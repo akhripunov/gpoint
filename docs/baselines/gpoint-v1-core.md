@@ -2,7 +2,8 @@
 
 Status: frozen web/core baseline; Telegram live gates remain preproduction.
 Date: 2026-09-15
-Baseline SHA: `c452356ef2f309d3ff5b294dc615704d61ceaf38` (source commit; documentation follow-up is tagged separately).
+Baseline SHA: `5326a89ee1d489d28d040270b16cfd95aa94246e`.
+Baseline tag: `gpoint-v1-core-baseline-2`.
 Canonical remote: `git@github.com:akhripunov/gpoint.git`
 Branch: `main`
 Database migration head: `20260915143000_post_moderation_reason`
@@ -42,9 +43,12 @@ Free content is hosted/displayed in GPoint. VIP content remains creator-side, pr
 ## Verification baseline
 
 - Unit: 7 passed / 0 failed.
-- Integration: 4 passed / 0 failed.
+- Integration: 4 passed / 0 failed (API 2, root 2).
 - Core E2E: 22 passed / 0 failed.
 - Total: 33 passed / 0 failed.
+- Repeatability: 3 consecutive full Core E2E runs passed 22/22 without broad DB reset.
+- Clean checkout reproducibility: PASS from remote `5326a89ee1d489d28d040270b16cfd95aa94246e`.
+- E2E namespace cleanup: only `e2e-creator-*` creator graphs; User rows are retained; non-E2E rows deleted: 0.
 - Typecheck and Mini App/API/Bot/Worker builds: PASS.
 - Secret scan: PASS.
 - Manual DB mutations during Core E2E: 0. Broad DB reset: NO.
