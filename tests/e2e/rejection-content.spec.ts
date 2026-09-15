@@ -56,7 +56,7 @@ test('post and reel rejection, resubmission and approval are real UI transitions
   await admin.reload();
   await admin.getByRole('button', { name: 'Content', exact: true }).click();
   const reelRow = admin.getByRole('article').filter({ hasText: reelCaption });
-  const reelMedia = await admin.evaluate(async (id) => { const token = localStorage.getItem('gpoint.session'); const r = await fetch(`${location.origin.replace(':5177', ':3022')}/media/assets/${id}`, { headers: { authorization: `Bearer ${token}` } }); return { ok: r.ok, type: r.headers.get('content-type'), size: (await r.arrayBuffer()).byteLength }; }, reel.media[0].mediaAssetId);
+  const reelMedia = await admin.evaluate(async ({ id, base }) => { const token = localStorage.getItem('gpoint.session'); const r = await fetch(`${base}/media/assets/${id}`, { headers: { authorization: `Bearer ${token}` } }); return { ok: r.ok, type: r.headers.get('content-type'), size: (await r.arrayBuffer()).byteLength }; }, { id: reel.media[0].mediaAssetId, base: process.env.GPOINT_E2E_API_URL ?? 'http://localhost:3000' });
   expect(reelMedia.ok).toBeTruthy();
   expect(reelMedia.type).toBe('video/mp4');
   expect(reelMedia.size).toBeGreaterThan(0);
