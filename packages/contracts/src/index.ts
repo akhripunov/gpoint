@@ -2,7 +2,7 @@ export type CreatorBotStatus = 'ACTIVE' | 'INACTIVE' | 'SUSPENDED';
 export type AffiliateProgramStatus = 'UNKNOWN' | 'ACTIVE' | 'ENDED' | 'REVOKED';
 export type AffiliateClickPlacement = 'EXPLORE_CARD' | 'CREATOR_PROFILE' | 'FREE_POST' | 'REEL' | 'VIP_CTA';
 
-export type ExploreTab = 'trending' | 'popular' | 'new' | 'following';
+export type ExploreTab = 'trending' | 'popular' | 'new' | 'following' | 'for-you';
 export type PostStatus = 'DRAFT' | 'PENDING' | 'PUBLISHED' | 'REJECTED' | 'HIDDEN';
 export interface CurrentUserDTO { id: string; telegramUsername: string | null; firstName: string | null; isPremium: boolean | null; }
 export interface CreatorSummaryDTO { id: string; slug: string; displayName: string; bio: string | null; avatarUrl: string | null; coverUrl: string | null; verified: boolean; vipPriceStars: number | null; vipOffer?: VipOfferDTO; }
