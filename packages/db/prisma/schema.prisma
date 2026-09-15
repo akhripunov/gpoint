@@ -1,0 +1,216 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "postgresql"
+  url = env("DATABASE_URL")
+}
+model User {
+  id String @id @default(cuid())
+  telegramUserId BigInt @unique
+  telegramUsername String?
+  firstName String?
+  lastName String?
+  languageCode String?
+  isPremium Boolean?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  lastSeenAt DateTime?
+  clicks AffiliateClick[]
+  owners CreatorOwner[]
+  follows Follow[]
+  events ProductEvent[]
+  roles UserRole[]
+}
+model Creator {
+  id String @id @default(cuid())
+  displayName String
+  slug String @unique
+  createdAt DateTime @default(now())
+  profile CreatorProfile?
+  bots CreatorBot[]
+  clicks AffiliateClick[]
+  owners CreatorOwner[]
+  follows Follow[]
+  events ProductEvent[]
+  vipOffers VipOffer[]
+  posts Post[]
+  mediaAssets MediaAsset[]
+}
+model CreatorProfile {
+  id String @id @default(cuid())
+  creatorId String @unique
+  status String @default("DRAFT")
+  bio String?
+  tagsJson String @default("[]")
+  avatarMediaId String?
+  coverMediaId String?
+  moderationReason String?
+  moderatedByUserId String?
+  moderatedAt DateTime?
+  creator Creator @relation(fields: [creatorId], references: [id])
+}
+model CreatorOwner {
+  id String @id @default(cuid())
+  creatorId String
+  userId String
+  role String @default("OWNER")
+  creator Creator @relation(fields: [creatorId], references: [id])
+  user User @relation(fields: [userId], references: [id])
+  @@unique([creatorId, userId])
+}
+model CreatorBot {
+  id String @id @default(cuid())
+  creatorId String
+  telegramBotId String @unique
+  telegramUsername String
+  status String
+  miniAppEnabled Boolean @default(false)
+  affiliateProgramStatus String @default("UNKNOWN")
+  commissionPermille Int?
+  durationMonths Int?
+  gpointAffiliateUrl String?
+  gpointAffiliatePeerId String?
+  lastVerifiedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  creator Creator @relation(fields: [creatorId], references: [id])
+  clicks AffiliateClick[]
+  affiliateProgram AffiliateProgram?
+  affiliateLinks AffiliateLink[]
+}
+model AffiliateProgram {
+  id String @id @default(cuid())
+  creatorBotId String @unique
+  status String
+  commissionPermille Int
+  durationMonths Int?
+  verifiedAt DateTime?
+  creatorBot CreatorBot @relation(fields: [creatorBotId], references: [id])
+}
+model AffiliateLink {
+  id String @id @default(cuid())
+  creatorBotId String
+  url String @unique
+  createdAt DateTime @default(now())
+  clicks AffiliateClick[]
+  creatorBot CreatorBot @relation(fields: [creatorBotId], references: [id])
+}
+model VipOffer {
+  id String @id @default(cuid())
+  creatorId String
+  title String
+  description String?
+  priceStars Int?
+  billingLabel String?
+  affiliateUrl String
+  status String @default("DRAFT")
+  moderationReason String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  clicks AffiliateClick[]
+  creator Creator @relation(fields: [creatorId], references: [id])
+}
+model AffiliateClick {
+  id String @id @default(cuid())
+  userId String
+  creatorId String
+  creatorBotId String
+  vipOfferId String?
+  affiliateLinkId String?
+  placement String
+  source String?
+  campaign String?
+  sessionId String?
+  clickedAt DateTime @default(now())
+  user User @relation(fields: [userId], references: [id])
+  creator Creator @relation(fields: [creatorId], references: [id])
+  bot CreatorBot @relation(fields: [creatorBotId], references: [id])
+  vipOffer VipOffer? @relation(fields: [vipOfferId], references: [id])
+  link AffiliateLink? @relation(fields: [affiliateLinkId], references: [id])
+  @@index([userId, creatorBotId, clickedAt])
+}
+model Follow {
+  userId String
+  creatorId String
+  createdAt DateTime @default(now())
+  user User @relation(fields: [userId], references: [id])
+  creator Creator @relation(fields: [creatorId], references: [id])
+  @@id([userId, creatorId])
+}
+model ProductEvent {
+  id String @id @default(cuid())
+  userId String?
+  creatorId String?
+  eventType String
+  entityType String?
+  entityId String?
+  sessionId String?
+  metadataJson Json?
+  createdAt DateTime @default(now())
+  user User? @relation(fields: [userId], references: [id])
+  creator Creator? @relation(fields: [creatorId], references: [id])
+}
+model UserRole {
+  userId String
+  role String
+  user User @relation(fields: [userId], references: [id])
+  @@id([userId, role])
+}
+model ModerationAction {
+  id String @id @default(cuid())
+  adminUserId String
+  targetType String
+  targetId String
+  action String
+  reason String?
+  createdAt DateTime @default(now())
+}
+model AttributionEvidence {
+  id String @id @default(cuid())
+  source String
+  observedAt DateTime @default(now())
+  externalReference String?
+  stars Int?
+  commissionPermille Int?
+  notes String?
+}
+model MediaAsset {
+  id String @id @default(cuid())
+  creatorId String
+  kind String
+  storageProvider String
+  storageKey String
+  mimeType String
+  fileSize Int
+  width Int?
+  height Int?
+  durationMs Int?
+  thumbnailStorageKey String?
+  status String @default("UPLOADING")
+  createdAt DateTime @default(now())
+  postMedia PostMedia[]
+  creator Creator @relation(fields: [creatorId], references: [id])
+}
+model Post {
+  id String @id @default(cuid())
+  creatorId String
+  type String
+  isReel Boolean @default(false)
+  caption String?
+  status String @default("DRAFT")
+  moderationReason String?
+  publishedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  media PostMedia[]
+  creator Creator @relation(fields: [creatorId], references: [id])
+}
+model PostMedia {
+  postId String
+  mediaAssetId String
+  sortOrder Int
+  post Post @relation(fields: [postId], references: [id])
+  media MediaAsset @relation(fields: [mediaAssetId], references: [id])
+  @@id([postId, mediaAssetId])
+}

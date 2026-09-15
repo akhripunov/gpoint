@@ -1,0 +1,2 @@
+export const fictionalSeed = { adminTelegramUserId: '100000001', creatorOwnerTelegramUserId: '100000002', creators: ['luna-vale','mira-sol','noa-moon','ivy-north','aria-bloom','elle-hart','sage-west','rue-atelier','celia-dawn','june-still','wren-park','thea-coast'] };
+console.log('Seed plan:', fictionalSeed.creators.length, 'fictional creators; execute through Prisma in an installed environment.');

@@ -1,0 +1,37 @@
+import type { CreatorProfileDTO, ExploreResponseDTO, CurrentUserDTO, PaginatedResponse, PostDTO, ReelDTO, VipClickResponseDTO, VipOfferDTO } from '../../../../packages/contracts/src/index.js';
+export const apiBase=import.meta.env.VITE_API_URL??'http://localhost:3000';
+export class ApiError extends Error{constructor(public status:number,message:string){super(message)}}
+let token=localStorage.getItem('gpoint.session'); export const getToken=()=>token;
+async function request<T>(path:string,init:RequestInit={}){const headers=new Headers(init.headers);if(init.body!==undefined&&!(init.body instanceof FormData)&&!headers.has('content-type'))headers.set('content-type','application/json');if(token)headers.set('authorization',`Bearer ${token}`);const r=await fetch(`${apiBase}${path}`,{...init,headers});let data:unknown;try{data=await r.json()}catch{data=null}if(!r.ok)throw new ApiError(r.status,(data as {message?:string})?.message??'Request failed');return data as T}
+export async function auth(){const tg=(window as Window&{Telegram?:{WebApp?:{initData?:string}}}).Telegram?.WebApp?.initData;const dev=import.meta.env.VITE_DEV_AUTH_MODE==='true';const devTelegramUserId=new URLSearchParams(window.location.search).get('e2eUserId')??undefined;if(!tg&&!dev)return null;const data=await request<{accessToken:string}>('/auth/telegram',{method:'POST',body:JSON.stringify({initData:tg??'dev',devTelegramUserId})});token=data.accessToken;localStorage.setItem('gpoint.session',token);return me()}
+export const me=()=>request<CurrentUserDTO>('/me');
+export const explore=(tab:string)=>request<ExploreResponseDTO>(`/explore?tab=${tab.toLowerCase()}`);
+export const creator=(slug:string)=>request<CreatorProfileDTO>(`/creators/${encodeURIComponent(slug)}`);
+export const posts=(id:string,cursor?:string)=>request<PaginatedResponse<PostDTO>>(`/creators/${id}/posts${cursor?`?cursor=${encodeURIComponent(cursor)}`:''}`);
+export const reels=(cursor?:string)=>request<PaginatedResponse<ReelDTO>>(`/reels${cursor?`?cursor=${encodeURIComponent(cursor)}`:''}`);
+export const follow=(id:string,following:boolean)=>request<{following:boolean}>(`/creators/${id}/follow`,{method:following?'POST':'DELETE'});
+export const vipOffer=(id:string)=>request<VipOfferDTO>(`/vip/creator/${id}`);
+export const vipClick=(id:string,placement:string)=>request<VipClickResponseDTO>(`/vip/${id}/click`,{method:'POST',body:JSON.stringify({placement})});
+export const creatorMe=()=>request<{creator:any;vip:any}>('/creator/me');
+export const creatorOnboarding=(body:any)=>request<{creator:any}>('/creator/onboarding',{method:'POST',body:JSON.stringify(body)});
+export const creatorSubmit=()=>request<{status:string}>('/creator/me/submit',{method:'POST'});
+export const creatorAnalytics=()=>request<any>('/creator/me/analytics');
+export const creatorPosts=()=>request<any>('/creator/me/posts');
+export const creatorPostCreate=(body:any)=>request<any>('/creator/me/posts',{method:'POST',body:JSON.stringify(body)});
+export const creatorPostUpdate=(id:string,body:any)=>request<any>(`/creator/me/posts/${id}`,{method:'PATCH',body:JSON.stringify(body)});
+export const creatorReelUpdate=(id:string,body:any)=>request<any>(`/creator/me/posts/${id}`,{method:'PATCH',body:JSON.stringify(body)});
+export const creatorReels=()=>request<any>('/creator/me/reels');
+export const creatorReelCreate=(body:any)=>request<any>('/creator/me/reels',{method:'POST',body:JSON.stringify(body)});
+export const creatorVip=()=>request<any>('/creator/me/vip');
+export const creatorVipUpdate=(body:any)=>request<any>('/creator/me/vip',{method:'PATCH',body:JSON.stringify(body)});
+export const adminCreators=()=>request<any[]>('/admin/creators');
+export const adminModerateCreator=(id:string,action:string,reason?:string)=>request<any>(`/admin/creators/${id}/${action}`,{method:'POST',body:JSON.stringify({reason})});
+export const adminModeratePost=(id:string,action:string,reason?:string)=>request<any>(`/admin/posts/${id}/${action}`,{method:'POST',body:JSON.stringify({reason})});
+export const adminPosts=()=>request<any[]>('/admin/posts');
+export const adminVip=()=>request<any[]>('/admin/vip');
+export const adminModerateVip=(id:string,action:string,reason?:string)=>request<any>(`/admin/vip/${id}/${action}`,{method:'POST',body:JSON.stringify({reason})});
+export const creatorMedia=()=>request<{items:any[]}>('/creator/me/media');
+export const creatorMediaIntent=(body:any)=>request<any>('/creator/me/media/intent',{method:'POST',body:JSON.stringify(body)});
+export const creatorMediaFinalize=(id:string)=>request<any>(`/creator/me/media/${id}/finalize`,{method:'POST'});
+export const creatorMediaDelete=(id:string)=>request<any>(`/creator/me/media/${id}`,{method:'DELETE'});
+export const creatorProfileUpdate=(body:any)=>request<any>('/creator/me/profile',{method:'PATCH',body:JSON.stringify(body)});

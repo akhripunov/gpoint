@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+coverage/
+test-results/
+.pnpm-store/
+.DS_Store
+*.db
+*.dump
+*.sql.tmp
+infra/minio-data/
+*.log

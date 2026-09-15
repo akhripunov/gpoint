@@ -1,0 +1,1 @@
+{"name":"@gpoint/db","private":true,"version":"0.1.0","type":"module","scripts":{"typecheck":"tsc -p tsconfig.json","build":"tsc -p tsconfig.json","test":"node --test"},"dependencies":{"@prisma/client":"^6.2.1"},"devDependencies":{"@types/node":"^22.10.2","prisma":"^6.2.1","tsx":"^4.19.2","typescript":"^5.7.2"}}
