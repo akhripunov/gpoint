@@ -2,7 +2,7 @@
 
 Status: frozen web/core baseline; Telegram live gates remain preproduction.
 Date: 2026-09-15
-Baseline SHA: recorded by the immutable `gpoint-v1-core-baseline` tag and remote ref.
+Baseline SHA: `c452356ef2f309d3ff5b294dc615704d61ceaf38` (source commit; documentation follow-up is tagged separately).
 Canonical remote: `git@github.com:akhripunov/gpoint.git`
 Branch: `main`
 Database migration head: `20260915143000_post_moderation_reason`
