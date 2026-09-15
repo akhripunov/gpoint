@@ -44,6 +44,9 @@ export async function queryExplore(tab: ExploreTab, limit = DEFAULT_LIMIT, curso
 export async function queryForYou(userId: string, limit = DEFAULT_LIMIT, cursorValue?: string): Promise<ExploreResponseDTO> {
   const safeLimit = Math.max(1, Math.min(Number(limit) || DEFAULT_LIMIT, MAX_LIMIT));
   const cursor = decodeCursor(cursorValue);
+  const preferences = await prisma.userPreference.findMany({ where: { userId }, select: { preferenceType: true, entityType: true, entityId: true } });
+  const blockedCreators = new Set(preferences.filter(p => p.preferenceType === 'DO_NOT_RECOMMEND_CREATOR' && p.entityType === 'CREATOR').map(p => p.entityId));
+  const hiddenItems = new Set(preferences.filter(p => p.preferenceType === 'NOT_INTERESTED').map(p => `${p.entityType}:${p.entityId}`));
   const candidates = await prisma.$queryRaw<Array<{ id: string; slug: string; displayName: string; bio: string | null; vipPriceStars: number | null; tagsJson: string; globalScore: number; follows: number; impressions: number; opens: number; events: Array<{ eventType: string; createdAt: Date }> }>>`
     SELECT c.id, c.slug, c."displayName", cp.bio, MIN(v."priceStars") FILTER (WHERE v.status = 'ACTIVE') AS "vipPriceStars", cp."tagsJson",
       (COUNT(DISTINCT f."userId") * 4 + COUNT(DISTINCT e.id) FILTER (WHERE e."eventType" IN ('CREATOR_PROFILE_VIEW','POST_OPEN','REEL_START')) + COUNT(DISTINCT e.id) FILTER (WHERE e."eventType" IN ('REEL_COMPLETE','VIP_CTA_CLICK')) * 2) AS "globalScore",
@@ -53,13 +56,14 @@ export async function queryForYou(userId: string, limit = DEFAULT_LIMIT, cursorV
       COALESCE(json_agg(json_build_object('eventType', ue."eventType", 'createdAt', ue."createdAt")) FILTER (WHERE ue.id IS NOT NULL), '[]') AS events
     FROM "Creator" c JOIN "CreatorProfile" cp ON cp."creatorId" = c.id AND cp.status = 'APPROVED'
     LEFT JOIN "Follow" f ON f."creatorId" = c.id LEFT JOIN "ProductEvent" e ON e."creatorId" = c.id
-    LEFT JOIN "ProductEvent" ue ON ue."userId" = ${userId} AND ue."creatorId" = c.id AND ue."createdAt" >= NOW() - INTERVAL '90 days'
+    LEFT JOIN "ProductEvent" ue ON ue."userId" = ${userId} AND ue."creatorId" = c.id AND ue."createdAt" >= GREATEST(NOW() - INTERVAL '90 days', COALESCE((SELECT "personalizationResetAt" FROM "User" WHERE id = ${userId}), TIMESTAMP 'epoch'))
     LEFT JOIN "VipOffer" v ON v."creatorId" = c.id
     GROUP BY c.id, c.slug, c."displayName", cp.bio, cp."tagsJson"`;
-  const userEvents = candidates.flatMap(c => c.events);
+  const eligibleCandidates = candidates.filter(c => !blockedCreators.has(c.id) && !hiddenItems.has(`CREATOR:${c.id}`));
+  const userEvents = eligibleCandidates.flatMap(c => c.events);
   const tagWeights = new Map<string, number>();
-  for (const event of userEvents) { const creator = candidates.find(c => c.events.some(e => e === event)); if (!creator) continue; for (const tag of safeTags(creator.tagsJson)) tagWeights.set(tag, (tagWeights.get(tag) ?? 0) + (PERSONALIZATION_EVENT_WEIGHTS[event.eventType] ?? 0) * recencyDecay((Date.now() - new Date(event.createdAt).getTime()) / 86400000)); }
-  const ranked = candidates.map(c => {
+  for (const event of userEvents) { const creator = eligibleCandidates.find(c => c.events.some(e => e === event)); if (!creator) continue; for (const tag of safeTags(creator.tagsJson)) tagWeights.set(tag, (tagWeights.get(tag) ?? 0) + (PERSONALIZATION_EVENT_WEIGHTS[event.eventType] ?? 0) * recencyDecay((Date.now() - new Date(event.createdAt).getTime()) / 86400000)); }
+  const ranked = eligibleCandidates.map(c => {
     const affinity = boundedAffinity(c.events.reduce((sum, e) => sum + (PERSONALIZATION_EVENT_WEIGHTS[e.eventType] ?? 0) * recencyDecay((Date.now() - new Date(e.createdAt).getTime()) / 86400000), 0));
     const tagAffinity = Math.min(4, safeTags(c.tagsJson).reduce((sum, tag) => sum + (tagWeights.get(tag) ?? 0) * 0.1, 0));
     const seenPenalty = c.impressions >= 3 && c.opens === 0 ? Math.min(4, c.impressions * 0.25) : 0;

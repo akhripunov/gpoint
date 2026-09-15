@@ -4,10 +4,12 @@ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify
 
 @Controller('health') class HealthController { @Get('live') live() { return { status: 'ok' }; } }
 import { ExploreController } from './explore.js';
-import { AuthController, CreatorController, MeController, ReelsController, VipController } from './core-v2.js';
+import { AuthController, CreatorController, MeController, VipController } from './core-v2.js';
+import { PersonalizedReelsController } from './reels-discovery.js';
 import { CreatorPlatformController, AdminPlatformController } from './creator-platform.js';
 import { MediaReadController } from './media-read.js';
 import { DiscoveryHealthController, EngagementController, FollowingController } from './discovery.js';
-@Module({ controllers: [HealthController, ExploreController, AuthController, MeController, CreatorController, ReelsController, VipController, CreatorPlatformController, AdminPlatformController, MediaReadController, EngagementController, FollowingController, DiscoveryHealthController] }) class AppModule {}
+import { PreferencesController } from './preferences.js';
+@Module({ controllers: [HealthController, ExploreController, AuthController, MeController, CreatorController, PersonalizedReelsController, VipController, CreatorPlatformController, AdminPlatformController, MediaReadController, EngagementController, FollowingController, DiscoveryHealthController, PreferencesController] }) class AppModule {}
 export async function bootstrap() { const app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter()); app.enableCors({ origin: process.env.MINIAPP_ORIGIN?.split(',') ?? true, methods: ['GET', 'HEAD', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }); await app.listen({ port: Number(process.env.API_PORT ?? 3000), host: '0.0.0.0' }); return app; }
 if (process.env.NODE_ENV !== 'test') bootstrap();
