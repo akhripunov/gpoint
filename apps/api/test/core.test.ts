@@ -3,7 +3,9 @@ import { decodeCursor, encodeCursor, popularScore, trendingScore, validateSlug }
 import { isAdmin, mediaKeyIsSafe, validateApprovedVipUrl } from '../src/security.js';
 import { devAuthAllowed } from '../src/auth.js';
 import { mediaStorageFromEnv } from '../src/media-storage.js';
+import { DISCOVERY_RANKING_CONFIG, coldStartScore, smoothedRate } from '../src/discovery-ranking.js';
 test('ranking is deterministic and explainable',()=>{assert.equal(trendingScore(10,2,1),26);assert.equal(popularScore(10,2,1),26)});
 test('cursor round trips and rejects invalid values',()=>{const d=new Date('2026-01-01T00:00:00Z');assert.deepEqual(decodeCursor(encodeCursor(d,'id-1')),{createdAt:d,id:'id-1'});assert.throws(()=>decodeCursor('bad'))});
 test('security helpers fail closed',()=>{assert.equal(validateSlug('good-creator'),'good-creator');assert.throws(()=>validateSlug('Bad Creator'));assert.doesNotThrow(()=>validateApprovedVipUrl('https://t.me/example?startapp=x'));assert.throws(()=>validateApprovedVipUrl('https://evil.example/x'));assert.equal(isAdmin(['USER']),false);assert.equal(mediaKeyIsSafe('../secret'),false);assert.equal(devAuthAllowed('production','true'),false)});
 test('S3 storage fails closed when configuration is incomplete',()=>{assert.throws(()=>mediaStorageFromEnv({MEDIA_STORAGE_PROVIDER:'s3'}),/S3 storage configuration missing/);assert.throws(()=>mediaStorageFromEnv({MEDIA_STORAGE_PROVIDER:'s3',S3_ENDPOINT:'https://s3.example',S3_REGION:'us-east-1',S3_BUCKET:'gpoint',S3_ACCESS_KEY_ID:'x',S3_SECRET_ACCESS_KEY:'y'}),/S3_PUBLIC_BASE_URL/);assert.equal(mediaStorageFromEnv({MEDIA_STORAGE_PROVIDER:'local'}).constructor.name,'LocalMediaStorage')});
+test('discovery ranking has a deterministic low-sample guard',()=>{assert.equal(DISCOVERY_RANKING_CONFIG.trendingWindowHours,24);assert.ok(smoothedRate(1,1)<1);assert.equal(coldStartScore(0),1);assert.equal(coldStartScore(7*24),0)});

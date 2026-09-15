@@ -150,6 +150,9 @@ model ProductEvent {
   createdAt DateTime @default(now())
   user User? @relation(fields: [userId], references: [id])
   creator Creator? @relation(fields: [creatorId], references: [id])
+  @@index([eventType, createdAt])
+  @@index([creatorId, eventType, createdAt])
+  @@index([userId, entityType, entityId, eventType, createdAt])
 }
 model UserRole {
   userId String

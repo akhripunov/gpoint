@@ -5,7 +5,9 @@ let token=localStorage.getItem('gpoint.session'); export const getToken=()=>toke
 async function request<T>(path:string,init:RequestInit={}){const headers=new Headers(init.headers);if(init.body!==undefined&&!(init.body instanceof FormData)&&!headers.has('content-type'))headers.set('content-type','application/json');if(token)headers.set('authorization',`Bearer ${token}`);const r=await fetch(`${apiBase}${path}`,{...init,headers});let data:unknown;try{data=await r.json()}catch{data=null}if(!r.ok)throw new ApiError(r.status,(data as {message?:string})?.message??'Request failed');return data as T}
 export async function auth(){const tg=(window as Window&{Telegram?:{WebApp?:{initData?:string}}}).Telegram?.WebApp?.initData;const dev=import.meta.env.VITE_DEV_AUTH_MODE==='true';const devTelegramUserId=new URLSearchParams(window.location.search).get('e2eUserId')??undefined;if(!tg&&!dev)return null;const data=await request<{accessToken:string}>('/auth/telegram',{method:'POST',body:JSON.stringify({initData:tg??'dev',devTelegramUserId})});token=data.accessToken;localStorage.setItem('gpoint.session',token);return me()}
 export const me=()=>request<CurrentUserDTO>('/me');
-export const explore=(tab:string)=>request<ExploreResponseDTO>(`/explore?tab=${tab.toLowerCase()}`);
+export const explore=(tab:string,cursor?:string)=>request<ExploreResponseDTO>(`/explore?mode=${tab.toLowerCase()}${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`);
+export const following=()=>request<any>('/following');
+export const engagement=(eventType:string,entityType?:string,entityId?:string)=>request<any>('/events',{method:'POST',body:JSON.stringify({eventType,entityType,entityId})});
 export const creator=(slug:string)=>request<CreatorProfileDTO>(`/creators/${encodeURIComponent(slug)}`);
 export const posts=(id:string,cursor?:string)=>request<PaginatedResponse<PostDTO>>(`/creators/${id}/posts${cursor?`?cursor=${encodeURIComponent(cursor)}`:''}`);
 export const reels=(cursor?:string)=>request<PaginatedResponse<ReelDTO>>(`/reels${cursor?`?cursor=${encodeURIComponent(cursor)}`:''}`);
