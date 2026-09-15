@@ -42,3 +42,13 @@ export function boundedAffinity(weightedSignal: number): number {
 export function personalizedScore(globalScore: number, affinity: number, tagAffinity: number, seenPenalty: number, explorationBoost: number): number {
   return globalScore + Math.max(-DISCOVERY_RANKING_CONFIG.personalizationMax, Math.min(DISCOVERY_RANKING_CONFIG.personalizationMax, affinity + tagAffinity + explorationBoost)) - Math.max(0, Math.min(4, seenPenalty));
 }
+
+export type DiversityCandidate = { id: string; creatorId: string; tags: string[]; score: number };
+export function diversifyCandidates<T extends DiversityCandidate>(input: T[], window = 5): T[] {
+  const remaining = [...input]; const output: T[] = []; let previousCreator = ''; let previousTag = '';
+  while (remaining.length) {
+    const index = remaining.findIndex((candidate, position) => position >= Math.min(window, remaining.length) || (candidate.creatorId !== previousCreator && !candidate.tags.includes(previousTag)));
+    const selected = remaining.splice(index < 0 ? 0 : index, 1)[0]; output.push(selected); previousCreator = selected.creatorId; previousTag = selected.tags[0] ?? '';
+  }
+  return output;
+}

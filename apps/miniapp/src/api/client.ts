@@ -7,7 +7,7 @@ export async function auth(){const tg=(window as Window&{Telegram?:{WebApp?:{ini
 export const me=()=>request<CurrentUserDTO>('/me');
 export const explore=(tab:string,cursor?:string)=>request<ExploreResponseDTO>(`/explore?mode=${tab.toLowerCase()}${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`);
 export const following=()=>request<any>('/following');
-export const engagement=(eventType:string,entityType?:string,entityId?:string)=>request<any>('/events',{method:'POST',body:JSON.stringify({eventType,entityType,entityId})});
+export const engagement=(eventType:string,entityType?:string,entityId?:string,surface?:string)=>request<any>('/events',{method:'POST',body:JSON.stringify({eventType,entityType,entityId,surface})});
 export const creator=(slug:string)=>request<CreatorProfileDTO>(`/creators/${encodeURIComponent(slug)}`);
 export const posts=(id:string,cursor?:string)=>request<PaginatedResponse<PostDTO>>(`/creators/${id}/posts${cursor?`?cursor=${encodeURIComponent(cursor)}`:''}`);
 export const reels=(cursor?:string)=>request<PaginatedResponse<ReelDTO>>(`/reels${cursor?`?cursor=${encodeURIComponent(cursor)}`:''}`);

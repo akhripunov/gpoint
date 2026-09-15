@@ -8,7 +8,7 @@ function auth(h: Record<string, string | undefined>) { const id = resolveSession
 
 @Controller('events')
 export class EngagementController {
-  @Post() async record(@Headers() h: Record<string, string | undefined>, @Body() body: { eventType?: string; entityType?: string; entityId?: string }) {
+  @Post() async record(@Headers() h: Record<string, string | undefined>, @Body() body: { eventType?: string; entityType?: string; entityId?: string; surface?: string }) {
     const userId = auth(h); const eventType = body.eventType;
     if (!eventType || !eventTypes.has(eventType)) throw new BadRequestException('unsupported engagement event');
     let creatorId = body.entityType === 'CREATOR' ? body.entityId : undefined;
@@ -25,7 +25,7 @@ export class EngagementController {
       const existing = await prisma.productEvent.findFirst({ where: { userId, eventType, entityType: body.entityType, entityId: body.entityId, createdAt: { gte: new Date(Date.now() - 30 * 60 * 1000) } } });
       if (existing) return { recorded: false, deduped: true };
     }
-    await prisma.productEvent.create({ data: { userId, eventType, entityType: body.entityType, entityId: body.entityId, creatorId } });
+    await prisma.productEvent.create({ data: { userId, eventType, entityType: body.entityType, entityId: body.entityId, creatorId, metadataJson: body.surface ? { surface: body.surface, rankingVersion: body.surface === 'FOR_YOU' ? 'personalized-v2' : 'global-v1' } : undefined } });
     return { recorded: true, deduped: false };
   }
 }
@@ -46,7 +46,15 @@ export class DiscoveryHealthController {
     ]);
     const returningUsers = returning.length ? await prisma.productEvent.findMany({ where: { userId: { in: returning.flatMap(x => x.userId ? [x.userId] : []) }, createdAt: { lt: day } }, distinct: ['userId'], select: { userId: true } }) : [];
     const counts = Object.fromEntries(eventCounts.map(x => [x.eventType, x._count._all]));
-    return { window: '7d', dau24h: dau.length, returning24h: returningUsers.length, eventCounts: counts };
+    const [forYou] = await prisma.$queryRaw<Array<{ impressions: bigint; profileOpens: bigint; follows: bigint; reelCompletions: bigint; vipClicks: bigint }>>`
+      SELECT COUNT(*) FILTER (WHERE "eventType" LIKE '%IMPRESSION') AS impressions,
+        COUNT(*) FILTER (WHERE "eventType" = 'CREATOR_PROFILE_VIEW') AS "profileOpens",
+        COUNT(*) FILTER (WHERE "eventType" = 'FOLLOW_CREATOR') AS follows,
+        COUNT(*) FILTER (WHERE "eventType" = 'REEL_COMPLETE') AS "reelCompletions",
+        COUNT(*) FILTER (WHERE "eventType" = 'VIP_CTA_CLICK') AS "vipClicks"
+      FROM "ProductEvent" WHERE "createdAt" >= ${week} AND "metadataJson"->>'surface' = 'FOR_YOU'`;
+    const rate = (n: bigint, d: bigint) => Number(d) ? Math.min(1, Number(n) / Number(d)) : 0;
+    return { window: '7d', dau24h: dau.length, returning24h: returningUsers.length, eventCounts: counts, forYou: { impressions: Number(forYou.impressions), profileOpenRate: rate(forYou.profileOpens, forYou.impressions), followConversionRate: rate(forYou.follows, forYou.impressions), reelCompletionRate: rate(forYou.reelCompletions, forYou.impressions), vipCtaRate: rate(forYou.vipClicks, forYou.impressions) } };
   }
 }
 

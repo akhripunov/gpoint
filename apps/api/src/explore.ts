@@ -2,7 +2,7 @@ import { BadRequestException, Controller, Get, Headers, Query, UnauthorizedExcep
 import { PrismaClient } from '@prisma/client';
 import type { ExploreResponseDTO, ExploreTab } from '../../../packages/contracts/src/index.js';
 import { DISCOVERY_RANKING_CONFIG } from './discovery-ranking.js';
-import { boundedAffinity, PERSONALIZATION_EVENT_WEIGHTS, personalizedScore, recencyDecay } from './discovery-ranking.js';
+import { boundedAffinity, diversifyCandidates, PERSONALIZATION_EVENT_WEIGHTS, personalizedScore, recencyDecay } from './discovery-ranking.js';
 import { resolveSession } from './session.js';
 
 const prisma = new PrismaClient();
@@ -66,7 +66,8 @@ export async function queryForYou(userId: string, limit = DEFAULT_LIMIT, cursorV
     const explorationBoost = affinity < 1 ? 2 : 0;
     return { ...c, score: personalizedScore(Number(c.globalScore), affinity, tagAffinity, seenPenalty, explorationBoost) };
   }).sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
-  const filtered = cursor ? ranked.filter(x => x.score < cursor.score || (x.score === cursor.score && x.id > cursor.id)) : ranked;
+  const diversified = diversifyCandidates(ranked.map(c => ({ ...c, creatorId: c.id, tags: safeTags(c.tagsJson) })));
+  const filtered = cursor ? diversified.filter(x => x.score < cursor.score || (x.score === cursor.score && x.id > cursor.id)) : diversified;
   const items = filtered.slice(0, safeLimit).map(c => ({ id: c.id, slug: c.slug, displayName: c.displayName, bio: c.bio, avatarUrl: null, coverUrl: null, verified: false, vipPriceStars: c.vipPriceStars }));
   const last = filtered.length > safeLimit ? filtered[safeLimit - 1] : undefined;
   return { tab: 'for-you', items, nextCursor: last ? encodeCursor({ score: last.score, id: last.id }) : null };
