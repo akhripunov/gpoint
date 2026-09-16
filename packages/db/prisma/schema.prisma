@@ -50,6 +50,7 @@ model Creator {
   vipOffers VipOffer[]
   posts Post[]
   mediaAssets MediaAsset[]
+  telegramChannel TelegramChannel?
 }
 model CreatorProfile {
   id String @id @default(cuid())
@@ -92,6 +93,27 @@ model CreatorBot {
   clicks AffiliateClick[]
   affiliateProgram AffiliateProgram?
   affiliateLinks AffiliateLink[]
+}
+model TelegramChannel {
+  id String @id @default(cuid())
+  creatorId String @unique
+  telegramChatId String @unique
+  username String?
+  title String?
+  status String @default("PENDING")
+  importMode String @default("AUTO")
+  importHashtag String?
+  verificationCodeHash String?
+  connectedAt DateTime?
+  disconnectedAt DateTime?
+  lastPostReceivedAt DateTime?
+  lastSuccessfulIngestAt DateTime?
+  lastError String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  creator Creator @relation(fields: [creatorId], references: [id])
+  posts Post[]
+  @@index([status, updatedAt])
 }
 model AffiliateProgram {
   id String @id @default(cuid())
@@ -220,8 +242,37 @@ model Post {
   publishedAt DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  source String @default("GPOINT")
+  telegramChannelId String?
+  telegramMessageId Int?
+  telegramMediaGroupId String?
+  telegramPublishedAt DateTime?
+  telegramEditedAt DateTime?
+  sourceText String?
+  sourceLanguage String?
+  sanitizedText String?
+  safetyClassification String @default("UNCERTAIN")
+  safetyReason String?
+  ingestStatus String?
   media PostMedia[]
   creator Creator @relation(fields: [creatorId], references: [id])
+  telegramChannel TelegramChannel? @relation(fields: [telegramChannelId], references: [id])
+  translations PostTranslation[]
+  @@unique([telegramChannelId, telegramMessageId])
+  @@index([source, ingestStatus])
+}
+model PostTranslation {
+  id String @id @default(cuid())
+  postId String
+  language String
+  text String
+  provider String
+  sourceHash String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  post Post @relation(fields: [postId], references: [id])
+  @@unique([postId, language, sourceHash])
+  @@index([postId, language])
 }
 model PostMedia {
   postId String
