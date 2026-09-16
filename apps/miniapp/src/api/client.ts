@@ -1,5 +1,6 @@
 import type { CreatorProfileDTO, ExploreResponseDTO, CurrentUserDTO, PaginatedResponse, PostDTO, ReelDTO, VipClickResponseDTO, VipOfferDTO } from '../../../../packages/contracts/src/index.js';
 export const apiBase=import.meta.env.VITE_API_URL??'';
+export const mediaUrl=(path:string)=>new URL(path,apiBase||window.location.origin).toString();
 export class ApiError extends Error{constructor(public status:number,message:string){super(message)}}
 let token=localStorage.getItem('gpoint.session'); export const getToken=()=>token;
 async function request<T>(path:string,init:RequestInit={}){const headers=new Headers(init.headers);if(init.body!==undefined&&!(init.body instanceof FormData)&&!headers.has('content-type'))headers.set('content-type','application/json');if(token)headers.set('authorization',`Bearer ${token}`);const r=await fetch(`${apiBase}${path}`,{...init,headers});let data:unknown;try{data=await r.json()}catch{data=null}if(!r.ok)throw new ApiError(r.status,(data as {message?:string})?.message??'Request failed');return data as T}
