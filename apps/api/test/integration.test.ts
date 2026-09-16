@@ -39,9 +39,9 @@ test('creator onboarding persists ownership and foreign media is rejected', asyn
   const me = await call('/creator/me', creatorToken);
   assert.equal(me.response.status, 200); assert.equal(me.data.creator.status, 'DRAFT');
   const intent = await call('/creator/me/media/intent', otherToken, 'POST', { kind: 'IMAGE', mimeType: 'image/jpeg', fileSize: 4 });
-  assert.equal(intent.response.status, 201); assert.match(intent.data.uploadUrl, /^https?:/);
-  const put = await fetch(intent.data.uploadUrl, { method: 'PUT', headers: { 'content-type': 'image/jpeg' }, body: new Uint8Array([255, 216, 255, 217]) });
-  assert.equal(put.status, 200);
+  assert.equal(intent.response.status, 201); assert.match(intent.data.uploadUrl, new RegExp(`^/creator/me/media/${intent.data.mediaId}/data$`));
+  const put = await call(intent.data.uploadUrl, otherToken, 'POST', { dataBase64: Buffer.from([255, 216, 255, 217]).toString('base64') });
+  assert.equal(put.response.status, 201); assert.equal(put.data.status, 'UPLOADED');
   const ready = await call(`/creator/me/media/${intent.data.mediaId}/finalize`, otherToken, 'POST');
   assert.equal(ready.response.status, 201, JSON.stringify(ready.data)); assert.equal(ready.data.status, 'READY');
   const avatar = await call('/creator/me/profile', creatorToken, 'PATCH', { avatarMediaId: intent.data.mediaId });
