@@ -7,3 +7,10 @@ export function authenticateTelegram(initData: string, botToken: string, upsertU
   return { token: randomUUID(), userId: upsertUser(user), expiresAt: nowSeconds + 3600 };
 }
 export function devAuthAllowed(nodeEnv: string, devAuthMode: string | undefined): boolean { return nodeEnv !== 'production' && devAuthMode === 'true'; }
+export function browserDevAuthAllowed(nodeEnv: string | undefined, flag: string | undefined, host: string | undefined, origin: string | undefined): boolean {
+  if (nodeEnv === 'production' || flag !== 'true') return false;
+  const hostname = (host ?? '').replace(/^\[/, '').split(']')[0].split(':')[0].toLowerCase();
+  if (!['localhost', '127.0.0.1', '::1'].includes(hostname)) return false;
+  if (!origin) return true;
+  try { return ['localhost', '127.0.0.1', '::1'].includes(new URL(origin).hostname.toLowerCase()); } catch { return false; }
+}

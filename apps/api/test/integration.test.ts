@@ -22,6 +22,7 @@ async function call(path: string, token: string, method = 'GET', body?: unknown)
 
 before(async () => {
   process.env.API_PORT = String(port);
+  process.env.DEV_BROWSER_AUTH = 'true';
   app = await bootstrap();
   const stamp = BigInt(Date.now());
   const a = await prisma.user.create({ data: { telegramUserId: stamp + 101n, firstName: 'E2E Creator A' } });
@@ -31,6 +32,16 @@ before(async () => {
   const cb = await call('/creator/onboarding', otherToken, 'POST', { displayName: 'E2E Creator B', slug: `e2e-b-${stamp}`, bio: 'integration' });
   assert.equal(ca.response.status, 201); assert.equal(cb.response.status, 201);
   creatorId = ca.data.creator.id; otherId = cb.data.creator.id;
+});
+
+test('local browser dev auth issues a normal session only for loopback origin', async () => {
+  const response = await fetch(`${base}/auth/browser`, { method: 'POST', headers: { origin: 'http://localhost:5184' } });
+  const data = await response.json() as { accessToken?: string; user?: { telegramUsername?: string } };
+  assert.equal(response.status, 201); assert.ok(data.accessToken); assert.equal(data.user?.telegramUsername, 'dev-browser-user');
+  const me = await call('/me', data.accessToken!);
+  assert.equal(me.response.status, 200); assert.equal(me.data.telegramUsername, 'dev-browser-user');
+  const external = await fetch(`${base}/auth/browser`, { method: 'POST', headers: { origin: 'https://example.com' } });
+  assert.equal(external.status, 401);
 });
 
 after(async () => { await app?.close(); await prisma.$disconnect(); });
