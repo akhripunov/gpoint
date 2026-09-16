@@ -19,6 +19,7 @@ model User {
   clicks AffiliateClick[]
   owners CreatorOwner[]
   follows Follow[]
+  likes PostLike[]
   events ProductEvent[]
   roles UserRole[]
   discoveryPreferences UserPreference[]
@@ -258,8 +259,19 @@ model Post {
   creator Creator @relation(fields: [creatorId], references: [id])
   telegramChannel TelegramChannel? @relation(fields: [telegramChannelId], references: [id])
   translations PostTranslation[]
+  likes PostLike[]
   @@unique([telegramChannelId, telegramMessageId])
   @@index([source, ingestStatus])
+}
+model PostLike {
+  id String @id @default(cuid())
+  userId String
+  postId String
+  createdAt DateTime @default(now())
+  user User @relation(fields: [userId], references: [id])
+  post Post @relation(fields: [postId], references: [id])
+  @@unique([userId, postId])
+  @@index([postId, createdAt])
 }
 model PostTranslation {
   id String @id @default(cuid())

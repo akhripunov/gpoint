@@ -6,7 +6,7 @@ export type ExploreTab = 'trending' | 'popular' | 'new' | 'following' | 'for-you
 export type PostStatus = 'DRAFT' | 'PENDING' | 'PUBLISHED' | 'REJECTED' | 'HIDDEN';
 export interface CurrentUserDTO { id: string; telegramUsername: string | null; firstName: string | null; isPremium: boolean | null; }
 export interface CreatorSummaryDTO { id: string; slug: string; displayName: string; bio: string | null; avatarUrl: string | null; coverUrl: string | null; verified: boolean; vipPriceStars: number | null; vipOffer?: VipOfferDTO; }
-export interface PostDTO { id: string; type: 'IMAGE' | 'VIDEO' | 'TEXT' | 'MIXED'; caption: string | null; media: { id: string; kind: 'IMAGE' | 'VIDEO'; readUrl: string }[]; publishedAt: string | null; }
+export interface PostDTO { id: string; type: 'IMAGE' | 'VIDEO' | 'TEXT' | 'MIXED'; caption: string | null; media: { id: string; kind: 'IMAGE' | 'VIDEO'; readUrl: string }[]; publishedAt: string | null; likedByMe?: boolean; likesCount?: number; creator?: CreatorSummaryDTO; following?: boolean; }
 export interface MediaDTO { id: string; kind: 'IMAGE' | 'VIDEO'; readUrl: string; }
 export interface CreatorProfileDTO extends CreatorSummaryDTO { tags: string[]; posts: PostDTO[]; following: boolean; followersCount: number; vipOffer?: VipOfferDTO; }
 export interface ReelDTO extends PostDTO { creator: CreatorSummaryDTO; }

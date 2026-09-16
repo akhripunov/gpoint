@@ -3,7 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { resolveSession } from './session.js';
 
 const prisma = new PrismaClient();
-const eventTypes = new Set(['CREATOR_IMPRESSION','CREATOR_PROFILE_VIEW','POST_IMPRESSION','POST_OPEN','REEL_IMPRESSION','REEL_START','REEL_COMPLETE','FOLLOW_CREATOR','UNFOLLOW_CREATOR','VIP_CTA_CLICK']);
+const eventTypes = new Set(['CREATOR_IMPRESSION','CREATOR_PROFILE_VIEW','POST_IMPRESSION','POST_OPEN','REEL_IMPRESSION','REEL_START','REEL_COMPLETE','FOLLOW_CREATOR','UNFOLLOW_CREATOR','VIP_CTA_CLICK','LIKE']);
 function auth(h: Record<string, string | undefined>) { const id = resolveSession(h.authorization?.replace(/^Bearer\s+/i, '')); if (!id) throw new UnauthorizedException(); return id; }
 
 @Controller('events')
