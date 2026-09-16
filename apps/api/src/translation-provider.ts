@@ -1,0 +1,5 @@
+import type { TranslationProvider } from './telegram-ingestion.js';
+export class HttpTranslationProvider implements TranslationProvider {
+  constructor(private readonly endpoint: string, private readonly secret?: string, private readonly timeoutMs = 10000) {}
+  async translate(text: string, sourceLanguage?: string) { const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.timeoutMs); try { const response = await fetch(this.endpoint, { method: 'POST', headers: { 'content-type': 'application/json', ...(this.secret ? { authorization: `Bearer ${this.secret}` } : {}) }, body: JSON.stringify({ text, sourceLanguage, targetLanguage: 'en' }), signal: controller.signal }); if (!response.ok) throw new Error(`translation provider ${response.status}`); const body = await response.json() as { text?: string }; if (!body.text?.trim()) throw new Error('malformed translation response'); return { text: body.text, provider: 'external-http' }; } catch { return { text, provider: 'fallback-untranslated' }; } finally { clearTimeout(timer); } }
+}
