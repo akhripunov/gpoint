@@ -1,4 +1,5 @@
 import React,{useEffect,useRef,useState} from 'react';import{createRoot}from'react-dom/client';import{QueryClient,QueryClientProvider,useInfiniteQuery,useMutation,useQuery,useQueryClient}from'@tanstack/react-query';import{auth,creator,creatorMe,creatorOnboarding,creatorSubmit,engagement,explore,feedFollowing,feedForYou,follow,following,likePost,posts,reels,unlikePost,vipClick,preferences,removePreference,resetPreferences,setPreference}from'./api/client';import{AdminPanel,CreatorDashboard as PlatformDashboard,TelegramChannelControls}from'./platform-ui';import'./style.css';
+console.info('[GPoint] build',{APP_BUILD_SHA:__GPOINT_BUILD_SHA__,APP_BUILD_TIME:__GPOINT_BUILD_TIME__});
 type Screen='for-you'|'explore'|'reels'|'vip'|'profile'|'account'|'admin'|'following';
 const V=({on}:{on?:boolean})=>on?<span className="verified">✓</span>:null;
 function Nav({active,target,icon,label,go}:{active:Screen;target:Screen;icon:string;label:string;go:(s:Screen)=>void}){return <button aria-label={label==='For You'?label:undefined} className={'nav-item '+(active===target?'active':'')} onClick={()=>go(target)}><b aria-hidden="true">{icon}</b><span>{label}</span></button>}
