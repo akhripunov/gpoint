@@ -19,7 +19,7 @@ export async function creatorPage(page: Page, scenario = `run-${Date.now()}`) {
     await page.reload();
   }
   if (await page.getByRole('heading', { name: 'Become a Creator' }).count()) {
-    const stamp = Date.now();
+    const stamp = Date.now() * 1000 + Math.floor(Math.random() * 1000);
     await page.getByLabel('Display name').fill(`E2E Creator ${stamp}`);
     await page.getByLabel('Slug').fill(`e2e-creator-${stamp}`);
     await page.getByLabel('Bio').fill('Browser release proof creator');
