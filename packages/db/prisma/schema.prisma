@@ -225,6 +225,13 @@ model MediaAsset {
   fileSize Int
   width Int?
   height Int?
+  aspectRatio Float?
+  blurHash String?
+  safetyProvider String?
+  safetyProviderVersion String?
+  safetyConfidence Float?
+  safetyEvaluatedAt DateTime?
+  safetyFailureReason String?
   durationMs Int?
   thumbnailStorageKey String?
   status String @default("UPLOADING")

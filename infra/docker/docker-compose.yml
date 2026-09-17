@@ -11,13 +11,32 @@ services:
     image: redis:7-alpine
     ports: ["6379:6379"]
   minio:
-    image: quay.io/minio/minio:latest
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: gpoint_minio
       MINIO_ROOT_PASSWORD: gpoint_minio_dev_only
     ports: ["9000:9000", "9001:9001"]
     volumes: [gpoint_minio:/data]
+  imgproxy:
+    image: ghcr.io/imgproxy/imgproxy:v4.0.12
+    profiles: [media]
+    environment:
+      IMGPROXY_KEY: ${IMGPROXY_KEY:?set local imgproxy key}
+      IMGPROXY_SALT: ${IMGPROXY_SALT:?set local imgproxy salt}
+      IMGPROXY_MAX_SRC_FILE_SIZE: 10485760
+      IMGPROXY_ALLOWED_SOURCES: ${IMGPROXY_ALLOWED_SOURCES:-s3://gpoint-minio}
+      IMGPROXY_WORKERS: 2
+    ports: ["127.0.0.1:8080:8080"]
+  meilisearch:
+    image: getmeili/meilisearch:v1.53.2
+    profiles: [search]
+    environment:
+      MEILI_ENV: development
+      MEILI_MASTER_KEY: ${MEILISEARCH_MASTER_KEY:?set local Meilisearch key}
+    ports: ["127.0.0.1:7700:7700"]
+    volumes: [gpoint_meili:/meili_data]
 volumes:
   gpoint_pg:
   gpoint_minio:
+  gpoint_meili:

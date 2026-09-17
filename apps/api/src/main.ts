@@ -1,8 +1,9 @@
 import { Controller, Get, Module } from '@nestjs/common';
+import { mediaOptimizationStatus } from './media-delivery.js';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 
-@Controller('health') class HealthController { @Get('live') live() { return { status: 'ok' }; } }
+@Controller('health') class HealthController { @Get('live') live() { return { status: 'ok' }; } @Get('ready') ready() { return { status: 'ok', imageOptimization: mediaOptimizationStatus(), imageSafety: { enabled: Boolean(process.env.GPOINT_SAFETY_URL), failClosed: true }, search: { enabled: process.env.SEARCH_ENABLED === 'true', mode: process.env.SEARCH_ENABLED === 'true' ? 'meilisearch-derived' : 'deferred' }, notifications: { enabled: process.env.NOTIFICATIONS_PROVIDER === 'novu', mode: process.env.NOTIFICATIONS_PROVIDER === 'novu' ? 'external-provider' : 'deferred' } }; } }
 import { ExploreController } from './explore.js';
 import { AuthController, CreatorController, MeController, VipController } from './core-v2.js';
 import { PersonalizedReelsController } from './reels-discovery.js';
@@ -13,6 +14,7 @@ import { PreferencesController } from './preferences.js';
 import { TelegramIngestionController } from './telegram-ingestion.js';
 import { TelegramChannelController, TelegramChannelVerificationController } from './telegram-channel.js';
 import { FeedController } from './feed.js';
-@Module({ controllers: [HealthController, ExploreController, AuthController, MeController, CreatorController, PersonalizedReelsController, VipController, CreatorPlatformController, AdminPlatformController, MediaReadController, EngagementController, FollowingController, DiscoveryHealthController, PreferencesController, TelegramIngestionController, TelegramChannelController, TelegramChannelVerificationController, FeedController] }) class AppModule {}
+import { SearchController } from './search.js';
+@Module({ controllers: [HealthController, SearchController, ExploreController, AuthController, MeController, CreatorController, PersonalizedReelsController, VipController, CreatorPlatformController, AdminPlatformController, MediaReadController, EngagementController, FollowingController, DiscoveryHealthController, PreferencesController, TelegramIngestionController, TelegramChannelController, TelegramChannelVerificationController, FeedController] }) class AppModule {}
 export async function bootstrap() { const app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter()); app.enableCors({ origin: process.env.MINIAPP_ORIGIN?.split(',') ?? true, methods: ['GET', 'HEAD', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }); await app.listen({ port: Number(process.env.API_PORT ?? 3000), host: '0.0.0.0' }); return app; }
 if (process.env.NODE_ENV !== 'test') bootstrap();
