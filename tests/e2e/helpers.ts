@@ -8,7 +8,7 @@ export const tinyMp4 = Buffer.from('AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEA
 
 export async function creatorPage(page: Page, scenario = `run-${Date.now()}`) {
   const configuredRun = Number(process.env.GPOINT_E2E_RUN_ID);
-  const runSuffix = Number.isSafeInteger(configuredRun) ? configuredRun : Date.now();
+  const runSuffix = Number.isSafeInteger(configuredRun) ? configuredRun : Date.now() * 1000 + Math.floor(Math.random() * 1000);
   const project = page.viewportSize()?.width === 393 ? 'chromium-mobile' : 'chromium';
   const identityHash = Array.from(`${scenario}:${project}`).reduce((sum, char) => sum + char.charCodeAt(0), 0);
   const e2eUserId = 200000000 + runSuffix * 10 + identityHash;

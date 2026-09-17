@@ -6,6 +6,13 @@ import { PrismaClient } from '@prisma/client';
  * transition in a scenario is still performed through the UI/API.
  */
 export default async function globalSetup() {
+  const apiUrl = process.env.GPOINT_E2E_API_URL ?? 'http://127.0.0.1:3013';
+  const authResponse = await fetch(`${apiUrl}/auth/browser`, { method: 'POST', headers: { origin: process.env.GPOINT_MINIAPP_URL ?? 'http://127.0.0.1:5183' } });
+  if (authResponse.status !== 201) throw new Error(`E2E browser auth readiness failed: ${authResponse.status}`);
+  const authData = await authResponse.json() as { accessToken?: string };
+  if (!authData.accessToken) throw new Error('E2E browser auth readiness returned no session');
+  const feedResponse = await fetch(`${apiUrl}/feed/for-you`, { headers: { authorization: `Bearer ${authData.accessToken}` } });
+  if (feedResponse.status !== 200) throw new Error(`E2E feed readiness failed: ${feedResponse.status}`);
   const prisma = new PrismaClient();
   try {
     const creators = await prisma.creator.findMany({
