@@ -55,5 +55,13 @@ if (!token) {
 
   bot.on('channel_post', ctx => forward(ctx.update));
   bot.on('edited_channel_post', ctx => forward(ctx.update));
+  bot.on('message:chat_shared', async ctx => {
+    if (!webhookSecret) return;
+    await fetch(ingestUrl.replace(/\/internal\/telegram\/update$/, '/internal/telegram/chat-shared'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-telegram-webhook-secret': webhookSecret },
+      body: JSON.stringify({ from: ctx.from, chat_shared: ctx.msg.chat_shared }),
+    }).catch(() => undefined);
+  });
   bot.start();
 }

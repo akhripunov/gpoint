@@ -22,6 +22,7 @@ export const feedFollowing=(cursor?:string)=>request<any>(`/feed/following${curs
 export const likePost=(id:string)=>request<any>(`/feed/${id}/like`,{method:'POST'});
 export const unlikePost=(id:string)=>request<any>(`/feed/${id}/like`,{method:'DELETE'});
 export const telegramChannel=()=>request<any>('/creator/me/telegram-channel');
+export const startTelegramChannelConnection=()=>request<any>('/creator/channel/connect/start',{method:'POST'});
 export const connectTelegramChannel=(body:any)=>request<any>('/creator/me/telegram-channel',{method:'POST',body:JSON.stringify(body)});
 export const updateTelegramChannel=(body:any)=>request<any>('/creator/me/telegram-channel',{method:'PATCH',body:JSON.stringify(body)});
 export const disconnectTelegramChannel=()=>request<any>('/creator/me/telegram-channel',{method:'DELETE'});

@@ -70,3 +70,36 @@ test('unsupported and oversized media are rejected by the real API', async () =>
   const hugeVideo = await call('/creator/me/media/intent', creatorToken, 'POST', { kind: 'VIDEO', mimeType: 'video/mp4', fileSize: 50 * 1024 * 1024 + 1 });
   assert.equal(badMime.response.status, 400); assert.equal(hugeImage.response.status, 400); assert.equal(hugeVideo.response.status, 400);
 });
+
+test('Telegram channel connection challenge is short-lived, single-use and cross-user safe', async () => {
+  const previousFetch = globalThis.fetch;
+  process.env.TELEGRAM_BOT_TOKEN = 'test-token'; process.env.TELEGRAM_WEBHOOK_SECRET = 'test-webhook-secret';
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (!url.startsWith('https://api.telegram.org/')) return previousFetch(input, init);
+    const method = url.split('/').pop();
+    if (method === 'sendMessage') return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    if (method === 'getMe') return new Response(JSON.stringify({ ok: true, result: { id: 999 } }), { status: 200 });
+    if (method === 'getChat') return new Response(JSON.stringify({ ok: true, result: { id: 123, type: 'channel', title: 'Test Channel' } }), { status: 200 });
+    if (method === 'getChatMember') return new Response(JSON.stringify({ ok: true, result: { status: 'administrator', can_post_messages: true } }), { status: 200 });
+    return new Response(JSON.stringify({ ok: false, description: 'unexpected mock method' }), { status: 400 });
+  };
+  const created: string[] = [];
+  try {
+    const started = await call('/creator/channel/connect/start', creatorToken, 'POST');
+    assert.equal(started.response.status, 201); assert.ok(started.data.requestId); created.push(started.data.challengeId);
+    const wrongUser = await fetch(`${base}/internal/telegram/chat-shared`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-telegram-webhook-secret': 'test-webhook-secret' }, body: JSON.stringify({ from: { id: 'wrong-user' }, chat_shared: { request_id: started.data.requestId, chat_id: 123 } }) });
+    assert.equal(wrongUser.status, 401);
+    const expired = await prisma.telegramConnectionChallenge.create({ data: { requestId: Number(started.data.requestId) + 1, userId: (await prisma.creatorOwner.findFirstOrThrow({ where: { creatorId }, select: { userId: true } })).userId, expiresAt: new Date(Date.now() - 1) } });
+    const expiredResponse = await fetch(`${base}/internal/telegram/chat-shared`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-telegram-webhook-secret': 'test-webhook-secret' }, body: JSON.stringify({ from: { id: (await prisma.user.findFirstOrThrow({ where: { id: (await prisma.creatorOwner.findFirstOrThrow({ where: { creatorId }, select: { userId: true } })).userId }, select: { telegramUserId: true } })).telegramUserId.toString() }, chat_shared: { request_id: expired.requestId, chat_id: 123 } }) });
+    assert.equal(expiredResponse.status, 401);
+    await prisma.telegramConnectionChallenge.update({ where: { id: started.data.challengeId }, data: { usedAt: new Date() } });
+    const replay = await fetch(`${base}/internal/telegram/chat-shared`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-telegram-webhook-secret': 'test-webhook-secret' }, body: JSON.stringify({ from: { id: (await prisma.user.findFirstOrThrow({ where: { id: (await prisma.creatorOwner.findFirstOrThrow({ where: { creatorId }, select: { userId: true } })).userId }, select: { telegramUserId: true } })).telegramUserId.toString() }, chat_shared: { request_id: started.data.requestId, chat_id: 123 } }) });
+    assert.equal(replay.status, 401);
+  } finally {
+    if (created.length) await prisma.telegramConnectionChallenge.deleteMany({ where: { id: { in: created } } });
+    const owners = await prisma.creatorOwner.findMany({ where: { creatorId: { in: [creatorId, otherId] } }, select: { userId: true } });
+    await prisma.telegramConnectionChallenge.deleteMany({ where: { userId: { in: owners.map(x => x.userId) } } });
+    globalThis.fetch = previousFetch; delete process.env.TELEGRAM_BOT_TOKEN; delete process.env.TELEGRAM_WEBHOOK_SECRET;
+  }
+});
