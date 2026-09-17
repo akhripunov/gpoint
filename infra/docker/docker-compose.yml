@@ -22,8 +22,8 @@ services:
     image: ghcr.io/imgproxy/imgproxy:v4.0.12
     profiles: [media]
     environment:
-      IMGPROXY_KEY: ${IMGPROXY_KEY:?set local imgproxy key}
-      IMGPROXY_SALT: ${IMGPROXY_SALT:?set local imgproxy salt}
+      IMGPROXY_KEY: ${IMGPROXY_KEY:-}
+      IMGPROXY_SALT: ${IMGPROXY_SALT:-}
       IMGPROXY_MAX_SRC_FILE_SIZE: 10485760
       IMGPROXY_ALLOWED_SOURCES: ${IMGPROXY_ALLOWED_SOURCES:-s3://gpoint-minio}
       IMGPROXY_WORKERS: 2
@@ -33,7 +33,7 @@ services:
     profiles: [search]
     environment:
       MEILI_ENV: development
-      MEILI_MASTER_KEY: ${MEILISEARCH_MASTER_KEY:?set local Meilisearch key}
+      MEILI_MASTER_KEY: ${MEILISEARCH_MASTER_KEY:-gpoint_local_search_key_change_me}
     ports: ["127.0.0.1:7700:7700"]
     volumes: [gpoint_meili:/meili_data]
 volumes:
