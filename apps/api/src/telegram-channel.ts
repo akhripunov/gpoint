@@ -6,9 +6,8 @@ import { resolveSession } from './session.js';
 const prisma = new PrismaClient();
 const modes = new Set(['AUTO', 'HASHTAG', 'MANUAL']);
 const challengeLifetimeMs = 10 * 60_000;
-const botChannelAdministratorRights = { is_anonymous: false, can_manage_chat: false, can_delete_messages: false, can_manage_video_chats: false, can_restrict_members: false, can_promote_members: false, can_change_info: false, can_invite_users: false, can_post_stories: false, can_edit_stories: false, can_delete_stories: false, can_send_welcome_messages: false, can_post_messages: true } as const;
-const userChannelAdministratorRights = { ...botChannelAdministratorRights, can_manage_chat: true, can_promote_members: true } as const;
-export function preparedChannelButton(requestId: number) { if (!Number.isInteger(requestId) || requestId < -2_147_483_648 || requestId > 2_147_483_647) throw new Error('request_id must be a signed 32-bit integer'); return { text: 'Select Telegram channel', request_chat: { request_id: requestId, chat_is_channel: true, request_title: true, request_username: true, request_photo: true, user_administrator_rights: userChannelAdministratorRights, bot_administrator_rights: botChannelAdministratorRights } }; }
+const userChannelAdministratorRights = { is_anonymous: false, can_manage_chat: true, can_delete_messages: false, can_manage_video_chats: false, can_restrict_members: false, can_promote_members: false, can_change_info: false, can_invite_users: false, can_post_stories: false, can_edit_stories: false, can_delete_stories: false, can_send_welcome_messages: false, can_post_messages: false } as const;
+export function preparedChannelButton(requestId: number) { if (!Number.isInteger(requestId) || requestId < -2_147_483_648 || requestId > 2_147_483_647) throw new Error('request_id must be a signed 32-bit integer'); return { text: 'Select Telegram channel', request_chat: { request_id: requestId, chat_is_channel: true, request_title: true, request_username: true, request_photo: true, user_administrator_rights: userChannelAdministratorRights } }; }
 export function preparedButtonId(result: { id?: unknown }) { if (typeof result.id !== 'string' || result.id.length === 0) throw new Error('Telegram returned an invalid PreparedKeyboardButton'); return result.id; }
 function userId(h: Record<string, string | undefined>) { const id = resolveSession(h.authorization?.replace(/^Bearer\s+/i, '')); if (!id) throw new UnauthorizedException(); return id; }
 async function authenticated(h: Record<string, string | undefined>) { const id = userId(h); const user = await prisma.user.findUnique({ where: { id }, select: { id: true, telegramUserId: true } }); if (!user) throw new UnauthorizedException(); return { userId: id, user }; }
@@ -18,6 +17,32 @@ async function telegramApi<T>(method: string, body: Record<string, unknown>): Pr
 function channelSlug(value: string) { const normalized = value.toLowerCase().trim().replace(/^@/, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40); return normalized || 'creator'; }
 async function uniqueSlug(value: string) { const base = channelSlug(value); let candidate = base; for (let index = 2; await prisma.creator.findUnique({ where: { slug: candidate }, select: { id: true } }); index += 1) { const suffix = `-${index}`; candidate = `${base.slice(0, 40 - suffix.length)}${suffix}`; } return candidate; }
 function publicChannel(c: any) { if (!c) return null; return { id: c.id, title: c.title, username: c.username, status: c.status, importMode: c.importMode, importHashtag: c.importHashtag, connectedAt: c.connectedAt, disconnectedAt: c.disconnectedAt, lastPostReceivedAt: c.lastPostReceivedAt, lastSuccessfulIngestAt: c.lastSuccessfulIngestAt, lastError: c.lastError }; }
+export function userIsChannelAdmin(member: { status: string; can_manage_chat?: boolean; can_post_messages?: boolean; can_promote_members?: boolean }) { return member.status === 'creator' || (member.status === 'administrator' && (member.can_manage_chat === true || member.can_post_messages === true)); }
+export function botCanPost(member: { status: string; can_post_messages?: boolean } | null) { return !!member && (member.status === 'administrator' || member.status === 'creator') && member.can_post_messages === true; }
+async function optionalBotMember(chatId: string, botId: number) { try { return await telegramApi<{ status: string; can_post_messages?: boolean }>('getChatMember', { chat_id: chatId, user_id: botId }); } catch (error) { const message = error instanceof Error ? error.message : String(error); if (/not found|not a member|chat member|USER_NOT_PARTICIPANT|user not found|member not found/i.test(message)) return null; throw error; } }
+async function ensurePendingChannel(challenge: any, chat: { title?: string; username?: string; description?: string }, shared: { title?: string; username?: string }, state: 'WAITING_FOR_BOT' | 'WAITING_FOR_BOT_RIGHTS') {
+  const currentOwner = await prisma.creatorOwner.findFirst({ where: { userId: challenge.userId }, select: { creatorId: true } });
+  const creatorId = currentOwner?.creatorId ?? (await prisma.creator.create({ data: { displayName: chat.title ?? shared.title ?? 'Telegram Creator', slug: await uniqueSlug(chat.username ?? chat.title ?? 'creator'), profile: { create: { bio: chat.description ?? '', tagsJson: '[]', status: 'DRAFT' } }, owners: { create: { userId: challenge.userId } } } })).id;
+  const pending = await prisma.telegramChannel.upsert({ where: { creatorId }, create: { creatorId, telegramChatId: challenge.telegramChatId, title: chat.title ?? shared.title, username: chat.username ?? shared.username, status: 'PENDING', importMode: 'AUTO', connectedAt: null, disconnectedAt: null, lastError: state === 'WAITING_FOR_BOT' ? 'Add GPoint bot to this channel to continue.' : 'Grant GPoint bot permission to post messages to continue.' }, update: { telegramChatId: challenge.telegramChatId, title: chat.title ?? shared.title, username: chat.username ?? shared.username, status: 'PENDING', connectedAt: null, disconnectedAt: null, lastError: state === 'WAITING_FOR_BOT' ? 'Add GPoint bot to this channel to continue.' : 'Grant GPoint bot permission to post messages to continue.' } });
+  return { status: state, channel: publicChannel(pending), instructions: state === 'WAITING_FOR_BOT' ? 'Add GPoint bot to the selected channel, then tap Continue.' : 'Grant GPoint bot permission to post messages, then tap Continue.' };
+}
+async function completeChannelSelection(challenge: any, senderId: string, chatId: string, shared: { title?: string; username?: string }) {
+  const chat = await telegramApi<{ id: number; type: string; title?: string; username?: string; description?: string }>('getChat', { chat_id: chatId });
+  if (chat.type !== 'channel' || chat.id.toString() !== chatId) throw new BadRequestException('selected chat is not a channel');
+  const member = await telegramApi<{ status: string; can_manage_chat?: boolean; can_post_messages?: boolean }>('getChatMember', { chat_id: chatId, user_id: senderId });
+  if (!userIsChannelAdmin(member)) throw new UnauthorizedException('selected Telegram user is not a channel administrator');
+  const currentOwner = await prisma.creatorOwner.findFirst({ where: { userId: challenge.userId }, select: { creatorId: true } });
+  const existing = await prisma.telegramChannel.findUnique({ where: { telegramChatId: chatId } });
+  if (existing && (!currentOwner || existing.creatorId !== currentOwner.creatorId)) throw new BadRequestException('channel is already connected to another creator');
+  const bot = await telegramApi<{ id: number }>('getMe', {});
+  const botMember = await optionalBotMember(chatId, bot.id);
+  challenge.telegramChatId = chatId;
+  if (!botMember) { await prisma.telegramConnectionChallenge.update({ where: { id: challenge.id }, data: { telegramChatId: chatId } }); return ensurePendingChannel(challenge, chat, shared, 'WAITING_FOR_BOT'); }
+  if (!botCanPost(botMember)) { await prisma.telegramConnectionChallenge.update({ where: { id: challenge.id }, data: { telegramChatId: chatId } }); return ensurePendingChannel(challenge, chat, shared, 'WAITING_FOR_BOT_RIGHTS'); }
+  const creatorId = currentOwner?.creatorId ?? (await prisma.creator.create({ data: { displayName: chat.title ?? shared.title ?? 'Telegram Creator', slug: await uniqueSlug(chat.username ?? chat.title ?? 'creator'), profile: { create: { bio: chat.description ?? '', tagsJson: '[]', status: 'DRAFT' } }, owners: { create: { userId: challenge.userId } } } })).id;
+  const connected = await prisma.$transaction(async tx => { await tx.telegramConnectionChallenge.update({ where: { id: challenge.id }, data: { usedAt: new Date(), telegramChatId: chatId } }); return tx.telegramChannel.upsert({ where: { creatorId }, create: { creatorId, telegramChatId: chatId, title: chat.title ?? shared.title, username: chat.username ?? shared.username, status: 'CONNECTED', importMode: 'AUTO', connectedAt: new Date(), disconnectedAt: null, lastError: null }, update: { telegramChatId: chatId, title: chat.title ?? shared.title, username: chat.username ?? shared.username, status: 'CONNECTED', connectedAt: new Date(), disconnectedAt: null, lastError: null } }); });
+  return { status: 'CONNECTED', channel: publicChannel(connected) };
+}
 
 @Controller('creator/channel')
 export class TelegramConnectionController {
@@ -30,12 +55,33 @@ export class TelegramConnectionController {
     return { challengeId: challenge.id, requestId: prepared, expiresAt: challenge.expiresAt, supported: true };
   }
 
+  @Get('selection/:challengeId')
+  async selectionStatus(@Headers() h: Record<string, string | undefined>, @Param('challengeId') challengeId: string) {
+    const { userId: id } = await authenticated(h); const challenge = await prisma.telegramConnectionChallenge.findUnique({ where: { id: challengeId } });
+    if (!challenge || challenge.userId !== id) throw new UnauthorizedException();
+    if (challenge.expiresAt.getTime() <= Date.now() && !challenge.usedAt) return { status: 'FAILED', message: 'Channel selection expired. Tap Become a Creator to try again.' };
+    if (challenge.usedAt) return { status: 'CONNECTED' };
+    if (!challenge.telegramChatId) return { status: 'READY' };
+    const channel = await prisma.telegramChannel.findFirst({ where: { telegramChatId: challenge.telegramChatId, creator: { owners: { some: { userId: id } } } } });
+    const status = channel?.lastError?.includes('permission') ? 'WAITING_FOR_BOT_RIGHTS' : 'WAITING_FOR_BOT';
+    return { status, channel: publicChannel(channel), message: channel?.lastError ?? 'Add GPoint bot to continue.' };
+  }
+
+  @Post('selection/complete')
+  async complete(@Headers() h: Record<string, string | undefined>, @Body() body: { challengeId?: string }) {
+    const { userId: id, user } = await authenticated(h); if (!body.challengeId) throw new BadRequestException('challengeId required');
+    const challenge = await prisma.telegramConnectionChallenge.findUnique({ where: { id: body.challengeId } });
+    if (!challenge || challenge.userId !== id || challenge.usedAt || challenge.expiresAt.getTime() <= Date.now()) throw new UnauthorizedException('challenge expired, used or unknown');
+    if (!challenge.telegramChatId) throw new BadRequestException('select a channel first');
+    return completeChannelSelection(challenge, user.telegramUserId.toString(), challenge.telegramChatId, {});
+  }
+
   @Post('connect/start')
   async start(@Headers() h: Record<string, string | undefined>) {
     const { userId: id } = await owned(h); const user = await prisma.user.findUnique({ where: { id }, select: { telegramUserId: true } });
     if (!user || user.telegramUserId <= 0n) throw new BadRequestException('A real Telegram account is required for channel selection');
     const requestId = randomInt(1, 2_147_483_647); const challenge = await prisma.telegramConnectionChallenge.create({ data: { requestId, userId: id, expiresAt: new Date(Date.now() + challengeLifetimeMs) } });
-    const keyboard = { keyboard: [[{ text: 'Select Telegram channel', request_chat: { request_id: requestId, chat_is_channel: true, user_administrator_rights: { can_post_messages: true }, bot_administrator_rights: { can_post_messages: true }, bot_is_member: true, request_title: true, request_username: true } }]], resize_keyboard: true, one_time_keyboard: true };
+    const keyboard = { keyboard: [[{ text: 'Select Telegram channel', request_chat: { request_id: requestId, chat_is_channel: true, user_administrator_rights: { can_manage_chat: true }, request_title: true, request_username: true } }]], resize_keyboard: true, one_time_keyboard: true };
     await telegramApi('sendMessage', { chat_id: user.telegramUserId.toString(), text: 'Select the channel you administer and where GPoint is already an administrator. The request expires in 10 minutes.', reply_markup: keyboard });
     return { challengeId: challenge.id, requestId, expiresAt: challenge.expiresAt, botUsername: process.env.TELEGRAM_BOT_USERNAME ?? null, instructions: 'Open the GPoint bot chat and tap Select Telegram channel.' };
   }
@@ -58,12 +104,6 @@ export class TelegramChannelVerificationController {
     const challenge = await prisma.telegramConnectionChallenge.findUnique({ where: { requestId: shared.request_id }, include: { user: true } });
     if (!challenge || challenge.usedAt || challenge.expiresAt.getTime() <= Date.now()) throw new UnauthorizedException('challenge expired, used or unknown');
     if (challenge.user.telegramUserId.toString() !== senderId) throw new UnauthorizedException('challenge belongs to another Telegram user');
-    const chatId = shared.chat_id.toString(); const chat = await telegramApi<{ id: number; type: string; title?: string; username?: string; description?: string }>('getChat', { chat_id: chatId }); if (chat.type !== 'channel' || chat.id.toString() !== chatId) throw new BadRequestException('selected chat is not the selected channel');
-    const bot = await telegramApi<{ id: number }>('getMe', {}); const [member, botMember] = await Promise.all([telegramApi<{ status: string; can_manage_chat?: boolean; can_post_messages?: boolean }>('getChatMember', { chat_id: chatId, user_id: senderId }), telegramApi<{ status: string; can_post_messages?: boolean }>('getChatMember', { chat_id: chatId, user_id: bot.id })]);
-    const userIsAdmin = member.status === 'creator' || (member.status === 'administrator' && (member.can_manage_chat === true || member.can_post_messages === true)); const botCanPost = (botMember.status === 'administrator' || botMember.status === 'creator') && botMember.can_post_messages === true; if (!userIsAdmin || !botCanPost) throw new UnauthorizedException('channel ownership or bot posting permission could not be verified');
-    const currentOwner = await prisma.creatorOwner.findFirst({ where: { userId: challenge.userId }, select: { creatorId: true } }); const existing = await prisma.telegramChannel.findUnique({ where: { telegramChatId: chatId } }); if (existing && (!currentOwner || existing.creatorId !== currentOwner.creatorId)) throw new BadRequestException('channel is already connected to another creator');
-    const creatorId = currentOwner?.creatorId ?? (await prisma.creator.create({ data: { displayName: chat.title ?? shared.title ?? 'Telegram Creator', slug: await uniqueSlug(chat.username ?? chat.title ?? 'creator'), profile: { create: { bio: chat.description ?? '', tagsJson: '[]', status: 'DRAFT' } }, owners: { create: { userId: challenge.userId } } } })).id;
-    const connected = await prisma.$transaction(async tx => { await tx.telegramConnectionChallenge.update({ where: { id: challenge.id }, data: { usedAt: new Date(), telegramChatId: chatId } }); return tx.telegramChannel.upsert({ where: { creatorId }, create: { creatorId, telegramChatId: chatId, title: chat.title ?? shared.title, username: chat.username ?? shared.username, status: 'CONNECTED', importMode: 'AUTO', connectedAt: new Date(), disconnectedAt: null, lastError: null }, update: { telegramChatId: chatId, title: chat.title ?? shared.title, username: chat.username ?? shared.username, status: 'CONNECTED', connectedAt: new Date(), disconnectedAt: null, lastError: null } }); });
-    return { status: 'CONNECTED', channel: publicChannel(connected) };
+    const chatId = shared.chat_id.toString(); return completeChannelSelection(challenge, senderId, chatId, shared);
   }
 }

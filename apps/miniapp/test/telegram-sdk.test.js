@@ -30,6 +30,8 @@ test('native creator onboarding uses requestChat and does not require manual fir
   assert.match(main, /queryKey:\['creator-channel-selection'\]/);
   assert.match(main, /onClick=\{openSelector\}/);
   assert.doesNotMatch(main, /NativeCreatorOnboardingBridge/);
-  assert.match(main, /prepState/);
+  assert.match(main, /selectionState/);
+  assert.match(main, /WAITING_FOR_BOT/);
+  assert.match(main, /Channel selection was cancelled/);
   assert.match(main, /Try again/);
 });
