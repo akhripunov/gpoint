@@ -30,6 +30,7 @@ function exactCheckout(sha) {
 export function applyCandidate(sha) {
   const checkout = exactCheckout(sha);
   const releaseDir = `/opt/gpoint/releases/${sha}`;
+  const imageProof = `/tmp/gpoint-image-id-${sha}`;
   const archive = `${checkout}.tar.gz`;
   const compose = path.join(checkout, 'infra/production/docker-compose.yml');
   const dockerfile = path.join(checkout, 'infra/production/Gpoint.Dockerfile');
@@ -45,7 +46,7 @@ export function applyCandidate(sha) {
       `tar -xzf /tmp/gpoint-${sha}.tar.gz -C ${releaseDir}`,
       `mv ${releaseDir}/${path.basename(checkout)} ${releaseDir}/source`,
       `docker build --no-cache --build-arg GPOINT_BUILD_SHA=${sha} --label org.opencontainers.image.revision=${sha} --label org.opencontainers.image.source=${REPO} -f /tmp/gpoint-dockerfile-${sha} -t gpoint-runtime:${sha} ${releaseDir}/source`,
-      `docker image inspect gpoint-runtime:${sha} --format '{{.Id}}' > ${releaseDir}/image-id`,
+      `docker image inspect gpoint-runtime:${sha} --format '{{.Id}}' > ${imageProof}`,
       'echo GPOINT_BUILD_OK'
     ].join('; ');
     const buildOutput = run(build); if (!buildOutput.includes('GPOINT_BUILD_OK')) throw new Error('remote image build failed');
@@ -67,7 +68,7 @@ export function applyCandidate(sha) {
       'echo GPOINT_DEPLOY_OK'
     ].join('; ');
     const deployOutput = run(deploy); if (!deployOutput.includes('GPOINT_DEPLOY_OK')) throw new Error('remote runtime deploy failed');
-    const identityOutput = run(`set -e; imageId=$(cat ${releaseDir}/image-id); apiImage=$(docker inspect compose-api-1 --format '{{.Image}}'); workerImage=$(docker inspect compose-worker-1 --format '{{.Image}}'); botImage=$(docker inspect compose-bot-1 --format '{{.Image}}'); indexSha256=$(sha256sum /opt/gpoint/app/miniapp/index.html | awk '{print $1}'); grep -F -q 'gpoint-build-sha" content="${sha}' /opt/gpoint/app/miniapp/index.html; test "$apiImage" = "$imageId"; test "$workerImage" = "$imageId"; test "$botImage" = "$imageId"; docker rm gpoint-static-${sha.slice(0, 8)} >/dev/null 2>&1 || true; printf 'IMAGE_ID=%s INDEX_SHA256=%s BUILD_SHA=%s\\n' "$imageId" "$indexSha256" '${sha}'`).trim();
+    const identityOutput = run(`set -e; imageId=$(cat ${imageProof}); apiImage=$(docker inspect compose-api-1 --format '{{.Image}}'); workerImage=$(docker inspect compose-worker-1 --format '{{.Image}}'); botImage=$(docker inspect compose-bot-1 --format '{{.Image}}'); indexSha256=$(sha256sum /opt/gpoint/app/miniapp/index.html | awk '{print $1}'); grep -F -q 'gpoint-build-sha" content="${sha}' /opt/gpoint/app/miniapp/index.html; test "$apiImage" = "$imageId"; test "$workerImage" = "$imageId"; test "$botImage" = "$imageId"; docker rm gpoint-static-${sha.slice(0, 8)} >/dev/null 2>&1 || true; printf 'IMAGE_ID=%s INDEX_SHA256=%s BUILD_SHA=%s\\n' "$imageId" "$indexSha256" '${sha}'`).trim();
     const imageId = identityOutput.match(/IMAGE_ID=(sha256:[a-f0-9]+)/)?.[1];
     const indexSha256 = identityOutput.match(/INDEX_SHA256=([a-f0-9]{64})/)?.[1];
     const buildSha = identityOutput.match(/BUILD_SHA=([0-9a-f]{40})/)?.[1];
