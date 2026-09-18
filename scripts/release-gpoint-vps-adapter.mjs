@@ -70,7 +70,12 @@ export function applyCandidate(sha) {
     const indexSha256 = identityOutput.match(/\b([a-f0-9]{64})\s+\/opt\/gpoint\/app\/miniapp\/index\.html\b/)?.[1];
     const buildSha = identityOutput.includes(sha) ? sha : undefined;
     if (!imageId || !indexSha256 || buildSha !== sha) throw new Error('remote runtime identity verification failed');
-    return { imageIdentity: { imageId, indexSha256, buildSha }, migrationOutput: migration.trim() };
+    const migrationOutput = [
+      migration.includes('Database schema is up to date!') ? 'DATABASE_SCHEMA_UP_TO_DATE' : null,
+      migration.includes('No pending migrations to apply.') ? 'NO_PENDING_MIGRATIONS' : null,
+    ].filter(Boolean).join(',');
+    if (!migrationOutput) throw new Error('migration gate output was not recognized');
+    return { imageIdentity: { imageId, indexSha256, buildSha }, migrationOutput };
   } finally {
     fs.rmSync(checkout, { recursive: true, force: true });
     fs.rmSync(archive, { force: true });
