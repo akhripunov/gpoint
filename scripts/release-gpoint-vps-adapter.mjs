@@ -45,10 +45,12 @@ export function applyCandidate(sha) {
       `tar -xzf /tmp/gpoint-${sha}.tar.gz -C ${releaseDir}`,
       `mv ${releaseDir}/${path.basename(checkout)} ${releaseDir}/source`,
       `docker build --no-cache --label org.opencontainers.image.revision=${sha} --label org.opencontainers.image.source=${REPO} -f /tmp/gpoint-dockerfile-${sha} -t gpoint-runtime:${sha} ${releaseDir}/source`,
-      `docker image inspect gpoint-runtime:${sha} | grep -q ${sha}`
+      `docker image inspect gpoint-runtime:${sha} | grep -q ${sha}`,
+      'echo GPOINT_BUILD_OK'
     ].join('; ');
-    run(build);
-    const migration = run(`set -e; docker run --rm --network gpoint_app --network-alias gpoint-migration --network shared_internal --env-file /opt/gpoint/env/production.env gpoint-runtime:${sha} pnpm --filter @gpoint/db exec prisma migrate status || true; docker run --rm --network gpoint_app --network-alias gpoint-migration --network shared_internal --env-file /opt/gpoint/env/production.env gpoint-runtime:${sha} pnpm --filter @gpoint/db exec prisma migrate deploy`);
+    const buildOutput = run(build); if (!buildOutput.includes('GPOINT_BUILD_OK')) throw new Error('remote image build failed');
+    const migration = run(`set -e; docker run --rm --network gpoint_app --network-alias gpoint-migration --network shared_internal --env-file /opt/gpoint/env/production.env gpoint-runtime:${sha} pnpm --filter @gpoint/db exec prisma migrate status || true; docker run --rm --network gpoint_app --network-alias gpoint-migration --network shared_internal --env-file /opt/gpoint/env/production.env gpoint-runtime:${sha} pnpm --filter @gpoint/db exec prisma migrate deploy; echo GPOINT_MIGRATION_OK`);
+    if (!migration.includes('GPOINT_MIGRATION_OK')) throw new Error('remote migration deploy failed');
     const deploy = [
       'set -e',
       `cp /tmp/gpoint-compose-${sha}.yml /opt/gpoint/compose/docker-compose.yml`,
@@ -62,9 +64,10 @@ export function applyCandidate(sha) {
       `docker rm gpoint-static-${sha.slice(0, 8)} >/dev/null`,
       'chmod -R a+rX /opt/gpoint/app/miniapp',
       'docker compose --env-file /opt/gpoint/env/production.env -f /opt/gpoint/compose/docker-compose.yml up -d --force-recreate api worker bot',
-      'curl -fsS http://127.0.0.1:3000/health/live >/dev/null'
+      'curl -fsS http://127.0.0.1:3000/health/live >/dev/null',
+      'echo GPOINT_DEPLOY_OK'
     ].join('; ');
-    run(deploy);
+    const deployOutput = run(deploy); if (!deployOutput.includes('GPOINT_DEPLOY_OK')) throw new Error('remote runtime deploy failed');
     const identityOutput = run(`docker image inspect gpoint-runtime:${sha} | grep Id | head -1; sha256sum /opt/gpoint/app/miniapp/index.html; grep -o ${sha} /opt/gpoint/app/miniapp/index.html | head -1`).trim();
     const imageId = identityOutput.match(/"Id"\s*:\s*"(sha256:[a-f0-9]+)"/)?.[1];
     const indexSha256 = identityOutput.match(/\b([a-f0-9]{64})\s+\/opt\/gpoint\/app\/miniapp\/index\.html\b/)?.[1];
