@@ -1,126 +1,50 @@
-name: gpoint-production
+version: "3.8"
 
 services:
-  reverse-proxy:
-    image: caddy:2.10-alpine
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    environment:
-      APP_DOMAIN: ${APP_DOMAIN:?set approved app domain}
-      API_DOMAIN: ${API_DOMAIN:?set approved api domain}
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data
-      - caddy-config:/config
-    depends_on:
-      miniapp:
-        condition: service_started
-      api:
-        condition: service_healthy
-    networks: [edge, private]
-
-  miniapp:
-    image: ${MINIAPP_IMAGE:?set immutable Mini App image identity}
-    restart: unless-stopped
-    networks: [private]
-
   api:
-    image: ${API_IMAGE:?set immutable API image identity}
+    image: gpoint-runtime:${RELEASE_SHA}
     restart: unless-stopped
-    environment:
-      DATABASE_URL: ${DATABASE_URL:?set production database URL}
-      REDIS_URL: ${REDIS_URL:?set production Redis URL}
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?set production Telegram token}
-      DEV_AUTH_MODE: "false"
-      MINIAPP_ORIGIN: ${MINIAPP_ORIGIN:?set approved Mini App origin}
-      MEDIA_STORAGE_PROVIDER: s3
-      S3_ENDPOINT: ${S3_ENDPOINT:?set production S3 endpoint}
-      S3_REGION: ${S3_REGION:?set production S3 region}
-      S3_BUCKET: ${S3_BUCKET:?set production S3 bucket}
-      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?set production S3 access key}
-      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?set production S3 secret}
-      S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL:-}
-      S3_SIGNED_READ: ${S3_SIGNED_READ:-true}
-      RELEASE_SHA: ${RELEASE_SHA:?set candidate SHA}
-    expose: ["3000"]
+    command: ["node", "apps/api/dist/apps/api/src/main.js"]
+    env_file:
+      - /opt/gpoint/env/production.env
+    volumes:
+      - /opt/gpoint/media:/data/media
+    expose:
+      - "3000"
+    ports:
+      - "127.0.0.1:3000:3000"
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000/health/live"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
       timeout: 5s
-      retries: 5
-    deploy:
-      resources:
-        limits:
-          cpus: "1.50"
-          memory: 1G
-    networks: [private]
-
-  bot:
-    image: ${BOT_IMAGE:?set immutable Bot image identity}
-    restart: unless-stopped
-    environment:
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?set production Telegram token}
-      RELEASE_SHA: ${RELEASE_SHA:?set candidate SHA}
-    deploy:
-      resources:
-        limits:
-          cpus: "0.50"
-          memory: 512M
-    networks: [private]
+      retries: 8
+    networks:
+      - gpoint_app
+      - shared_internal
 
   worker:
-    image: ${WORKER_IMAGE:?set immutable Worker image identity}
+    image: gpoint-runtime:${RELEASE_SHA}
     restart: unless-stopped
-    environment:
-      REDIS_URL: ${REDIS_URL:?set production Redis URL}
-      RELEASE_SHA: ${RELEASE_SHA:?set candidate SHA}
-    deploy:
-      resources:
-        limits:
-          cpus: "1.00"
-          memory: 768M
-    networks: [private]
+    command: ["node", "apps/worker/dist/main.js"]
+    env_file:
+      - /opt/gpoint/env/production.env
+    networks:
+      - gpoint_app
+      - shared_internal
 
-  postgres:
-    image: postgres:16-alpine
+  bot:
+    image: gpoint-runtime:${RELEASE_SHA}
     restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:?set production database name}
-      POSTGRES_USER: ${POSTGRES_USER:?set production database user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set production database password}
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    expose: ["5432"]
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks: [private]
-
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?set production Redis password}"]
-    volumes:
-      - redis-data:/data
-    expose: ["6379"]
-    healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks: [private]
-
-volumes:
-  caddy-data:
-  caddy-config:
-  postgres-data:
-  redis-data:
+    command: ["node", "apps/bot/dist/main.js"]
+    env_file:
+      - /opt/gpoint/env/production.env
+    networks:
+      - gpoint_app
 
 networks:
-  edge:
-  private:
-    internal: true
+  gpoint_app:
+    external: true
+    name: gpoint_app
+  shared_internal:
+    external: true
+    name: shared_internal

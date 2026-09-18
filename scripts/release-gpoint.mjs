@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { applyCandidate } from './release-gpoint-vps-adapter.mjs';
 
 const ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const STATE_FILE = path.join(ROOT, 'docs/release/state/production.json');
@@ -118,6 +119,37 @@ function runDryRun(candidate) {
 
 function status() { console.log(JSON.stringify({ state: state(), activeLock: fs.existsSync(LOCK_FILE) ? readJson(LOCK_FILE) : null, manifests: fs.readdirSync(MANIFEST_DIR).filter(x => x.endsWith('.json')).sort() }, null, 2)); }
 
+function runApply(candidate) {
+  const startedAt = isoNow();
+  const releaseId = `gpoint-release-${startedAt.replace(/[-:.]/g, '')}`;
+  const unlock = acquireLock(releaseId);
+  const current = state();
+  try {
+    const proof = remoteProof(candidate);
+    const liveSha = process.env.GPOINT_LIVE_PRODUCTION_SHA ?? current.currentProductionSha;
+    const liveDbHead = process.env.GPOINT_LIVE_PRODUCTION_DB_HEAD ?? current.currentProductionDbHead;
+    if (liveSha !== current.currentProductionSha) die(`live production SHA drift: recorded=${current.currentProductionSha} live=${liveSha}`);
+    if (!liveDbHead) die('actual production DB head is required');
+    const effective = { api: candidate, worker: candidate, bot: candidate, miniapp: candidate };
+    const artifacts = { api: { sourceSha: candidate }, worker: { sourceSha: candidate }, bot: { sourceSha: candidate }, miniapp: { sourceSha: candidate } };
+    const gates = evaluateSafetyGates({ candidateSha: candidate, remoteSha: proof.mainSha, artifacts, config: effective, recordedProductionSha: current.currentProductionSha, liveProductionSha: liveSha, productionRefTarget: candidate });
+    if (gates.length) die(gates.join('; '));
+    const adapter = applyCandidate(candidate);
+    const root = execFileSync('curl', ['-fsS', 'https://gpoint.amiora.one/'], { encoding: 'utf8' });
+    if (!root.includes(`gpoint-build-sha" content="${candidate}`)) die('external Mini App build SHA mismatch after apply');
+    execFileSync('curl', ['-fsS', 'https://gpoint.amiora.one/api/health/live'], { stdio: 'ignore' });
+    const ref = `gpoint-production-${startedAt.replace(/[-:.]/g, '')}`;
+    execFileSync('git', ['tag', '-a', ref, candidate, '-m', `GPoint production release\nproductionSha=${candidate}\ndbHead=${liveDbHead}\nreleaseId=${releaseId}`], { cwd: ROOT, stdio: 'inherit' });
+    execFileSync('git', ['push', 'origin', `refs/tags/${ref}`], { cwd: ROOT, stdio: 'inherit' });
+    const remoteRef = git(['ls-remote', 'origin', `refs/tags/${ref}^{}`]).trim();
+    if (!remoteRef.includes(candidate)) die('remote production ref target mismatch');
+    const manifest = { releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: candidate, dbHeadBefore: liveDbHead, dbHeadAfter: liveDbHead, artifactIdentities: { api: { sourceSha: candidate, adapter: adapter.imageIdentity }, worker: { sourceSha: candidate, adapter: adapter.imageIdentity }, bot: { sourceSha: candidate, adapter: adapter.imageIdentity }, miniapp: { sourceSha: candidate, adapter: adapter.imageIdentity } }, startedAt, finishedAt: isoNow(), status: 'COMPLETE', failureStage: null, failureReason: null, rollbackSha: current.currentProductionSha, rollbackDbCompatibility: 'REQUIRES_FORWARD_FIX_ASSESSMENT', productionRef: ref, remoteProof: { mainSha: proof.mainSha }, migrationOutput: adapter.migrationOutput, releaseOrigin: 'durable-production-release' };
+    const file = writeManifest(manifest);
+    fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...current, currentProductionSha: candidate, currentProductionDbHead: liveDbHead, currentProductionRef: ref, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: manifest.finishedAt, releaseOrigin: 'durable-production-release', artifactIdentities: manifest.artifactIdentities }, null, 2)}\n`);
+    console.log(JSON.stringify({ status: 'COMPLETE', releaseId, candidateSha: candidate, productionRef: ref, manifest: path.relative(ROOT, file) }, null, 2));
+  } finally { unlock(); }
+}
+
 function main() {
   const args = process.argv.slice(2);
   if (args[0] === 'status' || args.includes('--status')) return status();
@@ -125,7 +157,7 @@ function main() {
   const isApply = args.includes('--apply');
   if (!isDryRun && !isApply) die('choose --dry-run or --apply');
   if (isApply && !args.includes('--confirm-production-apply')) die('apply requires --confirm-production-apply');
-  if (isApply) die('production adapter is intentionally not enabled in this local adoption task; use the reviewed VPS adapter in a future release');
+  if (isApply) return runApply(candidateSha(args));
   runDryRun(candidateSha(args));
 }
 
