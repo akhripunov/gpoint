@@ -45,7 +45,7 @@ async function completeChannelSelection(challenge: any, senderId: string, chatId
   return { status: 'CONNECTED', channel: publicChannel(connected) };
 }
 
-async function completeStartChannelConnection(challenge: any, senderId: string, chatId: string, shared: { title?: string; username?: string; description?: string }) {
+async function reconcileCreatorChannelConnection(challenge: any, senderId: string, chatId: string, shared: { title?: string; username?: string; description?: string }) {
   const chat = await telegramApi<{ id: number; type: string; title?: string; username?: string; description?: string }>('getChat', { chat_id: chatId });
   if (chat.type !== 'channel' || chat.id.toString() !== chatId) throw new BadRequestException('selected chat is not a channel');
   const userMember = await telegramApi<{ status: string; can_manage_chat?: boolean; can_post_messages?: boolean }>('getChatMember', { chat_id: chatId, user_id: senderId });
@@ -76,12 +76,26 @@ export class TelegramConnectionController {
 
   @Get('start/:challengeId')
   async startChannelStatus(@Headers() h: Record<string, string | undefined>, @Param('challengeId') challengeId: string) {
-    const { userId: id } = await authenticated(h); const challenge = await prisma.telegramConnectionChallenge.findUnique({ where: { id: challengeId } });
+    const { userId: id, user } = await authenticated(h); const challenge = await prisma.telegramConnectionChallenge.findUnique({ where: { id: challengeId } });
     if (!challenge || challenge.userId !== id || challenge.preparedButtonId) throw new UnauthorizedException();
-    if (challenge.usedAt) return { status: 'CONNECTED' }; if (challenge.expiresAt.getTime() <= Date.now()) return { status: 'FAILED', message: 'Telegram channel connection expired.' }; if (!challenge.telegramChatId) return { status: 'WAITING_FOR_CHANNEL' };
-    const channel = await prisma.telegramChannel.findFirst({ where: { telegramChatId: challenge.telegramChatId, creator: { owners: { some: { userId: id } } } } });
-    if (channel?.status === 'CONNECTED') return { status: 'CONNECTED', channel: publicChannel(channel) };
-    return { status: 'VERIFYING', channel: publicChannel(channel), message: channel?.lastError ?? 'Verifying Telegram channel access.' };
+    if (challenge.usedAt) return { status: 'CONNECTED' }; if (challenge.expiresAt.getTime() <= Date.now() && !challenge.telegramChatId) return { status: 'FAILED', message: 'Telegram channel connection expired.' }; if (!challenge.telegramChatId) return { status: 'WAITING_FOR_CHANNEL' };
+    try {
+      const result = await reconcileCreatorChannelConnection(challenge, user.telegramUserId.toString(), challenge.telegramChatId, {});
+      return result.status === 'CONNECTED' ? result : { status: 'VERIFYING', channel: result.channel ?? null, message: 'Verifying Telegram channel access.' };
+    } catch (error) {
+      console.error('[GPoint] creator channel reconciliation failed', { reason: error instanceof Error ? error.message : 'UNKNOWN' });
+      return { status: 'VERIFYING', message: 'Could not verify the connection yet.' };
+    }
+  }
+
+  @Post('reconcile')
+  async reconcile(@Headers() h: Record<string, string | undefined>, @Body() body: { challengeId?: string }) {
+    const { userId: id, user } = await authenticated(h); if (!body.challengeId) throw new BadRequestException('challengeId required');
+    const challenge = await prisma.telegramConnectionChallenge.findUnique({ where: { id: body.challengeId } });
+    if (!challenge || challenge.userId !== id || challenge.preparedButtonId || !challenge.telegramChatId) return { status: 'WAITING_FOR_CHANNEL' };
+    if (challenge.usedAt) return { status: 'CONNECTED' };
+    try { return await reconcileCreatorChannelConnection(challenge, user.telegramUserId.toString(), challenge.telegramChatId, {}); }
+    catch (error) { console.error('[GPoint] creator channel reconciliation failed', { reason: error instanceof Error ? error.message : 'UNKNOWN' }); return { status: 'FAILED', message: 'Could not verify the connection yet.' }; }
   }
 
   @Post('selection/prepare')
@@ -150,7 +164,7 @@ export class TelegramChannelVerificationController {
     if (!challenge) throw new UnauthorizedException('no active channel connection');
     console.info('[GPoint] my_chat_member pending connection found', { state: challenge.telegramChatId ? 'BOUND' : 'WAITING_FOR_CHANNEL' });
     try {
-      const result = await completeStartChannelConnection(challenge, senderId, chatId, chat);
+      const result = await reconcileCreatorChannelConnection(challenge, senderId, chatId, chat);
       console.info('[GPoint] my_chat_member finalization complete', { status: result.status });
       return result;
     } catch (error) {

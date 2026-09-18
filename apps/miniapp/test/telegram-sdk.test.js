@@ -32,6 +32,9 @@ test('creator onboarding uses the official startchannel deep link', async () => 
   assert.match(main, /state==='IDLE'/);
   assert.match(main, /WAITING_FOR_CHANNEL/);
   assert.match(main, /telegramChannelConnectionStatus/);
+  assert.match(main, /deadline>Date\.now\(\)\?1500:false/);
+  assert.match(main, /Channel connected/);
+  assert.match(main, /Continue to Creator tools/);
   assert.match(main, /Try again/);
   assert.doesNotMatch(main, /requestCreatorTelegramChannel/);
 });
