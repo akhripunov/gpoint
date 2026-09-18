@@ -19,29 +19,19 @@ test('API client disables conditional caching and bounds request time', async ()
   assert.match(source, /setTimeout\(\(\)=>controller\.abort\(\),timeoutMs\)/);
 });
 
-test('native creator onboarding uses requestChat and does not require manual first-step fields', async () => {
+test('creator onboarding uses the official startchannel deep link', async () => {
   const client = await readFile(join(root, 'src/api/client.ts'), 'utf8');
   const main = await readFile(join(root, 'src/main.tsx'), 'utf8');
-  assert.match(client, /requestChat/);
-  assert.match(client, /version/);
-  assert.match(client, /9\.6/);
-  assert.match(client, /selection\/prepare/);
-  assert.match(client, /requestCreatorTelegramChannel\(requestId:string\)/);
-  assert.doesNotMatch(main, /queryKey:\['creator-channel-selection'\]/);
-  assert.doesNotMatch(main, /queryKey:\['creator-channel-onboarding'\]/);
-  assert.match(main, /Prepare channel selector/);
-  assert.match(main, /onClick=\{prepare\}/);
-  assert.match(main, /onClick=\{select\}/);
+  assert.match(client, /openTelegramLink/);
+  assert.match(client, /startchannel&admin=post_messages/);
+  assert.match(client, /creator\/channel\/start/);
+  assert.doesNotMatch(main, /Prepare channel selector/);
+  assert.match(main, /Connect Telegram channel/);
+  assert.match(main, /openTelegramStartChannel/);
   assert.doesNotMatch(main, /NativeCreatorOnboardingBridge/);
   assert.match(main, /state==='IDLE'/);
-  assert.match(main, /state==='PREPARING'/);
-  assert.match(main, /state==='READY'/);
-  assert.doesNotMatch(main, /WAITING_FOR_BOT/);
-  assert.match(main, /setState\('READY'\)/);
-  assert.match(main, /prepareCreatorChannelSelection\(\)\.then/);
-  assert.match(main, /if\(state==='PREPARING'\)return/);
+  assert.match(main, /WAITING_FOR_CHANNEL/);
+  assert.match(main, /telegramChannelConnectionStatus/);
   assert.match(main, /Try again/);
-  assert.match(client, /prepareInFlight/);
-  assert.match(client, /prepareAttemptCount/);
-  assert.match(client, /Could not prepare channel selector/);
+  assert.doesNotMatch(main, /requestCreatorTelegramChannel/);
 });

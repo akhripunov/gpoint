@@ -63,5 +63,13 @@ if (!token) {
       body: JSON.stringify({ from: ctx.from, chat_shared: ctx.msg.chat_shared }),
     }).catch(() => undefined);
   });
+  bot.on('my_chat_member', async ctx => {
+    if (!webhookSecret) return;
+    await fetch(ingestUrl.replace(/\/internal\/telegram\/update$/, '/internal/telegram/my-chat-member'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-telegram-webhook-secret': webhookSecret },
+      body: JSON.stringify(ctx.update.my_chat_member),
+    }).catch(() => undefined);
+  });
   bot.start();
 }
