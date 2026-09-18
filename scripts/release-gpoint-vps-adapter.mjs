@@ -52,7 +52,7 @@ export function applyCandidate(sha) {
     upload(dockerfile, `/tmp/gpoint-dockerfile-${sha}`);
     upload(safetyConfig, `/tmp/gpoint-safety-config-${sha}.mjs`);
     upload(safetyDockerfile, `/tmp/gpoint-safety-dockerfile-${sha}`);
-    const diskGuard = run("set -e; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n \"$freeKb\"; test \"$freeKb\" -ge 5242880; echo GPOINT_DISK_GUARD_OK");
+    const diskGuard = run("set -e; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n \"$freeKb\"; if [ \"$freeKb\" -lt 8388608 ]; then echo GPOINT_DISK_GUARD_WARN; fi; test \"$freeKb\" -ge 5242880; echo GPOINT_DISK_GUARD_OK");
     if (!diskGuard.includes('GPOINT_DISK_GUARD_OK')) throw new Error('remote disk guard failed: minimum 5 GiB free space required');
     const build = [
       'set -e',
@@ -96,6 +96,8 @@ export function applyCandidate(sha) {
     const buildSha = identityLine.match(/BUILD_SHA=([0-9a-f]{40})/)?.[1];
     const runtimeFailures = validateRuntimeIdentity(sha, { imageId, buildSha, apiImage: identityOutput.match(/API_IMAGE=(sha256:[a-f0-9]+)/)?.[1], workerImage: identityOutput.match(/WORKER_IMAGE=(sha256:[a-f0-9]+)/)?.[1], botImage: identityOutput.match(/BOT_IMAGE=(sha256:[a-f0-9]+)/)?.[1] });
     if (!imageId || !indexSha256 || runtimeFailures.length) throw new Error(`remote runtime identity verification failed: ${runtimeFailures.join('; ') || 'missing identity fields'}: ${identityOutput}`);
+    const cleanup = run("set -e; docker ps -aq --filter name=gpoint-static- --filter status=created --filter status=exited | xargs -r docker rm >/dev/null; docker builder prune --filter until=168h -f >/dev/null; echo GPOINT_POST_RELEASE_CLEANUP_OK");
+    if (!cleanup.includes('GPOINT_POST_RELEASE_CLEANUP_OK')) throw new Error('post-release cleanup failed');
     const migrationOutput = [
       migration.includes('Database schema is up to date!') ? 'DATABASE_SCHEMA_UP_TO_DATE' : null,
       migration.includes('No pending migrations to apply.') ? 'NO_PENDING_MIGRATIONS' : null,
