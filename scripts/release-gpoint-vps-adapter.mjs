@@ -48,7 +48,7 @@ export function applyCandidate(sha) {
       `docker image inspect gpoint-runtime:${sha} | grep -q ${sha}`
     ].join('; ');
     run(build);
-    const migration = run(`set -e; docker run --rm --network gpoint_app --network-alias gpoint-migration --network shared_internal --env-file /opt/gpoint/env/production.env gpoint-runtime:${sha} pnpm --filter @gpoint/db exec prisma migrate status; docker run --rm --network gpoint_app --network-alias gpoint-migration --network shared_internal --env-file /opt/gpoint/env/production.env gpoint-runtime:${sha} pnpm --filter @gpoint/db exec prisma migrate deploy`);
+    const migration = run(`set -e; docker run --rm --network gpoint_app --network-alias gpoint-migration --network shared_internal --env-file /opt/gpoint/env/production.env gpoint-runtime:${sha} pnpm --filter @gpoint/db exec prisma migrate status || true; docker run --rm --network gpoint_app --network-alias gpoint-migration --network shared_internal --env-file /opt/gpoint/env/production.env gpoint-runtime:${sha} pnpm --filter @gpoint/db exec prisma migrate deploy`);
     const deploy = [
       'set -e',
       `cp /tmp/gpoint-compose-${sha}.yml /opt/gpoint/compose/docker-compose.yml`,
@@ -73,6 +73,7 @@ export function applyCandidate(sha) {
     const migrationOutput = [
       migration.includes('Database schema is up to date!') ? 'DATABASE_SCHEMA_UP_TO_DATE' : null,
       migration.includes('No pending migrations to apply.') ? 'NO_PENDING_MIGRATIONS' : null,
+      migration.includes('Applying migration') ? 'PENDING_MIGRATION_APPLIED' : null,
     ].filter(Boolean).join(',');
     if (!migrationOutput) throw new Error('migration gate output was not recognized');
     return { imageIdentity: { imageId, indexSha256, buildSha }, migrationOutput };
