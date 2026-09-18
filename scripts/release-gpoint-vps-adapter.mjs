@@ -6,6 +6,15 @@ import { execFileSync } from 'node:child_process';
 const ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const REPO = 'git@github.com:akhripunov/gpoint.git';
 
+export function validateRuntimeIdentity(candidate, runtime) {
+  const failures = [];
+  if (runtime?.buildSha !== candidate) failures.push('runtime build SHA mismatch');
+  for (const role of ['apiImage', 'workerImage', 'botImage']) {
+    if (runtime?.[role] !== runtime?.imageId) failures.push(`${role} does not use candidate image`);
+  }
+  return failures;
+}
+
 function run(command, env = {}) {
   const runner = process.env.GPOINT_REMOTE_RUNNER;
   if (!runner) throw new Error('GPOINT_REMOTE_RUNNER is required for apply mode; no implicit SSH credentials are used');
@@ -68,11 +77,12 @@ export function applyCandidate(sha) {
       'echo GPOINT_DEPLOY_OK'
     ].join('; ');
     const deployOutput = run(deploy); if (!deployOutput.includes('GPOINT_DEPLOY_OK')) throw new Error('remote runtime deploy failed');
-    const identityOutput = run(`set -e; imageId=$(cat ${imageProof}); apiImage=$(docker inspect compose-api-1 --format '{{.Image}}'); workerImage=$(docker inspect compose-worker-1 --format '{{.Image}}'); botImage=$(docker inspect compose-bot-1 --format '{{.Image}}'); indexSha256=$(sha256sum /opt/gpoint/app/miniapp/index.html | awk '{print $1}'); grep -F -q 'gpoint-build-sha" content="${sha}' /opt/gpoint/app/miniapp/index.html; test "$apiImage" = "$imageId"; test "$workerImage" = "$imageId"; test "$botImage" = "$imageId"; docker rm gpoint-static-${sha.slice(0, 8)} >/dev/null 2>&1 || true; printf 'IMAGE_ID=%s INDEX_SHA256=%s BUILD_SHA=%s\\n' "$imageId" "$indexSha256" '${sha}'`).trim();
+    const identityOutput = run(`set -e; imageId=$(cat ${imageProof}); apiImage=$(docker inspect compose-api-1 --format '{{.Image}}'); workerImage=$(docker inspect compose-worker-1 --format '{{.Image}}'); botImage=$(docker inspect compose-bot-1 --format '{{.Image}}'); indexSha256=$(sha256sum /opt/gpoint/app/miniapp/index.html | awk '{print $1}'); grep -F -q 'gpoint-build-sha" content="${sha}' /opt/gpoint/app/miniapp/index.html; test "$apiImage" = "$imageId"; test "$workerImage" = "$imageId"; test "$botImage" = "$imageId"; docker rm gpoint-static-${sha.slice(0, 8)} >/dev/null 2>&1 || true; printf 'IMAGE_ID=%s INDEX_SHA256=%s BUILD_SHA=%s API_IMAGE=%s WORKER_IMAGE=%s BOT_IMAGE=%s\\n' "$imageId" "$indexSha256" '${sha}' "$apiImage" "$workerImage" "$botImage"`).trim();
     const imageId = identityOutput.match(/IMAGE_ID=(sha256:[a-f0-9]+)/)?.[1];
     const indexSha256 = identityOutput.match(/INDEX_SHA256=([a-f0-9]{64})/)?.[1];
     const buildSha = identityOutput.match(/BUILD_SHA=([0-9a-f]{40})/)?.[1];
-    if (!imageId || !indexSha256 || buildSha !== sha) throw new Error(`remote runtime identity verification failed: ${identityOutput}`);
+    const runtimeFailures = validateRuntimeIdentity(sha, { imageId, buildSha, apiImage: identityOutput.match(/API_IMAGE=(sha256:[a-f0-9]+)/)?.[1], workerImage: identityOutput.match(/WORKER_IMAGE=(sha256:[a-f0-9]+)/)?.[1], botImage: identityOutput.match(/BOT_IMAGE=(sha256:[a-f0-9]+)/)?.[1] });
+    if (!imageId || !indexSha256 || runtimeFailures.length) throw new Error(`remote runtime identity verification failed: ${runtimeFailures.join('; ') || 'missing identity fields'}: ${identityOutput}`);
     const migrationOutput = [
       migration.includes('Database schema is up to date!') ? 'DATABASE_SCHEMA_UP_TO_DATE' : null,
       migration.includes('No pending migrations to apply.') ? 'NO_PENDING_MIGRATIONS' : null,

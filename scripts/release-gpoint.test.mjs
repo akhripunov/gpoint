@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { checkArtifactParity, checkEffectiveConfig, evaluateSafetyGates, validateCandidate } from './release-gpoint.mjs';
+import { validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
 
 const sha = '4d99e0da856d2ffe174c54d7ae7f2f971ab462f5';
 const artifacts = { api: { sourceSha: sha }, worker: { sourceSha: sha }, bot: { sourceSha: sha }, miniapp: { sourceSha: sha } };
@@ -31,3 +32,9 @@ test('migration failure blocks runtime switch', () => assert.ok(evaluateSafetyGa
 test('held release lock rejects a concurrent release', () => assert.ok(evaluateSafetyGates({ candidateSha: sha, remoteSha: sha, artifacts, config, concurrent: true, recordedProductionSha: sha, liveProductionSha: sha }).includes('concurrent release lock is held')));
 test('recorded/live production drift blocks', () => assert.ok(evaluateSafetyGates({ candidateSha: sha, remoteSha: sha, artifacts, config, recordedProductionSha: '0'.repeat(40), liveProductionSha: sha }).includes('live production SHA drift')));
 test('remote production ref mismatch blocks completion', () => assert.ok(evaluateSafetyGates({ candidateSha: sha, remoteSha: sha, artifacts, config, recordedProductionSha: sha, liveProductionSha: sha, productionRefTarget: '0'.repeat(40) }).includes('production ref target mismatch')));
+test('runtime identity blocks a previous image before release completion', () => {
+  const imageId = 'sha256:' + 'a'.repeat(64);
+  const previousImage = 'sha256:' + 'b'.repeat(64);
+  assert.deepEqual(validateRuntimeIdentity(sha, { imageId, buildSha: sha, apiImage: previousImage, workerImage: imageId, botImage: imageId }), ['apiImage does not use candidate image']);
+  assert.deepEqual(validateRuntimeIdentity(sha, { imageId, buildSha: sha, apiImage: imageId, workerImage: imageId, botImage: imageId }), []);
+});
