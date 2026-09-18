@@ -801,7 +801,7 @@ export function CreatorWorkspaceDashboard() {
           {posts.data?.items?.length ? posts.data.items.map((post: any) => (
             <article key={post.id}>
               <p>{post.caption || 'Imported Telegram post'}</p>
-              <span className="muted">{post.status}</span>
+              <span className="muted">{post.safetyClassification === 'UNCERTAIN' || post.ingestStatus === 'PENDING_MODERATION' ? 'Pending review' : post.status}</span>
             </article>
           )) : !posts.isLoading && <p>No imported posts yet.</p>}
         </div>

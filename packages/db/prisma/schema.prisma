@@ -248,6 +248,8 @@ model ModerationAction {
   targetId String
   action String
   reason String?
+  previousStatus String?
+  previousSafetyClassification String?
   createdAt DateTime @default(now())
 }
 model AttributionEvidence {
