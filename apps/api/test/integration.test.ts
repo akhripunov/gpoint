@@ -100,10 +100,10 @@ test('Telegram channel connection challenge is short-lived, single-use and cross
     assert.equal(preparedChallenge?.preparedButtonId, 'prepared-native-1');
     const startChannel = await call('/creator/channel/start', creatorToken, 'POST');
     assert.equal(startChannel.response.status, 201); assert.equal(startChannel.data.status, 'WAITING_FOR_CHANNEL'); created.push(startChannel.data.challengeId);
-    const wrongActorStart = await fetch(`${base}/internal/telegram/my-chat-member`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-telegram-webhook-secret': 'test-webhook-secret' }, body: JSON.stringify({ from: { id: 'wrong-user' }, chat: { id: 123, type: 'channel' }, new_chat_member: { status: 'administrator', can_post_messages: true } }) });
+    const wrongActorStart = await fetch(`${base}/internal/telegram/my-chat-member`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-telegram-webhook-secret': 'test-webhook-secret' }, body: JSON.stringify({ updateId: 9001, from: { id: 'wrong-user' }, chat: { id: 123, type: 'channel' }, new_chat_member: { status: 'administrator', can_post_messages: true } }) });
     assert.equal(wrongActorStart.status, 401);
     const actor = (await prisma.user.findUniqueOrThrow({ where: { id: (await prisma.creatorOwner.findFirstOrThrow({ where: { creatorId }, select: { userId: true } })).userId }, select: { telegramUserId: true } })).telegramUserId.toString();
-    const installed = await fetch(`${base}/internal/telegram/my-chat-member`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-telegram-webhook-secret': 'test-webhook-secret' }, body: JSON.stringify({ from: { id: actor }, chat: { id: 123, type: 'channel', title: 'Test Channel' }, new_chat_member: { status: 'administrator', can_post_messages: true } }) });
+    const installed = await fetch(`${base}/internal/telegram/my-chat-member`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-telegram-webhook-secret': 'test-webhook-secret' }, body: JSON.stringify({ updateId: 9002, from: { id: actor }, chat: { id: 123, type: 'channel', title: 'Test Channel' }, new_chat_member: { status: 'administrator', can_post_messages: true } }) });
     assert.equal(installed.status, 201); assert.equal((await installed.json() as { status?: string }).status, 'CONNECTED');
     const started = await call('/creator/channel/connect/start', creatorToken, 'POST');
     assert.equal(started.response.status, 201); assert.ok(started.data.requestId); created.push(started.data.challengeId);
@@ -119,6 +119,8 @@ test('Telegram channel connection challenge is short-lived, single-use and cross
     if (created.length) await prisma.telegramConnectionChallenge.deleteMany({ where: { id: { in: created } } });
     const owners = await prisma.creatorOwner.findMany({ where: { creatorId: { in: [creatorId, otherId] } }, select: { userId: true } });
     await prisma.telegramConnectionChallenge.deleteMany({ where: { userId: { in: owners.map(x => x.userId) } } });
+    await prisma.telegramChannelInstallEvidence.deleteMany({ where: { attempt: { gpointUserId: { in: owners.map(x => x.userId) } } } });
+    await prisma.creatorChannelInstallAttempt.deleteMany({ where: { gpointUserId: { in: owners.map(x => x.userId) } } });
     await prisma.telegramChannel.deleteMany({ where: { creatorId: { in: [creatorId, otherId] } } });
     globalThis.fetch = previousFetch; delete process.env.TELEGRAM_BOT_TOKEN; delete process.env.TELEGRAM_WEBHOOK_SECRET;
   }

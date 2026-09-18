@@ -75,7 +75,7 @@ if (!token) {
     const response = await fetch(ingestUrl.replace(/\/internal\/telegram\/update$/, '/internal/telegram/my-chat-member'), {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-telegram-webhook-secret': webhookSecret },
-      body: JSON.stringify(update),
+      body: JSON.stringify({ ...update, updateId: ctx.update.update_id }),
     }).catch(() => undefined);
     console.info('[GPoint] my_chat_member forwarded', { updateId: ctx.update.update_id, apiStatus: response?.status ?? 'NETWORK_ERROR' });
   });

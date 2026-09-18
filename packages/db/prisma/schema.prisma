@@ -25,6 +25,7 @@ model User {
   discoveryPreferences UserPreference[]
   personalizationResetAt DateTime?
   channelChallenges TelegramConnectionChallenge[]
+  channelInstallAttempts CreatorChannelInstallAttempt[]
 }
 model UserPreference {
   id String @id @default(cuid())
@@ -128,6 +129,36 @@ model TelegramConnectionChallenge {
   createdAt DateTime @default(now())
   user User @relation(fields: [userId], references: [id])
   @@index([userId, expiresAt])
+}
+model CreatorChannelInstallAttempt {
+  id String @id @default(cuid())
+  gpointUserId String
+  telegramUserId BigInt
+  state String @default("WAITING_FOR_TELEGRAM")
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  completedAt DateTime?
+  user User @relation(fields: [gpointUserId], references: [id])
+  evidence TelegramChannelInstallEvidence[]
+  @@index([telegramUserId, state, expiresAt])
+  @@index([gpointUserId, state, expiresAt])
+}
+model TelegramChannelInstallEvidence {
+  id String @id @default(cuid())
+  telegramUpdateId Int @unique
+  attemptId String?
+  telegramChatId String
+  chatType String
+  chatTitle String?
+  actorTelegramUserId BigInt
+  oldBotStatus String?
+  newBotStatus String
+  botRightsSnapshot Json?
+  eventDate DateTime?
+  receivedAt DateTime @default(now())
+  attempt CreatorChannelInstallAttempt? @relation(fields: [attemptId], references: [id])
+  @@index([actorTelegramUserId, receivedAt])
+  @@index([telegramChatId, receivedAt])
 }
 model AffiliateProgram {
   id String @id @default(cuid())
