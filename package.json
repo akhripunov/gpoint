@@ -9,6 +9,9 @@
     "test:integration": "pnpm --filter @gpoint/api test:integration && node --test tests/integration/*.test.js",
     "test:e2e": "playwright test",
     "typecheck": "pnpm -r typecheck",
+    "release:gpoint": "node scripts/release-gpoint.mjs",
+    "release:gpoint:status": "node scripts/release-gpoint.mjs status",
+    "test:release": "node --test scripts/release-gpoint.test.mjs",
     "db:migrate": "pnpm --filter @gpoint/db exec prisma migrate dev",
     "db:seed": "pnpm --filter @gpoint/db exec tsx prisma/seed.ts"
   },

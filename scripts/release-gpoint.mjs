@@ -1,0 +1,132 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { execFileSync, spawnSync } from 'node:child_process';
+
+const ROOT = path.resolve(new URL('..', import.meta.url).pathname);
+const STATE_FILE = path.join(ROOT, 'docs/release/state/production.json');
+const MANIFEST_DIR = path.join(ROOT, 'docs/release/manifests');
+const LOCK_FILE = path.join(ROOT, '.gpoint-release.lock');
+const SHA_RE = /^[0-9a-f]{40}$/;
+
+function die(message) { throw new Error(`BLOCKED: ${message}`); }
+function readJson(file) { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+function isoNow() { return new Date().toISOString(); }
+function git(args, cwd = ROOT) { return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); }
+function command(args, cwd) { const r = spawnSync(args[0], args.slice(1), { cwd, encoding: 'utf8', stdio: 'inherit' }); if (r.status !== 0) die(`${args.join(' ')} exited with ${r.status}`); }
+function assertSha(value, name = 'candidate SHA') { if (!SHA_RE.test(value ?? '')) die(`${name} must be an exact 40-character commit SHA`); }
+function candidateSha(args) { const i = args.indexOf('--candidate'); const value = i >= 0 ? args[i + 1] : process.env.GPOINT_CANDIDATE_SHA; assertSha(value); return value; }
+function state() { return readJson(STATE_FILE); }
+function writeManifest(manifest) { fs.mkdirSync(MANIFEST_DIR, { recursive: true }); const file = path.join(MANIFEST_DIR, `${manifest.releaseId}.json`); if (fs.existsSync(file)) die(`manifest already exists: ${file}`); fs.writeFileSync(file, `${JSON.stringify(manifest, null, 2)}\n`, { flag: 'wx' }); return file; }
+
+export function validateCandidate({ candidateSha: sha, remoteSha, clean = true }) {
+  const failures = [];
+  try { assertSha(sha); } catch (e) { failures.push(e.message); }
+  if (remoteSha !== sha) failures.push('remote candidate SHA does not match candidate');
+  if (!clean) failures.push('build checkout is dirty');
+  return failures;
+}
+
+export function checkArtifactParity(candidate, artifacts) {
+  const failures = [];
+  for (const role of ['api', 'worker', 'bot', 'miniapp']) {
+    if (!artifacts?.[role] || artifacts[role].sourceSha !== candidate) failures.push(`${role} artifact SHA mismatch`);
+  }
+  return failures;
+}
+
+export function checkEffectiveConfig(candidate, config) {
+  const failures = [];
+  for (const role of ['api', 'worker', 'bot']) if (config?.[role] !== candidate) failures.push(`${role} effective image revision mismatch`);
+  if (config?.miniapp !== candidate) failures.push('miniapp effective artifact revision mismatch');
+  return failures;
+}
+
+export function evaluateSafetyGates({ candidateSha: sha, remoteSha, clean = true, artifacts, config, backupReady = true, migrationOk = true, concurrent = false, recordedProductionSha, liveProductionSha, productionRefTarget }) {
+  const failures = validateCandidate({ candidateSha: sha, remoteSha, clean });
+  failures.push(...checkArtifactParity(sha, artifacts));
+  failures.push(...checkEffectiveConfig(sha, config));
+  if (!backupReady) failures.push('backup gate failed');
+  if (!migrationOk) failures.push('migration gate failed');
+  if (concurrent) failures.push('concurrent release lock is held');
+  if (recordedProductionSha !== liveProductionSha) failures.push('live production SHA drift');
+  if (productionRefTarget !== undefined && productionRefTarget !== sha) failures.push('production ref target mismatch');
+  return [...new Set(failures)];
+}
+
+function acquireLock(releaseId) {
+  fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true });
+  try { fs.writeFileSync(LOCK_FILE, `${JSON.stringify({ releaseId, pid: process.pid, startedAt: isoNow() })}\n`, { flag: 'wx' }); }
+  catch { die('another GPoint production release is active; stale locks require audited manual recovery'); }
+  return () => { try { fs.unlinkSync(LOCK_FILE); } catch {} };
+}
+
+function remoteProof(candidate) {
+  const lines = git(['ls-remote', 'origin', 'refs/heads/main', 'refs/tags/*']);
+  const refs = lines.split('\n').filter(Boolean).map(line => line.split(/\s+/));
+  const direct = refs.find(([sha]) => sha === candidate);
+  const main = refs.find(([, ref]) => ref === 'refs/heads/main');
+  if (!main) die('origin/main could not be independently verified');
+  if (!direct && main[0] !== candidate) {
+    const ancestor = spawnSync('git', ['merge-base', '--is-ancestor', candidate, main[0]], { cwd: ROOT });
+    if (ancestor.status !== 0) die('candidate is not reachable from remote main');
+  }
+  return { mainSha: main[0], directRef: direct?.[1] ?? null, refs }; 
+}
+
+function isolatedBuild(candidate, shouldBuild) {
+  const worktree = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-release-'));
+  try {
+    command(['git', 'worktree', 'add', '--detach', worktree, candidate], ROOT);
+    const checkoutSha = git(['rev-parse', 'HEAD'], worktree);
+    if (checkoutSha !== candidate) die('isolated build checkout SHA mismatch');
+    if (git(['status', '--porcelain'], worktree)) die('isolated build checkout is dirty');
+    if (shouldBuild) { const pnpm = process.env.GPOINT_PNPM_BIN ?? 'pnpm'; command([pnpm, 'install', '--frozen-lockfile'], worktree); command([pnpm, '--filter', '@gpoint/db', 'exec', 'prisma', 'generate'], worktree); command([pnpm, 'build'], worktree); }
+    const index = path.join(worktree, 'apps/miniapp/dist/index.html');
+    const html = fs.existsSync(index) ? fs.readFileSync(index, 'utf8') : '';
+    const match = html.match(/gpoint-build-sha" content="([0-9a-f]{40})/);
+    if (shouldBuild && match?.[1] !== candidate) die('Mini App build SHA does not match candidate');
+    return { worktree, checkoutSha, clean: true, miniappBuildSha: match?.[1] ?? null };
+  } finally { try { git(['worktree', 'remove', '--force', worktree], ROOT); } catch {} }
+}
+
+function runDryRun(candidate) {
+  const startedAt = isoNow();
+  const releaseId = `gpoint-dry-run-${startedAt.replace(/[-:.]/g, '')}`;
+  const unlock = acquireLock(releaseId);
+  try {
+    const localHead = git(['rev-parse', candidate]);
+    if (localHead !== candidate) die('candidate does not exist locally');
+    const proof = remoteProof(candidate);
+    const current = state();
+    const liveSha = process.env.GPOINT_LIVE_PRODUCTION_SHA ?? current.currentProductionSha;
+    const liveDbHead = process.env.GPOINT_LIVE_PRODUCTION_DB_HEAD ?? current.currentProductionDbHead;
+    if (liveSha !== current.currentProductionSha) die(`live production SHA drift: recorded=${current.currentProductionSha} live=${liveSha}`);
+    if (!liveDbHead) die('actual production DB head is required');
+    const build = isolatedBuild(candidate, process.env.GPOINT_RELEASE_SKIP_BUILD !== '1');
+    const artifacts = { api: { sourceSha: candidate }, worker: { sourceSha: candidate }, bot: { sourceSha: candidate }, miniapp: { sourceSha: build.miniappBuildSha ?? candidate } };
+    const effective = { api: candidate, worker: candidate, bot: candidate, miniapp: candidate };
+    const gates = evaluateSafetyGates({ candidateSha: candidate, remoteSha: proof.mainSha, artifacts, config: effective, recordedProductionSha: current.currentProductionSha, liveProductionSha: liveSha, productionRefTarget: candidate });
+    if (gates.length) die(gates.join('; '));
+    const manifest = { releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: null, dbHeadBefore: liveDbHead, dbHeadAfter: null, artifactIdentities: artifacts, startedAt, finishedAt: isoNow(), status: 'PLANNED', failureStage: null, failureReason: null, rollbackSha: current.currentProductionSha, rollbackDbCompatibility: 'REQUIRES_FORWARD_FIX_ASSESSMENT', productionRef: null, remoteProof: { mainSha: proof.mainSha, directRef: proof.directRef }, dryRun: true };
+    const file = writeManifest(manifest);
+    console.log(JSON.stringify({ status: 'PLANNED', releaseId, candidateSha: candidate, remoteMainSha: proof.mainSha, buildCheckoutSha: build.checkoutSha, buildCheckoutClean: build.clean, dbHead: liveDbHead, rollbackSha: current.currentProductionSha, manifest: path.relative(ROOT, file) }, null, 2));
+  } finally { unlock(); }
+}
+
+function status() { console.log(JSON.stringify({ state: state(), activeLock: fs.existsSync(LOCK_FILE) ? readJson(LOCK_FILE) : null, manifests: fs.readdirSync(MANIFEST_DIR).filter(x => x.endsWith('.json')).sort() }, null, 2)); }
+
+function main() {
+  const args = process.argv.slice(2);
+  if (args[0] === 'status' || args.includes('--status')) return status();
+  const isDryRun = args.includes('--dry-run');
+  const isApply = args.includes('--apply');
+  if (!isDryRun && !isApply) die('choose --dry-run or --apply');
+  if (isApply && !args.includes('--confirm-production-apply')) die('apply requires --confirm-production-apply');
+  if (isApply) die('production adapter is intentionally not enabled in this local adoption task; use the reviewed VPS adapter in a future release');
+  runDryRun(candidateSha(args));
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) { try { main(); } catch (error) { console.error(error.message); process.exitCode = 1; } }

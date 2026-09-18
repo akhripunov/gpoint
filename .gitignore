@@ -12,3 +12,4 @@ test-results/
 *.sql.tmp
 infra/minio-data/
 *.log
+.gpoint-release.lock
