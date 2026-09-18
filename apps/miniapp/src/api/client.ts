@@ -23,7 +23,7 @@ export const likePost=(id:string)=>request<any>(`/feed/${id}/like`,{method:'POST
 export const unlikePost=(id:string)=>request<any>(`/feed/${id}/like`,{method:'DELETE'});
 export const telegramChannel=()=>request<any>('/creator/me/telegram-channel');
 export const prepareCreatorChannelSelection=()=>request<{requestId:string;challengeId:string;expiresAt:string;supported:boolean}>('/creator/channel/selection/prepare',{method:'POST'});
-export async function requestCreatorTelegramChannel(){const prepared=await prepareCreatorChannelSelection();const webApp=telegramWebApp();if(typeof webApp?.requestChat!=='function')throw new ApiError(426,'Update Telegram to select a channel natively.');return new Promise<boolean>(resolve=>webApp.requestChat!(prepared.requestId,resolve));}
+export function requestCreatorTelegramChannel(requestId:string){const webApp=telegramWebApp();if(typeof webApp?.requestChat!=='function')throw new ApiError(426,'Update Telegram to select a channel natively.');return new Promise<boolean>(resolve=>webApp.requestChat!(requestId,resolve));}
 export const startTelegramChannelConnection=()=>request<any>('/creator/channel/connect/start',{method:'POST'});
 export const connectTelegramChannel=(body:any)=>request<any>('/creator/me/telegram-channel',{method:'POST',body:JSON.stringify(body)});
 export const updateTelegramChannel=(body:any)=>request<any>('/creator/me/telegram-channel',{method:'PATCH',body:JSON.stringify(body)});

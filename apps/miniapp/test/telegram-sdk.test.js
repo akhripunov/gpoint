@@ -24,6 +24,9 @@ test('native creator onboarding uses requestChat and does not require manual fir
   const main = await readFile(join(root, 'src/main.tsx'), 'utf8');
   assert.match(client, /requestChat/);
   assert.match(client, /selection\/prepare/);
-  assert.match(main, /NativeCreatorOnboardingBridge/);
-  assert.match(main, /Select your channel/);
+  assert.match(client, /requestCreatorTelegramChannel\(requestId:string\)/);
+  assert.match(main, /queryKey:\['creator-channel-selection'\]/);
+  assert.match(main, /onClick=\{openSelector\}/);
+  assert.doesNotMatch(main, /NativeCreatorOnboardingBridge/);
+  assert.match(main, /Preparing Telegram selector/);
 });
