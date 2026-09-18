@@ -6,11 +6,15 @@ import { resolveSession } from './session.js';
 const prisma = new PrismaClient();
 const modes = new Set(['AUTO', 'HASHTAG', 'MANUAL']);
 const challengeLifetimeMs = 10 * 60_000;
+const botChannelAdministratorRights = { is_anonymous: false, can_manage_chat: false, can_delete_messages: false, can_manage_video_chats: false, can_restrict_members: false, can_promote_members: false, can_change_info: false, can_invite_users: false, can_post_stories: false, can_edit_stories: false, can_delete_stories: false, can_send_welcome_messages: false, can_post_messages: true } as const;
+const userChannelAdministratorRights = { ...botChannelAdministratorRights, can_manage_chat: true, can_promote_members: true } as const;
+export function preparedChannelButton(requestId: number) { if (!Number.isInteger(requestId) || requestId < -2_147_483_648 || requestId > 2_147_483_647) throw new Error('request_id must be a signed 32-bit integer'); return { text: 'Select Telegram channel', request_chat: { request_id: requestId, chat_is_channel: true, request_title: true, request_username: true, request_photo: true, user_administrator_rights: userChannelAdministratorRights, bot_administrator_rights: botChannelAdministratorRights } }; }
+export function preparedButtonId(result: { id?: unknown }) { if (typeof result.id !== 'string' || result.id.length === 0) throw new Error('Telegram returned an invalid PreparedKeyboardButton'); return result.id; }
 function userId(h: Record<string, string | undefined>) { const id = resolveSession(h.authorization?.replace(/^Bearer\s+/i, '')); if (!id) throw new UnauthorizedException(); return id; }
 async function authenticated(h: Record<string, string | undefined>) { const id = userId(h); const user = await prisma.user.findUnique({ where: { id }, select: { id: true, telegramUserId: true } }); if (!user) throw new UnauthorizedException(); return { userId: id, user }; }
 async function owned(h: Record<string, string | undefined>) { const { userId: id } = await authenticated(h); const owner = await prisma.creatorOwner.findFirst({ where: { userId: id }, select: { creatorId: true } }); if (!owner) throw new UnauthorizedException(); return { creatorId: owner.creatorId, userId: id }; }
 function botToken() { const value = process.env.TELEGRAM_BOT_TOKEN; if (!value) throw new BadRequestException('Telegram bot is not configured'); return value; }
-async function telegramApi<T>(method: string, body: Record<string, unknown>): Promise<T> { const response = await fetch(`https://api.telegram.org/bot${botToken()}/${method}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); const data = await response.json() as { ok?: boolean; result?: T; description?: string }; if (!response.ok || !data.ok || data.result === undefined) throw new BadRequestException(data.description ?? `Telegram ${method} failed`); return data.result; }
+async function telegramApi<T>(method: string, body: Record<string, unknown>): Promise<T> { const response = await fetch(`https://api.telegram.org/bot${botToken()}/${method}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); const data = await response.json() as { ok?: boolean; result?: T; error_code?: number; description?: string }; if (!response.ok || !data.ok || data.result === undefined) { console.error('[Telegram] Bot API failure', { method, httpStatus: response.status, errorCode: data.error_code ?? null, description: data.description ?? null }); throw new BadRequestException(data.description ?? `Telegram ${method} failed`); } return data.result; }
 function channelSlug(value: string) { const normalized = value.toLowerCase().trim().replace(/^@/, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40); return normalized || 'creator'; }
 async function uniqueSlug(value: string) { const base = channelSlug(value); let candidate = base; for (let index = 2; await prisma.creator.findUnique({ where: { slug: candidate }, select: { id: true } }); index += 1) { const suffix = `-${index}`; candidate = `${base.slice(0, 40 - suffix.length)}${suffix}`; } return candidate; }
 function publicChannel(c: any) { if (!c) return null; return { id: c.id, title: c.title, username: c.username, status: c.status, importMode: c.importMode, importHashtag: c.importHashtag, connectedAt: c.connectedAt, disconnectedAt: c.disconnectedAt, lastPostReceivedAt: c.lastPostReceivedAt, lastSuccessfulIngestAt: c.lastSuccessfulIngestAt, lastError: c.lastError }; }
@@ -20,10 +24,10 @@ export class TelegramConnectionController {
   @Post('selection/prepare')
   async prepare(@Headers() h: Record<string, string | undefined>) {
     const { userId: id, user } = await authenticated(h); if (user.telegramUserId <= 0n) throw new BadRequestException('A real Telegram account is required for channel selection');
-    const requestId = randomInt(1, 2_147_483_647); const button = { text: 'Select Telegram channel', request_chat: { request_id: requestId, chat_is_channel: true, request_title: true, request_username: true, request_photo: true, user_administrator_rights: { can_manage_chat: true }, bot_administrator_rights: { can_post_messages: true } } };
-    const prepared = await telegramApi<{ id: string }>('savePreparedKeyboardButton', { user_id: user.telegramUserId.toString(), button });
-    const challenge = await prisma.telegramConnectionChallenge.create({ data: { requestId, preparedButtonId: prepared.id, userId: id, expiresAt: new Date(Date.now() + challengeLifetimeMs) } });
-    return { challengeId: challenge.id, requestId: prepared.id, expiresAt: challenge.expiresAt, supported: true };
+    const requestId = randomInt(1, 2_147_483_647); const button = preparedChannelButton(requestId);
+    const prepared = preparedButtonId(await telegramApi<{ id?: unknown }>('savePreparedKeyboardButton', { user_id: user.telegramUserId.toString(), button }));
+    const challenge = await prisma.telegramConnectionChallenge.create({ data: { requestId, preparedButtonId: prepared, userId: id, expiresAt: new Date(Date.now() + challengeLifetimeMs) } });
+    return { challengeId: challenge.id, requestId: prepared, expiresAt: challenge.expiresAt, supported: true };
   }
 
   @Post('connect/start')
