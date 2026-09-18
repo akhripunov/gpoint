@@ -78,7 +78,7 @@ export function applyCandidate(sha) {
       `docker cp gpoint-static-${sha.slice(0, 8)}:/app/apps/miniapp/dist/. /opt/gpoint/app/miniapp/`,
       'chmod -R a+rX /opt/gpoint/app/miniapp',
       "grep -q '^GPOINT_SAFETY_PROVIDER=' /opt/gpoint/env/production.env && sed -i 's#^GPOINT_SAFETY_PROVIDER=.*#GPOINT_SAFETY_PROVIDER=misskey-sensitive-detector#' /opt/gpoint/env/production.env || printf '%s\\n' 'GPOINT_SAFETY_PROVIDER=misskey-sensitive-detector' >> /opt/gpoint/env/production.env",
-      "grep -q '^GPOINT_SAFETY_URL=' /opt/gpoint/env/production.env && sed -i 's#^GPOINT_SAFETY_URL=.*#GPOINT_SAFETY_URL=http://gpoint-sensitive-detector:3009/v1/detect-images#' /opt/gpoint/env/production.env || printf '%s\\n' 'GPOINT_SAFETY_URL=http://gpoint-sensitive-detector:3009/v1/detect-images' >> /opt/gpoint/env/production.env",
+      "grep -q '^GPOINT_SAFETY_URL=' /opt/gpoint/env/production.env && sed -i 's#^GPOINT_SAFETY_URL=.*#GPOINT_SAFETY_URL=http://gpoint-sensitive-detector:3009#' /opt/gpoint/env/production.env || printf '%s\\n' 'GPOINT_SAFETY_URL=http://gpoint-sensitive-detector:3009' >> /opt/gpoint/env/production.env",
       "grep -q '^GPOINT_SAFETY_TIMEOUT_MS=' /opt/gpoint/env/production.env && sed -i 's#^GPOINT_SAFETY_TIMEOUT_MS=.*#GPOINT_SAFETY_TIMEOUT_MS=60000#' /opt/gpoint/env/production.env || printf '%s\\n' 'GPOINT_SAFETY_TIMEOUT_MS=60000' >> /opt/gpoint/env/production.env",
       "if ! grep -q '^GPOINT_SAFETY_API_KEY=.' /opt/gpoint/env/production.env; then printf 'GPOINT_SAFETY_API_KEY=%s\\n' \"$(openssl rand -hex 32)\" >> /opt/gpoint/env/production.env; fi",
       'docker compose --env-file /opt/gpoint/env/production.env -f /opt/gpoint/compose/docker-compose.yml build gpoint-sensitive-detector',
