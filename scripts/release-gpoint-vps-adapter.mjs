@@ -84,6 +84,7 @@ export function applyCandidate(sha) {
       "grep -q '^GPOINT_SAFETY_TIMEOUT_MS=' /opt/gpoint/env/production.env && sed -i 's#^GPOINT_SAFETY_TIMEOUT_MS=.*#GPOINT_SAFETY_TIMEOUT_MS=60000#' /opt/gpoint/env/production.env || printf '%s\\n' 'GPOINT_SAFETY_TIMEOUT_MS=60000' >> /opt/gpoint/env/production.env",
       "if ! grep -q '^GPOINT_SAFETY_API_KEY=.' /opt/gpoint/env/production.env; then printf 'GPOINT_SAFETY_API_KEY=%s\\n' \"$(openssl rand -hex 32)\" >> /opt/gpoint/env/production.env; fi",
       'docker compose --env-file /opt/gpoint/env/production.env -f /opt/gpoint/compose/docker-compose.yml build gpoint-sensitive-detector',
+      `docker inspect compose-api-1 --format '{{.Config.Image}}' > /tmp/gpoint-previous-runtime-${sha} 2>/dev/null || true`,
       'docker compose --env-file /opt/gpoint/env/production.env -f /opt/gpoint/compose/docker-compose.yml up -d --force-recreate api worker bot gpoint-sensitive-detector',
       'curl -fsS http://127.0.0.1:3000/health/live >/dev/null',
       'echo GPOINT_DEPLOY_OK'
@@ -96,7 +97,7 @@ export function applyCandidate(sha) {
     const buildSha = identityLine.match(/BUILD_SHA=([0-9a-f]{40})/)?.[1];
     const runtimeFailures = validateRuntimeIdentity(sha, { imageId, buildSha, apiImage: identityOutput.match(/API_IMAGE=(sha256:[a-f0-9]+)/)?.[1], workerImage: identityOutput.match(/WORKER_IMAGE=(sha256:[a-f0-9]+)/)?.[1], botImage: identityOutput.match(/BOT_IMAGE=(sha256:[a-f0-9]+)/)?.[1] });
     if (!imageId || !indexSha256 || runtimeFailures.length) throw new Error(`remote runtime identity verification failed: ${runtimeFailures.join('; ') || 'missing identity fields'}: ${identityOutput}`);
-    const cleanup = run("set -e; docker ps -aq --filter name=gpoint-static- --filter status=created --filter status=exited | xargs -r docker rm >/dev/null; docker builder prune --filter until=168h -f >/dev/null; echo GPOINT_POST_RELEASE_CLEANUP_OK");
+    const cleanup = run(`set -e; docker ps -aq --filter name=gpoint-static- --filter status=created --filter status=exited | xargs -r docker rm >/dev/null; previousRuntime=$(cat /tmp/gpoint-previous-runtime-${sha} 2>/dev/null || true); if [ -n "$previousRuntime" ] && [ "$previousRuntime" != "gpoint-runtime:${sha}" ]; then docker image rm "$previousRuntime" >/dev/null 2>&1 || true; fi; rm -f /tmp/gpoint-previous-runtime-${sha}; docker builder prune --filter until=168h -f >/dev/null; dangling=$(docker image ls --filter dangling=true -q | sort -u); if [ -n "$dangling" ]; then docker image rm $dangling >/dev/null; fi; test -z "$(docker image ls --filter dangling=true -q)"; echo GPOINT_POST_RELEASE_CLEANUP_OK`);
     if (!cleanup.includes('GPOINT_POST_RELEASE_CLEANUP_OK')) throw new Error('post-release cleanup failed');
     const migrationOutput = [
       migration.includes('Database schema is up to date!') ? 'DATABASE_SCHEMA_UP_TO_DATE' : null,
