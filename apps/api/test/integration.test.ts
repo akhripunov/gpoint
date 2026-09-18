@@ -74,11 +74,12 @@ test('unsupported and oversized media are rejected by the real API', async () =>
 test('Telegram channel connection challenge is short-lived, single-use and cross-user safe', async () => {
   const previousFetch = globalThis.fetch;
   process.env.TELEGRAM_BOT_TOKEN = 'test-token'; process.env.TELEGRAM_WEBHOOK_SECRET = 'test-webhook-secret';
+  let preparedRequestBody: any;
   globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (!url.startsWith('https://api.telegram.org/')) return previousFetch(input, init);
     const method = url.split('/').pop();
-    if (method === 'savePreparedKeyboardButton') return new Response(JSON.stringify({ ok: true, result: { id: 'prepared-native-1' } }), { status: 200 });
+    if (method === 'savePreparedKeyboardButton') { preparedRequestBody = JSON.parse(String(init?.body)); return new Response(JSON.stringify({ ok: true, result: { id: 'prepared-native-1' } }), { status: 200 }); }
     if (method === 'sendMessage') return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
     if (method === 'getMe') return new Response(JSON.stringify({ ok: true, result: { id: 999 } }), { status: 200 });
     if (method === 'getChat') return new Response(JSON.stringify({ ok: true, result: { id: 123, type: 'channel', title: 'Test Channel' } }), { status: 200 });
@@ -89,6 +90,12 @@ test('Telegram channel connection challenge is short-lived, single-use and cross
   try {
     const prepared = await call('/creator/channel/selection/prepare', creatorToken, 'POST');
     assert.equal(prepared.response.status, 201); assert.equal(prepared.data.requestId, 'prepared-native-1');
+    const requestChat = preparedRequestBody.button.request_chat;
+    assert.equal(requestChat.chat_is_channel, true);
+    assert.equal(requestChat.user_administrator_rights.can_manage_chat, true);
+    assert.equal(requestChat.user_administrator_rights.can_promote_members, false);
+    assert.equal(requestChat.bot_administrator_rights, undefined);
+    assert.equal(requestChat.bot_is_member, undefined);
     created.push(prepared.data.challengeId); const preparedChallenge = await prisma.telegramConnectionChallenge.findUnique({ where: { id: prepared.data.challengeId } });
     assert.equal(preparedChallenge?.preparedButtonId, 'prepared-native-1');
     const started = await call('/creator/channel/connect/start', creatorToken, 'POST');

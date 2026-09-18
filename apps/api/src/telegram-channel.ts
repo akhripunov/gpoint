@@ -84,7 +84,8 @@ export class TelegramConnectionController {
     const { userId: id } = await owned(h); const user = await prisma.user.findUnique({ where: { id }, select: { telegramUserId: true } });
     if (!user || user.telegramUserId <= 0n) throw new BadRequestException('A real Telegram account is required for channel selection');
     const requestId = randomInt(1, 2_147_483_647); const challenge = await prisma.telegramConnectionChallenge.create({ data: { requestId, userId: id, expiresAt: new Date(Date.now() + challengeLifetimeMs) } });
-    const keyboard = { keyboard: [[{ text: 'Select Telegram channel', request_chat: { request_id: requestId, chat_is_channel: true, user_administrator_rights: { can_manage_chat: true }, request_title: true, request_username: true } }]], resize_keyboard: true, one_time_keyboard: true };
+    const selector = preparedChannelButton(requestId);
+    const keyboard = { keyboard: [[selector]], resize_keyboard: true, one_time_keyboard: true };
     await telegramApi('sendMessage', { chat_id: user.telegramUserId.toString(), text: 'Select the channel you administer and where GPoint is already an administrator. The request expires in 10 minutes.', reply_markup: keyboard });
     return { challengeId: challenge.id, requestId, expiresAt: challenge.expiresAt, botUsername: process.env.TELEGRAM_BOT_USERNAME ?? null, instructions: 'Open the GPoint bot chat and tap Select Telegram channel.' };
   }
