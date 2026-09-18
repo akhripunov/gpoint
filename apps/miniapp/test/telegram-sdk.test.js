@@ -29,12 +29,42 @@ test('creator onboarding uses the official startchannel deep link', async () => 
   assert.match(main, /Connect Telegram channel/);
   assert.match(main, /openTelegramStartChannel/);
   assert.doesNotMatch(main, /NativeCreatorOnboardingBridge/);
-  assert.match(main, /state==='IDLE'/);
+  assert.match(main, /state === "IDLE"/);
   assert.match(main, /WAITING_FOR_CHANNEL/);
   assert.match(main, /telegramChannelConnectionStatus/);
-  assert.match(main, /deadline>Date\.now\(\)\?1500:false/);
+  assert.match(main, /deadline > Date\.now\(\) \? 1500 : false/);
   assert.match(main, /Channel connected/);
   assert.match(main, /Continue to Creator tools/);
   assert.match(main, /Try again/);
   assert.doesNotMatch(main, /requestCreatorTelegramChannel/);
+});
+
+test('connected creators get a dedicated workspace without moderation or recommendation controls', async () => {
+  const main = await readFile(join(root, 'src', 'main.tsx'), 'utf8');
+  const platform = await readFile(join(root, 'src', 'platform-ui.tsx'), 'utf8');
+
+  assert.match(main, /GPoint is connected and ready to import new posts automatically\./);
+  assert.match(main, /Continue to Creator tools/);
+  assert.match(main, /<CreatorWorkspaceDashboard \/>/);
+  assert.doesNotMatch(main, /<PlatformDashboard \/>/);
+
+  const dashboardStart = platform.indexOf('export function CreatorWorkspaceDashboard');
+  assert.notEqual(dashboardStart, -1);
+  const dashboard = platform.slice(dashboardStart);
+  assert.match(dashboard, /Creator workspace active/);
+  assert.match(dashboard, /Profile settings/);
+  assert.match(dashboard, /Imported Posts/);
+  assert.match(dashboard, /Stats/);
+  assert.doesNotMatch(dashboard, /Submit for Moderation/);
+  assert.doesNotMatch(dashboard, /Under review/);
+  assert.doesNotMatch(dashboard, /Recommendation controls/);
+});
+
+test('connected Telegram channel card exposes operational settings', async () => {
+  const platform = await readFile(join(root, 'src', 'platform-ui.tsx'), 'utf8');
+  assert.match(platform, /MY TELEGRAM CHANNEL/);
+  assert.match(platform, /Models Hub/);
+  assert.match(platform, /Connected ✓/);
+  assert.match(platform, /Last sync:/);
+  assert.match(platform, /Save import settings/);
 });
