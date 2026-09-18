@@ -72,7 +72,7 @@ export function applyCandidate(sha) {
     const imageId = identityOutput.match(/IMAGE_ID=(sha256:[a-f0-9]+)/)?.[1];
     const indexSha256 = identityOutput.match(/INDEX_SHA256=([a-f0-9]{64})/)?.[1];
     const buildSha = identityOutput.match(/BUILD_SHA=([0-9a-f]{40})/)?.[1];
-    if (!imageId || !indexSha256 || buildSha !== sha) throw new Error('remote runtime identity verification failed');
+    if (!imageId || !indexSha256 || buildSha !== sha) throw new Error(`remote runtime identity verification failed: ${identityOutput}`);
     const migrationOutput = [
       migration.includes('Database schema is up to date!') ? 'DATABASE_SCHEMA_UP_TO_DATE' : null,
       migration.includes('No pending migrations to apply.') ? 'NO_PENDING_MIGRATIONS' : null,
