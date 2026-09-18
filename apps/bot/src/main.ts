@@ -65,11 +65,19 @@ if (!token) {
   });
   bot.on('my_chat_member', async ctx => {
     if (!webhookSecret) return;
-    await fetch(ingestUrl.replace(/\/internal\/telegram\/update$/, '/internal/telegram/my-chat-member'), {
+    const update = ctx.update.my_chat_member;
+    console.info('[GPoint] my_chat_member received', {
+      updateId: ctx.update.update_id,
+      chatType: update?.chat?.type ?? null,
+      newStatus: update?.new_chat_member?.status ?? null,
+      actorPresent: Boolean(update?.from?.id),
+    });
+    const response = await fetch(ingestUrl.replace(/\/internal\/telegram\/update$/, '/internal/telegram/my-chat-member'), {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-telegram-webhook-secret': webhookSecret },
-      body: JSON.stringify(ctx.update.my_chat_member),
+      body: JSON.stringify(update),
     }).catch(() => undefined);
+    console.info('[GPoint] my_chat_member forwarded', { updateId: ctx.update.update_id, apiStatus: response?.status ?? 'NETWORK_ERROR' });
   });
-  bot.start();
+  bot.start({ allowed_updates: ['message', 'channel_post', 'edited_channel_post', 'my_chat_member'] });
 }

@@ -142,12 +142,21 @@ export class TelegramChannelVerificationController {
   async myChatMember(@Headers() headers: Record<string, string | undefined>, @Body() body: { from?: { id?: number | string }; chat?: { id?: number | string; type?: string; title?: string; username?: string }; old_chat_member?: { status?: string }; new_chat_member?: { status?: string; can_post_messages?: boolean } }) {
     const expected = process.env.TELEGRAM_WEBHOOK_SECRET; if (!expected || headers['x-telegram-webhook-secret'] !== expected) throw new UnauthorizedException();
     const senderId = body.from?.id?.toString(); const chat = body.chat; const next = body.new_chat_member;
+    console.info('[GPoint] my_chat_member handler started', { chatType: chat?.type ?? null, newStatus: next?.status ?? null, actorPresent: Boolean(senderId), chatPresent: Boolean(chat?.id) });
     if (!senderId || !chat?.id || chat.type !== 'channel' || next?.status !== 'administrator') throw new BadRequestException('administrator channel update required');
     if (!/^\d+$/.test(senderId)) throw new UnauthorizedException('invalid Telegram actor');
     const chatId = chat.id.toString();
     const challenge = await prisma.telegramConnectionChallenge.findFirst({ where: { preparedButtonId: null, usedAt: null, expiresAt: { gt: new Date() }, user: { telegramUserId: BigInt(senderId) }, OR: [{ telegramChatId: null }, { telegramChatId: chatId }] }, orderBy: { createdAt: 'desc' } });
     if (!challenge) throw new UnauthorizedException('no active channel connection');
-    return completeStartChannelConnection(challenge, senderId, chatId, chat);
+    console.info('[GPoint] my_chat_member pending connection found', { state: challenge.telegramChatId ? 'BOUND' : 'WAITING_FOR_CHANNEL' });
+    try {
+      const result = await completeStartChannelConnection(challenge, senderId, chatId, chat);
+      console.info('[GPoint] my_chat_member finalization complete', { status: result.status });
+      return result;
+    } catch (error) {
+      console.error('[GPoint] my_chat_member finalization failed', { reason: error instanceof Error ? error.message : 'UNKNOWN' });
+      throw error;
+    }
   }
 
   @Post('chat-shared')
