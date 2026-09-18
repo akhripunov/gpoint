@@ -6,7 +6,7 @@ import { resolveSession } from './session.js';
 const prisma = new PrismaClient();
 const modes = new Set(['AUTO', 'HASHTAG', 'MANUAL']);
 const challengeLifetimeMs = 10 * 60_000;
-const telegramApiTimeoutMs = 12_000;
+export const telegramApiTimeoutMs = 8_000;
 const userChannelAdministratorRights = { is_anonymous: false, can_manage_chat: true, can_delete_messages: false, can_manage_video_chats: false, can_restrict_members: false, can_promote_members: false, can_change_info: false, can_invite_users: false, can_post_stories: false, can_edit_stories: false, can_delete_stories: false, can_send_welcome_messages: false, can_post_messages: false } as const;
 export function preparedChannelButton(requestId: number) { if (!Number.isInteger(requestId) || requestId < -2_147_483_648 || requestId > 2_147_483_647) throw new Error('request_id must be a signed 32-bit integer'); return { text: 'Select Telegram channel', request_chat: { request_id: requestId, chat_is_channel: true, request_title: true, request_username: true, request_photo: true, user_administrator_rights: userChannelAdministratorRights } }; }
 export function preparedButtonId(result: { id?: unknown }) { if (typeof result.id !== 'string' || result.id.length === 0) throw new Error('Telegram returned an invalid PreparedKeyboardButton'); return result.id; }
