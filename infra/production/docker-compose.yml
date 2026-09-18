@@ -41,6 +41,46 @@ services:
     networks:
       - gpoint_app
 
+  gpoint-sensitive-detector:
+    build:
+      context: https://github.com/misskey-dev/sensitive-detector.git#f91d4bc978bea30aee7c1be1c2b6932c5818c7ec
+      dockerfile: Dockerfile
+      target: runtime
+    image: gpoint-sensitive-detector:f91d4bc978bea30aee7c1be1c2b6932c5818c7ec
+    restart: unless-stopped
+    env_file:
+      - /opt/gpoint/env/production.env
+    volumes:
+      - /opt/gpoint/compose/sensitive-detector/config.mjs:/config/config.mjs:ro
+    command: ["node", "dist/main.mjs", "--config", "/config/config.mjs"]
+    networks:
+      - gpoint_app
+    healthcheck:
+      test: ["CMD", "node", "/scripts/healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: 768M
+        reservations:
+          memory: 256M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 networks:
   gpoint_app:
     external: true

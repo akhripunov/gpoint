@@ -45,9 +45,26 @@ export class TelegramIngestionService {
     await prisma.telegramChannel.update({ where: { id: channel.id }, data: { lastPostReceivedAt: new Date(), lastSuccessfulIngestAt: new Date(), lastError: null } });
     return { status: existing ? 'UPDATED' : 'CREATED', postId: post.id, safety: safety.classification };
   }
+
+  async reprocessPendingPost(postId: string) {
+    const existing = await prisma.post.findFirst({ where: { id: postId, source: 'TELEGRAM_CHANNEL', status: { in: ['PENDING', 'PENDING_MODERATION'] } }, include: { telegramChannel: true, media: { include: { media: true } } } });
+    if (!existing?.telegramChannel || existing.telegramChannel.status !== 'CONNECTED') throw new BadRequestException('pending connected Telegram post not found');
+    const media = existing.media.find((item: any) => item.media.kind === 'IMAGE' || item.media.kind === 'VIDEO');
+    const bytes = media ? await this.storage.readBytes(media.media.storageKey) : undefined;
+    const safety = await this.safety.classify({ text: existing.sanitizedText ?? existing.caption ?? '', mimeTypes: media ? [media.media.mimeType] : [], imageBytes: bytes });
+    const status = existing.telegramChannel.importMode === 'MANUAL' || safety.classification !== 'SAFE' ? 'PENDING' : 'PUBLISHED';
+    const publishedAt = status === 'PUBLISHED' ? (existing.publishedAt ?? new Date()) : null;
+    await prisma.$transaction(async tx => {
+      await tx.post.update({ where: { id: existing.id }, data: { status, ingestStatus: status === 'PUBLISHED' ? 'PUBLISHED' : 'PENDING_MODERATION', safetyClassification: safety.classification, safetyReason: safety.reason ?? null, publishedAt } });
+      if (media) await tx.mediaAsset.update({ where: { id: media.media.id }, data: { safetyProvider: safety.provider ?? null, safetyConfidence: safety.confidence ?? null, safetyEvaluatedAt: new Date(), safetyFailureReason: safety.failureReason ?? null } });
+      await tx.telegramChannel.update({ where: { id: existing.telegramChannel!.id }, data: { lastSuccessfulIngestAt: new Date(), lastError: null } });
+    });
+    return { status, safety: safety.classification, postId: existing.id };
+  }
 }
 
 export const telegramIngestion = new TelegramIngestionService(safetyProviderFromEnv(), process.env.GPOINT_TRANSLATION_URL ? new HttpTranslationProvider(process.env.GPOINT_TRANSLATION_URL, process.env.GPOINT_TRANSLATION_API_KEY) : new FallbackTranslationProvider());
 @Controller('internal/telegram') export class TelegramIngestionController {
   @Post('update') async update(@Headers() headers: Record<string, string | undefined>, @Body() body: TelegramUpdate) { const expected = process.env.TELEGRAM_WEBHOOK_SECRET; if (!expected || headers['x-telegram-webhook-secret'] !== expected) throw new UnauthorizedException(); return telegramIngestion.ingest(body); }
+  @Post('reprocess-pending') async reprocessPending(@Headers() headers: Record<string, string | undefined>, @Body() body: { postId?: string }) { const expected = process.env.TELEGRAM_WEBHOOK_SECRET; if (!expected || headers['x-telegram-webhook-secret'] !== expected || !body.postId) throw new UnauthorizedException(); return telegramIngestion.reprocessPendingPost(body.postId); }
 }

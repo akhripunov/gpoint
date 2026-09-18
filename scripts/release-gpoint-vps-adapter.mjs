@@ -43,11 +43,13 @@ export function applyCandidate(sha) {
   const archive = `${checkout}.tar.gz`;
   const compose = path.join(checkout, 'infra/production/docker-compose.yml');
   const dockerfile = path.join(checkout, 'infra/production/Gpoint.Dockerfile');
+  const safetyConfig = path.join(checkout, 'infra/production/sensitive-detector/config.mjs');
   execFileSync('tar', ['-czf', archive, '-C', path.dirname(checkout), path.basename(checkout)]);
   try {
     upload(archive, `/tmp/gpoint-${sha}.tar.gz`);
     upload(compose, `/tmp/gpoint-compose-${sha}.yml`);
     upload(dockerfile, `/tmp/gpoint-dockerfile-${sha}`);
+    upload(safetyConfig, `/tmp/gpoint-safety-config-${sha}.mjs`);
     const build = [
       'set -e',
       `rm -rf ${releaseDir}`,
@@ -64,6 +66,7 @@ export function applyCandidate(sha) {
     const deploy = [
       'set -e',
       `cp /tmp/gpoint-compose-${sha}.yml /opt/gpoint/compose/docker-compose.yml`,
+      `mkdir -p /opt/gpoint/compose/sensitive-detector && cp /tmp/gpoint-safety-config-${sha}.mjs /opt/gpoint/compose/sensitive-detector/config.mjs`,
       `sed -i.bak s/^RELEASE_SHA=.*/RELEASE_SHA=${sha}/ /opt/gpoint/env/production.env`,
       'rm -f /opt/gpoint/env/production.env.bak',
       `rm -rf /opt/gpoint/app/miniapp/assets`,
@@ -72,7 +75,12 @@ export function applyCandidate(sha) {
       `mkdir -p /opt/gpoint/app/miniapp`,
       `docker cp gpoint-static-${sha.slice(0, 8)}:/app/apps/miniapp/dist/. /opt/gpoint/app/miniapp/`,
       'chmod -R a+rX /opt/gpoint/app/miniapp',
-      'docker compose --env-file /opt/gpoint/env/production.env -f /opt/gpoint/compose/docker-compose.yml up -d --force-recreate api worker bot',
+      "grep -q '^GPOINT_SAFETY_PROVIDER=' /opt/gpoint/env/production.env && sed -i 's#^GPOINT_SAFETY_PROVIDER=.*#GPOINT_SAFETY_PROVIDER=misskey-sensitive-detector#' /opt/gpoint/env/production.env || printf '%s\\n' 'GPOINT_SAFETY_PROVIDER=misskey-sensitive-detector' >> /opt/gpoint/env/production.env",
+      "grep -q '^GPOINT_SAFETY_URL=' /opt/gpoint/env/production.env && sed -i 's#^GPOINT_SAFETY_URL=.*#GPOINT_SAFETY_URL=http://gpoint-sensitive-detector:3009/v1/detect-images#' /opt/gpoint/env/production.env || printf '%s\\n' 'GPOINT_SAFETY_URL=http://gpoint-sensitive-detector:3009/v1/detect-images' >> /opt/gpoint/env/production.env",
+      "grep -q '^GPOINT_SAFETY_TIMEOUT_MS=' /opt/gpoint/env/production.env && sed -i 's#^GPOINT_SAFETY_TIMEOUT_MS=.*#GPOINT_SAFETY_TIMEOUT_MS=60000#' /opt/gpoint/env/production.env || printf '%s\\n' 'GPOINT_SAFETY_TIMEOUT_MS=60000' >> /opt/gpoint/env/production.env",
+      "if ! grep -q '^GPOINT_SAFETY_API_KEY=.' /opt/gpoint/env/production.env; then printf 'GPOINT_SAFETY_API_KEY=%s\\n' \"$(openssl rand -hex 32)\" >> /opt/gpoint/env/production.env; fi",
+      'docker compose --env-file /opt/gpoint/env/production.env -f /opt/gpoint/compose/docker-compose.yml build gpoint-sensitive-detector',
+      'docker compose --env-file /opt/gpoint/env/production.env -f /opt/gpoint/compose/docker-compose.yml up -d --force-recreate api worker bot gpoint-sensitive-detector',
       'curl -fsS http://127.0.0.1:3000/health/live >/dev/null',
       'echo GPOINT_DEPLOY_OK'
     ].join('; ');

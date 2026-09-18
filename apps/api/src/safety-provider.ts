@@ -10,6 +10,8 @@ export class HttpSafetyProvider implements ContentSafetyProvider {
 export class MisskeySensitiveDetectorProvider implements ContentSafetyProvider {
   constructor(private readonly endpoint: string, private readonly apiKey?: string, private readonly timeoutMs = 60_000) {}
   async classify(input: { text: string; mimeTypes: string[]; imageBytes?: Buffer }) {
+    const startedAt = Date.now();
+    console.info('[GPoint] image safety call started', { provider: 'misskey-sensitive-detector' });
     if (!input.imageBytes || !input.mimeTypes.some(x => x.startsWith('image/'))) return { classification: 'UNCERTAIN' as const, reason: 'image bytes required by sensitive-detector', provider: 'misskey-sensitive-detector' };
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -21,10 +23,11 @@ export class MisskeySensitiveDetectorProvider implements ContentSafetyProvider {
       const result = (body.result?.results ?? body.results)?.[0]; if (!result?.predictions || result.error) throw new Error('malformed detector response');
       const predictions = Array.isArray(result.predictions) ? result.predictions.map(item => [item.className?.toLowerCase() ?? '', Number(item.probability)] as const) : Object.entries(result.predictions).map(([label, value]) => [label.toLowerCase(), Number(value)] as const);
       const max = predictions.filter(([label, value]) => Boolean(label) && Number.isFinite(value)).sort((a, b) => b[1] - a[1])[0];
-      if (!max || max[1] < 0.8) return { classification: 'UNCERTAIN' as const, reason: 'detector confidence below threshold', confidence: max?.[1], provider: 'misskey-sensitive-detector' };
+      if (!max || max[1] < 0.8) { console.warn('[GPoint] image safety uncertain', { provider: 'misskey-sensitive-detector', latencyMs: Date.now() - startedAt }); return { classification: 'UNCERTAIN' as const, reason: 'detector confidence below threshold', confidence: max?.[1], provider: 'misskey-sensitive-detector' }; }
       const classification = /porn|explicit|hentai/.test(max[0]) ? 'EXPLICIT' : /sexy|erotic|sensitive/.test(max[0]) ? 'SUGGESTIVE' : 'SAFE';
+      console.info('[GPoint] image safety call finished', { provider: 'misskey-sensitive-detector', classification, latencyMs: Date.now() - startedAt });
       return { classification: classification as SafetyClassification, reason: `detector:${max[0]}`, confidence: max[1], provider: 'misskey-sensitive-detector' };
-    } catch { return { classification: 'UNCERTAIN' as const, reason: 'sensitive-detector unavailable or malformed', provider: 'misskey-sensitive-detector', failureReason: 'provider_unavailable' }; } finally { clearTimeout(timer); }
+    } catch { console.warn('[GPoint] image safety call failed', { provider: 'misskey-sensitive-detector', latencyMs: Date.now() - startedAt }); return { classification: 'UNCERTAIN' as const, reason: 'sensitive-detector unavailable or malformed', provider: 'misskey-sensitive-detector', failureReason: 'provider_unavailable' }; } finally { clearTimeout(timer); }
   }
 }
-export function safetyProviderFromEnv(env: NodeJS.ProcessEnv = process.env): ContentSafetyProvider { if (env.GPOINT_SAFETY_PROVIDER === 'misskey-sensitive-detector' && env.GPOINT_SAFETY_URL) return new MisskeySensitiveDetectorProvider(env.GPOINT_SAFETY_URL, env.GPOINT_SAFETY_API_KEY); return env.GPOINT_SAFETY_URL ? new HttpSafetyProvider(env.GPOINT_SAFETY_URL, env.GPOINT_SAFETY_API_KEY) : new UnconfiguredSafetyProvider(); }
+export function safetyProviderFromEnv(env: NodeJS.ProcessEnv = process.env): ContentSafetyProvider { const timeout = Number(env.GPOINT_SAFETY_TIMEOUT_MS); const boundedTimeout = Number.isFinite(timeout) && timeout >= 1000 && timeout <= 120000 ? timeout : 60_000; if (env.GPOINT_SAFETY_PROVIDER === 'misskey-sensitive-detector' && env.GPOINT_SAFETY_URL) return new MisskeySensitiveDetectorProvider(env.GPOINT_SAFETY_URL, env.GPOINT_SAFETY_API_KEY, boundedTimeout); return env.GPOINT_SAFETY_URL ? new HttpSafetyProvider(env.GPOINT_SAFETY_URL, env.GPOINT_SAFETY_API_KEY, boundedTimeout) : new UnconfiguredSafetyProvider(); }
