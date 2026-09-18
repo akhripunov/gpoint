@@ -1,0 +1,35 @@
+{
+  "releaseId": "gpoint-dry-run-20260918T153352064Z",
+  "candidateSha": "a2e1efedd590504476181ffab9dbff421da1bcfb",
+  "previousProductionSha": "a22aad7af4957d859ff383ef1c60db7eb6e981aa",
+  "productionShaAfter": null,
+  "dbHeadBefore": "20260918100000_native_creator_onboarding",
+  "dbHeadAfter": null,
+  "artifactIdentities": {
+    "api": {
+      "sourceSha": "a2e1efedd590504476181ffab9dbff421da1bcfb"
+    },
+    "worker": {
+      "sourceSha": "a2e1efedd590504476181ffab9dbff421da1bcfb"
+    },
+    "bot": {
+      "sourceSha": "a2e1efedd590504476181ffab9dbff421da1bcfb"
+    },
+    "miniapp": {
+      "sourceSha": "a2e1efedd590504476181ffab9dbff421da1bcfb"
+    }
+  },
+  "startedAt": "2026-09-18T15:33:52.064Z",
+  "finishedAt": "2026-09-18T15:34:08.200Z",
+  "status": "PLANNED",
+  "failureStage": null,
+  "failureReason": null,
+  "rollbackSha": "a22aad7af4957d859ff383ef1c60db7eb6e981aa",
+  "rollbackDbCompatibility": "REQUIRES_FORWARD_FIX_ASSESSMENT",
+  "productionRef": null,
+  "remoteProof": {
+    "mainSha": "a2e1efedd590504476181ffab9dbff421da1bcfb",
+    "directRef": "refs/heads/main"
+  },
+  "dryRun": true
+}
