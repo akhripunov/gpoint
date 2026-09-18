@@ -12,3 +12,9 @@ test('production entrypoint loads the Telegram WebApp SDK before the app', async
   assert.ok(html.includes(sdk));
   assert.ok(html.indexOf(sdk) < html.indexOf('<script type="module"'));
 });
+
+test('API client disables conditional caching and bounds request time', async () => {
+  const source = await readFile(join(root, 'src/api/client.ts'), 'utf8');
+  assert.match(source, /cache:'no-store'/);
+  assert.match(source, /setTimeout\(\(\)=>controller\.abort\(\),15000\)/);
+});
