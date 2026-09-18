@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-const buildSha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+const buildSha = process.env.GPOINT_BUILD_SHA ?? execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 const buildTime = new Date().toISOString();
 const apiPaths = ['health', 'auth', 'me', 'creators', 'reels', 'vip', 'creator', 'admin', 'media', 'events', 'following', 'discovery', 'preferences', 'internal', 'feed'];
 const apiTarget = process.env.VITE_API_URL ?? 'http://127.0.0.1:3000';
