@@ -16,7 +16,7 @@ test('production entrypoint loads the Telegram WebApp SDK before the app', async
 test('API client disables conditional caching and bounds request time', async () => {
   const source = await readFile(join(root, 'src/api/client.ts'), 'utf8');
   assert.match(source, /cache:'no-store'/);
-  assert.match(source, /setTimeout\(\(\)=>controller\.abort\(\),15000\)/);
+  assert.match(source, /setTimeout\(\(\)=>controller\.abort\(\),timeoutMs\)/);
 });
 
 test('native creator onboarding uses requestChat and does not require manual first-step fields', async () => {
