@@ -65,8 +65,12 @@ export function applyCandidate(sha) {
       'curl -fsS http://127.0.0.1:3000/health/live >/dev/null'
     ].join('; ');
     run(deploy);
-    const identity = run(`docker image inspect gpoint-runtime:${sha} | grep Id | head -1; sha256sum /opt/gpoint/app/miniapp/index.html; grep -o ${sha} /opt/gpoint/app/miniapp/index.html | head -1`).trim();
-    return { imageIdentity: identity, migrationOutput: migration.trim() };
+    const identityOutput = run(`docker image inspect gpoint-runtime:${sha} | grep Id | head -1; sha256sum /opt/gpoint/app/miniapp/index.html; grep -o ${sha} /opt/gpoint/app/miniapp/index.html | head -1`).trim();
+    const imageId = identityOutput.match(/"Id"\s*:\s*"(sha256:[a-f0-9]+)"/)?.[1];
+    const indexSha256 = identityOutput.match(/\b([a-f0-9]{64})\s+\/opt\/gpoint\/app\/miniapp\/index\.html\b/)?.[1];
+    const buildSha = identityOutput.includes(sha) ? sha : undefined;
+    if (!imageId || !indexSha256 || buildSha !== sha) throw new Error('remote runtime identity verification failed');
+    return { imageIdentity: { imageId, indexSha256, buildSha }, migrationOutput: migration.trim() };
   } finally {
     fs.rmSync(checkout, { recursive: true, force: true });
     fs.rmSync(archive, { force: true });
