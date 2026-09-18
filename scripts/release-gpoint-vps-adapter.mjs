@@ -68,10 +68,10 @@ export function applyCandidate(sha) {
       'echo GPOINT_DEPLOY_OK'
     ].join('; ');
     const deployOutput = run(deploy); if (!deployOutput.includes('GPOINT_DEPLOY_OK')) throw new Error('remote runtime deploy failed');
-    const identityOutput = run(`docker image inspect gpoint-runtime:${sha} | grep Id | head -1; sha256sum /opt/gpoint/app/miniapp/index.html; grep -o ${sha} /opt/gpoint/app/miniapp/index.html | head -1`).trim();
-    const imageId = identityOutput.match(/"Id"\s*:\s*"(sha256:[a-f0-9]+)"/)?.[1];
-    const indexSha256 = identityOutput.match(/\b([a-f0-9]{64})\s+\/opt\/gpoint\/app\/miniapp\/index\.html\b/)?.[1];
-    const buildSha = identityOutput.includes(sha) ? sha : undefined;
+    const identityOutput = run(`set -e; imageId=$(docker image inspect gpoint-runtime:${sha} --format '{{.Id}}'); indexSha256=$(sha256sum /opt/gpoint/app/miniapp/index.html | awk '{print $1}'); grep -F -q 'gpoint-build-sha" content="${sha}' /opt/gpoint/app/miniapp/index.html; printf 'IMAGE_ID=%s INDEX_SHA256=%s BUILD_SHA=%s\\n' "$imageId" "$indexSha256" '${sha}'`).trim();
+    const imageId = identityOutput.match(/IMAGE_ID=(sha256:[a-f0-9]+)/)?.[1];
+    const indexSha256 = identityOutput.match(/INDEX_SHA256=([a-f0-9]{64})/)?.[1];
+    const buildSha = identityOutput.match(/BUILD_SHA=([0-9a-f]{40})/)?.[1];
     if (!imageId || !indexSha256 || buildSha !== sha) throw new Error('remote runtime identity verification failed');
     const migrationOutput = [
       migration.includes('Database schema is up to date!') ? 'DATABASE_SCHEMA_UP_TO_DATE' : null,
