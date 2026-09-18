@@ -52,6 +52,8 @@ export function applyCandidate(sha) {
     upload(dockerfile, `/tmp/gpoint-dockerfile-${sha}`);
     upload(safetyConfig, `/tmp/gpoint-safety-config-${sha}.mjs`);
     upload(safetyDockerfile, `/tmp/gpoint-safety-dockerfile-${sha}`);
+    const diskGuard = run("set -e; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n \"$freeKb\"; test \"$freeKb\" -ge 5242880; echo GPOINT_DISK_GUARD_OK");
+    if (!diskGuard.includes('GPOINT_DISK_GUARD_OK')) throw new Error('remote disk guard failed: minimum 5 GiB free space required');
     const build = [
       'set -e',
       `rm -rf ${releaseDir}`,
