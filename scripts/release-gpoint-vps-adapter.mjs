@@ -44,12 +44,14 @@ export function applyCandidate(sha) {
   const compose = path.join(checkout, 'infra/production/docker-compose.yml');
   const dockerfile = path.join(checkout, 'infra/production/Gpoint.Dockerfile');
   const safetyConfig = path.join(checkout, 'infra/production/sensitive-detector/config.mjs');
+  const safetyDockerfile = path.join(checkout, 'infra/production/sensitive-detector/Dockerfile');
   execFileSync('tar', ['-czf', archive, '-C', path.dirname(checkout), path.basename(checkout)]);
   try {
     upload(archive, `/tmp/gpoint-${sha}.tar.gz`);
     upload(compose, `/tmp/gpoint-compose-${sha}.yml`);
     upload(dockerfile, `/tmp/gpoint-dockerfile-${sha}`);
     upload(safetyConfig, `/tmp/gpoint-safety-config-${sha}.mjs`);
+    upload(safetyDockerfile, `/tmp/gpoint-safety-dockerfile-${sha}`);
     const build = [
       'set -e',
       `rm -rf ${releaseDir}`,
@@ -66,7 +68,7 @@ export function applyCandidate(sha) {
     const deploy = [
       'set -e',
       `cp /tmp/gpoint-compose-${sha}.yml /opt/gpoint/compose/docker-compose.yml`,
-      `mkdir -p /opt/gpoint/compose/sensitive-detector && cp /tmp/gpoint-safety-config-${sha}.mjs /opt/gpoint/compose/sensitive-detector/config.mjs`,
+      `mkdir -p /opt/gpoint/compose/sensitive-detector && cp /tmp/gpoint-safety-config-${sha}.mjs /opt/gpoint/compose/sensitive-detector/config.mjs && cp /tmp/gpoint-safety-dockerfile-${sha} /opt/gpoint/compose/sensitive-detector/Dockerfile`,
       `sed -i.bak s/^RELEASE_SHA=.*/RELEASE_SHA=${sha}/ /opt/gpoint/env/production.env`,
       'rm -f /opt/gpoint/env/production.env.bak',
       `rm -rf /opt/gpoint/app/miniapp/assets`,
@@ -86,9 +88,10 @@ export function applyCandidate(sha) {
     ].join('; ');
     const deployOutput = run(deploy); if (!deployOutput.includes('GPOINT_DEPLOY_OK')) throw new Error('remote runtime deploy failed');
     const identityOutput = run(`set -e; imageId=$(cat ${imageProof}); apiImage=$(docker inspect compose-api-1 --format '{{.Image}}'); workerImage=$(docker inspect compose-worker-1 --format '{{.Image}}'); botImage=$(docker inspect compose-bot-1 --format '{{.Image}}'); indexSha256=$(sha256sum /opt/gpoint/app/miniapp/index.html | awk '{print $1}'); grep -F -q 'gpoint-build-sha" content="${sha}' /opt/gpoint/app/miniapp/index.html; test "$apiImage" = "$imageId"; test "$workerImage" = "$imageId"; test "$botImage" = "$imageId"; docker rm gpoint-static-${sha.slice(0, 8)} >/dev/null 2>&1 || true; printf 'IMAGE_ID=%s INDEX_SHA256=%s BUILD_SHA=%s API_IMAGE=%s WORKER_IMAGE=%s BOT_IMAGE=%s\\n' "$imageId" "$indexSha256" '${sha}' "$apiImage" "$workerImage" "$botImage"`).trim();
-    const imageId = identityOutput.match(/IMAGE_ID=(sha256:[a-f0-9]+)/)?.[1];
-    const indexSha256 = identityOutput.match(/INDEX_SHA256=([a-f0-9]{64})/)?.[1];
-    const buildSha = identityOutput.match(/BUILD_SHA=([0-9a-f]{40})/)?.[1];
+    const identityLine = identityOutput.split(/\\r?\\n/).find(line => line.includes('IMAGE_ID=')) ?? '';
+    const imageId = identityLine.match(/IMAGE_ID=(sha256:[a-f0-9]+)/)?.[1];
+    const indexSha256 = identityLine.match(/INDEX_SHA256=([a-f0-9]{64})/)?.[1];
+    const buildSha = identityLine.match(/BUILD_SHA=([0-9a-f]{40})/)?.[1];
     const runtimeFailures = validateRuntimeIdentity(sha, { imageId, buildSha, apiImage: identityOutput.match(/API_IMAGE=(sha256:[a-f0-9]+)/)?.[1], workerImage: identityOutput.match(/WORKER_IMAGE=(sha256:[a-f0-9]+)/)?.[1], botImage: identityOutput.match(/BOT_IMAGE=(sha256:[a-f0-9]+)/)?.[1] });
     if (!imageId || !indexSha256 || runtimeFailures.length) throw new Error(`remote runtime identity verification failed: ${runtimeFailures.join('; ') || 'missing identity fields'}: ${identityOutput}`);
     const migrationOutput = [

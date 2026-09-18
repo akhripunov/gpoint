@@ -43,7 +43,7 @@ services:
 
   gpoint-sensitive-detector:
     build:
-      context: https://github.com/misskey-dev/sensitive-detector.git#f91d4bc978bea30aee7c1be1c2b6932c5818c7ec
+      context: /opt/gpoint/compose/sensitive-detector
       dockerfile: Dockerfile
       target: runtime
     image: gpoint-sensitive-detector:f91d4bc978bea30aee7c1be1c2b6932c5818c7ec
