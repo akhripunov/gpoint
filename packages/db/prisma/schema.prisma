@@ -124,6 +124,7 @@ model TelegramConnectionChallenge {
   expiresAt DateTime
   usedAt DateTime?
   telegramChatId String?
+  preparedButtonId String?
   createdAt DateTime @default(now())
   user User @relation(fields: [userId], references: [id])
   @@index([userId, expiresAt])

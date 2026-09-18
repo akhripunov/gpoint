@@ -4,7 +4,7 @@ export const mediaUrl=(path:string)=>new URL(path,apiBase||window.location.origi
 export class ApiError extends Error{constructor(public status:number,message:string){super(message)}}
 let token=localStorage.getItem('gpoint.session'); export const getToken=()=>token;
 async function request<T>(path:string,init:RequestInit={}){const headers=new Headers(init.headers);if(init.body!==undefined&&!(init.body instanceof FormData)&&!headers.has('content-type'))headers.set('content-type','application/json');if(token)headers.set('authorization',`Bearer ${token}`);const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),15000);try{const r=await fetch(`${apiBase}${path}`,{...init,headers,cache:'no-store',credentials:'same-origin',signal:controller.signal});let data:unknown;try{data=await r.json()}catch{data=null}if(!r.ok)throw new ApiError(r.status,(data as {message?:string})?.message??'Request failed');return data as T}catch(error){if(error instanceof DOMException&&error.name==='AbortError')throw new ApiError(408,'Request timed out');throw error}finally{clearTimeout(timeout)}}
-type TelegramWebApp={initData?:string;initDataUnsafe?:{user?:unknown};ready?:()=>void};
+type TelegramWebApp={initData?:string;initDataUnsafe?:{user?:unknown};ready?:()=>void;requestChat?:(requestId:string,callback?:(success:boolean)=>void)=>void};
 function telegramWebApp(){return (window as Window&{Telegram?:{WebApp?:TelegramWebApp}}).Telegram?.WebApp}
 function browserDevAuthEnabled(){return import.meta.env.VITE_DEV_BROWSER_AUTH==='true'&&['localhost','127.0.0.1','::1'].includes(window.location.hostname.toLowerCase())}
 async function telegramInitData(){const webApp=telegramWebApp();const dev=import.meta.env.VITE_DEV_AUTH_MODE==='true';if(webApp?.ready)webApp.ready();for(let attempt=0;attempt<20;attempt+=1){const initData=webApp?.initData?.trim();if(initData){console.info('[GPoint] telegram bootstrap',{telegram_init_data_present:true,telegram_init_data_length:initData.length,telegram_user_present:!!webApp?.initDataUnsafe?.user});return initData}if(!dev)await new Promise(resolve=>setTimeout(resolve,100));}console.info('[GPoint] telegram bootstrap',{telegram_init_data_present:false,telegram_init_data_length:0,telegram_user_present:false});return dev?'dev':null}
@@ -22,6 +22,8 @@ export const feedFollowing=(cursor?:string)=>request<any>(`/feed/following${curs
 export const likePost=(id:string)=>request<any>(`/feed/${id}/like`,{method:'POST'});
 export const unlikePost=(id:string)=>request<any>(`/feed/${id}/like`,{method:'DELETE'});
 export const telegramChannel=()=>request<any>('/creator/me/telegram-channel');
+export const prepareCreatorChannelSelection=()=>request<{requestId:string;challengeId:string;expiresAt:string;supported:boolean}>('/creator/channel/selection/prepare',{method:'POST'});
+export async function requestCreatorTelegramChannel(){const prepared=await prepareCreatorChannelSelection();const webApp=telegramWebApp();if(typeof webApp?.requestChat!=='function')throw new ApiError(426,'Update Telegram to select a channel natively.');return new Promise<boolean>(resolve=>webApp.requestChat!(prepared.requestId,resolve));}
 export const startTelegramChannelConnection=()=>request<any>('/creator/channel/connect/start',{method:'POST'});
 export const connectTelegramChannel=(body:any)=>request<any>('/creator/me/telegram-channel',{method:'POST',body:JSON.stringify(body)});
 export const updateTelegramChannel=(body:any)=>request<any>('/creator/me/telegram-channel',{method:'PATCH',body:JSON.stringify(body)});

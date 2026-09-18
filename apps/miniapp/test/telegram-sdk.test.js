@@ -18,3 +18,12 @@ test('API client disables conditional caching and bounds request time', async ()
   assert.match(source, /cache:'no-store'/);
   assert.match(source, /setTimeout\(\(\)=>controller\.abort\(\),15000\)/);
 });
+
+test('native creator onboarding uses requestChat and does not require manual first-step fields', async () => {
+  const client = await readFile(join(root, 'src/api/client.ts'), 'utf8');
+  const main = await readFile(join(root, 'src/main.tsx'), 'utf8');
+  assert.match(client, /requestChat/);
+  assert.match(client, /selection\/prepare/);
+  assert.match(main, /NativeCreatorOnboardingBridge/);
+  assert.match(main, /Select your channel/);
+});

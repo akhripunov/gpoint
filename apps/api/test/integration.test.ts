@@ -78,6 +78,7 @@ test('Telegram channel connection challenge is short-lived, single-use and cross
     const url = String(input);
     if (!url.startsWith('https://api.telegram.org/')) return previousFetch(input, init);
     const method = url.split('/').pop();
+    if (method === 'savePreparedKeyboardButton') return new Response(JSON.stringify({ ok: true, result: { id: 'prepared-native-1' } }), { status: 200 });
     if (method === 'sendMessage') return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
     if (method === 'getMe') return new Response(JSON.stringify({ ok: true, result: { id: 999 } }), { status: 200 });
     if (method === 'getChat') return new Response(JSON.stringify({ ok: true, result: { id: 123, type: 'channel', title: 'Test Channel' } }), { status: 200 });
@@ -86,6 +87,10 @@ test('Telegram channel connection challenge is short-lived, single-use and cross
   };
   const created: string[] = [];
   try {
+    const prepared = await call('/creator/channel/selection/prepare', creatorToken, 'POST');
+    assert.equal(prepared.response.status, 201); assert.equal(prepared.data.requestId, 'prepared-native-1');
+    created.push(prepared.data.challengeId); const preparedChallenge = await prisma.telegramConnectionChallenge.findUnique({ where: { id: prepared.data.challengeId } });
+    assert.equal(preparedChallenge?.preparedButtonId, 'prepared-native-1');
     const started = await call('/creator/channel/connect/start', creatorToken, 'POST');
     assert.equal(started.response.status, 201); assert.ok(started.data.requestId); created.push(started.data.challengeId);
     const wrongUser = await fetch(`${base}/internal/telegram/chat-shared`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-telegram-webhook-secret': 'test-webhook-secret' }, body: JSON.stringify({ from: { id: 'wrong-user' }, chat_shared: { request_id: started.data.requestId, chat_id: 123 } }) });
