@@ -12,4 +12,5 @@ test('consumer My Profile uses real user data and existing settings/onboarding p
   await expect(page.getByRole('heading', { name: 'Recommendation controls' })).toBeVisible();
   await page.getByRole('button', { name: /Become a Creator/ }).click();
   await expect(page.getByRole('heading', { name: 'Become a Creator' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Connect Telegram channel', exact: true })).toBeVisible();
 });

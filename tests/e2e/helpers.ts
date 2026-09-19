@@ -12,20 +12,64 @@ export async function creatorPage(page: Page, scenario = `run-${Date.now()}`) {
   const project = page.viewportSize()?.width === 393 ? 'chromium-mobile' : 'chromium';
   const identityHash = Array.from(`${scenario}:${project}`).reduce((sum, char) => sum + char.charCodeAt(0), 0);
   const e2eUserId = 200000000 + runSuffix * 10 + identityHash;
-  await page.goto(`/creator/dashboard?e2eUserId=${e2eUserId}`);
+  const creatorRoute = `/creator/dashboard?e2eUserId=${e2eUserId}`;
+  await page.goto(`/?e2eUserId=${e2eUserId}`);
+  await expect(page.getByRole('button', { name: 'Profile', exact: true })).toBeVisible();
+  const stamp = Date.now() * 1000 + Math.floor(Math.random() * 1000);
+  const onboardingPayload = { displayName: `E2E Creator ${stamp}`, slug: `e2e-creator-${stamp}`, bio: 'Browser release proof creator', tags: [] as string[] };
+  const api = process.env.GPOINT_E2E_API_URL ?? 'http://localhost:3000';
+  const result = await page.evaluate(async ({ api, payload }) => {
+    const token = localStorage.getItem('gpoint.session');
+    const response = await fetch(`${api}/creator/onboarding`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return { ok: response.ok, status: response.status, body: await response.text() };
+  }, { api, payload: onboardingPayload });
+  if (!result.ok) throw new Error(`creator onboarding setup failed: ${result.status} ${result.body}`);
+  await page.goto(creatorRoute);
   await expect(page.locator('body')).toBeVisible();
   for (let attempt = 0; attempt < 3 && await page.getByText('Loading…', { exact: true }).count(); attempt++) {
     await page.waitForTimeout(1000);
     await page.reload();
   }
-  if (await page.getByRole('heading', { name: 'Become a Creator' }).count()) {
-    const stamp = Date.now() * 1000 + Math.floor(Math.random() * 1000);
-    await page.getByLabel('Display name').fill(`E2E Creator ${stamp}`);
-    await page.getByLabel('Slug').fill(`e2e-creator-${stamp}`);
-    await page.getByLabel('Bio').fill('Browser release proof creator');
-    await page.getByRole('button', { name: /Save Draft|Create draft/ }).click();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let state: { creator?: unknown };
+    try {
+      state = await apiRead<{ creator?: unknown }>(page, '/creator/me');
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes('401')) throw error;
+      await page.goto(`/?e2eUserId=${e2eUserId}`);
+      await expect(page.getByRole('button', { name: 'Profile', exact: true })).toBeVisible();
+      await apiRequest(page, '/creator/onboarding', 'POST', onboardingPayload);
+      await page.goto(creatorRoute);
+      continue;
+    }
+    if (state.creator) break;
+    await apiRequest(page, '/creator/onboarding', 'POST', onboardingPayload);
+    await page.waitForTimeout(500);
+    await page.goto(`/?e2eUserId=${e2eUserId}`);
+    await expect(page.getByRole('button', { name: 'Profile', exact: true })).toBeVisible();
+    await page.goto(creatorRoute);
   }
   await expect(page.getByRole('heading', { name: 'Creator Dashboard' })).toBeVisible();
+}
+
+export async function adminPage(page: Page) {
+  const profile = page.getByRole('button', { name: 'Profile', exact: true });
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await page.goto('/?e2eUserId=991234567');
+    try {
+      await profile.waitFor({ state: 'visible', timeout: 6_000 });
+      break;
+    } catch {
+      if (attempt === 2) throw new Error('browser auth did not become ready for admin E2E');
+    }
+  }
+  await expect(profile).toBeVisible();
+  await page.goto('/admin');
+  await expect(page.getByRole('heading', { name: 'Moderation' })).toBeVisible();
 }
 
 export async function choosePng(page: Page, index = 0) {
@@ -40,6 +84,29 @@ export async function apiRead<T>(page: Page, path: string): Promise<T> {
     if (!response.ok) throw new Error(`read ${path} failed: ${response.status}`);
     return response.json();
   }, { path, base });
+}
+
+export async function apiRequest<T>(page: Page, path: string, method: string, body?: unknown): Promise<T> {
+  const base = process.env.GPOINT_E2E_API_URL ?? 'http://localhost:3000';
+  return page.evaluate(async ({ path, method, body, base }) => {
+    const token = localStorage.getItem('gpoint.session');
+    const response = await fetch(`${base}${path}`, {
+      method,
+      headers: { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await response.text();
+    if (!response.ok) throw new Error(`${method} ${path} failed: ${response.status} ${text}`);
+    return text ? JSON.parse(text) as T : undefined as T;
+  }, { path, method, body, base });
+}
+
+export async function createPendingImagePost(page: Page, caption: string) {
+  const intent = await apiRequest<{ mediaId: string }>(page, '/creator/me/media/intent', 'POST', { kind: 'IMAGE', mimeType: 'image/png', fileSize: tinyPng.length });
+  await apiRequest(page, `/creator/me/media/${intent.mediaId}/data`, 'POST', { dataBase64: tinyPng.toString('base64') });
+  await apiRequest(page, `/creator/me/media/${intent.mediaId}/finalize`, 'POST');
+  const post = await apiRequest<{ id: string }>(page, '/creator/me/posts', 'POST', { type: 'IMAGE', caption, mediaIds: [intent.mediaId] });
+  return apiRequest<{ id: string; status: string }>(page, `/creator/me/posts/${post.id}`, 'PATCH', { status: 'PENDING', caption, mediaIds: [intent.mediaId] });
 }
 
 export async function waitForApi(page: Page, pathPart: string, action: () => Promise<void>) {

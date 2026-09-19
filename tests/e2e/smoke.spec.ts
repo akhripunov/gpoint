@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { adminPage } from './helpers';
 
 test('Mini App loads in Chromium without horizontal overflow', async ({ page }) => {
   await page.goto('/');
@@ -35,7 +36,7 @@ test('Telegram mobile shell fills common phone viewports without scaling', async
 });
 
 test('admin moderation route is reachable in the browser', async ({ page }) => {
-  await page.goto('/admin?e2eUserId=991234567');
+  await adminPage(page);
   await expect(page.getByRole('heading', { name: 'Moderation' })).toBeVisible();
 });
 
@@ -61,7 +62,7 @@ test('creator dashboard exposes the frozen creator-platform surface', async ({ p
 });
 
 test('admin moderation surface has creator, content and VIP queues', async ({ page }) => {
-  await page.goto('/admin?e2eUserId=991234567');
+  await adminPage(page);
   await expect(page.getByRole('button', { name: 'Creators', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Content', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'VIP', exact: true })).toBeVisible();

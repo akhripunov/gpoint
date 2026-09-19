@@ -27,7 +27,7 @@ test('recommendation controls work from For You, Reels and Profile', async ({ pa
   await reel.getByRole('button', { name: 'Undo', exact: true }).click();
   await expect.poll(async () => (await apiRead<any>(page, '/preferences')).items.length).toBe(0);
 
-  await page.locator('nav.bottom-nav button').nth(3).click();
+  await page.getByRole('button', { name: 'Profile', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Recommendation controls' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Reset recommendations', exact: true })).toBeVisible();
 });

@@ -3,9 +3,12 @@ import { defineConfig, devices } from '@playwright/test';
 const testDatabaseUrl = process.env.DATABASE_URL ?? 'postgresql://gpoint:gpoint_dev_only@127.0.0.1:5432/gpoint';
 const testApiUrl = 'http://127.0.0.1:3013';
 const testAppUrl = 'http://127.0.0.1:5183';
-process.env.DATABASE_URL ??= testDatabaseUrl;
-process.env.GPOINT_MINIAPP_URL ??= testAppUrl;
-process.env.GPOINT_E2E_API_URL ??= testApiUrl;
+// Acceptance E2E owns its isolated local ports. Do not inherit tunnel/dev
+// environment values such as localhost:3000, which can silently target a
+// stale API while Playwright has started the test API on 3013.
+process.env.DATABASE_URL = testDatabaseUrl;
+process.env.GPOINT_MINIAPP_URL = testAppUrl;
+process.env.GPOINT_E2E_API_URL = testApiUrl;
 
 export default defineConfig({
   testDir: './tests/e2e',
