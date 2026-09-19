@@ -17,3 +17,7 @@ The canonical entry point is `pnpm release:gpoint --dry-run --candidate <40-char
 ## VPS policy
 
 The VPS is a runtime and artifact target, not a development workspace. Application fixes must be committed and pushed before deployment. MaxiBot files, containers, database, domain, and release state are outside GPoint scope and must not be touched.
+
+## GPoint UI/design skill
+
+- For GPoint UI/design, Pen, visual-reference, Golden, and design-to-React tasks, use the repo-local `gpoint-design` skill.

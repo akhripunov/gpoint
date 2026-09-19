@@ -1,0 +1,7 @@
+interface:
+  display_name: "GPoint Design"
+  short_description: "Design GPoint screens from approved components and references"
+  default_prompt: "Use $gpoint-design to design or implement this GPoint UI with the canonical Pen system, visual references, and owner approval gates."
+
+policy:
+  allow_implicit_invocation: true

@@ -87,4 +87,13 @@ Every approved Pen modification must follow: **SAVE → verify disk hash changed
 - **Telegram UI:** use only as a source of Telegram Mini App behavior/patterns; no wholesale migration.
 - **Pen/Pencil MCP:** current MCP is already connected and is sufficient for this Factory. No global skill/plugin installation was performed; therefore there is no owner installation action.
 
+## Codex Design Agent Workflow
+
+For GPoint UI/design, Pen, visual-reference, Golden, and design-to-React tasks,
+use the repo-local `.agents/skills/gpoint-design` skill. Its sequence is:
+classify the design mode → select a template and inventory reusable components
+→ read native Pen instructions before inspection or mutation → inspect the
+actual reference pixels → build and screenshot incrementally → require explicit
+owner approval before React synchronization → run responsive visual QA.
+
 Design fixtures are not production data. Pen/Storybook/visual tests may use stable fixture avatars, titles and timestamps; runtime uses actual connected Telegram data.
