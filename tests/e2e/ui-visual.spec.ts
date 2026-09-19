@@ -60,6 +60,8 @@ test('captures the reusable GPoint UI foundation surfaces', async ({ page, brows
     await page430.goto('/');
     await expect(page430.locator('.app-shell')).toBeVisible();
     await page430.screenshot({ path: path.join(outputDir, 'chromium-mobile-430-for-you.png'), fullPage: true });
+    await creatorPage(page430, 'visual-dashboard-430');
+    await page430.screenshot({ path: path.join(outputDir, 'chromium-mobile-430-creator-overview.png'), fullPage: true });
     await phone430.close();
   }
 });
