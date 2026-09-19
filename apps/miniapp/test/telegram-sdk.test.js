@@ -65,6 +65,7 @@ test('connected Telegram channel card exposes operational settings', async () =>
   assert.match(platform, /MY TELEGRAM CHANNEL/);
   assert.match(platform, /c\.title/);
   assert.match(platform, /status="Connected"/);
-  assert.match(platform, /Last sync/);
-  assert.match(platform, /Save settings/);
+  assert.match(platform, /className="channel-meta"/);
+  assert.match(platform, /export function TelegramImportSettings/);
+  assert.match(platform, /disabled={!dirty \|\| update\.isPending}/);
 });

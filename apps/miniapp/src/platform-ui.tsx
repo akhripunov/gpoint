@@ -679,27 +679,8 @@ export function TelegramChannelControls() {
     queryKey: ["telegram-channel"],
     queryFn: telegramChannel,
   });
-  const [mode, setMode] = useState("AUTO");
-  const [hashtag, setHashtag] = useState("gpoint");
   const connect = useMutation({ mutationFn: startTelegramChannelConnection });
-  const update = useMutation({
-    mutationFn: () =>
-      updateTelegramChannel({ importMode: mode, importHashtag: hashtag }),
-    onSuccess: () => q.refetch(),
-  });
-  const disconnect = useMutation({
-    mutationFn: disconnectTelegramChannel,
-    onSuccess: () => q.refetch(),
-  });
-  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
-  const [saved, setSaved] = useState(false);
   const c = q.data;
-  useEffect(() => {
-    if (c) {
-      setMode(c.importMode);
-      setHashtag(c.importHashtag || "gpoint");
-    }
-  }, [c?.id, c?.importMode, c?.importHashtag]);
   if (q.isLoading) return <div className="dashboard-skeleton" aria-label="Loading channel" />;
   if (!c)
     return (
@@ -735,27 +716,37 @@ export function TelegramChannelControls() {
           <StatusBadge status="Connected" tone="success" />
         </div>
         <ChevronRight className="channel-chevron" size={20} aria-hidden="true" />
+        <div className="channel-meta"><span>Last sync</span><strong>{formatDashboardDate(c.lastSuccessfulIngestAt)}</strong></div>
       </div>
-      <div className="channel-meta"><span>Last sync</span><strong>{formatDashboardDate(c.lastSuccessfulIngestAt)}</strong></div>
       {c.lastError && <p className="dashboard-error" role="alert">{c.lastError}</p>}
+    </section>
+  );
+}
+
+export function TelegramImportSettings() {
+  const q = useQuery({ queryKey: ["telegram-channel"], queryFn: telegramChannel });
+  const [mode, setMode] = useState("AUTO");
+  const [hashtag, setHashtag] = useState("gpoint");
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const update = useMutation({ mutationFn: () => updateTelegramChannel({ importMode: mode, importHashtag: hashtag }), onSuccess: () => { setSaved(true); q.refetch(); } });
+  const disconnect = useMutation({ mutationFn: disconnectTelegramChannel, onSuccess: () => { setConfirmDisconnect(false); q.refetch(); } });
+  const c = q.data;
+  useEffect(() => {
+    if (c) { setMode(c.importMode); setHashtag(c.importHashtag || "gpoint"); }
+  }, [c?.id, c?.importMode, c?.importHashtag]);
+  if (q.isLoading || !c) return null;
+  const dirty = mode !== c.importMode || hashtag !== (c.importHashtag || "gpoint");
+  return (
+    <section className="dashboard-section dashboard-import-settings">
+      <p className="dashboard-eyebrow">IMPORT SETTINGS</p>
       <div className="settings-card">
-        <div className="settings-card-heading"><div className="dashboard-icon-circle"><Settings2 size={18} /></div><div><p className="dashboard-eyebrow">IMPORT SETTINGS</p><h3>Keep your channel in sync</h3></div></div>
-        <label className="dashboard-field">Import mode
-          <select aria-label="Import mode" value={mode} onChange={(e) => { setMode(e.target.value); setSaved(false); }}>
-            <option value="AUTO">Auto</option><option value="HASHTAG">Hashtag</option><option value="MANUAL">Manual</option>
-          </select>
-        </label>
-        <p className="field-hint">{mode === "AUTO" ? "New posts will be imported automatically from your Telegram channel." : mode === "HASHTAG" ? "Only posts with this hashtag will be imported." : "Choose imported posts manually from your connected channel."}</p>
+        <div className="settings-card-heading"><div className="dashboard-icon-circle"><Settings2 size={18} /></div><div><h3>Import mode</h3><p className="field-hint">{mode === "AUTO" ? "New posts will be imported automatically from your Telegram channel." : mode === "HASHTAG" ? "Only posts with this hashtag will be imported." : "Choose imported posts manually from your connected channel."}</p></div></div>
+        <label className="dashboard-field"><span className="sr-only">Import mode</span><select aria-label="Import mode" value={mode} onChange={(e) => { setMode(e.target.value); setSaved(false); }}><option value="AUTO">Auto</option><option value="HASHTAG">Hashtag</option><option value="MANUAL">Manual</option></select></label>
         {mode === "HASHTAG" && <label className="dashboard-field">Hashtag<input aria-label="Import hashtag" value={hashtag} onChange={(e) => { setHashtag(e.target.value); setSaved(false); }} placeholder="gpoint" /></label>}
-        <div className="settings-actions">
-          <button className="dashboard-primary" disabled={update.isPending} onClick={() => { setSaved(false); update.mutate(undefined, { onSuccess: () => setSaved(true) }); }}><Save size={15} />{update.isPending ? "Saving…" : "Save settings"}</button>
-          {saved && <span className="save-confirm" role="status"><Check size={14} /> Saved</span>}
-        </div>
+        <div className="settings-actions"><button className="dashboard-primary" disabled={!dirty || update.isPending} onClick={() => update.mutate()}><Save size={15} />{update.isPending ? "Saving…" : "Save settings"}</button>{saved && <span className="save-confirm" role="status"><Check size={14} /> Saved</span>}</div>
       </div>
-      <div className="danger-zone">
-        <button className="danger-link" onClick={() => setConfirmDisconnect(true)}><Unplug size={15} /> Channel settings</button>
-        {confirmDisconnect && <div className="confirm-panel" role="dialog" aria-label="Confirm channel disconnect"><strong>Disconnect this channel?</strong><p>Future sync will stop. Historical GPoint posts remain.</p><div><button onClick={() => setConfirmDisconnect(false)}>Cancel</button><button className="danger-confirm" disabled={disconnect.isPending} onClick={() => disconnect.mutate(undefined, { onSuccess: () => setConfirmDisconnect(false) })}>Disconnect</button></div></div>}
-      </div>
+      <div className="danger-zone"><button className="danger-link" onClick={() => setConfirmDisconnect(true)}><Unplug size={15} /> Disconnect channel</button>{confirmDisconnect && <div className="confirm-panel" role="dialog" aria-label="Confirm channel disconnect"><strong>Disconnect this channel?</strong><p>Future sync will stop. Historical GPoint posts remain.</p><div><button onClick={() => setConfirmDisconnect(false)}>Cancel</button><button className="danger-confirm" disabled={disconnect.isPending} onClick={() => disconnect.mutate()}>Disconnect</button></div></div>}</div>
     </section>
   );
 }
@@ -806,9 +797,10 @@ export function CreatorWorkspaceDashboard() {
       </div>
       {tab === 'Overview' && (
         <>
-          <div className="workspace-hero"><div className="hero-status-icon"><CheckCircle2 size={25} /></div><div><p className="dashboard-eyebrow">WORKSPACE STATUS</p><h2>Creator workspace active</h2><p>Telegram channel connected and ready for ingestion.</p></div><StatusBadge status={creator.status === "APPROVED" ? "Live" : "Pending review"} tone={creator.status === "APPROVED" ? "success" : "warm"} /></div>
-              <TelegramChannelControls />
+          <div className="workspace-hero"><div className="hero-status-icon"><CheckCircle2 size={24} /></div><div><h2>Creator workspace active</h2><p>Telegram channel connected and ready for ingestion.</p></div><StatusBadge status={creator.status === "APPROVED" ? "Live" : "Pending review"} tone={creator.status === "APPROVED" ? "success" : "warm"} /></div>
+          <TelegramChannelControls />
           <div className="dashboard-section"><p className="dashboard-eyebrow">CREATOR TOOLS</p><div className="tool-grid">{tools.map((tool) => <button className="tool-card" key={tool.tab} onClick={() => setTab(tool.tab)}><span className="tool-icon">{tool.icon}</span><span><strong>{tool.title}</strong><small>{tool.copy}</small></span><ChevronRight size={17} /></button>)}</div></div>
+          <TelegramImportSettings />
         </>
       )}
       {tab === 'Profile settings' && (

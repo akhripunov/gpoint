@@ -4,6 +4,7 @@ import path from 'node:path';
 import { creatorPage } from './helpers';
 
 test('captures the reusable GPoint UI foundation surfaces', async ({ page, browser }) => {
+  test.setTimeout(120_000);
   const outputDir = path.join(process.cwd(), 'test-results', 'ui-foundation');
   fs.mkdirSync(outputDir, { recursive: true });
   const prefix = `${test.info().project.name}-${page.viewportSize()?.width}`;
@@ -55,11 +56,12 @@ test('captures the reusable GPoint UI foundation surfaces', async ({ page, brows
     await shot390('creator-stats');
     await phone390.close();
 
-    const phone430 = await browser.newContext({ viewport: { width: 430, height: 932 } });
-    const page430 = await phone430.newPage();
-    await page430.goto('/');
-    await expect(page430.locator('.app-shell')).toBeVisible();
-    await page430.screenshot({ path: path.join(outputDir, 'chromium-mobile-430-for-you.png'), fullPage: true });
-    await phone430.close();
+    for (const viewport of [{ width: 393, height: 852 }, { width: 430, height: 932 }, { width: 360, height: 800 }]) {
+      const phone = await browser.newContext({ viewport });
+      const phonePage = await phone.newPage();
+      await creatorPage(phonePage, `visual-dashboard-${viewport.width}`);
+      await phonePage.screenshot({ path: path.join(outputDir, `chromium-mobile-${viewport.width}-creator-overview.png`), fullPage: true });
+      await phone.close();
+    }
   }
 });

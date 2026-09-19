@@ -34,7 +34,7 @@ import {
   telegramChannelConnectionStatus,
   openTelegramStartChannel,
 } from "./api/client";
-import { Compass, Heart, House, Search, UserRound, Video } from "lucide-react";
+import { ChevronLeft, Compass, Heart, House, Search, UserRound, Video } from "lucide-react";
 import {
   AdminPanel,
   CreatorWorkspaceDashboard,
@@ -1305,6 +1305,7 @@ function App() {
     setSlug(s);
     setScreen("profile");
   };
+  const creatorWorkspace = screen === "account" && accountView === "creator";
   if ((screen === "account" || screen === "admin") && !authReady)
     return (
       <div className="app-shell">
@@ -1315,13 +1316,16 @@ function App() {
     );
   return (
     <div className="app-shell">
-      <header className="topbar">
+      <header className={`topbar${creatorWorkspace ? " creator-topbar" : ""}`}>
+        {creatorWorkspace && (
+          <button className="creator-back" aria-label="Back to Profile" onClick={() => setAccountView("profile")}>
+            <ChevronLeft size={22} aria-hidden="true" />
+          </button>
+        )}
         <button className="brand" onClick={() => setScreen("for-you")}>
           GPoint<span>•</span>
         </button>
-        <button className="icon-button" aria-label="Search">
-          <Search size={18} strokeWidth={1.8} aria-hidden="true" />
-        </button>
+        {!creatorWorkspace && <button className="icon-button" aria-label="Search"><Search size={18} strokeWidth={1.8} aria-hidden="true" /></button>}
       </header>
       <main className="page">
         {screen === "for-you" && (
@@ -1338,7 +1342,7 @@ function App() {
         )}{" "}
         {screen === "reels" && <RealReels open={clickReel} />}{" "}
         {screen === "account" &&
-          (creatorRoute || accountView === "creator" ? (
+          (accountView === "creator" ? (
             <CreatorDashboard />
           ) : (
             <MyProfile

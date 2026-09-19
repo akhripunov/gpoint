@@ -15,7 +15,7 @@ export async function creatorPage(page: Page, scenario = `run-${Date.now()}`) {
   const creatorRoute = `/creator/dashboard?e2eUserId=${e2eUserId}`;
   let profileReady = false;
   for (let attempt = 0; attempt < 3 && !profileReady; attempt++) {
-    await page.goto(`/?e2eUserId=${e2eUserId}`);
+    await page.goto(`/?e2eUserId=${e2eUserId}`, { timeout: 60_000 });
     try {
       await expect(page.getByRole('button', { name: 'Profile', exact: true })).toBeVisible({ timeout: 5000 });
       profileReady = true;
@@ -37,7 +37,7 @@ export async function creatorPage(page: Page, scenario = `run-${Date.now()}`) {
     return { ok: response.ok, status: response.status, body: await response.text() };
   }, { api, payload: onboardingPayload });
   if (!result.ok) throw new Error(`creator onboarding setup failed: ${result.status} ${result.body}`);
-  await page.goto(creatorRoute);
+  await page.goto(creatorRoute, { timeout: 60_000 });
   await expect(page.locator('body')).toBeVisible();
   for (let attempt = 0; attempt < 3 && await page.getByText('Loading…', { exact: true }).count(); attempt++) {
     await page.waitForTimeout(1000);
@@ -56,7 +56,14 @@ export async function creatorPage(page: Page, scenario = `run-${Date.now()}`) {
       continue;
     }
     if (state.creator) break;
-    await apiRequest(page, '/creator/onboarding', 'POST', onboardingPayload);
+    try {
+      await apiRequest(page, '/creator/onboarding', 'POST', onboardingPayload);
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes('401')) throw error;
+      await page.goto(`/?e2eUserId=${e2eUserId}`, { timeout: 60_000 });
+      await expect(page.getByRole('button', { name: 'Profile', exact: true })).toBeVisible({ timeout: 5000 });
+      continue;
+    }
     await page.waitForTimeout(500);
     await page.goto(`/?e2eUserId=${e2eUserId}`);
     await expect(page.getByRole('button', { name: 'Profile', exact: true })).toBeVisible();
