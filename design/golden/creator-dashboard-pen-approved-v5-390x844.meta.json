@@ -1,0 +1,10 @@
+{
+  "schema": "gpoint.visual-golden.pen-approved.v1",
+  "source": "design/gpoint-design-system.pen",
+  "screen": "Creator Dashboard Mobile / Scroll Content + Fixed Viewport Nav",
+  "viewport": { "width": 390, "height": 844 },
+  "approval": "OWNER_VISUAL_APPROVAL=YES",
+  "role": "canonical Pen implementation golden for Pen-to-React regression",
+  "sha256": "3f02ed824b2398bd1a4619f573bf7c0479658520f66289355d58ba13409a1e01",
+  "react": "frozen until Pen-to-React synchronization phase"
+}
