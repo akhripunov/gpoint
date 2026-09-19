@@ -38,7 +38,6 @@ import { Compass, Heart, House, Search, UserRound, Video } from "lucide-react";
 import {
   AdminPanel,
   CreatorWorkspaceDashboard,
-  TelegramChannelControls,
 } from "./platform-ui";
 import "./style.css";
 console.info("[GPoint] build", {
@@ -834,12 +833,7 @@ function CreatorChannelOnboarding() {
       />
     );
   if (q.data?.creator)
-    return (
-      <>
-        <CreatorWorkspaceDashboard />
-        <TelegramChannelControls />
-      </>
-    );
+    return <CreatorWorkspaceDashboard />;
   return (
     <section className="account">
       <p className="eyebrow">CREATOR ONBOARDING</p>
@@ -909,12 +903,7 @@ function CreatorDashboard() {
       />
     );
   if (!q.data?.creator) return <CreatorChannelOnboarding />;
-  return (
-    <>
-      <CreatorWorkspaceDashboard />
-      <TelegramChannelControls />
-    </>
-  );
+  return <CreatorWorkspaceDashboard />;
 }
 function Account({ user }: { user: any }) {
   return (

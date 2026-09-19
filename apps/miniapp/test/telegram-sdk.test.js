@@ -63,8 +63,8 @@ test('connected creators get a dedicated workspace without moderation or recomme
 test('connected Telegram channel card exposes operational settings', async () => {
   const platform = await readFile(join(root, 'src', 'platform-ui.tsx'), 'utf8');
   assert.match(platform, /MY TELEGRAM CHANNEL/);
-  assert.match(platform, /Models Hub/);
-  assert.match(platform, /Connected ✓/);
-  assert.match(platform, /Last sync:/);
-  assert.match(platform, /Save import settings/);
+  assert.match(platform, /c\.title/);
+  assert.match(platform, /status="Connected"/);
+  assert.match(platform, /Last sync/);
+  assert.match(platform, /Save settings/);
 });

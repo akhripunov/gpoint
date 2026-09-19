@@ -29,6 +29,18 @@ import {
   telegramChannel,
   updateTelegramChannel,
 } from "./api/client";
+import {
+  BarChart3,
+  Check,
+  CheckCircle2,
+  ChevronRight,
+  FileText,
+  Import,
+  Save,
+  Settings2,
+  ShieldCheck,
+  Unplug,
+} from "lucide-react";
 
 function Preview({ asset, admin = false }: { asset: any; admin?: boolean }) {
   const [url, setUrl] = useState("");
@@ -646,6 +658,22 @@ export function MediaUpload({
   );
 }
 
+function formatDashboardDate(value?: string | null) {
+  if (!value) return "Not synchronized yet";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Not synchronized yet";
+  return new Intl.DateTimeFormat(undefined, {
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function StatusBadge({ status, tone = "neutral" }: { status: string; tone?: string }) {
+  return <span className={`dashboard-status dashboard-status-${tone}`}>{status}</span>;
+}
+
 export function TelegramChannelControls() {
   const q = useQuery({
     queryKey: ["telegram-channel"],
@@ -663,6 +691,8 @@ export function TelegramChannelControls() {
     mutationFn: disconnectTelegramChannel,
     onSuccess: () => q.refetch(),
   });
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const [saved, setSaved] = useState(false);
   const c = q.data;
   useEffect(() => {
     if (c) {
@@ -670,23 +700,24 @@ export function TelegramChannelControls() {
       setHashtag(c.importHashtag || "gpoint");
     }
   }, [c?.id, c?.importMode, c?.importHashtag]);
-  if (q.isLoading) return null;
+  if (q.isLoading) return <div className="dashboard-skeleton" aria-label="Loading channel" />;
   if (!c)
     return (
-      <section className="account">
-        <p className="eyebrow">MY TELEGRAM CHANNEL</p>
-        <h2>Connect Telegram Channel</h2>
-        <p className="profile-bio">
+      <section className="dashboard-section dashboard-channel-panel">
+        <p className="dashboard-eyebrow">MY TELEGRAM CHANNEL</p>
+        <div className="dashboard-empty-card">
+          <div className="dashboard-icon-circle"><Import size={20} /></div>
+          <div>
+            <h2>Connect Telegram Channel</h2>
+            <p className="profile-bio">
           Select any Telegram channel where you are an administrator. GPoint
           verifies the channel and its own posting permission after selection.
-        </p>
-        <button
-          className="primary"
-          disabled={connect.isPending}
-          onClick={() => connect.mutate()}
-        >
-          Select Telegram Channel
-        </button>
+            </p>
+          </div>
+          <button className="primary dashboard-primary" disabled={connect.isPending} onClick={() => connect.mutate()}>
+            {connect.isPending ? "Preparing…" : "Select Telegram Channel"}
+          </button>
+        </div>
         {connect.data && <p role="status">{connect.data.instructions}</p>}
         {connect.error && (
           <p role="alert">{(connect.error as Error).message}</p>
@@ -694,53 +725,37 @@ export function TelegramChannelControls() {
       </section>
     );
   return (
-    <section className="account">
-      <p className="eyebrow">MY TELEGRAM CHANNEL</p>
-      <h2>Models Hub</h2>
-      <p>{c.title || c.username || "Channel"}</p>
-      <div className="tag-row">
-        <span className="tag">Connected ✓</span>
-        <span className="muted">
-          Last sync: {c.lastSuccessfulIngestAt || "Not synchronized"}
-        </span>
+    <section className="dashboard-section dashboard-channel-panel" aria-label="Telegram channel">
+      <p className="dashboard-eyebrow">MY TELEGRAM CHANNEL</p>
+      <div className="channel-card">
+        <div className="channel-avatar">{(c.title || c.username || "G").slice(0, 1).toUpperCase()}</div>
+        <div className="channel-copy">
+          <h2>{c.title || c.username || "Telegram channel"}</h2>
+          <p>Telegram channel</p>
+          <StatusBadge status="Connected" tone="success" />
+        </div>
+        <ChevronRight className="channel-chevron" size={20} aria-hidden="true" />
       </div>
-      {c.lastError && <p role="alert">{c.lastError}</p>}
-      <label>
-        Import mode
-        <select
-          aria-label="Import mode"
-          value={mode}
-          onChange={(e) => setMode(e.target.value)}
-        >
-          <option value="AUTO">AUTO</option>
-          <option value="HASHTAG">HASHTAG</option>
-          <option value="MANUAL">MANUAL</option>
-        </select>
-      </label>
-      <input
-        aria-label="Import hashtag"
-        value={hashtag}
-        onChange={(e) => setHashtag(e.target.value)}
-      />
-      <button
-        className="primary"
-        disabled={update.isPending}
-        onClick={() => update.mutate()}
-      >
-        Save import settings
-      </button>
-      <button
-        onClick={() => {
-          if (
-            window.confirm(
-              "Disconnecting stops future sync. Historical GPoint posts remain.",
-            )
-          )
-            disconnect.mutate();
-        }}
-      >
-        Disconnect
-      </button>
+      <div className="channel-meta"><span>Last sync</span><strong>{formatDashboardDate(c.lastSuccessfulIngestAt)}</strong></div>
+      {c.lastError && <p className="dashboard-error" role="alert">{c.lastError}</p>}
+      <div className="settings-card">
+        <div className="settings-card-heading"><div className="dashboard-icon-circle"><Settings2 size={18} /></div><div><p className="dashboard-eyebrow">IMPORT SETTINGS</p><h3>Keep your channel in sync</h3></div></div>
+        <label className="dashboard-field">Import mode
+          <select aria-label="Import mode" value={mode} onChange={(e) => { setMode(e.target.value); setSaved(false); }}>
+            <option value="AUTO">Auto</option><option value="HASHTAG">Hashtag</option><option value="MANUAL">Manual</option>
+          </select>
+        </label>
+        <p className="field-hint">{mode === "AUTO" ? "New posts will be imported automatically from your Telegram channel." : mode === "HASHTAG" ? "Only posts with this hashtag will be imported." : "Choose imported posts manually from your connected channel."}</p>
+        {mode === "HASHTAG" && <label className="dashboard-field">Hashtag<input aria-label="Import hashtag" value={hashtag} onChange={(e) => { setHashtag(e.target.value); setSaved(false); }} placeholder="gpoint" /></label>}
+        <div className="settings-actions">
+          <button className="dashboard-primary" disabled={update.isPending} onClick={() => { setSaved(false); update.mutate(undefined, { onSuccess: () => setSaved(true) }); }}><Save size={15} />{update.isPending ? "Saving…" : "Save settings"}</button>
+          {saved && <span className="save-confirm" role="status"><Check size={14} /> Saved</span>}
+        </div>
+      </div>
+      <div className="danger-zone">
+        <button className="danger-link" onClick={() => setConfirmDisconnect(true)}><Unplug size={15} /> Channel settings</button>
+        {confirmDisconnect && <div className="confirm-panel" role="dialog" aria-label="Confirm channel disconnect"><strong>Disconnect this channel?</strong><p>Future sync will stop. Historical GPoint posts remain.</p><div><button onClick={() => setConfirmDisconnect(false)}>Cancel</button><button className="danger-confirm" disabled={disconnect.isPending} onClick={() => disconnect.mutate(undefined, { onSuccess: () => setConfirmDisconnect(false) })}>Disconnect</button></div></div>}
+      </div>
     </section>
   );
 }
@@ -764,52 +779,65 @@ export function CreatorWorkspaceDashboard() {
     queryFn: creatorAnalytics,
     enabled: tab === "Stats",
   });
+  const profileSave = useMutation({ mutationFn: (body: any) => creatorProfileUpdate(body), onSuccess: () => q.refetch() });
+  const [profileName, setProfileName] = useState("");
+  const [profileSlug, setProfileSlug] = useState("");
+  const [profileBio, setProfileBio] = useState("");
+  useEffect(() => {
+    if (q.data?.creator) {
+      setProfileName(q.data.creator.displayName || "");
+      setProfileSlug(q.data.creator.slug || "");
+      setProfileBio(q.data.creator.bio || "");
+    }
+  }, [q.data?.creator?.id, q.data?.creator?.displayName, q.data?.creator?.slug, q.data?.creator?.bio]);
   if (q.isLoading) return <div className="empty">Loading creator workspace…</div>;
   const creator = q.data?.creator;
   if (!creator) return <div className="empty">Creator workspace unavailable.</div>;
+  const tools = [
+    { tab: "Profile settings", title: "Profile settings", copy: "Manage your creator profile", icon: <Settings2 size={18} /> },
+    { tab: "Imported Posts", title: "Imported posts", copy: "View and manage content", icon: <FileText size={18} /> },
+    { tab: "Stats", title: "Stats", copy: "Track your growth", icon: <BarChart3 size={18} /> },
+  ];
   return (
-    <section className="account" aria-label="Creator tools">
-      <p className="eyebrow">CREATOR TOOLS</p>
-      <h1>Creator Dashboard</h1>
+    <section className="creator-workspace" aria-label="Creator tools">
+      <div className="dashboard-heading"><p className="dashboard-eyebrow">CREATOR TOOLS</p><h1>Creator Dashboard</h1><p>Your content, your audience, more possibilities.</p></div>
       <div className="content-tabs">
-        {['Overview', 'Profile settings', 'Imported Posts', 'Stats'].map((item) => (
-          <button className={tab === item ? 'selected' : ''} onClick={() => setTab(item)} key={item}>
-            {item}
-          </button>
-        ))}
+        {['Overview', 'Profile settings', 'Imported Posts', 'Stats'].map((item) => <button className={tab === item ? 'selected' : ''} onClick={() => setTab(item)} key={item}>{item}</button>)}
       </div>
       {tab === 'Overview' && (
-        <div className="empty">
-          <h3>Creator workspace active</h3>
-          <p>Telegram channel connected and ready for ingestion.</p>
-          <p>Public profile: {creator.status}</p>
-        </div>
+        <>
+          <div className="workspace-hero"><div className="hero-status-icon"><CheckCircle2 size={25} /></div><div><p className="dashboard-eyebrow">WORKSPACE STATUS</p><h2>Creator workspace active</h2><p>Telegram channel connected and ready for ingestion.</p></div><StatusBadge status={creator.status === "APPROVED" ? "Live" : "Pending review"} tone={creator.status === "APPROVED" ? "success" : "warm"} /></div>
+              <TelegramChannelControls />
+          <div className="dashboard-section"><p className="dashboard-eyebrow">CREATOR TOOLS</p><div className="tool-grid">{tools.map((tool) => <button className="tool-card" key={tool.tab} onClick={() => setTab(tool.tab)}><span className="tool-icon">{tool.icon}</span><span><strong>{tool.title}</strong><small>{tool.copy}</small></span><ChevronRight size={17} /></button>)}</div></div>
+        </>
       )}
       {tab === 'Profile settings' && (
-        <div className="empty">
-          <h3>{creator.displayName}</h3>
-          <p>@{creator.slug}</p>
-          <p>{creator.bio || 'Add a bio to your public profile.'}</p>
-          <p>Public profile: {creator.status}</p>
+        <div className="dashboard-section profile-settings-panel">
+          <p className="dashboard-eyebrow">PROFILE SETTINGS</p><h2>Shape your public profile</h2><p className="dashboard-copy">Keep your creator identity clear and easy to recognize.</p>
+          <label className="dashboard-field">Display name<input aria-label="Creator display name" value={profileName} onChange={(e) => setProfileName(e.target.value)} /></label>
+          <label className="dashboard-field">GPoint handle<input aria-label="Creator handle" value={profileSlug} onChange={(e) => setProfileSlug(e.target.value)} /></label>
+          <label className="dashboard-field">Bio<textarea aria-label="Creator bio" rows={4} value={profileBio} onChange={(e) => setProfileBio(e.target.value)} placeholder="Tell people what you create." /></label>
+          <button className="dashboard-primary" disabled={profileSave.isPending} onClick={() => profileSave.mutate({ displayName: profileName, slug: profileSlug, bio: profileBio, tags: [] })}><Save size={15} />{profileSave.isPending ? "Saving…" : "Save profile"}</button>
+          <div className="profile-state"><ShieldCheck size={16} /><span>Public profile:</span><StatusBadge status={creator.status === "APPROVED" ? "Live" : "Pending review"} tone={creator.status === "APPROVED" ? "success" : "warm"} /></div>
         </div>
       )}
       {tab === 'Imported Posts' && (
-        <div className="empty">
-          <h3>Imported Posts</h3>
+        <div className="dashboard-section">
+          <div className="dashboard-section-title"><div><p className="dashboard-eyebrow">CONTENT LIBRARY</p><h2>Imported Posts</h2></div><span className="muted">{posts.data?.items?.length ?? 0} total</span></div>
           {posts.isLoading && <p>Loading imported posts…</p>}
-          {posts.isError && <p role="alert">Imported posts are unavailable.</p>}
+          {posts.isError && <p className="dashboard-error" role="alert">Couldn't load creator data. Try again.</p>}
           {posts.data?.items?.length ? posts.data.items.map((post: any) => (
-            <article key={post.id}>
-              <p>{post.caption || 'Imported Telegram post'}</p>
-              <span className="muted">{post.safetyClassification === 'UNCERTAIN' || post.ingestStatus === 'PENDING_MODERATION' ? 'Pending review' : post.status}</span>
+            <article className="imported-post-card" key={post.id}>
+              {post.media?.[0]?.readUrl ? <img src={mediaUrl(post.media[0].readUrl)} alt="" /> : <div className="post-placeholder"><FileText size={20} /></div>}
+              <div><p>{post.caption || 'Imported Telegram post'}</p><StatusBadge status={post.safetyClassification === 'UNCERTAIN' || post.ingestStatus === 'PENDING_MODERATION' ? 'Pending review' : post.status === 'PUBLISHED' ? 'Published' : post.status === 'REJECTED' ? 'Rejected' : 'Pending review'} tone={post.status === 'REJECTED' ? 'danger' : post.status === 'PUBLISHED' ? 'success' : 'warm'} /></div><ChevronRight size={17} />
             </article>
-          )) : !posts.isLoading && <p>No imported posts yet.</p>}
+          )) : !posts.isLoading && <div className="dashboard-empty-card"><FileText size={19} /><p>No imported posts yet.</p></div>}
         </div>
       )}
       {tab === 'Stats' && (
-        <div className="empty">
-          <h3>Stats</h3>
-          <p>{stats.data ? `Views ${stats.data.profileViews} · Followers ${stats.data.followers}` : 'Loading stats…'}</p>
+        <div className="dashboard-section">
+          <p className="dashboard-eyebrow">YOUR MOMENTUM</p><h2>Stats</h2><p className="dashboard-copy">A simple view of how your profile is being discovered.</p>
+          <div className="stat-grid">{[["Profile views", stats.data?.profileViews ?? 0], ["Followers", stats.data?.followers ?? 0], ["Post views", stats.data?.postViews ?? 0], ["Reel views", stats.data?.reelViews ?? 0]].map(([label, value]) => <div className="stat-card" key={String(label)}><strong>{value}</strong><span>{label}</span></div>)}</div>
         </div>
       )}
     </section>
