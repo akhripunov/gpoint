@@ -110,3 +110,54 @@ body:has(.account) .bottom-nav{display:grid}
 .dashboard-empty-card{display:flex;align-items:center;gap:10px;padding:17px;border:1px dashed var(--line);border-radius:16px;color:var(--muted);font-size:12px}.dashboard-empty-card p{margin:0}.profile-settings-panel{max-width:560px}.profile-state{display:flex;align-items:center;gap:8px;margin-top:20px;padding-top:15px;border-top:1px solid var(--line);color:var(--sub);font-size:12px}.profile-state .dashboard-status{margin-left:auto}.imported-post-card{display:flex;align-items:center;gap:11px;padding:10px;margin:9px 0;border:1px solid var(--line);border-radius:15px;background:rgba(17,24,39,.75)}.imported-post-card>img,.post-placeholder{width:52px;height:52px;flex:none;border-radius:11px;object-fit:cover;background:var(--surface-3)}.post-placeholder{display:grid;place-items:center;color:var(--accent)}.imported-post-card>div:nth-child(2){min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:7px}.imported-post-card p{margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;font-size:12px;color:var(--text)}.imported-post-card>svg{margin-left:auto;color:var(--muted);flex:none}.stat-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.stat-card{padding:16px;border:1px solid var(--line);border-radius:16px;background:linear-gradient(145deg,rgba(29,41,60,.75),rgba(17,24,39,.82))}.stat-card strong{display:block;font-family:'Playfair Display',Georgia,serif;color:var(--accent-soft);font-size:28px;line-height:1;margin-bottom:8px}.stat-card span{color:var(--muted);font-size:11px}.dashboard-skeleton{height:130px;border-radius:19px;background:linear-gradient(90deg,var(--surface),#233047,var(--surface));background-size:200% 100%;animation:shimmer 1.35s infinite}
 @media(max-width:560px){.workspace-hero{align-items:flex-start;padding:14px}.workspace-hero .dashboard-status{margin-left:0;position:absolute;right:26px;margin-top:2px}.workspace-hero{position:relative;padding-right:108px}.tool-grid{grid-template-columns:1fr}.tool-card{display:grid;grid-template-columns:32px 1fr auto;align-items:center;gap:11px;padding:13px}.tool-card>svg{align-self:center}.channel-card{padding:13px}.creator-workspace{padding-bottom:12px}}
 @media(min-width:561px){.dashboard-channel-panel,.dashboard-section{max-width:640px}.creator-workspace{padding-left:2px;padding-right:2px}}
+
+/* Creator dashboard mobile design tokens: primary 390x844 viewport. */
+@media(max-width:560px){
+  :root{--nav:64px}
+  .page{padding-left:20px;padding-right:20px}
+  .creator-workspace{padding:10px 0 calc(var(--nav) + var(--safe-bottom) + 24px)}
+  .dashboard-heading{padding:16px 0 18px}
+  .dashboard-heading h1{font-size:44px;line-height:46px;max-width:100%;margin:7px 0 0}
+  .dashboard-heading>p:last-child,.dashboard-copy{font-size:15px;line-height:21px;margin-top:6px}
+  .dashboard-eyebrow{font-size:12px;line-height:16px;letter-spacing:2.2px}
+  .creator-workspace .content-tabs{height:46px;gap:28px;margin-bottom:28px}
+  .creator-workspace .content-tabs button{font-size:16px;line-height:22px;padding:12px 0 10px}
+  .workspace-hero{min-height:136px;border-radius:22px;padding:20px;gap:14px;margin-bottom:28px}
+  .hero-status-icon{width:56px;height:56px}
+  .workspace-hero>div:nth-child(2){min-width:0;padding-right:96px}
+  .workspace-hero h2{font-size:20px;line-height:26px}
+  .workspace-hero p:not(.dashboard-eyebrow){font-size:15px;line-height:22px}
+  .dashboard-status{height:28px;padding:0 12px;border-radius:14px;font-size:12px}
+  .dashboard-section{margin:28px 0}
+  .dashboard-section>.dashboard-eyebrow,.dashboard-channel-panel>.dashboard-eyebrow{margin-bottom:12px}
+  .dashboard-empty-card{display:grid;grid-template-columns:44px minmax(0,1fr);gap:12px;align-items:start;min-height:168px;border-radius:22px;padding:18px}
+  .dashboard-empty-card .dashboard-icon-circle{grid-row:1;grid-column:1}
+  .dashboard-empty-card>div:nth-child(2){grid-column:2;min-width:0}
+  .dashboard-empty-card>.dashboard-primary{grid-column:1/-1;width:100%}
+  .channel-card{min-height:168px;border-radius:22px;padding:18px}
+  .channel-avatar{width:72px;height:72px;border-radius:18px;font-size:31px}
+  .channel-copy h2{font-size:24px;line-height:29px}
+  .channel-copy p{font-size:14px;line-height:20px}
+  .channel-meta{font-size:13px;line-height:18px;padding-top:12px}
+  .settings-card{min-height:144px;border-radius:22px;padding:18px}
+  .dashboard-icon-circle{width:44px;height:44px}
+  .dashboard-field{font-size:15px;line-height:20px}
+  .dashboard-field input,.dashboard-field textarea,.dashboard-field select{font-size:16px}
+  .dashboard-field select{height:48px;border-radius:14px;padding:0 14px}
+  .field-hint{font-size:13px;line-height:19px}
+  .dashboard-primary{height:50px;border-radius:16px;padding:0 20px;font-size:16px}
+  .tool-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+  .tool-card{display:flex;min-height:170px;border-radius:20px;padding:14px 10px;overflow:hidden}
+  .tool-card .tool-icon{width:44px;height:44px}
+  .tool-card>span:nth-child(2){width:100%;min-width:0}
+  .tool-card strong{font-size:15px;line-height:18px}
+  .tool-card small{font-size:12px;line-height:17px;overflow-wrap:anywhere}
+  .tool-card>svg{width:18px;height:18px}
+  .bottom-nav{height:calc(var(--nav) + var(--safe-bottom));padding-bottom:var(--safe-bottom)}
+  .nav-item{font-size:11px;line-height:14px;min-height:44px}
+  .nav-item b{font-size:23px}
+}
+@media(max-width:375px){
+  .tool-grid{display:flex;overflow-x:auto;gap:12px;padding-bottom:4px}
+  .tool-card{flex:0 0 132px}
+}

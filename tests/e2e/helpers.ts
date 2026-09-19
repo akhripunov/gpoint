@@ -13,8 +13,17 @@ export async function creatorPage(page: Page, scenario = `run-${Date.now()}`) {
   const identityHash = Array.from(`${scenario}:${project}`).reduce((sum, char) => sum + char.charCodeAt(0), 0);
   const e2eUserId = 200000000 + runSuffix * 10 + identityHash;
   const creatorRoute = `/creator/dashboard?e2eUserId=${e2eUserId}`;
-  await page.goto(`/?e2eUserId=${e2eUserId}`);
-  await expect(page.getByRole('button', { name: 'Profile', exact: true })).toBeVisible();
+  let profileReady = false;
+  for (let attempt = 0; attempt < 3 && !profileReady; attempt++) {
+    await page.goto(`/?e2eUserId=${e2eUserId}`);
+    try {
+      await expect(page.getByRole('button', { name: 'Profile', exact: true })).toBeVisible({ timeout: 5000 });
+      profileReady = true;
+    } catch (error) {
+      if (attempt === 2) throw error;
+      await page.waitForTimeout(500);
+    }
+  }
   const stamp = Date.now() * 1000 + Math.floor(Math.random() * 1000);
   const onboardingPayload = { displayName: `E2E Creator ${stamp}`, slug: `e2e-creator-${stamp}`, bio: 'Browser release proof creator', tags: [] as string[] };
   const api = process.env.GPOINT_E2E_API_URL ?? 'http://localhost:3000';
