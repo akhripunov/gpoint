@@ -85,7 +85,7 @@ Every approved Pen modification must follow: **SAVE → verify disk hash changed
 - **Radix:** no actual repository usage found; deferred.
 - **shadcn/ui:** no actual repository usage found; patterns may be consulted, but no catalogue is imported.
 - **Telegram UI:** use only as a source of Telegram Mini App behavior/patterns; no wholesale migration.
-- **Pen/Pencil MCP:** current MCP is already connected and is sufficient for this Factory. No global skill/plugin installation was performed; therefore there is no owner installation action.
+- **Pen/Pencil MCP:** current MCP is already connected and is sufficient for this Factory. The official OpenAI `build-web-apps` plugin is installed in Codex for frontend implementation and rendered QA; it does not replace the repo-local GPoint skill.
 
 ## Codex Design Agent Workflow
 
@@ -97,3 +97,42 @@ actual reference pixels → build and screenshot incrementally → require expli
 owner approval before React synchronization → run responsive visual QA.
 
 Design fixtures are not production data. Pen/Storybook/visual tests may use stable fixture avatars, titles and timestamps; runtime uses actual connected Telegram data.
+
+## Official Codex Frontend Skill Coordination
+
+GPoint keeps `$gpoint-design` as the product-specific orchestration layer and
+coordinates it with the official OpenAI `build-web-apps` skills:
+
+- `$gpoint-design` owns GPoint's Design Factory, Pen source of truth, approved
+  references/Goldens, tokens, components, viewport rules, and owner-approval
+  gates.
+- `frontend-app-builder` is used for faithful React implementation after an
+  approved Pen/reference handoff. It does not authorize reinterpretation of
+  GPoint's accepted visual direction.
+- `frontend-testing-debugging` owns rendered UI validation. Prefer the official
+  Browser plugin when available; use Playwright as the documented fallback when
+  Browser is unavailable or unreliable.
+- `react-best-practices` is applied after meaningful React component edits for
+  implementation quality and performance review.
+
+`shadcn-best-practices` is not a request to install or introduce shadcn,
+Radix, or TelegramUI into GPoint. `imagegen` is used only when a genuinely new
+visual asset/pattern is required and remains subordinate to GPoint constraints.
+
+### Exact-reference fidelity
+
+When the owner accepts a reference as “this is what we should build”, the inner
+product UI is the `EXACT VISUAL TARGET`. Device frames, browser chrome, status
+bars, and decorative presentation backgrounds are `PRESENTATION CHROME` and
+may be excluded from the product screen; they do not downgrade the inner UI to
+loose inspiration.
+
+Every exact-reference task requires a Fidelity Ledger with, for each major
+region, `REGION`, `REFERENCE OBSERVATION`, `CURRENT RENDER OBSERVATION`,
+`DELTA`, `ACTION`, and `FINAL STATUS`. At minimum: Header, Navigation/Tabs,
+Hero, Primary Card, Secondary Cards, Typography, spacing/rhythm, and BottomNav.
+Measurements are exact only when supported by the source pixels; otherwise
+they are explicitly approximate. The ledger is checked during the Pen
+reference → editable screen → screenshot loop and again during the approved
+Pen/reference → React → rendered browser QA loop. Passing tests or SSIM alone
+does not approve the design; owner approval remains explicit.
