@@ -34,6 +34,7 @@ import {
   telegramChannelConnectionStatus,
   openTelegramStartChannel,
 } from "./api/client";
+import { Compass, Heart, House, Search, UserRound, Video } from "lucide-react";
 import {
   AdminPanel,
   CreatorWorkspaceDashboard,
@@ -64,7 +65,7 @@ function Nav({
 }: {
   active: Screen;
   target: Screen;
-  icon: string;
+  icon: React.ReactNode;
   label: string;
   go: (s: Screen) => void;
 }) {
@@ -1330,7 +1331,7 @@ function App() {
           GPoint<span>•</span>
         </button>
         <button className="icon-button" aria-label="Search">
-          ⌕
+          <Search size={18} strokeWidth={1.8} aria-hidden="true" />
         </button>
       </header>
       <main className="page">
@@ -1368,36 +1369,36 @@ function App() {
         <Nav
           active={screen}
           target="for-you"
-          icon="⌂"
+          icon={<House size={18} strokeWidth={1.8} />}
           label="For You"
           go={setScreen}
         />
         <Nav
           active={screen}
           target="reels"
-          icon="▶"
+          icon={<Video size={18} strokeWidth={1.8} />}
           label="Reels"
           go={setScreen}
         />
         <Nav
           active={screen}
           target="explore"
-          icon="◉"
+          icon={<Compass size={18} strokeWidth={1.8} />}
           label="Explore"
           go={setScreen}
         />
         <Nav
           active={screen}
-          target="account"
-          icon="○"
-          label="Profile"
+          target="following"
+          icon={<Heart size={18} strokeWidth={1.8} />}
+          label="Following"
           go={setScreen}
         />
         <Nav
           active={screen}
-          target="following"
-          icon="♡"
-          label="Following"
+          target="account"
+          icon={<UserRound size={18} strokeWidth={1.8} />}
+          label="Profile"
           go={setScreen}
         />
       </nav>

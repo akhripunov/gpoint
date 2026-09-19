@@ -57,7 +57,7 @@ test('creator can configure profile, media, post, reel and VIP controls', async 
 });
 
 test('admin can inspect moderation queues from the browser', async ({ page }) => {
-  await page.goto('/admin');
+  await page.goto('/admin?e2eUserId=991234567');
   await expect(page.getByRole('heading', { name: 'Moderation' })).toBeVisible();
   await page.getByRole('button', { name: 'Content', exact: true }).click();
   await page.getByRole('button', { name: 'VIP', exact: true }).click();

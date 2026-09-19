@@ -1,0 +1,53 @@
+import { test, expect } from '@playwright/test';
+import fs from 'node:fs';
+import path from 'node:path';
+
+test('captures the reusable GPoint UI foundation surfaces', async ({ page, browser }) => {
+  const outputDir = path.join(process.cwd(), 'test-results', 'ui-foundation');
+  fs.mkdirSync(outputDir, { recursive: true });
+  const prefix = `${test.info().project.name}-${page.viewportSize()?.width}`;
+  const shot = (name: string) => page.screenshot({ path: path.join(outputDir, `${prefix}-${name}.png`), fullPage: true });
+
+  await page.goto('/');
+  await expect(page.locator('.app-shell')).toBeVisible();
+  await shot('for-you');
+
+  await page.getByRole('button', { name: /Reels/ }).click();
+  await expect(page.getByRole('heading', { name: 'Reels', exact: true })).toBeVisible();
+  await shot('reels');
+
+  await page.getByRole('button', { name: /Explore/ }).click();
+  await shot('explore');
+
+  await page.getByRole('button', { name: /Profile/ }).click();
+  await shot('profile');
+
+  await page.goto('/creator/dashboard?e2eUserId=200000001');
+  await expect(page.locator('body')).toBeVisible();
+  await shot('creator-dashboard');
+
+  if (test.info().project.name === 'chromium-mobile') {
+    const phone390 = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const page390 = await phone390.newPage();
+    const shot390 = (name: string) => page390.screenshot({ path: path.join(outputDir, `chromium-mobile-390-${name}.png`), fullPage: true });
+    await page390.goto('/');
+    await expect(page390.locator('.app-shell')).toBeVisible();
+    await shot390('for-you');
+    await page390.getByRole('button', { name: /Reels/ }).click();
+    await shot390('reels');
+    await page390.getByRole('button', { name: /Explore/ }).click();
+    await shot390('explore');
+    await page390.getByRole('button', { name: /Profile/ }).click();
+    await shot390('profile');
+    await page390.goto('/creator/dashboard?e2eUserId=200000001');
+    await shot390('creator-dashboard');
+    await phone390.close();
+
+    const phone430 = await browser.newContext({ viewport: { width: 430, height: 932 } });
+    const page430 = await phone430.newPage();
+    await page430.goto('/');
+    await expect(page430.locator('.app-shell')).toBeVisible();
+    await page430.screenshot({ path: path.join(outputDir, 'chromium-mobile-430-for-you.png'), fullPage: true });
+    await phone430.close();
+  }
+});
