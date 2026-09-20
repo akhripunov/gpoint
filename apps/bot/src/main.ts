@@ -4,6 +4,13 @@ const token = process.env.TELEGRAM_BOT_TOKEN;
 const ingestUrl = process.env.GPOINT_INGEST_URL ?? 'http://127.0.0.1:3000/internal/telegram/update';
 const webhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET;
 const publicAppUrl = process.env.PUBLIC_APP_URL;
+const releaseSha = process.env.RELEASE_SHA;
+
+function miniAppLaunchUrl(url: string) {
+  const launchUrl = new URL(url);
+  if (/^[a-f0-9]{40}$/i.test(releaseSha ?? '')) launchUrl.searchParams.set('v', releaseSha!);
+  return launchUrl.toString();
+}
 
 if (!token) {
   console.error('TELEGRAM_BOT_TOKEN is required');
@@ -13,7 +20,12 @@ if (!token) {
   process.exitCode = 1;
 } else {
   const bot = new Bot(token);
-  const openKeyboard = new InlineKeyboard().webApp('Open GPoint', publicAppUrl);
+  const launchUrl = miniAppLaunchUrl(publicAppUrl);
+  const openKeyboard = new InlineKeyboard().webApp('Open GPoint', launchUrl);
+
+  void bot.api.setChatMenuButton({ menu_button: { type: 'web_app', text: 'Open GPoint', web_app: { url: launchUrl } } })
+    .then(() => console.info('[GPoint] Telegram Mini App menu button synchronized', { releaseShaPresent: Boolean(releaseSha) }))
+    .catch(error => console.error('[GPoint] Telegram Mini App menu button sync failed', { reason: error instanceof Error ? error.message : 'UNKNOWN' }));
 
   bot.command('start', ctx => ctx.reply('Welcome to GPoint — a creator-first feed.', { reply_markup: openKeyboard }));
 
