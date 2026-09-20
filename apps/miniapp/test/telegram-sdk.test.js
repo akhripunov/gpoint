@@ -19,6 +19,12 @@ test('API client disables conditional caching and bounds request time', async ()
   assert.match(source, /setTimeout\(\(\)=>controller\.abort\(\),timeoutMs\)/);
 });
 
+test('media asset URLs resolve from the same origin, not the /api path base', async () => {
+  const source = await readFile(join(root, 'src/api/client.ts'), 'utf8');
+  assert.match(source, /new URL\(path,window\.location\.origin\)/);
+  assert.doesNotMatch(source, /new URL\(path,apiBase\|\|window\.location\.origin\)/);
+});
+
 test('creator onboarding uses the official startchannel deep link', async () => {
   const client = await readFile(join(root, 'src/api/client.ts'), 'utf8');
   const main = await readFile(join(root, 'src/main.tsx'), 'utf8');

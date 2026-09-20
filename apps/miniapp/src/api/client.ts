@@ -4,7 +4,11 @@ import { markBootStage } from '../boot-diagnostics';
 // for the API while all other client routes resolve to the SPA. Keep the empty
 // base during local Vite development so its existing API proxy remains used.
 export const apiBase=import.meta.env.VITE_API_URL??(import.meta.env.DEV?'':'/api');
-export const mediaUrl=(path:string)=>new URL(path,apiBase||window.location.origin).toString();
+// Media delivery is mounted at the origin root (/media), while API requests
+// use the /api prefix. Resolving a root-relative media path against `/api`
+// makes `new URL()` throw in the browser because `/api` is not an absolute
+// URL base. Keep media same-origin in production and local development.
+export const mediaUrl=(path:string)=>new URL(path,window.location.origin).toString();
 export class ApiError extends Error{constructor(public status:number,message:string){super(message)}}
 let token=localStorage.getItem('gpoint.session'); export const getToken=()=>token;
 async function request<T>(path:string,init:RequestInit={},timeoutMs=15000){const headers=new Headers(init.headers);if(init.body!==undefined&&!(init.body instanceof FormData)&&!headers.has('content-type'))headers.set('content-type','application/json');if(token)headers.set('authorization',`Bearer ${token}`);const controller=new AbortController();const externalSignal=init.signal;if(externalSignal){if(externalSignal.aborted)controller.abort();else externalSignal.addEventListener('abort',()=>controller.abort(),{once:true})}const started=Date.now();const timeout=setTimeout(()=>controller.abort(),timeoutMs);const stage=path==='/me'?'ME':path.startsWith('/feed/for-you')?'FEED':null;if(stage==='ME')markBootStage('ME_REQUEST_STARTED');if(stage==='FEED')markBootStage('FEED_REQUEST_STARTED');try{const r=await fetch(`${apiBase}${path}`,{...init,headers,cache:'no-store',credentials:'same-origin',signal:controller.signal});let data:unknown;try{data=await r.json()}catch{data=null}console.info('[GPoint] API response',{path,status:r.status,latencyMs:Date.now()-started});if(!r.ok)throw new ApiError(r.status,(data as {message?:string})?.message??'Request failed');if(stage==='ME')markBootStage('ME_SUCCESS');if(stage==='FEED')markBootStage('FEED_SUCCESS',{itemCount:Array.isArray((data as any)?.items)?(data as any).items.length:undefined});return data as T}catch(error){if(error instanceof DOMException&&error.name==='AbortError')throw new ApiError(408,'Request timed out');throw error}finally{clearTimeout(timeout)}}
