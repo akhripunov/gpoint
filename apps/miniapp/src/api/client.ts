@@ -1,5 +1,8 @@
 import type { CreatorProfileDTO, ExploreResponseDTO, CurrentUserDTO, PaginatedResponse, PostDTO, ReelDTO, VipClickResponseDTO, VipOfferDTO } from '../../../../packages/contracts/src/index.js';
-export const apiBase=import.meta.env.VITE_API_URL??'';
+// Production serves the Mini App and API from one origin; Caddy reserves /api
+// for the API while all other client routes resolve to the SPA. Keep the empty
+// base during local Vite development so its existing API proxy remains used.
+export const apiBase=import.meta.env.VITE_API_URL??(import.meta.env.DEV?'':'/api');
 export const mediaUrl=(path:string)=>new URL(path,apiBase||window.location.origin).toString();
 export class ApiError extends Error{constructor(public status:number,message:string){super(message)}}
 let token=localStorage.getItem('gpoint.session'); export const getToken=()=>token;
