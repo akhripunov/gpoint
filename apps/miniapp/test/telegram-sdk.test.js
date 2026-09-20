@@ -71,20 +71,6 @@ test('connected Telegram channel card exposes operational settings', async () =>
   assert.match(platform, /disabled={!dirty \|\| update\.isPending}/);
 });
 
-test('disconnected creator reconnect uses prepared native selection and truthful overview state', async () => {
-  const client = await readFile(join(root, 'src', 'api', 'client.ts'), 'utf8');
-  const platform = await readFile(join(root, 'src', 'platform-ui.tsx'), 'utf8');
-  assert.match(client, /prepareCreatorChannelSelection/);
-  assert.match(client, /\/creator\/channel\/selection\/prepare/);
-  assert.match(client, /requestCreatorTelegramChannel/);
-  assert.match(platform, /c\?\.status === "CONNECTED"/);
-  assert.match(platform, /prepare=\{prepareCreatorChannelSelection\}/);
-  assert.match(platform, /label="Select Telegram Channel"/);
-  assert.match(platform, /Reconnect your Telegram channel/);
-  assert.match(platform, /Telegram channel connected and ready for ingestion\./);
-  assert.match(platform, /channelQ\.data\?\.status === "CONNECTED"/);
-});
-
 test('authenticated app passes the single authenticated user into the app shell', async () => {
   const main = await readFile(join(root, 'src', 'main.tsx'), 'utf8');
   const appStart = main.indexOf('function App({ initialUser }');

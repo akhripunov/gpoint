@@ -25,10 +25,10 @@ import {
   disconnectTelegramChannel,
   getToken,
   mediaUrl,
-  prepareCreatorChannelSelection,
   prepareCreatorChannelReverification,
   creatorChannelSelectionStatus,
   requestCreatorTelegramChannel,
+  startTelegramChannelConnection,
   telegramChannel,
   updateTelegramChannel,
 } from "./api/client";
@@ -708,6 +708,7 @@ export function TelegramChannelControls() {
     queryKey: ["telegram-channel"],
     queryFn: telegramChannel,
   });
+  const connect = useMutation({ mutationFn: startTelegramChannelConnection });
   const c = creatorDashboardVisualFixture ? visualFixtureChannel : q.data;
   const connected = c?.status === "CONNECTED";
   if (q.isLoading) return <div className="dashboard-skeleton" aria-label="Loading channel" />;
@@ -724,8 +725,14 @@ export function TelegramChannelControls() {
           verifies the channel and its own posting permission after selection.
             </p>
           </div>
-          {!creatorDashboardVisualFixture && <CreatorChannelSelectionAction prepare={prepareCreatorChannelSelection} onSuccess={() => q.refetch()} label="Select Telegram Channel" />}
+          <button className="primary dashboard-primary" disabled={connect.isPending} onClick={() => connect.mutate()}>
+            {connect.isPending ? "Preparing…" : "Select Telegram Channel"}
+          </button>
         </div>
+        {connect.data && <p role="status">{connect.data.instructions}</p>}
+        {connect.error && (
+          <p role="alert">{(connect.error as Error).message}</p>
+        )}
       </section>
     );
   return (
@@ -738,10 +745,10 @@ export function TelegramChannelControls() {
   );
 }
 
-function CreatorChannelSelectionAction({ prepare, onSuccess, label }: { prepare: () => Promise<{ requestId: string; challengeId: string; expiresAt: string; supported: boolean }>; onSuccess: () => void; label: string }) {
+function CreatorReverifyAction({ onSuccess }: { onSuccess: () => void }) {
   const prepared = useQuery({
-    queryKey: ["creator-channel-selection-prepare", label],
-    queryFn: prepare,
+    queryKey: ["creator-channel-reverify-prepare"],
+    queryFn: prepareCreatorChannelReverification,
     enabled: !creatorDashboardVisualFixture,
     staleTime: 8 * 60_000,
     retry: false,
@@ -777,16 +784,12 @@ function CreatorChannelSelectionAction({ prepare, onSuccess, label }: { prepare:
   };
   return <div className="reverify-control">
     <button className="dashboard-secondary" disabled={!prepared.data || prepared.isFetching || state === "REQUESTING" || state === "VERIFYING"} onClick={reverify}>
-      {state === "REQUESTING" ? "Opening Telegram…" : state === "VERIFYING" ? "Verifying connection…" : label}
+      {state === "REQUESTING" ? "Opening Telegram…" : state === "VERIFYING" ? "Verifying connection…" : "Re-verify connection"}
     </button>
     {state === "DONE" && <p className="save-confirm" role="status">Connection verified.</p>}
     {prepared.error && <p className="dashboard-error" role="alert">Could not prepare verification. Try again.</p>}
     {message && <p className="dashboard-error" role="alert">{message}</p>}
   </div>;
-}
-
-function CreatorReverifyAction({ onSuccess }: { onSuccess: () => void }) {
-  return <CreatorChannelSelectionAction prepare={prepareCreatorChannelReverification} onSuccess={onSuccess} label="Re-verify connection" />;
 }
 
 export function TelegramImportSettings() {
@@ -820,7 +823,6 @@ export function TelegramImportSettings() {
 
 export function CreatorWorkspaceDashboard() {
   const q = useQuery({ queryKey: ["creator-me"], queryFn: creatorMe });
-  const channelQ = useQuery({ queryKey: ["telegram-channel"], queryFn: telegramChannel });
   const [tab, setTab] = useState("Overview");
   const posts = useQuery({
     queryKey: ["creator-imported-posts"],
@@ -863,7 +865,7 @@ export function CreatorWorkspaceDashboard() {
       <Tabs items={['Overview', 'Profile settings', 'Imported Posts', 'Stats']} active={tab} onChange={setTab} className="content-tabs" />
       {tab === 'Overview' && (
         <>
-          <WorkspaceStatusCard icon={<Check size={28} strokeWidth={1.8} />} title={channelQ.data?.status === "CONNECTED" ? "Creator workspace active" : "Reconnect your Telegram channel"} body={channelQ.data?.status === "CONNECTED" ? "Telegram channel connected and ready for ingestion." : "Reconnect your Telegram channel to resume ingestion."} status={channelQ.data?.status === "CONNECTED" ? (creator.status === "APPROVED" ? "Live" : "Pending review") : "Reconnect required"} tone={channelQ.data?.status === "CONNECTED" && creator.status === "APPROVED" ? "success" : "warm"} />
+          <WorkspaceStatusCard icon={<Check size={28} strokeWidth={1.8} />} title="Creator workspace active" body="Telegram channel connected and ready for ingestion." status={creator.status === "APPROVED" ? "Live" : "Pending review"} tone={creator.status === "APPROVED" ? "success" : "warm"} />
           <TelegramChannelControls />
           <div className="dashboard-section"><SectionEyebrow>CREATOR TOOLS</SectionEyebrow><div className="gpoint-tool-grid">{tools.map((tool) => <CreatorToolCard key={tool.tab} title={tool.title} description={tool.copy} icon={tool.icon} onClick={() => setTab(tool.tab)} />)}</div></div>
           <TelegramImportSettings />
