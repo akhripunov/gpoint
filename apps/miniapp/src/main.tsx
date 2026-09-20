@@ -34,12 +34,14 @@ import {
   telegramChannelConnectionStatus,
   openTelegramStartChannel,
 } from "./api/client";
-import { ChevronLeft, Compass, Heart, House, Search, UserRound, Video } from "lucide-react";
+import { House, Search, Settings, UserRound, Users, Video } from "lucide-react";
 import {
   AdminPanel,
   CreatorWorkspaceDashboard,
 } from "./platform-ui";
+import { BackButton, BottomNav } from "./ui";
 import "./style.css";
+import "./ui/tokens.css";
 console.info("[GPoint] build", {
   APP_BUILD_SHA: __GPOINT_BUILD_SHA__,
   APP_BUILD_TIME: __GPOINT_BUILD_TIME__,
@@ -55,30 +57,6 @@ type Screen =
   | "following";
 const V = ({ on }: { on?: boolean }) =>
   on ? <span className="verified">✓</span> : null;
-function Nav({
-  active,
-  target,
-  icon,
-  label,
-  go,
-}: {
-  active: Screen;
-  target: Screen;
-  icon: React.ReactNode;
-  label: string;
-  go: (s: Screen) => void;
-}) {
-  return (
-    <button
-      aria-label={label === "For You" ? label : undefined}
-      className={"nav-item " + (active === target ? "active" : "")}
-      onClick={() => go(target)}
-    >
-      <b aria-hidden="true">{icon}</b>
-      <span>{label}</span>
-    </button>
-  );
-}
 function VipButton({
   offerId,
   placement,
@@ -1273,7 +1251,7 @@ function Feed({
     </section>
   );
 }
-function App() {
+function App({ initialUser }: { initialUser: any }) {
   const creatorRoute = window.location.pathname.startsWith("/creator");
   const [screen, setScreen] = useState<Screen>(
     window.location.pathname.startsWith("/admin")
@@ -1284,17 +1262,10 @@ function App() {
   );
   const [tab, setTab] = useState("Trending");
   const [slug, setSlug] = useState("");
-  const [user, setUser] = useState<any>(null);
-  const [authReady, setAuthReady] = useState(false);
+  const user = initialUser;
   const [accountView, setAccountView] = useState<"profile" | "creator">(
     creatorRoute ? "creator" : "profile",
   );
-  useEffect(() => {
-    auth()
-      .then(setUser)
-      .catch(() => undefined)
-      .finally(() => setAuthReady(true));
-  }, []);
   const open = (c: any) => {
     if (c.slug) {
       setSlug(c.slug);
@@ -1306,25 +1277,16 @@ function App() {
     setScreen("profile");
   };
   const creatorWorkspace = screen === "account" && accountView === "creator";
-  if ((screen === "account" || screen === "admin") && !authReady)
-    return (
-      <div className="app-shell">
-        <main className="page">
-          <div className="empty">Loading…</div>
-        </main>
-      </div>
-    );
   return (
     <div className="app-shell">
       <header className={`topbar${creatorWorkspace ? " creator-topbar" : ""}`}>
         {creatorWorkspace && (
-          <button className="creator-back" aria-label="Back to Profile" onClick={() => setAccountView("profile")}>
-            <ChevronLeft size={22} aria-hidden="true" />
-          </button>
+          <BackButton className="creator-back" label="Back to Profile" onClick={() => setAccountView("profile")} />
         )}
         <button className="brand" onClick={() => setScreen("for-you")}>
           GPoint<span>•</span>
         </button>
+        {creatorWorkspace && <span className="creator-settings-control" aria-hidden="true"><Settings size={20} strokeWidth={1.7} /></span>}
         {!creatorWorkspace && <button className="icon-button" aria-label="Search"><Search size={18} strokeWidth={1.8} aria-hidden="true" /></button>}
       </header>
       <main className="page">
@@ -1358,43 +1320,13 @@ function App() {
           </div>
         )}
       </main>
-      <nav className="bottom-nav">
-        <Nav
-          active={screen}
-          target="for-you"
-          icon={<House size={18} strokeWidth={1.8} />}
-          label="For You"
-          go={setScreen}
-        />
-        <Nav
-          active={screen}
-          target="reels"
-          icon={<Video size={18} strokeWidth={1.8} />}
-          label="Reels"
-          go={setScreen}
-        />
-        <Nav
-          active={screen}
-          target="explore"
-          icon={<Compass size={18} strokeWidth={1.8} />}
-          label="Explore"
-          go={setScreen}
-        />
-        <Nav
-          active={screen}
-          target="following"
-          icon={<Heart size={18} strokeWidth={1.8} />}
-          label="Following"
-          go={setScreen}
-        />
-        <Nav
-          active={screen}
-          target="account"
-          icon={<UserRound size={18} strokeWidth={1.8} />}
-          label="Profile"
-          go={setScreen}
-        />
-      </nav>
+      <BottomNav active={screen} onChange={(id) => setScreen(id as Screen)} items={[
+        { id: "for-you", label: "For You", icon: <House size={23} strokeWidth={1.8} /> },
+        { id: "reels", label: "Reels", icon: <Video size={23} strokeWidth={1.8} /> },
+        { id: "explore", label: "Explore", icon: <Search size={23} strokeWidth={1.8} /> },
+        { id: "following", label: "Following", icon: <Users size={23} strokeWidth={1.8} /> },
+        { id: "account", label: "Profile", icon: <UserRound size={23} strokeWidth={1.8} /> },
+      ]} />
     </div>
   );
 }
@@ -1506,10 +1438,14 @@ function RecommendationSettings() {
   );
 }
 function AuthenticatedApp() {
+  const [user, setUser] = useState<any>(null);
   const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
   useEffect(() => {
     auth()
-      .then(() => setState("ready"))
+      .then((authenticatedUser) => {
+        setUser(authenticatedUser);
+        setState("ready");
+      })
       .catch(() => {
         localStorage.removeItem("gpoint.session");
         setState("failed");
@@ -1536,7 +1472,7 @@ function AuthenticatedApp() {
         </main>
       </div>
     );
-  return <App />;
+  return <App initialUser={user} />;
 }
 createRoot(document.getElementById("root")!).render(
   <QueryClientProvider client={new QueryClient()}>

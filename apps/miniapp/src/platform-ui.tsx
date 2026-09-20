@@ -37,10 +37,22 @@ import {
   FileText,
   Import,
   Save,
+  Send,
+  Settings,
   Settings2,
   ShieldCheck,
   Unplug,
+  UserRound,
 } from "lucide-react";
+import {
+  CreatorToolCard,
+  ImportSettingsCard,
+  SectionEyebrow,
+  StatusBadge as DesignStatusBadge,
+  Tabs,
+  TelegramChannelCard,
+  WorkspaceStatusCard,
+} from "./ui";
 
 function Preview({ asset, admin = false }: { asset: any; admin?: boolean }) {
   const [url, setUrl] = useState("");
@@ -670,9 +682,23 @@ function formatDashboardDate(value?: string | null) {
   }).format(date);
 }
 
-function StatusBadge({ status, tone = "neutral" }: { status: string; tone?: string }) {
-  return <span className={`dashboard-status dashboard-status-${tone}`}>{status}</span>;
-}
+// Only the deterministic visual harness may opt into this fixture. Production
+// renders the API response exclusively and never sees these values.
+const creatorDashboardVisualFixture = import.meta.env.DEV && new URLSearchParams(window.location.search).get("visualFixture") === "creator-dashboard";
+const visualFixtureChannel = {
+  id: "visual-fixture-channel",
+  title: "Models Hub",
+  username: null,
+  avatarUrl: "/visual-fixtures/models-hub-avatar.png",
+  photoUrl: null,
+  avatarReadUrl: null,
+  status: "CONNECTED",
+  importMode: "AUTO",
+  importHashtag: null,
+  lastSuccessfulIngestAt: "2026-09-18T16:54:00.000Z",
+  lastSync: "18 Sep, 16:54",
+  lastError: null,
+};
 
 export function TelegramChannelControls() {
   const q = useQuery({
@@ -680,12 +706,12 @@ export function TelegramChannelControls() {
     queryFn: telegramChannel,
   });
   const connect = useMutation({ mutationFn: startTelegramChannelConnection });
-  const c = q.data;
+  const c = creatorDashboardVisualFixture ? visualFixtureChannel : q.data;
   if (q.isLoading) return <div className="dashboard-skeleton" aria-label="Loading channel" />;
   if (!c)
     return (
       <section className="dashboard-section dashboard-channel-panel">
-        <p className="dashboard-eyebrow">MY TELEGRAM CHANNEL</p>
+        <SectionEyebrow>MY TELEGRAM CHANNEL</SectionEyebrow>
         <div className="dashboard-empty-card">
           <div className="dashboard-icon-circle"><Import size={20} /></div>
           <div>
@@ -707,17 +733,8 @@ export function TelegramChannelControls() {
     );
   return (
     <section className="dashboard-section dashboard-channel-panel" aria-label="Telegram channel">
-      <p className="dashboard-eyebrow">MY TELEGRAM CHANNEL</p>
-      <div className="channel-card">
-        <div className="channel-avatar">{(c.title || c.username || "G").slice(0, 1).toUpperCase()}</div>
-        <div className="channel-copy">
-          <h2>{c.title || c.username || "Telegram channel"}</h2>
-          <p>Telegram channel</p>
-          <StatusBadge status="Connected" tone="success" />
-        </div>
-        <ChevronRight className="channel-chevron" size={20} aria-hidden="true" />
-        <div className="channel-meta"><span>Last sync</span><strong>{formatDashboardDate(c.lastSuccessfulIngestAt)}</strong></div>
-      </div>
+      <SectionEyebrow>MY TELEGRAM CHANNEL</SectionEyebrow>
+      <TelegramChannelCard status="Connected" title={c.title || c.username || "Telegram channel"} subtitle={c.username ? `@${String(c.username).replace(/^@/, "")}` : "Telegram channel"} avatarUrl={c.avatarUrl ?? c.photoUrl ?? c.avatarReadUrl ?? null} icon={<Send size={30} />} lastSync={creatorDashboardVisualFixture ? c.lastSync : formatDashboardDate(c.lastSuccessfulIngestAt)} />
       {c.lastError && <p className="dashboard-error" role="alert">{c.lastError}</p>}
     </section>
   );
@@ -731,7 +748,7 @@ export function TelegramImportSettings() {
   const [saved, setSaved] = useState(false);
   const update = useMutation({ mutationFn: () => updateTelegramChannel({ importMode: mode, importHashtag: hashtag }), onSuccess: () => { setSaved(true); q.refetch(); } });
   const disconnect = useMutation({ mutationFn: disconnectTelegramChannel, onSuccess: () => { setConfirmDisconnect(false); q.refetch(); } });
-  const c = q.data;
+  const c = creatorDashboardVisualFixture ? visualFixtureChannel : q.data;
   useEffect(() => {
     if (c) { setMode(c.importMode); setHashtag(c.importHashtag || "gpoint"); }
   }, [c?.id, c?.importMode, c?.importHashtag]);
@@ -739,13 +756,14 @@ export function TelegramImportSettings() {
   const dirty = mode !== c.importMode || hashtag !== (c.importHashtag || "gpoint");
   return (
     <section className="dashboard-section dashboard-import-settings">
-      <p className="dashboard-eyebrow">IMPORT SETTINGS</p>
-      <div className="settings-card">
-        <div className="settings-card-heading"><div className="dashboard-icon-circle"><Settings2 size={18} /></div><div><h3>Import mode</h3><p className="field-hint">{mode === "AUTO" ? "New posts will be imported automatically from your Telegram channel." : mode === "HASHTAG" ? "Only posts with this hashtag will be imported." : "Choose imported posts manually from your connected channel."}</p></div></div>
-        <label className="dashboard-field"><span className="sr-only">Import mode</span><select aria-label="Import mode" value={mode} onChange={(e) => { setMode(e.target.value); setSaved(false); }}><option value="AUTO">Auto</option><option value="HASHTAG">Hashtag</option><option value="MANUAL">Manual</option></select></label>
+      <SectionEyebrow>IMPORT SETTINGS</SectionEyebrow>
+      <ImportSettingsCard><div className="settings-card">
+        <div className="settings-card-icon-zone"><div className="dashboard-icon-circle"><Settings size={20} /></div></div>
+        <div className="settings-card-text-zone"><h3>Import mode</h3><p className="field-hint">{mode === "AUTO" ? "New posts will import automatically from your Telegram channel." : mode === "HASHTAG" ? "Only posts with this hashtag will be imported." : "Choose imported posts manually from your connected channel."}</p></div>
+        <label className="dashboard-field settings-card-select-zone"><span className="sr-only">Import mode</span><select aria-label="Import mode" value={mode} onChange={(e) => { setMode(e.target.value); setSaved(false); }}><option value="AUTO">Auto</option><option value="HASHTAG">Hashtag</option><option value="MANUAL">Manual</option></select></label>
         {mode === "HASHTAG" && <label className="dashboard-field">Hashtag<input aria-label="Import hashtag" value={hashtag} onChange={(e) => { setHashtag(e.target.value); setSaved(false); }} placeholder="gpoint" /></label>}
         <div className="settings-actions"><button className="dashboard-primary" disabled={!dirty || update.isPending} onClick={() => update.mutate()}><Save size={15} />{update.isPending ? "Saving…" : "Save settings"}</button>{saved && <span className="save-confirm" role="status"><Check size={14} /> Saved</span>}</div>
-      </div>
+      </div></ImportSettingsCard>
       <div className="danger-zone"><button className="danger-link" onClick={() => setConfirmDisconnect(true)}><Unplug size={15} /> Disconnect channel</button>{confirmDisconnect && <div className="confirm-panel" role="dialog" aria-label="Confirm channel disconnect"><strong>Disconnect this channel?</strong><p>Future sync will stop. Historical GPoint posts remain.</p><div><button onClick={() => setConfirmDisconnect(false)}>Cancel</button><button className="danger-confirm" disabled={disconnect.isPending} onClick={() => disconnect.mutate()}>Disconnect</button></div></div>}</div>
     </section>
   );
@@ -785,50 +803,48 @@ export function CreatorWorkspaceDashboard() {
   const creator = q.data?.creator;
   if (!creator) return <div className="empty">Creator workspace unavailable.</div>;
   const tools = [
-    { tab: "Profile settings", title: "Profile settings", copy: "Manage your creator profile", icon: <Settings2 size={18} /> },
+    { tab: "Profile settings", title: "Profile settings", copy: "Manage your creator profile", icon: <UserRound size={20} /> },
     { tab: "Imported Posts", title: "Imported posts", copy: "View and manage content", icon: <FileText size={18} /> },
     { tab: "Stats", title: "Stats", copy: "Track your growth", icon: <BarChart3 size={18} /> },
   ];
   return (
-    <section className="creator-workspace" aria-label="Creator tools">
+    <section className={`creator-workspace${creatorDashboardVisualFixture ? " visual-fixture" : ""}`} aria-label="Creator tools">
       <div className="dashboard-heading"><p className="dashboard-eyebrow">CREATOR TOOLS</p><h1>Creator Dashboard</h1><p>Your content, your audience, more possibilities.</p></div>
-      <div className="content-tabs">
-        {['Overview', 'Profile settings', 'Imported Posts', 'Stats'].map((item) => <button className={tab === item ? 'selected' : ''} onClick={() => setTab(item)} key={item}>{item}</button>)}
-      </div>
+      <Tabs items={['Overview', 'Profile settings', 'Imported Posts', 'Stats']} active={tab} onChange={setTab} className="content-tabs" />
       {tab === 'Overview' && (
         <>
-          <div className="workspace-hero"><div className="hero-status-icon"><CheckCircle2 size={24} /></div><div><h2>Creator workspace active</h2><p>Telegram channel connected and ready for ingestion.</p></div><StatusBadge status={creator.status === "APPROVED" ? "Live" : "Pending review"} tone={creator.status === "APPROVED" ? "success" : "warm"} /></div>
+          <WorkspaceStatusCard icon={<Check size={28} strokeWidth={1.8} />} title="Creator workspace active" body="Telegram channel connected and ready for ingestion." status={creator.status === "APPROVED" ? "Live" : "Pending review"} tone={creator.status === "APPROVED" ? "success" : "warm"} />
           <TelegramChannelControls />
-          <div className="dashboard-section"><p className="dashboard-eyebrow">CREATOR TOOLS</p><div className="tool-grid">{tools.map((tool) => <button className="tool-card" key={tool.tab} onClick={() => setTab(tool.tab)}><span className="tool-icon">{tool.icon}</span><span><strong>{tool.title}</strong><small>{tool.copy}</small></span><ChevronRight size={17} /></button>)}</div></div>
+          <div className="dashboard-section"><SectionEyebrow>CREATOR TOOLS</SectionEyebrow><div className="gpoint-tool-grid">{tools.map((tool) => <CreatorToolCard key={tool.tab} title={tool.title} description={tool.copy} icon={tool.icon} onClick={() => setTab(tool.tab)} />)}</div></div>
           <TelegramImportSettings />
         </>
       )}
       {tab === 'Profile settings' && (
         <div className="dashboard-section profile-settings-panel">
-          <p className="dashboard-eyebrow">PROFILE SETTINGS</p><h2>Shape your public profile</h2><p className="dashboard-copy">Keep your creator identity clear and easy to recognize.</p>
+          <SectionEyebrow>PROFILE SETTINGS</SectionEyebrow><h2>Shape your public profile</h2><p className="dashboard-copy">Keep your creator identity clear and easy to recognize.</p>
           <label className="dashboard-field">Display name<input aria-label="Creator display name" value={profileName} onChange={(e) => setProfileName(e.target.value)} /></label>
           <label className="dashboard-field">GPoint handle<input aria-label="Creator handle" value={profileSlug} onChange={(e) => setProfileSlug(e.target.value)} /></label>
           <label className="dashboard-field">Bio<textarea aria-label="Creator bio" rows={4} value={profileBio} onChange={(e) => setProfileBio(e.target.value)} placeholder="Tell people what you create." /></label>
           <button className="dashboard-primary" disabled={profileSave.isPending} onClick={() => profileSave.mutate({ displayName: profileName, slug: profileSlug, bio: profileBio, tags: [] })}><Save size={15} />{profileSave.isPending ? "Saving…" : "Save profile"}</button>
-          <div className="profile-state"><ShieldCheck size={16} /><span>Public profile:</span><StatusBadge status={creator.status === "APPROVED" ? "Live" : "Pending review"} tone={creator.status === "APPROVED" ? "success" : "warm"} /></div>
+          <div className="profile-state"><ShieldCheck size={16} /><span>Public profile:</span><DesignStatusBadge status={creator.status === "APPROVED" ? "Live" : "Pending review"} tone={creator.status === "APPROVED" ? "success" : "warm"} /></div>
         </div>
       )}
       {tab === 'Imported Posts' && (
         <div className="dashboard-section">
-          <div className="dashboard-section-title"><div><p className="dashboard-eyebrow">CONTENT LIBRARY</p><h2>Imported Posts</h2></div><span className="muted">{posts.data?.items?.length ?? 0} total</span></div>
+          <div className="dashboard-section-title"><div><SectionEyebrow>CONTENT LIBRARY</SectionEyebrow><h2>Imported Posts</h2></div><span className="muted">{posts.data?.items?.length ?? 0} total</span></div>
           {posts.isLoading && <p>Loading imported posts…</p>}
           {posts.isError && <p className="dashboard-error" role="alert">Couldn't load creator data. Try again.</p>}
           {posts.data?.items?.length ? posts.data.items.map((post: any) => (
             <article className="imported-post-card" key={post.id}>
               {post.media?.[0]?.readUrl ? <img src={mediaUrl(post.media[0].readUrl)} alt="" /> : <div className="post-placeholder"><FileText size={20} /></div>}
-              <div><p>{post.caption || 'Imported Telegram post'}</p><StatusBadge status={post.safetyClassification === 'UNCERTAIN' || post.ingestStatus === 'PENDING_MODERATION' ? 'Pending review' : post.status === 'PUBLISHED' ? 'Published' : post.status === 'REJECTED' ? 'Rejected' : 'Pending review'} tone={post.status === 'REJECTED' ? 'danger' : post.status === 'PUBLISHED' ? 'success' : 'warm'} /></div><ChevronRight size={17} />
+              <div><p>{post.caption || 'Imported Telegram post'}</p><DesignStatusBadge status={post.safetyClassification === 'UNCERTAIN' || post.ingestStatus === 'PENDING_MODERATION' ? 'Pending review' : post.status === 'PUBLISHED' ? 'Published' : post.status === 'REJECTED' ? 'Rejected' : 'Pending review'} tone={post.status === 'REJECTED' ? 'danger' : post.status === 'PUBLISHED' ? 'success' : 'warm'} /></div><ChevronRight size={17} />
             </article>
           )) : !posts.isLoading && <div className="dashboard-empty-card"><FileText size={19} /><p>No imported posts yet.</p></div>}
         </div>
       )}
       {tab === 'Stats' && (
         <div className="dashboard-section">
-          <p className="dashboard-eyebrow">YOUR MOMENTUM</p><h2>Stats</h2><p className="dashboard-copy">A simple view of how your profile is being discovered.</p>
+          <SectionEyebrow>YOUR MOMENTUM</SectionEyebrow><h2>Stats</h2><p className="dashboard-copy">A simple view of how your profile is being discovered.</p>
           <div className="stat-grid">{[["Profile views", stats.data?.profileViews ?? 0], ["Followers", stats.data?.followers ?? 0], ["Post views", stats.data?.postViews ?? 0], ["Reel views", stats.data?.reelViews ?? 0]].map(([label, value]) => <div className="stat-card" key={String(label)}><strong>{value}</strong><span>{label}</span></div>)}</div>
         </div>
       )}
