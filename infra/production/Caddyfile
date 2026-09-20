@@ -14,6 +14,8 @@ gpoint.amiora.one {
     uri strip_prefix /api
     reverse_proxy 127.0.0.1:3000
   }
+  @app_entry path / /index.html
+  header @app_entry Cache-Control "no-store, max-age=0"
   handle {
     root * /opt/gpoint/app/miniapp
     try_files {path} /index.html
