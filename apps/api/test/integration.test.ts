@@ -105,6 +105,11 @@ test('Telegram channel connection challenge is short-lived, single-use and cross
     const actor = (await prisma.user.findUniqueOrThrow({ where: { id: (await prisma.creatorOwner.findFirstOrThrow({ where: { creatorId }, select: { userId: true } })).userId }, select: { telegramUserId: true } })).telegramUserId.toString();
     const installed = await fetch(`${base}/internal/telegram/my-chat-member`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-telegram-webhook-secret': 'test-webhook-secret' }, body: JSON.stringify({ updateId: 9002, from: { id: actor }, chat: { id: 123, type: 'channel', title: 'Test Channel' }, new_chat_member: { status: 'administrator', can_post_messages: true } }) });
     assert.equal(installed.status, 201); assert.equal((await installed.json() as { status?: string }).status, 'CONNECTED');
+    const connectedProfile = await prisma.creatorProfile.findUnique({ where: { creatorId } });
+    assert.equal(connectedProfile?.status, 'APPROVED');
+    const autoApprovalEvent = await prisma.productEvent.findFirst({ where: { creatorId, eventType: 'CREATOR_AUTO_APPROVED', entityType: 'TELEGRAM_CHANNEL' } });
+    assert.ok(autoApprovalEvent);
+    assert.equal((autoApprovalEvent?.metadataJson as { userAdministratorVerified?: boolean })?.userAdministratorVerified, true);
     const started = await call('/creator/channel/connect/start', creatorToken, 'POST');
     assert.equal(started.response.status, 201); assert.ok(started.data.requestId); created.push(started.data.challengeId);
     const wrongUser = await fetch(`${base}/internal/telegram/chat-shared`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-telegram-webhook-secret': 'test-webhook-secret' }, body: JSON.stringify({ from: { id: 'wrong-user' }, chat_shared: { request_id: started.data.requestId, chat_id: 123 } }) });
@@ -122,6 +127,7 @@ test('Telegram channel connection challenge is short-lived, single-use and cross
     await prisma.telegramChannelInstallEvidence.deleteMany({ where: { attempt: { gpointUserId: { in: owners.map(x => x.userId) } } } });
     await prisma.creatorChannelInstallAttempt.deleteMany({ where: { gpointUserId: { in: owners.map(x => x.userId) } } });
     await prisma.telegramChannel.deleteMany({ where: { creatorId: { in: [creatorId, otherId] } } });
+    await prisma.productEvent.deleteMany({ where: { creatorId: { in: [creatorId, otherId] } } });
     globalThis.fetch = previousFetch; delete process.env.TELEGRAM_BOT_TOKEN; delete process.env.TELEGRAM_WEBHOOK_SECRET;
   }
 });
