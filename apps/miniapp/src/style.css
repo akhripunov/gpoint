@@ -502,3 +502,6 @@ body:has(.creator-workspace) { background: #050b16; }
 .creator-workspace.visual-fixture .settings-card-text-zone h3 {
   white-space:nowrap;
 }
+.dashboard-secondary{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:10px 14px;border:1px solid var(--line);border-radius:11px;background:rgba(232,178,166,.06);color:var(--text);font:600 12px/16px Inter,sans-serif;cursor:pointer}
+.dashboard-secondary:disabled{opacity:.55;cursor:default}
+.reverify-control{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px}

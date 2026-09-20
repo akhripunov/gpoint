@@ -66,6 +66,42 @@ async function reconcileCreatorChannelConnection(challenge: any, senderId: strin
   return { status: 'CONNECTED', channel: publicChannel(connected) };
 }
 
+async function prepareNativeChannelSelection(userId: string, telegramUserId: bigint, resumeWaitingAttempt: boolean) {
+  const now = new Date();
+  let challenge: any = null;
+  if (resumeWaitingAttempt) {
+    const attempt = await prisma.creatorChannelInstallAttempt.findFirst({
+      where: { gpointUserId: userId, state: 'WAITING_FOR_TELEGRAM', expiresAt: { gt: now } },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (attempt) challenge = await prisma.telegramConnectionChallenge.findUnique({ where: { id: attempt.id } });
+  }
+  if (!challenge || challenge.usedAt || challenge.expiresAt.getTime() <= Date.now()) {
+    challenge = await prisma.telegramConnectionChallenge.create({
+      data: { requestId: randomInt(1, 2_147_483_647), userId, expiresAt: new Date(Date.now() + challengeLifetimeMs) },
+    });
+  }
+  if (!challenge.preparedButtonId) {
+    const requestId = randomInt(1, 2_147_483_647);
+    const prepared = preparedButtonId(await telegramApi<{ id?: unknown }>('savePreparedKeyboardButton', {
+      user_id: telegramUserId.toString(),
+      button: preparedChannelButton(requestId),
+    }));
+    challenge = await prisma.telegramConnectionChallenge.update({
+      where: { id: challenge.id },
+      data: { requestId, preparedButtonId: prepared, expiresAt: new Date(Date.now() + challengeLifetimeMs) },
+    });
+  }
+  if (resumeWaitingAttempt) {
+    await prisma.creatorChannelInstallAttempt.upsert({
+      where: { id: challenge.id },
+      create: { id: challenge.id, gpointUserId: userId, telegramUserId, state: 'WAITING_FOR_TELEGRAM', expiresAt: challenge.expiresAt },
+      update: { telegramUserId, state: 'WAITING_FOR_TELEGRAM', expiresAt: challenge.expiresAt, completedAt: null },
+    });
+  }
+  return { challengeId: challenge.id, requestId: challenge.preparedButtonId, expiresAt: challenge.expiresAt, supported: true };
+}
+
 @Controller('creator/channel')
 export class TelegramConnectionController {
   @Post('start')
@@ -111,11 +147,18 @@ export class TelegramConnectionController {
   async prepare(@Headers() h: Record<string, string | undefined>) {
     const startedAt = Date.now(); console.info('[GPoint] channel prepare handler started', { startedAt: new Date(startedAt).toISOString() });
     const { userId: id, user } = await authenticated(h); if (user.telegramUserId <= 0n) throw new BadRequestException('A real Telegram account is required for channel selection');
-    const requestId = randomInt(1, 2_147_483_647); const button = preparedChannelButton(requestId);
-    const prepared = preparedButtonId(await telegramApi<{ id?: unknown }>('savePreparedKeyboardButton', { user_id: user.telegramUserId.toString(), button }));
-    const challenge = await prisma.telegramConnectionChallenge.create({ data: { requestId, preparedButtonId: prepared, userId: id, expiresAt: new Date(Date.now() + challengeLifetimeMs) } });
+    const prepared = await prepareNativeChannelSelection(id, user.telegramUserId, false);
     console.info('[GPoint] channel prepare response sent', { finishedAt: new Date().toISOString(), latencyMs: Date.now() - startedAt, status: 201, preparedRequestIdPresent: true });
-    return { challengeId: challenge.id, requestId: prepared, expiresAt: challenge.expiresAt, supported: true };
+    return prepared;
+  }
+
+  @Post('reverify')
+  async reverify(@Headers() h: Record<string, string | undefined>) {
+    const { userId: id, user } = await authenticated(h); if (user.telegramUserId <= 0n) throw new BadRequestException('A real Telegram account is required for channel verification');
+    const owner = await prisma.creatorOwner.findFirst({ where: { userId: id }, select: { creatorId: true } });
+    const channel = owner ? await prisma.telegramChannel.findUnique({ where: { creatorId: owner.creatorId }, select: { status: true } }) : null;
+    if (!owner || channel?.status !== 'CONNECTED') throw new BadRequestException('connected Telegram channel required');
+    return prepareNativeChannelSelection(id, user.telegramUserId, true);
   }
 
   @Get('selection/:challengeId')

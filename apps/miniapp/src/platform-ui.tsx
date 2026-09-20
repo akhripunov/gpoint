@@ -25,6 +25,9 @@ import {
   disconnectTelegramChannel,
   getToken,
   mediaUrl,
+  prepareCreatorChannelReverification,
+  creatorChannelSelectionStatus,
+  requestCreatorTelegramChannel,
   startTelegramChannelConnection,
   telegramChannel,
   updateTelegramChannel,
@@ -707,8 +710,9 @@ export function TelegramChannelControls() {
   });
   const connect = useMutation({ mutationFn: startTelegramChannelConnection });
   const c = creatorDashboardVisualFixture ? visualFixtureChannel : q.data;
+  const connected = c?.status === "CONNECTED";
   if (q.isLoading) return <div className="dashboard-skeleton" aria-label="Loading channel" />;
-  if (!c)
+  if (!c || !connected)
     return (
       <section className="dashboard-section dashboard-channel-panel">
         <SectionEyebrow>MY TELEGRAM CHANNEL</SectionEyebrow>
@@ -736,8 +740,56 @@ export function TelegramChannelControls() {
       <SectionEyebrow>MY TELEGRAM CHANNEL</SectionEyebrow>
       <TelegramChannelCard status="Connected" title={c.title || c.username || "Telegram channel"} subtitle={c.username ? `@${String(c.username).replace(/^@/, "")}` : "Telegram channel"} avatarUrl={c.avatarUrl ?? c.photoUrl ?? c.avatarReadUrl ?? null} icon={<Send size={30} />} lastSync={creatorDashboardVisualFixture ? c.lastSync : formatDashboardDate(c.lastSuccessfulIngestAt)} />
       {c.lastError && <p className="dashboard-error" role="alert">{c.lastError}</p>}
+      {!creatorDashboardVisualFixture && <CreatorReverifyAction onSuccess={() => q.refetch()} />}
     </section>
   );
+}
+
+function CreatorReverifyAction({ onSuccess }: { onSuccess: () => void }) {
+  const prepared = useQuery({
+    queryKey: ["creator-channel-reverify-prepare"],
+    queryFn: prepareCreatorChannelReverification,
+    enabled: !creatorDashboardVisualFixture,
+    staleTime: 8 * 60_000,
+    retry: false,
+  });
+  const [state, setState] = useState<"READY" | "REQUESTING" | "VERIFYING" | "DONE" | "FAILED">("READY");
+  const [message, setMessage] = useState("");
+  const waitForConnection = async (challengeId: string) => {
+    for (let attempt = 0; attempt < 15; attempt += 1) {
+      const result = await creatorChannelSelectionStatus(challengeId);
+      if (result.status === "CONNECTED") return;
+      if (result.status === "FAILED") throw new Error(result.message || "Could not verify the connection.");
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    }
+    throw new Error("Could not verify the connection yet.");
+  };
+  const reverify = async () => {
+    if (!prepared.data) return;
+    setMessage("");
+    setState("REQUESTING");
+    try {
+      const sent = await requestCreatorTelegramChannel(prepared.data.requestId);
+      if (!sent) throw new Error("Telegram channel selection was cancelled.");
+      setState("VERIFYING");
+      await waitForConnection(prepared.data.challengeId);
+      setState("DONE");
+      onSuccess();
+      window.dispatchEvent(new CustomEvent("gpoint:creator-connected"));
+    } catch (error) {
+      setState("FAILED");
+      setMessage(error instanceof Error ? error.message : "Could not re-verify the connection.");
+      prepared.refetch();
+    }
+  };
+  return <div className="reverify-control">
+    <button className="dashboard-secondary" disabled={!prepared.data || prepared.isFetching || state === "REQUESTING" || state === "VERIFYING"} onClick={reverify}>
+      {state === "REQUESTING" ? "Opening Telegram…" : state === "VERIFYING" ? "Verifying connection…" : "Re-verify connection"}
+    </button>
+    {state === "DONE" && <p className="save-confirm" role="status">Connection verified.</p>}
+    {prepared.error && <p className="dashboard-error" role="alert">Could not prepare verification. Try again.</p>}
+    {message && <p className="dashboard-error" role="alert">{message}</p>}
+  </div>;
 }
 
 export function TelegramImportSettings() {
@@ -747,12 +799,12 @@ export function TelegramImportSettings() {
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   const [saved, setSaved] = useState(false);
   const update = useMutation({ mutationFn: () => updateTelegramChannel({ importMode: mode, importHashtag: hashtag }), onSuccess: () => { setSaved(true); q.refetch(); } });
-  const disconnect = useMutation({ mutationFn: disconnectTelegramChannel, onSuccess: () => { setConfirmDisconnect(false); q.refetch(); } });
+  const disconnect = useMutation({ mutationFn: disconnectTelegramChannel, onSuccess: () => { setConfirmDisconnect(false); q.refetch(); }, onError: () => { setConfirmDisconnect(false); } });
   const c = creatorDashboardVisualFixture ? visualFixtureChannel : q.data;
   useEffect(() => {
     if (c) { setMode(c.importMode); setHashtag(c.importHashtag || "gpoint"); }
   }, [c?.id, c?.importMode, c?.importHashtag]);
-  if (q.isLoading || !c) return null;
+  if (q.isLoading || !c || c.status !== "CONNECTED") return null;
   const dirty = mode !== c.importMode || hashtag !== (c.importHashtag || "gpoint");
   return (
     <section className="dashboard-section dashboard-import-settings">
