@@ -975,7 +975,7 @@
                   "name": "Overview Label",
                   "fill": "$text-primary",
                   "content": "Overview",
-                  "lineHeight": 20,
+                  "lineHeight": 1.43,
                   "fontFamily": "Inter",
                   "fontSize": 14,
                   "fontWeight": "600"
@@ -1008,9 +1008,10 @@
                   "name": "Profile settings Label",
                   "fill": "$text-muted",
                   "content": "Profile settings",
-                  "lineHeight": 20,
+                  "lineHeight": 1.43,
                   "fontFamily": "Inter",
-                  "fontSize": 14
+                  "fontSize": 14,
+                  "fontWeight": "normal"
                 }
               ]
             },
@@ -1031,9 +1032,10 @@
                   "name": "Imported Posts Label",
                   "fill": "$text-muted",
                   "content": "Imported Posts",
-                  "lineHeight": 20,
+                  "lineHeight": 1.43,
                   "fontFamily": "Inter",
-                  "fontSize": 14
+                  "fontSize": 14,
+                  "fontWeight": "normal"
                 }
               ]
             },
@@ -1054,9 +1056,10 @@
                   "name": "Stats Label",
                   "fill": "$text-muted",
                   "content": "Stats",
-                  "lineHeight": 20,
+                  "lineHeight": 1.43,
                   "fontFamily": "Inter",
-                  "fontSize": 14
+                  "fontSize": 14,
+                  "fontWeight": "normal"
                 }
               ]
             }
@@ -1070,7 +1073,7 @@
           "width": 390,
           "height": 78,
           "fill": "#080F1C",
-          "stroke": "#172238",
+          "stroke": "#26354A",
           "strokeWidth": 1,
           "children": [
             {
@@ -1086,9 +1089,23 @@
               "alignItems": "center",
               "children": [
                 {
+                  "type": "icon",
+                  "id": "EILQB",
+                  "name": "For You Icon",
+                  "width": 22,
+                  "height": 22,
+                  "icon": "house",
+                  "library": "lucide",
+                  "weight": 400,
+                  "fill": "#B8B8C2"
+                },
+                {
                   "type": "text",
                   "id": "de9ml",
+                  "x": 31.5,
+                  "y": -274.5,
                   "name": "For You Icon",
+                  "enabled": false,
                   "fill": "#B8B8C2",
                   "content": "⌂",
                   "lineHeight": 22,
@@ -1102,7 +1119,7 @@
                   "name": "For You Label",
                   "fill": "#B8B8C2",
                   "content": "For You",
-                  "lineHeight": 14,
+                  "lineHeight": 1.4,
                   "fontFamily": "Inter",
                   "fontSize": 10,
                   "fontWeight": "600"
@@ -1122,9 +1139,23 @@
               "alignItems": "center",
               "children": [
                 {
+                  "type": "icon",
+                  "id": "Q3Hxny",
+                  "name": "Reels Icon",
+                  "width": 22,
+                  "height": 22,
+                  "icon": "clapperboard",
+                  "library": "lucide",
+                  "weight": 400,
+                  "fill": "#B8B8C2"
+                },
+                {
                   "type": "text",
                   "id": "d8Zfcm",
+                  "x": 27.5,
+                  "y": -274.5,
                   "name": "Reels Icon",
+                  "enabled": false,
                   "fill": "#B8B8C2",
                   "content": "▣",
                   "lineHeight": 22,
@@ -1138,7 +1169,7 @@
                   "name": "Reels Label",
                   "fill": "$text-secondary",
                   "content": "Reels",
-                  "lineHeight": 14,
+                  "lineHeight": 1.4,
                   "fontFamily": "Inter",
                   "fontSize": 10,
                   "fontWeight": "600"
@@ -1158,9 +1189,23 @@
               "alignItems": "center",
               "children": [
                 {
+                  "type": "icon",
+                  "id": "p1h9b",
+                  "name": "Explore Icon",
+                  "width": 22,
+                  "height": 22,
+                  "icon": "search",
+                  "library": "lucide",
+                  "weight": 400,
+                  "fill": "#B8B8C2"
+                },
+                {
                   "type": "text",
                   "id": "G7vMvV",
+                  "x": 31.5,
+                  "y": -274.5,
                   "name": "Explore Icon",
+                  "enabled": false,
                   "fill": "#B8B8C2",
                   "content": "⌕",
                   "lineHeight": 22,
@@ -1174,7 +1219,7 @@
                   "name": "Explore Label",
                   "fill": "$text-secondary",
                   "content": "Explore",
-                  "lineHeight": 14,
+                  "lineHeight": 1.4,
                   "fontFamily": "Inter",
                   "fontSize": 10,
                   "fontWeight": "600"
@@ -1194,9 +1239,23 @@
               "alignItems": "center",
               "children": [
                 {
+                  "type": "icon",
+                  "id": "tjQLU",
+                  "name": "Following Icon",
+                  "width": 22,
+                  "height": 22,
+                  "icon": "users-round",
+                  "library": "lucide",
+                  "weight": 400,
+                  "fill": "#B8B8C2"
+                },
+                {
                   "type": "text",
                   "id": "LnVRf",
+                  "x": 27.5,
+                  "y": -274.5,
                   "name": "Following Icon",
+                  "enabled": false,
                   "fill": "#B8B8C2",
                   "content": "♧",
                   "lineHeight": 22,
@@ -1210,7 +1269,7 @@
                   "name": "Following Label",
                   "fill": "$text-secondary",
                   "content": "Following",
-                  "lineHeight": 14,
+                  "lineHeight": 1.4,
                   "fontFamily": "Inter",
                   "fontSize": 10,
                   "fontWeight": "600"
@@ -1230,9 +1289,23 @@
               "alignItems": "center",
               "children": [
                 {
+                  "type": "icon",
+                  "id": "y9cpFD",
+                  "name": "Profile Icon",
+                  "width": 22,
+                  "height": 22,
+                  "icon": "user-round",
+                  "library": "lucide",
+                  "weight": 400,
+                  "fill": "#E8B2A6"
+                },
+                {
                   "type": "text",
                   "id": "DOiW1",
+                  "x": 27.5,
+                  "y": -274.5,
                   "name": "Profile Icon",
+                  "enabled": false,
                   "fill": "#E8B2A6",
                   "content": "◉",
                   "lineHeight": 22,
@@ -1246,7 +1319,7 @@
                   "name": "Profile Label",
                   "fill": "#E8B2A6",
                   "content": "Profile",
-                  "lineHeight": 14,
+                  "lineHeight": 1.4,
                   "fontFamily": "Inter",
                   "fontSize": 10,
                   "fontWeight": "600"
@@ -1273,19 +1346,20 @@
           "id": "w7ZDZ",
           "name": "Creator / Workspace Status",
           "reusable": true,
+          "clip": true,
           "width": 366,
           "height": 126,
           "fill": "#342321",
           "cornerRadius": 20,
           "stroke": "#B77F73",
           "strokeWidth": 1,
-          "gap": 12,
-          "padding": 16,
-          "alignItems": "center",
+          "layout": "none",
           "children": [
             {
               "type": "frame",
               "id": "BFBqT",
+              "x": 16,
+              "y": 34,
               "name": "Workspace Status Icon",
               "width": 58,
               "height": 58,
@@ -1307,11 +1381,11 @@
                   "type": "text",
                   "id": "vre7P",
                   "name": "Workspace Status Icon Glyph",
-                  "fill": "#E8B2A6",
+                  "fill": "#F7C4A8",
                   "content": "✓",
-                  "lineHeight": 28,
+                  "lineHeight": 30,
                   "fontFamily": "Inter",
-                  "fontSize": 28,
+                  "fontSize": 30,
                   "fontWeight": "600"
                 }
               ]
@@ -1319,18 +1393,26 @@
             {
               "type": "frame",
               "id": "hudM0",
+              "x": 88,
+              "y": 18,
               "name": "Workspace Status Copy",
-              "width": "fill_container",
-              "layout": "vertical",
-              "gap": 2,
+              "width": 210,
+              "height": 66,
+              "layout": "none",
               "children": [
                 {
                   "type": "text",
                   "id": "yEx6B",
+                  "x": 0,
+                  "y": 0,
                   "name": "Workspace Status Title",
-                  "fill": "$text-primary",
+                  "fill": "#F7F2EE",
+                  "textGrowth": "fixed-width-height",
+                  "width": 210,
+                  "height": 24,
                   "content": "Creator workspace active",
-                  "lineHeight": 24,
+                  "lineHeight": 1.2,
+                  "textAlignVertical": "middle",
                   "fontFamily": "Cormorant Garamond",
                   "fontSize": 20,
                   "fontWeight": "500"
@@ -1338,25 +1420,32 @@
                 {
                   "type": "text",
                   "id": "UNgKq",
+                  "x": 0,
+                  "y": 29,
                   "name": "Workspace Status Body",
-                  "fill": "$text-secondary",
-                  "textGrowth": "fixed-width",
-                  "width": "fill_container",
+                  "fill": "#B8B8C2",
+                  "textGrowth": "fixed-width-height",
+                  "width": 204,
+                  "height": 38,
                   "content": "Telegram channel connected and ready for ingestion.",
-                  "lineHeight": 19,
+                  "lineHeight": 1.46,
                   "fontFamily": "Inter",
-                  "fontSize": 13
+                  "fontSize": 13,
+                  "fontWeight": "normal"
                 }
               ]
             },
             {
               "type": "frame",
               "id": "Sn6MD",
+              "x": 88,
+              "y": 84,
               "name": "Workspace Status Badge",
               "width": 152,
               "height": 26,
               "fill": "#211923",
               "cornerRadius": 13,
+              "stroke": "#8C5F55",
               "padding": [
                 0,
                 10
@@ -1380,6 +1469,8 @@
             {
               "type": "icon",
               "id": "abqDm",
+              "x": 336,
+              "y": 52,
               "name": "Workspace Chevron",
               "width": 22,
               "height": 22,
@@ -1387,6 +1478,40 @@
               "library": "lucide",
               "weight": 500,
               "fill": "#E8B2A6"
+            },
+            {
+              "type": "text",
+              "id": "D7DyO",
+              "x": 88,
+              "y": 18,
+              "name": "Workspace Status Editorial Title",
+              "enabled": false,
+              "fill": "#F7F2EE",
+              "textGrowth": "fixed-width-height",
+              "width": 210,
+              "height": 24,
+              "content": "Creator workspace active",
+              "lineHeight": 24,
+              "fontFamily": "Cormorant Garamond",
+              "fontSize": 20,
+              "fontWeight": "500"
+            },
+            {
+              "type": "text",
+              "id": "XWa8D",
+              "x": 88,
+              "y": 45,
+              "name": "Workspace Status Supporting Body",
+              "enabled": false,
+              "fill": "#B8B8C2",
+              "textGrowth": "fixed-width-height",
+              "width": 204,
+              "height": 38,
+              "content": "Telegram channel connected and ready for ingestion.",
+              "lineHeight": 19,
+              "fontFamily": "Inter",
+              "fontSize": 13,
+              "fontWeight": "normal"
             }
           ]
         },
@@ -1395,42 +1520,55 @@
           "id": "qvO0Z",
           "name": "Creator / Telegram Channel",
           "reusable": true,
+          "clip": true,
           "width": 366,
           "height": 146,
           "fill": "#211923",
           "cornerRadius": 20,
-          "stroke": "#5C3D49",
+          "stroke": "#79505B",
           "strokeWidth": 1,
-          "gap": 14,
-          "padding": 16,
-          "alignItems": "center",
+          "layout": "none",
           "children": [
             {
               "type": "frame",
               "id": "UOLMg",
+              "x": 16,
+              "y": 21,
               "name": "Telegram Channel Avatar",
               "width": 72,
               "height": 72,
-              "fill": "#2C1F2A",
+              "fill": {
+                "type": "image",
+                "enabled": true,
+                "url": "generated.png",
+                "mode": "fill"
+              },
               "cornerRadius": 36,
-              "stroke": "#E8B2A6",
+              "stroke": "#F1B69A",
               "strokeWidth": 1
             },
             {
               "type": "frame",
               "id": "I4NqH",
+              "x": 104,
+              "y": 16,
               "name": "Telegram Channel Copy",
-              "width": "fill_container",
-              "layout": "vertical",
-              "gap": 3,
+              "width": 208,
+              "height": 114,
+              "layout": "none",
               "children": [
                 {
                   "type": "text",
                   "id": "ecsxZ",
+                  "x": 0,
+                  "y": 0,
                   "name": "Telegram Channel Title",
-                  "fill": "$text-primary",
+                  "fill": "#F7F2EE",
+                  "textGrowth": "fixed-width-height",
+                  "width": 208,
+                  "height": 27,
                   "content": "Models Hub",
-                  "lineHeight": 27,
+                  "lineHeight": 1.23,
                   "fontFamily": "Cormorant Garamond",
                   "fontSize": 22,
                   "fontWeight": "500"
@@ -1438,21 +1576,31 @@
                 {
                   "type": "text",
                   "id": "maQqA",
+                  "x": 0,
+                  "y": 31,
                   "name": "Telegram Channel Subtitle",
-                  "fill": "$text-secondary",
+                  "fill": "#B8B8C2",
+                  "textGrowth": "fixed-width-height",
+                  "width": 208,
+                  "height": 18,
                   "content": "Telegram channel",
-                  "lineHeight": 18,
+                  "lineHeight": 1.38,
                   "fontFamily": "Inter",
-                  "fontSize": 13
+                  "fontSize": 13,
+                  "fontWeight": "normal"
                 },
                 {
                   "type": "frame",
                   "id": "juLhy",
+                  "x": 0,
+                  "y": 53,
                   "name": "Telegram Channel Connected Badge",
                   "width": 98,
                   "height": 27,
                   "fill": "#063E3B",
                   "cornerRadius": 14,
+                  "stroke": "#3B9F90",
+                  "strokeWidth": 1,
                   "padding": [
                     0,
                     10
@@ -1466,7 +1614,7 @@
                       "name": "Connected Badge Label",
                       "fill": "#78E0CB",
                       "content": "✓ Connected",
-                      "lineHeight": 14,
+                      "lineHeight": 1.27,
                       "fontFamily": "Inter",
                       "fontSize": 11,
                       "fontWeight": "600"
@@ -1476,32 +1624,42 @@
                 {
                   "type": "text",
                   "id": "B8Itx",
+                  "x": 0,
+                  "y": 87,
                   "name": "Telegram Channel Last Sync",
                   "fill": "#B8B8C2",
+                  "textGrowth": "fixed-width-height",
+                  "width": 208,
+                  "height": 17,
                   "content": "Last sync · 18 Sep, 16:54",
-                  "lineHeight": 17,
+                  "lineHeight": 1.42,
                   "fontFamily": "Inter",
-                  "fontSize": 12
+                  "fontSize": 12,
+                  "fontWeight": "normal"
                 }
               ]
             },
             {
               "type": "icon",
               "id": "ykeCH",
+              "x": 334,
+              "y": 57,
               "name": "Telegram Chevron",
               "width": 22,
               "height": 22,
               "icon": "chevron-right",
               "library": "lucide",
               "weight": 500,
-              "fill": "#E8B2A6"
+              "fill": "#F1B69A"
             },
             {
               "type": "icon",
               "id": "HnaJe",
+              "x": 276,
+              "y": 54,
               "name": "Telegram Motif",
-              "width": 32,
-              "height": 32,
+              "width": 34,
+              "height": 34,
               "icon": "send",
               "library": "lucide",
               "weight": 500,
@@ -1515,25 +1673,24 @@
           "name": "Creator / Tool Card",
           "reusable": true,
           "width": 110,
-          "height": 156,
+          "height": 142,
           "fill": "#211923",
           "cornerRadius": 18,
-          "stroke": "#5C3D49",
+          "stroke": "#79505B",
           "strokeWidth": 1,
-          "layout": "vertical",
-          "gap": 6,
-          "padding": 12,
-          "alignItems": "center",
+          "layout": "none",
           "children": [
             {
               "type": "frame",
               "id": "nDbpa",
+              "x": 33,
+              "y": 14,
               "name": "Tool Card Icon",
               "width": 44,
               "height": 44,
               "fill": "#211923",
               "cornerRadius": 22,
-              "stroke": "#E8B2A6",
+              "stroke": "#F1B69A",
               "strokeWidth": 1,
               "justifyContent": "center",
               "alignItems": "center",
@@ -1547,20 +1704,24 @@
                   "icon": "user-round",
                   "library": "lucide",
                   "weight": 400,
-                  "fill": "#E8B2A6"
+                  "fill": "#F1B69A"
                 }
               ]
             },
             {
               "type": "text",
               "id": "NzhPm",
+              "x": 12,
+              "y": 56,
               "name": "Tool Card Title",
-              "fill": "$text-primary",
-              "textGrowth": "fixed-width",
+              "fill": "#F7F2EE",
+              "textGrowth": "fixed-width-height",
               "width": 86,
+              "height": 32,
               "content": "Imported Posts",
-              "lineHeight": 17,
+              "lineHeight": 1.21,
               "textAlign": "center",
+              "textAlignVertical": "middle",
               "fontFamily": "Inter",
               "fontSize": 14,
               "fontWeight": "600"
@@ -1568,26 +1729,46 @@
             {
               "type": "text",
               "id": "L1gOh",
+              "x": 12,
+              "y": 90,
               "name": "Tool Card Description",
-              "fill": "$text-secondary",
-              "textGrowth": "fixed-width",
+              "fill": "#B8B8C2",
+              "textGrowth": "fixed-width-height",
               "width": 86,
+              "height": 28,
               "content": "Manage your creator profile",
-              "lineHeight": 16,
+              "lineHeight": 1.45,
               "textAlign": "center",
               "fontFamily": "Inter",
-              "fontSize": 11
+              "fontSize": 11,
+              "fontWeight": "normal"
             },
             {
               "type": "text",
               "id": "whGkn",
+              "x": 47.5,
+              "y": 902,
               "name": "Tool Card Chevron",
+              "enabled": false,
               "fill": "#E8B2A6",
               "content": "⌄",
               "lineHeight": 18,
               "fontFamily": "Inter",
               "fontSize": 18,
               "fontWeight": "normal"
+            },
+            {
+              "type": "icon",
+              "id": "X2vmiD",
+              "x": 46,
+              "y": 121,
+              "name": "Tool Card Chevron Icon",
+              "width": 18,
+              "height": 18,
+              "icon": "chevron-down",
+              "library": "lucide",
+              "weight": 500,
+              "fill": "#F1B69A"
             }
           ]
         },
@@ -1597,10 +1778,10 @@
           "name": "Creator / Import Settings",
           "reusable": true,
           "width": 366,
-          "height": 76,
+          "height": 80,
           "fill": "#101A2B",
           "cornerRadius": 20,
-          "stroke": "#28344A",
+          "stroke": "#79505B",
           "strokeWidth": 1,
           "layout": "none",
           "children": [
@@ -1610,20 +1791,21 @@
               "x": 16,
               "y": 16,
               "name": "Import Settings Heading",
-              "width": 44,
+              "width": 140,
               "height": 44,
-              "gap": 10,
-              "alignItems": "center",
+              "layout": "none",
               "children": [
                 {
                   "type": "frame",
                   "id": "wKnnu",
+                  "x": 16,
+                  "y": 16,
                   "name": "Import Settings Icon",
                   "width": 44,
                   "height": 44,
                   "fill": "#211923",
                   "cornerRadius": 22,
-                  "stroke": "#E8B2A6",
+                  "stroke": "#F1B69A",
                   "strokeWidth": 1,
                   "justifyContent": "center",
                   "alignItems": "center",
@@ -1644,10 +1826,12 @@
                 {
                   "type": "text",
                   "id": "yCXCc",
+                  "x": 72,
+                  "y": 12,
                   "name": "Import Settings Label",
-                  "fill": "$text-primary",
+                  "fill": "#F7F2EE",
                   "content": "Import mode",
-                  "lineHeight": 20,
+                  "lineHeight": 1.33,
                   "fontFamily": "Inter",
                   "fontSize": 15,
                   "fontWeight": "600"
@@ -1658,42 +1842,76 @@
               "type": "frame",
               "id": "h6gfG2",
               "x": 190,
-              "y": 14,
+              "y": 10,
               "name": "Import Settings Select",
               "width": 160,
-              "height": 48,
+              "height": 40,
               "fill": "#0B1322",
               "cornerRadius": 14,
-              "stroke": "#28344A",
+              "stroke": "#3A4A63",
               "strokeWidth": 1,
-              "padding": 14,
-              "alignItems": "center"
+              "layout": "none",
+              "children": [
+                {
+                  "type": "text",
+                  "id": "jG8qx",
+                  "x": 14,
+                  "y": 10,
+                  "name": "Import Mode Auto Value",
+                  "fill": "#F7F2EE",
+                  "textGrowth": "fixed-width-height",
+                  "width": 100,
+                  "height": 20,
+                  "content": "Auto",
+                  "lineHeight": 1.25,
+                  "fontFamily": "Inter",
+                  "fontSize": 16,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "icon",
+                  "id": "VRmBH",
+                  "x": 128,
+                  "y": 11,
+                  "name": "Import Mode Chevron",
+                  "width": 18,
+                  "height": 18,
+                  "icon": "chevron-down",
+                  "library": "lucide",
+                  "weight": 400,
+                  "fill": "#F1B69A"
+                }
+              ]
             },
             {
               "type": "text",
               "id": "wSgVB",
-              "x": 18,
-              "y": 386,
+              "x": 14,
+              "y": 12,
               "name": "Import Settings Select Label",
-              "fill": "$text-primary",
+              "enabled": false,
+              "fill": "#F7F2EE",
               "content": "Auto",
-              "lineHeight": 20,
+              "lineHeight": 1.25,
               "fontFamily": "Inter",
-              "fontSize": 16
+              "fontSize": 16,
+              "fontWeight": "normal"
             },
             {
               "type": "text",
               "id": "Nutxp",
-              "x": 72,
-              "y": 48,
+              "x": 88,
+              "y": 54,
               "name": "Import Settings Description",
-              "fill": "$text-secondary",
-              "textGrowth": "fixed-width",
-              "width": 270,
+              "fill": "#B8B8C2",
+              "textGrowth": "fixed-width-height",
+              "width": 254,
+              "height": 24,
               "content": "New posts will import automatically from your Telegram channel.",
-              "lineHeight": 15,
+              "lineHeight": 1.2,
               "fontFamily": "Inter",
-              "fontSize": 11
+              "fontSize": 10,
+              "fontWeight": "normal"
             }
           ]
         }
@@ -2390,7 +2608,7 @@
                   "name": "Brand",
                   "fill": "#F7F2EE",
                   "content": "g.",
-                  "lineHeight": 36,
+                  "lineHeight": 1,
                   "fontFamily": "Cormorant Garamond",
                   "fontSize": 36,
                   "fontWeight": "500"
@@ -2456,10 +2674,10 @@
               "id": "OVyzR",
               "layoutPosition": "absolute",
               "x": 12,
-              "y": 510,
+              "y": 514,
               "name": "Creator Tool Cards",
               "width": 366,
-              "height": 156,
+              "height": 142,
               "layout": "none",
               "children": [
                 {
@@ -2473,6 +2691,11 @@
                   "height": 156,
                   "layoutPosition": "absolute",
                   "descendants": {
+                    "u87BJ": {
+                      "icon": "user-round",
+                      "library": "lucide",
+                      "fill": "#F1B69A"
+                    },
                     "NzhPm": {
                       "content": "Profile settings"
                     },
@@ -2492,6 +2715,11 @@
                   "height": 156,
                   "layoutPosition": "absolute",
                   "descendants": {
+                    "u87BJ": {
+                      "icon": "file-text",
+                      "library": "lucide",
+                      "fill": "#F1B69A"
+                    },
                     "NzhPm": {
                       "content": "Imported posts"
                     },
@@ -2511,6 +2739,11 @@
                   "height": 156,
                   "layoutPosition": "absolute",
                   "descendants": {
+                    "u87BJ": {
+                      "icon": "chart-no-axes-column",
+                      "library": "lucide",
+                      "fill": "#F1B69A"
+                    },
                     "NzhPm": {
                       "content": "Stats"
                     },
@@ -2525,11 +2758,11 @@
               "type": "text",
               "id": "s72UtZ",
               "x": 16,
-              "y": 675,
+              "y": 660,
               "name": "Import Settings Eyebrow",
               "fill": "#E8B2A6",
               "content": "IMPORT SETTINGS",
-              "lineHeight": 14,
+              "lineHeight": 1.27,
               "fontFamily": "Inter",
               "fontSize": 11,
               "fontWeight": "600",
@@ -2543,7 +2776,7 @@
               "name": "Creator Tools Eyebrow",
               "fill": "#E8B2A6",
               "content": "CREATOR TOOLS",
-              "lineHeight": 14,
+              "lineHeight": 1.27,
               "fontFamily": "Inter",
               "fontSize": 11,
               "fontWeight": "600",
@@ -2557,7 +2790,7 @@
               "name": "Creator Dashboard Title",
               "fill": "#F7F2EE",
               "content": "Creator Dashboard",
-              "lineHeight": 44,
+              "lineHeight": 1.05,
               "fontFamily": "Cormorant Garamond",
               "fontSize": 42,
               "fontWeight": "500"
@@ -2570,9 +2803,10 @@
               "name": "Creator Dashboard Subtitle",
               "fill": "#B8B8C2",
               "content": "Your content, your audience, more possibilities.",
-              "lineHeight": 20,
+              "lineHeight": 1.43,
               "fontFamily": "Inter",
-              "fontSize": 14
+              "fontSize": 14,
+              "fontWeight": "normal"
             },
             {
               "type": "frame",
@@ -2647,10 +2881,10 @@
               "type": "frame",
               "id": "wuyT6",
               "x": 12,
-              "y": 690,
+              "y": 678,
               "name": "Import Settings Placement",
               "width": 366,
-              "height": 76,
+              "height": 80,
               "layout": "none",
               "children": [
                 {
@@ -2661,8 +2895,18 @@
                   "width": 366,
                   "x": 0,
                   "y": 0,
-                  "height": 76,
-                  "layoutPosition": "absolute"
+                  "height": 80,
+                  "layoutPosition": "absolute",
+                  "descendants": {
+                    "Nutxp": {
+                      "x": 88,
+                      "y": 54,
+                      "width": 254,
+                      "height": 24,
+                      "fontSize": 10,
+                      "lineHeight": 1.2
+                    }
+                  }
                 }
               ]
             },
@@ -2688,6 +2932,34 @@
                   "layoutPosition": "absolute"
                 }
               ]
+            },
+            {
+              "type": "text",
+              "id": "fQQf1",
+              "x": 16,
+              "y": 328,
+              "name": "My Telegram Channel Eyebrow",
+              "fill": "#E8B2A6",
+              "content": "MY TELEGRAM CHANNEL",
+              "lineHeight": 1.27,
+              "fontFamily": "Inter",
+              "fontSize": 11,
+              "fontWeight": "600",
+              "letterSpacing": 2.2
+            },
+            {
+              "type": "text",
+              "id": "NYMUQ",
+              "x": 16,
+              "y": 494,
+              "name": "Creator Tools Section Eyebrow",
+              "fill": "#E8B2A6",
+              "content": "CREATOR TOOLS",
+              "lineHeight": 1.27,
+              "fontFamily": "Inter",
+              "fontSize": 11,
+              "fontWeight": "600",
+              "letterSpacing": 2.2
             }
           ]
         },
