@@ -45,6 +45,7 @@ export function applyCandidate(sha) {
   const dockerfile = path.join(checkout, 'infra/production/Gpoint.Dockerfile');
   const safetyConfig = path.join(checkout, 'infra/production/sensitive-detector/config.mjs');
   const safetyDockerfile = path.join(checkout, 'infra/production/sensitive-detector/Dockerfile');
+  const caddyfile = path.join(checkout, 'infra/production/Caddyfile');
   execFileSync('tar', ['-czf', archive, '-C', path.dirname(checkout), path.basename(checkout)]);
   try {
     upload(archive, `/tmp/gpoint-${sha}.tar.gz`);
@@ -52,6 +53,7 @@ export function applyCandidate(sha) {
     upload(dockerfile, `/tmp/gpoint-dockerfile-${sha}`);
     upload(safetyConfig, `/tmp/gpoint-safety-config-${sha}.mjs`);
     upload(safetyDockerfile, `/tmp/gpoint-safety-dockerfile-${sha}`);
+    upload(caddyfile, `/tmp/gpoint-caddy-${sha}`);
     const diskGuard = run("set -e; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n \"$freeKb\"; if [ \"$freeKb\" -lt 8388608 ]; then echo GPOINT_DISK_GUARD_WARN; fi; test \"$freeKb\" -ge 5242880; echo GPOINT_DISK_GUARD_OK");
     if (!diskGuard.includes('GPOINT_DISK_GUARD_OK')) throw new Error('remote disk guard failed: minimum 5 GiB free space required');
     const build = [
@@ -70,6 +72,9 @@ export function applyCandidate(sha) {
     const deploy = [
       'set -e',
       `cp /tmp/gpoint-compose-${sha}.yml /opt/gpoint/compose/docker-compose.yml`,
+      `caddy validate --config /tmp/gpoint-caddy-${sha} --adapter caddyfile`,
+      `cp /tmp/gpoint-caddy-${sha} /etc/caddy/Caddyfile`,
+      'systemctl reload caddy',
       `mkdir -p /opt/gpoint/compose/sensitive-detector && cp /tmp/gpoint-safety-config-${sha}.mjs /opt/gpoint/compose/sensitive-detector/config.mjs && cp /tmp/gpoint-safety-dockerfile-${sha} /opt/gpoint/compose/sensitive-detector/Dockerfile`,
       `sed -i.bak s/^RELEASE_SHA=.*/RELEASE_SHA=${sha}/ /opt/gpoint/env/production.env`,
       'rm -f /opt/gpoint/env/production.env.bak',
