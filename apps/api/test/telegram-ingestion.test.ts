@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { ContentSanitizer } from '../src/content-sanitizer.js';
 import { DeterministicSafetyProvider, isEligibleImport, sourceHash } from '../src/telegram-ingestion.js';
 import { HttpSafetyProvider, UnconfiguredSafetyProvider } from '../src/safety-provider.js';
+import { manualApprovalAllowed, publicationDecision, publicationStatus } from '../src/content-safety-policy.js';
 import { HttpTranslationProvider } from '../src/translation-provider.js';
 
 test('sanitizer preserves ordinary caption and removes outbound promotion', () => {
@@ -26,6 +27,20 @@ test('safety provider never treats explicit or uncertain markers as safe', async
 });
 test('source versions are deterministic for translation invalidation', () => assert.equal(sourceHash('same'), sourceHash('same')));
 test('unconfigured safety provider fails closed', async () => assert.equal((await new UnconfiguredSafetyProvider().classify({ text: 'ordinary', mimeTypes: [] })).classification, 'UNCERTAIN'));
+test('canonical policy auto-publishes suggestive while preserving its class', () => {
+  assert.equal(publicationDecision('SAFE'), 'AUTO_PUBLISH');
+  assert.equal(publicationDecision('SUGGESTIVE'), 'AUTO_PUBLISH');
+  assert.equal(publicationStatus('SUGGESTIVE', 'AUTO'), 'PUBLISHED');
+  assert.equal(manualApprovalAllowed('SUGGESTIVE'), true);
+});
+test('canonical policy keeps uncertain and erotic pending and blocks explicit', () => {
+  assert.equal(publicationDecision('UNCERTAIN'), 'PENDING_MODERATION');
+  assert.equal(publicationDecision('EROTIC'), 'PENDING_MODERATION');
+  assert.equal(publicationDecision('EXPLICIT'), 'BLOCKED');
+  assert.equal(publicationStatus('EXPLICIT', 'AUTO'), 'PENDING_MODERATION');
+  assert.equal(manualApprovalAllowed('EXPLICIT'), false);
+  assert.equal(manualApprovalAllowed('EROTIC'), false);
+});
 test('http safety adapter maps taxonomy and low confidence to uncertain', async () => {
   const original = globalThis.fetch;
   try {

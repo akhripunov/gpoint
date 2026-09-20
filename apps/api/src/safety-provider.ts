@@ -1,4 +1,5 @@
-import type { ContentSafetyProvider, SafetyClassification } from './telegram-ingestion.js';
+import type { ContentSafetyProvider } from './telegram-ingestion.js';
+import type { SafetyClassification } from './content-safety-policy.js';
 import sharp from 'sharp';
 
 const classifications = new Set<SafetyClassification>(['SAFE', 'SUGGESTIVE', 'EROTIC', 'EXPLICIT', 'UNCERTAIN']);
