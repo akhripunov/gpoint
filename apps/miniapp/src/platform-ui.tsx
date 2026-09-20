@@ -25,6 +25,7 @@ import {
   disconnectTelegramChannel,
   getToken,
   mediaUrl,
+  openTelegramStartChannel,
   prepareCreatorChannelReverification,
   creatorChannelSelectionStatus,
   requestCreatorTelegramChannel,
@@ -708,7 +709,22 @@ export function TelegramChannelControls() {
     queryKey: ["telegram-channel"],
     queryFn: telegramChannel,
   });
-  const connect = useMutation({ mutationFn: startTelegramChannelConnection });
+  const [connectMessage, setConnectMessage] = useState("");
+  const connect = useMutation({
+    mutationFn: startTelegramChannelConnection,
+    onMutate: () => setConnectMessage(""),
+    onSuccess: () => {
+      try {
+        openTelegramStartChannel();
+      } catch (error: any) {
+        setConnectMessage(
+          error?.status === 426
+            ? "Update Telegram to connect a channel."
+            : "Could not open Telegram channel connection.",
+        );
+      }
+    },
+  });
   const c = creatorDashboardVisualFixture ? visualFixtureChannel : q.data;
   const connected = c?.status === "CONNECTED";
   if (q.isLoading) return <div className="dashboard-skeleton" aria-label="Loading channel" />;
@@ -730,8 +746,8 @@ export function TelegramChannelControls() {
           </button>
         </div>
         {connect.data && <p role="status">{connect.data.instructions}</p>}
-        {connect.error && (
-          <p role="alert">{(connect.error as Error).message}</p>
+        {(connect.error || connectMessage) && (
+          <p role="alert">{connectMessage || (connect.error as Error).message}</p>
         )}
       </section>
     );

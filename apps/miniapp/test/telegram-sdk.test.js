@@ -45,6 +45,14 @@ test('creator onboarding uses the official startchannel deep link', async () => 
   assert.doesNotMatch(main, /requestCreatorTelegramChannel/);
 });
 
+test('disconnected channel control opens Telegram after the start request succeeds', async () => {
+  const platform = await readFile(join(root, 'src', 'platform-ui.tsx'), 'utf8');
+  assert.match(platform, /openTelegramStartChannel/);
+  assert.match(platform, /mutationFn: startTelegramChannelConnection/);
+  assert.match(platform, /onSuccess: \(\) =>/);
+  assert.match(platform, /openTelegramStartChannel\(\)/);
+});
+
 test('connected creators get a dedicated workspace without moderation or recommendation controls', async () => {
   const main = await readFile(join(root, 'src', 'main.tsx'), 'utf8');
   const platform = await readFile(join(root, 'src', 'platform-ui.tsx'), 'utf8');
