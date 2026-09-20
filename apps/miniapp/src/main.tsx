@@ -1,3 +1,4 @@
+import "./boot-diagnostics";
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -42,6 +43,8 @@ import {
 import { BackButton, BottomNav } from "./ui";
 import "./style.css";
 import "./ui/tokens.css";
+import { BootErrorBoundary, markBootStage } from "./boot-diagnostics";
+markBootStage("TELEGRAM_GLOBAL_READY", { telegramGlobalPresent: Boolean((window as any).Telegram?.WebApp) });
 console.info("[GPoint] build", {
   APP_BUILD_SHA: __GPOINT_BUILD_SHA__,
   APP_BUILD_TIME: __GPOINT_BUILD_TIME__,
@@ -1441,8 +1444,10 @@ function AuthenticatedApp() {
   const [user, setUser] = useState<any>(null);
   const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
   useEffect(() => {
+    markBootStage("AUTH_REQUEST_STARTED");
     auth()
       .then((authenticatedUser) => {
+        markBootStage("AUTH_SUCCESS", { creatorProfileStatus: "unknown", channelStatus: "unknown" });
         setUser(authenticatedUser);
         setState("ready");
       })
@@ -1472,13 +1477,15 @@ function AuthenticatedApp() {
         </main>
       </div>
     );
-  return <App initialUser={user} />;
+  markBootStage("MAIN_VIEW_RENDER_STARTED");
+  const view = <App initialUser={user} />;
+  markBootStage("MAIN_VIEW_RENDER_FINISHED");
+  return view;
 }
-createRoot(document.getElementById("root")!).render(
-  <QueryClientProvider client={new QueryClient()}>
-    <AuthenticatedApp />
-  </QueryClientProvider>,
-);
+const root = createRoot(document.getElementById("root")!);
+markBootStage("REACT_ROOT_CREATED");
+root.render(<BootErrorBoundary><QueryClientProvider client={new QueryClient()}><AuthenticatedApp /></QueryClientProvider></BootErrorBoundary>);
+markBootStage("REACT_RENDER_CALLED");
 import { decode } from "blurhash";
 function BlurHashImage({
   hash,
