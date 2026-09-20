@@ -65,7 +65,35 @@ test('connected Telegram channel card exposes operational settings', async () =>
   assert.match(platform, /MY TELEGRAM CHANNEL/);
   assert.match(platform, /c\.title/);
   assert.match(platform, /status="Connected"/);
-  assert.match(platform, /className="channel-meta"/);
+  assert.match(platform, /<TelegramChannelCard/);
+  assert.match(platform, /lastSync=/);
   assert.match(platform, /export function TelegramImportSettings/);
   assert.match(platform, /disabled={!dirty \|\| update\.isPending}/);
+});
+
+test('disconnected creator reconnect uses prepared native selection and truthful overview state', async () => {
+  const client = await readFile(join(root, 'src', 'api', 'client.ts'), 'utf8');
+  const platform = await readFile(join(root, 'src', 'platform-ui.tsx'), 'utf8');
+  assert.match(client, /prepareCreatorChannelSelection/);
+  assert.match(client, /\/creator\/channel\/selection\/prepare/);
+  assert.match(client, /requestCreatorTelegramChannel/);
+  assert.match(platform, /c\?\.status === "CONNECTED"/);
+  assert.match(platform, /prepare=\{prepareCreatorChannelSelection\}/);
+  assert.match(platform, /label="Select Telegram Channel"/);
+  assert.match(platform, /Reconnect your Telegram channel/);
+  assert.match(platform, /Telegram channel connected and ready for ingestion\./);
+  assert.match(platform, /channelQ\.data\?\.status === "CONNECTED"/);
+});
+
+test('authenticated app passes the single authenticated user into the app shell', async () => {
+  const main = await readFile(join(root, 'src', 'main.tsx'), 'utf8');
+  const appStart = main.indexOf('function App({ initialUser }');
+  const authStart = main.indexOf('function AuthenticatedApp()');
+  assert.notEqual(appStart, -1);
+  assert.notEqual(authStart, -1);
+  const app = main.slice(appStart, authStart);
+  const authenticatedApp = main.slice(authStart);
+  assert.doesNotMatch(app, /\bauth\(\)/);
+  assert.match(authenticatedApp, /\.then\(\(authenticatedUser\) =>/);
+  assert.match(authenticatedApp, /<App initialUser=\{user\} \/>/);
 });
