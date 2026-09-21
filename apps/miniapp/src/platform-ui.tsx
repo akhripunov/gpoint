@@ -25,11 +25,10 @@ import {
   disconnectTelegramChannel,
   getToken,
   mediaUrl,
-  openTelegramStartChannel,
+  prepareCreatorChannelSelection,
   prepareCreatorChannelReverification,
   creatorChannelSelectionStatus,
   requestCreatorTelegramChannel,
-  startTelegramChannelConnection,
   telegramChannel,
   updateTelegramChannel,
 } from "./api/client";
@@ -709,22 +708,6 @@ export function TelegramChannelControls() {
     queryKey: ["telegram-channel"],
     queryFn: telegramChannel,
   });
-  const [connectMessage, setConnectMessage] = useState("");
-  const connect = useMutation({
-    mutationFn: startTelegramChannelConnection,
-    onMutate: () => setConnectMessage(""),
-    onSuccess: () => {
-      try {
-        openTelegramStartChannel();
-      } catch (error: any) {
-        setConnectMessage(
-          error?.status === 426
-            ? "Update Telegram to connect a channel."
-            : "Could not open Telegram channel connection.",
-        );
-      }
-    },
-  });
   const c = creatorDashboardVisualFixture ? visualFixtureChannel : q.data;
   const connected = c?.status === "CONNECTED";
   if (q.isLoading) return <div className="dashboard-skeleton" aria-label="Loading channel" />;
@@ -741,14 +724,8 @@ export function TelegramChannelControls() {
           verifies the channel and its own posting permission after selection.
             </p>
           </div>
-          <button className="primary dashboard-primary" disabled={connect.isPending} onClick={() => connect.mutate()}>
-            {connect.isPending ? "Preparing…" : "Select Telegram Channel"}
-          </button>
+          <CreatorChannelSelectionAction onSuccess={() => q.refetch()} />
         </div>
-        {connect.data && <p role="status">{connect.data.instructions}</p>}
-        {(connect.error || connectMessage) && (
-          <p role="alert">{connectMessage || (connect.error as Error).message}</p>
-        )}
       </section>
     );
   return (
@@ -758,6 +735,53 @@ export function TelegramChannelControls() {
       {c.lastError && <p className="dashboard-error" role="alert">{c.lastError}</p>}
       {!creatorDashboardVisualFixture && <CreatorReverifyAction onSuccess={() => q.refetch()} />}
     </section>
+  );
+}
+
+function CreatorChannelSelectionAction({ onSuccess }: { onSuccess: () => void }) {
+  const prepared = useQuery({
+    queryKey: ["creator-channel-selection-prepare"],
+    queryFn: prepareCreatorChannelSelection,
+    enabled: !creatorDashboardVisualFixture,
+    staleTime: 8 * 60_000,
+    retry: false,
+  });
+  const [state, setState] = useState<"READY" | "REQUESTING" | "VERIFYING" | "FAILED">("READY");
+  const [message, setMessage] = useState("");
+  const waitForConnection = async (challengeId: string) => {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const result = await creatorChannelSelectionStatus(challengeId);
+      if (result.status === "CONNECTED") return;
+      if (result.status === "FAILED") throw new Error(result.message || "Could not verify the connection.");
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    }
+    throw new Error("Could not verify the connection yet.");
+  };
+  const select = async () => {
+    if (!prepared.data) return;
+    setMessage("");
+    setState("REQUESTING");
+    try {
+      const sent = await requestCreatorTelegramChannel(prepared.data.requestId);
+      if (!sent) throw new Error("Telegram channel selection was cancelled.");
+      setState("VERIFYING");
+      await waitForConnection(prepared.data.challengeId);
+      setState("READY");
+      onSuccess();
+      window.dispatchEvent(new CustomEvent("gpoint:creator-connected"));
+    } catch (error) {
+      setState("FAILED");
+      setMessage(error instanceof Error ? error.message : "Could not connect Telegram channel.");
+      prepared.refetch();
+    }
+  };
+  return (
+    <>
+      <button className="primary dashboard-primary" disabled={!prepared.data || prepared.isFetching || state === "REQUESTING" || state === "VERIFYING"} onClick={select}>
+        {state === "REQUESTING" ? "Opening Telegram…" : state === "VERIFYING" ? "Verifying connection…" : "Select Telegram Channel"}
+      </button>
+      {message && <p role="alert">{message}</p>}
+    </>
   );
 }
 

@@ -85,6 +85,19 @@ test('connected Telegram channel card exposes operational settings', async () =>
   assert.match(platform, /disabled={!dirty \|\| update\.isPending}/);
 });
 
+test('disconnected creator channels use native selection so existing bot membership can be reconnected', async () => {
+  const client = await readFile(join(root, 'src', 'api', 'client.ts'), 'utf8');
+  const platform = await readFile(join(root, 'src', 'platform-ui.tsx'), 'utf8');
+  assert.match(client, /prepareCreatorChannelSelection/);
+  assert.match(client, /requestCreatorTelegramChannel/);
+  assert.match(client, /creatorChannelSelectionStatus/);
+  const controls = platform.slice(platform.indexOf('export function TelegramChannelControls'), platform.indexOf('export function TelegramImportSettings'));
+  assert.match(controls, /prepareCreatorChannelSelection/);
+  assert.match(controls, /requestCreatorTelegramChannel/);
+  assert.match(controls, /creatorChannelSelectionStatus/);
+  assert.doesNotMatch(controls, /openTelegramStartChannel/);
+});
+
 test('creator workspace derives its hero state from the durable channel query', async () => {
   const platform = await readFile(join(root, 'src', 'platform-ui.tsx'), 'utf8');
   const dashboardStart = platform.indexOf('export function CreatorWorkspaceDashboard');
