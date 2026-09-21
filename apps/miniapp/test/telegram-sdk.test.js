@@ -85,6 +85,17 @@ test('connected Telegram channel card exposes operational settings', async () =>
   assert.match(platform, /disabled={!dirty \|\| update\.isPending}/);
 });
 
+test('creator workspace derives its hero state from the durable channel query', async () => {
+  const platform = await readFile(join(root, 'src', 'platform-ui.tsx'), 'utf8');
+  const dashboardStart = platform.indexOf('export function CreatorWorkspaceDashboard');
+  assert.notEqual(dashboardStart, -1);
+  const dashboard = platform.slice(dashboardStart);
+  assert.match(dashboard, /queryKey: \["telegram-channel"\], queryFn: telegramChannel/);
+  assert.match(dashboard, /const channelConnected = channelQ\.data\?\.status === "CONNECTED"/);
+  assert.match(dashboard, /title=\{channelConnected \? "Creator workspace active" : "Reconnect your Telegram channel"\}/);
+  assert.match(dashboard, /body=\{channelConnected \? "Telegram channel connected and ready for ingestion\." : "Reconnect your Telegram channel to resume ingestion\."\}/);
+});
+
 test('authenticated app passes the single authenticated user into the app shell', async () => {
   const main = await readFile(join(root, 'src', 'main.tsx'), 'utf8');
   const appStart = main.indexOf('function App({ initialUser }');

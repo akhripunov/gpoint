@@ -839,6 +839,7 @@ export function TelegramImportSettings() {
 
 export function CreatorWorkspaceDashboard() {
   const q = useQuery({ queryKey: ["creator-me"], queryFn: creatorMe });
+  const channelQ = useQuery({ queryKey: ["telegram-channel"], queryFn: telegramChannel });
   const [tab, setTab] = useState("Overview");
   const posts = useQuery({
     queryKey: ["creator-imported-posts"],
@@ -870,6 +871,7 @@ export function CreatorWorkspaceDashboard() {
   if (q.isLoading) return <div className="empty">Loading creator workspace…</div>;
   const creator = q.data?.creator;
   if (!creator) return <div className="empty">Creator workspace unavailable.</div>;
+  const channelConnected = channelQ.data?.status === "CONNECTED";
   const tools = [
     { tab: "Profile settings", title: "Profile settings", copy: "Manage your creator profile", icon: <UserRound size={20} /> },
     { tab: "Imported Posts", title: "Imported posts", copy: "View and manage content", icon: <FileText size={18} /> },
@@ -881,7 +883,7 @@ export function CreatorWorkspaceDashboard() {
       <Tabs items={['Overview', 'Profile settings', 'Imported Posts', 'Stats']} active={tab} onChange={setTab} className="content-tabs" />
       {tab === 'Overview' && (
         <>
-          <WorkspaceStatusCard icon={<Check size={28} strokeWidth={1.8} />} title="Creator workspace active" body="Telegram channel connected and ready for ingestion." status={creator.status === "APPROVED" ? "Live" : "Pending review"} tone={creator.status === "APPROVED" ? "success" : "warm"} />
+          <WorkspaceStatusCard icon={<Check size={28} strokeWidth={1.8} />} title={channelConnected ? "Creator workspace active" : "Reconnect your Telegram channel"} body={channelConnected ? "Telegram channel connected and ready for ingestion." : "Reconnect your Telegram channel to resume ingestion."} status={channelConnected ? (creator.status === "APPROVED" ? "Live" : "Pending review") : "Reconnect required"} tone={channelConnected && creator.status === "APPROVED" ? "success" : "warm"} />
           <TelegramChannelControls />
           <div className="dashboard-section"><SectionEyebrow>CREATOR TOOLS</SectionEyebrow><div className="gpoint-tool-grid">{tools.map((tool) => <CreatorToolCard key={tool.tab} title={tool.title} description={tool.copy} icon={tool.icon} onClick={() => setTab(tool.tab)} />)}</div></div>
           <TelegramImportSettings />
