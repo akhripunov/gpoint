@@ -62,7 +62,7 @@ export function applyCandidate(sha) {
       `mkdir -p ${releaseDir}`,
       `tar -xzf /tmp/gpoint-${sha}.tar.gz -C ${releaseDir}`,
       `mv ${releaseDir}/${path.basename(checkout)} ${releaseDir}/source`,
-      `docker build --no-cache --build-arg GPOINT_BUILD_SHA=${sha} --label org.opencontainers.image.revision=${sha} --label org.opencontainers.image.source=${REPO} -f /tmp/gpoint-dockerfile-${sha} -t gpoint-runtime:${sha} ${releaseDir}/source`,
+      `docker build --build-arg GPOINT_BUILD_SHA=${sha} --label org.opencontainers.image.revision=${sha} --label org.opencontainers.image.source=${REPO} -f /tmp/gpoint-dockerfile-${sha} -t gpoint-runtime:${sha} ${releaseDir}/source`,
       `docker image inspect gpoint-runtime:${sha} --format '{{.Id}}' > ${imageProof}`,
       'echo GPOINT_BUILD_OK'
     ].join('; ');
