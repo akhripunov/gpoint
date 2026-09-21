@@ -3,9 +3,16 @@ WORKDIR /workspace
 ARG GPOINT_BUILD_SHA
 ENV GPOINT_BUILD_SHA=${GPOINT_BUILD_SHA}
 RUN apt-get update && apt-get install -y --no-install-recommends git openssl ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY . .
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/bot/package.json apps/bot/package.json
+COPY apps/miniapp/package.json apps/miniapp/package.json
+COPY apps/worker/package.json apps/worker/package.json
+COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/db/package.json packages/db/package.json
 RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
 RUN pnpm install --frozen-lockfile
+COPY . .
 RUN pnpm --filter @gpoint/db exec prisma generate
 RUN pnpm --filter @gpoint/db build
 RUN pnpm --filter @gpoint/api build
