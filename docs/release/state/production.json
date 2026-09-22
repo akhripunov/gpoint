@@ -1,11 +1,11 @@
 {
-  "currentProductionSha": "104aa06ad314b06c44f969d24bbbbdc07fb5100a",
+  "currentProductionSha": "ce88b3009c428235e28110fa8e43f01e08b09a53",
   "currentProductionDbHead": "20260918100000_native_creator_onboarding",
-  "currentProductionRef": "gpoint-production-20260920T104512787Z",
-  "previousProductionSha": "216dc2173e9f6624fad0e6829e6e51f7b1d8c367",
-  "lastReleaseId": "gpoint-release-20260920T104512787Z",
+  "currentProductionRef": "gpoint-production-20260922T041317Z",
+  "previousProductionSha": "0c596c12477d194ac68ee8d51c8a3b2fe8b1bf76",
+  "lastReleaseId": "gpoint-release-20260922T041317Z",
   "lastReleaseStatus": "COMPLETE",
-  "lastReleaseCompletedAt": "2026-09-20T10:57:16.759Z",
+  "lastReleaseCompletedAt": "2026-09-22T04:13:17.000Z",
   "releaseOrigin": "durable-production-release",
   "artifactIdentities": {
     "api": {
