@@ -105,8 +105,10 @@ export { run as runRemoteCommand };
 
 function exactCheckout(sha) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-apply-'));
-  execFileSync('git', ['clone', '--no-local', '--depth', '1', `file://${ROOT}`, dir], { stdio: 'ignore' });
-  execFileSync('git', ['checkout', sha], { cwd: dir, stdio: 'ignore' });
+  execFileSync('git', ['init', '-q', dir], { stdio: 'ignore' });
+  execFileSync('git', ['remote', 'add', 'origin', REPO], { cwd: dir, stdio: 'ignore' });
+  execFileSync('git', ['fetch', '--depth', '1', 'origin', sha], { cwd: dir, stdio: 'ignore' });
+  execFileSync('git', ['checkout', '--detach', '-q', 'FETCH_HEAD'], { cwd: dir, stdio: 'ignore' });
   const actual = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
   if (actual !== sha) throw new Error('apply checkout SHA mismatch');
   return dir;
@@ -127,6 +129,7 @@ export function applyCandidate(sha) {
   const caddyfile = path.join(checkout, 'infra/production/Caddyfile');
   execFileSync('tar', ['-czf', archive, '-C', path.dirname(checkout), path.basename(checkout)]);
   try {
+    stage(timings, 'PRODUCTION_PREFLIGHT', () => run("set -e; command -v docker >/dev/null; docker version --format 'DOCKER_VERSION={{.Server.Version}}'; docker compose version; docker buildx version; docker buildx inspect --bootstrap >/dev/null; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n \"$freeKb\"; test \"$freeKb\" -ge 5242880; test -r /opt/gpoint/env/production.env; currentSha=$(awk -F= '$1==\"RELEASE_SHA\" {print $2}' /opt/gpoint/env/production.env); printf '%s\\n' \"$currentSha\" | grep -Eq '^[0-9a-f]{40}$'; currentImage=$(docker inspect compose-api-1 --format '{{.Config.Image}}'); dbStatus=$(docker run --rm --network gpoint_app --network-alias gpoint-preflight --network shared_internal --env-file /opt/gpoint/env/production.env \"$currentImage\" pnpm --filter @gpoint/db exec prisma migrate status 2>&1); test -n \"$dbStatus\"; printf '%s\\n' \"$dbStatus\" | tail -5; printf 'GPOINT_PREFLIGHT_OK\\n'"));
     stage(timings, 'SOURCE_PREPARE', () => {
       upload(archive, `/tmp/gpoint-${sha}.tar.gz`);
       upload(compose, `/tmp/gpoint-compose-${sha}.yml`);
@@ -143,7 +146,7 @@ export function applyCandidate(sha) {
       `mkdir -p ${releaseDir}`,
       `tar -xzf /tmp/gpoint-${sha}.tar.gz -C ${releaseDir}`,
       `mv ${releaseDir}/${path.basename(checkout)} ${releaseDir}/source`,
-      `if docker image inspect gpoint-runtime:${sha} >/dev/null 2>&1; then test "$(docker image inspect gpoint-runtime:${sha} --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')" = '${sha}'; echo GPOINT_BUILD_REUSED; else if docker buildx version >/dev/null 2>&1; then DOCKER_BUILDKIT=1 docker build --progress=plain --build-arg GPOINT_BUILD_SHA=${sha} --label org.opencontainers.image.revision=${sha} --label org.opencontainers.image.source=${REPO} -f /tmp/gpoint-dockerfile-${sha} -t gpoint-runtime:${sha} ${releaseDir}/source > /tmp/gpoint-build-${sha}.log 2>&1; else DOCKER_BUILDKIT=0 docker build --progress=plain --build-arg GPOINT_BUILD_SHA=${sha} --label org.opencontainers.image.revision=${sha} --label org.opencontainers.image.source=${REPO} -f /tmp/gpoint-dockerfile-${sha} -t gpoint-runtime:${sha} ${releaseDir}/source > /tmp/gpoint-build-${sha}.log 2>&1; fi; fi`,
+      `if docker image inspect gpoint-runtime:${sha} >/dev/null 2>&1; then test "$(docker image inspect gpoint-runtime:${sha} --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')" = '${sha}'; echo GPOINT_BUILD_REUSED; else DOCKER_BUILDKIT=1 docker build --progress=plain --build-arg GPOINT_BUILD_SHA=${sha} --label org.opencontainers.image.revision=${sha} --label org.opencontainers.image.source=${REPO} -f /tmp/gpoint-dockerfile-${sha} -t gpoint-runtime:${sha} ${releaseDir}/source > /tmp/gpoint-build-${sha}.log 2>&1; fi`,
       `docker image inspect gpoint-runtime:${sha} --format '{{.Id}}' > ${imageProof}`,
       `mkdir -p /opt/gpoint/release-logs/${sha} && cp /tmp/gpoint-build-${sha}.log /opt/gpoint/release-logs/${sha}/runtime-build.log 2>/dev/null || true`,
       'echo GPOINT_BUILD_OK'
@@ -171,7 +174,7 @@ export function applyCandidate(sha) {
       "grep -q '^GPOINT_SAFETY_URL=' /opt/gpoint/env/production.env && sed -i 's#^GPOINT_SAFETY_URL=.*#GPOINT_SAFETY_URL=http://gpoint-sensitive-detector:3009#' /opt/gpoint/env/production.env || printf '%s\\n' 'GPOINT_SAFETY_URL=http://gpoint-sensitive-detector:3009' >> /opt/gpoint/env/production.env",
       "grep -q '^GPOINT_SAFETY_TIMEOUT_MS=' /opt/gpoint/env/production.env && sed -i 's#^GPOINT_SAFETY_TIMEOUT_MS=.*#GPOINT_SAFETY_TIMEOUT_MS=60000#' /opt/gpoint/env/production.env || printf '%s\\n' 'GPOINT_SAFETY_TIMEOUT_MS=60000' >> /opt/gpoint/env/production.env",
       "if ! grep -q '^GPOINT_SAFETY_API_KEY=.' /opt/gpoint/env/production.env; then printf 'GPOINT_SAFETY_API_KEY=%s\\n' \"$(openssl rand -hex 32)\" >> /opt/gpoint/env/production.env; fi",
-      `auxNeedsRecreate=0; if docker image inspect ${detectorTag} >/dev/null 2>&1; then echo GPOINT_AUX_REUSED; else auxNeedsRecreate=1; if docker buildx version >/dev/null 2>&1; then DOCKER_BUILDKIT=1 docker compose --env-file /opt/gpoint/env/production.env -f /opt/gpoint/compose/docker-compose.yml build --progress=plain gpoint-sensitive-detector > /tmp/gpoint-detector-build-${detectorHash}.log 2>&1; else DOCKER_BUILDKIT=0 docker compose --env-file /opt/gpoint/env/production.env -f /opt/gpoint/compose/docker-compose.yml build --progress=plain gpoint-sensitive-detector > /tmp/gpoint-detector-build-${detectorHash}.log 2>&1; fi; fi; printf 'GPOINT_AUX_NEEDS_RECREATE=%s\\n' "$auxNeedsRecreate" > /tmp/gpoint-aux-${sha}`,
+      `auxNeedsRecreate=0; if docker image inspect ${detectorTag} >/dev/null 2>&1; then echo GPOINT_AUX_REUSED; else auxNeedsRecreate=1; DOCKER_BUILDKIT=1 docker compose --env-file /opt/gpoint/env/production.env -f /opt/gpoint/compose/docker-compose.yml build --progress=plain gpoint-sensitive-detector > /tmp/gpoint-detector-build-${detectorHash}.log 2>&1; fi; printf 'GPOINT_AUX_NEEDS_RECREATE=%s\\n' "$auxNeedsRecreate" > /tmp/gpoint-aux-${sha}`,
       `mkdir -p /opt/gpoint/release-logs/${sha} && cp /tmp/gpoint-detector-build-${detectorHash}.log /opt/gpoint/release-logs/${sha}/detector-build.log 2>/dev/null || true`,
       `docker inspect compose-api-1 --format '{{.Config.Image}}' > /tmp/gpoint-previous-runtime-${sha} 2>/dev/null || true`,
       `set +e; services='api worker bot'; if grep -q 'GPOINT_AUX_NEEDS_RECREATE=1' /tmp/gpoint-aux-${sha}; then services="$services gpoint-sensitive-detector"; fi; docker compose --env-file /opt/gpoint/env/production.env -f /opt/gpoint/compose/docker-compose.yml up -d --force-recreate $services > /tmp/gpoint-compose-switch-${sha}.log 2>&1; composeExit=$?; set -e; printf 'GPOINT_COMPOSE_EXIT=%s\\n' "$composeExit"; mkdir -p /opt/gpoint/release-logs/${sha} && cp /tmp/gpoint-compose-switch-${sha}.log /opt/gpoint/release-logs/${sha}/compose-switch.log; tail -80 /tmp/gpoint-compose-switch-${sha}.log`,
