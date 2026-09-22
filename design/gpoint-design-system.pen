@@ -2163,7 +2163,7 @@
       "y": 0,
       "name": "03 SCREENS",
       "width": 980,
-      "height": 1100,
+      "height": 2020,
       "fill": "$bg-primary",
       "cornerRadius": 20,
       "layout": "none",
@@ -3060,6 +3060,855 @@
           "fontFamily": "Inter",
           "fontSize": 12,
           "fontWeight": "600"
+        },
+        {
+          "type": "frame",
+          "id": "k9i2Hr",
+          "x": 48,
+          "y": 1120,
+          "name": "UserProfile — Mobile 390x844",
+          "clip": true,
+          "width": 390,
+          "height": 844,
+          "fill": [
+            "#050B16",
+            {
+              "type": "gradient",
+              "gradientType": "radial",
+              "enabled": true,
+              "opacity": 0.58,
+              "rotation": 0,
+              "size": {
+                "width": 1.35,
+                "height": 0.8
+              },
+              "colors": [
+                {
+                  "color": "#20334B",
+                  "position": 0
+                },
+                {
+                  "color": "#0B1422",
+                  "position": 1
+                }
+              ],
+              "center": {
+                "y": 0.08
+              }
+            },
+            {
+              "type": "gradient",
+              "gradientType": "radial",
+              "enabled": true,
+              "opacity": 0.3,
+              "rotation": 0,
+              "size": {
+                "width": 1.45,
+                "height": 0.65
+              },
+              "colors": [
+                {
+                  "color": "#17273D",
+                  "position": 0
+                },
+                {
+                  "color": "#050B16",
+                  "position": 1
+                }
+              ],
+              "center": {
+                "y": 0.82
+              }
+            }
+          ],
+          "cornerRadius": 20,
+          "stroke": "#26354A",
+          "strokeWidth": 1,
+          "layout": "none",
+          "children": [
+            {
+              "type": "text",
+              "id": "b73Q6T",
+              "x": 16,
+              "y": 18,
+              "name": "GPoint Logo",
+              "fill": "#F7F2EE",
+              "content": "GPoint",
+              "lineHeight": 1,
+              "fontFamily": "Cormorant Garamond",
+              "fontSize": 24,
+              "fontWeight": "500"
+            },
+            {
+              "type": "frame",
+              "id": "SCGlA",
+              "x": 16,
+              "y": 16,
+              "name": "UserProfile Header",
+              "enabled": false,
+              "width": 358,
+              "height": 40,
+              "layout": "none",
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "ADXxZ",
+                  "x": 0,
+                  "y": 0,
+                  "name": "Back Button",
+                  "width": 40,
+                  "height": 40,
+                  "fill": "#0B1322",
+                  "cornerRadius": 20,
+                  "stroke": "#26354A",
+                  "strokeWidth": 1,
+                  "children": [
+                    {
+                      "type": "icon",
+                      "id": "xgR20",
+                      "name": "Back Chevron",
+                      "width": 22,
+                      "height": 22,
+                      "icon": "chevron-left",
+                      "library": "lucide",
+                      "weight": 500,
+                      "fill": "#E8B2A6"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "fCaqh",
+                  "x": 318,
+                  "y": 0,
+                  "name": "Profile Settings Button",
+                  "width": 40,
+                  "height": 40,
+                  "fill": "#0B1322",
+                  "cornerRadius": 20,
+                  "stroke": "#26354A",
+                  "strokeWidth": 1,
+                  "children": [
+                    {
+                      "type": "icon",
+                      "id": "xubbb",
+                      "name": "Profile Settings Icon",
+                      "width": 22,
+                      "height": 22,
+                      "icon": "settings",
+                      "library": "lucide",
+                      "weight": 400,
+                      "fill": "#E8B2A6"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "t6w0h",
+              "x": 10,
+              "y": 58,
+              "name": "Profile Card",
+              "width": 370,
+              "height": 155,
+              "fill": "#101A2B",
+              "cornerRadius": 20,
+              "stroke": "#26354A",
+              "strokeWidth": 1,
+              "layout": "none",
+              "children": [
+                {
+                  "type": "text",
+                  "id": "rY7gy",
+                  "x": 119,
+                  "y": 30,
+                  "name": "Profile Eyebrow",
+                  "fill": "#E8B2A6",
+                  "content": "MY PROFILE",
+                  "fontFamily": "Inter",
+                  "fontSize": 11,
+                  "fontWeight": "600",
+                  "letterSpacing": 2.2
+                },
+                {
+                  "type": "frame",
+                  "id": "xtN8M",
+                  "x": 14,
+                  "y": 26,
+                  "name": "Profile Avatar",
+                  "width": 72,
+                  "height": 72,
+                  "fill": "#E8B2A6",
+                  "cornerRadius": 36,
+                  "stroke": "#F7D2C8",
+                  "strokeWidth": 1
+                },
+                {
+                  "type": "text",
+                  "id": "DiGgA",
+                  "x": 20,
+                  "y": 43,
+                  "name": "Profile Avatar Initial",
+                  "fill": "#2A1C25",
+                  "content": "A",
+                  "textAlign": "center",
+                  "fontFamily": "Inter",
+                  "fontSize": 42,
+                  "fontWeight": "700"
+                },
+                {
+                  "type": "text",
+                  "id": "tzvTt",
+                  "x": 119,
+                  "y": 50,
+                  "name": "Profile Name",
+                  "fill": "#F7F2EE",
+                  "content": "Alexander",
+                  "fontFamily": "Inter",
+                  "fontSize": 22,
+                  "fontWeight": "700"
+                },
+                {
+                  "type": "text",
+                  "id": "bScIx",
+                  "x": 119,
+                  "y": 82,
+                  "name": "Profile Username",
+                  "fill": "#B8B8C2",
+                  "content": "@a_khripunov",
+                  "fontFamily": "Inter",
+                  "fontSize": 15,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "frame",
+                  "id": "PORr4",
+                  "x": 321,
+                  "y": 18,
+                  "name": "Edit Profile Button",
+                  "width": 40,
+                  "height": 40,
+                  "fill": "#0B1322",
+                  "cornerRadius": 20,
+                  "stroke": "#E8B2A6",
+                  "strokeWidth": 1,
+                  "layout": "none",
+                  "children": [
+                    {
+                      "type": "icon",
+                      "id": "bbTjR",
+                      "x": 9,
+                      "y": 9,
+                      "name": "Edit Pencil",
+                      "width": 22,
+                      "height": 22,
+                      "icon": "pencil",
+                      "library": "lucide",
+                      "weight": 400,
+                      "fill": "#E8B2A6"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "zCVav",
+              "x": 10,
+              "y": 223,
+              "name": "Profile Stats",
+              "width": 238,
+              "height": 68,
+              "layout": "none",
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "MKks1",
+                  "x": 0,
+                  "y": 0,
+                  "name": "Saved Card",
+                  "width": 117,
+                  "height": 68,
+                  "fill": "#101A2B",
+                  "cornerRadius": 16,
+                  "stroke": "#26354A",
+                  "strokeWidth": 1,
+                  "layout": "none",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "c0CI5",
+                      "x": 10,
+                      "y": 17,
+                      "name": "Saved Icon Circle",
+                      "width": 34,
+                      "height": 34,
+                      "fill": "#1C2A40",
+                      "cornerRadius": 17
+                    },
+                    {
+                      "type": "icon",
+                      "id": "B7HY2R",
+                      "x": 16,
+                      "y": 23,
+                      "name": "Saved Icon",
+                      "width": 22,
+                      "height": 22,
+                      "icon": "bookmark",
+                      "library": "lucide",
+                      "weight": 400,
+                      "fill": "#E8B2A6"
+                    },
+                    {
+                      "type": "text",
+                      "id": "KWxNw",
+                      "x": 48,
+                      "y": 40,
+                      "name": "Saved Label",
+                      "fill": "#B8B8C2",
+                      "content": "Saved",
+                      "fontFamily": "Inter",
+                      "fontSize": 13,
+                      "fontWeight": "600"
+                    },
+                    {
+                      "type": "text",
+                      "id": "TMca2",
+                      "x": 48,
+                      "y": 13,
+                      "name": "Saved Value",
+                      "fill": "#F7F2EE",
+                      "content": "12",
+                      "fontFamily": "Inter",
+                      "fontSize": 20,
+                      "fontWeight": "700"
+                    },
+                    {
+                      "type": "icon",
+                      "id": "spST8",
+                      "x": 93,
+                      "y": 25,
+                      "name": "Saved Chevron",
+                      "width": 18,
+                      "height": 18,
+                      "icon": "chevron-right",
+                      "library": "lucide",
+                      "weight": 400,
+                      "fill": "#8D98AB"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "BIvTY",
+                  "x": 125,
+                  "y": 0,
+                  "name": "Following Card",
+                  "width": 113,
+                  "height": 68,
+                  "fill": "#101A2B",
+                  "cornerRadius": 16,
+                  "stroke": "#26354A",
+                  "strokeWidth": 1,
+                  "layout": "none",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "wCDFT",
+                      "x": 10,
+                      "y": 17,
+                      "name": "Following Icon Circle",
+                      "width": 34,
+                      "height": 34,
+                      "fill": "#1C2A40",
+                      "cornerRadius": 17
+                    },
+                    {
+                      "type": "icon",
+                      "id": "RqLDy",
+                      "x": 16,
+                      "y": 23,
+                      "name": "Following Icon",
+                      "width": 22,
+                      "height": 22,
+                      "icon": "users-round",
+                      "library": "lucide",
+                      "weight": 400,
+                      "fill": "#E8B2A6"
+                    },
+                    {
+                      "type": "text",
+                      "id": "h5kiP1",
+                      "x": 48,
+                      "y": 40,
+                      "name": "Following Label",
+                      "fill": "#B8B8C2",
+                      "content": "Following",
+                      "fontFamily": "Inter",
+                      "fontSize": 13,
+                      "fontWeight": "600"
+                    },
+                    {
+                      "type": "text",
+                      "id": "bL6va",
+                      "x": 48,
+                      "y": 13,
+                      "name": "Following Value",
+                      "fill": "#F7F2EE",
+                      "content": "248",
+                      "fontFamily": "Inter",
+                      "fontSize": 20,
+                      "fontWeight": "700"
+                    },
+                    {
+                      "type": "icon",
+                      "id": "Tpkon",
+                      "x": 89,
+                      "y": 25,
+                      "name": "Following Chevron",
+                      "width": 18,
+                      "height": 18,
+                      "icon": "chevron-right",
+                      "library": "lucide",
+                      "weight": 400,
+                      "fill": "#8D98AB"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "id": "eBYY5",
+              "x": 14,
+              "y": 324,
+              "name": "Your Space Eyebrow",
+              "fill": "#E8B2A6",
+              "content": "YOUR SPACE",
+              "fontFamily": "Inter",
+              "fontSize": 11,
+              "fontWeight": "600",
+              "letterSpacing": 2.2
+            },
+            {
+              "type": "frame",
+              "id": "UHqDS",
+              "x": 10,
+              "y": 343,
+              "name": "Your Space Card",
+              "width": 370,
+              "height": 202,
+              "fill": "#101A2B",
+              "cornerRadius": 18,
+              "stroke": "#26354A",
+              "strokeWidth": 1,
+              "layout": "none",
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "FRdfq",
+                  "x": 14,
+                  "y": 14,
+                  "name": "My Subscription Row",
+                  "width": 342,
+                  "height": 40,
+                  "layout": "none",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "hPi29",
+                      "x": 0,
+                      "y": 3,
+                      "name": "My Subscription Icon Circle",
+                      "width": 34,
+                      "height": 34,
+                      "fill": "#1C2A40",
+                      "cornerRadius": 17
+                    },
+                    {
+                      "type": "icon",
+                      "id": "x1nCow",
+                      "x": 6,
+                      "y": 9,
+                      "name": "My Subscription Icon",
+                      "width": 22,
+                      "height": 22,
+                      "icon": "crown",
+                      "library": "lucide",
+                      "weight": 400,
+                      "fill": "#E8B2A6"
+                    },
+                    {
+                      "type": "text",
+                      "id": "Z80Cc",
+                      "x": 48,
+                      "y": 0,
+                      "name": "My Subscription Title",
+                      "fill": "#F7F2EE",
+                      "content": "My Subscription",
+                      "fontFamily": "Inter",
+                      "fontSize": 14,
+                      "fontWeight": "600"
+                    },
+                    {
+                      "type": "text",
+                      "id": "D0auJu",
+                      "x": 48,
+                      "y": 20,
+                      "name": "My Subscription Subtitle",
+                      "fill": "#B8B8C2",
+                      "content": "Manage your plan and benefits",
+                      "fontFamily": "Inter",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "icon",
+                      "id": "KeQt7",
+                      "x": 306,
+                      "y": 11,
+                      "name": "My Subscription Chevron",
+                      "width": 18,
+                      "height": 18,
+                      "icon": "chevron-right",
+                      "library": "lucide",
+                      "weight": 400,
+                      "fill": "#8D98AB"
+                    }
+                  ]
+                },
+                {
+                  "type": "rectangle",
+                  "id": "qYlXJ",
+                  "x": 48,
+                  "y": 62,
+                  "name": "My Subscription Divider",
+                  "fill": "#26354A",
+                  "width": 278,
+                  "height": 1
+                },
+                {
+                  "type": "frame",
+                  "id": "Y7uO0",
+                  "x": 14,
+                  "y": 66,
+                  "name": "Wallet Row",
+                  "width": 342,
+                  "height": 40,
+                  "layout": "none",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "B9lvUk",
+                      "x": 0,
+                      "y": 3,
+                      "name": "Wallet Icon Circle",
+                      "width": 34,
+                      "height": 34,
+                      "fill": "#1C2A40",
+                      "cornerRadius": 17
+                    },
+                    {
+                      "type": "icon",
+                      "id": "nFEXp",
+                      "x": 6,
+                      "y": 9,
+                      "name": "Wallet Icon",
+                      "width": 22,
+                      "height": 22,
+                      "icon": "wallet-cards",
+                      "library": "lucide",
+                      "weight": 400,
+                      "fill": "#E8B2A6"
+                    },
+                    {
+                      "type": "text",
+                      "id": "MsWpf",
+                      "x": 48,
+                      "y": 0,
+                      "name": "Wallet Title",
+                      "fill": "#F7F2EE",
+                      "content": "Wallet",
+                      "fontFamily": "Inter",
+                      "fontSize": 14,
+                      "fontWeight": "600"
+                    },
+                    {
+                      "type": "text",
+                      "id": "jhNQd",
+                      "x": 48,
+                      "y": 20,
+                      "name": "Wallet Subtitle",
+                      "fill": "#B8B8C2",
+                      "content": "Credits, payouts and payment methods",
+                      "fontFamily": "Inter",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "icon",
+                      "id": "j1jH7",
+                      "x": 306,
+                      "y": 11,
+                      "name": "Wallet Chevron",
+                      "width": 18,
+                      "height": 18,
+                      "icon": "chevron-right",
+                      "library": "lucide",
+                      "weight": 400,
+                      "fill": "#8D98AB"
+                    }
+                  ]
+                },
+                {
+                  "type": "rectangle",
+                  "id": "w2N8y",
+                  "x": 48,
+                  "y": 114,
+                  "name": "Wallet Divider",
+                  "fill": "#26354A",
+                  "width": 278,
+                  "height": 1
+                },
+                {
+                  "type": "frame",
+                  "id": "UmEjf",
+                  "x": 14,
+                  "y": 118,
+                  "name": "Settings Row",
+                  "width": 342,
+                  "height": 40,
+                  "layout": "none",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "P25wH",
+                      "x": 0,
+                      "y": 3,
+                      "name": "Settings Icon Circle",
+                      "width": 34,
+                      "height": 34,
+                      "fill": "#1C2A40",
+                      "cornerRadius": 17
+                    },
+                    {
+                      "type": "icon",
+                      "id": "Zyu5z",
+                      "x": 6,
+                      "y": 9,
+                      "name": "Settings Icon",
+                      "width": 22,
+                      "height": 22,
+                      "icon": "settings",
+                      "library": "lucide",
+                      "weight": 400,
+                      "fill": "#E8B2A6"
+                    },
+                    {
+                      "type": "text",
+                      "id": "Um1Fd",
+                      "x": 48,
+                      "y": 0,
+                      "name": "Settings Title",
+                      "fill": "#F7F2EE",
+                      "content": "Settings",
+                      "fontFamily": "Inter",
+                      "fontSize": 14,
+                      "fontWeight": "600"
+                    },
+                    {
+                      "type": "text",
+                      "id": "e9RrZ",
+                      "x": 48,
+                      "y": 20,
+                      "name": "Settings Subtitle",
+                      "fill": "#B8B8C2",
+                      "content": "Account, privacy and more",
+                      "fontFamily": "Inter",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "icon",
+                      "id": "zwyO2",
+                      "x": 306,
+                      "y": 11,
+                      "name": "Settings Chevron",
+                      "width": 18,
+                      "height": 18,
+                      "icon": "chevron-right",
+                      "library": "lucide",
+                      "weight": 400,
+                      "fill": "#8D98AB"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "id": "Vehv0",
+              "x": 14,
+              "y": 575,
+              "name": "Recommendations Eyebrow",
+              "fill": "#E8B2A6",
+              "content": "RECOMMENDATIONS",
+              "fontFamily": "Inter",
+              "fontSize": 11,
+              "fontWeight": "600",
+              "letterSpacing": 2.2
+            },
+            {
+              "type": "frame",
+              "id": "IvHrf",
+              "x": 10,
+              "y": 597,
+              "name": "Creator Tools Recommendation",
+              "width": 370,
+              "height": 87,
+              "fill": {
+                "type": "gradient",
+                "gradientType": "radial",
+                "enabled": true,
+                "rotation": 0,
+                "size": {
+                  "width": 0.9,
+                  "height": 1.5
+                },
+                "colors": [
+                  {
+                    "color": "#6D4B4A",
+                    "position": 0
+                  },
+                  {
+                    "color": "#2A2430",
+                    "position": 0.42
+                  },
+                  {
+                    "color": "#111B29",
+                    "position": 1
+                  }
+                ],
+                "center": {
+                  "x": 0.05
+                }
+              },
+              "cornerRadius": 18,
+              "stroke": "#E8B2A6",
+              "strokeWidth": 1,
+              "layout": "none",
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "TQWMn",
+                  "x": 16,
+                  "y": 17,
+                  "name": "Creator Tools Icon Circle",
+                  "width": 52,
+                  "height": 52,
+                  "fill": "#5A4649",
+                  "cornerRadius": 26,
+                  "stroke": "#E8B2A6"
+                },
+                {
+                  "type": "icon",
+                  "id": "sH0an",
+                  "x": 31,
+                  "y": 32,
+                  "name": "Creator Tools Icon",
+                  "width": 22,
+                  "height": 22,
+                  "icon": "sparkles",
+                  "library": "lucide",
+                  "weight": 400,
+                  "fill": "#F1B69A"
+                },
+                {
+                  "type": "text",
+                  "id": "ifZXM",
+                  "x": 74,
+                  "y": 20,
+                  "name": "Creator Tools Title",
+                  "fill": "#F7F2EE",
+                  "content": "Creator tools",
+                  "fontFamily": "Inter",
+                  "fontSize": 16,
+                  "fontWeight": "700"
+                },
+                {
+                  "type": "text",
+                  "id": "KkKue",
+                  "x": 74,
+                  "y": 48,
+                  "name": "Creator Tools Subtitle",
+                  "fill": "#B8B8C2",
+                  "content": "Manage your creator space",
+                  "fontFamily": "Inter",
+                  "fontSize": 13,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "icon",
+                  "id": "e9uLpa",
+                  "x": 334,
+                  "y": 33,
+                  "name": "Creator Tools Chevron",
+                  "width": 20,
+                  "height": 20,
+                  "icon": "chevron-right",
+                  "library": "lucide",
+                  "weight": 400,
+                  "fill": "#E8B2A6"
+                }
+              ]
+            },
+            {
+              "id": "CbGA2",
+              "type": "ref",
+              "ref": "aTrZ3",
+              "name": "Navigation / Bottom — Profile Active",
+              "x": 0,
+              "y": 766,
+              "width": 390,
+              "height": 78
+            },
+            {
+              "type": "ellipse",
+              "id": "ZbBll",
+              "x": 82,
+              "y": 29,
+              "name": "GPoint Logo Dot",
+              "fill": "#FFB1A5",
+              "width": 6,
+              "height": 7
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "id": "DoipZ",
+          "x": 48,
+          "y": 1092,
+          "name": "USER PROFILE — CANVAS LABEL",
+          "fill": "#C88F86",
+          "content": "USER PROFILE",
+          "fontFamily": "Inter",
+          "fontSize": 14,
+          "fontWeight": "600",
+          "letterSpacing": 2
+        },
+        {
+          "type": "text",
+          "id": "T9CrSC",
+          "x": 48,
+          "y": 1110,
+          "name": "UserProfile — APPROVED REFERENCE",
+          "fill": "#B8B8C2",
+          "content": "UserProfile · editable Pen mockup",
+          "fontFamily": "Inter",
+          "fontSize": 12,
+          "fontWeight": "normal"
         }
       ]
     },

@@ -21,3 +21,17 @@ The VPS is a runtime and artifact target, not a development workspace. Applicati
 ## GPoint UI/design skill
 
 - For GPoint UI/design, Pen, visual-reference, Golden, and design-to-React tasks, use the repo-local `gpoint-design` skill.
+
+## Canonical Pen workflow
+
+- For reference-image to editable-design work, use the connected `pencil` Pen MCP against `design/gpoint-design-system.pen`; the current Mac has no `pen` CLI in PATH.
+- Automated Pen editing must use Pen MCP/CLI only. Do not use Computer Use to open Finder, operate file dialogs, move canvas objects, or edit Pen properties; GUI inspection is diagnostic-only.
+- The required design chain is `design/references/*.png` → editable `.pen` layers/components → Pen screenshot/render → existing `tools/visual-diff/` comparison → bounded MCP correction loop → owner review.
+- A reference PNG is never the final flattened design layer. Reuse canonical GPoint tokens/components and keep new screens editable.
+- Screenshot/diff validation is required before reporting visual fidelity. Automated checks do not grant owner approval.
+
+## Clean worktree after task
+
+- After completing any GPoint task, leave the main repository either clean with verified changes committed and pushed, or explicitly BLOCKED with every remaining uncommitted file listed.
+- Do not report a task COMPLETE while unexplained tracked modifications remain.
+- Before starting the next task, verify `git status --porcelain` is empty.
