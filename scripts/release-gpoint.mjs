@@ -45,6 +45,19 @@ export function checkEffectiveConfig(candidate, config) {
   return failures;
 }
 
+export function releaseStateAfterError({ switched, runtimeVerified = false }) {
+  if (!switched) return 'FAILED_PRE_SWITCH';
+  return runtimeVerified ? 'RECOVERY_REQUIRED' : 'SWITCHED_UNVERIFIED';
+}
+
+export function canCreateProductionRef({ releaseState, candidate, actualSha, mixedRuntime = false, health = true, dbVerified = true }) {
+  return releaseState === 'VERIFIED' && candidate === actualSha && !mixedRuntime && health && dbVerified;
+}
+
+export function shouldFinalizeRecovery({ releaseState, candidate, actualSha, gatesPass }) {
+  return releaseState === 'RECOVERY_REQUIRED' && candidate === actualSha && gatesPass === true;
+}
+
 export function evaluateSafetyGates({ candidateSha: sha, remoteSha, clean = true, artifacts, config, backupReady = true, migrationOk = true, concurrent = false, recordedProductionSha, liveProductionSha, productionRefTarget }) {
   const failures = validateCandidate({ candidateSha: sha, remoteSha, clean });
   failures.push(...checkArtifactParity(sha, artifacts));
@@ -124,6 +137,7 @@ function runApply(candidate) {
   const releaseId = `gpoint-release-${startedAt.replace(/[-:.]/g, '')}`;
   const unlock = acquireLock(releaseId);
   const current = state();
+  let switchStarted = false;
   try {
     const proof = remoteProof(candidate);
     const liveSha = process.env.GPOINT_LIVE_PRODUCTION_SHA ?? current.currentProductionSha;
@@ -134,7 +148,13 @@ function runApply(candidate) {
     const artifacts = { api: { sourceSha: candidate }, worker: { sourceSha: candidate }, bot: { sourceSha: candidate }, miniapp: { sourceSha: candidate } };
     const gates = evaluateSafetyGates({ candidateSha: candidate, remoteSha: proof.mainSha, artifacts, config: effective, recordedProductionSha: current.currentProductionSha, liveProductionSha: liveSha, productionRefTarget: candidate });
     if (gates.length) die(gates.join('; '));
+    switchStarted = true;
     const adapter = applyCandidate(candidate);
+    if (adapter.postSwitch?.state !== 'VERIFIED') {
+      const error = new Error(`post-switch reconciliation required: ${adapter.postSwitch?.state ?? 'UNKNOWN'}`);
+      error.code = adapter.postSwitch?.state ?? 'SWITCHED_UNVERIFIED';
+      throw error;
+    }
     const root = execFileSync('curl', ['-fsS', 'https://gpoint.amiora.one/'], { encoding: 'utf8' });
     if (!root.includes(`gpoint-build-sha" content="${candidate}`)) die('external Mini App build SHA mismatch after apply');
     execFileSync('curl', ['-fsS', 'https://gpoint.amiora.one/api/health/live'], { stdio: 'ignore' });
@@ -147,6 +167,32 @@ function runApply(candidate) {
     const file = writeManifest(manifest);
     fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...current, currentProductionSha: candidate, currentProductionDbHead: liveDbHead, currentProductionRef: ref, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: manifest.finishedAt, releaseOrigin: 'durable-production-release', artifactIdentities: manifest.artifactIdentities }, null, 2)}\n`);
     console.log(JSON.stringify({ status: 'COMPLETE', releaseId, candidateSha: candidate, productionRef: ref, manifest: path.relative(ROOT, file) }, null, 2));
+  } catch (error) {
+    const switched = switchStarted || error?.code === 'REMOTE_COMMAND_FAILED' && /compose|deploy|health|identity/i.test(error.command ?? '');
+    const releaseState = releaseStateAfterError({ switched, runtimeVerified: false });
+    const failureManifest = {
+      releaseId,
+      candidateSha: candidate,
+      previousProductionSha: current.currentProductionSha,
+      productionShaAfter: null,
+      dbHeadBefore: current.currentProductionDbHead,
+      dbHeadAfter: null,
+      startedAt,
+      finishedAt: isoNow(),
+      status: releaseState,
+      failureStage: switched ? 'POST_SWITCH' : 'PRE_SWITCH',
+      failureReason: error.message,
+      failureCommand: error.command ?? null,
+      failureExitCode: error.exitCode ?? null,
+      failureStderr: error.stderr ? String(error.stderr).slice(-4000) : null,
+      rollbackSha: current.currentProductionSha,
+      productionRef: null,
+      releaseOrigin: 'durable-production-release'
+    };
+    const manifestFile = writeManifest(failureManifest);
+    fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...current, lastReleaseId: releaseId, lastReleaseStatus: releaseState, recoveryRequired: switched, lastReleaseFailureManifest: path.relative(ROOT, manifestFile), lastReleaseFailureAt: failureManifest.finishedAt }, null, 2)}\n`);
+    console.error(JSON.stringify({ status: releaseState, releaseId, candidateSha: candidate, failureStage: switched ? 'POST_SWITCH' : 'PRE_SWITCH', failureReason: error.message }));
+    throw error;
   } finally { unlock(); }
 }
 

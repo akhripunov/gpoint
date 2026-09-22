@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { checkArtifactParity, checkEffectiveConfig, evaluateSafetyGates, validateCandidate } from './release-gpoint.mjs';
-import { validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
+import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, evaluateSafetyGates, releaseStateAfterError, shouldFinalizeRecovery, validateCandidate } from './release-gpoint.mjs';
+import { classifyPostSwitchState, migrationNeedsDeploy, shouldReuseCandidateImage, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
 
 const sha = '4d99e0da856d2ffe174c54d7ae7f2f971ab462f5';
 const artifacts = { api: { sourceSha: sha }, worker: { sourceSha: sha }, bot: { sourceSha: sha }, miniapp: { sourceSha: sha } };
@@ -37,4 +37,30 @@ test('runtime identity blocks a previous image before release completion', () =>
   const previousImage = 'sha256:' + 'b'.repeat(64);
   assert.deepEqual(validateRuntimeIdentity(sha, { imageId, buildSha: sha, apiImage: previousImage, workerImage: imageId, botImage: imageId }), ['apiImage does not use candidate image']);
   assert.deepEqual(validateRuntimeIdentity(sha, { imageId, buildSha: sha, apiImage: imageId, workerImage: imageId, botImage: imageId }), []);
+});
+
+test('nonzero compose after candidate switch enters switched-unverified recovery', () => {
+  const image = 'sha256:' + 'a'.repeat(64);
+  assert.equal(classifyPostSwitchState({ candidate: sha, runtime: { imageId: image, buildSha: sha, apiImage: image, workerImage: image, botImage: image }, composeExitCode: 1 }).state, 'SWITCHED_UNVERIFIED');
+  assert.equal(releaseStateAfterError({ switched: true, runtimeVerified: false }), 'SWITCHED_UNVERIFIED');
+});
+
+test('mixed runtime is recovery-required and cannot create a ref', () => {
+  const image = 'sha256:' + 'a'.repeat(64);
+  const old = 'sha256:' + 'b'.repeat(64);
+  const state = classifyPostSwitchState({ candidate: sha, runtime: { imageId: image, buildSha: sha, apiImage: image, workerImage: old, botImage: image }, composeExitCode: 0 });
+  assert.equal(state.state, 'RECOVERY_REQUIRED');
+  assert.equal(canCreateProductionRef({ releaseState: 'RECOVERY_REQUIRED', candidate: sha, actualSha: sha, gatesPass: true }), false);
+});
+
+test('recovery can finalize exactly once only after all gates pass', () => {
+  assert.equal(shouldFinalizeRecovery({ releaseState: 'RECOVERY_REQUIRED', candidate: sha, actualSha: sha, gatesPass: true }), true);
+  assert.equal(canCreateProductionRef({ releaseState: 'VERIFIED', candidate: sha, actualSha: sha, mixedRuntime: false, health: true, dbVerified: true }), true);
+  assert.equal(canCreateProductionRef({ releaseState: 'VERIFIED', candidate: sha, actualSha: sha, mixedRuntime: true, health: true, dbVerified: true }), false);
+});
+
+test('same candidate exact image is reusable and up-to-date migration is not redeployed', () => {
+  assert.equal(shouldReuseCandidateImage({ candidate: sha, exactRuntimeImage: true }), true);
+  assert.equal(migrationNeedsDeploy('Database schema is up to date!'), false);
+  assert.equal(migrationNeedsDeploy('Following migrations have not yet been applied'), true);
 });
