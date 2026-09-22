@@ -35,3 +35,5 @@ The VPS is a runtime and artifact target, not a development workspace. Applicati
 - After completing any GPoint task, leave the main repository either clean with verified changes committed and pushed, or explicitly BLOCKED with every remaining uncommitted file listed.
 - Do not report a task COMPLETE while unexplained tracked modifications remain.
 - Before starting the next task, verify `git status --porcelain` is empty.
+- The durable automation checks are `pnpm repo:clean:start` before work and
+  `pnpm repo:clean:end` before reporting completion; both must print `PASS`.
