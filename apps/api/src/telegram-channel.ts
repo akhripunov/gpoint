@@ -10,6 +10,9 @@ const storage = mediaStorageFromEnv();
 const modes = new Set(['AUTO', 'HASHTAG', 'MANUAL']);
 const challengeLifetimeMs = 10 * 60_000;
 export const telegramApiTimeoutMs = 8_000;
+export const telegramPhotoDownloadTimeoutMs = 8_000;
+export const telegramPhotoDownloadAttempts = 4;
+const telegramPhotoMaxBytes = 10 * 1024 * 1024;
 const userChannelAdministratorRights = { is_anonymous: false, can_manage_chat: true, can_delete_messages: false, can_manage_video_chats: false, can_restrict_members: false, can_promote_members: false, can_change_info: false, can_invite_users: false, can_post_stories: false, can_edit_stories: false, can_delete_stories: false, can_send_welcome_messages: false, can_post_messages: false } as const;
 export function preparedChannelButton(requestId: number) { if (!Number.isInteger(requestId) || requestId < -2_147_483_648 || requestId > 2_147_483_647) throw new Error('request_id must be a signed 32-bit integer'); return { text: 'Select Telegram channel', request_chat: { request_id: requestId, chat_is_channel: true, request_title: true, request_username: true, request_photo: true, user_administrator_rights: userChannelAdministratorRights } }; }
 export function preparedButtonId(result: { id?: unknown }) { if (typeof result.id !== 'string' || result.id.length === 0) throw new Error('Telegram returned an invalid PreparedKeyboardButton'); return result.id; }
@@ -18,14 +21,73 @@ async function authenticated(h: Record<string, string | undefined>) { const id =
 async function owned(h: Record<string, string | undefined>) { const { userId: id } = await authenticated(h); const owner = await prisma.creatorOwner.findFirst({ where: { userId: id }, select: { creatorId: true } }); if (!owner) throw new UnauthorizedException(); return { creatorId: owner.creatorId, userId: id }; }
 function botToken() { const value = process.env.TELEGRAM_BOT_TOKEN; if (!value) throw new BadRequestException('Telegram bot is not configured'); return value; }
 async function telegramApi<T>(method: string, body: Record<string, unknown>): Promise<T> { const startedAt = Date.now(); const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), telegramApiTimeoutMs); console.info('[Telegram] Bot API started', { method, startedAt: new Date(startedAt).toISOString() }); try { const response = await fetch(`https://api.telegram.org/bot${botToken()}/${method}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal }); const data = await response.json() as { ok?: boolean; result?: T; error_code?: number; description?: string }; console.info('[Telegram] Bot API finished', { method, finishedAt: new Date().toISOString(), latencyMs: Date.now() - startedAt, httpStatus: response.status, ok: data.ok === true }); if (!response.ok || !data.ok || data.result === undefined) { console.error('[Telegram] Bot API failure', { method, httpStatus: response.status, errorCode: data.error_code ?? null, description: data.description ?? null }); throw new BadRequestException(data.description ?? `Telegram ${method} failed`); } return data.result; } catch (error) { const timedOut = error instanceof DOMException && error.name === 'AbortError'; console.error('[Telegram] Bot API request failed', { method, finishedAt: new Date().toISOString(), latencyMs: Date.now() - startedAt, reason: timedOut ? 'TIMEOUT' : 'ERROR' }); if (timedOut) throw new BadRequestException(`Telegram ${method} timed out`); throw error; } finally { clearTimeout(timer); } }
+type TelegramFileFetch = typeof fetch;
+type TelegramSleep = (ms: number) => Promise<void>;
+const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+function downloadErrorCode(error: unknown) {
+  const code = error && typeof error === 'object' && 'cause' in error && (error as { cause?: { code?: unknown } }).cause?.code;
+  return typeof code === 'string' ? code : error instanceof Error ? error.name : 'UNKNOWN';
+}
+function isTransientDownloadError(error: unknown) {
+  const code = downloadErrorCode(error);
+  return code === 'AbortError' || /^(ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNREFUSED|UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET)$/.test(code);
+}
+function isAllowedTelegramImageContentType(value: string | null) {
+  return !value || value === 'application/octet-stream' || value.startsWith('image/');
+}
+export async function downloadTelegramFile(filePath: string, token: string, fetchImpl: TelegramFileFetch = fetch, sleepImpl: TelegramSleep = sleep) {
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= telegramPhotoDownloadAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), telegramPhotoDownloadTimeoutMs);
+    let responseStatus: number | null = null;
+    let responseContentType: string | null = null;
+    let responseContentLength: number | null = null;
+    try {
+      const response = await fetchImpl(`https://api.telegram.org/file/bot${token}/${filePath}`, { signal: controller.signal });
+      responseStatus = response.status;
+      responseContentType = response.headers.get('content-type');
+      const rawLength = response.headers.get('content-length');
+      responseContentLength = rawLength ? Number(rawLength) : null;
+      const retryableStatus = response.status === 429 || response.status >= 500;
+      if (!response.ok) {
+        lastError = new Error(`Telegram file HTTP ${response.status}`);
+        if (!retryableStatus) throw new BadRequestException('Telegram channel photo download failed');
+        throw lastError;
+      }
+      if (responseContentLength !== null && (!Number.isFinite(responseContentLength) || responseContentLength <= 0 || responseContentLength > telegramPhotoMaxBytes)) {
+        throw new BadRequestException('Telegram channel photo is invalid');
+      }
+      if (!isAllowedTelegramImageContentType(responseContentType)) throw new BadRequestException('Telegram channel photo is invalid');
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.length === 0 || bytes.length > telegramPhotoMaxBytes) throw new BadRequestException('Telegram channel photo is invalid');
+      console.info('[Telegram] channel photo download succeeded', { attempt, httpStatus: responseStatus, contentType: responseContentType ?? 'UNKNOWN', contentLength: responseContentLength, bodyBytes: bytes.length });
+      return bytes;
+    } catch (error) {
+      lastError = error;
+      const retryable = (responseStatus === 429 || (responseStatus !== null && responseStatus >= 500)) || isTransientDownloadError(error);
+      console.warn('[Telegram] channel photo download attempt failed', { attempt, httpStatus: responseStatus, errorClass: error instanceof BadRequestException ? 'HTTP_OR_VALIDATION' : downloadErrorCode(error), timeout: downloadErrorCode(error) === 'AbortError', contentType: responseContentType ?? 'UNKNOWN', contentLength: responseContentLength, retryable });
+      if (!retryable || attempt === telegramPhotoDownloadAttempts) break;
+      await sleepImpl(100 * 2 ** (attempt - 1));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new BadRequestException('Telegram channel photo download failed');
+}
 async function telegramPhotoBytes(fileId: string) {
   const file = await telegramApi<{ file_path?: string }>('getFile', { file_id: fileId });
   if (!file.file_path) throw new BadRequestException('Telegram channel photo path unavailable');
-  const response = await fetch(`https://api.telegram.org/file/${botToken()}/${file.file_path}`);
-  if (!response.ok) throw new BadRequestException('Telegram channel photo download failed');
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (bytes.length === 0 || bytes.length > 10 * 1024 * 1024) throw new BadRequestException('Telegram channel photo is invalid');
-  return bytes;
+  try {
+    return await downloadTelegramFile(file.file_path, botToken());
+  } catch (error) {
+    if (!(error instanceof BadRequestException)) throw error;
+    // Telegram file paths can expire. One bounded fresh getFile cycle is safe and
+    // keeps a transient file-endpoint failure from breaking channel hydration.
+    const refreshed = await telegramApi<{ file_path?: string }>('getFile', { file_id: fileId });
+    if (!refreshed.file_path || refreshed.file_path === file.file_path) throw error;
+    return downloadTelegramFile(refreshed.file_path, botToken(), fetch, sleep);
+  }
 }
 function channelSlug(value: string) { const normalized = value.toLowerCase().trim().replace(/^@/, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40); return normalized || 'creator'; }
 async function uniqueSlug(value: string) { const base = channelSlug(value); let candidate = base; for (let index = 2; await prisma.creator.findUnique({ where: { slug: candidate }, select: { id: true } }); index += 1) { const suffix = `-${index}`; candidate = `${base.slice(0, 40 - suffix.length)}${suffix}`; } return candidate; }

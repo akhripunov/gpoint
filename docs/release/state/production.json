@@ -1,10 +1,10 @@
 {
-  "currentProductionSha": "ce88b3009c428235e28110fa8e43f01e08b09a53",
-  "currentProductionDbHead": "20260918100000_native_creator_onboarding",
+  "currentProductionSha": "4a220f140563757aa7d678968338da7cc71c3fef",
+  "currentProductionDbHead": "20260922090000_telegram_channel_avatar",
   "currentProductionRef": "gpoint-production-20260922T041317Z",
   "previousProductionSha": "0c596c12477d194ac68ee8d51c8a3b2fe8b1bf76",
-  "lastReleaseId": "gpoint-release-20260922T041317Z",
-  "lastReleaseStatus": "COMPLETE",
+  "lastReleaseId": "gpoint-release-20260922T052654086Z",
+  "lastReleaseStatus": "FEATURE_GATE_FAILED",
   "lastReleaseCompletedAt": "2026-09-22T04:13:17.000Z",
   "releaseOrigin": "durable-production-release",
   "artifactIdentities": {
@@ -40,5 +40,11 @@
         "buildSha": "104aa06ad314b06c44f969d24bbbbdc07fb5100a"
       }
     }
-  }
+  },
+  "activeRuntimeSha": "4a220f140563757aa7d678968338da7cc71c3fef",
+  "activeRuntimeDbHead": "20260922090000_telegram_channel_avatar",
+  "releaseStatus": "VERIFIED_RUNTIME_PENDING_FEATURE_FINALIZATION",
+  "recoveryRequired": true,
+  "lastReleaseFailureManifest": "docs/release/manifests/gpoint-release-20260922T052654086Z.json",
+  "lastReleaseFailureAt": "2026-09-22T05:32:17.192Z"
 }
