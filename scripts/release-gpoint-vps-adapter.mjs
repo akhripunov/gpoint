@@ -178,7 +178,7 @@ export function applyCandidate(sha) {
       `mkdir -p /opt/gpoint/release-logs/${sha} && cp /tmp/gpoint-detector-build-${detectorHash}.log /opt/gpoint/release-logs/${sha}/detector-build.log 2>/dev/null || true`,
       `docker inspect compose-api-1 --format '{{.Config.Image}}' > /tmp/gpoint-previous-runtime-${sha} 2>/dev/null || true`,
       `set +e; services='api worker bot'; if grep -q 'GPOINT_AUX_NEEDS_RECREATE=1' /tmp/gpoint-aux-${sha}; then services="$services gpoint-sensitive-detector"; fi; docker compose --env-file /opt/gpoint/env/production.env -f /opt/gpoint/compose/docker-compose.yml up -d --force-recreate $services > /tmp/gpoint-compose-switch-${sha}.log 2>&1; composeExit=$?; set -e; printf 'GPOINT_COMPOSE_EXIT=%s\\n' "$composeExit"; mkdir -p /opt/gpoint/release-logs/${sha} && cp /tmp/gpoint-compose-switch-${sha}.log /opt/gpoint/release-logs/${sha}/compose-switch.log; tail -80 /tmp/gpoint-compose-switch-${sha}.log`,
-      'curl -fsS http://127.0.0.1:3000/health/live >/dev/null',
+      "for attempt in $(seq 1 30); do if curl -fsS http://127.0.0.1:3000/health/live >/dev/null; then break; fi; if [ \"$attempt\" = 30 ]; then exit 56; fi; sleep 2; done",
       'echo GPOINT_DEPLOY_OK'
     ].join('; ');
     const deployOutput = run(deploy); if (!deployOutput.includes('GPOINT_DEPLOY_OK')) throw new Error('remote runtime deploy failed');
