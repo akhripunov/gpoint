@@ -20,8 +20,9 @@ export class MediaReadController {
     const isPublicPost = asset.postMedia.some((x: any) => x.post.status === 'PUBLISHED' && x.post.creator.profile?.status === 'APPROVED');
     const profile = await prisma.creatorProfile.findFirst({ where: { OR: [{ avatarMediaId: id }, { coverMediaId: id }] }, select: { creator: { select: { profile: { select: { status: true } } } } } });
     const isPublicProfile = profile?.creator.profile?.status === 'APPROVED';
+    const isConnectedChannelAvatar = !!await prisma.telegramChannel.findFirst({ where: { avatarMediaId: id, status: 'CONNECTED' }, select: { id: true } });
     const isAdmin = session ? !!await prisma.userRole.findUnique({ where: { userId_role: { userId: session, role: 'ADMIN' } } }) : false;
-    if (asset.status !== 'READY' || (!isOwner && !isAdmin && !isPublicPost && !isPublicProfile)) throw new NotFoundException('media unavailable');
+    if (asset.status !== 'READY' || (!isOwner && !isAdmin && !isPublicPost && !isPublicProfile && !isConnectedChannelAvatar)) throw new NotFoundException('media unavailable');
     if (asset.storageProvider === 'local') {
       const path = normalize(join(mediaRoot, asset.storageKey));
       if (relative(mediaRoot, path).startsWith('..') || !relative(mediaRoot, path)) throw new NotFoundException('media unavailable');

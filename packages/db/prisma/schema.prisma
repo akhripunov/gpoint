@@ -103,6 +103,7 @@ model TelegramChannel {
   telegramChatId String @unique
   username String?
   title String?
+  avatarMediaId String?
   status String @default("PENDING")
   importMode String @default("AUTO")
   importHashtag String?
