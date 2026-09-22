@@ -116,7 +116,11 @@ async function hydrateConnectedChannelAvatar(channel: any) {
     const chat = await telegramApi<{ photo?: { big_file_id?: string; small_file_id?: string } }>('getChat', { chat_id: channel.telegramChatId });
     const avatar = await prepareChannelAvatar(channel.creatorId, channel.telegramChatId, chat.photo);
     if (!avatar) return channel;
-    const avatarMediaId = await prisma.$transaction(tx => attachChannelAvatar(tx, channel.creatorId, avatar, null));
+    const avatarMediaId = await prisma.$transaction(async tx => {
+      const mediaId = await attachChannelAvatar(tx, channel.creatorId, avatar, null);
+      await tx.telegramChannel.update({ where: { id: channel.id }, data: { avatarMediaId: mediaId } });
+      return mediaId;
+    });
     return { ...channel, avatarMediaId };
   } catch (error) {
     console.warn('[GPoint] connected channel avatar hydration failed', { reason: error instanceof Error ? error.message : 'UNKNOWN' });
