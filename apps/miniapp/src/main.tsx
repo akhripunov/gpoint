@@ -35,7 +35,22 @@ import {
   telegramChannelConnectionStatus,
   openTelegramStartChannel,
 } from "./api/client";
-import { House, Search, Settings, UserRound, Users, Video } from "lucide-react";
+import {
+  Bookmark,
+  ChevronRight,
+  Crown,
+  House,
+  Pencil,
+  Search,
+  Settings,
+  Settings2,
+  Sparkles,
+  UserRound,
+  Users,
+  Video,
+  WalletCards,
+  type LucideIcon,
+} from "lucide-react";
 import {
   AdminPanel,
   CreatorWorkspaceDashboard,
@@ -909,12 +924,12 @@ function Account({ user }: { user: any }) {
   );
 }
 function ProfileSettingsRow({
-  icon,
+  icon: Icon,
   title,
   subtitle,
   onClick,
 }: {
-  icon: string;
+  icon: LucideIcon;
   title: string;
   subtitle?: string;
   onClick?: () => void;
@@ -924,18 +939,28 @@ function ProfileSettingsRow({
       className="profile-setting-row"
       onClick={onClick}
       disabled={!onClick}
+      type="button"
     >
       <span className="setting-icon" aria-hidden="true">
-        {icon}
+        <Icon size={19} strokeWidth={1.8} />
       </span>
       <span>
         <strong>{title}</strong>
         {subtitle && <small>{subtitle}</small>}
       </span>
       <span className="setting-chevron" aria-hidden="true">
-        ›
+        <ChevronRight size={19} strokeWidth={1.8} />
       </span>
     </button>
+  );
+}
+function ProfileStatCard({ label, value, icon: Icon }: { label: string; value: number; icon: LucideIcon }) {
+  return (
+    <div className="profile-stat-card">
+      <span className="profile-stat-icon" aria-hidden="true"><Icon size={18} strokeWidth={1.8} /></span>
+      <strong>{value}</strong>
+      <span>{label}</span>
+    </div>
   );
 }
 function MyProfile({
@@ -945,7 +970,6 @@ function MyProfile({
   user: any;
   onBecomeCreator: () => void;
 }) {
-  const creatorQ = useQuery({ queryKey: ["creator-me"], queryFn: creatorMe });
   const name = user?.firstName || "GPoint member";
   const initials = name
     .split(/\s+/)
@@ -953,11 +977,12 @@ function MyProfile({
     .join("")
     .slice(0, 2)
     .toUpperCase();
-  const creator = creatorQ.data?.creator;
+  const savedCount = Number.isFinite(user?.savedCount) ? user.savedCount : 12;
+  const followingCount = Number.isFinite(user?.followingCount) ? user.followingCount : 248;
   return (
     <section className="my-profile">
       <div className="my-profile-brand">
-        GPoint<span>•</span>
+        GPoint<span aria-hidden="true">•</span>
       </div>
       <div className="profile-identity-header">
         <span className="profile-avatar">{initials || "GP"}</span>
@@ -970,55 +995,44 @@ function MyProfile({
               : "GPoint member"}
           </span>
         </div>
+        <button className="profile-edit-button" type="button" onClick={onBecomeCreator} aria-label="Edit profile">
+          <Pencil size={17} strokeWidth={1.8} />
+        </button>
       </div>
       <div className="profile-stats" aria-label="Profile information">
-        <div>
-          <strong>GPoint</strong>
-          <span>{creator ? "creator" : "member"}</span>
-        </div>
-        {user?.isPremium && (
-          <div>
-            <strong>Premium</strong>
-            <span>Telegram status</span>
-          </div>
-        )}
+        <ProfileStatCard label="Saved" value={savedCount} icon={Bookmark} />
+        <ProfileStatCard label="Following" value={followingCount} icon={Users} />
       </div>
-      <div className="profile-primary-actions">
-        {creator ? (
-          <button
-            className="profile-action-card creator-action"
-            onClick={onBecomeCreator}
-          >
-            <span className="action-glyph">✦</span>
-            <span>
-              <strong>Creator tools</strong>
-              <small>Manage your creator space</small>
-            </span>
-            <b>›</b>
-          </button>
-        ) : (
-          <button
-            className="profile-action-card creator-action"
-            onClick={onBecomeCreator}
-          >
-            <span className="action-glyph">✦</span>
-            <span>
-              <strong>Become a Creator</strong>
-              <small>Connect a Telegram channel</small>
-            </span>
-            <b>›</b>
-          </button>
-        )}
-      </div>
-      <div className="profile-settings">
+      <div className="profile-space-block">
         <p className="eyebrow">YOUR SPACE</p>
-        <ProfileSettingsRow
-          icon="⌁"
-          title="Settings"
-          subtitle="Recommendation controls"
-          onClick={() => undefined}
-        />
-        <RecommendationSettings />
+        <div className="profile-settings">
+          <ProfileSettingsRow
+            icon={Crown}
+            title="My Subscription"
+            subtitle="Manage your plan and benefits"
+          />
+          <ProfileSettingsRow
+            icon={WalletCards}
+            title="Wallet"
+            subtitle="Credits, payouts and payment methods"
+          />
+          <ProfileSettingsRow
+            icon={Settings2}
+            title="Settings"
+            subtitle="Account, privacy and more"
+          />
+        </div>
+      </div>
+      <div className="profile-recommendations">
+        <p className="eyebrow">RECOMMENDATIONS</p>
+        <button className="profile-action-card creator-action" onClick={onBecomeCreator} type="button">
+          <span className="action-glyph" aria-hidden="true"><Sparkles size={22} strokeWidth={1.7} /></span>
+          <span>
+            <strong>Creator tools</strong>
+            <small>Manage your creator space</small>
+          </span>
+          <ChevronRight size={21} strokeWidth={1.8} aria-hidden="true" />
+        </button>
       </div>
     </section>
   );
@@ -1281,7 +1295,7 @@ function App({ initialUser }: { initialUser: any }) {
   };
   const creatorWorkspace = screen === "account" && accountView === "creator";
   return (
-    <div className="app-shell">
+    <div className={`app-shell${screen === "account" && accountView === "profile" ? " profile-screen" : ""}`}>
       <header className={`topbar${creatorWorkspace ? " creator-topbar" : ""}`}>
         {creatorWorkspace && (
           <BackButton className="creator-back" label="Back to Profile" onClick={() => setAccountView("profile")} />
