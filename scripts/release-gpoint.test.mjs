@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, evaluateSafetyGates, releaseStateAfterError, shouldFinalizeRecovery, validateCandidate } from './release-gpoint.mjs';
-import { classifyPostSwitchState, migrationNeedsDeploy, shouldReuseCandidateImage, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
+import { classifyPostSwitchState, detectorNeedsRebuild, detectorSourceHash, migrationNeedsDeploy, runRemoteCommand, shouldReuseCandidateImage, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
 
 const sha = '4d99e0da856d2ffe174c54d7ae7f2f971ab462f5';
 const artifacts = { api: { sourceSha: sha }, worker: { sourceSha: sha }, bot: { sourceSha: sha }, miniapp: { sourceSha: sha } };
@@ -63,4 +66,33 @@ test('same candidate exact image is reusable and up-to-date migration is not red
   assert.equal(shouldReuseCandidateImage({ candidate: sha, exactRuntimeImage: true }), true);
   assert.equal(migrationNeedsDeploy('Database schema is up to date!'), false);
   assert.equal(migrationNeedsDeploy('Following migrations have not yet been applied'), true);
+});
+
+test('detector identity is independent and rebuilds only when source inputs change', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-detector-test-'));
+  const dir = path.join(root, 'infra/production/sensitive-detector');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'Dockerfile'), 'FROM node:22\n');
+  fs.writeFileSync(path.join(dir, 'config.mjs'), 'export default {}\n');
+  const first = detectorSourceHash(root);
+  const same = detectorSourceHash(root);
+  fs.writeFileSync(path.join(dir, 'config.mjs'), 'export default { port: 3009 }\n');
+  const changed = detectorSourceHash(root);
+  fs.rmSync(root, { recursive: true, force: true });
+  assert.equal(first, same);
+  assert.equal(detectorNeedsRebuild(first, same), false);
+  assert.notEqual(first, changed);
+  assert.equal(detectorNeedsRebuild(first, changed), true);
+});
+
+test('remote runner retains exact exit code and stderr without a parent pipe buffer', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-runner-test-'));
+  const runner = path.join(root, 'runner.sh');
+  fs.writeFileSync(runner, '#!/bin/sh\nprintf "bounded-output"\nprintf "diagnostic-stderr" >&2\nexit 17\n');
+  fs.chmodSync(runner, 0o700);
+  const previous = process.env.GPOINT_REMOTE_RUNNER;
+  process.env.GPOINT_REMOTE_RUNNER = runner;
+  assert.throws(() => runRemoteCommand('safe-test-command'), error => error.exitCode === 17 && error.stderr.includes('diagnostic-stderr'));
+  if (previous === undefined) delete process.env.GPOINT_REMOTE_RUNNER; else process.env.GPOINT_REMOTE_RUNNER = previous;
+  fs.rmSync(root, { recursive: true, force: true });
 });

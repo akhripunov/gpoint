@@ -15,6 +15,7 @@ const SHA_RE = /^[0-9a-f]{40}$/;
 function die(message) { throw new Error(`BLOCKED: ${message}`); }
 function readJson(file) { return JSON.parse(fs.readFileSync(file, 'utf8')); }
 function isoNow() { return new Date().toISOString(); }
+function measured(timings, name, action) { const started = Date.now(); try { return action(); } finally { timings[name] = Number(((Date.now() - started) / 1000).toFixed(1)); } }
 function git(args, cwd = ROOT) { return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); }
 function command(args, cwd) { const r = spawnSync(args[0], args.slice(1), { cwd, encoding: 'utf8', stdio: 'inherit' }); if (r.status !== 0) die(`${args.join(' ')} exited with ${r.status}`); }
 function assertSha(value, name = 'candidate SHA') { if (!SHA_RE.test(value ?? '')) die(`${name} must be an exact 40-character commit SHA`); }
@@ -134,10 +135,12 @@ function status() { console.log(JSON.stringify({ state: state(), activeLock: fs.
 
 function runApply(candidate) {
   const startedAt = isoNow();
+  const totalStarted = Date.now();
   const releaseId = `gpoint-release-${startedAt.replace(/[-:.]/g, '')}`;
   const unlock = acquireLock(releaseId);
   const current = state();
   let switchStarted = false;
+  const stageTimings = {};
   try {
     const proof = remoteProof(candidate);
     const liveSha = process.env.GPOINT_LIVE_PRODUCTION_SHA ?? current.currentProductionSha;
@@ -155,15 +158,17 @@ function runApply(candidate) {
       error.code = adapter.postSwitch?.state ?? 'SWITCHED_UNVERIFIED';
       throw error;
     }
-    const root = execFileSync('curl', ['-fsS', 'https://gpoint.amiora.one/'], { encoding: 'utf8' });
+    const root = measured(stageTimings, 'API_HEALTH', () => execFileSync('curl', ['-fsS', 'https://gpoint.amiora.one/'], { encoding: 'utf8' }));
     if (!root.includes(`gpoint-build-sha" content="${candidate}`)) die('external Mini App build SHA mismatch after apply');
-    execFileSync('curl', ['-fsS', 'https://gpoint.amiora.one/api/health/live'], { stdio: 'ignore' });
+    measured(stageTimings, 'WORKER_HEALTH', () => execFileSync('curl', ['-fsS', 'https://gpoint.amiora.one/api/health/live'], { stdio: 'ignore' }));
     const ref = `gpoint-production-${startedAt.replace(/[-:.]/g, '')}`;
-    execFileSync('git', ['tag', '-a', ref, candidate, '-m', `GPoint production release\nproductionSha=${candidate}\ndbHead=${liveDbHead}\nreleaseId=${releaseId}`], { cwd: ROOT, stdio: 'inherit' });
-    execFileSync('git', ['push', 'origin', `refs/tags/${ref}`], { cwd: ROOT, stdio: 'inherit' });
-    const remoteRef = git(['ls-remote', 'origin', `refs/tags/${ref}^{}`]).trim();
+    measured(stageTimings, 'PRODUCTION_REF_CREATE', () => execFileSync('git', ['tag', '-a', ref, candidate, '-m', `GPoint production release\nproductionSha=${candidate}\ndbHead=${liveDbHead}\nreleaseId=${releaseId}`], { cwd: ROOT, stdio: 'inherit' }));
+    measured(stageTimings, 'PRODUCTION_REF_PUSH', () => execFileSync('git', ['push', 'origin', `refs/tags/${ref}`], { cwd: ROOT, stdio: 'inherit' }));
+    const remoteRef = measured(stageTimings, 'REMOTE_REF_VERIFY', () => git(['ls-remote', 'origin', `refs/tags/${ref}^{}`])).trim();
     if (!remoteRef.includes(candidate)) die('remote production ref target mismatch');
-    const manifest = { releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: candidate, dbHeadBefore: liveDbHead, dbHeadAfter: liveDbHead, artifactIdentities: { api: { sourceSha: candidate, adapter: adapter.imageIdentity }, worker: { sourceSha: candidate, adapter: adapter.imageIdentity }, bot: { sourceSha: candidate, adapter: adapter.imageIdentity }, miniapp: { sourceSha: candidate, adapter: adapter.imageIdentity } }, startedAt, finishedAt: isoNow(), status: 'COMPLETE', failureStage: null, failureReason: null, rollbackSha: current.currentProductionSha, rollbackDbCompatibility: 'REQUIRES_FORWARD_FIX_ASSESSMENT', productionRef: ref, remoteProof: { mainSha: proof.mainSha }, migrationOutput: adapter.migrationOutput, releaseOrigin: 'durable-production-release' };
+    Object.assign(stageTimings, adapter.timings ?? {}, { TOTAL_RELEASE: Number(((Date.now() - totalStarted) / 1000).toFixed(1)) });
+    console.log(`RELEASE_STAGE_TIMING=${JSON.stringify(stageTimings)}`);
+    const manifest = { releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: candidate, dbHeadBefore: liveDbHead, dbHeadAfter: liveDbHead, artifactIdentities: { api: { sourceSha: candidate, adapter: adapter.imageIdentity }, worker: { sourceSha: candidate, adapter: adapter.imageIdentity }, bot: { sourceSha: candidate, adapter: adapter.imageIdentity }, miniapp: { sourceSha: candidate, adapter: adapter.imageIdentity } }, startedAt, finishedAt: isoNow(), status: 'COMPLETE', failureStage: null, failureReason: null, rollbackSha: current.currentProductionSha, rollbackDbCompatibility: 'REQUIRES_FORWARD_FIX_ASSESSMENT', productionRef: ref, remoteProof: { mainSha: proof.mainSha }, migrationOutput: adapter.migrationOutput, detectorSourceHash: adapter.detectorHash, stageTimings, releaseOrigin: 'durable-production-release' };
     const file = writeManifest(manifest);
     fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...current, currentProductionSha: candidate, currentProductionDbHead: liveDbHead, currentProductionRef: ref, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: manifest.finishedAt, releaseOrigin: 'durable-production-release', artifactIdentities: manifest.artifactIdentities }, null, 2)}\n`);
     console.log(JSON.stringify({ status: 'COMPLETE', releaseId, candidateSha: candidate, productionRef: ref, manifest: path.relative(ROOT, file) }, null, 2));

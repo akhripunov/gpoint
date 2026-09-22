@@ -19,6 +19,14 @@ dist
 .env*
 *.log
 screenshots
+design
+**/design
+design/**/*.png
+design/**/*.jpg
+design/**/*.jpeg
+design/**/*.webp
+tmp
+**/tmp
 release-artifacts
 .DS_Store
 .idea
