@@ -42,6 +42,7 @@ import {
   House,
   Pencil,
   Search,
+  Share2,
   Settings,
   Settings2,
   Sparkles,
@@ -56,6 +57,13 @@ import {
   CreatorWorkspaceDashboard,
 } from "./platform-ui";
 import { BackButton, BottomNav } from "./ui";
+import {
+  canonicalModelProfileUrl,
+  modelHandleFromStartParam,
+  modelProfilePath,
+  modelRouteFromLocation,
+  telegramModelStartParam,
+} from "./model-routing";
 import "./style.css";
 import "./ui/tokens.css";
 import { BootErrorBoundary, markBootStage } from "./boot-diagnostics";
@@ -308,6 +316,7 @@ function Explore({
 }
 function Profile({ slug, back }: { slug: string; back: () => void }) {
   const qc = useQueryClient();
+  const [shareStatus, setShareStatus] = useState("");
   const q = useQuery({
     queryKey: ["creator", slug],
     queryFn: () => creator(slug),
@@ -325,24 +334,57 @@ function Profile({ slug, back }: { slug: string; back: () => void }) {
   if (q.isLoading)
     return (
       <div className="empty">
-        <h3>Loading creator</h3>
+        <h3>Loading model</h3>
       </div>
     );
   if (q.isError || !q.data)
     return (
       <div className="empty">
-        <h3>Creator unavailable</h3>
+        <h3>Model unavailable</h3>
         <button className="back" onClick={back}>
           ← Back
         </button>
       </div>
     );
   const c = q.data;
+  const shareProfile = async () => {
+    const url = canonicalModelProfileUrl(c.slug);
+    try {
+      if (typeof navigator.share === "function") {
+        await navigator.share({ title: c.displayName, url });
+        return;
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+      setShareStatus("Profile link copied");
+      return;
+    } catch {
+      const telegram = (window as Window & {
+        Telegram?: { WebApp?: { openTelegramLink?: (target: string) => void } };
+      }).Telegram?.WebApp;
+      if (telegram?.openTelegramLink) {
+        telegram.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(url)}`);
+        return;
+      }
+      window.prompt("Copy this model profile link", url);
+      setShareStatus("Copy the canonical model profile link");
+    }
+  };
   return (
     <section className="profile-view">
-      <button className="back" onClick={back}>
-        ← Back
-      </button>
+      <div className="model-profile-actions">
+        <button className="back" onClick={back}>
+          ← Back
+        </button>
+        <button className="model-profile-share" onClick={shareProfile} aria-label={`Share ${c.displayName}'s model profile`}>
+          <Share2 size={16} aria-hidden="true" />
+          <span>Share</span>
+        </button>
+        {shareStatus && <small role="status">{shareStatus}</small>}
+      </div>
       <div className="profile-cover" />
       <div className="profile-identity">
         <span className="avatar large">
@@ -1089,7 +1131,24 @@ function FeedCard({
       })
     : "";
   return (
-    <article className="post-card">
+    <article
+      className="post-card"
+      tabIndex={0}
+      aria-label={`Post by ${post.creator.displayName}. Open model profile.`}
+      onClick={(event) => {
+        if ((event.target as HTMLElement).closest("button, a, video, details")) return;
+        open(post.creator);
+      }}
+      onKeyDown={(event) => {
+        if (
+          (event.key === "Enter" || event.key === " ") &&
+          event.target === event.currentTarget
+        ) {
+          event.preventDefault();
+          open(post.creator);
+        }
+      }}
+    >
       <div className="post-header">
         <button className="post-creator" onClick={() => open(post.creator)}>
           <span className="avatar tiny">
@@ -1269,28 +1328,77 @@ function Feed({
   );
 }
 function App({ initialUser }: { initialUser: any }) {
-  const creatorRoute = window.location.pathname.startsWith("/creator");
+  const [launchStartParam] = useState(() => telegramModelStartParam());
+  const [initialRoute] = useState(() =>
+    modelRouteFromLocation(window.location.pathname, launchStartParam),
+  );
+  const creatorRoute = initialRoute.screen === "creator";
   const [screen, setScreen] = useState<Screen>(
-    window.location.pathname.startsWith("/admin")
-      ? "admin"
-      : creatorRoute
-        ? "account"
-        : "for-you",
+    initialRoute.screen === "profile"
+      ? "profile"
+      : initialRoute.screen === "admin"
+        ? "admin"
+        : creatorRoute
+          ? "account"
+          : "for-you",
   );
   const [tab, setTab] = useState("Trending");
-  const [slug, setSlug] = useState("");
+  const [slug, setSlug] = useState(initialRoute.screen === "profile" ? initialRoute.handle : "");
   const user = initialUser;
   const [accountView, setAccountView] = useState<"profile" | "creator">(
     creatorRoute ? "creator" : "profile",
   );
+  const initialStartHandle = modelHandleFromStartParam(launchStartParam);
+  useEffect(() => {
+    if (initialRoute.screen !== "profile" || !initialStartHandle) return;
+    const path = modelProfilePath(initialStartHandle);
+    if (window.location.pathname !== path) {
+      window.history.replaceState(
+        window.history.state,
+        "",
+        `${path}${window.location.search}${window.location.hash}`,
+      );
+    }
+  }, []);
+  useEffect(() => {
+    const onPopState = () => {
+      const route = modelRouteFromLocation(window.location.pathname);
+      if (route.screen === "profile") {
+        setSlug(route.handle);
+        setScreen("profile");
+      } else if (route.screen === "admin") {
+        setScreen("admin");
+      } else if (route.screen === "creator") {
+        setAccountView("creator");
+        setScreen("account");
+      } else {
+        setScreen("for-you");
+      }
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+  const navigate = (next: Screen) => {
+    const path = next === "admin" ? "/admin" : next === "account" ? "/creator" : "/";
+    if (window.location.pathname !== path) window.history.pushState({ gpoint: true }, "", path);
+    setScreen(next);
+  };
+  const backToFeed = () => {
+    if (window.location.pathname.startsWith("/model/")) {
+      window.history.replaceState(window.history.state, "", "/");
+    }
+    setScreen("for-you");
+  };
   const open = (c: any) => {
     if (c.slug) {
       setSlug(c.slug);
+      window.history.pushState({ gpoint: true, modelHandle: c.slug }, "", modelProfilePath(c.slug));
       setScreen("profile");
-    } else setScreen("explore");
+    } else navigate("explore");
   };
   const clickReel = (s: string) => {
     setSlug(s);
+    window.history.pushState({ gpoint: true, modelHandle: s }, "", modelProfilePath(s));
     setScreen("profile");
   };
   const creatorWorkspace = screen === "account" && accountView === "creator";
@@ -1300,7 +1408,7 @@ function App({ initialUser }: { initialUser: any }) {
         {creatorWorkspace && (
           <BackButton className="creator-back" label="Back to Profile" onClick={() => setAccountView("profile")} />
         )}
-        <button className="brand" onClick={() => setScreen("for-you")}>
+        <button className="brand" onClick={() => navigate("for-you")}>
           GPoint<span>•</span>
         </button>
         {creatorWorkspace && <span className="creator-settings-control" aria-hidden="true"><Settings size={20} strokeWidth={1.7} /></span>}
@@ -1308,16 +1416,16 @@ function App({ initialUser }: { initialUser: any }) {
       </header>
       <main className="page">
         {screen === "for-you" && (
-          <Feed mode="for-you" open={open} go={setScreen} />
+          <Feed mode="for-you" open={open} go={navigate} />
         )}{" "}
         {screen === "following" && (
-          <Feed mode="following" open={open} go={setScreen} />
+          <Feed mode="following" open={open} go={navigate} />
         )}{" "}
         {screen === "explore" && (
           <Explore tab={tab} setTab={setTab} open={open} />
         )}{" "}
         {screen === "profile" && (
-          <Profile slug={slug} back={() => setScreen("for-you")} />
+          <Profile slug={slug} back={backToFeed} />
         )}{" "}
         {screen === "reels" && <RealReels open={clickReel} />}{" "}
         {screen === "account" &&
@@ -1337,7 +1445,7 @@ function App({ initialUser }: { initialUser: any }) {
           </div>
         )}
       </main>
-      <BottomNav active={screen} onChange={(id) => setScreen(id as Screen)} items={[
+      <BottomNav active={screen} onChange={(id) => navigate(id as Screen)} items={[
         { id: "for-you", label: "For You", icon: <House size={23} strokeWidth={1.8} /> },
         { id: "reels", label: "Reels", icon: <Video size={23} strokeWidth={1.8} /> },
         { id: "explore", label: "Explore", icon: <Search size={23} strokeWidth={1.8} /> },
