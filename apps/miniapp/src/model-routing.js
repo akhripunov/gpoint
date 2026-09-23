@@ -1,4 +1,4 @@
-const MODEL_HANDLE_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,48}[a-z0-9])?$/;
+const MODEL_HANDLE_PATTERN = /^[a-z0-9](?:[a-z0-9_-]{1,48}[a-z0-9])?$/;
 
 export function modelProfilePath(handle) {
   return `/model/${encodeURIComponent(handle)}`;
@@ -12,6 +12,13 @@ export function modelHandleFromStartParam(value) {
   if (!value?.startsWith("model_")) return null;
   const handle = value.slice("model_".length);
   return MODEL_HANDLE_PATTERN.test(handle) ? handle : null;
+}
+
+export function shouldRetryModelProfileQuery(failureCount, error) {
+  if (error && typeof error === "object" && "status" in error && error.status === 404) {
+    return false;
+  }
+  return failureCount < 3;
 }
 
 export function telegramModelStartParam() {

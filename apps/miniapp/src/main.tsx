@@ -62,6 +62,7 @@ import {
   modelHandleFromStartParam,
   modelProfilePath,
   modelRouteFromLocation,
+  shouldRetryModelProfileQuery,
   telegramModelStartParam,
 } from "./model-routing";
 import "./style.css";
@@ -320,6 +321,7 @@ function Profile({ slug, back }: { slug: string; back: () => void }) {
   const q = useQuery({
     queryKey: ["creator", slug],
     queryFn: () => creator(slug),
+    retry: shouldRetryModelProfileQuery,
   });
   const [tab, setTab] = useState("Posts");
   const f = useMutation({

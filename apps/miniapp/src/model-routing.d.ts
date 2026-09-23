@@ -8,3 +8,4 @@ export function modelHandleFromStartParam(value?: string | null): string | null;
 export function telegramModelStartParam(): string | null;
 export function modelStartParamFromUrl(search: string, hash: string): string | null;
 export function modelRouteFromLocation(pathname: string, startParam?: string | null): ModelRoute;
+export function shouldRetryModelProfileQuery(failureCount: number, error: unknown): boolean;

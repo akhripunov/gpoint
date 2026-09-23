@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { QueryClient } from "@tanstack/react-query";
 import {
   canonicalModelProfileUrl,
   modelHandleFromStartParam,
   modelProfilePath,
   modelStartParamFromUrl,
   modelRouteFromLocation,
+  shouldRetryModelProfileQuery,
   telegramModelStartParam,
 } from "../src/model-routing.js";
 
@@ -43,6 +45,46 @@ test("Telegram SDK start_param takes precedence and launch URL parameters are su
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;
   }
+});
+
+test("Telegram SDK model start_param resolves the requested model profile route", () => {
+  const previousWindow = globalThis.window;
+  try {
+    globalThis.window = {
+      Telegram: { WebApp: { initDataUnsafe: { start_param: "model_models_hub" } } },
+      location: { search: "", hash: "" },
+    };
+    const startParam = telegramModelStartParam();
+    assert.equal(modelHandleFromStartParam(startParam), "models_hub");
+    assert.deepEqual(modelRouteFromLocation("/", startParam), {
+      screen: "profile",
+      handle: "models_hub",
+    });
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test("unknown model 404 ends its profile query without retrying", async () => {
+  const queryClient = new QueryClient();
+  const queryKey = ["creator", "unknown-model"];
+  let requestCount = 0;
+  await assert.rejects(
+    queryClient.fetchQuery({
+      queryKey,
+      queryFn: async () => {
+        requestCount += 1;
+        throw Object.assign(new Error("Model unavailable"), { status: 404 });
+      },
+      retry: shouldRetryModelProfileQuery,
+    }),
+    /Model unavailable/,
+  );
+  assert.equal(requestCount, 1);
+  assert.equal(queryClient.getQueryState(queryKey)?.status, "error");
+  assert.equal(queryClient.getQueryState(queryKey)?.fetchStatus, "idle");
+  queryClient.clear();
 });
 
 test("direct model URLs resolve the selected handle and unknown handles stay on that route", () => {
