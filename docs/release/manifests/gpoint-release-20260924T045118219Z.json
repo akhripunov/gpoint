@@ -1,0 +1,19 @@
+{
+  "releaseId": "gpoint-release-20260924T045118219Z",
+  "candidateSha": "125bcd6fda72ddd5b99393b7316a5cbc4eeab1f2",
+  "previousProductionSha": "af94cc14e33c11de770fdf4389b83554ec1f9504",
+  "productionShaAfter": null,
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": null,
+  "startedAt": "2026-09-24T04:51:18.219Z",
+  "finishedAt": "2026-09-24T04:52:52.413Z",
+  "status": "FAILED_PRE_SWITCH",
+  "failureStage": "PRE_SWITCH",
+  "failureReason": "Command failed: /private/tmp/gpoint-vps-scp-runner",
+  "failureCommand": null,
+  "failureExitCode": null,
+  "failureStderr": null,
+  "rollbackSha": "af94cc14e33c11de770fdf4389b83554ec1f9504",
+  "productionRef": null,
+  "releaseOrigin": "durable-production-release"
+}

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, evaluateSafetyGates, releaseStateAfterError, shouldFinalizeRecovery, validateCandidate } from './release-gpoint.mjs';
-import { classifyPostSwitchState, detectorNeedsRebuild, detectorSourceHash, exactCheckout, migrationNeedsDeploy, runRemoteCommand, shouldReuseCandidateImage, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
+import { classifyPostSwitchState, detectorNeedsRebuild, detectorSourceHash, exactCheckout, migrationNeedsDeploy, runRemoteCommand, shouldReuseCandidateImage, upload, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
 
 const sha = '4d99e0da856d2ffe174c54d7ae7f2f971ab462f5';
 const artifacts = { api: { sourceSha: sha }, worker: { sourceSha: sha }, bot: { sourceSha: sha }, miniapp: { sourceSha: sha } };
@@ -106,5 +106,26 @@ test('apply checkout uses the exact local commit in a clean isolated worktree', 
     assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: checkout, encoding: 'utf8' }).trim(), '');
   } finally {
     execFileSync('git', ['worktree', 'remove', '--force', checkout], { stdio: 'ignore' });
+  }
+});
+
+test('source upload retries a transient SCP failure and preserves the exact paths', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-upload-test-'));
+  const runner = path.join(root, 'runner.sh');
+  const count = path.join(root, 'count');
+  const local = path.join(root, 'source');
+  fs.writeFileSync(local, 'exact-source');
+  fs.writeFileSync(runner, '#!/bin/sh\ncount=$(cat "$COUNT_FILE" 2>/dev/null || echo 0)\ncount=$((count + 1))\nprintf "%s" "$count" > "$COUNT_FILE"\nif [ "$count" -lt 2 ]; then echo "temporary connection failure" >&2; exit 255; fi\ntest "$LOCAL_FILE" = "$EXPECTED_LOCAL" && test "$REMOTE_FILE" = "$EXPECTED_REMOTE"\n');
+  fs.chmodSync(runner, 0o700);
+  const previous = { runner: process.env.GPOINT_SCP_RUNNER, count: process.env.COUNT_FILE, local: process.env.EXPECTED_LOCAL, remote: process.env.EXPECTED_REMOTE };
+  Object.assign(process.env, { GPOINT_SCP_RUNNER: runner, COUNT_FILE: count, EXPECTED_LOCAL: local, EXPECTED_REMOTE: '/tmp/exact-source' });
+  try {
+    upload(local, '/tmp/exact-source');
+    assert.equal(fs.readFileSync(count, 'utf8'), '2');
+  } finally {
+    for (const [key, value] of Object.entries({ GPOINT_SCP_RUNNER: previous.runner, COUNT_FILE: previous.count, EXPECTED_LOCAL: previous.local, EXPECTED_REMOTE: previous.remote })) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
