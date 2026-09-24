@@ -357,6 +357,15 @@ function Profile({ slug, back, explore }: { slug: string; back: () => void; expl
   const reelPosts = mediaPosts.filter(({ media }) => media.kind === "VIDEO");
   const shareProfile = async () => {
     const url = canonicalModelProfileUrl(c.slug);
+    const telegram = (window as Window & {
+      Telegram?: { WebApp?: { openTelegramLink?: (target: string) => void } };
+    }).Telegram?.WebApp;
+    if (telegram?.openTelegramLink) {
+      telegram.openTelegramLink(
+        `https://t.me/share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(c.displayName)}`,
+      );
+      return;
+    }
     try {
       if (typeof navigator.share === "function") {
         await navigator.share({ title: c.displayName, url });
@@ -370,13 +379,6 @@ function Profile({ slug, back, explore }: { slug: string; back: () => void; expl
       setShareStatus("Profile link copied");
       return;
     } catch {
-      const telegram = (window as Window & {
-        Telegram?: { WebApp?: { openTelegramLink?: (target: string) => void } };
-      }).Telegram?.WebApp;
-      if (telegram?.openTelegramLink) {
-        telegram.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(url)}`);
-        return;
-      }
       window.prompt("Copy this model profile link", url);
       setShareStatus("Copy the canonical model profile link");
     }
