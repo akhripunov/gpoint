@@ -109,18 +109,24 @@ function upload(localFile, remoteFile) {
 
 export { run as runRemoteCommand };
 
-function exactCheckout(sha) {
+export function exactCheckout(sha) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-apply-'));
-  execFileSync('git', ['init', '-q', dir], { stdio: 'ignore' });
-  execFileSync('git', ['remote', 'add', 'origin', REPO], { cwd: dir, stdio: 'ignore' });
-  execFileSync('git', ['fetch', '--depth', '1', 'origin', sha], { cwd: dir, stdio: 'ignore' });
-  execFileSync('git', ['checkout', '--detach', '-q', 'FETCH_HEAD'], { cwd: dir, stdio: 'ignore' });
-  const actual = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
-  if (actual !== sha) throw new Error('apply checkout SHA mismatch');
-  return dir;
+  try {
+    // runApply has already verified this SHA against origin/main. Reuse the
+    // verified local object instead of opening another fragile SSH session.
+    execFileSync('git', ['worktree', 'add', '--detach', dir, sha], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+    const actual = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+    if (actual !== sha) throw new Error('apply checkout SHA mismatch');
+    if (execFileSync('git', ['status', '--porcelain'], { cwd: dir, encoding: 'utf8' }).trim()) throw new Error('apply checkout is dirty');
+    return dir;
+  } catch (error) {
+    try { execFileSync('git', ['worktree', 'remove', '--force', dir], { cwd: ROOT, stdio: 'ignore' }); } catch {}
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
 }
 
-export function applyCandidate(sha) {
+export function applyCandidate(sha, { onSwitchStart = () => {} } = {}) {
   const checkout = exactCheckout(sha);
   const timings = {};
   const detectorHash = detectorSourceHash(checkout);
@@ -187,6 +193,7 @@ export function applyCandidate(sha) {
       `healthStartMs=$(date +%s%3N); consecutive=0; for attempt in $(seq 1 30); do running=$(docker inspect --format '{{.State.Running}}' compose-api-1 2>/dev/null || echo false); containerHealth=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' compose-api-1 2>/dev/null || echo missing); set +e; curl --connect-timeout 1 --max-time 3 -fsS -o /tmp/gpoint-health-${sha} http://127.0.0.1:3000/health/live; curlExit=$?; set -e; echo GPOINT_HEALTH_ATTEMPT=$attempt RUNNING=$running CONTAINER_HEALTH=$containerHealth CURL_EXIT=$curlExit; if [ "$curlExit" -eq 0 ] && grep -Fq '"status":"ok"' /tmp/gpoint-health-${sha}; then consecutive=$((consecutive + 1)); else consecutive=0; fi; if [ "$consecutive" -ge 3 ]; then echo GPOINT_DEPLOY_OK; break; fi; sleep 2; done; echo GPOINT_STAGE_TIMING=CONTAINER_HEALTH_WAIT_DURATION_MS=$(( $(date +%s%3N) - healthStartMs )); rm -f /tmp/gpoint-health-${sha}; test "$consecutive" -ge 3`,
       'echo GPOINT_DEPLOY_OK'
     ].join('; ');
+    onSwitchStart();
     const deployOutput = run(deploy); applyRemoteTimingMarkers(timings, deployOutput); if (!deployOutput.includes('GPOINT_DEPLOY_OK')) throw new Error('remote runtime deploy failed');
     const composeExitCode = Number(deployOutput.match(/GPOINT_COMPOSE_EXIT=(\d+)/)?.[1] ?? NaN);
     const identityOutput = stage(timings, 'POST_SWITCH_RECONCILIATION', () => run(`set -e; imageId=$(cat ${imageProof}); apiImage=$(docker inspect compose-api-1 --format '{{.Image}}'); workerImage=$(docker inspect compose-worker-1 --format '{{.Image}}'); botImage=$(docker inspect compose-bot-1 --format '{{.Image}}'); detectorImage=$(docker inspect compose-gpoint-sensitive-detector-1 --format '{{.Config.Image}}'); indexSha256=$(sha256sum /opt/gpoint/app/miniapp/index.html | awk '{print $1}'); grep -F -q 'gpoint-build-sha" content="${sha}' /opt/gpoint/app/miniapp/index.html; test "$apiImage" = "$imageId"; test "$workerImage" = "$imageId"; test "$botImage" = "$imageId"; test "$detectorImage" = '${detectorTag}'; docker rm gpoint-static-${sha.slice(0, 8)} >/dev/null 2>&1 || true; printf 'IMAGE_ID=%s INDEX_SHA256=%s BUILD_SHA=%s API_IMAGE=%s WORKER_IMAGE=%s BOT_IMAGE=%s DETECTOR_IMAGE=%s\\n' "$imageId" "$indexSha256" '${sha}' "$apiImage" "$workerImage" "$botImage" "$detectorImage"`)).trim();
@@ -207,7 +214,7 @@ export function applyCandidate(sha) {
     if (!migrationOutput) throw new Error('migration gate output was not recognized');
     return { imageIdentity: { imageId, indexSha256, buildSha, detectorHash }, migrationOutput, composeExitCode, postSwitch, detectorHash, timings };
   } finally {
-    fs.rmSync(checkout, { recursive: true, force: true });
+    execFileSync('git', ['worktree', 'remove', '--force', checkout], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
     fs.rmSync(archive, { force: true });
   }
 }

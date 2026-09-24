@@ -151,8 +151,7 @@ function runApply(candidate) {
     const artifacts = { api: { sourceSha: candidate }, worker: { sourceSha: candidate }, bot: { sourceSha: candidate }, miniapp: { sourceSha: candidate } };
     const gates = evaluateSafetyGates({ candidateSha: candidate, remoteSha: proof.mainSha, artifacts, config: effective, recordedProductionSha: current.currentProductionSha, liveProductionSha: liveSha, productionRefTarget: candidate });
     if (gates.length) die(gates.join('; '));
-    switchStarted = true;
-    const adapter = applyCandidate(candidate);
+    const adapter = applyCandidate(candidate, { onSwitchStart: () => { switchStarted = true; } });
     if (adapter.postSwitch?.state !== 'VERIFIED') {
       const error = new Error(`post-switch reconciliation required: ${adapter.postSwitch?.state ?? 'UNKNOWN'}`);
       error.code = adapter.postSwitch?.state ?? 'SWITCHED_UNVERIFIED';

@@ -3,8 +3,8 @@
   "currentProductionDbHead": "20260922090000_telegram_channel_avatar",
   "currentProductionRef": "gpoint-production-20260922T094423181Z",
   "previousProductionSha": "4a220f140563757aa7d678968338da7cc71c3fef",
-  "lastReleaseId": "gpoint-release-20260924T042644424Z",
-  "lastReleaseStatus": "SWITCHED_UNVERIFIED",
+  "lastReleaseId": "gpoint-release-20260924T044015133Z",
+  "lastReleaseStatus": "FAILED_PRE_SWITCH",
   "lastReleaseCompletedAt": "2026-09-22T09:48:16.280Z",
   "releaseOrigin": "durable-production-release",
   "artifactIdentities": {
@@ -49,22 +49,23 @@
   "activeRuntimeDbHead": "20260922090000_telegram_channel_avatar",
   "releaseStatus": "COMPLETE",
   "recoveryRequired": false,
-  "lastReleaseFailureManifest": "docs/release/manifests/gpoint-release-20260924T042644424Z.json",
-  "lastReleaseFailureAt": "2026-09-24T04:28:14.498Z",
+  "lastReleaseFailureManifest": "docs/release/manifests/gpoint-release-20260924T044015133Z.json",
+  "lastReleaseFailureAt": "2026-09-24T04:40:27.399Z",
   "reconciliation": {
-    "reconciledAt": "2026-09-24T04:33:21Z",
+    "reconciledAt": "2026-09-24T04:47:30Z",
     "activeRuntimeSha": "af94cc14e33c11de770fdf4389b83554ec1f9504",
     "activeRuntimeDbHead": "20260922090000_telegram_channel_avatar",
     "releaseStatus": "COMPLETE",
     "recoveryRequired": false,
-    "resolvedManifest": "docs/release/manifests/gpoint-release-20260923T164845713Z.json",
+    "resolvedManifest": "docs/release/manifests/gpoint-release-20260924T044015133Z.json",
     "resolvedFailures": [
       "gpoint-release-20260924T035426916Z",
       "gpoint-release-20260924T040521420Z",
       "gpoint-release-20260924T040856151Z",
       "gpoint-release-20260924T042108522Z",
-      "gpoint-release-20260924T042644424Z"
+      "gpoint-release-20260924T042644424Z",
+      "gpoint-release-20260924T044015133Z"
     ],
-    "basis": "Read-only VPS runtime/env inspection matched the recorded production baseline. Subsequent failures were during remote verification, preflight, or SOURCE_PREPARE, before build/migration/runtime switch."
+    "basis": "Read-only VPS RELEASE_SHA and API/Worker/Bot image revision labels matched the recorded production baseline. Prisma migration status reported schema up to date. The latest failure was during local exact checkout, before production mutation."
   }
 }

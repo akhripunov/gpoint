@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, evaluateSafetyGates, releaseStateAfterError, shouldFinalizeRecovery, validateCandidate } from './release-gpoint.mjs';
-import { classifyPostSwitchState, detectorNeedsRebuild, detectorSourceHash, migrationNeedsDeploy, runRemoteCommand, shouldReuseCandidateImage, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
+import { classifyPostSwitchState, detectorNeedsRebuild, detectorSourceHash, exactCheckout, migrationNeedsDeploy, runRemoteCommand, shouldReuseCandidateImage, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
 
 const sha = '4d99e0da856d2ffe174c54d7ae7f2f971ab462f5';
 const artifacts = { api: { sourceSha: sha }, worker: { sourceSha: sha }, bot: { sourceSha: sha }, miniapp: { sourceSha: sha } };
@@ -95,4 +96,15 @@ test('remote runner retains exact exit code and stderr without a parent pipe buf
   assert.throws(() => runRemoteCommand('safe-test-command'), error => error.exitCode === 17 && error.stderr.includes('diagnostic-stderr'));
   if (previous === undefined) delete process.env.GPOINT_REMOTE_RUNNER; else process.env.GPOINT_REMOTE_RUNNER = previous;
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('apply checkout uses the exact local commit in a clean isolated worktree', () => {
+  const candidate = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  const checkout = exactCheckout(candidate);
+  try {
+    assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: checkout, encoding: 'utf8' }).trim(), candidate);
+    assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: checkout, encoding: 'utf8' }).trim(), '');
+  } finally {
+    execFileSync('git', ['worktree', 'remove', '--force', checkout], { stdio: 'ignore' });
+  }
 });

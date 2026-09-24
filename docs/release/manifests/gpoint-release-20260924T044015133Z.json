@@ -1,0 +1,27 @@
+{
+  "releaseId": "gpoint-release-20260924T044015133Z",
+  "candidateSha": "ee2a9e1729953969eba3995f98a2d751696844e0",
+  "previousProductionSha": "af94cc14e33c11de770fdf4389b83554ec1f9504",
+  "productionShaAfter": null,
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": null,
+  "startedAt": "2026-09-24T04:40:15.133Z",
+  "finishedAt": "2026-09-24T04:40:27.399Z",
+  "status": "FAILED_PRE_SWITCH",
+  "failureStage": "PRE_SWITCH",
+  "failureReason": "Command failed: git fetch --depth 1 origin ee2a9e1729953969eba3995f98a2d751696844e0",
+  "failureCommand": null,
+  "failureExitCode": null,
+  "failureStderr": null,
+  "rollbackSha": "af94cc14e33c11de770fdf4389b83554ec1f9504",
+  "productionRef": null,
+  "releaseOrigin": "durable-production-release",
+  "reconciliation": {
+    "reconciledAt": "2026-09-24T04:47:30Z",
+    "originalStatus": "SWITCHED_UNVERIFIED",
+    "observedLiveProductionSha": "af94cc14e33c11de770fdf4389b83554ec1f9504",
+    "productionSwitchOccurred": false,
+    "resolvedStatus": "FAILED_PRE_SWITCH",
+    "evidence": "Failure was exactCheckout git fetch before source preparation, build, migration, or runtime switch. Read-only VPS inspection confirmed RELEASE_SHA and API/Worker/Bot revision labels remained at the recorded production baseline; Prisma reported schema up to date."
+  }
+}
