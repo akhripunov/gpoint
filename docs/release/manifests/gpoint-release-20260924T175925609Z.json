@@ -1,0 +1,88 @@
+{
+  "releaseId": "gpoint-release-20260924T175925609Z",
+  "candidateSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+  "previousProductionSha": "4f09df5c33ba58b1cf8048280e58474853f0b576",
+  "productionShaAfter": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": "20260922090000_telegram_channel_avatar",
+  "startedAt": "2026-09-24T17:59:25.609Z",
+  "finishedAt": "2026-09-24T18:11:43.950Z",
+  "status": "COMPLETE",
+  "failureStage": null,
+  "failureReason": null,
+  "failureCommand": null,
+  "failureExitCode": null,
+  "failureStderr": null,
+  "rollbackSha": "4f09df5c33ba58b1cf8048280e58474853f0b576",
+  "productionRef": "gpoint-production-20260924T175925609Z",
+  "releaseOrigin": "durable-production-release",
+  "artifactIdentities": {
+    "api": {
+      "sourceSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+      "adapter": {
+        "imageId": "sha256:de56274ad813bb5e8a10eed3e8612c4d71043e23471cc1ac8a01fc620eed7eb4",
+        "indexSha256": "3e1dcd46cce2a272be916d791de11314b5260b9c3fda49f2a73e54ccec0421bc",
+        "buildSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    },
+    "worker": {
+      "sourceSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+      "adapter": {
+        "imageId": "sha256:de56274ad813bb5e8a10eed3e8612c4d71043e23471cc1ac8a01fc620eed7eb4",
+        "indexSha256": "3e1dcd46cce2a272be916d791de11314b5260b9c3fda49f2a73e54ccec0421bc",
+        "buildSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    },
+    "bot": {
+      "sourceSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+      "adapter": {
+        "imageId": "sha256:de56274ad813bb5e8a10eed3e8612c4d71043e23471cc1ac8a01fc620eed7eb4",
+        "indexSha256": "3e1dcd46cce2a272be916d791de11314b5260b9c3fda49f2a73e54ccec0421bc",
+        "buildSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    },
+    "miniapp": {
+      "sourceSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+      "adapter": {
+        "imageId": "sha256:de56274ad813bb5e8a10eed3e8612c4d71043e23471cc1ac8a01fc620eed7eb4",
+        "indexSha256": "3e1dcd46cce2a272be916d791de11314b5260b9c3fda49f2a73e54ccec0421bc",
+        "buildSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    }
+  },
+  "remoteProof": {
+    "mainSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+    "productionTagTarget": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49"
+  },
+  "migrationOutput": "DATABASE_SCHEMA_UP_TO_DATE",
+  "detectorSourceHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32",
+  "stageTimings": {
+    "PRODUCTION_PREFLIGHT": 4.4,
+    "SOURCE_PREPARE": 1.6,
+    "RUNTIME_BUILD": 172.6,
+    "MIGRATION_CHECK": 5.5,
+    "RUNTIME_SWITCH_AND_HEALTH": 20.1,
+    "POST_SWITCH_RECONCILIATION": 0.3,
+    "POST_RELEASE_CLEANUP": 3.6
+  },
+  "reconciliation": {
+    "reconciledAt": "2026-09-24T18:11:43.954Z",
+    "originalFailure": {
+      "status": "SWITCHED_UNVERIFIED",
+      "failureStage": "POST_SWITCH",
+      "failureReason": "Command failed: curl -fsS https://gpoint.amiora.one/api/health/live",
+      "finishedAt": "2026-09-24T18:04:19.357Z"
+    },
+    "basis": "Runtime switch, internal API health, container parity, post-switch image/index identity, and cleanup completed before Mac HTTPS health request failed during TLS. Read-only VPS checks confirmed RELEASE_SHA and API/Worker/Bot images at candidate, internal API health, published index SHA, and Prisma schema up to date. HTTPS requests from VPS confirmed public root build SHA and API health. Published Mini App bundle contains the direct Telegram share URL handler. Annotated production tag was pushed and independently verified against candidate. No second apply was run.",
+    "externalSmoke": {
+      "miniappRootFromVps": "PASS",
+      "apiHealthFromVps": "PASS",
+      "telegramShareHandlerInBundle": "PASS",
+      "miniappIndexSha256": "3e1dcd46cce2a272be916d791de11314b5260b9c3fda49f2a73e54ccec0421bc"
+    }
+  }
+}
