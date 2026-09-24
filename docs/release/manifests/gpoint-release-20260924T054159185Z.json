@@ -1,0 +1,88 @@
+{
+  "releaseId": "gpoint-release-20260924T054159185Z",
+  "candidateSha": "4f09df5c33ba58b1cf8048280e58474853f0b576",
+  "previousProductionSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
+  "productionShaAfter": "4f09df5c33ba58b1cf8048280e58474853f0b576",
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": "20260922090000_telegram_channel_avatar",
+  "startedAt": "2026-09-24T05:41:59.185Z",
+  "finishedAt": "2026-09-24T05:48:26.545Z",
+  "status": "COMPLETE",
+  "failureStage": null,
+  "failureReason": null,
+  "failureCommand": null,
+  "failureExitCode": null,
+  "failureStderr": null,
+  "rollbackSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
+  "productionRef": "gpoint-production-20260924T054159185Z",
+  "releaseOrigin": "durable-production-release",
+  "artifactIdentities": {
+    "api": {
+      "sourceSha": "4f09df5c33ba58b1cf8048280e58474853f0b576",
+      "adapter": {
+        "imageId": "sha256:3ec730cacb320a8331dea261736588649524c61120bb19b58dd56ee280e7ba20",
+        "indexSha256": "0ee0fe6102807a80b397c221ef2293bd6d3319e56f6fab7772059ecd20ef04cb",
+        "buildSha": "4f09df5c33ba58b1cf8048280e58474853f0b576",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    },
+    "worker": {
+      "sourceSha": "4f09df5c33ba58b1cf8048280e58474853f0b576",
+      "adapter": {
+        "imageId": "sha256:3ec730cacb320a8331dea261736588649524c61120bb19b58dd56ee280e7ba20",
+        "indexSha256": "0ee0fe6102807a80b397c221ef2293bd6d3319e56f6fab7772059ecd20ef04cb",
+        "buildSha": "4f09df5c33ba58b1cf8048280e58474853f0b576",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    },
+    "bot": {
+      "sourceSha": "4f09df5c33ba58b1cf8048280e58474853f0b576",
+      "adapter": {
+        "imageId": "sha256:3ec730cacb320a8331dea261736588649524c61120bb19b58dd56ee280e7ba20",
+        "indexSha256": "0ee0fe6102807a80b397c221ef2293bd6d3319e56f6fab7772059ecd20ef04cb",
+        "buildSha": "4f09df5c33ba58b1cf8048280e58474853f0b576",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    },
+    "miniapp": {
+      "sourceSha": "4f09df5c33ba58b1cf8048280e58474853f0b576",
+      "adapter": {
+        "imageId": "sha256:3ec730cacb320a8331dea261736588649524c61120bb19b58dd56ee280e7ba20",
+        "indexSha256": "0ee0fe6102807a80b397c221ef2293bd6d3319e56f6fab7772059ecd20ef04cb",
+        "buildSha": "4f09df5c33ba58b1cf8048280e58474853f0b576",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    }
+  },
+  "remoteProof": {
+    "mainSha": "4f09df5c33ba58b1cf8048280e58474853f0b576",
+    "productionTagTarget": "4f09df5c33ba58b1cf8048280e58474853f0b576"
+  },
+  "migrationOutput": "DATABASE_SCHEMA_UP_TO_DATE",
+  "detectorSourceHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32",
+  "stageTimings": {
+    "PRODUCTION_PREFLIGHT": 3.9,
+    "SOURCE_PREPARE": 1.7,
+    "RUNTIME_BUILD": 151,
+    "MIGRATION_CHECK": 4.5,
+    "RUNTIME_SWITCH_AND_HEALTH": 19.7,
+    "POST_SWITCH_RECONCILIATION": 0.3,
+    "POST_RELEASE_CLEANUP": 2.8
+  },
+  "reconciliation": {
+    "reconciledAt": "2026-09-24T05:48:26.545Z",
+    "originalFailure": {
+      "status": "SWITCHED_UNVERIFIED",
+      "failureStage": "POST_SWITCH",
+      "failureReason": "Command failed: git ls-remote origin refs/tags/gpoint-production-20260924T054159185Z^{}\nConnection timed out during banner exchange\r\nConnection to 140.82.121.35 port 443 timed out\r\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n",
+      "finishedAt": "2026-09-24T05:45:20.688Z"
+    },
+    "basis": "Runtime switch, internal health, identity reconciliation, cleanup and production-tag push completed before GitHub SSH read timed out. Read-only VPS checks confirmed RELEASE_SHA and API/Worker/Bot image revisions, static index checksum, detector identity and Prisma status. HTTPS checks confirmed Mini App root, model route, API health, and new profile JS/CSS. An independent GitHub SSH read verified the annotated production tag target. Apply was not repeated after switch.",
+    "externalSmoke": {
+      "miniappRoot": "PASS",
+      "apiHealth": "PASS",
+      "modelRoute": "PASS",
+      "newProfileBundle": "PASS"
+    }
+  }
+}
