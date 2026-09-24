@@ -3,8 +3,8 @@
   "currentProductionDbHead": "20260922090000_telegram_channel_avatar",
   "currentProductionRef": "gpoint-production-20260924T045727583Z",
   "previousProductionSha": "af94cc14e33c11de770fdf4389b83554ec1f9504",
-  "lastReleaseId": "gpoint-release-20260924T045727583Z",
-  "lastReleaseStatus": "COMPLETE",
+  "lastReleaseId": "gpoint-release-20260924T051002851Z",
+  "lastReleaseStatus": "FAILED_PRE_SWITCH",
   "lastReleaseCompletedAt": "2026-09-24T05:04:25Z",
   "releaseOrigin": "durable-production-release",
   "artifactIdentities": {
@@ -49,8 +49,8 @@
   "activeRuntimeDbHead": "20260922090000_telegram_channel_avatar",
   "releaseStatus": "COMPLETE",
   "recoveryRequired": false,
-  "lastReleaseFailureManifest": null,
-  "lastReleaseFailureAt": null,
+  "lastReleaseFailureManifest": "docs/release/manifests/gpoint-release-20260924T051002851Z.json",
+  "lastReleaseFailureAt": "2026-09-24T05:10:49.179Z",
   "reconciliation": {
     "reconciledAt": "2026-09-24T05:04:25Z",
     "activeRuntimeSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",

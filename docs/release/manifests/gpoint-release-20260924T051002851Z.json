@@ -1,0 +1,19 @@
+{
+  "releaseId": "gpoint-release-20260924T051002851Z",
+  "candidateSha": "3d22c7b5289a7896a18c35019ca47c1a2ba1f74b",
+  "previousProductionSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+  "productionShaAfter": null,
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": null,
+  "startedAt": "2026-09-24T05:10:02.851Z",
+  "finishedAt": "2026-09-24T05:10:49.179Z",
+  "status": "FAILED_PRE_SWITCH",
+  "failureStage": "PRE_SWITCH",
+  "failureReason": "source upload failed after 3 attempts: config.mjs",
+  "failureCommand": "scp upload config.mjs",
+  "failureExitCode": 255,
+  "failureStderr": "Connection timed out during banner exchange\r\r\nConnection to 38.180.110.92 port 22 timed out\r\r\n/usr/bin/scp: Connection closed\r\r\n",
+  "rollbackSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+  "productionRef": null,
+  "releaseOrigin": "durable-production-release"
+}

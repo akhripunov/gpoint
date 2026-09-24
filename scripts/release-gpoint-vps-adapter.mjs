@@ -149,21 +149,11 @@ export function applyCandidate(sha, { onSwitchStart = () => {} } = {}) {
   const releaseDir = `/opt/gpoint/releases/${sha}`;
   const imageProof = `/tmp/gpoint-image-id-${sha}`;
   const archive = `${checkout}.tar.gz`;
-  const compose = path.join(checkout, 'infra/production/docker-compose.yml');
-  const dockerfile = path.join(checkout, 'infra/production/Gpoint.Dockerfile');
-  const safetyConfig = path.join(checkout, 'infra/production/sensitive-detector/config.mjs');
-  const safetyDockerfile = path.join(checkout, 'infra/production/sensitive-detector/Dockerfile');
-  const caddyfile = path.join(checkout, 'infra/production/Caddyfile');
   execFileSync('tar', ['-czf', archive, '-C', path.dirname(checkout), path.basename(checkout)]);
   try {
     stage(timings, 'PRODUCTION_PREFLIGHT', () => run("set -e; command -v docker >/dev/null; docker version --format 'DOCKER_VERSION={{.Server.Version}}'; docker compose version; docker buildx version; docker buildx inspect --bootstrap >/dev/null; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n \"$freeKb\"; test \"$freeKb\" -ge 5242880; test -r /opt/gpoint/env/production.env; currentSha=$(awk -F= '$1==\"RELEASE_SHA\" {print $2}' /opt/gpoint/env/production.env); printf '%s\\n' \"$currentSha\" | grep -Eq '^[0-9a-f]{40}$'; currentImage=$(docker inspect compose-api-1 --format '{{.Config.Image}}'); dbStatus=$(docker run --rm --network gpoint_app --network-alias gpoint-preflight --network shared_internal --env-file /opt/gpoint/env/production.env \"$currentImage\" pnpm --filter @gpoint/db exec prisma migrate status 2>&1); test -n \"$dbStatus\"; printf '%s\\n' \"$dbStatus\" | tail -5; printf 'GPOINT_PREFLIGHT_OK\\n'"));
     stage(timings, 'SOURCE_PREPARE', () => {
       upload(archive, `/tmp/gpoint-${sha}.tar.gz`);
-      upload(compose, `/tmp/gpoint-compose-${sha}.yml`);
-      upload(dockerfile, `/tmp/gpoint-dockerfile-${sha}`);
-      upload(safetyConfig, `/tmp/gpoint-safety-config-${sha}.mjs`);
-      upload(safetyDockerfile, `/tmp/gpoint-safety-dockerfile-${sha}`);
-      upload(caddyfile, `/tmp/gpoint-caddy-${sha}`);
     });
     const diskGuard = run("set -e; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n \"$freeKb\"; if [ \"$freeKb\" -lt 8388608 ]; then echo GPOINT_DISK_GUARD_WARN; fi; test \"$freeKb\" -ge 5242880; echo GPOINT_DISK_GUARD_OK");
     if (!diskGuard.includes('GPOINT_DISK_GUARD_OK')) throw new Error('remote disk guard failed: minimum 5 GiB free space required');
@@ -173,6 +163,11 @@ export function applyCandidate(sha, { onSwitchStart = () => {} } = {}) {
       `mkdir -p ${releaseDir}`,
       `tar -xzf /tmp/gpoint-${sha}.tar.gz -C ${releaseDir}`,
       `mv ${releaseDir}/${path.basename(checkout)} ${releaseDir}/source`,
+      `cp ${releaseDir}/source/infra/production/docker-compose.yml /tmp/gpoint-compose-${sha}.yml`,
+      `cp ${releaseDir}/source/infra/production/Gpoint.Dockerfile /tmp/gpoint-dockerfile-${sha}`,
+      `cp ${releaseDir}/source/infra/production/sensitive-detector/config.mjs /tmp/gpoint-safety-config-${sha}.mjs`,
+      `cp ${releaseDir}/source/infra/production/sensitive-detector/Dockerfile /tmp/gpoint-safety-dockerfile-${sha}`,
+      `cp ${releaseDir}/source/infra/production/Caddyfile /tmp/gpoint-caddy-${sha}`,
       `if docker image inspect gpoint-runtime:${sha} >/dev/null 2>&1; then test "$(docker image inspect gpoint-runtime:${sha} --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')" = '${sha}'; echo GPOINT_BUILD_REUSED; else DOCKER_BUILDKIT=1 docker build --progress=plain --build-arg GPOINT_BUILD_SHA=${sha} --label org.opencontainers.image.revision=${sha} --label org.opencontainers.image.source=${REPO} -f /tmp/gpoint-dockerfile-${sha} -t gpoint-runtime:${sha} ${releaseDir}/source > /tmp/gpoint-build-${sha}.log 2>&1; fi`,
       `docker image inspect gpoint-runtime:${sha} --format '{{.Id}}' > ${imageProof}`,
       `mkdir -p /opt/gpoint/release-logs/${sha} && cp /tmp/gpoint-build-${sha}.log /opt/gpoint/release-logs/${sha}/runtime-build.log 2>/dev/null || true`,
