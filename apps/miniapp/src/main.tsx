@@ -36,7 +36,9 @@ import {
   openTelegramStartChannel,
 } from "./api/client";
 import {
+  BadgeCheck,
   Bookmark,
+  ChevronLeft,
   ChevronRight,
   Crown,
   House,
@@ -52,6 +54,7 @@ import {
   WalletCards,
   type LucideIcon,
 } from "lucide-react";
+import type { PostDTO } from "../../../packages/contracts/src/index.js";
 import {
   AdminPanel,
   CreatorWorkspaceDashboard,
@@ -315,7 +318,7 @@ function Explore({
     </>
   );
 }
-function Profile({ slug, back }: { slug: string; back: () => void }) {
+function Profile({ slug, back, explore }: { slug: string; back: () => void; explore: () => void }) {
   const qc = useQueryClient();
   const [shareStatus, setShareStatus] = useState("");
   const q = useQuery({
@@ -349,6 +352,9 @@ function Profile({ slug, back }: { slug: string; back: () => void }) {
       </div>
     );
   const c = q.data;
+  const profilePosts = p.data?.items ?? c.posts;
+  const mediaPosts = profilePosts.flatMap((post) => post.media.map((media) => ({ post, media })));
+  const reelPosts = mediaPosts.filter(({ media }) => media.kind === "VIDEO");
   const shareProfile = async () => {
     const url = canonicalModelProfileUrl(c.slug);
     try {
@@ -376,45 +382,41 @@ function Profile({ slug, back }: { slug: string; back: () => void }) {
     }
   };
   return (
-    <section className="profile-view">
-      <div className="model-profile-actions">
-        <button className="back" onClick={back}>
-          ← Back
+    <section className="profile-view model-profile" aria-label={`${c.displayName} model profile`}>
+      <header className="model-profile-header">
+        <button type="button" className="model-profile-icon" onClick={back} aria-label="Back to feed">
+          <ChevronLeft size={25} strokeWidth={1.6} aria-hidden="true" />
         </button>
-        <button className="model-profile-share" onClick={shareProfile} aria-label={`Share ${c.displayName}'s model profile`}>
-          <Share2 size={16} aria-hidden="true" />
-          <span>Share</span>
+        <span className="model-profile-brand">GPoint<span>•</span></span>
+        <button type="button" className="model-profile-icon model-profile-search" onClick={explore} aria-label="Explore models">
+          <Search size={22} strokeWidth={1.6} aria-hidden="true" />
         </button>
-        {shareStatus && <small role="status">{shareStatus}</small>}
-      </div>
-      <div className="profile-cover" />
-      <div className="profile-identity">
-        <span className="avatar large">
-          {c.displayName.slice(0, 2).toUpperCase()}
-        </span>
-        <div>
-          <h1>
-            {c.displayName} <V on={c.verified} />
-          </h1>
-          <span className="handle">@{c.slug}</span>
-        </div>
-        <button
-          className={"follow " + (c.following ? "following" : "")}
-          disabled={f.isPending}
-          onClick={() => f.mutate(!c.following)}
-        >
-          {c.following ? "Following" : "Follow"}
-        </button>
-      </div>
-      <p className="profile-bio">{c.bio}</p>
-      <div className="tag-row">
-        {c.tags.map((t) => (
-          <span className="tag" key={t}>
-            #{t}
+      </header>
+      <div className="model-profile-main">
+        <div className="model-profile-overview">
+          <span className="model-profile-avatar">
+            {c.avatarUrl ? <img src={mediaUrl(c.avatarUrl)} alt={`${c.displayName} avatar`} /> : c.displayName.slice(0, 2).toUpperCase()}
           </span>
-        ))}
-        <span className="muted">{c.followersCount} followers</span>
-      </div>
+          <div className="model-profile-details">
+            <h1>{c.displayName}{c.verified && <BadgeCheck size={19} className="model-profile-verified" aria-label="Verified" />}</h1>
+            <span className="model-profile-handle">@{c.slug}</span>
+            {c.bio && <p className="model-profile-bio">{c.bio}</p>}
+            <div className="model-profile-stats">
+              <span><strong>{profilePosts.length}</strong><small>Posts</small></span>
+              <span><strong>{Intl.NumberFormat("en", { notation: "compact" }).format(c.followersCount)}</strong><small>Followers</small></span>
+            </div>
+            <div className="model-profile-controls">
+              <button type="button" className={`model-profile-follow${c.following ? " following" : ""}`} disabled={f.isPending} onClick={() => f.mutate(!c.following)}>
+                {c.following ? "Following" : "Follow"}
+              </button>
+              <button type="button" className="model-profile-share" onClick={shareProfile} aria-label={`Share ${c.displayName}'s model profile`}>
+                <Share2 size={20} strokeWidth={1.7} aria-hidden="true" />
+              </button>
+            </div>
+            {shareStatus && <small className="model-profile-share-status" role="status">{shareStatus}</small>}
+          </div>
+        </div>
+        {c.tags.length > 0 && <div className="model-profile-tags">{c.tags.map((tag) => <span key={tag}>#{tag}</span>)}</div>}
       {c.vipOffer && (
         <div className="vip-card">
           <div>
@@ -433,7 +435,7 @@ function Profile({ slug, back }: { slug: string; back: () => void }) {
           <small>Payment happens in the creator's Telegram seller flow.</small>
         </div>
       )}
-      <div className="content-tabs">
+      <div className="content-tabs model-profile-tabs">
         {["Posts", "Media", "Reels"].map((x) => (
           <button
             className={tab === x ? "selected" : ""}
@@ -446,31 +448,36 @@ function Profile({ slug, back }: { slug: string; back: () => void }) {
       </div>
       {tab === "Posts" && (
         <div className="free-grid">
-          {p.data?.items.map((x) => (
-            <div className="free-tile tile-1" key={x.id}>
-              <span>{x.type} · FREE</span>
-            </div>
-          ))}
+          {profilePosts.map((post) => <ProfilePostTile key={post.id} post={post} />)}
         </div>
       )}
       {tab === "Media" && (
         <div className="free-grid">
-          {p.data?.items
-            .flatMap((x) => x.media)
-            .map((x) => (
-              <div className="free-tile tile-2" key={x.id}>
-                <span>{x.kind}</span>
-              </div>
-            ))}
+          {mediaPosts.map(({ media, post }) => <ProfileMediaTile key={media.id} media={media} name={c.displayName} caption={post.caption} />)}
         </div>
       )}
       {tab === "Reels" && (
-        <div className="empty">
-          <p>Open Reels to browse published short media.</p>
+        <div className="free-grid">
+          {reelPosts.map(({ media, post }) => <ProfileMediaTile key={media.id} media={media} name={c.displayName} caption={post.caption} />)}
         </div>
       )}
+      {(tab === "Posts" && !profilePosts.length || tab === "Media" && !mediaPosts.length || tab === "Reels" && !reelPosts.length) &&
+        <p className="model-profile-empty">No {tab.toLowerCase()} yet.</p>}
+      </div>
     </section>
   );
+}
+function ProfileMediaTile({ media, name, caption }: { media: PostDTO["media"][number]; name: string; caption: string | null }) {
+  return <div className="model-profile-tile">
+    {media.kind === "IMAGE"
+      ? <img src={mediaUrl(media.readUrl)} alt={caption || `${name} post`} loading="lazy" />
+      : <video src={mediaUrl(media.readUrl)} muted playsInline preload="metadata" aria-label={caption || `${name} reel`} />}
+  </div>;
+}
+function ProfilePostTile({ post }: { post: PostDTO }) {
+  const media = post.media[0];
+  if (media) return <ProfileMediaTile media={media} name={post.creator?.displayName || "Model"} caption={post.caption} />;
+  return <div className="model-profile-tile model-profile-text-tile"><p>{post.caption || "Post"}</p></div>;
 }
 function Reels({ open }: { open: (slug: string) => void }) {
   const q = useQuery({ queryKey: ["reels"], queryFn: () => reels() });
@@ -1405,7 +1412,7 @@ function App({ initialUser }: { initialUser: any }) {
   };
   const creatorWorkspace = screen === "account" && accountView === "creator";
   return (
-    <div className={`app-shell${screen === "account" && accountView === "profile" ? " profile-screen" : ""}`}>
+    <div className={`app-shell${screen === "account" && accountView === "profile" ? " profile-screen" : ""}${screen === "profile" ? " model-profile-screen" : ""}`}>
       <header className={`topbar${creatorWorkspace ? " creator-topbar" : ""}`}>
         {creatorWorkspace && (
           <BackButton className="creator-back" label="Back to Profile" onClick={() => setAccountView("profile")} />
@@ -1427,7 +1434,7 @@ function App({ initialUser }: { initialUser: any }) {
           <Explore tab={tab} setTab={setTab} open={open} />
         )}{" "}
         {screen === "profile" && (
-          <Profile slug={slug} back={backToFeed} />
+          <Profile slug={slug} back={backToFeed} explore={() => navigate("explore")} />
         )}{" "}
         {screen === "reels" && <RealReels open={clickReel} />}{" "}
         {screen === "account" &&

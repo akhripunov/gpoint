@@ -78,14 +78,16 @@ test("F — post click, 3-column grid, bottom nav and 390×844 layout", async ({
       viewport: [innerWidth, innerHeight],
       docWidth: document.documentElement.scrollWidth,
       navTop: nav.top,
+      navBottom: nav.bottom,
       profileBottom: profile.bottom,
       pageHeight: document.documentElement.scrollHeight,
     };
   });
   expect(layout.viewport).toEqual([390, 844]);
   expect(layout.docWidth).toBeLessThanOrEqual(390);
-  expect(layout.navTop).toBeGreaterThanOrEqual(layout.profileBottom);
-  await expect.poll(() => runtimeErrors.get(page)?.length ?? 0).toBe(0);
+  expect(layout.navBottom).toBe(844);
+  expect(layout.pageHeight).toBeGreaterThan(844);
   await page.screenshot({ path: testInfo.outputPath("model-profile-390x844.png") });
+  expect(runtimeErrors.get(page)).toEqual([]);
   console.log("LAYOUT_PASS", JSON.stringify(layout));
 });
