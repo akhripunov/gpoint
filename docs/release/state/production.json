@@ -3,8 +3,8 @@
   "currentProductionDbHead": "20260922090000_telegram_channel_avatar",
   "currentProductionRef": "gpoint-production-20260922T094423181Z",
   "previousProductionSha": "4a220f140563757aa7d678968338da7cc71c3fef",
-  "lastReleaseId": "gpoint-release-20260924T040856151Z",
-  "lastReleaseStatus": "FAILED_PRE_SWITCH",
+  "lastReleaseId": "gpoint-release-20260924T042108522Z",
+  "lastReleaseStatus": "SWITCHED_UNVERIFIED",
   "lastReleaseCompletedAt": "2026-09-22T09:48:16.280Z",
   "releaseOrigin": "durable-production-release",
   "artifactIdentities": {
@@ -49,10 +49,10 @@
   "activeRuntimeDbHead": "20260922090000_telegram_channel_avatar",
   "releaseStatus": "COMPLETE",
   "recoveryRequired": false,
-  "lastReleaseFailureManifest": "docs/release/manifests/gpoint-release-20260924T040856151Z.json",
-  "lastReleaseFailureAt": "2026-09-24T04:10:34.293Z",
+  "lastReleaseFailureManifest": "docs/release/manifests/gpoint-release-20260924T042108522Z.json",
+  "lastReleaseFailureAt": "2026-09-24T04:22:38.693Z",
   "reconciliation": {
-    "reconciledAt": "2026-09-24T04:18:34Z",
+    "reconciledAt": "2026-09-24T04:23:44Z",
     "activeRuntimeSha": "af94cc14e33c11de770fdf4389b83554ec1f9504",
     "activeRuntimeDbHead": "20260922090000_telegram_channel_avatar",
     "releaseStatus": "COMPLETE",
@@ -61,7 +61,8 @@
     "resolvedFailures": [
       "gpoint-release-20260924T035426916Z",
       "gpoint-release-20260924T040521420Z",
-      "gpoint-release-20260924T040856151Z"
+      "gpoint-release-20260924T040856151Z",
+      "gpoint-release-20260924T042108522Z"
     ],
     "basis": "Read-only VPS runtime/env inspection matched the recorded production baseline. Subsequent failures were during remote verification, preflight, or SOURCE_PREPARE, before build/migration/runtime switch."
   }
