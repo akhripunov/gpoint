@@ -1,0 +1,87 @@
+{
+  "releaseId": "gpoint-release-20260924T045727583Z",
+  "candidateSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+  "previousProductionSha": "af94cc14e33c11de770fdf4389b83554ec1f9504",
+  "productionShaAfter": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": "20260922090000_telegram_channel_avatar",
+  "startedAt": "2026-09-24T04:57:27.583Z",
+  "finishedAt": "2026-09-24T05:04:25Z",
+  "status": "COMPLETE",
+  "failureStage": null,
+  "failureReason": null,
+  "failureCommand": null,
+  "failureExitCode": null,
+  "failureStderr": null,
+  "rollbackSha": "af94cc14e33c11de770fdf4389b83554ec1f9504",
+  "productionRef": "gpoint-production-20260924T045727583Z",
+  "releaseOrigin": "durable-production-release",
+  "artifactIdentities": {
+    "api": {
+      "sourceSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+      "adapter": {
+        "imageId": "sha256:66773852fbdde14ec2b09e54c2b207bbe294211b61e84459ff5e7261bd25298a",
+        "indexSha256": "b5c4c755b9299f2ccc431a2e643d9b2971c34fd9e368446693857f71499acddc",
+        "buildSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    },
+    "worker": {
+      "sourceSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+      "adapter": {
+        "imageId": "sha256:66773852fbdde14ec2b09e54c2b207bbe294211b61e84459ff5e7261bd25298a",
+        "indexSha256": "b5c4c755b9299f2ccc431a2e643d9b2971c34fd9e368446693857f71499acddc",
+        "buildSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    },
+    "bot": {
+      "sourceSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+      "adapter": {
+        "imageId": "sha256:66773852fbdde14ec2b09e54c2b207bbe294211b61e84459ff5e7261bd25298a",
+        "indexSha256": "b5c4c755b9299f2ccc431a2e643d9b2971c34fd9e368446693857f71499acddc",
+        "buildSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    },
+    "miniapp": {
+      "sourceSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+      "adapter": {
+        "imageId": "sha256:66773852fbdde14ec2b09e54c2b207bbe294211b61e84459ff5e7261bd25298a",
+        "indexSha256": "b5c4c755b9299f2ccc431a2e643d9b2971c34fd9e368446693857f71499acddc",
+        "buildSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    }
+  },
+  "remoteProof": {
+    "mainSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+    "productionTagTarget": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef"
+  },
+  "migrationOutput": "DATABASE_SCHEMA_UP_TO_DATE",
+  "detectorSourceHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32",
+  "stageTimings": {
+    "PRODUCTION_PREFLIGHT": 4.8,
+    "SOURCE_PREPARE": 19.1,
+    "RUNTIME_BUILD": 156.1,
+    "MIGRATION_CHECK": 5.6,
+    "RUNTIME_SWITCH_AND_HEALTH": 19.9,
+    "POST_SWITCH_RECONCILIATION": 0.7,
+    "POST_RELEASE_CLEANUP": 3.1
+  },
+  "reconciliation": {
+    "reconciledAt": "2026-09-24T05:04:25Z",
+    "originalFailure": {
+      "status": "SWITCHED_UNVERIFIED",
+      "failureStage": "POST_SWITCH",
+      "failureReason": "Command failed: git push origin refs/tags/gpoint-production-20260924T045727583Z",
+      "finishedAt": "2026-09-24T05:01:10.646Z"
+    },
+    "basis": "The runtime switch, container identity check, health checks, and cleanup completed before the GitHub tag push timed out. Read-only VPS inspection confirmed RELEASE_SHA and API/Worker/Bot labels and image IDs all match the candidate; detector running; Prisma schema up to date. External Mini App root and API health returned HTTP 200. The existing annotated tag was pushed and independently verified on GitHub without repeating apply.",
+    "externalSmoke": {
+      "miniappRoot": "PASS",
+      "apiHealth": "PASS",
+      "canonicalModelShareUrl": "DNS_UNRESOLVED"
+    }
+  }
+}
