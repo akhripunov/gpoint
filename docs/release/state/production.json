@@ -1,63 +1,63 @@
 {
-  "currentProductionSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+  "currentProductionSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
   "currentProductionDbHead": "20260922090000_telegram_channel_avatar",
-  "currentProductionRef": "gpoint-production-20260924T045727583Z",
-  "previousProductionSha": "af94cc14e33c11de770fdf4389b83554ec1f9504",
-  "lastReleaseId": "gpoint-release-20260924T051002851Z",
-  "lastReleaseStatus": "FAILED_PRE_SWITCH",
-  "lastReleaseCompletedAt": "2026-09-24T05:04:25Z",
+  "currentProductionRef": "gpoint-production-20260924T051236278Z",
+  "previousProductionSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+  "lastReleaseId": "gpoint-release-20260924T051236278Z",
+  "lastReleaseStatus": "COMPLETE",
+  "lastReleaseCompletedAt": "2026-09-24T05:20:49Z",
   "releaseOrigin": "durable-production-release",
   "artifactIdentities": {
     "api": {
-      "sourceSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+      "sourceSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
       "adapter": {
-        "imageId": "sha256:66773852fbdde14ec2b09e54c2b207bbe294211b61e84459ff5e7261bd25298a",
-        "indexSha256": "b5c4c755b9299f2ccc431a2e643d9b2971c34fd9e368446693857f71499acddc",
-        "buildSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+        "imageId": "sha256:1a0b287f74cc4710afe26c55806f5e3358b8fa86a6b5abf1852df33bdd92effe",
+        "indexSha256": "0f95d888c1f5d830818299597071f880976837c31f16a50c68afa9417ea04240",
+        "buildSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
         "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
       }
     },
     "worker": {
-      "sourceSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+      "sourceSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
       "adapter": {
-        "imageId": "sha256:66773852fbdde14ec2b09e54c2b207bbe294211b61e84459ff5e7261bd25298a",
-        "indexSha256": "b5c4c755b9299f2ccc431a2e643d9b2971c34fd9e368446693857f71499acddc",
-        "buildSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+        "imageId": "sha256:1a0b287f74cc4710afe26c55806f5e3358b8fa86a6b5abf1852df33bdd92effe",
+        "indexSha256": "0f95d888c1f5d830818299597071f880976837c31f16a50c68afa9417ea04240",
+        "buildSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
         "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
       }
     },
     "bot": {
-      "sourceSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+      "sourceSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
       "adapter": {
-        "imageId": "sha256:66773852fbdde14ec2b09e54c2b207bbe294211b61e84459ff5e7261bd25298a",
-        "indexSha256": "b5c4c755b9299f2ccc431a2e643d9b2971c34fd9e368446693857f71499acddc",
-        "buildSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+        "imageId": "sha256:1a0b287f74cc4710afe26c55806f5e3358b8fa86a6b5abf1852df33bdd92effe",
+        "indexSha256": "0f95d888c1f5d830818299597071f880976837c31f16a50c68afa9417ea04240",
+        "buildSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
         "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
       }
     },
     "miniapp": {
-      "sourceSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+      "sourceSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
       "adapter": {
-        "imageId": "sha256:66773852fbdde14ec2b09e54c2b207bbe294211b61e84459ff5e7261bd25298a",
-        "indexSha256": "b5c4c755b9299f2ccc431a2e643d9b2971c34fd9e368446693857f71499acddc",
-        "buildSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+        "imageId": "sha256:1a0b287f74cc4710afe26c55806f5e3358b8fa86a6b5abf1852df33bdd92effe",
+        "indexSha256": "0f95d888c1f5d830818299597071f880976837c31f16a50c68afa9417ea04240",
+        "buildSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
         "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
       }
     }
   },
-  "activeRuntimeSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+  "activeRuntimeSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
   "activeRuntimeDbHead": "20260922090000_telegram_channel_avatar",
   "releaseStatus": "COMPLETE",
   "recoveryRequired": false,
-  "lastReleaseFailureManifest": "docs/release/manifests/gpoint-release-20260924T051002851Z.json",
-  "lastReleaseFailureAt": "2026-09-24T05:10:49.179Z",
+  "lastReleaseFailureManifest": null,
+  "lastReleaseFailureAt": null,
   "reconciliation": {
-    "reconciledAt": "2026-09-24T05:04:25Z",
-    "activeRuntimeSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+    "reconciledAt": "2026-09-24T05:20:49Z",
+    "activeRuntimeSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
     "activeRuntimeDbHead": "20260922090000_telegram_channel_avatar",
     "releaseStatus": "COMPLETE",
     "recoveryRequired": false,
-    "resolvedManifest": "docs/release/manifests/gpoint-release-20260924T045727583Z.json",
-    "basis": "Read-only VPS runtime and artifact identities, external Mini App and API health, current DB migration status, and exact GitHub production tag were verified after the original tag-push timeout."
+    "resolvedManifest": "docs/release/manifests/gpoint-release-20260924T051236278Z.json",
+    "basis": "Read-only VPS runtime identity and DB status, live HTTPS root/model/API checks, published share domain, and exact GitHub production tag were verified after the local TLS timeout."
   }
 }

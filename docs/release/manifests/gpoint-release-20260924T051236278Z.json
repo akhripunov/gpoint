@@ -1,0 +1,88 @@
+{
+  "releaseId": "gpoint-release-20260924T051236278Z",
+  "candidateSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
+  "previousProductionSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+  "productionShaAfter": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": "20260922090000_telegram_channel_avatar",
+  "startedAt": "2026-09-24T05:12:36.278Z",
+  "finishedAt": "2026-09-24T05:20:49Z",
+  "status": "COMPLETE",
+  "failureStage": null,
+  "failureReason": null,
+  "failureCommand": null,
+  "failureExitCode": null,
+  "failureStderr": null,
+  "rollbackSha": "2722db1fe35df83ceaaf83f0bd73c48865ffb8ef",
+  "productionRef": "gpoint-production-20260924T051236278Z",
+  "releaseOrigin": "durable-production-release",
+  "artifactIdentities": {
+    "api": {
+      "sourceSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
+      "adapter": {
+        "imageId": "sha256:1a0b287f74cc4710afe26c55806f5e3358b8fa86a6b5abf1852df33bdd92effe",
+        "indexSha256": "0f95d888c1f5d830818299597071f880976837c31f16a50c68afa9417ea04240",
+        "buildSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    },
+    "worker": {
+      "sourceSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
+      "adapter": {
+        "imageId": "sha256:1a0b287f74cc4710afe26c55806f5e3358b8fa86a6b5abf1852df33bdd92effe",
+        "indexSha256": "0f95d888c1f5d830818299597071f880976837c31f16a50c68afa9417ea04240",
+        "buildSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    },
+    "bot": {
+      "sourceSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
+      "adapter": {
+        "imageId": "sha256:1a0b287f74cc4710afe26c55806f5e3358b8fa86a6b5abf1852df33bdd92effe",
+        "indexSha256": "0f95d888c1f5d830818299597071f880976837c31f16a50c68afa9417ea04240",
+        "buildSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    },
+    "miniapp": {
+      "sourceSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
+      "adapter": {
+        "imageId": "sha256:1a0b287f74cc4710afe26c55806f5e3358b8fa86a6b5abf1852df33bdd92effe",
+        "indexSha256": "0f95d888c1f5d830818299597071f880976837c31f16a50c68afa9417ea04240",
+        "buildSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    }
+  },
+  "remoteProof": {
+    "mainSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
+    "productionTagTarget": "7a3dd5beaf693ae6498cfd3879f3579903b4d089"
+  },
+  "migrationOutput": "DATABASE_SCHEMA_UP_TO_DATE",
+  "detectorSourceHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32",
+  "stageTimings": {
+    "PRODUCTION_PREFLIGHT": 5.2,
+    "SOURCE_PREPARE": 2.0,
+    "RUNTIME_BUILD": 152.1,
+    "MIGRATION_CHECK": 5.8,
+    "RUNTIME_SWITCH_AND_HEALTH": 20.1,
+    "POST_SWITCH_RECONCILIATION": 0.7,
+    "POST_RELEASE_CLEANUP": 3.3
+  },
+  "reconciliation": {
+    "reconciledAt": "2026-09-24T05:20:49Z",
+    "originalFailure": {
+      "status": "SWITCHED_UNVERIFIED",
+      "failureStage": "POST_SWITCH",
+      "failureReason": "Command failed: curl -fsS https://gpoint.amiora.one/\ncurl: (35) LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to gpoint.amiora.one:443 \n",
+      "finishedAt": "2026-09-24T05:17:10.710Z"
+    },
+    "basis": "The runtime switch, container identity check and cleanup completed before local curl failed through the Mac network. Read-only VPS inspection confirmed RELEASE_SHA and API/Worker/Bot image labels and IDs match the candidate, detector running, and Prisma schema up to date. HTTPS via the VPS public IP confirmed root, model route and API health; published JavaScript contains https://gpoint.amiora.one. The annotated production tag was pushed and independently verified on GitHub without repeating apply.",
+    "externalSmoke": {
+      "miniappRoot": "PASS",
+      "apiHealth": "PASS",
+      "modelRoute": "PASS",
+      "canonicalShareDomainInPublishedBundle": "PASS"
+    }
+  }
+}
