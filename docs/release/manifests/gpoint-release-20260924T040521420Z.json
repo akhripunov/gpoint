@@ -1,0 +1,19 @@
+{
+  "releaseId": "gpoint-release-20260924T040521420Z",
+  "candidateSha": "ee2a9e1729953969eba3995f98a2d751696844e0",
+  "previousProductionSha": "af94cc14e33c11de770fdf4389b83554ec1f9504",
+  "productionShaAfter": null,
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": null,
+  "startedAt": "2026-09-24T04:05:21.420Z",
+  "finishedAt": "2026-09-24T04:05:31.455Z",
+  "status": "FAILED_PRE_SWITCH",
+  "failureStage": "PRE_SWITCH",
+  "failureReason": "Command failed: git ls-remote origin refs/heads/main refs/tags/*\nConnection timed out during banner exchange\r\nConnection to 140.82.121.35 port 443 timed out\r\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n",
+  "failureCommand": null,
+  "failureExitCode": null,
+  "failureStderr": "Connection timed out during banner exchange\r\nConnection to 140.82.121.35 port 443 timed out\r\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n",
+  "rollbackSha": "af94cc14e33c11de770fdf4389b83554ec1f9504",
+  "productionRef": null,
+  "releaseOrigin": "durable-production-release"
+}

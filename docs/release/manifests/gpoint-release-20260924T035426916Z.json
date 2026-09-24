@@ -1,0 +1,27 @@
+{
+  "releaseId": "gpoint-release-20260924T035426916Z",
+  "candidateSha": "ee2a9e1729953969eba3995f98a2d751696844e0",
+  "previousProductionSha": "af94cc14e33c11de770fdf4389b83554ec1f9504",
+  "productionShaAfter": null,
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": null,
+  "startedAt": "2026-09-24T03:54:26.916Z",
+  "finishedAt": "2026-09-24T03:55:55.520Z",
+  "status": "FAILED_PRE_SWITCH",
+  "failureStage": "PRE_SWITCH",
+  "failureReason": "remote command failed (exit=255): set -e; command -v docker >/dev/null; docker version --format 'DOCKER_VERSION={{.Server.Version}}'; docker compose version; docker buildx version; docker buildx inspect --bootstrap >/dev/null; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n \"$freeKb\"; test \"$freeKb\" -ge 5242880; test -r /opt/gpoint/env/production.env; currentSha=$(awk -F= '$1==\"RELEASE_SHA\" {print $2}' /opt/gpoint/env/production.env); printf '%s\\n' \"$currentSha\" | grep -Eq '^[0-9a-f]{40}$'; currentImage=$(docker inspect compose-api-1 --format '{{.Config.Image}}'); dbStatus=$(docker run --rm --network gpoint_app --network-alias gpoint-preflight --network shared_internal --env-file /opt/gpoint/env/production.env \"$currentImage\" pnpm --filter @gpoint/db exec prisma migrate status 2>&1); test -n \"$dbStatus\"; printf '%s\\n' \"$dbStatus\" | tail -5; printf 'GPOINT_PREFLIGHT_OK\\n'",
+  "failureCommand": "set -e; command -v docker >/dev/null; docker version --format 'DOCKER_VERSION={{.Server.Version}}'; docker compose version; docker buildx version; docker buildx inspect --bootstrap >/dev/null; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n \"$freeKb\"; test \"$freeKb\" -ge 5242880; test -r /opt/gpoint/env/production.env; currentSha=$(awk -F= '$1==\"RELEASE_SHA\" {print $2}' /opt/gpoint/env/production.env); printf '%s\\n' \"$currentSha\" | grep -Eq '^[0-9a-f]{40}$'; currentImage=$(docker inspect compose-api-1 --format '{{.Config.Image}}'); dbStatus=$(docker run --rm --network gpoint_app --network-alias gpoint-preflight --network shared_internal --env-file /opt/gpoint/env/production.env \"$currentImage\" pnpm --filter @gpoint/db exec prisma migrate status 2>&1); test -n \"$dbStatus\"; printf '%s\\n' \"$dbStatus\" | tail -5; printf 'GPOINT_PREFLIGHT_OK\\n'",
+  "failureExitCode": 255,
+  "failureStderr": null,
+  "rollbackSha": "af94cc14e33c11de770fdf4389b83554ec1f9504",
+  "productionRef": null,
+  "releaseOrigin": "durable-production-release",
+  "reconciliation": {
+    "reconciledAt": "2026-09-24T04:18:34Z",
+    "originalStatus": "SWITCHED_UNVERIFIED",
+    "observedLiveProductionSha": "af94cc14e33c11de770fdf4389b83554ec1f9504",
+    "productionSwitchOccurred": false,
+    "resolvedStatus": "FAILED_PRE_SWITCH",
+    "evidence": "Failure was in the production preflight remote command, before SOURCE_PREPARE and before any migration or runtime switch. A subsequent read-only VPS check confirmed the previous SHA remained active. Original command and exit code are preserved above."
+  }
+}

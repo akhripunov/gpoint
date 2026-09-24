@@ -3,7 +3,7 @@
   "currentProductionDbHead": "20260922090000_telegram_channel_avatar",
   "currentProductionRef": "gpoint-production-20260922T094423181Z",
   "previousProductionSha": "4a220f140563757aa7d678968338da7cc71c3fef",
-  "lastReleaseId": "gpoint-release-20260923T170605705Z",
+  "lastReleaseId": "gpoint-release-20260924T040856151Z",
   "lastReleaseStatus": "FAILED_PRE_SWITCH",
   "lastReleaseCompletedAt": "2026-09-22T09:48:16.280Z",
   "releaseOrigin": "durable-production-release",
@@ -49,15 +49,20 @@
   "activeRuntimeDbHead": "20260922090000_telegram_channel_avatar",
   "releaseStatus": "COMPLETE",
   "recoveryRequired": false,
-  "lastReleaseFailureManifest": "docs/release/manifests/gpoint-release-20260923T170605705Z.json",
-  "lastReleaseFailureAt": "2026-09-23T17:07:27.775Z",
+  "lastReleaseFailureManifest": "docs/release/manifests/gpoint-release-20260924T040856151Z.json",
+  "lastReleaseFailureAt": "2026-09-24T04:10:34.293Z",
   "reconciliation": {
-    "reconciledAt": "2026-09-24T03:48:51Z",
+    "reconciledAt": "2026-09-24T04:18:34Z",
     "activeRuntimeSha": "af94cc14e33c11de770fdf4389b83554ec1f9504",
     "activeRuntimeDbHead": "20260922090000_telegram_channel_avatar",
     "releaseStatus": "COMPLETE",
     "recoveryRequired": false,
     "resolvedManifest": "docs/release/manifests/gpoint-release-20260923T164845713Z.json",
-    "basis": "Read-only VPS runtime/env inspection matched the recorded production baseline; neither failed candidate attempt changed the live runtime."
+    "resolvedFailures": [
+      "gpoint-release-20260924T035426916Z",
+      "gpoint-release-20260924T040521420Z",
+      "gpoint-release-20260924T040856151Z"
+    ],
+    "basis": "Read-only VPS runtime/env inspection matched the recorded production baseline. Subsequent failures were during remote verification, preflight, or SOURCE_PREPARE, before build/migration/runtime switch."
   }
 }
