@@ -51,7 +51,7 @@ test("E — share action produces the canonical current-model URL", async ({ pag
   await expect(page.locator("h1")).toContainText("Models Hub");
   await page.getByRole("button", { name: /Share Models Hub/ }).click();
   await expect.poll(() => page.evaluate(() => (window as Window & { __sharedUrl?: string }).__sharedUrl))
-    .toBe("https://gpoint.one/model/models_hub");
+    .toBe("https://gpoint.amiora.one/model/models_hub");
   console.log("SHARE_PASS");
 });
 
