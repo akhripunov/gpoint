@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -104,13 +105,77 @@ def graphql_request(
     raise SyncError("Linear API request exhausted retries")
 
 
+def _linear_markdown_comparison_form(content: str) -> str:
+    """Apply only Markdown-equivalent formatting observed in Linear read-back."""
+    output: list[str] = []
+    plain: list[str] = []
+    fence: tuple[str, int] | None = None
+    just_closed_fence = False
+
+    def flush_plain() -> None:
+        if not plain:
+            return
+        text = "".join(plain)
+        text = re.sub(r"(?m)^([ \t]*)-(?= )", r"\1*", text)
+        text = re.sub(r"\]\(<([^>\s()]*)>\)", r"](\1)", text)
+        text = re.sub(
+            r"(`+)(.+?)\1",
+            lambda match: match.group(1)
+            + re.sub(r"[ \t]*(?:\r\n|\r|\n)[ \t]*", " ", match.group(2))
+            + match.group(1),
+            text,
+            flags=re.DOTALL,
+        )
+        lines = text.splitlines(keepends=True)
+        compacted: list[str] = []
+        for index, line in enumerate(lines):
+            next_line = lines[index + 1] if index + 1 < len(lines) else ""
+            if (
+                line.strip() == ""
+                and next_line
+                and re.match(r"^[ \t]*[*+\-][ \t]+", next_line)
+                and compacted
+                and compacted[-1].strip()
+                and not re.match(r"^[ \t]*[*+\-][ \t]+", compacted[-1])
+            ):
+                continue
+            compacted.append(line)
+        text = "".join(compacted)
+        output.append(text)
+        plain.clear()
+
+    for line in content.splitlines(keepends=True):
+        fence_match = re.match(r"^[ \t]{0,3}(`{3,}|~{3,})", line)
+        if fence is not None:
+            output.append(line)
+            if fence_match and fence_match.group(1)[0] == fence[0] and len(fence_match.group(1)) >= fence[1]:
+                fence = None
+                just_closed_fence = True
+            continue
+        if fence_match:
+            flush_plain()
+            marker = fence_match.group(1)
+            fence = (marker[0], len(marker))
+            output.append(line)
+            continue
+        if just_closed_fence and line.strip() == "":
+            just_closed_fence = False
+            continue
+        just_closed_fence = False
+        plain.append(line)
+    flush_plain()
+    return "".join(output)
+
+
 def _content_matches(source: str, returned: str) -> bool:
-    if source == returned:
+    source_form = _linear_markdown_comparison_form(source)
+    returned_form = _linear_markdown_comparison_form(returned)
+    if source_form == returned_form:
         return True
     # Linear may remove or add one terminal LF. No other normalization is allowed.
-    if source.endswith("\n") and source[:-1] == returned:
+    if source_form.endswith("\n") and source_form[:-1] == returned_form:
         return True
-    if returned.endswith("\n") and returned[:-1] == source:
+    if returned_form.endswith("\n") and returned_form[:-1] == source_form:
         return True
     return False
 

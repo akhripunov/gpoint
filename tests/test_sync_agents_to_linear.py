@@ -106,6 +106,30 @@ class SyncContractTests(unittest.TestCase):
         self.assertTrue(SYNC._content_matches("body\n", "body"))
         self.assertFalse(SYNC._content_matches("body\n\n", "body"))
 
+    def test_linear_equivalent_bullet_marker_is_normalized(self):
+        self.assertTrue(SYNC._content_matches("- item\n", "* item\n"))
+        self.assertFalse(SYNC._content_matches("- original item\n", "* changed item\n"))
+
+    def test_bullet_marker_inside_fenced_code_is_not_normalized(self):
+        source = "```text\n- literal code\n```\n"
+        returned = "```text\n* literal code\n```\n"
+        self.assertFalse(SYNC._content_matches(source, returned))
+
+    def test_documented_linear_markdown_serializations_are_narrowly_normalized(self):
+        source = (
+            "```text\ncode\n```\n\n"
+            "Paragraph before list.\n\n"
+            "* `wrapped\n  inline code`\n"
+            "[role registry](<docs/ROLE_REGISTRY.md>)\n"
+        )
+        returned = (
+            "```text\ncode\n```\n"
+            "Paragraph before list.\n"
+            "* `wrapped inline code`\n"
+            "[role registry](docs/ROLE_REGISTRY.md)\n"
+        )
+        self.assertTrue(SYNC._content_matches(source, returned))
+
 
 if __name__ == "__main__":
     unittest.main()
