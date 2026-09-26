@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db.base import set_tenant_context
 from app.db.models import (
     AuditLog,
@@ -48,7 +49,7 @@ from app.memory.retrieval import (
     RetrievalResult,
     RetrievedMemory,
 )
-from app.memory.segments import segment_hierarchy, summary_relevance
+from app.memory.segments import segment_hierarchy, segment_interval, summary_relevance
 from app.memory.shared_history import (
     SharedHistoryContext,
     SharedHistoryEvidence,
@@ -59,6 +60,16 @@ from app.messages.crypto import (
     CiphertextEnvelope,
     canonical_tagged_fields,
     derive_hmac_subkey,
+)
+from app.messages.protected_content import (
+    content_aad,
+    decrypt_text_from_storage,
+    derived_view_content_aad,
+    encrypt_json_for_storage,
+    encrypt_text_for_storage,
+    memory_value_aad,
+    opaque_search_text,
+    segment_summary_aad,
 )
 from app.messages.service import DomainError, MessageIngestionService
 from app.responses.guard import ResponseGuard
@@ -903,17 +914,36 @@ class ResponseOrchestrator:
                         importance = float(item.get("importance", 0))
                         if not fact_text or importance < 0.5:
                             continue
-                        # Dedup: check for existing fact with same text
-                        existing = await db_session.scalar(
-                            select(Memory)
-                            .where(
-                                Memory.tenant_id == principal.tenant_id,
-                                Memory.user_id == principal.user_id,
-                                Memory.value_text == fact_text[:2000],
-                                Memory.lifecycle_state == LifecycleState("active"),
-                                Memory.deleted_at.is_(None),
-                            )
-                            .limit(1)
+                        # Compare decrypted values only in-process; never query canonical text.
+                        candidates = list(
+                            (
+                                await db_session.scalars(
+                                    select(Memory)
+                                    .where(
+                                        Memory.tenant_id == principal.tenant_id,
+                                        Memory.user_id == principal.user_id,
+                                        Memory.character_id == conversation.character_id,
+                                        Memory.scope == conversation.scope,
+                                        Memory.scenario_id == conversation.scenario_id,
+                                        Memory.predicate == "user_stated",
+                                        Memory.lifecycle_state == LifecycleState.active,
+                                        Memory.deleted_at.is_(None),
+                                    )
+                                    .order_by(Memory.updated_at.desc(), Memory.id)
+                                    .limit(128)
+                                )
+                            ).all()
+                        )
+                        existing = next(
+                            (
+                                memory
+                                for memory in candidates
+                                if decrypt_text_from_storage(
+                                    memory.value_text, memory_value_aad(memory), crypto=self.crypto
+                                )
+                                == fact_text[:2000]
+                            ),
+                            None,
                         )
                         if existing is not None:
                             existing.confidence = round(
@@ -924,6 +954,9 @@ class ResponseOrchestrator:
                             existing.updated_at = datetime.now(UTC)
                             continue
                         # Check for contradictions
+                        settings = get_settings()
+                        search_key = settings.retrieval_query_hmac_key.get_secret_value()
+                        indexed_query = opaque_search_text(fact_text, search_key)
                         related = await db_session.scalar(
                             select(Memory)
                             .where(
@@ -934,14 +967,23 @@ class ResponseOrchestrator:
                                 Memory.deleted_at.is_(None),
                                 func.to_tsvector(
                                     "simple", func.coalesce(Memory.search_text, "")
-                                ).op("@@")(func.plainto_tsquery("simple", fact_text)),
+                                ).op("@@")(func.plainto_tsquery("simple", indexed_query)),
                             )
                             .limit(1)
                         )
-                        if related is not None and related.value_text != fact_text[:2000]:
+                        related_value = (
+                            decrypt_text_from_storage(
+                                related.value_text, memory_value_aad(related), crypto=self.crypto
+                            )
+                            if related is not None
+                            else None
+                        )
+                        if related is not None and related_value != fact_text[:2000]:
                             related.lifecycle_state = LifecycleState("historical")
                             related.supersedes_id = None
+                        memory_id = uuid4()
                         memory = Memory(
+                            id=memory_id,
                             tenant_id=principal.tenant_id,
                             user_id=principal.user_id,
                             character_id=conversation.character_id,
@@ -949,8 +991,21 @@ class ResponseOrchestrator:
                             scope=conversation.scope,
                             scenario_id=conversation.scenario_id,
                             predicate="user_stated",
-                            value_text=fact_text[:2000],
-                            search_text=fact_text[:2000],
+                            value_text=encrypt_text_for_storage(
+                                fact_text[:2000],
+                                content_aad(
+                                    entity="memories",
+                                    tenant_id=principal.tenant_id,
+                                    user_id=principal.user_id,
+                                    character_id=conversation.character_id,
+                                    scope=conversation.scope,
+                                    scenario_id=conversation.scenario_id,
+                                    record_id=memory_id,
+                                    field="value_text",
+                                ),
+                                crypto=self.crypto,
+                            ),
+                            search_text=opaque_search_text(fact_text[:2000], search_key),
                             observed_at=datetime.now(UTC),
                             evidence_state=EvidenceState("explicit"),
                             lifecycle_state=LifecycleState("active"),
@@ -959,7 +1014,7 @@ class ResponseOrchestrator:
                             created_epoch=epoch,
                         )
                         db_session.add(memory)
-                        if related is not None and related.value_text != fact_text[:2000]:
+                        if related is not None and related_value != fact_text[:2000]:
                             await db_session.flush()
                             related.supersedes_id = memory.id
         except Exception:
@@ -1067,9 +1122,8 @@ class ResponseOrchestrator:
 
                     summary = envelope.text[:1000]
                     keyphrases = [w for w in summary.split() if len(w) > 3][:5]
-                    hierarchy = segment_hierarchy(
-                        summary, rows[-1].occurred_at, rows[0].occurred_at
-                    )
+                    started_at, ended_at = segment_interval(row.occurred_at for row in rows)
+                    hierarchy = segment_hierarchy(summary, started_at, ended_at)
 
                     # Save segment
                     ctrl = await db_session.scalar(
@@ -1088,10 +1142,36 @@ class ResponseOrchestrator:
                             id=segment_id,
                             tenant_id=principal.tenant_id,
                             conversation_id=conversation.id,
-                            summary=summary,
-                            keyphrases=keyphrases,
-                            started_at=rows[-1].occurred_at,
-                            ended_at=rows[0].occurred_at,
+                            summary=encrypt_text_for_storage(
+                                summary,
+                                content_aad(
+                                    entity="conversation_segments",
+                                    tenant_id=principal.tenant_id,
+                                    user_id=principal.user_id,
+                                    character_id=conversation.character_id,
+                                    scope=conversation.scope,
+                                    scenario_id=conversation.scenario_id,
+                                    record_id=segment_id,
+                                    field="summary",
+                                ),
+                                crypto=self.crypto,
+                            ),
+                            keyphrases=encrypt_json_for_storage(
+                                keyphrases,
+                                content_aad(
+                                    entity="conversation_segments",
+                                    tenant_id=principal.tenant_id,
+                                    user_id=principal.user_id,
+                                    character_id=conversation.character_id,
+                                    scope=conversation.scope,
+                                    scenario_id=conversation.scenario_id,
+                                    record_id=segment_id,
+                                    field="keyphrases",
+                                ),
+                                crypto=self.crypto,
+                            ),
+                            started_at=started_at,
+                            ended_at=ended_at,
                         )
                     )
                     await db_session.flush()
@@ -1115,22 +1195,39 @@ class ResponseOrchestrator:
                         .with_for_update()
                     )
                     if existing_view is None:
+                        view_id = uuid4()
                         db_session.add(
                             DerivedMemoryView(
+                                id=view_id,
                                 tenant_id=principal.tenant_id,
                                 user_id=principal.user_id,
                                 character_id=conversation.character_id,
                                 scope=conversation.scope,
                                 scenario_id=conversation.scenario_id,
                                 view_type="conversation_summary",
-                                content=payload,
+                                content=encrypt_json_for_storage(
+                                    payload,
+                                    content_aad(
+                                        entity="derived_memory_views",
+                                        tenant_id=principal.tenant_id,
+                                        user_id=principal.user_id,
+                                        character_id=conversation.character_id,
+                                        scope=conversation.scope,
+                                        scenario_id=conversation.scenario_id,
+                                        record_id=view_id,
+                                        field="content",
+                                    ),
+                                    crypto=self.crypto,
+                                ),
                                 parent_memory_ids=[str(segment_id)],
                                 creation_epoch=epoch,
                             )
                         )
                     else:
                         existing_view.generation += 1
-                        existing_view.content = payload
+                        existing_view.content = encrypt_json_for_storage(
+                            payload, derived_view_content_aad(existing_view), crypto=self.crypto
+                        )
                         existing_view.parent_memory_ids = [str(segment_id)]
                         existing_view.creation_epoch = epoch
         except Exception:
@@ -1298,7 +1395,7 @@ class ResponseOrchestrator:
         rows = list(
             (
                 await self.session.scalars(
-                    select(Memory.value_text)
+                    select(Memory)
                     .where(
                         Memory.tenant_id == principal.tenant_id,
                         Memory.user_id == principal.user_id,
@@ -1313,7 +1410,14 @@ class ResponseOrchestrator:
                 )
             ).all()
         )
-        return tuple(value for value in rows if isinstance(value, str) and 1 <= len(value) <= 500)
+        values = []
+        for memory in rows:
+            value = decrypt_text_from_storage(
+                memory.value_text, memory_value_aad(memory), crypto=self.crypto
+            )
+            if isinstance(value, str) and 1 <= len(value) <= 500:
+                values.append(value)
+        return tuple(values)
 
     async def _recent_summaries(
         self,
@@ -1337,18 +1441,22 @@ class ResponseOrchestrator:
                 )
             ).all()
         )
-        eligible = [
-            row for row in rows if isinstance(row.summary, str) and 1 <= len(row.summary) <= 1200
-        ]
+        eligible: list[tuple[ConversationSegment, str]] = []
+        for row in rows:
+            summary = decrypt_text_from_storage(
+                row.summary, segment_summary_aad(row, conversation), crypto=self.crypto
+            )
+            if isinstance(summary, str) and 1 <= len(summary) <= 1200:
+                eligible.append((row, summary))
         eligible.sort(
             key=lambda row: (
-                summary_relevance(row.summary, query, row.ended_at, now=as_of),
-                row.ended_at,
-                row.id,
+                summary_relevance(row[1], query, row[0].ended_at, now=as_of),
+                row[0].ended_at,
+                row[0].id,
             ),
             reverse=True,
         )
-        return tuple(row.summary[:1200] for row in eligible[:3])
+        return tuple(summary[:1200] for _, summary in eligible[:3])
 
     async def _communication_settings(
         self, principal: PrincipalContext, conversation: Conversation
@@ -1541,10 +1649,7 @@ def _bounded_profile_data(value: object) -> dict[str, object]:
 
 
 async def run_retention_cleanup(session: AsyncSession, tenant_id: UUID) -> int:
-    """Delete expired messages and memories according to retention_policies.
-
-    Returns number of deleted rows.
-    """
+    """Purge expired narrative bytes and invalidate work that could resurrect them."""
     from datetime import datetime, timedelta
 
     from app.db.models import RetentionPolicy
@@ -1557,41 +1662,139 @@ async def run_retention_cleanup(session: AsyncSession, tenant_id: UUID) -> int:
             )
         ).all()
     )
-    deleted = 0
-    # Episodic memories are durable, but their active medium-term window is
-    # bounded.  Once it expires, preserve the row as historical evidence while
-    # removing it from active retrieval.
-    archived = await session.execute(
-        text(
-            "UPDATE memories SET lifecycle_state='historical' "
-            "WHERE tenant_id=:tid AND kind='episodic' "
-            "AND lifecycle_state='active' AND deleted_at IS NULL "
-            "AND valid_until IS NOT NULL AND valid_until <= :now"
-        ),
-        {"tid": tenant_id, "now": now},
-    )
-    deleted += int(getattr(archived, "rowcount", 0) or 0)
-    for policy in policies:
-        if policy.legal_hold or policy.message_days is None:
-            continue
-        cutoff = now - timedelta(days=policy.message_days)
-        result = await session.execute(
-            text(
-                "UPDATE messages SET deleted_at=:now WHERE tenant_id=:tid AND retention_policy_id=:policy AND deleted_at IS NULL AND occurred_at < :cutoff"
-            ),
-            {"tid": tenant_id, "policy": policy.id, "cutoff": cutoff, "now": now},
-        )
-        deleted += int(getattr(result, "rowcount", 0) or 0)
+    message_cutoffs = {
+        policy.id: now - timedelta(days=policy.message_days)
+        for policy in policies
+        if not policy.legal_hold and policy.message_days is not None
+    }
+    memory_cutoffs = {
+        policy.id: now - timedelta(days=policy.memory_days)
+        for policy in policies
+        if not policy.legal_hold and policy.memory_days is not None
+    }
+    message_ids: list[UUID] = []
+    conversation_ids: set[UUID] = set()
+    for policy_id, cutoff in message_cutoffs.items():
+        rows = (
+            await session.execute(
+                text(
+                    "UPDATE agata.messages SET deleted_at=:now, content_ciphertext=NULL, "
+                    "content_nonce=NULL, content_key_version=NULL "
+                    "WHERE tenant_id=:tid AND retention_policy_id=:policy AND deleted_at IS NULL "
+                    "AND occurred_at < :cutoff RETURNING id,conversation_id"
+                ),
+                {"tid": tenant_id, "policy": policy_id, "cutoff": cutoff, "now": now},
+            )
+        ).all()
+        message_ids.extend(row.id for row in rows)
+        conversation_ids.update(row.conversation_id for row in rows)
 
-    for policy in policies:
-        if policy.legal_hold or policy.memory_days is None:
-            continue
-        cutoff = now - timedelta(days=policy.memory_days)
-        result = await session.execute(
+    if message_ids:
+        await session.execute(
             text(
-                "UPDATE memories SET lifecycle_state='deleted', deleted_at=:now WHERE tenant_id=:tid AND retention_policy_id=:policy AND deleted_at IS NULL AND observed_at < :cutoff"
+                "UPDATE agata.outbox_jobs SET state='dead', claimed_at=NULL, lease_expires_at=NULL, "
+                "last_error='retention_purged', payload=payload - 'reply_context_ciphertext' "
+                "- 'reply_context_nonce' - 'reply_context_key_version' "
+                "WHERE tenant_id=:tid AND state IN ('pending','running','failed') "
+                "AND (payload->>'message_id' = ANY(CAST(:ids AS text[])) "
+                "OR payload->>'conversation_id' = ANY(CAST(:conversations AS text[])))"
             ),
-            {"tid": tenant_id, "policy": policy.id, "cutoff": cutoff, "now": now},
+            {
+                "tid": tenant_id,
+                "ids": [str(value) for value in message_ids],
+                "conversations": [str(value) for value in conversation_ids],
+            },
         )
-        deleted += int(getattr(result, "rowcount", 0) or 0)
-    return deleted
+
+    memory_expiry = " OR ".join(
+        f"(m.retention_policy_id=:memory_policy_{index} AND m.observed_at<:memory_cutoff_{index})"
+        for index in range(len(memory_cutoffs))
+    ) or "FALSE"
+    memory_params = {"tid": tenant_id, "now": now, "message_ids": message_ids}
+    for index, (policy_id, cutoff) in enumerate(memory_cutoffs.items()):
+        memory_params[f"memory_policy_{index}"] = policy_id
+        memory_params[f"memory_cutoff_{index}"] = cutoff
+    purged = await session.execute(
+        text(
+            "UPDATE agata.memories m SET lifecycle_state='deleted', deleted_at=:now, valid_until=:now, "
+            "value_text=NULL, value_json=NULL, search_text=NULL, embedding=NULL, "
+            "embedding_model=NULL, embedded_at=NULL "
+            "WHERE m.tenant_id=:tid AND m.deleted_at IS NULL AND ("
+            "EXISTS (SELECT 1 FROM agata.memory_sources s WHERE s.tenant_id=m.tenant_id "
+            "AND s.memory_id=m.id AND s.message_id=ANY(CAST(:message_ids AS uuid[]))) OR "
+            f"({memory_expiry})"
+            ") RETURNING m.id,m.user_id,m.character_id,m.scope,m.scenario_id"
+        ),
+        memory_params,
+    )
+    purged_rows = purged.all()
+    candidate_expiry = " OR ".join(
+        f"(retention_policy_id=:candidate_policy_{index} AND created_at<:candidate_cutoff_{index})"
+        for index in range(len(memory_cutoffs))
+    ) or "FALSE"
+    candidate_params = {"tid": tenant_id, "message_ids": message_ids}
+    for index, (policy_id, cutoff) in enumerate(memory_cutoffs.items()):
+        candidate_params[f"candidate_policy_{index}"] = policy_id
+        candidate_params[f"candidate_cutoff_{index}"] = cutoff
+    invalidated_candidates = (
+        await session.execute(
+            text(
+                "UPDATE agata.shadow_memory_candidates SET status='invalidated', invalidated_at=now(), "
+                "value_ciphertext=NULL,value_nonce=NULL,value_key_version=NULL "
+                "WHERE tenant_id=:tid AND status IN ('shadow','promoting') AND ("
+                "source_message_id=ANY(CAST(:message_ids AS uuid[])) OR "
+                f"({candidate_expiry})"
+                ") RETURNING id"
+            ),
+            candidate_params,
+        )
+    ).all()
+    if invalidated_candidates:
+        await session.execute(
+            text(
+                "UPDATE agata.outbox_jobs SET state='dead', claimed_at=NULL, lease_expires_at=NULL, "
+                "last_error='retention_purged' WHERE tenant_id=:tid "
+                "AND state IN ('pending','running','failed') "
+                "AND payload->>'candidate_id'=ANY(CAST(:ids AS text[]))"
+            ),
+            {
+                "tid": tenant_id,
+                "ids": [str(row.id) for row in invalidated_candidates],
+            },
+        )
+    affected_scopes = {
+        (
+            row.user_id,
+            row.character_id,
+            getattr(row.scope, "value", row.scope),
+            row.scenario_id,
+        )
+        for row in purged_rows
+    }
+    for user_id, character_id, scope, scenario_id in affected_scopes:
+        await session.execute(
+            text(
+                "UPDATE agata.memory_control_state SET deletion_epoch=deletion_epoch+1 "
+                "WHERE tenant_id=:tid AND user_id=:uid AND character_id=:cid "
+                "AND scope=CAST(:scope AS public.scope_enum) AND scenario_id IS NOT DISTINCT FROM :sid"
+            ),
+            {"tid": tenant_id, "uid": user_id, "cid": character_id, "scope": scope, "sid": scenario_id},
+        )
+        await session.execute(
+            text(
+                "UPDATE agata.derived_memory_views SET content='{}'::jsonb, "
+                "parent_memory_ids='[]'::jsonb, generation=generation+1 "
+                "WHERE tenant_id=:tid AND user_id=:uid AND character_id=:cid "
+                "AND scope=CAST(:scope AS public.scope_enum) AND scenario_id IS NOT DISTINCT FROM :sid"
+            ),
+            {"tid": tenant_id, "uid": user_id, "cid": character_id, "scope": scope, "sid": scenario_id},
+        )
+    if conversation_ids:
+        await session.execute(
+            text(
+                "UPDATE agata.conversation_segments SET summary=NULL,keyphrases=NULL "
+                "WHERE tenant_id=:tid AND conversation_id = ANY(:ids)"
+            ),
+            {"tid": tenant_id, "ids": list(conversation_ids)},
+        )
+    return len(message_ids) + len(purged_rows)

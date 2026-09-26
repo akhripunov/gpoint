@@ -289,7 +289,8 @@ class ConversationSegment(TenantOwned):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     summary: Mapped[str | None] = mapped_column(Text)
-    keyphrases: Mapped[list | None] = mapped_column(JSONB)
+    # Ciphertext envelope object at rest; decrypted list exists only in process memory.
+    keyphrases: Mapped[dict | list | None] = mapped_column(JSONB)
     __table_args__ = (
         ForeignKeyConstraint(
             ["tenant_id", "conversation_id"], ["conversations.tenant_id", "conversations.id"]
@@ -315,7 +316,7 @@ class Message(TenantOwned):
     )
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(32), nullable=False)
-    content_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    content_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
     content_nonce: Mapped[bytes | None] = mapped_column(LargeBinary)
     content_key_version: Mapped[str | None] = mapped_column(String(32))
     system_message_type: Mapped[str | None] = mapped_column(String(32))
@@ -359,6 +360,13 @@ class Message(TenantOwned):
             ["retention_policies.tenant_id", "retention_policies.id"],
         ),
         CheckConstraint("role IN ('user','assistant','system')", name="ck_message_role"),
+        CheckConstraint(
+            "(content_ciphertext IS NULL AND content_nonce IS NULL AND content_key_version IS NULL) "
+            "OR (content_ciphertext IS NOT NULL AND content_nonce IS NOT NULL "
+            "AND content_key_version IS NOT NULL AND octet_length(content_ciphertext) > 16 "
+            "AND octet_length(content_nonce) = 12 AND content_key_version IS NOT NULL)",
+            name="ck_message_content_envelope",
+        ),
         CheckConstraint(
             "language_code IN ('ru','en','mixed','unknown')", name="ck_message_language"
         ),
@@ -1281,9 +1289,9 @@ class ShadowMemoryCandidate(TenantOwned):
     category: Mapped[str] = mapped_column(String(32), nullable=False)
     subject: Mapped[str] = mapped_column(String(32), nullable=False)
     predicate: Mapped[str] = mapped_column(String(64), nullable=False)
-    value_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    value_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    value_key_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    value_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
+    value_nonce: Mapped[bytes | None] = mapped_column(LargeBinary)
+    value_key_version: Mapped[str | None] = mapped_column(String(32))
     value_fingerprint: Mapped[str] = mapped_column(String(128), nullable=False)
     confidence: Mapped[float] = mapped_column(Numeric(4, 3), nullable=False)
     temporal_hint: Mapped[str] = mapped_column(String(16), server_default="none", nullable=False)
@@ -1386,7 +1394,10 @@ class ShadowMemoryCandidate(TenantOwned):
             name="fk_shadow_promoted_memory_owner",
         ),
         CheckConstraint(
-            "length(value_ciphertext) > 16 AND octet_length(value_nonce) = 12",
+            "(value_ciphertext IS NULL AND value_nonce IS NULL AND value_key_version IS NULL) "
+            "OR (value_ciphertext IS NOT NULL AND value_nonce IS NOT NULL "
+            "AND value_key_version IS NOT NULL AND length(value_ciphertext) > 16 "
+            "AND octet_length(value_nonce) = 12 AND value_key_version IS NOT NULL)",
             name="ck_shadow_candidate_envelope",
         ),
         Index("shadow_candidate_source_idx", "tenant_id", "source_message_id", "status"),

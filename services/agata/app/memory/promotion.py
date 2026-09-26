@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from hmac import new
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,6 +35,12 @@ from app.messages.crypto import (
     CiphertextEnvelope,
     canonical_tagged_fields,
     derive_hmac_subkey,
+)
+from app.messages.protected_content import (
+    content_aad,
+    decrypt_text_from_storage,
+    encrypt_text_for_storage,
+    memory_value_aad,
 )
 from app.messages.service import DomainError
 
@@ -284,7 +290,14 @@ class AutoWritePromotionService:
                 .with_for_update()
             )
             status = "promoted"
-            if existing is not None and existing.value_text != value:
+            existing_value = (
+                decrypt_text_from_storage(
+                    existing.value_text, memory_value_aad(existing), crypto=self.crypto
+                )
+                if existing is not None
+                else None
+            )
+            if existing is not None and existing_value != value:
                 if candidate.category in {"preferred_name", "current_activity"}:
                     candidate.status = "conflict"
                     await self._receipt(candidate, release, "conflict", None)
@@ -297,7 +310,9 @@ class AutoWritePromotionService:
             else:
                 existing_id = None
             if existing is None:
+                memory_id = uuid4()
                 existing = Memory(
+                    id=memory_id,
                     tenant_id=tenant_id,
                     user_id=candidate.user_id,
                     character_id=candidate.character_id,
@@ -313,7 +328,20 @@ class AutoWritePromotionService:
                     slot_schema_version=1,
                     subject_type="user",
                     predicate=slot_key.removeprefix("user."),
-                    value_text=value,
+                    value_text=encrypt_text_for_storage(
+                        value,
+                        content_aad(
+                            entity="memories",
+                            tenant_id=tenant_id,
+                            user_id=candidate.user_id,
+                            character_id=candidate.character_id,
+                            scope=candidate.scope,
+                            scenario_id=candidate.scenario_id,
+                            record_id=memory_id,
+                            field="value_text",
+                        ),
+                        crypto=self.crypto,
+                    ),
                     observed_at=source.occurred_at,
                     valid_until=(now + timedelta(days=3))
                     if candidate.category == "current_activity"

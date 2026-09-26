@@ -35,6 +35,11 @@ from app.db.models import (
 from app.domain.principal import PrincipalContext
 from app.jobs.outbox import OutboxRepository, StaleCreationEpoch
 from app.messages.crypto import canonical_tagged_fields, derive_hmac_subkey
+from app.messages.protected_content import (
+    decrypt_text_from_storage,
+    memory_value_aad,
+    opaque_search_text,
+)
 from app.messages.service import DomainError
 
 EMBEDDING_DIMENSIONS = 1536
@@ -224,11 +229,12 @@ class EmbeddingWorker:
         )
         if memory is None or memory.created_epoch != job.creation_epoch:
             raise StaleCreationEpoch("memory is no longer eligible")
-        if not isinstance(memory.value_text, str) or not memory.value_text:
+        value = decrypt_text_from_storage(memory.value_text, memory_value_aad(memory))
+        if not isinstance(value, str) or not value:
             raise DomainError("embedding_source_invalid")
         try:
             vector = _finite_vector(
-                await asyncio.wait_for(self.provider.embed(memory.value_text), timeout=2.0)
+                await asyncio.wait_for(self.provider.embed(value), timeout=2.0)
             )
         except TimeoutError:
             raise
@@ -327,6 +333,7 @@ class HybridRetrievalService:
         if not isinstance(hmac_key, bytes) or len(hmac_key) < 32:
             raise DomainError("retrieval_key_invalid")
         self.session, self.provider = session, provider
+        self._search_key = hmac_key
         self._query_key = derive_hmac_subkey(hmac_key, QUERY_DOMAIN)
 
     async def retrieve(
@@ -357,7 +364,11 @@ class HybridRetrievalService:
                         base.where(
                             func.to_tsvector("simple", func.coalesce(Memory.search_text, "")).op(
                                 "@@"
-                            )(func.plainto_tsquery("simple", request.query))
+                            )(
+                                func.plainto_tsquery(
+                                    "simple", opaque_search_text(request.query, self._search_key)
+                                )
+                            )
                         )
                         .order_by(Memory.id)
                         .limit(request.per_list_k)
@@ -410,7 +421,7 @@ class HybridRetrievalService:
             selected: list[RetrievedMemory] = []
             used = 0
             for memory in ordered[: request.final_k]:
-                value = memory.value_text
+                value = decrypt_text_from_storage(memory.value_text, memory_value_aad(memory))
                 size = len(value or "")
                 if used + size > request.max_characters:
                     continue

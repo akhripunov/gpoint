@@ -28,8 +28,8 @@ async def ready(session: AsyncSession = Depends(get_session)) -> dict[str, str]:
         )
         revision = await session.scalar(text("SELECT version_num FROM agata.alembic_version"))
         vector = await session.scalar(text("SELECT 1 FROM pg_extension WHERE extname='vector'"))
-        if schema != 1 or revision != "agata0001" or vector != 1:
-            raise RuntimeError("AGATA schema, baseline, or pgvector unavailable")
+        if schema != 1 or revision != "agata0002" or vector != 1:
+            raise RuntimeError("AGATA schema, protected-content revision, or pgvector unavailable")
 
     try:
         await asyncio.wait_for(check(), timeout=1.5)

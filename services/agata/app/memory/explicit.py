@@ -4,7 +4,7 @@ from hashlib import sha256
 from hmac import new
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import set_tenant_context
@@ -18,11 +18,18 @@ from app.db.models import (
     MemorySource,
     Message,
     Scope,
+    ShadowMemoryCandidate,
     SuppressionRule,
 )
 from app.domain.principal import PrincipalContext
 from app.memory.shared_history import SharedHistoryContext, SharedHistoryService
 from app.messages.crypto import canonical_tagged_fields, derive_hmac_subkey
+from app.messages.protected_content import (
+    content_aad,
+    decrypt_text_from_storage,
+    encrypt_text_for_storage,
+    memory_value_aad,
+)
 from app.messages.service import DomainError
 
 EXPLICIT_CONFIDENCE = 1.0
@@ -166,8 +173,9 @@ class ExplicitMemoryService:
             if existing is not None:
                 await self._store_receipt(principal, command.command_id, existing.id, "completed")
                 return existing.id
+            memory_id = uuid4()
             memory = Memory(
-                id=uuid4(),
+                id=memory_id,
                 tenant_id=principal.tenant_id,
                 user_id=principal.user_id,
                 character_id=command.character_id,
@@ -176,7 +184,19 @@ class ExplicitMemoryService:
                 scenario_id=command.scenario_id,
                 slot_key=command.slot_key,
                 predicate=command.predicate,
-                value_text=command.value_text,
+                value_text=encrypt_text_for_storage(
+                    command.value_text,
+                    content_aad(
+                        entity="memories",
+                        tenant_id=principal.tenant_id,
+                        user_id=principal.user_id,
+                        character_id=command.character_id,
+                        scope=command.scope,
+                        scenario_id=command.scenario_id,
+                        record_id=memory_id,
+                        field="value_text",
+                    ),
+                ),
                 observed_at=datetime.now(UTC),
                 evidence_state="explicit",
                 lifecycle_state="active",
@@ -268,8 +288,9 @@ class ExplicitMemoryService:
                 ),
                 old.id,
             )
+            replacement_id = uuid4()
             replacement = Memory(
-                id=uuid4(),
+                id=replacement_id,
                 tenant_id=old.tenant_id,
                 user_id=old.user_id,
                 character_id=old.character_id,
@@ -278,7 +299,19 @@ class ExplicitMemoryService:
                 scenario_id=old.scenario_id,
                 slot_key=old.slot_key,
                 predicate=command.predicate,
-                value_text=command.value_text,
+                value_text=encrypt_text_for_storage(
+                    command.value_text,
+                    content_aad(
+                        entity="memories",
+                        tenant_id=old.tenant_id,
+                        user_id=old.user_id,
+                        character_id=old.character_id,
+                        scope=old.scope,
+                        scenario_id=old.scenario_id,
+                        record_id=replacement_id,
+                        field="value_text",
+                    ),
+                ),
                 observed_at=now,
                 evidence_state="explicit",
                 lifecycle_state="active",
@@ -343,10 +376,38 @@ class ExplicitMemoryService:
                 return True
             control = await self._control(principal, memory)
             now = datetime.now(UTC)
+            old_value = decrypt_text_from_storage(memory.value_text, memory_value_aad(memory)) or ""
             memory.lifecycle_state, memory.deleted_at, memory.valid_until = (
                 LifecycleState.deleted,
                 now,
                 now,
+            )
+            memory.value_text = None
+            memory.value_json = None
+            memory.search_text = None
+            memory.embedding = None
+            memory.embedding_model = None
+            memory.embedded_at = None
+            source_message_ids = select(MemorySource.message_id).where(
+                MemorySource.tenant_id == memory.tenant_id,
+                MemorySource.memory_id == memory.id,
+            )
+            await self.session.execute(
+                update(ShadowMemoryCandidate)
+                .where(
+                    ShadowMemoryCandidate.tenant_id == memory.tenant_id,
+                    ShadowMemoryCandidate.source_message_id.in_(source_message_ids),
+                    ShadowMemoryCandidate.user_id == memory.user_id,
+                    ShadowMemoryCandidate.character_id == memory.character_id,
+                    ShadowMemoryCandidate.status.in_(("shadow", "promoting")),
+                )
+                .values(
+                    status="invalidated",
+                    invalidated_at=now,
+                    value_ciphertext=None,
+                    value_nonce=None,
+                    value_key_version=None,
+                )
             )
             await SharedHistoryService(self.session).retire_memory_in_transaction(
                 SharedHistoryContext(
@@ -369,7 +430,7 @@ class ExplicitMemoryService:
                     scenario_id=memory.scenario_id,
                     rule_type="slot_value",
                     slot_hmac=self._digest(memory.slot_key or ""),
-                    value_hmac=self._digest(memory.value_text or ""),
+                    value_hmac=self._digest(old_value),
                     key_version=self.hmac_key_version,
                     reason="explicit_forget",
                 )

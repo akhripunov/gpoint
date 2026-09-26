@@ -1,5 +1,6 @@
 import base64
 import binascii
+import re
 import uuid
 from functools import lru_cache
 
@@ -14,6 +15,7 @@ class Settings(BaseSettings):
     tenant_id: str
     internal_api_token: SecretStr
     message_aead_key: SecretStr
+    message_aead_key_version: str = "v1"
     request_fingerprint_hmac_key: SecretStr
     retrieval_query_hmac_key: SecretStr
     shadow_candidate_hmac_key: SecretStr
@@ -48,6 +50,13 @@ class Settings(BaseSettings):
             raise ValueError("AGATA_MESSAGE_AEAD_KEY must be base64") from exc
         if len(decoded) != 32:
             raise ValueError("AGATA_MESSAGE_AEAD_KEY must decode to exactly 32 bytes")
+        return value
+
+    @field_validator("message_aead_key_version")
+    @classmethod
+    def valid_aead_key_version(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,32}", value):
+            raise ValueError("AGATA_MESSAGE_AEAD_KEY_VERSION is invalid")
         return value
 
     @field_validator(

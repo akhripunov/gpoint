@@ -6,6 +6,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import JobState, MemoryControlState, OutboxJob
+from app.messages.protected_content import validate_outbox_payload
 
 JOB_TYPES = frozenset(
     {
@@ -43,6 +44,10 @@ class OutboxRepository:
         payload = dict(payload)
         if "memory_control_state_id" in payload:
             raise ValueError("memory_control_state_id is a typed column, not payload data")
+        try:
+            validate_outbox_payload(job_type, payload)
+        except ValueError as exc:
+            raise ValueError("outbox_payload_not_content_safe") from exc
         if job_type.startswith("memory_") and memory_control_state_id is None:
             raise StaleCreationEpoch("memory job requires memory_control_state_id")
         job = OutboxJob(

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import UUID
+from pathlib import Path
+from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
@@ -26,16 +28,25 @@ from app.jobs.outbox import OutboxRepository, StaleCreationEpoch
 from app.memory.embedding import HuggingFaceFreeEmbeddingProvider
 from app.memory.promotion import AutoWritePromotionService
 from app.memory.retrieval import EmbeddingWorker
-from app.memory.segments import segment_hierarchy
+from app.memory.segments import segment_hierarchy, segment_interval
 from app.memory.shadow import (
     ExtractionProvider,
     ShadowExtractionWorker,
     StructuredExtractionProvider,
 )
 from app.messages.crypto import AeadCrypto, CiphertextEnvelope
+from app.messages.protected_content import (
+    content_aad,
+    decrypt_json_from_storage,
+    derived_view_content_aad,
+    encrypt_json_for_storage,
+    encrypt_text_for_storage,
+)
 from app.messages.service import MessageIngestionService
 from app.responses.deepseek import DeepSeekResponseProvider
 from app.responses.pipeline import ProviderEnvelope, ResponseContext
+
+_HEARTBEAT_PATH = Path("/tmp/agata-worker-heartbeat")
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,7 +285,8 @@ class MemoryWorker:
         if not summary or "\x00" in summary:
             raise SummaryProcessingError("summary_provider_invalid")
         now = datetime.now(UTC)
-        hierarchy = segment_hierarchy(summary, rows[-1].occurred_at, rows[0].occurred_at)
+        started_at, ended_at = segment_interval(message.occurred_at for message in rows)
+        hierarchy = segment_hierarchy(summary, started_at, ended_at)
         async with self.session_factory() as session:
             async with session.begin():
                 await set_tenant_context(session, str(self.tenant_id))
@@ -288,13 +300,41 @@ class MemoryWorker:
                 )
                 if control is None:
                     raise StaleCreationEpoch("summary control unavailable")
+                segment_id = uuid4()
                 segment = ConversationSegment(
+                    id=segment_id,
                     tenant_id=self.tenant_id,
                     conversation_id=conversation_id,
-                    summary=summary,
-                    keyphrases=[word for word in summary.split() if len(word) > 3][:8],
-                    started_at=rows[-1].occurred_at,
-                    ended_at=rows[0].occurred_at,
+                    summary=encrypt_text_for_storage(
+                        summary,
+                        content_aad(
+                            entity="conversation_segments",
+                            tenant_id=self.tenant_id,
+                            user_id=user_id,
+                            character_id=character_id,
+                            scope=conversation.scope,
+                            scenario_id=conversation.scenario_id,
+                            record_id=segment_id,
+                            field="summary",
+                        ),
+                        crypto=self.crypto,
+                    ),
+                    keyphrases=encrypt_json_for_storage(
+                        [word for word in summary.split() if len(word) > 3][:8],
+                        content_aad(
+                            entity="conversation_segments",
+                            tenant_id=self.tenant_id,
+                            user_id=user_id,
+                            character_id=character_id,
+                            scope=conversation.scope,
+                            scenario_id=conversation.scenario_id,
+                            record_id=segment_id,
+                            field="keyphrases",
+                        ),
+                        crypto=self.crypto,
+                    ),
+                    started_at=started_at,
+                    ended_at=ended_at,
                 )
                 session.add(segment)
                 await session.flush()
@@ -312,8 +352,15 @@ class MemoryWorker:
                 )
                 previous_segments: list[dict[str, object]] = []
                 previous_parent_ids: list[str] = []
-                if view is not None and isinstance(view.content, dict):
-                    stored = view.content.get("segments")
+                if view is not None and isinstance(view.content, dict) and view.content:
+                    previous_content = decrypt_json_from_storage(
+                        view.content, derived_view_content_aad(view), crypto=self.crypto
+                    )
+                    stored = (
+                        previous_content.get("segments")
+                        if isinstance(previous_content, dict)
+                        else None
+                    )
                     if isinstance(stored, list):
                         previous_segments = [item for item in stored if isinstance(item, dict)][
                             -23:
@@ -360,22 +407,39 @@ class MemoryWorker:
                     "updated_at": now.isoformat(),
                 }
                 if view is None:
+                    view_id = uuid4()
                     session.add(
                         DerivedMemoryView(
+                            id=view_id,
                             tenant_id=self.tenant_id,
                             user_id=user_id,
                             character_id=character_id,
                             scope=conversation.scope,
                             scenario_id=conversation.scenario_id,
                             view_type="conversation_summary",
-                            content=payload,
+                            content=encrypt_json_for_storage(
+                                payload,
+                                content_aad(
+                                    entity="derived_memory_views",
+                                    tenant_id=self.tenant_id,
+                                    user_id=user_id,
+                                    character_id=character_id,
+                                    scope=conversation.scope,
+                                    scenario_id=conversation.scenario_id,
+                                    record_id=view_id,
+                                    field="content",
+                                ),
+                                crypto=self.crypto,
+                            ),
                             parent_memory_ids=[str(segment.id)],
                             creation_epoch=control.deletion_epoch,
                         )
                     )
                 else:
                     view.generation += 1
-                    view.content = payload
+                    view.content = encrypt_json_for_storage(
+                        payload, derived_view_content_aad(view), crypto=self.crypto
+                    )
                     view.parent_memory_ids = previous_parent_ids + [str(segment.id)]
                     view.creation_epoch = control.deletion_epoch
                 await OutboxRepository(session).complete_memory_job(job)
@@ -383,6 +447,7 @@ class MemoryWorker:
     async def run_forever(self, stop_event: asyncio.Event, poll_seconds: float = 5) -> None:
         while not stop_event.is_set():
             await self.run_once()
+            _HEARTBEAT_PATH.write_text(datetime.now(UTC).isoformat(), encoding="ascii")
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=poll_seconds)
             except TimeoutError:
@@ -419,7 +484,7 @@ async def _amain() -> int:
         provider=provider,
         crypto=AeadCrypto(
             encoded_key=settings.message_aead_key.get_secret_value(),
-            key_version="v1",
+            key_version=settings.message_aead_key_version,
         ),
         shadow_hmac_key=base64.b64decode(
             settings.shadow_candidate_hmac_key.get_secret_value(), validate=True
@@ -438,7 +503,27 @@ async def _amain() -> int:
     return 0
 
 
+async def _healthcheck() -> int:
+    settings = get_settings()
+    try:
+        age = datetime.now(UTC).timestamp() - _HEARTBEAT_PATH.stat().st_mtime
+        if age < 0 or age > max(90.0, settings.worker_poll_seconds * 4):
+            return 1
+        async with SessionFactory() as session:
+            async with session.begin():
+                await set_tenant_context(session, settings.tenant_id)
+                revision = await session.scalar(
+                    text("SELECT version_num FROM agata.alembic_version")
+                )
+                await session.scalar(text("SELECT 1 FROM agata.outbox_jobs LIMIT 1"))
+        return 0 if revision == "agata0002" else 1
+    except Exception:
+        return 1
+
+
 def main() -> int:
+    if "--healthcheck" in sys.argv[1:]:
+        return asyncio.run(_healthcheck())
     return asyncio.run(_amain())
 
 

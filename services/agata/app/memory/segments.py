@@ -3,7 +3,25 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
+
+
+def segment_interval(timestamps: Iterable[datetime]) -> tuple[datetime, datetime]:
+    """Return the chronological bounds; a single event is a one-microsecond interval."""
+    values = tuple(timestamps)
+    if not values or any(
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+        for value in values
+    ):
+        raise ValueError("segment_time_invalid")
+    ordered = sorted(values, key=lambda value: value.astimezone(UTC))
+    started_at, ended_at = ordered[0], ordered[-1]
+    if ended_at <= started_at:
+        ended_at = started_at + timedelta(microseconds=1)
+    return started_at, ended_at
 
 
 def segment_hierarchy(summary: str, started_at: datetime, ended_at: datetime) -> dict[str, object]:

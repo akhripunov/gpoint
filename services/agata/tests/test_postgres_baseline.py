@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -37,6 +38,98 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
     env["AGATA_DATABASE_URL"] = DATABASE_URL
     env.setdefault("AGATA_TENANT_ID", "7508f36f-774a-48aa-8c6b-42f6f160415d")
     subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "agata0001"],
+        cwd=ROOT,
+        env=env,
+        check=True,
+        timeout=60,
+        capture_output=True,
+        text=True,
+    )
+
+    tenant_id = env["AGATA_TENANT_ID"]
+    user_id, character_id, conversation_id, memory_id, segment_id, view_id = (
+        uuid4() for _ in range(6)
+    )
+    sentinel = "legacy-private-synthetic-payload"
+    with engine.begin() as connection:
+        connection.execute(
+            text("SELECT set_config('app.tenant_id', :tenant, true)"), {"tenant": tenant_id}
+        )
+        connection.execute(
+            text(
+                "INSERT INTO agata.users(id,tenant_id,external_id) "
+                "VALUES (:id,:tenant,:external)"
+            ),
+            {"id": user_id, "tenant": tenant_id, "external": f"migration-{user_id}"},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO agata.characters(id,tenant_id,external_id,name) "
+                "VALUES (:id,:tenant,:external,'Synthetic migration character')"
+            ),
+            {"id": character_id, "tenant": tenant_id, "external": f"migration-{character_id}"},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO agata.conversations(id,tenant_id,user_id,character_id,scope,scenario_id,started_at) "
+                "VALUES (:id,:tenant,:user,:character,CAST('real_world' AS public.scope_enum),NULL,now())"
+            ),
+            {
+                "id": conversation_id,
+                "tenant": tenant_id,
+                "user": user_id,
+                "character": character_id,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO agata.memories(id,tenant_id,user_id,character_id,kind,scope,scenario_id,"
+                "slot_key,predicate,value_text,value_json,search_text,observed_at,evidence_state,"
+                "lifecycle_state,confidence,importance) VALUES (:id,:tenant,:user,:character,'semantic_fact',"
+                "CAST('real_world' AS public.scope_enum),NULL,'legacy.slot','likes',:value_text,"
+                "CAST(:value_json AS jsonb),:search_text,now(),'confirmed','active',0.8,0.5)"
+            ),
+            {
+                "id": memory_id,
+                "tenant": tenant_id,
+                "user": user_id,
+                "character": character_id,
+                "value_text": sentinel,
+                "value_json": '{"note":"legacy-private-synthetic-payload"}',
+                "search_text": sentinel,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO agata.conversation_segments(id,tenant_id,conversation_id,started_at,ended_at,summary,keyphrases) "
+                "VALUES (:id,:tenant,:conversation,now()-interval '2 minutes',now(),:summary,CAST(:phrases AS jsonb))"
+            ),
+            {
+                "id": segment_id,
+                "tenant": tenant_id,
+                "conversation": conversation_id,
+                "summary": sentinel,
+                "phrases": '["legacy-private-synthetic-payload"]',
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO agata.derived_memory_views(id,tenant_id,user_id,character_id,scope,scenario_id,"
+                "view_type,content,parent_memory_ids) VALUES (:id,:tenant,:user,:character,"
+                "CAST('real_world' AS public.scope_enum),NULL,'conversation_summary',"
+                "CAST(:content AS jsonb),'[]'::jsonb)"
+            ),
+            {
+                "id": view_id,
+                "tenant": tenant_id,
+                "user": user_id,
+                "character": character_id,
+                "content": '{"summary":"legacy-private-synthetic-payload"}',
+            },
+        )
+
+    subprocess.run(
         [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
         cwd=ROOT,
         env=env,
@@ -56,7 +149,7 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
         assert after == before
         assert "alembic_version" in agata_tables
         assert (
-            connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0001"
+            connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0002"
         )
         assert connection.scalar(text("SELECT count(*) FROM agata.tenants")) == 1
         assert (
@@ -79,4 +172,38 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
             )
             == len(agata_tables) - 1
         )
+        message_guard = connection.scalar(
+            text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname='ck_message_content_envelope'"
+            )
+        )
+        shadow_guard = connection.scalar(
+            text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname='ck_shadow_candidate_envelope'"
+            )
+        )
+        assert message_guard and "content_nonce IS NOT NULL" in message_guard
+        assert message_guard and "content_key_version IS NOT NULL" in message_guard
+        assert shadow_guard and "value_nonce IS NOT NULL" in shadow_guard
+        assert shadow_guard and "value_key_version IS NOT NULL" in shadow_guard
+        migrated_memory = connection.execute(
+            text("SELECT value_text,value_json,search_text FROM agata.memories WHERE id=:id"),
+            {"id": memory_id},
+        ).one()
+        assert migrated_memory.value_text.startswith("agata$")
+        assert migrated_memory.value_json["_agata_ciphertext"] == "1"
+        assert sentinel not in migrated_memory.search_text
+        migrated_segment = connection.execute(
+            text("SELECT summary,keyphrases FROM agata.conversation_segments WHERE id=:id"),
+            {"id": segment_id},
+        ).one()
+        assert migrated_segment.summary.startswith("agata$")
+        assert migrated_segment.keyphrases["_agata_ciphertext"] == "1"
+        migrated_view = connection.scalar(
+            text("SELECT content FROM agata.derived_memory_views WHERE id=:id"),
+            {"id": view_id},
+        )
+        assert migrated_view["_agata_ciphertext"] == "1"
     engine.dispose()

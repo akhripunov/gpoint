@@ -7,6 +7,11 @@ services:
       POSTGRES_DB: gpoint
     ports: ["5432:5432"]
     volumes: [gpoint_pg:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gpoint -d gpoint"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
   agata-api:
     profiles: [agata]
     build:
@@ -25,9 +30,16 @@ services:
       AGATA_EMBEDDING_API_KEY: ${AGATA_EMBEDDING_API_KEY:?Set an embedding-provider key}
       AGATA_LLM_API_KEY: ${AGATA_LLM_API_KEY:?Set a response-provider key}
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     expose: [8000]
     ports: ["127.0.0.1:8001:8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
   agata-worker:
     profiles: [agata]
     build:
@@ -37,7 +49,14 @@ services:
     command: ["python", "-m", "app.memory.worker"]
     environment: *agata_environment
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.memory.worker", "--healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
   redis:
     image: redis:7-alpine
     ports: ["6379:6379"]

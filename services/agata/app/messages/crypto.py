@@ -14,6 +14,10 @@ class CryptoError(ValueError):
     pass
 
 
+class UnknownKeyVersionError(CryptoError):
+    """The ciphertext key version is not available in this process."""
+
+
 @dataclass(frozen=True, slots=True)
 class CiphertextEnvelope:
     ciphertext: bytes
@@ -42,7 +46,7 @@ class AeadCrypto:
 
     def decrypt(self, envelope: CiphertextEnvelope, aad: bytes) -> str:
         if envelope.key_version != self._key_version:
-            raise CryptoError("decrypt_failed")
+            raise UnknownKeyVersionError("unknown_key_version")
         try:
             return self._aead.decrypt(envelope.nonce, envelope.ciphertext, aad).decode()
         except (InvalidTag, UnicodeDecodeError) as exc:

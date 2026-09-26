@@ -19,6 +19,7 @@ from app.db.models import (
     MemorySource,
     SharedHistoryEpisode,
 )
+from app.messages.protected_content import decrypt_text_from_storage, memory_value_aad
 
 MAX_SHARED_HISTORY = 10
 
@@ -255,17 +256,20 @@ class SharedHistoryService:
                 )
             ).all()
         )
-        return tuple(
-            SharedHistoryEvidence(
-                memory.id,
-                memory.version,
-                memory.value_text[:500],
-                memory.evidence_state.value,
-                memory.observed_at,
-            )
-            for _, memory in rows
-            if isinstance(memory.value_text, str) and memory.value_text
-        )
+        evidence: list[SharedHistoryEvidence] = []
+        for _, memory in rows:
+            value = decrypt_text_from_storage(memory.value_text, memory_value_aad(memory))
+            if value:
+                evidence.append(
+                    SharedHistoryEvidence(
+                        memory.id,
+                        memory.version,
+                        value[:500],
+                        memory.evidence_state.value,
+                        memory.observed_at,
+                    )
+                )
+        return tuple(evidence)
 
     async def verify_in_transaction(self, context: object, evidence: object) -> bool:
         if not isinstance(context, SharedHistoryContext) or not isinstance(evidence, tuple):
