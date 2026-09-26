@@ -1,0 +1,36 @@
+name: Sync AGENTS.md to Linear
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - AGENTS.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+      LINEAR_DOCUMENT_ID: ab911628-2575-42bf-a159-338cca0d9de8
+      SOURCE_SHA: ${{ github.sha }}
+    steps:
+      - name: Checkout exact event commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Validate Python syntax
+        run: python -m py_compile scripts/sync_agents_to_linear.py
+
+      - name: Verify exact checkout SHA
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+      - name: Update existing Linear document and verify read-back
+        run: python scripts/sync_agents_to_linear.py
