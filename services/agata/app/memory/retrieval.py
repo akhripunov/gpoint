@@ -700,6 +700,7 @@ class HybridRetrievalService:
                     ResponseMemoryRef(
                         tenant_id=principal.tenant_id,
                         assistant_message_id=assistant_message_id,
+                        relationship_id=memory.relationship_id,
                         memory_id=memory.id,
                         user_id=memory.user_id,
                         character_id=memory.character_id,

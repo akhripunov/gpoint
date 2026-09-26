@@ -419,6 +419,22 @@ class AutoWritePromotionService:
                     payload={"memory_id": str(existing.id), "code": "embed"},
                 )
             await self.session.flush()
+            if status == "promoted":
+                from app.memory.snapshots import (
+                    enqueue_relationship_note_refresh,
+                    enqueue_relationship_summary_refresh,
+                )
+
+                await enqueue_relationship_note_refresh(
+                    self.session, tenant_id=tenant_id,
+                    relationship_id=candidate.relationship_id,
+                    creation_epoch=control.deletion_epoch,
+                )
+                await enqueue_relationship_summary_refresh(
+                    self.session, tenant_id=tenant_id,
+                    relationship_id=candidate.relationship_id,
+                    creation_epoch=control.deletion_epoch,
+                )
             return PromotionResult(status, existing.id)
 
     async def process_claimed(self, job: OutboxJob) -> PromotionResult:

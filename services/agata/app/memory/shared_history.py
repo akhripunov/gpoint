@@ -134,6 +134,13 @@ class SharedHistoryService:
             existing.confirmed_at = datetime.now(UTC)
             existing.creation_epoch = control.deletion_epoch
             await self.session.flush()
+            from app.memory.snapshots import enqueue_relationship_summary_refresh
+
+            await enqueue_relationship_summary_refresh(
+                self.session, tenant_id=context.tenant_id,
+                relationship_id=context.relationship_id,
+                creation_epoch=control.deletion_epoch,
+            )
             return existing
         active = list(
             (
@@ -183,6 +190,13 @@ class SharedHistoryService:
         )
         self.session.add(episode)
         await self.session.flush()
+        from app.memory.snapshots import enqueue_relationship_summary_refresh
+
+        await enqueue_relationship_summary_refresh(
+            self.session, tenant_id=context.tenant_id,
+            relationship_id=context.relationship_id,
+            creation_epoch=control.deletion_epoch,
+        )
         return episode
 
     async def retire_memory_in_transaction(

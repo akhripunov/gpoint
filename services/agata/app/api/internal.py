@@ -9,7 +9,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -21,6 +21,7 @@ from app.db.models import (
     CharacterProfileVersion,
     Consent,
     Conversation,
+    MemorySnapshot,
     Message,
     RegionalPolicyProfile,
     ResponseRoutePolicy,
@@ -274,6 +275,7 @@ async def sync_user_consent(
             user = User(tenant_id=tenant_id, source_system="gpoint", external_id=gpoint_user_id)
             session.add(user)
             await session.flush()
+        revoked_purposes: set[str] = set()
         for purpose, granted in (
             ("chat_history", payload.chat_history),
             ("long_term_memory", payload.long_term_memory),
@@ -301,6 +303,25 @@ async def sync_user_consent(
                 )
             elif not granted and existing is not None:
                 existing.revoked_at = now
+                revoked_purposes.add(purpose)
+        purge_types: set[str] = set()
+        if "long_term_memory" in revoked_purposes:
+            purge_types.update({"relationship_note", "relationship_summary", "user_profile_summary", "goal_summary", "project_summary"})
+        if "chat_history" in revoked_purposes:
+            purge_types.update({"conversation_summary", "current_context_summary", "topic_summary", "day_summary"})
+        if purge_types:
+            await session.execute(
+                update(MemorySnapshot)
+                .where(
+                    MemorySnapshot.tenant_id == tenant_id,
+                    MemorySnapshot.user_id == user.id,
+                    MemorySnapshot.snapshot_type.in_(purge_types),
+                )
+                .values(
+                    content={}, source_memory_ids=[], source_segment_ids=[], source_message_ids=[],
+                    invalidated_at=now, generation=MemorySnapshot.generation + 1,
+                )
+            )
         prior_age = await session.scalar(
             select(AgeAssurance)
             .where(AgeAssurance.tenant_id == tenant_id, AgeAssurance.user_id == user.id)

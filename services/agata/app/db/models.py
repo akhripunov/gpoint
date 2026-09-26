@@ -904,7 +904,7 @@ class OutboxJob(TenantOwned):
             name="ck_outbox_memory_control_required",
         ),
         CheckConstraint(
-            "job_type IN ('generic','conversation_summary','memory_extract','memory_promote','memory_embed','response_retry')",
+            "job_type IN ('generic','conversation_summary','relationship_note_refresh','snapshot_refresh','memory_extract','memory_promote','memory_embed','response_retry')",
             name="ck_outbox_job_type_allowlist",
         ),
         Index(
@@ -919,14 +919,18 @@ class OutboxJob(TenantOwned):
 class ResponseMemoryRef(TenantOwned):
     __tablename__ = "response_memory_refs"
     assistant_message_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    memory_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    relationship_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    memory_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    snapshot_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     character_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     scope: Mapped[Scope] = mapped_column(
         Enum(Scope, name="scope_enum", native_enum=True, create_type=False), nullable=False
     )
     scenario_key: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    memory_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    memory_version: Mapped[int | None] = mapped_column(Integer)
+    snapshot_generation: Mapped[int | None] = mapped_column(Integer)
+    ref_type: Mapped[str] = mapped_column(String(16), server_default="memory", nullable=False)
     usage_type: Mapped[str] = mapped_column(String(32), nullable=False)
     response_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     __table_args__ = (
@@ -950,16 +954,22 @@ class ResponseMemoryRef(TenantOwned):
             name="fk_response_message_owner",
         ),
         ForeignKeyConstraint(
-            ["tenant_id", "memory_id", "user_id", "character_id", "scope", "scenario_key"],
+            ["tenant_id", "memory_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"],
             [
-                "memories.tenant_id",
-                "memories.id",
-                "memories.user_id",
-                "memories.character_id",
-                "memories.scope",
-                "memories.scenario_key",
+                "memories.tenant_id", "memories.id", "memories.relationship_id",
+                "memories.user_id", "memories.character_id", "memories.scope", "memories.scenario_key",
             ],
             name="fk_response_memory_owner",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "snapshot_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"],
+            ["memory_snapshots.tenant_id", "memory_snapshots.id", "memory_snapshots.relationship_id", "memory_snapshots.user_id", "memory_snapshots.character_id", "memory_snapshots.scope", "memory_snapshots.scenario_key"],
+            name="fk_response_snapshot_owner",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"],
+            ["relationships.tenant_id", "relationships.id", "relationships.user_id", "relationships.character_id", "relationships.scope", "relationships.scenario_key"],
+            name="fk_response_ref_relationship_owner",
         ),
         ForeignKeyConstraint(
             ["tenant_id", "response_run_id"],
@@ -967,6 +977,12 @@ class ResponseMemoryRef(TenantOwned):
             name="fk_response_ref_run",
         ),
         CheckConstraint("usage_type IN ('supplied','cited')", name="ck_response_ref_usage"),
+        CheckConstraint(
+            "(ref_type='memory' AND memory_id IS NOT NULL AND snapshot_id IS NULL) OR (ref_type='snapshot' AND snapshot_id IS NOT NULL AND memory_id IS NULL)",
+            name="ck_response_ref_type",
+        ),
+        CheckConstraint("(memory_id IS NOT NULL) <> (snapshot_id IS NOT NULL)", name="ck_response_ref_one_source"),
+        CheckConstraint("(memory_id IS NOT NULL AND memory_version IS NOT NULL AND snapshot_generation IS NULL) OR (snapshot_id IS NOT NULL AND snapshot_generation IS NOT NULL AND memory_version IS NULL)", name="ck_response_ref_source_version"),
         Index("response_refs_run_idx", "tenant_id", "response_run_id", "usage_type"),
     )
 
@@ -1284,8 +1300,8 @@ class ResponseRun(TenantOwned):
     )
 
 
-class DerivedMemoryView(TenantOwned):
-    __tablename__ = "derived_memory_views"
+class MemorySnapshot(TenantOwned):
+    __tablename__ = "memory_snapshots"
     relationship_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     character_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
@@ -1300,24 +1316,26 @@ class DerivedMemoryView(TenantOwned):
             persisted=True,
         ),
     )
-    view_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    snapshot_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    snapshot_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     generation: Mapped[int] = mapped_column(Integer, server_default="1", nullable=False)
     content: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    parent_memory_ids: Mapped[list] = mapped_column(JSONB, server_default="[]", nullable=False)
+    source_fingerprint: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_memory_ids: Mapped[list] = mapped_column(JSONB, server_default="[]", nullable=False)
+    source_segment_ids: Mapped[list] = mapped_column(JSONB, server_default="[]", nullable=False)
+    source_message_ids: Mapped[list] = mapped_column(JSONB, server_default="[]", nullable=False)
     creation_epoch: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (
         UniqueConstraint(
-            "tenant_id", "relationship_id", "view_type", name="uq_derived_view_relationship"
+            "tenant_id", "id", "relationship_id", "user_id", "character_id", "scope", "scenario_key",
+            name="uq_memory_snapshot_owner_scope",
         ),
         UniqueConstraint(
-            "tenant_id",
-            "user_id",
-            "character_id",
-            "scope",
-            "scenario_id",
-            "view_type",
-            name="uq_derived_view",
-            postgresql_nulls_not_distinct=True,
+            "tenant_id", "relationship_id", "snapshot_type", "snapshot_key", name="uq_memory_snapshot_identity"
         ),
         ForeignKeyConstraint(["tenant_id", "user_id"], ["users.tenant_id", "users.id"]),
         ForeignKeyConstraint(
@@ -1329,7 +1347,7 @@ class DerivedMemoryView(TenantOwned):
                 "relationships.tenant_id", "relationships.id", "relationships.user_id",
                 "relationships.character_id", "relationships.scope", "relationships.scenario_key",
             ],
-            name="fk_derived_view_relationship_owner",
+            name="fk_memory_snapshot_relationship_owner",
         ),
         ForeignKeyConstraint(
             ["tenant_id", "scenario_id", "user_id", "character_id"],
@@ -1339,11 +1357,23 @@ class DerivedMemoryView(TenantOwned):
                 "roleplay_scenarios.user_id",
                 "roleplay_scenarios.character_id",
             ],
-            name="fk_derived_scenario_owner",
+            name="fk_memory_snapshot_scenario_owner",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"],
+            ["conversations.tenant_id", "conversations.id", "conversations.relationship_id", "conversations.user_id", "conversations.character_id", "conversations.scope", "conversations.scenario_key"],
+            name="fk_memory_snapshot_conversation_owner",
+        ),
+        CheckConstraint("snapshot_type IN ('relationship_note','relationship_summary','user_profile_summary','conversation_summary','topic_summary','day_summary','goal_summary','project_summary','current_context_summary')", name="ck_memory_snapshot_type"),
+        CheckConstraint("generation >= 1 AND creation_epoch >= 0", name="ck_memory_snapshot_generation_epoch"),
+        CheckConstraint("length(source_fingerprint) BETWEEN 1 AND 128", name="ck_memory_snapshot_fingerprint"),
+        CheckConstraint(
+            "((snapshot_type IN ('conversation_summary','current_context_summary') AND conversation_id IS NOT NULL AND snapshot_key = 'conversation:' || conversation_id::text) OR (snapshot_type NOT IN ('conversation_summary','current_context_summary') AND conversation_id IS NULL))",
+            name="ck_memory_snapshot_conversation_key",
         ),
         CheckConstraint(
             "(scope = 'real_world' AND scenario_id IS NULL) OR (scope = 'roleplay' AND scenario_id IS NOT NULL)",
-            name="ck_derived_scope",
+            name="ck_memory_snapshot_scope",
         ),
     )
 

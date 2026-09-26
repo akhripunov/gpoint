@@ -7,7 +7,7 @@ import base64
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -18,11 +18,13 @@ from app.config import Settings, get_settings
 from app.db.base import SessionFactory, set_tenant_context
 from app.db.models import (
     Character,
+    Consent,
     Conversation,
     ConversationSegment,
-    DerivedMemoryView,
     MemoryControlState,
+    MemorySnapshot,
     Message,
+    Relationship,
 )
 from app.jobs.outbox import OutboxRepository, StaleCreationEpoch
 from app.memory.embedding import HuggingFaceFreeEmbeddingProvider
@@ -34,13 +36,17 @@ from app.memory.shadow import (
     ShadowExtractionWorker,
     StructuredExtractionProvider,
 )
+from app.memory.shared_history import SharedHistoryContext, SharedHistoryService
+from app.memory.snapshots import MemorySnapshotService, snapshot_fingerprint
 from app.messages.crypto import AeadCrypto, CiphertextEnvelope
 from app.messages.protected_content import (
     content_aad,
     decrypt_json_from_storage,
-    derived_view_content_aad,
+    decrypt_text_from_storage,
     encrypt_json_for_storage,
     encrypt_text_for_storage,
+    memory_snapshot_content_aad,
+    segment_summary_aad,
 )
 from app.messages.service import MessageIngestionService
 from app.responses.deepseek import DeepSeekResponseProvider
@@ -86,6 +92,8 @@ class MemoryWorker:
         owned_job_types = frozenset(
             {
                 "conversation_summary",
+                "relationship_note_refresh",
+                "snapshot_refresh",
                 "memory_extract",
                 "memory_promote",
                 "memory_embed",
@@ -107,6 +115,22 @@ class MemoryWorker:
         completed = failed = 0
         for job in memory_jobs:
             async with self.session_factory() as session:
+                if job.job_type == "relationship_note_refresh":
+                    try:
+                        await self._process_relationship_note(job)
+                        completed += 1
+                    except Exception:
+                        await self._fail_claimed(job, "snapshot_refresh_failed", max_attempts=3)
+                        failed += 1
+                    continue
+                if job.job_type == "snapshot_refresh":
+                    try:
+                        await self._process_snapshot_refresh(job)
+                        completed += 1
+                    except (SummaryProcessingError, StaleCreationEpoch) as exc:
+                        await self._fail_claimed(job, str(exc), max_attempts=3)
+                        failed += 1
+                    continue
                 if job.job_type == "conversation_summary":
                     try:
                         await self._process_summary(job)
@@ -182,7 +206,7 @@ class MemoryWorker:
                 await OutboxRepository(session).fail(job, code, max_attempts=max_attempts)
 
     async def _process_summary(self, job) -> None:
-        """Build one durable segment/view and complete the epoch-guarded job."""
+        """Build one durable segment and conversation-scoped snapshots."""
         if self.summary_provider is None:
             raise SummaryProcessingError("summary_provider_unavailable")
         try:
@@ -208,6 +232,36 @@ class MemoryWorker:
                         Character.id == character_id,
                     )
                 )
+                consent = await session.scalar(select(Consent.id).where(
+                    Consent.tenant_id == self.tenant_id, Consent.user_id == user_id,
+                    Consent.purpose == "chat_history", Consent.revoked_at.is_(None),
+                ).limit(1))
+                snapshot_generations = {}
+                if conversation is not None:
+                    current_snapshots = list((await session.execute(select(
+                        MemorySnapshot.snapshot_type, MemorySnapshot.generation,
+                    ).where(
+                        MemorySnapshot.tenant_id == self.tenant_id,
+                        MemorySnapshot.relationship_id == conversation.relationship_id,
+                        MemorySnapshot.snapshot_key.in_(
+                            (f"conversation:{conversation.id}", "relationship")
+                        ),
+                        MemorySnapshot.snapshot_type.in_(
+                            ("conversation_summary", "current_context_summary", "relationship_summary")
+                        ),
+                    ))).all())
+                    snapshot_generations = {
+                        (row.snapshot_type, row.generation) for row in current_snapshots
+                    }
+                    snapshot_generations = {
+                        snapshot_type: max(
+                            (generation for kind, generation in snapshot_generations if kind == snapshot_type),
+                            default=0,
+                        )
+                        for snapshot_type in (
+                            "conversation_summary", "current_context_summary", "relationship_summary"
+                        )
+                    }
                 segment_count = await session.scalar(
                     select(func.count())
                     .select_from(ConversationSegment)
@@ -235,6 +289,16 @@ class MemoryWorker:
                 )
             if conversation is None:
                 raise StaleCreationEpoch("summary conversation unavailable")
+            if consent is None:
+                async with session.begin():
+                    await set_tenant_context(session, str(self.tenant_id))
+                    snapshots = MemorySnapshotService(session, self.crypto)
+                    await snapshots.invalidate_relationship(
+                        self.tenant_id, conversation.relationship_id,
+                        snapshot_types=("conversation_summary", "current_context_summary", "relationship_summary"),
+                    )
+                    await OutboxRepository(session).complete_memory_job(job)
+                return
             if len(rows) < 5:
                 async with session.begin():
                     await set_tenant_context(session, str(self.tenant_id))
@@ -300,6 +364,19 @@ class MemoryWorker:
                 )
                 if control is None or control.relationship_id != conversation.relationship_id:
                     raise StaleCreationEpoch("summary control unavailable")
+                if control.deletion_epoch != job.creation_epoch:
+                    raise StaleCreationEpoch("summary_creation_epoch_stale")
+                current_chat_consent = await session.scalar(select(Consent.id).where(
+                    Consent.tenant_id == self.tenant_id, Consent.user_id == user_id,
+                    Consent.purpose == "chat_history", Consent.revoked_at.is_(None),
+                ).limit(1))
+                if current_chat_consent is None:
+                    await MemorySnapshotService(session, self.crypto).invalidate_relationship(
+                        self.tenant_id, conversation.relationship_id,
+                        snapshot_types=("conversation_summary", "current_context_summary"),
+                    )
+                    await OutboxRepository(session).complete_memory_job(job)
+                    return
                 segment_id = uuid4()
                 segment = ConversationSegment(
                     id=segment_id,
@@ -338,113 +415,181 @@ class MemoryWorker:
                 )
                 session.add(segment)
                 await session.flush()
-                view = await session.scalar(
-                    select(DerivedMemoryView)
-                    .where(
-                        DerivedMemoryView.tenant_id == self.tenant_id,
-                        DerivedMemoryView.relationship_id == conversation.relationship_id,
-                        DerivedMemoryView.user_id == user_id,
-                        DerivedMemoryView.character_id == character_id,
-                        DerivedMemoryView.scope == conversation.scope,
-                        DerivedMemoryView.scenario_id == conversation.scenario_id,
-                        DerivedMemoryView.view_type == "conversation_summary",
-                    )
-                    .with_for_update()
+                snapshots = MemorySnapshotService(session, self.crypto)
+                fingerprint = snapshot_fingerprint(
+                    "conversation_summary", conversation.id, control.deletion_epoch,
+                    [(str(row.id), row.occurred_at.isoformat()) for row in rows],
                 )
-                previous_segments: list[dict[str, object]] = []
-                previous_parent_ids: list[str] = []
-                if view is not None and isinstance(view.content, dict) and view.content:
-                    previous_content = decrypt_json_from_storage(
-                        view.content, derived_view_content_aad(view), crypto=self.crypto
+                await snapshots.upsert(
+                    tenant_id=self.tenant_id, relationship=conversation,
+                    snapshot_type="conversation_summary", snapshot_key=f"conversation:{conversation.id}",
+                    content={"summary": summary, "segment_id": str(segment.id), "hierarchy": hierarchy},
+                    source_fingerprint=fingerprint, creation_epoch=control.deletion_epoch,
+                    source_segment_ids=[segment.id], conversation_id=conversation.id,
+                    expected_generation=snapshot_generations.get("conversation_summary", 0),
+                )
+                await snapshots.upsert(
+                    tenant_id=self.tenant_id, relationship=conversation,
+                    snapshot_type="current_context_summary", snapshot_key=f"conversation:{conversation.id}",
+                    content={"active_topic": summary[:400], "open_loops": [], "recent_decisions": [], "temporary_context": summary[:700], "pending_questions": []},
+                    source_fingerprint=snapshot_fingerprint("current_context", conversation.id, fingerprint),
+                    creation_epoch=control.deletion_epoch, source_segment_ids=[segment.id],
+                    conversation_id=conversation.id, expires_at=now + timedelta(days=7),
+                    expected_generation=snapshot_generations.get("current_context_summary", 0),
+                )
+                long_term_consent = await session.scalar(select(Consent.id).where(
+                    Consent.tenant_id == self.tenant_id, Consent.user_id == user_id,
+                    Consent.purpose == "long_term_memory", Consent.revoked_at.is_(None),
+                ).limit(1))
+                if long_term_consent is not None:
+                    await snapshots.upsert(
+                        tenant_id=self.tenant_id, relationship=conversation,
+                        snapshot_type="relationship_summary", snapshot_key="relationship",
+                        content={"recent_summary": summary},
+                        source_fingerprint=snapshot_fingerprint("relationship_summary", conversation.relationship_id, fingerprint),
+                        creation_epoch=control.deletion_epoch, source_segment_ids=[segment.id],
+                        expected_generation=snapshot_generations.get("relationship_summary", 0),
                     )
-                    stored = (
-                        previous_content.get("segments")
-                        if isinstance(previous_content, dict)
-                        else None
-                    )
-                    if isinstance(stored, list):
-                        previous_segments = [item for item in stored if isinstance(item, dict)][
-                            -23:
-                        ]
-                    previous_parent_ids = [
-                        item for item in view.parent_memory_ids if isinstance(item, str)
-                    ][-23:]
-                segment_projection = {
-                    "summary": summary,
-                    "segment_id": str(segment.id),
-                    "hierarchy": hierarchy,
-                    "created_at": now.isoformat(),
-                }
-                segments = previous_segments + [segment_projection]
-                topic_days: dict[str, list[str]] = {}
-                project_topics: list[str] = []
-                for item in segments:
-                    item_hierarchy = item.get("hierarchy")
-                    if not isinstance(item_hierarchy, dict):
-                        continue
-                    topic_day = item_hierarchy.get("topic_day")
-                    if isinstance(topic_day, dict):
-                        day = topic_day.get("day")
-                        topics = topic_day.get("topics")
-                        if isinstance(day, str) and isinstance(topics, list):
-                            topic_days[day] = [value for value in topics if isinstance(value, str)][
-                                :12
-                            ]
-                    relationship = item_hierarchy.get("relationship_project")
-                    if isinstance(relationship, dict):
-                        topics = relationship.get("project_topics")
-                        if isinstance(topics, list):
-                            for value in topics:
-                                if isinstance(value, str) and value not in project_topics:
-                                    project_topics.append(value)
-                payload = {
-                    "latest_summary": summary,
-                    "segments": segments,
-                    "topic_days": topic_days,
-                    "relationship_project": {
-                        "relationship": "user_character",
-                        "project_topics": project_topics[:16],
-                    },
-                    "updated_at": now.isoformat(),
-                }
-                if view is None:
-                    view_id = uuid4()
-                    session.add(
-                        DerivedMemoryView(
-                            id=view_id,
-                            tenant_id=self.tenant_id,
-                            relationship_id=conversation.relationship_id,
-                            user_id=user_id,
-                            character_id=character_id,
-                            scope=conversation.scope,
-                            scenario_id=conversation.scenario_id,
-                            view_type="conversation_summary",
-                            content=encrypt_json_for_storage(
-                                payload,
-                                content_aad(
-                                    entity="derived_memory_views",
-                                    tenant_id=self.tenant_id,
-                                    user_id=user_id,
-                                    character_id=character_id,
-                                    scope=conversation.scope,
-                                    scenario_id=conversation.scenario_id,
-                                    record_id=view_id,
-                                    field="content",
-                                ),
-                                crypto=self.crypto,
-                            ),
-                            parent_memory_ids=[str(segment.id)],
-                            creation_epoch=control.deletion_epoch,
-                        )
-                    )
-                else:
-                    view.generation += 1
-                    view.content = encrypt_json_for_storage(
-                        payload, derived_view_content_aad(view), crypto=self.crypto
-                    )
-                    view.parent_memory_ids = previous_parent_ids + [str(segment.id)]
-                    view.creation_epoch = control.deletion_epoch
                 await OutboxRepository(session).complete_memory_job(job)
+
+    async def _process_relationship_note(self, job) -> None:
+        relationship_id = UUID(str(job.payload["relationship_id"]))
+        async with self.session_factory() as session:
+            async with session.begin():
+                await set_tenant_context(session, str(self.tenant_id))
+                from app.db.models import Relationship
+                relationship = await session.scalar(select(Relationship).where(
+                    Relationship.tenant_id == self.tenant_id,
+                    Relationship.id == relationship_id,
+                ).with_for_update())
+                if relationship is None:
+                    await OutboxRepository(session).complete(job)
+                    return
+                control = await session.scalar(select(MemoryControlState).where(
+                    MemoryControlState.tenant_id == self.tenant_id,
+                    MemoryControlState.relationship_id == relationship_id,
+                ).with_for_update())
+                if control is None or control.deletion_epoch != job.creation_epoch:
+                    raise StaleCreationEpoch("snapshot_creation_epoch_stale")
+                await MemorySnapshotService(session, self.crypto).refresh_relationship_note(
+                    tenant_id=self.tenant_id, relationship=relationship,
+                )
+                await OutboxRepository(session).complete(job)
+
+    async def _process_snapshot_refresh(self, job) -> None:
+        try:
+            relationship_id = UUID(str(job.payload["relationship_id"]))
+            snapshot_type = str(job.payload["snapshot_type"])
+            conversation_value = job.payload.get("conversation_id")
+            conversation_id = UUID(str(conversation_value)) if conversation_value else None
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SummaryProcessingError("snapshot_refresh_job_invalid") from exc
+        if conversation_id is not None:
+            raise SummaryProcessingError("snapshot_refresh_type_unsupported")
+        if snapshot_type == "relationship_note":
+            await self._process_relationship_note(job)
+            return
+        if snapshot_type != "relationship_summary":
+            raise SummaryProcessingError("snapshot_refresh_type_unsupported")
+        async with self.session_factory() as session:
+            async with session.begin():
+                await set_tenant_context(session, str(self.tenant_id))
+                relationship = await session.scalar(select(Relationship).where(
+                    Relationship.tenant_id == self.tenant_id,
+                    Relationship.id == relationship_id,
+                ).with_for_update())
+                control = await session.scalar(select(MemoryControlState).where(
+                    MemoryControlState.tenant_id == self.tenant_id,
+                    MemoryControlState.relationship_id == relationship_id,
+                ).with_for_update())
+                if relationship is None or control is None:
+                    await OutboxRepository(session).complete(job)
+                    return
+                if control.deletion_epoch != job.creation_epoch:
+                    raise StaleCreationEpoch("snapshot_creation_epoch_stale")
+                consents = list((await session.scalars(select(Consent).where(
+                    Consent.tenant_id == self.tenant_id,
+                    Consent.user_id == relationship.user_id,
+                    Consent.purpose.in_(("chat_history", "long_term_memory")),
+                    Consent.revoked_at.is_(None),
+                ).with_for_update())).all())
+                if {consent.purpose for consent in consents} != {"chat_history", "long_term_memory"}:
+                    await MemorySnapshotService(session, self.crypto).invalidate_relationship(
+                        self.tenant_id, relationship_id, snapshot_types=("relationship_summary",)
+                    )
+                    await OutboxRepository(session).complete(job)
+                    return
+                conversation_rows = list((await session.execute(
+                    select(ConversationSegment, Conversation)
+                    .join(Conversation, (Conversation.tenant_id == ConversationSegment.tenant_id) & (Conversation.id == ConversationSegment.conversation_id))
+                    .where(
+                        ConversationSegment.tenant_id == self.tenant_id,
+                        Conversation.relationship_id == relationship_id,
+                        ConversationSegment.summary.is_not(None),
+                    )
+                    .order_by(ConversationSegment.ended_at.desc(), ConversationSegment.id)
+                    .limit(3)
+                )).all())
+                note = await MemorySnapshotService(session, self.crypto).refresh_relationship_note(
+                    tenant_id=self.tenant_id, relationship=relationship,
+                )
+                rendered: list[str] = []
+                source_segment_ids: list[UUID] = []
+                for segment, conversation in conversation_rows:
+                    summary = decrypt_text_from_storage(
+                        segment.summary, segment_summary_aad(segment, conversation), crypto=self.crypto
+                    )
+                    if isinstance(summary, str) and summary.strip():
+                        rendered.append(summary[:500])
+                        source_segment_ids.append(segment.id)
+                shared_context = SharedHistoryContext(
+                    self.tenant_id, relationship.user_id, relationship.character_id,
+                    relationship.scope, relationship.scenario_id, relationship.id,
+                )
+                shared = await SharedHistoryService(session).load_in_transaction(shared_context)
+                shared_text = [item.value[:200] for item in shared[:4]]
+                note_facts = []
+                memory_ids: list[UUID] = []
+                if note is not None:
+                    note_payload = decrypt_json_from_storage(
+                        note.content, memory_snapshot_content_aad(note), crypto=self.crypto
+                    )
+                    if isinstance(note_payload, dict):
+                        note_facts = [
+                            f"{item.get('predicate', 'fact')}: {item.get('value', '')}"
+                            for item in note_payload.get("stable_facts", [])[:6]
+                            if isinstance(item, dict) and isinstance(item.get("value"), str)
+                        ]
+                    memory_ids.extend(UUID(value) for value in note.source_memory_ids if isinstance(value, str))
+                pieces = []
+                if note_facts:
+                    pieces.append("Stable context: " + "; ".join(note_facts))
+                if rendered:
+                    pieces.append("Recent conversations: " + " ".join(rendered))
+                if shared_text:
+                    pieces.append("Confirmed shared history: " + "; ".join(shared_text))
+                if not pieces:
+                    await OutboxRepository(session).complete(job)
+                    return
+                source_segments = [
+                    (str(segment.id), segment.ended_at.isoformat())
+                    for segment, _conversation in conversation_rows if segment.id in source_segment_ids
+                ]
+                fingerprint = snapshot_fingerprint(
+                    "relationship_summary", relationship_id, control.deletion_epoch,
+                    note.generation if note is not None else 0, source_segments,
+                    [(str(item.memory_id), item.memory_version) for item in shared],
+                )
+                await MemorySnapshotService(session, self.crypto).upsert(
+                    tenant_id=self.tenant_id, relationship=relationship,
+                    snapshot_type="relationship_summary", snapshot_key="relationship",
+                    content={"recent_summary": " ".join(pieces)[:2400]},
+                    source_fingerprint=fingerprint,
+                    creation_epoch=control.deletion_epoch,
+                    source_memory_ids=list(dict.fromkeys(memory_ids + [item.memory_id for item in shared])),
+                    source_segment_ids=source_segment_ids,
+                )
+                await OutboxRepository(session).complete(job)
 
     async def run_forever(self, stop_event: asyncio.Event, poll_seconds: float = 5) -> None:
         while not stop_event.is_set():

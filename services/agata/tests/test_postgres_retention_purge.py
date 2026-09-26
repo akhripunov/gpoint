@@ -15,12 +15,12 @@ from app.db.models import (
     Consent,
     Conversation,
     ConversationSegment,
-    DerivedMemoryView,
     EvidenceState,
     JobState,
     LifecycleState,
     Memory,
     MemoryControlState,
+    MemorySnapshot,
     MemorySource,
     Message,
     OutboxJob,
@@ -35,6 +35,7 @@ from app.messages.protected_content import (
     content_aad,
     encrypt_json_for_storage,
     encrypt_text_for_storage,
+    memory_snapshot_content_aad,
 )
 from app.messages.service import MessageIngestionService
 from app.responses.pipeline import run_retention_cleanup
@@ -135,9 +136,25 @@ async def test_retention_physically_purges_content_and_respects_legal_hold():
                 MemorySource(tenant_id=TENANT_ID, memory_id=memory_id, message_id=message_id, user_id=user_id, character_id=character_id, scope=Scope.real_world, scenario_key=SCENARIO_ZERO, relation="supports"),
                 ConversationSegment(id=segment_id, tenant_id=TENANT_ID, conversation_id=conversation_id, started_at=now-timedelta(days=2), ended_at=now-timedelta(days=1), summary=encrypt_text_for_storage("private summary", content_aad(entity="conversation_segments", tenant_id=TENANT_ID, user_id=user_id, character_id=character_id, scope=Scope.real_world, scenario_id=None, record_id=segment_id, field="summary"), crypto=crypto), keyphrases=encrypt_json_for_storage(["private phrase"], content_aad(entity="conversation_segments", tenant_id=TENANT_ID, user_id=user_id, character_id=character_id, scope=Scope.real_world, scenario_id=None, record_id=segment_id, field="keyphrases"), crypto=crypto)),
             ])
-            view_id = uuid4()
-            view = DerivedMemoryView(id=view_id, tenant_id=TENANT_ID, relationship_id=relationship.id, user_id=user_id, character_id=character_id, scope=Scope.real_world, scenario_id=None, view_type="conversation_summary", content=encrypt_json_for_storage({"text": "private view"}, content_aad(entity="derived_memory_views", tenant_id=TENANT_ID, user_id=user_id, character_id=character_id, scope=Scope.real_world, scenario_id=None, record_id=view_id, field="content"), crypto=crypto), parent_memory_ids=[str(memory_id)])
-            session.add(view)
+            snapshot_id = uuid4()
+            snapshot_aad_owner = type("SnapshotAAD", (), {
+                "tenant_id": TENANT_ID, "user_id": user_id, "character_id": character_id,
+                "scope": Scope.real_world, "scenario_id": None, "id": snapshot_id,
+                "snapshot_type": "relationship_note", "snapshot_key": "relationship",
+                "generation": 1,
+            })()
+            snapshot = MemorySnapshot(
+                id=snapshot_id, tenant_id=TENANT_ID, relationship_id=relationship.id,
+                user_id=user_id, character_id=character_id, scope=Scope.real_world,
+                scenario_id=None, snapshot_type="relationship_note", snapshot_key="relationship",
+                generation=1, content=encrypt_json_for_storage(
+                    {"stable_facts": [{"predicate": "likes", "value": "private view"}]},
+                    memory_snapshot_content_aad(snapshot_aad_owner), crypto=crypto,
+                ), source_fingerprint="a" * 64, source_memory_ids=[str(memory_id)],
+                source_segment_ids=[str(segment_id)], source_message_ids=[str(message_id)],
+                creation_epoch=0,
+            )
+            session.add(snapshot)
             candidate_id = uuid4()
             candidate_envelope = crypto.encrypt("private candidate", f"shadow:{TENANT_ID}:{user_id}:{message_id}:{candidate_id}".encode())
             candidate = ShadowMemoryCandidate(
@@ -171,8 +188,15 @@ async def test_retention_physically_purges_content_and_respects_legal_hold():
             assert (purged_memory.value_text, purged_memory.value_json, purged_memory.search_text, purged_memory.embedding) == (None, None, None, None)
             segment = await session.scalar(select(ConversationSegment).where(ConversationSegment.conversation_id == conversation_id))
             assert segment is not None and segment.summary is None and segment.keyphrases is None
-            view = await session.scalar(select(DerivedMemoryView).where(DerivedMemoryView.user_id == user_id, DerivedMemoryView.character_id == character_id))
-            assert view is not None and view.content == {} and view.parent_memory_ids == []
+            snapshot = await session.scalar(select(MemorySnapshot).where(
+                MemorySnapshot.user_id == user_id,
+                MemorySnapshot.character_id == character_id,
+            ))
+            assert snapshot is not None and snapshot.content == {}
+            assert snapshot.source_memory_ids == []
+            assert snapshot.source_segment_ids == []
+            assert snapshot.source_message_ids == []
+            assert snapshot.invalidated_at is not None
             candidate = await session.get(ShadowMemoryCandidate, candidate_id)
             assert candidate is not None and candidate.status == "invalidated"
             assert (candidate.value_ciphertext, candidate.value_nonce, candidate.value_key_version) == (None, None, None)

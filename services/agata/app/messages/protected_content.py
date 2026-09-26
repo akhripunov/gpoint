@@ -25,6 +25,8 @@ _SEARCH_DOMAIN = b"gpoint/agata/search-index/v1"
 _TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
 _OUTBOX_KEYS = {
     "conversation_summary": frozenset({"conversation_id", "user_id", "character_id"}),
+    "relationship_note_refresh": frozenset({"relationship_id", "creation_epoch"}),
+    "snapshot_refresh": frozenset({"relationship_id", "conversation_id", "snapshot_type", "creation_epoch"}),
     "memory_extract": frozenset(
         {
             "message_id",
@@ -254,14 +256,25 @@ def segment_keyphrases_aad(segment: object, conversation: object) -> bytes:
     )
 
 
-def derived_view_content_aad(view: object) -> bytes:
+def memory_snapshot_content_aad(snapshot: object) -> bytes:
+    """Versioned semantic AAD for canonical derived snapshots."""
+    snapshot_type = getattr(snapshot, "snapshot_type", None)
+    snapshot_key = getattr(snapshot, "snapshot_key", None)
+    generation = getattr(snapshot, "generation", None)
+    if (
+        not isinstance(snapshot_type, str)
+        or not isinstance(snapshot_key, str)
+        or not isinstance(generation, int)
+        or generation < 1
+    ):
+        raise CryptoError("invalid_snapshot_aad")
     return content_aad(
-        entity="derived_memory_views",
-        tenant_id=view.tenant_id,
-        user_id=view.user_id,
-        character_id=view.character_id,
-        scope=view.scope,
-        scenario_id=view.scenario_id,
-        record_id=view.id,
-        field="content",
+        entity="agata/memory-snapshot/v1",
+        tenant_id=snapshot.tenant_id,
+        user_id=snapshot.user_id,
+        character_id=snapshot.character_id,
+        scope=snapshot.scope,
+        scenario_id=snapshot.scenario_id,
+        record_id=snapshot.id,
+        field=f"{snapshot_type}:{snapshot_key}:{generation}",
     )

@@ -25,9 +25,15 @@ from app.db.models import (
 from app.domain.principal import PrincipalContext
 from app.domain.relationships import resolve_relationship
 from app.memory.shared_history import SharedHistoryContext, SharedHistoryService
+from app.memory.snapshots import (
+    MemorySnapshotService,
+    enqueue_relationship_note_refresh,
+    enqueue_relationship_summary_refresh,
+)
 from app.messages.crypto import canonical_tagged_fields, derive_hmac_subkey
 from app.messages.protected_content import (
     content_aad,
+    content_crypto,
     decrypt_text_from_storage,
     encrypt_text_for_storage,
     memory_value_aad,
@@ -238,6 +244,7 @@ class ExplicitMemoryService:
                 )
             )
             await self.session.flush()
+            await self._queue_note_refresh(principal.tenant_id, control.relationship_id, control.deletion_epoch)
             await self._store_receipt(principal, command.command_id, memory.id, "completed")
             return memory.id
 
@@ -358,6 +365,7 @@ class ExplicitMemoryService:
                 )
             )
             await self.session.flush()
+            await self._queue_note_refresh(principal.tenant_id, old.relationship_id, control.deletion_epoch)
             await self._store_receipt(principal, command.command_id, replacement.id, "completed")
             return replacement.id
 
@@ -434,6 +442,7 @@ class ExplicitMemoryService:
                 deleted=True,
             )
             control.deletion_epoch += 1
+            await self._queue_note_refresh(principal.tenant_id, memory.relationship_id, control.deletion_epoch)
             self.session.add(
                 SuppressionRule(
                     tenant_id=memory.tenant_id,
@@ -462,6 +471,21 @@ class ExplicitMemoryService:
             await self.session.flush()
             await self._store_receipt(principal, command.command_id, memory.id, "completed")
             return False
+
+    async def _queue_note_refresh(
+        self, tenant_id: UUID, relationship_id: UUID, epoch: int
+    ) -> None:
+        await MemorySnapshotService(self.session, content_crypto()).invalidate_relationship(
+            tenant_id, relationship_id, snapshot_types=("relationship_note", "relationship_summary")
+        )
+        await enqueue_relationship_note_refresh(
+            self.session, tenant_id=tenant_id,
+            relationship_id=relationship_id, creation_epoch=epoch,
+        )
+        await enqueue_relationship_summary_refresh(
+            self.session, tenant_id=tenant_id, relationship_id=relationship_id,
+            creation_epoch=epoch,
+        )
 
     async def _control(self, principal: PrincipalContext, command: object) -> MemoryControlState:
         character_id = command.character_id

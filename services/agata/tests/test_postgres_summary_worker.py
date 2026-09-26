@@ -1,4 +1,4 @@
-"""Disposable PostgreSQL end-to-end test for message → summary segment/view."""
+"""Disposable PostgreSQL E2E for message → segment → canonical snapshots."""
 
 import os
 from datetime import UTC, datetime, timedelta
@@ -12,11 +12,12 @@ from app.config import get_settings
 from app.db.base import SessionFactory, set_tenant_context
 from app.db.models import (
     Character,
+    Consent,
     Conversation,
     ConversationSegment,
-    DerivedMemoryView,
     JobState,
     MemoryControlState,
+    MemorySnapshot,
     Message,
     OutboxJob,
     Scope,
@@ -30,7 +31,7 @@ from app.messages.crypto import AeadCrypto
 from app.messages.protected_content import (
     decrypt_json_from_storage,
     decrypt_text_from_storage,
-    derived_view_content_aad,
+    memory_snapshot_content_aad,
     segment_summary_aad,
 )
 from app.messages.service import MessageIngestionService
@@ -47,7 +48,7 @@ class _SummaryProvider:
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_postgres_summary_worker_persists_chronological_encrypted_segment_and_view():
+async def test_postgres_summary_worker_persists_chronological_encrypted_segment_and_snapshots():
     settings = get_settings()
     crypto = AeadCrypto(
         encoded_key=settings.message_aead_key.get_secret_value(),
@@ -95,6 +96,14 @@ async def test_postgres_summary_worker_persists_chronological_encrypted_segment_
                 scenario_id=None,
             )
             session.add_all([conversation, control])
+            session.add(Consent(
+                tenant_id=TENANT_ID, user_id=user_id, purpose="chat_history",
+                granted_at=now, policy_version="test-v1",
+            ))
+            session.add(Consent(
+                tenant_id=TENANT_ID, user_id=user_id, purpose="long_term_memory",
+                granted_at=now, policy_version="test-v1",
+            ))
             await session.flush()
             for index in range(5):
                 message_id = uuid4()
@@ -175,18 +184,35 @@ async def test_postgres_summary_worker_persists_chronological_encrypted_segment_
                 segment.summary, segment_summary_aad(segment, conversation), crypto=crypto
             )
             assert plaintext.startswith("PRIVATE_SUMMARY_SENTINEL")
-            view = await session.scalar(
-                select(DerivedMemoryView).where(
-                    DerivedMemoryView.user_id == user_id,
-                    DerivedMemoryView.character_id == character_id,
-                )
-            )
-            assert view is not None
-            assert "PRIVATE_SUMMARY_SENTINEL" not in str(view.content)
+            snapshot = await session.scalar(select(MemorySnapshot).where(
+                MemorySnapshot.relationship_id == conversation.relationship_id,
+                MemorySnapshot.snapshot_type == "conversation_summary",
+            ))
+            assert snapshot is not None
+            assert snapshot.conversation_id == conversation_id
+            assert "PRIVATE_SUMMARY_SENTINEL" not in str(snapshot.content)
             content = decrypt_json_from_storage(
-                view.content, derived_view_content_aad(view), crypto=crypto
+                snapshot.content, memory_snapshot_content_aad(snapshot), crypto=crypto
             )
-            assert content["latest_summary"].startswith("PRIVATE_SUMMARY_SENTINEL")
+            assert content["summary"].startswith("PRIVATE_SUMMARY_SENTINEL")
+            working = await session.scalar(select(MemorySnapshot).where(
+                MemorySnapshot.relationship_id == conversation.relationship_id,
+                MemorySnapshot.snapshot_type == "current_context_summary",
+            ))
+            assert working is not None and working.conversation_id == conversation_id
+            relationship_summary = await session.scalar(select(MemorySnapshot).where(
+                MemorySnapshot.relationship_id == conversation.relationship_id,
+                MemorySnapshot.snapshot_type == "relationship_summary",
+                MemorySnapshot.snapshot_key == "relationship",
+            ))
+            assert relationship_summary is not None
+            assert relationship_summary.conversation_id is None
+            relationship_content = decrypt_json_from_storage(
+                relationship_summary.content,
+                memory_snapshot_content_aad(relationship_summary),
+                crypto=crypto,
+            )
+            assert relationship_content["recent_summary"].startswith("PRIVATE_SUMMARY_SENTINEL")
             job = await session.scalar(
                 select(OutboxJob).where(OutboxJob.dedupe_key == f"summary-e2e:{suffix}")
             )

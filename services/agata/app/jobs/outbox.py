@@ -12,6 +12,8 @@ JOB_TYPES = frozenset(
     {
         "generic",
         "conversation_summary",
+        "relationship_note_refresh",
+        "snapshot_refresh",
         "memory_extract",
         "memory_promote",
         "memory_embed",

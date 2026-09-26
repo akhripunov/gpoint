@@ -27,11 +27,11 @@ from app.db.models import (
     Consent,
     Conversation,
     ConversationSegment,
-    DerivedMemoryView,
     EvidenceState,
     LifecycleState,
     Memory,
     MemoryControlState,
+    MemorySnapshot,
     Message,
     ResponseMemoryRef,
     ResponseRoutePolicy,
@@ -55,6 +55,7 @@ from app.memory.shared_history import (
     SharedHistoryEvidence,
     SharedHistoryService,
 )
+from app.memory.snapshots import MemorySnapshotService, snapshot_fingerprint
 from app.messages.crypto import (
     AeadCrypto,
     CiphertextEnvelope,
@@ -63,10 +64,11 @@ from app.messages.crypto import (
 )
 from app.messages.protected_content import (
     content_aad,
+    decrypt_json_from_storage,
     decrypt_text_from_storage,
-    derived_view_content_aad,
     encrypt_json_for_storage,
     encrypt_text_for_storage,
+    memory_snapshot_content_aad,
     memory_value_aad,
     opaque_search_text,
     segment_summary_aad,
@@ -157,6 +159,10 @@ class ResponseContext:
     response_language: str = "ru"
     image_data_url: str | None = None
     conversation_summaries: tuple[str, ...] = ()
+    relationship_note: str | None = None
+    relationship_summary: str | None = None
+    current_context_summary: str | None = None
+    snapshot_refs: tuple[tuple[UUID, int, str], ...] = ()
     graph_context: tuple[str, ...] = ()
     as_of: datetime | None = None
     dialogue_state: DialogueState = DialogueState("general", False, "answer")
@@ -299,6 +305,10 @@ class ContextBuilder:
         conversation_history: tuple[ConversationEntry, ...] = (),
         image_data_url: str | None = None,
         conversation_summaries: tuple[str, ...] = (),
+        relationship_note: str | None = None,
+        relationship_summary: str | None = None,
+        current_context_summary: str | None = None,
+        snapshot_refs: tuple[tuple[UUID, int, str], ...] = (),
         graph_context: tuple[str, ...] = (),
         as_of: datetime | None = None,
         shared_history: tuple[UntrustedMemoryBlock, ...] = (),
@@ -341,6 +351,9 @@ class ContextBuilder:
             )
         bounded_history = _bounded_history(conversation_history)
         bounded_summaries = _bounded_strings(conversation_summaries, count=3, each=500)
+        bounded_note = _bounded_untrusted_text(relationship_note, limit=1800)
+        bounded_relationship_summary = _bounded_untrusted_text(relationship_summary, limit=1800)
+        bounded_current_context = _bounded_untrusted_text(current_context_summary, limit=1200)
         bounded_graph = _bounded_strings(graph_context, count=8, each=160)
         dialogue = _derive_dialogue_state(current_message, bounded_history)
         return ResponseContext(
@@ -357,6 +370,10 @@ class ContextBuilder:
             conversation_history=bounded_history,
             image_data_url=image_data_url,
             conversation_summaries=bounded_summaries,
+            relationship_note=bounded_note,
+            relationship_summary=bounded_relationship_summary,
+            current_context_summary=bounded_current_context,
+            snapshot_refs=tuple(snapshot_refs[:4]),
             graph_context=bounded_graph
             or tuple(f"{node.kind}: {node.label}" for node in build_memory_graph(results).nodes),
             as_of=as_of,
@@ -473,6 +490,63 @@ class ResponseOrchestrator:
             conversation_summaries = await self._recent_summaries(
                 principal, conversation, plaintext, request.as_of
             )
+            snapshot_service = MemorySnapshotService(self.session, self.crypto)
+            resolved_snapshots: list[MemorySnapshot] = []
+            snapshot_text: dict[str, str] = {}
+            snapshot_specs = (
+                ("relationship_note", "relationship", "long_term_memory"),
+                ("relationship_summary", "relationship", "long_term_memory"),
+                ("current_context_summary", f"conversation:{conversation.id}", "chat_history"),
+                ("conversation_summary", f"conversation:{conversation.id}", "chat_history"),
+            )
+            for snapshot_type, snapshot_key, consent_name in snapshot_specs:
+                snapshot = await snapshot_service.resolve_current(
+                    tenant_id=principal.tenant_id,
+                    relationship_id=conversation.relationship_id,
+                    snapshot_type=snapshot_type,
+                    snapshot_key=snapshot_key,
+                    user_id=principal.user_id,
+                    required_consent=consent_name,
+                )
+                if snapshot is None:
+                    continue
+                payload = decrypt_json_from_storage(
+                    snapshot.content, memory_snapshot_content_aad(snapshot), crypto=self.crypto
+                )
+                if not isinstance(payload, dict):
+                    continue
+                if snapshot_type == "relationship_note":
+                    facts = payload.get("stable_facts", [])
+                    parts = [f"Имя: {payload['preferred_name']}" for _ in [0] if isinstance(payload.get("preferred_name"), str)]
+                    if isinstance(facts, list):
+                        parts.extend(f"{item.get('predicate', 'факт')}: {item.get('value', '')}" for item in facts[:10] if isinstance(item, dict) and isinstance(item.get("value"), str))
+                    relationship_context = payload.get("important_relationship_context", [])
+                    if isinstance(relationship_context, list):
+                        parts.extend(str(item)[:180] for item in relationship_context[:4] if isinstance(item, str))
+                    rendered = "; ".join(parts)[:1800]
+                elif snapshot_type in {"relationship_summary", "conversation_summary"}:
+                    rendered = str(payload.get("recent_summary") or payload.get("summary") or "")[:1000]
+                else:
+                    rendered = json.dumps(payload, ensure_ascii=False, sort_keys=True)[:1200]
+                if rendered:
+                    snapshot_text[snapshot_type] = rendered
+                    resolved_snapshots.append(snapshot)
+            if "relationship_note" not in snapshot_text and await snapshot_service.consent_allowed(
+                principal.tenant_id, principal.user_id, "long_term_memory"
+            ):
+                control = await self.session.scalar(select(MemoryControlState).where(
+                    MemoryControlState.tenant_id == principal.tenant_id,
+                    MemoryControlState.relationship_id == conversation.relationship_id,
+                ).limit(1))
+                if control is not None:
+                    await OutboxRepository(self.session).enqueue(
+                        tenant_id=principal.tenant_id,
+                        job_type="relationship_note_refresh",
+                        dedupe_key=f"relationship-note:{conversation.relationship_id}:{control.deletion_epoch}",
+                        aggregate_id=conversation.relationship_id,
+                        creation_epoch=control.deletion_epoch,
+                        payload={"relationship_id": str(conversation.relationship_id), "creation_epoch": str(control.deletion_epoch)},
+                    )
             communication_settings = await self._communication_settings(principal, conversation)
             disputed_memory_values = await self._disputed_memory_values(principal, conversation)
             shared_context = SharedHistoryContext(
@@ -552,7 +626,6 @@ class ResponseOrchestrator:
                 and item.evidence_state != EvidenceState.disputed.value
             ),
             conversation_history=conversation_history,
-            conversation_summaries=conversation_summaries,
             graph_context=tuple(
                 f"{node.kind}: {node.label}" for node in build_memory_graph(retrieval.results).nodes
             ),
@@ -572,6 +645,11 @@ class ResponseOrchestrator:
             ),
             communication_settings=communication_settings,
             character_name=character_name if isinstance(character_name, str) else "Персонаж",
+            relationship_note=snapshot_text.get("relationship_note"),
+            relationship_summary=snapshot_text.get("relationship_summary"),
+            current_context_summary=snapshot_text.get("current_context_summary"),
+            conversation_summaries=((snapshot_text["conversation_summary"],) if snapshot_text.get("conversation_summary") else ()) + conversation_summaries,
+            snapshot_refs=tuple((item.id, item.generation, item.snapshot_type) for item in resolved_snapshots),
         )
         try:
             envelope = await asyncio.wait_for(
@@ -641,6 +719,7 @@ class ResponseOrchestrator:
             locale_fragment,
             shared_history,
             shared_context,
+            context.snapshot_refs,
         )
         # Memory extraction is durable and asynchronous.  MessageIngestionService
         # already enqueues a typed memory_extract job; the memory worker owns the
@@ -676,6 +755,7 @@ class ResponseOrchestrator:
         locale_fragment: LocaleResponseFragment,
         shared_history: tuple[SharedHistoryEvidence, ...],
         shared_context: SharedHistoryContext,
+        snapshot_refs: tuple[tuple[UUID, int, str], ...] = (),
     ) -> ResponseResult:
         async with self.session.begin():
             await set_tenant_context(self.session, str(principal.tenant_id))
@@ -729,6 +809,32 @@ class ResponseOrchestrator:
                 shared_context, shared_history
             ):
                 return ResponseResult(None, "rejected", "stale_shared_history")
+            if snapshot_refs:
+                current_epoch = await self.session.scalar(select(MemoryControlState.deletion_epoch).where(
+                    MemoryControlState.tenant_id == principal.tenant_id,
+                    MemoryControlState.relationship_id == conversation.relationship_id,
+                ))
+                now = datetime.now(UTC)
+                required_consents = {
+                    "relationship_note": "long_term_memory",
+                    "relationship_summary": "long_term_memory",
+                    "current_context_summary": "chat_history",
+                    "conversation_summary": "chat_history",
+                }
+                for snapshot_id, generation, snapshot_type in snapshot_refs:
+                    allowed = await self._active_consent(principal, required_consents.get(snapshot_type, ""))
+                    current_snapshot = await self.session.scalar(select(MemorySnapshot).where(
+                        MemorySnapshot.tenant_id == principal.tenant_id,
+                        MemorySnapshot.id == snapshot_id,
+                        MemorySnapshot.relationship_id == conversation.relationship_id,
+                        MemorySnapshot.user_id == principal.user_id,
+                        MemorySnapshot.generation == generation,
+                        MemorySnapshot.creation_epoch == current_epoch,
+                        MemorySnapshot.invalidated_at.is_(None),
+                        or_(MemorySnapshot.expires_at.is_(None), MemorySnapshot.expires_at > now),
+                    ).with_for_update())
+                    if not allowed or current_snapshot is None:
+                        return ResponseResult(None, "rejected", "stale_snapshot")
             verified = await self._verify_supplied(principal, conversation, supplied)
             supplied_ids = {item.memory_id for item in verified}
             if not set(envelope.cited_memory_ids).issubset(supplied_ids):
@@ -785,6 +891,7 @@ class ResponseOrchestrator:
                     ResponseMemoryRef(
                         tenant_id=principal.tenant_id,
                         assistant_message_id=assistant_id,
+                        relationship_id=conversation.relationship_id,
                         memory_id=item.memory_id,
                         user_id=principal.user_id,
                         character_id=conversation.character_id,
@@ -800,6 +907,7 @@ class ResponseOrchestrator:
                         ResponseMemoryRef(
                             tenant_id=principal.tenant_id,
                             assistant_message_id=assistant_id,
+                            relationship_id=conversation.relationship_id,
                             memory_id=item.memory_id,
                             user_id=principal.user_id,
                             character_id=conversation.character_id,
@@ -810,6 +918,21 @@ class ResponseOrchestrator:
                             response_run_id=run.id,
                         )
                     )
+            for snapshot_id, generation, _snapshot_type in snapshot_refs:
+                self.session.add(ResponseMemoryRef(
+                    tenant_id=principal.tenant_id,
+                    assistant_message_id=assistant_id,
+                    relationship_id=conversation.relationship_id,
+                    snapshot_id=snapshot_id,
+                    user_id=principal.user_id,
+                    character_id=conversation.character_id,
+                    scope=conversation.scope,
+                    scenario_key=conversation.scenario_key,
+                    snapshot_generation=generation,
+                    ref_type="snapshot",
+                    usage_type="supplied",
+                    response_run_id=run.id,
+                ))
             self.session.add(
                 AuditLog(
                     tenant_id=principal.tenant_id,
@@ -1192,56 +1315,19 @@ class ResponseOrchestrator:
                         "hierarchy": hierarchy,
                         "segment_id": str(segment_id),
                     }
-                    existing_view = await db_session.scalar(
-                        select(DerivedMemoryView)
-                        .where(
-                            DerivedMemoryView.tenant_id == principal.tenant_id,
-                            DerivedMemoryView.relationship_id == conversation.relationship_id,
-                            DerivedMemoryView.user_id == principal.user_id,
-                            DerivedMemoryView.character_id == conversation.character_id,
-                            DerivedMemoryView.scope == conversation.scope,
-                            DerivedMemoryView.scenario_key == conversation.scenario_key,  # type: ignore[attr-defined]
-                            DerivedMemoryView.view_type == "conversation_summary",
-                        )
-                        .with_for_update()
+                    await MemorySnapshotService(db_session, self.crypto).upsert(
+                        tenant_id=principal.tenant_id,
+                        relationship=conversation,
+                        snapshot_type="conversation_summary",
+                        snapshot_key=f"conversation:{conversation.id}",
+                        content=payload,
+                        source_fingerprint=snapshot_fingerprint(
+                            "conversation_summary", conversation.id, epoch, str(segment_id)
+                        ),
+                        creation_epoch=epoch,
+                        source_segment_ids=[segment_id],
+                        conversation_id=conversation.id,
                     )
-                    if existing_view is None:
-                        view_id = uuid4()
-                        db_session.add(
-                            DerivedMemoryView(
-                                id=view_id,
-                                tenant_id=principal.tenant_id,
-                                relationship_id=conversation.relationship_id,
-                                user_id=principal.user_id,
-                                character_id=conversation.character_id,
-                                scope=conversation.scope,
-                                scenario_id=conversation.scenario_id,
-                                view_type="conversation_summary",
-                                content=encrypt_json_for_storage(
-                                    payload,
-                                    content_aad(
-                                        entity="derived_memory_views",
-                                        tenant_id=principal.tenant_id,
-                                        user_id=principal.user_id,
-                                        character_id=conversation.character_id,
-                                        scope=conversation.scope,
-                                        scenario_id=conversation.scenario_id,
-                                        record_id=view_id,
-                                        field="content",
-                                    ),
-                                    crypto=self.crypto,
-                                ),
-                                parent_memory_ids=[str(segment_id)],
-                                creation_epoch=epoch,
-                            )
-                        )
-                    else:
-                        existing_view.generation += 1
-                        existing_view.content = encrypt_json_for_storage(
-                            payload, derived_view_content_aad(existing_view), crypto=self.crypto
-                        )
-                        existing_view.parent_memory_ids = [str(segment_id)]
-                        existing_view.creation_epoch = epoch
         except Exception:
             pass  # Non-critical: never block main flow
 
@@ -1787,11 +1873,13 @@ async def run_retention_cleanup(session: AsyncSession, tenant_id: UUID) -> int:
         )
         await session.execute(
             text(
-                "UPDATE agata.derived_memory_views SET content='{}'::jsonb, "
-                "parent_memory_ids='[]'::jsonb, generation=generation+1 "
+                "UPDATE agata.memory_snapshots SET content='{}'::jsonb, "
+                "source_memory_ids='[]'::jsonb, source_segment_ids='[]'::jsonb, "
+                "source_message_ids='[]'::jsonb, invalidated_at=COALESCE(invalidated_at,:now), "
+                "generation=generation+1 "
                 "WHERE tenant_id=:tid AND relationship_id=:relationship_id"
             ),
-            {"tid": tenant_id, "relationship_id": relationship_id},
+            {"tid": tenant_id, "relationship_id": relationship_id, "now": now},
         )
     if conversation_ids:
         await session.execute(

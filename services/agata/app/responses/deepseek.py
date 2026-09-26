@@ -130,8 +130,14 @@ class DeepSeekResponseProvider:
                 "code": protocol.code,
                 "steps": protocol.expression,
             }
+        if context.current_context_summary:
+            typed_context["working_dialogue_state"] = context.current_context_summary[:1200]
         # SYSTEM MEMORY (authoritative) — separate message with highest priority
         memory_lines = []
+        if context.relationship_note:
+            memory_lines.append("Краткая память об отношениях (подтверждённые данные): " + context.relationship_note[:1800])
+        if context.relationship_summary:
+            memory_lines.append("История отношений (краткая сводка): " + context.relationship_summary[:1800])
         if context.memories:
             facts: list[str] = []
             for memory in context.memories:

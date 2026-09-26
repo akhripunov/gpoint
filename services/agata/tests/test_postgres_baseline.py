@@ -11,13 +11,12 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
-from app.config import get_settings
 from app.messages.crypto import AeadCrypto
 from app.messages.protected_content import (
     content_aad,
     decrypt_json_from_storage,
     decrypt_text_from_storage,
-    derived_view_content_aad,
+    memory_snapshot_content_aad,
     memory_value_aad,
     segment_keyphrases_aad,
     segment_summary_aad,
@@ -71,7 +70,7 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
             "retrieval_runs",
             "retrieval_candidates",
             "response_runs",
-            "derived_memory_views",
+            "response_memory_refs",
             "shared_history_episodes",
             "shadow_memory_candidates",
         ):
@@ -79,6 +78,33 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
                 text(f"ALTER TABLE agata.{table} DROP COLUMN IF EXISTS relationship_id CASCADE")
             )
         connection.execute(text("DROP TABLE IF EXISTS agata.relationships CASCADE"))
+        connection.execute(text("DROP TABLE IF EXISTS agata.memory_snapshots CASCADE"))
+        for column in ("snapshot_id", "snapshot_generation", "ref_type"):
+            connection.execute(text(f"ALTER TABLE agata.response_memory_refs DROP COLUMN IF EXISTS {column} CASCADE"))
+        connection.execute(text("ALTER TABLE agata.response_memory_refs ALTER COLUMN memory_id SET NOT NULL"))
+        connection.execute(text("ALTER TABLE agata.response_memory_refs ALTER COLUMN memory_version SET NOT NULL"))
+        connection.execute(text("""
+            CREATE TABLE agata.derived_memory_views (
+                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                tenant_id uuid NOT NULL,
+                user_id uuid NOT NULL,
+                character_id uuid NOT NULL,
+                scope public.scope_enum NOT NULL,
+                scenario_id uuid NULL,
+                view_type varchar(64) NOT NULL,
+                generation integer NOT NULL DEFAULT 1,
+                content jsonb NOT NULL,
+                parent_memory_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+                creation_epoch integer NOT NULL DEFAULT 0,
+                created_at timestamptz NOT NULL DEFAULT now()
+            )
+        """))
+        connection.execute(text("""
+            ALTER TABLE agata.response_memory_refs
+            ADD CONSTRAINT fk_response_memory_owner FOREIGN KEY
+            (tenant_id,memory_id,user_id,character_id,scope,scenario_key)
+            REFERENCES agata.memories(tenant_id,id,user_id,character_id,scope,scenario_key)
+        """))
 
     tenant_id = env["AGATA_TENANT_ID"]
     user_id, character_id, relationship_id, conversation_id, memory_id, segment_id, view_id = (
@@ -151,7 +177,7 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
                 "INSERT INTO agata.derived_memory_views(id,tenant_id,user_id,character_id,scope,scenario_id,"
                 "view_type,content,parent_memory_ids) VALUES (:id,:tenant,:user,:character,"
                 "CAST('real_world' AS public.scope_enum),NULL,'conversation_summary',"
-                "CAST(:content AS jsonb),'[]'::jsonb)"
+                "CAST(:content AS jsonb),CAST(:parent_ids AS jsonb))"
             ),
             {
                 "id": view_id,
@@ -159,6 +185,7 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
                 "user": user_id,
                 "character": character_id,
                 "content": '{"summary":"legacy-private-synthetic-payload"}',
+                "parent_ids": f'["{segment_id}"]',
             },
         )
 
@@ -176,7 +203,7 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
         assert legacy_revision == "agata0002"
 
     subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "agata0003"],
+        [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "agata0004"],
         cwd=ROOT,
         env=env,
         check=True,
@@ -195,7 +222,7 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
         assert after == before
         assert "alembic_version" in agata_tables
         assert (
-            connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0003"
+            connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0004"
         )
         assert connection.scalar(text("SELECT count(*) FROM agata.tenants")) == 1
         assert (
@@ -257,15 +284,17 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
         assert migrated_segment.summary.startswith("agata$")
         assert migrated_segment.keyphrases["_agata_ciphertext"] == "1"
         migrated_view = connection.execute(
-            text("SELECT * FROM agata.derived_memory_views WHERE id=:id"),
+            text("SELECT * FROM agata.memory_snapshots WHERE id=:id"),
             {"id": view_id},
         ).one()
         assert migrated_view.relationship_id == backfilled_relationship_id
         assert migrated_view.content["_agata_ciphertext"] == "1"
-        settings = get_settings()
+        assert connection.scalar(text("SELECT to_regclass('agata.derived_memory_views')")) is None
+        assert migrated_view.snapshot_type == "conversation_summary"
+        assert migrated_view.source_segment_ids == [str(segment_id)]
         crypto = AeadCrypto(
-            encoded_key=settings.message_aead_key.get_secret_value(),
-            key_version=settings.message_aead_key_version,
+            encoded_key=os.environ["AGATA_MESSAGE_AEAD_KEY"],
+            key_version=os.getenv("AGATA_MESSAGE_AEAD_KEY_VERSION", "v1"),
         )
         memory_owner = SimpleNamespace(
             tenant_id=UUID(tenant_id),
@@ -313,15 +342,14 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
             crypto=crypto,
         ) == [sentinel]
         view_owner = SimpleNamespace(
-            tenant_id=UUID(tenant_id),
-            user_id=user_id,
-            character_id=character_id,
-            scope="real_world",
-            scenario_id=None,
-            id=view_id,
+            tenant_id=UUID(tenant_id), user_id=user_id, character_id=character_id,
+            scope="real_world", scenario_id=None, id=view_id,
+            snapshot_type=migrated_view.snapshot_type,
+            snapshot_key=migrated_view.snapshot_key,
+            generation=migrated_view.generation,
         )
         assert decrypt_json_from_storage(
-            migrated_view.content, derived_view_content_aad(view_owner), crypto=crypto
+            migrated_view.content, memory_snapshot_content_aad(view_owner), crypto=crypto
         ) == {"summary": sentinel}
         assert connection.scalar(
             text("SELECT count(*) FROM agata.retrieval_candidates WHERE relationship_id IS NULL")
