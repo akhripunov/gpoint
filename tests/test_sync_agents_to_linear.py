@@ -102,6 +102,25 @@ class SyncContractTests(unittest.TestCase):
             SYNC.graphql_request("query { viewer { id } }", {}, "test-key", opener=failing_opener, sleep=lambda _: None)
         self.assertEqual(len(attempts), 3)
 
+    def test_http_429_and_5xx_retry_bounded_but_auth_does_not(self):
+        for status, expected_attempts in ((429, 3), (503, 3), (403, 1)):
+            attempts = []
+
+            def failing_opener(*_args, **_kwargs):
+                attempts.append(1)
+                raise urllib.error.HTTPError(SYNC.ENDPOINT, status, "failure", None, None)
+
+            with self.subTest(status=status):
+                with self.assertRaises(SYNC.SyncError):
+                    SYNC.graphql_request(
+                        "query { viewer { id } }",
+                        {},
+                        "test-key",
+                        opener=failing_opener,
+                        sleep=lambda _: None,
+                    )
+                self.assertEqual(len(attempts), expected_attempts)
+
     def test_only_one_terminal_newline_can_be_normalized(self):
         self.assertTrue(SYNC._content_matches("body\n", "body"))
         self.assertFalse(SYNC._content_matches("body\n\n", "body"))
