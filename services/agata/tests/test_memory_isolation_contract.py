@@ -12,6 +12,7 @@ def _sql(user_id, character_id):
     principal = PrincipalContext(uuid4(), user_id, user_id, "internal")
     request = RetrievalRequest(
         character_id=character_id,
+        relationship_id=uuid4(),
         scope=Scope.real_world,
         scenario_id=None,
         query="Как зовут мою собаку?",

@@ -11,6 +11,7 @@ from app.db.base import set_tenant_context
 from app.db.models import (
     AuditLog,
     Consent,
+    Conversation,
     ExplicitCommandReceipt,
     LifecycleState,
     Memory,
@@ -22,6 +23,7 @@ from app.db.models import (
     SuppressionRule,
 )
 from app.domain.principal import PrincipalContext
+from app.domain.relationships import resolve_relationship
 from app.memory.shared_history import SharedHistoryContext, SharedHistoryService
 from app.messages.crypto import canonical_tagged_fields, derive_hmac_subkey
 from app.messages.protected_content import (
@@ -114,8 +116,11 @@ class ExplicitMemoryService:
             consent = await self._current_memory_consent(principal)
             if consent is None:
                 raise DomainError("long_term_memory_consent_required")
+            relationship = await resolve_relationship(
+                self.session, principal, command.character_id, command.scope, command.scenario_id
+            )
             source = await self.session.scalar(
-                select(Message).where(
+                select(Message).join(Conversation, Conversation.id == Message.conversation_id).where(
                     Message.tenant_id == principal.tenant_id,
                     Message.id == command.source_message_id,
                     Message.user_id == principal.user_id,
@@ -123,6 +128,7 @@ class ExplicitMemoryService:
                     Message.scope == command.scope,
                     Message.scenario_id == command.scenario_id,
                     Message.role == "user",
+                    Conversation.relationship_id == relationship.id,
                 )
             )
             if source is None:
@@ -133,6 +139,7 @@ class ExplicitMemoryService:
                 select(SuppressionRule)
                 .where(
                     SuppressionRule.tenant_id == principal.tenant_id,
+                    SuppressionRule.relationship_id == control.relationship_id,
                     SuppressionRule.user_id == principal.user_id,
                     SuppressionRule.character_id == command.character_id,
                     SuppressionRule.scope == command.scope,
@@ -161,6 +168,7 @@ class ExplicitMemoryService:
                 select(Memory)
                 .where(
                     Memory.tenant_id == principal.tenant_id,
+                    Memory.relationship_id == control.relationship_id,
                     Memory.user_id == principal.user_id,
                     Memory.character_id == command.character_id,
                     Memory.scope == command.scope,
@@ -177,6 +185,7 @@ class ExplicitMemoryService:
             memory = Memory(
                 id=memory_id,
                 tenant_id=principal.tenant_id,
+                relationship_id=control.relationship_id,
                 user_id=principal.user_id,
                 character_id=command.character_id,
                 kind="semantic_fact",
@@ -285,6 +294,7 @@ class ExplicitMemoryService:
                     old.character_id,
                     old.scope,
                     old.scenario_id,
+                    old.relationship_id,
                 ),
                 old.id,
             )
@@ -292,6 +302,7 @@ class ExplicitMemoryService:
             replacement = Memory(
                 id=replacement_id,
                 tenant_id=old.tenant_id,
+                relationship_id=old.relationship_id,
                 user_id=old.user_id,
                 character_id=old.character_id,
                 kind="semantic_fact",
@@ -396,6 +407,7 @@ class ExplicitMemoryService:
                 update(ShadowMemoryCandidate)
                 .where(
                     ShadowMemoryCandidate.tenant_id == memory.tenant_id,
+                    ShadowMemoryCandidate.relationship_id == memory.relationship_id,
                     ShadowMemoryCandidate.source_message_id.in_(source_message_ids),
                     ShadowMemoryCandidate.user_id == memory.user_id,
                     ShadowMemoryCandidate.character_id == memory.character_id,
@@ -416,6 +428,7 @@ class ExplicitMemoryService:
                     memory.character_id,
                     memory.scope,
                     memory.scenario_id,
+                    memory.relationship_id,
                 ),
                 memory.id,
                 deleted=True,
@@ -424,6 +437,7 @@ class ExplicitMemoryService:
             self.session.add(
                 SuppressionRule(
                     tenant_id=memory.tenant_id,
+                    relationship_id=memory.relationship_id,
                     user_id=memory.user_id,
                     character_id=memory.character_id,
                     scope=memory.scope,
@@ -453,10 +467,17 @@ class ExplicitMemoryService:
         character_id = command.character_id
         scope = command.scope
         scenario_id = command.scenario_id
+        relationship_id = getattr(command, "relationship_id", None)
+        if not isinstance(relationship_id, UUID):
+            relationship = await resolve_relationship(
+                self.session, principal, character_id, scope, scenario_id
+            )
+            relationship_id = relationship.id
         control = await self.session.scalar(
             select(MemoryControlState)
             .where(
                 MemoryControlState.tenant_id == principal.tenant_id,
+                MemoryControlState.relationship_id == relationship_id,
                 MemoryControlState.user_id == principal.user_id,
                 MemoryControlState.character_id == character_id,
                 MemoryControlState.scope == scope,
@@ -467,6 +488,7 @@ class ExplicitMemoryService:
         if control is None:
             control = MemoryControlState(
                 tenant_id=principal.tenant_id,
+                relationship_id=relationship_id,
                 user_id=principal.user_id,
                 character_id=character_id,
                 scope=scope,

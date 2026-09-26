@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.base import set_tenant_context
 from app.db.models import (
     Consent,
+    Conversation,
     EvidenceState,
     LifecycleState,
     Memory,
@@ -26,6 +27,7 @@ from app.db.models import (
     MemorySource,
     Message,
     OutboxJob,
+    Relationship,
     ResponseMemoryRef,
     RetentionPolicy,
     RetrievalCandidate,
@@ -135,6 +137,7 @@ class OpenAICompatibleEmbeddingProvider:
 @dataclass(frozen=True, slots=True)
 class RetrievalRequest:
     character_id: UUID
+    relationship_id: UUID
     scope: Scope
     scenario_id: UUID | None
     query: str
@@ -266,6 +269,7 @@ class EmbeddingWorker:
                 and_(
                     MemoryControlState.tenant_id == Memory.tenant_id,
                     MemoryControlState.id == control_id,
+                    MemoryControlState.relationship_id == Memory.relationship_id,
                     MemoryControlState.user_id == Memory.user_id,
                     MemoryControlState.character_id == Memory.character_id,
                     MemoryControlState.scope == Memory.scope,
@@ -346,6 +350,19 @@ class HybridRetrievalService:
         started = time.monotonic()
         async with self.session.begin():
             await set_tenant_context(self.session, str(principal.tenant_id))
+            relationship = await self.session.scalar(
+                select(Relationship).where(
+                    Relationship.tenant_id == principal.tenant_id,
+                    Relationship.id == request.relationship_id,
+                    Relationship.user_id == principal.user_id,
+                    Relationship.character_id == request.character_id,
+                    Relationship.scope == request.scope,
+                    Relationship.scenario_id == request.scenario_id,
+                    Relationship.status == "ACTIVE",
+                )
+            )
+            if relationship is None:
+                return RetrievalResult((), "invalid_request", None)
             base = self._hard_filter(principal, request)
             exact = list(
                 (
@@ -474,6 +491,7 @@ class HybridRetrievalService:
                 MemoryControlState,
                 and_(
                     MemoryControlState.tenant_id == Memory.tenant_id,
+                    MemoryControlState.relationship_id == Memory.relationship_id,
                     MemoryControlState.user_id == Memory.user_id,
                     MemoryControlState.character_id == Memory.character_id,
                     MemoryControlState.scope == Memory.scope,
@@ -500,6 +518,7 @@ class HybridRetrievalService:
             .where(
                 Memory.tenant_id == principal.tenant_id,
                 Memory.user_id == principal.user_id,
+                Memory.relationship_id == request.relationship_id,
                 Memory.character_id == request.character_id,
                 Memory.scope == request.scope,
                 Memory.scenario_id == request.scenario_id,
@@ -533,6 +552,7 @@ class HybridRetrievalService:
                     (b"version", QUERY_DOMAIN),
                     (b"tenant", principal.tenant_id.bytes),
                     (b"user", principal.user_id.bytes),
+                    (b"relationship", request.relationship_id.bytes),
                     (b"character", request.character_id.bytes),
                     (b"scope", request.scope.value.encode()),
                     (b"scenario", request.scenario_id.bytes if request.scenario_id else b""),
@@ -552,6 +572,7 @@ class HybridRetrievalService:
         )
         run = RetrievalRun(
             tenant_id=principal.tenant_id,
+            relationship_id=request.relationship_id,
             user_id=principal.user_id,
             character_id=request.character_id,
             scope=request.scope,
@@ -574,6 +595,7 @@ class HybridRetrievalService:
                 RetrievalCandidate(
                     tenant_id=principal.tenant_id,
                     run_id=run.id,
+                    relationship_id=request.relationship_id,
                     memory_id=memory_id,
                     memory_version=memory.version,
                     user_id=memory.user_id,
@@ -596,6 +618,7 @@ class HybridRetrievalService:
         if (
             not isinstance(request, RetrievalRequest)
             or not isinstance(request.character_id, UUID)
+            or not isinstance(request.relationship_id, UUID)
             or not isinstance(request.scope, Scope)
             or not isinstance(request.query, str)
             or not 1 <= len(request.query) <= 512
@@ -635,6 +658,24 @@ class HybridRetrievalService:
             raise DomainError("attribution_invalid")
         async with self.session.begin():
             await set_tenant_context(self.session, str(principal.tenant_id))
+            assistant_relationship_id = await self.session.scalar(
+                select(Conversation.relationship_id)
+                .join(
+                    Message,
+                    and_(
+                        Message.tenant_id == Conversation.tenant_id,
+                        Message.conversation_id == Conversation.id,
+                    ),
+                )
+                .where(
+                    Message.tenant_id == principal.tenant_id,
+                    Message.id == assistant_message_id,
+                    Message.user_id == principal.user_id,
+                    Message.role == "assistant",
+                )
+            )
+            if assistant_relationship_id is None:
+                raise DomainError("attribution_invalid")
             for entry in entries:
                 if not isinstance(entry, RetrievedMemory):
                     raise DomainError("attribution_invalid")
@@ -644,6 +685,7 @@ class HybridRetrievalService:
                         Memory.tenant_id == principal.tenant_id,
                         Memory.id == entry.memory_id,
                         Memory.user_id == principal.user_id,
+                        Memory.relationship_id == assistant_relationship_id,
                     )
                     .with_for_update()
                 )

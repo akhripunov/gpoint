@@ -44,6 +44,7 @@ class SharedHistoryContext:
     character_id: UUID
     scope: object
     scenario_id: UUID | None
+    relationship_id: UUID
 
     def __post_init__(self) -> None:
         from app.db.models import Scope
@@ -51,7 +52,9 @@ class SharedHistoryContext:
         if (
             not all(
                 isinstance(value, UUID)
-                for value in (self.tenant_id, self.user_id, self.character_id)
+                for value in (
+                    self.tenant_id, self.user_id, self.character_id, self.relationship_id
+                )
             )
             or not isinstance(self.scope, Scope)
             or (self.scope == Scope.real_world and self.scenario_id is not None)
@@ -81,6 +84,7 @@ class SharedHistoryService:
             .where(
                 Memory.tenant_id == context.tenant_id,
                 Memory.id == memory_id,
+                Memory.relationship_id == context.relationship_id,
                 Memory.user_id == context.user_id,
                 Memory.character_id == context.character_id,
                 Memory.scope == context.scope,
@@ -97,6 +101,7 @@ class SharedHistoryService:
             select(MemoryControlState)
             .where(
                 MemoryControlState.tenant_id == context.tenant_id,
+                MemoryControlState.relationship_id == context.relationship_id,
                 MemoryControlState.user_id == context.user_id,
                 MemoryControlState.character_id == context.character_id,
                 MemoryControlState.scope == context.scope,
@@ -112,6 +117,7 @@ class SharedHistoryService:
             select(SharedHistoryEpisode)
             .where(
                 SharedHistoryEpisode.tenant_id == context.tenant_id,
+                SharedHistoryEpisode.relationship_id == context.relationship_id,
                 SharedHistoryEpisode.user_id == context.user_id,
                 SharedHistoryEpisode.character_id == context.character_id,
                 SharedHistoryEpisode.scope == context.scope,
@@ -135,6 +141,7 @@ class SharedHistoryService:
                     select(SharedHistoryEpisode)
                     .where(
                         SharedHistoryEpisode.tenant_id == context.tenant_id,
+                        SharedHistoryEpisode.relationship_id == context.relationship_id,
                         SharedHistoryEpisode.user_id == context.user_id,
                         SharedHistoryEpisode.character_id == context.character_id,
                         SharedHistoryEpisode.scope == context.scope,
@@ -163,6 +170,7 @@ class SharedHistoryService:
         )
         episode = SharedHistoryEpisode(
             tenant_id=context.tenant_id,
+            relationship_id=context.relationship_id,
             user_id=context.user_id,
             character_id=context.character_id,
             scope=context.scope,
@@ -188,6 +196,7 @@ class SharedHistoryService:
                     select(SharedHistoryEpisode)
                     .where(
                         SharedHistoryEpisode.tenant_id == context.tenant_id,
+                        SharedHistoryEpisode.relationship_id == context.relationship_id,
                         SharedHistoryEpisode.user_id == context.user_id,
                         SharedHistoryEpisode.character_id == context.character_id,
                         SharedHistoryEpisode.scope == context.scope,
@@ -219,6 +228,7 @@ class SharedHistoryService:
                         and_(
                             Memory.tenant_id == SharedHistoryEpisode.tenant_id,
                             Memory.id == SharedHistoryEpisode.memory_id,
+                            Memory.relationship_id == SharedHistoryEpisode.relationship_id,
                             Memory.user_id == SharedHistoryEpisode.user_id,
                             Memory.character_id == SharedHistoryEpisode.character_id,
                             Memory.scope == SharedHistoryEpisode.scope,
@@ -229,6 +239,7 @@ class SharedHistoryService:
                         MemoryControlState,
                         and_(
                             MemoryControlState.tenant_id == Memory.tenant_id,
+                            MemoryControlState.relationship_id == Memory.relationship_id,
                             MemoryControlState.user_id == Memory.user_id,
                             MemoryControlState.character_id == Memory.character_id,
                             MemoryControlState.scope == Memory.scope,
@@ -239,6 +250,7 @@ class SharedHistoryService:
                     )
                     .where(
                         SharedHistoryEpisode.tenant_id == context.tenant_id,
+                        SharedHistoryEpisode.relationship_id == context.relationship_id,
                         SharedHistoryEpisode.user_id == context.user_id,
                         SharedHistoryEpisode.character_id == context.character_id,
                         SharedHistoryEpisode.scope == context.scope,

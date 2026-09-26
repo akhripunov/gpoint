@@ -298,7 +298,7 @@ class MemoryWorker:
                     )
                     .with_for_update()
                 )
-                if control is None:
+                if control is None or control.relationship_id != conversation.relationship_id:
                     raise StaleCreationEpoch("summary control unavailable")
                 segment_id = uuid4()
                 segment = ConversationSegment(
@@ -342,6 +342,7 @@ class MemoryWorker:
                     select(DerivedMemoryView)
                     .where(
                         DerivedMemoryView.tenant_id == self.tenant_id,
+                        DerivedMemoryView.relationship_id == conversation.relationship_id,
                         DerivedMemoryView.user_id == user_id,
                         DerivedMemoryView.character_id == character_id,
                         DerivedMemoryView.scope == conversation.scope,
@@ -412,6 +413,7 @@ class MemoryWorker:
                         DerivedMemoryView(
                             id=view_id,
                             tenant_id=self.tenant_id,
+                            relationship_id=conversation.relationship_id,
                             user_id=user_id,
                             character_id=character_id,
                             scope=conversation.scope,
@@ -516,7 +518,7 @@ async def _healthcheck() -> int:
                     text("SELECT version_num FROM agata.alembic_version")
                 )
                 await session.scalar(text("SELECT 1 FROM agata.outbox_jobs LIMIT 1"))
-        return 0 if revision == "agata0002" else 1
+        return 0 if revision == "agata0003" else 1
     except Exception:
         return 1
 

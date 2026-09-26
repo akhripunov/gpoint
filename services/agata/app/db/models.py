@@ -144,6 +144,9 @@ class UserCharacterSettings(TenantOwned):
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     character_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     preferences: Mapped[dict] = mapped_column(JSONB, server_default="{}", nullable=False)
+    # Legacy lifecycle-shaped JSON; runtime intentionally does not read or write it.
+    # Explicit communication preferences belong in `preferences`; relationship
+    # identity/lifecycle is canonicalized by the relationships table.
     relationship: Mapped[dict] = mapped_column(JSONB, server_default="{}", nullable=False)
     version: Mapped[int] = mapped_column(Integer, server_default="1", nullable=False)
     __table_args__ = (
@@ -213,10 +216,76 @@ class RoleplayScenario(TenantOwned):
     )
 
 
+class Relationship(TenantOwned):
+    """Durable user-character interaction identity in one scope/scenario."""
+
+    __tablename__ = "relationships"
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    character_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    scope: Mapped[Scope] = mapped_column(
+        Enum(Scope, name="scope_enum", native_enum=True, create_type=False), nullable=False
+    )
+    scenario_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    scenario_key: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        Computed(
+            "coalesce(scenario_id, '00000000-0000-0000-0000-000000000000'::uuid)",
+            persisted=True,
+        ),
+    )
+    status: Mapped[str] = mapped_column(String(16), server_default="ACTIVE", nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_interaction_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "user_id", "character_id", "scope", "scenario_key",
+            name="uq_relationship_context",
+        ),
+        UniqueConstraint(
+            "tenant_id", "id", "user_id", "character_id", "scope", "scenario_key",
+            name="uq_relationship_owner_scope",
+        ),
+        ForeignKeyConstraint(["tenant_id", "user_id"], ["users.tenant_id", "users.id"]),
+        ForeignKeyConstraint(
+            ["tenant_id", "character_id"], ["characters.tenant_id", "characters.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "scenario_id", "user_id", "character_id"],
+            [
+                "roleplay_scenarios.tenant_id", "roleplay_scenarios.id",
+                "roleplay_scenarios.user_id", "roleplay_scenarios.character_id",
+            ],
+            name="fk_relationship_scenario_owner",
+        ),
+        CheckConstraint(
+            "(scope = 'real_world' AND scenario_id IS NULL) OR "
+            "(scope = 'roleplay' AND scenario_id IS NOT NULL)",
+            name="ck_relationship_scope",
+        ),
+        CheckConstraint(
+            "status IN ('ACTIVE','PAUSED','ENDED')", name="ck_relationship_status"
+        ),
+        CheckConstraint(
+            "(status = 'ENDED' AND ended_at IS NOT NULL) OR "
+            "(status <> 'ENDED' AND ended_at IS NULL)",
+            name="ck_relationship_ended_at",
+        ),
+        CheckConstraint(
+            "last_interaction_at IS NULL OR last_interaction_at >= started_at",
+            name="ck_relationship_interaction_interval",
+        ),
+    )
+
+
 class Conversation(TenantOwned):
     __tablename__ = "conversations"
     source_system: Mapped[str] = mapped_column(String(32), server_default="gpoint", nullable=False)
     external_id: Mapped[str | None] = mapped_column(String(255))
+    relationship_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     character_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     scope: Mapped[Scope] = mapped_column(
@@ -246,9 +315,27 @@ class Conversation(TenantOwned):
             "scenario_key",
             name="uq_conversation_owner_scope",
         ),
+        UniqueConstraint(
+            "tenant_id",
+            "id",
+            "relationship_id",
+            "user_id",
+            "character_id",
+            "scope",
+            "scenario_key",
+            name="uq_conversation_relationship_owner_scope",
+        ),
         ForeignKeyConstraint(["tenant_id", "user_id"], ["users.tenant_id", "users.id"]),
         ForeignKeyConstraint(
             ["tenant_id", "character_id"], ["characters.tenant_id", "characters.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"],
+            [
+                "relationships.tenant_id", "relationships.id", "relationships.user_id",
+                "relationships.character_id", "relationships.scope", "relationships.scenario_key",
+            ],
+            name="fk_conversation_relationship_owner",
         ),
         ForeignKeyConstraint(
             ["tenant_id", "scenario_id", "user_id", "character_id"],
@@ -382,6 +469,7 @@ class Message(TenantOwned):
 
 class MemoryControlState(TenantOwned):
     __tablename__ = "memory_control_state"
+    relationship_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     character_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     scope: Mapped[Scope] = mapped_column(
@@ -397,6 +485,9 @@ class MemoryControlState(TenantOwned):
     deletion_epoch: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
     __table_args__ = (
         UniqueConstraint("tenant_id", "id", name="uq_memory_control_tenant_id"),
+        UniqueConstraint(
+            "tenant_id", "relationship_id", name="uq_memory_control_relationship"
+        ),
         UniqueConstraint(
             "tenant_id",
             "user_id",
@@ -415,9 +506,27 @@ class MemoryControlState(TenantOwned):
             "scenario_key",
             name="uq_control_owner_scope_key",
         ),
+        UniqueConstraint(
+            "tenant_id",
+            "id",
+            "relationship_id",
+            "user_id",
+            "character_id",
+            "scope",
+            "scenario_key",
+            name="uq_control_relationship_owner_scope_key",
+        ),
         ForeignKeyConstraint(["tenant_id", "user_id"], ["users.tenant_id", "users.id"]),
         ForeignKeyConstraint(
             ["tenant_id", "character_id"], ["characters.tenant_id", "characters.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"],
+            [
+                "relationships.tenant_id", "relationships.id", "relationships.user_id",
+                "relationships.character_id", "relationships.scope", "relationships.scenario_key",
+            ],
+            name="fk_memory_control_relationship_owner",
         ),
         ForeignKeyConstraint(
             ["tenant_id", "scenario_id", "user_id", "character_id"],
@@ -438,6 +547,7 @@ class MemoryControlState(TenantOwned):
 
 class Memory(TenantOwned):
     __tablename__ = "memories"
+    relationship_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     character_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -486,6 +596,10 @@ class Memory(TenantOwned):
     __table_args__ = (
         UniqueConstraint("tenant_id", "id", name="uq_memories_tenant_id"),
         UniqueConstraint(
+            "tenant_id", "id", "relationship_id", "user_id", "character_id", "scope", "scenario_key",
+            name="uq_memory_relationship_owner_scope",
+        ),
+        UniqueConstraint(
             "tenant_id",
             "id",
             "user_id",
@@ -497,6 +611,14 @@ class Memory(TenantOwned):
         ForeignKeyConstraint(["tenant_id", "user_id"], ["users.tenant_id", "users.id"]),
         ForeignKeyConstraint(
             ["tenant_id", "character_id"], ["characters.tenant_id", "characters.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"],
+            [
+                "relationships.tenant_id", "relationships.id", "relationships.user_id",
+                "relationships.character_id", "relationships.scope", "relationships.scenario_key",
+            ],
+            name="fk_memory_relationship_owner",
         ),
         ForeignKeyConstraint(
             ["tenant_id", "scenario_id", "user_id", "character_id"],
@@ -692,12 +814,20 @@ class MemoryDependency(TenantOwned):
 
 class SuppressionRule(TenantOwned):
     __tablename__ = "suppression_rules"
+    relationship_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     character_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     scope: Mapped[Scope] = mapped_column(
         Enum(Scope, name="scope_enum", native_enum=True, create_type=False), nullable=False
     )
     scenario_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    scenario_key: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        Computed(
+            "coalesce(scenario_id, '00000000-0000-0000-0000-000000000000'::uuid)",
+            persisted=True,
+        ),
+    )
     rule_type: Mapped[str] = mapped_column(String(32), nullable=False)
     canonical_version: Mapped[int] = mapped_column(Integer, server_default="1", nullable=False)
     slot_hmac: Mapped[str | None] = mapped_column(String(128))
@@ -711,6 +841,14 @@ class SuppressionRule(TenantOwned):
         ForeignKeyConstraint(["tenant_id", "user_id"], ["users.tenant_id", "users.id"]),
         ForeignKeyConstraint(
             ["tenant_id", "character_id"], ["characters.tenant_id", "characters.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"],
+            [
+                "relationships.tenant_id", "relationships.id", "relationships.user_id",
+                "relationships.character_id", "relationships.scope", "relationships.scenario_key",
+            ],
+            name="fk_suppression_relationship_owner",
         ),
         ForeignKeyConstraint(
             ["tenant_id", "scenario_id", "user_id", "character_id"],
@@ -835,6 +973,7 @@ class ResponseMemoryRef(TenantOwned):
 
 class RetrievalRun(TenantOwned):
     __tablename__ = "retrieval_runs"
+    relationship_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     character_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     scope: Mapped[Scope] = mapped_column(
@@ -858,8 +997,19 @@ class RetrievalRun(TenantOwned):
     __table_args__ = (
         UniqueConstraint("tenant_id", "id", name="uq_retrieval_run_tenant_id"),
         ForeignKeyConstraint(["tenant_id", "user_id"], ["users.tenant_id", "users.id"]),
+        UniqueConstraint(
+            "tenant_id", "id", "relationship_id", name="uq_retrieval_run_relationship"
+        ),
         ForeignKeyConstraint(
             ["tenant_id", "character_id"], ["characters.tenant_id", "characters.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"],
+            [
+                "relationships.tenant_id", "relationships.id", "relationships.user_id",
+                "relationships.character_id", "relationships.scope", "relationships.scenario_key",
+            ],
+            name="fk_retrieval_run_relationship_owner",
         ),
         ForeignKeyConstraint(
             ["tenant_id", "scenario_id", "user_id", "character_id"],
@@ -901,6 +1051,7 @@ class RetrievalRun(TenantOwned):
 class RetrievalCandidate(TenantOwned):
     __tablename__ = "retrieval_candidates"
     run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    relationship_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     memory_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     memory_version: Mapped[int] = mapped_column(Integer, nullable=False)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
@@ -919,18 +1070,17 @@ class RetrievalCandidate(TenantOwned):
     __table_args__ = (
         UniqueConstraint("tenant_id", "run_id", "memory_id", name="uq_retrieval_candidate"),
         ForeignKeyConstraint(
-            ["tenant_id", "run_id"], ["retrieval_runs.tenant_id", "retrieval_runs.id"]
+            ["tenant_id", "run_id", "relationship_id"],
+            ["retrieval_runs.tenant_id", "retrieval_runs.id", "retrieval_runs.relationship_id"],
+            name="fk_retrieval_candidate_run_relationship",
         ),
         ForeignKeyConstraint(
-            ["tenant_id", "memory_id", "user_id", "character_id", "scope", "scenario_key"],
+            ["tenant_id", "memory_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"],
             [
-                "memories.tenant_id",
-                "memories.id",
-                "memories.user_id",
-                "memories.character_id",
-                "memories.scope",
-                "memories.scenario_key",
+                "memories.tenant_id", "memories.id", "memories.relationship_id",
+                "memories.user_id", "memories.character_id", "memories.scope", "memories.scenario_key",
             ],
+            name="fk_retrieval_candidate_memory_relationship",
         ),
         CheckConstraint("memory_version>0", name="ck_retrieval_candidate_version"),
         CheckConstraint(
@@ -992,6 +1142,7 @@ class ResponseRun(TenantOwned):
     """Opaque authoritative record for a committed assistant response."""
 
     __tablename__ = "response_runs"
+    relationship_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     character_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
@@ -1025,9 +1176,27 @@ class ResponseRun(TenantOwned):
             name="uq_response_run_owner_scope",
         ),
         UniqueConstraint(
+            "tenant_id",
+            "id",
+            "relationship_id",
+            "user_id",
+            "character_id",
+            "scope",
+            "scenario_key",
+            name="uq_response_run_relationship_owner_scope",
+        ),
+        UniqueConstraint(
             "tenant_id", "user_id", "request_fingerprint", name="uq_response_run_idempotency"
         ),
         ForeignKeyConstraint(["tenant_id", "user_id"], ["users.tenant_id", "users.id"]),
+        ForeignKeyConstraint(
+            ["tenant_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"],
+            [
+                "relationships.tenant_id", "relationships.id", "relationships.user_id",
+                "relationships.character_id", "relationships.scope", "relationships.scenario_key",
+            ],
+            name="fk_response_run_relationship_owner",
+        ),
         ForeignKeyConstraint(
             ["tenant_id", "conversation_id", "user_id", "character_id", "scope", "scenario_key"],
             [
@@ -1039,6 +1208,15 @@ class ResponseRun(TenantOwned):
                 "conversations.scenario_key",
             ],
             name="fk_response_run_conversation",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"],
+            [
+                "conversations.tenant_id", "conversations.id", "conversations.relationship_id",
+                "conversations.user_id", "conversations.character_id", "conversations.scope",
+                "conversations.scenario_key",
+            ],
+            name="fk_response_run_conversation_relationship",
         ),
         ForeignKeyConstraint(
             ["tenant_id", "user_message_id", "user_id", "character_id", "scope", "scenario_key"],
@@ -1076,7 +1254,9 @@ class ResponseRun(TenantOwned):
             ["response_route_policies.tenant_id", "response_route_policies.id"],
         ),
         ForeignKeyConstraint(
-            ["tenant_id", "retrieval_run_id"], ["retrieval_runs.tenant_id", "retrieval_runs.id"]
+            ["tenant_id", "retrieval_run_id", "relationship_id"],
+            ["retrieval_runs.tenant_id", "retrieval_runs.id", "retrieval_runs.relationship_id"],
+            name="fk_response_run_retrieval_relationship",
         ),
         CheckConstraint(
             "(scope='real_world' AND scenario_id IS NULL) OR (scope='roleplay' AND scenario_id IS NOT NULL)",
@@ -1106,18 +1286,29 @@ class ResponseRun(TenantOwned):
 
 class DerivedMemoryView(TenantOwned):
     __tablename__ = "derived_memory_views"
+    relationship_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     character_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     scope: Mapped[Scope] = mapped_column(
         Enum(Scope, name="scope_enum", native_enum=True, create_type=False), nullable=False
     )
     scenario_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    scenario_key: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        Computed(
+            "coalesce(scenario_id, '00000000-0000-0000-0000-000000000000'::uuid)",
+            persisted=True,
+        ),
+    )
     view_type: Mapped[str] = mapped_column(String(64), nullable=False)
     generation: Mapped[int] = mapped_column(Integer, server_default="1", nullable=False)
     content: Mapped[dict] = mapped_column(JSONB, nullable=False)
     parent_memory_ids: Mapped[list] = mapped_column(JSONB, server_default="[]", nullable=False)
     creation_epoch: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
     __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "relationship_id", "view_type", name="uq_derived_view_relationship"
+        ),
         UniqueConstraint(
             "tenant_id",
             "user_id",
@@ -1131,6 +1322,14 @@ class DerivedMemoryView(TenantOwned):
         ForeignKeyConstraint(["tenant_id", "user_id"], ["users.tenant_id", "users.id"]),
         ForeignKeyConstraint(
             ["tenant_id", "character_id"], ["characters.tenant_id", "characters.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"],
+            [
+                "relationships.tenant_id", "relationships.id", "relationships.user_id",
+                "relationships.character_id", "relationships.scope", "relationships.scenario_key",
+            ],
+            name="fk_derived_view_relationship_owner",
         ),
         ForeignKeyConstraint(
             ["tenant_id", "scenario_id", "user_id", "character_id"],
@@ -1164,6 +1363,7 @@ class SharedHistoryEpisode(TenantOwned):
     """Bounded, source-linked relationship continuity; text stays with Memory."""
 
     __tablename__ = "shared_history_episodes"
+    relationship_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     character_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     scope: Mapped[Scope] = mapped_column(
@@ -1195,6 +1395,14 @@ class SharedHistoryEpisode(TenantOwned):
         ForeignKeyConstraint(["tenant_id", "user_id"], ["users.tenant_id", "users.id"]),
         ForeignKeyConstraint(
             ["tenant_id", "character_id"], ["characters.tenant_id", "characters.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"],
+            [
+                "relationships.tenant_id", "relationships.id", "relationships.user_id",
+                "relationships.character_id", "relationships.scope", "relationships.scenario_key",
+            ],
+            name="fk_shared_history_relationship_owner",
         ),
         ForeignKeyConstraint(
             ["tenant_id", "memory_id", "user_id", "character_id", "scope", "scenario_key"],
@@ -1272,6 +1480,7 @@ class ShadowMemoryCandidate(TenantOwned):
     """Encrypted, evaluation-only extraction output; never an authoritative memory."""
 
     __tablename__ = "shadow_memory_candidates"
+    relationship_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     character_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     scope: Mapped[Scope] = mapped_column(
@@ -1323,6 +1532,14 @@ class ShadowMemoryCandidate(TenantOwned):
             ["tenant_id", "character_id"], ["characters.tenant_id", "characters.id"]
         ),
         ForeignKeyConstraint(
+            ["tenant_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"],
+            [
+                "relationships.tenant_id", "relationships.id", "relationships.user_id",
+                "relationships.character_id", "relationships.scope", "relationships.scenario_key",
+            ],
+            name="fk_shadow_candidate_relationship_owner",
+        ),
+        ForeignKeyConstraint(
             ["tenant_id", "source_message_id", "user_id", "character_id", "scope", "scenario_key"],
             [
                 "messages.tenant_id",
@@ -1338,6 +1555,7 @@ class ShadowMemoryCandidate(TenantOwned):
             [
                 "tenant_id",
                 "memory_control_state_id",
+                "relationship_id",
                 "user_id",
                 "character_id",
                 "scope",
@@ -1346,6 +1564,7 @@ class ShadowMemoryCandidate(TenantOwned):
             [
                 "memory_control_state.tenant_id",
                 "memory_control_state.id",
+                "memory_control_state.relationship_id",
                 "memory_control_state.user_id",
                 "memory_control_state.character_id",
                 "memory_control_state.scope",
@@ -1392,6 +1611,14 @@ class ShadowMemoryCandidate(TenantOwned):
                 "memories.scenario_key",
             ],
             name="fk_shadow_promoted_memory_owner",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "promoted_memory_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"],
+            [
+                "memories.tenant_id", "memories.id", "memories.relationship_id",
+                "memories.user_id", "memories.character_id", "memories.scope", "memories.scenario_key",
+            ],
+            name="fk_shadow_promoted_relationship_owner",
         ),
         CheckConstraint(
             "(value_ciphertext IS NULL AND value_nonce IS NULL AND value_key_version IS NULL) "

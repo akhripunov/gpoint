@@ -183,6 +183,7 @@ class AutoWritePromotionService:
                 select(MemoryControlState)
                 .where(
                     MemoryControlState.tenant_id == tenant_id,
+                    MemoryControlState.relationship_id == candidate.relationship_id,
                     MemoryControlState.id == candidate.memory_control_state_id,
                     MemoryControlState.user_id == candidate.user_id,
                     MemoryControlState.character_id == candidate.character_id,
@@ -255,6 +256,7 @@ class AutoWritePromotionService:
                 select(SuppressionRule)
                 .where(
                     SuppressionRule.tenant_id == tenant_id,
+                    SuppressionRule.relationship_id == candidate.relationship_id,
                     SuppressionRule.user_id == candidate.user_id,
                     SuppressionRule.character_id == candidate.character_id,
                     SuppressionRule.scope == candidate.scope,
@@ -271,7 +273,7 @@ class AutoWritePromotionService:
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
                 {
                     "key": (
-                        f"autowrite:{tenant_id}:{candidate.user_id}:{candidate.character_id}:"
+                        f"autowrite:{tenant_id}:{candidate.relationship_id}:{candidate.user_id}:{candidate.character_id}:"
                         f"{candidate.scope.value}:{candidate.scenario_id}:{slot_key}"
                     )
                 },
@@ -280,6 +282,7 @@ class AutoWritePromotionService:
                 select(Memory)
                 .where(
                     Memory.tenant_id == tenant_id,
+                    Memory.relationship_id == candidate.relationship_id,
                     Memory.user_id == candidate.user_id,
                     Memory.character_id == candidate.character_id,
                     Memory.scope == candidate.scope,
@@ -314,6 +317,7 @@ class AutoWritePromotionService:
                 existing = Memory(
                     id=memory_id,
                     tenant_id=tenant_id,
+                    relationship_id=candidate.relationship_id,
                     user_id=candidate.user_id,
                     character_id=candidate.character_id,
                     # Current activity is a medium-term episode: it remains

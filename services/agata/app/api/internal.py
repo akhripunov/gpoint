@@ -29,6 +29,11 @@ from app.db.models import (
     User,
 )
 from app.domain.principal import PrincipalContext
+from app.domain.relationships import (
+    RelationshipUnavailable,
+    record_accepted_interaction,
+    resolve_relationship,
+)
 from app.memory.embedding import HuggingFaceFreeEmbeddingProvider
 from app.memory.retrieval import EmbeddingProvider, HybridRetrievalService
 from app.messages.crypto import AeadCrypto, RequestFingerprinter
@@ -434,6 +439,15 @@ async def respond(
         )
         if consent is None:
             raise HTTPException(status_code=403, detail={"code": "consent_required"})
+        principal = PrincipalContext(tenant_id, user.id, user.id, "internal")
+        try:
+            relationship = await resolve_relationship(
+                session, principal, external_character.id, Scope.real_world, None
+            )
+        except RelationshipUnavailable as exc:
+            raise HTTPException(
+                status_code=409, detail={"code": str(exc)}
+            ) from exc
         conversation = None
         external_conversation_id = payload.conversation_id or f"implicit:{payload.message_id}"
         conversation = await session.scalar(
@@ -444,6 +458,7 @@ async def respond(
                 Conversation.character_id == external_character.id,
                 Conversation.source_system == "gpoint",
                 Conversation.external_id == external_conversation_id,
+                Conversation.relationship_id == relationship.id,
             )
             .with_for_update()
         )
@@ -454,6 +469,7 @@ async def respond(
                 tenant_id=tenant_id,
                 user_id=user.id,
                 character_id=external_character.id,
+                relationship_id=relationship.id,
                 scope=Scope.real_world,
                 scenario_id=None,
                 started_at=now,
@@ -480,7 +496,6 @@ async def respond(
         user_id = user.id
         character_id = external_character.id
         conversation_id = conversation.id
-    principal = PrincipalContext(tenant_id, user_id, user_id, "internal")
     try:
         ingest = await MessageIngestionService(session, crypto, fingerprinter).ingest(
             principal,
@@ -498,6 +513,13 @@ async def respond(
         raise HTTPException(
             status_code=409 if code == "idempotency_conflict" else 403, detail={"code": code}
         ) from exc
+    if not ingest.replayed:
+        try:
+            await record_accepted_interaction(
+                session, principal, relationship.id, now
+            )
+        except RelationshipUnavailable as exc:
+            raise HTTPException(status_code=409, detail={"code": str(exc)}) from exc
     orchestrator = ResponseOrchestrator(
         session,
         crypto,

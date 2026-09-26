@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
+from conftest import ensure_test_relationship
 from sqlalchemy import select
 
 from app.config import get_settings
@@ -60,6 +61,9 @@ async def test_explicit_memory_commands_encrypt_idempotently_correct_and_forget(
                 ]
             )
             await session.flush()
+            relationship = await ensure_test_relationship(
+                session, TENANT_ID, user_id, character_id, Scope.real_world, None
+            )
             session.add_all(
                 [
                     Consent(
@@ -72,6 +76,7 @@ async def test_explicit_memory_commands_encrypt_idempotently_correct_and_forget(
                     Conversation(
                         id=conversation_id,
                         tenant_id=TENANT_ID,
+                        relationship_id=relationship.id,
                         user_id=user_id,
                         character_id=character_id,
                         scope=Scope.real_world,
@@ -80,6 +85,7 @@ async def test_explicit_memory_commands_encrypt_idempotently_correct_and_forget(
                     ),
                     MemoryControlState(
                         tenant_id=TENANT_ID,
+                        relationship_id=relationship.id,
                         user_id=user_id,
                         character_id=character_id,
                         scope=Scope.real_world,

@@ -4,11 +4,24 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from uuid import uuid4
+from types import SimpleNamespace
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
+
+from app.config import get_settings
+from app.messages.crypto import AeadCrypto
+from app.messages.protected_content import (
+    content_aad,
+    decrypt_json_from_storage,
+    decrypt_text_from_storage,
+    derived_view_content_aad,
+    memory_value_aad,
+    segment_keyphrases_aad,
+    segment_summary_aad,
+)
 
 ROOT = Path(__file__).parents[1]
 DATABASE_URL = os.getenv("AGATA_TEST_DATABASE_URL")
@@ -47,9 +60,29 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
         text=True,
     )
 
+    # The baseline migration imports current ORM metadata. Strip only the P2.1
+    # relationship layer here to reproduce an agata0002-era disposable schema.
+    with engine.begin() as connection:
+        for table in (
+            "conversations",
+            "memory_control_state",
+            "memories",
+            "suppression_rules",
+            "retrieval_runs",
+            "retrieval_candidates",
+            "response_runs",
+            "derived_memory_views",
+            "shared_history_episodes",
+            "shadow_memory_candidates",
+        ):
+            connection.execute(
+                text(f"ALTER TABLE agata.{table} DROP COLUMN IF EXISTS relationship_id CASCADE")
+            )
+        connection.execute(text("DROP TABLE IF EXISTS agata.relationships CASCADE"))
+
     tenant_id = env["AGATA_TENANT_ID"]
-    user_id, character_id, conversation_id, memory_id, segment_id, view_id = (
-        uuid4() for _ in range(6)
+    user_id, character_id, relationship_id, conversation_id, memory_id, segment_id, view_id = (
+        uuid4() for _ in range(7)
     )
     sentinel = "legacy-private-synthetic-payload"
     with engine.begin() as connection:
@@ -130,7 +163,20 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
         )
 
     subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
+        [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "agata0002"],
+        cwd=ROOT,
+        env=env,
+        check=True,
+        timeout=60,
+        capture_output=True,
+        text=True,
+    )
+    with engine.connect() as connection:
+        legacy_revision = connection.scalar(text("SELECT version_num FROM agata.alembic_version"))
+        assert legacy_revision == "agata0002"
+
+    subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "agata0003"],
         cwd=ROOT,
         env=env,
         check=True,
@@ -149,7 +195,7 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
         assert after == before
         assert "alembic_version" in agata_tables
         assert (
-            connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0002"
+            connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0003"
         )
         assert connection.scalar(text("SELECT count(*) FROM agata.tenants")) == 1
         assert (
@@ -188,22 +234,109 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
         assert message_guard and "content_key_version IS NOT NULL" in message_guard
         assert shadow_guard and "value_nonce IS NOT NULL" in shadow_guard
         assert shadow_guard and "value_key_version IS NOT NULL" in shadow_guard
+        backfilled_relationship_id = connection.scalar(
+            text(
+                "SELECT id FROM agata.relationships WHERE tenant_id=:tenant AND user_id=:user "
+                "AND character_id=:character AND scope='real_world' AND scenario_id IS NULL"
+            ),
+            {"tenant": tenant_id, "user": user_id, "character": character_id},
+        )
+        assert backfilled_relationship_id is not None
         migrated_memory = connection.execute(
-            text("SELECT value_text,value_json,search_text FROM agata.memories WHERE id=:id"),
+            text("SELECT * FROM agata.memories WHERE id=:id"),
             {"id": memory_id},
         ).one()
+        assert migrated_memory.relationship_id == backfilled_relationship_id
         assert migrated_memory.value_text.startswith("agata$")
         assert migrated_memory.value_json["_agata_ciphertext"] == "1"
         assert sentinel not in migrated_memory.search_text
         migrated_segment = connection.execute(
-            text("SELECT summary,keyphrases FROM agata.conversation_segments WHERE id=:id"),
+            text("SELECT * FROM agata.conversation_segments WHERE id=:id"),
             {"id": segment_id},
         ).one()
         assert migrated_segment.summary.startswith("agata$")
         assert migrated_segment.keyphrases["_agata_ciphertext"] == "1"
-        migrated_view = connection.scalar(
-            text("SELECT content FROM agata.derived_memory_views WHERE id=:id"),
+        migrated_view = connection.execute(
+            text("SELECT * FROM agata.derived_memory_views WHERE id=:id"),
             {"id": view_id},
+        ).one()
+        assert migrated_view.relationship_id == backfilled_relationship_id
+        assert migrated_view.content["_agata_ciphertext"] == "1"
+        settings = get_settings()
+        crypto = AeadCrypto(
+            encoded_key=settings.message_aead_key.get_secret_value(),
+            key_version=settings.message_aead_key_version,
         )
-        assert migrated_view["_agata_ciphertext"] == "1"
+        memory_owner = SimpleNamespace(
+            tenant_id=UUID(tenant_id),
+            user_id=user_id,
+            character_id=character_id,
+            scope="real_world",
+            scenario_id=None,
+            id=memory_id,
+        )
+        conversation_owner = SimpleNamespace(
+            tenant_id=UUID(tenant_id),
+            user_id=user_id,
+            character_id=character_id,
+            scope="real_world",
+            scenario_id=None,
+        )
+        assert decrypt_text_from_storage(
+            migrated_memory.value_text, memory_value_aad(memory_owner), crypto=crypto
+        ) == sentinel
+        assert decrypt_json_from_storage(
+            migrated_memory.value_json,
+            content_aad(
+                entity="memories",
+                tenant_id=UUID(tenant_id),
+                user_id=user_id,
+                character_id=character_id,
+                scope="real_world",
+                scenario_id=None,
+                record_id=memory_id,
+                field="value_json",
+            ),
+            crypto=crypto,
+        ) == {"note": sentinel}
+        segment_owner = SimpleNamespace(
+            tenant_id=UUID(tenant_id), id=segment_id
+        )
+        assert decrypt_text_from_storage(
+            migrated_segment.summary,
+            segment_summary_aad(segment_owner, conversation_owner),
+            crypto=crypto,
+        ) == sentinel
+        assert decrypt_json_from_storage(
+            migrated_segment.keyphrases,
+            segment_keyphrases_aad(segment_owner, conversation_owner),
+            crypto=crypto,
+        ) == [sentinel]
+        view_owner = SimpleNamespace(
+            tenant_id=UUID(tenant_id),
+            user_id=user_id,
+            character_id=character_id,
+            scope="real_world",
+            scenario_id=None,
+            id=view_id,
+        )
+        assert decrypt_json_from_storage(
+            migrated_view.content, derived_view_content_aad(view_owner), crypto=crypto
+        ) == {"summary": sentinel}
+        assert connection.scalar(
+            text("SELECT count(*) FROM agata.retrieval_candidates WHERE relationship_id IS NULL")
+        ) == 0
+        assert connection.scalar(text("SELECT count(*) FROM agata.relationships")) == 1
+        relationship_id = connection.scalar(
+            text("SELECT relationship_id FROM agata.conversations WHERE id=:id"),
+            {"id": conversation_id},
+        )
+        assert relationship_id is not None
+        assert connection.scalar(
+            text("SELECT relationship_id FROM agata.memories WHERE id=:id"), {"id": memory_id}
+        ) == relationship_id
+        assert connection.scalar(
+            text("SELECT count(*) FROM agata.relationships WHERE id=:id AND status='ACTIVE'"),
+            {"id": relationship_id},
+        ) == 1
     engine.dispose()

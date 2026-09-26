@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
+from conftest import ensure_test_relationship
 
 from app.config import get_settings
 from app.db.base import SessionFactory, set_tenant_context
@@ -50,6 +51,7 @@ async def test_postgres_user_character_tenant_and_scenario_retrieval_isolation()
     labels: dict[tuple[str, str, str], str] = {}
     principals: dict[tuple[str, str, str], tuple[UUID, UUID]] = {}
     scenario_ids: dict[tuple[str, str, str], UUID | None] = {}
+    relationship_ids: dict[tuple[str, str, str], UUID] = {}
     async with SessionFactory() as session:
         async with session.begin():
             await set_tenant_context(session, str(TENANT_ID))
@@ -92,8 +94,11 @@ async def test_postgres_user_character_tenant_and_scenario_retrieval_isolation()
                     session.add(RoleplayScenario(id=scenario_id, tenant_id=tenant_id, user_id=user.id, character_id=character.id, name=f"isolation-{scenario_label}-{suffix}", started_at=datetime.now(UTC)))
                     await session.flush()
                 scope = Scope(scope_label)
-                conversation = Conversation(tenant_id=tenant_id, user_id=user.id, character_id=character.id, scope=scope, scenario_id=scenario_id, started_at=datetime.now(UTC))
-                control = MemoryControlState(tenant_id=tenant_id, user_id=user.id, character_id=character.id, scope=scope, scenario_id=scenario_id)
+                relationship = await ensure_test_relationship(
+                    session, tenant_id, user.id, character.id, scope, scenario_id
+                )
+                conversation = Conversation(tenant_id=tenant_id, relationship_id=relationship.id, user_id=user.id, character_id=character.id, scope=scope, scenario_id=scenario_id, started_at=datetime.now(UTC))
+                control = MemoryControlState(tenant_id=tenant_id, relationship_id=relationship.id, user_id=user.id, character_id=character.id, scope=scope, scenario_id=scenario_id)
                 session.add_all([conversation, control])
                 await session.flush()
                 message_id = uuid4()
@@ -112,7 +117,7 @@ async def test_postgres_user_character_tenant_and_scenario_retrieval_isolation()
                 memory_id = uuid4()
                 token = f"private-{user_label}-{character_label}-{scenario_label or 'real'}-{suffix}"
                 memory = Memory(
-                    id=memory_id, tenant_id=tenant_id, user_id=user.id, character_id=character.id,
+                    id=memory_id, tenant_id=tenant_id, relationship_id=relationship.id, user_id=user.id, character_id=character.id,
                     kind="semantic_fact", scope=scope, scenario_id=scenario_id,
                     slot_key=f"test.{suffix}.{user_label}.{character_label}.{scenario_label or 'real'}",
                     predicate="test_fact",
@@ -136,6 +141,7 @@ async def test_postgres_user_character_tenant_and_scenario_retrieval_isolation()
                 labels[key] = token
                 principals[key] = (user.id, character.id)
                 scenario_ids[key] = scenario_id
+                relationship_ids[key] = relationship.id
 
     hmac_key = base64.b64decode(settings.retrieval_query_hmac_key.get_secret_value())
     service_results: dict[tuple[str, str, str], set[str]] = {}
@@ -145,7 +151,7 @@ async def test_postgres_user_character_tenant_and_scenario_retrieval_isolation()
         principal = PrincipalContext(tenant_id, user_id, user_id, "internal")
         scope = Scope.roleplay if scenario_label in {"S1", "S2"} else Scope.real_world
         scenario_id = scenario_ids[key]
-        request = RetrievalRequest(character_id, scope, scenario_id, "synthetic isolation query", datetime.now(UTC))
+        request = RetrievalRequest(character_id, relationship_ids[key], scope, scenario_id, "synthetic isolation query", datetime.now(UTC))
         async with SessionFactory() as session:
             result = await HybridRetrievalService(session, DeterministicFakeEmbeddingProvider(), hmac_key=hmac_key).retrieve(principal, request)
         service_results[key] = {item.value for item in result.results if item.value}

@@ -481,6 +481,7 @@ class ResponseOrchestrator:
                 conversation.character_id,
                 conversation.scope,
                 conversation.scenario_id,
+                conversation.relationship_id,
             )
             shared_history = await SharedHistoryService(self.session).load_in_transaction(
                 shared_context
@@ -493,6 +494,7 @@ class ResponseOrchestrator:
                 principal,
                 RetrievalRequest(
                     conversation.character_id,
+                    conversation.relationship_id,
                     conversation.scope,
                     conversation.scenario_id,
                     plaintext,
@@ -514,6 +516,7 @@ class ResponseOrchestrator:
                     principal,
                     RetrievalRequest(
                         conversation.character_id,
+                        conversation.relationship_id,
                         conversation.scope,
                         conversation.scenario_id,
                         plaintext,
@@ -760,6 +763,7 @@ class ResponseOrchestrator:
             self.session.add(message)
             run = ResponseRun(
                 tenant_id=principal.tenant_id,
+                relationship_id=conversation.relationship_id,
                 user_id=principal.user_id,
                 character_id=conversation.character_id,
                 conversation_id=conversation.id,
@@ -820,6 +824,7 @@ class ResponseOrchestrator:
                 select(MemoryControlState)
                 .where(
                     MemoryControlState.tenant_id == principal.tenant_id,
+                    MemoryControlState.relationship_id == conversation.relationship_id,
                     MemoryControlState.user_id == principal.user_id,
                 )
                 .limit(1)
@@ -902,6 +907,7 @@ class ResponseOrchestrator:
                         select(MemoryControlState)
                         .where(
                             MemoryControlState.tenant_id == principal.tenant_id,
+                            MemoryControlState.relationship_id == conversation.relationship_id,
                             MemoryControlState.user_id == principal.user_id,
                         )
                         .limit(1)
@@ -921,6 +927,7 @@ class ResponseOrchestrator:
                                     select(Memory)
                                     .where(
                                         Memory.tenant_id == principal.tenant_id,
+                                        Memory.relationship_id == conversation.relationship_id,
                                         Memory.user_id == principal.user_id,
                                         Memory.character_id == conversation.character_id,
                                         Memory.scope == conversation.scope,
@@ -961,6 +968,7 @@ class ResponseOrchestrator:
                             select(Memory)
                             .where(
                                 Memory.tenant_id == principal.tenant_id,
+                                Memory.relationship_id == conversation.relationship_id,
                                 Memory.user_id == principal.user_id,
                                 Memory.predicate == "user_stated",
                                 Memory.lifecycle_state == LifecycleState("active"),
@@ -985,6 +993,7 @@ class ResponseOrchestrator:
                         memory = Memory(
                             id=memory_id,
                             tenant_id=principal.tenant_id,
+                            relationship_id=conversation.relationship_id,
                             user_id=principal.user_id,
                             character_id=conversation.character_id,
                             kind="user_fact",
@@ -1130,6 +1139,7 @@ class ResponseOrchestrator:
                         select(MemoryControlState)
                         .where(
                             MemoryControlState.tenant_id == principal.tenant_id,
+                            MemoryControlState.relationship_id == conversation.relationship_id,
                             MemoryControlState.user_id == principal.user_id,
                         )
                         .limit(1)
@@ -1186,6 +1196,7 @@ class ResponseOrchestrator:
                         select(DerivedMemoryView)
                         .where(
                             DerivedMemoryView.tenant_id == principal.tenant_id,
+                            DerivedMemoryView.relationship_id == conversation.relationship_id,
                             DerivedMemoryView.user_id == principal.user_id,
                             DerivedMemoryView.character_id == conversation.character_id,
                             DerivedMemoryView.scope == conversation.scope,
@@ -1200,6 +1211,7 @@ class ResponseOrchestrator:
                             DerivedMemoryView(
                                 id=view_id,
                                 tenant_id=principal.tenant_id,
+                                relationship_id=conversation.relationship_id,
                                 user_id=principal.user_id,
                                 character_id=conversation.character_id,
                                 scope=conversation.scope,
@@ -1398,6 +1410,7 @@ class ResponseOrchestrator:
                     select(Memory)
                     .where(
                         Memory.tenant_id == principal.tenant_id,
+                        Memory.relationship_id == conversation.relationship_id,
                         Memory.user_id == principal.user_id,
                         Memory.character_id == conversation.character_id,
                         Memory.scope == conversation.scope,
@@ -1523,6 +1536,7 @@ class ResponseOrchestrator:
                 )
                 .where(
                     Memory.tenant_id == principal.tenant_id,
+                    Memory.relationship_id == conversation.relationship_id,
                     Memory.id == item.memory_id,
                     Memory.version == item.version,
                     Memory.user_id == principal.user_id,
@@ -1723,7 +1737,7 @@ async def run_retention_cleanup(session: AsyncSession, tenant_id: UUID) -> int:
             "EXISTS (SELECT 1 FROM agata.memory_sources s WHERE s.tenant_id=m.tenant_id "
             "AND s.memory_id=m.id AND s.message_id=ANY(CAST(:message_ids AS uuid[]))) OR "
             f"({memory_expiry})"
-            ") RETURNING m.id,m.user_id,m.character_id,m.scope,m.scenario_id"
+            ") RETURNING m.id,m.relationship_id,m.user_id,m.character_id,m.scope,m.scenario_id"
         ),
         memory_params,
     )
@@ -1762,32 +1776,22 @@ async def run_retention_cleanup(session: AsyncSession, tenant_id: UUID) -> int:
                 "ids": [str(row.id) for row in invalidated_candidates],
             },
         )
-    affected_scopes = {
-        (
-            row.user_id,
-            row.character_id,
-            getattr(row.scope, "value", row.scope),
-            row.scenario_id,
-        )
-        for row in purged_rows
-    }
-    for user_id, character_id, scope, scenario_id in affected_scopes:
+    affected_relationship_ids = {row.relationship_id for row in purged_rows}
+    for relationship_id in affected_relationship_ids:
         await session.execute(
             text(
                 "UPDATE agata.memory_control_state SET deletion_epoch=deletion_epoch+1 "
-                "WHERE tenant_id=:tid AND user_id=:uid AND character_id=:cid "
-                "AND scope=CAST(:scope AS public.scope_enum) AND scenario_id IS NOT DISTINCT FROM :sid"
+                "WHERE tenant_id=:tid AND relationship_id=:relationship_id"
             ),
-            {"tid": tenant_id, "uid": user_id, "cid": character_id, "scope": scope, "sid": scenario_id},
+            {"tid": tenant_id, "relationship_id": relationship_id},
         )
         await session.execute(
             text(
                 "UPDATE agata.derived_memory_views SET content='{}'::jsonb, "
                 "parent_memory_ids='[]'::jsonb, generation=generation+1 "
-                "WHERE tenant_id=:tid AND user_id=:uid AND character_id=:cid "
-                "AND scope=CAST(:scope AS public.scope_enum) AND scenario_id IS NOT DISTINCT FROM :sid"
+                "WHERE tenant_id=:tid AND relationship_id=:relationship_id"
             ),
-            {"tid": tenant_id, "uid": user_id, "cid": character_id, "scope": scope, "sid": scenario_id},
+            {"tid": tenant_id, "relationship_id": relationship_id},
         )
     if conversation_ids:
         await session.execute(

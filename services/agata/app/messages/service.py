@@ -245,6 +245,7 @@ class MessageIngestionService:
             select(MemoryControlState)
             .where(
                 MemoryControlState.tenant_id == principal.tenant_id,
+                MemoryControlState.relationship_id == conversation.relationship_id,
                 MemoryControlState.user_id == principal.user_id,
                 MemoryControlState.character_id == conversation.character_id,
                 MemoryControlState.scope == conversation.scope,
@@ -255,6 +256,7 @@ class MessageIngestionService:
         if control is None:
             control = MemoryControlState(
                 tenant_id=principal.tenant_id,
+                relationship_id=conversation.relationship_id,
                 user_id=principal.user_id,
                 character_id=conversation.character_id,
                 scope=conversation.scope,

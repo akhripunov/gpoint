@@ -14,6 +14,7 @@ def test_core_tables_are_owned_only_by_agata_schema() -> None:
         "memories",
         "outbox_jobs",
         "response_runs",
+        "relationships",
     } <= {table.name for table in tables.values()}
 
 
@@ -42,6 +43,7 @@ def test_message_response_and_profile_idempotency_constraints_exist() -> None:
     messages = Base.metadata.tables["agata.messages"]
     runs = Base.metadata.tables["agata.response_runs"]
     profiles = Base.metadata.tables["agata.character_profile_versions"]
+    relationships = Base.metadata.tables["agata.relationships"]
 
     def unique_columns(table):
         return {
@@ -53,3 +55,6 @@ def test_message_response_and_profile_idempotency_constraints_exist() -> None:
     assert ("tenant_id", "idempotency_key") in unique_columns(messages)
     assert ("tenant_id", "user_id", "request_fingerprint") in unique_columns(runs)
     assert ("tenant_id", "character_id", "version") in unique_columns(profiles)
+    assert (
+        "tenant_id", "user_id", "character_id", "scope", "scenario_key"
+    ) in unique_columns(relationships)

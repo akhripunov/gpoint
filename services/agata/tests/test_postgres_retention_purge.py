@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
+from conftest import ensure_test_relationship
 from sqlalchemy import select
 
 from app.config import get_settings
@@ -79,10 +80,16 @@ async def test_retention_physically_purges_content_and_respects_legal_hold():
             hold_consent = Consent(tenant_id=TENANT_ID, user_id=hold_user_id, purpose="long_term_memory", granted_at=now, policy_version="test")
             session.add_all([consent, hold_consent])
             await session.flush()
-            conversation = Conversation(id=conversation_id, tenant_id=TENANT_ID, user_id=user_id, character_id=character_id, scope=Scope.real_world, scenario_id=None, started_at=now-timedelta(days=2))
-            control = MemoryControlState(id=control_id, tenant_id=TENANT_ID, user_id=user_id, character_id=character_id, scope=Scope.real_world, scenario_id=None)
-            hold_conversation = Conversation(id=hold_conversation_id, tenant_id=TENANT_ID, user_id=hold_user_id, character_id=hold_character_id, scope=Scope.real_world, scenario_id=None, started_at=now-timedelta(days=2))
-            hold_control = MemoryControlState(id=hold_control_id, tenant_id=TENANT_ID, user_id=hold_user_id, character_id=hold_character_id, scope=Scope.real_world, scenario_id=None)
+            relationship = await ensure_test_relationship(
+                session, TENANT_ID, user_id, character_id, Scope.real_world, None
+            )
+            hold_relationship = await ensure_test_relationship(
+                session, TENANT_ID, hold_user_id, hold_character_id, Scope.real_world, None
+            )
+            conversation = Conversation(id=conversation_id, tenant_id=TENANT_ID, relationship_id=relationship.id, user_id=user_id, character_id=character_id, scope=Scope.real_world, scenario_id=None, started_at=now-timedelta(days=2))
+            control = MemoryControlState(id=control_id, tenant_id=TENANT_ID, relationship_id=relationship.id, user_id=user_id, character_id=character_id, scope=Scope.real_world, scenario_id=None)
+            hold_conversation = Conversation(id=hold_conversation_id, tenant_id=TENANT_ID, relationship_id=hold_relationship.id, user_id=hold_user_id, character_id=hold_character_id, scope=Scope.real_world, scenario_id=None, started_at=now-timedelta(days=2))
+            hold_control = MemoryControlState(id=hold_control_id, tenant_id=TENANT_ID, relationship_id=hold_relationship.id, user_id=hold_user_id, character_id=hold_character_id, scope=Scope.real_world, scenario_id=None)
             session.add_all([conversation, control, hold_conversation, hold_control])
             await session.flush()
 
@@ -102,7 +109,7 @@ async def test_retention_physically_purges_content_and_respects_legal_hold():
             hold_message = make_message(hold_message_id, hold_user_id, hold_character_id, hold_conversation_id, hold_policy_id, "held")
             session.add_all([message, hold_message])
             memory = Memory(
-                id=memory_id, tenant_id=TENANT_ID, user_id=user_id, character_id=character_id,
+                id=memory_id, tenant_id=TENANT_ID, relationship_id=relationship.id, user_id=user_id, character_id=character_id,
                 kind="semantic_fact", scope=Scope.real_world, scenario_id=None,
                 slot_key=f"purge.{suffix}", predicate="private", value_text=encrypt_text_for_storage(
                     "private memory", content_aad(entity="memories", tenant_id=TENANT_ID, user_id=user_id, character_id=character_id, scope=Scope.real_world, scenario_id=None, record_id=memory_id, field="value_text"), crypto=crypto),
@@ -113,7 +120,7 @@ async def test_retention_physically_purges_content_and_respects_legal_hold():
                 embedding=[0.1] * 1536, embedding_model="test", embedded_at=now-timedelta(days=1),
             )
             hold_memory = Memory(
-                id=hold_memory_id, tenant_id=TENANT_ID, user_id=hold_user_id, character_id=hold_character_id,
+                id=hold_memory_id, tenant_id=TENANT_ID, relationship_id=hold_relationship.id, user_id=hold_user_id, character_id=hold_character_id,
                 kind="semantic_fact", scope=Scope.real_world, scenario_id=None,
                 slot_key=f"hold.{suffix}", predicate="private", value_text=encrypt_text_for_storage(
                     "held memory", content_aad(entity="memories", tenant_id=TENANT_ID, user_id=hold_user_id, character_id=hold_character_id, scope=Scope.real_world, scenario_id=None, record_id=hold_memory_id, field="value_text"), crypto=crypto),
@@ -129,12 +136,12 @@ async def test_retention_physically_purges_content_and_respects_legal_hold():
                 ConversationSegment(id=segment_id, tenant_id=TENANT_ID, conversation_id=conversation_id, started_at=now-timedelta(days=2), ended_at=now-timedelta(days=1), summary=encrypt_text_for_storage("private summary", content_aad(entity="conversation_segments", tenant_id=TENANT_ID, user_id=user_id, character_id=character_id, scope=Scope.real_world, scenario_id=None, record_id=segment_id, field="summary"), crypto=crypto), keyphrases=encrypt_json_for_storage(["private phrase"], content_aad(entity="conversation_segments", tenant_id=TENANT_ID, user_id=user_id, character_id=character_id, scope=Scope.real_world, scenario_id=None, record_id=segment_id, field="keyphrases"), crypto=crypto)),
             ])
             view_id = uuid4()
-            view = DerivedMemoryView(id=view_id, tenant_id=TENANT_ID, user_id=user_id, character_id=character_id, scope=Scope.real_world, scenario_id=None, view_type="conversation_summary", content=encrypt_json_for_storage({"text": "private view"}, content_aad(entity="derived_memory_views", tenant_id=TENANT_ID, user_id=user_id, character_id=character_id, scope=Scope.real_world, scenario_id=None, record_id=view_id, field="content"), crypto=crypto), parent_memory_ids=[str(memory_id)])
+            view = DerivedMemoryView(id=view_id, tenant_id=TENANT_ID, relationship_id=relationship.id, user_id=user_id, character_id=character_id, scope=Scope.real_world, scenario_id=None, view_type="conversation_summary", content=encrypt_json_for_storage({"text": "private view"}, content_aad(entity="derived_memory_views", tenant_id=TENANT_ID, user_id=user_id, character_id=character_id, scope=Scope.real_world, scenario_id=None, record_id=view_id, field="content"), crypto=crypto), parent_memory_ids=[str(memory_id)])
             session.add(view)
             candidate_id = uuid4()
             candidate_envelope = crypto.encrypt("private candidate", f"shadow:{TENANT_ID}:{user_id}:{message_id}:{candidate_id}".encode())
             candidate = ShadowMemoryCandidate(
-                id=candidate_id, tenant_id=TENANT_ID, user_id=user_id, character_id=character_id,
+                id=candidate_id, tenant_id=TENANT_ID, relationship_id=relationship.id, user_id=user_id, character_id=character_id,
                 scope=Scope.real_world, scenario_id=None, source_message_id=message_id,
                 memory_control_state_id=control_id, category="preference", subject="user",
                 predicate="likes", value_ciphertext=candidate_envelope.ciphertext,

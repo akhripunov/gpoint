@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.base import set_tenant_context
 from app.db.models import (
     Consent,
+    Conversation,
     MemoryControlState,
     Message,
     OutboxJob,
@@ -541,10 +542,23 @@ class ShadowExtractionWorker:
         )
         if message is None or message.deleted_at is not None:
             raise ExtractionError("source_ineligible")
+        conversation = await self.session.scalar(
+            select(Conversation).where(
+                Conversation.tenant_id == job.tenant_id,
+                Conversation.id == message.conversation_id,
+                Conversation.user_id == message.user_id,
+                Conversation.character_id == message.character_id,
+                Conversation.scope == message.scope,
+                Conversation.scenario_id == message.scenario_id,
+            )
+        )
+        if conversation is None:
+            raise ExtractionError("source_conversation_unavailable")
         control = await self.session.scalar(
             select(MemoryControlState)
             .where(
                 MemoryControlState.tenant_id == job.tenant_id,
+                MemoryControlState.relationship_id == conversation.relationship_id,
                 MemoryControlState.id == job.memory_control_state_id,
                 MemoryControlState.user_id == message.user_id,
                 MemoryControlState.character_id == message.character_id,
@@ -649,6 +663,7 @@ class ShadowExtractionWorker:
                 extractor_schema_version=self.schema_version,
                 source_deletion_epoch=job.creation_epoch,
                 status="shadow",
+                relationship_id=control.relationship_id,
                 consent_id=consent.id,
                 retention_policy_id=message.retention_policy_id,
                 expires_at=(

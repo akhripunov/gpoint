@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
+from conftest import ensure_test_relationship
 from sqlalchemy import select
 
 from app.config import get_settings
@@ -71,9 +72,13 @@ async def test_postgres_summary_worker_persists_chronological_encrypted_segment_
                 ]
             )
             await session.flush()
+            relationship = await ensure_test_relationship(
+                session, TENANT_ID, user_id, character_id, Scope.real_world, None
+            )
             conversation = Conversation(
                 id=conversation_id,
                 tenant_id=TENANT_ID,
+                relationship_id=relationship.id,
                 user_id=user_id,
                 character_id=character_id,
                 scope=Scope.real_world,
@@ -83,6 +88,7 @@ async def test_postgres_summary_worker_persists_chronological_encrypted_segment_
             control = MemoryControlState(
                 id=control_id,
                 tenant_id=TENANT_ID,
+                relationship_id=relationship.id,
                 user_id=user_id,
                 character_id=character_id,
                 scope=Scope.real_world,

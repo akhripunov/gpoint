@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
+from conftest import ensure_test_relationship
 from sqlalchemy import select
 
 from app.config import get_settings
@@ -64,6 +65,9 @@ async def test_memory_worker_extracts_encrypted_shadow_and_keeps_promotion_defau
                 ]
             )
             await session.flush()
+            relationship = await ensure_test_relationship(
+                session, tenant_id, user_id, character_id, Scope.real_world, None
+            )
             session.add_all(
                 [
                     Consent(
@@ -76,6 +80,7 @@ async def test_memory_worker_extracts_encrypted_shadow_and_keeps_promotion_defau
                     Conversation(
                         id=conversation_id,
                         tenant_id=tenant_id,
+                        relationship_id=relationship.id,
                         user_id=user_id,
                         character_id=character_id,
                         scope=Scope.real_world,
@@ -85,6 +90,7 @@ async def test_memory_worker_extracts_encrypted_shadow_and_keeps_promotion_defau
                     MemoryControlState(
                         id=control_id,
                         tenant_id=tenant_id,
+                        relationship_id=relationship.id,
                         user_id=user_id,
                         character_id=character_id,
                         scope=Scope.real_world,
