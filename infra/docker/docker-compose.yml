@@ -1,12 +1,43 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: gpoint
       POSTGRES_PASSWORD: gpoint_dev_only
       POSTGRES_DB: gpoint
     ports: ["5432:5432"]
     volumes: [gpoint_pg:/var/lib/postgresql/data]
+  agata-api:
+    profiles: [agata]
+    build:
+      context: ../../services/agata
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment: &agata_environment
+      AGATA_DATABASE_URL: postgresql+asyncpg://gpoint:gpoint_dev_only@postgres:5432/gpoint
+      AGATA_TENANT_ID: ${AGATA_TENANT_ID:?Set a UUID tenant for local AGATA}
+      AGATA_INTERNAL_API_TOKEN: ${AGATA_INTERNAL_API_TOKEN:?Set a local internal API token}
+      AGATA_MESSAGE_AEAD_KEY: ${AGATA_MESSAGE_AEAD_KEY:?Set a base64 32-byte key}
+      AGATA_REQUEST_FINGERPRINT_HMAC_KEY: ${AGATA_REQUEST_FINGERPRINT_HMAC_KEY:?Set a base64 32-byte key}
+      AGATA_RETRIEVAL_QUERY_HMAC_KEY: ${AGATA_RETRIEVAL_QUERY_HMAC_KEY:?Set a base64 32-byte key}
+      AGATA_RESPONSE_FINGERPRINT_HMAC_KEY: ${AGATA_RESPONSE_FINGERPRINT_HMAC_KEY:?Set a base64 32-byte key}
+      AGATA_SHADOW_CANDIDATE_HMAC_KEY: ${AGATA_SHADOW_CANDIDATE_HMAC_KEY:?Set a base64 32-byte key}
+      AGATA_EMBEDDING_API_KEY: ${AGATA_EMBEDDING_API_KEY:?Set an embedding-provider key}
+      AGATA_LLM_API_KEY: ${AGATA_LLM_API_KEY:?Set a response-provider key}
+    depends_on:
+      - postgres
+    expose: [8000]
+    ports: ["127.0.0.1:8001:8000"]
+  agata-worker:
+    profiles: [agata]
+    build:
+      context: ../../services/agata
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["python", "-m", "app.memory.worker"]
+    environment: *agata_environment
+    depends_on:
+      - postgres
   redis:
     image: redis:7-alpine
     ports: ["6379:6379"]

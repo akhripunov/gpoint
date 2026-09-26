@@ -7,6 +7,8 @@ services:
     command: ["node", "apps/api/dist/apps/api/src/main.js"]
     env_file:
       - /opt/gpoint/env/production.env
+    environment:
+      AGATA_SERVICE_URL: http://agata-api:8000
     volumes:
       - /opt/gpoint/media:/data/media
     expose:
@@ -21,6 +23,34 @@ services:
     networks:
       - gpoint_app
       - shared_internal
+
+  agata-api:
+    profiles: [agata]
+    image: gpoint-agata-runtime:${RELEASE_SHA}
+    build:
+      context: /opt/gpoint/releases/${RELEASE_SHA}/source/services/agata
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file:
+      - /opt/gpoint/env/production.env
+    expose: ["8000"]
+    networks:
+      - gpoint_app
+      - shared_internal
+
+  agata-memory-worker:
+    profiles: [agata]
+    image: gpoint-agata-runtime:${RELEASE_SHA}
+    build:
+      context: /opt/gpoint/releases/${RELEASE_SHA}/source/services/agata
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["python", "-m", "app.memory.worker"]
+    env_file:
+      - /opt/gpoint/env/production.env
+    networks:
+      - gpoint_app
 
   worker:
     image: gpoint-runtime:${RELEASE_SHA}

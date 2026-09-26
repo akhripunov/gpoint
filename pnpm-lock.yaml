@@ -23,6 +23,9 @@ importers:
       '@aws-sdk/s3-request-presigner':
         specifier: ^3.879.0
         version: 3.1131.0
+      '@gpoint/agata-client':
+        specifier: workspace:*
+        version: link:../../packages/agata-client
       '@gpoint/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
@@ -135,6 +138,18 @@ importers:
       '@types/node':
         specifier: ^22.10.2
         version: 22.20.2
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
+  packages/agata-client:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.20.2
+      tsx:
+        specifier: ^4.19.2
+        version: 4.23.13
       typescript:
         specifier: ^5.7.2
         version: 5.9.3
