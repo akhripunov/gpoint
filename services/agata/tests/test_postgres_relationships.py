@@ -14,9 +14,14 @@ from app.db.base import SessionFactory, set_tenant_context
 from app.db.models import (
     Character,
     Conversation,
+    EvidenceState,
+    LifecycleState,
+    Memory,
     Relationship,
+    RetrievalRun,
     RoleplayScenario,
     Scope,
+    SharedHistoryEpisode,
     Tenant,
     User,
 )
@@ -133,6 +138,134 @@ async def test_conversation_relationship_tuple_mismatch_is_rejected_by_postgres(
                     )
                 )
                 await session.flush()
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_memory_shared_history_and_retrieval_relationship_mismatches_are_rejected():
+    suffix = uuid4().hex
+    user_a, user_b, character_id, scenario_id = (uuid4() for _ in range(4))
+    now = datetime.now(UTC)
+    async with SessionFactory() as session:
+        async with session.begin():
+            await set_tenant_context(session, TENANT_ID)
+            session.add_all(
+                [
+                    User(id=user_a, tenant_id=TENANT_ID, external_id=f"owner-a-{suffix}"),
+                    User(id=user_b, tenant_id=TENANT_ID, external_id=f"owner-b-{suffix}"),
+                    Character(
+                        id=character_id,
+                        tenant_id=TENANT_ID,
+                        external_id=f"owner-character-{suffix}",
+                        name="Owner integrity",
+                    ),
+                ]
+            )
+            await session.flush()
+            scenario = RoleplayScenario(
+                id=scenario_id,
+                tenant_id=TENANT_ID,
+                user_id=user_a,
+                character_id=character_id,
+                name=f"owner-scenario-{suffix}",
+                started_at=now,
+            )
+            session.add(scenario)
+            await session.flush()
+            rel_a = await resolve_relationship(
+                session,
+                PrincipalContext(UUID(TENANT_ID), user_a, user_a, "internal"),
+                character_id,
+                Scope.real_world,
+                None,
+            )
+            rel_b = await resolve_relationship(
+                session,
+                PrincipalContext(UUID(TENANT_ID), user_b, user_b, "internal"),
+                character_id,
+                Scope.real_world,
+                None,
+            )
+            memory_b = Memory(
+                tenant_id=UUID(TENANT_ID),
+                relationship_id=rel_b.id,
+                user_id=user_b,
+                character_id=character_id,
+                kind="semantic_fact",
+                scope=Scope.real_world,
+                scenario_id=None,
+                observed_at=now,
+                evidence_state=EvidenceState.confirmed,
+                lifecycle_state=LifecycleState.historical,
+                confidence=0.5,
+                importance=0.5,
+            )
+            session.add(memory_b)
+            await session.flush()
+
+            mismatch_cases = (
+                (
+                    "fk_memory_relationship_owner",
+                    Memory(
+                        tenant_id=UUID(TENANT_ID),
+                        relationship_id=rel_a.id,
+                        user_id=user_a,
+                        character_id=character_id,
+                        kind="semantic_fact",
+                        scope=Scope.roleplay,
+                        scenario_id=scenario_id,
+                        observed_at=now,
+                        evidence_state=EvidenceState.confirmed,
+                        lifecycle_state=LifecycleState.historical,
+                        confidence=0.5,
+                        importance=0.5,
+                    ),
+                ),
+                (
+                    "fk_retrieval_run_relationship_owner",
+                    RetrievalRun(
+                        tenant_id=UUID(TENANT_ID),
+                        relationship_id=rel_a.id,
+                        user_id=user_b,
+                        character_id=character_id,
+                        scope=Scope.real_world,
+                        scenario_id=None,
+                        query_fingerprint="relationship-owner-mismatch",
+                        retrieval_policy_version="test-v1",
+                        index_version="test-v1",
+                        latency_bucket="lt_10ms",
+                        reason_code="no_results",
+                    ),
+                ),
+                (
+                    "fk_shared_history_relationship_owner",
+                    SharedHistoryEpisode(
+                        tenant_id=UUID(TENANT_ID),
+                        relationship_id=rel_a.id,
+                        user_id=user_b,
+                        character_id=character_id,
+                        scope=Scope.real_world,
+                        scenario_id=None,
+                        memory_id=memory_b.id,
+                        confirmed_at=now,
+                    ),
+                ),
+            )
+            for expected_constraint, row in mismatch_cases:
+                with pytest.raises(IntegrityError) as raised:
+                    async with session.begin_nested():
+                        session.add(row)
+                        await session.flush()
+                original = raised.value.orig
+                actual_constraint = None
+                for error in (original, getattr(original, "__cause__", None)):
+                    if error is None:
+                        continue
+                    actual_constraint = getattr(error, "constraint_name", None) or getattr(
+                        getattr(error, "diag", None), "constraint_name", None
+                    )
+                    if actual_constraint:
+                        break
+                assert actual_constraint == expected_constraint or expected_constraint in str(original)
 
 
 @pytest.mark.asyncio(loop_scope="module")
