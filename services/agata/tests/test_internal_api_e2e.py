@@ -50,6 +50,18 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
             headers = {"authorization": "Bearer disposable-internal-test-token"}
             health = await client.get("/health/live")
             assert health.status_code == 200
+            ready = await client.get("/health/ready")
+            assert ready.status_code == 200, ready.text
+            unauthorized = await client.put(
+                f"/internal/v1/characters/{character_key}",
+                json={"name": "Must not be written"},
+            )
+            wrong_token = await client.put(
+                f"/internal/v1/characters/{character_key}",
+                headers={"authorization": "Bearer wrong-token"},
+                json={"name": "Must not be written"},
+            )
+            assert unauthorized.status_code == wrong_token.status_code == 401
             profile = await client.put(
                 f"/internal/v1/characters/{character_key}",
                 headers=headers,
@@ -99,6 +111,12 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
             assert second.status_code == 200, second.text
             assert first.json()["message_id"] == second.json()["message_id"]
             assert first.json()["conversation_id"] == second.json()["conversation_id"]
+            metrics = await client.get("/health/metrics")
+            assert metrics.status_code == 200, metrics.text
+            assert set(metrics.json()) == {
+                "status", "messages", "active_memories", "recent_failed_responses"
+            }
+            assert all(isinstance(value, int) for key, value in metrics.json().items() if key != "status")
 
         async with SessionFactory() as session:
             async with session.begin():
@@ -132,6 +150,25 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
                     )
                 )
                 assert message_count == 2
+                stored_messages = list(
+                    (
+                        await session.scalars(
+                            select(Message).where(
+                                Message.tenant_id == tenant_id,
+                                Message.user_id == user.id,
+                                Message.conversation_id == first.json()["conversation_id"],
+                            )
+                        )
+                    ).all()
+                )
+                assert {item.role for item in stored_messages} == {"user", "assistant"}
+                assert all(
+                    item.content_ciphertext
+                    and item.content_nonce
+                    and item.content_key_version
+                    and "Привет".encode() not in item.content_ciphertext
+                    for item in stored_messages
+                )
                 user_message_id = await session.scalar(
                     select(Message.id).where(
                         Message.tenant_id == tenant_id,

@@ -32,7 +32,15 @@ OWNED_TABLES = (
 )
 
 
-def _validate_backfill() -> None:
+def _owned_tables() -> tuple[str, ...]:
+    inspector = sa.inspect(op.get_bind())
+    return tuple(
+        table for table in OWNED_TABLES
+        if inspector.has_table(table, schema="agata")
+    )
+
+
+def _validate_backfill(owned_tables: tuple[str, ...]) -> None:
     bind = op.get_bind()
     checks = {
         "orphan relationship-owned row": """
@@ -55,7 +63,7 @@ def _validate_backfill() -> None:
                        (scope='roleplay' AND scenario_id IS NOT NULL))
         """,
     }
-    for table in OWNED_TABLES:
+    for table in owned_tables:
         count = bind.scalar(text(checks["orphan relationship-owned row"].format(table=f"agata.{table}")))
         if count:
             raise RuntimeError(f"agata0003 backfill validation failed: {table} has {count} orphan rows")
@@ -140,7 +148,8 @@ def upgrade() -> None:
         )
         """)
 
-    for table in OWNED_TABLES:
+    owned_tables = _owned_tables()
+    for table in owned_tables:
         _add_column_if_missing(table, sa.Column("relationship_id", sa.UUID(), nullable=True))
     _add_column_if_missing(
         "suppression_rules",
@@ -153,23 +162,30 @@ def upgrade() -> None:
             ),
         ),
     )
-    _add_column_if_missing(
-        "derived_memory_views",
-        sa.Column(
-            "scenario_key",
-            sa.UUID(),
-            sa.Computed(
-                "coalesce(scenario_id, '00000000-0000-0000-0000-000000000000'::uuid)",
-                persisted=True,
+    if "derived_memory_views" in owned_tables:
+        _add_column_if_missing(
+            "derived_memory_views",
+            sa.Column(
+                "scenario_key",
+                sa.UUID(),
+                sa.Computed(
+                    "coalesce(scenario_id, '00000000-0000-0000-0000-000000000000'::uuid)",
+                    persisted=True,
+                ),
             ),
-        ),
-    )
+        )
     _add_column_if_missing(
         "retrieval_candidates", sa.Column("relationship_id", sa.UUID(), nullable=True)
     )
 
     # Every existing owner tuple from each relationship-bearing aggregate is included.
-    op.execute("""
+    legacy_view_owners = (
+        "UNION ALL SELECT tenant_id,user_id,character_id,scope,scenario_id,NULL,created_at "
+        "FROM agata.derived_memory_views"
+        if "derived_memory_views" in owned_tables
+        else ""
+    )
+    op.execute(f"""
         WITH owners AS (
             SELECT tenant_id,user_id,character_id,scope,scenario_id,
                    started_at AS conversation_started, created_at AS seen_at
@@ -184,8 +200,7 @@ def upgrade() -> None:
                 FROM agata.retrieval_runs
             UNION ALL SELECT tenant_id,user_id,character_id,scope,scenario_id,NULL,created_at
                 FROM agata.response_runs
-            UNION ALL SELECT tenant_id,user_id,character_id,scope,scenario_id,NULL,created_at
-                FROM agata.derived_memory_views
+            {legacy_view_owners}
             UNION ALL SELECT tenant_id,user_id,character_id,scope,scenario_id,NULL,created_at
                 FROM agata.shared_history_episodes
             UNION ALL SELECT tenant_id,user_id,character_id,scope,scenario_id,NULL,created_at
@@ -213,7 +228,7 @@ def upgrade() -> None:
         ON CONFLICT (tenant_id,user_id,character_id,scope,scenario_key) DO NOTHING
     """)
 
-    for table in OWNED_TABLES:
+    for table in owned_tables:
         op.execute(f"""
             UPDATE agata.{table} t SET relationship_id=r.id
             FROM agata.relationships r
@@ -227,7 +242,7 @@ def upgrade() -> None:
         WHERE r.tenant_id=c.tenant_id AND r.id=c.run_id
     """)
 
-    _validate_backfill()
+    _validate_backfill(owned_tables)
 
     # Unique target keys required by composite owner constraints.
     _add_unique_if_missing(
@@ -252,12 +267,13 @@ def upgrade() -> None:
         "memory_control_state", "uq_control_relationship_owner_scope_key",
         ["tenant_id","id","relationship_id","user_id","character_id","scope","scenario_key"]
     )
-    _add_unique_if_missing(
-        "derived_memory_views", "uq_derived_view_relationship",
-        ["tenant_id","relationship_id","view_type"]
-    )
+    if "derived_memory_views" in owned_tables:
+        _add_unique_if_missing(
+            "derived_memory_views", "uq_derived_view_relationship",
+            ["tenant_id","relationship_id","view_type"]
+        )
 
-    for table in OWNED_TABLES + ("retrieval_candidates",):
+    for table in owned_tables + ("retrieval_candidates",):
         if any(
             item["name"] == "relationship_id" and item["nullable"]
             for item in sa.inspect(op.get_bind()).get_columns(table, schema="agata")
@@ -276,6 +292,8 @@ def upgrade() -> None:
         "shadow_memory_candidates": "fk_shadow_candidate_relationship_owner",
     }
     for table, constraint_name in owner_fk_names.items():
+        if table not in owned_tables:
+            continue
         _add_fk_if_missing(
             table, constraint_name, "relationships",
             ["tenant_id","relationship_id","user_id","character_id","scope","scenario_key"],
@@ -311,7 +329,7 @@ def upgrade() -> None:
         op.execute(f"CREATE INDEX IF NOT EXISTS {name} ON agata.{table} (tenant_id,relationship_id)")
 
     # Fail closed on any data mismatch before enabling mandatory ownership.
-    _validate_backfill()
+    _validate_backfill(owned_tables)
     op.execute("ALTER TABLE agata.relationships ENABLE ROW LEVEL SECURITY")
     op.execute("ALTER TABLE agata.relationships FORCE ROW LEVEL SECURITY")
     op.execute("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname='agata' AND tablename='relationships' AND policyname='relationships_tenant_isolation') THEN CREATE POLICY relationships_tenant_isolation ON agata.relationships "

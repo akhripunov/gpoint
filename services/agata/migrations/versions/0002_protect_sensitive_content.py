@@ -75,13 +75,21 @@ def upgrade() -> None:
             )
         )
     )
-    views = list(
-        bind.execute(
-            text(
-                "SELECT id,tenant_id,user_id,character_id,scope,scenario_id,content "
-                "FROM agata.derived_memory_views WHERE content <> '{}'::jsonb"
+    # Fresh agata0001 baselines use the current ORM metadata and therefore do
+    # not contain this legacy table. Older installations can still have it;
+    # preserve their encrypted backfill without making a clean install depend
+    # on an obsolete table being manufactured first.
+    views = (
+        list(
+            bind.execute(
+                text(
+                    "SELECT id,tenant_id,user_id,character_id,scope,scenario_id,content "
+                    "FROM agata.derived_memory_views WHERE content <> '{}'::jsonb"
+                )
             )
         )
+        if inspect(bind).has_table("derived_memory_views", schema="agata")
+        else []
     )
 
     content_crypto = _crypto(

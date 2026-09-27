@@ -49,6 +49,24 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
     env = dict(os.environ)
     env["AGATA_DATABASE_URL"] = DATABASE_URL
     env.setdefault("AGATA_TENANT_ID", "7508f36f-774a-48aa-8c6b-42f6f160415d")
+    # Prove a true fresh install can traverse every revision without legacy
+    # derived_memory_views. Then reset only this disposable schema and continue
+    # with the representative pre-P2.4 data/backfill path below.
+    subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
+        cwd=ROOT,
+        env=env,
+        check=True,
+        timeout=60,
+        capture_output=True,
+        text=True,
+    )
+    with engine.begin() as connection:
+        assert connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0006"
+        assert connection.scalar(text("SELECT to_regclass('agata.derived_memory_views')")) is None
+        assert connection.scalar(text("SELECT count(*) FROM agata.memory_entities")) == 0
+        connection.execute(text("DROP SCHEMA agata CASCADE"))
+
     subprocess.run(
         [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "agata0001"],
         cwd=ROOT,
