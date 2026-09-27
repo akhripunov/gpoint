@@ -145,7 +145,7 @@ class PersistentMemoryGraphService:
             RetentionPolicy.tenant_id == tenant_id,
             RetentionPolicy.id == memory.retention_policy_id,
         )) if memory.retention_policy_id else None
-        if retention and retention.memory_days is not None:
+        if retention and not retention.legal_hold and retention.memory_days is not None:
             from sqlalchemy import func
             expired = await self.session.scalar(select(
                 memory.created_at + func.make_interval(0, 0, 0, retention.memory_days) <= func.now()
@@ -285,7 +285,7 @@ class PersistentMemoryGraphService:
                 MemoryGraphEvidence.invalidated_at.is_(None),
                 MemoryRelation.created_epoch == MemoryGraphEvidence.created_epoch,
                 temporal_filter,
-                or_(RetentionPolicy.memory_days.is_(None),
+                or_(RetentionPolicy.legal_hold.is_(True), RetentionPolicy.memory_days.is_(None),
                     Memory.created_at + func.make_interval(0, 0, 0, RetentionPolicy.memory_days) > func.now()),
             ).order_by(MemoryGraphEvidence.memory_id, MemoryRelation.id)
             .limit(GRAPH_CONTEXT_MAX_ITEMS)

@@ -20,6 +20,7 @@ from app.db.models import (
     LifecycleState,
     Memory,
     MemoryControlState,
+    MemoryGraphEvidence,
     MemorySnapshot,
     MemorySource,
     Message,
@@ -30,6 +31,7 @@ from app.db.models import (
     Tenant,
     User,
 )
+from app.memory.persistent_graph import PersistentMemoryGraphService
 from app.messages.crypto import AeadCrypto
 from app.messages.protected_content import (
     content_aad,
@@ -112,18 +114,18 @@ async def test_retention_physically_purges_content_and_respects_legal_hold():
             memory = Memory(
                 id=memory_id, tenant_id=TENANT_ID, relationship_id=relationship.id, user_id=user_id, character_id=character_id,
                 kind="semantic_fact", scope=Scope.real_world, scenario_id=None,
-                slot_key=f"purge.{suffix}", predicate="private", value_text=encrypt_text_for_storage(
+                slot_key=f"purge.{suffix}", subject_type="user", predicate="likes", value_text=encrypt_text_for_storage(
                     "private memory", content_aad(entity="memories", tenant_id=TENANT_ID, user_id=user_id, character_id=character_id, scope=Scope.real_world, scenario_id=None, record_id=memory_id, field="value_text"), crypto=crypto),
                 value_json=encrypt_json_for_storage({"text": "private json"}, content_aad(entity="memories", tenant_id=TENANT_ID, user_id=user_id, character_id=character_id, scope=Scope.real_world, scenario_id=None, record_id=memory_id, field="value_json"), crypto=crypto), search_text="opaque-private-token",
                 observed_at=now-timedelta(days=2), evidence_state=EvidenceState.confirmed,
                 lifecycle_state=LifecycleState.active, confidence=0.9, importance=0.9,
-                consent_id=consent.id, retention_policy_id=policy_id, created_epoch=0,
+                consent_id=consent.id, retention_policy_id=None, created_epoch=0,
                 embedding=[0.1] * 1536, embedding_model="test", embedded_at=now-timedelta(days=1),
             )
             hold_memory = Memory(
                 id=hold_memory_id, tenant_id=TENANT_ID, relationship_id=hold_relationship.id, user_id=hold_user_id, character_id=hold_character_id,
                 kind="semantic_fact", scope=Scope.real_world, scenario_id=None,
-                slot_key=f"hold.{suffix}", predicate="private", value_text=encrypt_text_for_storage(
+                slot_key=f"hold.{suffix}", subject_type="user", predicate="likes", value_text=encrypt_text_for_storage(
                     "held memory", content_aad(entity="memories", tenant_id=TENANT_ID, user_id=hold_user_id, character_id=hold_character_id, scope=Scope.real_world, scenario_id=None, record_id=hold_memory_id, field="value_text"), crypto=crypto),
                 observed_at=now-timedelta(days=2), evidence_state=EvidenceState.confirmed,
                 lifecycle_state=LifecycleState.active, confidence=0.9, importance=0.9,
@@ -134,6 +136,7 @@ async def test_retention_physically_purges_content_and_respects_legal_hold():
             segment_id = uuid4()
             session.add_all([
                 MemorySource(tenant_id=TENANT_ID, memory_id=memory_id, message_id=message_id, user_id=user_id, character_id=character_id, scope=Scope.real_world, scenario_key=SCENARIO_ZERO, relation="supports"),
+                MemorySource(tenant_id=TENANT_ID, memory_id=hold_memory_id, message_id=hold_message_id, user_id=hold_user_id, character_id=hold_character_id, scope=Scope.real_world, scenario_key=SCENARIO_ZERO, relation="supports"),
                 ConversationSegment(id=segment_id, tenant_id=TENANT_ID, conversation_id=conversation_id, started_at=now-timedelta(days=2), ended_at=now-timedelta(days=1), summary=encrypt_text_for_storage("private summary", content_aad(entity="conversation_segments", tenant_id=TENANT_ID, user_id=user_id, character_id=character_id, scope=Scope.real_world, scenario_id=None, record_id=segment_id, field="summary"), crypto=crypto), keyphrases=encrypt_json_for_storage(["private phrase"], content_aad(entity="conversation_segments", tenant_id=TENANT_ID, user_id=user_id, character_id=character_id, scope=Scope.real_world, scenario_id=None, record_id=segment_id, field="keyphrases"), crypto=crypto)),
             ])
             snapshot_id = uuid4()
@@ -174,8 +177,36 @@ async def test_retention_physically_purges_content_and_respects_legal_hold():
             repository = OutboxRepository(session)
             await repository.enqueue(tenant_id=TENANT_ID, job_type="memory_extract", dedupe_key=f"purge-extract-{suffix}", aggregate_id=message_id, memory_control_state_id=control_id, payload={"message_id": str(message_id), "conversation_id": str(conversation_id), "code": "extract"})
             await repository.enqueue(tenant_id=TENANT_ID, job_type="memory_promote", dedupe_key=f"purge-promote-{suffix}", aggregate_id=candidate_id, memory_control_state_id=control_id, payload={"candidate_id": str(candidate_id)})
+            graph = PersistentMemoryGraphService(
+                session, crypto=crypto, hmac_root=b"p24-retention-test-graph-key-0000000000000000000000"
+            )
+            assert await graph.project_memory(
+                memory_id=memory_id, memory_version=1, tenant_id=TENANT_ID,
+                control_id=control_id, creation_epoch=0,
+            )
+            assert await graph.project_memory(
+                memory_id=hold_memory_id, memory_version=1, tenant_id=TENANT_ID,
+                control_id=hold_control_id, creation_epoch=0,
+            )
+            # Exercise graph cleanup after an established projection.
+            memory.retention_policy_id = policy_id
             deleted = await run_retention_cleanup(session, TENANT_ID)
             assert deleted == 2
+            assert await session.scalar(select(MemoryGraphEvidence.id).where(
+                MemoryGraphEvidence.tenant_id == TENANT_ID,
+                MemoryGraphEvidence.relationship_id == relationship.id,
+            ).limit(1)) is None
+            held_context = await graph.load_context(
+                tenant_id=TENANT_ID, relationship_id=hold_relationship.id,
+                user_id=hold_user_id, character_id=hold_character_id,
+                scope=Scope.real_world, scenario_key=hold_relationship.scenario_key,
+                as_of=now, temporal_mode="current",
+                seeds=(type("GraphSeed", (), {
+                    "memory_id": hold_memory_id, "version": 1,
+                    "value": "held memory", "predicate": "likes",
+                })(),),
+            )
+            assert held_context == ("User likes: held memory",)
 
     async with SessionFactory() as session:
         async with session.begin():

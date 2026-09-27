@@ -11,6 +11,8 @@ import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
+from app.api.internal import UserConsentRequest, sync_user_consent
+from app.config import get_settings
 from app.db.base import SessionFactory, set_tenant_context
 from app.db.models import (
     Character,
@@ -47,7 +49,7 @@ pytestmark = pytest.mark.skipif(not TEST_DSN, reason="AGATA_TEST_DATABASE_URL no
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_persistent_graph_projection_is_evidence_backed_private_and_scoped():
+async def test_persistent_graph_projection_is_evidence_backed_private_and_scoped(monkeypatch):
     tenant_id, user_id, character_id = uuid4(), uuid4(), uuid4()
     other_tenant_id, other_user_id, other_character_id = uuid4(), uuid4(), uuid4()
     suffix = uuid4().hex
@@ -372,3 +374,43 @@ async def test_persistent_graph_projection_is_evidence_backed_private_and_scoped
                 MemoryGraphEvidence.tenant_id == tenant_id,
                 MemoryGraphEvidence.relationship_id == relationships[0].id,
             )) == 0
+
+    # Exercise the real consent-revocation handler: it purges derived graph rows
+    # and makes an already queued projection terminal before the transaction ends.
+    consent_memory_id, _, consent_control_id = created[4]
+    async with SessionFactory() as session:
+        async with session.begin():
+            await set_tenant_context(session, str(tenant_id))
+            consent_memory = await session.get(Memory, consent_memory_id)
+            consent_control = await session.get(MemoryControlState, consent_control_id)
+            await enqueue_memory_graph_sync(
+                session, memory=consent_memory, control=consent_control
+            )
+    monkeypatch.setenv("AGATA_TENANT_ID", str(tenant_id))
+    get_settings.cache_clear()
+    try:
+        async with SessionFactory() as session:
+            result = await sync_user_consent(
+                f"p24-{suffix}",
+                UserConsentRequest(
+                    chat_history=True, long_term_memory=False, age_band="unknown",
+                    age_status="pending", age_method="p24-test", jurisdiction="US",
+                    disclosure_accepted=False, disclosure_receipt_id=f"p24-{suffix}",
+                ),
+                session,
+            )
+            assert result["user_id"] == str(user_id)
+        async with SessionFactory() as session:
+            async with session.begin():
+                await set_tenant_context(session, str(tenant_id))
+                for model in (MemoryGraphEvidence, MemoryRelation, MemoryEntity):
+                    assert await session.scalar(select(func.count()).select_from(model).where(
+                        model.tenant_id == tenant_id
+                    )) == 0
+                consent_job = await session.scalar(select(OutboxJob).where(
+                    OutboxJob.tenant_id == tenant_id,
+                    OutboxJob.dedupe_key == f"graph:{consent_memory_id}:1:0",
+                ))
+                assert consent_job is not None and consent_job.state == JobState.dead
+    finally:
+        get_settings.cache_clear()
