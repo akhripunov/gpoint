@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, evaluateSafetyGates, releaseStateAfterError, shouldFinalizeRecovery, validateCandidate } from './release-gpoint.mjs';
-import { classifyPostSwitchState, detectorNeedsRebuild, detectorSourceHash, exactCheckout, migrationNeedsDeploy, resolveRunnerPath, runRemoteCommand, shouldReuseCandidateImage, upload, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
+import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, evaluateSafetyGates, releaseStateAfterError, shouldFinalizeRecovery, validateCandidate, verifiedRuntimeState } from './release-gpoint.mjs';
+import { agataInternalConfigProvisionCommand, classifyPostSwitchState, detectorNeedsRebuild, detectorSourceHash, exactCheckout, migrationNeedsDeploy, resolveRunnerPath, runRemoteCommand, shouldReuseCandidateImage, upload, validateAgataProviderConfig, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
 
 const sha = '4d99e0da856d2ffe174c54d7ae7f2f971ab462f5';
 const artifacts = { api: { sourceSha: sha }, worker: { sourceSha: sha }, bot: { sourceSha: sha }, miniapp: { sourceSha: sha } };
@@ -57,6 +57,24 @@ test('runtime identity blocks a previous image before release completion', () =>
   assert.deepEqual(validateRuntimeIdentity(sha, { imageId, buildSha: sha, apiImage: imageId, workerImage: imageId, botImage: imageId }), []);
 });
 
+test('AGATA runtime requires candidate image parity and healthy API/worker', () => {
+  const imageId = 'sha256:' + 'c'.repeat(64);
+  const runtime = { imageId, buildSha: sha, apiImage: imageId, workerImage: imageId, apiRunning: 'true', apiHealth: 'healthy', workerRunning: 'true', workerHealth: 'healthy' };
+  assert.deepEqual(validateAgataRuntimeIdentity(sha, runtime), []);
+  assert.ok(validateAgataRuntimeIdentity(sha, { ...runtime, workerHealth: 'starting' }).some(x => x.includes('worker')));
+  assert.ok(validateAgataRuntimeIdentity('0'.repeat(40), runtime).some(x => x.includes('build SHA')));
+});
+
+test('AGATA provider-disabled config has internal keys but never requires LLM credentials', () => {
+  const valid = { enabled: 'true', provider: 'disabled', databaseUrlPresent: true, tenant: true, internalAuth: true, messageKey: true, requestHmac: true, retrievalHmac: true, responseHmac: true, shadowHmac: true };
+  assert.deepEqual(validateAgataProviderConfig(valid), []);
+  assert.ok(validateAgataProviderConfig({ ...valid, provider: 'anymodel' }).some(x => x.includes('disabled')));
+  const provision = agataInternalConfigProvisionCommand();
+  const script = Buffer.from(provision.match(/printf '%s' '([^']+)'/)[1], 'base64').toString();
+  assert.match(script, /AGATA_LLM_PROVIDER.*disabled/);
+  assert.doesNotMatch(script, /AGATA_LLM_API_KEY=/);
+});
+
 test('nonzero compose after candidate switch enters switched-unverified recovery', () => {
   const image = 'sha256:' + 'a'.repeat(64);
   assert.equal(classifyPostSwitchState({ candidate: sha, runtime: { imageId: image, buildSha: sha, apiImage: image, workerImage: image, botImage: image }, composeExitCode: 1 }).state, 'SWITCHED_UNVERIFIED');
@@ -75,6 +93,15 @@ test('recovery can finalize exactly once only after all gates pass', () => {
   assert.equal(shouldFinalizeRecovery({ releaseState: 'RECOVERY_REQUIRED', candidate: sha, actualSha: sha, gatesPass: true }), true);
   assert.equal(canCreateProductionRef({ releaseState: 'VERIFIED', candidate: sha, actualSha: sha, mixedRuntime: false, health: true, dbVerified: true }), true);
   assert.equal(canCreateProductionRef({ releaseState: 'VERIFIED', candidate: sha, actualSha: sha, mixedRuntime: true, health: true, dbVerified: true }), false);
+});
+
+test('verified release reconciles activeRuntimeSha only after verified switch', () => {
+  const prior = { currentProductionSha: 'a'.repeat(40), activeRuntimeSha: 'b'.repeat(40), activeRuntimeDbHead: 'old' };
+  const next = verifiedRuntimeState(prior, { candidate: sha, dbHead: 'agata0007' });
+  assert.equal(next.currentProductionSha, sha);
+  assert.equal(next.activeRuntimeSha, sha);
+  assert.equal(next.activeRuntimeDbHead, 'agata0007');
+  assert.equal(prior.activeRuntimeSha, 'b'.repeat(40));
 });
 
 test('same candidate exact image is reusable and up-to-date migration is not redeployed', () => {

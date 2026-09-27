@@ -231,7 +231,7 @@ class MessageIngestionService:
         if not await PolicyService().age_assurance_eligible(
             self.session, tenant_id=principal.tenant_id, user_id=principal.user_id, now=now
         ):
-            raise DomainError("compliance_not_permitted")
+            raise DomainError("age_assurance_required")
         disclosure = await current_disclosure(
             self.session, tenant_id=principal.tenant_id, user_id=principal.user_id
         )

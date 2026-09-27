@@ -32,10 +32,11 @@ const modelPost = (index: number) => ({
 
 export async function installMiniAppBrowserMocks(
   page: Page,
-  options: { telegramStartParam?: string; ageAssuranceRequired?: boolean } = {},
+  options: { telegramStartParam?: string; ageAssuranceRequired?: boolean; aiAvailable?: boolean } = {},
 ) {
   const errors: string[] = [];
   const chatMessages: Array<{ id: string; role: "user" | "assistant"; text: string; occurredAt: string }> = [];
+  let ageAssuranceRequired = options.ageAssuranceRequired ?? false;
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => {
     if (message.type() === "error") errors.push(message.text());
@@ -71,8 +72,10 @@ export async function installMiniAppBrowserMocks(
     else if (apiPath === "/creators/models_hub") data = creator;
     else if (apiPath === "/creators/unknown-model") { status = 404; data = { message: "Creator unavailable" }; }
     else if (apiPath === "/creators/browser-smoke-model-id/posts") data = { items, nextCursor: null };
-    else if (apiPath === "/messages/state") data = { enabled: true, chatHistory: false, longTermMemory: false, disclosureRequired: true, ageAssuranceRequired: options.ageAssuranceRequired ?? false };
-    else if (apiPath === "/messages/consent" && route.request().method() === "POST") data = { enabled: true, chatHistory: true, longTermMemory: JSON.parse(route.request().postData() || "{}").longTermMemory, disclosureRequired: false, ageAssuranceRequired: options.ageAssuranceRequired ?? false };
+    else if (apiPath === "/age-assurance/state") data = { required: ageAssuranceRequired, eligible: !ageAssuranceRequired, status: ageAssuranceRequired ? "pending" : "self_attested", method: ageAssuranceRequired ? "unknown" : "self_attested", jurisdiction: "GLOBAL", assertedAt: ageAssuranceRequired ? null : "2026-09-27T10:00:00.000Z", expiresAt: null, selfAttestationAllowed: true };
+    else if (apiPath === "/age-assurance/self-attest" && route.request().method() === "POST") { ageAssuranceRequired = false; data = { required: false, eligible: true, status: "self_attested", method: "self_attested", jurisdiction: "GLOBAL", assertedAt: "2026-09-27T10:00:00.000Z", expiresAt: null, selfAttestationAllowed: true }; }
+    else if (apiPath === "/messages/state") data = { enabled: true, chatHistory: false, longTermMemory: false, disclosureRequired: true, ageAssuranceRequired, aiAvailable: options.aiAvailable ?? true };
+    else if (apiPath === "/messages/consent" && route.request().method() === "POST") data = { enabled: true, chatHistory: true, longTermMemory: JSON.parse(route.request().postData() || "{}").longTermMemory, disclosureRequired: false, ageAssuranceRequired, aiAvailable: options.aiAvailable ?? true };
     else if (apiPath === "/messages") data = { items: [{ creator: { id: creator.id, slug: creator.slug, displayName: creator.displayName, avatarUrl: creator.avatarUrl, verified: creator.verified }, lastMessagePreview: "Hello there", lastMessageRole: "assistant", lastMessageAt: "2026-09-27T10:00:00.000Z" }], nextCursor: null };
     else if (apiPath === `/messages/creator/${creator.id}` && route.request().method() === "GET") {
       data = { creator, items: [...chatMessages], nextCursor: null };

@@ -2,7 +2,6 @@
 
 import base64
 import os
-from datetime import UTC, datetime
 from uuid import uuid4
 
 import httpx
@@ -44,7 +43,6 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
 
     user_key, character_key, message_key = (f"test-{uuid4()}" for _ in range(3))
     conversation_key = f"gpoint-chat:{user_key}:{character_key}"
-    now = datetime.now(UTC).isoformat()
     transport = httpx.ASGITransport(app=app)
     try:
         async with httpx.AsyncClient(transport=transport, base_url="http://agata-test") as client:
@@ -68,6 +66,32 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
             )
             assert initial_state.status_code == 200, initial_state.text
             assert initial_state.json()["ageAssuranceRequired"] is True
+            age_path = f"/internal/v1/users/{user_key}/age-assurance"
+            initial_age = await client.get(age_path, headers=headers)
+            assert initial_age.status_code == 200
+            assert initial_age.json()["required"] is True
+            assert initial_age.json()["selfAttestationAllowed"] is True
+            attested = await client.post(
+                f"{age_path}/self-attest",
+                headers=headers,
+                json={"confirmed_18_plus": True},
+            )
+            assert attested.status_code == 200, attested.text
+            assert attested.json() == {
+                "eligible": True,
+                "status": "self_attested",
+                "method": "self_attested",
+            }
+            reopened_age = await client.get(age_path, headers=headers)
+            assert reopened_age.json()["required"] is False
+            assert reopened_age.json()["method"] == "self_attested"
+            assert reopened_age.json()["assertedAt"]
+            other_user_state = await client.get(
+                f"/internal/v1/users/{user_key}-other/age-assurance", headers=headers
+            )
+            assert other_user_state.status_code == 200
+            assert other_user_state.json()["required"] is True
+
             profile = await client.put(
                 f"/internal/v1/characters/{character_key}",
                 headers=headers,
@@ -75,6 +99,40 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
             )
             assert profile.status_code == 200, profile.text
             character_id = profile.json()["character_id"]
+
+            no_age_user = f"test-no-age-{uuid4()}"
+            no_age_consent = await client.put(
+                f"/internal/v1/users/{no_age_user}/consent",
+                headers=headers,
+                json={
+                    "chat_history": True,
+                    "long_term_memory": False,
+                    "age_band": "unknown",
+                    "age_status": "pending",
+                    "age_method": "unknown",
+                    "jurisdiction": "GLOBAL",
+                    "verified_at": None,
+                    "expires_at": None,
+                    "disclosure_accepted": True,
+                    "disclosure_receipt_id": str(uuid4()),
+                },
+            )
+            assert no_age_consent.status_code == 200, no_age_consent.text
+            bypass_attempt = await client.post(
+                "/internal/v1/respond",
+                headers=headers,
+                json={
+                    "request_id": str(uuid4()),
+                    "gpoint_user_id": no_age_user,
+                    "gpoint_character_id": character_key,
+                    "conversation_id": f"gpoint-chat:{no_age_user}:{character_key}",
+                    "message_id": f"no-age-{uuid4()}",
+                    "text": "Must remain blocked",
+                    "locale": "ru-RU",
+                },
+            )
+            assert bypass_attempt.status_code == 403
+            assert bypass_attempt.json()["detail"]["code"] == "age_assurance_required"
             profile_update = await client.put(
                 f"/internal/v1/characters/{character_key}",
                 headers=headers,
@@ -93,10 +151,10 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
                     "chat_history": True,
                     "long_term_memory": True,
                     "age_band": "adult",
-                    "age_status": "verified",
-                    "age_method": "provider_verified",
-                    "jurisdiction": "US",
-                    "verified_at": now,
+                    "age_status": "self_attested",
+                    "age_method": "self_attested",
+                    "jurisdiction": "GLOBAL",
+                    "verified_at": None,
                     "disclosure_accepted": True,
                     "disclosure_receipt_id": str(uuid4()),
                 },
@@ -205,13 +263,6 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
                     ).all()
                 )
                 assert {item.role for item in stored_messages} == {"user", "assistant"}
-                assert all(
-                    item.content_ciphertext
-                    and item.content_nonce
-                    and item.content_key_version
-                    and "Привет".encode() not in item.content_ciphertext
-                    for item in stored_messages
-                )
                 user_message_id = await session.scalar(
                     select(Message.id).where(
                         Message.tenant_id == tenant_id,
@@ -229,6 +280,60 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
                     )
                 )
                 assert extraction_count == 1
+            assert all(
+                item.content_ciphertext
+                and item.content_nonce
+                and item.content_key_version
+                and "Привет".encode() not in item.content_ciphertext
+                for item in stored_messages
+            )
+
+        disabled_message_key = f"disabled-{uuid4()}"
+        async with SessionFactory() as session:
+            async with session.begin():
+                await set_tenant_context(session, tenant_id)
+                inference_jobs_before = await session.scalar(
+                    select(func.count()).select_from(OutboxJob).where(
+                        OutboxJob.tenant_id == tenant_id, OutboxJob.job_type == "inference"
+                    )
+                )
+        monkeypatch.setenv("AGATA_LLM_PROVIDER", "disabled")
+        monkeypatch.delenv("AGATA_LLM_API_KEY", raising=False)
+        get_settings.cache_clear()
+        app.dependency_overrides[get_response_provider] = lambda: None
+        async with httpx.AsyncClient(transport=transport, base_url="http://agata-test") as client:
+            disabled_response = await client.post(
+                "/internal/v1/respond",
+                headers={"authorization": "Bearer disposable-internal-test-token"},
+                json={
+                    "request_id": str(uuid4()),
+                    "gpoint_user_id": user_key,
+                    "gpoint_character_id": character_key,
+                    "conversation_id": conversation_key,
+                    "message_id": disabled_message_key,
+                    "text": "This message must persist without an AI reply",
+                    "locale": "en-US",
+                },
+            )
+            assert disabled_response.status_code == 503
+            assert disabled_response.json()["detail"]["code"] == "ai_unavailable"
+        async with SessionFactory() as session:
+            async with session.begin():
+                await set_tenant_context(session, tenant_id)
+                persisted = await session.scalar(
+                    select(Message).where(
+                        Message.tenant_id == tenant_id,
+                        Message.idempotency_key == disabled_message_key,
+                        Message.role == "user",
+                    )
+                )
+                assert persisted is not None and persisted.content_ciphertext
+                inference_jobs_after = await session.scalar(
+                    select(func.count()).select_from(OutboxJob).where(
+                        OutboxJob.tenant_id == tenant_id, OutboxJob.job_type == "inference"
+                    )
+                )
+                assert inference_jobs_after == inference_jobs_before
     finally:
         app.dependency_overrides.clear()
         get_settings.cache_clear()

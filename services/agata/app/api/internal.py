@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, func, select, text, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.compliance.policy import PolicyService
 from app.compliance.receipt import current_disclosure
 from app.config import get_settings
 from app.db.base import get_session, set_tenant_context
@@ -23,8 +24,10 @@ from app.db.models import (
     CharacterProfileVersion,
     Consent,
     Conversation,
+    JobState,
     MemorySnapshot,
     Message,
+    OutboxJob,
     RegionalPolicyProfile,
     Relationship,
     ResponseRoutePolicy,
@@ -38,12 +41,14 @@ from app.domain.relationships import (
     record_accepted_interaction,
     resolve_relationship,
 )
+from app.jobs.outbox import OutboxRepository
 from app.memory.embedding import HuggingFaceFreeEmbeddingProvider
 from app.memory.retrieval import EmbeddingProvider, HybridRetrievalService
 from app.messages.crypto import AeadCrypto, RequestFingerprinter
 from app.messages.service import IngestMessage, MessageIngestionService
-from app.responses.deepseek import DeepSeekResponseProvider
+from app.responses.mac_worker import decrypt_claimed_request, encrypt_worker_result
 from app.responses.pipeline import ResponseOrchestrator, ResponseProvider, ResponseRequest
+from app.responses.provider_factory import build_response_provider
 
 router = APIRouter(prefix="/internal/v1", tags=["internal"])
 
@@ -156,6 +161,109 @@ async def chat_state(gpoint_user_id: str, session: AsyncSession = Depends(get_se
             "expiresAt": age.expires_at.isoformat() if age and age.expires_at else None,
             "jurisdiction": age.jurisdiction if age else policy.jurisdiction,
         }
+
+
+@router.get("/users/{gpoint_user_id}/age-assurance", dependencies=[Depends(require_internal_auth)])
+async def age_assurance_state(
+    gpoint_user_id: str, session: AsyncSession = Depends(get_session)
+) -> dict:
+    settings = get_settings()
+    tenant_id = UUID(settings.tenant_id)
+    if not 1 <= len(gpoint_user_id) <= 255 or "\x00" in gpoint_user_id:
+        raise HTTPException(status_code=422, detail={"code": "invalid_user_id"})
+    now = datetime.now(UTC)
+    async with session.begin():
+        await set_tenant_context(session, str(tenant_id))
+        user = await session.scalar(select(User).where(
+            User.tenant_id == tenant_id, User.source_system == "gpoint",
+            User.external_id == gpoint_user_id, User.deleted_at.is_(None),
+        ))
+        policy = await session.scalar(select(RegionalPolicyProfile).where(
+            RegionalPolicyProfile.tenant_id == tenant_id,
+            RegionalPolicyProfile.status == "active",
+            RegionalPolicyProfile.effective_from <= now,
+            RegionalPolicyProfile.effective_to.is_(None) | (RegionalPolicyProfile.effective_to > now),
+        ).order_by(RegionalPolicyProfile.effective_from.desc(), RegionalPolicyProfile.id.desc()).limit(1))
+        if policy is None:
+            raise HTTPException(status_code=503, detail={"code": "policy_unavailable"})
+        age = None if user is None else await session.scalar(select(AgeAssurance).where(
+            AgeAssurance.tenant_id == tenant_id, AgeAssurance.user_id == user.id,
+        ).order_by(AgeAssurance.version.desc()).limit(1))
+        eligible = False
+        if user is not None:
+            from app.compliance.policy import PolicyService
+            eligible = await PolicyService().age_assurance_eligible(
+                session, tenant_id=tenant_id, user_id=user.id, now=now
+            )
+        return {
+            "required": not eligible,
+            "eligible": eligible,
+            "status": age.status if age else "pending",
+            "method": age.method if age else "unknown",
+            "jurisdiction": age.jurisdiction if age else policy.jurisdiction,
+            "assertedAt": age.asserted_at.isoformat() if age and age.asserted_at else None,
+            "expiresAt": age.expires_at.isoformat() if age and age.expires_at else None,
+            "selfAttestationAllowed": policy.rules.get("self_attestation_allowed") is True,
+        }
+
+
+@router.post(
+    "/users/{gpoint_user_id}/age-assurance/self-attest",
+    dependencies=[Depends(require_internal_auth)],
+)
+async def self_attest_age(
+    gpoint_user_id: str,
+    payload: SelfAttestationRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    settings = get_settings()
+    tenant_id = UUID(settings.tenant_id)
+    if not 1 <= len(gpoint_user_id) <= 255 or "\x00" in gpoint_user_id:
+        raise HTTPException(status_code=422, detail={"code": "invalid_user_id"})
+    now = datetime.now(UTC)
+    async with session.begin():
+        await set_tenant_context(session, str(tenant_id))
+        policy = await session.scalar(select(RegionalPolicyProfile).where(
+            RegionalPolicyProfile.tenant_id == tenant_id,
+            RegionalPolicyProfile.status == "active",
+            RegionalPolicyProfile.effective_from <= now,
+            RegionalPolicyProfile.effective_to.is_(None) | (RegionalPolicyProfile.effective_to > now),
+        ).order_by(RegionalPolicyProfile.effective_from.desc(), RegionalPolicyProfile.id.desc()).limit(1).with_for_update())
+        if policy is None:
+            raise HTTPException(status_code=503, detail={"code": "policy_unavailable"})
+        if policy.rules.get("self_attestation_allowed") is not True:
+            raise HTTPException(status_code=403, detail={"code": "self_attestation_not_allowed"})
+        user = await session.scalar(select(User).where(
+            User.tenant_id == tenant_id, User.source_system == "gpoint",
+            User.external_id == gpoint_user_id, User.deleted_at.is_(None),
+        ).with_for_update())
+        if user is None:
+            user = User(tenant_id=tenant_id, source_system="gpoint", external_id=gpoint_user_id)
+            session.add(user)
+            await session.flush()
+        prior = await session.scalar(select(AgeAssurance).where(
+            AgeAssurance.tenant_id == tenant_id, AgeAssurance.user_id == user.id,
+        ).order_by(AgeAssurance.version.desc()).limit(1).with_for_update())
+        if prior is not None and (prior.status == "rejected" or prior.age_band == "minor"):
+            raise HTTPException(status_code=403, detail={"code": "age_assurance_rejected"})
+        if prior is not None and await PolicyService().age_assurance_eligible(
+            session, tenant_id=tenant_id, user_id=user.id, now=now
+        ):
+            return {"eligible": True, "status": prior.status, "method": prior.method}
+        session.add(AgeAssurance(
+            tenant_id=tenant_id,
+            user_id=user.id,
+            age_band="adult",
+            status="self_attested",
+            method="self_attested",
+            jurisdiction=policy.jurisdiction,
+            verified_at=None,
+            asserted_at=now,
+            expires_at=None,
+            version=(prior.version + 1) if prior else 1,
+        ))
+        await session.flush()
+        return {"eligible": True, "status": "self_attested", "method": "self_attested"}
 
 
 @router.get("/users/{gpoint_user_id}/conversations", dependencies=[Depends(require_internal_auth)])
@@ -315,11 +423,12 @@ class RespondRequest(BaseModel):
 
 
 class RespondResponse(BaseModel):
+    status: Literal["completed", "pending"] = "completed"
     request_id: str
     conversation_id: str
-    message_id: str
+    message_id: str | None = None
     character_id: str
-    text: str
+    text: str | None = None
 
 
 class CharacterSyncRequest(BaseModel):
@@ -345,6 +454,26 @@ class UserConsentRequest(BaseModel):
     disclosure_receipt_id: str = Field(min_length=1, max_length=128)
 
 
+class SelfAttestationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirmed_18_plus: Literal[True]
+
+
+class WorkerCompleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    job_id: UUID
+    lease_token: str = Field(min_length=32, max_length=64)
+    text: str = Field(min_length=1, max_length=16_000)
+    model: str = Field(min_length=1, max_length=128)
+
+
+class WorkerFailRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    job_id: UUID
+    lease_token: str = Field(min_length=32, max_length=64)
+    error_code: str = Field(pattern=r"^[a-z0-9_]{1,64}$")
+
+
 def _language_code(locale: str | None) -> str:
     """Map BCP-47 locale tags to the finite language codes stored by AGATA."""
     if not locale:
@@ -353,27 +482,159 @@ def _language_code(locale: str | None) -> str:
     return language if language in {"ru", "en"} else "mixed"
 
 
-def get_response_provider() -> ResponseProvider:
-    settings = get_settings()
-    if not settings.llm_api_key:
-        raise HTTPException(status_code=503, detail={"code": "provider_unconfigured"})
-    return DeepSeekResponseProvider(
-        api_key=settings.llm_api_key.get_secret_value(),
-        base_url=settings.llm_api_base_url,
-        timeout_seconds=settings.llm_timeout_seconds,
-        provider=settings.llm_provider,
-        model=settings.llm_model,
-    )
+def get_response_provider(
+    session: AsyncSession = Depends(get_session),
+) -> ResponseProvider | None:
+    return build_response_provider(session)
 
 
 def get_embedding_provider() -> EmbeddingProvider:
     settings = get_settings()
     if not settings.embedding_api_key:
+        if settings.llm_provider in {"disabled", "none", "mac_worker"}:
+            return UnavailableEmbeddingProvider()
         raise HTTPException(status_code=503, detail={"code": "embedding_provider_unconfigured"})
     return HuggingFaceFreeEmbeddingProvider(
         api_key=settings.embedding_api_key.get_secret_value(),
         timeout=settings.llm_timeout_seconds,
     )
+
+
+class UnavailableEmbeddingProvider:
+    """Fail retrieval closed while allowing the configured Mac inference provider."""
+
+    model_name = "unavailable"
+
+    async def embed(self, _text: str) -> object:
+        raise RuntimeError("embedding_provider_unavailable")
+
+
+@router.post("/worker/claim", dependencies=[Depends(require_internal_auth)])
+async def claim_inference_job(
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    settings = get_settings()
+    tenant_id = UUID(settings.tenant_id)
+    async with session.begin():
+        await set_tenant_context(session, str(tenant_id))
+        repository = OutboxRepository(session)
+        await repository.requeue_expired(
+            tenant_id=tenant_id, job_types=frozenset({"inference"})
+        )
+        jobs = await repository.claim(
+            tenant_id=tenant_id,
+            limit=1,
+            lease_seconds=300,
+            job_types=frozenset({"inference"}),
+        )
+        if not jobs:
+            return {"job": None}
+        job = jobs[0]
+        request_text = decrypt_claimed_request(job)
+        return {
+            "job": {
+                "id": str(job.id),
+                "leaseToken": job.claim_token,
+                "attempt": job.attempts,
+                "request": json.loads(request_text),
+            }
+        }
+
+
+@router.post("/worker/complete", dependencies=[Depends(require_internal_auth)])
+async def complete_inference_job(
+    payload: WorkerCompleteRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    settings = get_settings()
+    tenant_id = UUID(settings.tenant_id)
+    now = datetime.now(UTC)
+    async with session.begin():
+        await set_tenant_context(session, str(tenant_id))
+        job = await session.scalar(
+            select(OutboxJob).where(
+                OutboxJob.tenant_id == tenant_id,
+                OutboxJob.id == payload.job_id,
+                OutboxJob.job_type == "inference",
+            ).with_for_update()
+        )
+        if job is None:
+            raise HTTPException(status_code=404, detail={"code": "inference_job_unavailable"})
+        if job.state == JobState.completed:
+            return {"completed": True, "duplicate": True}
+        if (
+            job.state != JobState.running
+            or job.lease_expires_at is None
+            or job.lease_expires_at <= now
+            or not isinstance(job.claim_token, str)
+            or not hmac.compare_digest(job.claim_token, payload.lease_token)
+        ):
+            raise HTTPException(status_code=409, detail={"code": "inference_lease_stale"})
+        job.payload = {
+            **job.payload,
+            **encrypt_worker_result(
+                job,
+                json.dumps(
+                    {"text": payload.text, "model": payload.model},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            ),
+        }
+        job.state = JobState.completed
+        job.claim_token = None
+        job.lease_expires_at = None
+        job.last_error = None
+        source_message = await session.scalar(select(Message).where(
+            Message.tenant_id == tenant_id,
+            Message.id == job.aggregate_id,
+            Message.role == "user",
+            Message.deleted_at.is_(None),
+        ).with_for_update())
+        if source_message is None:
+            raise HTTPException(status_code=409, detail={"code": "inference_source_unavailable"})
+        await OutboxRepository(session).enqueue(
+            tenant_id=tenant_id,
+            job_type="response_retry",
+            dedupe_key=f"response-retry:{source_message.id}",
+            aggregate_id=source_message.id,
+            payload={
+                "request_id": source_message.idempotency_key,
+                "message_id": str(source_message.id),
+            },
+        )
+        await session.flush()
+        return {"completed": True, "duplicate": False, "finalizationQueued": True}
+
+
+@router.post("/worker/fail", dependencies=[Depends(require_internal_auth)])
+async def fail_inference_job(
+    payload: WorkerFailRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    settings = get_settings()
+    tenant_id = UUID(settings.tenant_id)
+    async with session.begin():
+        await set_tenant_context(session, str(tenant_id))
+        job = await session.scalar(
+            select(OutboxJob).where(
+                OutboxJob.tenant_id == tenant_id,
+                OutboxJob.id == payload.job_id,
+                OutboxJob.job_type == "inference",
+            ).with_for_update()
+        )
+        if job is None:
+            raise HTTPException(status_code=404, detail={"code": "inference_job_unavailable"})
+        if (
+            job.state != JobState.running
+            or job.lease_expires_at is None
+            or job.lease_expires_at <= datetime.now(UTC)
+            or not isinstance(job.claim_token, str)
+            or not hmac.compare_digest(job.claim_token, payload.lease_token)
+        ):
+            raise HTTPException(status_code=409, detail={"code": "inference_lease_stale"})
+        await OutboxRepository(session).fail(job, payload.error_code, max_attempts=5)
+        return {"accepted": True, "state": job.state.value}
 
 
 @router.put("/characters/{gpoint_character_id}", dependencies=[Depends(require_internal_auth)])
@@ -600,6 +861,7 @@ async def sync_user_consent(
             .order_by(AgeAssurance.version.desc())
             .with_for_update()
         )
+        preserve_verified_age = prior_age is not None and prior_age.status == "verified"
         same_age = prior_age is not None and (
             prior_age.age_band == payload.age_band
             and prior_age.status == payload.age_status
@@ -608,7 +870,9 @@ async def sync_user_consent(
             and prior_age.verified_at == payload.verified_at
             and prior_age.expires_at == payload.expires_at
         )
-        if not same_age:
+        if preserve_verified_age:
+            age_version = prior_age.version
+        elif not same_age:
             age_version = (prior_age.version + 1) if prior_age else 1
             session.add(
                 AgeAssurance(
@@ -813,6 +1077,10 @@ async def respond(
             )
         except RelationshipUnavailable as exc:
             raise HTTPException(status_code=409, detail={"code": str(exc)}) from exc
+    if response_provider is None:
+        # The encrypted user message is already durable. Do not create a
+        # response run or queue inference while production has no provider.
+        raise HTTPException(status_code=503, detail={"code": "ai_unavailable"})
     orchestrator = ResponseOrchestrator(
         session,
         crypto,
@@ -838,6 +1106,13 @@ async def respond(
             as_of=now,
         ),
     )
+    if result.status == "pending":
+        return RespondResponse(
+            status="pending",
+            request_id=payload.request_id,
+            conversation_id=str(conversation_id),
+            character_id=str(character_id),
+        )
     if result.status != "completed" or result.assistant_message_id is None:
         raise HTTPException(status_code=503, detail={"code": result.reason_code})
     async with session.begin():
@@ -867,6 +1142,7 @@ async def respond(
         MessageIngestionService._aad_for(tenant_id, user.id, conversation.id, assistant.id),
     )
     return RespondResponse(
+        status="completed",
         request_id=payload.request_id,
         conversation_id=str(conversation.id),
         message_id=str(assistant.id),

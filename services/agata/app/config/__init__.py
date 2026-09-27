@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr | None = None
     llm_api_base_url: str = "https://anymodel.org/v1"
     llm_timeout_seconds: int = Field(default=12, ge=1, le=30)
+    worker_wait_seconds: float = Field(default=6.0, ge=0.5, le=10.0)
     runtime_db_role: str | None = None
     db_pool_size: int = Field(default=5, ge=1, le=50)
     db_max_overflow: int = Field(default=5, ge=0, le=100)

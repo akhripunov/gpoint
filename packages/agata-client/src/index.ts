@@ -30,11 +30,12 @@ export interface AgataRespondInput {
 }
 
 export interface AgataRespondOutput {
+  status: 'completed' | 'pending';
   request_id: string;
   conversation_id: string;
-  message_id: string;
+  message_id: string | null;
   character_id: string;
-  text: string;
+  text: string | null;
 }
 
 export interface AgataChatState {
@@ -48,6 +49,24 @@ export interface AgataChatState {
   verifiedAt: string | null;
   expiresAt: string | null;
   jurisdiction: string;
+}
+
+export interface AgataAgeAssuranceState {
+  required: boolean;
+  eligible: boolean;
+  status: 'pending' | 'verified' | 'self_attested' | 'expired' | 'rejected';
+  method: string;
+  jurisdiction: string;
+  assertedAt: string | null;
+  expiresAt: string | null;
+  selfAttestationAllowed: boolean;
+}
+
+export interface AgataInferenceJob {
+  id: string;
+  leaseToken: string;
+  attempt: number;
+  request: Record<string, unknown>;
 }
 
 export interface AgataConversationItem {
@@ -133,6 +152,26 @@ export class AgataClient {
 
   async getChatState(id: string): Promise<AgataChatState> {
     return this.request(`/internal/v1/users/${encodeURIComponent(id)}/chat-state`, 'GET', undefined);
+  }
+
+  async getAgeAssurance(id: string): Promise<AgataAgeAssuranceState> {
+    return this.request(`/internal/v1/users/${encodeURIComponent(id)}/age-assurance`, 'GET', undefined);
+  }
+
+  async selfAttestAge(id: string): Promise<{ eligible: boolean; status: string; method: string }> {
+    return this.request(`/internal/v1/users/${encodeURIComponent(id)}/age-assurance/self-attest`, 'POST', { confirmed_18_plus: true });
+  }
+
+  async claimInferenceJob(): Promise<{ job: AgataInferenceJob | null }> {
+    return this.request('/internal/v1/worker/claim', 'POST', {});
+  }
+
+  async completeInferenceJob(input: { job_id: string; lease_token: string; text: string; model: string }): Promise<{ completed: boolean; duplicate: boolean }> {
+    return this.request('/internal/v1/worker/complete', 'POST', input);
+  }
+
+  async failInferenceJob(input: { job_id: string; lease_token: string; error_code: string }): Promise<{ accepted: boolean; state: string }> {
+    return this.request('/internal/v1/worker/fail', 'POST', input);
   }
 
   async listConversations(id: string, options: { limit?: number; cursor?: string } = {}): Promise<AgataConversationPage> {

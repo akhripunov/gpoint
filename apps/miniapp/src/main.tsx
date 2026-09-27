@@ -11,6 +11,7 @@ import {
 } from "@tanstack/react-query";
 import {
   auth,
+  ageAssuranceState,
   creator,
   creatorMe,
   creatorOnboarding,
@@ -32,6 +33,7 @@ import {
   resetPreferences,
   setPreference,
   startTelegramChannelConnection,
+  selfAttest18Plus,
   telegramChannelConnectionStatus,
   openTelegramStartChannel,
 } from "./api/client";
@@ -1603,6 +1605,13 @@ function RecommendationSettings() {
 function AuthenticatedApp() {
   const [user, setUser] = useState<any>(null);
   const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
+  const [ageState, setAgeState] = useState<"loading" | "required" | "ready" | "failed">("loading");
+  const [ageSubmitting, setAgeSubmitting] = useState(false);
+  useEffect(() => {
+    const requireAgeAssurance = () => setAgeState("required");
+    window.addEventListener("gpoint:age-assurance-required", requireAgeAssurance);
+    return () => window.removeEventListener("gpoint:age-assurance-required", requireAgeAssurance);
+  }, []);
   useEffect(() => {
     markBootStage("AUTH_REQUEST_STARTED");
     auth()
@@ -1610,12 +1619,21 @@ function AuthenticatedApp() {
         markBootStage("AUTH_SUCCESS", { creatorProfileStatus: "unknown", channelStatus: "unknown" });
         setUser(authenticatedUser);
         setState("ready");
+        ageAssuranceState()
+          .then((age) => setAgeState(age.required ? "required" : "ready"))
+          .catch(() => setAgeState("failed"));
       })
       .catch(() => {
         localStorage.removeItem("gpoint.session");
         setState("failed");
       });
   }, []);
+  if (state === "ready" && ageState === "required") {
+    return <main className="age-assurance-gate" role="main"><p className="eyebrow">AGE ASSURANCE</p><h1>Продолжить в GPoint</h1><p>Подтвердите, что вам исполнилось 18 лет. Это самостоятельное подтверждение возраста, не проверка документов.</p><button type="button" disabled={ageSubmitting} onClick={() => { setAgeSubmitting(true); selfAttest18Plus().then((age) => setAgeState(age.required ? "required" : "ready")).catch(() => setAgeState("failed")).finally(() => setAgeSubmitting(false)); }}>{ageSubmitting ? "Проверяем…" : "Мне 18+"}</button></main>;
+  }
+  if (state === "ready" && (ageState === "loading" || ageState === "failed")) {
+    return <main className="age-assurance-gate" role="main"><p className="eyebrow">AGE ASSURANCE</p><h1>{ageState === "loading" ? "Проверяем доступ…" : "Не удалось проверить возраст"}</h1><p>{ageState === "loading" ? "GPoint проверяет сохранённое подтверждение." : "Доступ закрыт, пока сервер не подтвердит состояние. Попробуйте снова."}</p>{ageState === "failed" && <button type="button" onClick={() => { setAgeState("loading"); ageAssuranceState().then((age) => setAgeState(age.required ? "required" : "ready")).catch(() => setAgeState("failed")); }}>Повторить</button>}</main>;
+  }
   if (state === "loading")
     return (
       <div className="app-shell">
@@ -1637,6 +1655,7 @@ function AuthenticatedApp() {
         </main>
       </div>
     );
+  if (ageState !== "ready") return <div className="app-shell"><main className="page"><div className="empty"><h3>Проверяем доступ…</h3></div></main></div>;
   markBootStage("MAIN_VIEW_RENDER_STARTED");
   const view = <App initialUser={user} />;
   markBootStage("MAIN_VIEW_RENDER_FINISHED");

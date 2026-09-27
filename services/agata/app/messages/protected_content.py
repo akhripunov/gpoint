@@ -42,6 +42,10 @@ _OUTBOX_KEYS = {
     "memory_graph_sync": frozenset({"memory_id", "memory_version"}),
     "generic": frozenset({"code", "aggregate_id"}),
     "response_retry": frozenset({"code", "request_id", "message_id"}),
+    "inference": frozenset({
+        "context_ciphertext", "context_nonce", "context_key_version",
+        "result_ciphertext", "result_nonce", "result_key_version",
+    }),
 }
 
 
@@ -211,6 +215,19 @@ def validate_outbox_payload(job_type: str, payload: object) -> None:
             raise CryptoError("outbox_payload_envelope_invalid") from exc
         if len(bytes.fromhex(payload["reply_context_nonce"])) != 12:
             raise CryptoError("outbox_payload_envelope_invalid")
+    for prefix in ("context", "result"):
+        envelope_keys = {f"{prefix}_ciphertext", f"{prefix}_nonce", f"{prefix}_key_version"}
+        present = envelope_keys.intersection(payload)
+        if present and present != envelope_keys:
+            raise CryptoError("outbox_payload_envelope_incomplete")
+        if present:
+            try:
+                bytes.fromhex(payload[f"{prefix}_ciphertext"])
+                nonce = bytes.fromhex(payload[f"{prefix}_nonce"])
+            except ValueError as exc:
+                raise CryptoError("outbox_payload_envelope_invalid") from exc
+            if len(nonce) != 12:
+                raise CryptoError("outbox_payload_envelope_invalid")
 
 
 def protected_text_aad(**owner: Any) -> bytes:

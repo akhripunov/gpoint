@@ -24,13 +24,16 @@ from app.db.models import (
     MemoryControlState,
     MemorySnapshot,
     Message,
+    OutboxJob,
     Relationship,
+    User,
 )
+from app.domain.principal import PrincipalContext
 from app.jobs.outbox import OutboxRepository, StaleCreationEpoch
 from app.memory.embedding import HuggingFaceFreeEmbeddingProvider
 from app.memory.persistent_graph import PersistentMemoryGraphService
 from app.memory.promotion import AutoWritePromotionService
-from app.memory.retrieval import EmbeddingWorker
+from app.memory.retrieval import EmbeddingWorker, HybridRetrievalService
 from app.memory.segments import segment_hierarchy, segment_interval
 from app.memory.shadow import (
     ExtractionProvider,
@@ -49,7 +52,13 @@ from app.messages.protected_content import (
 )
 from app.messages.service import MessageIngestionService
 from app.responses.deepseek import DeepSeekResponseProvider
-from app.responses.pipeline import ProviderEnvelope, ResponseContext
+from app.responses.pipeline import (
+    ProviderEnvelope,
+    ResponseContext,
+    ResponseOrchestrator,
+    ResponseRequest,
+)
+from app.responses.provider_factory import build_response_provider
 
 _HEARTBEAT_PATH = Path("/tmp/agata-worker-heartbeat")
 
@@ -63,6 +72,21 @@ class MemoryWorkerCycle:
 
 class SummaryProcessingError(ValueError):
     """Finite summary-worker failure; content is never copied into the code."""
+
+
+def claimed_job_types(*, embedding_available: bool) -> frozenset[str]:
+    job_types = {
+        "conversation_summary",
+        "relationship_note_refresh",
+        "snapshot_refresh",
+        "memory_extract",
+        "memory_promote",
+        "memory_graph_sync",
+        "response_retry",
+    }
+    if embedding_available:
+        job_types.add("memory_embed")
+    return frozenset(job_types)
 
 
 class MemoryWorker:
@@ -90,16 +114,8 @@ class MemoryWorker:
         self.batch_size = batch_size
 
     async def run_once(self) -> MemoryWorkerCycle:
-        owned_job_types = frozenset(
-            {
-                "conversation_summary",
-                "relationship_note_refresh",
-                "snapshot_refresh",
-                "memory_extract",
-                "memory_promote",
-                "memory_embed",
-                "memory_graph_sync",
-            }
+        owned_job_types = claimed_job_types(
+            embedding_available=getattr(self.provider, "available", True)
         )
         async with self.session_factory() as claim_session:
             async with claim_session.begin():
@@ -162,6 +178,14 @@ class MemoryWorker:
                         await self._fail_claimed(job, "memory_graph_sync_failed", max_attempts=3)
                         failed += 1
                     continue
+                if job.job_type == "response_retry":
+                    try:
+                        await self._process_response_retry(job, session)
+                        completed += 1
+                    except Exception:
+                        await self._fail_claimed(job, "response_finalization_failed")
+                        failed += 1
+                    continue
                 if job.job_type == "memory_extract":
                     if self.extraction_provider is None:
                         await self._fail_claimed(job, "extractor_unavailable", max_attempts=3)
@@ -211,6 +235,73 @@ class MemoryWorker:
                 else:
                     failed += 1
         return MemoryWorkerCycle(len(memory_jobs), completed, failed)
+
+    async def _process_response_retry(self, job, session: AsyncSession) -> None:
+        """Finalize a completed Mac inference using AGATA's normal response pipeline."""
+        try:
+            message_id = UUID(str(job.payload["message_id"]))
+            request_id = job.payload["request_id"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SummaryProcessingError("response_retry_invalid") from exc
+        if job.aggregate_id != message_id or not isinstance(request_id, str):
+            raise SummaryProcessingError("response_retry_invalid")
+
+        async with session.begin():
+            await set_tenant_context(session, str(self.tenant_id))
+            row = (await session.execute(
+                select(Message, User, Character, Conversation)
+                .join(User, (User.tenant_id == Message.tenant_id) & (User.id == Message.user_id))
+                .join(Character, (Character.tenant_id == Message.tenant_id) & (Character.id == Message.character_id))
+                .join(Conversation, (Conversation.tenant_id == Message.tenant_id) & (Conversation.id == Message.conversation_id))
+                .where(
+                    Message.tenant_id == self.tenant_id,
+                    Message.id == message_id,
+                    Message.idempotency_key == request_id,
+                    Message.role == "user",
+                    Message.deleted_at.is_(None),
+                    User.source_system == "gpoint",
+                    User.deleted_at.is_(None),
+                    Character.source_system == "gpoint",
+                    Character.status == "active",
+                    Conversation.source_system == "gpoint",
+                )
+            )).one_or_none()
+            if row is None:
+                raise SummaryProcessingError("response_source_unavailable")
+            message, user, character, conversation = row
+            principal = PrincipalContext(self.tenant_id, user.id, user.id, "internal")
+            request = ResponseRequest(
+                conversation_id=conversation.id,
+                user_message_id=message.id,
+                idempotency_key=request_id,
+                as_of=message.occurred_at,
+            )
+
+        settings = get_settings()
+        retrieval_key = base64.b64decode(settings.retrieval_query_hmac_key.get_secret_value(), validate=True)
+        response_key = base64.b64decode(settings.response_fingerprint_hmac_key.get_secret_value(), validate=True)
+        orchestrator = ResponseOrchestrator(
+            session,
+            self.crypto,
+            HybridRetrievalService(session, self.provider, hmac_key=retrieval_key),
+            build_response_provider(session, settings),
+            hmac_key=response_key,
+            provider_timeout_seconds=settings.llm_timeout_seconds,
+        )
+        result = await orchestrator.respond(principal, request)
+        if result.status != "completed" or result.assistant_message_id is None:
+            raise SummaryProcessingError("response_not_finalized")
+        async with session.begin():
+            await set_tenant_context(session, str(self.tenant_id))
+            current_job = await session.scalar(
+                select(OutboxJob).where(
+                    OutboxJob.tenant_id == self.tenant_id,
+                    OutboxJob.id == job.id,
+                ).with_for_update()
+            )
+            if current_job is None:
+                raise SummaryProcessingError("response_retry_unavailable")
+            await OutboxRepository(session).complete(current_job)
 
     async def _process_graph_sync(self, job) -> None:
         try:
@@ -630,15 +721,13 @@ class MemoryWorker:
 
 async def _amain() -> int:
     settings: Settings = get_settings()
-    if not settings.embedding_api_key:
-        return 2
     provider = HuggingFaceFreeEmbeddingProvider(
-        api_key=settings.embedding_api_key.get_secret_value(),
+        api_key=settings.embedding_api_key.get_secret_value() if settings.embedding_api_key else "",
         timeout=settings.llm_timeout_seconds,
     )
     summary_provider = None
     extraction_provider: ExtractionProvider | None = None
-    if settings.llm_api_key:
+    if settings.llm_provider not in {"disabled", "none"} and settings.llm_api_key:
         summary_provider = DeepSeekResponseProvider(
             api_key=settings.llm_api_key.get_secret_value(),
             base_url=settings.llm_api_base_url,
@@ -694,7 +783,7 @@ async def _healthcheck() -> int:
                     text("SELECT version_num FROM agata.alembic_version")
                 )
                 await session.scalar(text("SELECT 1 FROM agata.outbox_jobs LIMIT 1"))
-        return 0 if revision == "agata0006" else 1
+        return 0 if revision == "agata0007" else 1
     except Exception:
         return 1
 

@@ -25,8 +25,8 @@ export interface MessageThreadDTO {
 }
 export interface MessageThreadListDTO { items: MessageThreadDTO[]; nextCursor: string | null; }
 export interface ChatHistoryDTO extends PaginatedResponse<ChatMessageDTO> { creator: CreatorSummaryDTO; }
-export interface MessagesStateDTO { enabled: boolean; chatHistory: boolean; longTermMemory: boolean; disclosureRequired: boolean; ageAssuranceRequired?: boolean; }
-export interface SendMessageDTO { userMessageId: string; response: ChatMessageDTO; }
+export interface MessagesStateDTO { enabled: boolean; chatHistory: boolean; longTermMemory: boolean; disclosureRequired: boolean; ageAssuranceRequired?: boolean; aiAvailable?: boolean; }
+export interface SendMessageDTO { userMessageId: string; status?: 'pending' | 'completed'; response?: ChatMessageDTO; }
 
 export interface CreatorBot {
   id: string; creatorId: string; telegramBotId: string; telegramUsername: string;

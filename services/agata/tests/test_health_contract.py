@@ -22,16 +22,33 @@ class ScalarSession:
 
 @pytest.mark.asyncio
 async def test_readiness_accepts_expected_provider_schema_head_and_pgvector(monkeypatch):
-    monkeypatch.setattr(health, "get_settings", lambda: SimpleNamespace(llm_api_key="fake"))
+    monkeypatch.setattr(
+        health, "get_settings", lambda: SimpleNamespace(llm_provider="local_fake", llm_api_key="fake")
+    )
 
-    result = await health.ready(ScalarSession([1, 1, "agata0006", 1]))
+    result = await health.ready(ScalarSession([1, 1, "agata0007", 1]))
+
+    assert result == {"status": "ready"}
+
+
+@pytest.mark.asyncio
+async def test_readiness_accepts_disabled_provider_without_api_key(monkeypatch):
+    monkeypatch.setattr(
+        health,
+        "get_settings",
+        lambda: SimpleNamespace(llm_provider="disabled", llm_api_key=None),
+    )
+
+    result = await health.ready(ScalarSession([1, 1, "agata0007", 1]))
 
     assert result == {"status": "ready"}
 
 
 @pytest.mark.asyncio
 async def test_readiness_fails_closed_without_provider_configuration(monkeypatch):
-    monkeypatch.setattr(health, "get_settings", lambda: SimpleNamespace(llm_api_key=None))
+    monkeypatch.setattr(
+        health, "get_settings", lambda: SimpleNamespace(llm_provider="local_fake", llm_api_key=None)
+    )
     session = ScalarSession([])
 
     with pytest.raises(HTTPException) as error:
@@ -46,13 +63,15 @@ async def test_readiness_fails_closed_without_provider_configuration(monkeypatch
     "values",
     [
         [1, 1, "agata0005", 1],
-        [1, 1, "agata0006", None],
+        [1, 1, "agata0007", None],
         [RuntimeError("disposable database unavailable")],
     ],
     ids=["wrong-head", "missing-pgvector", "database-unavailable"],
 )
 async def test_readiness_fails_closed_for_dependency_or_revision_mismatch(monkeypatch, values):
-    monkeypatch.setattr(health, "get_settings", lambda: SimpleNamespace(llm_api_key="fake"))
+    monkeypatch.setattr(
+        health, "get_settings", lambda: SimpleNamespace(llm_provider="local_fake", llm_api_key="fake")
+    )
 
     with pytest.raises(HTTPException) as error:
         await health.ready(ScalarSession(values))

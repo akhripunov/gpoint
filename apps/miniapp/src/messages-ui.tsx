@@ -53,7 +53,7 @@ export function MessagesInbox({ openChat, explore }: { openChat: (slug: string) 
   </section>;
 }
 
-type PendingMessage = { id: string; text: string; status: "sending" | "failed" };
+type PendingMessage = { id: string; text: string; status: "sending" | "waiting" | "failed" };
 type DisplayMessage = ChatMessageDTO & { status?: PendingMessage["status"] };
 
 export function ModelChat({ slug, back }: { slug: string; back: () => void }) {
@@ -62,6 +62,7 @@ export function ModelChat({ slug, back }: { slug: string; back: () => void }) {
   const [remember, setRemember] = useState<boolean | null>(null);
   const [pending, setPending] = useState<PendingMessage[]>([]);
   const [ageRequired, setAgeRequired] = useState(false);
+  const [providerUnavailable, setProviderUnavailable] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const fieldRef = useRef<HTMLTextAreaElement>(null);
   const model = useQuery({ queryKey: ["creator", slug], queryFn: () => creator(slug), retry: (count, error) => !(error instanceof ApiError && error.status === 404) && count < 2 });
@@ -70,6 +71,7 @@ export function ModelChat({ slug, back }: { slug: string; back: () => void }) {
   const history = useInfiniteQuery({
     queryKey: ["creator-messages", creatorId],
     queryFn: ({ pageParam }) => creatorMessages(creatorId!, pageParam),
+    refetchInterval: 3000,
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (page) => page.nextCursor ?? undefined,
     enabled: Boolean(creatorId && state.data?.enabled && state.data.chatHistory && !state.data.disclosureRequired),
@@ -82,13 +84,29 @@ export function ModelChat({ slug, back }: { slug: string; back: () => void }) {
     mutationFn: ({ id, text }: { id: string; text: string }) => sendCreatorMessage(creatorId!, { clientMessageId: id, text }),
     onSuccess: (result, variables) => {
       const key = ["creator-messages", creatorId];
+      if (result.status === "pending" || !result.response) {
+        queryClient.setQueryData<any>(key, (current: any) => {
+          if (!current?.pages?.length) return current;
+          const pages = [...current.pages];
+          const first = pages[0];
+          if (!first.items.some((item: ChatMessageDTO) => item.id === variables.id)) {
+            pages[0] = { ...first, items: [...first.items, { id: variables.id, role: "user", text: variables.text, occurredAt: new Date().toISOString() }] };
+          }
+          return { ...current, pages };
+        });
+        setPending((all) => all.map((item) => item.id === variables.id ? { ...item, status: "waiting" } : item));
+        void queryClient.invalidateQueries({ queryKey: ["messages-inbox"] });
+        return;
+      }
+      const response = result.response;
+      if (result.status !== "completed" || !response) return;
       queryClient.setQueryData<any>(key, (current: any) => {
         if (!current?.pages?.length) return current;
         const pages = [...current.pages];
         const first = pages[0];
         const items = [...first.items];
         if (!items.some((item: ChatMessageDTO) => item.id === variables.id)) items.push({ id: variables.id, role: "user", text: variables.text, occurredAt: new Date().toISOString() });
-        if (!items.some((item: ChatMessageDTO) => item.id === result.response.id)) items.push(result.response);
+        if (!items.some((item: ChatMessageDTO) => item.id === response.id)) items.push(response);
         pages[0] = { ...first, items };
         return { ...current, pages };
       });
@@ -98,8 +116,15 @@ export function ModelChat({ slug, back }: { slug: string; back: () => void }) {
     },
     onError: (error, variables) => {
       if (error instanceof ApiError && error.code === "AGE_ASSURANCE_REQUIRED") {
-        setAgeRequired(true);
+        window.dispatchEvent(new Event("gpoint:age-assurance-required"));
         void queryClient.invalidateQueries({ queryKey: ["messages-state"] });
+      }
+      if (error instanceof ApiError && error.code === "AI_UNAVAILABLE") {
+        setProviderUnavailable(true);
+        setPending((all) => all.filter((item) => item.id !== variables.id));
+        void queryClient.invalidateQueries({ queryKey: ["creator-messages", creatorId] });
+        void queryClient.invalidateQueries({ queryKey: ["messages-inbox"] });
+        return;
       }
       setPending((all) => all.map((item) => item.id === variables.id ? { ...item, status: "failed" } : item));
     },
@@ -108,10 +133,20 @@ export function ModelChat({ slug, back }: { slug: string; back: () => void }) {
   const historyItems = pages.flatMap((page) => page.items).sort((a, b) => Date.parse(a.occurredAt) - Date.parse(b.occurredAt));
   const displayItems: DisplayMessage[] = [...historyItems, ...pending.map((item) => ({ ...item, role: "user" as const, occurredAt: new Date().toISOString() }))];
   const ageBlocked = ageRequired || state.data?.ageAssuranceRequired === true;
+  const aiUnavailable = providerUnavailable || state.data?.aiAvailable === false;
+  useEffect(() => {
+    if (state.data?.ageAssuranceRequired) window.dispatchEvent(new Event("gpoint:age-assurance-required"));
+  }, [state.data?.ageAssuranceRequired]);
   const needsConsent = !!state.data && (!state.data.chatHistory || state.data.disclosureRequired);
-  const canSend = Boolean(creatorId && state.data?.enabled && !needsConsent && !ageBlocked && !send.isPending);
+  const canSend = Boolean(creatorId && state.data?.enabled && !needsConsent && !ageBlocked && !aiUnavailable && !send.isPending);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end", behavior: "smooth" }); }, [displayItems.length]);
+  useEffect(() => {
+    const waiting = pending.find((item) => item.status === "waiting");
+    if (!waiting || send.isPending || !creatorId) return;
+    const timer = window.setTimeout(() => send.mutate({ id: waiting.id, text: waiting.text }), 5000);
+    return () => window.clearTimeout(timer);
+  }, [pending, send.isPending, creatorId]);
 
   const submit = (event?: FormEvent) => {
     event?.preventDefault();
@@ -139,14 +174,15 @@ export function ModelChat({ slug, back }: { slug: string; back: () => void }) {
     <header className="chat-header"><button type="button" onClick={back} aria-label="Back to messages"><ArrowLeft size={22} /></button>{model.data && <><Avatar src={model.data.avatarUrl} name={model.data.displayName} /><div className="chat-header-name"><strong>{model.data.displayName}</strong><span>@{model.data.slug}</span></div></>}</header>
     {model.isLoading || state.isLoading ? <div className="messages-state"><span className="messages-spinner" /><p>Opening conversation…</p></div> : model.isError || !model.data ? <div className="messages-state"><h2>Model unavailable</h2><p>This model profile can't be opened right now.</p><Button variant="secondary" onClick={back}>Back to messages</Button></div> : state.isError || !state.data?.enabled ? <div className="messages-state"><h2>Messages unavailable</h2><p>Conversations are temporarily unavailable.</p></div> : ageBlocked ? <div className="messages-gate" role="alert"><ShieldAlert size={25} /><h2>Messages are unavailable</h2><p>Age assurance is required before you can send messages. Messages cannot collect or change your age status.</p></div> : needsConsent ? <div className="messages-gate"><span className="messages-empty-icon"><MessageCircle size={25} /></span><p className="eyebrow">BEFORE YOUR FIRST MESSAGE</p><h2>AI character conversation</h2><p>You’re chatting with an AI character for this creator. Your conversation history is saved so you can continue this chat later.</p><label className="messages-memory-choice"><input type="checkbox" checked={remember ?? state.data.longTermMemory} onChange={(event) => setRemember(event.target.checked)} /><span><strong>Remember things from our conversations</strong><small>Optional. You can continue without long-term memory.</small></span></label><Button loading={consent.isPending} disabled={consent.isPending} onClick={() => consent.mutate(remember ?? state.data!.longTermMemory)}>Continue</Button>{consent.isError && <p className="messages-error" role="alert">Consent couldn't be saved. Try again.</p>}</div> : <>
       <div className="chat-history" aria-live="polite">
+        {aiUnavailable && <div className="chat-provider-unavailable" role="status">AI replies are not configured yet. You can read your conversation, but sending is disabled for now.</div>}
         {history.isError && <div className="chat-load-error" role="alert">Couldn't load chat history. <button type="button" onClick={() => void history.refetch()}>Retry</button></div>}
         {history.hasNextPage && <button className="chat-older" disabled={history.isFetchingNextPage} type="button" onClick={() => void history.fetchNextPage()}>{history.isFetchingNextPage ? "Loading…" : "Load earlier messages"}</button>}
         {history.isLoading && <div className="messages-state"><span className="messages-spinner" /><p>Loading conversation…</p></div>}
-        {!history.isLoading && displayItems.map((item) => <div className={`chat-message-row ${item.role === "user" ? "mine" : "theirs"}`} key={item.id}><article className={`chat-bubble ${item.role === "user" ? "mine" : "theirs"}`}><p>{item.text}</p>{item.status && <small className={item.status}>{item.status === "sending" ? "Sending…" : <>Not sent · <button type="button" onClick={() => retry({ id: item.id, text: item.text, status: "failed" })}>Retry</button></>}</small>}<time>{activityTime(item.occurredAt)}</time></article></div>)}
+        {!history.isLoading && displayItems.map((item) => <div className={`chat-message-row ${item.role === "user" ? "mine" : "theirs"}`} key={item.id}><article className={`chat-bubble ${item.role === "user" ? "mine" : "theirs"}`}><p>{item.text}</p>{item.status && <small className={item.status}>{item.status === "sending" ? "Sending…" : item.status === "waiting" ? "Агата отвечает…" : <>Not sent · <button type="button" onClick={() => retry({ id: item.id, text: item.text, status: "failed" })}>Retry</button></>}</small>}<time>{activityTime(item.occurredAt)}</time></article></div>)}
         {!history.isLoading && !displayItems.length && <div className="chat-welcome"><Avatar src={model.data.avatarUrl} name={model.data.displayName} className="large" /><h2>{model.data.displayName}</h2><p>Start a conversation. You’re chatting with an AI character for this creator.</p></div>}
         <div ref={bottomRef} />
       </div>
-      {send.isError && !(send.error instanceof ApiError && send.error.code === "AGE_ASSURANCE_REQUIRED") && <p className="chat-send-error" role="alert">Message wasn't sent. You can retry it above.</p>}
+      {send.isError && !(send.error instanceof ApiError && ["AGE_ASSURANCE_REQUIRED", "AI_UNAVAILABLE"].includes(send.error.code ?? "")) && <p className="chat-send-error" role="alert">Message wasn't sent. You can retry it above.</p>}
       <form className="chat-composer" onSubmit={submit}><textarea ref={fieldRef} value={draft} onChange={(event) => setDraft(event.target.value.slice(0, 4000))} onKeyDown={onKeyDown} placeholder="Message…" aria-label="Message" rows={1} maxLength={4000} disabled={!canSend} /><span className="chat-composer-meta">{draft.length > 3600 ? `${draft.length}/4000` : ""}</span><button type="submit" disabled={!draft.trim() || !canSend} aria-label="Send message"><ArrowUp size={19} /></button></form>
     </>}
   </section>;

@@ -3,7 +3,8 @@ import { installMiniAppBrowserMocks } from "./miniapp-mocks";
 
 test.beforeEach(async ({ page }, testInfo) => {
   await installMiniAppBrowserMocks(page, {
-    ageAssuranceRequired: testInfo.title.includes("age assurance blocked"),
+    ageAssuranceRequired: testInfo.title.includes("age assurance blocks") || testInfo.title.includes("age assurance self-attestation"),
+    aiAvailable: !testInfo.title.includes("provider-disabled"),
   });
 });
 
@@ -34,9 +35,28 @@ test("creator profile opens its chat; consent and text exchange work", async ({ 
   await expect(page.locator(".bottom-nav")).toHaveCount(0);
 });
 
-test("age assurance blocked state does not offer a Messages age flow or send", async ({ page }) => {
+test("age assurance blocks Messages behind the global onboarding gate", async ({ page }) => {
   await page.goto("/messages/models_hub", { waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("heading", { name: "Messages are unavailable" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Продолжить в GPoint" })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Message" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: /age assurance|onboarding/i })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Мне 18+" })).toBeVisible();
+});
+
+test("age assurance self-attestation persists and returns to the requested Messages route", async ({ page }) => {
+  await page.goto("/messages", { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("heading", { name: "Продолжить в GPoint" })).toBeVisible();
+  await page.getByRole("button", { name: "Мне 18+" }).click();
+  await expect(page.getByRole("heading", { name: "Messages", exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/\/messages$/);
+});
+
+test("provider-disabled chat remains readable and blocks sending without a fake reply", async ({ page }) => {
+  await page.goto("/messages/models_hub", { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("heading", { name: "AI character conversation" })).toBeVisible();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByRole("status")).toContainText("AI replies are not configured yet");
+  const composer = page.getByRole("textbox", { name: "Message" });
+  await expect(composer).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Send message" })).toBeDisabled();
+  await expect(page.getByText("Thanks for your message.", { exact: true })).toHaveCount(0);
 });

@@ -996,6 +996,7 @@ class OutboxJob(TenantOwned):
     )
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claim_token: Mapped[str | None] = mapped_column(String(64))
     creation_epoch: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
     dedupe_key: Mapped[str] = mapped_column(String(255), nullable=False)
     last_error: Mapped[str | None] = mapped_column(Text)
@@ -1011,7 +1012,7 @@ class OutboxJob(TenantOwned):
             name="ck_outbox_memory_control_required",
         ),
         CheckConstraint(
-            "job_type IN ('generic','conversation_summary','relationship_note_refresh','snapshot_refresh','memory_extract','memory_promote','memory_embed','memory_graph_sync','response_retry')",
+            "job_type IN ('generic','conversation_summary','relationship_note_refresh','snapshot_refresh','memory_extract','memory_promote','memory_embed','memory_graph_sync','response_retry','inference')",
             name="ck_outbox_job_type_allowlist",
         ),
         Index(
@@ -1254,7 +1255,7 @@ class ResponseRoutePolicy(TenantOwned):
             name="fk_response_route_profile",
         ),
         CheckConstraint(
-            "provider IN ('local_fake','external_disabled','deepseek','anymodel')",
+            "provider IN ('local_fake','external_disabled','deepseek','anymodel','mac_worker','disabled')",
             name="ck_response_route_provider",
         ),
         CheckConstraint("NOT streaming_allowed", name="ck_response_route_no_streaming"),
@@ -1904,6 +1905,7 @@ class AgeAssurance(TenantOwned):
     method: Mapped[str] = mapped_column(String(32), nullable=False)
     jurisdiction: Mapped[str] = mapped_column(String(32), nullable=False)
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    asserted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     retention_policy_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))

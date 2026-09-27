@@ -63,7 +63,7 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
         text=True,
     )
     with engine.begin() as connection:
-        assert connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0006"
+        assert connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0007"
         assert connection.scalar(text("SELECT to_regclass('agata.derived_memory_views')")) is None
         assert connection.scalar(text("SELECT count(*) FROM agata.memory_entities")) == 0
         connection.execute(text("DROP SCHEMA agata CASCADE"))
@@ -378,7 +378,7 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
         assert legacy_revision == "agata0002"
 
     subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "agata0006"],
+        [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
         cwd=ROOT,
         env=env,
         check=True,
@@ -397,7 +397,7 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
         assert after == before
         assert "alembic_version" in agata_tables
         assert (
-            connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0006"
+            connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0007"
         )
         assert {"memory_entities", "memory_relations", "memory_graph_evidence"} <= agata_tables
         assert connection.scalar(text("SELECT count(*) FROM agata.memory_entities")) == 0

@@ -1,6 +1,6 @@
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +19,7 @@ JOB_TYPES = frozenset(
         "memory_embed",
         "memory_graph_sync",
         "response_retry",
+        "inference",
     }
 )
 
@@ -94,6 +95,7 @@ class OutboxRepository:
             job.attempts += 1
             job.claimed_at = now
             job.lease_expires_at = now + timedelta(seconds=lease_seconds)
+            job.claim_token = uuid4().hex
         await self.session.flush()
         return rows
 
@@ -106,6 +108,7 @@ class OutboxRepository:
             raise StaleCreationEpoch("job is not running or lease expired")
         job.state = JobState.completed
         job.lease_expires_at = None
+        job.claim_token = None
         await self.session.flush()
 
     async def complete_memory_job(
@@ -138,6 +141,7 @@ class OutboxRepository:
             await write_authoritative(self.session)
         locked.state = JobState.completed
         locked.lease_expires_at = None
+        locked.claim_token = None
         await self.session.flush()
 
     async def bump_deletion_epoch(self, control_id: UUID, tenant_id: UUID) -> int:
@@ -168,6 +172,7 @@ class OutboxRepository:
         assert isinstance(locked, OutboxJob)
         locked.last_error = error[:2000]
         locked.lease_expires_at = None
+        locked.claim_token = None
         locked.state = JobState.dead if locked.attempts >= max_attempts else JobState.failed
         if locked.state == JobState.failed:
             locked.state = JobState.pending
@@ -198,7 +203,7 @@ class OutboxRepository:
                 OutboxJob.state == JobState.running,
                 OutboxJob.lease_expires_at < now,
             )
-            .values(state=JobState.pending, claimed_at=None, lease_expires_at=None)
+            .values(state=JobState.pending, claimed_at=None, lease_expires_at=None, claim_token=None)
         )
         if job_types is not None:
             stmt = stmt.where(OutboxJob.job_type.in_(job_types))

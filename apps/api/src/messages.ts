@@ -33,6 +33,7 @@ export function mapAgataError(error: unknown): HttpException {
     if (error.status === 409 && error.code === 'conversation_closed') return new HttpException({ code: 'CHAT_CONVERSATION_CLOSED' }, 409);
     if (error.status === 409 && error.code === 'idempotency_conflict') return new HttpException({ code: 'CHAT_IDEMPOTENCY_CONFLICT' }, 409);
     if (error.status === 403 && ['consent_required', 'chat_history_consent_required'].includes(error.code)) return new HttpException({ code: 'CHAT_CONSENT_REQUIRED' }, 403);
+    if (error.status === 503 && error.code === 'ai_unavailable') return new HttpException({ code: 'AI_UNAVAILABLE' }, 503);
   }
   return new HttpException({ code: 'MESSAGES_TEMPORARILY_UNAVAILABLE' }, 503);
 }
@@ -89,10 +90,10 @@ export class MessagesController {
   async state(@Headers() headers: Record<string, string | undefined>) {
     const userId = authenticatedUser(headers);
     const agata = createAgataIntegration();
-    if (!agata) return { enabled: false, chatHistory: false, longTermMemory: false, disclosureRequired: true };
+    if (!agata) return { enabled: false, chatHistory: false, longTermMemory: false, disclosureRequired: true, aiAvailable: false };
     try {
       const state = await agata.chatState(userId);
-      return { enabled: true, chatHistory: state.chatHistory, longTermMemory: state.longTermMemory, disclosureRequired: state.disclosureRequired, ageAssuranceRequired: state.ageAssuranceRequired };
+      return { enabled: true, chatHistory: state.chatHistory, longTermMemory: state.longTermMemory, disclosureRequired: state.disclosureRequired, ageAssuranceRequired: state.ageAssuranceRequired, aiAvailable: process.env.AGATA_LLM_PROVIDER !== 'disabled' && process.env.AGATA_LLM_PROVIDER !== 'none' };
     } catch (error) { throw mapAgataError(error); }
   }
 
@@ -117,7 +118,7 @@ export class MessagesController {
       };
       await agata.acceptConsent({ userId, consent });
       const updated = await agata.chatState(userId);
-      return { enabled: true, chatHistory: updated.chatHistory, longTermMemory: updated.longTermMemory, disclosureRequired: updated.disclosureRequired, ageAssuranceRequired: updated.ageAssuranceRequired };
+      return { enabled: true, chatHistory: updated.chatHistory, longTermMemory: updated.longTermMemory, disclosureRequired: updated.disclosureRequired, ageAssuranceRequired: updated.ageAssuranceRequired, aiAvailable: process.env.AGATA_LLM_PROVIDER !== 'disabled' && process.env.AGATA_LLM_PROVIDER !== 'none' };
     } catch (error) { throw mapAgataError(error); }
   }
 
@@ -199,8 +200,12 @@ export class MessagesController {
         profile: buildAgataCharacterProfile(creator), consent,
       });
       await recordChatEvent(userId, creator.id, 'CHAT_MESSAGE_SENT', body.clientMessageId);
+      if (response.status === 'pending' || !response.message_id || !response.text) {
+        return { userMessageId: body.clientMessageId, status: 'pending' as const };
+      }
       await recordChatEvent(userId, creator.id, 'CHAT_RESPONSE_RECEIVED', body.clientMessageId);
       return {
+        status: 'completed' as const,
         userMessageId: body.clientMessageId,
         response: { id: response.message_id, role: 'assistant' as const, text: response.text, occurredAt: new Date().toISOString() },
       };
@@ -217,5 +222,30 @@ export class MessagesController {
       }
       throw mapAgataError(error);
     }
+  }
+}
+
+@Controller('age-assurance')
+export class AgeAssuranceController {
+  @Get('state')
+  async state(@Headers() headers: Record<string, string | undefined>) {
+    const userId = authenticatedUser(headers);
+    const agata = agataOrUnavailable();
+    try { return await agata.ageAssurance(userId); }
+    catch (error) { throw mapAgataError(error); }
+  }
+
+  @Post('self-attest')
+  async selfAttest(
+    @Headers() headers: Record<string, string | undefined>,
+    @Body() body: { confirmed18Plus?: unknown },
+  ) {
+    const userId = authenticatedUser(headers);
+    if (body?.confirmed18Plus !== true) throw new BadRequestException({ code: 'explicit_age_confirmation_required' });
+    const agata = agataOrUnavailable();
+    try {
+      await agata.selfAttestAge(userId);
+      return await agata.ageAssurance(userId);
+    } catch (error) { throw mapAgataError(error); }
   }
 }

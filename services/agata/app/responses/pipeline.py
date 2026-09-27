@@ -172,6 +172,8 @@ class ResponseContext:
     shared_history: tuple[UntrustedMemoryBlock, ...] = ()
     communication_settings: CommunicationSettings = CommunicationSettings()
     character_name: str = "Персонаж"
+    source_message_id: UUID | None = None
+    source_idempotency_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,6 +318,8 @@ class ContextBuilder:
         shared_history: tuple[UntrustedMemoryBlock, ...] = (),
         communication_settings: CommunicationSettings = CommunicationSettings(),
         character_name: str = "Персонаж",
+        source_message_id: UUID | None = None,
+        source_idempotency_key: str | None = None,
     ) -> ResponseContext:
         if (
             not isinstance(profile, CharacterProfileVersion)
@@ -412,6 +416,8 @@ class ContextBuilder:
                 if isinstance(character_name, str) and 1 <= len(character_name) <= 255
                 else "Персонаж"
             ),
+            source_message_id=source_message_id,
+            source_idempotency_key=source_idempotency_key,
         )
 
 
@@ -669,6 +675,8 @@ class ResponseOrchestrator:
             ),
             communication_settings=communication_settings,
             character_name=character_name if isinstance(character_name, str) else "Персонаж",
+            source_message_id=request.user_message_id,
+            source_idempotency_key=request.idempotency_key,
             relationship_note=snapshot_text.get("relationship_note"),
             relationship_summary=snapshot_text.get("relationship_summary"),
             current_context_summary=snapshot_text.get("current_context_summary"),
@@ -680,8 +688,11 @@ class ResponseOrchestrator:
                 self.provider.complete(context),
                 timeout=float(self.provider_timeout_seconds),
             )
-        except Exception:
-            # Never substitute a second persona or a canned answer.
+        except Exception as exc:
+            from app.responses.mac_worker import WorkerInferencePending
+
+            if isinstance(exc, WorkerInferencePending):
+                return ResponseResult(None, "pending", "inference_pending")
             try:
                 envelope = await asyncio.wait_for(
                     self.provider.complete(context),

@@ -1,5 +1,6 @@
 import {
   type AgataChatState,
+  type AgataAgeAssuranceState,
   type AgataConversationPage,
   type AgataCharacterProfile,
   type AgataConsentSnapshot,
@@ -28,10 +29,18 @@ export interface AgataConsentInput {
 
 /** Disabled-by-default boundary for a future GPoint character-chat flow. */
 export class AgataIntegrationService {
-  constructor(private readonly client: Pick<AgataClient, 'syncCharacter' | 'syncConsent' | 'respond' | 'getChatState' | 'listConversations' | 'listMessages'>) {}
+  constructor(private readonly client: Pick<AgataClient, 'syncCharacter' | 'syncConsent' | 'respond' | 'getChatState' | 'getAgeAssurance' | 'selfAttestAge' | 'listConversations' | 'listMessages'>) {}
 
   chatState(userId: string): Promise<AgataChatState> {
     return this.client.getChatState(userId);
+  }
+
+  ageAssurance(userId: string): Promise<AgataAgeAssuranceState> {
+    return this.client.getAgeAssurance(userId);
+  }
+
+  selfAttestAge(userId: string): ReturnType<AgataClient['selfAttestAge']> {
+    return this.client.selfAttestAge(userId);
   }
 
   listConversations(userId: string, options?: { limit?: number; cursor?: string }): Promise<AgataConversationPage> {

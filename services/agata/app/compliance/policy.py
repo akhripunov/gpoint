@@ -10,7 +10,7 @@ from app.db.models import AgeAssurance, RegionalPolicyProfile
 SAFETY_USE_PURPOSES = frozenset({"safe_response", "present_resources", "escalate"})
 VALID_CRISIS_SEVERITIES = frozenset({"low", "medium", "high", "critical"})
 VALID_AGE_BANDS = frozenset({"unknown", "minor", "adult"})
-VALID_AGE_STATUSES = frozenset({"pending", "verified", "expired", "rejected"})
+VALID_AGE_STATUSES = frozenset({"pending", "verified", "self_attested", "expired", "rejected"})
 VALID_POLICY_STATUSES = frozenset({"draft", "active", "retired"})
 DEFAULT_DISCLOSURE_REPEAT_HOURS = 24
 DEFAULT_BREAK_INTERVAL_MINUTES = 180
@@ -38,18 +38,25 @@ class PolicyService:
             .where(
                 AgeAssurance.tenant_id == tenant_id,
                 AgeAssurance.user_id == user_id,
-                AgeAssurance.age_band == "adult",
-                AgeAssurance.expires_at.is_(None) | (AgeAssurance.expires_at > now),
             )
-            .order_by(AgeAssurance.verified_at.desc(), AgeAssurance.id.desc())
+            .order_by(AgeAssurance.version.desc(), AgeAssurance.id.desc())
             .limit(1)
             .with_for_update()
         )
-        if age is None:
+        if (
+            age is None
+            or age.age_band != "adult"
+            or (age.expires_at is not None and age.expires_at <= now)
+        ):
             return False
         if age.status == "verified":
-            return True
-        if age.status != "self_attested" or age.method != "self_attested":
+            return age.verified_at is not None and age.verified_at <= now
+        if (
+            age.status != "self_attested"
+            or age.method != "self_attested"
+            or age.asserted_at is None
+            or age.asserted_at > now
+        ):
             return False
         policy = await session.scalar(
             select(RegionalPolicyProfile)
@@ -79,13 +86,14 @@ class PolicyService:
         expires_at: object,
         disclosure_current: object,
         now: object,
+        asserted_at: object = None,
     ) -> Decision:
         version = self._version_or_none(policy_version)
         if version is None:
             return self._invalid("invalid_policy_version", 0)
         if not self._valid_rules(rules):
             return self._invalid("policy_configuration_invalid", version)
-        if not self._aware(now) or not self._optional_aware(verified_at, expires_at):
+        if not self._aware(now) or not self._optional_aware(verified_at, asserted_at, expires_at):
             return self._invalid("invalid_time_input", version)
         if not isinstance(feature, str):
             return self._invalid("invalid_feature", version)
@@ -98,11 +106,12 @@ class PolicyService:
         assert type(rules) is dict and isinstance(now, datetime)
         restricted = {"romantic", "sexual"} | set(rules.get("adult_only_features", []))
         age_is_current = (
-            isinstance(verified_at, datetime)
+            isinstance(asserted_at if age_status == "self_attested" else verified_at, datetime)
             and age_band == "adult"
-            and age_status == "verified"
-            and verified_at <= now
+            and age_status in {"verified", "self_attested"}
+            and (asserted_at if age_status == "self_attested" else verified_at) <= now
             and (expires_at is None or (isinstance(expires_at, datetime) and expires_at > now))
+            and (age_status != "self_attested" or rules.get("self_attestation_allowed") is True)
         )
         if feature in restricted and not age_is_current:
             return Decision(False, "deny", ("adult_age_assurance_required",), version)
@@ -247,6 +256,7 @@ class PolicyService:
         allowed_keys = {
             "adult_only_features",
             "ai_disclosure_required",
+            "self_attestation_allowed",
             "disclosure_repeat_hours",
             "break_interval_minutes",
         }
@@ -261,8 +271,9 @@ class PolicyService:
                 not isinstance(rules[key], int) or isinstance(rules[key], bool) or rules[key] <= 0
             ):
                 return False
-        return "ai_disclosure_required" not in rules or isinstance(
-            rules["ai_disclosure_required"], bool
+        return all(
+            key not in rules or isinstance(rules[key], bool)
+            for key in ("ai_disclosure_required", "self_attestation_allowed")
         )
 
     @classmethod

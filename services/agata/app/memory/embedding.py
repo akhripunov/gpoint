@@ -193,6 +193,7 @@ class HuggingFaceFreeEmbeddingProvider:
         self._api_key = api_key
         self._timeout = timeout
         self._transport = transport
+        self.available = bool(api_key)
 
     async def embed(self, text: str) -> list[float]:
         results = await self.embed_batch([text])
