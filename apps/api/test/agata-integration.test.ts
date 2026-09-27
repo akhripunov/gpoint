@@ -36,7 +36,7 @@ test('enabled boundary synchronizes character and consent before idempotent resp
       calls.push(['respond', ...args]);
       return { request_id: input.requestId, conversation_id: 'conversation-1', message_id: input.messageId, character_id: 'character-1', text: 'reply' };
     },
-  } as unknown as Pick<AgataClient, 'syncCharacter' | 'syncConsent' | 'respond'>;
+  } as unknown as ConstructorParameters<typeof AgataIntegrationService>[0];
   const service = new AgataIntegrationService(client);
   const result = await service.respond(input);
   assert.deepEqual(calls.map(([name]) => name), ['character', 'consent', 'respond']);
@@ -50,6 +50,6 @@ test('AGATA failures propagate; the adapter cannot manufacture a successful resp
     async syncCharacter() { throw failure; },
     async syncConsent() { assert.fail('consent must not run after failed character sync'); },
     async respond() { assert.fail('respond must not run after failed sync'); },
-  } as unknown as Pick<AgataClient, 'syncCharacter' | 'syncConsent' | 'respond'>);
+  } as unknown as ConstructorParameters<typeof AgataIntegrationService>[0]);
   await assert.rejects(service.respond(input), (error) => error === failure);
 });

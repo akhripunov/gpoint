@@ -6,6 +6,7 @@ const runtimeErrors = new WeakMap<Page, string[]>();
 test.beforeEach(async ({ page }, testInfo) => {
   const { errors } = await installMiniAppBrowserMocks(page, {
     telegramStartParam: testInfo.title.startsWith("C —") ? "model_models_hub" : undefined,
+    ageAssuranceRequired: testInfo.title.includes("age assurance blocked"),
   });
   runtimeErrors.set(page, errors);
 });

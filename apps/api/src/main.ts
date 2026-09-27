@@ -16,6 +16,7 @@ import { TelegramChannelController, TelegramChannelVerificationController, Teleg
 import { FeedController } from './feed.js';
 import { SearchController } from './search.js';
 import { DiagnosticsController } from './diagnostics.js';
-@Module({ controllers: [HealthController, DiagnosticsController, SearchController, ExploreController, AuthController, MeController, CreatorController, PersonalizedReelsController, VipController, CreatorPlatformController, AdminPlatformController, MediaReadController, EngagementController, FollowingController, DiscoveryHealthController, PreferencesController, TelegramIngestionController, TelegramChannelController, TelegramChannelVerificationController, TelegramConnectionController, FeedController] }) class AppModule {}
+import { MessagesController } from './messages.js';
+@Module({ controllers: [HealthController, DiagnosticsController, SearchController, ExploreController, AuthController, MeController, CreatorController, PersonalizedReelsController, VipController, CreatorPlatformController, AdminPlatformController, MediaReadController, EngagementController, FollowingController, DiscoveryHealthController, PreferencesController, TelegramIngestionController, TelegramChannelController, TelegramChannelVerificationController, TelegramConnectionController, FeedController, MessagesController] }) class AppModule {}
 export async function bootstrap() { const app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter()); app.enableCors({ origin: process.env.MINIAPP_ORIGIN?.split(',') ?? true, methods: ['GET', 'HEAD', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }); await app.listen({ port: Number(process.env.API_PORT ?? 3000), host: '0.0.0.0' }); return app; }
 if (process.env.NODE_ENV !== 'test') bootstrap();

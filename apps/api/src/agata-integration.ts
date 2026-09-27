@@ -1,6 +1,9 @@
 import {
+  type AgataChatState,
+  type AgataConversationPage,
   type AgataCharacterProfile,
   type AgataConsentSnapshot,
+  type AgataHistoryPage,
   type AgataRespondOutput,
 } from '@gpoint/agata-client';
 import { createAgataClient } from './agata-client.js';
@@ -18,13 +21,43 @@ export interface AgataTurnInput {
   consent: AgataConsentSnapshot;
 }
 
+export interface AgataConsentInput {
+  userId: string;
+  consent: AgataConsentSnapshot;
+}
+
 /** Disabled-by-default boundary for a future GPoint character-chat flow. */
 export class AgataIntegrationService {
-  constructor(private readonly client: Pick<AgataClient, 'syncCharacter' | 'syncConsent' | 'respond'>) {}
+  constructor(private readonly client: Pick<AgataClient, 'syncCharacter' | 'syncConsent' | 'respond' | 'getChatState' | 'listConversations' | 'listMessages'>) {}
+
+  chatState(userId: string): Promise<AgataChatState> {
+    return this.client.getChatState(userId);
+  }
+
+  listConversations(userId: string, options?: { limit?: number; cursor?: string }): Promise<AgataConversationPage> {
+    return this.client.listConversations(userId, options);
+  }
+
+  listMessages(userId: string, characterId: string, options?: { limit?: number; cursor?: string }): Promise<AgataHistoryPage> {
+    return this.client.listMessages(userId, characterId, options);
+  }
+
+  acceptConsent(input: AgataConsentInput): ReturnType<AgataClient['syncConsent']> {
+    return this.client.syncConsent(input.userId, input.consent);
+  }
 
   async respond(input: AgataTurnInput): Promise<AgataRespondOutput> {
     await this.client.syncCharacter(input.characterId, input.profile);
     await this.client.syncConsent(input.userId, input.consent);
+    return this.send(input);
+  }
+
+  async respondWithCurrentConsent(input: AgataTurnInput): Promise<AgataRespondOutput> {
+    await this.client.syncCharacter(input.characterId, input.profile);
+    return this.send(input);
+  }
+
+  private async send(input: AgataTurnInput): Promise<AgataRespondOutput> {
     // messageId is the durable idempotency key. Any client retry reuses it.
     return this.client.respond({
       request_id: input.requestId,

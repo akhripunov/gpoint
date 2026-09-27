@@ -37,6 +37,44 @@ export interface AgataRespondOutput {
   text: string;
 }
 
+export interface AgataChatState {
+  chatHistory: boolean;
+  longTermMemory: boolean;
+  disclosureRequired: boolean;
+  ageAssuranceRequired: boolean;
+  ageBand: 'unknown' | 'minor' | 'adult';
+  ageStatus: 'pending' | 'verified' | 'self_attested' | 'expired' | 'rejected';
+  ageMethod: string;
+  verifiedAt: string | null;
+  expiresAt: string | null;
+  jurisdiction: string;
+}
+
+export interface AgataConversationItem {
+  gpointCharacterId: string;
+  externalConversationId: string;
+  lastMessagePreview: string;
+  lastMessageRole: 'user' | 'assistant';
+  lastMessageAt: string;
+}
+
+export interface AgataConversationPage {
+  items: AgataConversationItem[];
+  nextCursor: string | null;
+}
+
+export interface AgataHistoryMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  occurredAt: string;
+}
+
+export interface AgataHistoryPage {
+  items: AgataHistoryMessage[];
+  nextCursor: string | null;
+}
+
 export class AgataServiceError extends Error {
   readonly status: number;
   readonly code: string;
@@ -91,6 +129,29 @@ export class AgataClient {
 
   async syncConsent(id: string, consent: AgataConsentSnapshot): Promise<{ user_id: string; age_version: number; disclosure: string }> {
     return this.request(`/internal/v1/users/${encodeURIComponent(id)}/consent`, 'PUT', consent);
+  }
+
+  async getChatState(id: string): Promise<AgataChatState> {
+    return this.request(`/internal/v1/users/${encodeURIComponent(id)}/chat-state`, 'GET', undefined);
+  }
+
+  async listConversations(id: string, options: { limit?: number; cursor?: string } = {}): Promise<AgataConversationPage> {
+    const query = new URLSearchParams();
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+    if (options.cursor) query.set('cursor', options.cursor);
+    const suffix = query.size ? `?${query.toString()}` : '';
+    return this.request(`/internal/v1/users/${encodeURIComponent(id)}/conversations${suffix}`, 'GET', undefined);
+  }
+
+  async listMessages(id: string, characterId: string, options: { limit?: number; cursor?: string } = {}): Promise<AgataHistoryPage> {
+    const query = new URLSearchParams();
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+    if (options.cursor) query.set('cursor', options.cursor);
+    const suffix = query.size ? `?${query.toString()}` : '';
+    return this.request(
+      `/internal/v1/users/${encodeURIComponent(id)}/characters/${encodeURIComponent(characterId)}/messages${suffix}`,
+      'GET', undefined,
+    );
   }
 
   /** Retries are safe because message_id is AGATA's durable idempotency key. */

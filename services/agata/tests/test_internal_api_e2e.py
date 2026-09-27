@@ -42,7 +42,8 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
     app.dependency_overrides[get_response_provider] = DeterministicFakeResponseProvider
     app.dependency_overrides[get_embedding_provider] = DeterministicFakeEmbeddingProvider
 
-    user_key, character_key, conversation_key, message_key = (f"test-{uuid4()}" for _ in range(4))
+    user_key, character_key, message_key = (f"test-{uuid4()}" for _ in range(3))
+    conversation_key = f"gpoint-chat:{user_key}:{character_key}"
     now = datetime.now(UTC).isoformat()
     transport = httpx.ASGITransport(app=app)
     try:
@@ -62,6 +63,11 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
                 json={"name": "Must not be written"},
             )
             assert unauthorized.status_code == wrong_token.status_code == 401
+            initial_state = await client.get(
+                f"/internal/v1/users/{user_key}/chat-state", headers=headers
+            )
+            assert initial_state.status_code == 200, initial_state.text
+            assert initial_state.json()["ageAssuranceRequired"] is True
             profile = await client.put(
                 f"/internal/v1/characters/{character_key}",
                 headers=headers,
@@ -111,6 +117,43 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
             assert second.status_code == 200, second.text
             assert first.json()["message_id"] == second.json()["message_id"]
             assert first.json()["conversation_id"] == second.json()["conversation_id"]
+            state = await client.get(
+                f"/internal/v1/users/{user_key}/chat-state", headers=headers
+            )
+            assert state.status_code == 200, state.text
+            assert state.json()["chatHistory"] is True
+            assert state.json()["longTermMemory"] is True
+            assert state.json()["ageAssuranceRequired"] is False
+            conversations = await client.get(
+                f"/internal/v1/users/{user_key}/conversations", headers=headers
+            )
+            assert conversations.status_code == 200, conversations.text
+            assert len(conversations.json()["items"]) == 1
+            assert conversations.json()["items"][0]["gpointCharacterId"] == character_key
+            assert conversations.json()["items"][0]["externalConversationId"] == conversation_key
+            history_path = f"/internal/v1/users/{user_key}/characters/{character_key}/messages"
+            history = await client.get(history_path, headers=headers)
+            assert history.status_code == 200, history.text
+            history_items = history.json()["items"]
+            assert {message["role"] for message in history_items} == {"user", "assistant"}
+            assert next(message["text"] for message in history_items if message["role"] == "user") == "Привет"
+            assert next(message["text"] for message in history_items if message["role"] == "assistant") == first.json()["text"]
+            wrong_user = await client.get(
+                f"/internal/v1/users/{user_key}-other/characters/{character_key}/messages",
+                headers=headers,
+            )
+            wrong_character = await client.get(
+                f"/internal/v1/users/{user_key}/characters/{character_key}-other/messages",
+                headers=headers,
+            )
+            assert wrong_user.status_code == wrong_character.status_code == 200
+            assert wrong_user.json()["items"] == wrong_character.json()["items"] == []
+            no_auth = await client.get(history_path)
+            assert no_auth.status_code == 401
+            bounded = await client.get(f"{history_path}?limit=1", headers=headers)
+            assert bounded.status_code == 200, bounded.text
+            assert len(bounded.json()["items"]) == 1
+            assert bounded.json()["nextCursor"]
             metrics = await client.get("/health/metrics")
             assert metrics.status_code == 200, metrics.text
             assert set(metrics.json()) == {

@@ -15,6 +15,19 @@ export interface VipClickResponseDTO { redirectUrl: string; clickRecorded: true;
 export interface PaginatedResponse<T> { items: T[]; nextCursor: string | null; }
 export interface ExploreResponseDTO extends PaginatedResponse<CreatorSummaryDTO> { tab: ExploreTab; }
 
+export type MessageRole = 'user' | 'assistant';
+export interface ChatMessageDTO { id: string; role: MessageRole; text: string; occurredAt: string; }
+export interface MessageThreadDTO {
+  creator: Pick<CreatorSummaryDTO, 'id' | 'slug' | 'displayName' | 'avatarUrl' | 'verified'>;
+  lastMessagePreview: string | null;
+  lastMessageRole: MessageRole | null;
+  lastMessageAt: string;
+}
+export interface MessageThreadListDTO { items: MessageThreadDTO[]; nextCursor: string | null; }
+export interface ChatHistoryDTO extends PaginatedResponse<ChatMessageDTO> { creator: CreatorSummaryDTO; }
+export interface MessagesStateDTO { enabled: boolean; chatHistory: boolean; longTermMemory: boolean; disclosureRequired: boolean; ageAssuranceRequired?: boolean; }
+export interface SendMessageDTO { userMessageId: string; response: ChatMessageDTO; }
+
 export interface CreatorBot {
   id: string; creatorId: string; telegramBotId: string; telegramUsername: string;
   status: CreatorBotStatus; miniAppEnabled: boolean;

@@ -42,6 +42,7 @@ import {
   ChevronRight,
   Crown,
   House,
+  MessageCircle,
   Pencil,
   Search,
   Share2,
@@ -60,6 +61,8 @@ import {
   CreatorWorkspaceDashboard,
 } from "./platform-ui";
 import { BackButton, BottomNav } from "./ui";
+import { MessagesInbox, ModelChat } from "./messages-ui";
+import { messagesPath, messagesRouteFromLocation } from "./messages-routing";
 import {
   canonicalModelProfileUrl,
   modelHandleFromStartParam,
@@ -84,7 +87,9 @@ type Screen =
   | "profile"
   | "account"
   | "admin"
-  | "following";
+  | "following"
+  | "messages"
+  | "chat";
 const V = ({ on }: { on?: boolean }) =>
   on ? <span className="verified">✓</span> : null;
 function VipButton({
@@ -318,7 +323,7 @@ function Explore({
     </>
   );
 }
-function Profile({ slug, back, explore }: { slug: string; back: () => void; explore: () => void }) {
+function Profile({ slug, back, explore, message }: { slug: string; back: () => void; explore: () => void; message: (slug: string) => void }) {
   const qc = useQueryClient();
   const [shareStatus, setShareStatus] = useState("");
   const q = useQuery({
@@ -410,6 +415,9 @@ function Profile({ slug, back, explore }: { slug: string; back: () => void; expl
             <div className="model-profile-controls">
               <button type="button" className={`model-profile-follow${c.following ? " following" : ""}`} disabled={f.isPending} onClick={() => f.mutate(!c.following)}>
                 {c.following ? "Following" : "Follow"}
+              </button>
+              <button type="button" className="model-profile-message" onClick={() => message(c.slug)} aria-label={`Message ${c.displayName}`}>
+                <MessageCircle size={16} strokeWidth={1.8} aria-hidden="true" /> Message
               </button>
               <button type="button" className="model-profile-share" onClick={shareProfile} aria-label={`Share ${c.displayName}'s model profile`}>
                 <Share2 size={20} strokeWidth={1.7} aria-hidden="true" />
@@ -1340,6 +1348,7 @@ function Feed({
 }
 function App({ initialUser }: { initialUser: any }) {
   const [launchStartParam] = useState(() => telegramModelStartParam());
+  const [initialMessagesRoute] = useState(() => messagesRouteFromLocation(window.location.pathname));
   const [initialRoute] = useState(() =>
     modelRouteFromLocation(window.location.pathname, launchStartParam),
   );
@@ -1351,10 +1360,11 @@ function App({ initialUser }: { initialUser: any }) {
         ? "admin"
         : creatorRoute
           ? "account"
-          : "for-you",
+          : initialMessagesRoute?.screen ?? "for-you",
   );
   const [tab, setTab] = useState("Trending");
   const [slug, setSlug] = useState(initialRoute.screen === "profile" ? initialRoute.handle : "");
+  const [chatSlug, setChatSlug] = useState(initialMessagesRoute?.screen === "chat" ? initialMessagesRoute.slug : "");
   const user = initialUser;
   const [accountView, setAccountView] = useState<"profile" | "creator">(
     creatorRoute ? "creator" : "profile",
@@ -1373,8 +1383,12 @@ function App({ initialUser }: { initialUser: any }) {
   }, []);
   useEffect(() => {
     const onPopState = () => {
+      const messageRoute = messagesRouteFromLocation(window.location.pathname);
       const route = modelRouteFromLocation(window.location.pathname);
-      if (route.screen === "profile") {
+      if (messageRoute) {
+        setScreen(messageRoute.screen as Screen);
+        if (messageRoute.screen === "chat") setChatSlug(messageRoute.slug);
+      } else if (route.screen === "profile") {
         setSlug(route.handle);
         setScreen("profile");
       } else if (route.screen === "admin") {
@@ -1390,9 +1404,19 @@ function App({ initialUser }: { initialUser: any }) {
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
   const navigate = (next: Screen) => {
-    const path = next === "admin" ? "/admin" : next === "account" ? "/creator" : "/";
+    const path = next === "admin" ? "/admin" : next === "account" ? "/creator" : next === "messages" ? "/messages" : "/";
     if (window.location.pathname !== path) window.history.pushState({ gpoint: true }, "", path);
     setScreen(next);
+  };
+  const openChat = (handle: string) => {
+    setChatSlug(handle);
+    const path = messagesPath(handle);
+    if (window.location.pathname !== path) window.history.pushState({ gpoint: true, modelHandle: handle }, "", path);
+    setScreen("chat");
+  };
+  const backToMessages = () => {
+    if (window.location.pathname !== "/messages") window.history.pushState({ gpoint: true }, "", "/messages");
+    setScreen("messages");
   };
   const backToFeed = () => {
     if (window.location.pathname.startsWith("/model/")) {
@@ -1413,9 +1437,10 @@ function App({ initialUser }: { initialUser: any }) {
     setScreen("profile");
   };
   const creatorWorkspace = screen === "account" && accountView === "creator";
+  const messagesView = screen === "messages" || screen === "chat";
   return (
-    <div className={`app-shell${screen === "account" && accountView === "profile" ? " profile-screen" : ""}${screen === "profile" ? " model-profile-screen" : ""}`}>
-      <header className={`topbar${creatorWorkspace ? " creator-topbar" : ""}`}>
+    <div className={`app-shell${screen === "account" && accountView === "profile" ? " profile-screen" : ""}${screen === "profile" ? " model-profile-screen" : ""}${screen === "messages" ? " messages-screen" : ""}${screen === "chat" ? " chat-screen" : ""}`}>
+      {!messagesView && <header className={`topbar${creatorWorkspace ? " creator-topbar" : ""}`}>
         {creatorWorkspace && (
           <BackButton className="creator-back" label="Back to Profile" onClick={() => setAccountView("profile")} />
         )}
@@ -1424,8 +1449,8 @@ function App({ initialUser }: { initialUser: any }) {
         </button>
         {creatorWorkspace && <span className="creator-settings-control" aria-hidden="true"><Settings size={20} strokeWidth={1.7} /></span>}
         {!creatorWorkspace && <button className="icon-button" aria-label="Search"><Search size={18} strokeWidth={1.8} aria-hidden="true" /></button>}
-      </header>
-      <main className="page">
+      </header>}
+      <main className={`page${messagesView ? " messages-page" : ""}`}>
         {screen === "for-you" && (
           <Feed mode="for-you" open={open} go={navigate} />
         )}{" "}
@@ -1436,8 +1461,10 @@ function App({ initialUser }: { initialUser: any }) {
           <Explore tab={tab} setTab={setTab} open={open} />
         )}{" "}
         {screen === "profile" && (
-          <Profile slug={slug} back={backToFeed} explore={() => navigate("explore")} />
+          <Profile slug={slug} back={backToFeed} explore={() => navigate("explore")} message={openChat} />
         )}{" "}
+        {screen === "messages" && <MessagesInbox openChat={openChat} explore={() => navigate("explore")} />}{" "}
+        {screen === "chat" && <ModelChat slug={chatSlug} back={backToMessages} />}{" "}
         {screen === "reels" && <RealReels open={clickReel} />}{" "}
         {screen === "account" &&
           (accountView === "creator" ? (
@@ -1456,13 +1483,13 @@ function App({ initialUser }: { initialUser: any }) {
           </div>
         )}
       </main>
-      <BottomNav active={screen} onChange={(id) => navigate(id as Screen)} items={[
+      {screen !== "chat" && <BottomNav active={screen} onChange={(id) => navigate(id as Screen)} items={[
         { id: "for-you", label: "For You", icon: <House size={23} strokeWidth={1.8} /> },
         { id: "reels", label: "Reels", icon: <Video size={23} strokeWidth={1.8} /> },
+        { id: "messages", label: "Messages", icon: <MessageCircle size={23} strokeWidth={1.8} /> },
         { id: "explore", label: "Explore", icon: <Search size={23} strokeWidth={1.8} /> },
-        { id: "following", label: "Following", icon: <Users size={23} strokeWidth={1.8} /> },
         { id: "account", label: "Profile", icon: <UserRound size={23} strokeWidth={1.8} /> },
-      ]} />
+      ]} />}
     </div>
   );
 }

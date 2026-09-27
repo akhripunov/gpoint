@@ -3,16 +3,18 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select, text, update
+from sqlalchemy import and_, func, select, text, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.compliance.receipt import current_disclosure
 from app.db.base import get_session, set_tenant_context
 from app.db.models import (
     AgeAssurance,
@@ -24,6 +26,7 @@ from app.db.models import (
     MemorySnapshot,
     Message,
     RegionalPolicyProfile,
+    Relationship,
     ResponseRoutePolicy,
     Scope,
     Tenant,
@@ -43,6 +46,261 @@ from app.responses.deepseek import DeepSeekResponseProvider
 from app.responses.pipeline import ResponseOrchestrator, ResponseProvider, ResponseRequest
 
 router = APIRouter(prefix="/internal/v1", tags=["internal"])
+
+
+def require_internal_auth(authorization: str | None = Header(default=None)) -> None:
+    expected = f"Bearer {get_settings().internal_api_token.get_secret_value()}"
+    if not isinstance(authorization, str) or not hmac.compare_digest(authorization, expected):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail={"code": "unauthorized"}
+        )
+
+
+def _encode_message_cursor(message: Message) -> str:
+    value = json.dumps([message.occurred_at.isoformat(), str(message.id)], separators=(",", ":"))
+    return base64.urlsafe_b64encode(value.encode()).decode().rstrip("=")
+
+
+def _decode_message_cursor(value: str | None) -> tuple[datetime, UUID] | None:
+    if value is None:
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        occurred_at, message_id = json.loads(raw)
+        timestamp = datetime.fromisoformat(occurred_at)
+        if timestamp.tzinfo is None:
+            raise ValueError
+        return timestamp, UUID(message_id)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail={"code": "invalid_cursor"}) from exc
+
+
+def _decrypt_message(message: Message, tenant_id: UUID, *, user_id: UUID) -> str:
+    if not message.content_ciphertext or not message.content_nonce or not message.content_key_version:
+        raise HTTPException(status_code=503, detail={"code": "message_content_unavailable"})
+    try:
+        crypto = AeadCrypto(
+            encoded_key=get_settings().message_aead_key.get_secret_value(), key_version="v1"
+        )
+        from app.messages.crypto import CiphertextEnvelope
+
+        return crypto.decrypt(
+            CiphertextEnvelope(message.content_ciphertext, message.content_nonce, message.content_key_version),
+            MessageIngestionService._aad_for(tenant_id, user_id, message.conversation_id, message.id),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail={"code": "message_content_unavailable"}) from exc
+
+
+@router.get("/users/{gpoint_user_id}/chat-state", dependencies=[Depends(require_internal_auth)])
+async def chat_state(gpoint_user_id: str, session: AsyncSession = Depends(get_session)) -> dict:
+    settings = get_settings()
+    tenant_id = UUID(settings.tenant_id)
+    if not 1 <= len(gpoint_user_id) <= 255 or "\x00" in gpoint_user_id:
+        raise HTTPException(status_code=422, detail={"code": "invalid_user_id"})
+    now = datetime.now(UTC)
+    async with session.begin():
+        await set_tenant_context(session, str(tenant_id))
+        user = await session.scalar(select(User).where(
+            User.tenant_id == tenant_id, User.source_system == "gpoint",
+            User.external_id == gpoint_user_id, User.deleted_at.is_(None),
+        ))
+        policy_query = select(RegionalPolicyProfile).where(
+            RegionalPolicyProfile.tenant_id == tenant_id,
+            RegionalPolicyProfile.status == "active",
+            RegionalPolicyProfile.effective_from <= now,
+            RegionalPolicyProfile.effective_to.is_(None) | (RegionalPolicyProfile.effective_to > now),
+        ).order_by(RegionalPolicyProfile.effective_from.desc(), RegionalPolicyProfile.id.desc()).limit(1)
+        policy = await session.scalar(policy_query)
+        if policy is None:
+            raise HTTPException(status_code=503, detail={"code": "policy_unavailable"})
+        if user is None:
+            return {
+                "chatHistory": False, "longTermMemory": False,
+                "disclosureRequired": bool(policy.rules.get("ai_disclosure_required", False)),
+                "ageAssuranceRequired": True,
+                "ageBand": "unknown", "ageStatus": "pending", "ageMethod": "unknown",
+                "verifiedAt": None, "expiresAt": None, "jurisdiction": policy.jurisdiction,
+            }
+        consent_rows = (await session.scalars(select(Consent).where(
+            Consent.tenant_id == tenant_id, Consent.user_id == user.id,
+            Consent.revoked_at.is_(None), Consent.purpose.in_(("chat_history", "long_term_memory")),
+        ))).all()
+        age = await session.scalar(select(AgeAssurance).where(
+            AgeAssurance.tenant_id == tenant_id, AgeAssurance.user_id == user.id,
+        ).order_by(AgeAssurance.version.desc()).limit(1))
+        from app.compliance.policy import PolicyService
+
+        policy_service = PolicyService()
+        age_assurance_required = not await policy_service.age_assurance_eligible(
+            session, tenant_id=tenant_id, user_id=user.id, now=now
+        )
+        disclosure = await current_disclosure(session, tenant_id=tenant_id, user_id=user.id, now=now)
+        disclosure_decision = None
+        if disclosure is not None:
+            disclosure_decision = policy_service.disclosure_required(
+                rules=disclosure.policy.rules, policy_version=disclosure.policy.version,
+                last_displayed_at=disclosure.receipt.displayed_at if disclosure.receipt else None,
+                now=now,
+            )
+        active = {row.purpose for row in consent_rows}
+        return {
+            "chatHistory": "chat_history" in active,
+            "longTermMemory": "long_term_memory" in active,
+            "disclosureRequired": bool(disclosure_decision and disclosure_decision.allowed),
+            "ageAssuranceRequired": age_assurance_required,
+            "ageBand": age.age_band if age else "unknown",
+            "ageStatus": age.status if age else "pending",
+            "ageMethod": age.method if age else "unknown",
+            "verifiedAt": age.verified_at.isoformat() if age and age.verified_at else None,
+            "expiresAt": age.expires_at.isoformat() if age and age.expires_at else None,
+            "jurisdiction": age.jurisdiction if age else policy.jurisdiction,
+        }
+
+
+@router.get("/users/{gpoint_user_id}/conversations", dependencies=[Depends(require_internal_auth)])
+async def list_gpoint_conversations(
+    gpoint_user_id: str,
+    limit: int = Query(default=30, ge=1, le=50),
+    cursor: str | None = Query(default=None, max_length=512),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    settings = get_settings()
+    tenant_id = UUID(settings.tenant_id)
+    try:
+        external_user_id = gpoint_user_id
+        if not 1 <= len(external_user_id) <= 255 or "\x00" in external_user_id:
+            raise ValueError
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": "invalid_user_id"}) from exc
+    decoded = _decode_message_cursor(cursor)
+    async with session.begin():
+        await set_tenant_context(session, str(tenant_id))
+        user = await session.scalar(select(User).where(
+            User.tenant_id == tenant_id, User.source_system == "gpoint",
+            User.external_id == external_user_id, User.deleted_at.is_(None),
+        ))
+        if user is None:
+            return {"items": [], "nextCursor": None}
+        has_history_consent = await session.scalar(select(Consent.id).where(
+            Consent.tenant_id == tenant_id, Consent.user_id == user.id,
+            Consent.purpose == "chat_history", Consent.revoked_at.is_(None),
+        ).limit(1))
+        if has_history_consent is None:
+            raise HTTPException(status_code=403, detail={"code": "chat_history_consent_required"})
+        latest = select(
+            Message.conversation_id.label("conversation_id"),
+            Message.id.label("message_id"),
+            Message.occurred_at.label("occurred_at"),
+            func.row_number().over(
+                partition_by=Message.conversation_id,
+                order_by=(Message.occurred_at.desc(), Message.id.desc()),
+            ).label("row_num"),
+        ).where(
+            Message.tenant_id == tenant_id, Message.user_id == user.id,
+            Message.scope == Scope.real_world, Message.scenario_id.is_(None),
+            Message.role.in_(("user", "assistant")), Message.deleted_at.is_(None),
+        ).subquery()
+        latest_query = select(latest).where(latest.c.row_num == 1)
+        if decoded:
+            latest_query = latest_query.where(
+                tuple_(latest.c.occurred_at, latest.c.message_id) < tuple_(decoded[0], decoded[1])
+            )
+        latest_page = latest_query.subquery()
+        rows = (await session.execute(
+            select(Conversation, Message, Character.external_id)
+            .join(latest_page, latest_page.c.conversation_id == Conversation.id)
+            .join(Message, Message.id == latest_page.c.message_id)
+            .join(Character, and_(
+                Character.tenant_id == Conversation.tenant_id,
+                Character.id == Conversation.character_id,
+                Character.source_system == "gpoint",
+            ))
+            .where(
+                Conversation.tenant_id == tenant_id, Conversation.user_id == user.id,
+                Conversation.source_system == "gpoint", Conversation.scope == Scope.real_world,
+                Conversation.scenario_id.is_(None),
+                Conversation.external_id.startswith(f"gpoint-chat:{gpoint_user_id}:", autoescape=True),
+            )
+            .order_by(Message.occurred_at.desc(), Message.id.desc())
+            .limit(limit + 1)
+        )).all()
+        page = rows[:limit]
+        items = []
+        for conversation, message, gpoint_character_id in page:
+            items.append({
+                "gpointCharacterId": gpoint_character_id,
+                "externalConversationId": conversation.external_id,
+                "lastMessagePreview": _decrypt_message(message, tenant_id, user_id=user.id)[:120],
+                "lastMessageRole": message.role,
+                "lastMessageAt": message.occurred_at.isoformat(),
+            })
+        next_cursor = None
+        if len(rows) > limit and page:
+            next_cursor = _encode_message_cursor(page[-1][1])
+        return {"items": items, "nextCursor": next_cursor}
+
+
+@router.get("/users/{gpoint_user_id}/characters/{gpoint_character_id}/messages", dependencies=[Depends(require_internal_auth)])
+async def list_gpoint_messages(
+    gpoint_user_id: str,
+    gpoint_character_id: str,
+    limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = Query(default=None, max_length=512),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    settings = get_settings()
+    tenant_id = UUID(settings.tenant_id)
+    if not 1 <= len(gpoint_user_id) <= 255 or not 1 <= len(gpoint_character_id) <= 255:
+        raise HTTPException(status_code=422, detail={"code": "invalid_identity"})
+    decoded = _decode_message_cursor(cursor)
+    async with session.begin():
+        await set_tenant_context(session, str(tenant_id))
+        user = await session.scalar(select(User).where(
+            User.tenant_id == tenant_id, User.source_system == "gpoint",
+            User.external_id == gpoint_user_id, User.deleted_at.is_(None),
+        ))
+        character = await session.scalar(select(Character).where(
+            Character.tenant_id == tenant_id, Character.source_system == "gpoint",
+            Character.external_id == gpoint_character_id, Character.status == "active",
+        ))
+        if user is None or character is None:
+            return {"items": [], "nextCursor": None}
+        has_history_consent = await session.scalar(select(Consent.id).where(
+            Consent.tenant_id == tenant_id, Consent.user_id == user.id,
+            Consent.purpose == "chat_history", Consent.revoked_at.is_(None),
+        ).limit(1))
+        if has_history_consent is None:
+            raise HTTPException(status_code=403, detail={"code": "chat_history_consent_required"})
+        relationship = await session.scalar(select(Relationship.id).where(
+            Relationship.tenant_id == tenant_id, Relationship.user_id == user.id,
+            Relationship.character_id == character.id, Relationship.scope == Scope.real_world,
+            Relationship.scenario_id.is_(None),
+        ).limit(1))
+        if relationship is None:
+            return {"items": [], "nextCursor": None}
+        query = select(Message).join(Conversation, and_(
+            Conversation.tenant_id == Message.tenant_id,
+            Conversation.id == Message.conversation_id,
+            Conversation.relationship_id == relationship,
+        )).where(
+            Message.tenant_id == tenant_id, Message.user_id == user.id,
+            Message.character_id == character.id, Message.scope == Scope.real_world,
+            Message.scenario_id.is_(None), Message.role.in_(("user", "assistant")),
+            Message.deleted_at.is_(None), Conversation.source_system == "gpoint",
+            Conversation.external_id == f"gpoint-chat:{gpoint_user_id}:{gpoint_character_id}",
+        )
+        if decoded:
+            query = query.where(tuple_(Message.occurred_at, Message.id) < tuple_(decoded[0], decoded[1]))
+        rows = list((await session.scalars(query.order_by(Message.occurred_at.desc(), Message.id.desc()).limit(limit + 1))).all())
+        page = rows[:limit]
+        items = [{
+            "id": str(message.id), "role": message.role,
+            "text": _decrypt_message(message, tenant_id, user_id=user.id),
+            "occurredAt": message.occurred_at.isoformat(),
+        } for message in reversed(page)]
+        next_cursor = _encode_message_cursor(page[-1]) if len(rows) > limit and page else None
+        return {"items": items, "nextCursor": next_cursor}
 
 
 class RespondRequest(BaseModel):
@@ -93,14 +351,6 @@ def _language_code(locale: str | None) -> str:
         return "unknown"
     language = locale.split("-", 1)[0].lower()
     return language if language in {"ru", "en"} else "mixed"
-
-
-def require_internal_auth(authorization: str | None = Header(default=None)) -> None:
-    expected = f"Bearer {get_settings().internal_api_token.get_secret_value()}"
-    if not isinstance(authorization, str) or not hmac.compare_digest(authorization, expected):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail={"code": "unauthorized"}
-        )
 
 
 def get_response_provider() -> ResponseProvider:

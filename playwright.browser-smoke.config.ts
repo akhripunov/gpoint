@@ -22,7 +22,7 @@ export default defineConfig({
   },
   webServer: {
     command:
-      "VITE_DEV_BROWSER_AUTH=true VITE_API_URL=http://127.0.0.1:5199 pnpm run dev --host 127.0.0.1 --port 5189 --strictPort",
+      "VITE_DEV_BROWSER_AUTH=true VITE_API_URL=http://127.0.0.1:5199 ./node_modules/.bin/vite --host 127.0.0.1 --port 5189 --strictPort",
     cwd: "apps/miniapp",
     url: appUrl,
     reuseExistingServer: !process.env.CI,

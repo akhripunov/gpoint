@@ -1,7 +1,7 @@
 import type { Page, Route } from "@playwright/test";
 import path from "node:path";
 
-const fixtureImages = path.resolve(process.cwd(), "design/assets/creator-profile");
+const fixtureImages = path.resolve(__dirname, "../../design/assets/creator-profile");
 
 const creator = {
   id: "browser-smoke-model-id",
@@ -32,9 +32,10 @@ const modelPost = (index: number) => ({
 
 export async function installMiniAppBrowserMocks(
   page: Page,
-  options: { telegramStartParam?: string } = {},
+  options: { telegramStartParam?: string; ageAssuranceRequired?: boolean } = {},
 ) {
   const errors: string[] = [];
+  const chatMessages: Array<{ id: string; role: "user" | "assistant"; text: string; occurredAt: string }> = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => {
     if (message.type() === "error") errors.push(message.text());
@@ -52,8 +53,47 @@ export async function installMiniAppBrowserMocks(
     };
   }, options);
 
+  await page.route("http://127.0.0.1:5199/**", async (route: Route) => {
+    const url = new URL(route.request().url());
+    const apiPath = url.pathname;
+    if (route.request().method() === "OPTIONS") {
+      await route.fulfill({ status: 204, headers: { "access-control-allow-origin": "http://127.0.0.1:5189", "access-control-allow-credentials": "true", "access-control-allow-methods": "GET,POST,DELETE,OPTIONS", "access-control-allow-headers": "authorization,content-type" }, body: "" });
+      return;
+    }
+    const items = Array.from({ length: 12 }, (_, index) => modelPost(index + 1));
+    let data: unknown;
+    let status = 200;
+    if (apiPath === "/auth/browser") data = { accessToken: "browser-smoke-token" };
+    else if (apiPath === "/me") data = { id: "browser-smoke-user", telegramUsername: "smoke", firstName: "Smoke", isPremium: false };
+    else if (apiPath === "/feed/for-you") data = { items: [modelPost(1)], nextCursor: null };
+    else if (apiPath === "/explore") data = { items: [], nextCursor: null };
+    else if (apiPath === "/events") data = { recorded: true };
+    else if (apiPath === "/creators/models_hub") data = creator;
+    else if (apiPath === "/creators/unknown-model") { status = 404; data = { message: "Creator unavailable" }; }
+    else if (apiPath === "/creators/browser-smoke-model-id/posts") data = { items, nextCursor: null };
+    else if (apiPath === "/messages/state") data = { enabled: true, chatHistory: false, longTermMemory: false, disclosureRequired: true, ageAssuranceRequired: options.ageAssuranceRequired ?? false };
+    else if (apiPath === "/messages/consent" && route.request().method() === "POST") data = { enabled: true, chatHistory: true, longTermMemory: JSON.parse(route.request().postData() || "{}").longTermMemory, disclosureRequired: false, ageAssuranceRequired: options.ageAssuranceRequired ?? false };
+    else if (apiPath === "/messages") data = { items: [{ creator: { id: creator.id, slug: creator.slug, displayName: creator.displayName, avatarUrl: creator.avatarUrl, verified: creator.verified }, lastMessagePreview: "Hello there", lastMessageRole: "assistant", lastMessageAt: "2026-09-27T10:00:00.000Z" }], nextCursor: null };
+    else if (apiPath === `/messages/creator/${creator.id}` && route.request().method() === "GET") {
+      data = { creator, items: [...chatMessages], nextCursor: null };
+    }
+    else if (apiPath === `/messages/creator/${creator.id}` && route.request().method() === "POST") {
+      const body = JSON.parse(route.request().postData() || "{}");
+      const occurredAt = new Date().toISOString();
+      const response = { id: "assistant-reply-1", role: "assistant" as const, text: "Thanks for your message.", occurredAt };
+      chatMessages.push({ id: body.clientMessageId, role: "user", text: body.text, occurredAt }, response);
+      data = { userMessageId: body.clientMessageId, response };
+    } else { status = 404; data = { message: `No browser smoke fixture for ${apiPath}` }; }
+    console.log("API_MOCK", route.request().method(), apiPath, status);
+    await route.fulfill({ status, headers: { "access-control-allow-origin": "http://127.0.0.1:5189", "access-control-allow-credentials": "true" }, contentType: "application/json", body: JSON.stringify(data) });
+  });
+
   await page.route("**/*", async (route: Route) => {
     const url = new URL(route.request().url());
+    if (url.origin === "http://127.0.0.1:5199") {
+      await route.fallback();
+      return;
+    }
     if (url.origin === "http://127.0.0.1:5189") {
       const fixture = /^\/media\/assets\/fixture-(avatar|post-(?:0[1-9]|1[0-2]))$/.exec(url.pathname);
       if (fixture) {
@@ -90,41 +130,7 @@ export async function installMiniAppBrowserMocks(
       return;
     }
 
-    const apiPath = url.pathname;
-    const items = Array.from({ length: 12 }, (_, index) => modelPost(index + 1));
-    let data: unknown;
-    let status = 200;
-    if (apiPath === "/auth/browser") data = { accessToken: "browser-smoke-token" };
-    else if (apiPath === "/me") {
-      data = {
-        id: "browser-smoke-user",
-        telegramUsername: "smoke",
-        firstName: "Smoke",
-        isPremium: false,
-      };
-    } else if (apiPath === "/feed/for-you") {
-      data = { items: [modelPost(1)], nextCursor: null };
-    } else if (apiPath === "/explore") {
-      data = { items: [], nextCursor: null };
-    } else if (apiPath === "/events") {
-      data = { recorded: true };
-    } else if (apiPath === "/creators/models_hub") data = creator;
-    else if (apiPath === "/creators/unknown-model") {
-      status = 404;
-      data = { message: "Creator unavailable" };
-    } else if (apiPath === "/creators/browser-smoke-model-id/posts") {
-      data = { items, nextCursor: null };
-    } else {
-      status = 404;
-      data = { message: `No browser smoke fixture for ${apiPath}` };
-    }
-
-    console.log("API_MOCK", route.request().method(), apiPath, status);
-    await route.fulfill({
-      status,
-      contentType: "application/json",
-      body: JSON.stringify(data),
-    });
+    await route.abort();
   });
 
   return { errors };

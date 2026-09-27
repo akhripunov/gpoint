@@ -49,3 +49,35 @@ test('live and ready use the health endpoints without a request body', async () 
   await client.ready();
   assert.deepEqual(paths, ['/health/live', '/health/ready']);
 });
+
+test('chat read methods authenticate and encode user, character, cursor and limits', async () => {
+  const requests: Array<{ url: URL; headers: Headers }> = [];
+  const client = new AgataClient({
+    baseUrl: 'http://agata-api:8000', token: 'internal-test-token',
+    fetchImpl: async (input, init) => {
+      requests.push({ url: new URL(String(input)), headers: new Headers(init?.headers) });
+      return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+    },
+  });
+  await client.getChatState('user/a');
+  await client.listConversations('user/a', { limit: 30, cursor: 'cursor +/=' });
+  await client.listMessages('user/a', 'character/a', { limit: 50, cursor: 'next' });
+  assert.deepEqual(requests.map(({ url }) => url.pathname), [
+    '/internal/v1/users/user%2Fa/chat-state',
+    '/internal/v1/users/user%2Fa/conversations',
+    '/internal/v1/users/user%2Fa/characters/character%2Fa/messages',
+  ]);
+  assert.equal(requests[1].url.searchParams.get('cursor'), 'cursor +/=');
+  assert.equal(requests[2].url.searchParams.get('limit'), '50');
+  assert.ok(requests.every(({ headers }) => headers.get('authorization') === 'Bearer internal-test-token'));
+});
+
+test('chat read methods do not retry permanent errors', async () => {
+  let calls = 0;
+  const client = new AgataClient({
+    baseUrl: 'http://agata-api:8000', token: 'internal-test-token',
+    fetchImpl: async () => { calls += 1; return new Response(JSON.stringify({ detail: { code: 'unauthorized' } }), { status: 401 }); },
+  });
+  await assert.rejects(client.getChatState('u'), (error: unknown) => error instanceof AgataServiceError && error.status === 401);
+  assert.equal(calls, 1);
+});
