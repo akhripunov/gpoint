@@ -25,6 +25,7 @@ from app.db.models import (
 )
 from app.domain.principal import PrincipalContext
 from app.domain.relationships import resolve_relationship
+from app.memory.persistent_graph import enqueue_memory_graph_sync
 from app.memory.precedence import (
     MemoryPrecedenceService,
     PrecedenceOutcome,
@@ -255,6 +256,7 @@ class ExplicitMemoryService:
                 scenario_id=command.scenario_id,
                 slot_key=slot_identity,
                 predicate=command.predicate,
+                subject_type="user",
                 value_text=encrypt_text_for_storage(
                     command.value_text,
                     content_aad(
@@ -309,6 +311,7 @@ class ExplicitMemoryService:
                 )
             )
             await self.session.flush()
+            await enqueue_memory_graph_sync(self.session, memory=memory, control=control)
             await self._queue_note_refresh(principal.tenant_id, control.relationship_id, control.deletion_epoch)
             await self._store_receipt(principal, command.command_id, memory.id, "completed")
             return memory.id
@@ -390,6 +393,7 @@ class ExplicitMemoryService:
                 scope=old.scope,
                 scenario_id=old.scenario_id,
                 slot_key=old.slot_key,
+                subject_type="user",
                 predicate=command.predicate,
                 value_text=encrypt_text_for_storage(
                     command.value_text,
@@ -440,6 +444,7 @@ class ExplicitMemoryService:
                 )
             )
             await self.session.flush()
+            await enqueue_memory_graph_sync(self.session, memory=replacement, control=control)
             await self._queue_note_refresh(principal.tenant_id, old.relationship_id, control.deletion_epoch)
             await self._store_receipt(principal, command.command_id, replacement.id, "completed")
             return replacement.id
@@ -517,6 +522,17 @@ class ExplicitMemoryService:
                 deleted=True,
             )
             control.deletion_epoch += 1
+            # Deletion epochs invalidate all projections in the relationship.
+            # Remove derived graph rows immediately; stale jobs are epoch-guarded.
+            await self.session.execute(text(
+                "DELETE FROM agata.memory_graph_evidence WHERE tenant_id=:tenant AND relationship_id=:relationship"
+            ), {"tenant": memory.tenant_id, "relationship": memory.relationship_id})
+            await self.session.execute(text(
+                "DELETE FROM agata.memory_relations WHERE tenant_id=:tenant AND relationship_id=:relationship"
+            ), {"tenant": memory.tenant_id, "relationship": memory.relationship_id})
+            await self.session.execute(text(
+                "DELETE FROM agata.memory_entities WHERE tenant_id=:tenant AND relationship_id=:relationship"
+            ), {"tenant": memory.tenant_id, "relationship": memory.relationship_id})
             await self._queue_note_refresh(principal.tenant_id, memory.relationship_id, control.deletion_epoch)
             self.session.add(
                 SuppressionRule(

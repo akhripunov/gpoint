@@ -203,7 +203,7 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
         assert legacy_revision == "agata0002"
 
     subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "agata0005"],
+        [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "agata0006"],
         cwd=ROOT,
         env=env,
         check=True,
@@ -222,8 +222,13 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
         assert after == before
         assert "alembic_version" in agata_tables
         assert (
-            connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0005"
+            connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0006"
         )
+        assert {"memory_entities", "memory_relations", "memory_graph_evidence"} <= agata_tables
+        assert connection.scalar(text("SELECT count(*) FROM agata.memory_entities")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM agata.memory_relations")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM agata.memory_graph_evidence")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='agata' AND c.relname IN ('memory_entities','memory_relations','memory_graph_evidence') AND c.relrowsecurity AND c.relforcerowsecurity")) == 3
         assert connection.scalar(text("SELECT count(*) FROM agata.tenants")) == 1
         assert (
             connection.scalar(text("SELECT count(*) FROM pg_extension WHERE extname='vector'")) == 1

@@ -39,6 +39,7 @@ _OUTBOX_KEYS = {
     ),
     "memory_promote": frozenset({"candidate_id"}),
     "memory_embed": frozenset({"memory_id", "code"}),
+    "memory_graph_sync": frozenset({"memory_id", "memory_version"}),
     "generic": frozenset({"code", "aggregate_id"}),
     "response_retry": frozenset({"code", "request_id", "message_id"}),
 }

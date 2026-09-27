@@ -28,6 +28,7 @@ from app.db.models import (
 )
 from app.jobs.outbox import OutboxRepository, StaleCreationEpoch
 from app.memory.embedding import HuggingFaceFreeEmbeddingProvider
+from app.memory.persistent_graph import PersistentMemoryGraphService
 from app.memory.promotion import AutoWritePromotionService
 from app.memory.retrieval import EmbeddingWorker
 from app.memory.segments import segment_hierarchy, segment_interval
@@ -73,6 +74,7 @@ class MemoryWorker:
         provider: HuggingFaceFreeEmbeddingProvider,
         crypto: AeadCrypto,
         shadow_hmac_key: bytes,
+        suppression_hmac_roots: tuple[bytes, ...] = (),
         extraction_provider: ExtractionProvider | None = None,
         summary_provider: DeepSeekResponseProvider | None = None,
         batch_size: int = 4,
@@ -82,6 +84,7 @@ class MemoryWorker:
         self.provider = provider
         self.crypto = crypto
         self.shadow_hmac_key = shadow_hmac_key
+        self.suppression_hmac_roots = suppression_hmac_roots or (shadow_hmac_key,)
         self.extraction_provider = extraction_provider
         self.summary_provider = summary_provider
         self.batch_size = batch_size
@@ -95,6 +98,7 @@ class MemoryWorker:
                 "memory_extract",
                 "memory_promote",
                 "memory_embed",
+                "memory_graph_sync",
             }
         )
         async with self.session_factory() as claim_session:
@@ -147,6 +151,17 @@ class MemoryWorker:
                     else:
                         failed += 1
                     continue
+                if job.job_type == "memory_graph_sync":
+                    try:
+                        await self._process_graph_sync(job)
+                        completed += 1
+                    except StaleCreationEpoch:
+                        # Epoch races are terminal no-ops, never graph resurrection.
+                        failed += 1
+                    except Exception:
+                        await self._fail_claimed(job, "memory_graph_sync_failed", max_attempts=3)
+                        failed += 1
+                    continue
                 if job.job_type == "memory_extract":
                     if self.extraction_provider is None:
                         await self._fail_claimed(job, "extractor_unavailable", max_attempts=3)
@@ -196,6 +211,35 @@ class MemoryWorker:
                 else:
                     failed += 1
         return MemoryWorkerCycle(len(memory_jobs), completed, failed)
+
+    async def _process_graph_sync(self, job) -> None:
+        try:
+            memory_id = UUID(str(job.payload["memory_id"]))
+            memory_version = int(job.payload["memory_version"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SummaryProcessingError("memory_graph_job_invalid") from exc
+        if job.aggregate_id != memory_id or memory_version < 1:
+            raise SummaryProcessingError("memory_graph_job_invalid")
+        async with self.session_factory() as session:
+            try:
+                async with session.begin():
+                    await set_tenant_context(session, str(self.tenant_id))
+
+                    async def project(_session):
+                        await PersistentMemoryGraphService(
+                            session, crypto=self.crypto, hmac_root=self.shadow_hmac_key,
+                            suppression_hmac_roots=self.suppression_hmac_roots,
+                        ).project_memory(
+                            memory_id=memory_id, memory_version=memory_version,
+                            tenant_id=self.tenant_id, control_id=job.memory_control_state_id,
+                            creation_epoch=job.creation_epoch,
+                        )
+
+                    await OutboxRepository(session).complete_memory_job(job, project)
+            except StaleCreationEpoch:
+                async with session.begin():
+                    await set_tenant_context(session, str(self.tenant_id))
+                    await OutboxRepository(session).fail(job, "stale_epoch", max_attempts=1)
 
     async def _fail_claimed(self, job, code: str, *, max_attempts: int = 5) -> None:
         async with self.session_factory() as session:
@@ -619,6 +663,10 @@ async def _amain() -> int:
         shadow_hmac_key=base64.b64decode(
             settings.shadow_candidate_hmac_key.get_secret_value(), validate=True
         ),
+        suppression_hmac_roots=(
+            base64.b64decode(settings.shadow_candidate_hmac_key.get_secret_value(), validate=True),
+            base64.b64decode(settings.request_fingerprint_hmac_key.get_secret_value(), validate=True),
+        ),
         extraction_provider=extraction_provider,
         summary_provider=summary_provider,
         batch_size=settings.worker_batch_size,
@@ -646,7 +694,7 @@ async def _healthcheck() -> int:
                     text("SELECT version_num FROM agata.alembic_version")
                 )
                 await session.scalar(text("SELECT 1 FROM agata.outbox_jobs LIMIT 1"))
-        return 0 if revision == "agata0003" else 1
+        return 0 if revision == "agata0006" else 1
     except Exception:
         return 1
 

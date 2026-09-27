@@ -17,6 +17,7 @@ JOB_TYPES = frozenset(
         "memory_extract",
         "memory_promote",
         "memory_embed",
+        "memory_graph_sync",
         "response_retry",
     }
 )

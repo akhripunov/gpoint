@@ -9,7 +9,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -307,6 +307,28 @@ async def sync_user_consent(
         purge_types: set[str] = set()
         if "long_term_memory" in revoked_purposes:
             purge_types.update({"relationship_note", "relationship_summary", "user_profile_summary", "goal_summary", "project_summary"})
+            # Consent revocation removes all derived graph material for this user's
+            # relationships in the same transaction; old queued jobs cannot recreate
+            # it because projection also requires the exact still-active consent id.
+            await session.execute(text(
+                "UPDATE agata.outbox_jobs SET state='dead', claimed_at=NULL, lease_expires_at=NULL, "
+                "last_error='long_term_consent_revoked' WHERE tenant_id=:tenant "
+                "AND job_type='memory_graph_sync' AND state IN ('pending','running','failed') "
+                "AND payload->>'memory_id' IN (SELECT id::text FROM agata.memories "
+                "WHERE tenant_id=:tenant AND user_id=:user)"
+            ), {"tenant": tenant_id, "user": user.id})
+            await session.execute(text(
+                "DELETE FROM agata.memory_graph_evidence WHERE tenant_id=:tenant "
+                "AND relationship_id IN (SELECT id FROM agata.relationships WHERE tenant_id=:tenant AND user_id=:user)"
+            ), {"tenant": tenant_id, "user": user.id})
+            await session.execute(text(
+                "DELETE FROM agata.memory_relations WHERE tenant_id=:tenant "
+                "AND relationship_id IN (SELECT id FROM agata.relationships WHERE tenant_id=:tenant AND user_id=:user)"
+            ), {"tenant": tenant_id, "user": user.id})
+            await session.execute(text(
+                "DELETE FROM agata.memory_entities WHERE tenant_id=:tenant "
+                "AND relationship_id IN (SELECT id FROM agata.relationships WHERE tenant_id=:tenant AND user_id=:user)"
+            ), {"tenant": tenant_id, "user": user.id})
         if "chat_history" in revoked_purposes:
             purge_types.update({"conversation_summary", "current_context_summary", "topic_summary", "day_summary"})
         if purge_types:

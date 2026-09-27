@@ -41,7 +41,7 @@ from app.db.models import (
 from app.domain.principal import PrincipalContext
 from app.i18n.response_context import LocaleResponseFragment, resolve_locale_response_fragment
 from app.jobs.outbox import OutboxRepository
-from app.memory.graph import build_memory_graph
+from app.memory.persistent_graph import PersistentMemoryGraphService
 from app.memory.precedence import TemporalMode
 from app.memory.retrieval import (
     HybridRetrievalService,
@@ -379,8 +379,7 @@ class ContextBuilder:
             relationship_summary=bounded_relationship_summary,
             current_context_summary=bounded_current_context,
             snapshot_refs=tuple(snapshot_refs[:4]),
-            graph_context=bounded_graph
-            or tuple(f"{node.kind}: {node.label}" for node in build_memory_graph(results).nodes),
+            graph_context=bounded_graph,
             as_of=as_of,
             dialogue_state=dialogue,
             psychology_protocol=select_psychology_protocol(current_message),
@@ -609,6 +608,21 @@ class ResponseOrchestrator:
                 recall_results = recall_retrieval.results
             except Exception:
                 pass
+        async with self.session.begin():
+            await set_tenant_context(self.session, str(principal.tenant_id))
+            graph_context = await PersistentMemoryGraphService(
+                self.session, crypto=self.crypto
+            ).load_context(
+                tenant_id=principal.tenant_id,
+                relationship_id=conversation.relationship_id,
+                user_id=principal.user_id,
+                character_id=conversation.character_id,
+                scope=conversation.scope,
+                scenario_key=conversation.scenario_key,
+                as_of=request.as_of,
+                temporal_mode=plan.temporal_mode.value,
+                seeds=retrieval.results,
+            )
         context = ContextBuilder.build(
             profile,
             plaintext,
@@ -637,9 +651,7 @@ class ResponseOrchestrator:
                 and item.evidence_state != EvidenceState.disputed.value
             ),
             conversation_history=conversation_history,
-            graph_context=tuple(
-                f"{node.kind}: {node.label}" for node in build_memory_graph(retrieval.results).nodes
-            ),
+            graph_context=graph_context,
             as_of=request.as_of,
             shared_history=tuple(
                 UntrustedMemoryBlock(
@@ -1708,6 +1720,17 @@ async def run_retention_cleanup(session: AsyncSession, tenant_id: UUID) -> int:
             ),
             {"tid": tenant_id, "relationship_id": relationship_id},
         )
+        # The deletion epoch invalidates every graph projection for the relationship;
+        # remove derived rows rather than retaining unreachable user topology.
+        await session.execute(text(
+            "DELETE FROM agata.memory_graph_evidence WHERE tenant_id=:tid AND relationship_id=:relationship_id"
+        ), {"tid": tenant_id, "relationship_id": relationship_id})
+        await session.execute(text(
+            "DELETE FROM agata.memory_relations WHERE tenant_id=:tid AND relationship_id=:relationship_id"
+        ), {"tid": tenant_id, "relationship_id": relationship_id})
+        await session.execute(text(
+            "DELETE FROM agata.memory_entities WHERE tenant_id=:tid AND relationship_id=:relationship_id"
+        ), {"tid": tenant_id, "relationship_id": relationship_id})
         await session.execute(
             text(
                 "UPDATE agata.memory_snapshots SET content='{}'::jsonb, "

@@ -470,6 +470,7 @@ class AutoWritePromotionService:
                 )
             await self.session.flush()
             if status == "promoted":
+                from app.memory.persistent_graph import enqueue_memory_graph_sync
                 from app.memory.snapshots import (
                     MemorySnapshotService,
                     enqueue_relationship_note_refresh,
@@ -490,6 +491,7 @@ class AutoWritePromotionService:
                     relationship_id=candidate.relationship_id,
                     creation_epoch=control.deletion_epoch,
                 )
+                await enqueue_memory_graph_sync(self.session, memory=existing, control=control)
             return PromotionResult(status, existing.id)
 
     async def process_claimed(self, job: OutboxJob) -> PromotionResult:

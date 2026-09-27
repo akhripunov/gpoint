@@ -600,6 +600,10 @@ class Memory(TenantOwned):
             name="uq_memory_relationship_owner_scope",
         ),
         UniqueConstraint(
+            "tenant_id", "id", "version", "relationship_id", "user_id", "character_id", "scope", "scenario_key",
+            name="uq_memory_exact_revision_owner_scope",
+        ),
+        UniqueConstraint(
             "tenant_id",
             "id",
             "user_id",
@@ -730,6 +734,96 @@ class Memory(TenantOwned):
             & deleted_at.is_(None)
             & embedding.is_not(None),
         ),
+    )
+
+
+class MemoryEntity(TenantOwned):
+    __tablename__ = "memory_entities"
+    relationship_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    character_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    scope: Mapped[Scope] = mapped_column(Enum(Scope, name="scope_enum", native_enum=True, create_type=False), nullable=False)
+    scenario_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    scenario_key: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), Computed(
+        "coalesce(scenario_id, '00000000-0000-0000-0000-000000000000'::uuid)", persisted=True
+    ))
+    entity_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    entity_key_hmac: Mapped[str] = mapped_column(String(80), nullable=False)
+    created_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", "relationship_id", "user_id", "character_id", "scope", "scenario_key", name="uq_memory_entity_owner"),
+        UniqueConstraint("tenant_id", "relationship_id", "entity_type", "entity_key_hmac", name="uq_memory_entity_identity"),
+        ForeignKeyConstraint(["tenant_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"], ["relationships.tenant_id", "relationships.id", "relationships.user_id", "relationships.character_id", "relationships.scope", "relationships.scenario_key"], name="fk_memory_entity_relationship_owner"),
+        CheckConstraint("(scope = 'real_world' AND scenario_id IS NULL) OR (scope = 'roleplay' AND scenario_id IS NOT NULL)", name="ck_memory_entity_scope"),
+        CheckConstraint("entity_type IN ('user','person','place','organization','activity','preference','goal','event','relationship','emotion','instruction','locale','timezone')", name="ck_memory_entity_type"),
+        CheckConstraint("created_epoch >= 0", name="ck_memory_entity_epoch"),
+        CheckConstraint("entity_key_hmac ~ '^hmac-sha256:v1:[0-9a-f]{64}$'", name="ck_memory_entity_hmac"),
+        Index("memory_entities_relationship_key_idx", "tenant_id", "relationship_id", "entity_key_hmac"),
+    )
+
+
+class MemoryRelation(TenantOwned):
+    __tablename__ = "memory_relations"
+    relationship_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    character_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    scope: Mapped[Scope] = mapped_column(Enum(Scope, name="scope_enum", native_enum=True, create_type=False), nullable=False)
+    scenario_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    scenario_key: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), Computed(
+        "coalesce(scenario_id, '00000000-0000-0000-0000-000000000000'::uuid)", persisted=True
+    ))
+    source_entity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    target_entity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    relation_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", "relationship_id", "user_id", "character_id", "scope", "scenario_key", name="uq_memory_relation_owner"),
+        UniqueConstraint("tenant_id", "relationship_id", "source_entity_id", "relation_type", "target_entity_id", name="uq_memory_relation_topology"),
+        ForeignKeyConstraint(["tenant_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"], ["relationships.tenant_id", "relationships.id", "relationships.user_id", "relationships.character_id", "relationships.scope", "relationships.scenario_key"], name="fk_memory_relation_relationship_owner"),
+        ForeignKeyConstraint(["tenant_id", "source_entity_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"], ["memory_entities.tenant_id", "memory_entities.id", "memory_entities.relationship_id", "memory_entities.user_id", "memory_entities.character_id", "memory_entities.scope", "memory_entities.scenario_key"], name="fk_memory_relation_source_owner"),
+        ForeignKeyConstraint(["tenant_id", "target_entity_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"], ["memory_entities.tenant_id", "memory_entities.id", "memory_entities.relationship_id", "memory_entities.user_id", "memory_entities.character_id", "memory_entities.scope", "memory_entities.scenario_key"], name="fk_memory_relation_target_owner"),
+        CheckConstraint("(scope = 'real_world' AND scenario_id IS NULL) OR (scope = 'roleplay' AND scenario_id IS NOT NULL)", name="ck_memory_relation_scope"),
+        CheckConstraint("source_entity_id <> target_entity_id", name="ck_memory_relation_not_self"),
+        CheckConstraint("relation_type IN ('preferred_name','likes','dislikes','hobby','locale','timezone','current_activity','goal','event','relationship','emotion','instruction','works_at','lives_in')", name="ck_memory_relation_type"),
+        CheckConstraint("created_epoch >= 0", name="ck_memory_relation_epoch"),
+        Index("memory_relations_source_idx", "tenant_id", "relationship_id", "source_entity_id"),
+        Index("memory_relations_target_idx", "tenant_id", "relationship_id", "target_entity_id"),
+    )
+
+
+class MemoryGraphEvidence(TenantOwned):
+    __tablename__ = "memory_graph_evidence"
+    relationship_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    character_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    scope: Mapped[Scope] = mapped_column(Enum(Scope, name="scope_enum", native_enum=True, create_type=False), nullable=False)
+    scenario_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    scenario_key: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), Computed(
+        "coalesce(scenario_id, '00000000-0000-0000-0000-000000000000'::uuid)", persisted=True
+    ))
+    memory_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    memory_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    entity_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    relation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    evidence_role: Mapped[str] = mapped_column(String(24), nullable=False)
+    created_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", "relationship_id", "user_id", "character_id", "scope", "scenario_key", name="uq_memory_graph_evidence_owner"),
+        ForeignKeyConstraint(["tenant_id", "memory_id", "memory_version", "relationship_id", "user_id", "character_id", "scope", "scenario_key"], ["memories.tenant_id", "memories.id", "memories.version", "memories.relationship_id", "memories.user_id", "memories.character_id", "memories.scope", "memories.scenario_key"], name="fk_memory_graph_evidence_exact_memory"),
+        ForeignKeyConstraint(["tenant_id", "entity_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"], ["memory_entities.tenant_id", "memory_entities.id", "memory_entities.relationship_id", "memory_entities.user_id", "memory_entities.character_id", "memory_entities.scope", "memory_entities.scenario_key"], name="fk_memory_graph_evidence_entity_owner"),
+        ForeignKeyConstraint(["tenant_id", "relation_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"], ["memory_relations.tenant_id", "memory_relations.id", "memory_relations.relationship_id", "memory_relations.user_id", "memory_relations.character_id", "memory_relations.scope", "memory_relations.scenario_key"], name="fk_memory_graph_evidence_relation_owner"),
+        CheckConstraint("(scope = 'real_world' AND scenario_id IS NULL) OR (scope = 'roleplay' AND scenario_id IS NOT NULL)", name="ck_memory_graph_evidence_scope"),
+        CheckConstraint("memory_version >= 1 AND created_epoch >= 0", name="ck_memory_graph_evidence_revision_epoch"),
+        CheckConstraint("(entity_id IS NOT NULL AND relation_id IS NULL AND evidence_role='defines_entity') OR (entity_id IS NULL AND relation_id IS NOT NULL AND evidence_role='supports_relation')", name="ck_memory_graph_evidence_target_role"),
+        CheckConstraint("invalidated_at IS NULL OR invalidated_at >= created_at", name="ck_memory_graph_evidence_invalidation_time"),
+        Index("memory_graph_evidence_memory_idx", "tenant_id", "relationship_id", "memory_id"),
+        Index("memory_graph_evidence_relation_idx", "tenant_id", "relationship_id", "relation_id", postgresql_where=text("relation_id IS NOT NULL")),
+        Index("memory_graph_evidence_entity_idx", "tenant_id", "relationship_id", "entity_id", postgresql_where=text("entity_id IS NOT NULL")),
+        Index("uq_memory_graph_evidence_entity", "tenant_id", "memory_id", "memory_version", "entity_id", unique=True, postgresql_where=text("entity_id IS NOT NULL")),
+        Index("uq_memory_graph_evidence_relation", "tenant_id", "memory_id", "memory_version", "relation_id", unique=True, postgresql_where=text("relation_id IS NOT NULL")),
     )
 
 
@@ -917,7 +1011,7 @@ class OutboxJob(TenantOwned):
             name="ck_outbox_memory_control_required",
         ),
         CheckConstraint(
-            "job_type IN ('generic','conversation_summary','relationship_note_refresh','snapshot_refresh','memory_extract','memory_promote','memory_embed','response_retry')",
+            "job_type IN ('generic','conversation_summary','relationship_note_refresh','snapshot_refresh','memory_extract','memory_promote','memory_embed','memory_graph_sync','response_retry')",
             name="ck_outbox_job_type_allowlist",
         ),
         Index(
