@@ -15,14 +15,13 @@ from app.db.models import (
     Consent,
     EvidenceState,
     JobState,
-    LifecycleState,
     Memory,
     MemoryControlState,
     MemorySnapshot,
     OutboxJob,
-    SharedHistoryEpisode,
     UserCharacterSettings,
 )
+from app.memory.precedence import current_truth_filter
 from app.messages.crypto import AeadCrypto
 from app.messages.protected_content import (
     encrypt_json_for_storage,
@@ -242,12 +241,9 @@ class MemorySnapshotService:
             Memory.character_id == relationship.character_id,
             Memory.scope == relationship.scope,
             Memory.scenario_id == relationship.scenario_id,
-            Memory.lifecycle_state == LifecycleState.active,
-            Memory.deleted_at.is_(None),
+            current_truth_filter(now),
             Memory.evidence_state.in_([EvidenceState.explicit, EvidenceState.confirmed]),
             Memory.created_epoch == epoch,
-            (Memory.valid_from.is_(None) | (Memory.valid_from <= now)),
-            (Memory.valid_until.is_(None) | (Memory.valid_until > now)),
         ).order_by(Memory.importance.desc(), Memory.updated_at.desc(), Memory.id).limit(12))).all())
         from app.messages.protected_content import decrypt_text_from_storage, memory_value_aad
         facts: list[dict[str, str]] = []
@@ -257,39 +253,9 @@ class MemorySnapshotService:
             if isinstance(value, str) and 1 <= len(value.strip()) <= 180:
                 facts.append({"predicate": (memory.predicate or memory.slot_key or "fact")[:64], "value": value.strip()})
                 valid_memories.append(memory)
-        shared_history = list((await self.session.execute(
-            select(SharedHistoryEpisode, Memory)
-            .join(Memory, (Memory.tenant_id == SharedHistoryEpisode.tenant_id) & (Memory.id == SharedHistoryEpisode.memory_id))
-            .where(
-                SharedHistoryEpisode.tenant_id == tenant_id,
-                SharedHistoryEpisode.relationship_id == relationship.id,
-                SharedHistoryEpisode.user_id == relationship.user_id,
-                SharedHistoryEpisode.character_id == relationship.character_id,
-                SharedHistoryEpisode.scope == relationship.scope,
-                SharedHistoryEpisode.scenario_id == relationship.scenario_id,
-                SharedHistoryEpisode.state == "active",
-                SharedHistoryEpisode.creation_epoch == epoch,
-                Memory.lifecycle_state == LifecycleState.active,
-                Memory.deleted_at.is_(None),
-                Memory.evidence_state.in_([EvidenceState.explicit, EvidenceState.confirmed]),
-                Memory.created_epoch == epoch,
-                (Memory.valid_from.is_(None) | (Memory.valid_from <= now)),
-                (Memory.valid_until.is_(None) | (Memory.valid_until > now)),
-            )
-            .order_by(SharedHistoryEpisode.confirmed_at.desc(), SharedHistoryEpisode.id)
-            .limit(4)
-        )).all())
-        relationship_context: list[str] = []
-        for _episode, memory in shared_history:
-            if memory.id in {item.id for item in valid_memories}:
-                continue
-            value = decrypt_text_from_storage(memory.value_text, memory_value_aad(memory), crypto=self.crypto)
-            if isinstance(value, str) and value.strip():
-                relationship_context.append(value.strip()[:180])
-                valid_memories.append(memory)
         content = {
             "preferred_name": preferred_name, "stable_facts": facts[:10],
-            "communication_preferences": [], "important_relationship_context": relationship_context[:4],
+            "communication_preferences": [],
         }
         content = {key: value for key, value in content.items() if value not in (None, [], {})}
         fingerprint = snapshot_fingerprint(
@@ -297,11 +263,13 @@ class MemorySnapshotService:
             settings.version if settings else 0,
             [(str(m.id), m.version, m.updated_at.isoformat()) for m in valid_memories],
         )
+        expiries = [m.valid_until for m in valid_memories if m.valid_until is not None and m.valid_until > now]
         return await self.upsert(
             tenant_id=tenant_id, relationship=relationship,
             snapshot_type="relationship_note", snapshot_key="relationship",
             content=content or {"stable_facts": []}, source_fingerprint=fingerprint,
             creation_epoch=epoch, source_memory_ids=[m.id for m in valid_memories],
+            expires_at=min(expiries) if expiries else None,
         )
 
     async def resolve_current(

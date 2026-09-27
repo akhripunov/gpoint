@@ -9,7 +9,7 @@ from hashlib import sha256
 from hmac import new
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import set_tenant_context
@@ -30,6 +30,12 @@ from app.db.models import (
     SuppressionRule,
 )
 from app.jobs.outbox import OutboxRepository, StaleCreationEpoch
+from app.memory.precedence import (
+    MemoryPrecedenceService,
+    PrecedenceOutcome,
+    build_slot_identity,
+)
+from app.memory.shared_history import SharedHistoryContext, SharedHistoryService
 from app.messages.crypto import (
     AeadCrypto,
     CiphertextEnvelope,
@@ -105,6 +111,7 @@ class AutoWritePromotionService:
             raise DomainError("promotion_policy_invalid")
         self.session, self.crypto, self.policy_version = session, crypto, policy_version
         self._promotion_key = derive_hmac_subkey(hmac_key, PROMOTION_DOMAIN)
+        self._slot_identity_hmac_key = hmac_key
         self._suppression_key = derive_hmac_subkey(hmac_key, SUPPRESSION_DOMAIN)
 
     async def promote(self, *, tenant_id: UUID, candidate_id: UUID) -> PromotionResult:
@@ -249,8 +256,9 @@ class AutoWritePromotionService:
                 return PromotionResult("denied", None)
             if not self._valid_value(candidate.category, value):
                 return PromotionResult("denied", None)
-            slot_key = SLOT_BY_CATEGORY[candidate.category]
-            slot_hmac = self._digest(slot_key)
+            base_slot_key = SLOT_BY_CATEGORY[candidate.category]
+            slot_key = build_slot_identity(base_slot_key, value, hmac_key=self._slot_identity_hmac_key)
+            slot_hmac = self._digest(base_slot_key)
             value_hmac = self._digest(value)
             suppression = await self.session.scalar(
                 select(SuppressionRule)
@@ -269,29 +277,38 @@ class AutoWritePromotionService:
             )
             if suppression is not None:
                 return PromotionResult("denied", None)
-            await self.session.execute(
-                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-                {
-                    "key": (
-                        f"autowrite:{tenant_id}:{candidate.relationship_id}:{candidate.user_id}:{candidate.character_id}:"
-                        f"{candidate.scope.value}:{candidate.scenario_id}:{slot_key}"
-                    )
-                },
+            precedence = MemoryPrecedenceService(self.session)
+            if slot_key != base_slot_key:
+                await precedence.lock_slot(
+                    tenant_id=tenant_id, relationship_id=candidate.relationship_id,
+                    user_id=candidate.user_id, character_id=candidate.character_id,
+                    scope=candidate.scope, scenario_id=candidate.scenario_id,
+                    slot_key=base_slot_key,
+                )
+            existing = await precedence.current_for_slot(
+                tenant_id=tenant_id, relationship_id=candidate.relationship_id,
+                user_id=candidate.user_id, character_id=candidate.character_id,
+                scope=candidate.scope, scenario_id=candidate.scenario_id,
+                slot_key=slot_key, at=now,
             )
-            existing = await self.session.scalar(
-                select(Memory)
-                .where(
+            if existing is None and slot_key != base_slot_key:
+                legacy = await self.session.scalar(select(Memory).where(
                     Memory.tenant_id == tenant_id,
                     Memory.relationship_id == candidate.relationship_id,
                     Memory.user_id == candidate.user_id,
                     Memory.character_id == candidate.character_id,
                     Memory.scope == candidate.scope,
                     Memory.scenario_id == candidate.scenario_id,
-                    Memory.slot_key == slot_key,
+                    Memory.slot_key == base_slot_key,
                     Memory.lifecycle_state == LifecycleState.active,
-                )
-                .with_for_update()
-            )
+                    Memory.deleted_at.is_(None),
+                ).with_for_update())
+                if legacy is not None:
+                    legacy_value = decrypt_text_from_storage(
+                        legacy.value_text, memory_value_aad(legacy), crypto=self.crypto
+                    )
+                    if legacy_value is not None and legacy_value.strip().casefold() == value.strip().casefold():
+                        existing = legacy
             status = "promoted"
             existing_value = (
                 decrypt_text_from_storage(
@@ -300,21 +317,47 @@ class AutoWritePromotionService:
                 if existing is not None
                 else None
             )
-            if existing is not None and existing_value != value:
-                if candidate.category in {"preferred_name", "current_activity"}:
+            old_memory = existing
+            if (
+                existing is not None
+                and existing.lifecycle_state == LifecycleState.historical
+                and existing.valid_until is not None
+                and source.occurred_at <= existing.valid_until
+            ):
+                candidate.status = "conflict"
+                await self._receipt(candidate, release, "conflict", None)
+                return PromotionResult("conflict", None)
+            if existing is not None and existing.lifecycle_state == LifecycleState.active:
+                existing_claimed_at = await precedence.latest_source_time(existing)
+                decision = precedence.compare_candidate(
+                    existing, candidate_value=value, current_value=existing_value,
+                    candidate_evidence=EvidenceState.inferred,
+                    candidate_claimed_at=source.occurred_at,
+                    current_claimed_at=existing_claimed_at,
+                )
+                if decision.outcome == PrecedenceOutcome.IDENTICAL:
+                    if existing.lifecycle_state == LifecycleState.active:
+                        status, existing_id = "identical", None
+                    elif existing.valid_until is not None and source.occurred_at <= existing.valid_until:
+                        candidate.status = "conflict"
+                        await self._receipt(candidate, release, "conflict", None)
+                        return PromotionResult("conflict", None)
+                    else:
+                        existing_id = existing.id
+                elif decision.outcome != PrecedenceOutcome.ACCEPT:
                     candidate.status = "conflict"
                     await self._receipt(candidate, release, "conflict", None)
                     return PromotionResult("conflict", None)
-                existing.lifecycle_state = LifecycleState.historical
-                existing.updated_at = now
-                status = "conflict"
-                existing_id = existing.id
-                existing = None
+                else:
+                    existing_id = existing.id
             else:
-                existing_id = None
-            if existing is None:
+                # current_for_slot already reconciled an expired active row to
+                # HISTORICAL. Preserve its revision chain, but never compare it
+                # as current truth or let it block a new effective value.
+                existing_id = existing.id if existing is not None else None
+            if existing_id is not None or existing is None:
                 memory_id = uuid4()
-                existing = Memory(
+                replacement = Memory(
                     id=memory_id,
                     tenant_id=tenant_id,
                     relationship_id=candidate.relationship_id,
@@ -331,7 +374,7 @@ class AutoWritePromotionService:
                     slot_key=slot_key,
                     slot_schema_version=1,
                     subject_type="user",
-                    predicate=slot_key.removeprefix("user."),
+                    predicate=base_slot_key.removeprefix("user."),
                     value_text=encrypt_text_for_storage(
                         value,
                         content_aad(
@@ -346,12 +389,12 @@ class AutoWritePromotionService:
                         ),
                         crypto=self.crypto,
                     ),
-                    observed_at=source.occurred_at,
-                    valid_until=(now + timedelta(days=3))
+                    observed_at=source.created_at,
+                    valid_until=(source.occurred_at + timedelta(days=3))
                     if candidate.category == "current_activity"
                     else None,
                     evidence_state=EvidenceState.inferred,
-                    lifecycle_state=LifecycleState.active,
+                    lifecycle_state=(LifecycleState.active if candidate.category != "current_activity" or source.occurred_at + timedelta(days=3) > now else LifecycleState.historical),
                     confidence=candidate.confidence,
                     importance=0.3,
                     sensitivity="normal",
@@ -359,10 +402,17 @@ class AutoWritePromotionService:
                     retention_policy_id=candidate.retention_policy_id,
                     created_epoch=control.deletion_epoch,
                 )
-                if existing_id is not None:
-                    existing.supersedes_id = existing_id
-                self.session.add(existing)
+                if old_memory is not None and existing_id is not None:
+                    await precedence.supersede(old_memory, replacement, transition_at=now)
+                    await SharedHistoryService(self.session).retire_memory_in_transaction(
+                        SharedHistoryContext(
+                            tenant_id, candidate.user_id, candidate.character_id,
+                            candidate.scope, candidate.scenario_id, candidate.relationship_id,
+                        ), old_memory.id,
+                    )
+                self.session.add(replacement)
                 await self.session.flush()
+                existing = replacement
             else:
                 status = "identical"
             existing_source = await self.session.scalar(
@@ -421,10 +471,15 @@ class AutoWritePromotionService:
             await self.session.flush()
             if status == "promoted":
                 from app.memory.snapshots import (
+                    MemorySnapshotService,
                     enqueue_relationship_note_refresh,
                     enqueue_relationship_summary_refresh,
                 )
 
+                await MemorySnapshotService(self.session, self.crypto).invalidate_relationship(
+                    tenant_id, candidate.relationship_id,
+                    snapshot_types=("relationship_note", "relationship_summary"),
+                )
                 await enqueue_relationship_note_refresh(
                     self.session, tenant_id=tenant_id,
                     relationship_id=candidate.relationship_id,

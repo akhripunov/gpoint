@@ -41,11 +41,9 @@ from app.memory.snapshots import MemorySnapshotService, snapshot_fingerprint
 from app.messages.crypto import AeadCrypto, CiphertextEnvelope
 from app.messages.protected_content import (
     content_aad,
-    decrypt_json_from_storage,
     decrypt_text_from_storage,
     encrypt_json_for_storage,
     encrypt_text_for_storage,
-    memory_snapshot_content_aad,
     segment_summary_aad,
 )
 from app.messages.service import MessageIngestionService
@@ -548,26 +546,11 @@ class MemoryWorker:
                 )
                 shared = await SharedHistoryService(session).load_in_transaction(shared_context)
                 shared_text = [item.value[:200] for item in shared[:4]]
-                note_facts = []
-                memory_ids: list[UUID] = []
-                if note is not None:
-                    note_payload = decrypt_json_from_storage(
-                        note.content, memory_snapshot_content_aad(note), crypto=self.crypto
-                    )
-                    if isinstance(note_payload, dict):
-                        note_facts = [
-                            f"{item.get('predicate', 'fact')}: {item.get('value', '')}"
-                            for item in note_payload.get("stable_facts", [])[:6]
-                            if isinstance(item, dict) and isinstance(item.get("value"), str)
-                        ]
-                    memory_ids.extend(UUID(value) for value in note.source_memory_ids if isinstance(value, str))
                 pieces = []
-                if note_facts:
-                    pieces.append("Stable context: " + "; ".join(note_facts))
                 if rendered:
-                    pieces.append("Recent conversations: " + " ".join(rendered))
+                    pieces.append("Conversation history (not authoritative current facts): " + " ".join(rendered))
                 if shared_text:
-                    pieces.append("Confirmed shared history: " + "; ".join(shared_text))
+                    pieces.append("Confirmed relationship history (not current facts): " + "; ".join(shared_text))
                 if not pieces:
                     await OutboxRepository(session).complete(job)
                     return
@@ -586,7 +569,7 @@ class MemoryWorker:
                     content={"recent_summary": " ".join(pieces)[:2400]},
                     source_fingerprint=fingerprint,
                     creation_epoch=control.deletion_epoch,
-                    source_memory_ids=list(dict.fromkeys(memory_ids + [item.memory_id for item in shared])),
+                    source_memory_ids=[item.memory_id for item in shared],
                     source_segment_ids=source_segment_ids,
                 )
                 await OutboxRepository(session).complete(job)

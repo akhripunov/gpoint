@@ -269,8 +269,9 @@ class SharedHistoryService:
                         SharedHistoryEpisode.character_id == context.character_id,
                         SharedHistoryEpisode.scope == context.scope,
                         SharedHistoryEpisode.scenario_id == context.scenario_id,
-                        SharedHistoryEpisode.state == "active",
-                        Memory.lifecycle_state == LifecycleState.active,
+                        SharedHistoryEpisode.state.in_(("active", "historical")),
+                        Memory.lifecycle_state.in_((LifecycleState.active, LifecycleState.historical)),
+                        Memory.created_epoch == SharedHistoryEpisode.creation_epoch,
                         Memory.evidence_state.in_(
                             [EvidenceState.explicit, EvidenceState.confirmed]
                         ),

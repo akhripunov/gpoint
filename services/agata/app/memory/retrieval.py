@@ -36,6 +36,7 @@ from app.db.models import (
 )
 from app.domain.principal import PrincipalContext
 from app.jobs.outbox import OutboxRepository, StaleCreationEpoch
+from app.memory.precedence import TemporalMode, current_truth_filter, historical_truth_filter
 from app.messages.crypto import canonical_tagged_fields, derive_hmac_subkey
 from app.messages.protected_content import (
     decrypt_text_from_storage,
@@ -146,6 +147,7 @@ class RetrievalRequest:
     final_k: int = 8
     max_characters: int = 2048
     kinds: tuple[str, ...] = ()
+    temporal_mode: TemporalMode = TemporalMode.CURRENT
 
 
 @dataclass(frozen=True, slots=True)
@@ -485,7 +487,7 @@ class HybridRetrievalService:
             return RetrievalResult(tuple(selected), reason, run.id)
 
     def _hard_filter(self, principal: PrincipalContext, request: RetrievalRequest):
-        return (
+        statement = (
             select(Memory)
             .join(
                 MemoryControlState,
@@ -522,11 +524,9 @@ class HybridRetrievalService:
                 Memory.character_id == request.character_id,
                 Memory.scope == request.scope,
                 Memory.scenario_id == request.scenario_id,
-                Memory.lifecycle_state.in_([LifecycleState.active, LifecycleState.historical]),
                 Memory.deleted_at.is_(None),
                 Memory.sensitivity == "normal",
-                or_(Memory.valid_from.is_(None), Memory.valid_from <= request.as_of),
-                or_(Memory.valid_until.is_(None), Memory.valid_until > request.as_of),
+                Memory.evidence_state != EvidenceState.disputed,
                 or_(
                     RetentionPolicy.memory_days.is_(None),
                     Memory.created_at + func.make_interval(0, 0, 0, RetentionPolicy.memory_days)
@@ -534,6 +534,16 @@ class HybridRetrievalService:
                 ),
             )
         )
+        if request.temporal_mode == TemporalMode.CURRENT:
+            statement = statement.where(current_truth_filter(request.as_of))
+        else:
+            # request.as_of is evaluation time, not a user-selected historical date.
+            statement = statement.where(or_(
+                historical_truth_filter(), current_truth_filter(request.as_of),
+            ))
+        if request.kinds:
+            statement = statement.where(Memory.kind.in_(request.kinds))
+        return statement
 
     async def _telemetry(
         self,
@@ -557,6 +567,7 @@ class HybridRetrievalService:
                     (b"scope", request.scope.value.encode()),
                     (b"scenario", request.scenario_id.bytes if request.scenario_id else b""),
                     (b"query", request.query.encode("utf-8")),
+                    (b"temporal_mode", request.temporal_mode.value.encode("ascii")),
                 )
             ),
             sha256,
@@ -624,6 +635,7 @@ class HybridRetrievalService:
             or not 1 <= len(request.query) <= 512
             or "\x00" in request.query
             or not isinstance(request.as_of, datetime)
+            or not isinstance(request.temporal_mode, TemporalMode)
             or request.as_of.tzinfo is None
             or request.as_of.utcoffset() is None
         ):
@@ -641,7 +653,7 @@ class HybridRetrievalService:
             and request.final_k <= 20
             and request.max_characters <= 8192
             and isinstance(request.kinds, tuple)
-            and all(isinstance(item, str) and item in {"semantic_fact"} for item in request.kinds)
+            and all(isinstance(item, str) and item in {"semantic_fact", "episodic"} for item in request.kinds)
         )
 
     async def attach_supplied(
@@ -691,6 +703,7 @@ class HybridRetrievalService:
                 )
                 if (
                     memory is None
+                    or memory.version != entry.version
                     or memory.lifecycle_state
                     not in (LifecycleState.active, LifecycleState.historical)
                     or memory.deleted_at is not None

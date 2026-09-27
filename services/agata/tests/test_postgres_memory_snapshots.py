@@ -2,7 +2,7 @@
 
 import asyncio
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -45,7 +45,7 @@ async def test_relationship_note_provenance_consent_and_snapshot_generation_cas(
     )
     suffix = uuid4().hex
     now = datetime.now(UTC)
-    user_id, character_id, memory_id, control_id = (uuid4() for _ in range(4))
+    user_id, character_id, memory_id, historical_memory_id, control_id = (uuid4() for _ in range(5))
     async with SessionFactory() as session:
         async with session.begin():
             await set_tenant_context(session, str(TENANT_ID))
@@ -91,7 +91,21 @@ async def test_relationship_note_provenance_consent_and_snapshot_generation_cas(
                 lifecycle_state=LifecycleState.active, confidence=0.98, importance=0.9,
                 created_epoch=0,
             )
-            session.add(memory)
+            historical_memory = Memory(
+                id=historical_memory_id, tenant_id=TENANT_ID, relationship_id=relationship.id,
+                user_id=user_id, character_id=character_id, kind="semantic_fact",
+                scope=Scope.real_world, scenario_id=None, slot_key=memory.slot_key,
+                predicate="works_at", value_text=encrypt_text_for_storage(
+                    "Company A", content_aad(
+                        entity="memories", tenant_id=TENANT_ID, user_id=user_id,
+                        character_id=character_id, scope=Scope.real_world, scenario_id=None,
+                        record_id=historical_memory_id, field="value_text",
+                    ), crypto=crypto,
+                ), observed_at=now-timedelta(days=30), valid_until=now-timedelta(days=1),
+                evidence_state=EvidenceState.confirmed, lifecycle_state=LifecycleState.historical,
+                confidence=0.98, importance=1.0, created_epoch=0,
+            )
+            session.add_all([memory, historical_memory])
             await session.flush()
             relationship_data = {
                 "id": relationship.id, "tenant_id": TENANT_ID, "user_id": user_id,

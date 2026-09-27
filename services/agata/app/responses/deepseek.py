@@ -148,16 +148,22 @@ class DeepSeekResponseProvider:
                     observed_date = memory.observed_at.date()
                     current_date = context.as_of.date()
                     if observed_date == current_date:
-                        temporal_label = "[сегодня] "
+                        temporal_label = "[evidence observed today] "
                     elif observed_date == current_date - timedelta(days=1):
-                        temporal_label = "[вчера] "
+                        temporal_label = "[evidence observed yesterday] "
                     else:
-                        temporal_label = f"[{observed_date.isoformat()}] "
+                        temporal_label = f"[evidence observed {observed_date.isoformat()}] "
+                truth_label = "CURRENT" if memory.lifecycle_state == "active" else "HISTORICAL"
+                interval = ""
+                if memory.valid_from is not None or memory.valid_until is not None:
+                    start = memory.valid_from.isoformat() if memory.valid_from is not None else "unknown-start"
+                    end = memory.valid_until.isoformat() if memory.valid_until is not None else "open-end"
+                    interval = f" (valid interval {start} ≤ t < {end})"
                 # Keep the memory's typed subject/predicate next to its value.
                 # A bare value such as ``Саша`` is ambiguous (it may be the
                 # user's name or another person mentioned in the conversation).
                 descriptor = memory.predicate or memory.subject or "факт"
-                facts.append(f"{temporal_label}{descriptor}: {memory.value}")
+                facts.append(f"[{truth_label}] {temporal_label}{descriptor}: {memory.value}{interval}")
             if facts:
                 memory_lines.append("Факты о пользователе: " + ", ".join(facts))
         if context.recall_context:

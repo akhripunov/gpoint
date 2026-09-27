@@ -18,7 +18,6 @@ from uuid import UUID, uuid4
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
 from app.db.base import set_tenant_context
 from app.db.models import (
     AuditLog,
@@ -43,6 +42,7 @@ from app.domain.principal import PrincipalContext
 from app.i18n.response_context import LocaleResponseFragment, resolve_locale_response_fragment
 from app.jobs.outbox import OutboxRepository
 from app.memory.graph import build_memory_graph
+from app.memory.precedence import TemporalMode
 from app.memory.retrieval import (
     HybridRetrievalService,
     RetrievalRequest,
@@ -70,7 +70,6 @@ from app.messages.protected_content import (
     encrypt_text_for_storage,
     memory_snapshot_content_aad,
     memory_value_aad,
-    opaque_search_text,
     segment_summary_aad,
 )
 from app.messages.service import DomainError, MessageIngestionService
@@ -92,7 +91,7 @@ class ResponseRequest:
 
 @dataclass(frozen=True, slots=True)
 class QueryPlan:
-    temporal_mode: str
+    temporal_mode: TemporalMode
     exact_lookup: bool
     max_characters: int
     abstain: bool
@@ -140,6 +139,9 @@ class UntrustedMemoryBlock:
     reason_code: str = "untrusted_memory_data"
     evidence_state: str = "inferred"
     lifecycle_state: str = "active"
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
+    truth_role: str = "current"
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,15 +283,15 @@ class QueryPlanner:
 
     def plan(self, query: object, as_of: object) -> QueryPlan:
         if not isinstance(query, str) or not 1 <= len(query) <= 512 or "\x00" in query:
-            return QueryPlan("all_time", False, 0, True, "invalid_query", "unknown")
+            return QueryPlan(TemporalMode.CURRENT, False, 0, True, "invalid_query", "unknown")
         if not isinstance(as_of, datetime) or as_of.tzinfo is None or as_of.utcoffset() is None:
-            return QueryPlan("all_time", False, 0, True, "invalid_time_input", "unknown")
+            return QueryPlan(TemporalMode.CURRENT, False, 0, True, "invalid_time_input", "unknown")
         lowered = query.casefold()
-        temporal = (
-            "historical"
-            if any(token in lowered for token in ("was", "раньше", "был"))
-            else "current"
+        historical_cues = (
+            "раньше", "до этого", "прежде", "в прошлом", "когда я работал",
+            "когда работал", "was", "used to", "previously", "before",
         )
+        temporal = TemporalMode.HISTORICAL if any(cue in lowered for cue in historical_cues) else TemporalMode.CURRENT
         return QueryPlan(temporal, len(query) <= 128, 2048, False, "ok", _language_code(query))
 
 
@@ -347,6 +349,9 @@ class ContextBuilder:
                     item.observed_at,
                     evidence_state=item.evidence_state,
                     lifecycle_state=item.lifecycle_state,
+                    valid_from=item.valid_from,
+                    valid_until=item.valid_until,
+                    truth_role="historical" if item.lifecycle_state == LifecycleState.historical.value else "current",
                 )
             )
         bounded_history = _bounded_history(conversation_history)
@@ -390,6 +395,7 @@ class ContextBuilder:
                     reason_code="shared_history_data",
                     evidence_state=item.evidence_state,
                     lifecycle_state=item.lifecycle_state,
+                    truth_role="relationship_history",
                 )
                 for item in shared_history[:10]
                 if isinstance(item, UntrustedMemoryBlock)
@@ -574,6 +580,7 @@ class ResponseOrchestrator:
                     plaintext,
                     request.as_of,
                     max_characters=plan.max_characters,
+                    temporal_mode=plan.temporal_mode,
                 ),
             )
         except Exception:
@@ -596,6 +603,7 @@ class ResponseOrchestrator:
                         plaintext,
                         request.as_of,
                         max_characters=plan.max_characters * 3,
+                        temporal_mode=plan.temporal_mode,
                     ),
                 )
                 recall_results = recall_retrieval.results
@@ -619,6 +627,9 @@ class ResponseOrchestrator:
                     reason_code="recall_memory_data",
                     evidence_state=item.evidence_state,
                     lifecycle_state=item.lifecycle_state,
+                    valid_from=item.valid_from,
+                    valid_until=item.valid_until,
+                    truth_role="historical" if item.lifecycle_state == LifecycleState.historical.value else "current",
                 )
                 for item in recall_results[:5]
                 if isinstance(item, RetrievedMemory)
@@ -640,6 +651,7 @@ class ResponseOrchestrator:
                     item.observed_at,
                     evidence_state=item.evidence_state,
                     lifecycle_state="active",
+                    truth_role="relationship_history",
                 )
                 for item in shared_history
             ),
@@ -975,184 +987,9 @@ class ResponseOrchestrator:
         user_message_plaintext: str,
         assistant_response: str,
     ) -> None:
-        """Extract and persist important facts from the exchange via DeepSeek.
-
-        Uses its own session to avoid conflicts with the caller's transaction.
-        """
-        # V7 deliberately leaves this historical direct-write helper detached.
-        # The only enabled path is the durable shadow → validation → promotion
-        # pipeline owned by ``app.memory.worker``.
+        """Retired direct-write path; durable shadow promotion is authoritative."""
+        del principal, conversation, user_message_plaintext, assistant_response
         return
-        try:
-            prompt = (
-                "Extract PERSONAL facts about the user from this message (not technical instructions). "
-                "IGNORE messages about bots, Docker, VPS, code, servers, debugging, admin tasks. "
-                "Those are task instructions, not facts about the user. "
-                "Only extract: work status, personal preferences, relationships, hobbies, feelings, life events. "
-                "For each fact, provide a JSON object with: fact (string), importance (0-1). "
-                "Only include facts with importance >= 0.5. "
-                "If the message is purely technical/administrative, return empty array []. "
-                "Return as JSON array. Example: "
-                '[{"fact":"works as a banker","importance":0.9}]'
-                f"\n\nUser message: {user_message_plaintext}"
-            )
-            envelope = await asyncio.wait_for(
-                self.provider.complete(
-                    ResponseContext(
-                        profile_version=0,
-                        route_tuple=("", "", "", "", ""),
-                        current_message=prompt,
-                        memories=(),
-                        response_language="en",
-                        personality={"name": "FactExtractor"},
-                        speech_style={},
-                    )
-                ),
-                timeout=float(self.provider_timeout_seconds),
-            )
-            if not isinstance(envelope, ProviderEnvelope):
-                return
-            try:
-                facts = json.loads(envelope.text)
-            except Exception:
-                return
-            if not isinstance(facts, list):
-                return
-            # Use a fresh session for DB writes
-            from app.db.base import SessionFactory
-            from app.db.models import MemoryControlState
-
-            async with SessionFactory() as db_session:
-                async with db_session.begin():
-                    await set_tenant_context(db_session, str(principal.tenant_id))
-                    # Read current deletion epoch for epoch guards
-                    ctrl = await db_session.scalar(
-                        select(MemoryControlState)
-                        .where(
-                            MemoryControlState.tenant_id == principal.tenant_id,
-                            MemoryControlState.relationship_id == conversation.relationship_id,
-                            MemoryControlState.user_id == principal.user_id,
-                        )
-                        .limit(1)
-                    )
-                    epoch = ctrl.deletion_epoch if ctrl is not None else 0
-                    for item in facts:
-                        if not isinstance(item, dict):
-                            continue
-                        fact_text = item.get("fact", "")
-                        importance = float(item.get("importance", 0))
-                        if not fact_text or importance < 0.5:
-                            continue
-                        # Compare decrypted values only in-process; never query canonical text.
-                        candidates = list(
-                            (
-                                await db_session.scalars(
-                                    select(Memory)
-                                    .where(
-                                        Memory.tenant_id == principal.tenant_id,
-                                        Memory.relationship_id == conversation.relationship_id,
-                                        Memory.user_id == principal.user_id,
-                                        Memory.character_id == conversation.character_id,
-                                        Memory.scope == conversation.scope,
-                                        Memory.scenario_id == conversation.scenario_id,
-                                        Memory.predicate == "user_stated",
-                                        Memory.lifecycle_state == LifecycleState.active,
-                                        Memory.deleted_at.is_(None),
-                                    )
-                                    .order_by(Memory.updated_at.desc(), Memory.id)
-                                    .limit(128)
-                                )
-                            ).all()
-                        )
-                        existing = next(
-                            (
-                                memory
-                                for memory in candidates
-                                if decrypt_text_from_storage(
-                                    memory.value_text, memory_value_aad(memory), crypto=self.crypto
-                                )
-                                == fact_text[:2000]
-                            ),
-                            None,
-                        )
-                        if existing is not None:
-                            existing.confidence = round(
-                                float(existing.confidence) + float(importance) / 2, 3
-                            )
-                            existing.importance = max(float(existing.importance), importance)
-                            existing.version = existing.version + 1
-                            existing.updated_at = datetime.now(UTC)
-                            continue
-                        # Check for contradictions
-                        settings = get_settings()
-                        search_key = settings.retrieval_query_hmac_key.get_secret_value()
-                        indexed_query = opaque_search_text(fact_text, search_key)
-                        related = await db_session.scalar(
-                            select(Memory)
-                            .where(
-                                Memory.tenant_id == principal.tenant_id,
-                                Memory.relationship_id == conversation.relationship_id,
-                                Memory.user_id == principal.user_id,
-                                Memory.predicate == "user_stated",
-                                Memory.lifecycle_state == LifecycleState("active"),
-                                Memory.deleted_at.is_(None),
-                                func.to_tsvector(
-                                    "simple", func.coalesce(Memory.search_text, "")
-                                ).op("@@")(func.plainto_tsquery("simple", indexed_query)),
-                            )
-                            .limit(1)
-                        )
-                        related_value = (
-                            decrypt_text_from_storage(
-                                related.value_text, memory_value_aad(related), crypto=self.crypto
-                            )
-                            if related is not None
-                            else None
-                        )
-                        if related is not None and related_value != fact_text[:2000]:
-                            related.lifecycle_state = LifecycleState("historical")
-                            related.supersedes_id = None
-                        memory_id = uuid4()
-                        memory = Memory(
-                            id=memory_id,
-                            tenant_id=principal.tenant_id,
-                            relationship_id=conversation.relationship_id,
-                            user_id=principal.user_id,
-                            character_id=conversation.character_id,
-                            kind="user_fact",
-                            scope=conversation.scope,
-                            scenario_id=conversation.scenario_id,
-                            predicate="user_stated",
-                            value_text=encrypt_text_for_storage(
-                                fact_text[:2000],
-                                content_aad(
-                                    entity="memories",
-                                    tenant_id=principal.tenant_id,
-                                    user_id=principal.user_id,
-                                    character_id=conversation.character_id,
-                                    scope=conversation.scope,
-                                    scenario_id=conversation.scenario_id,
-                                    record_id=memory_id,
-                                    field="value_text",
-                                ),
-                                crypto=self.crypto,
-                            ),
-                            search_text=opaque_search_text(fact_text[:2000], search_key),
-                            observed_at=datetime.now(UTC),
-                            evidence_state=EvidenceState("explicit"),
-                            lifecycle_state=LifecycleState("active"),
-                            confidence=importance,
-                            importance=importance,
-                            created_epoch=epoch,
-                        )
-                        db_session.add(memory)
-                        if related is not None and related_value != fact_text[:2000]:
-                            await db_session.flush()
-                            related.supersedes_id = memory.id
-        except Exception:
-            # The legacy helper is not wired into the response path.  Preserve
-            # its fail-closed behaviour without emitting exception/object text.
-            return
 
     async def _summarize_conversation(
         self,

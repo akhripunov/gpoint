@@ -636,16 +636,23 @@ class Memory(TenantOwned):
             ["retention_policies.tenant_id", "retention_policies.id"],
         ),
         ForeignKeyConstraint(
-            ["tenant_id", "supersedes_id", "user_id", "character_id", "scope", "scenario_key"],
+            ["tenant_id", "supersedes_id", "relationship_id", "user_id", "character_id", "scope", "scenario_key"],
             [
                 "memories.tenant_id",
                 "memories.id",
+                "memories.relationship_id",
                 "memories.user_id",
                 "memories.character_id",
                 "memories.scope",
                 "memories.scenario_key",
             ],
             name="fk_memory_supersedes_owner",
+        ),
+        CheckConstraint("supersedes_id IS NULL OR supersedes_id <> id", name="ck_memory_not_self_superseding"),
+        CheckConstraint("version >= 1", name="ck_memory_version_positive"),
+        Index(
+            "memories_one_successor_idx", "tenant_id", "relationship_id", "supersedes_id",
+            unique=True, postgresql_where=supersedes_id.is_not(None),
         ),
         CheckConstraint(
             "(scope = 'real_world' AND scenario_id IS NULL) OR (scope = 'roleplay' AND scenario_id IS NOT NULL)",
@@ -668,6 +675,7 @@ class Memory(TenantOwned):
         Index(
             "memories_one_active_slot_idx",
             "tenant_id",
+            "relationship_id",
             "user_id",
             "character_id",
             "scope",
@@ -676,8 +684,13 @@ class Memory(TenantOwned):
             unique=True,
             postgresql_nulls_not_distinct=True,
             postgresql_where=(lifecycle_state == LifecycleState.active)
-            & (kind == "semantic_fact")
+            & (kind.in_(["semantic_fact", "episodic"]))
             & slot_key.is_not(None),
+        ),
+        Index(
+            "memories_truth_resolution_idx",
+            "tenant_id", "relationship_id", "slot_key", "lifecycle_state", "valid_from", "valid_until",
+            postgresql_where=(deleted_at.is_(None)) & (evidence_state != EvidenceState.disputed),
         ),
         Index(
             "memories_slot_version_idx",

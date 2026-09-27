@@ -128,7 +128,10 @@ async def test_explicit_memory_commands_encrypt_idempotently_correct_and_forget(
         value_text="synthetic value",
     )
     async with SessionFactory() as session:
-        service = ExplicitMemoryService(session, hmac_key=hmac_key, hmac_key_version="test-v1")
+        service = ExplicitMemoryService(
+            session, hmac_key=hmac_key, hmac_key_version="test-v1",
+            slot_identity_hmac_key=base64.b64decode(settings.shadow_candidate_hmac_key.get_secret_value()),
+        )
         memory_id = await service.remember(principal, remember)
         assert await service.remember(principal, remember) == memory_id
 
@@ -141,7 +144,10 @@ async def test_explicit_memory_commands_encrypt_idempotently_correct_and_forget(
             assert decrypt_text_from_storage(memory.value_text, memory_value_aad(memory), crypto=crypto) == "synthetic value"
 
     async with SessionFactory() as session:
-        service = ExplicitMemoryService(session, hmac_key=hmac_key, hmac_key_version="test-v1")
+        service = ExplicitMemoryService(
+            session, hmac_key=hmac_key, hmac_key_version="test-v1",
+            slot_identity_hmac_key=base64.b64decode(settings.shadow_candidate_hmac_key.get_secret_value()),
+        )
         replacement_id = await service.correct(
             principal,
             Correct(
@@ -168,7 +174,10 @@ async def test_explicit_memory_commands_encrypt_idempotently_correct_and_forget(
             )
 
     async with SessionFactory() as session:
-        service = ExplicitMemoryService(session, hmac_key=hmac_key, hmac_key_version="test-v1")
+        service = ExplicitMemoryService(
+            session, hmac_key=hmac_key, hmac_key_version="test-v1",
+            slot_identity_hmac_key=base64.b64decode(settings.shadow_candidate_hmac_key.get_secret_value()),
+        )
         assert (
             await service.forget(
                 principal,

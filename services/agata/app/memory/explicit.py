@@ -12,6 +12,7 @@ from app.db.models import (
     AuditLog,
     Consent,
     Conversation,
+    EvidenceState,
     ExplicitCommandReceipt,
     LifecycleState,
     Memory,
@@ -24,6 +25,12 @@ from app.db.models import (
 )
 from app.domain.principal import PrincipalContext
 from app.domain.relationships import resolve_relationship
+from app.memory.precedence import (
+    MemoryPrecedenceService,
+    PrecedenceOutcome,
+    build_slot_identity,
+    slot_family,
+)
 from app.memory.shared_history import SharedHistoryContext, SharedHistoryService
 from app.memory.snapshots import (
     MemorySnapshotService,
@@ -99,7 +106,10 @@ class Forget:
 
 
 class ExplicitMemoryService:
-    def __init__(self, session: AsyncSession, *, hmac_key: bytes, hmac_key_version: str) -> None:
+    def __init__(
+        self, session: AsyncSession, *, hmac_key: bytes, hmac_key_version: str,
+        slot_identity_hmac_key: bytes,
+    ) -> None:
         if (
             not isinstance(hmac_key, bytes)
             or len(hmac_key) < 32
@@ -108,6 +118,11 @@ class ExplicitMemoryService:
         ):
             raise DomainError("invalid_memory_hmac_key")
         self.session, self.hmac_key_version = session, hmac_key_version
+        if not isinstance(slot_identity_hmac_key, bytes) or len(slot_identity_hmac_key) < 32:
+            raise DomainError("invalid_memory_slot_identity_key")
+        # Explicit and auto-promotion writers receive the same stable
+        # shadow-candidate HMAC root to share multi-value identities.
+        self._slot_identity_hmac_key = slot_identity_hmac_key
         self._suppression_hmac_key = derive_hmac_subkey(hmac_key, SUPPRESSION_HMAC_DOMAIN)
         self._command_hmac_key = derive_hmac_subkey(hmac_key, COMMAND_HMAC_DOMAIN)
 
@@ -170,9 +185,25 @@ class ExplicitMemoryService:
                         metadata_json={"code": "remember_again"},
                     )
                 )
-            existing = await self.session.scalar(
-                select(Memory)
-                .where(
+            slot_identity = build_slot_identity(
+                command.slot_key, command.value_text, hmac_key=self._slot_identity_hmac_key
+            )
+            precedence = MemoryPrecedenceService(self.session)
+            if slot_identity != command.slot_key:
+                await precedence.lock_slot(
+                    tenant_id=principal.tenant_id, relationship_id=control.relationship_id,
+                    user_id=principal.user_id, character_id=command.character_id,
+                    scope=command.scope, scenario_id=command.scenario_id,
+                    slot_key=command.slot_key,
+                )
+            existing = await precedence.current_for_slot(
+                tenant_id=principal.tenant_id, relationship_id=control.relationship_id,
+                user_id=principal.user_id, character_id=command.character_id,
+                scope=command.scope, scenario_id=command.scenario_id,
+                slot_key=slot_identity, at=datetime.now(UTC),
+            )
+            if existing is None and slot_identity != command.slot_key:
+                existing = await self.session.scalar(select(Memory).where(
                     Memory.tenant_id == principal.tenant_id,
                     Memory.relationship_id == control.relationship_id,
                     Memory.user_id == principal.user_id,
@@ -181,13 +212,38 @@ class ExplicitMemoryService:
                     Memory.scenario_id == command.scenario_id,
                     Memory.slot_key == command.slot_key,
                     Memory.lifecycle_state == LifecycleState.active,
+                    Memory.deleted_at.is_(None),
+                ).with_for_update())
+                if existing is not None:
+                    legacy_value = decrypt_text_from_storage(existing.value_text, memory_value_aad(existing))
+                    if legacy_value is None or legacy_value.strip().casefold() != command.value_text.strip().casefold():
+                        existing = None
+            if existing is not None and existing.lifecycle_state == LifecycleState.active:
+                existing_value = decrypt_text_from_storage(existing.value_text, memory_value_aad(existing))
+                decision = precedence.compare_candidate(
+                    existing, candidate_value=command.value_text, current_value=existing_value,
+                    candidate_evidence=EvidenceState.explicit, candidate_claimed_at=datetime.now(UTC),
                 )
-                .with_for_update()
-            )
-            if existing is not None:
-                await self._store_receipt(principal, command.command_id, existing.id, "completed")
-                return existing.id
+                if decision.outcome == PrecedenceOutcome.IDENTICAL:
+                    source_exists = await self.session.scalar(select(MemorySource.id).where(
+                        MemorySource.tenant_id == principal.tenant_id,
+                        MemorySource.memory_id == existing.id,
+                        MemorySource.message_id == source.id,
+                        MemorySource.relation == "supports",
+                    ))
+                    if source_exists is None:
+                        self.session.add(MemorySource(
+                            tenant_id=principal.tenant_id, memory_id=existing.id,
+                            message_id=source.id, user_id=principal.user_id,
+                            character_id=command.character_id, scope=command.scope,
+                            scenario_key=source.scenario_key, relation="supports",
+                        ))
+                    await self._store_receipt(principal, command.command_id, existing.id, "completed")
+                    return existing.id
+                if decision.outcome != PrecedenceOutcome.ACCEPT:
+                    raise DomainError("memory_precedence_conflict")
             memory_id = uuid4()
+            observed_at = datetime.now(UTC)
             memory = Memory(
                 id=memory_id,
                 tenant_id=principal.tenant_id,
@@ -197,7 +253,7 @@ class ExplicitMemoryService:
                 kind="semantic_fact",
                 scope=command.scope,
                 scenario_id=command.scenario_id,
-                slot_key=command.slot_key,
+                slot_key=slot_identity,
                 predicate=command.predicate,
                 value_text=encrypt_text_for_storage(
                     command.value_text,
@@ -212,14 +268,23 @@ class ExplicitMemoryService:
                         field="value_text",
                     ),
                 ),
-                observed_at=datetime.now(UTC),
+                observed_at=observed_at,
                 evidence_state="explicit",
                 lifecycle_state="active",
                 confidence=EXPLICIT_CONFIDENCE,
                 importance=0.5,
                 consent_id=consent.id,
                 created_epoch=control.deletion_epoch,
+                version=(existing.version + 1) if existing is not None else 1,
             )
+            if existing is not None:
+                await SharedHistoryService(self.session).retire_memory_in_transaction(
+                    SharedHistoryContext(
+                        principal.tenant_id, principal.user_id, command.character_id,
+                        command.scope, command.scenario_id, control.relationship_id,
+                    ), existing.id,
+                )
+                await precedence.supersede(existing, memory, transition_at=observed_at)
             self.session.add(memory)
             self.session.add(
                 MemorySource(
@@ -273,6 +338,15 @@ class ExplicitMemoryService:
                 .with_for_update()
             )
             if old is None:
+                raise DomainError("memory_target_unavailable")
+            precedence = MemoryPrecedenceService(self.session)
+            await precedence.lock_slot(
+                tenant_id=old.tenant_id, relationship_id=old.relationship_id,
+                user_id=old.user_id, character_id=old.character_id, scope=old.scope,
+                scenario_id=old.scenario_id, slot_key=old.slot_key or f"memory:{old.id}",
+            )
+            await self.session.refresh(old)
+            if old.lifecycle_state != LifecycleState.active or old.deleted_at is not None:
                 raise DomainError("memory_target_unavailable")
             source = await self.session.scalar(
                 select(Message).where(
@@ -341,6 +415,7 @@ class ExplicitMemoryService:
                 version=old.version + 1,
                 created_epoch=control.deletion_epoch,
             )
+            await precedence.supersede(old, replacement, transition_at=now)
             self.session.add(replacement)
             self.session.add(
                 MemorySource(
@@ -452,7 +527,7 @@ class ExplicitMemoryService:
                     scope=memory.scope,
                     scenario_id=memory.scenario_id,
                     rule_type="slot_value",
-                    slot_hmac=self._digest(memory.slot_key or ""),
+                    slot_hmac=self._digest(slot_family(memory.slot_key or "")),
                     value_hmac=self._digest(old_value),
                     key_version=self.hmac_key_version,
                     reason="explicit_forget",

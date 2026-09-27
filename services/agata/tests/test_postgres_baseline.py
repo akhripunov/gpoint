@@ -203,7 +203,7 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
         assert legacy_revision == "agata0002"
 
     subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "agata0004"],
+        [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "agata0005"],
         cwd=ROOT,
         env=env,
         check=True,
@@ -222,7 +222,7 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
         assert after == before
         assert "alembic_version" in agata_tables
         assert (
-            connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0004"
+            connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0005"
         )
         assert connection.scalar(text("SELECT count(*) FROM agata.tenants")) == 1
         assert (
