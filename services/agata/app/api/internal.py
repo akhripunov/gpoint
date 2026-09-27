@@ -13,8 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, func, select, text, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
 from app.compliance.receipt import current_disclosure
+from app.config import get_settings
 from app.db.base import get_session, set_tenant_context
 from app.db.models import (
     AgeAssurance,
