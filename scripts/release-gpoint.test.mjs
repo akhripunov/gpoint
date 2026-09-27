@@ -5,11 +5,25 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, evaluateSafetyGates, releaseStateAfterError, shouldFinalizeRecovery, validateCandidate } from './release-gpoint.mjs';
-import { classifyPostSwitchState, detectorNeedsRebuild, detectorSourceHash, exactCheckout, migrationNeedsDeploy, runRemoteCommand, shouldReuseCandidateImage, upload, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
+import { classifyPostSwitchState, detectorNeedsRebuild, detectorSourceHash, exactCheckout, migrationNeedsDeploy, resolveRunnerPath, runRemoteCommand, shouldReuseCandidateImage, upload, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
 
 const sha = '4d99e0da856d2ffe174c54d7ae7f2f971ab462f5';
 const artifacts = { api: { sourceSha: sha }, worker: { sourceSha: sha }, bot: { sourceSha: sha }, miniapp: { sourceSha: sha } };
 const config = { api: sha, worker: sha, bot: sha, miniapp: sha };
+
+test('durable runner config is discovered in a fresh environment and explicit env wins', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-runner-config-test-'));
+  const configFile = path.join(root, 'release-tools.env');
+  fs.writeFileSync(configFile, 'GPOINT_REMOTE_RUNNER=$HOME/.local/bin/gpoint-vps-runner\nGPOINT_SCP_RUNNER=~/bin/gpoint-vps-scp-runner\n');
+  try {
+    assert.equal(resolveRunnerPath('GPOINT_REMOTE_RUNNER', { env: {}, configFile, home: root }), path.join(root, '.local/bin/gpoint-vps-runner'));
+    assert.equal(resolveRunnerPath('GPOINT_SCP_RUNNER', { env: {}, configFile, home: root }), path.join(root, 'bin/gpoint-vps-scp-runner'));
+    assert.equal(resolveRunnerPath('GPOINT_REMOTE_RUNNER', { env: { GPOINT_REMOTE_RUNNER: '/explicit/runner' }, configFile, home: root }), '/explicit/runner');
+    assert.equal(resolveRunnerPath('UNKNOWN_RUNNER', { env: {}, configFile, home: root }), null);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('exact candidate gate blocks a nonexistent or malformed remote candidate', () => {
   assert.ok(validateCandidate({ candidateSha: 'not-a-sha', remoteSha: null }).length);

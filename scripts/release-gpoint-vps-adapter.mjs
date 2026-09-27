@@ -7,6 +7,34 @@ import { execFileSync, spawnSync } from 'node:child_process';
 const ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const REPO = 'git@github.com:akhripunov/gpoint.git';
 
+export function resolveRunnerPath(name, {
+  env = process.env,
+  configFile = path.join(os.homedir(), '.config/gpoint/release-tools.env'),
+  home = os.homedir(),
+} = {}) {
+  const explicit = env[name]?.trim();
+  if (explicit) return explicit;
+
+  let config;
+  try {
+    config = fs.readFileSync(configFile, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+
+  const prefix = `${name}=`;
+  const line = config.split(/\r?\n/).find(entry => entry.startsWith(prefix));
+  if (!line) return null;
+  let value = line.slice(prefix.length).trim();
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    value = value.slice(1, -1);
+  }
+  if (value === '$HOME' || value.startsWith('$HOME/')) value = path.join(home, value.slice(6));
+  else if (value === '~' || value.startsWith('~/')) value = path.join(home, value.slice(2));
+  return path.isAbsolute(value) ? path.resolve(value) : null;
+}
+
 export function validateRuntimeIdentity(candidate, runtime) {
   const failures = [];
   if (runtime?.buildSha !== candidate) failures.push('runtime build SHA mismatch');
@@ -70,7 +98,7 @@ function applyRemoteTimingMarkers(timings, output) {
 }
 
 function run(command, env = {}) {
-  const runner = process.env.GPOINT_REMOTE_RUNNER;
+  const runner = resolveRunnerPath('GPOINT_REMOTE_RUNNER');
   if (!runner) throw new Error('GPOINT_REMOTE_RUNNER is required for apply mode; no implicit SSH credentials are used');
   const captureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-remote-run-'));
   const stdoutFile = path.join(captureDir, 'stdout');
@@ -102,7 +130,7 @@ function run(command, env = {}) {
 }
 
 export function upload(localFile, remoteFile) {
-  const runner = process.env.GPOINT_SCP_RUNNER;
+  const runner = resolveRunnerPath('GPOINT_SCP_RUNNER');
   if (!runner) throw new Error('GPOINT_SCP_RUNNER is required for apply mode; no implicit SSH credentials are used');
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
