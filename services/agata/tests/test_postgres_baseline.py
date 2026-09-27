@@ -11,7 +11,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
-from app.messages.crypto import AeadCrypto
+from app.messages.crypto import AeadCrypto, CiphertextEnvelope
 from app.messages.protected_content import (
     content_aad,
     decrypt_json_from_storage,
@@ -21,6 +21,7 @@ from app.messages.protected_content import (
     segment_keyphrases_aad,
     segment_summary_aad,
 )
+from app.messages.service import MessageIngestionService
 
 ROOT = Path(__file__).parents[1]
 DATABASE_URL = os.getenv("AGATA_TEST_DATABASE_URL")
@@ -125,10 +126,41 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
         """))
 
     tenant_id = env["AGATA_TENANT_ID"]
-    user_id, character_id, relationship_id, conversation_id, memory_id, segment_id, view_id = (
-        uuid4() for _ in range(7)
-    )
+    (
+        user_id,
+        character_id,
+        relationship_id,
+        conversation_id,
+        memory_id,
+        segment_id,
+        view_id,
+        profile_id,
+        user_message_id,
+        assistant_message_id,
+        memory_source_id,
+        retrieval_run_id,
+        retrieval_candidate_id,
+        route_policy_id,
+        response_run_id,
+        response_ref_id,
+    ) = (uuid4() for _ in range(16))
     sentinel = "legacy-private-synthetic-payload"
+    crypto = AeadCrypto(
+        encoded_key=os.environ["AGATA_MESSAGE_AEAD_KEY"],
+        key_version=os.getenv("AGATA_MESSAGE_AEAD_KEY_VERSION", "v1"),
+    )
+    user_envelope = crypto.encrypt(
+        "legacy-user-message",
+        MessageIngestionService._aad_for(
+            UUID(tenant_id), user_id, conversation_id, user_message_id
+        ),
+    )
+    assistant_envelope = crypto.encrypt(
+        "legacy-assistant-message",
+        MessageIngestionService._aad_for(
+            UUID(tenant_id), user_id, conversation_id, assistant_message_id
+        ),
+    )
     with engine.begin() as connection:
         connection.execute(
             text("SELECT set_config('app.tenant_id', :tenant, true)"), {"tenant": tenant_id}
@@ -149,6 +181,14 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
         )
         connection.execute(
             text(
+                "INSERT INTO agata.character_profile_versions("
+                "id,tenant_id,character_id,version,personality,speech_style,backstory,boundaries,effective_at) "
+                "VALUES (:id,:tenant,:character,1,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,now())"
+            ),
+            {"id": profile_id, "tenant": tenant_id, "character": character_id},
+        )
+        connection.execute(
+            text(
                 "INSERT INTO agata.conversations(id,tenant_id,user_id,character_id,scope,scenario_id,started_at) "
                 "VALUES (:id,:tenant,:user,:character,CAST('real_world' AS public.scope_enum),NULL,now())"
             ),
@@ -159,6 +199,31 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
                 "character": character_id,
             },
         )
+        for message_id, role, envelope in (
+            (user_message_id, "user", user_envelope),
+            (assistant_message_id, "assistant", assistant_envelope),
+        ):
+            connection.execute(
+                text(
+                    "INSERT INTO agata.messages("
+                    "id,tenant_id,conversation_id,user_id,character_id,scope,scenario_id,"
+                    "idempotency_key,role,content_ciphertext,content_nonce,content_key_version,occurred_at) "
+                    "VALUES (:id,:tenant,:conversation,:user,:character,"
+                    "CAST('real_world' AS public.scope_enum),NULL,:key,:role,:ciphertext,:nonce,:key_version,now())"
+                ),
+                {
+                    "id": message_id,
+                    "tenant": tenant_id,
+                    "conversation": conversation_id,
+                    "user": user_id,
+                    "character": character_id,
+                    "key": f"migration-{message_id}",
+                    "role": role,
+                    "ciphertext": envelope.ciphertext,
+                    "nonce": envelope.nonce,
+                    "key_version": envelope.key_version,
+                },
+            )
         connection.execute(
             text(
                 "INSERT INTO agata.memories(id,tenant_id,user_id,character_id,kind,scope,scenario_id,"
@@ -175,6 +240,98 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
                 "value_text": sentinel,
                 "value_json": '{"note":"legacy-private-synthetic-payload"}',
                 "search_text": sentinel,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO agata.memory_sources("
+                "id,tenant_id,memory_id,message_id,user_id,character_id,scope,scenario_key,relation) "
+                "VALUES (:id,:tenant,:memory,:message,:user,:character,"
+                "CAST('real_world' AS public.scope_enum),:scenario_key,'supports')"
+            ),
+            {
+                "id": memory_source_id,
+                "tenant": tenant_id,
+                "memory": memory_id,
+                "message": user_message_id,
+                "user": user_id,
+                "character": character_id,
+                "scenario_key": UUID("00000000-0000-0000-0000-000000000000"),
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO agata.retrieval_runs("
+                "id,tenant_id,user_id,character_id,scope,scenario_id,query_fingerprint,"
+                "retrieval_policy_version,index_version,latency_bucket,reason_code) "
+                "VALUES (:id,:tenant,:user,:character,CAST('real_world' AS public.scope_enum),NULL,"
+                "'migration-query','v1','v1','lt_10ms','ok')"
+            ),
+            {"id": retrieval_run_id, "tenant": tenant_id, "user": user_id, "character": character_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO agata.retrieval_candidates("
+                "id,tenant_id,run_id,memory_id,memory_version,user_id,character_id,scope,scenario_key,"
+                "exact_rank,fused_score,selected,reason_code) "
+                "VALUES (:id,:tenant,:run,:memory,1,:user,:character,"
+                "CAST('real_world' AS public.scope_enum),:scenario_key,1,0.9,true,'rrf_selected')"
+            ),
+            {
+                "id": retrieval_candidate_id,
+                "tenant": tenant_id,
+                "run": retrieval_run_id,
+                "memory": memory_id,
+                "user": user_id,
+                "character": character_id,
+                "scenario_key": UUID("00000000-0000-0000-0000-000000000000"),
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO agata.response_route_policies("
+                "id,tenant_id,character_id,profile_version,provider,model,prompt_version,schema_version,policy_version) "
+                "VALUES (:id,:tenant,:character,1,'local_fake','migration-test','v1','v1','v1')"
+            ),
+            {"id": route_policy_id, "tenant": tenant_id, "character": character_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO agata.response_runs("
+                "id,tenant_id,user_id,character_id,conversation_id,user_message_id,assistant_message_id,"
+                "scope,scenario_id,route_policy_id,retrieval_run_id,request_fingerprint,status,reason_code,language_code) "
+                "VALUES (:id,:tenant,:user,:character,:conversation,:user_message,:assistant_message,"
+                "CAST('real_world' AS public.scope_enum),NULL,:route,:retrieval,'migration-request','completed','ok','en')"
+            ),
+            {
+                "id": response_run_id,
+                "tenant": tenant_id,
+                "user": user_id,
+                "character": character_id,
+                "conversation": conversation_id,
+                "user_message": user_message_id,
+                "assistant_message": assistant_message_id,
+                "route": route_policy_id,
+                "retrieval": retrieval_run_id,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO agata.response_memory_refs("
+                "id,tenant_id,assistant_message_id,memory_id,memory_version,user_id,character_id,scope,"
+                "scenario_key,usage_type,response_run_id) "
+                "VALUES (:id,:tenant,:assistant,:memory,1,:user,:character,"
+                "CAST('real_world' AS public.scope_enum),:scenario_key,'supplied',:run)"
+            ),
+            {
+                "id": response_ref_id,
+                "tenant": tenant_id,
+                "assistant": assistant_message_id,
+                "memory": memory_id,
+                "user": user_id,
+                "character": character_id,
+                "scenario_key": UUID("00000000-0000-0000-0000-000000000000"),
+                "run": response_run_id,
             },
         )
         connection.execute(
@@ -315,10 +472,44 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
         assert connection.scalar(text("SELECT to_regclass('agata.derived_memory_views')")) is None
         assert migrated_view.snapshot_type == "conversation_summary"
         assert migrated_view.source_segment_ids == [str(segment_id)]
-        crypto = AeadCrypto(
-            encoded_key=os.environ["AGATA_MESSAGE_AEAD_KEY"],
-            key_version=os.getenv("AGATA_MESSAGE_AEAD_KEY_VERSION", "v1"),
-        )
+        migrated_profile = connection.execute(
+            text("SELECT id,personality FROM agata.character_profile_versions WHERE id=:id"),
+            {"id": profile_id},
+        ).one()
+        assert migrated_profile.personality == {}
+        assert migrated_profile.id == profile_id
+        migrated_messages = connection.execute(
+            text("SELECT id,role,content_ciphertext,content_nonce,content_key_version FROM agata.messages WHERE id IN (:user_id,:assistant_id) ORDER BY role"),
+            {"user_id": user_message_id, "assistant_id": assistant_message_id},
+        ).all()
+        assert len(migrated_messages) == 2
+        plaintext_by_role = {
+            row.role: crypto.decrypt(
+                CiphertextEnvelope(bytes(row.content_ciphertext), bytes(row.content_nonce), row.content_key_version),
+                MessageIngestionService._aad_for(UUID(tenant_id), user_id, conversation_id, row.id),
+            )
+            for row in migrated_messages
+        }
+        assert plaintext_by_role == {
+            "user": "legacy-user-message",
+            "assistant": "legacy-assistant-message",
+        }
+        assert connection.scalar(
+            text("SELECT count(*) FROM agata.memory_sources WHERE id=:id AND memory_id=:memory AND message_id=:message"),
+            {"id": memory_source_id, "memory": memory_id, "message": user_message_id},
+        ) == 1
+        assert connection.scalar(
+            text("SELECT count(*) FROM agata.retrieval_candidates WHERE id=:id AND relationship_id=:relationship AND selected AND memory_version=1"),
+            {"id": retrieval_candidate_id, "relationship": backfilled_relationship_id},
+        ) == 1
+        assert connection.scalar(
+            text("SELECT count(*) FROM agata.response_runs WHERE id=:id AND relationship_id=:relationship"),
+            {"id": response_run_id, "relationship": backfilled_relationship_id},
+        ) == 1
+        assert connection.scalar(
+            text("SELECT count(*) FROM agata.response_memory_refs WHERE id=:id AND relationship_id=:relationship AND memory_id=:memory AND memory_version=1"),
+            {"id": response_ref_id, "relationship": backfilled_relationship_id, "memory": memory_id},
+        ) == 1
         memory_owner = SimpleNamespace(
             tenant_id=UUID(tenant_id),
             user_id=user_id,
