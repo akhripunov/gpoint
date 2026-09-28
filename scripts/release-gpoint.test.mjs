@@ -89,6 +89,13 @@ test('all disposable Prisma/AGATA database runners use shared_internal', () => {
   assert.doesNotMatch(adapter, /--network gpoint_app --network-alias gpoint-(?:preflight|migration|agata-preflight|agata-migration|agata-verify)/);
 });
 
+test('AGATA memory worker can resolve the shared PostgreSQL service', () => {
+  const compose = fs.readFileSync(new URL('../infra/production/docker-compose.yml', import.meta.url), 'utf8');
+  const worker = compose.match(/  agata-memory-worker:\n([\s\S]*?)(?=\n  [\w-]+:|\nnetworks:)/)?.[1];
+  assert.ok(worker);
+  assert.match(worker, /networks:\n\s+- gpoint_app\n\s+- shared_internal/);
+});
+
 test('runtime deploy plan stays an array until it is split at the runtime switch', () => {
   const adapter = fs.readFileSync(new URL('./release-gpoint-vps-adapter.mjs', import.meta.url), 'utf8');
   const start = adapter.indexOf('const deploy = [');

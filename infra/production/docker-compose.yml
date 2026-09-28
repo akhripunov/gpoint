@@ -63,6 +63,7 @@ services:
       retries: 3
     networks:
       - gpoint_app
+      - shared_internal
 
   worker:
     image: gpoint-runtime:${RELEASE_SHA}
