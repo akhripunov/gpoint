@@ -89,6 +89,15 @@ test('all disposable Prisma/AGATA database runners use shared_internal', () => {
   assert.doesNotMatch(adapter, /--network gpoint_app --network-alias gpoint-(?:preflight|migration|agata-preflight|agata-migration|agata-verify)/);
 });
 
+test('runtime deploy plan stays an array until it is split at the runtime switch', () => {
+  const adapter = fs.readFileSync(new URL('./release-gpoint-vps-adapter.mjs', import.meta.url), 'utf8');
+  const start = adapter.indexOf('const deploy = [');
+  const split = adapter.indexOf('const switchIndex = deploy.findIndex', start);
+  assert.ok(start >= 0 && split > start);
+  assert.match(adapter.slice(start, split), /\]\s*;\s*$/);
+  assert.doesNotMatch(adapter.slice(start, split), /\]\.join\(['"];/);
+});
+
 test('release source archive excludes AppleDouble and Python cache artifacts', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-source-archive-'));
   const checkout = path.join(root, 'checkout');
