@@ -96,13 +96,21 @@ test('AGATA memory worker can resolve the shared PostgreSQL service', () => {
   assert.match(worker, /networks:\n\s+- gpoint_app\n\s+- shared_internal/);
 });
 
-test('runtime deploy plan stays an array until it is split at the runtime switch', () => {
+test('production config and Mini App writes begin only after the runtime switch boundary', () => {
   const adapter = fs.readFileSync(new URL('./release-gpoint-vps-adapter.mjs', import.meta.url), 'utf8');
-  const start = adapter.indexOf('const deploy = [');
-  const split = adapter.indexOf('const switchIndex = deploy.findIndex', start);
-  assert.ok(start >= 0 && split > start);
-  assert.match(adapter.slice(start, split), /\]\s*;\s*$/);
-  assert.doesNotMatch(adapter.slice(start, split), /\]\.join\(['"];/);
+  const preparationStart = adapter.indexOf('const preparation = [');
+  const deployStart = adapter.indexOf('const deploy = [', preparationStart);
+  const prepareRun = adapter.indexOf("stage(timings, 'PRE_SWITCH_PREPARATION'", deployStart);
+  const switchMarker = adapter.indexOf('switchStartMs=$(date +%s%3N)', deployStart);
+  assert.ok(preparationStart >= 0 && deployStart > preparationStart && prepareRun > deployStart && switchMarker > deployStart);
+  const preparation = adapter.slice(preparationStart, deployStart);
+  const deploy = adapter.slice(deployStart, prepareRun);
+  assert.doesNotMatch(preparation, /\/etc\/caddy\/Caddyfile|\/opt\/gpoint\/compose\/docker-compose\.yml|\/opt\/gpoint\/app\/miniapp/);
+  assert.doesNotMatch(preparation, /sed -i[^\n]*\/opt\/gpoint\/env\/production\.env|>> \/opt\/gpoint\/env\/production\.env/);
+  assert.match(deploy, /switchStartMs=\$\(date \+%s%3N\); set -e;[\s\S]*\/opt\/gpoint\/compose\/docker-compose\.yml/);
+  assert.match(deploy, /\/opt\/gpoint\/app\/miniapp\.rollback-/);
+  assert.match(adapter, /run\(preparation\.join\('; '\)\)/);
+  assert.match(adapter, /run\(deploy\.join\('; '\)\)/);
 });
 
 test('release source archive excludes AppleDouble and Python cache artifacts', () => {
