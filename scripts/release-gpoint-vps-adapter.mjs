@@ -7,8 +7,20 @@ import { execFileSync, spawnSync } from 'node:child_process';
 const ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const REPO = 'git@github.com:akhripunov/gpoint.git';
 export const GPOINT_DATABASE_NETWORK = 'shared_internal';
+export const SOURCE_ARCHIVE_EXCLUDES = [
+  '--exclude=._*', '--exclude=*/._*',
+  '--exclude=.DS_Store', '--exclude=*/.DS_Store',
+  '--exclude=__pycache__', '--exclude=*/__pycache__',
+  '--exclude=*.pyc', '--exclude=*/*.pyc',
+];
 export function databaseNetworkArgs(alias) {
   return `--network ${GPOINT_DATABASE_NETWORK}${alias ? ` --network-alias ${alias}` : ''}`;
+}
+
+export function createSourceArchive(checkout, archive, { exec = execFileSync, env = process.env } = {}) {
+  exec('tar', ['-czf', archive, ...SOURCE_ARCHIVE_EXCLUDES, '-C', path.dirname(checkout), path.basename(checkout)], {
+    env: { ...env, COPYFILE_DISABLE: '1' },
+  });
 }
 
 export function resolveRunnerPath(name, {
@@ -229,7 +241,7 @@ export function applyCandidate(sha, { onMigrationStart = () => {}, onAgataStart 
   const archive = `${checkout}.tar.gz`;
   const agataStatusCode = `import os, psycopg\nfrom sqlalchemy.engine import make_url\nurl = make_url(os.environ['AGATA_DATABASE_URL'])\nquery = {key: value for key, value in url.query.items() if key in {'sslmode','sslrootcert','sslcert','sslkey','connect_timeout','application_name'}}\nurl = url.set(drivername='postgresql', query=query)\nwith psycopg.connect(url.render_as_string(hide_password=False)) as conn:\n    row = conn.execute(\"SELECT to_regclass('agata.alembic_version')\").fetchone()\n    if row[0] is None:\n        print('AGATA_SCHEMA_ABSENT')\n    else:\n        heads = conn.execute('SELECT version_num FROM agata.alembic_version').fetchall()\n        if len(heads) != 1:\n            raise RuntimeError('AGATA migration head is not singular')\n        print('AGATA_HEAD=' + heads[0][0])\n`;
   const agataStatusB64 = Buffer.from(agataStatusCode).toString('base64');
-  execFileSync('tar', ['-czf', archive, '-C', path.dirname(checkout), path.basename(checkout)]);
+  createSourceArchive(checkout, archive);
   try {
     stage(timings, 'PRODUCTION_PREFLIGHT', () => run(`set -e; command -v docker >/dev/null; docker version --format 'DOCKER_VERSION={{.Server.Version}}'; docker compose version; docker buildx version; docker buildx inspect --bootstrap >/dev/null; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n "$freeKb"; test "$freeKb" -ge 5242880; test -r /opt/gpoint/env/production.env; currentSha=$(sed -n 's/^RELEASE_SHA=//p' /opt/gpoint/env/production.env | head -1); printf '%s\\n' "$currentSha" | grep -Eq '^[0-9a-f]{40}$'; currentImage=$(docker inspect compose-api-1 --format '{{.Config.Image}}'); dbStatus=$(docker run --rm ${databaseNetworkArgs('gpoint-preflight')} --env-file /opt/gpoint/env/production.env "$currentImage" pnpm --filter @gpoint/db exec prisma migrate status 2>&1); test -n "$dbStatus"; printf '%s\\n' "$dbStatus" | tail -5; for name in AGATA_ENABLED AGATA_LLM_PROVIDER AGATA_DATABASE_URL AGATA_TENANT_ID AGATA_INTERNAL_API_TOKEN AGATA_MESSAGE_AEAD_KEY AGATA_REQUEST_FINGERPRINT_HMAC_KEY AGATA_RETRIEVAL_QUERY_HMAC_KEY AGATA_RESPONSE_FINGERPRINT_HMAC_KEY AGATA_SHADOW_CANDIDATE_HMAC_KEY; do grep -Eq "^\${name}=.+\\$" /opt/gpoint/env/production.env || { echo AGATA_CONFIG_MISSING=$name; exit 32; }; done; grep -qx 'AGATA_ENABLED=true' /opt/gpoint/env/production.env; grep -qx 'AGATA_LLM_PROVIDER=disabled' /opt/gpoint/env/production.env; printf 'GPOINT_PREFLIGHT_OK\\n'`));
     stage(timings, 'SOURCE_PREPARE', () => {

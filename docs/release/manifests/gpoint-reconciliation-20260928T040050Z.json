@@ -1,0 +1,41 @@
+{
+  "reconciliationId": "gpoint-reconciliation-20260928T040050Z",
+  "eventType": "FAILED_RELEASE_PRE_SWITCH_RECONCILIATION",
+  "failedReleaseId": "gpoint-release-20260928T034755057Z",
+  "failedManifest": "docs/release/manifests/gpoint-release-20260928T034755057Z.json",
+  "candidateSha": "6889465491b9a333f3c41ccb57263351abdff473",
+  "recordedProductionSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+  "liveProduction": {
+    "releaseEnvSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+    "apiSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+    "apiRunning": true,
+    "apiHealth": "healthy",
+    "apiRestarts": 0,
+    "workerSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+    "workerRunning": true,
+    "workerRestarts": 0,
+    "botSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+    "botRunning": true,
+    "botRestarts": 0,
+    "miniappSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+    "diskFreeKb": 7710964
+  },
+  "livePrismaHead": "20260922090000_telegram_channel_avatar",
+  "liveAgataHead": "ABSENT",
+  "agataEnabled": true,
+  "agataProvider": "disabled",
+  "agataInternalConfigPresent": true,
+  "runtimeSwitchOccurred": false,
+  "databaseApplyOccurred": false,
+  "protectedBackup": {
+    "created": true,
+    "validatedWithPgRestoreList": true
+  },
+  "failureClassification": {
+    "original": "RECOVERY_REQUIRED",
+    "reconciled": "FAILED_PRE_SWITCH",
+    "stage": "PRE_SWITCH_DB_OR_AGATA"
+  },
+  "rootCause": "The candidate AGATA image contained AppleDouble metadata files named ._*.py in /srv/agata/migrations. Alembic attempted to import them and failed with SyntaxError: source code string cannot contain null bytes before applying the initial migration. The files were introduced by macOS source packaging and were not present as Python source in the Git tree.",
+  "reconciledAt": "2026-09-28T04:00:50Z"
+}

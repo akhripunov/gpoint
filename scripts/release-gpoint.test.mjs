@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, evaluateSafetyGates, releaseStateAfterError, shouldFinalizeRecovery, validateCandidate, verifiedRuntimeState } from './release-gpoint.mjs';
-import { agataInternalConfigProvisionCommand, classifyPostSwitchState, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, resolveRunnerPath, runRemoteCommand, shouldReuseCandidateImage, upload, validateAgataProviderConfig, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
+import { agataInternalConfigProvisionCommand, classifyPostSwitchState, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, resolveRunnerPath, runRemoteCommand, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
 
 const sha = '4d99e0da856d2ffe174c54d7ae7f2f971ab462f5';
 const artifacts = { api: { sourceSha: sha }, worker: { sourceSha: sha }, bot: { sourceSha: sha }, miniapp: { sourceSha: sha } };
@@ -87,6 +87,27 @@ test('all disposable Prisma/AGATA database runners use shared_internal', () => {
   assert.equal(databaseNetworkArgs('gpoint-preflight'), '--network shared_internal --network-alias gpoint-preflight');
   assert.ok((adapter.match(/\$\{databaseNetworkArgs\(/g) ?? []).length >= 8);
   assert.doesNotMatch(adapter, /--network gpoint_app --network-alias gpoint-(?:preflight|migration|agata-preflight|agata-migration|agata-verify)/);
+});
+
+test('release source archive excludes AppleDouble and Python cache artifacts', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-source-archive-'));
+  const checkout = path.join(root, 'checkout');
+  const archive = path.join(root, 'source.tar.gz');
+  fs.mkdirSync(path.join(checkout, 'services/agata/migrations/__pycache__'), { recursive: true });
+  fs.writeFileSync(path.join(checkout, 'services/agata/migrations/env.py'), 'editable source');
+  fs.writeFileSync(path.join(checkout, 'services/agata/migrations/._env.py'), 'AppleDouble metadata');
+  fs.writeFileSync(path.join(checkout, 'services/agata/migrations/.DS_Store'), 'Finder metadata');
+  fs.writeFileSync(path.join(checkout, 'services/agata/migrations/__pycache__/env.cpython-312.pyc'), 'bytecode');
+  try {
+    createSourceArchive(checkout, archive);
+    const entries = execFileSync('tar', ['-tzf', archive], { encoding: 'utf8' });
+    assert.match(entries, /checkout\/services\/agata\/migrations\/env\.py/);
+    assert.doesNotMatch(entries, /\._env\.py|\.DS_Store|__pycache__|\.pyc/);
+    assert.ok(SOURCE_ARCHIVE_EXCLUDES.includes('--exclude=*/._*'));
+    assert.ok(SOURCE_ARCHIVE_EXCLUDES.includes('--exclude=*/__pycache__'));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('production runtime image includes and builds AGATA client before API', () => {

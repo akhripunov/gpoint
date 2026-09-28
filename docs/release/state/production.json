@@ -3,7 +3,7 @@
   "currentProductionDbHead": "20260922090000_telegram_channel_avatar",
   "currentProductionRef": "gpoint-production-20260924T175925609Z",
   "previousProductionSha": "4f09df5c33ba58b1cf8048280e58474853f0b576",
-  "lastReleaseId": "gpoint-release-20260928T034030185Z",
+  "lastReleaseId": "gpoint-release-20260928T034755057Z",
   "lastReleaseStatus": "FAILED_PRE_SWITCH",
   "lastReleaseCompletedAt": "2026-09-24T18:11:43.950Z",
   "releaseOrigin": "durable-production-release",
@@ -71,6 +71,20 @@
     "resolvedManifest": "docs/release/manifests/gpoint-release-20260924T051236278Z.json",
     "basis": "Read-only VPS runtime identity and DB status, live HTTPS root/model/API checks, published share domain, and exact GitHub production tag were verified after the local TLS timeout."
   },
-  "lastReleaseFailureManifest": "docs/release/manifests/gpoint-release-20260928T034030185Z.json",
-  "lastReleaseFailureAt": "2026-09-28T03:41:40.362Z"
+  "lastReleaseFailureManifest": "docs/release/manifests/gpoint-release-20260928T034755057Z.json",
+  "lastReleaseFailureAt": "2026-09-28T03:52:04.460Z",
+  "latestReleaseFailureReconciliation": {
+    "reconciledAt": "2026-09-28T04:00:50Z",
+    "failedReleaseId": "gpoint-release-20260928T034755057Z",
+    "failedManifest": "docs/release/manifests/gpoint-release-20260928T034755057Z.json",
+    "candidateSha": "6889465491b9a333f3c41ccb57263351abdff473",
+    "correctedFailureStage": "PRE_SWITCH_DB_OR_AGATA",
+    "liveProductionSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+    "livePrismaHead": "20260922090000_telegram_channel_avatar",
+    "liveAgataHead": "ABSENT",
+    "runtimeSwitchOccurred": false,
+    "databaseApplyOccurred": false,
+    "protectedBackupCreated": true,
+    "basis": "Read-only production reconciliation confirmed release env and API/Worker/Bot/Mini App SHA remain on the prior runtime; Prisma head is unchanged and AGATA schema is absent. The pre-migration backup was created and passed pg_restore --list. Alembic inspection of the candidate image identified AppleDouble metadata files (._*.py) in the migration source causing SyntaxError before any schema was created or migration applied."
+  }
 }
