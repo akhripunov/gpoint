@@ -61,6 +61,7 @@ from app.responses.pipeline import (
 from app.responses.provider_factory import build_response_provider
 
 _HEARTBEAT_PATH = Path("/tmp/agata-worker-heartbeat")
+_EXPECTED_ALEMBIC_HEAD = "agata0008"
 
 
 @dataclass(frozen=True, slots=True)
@@ -783,7 +784,7 @@ async def _healthcheck() -> int:
                     text("SELECT version_num FROM agata.alembic_version")
                 )
                 await session.scalar(text("SELECT 1 FROM agata.outbox_jobs LIMIT 1"))
-        return 0 if revision == "agata0007" else 1
+        return 0 if revision == _EXPECTED_ALEMBIC_HEAD else 1
     except Exception:
         return 1
 

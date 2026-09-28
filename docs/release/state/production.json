@@ -3,8 +3,8 @@
   "currentProductionDbHead": "20260922090000_telegram_channel_avatar",
   "currentProductionRef": "gpoint-production-20260928T071235134Z",
   "previousProductionSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
-  "lastReleaseId": "gpoint-recovery-20260928T071235134Z",
-  "lastReleaseStatus": "COMPLETE",
+  "lastReleaseId": "gpoint-release-20260928T082516997Z",
+  "lastReleaseStatus": "RECOVERY_REQUIRED",
   "lastReleaseCompletedAt": "2026-09-28T07:12:53.695Z",
   "releaseOrigin": "durable-production-release",
   "artifactIdentities": {
@@ -25,18 +25,18 @@
       "servedBuildSha": "972f5e28f36d061d15829cebd1eb3442e6bf32b6"
     },
     "agataApi": {
-      "sourceSha": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
-      "runtimeImageId": "sha256:fa3bd464a748dbd5b5c1f15ef36133df2e974ce1bfea0cb4d0d4b97ea2ff836e"
+      "sourceSha": "6478e79bcc1fa0ae5f9eed4b9ef731966df05317",
+      "runtimeImageId": "sha256:e6b3021a97ffbacf591b7d99e0dfac74043b0cace85e10e7738fd51a29b37d73"
     },
     "agataWorker": {
-      "sourceSha": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
-      "runtimeImageId": "sha256:fa3bd464a748dbd5b5c1f15ef36133df2e974ce1bfea0cb4d0d4b97ea2ff836e"
+      "sourceSha": "6478e79bcc1fa0ae5f9eed4b9ef731966df05317",
+      "runtimeImageId": "sha256:e6b3021a97ffbacf591b7d99e0dfac74043b0cace85e10e7738fd51a29b37d73"
     }
   },
   "activeRuntimeSha": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
   "activeRuntimeDbHead": "20260922090000_telegram_channel_avatar",
   "releaseStatus": "COMPLETE",
-  "recoveryRequired": false,
+  "recoveryRequired": true,
   "lastReleaseFailureReconciliation": {
     "reconciledAt": "2026-09-28T03:34:44Z",
     "failedReleaseId": "gpoint-release-20260928T032622935Z",
@@ -59,8 +59,24 @@
     "resolvedManifest": "docs/release/manifests/gpoint-release-20260924T051236278Z.json",
     "basis": "Read-only VPS runtime identity and DB status, live HTTPS root/model/API checks, published share domain, and exact GitHub production tag were verified after the local TLS timeout."
   },
-  "lastReleaseFailureManifest": "docs/release/manifests/gpoint-release-20260928T065336221Z.json",
-  "lastReleaseFailureAt": "2026-09-28T06:58:33.148Z",
+  "lastReleaseFailureManifest": "docs/release/manifests/gpoint-release-20260928T082516997Z.json",
+  "lastReleaseFailureAt": "2026-09-28T08:31:41.249Z",
+  "currentReleaseFailureReconciliation": {
+    "reconciledAt": "2026-09-28T08:52:16Z",
+    "failedReleaseId": "gpoint-release-20260928T082516997Z",
+    "candidateSha": "6478e79bcc1fa0ae5f9eed4b9ef731966df05317",
+    "correctedFailureStage": "PRE_SWITCH_AFTER_MIGRATION",
+    "liveProductionSha": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
+    "runtimeSwitchOccurred": false,
+    "databaseApplyOccurred": true,
+    "livePrismaHead": "20260922090000_telegram_channel_avatar",
+    "liveAgataHead": "agata0008",
+    "agataApiSha": "6478e79bcc1fa0ae5f9eed4b9ef731966df05317",
+    "agataWorkerSha": "6478e79bcc1fa0ae5f9eed4b9ef731966df05317",
+    "agataWorkerHealth": "unhealthy",
+    "recoveryRequired": true,
+    "basis": "Read-only verification confirmed old GPoint API/Worker/Bot/Mini App runtime, unchanged Prisma head, agata0008 with 39 AGATA tables, and pgvector 0.8.6. Candidate AGATA API is healthy; worker is running with fresh heartbeat, resolves PostgreSQL, and successfully reads agata.alembic_version and agata.outbox_jobs. The readiness failure is the candidate worker healthcheck hardcoding agata0007; it rejects the now-current agata0008. Candidate AGATA services had already started, so recovery remains required until runtime parity is restored."
+  },
   "previousReleaseFailureReconciliation": {
     "reconciledAt": "2026-09-28T04:00:50Z",
     "failedReleaseId": "gpoint-release-20260928T034755057Z",
@@ -91,8 +107,8 @@
     "rollbackRequired": false,
     "basis": "Read-only production reconciliation verified all API/Worker/Bot runtime revisions and RELEASE_SHA remain on ca00b191db4fa26fb1f2746f9e6c218a8538ab49; Prisma head is unchanged. The agata schema exists but is empty, with no alembic_version table/head. Original failure evidence and the validated pre-release backup are retained."
   },
-  "agataRuntimeSha": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
-  "agataAlembicHead": "agata0007",
+  "agataRuntimeSha": "6478e79bcc1fa0ae5f9eed4b9ef731966df05317",
+  "agataAlembicHead": "agata0008",
   "agataProvider": "disabled",
   "recoveryFinalizationManifest": "docs/release/manifests/gpoint-recovery-20260928T071235134Z.json"
 }
