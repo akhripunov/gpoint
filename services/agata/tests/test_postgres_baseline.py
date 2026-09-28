@@ -1,5 +1,6 @@
 """Explicit integration test for a disposable, initially empty AGATA test database."""
 
+import base64
 import os
 import subprocess
 import sys
@@ -50,6 +51,8 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
     env = dict(os.environ)
     env["AGATA_DATABASE_URL"] = DATABASE_URL
     env.setdefault("AGATA_TENANT_ID", "7508f36f-774a-48aa-8c6b-42f6f160415d")
+    env["AGATA_MESSAGE_AEAD_KEY"] = base64.b64encode(b"a" * 32).decode()
+    env["AGATA_RETRIEVAL_QUERY_HMAC_KEY"] = base64.b64encode(b"h" * 32).decode()
     # Prove a true fresh install can traverse every revision without legacy
     # derived_memory_views. Then reset only this disposable schema and continue
     # with the representative pre-P2.4 data/backfill path below.
@@ -63,7 +66,20 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
         text=True,
     )
     with engine.begin() as connection:
-        assert connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0007"
+        connection.execute(
+            text("SELECT set_config('app.tenant_id', :tenant, true)"),
+            {"tenant": env["AGATA_TENANT_ID"]},
+        )
+        assert connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0008"
+        policy_allowed = connection.scalar(
+            text(
+                "SELECT rules->>'self_attestation_allowed' FROM agata.regional_policy_profiles "
+                "WHERE tenant_id = :tenant AND jurisdiction = 'GLOBAL' AND market = 'GPOINT' "
+                "AND status = 'active'"
+            ),
+            {"tenant": env["AGATA_TENANT_ID"]},
+        )
+        assert policy_allowed == "true"
         assert connection.scalar(text("SELECT to_regclass('agata.derived_memory_views')")) is None
         assert connection.scalar(text("SELECT count(*) FROM agata.memory_entities")) == 0
         connection.execute(text("DROP SCHEMA agata CASCADE"))
@@ -146,7 +162,7 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
     ) = (uuid4() for _ in range(16))
     sentinel = "legacy-private-synthetic-payload"
     crypto = AeadCrypto(
-        encoded_key=os.environ["AGATA_MESSAGE_AEAD_KEY"],
+        encoded_key=base64.b64encode(b"a" * 32).decode(),
         key_version=os.getenv("AGATA_MESSAGE_AEAD_KEY_VERSION", "v1"),
     )
     user_envelope = crypto.encrypt(
@@ -397,7 +413,7 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
         assert after == before
         assert "alembic_version" in agata_tables
         assert (
-            connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0007"
+            connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0008"
         )
         assert {"memory_entities", "memory_relations", "memory_graph_evidence"} <= agata_tables
         assert connection.scalar(text("SELECT count(*) FROM agata.memory_entities")) == 0

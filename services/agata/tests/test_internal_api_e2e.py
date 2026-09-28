@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from app.api.internal import get_embedding_provider, get_response_provider
 from app.config import get_settings
 from app.db.base import SessionFactory, dispose_engine, set_tenant_context
-from app.db.models import CharacterProfileVersion, Message, OutboxJob, User
+from app.db.models import AgeAssurance, CharacterProfileVersion, Message, OutboxJob, User
 from app.main import app
 from app.memory.retrieval import DeterministicFakeEmbeddingProvider
 from app.responses.pipeline import DeterministicFakeResponseProvider
@@ -86,6 +86,26 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
             assert reopened_age.json()["required"] is False
             assert reopened_age.json()["method"] == "self_attested"
             assert reopened_age.json()["assertedAt"]
+            async with SessionFactory() as session:
+                await set_tenant_context(session, tenant_id)
+                persisted_user = await session.scalar(
+                    select(User).where(
+                        User.tenant_id == tenant_id,
+                        User.source_system == "gpoint",
+                        User.external_id == user_key,
+                    )
+                )
+                assert persisted_user is not None
+                persisted_age = await session.scalar(
+                    select(AgeAssurance).where(
+                        AgeAssurance.tenant_id == tenant_id,
+                        AgeAssurance.user_id == persisted_user.id,
+                    )
+                )
+                assert persisted_age is not None
+                assert persisted_age.status == "self_attested"
+                assert persisted_age.method == "self_attested"
+                assert persisted_age.asserted_at is not None
             other_user_state = await client.get(
                 f"/internal/v1/users/{user_key}-other/age-assurance", headers=headers
             )

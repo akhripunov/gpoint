@@ -152,7 +152,7 @@ export function recoveryRuntimeFailures(candidate, facts, expectedDbHead) {
   if (facts.LIVE_API_HEALTH !== 'healthy') failures.push('API is not healthy');
   if (facts.LIVE_MINIAPP_SHA !== candidate) failures.push('Mini App SHA mismatch');
   if (facts.LIVE_PRISMA_HEAD !== expectedDbHead) failures.push('Prisma head mismatch');
-  if (facts.LIVE_AGATA_HEAD !== 'agata0007') failures.push('AGATA Alembic head mismatch');
+  if (facts.LIVE_AGATA_HEAD !== 'agata0008') failures.push('AGATA Alembic head mismatch');
   if (facts.LIVE_AGATA_ENABLED !== 'true' || facts.LIVE_AGATA_PROVIDER !== 'disabled') failures.push('AGATA config is not enabled with provider disabled');
   if (facts.LIVE_CONFIG_AGATA_LLM_API_KEY !== 'NO') failures.push('AGATA LLM API key must remain absent while provider is disabled');
   for (const role of ['API', 'WORKER']) {
@@ -268,7 +268,7 @@ function runDryRun(candidate) {
     const gates = evaluateSafetyGates({ candidateSha: candidate, remoteSha: proof.mainSha, artifacts, config: effective, recordedProductionSha: current.currentProductionSha, liveProductionSha: liveSha, productionRefTarget: candidate });
     gates.push(...checkAgataArtifactParity(candidate, artifacts), ...checkAgataEffectiveConfig({ provider: effective.agataProvider, enabled: effective.agataEnabled }));
     if (gates.length) die(gates.join('; '));
-    const manifest = { releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: null, dbHeadBefore: liveDbHead, dbHeadAfter: null, agataDbHeadBefore: baseline.agataDbHead, agataDbHeadAfter: 'agata0007', artifactIdentities: artifacts, provider: 'disabled', startedAt, finishedAt: isoNow(), status: 'PLANNED', failureStage: null, failureReason: null, rollbackSha: current.currentProductionSha, rollbackDbCompatibility: 'REQUIRES_FORWARD_FIX_ASSESSMENT', productionRef: null, remoteProof: { mainSha: proof.mainSha, directRef: proof.directRef }, liveFacts: baseline.facts, dryRun: true };
+    const manifest = { releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: null, dbHeadBefore: liveDbHead, dbHeadAfter: null, agataDbHeadBefore: baseline.agataDbHead, agataDbHeadAfter: 'agata0008', artifactIdentities: artifacts, provider: 'disabled', startedAt, finishedAt: isoNow(), status: 'PLANNED', failureStage: null, failureReason: null, rollbackSha: current.currentProductionSha, rollbackDbCompatibility: 'REQUIRES_FORWARD_FIX_ASSESSMENT', productionRef: null, remoteProof: { mainSha: proof.mainSha, directRef: proof.directRef }, liveFacts: baseline.facts, dryRun: true };
     const file = writeManifest(manifest);
     console.log(JSON.stringify({ status: 'PLANNED', releaseId, candidateSha: candidate, remoteMainSha: proof.mainSha, buildCheckoutSha: build.checkoutSha, buildCheckoutClean: build.clean, dbHead: liveDbHead, rollbackSha: current.currentProductionSha, manifest: path.relative(ROOT, file) }, null, 2));
   } finally { unlock(); }

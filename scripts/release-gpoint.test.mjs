@@ -73,10 +73,10 @@ test('AGATA runtime requires candidate image parity and healthy API/worker', () 
 
 test('AGATA runtime identity parser maps uppercase snake case fields to camel case', () => {
   const imageId = 'sha256:' + 'c'.repeat(64);
-  const runtime = parseAgataRuntimeIdentityLine(`AGATA_IMAGE_ID=${imageId} AGATA_BUILD_SHA=${sha} AGATA_API_IMAGE=${imageId} AGATA_API_RUNNING=true AGATA_API_HEALTH=healthy AGATA_WORKER_IMAGE=${imageId} AGATA_WORKER_RUNNING=true AGATA_WORKER_HEALTH=healthy AGATA_HEAD=agata0007`);
+  const runtime = parseAgataRuntimeIdentityLine(`AGATA_IMAGE_ID=${imageId} AGATA_BUILD_SHA=${sha} AGATA_API_IMAGE=${imageId} AGATA_API_RUNNING=true AGATA_API_HEALTH=healthy AGATA_WORKER_IMAGE=${imageId} AGATA_WORKER_RUNNING=true AGATA_WORKER_HEALTH=healthy AGATA_HEAD=agata0008`);
   assert.deepEqual(runtime, {
     imageId, buildSha: sha, apiImage: imageId, apiRunning: 'true', apiHealth: 'healthy',
-    workerImage: imageId, workerRunning: 'true', workerHealth: 'healthy', head: 'agata0007',
+    workerImage: imageId, workerRunning: 'true', workerHealth: 'healthy', head: 'agata0008',
   });
   assert.deepEqual(validateAgataRuntimeIdentity(sha, runtime), []);
 });
@@ -174,7 +174,7 @@ test('recovery finalization rejects mixed or unhealthy runtime facts', () => {
   const facts = {
     LIVE_RELEASE_ENV_SHA: sha, LIVE_API_SHA: sha, LIVE_API_RUNNING: 'true', LIVE_API_HEALTH: 'healthy',
     LIVE_WORKER_SHA: sha, LIVE_WORKER_RUNNING: 'true', LIVE_BOT_SHA: sha, LIVE_BOT_RUNNING: 'true',
-    LIVE_MINIAPP_SHA: sha, LIVE_PRISMA_HEAD: 'prisma-head', LIVE_AGATA_HEAD: 'agata0007',
+    LIVE_MINIAPP_SHA: sha, LIVE_PRISMA_HEAD: 'prisma-head', LIVE_AGATA_HEAD: 'agata0008',
     LIVE_AGATA_ENABLED: 'true', LIVE_AGATA_PROVIDER: 'disabled', LIVE_CONFIG_AGATA_LLM_API_KEY: 'NO',
     LIVE_AGATA_API_SHA: sha, LIVE_AGATA_API_RUNNING: 'true', LIVE_AGATA_API_HEALTH: 'healthy',
     LIVE_AGATA_WORKER_SHA: sha, LIVE_AGATA_WORKER_RUNNING: 'true', LIVE_AGATA_WORKER_HEALTH: 'healthy',
@@ -202,10 +202,10 @@ test('recovery artifact identities are derived from verified live candidate fact
 
 test('verified release reconciles activeRuntimeSha only after verified switch', () => {
   const prior = { currentProductionSha: 'a'.repeat(40), activeRuntimeSha: 'b'.repeat(40), activeRuntimeDbHead: 'old' };
-  const next = verifiedRuntimeState(prior, { candidate: sha, dbHead: 'agata0007' });
+  const next = verifiedRuntimeState(prior, { candidate: sha, dbHead: 'agata0008' });
   assert.equal(next.currentProductionSha, sha);
   assert.equal(next.activeRuntimeSha, sha);
-  assert.equal(next.activeRuntimeDbHead, 'agata0007');
+  assert.equal(next.activeRuntimeDbHead, 'agata0008');
   assert.equal(prior.activeRuntimeSha, 'b'.repeat(40));
 });
 
