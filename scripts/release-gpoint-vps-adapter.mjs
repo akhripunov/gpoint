@@ -290,14 +290,15 @@ function run(command, env = {}) {
 export function upload(localFile, remoteFile) {
   const runner = resolveRunnerPath('GPOINT_SCP_RUNNER');
   if (!runner) throw new Error('GPOINT_SCP_RUNNER is required for apply mode; no implicit SSH credentials are used');
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  const maxAttempts = 2; // one controlled retry after a transient transport failure
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      return execFileSync(runner, [], { encoding: 'utf8', env: { ...process.env, LOCAL_FILE: localFile, REMOTE_FILE: remoteFile }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 45000 });
+      return execFileSync(runner, [], { encoding: 'utf8', env: { ...process.env, LOCAL_FILE: localFile, REMOTE_FILE: remoteFile }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 60000 });
     } catch (error) {
       const detail = String(error.stderr || error.stdout || error.message).slice(-2000);
       console.error(`SOURCE_UPLOAD_FAIL file=${path.basename(localFile)} attempt=${attempt} exit=${error.status ?? 'unknown'} detail=${detail}`);
-      if (attempt === 3) {
-        const failure = new Error(`source upload failed after 3 attempts: ${path.basename(localFile)}`);
+      if (attempt === maxAttempts) {
+        const failure = new Error(`source upload failed after ${maxAttempts} attempts: ${path.basename(localFile)}`);
         failure.command = `scp upload ${path.basename(localFile)}`;
         failure.exitCode = Number.isInteger(error.status) ? error.status : null;
         failure.stderr = detail;

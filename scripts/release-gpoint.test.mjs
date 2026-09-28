@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, evaluateSafetyGates, failureEvidence, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, shouldFinalizeRecovery, validateCandidate, verifiedRuntimeState } from './release-gpoint.mjs';
 import { agataInternalConfigProvisionCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, parseAgataRuntimeIdentityLine, planReleaseRetention, resolveRunnerPath, runRemoteCommand, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
 
@@ -23,6 +23,124 @@ test('durable runner config is discovered in a fresh environment and explicit en
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('GPoint SSH runner uses the dedicated identity and strict non-interactive options', () => {
+  const runner = fs.readFileSync(new URL('./gpoint-vps-runner.sh', import.meta.url), 'utf8');
+  for (const option of ['-i "$identity"', 'IdentitiesOnly=yes', 'StrictHostKeyChecking=yes', 'BatchMode=yes', 'ConnectTimeout=20', 'ConnectionAttempts=1']) {
+    assert.ok(runner.includes(option), `missing SSH option ${option}`);
+  }
+  assert.ok(runner.includes('root@38.180.110.92'));
+  assert.ok(!runner.includes('VPS_PASSWORD'));
+  assert.ok(!runner.includes('expect'));
+});
+
+test('key-only runner discovers identity in a fresh process and preserves remote exit status/output', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-key-runner-test-'));
+  const home = path.join(root, 'home');
+  const bin = path.join(root, 'bin');
+  const configDir = path.join(home, '.config/gpoint');
+  const identity = path.join(home, '.ssh/gpoint_deploy_ed25519');
+  const calls = path.join(root, 'ssh-call');
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.mkdirSync(bin, { recursive: true });
+  fs.mkdirSync(path.dirname(identity), { recursive: true });
+  fs.writeFileSync(identity, 'test-private-key-placeholder');
+  fs.writeFileSync(path.join(configDir, 'release-tools.env'), 'GPOINT_SSH_IDENTITY_FILE=$HOME/.ssh/gpoint_deploy_ed25519\n');
+  const fakeSsh = path.join(bin, 'ssh');
+  fs.writeFileSync(fakeSsh, `#!/bin/sh\nprintf '%s\\n' "$@" > "$SSH_CALL_FILE"\nprintf 'remote-out\\n'\nprintf 'remote-err\\n' >&2\nexit 17\n`, { mode: 0o700 });
+  try {
+    const result = spawnSync(path.join(path.dirname(new URL(import.meta.url).pathname), 'gpoint-vps-runner.sh'), [], {
+      encoding: 'utf8', env: { HOME: home, PATH: `${bin}:${process.env.PATH}`, SSH_CALL_FILE: calls, REMOTE_CMD: 'exit 17' },
+    });
+    assert.equal(result.status, 17);
+    assert.equal(result.stdout, 'remote-out\n');
+    assert.equal(result.stderr, 'remote-err\n');
+    const args = fs.readFileSync(calls, 'utf8').split(/\r?\n/);
+    assert.ok(args.includes(identity));
+    assert.ok(args.includes('IdentitiesOnly=yes'));
+    assert.ok(args.includes('StrictHostKeyChecking=yes'));
+    assert.ok(args.includes('BatchMode=yes'));
+    assert.ok(args.includes('exit 17'));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('missing SSH identity fails before invoking ssh and SCP uses the same key-only policy', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-key-scp-test-'));
+  const home = path.join(root, 'home');
+  const bin = path.join(root, 'bin');
+  const configDir = path.join(home, '.config/gpoint');
+  const calls = path.join(root, 'scp-call');
+  const localFile = path.join(root, 'payload');
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(localFile, 'harmless test payload');
+  fs.writeFileSync(path.join(configDir, 'release-tools.env'), 'GPOINT_SSH_IDENTITY_FILE=$HOME/.ssh/missing-key\n');
+  fs.writeFileSync(path.join(bin, 'scp'), `#!/bin/sh\nprintf '%s\\n' "$@" > "$SCP_CALL_FILE"\nexit 0\n`, { mode: 0o700 });
+  const scpRunner = path.join(path.dirname(new URL(import.meta.url).pathname), 'gpoint-vps-scp-runner.sh');
+  try {
+    const missing = spawnSync(scpRunner, [], { encoding: 'utf8', env: { HOME: home, PATH: `${bin}:${process.env.PATH}`, SCP_CALL_FILE: calls, LOCAL_FILE: localFile, REMOTE_FILE: '/tmp/payload' } });
+    assert.equal(missing.status, 78);
+    assert.match(missing.stderr, /identity is missing or unreadable/);
+    assert.equal(fs.existsSync(calls), false);
+
+    const identity = path.join(home, '.ssh/existing-key');
+    fs.mkdirSync(path.dirname(identity), { recursive: true });
+    fs.writeFileSync(identity, 'test-private-key-placeholder');
+    fs.writeFileSync(path.join(configDir, 'release-tools.env'), `GPOINT_SSH_IDENTITY_FILE=${identity}\n`);
+    const result = spawnSync(scpRunner, [], { encoding: 'utf8', env: { HOME: home, PATH: `${bin}:${process.env.PATH}`, SCP_CALL_FILE: calls, LOCAL_FILE: localFile, REMOTE_FILE: '/tmp/payload' } });
+    assert.equal(result.status, 0);
+    const args = fs.readFileSync(calls, 'utf8');
+    assert.ok(args.includes(identity));
+    for (const option of ['IdentitiesOnly=yes', 'StrictHostKeyChecking=yes', 'BatchMode=yes', 'ConnectionAttempts=1']) assert.ok(args.includes(option));
+    assert.ok(args.includes('root@38.180.110.92:/tmp/payload'));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('key-only runner fails closed on rejected identity and host-key mismatch', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-key-failclosed-test-'));
+  const home = path.join(root, 'home');
+  const bin = path.join(root, 'bin');
+  const configDir = path.join(home, '.config/gpoint');
+  const identity = path.join(home, '.ssh/gpoint_deploy_ed25519');
+  const modeFile = path.join(root, 'ssh-mode');
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.mkdirSync(bin, { recursive: true });
+  fs.mkdirSync(path.dirname(identity), { recursive: true });
+  fs.writeFileSync(identity, 'test-private-key-placeholder');
+  fs.writeFileSync(path.join(configDir, 'release-tools.env'), 'GPOINT_SSH_IDENTITY_FILE=$HOME/.ssh/gpoint_deploy_ed25519\n');
+  fs.writeFileSync(path.join(bin, 'ssh'), `#!/bin/sh\nif [ "$(cat "$SSH_MODE_FILE")" = host ]; then echo 'Host key verification failed.' >&2; else echo 'root@38.180.110.92: Permission denied (publickey).' >&2; fi\nexit 255\n`, { mode: 0o700 });
+  const runner = path.join(path.dirname(new URL(import.meta.url).pathname), 'gpoint-vps-runner.sh');
+  try {
+    for (const [mode, expected] of [['host', /Host key verification failed\./], ['auth', /Permission denied \(publickey\)/]]) {
+      fs.writeFileSync(modeFile, mode);
+      const result = spawnSync(runner, [], { encoding: 'utf8', env: { HOME: home, PATH: `${bin}:${process.env.PATH}`, SSH_MODE_FILE: modeFile, REMOTE_CMD: 'hostname' } });
+      assert.equal(result.status, 255);
+      assert.match(result.stderr, expected);
+      assert.doesNotMatch(result.stderr, /password:/i);
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('unreachable SSH child is terminated by the wall-clock deadline', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-key-timeout-test-'));
+  const home = path.join(root, 'home');
+  const bin = path.join(root, 'bin');
+  const configDir = path.join(home, '.config/gpoint');
+  const identity = path.join(home, '.ssh/gpoint_deploy_ed25519');
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.mkdirSync(bin, { recursive: true });
+  fs.mkdirSync(path.dirname(identity), { recursive: true });
+  fs.writeFileSync(identity, 'test-private-key-placeholder');
+  fs.writeFileSync(path.join(configDir, 'release-tools.env'), 'GPOINT_SSH_IDENTITY_FILE=$HOME/.ssh/gpoint_deploy_ed25519\n');
+  fs.writeFileSync(path.join(bin, 'ssh'), '#!/bin/sh\nexec sleep 10\n', { mode: 0o700 });
+  const runner = path.join(path.dirname(new URL(import.meta.url).pathname), 'gpoint-vps-runner.sh');
+  const started = Date.now();
+  try {
+    const result = spawnSync(runner, [], { encoding: 'utf8', timeout: 4000, env: { HOME: home, PATH: `${bin}:${process.env.PATH}`, GPOINT_REMOTE_COMMAND_TIMEOUT_SECONDS: '1', REMOTE_CMD: 'hostname' } });
+    assert.equal(result.status, 124);
+    assert.ok(Date.now() - started < 3500, 'SSH probe exceeded bounded wall-clock deadline');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test('exact candidate gate blocks a nonexistent or malformed remote candidate', () => {
@@ -345,6 +463,26 @@ test('source upload retries a transient SCP failure and preserves the exact path
     for (const [key, value] of Object.entries({ GPOINT_SCP_RUNNER: previous.runner, COUNT_FILE: previous.count, EXPECTED_LOCAL: previous.local, EXPECTED_REMOTE: previous.remote })) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('source upload uses at most one controlled retry', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-upload-bound-test-'));
+  const runner = path.join(root, 'runner.sh');
+  const count = path.join(root, 'count');
+  const local = path.join(root, 'source');
+  fs.writeFileSync(local, 'exact-source');
+  fs.writeFileSync(runner, '#!/bin/sh\ncount=$(cat "$COUNT_FILE" 2>/dev/null || echo 0)\ncount=$((count + 1))\nprintf "%s" "$count" > "$COUNT_FILE"\necho "synthetic bounded failure" >&2\nexit 255\n');
+  fs.chmodSync(runner, 0o700);
+  const previous = { runner: process.env.GPOINT_SCP_RUNNER, count: process.env.COUNT_FILE };
+  Object.assign(process.env, { GPOINT_SCP_RUNNER: runner, COUNT_FILE: count });
+  try {
+    assert.throws(() => upload(local, '/tmp/exact-source'), /failed after 2 attempts/);
+    assert.equal(fs.readFileSync(count, 'utf8'), '2');
+  } finally {
+    if (previous.runner === undefined) delete process.env.GPOINT_SCP_RUNNER; else process.env.GPOINT_SCP_RUNNER = previous.runner;
+    if (previous.count === undefined) delete process.env.COUNT_FILE; else process.env.COUNT_FILE = previous.count;
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
