@@ -1,42 +1,42 @@
 {
-  "currentProductionSha": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
+  "currentProductionSha": "93d0c38c7452516f4cea41e1e78f1fe0966f48a9",
   "currentProductionDbHead": "20260922090000_telegram_channel_avatar",
-  "currentProductionRef": "gpoint-production-20260928T071235134Z",
-  "previousProductionSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
-  "lastReleaseId": "gpoint-release-20260928T082516997Z",
-  "lastReleaseStatus": "RECOVERY_REQUIRED",
-  "lastReleaseCompletedAt": "2026-09-28T07:12:53.695Z",
+  "currentProductionRef": "gpoint-production-20260928T094858578Z",
+  "previousProductionSha": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
+  "lastReleaseId": "gpoint-recovery-20260928T094858578Z",
+  "lastReleaseStatus": "COMPLETE",
+  "lastReleaseCompletedAt": "2026-09-28T09:49:17.943Z",
   "releaseOrigin": "durable-production-release",
   "artifactIdentities": {
     "api": {
-      "sourceSha": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
-      "runtimeImageId": "sha256:141d8c1d693b55bde5af9acbdebd88d6cdf905608f5d8c26cdcb6643c9ec6875"
+      "sourceSha": "93d0c38c7452516f4cea41e1e78f1fe0966f48a9",
+      "runtimeImageId": "sha256:ed04c6df923608bd0e5b6091b247f9e408894f45ab45adce75d673339961671e"
     },
     "worker": {
-      "sourceSha": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
-      "runtimeImageId": "sha256:141d8c1d693b55bde5af9acbdebd88d6cdf905608f5d8c26cdcb6643c9ec6875"
+      "sourceSha": "93d0c38c7452516f4cea41e1e78f1fe0966f48a9",
+      "runtimeImageId": "sha256:ed04c6df923608bd0e5b6091b247f9e408894f45ab45adce75d673339961671e"
     },
     "bot": {
-      "sourceSha": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
-      "runtimeImageId": "sha256:141d8c1d693b55bde5af9acbdebd88d6cdf905608f5d8c26cdcb6643c9ec6875"
+      "sourceSha": "93d0c38c7452516f4cea41e1e78f1fe0966f48a9",
+      "runtimeImageId": "sha256:ed04c6df923608bd0e5b6091b247f9e408894f45ab45adce75d673339961671e"
     },
     "miniapp": {
-      "sourceSha": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
-      "servedBuildSha": "972f5e28f36d061d15829cebd1eb3442e6bf32b6"
+      "sourceSha": "93d0c38c7452516f4cea41e1e78f1fe0966f48a9",
+      "servedBuildSha": "93d0c38c7452516f4cea41e1e78f1fe0966f48a9"
     },
     "agataApi": {
-      "sourceSha": "6478e79bcc1fa0ae5f9eed4b9ef731966df05317",
-      "runtimeImageId": "sha256:e6b3021a97ffbacf591b7d99e0dfac74043b0cace85e10e7738fd51a29b37d73"
+      "sourceSha": "93d0c38c7452516f4cea41e1e78f1fe0966f48a9",
+      "runtimeImageId": "sha256:42ac2e107263dfd5a5b22eccef8a07be9ebac83d787360d3f5d4386d2e13b451"
     },
     "agataWorker": {
-      "sourceSha": "6478e79bcc1fa0ae5f9eed4b9ef731966df05317",
-      "runtimeImageId": "sha256:e6b3021a97ffbacf591b7d99e0dfac74043b0cace85e10e7738fd51a29b37d73"
+      "sourceSha": "93d0c38c7452516f4cea41e1e78f1fe0966f48a9",
+      "runtimeImageId": "sha256:42ac2e107263dfd5a5b22eccef8a07be9ebac83d787360d3f5d4386d2e13b451"
     }
   },
-  "activeRuntimeSha": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
+  "activeRuntimeSha": "93d0c38c7452516f4cea41e1e78f1fe0966f48a9",
   "activeRuntimeDbHead": "20260922090000_telegram_channel_avatar",
   "releaseStatus": "COMPLETE",
-  "recoveryRequired": true,
+  "recoveryRequired": false,
   "lastReleaseFailureReconciliation": {
     "reconciledAt": "2026-09-28T03:34:44Z",
     "failedReleaseId": "gpoint-release-20260928T032622935Z",
@@ -59,8 +59,8 @@
     "resolvedManifest": "docs/release/manifests/gpoint-release-20260924T051236278Z.json",
     "basis": "Read-only VPS runtime identity and DB status, live HTTPS root/model/API checks, published share domain, and exact GitHub production tag were verified after the local TLS timeout."
   },
-  "lastReleaseFailureManifest": "docs/release/manifests/gpoint-release-20260928T082516997Z.json",
-  "lastReleaseFailureAt": "2026-09-28T08:31:41.249Z",
+  "lastReleaseFailureManifest": "docs/release/manifests/gpoint-release-20260928T094212841Z.json",
+  "lastReleaseFailureAt": "2026-09-28T09:47:51.762Z",
   "currentReleaseFailureReconciliation": {
     "reconciledAt": "2026-09-28T08:52:16Z",
     "failedReleaseId": "gpoint-release-20260928T082516997Z",
@@ -107,8 +107,8 @@
     "rollbackRequired": false,
     "basis": "Read-only production reconciliation verified all API/Worker/Bot runtime revisions and RELEASE_SHA remain on ca00b191db4fa26fb1f2746f9e6c218a8538ab49; Prisma head is unchanged. The agata schema exists but is empty, with no alembic_version table/head. Original failure evidence and the validated pre-release backup are retained."
   },
-  "agataRuntimeSha": "6478e79bcc1fa0ae5f9eed4b9ef731966df05317",
+  "agataRuntimeSha": "93d0c38c7452516f4cea41e1e78f1fe0966f48a9",
   "agataAlembicHead": "agata0008",
   "agataProvider": "disabled",
-  "recoveryFinalizationManifest": "docs/release/manifests/gpoint-recovery-20260928T071235134Z.json"
+  "recoveryFinalizationManifest": "docs/release/manifests/gpoint-recovery-20260928T094858578Z.json"
 }

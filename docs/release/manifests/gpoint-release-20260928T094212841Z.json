@@ -1,0 +1,21 @@
+{
+  "releaseId": "gpoint-release-20260928T094212841Z",
+  "candidateSha": "93d0c38c7452516f4cea41e1e78f1fe0966f48a9",
+  "previousProductionSha": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
+  "productionShaAfter": null,
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": null,
+  "startedAt": "2026-09-28T09:42:12.841Z",
+  "finishedAt": "2026-09-28T09:47:51.762Z",
+  "status": "RECOVERY_REQUIRED",
+  "failureStage": "POST_RELEASE_CLEANUP",
+  "failureReason": "remote command failed (exit=255, command_sha256=5536a42bbaf1ad51f3518a78e1ece6513552b7ecf4e84aa1c4a929407199177a)",
+  "failureCommand": "POST_RELEASE_CLEANUP",
+  "failureCommandSha256": "5536a42bbaf1ad51f3518a78e1ece6513552b7ecf4e84aa1c4a929407199177a",
+  "failureExitCode": 255,
+  "failureStdout": "\rroot@38.180.110.92's password: \r\nConnection to 38.180.110.92 closed by remote host.\r\r\n",
+  "failureStderr": "\rroot@38.180.110.92's password: \r\nConnection to 38.180.110.92 closed by remote host.\r\r\n",
+  "rollbackSha": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
+  "productionRef": null,
+  "releaseOrigin": "durable-production-release"
+}
