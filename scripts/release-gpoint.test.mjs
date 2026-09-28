@@ -89,6 +89,12 @@ test('all disposable Prisma/AGATA database runners use shared_internal', () => {
   assert.doesNotMatch(adapter, /--network gpoint_app --network-alias gpoint-(?:preflight|migration|agata-preflight|agata-migration|agata-verify)/);
 });
 
+test('production runtime image includes and builds AGATA client before API', () => {
+  const dockerfile = fs.readFileSync(new URL('../infra/production/Gpoint.Dockerfile', import.meta.url), 'utf8');
+  assert.match(dockerfile, /COPY packages\/agata-client\/package\.json packages\/agata-client\/package\.json/);
+  assert.ok(dockerfile.indexOf('RUN pnpm --filter @gpoint/agata-client build') < dockerfile.indexOf('RUN pnpm --filter @gpoint/api build'));
+});
+
 test('nonzero compose after candidate switch enters switched-unverified recovery', () => {
   const image = 'sha256:' + 'a'.repeat(64);
   assert.equal(classifyPostSwitchState({ candidate: sha, runtime: { imageId: image, buildSha: sha, apiImage: image, workerImage: image, botImage: image }, composeExitCode: 1 }).state, 'SWITCHED_UNVERIFIED');

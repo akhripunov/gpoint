@@ -11,12 +11,14 @@ COPY apps/api/package.json apps/api/package.json
 COPY apps/bot/package.json apps/bot/package.json
 COPY apps/miniapp/package.json apps/miniapp/package.json
 COPY apps/worker/package.json apps/worker/package.json
+COPY packages/agata-client/package.json packages/agata-client/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/db/package.json packages/db/package.json
 RUN corepack enable && corepack prepare pnpm@9.15.0 --activate && pnpm config set store-dir /pnpm/store
 RUN --mount=type=cache,id=gpoint-pnpm-store,target=/pnpm/store pnpm install --frozen-lockfile
 COPY . .
 RUN pnpm --filter @gpoint/db exec prisma generate
+RUN pnpm --filter @gpoint/agata-client build
 RUN pnpm --filter @gpoint/db build
 RUN pnpm --filter @gpoint/api build
 RUN pnpm --filter @gpoint/worker build
