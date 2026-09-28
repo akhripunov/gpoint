@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { applyCandidate, inspectProductionReadOnly, planReleaseRetention, provisionAgataInternalConfigForBaseline } from './release-gpoint-vps-adapter.mjs';
+import { applyCandidate, inspectProductionReadOnly, planReleaseRetention, provisionAgataInternalConfigForBaseline, runRemoteCommand } from './release-gpoint-vps-adapter.mjs';
 
 const ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const STATE_FILE = path.join(ROOT, 'docs/release/state/production.json');
@@ -140,6 +140,28 @@ export function canCreateProductionRef({ releaseState, candidate, actualSha, mix
 
 export function shouldFinalizeRecovery({ releaseState, candidate, actualSha, gatesPass }) {
   return releaseState === 'RECOVERY_REQUIRED' && candidate === actualSha && gatesPass === true;
+}
+
+export function recoveryRuntimeFailures(candidate, facts, expectedDbHead) {
+  const failures = [];
+  if (facts.LIVE_RELEASE_ENV_SHA !== candidate) failures.push('release env SHA mismatch');
+  for (const role of ['API', 'WORKER', 'BOT']) {
+    if (facts[`LIVE_${role}_SHA`] !== candidate) failures.push(`${role.toLowerCase()} build SHA mismatch`);
+    if (facts[`LIVE_${role}_RUNNING`] !== 'true') failures.push(`${role.toLowerCase()} is not running`);
+  }
+  if (facts.LIVE_API_HEALTH !== 'healthy') failures.push('API is not healthy');
+  if (facts.LIVE_MINIAPP_SHA !== candidate) failures.push('Mini App SHA mismatch');
+  if (facts.LIVE_PRISMA_HEAD !== expectedDbHead) failures.push('Prisma head mismatch');
+  if (facts.LIVE_AGATA_HEAD !== 'agata0007') failures.push('AGATA Alembic head mismatch');
+  if (facts.LIVE_AGATA_ENABLED !== 'true' || facts.LIVE_AGATA_PROVIDER !== 'disabled') failures.push('AGATA config is not enabled with provider disabled');
+  if (facts.LIVE_CONFIG_AGATA_LLM_API_KEY !== 'NO') failures.push('AGATA LLM API key must remain absent while provider is disabled');
+  for (const role of ['API', 'WORKER']) {
+    if (facts[`LIVE_AGATA_${role}_SHA`] !== candidate) failures.push(`AGATA ${role.toLowerCase()} build SHA mismatch`);
+    if (facts[`LIVE_AGATA_${role}_RUNNING`] !== 'true') failures.push(`AGATA ${role.toLowerCase()} is not running`);
+    if (facts[`LIVE_AGATA_${role}_HEALTH`] !== 'healthy') failures.push(`AGATA ${role.toLowerCase()} is not healthy`);
+  }
+  if (!facts.LIVE_AGATA_API_IMAGE_ID || facts.LIVE_AGATA_API_IMAGE_ID !== facts.LIVE_AGATA_WORKER_IMAGE_ID) failures.push('AGATA API/worker image identity mismatch');
+  return failures;
 }
 
 export function evaluateSafetyGates({ candidateSha: sha, remoteSha, clean = true, artifacts, config, backupReady = true, migrationOk = true, concurrent = false, recordedProductionSha, liveProductionSha, productionRefTarget }) {
@@ -337,10 +359,73 @@ function runApply(candidate) {
   } finally { unlock(); }
 }
 
+function finalizeRecovery(candidate) {
+  const startedAt = isoNow();
+  const releaseId = `gpoint-recovery-${startedAt.replace(/[-:.]/g, '')}`;
+  const unlock = acquireLock(releaseId);
+  try {
+    const current = state();
+    if (current.recoveryRequired !== true || current.lastReleaseStatus !== 'RECOVERY_REQUIRED') die('no unresolved RECOVERY_REQUIRED release is recorded');
+    const failedManifestPath = path.resolve(ROOT, current.lastReleaseFailureManifest ?? '');
+    if (!failedManifestPath.startsWith(`${MANIFEST_DIR}${path.sep}`) || !fs.existsSync(failedManifestPath)) die('recovery failure manifest is missing or outside the release manifest directory');
+    const failed = readJson(failedManifestPath);
+    if (failed.status !== 'RECOVERY_REQUIRED' || failed.candidateSha !== candidate || failed.releaseId !== current.lastReleaseId) die('candidate does not match the unresolved release attempt');
+    assertSha(candidate);
+    if (git(['rev-parse', candidate]) !== candidate) die('recovery candidate is not present locally');
+
+    const remoteMain = git(['ls-remote', 'origin', 'refs/heads/main']).split(/\s+/)[0];
+    if (!SHA_RE.test(remoteMain ?? '') || remoteMain !== git(['rev-parse', 'origin/main'])) die('origin/main exact SHA could not be independently reconciled');
+    try { execFileSync('git', ['merge-base', '--is-ancestor', candidate, 'origin/main'], { cwd: ROOT, stdio: 'ignore' }); }
+    catch { die('recovery candidate is not contained in verified origin/main history'); }
+
+    const facts = readLiveFacts();
+    const runtimeFailures = recoveryRuntimeFailures(candidate, facts, current.currentProductionDbHead);
+    if (runtimeFailures.length) die(`live runtime is not safe to finalize: ${runtimeFailures.join('; ')}`);
+    const root = measured({}, 'RECOVERY_ROOT_HEALTH', () => execFileSync('curl', ['-fsS', '--connect-timeout', '3', '--max-time', '10', 'https://gpoint.amiora.one/'], { encoding: 'utf8' }));
+    if (!root.includes(`gpoint-build-sha" content="${candidate}`)) die('external Mini App root does not serve the recovery candidate');
+    measured({}, 'RECOVERY_API_HEALTH', () => execFileSync('curl', ['-fsS', '--connect-timeout', '3', '--max-time', '10', 'https://gpoint.amiora.one/api/health/live'], { stdio: 'ignore' }));
+    const messagesStatus = execFileSync('curl', ['-sS', '-o', os.devNull, '-w', '%{http_code}', '--connect-timeout', '3', '--max-time', '10', 'https://gpoint.amiora.one/api/messages/state'], { encoding: 'utf8' }).trim();
+    const ageStatus = execFileSync('curl', ['-sS', '-o', os.devNull, '-w', '%{http_code}', '--connect-timeout', '3', '--max-time', '10', 'https://gpoint.amiora.one/api/age-assurance/state'], { encoding: 'utf8' }).trim();
+    if (messagesStatus !== '401' || ageStatus !== '401') die(`Messages/Age routes did not return the expected unauthenticated guard: messages=${messagesStatus} age=${ageStatus}`);
+    for (const route of ['/messages', '/model/models_hub']) {
+      const html = execFileSync('curl', ['-fsS', '--connect-timeout', '3', '--max-time', '10', `https://gpoint.amiora.one${route}`], { encoding: 'utf8' });
+      if (!html.includes(`gpoint-build-sha" content="${candidate}`)) die(`Mini App route shell mismatch at ${route}`);
+    }
+    const agataSmoke = runRemoteCommand(`set -e; docker exec compose-agata-api-1 python -c "from app.config import get_settings; assert get_settings().llm_provider == 'disabled'; print('AGATA_PROVIDER_DISABLED')"; docker run --rm --network gpoint_app --env-file /opt/gpoint/env/production.env --entrypoint node gpoint-runtime:${candidate} -e 'fetch("http://agata-api:8000/internal/v1/users/gpoint-release-readiness/age-assurance", {headers:{authorization:"Bearer "+process.env.AGATA_INTERNAL_API_TOKEN}}).then(async r=>{if(!r.ok) throw Error("age readiness HTTP "+r.status); await r.arrayBuffer(); console.log("AGE_ASSURANCE_INTERNAL_READINESS=PASS")}).catch(e=>{console.error(e.message);process.exit(1)})'; echo AGATA_RECOVERY_SMOKE=PASS`);
+    if (!agataSmoke.includes('AGATA_PROVIDER_DISABLED') || !agataSmoke.includes('AGE_ASSURANCE_INTERNAL_READINESS=PASS')) die('AGATA/age-assurance recovery smoke failed');
+
+    const ref = `gpoint-production-${startedAt.replace(/[-:.]/g, '')}`;
+    const localTag = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/tags/${ref}`], { cwd: ROOT, stdio: 'ignore' });
+    if (localTag.status === 0) die(`production ref already exists locally: ${ref}`);
+    execFileSync('git', ['tag', '-a', ref, candidate, '-m', `GPoint production recovery finalization\nproductionSha=${candidate}\ndbHead=${facts.LIVE_PRISMA_HEAD}\nreleaseId=${failed.releaseId}`], { cwd: ROOT, stdio: 'inherit' });
+    execFileSync('git', ['push', 'origin', `refs/tags/${ref}`], { cwd: ROOT, stdio: 'inherit' });
+    const remoteRef = git(['ls-remote', 'origin', `refs/tags/${ref}^{}`]).split(/\s+/)[0];
+    if (remoteRef !== candidate) die('remote production ref target mismatch during recovery finalization');
+
+    const finishedAt = isoNow();
+    const recoveryManifest = {
+      releaseId, eventType: 'RECOVERY_FINALIZATION', failedReleaseId: failed.releaseId,
+      candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: candidate,
+      dbHeadBefore: current.currentProductionDbHead, dbHeadAfter: facts.LIVE_PRISMA_HEAD,
+      agataDbHeadAfter: facts.LIVE_AGATA_HEAD, agataRuntimeSha: candidate, agataProvider: 'disabled',
+      startedAt, finishedAt, status: 'COMPLETE', failureStage: null, failureReason: null,
+      productionRef: ref, remoteProductionRefTarget: remoteRef, remoteMainSha: remoteMain,
+      runtimeFacts: Object.fromEntries(Object.entries(facts).filter(([key]) => key.startsWith('LIVE_'))),
+      smoke: { root: 'PASS', apiHealth: 'PASS', messagesUnauthenticatedRoute: 'PASS', ageUnauthenticatedRoute: 'PASS', messagesRouteShell: 'PASS', modelRouteShell: 'PASS', ageInternalReadiness: 'PASS', providerDisabled: 'PASS' },
+      recoveryBasis: 'Live runtime, API/Worker/Bot/AGATA image parity, Mini App build SHA, Prisma/Alembic heads, and health/smoke checks were independently verified after the original release apply switched runtime but failed AGATA identity parsing.'
+    };
+    const manifestFile = writeManifest(recoveryManifest);
+    const verifiedState = verifiedRuntimeState(current, { candidate, dbHead: facts.LIVE_PRISMA_HEAD });
+    fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...verifiedState, currentProductionRef: ref, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: finishedAt, releaseOrigin: 'durable-production-release', agataRuntimeSha: candidate, agataAlembicHead: facts.LIVE_AGATA_HEAD, agataProvider: 'disabled', recoveryRequired: false, lastReleaseFailureManifest: path.relative(ROOT, failedManifestPath), recoveryFinalizationManifest: path.relative(ROOT, manifestFile) }, null, 2)}\n`);
+    console.log(JSON.stringify({ status: 'COMPLETE', candidateSha: candidate, productionRef: ref, recoveryManifest: path.relative(ROOT, manifestFile), failedAttemptPreserved: path.relative(ROOT, failedManifestPath) }, null, 2));
+  } finally { unlock(); }
+}
+
 function main() {
   const args = process.argv.slice(2);
   if (args[0] === 'status' || args.includes('--status')) return status();
   if (args.includes('--provision-agata-config')) return provisionAgataConfig(candidateSha(args));
+  if (args.includes('--finalize-recovery')) return finalizeRecovery(candidateSha(args));
   const isDryRun = args.includes('--dry-run');
   const isApply = args.includes('--apply');
   if (!isDryRun && !isApply) die('choose --dry-run or --apply');

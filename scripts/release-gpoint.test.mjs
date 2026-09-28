@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, evaluateSafetyGates, failureEvidence, releaseStateAfterError, shouldFinalizeRecovery, validateCandidate, verifiedRuntimeState } from './release-gpoint.mjs';
-import { agataInternalConfigProvisionCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, planReleaseRetention, resolveRunnerPath, runRemoteCommand, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
+import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, evaluateSafetyGates, failureEvidence, recoveryRuntimeFailures, releaseStateAfterError, shouldFinalizeRecovery, validateCandidate, verifiedRuntimeState } from './release-gpoint.mjs';
+import { agataInternalConfigProvisionCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, parseAgataRuntimeIdentityLine, planReleaseRetention, resolveRunnerPath, runRemoteCommand, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
 
 const sha = '4d99e0da856d2ffe174c54d7ae7f2f971ab462f5';
 const artifacts = { api: { sourceSha: sha }, worker: { sourceSha: sha }, bot: { sourceSha: sha }, miniapp: { sourceSha: sha } };
@@ -69,6 +69,16 @@ test('AGATA runtime requires candidate image parity and healthy API/worker', () 
   assert.deepEqual(validateAgataRuntimeIdentity(sha, runtime), []);
   assert.ok(validateAgataRuntimeIdentity(sha, { ...runtime, workerHealth: 'starting' }).some(x => x.includes('worker')));
   assert.ok(validateAgataRuntimeIdentity('0'.repeat(40), runtime).some(x => x.includes('build SHA')));
+});
+
+test('AGATA runtime identity parser maps uppercase snake case fields to camel case', () => {
+  const imageId = 'sha256:' + 'c'.repeat(64);
+  const runtime = parseAgataRuntimeIdentityLine(`AGATA_IMAGE_ID=${imageId} AGATA_BUILD_SHA=${sha} AGATA_API_IMAGE=${imageId} AGATA_API_RUNNING=true AGATA_API_HEALTH=healthy AGATA_WORKER_IMAGE=${imageId} AGATA_WORKER_RUNNING=true AGATA_WORKER_HEALTH=healthy AGATA_HEAD=agata0007`);
+  assert.deepEqual(runtime, {
+    imageId, buildSha: sha, apiImage: imageId, apiRunning: 'true', apiHealth: 'healthy',
+    workerImage: imageId, workerRunning: 'true', workerHealth: 'healthy', head: 'agata0007',
+  });
+  assert.deepEqual(validateAgataRuntimeIdentity(sha, runtime), []);
 });
 
 test('AGATA provider-disabled config has internal keys but never requires LLM credentials', () => {
@@ -158,6 +168,21 @@ test('recovery can finalize exactly once only after all gates pass', () => {
   assert.equal(shouldFinalizeRecovery({ releaseState: 'RECOVERY_REQUIRED', candidate: sha, actualSha: sha, gatesPass: true }), true);
   assert.equal(canCreateProductionRef({ releaseState: 'VERIFIED', candidate: sha, actualSha: sha, mixedRuntime: false, health: true, dbVerified: true }), true);
   assert.equal(canCreateProductionRef({ releaseState: 'VERIFIED', candidate: sha, actualSha: sha, mixedRuntime: true, health: true, dbVerified: true }), false);
+});
+
+test('recovery finalization rejects mixed or unhealthy runtime facts', () => {
+  const facts = {
+    LIVE_RELEASE_ENV_SHA: sha, LIVE_API_SHA: sha, LIVE_API_RUNNING: 'true', LIVE_API_HEALTH: 'healthy',
+    LIVE_WORKER_SHA: sha, LIVE_WORKER_RUNNING: 'true', LIVE_BOT_SHA: sha, LIVE_BOT_RUNNING: 'true',
+    LIVE_MINIAPP_SHA: sha, LIVE_PRISMA_HEAD: 'prisma-head', LIVE_AGATA_HEAD: 'agata0007',
+    LIVE_AGATA_ENABLED: 'true', LIVE_AGATA_PROVIDER: 'disabled', LIVE_CONFIG_AGATA_LLM_API_KEY: 'NO',
+    LIVE_AGATA_API_SHA: sha, LIVE_AGATA_API_RUNNING: 'true', LIVE_AGATA_API_HEALTH: 'healthy',
+    LIVE_AGATA_WORKER_SHA: sha, LIVE_AGATA_WORKER_RUNNING: 'true', LIVE_AGATA_WORKER_HEALTH: 'healthy',
+    LIVE_AGATA_API_IMAGE_ID: 'sha256:shared', LIVE_AGATA_WORKER_IMAGE_ID: 'sha256:shared',
+  };
+  assert.deepEqual(recoveryRuntimeFailures(sha, facts, 'prisma-head'), []);
+  assert.ok(recoveryRuntimeFailures(sha, { ...facts, LIVE_AGATA_WORKER_HEALTH: 'unhealthy' }, 'prisma-head').includes('AGATA worker is not healthy'));
+  assert.ok(recoveryRuntimeFailures(sha, { ...facts, LIVE_MINIAPP_SHA: '0'.repeat(40) }, 'prisma-head').includes('Mini App SHA mismatch'));
 });
 
 test('verified release reconciles activeRuntimeSha only after verified switch', () => {
