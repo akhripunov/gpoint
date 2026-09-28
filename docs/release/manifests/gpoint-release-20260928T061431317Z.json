@@ -1,0 +1,21 @@
+{
+  "releaseId": "gpoint-release-20260928T061431317Z",
+  "candidateSha": "bb7f8dad9826730ddce86c741d0e3950595364e4",
+  "previousProductionSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+  "productionShaAfter": null,
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": null,
+  "startedAt": "2026-09-28T06:14:31.317Z",
+  "finishedAt": "2026-09-28T06:15:00.868Z",
+  "status": "RECOVERY_REQUIRED",
+  "failureStage": "PRE_SWITCH_DB_OR_AGATA",
+  "failureReason": "deploy.findIndex is not a function",
+  "failureCommand": null,
+  "failureCommandSha256": null,
+  "failureExitCode": null,
+  "failureStdout": "",
+  "failureStderr": "",
+  "rollbackSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+  "productionRef": null,
+  "releaseOrigin": "durable-production-release"
+}
