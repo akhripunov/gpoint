@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { applyCandidate, inspectProductionReadOnly, provisionAgataInternalConfigForBaseline } from './release-gpoint-vps-adapter.mjs';
+import { applyCandidate, inspectProductionReadOnly, planReleaseRetention, provisionAgataInternalConfigForBaseline } from './release-gpoint-vps-adapter.mjs';
 
 const ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const STATE_FILE = path.join(ROOT, 'docs/release/state/production.json');
@@ -22,6 +22,31 @@ function assertSha(value, name = 'candidate SHA') { if (!SHA_RE.test(value ?? ''
 function candidateSha(args) { const i = args.indexOf('--candidate'); const value = i >= 0 ? args[i + 1] : process.env.GPOINT_CANDIDATE_SHA; assertSha(value); return value; }
 function state() { return readJson(STATE_FILE); }
 function writeManifest(manifest) { fs.mkdirSync(MANIFEST_DIR, { recursive: true }); const file = path.join(MANIFEST_DIR, `${manifest.releaseId}.json`); if (fs.existsSync(file)) die(`manifest already exists: ${file}`); fs.writeFileSync(file, `${JSON.stringify(manifest, null, 2)}\n`, { flag: 'wx' }); return file; }
+
+function releaseRetentionCandidates() {
+  const reconciliations = new Map();
+  for (const name of fs.readdirSync(MANIFEST_DIR).filter(name => name.endsWith('.json'))) {
+    const record = readJson(path.join(MANIFEST_DIR, name));
+    if (!record.failedReleaseId || record.runtimeSwitchOccurred !== false || record.databaseApplyOccurred !== false) continue;
+    if (record.recordedProductionSha && record.liveProductionSha && record.recordedProductionSha !== record.liveProductionSha) continue;
+    const state = record.failureClassification?.reconciled ?? record.correctedFailureStage;
+    if (state === 'FAILED_PRE_SWITCH' || state === 'FAILED_MIGRATION' || record.eventType === 'FAILED_RELEASE_PRE_SWITCH_RECONCILIATION' || (record.eventType === 'FAILED_RELEASE_STATE_CORRECTION' && state === 'PRE_SWITCH')) {
+      reconciliations.set(record.failedReleaseId, state === 'FAILED_MIGRATION' ? 'FAILED_MIGRATION' : 'FAILED_PRE_SWITCH');
+    }
+  }
+  return fs.readdirSync(MANIFEST_DIR)
+    .filter(name => name.endsWith('.json') && name.startsWith('gpoint-release-'))
+    .map(name => readJson(path.join(MANIFEST_DIR, name)))
+    .filter(manifest => /^[0-9a-f]{40}$/.test(manifest.candidateSha ?? ''))
+    .map(manifest => {
+      const reconciledStatus = reconciliations.get(manifest.releaseId);
+      return {
+        sha: manifest.candidateSha,
+        status: reconciledStatus ?? manifest.status,
+        recoveryRequired: reconciledStatus ? false : manifest.status === 'RECOVERY_REQUIRED',
+      };
+    });
+}
 
 export function sanitizeReleaseOutput(value) {
   return String(value ?? '')
@@ -253,7 +278,15 @@ function runApply(candidate) {
     const gates = evaluateSafetyGates({ candidateSha: candidate, remoteSha: proof.mainSha, artifacts, config: effective, recordedProductionSha: current.currentProductionSha, liveProductionSha: liveSha, productionRefTarget: candidate });
     gates.push(...checkAgataArtifactParity(candidate, artifacts), ...checkAgataEffectiveConfig({ provider: effective.agataProvider, enabled: effective.agataEnabled }));
     if (gates.length) die(gates.join('; '));
+    const retentionCandidates = releaseRetentionCandidates();
+    const retentionPlan = planReleaseRetention({
+      currentSha: candidate,
+      rollbackSha: liveSha,
+      candidates: retentionCandidates,
+      imageTags: retentionCandidates.flatMap(({ sha }) => [`gpoint-runtime:${sha}`, `gpoint-agata-runtime:${sha}`]),
+    });
     const adapter = applyCandidate(candidate, {
+      retentionPlan,
       onMigrationStart: () => { migrationStarted = true; },
       onAgataStart: () => { agataStartStarted = true; },
       onSwitchStart: () => { switchStarted = true; },

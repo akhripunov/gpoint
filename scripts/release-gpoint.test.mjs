@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, evaluateSafetyGates, failureEvidence, releaseStateAfterError, shouldFinalizeRecovery, validateCandidate, verifiedRuntimeState } from './release-gpoint.mjs';
-import { agataInternalConfigProvisionCommand, classifyPostSwitchState, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, resolveRunnerPath, runRemoteCommand, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
+import { agataInternalConfigProvisionCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, planReleaseRetention, resolveRunnerPath, runRemoteCommand, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
 
 const sha = '4d99e0da856d2ffe174c54d7ae7f2f971ab462f5';
 const artifacts = { api: { sourceSha: sha }, worker: { sourceSha: sha }, bot: { sourceSha: sha }, miniapp: { sourceSha: sha } };
@@ -149,6 +149,56 @@ test('same candidate exact image is reusable and up-to-date migration is not red
   assert.equal(shouldReuseCandidateImage({ candidate: sha, exactRuntimeImage: true }), true);
   assert.equal(migrationNeedsDeploy('Database schema is up to date!'), false);
   assert.equal(migrationNeedsDeploy('Following migrations have not yet been applied'), true);
+});
+
+test('release retention protects unresolved RECOVERY_REQUIRED candidate', () => {
+  const plan = planReleaseRetention({
+    currentSha: 'a'.repeat(40), rollbackSha: 'b'.repeat(40),
+    candidates: [{ sha, status: 'RECOVERY_REQUIRED', recoveryRequired: true }],
+    imageTags: [`gpoint-runtime:${sha}`, `gpoint-agata-runtime:${sha}`],
+  });
+  assert.deepEqual(plan.removableShas, []);
+  assert.deepEqual(plan.protectedShas, ['a'.repeat(40), 'b'.repeat(40), sha].sort());
+});
+
+test('release retention removes a reconciled FAILED candidate and its attributable cache only', () => {
+  const cacheId = 'cacheRecord_42';
+  const plan = planReleaseRetention({
+    currentSha: 'a'.repeat(40), rollbackSha: 'b'.repeat(40),
+    candidates: [{ sha, status: 'FAILED_PRE_SWITCH', recoveryRequired: false }],
+    imageTags: [`gpoint-runtime:${sha}`, `gpoint-agata-runtime:${sha}`],
+    cacheRecords: [{ id: cacheId, candidateSha: sha, reclaimable: true }, { id: 'shared-cache', candidateSha: sha, reclaimable: false }],
+  });
+  assert.deepEqual(plan.removableShas, [sha]);
+  assert.deepEqual(plan.removableCacheIds, [cacheId]);
+});
+
+test('release retention protects current and rollback SHAs', () => {
+  const current = 'a'.repeat(40);
+  const rollback = 'b'.repeat(40);
+  const plan = planReleaseRetention({
+    currentSha: current, rollbackSha: rollback,
+    candidates: [{ sha: current, status: 'COMPLETE' }, { sha: rollback, status: 'COMPLETE' }],
+    imageTags: [`gpoint-runtime:${current}`, `gpoint-runtime:${rollback}`],
+  });
+  assert.deepEqual(plan.removableShas, []);
+});
+
+test('release retention never plans volume removal', () => {
+  const plan = planReleaseRetention({ candidates: [], imageTags: [], volumes: ['postgres-data'] });
+  assert.deepEqual(plan.volumesToRemove, []);
+  assert.equal(Object.hasOwn(plan, 'volumes'), false);
+});
+
+test('candidate cache cleanup is exact-SHA scoped and rejects ambiguous SHA', () => {
+  const command = candidateBuildCacheCleanupCommand(sha);
+  const encoded = command.match(/printf '%s' '([A-Za-z0-9+/=]+)'/)?.[1];
+  const script = Buffer.from(encoded ?? '', 'base64').toString('utf8');
+  assert.match(script, /docker','buildx/);
+  assert.match(script, /CACHE_CLEANUP_SKIPPED=overlapping_unrelated_build/);
+  assert.match(script, /id~=/);
+  assert.match(script, /usage!='1'/);
+  assert.throws(() => candidateBuildCacheCleanupCommand('not-a-sha'), /exact candidate SHA/);
 });
 
 test('detector identity is independent and rebuilds only when source inputs change', () => {

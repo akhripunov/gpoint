@@ -127,6 +127,93 @@ export function shouldReuseCandidateImage({ candidate, availableTags = [], exact
   return exactRuntimeImage || availableTags.includes(`gpoint-runtime:${candidate}`);
 }
 
+const TERMINAL_RELEASE_STATES = new Set(['COMPLETE', 'FAILED', 'FAILED_PRE_SWITCH', 'FAILED_MIGRATION']);
+
+/** Plan SHA-scoped cleanup. Backups and volumes are intentionally never candidates for deletion. */
+export function planReleaseRetention({ currentSha, rollbackSha, candidates = [], imageTags = [], cacheRecords = [], containers = [], tempFiles = [] }) {
+  const protectedShas = new Set([currentSha, rollbackSha].filter(Boolean));
+  for (const candidate of candidates) {
+    if (!TERMINAL_RELEASE_STATES.has(candidate.status) || candidate.recoveryRequired === true) protectedShas.add(candidate.sha);
+  }
+  const terminalShas = new Set(candidates
+    .filter(candidate => TERMINAL_RELEASE_STATES.has(candidate.status) && candidate.recoveryRequired !== true)
+    .map(candidate => candidate.sha));
+  const removableShas = [...new Set(imageTags
+    .map(tag => tag.match(/^gpoint-(?:agata-)?runtime:([0-9a-f]{40})$/)?.[1])
+    .filter(sha => sha && terminalShas.has(sha) && !protectedShas.has(sha)))].sort();
+  const candidateShaForResource = resource => resource.candidateSha;
+  const isRemovable = resource => {
+    const sha = candidateShaForResource(resource);
+    return sha && terminalShas.has(sha) && !protectedShas.has(sha);
+  };
+  return {
+    protectedShas: [...protectedShas].sort(),
+    removableShas,
+    removableCacheIds: [...new Set(cacheRecords.filter(record => record.reclaimable && record.shared !== true && record.id && isRemovable(record)).map(record => record.id))].sort(),
+    removableContainers: [...new Set(containers.filter(container => ['created', 'exited'].includes(container.state) && isRemovable(container)).map(container => container.id))].sort(),
+    removableTempFiles: [...new Set(tempFiles.filter(isRemovable).map(file => file.path))].sort(),
+    volumesToRemove: [],
+  };
+}
+
+export function candidateBuildCacheCleanupCommand(candidateSha) {
+  if (!/^[0-9a-f]{40}$/.test(candidateSha ?? '')) throw new Error('exact candidate SHA is required for cache cleanup');
+  const script = `import datetime, json, re, subprocess, sys
+sha=${JSON.stringify(candidateSha)}
+def run(args): return subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE).stdout
+def parse_iso(value): return datetime.datetime.fromisoformat(re.sub(r'(\\.\\d{6})\\d+(?=Z|[+-])',r'\\1',value).replace('Z','+00:00'))
+records=[]
+for line in run(['docker','buildx','history','ls','--no-trunc','--format','json']).splitlines():
+    try: row=json.loads(line)
+    except json.JSONDecodeError: continue
+    if row.get('created_at') and row.get('completed_at'):
+        row['_start']=parse_iso(row['created_at'])
+        row['_end']=parse_iso(row['completed_at'])
+        records.append(row)
+history=[]
+for row in records:
+    if sha in row.get('name','') and ('gpoint-dockerfile-' + sha in row.get('name','') or 'gpoint-agata-dockerfile-' + sha in row.get('name','')):
+        if row.get('status') not in ('Completed','Error'):
+            print('CACHE_CLEANUP_SKIPPED=build_not_terminal'); sys.exit(0)
+        history.append((row['name'],row['_start'],row['_end']))
+if not history:
+    print('CACHE_CLEANUP_SKIPPED=no_candidate_build_history'); sys.exit(0)
+for row in records:
+    if sha not in row.get('name','') and any(row['_start'] < end and row['_end'] > start for _,start,end in history):
+        print('CACHE_CLEANUP_SKIPPED=overlapping_unrelated_build'); sys.exit(0)
+fmt='{{.ID}}|{{.CreatedAt}}|{{.Reclaimable}}|{{.Shared}}|{{.UsageCount}}'
+rows=run(['docker','buildx','du','--format',fmt]).splitlines()
+targets=[]
+for line in rows:
+    parts=line.split('|',4)
+    if len(parts)!=5: continue
+    ident,created,reclaimable,shared,usage=parts
+    if not re.fullmatch(r'[A-Za-z0-9_-]+',ident): continue
+    try:
+        stamp=created.replace(' UTC','')
+        match=re.fullmatch(r'(\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d)\\.(\\d+) ([+-]\\d{4})',stamp)
+        if not match: continue
+        timestamp=datetime.datetime.strptime(match.group(1)+'.'+match.group(2)[:6].ljust(6,'0')+' '+match.group(3),'%Y-%m-%d %H:%M:%S.%f %z')
+    except ValueError: continue
+    if reclaimable!='true' or shared!='false' or usage!='1': continue
+    if any(start <= timestamp <= end for _,start,end in history): targets.append(ident)
+pending=set(targets); removed=set()
+for _ in range(4):
+    current={line.split('|',1)[0] for line in run(['docker','buildx','du','--format',fmt]).splitlines() if '|' in line}
+    pending.intersection_update(current)
+    if not pending: break
+    pattern='^('+'|'.join(sorted(pending))+')$'
+    run(['docker','buildx','prune','--filter','id~='+pattern,'--force'])
+    after={line.split('|',1)[0] for line in run(['docker','buildx','du','--format',fmt]).splitlines() if '|' in line}
+    removed.update(pending-after)
+    if pending.issubset(after): break
+    pending.intersection_update(after)
+print('CACHE_RECORDS_REMOVED='+str(len(removed)))
+print('CACHE_RECORDS_RETAINED='+str(len(pending)))
+`;
+  return `printf '%s' '${Buffer.from(script).toString('base64')}' | base64 -d | python3 -`;
+}
+
 export function migrationNeedsDeploy(statusOutput) {
   return !/Database schema is up to date!|No pending migrations to apply\./i.test(statusOutput ?? '');
 }
@@ -240,7 +327,7 @@ export function exactCheckout(sha) {
   }
 }
 
-export function applyCandidate(sha, { onMigrationStart = () => {}, onAgataStart = () => {}, onSwitchStart = () => {} } = {}) {
+export function applyCandidate(sha, { retentionPlan = { removableShas: [], removableCacheIds: [] }, onMigrationStart = () => {}, onAgataStart = () => {}, onSwitchStart = () => {} } = {}) {
   const checkout = exactCheckout(sha);
   const timings = {};
   const detectorHash = detectorSourceHash(checkout);
@@ -350,7 +437,14 @@ export function applyCandidate(sha, { onMigrationStart = () => {}, onAgataStart 
     const agataRuntime = Object.fromEntries(['IMAGE_ID', 'BUILD_SHA', 'API_IMAGE', 'API_RUNNING', 'API_HEALTH', 'WORKER_IMAGE', 'WORKER_RUNNING', 'WORKER_HEALTH', 'HEAD'].map(key => [key.replace(/_([A-Z])/g, (_, c) => c.toLowerCase()).replace(/^./, c => c.toLowerCase()), agataLine.match(new RegExp(`${key}=([^\\s]+)`))?.[1]]));
     const agataFailures = validateAgataRuntimeIdentity(sha, { imageId: agataRuntime.imageId, buildSha: agataRuntime.buildSha, apiImage: agataRuntime.apiImage, apiRunning: agataRuntime.apiRunning, apiHealth: agataRuntime.apiHealth, workerImage: agataRuntime.workerImage, workerRunning: agataRuntime.workerRunning, workerHealth: agataRuntime.workerHealth });
     if (agataFailures.length || agataRuntime.head !== 'agata0007') throw new Error(`AGATA runtime identity verification failed: ${agataFailures.join('; ') || 'Alembic head mismatch'}: ${agataIdentityOutput}`);
-    const cleanup = stage(timings, 'POST_RELEASE_CLEANUP', () => run(`set -e; docker ps -aq --filter name=gpoint-static- --filter status=created --filter status=exited | xargs -r docker rm >/dev/null; rm -f /tmp/gpoint-previous-runtime-${sha} /tmp/gpoint-aux-${sha}; echo GPOINT_POST_RELEASE_CLEANUP_OK`));
+    const removableShas = [...new Set(retentionPlan.removableShas ?? [])].filter(candidate => /^[0-9a-f]{40}$/.test(candidate) && candidate !== sha).join(' ');
+    const terminalCleanup = removableShas ? removableShas.split(' ').map(candidate =>
+      `for ref in gpoint-runtime:${candidate} gpoint-agata-runtime:${candidate}; do for status in created exited; do docker ps -aq --filter ancestor="$ref" --filter status="$status" | xargs -r docker rm >/dev/null; done; done; if [ -z "$(docker ps -aq --filter ancestor=gpoint-runtime:${candidate})" ] && [ -z "$(docker ps -aq --filter ancestor=gpoint-agata-runtime:${candidate})" ]; then docker image rm gpoint-runtime:${candidate} gpoint-agata-runtime:${candidate} >/dev/null 2>&1 || true; rm -f /tmp/gpoint-${candidate}.tar.gz /tmp/gpoint-compose-${candidate}.yml /tmp/gpoint-caddy-${candidate} /tmp/gpoint-dockerfile-${candidate} /tmp/gpoint-agata-dockerfile-${candidate} /tmp/gpoint-safety-dockerfile-${candidate} /tmp/gpoint-safety-config-${candidate}.mjs /tmp/gpoint-image-id-${candidate} /tmp/gpoint-agata-image-id-${candidate} /tmp/gpoint-previous-runtime-${candidate} /tmp/gpoint-aux-${candidate}; fi`
+    ).join('; ') : 'true';
+    const cacheCleanup = removableShas
+      ? removableShas.split(' ').map(candidateBuildCacheCleanupCommand).join('; ')
+      : "echo GPOINT_BUILD_CACHE_PRESERVED reason=no_terminal_candidate_cache";
+    const cleanup = stage(timings, 'POST_RELEASE_CLEANUP', () => run(`set -e; test "$(sed -n 's/^RELEASE_SHA=//p' /opt/gpoint/env/production.env | head -1)" = '${sha}'; ${terminalCleanup}; ${cacheCleanup}; rm -f /tmp/gpoint-previous-runtime-${sha} /tmp/gpoint-aux-${sha}; echo GPOINT_POST_RELEASE_CLEANUP_OK`));
     if (!cleanup.includes('GPOINT_POST_RELEASE_CLEANUP_OK')) throw new Error('post-release cleanup failed');
     const migrationOutput = [
       migration.includes('Database schema is up to date!') ? 'DATABASE_SCHEMA_UP_TO_DATE' : null,
