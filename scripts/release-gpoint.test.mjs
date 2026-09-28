@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, evaluateSafetyGates, failureEvidence, recoveryRuntimeFailures, releaseStateAfterError, shouldFinalizeRecovery, validateCandidate, verifiedRuntimeState } from './release-gpoint.mjs';
+import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, evaluateSafetyGates, failureEvidence, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, shouldFinalizeRecovery, validateCandidate, verifiedRuntimeState } from './release-gpoint.mjs';
 import { agataInternalConfigProvisionCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, parseAgataRuntimeIdentityLine, planReleaseRetention, resolveRunnerPath, runRemoteCommand, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
 
 const sha = '4d99e0da856d2ffe174c54d7ae7f2f971ab462f5';
@@ -183,6 +183,21 @@ test('recovery finalization rejects mixed or unhealthy runtime facts', () => {
   assert.deepEqual(recoveryRuntimeFailures(sha, facts, 'prisma-head'), []);
   assert.ok(recoveryRuntimeFailures(sha, { ...facts, LIVE_AGATA_WORKER_HEALTH: 'unhealthy' }, 'prisma-head').includes('AGATA worker is not healthy'));
   assert.ok(recoveryRuntimeFailures(sha, { ...facts, LIVE_MINIAPP_SHA: '0'.repeat(40) }, 'prisma-head').includes('Mini App SHA mismatch'));
+});
+
+test('recovery artifact identities are derived from verified live candidate facts', () => {
+  const facts = {
+    LIVE_API_IMAGE: 'sha256:api', LIVE_WORKER_IMAGE: 'sha256:worker', LIVE_BOT_IMAGE: 'sha256:bot',
+    LIVE_MINIAPP_SHA: sha, LIVE_AGATA_API_IMAGE_ID: 'sha256:agata', LIVE_AGATA_WORKER_IMAGE_ID: 'sha256:agata',
+  };
+  assert.deepEqual(recoveryArtifactIdentities(sha, facts), {
+    api: { sourceSha: sha, runtimeImageId: 'sha256:api' },
+    worker: { sourceSha: sha, runtimeImageId: 'sha256:worker' },
+    bot: { sourceSha: sha, runtimeImageId: 'sha256:bot' },
+    miniapp: { sourceSha: sha, servedBuildSha: sha },
+    agataApi: { sourceSha: sha, runtimeImageId: 'sha256:agata' },
+    agataWorker: { sourceSha: sha, runtimeImageId: 'sha256:agata' },
+  });
 });
 
 test('verified release reconciles activeRuntimeSha only after verified switch', () => {

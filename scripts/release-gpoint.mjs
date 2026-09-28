@@ -164,6 +164,18 @@ export function recoveryRuntimeFailures(candidate, facts, expectedDbHead) {
   return failures;
 }
 
+export function recoveryArtifactIdentities(candidate, facts) {
+  const runtimeImageId = facts.LIVE_API_IMAGE;
+  return {
+    api: { sourceSha: candidate, runtimeImageId },
+    worker: { sourceSha: candidate, runtimeImageId: facts.LIVE_WORKER_IMAGE },
+    bot: { sourceSha: candidate, runtimeImageId: facts.LIVE_BOT_IMAGE },
+    miniapp: { sourceSha: candidate, servedBuildSha: facts.LIVE_MINIAPP_SHA },
+    agataApi: { sourceSha: candidate, runtimeImageId: facts.LIVE_AGATA_API_IMAGE_ID },
+    agataWorker: { sourceSha: candidate, runtimeImageId: facts.LIVE_AGATA_WORKER_IMAGE_ID },
+  };
+}
+
 export function evaluateSafetyGates({ candidateSha: sha, remoteSha, clean = true, artifacts, config, backupReady = true, migrationOk = true, concurrent = false, recordedProductionSha, liveProductionSha, productionRefTarget }) {
   const failures = validateCandidate({ candidateSha: sha, remoteSha, clean });
   failures.push(...checkArtifactParity(sha, artifacts));
@@ -408,6 +420,7 @@ function finalizeRecovery(candidate) {
       candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: candidate,
       dbHeadBefore: current.currentProductionDbHead, dbHeadAfter: facts.LIVE_PRISMA_HEAD,
       agataDbHeadAfter: facts.LIVE_AGATA_HEAD, agataRuntimeSha: candidate, agataProvider: 'disabled',
+      artifactIdentities: recoveryArtifactIdentities(candidate, facts),
       startedAt, finishedAt, status: 'COMPLETE', failureStage: null, failureReason: null,
       productionRef: ref, remoteProductionRefTarget: remoteRef, remoteMainSha: remoteMain,
       runtimeFacts: Object.fromEntries(Object.entries(facts).filter(([key]) => key.startsWith('LIVE_'))),
@@ -416,7 +429,7 @@ function finalizeRecovery(candidate) {
     };
     const manifestFile = writeManifest(recoveryManifest);
     const verifiedState = verifiedRuntimeState(current, { candidate, dbHead: facts.LIVE_PRISMA_HEAD });
-    fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...verifiedState, currentProductionRef: ref, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: finishedAt, releaseOrigin: 'durable-production-release', agataRuntimeSha: candidate, agataAlembicHead: facts.LIVE_AGATA_HEAD, agataProvider: 'disabled', recoveryRequired: false, lastReleaseFailureManifest: path.relative(ROOT, failedManifestPath), recoveryFinalizationManifest: path.relative(ROOT, manifestFile) }, null, 2)}\n`);
+    fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...verifiedState, currentProductionRef: ref, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: finishedAt, releaseOrigin: 'durable-production-release', agataRuntimeSha: candidate, agataAlembicHead: facts.LIVE_AGATA_HEAD, agataProvider: 'disabled', artifactIdentities: recoveryManifest.artifactIdentities, recoveryRequired: false, lastReleaseFailureManifest: path.relative(ROOT, failedManifestPath), recoveryFinalizationManifest: path.relative(ROOT, manifestFile) }, null, 2)}\n`);
     console.log(JSON.stringify({ status: 'COMPLETE', candidateSha: candidate, productionRef: ref, recoveryManifest: path.relative(ROOT, manifestFile), failedAttemptPreserved: path.relative(ROOT, failedManifestPath) }, null, 2));
   } finally { unlock(); }
 }
