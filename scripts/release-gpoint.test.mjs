@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, evaluateSafetyGates, releaseStateAfterError, shouldFinalizeRecovery, validateCandidate, verifiedRuntimeState } from './release-gpoint.mjs';
+import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, evaluateSafetyGates, failureEvidence, releaseStateAfterError, shouldFinalizeRecovery, validateCandidate, verifiedRuntimeState } from './release-gpoint.mjs';
 import { agataInternalConfigProvisionCommand, classifyPostSwitchState, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, resolveRunnerPath, runRemoteCommand, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
 
 const sha = '4d99e0da856d2ffe174c54d7ae7f2f971ab462f5';
@@ -175,9 +175,32 @@ test('remote runner retains exact exit code and stderr without a parent pipe buf
   fs.chmodSync(runner, 0o700);
   const previous = process.env.GPOINT_REMOTE_RUNNER;
   process.env.GPOINT_REMOTE_RUNNER = runner;
-  assert.throws(() => runRemoteCommand('safe-test-command'), error => error.exitCode === 17 && error.stderr.includes('diagnostic-stderr'));
+  let captured;
+  assert.throws(() => runRemoteCommand('safe-test-command'), error => {
+    captured = error;
+    return error.exitCode === 17 && error.stderr.includes('diagnostic-stderr') && /^[0-9a-f]{64}$/.test(error.commandHash);
+  });
+  assert.equal(failureEvidence(captured, { stage: 'MIGRATION_APPLY' }).failureStage, 'MIGRATION_APPLY');
+  assert.equal(failureEvidence(captured, { stage: 'MIGRATION_APPLY' }).failureExitCode, 17);
   if (previous === undefined) delete process.env.GPOINT_REMOTE_RUNNER; else process.env.GPOINT_REMOTE_RUNNER = previous;
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('remote migration failure evidence preserves output and exit while redacting secrets and command payloads', () => {
+  const error = Object.assign(new Error('remote command failed (exit=1, command_sha256=abc)'), {
+    exitCode: 1,
+    command: 'sha256:abc',
+    commandHash: 'abc',
+    stdout: 'migration output',
+    stderr: 'permission denied; AGATA_INTERNAL_API_TOKEN=secret-value DATABASE_URL=postgresql://gpoint:db-secret@db/gpoint',
+  });
+  const evidence = failureEvidence(error, { stage: 'MIGRATION_APPLY' });
+  assert.equal(evidence.failureStage, 'MIGRATION_APPLY');
+  assert.equal(evidence.failureExitCode, 1);
+  assert.equal(evidence.failureCommand, 'MIGRATION_APPLY');
+  assert.equal(evidence.failureStdout, 'migration output');
+  assert.match(evidence.failureStderr, /permission denied/);
+  assert.doesNotMatch(JSON.stringify(evidence), /secret-value|db-secret/);
 });
 
 test('apply checkout uses the exact local commit in a clean isolated worktree', () => {

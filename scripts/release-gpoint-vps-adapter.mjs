@@ -99,13 +99,19 @@ export function provisionAgataInternalConfigForBaseline(expectedSha) {
 
 export class RemoteCommandError extends Error {
   constructor(command, error) {
-    super(`remote command failed (exit=${error.status ?? 'unknown'}): ${command}`);
+    const commandHash = crypto.createHash('sha256').update(command).digest('hex');
+    const stdout = String(error.stdout ?? '');
+    const stderr = String(error.stderr ?? '');
+    super(`remote command failed (exit=${error.status ?? 'unknown'}, command_sha256=${commandHash})`);
     this.name = 'RemoteCommandError';
     this.code = 'REMOTE_COMMAND_FAILED';
-    this.command = command;
+    this.command = `sha256:${commandHash}`;
+    this.commandHash = commandHash;
     this.exitCode = Number.isInteger(error.status) ? error.status : null;
-    this.stdout = String(error.stdout ?? '');
-    this.stderr = String(error.stderr ?? '');
+    this.stdout = stdout;
+    // Some approved wrappers multiplex the remote stderr stream into stdout.
+    // Preserve that output as diagnostic stderr when the local stderr pipe is empty.
+    this.stderr = stderr || stdout;
     this.cause = error;
   }
 }
@@ -141,6 +147,10 @@ function stage(timings, name, action) {
   const started = Date.now();
   console.error(`${name} START`);
   try { return action(); }
+  catch (error) {
+    if (error && typeof error === 'object' && !error.releaseStage) error.releaseStage = name;
+    throw error;
+  }
   finally { timings[name] = Number(((Date.now() - started) / 1000).toFixed(1)); console.error(`${name} = ${timings[name]}s`); }
 }
 

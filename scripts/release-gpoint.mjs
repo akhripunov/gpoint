@@ -23,6 +23,28 @@ function candidateSha(args) { const i = args.indexOf('--candidate'); const value
 function state() { return readJson(STATE_FILE); }
 function writeManifest(manifest) { fs.mkdirSync(MANIFEST_DIR, { recursive: true }); const file = path.join(MANIFEST_DIR, `${manifest.releaseId}.json`); if (fs.existsSync(file)) die(`manifest already exists: ${file}`); fs.writeFileSync(file, `${JSON.stringify(manifest, null, 2)}\n`, { flag: 'wx' }); return file; }
 
+export function sanitizeReleaseOutput(value) {
+  return String(value ?? '')
+    .replace(/((?:password|passwd|token|secret|api[_-]?key|private[_-]?key|database_url|dsn)\s*=\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1[REDACTED]')
+    .replace(/(postgres(?:ql)?(?:\+[a-z0-9]+)?:\/\/[^:\s/@]+:)[^@\s/]+@/gi, '$1[REDACTED]@')
+    .replace(/(\bBearer\s+)[^\s"'`]+/gi, '$1[REDACTED]')
+    .slice(-4000);
+}
+
+export function failureEvidence(error, { stage, fallbackStage } = {}) {
+  const stdout = String(error?.stdout ?? '');
+  const stderr = String(error?.stderr || error?.output || stdout);
+  return {
+    failureStage: stage || fallbackStage || 'UNKNOWN',
+    failureReason: sanitizeReleaseOutput(error?.message),
+    failureCommand: stage || error?.command || null,
+    failureCommandSha256: error?.commandHash ?? null,
+    failureExitCode: Number.isInteger(error?.exitCode) ? error.exitCode : Number.isInteger(error?.status) ? error.status : null,
+    failureStdout: sanitizeReleaseOutput(stdout),
+    failureStderr: sanitizeReleaseOutput(stderr),
+  };
+}
+
 export function validateCandidate({ candidateSha: sha, remoteSha, clean = true }) {
   const failures = [];
   try { assertSha(sha); } catch (e) { failures.push(e.message); }
@@ -270,11 +292,7 @@ function runApply(candidate) {
       startedAt,
       finishedAt: isoNow(),
       status: releaseState,
-      failureStage: failure.failureStage,
-      failureReason: error.message,
-      failureCommand: error.command ?? null,
-      failureExitCode: error.exitCode ?? null,
-      failureStderr: error.stderr ? String(error.stderr).slice(-4000) : null,
+      ...failureEvidence(error, { stage: error.releaseStage, fallbackStage: failure.failureStage }),
       rollbackSha: current.currentProductionSha,
       productionRef: null,
       releaseOrigin: 'durable-production-release'
