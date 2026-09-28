@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, evaluateSafetyGates, releaseStateAfterError, shouldFinalizeRecovery, validateCandidate, verifiedRuntimeState } from './release-gpoint.mjs';
-import { agataInternalConfigProvisionCommand, classifyPostSwitchState, detectorNeedsRebuild, detectorSourceHash, exactCheckout, migrationNeedsDeploy, resolveRunnerPath, runRemoteCommand, shouldReuseCandidateImage, upload, validateAgataProviderConfig, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
+import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, evaluateSafetyGates, releaseStateAfterError, shouldFinalizeRecovery, validateCandidate, verifiedRuntimeState } from './release-gpoint.mjs';
+import { agataInternalConfigProvisionCommand, classifyPostSwitchState, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, resolveRunnerPath, runRemoteCommand, shouldReuseCandidateImage, upload, validateAgataProviderConfig, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
 
 const sha = '4d99e0da856d2ffe174c54d7ae7f2f971ab462f5';
 const artifacts = { api: { sourceSha: sha }, worker: { sourceSha: sha }, bot: { sourceSha: sha }, miniapp: { sourceSha: sha } };
@@ -47,6 +47,12 @@ test('all parity gates pass only when every role shares the candidate', () => {
 });
 test('backup failure blocks before migration', () => assert.ok(evaluateSafetyGates({ candidateSha: sha, remoteSha: sha, artifacts, config, backupReady: false, recordedProductionSha: sha, liveProductionSha: sha }).includes('backup gate failed')));
 test('migration failure blocks runtime switch', () => assert.ok(evaluateSafetyGates({ candidateSha: sha, remoteSha: sha, artifacts, config, migrationOk: false, recordedProductionSha: sha, liveProductionSha: sha }).includes('migration gate failed')));
+test('pre-switch Docker Compose preflight error is not misclassified as a runtime switch', () => {
+  const failure = classifyReleaseFailure({ command: 'docker compose version failed', switchStarted: false });
+  assert.equal(failure.switched, false);
+  assert.equal(failure.releaseState, 'FAILED_PRE_SWITCH');
+  assert.equal(failure.failureStage, 'PRE_SWITCH');
+});
 test('held release lock rejects a concurrent release', () => assert.ok(evaluateSafetyGates({ candidateSha: sha, remoteSha: sha, artifacts, config, concurrent: true, recordedProductionSha: sha, liveProductionSha: sha }).includes('concurrent release lock is held')));
 test('recorded/live production drift blocks', () => assert.ok(evaluateSafetyGates({ candidateSha: sha, remoteSha: sha, artifacts, config, recordedProductionSha: '0'.repeat(40), liveProductionSha: sha }).includes('live production SHA drift')));
 test('remote production ref mismatch blocks completion', () => assert.ok(evaluateSafetyGates({ candidateSha: sha, remoteSha: sha, artifacts, config, recordedProductionSha: sha, liveProductionSha: sha, productionRefTarget: '0'.repeat(40) }).includes('production ref target mismatch')));
@@ -73,6 +79,14 @@ test('AGATA provider-disabled config has internal keys but never requires LLM cr
   const script = Buffer.from(provision.match(/printf '%s' '([^']+)'/)[1], 'base64').toString();
   assert.match(script, /AGATA_LLM_PROVIDER.*disabled/);
   assert.doesNotMatch(script, /AGATA_LLM_API_KEY=/);
+});
+
+test('all disposable Prisma/AGATA database runners use shared_internal', () => {
+  const adapter = fs.readFileSync(new URL('./release-gpoint-vps-adapter.mjs', import.meta.url), 'utf8');
+  assert.equal(GPOINT_DATABASE_NETWORK, 'shared_internal');
+  assert.equal(databaseNetworkArgs('gpoint-preflight'), '--network shared_internal --network-alias gpoint-preflight');
+  assert.ok((adapter.match(/\$\{databaseNetworkArgs\(/g) ?? []).length >= 8);
+  assert.doesNotMatch(adapter, /--network gpoint_app --network-alias gpoint-(?:preflight|migration|agata-preflight|agata-migration|agata-verify)/);
 });
 
 test('nonzero compose after candidate switch enters switched-unverified recovery', () => {

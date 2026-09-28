@@ -64,6 +64,19 @@ export function releaseStateAfterError({ switched, runtimeVerified = false }) {
   return runtimeVerified ? 'RECOVERY_REQUIRED' : 'SWITCHED_UNVERIFIED';
 }
 
+export function classifyReleaseFailure({ switchStarted = false, migrationStarted = false, agataStartStarted = false }) {
+  const switched = switchStarted;
+  const partiallyMutated = migrationStarted || agataStartStarted;
+  return {
+    switched,
+    partiallyMutated,
+    releaseState: switched || partiallyMutated
+      ? 'RECOVERY_REQUIRED'
+      : releaseStateAfterError({ switched, runtimeVerified: false }),
+    failureStage: switched ? 'POST_SWITCH' : partiallyMutated ? 'PRE_SWITCH_DB_OR_AGATA' : 'PRE_SWITCH',
+  };
+}
+
 export function verifiedRuntimeState(current, { candidate, dbHead }) {
   return {
     ...current,
@@ -245,9 +258,8 @@ function runApply(candidate) {
     fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...verifiedState, currentProductionRef: ref, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: manifest.finishedAt, releaseOrigin: 'durable-production-release', agataRuntimeSha: candidate, agataAlembicHead: adapter.agataIdentity.head, agataProvider: 'disabled', artifactIdentities: manifest.artifactIdentities }, null, 2)}\n`);
     console.log(JSON.stringify({ status: 'COMPLETE', releaseId, candidateSha: candidate, productionRef: ref, manifest: path.relative(ROOT, file) }, null, 2));
   } catch (error) {
-    const switched = switchStarted || error?.code === 'REMOTE_COMMAND_FAILED' && /compose|deploy|health|identity/i.test(error.command ?? '');
-    const partiallyMutated = migrationStarted || agataStartStarted;
-    const releaseState = switched || partiallyMutated ? 'RECOVERY_REQUIRED' : releaseStateAfterError({ switched, runtimeVerified: false });
+    const failure = classifyReleaseFailure({ switchStarted, migrationStarted, agataStartStarted });
+    const { switched, partiallyMutated, releaseState } = failure;
     const failureManifest = {
       releaseId,
       candidateSha: candidate,
@@ -258,7 +270,7 @@ function runApply(candidate) {
       startedAt,
       finishedAt: isoNow(),
       status: releaseState,
-      failureStage: switched ? 'POST_SWITCH' : partiallyMutated ? 'PRE_SWITCH_DB_OR_AGATA' : 'PRE_SWITCH',
+      failureStage: failure.failureStage,
       failureReason: error.message,
       failureCommand: error.command ?? null,
       failureExitCode: error.exitCode ?? null,

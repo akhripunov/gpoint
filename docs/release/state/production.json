@@ -3,8 +3,8 @@
   "currentProductionDbHead": "20260922090000_telegram_channel_avatar",
   "currentProductionRef": "gpoint-production-20260924T175925609Z",
   "previousProductionSha": "4f09df5c33ba58b1cf8048280e58474853f0b576",
-  "lastReleaseId": "gpoint-release-20260924T175925609Z",
-  "lastReleaseStatus": "COMPLETE",
+  "lastReleaseId": "gpoint-release-20260928T032622935Z",
+  "lastReleaseStatus": "FAILED_PRE_SWITCH",
   "lastReleaseCompletedAt": "2026-09-24T18:11:43.950Z",
   "releaseOrigin": "durable-production-release",
   "artifactIdentities": {
@@ -45,10 +45,23 @@
       }
     }
   },
-  "activeRuntimeSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
+  "activeRuntimeSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
   "activeRuntimeDbHead": "20260922090000_telegram_channel_avatar",
   "releaseStatus": "COMPLETE",
   "recoveryRequired": false,
+  "lastReleaseFailureReconciliation": {
+    "reconciledAt": "2026-09-28T03:34:44Z",
+    "failedReleaseId": "gpoint-release-20260928T032622935Z",
+    "failedManifest": "docs/release/manifests/gpoint-release-20260928T032622935Z.json",
+    "originalFailureStage": "POST_SWITCH",
+    "correctedFailureStage": "PRE_SWITCH",
+    "recordedProductionSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+    "liveProductionSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+    "livePrismaHead": "20260922090000_telegram_channel_avatar",
+    "runtimeSwitchOccurred": false,
+    "databaseApplyOccurred": false,
+    "basis": "Read-only VPS RELEASE_SHA and API/Worker/Bot image/runtime inspection confirmed the prior production SHA. Failure occurred in preflight before SOURCE_PREPARE, migration, AGATA start, or runtime switch. POST_SWITCH classification was caused by matching the text 'docker compose version' in the preflight command."
+  },
   "reconciliation": {
     "reconciledAt": "2026-09-24T05:20:49Z",
     "activeRuntimeSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
@@ -57,5 +70,7 @@
     "recoveryRequired": false,
     "resolvedManifest": "docs/release/manifests/gpoint-release-20260924T051236278Z.json",
     "basis": "Read-only VPS runtime identity and DB status, live HTTPS root/model/API checks, published share domain, and exact GitHub production tag were verified after the local TLS timeout."
-  }
+  },
+  "lastReleaseFailureManifest": "docs/release/manifests/gpoint-release-20260928T032622935Z.json",
+  "lastReleaseFailureAt": "2026-09-28T03:26:33.508Z"
 }

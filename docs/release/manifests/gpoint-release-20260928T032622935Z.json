@@ -1,0 +1,19 @@
+{
+  "releaseId": "gpoint-release-20260928T032622935Z",
+  "candidateSha": "bcaebb9e22e3d974ef21fd459e810b4af3ca3bd9",
+  "previousProductionSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+  "productionShaAfter": null,
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": null,
+  "startedAt": "2026-09-28T03:26:22.935Z",
+  "finishedAt": "2026-09-28T03:26:33.508Z",
+  "status": "RECOVERY_REQUIRED",
+  "failureStage": "POST_SWITCH",
+  "failureReason": "remote command failed (exit=1): set -e; command -v docker >/dev/null; docker version --format 'DOCKER_VERSION={{.Server.Version}}'; docker compose version; docker buildx version; docker buildx inspect --bootstrap >/dev/null; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n \"$freeKb\"; test \"$freeKb\" -ge 5242880; test -r /opt/gpoint/env/production.env; currentSha=$(sed -n 's/^RELEASE_SHA=//p' /opt/gpoint/env/production.env | head -1); printf '%s\\n' \"$currentSha\" | grep -Eq '^[0-9a-f]{40}$'; currentImage=$(docker inspect compose-api-1 --format '{{.Config.Image}}'); dbStatus=$(docker run --rm --network gpoint_app --network-alias gpoint-preflight --env-file /opt/gpoint/env/production.env \"$currentImage\" pnpm --filter @gpoint/db exec prisma migrate status 2>&1); test -n \"$dbStatus\"; printf '%s\\n' \"$dbStatus\" | tail -5; for name in AGATA_ENABLED AGATA_LLM_PROVIDER AGATA_DATABASE_URL AGATA_TENANT_ID AGATA_INTERNAL_API_TOKEN AGATA_MESSAGE_AEAD_KEY AGATA_REQUEST_FINGERPRINT_HMAC_KEY AGATA_RETRIEVAL_QUERY_HMAC_KEY AGATA_RESPONSE_FINGERPRINT_HMAC_KEY AGATA_SHADOW_CANDIDATE_HMAC_KEY; do grep -Eq \"^${name}=.+\\$\" /opt/gpoint/env/production.env || { echo AGATA_CONFIG_MISSING=$name; exit 32; }; done; grep -qx 'AGATA_ENABLED=true' /opt/gpoint/env/production.env; grep -qx 'AGATA_LLM_PROVIDER=disabled' /opt/gpoint/env/production.env; printf 'GPOINT_PREFLIGHT_OK\\n'",
+  "failureCommand": "set -e; command -v docker >/dev/null; docker version --format 'DOCKER_VERSION={{.Server.Version}}'; docker compose version; docker buildx version; docker buildx inspect --bootstrap >/dev/null; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n \"$freeKb\"; test \"$freeKb\" -ge 5242880; test -r /opt/gpoint/env/production.env; currentSha=$(sed -n 's/^RELEASE_SHA=//p' /opt/gpoint/env/production.env | head -1); printf '%s\\n' \"$currentSha\" | grep -Eq '^[0-9a-f]{40}$'; currentImage=$(docker inspect compose-api-1 --format '{{.Config.Image}}'); dbStatus=$(docker run --rm --network gpoint_app --network-alias gpoint-preflight --env-file /opt/gpoint/env/production.env \"$currentImage\" pnpm --filter @gpoint/db exec prisma migrate status 2>&1); test -n \"$dbStatus\"; printf '%s\\n' \"$dbStatus\" | tail -5; for name in AGATA_ENABLED AGATA_LLM_PROVIDER AGATA_DATABASE_URL AGATA_TENANT_ID AGATA_INTERNAL_API_TOKEN AGATA_MESSAGE_AEAD_KEY AGATA_REQUEST_FINGERPRINT_HMAC_KEY AGATA_RETRIEVAL_QUERY_HMAC_KEY AGATA_RESPONSE_FINGERPRINT_HMAC_KEY AGATA_SHADOW_CANDIDATE_HMAC_KEY; do grep -Eq \"^${name}=.+\\$\" /opt/gpoint/env/production.env || { echo AGATA_CONFIG_MISSING=$name; exit 32; }; done; grep -qx 'AGATA_ENABLED=true' /opt/gpoint/env/production.env; grep -qx 'AGATA_LLM_PROVIDER=disabled' /opt/gpoint/env/production.env; printf 'GPOINT_PREFLIGHT_OK\\n'",
+  "failureExitCode": 1,
+  "failureStderr": null,
+  "rollbackSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+  "productionRef": null,
+  "releaseOrigin": "durable-production-release"
+}
