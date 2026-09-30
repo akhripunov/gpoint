@@ -4,14 +4,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, evaluateSafetyGates, failureEvidence, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runRemoteShaList, shouldFinalizeRecovery, validateCandidate, verifiedRuntimeState } from './release-gpoint.mjs';
+import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, evaluateSafetyGates, failureEvidence, isTransientGitHubTransportFailure, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, verifiedRuntimeState } from './release-gpoint.mjs';
 import { agataInternalConfigProvisionCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, parseAgataRuntimeIdentityLine, planReleaseRetention, resolveRunnerPath, runRemoteCommand, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
 
 const sha = '4d99e0da856d2ffe174c54d7ae7f2f971ab462f5';
 const artifacts = { api: { sourceSha: sha }, worker: { sourceSha: sha }, bot: { sourceSha: sha }, miniapp: { sourceSha: sha } };
 const config = { api: sha, worker: sha, bot: sha, miniapp: sha };
 
-test('remote SHA verifier uses primary SSH result without invoking fallback', () => {
+test('remote SHA verifier accepts the exact main SHA through the canonical transport', () => {
   const calls = [];
   const proof = remoteProof(sha, {
     runRemote: options => {
@@ -20,28 +20,32 @@ test('remote SHA verifier uses primary SSH result without invoking fallback', ()
     },
   });
   assert.equal(proof.mainSha, sha);
-  assert.deepEqual(calls, [{ ssh443: false, timeoutMs: 15_000 }]);
+  assert.deepEqual(calls, [{ timeoutMs: 15_000 }]);
 });
 
-test('transient primary DNS failure uses one bounded SSH-over-443 fallback', () => {
+test('transient transport failure retries once then accepts exact main SHA', () => {
   const calls = [];
+  const delays = [];
   const proof = remoteProof(sha, {
     runRemote: options => {
       calls.push(options);
-      if (!options.ssh443) throw new Error('Could not resolve hostname github.com');
+      if (calls.length === 1) throw new Error('Connection timed out during banner exchange');
       return `${sha}\trefs/heads/main`;
     },
+    sleep: milliseconds => delays.push(milliseconds),
   });
   assert.equal(proof.mainSha, sha);
-  assert.deepEqual(calls, [
-    { ssh443: false, timeoutMs: 15_000 },
-    { ssh443: true, timeoutMs: 15_000 },
-  ]);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(delays, [1_000]);
 });
 
-test('SSH-over-443 remote command keeps strict host checking and is time bounded', () => {
+test('canonical SSH-over-443 command inherits the configured identity and strict verification', () => {
+  const previousIdentity = process.env.GPOINT_GITHUB_SSH_IDENTITY_FILE;
+  const previousCommand = process.env.GIT_SSH_COMMAND;
+  process.env.GPOINT_GITHUB_SSH_IDENTITY_FILE = '/local/known github key';
+  delete process.env.GIT_SSH_COMMAND;
+  try {
   runRemoteShaList({
-    ssh443: true,
     runner: (file, args, options) => {
       assert.equal(file, 'git');
       assert.deepEqual(args, ['ls-remote', 'origin', 'refs/heads/main', 'refs/tags/*']);
@@ -51,25 +55,32 @@ test('SSH-over-443 remote command keeps strict host checking and is time bounded
       assert.match(options.env.GIT_SSH_COMMAND, /StrictHostKeyChecking=yes/);
       assert.match(options.env.GIT_SSH_COMMAND, /ConnectionAttempts=1/);
       assert.match(options.env.GIT_SSH_COMMAND, /ConnectTimeout=8/);
+      assert.match(options.env.GIT_SSH_COMMAND, /-i "\/local\/known github key"/);
       return `${sha}\trefs/heads/main`;
     },
   });
+  } finally {
+    if (previousIdentity === undefined) delete process.env.GPOINT_GITHUB_SSH_IDENTITY_FILE;
+    else process.env.GPOINT_GITHUB_SSH_IDENTITY_FILE = previousIdentity;
+    if (previousCommand === undefined) delete process.env.GIT_SSH_COMMAND;
+    else process.env.GIT_SSH_COMMAND = previousCommand;
+  }
 });
 
-test('SSH-over-443 fallback rejects a remote SHA mismatch', () => {
+test('remote SHA mismatch fails closed without retry', () => {
   const calls = [];
   assert.throws(() => remoteProof(sha, {
     runRemote: options => {
       calls.push(options);
-      if (!options.ssh443) throw new Error('Connection timed out');
       return `${'0'.repeat(40)}\trefs/heads/main`;
     },
   }), /candidate SHA is not exact origin\/main/);
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 1);
 });
 
-test('unavailable primary and fallback fail closed without exposing error text', () => {
+test('three transient remote failures stop, stay bounded, and do not expose secrets', () => {
   const calls = [];
+  const delays = [];
   assert.throws(() => remoteProof(sha, {
     runRemote: options => {
       calls.push(options);
@@ -78,24 +89,96 @@ test('unavailable primary and fallback fail closed without exposing error text',
         code: 'ETIMEDOUT',
       });
     },
+    sleep: milliseconds => delays.push(milliseconds),
   }), error => {
-    assert.match(error.message, /primary and bounded SSH-over-443 fallback/);
+    assert.match(error.message, /three bounded transport attempts/);
     assert.doesNotMatch(error.message, /worker-secret-token/);
     return true;
   });
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(delays, [1_000, 3_000]);
 });
 
-test('authentication failure does not trigger fallback and unknown remote SHA is rejected', () => {
+test('auth and host-key failures are not retried; UNKNOWN remote SHA is rejected', () => {
   const calls = [];
   assert.throws(() => remoteProof(sha, {
     runRemote: options => {
       calls.push(options);
       throw new Error('Permission denied (publickey)');
     },
-  }), /primary remote verification failed/);
+  }), /non-transient error/);
   assert.equal(calls.length, 1);
+  assert.equal(isTransientGitHubTransportFailure(new Error('Host key verification failed')), false);
+  let retries = 0;
+  assert.throws(() => runWithBoundedGitHubRetries(() => { retries += 1; throw new Error('Host key verification failed'); }, { sleep: () => assert.fail('host-key failure must not retry') }), /Host key verification failed/);
+  assert.equal(retries, 1);
   assert.throws(() => remoteProof(sha, { runRemote: () => `${sha}\trefs/tags/not-main` }), /origin\/main could not be independently verified/);
+});
+
+test('tag push retries transient connection loss after confirming remote tag is absent', () => {
+  let pushes = 0;
+  const lookups = [];
+  const delays = [];
+  const result = pushProductionTag('gpoint-production-test', sha, {
+    push: () => { pushes += 1; if (pushes === 1) throw new Error('Connection reset by peer'); },
+    lookup: () => { const value = lookups.length === 0 ? null : sha; lookups.push(value); return value; },
+    sleep: milliseconds => delays.push(milliseconds),
+  });
+  assert.equal(result, sha);
+  assert.equal(pushes, 2);
+  assert.deepEqual(lookups, [null, sha]);
+  assert.deepEqual(delays, [1_000]);
+});
+
+test('tag push connection loss is treated as success when exact remote tag already exists', () => {
+  let pushes = 0;
+  const result = pushProductionTag('gpoint-production-test', sha, {
+    push: () => { pushes += 1; throw new Error('Connection closed during push'); },
+    lookup: () => sha,
+    sleep: () => assert.fail('verified remote tag does not need a retry'),
+  });
+  assert.equal(result, sha);
+  assert.equal(pushes, 1);
+});
+
+test('three transient tag push failures stop after remote reconciliation checks', () => {
+  let pushes = 0;
+  let lookups = 0;
+  const delays = [];
+  assert.throws(() => pushProductionTag('gpoint-production-test', sha, {
+    push: () => { pushes += 1; throw new Error('Connection timed out during banner exchange'); },
+    lookup: () => { lookups += 1; return null; },
+    sleep: milliseconds => delays.push(milliseconds),
+  }), /three bounded transport attempts/);
+  assert.equal(pushes, 3);
+  assert.equal(lookups, 3);
+  assert.deepEqual(delays, [1_000, 3_000]);
+});
+
+test('tag push fails closed when an existing remote tag points elsewhere', () => {
+  let pushes = 0;
+  assert.throws(() => pushProductionTag('gpoint-production-test', sha, {
+    push: () => { pushes += 1; throw new Error('Connection closed during push'); },
+    lookup: () => '0'.repeat(40),
+    sleep: () => assert.fail('wrong remote tag must not be retried'),
+  }), /different target/);
+  assert.equal(pushes, 1);
+});
+
+test('tag push does not retry authentication, host-key, or rejected-push failures', () => {
+  for (const [message, expected] of [
+    ['Permission denied (publickey)', /authentication failed/],
+    ['Host key verification failed', /host-key verification failed/],
+    ['[rejected] non-fast-forward', /non-transient error/],
+  ]) {
+    let pushes = 0;
+    assert.throws(() => pushProductionTag('gpoint-production-test', sha, {
+      push: () => { pushes += 1; throw new Error(message); },
+      lookup: () => assert.fail('non-transient failure must not query/retry'),
+      sleep: () => assert.fail('non-transient failure must not sleep'),
+    }), expected);
+    assert.equal(pushes, 1);
+  }
 });
 
 test('durable runner config is discovered in a fresh environment and explicit env wins', () => {

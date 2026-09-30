@@ -12,19 +12,24 @@ const MANIFEST_DIR = path.join(ROOT, 'docs/release/manifests');
 const LOCK_FILE = path.join(ROOT, '.gpoint-release.lock');
 const SHA_RE = /^[0-9a-f]{40}$/;
 const REMOTE_VERIFY_TIMEOUT_MS = 15_000;
-const SSH_443_COMMAND = [
-  'ssh',
-  '-o', 'BatchMode=yes',
-  '-o', 'ConnectTimeout=8',
-  '-o', 'ConnectionAttempts=1',
-  '-o', 'StrictHostKeyChecking=yes',
-  '-o', 'IdentitiesOnly=yes',
-  '-o', 'HostName=ssh.github.com',
-  '-o', 'HostKeyAlias=github.com',
-  '-o', 'ServerAliveInterval=5',
-  '-o', 'ServerAliveCountMax=2',
-  '-p', '443',
-].join(' ');
+const GITHUB_REMOTE_TIMEOUT_MS = 20_000;
+const GITHUB_RETRY_DELAYS_MS = [1_000, 3_000];
+function githubSshCommand() {
+  return [
+    'ssh',
+    '-o', 'BatchMode=yes',
+    '-o', 'ConnectTimeout=8',
+    '-o', 'ConnectionAttempts=1',
+    '-o', 'StrictHostKeyChecking=yes',
+    '-o', 'IdentitiesOnly=yes',
+    '-o', 'HostName=ssh.github.com',
+    '-o', 'HostKeyAlias=github.com',
+    '-o', 'ServerAliveInterval=5',
+    '-o', 'ServerAliveCountMax=2',
+    ...(process.env.GPOINT_GITHUB_SSH_IDENTITY_FILE ? ['-i', `"${process.env.GPOINT_GITHUB_SSH_IDENTITY_FILE.replaceAll('"', '\\"')}"`] : []),
+    '-p', '443',
+  ].join(' ');
+}
 
 function die(message) { throw new Error(`BLOCKED: ${message}`); }
 function readJson(file) { return JSON.parse(fs.readFileSync(file, 'utf8')); }
@@ -209,36 +214,60 @@ function acquireLock(releaseId) {
   return () => { try { fs.unlinkSync(LOCK_FILE); } catch {} };
 }
 
-function remoteVerificationTransient(error) {
-  const text = `${error?.code ?? ''} ${error?.message ?? ''} ${error?.stderr ?? ''}`;
-  return error?.code === 'ETIMEDOUT'
-    || error?.killed === true
-    || /could not resolve hostname|nodename nor servname|temporary failure in name resolution|name or service not known|connection timed out|operation timed out|connection reset|connection closed|banner exchange|connection refused|network is unreachable|eai_again|enotfound/i.test(text);
+function errorText(error) {
+  const stderr = Buffer.isBuffer(error?.stderr) ? error.stderr.toString('utf8') : error?.stderr ?? '';
+  const message = Buffer.isBuffer(error?.message) ? error.message.toString('utf8') : error?.message ?? '';
+  return `${error?.code ?? ''} ${message} ${stderr}`;
 }
 
-export function runRemoteShaList({ ssh443 = false, runner = execFileSync } = {}) {
-  const env = ssh443 ? { ...process.env, GIT_SSH_COMMAND: SSH_443_COMMAND } : process.env;
+export function isTransientGitHubTransportFailure(error) {
+  const text = errorText(error);
+  if (/permission denied|publickey|host key verification failed|remote mismatch|non-fast-forward|rejected|authentication failed|could not read from remote repository/i.test(text)) return false;
+  return error?.code === 'ETIMEDOUT'
+    || error?.killed === true
+    || /could not resolve (?:hostname|host)|nodename nor servname|temporary failure in name resolution|name or service not known|connection timed out|operation timed out|connection reset|connection closed|closed by .* port|banner exchange|connection refused|network is unreachable|network unreachable|eai_again|enotfound|broken pipe/i.test(text);
+}
+
+function waitForGitHubRetry(attempt, sleep = milliseconds => execFileSync('sleep', [String(milliseconds / 1_000)])) {
+  const delay = GITHUB_RETRY_DELAYS_MS[attempt - 1];
+  if (delay) sleep(delay);
+}
+
+export function runWithBoundedGitHubRetries(operation, { sleep = waitForGitHubRetry } = {}) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try { return operation(attempt); }
+    catch (error) {
+      if (!isTransientGitHubTransportFailure(error) || attempt === 3) throw error;
+      waitForGitHubRetry(attempt, sleep);
+    }
+  }
+  throw new Error('unreachable GitHub retry state');
+}
+
+function githubTransportEnv() {
+  return {
+    ...process.env,
+    GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND || githubSshCommand(),
+  };
+}
+
+export function runRemoteShaList({ runner = execFileSync } = {}) {
   return runner('git', ['ls-remote', 'origin', 'refs/heads/main', 'refs/tags/*'], {
     cwd: ROOT,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: REMOTE_VERIFY_TIMEOUT_MS,
     maxBuffer: 8 * 1024 * 1024,
-    env,
+    env: githubTransportEnv(),
   }).trim();
 }
 
-export function remoteProof(candidate, { runRemote = options => runRemoteShaList(options) } = {}) {
+export function remoteProof(candidate, { runRemote = () => runRemoteShaList(), sleep } = {}) {
   let lines;
-  try {
-    lines = runRemote({ ssh443: false, timeoutMs: REMOTE_VERIFY_TIMEOUT_MS });
-  } catch (error) {
-    if (!remoteVerificationTransient(error)) die('GitHub primary remote verification failed; refusing fallback');
-    try {
-      lines = runRemote({ ssh443: true, timeoutMs: REMOTE_VERIFY_TIMEOUT_MS });
-    } catch {
-      die('GitHub remote verification failed through primary and bounded SSH-over-443 fallback');
-    }
+  try { lines = runWithBoundedGitHubRetries(() => runRemote({ timeoutMs: REMOTE_VERIFY_TIMEOUT_MS }), { sleep }); }
+  catch (error) {
+    if (isTransientGitHubTransportFailure(error)) die('GitHub remote verification failed after three bounded transport attempts');
+    die('GitHub remote verification failed on a non-transient error; refusing retry');
   }
   const refs = lines.split('\n').filter(Boolean).map(line => line.split(/\s+/));
   const direct = refs.find(([sha]) => sha === candidate);
@@ -246,6 +275,67 @@ export function remoteProof(candidate, { runRemote = options => runRemoteShaList
   if (!main) die('origin/main could not be independently verified');
   if (main[0] !== candidate) die(`candidate SHA is not exact origin/main: candidate=${candidate} origin/main=${main[0]}`);
   return { mainSha: main[0], directRef: direct?.[1] ?? null, refs }; 
+}
+
+function runGitHubRemoteGit(args, { timeout = GITHUB_REMOTE_TIMEOUT_MS } = {}) {
+  try {
+    return runWithBoundedGitHubRetries(() => execFileSync('git', args, {
+      cwd: ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout,
+      maxBuffer: 8 * 1024 * 1024,
+      env: githubTransportEnv(),
+    }).trim());
+  } catch (error) {
+    die(isTransientGitHubTransportFailure(error)
+      ? 'GitHub remote operation unavailable after three bounded transport attempts'
+      : 'GitHub remote operation failed on a non-transient error; refusing retry');
+  }
+}
+
+function remoteTagTarget(tag) {
+  const output = runGitHubRemoteGit(['ls-remote', 'origin', `refs/tags/${tag}`, `refs/tags/${tag}^{}`]);
+  const refs = new Map(output.split('\n').filter(Boolean).map(line => {
+    const [objectSha, ref] = line.split(/\s+/);
+    return [ref, objectSha];
+  }));
+  return refs.get(`refs/tags/${tag}^{}`) ?? refs.get(`refs/tags/${tag}`) ?? null;
+}
+
+export function pushProductionTag(tag, candidate, { push = () => execFileSync('git', ['push', 'origin', `refs/tags/${tag}`], {
+  cwd: ROOT,
+  encoding: 'utf8',
+  stdio: ['ignore', 'pipe', 'pipe'],
+  timeout: GITHUB_REMOTE_TIMEOUT_MS,
+  maxBuffer: 8 * 1024 * 1024,
+  env: githubTransportEnv(),
+}), lookup = remoteTagTarget, sleep } = {}) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      push(attempt);
+      const target = lookup(tag);
+      if (target !== candidate) die(`remote production tag target mismatch: ${tag}`);
+      return target;
+    } catch (error) {
+      if (!isTransientGitHubTransportFailure(error)) {
+        die(/permission denied|publickey|authentication failed/i.test(errorText(error))
+          ? 'GitHub production tag push authentication failed; refusing retry'
+          : /host key verification failed/i.test(errorText(error))
+            ? 'GitHub production tag push host-key verification failed; refusing retry'
+            : 'GitHub production tag push failed on a non-transient error; refusing retry');
+      }
+      // A failed push can have reached GitHub; always reconcile before any retry.
+      let existing;
+      try { existing = lookup(tag); }
+      catch { die('production tag push outcome is ambiguous; remote tag could not be verified'); }
+      if (existing === candidate) return existing;
+      if (existing !== null) die(`production tag already exists with a different target: ${tag}`);
+      if (attempt === 3) die('GitHub production tag push failed after three bounded transport attempts');
+      waitForGitHubRetry(attempt, sleep);
+    }
+  }
+  throw new Error('unreachable production tag push retry state');
 }
 
 function readLiveFacts() {
@@ -378,9 +468,7 @@ function runApply(candidate) {
     measured(stageTimings, 'WORKER_HEALTH', () => execFileSync('curl', ['-fsS', 'https://gpoint.amiora.one/api/health/live'], { stdio: 'ignore' }));
     const ref = `gpoint-production-${startedAt.replace(/[-:.]/g, '')}`;
     measured(stageTimings, 'PRODUCTION_REF_CREATE', () => execFileSync('git', ['tag', '-a', ref, candidate, '-m', `GPoint production release\nproductionSha=${candidate}\ndbHead=${liveDbHead}\nreleaseId=${releaseId}`], { cwd: ROOT, stdio: 'inherit' }));
-    measured(stageTimings, 'PRODUCTION_REF_PUSH', () => execFileSync('git', ['push', 'origin', `refs/tags/${ref}`], { cwd: ROOT, stdio: 'inherit' }));
-    const remoteRef = measured(stageTimings, 'REMOTE_REF_VERIFY', () => git(['ls-remote', 'origin', `refs/tags/${ref}^{}`])).trim();
-    if (!remoteRef.includes(candidate)) die('remote production ref target mismatch');
+    const remoteRef = measured(stageTimings, 'PRODUCTION_REF_PUSH_AND_VERIFY', () => pushProductionTag(ref, candidate));
     Object.assign(stageTimings, adapter.timings ?? {}, { TOTAL_RELEASE: Number(((Date.now() - totalStarted) / 1000).toFixed(1)) });
     console.log(`RELEASE_STAGE_TIMING=${JSON.stringify(stageTimings)}`);
     const artifactIdentities = { api: { sourceSha: candidate, adapter: adapter.imageIdentity }, worker: { sourceSha: candidate, adapter: adapter.imageIdentity }, bot: { sourceSha: candidate, adapter: adapter.imageIdentity }, miniapp: { sourceSha: candidate, adapter: adapter.imageIdentity }, agataApi: { sourceSha: candidate, adapter: adapter.agataIdentity }, agataWorker: { sourceSha: candidate, adapter: adapter.agataIdentity } };
@@ -428,7 +516,7 @@ function finalizeRecovery(candidate) {
     assertSha(candidate);
     if (git(['rev-parse', candidate]) !== candidate) die('recovery candidate is not present locally');
 
-    const remoteMain = git(['ls-remote', 'origin', 'refs/heads/main']).split(/\s+/)[0];
+    const remoteMain = runGitHubRemoteGit(['ls-remote', 'origin', 'refs/heads/main']).split(/\s+/)[0];
     if (!SHA_RE.test(remoteMain ?? '') || remoteMain !== git(['rev-parse', 'origin/main'])) die('origin/main exact SHA could not be independently reconciled');
     try { execFileSync('git', ['merge-base', '--is-ancestor', candidate, 'origin/main'], { cwd: ROOT, stdio: 'ignore' }); }
     catch { die('recovery candidate is not contained in verified origin/main history'); }
@@ -453,9 +541,7 @@ function finalizeRecovery(candidate) {
     const localTag = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/tags/${ref}`], { cwd: ROOT, stdio: 'ignore' });
     if (localTag.status === 0) die(`production ref already exists locally: ${ref}`);
     execFileSync('git', ['tag', '-a', ref, candidate, '-m', `GPoint production recovery finalization\nproductionSha=${candidate}\ndbHead=${facts.LIVE_PRISMA_HEAD}\nreleaseId=${failed.releaseId}`], { cwd: ROOT, stdio: 'inherit' });
-    execFileSync('git', ['push', 'origin', `refs/tags/${ref}`], { cwd: ROOT, stdio: 'inherit' });
-    const remoteRef = git(['ls-remote', 'origin', `refs/tags/${ref}^{}`]).split(/\s+/)[0];
-    if (remoteRef !== candidate) die('remote production ref target mismatch during recovery finalization');
+    const remoteRef = pushProductionTag(ref, candidate);
 
     const finishedAt = isoNow();
     const recoveryManifest = {
