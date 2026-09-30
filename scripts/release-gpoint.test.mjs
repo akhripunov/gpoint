@@ -4,12 +4,99 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, evaluateSafetyGates, failureEvidence, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, shouldFinalizeRecovery, validateCandidate, verifiedRuntimeState } from './release-gpoint.mjs';
+import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, evaluateSafetyGates, failureEvidence, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runRemoteShaList, shouldFinalizeRecovery, validateCandidate, verifiedRuntimeState } from './release-gpoint.mjs';
 import { agataInternalConfigProvisionCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, parseAgataRuntimeIdentityLine, planReleaseRetention, resolveRunnerPath, runRemoteCommand, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
 
 const sha = '4d99e0da856d2ffe174c54d7ae7f2f971ab462f5';
 const artifacts = { api: { sourceSha: sha }, worker: { sourceSha: sha }, bot: { sourceSha: sha }, miniapp: { sourceSha: sha } };
 const config = { api: sha, worker: sha, bot: sha, miniapp: sha };
+
+test('remote SHA verifier uses primary SSH result without invoking fallback', () => {
+  const calls = [];
+  const proof = remoteProof(sha, {
+    runRemote: options => {
+      calls.push(options);
+      return `${sha}\trefs/heads/main\n${sha}\trefs/tags/candidate`;
+    },
+  });
+  assert.equal(proof.mainSha, sha);
+  assert.deepEqual(calls, [{ ssh443: false, timeoutMs: 15_000 }]);
+});
+
+test('transient primary DNS failure uses one bounded SSH-over-443 fallback', () => {
+  const calls = [];
+  const proof = remoteProof(sha, {
+    runRemote: options => {
+      calls.push(options);
+      if (!options.ssh443) throw new Error('Could not resolve hostname github.com');
+      return `${sha}\trefs/heads/main`;
+    },
+  });
+  assert.equal(proof.mainSha, sha);
+  assert.deepEqual(calls, [
+    { ssh443: false, timeoutMs: 15_000 },
+    { ssh443: true, timeoutMs: 15_000 },
+  ]);
+});
+
+test('SSH-over-443 remote command keeps strict host checking and is time bounded', () => {
+  runRemoteShaList({
+    ssh443: true,
+    runner: (file, args, options) => {
+      assert.equal(file, 'git');
+      assert.deepEqual(args, ['ls-remote', 'origin', 'refs/heads/main', 'refs/tags/*']);
+      assert.equal(options.timeout, 15_000);
+      assert.match(options.env.GIT_SSH_COMMAND, /HostName=ssh\.github\.com/);
+      assert.match(options.env.GIT_SSH_COMMAND, /HostKeyAlias=github\.com/);
+      assert.match(options.env.GIT_SSH_COMMAND, /StrictHostKeyChecking=yes/);
+      assert.match(options.env.GIT_SSH_COMMAND, /ConnectionAttempts=1/);
+      assert.match(options.env.GIT_SSH_COMMAND, /ConnectTimeout=8/);
+      return `${sha}\trefs/heads/main`;
+    },
+  });
+});
+
+test('SSH-over-443 fallback rejects a remote SHA mismatch', () => {
+  const calls = [];
+  assert.throws(() => remoteProof(sha, {
+    runRemote: options => {
+      calls.push(options);
+      if (!options.ssh443) throw new Error('Connection timed out');
+      return `${'0'.repeat(40)}\trefs/heads/main`;
+    },
+  }), /candidate SHA is not exact origin\/main/);
+  assert.equal(calls.length, 2);
+});
+
+test('unavailable primary and fallback fail closed without exposing error text', () => {
+  const calls = [];
+  assert.throws(() => remoteProof(sha, {
+    runRemote: options => {
+      calls.push(options);
+      throw Object.assign(new Error('worker-secret-token ssh: Could not resolve hostname github.com'), {
+        stderr: 'worker-secret-token ssh: Could not resolve hostname github.com',
+        code: 'ETIMEDOUT',
+      });
+    },
+  }), error => {
+    assert.match(error.message, /primary and bounded SSH-over-443 fallback/);
+    assert.doesNotMatch(error.message, /worker-secret-token/);
+    return true;
+  });
+  assert.equal(calls.length, 2);
+});
+
+test('authentication failure does not trigger fallback and unknown remote SHA is rejected', () => {
+  const calls = [];
+  assert.throws(() => remoteProof(sha, {
+    runRemote: options => {
+      calls.push(options);
+      throw new Error('Permission denied (publickey)');
+    },
+  }), /primary remote verification failed/);
+  assert.equal(calls.length, 1);
+  assert.throws(() => remoteProof(sha, { runRemote: () => `${sha}\trefs/tags/not-main` }), /origin\/main could not be independently verified/);
+});
 
 test('durable runner config is discovered in a fresh environment and explicit env wins', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-runner-config-test-'));

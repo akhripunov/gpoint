@@ -11,6 +11,20 @@ const STATE_FILE = path.join(ROOT, 'docs/release/state/production.json');
 const MANIFEST_DIR = path.join(ROOT, 'docs/release/manifests');
 const LOCK_FILE = path.join(ROOT, '.gpoint-release.lock');
 const SHA_RE = /^[0-9a-f]{40}$/;
+const REMOTE_VERIFY_TIMEOUT_MS = 15_000;
+const SSH_443_COMMAND = [
+  'ssh',
+  '-o', 'BatchMode=yes',
+  '-o', 'ConnectTimeout=8',
+  '-o', 'ConnectionAttempts=1',
+  '-o', 'StrictHostKeyChecking=yes',
+  '-o', 'IdentitiesOnly=yes',
+  '-o', 'HostName=ssh.github.com',
+  '-o', 'HostKeyAlias=github.com',
+  '-o', 'ServerAliveInterval=5',
+  '-o', 'ServerAliveCountMax=2',
+  '-p', '443',
+].join(' ');
 
 function die(message) { throw new Error(`BLOCKED: ${message}`); }
 function readJson(file) { return JSON.parse(fs.readFileSync(file, 'utf8')); }
@@ -195,8 +209,37 @@ function acquireLock(releaseId) {
   return () => { try { fs.unlinkSync(LOCK_FILE); } catch {} };
 }
 
-function remoteProof(candidate) {
-  const lines = git(['ls-remote', 'origin', 'refs/heads/main', 'refs/tags/*']);
+function remoteVerificationTransient(error) {
+  const text = `${error?.code ?? ''} ${error?.message ?? ''} ${error?.stderr ?? ''}`;
+  return error?.code === 'ETIMEDOUT'
+    || error?.killed === true
+    || /could not resolve hostname|nodename nor servname|temporary failure in name resolution|name or service not known|connection timed out|operation timed out|connection reset|connection closed|banner exchange|connection refused|network is unreachable|eai_again|enotfound/i.test(text);
+}
+
+export function runRemoteShaList({ ssh443 = false, runner = execFileSync } = {}) {
+  const env = ssh443 ? { ...process.env, GIT_SSH_COMMAND: SSH_443_COMMAND } : process.env;
+  return runner('git', ['ls-remote', 'origin', 'refs/heads/main', 'refs/tags/*'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: REMOTE_VERIFY_TIMEOUT_MS,
+    maxBuffer: 8 * 1024 * 1024,
+    env,
+  }).trim();
+}
+
+export function remoteProof(candidate, { runRemote = options => runRemoteShaList(options) } = {}) {
+  let lines;
+  try {
+    lines = runRemote({ ssh443: false, timeoutMs: REMOTE_VERIFY_TIMEOUT_MS });
+  } catch (error) {
+    if (!remoteVerificationTransient(error)) die('GitHub primary remote verification failed; refusing fallback');
+    try {
+      lines = runRemote({ ssh443: true, timeoutMs: REMOTE_VERIFY_TIMEOUT_MS });
+    } catch {
+      die('GitHub remote verification failed through primary and bounded SSH-over-443 fallback');
+    }
+  }
   const refs = lines.split('\n').filter(Boolean).map(line => line.split(/\s+/));
   const direct = refs.find(([sha]) => sha === candidate);
   const main = refs.find(([, ref]) => ref === 'refs/heads/main');
