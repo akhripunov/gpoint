@@ -2,7 +2,7 @@
 
 import base64
 import os
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -11,9 +11,10 @@ from sqlalchemy import func, select
 from app.api.internal import get_embedding_provider, get_response_provider
 from app.config import get_settings
 from app.db.base import SessionFactory, dispose_engine, set_tenant_context
-from app.db.models import AgeAssurance, CharacterProfileVersion, Message, OutboxJob, User
+from app.db.models import AgeAssurance, CharacterProfileVersion, Conversation, Message, OutboxJob, ResponseRun, User
 from app.main import app
 from app.memory.retrieval import DeterministicFakeEmbeddingProvider
+from app.messages.crypto import AeadCrypto
 from app.responses.pipeline import DeterministicFakeResponseProvider
 
 TEST_DSN = os.getenv("AGATA_TEST_DATABASE_URL")
@@ -216,6 +217,9 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
             assert {message["role"] for message in history_items} == {"user", "assistant"}
             assert next(message["text"] for message in history_items if message["role"] == "user") == "Привет"
             assert next(message["text"] for message in history_items if message["role"] == "assistant") == first.json()["text"]
+            persisted_user_message = next(message for message in history_items if message["role"] == "user")
+            assert persisted_user_message["clientMessageId"] == message_key
+            assert all("clientMessageId" not in message for message in history_items if message["role"] == "assistant")
             wrong_user = await client.get(
                 f"/internal/v1/users/{user_key}-other/characters/{character_key}/messages",
                 headers=headers,
@@ -307,6 +311,85 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
                 and "Привет".encode() not in item.content_ciphertext
                 for item in stored_messages
             )
+
+        # Pending ResponseRuns are intentionally not persisted: the inference
+        # outbox owns pending/running state; ResponseRun is committed atomically
+        # with the final assistant message only.
+        pending_message_key = f"pending-{uuid4()}"
+        monkeypatch.setenv("AGATA_LLM_PROVIDER", "mac_worker")
+        monkeypatch.setenv("AGATA_CODEX_LOCAL_ENABLED", "true")
+        monkeypatch.setenv("AGATA_WORKER_WAIT_SECONDS", "0.5")
+        get_settings.cache_clear()
+        mac_character_key = f"test-mac-worker-{uuid4()}"
+        async with httpx.AsyncClient(transport=transport, base_url="http://agata-test") as client:
+            mac_profile = await client.put(
+                f"/internal/v1/characters/{mac_character_key}",
+                headers=headers,
+                json={"name": "Anna Mac Worker", "personality": {"traits": ["test"]}},
+            )
+            assert mac_profile.status_code == 200, mac_profile.text
+        app.dependency_overrides.pop(get_response_provider, None)
+        pending_body = {
+            "request_id": pending_message_key,
+            "gpoint_user_id": user_key,
+            "gpoint_character_id": mac_character_key,
+            "conversation_id": f"gpoint-chat:{user_key}:{mac_character_key}",
+            "message_id": pending_message_key,
+            "text": "This message should enqueue one inference job",
+            "locale": "en-US",
+        }
+        async with httpx.AsyncClient(transport=transport, base_url="http://agata-test") as client:
+            pending_first = await client.post(
+                "/internal/v1/respond", headers=headers, json=pending_body
+            )
+            pending_retry = await client.post(
+                "/internal/v1/respond", headers=headers, json=pending_body
+            )
+            assert pending_first.status_code == pending_retry.status_code == 200
+            assert pending_first.json()["status"] == pending_retry.json()["status"] == "pending"
+        async with SessionFactory() as session:
+            async with session.begin():
+                await set_tenant_context(session, tenant_id)
+                pending_user = await session.scalar(
+                    select(Message).where(
+                        Message.tenant_id == tenant_id,
+                        Message.idempotency_key == pending_message_key,
+                        Message.role == "user",
+                    )
+                )
+                assert pending_user is not None
+                pending_conversation = await session.get(Conversation, pending_user.conversation_id)
+                assert pending_conversation is not None
+                user_rows = await session.scalar(
+                    select(func.count()).select_from(Message).where(
+                        Message.tenant_id == tenant_id,
+                        Message.idempotency_key == pending_message_key,
+                        Message.role == "user",
+                    )
+                )
+                inference_rows = await session.scalar(
+                    select(func.count()).select_from(OutboxJob).where(
+                        OutboxJob.tenant_id == tenant_id,
+                        OutboxJob.job_type == "inference",
+                        OutboxJob.dedupe_key == f"inference:{pending_user.id}",
+                    )
+                )
+                response_runs = await session.scalar(
+                    select(func.count()).select_from(ResponseRun).where(
+                        ResponseRun.tenant_id == tenant_id,
+                        ResponseRun.user_message_id == pending_user.id,
+                    )
+                )
+                relationship_refresh_rows = await session.scalar(
+                    select(func.count()).select_from(OutboxJob).where(
+                        OutboxJob.tenant_id == tenant_id,
+                        OutboxJob.job_type == "relationship_note_refresh",
+                        OutboxJob.aggregate_id == pending_conversation.relationship_id,
+                        OutboxJob.dedupe_key == f"relationship-note:{pending_conversation.relationship_id}:0",
+                    )
+                )
+                assert user_rows == inference_rows == relationship_refresh_rows == 1
+                assert response_runs == 0
 
         disabled_message_key = f"disabled-{uuid4()}"
         async with SessionFactory() as session:

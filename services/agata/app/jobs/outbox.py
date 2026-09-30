@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import JobState, MemoryControlState, OutboxJob
@@ -31,6 +32,27 @@ class StaleCreationEpoch(Exception):
 class OutboxRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
+
+    async def expire_stale_inference_jobs(self, *, tenant_id: UUID, ttl_seconds: int) -> int:
+        """Bound worker-offline backlog and invalidate leases past the inference TTL."""
+        if not isinstance(ttl_seconds, int) or not 60 <= ttl_seconds <= 3600:
+            raise ValueError("inference_job_ttl_invalid")
+        result = await self.session.execute(
+            update(OutboxJob)
+            .where(
+                OutboxJob.tenant_id == tenant_id,
+                OutboxJob.job_type == "inference",
+                OutboxJob.state.in_((JobState.pending, JobState.running)),
+                OutboxJob.created_at < datetime.now(UTC) - timedelta(seconds=ttl_seconds),
+            )
+            .values(
+                state=JobState.dead,
+                claim_token=None,
+                lease_expires_at=None,
+                last_error="inference_job_expired",
+            )
+        )
+        return int(getattr(result, "rowcount", 0) or 0)
 
     async def enqueue(
         self,
@@ -66,6 +88,100 @@ class OutboxRepository:
         self.session.add(job)
         await self.session.flush()
         return job
+
+    async def enqueue_inference_idempotent(
+        self,
+        *,
+        tenant_id: UUID,
+        dedupe_key: str,
+        aggregate_id: UUID,
+        payload: dict,
+    ) -> tuple[OutboxJob, bool]:
+        """Create one inference row, or reuse only its exact dedupe identity.
+
+        The conflict target is deliberately limited to uq_outbox_dedupe. Other
+        constraint failures still raise, and a collision with a different job
+        identity is rejected after reading the conflicting row.
+        """
+        return await self.enqueue_idempotent(
+            tenant_id=tenant_id,
+            job_type="inference",
+            dedupe_key=dedupe_key,
+            aggregate_id=aggregate_id,
+            payload=payload,
+        )
+
+    async def enqueue_idempotent(
+        self,
+        *,
+        tenant_id: UUID,
+        job_type: str,
+        dedupe_key: str,
+        aggregate_id: UUID,
+        payload: dict,
+        creation_epoch: int = 0,
+        memory_control_state_id: UUID | None = None,
+        reactivate_terminal: bool = False,
+    ) -> tuple[OutboxJob, bool]:
+        """Atomically insert or reuse a row with the same complete job identity.
+
+        This explicit path is for job types whose dedupe key is an idempotency
+        contract. The ordinary ``enqueue`` method intentionally remains strict.
+        """
+        if not isinstance(job_type, str) or job_type not in JOB_TYPES:
+            raise ValueError("unsupported outbox job_type")
+        if not isinstance(dedupe_key, str) or not dedupe_key:
+            raise ValueError("invalid outbox dedupe key")
+        safe_payload = dict(payload)
+        if "memory_control_state_id" in safe_payload:
+            raise ValueError("memory_control_state_id is a typed column, not payload data")
+        try:
+            validate_outbox_payload(job_type, safe_payload)
+        except ValueError as exc:
+            raise ValueError("outbox_payload_not_content_safe") from exc
+        if job_type.startswith("memory_") and memory_control_state_id is None:
+            raise StaleCreationEpoch("memory job requires memory_control_state_id")
+        proposed_id = uuid4()
+        statement = (
+            pg_insert(OutboxJob)
+            .values(
+                id=proposed_id,
+                tenant_id=tenant_id,
+                job_type=job_type,
+                dedupe_key=dedupe_key,
+                aggregate_id=aggregate_id,
+                payload=safe_payload,
+                creation_epoch=creation_epoch,
+                memory_control_state_id=memory_control_state_id,
+            )
+            .on_conflict_do_nothing(constraint="uq_outbox_dedupe")
+            .returning(OutboxJob.id)
+        )
+        inserted_id = await self.session.scalar(statement)
+        job = await self.session.scalar(
+            select(OutboxJob)
+            .where(OutboxJob.tenant_id == tenant_id, OutboxJob.dedupe_key == dedupe_key)
+            .with_for_update()
+        )
+        if job is None:
+            raise RuntimeError("outbox_idempotent_insert_not_visible")
+        if (
+            job.job_type != job_type
+            or job.aggregate_id != aggregate_id
+            or job.creation_epoch != creation_epoch
+            or job.memory_control_state_id != memory_control_state_id
+        ):
+            raise ValueError(f"{job_type}_outbox_dedupe_conflict")
+        if not inserted_id and reactivate_terminal and job.state in {JobState.completed, JobState.dead}:
+            job.state = JobState.pending
+            job.attempts = 0
+            job.available_at = datetime.now(UTC)
+            job.claimed_at = None
+            job.lease_expires_at = None
+            job.claim_token = None
+            job.last_error = None
+            await self.session.flush()
+        return job, inserted_id is not None
 
     async def claim(
         self,

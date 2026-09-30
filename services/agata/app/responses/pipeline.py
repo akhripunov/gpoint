@@ -55,7 +55,11 @@ from app.memory.shared_history import (
     SharedHistoryEvidence,
     SharedHistoryService,
 )
-from app.memory.snapshots import MemorySnapshotService, snapshot_fingerprint
+from app.memory.snapshots import (
+    MemorySnapshotService,
+    enqueue_relationship_note_refresh,
+    snapshot_fingerprint,
+)
 from app.messages.crypto import (
     AeadCrypto,
     CiphertextEnvelope,
@@ -550,13 +554,11 @@ class ResponseOrchestrator:
                     MemoryControlState.relationship_id == conversation.relationship_id,
                 ).limit(1))
                 if control is not None:
-                    await OutboxRepository(self.session).enqueue(
+                    await enqueue_relationship_note_refresh(
+                        self.session,
                         tenant_id=principal.tenant_id,
-                        job_type="relationship_note_refresh",
-                        dedupe_key=f"relationship-note:{conversation.relationship_id}:{control.deletion_epoch}",
-                        aggregate_id=conversation.relationship_id,
+                        relationship_id=conversation.relationship_id,
                         creation_epoch=control.deletion_epoch,
-                        payload={"relationship_id": str(conversation.relationship_id), "creation_epoch": str(control.deletion_epoch)},
                     )
             communication_settings = await self._communication_settings(principal, conversation)
             disputed_memory_values = await self._disputed_memory_values(principal, conversation)
@@ -689,10 +691,12 @@ class ResponseOrchestrator:
                 timeout=float(self.provider_timeout_seconds),
             )
         except Exception as exc:
-            from app.responses.mac_worker import WorkerInferencePending
+            from app.responses.mac_worker import WorkerInferencePending, WorkerInferenceUnavailable
 
             if isinstance(exc, WorkerInferencePending):
                 return ResponseResult(None, "pending", "inference_pending")
+            if isinstance(exc, WorkerInferenceUnavailable):
+                return ResponseResult(None, "rejected", "provider_unavailable")
             try:
                 envelope = await asyncio.wait_for(
                     self.provider.complete(context),

@@ -16,7 +16,7 @@ export interface PaginatedResponse<T> { items: T[]; nextCursor: string | null; }
 export interface ExploreResponseDTO extends PaginatedResponse<CreatorSummaryDTO> { tab: ExploreTab; }
 
 export type MessageRole = 'user' | 'assistant';
-export interface ChatMessageDTO { id: string; role: MessageRole; text: string; occurredAt: string; }
+export interface ChatMessageDTO { id: string; clientMessageId?: string; role: MessageRole; text: string; occurredAt: string; }
 export interface MessageThreadDTO {
   creator: Pick<CreatorSummaryDTO, 'id' | 'slug' | 'displayName' | 'avatarUrl' | 'verified'>;
   lastMessagePreview: string | null;

@@ -84,6 +84,7 @@ export interface AgataConversationPage {
 
 export interface AgataHistoryMessage {
   id: string;
+  clientMessageId?: string;
   role: 'user' | 'assistant';
   text: string;
   occurredAt: string;

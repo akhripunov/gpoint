@@ -3,6 +3,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 import { ArrowLeft, ArrowUp, MessageCircle, Plus, ShieldAlert } from "lucide-react";
 import { ApiError, acceptMessagesConsent, creator, creatorMessages, mediaUrl, messages, messagesState, sendCreatorMessage } from "./api/client";
 import type { ChatMessageDTO, MessageThreadDTO } from "../../../packages/contracts/src/index.js";
+import { mergePendingMessages } from "./messages-pending.js";
 import { Button } from "./ui";
 
 function Avatar({ src, name, className = "" }: { src: string | null; name: string; className?: string }) {
@@ -53,8 +54,8 @@ export function MessagesInbox({ openChat, explore }: { openChat: (slug: string) 
   </section>;
 }
 
-type PendingMessage = { id: string; text: string; status: "sending" | "waiting" | "failed" };
-type DisplayMessage = ChatMessageDTO & { status?: PendingMessage["status"] };
+type PendingMessage = { id: string; text: string; status: "sending" | "waiting" | "failed"; createdAt: number };
+type DisplayMessage = ChatMessageDTO & { status?: PendingMessage["status"] | "accepted" };
 
 export function ModelChat({ slug, back }: { slug: string; back: () => void }) {
   const queryClient = useQueryClient();
@@ -85,16 +86,8 @@ export function ModelChat({ slug, back }: { slug: string; back: () => void }) {
     onSuccess: (result, variables) => {
       const key = ["creator-messages", creatorId];
       if (result.status === "pending" || !result.response) {
-        queryClient.setQueryData<any>(key, (current: any) => {
-          if (!current?.pages?.length) return current;
-          const pages = [...current.pages];
-          const first = pages[0];
-          if (!first.items.some((item: ChatMessageDTO) => item.id === variables.id)) {
-            pages[0] = { ...first, items: [...first.items, { id: variables.id, role: "user", text: variables.text, occurredAt: new Date().toISOString() }] };
-          }
-          return { ...current, pages };
-        });
         setPending((all) => all.map((item) => item.id === variables.id ? { ...item, status: "waiting" } : item));
+        void queryClient.invalidateQueries({ queryKey: key });
         void queryClient.invalidateQueries({ queryKey: ["messages-inbox"] });
         return;
       }
@@ -105,7 +98,7 @@ export function ModelChat({ slug, back }: { slug: string; back: () => void }) {
         const pages = [...current.pages];
         const first = pages[0];
         const items = [...first.items];
-        if (!items.some((item: ChatMessageDTO) => item.id === variables.id)) items.push({ id: variables.id, role: "user", text: variables.text, occurredAt: new Date().toISOString() });
+        if (!items.some((item: ChatMessageDTO) => item.clientMessageId === variables.id || item.id === variables.id)) items.push({ id: variables.id, clientMessageId: variables.id, role: "user", text: variables.text, occurredAt: new Date().toISOString() });
         if (!items.some((item: ChatMessageDTO) => item.id === response.id)) items.push(response);
         pages[0] = { ...first, items };
         return { ...current, pages };
@@ -121,17 +114,18 @@ export function ModelChat({ slug, back }: { slug: string; back: () => void }) {
       }
       if (error instanceof ApiError && error.code === "AI_UNAVAILABLE") {
         setProviderUnavailable(true);
-        setPending((all) => all.filter((item) => item.id !== variables.id));
+        setPending((all) => all.map((item) => item.id === variables.id ? { ...item, status: "waiting" } : item));
         void queryClient.invalidateQueries({ queryKey: ["creator-messages", creatorId] });
         void queryClient.invalidateQueries({ queryKey: ["messages-inbox"] });
         return;
       }
       setPending((all) => all.map((item) => item.id === variables.id ? { ...item, status: "failed" } : item));
+      void queryClient.invalidateQueries({ queryKey: ["creator-messages", creatorId] });
     },
   });
   const pages = history.data?.pages ?? [];
   const historyItems = pages.flatMap((page) => page.items).sort((a, b) => Date.parse(a.occurredAt) - Date.parse(b.occurredAt));
-  const displayItems: DisplayMessage[] = [...historyItems, ...pending.map((item) => ({ ...item, role: "user" as const, occurredAt: new Date().toISOString() }))];
+  const displayItems = mergePendingMessages(historyItems, pending) as DisplayMessage[];
   const ageBlocked = ageRequired || state.data?.ageAssuranceRequired === true;
   const aiUnavailable = providerUnavailable || state.data?.aiAvailable === false;
   useEffect(() => {
@@ -142,18 +136,17 @@ export function ModelChat({ slug, back }: { slug: string; back: () => void }) {
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end", behavior: "smooth" }); }, [displayItems.length]);
   useEffect(() => {
-    const waiting = pending.find((item) => item.status === "waiting");
-    if (!waiting || send.isPending || !creatorId) return;
-    const timer = window.setTimeout(() => send.mutate({ id: waiting.id, text: waiting.text }), 5000);
-    return () => window.clearTimeout(timer);
-  }, [pending, send.isPending, creatorId]);
-
+    const persistedClientIds = new Set(historyItems.flatMap((item) => item.clientMessageId ? [item.clientMessageId] : []));
+    if (!persistedClientIds.size) return;
+    setPending((all) => all.filter((item) => !persistedClientIds.has(item.id)));
+  }, [history.data, creatorId]);
   const submit = (event?: FormEvent) => {
     event?.preventDefault();
     const text = draft.trim();
     if (!text || text.length > 4000 || !canSend) return;
     const id = crypto.randomUUID();
-    setPending((all) => [...all, { id, text, status: "sending" }]);
+    setPending((all) => [...all, { id, text, status: "sending", createdAt: Date.now() }]);
+    setProviderUnavailable(false);
     setDraft("");
     send.mutate({ id, text });
   };
@@ -173,16 +166,16 @@ export function ModelChat({ slug, back }: { slug: string; back: () => void }) {
   return <section className="messages-chat" aria-label="Chat">
     <header className="chat-header"><button type="button" onClick={back} aria-label="Back to messages"><ArrowLeft size={22} /></button>{model.data && <><Avatar src={model.data.avatarUrl} name={model.data.displayName} /><div className="chat-header-name"><strong>{model.data.displayName}</strong><span>@{model.data.slug}</span></div></>}</header>
     {model.isLoading || state.isLoading ? <div className="messages-state"><span className="messages-spinner" /><p>Opening conversation…</p></div> : model.isError || !model.data ? <div className="messages-state"><h2>Model unavailable</h2><p>This model profile can't be opened right now.</p><Button variant="secondary" onClick={back}>Back to messages</Button></div> : state.isError || !state.data?.enabled ? <div className="messages-state"><h2>Messages unavailable</h2><p>Conversations are temporarily unavailable.</p></div> : ageBlocked ? <div className="messages-gate" role="alert"><ShieldAlert size={25} /><h2>Messages are unavailable</h2><p>Age assurance is required before you can send messages. Messages cannot collect or change your age status.</p></div> : needsConsent ? <div className="messages-gate"><span className="messages-empty-icon"><MessageCircle size={25} /></span><p className="eyebrow">BEFORE YOUR FIRST MESSAGE</p><h2>AI character conversation</h2><p>You’re chatting with an AI character for this creator. Your conversation history is saved so you can continue this chat later.</p><label className="messages-memory-choice"><input type="checkbox" checked={remember ?? state.data.longTermMemory} onChange={(event) => setRemember(event.target.checked)} /><span><strong>Remember things from our conversations</strong><small>Optional. You can continue without long-term memory.</small></span></label><Button loading={consent.isPending} disabled={consent.isPending} onClick={() => consent.mutate(remember ?? state.data!.longTermMemory)}>Continue</Button>{consent.isError && <p className="messages-error" role="alert">Consent couldn't be saved. Try again.</p>}</div> : <>
-      <div className="chat-history" aria-live="polite">
-        {aiUnavailable && <div className="chat-provider-unavailable" role="status">AI replies are not configured yet. You can read your conversation, but sending is disabled for now.</div>}
-        {history.isError && <div className="chat-load-error" role="alert">Couldn't load chat history. <button type="button" onClick={() => void history.refetch()}>Retry</button></div>}
+        <div className="chat-history" aria-live="polite">
+        {aiUnavailable && <div className="chat-provider-unavailable" role="status">AGATA is temporarily unavailable. Please try again later.</div>}
+      {history.isError && <div className="chat-load-error" role="alert">Couldn't load chat history. <button type="button" onClick={() => void history.refetch()}>Retry</button></div>}
         {history.hasNextPage && <button className="chat-older" disabled={history.isFetchingNextPage} type="button" onClick={() => void history.fetchNextPage()}>{history.isFetchingNextPage ? "Loading…" : "Load earlier messages"}</button>}
         {history.isLoading && <div className="messages-state"><span className="messages-spinner" /><p>Loading conversation…</p></div>}
-        {!history.isLoading && displayItems.map((item) => <div className={`chat-message-row ${item.role === "user" ? "mine" : "theirs"}`} key={item.id}><article className={`chat-bubble ${item.role === "user" ? "mine" : "theirs"}`}><p>{item.text}</p>{item.status && <small className={item.status}>{item.status === "sending" ? "Sending…" : item.status === "waiting" ? "Агата отвечает…" : <>Not sent · <button type="button" onClick={() => retry({ id: item.id, text: item.text, status: "failed" })}>Retry</button></>}</small>}<time>{activityTime(item.occurredAt)}</time></article></div>)}
+        {!history.isLoading && displayItems.map((item) => <div className={`chat-message-row ${item.role === "user" ? "mine" : "theirs"}`} key={item.id}><article className={`chat-bubble ${item.role === "user" ? "mine" : "theirs"}`}><p>{item.text}</p>{item.status && <small className={item.status}>{item.status === "sending" ? "Sending…" : item.status === "waiting" ? "Агата отвечает…" : item.status === "accepted" ? "Sent" : <>Couldn't confirm · <button type="button" onClick={() => retry({ id: item.clientMessageId ?? item.id, text: item.text, status: "failed", createdAt: Date.now() })}>Retry</button></>}</small>}<time>{activityTime(item.occurredAt)}</time></article></div>)}
         {!history.isLoading && !displayItems.length && <div className="chat-welcome"><Avatar src={model.data.avatarUrl} name={model.data.displayName} className="large" /><h2>{model.data.displayName}</h2><p>Start a conversation. You’re chatting with an AI character for this creator.</p></div>}
         <div ref={bottomRef} />
       </div>
-      {send.isError && !(send.error instanceof ApiError && ["AGE_ASSURANCE_REQUIRED", "AI_UNAVAILABLE"].includes(send.error.code ?? "")) && <p className="chat-send-error" role="alert">Message wasn't sent. You can retry it above.</p>}
+      {displayItems.some((item) => item.status === "failed") && <p className="chat-send-error" role="alert">Delivery couldn't be confirmed. Retrying uses the same message ID.</p>}
       <form className="chat-composer" onSubmit={submit}><textarea ref={fieldRef} value={draft} onChange={(event) => setDraft(event.target.value.slice(0, 4000))} onKeyDown={onKeyDown} placeholder="Message…" aria-label="Message" rows={1} maxLength={4000} disabled={!canSend} /><span className="chat-composer-meta">{draft.length > 3600 ? `${draft.length}/4000` : ""}</span><button type="submit" disabled={!draft.trim() || !canSend} aria-label="Send message"><ArrowUp size={19} /></button></form>
     </>}
   </section>;

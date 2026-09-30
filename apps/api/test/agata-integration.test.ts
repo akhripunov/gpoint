@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { AgataClient } from '@gpoint/agata-client';
 import { createAgataIntegration, AgataIntegrationService } from '../src/agata-integration.js';
+import { assertWorkerAuth } from '../src/agata-worker-gateway.js';
 
 const input = {
   userId: 'gpoint-user-1',
@@ -25,6 +26,13 @@ const input = {
 test('AGATA boundary is disabled by default and ignores absent credentials', () => {
   assert.equal(createAgataIntegration({}), null);
   assert.equal(createAgataIntegration({ AGATA_ENABLED: 'false' }), null);
+});
+
+test('Codex worker gateway accepts only the dedicated bearer token', () => {
+  const env = { GPOINT_AGATA_WORKER_TOKEN: 'dedicated-test-token' };
+  assert.doesNotThrow(() => assertWorkerAuth({ authorization: 'Bearer dedicated-test-token' }, env));
+  assert.throws(() => assertWorkerAuth({}, env), { status: 401 });
+  assert.throws(() => assertWorkerAuth({ authorization: 'Bearer wrong-token' }, env), { status: 401 });
 });
 
 test('enabled boundary synchronizes character and consent before idempotent respond', async () => {

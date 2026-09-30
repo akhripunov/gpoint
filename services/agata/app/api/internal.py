@@ -404,6 +404,7 @@ async def list_gpoint_messages(
         page = rows[:limit]
         items = [{
             "id": str(message.id), "role": message.role,
+            **({"clientMessageId": message.idempotency_key} if message.role == "user" else {}),
             "text": _decrypt_message(message, tenant_id, user_id=user.id),
             "occurredAt": message.occurred_at.isoformat(),
         } for message in reversed(page)]
@@ -518,6 +519,10 @@ async def claim_inference_job(
     async with session.begin():
         await set_tenant_context(session, str(tenant_id))
         repository = OutboxRepository(session)
+        await repository.expire_stale_inference_jobs(
+            tenant_id=tenant_id,
+            ttl_seconds=settings.inference_job_ttl_seconds,
+        )
         await repository.requeue_expired(
             tenant_id=tenant_id, job_types=frozenset({"inference"})
         )
@@ -633,7 +638,7 @@ async def fail_inference_job(
             or not hmac.compare_digest(job.claim_token, payload.lease_token)
         ):
             raise HTTPException(status_code=409, detail={"code": "inference_lease_stale"})
-        await OutboxRepository(session).fail(job, payload.error_code, max_attempts=5)
+        await OutboxRepository(session).fail(job, payload.error_code, max_attempts=2)
         return {"accepted": True, "state": job.state.value}
 
 
@@ -1107,6 +1112,9 @@ async def respond(
         ),
     )
     if result.status == "pending":
+        # Pending/running lifecycle is owned by the inference outbox. A
+        # ResponseRun is intentionally created only when the assistant message
+        # is committed, so retries recover from the deterministic outbox key.
         return RespondResponse(
             status="pending",
             request_id=payload.request_id,
@@ -1114,7 +1122,12 @@ async def respond(
             character_id=str(character_id),
         )
     if result.status != "completed" or result.assistant_message_id is None:
-        raise HTTPException(status_code=503, detail={"code": result.reason_code})
+        code = (
+            "ai_unavailable"
+            if result.reason_code in {"provider_unavailable", "inference_retry_exhausted"}
+            else result.reason_code
+        )
+        raise HTTPException(status_code=503, detail={"code": code})
     async with session.begin():
         await set_tenant_context(session, str(tenant_id))
         assistant = await session.scalar(

@@ -34,6 +34,7 @@ export function mapAgataError(error: unknown): HttpException {
     if (error.status === 409 && error.code === 'idempotency_conflict') return new HttpException({ code: 'CHAT_IDEMPOTENCY_CONFLICT' }, 409);
     if (error.status === 403 && ['consent_required', 'chat_history_consent_required'].includes(error.code)) return new HttpException({ code: 'CHAT_CONSENT_REQUIRED' }, 403);
     if (error.status === 503 && error.code === 'ai_unavailable') return new HttpException({ code: 'AI_UNAVAILABLE' }, 503);
+    if (error.status === 503 && ['provider_unavailable', 'inference_retry_exhausted'].includes(error.code)) return new HttpException({ code: 'AI_UNAVAILABLE' }, 503);
   }
   return new HttpException({ code: 'MESSAGES_TEMPORARILY_UNAVAILABLE' }, 503);
 }

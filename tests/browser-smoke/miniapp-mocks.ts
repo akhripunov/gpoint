@@ -32,10 +32,10 @@ const modelPost = (index: number) => ({
 
 export async function installMiniAppBrowserMocks(
   page: Page,
-  options: { telegramStartParam?: string; ageAssuranceRequired?: boolean; ageAttestationWriteStatus?: number; aiAvailable?: boolean } = {},
+  options: { telegramStartParam?: string; ageAssuranceRequired?: boolean; ageAttestationWriteStatus?: number; aiAvailable?: boolean; pendingReply?: boolean } = {},
 ) {
   const errors: string[] = [];
-  const chatMessages: Array<{ id: string; role: "user" | "assistant"; text: string; occurredAt: string }> = [];
+  const chatMessages: Array<{ id: string; clientMessageId?: string; role: "user" | "assistant"; text: string; occurredAt: string }> = [];
   let ageAssuranceRequired = options.ageAssuranceRequired ?? false;
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => {
@@ -92,8 +92,13 @@ export async function installMiniAppBrowserMocks(
       const body = JSON.parse(route.request().postData() || "{}");
       const occurredAt = new Date().toISOString();
       const response = { id: "assistant-reply-1", role: "assistant" as const, text: "Thanks for your message.", occurredAt };
-      chatMessages.push({ id: body.clientMessageId, role: "user", text: body.text, occurredAt }, response);
-      data = { userMessageId: body.clientMessageId, response };
+      chatMessages.push({ id: `server-${body.clientMessageId}`, clientMessageId: body.clientMessageId, role: "user", text: body.text, occurredAt });
+      if (options.pendingReply) {
+        data = { userMessageId: body.clientMessageId, status: "pending" };
+      } else {
+        chatMessages.push(response);
+        data = { userMessageId: body.clientMessageId, response };
+      }
     } else { status = 404; data = { message: `No browser smoke fixture for ${apiPath}` }; }
     console.log("API_MOCK", route.request().method(), apiPath, status);
     await route.fulfill({ status, headers: { "access-control-allow-origin": "http://127.0.0.1:5189", "access-control-allow-credentials": "true" }, contentType: "application/json", body: JSON.stringify(data) });

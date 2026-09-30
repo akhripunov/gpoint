@@ -24,6 +24,11 @@ test('AGATA errors map to stable public codes without exposing internal messages
   const conflict = mapAgataError(new AgataServiceError('raw detail', 409, 'idempotency_conflict'));
   assert.equal(conflict.getStatus(), 409);
   assert.deepEqual(conflict.getResponse(), { code: 'CHAT_IDEMPOTENCY_CONFLICT' });
+  for (const code of ['provider_unavailable', 'inference_retry_exhausted']) {
+    const workerUnavailable = mapAgataError(new AgataServiceError('internal worker detail', 503, code));
+    assert.equal(workerUnavailable.getStatus(), 503);
+    assert.deepEqual(workerUnavailable.getResponse(), { code: 'AI_UNAVAILABLE' });
+  }
 });
 
 test('message send is blocked with a stable age-assurance error when authoritative state requires it', () => {

@@ -100,9 +100,10 @@ async def _enqueue_refresh(
             existing.lease_expires_at = None
             existing.last_error = None
         return
-    await OutboxRepository(session).enqueue(
+    await OutboxRepository(session).enqueue_idempotent(
         tenant_id=tenant_id, job_type=job_type, dedupe_key=dedupe_key,
         aggregate_id=relationship_id, creation_epoch=creation_epoch, payload=payload,
+        reactivate_terminal=True,
     )
 
 

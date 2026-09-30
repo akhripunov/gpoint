@@ -19,6 +19,8 @@ def build_response_provider(
     if configured.llm_provider in {"disabled", "none"}:
         return None
     if configured.llm_provider == "mac_worker":
+        if not configured.codex_local_enabled:
+            return None
         return MacWorkerResponseProvider(
             session,
             crypto=AeadCrypto(

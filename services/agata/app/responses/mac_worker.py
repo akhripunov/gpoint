@@ -6,12 +6,12 @@ import asyncio
 import json
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db.base import set_tenant_context
-from app.db.models import JobState, OutboxJob
+from app.db.models import JobState, OutboxJob, Tenant
 from app.jobs.outbox import OutboxRepository
 from app.messages.crypto import AeadCrypto, CiphertextEnvelope, canonical_tagged_fields
 from app.responses.pipeline import ProviderEnvelope, ResponseContext
@@ -19,6 +19,10 @@ from app.responses.pipeline import ProviderEnvelope, ResponseContext
 
 class WorkerInferencePending(Exception):
     """The durable job exists but no worker result is ready within the HTTP window."""
+
+
+class WorkerInferenceUnavailable(Exception):
+    """The worker queue is unavailable or at its configured bounded capacity."""
 
 
 def _aad(tenant_id: UUID, job_id: UUID, source_message_id: UUID, field: str) -> bytes:
@@ -129,26 +133,63 @@ class MacWorkerResponseProvider:
         message_id = context.source_message_id
         dedupe_key = f"inference:{message_id}"
         encoded_request = json.dumps(_worker_request(context), ensure_ascii=False, separators=(",", ":"))
+        queue_full = False
         async with self.session.begin():
             await set_tenant_context(self.session, str(self.tenant_id))
+            settings = get_settings()
+            repository = OutboxRepository(self.session)
+            await repository.expire_stale_inference_jobs(
+                tenant_id=self.tenant_id,
+                ttl_seconds=settings.inference_job_ttl_seconds,
+            )
             job = await self.session.scalar(select(OutboxJob).where(
                 OutboxJob.tenant_id == self.tenant_id,
                 OutboxJob.job_type == "inference",
                 OutboxJob.dedupe_key == dedupe_key,
             ).with_for_update())
             if job is None:
-                job = await OutboxRepository(self.session).enqueue(
-                    tenant_id=self.tenant_id,
-                    job_type="inference",
-                    dedupe_key=dedupe_key,
-                    aggregate_id=message_id,
-                    payload={},
+                tenant = await self.session.scalar(
+                    select(Tenant).where(Tenant.id == self.tenant_id).with_for_update()
                 )
-                job.payload = _encrypt_payload(self.crypto, self.tenant_id, job, "context", encoded_request)
-            if job.state == JobState.completed:
+                # Locking a missing outbox row provides no gap lock. Recheck
+                # after queue admission is serialized on the tenant row.
+                job = await self.session.scalar(select(OutboxJob).where(
+                    OutboxJob.tenant_id == self.tenant_id,
+                    OutboxJob.job_type == "inference",
+                    OutboxJob.dedupe_key == dedupe_key,
+                ).with_for_update())
+                pending_count = await self.session.scalar(
+                    select(func.count(OutboxJob.id)).where(
+                        OutboxJob.tenant_id == self.tenant_id,
+                        OutboxJob.job_type == "inference",
+                        OutboxJob.state.in_((JobState.pending, JobState.running)),
+                    )
+                )
+                if tenant is None:
+                    queue_full = True
+                elif job is None and (pending_count or 0) >= settings.max_pending_inference_jobs:
+                    queue_full = True
+                elif job is None:
+                    job, created = await repository.enqueue_inference_idempotent(
+                        tenant_id=self.tenant_id,
+                        dedupe_key=dedupe_key,
+                        aggregate_id=message_id,
+                        payload={},
+                    )
+                    if created:
+                        job.payload = _encrypt_payload(
+                            self.crypto, self.tenant_id, job, "context", encoded_request
+                        )
+            if queue_full:
+                # Commit stale-job expiry before returning a controlled unavailable result.
+                pass
+            elif job.state == JobState.completed:
                 return self._result(job)
-            if job.state == JobState.dead:
+            elif job.state == JobState.dead:
                 raise ValueError("inference_retry_exhausted")
+
+        if queue_full:
+            raise WorkerInferenceUnavailable("inference_queue_unavailable")
 
         deadline = asyncio.get_running_loop().time() + self.wait_seconds
         while asyncio.get_running_loop().time() < deadline:

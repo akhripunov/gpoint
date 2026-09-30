@@ -5,6 +5,7 @@ test.beforeEach(async ({ page }, testInfo) => {
   await installMiniAppBrowserMocks(page, {
     ageAssuranceRequired: testInfo.title.includes("age assurance blocks") || testInfo.title.includes("age assurance self-attestation"),
     aiAvailable: !testInfo.title.includes("provider-disabled"),
+    pendingReply: testInfo.title.includes("pending send"),
   });
 });
 
@@ -33,6 +34,27 @@ test("creator profile opens its chat; consent and text exchange work", async ({ 
   await expect(page.getByText("Hello!", { exact: true })).toBeVisible();
   await expect(page.getByText("Thanks for your message.", { exact: true })).toBeVisible();
   await expect(page.locator(".bottom-nav")).toHaveCount(0);
+});
+
+test("pending send polls history without reposting and merges the persisted bubble", async ({ page }) => {
+  const sendRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().includes("/messages/creator/")) {
+      sendRequests.push(request.url());
+    }
+  });
+  await page.goto("/messages/models_hub", { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "Continue" }).click();
+  const composer = page.getByRole("textbox", { name: "Message" });
+  await composer.fill("Accepted once");
+  await composer.press("Enter");
+
+  const bubble = page.locator(".chat-bubble.mine").filter({ hasText: "Accepted once" });
+  await expect(bubble).toHaveCount(1);
+  await expect(bubble.getByRole("button", { name: "Retry" })).toHaveCount(0);
+  await page.waitForTimeout(6_000);
+  expect(sendRequests).toHaveLength(1);
+  await expect(page.getByText(/couldn't confirm delivery/i)).toHaveCount(0);
 });
 
 test("age assurance blocks Messages behind the global onboarding gate", async ({ page }) => {
