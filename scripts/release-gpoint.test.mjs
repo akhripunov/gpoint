@@ -4,12 +4,87 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, evaluateSafetyGates, failureEvidence, isTransientGitHubTransportFailure, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, verifiedRuntimeState } from './release-gpoint.mjs';
-import { agataInternalConfigProvisionCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, parseAgataRuntimeIdentityLine, planReleaseRetention, resolveRunnerPath, runRemoteCommand, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
+import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, cleanupLocalPackageCaches, evaluateSafetyGates, failureEvidence, isTransientGitHubTransportFailure, localDiskDecision, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runLocalDiskPreflight, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, verifiedRuntimeState } from './release-gpoint.mjs';
+import { agataInternalConfigProvisionCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, cleanupTemporaryWorktree, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, parseAgataRuntimeIdentityLine, planReleaseRetention, resolveRunnerPath, runRemoteCommand, runWithPreExecRetry, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
+
+test('temporary worktree cleanup uses git metadata removal when available', () => {
+  const calls = [];
+  const tempWorktree = path.join(os.tmpdir(), 'gpoint-release-test');
+  const result = cleanupTemporaryWorktree(tempWorktree, {
+    removeWorktree: target => calls.push(['git', target]),
+    removeDirectory: target => calls.push(['fs', target]),
+    pruneWorktreeMetadata: () => calls.push(['prune']),
+  });
+  assert.equal(result, 'GIT_WORKTREE_REMOVE');
+  assert.deepEqual(calls, [['git', tempWorktree]]);
+});
+
+test('temporary worktree cleanup falls back to its exact directory and prunes stale metadata', () => {
+  const calls = [];
+  const tempWorktree = path.join(os.tmpdir(), 'gpoint-release-test');
+  const result = cleanupTemporaryWorktree(tempWorktree, {
+    removeWorktree: target => { calls.push(['git', target]); throw new Error('worktree unavailable'); },
+    removeDirectory: target => calls.push(['fs', target]),
+    pruneWorktreeMetadata: () => calls.push(['prune']),
+  });
+  assert.equal(result, 'FILESYSTEM_FALLBACK');
+  assert.deepEqual(calls, [
+    ['git', tempWorktree],
+    ['fs', tempWorktree],
+    ['prune'],
+  ]);
+});
+
+test('temporary worktree cleanup refuses paths outside recognized GPoint temp worktrees', () => {
+  let touched = false;
+  assert.throws(() => cleanupTemporaryWorktree(path.join(os.tmpdir(), 'user-data'), {
+    removeWorktree: () => { touched = true; },
+    removeDirectory: () => { touched = true; },
+  }), /refusing to clean a path/);
+  assert.equal(touched, false);
+});
 
 const sha = '4d99e0da856d2ffe174c54d7ae7f2f971ab462f5';
 const artifacts = { api: { sourceSha: sha }, worker: { sourceSha: sha }, bot: { sourceSha: sha }, miniapp: { sourceSha: sha } };
 const config = { api: sha, worker: sha, bot: sha, miniapp: sha };
+
+test('local disk gate passes at the 15 GiB target', () => {
+  const warnings = [];
+  const result = runLocalDiskPreflight({ freeBytes: () => 16 * 1024 ** 3, cleanup: () => assert.fail('cleanup should not run at target'), warn: message => warnings.push(message) });
+  assert.equal(result.gate, 'PASS');
+  assert.equal(result.cleanupAttempted, false);
+  assert.deepEqual(warnings, []);
+});
+
+test('local disk gate performs one safe cleanup and warns between 10 and 15 GiB', () => {
+  const free = [12, 12].map(value => value * 1024 ** 3);
+  const warnings = [];
+  let cleanups = 0;
+  const result = runLocalDiskPreflight({ freeBytes: () => free.shift(), cleanup: () => { cleanups += 1; return [{ command: 'pnpm', ok: true }, { command: 'npm', ok: true }]; }, warn: message => warnings.push(message) });
+  assert.equal(result.gate, 'WARNING');
+  assert.equal(result.cleanupAttempted, true);
+  assert.equal(cleanups, 1);
+  assert.match(warnings[0], /LOCAL_DISK_GATE=WARNING/);
+});
+
+test('local disk gate fails closed below 10 GiB after exactly one cleanup', () => {
+  const free = [8, 9].map(value => value * 1024 ** 3);
+  let cleanups = 0;
+  assert.throws(() => runLocalDiskPreflight({ freeBytes: () => free.shift(), cleanup: () => { cleanups += 1; return []; }, warn: () => {} }), /requires at least 10 GiB/);
+  assert.equal(cleanups, 1);
+});
+
+test('local package-cache cleanup is limited to bounded pnpm/npm cache commands', () => {
+  const calls = [];
+  const results = cleanupLocalPackageCaches((...args) => { calls.push(args); return { status: 0 }; });
+  assert.deepEqual(calls.map(([binary, args]) => [binary, args]), [
+    ['pnpm', ['store', 'prune']],
+    ['npm', ['cache', 'clean', '--force']],
+  ]);
+  assert.ok(calls.every(([, , options]) => options.timeout === 30_000));
+  assert.deepEqual(results, [{ command: 'pnpm', ok: true }, { command: 'npm', ok: true }]);
+  assert.equal(localDiskDecision(9 * 1024 ** 3).gate, 'FAIL');
+});
 
 test('remote SHA verifier accepts the exact main SHA through the canonical transport', () => {
   const calls = [];
@@ -231,6 +306,8 @@ test('key-only runner discovers identity in a fresh process and preserves remote
     assert.ok(args.includes('IdentitiesOnly=yes'));
     assert.ok(args.includes('StrictHostKeyChecking=yes'));
     assert.ok(args.includes('BatchMode=yes'));
+    assert.ok(args.includes('-E'));
+    assert.ok(args.includes('-vv'));
     assert.ok(args.includes('exit 17'));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
@@ -586,6 +663,110 @@ test('remote runner retains exact exit code and stderr without a parent pipe buf
   assert.equal(failureEvidence(captured, { stage: 'MIGRATION_APPLY' }).failureExitCode, 17);
   if (previous === undefined) delete process.env.GPOINT_REMOTE_RUNNER; else process.env.GPOINT_REMOTE_RUNNER = previous;
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('remote runner retries a proven banner timeout once and preserves the exact command', () => {
+  const commands = [];
+  const delays = [];
+  const command = 'docker inspect compose-api-1';
+  const result = runWithPreExecRetry(attempt => {
+    commands.push(command);
+    if (attempt === 1) throw Object.assign(new Error('banner timeout'), { classification: 'PRE_EXEC_TRANSPORT_FAILURE' });
+    return 'healthy';
+  }, { sleep: milliseconds => delays.push(milliseconds) });
+  assert.equal(result, 'healthy');
+  assert.deepEqual(commands, [command, command]);
+  assert.deepEqual(delays, [1_000]);
+});
+
+test('three proven pre-exec failures stop after exactly three attempts with bounded backoff', () => {
+  let attempts = 0;
+  const delays = [];
+  assert.throws(() => runWithPreExecRetry(() => {
+    attempts += 1;
+    throw Object.assign(new Error('Could not resolve host'), { classification: 'PRE_EXEC_TRANSPORT_FAILURE' });
+  }, { sleep: milliseconds => delays.push(milliseconds) }), /Could not resolve host/);
+  assert.equal(attempts, 3);
+  assert.deepEqual(delays, [1_000, 3_000]);
+});
+
+test('remote command, auth, host-key, and ambiguous post-start failures never retry', () => {
+  for (const [classification, message] of [
+    ['REMOTE_COMMAND_FAILURE', 'docker command failed'],
+    ['REMOTE_COMMAND_FAILURE', 'Permission denied (publickey)'],
+    ['REMOTE_COMMAND_FAILURE', 'Host key verification failed'],
+    ['AMBIGUOUS_POST_START_FAILURE', 'Connection reset after command start'],
+  ]) {
+    let attempts = 0;
+    assert.throws(() => runWithPreExecRetry(() => {
+      attempts += 1;
+      throw Object.assign(new Error(message), { classification });
+    }, { sleep: () => assert.fail('unsafe remote failure must not retry') }), new RegExp(message.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.equal(attempts, 1);
+  }
+});
+
+test('pre-exec runner marker is emitted only for recognized SSH failure before command send', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-pre-exec-runner-test-'));
+  const home = path.join(root, 'home');
+  const bin = path.join(root, 'bin');
+  const configDir = path.join(home, '.config/gpoint');
+  const identity = path.join(home, '.ssh/gpoint_deploy_ed25519');
+  const statusFile = path.join(root, 'status');
+  const modeFile = path.join(root, 'mode');
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.mkdirSync(bin, { recursive: true });
+  fs.mkdirSync(path.dirname(identity), { recursive: true });
+  fs.writeFileSync(identity, 'test-private-key-placeholder');
+  fs.writeFileSync(path.join(configDir, 'release-tools.env'), 'GPOINT_SSH_IDENTITY_FILE=$HOME/.ssh/gpoint_deploy_ed25519\n');
+  fs.writeFileSync(path.join(bin, 'ssh'), `#!/bin/sh\ndebug=\nwhile [ "$#" -gt 0 ]; do if [ "$1" = -E ]; then shift; debug=$1; fi; shift; done\ncase "$(cat "$MODE_FILE")" in\npreexec) echo 'Connection timed out during banner exchange' >&2; echo 'ssh: Connection timed out during banner exchange' >> "$debug"; exit 255;;\nambiguous) echo 'Connection reset by peer' >&2; echo 'debug1: Sending command: hostname' >> "$debug"; exit 255;;\nauth) echo 'Permission denied (publickey).' >&2; echo 'debug1: Offering public key' >> "$debug"; exit 255;;\nhostkey) echo 'Host key verification failed.' >&2; echo 'Host key verification failed.' >> "$debug"; exit 255;;\nremote) echo 'remote docker failure' >&2; echo 'debug1: Sending command: hostname' >> "$debug"; exit 17;;\nesac\n`, { mode: 0o700 });
+  const runner = path.join(path.dirname(new URL(import.meta.url).pathname), 'gpoint-vps-runner.sh');
+  const env = { HOME: home, PATH: `${bin}:${process.env.PATH}`, GPOINT_REMOTE_ATTEMPT_STATUS_FILE: statusFile, MODE_FILE: modeFile, REMOTE_CMD: 'hostname' };
+  try {
+    fs.writeFileSync(modeFile, 'preexec');
+    const preexec = spawnSync(runner, [], { encoding: 'utf8', env });
+    assert.equal(preexec.status, 75);
+    assert.equal(fs.readFileSync(statusFile, 'utf8').trim(), 'PRE_EXEC_TRANSPORT_FAILURE:255');
+    for (const mode of ['ambiguous', 'auth', 'hostkey', 'remote']) {
+      fs.writeFileSync(modeFile, mode);
+      fs.writeFileSync(statusFile, '');
+      const result = spawnSync(runner, [], { encoding: 'utf8', env });
+      assert.equal(result.status, mode === 'remote' ? 17 : 255, mode);
+      assert.equal(fs.readFileSync(statusFile, 'utf8'), '', mode);
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('pre-exec retry errors and logs do not expose command secrets', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-pre-exec-redaction-test-'));
+  const runner = path.join(root, 'runner.sh');
+  const countFile = path.join(root, 'count');
+  const secret = 'synthetic-secret-value';
+  fs.writeFileSync(runner, `#!/bin/sh\ncount=$(cat "$COUNT_FILE" 2>/dev/null || echo 0)\ncount=$((count + 1))\nprintf '%s' "$count" > "$COUNT_FILE"\nprintf 'TOKEN=${secret}\\n' >&2\nprintf '%s\\n' 'PRE_EXEC_TRANSPORT_FAILURE:255' > "$GPOINT_REMOTE_ATTEMPT_STATUS_FILE"\nexit 75\n`);
+  fs.chmodSync(runner, 0o700);
+  const previousRunner = process.env.GPOINT_REMOTE_RUNNER;
+  const previousCount = process.env.COUNT_FILE;
+  const messages = [];
+  const previousLog = console.error;
+  process.env.GPOINT_REMOTE_RUNNER = runner;
+  process.env.COUNT_FILE = countFile;
+  console.error = (...values) => messages.push(values.join(' '));
+  try {
+    assert.throws(() => runRemoteCommand('safe-command'), error => {
+      assert.equal(error.code, 'PRE_EXEC_TRANSPORT_FAILURE');
+      assert.equal(error.exitCode, 255);
+      assert.match(error.stderr, new RegExp(secret));
+      assert.doesNotMatch(error.message, new RegExp(secret));
+      return true;
+    });
+    assert.equal(fs.readFileSync(countFile, 'utf8'), '3');
+    assert.doesNotMatch(messages.join('\n'), new RegExp(secret));
+  } finally {
+    console.error = previousLog;
+    if (previousRunner === undefined) delete process.env.GPOINT_REMOTE_RUNNER; else process.env.GPOINT_REMOTE_RUNNER = previousRunner;
+    if (previousCount === undefined) delete process.env.COUNT_FILE; else process.env.COUNT_FILE = previousCount;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('remote migration failure evidence preserves output and exit while redacting secrets and command payloads', () => {

@@ -6,6 +6,8 @@ import { execFileSync, spawnSync } from 'node:child_process';
 
 const ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const REPO = 'git@github.com:akhripunov/gpoint.git';
+const REMOTE_RETRY_BACKOFF_MS = [1_000, 3_000];
+const PRE_EXEC_STATUS_MARKER = 'PRE_EXEC_TRANSPORT_FAILURE:255';
 export const GPOINT_DATABASE_NETWORK = 'shared_internal';
 export const SOURCE_ARCHIVE_EXCLUDES = [
   '--exclude=._*', '--exclude=*/._*',
@@ -106,13 +108,16 @@ export function provisionAgataInternalConfigForBaseline(expectedSha) {
 }
 
 export class RemoteCommandError extends Error {
-  constructor(command, error) {
+  constructor(command, error, classification = 'REMOTE_COMMAND_FAILURE') {
     const commandHash = crypto.createHash('sha256').update(command).digest('hex');
     const stdout = String(error.stdout ?? '');
     const stderr = String(error.stderr ?? '');
-    super(`remote command failed (exit=${error.status ?? 'unknown'}, command_sha256=${commandHash})`);
+    super(classification === 'PRE_EXEC_TRANSPORT_FAILURE'
+      ? `remote SSH failed before command execution (exit=${error.status ?? 'unknown'}, command_sha256=${commandHash})`
+      : `remote command failed (exit=${error.status ?? 'unknown'}, command_sha256=${commandHash})`);
     this.name = 'RemoteCommandError';
-    this.code = 'REMOTE_COMMAND_FAILED';
+    this.code = classification;
+    this.classification = classification;
     this.command = `sha256:${commandHash}`;
     this.commandHash = commandHash;
     this.exitCode = Number.isInteger(error.status) ? error.status : null;
@@ -238,6 +243,26 @@ export function detectorNeedsRebuild(currentSourceHash, candidateSourceHash) {
   return currentSourceHash !== candidateSourceHash;
 }
 
+export function cleanupTemporaryWorktree(worktree, {
+  removeWorktree = target => execFileSync('git', ['worktree', 'remove', '--force', target], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] }),
+  removeDirectory = target => fs.rmSync(target, { recursive: true, force: true }),
+  pruneWorktreeMetadata = () => execFileSync('git', ['worktree', 'prune', '--expire', 'now'], { cwd: ROOT, stdio: 'ignore' }),
+} = {}) {
+  const target = path.resolve(worktree);
+  const tempRoot = path.resolve(os.tmpdir());
+  if (path.dirname(target) !== tempRoot || !/^gpoint-(?:release|apply)-/.test(path.basename(target))) {
+    throw new Error('refusing to clean a path outside a recognized GPoint temporary worktree');
+  }
+  try {
+    removeWorktree(target);
+    return 'GIT_WORKTREE_REMOVE';
+  } catch {
+    removeDirectory(target);
+    try { pruneWorktreeMetadata(); } catch {}
+    return 'FILESYSTEM_FALLBACK';
+  }
+}
+
 function stage(timings, name, action) {
   const started = Date.now();
   console.error(`${name} START`);
@@ -261,30 +286,59 @@ function run(command, env = {}) {
   const captureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-remote-run-'));
   const stdoutFile = path.join(captureDir, 'stdout');
   const stderrFile = path.join(captureDir, 'stderr');
-  const stdoutFd = fs.openSync(stdoutFile, 'w');
-  const stderrFd = fs.openSync(stderrFile, 'w');
-  const started = Date.now();
+  const statusFile = path.join(captureDir, 'attempt-status');
   console.error(`REMOTE_COMMAND_START elapsed=0s command=${command.split(/\s+/).slice(0, 3).join(' ')}`);
   try {
-    const result = spawnSync(runner, [], { env: { ...process.env, ...env, REMOTE_CMD: command }, stdio: ['ignore', stdoutFd, stderrFd] });
-    const stdout = fs.readFileSync(stdoutFile, 'utf8');
-    const stderr = fs.readFileSync(stderrFile, 'utf8');
-    console.error(`REMOTE_COMMAND_DONE elapsed=${((Date.now() - started) / 1000).toFixed(1)}s exit=${result.status ?? 'unknown'}`);
-    if (result.status !== 0) {
-      const error = new Error('remote runner exited non-zero');
-      error.status = result.status;
-      error.stdout = stdout;
-      error.stderr = stderr;
+    return runWithPreExecRetry(attempt => {
+      fs.writeFileSync(stdoutFile, '');
+      fs.writeFileSync(stderrFile, '');
+      fs.writeFileSync(statusFile, '');
+      const stdoutFd = fs.openSync(stdoutFile, 'w');
+      const stderrFd = fs.openSync(stderrFile, 'w');
+      const started = Date.now();
+      let result;
+      try {
+        result = spawnSync(runner, [], {
+          env: { ...process.env, ...env, REMOTE_CMD: command, GPOINT_REMOTE_ATTEMPT_STATUS_FILE: statusFile },
+          stdio: ['ignore', stdoutFd, stderrFd],
+        });
+      } finally {
+        fs.closeSync(stdoutFd);
+        fs.closeSync(stderrFd);
+      }
+      const stdout = fs.readFileSync(stdoutFile, 'utf8');
+      const stderr = fs.readFileSync(stderrFile, 'utf8');
+      const elapsed = ((Date.now() - started) / 1000).toFixed(1);
+      if (result.status === 0) {
+        console.error(`REMOTE_COMMAND_DONE attempt=${attempt} elapsed=${elapsed}s exit=0`);
+        return stdout;
+      }
+      const statusMarker = fs.readFileSync(statusFile, 'utf8').trim();
+      const classification = result.status === 75 && statusMarker === PRE_EXEC_STATUS_MARKER
+        ? 'PRE_EXEC_TRANSPORT_FAILURE'
+        : 'REMOTE_COMMAND_FAILURE';
+      const error = new RemoteCommandError(command, {
+        status: classification === 'PRE_EXEC_TRANSPORT_FAILURE' ? 255 : result.status,
+        stdout: result.error ? `${stdout}${result.error.message}` : stdout,
+        stderr: result.error ? `${stderr}${result.error.message}` : stderr,
+      }, classification);
+      console.error(`REMOTE_COMMAND_DONE attempt=${attempt} elapsed=${elapsed}s exit=${result.status ?? 'unknown'} class=${classification}`);
       throw error;
-    }
-    return stdout;
-  } catch (error) {
-    throw new RemoteCommandError(command, error);
+    });
   } finally {
-    fs.closeSync(stdoutFd);
-    fs.closeSync(stderrFd);
     fs.rmSync(captureDir, { recursive: true, force: true });
   }
+}
+
+export function runWithPreExecRetry(operation, { sleep = milliseconds => spawnSync('sleep', [String(milliseconds / 1_000)]) } = {}) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try { return operation(attempt); }
+    catch (error) {
+      if (error?.classification !== 'PRE_EXEC_TRANSPORT_FAILURE' || attempt === 3) throw error;
+      sleep(REMOTE_RETRY_BACKOFF_MS[attempt - 1]);
+    }
+  }
+  throw new Error('unreachable remote retry state');
 }
 
 export function upload(localFile, remoteFile) {
@@ -331,8 +385,7 @@ export function exactCheckout(sha) {
     if (execFileSync('git', ['status', '--porcelain'], { cwd: dir, encoding: 'utf8' }).trim()) throw new Error('apply checkout is dirty');
     return dir;
   } catch (error) {
-    try { execFileSync('git', ['worktree', 'remove', '--force', dir], { cwd: ROOT, stdio: 'ignore' }); } catch {}
-    fs.rmSync(dir, { recursive: true, force: true });
+    cleanupTemporaryWorktree(dir);
     throw error;
   }
 }
@@ -348,8 +401,8 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
   const archive = `${checkout}.tar.gz`;
   const agataStatusCode = `import os, psycopg\nfrom sqlalchemy.engine import make_url\nurl = make_url(os.environ['AGATA_DATABASE_URL'])\nquery = {key: value for key, value in url.query.items() if key in {'sslmode','sslrootcert','sslcert','sslkey','connect_timeout','application_name'}}\nurl = url.set(drivername='postgresql', query=query)\nwith psycopg.connect(url.render_as_string(hide_password=False)) as conn:\n    row = conn.execute(\"SELECT to_regclass('agata.alembic_version')\").fetchone()\n    if row[0] is None:\n        print('AGATA_SCHEMA_ABSENT')\n    else:\n        heads = conn.execute('SELECT version_num FROM agata.alembic_version').fetchall()\n        if len(heads) != 1:\n            raise RuntimeError('AGATA migration head is not singular')\n        print('AGATA_HEAD=' + heads[0][0])\n`;
   const agataStatusB64 = Buffer.from(agataStatusCode).toString('base64');
-  createSourceArchive(checkout, archive);
   try {
+    createSourceArchive(checkout, archive);
     stage(timings, 'PRODUCTION_PREFLIGHT', () => run(`set -e; command -v docker >/dev/null; docker version --format 'DOCKER_VERSION={{.Server.Version}}'; docker compose version; docker buildx version; docker buildx inspect --bootstrap >/dev/null; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n "$freeKb"; test "$freeKb" -ge 5242880; test -r /opt/gpoint/env/production.env; currentSha=$(sed -n 's/^RELEASE_SHA=//p' /opt/gpoint/env/production.env | head -1); printf '%s\\n' "$currentSha" | grep -Eq '^[0-9a-f]{40}$'; currentImage=$(docker inspect compose-api-1 --format '{{.Config.Image}}'); dbStatus=$(docker run --rm ${databaseNetworkArgs('gpoint-preflight')} --env-file /opt/gpoint/env/production.env "$currentImage" pnpm --filter @gpoint/db exec prisma migrate status 2>&1); test -n "$dbStatus"; printf '%s\\n' "$dbStatus" | tail -5; for name in AGATA_ENABLED AGATA_LLM_PROVIDER AGATA_DATABASE_URL AGATA_TENANT_ID AGATA_INTERNAL_API_TOKEN AGATA_MESSAGE_AEAD_KEY AGATA_REQUEST_FINGERPRINT_HMAC_KEY AGATA_RETRIEVAL_QUERY_HMAC_KEY AGATA_RESPONSE_FINGERPRINT_HMAC_KEY AGATA_SHADOW_CANDIDATE_HMAC_KEY; do grep -Eq "^\${name}=.+\\$" /opt/gpoint/env/production.env || { echo AGATA_CONFIG_MISSING=$name; exit 32; }; done; grep -qx 'AGATA_ENABLED=true' /opt/gpoint/env/production.env; grep -qx 'AGATA_LLM_PROVIDER=disabled' /opt/gpoint/env/production.env; printf 'GPOINT_PREFLIGHT_OK\\n'`));
     stage(timings, 'SOURCE_PREPARE', () => {
       upload(archive, `/tmp/gpoint-${sha}.tar.gz`);
@@ -466,7 +519,7 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
     if (!migrationOutput) throw new Error('migration gate output was not recognized');
     return { imageIdentity: { imageId, indexSha256, buildSha, detectorHash }, agataIdentity: agataRuntime, migrationOutput, composeExitCode, postSwitch, detectorHash, timings };
   } finally {
-    execFileSync('git', ['worktree', 'remove', '--force', checkout], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
-    fs.rmSync(archive, { force: true });
+    try { cleanupTemporaryWorktree(checkout); }
+    finally { fs.rmSync(archive, { force: true }); }
   }
 }

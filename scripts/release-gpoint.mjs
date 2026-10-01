@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { applyCandidate, inspectProductionReadOnly, planReleaseRetention, provisionAgataInternalConfigForBaseline, runRemoteCommand } from './release-gpoint-vps-adapter.mjs';
+import { applyCandidate, cleanupTemporaryWorktree, inspectProductionReadOnly, planReleaseRetention, provisionAgataInternalConfigForBaseline, runRemoteCommand } from './release-gpoint-vps-adapter.mjs';
 
 const ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const STATE_FILE = path.join(ROOT, 'docs/release/state/production.json');
@@ -14,6 +14,10 @@ const SHA_RE = /^[0-9a-f]{40}$/;
 const REMOTE_VERIFY_TIMEOUT_MS = 15_000;
 const GITHUB_REMOTE_TIMEOUT_MS = 20_000;
 const GITHUB_RETRY_DELAYS_MS = [1_000, 3_000];
+const GIB = 1024 ** 3;
+const LOCAL_DISK_HARD_MIN_BYTES = 10 * GIB;
+const LOCAL_DISK_TARGET_BYTES = 15 * GIB;
+const LOCAL_CACHE_CLEANUP_TIMEOUT_MS = 30_000;
 function githubSshCommand() {
   return [
     'ssh',
@@ -37,6 +41,43 @@ function isoNow() { return new Date().toISOString(); }
 function measured(timings, name, action) { const started = Date.now(); try { return action(); } finally { timings[name] = Number(((Date.now() - started) / 1000).toFixed(1)); } }
 function git(args, cwd = ROOT) { return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); }
 function command(args, cwd) { const r = spawnSync(args[0], args.slice(1), { cwd, encoding: 'utf8', stdio: 'inherit' }); if (r.status !== 0) die(`${args.join(' ')} exited with ${r.status}`); }
+export function localDiskDecision(freeBytes) {
+  if (!Number.isFinite(freeBytes) || freeBytes < 0) throw new Error('local disk free-space value is invalid');
+  if (freeBytes < LOCAL_DISK_HARD_MIN_BYTES) return { gate: 'FAIL', freeGiB: freeBytes / GIB };
+  if (freeBytes < LOCAL_DISK_TARGET_BYTES) return { gate: 'WARNING', freeGiB: freeBytes / GIB };
+  return { gate: 'PASS', freeGiB: freeBytes / GIB };
+}
+
+export function cleanupLocalPackageCaches(runCommand = (binary, args, options) => spawnSync(binary, args, options)) {
+  const attempts = [
+    ['pnpm', ['store', 'prune']],
+    ['npm', ['cache', 'clean', '--force']],
+  ];
+  return attempts.map(([binary, args]) => {
+    const result = runCommand(binary, args, { encoding: 'utf8', stdio: 'ignore', timeout: LOCAL_CACHE_CLEANUP_TIMEOUT_MS });
+    return { command: binary, ok: result.status === 0 && !result.error };
+  });
+}
+
+export function runLocalDiskPreflight({
+  freeBytes = () => { const stats = fs.statfsSync(ROOT); return stats.bavail * stats.bsize; },
+  cleanup = cleanupLocalPackageCaches,
+  warn = message => console.error(message),
+} = {}) {
+  let bytes = freeBytes();
+  let cleanupAttempted = false;
+  if (bytes < LOCAL_DISK_TARGET_BYTES) {
+    cleanupAttempted = true;
+    const results = cleanup();
+    for (const result of results) if (!result.ok) warn(`LOCAL_DISK_CACHE_CLEANUP=${result.command}:FAILED`);
+    bytes = freeBytes();
+  }
+  const decision = localDiskDecision(bytes);
+  if (decision.gate === 'FAIL') throw new Error(`BLOCKED: local disk has ${decision.freeGiB.toFixed(2)} GiB free; release requires at least 10 GiB`);
+  if (decision.gate === 'WARNING') warn(`LOCAL_DISK_GATE=WARNING free=${decision.freeGiB.toFixed(2)} GiB target=15 GiB`);
+  else console.error(`LOCAL_DISK_GATE=PASS free=${decision.freeGiB.toFixed(2)} GiB`);
+  return { ...decision, cleanupAttempted };
+}
 function assertSha(value, name = 'candidate SHA') { if (!SHA_RE.test(value ?? '')) die(`${name} must be an exact 40-character commit SHA`); }
 function candidateSha(args) { const i = args.indexOf('--candidate'); const value = i >= 0 ? args[i + 1] : process.env.GPOINT_CANDIDATE_SHA; assertSha(value); return value; }
 function state() { return readJson(STATE_FILE); }
@@ -381,7 +422,7 @@ function isolatedBuild(candidate, shouldBuild) {
     const match = html.match(/gpoint-build-sha" content="([0-9a-f]{40})/);
     if (shouldBuild && match?.[1] !== candidate) die('Mini App build SHA does not match candidate');
     return { worktree, checkoutSha, clean: true, miniappBuildSha: match?.[1] ?? null };
-  } finally { try { git(['worktree', 'remove', '--force', worktree], ROOT); } catch {} }
+  } finally { cleanupTemporaryWorktree(worktree); }
 }
 
 function runDryRun(candidate) {
@@ -566,6 +607,7 @@ function finalizeRecovery(candidate) {
 function main() {
   const args = process.argv.slice(2);
   if (args[0] === 'status' || args.includes('--status')) return status();
+  runLocalDiskPreflight();
   if (args.includes('--provision-agata-config')) return provisionAgataConfig(candidateSha(args));
   if (args.includes('--finalize-recovery')) return finalizeRecovery(candidateSha(args));
   const isDryRun = args.includes('--dry-run');
