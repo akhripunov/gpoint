@@ -705,7 +705,11 @@ async def sync_character(
                     ResponseRoutePolicy.tenant_id == tenant_id,
                     ResponseRoutePolicy.character_id == character.id,
                     ResponseRoutePolicy.profile_version == previous.version,
-                    ResponseRoutePolicy.enabled.is_(True),
+                    ResponseRoutePolicy.provider == settings.llm_provider,
+                    ResponseRoutePolicy.model == settings.llm_model,
+                    ResponseRoutePolicy.prompt_version == "agata-core-v1",
+                    ResponseRoutePolicy.schema_version == "context-v1",
+                    ResponseRoutePolicy.policy_version == "gpoint-internal-v1",
                 )
             )
             if route is None:
@@ -723,6 +727,8 @@ async def sync_character(
                         streaming_allowed=False,
                     )
                 )
+            # Preserve an operator-disabled exact tuple. An old model's route
+            # must not suppress provisioning the current configured tuple.
             return {"character_id": str(character.id), "profile_version": previous.version}
         version = (previous.version + 1) if previous else 1
         if previous:
