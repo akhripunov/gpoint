@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { canCreateProductionRef, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, cleanupLocalPackageCaches, evaluateSafetyGates, failureEvidence, isTransientGitHubTransportFailure, localDiskDecision, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runLocalDiskPreflight, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, verifiedRuntimeState } from './release-gpoint.mjs';
-import { agataInternalConfigProvisionCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, cleanupTemporaryWorktree, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, parseAgataRuntimeIdentityLine, planReleaseRetention, resolveRunnerPath, runRemoteCommand, runWithPreExecRetry, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
+import { canCreateProductionRef, checkAgataEffectiveConfig, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, cleanupLocalPackageCaches, evaluateSafetyGates, failureEvidence, isTransientGitHubTransportFailure, localDiskDecision, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runLocalDiskPreflight, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, validateMacWorkerStatus, verifiedRuntimeState } from './release-gpoint.mjs';
+import { agataInternalConfigProvisionCommand, agataPreSwitchReadinessCommand, agataProviderRuntimeCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, cleanupTemporaryWorktree, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, parseAgataRuntimeIdentityLine, planReleaseRetention, productionPreflightCommand, resolveRunnerPath, runRemoteCommand, runWithPreExecRetry, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataProviderMode, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
 
 test('temporary worktree cleanup uses git metadata removal when available', () => {
   const calls = [];
@@ -188,6 +188,36 @@ test('auth and host-key failures are not retried; UNKNOWN remote SHA is rejected
   assert.throws(() => runWithBoundedGitHubRetries(() => { retries += 1; throw new Error('Host key verification failed'); }, { sleep: () => assert.fail('host-key failure must not retry') }), /Host key verification failed/);
   assert.equal(retries, 1);
   assert.throws(() => remoteProof(sha, { runRemote: () => `${sha}\trefs/tags/not-main` }), /origin\/main could not be independently verified/);
+});
+
+test('specific DNS transport errors outrank Git generic remote-read footer', () => {
+  const exactError = new Error([
+    'ssh: Could not resolve hostname ssh.github.com: nodename nor servname provided, or not known',
+    'fatal: Could not read from remote repository.',
+  ].join('\n'));
+  assert.equal(isTransientGitHubTransportFailure(exactError), true);
+  assert.equal(isTransientGitHubTransportFailure(new Error('ssh: Could not resolve hostname ssh.github.com: nodename nor servname provided, or not known\\nfatal: Could not read from remote repository.')), true);
+  assert.equal(isTransientGitHubTransportFailure(new Error('ssh: nodename nor servname provided\\nfatal: Could not read from remote repository.')), true);
+  assert.equal(isTransientGitHubTransportFailure(new Error('Permission denied (publickey).\\nfatal: Could not read from remote repository.')), false);
+  assert.equal(isTransientGitHubTransportFailure(new Error('Host key verification failed.')), false);
+  assert.equal(isTransientGitHubTransportFailure(new Error('candidate SHA mismatch')), false);
+  assert.equal(isTransientGitHubTransportFailure(new Error('fatal: Could not read from remote repository.')), false);
+});
+
+test('DNS transport error followed by success retries and verifies exact main SHA', () => {
+  const calls = [];
+  const delays = [];
+  const proof = remoteProof(sha, {
+    runRemote: () => {
+      calls.push(calls.length + 1);
+      if (calls.length === 1) throw new Error('ssh: Could not resolve hostname ssh.github.com: nodename nor servname provided, or not known\\nfatal: Could not read from remote repository.');
+      return `${sha}\trefs/heads/main`;
+    },
+    sleep: milliseconds => delays.push(milliseconds),
+  });
+  assert.equal(proof.mainSha, sha);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(delays, [1_000]);
 });
 
 test('tag push retries transient connection loss after confirming remote tag is absent', () => {
@@ -446,14 +476,78 @@ test('AGATA runtime identity parser maps uppercase snake case fields to camel ca
   assert.deepEqual(validateAgataRuntimeIdentity(sha, runtime), []);
 });
 
-test('AGATA provider-disabled config has internal keys but never requires LLM credentials', () => {
-  const valid = { enabled: 'true', provider: 'disabled', databaseUrlPresent: true, tenant: true, internalAuth: true, messageKey: true, requestHmac: true, retrievalHmac: true, responseHmac: true, shadowHmac: true };
+const validAgataInternalConfig = {
+  enabled: 'true', databaseUrlPresent: true, tenant: true, internalAuth: true, messageKey: true,
+  requestHmac: true, retrievalHmac: true, responseHmac: true, shadowHmac: true,
+};
+const freshWorkerStatus = nowMs => ({
+  enabled: true,
+  queue_connectivity: 'reachable',
+  last_heartbeat_at: new Date(nowMs - 2_000).toISOString(),
+  last_poll_at: new Date(nowMs - 3_000).toISOString(),
+});
+
+test('AGATA disabled provider remains valid with local execution off and no LLM key', () => {
+  const valid = { ...validAgataInternalConfig, provider: 'disabled', localEnabled: 'false', apiKeyPresent: false };
   assert.deepEqual(validateAgataProviderConfig(valid), []);
-  assert.ok(validateAgataProviderConfig({ ...valid, provider: 'anymodel' }).some(x => x.includes('disabled')));
+  assert.deepEqual(checkAgataEffectiveConfig({ ...valid, enabled: true }), []);
   const provision = agataInternalConfigProvisionCommand();
   const script = Buffer.from(provision.match(/printf '%s' '([^']+)'/)[1], 'base64').toString();
-  assert.match(script, /AGATA_LLM_PROVIDER.*disabled/);
+  assert.match(script, /provider=values\.get\('AGATA_LLM_PROVIDER'\) or 'disabled'/);
+  assert.match(script, /values\['AGATA_LLM_PROVIDER'\]=provider/);
+  assert.doesNotMatch(script, /values\['AGATA_LLM_PROVIDER'\]='disabled'/);
   assert.doesNotMatch(script, /AGATA_LLM_API_KEY=/);
+});
+
+test('mac_worker provider passes with local enablement, token, auth, fresh heartbeat/poll and healthy API', () => {
+  const nowMs = Date.now();
+  const config = {
+    ...validAgataInternalConfig, provider: 'mac_worker', localEnabled: 'true', workerTokenPresent: true,
+    agataApiHealthy: true, workerStatus: freshWorkerStatus(nowMs),
+  };
+  assert.deepEqual(validateAgataProviderConfig(config), []);
+  assert.deepEqual(checkAgataEffectiveConfig({ ...config, enabled: true }), []);
+  assert.deepEqual(validateMacWorkerStatus(config.workerStatus, { nowMs }), []);
+});
+
+test('mac_worker provider fails closed when local execution is disabled or token missing', () => {
+  const nowMs = Date.now();
+  const config = {
+    ...validAgataInternalConfig, provider: 'mac_worker', localEnabled: 'true', workerTokenPresent: true,
+    agataApiHealthy: true, workerStatus: freshWorkerStatus(nowMs),
+  };
+  assert.ok(validateAgataProviderConfig({ ...config, localEnabled: 'false' }).some(x => x.includes('not enabled')));
+  assert.ok(validateAgataProviderConfig({ ...config, workerTokenPresent: false }).some(x => x.includes('token/config is missing')));
+});
+
+test('mac_worker provider fails closed for stale heartbeat/poll and auth failure', () => {
+  const nowMs = Date.now();
+  const config = {
+    ...validAgataInternalConfig, provider: 'mac_worker', localEnabled: true, workerTokenPresent: true,
+    agataApiHealthy: true, workerStatus: freshWorkerStatus(nowMs),
+  };
+  const stale = { ...config.workerStatus, last_poll_at: new Date(nowMs - 91_000).toISOString() };
+  assert.ok(validateAgataProviderConfig({ ...config, workerStatus: stale }).some(x => x.includes('poll is missing or stale')));
+  assert.ok(validateAgataProviderConfig({ ...config, workerStatus: { ...config.workerStatus, queue_connectivity: 'worker_gateway_auth_rejected' } }).some(x => x.includes('authentication/status')));
+  assert.ok(validateAgataProviderConfig({ ...config, agataApiHealthy: false }).some(x => x.includes('AGATA API is not healthy')));
+});
+
+test('unsupported AGATA provider is rejected and release commands preserve provider mode', () => {
+  const unsupported = { ...validAgataInternalConfig, provider: 'arbitrary_provider', localEnabled: false, apiKeyPresent: false };
+  assert.ok(validateAgataProviderConfig(unsupported).some(x => x.includes('unsupported AGATA provider')));
+  assert.ok(checkAgataEffectiveConfig({ provider: 'arbitrary_provider', enabled: true }).some(x => x.includes('unsupported')));
+  const preflight = productionPreflightCommand();
+  assert.match(preflight, /case "\$provider" in disabled\)/);
+  assert.match(preflight, /mac_worker\)/);
+  assert.match(preflight, /AGATA_PROVIDER_UNSUPPORTED/);
+  assert.match(agataPreSwitchReadinessCommand(sha, 'mac_worker'), /AGATA_PROVIDER_VERIFIED=mac_worker/);
+  assert.match(agataPreSwitchReadinessCommand(sha, 'disabled'), /AGATA_PROVIDER_VERIFIED=disabled/);
+  assert.match(agataProviderRuntimeCommand('mac_worker'), /AGATA_WORKER_TOKEN_PRESENT/);
+  assert.throws(() => agataPreSwitchReadinessCommand(sha, 'arbitrary_provider'), /supported AGATA provider/);
+  for (const command of [preflight, agataPreSwitchReadinessCommand(sha, 'disabled'), agataPreSwitchReadinessCommand(sha, 'mac_worker'), agataProviderRuntimeCommand('mac_worker')]) {
+    const syntax = spawnSync('/bin/sh', ['-n', '-c', command], { encoding: 'utf8' });
+    assert.equal(syntax.status, 0, syntax.stderr);
+  }
 });
 
 test('all disposable Prisma/AGATA database runners use shared_internal', () => {
@@ -540,7 +634,8 @@ test('recovery finalization rejects mixed or unhealthy runtime facts', () => {
     LIVE_RELEASE_ENV_SHA: sha, LIVE_API_SHA: sha, LIVE_API_RUNNING: 'true', LIVE_API_HEALTH: 'healthy',
     LIVE_WORKER_SHA: sha, LIVE_WORKER_RUNNING: 'true', LIVE_BOT_SHA: sha, LIVE_BOT_RUNNING: 'true',
     LIVE_MINIAPP_SHA: sha, LIVE_PRISMA_HEAD: 'prisma-head', LIVE_AGATA_HEAD: 'agata0008',
-    LIVE_AGATA_ENABLED: 'true', LIVE_AGATA_PROVIDER: 'disabled', LIVE_CONFIG_AGATA_LLM_API_KEY: 'NO',
+    LIVE_AGATA_ENABLED: 'true', LIVE_AGATA_PROVIDER: 'disabled', LIVE_AGATA_CODEX_LOCAL_ENABLED: 'false',
+    LIVE_CONFIG_AGATA_CODEX_LOCAL_ENABLED: 'YES', LIVE_CONFIG_AGATA_LLM_API_KEY: 'NO',
     LIVE_AGATA_API_SHA: sha, LIVE_AGATA_API_RUNNING: 'true', LIVE_AGATA_API_HEALTH: 'healthy',
     LIVE_AGATA_WORKER_SHA: sha, LIVE_AGATA_WORKER_RUNNING: 'true', LIVE_AGATA_WORKER_HEALTH: 'healthy',
     LIVE_AGATA_API_IMAGE_ID: 'sha256:shared', LIVE_AGATA_WORKER_IMAGE_ID: 'sha256:shared',
@@ -548,6 +643,22 @@ test('recovery finalization rejects mixed or unhealthy runtime facts', () => {
   assert.deepEqual(recoveryRuntimeFailures(sha, facts, 'prisma-head'), []);
   assert.ok(recoveryRuntimeFailures(sha, { ...facts, LIVE_AGATA_WORKER_HEALTH: 'unhealthy' }, 'prisma-head').includes('AGATA worker is not healthy'));
   assert.ok(recoveryRuntimeFailures(sha, { ...facts, LIVE_MINIAPP_SHA: '0'.repeat(40) }, 'prisma-head').includes('Mini App SHA mismatch'));
+});
+
+test('recovery accepts mac_worker only with current local worker and runtime config evidence', () => {
+  const facts = {
+    LIVE_RELEASE_ENV_SHA: sha, LIVE_API_SHA: sha, LIVE_API_RUNNING: 'true', LIVE_API_HEALTH: 'healthy',
+    LIVE_WORKER_SHA: sha, LIVE_WORKER_RUNNING: 'true', LIVE_BOT_SHA: sha, LIVE_BOT_RUNNING: 'true',
+    LIVE_MINIAPP_SHA: sha, LIVE_PRISMA_HEAD: 'prisma-head', LIVE_AGATA_HEAD: 'agata0008',
+    LIVE_AGATA_ENABLED: 'true', LIVE_AGATA_PROVIDER: 'mac_worker', LIVE_AGATA_CODEX_LOCAL_ENABLED: 'true',
+    LIVE_CONFIG_AGATA_CODEX_LOCAL_ENABLED: 'YES', LIVE_CONFIG_GPOINT_AGATA_WORKER_TOKEN: 'YES',
+    LIVE_AGATA_API_SHA: sha, LIVE_AGATA_API_RUNNING: 'true', LIVE_AGATA_API_HEALTH: 'healthy',
+    LIVE_AGATA_WORKER_SHA: sha, LIVE_AGATA_WORKER_RUNNING: 'true', LIVE_AGATA_WORKER_HEALTH: 'healthy',
+    LIVE_AGATA_API_IMAGE_ID: 'sha256:shared', LIVE_AGATA_WORKER_IMAGE_ID: 'sha256:shared',
+  };
+  const worker = freshWorkerStatus(Date.now());
+  assert.deepEqual(recoveryRuntimeFailures(sha, facts, 'prisma-head', worker), []);
+  assert.ok(recoveryRuntimeFailures(sha, facts, 'prisma-head').some(x => x.includes('authentication/status')));
 });
 
 test('recovery artifact identities are derived from verified live candidate facts', () => {

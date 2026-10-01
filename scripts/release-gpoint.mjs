@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { applyCandidate, cleanupTemporaryWorktree, inspectProductionReadOnly, planReleaseRetention, provisionAgataInternalConfigForBaseline, runRemoteCommand } from './release-gpoint-vps-adapter.mjs';
+import { applyCandidate, cleanupTemporaryWorktree, inspectProductionReadOnly, planReleaseRetention, provisionAgataInternalConfigForBaseline, runRemoteCommand, validateAgataProviderMode } from './release-gpoint-vps-adapter.mjs';
 
 const ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const STATE_FILE = path.join(ROOT, 'docs/release/state/production.json');
@@ -160,10 +160,51 @@ export function checkAgataArtifactParity(candidate, artifacts) {
 }
 
 export function checkAgataEffectiveConfig(config) {
-  const failures = [];
-  if (config?.provider !== 'disabled') failures.push('AGATA inference provider is not disabled');
-  if (config?.enabled !== true) failures.push('AGATA is not enabled');
-  return failures;
+  if (config?.enabled !== true) return ['AGATA is not enabled'];
+  return validateAgataProviderMode(config);
+}
+
+export function validateMacWorkerStatus(status, { nowMs = Date.now(), maxAgeMs = 90_000, futureClockSkewMs = 5_000 } = {}) {
+  return validateAgataProviderMode({
+    provider: 'mac_worker',
+    enabled: 'true',
+    localEnabled: 'true',
+    workerTokenPresent: true,
+    agataApiHealthy: true,
+    workerStatus: status,
+  }, { nowMs, maxWorkerAgeMs: maxAgeMs, futureClockSkewMs });
+}
+
+function readMacWorkerStatus() {
+  const script = path.join(os.homedir(), 'Library/Application Support/GPoint/agata-codex-worker/run_codex_worker.sh');
+  try {
+    const output = execFileSync(script, ['status'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 25_000, maxBuffer: 64 * 1024 });
+    const status = JSON.parse(output);
+    return status && typeof status === 'object' && !Array.isArray(status) ? status : null;
+  } catch {
+    return null;
+  }
+}
+
+function providerConfigFromFacts(facts, workerStatus = undefined) {
+  return {
+    provider: facts.LIVE_AGATA_PROVIDER,
+    enabled: facts.LIVE_AGATA_ENABLED,
+    localEnabled: facts.LIVE_AGATA_CODEX_LOCAL_ENABLED,
+    workerTokenPresent: facts.LIVE_CONFIG_GPOINT_AGATA_WORKER_TOKEN === 'YES',
+    apiKeyPresent: facts.LIVE_CONFIG_AGATA_LLM_API_KEY === 'YES',
+    agataApiHealthy: facts.LIVE_AGATA_API_HEALTH === 'healthy',
+    workerStatus,
+  };
+}
+
+function assertProviderReadiness(facts, workerStatus = undefined) {
+  const provider = facts.LIVE_AGATA_PROVIDER;
+  if (facts.LIVE_AGATA_ENABLED !== 'true') die('AGATA is not enabled');
+  const status = provider === 'mac_worker' ? (workerStatus === undefined ? readMacWorkerStatus() : workerStatus) : undefined;
+  const failures = validateAgataProviderMode(providerConfigFromFacts(facts, status));
+  if (failures.length) die(failures.join('; '));
+  return { provider, workerStatus: status };
 }
 
 export function releaseStateAfterError({ switched, runtimeVerified = false }) {
@@ -202,7 +243,7 @@ export function shouldFinalizeRecovery({ releaseState, candidate, actualSha, gat
   return releaseState === 'RECOVERY_REQUIRED' && candidate === actualSha && gatesPass === true;
 }
 
-export function recoveryRuntimeFailures(candidate, facts, expectedDbHead) {
+export function recoveryRuntimeFailures(candidate, facts, expectedDbHead, workerStatus = undefined) {
   const failures = [];
   if (facts.LIVE_RELEASE_ENV_SHA !== candidate) failures.push('release env SHA mismatch');
   for (const role of ['API', 'WORKER', 'BOT']) {
@@ -213,8 +254,11 @@ export function recoveryRuntimeFailures(candidate, facts, expectedDbHead) {
   if (facts.LIVE_MINIAPP_SHA !== candidate) failures.push('Mini App SHA mismatch');
   if (facts.LIVE_PRISMA_HEAD !== expectedDbHead) failures.push('Prisma head mismatch');
   if (facts.LIVE_AGATA_HEAD !== 'agata0008') failures.push('AGATA Alembic head mismatch');
-  if (facts.LIVE_AGATA_ENABLED !== 'true' || facts.LIVE_AGATA_PROVIDER !== 'disabled') failures.push('AGATA config is not enabled with provider disabled');
-  if (facts.LIVE_CONFIG_AGATA_LLM_API_KEY !== 'NO') failures.push('AGATA LLM API key must remain absent while provider is disabled');
+  if (facts.LIVE_CONFIG_AGATA_CODEX_LOCAL_ENABLED !== 'YES') failures.push('AGATA_CODEX_LOCAL_ENABLED is missing');
+  failures.push(...validateAgataProviderMode(providerConfigFromFacts(facts, facts.LIVE_AGATA_PROVIDER === 'mac_worker' ? workerStatus : undefined)));
+  if (facts.LIVE_AGATA_ENABLED !== 'true') failures.push('AGATA is not enabled');
+  if (facts.LIVE_AGATA_PROVIDER === 'mac_worker' && facts.LIVE_CONFIG_GPOINT_AGATA_WORKER_TOKEN !== 'YES') failures.push('AGATA worker token/config is missing');
+  if (facts.LIVE_AGATA_PROVIDER === 'disabled' && facts.LIVE_CONFIG_AGATA_LLM_API_KEY !== 'NO') failures.push('AGATA LLM API key must remain absent while provider is disabled');
   for (const role of ['API', 'WORKER']) {
     if (facts[`LIVE_AGATA_${role}_SHA`] !== candidate) failures.push(`AGATA ${role.toLowerCase()} build SHA mismatch`);
     if (facts[`LIVE_AGATA_${role}_RUNNING`] !== 'true') failures.push(`AGATA ${role.toLowerCase()} is not running`);
@@ -263,10 +307,13 @@ function errorText(error) {
 
 export function isTransientGitHubTransportFailure(error) {
   const text = errorText(error);
-  if (/permission denied|publickey|host key verification failed|remote mismatch|non-fast-forward|rejected|authentication failed|could not read from remote repository/i.test(text)) return false;
-  return error?.code === 'ETIMEDOUT'
+  if (/permission denied|publickey|host key verification failed|remote mismatch|non-fast-forward|rejected|authentication failed|sha mismatch|candidate sha is not exact/i.test(text)) return false;
+  const transient = error?.code === 'ETIMEDOUT'
     || error?.killed === true
     || /could not resolve (?:hostname|host)|nodename nor servname|temporary failure in name resolution|name or service not known|connection timed out|operation timed out|connection reset|connection closed|closed by .* port|banner exchange|connection refused|network is unreachable|network unreachable|eai_again|enotfound|broken pipe/i.test(text);
+  if (transient) return true;
+  if (/could not read from remote repository/i.test(text)) return false;
+  return false;
 }
 
 function waitForGitHubRetry(attempt, sleep = milliseconds => execFileSync('sleep', [String(milliseconds / 1_000)])) {
@@ -400,13 +447,17 @@ function assertLiveBaseline(current, facts, { requireAgataConfig = true } = {}) 
   }
   if (facts.LIVE_MINIAPP_SHA !== liveSha) die('live Mini App SHA does not match RELEASE_SHA');
   if (facts.LIVE_PRISMA_HEAD !== current.currentProductionDbHead) die(`live Prisma head drift: recorded=${current.currentProductionDbHead} live=${facts.LIVE_PRISMA_HEAD ?? 'unavailable'}`);
+  let providerReadiness = { provider: facts.LIVE_AGATA_PROVIDER };
   if (requireAgataConfig) {
     const requiredConfig = ['AGATA_ENABLED','AGATA_LLM_PROVIDER','AGATA_DATABASE_URL','AGATA_TENANT_ID','AGATA_INTERNAL_API_TOKEN','AGATA_MESSAGE_AEAD_KEY','AGATA_REQUEST_FINGERPRINT_HMAC_KEY','AGATA_RETRIEVAL_QUERY_HMAC_KEY','AGATA_RESPONSE_FINGERPRINT_HMAC_KEY','AGATA_SHADOW_CANDIDATE_HMAC_KEY'];
     for (const key of requiredConfig) if (facts[`LIVE_CONFIG_${key}`] !== 'YES') die(`AGATA production config is missing: ${key}`);
-    if (facts.LIVE_AGATA_ENABLED !== 'true' || facts.LIVE_AGATA_PROVIDER !== 'disabled') die('AGATA must be enabled with inference explicitly disabled');
+    if (facts.LIVE_CONFIG_AGATA_CODEX_LOCAL_ENABLED !== 'YES') die('AGATA_CODEX_LOCAL_ENABLED is missing');
+    providerReadiness = assertProviderReadiness(facts);
+    if (providerReadiness.provider === 'mac_worker' && facts.LIVE_CONFIG_GPOINT_AGATA_WORKER_TOKEN !== 'YES') die('AGATA worker token/config is missing');
+    if (providerReadiness.provider === 'disabled' && facts.LIVE_CONFIG_AGATA_LLM_API_KEY !== 'NO') die('AGATA LLM API key must remain absent while provider is disabled');
   }
   if (!facts.LIVE_AGATA_HEAD || facts.LIVE_AGATA_HEAD === 'READ_ONLY_DB_INSPECTION_FAILED') die('live AGATA migration head could not be verified');
-  return { liveSha, liveDbHead: facts.LIVE_PRISMA_HEAD, agataDbHead: facts.LIVE_AGATA_HEAD, facts };
+  return { liveSha, liveDbHead: facts.LIVE_PRISMA_HEAD, agataDbHead: facts.LIVE_AGATA_HEAD, facts, ...providerReadiness };
 }
 
 function isolatedBuild(candidate, shouldBuild) {
@@ -438,11 +489,11 @@ function runDryRun(candidate) {
     const { liveSha, liveDbHead } = baseline;
     const build = isolatedBuild(candidate, process.env.GPOINT_RELEASE_SKIP_BUILD !== '1');
     const artifacts = { api: { sourceSha: candidate }, worker: { sourceSha: candidate }, bot: { sourceSha: candidate }, miniapp: { sourceSha: build.miniappBuildSha ?? candidate }, agataApi: { sourceSha: candidate }, agataWorker: { sourceSha: candidate } };
-    const effective = { api: candidate, worker: candidate, bot: candidate, miniapp: candidate, agataApi: candidate, agataWorker: candidate, agataProvider: 'disabled', agataEnabled: true };
+    const effective = { api: candidate, worker: candidate, bot: candidate, miniapp: candidate, agataApi: candidate, agataWorker: candidate, agataProvider: baseline.provider, ...providerConfigFromFacts(baseline.facts, baseline.workerStatus), enabled: true };
     const gates = evaluateSafetyGates({ candidateSha: candidate, remoteSha: proof.mainSha, artifacts, config: effective, recordedProductionSha: current.currentProductionSha, liveProductionSha: liveSha, productionRefTarget: candidate });
-    gates.push(...checkAgataArtifactParity(candidate, artifacts), ...checkAgataEffectiveConfig({ provider: effective.agataProvider, enabled: effective.agataEnabled }));
+    gates.push(...checkAgataArtifactParity(candidate, artifacts), ...checkAgataEffectiveConfig(effective));
     if (gates.length) die(gates.join('; '));
-    const manifest = { releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: null, dbHeadBefore: liveDbHead, dbHeadAfter: null, agataDbHeadBefore: baseline.agataDbHead, agataDbHeadAfter: 'agata0008', artifactIdentities: artifacts, provider: 'disabled', startedAt, finishedAt: isoNow(), status: 'PLANNED', failureStage: null, failureReason: null, rollbackSha: current.currentProductionSha, rollbackDbCompatibility: 'REQUIRES_FORWARD_FIX_ASSESSMENT', productionRef: null, remoteProof: { mainSha: proof.mainSha, directRef: proof.directRef }, liveFacts: baseline.facts, dryRun: true };
+    const manifest = { releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: null, dbHeadBefore: liveDbHead, dbHeadAfter: null, agataDbHeadBefore: baseline.agataDbHead, agataDbHeadAfter: 'agata0008', artifactIdentities: artifacts, provider: baseline.provider, agataProvider: baseline.provider, startedAt, finishedAt: isoNow(), status: 'PLANNED', failureStage: null, failureReason: null, rollbackSha: current.currentProductionSha, rollbackDbCompatibility: 'REQUIRES_FORWARD_FIX_ASSESSMENT', productionRef: null, remoteProof: { mainSha: proof.mainSha, directRef: proof.directRef }, liveFacts: baseline.facts, dryRun: true };
     const file = writeManifest(manifest);
     console.log(JSON.stringify({ status: 'PLANNED', releaseId, candidateSha: candidate, remoteMainSha: proof.mainSha, buildCheckoutSha: build.checkoutSha, buildCheckoutClean: build.clean, dbHead: liveDbHead, rollbackSha: current.currentProductionSha, manifest: path.relative(ROOT, file) }, null, 2));
   } finally { unlock(); }
@@ -463,7 +514,7 @@ function provisionAgataConfig(candidate) {
   const unlock = acquireLock(releaseId);
   try {
     const output = provisionAgataInternalConfigForBaseline(current.currentProductionSha);
-    console.log(JSON.stringify({ status: 'PROVISIONED', candidateSha: candidate, baselineSha: current.currentProductionSha, provider: 'disabled', apiKeyProvisioned: false, output }, null, 2));
+    console.log(JSON.stringify({ status: 'PROVISIONED', candidateSha: candidate, baselineSha: current.currentProductionSha, provider: output.match(/AGATA_LLM_PROVIDER=(disabled|mac_worker)/)?.[1] ?? 'unknown', apiKeyProvisioned: false, output }, null, 2));
   } finally { unlock(); }
 }
 
@@ -476,15 +527,17 @@ function runApply(candidate) {
   let switchStarted = false;
   let migrationStarted = false;
   let agataStartStarted = false;
+  let validatedProvider = null;
   const stageTimings = {};
   try {
     const proof = remoteProof(candidate);
     const baseline = assertLiveBaseline(current, readLiveFacts());
+    validatedProvider = baseline.provider;
     const { liveSha, liveDbHead } = baseline;
-    const effective = { api: candidate, worker: candidate, bot: candidate, miniapp: candidate, agataApi: candidate, agataWorker: candidate, agataProvider: 'disabled', agataEnabled: true };
+    const effective = { api: candidate, worker: candidate, bot: candidate, miniapp: candidate, agataApi: candidate, agataWorker: candidate, agataProvider: baseline.provider, ...providerConfigFromFacts(baseline.facts, baseline.workerStatus), enabled: true };
     const artifacts = { api: { sourceSha: candidate }, worker: { sourceSha: candidate }, bot: { sourceSha: candidate }, miniapp: { sourceSha: candidate }, agataApi: { sourceSha: candidate }, agataWorker: { sourceSha: candidate } };
     const gates = evaluateSafetyGates({ candidateSha: candidate, remoteSha: proof.mainSha, artifacts, config: effective, recordedProductionSha: current.currentProductionSha, liveProductionSha: liveSha, productionRefTarget: candidate });
-    gates.push(...checkAgataArtifactParity(candidate, artifacts), ...checkAgataEffectiveConfig({ provider: effective.agataProvider, enabled: effective.agataEnabled }));
+    gates.push(...checkAgataArtifactParity(candidate, artifacts), ...checkAgataEffectiveConfig(effective));
     if (gates.length) die(gates.join('; '));
     const retentionCandidates = releaseRetentionCandidates();
     const retentionPlan = planReleaseRetention({
@@ -495,6 +548,8 @@ function runApply(candidate) {
     });
     const adapter = applyCandidate(candidate, {
       retentionPlan,
+      provider: baseline.provider,
+      verifyProviderReadiness: () => assertProviderReadiness(baseline.facts),
       onMigrationStart: () => { migrationStarted = true; },
       onAgataStart: () => { agataStartStarted = true; },
       onSwitchStart: () => { switchStarted = true; },
@@ -504,6 +559,8 @@ function runApply(candidate) {
       error.code = adapter.postSwitch?.state ?? 'SWITCHED_UNVERIFIED';
       throw error;
     }
+    if (adapter.agataIdentity.provider !== baseline.provider) die('post-switch AGATA provider does not match validated baseline');
+    if (baseline.provider === 'mac_worker') assertProviderReadiness(baseline.facts);
     const root = measured(stageTimings, 'API_HEALTH', () => execFileSync('curl', ['-fsS', 'https://gpoint.amiora.one/'], { encoding: 'utf8' }));
     if (!root.includes(`gpoint-build-sha" content="${candidate}`)) die('external Mini App build SHA mismatch after apply');
     measured(stageTimings, 'WORKER_HEALTH', () => execFileSync('curl', ['-fsS', 'https://gpoint.amiora.one/api/health/live'], { stdio: 'ignore' }));
@@ -513,10 +570,10 @@ function runApply(candidate) {
     Object.assign(stageTimings, adapter.timings ?? {}, { TOTAL_RELEASE: Number(((Date.now() - totalStarted) / 1000).toFixed(1)) });
     console.log(`RELEASE_STAGE_TIMING=${JSON.stringify(stageTimings)}`);
     const artifactIdentities = { api: { sourceSha: candidate, adapter: adapter.imageIdentity }, worker: { sourceSha: candidate, adapter: adapter.imageIdentity }, bot: { sourceSha: candidate, adapter: adapter.imageIdentity }, miniapp: { sourceSha: candidate, adapter: adapter.imageIdentity }, agataApi: { sourceSha: candidate, adapter: adapter.agataIdentity }, agataWorker: { sourceSha: candidate, adapter: adapter.agataIdentity } };
-    const manifest = { releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: candidate, dbHeadBefore: liveDbHead, dbHeadAfter: liveDbHead, agataDbHeadBefore: baseline.agataDbHead, agataDbHeadAfter: adapter.agataIdentity.head, agataRuntimeSha: candidate, agataProvider: 'disabled', artifactIdentities, startedAt, finishedAt: isoNow(), status: 'COMPLETE', failureStage: null, failureReason: null, rollbackSha: current.currentProductionSha, rollbackDbCompatibility: 'REQUIRES_FORWARD_FIX_ASSESSMENT', productionRef: ref, remoteProof: { mainSha: proof.mainSha }, migrationOutput: adapter.migrationOutput, detectorSourceHash: adapter.detectorHash, stageTimings, releaseOrigin: 'durable-production-release' };
+    const manifest = { releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: candidate, dbHeadBefore: liveDbHead, dbHeadAfter: liveDbHead, agataDbHeadBefore: baseline.agataDbHead, agataDbHeadAfter: adapter.agataIdentity.head, agataRuntimeSha: candidate, agataProvider: adapter.agataIdentity.provider, artifactIdentities, startedAt, finishedAt: isoNow(), status: 'COMPLETE', failureStage: null, failureReason: null, rollbackSha: current.currentProductionSha, rollbackDbCompatibility: 'REQUIRES_FORWARD_FIX_ASSESSMENT', productionRef: ref, remoteProof: { mainSha: proof.mainSha }, migrationOutput: adapter.migrationOutput, detectorSourceHash: adapter.detectorHash, stageTimings, releaseOrigin: 'durable-production-release' };
     const file = writeManifest(manifest);
     const verifiedState = verifiedRuntimeState(current, { candidate, dbHead: liveDbHead });
-    fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...verifiedState, currentProductionRef: ref, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: manifest.finishedAt, releaseOrigin: 'durable-production-release', agataRuntimeSha: candidate, agataAlembicHead: adapter.agataIdentity.head, agataProvider: 'disabled', artifactIdentities: manifest.artifactIdentities }, null, 2)}\n`);
+    fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...verifiedState, currentProductionRef: ref, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: manifest.finishedAt, releaseOrigin: 'durable-production-release', agataRuntimeSha: candidate, agataAlembicHead: adapter.agataIdentity.head, agataProvider: adapter.agataIdentity.provider, artifactIdentities: manifest.artifactIdentities }, null, 2)}\n`);
     console.log(JSON.stringify({ status: 'COMPLETE', releaseId, candidateSha: candidate, productionRef: ref, manifest: path.relative(ROOT, file) }, null, 2));
   } catch (error) {
     const failure = classifyReleaseFailure({ switchStarted, migrationStarted, agataStartStarted });
@@ -531,13 +588,14 @@ function runApply(candidate) {
       startedAt,
       finishedAt: isoNow(),
       status: releaseState,
+      agataProvider: validatedProvider,
       ...failureEvidence(error, { stage: error.releaseStage, fallbackStage: failure.failureStage }),
       rollbackSha: current.currentProductionSha,
       productionRef: null,
       releaseOrigin: 'durable-production-release'
     };
     const manifestFile = writeManifest(failureManifest);
-    fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...current, lastReleaseId: releaseId, lastReleaseStatus: releaseState, recoveryRequired: switched || partiallyMutated, lastReleaseFailureManifest: path.relative(ROOT, manifestFile), lastReleaseFailureAt: failureManifest.finishedAt }, null, 2)}\n`);
+    fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...current, ...(validatedProvider ? { agataProvider: validatedProvider } : {}), lastReleaseId: releaseId, lastReleaseStatus: releaseState, recoveryRequired: switched || partiallyMutated, lastReleaseFailureManifest: path.relative(ROOT, manifestFile), lastReleaseFailureAt: failureManifest.finishedAt }, null, 2)}\n`);
     console.error(JSON.stringify({ status: releaseState, releaseId, candidateSha: candidate, failureStage: failureManifest.failureStage, failureReason: error.message }));
     throw error;
   } finally { unlock(); }
@@ -563,7 +621,7 @@ function finalizeRecovery(candidate) {
     catch { die('recovery candidate is not contained in verified origin/main history'); }
 
     const facts = readLiveFacts();
-    const runtimeFailures = recoveryRuntimeFailures(candidate, facts, current.currentProductionDbHead);
+    const runtimeFailures = recoveryRuntimeFailures(candidate, facts, current.currentProductionDbHead, facts.LIVE_AGATA_PROVIDER === 'mac_worker' ? readMacWorkerStatus() : undefined);
     if (runtimeFailures.length) die(`live runtime is not safe to finalize: ${runtimeFailures.join('; ')}`);
     const root = measured({}, 'RECOVERY_ROOT_HEALTH', () => execFileSync('curl', ['-fsS', '--connect-timeout', '3', '--max-time', '10', 'https://gpoint.amiora.one/'], { encoding: 'utf8' }));
     if (!root.includes(`gpoint-build-sha" content="${candidate}`)) die('external Mini App root does not serve the recovery candidate');
@@ -575,8 +633,9 @@ function finalizeRecovery(candidate) {
       const html = execFileSync('curl', ['-fsS', '--connect-timeout', '3', '--max-time', '10', `https://gpoint.amiora.one${route}`], { encoding: 'utf8' });
       if (!html.includes(`gpoint-build-sha" content="${candidate}`)) die(`Mini App route shell mismatch at ${route}`);
     }
-    const agataSmoke = runRemoteCommand(`set -e; docker exec compose-agata-api-1 python -c "from app.config import get_settings; assert get_settings().llm_provider == 'disabled'; print('AGATA_PROVIDER_DISABLED')"; docker run --rm --network gpoint_app --env-file /opt/gpoint/env/production.env --entrypoint node gpoint-runtime:${candidate} -e 'fetch("http://agata-api:8000/internal/v1/users/gpoint-release-readiness/age-assurance", {headers:{authorization:"Bearer "+process.env.AGATA_INTERNAL_API_TOKEN}}).then(async r=>{if(!r.ok) throw Error("age readiness HTTP "+r.status); await r.arrayBuffer(); console.log("AGE_ASSURANCE_INTERNAL_READINESS=PASS")}).catch(e=>{console.error(e.message);process.exit(1)})'; echo AGATA_RECOVERY_SMOKE=PASS`);
-    if (!agataSmoke.includes('AGATA_PROVIDER_DISABLED') || !agataSmoke.includes('AGE_ASSURANCE_INTERNAL_READINESS=PASS')) die('AGATA/age-assurance recovery smoke failed');
+    const provider = facts.LIVE_AGATA_PROVIDER;
+    const agataSmoke = runRemoteCommand(`set -e; docker exec compose-agata-api-1 python -c "from app.config import get_settings; assert get_settings().llm_provider == '${provider}'; print('AGATA_PROVIDER_VERIFIED=${provider}')"; docker run --rm --network gpoint_app --env-file /opt/gpoint/env/production.env --entrypoint node gpoint-runtime:${candidate} -e 'fetch("http://agata-api:8000/internal/v1/users/gpoint-release-readiness/age-assurance", {headers:{authorization:"Bearer "+process.env.AGATA_INTERNAL_API_TOKEN}}).then(async r=>{if(!r.ok) throw Error("age readiness HTTP "+r.status); await r.arrayBuffer(); console.log("AGE_ASSURANCE_INTERNAL_READINESS=PASS")}).catch(e=>{console.error(e.message);process.exit(1)})'; echo AGATA_RECOVERY_SMOKE=PASS`);
+    if (!agataSmoke.includes(`AGATA_PROVIDER_VERIFIED=${provider}`) || !agataSmoke.includes('AGE_ASSURANCE_INTERNAL_READINESS=PASS')) die('AGATA/age-assurance recovery smoke failed');
 
     const ref = `gpoint-production-${startedAt.replace(/[-:.]/g, '')}`;
     const localTag = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/tags/${ref}`], { cwd: ROOT, stdio: 'ignore' });
@@ -589,17 +648,17 @@ function finalizeRecovery(candidate) {
       releaseId, eventType: 'RECOVERY_FINALIZATION', failedReleaseId: failed.releaseId,
       candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: candidate,
       dbHeadBefore: current.currentProductionDbHead, dbHeadAfter: facts.LIVE_PRISMA_HEAD,
-      agataDbHeadAfter: facts.LIVE_AGATA_HEAD, agataRuntimeSha: candidate, agataProvider: 'disabled',
+      agataDbHeadAfter: facts.LIVE_AGATA_HEAD, agataRuntimeSha: candidate, agataProvider: provider,
       artifactIdentities: recoveryArtifactIdentities(candidate, facts),
       startedAt, finishedAt, status: 'COMPLETE', failureStage: null, failureReason: null,
       productionRef: ref, remoteProductionRefTarget: remoteRef, remoteMainSha: remoteMain,
       runtimeFacts: Object.fromEntries(Object.entries(facts).filter(([key]) => key.startsWith('LIVE_'))),
-      smoke: { root: 'PASS', apiHealth: 'PASS', messagesUnauthenticatedRoute: 'PASS', ageUnauthenticatedRoute: 'PASS', messagesRouteShell: 'PASS', modelRouteShell: 'PASS', ageInternalReadiness: 'PASS', providerDisabled: 'PASS' },
+      smoke: { root: 'PASS', apiHealth: 'PASS', messagesUnauthenticatedRoute: 'PASS', ageUnauthenticatedRoute: 'PASS', messagesRouteShell: 'PASS', modelRouteShell: 'PASS', ageInternalReadiness: 'PASS', provider },
       recoveryBasis: 'Live runtime, API/Worker/Bot/AGATA image parity, Mini App build SHA, Prisma/Alembic heads, and health/smoke checks were independently verified after the original release apply switched runtime but failed AGATA identity parsing.'
     };
     const manifestFile = writeManifest(recoveryManifest);
     const verifiedState = verifiedRuntimeState(current, { candidate, dbHead: facts.LIVE_PRISMA_HEAD });
-    fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...verifiedState, currentProductionRef: ref, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: finishedAt, releaseOrigin: 'durable-production-release', agataRuntimeSha: candidate, agataAlembicHead: facts.LIVE_AGATA_HEAD, agataProvider: 'disabled', artifactIdentities: recoveryManifest.artifactIdentities, recoveryRequired: false, lastReleaseFailureManifest: path.relative(ROOT, failedManifestPath), recoveryFinalizationManifest: path.relative(ROOT, manifestFile) }, null, 2)}\n`);
+    fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...verifiedState, currentProductionRef: ref, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: finishedAt, releaseOrigin: 'durable-production-release', agataRuntimeSha: candidate, agataAlembicHead: facts.LIVE_AGATA_HEAD, agataProvider: provider, artifactIdentities: recoveryManifest.artifactIdentities, recoveryRequired: false, lastReleaseFailureManifest: path.relative(ROOT, failedManifestPath), recoveryFinalizationManifest: path.relative(ROOT, manifestFile) }, null, 2)}\n`);
     console.log(JSON.stringify({ status: 'COMPLETE', candidateSha: candidate, productionRef: ref, recoveryManifest: path.relative(ROOT, manifestFile), failedAttemptPreserved: path.relative(ROOT, failedManifestPath) }, null, 2));
   } finally { unlock(); }
 }
