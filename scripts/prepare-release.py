@@ -82,8 +82,14 @@ def prepare(sha, output, *, postgres_only=False):
         run(sys.executable, '-m', 'pytest', '-q', 'tests/test_postgres_baseline.py', cwd=agata, env=migration_env)
         run('docker', 'exec', postgres, 'psql', '-U', 'postgres', '-d', 'gpoint_agata_test', '-v', 'ON_ERROR_STOP=1', '-c',
             'GRANT USAGE ON SCHEMA agata TO ci_owner; GRANT ALL ON ALL TABLES IN SCHEMA agata TO ci_owner; GRANT ALL ON ALL SEQUENCES IN SCHEMA agata TO ci_owner;')
-        env['AGATA_RLS_TEST_DATABASE_URL'] = dsn.replace('/gpoint_agata_test', '/rls_agata_test')
-        run(sys.executable, '-m', 'pytest', '-q', '--ignore=tests/test_postgres_baseline.py', cwd=agata, env=env)
+        # Existing integration fixtures deliberately create tenants and roles.
+        # Keep those administrative setup operations on the test administrator;
+        # the explicit RLS migration test uses its isolated non-bypass role.
+        migration_env['AGATA_RLS_TEST_DATABASE_URL'] = dsn.replace('/gpoint_agata_test', '/rls_agata_test')
+        run(sys.executable, '-m', 'pytest', '-q', '--ignore=tests/test_postgres_baseline.py', cwd=agata, env=migration_env)
+        # Repeat the actual HTTP dialogue under the application's non-bypass
+        # role, independently of privileged fixture creation above.
+        run(sys.executable, '-m', 'pytest', '-q', 'tests/test_internal_api_e2e.py', cwd=agata, env=env)
         if postgres_only:
             print('POSTGRES_REHEARSAL=PASS; no READY receipt or production images emitted')
             return

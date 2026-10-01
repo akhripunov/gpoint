@@ -31,3 +31,5 @@ release-artifacts
 .DS_Store
 .idea
 .vscode
+**/*.egg-info/
+services/agata/build/

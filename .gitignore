@@ -13,3 +13,7 @@ test-results/
 infra/minio-data/
 *.log
 .gpoint-release.lock
+__pycache__/
+*.py[cod]
+*.egg-info/
+services/agata/build/
