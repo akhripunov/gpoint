@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { verifyReleaseBundle, importBundleCommand } from './release-bundle.mjs';
+import { verifyReleaseBundle, importBundleCommand, reuseBundleCommand } from './release-bundle.mjs';
 import { migrationHead } from './release-migrations.mjs';
 import { fileURLToPath } from 'node:url';
 
@@ -476,8 +476,13 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
       upload(archive, `/tmp/gpoint-${sha}.tar.gz`);
     });
     if (bundle) stage(timings, 'CI_ARTIFACT_IMPORT', () => {
-      upload(bundle.archive, `/tmp/gpoint-images-${sha}.tar.gz`);
-      const output = run(importBundleCommand(bundle, sha));
+      const reuse = stage(timings, 'CI_ARTIFACT_REUSE_CHECK', () => run(reuseBundleCommand(bundle, sha)));
+      if (reuse.includes('GPOINT_CI_IMAGES_REUSABLE')) {
+        console.error('CI_ARTIFACT_REUSED=YES');
+        return;
+      }
+      stage(timings, 'CI_ARTIFACT_UPLOAD', () => upload(bundle.archive, `/tmp/gpoint-images-${sha}.tar.gz`));
+      const output = stage(timings, 'CI_ARTIFACT_LOAD', () => run(importBundleCommand(bundle, sha)));
       if (!output.includes('GPOINT_CI_IMAGES_VERIFIED')) throw new Error('CI image import failed');
     });
     const diskGuard = run("set -e; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n \"$freeKb\"; if [ \"$freeKb\" -lt 8388608 ]; then echo GPOINT_DISK_GUARD_WARN; fi; test \"$freeKb\" -ge 5242880; echo GPOINT_DISK_GUARD_OK");

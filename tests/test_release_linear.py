@@ -35,6 +35,41 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(first, SYNC.append_event(first, '123_candidate_READY', 'facts'))
         self.assertTrue(first.startswith('Original history'))
 
+    def test_prepare_success_can_only_publish_ready_after_artifact_step_job_success(self):
+        workflow = (ROOT / '.github/workflows/gpoint-prepare.yml').read_text()
+        upload = workflow.index('uses: actions/upload-artifact@v4')
+        publish = workflow.index('name: Publish candidate result to existing Linear documents')
+        self.assertLess(upload, publish)
+        self.assertIn('needs.prepare.result', workflow)
+        self.assertIn('PREPARE_RESULT: ${{ needs.prepare.result }}', workflow)
+        self.assertEqual([SYNC.candidate_status(x) for x in ('success', 'failure', 'cancelled', 'skipped')],
+                         ['READY', 'FAILED', 'CANCELLED', 'SKIPPED'])
+
+    def test_preflight_only_does_not_publish_production_and_failed_apply_has_real_status(self):
+        workflow = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()
+        self.assertIn("inputs.mode == 'production' && needs.deploy.outputs.status != ''", workflow)
+        self.assertIn('RELEASE_PHASE: preflight', workflow)
+        self.assertIn("RELEASE_STATUS: ${{ needs.deploy.outputs.preflight || 'BLOCKED' }}", workflow)
+        self.assertIn("needs.deploy.outputs.status == 'COMPLETE' && 'RECOVERY_REQUIRED'", workflow)
+        self.assertIn('preflight=${preflightStatus}', (ROOT / 'scripts/automated-release.mjs').read_text())
+
+    def test_project_linear_document_targets_are_gpoint_scoped(self):
+        self.assertIn('Архитектор — Handoff', SYNC.DOCUMENTS['handoff'][1])
+        self.assertIn('Журнал релизов', SYNC.DOCUMENTS['journal'][1])
+        self.assertNotIn('MAXIBOT', (ROOT / 'scripts/publish-release-linear.py').read_text())
+
+    def test_rerun_attempts_have_distinct_audit_events(self):
+        source = (ROOT / 'scripts/publish-release-linear.py').read_text()
+        self.assertIn('GITHUB_RUN_ATTEMPT', source)
+        self.assertIn("_attempt_{attempt}_{phase}_{status}", source)
+        self.assertIn('Предыдущая запись сохранена', source)
+        first = SYNC.event_identity('123', '1', 'candidate', 'READY')
+        second = SYNC.event_identity('123', '2', 'candidate', 'READY')
+        journal = SYNC.append_event('history', first, 'first attempt')
+        journal = SYNC.append_event(journal, second, 'second attempt')
+        self.assertIn(first, journal)
+        self.assertIn(second, journal)
+
     def test_candidate_does_not_replace_production(self):
         source = SYNC.replace_section('Architect', 'production', 'production facts')
         self.assertIn('production facts', SYNC.replace_section(source, 'кандидат', 'candidate facts'))

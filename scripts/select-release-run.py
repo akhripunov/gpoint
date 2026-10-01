@@ -46,11 +46,13 @@ def main():
     runs = github(f'actions/workflows/gpoint-prepare.yml/runs?branch=main&head_sha={sha}&per_page=100')['workflow_runs']
     selected = select_run(sha, runs)
     artifacts = github(f"actions/runs/{selected['id']}/artifacts")['artifacts']
-    matches = [a for a in artifacts if a['name'] == f'gpoint-release-{sha}' and not a['expired']]
+    matches = [a for a in artifacts if a['name'] == f"gpoint-release-{sha}-{selected['id']}-{selected.get('run_attempt', 1)}" and not a['expired']]
     if len(matches) != 1:
         raise RuntimeError('The immutable candidate artifact is missing or expired')
+    if os.environ.get('PREPARE_RUN_ID') and (str(selected['id']) != os.environ['PREPARE_RUN_ID'] or str(selected.get('run_attempt', 1)) != os.environ.get('PREPARE_RUN_ATTEMPT')):
+        raise RuntimeError('Prepare run/attempt changed after selection')
     with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-        output.write(f"run_id={selected['id']}\nartifact_id={matches[0]['id']}\ncandidate={sha}\n")
+        output.write(f"run_id={selected['id']}\nrun_attempt={selected.get('run_attempt', 1)}\nartifact_id={matches[0]['id']}\ncandidate={sha}\n")
 
 
 if __name__ == '__main__':

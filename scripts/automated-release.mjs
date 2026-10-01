@@ -25,12 +25,14 @@ if (!fs.existsSync(workerInstalled) || checksum(workerSource) !== checksum(worke
 if (!process.env.RELEASE_RESULT || !process.env.GITHUB_RUN_ID) throw new Error('Release evidence paths are required');
 const previous = new Set(fs.readdirSync(path.join(root, 'docs/release/manifests')));
 let releaseCode = 1;
+let preflightStatus = 'BLOCKED';
 try {
   // Docker artifacts already passed CI. Canonical dry-run still independently
   // checks the live baseline, config, GitHub SHA and isolated source tree.
   const preflight = spawnSync('pnpm', ['release:gpoint', '--dry-run', '--candidate', sha], {
     cwd: root, env: { ...process.env, GPOINT_RELEASE_SKIP_BUILD: '1' }, stdio: 'inherit', timeout: 600_000,
   });
+  preflightStatus = preflight.status === 0 ? 'PLANNED' : 'FAILED';
   if (preflight.status !== 0) throw new Error('Canonical preflight blocked the release');
   if (mode === 'preflight') {
     releaseCode = 0;
@@ -51,6 +53,9 @@ try {
     operator: process.env.GITHUB_ACTOR, automationRunId: process.env.GITHUB_RUN_ID,
     applicationVerification: mode === 'preflight' ? 'NOT_DEPLOYED' : 'OWNER_SMOKE_PENDING',
   }, null, 2) + '\n');
+  if (process.env.GITHUB_OUTPUT) {
+    fs.appendFileSync(process.env.GITHUB_OUTPUT, `preflight=${preflightStatus}\nstatus=${evidence.status}\n`);
+  }
   // Limit staging to canonical bookkeeping. A concurrent push is rejected;
   // the result artifact and Linear retain evidence without forcing main.
   if (mode === 'production' && records.length) {

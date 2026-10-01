@@ -40,6 +40,7 @@ def prepare(sha, output, *, postgres_only=False):
         run('pnpm', 'test')
         run('pnpm', 'test:release')
         run(sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_*linear*.py')
+        run(sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_prepared_artifact_cache.py')
 
     suffix = uuid.uuid4().hex[:12]
     network, postgres, api = (f'gpoint-ci-{suffix}-{x}' for x in ('net', 'pg', 'agata'))

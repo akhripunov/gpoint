@@ -97,7 +97,7 @@ def graphql_request(
                     f"Linear API unavailable after {MAX_ATTEMPTS} attempts (HTTP {exc.code})"
                 ) from None
             raise SyncError(f"Linear API rejected request (HTTP {exc.code})") from None
-        except urllib.error.URLError:
+        except (urllib.error.URLError, TimeoutError):
             if attempt < MAX_ATTEMPTS:
                 sleep(_retry_delay(attempt))
                 continue

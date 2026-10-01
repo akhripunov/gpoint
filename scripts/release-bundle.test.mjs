@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { verifyReleaseBundle, importBundleCommand } from './release-bundle.mjs';
+import { verifyReleaseBundle, importBundleCommand, reuseBundleCommand } from './release-bundle.mjs';
 import { migrationHead } from './release-migrations.mjs';
 import { acquireReleaseLock } from './release-lock.mjs';
 import { fileURLToPath } from 'node:url';
@@ -37,6 +37,19 @@ test('archive corruption fails before upload or mutation', t => {
   const f = fixture(t);
   fs.appendFileSync(path.join(f.dir, 'images.tar.gz'), 'corruption');
   assert.throws(() => verifyReleaseBundle(f.dir, f.sha), /checksum mismatch/);
+});
+test('VPS reuse requires both exact image IDs, source labels and platform', t => {
+  const f = fixture(t), proof = verifyReleaseBundle(f.dir, f.sha);
+  const docker = path.join(f.dir, 'docker');
+  fs.writeFileSync(docker, '#!/bin/sh\ncase "$5" in\n  *Architecture*) echo "$FAKE_PLATFORM" ;;\n  *revision*) echo "$FAKE_SHA" ;;\n  *) echo "$FAKE_ID" ;;\nesac\n', { mode: 0o700 });
+  const run = changes => spawnSync('bash', ['-c', reuseBundleCommand(proof, f.sha)], {
+    encoding: 'utf8', env: { ...process.env, PATH: `${f.dir}:${process.env.PATH}`,
+      FAKE_PLATFORM: 'linux/amd64', FAKE_SHA: f.sha, FAKE_ID: proof.images.app.id, ...changes },
+  });
+  assert.match(run({}).stdout, /GPOINT_CI_IMAGES_REUSABLE/);
+  for (const changes of [{ FAKE_ID: `sha256:${'c'.repeat(64)}` }, { FAKE_PLATFORM: 'linux/arm64' }, { FAKE_SHA: 'c'.repeat(40) }]) {
+    assert.match(run(changes).stdout, /GPOINT_CI_IMAGES_IMPORT_REQUIRED/);
+  }
 });
 test('different candidate and skipped gates fail closed', t => {
   const f = fixture(t);

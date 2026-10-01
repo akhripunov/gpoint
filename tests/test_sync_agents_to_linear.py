@@ -102,6 +102,16 @@ class SyncContractTests(unittest.TestCase):
             SYNC.graphql_request("query { viewer { id } }", {}, "test-key", opener=failing_opener, sleep=lambda _: None)
         self.assertEqual(len(attempts), 3)
 
+    def test_socket_timeout_retries_are_bounded_and_safe(self):
+        attempts = []
+        def failing_opener(*args, **kwargs):
+            attempts.append(1)
+            raise TimeoutError("sensitive internal endpoint")
+        with self.assertRaisesRegex(SYNC.SyncError, "after 3 attempts") as failure:
+            SYNC.graphql_request("query { viewer { id } }", {}, "test-key", opener=failing_opener, sleep=lambda _: None)
+        self.assertEqual(len(attempts), 3)
+        self.assertNotIn("sensitive", str(failure.exception))
+
     def test_http_429_and_5xx_retry_bounded_but_auth_does_not(self):
         for status, expected_attempts in ((429, 3), (503, 3), (403, 1)):
             attempts = []

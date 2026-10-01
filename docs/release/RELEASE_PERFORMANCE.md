@@ -26,3 +26,26 @@ any release gate.
 Do not run a new production apply solely to benchmark these controls. Release
 manifests retain stage timings and artifact-reuse decisions for future
 comparison.
+
+## GitHub artifact transport
+
+Prepare artifacts are named by exact candidate, GitHub run ID and attempt.
+Already compressed image archives use `compression-level: 0` for the outer ZIP.
+Deploy reads fresh GitHub main/run/artifact metadata before consulting the Mac
+cache and verifies the ZIP against GitHub's SHA-256 digest on every cache hit.
+Expired artifacts, changed attempts, unavailable digests and mismatched source
+SHAs block reuse. The inner receipt, archive checksum and image parity gates
+still run. The project cache holds at most three ZIPs / 1 GiB (a selected ZIP
+larger than that bound is retained alone); no cache lives inside the checkout.
+
+On the VPS, the exact app and AGATA image IDs, platform and source labels must
+match the verified receipt before upload/load can be omitted. Upload and load
+have separate timing markers. Dependency caches accelerate package downloads;
+all tests and migration rehearsals still execute.
+
+Deploy saves runtime evidence before a separate Ubuntu publication job writes
+to Linear. A publication failure remains a failed workflow and a visible
+blocker, but never changes the recorded result of the runtime attempt. Reruns
+have independent events and evidence artifacts; retry only the publication job
+when runtime evidence already confirms completion. Production authorization
+and the canonical release lock remain mandatory.

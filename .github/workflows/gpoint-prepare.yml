@@ -28,9 +28,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
+          cache-dependency-path: services/agata/pyproject.toml
       - name: Install AGATA test dependencies
         run: python -m pip install './services/agata[test]'
       - name: Tests, disposable database rehearsal and immutable Docker build
@@ -40,10 +44,11 @@ jobs:
       - name: Save exact candidate images and readiness receipt
         uses: actions/upload-artifact@v4
         with:
-          name: gpoint-release-${{ github.sha }}
+          name: gpoint-release-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/gpoint-bundle/
           if-no-files-found: error
           retention-days: 7
+          compression-level: 0
       - name: Owner summary
         env:
           CANDIDATE_SHA: ${{ github.sha }}
@@ -69,6 +74,5 @@ jobs:
           CANDIDATE_SHA: ${{ github.sha }}
           RELEASE_PHASE: candidate
           PREPARE_RESULT: ${{ needs.prepare.result }}
-        run: |
-          if [ "$PREPARE_RESULT" = success ]; then export RELEASE_STATUS=READY; else export RELEASE_STATUS=FAILED; fi
-          python scripts/publish-release-linear.py
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: python scripts/publish-release-linear.py

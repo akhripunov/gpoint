@@ -35,6 +35,8 @@ jobs:
     outputs:
       run_id: ${{ steps.select.outputs.run_id }}
       candidate: ${{ steps.select.outputs.candidate }}
+      run_attempt: ${{ steps.select.outputs.run_attempt }}
+      artifact_id: ${{ steps.select.outputs.artifact_id }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -56,9 +58,16 @@ jobs:
     permissions:
       contents: write
       actions: read
+    outputs:
+      preflight: ${{ steps.execute.outputs.preflight }}
+      status: ${{ steps.execute.outputs.status }}
+      execute_outcome: ${{ steps.execute.outcome }}
     env:
       CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
       PREPARE_RUN_ID: ${{ needs.validate.outputs.run_id }}
+      PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.run_attempt }}
+      PREPARE_ARTIFACT_ID: ${{ needs.validate.outputs.artifact_id }}
+      PYTHONDONTWRITEBYTECODE: "1"
       RELEASE_MODE: ${{ inputs.mode }}
       APPROVE_PRODUCTION: ${{ inputs.approve_production }}
     steps:
@@ -71,29 +80,70 @@ jobs:
         with:
           ref: ${{ needs.validate.outputs.candidate }}
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
-        with:
-          name: gpoint-release-${{ needs.validate.outputs.candidate }}
-          run-id: ${{ needs.validate.outputs.run_id }}
-          github-token: ${{ github.token }}
-          path: ${{ env.GPOINT_RELEASE_BUNDLE }}
-      - name: Verify receipt, canonical preflight, apply and persist evidence
-        run: node scripts/automated-release.mjs
-      - name: Publish production result to Linear
-        if: always()
+      - name: Recheck current main and Prepare provenance on the Mac
         env:
-          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
-          RELEASE_PHASE: production
-          RELEASE_STATUS: ${{ job.status == 'success' && (inputs.mode == 'preflight' && 'PLANNED' || 'COMPLETE') || 'FAILED' }}
-        run: python3 scripts/publish-release-linear.py
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/select-release-run.py
+      - name: Restore or download the verified immutable artifact
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ARTIFACT_DESTINATION: ${{ env.GPOINT_RELEASE_BUNDLE }}
+        run: python3 scripts/prepared_artifact_cache.py
+      - name: Verify receipt, canonical preflight, apply and persist evidence
+        id: execute
+        run: node scripts/automated-release.mjs
       - name: Preserve release result even when apply fails
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gpoint-production-result-${{ github.run_id }}
-          path: |
-            ${{ env.RELEASE_RESULT }}
-            docs/release/manifests/
-            docs/release/state/production.json
+          name: gpoint-production-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.RELEASE_RESULT }}
           if-no-files-found: warn
           retention-days: 30
+      - name: Preserve canonical manifests
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpoint-manifests-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            docs/release/manifests/
+            docs/release/state/production.json
+          retention-days: 30
+
+  publish:
+    needs: [validate, deploy]
+    if: always() && needs.validate.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: gpoint-linear-release
+      cancel-in-progress: false
+    env:
+      CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
+      RELEASE_MODE: ${{ inputs.mode }}
+      RELEASE_RESULT: ${{ runner.temp }}/release-evidence/gpoint-release-result-${{ github.run_id }}.json
+      GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.candidate }}
+      - name: Read saved release evidence
+        if: needs.deploy.outputs.status != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: gpoint-production-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-evidence
+      - name: Publish preflight result to GPoint Linear
+        if: always()
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          RELEASE_PHASE: preflight
+          RELEASE_STATUS: ${{ needs.deploy.outputs.preflight || 'BLOCKED' }}
+        run: python3 scripts/publish-release-linear.py
+      - name: Publish production result to GPoint Linear
+        if: always() && inputs.mode == 'production' && needs.deploy.outputs.status != ''
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          RELEASE_PHASE: production
+          RELEASE_STATUS: ${{ needs.deploy.outputs.execute_outcome == 'success' && needs.deploy.outputs.status || (needs.deploy.outputs.status == 'COMPLETE' && 'RECOVERY_REQUIRED' || needs.deploy.outputs.status || 'FAILED') }}
+        run: python3 scripts/publish-release-linear.py

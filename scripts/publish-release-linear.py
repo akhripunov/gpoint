@@ -35,6 +35,14 @@ def append_event(content, event_id, body):
     return content.rstrip() + f'\n\n### {marker}\n\n{body}\n'
 
 
+def event_identity(run_id, attempt, phase, status):
+    return f'{run_id}_attempt_{attempt}_{phase}_{status}'
+
+
+def candidate_status(prepare_result):
+    return {'success': 'READY', 'cancelled': 'CANCELLED', 'skipped': 'SKIPPED'}.get(prepare_result, 'FAILED')
+
+
 def publish(section, event_id, body, key, call=graphql_request):
     if not key.strip():
         raise SyncError('LINEAR_API_KEY is missing: configure the repository secret; release facts were not published')
@@ -54,16 +62,26 @@ def main():
     if not re.fullmatch('[a-f0-9]{40}', sha) or not run_id.isdigit():
         raise SyncError('Invalid release identity')
     phase = os.environ['RELEASE_PHASE']
-    status = os.environ['RELEASE_STATUS']
-    if phase not in ('candidate', 'production') or status not in ('READY', 'PLANNED', 'FAILED', 'COMPLETE', 'RECOVERY_REQUIRED', 'FAILED_PRE_SWITCH', 'FAILED_MIGRATION', 'FAILED_AGATA_START', 'CANCELLED', 'BLOCKED'):
+    status = candidate_status(os.environ.get('PREPARE_RESULT', '')) if phase == 'candidate' else os.environ['RELEASE_STATUS']
+    allowed_statuses = {
+        'candidate': ('READY', 'FAILED', 'CANCELLED', 'SKIPPED'),
+        'preflight': ('PLANNED', 'FAILED', 'BLOCKED'),
+        'production': ('FAILED', 'COMPLETE', 'RECOVERY_REQUIRED', 'FAILED_PRE_SWITCH', 'FAILED_MIGRATION', 'FAILED_AGATA_START', 'CANCELLED', 'BLOCKED'),
+    }
+    if phase not in allowed_statuses or status not in allowed_statuses[phase]:
         raise SyncError('Invalid release status')
+    attempt = os.environ.get('GITHUB_RUN_ATTEMPT', '1')
+    if not attempt.isdigit() or int(attempt) < 1:
+        raise SyncError('Invalid release attempt')
     url = f'https://github.com/akhripunov/gpoint/actions/runs/{run_id}'
-    body = f"Время: {datetime.now(timezone.utc).isoformat()}.\n\nЭтап: {phase}; статус: **{status}**.\n\nSHA: `{sha}`.\n\n[Проверки и логи]({url})."
+    body = f"Время: {datetime.now(timezone.utc).isoformat()}.\n\nЭтап: {phase}; статус: **{status}**.\n\nSHA: `{sha}`.\n\nПопытка GitHub Actions: `{attempt}`.\n\n[Проверки и логи]({url}/attempts/{attempt})."
+    if int(attempt) > 1:
+        body += '\n\nЭто повторный запуск. Предыдущая запись сохранена; данный статус относится к указанной попытке.'
     if phase == 'candidate':
         body += '\n\nREADY означает: unit/typecheck, реальный PostgreSQL, миграции и Docker-артефакты прошли проверки. Production не изменён. Следующее действие: владелец запускает GPoint — Deploy из main с этим SHA.' if status == 'READY' else '\n\nВыкладка заблокирована. Dev открывает первый упавший шаг, исправляет код в GitHub и готовит новый кандидат.'
-    else:
+    elif phase in ('preflight', 'production'):
         result = Path(os.environ['RELEASE_RESULT'])
-        if result.exists():
+        if phase == 'production' and result.exists():
             data = json.loads(result.read_text())
             if data.get('candidateSha') != sha:
                 raise SyncError('Release result SHA mismatch')
@@ -73,12 +91,12 @@ def main():
             if data.get('failureStage'):
                 # No raw shell output, environment, prompts, tokens or user messages.
                 body += f"\n\nЭтап сбоя: `{re.sub(r'[^A-Z_0-9]', '', data['failureStage'])}`. Dev обязан сверить runtime/БД до повторной попытки."
-        if os.environ.get('RELEASE_MODE') == 'preflight':
-            body += '\n\nЭто preflight: production runtime и БД не изменены. Следующее действие: отдельный запуск в режиме production с подтверждением владельца.'
+        if phase == 'preflight':
+            body += '\n\nЭто результат preflight, который сам не меняет runtime или БД. Выкладка, если запрошена, фиксируется отдельным production-событием.'
         else:
             body += '\n\nПользовательская проверка: **ожидается**. Владелец отправляет новое сообщение Models Hub и подтверждает ответ; Dev фиксирует приёмку отдельно. Не считать heartbeat подтверждением ответа.'
-    section = 'кандидат' if phase == 'candidate' else ('preflight' if os.environ.get('RELEASE_MODE') == 'preflight' else 'production')
-    publish(section, f'{run_id}_{phase}_{status}', body, os.environ.get('LINEAR_API_KEY', ''))
+    section = {'candidate': 'кандидат', 'preflight': 'preflight', 'production': 'production'}[phase]
+    publish(section, event_identity(run_id, attempt, phase, status), body, os.environ.get('LINEAR_API_KEY', ''))
 
 
 if __name__ == '__main__':
