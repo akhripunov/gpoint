@@ -55,7 +55,7 @@ def main():
         raise SyncError('Invalid release identity')
     phase = os.environ['RELEASE_PHASE']
     status = os.environ['RELEASE_STATUS']
-    if phase not in ('candidate', 'production') or status not in ('READY', 'FAILED', 'COMPLETE', 'RECOVERY_REQUIRED', 'FAILED_PRE_SWITCH', 'FAILED_MIGRATION', 'FAILED_AGATA_START', 'CANCELLED', 'BLOCKED'):
+    if phase not in ('candidate', 'production') or status not in ('READY', 'PLANNED', 'FAILED', 'COMPLETE', 'RECOVERY_REQUIRED', 'FAILED_PRE_SWITCH', 'FAILED_MIGRATION', 'FAILED_AGATA_START', 'CANCELLED', 'BLOCKED'):
         raise SyncError('Invalid release status')
     url = f'https://github.com/akhripunov/gpoint/actions/runs/{run_id}'
     body = f"Время: {datetime.now(timezone.utc).isoformat()}.\n\nЭтап: {phase}; статус: **{status}**.\n\nSHA: `{sha}`.\n\n[Проверки и логи]({url})."
@@ -73,8 +73,12 @@ def main():
             if data.get('failureStage'):
                 # No raw shell output, environment, prompts, tokens or user messages.
                 body += f"\n\nЭтап сбоя: `{re.sub(r'[^A-Z_0-9]', '', data['failureStage'])}`. Dev обязан сверить runtime/БД до повторной попытки."
-        body += '\n\nПользовательская проверка: **ожидается**. Владелец отправляет новое сообщение Models Hub и подтверждает ответ; Dev фиксирует приёмку отдельно. Не считать heartbeat подтверждением ответа.'
-    publish('кандидат' if phase == 'candidate' else 'production', f'{run_id}_{phase}_{status}', body, os.environ.get('LINEAR_API_KEY', ''))
+        if os.environ.get('RELEASE_MODE') == 'preflight':
+            body += '\n\nЭто preflight: production runtime и БД не изменены. Следующее действие: отдельный запуск в режиме production с подтверждением владельца.'
+        else:
+            body += '\n\nПользовательская проверка: **ожидается**. Владелец отправляет новое сообщение Models Hub и подтверждает ответ; Dev фиксирует приёмку отдельно. Не считать heartbeat подтверждением ответа.'
+    section = 'кандидат' if phase == 'candidate' else ('preflight' if os.environ.get('RELEASE_MODE') == 'preflight' else 'production')
+    publish(section, f'{run_id}_{phase}_{status}', body, os.environ.get('LINEAR_API_KEY', ''))
 
 
 if __name__ == '__main__':

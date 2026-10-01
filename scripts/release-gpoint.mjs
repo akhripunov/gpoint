@@ -4,13 +4,18 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { migrationHead } from './release-migrations.mjs';
+import { acquireReleaseLock } from './release-lock.mjs';
+import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { applyCandidate, cleanupTemporaryWorktree, inspectProductionReadOnly, planReleaseRetention, provisionAgataInternalConfigForBaseline, runRemoteCommand, validateAgataProviderMode } from './release-gpoint-vps-adapter.mjs';
 
-const ROOT = path.resolve(new URL('..', import.meta.url).pathname);
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const STATE_FILE = path.join(ROOT, 'docs/release/state/production.json');
 const MANIFEST_DIR = path.join(ROOT, 'docs/release/manifests');
-const LOCK_FILE = path.join(ROOT, '.gpoint-release.lock');
+// Keep the lock outside Actions checkout: checkout cleanup must never erase a
+// stale release lock left by interruption, and all Mac checkouts share it.
+const LOCK_FILE = path.join(os.homedir(), '.config/gpoint/release-production.lock');
+const LEGACY_LOCK_FILE = path.join(ROOT, '.gpoint-release.lock');
 const SHA_RE = /^[0-9a-f]{40}$/;
 const REMOTE_VERIFY_TIMEOUT_MS = 15_000;
 const GITHUB_REMOTE_TIMEOUT_MS = 20_000;
@@ -301,10 +306,7 @@ export function evaluateSafetyGates({ candidateSha: sha, remoteSha, clean = true
 }
 
 function acquireLock(releaseId) {
-  fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true });
-  try { fs.writeFileSync(LOCK_FILE, `${JSON.stringify({ releaseId, pid: process.pid, startedAt: isoNow() })}\n`, { flag: 'wx' }); }
-  catch { die('another GPoint production release is active; stale locks require audited manual recovery'); }
-  return () => { try { fs.unlinkSync(LOCK_FILE); } catch {} };
+  return acquireReleaseLock(LOCK_FILE, releaseId, LEGACY_LOCK_FILE);
 }
 
 function errorText(error) {
@@ -575,6 +577,9 @@ function runApply(candidate) {
     const afterFacts = readLiveFacts();
     const deployedDbHead = afterFacts.LIVE_PRISMA_HEAD;
     if (!deployedDbHead || deployedDbHead === 'NONE') die('post-release Prisma head is missing');
+    const prismaPaths = git(['ls-tree', '-r', '--name-only', candidate, 'packages/db/prisma/migrations']).split('\n').filter(name => name.endsWith('/migration.sql'));
+    const candidateDbHead = prismaPaths.map(name => name.split('/').at(-2)).sort().at(-1);
+    if (deployedDbHead !== candidateDbHead || (adapter.ciReceipt && deployedDbHead !== adapter.ciReceipt.prismaHead)) die('post-release Prisma head does not match candidate');
     if (afterFacts.LIVE_AGATA_HEAD !== adapter.agataIdentity.head) die('post-release Alembic head mismatch');
     const ref = `gpoint-production-${startedAt.replace(/[-:.]/g, '')}`;
     measured(stageTimings, 'PRODUCTION_REF_CREATE', () => execFileSync('git', ['tag', '-a', ref, candidate, '-m', `GPoint production release\nproductionSha=${candidate}\ndbHead=${deployedDbHead}\nreleaseId=${releaseId}`], { cwd: ROOT, stdio: 'inherit' }));
@@ -692,4 +697,4 @@ function main() {
   runDryRun(candidateSha(args));
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) { try { main(); } catch (error) { console.error(error.message); process.exitCode = 1; } }
+if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(process.argv[1])) { try { main(); } catch (error) { console.error(error.message); process.exitCode = 1; } }

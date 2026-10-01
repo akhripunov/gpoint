@@ -6,9 +6,13 @@ WORKDIR /srv/agata
 RUN addgroup --system agata && adduser --system --ingroup agata agata
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir .
-COPY --chmod=u=rwX,go=rX app ./app
-COPY --chmod=u=rwX,go=rX migrations ./migrations
+COPY app ./app
+COPY migrations ./migrations
 COPY --chmod=644 alembic.ini ./alembic.ini
+# Normalize nested directory permissions with the container's chmod rather
+# than relying on symbolic COPY permission handling across BuildKit versions.
+RUN chmod -R u=rwX,go=rX /srv/agata/app /srv/agata/migrations
 USER agata
+RUN python -c "from app.db.models import Base; assert len(Base.metadata.tables) > 0"
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

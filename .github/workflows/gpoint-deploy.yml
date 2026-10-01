@@ -8,6 +8,12 @@ on:
         description: 'Exact 40-character SHA from successful GPoint — Prepare'
         required: true
         type: string
+      mode:
+        description: 'preflight checks the live server; production applies this candidate'
+        required: true
+        default: preflight
+        type: choice
+        options: [preflight, production]
       approve_production:
         description: 'I authorize this exact candidate on GPoint production'
         required: true
@@ -39,6 +45,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ inputs.candidate }}
           APPROVE_PRODUCTION: ${{ inputs.approve_production }}
+          RELEASE_MODE: ${{ inputs.mode }}
         run: python scripts/select-release-run.py
 
   deploy:
@@ -52,6 +59,8 @@ jobs:
     env:
       CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
       PREPARE_RUN_ID: ${{ needs.validate.outputs.run_id }}
+      RELEASE_MODE: ${{ inputs.mode }}
+      APPROVE_PRODUCTION: ${{ inputs.approve_production }}
     steps:
       - name: Set private temporary evidence paths
         shell: bash
@@ -75,7 +84,7 @@ jobs:
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           RELEASE_PHASE: production
-          RELEASE_STATUS: ${{ job.status == 'success' && 'COMPLETE' || 'FAILED' }}
+          RELEASE_STATUS: ${{ job.status == 'success' && (inputs.mode == 'preflight' && 'PLANNED' || 'COMPLETE') || 'FAILED' }}
         run: python3 scripts/publish-release-linear.py
       - name: Preserve release result even when apply fails
         if: always()

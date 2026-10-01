@@ -54,6 +54,17 @@ class ReleaseTests(unittest.TestCase):
                'status': 'completed', 'conclusion': 'success'}
         self.assertEqual(SELECT.select_run('a' * 40, [run]), run)
 
+    def test_preflight_can_run_without_production_permission(self):
+        SELECT.validate_request('a' * 40, 'refs/heads/main', 'preflight', 'false')
+        with self.assertRaisesRegex(RuntimeError, 'approval'):
+            SELECT.validate_request('a' * 40, 'refs/heads/main', 'production', 'false')
+        SELECT.validate_request('a' * 40, 'refs/heads/main', 'production', 'true')
+
+    def test_branch_and_invalid_release_mode_are_rejected(self):
+        for ref, mode in [('refs/heads/other', 'production'), ('refs/heads/main', 'anything')]:
+            with self.assertRaises(RuntimeError):
+                SELECT.validate_request('a' * 40, ref, mode, 'true')
+
 
 if __name__ == '__main__':
     unittest.main()

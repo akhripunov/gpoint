@@ -129,6 +129,10 @@ def prepare(sha, output, *, postgres_only=False):
                     'SELECT version_num FROM agata.alembic_version;', capture=True)
         prisma = run('docker', 'exec', postgres, 'psql', '-U', 'postgres', '-d', 'runtime_agata_test', '-At', '-c',
                     'SELECT migration_name FROM public._prisma_migrations WHERE finished_at IS NOT NULL ORDER BY migration_name DESC LIMIT 1;', capture=True)
+        expected_prisma = sorted(p.name for p in (ROOT / 'packages/db/prisma/migrations').iterdir() if (p / 'migration.sql').is_file())[-1]
+        expected_agata = run('docker', 'run', '--rm', f'gpoint-agata-runtime:{sha}', 'alembic', 'heads', capture=True)
+        if '\n' in expected_agata or not expected_agata or heads != expected_agata.split()[0] or prisma != expected_prisma:
+            raise RuntimeError('runtime artifact migration heads do not match candidate source')
         images = {}
         for role, tag in [('app', 'gpoint-runtime'), ('agata', 'gpoint-agata-runtime')]:
             image = json.loads(run('docker', 'image', 'inspect', f'{tag}:{sha}', capture=True))[0]

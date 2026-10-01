@@ -17,7 +17,7 @@ The canonical entry point is `pnpm release:gpoint --dry-run --candidate <40-char
 ## Automated release control
 
 - GitHub workflows `GPoint — Prepare` and `GPoint — Deploy` implement the release flow described in `docs/release/automation.md`.
-- Prepare must succeed for the exact current main SHA, including publication of release facts to Linear. Deploy is manually dispatched from main with exact SHA and explicit production approval.
+- Prepare must succeed for the exact current main SHA, including publication of release facts to Linear. Deploy is manually dispatched from main with exact SHA: preflight is read-only; production mode requires explicit production approval. The shared Mac lock lives outside checkout at `~/.config/gpoint/release-production.lock`; legacy checkout locks also fail closed.
 - The production runner is repository-scoped, Mac-only and labelled `gpoint-production`; never assign it untrusted PR jobs. VPS secrets stay on the Mac/VPS.
 - CI artifacts are consumed by `GPOINT_RELEASE_BUNDLE`; verify successful GitHub run provenance, receipt/run ID, archive checksum and exact image IDs. Do not rebuild those application images during apply.
 - Compare the installed Mac worker source to the candidate before apply. A changed worker requires installation from the published candidate before resuming.

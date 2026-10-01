@@ -5,8 +5,9 @@ import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { verifyReleaseBundle, importBundleCommand } from './release-bundle.mjs';
 import { migrationHead } from './release-migrations.mjs';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = path.resolve(new URL('..', import.meta.url).pathname);
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const REPO = 'git@github.com:akhripunov/gpoint.git';
 const REMOTE_RETRY_BACKOFF_MS = [1_000, 3_000];
 const PRE_EXEC_STATUS_MARKER = 'PRE_EXEC_TRANSPORT_FAILURE:255';

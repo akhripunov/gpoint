@@ -5,13 +5,15 @@
 1. Архитектор задаёт изменения и критерии приёмки. Dev реализует их и отправляет чистый commit в `origin/main`.
 2. Откройте [GPoint — Prepare](https://github.com/akhripunov/gpoint/actions/workflows/gpoint-prepare.yml). GitHub сам запускает проверки после push. Ждите завершения всего workflow, включая публикацию в Linear.
 3. В [Архитектор — Handoff](https://linear.app/bestuzhev/document/arhitektor-handoff-36f91afb3d2c) смотрите блок **Автоматизация: кандидат**. READY — кандидат проверен; это ещё не выкладка. Dev должен объяснить изменения, миграции, backup и риски перед вашим подтверждением.
-4. Откройте [GPoint — Deploy](https://github.com/akhripunov/gpoint/actions/workflows/gpoint-deploy.yml), нажмите **Run workflow**, выберите **main**, вставьте полный SHA из успешного Prepare, отметьте **I authorize this exact candidate…**, затем **Run workflow**. Это ваше разрешение на production для этого SHA.
+4. Откройте [GPoint — Deploy](https://github.com/akhripunov/gpoint/actions/workflows/gpoint-deploy.yml), нажмите **Run workflow**, выберите **main**, вставьте полный SHA из успешного Prepare, выберите режим **production**, отметьте **I authorize this exact candidate…**, затем **Run workflow**. Это ваше разрешение на production для этого SHA.
 5. Следите за шагами Validate → Deploy. Mac должен быть включён, иметь сеть, активную CLI authentication и работающий GPoint runner. Incy остаётся включённым. Пока runner не подключён, Deploy останется Queued — это не работающий автоматический деплой.
 6. После технического COMPLETE откройте Telegram → GPoint → Models Hub. Отправьте новое сообщение и дождитесь ответа. Сообщите Dev «ответ получил» или «ответа нет». Dev фиксирует подтверждение сценария в журнале; автоматизация не создаёт тестовые production-диалоги от вашего имени.
 
 История: [Журнал релизов](https://linear.app/bestuzhev/document/zhurnal-relizov-640efa60dacf). Каждый результат содержит SHA и ссылку на GitHub run. В Handoff история и архитектурные ограничения сохраняются, автоматизация меняет только свои именованные блоки.
 
 Можно пользоваться через Dev: «Подготовь релиз и дай SHA со ссылкой на проверки», затем «Разрешаю выкатить SHA …». Dev обязан проверить успешный Prepare, использовать его артефакты и canonical entrypoint. Кнопка Deploy удобнее тем, что фиксирует оператора и запускает стандартные шаги без пересказа команд.
+
+Режим **preflight** в той же форме проверяет доступ, live baseline, worker/config и артефакты без применения миграций и переключения runtime. Он выбран по умолчанию и не требует production approval. Результат PLANNED означает «можно планировать выкладку», а не «релиз уже выпущен».
 
 ## Значение состояний
 
@@ -20,6 +22,7 @@
 | READY | Этот SHA прошёл проверки, Docker/БД репетицию; владелец может разрешить выпуск |
 | FAILED в Prepare | Production не изменён; Dev исправляет первый упавший шаг |
 | Queued в Deploy | Исполнитель занят/выключен/не подключён; проверять Settings → Actions → Runners |
+| PLANNED | Preflight завершён; production не переключался |
 | COMPLETE в manifest | Runtime, health, parity, миграции и production ref технически проверены |
 | OWNER_SMOKE_PENDING | Ответ в Telegram ещё не подтверждён после этого релиза |
 | FAILED_PRE_SWITCH | Переключение не началось; Dev сверяет baseline перед новой попыткой |
@@ -54,6 +57,6 @@ pnpm release:gpoint:status
 pnpm release:gpoint --dry-run --candidate <40-char-sha>
 ```
 
-Автоматический job использует `scripts/automated-release.mjs` с bundle вне checkout. Apply не запускать по имени ветки, latest или произвольному локальному receipt: workflow сначала подтверждает provenance через GitHub API. Не снимать stale lock молча и не повторять mutation после RECOVERY_REQUIRED.
+Автоматический job использует `scripts/automated-release.mjs` с bundle вне checkout. Apply не запускать по имени ветки, latest или произвольному локальному receipt: workflow сначала подтверждает provenance через GitHub API. Общий lock на Mac: `~/.config/gpoint/release-production.lock`, вне checkout runner; старый `.gpoint-release.lock` также блокирует запуск до явной reconciliation. Не снимать stale lock молча и не повторять mutation после RECOVERY_REQUIRED.
 
 При bookkeeping push-конфликте workflow не форсирует main. Exact attempt сохранён в result artifact; Dev переносит только canonical manifests/state после сверки фактов, commit/push и clean-end. При неудачной публикации повторный Publish идемпотентен по run/phase/status; существующая история сохраняется.

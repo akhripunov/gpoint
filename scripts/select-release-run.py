@@ -29,12 +29,18 @@ def select_run(sha, runs):
     return latest
 
 
-def main():
-    sha = os.environ['CANDIDATE_SHA']
+def validate_request(sha, ref, mode, approval):
     if not re.fullmatch('[a-f0-9]{40}', sha):
         raise RuntimeError('Enter the complete 40-character candidate SHA')
-    if os.environ.get('APPROVE_PRODUCTION') != 'true' or os.environ.get('GITHUB_REF') != 'refs/heads/main':
-        raise RuntimeError('Select main and explicitly approve production')
+    if ref != 'refs/heads/main' or mode not in ('preflight', 'production'):
+        raise RuntimeError('Select main and a valid release mode')
+    if mode == 'production' and approval != 'true':
+        raise RuntimeError('Explicit production approval is required')
+
+
+def main():
+    sha = os.environ['CANDIDATE_SHA']
+    validate_request(sha, os.environ.get('GITHUB_REF'), os.environ.get('RELEASE_MODE'), os.environ.get('APPROVE_PRODUCTION'))
     if github('git/ref/heads/main')['object']['sha'] != sha:
         raise RuntimeError('Candidate is no longer origin/main; prepare the new candidate')
     runs = github(f'actions/workflows/gpoint-prepare.yml/runs?branch=main&head_sha={sha}&per_page=100')['workflow_runs']

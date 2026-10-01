@@ -12,6 +12,9 @@ export function verifyReleaseBundle(directory, candidate) {
     throw new Error('release bundle is not READY for the exact candidate');
   }
   if (!Number.isSafeInteger(proof.runId) || proof.runId < 1) throw new Error('invalid CI run ID');
+  if (!/^[A-Za-z0-9_]{1,32}$/.test(proof.agataHead ?? '') || !/^[A-Za-z0-9_]{1,128}$/.test(proof.prismaHead ?? '')) {
+    throw new Error('invalid candidate migration heads');
+  }
   for (const gate of ['unit', 'postgres', 'docker', 'migration', 'miniapp', 'agataHealth']) {
     if (proof.gates?.[gate] !== 'PASS') throw new Error(`missing release gate: ${gate}`);
   }

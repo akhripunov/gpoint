@@ -5,9 +5,13 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { verifyReleaseBundle } from './release-bundle.mjs';
+import { fileURLToPath } from 'node:url';
 
-const root = path.resolve(new URL('..', import.meta.url).pathname);
+const root = fileURLToPath(new URL('..', import.meta.url));
 const sha = process.env.CANDIDATE_SHA;
+const mode = process.env.RELEASE_MODE;
+if (!['preflight', 'production'].includes(mode)) throw new Error('Explicit release mode is required');
+if (mode === 'production' && process.env.APPROVE_PRODUCTION !== 'true') throw new Error('Explicit production approval is required');
 const proof = verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, sha);
 if (String(proof.runId) !== process.env.PREPARE_RUN_ID) throw new Error('Receipt does not belong to the approved GitHub run');
 const git = args => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
@@ -28,24 +32,28 @@ try {
     cwd: root, env: { ...process.env, GPOINT_RELEASE_SKIP_BUILD: '1' }, stdio: 'inherit', timeout: 600_000,
   });
   if (preflight.status !== 0) throw new Error('Canonical preflight blocked the release');
-  const result = spawnSync('pnpm', ['release:gpoint', '--apply', '--candidate', sha, '--confirm-production-apply'], {
-    cwd: root, stdio: 'inherit', timeout: 1_800_000,
-  });
-  releaseCode = result.status ?? 1;
+  if (mode === 'preflight') {
+    releaseCode = 0;
+  } else {
+    const result = spawnSync('pnpm', ['release:gpoint', '--apply', '--candidate', sha, '--confirm-production-apply'], {
+      cwd: root, stdio: 'inherit', timeout: 1_800_000,
+    });
+    releaseCode = result.status ?? 1;
+  }
 } finally {
   const directory = path.join(root, 'docs/release/manifests');
   const records = fs.readdirSync(directory).filter(name => !previous.has(name)).map(name => ({
     name, data: JSON.parse(fs.readFileSync(path.join(directory, name), 'utf8')),
   })).filter(record => record.data.candidateSha === sha);
-  const attempt = records.filter(r => r.data.status !== 'PLANNED').at(-1);
+  const attempt = (mode === 'preflight' ? records : records.filter(r => r.data.status !== 'PLANNED')).at(-1);
   const evidence = attempt?.data ?? { candidateSha: sha, status: 'BLOCKED', productionRef: null };
   fs.writeFileSync(process.env.RELEASE_RESULT, JSON.stringify({ ...evidence,
     operator: process.env.GITHUB_ACTOR, automationRunId: process.env.GITHUB_RUN_ID,
-    applicationVerification: 'OWNER_SMOKE_PENDING',
+    applicationVerification: mode === 'preflight' ? 'NOT_DEPLOYED' : 'OWNER_SMOKE_PENDING',
   }, null, 2) + '\n');
   // Limit staging to canonical bookkeeping. A concurrent push is rejected;
   // the result artifact and Linear retain evidence without forcing main.
-  if (records.length) {
+  if (mode === 'production' && records.length) {
     git(['config', 'user.name', 'GPoint Release']);
     git(['config', 'user.email', 'gpoint-release@users.noreply.github.com']);
     git(['add', 'docs/release/state/production.json', ...records.map(r => `docs/release/manifests/${r.name}`)]);
