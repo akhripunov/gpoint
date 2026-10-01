@@ -132,6 +132,22 @@ class MacWorkerTests(unittest.TestCase):
         self.assertNotIn(token, saved)
         self.assertEqual(json.loads(saved)["last_success_job_id"], "job-1")
 
+    def test_blank_default_model_completion_satisfies_server_contract(self):
+        from app.api.internal import WorkerCompleteRequest
+
+        for model, expected in [("", "codex-default"), ("  ", "codex-default"), (" explicit ", "explicit")]:
+            worker._last_heartbeat_attempt = float("-inf")
+            def api(path, body=None):
+                if path == "claim":
+                    return {"job": {"id": "7508f36f-774a-48aa-8c6b-42f6f160415d", "leaseToken": "x" * 32, "request": {}}}
+                if path == "complete":
+                    validated = WorkerCompleteRequest(**body)
+                    self.assertEqual(validated.model, expected)
+                return {"accepted": True}
+
+            with self.subTest(model=model), patch.dict(os.environ, {"AGATA_CODEX_MODEL": model}), patch.object(worker, "api_request", side_effect=api), patch.object(worker, "run_inference", return_value="answer"):
+                self.assertTrue(worker.process_one())
+
     def test_inference_failure_reports_retryable_safe_code(self):
         calls = []
 

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { canCreateProductionRef, checkAgataEffectiveConfig, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, cleanupLocalPackageCaches, evaluateSafetyGates, failureEvidence, isTransientGitHubTransportFailure, localDiskDecision, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runLocalDiskPreflight, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, validateMacWorkerStatus, verifiedRuntimeState } from './release-gpoint.mjs';
-import { agataInternalConfigProvisionCommand, agataPreSwitchReadinessCommand, agataProviderRuntimeCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, cleanupTemporaryWorktree, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, parseAgataRuntimeIdentityLine, planReleaseRetention, productionPreflightCommand, resolveRunnerPath, runRemoteCommand, runWithPreExecRetry, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataProviderMode, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
+import { agataInternalConfigProvisionCommand, agataPreSwitchReadinessCommand, agataProviderRuntimeCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, cleanupTemporaryWorktree, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, parseAgataRuntimeIdentityLine, planReleaseRetention, productionPreflightCommand, resolveRunnerPath, runCleanupCommand, runRemoteCommand, runWithPreExecRetry, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataProviderMode, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
 
 test('temporary worktree cleanup uses git metadata removal when available', () => {
   const calls = [];
@@ -947,4 +947,49 @@ test('source upload uses at most one controlled retry', () => {
     if (previous.count === undefined) delete process.env.COUNT_FILE; else process.env.COUNT_FILE = previous.count;
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+
+test('large cleanup transports exact bytes through a verified script and bounded SSH command', () => {
+  const command = 'echo cleanup;'.repeat(4000);
+  let source, remotePath;
+  const result = runCleanupCommand(command, {
+    remoteUpload(local, remote) {
+      source = local; remotePath = remote;
+      assert.equal(fs.readFileSync(local, 'utf8'), command);
+      assert.equal(fs.statSync(local).mode & 0o777, 0o600);
+    },
+    remoteRun(shortCommand) {
+      assert.ok(Buffer.byteLength(shortCommand) < 1024);
+      assert.ok(shortCommand.includes('sha256sum'));
+      assert.ok(shortCommand.includes(remotePath));
+      // Run the actual checksum guard locally on the uploaded bytes.
+      fs.copyFileSync(source, remotePath);
+      try { return execFileSync('sh', ['-c', shortCommand], {encoding:'utf8'}); }
+      finally { fs.rmSync(remotePath, {force:true}); }
+    },
+  });
+  assert.equal(result.trim().split('\n').length, 4000);
+  assert.equal(fs.existsSync(source), false);
+});
+
+test('large cleanup removes its local script and preserves remote execution failures', () => {
+  let source;
+  const failure = new Error('cleanup execution failed');
+  assert.throws(() => runCleanupCommand('true;'.repeat(8000), {
+    remoteUpload(local) { source = local; },
+    remoteRun() { throw failure; },
+  }), error => error === failure);
+  assert.equal(fs.existsSync(source), false);
+});
+
+test('cleanup checksum mismatch prevents execution of a changed remote script', () => {
+  let remotePath;
+  assert.throws(() => runCleanupCommand('true;'.repeat(8000), {
+    remoteUpload(local, remote) { remotePath = remote; fs.writeFileSync(remote, 'echo SHOULD_NOT_EXECUTE'); },
+    remoteRun(command) {
+      try { return execFileSync('sh', ['-c', command], {encoding:'utf8', stdio:['ignore','pipe','pipe']}); }
+      finally { fs.rmSync(remotePath, {force:true}); }
+    },
+  }), error => error.status !== 0 && String(error.stdout ?? '') === '');
 });

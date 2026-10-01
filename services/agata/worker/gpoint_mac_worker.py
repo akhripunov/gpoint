@@ -274,7 +274,7 @@ def process_one() -> bool:
             "job_id": job_id,
             "lease_token": lease,
             "text": response,
-            "model": os.environ.get("AGATA_CODEX_MODEL", "codex-default"),
+            "model": os.environ.get("AGATA_CODEX_MODEL", "").strip() or "codex-default",
         })
     except TransientNetworkError:
         write_status(state="network_error", last_error_code="worker_gateway_network_error")

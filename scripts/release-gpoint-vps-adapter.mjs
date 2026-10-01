@@ -391,6 +391,21 @@ export function upload(localFile, remoteFile) {
 
 export { run as runRemoteCommand };
 
+export function runCleanupCommand(command, { remoteRun = run, remoteUpload = upload } = {}) {
+  if (Buffer.byteLength(command, 'utf8') <= 32_768) return remoteRun(command);
+  const digest = crypto.createHash('sha256').update(command).digest('hex');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-cleanup-'));
+  const local = path.join(directory, 'cleanup.sh');
+  const remote = `/tmp/gpoint-cleanup-${digest}.sh`;
+  try {
+    fs.writeFileSync(local, command, { mode: 0o600 });
+    remoteUpload(local, remote);
+    return remoteRun(`set -e; chmod 600 '${remote}'; test "$(sha256sum '${remote}' | cut -d ' ' -f1)" = '${digest}'; sh '${remote}'; rm -f '${remote}'`);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 export function inspectProductionReadOnly() {
   const prerequisites = run("set -e; dockerVersion=$(docker version --format '{{.Server.Version}}'); composeVersion=$(docker compose version --short); buildxVersion=$(docker buildx version | awk 'NR==1 {print $2}'); docker buildx inspect --bootstrap >/dev/null; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n \"$freeKb\"; test \"$freeKb\" -ge 5242880; releaseSha=$(sed -n 's/^RELEASE_SHA=//p' /opt/gpoint/env/production.env | head -1); docker image inspect gpoint-runtime:$releaseSha >/dev/null; command -v caddy >/dev/null; printf 'LIVE_DOCKER_VERSION=%s\\nLIVE_COMPOSE_VERSION=%s\\nLIVE_BUILDX_VERSION=%s\\nLIVE_BUILDKIT=ready\\nLIVE_DISK_FREE_KB=%s\\nLIVE_ROLLBACK_IMAGE_AVAILABLE=YES\\n' \"$dockerVersion\" \"$composeVersion\" \"$buildxVersion\" \"$freeKb\"");
   const dbScript = `const {PrismaClient}=require('@prisma/client'); const db=new PrismaClient(); (async()=>{try{const p=await db.$queryRawUnsafe('SELECT migration_name FROM "_prisma_migrations" WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY finished_at DESC LIMIT 1'); const a=await db.$queryRawUnsafe("SELECT to_regclass('agata.alembic_version')::text AS relation"); let head='ABSENT'; if(a[0].relation){const rows=await db.$queryRawUnsafe('SELECT version_num FROM agata.alembic_version'); if(rows.length!==1) throw Error('agata head is not singular'); head=rows[0].version_num;} console.log('LIVE_PRISMA_HEAD='+(p[0]?.migration_name||'NONE')); console.log('LIVE_AGATA_HEAD='+head);}catch(e){console.error('READ_ONLY_DB_INSPECTION_FAILED='+e.name); process.exitCode=1;}finally{await db.$disconnect();}})();`;
@@ -560,7 +575,7 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
     const cacheCleanup = removableShas
       ? removableShas.split(' ').map(candidateBuildCacheCleanupCommand).join('; ')
       : "echo GPOINT_BUILD_CACHE_PRESERVED reason=no_terminal_candidate_cache";
-    const cleanup = stage(timings, 'POST_RELEASE_CLEANUP', () => run(`set -e; test "$(sed -n 's/^RELEASE_SHA=//p' /opt/gpoint/env/production.env | head -1)" = '${sha}'; ${terminalCleanup}; ${cacheCleanup}; rm -f /tmp/gpoint-previous-runtime-${sha} /tmp/gpoint-aux-${sha}; echo GPOINT_POST_RELEASE_CLEANUP_OK`));
+    const cleanup = stage(timings, 'POST_RELEASE_CLEANUP', () => runCleanupCommand(`set -e; test "$(sed -n 's/^RELEASE_SHA=//p' /opt/gpoint/env/production.env | head -1)" = '${sha}'; ${terminalCleanup}; ${cacheCleanup}; rm -f /tmp/gpoint-previous-runtime-${sha} /tmp/gpoint-aux-${sha}; echo GPOINT_POST_RELEASE_CLEANUP_OK`));
     if (!cleanup.includes('GPOINT_POST_RELEASE_CLEANUP_OK')) throw new Error('post-release cleanup failed');
     const migrationOutput = [
       migration.includes('Database schema is up to date!') ? 'DATABASE_SCHEMA_UP_TO_DATE' : null,
