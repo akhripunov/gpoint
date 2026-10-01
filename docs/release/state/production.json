@@ -3,8 +3,8 @@
   "currentProductionDbHead": "20260922090000_telegram_channel_avatar",
   "currentProductionRef": "gpoint-production-20261001T072211071Z",
   "previousProductionSha": "ce38486ef416869e217c5fa41773c02f258d38e0",
-  "lastReleaseId": "gpoint-release-20261001T072211071Z",
-  "lastReleaseStatus": "COMPLETE",
+  "lastReleaseId": "gpoint-release-20261001T195208190Z",
+  "lastReleaseStatus": "FAILED_PRE_SWITCH",
   "lastReleaseCompletedAt": "2026-10-01T07:28:09.078Z",
   "releaseOrigin": "durable-production-release",
   "artifactIdentities": {
@@ -105,8 +105,8 @@
     "resolvedManifest": "docs/release/manifests/gpoint-release-20260924T051236278Z.json",
     "basis": "Read-only VPS runtime identity and DB status, live HTTPS root/model/API checks, published share domain, and exact GitHub production tag were verified after the local TLS timeout."
   },
-  "lastReleaseFailureManifest": "docs/release/manifests/gpoint-release-20261001T070511382Z.json",
-  "lastReleaseFailureAt": "2026-10-01T07:10:38.501Z",
+  "lastReleaseFailureManifest": "docs/release/manifests/gpoint-release-20261001T195208190Z.json",
+  "lastReleaseFailureAt": "2026-10-01T19:54:57.080Z",
   "currentReleaseFailureReconciliation": {
     "reconciledAt": "2026-09-28T08:52:16Z",
     "failedReleaseId": "gpoint-release-20260928T082516997Z",
