@@ -1,39 +1,85 @@
 {
-  "currentProductionSha": "ce38486ef416869e217c5fa41773c02f258d38e0",
+  "currentProductionSha": "62d96acc67bd739599b7edf205e5fabeed6456ce",
   "currentProductionDbHead": "20260922090000_telegram_channel_avatar",
-  "currentProductionRef": "gpoint-production-20261001T071149396Z",
-  "previousProductionSha": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
-  "lastReleaseId": "gpoint-recovery-20261001T071149396Z",
+  "currentProductionRef": "gpoint-production-20261001T072211071Z",
+  "previousProductionSha": "ce38486ef416869e217c5fa41773c02f258d38e0",
+  "lastReleaseId": "gpoint-release-20261001T072211071Z",
   "lastReleaseStatus": "COMPLETE",
-  "lastReleaseCompletedAt": "2026-10-01T07:12:07.092Z",
+  "lastReleaseCompletedAt": "2026-10-01T07:28:09.078Z",
   "releaseOrigin": "durable-production-release",
   "artifactIdentities": {
     "api": {
-      "sourceSha": "ce38486ef416869e217c5fa41773c02f258d38e0",
-      "runtimeImageId": "sha256:5ac25de5b7ace15ff210fb7c244dfe707108da5673408070d952838ba7fb5140"
+      "sourceSha": "62d96acc67bd739599b7edf205e5fabeed6456ce",
+      "adapter": {
+        "imageId": "sha256:b3fbaf67462f7091cd066aac6b2ed13aff2370613c953279818af6857e63868d",
+        "indexSha256": "a772f4b24e5c3ea3c022540660166c2cdc71ed3ca95fa43cba385f7715e89707",
+        "buildSha": "62d96acc67bd739599b7edf205e5fabeed6456ce",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
     },
     "worker": {
-      "sourceSha": "ce38486ef416869e217c5fa41773c02f258d38e0",
-      "runtimeImageId": "sha256:5ac25de5b7ace15ff210fb7c244dfe707108da5673408070d952838ba7fb5140"
+      "sourceSha": "62d96acc67bd739599b7edf205e5fabeed6456ce",
+      "adapter": {
+        "imageId": "sha256:b3fbaf67462f7091cd066aac6b2ed13aff2370613c953279818af6857e63868d",
+        "indexSha256": "a772f4b24e5c3ea3c022540660166c2cdc71ed3ca95fa43cba385f7715e89707",
+        "buildSha": "62d96acc67bd739599b7edf205e5fabeed6456ce",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
     },
     "bot": {
-      "sourceSha": "ce38486ef416869e217c5fa41773c02f258d38e0",
-      "runtimeImageId": "sha256:5ac25de5b7ace15ff210fb7c244dfe707108da5673408070d952838ba7fb5140"
+      "sourceSha": "62d96acc67bd739599b7edf205e5fabeed6456ce",
+      "adapter": {
+        "imageId": "sha256:b3fbaf67462f7091cd066aac6b2ed13aff2370613c953279818af6857e63868d",
+        "indexSha256": "a772f4b24e5c3ea3c022540660166c2cdc71ed3ca95fa43cba385f7715e89707",
+        "buildSha": "62d96acc67bd739599b7edf205e5fabeed6456ce",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
     },
     "miniapp": {
-      "sourceSha": "ce38486ef416869e217c5fa41773c02f258d38e0",
-      "servedBuildSha": "ce38486ef416869e217c5fa41773c02f258d38e0"
+      "sourceSha": "62d96acc67bd739599b7edf205e5fabeed6456ce",
+      "adapter": {
+        "imageId": "sha256:b3fbaf67462f7091cd066aac6b2ed13aff2370613c953279818af6857e63868d",
+        "indexSha256": "a772f4b24e5c3ea3c022540660166c2cdc71ed3ca95fa43cba385f7715e89707",
+        "buildSha": "62d96acc67bd739599b7edf205e5fabeed6456ce",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
     },
     "agataApi": {
-      "sourceSha": "ce38486ef416869e217c5fa41773c02f258d38e0",
-      "runtimeImageId": "sha256:721ea1426426d0ab40e46cefec8ff362d2efdf75ba332ce84b8200cee6440fb5"
+      "sourceSha": "62d96acc67bd739599b7edf205e5fabeed6456ce",
+      "adapter": {
+        "imageId": "sha256:f9a8055b8e050e392bec4c88a3c2f0389980dd742c75571cd57f91f3362a6931",
+        "buildSha": "62d96acc67bd739599b7edf205e5fabeed6456ce",
+        "apiImage": "sha256:f9a8055b8e050e392bec4c88a3c2f0389980dd742c75571cd57f91f3362a6931",
+        "apiRunning": "true",
+        "apiHealth": "healthy",
+        "workerImage": "sha256:f9a8055b8e050e392bec4c88a3c2f0389980dd742c75571cd57f91f3362a6931",
+        "workerRunning": "true",
+        "workerHealth": "healthy",
+        "head": "agata0008",
+        "provider": "mac_worker",
+        "codexLocalEnabled": "true",
+        "workerTokenPresent": true
+      }
     },
     "agataWorker": {
-      "sourceSha": "ce38486ef416869e217c5fa41773c02f258d38e0",
-      "runtimeImageId": "sha256:721ea1426426d0ab40e46cefec8ff362d2efdf75ba332ce84b8200cee6440fb5"
+      "sourceSha": "62d96acc67bd739599b7edf205e5fabeed6456ce",
+      "adapter": {
+        "imageId": "sha256:f9a8055b8e050e392bec4c88a3c2f0389980dd742c75571cd57f91f3362a6931",
+        "buildSha": "62d96acc67bd739599b7edf205e5fabeed6456ce",
+        "apiImage": "sha256:f9a8055b8e050e392bec4c88a3c2f0389980dd742c75571cd57f91f3362a6931",
+        "apiRunning": "true",
+        "apiHealth": "healthy",
+        "workerImage": "sha256:f9a8055b8e050e392bec4c88a3c2f0389980dd742c75571cd57f91f3362a6931",
+        "workerRunning": "true",
+        "workerHealth": "healthy",
+        "head": "agata0008",
+        "provider": "mac_worker",
+        "codexLocalEnabled": "true",
+        "workerTokenPresent": true
+      }
     }
   },
-  "activeRuntimeSha": "ce38486ef416869e217c5fa41773c02f258d38e0",
+  "activeRuntimeSha": "62d96acc67bd739599b7edf205e5fabeed6456ce",
   "activeRuntimeDbHead": "20260922090000_telegram_channel_avatar",
   "releaseStatus": "COMPLETE",
   "recoveryRequired": false,
@@ -107,7 +153,7 @@
     "rollbackRequired": false,
     "basis": "Read-only production reconciliation verified all API/Worker/Bot runtime revisions and RELEASE_SHA remain on ca00b191db4fa26fb1f2746f9e6c218a8538ab49; Prisma head is unchanged. The agata schema exists but is empty, with no alembic_version table/head. Original failure evidence and the validated pre-release backup are retained."
   },
-  "agataRuntimeSha": "ce38486ef416869e217c5fa41773c02f258d38e0",
+  "agataRuntimeSha": "62d96acc67bd739599b7edf205e5fabeed6456ce",
   "agataAlembicHead": "agata0008",
   "agataProvider": "mac_worker",
   "recoveryFinalizationManifest": "docs/release/manifests/gpoint-recovery-20261001T071149396Z.json"
