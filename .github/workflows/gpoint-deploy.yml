@@ -52,9 +52,12 @@ jobs:
     env:
       CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
       PREPARE_RUN_ID: ${{ needs.validate.outputs.run_id }}
-      GPOINT_RELEASE_BUNDLE: ${{ runner.temp }}/gpoint-bundle-${{ github.run_id }}
-      RELEASE_RESULT: ${{ runner.temp }}/gpoint-release-result-${{ github.run_id }}.json
     steps:
+      - name: Set private temporary evidence paths
+        shell: bash
+        run: |
+          echo "GPOINT_RELEASE_BUNDLE=$RUNNER_TEMP/gpoint-bundle-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
+          echo "RELEASE_RESULT=$RUNNER_TEMP/gpoint-release-result-$GITHUB_RUN_ID.json" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.validate.outputs.candidate }}

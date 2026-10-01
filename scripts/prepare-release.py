@@ -21,7 +21,7 @@ def run(*args, cwd=ROOT, env=None, capture=False):
     return result.stdout.strip() if capture else None
 
 
-def prepare(sha, output):
+def prepare(sha, output, *, postgres_only=False):
     if not re.fullmatch(r"[a-f0-9]{40}", sha) or run('git', 'rev-parse', 'HEAD', capture=True) != sha:
         raise RuntimeError('candidate must match the exact checkout')
     if run('git', 'status', '--porcelain', capture=True):
@@ -32,13 +32,14 @@ def prepare(sha, output):
     output.mkdir(parents=True, exist_ok=True)
     receipt = output / 'receipt.json'
     receipt.unlink(missing_ok=True)  # Never retain READY from a failed retry.
-    run('pnpm', 'install', '--frozen-lockfile')
-    run('pnpm', '--filter', '@gpoint/db', 'exec', 'prisma', 'generate')
-    run('pnpm', 'build')
-    run('pnpm', 'typecheck')
-    run('pnpm', 'test')
-    run('pnpm', 'test:release')
-    run(sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_*linear*.py')
+    if not postgres_only:
+        run('pnpm', 'install', '--frozen-lockfile')
+        run('pnpm', '--filter', '@gpoint/db', 'exec', 'prisma', 'generate')
+        run('pnpm', 'build')
+        run('pnpm', 'typecheck')
+        run('pnpm', 'test')
+        run('pnpm', 'test:release')
+        run(sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_*linear*.py')
 
     suffix = uuid.uuid4().hex[:12]
     network, postgres, api = (f'gpoint-ci-{suffix}-{x}' for x in ('net', 'pg', 'agata'))
@@ -73,9 +74,19 @@ def prepare(sha, output):
         agata = ROOT / 'services/agata'
         # This test intentionally starts with an empty AGATA schema, then leaves
         # an upgraded representative legacy schema for the remaining tests.
-        run(sys.executable, '-m', 'pytest', '-q', 'tests/test_postgres_baseline.py', cwd=agata, env=env)
+        # Legacy backfill uses the migration administrator. The application
+        # suite below uses a different role which cannot bypass tenant RLS.
+        migration_env = dict(env)
+        migration_env['AGATA_TEST_DATABASE_URL'] = dsn.replace('ci_owner:', 'postgres:')
+        migration_env['AGATA_DATABASE_URL'] = migration_env['AGATA_TEST_DATABASE_URL'].replace('+psycopg', '+asyncpg')
+        run(sys.executable, '-m', 'pytest', '-q', 'tests/test_postgres_baseline.py', cwd=agata, env=migration_env)
+        run('docker', 'exec', postgres, 'psql', '-U', 'postgres', '-d', 'gpoint_agata_test', '-v', 'ON_ERROR_STOP=1', '-c',
+            'GRANT USAGE ON SCHEMA agata TO ci_owner; GRANT ALL ON ALL TABLES IN SCHEMA agata TO ci_owner; GRANT ALL ON ALL SEQUENCES IN SCHEMA agata TO ci_owner;')
         env['AGATA_RLS_TEST_DATABASE_URL'] = dsn.replace('/gpoint_agata_test', '/rls_agata_test')
         run(sys.executable, '-m', 'pytest', '-q', '--ignore=tests/test_postgres_baseline.py', cwd=agata, env=env)
+        if postgres_only:
+            print('POSTGRES_REHEARSAL=PASS; no READY receipt or production images emitted')
+            return
         for tag, dockerfile, context in (
             ('gpoint-runtime', 'infra/production/Gpoint.Dockerfile', '.'),
             ('gpoint-agata-runtime', 'services/agata/Dockerfile', 'services/agata'),
@@ -140,4 +151,4 @@ def prepare(sha, output):
 
 
 if __name__ == '__main__':
-    prepare(sys.argv[1], sys.argv[2])
+    prepare(sys.argv[1], sys.argv[2], postgres_only='--postgres-only' in sys.argv[3:])
