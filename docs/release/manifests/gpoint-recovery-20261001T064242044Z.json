@@ -1,0 +1,111 @@
+{
+  "releaseId": "gpoint-recovery-20261001T064242044Z",
+  "eventType": "RECOVERY_FINALIZATION",
+  "failedReleaseId": "gpoint-release-20261001T063600024Z",
+  "candidateSha": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+  "previousProductionSha": "93d0c38c7452516f4cea41e1e78f1fe0966f48a9",
+  "productionShaAfter": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": "20260922090000_telegram_channel_avatar",
+  "agataDbHeadAfter": "agata0008",
+  "agataRuntimeSha": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+  "agataProvider": "mac_worker",
+  "artifactIdentities": {
+    "api": {
+      "sourceSha": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+      "runtimeImageId": "sha256:0c49306244d2c478e3434c439d744e7fd91fb895e252e8b794587fb2f0c717b0"
+    },
+    "worker": {
+      "sourceSha": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+      "runtimeImageId": "sha256:0c49306244d2c478e3434c439d744e7fd91fb895e252e8b794587fb2f0c717b0"
+    },
+    "bot": {
+      "sourceSha": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+      "runtimeImageId": "sha256:0c49306244d2c478e3434c439d744e7fd91fb895e252e8b794587fb2f0c717b0"
+    },
+    "miniapp": {
+      "sourceSha": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+      "servedBuildSha": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57"
+    },
+    "agataApi": {
+      "sourceSha": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+      "runtimeImageId": "sha256:a8cf292af04762969a39d594f0fa35dfdf33b5ace07c64e6e698e46a8d54f11d"
+    },
+    "agataWorker": {
+      "sourceSha": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+      "runtimeImageId": "sha256:a8cf292af04762969a39d594f0fa35dfdf33b5ace07c64e6e698e46a8d54f11d"
+    }
+  },
+  "startedAt": "2026-10-01T06:42:42.044Z",
+  "finishedAt": "2026-10-01T06:42:57.588Z",
+  "status": "COMPLETE",
+  "failureStage": null,
+  "failureReason": null,
+  "productionRef": "gpoint-production-20261001T064242044Z",
+  "remoteProductionRefTarget": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+  "remoteMainSha": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+  "runtimeFacts": {
+    "LIVE_DOCKER_VERSION": "29.1.3",
+    "LIVE_COMPOSE_VERSION": "5.5.1",
+    "LIVE_BUILDX_VERSION": "v0.37.1",
+    "LIVE_BUILDKIT": "ready",
+    "LIVE_DISK_FREE_KB": "9344896",
+    "LIVE_ROLLBACK_IMAGE_AVAILABLE": "YES",
+    "LIVE_RELEASE_ENV_SHA": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+    "LIVE_API_IMAGE": "sha256:0c49306244d2c478e3434c439d744e7fd91fb895e252e8b794587fb2f0c717b0",
+    "LIVE_API_SHA": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+    "LIVE_API_RUNNING": "true",
+    "LIVE_API_HEALTH": "healthy",
+    "LIVE_API_RESTARTS": "0",
+    "LIVE_WORKER_IMAGE": "sha256:0c49306244d2c478e3434c439d744e7fd91fb895e252e8b794587fb2f0c717b0",
+    "LIVE_WORKER_SHA": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+    "LIVE_WORKER_RUNNING": "true",
+    "LIVE_WORKER_HEALTH": "none",
+    "LIVE_WORKER_RESTARTS": "0",
+    "LIVE_BOT_IMAGE": "sha256:0c49306244d2c478e3434c439d744e7fd91fb895e252e8b794587fb2f0c717b0",
+    "LIVE_BOT_SHA": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+    "LIVE_BOT_RUNNING": "true",
+    "LIVE_BOT_HEALTH": "none",
+    "LIVE_BOT_RESTARTS": "0",
+    "LIVE_MINIAPP_SHA": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+    "LIVE_PRISMA_HEAD": "20260922090000_telegram_channel_avatar",
+    "LIVE_AGATA_HEAD": "agata0008",
+    "LIVE_CONFIG_AGATA_ENABLED": "YES",
+    "LIVE_CONFIG_AGATA_LLM_PROVIDER": "YES",
+    "LIVE_CONFIG_AGATA_DATABASE_URL": "YES",
+    "LIVE_CONFIG_AGATA_TENANT_ID": "YES",
+    "LIVE_CONFIG_AGATA_INTERNAL_API_TOKEN": "YES",
+    "LIVE_CONFIG_AGATA_MESSAGE_AEAD_KEY": "YES",
+    "LIVE_CONFIG_AGATA_REQUEST_FINGERPRINT_HMAC_KEY": "YES",
+    "LIVE_CONFIG_AGATA_RETRIEVAL_QUERY_HMAC_KEY": "YES",
+    "LIVE_CONFIG_AGATA_RESPONSE_FINGERPRINT_HMAC_KEY": "YES",
+    "LIVE_CONFIG_AGATA_SHADOW_CANDIDATE_HMAC_KEY": "YES",
+    "LIVE_AGATA_ENABLED": "true",
+    "LIVE_AGATA_PROVIDER": "mac_worker",
+    "LIVE_AGATA_API_IMAGE": "gpoint-agata-runtime:7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+    "LIVE_AGATA_API_IMAGE_ID": "sha256:a8cf292af04762969a39d594f0fa35dfdf33b5ace07c64e6e698e46a8d54f11d",
+    "LIVE_AGATA_API_SHA": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+    "LIVE_AGATA_API_RUNNING": "true",
+    "LIVE_AGATA_API_HEALTH": "healthy",
+    "LIVE_AGATA_WORKER_IMAGE": "gpoint-agata-runtime:7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+    "LIVE_AGATA_WORKER_IMAGE_ID": "sha256:a8cf292af04762969a39d594f0fa35dfdf33b5ace07c64e6e698e46a8d54f11d",
+    "LIVE_AGATA_WORKER_SHA": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+    "LIVE_AGATA_WORKER_RUNNING": "true",
+    "LIVE_AGATA_WORKER_HEALTH": "healthy",
+    "LIVE_CONFIG_AGATA_LLM_API_KEY": "NO",
+    "LIVE_CONFIG_AGATA_CODEX_LOCAL_ENABLED": "YES",
+    "LIVE_CONFIG_GPOINT_AGATA_WORKER_TOKEN": "YES",
+    "LIVE_AGATA_CODEX_LOCAL_ENABLED": "true"
+  },
+  "smoke": {
+    "root": "PASS",
+    "apiHealth": "PASS",
+    "messagesUnauthenticatedRoute": "PASS",
+    "ageUnauthenticatedRoute": "PASS",
+    "messagesRouteShell": "PASS",
+    "modelRouteShell": "PASS",
+    "ageInternalReadiness": "PASS",
+    "provider": "mac_worker"
+  },
+  "recoveryBasis": "Live runtime, API/Worker/Bot/AGATA image parity, Mini App build SHA, Prisma/Alembic heads, and health/smoke checks were independently verified after the original release apply switched runtime but failed AGATA identity parsing."
+}
