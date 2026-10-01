@@ -14,6 +14,16 @@ Every release must record the current production SHA and database migration head
 
 The canonical entry point is `pnpm release:gpoint --dry-run --candidate <40-char-sha>`. Apply mode is deliberately fail-closed and requires an explicit operator confirmation. A release lock covers migration, runtime apply, and production-ref finalization; a stale lock is never silently removed.
 
+## Automated release control
+
+- GitHub workflows `GPoint — Prepare` and `GPoint — Deploy` implement the release flow described in `docs/release/automation.md`.
+- Prepare must succeed for the exact current main SHA, including publication of release facts to Linear. Deploy is manually dispatched from main with exact SHA and explicit production approval.
+- The production runner is repository-scoped, Mac-only and labelled `gpoint-production`; never assign it untrusted PR jobs. VPS secrets stay on the Mac/VPS.
+- CI artifacts are consumed by `GPOINT_RELEASE_BUNDLE`; verify successful GitHub run provenance, receipt/run ID, archive checksum and exact image IDs. Do not rebuild those application images during apply.
+- Compare the installed Mac worker source to the candidate before apply. A changed worker requires installation from the published candidate before resuming.
+- Technical COMPLETE and owner-confirmed Telegram replies are separate facts. Never create synthetic production Messages jobs or report heartbeat as an end-to-end reply.
+- Linear publication preserves architect-owned Handoff sections and existing journal history. Missing publication or an offline runner is a visible blocker, not a successful automation setup.
+
 ## VPS policy
 
 The VPS is a runtime and artifact target, not a development workspace. Application fixes must be committed and pushed before deployment. MaxiBot files, containers, database, domain, and release state are outside GPoint scope and must not be touched.

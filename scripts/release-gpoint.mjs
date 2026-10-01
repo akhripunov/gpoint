@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { migrationHead } from './release-migrations.mjs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { applyCandidate, cleanupTemporaryWorktree, inspectProductionReadOnly, planReleaseRetention, provisionAgataInternalConfigForBaseline, runRemoteCommand, validateAgataProviderMode } from './release-gpoint-vps-adapter.mjs';
 
@@ -243,7 +244,14 @@ export function shouldFinalizeRecovery({ releaseState, candidate, actualSha, gat
   return releaseState === 'RECOVERY_REQUIRED' && candidate === actualSha && gatesPass === true;
 }
 
-export function recoveryRuntimeFailures(candidate, facts, expectedDbHead, workerStatus = undefined) {
+export function candidateAgataMigrationHead(candidate) {
+  assertSha(candidate);
+  const directory = 'services/agata/migrations/versions';
+  const files = git(['ls-tree', '-r', '--name-only', candidate, directory]).split('\n').filter(name => name.endsWith('.py'));
+  return migrationHead(files.map(name => git(['show', `${candidate}:${name}`]))).head;
+}
+
+export function recoveryRuntimeFailures(candidate, facts, expectedDbHead, workerStatus = undefined, expectedAgataHead = 'agata0008') {
   const failures = [];
   if (facts.LIVE_RELEASE_ENV_SHA !== candidate) failures.push('release env SHA mismatch');
   for (const role of ['API', 'WORKER', 'BOT']) {
@@ -253,7 +261,7 @@ export function recoveryRuntimeFailures(candidate, facts, expectedDbHead, worker
   if (facts.LIVE_API_HEALTH !== 'healthy') failures.push('API is not healthy');
   if (facts.LIVE_MINIAPP_SHA !== candidate) failures.push('Mini App SHA mismatch');
   if (facts.LIVE_PRISMA_HEAD !== expectedDbHead) failures.push('Prisma head mismatch');
-  if (facts.LIVE_AGATA_HEAD !== 'agata0008') failures.push('AGATA Alembic head mismatch');
+  if (facts.LIVE_AGATA_HEAD !== expectedAgataHead) failures.push('AGATA Alembic head mismatch');
   if (facts.LIVE_CONFIG_AGATA_CODEX_LOCAL_ENABLED !== 'YES') failures.push('AGATA_CODEX_LOCAL_ENABLED is missing');
   failures.push(...validateAgataProviderMode(providerConfigFromFacts(facts, facts.LIVE_AGATA_PROVIDER === 'mac_worker' ? workerStatus : undefined)));
   if (facts.LIVE_AGATA_ENABLED !== 'true') failures.push('AGATA is not enabled');
@@ -493,7 +501,7 @@ function runDryRun(candidate) {
     const gates = evaluateSafetyGates({ candidateSha: candidate, remoteSha: proof.mainSha, artifacts, config: effective, recordedProductionSha: current.currentProductionSha, liveProductionSha: liveSha, productionRefTarget: candidate });
     gates.push(...checkAgataArtifactParity(candidate, artifacts), ...checkAgataEffectiveConfig(effective));
     if (gates.length) die(gates.join('; '));
-    const manifest = { releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: null, dbHeadBefore: liveDbHead, dbHeadAfter: null, agataDbHeadBefore: baseline.agataDbHead, agataDbHeadAfter: 'agata0008', artifactIdentities: artifacts, provider: baseline.provider, agataProvider: baseline.provider, startedAt, finishedAt: isoNow(), status: 'PLANNED', failureStage: null, failureReason: null, rollbackSha: current.currentProductionSha, rollbackDbCompatibility: 'REQUIRES_FORWARD_FIX_ASSESSMENT', productionRef: null, remoteProof: { mainSha: proof.mainSha, directRef: proof.directRef }, liveFacts: baseline.facts, dryRun: true };
+    const manifest = { releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: null, dbHeadBefore: liveDbHead, dbHeadAfter: null, agataDbHeadBefore: baseline.agataDbHead, agataDbHeadAfter: candidateAgataMigrationHead(candidate), artifactIdentities: artifacts, provider: baseline.provider, agataProvider: baseline.provider, startedAt, finishedAt: isoNow(), status: 'PLANNED', failureStage: null, failureReason: null, rollbackSha: current.currentProductionSha, rollbackDbCompatibility: 'REQUIRES_FORWARD_FIX_ASSESSMENT', productionRef: null, remoteProof: { mainSha: proof.mainSha, directRef: proof.directRef }, liveFacts: baseline.facts, dryRun: true };
     const file = writeManifest(manifest);
     console.log(JSON.stringify({ status: 'PLANNED', releaseId, candidateSha: candidate, remoteMainSha: proof.mainSha, buildCheckoutSha: build.checkoutSha, buildCheckoutClean: build.clean, dbHead: liveDbHead, rollbackSha: current.currentProductionSha, manifest: path.relative(ROOT, file) }, null, 2));
   } finally { unlock(); }
@@ -564,15 +572,20 @@ function runApply(candidate) {
     const root = measured(stageTimings, 'API_HEALTH', () => execFileSync('curl', ['-fsS', 'https://gpoint.amiora.one/'], { encoding: 'utf8' }));
     if (!root.includes(`gpoint-build-sha" content="${candidate}`)) die('external Mini App build SHA mismatch after apply');
     measured(stageTimings, 'WORKER_HEALTH', () => execFileSync('curl', ['-fsS', 'https://gpoint.amiora.one/api/health/live'], { stdio: 'ignore' }));
+    const afterFacts = readLiveFacts();
+    const deployedDbHead = afterFacts.LIVE_PRISMA_HEAD;
+    if (!deployedDbHead || deployedDbHead === 'NONE') die('post-release Prisma head is missing');
+    if (afterFacts.LIVE_AGATA_HEAD !== adapter.agataIdentity.head) die('post-release Alembic head mismatch');
     const ref = `gpoint-production-${startedAt.replace(/[-:.]/g, '')}`;
-    measured(stageTimings, 'PRODUCTION_REF_CREATE', () => execFileSync('git', ['tag', '-a', ref, candidate, '-m', `GPoint production release\nproductionSha=${candidate}\ndbHead=${liveDbHead}\nreleaseId=${releaseId}`], { cwd: ROOT, stdio: 'inherit' }));
+    measured(stageTimings, 'PRODUCTION_REF_CREATE', () => execFileSync('git', ['tag', '-a', ref, candidate, '-m', `GPoint production release\nproductionSha=${candidate}\ndbHead=${deployedDbHead}\nreleaseId=${releaseId}`], { cwd: ROOT, stdio: 'inherit' }));
     const remoteRef = measured(stageTimings, 'PRODUCTION_REF_PUSH_AND_VERIFY', () => pushProductionTag(ref, candidate));
     Object.assign(stageTimings, adapter.timings ?? {}, { TOTAL_RELEASE: Number(((Date.now() - totalStarted) / 1000).toFixed(1)) });
     console.log(`RELEASE_STAGE_TIMING=${JSON.stringify(stageTimings)}`);
     const artifactIdentities = { api: { sourceSha: candidate, adapter: adapter.imageIdentity }, worker: { sourceSha: candidate, adapter: adapter.imageIdentity }, bot: { sourceSha: candidate, adapter: adapter.imageIdentity }, miniapp: { sourceSha: candidate, adapter: adapter.imageIdentity }, agataApi: { sourceSha: candidate, adapter: adapter.agataIdentity }, agataWorker: { sourceSha: candidate, adapter: adapter.agataIdentity } };
-    const manifest = { releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: candidate, dbHeadBefore: liveDbHead, dbHeadAfter: liveDbHead, agataDbHeadBefore: baseline.agataDbHead, agataDbHeadAfter: adapter.agataIdentity.head, agataRuntimeSha: candidate, agataProvider: adapter.agataIdentity.provider, artifactIdentities, startedAt, finishedAt: isoNow(), status: 'COMPLETE', failureStage: null, failureReason: null, rollbackSha: current.currentProductionSha, rollbackDbCompatibility: 'REQUIRES_FORWARD_FIX_ASSESSMENT', productionRef: ref, remoteProof: { mainSha: proof.mainSha }, migrationOutput: adapter.migrationOutput, detectorSourceHash: adapter.detectorHash, stageTimings, releaseOrigin: 'durable-production-release' };
+    const manifest = { releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: candidate, dbHeadBefore: liveDbHead, dbHeadAfter: deployedDbHead, agataDbHeadBefore: baseline.agataDbHead, agataDbHeadAfter: adapter.agataIdentity.head, agataRuntimeSha: candidate, agataProvider: adapter.agataIdentity.provider, artifactIdentities, startedAt, finishedAt: isoNow(), status: 'COMPLETE', failureStage: null, failureReason: null, rollbackSha: current.currentProductionSha, rollbackDbCompatibility: 'REQUIRES_FORWARD_FIX_ASSESSMENT', productionRef: ref, remoteProof: { mainSha: proof.mainSha }, migrationOutput: adapter.migrationOutput, detectorSourceHash: adapter.detectorHash, stageTimings, releaseOrigin: 'durable-production-release' };
+    manifest.ciReceipt = adapter.ciReceipt ?? null;
     const file = writeManifest(manifest);
-    const verifiedState = verifiedRuntimeState(current, { candidate, dbHead: liveDbHead });
+    const verifiedState = verifiedRuntimeState(current, { candidate, dbHead: deployedDbHead });
     fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...verifiedState, currentProductionRef: ref, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: manifest.finishedAt, releaseOrigin: 'durable-production-release', agataRuntimeSha: candidate, agataAlembicHead: adapter.agataIdentity.head, agataProvider: adapter.agataIdentity.provider, artifactIdentities: manifest.artifactIdentities }, null, 2)}\n`);
     console.log(JSON.stringify({ status: 'COMPLETE', releaseId, candidateSha: candidate, productionRef: ref, manifest: path.relative(ROOT, file) }, null, 2));
   } catch (error) {
@@ -621,7 +634,9 @@ function finalizeRecovery(candidate) {
     catch { die('recovery candidate is not contained in verified origin/main history'); }
 
     const facts = readLiveFacts();
-    const runtimeFailures = recoveryRuntimeFailures(candidate, facts, current.currentProductionDbHead, facts.LIVE_AGATA_PROVIDER === 'mac_worker' ? readMacWorkerStatus() : undefined);
+    const prismaFiles = git(['ls-tree', '-r', '--name-only', candidate, 'packages/db/prisma/migrations']).split('\n').filter(name => name.endsWith('/migration.sql'));
+    const expectedPrismaHead = prismaFiles.map(name => name.split('/').at(-2)).sort().at(-1);
+    const runtimeFailures = recoveryRuntimeFailures(candidate, facts, expectedPrismaHead, facts.LIVE_AGATA_PROVIDER === 'mac_worker' ? readMacWorkerStatus() : undefined, candidateAgataMigrationHead(candidate));
     if (runtimeFailures.length) die(`live runtime is not safe to finalize: ${runtimeFailures.join('; ')}`);
     const root = measured({}, 'RECOVERY_ROOT_HEALTH', () => execFileSync('curl', ['-fsS', '--connect-timeout', '3', '--max-time', '10', 'https://gpoint.amiora.one/'], { encoding: 'utf8' }));
     if (!root.includes(`gpoint-build-sha" content="${candidate}`)) die('external Mini App root does not serve the recovery candidate');

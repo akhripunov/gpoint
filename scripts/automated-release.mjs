@@ -1,0 +1,56 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import crypto from 'node:crypto';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { verifyReleaseBundle } from './release-bundle.mjs';
+
+const root = path.resolve(new URL('..', import.meta.url).pathname);
+const sha = process.env.CANDIDATE_SHA;
+const proof = verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, sha);
+if (String(proof.runId) !== process.env.PREPARE_RUN_ID) throw new Error('Receipt does not belong to the approved GitHub run');
+const git = args => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+if (git(['rev-parse', 'HEAD']) !== sha || git(['status', '--porcelain'])) throw new Error('Release checkout must be clean and exact');
+const workerSource = path.join(root, 'services/agata/worker/gpoint_mac_worker.py');
+const workerInstalled = path.join(os.homedir(), 'Library/Application Support/GPoint/agata-codex-worker/gpoint_mac_worker.py');
+const checksum = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+if (!fs.existsSync(workerInstalled) || checksum(workerSource) !== checksum(workerInstalled)) {
+  throw new Error('Installed Mac worker differs from candidate. Install the published candidate worker before apply.');
+}
+if (!process.env.RELEASE_RESULT || !process.env.GITHUB_RUN_ID) throw new Error('Release evidence paths are required');
+const previous = new Set(fs.readdirSync(path.join(root, 'docs/release/manifests')));
+let releaseCode = 1;
+try {
+  // Docker artifacts already passed CI. Canonical dry-run still independently
+  // checks the live baseline, config, GitHub SHA and isolated source tree.
+  const preflight = spawnSync('pnpm', ['release:gpoint', '--dry-run', '--candidate', sha], {
+    cwd: root, env: { ...process.env, GPOINT_RELEASE_SKIP_BUILD: '1' }, stdio: 'inherit', timeout: 600_000,
+  });
+  if (preflight.status !== 0) throw new Error('Canonical preflight blocked the release');
+  const result = spawnSync('pnpm', ['release:gpoint', '--apply', '--candidate', sha, '--confirm-production-apply'], {
+    cwd: root, stdio: 'inherit', timeout: 1_800_000,
+  });
+  releaseCode = result.status ?? 1;
+} finally {
+  const directory = path.join(root, 'docs/release/manifests');
+  const records = fs.readdirSync(directory).filter(name => !previous.has(name)).map(name => ({
+    name, data: JSON.parse(fs.readFileSync(path.join(directory, name), 'utf8')),
+  })).filter(record => record.data.candidateSha === sha);
+  const attempt = records.filter(r => r.data.status !== 'PLANNED').at(-1);
+  const evidence = attempt?.data ?? { candidateSha: sha, status: 'BLOCKED', productionRef: null };
+  fs.writeFileSync(process.env.RELEASE_RESULT, JSON.stringify({ ...evidence,
+    operator: process.env.GITHUB_ACTOR, automationRunId: process.env.GITHUB_RUN_ID,
+    applicationVerification: 'OWNER_SMOKE_PENDING',
+  }, null, 2) + '\n');
+  // Limit staging to canonical bookkeeping. A concurrent push is rejected;
+  // the result artifact and Linear retain evidence without forcing main.
+  if (records.length) {
+    git(['config', 'user.name', 'GPoint Release']);
+    git(['config', 'user.email', 'gpoint-release@users.noreply.github.com']);
+    git(['add', 'docs/release/state/production.json', ...records.map(r => `docs/release/manifests/${r.name}`)]);
+    git(['commit', '-m', `Record GPoint release ${sha} [skip ci]`]);
+    git(['push', 'origin', 'HEAD:main']);
+  }
+}
+process.exitCode = releaseCode;

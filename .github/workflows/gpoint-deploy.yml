@@ -1,0 +1,87 @@
+name: GPoint — Deploy
+run-name: Deploy ${{ inputs.candidate }} by ${{ github.actor }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: 'Exact 40-character SHA from successful GPoint — Prepare'
+        required: true
+        type: string
+      approve_production:
+        description: 'I authorize this exact candidate on GPoint production'
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: gpoint-production-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_id: ${{ steps.select.outputs.run_id }}
+      candidate: ${{ steps.select.outputs.candidate }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Verify operator confirmation, current main and successful preparation
+        id: select
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ inputs.candidate }}
+          APPROVE_PRODUCTION: ${{ inputs.approve_production }}
+        run: python scripts/select-release-run.py
+
+  deploy:
+    needs: validate
+    # Only a repository-scoped runner on the owner's Mac may receive this job.
+    runs-on: [self-hosted, macOS, gpoint-production]
+    timeout-minutes: 40
+    permissions:
+      contents: write
+      actions: read
+    env:
+      CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
+      PREPARE_RUN_ID: ${{ needs.validate.outputs.run_id }}
+      GPOINT_RELEASE_BUNDLE: ${{ runner.temp }}/gpoint-bundle-${{ github.run_id }}
+      RELEASE_RESULT: ${{ runner.temp }}/gpoint-release-result-${{ github.run_id }}.json
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.candidate }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: gpoint-release-${{ needs.validate.outputs.candidate }}
+          run-id: ${{ needs.validate.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ env.GPOINT_RELEASE_BUNDLE }}
+      - name: Verify receipt, canonical preflight, apply and persist evidence
+        run: node scripts/automated-release.mjs
+      - name: Publish production result to Linear
+        if: always()
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          RELEASE_PHASE: production
+          RELEASE_STATUS: ${{ job.status == 'success' && 'COMPLETE' || 'FAILED' }}
+        run: python3 scripts/publish-release-linear.py
+      - name: Preserve release result even when apply fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpoint-production-result-${{ github.run_id }}
+          path: |
+            ${{ env.RELEASE_RESULT }}
+            docs/release/manifests/
+            docs/release/state/production.json
+          if-no-files-found: warn
+          retention-days: 30
