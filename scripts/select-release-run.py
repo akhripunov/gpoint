@@ -79,6 +79,9 @@ def main():
         raise RuntimeError('Prepare run/attempt changed after selection')
     with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
         output.write(f"run_id={selected['id']}\nrun_attempt={selected.get('run_attempt', 1)}\nartifact_id={matches[0]['id']}\ncandidate={sha}\n")
+        state = os.environ.get('NETWORK_RETRY_BUDGET_STATE')
+        used = Path(state).read_text().strip() if state and Path(state).exists() else '0'
+        output.write(f'network_retry_budget_used_seconds={used}\n')
 
 
 if __name__ == '__main__':

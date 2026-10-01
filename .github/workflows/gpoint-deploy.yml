@@ -37,7 +37,13 @@ jobs:
       candidate: ${{ steps.select.outputs.candidate }}
       run_attempt: ${{ steps.select.outputs.run_attempt }}
       artifact_id: ${{ steps.select.outputs.artifact_id }}
+      network_retry_budget_used_seconds: ${{ steps.select.outputs.network_retry_budget_used_seconds }}
     steps:
+      - name: Initialize shared retry budget
+        shell: bash
+        run: |
+          echo "NETWORK_RETRY_BUDGET_STATE=$RUNNER_TEMP/gpoint-network-retry-budget-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
+          printf '0\n' > "$RUNNER_TEMP/gpoint-network-retry-budget-$GITHUB_RUN_ID"
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
@@ -76,6 +82,8 @@ jobs:
         run: |
           echo "GPOINT_RELEASE_BUNDLE=$RUNNER_TEMP/gpoint-bundle-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
           echo "RELEASE_RESULT=$RUNNER_TEMP/gpoint-release-result-$GITHUB_RUN_ID.json" >> "$GITHUB_ENV"
+          echo "NETWORK_RETRY_BUDGET_STATE=$RUNNER_TEMP/gpoint-network-retry-budget-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
+          printf '%s\n' '${{ needs.validate.outputs.network_retry_budget_used_seconds }}' > "$RUNNER_TEMP/gpoint-network-retry-budget-$GITHUB_RUN_ID"
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.validate.outputs.candidate }}

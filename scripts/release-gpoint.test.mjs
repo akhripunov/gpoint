@@ -229,6 +229,56 @@ test('DNS transport error followed by success retries and verifies exact main SH
   assert.deepEqual(delays, [1_000]);
 });
 
+test('GitHub recovery and a later SSH outage share one cumulative retry budget', () => {
+  const statePath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-retry-budget-')), 'spent');
+  const previous = process.env.NETWORK_RETRY_BUDGET_STATE;
+  process.env.NETWORK_RETRY_BUDGET_STATE = statePath;
+  let now = 0;
+  const clock = () => now;
+  const sleep = milliseconds => { now += milliseconds; };
+  try {
+    let githubCalls = 0;
+    runWithBoundedGitHubRetries(() => {
+      githubCalls += 1;
+      if (githubCalls === 1) throw Object.assign(new Error('temporary network timeout'), { code: 'ETIMEDOUT' });
+      return 'main-sha';
+    }, { now: clock, sleep, jitter: () => 700, emit: () => {} });
+    assert.equal(fs.readFileSync(statePath, 'utf8').trim(), '0.700000');
+
+    let sshCalls = 0;
+    runWithPreExecRetry(() => {
+      sshCalls += 1;
+      if (sshCalls === 1) throw Object.assign(new Error('temporary SSH banner timeout'), { classification: 'PRE_EXEC_TRANSPORT_FAILURE' });
+      return 'read-only baseline';
+    }, { now: clock, sleep, jitter: () => 800, emit: () => {} });
+    assert.equal(fs.readFileSync(statePath, 'utf8').trim(), '1.500000');
+    assert.equal(githubCalls, 2);
+    assert.equal(sshCalls, 2);
+  } finally {
+    if (previous === undefined) delete process.env.NETWORK_RETRY_BUDGET_STATE;
+    else process.env.NETWORK_RETRY_BUDGET_STATE = previous;
+    fs.rmSync(path.dirname(statePath), { recursive: true, force: true });
+  }
+});
+
+test('later SSH failure exhausts the remaining shared budget as NETWORK_UNAVAILABLE', () => {
+  const statePath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-retry-budget-')), 'spent');
+  const previous = process.env.NETWORK_RETRY_BUDGET_STATE;
+  process.env.NETWORK_RETRY_BUDGET_STATE = statePath;
+  fs.writeFileSync(statePath, '1799.5\n');
+  let now = 0;
+  try {
+    assert.throws(() => runWithPreExecRetry(() => {
+      throw Object.assign(new Error('temporary SSH banner timeout'), { classification: 'PRE_EXEC_TRANSPORT_FAILURE' });
+    }, { now: () => now, sleep: milliseconds => { now += milliseconds; }, jitter: () => 500, emit: () => {} }),
+    error => error.code === 'NETWORK_UNAVAILABLE');
+  } finally {
+    if (previous === undefined) delete process.env.NETWORK_RETRY_BUDGET_STATE;
+    else process.env.NETWORK_RETRY_BUDGET_STATE = previous;
+    fs.rmSync(path.dirname(statePath), { recursive: true, force: true });
+  }
+});
+
 test('tag push retries transient connection loss after confirming remote tag is absent', () => {
   let pushes = 0;
   const lookups = [];

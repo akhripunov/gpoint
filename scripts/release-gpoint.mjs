@@ -334,7 +334,15 @@ export function runWithBoundedGitHubRetries(operation, {
   budgetMs = NETWORK_RETRY_BUDGET_MS, emit = message => console.error(message),
 } = {}) {
   const started = now();
-  const deadline = started + budgetMs;
+  const statePath = process.env.NETWORK_RETRY_BUDGET_STATE;
+  let spentMs = 0;
+  if (statePath && fs.existsSync(statePath)) {
+    const raw = fs.readFileSync(statePath, 'utf8').trim();
+    if (!/^\d+(?:\.\d+)?$/.test(raw)) throw new Error('Invalid shared network retry budget state');
+    spentMs = Number(raw) * 1000;
+  }
+  const remainingBudgetMs = Math.max(0, budgetMs - spentMs);
+  const deadline = started + remainingBudgetMs;
   let retries = 0;
   const unavailable = () => {
     emit(`NETWORK_UNAVAILABLE stage=github_read elapsed_s=${((now() - started) / 1000).toFixed(1)} budget_s=${budgetMs / 1000}`);
@@ -342,7 +350,7 @@ export function runWithBoundedGitHubRetries(operation, {
     error.code = 'NETWORK_UNAVAILABLE';
     return error;
   };
-  while (true) {
+  try { while (true) {
     if (now() >= deadline) throw unavailable();
     try {
       const result = operation(retries + 1);
@@ -359,6 +367,13 @@ export function runWithBoundedGitHubRetries(operation, {
       emit(`NETWORK_RETRYING stage=github_read retry_in_s=${(delay / 1000).toFixed(1)} elapsed_s=${((now() - started) / 1000).toFixed(1)}`);
       retries += 1;
       sleep(delay);
+    }
+  } } finally {
+    if (statePath && retries) {
+      fs.mkdirSync(path.dirname(statePath), { recursive: true });
+      const temporary = `${statePath}.${process.pid}.tmp`;
+      fs.writeFileSync(temporary, `${((spentMs + Math.max(0, now() - started)) / 1000).toFixed(6)}\n`, { mode: 0o600 });
+      fs.renameSync(temporary, statePath);
     }
   }
 }
