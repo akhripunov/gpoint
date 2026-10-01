@@ -19,7 +19,9 @@ const LEGACY_LOCK_FILE = path.join(ROOT, '.gpoint-release.lock');
 const SHA_RE = /^[0-9a-f]{40}$/;
 const REMOTE_VERIFY_TIMEOUT_MS = 15_000;
 const GITHUB_REMOTE_TIMEOUT_MS = 20_000;
-const GITHUB_RETRY_DELAYS_MS = [1_000, 3_000];
+const NETWORK_RETRY_BUDGET_MS = 30 * 60 * 1000;
+const NETWORK_BACKOFF_CAP_MS = 60_000;
+const TAG_RECONCILIATION_RETRY_DELAYS_MS = [1_000, 3_000];
 const GIB = 1024 ** 3;
 const LOCAL_DISK_HARD_MIN_BYTES = 10 * GIB;
 const LOCAL_DISK_TARGET_BYTES = 15 * GIB;
@@ -317,29 +319,53 @@ function errorText(error) {
 
 export function isTransientGitHubTransportFailure(error) {
   const text = errorText(error);
-  if (/permission denied|publickey|host key verification failed|remote mismatch|non-fast-forward|rejected|authentication failed|sha mismatch|candidate sha is not exact/i.test(text)) return false;
+  if (/permission denied|publickey|host key verification failed|remote mismatch|non-fast-forward|rejected|authentication failed|sha mismatch|candidate sha is not exact|certificate verify failed|certificate verification failed|self-signed certificate|unable to get local issuer/i.test(text)) return false;
   const transient = error?.code === 'ETIMEDOUT'
     || error?.killed === true
-    || /could not resolve (?:hostname|host)|nodename nor servname|temporary failure in name resolution|name or service not known|connection timed out|operation timed out|connection reset|connection closed|closed by .* port|banner exchange|connection refused|network is unreachable|network unreachable|eai_again|enotfound|broken pipe/i.test(text);
+    || /could not resolve (?:hostname|host)|nodename nor servname|temporary failure in name resolution|name or service not known|connection timed out|operation timed out|connection reset|connection closed|closed by .* port|banner exchange|connection refused|network is unreachable|network unreachable|eai_again|enotfound|broken pipe|ssl_error_syscall|ssl read error|tls.*(?:timeout|temporar|unexpected eof|connection reset)|unexpected eof while reading/i.test(text);
   if (transient) return true;
   if (/could not read from remote repository/i.test(text)) return false;
   return false;
 }
 
-function waitForGitHubRetry(attempt, sleep = milliseconds => execFileSync('sleep', [String(milliseconds / 1_000)])) {
-  const delay = GITHUB_RETRY_DELAYS_MS[attempt - 1];
-  if (delay) sleep(delay);
-}
-
-export function runWithBoundedGitHubRetries(operation, { sleep = waitForGitHubRetry } = {}) {
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    try { return operation(attempt); }
-    catch (error) {
-      if (!isTransientGitHubTransportFailure(error) || attempt === 3) throw error;
-      waitForGitHubRetry(attempt, sleep);
+export function runWithBoundedGitHubRetries(operation, {
+  sleep = milliseconds => execFileSync('sleep', [String(milliseconds / 1_000)]),
+  now = () => performance.now(), jitter = (low, high) => low + Math.random() * (high - low),
+  budgetMs = NETWORK_RETRY_BUDGET_MS, emit = message => console.error(message),
+} = {}) {
+  const started = now();
+  const deadline = started + budgetMs;
+  let retries = 0;
+  const unavailable = () => {
+    emit(`NETWORK_UNAVAILABLE stage=github_read elapsed_s=${((now() - started) / 1000).toFixed(1)} budget_s=${budgetMs / 1000}`);
+    const error = new Error('NETWORK_UNAVAILABLE stage=github_read');
+    error.code = 'NETWORK_UNAVAILABLE';
+    return error;
+  };
+  while (true) {
+    if (now() >= deadline) throw unavailable();
+    try {
+      const result = operation(retries + 1);
+      if (now() >= deadline) throw unavailable();
+      if (retries) emit(`NETWORK_RESTORED stage=github_read elapsed_s=${((now() - started) / 1000).toFixed(1)}`);
+      emit('RELEASE_CONTINUING stage=github_read');
+      return result;
+    } catch (error) {
+      if (!isTransientGitHubTransportFailure(error)) throw error;
+      const remaining = deadline - now();
+      if (remaining <= 0) throw unavailable();
+      const cap = Math.min(NETWORK_BACKOFF_CAP_MS, 1_000 * 2 ** Math.min(retries, 6));
+      const delay = Math.min(Math.max(0, jitter(0, cap)), remaining);
+      emit(`NETWORK_RETRYING stage=github_read retry_in_s=${(delay / 1000).toFixed(1)} elapsed_s=${((now() - started) / 1000).toFixed(1)}`);
+      retries += 1;
+      sleep(delay);
     }
   }
-  throw new Error('unreachable GitHub retry state');
+}
+
+function waitForGitHubRetry(attempt, sleep = milliseconds => execFileSync('sleep', [String(milliseconds / 1_000)])) {
+  const delay = TAG_RECONCILIATION_RETRY_DELAYS_MS[attempt - 1];
+  if (delay) sleep(delay);
 }
 
 function githubTransportEnv() {
@@ -360,11 +386,12 @@ export function runRemoteShaList({ runner = execFileSync } = {}) {
   }).trim();
 }
 
-export function remoteProof(candidate, { runRemote = () => runRemoteShaList(), sleep } = {}) {
+export function remoteProof(candidate, { runRemote = () => runRemoteShaList(), sleep, now, jitter, budgetMs, emit } = {}) {
   let lines;
-  try { lines = runWithBoundedGitHubRetries(() => runRemote({ timeoutMs: REMOTE_VERIFY_TIMEOUT_MS }), { sleep }); }
+  try { lines = runWithBoundedGitHubRetries(() => runRemote({ timeoutMs: REMOTE_VERIFY_TIMEOUT_MS }), { sleep, now, jitter, budgetMs, emit }); }
   catch (error) {
-    if (isTransientGitHubTransportFailure(error)) die('GitHub remote verification failed after three bounded transport attempts');
+    if (error?.code === 'NETWORK_UNAVAILABLE') die('NETWORK_UNAVAILABLE during GitHub remote verification');
+    if (isTransientGitHubTransportFailure(error)) die('GitHub remote verification stopped after a retryable transport error');
     die('GitHub remote verification failed on a non-transient error; refusing retry');
   }
   const refs = lines.split('\n').filter(Boolean).map(line => line.split(/\s+/));
@@ -386,8 +413,9 @@ function runGitHubRemoteGit(args, { timeout = GITHUB_REMOTE_TIMEOUT_MS } = {}) {
       env: githubTransportEnv(),
     }).trim());
   } catch (error) {
+    if (error?.code === 'NETWORK_UNAVAILABLE') die('NETWORK_UNAVAILABLE during GitHub remote operation');
     die(isTransientGitHubTransportFailure(error)
-      ? 'GitHub remote operation unavailable after three bounded transport attempts'
+      ? 'GitHub remote operation stopped after a retryable transport error'
       : 'GitHub remote operation failed on a non-transient error; refusing retry');
   }
 }

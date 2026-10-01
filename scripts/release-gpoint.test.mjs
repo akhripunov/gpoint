@@ -108,6 +108,7 @@ test('transient transport failure retries once then accepts exact main SHA', () 
       return `${sha}\trefs/heads/main`;
     },
     sleep: milliseconds => delays.push(milliseconds),
+    jitter: (_low, high) => high,
   });
   assert.equal(proof.mainSha, sha);
   assert.equal(calls.length, 2);
@@ -153,9 +154,10 @@ test('remote SHA mismatch fails closed without retry', () => {
   assert.equal(calls.length, 1);
 });
 
-test('three transient remote failures stop, stay bounded, and do not expose secrets', () => {
+test('transient remote outage expires as NETWORK_UNAVAILABLE without exposing secrets', () => {
   const calls = [];
   const delays = [];
+  let now = 0;
   assert.throws(() => remoteProof(sha, {
     runRemote: options => {
       calls.push(options);
@@ -164,14 +166,18 @@ test('three transient remote failures stop, stay bounded, and do not expose secr
         code: 'ETIMEDOUT',
       });
     },
-    sleep: milliseconds => delays.push(milliseconds),
+    sleep: milliseconds => { delays.push(milliseconds); now += milliseconds; },
+    now: () => now,
+    jitter: (_low, high) => high,
+    budgetMs: 3_500,
+    emit: () => {},
   }), error => {
-    assert.match(error.message, /three bounded transport attempts/);
+    assert.match(error.message, /NETWORK_UNAVAILABLE/);
     assert.doesNotMatch(error.message, /worker-secret-token/);
     return true;
   });
   assert.equal(calls.length, 3);
-  assert.deepEqual(delays, [1_000, 3_000]);
+  assert.deepEqual(delays, [1_000, 2_000, 500]);
 });
 
 test('auth and host-key failures are not retried; UNKNOWN remote SHA is rejected', () => {
@@ -200,6 +206,8 @@ test('specific DNS transport errors outrank Git generic remote-read footer', () 
   assert.equal(isTransientGitHubTransportFailure(new Error('ssh: nodename nor servname provided\\nfatal: Could not read from remote repository.')), true);
   assert.equal(isTransientGitHubTransportFailure(new Error('Permission denied (publickey).\\nfatal: Could not read from remote repository.')), false);
   assert.equal(isTransientGitHubTransportFailure(new Error('Host key verification failed.')), false);
+  assert.equal(isTransientGitHubTransportFailure(new Error('SSL certificate problem: unable to get local issuer certificate')), false);
+  assert.equal(isTransientGitHubTransportFailure(new Error('OpenSSL SSL_ERROR_SYSCALL during TLS read')), true);
   assert.equal(isTransientGitHubTransportFailure(new Error('candidate SHA mismatch')), false);
   assert.equal(isTransientGitHubTransportFailure(new Error('fatal: Could not read from remote repository.')), false);
 });
@@ -214,6 +222,7 @@ test('DNS transport error followed by success retries and verifies exact main SH
       return `${sha}\trefs/heads/main`;
     },
     sleep: milliseconds => delays.push(milliseconds),
+    jitter: (_low, high) => high,
   });
   assert.equal(proof.mainSha, sha);
   assert.equal(calls.length, 2);
@@ -784,7 +793,7 @@ test('remote runner retries a proven banner timeout once and preserves the exact
     commands.push(command);
     if (attempt === 1) throw Object.assign(new Error('banner timeout'), { classification: 'PRE_EXEC_TRANSPORT_FAILURE' });
     return 'healthy';
-  }, { sleep: milliseconds => delays.push(milliseconds) });
+  }, { sleep: milliseconds => delays.push(milliseconds), jitter: (_low, high) => high });
   assert.equal(result, 'healthy');
   assert.deepEqual(commands, [command, command]);
   assert.deepEqual(delays, [1_000]);
@@ -793,12 +802,31 @@ test('remote runner retries a proven banner timeout once and preserves the exact
 test('three proven pre-exec failures stop after exactly three attempts with bounded backoff', () => {
   let attempts = 0;
   const delays = [];
+  let now = 0;
   assert.throws(() => runWithPreExecRetry(() => {
     attempts += 1;
     throw Object.assign(new Error('Could not resolve host'), { classification: 'PRE_EXEC_TRANSPORT_FAILURE' });
-  }, { sleep: milliseconds => delays.push(milliseconds) }), /Could not resolve host/);
+  }, { sleep: milliseconds => { delays.push(milliseconds); now += milliseconds; }, now: () => now,
+    jitter: (_low, high) => high, budgetMs: 3_500, emit: () => {} }), /NETWORK_UNAVAILABLE/);
   assert.equal(attempts, 3);
-  assert.deepEqual(delays, [1_000, 3_000]);
+  assert.deepEqual(delays, [1_000, 2_000, 500]);
+});
+
+test('long GitHub TLS outage recovers within the bounded retry window and resumes the read', () => {
+  let now = 0;
+  let calls = 0;
+  const events = [];
+  const result = runWithBoundedGitHubRetries(() => {
+    calls += 1;
+    if (calls <= 27) throw Object.assign(new Error('TLS connection reset by peer'), { code: 'ECONNRESET' });
+    return 'verified candidate metadata';
+  }, { budgetMs: 1_800_000, now: () => now, sleep: ms => { now += ms; },
+    jitter: (_low, high) => high, emit: event => events.push(event) });
+  assert.equal(result, 'verified candidate metadata');
+  assert.ok(now > 1_200_000 && now < 1_800_000);
+  assert.ok(events.some(event => event.startsWith('NETWORK_RETRYING')));
+  assert.ok(events.some(event => event.startsWith('NETWORK_RESTORED')));
+  assert.equal(events.at(-1), 'RELEASE_CONTINUING stage=github_read');
 });
 
 test('remote command, auth, host-key, and ambiguous post-start failures never retry', () => {
@@ -853,6 +881,7 @@ test('pre-exec retry errors and logs do not expose command secrets', () => {
   const runner = path.join(root, 'runner.sh');
   const countFile = path.join(root, 'count');
   const secret = 'synthetic-secret-value';
+  let now = 0;
   fs.writeFileSync(runner, `#!/bin/sh\ncount=$(cat "$COUNT_FILE" 2>/dev/null || echo 0)\ncount=$((count + 1))\nprintf '%s' "$count" > "$COUNT_FILE"\nprintf 'TOKEN=${secret}\\n' >&2\nprintf '%s\\n' 'PRE_EXEC_TRANSPORT_FAILURE:255' > "$GPOINT_REMOTE_ATTEMPT_STATUS_FILE"\nexit 75\n`);
   fs.chmodSync(runner, 0o700);
   const previousRunner = process.env.GPOINT_REMOTE_RUNNER;
@@ -863,10 +892,11 @@ test('pre-exec retry errors and logs do not expose command secrets', () => {
   process.env.COUNT_FILE = countFile;
   console.error = (...values) => messages.push(values.join(' '));
   try {
-    assert.throws(() => runRemoteCommand('safe-command'), error => {
-      assert.equal(error.code, 'PRE_EXEC_TRANSPORT_FAILURE');
-      assert.equal(error.exitCode, 255);
-      assert.match(error.stderr, new RegExp(secret));
+    assert.throws(() => runRemoteCommand('safe-command', {}, {
+      now: () => now, sleep: milliseconds => { now += milliseconds; },
+      jitter: (_low, high) => high, budgetMs: 3_500, emit: message => messages.push(message),
+    }), error => {
+      assert.equal(error.code, 'NETWORK_UNAVAILABLE');
       assert.doesNotMatch(error.message, new RegExp(secret));
       return true;
     });

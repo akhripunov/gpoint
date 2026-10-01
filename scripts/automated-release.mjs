@@ -30,7 +30,7 @@ try {
   // Docker artifacts already passed CI. Canonical dry-run still independently
   // checks the live baseline, config, GitHub SHA and isolated source tree.
   const preflight = spawnSync('pnpm', ['release:gpoint', '--dry-run', '--candidate', sha], {
-    cwd: root, env: { ...process.env, GPOINT_RELEASE_SKIP_BUILD: '1' }, stdio: 'inherit', timeout: 600_000,
+    cwd: root, env: { ...process.env, GPOINT_RELEASE_SKIP_BUILD: '1' }, stdio: 'inherit', timeout: 2_100_000,
   });
   preflightStatus = preflight.status === 0 ? 'PLANNED' : 'FAILED';
   if (preflight.status !== 0) throw new Error('Canonical preflight blocked the release');

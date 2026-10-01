@@ -3,17 +3,43 @@
 import json
 import os
 import re
+import socket
+import ssl
+import sys
+import urllib.error
 import urllib.request
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from network_retry import NetworkUnavailable, RetryBudget, retry_network_read
 
 REPO = 'akhripunov/gpoint'
+NETWORK_BUDGET = RetryBudget()
+
+
+def transient(error):
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in (408, 425, 429, 500, 502, 503, 504)
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return False
+    if isinstance(reason, ssl.SSLError):
+        return not any(marker in str(reason).lower() for marker in (
+            'certificate_verify_failed', 'wrong_version_number', 'protocol_version'))
+    return isinstance(reason, (TimeoutError, socket.timeout, socket.gaierror,
+                               ConnectionError))
 
 
 def github(path):
     request = urllib.request.Request(f'https://api.github.com/repos/{REPO}/{path}', headers={
         'Authorization': f"Bearer {os.environ['GITHUB_TOKEN']}",
         'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'})
-    with urllib.request.urlopen(request, timeout=20) as response:
-        return json.load(response)
+    def read():
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.load(response)
+    try:
+        return retry_network_read(read, 'release_selection', transient, budget=NETWORK_BUDGET)
+    except NetworkUnavailable:
+        raise RuntimeError('NETWORK_UNAVAILABLE stage=release_selection') from None
 
 
 def select_run(sha, runs):

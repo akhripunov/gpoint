@@ -9,7 +9,8 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const REPO = 'git@github.com:akhripunov/gpoint.git';
-const REMOTE_RETRY_BACKOFF_MS = [1_000, 3_000];
+const REMOTE_RETRY_BUDGET_MS = 30 * 60 * 1000;
+const REMOTE_RETRY_BACKOFF_CAP_MS = 60_000;
 const PRE_EXEC_STATUS_MARKER = 'PRE_EXEC_TRANSPORT_FAILURE:255';
 export const GPOINT_DATABASE_NETWORK = 'shared_internal';
 export const SOURCE_ARCHIVE_EXCLUDES = [
@@ -309,7 +310,7 @@ function applyRemoteTimingMarkers(timings, output) {
   }
 }
 
-function run(command, env = {}) {
+function run(command, env = {}, retryOptions = {}) {
   const runner = resolveRunnerPath('GPOINT_REMOTE_RUNNER');
   if (!runner) throw new Error('GPOINT_REMOTE_RUNNER is required for apply mode; no implicit SSH credentials are used');
   const captureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-remote-run-'));
@@ -353,21 +354,45 @@ function run(command, env = {}) {
       }, classification);
       console.error(`REMOTE_COMMAND_DONE attempt=${attempt} elapsed=${elapsed}s exit=${result.status ?? 'unknown'} class=${classification}`);
       throw error;
-    });
+    }, retryOptions);
   } finally {
     fs.rmSync(captureDir, { recursive: true, force: true });
   }
 }
 
-export function runWithPreExecRetry(operation, { sleep = milliseconds => spawnSync('sleep', [String(milliseconds / 1_000)]) } = {}) {
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    try { return operation(attempt); }
-    catch (error) {
-      if (error?.classification !== 'PRE_EXEC_TRANSPORT_FAILURE' || attempt === 3) throw error;
-      sleep(REMOTE_RETRY_BACKOFF_MS[attempt - 1]);
+export function runWithPreExecRetry(operation, {
+  sleep = milliseconds => spawnSync('sleep', [String(milliseconds / 1_000)]),
+  now = () => performance.now(), jitter = (low, high) => low + Math.random() * (high - low),
+  budgetMs = REMOTE_RETRY_BUDGET_MS, emit = message => console.error(message),
+} = {}) {
+  const started = now();
+  const deadline = started + budgetMs;
+  let retries = 0;
+  const unavailable = () => {
+    emit(`NETWORK_UNAVAILABLE stage=ssh_pre_exec elapsed_s=${((now() - started) / 1000).toFixed(1)} budget_s=${budgetMs / 1000}`);
+    const error = new Error('NETWORK_UNAVAILABLE stage=ssh_pre_exec');
+    error.code = 'NETWORK_UNAVAILABLE';
+    return error;
+  };
+  while (true) {
+    if (now() >= deadline) throw unavailable();
+    try {
+      const result = operation(retries + 1);
+      if (now() >= deadline) throw unavailable();
+      if (retries) emit(`NETWORK_RESTORED stage=ssh_pre_exec elapsed_s=${((now() - started) / 1000).toFixed(1)}`);
+      emit('RELEASE_CONTINUING stage=ssh_pre_exec');
+      return result;
+    } catch (error) {
+      if (error?.classification !== 'PRE_EXEC_TRANSPORT_FAILURE') throw error;
+      const remaining = deadline - now();
+      if (remaining <= 0) throw unavailable();
+      const cap = Math.min(REMOTE_RETRY_BACKOFF_CAP_MS, 1_000 * 2 ** Math.min(retries, 6));
+      const delay = Math.min(Math.max(0, jitter(0, cap)), remaining);
+      emit(`NETWORK_RETRYING stage=ssh_pre_exec retry_in_s=${(delay / 1000).toFixed(1)} elapsed_s=${((now() - started) / 1000).toFixed(1)}`);
+      retries += 1;
+      sleep(delay);
     }
   }
-  throw new Error('unreachable remote retry state');
 }
 
 export function upload(localFile, remoteFile) {

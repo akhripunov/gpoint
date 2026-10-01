@@ -31,7 +31,7 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 35
     outputs:
       run_id: ${{ steps.select.outputs.run_id }}
       candidate: ${{ steps.select.outputs.candidate }}
