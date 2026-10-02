@@ -1,0 +1,98 @@
+{
+  "releaseId": "gpoint-dry-run-20261002T091207727Z",
+  "candidateSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4",
+  "previousProductionSha": "820c943b0b5d7db94a05ab9bd5fa26e2238a6131",
+  "productionShaAfter": null,
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": null,
+  "agataDbHeadBefore": "agata0008",
+  "agataDbHeadAfter": "agata0008",
+  "artifactIdentities": {
+    "api": {
+      "sourceSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4"
+    },
+    "worker": {
+      "sourceSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4"
+    },
+    "bot": {
+      "sourceSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4"
+    },
+    "miniapp": {
+      "sourceSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4"
+    },
+    "agataApi": {
+      "sourceSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4"
+    },
+    "agataWorker": {
+      "sourceSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4"
+    }
+  },
+  "provider": "mac_worker",
+  "agataProvider": "mac_worker",
+  "startedAt": "2026-10-02T09:12:07.727Z",
+  "finishedAt": "2026-10-02T09:12:15.075Z",
+  "status": "PLANNED",
+  "failureStage": null,
+  "failureReason": null,
+  "rollbackSha": "820c943b0b5d7db94a05ab9bd5fa26e2238a6131",
+  "rollbackDbCompatibility": "REQUIRES_FORWARD_FIX_ASSESSMENT",
+  "productionRef": null,
+  "remoteProof": {
+    "mainSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4",
+    "directRef": "refs/heads/main"
+  },
+  "liveFacts": {
+    "LIVE_DOCKER_VERSION": "29.1.3",
+    "LIVE_COMPOSE_VERSION": "5.5.1",
+    "LIVE_BUILDX_VERSION": "v0.37.1",
+    "LIVE_BUILDKIT": "ready",
+    "LIVE_DISK_FREE_KB": "14616704",
+    "LIVE_ROLLBACK_IMAGE_AVAILABLE": "YES",
+    "LIVE_RELEASE_ENV_SHA": "820c943b0b5d7db94a05ab9bd5fa26e2238a6131",
+    "LIVE_API_IMAGE": "sha256:6325319328b4c3e99f501888fe4dbadf9750b78109c547459d091643212f0c81",
+    "LIVE_API_SHA": "820c943b0b5d7db94a05ab9bd5fa26e2238a6131",
+    "LIVE_API_RUNNING": "true",
+    "LIVE_API_HEALTH": "healthy",
+    "LIVE_API_RESTARTS": "0",
+    "LIVE_WORKER_IMAGE": "sha256:6325319328b4c3e99f501888fe4dbadf9750b78109c547459d091643212f0c81",
+    "LIVE_WORKER_SHA": "820c943b0b5d7db94a05ab9bd5fa26e2238a6131",
+    "LIVE_WORKER_RUNNING": "true",
+    "LIVE_WORKER_HEALTH": "none",
+    "LIVE_WORKER_RESTARTS": "0",
+    "LIVE_BOT_IMAGE": "sha256:6325319328b4c3e99f501888fe4dbadf9750b78109c547459d091643212f0c81",
+    "LIVE_BOT_SHA": "820c943b0b5d7db94a05ab9bd5fa26e2238a6131",
+    "LIVE_BOT_RUNNING": "true",
+    "LIVE_BOT_HEALTH": "none",
+    "LIVE_BOT_RESTARTS": "0",
+    "LIVE_MINIAPP_SHA": "820c943b0b5d7db94a05ab9bd5fa26e2238a6131",
+    "LIVE_PRISMA_HEAD": "20260922090000_telegram_channel_avatar",
+    "LIVE_AGATA_HEAD": "agata0008",
+    "LIVE_CONFIG_AGATA_ENABLED": "YES",
+    "LIVE_CONFIG_AGATA_LLM_PROVIDER": "YES",
+    "LIVE_CONFIG_AGATA_DATABASE_URL": "YES",
+    "LIVE_CONFIG_AGATA_TENANT_ID": "YES",
+    "LIVE_CONFIG_AGATA_INTERNAL_API_TOKEN": "YES",
+    "LIVE_CONFIG_AGATA_MESSAGE_AEAD_KEY": "YES",
+    "LIVE_CONFIG_AGATA_REQUEST_FINGERPRINT_HMAC_KEY": "YES",
+    "LIVE_CONFIG_AGATA_RETRIEVAL_QUERY_HMAC_KEY": "YES",
+    "LIVE_CONFIG_AGATA_RESPONSE_FINGERPRINT_HMAC_KEY": "YES",
+    "LIVE_CONFIG_AGATA_SHADOW_CANDIDATE_HMAC_KEY": "YES",
+    "LIVE_AGATA_ENABLED": "true",
+    "LIVE_AGATA_PROVIDER": "mac_worker",
+    "LIVE_AGATA_API_IMAGE": "gpoint-agata-runtime:820c943b0b5d7db94a05ab9bd5fa26e2238a6131",
+    "LIVE_AGATA_API_IMAGE_ID": "sha256:980356179c8a0ebddd198171df2f15e89f0f78c9b09e5a30518d7f09d1c0e12f",
+    "LIVE_AGATA_API_SHA": "820c943b0b5d7db94a05ab9bd5fa26e2238a6131",
+    "LIVE_AGATA_API_RUNNING": "true",
+    "LIVE_AGATA_API_HEALTH": "healthy",
+    "LIVE_AGATA_WORKER_IMAGE": "gpoint-agata-runtime:820c943b0b5d7db94a05ab9bd5fa26e2238a6131",
+    "LIVE_AGATA_WORKER_IMAGE_ID": "sha256:980356179c8a0ebddd198171df2f15e89f0f78c9b09e5a30518d7f09d1c0e12f",
+    "LIVE_AGATA_WORKER_SHA": "820c943b0b5d7db94a05ab9bd5fa26e2238a6131",
+    "LIVE_AGATA_WORKER_RUNNING": "true",
+    "LIVE_AGATA_WORKER_HEALTH": "healthy",
+    "LIVE_CONFIG_AGATA_LLM_API_KEY": "NO",
+    "LIVE_CONFIG_AGATA_CODEX_LOCAL_ENABLED": "YES",
+    "LIVE_CONFIG_GPOINT_AGATA_WORKER_TOKEN": "YES",
+    "LIVE_AGATA_CODEX_LOCAL_ENABLED": "true"
+  },
+  "dryRun": true
+}
