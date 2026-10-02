@@ -27,8 +27,8 @@ def run(*args, cwd=ROOT, env=None, capture=False):
 def verify_saved_images(archive, images, sha, temp_root):
     """Rehearse production import/capture/parity/reuse in a private containerd store."""
     started = time.monotonic()
-    dockerd, docker, ctr = (shutil.which(name) for name in ('dockerd', 'docker', 'ctr'))
-    if not all((dockerd, docker, ctr, shutil.which('sudo'))):
+    dockerd, docker, ctr, containerd = (shutil.which(name) for name in ('dockerd', 'docker', 'ctr', 'containerd'))
+    if not all((dockerd, docker, ctr, containerd, shutil.which('sudo'))):
         raise RuntimeError('isolated Docker daemon prerequisites are unavailable')
     root = Path(tempfile.mkdtemp(prefix='gpoint-image-roundtrip-', dir=temp_root))
     socket = root / 'docker.sock'
@@ -38,14 +38,37 @@ def verify_saved_images(archive, images, sha, temp_root):
     log = log_path.open('wb')
     daemon = None
     daemon_pid = None
+    content_daemon = None
+    content_pidfile = root / 'containerd.pid'
+    content_socket = root / 'containerd.sock'
     try:
         config = root / 'daemon.json'
         config.write_text(json.dumps({'features': {'containerd-snapshotter': True}}))
+        # Own both daemons explicitly; never attach to system containerd.
+        content_daemon = subprocess.Popen(
+            ['sudo', '-n', 'env', f'PATH={os.environ["PATH"]}', 'sh', '-c',
+             'echo $$ > "$1"; shift; exec "$@"', 'gpoint-containerd', str(content_pidfile),
+             containerd, '--root', str(root / 'content'), '--state', str(root / 'content-state'),
+             '--address', str(content_socket)],
+            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        for _ in range(30):
+            if content_daemon.poll() is not None:
+                break
+            probe = subprocess.run(['sudo', '-n', ctr, '--address', str(content_socket), 'version'],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+            if probe.returncode == 0:
+                break
+            time.sleep(1)
+        else:
+            raise RuntimeError('private containerd did not become ready')
+        if content_daemon.poll() is not None:
+            raise RuntimeError('private containerd exited before rehearsal')
         daemon = subprocess.Popen(
             ['sudo', '-n', 'env', f'PATH={os.environ["PATH"]}', dockerd,
              '--config-file', str(config), '--host', host, '--data-root', str(root / 'data'),
              '--exec-root', str(root / 'exec'), '--pidfile', str(pidfile), '--storage-driver=overlayfs',
-             '--containerd-namespace=moby', '--bridge=none', '--iptables=false', '--ip-masq=false',
+             '--containerd', str(content_socket), '--containerd-namespace=moby',
+             '--bridge=none', '--iptables=false', '--ip-masq=false',
              '--ip-forward=false'],
             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         # Wrappers always address the private daemon, even if setup-docker-action
@@ -54,7 +77,7 @@ def verify_saved_images(archive, images, sha, temp_root):
         wrappers.mkdir()
         for name, command in {
                 'docker': ['sudo', '-n', docker, '--host', host],
-                'ctr': ['sudo', '-n', ctr, '--address', str(root / 'exec/containerd/containerd.sock')],
+                'ctr': ['sudo', '-n', ctr, '--address', str(content_socket)],
         }.items():
             wrapper = wrappers / name
             wrapper.write_text('#!/bin/sh\nexec ' + shlex.join(command) + ' "$@"\n')
@@ -81,6 +104,8 @@ def verify_saved_images(archive, images, sha, temp_root):
         if info['ServerVersion'] != '29.1.3' or info['Driver'] != 'overlayfs' or \
                 ['driver-type', 'io.containerd.snapshotter.v1'] not in info.get('DriverStatus', []):
             raise RuntimeError('rehearsal must use production Docker 29.1.3/containerd/overlayfs')
+        if info.get('Containerd', {}).get('Address') != str(content_socket):
+            raise RuntimeError('rehearsal Docker is not attached to its private containerd')
         copied = root / f'gpoint-images-{sha}.tar.gz'
         shutil.copyfile(archive, copied)
         with copied.open('rb') as source:
@@ -110,6 +135,17 @@ def verify_saved_images(archive, images, sha, temp_root):
                     subprocess.run(['sudo', '-n', 'kill', '-KILL', str(daemon_pid)], check=False, timeout=10)
                 daemon.kill()
                 daemon.wait(timeout=10)
+        if content_daemon is not None and content_daemon.poll() is None:
+            if content_pidfile.exists():
+                content_pid = int(content_pidfile.read_text().strip())
+                subprocess.run(['sudo', '-n', 'kill', '-TERM', str(content_pid)], check=False, timeout=10)
+            try:
+                content_daemon.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                if content_pidfile.exists():
+                    subprocess.run(['sudo', '-n', 'kill', '-KILL', str(content_pid)], check=False, timeout=10)
+                content_daemon.kill()
+                content_daemon.wait(timeout=10)
         log.close()
         # dockerd runs as root on hosted runners, so its isolated scratch tree
         # needs narrowly scoped privileged cleanup.
