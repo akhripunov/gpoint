@@ -26,7 +26,7 @@ fi
 
 deadline="${GPOINT_SCP_COMMAND_TIMEOUT_SECONDS:-60}"
 case "$deadline" in ''|*[!0-9]*) echo 'GPoint SCP timeout must be an integer number of seconds' >&2; exit 78 ;; esac
-[ "$deadline" -ge 1 ] && [ "$deadline" -le 60 ] || { echo 'GPoint SCP timeout is outside the allowed range' >&2; exit 78; }
+[ "$deadline" -ge 1 ] && [ "$deadline" -le 600 ] || { echo 'GPoint SCP timeout is outside the allowed range' >&2; exit 78; }
 
 perl - "$deadline" scp \
   -i "$identity" \

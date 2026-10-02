@@ -430,6 +430,11 @@ test('missing SSH identity fails before invoking ssh and SCP uses the same key-o
     assert.ok(args.includes(identity));
     for (const option of ['IdentitiesOnly=yes', 'StrictHostKeyChecking=yes', 'BatchMode=yes', 'ConnectionAttempts=1']) assert.ok(args.includes(option));
     assert.ok(args.includes('root@38.180.110.92:/tmp/payload'));
+    const largeTransfer = spawnSync(scpRunner, [], { encoding: 'utf8', env: { HOME: home, PATH: `${bin}:${process.env.PATH}`, SCP_CALL_FILE: calls, LOCAL_FILE: localFile, REMOTE_FILE: '/tmp/payload', GPOINT_SCP_COMMAND_TIMEOUT_SECONDS: '600' } });
+    assert.equal(largeTransfer.status, 0);
+    const unboundedTransfer = spawnSync(scpRunner, [], { encoding: 'utf8', env: { HOME: home, PATH: `${bin}:${process.env.PATH}`, SCP_CALL_FILE: calls, LOCAL_FILE: localFile, REMOTE_FILE: '/tmp/payload', GPOINT_SCP_COMMAND_TIMEOUT_SECONDS: '601' } });
+    assert.equal(unboundedTransfer.status, 78);
+    assert.match(unboundedTransfer.stderr, /outside the allowed range/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -985,6 +990,26 @@ test('apply checkout uses the exact local commit in a clean isolated worktree', 
     assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: checkout, encoding: 'utf8' }).trim(), '');
   } finally {
     execFileSync('git', ['worktree', 'remove', '--force', checkout], { stdio: 'ignore' });
+  }
+});
+
+test('image uploads receive a size-aware bounded deadline while small uploads retain 60 seconds', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-image-upload-test-'));
+  const runner = path.join(root, 'runner.sh');
+  const local = path.join(root, 'images.tar.gz');
+  fs.writeFileSync(runner, '#!/bin/sh\nprintf "%s" "$GPOINT_SCP_COMMAND_TIMEOUT_SECONDS"\n', { mode: 0o700 });
+  const previous = process.env.GPOINT_SCP_RUNNER;
+  process.env.GPOINT_SCP_RUNNER = runner;
+  try {
+    fs.writeFileSync(local, 'small source');
+    assert.equal(upload(local, '/tmp/exact-images'), '60');
+    fs.truncateSync(local, 348 * 1024 * 1024);
+    assert.equal(upload(local, '/tmp/exact-images'), '378');
+    fs.truncateSync(local, 2 * 1024 * 1024 * 1024);
+    assert.equal(upload(local, '/tmp/exact-images'), '600');
+  } finally {
+    if (previous === undefined) delete process.env.GPOINT_SCP_RUNNER; else process.env.GPOINT_SCP_RUNNER = previous;
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 

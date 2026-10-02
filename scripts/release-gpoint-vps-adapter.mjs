@@ -414,9 +414,14 @@ export function upload(localFile, remoteFile) {
   const runner = resolveRunnerPath('GPOINT_SCP_RUNNER');
   if (!runner) throw new Error('GPOINT_SCP_RUNNER is required for apply mode; no implicit SSH credentials are used');
   const maxAttempts = 2; // one controlled retry after a transient transport failure
+  // Budget a transfer at 1 MiB/s plus connection/setup time. Large immutable
+  // image bundles must not inherit the small source/config upload deadline.
+  const bytes = fs.statSync(localFile).size;
+  const timeoutSeconds = Math.min(600, Math.max(60, 30 + Math.ceil(bytes / (1024 * 1024))));
+  console.error(`SOURCE_UPLOAD_START file=${path.basename(localFile)} bytes=${bytes} timeout_s=${timeoutSeconds}`);
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      return execFileSync(runner, [], { encoding: 'utf8', env: { ...process.env, LOCAL_FILE: localFile, REMOTE_FILE: remoteFile }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 60000 });
+      return execFileSync(runner, [], { encoding: 'utf8', env: { ...process.env, LOCAL_FILE: localFile, REMOTE_FILE: remoteFile, GPOINT_SCP_COMMAND_TIMEOUT_SECONDS: String(timeoutSeconds) }, stdio: ['ignore', 'pipe', 'pipe'], timeout: (timeoutSeconds + 5) * 1000 });
     } catch (error) {
       const detail = String(error.stderr || error.stdout || error.message).slice(-2000);
       console.error(`SOURCE_UPLOAD_FAIL file=${path.basename(localFile)} attempt=${attempt} exit=${error.status ?? 'unknown'} detail=${detail}`);
