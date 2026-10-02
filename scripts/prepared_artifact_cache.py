@@ -92,36 +92,15 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def download(repo, artifact_id, token, target):
-    # The token must never follow GitHub's redirect to signed blob storage.
+    # Each bounded attempt obtains a fresh signed URL. Never forward the
+    # GitHub token to blob storage or reuse a URL after a connection outage.
     request = urllib.request.Request(
         f'https://api.github.com/repos/{repo}/actions/artifacts/{artifact_id}/zip',
         headers={'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json'})
-    response = network_request(
-        lambda: urllib.request.build_opener(NoRedirect).open(request, timeout=30),
-        'artifact_zip_redirect', allow_redirect=True)
-    if isinstance(response, urllib.error.HTTPError):
-        error = response
-        if error.code != 302:
-            raise RuntimeError(f'Artifact download HTTP {error.code}') from None
-        location = error.headers.get('Location', '')
-        error.close()
-        if not location.startswith('https://'):
-            raise RuntimeError('Artifact redirect must use HTTPS')
-        def fetch_storage():
-            with urllib.request.urlopen(location, timeout=30) as response, target.open('wb') as output:
-                count = 0
-                while True:
-                    chunk = response.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    count += len(chunk)
-                    if count > MAX_BYTES:
-                        raise RuntimeError('Artifact exceeds the bounded cache size')
-                    output.write(chunk)
-        network_request(fetch_storage, 'artifact_zip_storage')
-    else:
-        count = 0
+
+    def copy_bounded(response):
         with response, target.open('wb') as output:
+            count = 0
             while True:
                 chunk = response.read(1024 * 1024)
                 if not chunk:
@@ -131,6 +110,22 @@ def download(repo, artifact_id, token, target):
                     raise RuntimeError('Artifact exceeds the bounded cache size')
                 output.write(chunk)
 
+    def fetch_storage():
+        try:
+            response = urllib.request.build_opener(NoRedirect).open(request, timeout=30)
+        except urllib.error.HTTPError as error:
+            if error.code != 302:
+                raise
+            location = error.headers.get('Location', '')
+            error.close()
+            if not location.startswith('https://'):
+                raise RuntimeError('Artifact redirect must use HTTPS')
+            copy_bounded(urllib.request.urlopen(location, timeout=30))
+        else:
+            copy_bounded(response)
+
+    # One retry scope/budget covers redirect plus transfer; no nested charges.
+    network_request(fetch_storage, 'artifact_zip_storage')
 
 def extract(archive, destination, expected):
     with zipfile.ZipFile(archive) as source:
