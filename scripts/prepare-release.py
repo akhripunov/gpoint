@@ -7,8 +7,10 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -19,6 +21,76 @@ def run(*args, cwd=ROOT, env=None, capture=False):
     result = subprocess.run(args, cwd=cwd, env=env, check=True, text=True,
                             stdout=subprocess.PIPE if capture else None, timeout=1800)
     return result.stdout.strip() if capture else None
+
+
+def verify_saved_images(archive, images, sha, temp_root):
+    """Load the exact saved bundle into a separate daemon and verify its IDs."""
+    if not shutil.which('dockerd') or not shutil.which('sudo'):
+        raise RuntimeError('isolated Docker daemon prerequisites are unavailable')
+    root = Path(tempfile.mkdtemp(prefix='gpoint-image-roundtrip-', dir=temp_root))
+    socket = root / 'docker.sock'
+    pidfile = root / 'dockerd.pid'
+    log_path = root / 'dockerd.log'
+    host = f'unix://{socket}'
+    log = log_path.open('wb')
+    daemon = None
+    daemon_pid = None
+    try:
+        namespace = f'gpoint-roundtrip-{uuid.uuid4().hex[:12]}'
+        daemon = subprocess.Popen(
+            ['sudo', '-n', 'dockerd', '--host', host, '--data-root', str(root / 'data'),
+             '--exec-root', str(root / 'exec'), '--pidfile', str(pidfile), '--storage-driver=vfs',
+             '--containerd-namespace', namespace, '--bridge=none', '--iptables=false', '--ip-masq=false',
+             '--ip-forward=false'],
+            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        client_env = dict(os.environ, DOCKER_HOST=host)
+        ready = False
+        for _ in range(90):
+            if daemon.poll() is not None:
+                break
+            probe = subprocess.run(['docker', 'info', '--format', '{{.ServerVersion}}'], env=client_env,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+            if probe.returncode == 0:
+                ready = True
+                break
+            time.sleep(1)
+        if not ready:
+            log.flush()
+            detail = log_path.read_text(errors='replace')[-4000:]
+            raise RuntimeError(f'isolated Docker daemon did not become ready: {detail}')
+
+        with Path(archive).open('rb') as source:
+            loaded = subprocess.run(['docker', 'load'], env=client_env, stdin=source, text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=900)
+        if loaded.returncode:
+            raise RuntimeError(f'isolated Docker image load failed: {loaded.stdout[-4000:]}')
+        for role, repository in [('app', 'gpoint-runtime'), ('agata', 'gpoint-agata-runtime')]:
+            tag = f'{repository}:{sha}'
+            actual = subprocess.run(['docker', 'image', 'inspect', tag, '--format', '{{.Id}}'], env=client_env,
+                                    check=True, text=True, stdout=subprocess.PIPE, timeout=30).stdout.strip()
+            if actual != images[role]['id']:
+                raise RuntimeError(f'isolated Docker round-trip image ID mismatch for {role}: expected {images[role]["id"]}, got {actual}')
+        print('PREPARE_IMAGE_ROUNDTRIP=PASS')
+    finally:
+        if pidfile.exists():
+            try:
+                daemon_pid = int(pidfile.read_text().strip())
+            except (OSError, ValueError):
+                pass
+        if daemon is not None and daemon.poll() is None:
+            if daemon_pid:
+                subprocess.run(['sudo', '-n', 'kill', '-TERM', str(daemon_pid)], check=False, timeout=10)
+            try:
+                daemon.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                if daemon_pid:
+                    subprocess.run(['sudo', '-n', 'kill', '-KILL', str(daemon_pid)], check=False, timeout=10)
+                daemon.kill()
+                daemon.wait(timeout=10)
+        log.close()
+        # dockerd runs as root on hosted runners, so its isolated scratch tree
+        # needs narrowly scoped privileged cleanup.
+        subprocess.run(['sudo', '-n', 'rm', '-rf', '--', str(root)], check=False, timeout=30)
 
 
 def prepare(sha, output, *, postgres_only=False):
@@ -148,6 +220,7 @@ def prepare(sha, output, *, postgres_only=False):
                 dest.write(chunk)
             if proc.wait(timeout=600):
                 raise RuntimeError('image export failed')
+        verify_saved_images(archive, images, sha, output.parent)
         with archive.open('rb') as source:
             digest = hashlib.file_digest(source, 'sha256').hexdigest()
         proof = {'schema': 1, 'candidateSha': sha, 'status': 'READY', 'runId': int(os.environ['GITHUB_RUN_ID']),
