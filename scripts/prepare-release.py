@@ -127,8 +127,13 @@ def prepare(sha, output, *, postgres_only=False):
         run('docker', 'network', 'create', network)
         run('docker', 'run', '-d', '--name', postgres, '--network', network,
             '-p', '127.0.0.1::5432', '-e', 'POSTGRES_PASSWORD=disposable-ci-password', 'pgvector/pgvector:0.8.6-pg16')
+        # The image entrypoint starts a temporary Unix-socket-only server
+        # during initdb, then stops it. Wait for the final TCP server and an
+        # authenticated query before creating fixtures.
         for _ in range(60):
-            if subprocess.run(['docker', 'exec', postgres, 'pg_isready', '-U', 'postgres'],
+            if subprocess.run(['docker', 'exec', '-e', 'PGPASSWORD=disposable-ci-password',
+                               postgres, 'psql', '-h', '127.0.0.1', '-U', 'postgres',
+                               '-w', '-v', 'ON_ERROR_STOP=1', '-At', '-c', 'SELECT 1'],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10).returncode == 0:
                 break
             time.sleep(1)
