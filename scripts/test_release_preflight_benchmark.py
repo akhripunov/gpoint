@@ -24,6 +24,11 @@ class CoordinatorTest(unittest.TestCase):
     with patch.object(m,'api',api),patch.object(m,'dispatch',dispatch),patch.object(m,'wait_run',return_value={'id':2}),patch.object(m,'cli',cli):
      r=m.project_run(project,root,SimpleNamespace(timeout_seconds=60,prepare_missing=False,maxibot_migration='revision'))
     self.assertEqual(r['status'],'PASS');self.assertEqual(calls[0]['mode'],'preflight');self.assertEqual(calls[0]['approve_production'],'false');self.assertFalse(r['production_applied'])
+ def test_production_without_exact_owner_approval_stops_before_dispatch(self):
+  with tempfile.TemporaryDirectory() as temporary:
+   with patch.object(m,'api',return_value={'object':{'sha':SHA}}),patch.object(m,'dispatch',side_effect=AssertionError('must not deploy')):
+    r=m.project_run('gpoint',Path(temporary),SimpleNamespace(mode='production',approved_gpoint='b'*40))
+   self.assertEqual(r['status'],'FAILED');self.assertIn('owner-approved exact SHA',r['error'])
  def test_failed_latest_prepare_stops_before_dispatch(self):
   with tempfile.TemporaryDirectory() as temporary:
    def api(path):

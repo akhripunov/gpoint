@@ -86,7 +86,7 @@ Release bookkeeping хранится в отдельной ветке `gpoint-re
 python3 scripts/release-preflight-benchmark.py --owner-start '<ISO timestamp with timezone>' --output '<new evidence directory>' --maxibot-migration 0098_durable_autopilot_execution_claim_v1 --prepare-missing
 ```
 
-Координатор выполняет только read-only preflight, проверяет exact receipt и неизменность main; production apply он не поддерживает. Время от команды владельца до завершения отчёта и время самого координатора записываются отдельно. Неудачный последний Prepare не обходится и не заменяется более старым успешным. Полные workflow logs, run/job boundaries, receipts и checksum списка файлов собираются без ручного копирования. Измерение не включает VPS upload/import/runtime switch.
+Координатор выполняет только read-only preflight, проверяет exact receipt и неизменность main; По умолчанию production apply не выполняется. Для mode production отдельно требуются --approved-gpoint и --approved-maxibot с явно разрешёнными exact SHA; несовпадение с текущим main блокирует запуск. Runtime изменяют только канонические workflows, не сам координатор. Время от команды владельца до завершения отчёта и время самого координатора записываются отдельно. Неудачный последний Prepare не обходится и не заменяется более старым успешным. Полные workflow logs, run/job boundaries, receipts и checksum списка файлов собираются без ручного копирования. Измерение не включает VPS upload/import/runtime switch.
 
 Для проверки самого конвейера до merge разрешён ручной Prepare dispatch из
 ветки: выполняются только hosted Linux jobs без production secrets, Mac/VPS

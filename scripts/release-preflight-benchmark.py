@@ -38,6 +38,8 @@ def project_run(project,root,args):
   repo=f'akhripunov/{project}'; sha=api(f'repos/{repo}/git/ref/heads/main')['object']['sha']
   if not re.fullmatch('[0-9a-f]{40}',sha):raise RuntimeError('Invalid exact main SHA')
   result['candidate_sha']=sha
+  mode=getattr(args,'mode','preflight')
+  if mode=='production' and getattr(args,'approved_'+project,None)!=sha:raise RuntimeError('Production requires owner-approved exact SHA for '+project)
   print(f'{project}: START exact={sha}',flush=True)
   prepare_workflow,deploy_workflow=PROJECTS[project]
   runs=api(f'repos/{repo}/actions/workflows/{prepare_workflow}/runs?branch=main&head_sha={sha}&per_page=100')['workflow_runs']
@@ -53,23 +55,26 @@ def project_run(project,root,args):
    result['runs'].append(wait_run(project,latest['id'],out,deadline))
   elif latest['conclusion']!='success':raise RuntimeError('Latest Prepare failed; not silently rerunning')
   else:result['reused_prepare_id']=latest['id']
-  fields={'candidate':sha,'mode':'preflight','approve_production':'false'}
+  fields={'candidate':sha,'mode':mode,'approve_production':'true' if mode=='production' else 'false'}
   if project=='maxibot':fields.update(target_migration=args.maxibot_migration,approve_worker_bootstrap='false')
   # Current main/provenance are checked again by the canonical workflow.
   run_id=dispatch(project,deploy_workflow,fields)
-  print(f'{project}: PREFLIGHT dispatched {run_id}',flush=True)
+  print(f'{project}: {mode.upper()} dispatched {run_id}',flush=True)
   result['runs'].append(wait_run(project,run_id,out,deadline))
   artifact=f'gpoint-production-result-{run_id}-1' if project=='gpoint' else f'maxibot-release-result-{run_id}-1'
   cli('run','download',str(run_id),'--repo',repo,'-n',artifact,'-D',str(out/'result'))
   receipts=list((out/'result').glob('*.json'))
   if len(receipts)!=1:raise RuntimeError('Missing exact preflight receipt')
   receipt=json.loads(receipts[0].read_text())
-  if project=='gpoint':
+  if mode=='production':
+   actual=receipt.get('productionShaAfter') if project=='gpoint' else receipt.get('final_runtime_sha')
+   if receipt.get('status')!='COMPLETE' or actual!=sha:raise RuntimeError('Production is not technically COMPLETE; reconcile runtime')
+  elif project=='gpoint':
    if receipt.get('status')!='PLANNED' or receipt.get('applicationVerification')!='NOT_DEPLOYED' or receipt.get('candidateSha')!=sha:raise RuntimeError('Unexpected GPoint result')
   elif receipt.get('production_changed') is not False or receipt.get('preflight')!='PASS' or receipt.get('candidate_sha')!=sha:raise RuntimeError('Unexpected MaxiBot result')
   after=api(f'repos/{repo}/git/ref/heads/main')['object']['sha']
   if after!=sha:raise RuntimeError('Main changed during preflight')
-  result.update(status='PASS',main_unchanged=True,production_applied=False,receipt=receipt)
+  result.update(status='PASS',main_unchanged=True,production_applied=mode=='production',receipt=receipt)
  except Exception as exc:result['error']=str(exc)
  result['finished_at']=timestamp();result['elapsed_seconds']=seconds(result['started_at'],result['finished_at'])
  (out/'summary.json').write_text(json.dumps(result,indent=2)+'\n')
@@ -78,6 +83,9 @@ def project_run(project,root,args):
 
 def main():
  p=argparse.ArgumentParser(description=__doc__)
+ p.add_argument('--mode',choices=['preflight','production'],default='preflight')
+ p.add_argument('--approved-gpoint',help='Explicit owner-approved exact production SHA')
+ p.add_argument('--approved-maxibot',help='Explicit owner-approved exact production SHA')
  p.add_argument('--owner-start',required=True,help='ISO timestamp of owner command, with timezone')
  p.add_argument('--output',required=True)
  p.add_argument('--maxibot-migration',required=True)
@@ -91,7 +99,7 @@ def main():
  with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
   results=list(pool.map(lambda project:project_run(project,root,args),PROJECTS))
  finished=timestamp()
- report={'owner_start':owner.isoformat(),'coordinator_started':started,'finished_at':finished,'owner_elapsed_seconds':seconds(owner.isoformat(),finished),'coordinator_seconds':seconds(started,finished),'status':'PASS' if all(r['status']=='PASS' for r in results) else 'FAIL','projects':results,'scope':'Prepare as needed + read-only preflight; no VPS transfer/import/switch'}
+ report={'owner_start':owner.isoformat(),'coordinator_started':started,'finished_at':finished,'owner_elapsed_seconds':seconds(owner.isoformat(),finished),'coordinator_seconds':seconds(started,finished),'status':'PASS' if all(r['status']=='PASS' for r in results) else 'FAIL','projects':results,'scope':'Prepare as needed + read-only preflight; no VPS transfer/import/switch' if args.mode=='preflight' else 'Owner-approved production through canonical workflows'}
  (root/'report.json').write_text(json.dumps(report,indent=2)+'\n')
  lines=['# Automated release preflight benchmark','',f'Owner start: {owner.isoformat()}',f'Finished: {finished}',f'Full owner elapsed: {report["owner_elapsed_seconds"]:.1f}s',f'Coordinator duration: {report["coordinator_seconds"]:.1f}s',f'Status: {report["status"]}','',report['scope'],'','| Project | Status | Time |','|---|---|---:|']
  for r in results:lines.append(f'| {r["project"]} | {r["status"]} | {r["elapsed_seconds"]:.1f}s |')
