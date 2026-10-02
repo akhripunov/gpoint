@@ -173,6 +173,60 @@ class ArtifactCacheTests(unittest.TestCase):
         self.assertIs(result, redirect)
         sleep.assert_not_called()
 
+    def test_download_refreshes_signed_url_after_transient_storage_failure(self):
+        import io
+        redirects=[]
+        storage=[]
+        token='secret-test-token'
+        def api_open(request, timeout):
+            self.assertEqual(request.get_header('Authorization'), 'Bearer '+token)
+            redirects.append(1)
+            raise urllib.error.HTTPError(request.full_url,302,'Found',
+                {'Location':f'https://storage.example/archive?attempt={len(redirects)}'},None)
+        class BrokenBlob(io.BytesIO):
+            calls=0
+            def read(self,size):
+                self.calls+=1
+                if self.calls>1:
+                    raise TimeoutError('simulated mid-transfer interruption')
+                return super().read(size)
+        def storage_open(location, timeout):
+            self.assertIsInstance(location,str)  # No GitHub Authorization forwarded.
+            storage.append(location)
+            if len(storage)==1:
+                return BrokenBlob(b'partial artifact to discard')
+            if location.endswith('attempt=1'):
+                raise urllib.error.HTTPError(location,403,'Expired signed URL',{},None)
+            return io.BytesIO(b'verified complete artifact')
+        def bounded_retry(operation, stage, allow_redirect=False):
+            for attempt in range(2):
+                try:return operation()
+                except urllib.error.HTTPError as exc:
+                    if allow_redirect and exc.code==302:return exc
+                    raise
+                except TimeoutError:
+                    if attempt:raise
+        with patch.object(CACHE.urllib.request,'build_opener') as opener, \
+             patch.object(CACHE.urllib.request,'urlopen',side_effect=storage_open), \
+             patch.object(CACHE,'network_request',side_effect=bounded_retry):
+            opener.return_value.open.side_effect=api_open
+            target=self.root/'refreshed.zip'
+            CACHE.download('owner/repo',123,token,target)
+        self.assertEqual(target.read_bytes(),b'verified complete artifact')
+        self.assertEqual(len(redirects),2)
+        self.assertNotEqual(storage[0],storage[1])
+
+
+    def test_artifact_download_auth_failure_is_not_retried(self):
+        with patch.object(CACHE.urllib.request,'build_opener') as opener, \
+             patch.object(CACHE.time,'sleep') as sleep:
+            opener.return_value.open.side_effect=urllib.error.HTTPError(
+                'https://api.github.com/artifact',401,'Unauthorized',{},None)
+            with self.assertRaises(CACHE.NetworkStageError):
+                CACHE.download('owner/repo',123,'test-token',self.root/'denied.zip')
+        self.assertEqual(opener.return_value.open.call_count,1)
+        sleep.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()
