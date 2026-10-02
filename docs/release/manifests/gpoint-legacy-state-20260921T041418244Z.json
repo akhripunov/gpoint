@@ -1,0 +1,51 @@
+{
+  "archiveKind": "historical-worktree-state",
+  "notCurrentProductionState": true,
+  "sourceWorktree": "/Users/akhripuniov/.codex/worktrees/gpoint-linear-automation/GPoint",
+  "sourceHead": "e14be413a97feccf7f0ee64104e649e91b696951",
+  "archivedAt": "2026-10-02T13:41:19.343277+00:00",
+  "state": {
+    "currentProductionSha": "e14be413a97feccf7f0ee64104e649e91b696951",
+    "currentProductionDbHead": "20260918100000_native_creator_onboarding",
+    "currentProductionRef": "gpoint-production-20260921T041418244Z",
+    "previousProductionSha": "c5c22eb1dccf1d063bf24d6345e95eb30c128c30",
+    "lastReleaseId": "gpoint-release-20260921T041418244Z",
+    "lastReleaseStatus": "COMPLETE",
+    "lastReleaseCompletedAt": "2026-09-21T04:24:51.661Z",
+    "releaseOrigin": "durable-production-release",
+    "artifactIdentities": {
+      "api": {
+        "sourceSha": "e14be413a97feccf7f0ee64104e649e91b696951",
+        "adapter": {
+          "imageId": "sha256:cbc50a0689b891a83dd8528f7277ce7411a37cad0acba69241dbde4965f1f70f",
+          "indexSha256": "c595bf5bfe4f4215634203eaa436c0d64a449cf62502674cbbcfa889e2e2476e",
+          "buildSha": "e14be413a97feccf7f0ee64104e649e91b696951"
+        }
+      },
+      "worker": {
+        "sourceSha": "e14be413a97feccf7f0ee64104e649e91b696951",
+        "adapter": {
+          "imageId": "sha256:cbc50a0689b891a83dd8528f7277ce7411a37cad0acba69241dbde4965f1f70f",
+          "indexSha256": "c595bf5bfe4f4215634203eaa436c0d64a449cf62502674cbbcfa889e2e2476e",
+          "buildSha": "e14be413a97feccf7f0ee64104e649e91b696951"
+        }
+      },
+      "bot": {
+        "sourceSha": "e14be413a97feccf7f0ee64104e649e91b696951",
+        "adapter": {
+          "imageId": "sha256:cbc50a0689b891a83dd8528f7277ce7411a37cad0acba69241dbde4965f1f70f",
+          "indexSha256": "c595bf5bfe4f4215634203eaa436c0d64a449cf62502674cbbcfa889e2e2476e",
+          "buildSha": "e14be413a97feccf7f0ee64104e649e91b696951"
+        }
+      },
+      "miniapp": {
+        "sourceSha": "e14be413a97feccf7f0ee64104e649e91b696951",
+        "adapter": {
+          "imageId": "sha256:cbc50a0689b891a83dd8528f7277ce7411a37cad0acba69241dbde4965f1f70f",
+          "indexSha256": "c595bf5bfe4f4215634203eaa436c0d64a449cf62502674cbbcfa889e2e2476e",
+          "buildSha": "e14be413a97feccf7f0ee64104e649e91b696951"
+        }
+      }
+    }
+  }
+}
