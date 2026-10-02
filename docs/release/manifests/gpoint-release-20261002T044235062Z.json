@@ -1,0 +1,22 @@
+{
+  "releaseId": "gpoint-release-20261002T044235062Z",
+  "candidateSha": "5a1e25741b79d20669f2e12df414cbf35f444b54",
+  "previousProductionSha": "62d96acc67bd739599b7edf205e5fabeed6456ce",
+  "productionShaAfter": null,
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": null,
+  "startedAt": "2026-10-02T04:42:35.062Z",
+  "finishedAt": "2026-10-02T04:44:12.191Z",
+  "status": "FAILED_PRE_SWITCH",
+  "agataProvider": "mac_worker",
+  "failureStage": "CI_ARTIFACT_LOAD",
+  "failureReason": "remote command failed (exit=1, command_sha256=fe9ba0a734800200b4a798124045f94bcf528a653e402ccba37aa12567e6ba24)",
+  "failureCommand": "CI_ARTIFACT_LOAD",
+  "failureCommandSha256": "fe9ba0a734800200b4a798124045f94bcf528a653e402ccba37aa12567e6ba24",
+  "failureExitCode": 1,
+  "failureStdout": "/tmp/gpoint-images-5a1e25741b79d20669f2e12df414cbf35f444b54.tar.gz: OK\nLoaded image: gpoint-runtime:5a1e25741b79d20669f2e12df414cbf35f444b54\nLoaded image: gpoint-agata-runtime:5a1e25741b79d20669f2e12df414cbf35f444b54\n",
+  "failureStderr": "/tmp/gpoint-images-5a1e25741b79d20669f2e12df414cbf35f444b54.tar.gz: OK\nLoaded image: gpoint-runtime:5a1e25741b79d20669f2e12df414cbf35f444b54\nLoaded image: gpoint-agata-runtime:5a1e25741b79d20669f2e12df414cbf35f444b54\n",
+  "rollbackSha": "62d96acc67bd739599b7edf205e5fabeed6456ce",
+  "productionRef": null,
+  "releaseOrigin": "durable-production-release"
+}
