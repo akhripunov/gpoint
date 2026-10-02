@@ -38,7 +38,15 @@ Prepare запускает frozen-lockfile install, сборку, typecheck, uni
 Сборка выдаёт Linux/amd64 images, exact revision labels, image IDs, архив SHA256 и READY receipt. Deploy проверяет успешный GitHub run текущего SHA, receipt/run ID, checksum, загружает Docker images на VPS и сверяет IDs. Повторная сборка приложения в режиме CI bundle запрещена. Canonical tooling сохраняет live baseline, проверяет config/provider, делает GPoint-only backup при миграциях, переключает runtime, выполняет health/parity, сохраняет immutable production ref, manifest и cleanup. Safety detector остаётся отдельным артефактом с source hash и canonical build; он не включён в архив приложения.
 
 Receipt `images.*.id` — точный SHA256 конфигурации, полученный в classic Docker
-Prepare и подтверждённый save/load round-trip. В containerd store VPS `.Id`
+build store. Prepare импортирует единственный сохранённый архив в отдельный
+Docker 29.1.3/containerd/overlayfs daemon с собственными socket/data/exec roots.
+Те же production command builders выполняют import → capture native IDs → parity
+→ reuse; созданные без запуска и без сети контейнеры проверяют runtime `.Image`.
+Отрицательная проверка подставляет config digest вместо native proof и обязана
+завершиться отказом для обоих образов. Обязательный gate `deployRehearsal=PASS`
+и измеренное время репетиции сохраняются в receipt. Старый receipt без gate
+не разрешает apply. Эта репетиция не проверяет SSH/SCP, production env или
+пользовательский Telegram reply. В containerd store VPS `.Id`
 обозначает OCI manifest, поэтому verifier доказывает связь native manifest →
 receipt config: хеширует оба content blob, проверяет exact config digest,
 linux/amd64, revision label и rootfs diff IDs. Неизвестный descriptor, OCI index,
@@ -69,3 +77,17 @@ pnpm release:gpoint --dry-run --candidate <40-char-sha>
 Автоматический job использует `scripts/automated-release.mjs` с bundle вне checkout. Apply не запускать по имени ветки, latest или произвольному локальному receipt: workflow сначала подтверждает provenance через GitHub API. Общий lock на Mac: `~/.config/gpoint/release-production.lock`, вне checkout runner; старый `.gpoint-release.lock` также блокирует запуск до явной reconciliation. Не снимать stale lock молча и не повторять mutation после RECOVERY_REQUIRED.
 
 При bookkeeping push-конфликте workflow не форсирует main. Exact attempt сохранён в result artifact; Dev переносит только canonical manifests/state после сверки фактов, commit/push и clean-end. При неудачной публикации повторный Publish идемпотентен по run/phase/status; существующая история сохраняется.
+
+Безопасные production outcomes `BLOCKED` и `FAILED_PRE_SWITCH` сохраняют
+result/manifests artifacts и независимую публикацию Linear, но не commit/push
+в main. Поэтому сетевой повтор того же кандидата не требует нового SHA или
+Prepare: свежая сверка current main, успешного Prepare/run/attempt, checksum,
+live baseline и operator approval остаётся обязательной. Любое исправление
+исходников по-прежнему означает новый кандидат. `RECOVERY_REQUIRED` и неизвестные
+outcomes сохраняют durable state в main и не получают этот fast path. COMPLETE
+также сохраняет production state/ref в Git. Это не автоматический повтор apply.
+
+Для проверки самого конвейера до merge разрешён ручной Prepare dispatch из
+ветки: выполняются только hosted Linux jobs без production secrets, Mac/VPS
+операций и публикации READY в Linear. Branch artifact не подходит Deploy;
+после merge требуется успешный Prepare exact current main.

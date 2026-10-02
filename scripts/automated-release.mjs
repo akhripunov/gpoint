@@ -5,6 +5,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { verifyReleaseBundle } from './release-bundle.mjs';
+import { persistReleaseBookkeeping } from './release-bookkeeping.mjs';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -58,12 +59,7 @@ try {
   }
   // Limit staging to canonical bookkeeping. A concurrent push is rejected;
   // the result artifact and Linear retain evidence without forcing main.
-  if (mode === 'production' && records.length) {
-    git(['config', 'user.name', 'GPoint Release']);
-    git(['config', 'user.email', 'gpoint-release@users.noreply.github.com']);
-    git(['add', 'docs/release/state/production.json', ...records.map(r => `docs/release/manifests/${r.name}`)]);
-    git(['commit', '-m', `Record GPoint release ${sha} [skip ci]`]);
-    git(['push', 'origin', 'HEAD:main']);
-  }
+  const bookkeeping = persistReleaseBookkeeping({ mode, records, evidence, git });
+  console.log(`RELEASE_BOOKKEEPING=${bookkeeping}`);
 }
 process.exitCode = releaseCode;
