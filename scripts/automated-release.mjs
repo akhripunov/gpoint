@@ -5,7 +5,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { verifyReleaseBundle } from './release-bundle.mjs';
-import { persistReleaseBookkeeping } from './release-bookkeeping.mjs';
+import { persistReleaseBookkeeping, loadReleaseBookkeeping } from './release-bookkeeping.mjs';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -15,7 +15,7 @@ if (!['preflight', 'production'].includes(mode)) throw new Error('Explicit relea
 if (mode === 'production' && process.env.APPROVE_PRODUCTION !== 'true') throw new Error('Explicit production approval is required');
 const proof = verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, sha);
 if (String(proof.runId) !== process.env.PREPARE_RUN_ID) throw new Error('Receipt does not belong to the approved GitHub run');
-const git = args => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+const git = (args, input) => execFileSync('git', args, { cwd: root, encoding: 'utf8', input, timeout: 30_000 }).trim();
 if (git(['rev-parse', 'HEAD']) !== sha || git(['status', '--porcelain'])) throw new Error('Release checkout must be clean and exact');
 const workerSource = path.join(root, 'services/agata/worker/gpoint_mac_worker.py');
 const workerInstalled = path.join(os.homedir(), 'Library/Application Support/GPoint/agata-codex-worker/gpoint_mac_worker.py');
@@ -24,7 +24,10 @@ if (!fs.existsSync(workerInstalled) || checksum(workerSource) !== checksum(worke
   throw new Error('Installed Mac worker differs from candidate. Install the published candidate worker before apply.');
 }
 if (!process.env.RELEASE_RESULT || !process.env.GITHUB_RUN_ID) throw new Error('Release evidence paths are required');
-const previous = new Set(fs.readdirSync(path.join(root, 'docs/release/manifests')));
+const ledger = loadReleaseBookkeeping({ root, git, destination: process.env.GPOINT_RELEASE_EVIDENCE });
+process.env.GPOINT_RELEASE_STATE_FILE = ledger.stateFile;
+process.env.GPOINT_RELEASE_MANIFEST_DIR = ledger.manifestDir;
+const previous = new Set(fs.readdirSync(ledger.manifestDir));
 let releaseCode = 1;
 let preflightStatus = 'BLOCKED';
 try {
@@ -44,7 +47,7 @@ try {
     releaseCode = result.status ?? 1;
   }
 } finally {
-  const directory = path.join(root, 'docs/release/manifests');
+  const directory = ledger.manifestDir;
   const records = fs.readdirSync(directory).filter(name => !previous.has(name)).map(name => ({
     name, data: JSON.parse(fs.readFileSync(path.join(directory, name), 'utf8')),
   })).filter(record => record.data.candidateSha === sha);
@@ -57,9 +60,8 @@ try {
   if (process.env.GITHUB_OUTPUT) {
     fs.appendFileSync(process.env.GITHUB_OUTPUT, `preflight=${preflightStatus}\nstatus=${evidence.status}\n`);
   }
-  // Limit staging to canonical bookkeeping. A concurrent push is rejected;
-  // the result artifact and Linear retain evidence without forcing main.
-  const bookkeeping = persistReleaseBookkeeping({ mode, records, evidence, git });
+  // Persist canonical evidence to the dedicated ledger, never application main.
+  const bookkeeping = persistReleaseBookkeeping({ mode, records, evidence, git, ...ledger });
   console.log(`RELEASE_BOOKKEEPING=${bookkeeping}`);
 }
 process.exitCode = releaseCode;

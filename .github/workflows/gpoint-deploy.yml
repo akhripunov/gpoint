@@ -80,6 +80,7 @@ jobs:
       - name: Set private temporary evidence paths
         shell: bash
         run: |
+          echo "GPOINT_RELEASE_EVIDENCE=$RUNNER_TEMP/gpoint-ledger-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
           echo "GPOINT_RELEASE_BUNDLE=$RUNNER_TEMP/gpoint-bundle-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
           echo "RELEASE_RESULT=$RUNNER_TEMP/gpoint-release-result-$GITHUB_RUN_ID.json" >> "$GITHUB_ENV"
           echo "NETWORK_RETRY_BUDGET_STATE=$RUNNER_TEMP/gpoint-network-retry-budget-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
@@ -114,8 +115,7 @@ jobs:
         with:
           name: gpoint-manifests-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            docs/release/manifests/
-            docs/release/state/production.json
+            ${{ env.GPOINT_RELEASE_EVIDENCE }}/
           retention-days: 30
 
   publish:
