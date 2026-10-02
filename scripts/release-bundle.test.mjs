@@ -157,13 +157,13 @@ test('release cannot remove a lock whose ownership changed', t => {
 test('canonical CLI executes from a Mac runner path containing spaces', t => {
   const f = fixture(t), root = path.join(f.dir, 'Application Support', 'GPoint');
   fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
-  for (const name of ['release-gpoint.mjs', 'release-gpoint-vps-adapter.mjs', 'release-bundle.mjs', 'verify-loaded-images.py', 'release-lock.mjs', 'release-migrations.mjs']) {
+  for (const name of ['release-gpoint.mjs', 'release-bookkeeping.mjs', 'release-gpoint-vps-adapter.mjs', 'release-bundle.mjs', 'verify-loaded-images.py', 'release-lock.mjs', 'release-migrations.mjs']) {
     fs.copyFileSync(fileURLToPath(new URL(name, import.meta.url)), path.join(root, 'scripts', name));
   }
   fs.mkdirSync(path.join(root, 'docs/release/state'), { recursive: true });
   fs.mkdirSync(path.join(root, 'docs/release/manifests'), { recursive: true });
   fs.writeFileSync(path.join(root, 'docs/release/state/production.json'), JSON.stringify({ currentProductionSha: f.sha }));
-  const run = spawnSync(process.execPath, [path.join(root, 'scripts/release-gpoint.mjs'), 'status'], { encoding: 'utf8' });
+  const run = spawnSync(process.execPath, [path.join(root, 'scripts/release-gpoint.mjs'), 'status'], { encoding: 'utf8', env: { ...process.env, GPOINT_RELEASE_STATE_FILE: path.join(root, 'docs/release/state/production.json'), GPOINT_RELEASE_MANIFEST_DIR: path.join(root, 'docs/release/manifests') } });
   assert.equal(run.status, 0, run.stderr);
   assert.equal(JSON.parse(run.stdout).state.currentProductionSha, f.sha);
 });

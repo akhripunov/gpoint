@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { loadReleaseBookkeeping, persistReleaseBookkeeping } from './release-bookkeeping.mjs';
 import { migrationHead } from './release-migrations.mjs';
 import { acquireReleaseLock } from './release-lock.mjs';
 import { fileURLToPath } from 'node:url';
@@ -10,8 +11,8 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { applyCandidate, cleanupTemporaryWorktree, inspectProductionReadOnly, planReleaseRetention, provisionAgataInternalConfigForBaseline, runRemoteCommand, validateAgataProviderMode } from './release-gpoint-vps-adapter.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const STATE_FILE = path.join(ROOT, 'docs/release/state/production.json');
-const MANIFEST_DIR = path.join(ROOT, 'docs/release/manifests');
+let STATE_FILE = process.env.GPOINT_RELEASE_STATE_FILE || path.join(ROOT, 'docs/release/state/production.json');
+let MANIFEST_DIR = process.env.GPOINT_RELEASE_MANIFEST_DIR || path.join(ROOT, 'docs/release/manifests');
 // Keep the lock outside Actions checkout: checkout cleanup must never erase a
 // stale release lock left by interruption, and all Mac checkouts share it.
 const LOCK_FILE = path.join(os.homedir(), '.config/gpoint/release-production.lock');
@@ -48,6 +49,8 @@ function readJson(file) { return JSON.parse(fs.readFileSync(file, 'utf8')); }
 function isoNow() { return new Date().toISOString(); }
 function measured(timings, name, action) { const started = Date.now(); try { return action(); } finally { timings[name] = Number(((Date.now() - started) / 1000).toFixed(1)); } }
 function git(args, cwd = ROOT) { return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); }
+const ledgerGit = (args, input) => execFileSync('git', args, { cwd: ROOT, input, encoding: 'utf8', timeout: 30_000 }).trim();
+function manifestReference(file) { return `docs/release/manifests/${path.basename(file)}`; }
 function command(args, cwd) { const r = spawnSync(args[0], args.slice(1), { cwd, encoding: 'utf8', stdio: 'inherit' }); if (r.status !== 0) die(`${args.join(' ')} exited with ${r.status}`); }
 export function localDiskDecision(freeBytes) {
   if (!Number.isFinite(freeBytes) || freeBytes < 0) throw new Error('local disk free-space value is invalid');
@@ -656,7 +659,7 @@ function runApply(candidate) {
       releaseOrigin: 'durable-production-release'
     };
     const manifestFile = writeManifest(failureManifest);
-    fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...current, ...(validatedProvider ? { agataProvider: validatedProvider } : {}), lastReleaseId: releaseId, lastReleaseStatus: releaseState, recoveryRequired: switched || partiallyMutated, lastReleaseFailureManifest: path.relative(ROOT, manifestFile), lastReleaseFailureAt: failureManifest.finishedAt }, null, 2)}\n`);
+    fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...current, ...(validatedProvider ? { agataProvider: validatedProvider } : {}), lastReleaseId: releaseId, lastReleaseStatus: releaseState, recoveryRequired: switched || partiallyMutated, lastReleaseFailureManifest: manifestReference(manifestFile), lastReleaseFailureAt: failureManifest.finishedAt }, null, 2)}\n`);
     console.error(JSON.stringify({ status: releaseState, releaseId, candidateSha: candidate, failureStage: failureManifest.failureStage, failureReason: error.message }));
     throw error;
   } finally { unlock(); }
@@ -669,7 +672,9 @@ function finalizeRecovery(candidate) {
   try {
     const current = state();
     if (current.recoveryRequired !== true || current.lastReleaseStatus !== 'RECOVERY_REQUIRED') die('no unresolved RECOVERY_REQUIRED release is recorded');
-    const failedManifestPath = path.resolve(ROOT, current.lastReleaseFailureManifest ?? '');
+    const failedReference = current.lastReleaseFailureManifest ?? '';
+    if (!/^docs\/release\/manifests\/gpoint-[a-zA-Z0-9_.-]+\.json$/.test(failedReference)) die('invalid recovery manifest reference');
+    const failedManifestPath = path.join(MANIFEST_DIR, path.basename(failedReference));
     if (!failedManifestPath.startsWith(`${MANIFEST_DIR}${path.sep}`) || !fs.existsSync(failedManifestPath)) die('recovery failure manifest is missing or outside the release manifest directory');
     const failed = readJson(failedManifestPath);
     if (failed.status !== 'RECOVERY_REQUIRED' || failed.candidateSha !== candidate || failed.releaseId !== current.lastReleaseId) die('candidate does not match the unresolved release attempt');
@@ -721,22 +726,39 @@ function finalizeRecovery(candidate) {
     };
     const manifestFile = writeManifest(recoveryManifest);
     const verifiedState = verifiedRuntimeState(current, { candidate, dbHead: facts.LIVE_PRISMA_HEAD });
-    fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...verifiedState, currentProductionRef: ref, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: finishedAt, releaseOrigin: 'durable-production-release', agataRuntimeSha: candidate, agataAlembicHead: facts.LIVE_AGATA_HEAD, agataProvider: provider, artifactIdentities: recoveryManifest.artifactIdentities, recoveryRequired: false, lastReleaseFailureManifest: path.relative(ROOT, failedManifestPath), recoveryFinalizationManifest: path.relative(ROOT, manifestFile) }, null, 2)}\n`);
-    console.log(JSON.stringify({ status: 'COMPLETE', candidateSha: candidate, productionRef: ref, recoveryManifest: path.relative(ROOT, manifestFile), failedAttemptPreserved: path.relative(ROOT, failedManifestPath) }, null, 2));
+    fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...verifiedState, currentProductionRef: ref, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: finishedAt, releaseOrigin: 'durable-production-release', agataRuntimeSha: candidate, agataAlembicHead: facts.LIVE_AGATA_HEAD, agataProvider: provider, artifactIdentities: recoveryManifest.artifactIdentities, recoveryRequired: false, lastReleaseFailureManifest: manifestReference(failedManifestPath), recoveryFinalizationManifest: manifestReference(manifestFile) }, null, 2)}\n`);
+    console.log(JSON.stringify({ status: 'COMPLETE', candidateSha: candidate, productionRef: ref, recoveryManifest: manifestReference(manifestFile), failedAttemptPreserved: manifestReference(failedManifestPath) }, null, 2));
   } finally { unlock(); }
 }
 
 function main() {
+  let standaloneLedger;
+  if (Boolean(process.env.GPOINT_RELEASE_STATE_FILE) !== Boolean(process.env.GPOINT_RELEASE_MANIFEST_DIR)) die('release evidence paths must be supplied together');
+  if (!process.env.GPOINT_RELEASE_STATE_FILE && !process.env.GPOINT_RELEASE_MANIFEST_DIR) {
+    const ledger = loadReleaseBookkeeping({ root: ROOT, git: ledgerGit });
+    standaloneLedger = ledger;
+    STATE_FILE = ledger.stateFile; MANIFEST_DIR = ledger.manifestDir;
+  }
   const args = process.argv.slice(2);
   if (args[0] === 'status' || args.includes('--status')) return status();
   runLocalDiskPreflight();
   if (args.includes('--provision-agata-config')) return provisionAgataConfig(candidateSha(args));
-  if (args.includes('--finalize-recovery')) return finalizeRecovery(candidateSha(args));
+  function persistAction(action) {
+    const previous = new Set(fs.readdirSync(MANIFEST_DIR));
+    try { return action(); } finally {
+      if (standaloneLedger) {
+        const records = fs.readdirSync(MANIFEST_DIR).filter(name => !previous.has(name)).map(name => ({ name, data: readJson(path.join(MANIFEST_DIR, name)) }));
+        const evidence = records.filter(r => r.data.status !== 'PLANNED').at(-1)?.data;
+        if (evidence) persistReleaseBookkeeping({ mode: 'production', records, evidence, git: ledgerGit, ...standaloneLedger });
+      }
+    }
+  }
+  if (args.includes('--finalize-recovery')) return persistAction(() => finalizeRecovery(candidateSha(args)));
   const isDryRun = args.includes('--dry-run');
   const isApply = args.includes('--apply');
   if (!isDryRun && !isApply) die('choose --dry-run or --apply');
   if (isApply && !args.includes('--confirm-production-apply')) die('apply requires --confirm-production-apply');
-  if (isApply) return runApply(candidateSha(args));
+  if (isApply) return persistAction(() => runApply(candidateSha(args)));
   runDryRun(candidateSha(args));
 }
 

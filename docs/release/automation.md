@@ -76,16 +76,17 @@ pnpm release:gpoint --dry-run --candidate <40-char-sha>
 
 Автоматический job использует `scripts/automated-release.mjs` с bundle вне checkout. Apply не запускать по имени ветки, latest или произвольному локальному receipt: workflow сначала подтверждает provenance через GitHub API. Общий lock на Mac: `~/.config/gpoint/release-production.lock`, вне checkout runner; старый `.gpoint-release.lock` также блокирует запуск до явной reconciliation. Не снимать stale lock молча и не повторять mutation после RECOVERY_REQUIRED.
 
-При bookkeeping push-конфликте workflow не форсирует main. Exact attempt сохранён в result artifact; Dev переносит только canonical manifests/state после сверки фактов, commit/push и clean-end. При неудачной публикации повторный Publish идемпотентен по run/phase/status; существующая история сохраняется.
+Release bookkeeping хранится в отдельной ветке `gpoint-release-ledger`, а не в `main` приложения. COMPLETE, RECOVERY_REQUIRED и неизвестные исходы сохраняют state и всю историю manifests в этой ветке. Push выполняется без force; конфликт или ошибка публикации видны как failure. Production tags, result/manifests artifacts и Linear сохраняются независимо. Безопасные BLOCKED/FAILED_PRE_SWITCH остаются только в artifacts/Linear.
 
-Безопасные production outcomes `BLOCKED` и `FAILED_PRE_SWITCH` сохраняют
-result/manifests artifacts и независимую публикацию Linear, но не commit/push
-в main. Поэтому сетевой повтор того же кандидата не требует нового SHA или
-Prepare: свежая сверка current main, успешного Prepare/run/attempt, checksum,
-live baseline и operator approval остаётся обязательной. Любое исправление
-исходников по-прежнему означает новый кандидат. `RECOVERY_REQUIRED` и неизвестные
-outcomes сохраняют durable state в main и не получают этот fast path. COMPLETE
-также сохраняет production state/ref в Git. Это не автоматический повтор apply.
+Перед dry-run/apply canonical CLI и workflow читают проверенный remote ledger в отдельный каталог вне checkout. Состояние recovery и drift gates остаются обязательными. При первом внедрении ledger отдельно инициализируется последним подтверждённым baseline из main. Отсутствие/удаление ledger после этого блокирует выпуск; автоматического возврата к старому state из main нет. Внутри workflow state и manifests доступны через GPOINT_RELEASE_EVIDENCE и сохраняются artifact job. Запись нового релиза больше не меняет SHA приложения и не обесценивает Prepare.
+
+Один тестовый запуск обоих проектов с автоматическим ожиданием, выбором exact SHA, Prepare при отсутствии, сохранением полных логов и отчёта:
+
+```sh
+python3 scripts/release-preflight-benchmark.py --owner-start '<ISO timestamp with timezone>' --output '<new evidence directory>' --maxibot-migration 0098_durable_autopilot_execution_claim_v1 --prepare-missing
+```
+
+Координатор выполняет только read-only preflight, проверяет exact receipt и неизменность main; production apply он не поддерживает. Время от команды владельца до завершения отчёта и время самого координатора записываются отдельно. Неудачный последний Prepare не обходится и не заменяется более старым успешным. Полные workflow logs, run/job boundaries, receipts и checksum списка файлов собираются без ручного копирования. Измерение не включает VPS upload/import/runtime switch.
 
 Для проверки самого конвейера до merge разрешён ручной Prepare dispatch из
 ветки: выполняются только hosted Linux jobs без production secrets, Mac/VPS
