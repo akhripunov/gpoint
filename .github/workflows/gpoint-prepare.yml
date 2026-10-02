@@ -79,6 +79,18 @@ jobs:
           CANDIDATE_SHA: ${{ github.sha }}
         run: |
           echo "Candidate: $CANDIDATE_SHA — rehearsal PASS. Production is unchanged." >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          receipt = Path(os.environ['RUNNER_TEMP']) / 'gpoint-bundle' / 'receipt.json'
+          if receipt.is_file():
+              stages = json.loads(receipt.read_text()).get('prepareStages', {})
+              if stages:
+                  with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as summary:
+                      summary.write('\n| Prepare stage | Result | Seconds |\n| --- | --- | ---: |\n')
+                      for name, result in stages.items():
+                          summary.write(f"| {name} | {result['status']} | {result['seconds']:.3f} |\n")
+          PY
           if [ "$GITHUB_REF" = refs/heads/main ]; then
             echo 'Next: await Publish PASS, then GPoint — Deploy → main → this SHA → approve production.' >> "$GITHUB_STEP_SUMMARY"
           else
