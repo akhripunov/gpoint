@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { verifyReleaseBundle, importBundleCommand, reuseBundleCommand } from './release-bundle.mjs';
+import { verifyReleaseBundle, importBundleCommand, reuseBundleCommand, loadedImageVerificationCommand, preparedImageParityCommand } from './release-bundle.mjs';
 import { migrationHead } from './release-migrations.mjs';
 import { fileURLToPath } from 'node:url';
 
@@ -546,15 +546,15 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
       `cp ${releaseDir}/source/infra/production/Caddyfile /tmp/gpoint-caddy-${sha}`,
       `caddy validate --config /tmp/gpoint-caddy-${sha} --adapter caddyfile`,
       `RELEASE_SHA=${sha} docker compose -p compose --env-file /opt/gpoint/env/production.env -f /tmp/gpoint-compose-${sha}.yml config --quiet`,
-      bundle ? `docker image inspect gpoint-runtime:${sha} >/dev/null; test "$(docker image inspect gpoint-runtime:${sha} --format '{{.Id}}')" = '${bundle.images.app.id}'; echo GPOINT_CI_IMAGE_REUSED` : `if docker image inspect gpoint-runtime:${sha} >/dev/null 2>&1; then test "$(docker image inspect gpoint-runtime:${sha} --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')" = '${sha}'; echo GPOINT_BUILD_REUSED; else DOCKER_BUILDKIT=1 docker build --progress=plain --build-arg GPOINT_BUILD_SHA=${sha} --label org.opencontainers.image.revision=${sha} --label org.opencontainers.image.source=${REPO} -f /tmp/gpoint-dockerfile-${sha} -t gpoint-runtime:${sha} ${releaseDir}/source > /tmp/gpoint-build-${sha}.log 2>&1; fi`,
+      bundle ? `${loadedImageVerificationCommand(bundle, sha)}; echo GPOINT_CI_IMAGE_REUSED` : `if docker image inspect gpoint-runtime:${sha} >/dev/null 2>&1; then test "$(docker image inspect gpoint-runtime:${sha} --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')" = '${sha}'; echo GPOINT_BUILD_REUSED; else DOCKER_BUILDKIT=1 docker build --progress=plain --build-arg GPOINT_BUILD_SHA=${sha} --label org.opencontainers.image.revision=${sha} --label org.opencontainers.image.source=${REPO} -f /tmp/gpoint-dockerfile-${sha} -t gpoint-runtime:${sha} ${releaseDir}/source > /tmp/gpoint-build-${sha}.log 2>&1; fi`,
       `docker image inspect gpoint-runtime:${sha} --format '{{.Id}}' > ${imageProof}`,
-      bundle ? `docker image inspect gpoint-agata-runtime:${sha} >/dev/null; test "$(docker image inspect gpoint-agata-runtime:${sha} --format '{{.Id}}')" = '${bundle.images.agata.id}'; echo GPOINT_CI_IMAGE_REUSED` : `if docker image inspect gpoint-agata-runtime:${sha} >/dev/null 2>&1; then test "$(docker image inspect gpoint-agata-runtime:${sha} --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')" = '${sha}'; echo AGATA_BUILD_REUSED; else DOCKER_BUILDKIT=1 docker build --progress=plain --build-arg GPOINT_BUILD_SHA=${sha} --label org.opencontainers.image.revision=${sha} --label org.opencontainers.image.source=${REPO} -f /tmp/gpoint-agata-dockerfile-${sha} -t gpoint-agata-runtime:${sha} ${releaseDir}/source/services/agata > /tmp/gpoint-agata-build-${sha}.log 2>&1; fi`,
+      bundle ? `${loadedImageVerificationCommand(bundle, sha)}; echo GPOINT_CI_IMAGE_REUSED` : `if docker image inspect gpoint-agata-runtime:${sha} >/dev/null 2>&1; then test "$(docker image inspect gpoint-agata-runtime:${sha} --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')" = '${sha}'; echo AGATA_BUILD_REUSED; else DOCKER_BUILDKIT=1 docker build --progress=plain --build-arg GPOINT_BUILD_SHA=${sha} --label org.opencontainers.image.revision=${sha} --label org.opencontainers.image.source=${REPO} -f /tmp/gpoint-agata-dockerfile-${sha} -t gpoint-agata-runtime:${sha} ${releaseDir}/source/services/agata > /tmp/gpoint-agata-build-${sha}.log 2>&1; fi`,
       `docker image inspect gpoint-agata-runtime:${sha} --format '{{.Id}}' > ${agataImageProof}`,
       `mkdir -p /opt/gpoint/release-logs/${sha} && cp /tmp/gpoint-build-${sha}.log /opt/gpoint/release-logs/${sha}/runtime-build.log 2>/dev/null || true && cp /tmp/gpoint-agata-build-${sha}.log /opt/gpoint/release-logs/${sha}/agata-build.log 2>/dev/null || true`,
       'echo GPOINT_BUILD_OK AGATA_BUILD_OK'
     ].join('; ');
     const buildOutput = stage(timings, 'RUNTIME_BUILD', () => run(build)); if (!buildOutput.includes('GPOINT_BUILD_OK') || !buildOutput.includes('AGATA_BUILD_OK')) throw new Error('GPoint/AGATA remote image build failed');
-    if (bundle) stage(timings, 'CI_ARTIFACT_PARITY', () => run(`set -e; test "$(cat ${imageProof})" = '${bundle.images.app.id}'; test "$(cat ${agataImageProof})" = '${bundle.images.agata.id}'; echo GPOINT_CI_PARITY_OK`));
+    if (bundle) stage(timings, 'CI_ARTIFACT_PARITY', () => run(preparedImageParityCommand(bundle, sha)));
     const migration = stage(timings, 'MIGRATION_APPLY', () => {
       const steps = [
         'set -e',

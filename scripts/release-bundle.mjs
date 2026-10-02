@@ -55,6 +55,13 @@ export function loadedImageVerificationCommand(proof, candidate) {
   return `python3 -c "import base64;exec(compile(base64.b64decode('${code}'), 'verify-loaded-images.py', 'exec'))" '${candidate}' '${proof.images.app.id}' '${proof.images.agata.id}'`;
 }
 
+export function preparedImageParityCommand(proof, candidate) {
+  const verification = loadedImageVerificationCommand(proof, candidate);
+  // Recorded runtime proofs use the VPS store's native IDs. Re-prove their
+  // exact config identity and then compare native IDs within that same store.
+  return `set -e; ${verification}; test "$(cat /tmp/gpoint-image-id-${candidate})" = "$(docker image inspect gpoint-runtime:${candidate} --format '{{.Id}}')"; test "$(cat /tmp/gpoint-agata-image-id-${candidate})" = "$(docker image inspect gpoint-agata-runtime:${candidate} --format '{{.Id}}')"; echo GPOINT_CI_PARITY_OK`;
+}
+
 export function reuseBundleCommand(proof, candidate) {
   // Validate command inputs using the same gate as a fresh import.
   importBundleCommand(proof, candidate);
