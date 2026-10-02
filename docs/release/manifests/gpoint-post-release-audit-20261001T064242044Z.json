@@ -1,0 +1,45 @@
+{
+  "eventType": "POST_RELEASE_CLEANUP_RECONCILIATION",
+  "recordedAt": "2026-10-01T06:47:41.442Z",
+  "candidateSha": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+  "status": "COMPLETE",
+  "productionRef": "gpoint-production-20261001T064242044Z",
+  "dryRunManifest": "docs/release/manifests/gpoint-dry-run-20261001T063330542Z.json",
+  "failedAttemptManifest": "docs/release/manifests/gpoint-release-20261001T063600024Z.json",
+  "recoveryManifest": "docs/release/manifests/gpoint-recovery-20261001T064242044Z.json",
+  "actualFailureStage": "POST_RELEASE_CLEANUP",
+  "actualFailureStderr": "Connection to 38.180.110.92 closed by remote host.",
+  "recoveryBasisClarification": "Runtime switched and parity checks passed; recovery was required after cleanup SSH transport failure, not AGATA identity parsing.",
+  "cleanup": {
+    "status": "PASS",
+    "canonicalCommandSha256": "bb6836d782f43569970a09b1bf0870fd0638bcfc1a7ae21a963494c120d6352f",
+    "commandBytes": 269837,
+    "method": "Same canonical cleanup command delivered by canonical SCP runner, checksum verified, executed by canonical SSH runner as a temporary control artifact, then removed.",
+    "directCommandFailures": 2,
+    "sizeRelatedTransportFailure": "INFERRED: two large SSH command invocations failed; identical checksum-verified script succeeded through short SSH invocation.",
+    "currentImageProtected": true,
+    "rollbackImageProtected": true,
+    "volumesToRemove": [],
+    "readback": "CURRENT_AND_ROLLBACK_IMAGES_PROTECTED=YES\nPOST_CLEANUP_HEALTH=PASS\nFilesystem     1024-blocks     Used Available Capacity Mounted on\n/dev/sda1         30865176 19437164  10117156      66% /\n"
+  },
+  "database": {
+    "prismaBefore": "20260922090000_telegram_channel_avatar",
+    "prismaAfter": "20260922090000_telegram_channel_avatar",
+    "alembicBefore": "agata0008",
+    "alembicAfter": "agata0008",
+    "migrationFilesChanged": false
+  },
+  "worker": {
+    "provider": "mac_worker",
+    "authAndFreshness": "PASS",
+    "queueConnectivity": "reachable",
+    "lastPollAt": "2026-10-01T06:47:36.311146+00:00",
+    "lastHeartbeatAt": "2026-10-01T06:47:32.736234+00:00"
+  },
+  "smoke": {
+    "publicRootBuildSha": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+    "apiHealth": "PASS",
+    "ownerMessagesE2E": "PENDING_OWNER_REAL_MESSAGE"
+  },
+  "toolingTests": "80/80 PASS"
+}

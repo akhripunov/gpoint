@@ -1,0 +1,21 @@
+{
+  "reconciliationId": "gpoint-reconciliation-20260928T033444Z",
+  "eventType": "FAILED_RELEASE_STATE_CORRECTION",
+  "failedReleaseId": "gpoint-release-20260928T032622935Z",
+  "failedManifest": "docs/release/manifests/gpoint-release-20260928T032622935Z.json",
+  "recordedProductionSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+  "liveProductionSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+  "liveRuntime": {
+    "apiSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+    "workerSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+    "botSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+    "apiRunning": true,
+    "apiHealth": "healthy"
+  },
+  "livePrismaHead": "20260922090000_telegram_channel_avatar",
+  "runtimeSwitchOccurred": false,
+  "databaseApplyOccurred": false,
+  "correctedFailureStage": "PRE_SWITCH",
+  "reconciledAt": "2026-09-28T03:34:44Z",
+  "basis": "Read-only VPS inspection after production preflight failure confirmed RELEASE_SHA and API/Worker/Bot images remained on the prior production SHA. The preflight Prisma status failed with P1001 because its ephemeral container joined gpoint_app while shared-postgres is attached to shared_internal. No migration or runtime switch occurred. The prior failed manifest is retained unchanged; the release-state recovery flag was cleared based on verified live state."
+}

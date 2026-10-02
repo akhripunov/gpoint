@@ -1,0 +1,47 @@
+{
+  "reconciliationId": "gpoint-reconciliation-20260928T120000Z",
+  "eventType": "FAILED_RELEASE_PRE_SWITCH_RECONCILIATION",
+  "failedReleaseId": "gpoint-release-20260928T040547798Z",
+  "failedManifest": "docs/release/manifests/gpoint-release-20260928T040547798Z.json",
+  "candidateSha": "8ddbd5c75ea0f78e371f530aa3bc7c5fd9fac5da",
+  "recordedProductionSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+  "liveProductionSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+  "liveRuntime": {
+    "apiSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+    "workerSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+    "botSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+    "apiRunning": true,
+    "apiHealth": "healthy"
+  },
+  "livePrismaHead": "20260922090000_telegram_channel_avatar",
+  "prismaApplyOccurred": false,
+  "databaseApplyOccurred": false,
+  "agata": {
+    "schemaExists": true,
+    "schemaIsEmpty": true,
+    "tables": [],
+    "alembicVersionTableExists": false,
+    "alembicHead": null,
+    "migrationCompleted": false,
+    "schemaOnlySideEffect": true
+  },
+  "runtimeSwitchOccurred": false,
+  "productionShaChanged": false,
+  "rollbackRequired": false,
+  "protectedBackups": [
+    "/opt/gpoint/backups/gpoint-pre-release-8ddbd5c75ea0f78e371f530aa3bc7c5fd9fac5da-20260928T040946Z.dump"
+  ],
+  "failureClassification": {
+    "original": "RECOVERY_REQUIRED",
+    "reconciled": "FAILED_PRE_SWITCH",
+    "stage": "PRE_SWITCH_DB_OR_AGATA"
+  },
+  "evidence": [
+    "Original failure manifest retained unchanged.",
+    "Read-only VPS inspection verified RELEASE_SHA and API/Worker/Bot image revisions remain at the prior production SHA.",
+    "Live Prisma migration head remains unchanged; the failed migration command did not apply a Prisma migration.",
+    "Live database inspection found an empty agata schema with no tables and no alembic_version table/head.",
+    "The candidate-specific backup exists and passed pg_restore --list in the previous audit."
+  ],
+  "reconciledAt": "2026-09-28T12:00:00Z"
+}

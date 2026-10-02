@@ -1,0 +1,40 @@
+{
+  "releaseId": "gpoint-reconciliation-20260928T085216Z",
+  "eventType": "AGATA_READINESS_ROOT_CAUSE_RECONCILIATION",
+  "failedReleaseId": "gpoint-release-20260928T082516997Z",
+  "candidateSha": "6478e79bcc1fa0ae5f9eed4b9ef731966df05317",
+  "status": "RECOVERY_REQUIRED",
+  "failureClassification": {
+    "reconciled": "PRE_SWITCH_AFTER_MIGRATION",
+    "runtimeSwitchOccurred": false,
+    "databaseApplyOccurred": true,
+    "recoveryRequired": true
+  },
+  "liveFacts": {
+    "LIVE_RELEASE_ENV_SHA": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
+    "LIVE_API_SHA": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
+    "LIVE_WORKER_SHA": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
+    "LIVE_BOT_SHA": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
+    "LIVE_MINIAPP_SHA": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
+    "LIVE_PRISMA_HEAD": "20260922090000_telegram_channel_avatar",
+    "LIVE_AGATA_API_SHA": "6478e79bcc1fa0ae5f9eed4b9ef731966df05317",
+    "LIVE_AGATA_API_IMAGE_ID": "sha256:e6b3021a97ffbacf591b7d99e0dfac74043b0cace85e10e7738fd51a29b37d73",
+    "LIVE_AGATA_API_HEALTH": "healthy",
+    "LIVE_AGATA_WORKER_SHA": "6478e79bcc1fa0ae5f9eed4b9ef731966df05317",
+    "LIVE_AGATA_WORKER_IMAGE_ID": "sha256:e6b3021a97ffbacf591b7d99e0dfac74043b0cace85e10e7738fd51a29b37d73",
+    "LIVE_AGATA_WORKER_RUNNING": true,
+    "LIVE_AGATA_WORKER_HEALTH": "unhealthy",
+    "LIVE_AGATA_WORKER_RESTART_COUNT": 0,
+    "LIVE_AGATA_WORKER_EXIT_CODE": 0,
+    "LIVE_AGATA_WORKER_HEARTBEAT_AGE_SECONDS": 0.3,
+    "LIVE_AGATA_HEAD": "agata0008",
+    "LIVE_AGATA_TABLE_COUNT": 39,
+    "LIVE_PGVECTOR_VERSION": "0.8.6",
+    "LIVE_AGATA_WORKER_NETWORKS": ["gpoint_app", "shared_internal"],
+    "LIVE_AGATA_WORKER_DATABASE_DNS": "PASS",
+    "LIVE_AGATA_WORKER_OUTBOX_QUERY": "PASS"
+  },
+  "rootCause": "The candidate worker readiness probe in services/agata/app/memory/worker.py required revision agata0007. Production migration completed to agata0008. Worker heartbeat was fresh and worker DB/outbox read-only queries passed, but the stale revision comparison made every healthcheck exit 1.",
+  "rollbackRequired": false,
+  "nextAction": "Fix the worker healthcheck expected head, add regression coverage, then deploy a new exact candidate to restore GPoint/AGATA runtime parity. Do not rerun migrations when live head is already agata0008."
+}

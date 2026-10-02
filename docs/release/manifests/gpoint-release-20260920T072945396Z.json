@@ -1,0 +1,55 @@
+{
+  "releaseId": "gpoint-release-20260920T072945396Z",
+  "candidateSha": "32ceae6e5253ffbcf48005f29802ceb64a2758ca",
+  "previousProductionSha": "e05027e3ca7acbc602451361c7d7ebee3cd776d1",
+  "productionShaAfter": "32ceae6e5253ffbcf48005f29802ceb64a2758ca",
+  "dbHeadBefore": "20260918100000_native_creator_onboarding",
+  "dbHeadAfter": "20260918100000_native_creator_onboarding",
+  "artifactIdentities": {
+    "api": {
+      "sourceSha": "32ceae6e5253ffbcf48005f29802ceb64a2758ca",
+      "adapter": {
+        "imageId": "sha256:42bf7b23cba772b6adff0d697078e1322faab32fa1fe40ba1867fb81ea103222",
+        "indexSha256": "207ce73547e0a5e5eb0103391ba656e08a00a17f9877b6d25d1a4d58bf68cd1d",
+        "buildSha": "32ceae6e5253ffbcf48005f29802ceb64a2758ca"
+      }
+    },
+    "worker": {
+      "sourceSha": "32ceae6e5253ffbcf48005f29802ceb64a2758ca",
+      "adapter": {
+        "imageId": "sha256:42bf7b23cba772b6adff0d697078e1322faab32fa1fe40ba1867fb81ea103222",
+        "indexSha256": "207ce73547e0a5e5eb0103391ba656e08a00a17f9877b6d25d1a4d58bf68cd1d",
+        "buildSha": "32ceae6e5253ffbcf48005f29802ceb64a2758ca"
+      }
+    },
+    "bot": {
+      "sourceSha": "32ceae6e5253ffbcf48005f29802ceb64a2758ca",
+      "adapter": {
+        "imageId": "sha256:42bf7b23cba772b6adff0d697078e1322faab32fa1fe40ba1867fb81ea103222",
+        "indexSha256": "207ce73547e0a5e5eb0103391ba656e08a00a17f9877b6d25d1a4d58bf68cd1d",
+        "buildSha": "32ceae6e5253ffbcf48005f29802ceb64a2758ca"
+      }
+    },
+    "miniapp": {
+      "sourceSha": "32ceae6e5253ffbcf48005f29802ceb64a2758ca",
+      "adapter": {
+        "imageId": "sha256:42bf7b23cba772b6adff0d697078e1322faab32fa1fe40ba1867fb81ea103222",
+        "indexSha256": "207ce73547e0a5e5eb0103391ba656e08a00a17f9877b6d25d1a4d58bf68cd1d",
+        "buildSha": "32ceae6e5253ffbcf48005f29802ceb64a2758ca"
+      }
+    }
+  },
+  "startedAt": "2026-09-20T07:29:45.396Z",
+  "finishedAt": "2026-09-20T07:40:09.537Z",
+  "status": "COMPLETE",
+  "failureStage": null,
+  "failureReason": null,
+  "rollbackSha": "e05027e3ca7acbc602451361c7d7ebee3cd776d1",
+  "rollbackDbCompatibility": "REQUIRES_FORWARD_FIX_ASSESSMENT",
+  "productionRef": "gpoint-production-20260920T072945396Z",
+  "remoteProof": {
+    "mainSha": "32ceae6e5253ffbcf48005f29802ceb64a2758ca"
+  },
+  "migrationOutput": "DATABASE_SCHEMA_UP_TO_DATE,NO_PENDING_MIGRATIONS",
+  "releaseOrigin": "durable-production-release"
+}

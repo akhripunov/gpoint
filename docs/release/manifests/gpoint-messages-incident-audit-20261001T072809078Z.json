@@ -1,0 +1,51 @@
+{
+  "eventType": "MESSAGES_INCIDENT_RELEASE_AUDIT",
+  "recordedAt": "2026-10-01T07:29:51.968Z",
+  "candidateSha": "62d96acc67bd739599b7edf205e5fabeed6456ce",
+  "productionRef": "gpoint-production-20261001T072211071Z",
+  "releaseManifest": "gpoint-release-20261001T072211071Z.json",
+  "releaseStatus": "COMPLETE",
+  "userSmokeStatus": "PENDING_FRESH_USER_MESSAGE",
+  "assistantResponseConfirmed": false,
+  "fixes": [
+    "character sync matches exact configured route tuple and preserves operator-disabled exact routes",
+    "blank completion model normalizes to codex-default",
+    "oversized cleanup transported as mode-600 script with SHA256 guard"
+  ],
+  "tests": {
+    "agataPassed": 64,
+    "postgresSkipped": 24,
+    "releasePassed": 83
+  },
+  "macWorker": {
+    "sourceSha": "62d96acc67bd739599b7edf205e5fabeed6456ce",
+    "sourceSha256": "606490fcb4f5e3bd119bff5759ee994d25543a8fa7e121db41014fd5617c5f60",
+    "installedSha256": "606490fcb4f5e3bd119bff5759ee994d25543a8fa7e121db41014fd5617c5f60",
+    "launchAgentLoaded": true,
+    "queueConnectivity": "reachable",
+    "lastSuccessAt": null
+  },
+  "earlierReleaseRecovery": {
+    "releaseId": "gpoint-release-20261001T070511382Z",
+    "failureStage": "POST_RELEASE_CLEANUP",
+    "cleanupCommandSha256": "69667aaea5df434d0c995b9ed3c18d6070f0c5433b8cfb43790eb67a67ee9d2e",
+    "exactScriptCleanup": "PASS",
+    "recoveryManifest": "gpoint-recovery-20261001T071149396Z.json",
+    "clarification": "Recovery basis is the recorded cleanup SSH failure; runtime and migrations had already passed. Not an AGATA identity parsing failure."
+  },
+  "previousMessageRetry": {
+    "sameIdempotencyKey": true,
+    "respondHttp": 200,
+    "status": "pending",
+    "workerCompleteHttp": 422,
+    "terminalReason": "inference_job_expired",
+    "manuallyReactivated": false
+  },
+  "remainingLimits": [
+    "fresh user response not yet confirmed",
+    "PostgreSQL integration tests skipped locally",
+    "worker status may clear past errors and retain stale current_job_present",
+    "memory extractor unavailable and relationship-note task repeats",
+    "no full candidate Docker/database rehearsal in dry-run/CI"
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "releaseId": "gpoint-release-20260924T053827222Z",
+  "candidateSha": "4f09df5c33ba58b1cf8048280e58474853f0b576",
+  "previousProductionSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
+  "productionShaAfter": null,
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": null,
+  "startedAt": "2026-09-24T05:38:27.222Z",
+  "finishedAt": "2026-09-24T05:38:55.854Z",
+  "status": "FAILED_PRE_SWITCH",
+  "failureStage": "PRE_SWITCH",
+  "failureReason": "remote command failed (exit=255): set -e; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n \"$freeKb\"; if [ \"$freeKb\" -lt 8388608 ]; then echo GPOINT_DISK_GUARD_WARN; fi; test \"$freeKb\" -ge 5242880; echo GPOINT_DISK_GUARD_OK",
+  "failureCommand": "set -e; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n \"$freeKb\"; if [ \"$freeKb\" -lt 8388608 ]; then echo GPOINT_DISK_GUARD_WARN; fi; test \"$freeKb\" -ge 5242880; echo GPOINT_DISK_GUARD_OK",
+  "failureExitCode": 255,
+  "failureStderr": "Connection timed out during banner exchange\r\nConnection to 38.180.110.92 port 22 timed out\r\n",
+  "rollbackSha": "7a3dd5beaf693ae6498cfd3879f3579903b4d089",
+  "productionRef": null,
+  "releaseOrigin": "durable-production-release"
+}

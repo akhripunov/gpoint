@@ -1,0 +1,35 @@
+{
+  "releaseId": "gpoint-dry-run-20260918T100453223Z",
+  "candidateSha": "e9b38dfb339f1eb2894b5bacc07e2ed2c6f641ad",
+  "previousProductionSha": "b3b4714060f528bdb2f8232f3eb81f7df82706aa",
+  "productionShaAfter": null,
+  "dbHeadBefore": "20260917120000_telegram_connection_challenges",
+  "dbHeadAfter": null,
+  "artifactIdentities": {
+    "api": {
+      "sourceSha": "e9b38dfb339f1eb2894b5bacc07e2ed2c6f641ad"
+    },
+    "worker": {
+      "sourceSha": "e9b38dfb339f1eb2894b5bacc07e2ed2c6f641ad"
+    },
+    "bot": {
+      "sourceSha": "e9b38dfb339f1eb2894b5bacc07e2ed2c6f641ad"
+    },
+    "miniapp": {
+      "sourceSha": "e9b38dfb339f1eb2894b5bacc07e2ed2c6f641ad"
+    }
+  },
+  "startedAt": "2026-09-18T10:04:53.223Z",
+  "finishedAt": "2026-09-18T10:05:08.258Z",
+  "status": "PLANNED",
+  "failureStage": null,
+  "failureReason": null,
+  "rollbackSha": "b3b4714060f528bdb2f8232f3eb81f7df82706aa",
+  "rollbackDbCompatibility": "REQUIRES_FORWARD_FIX_ASSESSMENT",
+  "productionRef": null,
+  "remoteProof": {
+    "mainSha": "e9b38dfb339f1eb2894b5bacc07e2ed2c6f641ad",
+    "directRef": "refs/heads/main"
+  },
+  "dryRun": true
+}

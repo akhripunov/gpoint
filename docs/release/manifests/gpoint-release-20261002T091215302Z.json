@@ -1,0 +1,165 @@
+{
+  "releaseId": "gpoint-release-20261002T091215302Z",
+  "candidateSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4",
+  "previousProductionSha": "820c943b0b5d7db94a05ab9bd5fa26e2238a6131",
+  "productionShaAfter": "8c30d676809f8c0f6d3254891bf096b0b8740bd4",
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": "20260922090000_telegram_channel_avatar",
+  "agataDbHeadBefore": "agata0008",
+  "agataDbHeadAfter": "agata0008",
+  "agataRuntimeSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4",
+  "agataProvider": "mac_worker",
+  "artifactIdentities": {
+    "api": {
+      "sourceSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4",
+      "adapter": {
+        "imageId": "sha256:d04c00ac9d40c6d1be51e37089c2e66603b07b369d8ddec11eaa19a003b6fcb2",
+        "indexSha256": "1f8b483e26063d05f20d5ef467c2a091de13e11291c1ad69ff390dd60b80caaf",
+        "buildSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    },
+    "worker": {
+      "sourceSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4",
+      "adapter": {
+        "imageId": "sha256:d04c00ac9d40c6d1be51e37089c2e66603b07b369d8ddec11eaa19a003b6fcb2",
+        "indexSha256": "1f8b483e26063d05f20d5ef467c2a091de13e11291c1ad69ff390dd60b80caaf",
+        "buildSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    },
+    "bot": {
+      "sourceSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4",
+      "adapter": {
+        "imageId": "sha256:d04c00ac9d40c6d1be51e37089c2e66603b07b369d8ddec11eaa19a003b6fcb2",
+        "indexSha256": "1f8b483e26063d05f20d5ef467c2a091de13e11291c1ad69ff390dd60b80caaf",
+        "buildSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    },
+    "miniapp": {
+      "sourceSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4",
+      "adapter": {
+        "imageId": "sha256:d04c00ac9d40c6d1be51e37089c2e66603b07b369d8ddec11eaa19a003b6fcb2",
+        "indexSha256": "1f8b483e26063d05f20d5ef467c2a091de13e11291c1ad69ff390dd60b80caaf",
+        "buildSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    },
+    "agataApi": {
+      "sourceSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4",
+      "adapter": {
+        "imageId": "sha256:18ee97dc099d10b26a84d044a1d552122954027417263dc02683905a7ddd0fc4",
+        "buildSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4",
+        "apiImage": "sha256:18ee97dc099d10b26a84d044a1d552122954027417263dc02683905a7ddd0fc4",
+        "apiRunning": "true",
+        "apiHealth": "healthy",
+        "workerImage": "sha256:18ee97dc099d10b26a84d044a1d552122954027417263dc02683905a7ddd0fc4",
+        "workerRunning": "true",
+        "workerHealth": "healthy",
+        "head": "agata0008",
+        "provider": "mac_worker",
+        "codexLocalEnabled": "true",
+        "workerTokenPresent": true
+      }
+    },
+    "agataWorker": {
+      "sourceSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4",
+      "adapter": {
+        "imageId": "sha256:18ee97dc099d10b26a84d044a1d552122954027417263dc02683905a7ddd0fc4",
+        "buildSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4",
+        "apiImage": "sha256:18ee97dc099d10b26a84d044a1d552122954027417263dc02683905a7ddd0fc4",
+        "apiRunning": "true",
+        "apiHealth": "healthy",
+        "workerImage": "sha256:18ee97dc099d10b26a84d044a1d552122954027417263dc02683905a7ddd0fc4",
+        "workerRunning": "true",
+        "workerHealth": "healthy",
+        "head": "agata0008",
+        "provider": "mac_worker",
+        "codexLocalEnabled": "true",
+        "workerTokenPresent": true
+      }
+    }
+  },
+  "startedAt": "2026-10-02T09:12:15.302Z",
+  "finishedAt": "2026-10-02T09:15:31.840Z",
+  "status": "COMPLETE",
+  "failureStage": null,
+  "failureReason": null,
+  "rollbackSha": "820c943b0b5d7db94a05ab9bd5fa26e2238a6131",
+  "rollbackDbCompatibility": "REQUIRES_FORWARD_FIX_ASSESSMENT",
+  "productionRef": "gpoint-production-20261002T091215302Z",
+  "remoteProof": {
+    "mainSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4"
+  },
+  "migrationOutput": "DATABASE_SCHEMA_UP_TO_DATE,AGATA_HEAD=agata0008",
+  "detectorSourceHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32",
+  "stageTimings": {
+    "API_HEALTH": 0.2,
+    "WORKER_HEALTH": 0.2,
+    "PRODUCTION_REF_CREATE": 0,
+    "PRODUCTION_REF_PUSH_AND_VERIFY": 2.5,
+    "PRODUCTION_PREFLIGHT": 5.5,
+    "SOURCE_PREPARE": 2,
+    "CI_ARTIFACT_REUSE_CHECK": 1.1,
+    "CI_ARTIFACT_UPLOAD": 36.6,
+    "CI_ARTIFACT_LOAD": 43.2,
+    "CI_ARTIFACT_IMPORT": 81,
+    "RUNTIME_BUILD": 2.8,
+    "CI_ARTIFACT_PARITY": 1.2,
+    "MIGRATION_APPLY": 10,
+    "PRE_SWITCH_PREPARATION": 1.7,
+    "AGATA_PRE_SWITCH_READINESS": 17.8,
+    "AUX_BUILD": 0.1,
+    "RUNTIME_SWITCH": 12.5,
+    "CONTAINER_HEALTH_WAIT": 6.5,
+    "POST_SWITCH_RECONCILIATION": 0.8,
+    "AGATA_POST_SWITCH_RECONCILIATION": 3.1,
+    "AGATA_PROVIDER_POST_SWITCH": 3.3,
+    "POST_RELEASE_CLEANUP": 29.6,
+    "TOTAL_RELEASE": 196.5
+  },
+  "releaseOrigin": "durable-production-release",
+  "ciReceipt": {
+    "schema": 1,
+    "candidateSha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4",
+    "status": "READY",
+    "runId": 36983812714,
+    "gates": {
+      "unit": "PASS",
+      "postgres": "PASS",
+      "docker": "PASS",
+      "migration": "PASS",
+      "miniapp": "PASS",
+      "agataHealth": "PASS",
+      "deployRehearsal": "PASS"
+    },
+    "images": {
+      "app": {
+        "id": "sha256:b0a5a314d255d309e5c5f986877b58faad98c0a7505b4921eda12f9e4133dc41",
+        "revision": "8c30d676809f8c0f6d3254891bf096b0b8740bd4",
+        "platform": "linux/amd64"
+      },
+      "agata": {
+        "id": "sha256:73c7512372640eb8510f1c8adf06ad84ac4e5cae0b091d4acafd066bbee9f5cf",
+        "revision": "8c30d676809f8c0f6d3254891bf096b0b8740bd4",
+        "platform": "linux/amd64"
+      }
+    },
+    "archiveSha256": "da7466f126259525b5475b15658b48248e57a3bb9c4c4312bccc73f0549aae49",
+    "prismaHead": "20260922090000_telegram_channel_avatar",
+    "agataHead": "agata0008",
+    "deployRehearsal": {
+      "dockerVersion": "29.1.3",
+      "store": "containerd",
+      "snapshotter": "overlayfs",
+      "identityRegressionRejected": [
+        "app",
+        "agata"
+      ],
+      "seconds": 29.5
+    },
+    "applicationSmoke": "DISPOSABLE_DB_DETERMINISTIC_PROVIDER",
+    "productionUserSmoke": "NOT_RUN"
+  }
+}

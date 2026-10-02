@@ -1,0 +1,23 @@
+{
+  "releaseId": "gpoint-adoption-20260918T083505Z",
+  "candidateSha": "4d99e0da856d2ffe174c54d7ae7f2f971ab462f5",
+  "previousProductionSha": null,
+  "productionShaAfter": "4d99e0da856d2ffe174c54d7ae7f2f971ab462f5",
+  "dbHeadBefore": "20260917120000_telegram_connection_challenges",
+  "dbHeadAfter": "20260917120000_telegram_connection_challenges",
+  "artifactIdentities": {
+    "api": {"sourceSha": "4d99e0da856d2ffe174c54d7ae7f2f971ab462f5", "imageId": "sha256:2491af3197bef708cfe2180cd4cb9d0a48b4bb1e19d7c95896b08156430f9de1"},
+    "worker": {"sourceSha": "4d99e0da856d2ffe174c54d7ae7f2f971ab462f5", "imageId": "sha256:2491af3197bef708cfe2180cd4cb9d0a48b4bb1e19d7c95896b08156430f9de1"},
+    "bot": {"sourceSha": "4d99e0da856d2ffe174c54d7ae7f2f971ab462f5", "imageId": "sha256:2491af3197bef708cfe2180cd4cb9d0a48b4bb1e19d7c95896b08156430f9de1"},
+    "miniapp": {"sourceSha": "4d99e0da856d2ffe174c54d7ae7f2f971ab462f5", "indexSha256": "42cd763f9e5f17ba90d1e51e355e5abe25446a91f39e0174fd12ab28431b4c79", "bundleSha256": "6b1dda4c4c845c53aaa49b60d936cdfc4ad88660c13ced76b33f4c4e2cb22992"}
+  },
+  "startedAt": "2026-09-18T08:35:05Z",
+  "finishedAt": "2026-09-18T08:35:05Z",
+  "status": "COMPLETE",
+  "failureStage": null,
+  "failureReason": null,
+  "rollbackSha": "4d99e0da856d2ffe174c54d7ae7f2f971ab462f5",
+  "rollbackDbCompatibility": "NOT_APPLICABLE_ADOPTION",
+  "productionRef": "gpoint-production-20260918T083505Z",
+  "releaseOrigin": "pre-release-flow-adoption"
+}

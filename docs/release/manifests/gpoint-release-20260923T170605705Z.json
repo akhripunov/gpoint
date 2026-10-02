@@ -1,0 +1,19 @@
+{
+  "releaseId": "gpoint-release-20260923T170605705Z",
+  "candidateSha": "f6674e6f31c3e570f61edbefe4ae0a2e9f0694cb",
+  "previousProductionSha": "af94cc14e33c11de770fdf4389b83554ec1f9504",
+  "productionShaAfter": null,
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": null,
+  "startedAt": "2026-09-23T17:06:05.705Z",
+  "finishedAt": "2026-09-23T17:07:27.775Z",
+  "status": "FAILED_PRE_SWITCH",
+  "failureStage": "PRE_SWITCH",
+  "failureReason": "Command failed: git ls-remote origin refs/heads/main refs/tags/*\nConnection closed by 240.0.0.93 port 22\r\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n",
+  "failureCommand": null,
+  "failureExitCode": null,
+  "failureStderr": "Connection closed by 240.0.0.93 port 22\r\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n",
+  "rollbackSha": "af94cc14e33c11de770fdf4389b83554ec1f9504",
+  "productionRef": null,
+  "releaseOrigin": "durable-production-release"
+}

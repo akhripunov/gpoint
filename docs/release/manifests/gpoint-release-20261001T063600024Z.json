@@ -1,0 +1,22 @@
+{
+  "releaseId": "gpoint-release-20261001T063600024Z",
+  "candidateSha": "7d4d394920d0f6cb3f83735b2d76d9ac1fbffe57",
+  "previousProductionSha": "93d0c38c7452516f4cea41e1e78f1fe0966f48a9",
+  "productionShaAfter": null,
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": null,
+  "startedAt": "2026-10-01T06:36:00.024Z",
+  "finishedAt": "2026-10-01T06:41:31.790Z",
+  "status": "RECOVERY_REQUIRED",
+  "agataProvider": "mac_worker",
+  "failureStage": "POST_RELEASE_CLEANUP",
+  "failureReason": "remote command failed (exit=255, command_sha256=bb6836d782f43569970a09b1bf0870fd0638bcfc1a7ae21a963494c120d6352f)",
+  "failureCommand": "POST_RELEASE_CLEANUP",
+  "failureCommandSha256": "bb6836d782f43569970a09b1bf0870fd0638bcfc1a7ae21a963494c120d6352f",
+  "failureExitCode": 255,
+  "failureStdout": "",
+  "failureStderr": "Connection to 38.180.110.92 closed by remote host.\r\n",
+  "rollbackSha": "93d0c38c7452516f4cea41e1e78f1fe0966f48a9",
+  "productionRef": null,
+  "releaseOrigin": "durable-production-release"
+}

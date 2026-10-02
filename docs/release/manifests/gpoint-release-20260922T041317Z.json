@@ -1,0 +1,24 @@
+{
+  "releaseId": "gpoint-release-20260922T041317Z",
+  "candidateSha": "ce88b3009c428235e28110fa8e43f01e08b09a53",
+  "previousProductionSha": "02e71eabaddb9d06464be77b5020e84a52819c55",
+  "productionShaAfter": "ce88b3009c428235e28110fa8e43f01e08b09a53",
+  "dbHeadBefore": "20260918100000_native_creator_onboarding",
+  "dbHeadAfter": "20260918100000_native_creator_onboarding",
+  "artifactIdentities": {
+    "api": { "sourceSha": "ce88b3009c428235e28110fa8e43f01e08b09a53", "imageId": "sha256:19d7728219e279212bde732a27438d510b5450897b0b4f28d2a42118a27d37fb" },
+    "worker": { "sourceSha": "ce88b3009c428235e28110fa8e43f01e08b09a53", "imageId": "sha256:19d7728219e279212bde732a27438d510b5450897b0b4f28d2a42118a27d37fb" },
+    "bot": { "sourceSha": "ce88b3009c428235e28110fa8e43f01e08b09a53", "imageId": "sha256:19d7728219e279212bde732a27438d510b5450897b0b4f28d2a42118a27d37fb" },
+    "miniapp": { "sourceSha": "ce88b3009c428235e28110fa8e43f01e08b09a53", "indexSha256": "46af1a232d3c83aebc4104153fc4a262b4d28a4952fc933204e1ffad35b63120" }
+  },
+  "startedAt": "2026-09-22T04:00:00.000Z",
+  "finishedAt": "2026-09-22T04:13:17.000Z",
+  "status": "COMPLETE",
+  "failureStage": null,
+  "failureReason": null,
+  "rollbackSha": "02e71eabaddb9d06464be77b5020e84a52819c55",
+  "rollbackDbCompatibility": "REQUIRES_FORWARD_FIX_ASSESSMENT",
+  "productionRef": "gpoint-production-20260922T041317Z",
+  "releaseOrigin": "durable-production-release",
+  "migrationOutput": "NO_PENDING_MIGRATIONS"
+}

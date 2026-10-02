@@ -1,0 +1,21 @@
+{
+  "releaseId": "gpoint-release-20260928T081836171Z",
+  "candidateSha": "6478e79bcc1fa0ae5f9eed4b9ef731966df05317",
+  "previousProductionSha": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
+  "productionShaAfter": null,
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": null,
+  "startedAt": "2026-09-28T08:18:36.171Z",
+  "finishedAt": "2026-09-28T08:18:36.204Z",
+  "status": "FAILED_PRE_SWITCH",
+  "failureStage": "PRE_SWITCH",
+  "failureReason": "Command failed: git ls-remote origin refs/heads/main refs/tags/*\nssh: Could not resolve hostname github.com: -65563\r\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n",
+  "failureCommand": null,
+  "failureCommandSha256": null,
+  "failureExitCode": 128,
+  "failureStdout": "",
+  "failureStderr": "ssh: Could not resolve hostname github.com: -65563\r\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n",
+  "rollbackSha": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
+  "productionRef": null,
+  "releaseOrigin": "durable-production-release"
+}

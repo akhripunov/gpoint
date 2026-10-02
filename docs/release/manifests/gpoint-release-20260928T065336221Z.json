@@ -1,0 +1,21 @@
+{
+  "releaseId": "gpoint-release-20260928T065336221Z",
+  "candidateSha": "972f5e28f36d061d15829cebd1eb3442e6bf32b6",
+  "previousProductionSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+  "productionShaAfter": null,
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": null,
+  "startedAt": "2026-09-28T06:53:36.221Z",
+  "finishedAt": "2026-09-28T06:58:33.148Z",
+  "status": "RECOVERY_REQUIRED",
+  "failureStage": "POST_SWITCH",
+  "failureReason": "AGATA runtime identity verification failed: AGATA build SHA mismatch; AGATA API does not use candidate image; AGATA API is not healthy; AGATA worker is not healthy: root@38.180.110.92's password: \r\nAGATA_IMAGE_ID=sha256:fa3bd464a748dbd5b5c1f15ef36133df2e974ce1bfea0cb4d0d4b97ea2ff836e AGATA_BUILD_SHA=972f5e28f36d061d15829cebd1eb3442e6bf32b6 AGATA_API_IMAGE=sha256:fa3bd464a748dbd5b5c1f15ef36133df2e974ce1bfea0cb4d0d4b97ea2ff836e AGATA_API_RUNNING=true AGATA_API_HEALTH=healthy AGATA_WORKER_IMAGE=sha256:fa3bd464a748dbd5b5c1f15ef36133df2e974ce1bfea0cb4d0d4b97ea2ff836e AGATA_WORKER_RUNNING=true AGATA_WORKER_HEALTH=healthy AGATA_HEAD=agata0007",
+  "failureCommand": null,
+  "failureCommandSha256": null,
+  "failureExitCode": null,
+  "failureStdout": "",
+  "failureStderr": "",
+  "rollbackSha": "ca00b191db4fa26fb1f2746f9e6c218a8538ab49",
+  "productionRef": null,
+  "releaseOrigin": "durable-production-release"
+}
