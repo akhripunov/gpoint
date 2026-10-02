@@ -41,21 +41,22 @@ export function verifyReleaseBundle(directory, candidate) {
 export function importBundleCommand(proof, candidate) {
   // Only validated values may enter the remote shell.
   if (proof.candidateSha !== candidate || !/^[a-f0-9]{40}$/.test(candidate) || !/^[a-f0-9]{64}$/.test(proof.archiveSha256)) throw new Error('invalid bundle command');
-  const checks = ['app', 'agata'].map(role => {
+  for (const role of ['app', 'agata']) {
     const id = proof.images[role].id;
     if (!/^sha256:[a-f0-9]{64}$/.test(id)) throw new Error('invalid image ID');
-    const tag = `${role === 'app' ? 'gpoint-runtime' : 'gpoint-agata-runtime'}:${candidate}`;
-    return `test "$(docker image inspect ${tag} --format '{{.Id}}')" = '${id}'; test "$(docker image inspect ${tag} --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = '${candidate}'`;
-  });
-  return `set -e; printf '%s  %s\\n' '${proof.archiveSha256}' '/tmp/gpoint-images-${candidate}.tar.gz' | sha256sum -c -; gzip -dc /tmp/gpoint-images-${candidate}.tar.gz | docker load; ${checks.join('; ')}; rm /tmp/gpoint-images-${candidate}.tar.gz; echo GPOINT_CI_IMAGES_VERIFIED`;
+  }
+  return `set -e; printf '%s  %s\\n' '${proof.archiveSha256}' '/tmp/gpoint-images-${candidate}.tar.gz' | sha256sum -c -; gzip -dc /tmp/gpoint-images-${candidate}.tar.gz | docker load; ${loadedImageVerificationCommand(proof, candidate)}; rm /tmp/gpoint-images-${candidate}.tar.gz; echo GPOINT_CI_IMAGES_VERIFIED`;
+}
+
+export function loadedImageVerificationCommand(proof, candidate) {
+  if (proof.candidateSha !== candidate || !/^[a-f0-9]{40}$/.test(candidate) ||
+      ['app', 'agata'].some(role => !/^sha256:[a-f0-9]{64}$/.test(proof.images?.[role]?.id))) throw new Error('invalid image identity command');
+  const code = fs.readFileSync(new URL('./verify-loaded-images.py', import.meta.url)).toString('base64');
+  return `python3 -c "import base64;exec(compile(base64.b64decode('${code}'), 'verify-loaded-images.py', 'exec'))" '${candidate}' '${proof.images.app.id}' '${proof.images.agata.id}'`;
 }
 
 export function reuseBundleCommand(proof, candidate) {
   // Validate command inputs using the same gate as a fresh import.
   importBundleCommand(proof, candidate);
-  const checks = ['app', 'agata'].map(role => {
-    const tag = `${role === 'app' ? 'gpoint-runtime' : 'gpoint-agata-runtime'}:${candidate}`;
-    return `test "$(docker image inspect ${tag} --format '{{.Id}}' 2>/dev/null)" = '${proof.images[role].id}' && test "$(docker image inspect ${tag} --format '{{.Os}}/{{.Architecture}}')" = linux/amd64 && test "$(docker image inspect ${tag} --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = '${candidate}'`;
-  });
-  return `if ${checks.join(' && ')}; then echo GPOINT_CI_IMAGES_REUSABLE; else echo GPOINT_CI_IMAGES_IMPORT_REQUIRED; fi`;
+  return `if ${loadedImageVerificationCommand(proof, candidate)}; then echo GPOINT_CI_IMAGES_REUSABLE; else echo GPOINT_CI_IMAGES_IMPORT_REQUIRED; fi`;
 }

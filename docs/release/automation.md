@@ -37,6 +37,15 @@ Prepare запускает frozen-lockfile install, сборку, typecheck, uni
 
 Сборка выдаёт Linux/amd64 images, exact revision labels, image IDs, архив SHA256 и READY receipt. Deploy проверяет успешный GitHub run текущего SHA, receipt/run ID, checksum, загружает Docker images на VPS и сверяет IDs. Повторная сборка приложения в режиме CI bundle запрещена. Canonical tooling сохраняет live baseline, проверяет config/provider, делает GPoint-only backup при миграциях, переключает runtime, выполняет health/parity, сохраняет immutable production ref, manifest и cleanup. Safety detector остаётся отдельным артефактом с source hash и canonical build; он не включён в архив приложения.
 
+Receipt `images.*.id` — точный SHA256 конфигурации, полученный в classic Docker
+Prepare и подтверждённый save/load round-trip. В containerd store VPS `.Id`
+обозначает OCI manifest, поэтому verifier доказывает связь native manifest →
+receipt config: хеширует оба content blob, проверяет exact config digest,
+linux/amd64, revision label и rootfs diff IDs. Неизвестный descriptor, OCI index,
+отсутствующий content blob или любое расхождение блокируют import/reuse.
+Это сравнение одной content identity в разных stores, а не замена exact ID
+проверкой только source label. Native runtime IDs сохраняются для parity.
+
 GitHub credentials, VPS key и production env не входят в архив и не сохраняются в Linear. Логи публикации не содержат текст пользовательских сообщений и raw production environment. Secret `LINEAR_API_KEY` предоставляется только шагу публикации; его отсутствие явно ломает публикацию, а не выдаёт ложный READY.
 
 ## Первичная настройка Dev/владельцем

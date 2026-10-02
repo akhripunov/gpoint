@@ -41,15 +41,50 @@ test('archive corruption fails before upload or mutation', t => {
 test('VPS reuse requires both exact image IDs, source labels and platform', t => {
   const f = fixture(t), proof = verifyReleaseBundle(f.dir, f.sha);
   const docker = path.join(f.dir, 'docker');
-  fs.writeFileSync(docker, '#!/bin/sh\ncase "$5" in\n  *Architecture*) echo "$FAKE_PLATFORM" ;;\n  *revision*) echo "$FAKE_SHA" ;;\n  *) echo "$FAKE_ID" ;;\nesac\n', { mode: 0o700 });
+  fs.writeFileSync(docker, '#!/bin/sh\nprintf \'[{"Id":"%s","Os":"linux","Architecture":"%s","Config":{"Labels":{"org.opencontainers.image.revision":"%s"}}}]\' "$FAKE_ID" "$FAKE_ARCH" "$FAKE_SHA"\n', { mode: 0o700 });
   const run = changes => spawnSync('bash', ['-c', reuseBundleCommand(proof, f.sha)], {
     encoding: 'utf8', env: { ...process.env, PATH: `${f.dir}:${process.env.PATH}`,
-      FAKE_PLATFORM: 'linux/amd64', FAKE_SHA: f.sha, FAKE_ID: proof.images.app.id, ...changes },
+      FAKE_ARCH: 'amd64', FAKE_SHA: f.sha, FAKE_ID: proof.images.app.id, ...changes },
   });
   assert.match(run({}).stdout, /GPOINT_CI_IMAGES_REUSABLE/);
-  for (const changes of [{ FAKE_ID: `sha256:${'c'.repeat(64)}` }, { FAKE_PLATFORM: 'linux/arm64' }, { FAKE_SHA: 'c'.repeat(40) }]) {
+  for (const changes of [{ FAKE_ID: `sha256:${'c'.repeat(64)}` }, { FAKE_ARCH: 'arm64' }, { FAKE_SHA: 'c'.repeat(40) }]) {
     assert.match(run(changes).stdout, /GPOINT_CI_IMAGES_IMPORT_REQUIRED/);
   }
+});
+
+test('containerd manifest IDs require exact hashed config, source, platform and rootfs', t => {
+  const f = fixture(t);
+  const hash = bytes => `sha256:${crypto.createHash('sha256').update(bytes).digest('hex')}`;
+  const layers = [`sha256:${'d'.repeat(64)}`];
+  const config = Buffer.from(JSON.stringify({ os: 'linux', architecture: 'amd64', config: { Labels: { 'org.opencontainers.image.revision': f.sha } }, rootfs: { diff_ids: layers } }));
+  const configId = hash(config);
+  for (const role of ['app', 'agata']) f.receipt.images[role].id = configId;
+  f.save();
+  const proof = verifyReleaseBundle(f.dir, f.sha);
+  const manifest = Buffer.from(JSON.stringify({ schemaVersion: 2, config: { digest: configId }, layers: [{ digest: layers[0] }] }));
+  const native = hash(manifest);
+  fs.writeFileSync(path.join(f.dir, 'manifest'), manifest);
+  fs.writeFileSync(path.join(f.dir, 'config'), config);
+  const image = { Id: native, Descriptor: { digest: native, mediaType: 'application/vnd.oci.image.manifest.v1+json' }, Os: 'linux', Architecture: 'amd64', Config: { Labels: { 'org.opencontainers.image.revision': f.sha } }, RootFS: { Layers: layers } };
+  const imagePath = path.join(f.dir, 'inspect.json');
+  fs.writeFileSync(imagePath, JSON.stringify([image]));
+  fs.writeFileSync(path.join(f.dir, 'docker'), '#!/bin/sh\ncat "$FAKE_INSPECT"\n', { mode: 0o700 });
+  fs.writeFileSync(path.join(f.dir, 'ctr'), '#!/bin/sh\nif [ "$5" = "$FAKE_NATIVE" ]; then cat "$FAKE_MANIFEST"; else cat "$FAKE_CONFIG"; fi\n', { mode: 0o700 });
+  const run = () => spawnSync('bash', ['-c', reuseBundleCommand(proof, f.sha)], { encoding: 'utf8', env: { ...process.env, PATH: `${f.dir}:${process.env.PATH}`, FAKE_INSPECT: imagePath, FAKE_NATIVE: native, FAKE_MANIFEST: path.join(f.dir, 'manifest'), FAKE_CONFIG: path.join(f.dir, 'config') } });
+  assert.match(run().stdout, /GPOINT_CI_IMAGES_REUSABLE/);
+  fs.appendFileSync(path.join(f.dir, 'config'), 'corruption');
+  assert.match(run().stdout, /GPOINT_CI_IMAGES_IMPORT_REQUIRED/);
+  fs.writeFileSync(path.join(f.dir, 'config'), config);
+  fs.appendFileSync(path.join(f.dir, 'manifest'), 'corruption');
+  assert.match(run().stdout, /GPOINT_CI_IMAGES_IMPORT_REQUIRED/);
+  fs.writeFileSync(path.join(f.dir, 'manifest'), manifest);
+  image.RootFS.Layers = [`sha256:${'e'.repeat(64)}`];
+  fs.writeFileSync(imagePath, JSON.stringify([image]));
+  assert.match(run().stdout, /GPOINT_CI_IMAGES_IMPORT_REQUIRED/);
+  image.RootFS.Layers = layers;
+  image.Descriptor.mediaType = 'application/vnd.oci.image.index.v1+json';
+  fs.writeFileSync(imagePath, JSON.stringify([image]));
+  assert.match(run().stdout, /GPOINT_CI_IMAGES_IMPORT_REQUIRED/);
 });
 test('different candidate and skipped gates fail closed', t => {
   const f = fixture(t);
@@ -105,7 +140,7 @@ test('release cannot remove a lock whose ownership changed', t => {
 test('canonical CLI executes from a Mac runner path containing spaces', t => {
   const f = fixture(t), root = path.join(f.dir, 'Application Support', 'GPoint');
   fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
-  for (const name of ['release-gpoint.mjs', 'release-gpoint-vps-adapter.mjs', 'release-bundle.mjs', 'release-lock.mjs', 'release-migrations.mjs']) {
+  for (const name of ['release-gpoint.mjs', 'release-gpoint-vps-adapter.mjs', 'release-bundle.mjs', 'verify-loaded-images.py', 'release-lock.mjs', 'release-migrations.mjs']) {
     fs.copyFileSync(fileURLToPath(new URL(name, import.meta.url)), path.join(root, 'scripts', name));
   }
   fs.mkdirSync(path.join(root, 'docs/release/state'), { recursive: true });
