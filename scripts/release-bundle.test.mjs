@@ -17,7 +17,7 @@ function fixture(t) {
   const bytes = Buffer.from('a disposable image archive');
   fs.writeFileSync(path.join(dir, 'images.tar.gz'), bytes);
   const receipt = { schema: 1, candidateSha: sha, status: 'READY', runId: 1, agataHead: 'agata0008', prismaHead: '20260922090000_telegram_channel_avatar',
-    gates: Object.fromEntries(['unit', 'postgres', 'docker', 'migration', 'miniapp', 'agataHealth'].map(g => [g, 'PASS'])),
+    gates: Object.fromEntries(['unit', 'postgres', 'docker', 'migration', 'miniapp', 'agataHealth', 'deployRehearsal'].map(g => [g, 'PASS'])),
     images: { app: { id, revision: sha, platform: 'linux/amd64' }, agata: { id, revision: sha, platform: 'linux/amd64' } },
     archiveSha256: crypto.createHash('sha256').update(bytes).digest('hex') };
   const save = () => fs.writeFileSync(path.join(dir, 'receipt.json'), JSON.stringify(receipt));
@@ -96,6 +96,18 @@ test('different candidate and skipped gates fail closed', t => {
   assert.throws(() => verifyReleaseBundle(f.dir, 'c'.repeat(40)), /exact candidate/);
   f.receipt.gates.postgres = 'SKIPPED'; f.save();
   assert.throws(() => verifyReleaseBundle(f.dir, f.sha), /postgres/);
+});
+test('a receipt without the real containerd deployment rehearsal cannot authorize apply', t => {
+  const f = fixture(t);
+  delete f.receipt.gates.deployRehearsal; f.save();
+  assert.throws(() => verifyReleaseBundle(f.dir, f.sha), /deployRehearsal/);
+});
+test('rehearsal scratch paths cannot introduce shell commands or escape via parent traversal', t => {
+  const f = fixture(t), proof = verifyReleaseBundle(f.dir, f.sha);
+  for (const scratch of ['/tmp/../opt/gpoint', '/tmp;touch /tmp/bypass', 'relative']) {
+    assert.throws(() => importBundleCommand(proof, f.sha, scratch), /scratch path/);
+    assert.throws(() => preparedImageParityCommand(proof, f.sha, scratch), /scratch path/);
+  }
 });
 test('invalid image identity and another architecture fail closed', t => {
   const f = fixture(t);

@@ -15,7 +15,7 @@ export function verifyReleaseBundle(directory, candidate) {
   if (!/^[A-Za-z0-9_]{1,32}$/.test(proof.agataHead ?? '') || !/^[A-Za-z0-9_]{1,128}$/.test(proof.prismaHead ?? '')) {
     throw new Error('invalid candidate migration heads');
   }
-  for (const gate of ['unit', 'postgres', 'docker', 'migration', 'miniapp', 'agataHealth']) {
+  for (const gate of ['unit', 'postgres', 'docker', 'migration', 'miniapp', 'agataHealth', 'deployRehearsal']) {
     if (proof.gates?.[gate] !== 'PASS') throw new Error(`missing release gate: ${gate}`);
   }
   for (const role of ['app', 'agata']) {
@@ -38,14 +38,20 @@ export function verifyReleaseBundle(directory, candidate) {
   return { ...proof, archive };
 }
 
-export function importBundleCommand(proof, candidate) {
+function temporaryPath(root, name) {
+  if (!/^\/[A-Za-z0-9_./-]+$/.test(root) || root.split('/').includes('..')) throw new Error('invalid release scratch path');
+  return `${root.replace(/\/$/, '')}/${name}`;
+}
+
+export function importBundleCommand(proof, candidate, scratch = '/tmp') {
   // Only validated values may enter the remote shell.
   if (proof.candidateSha !== candidate || !/^[a-f0-9]{40}$/.test(candidate) || !/^[a-f0-9]{64}$/.test(proof.archiveSha256)) throw new Error('invalid bundle command');
   for (const role of ['app', 'agata']) {
     const id = proof.images[role].id;
     if (!/^sha256:[a-f0-9]{64}$/.test(id)) throw new Error('invalid image ID');
   }
-  return `set -e; printf '%s  %s\\n' '${proof.archiveSha256}' '/tmp/gpoint-images-${candidate}.tar.gz' | sha256sum -c -; gzip -dc /tmp/gpoint-images-${candidate}.tar.gz | docker load; ${loadedImageVerificationCommand(proof, candidate)}; rm /tmp/gpoint-images-${candidate}.tar.gz; echo GPOINT_CI_IMAGES_VERIFIED`;
+  const archive = temporaryPath(scratch, `gpoint-images-${candidate}.tar.gz`);
+  return `set -e; printf '%s  %s\\n' '${proof.archiveSha256}' '${archive}' | sha256sum -c -; gzip -dc ${archive} | docker load; ${loadedImageVerificationCommand(proof, candidate)}; rm ${archive}; echo GPOINT_CI_IMAGES_VERIFIED`;
 }
 
 export function loadedImageVerificationCommand(proof, candidate) {
@@ -55,11 +61,16 @@ export function loadedImageVerificationCommand(proof, candidate) {
   return `python3 -c "import base64;exec(compile(base64.b64decode('${code}'), 'verify-loaded-images.py', 'exec'))" '${candidate}' '${proof.images.app.id}' '${proof.images.agata.id}'`;
 }
 
-export function preparedImageParityCommand(proof, candidate) {
+export function preparedImageCaptureCommand(proof, candidate, scratch = '/tmp') {
+  const verification = loadedImageVerificationCommand(proof, candidate);
+  return `set -e; ${verification}; docker image inspect gpoint-runtime:${candidate} --format '{{.Id}}' > ${temporaryPath(scratch, `gpoint-image-id-${candidate}`)}; docker image inspect gpoint-agata-runtime:${candidate} --format '{{.Id}}' > ${temporaryPath(scratch, `gpoint-agata-image-id-${candidate}`)}; echo GPOINT_CI_IMAGE_REUSED`;
+}
+
+export function preparedImageParityCommand(proof, candidate, scratch = '/tmp') {
   const verification = loadedImageVerificationCommand(proof, candidate);
   // Recorded runtime proofs use the VPS store's native IDs. Re-prove their
   // exact config identity and then compare native IDs within that same store.
-  return `set -e; ${verification}; test "$(cat /tmp/gpoint-image-id-${candidate})" = "$(docker image inspect gpoint-runtime:${candidate} --format '{{.Id}}')"; test "$(cat /tmp/gpoint-agata-image-id-${candidate})" = "$(docker image inspect gpoint-agata-runtime:${candidate} --format '{{.Id}}')"; echo GPOINT_CI_PARITY_OK`;
+  return `set -e; ${verification}; test "$(cat ${temporaryPath(scratch, `gpoint-image-id-${candidate}`)})" = "$(docker image inspect gpoint-runtime:${candidate} --format '{{.Id}}')"; test "$(cat ${temporaryPath(scratch, `gpoint-agata-image-id-${candidate}`)})" = "$(docker image inspect gpoint-agata-runtime:${candidate} --format '{{.Id}}')"; echo GPOINT_CI_PARITY_OK`;
 }
 
 export function reuseBundleCommand(proof, candidate) {

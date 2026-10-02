@@ -49,3 +49,24 @@ blocker, but never changes the recorded result of the runtime attempt. Reruns
 have independent events and evidence artifacts; retry only the publication job
 when runtime evidence already confirms completion. Production authorization
 and the canonical release lock remain mandatory.
+
+## Avoiding repeated release cycles
+
+The Prepare image round-trip now targets the production Docker 29.1.3
+containerd/overlayfs store instead of another classic store. It runs the same
+import, native identity capture, parity and reuse command builders as Deploy,
+and deliberately rejects the historical config-as-native proof regression.
+The images are built once; rehearsal only imports that archive. Its measured
+duration is recorded in the receipt; this improves failure detection and is
+not a promise of a faster successful Prepare.
+
+Safe pre-switch failures keep their evidence in Actions artifacts and Linear
+without a bookkeeping commit to main. Repeating that exact prepared candidate
+can reuse the verified artifact. Partial/unknown mutations still persist
+recovery state; no automatic retry or rollback is introduced.
+
+Baseline from 2026-10-02: Prepare run 36967671335 took 331 seconds including
+publication; Deploy run 36968491432 took 261 seconds including publication.
+Canonical apply took 200.1 seconds (upload 41.1s, load 41.4s). Compare future
+whole-workflow durations and repeated-cycle count, not just apply time. The
+new rehearsal's CI duration must be measured before claiming speed gains.

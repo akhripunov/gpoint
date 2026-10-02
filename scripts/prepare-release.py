@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -24,8 +25,10 @@ def run(*args, cwd=ROOT, env=None, capture=False):
 
 
 def verify_saved_images(archive, images, sha, temp_root):
-    """Load the exact saved bundle into a separate daemon and verify its IDs."""
-    if not shutil.which('dockerd') or not shutil.which('sudo'):
+    """Rehearse production import/capture/parity/reuse in a private containerd store."""
+    started = time.monotonic()
+    dockerd, docker, ctr = (shutil.which(name) for name in ('dockerd', 'docker', 'ctr'))
+    if not all((dockerd, docker, ctr, shutil.which('sudo'))):
         raise RuntimeError('isolated Docker daemon prerequisites are unavailable')
     root = Path(tempfile.mkdtemp(prefix='gpoint-image-roundtrip-', dir=temp_root))
     socket = root / 'docker.sock'
@@ -36,14 +39,29 @@ def verify_saved_images(archive, images, sha, temp_root):
     daemon = None
     daemon_pid = None
     try:
-        namespace = f'gpoint-roundtrip-{uuid.uuid4().hex[:12]}'
+        config = root / 'daemon.json'
+        config.write_text(json.dumps({'features': {'containerd-snapshotter': True}}))
         daemon = subprocess.Popen(
-            ['sudo', '-n', 'dockerd', '--host', host, '--data-root', str(root / 'data'),
-             '--exec-root', str(root / 'exec'), '--pidfile', str(pidfile), '--storage-driver=vfs',
-             '--containerd-namespace', namespace, '--bridge=none', '--iptables=false', '--ip-masq=false',
+            ['sudo', '-n', 'env', f'PATH={os.environ["PATH"]}', dockerd,
+             '--config-file', str(config), '--host', host, '--data-root', str(root / 'data'),
+             '--exec-root', str(root / 'exec'), '--pidfile', str(pidfile), '--storage-driver=overlayfs',
+             '--containerd-namespace=moby', '--bridge=none', '--iptables=false', '--ip-masq=false',
              '--ip-forward=false'],
             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        client_env = dict(os.environ, DOCKER_HOST=host)
+        # Wrappers always address the private daemon, even if setup-docker-action
+        # exports a Docker context. ctr must address its private managed containerd.
+        wrappers = root / 'bin'
+        wrappers.mkdir()
+        for name, command in {
+                'docker': ['sudo', '-n', docker, '--host', host],
+                'ctr': ['sudo', '-n', ctr, '--address', str(root / 'exec/containerd/containerd.sock')],
+        }.items():
+            wrapper = wrappers / name
+            wrapper.write_text('#!/bin/sh\nexec ' + shlex.join(command) + ' "$@"\n')
+            wrapper.chmod(0o700)
+        client_env = dict(os.environ, PATH=f'{wrappers}:{os.environ["PATH"]}', DOCKER_HOST=host)
+        for key in ('DOCKER_CONTEXT', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH', 'DOCKER_API_VERSION'):
+            client_env.pop(key, None)
         ready = False
         for _ in range(90):
             if daemon.poll() is not None:
@@ -59,18 +77,23 @@ def verify_saved_images(archive, images, sha, temp_root):
             detail = log_path.read_text(errors='replace')[-4000:]
             raise RuntimeError(f'isolated Docker daemon did not become ready: {detail}')
 
-        with Path(archive).open('rb') as source:
-            loaded = subprocess.run(['docker', 'load'], env=client_env, stdin=source, text=True,
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=900)
-        if loaded.returncode:
-            raise RuntimeError(f'isolated Docker image load failed: {loaded.stdout[-4000:]}')
-        for role, repository in [('app', 'gpoint-runtime'), ('agata', 'gpoint-agata-runtime')]:
-            tag = f'{repository}:{sha}'
-            actual = subprocess.run(['docker', 'image', 'inspect', tag, '--format', '{{.Id}}'], env=client_env,
-                                    check=True, text=True, stdout=subprocess.PIPE, timeout=30).stdout.strip()
-            if actual != images[role]['id']:
-                raise RuntimeError(f'isolated Docker round-trip image ID mismatch for {role}: expected {images[role]["id"]}, got {actual}')
+        info = json.loads(run('docker', 'info', '--format', '{{json .}}', env=client_env, capture=True))
+        if info['ServerVersion'] != '29.1.3' or info['Driver'] != 'overlayfs' or \
+                ['driver-type', 'io.containerd.snapshotter.v1'] not in info.get('DriverStatus', []):
+            raise RuntimeError('rehearsal must use production Docker 29.1.3/containerd/overlayfs')
+        copied = root / f'gpoint-images-{sha}.tar.gz'
+        shutil.copyfile(archive, copied)
+        with copied.open('rb') as source:
+            checksum = hashlib.file_digest(source, 'sha256').hexdigest()
+        proof = root / 'proof.json'
+        proof.write_text(json.dumps({'candidateSha': sha, 'images': images, 'archiveSha256': checksum}))
+        run('node', 'scripts/rehearse-release-bundle.mjs', str(proof), sha, str(root), env=client_env)
+        print('PREPARE_IMAGE_STORE=containerd DOCKER_VERSION=29.1.3')
         print('PREPARE_IMAGE_ROUNDTRIP=PASS')
+        elapsed = round(time.monotonic() - started, 1)
+        print(f'PREPARE_DEPLOY_REHEARSAL_SECONDS={elapsed}')
+        return {'dockerVersion': '29.1.3', 'store': 'containerd', 'snapshotter': 'overlayfs',
+                'identityRegressionRejected': ['app', 'agata'], 'seconds': elapsed}
     finally:
         if pidfile.exists():
             try:
@@ -225,12 +248,13 @@ def prepare(sha, output, *, postgres_only=False):
                 dest.write(chunk)
             if proc.wait(timeout=600):
                 raise RuntimeError('image export failed')
-        verify_saved_images(archive, images, sha, output.parent)
+        rehearsal = verify_saved_images(archive, images, sha, output.parent)
         with archive.open('rb') as source:
             digest = hashlib.file_digest(source, 'sha256').hexdigest()
         proof = {'schema': 1, 'candidateSha': sha, 'status': 'READY', 'runId': int(os.environ['GITHUB_RUN_ID']),
-                 'gates': {name: 'PASS' for name in ['unit', 'postgres', 'docker', 'migration', 'miniapp', 'agataHealth']},
+                 'gates': {name: 'PASS' for name in ['unit', 'postgres', 'docker', 'migration', 'miniapp', 'agataHealth', 'deployRehearsal']},
                  'images': images, 'archiveSha256': digest, 'prismaHead': prisma, 'agataHead': heads,
+                 'deployRehearsal': rehearsal,
                  'applicationSmoke': 'DISPOSABLE_DB_DETERMINISTIC_PROVIDER', 'productionUserSmoke': 'NOT_RUN'}
         receipt.write_text(json.dumps(proof, indent=2) + '\n')
     finally:
