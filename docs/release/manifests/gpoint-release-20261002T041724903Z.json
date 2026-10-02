@@ -1,0 +1,22 @@
+{
+  "releaseId": "gpoint-release-20261002T041724903Z",
+  "candidateSha": "7b243329e2b264c7c85aebadb168b90e2fc68560",
+  "previousProductionSha": "62d96acc67bd739599b7edf205e5fabeed6456ce",
+  "productionShaAfter": null,
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": null,
+  "startedAt": "2026-10-02T04:17:24.903Z",
+  "finishedAt": "2026-10-02T04:19:43.496Z",
+  "status": "FAILED_PRE_SWITCH",
+  "agataProvider": "mac_worker",
+  "failureStage": "CI_ARTIFACT_UPLOAD",
+  "failureReason": "source upload failed after 2 attempts: images.tar.gz",
+  "failureCommand": "CI_ARTIFACT_UPLOAD",
+  "failureCommandSha256": null,
+  "failureExitCode": null,
+  "failureStdout": "",
+  "failureStderr": "spawnSync /Users/akhripuniov/.local/bin/gpoint-vps-scp-runner ETIMEDOUT",
+  "rollbackSha": "62d96acc67bd739599b7edf205e5fabeed6456ce",
+  "productionRef": null,
+  "releaseOrigin": "durable-production-release"
+}
