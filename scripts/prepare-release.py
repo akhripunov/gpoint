@@ -28,7 +28,8 @@ def verify_saved_images(archive, images, sha, temp_root):
     """Rehearse production import/capture/parity/reuse in a private containerd store."""
     started = time.monotonic()
     dockerd, docker, ctr, containerd = (shutil.which(name) for name in ('dockerd', 'docker', 'ctr', 'containerd'))
-    if not all((dockerd, docker, ctr, containerd, shutil.which('sudo'))):
+    unshare = shutil.which('unshare')
+    if not all((dockerd, docker, ctr, containerd, unshare, shutil.which('sudo'))):
         raise RuntimeError('isolated Docker daemon prerequisites are unavailable')
     root = Path(tempfile.mkdtemp(prefix='gpoint-image-roundtrip-', dir=temp_root))
     socket = root / 'docker.sock'
@@ -64,7 +65,7 @@ def verify_saved_images(archive, images, sha, temp_root):
         if content_daemon.poll() is not None:
             raise RuntimeError('private containerd exited before rehearsal')
         daemon = subprocess.Popen(
-            ['sudo', '-n', 'env', f'PATH={os.environ["PATH"]}', dockerd,
+            ['sudo', '-n', 'env', f'PATH={os.environ["PATH"]}', unshare, '--net', dockerd,
              '--config-file', str(config), '--host', host, '--data-root', str(root / 'data'),
              '--exec-root', str(root / 'exec'), '--pidfile', str(pidfile), '--storage-driver=overlayfs',
              '--containerd', str(content_socket), '--containerd-namespace=moby',
@@ -106,6 +107,11 @@ def verify_saved_images(archive, images, sha, temp_root):
             raise RuntimeError('rehearsal must use production Docker 29.1.3/containerd/overlayfs')
         if info.get('Containerd', {}).get('Address') != str(content_socket):
             raise RuntimeError('rehearsal Docker is not attached to its private containerd')
+        daemon_pid = int(pidfile.read_text().strip())
+        network_inode = int(run('sudo', '-n', 'stat', '-Lc', '%i',
+                                f'/proc/{daemon_pid}/ns/net', capture=True))
+        if network_inode == os.stat('/proc/self/ns/net').st_ino:
+            raise RuntimeError('rehearsal Docker must not share the build daemon network namespace')
         copied = root / f'gpoint-images-{sha}.tar.gz'
         shutil.copyfile(archive, copied)
         with copied.open('rb') as source:
