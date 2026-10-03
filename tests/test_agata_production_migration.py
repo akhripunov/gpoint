@@ -1,0 +1,95 @@
+import importlib.util
+from pathlib import Path
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location('migration', ROOT / 'scripts/agata-production-migration.py')
+
+
+class ProductionMigrationTests(unittest.TestCase):
+    def setUp(self):
+        self.assertTrue(Path(SPEC.origin).exists(), 'canonical production migration gate is missing')
+        self.m = importlib.util.module_from_spec(SPEC)
+        SPEC.loader.exec_module(self.m)
+
+    def proof(self):
+        return dict(database='gpoint', role='gpoint', head='agata0009', privileged=False,
+                    owner=True, schema_create=True, schema_usage=True, permissions=True,
+                    force_rls=True, rls=True, server_address='10.2.0.4', database_oid=16385, total_bytes=114688, url_source='AGATA_DATABASE_URL')
+
+    def census(self):
+        return dict(database='gpoint', authoritative=True, cluster_addresses=['10.2.0.4'], database_oid=16385,
+                    tenants=['22222222-2222-4222-8222-222222222222',
+                             '11111111-1111-4111-8111-111111111111'],
+                    messages=12, baseline=5)
+
+    def test_restricted_role_uses_complete_authoritative_sorted_inventory(self):
+        result = self.m.validate_readiness(self.proof(), self.census())
+        self.assertEqual(result['tenant_count'], 2)
+        self.assertEqual(result['inventory'], ','.join(sorted(self.census()['tenants'])))
+        self.assertEqual(result['lock_risk'], 'BOUNDED_MIGRATION_LOCK_REQUIRED')
+
+    def test_missing_inventory_fails_closed(self):
+        census = self.census(); census['tenants'] = []
+        with self.assertRaisesRegex(RuntimeError, 'inventory'):
+            self.m.validate_readiness(self.proof(), census)
+
+    def test_role_filtered_census_is_never_complete(self):
+        census = self.census(); census['authoritative'] = False
+        with self.assertRaisesRegex(RuntimeError, 'authoritative'):
+            self.m.validate_readiness(self.proof(), census)
+
+    def test_wrong_database_or_missing_permissions_fails_closed(self):
+        for key, value in [('database', 'maxibot'), ('owner', False), ('permissions', False),
+                           ('schema_create', False), ('schema_usage', False), ('rls', False), ('force_rls', False), ('head', 'agata0008')]:
+            with self.subTest(key=key):
+                proof = self.proof(); proof[key] = value
+                with self.assertRaises(RuntimeError):
+                    self.m.validate_readiness(proof, self.census())
+
+    def test_inventory_is_not_leaked_in_public_facts(self):
+        result = self.m.public_facts(self.m.validate_readiness(self.proof(), self.census()))
+        self.assertNotIn('inventory', result)
+        self.assertNotIn('tenants', result)
+        self.assertEqual(result['tenant_count'], 2)
+        self.assertEqual(len(result['inventory_sha256']), 64)
+
+    def test_guard_precedes_census_and_is_held_through_migration(self):
+        events = []
+        class Guard:
+            def __enter__(self): events.append('lock'); return self
+            def census(self): events.append('census'); return self_outer.census()
+            def alive(self): return True
+            def verify(self): events.append('verify'); return True
+            def __exit__(self, *args): events.append('unlock')
+        self_outer = self
+        def migrate(inventory, guard):
+            events.append('migrate')
+            self.assertTrue(guard.alive())
+            self.assertEqual(len(inventory.split(',')), 2)
+        self.m.guarded_migration(self.proof(), Guard(), migrate)
+        self.assertEqual(events, ['lock', 'census', 'migrate', 'verify', 'unlock'])
+
+    def test_guard_loss_or_incomplete_baseline_is_not_success(self):
+        for alive, verified in [(False, True), (True, False)]:
+            class Guard:
+                def __enter__(self): return self
+                def __exit__(self, *args): pass
+                def census(self): return self_outer.census()
+                def alive(self): return alive
+                def verify(self): return verified
+            self_outer = self
+            calls = []
+            with self.assertRaises(RuntimeError):
+                self.m.guarded_migration(self.proof(), Guard(), lambda *args: calls.append('apply'))
+            if not alive: self.assertEqual(calls, [])
+
+
+    def test_different_database_cluster_cannot_supply_inventory(self):
+        proof = self.proof(); proof.update(server_address='10.2.0.4', database_oid=16385)
+        census = self.census(); census.update(cluster_addresses=['10.2.0.5'], database_oid=16385)
+        with self.assertRaisesRegex(RuntimeError, 'identity'):
+            self.m.validate_readiness(proof, census)
+
+
+if __name__ == '__main__': unittest.main()
