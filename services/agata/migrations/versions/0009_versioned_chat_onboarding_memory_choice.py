@@ -10,7 +10,7 @@ from uuid import UUID
 
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
 revision = "agata0009"
 down_revision = "agata0008"
@@ -25,16 +25,19 @@ def upgrade() -> None:
     tenant_id = str(UUID(tenant_value))
     bind = op.get_bind()
     bind.execute(text("SELECT set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": tenant_id})
-    op.add_column(
-        "ai_disclosure_receipts",
-        sa.Column("memory_opt_in", sa.Boolean(), server_default=sa.false(), nullable=False),
-        schema="agata",
-    )
-    op.add_column(
-        "ai_disclosure_receipts",
-        sa.Column("memory_opt_in_at", sa.DateTime(timezone=True), nullable=True),
-        schema="agata",
-    )
+    columns = {column["name"] for column in inspect(bind).get_columns("ai_disclosure_receipts", schema="agata")}
+    if "memory_opt_in" not in columns:
+        op.add_column(
+            "ai_disclosure_receipts",
+            sa.Column("memory_opt_in", sa.Boolean(), server_default=sa.false(), nullable=False),
+            schema="agata",
+        )
+    if "memory_opt_in_at" not in columns:
+        op.add_column(
+            "ai_disclosure_receipts",
+            sa.Column("memory_opt_in_at", sa.DateTime(timezone=True), nullable=True),
+            schema="agata",
+        )
     # Preserve only affirmative memory choices proven by the separate active
     # long_term_memory consent. Chat history by itself never grants memory.
     bind.execute(text("""
