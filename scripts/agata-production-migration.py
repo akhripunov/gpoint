@@ -139,9 +139,10 @@ class TenantGuard:
         try:
             self.snapshot = add_cluster_identity(self.query("BEGIN; SET LOCAL lock_timeout='15s'; "
                 "SET LOCAL statement_timeout='120s'; SET LOCAL idle_in_transaction_session_timeout='180s'; "
-                "LOCK TABLE agata.tenants IN SHARE MODE; SELECT json_build_object('tenants',coalesce(json_agg(id ORDER BY id),'[]')) FROM agata.tenants;"))
+                "LOCK TABLE agata.tenants IN SHARE MODE; SELECT json_build_object('pid',pg_backend_pid(),'tenants',coalesce(json_agg(id ORDER BY id),'[]')) FROM agata.tenants;"))
             # Reading messages in the guard would retain ACCESS SHARE and block
             # Alembic ADD COLUMN. Census runs in a separate, closed read-only tx.
+            self.backend_pid = self.snapshot['pid']
             locked_tenants = self.snapshot['tenants']
             self.snapshot = authoritative_census()
             if sorted(locked_tenants) != sorted(self.snapshot['tenants']):
@@ -151,9 +152,9 @@ class TenantGuard:
             self.__exit__(None, None, None)
             raise
 
-    def query(self, sql):
+    def query(self, sql, timeout=20):
         self.process.stdin.write(sql + '\n'); self.process.stdin.flush()
-        if not select.select([self.process.stdout], [], [], 20)[0]:
+        if not select.select([self.process.stdout], [], [], timeout)[0]:
             raise RuntimeError('authoritative inventory transaction timed out')
         line = self.process.stdout.readline()
         if not line: raise RuntimeError('authoritative inventory transaction failed')
@@ -161,7 +162,17 @@ class TenantGuard:
 
     def census(self): return self.snapshot
 
-    def alive(self): return self.process.poll() is None
+    def alive(self):
+        if self.process.poll() is not None:
+            return False
+        try:
+            result = self.query("SELECT json_build_object('pid',pg_backend_pid(),'locked',"
+                "EXISTS(SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid() "
+                "AND locktype='relation' AND relation='agata.tenants'::regclass "
+                "AND mode='ShareLock' AND granted));", timeout=2)
+            return result['pid'] == self.backend_pid and result['locked'] is True
+        except (OSError, RuntimeError, ValueError, KeyError):
+            return False
 
     def verify(self):
         ids = [str(UUID(value)) for value in self.snapshot['baseline_ids']]

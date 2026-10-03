@@ -88,6 +88,11 @@ class DockerMigrationProtocol(unittest.TestCase):
                     docker('exec',postgres,'psql','-U','postgres','-d','gpoint','-Atc',
                         f'SELECT pg_terminate_backend({backend})')
                     self.assertFalse(guard.alive(), 'a live psql process is not proof of a retained database lock')
+                with gate.TenantGuard() as guard:
+                    self.assertTrue(guard.alive())
+                    pid = guard.query("ROLLBACK; SELECT json_build_object('pid',pg_backend_pid());")['pid']
+                    self.assertEqual(pid, guard.backend_pid)
+                    self.assertFalse(guard.alive(), 'a retained backend without its lock must fail closed')
                 def migrate(inventory, guard):
                     # An attempted concurrent tenant insert is refused while the guard is held.
                     blocked = docker('exec', postgres, 'psql', '-U','postgres','-d','gpoint','-v','ON_ERROR_STOP=1','-c',
