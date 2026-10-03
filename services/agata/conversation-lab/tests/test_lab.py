@@ -31,7 +31,9 @@ class NormalizationTests(unittest.TestCase):
     def test_contact_detection_avoids_grouped_currency_amount_false_positive(self):
         self.assertTrue(lab.is_pii("call +7 (999) 123-45-67"))
         self.assertTrue(lab.is_pii("mail person@example.com"))
+        self.assertTrue(lab.is_pii("call 415 555 2671"))
         self.assertFalse(lab.is_pii("18 500 000 000 рублей"))
+        self.assertFalse(lab.is_pii("reference 2019-01-02-03"))
 
     def test_russian_dialogues_jsonl_sample_field_is_dialogue(self):
         item = lab.dialogue_from_row({"sample": ["один", "два", "три"]}, lab.get_source("russian-dialogues-2"), "unspecified")

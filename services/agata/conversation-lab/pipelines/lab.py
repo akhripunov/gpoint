@@ -31,6 +31,7 @@ USER_AGENT = "AGATA-Conversation-Lab/1.0 (dataset provenance and local normaliza
 MIN_FREE = 15 * 1024**3
 EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b")
 PHONE_CANDIDATE_RE = re.compile(r"(?<!\w)\+?\d[\d ().-]{7,}\d(?!\w)")
+DATE_CANDIDATE_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}[-/.]\d{1,2}[-/.]\d{1,2}(?:[-/.]\d{1,2})?(?!\d)")
 TAG_RE = re.compile(r"<[^>]{1,300}>")
 
 
@@ -446,6 +447,8 @@ def skip_records(iterator, n):
 
 def is_pii(text):
     if EMAIL_RE.search(text): return True
+    # Date-like ISO and year-first numeric strings frequently pass generic digit-count rules.
+    if DATE_CANDIDATE_RE.search(text): return False
     for match in PHONE_CANDIDATE_RE.finditer(text):
         value=match.group(); digits=re.sub(r"\D","",value)
         if not 10 <= len(digits) <= 15: continue
@@ -456,6 +459,9 @@ def is_pii(text):
             if len(groups)>=3 and ((len(groups[-1])==2 and len(groups[-2])==2) or (len(groups[-1])==4 and len(groups[-2])==3)):
                 return True
         if len(groups)>=4 and len(groups[-1])==2 and len(groups[-2])==2:
+            return True
+        group_lengths=[len(group) for group in groups]
+        if len(digits)==10 and group_lengths in ([3,3,4], [3,4,3]):
             return True
     return False
 
