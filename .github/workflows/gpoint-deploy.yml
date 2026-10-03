@@ -101,22 +101,11 @@ jobs:
       - name: Verify receipt, canonical preflight, apply and persist evidence
         id: execute
         run: node scripts/automated-release.mjs
-      - name: Preserve release result even when apply fails
+      - name: Preserve release result and canonical manifests as immutable evidence
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gpoint-production-result-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.RELEASE_RESULT }}
-          if-no-files-found: warn
-          retention-days: 30
-      - name: Preserve canonical manifests
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gpoint-manifests-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ env.GPOINT_RELEASE_EVIDENCE }}/
-          retention-days: 30
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_assets.py publish evidence
 
   publish:
     needs: [validate, deploy]
@@ -139,10 +128,9 @@ jobs:
           ref: ${{ github.sha }}
       - name: Read saved release evidence
         if: needs.deploy.outputs.status != ''
-        uses: actions/download-artifact@v4
-        with:
-          name: gpoint-production-result-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/release-evidence
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_assets.py read-result
       - name: Publish preflight result to GPoint Linear
         if: always()
         env:

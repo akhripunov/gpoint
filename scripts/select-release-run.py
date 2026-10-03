@@ -10,6 +10,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from release_assets import resolve_asset
 from network_retry import NetworkUnavailable, RetryBudget, retry_network_read
 
 REPO = 'akhripunov/gpoint'
@@ -71,14 +72,12 @@ def main():
         raise RuntimeError('Candidate is no longer origin/main; prepare the new candidate')
     runs = github(f'actions/workflows/gpoint-prepare.yml/runs?branch=main&head_sha={sha}&per_page=100')['workflow_runs']
     selected = select_run(sha, runs)
-    artifacts = github(f"actions/runs/{selected['id']}/artifacts")['artifacts']
-    matches = [a for a in artifacts if a['name'] == f"gpoint-release-{sha}-{selected['id']}-{selected.get('run_attempt', 1)}" and not a['expired']]
-    if len(matches) != 1:
-        raise RuntimeError('The immutable candidate artifact is missing or expired')
+    asset = resolve_asset('prepare', sha, str(selected['id']), str(selected.get('run_attempt', 1)),
+                          'bundle.zip', github)
     if os.environ.get('PREPARE_RUN_ID') and (str(selected['id']) != os.environ['PREPARE_RUN_ID'] or str(selected.get('run_attempt', 1)) != os.environ.get('PREPARE_RUN_ATTEMPT')):
         raise RuntimeError('Prepare run/attempt changed after selection')
     with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-        output.write(f"run_id={selected['id']}\nrun_attempt={selected.get('run_attempt', 1)}\nartifact_id={matches[0]['id']}\ncandidate={sha}\n")
+        output.write(f"run_id={selected['id']}\nrun_attempt={selected.get('run_attempt', 1)}\nartifact_id={asset['id']}\ncandidate={sha}\n")
         state = os.environ.get('NETWORK_RETRY_BUDGET_STATE')
         used = Path(state).read_text().strip() if state and Path(state).exists() else '0'
         output.write(f'network_retry_budget_used_seconds={used}\n')

@@ -13,6 +13,7 @@ import zipfile
 import hashlib
 from datetime import datetime, timezone
 
+from release_assets import resolve_asset
 from sync_agents_to_linear import graphql_request, sync_document, SyncError
 
 DOCUMENTS = {
@@ -36,34 +37,55 @@ def github_json(path, token=None):
         with urllib.request.urlopen(request, timeout=20) as response:
             return json.loads(response.read())
     except Exception as exc:
-        raise SyncError(f'GitHub current-state read failed: {type(exc).__name__}') from exc
+        error = SyncError(f'GitHub current-state read failed: {type(exc).__name__}')
+        error.http_status = getattr(exc, 'code', None)
+        raise error from exc
 
 
 def artifact_json(run_id, prefix):
     data = github_json(f'repos/{REPOSITORY}/actions/runs/{run_id}/artifacts')
     matches = [a for a in data.get('artifacts', []) if a.get('name', '').startswith(prefix) and not a.get('expired')]
+    if not matches:
+        run = github_json(f'repos/{REPOSITORY}/actions/runs/{run_id}')
+        if (run.get('path') != '.github/workflows/gpoint-deploy.yml'
+                or run.get('head_branch') != 'main' or run.get('event') != 'workflow_dispatch'):
+            raise SyncError('Unverified Deploy result provenance')
+        try:
+            asset = resolve_asset('evidence', run['head_sha'], str(run_id), str(run['run_attempt']),
+                                  'result.zip', lambda route: github_json(f'repos/{REPOSITORY}/{route}'))
+        except SyncError as exc:
+            if getattr(exc, 'http_status', None) == 404:
+                raise SyncError(f'Expected one canonical result artifact for run {run_id}; found 0') from exc
+            raise
+        except (RuntimeError, KeyError) as exc:
+            raise SyncError(f'Immutable result validation failed: {type(exc).__name__}') from exc
+        matches = [dict(asset, archive_download_url=f'https://api.github.com/repos/{REPOSITORY}/releases/assets/{asset["id"]}')]
     if len(matches) != 1:
         raise SyncError(f'Expected one canonical result artifact for run {run_id}; found {len(matches)}')
     request = urllib.request.Request(matches[0]['archive_download_url'], headers={
-        'Accept': 'application/vnd.github+json',
+        'Accept': 'application/octet-stream',
         'Authorization': f"Bearer {os.environ.get('GITHUB_TOKEN', '')}",
     })
     class SafeRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             # Artifact endpoints redirect to signed object storage URLs. Never
             # forward the GitHub bearer token to a different host.
+            if urlparse(newurl).scheme != 'https':
+                raise SyncError('Result redirect must use HTTPS')
             if urlparse(newurl).netloc != urlparse(req.full_url).netloc:
                 return urllib.request.Request(newurl, headers={'Accept': 'application/octet-stream'})
             return super().redirect_request(req, fp, code, msg, headers, newurl)
     try:
         with urllib.request.build_opener(SafeRedirect).open(request, timeout=30) as response:
-            payload = response.read()
+            payload = response.read(16 * 1024**2 + 1)
+            if len(payload) > 16 * 1024**2:
+                raise SyncError('Result evidence exceeds size limit')
             digest = matches[0].get('digest', '')
             if not re.fullmatch(r'sha256:[a-f0-9]{64}', digest) or hashlib.sha256(payload).hexdigest() != digest[7:]:
                 raise SyncError(f'Canonical result artifact checksum mismatch for run {run_id}')
             archive = zipfile.ZipFile(io.BytesIO(payload))
             files = [name for name in archive.namelist() if name.endswith('.json')]
-            if len(files) != 1:
+            if len(files) != 1 or len(archive.infolist()) != 1 or archive.infolist()[0].file_size > 16 * 1024**2:
                 raise SyncError(f'Expected one JSON result in run {run_id} artifact')
             return json.loads(archive.read(files[0]))
     except SyncError:

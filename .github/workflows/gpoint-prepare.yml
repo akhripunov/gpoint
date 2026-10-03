@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   actions: read
 
 concurrency:
@@ -60,21 +60,14 @@ jobs:
         run: python scripts/prepare-release.py "$CANDIDATE_SHA" "$RUNNER_TEMP/gpoint-bundle"
       - name: Save exact candidate images and readiness receipt
         if: github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v4
-        with:
-          name: gpoint-release-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/gpoint-bundle/
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_assets.py publish prepare
       - name: Save branch rehearsal receipt without a duplicate image archive
         if: github.ref != 'refs/heads/main'
-        uses: actions/upload-artifact@v4
-        with:
-          name: gpoint-rehearsal-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/gpoint-bundle/receipt.json
-          if-no-files-found: error
-          retention-days: 7
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_assets.py publish rehearsal
       - name: Owner summary
         env:
           CANDIDATE_SHA: ${{ github.sha }}
@@ -99,6 +92,9 @@ jobs:
           fi
 
   publish:
+    permissions:
+      contents: read
+      actions: read
     needs: prepare
     if: always() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
