@@ -43,6 +43,14 @@ approval semantics; the existing canonical tooling and invariants still apply.
 - Before dispatching, check whether the required workflow is already running. Never create a duplicate production Deploy, and do not cancel or rerun an active release unless necessary.
 - If CLI/API access, authorization, or the runner is unavailable, stop and report the concrete blocker. Do not fall back to browser UI or another unverified launch path.
 
+## GitHub access preflight
+
+- Before any task that needs GitHub CLI/API access, run `python3 scripts/github-preflight.py` from the repository root. Continue only on `GITHUB_PREFLIGHT=PASS`.
+- The preflight is read-only and checks DNS/TLS reachability to `github.com` and `api.github.com`, the effective `gh` credential against the authenticated-user API, repository read access, and Actions run read access.
+- Use its stable classifications (`NETWORK_BLOCKED`, `AUTH_INVALID`, `PERMISSION_DENIED`, `GITHUB_UNAVAILABLE`) to report the first proven failure. A local `gh auth status` error alone does not prove revocation; only an authenticated API rejection does.
+- Never print or request tokens in chat. To recover, first resolve the classified network or access problem. If reauthentication is actually needed, Codex runs the official `gh auth login` flow and asks the OWNER only to confirm the official GitHub authorization page when presented. Do not ask the OWNER to use Terminal or paste credentials.
+- Sandbox command networking is configured in the GPoint-only `.codex/config.toml` profile. It inherits workspace permissions and allows only `github.com` and `api.github.com`; do not broaden domains or disable the sandbox.
+
 ## VPS policy
 
 The VPS is a runtime and artifact target, not a development workspace. Application fixes must be committed and pushed before deployment. MaxiBot files, containers, database, domain, and release state are outside GPoint scope and must not be touched.

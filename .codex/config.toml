@@ -1,0 +1,17 @@
+# Restrict sandboxed command networking for this trusted GPoint checkout.
+# The profile inherits workspace filesystem access and permits HTTPS only to
+# GitHub's web and API hosts. It does not enable Full Access.
+default_permissions = "gpoint-github"
+
+[permissions.gpoint-github]
+extends = ":workspace"
+
+[permissions.gpoint-github.network]
+enabled = true
+mode = "limited"
+allow_local_binding = false
+allow_upstream_proxy = false
+domains = { "github.com" = "allow", "api.github.com" = "allow" }
+
+[features.network_proxy]
+enabled = true
