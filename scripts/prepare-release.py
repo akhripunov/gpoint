@@ -42,6 +42,23 @@ def run(*args, cwd=ROOT, env=None, capture=False):
     return result.stdout.strip() if capture else None
 
 
+def disposable_migration_tenant_inventory(postgres, database):
+    """Read every tenant from the isolated rehearsal DB, failing closed if absent."""
+    if not re.fullmatch(r'[a-z0-9_]+', database):
+        raise RuntimeError('invalid disposable AGATA database name')
+    output = run('docker', 'exec', postgres, 'psql', '-X', '-U', 'postgres', '-d', database,
+                 '-v', 'ON_ERROR_STOP=1', '-At', '-c',
+                 'SELECT id::text FROM agata.tenants ORDER BY id;', capture=True)
+    tenants = []
+    try:
+        tenants = sorted({str(uuid.UUID(line.strip())) for line in output.splitlines() if line.strip()})
+    except ValueError as exc:
+        raise RuntimeError('complete disposable AGATA tenant inventory contains an invalid UUID') from exc
+    if not tenants:
+        raise RuntimeError('complete disposable AGATA tenant inventory is empty')
+    return ','.join(tenants)
+
+
 def verify_saved_images(archive, images, sha, temp_root):
     """Rehearse production import/capture/parity/reuse in a private containerd store."""
     started = time.monotonic()
@@ -197,6 +214,7 @@ def prepare(sha, output, *, postgres_only=False):
             ('workspace_tests', ('pnpm', 'test')),
             ('release_tests', ('pnpm', 'test:release')),
             ('linear_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_*linear*.py')),
+            ('prepare_inventory_tests', (sys.executable, '-m', 'pytest', '-q', 'tests/test_prepare_release_migration_inventory.py')),
             ('artifact_cache_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_prepared_artifact_cache.py')),
         )
         for name, command in commands:
@@ -209,6 +227,8 @@ def prepare(sha, output, *, postgres_only=False):
     key = base64.b64encode(b'a' * 32).decode()
     env.update(AGATA_TENANT_ID='7508f36f-774a-48aa-8c6b-42f6f160415d',
                AGATA_INTERNAL_API_TOKEN='disposable-test-token', AGATA_LLM_PROVIDER='disabled')
+    # Never inherit an operator's or CI runner's inventory into a disposable rehearsal.
+    env.pop('AGATA_MIGRATION_TENANT_IDS', None)
     for name in ('MESSAGE_AEAD_KEY', 'REQUEST_FINGERPRINT_HMAC_KEY', 'RETRIEVAL_QUERY_HMAC_KEY',
                  'RESPONSE_FINGERPRINT_HMAC_KEY', 'SHADOW_CANDIDATE_HMAC_KEY'):
         env[f'AGATA_{name}'] = key
@@ -282,6 +302,14 @@ def prepare(sha, output, *, postgres_only=False):
             if name.startswith('AGATA_') and name not in ('AGATA_DATABASE_URL', 'AGATA_TEST_DATABASE_URL', 'AGATA_RLS_TEST_DATABASE_URL'):
                 container_env.extend(['-e', name])
         with measured_stage('agata_artifact_migration_and_health', timings):
+            # The production candidate image creates the disposable AGATA schema
+            # through agata0009. Then read the complete fixture inventory from
+            # this exact DB as its isolated administrator before agata0010 runs.
+            run('docker', 'run', '--rm', '--network', network, *container_env,
+                f'gpoint-agata-runtime:{sha}', 'alembic', 'upgrade', 'agata0009', env=env)
+            env['AGATA_MIGRATION_TENANT_IDS'] = disposable_migration_tenant_inventory(
+                postgres, 'runtime_agata_test')
+            container_env.extend(['-e', 'AGATA_MIGRATION_TENANT_IDS'])
             for _ in range(2):  # Actual artifact migrations must also be idempotent.
                 run('docker', 'run', '--rm', '--network', network, *container_env,
                     f'gpoint-agata-runtime:{sha}', 'alembic', 'upgrade', 'head', env=env)
