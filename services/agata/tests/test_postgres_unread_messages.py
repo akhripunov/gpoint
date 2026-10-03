@@ -21,7 +21,8 @@ def test_incoming_read_state_has_no_default_that_marks_new_messages_read():
 
 
 @pytest.mark.skipif(not DSN, reason='AGATA_TEST_DATABASE_URL not set')
-def test_migration_baselines_existing_messages_across_tenants_without_marking_new_messages():
+@pytest.mark.parametrize('restricted_role', [False, True])
+def test_migration_baselines_existing_messages_across_tenants_without_marking_new_messages(restricted_role):
     # Dedicated database owned by this test; never reset the shared suite database.
     admin = create_engine(DSN, isolation_level='AUTOCOMMIT')
     db = 'unread_migration_' + uuid4().hex + '_agata_test'
@@ -30,7 +31,15 @@ def test_migration_baselines_existing_messages_across_tenants_without_marking_ne
     from sqlalchemy.engine import make_url
     url = make_url(DSN).set(database=db)
     engine = create_engine(url)
-    env = dict(os.environ, AGATA_DATABASE_URL=url.render_as_string(hide_password=False))
+    migration_url = url
+    if restricted_role:
+        rls_dsn = os.getenv('AGATA_RLS_TEST_DATABASE_URL')
+        assert rls_dsn, 'restricted migration regression requires its dedicated non-bypass role'
+        migration_url = make_url(rls_dsn).set(database=db)
+        with admin.connect() as conn:
+            conn.execute(text(f'ALTER DATABASE {db} OWNER TO {migration_url.username}'))
+    env = dict(os.environ, AGATA_DATABASE_URL=migration_url.render_as_string(hide_password=False))
+    env.pop('AGATA_MIGRATION_TENANT_IDS', None)
     try:
         with engine.begin() as conn:
             conn.execute(text('CREATE EXTENSION vector; CREATE EXTENSION pgcrypto;'))
@@ -52,6 +61,13 @@ def test_migration_baselines_existing_messages_across_tenants_without_marking_ne
                 conn.execute(text("INSERT INTO agata.conversations(id,tenant_id,user_id,character_id,relationship_id,scope,external_id,started_at) VALUES (:v,:t,:u,:c,:r,'real_world',:external,now())"), {'v':conversation,'t':tenant,'u':u,'c':c,'r':r,'external':f'gpoint-chat:{u}:{c}'})
                 conn.execute(text("INSERT INTO agata.messages(id,tenant_id,user_id,character_id,conversation_id,scope,idempotency_key,role,occurred_at) VALUES (CAST(:m AS uuid),:t,:u,:c,:v,'real_world',CAST(:m AS text),'assistant',now())"), {'m':m,'t':tenant,'u':u,'c':c,'v':conversation})
                 mids.append(m)
+        if restricted_role:
+            with pytest.raises(subprocess.CalledProcessError) as failure:
+                upgrade('head')
+            assert 'AGATA_MIGRATION_TENANT_IDS' in failure.value.stderr
+            with engine.begin() as conn:
+                assert conn.scalar(text('SELECT version_num FROM agata.alembic_version')) == 'agata0009'
+            env['AGATA_MIGRATION_TENANT_IDS'] = ','.join(tenants)
         upgrade('head')
         assert 'incoming_read_at' in {c['name'] for c in inspect(engine).get_columns('messages', schema='agata')}
         with engine.begin() as conn:
@@ -203,3 +219,30 @@ async def test_summary_is_not_limited_to_the_first_inbox_page(dialogue):
     # A separate HTTP client/new session gets the same persisted state.
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://reopen',headers=client.headers) as fresh:
         assert (await fresh.get(f'/internal/v1/users/{user}/unread')).json()==result.json()
+
+@pytest.mark.skipif(not DSN, reason='AGATA_TEST_DATABASE_URL not set')
+@pytest.mark.asyncio(loop_scope='module')
+async def test_matching_external_id_in_another_tenant_cannot_leak_or_partially_ack(dialogue):
+    from app.db.models import Tenant
+    client,user,chars,mids,add=dialogue
+    tenant,u,char,rel,conv,foreign=[uuid4() for _ in range(6)]
+    now=datetime.now(UTC)
+    async with SessionFactory() as session,session.begin():
+        await set_tenant_context(session,str(tenant))
+        session.add(Tenant(id=tenant));await session.flush()
+        session.add(User(id=u,tenant_id=tenant,external_id=user))
+        session.add(Character(id=char,tenant_id=tenant,external_id=str(chars[0]),name='Other tenant'))
+        await session.flush()
+        session.add(Relationship(id=rel,tenant_id=tenant,user_id=u,character_id=char,scope=Scope.real_world,status='ACTIVE',started_at=now));await session.flush()
+        session.add(Conversation(id=conv,tenant_id=tenant,user_id=u,character_id=char,relationship_id=rel,scope=Scope.real_world,external_id=f'gpoint-chat:{user}:{chars[0]}',started_at=now));await session.flush()
+        session.add(Message(id=foreign,tenant_id=tenant,user_id=u,character_id=char,conversation_id=conv,scope=Scope.real_world,idempotency_key=str(foreign),role='assistant',occurred_at=now))
+    summary=await client.get(f'/internal/v1/users/{user}/unread')
+    assert summary.status_code==200,summary.text
+    assert sum(row['unreadCount'] for row in summary.json()['items'])==3
+    ack=await client.post(f'/internal/v1/users/{user}/characters/{chars[0]}/messages/read',json={'messageIds':[mids[0],str(foreign)]})
+    assert ack.status_code==404,ack.text
+    async with SessionFactory() as session,session.begin():
+        await set_tenant_context(session,get_settings().tenant_id)
+        assert await session.scalar(select(Message.incoming_read_at).where(Message.id==UUID(mids[0]))) is None
+        await set_tenant_context(session,str(tenant))
+        assert await session.scalar(select(Message.incoming_read_at).where(Message.id==foreign)) is None

@@ -38,7 +38,7 @@ export function MessagesUnreadProvider({ userId, children }: { userId: string; c
   useEffect(() => {
     if (!summary.data) return;
     const signature = JSON.stringify(summary.data.items);
-    if (priorSignature.current !== null && priorSignature.current !== signature) void queryClient.invalidateQueries({ queryKey: ['messages-inbox'] });
+    if (priorSignature.current !== signature) void queryClient.invalidateQueries({ queryKey: ['messages-inbox'] });
     priorSignature.current = signature;
   }, [summary.data, queryClient]);
   useEffect(() => () => {

@@ -3,6 +3,8 @@
 Revision ID: agata0010
 Revises: agata0009
 """
+import os
+from uuid import UUID
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import inspect, text
@@ -22,9 +24,22 @@ def upgrade():
     # enabled: explicitly enter each tenant, including non-default tenants.
     bind.execute(text('LOCK TABLE agata.messages IN SHARE ROW EXCLUSIVE MODE'))
     prior = bind.scalar(text("SELECT current_setting('app.tenant_id', true)"))
+    # A forced-RLS owner cannot discover hidden tenants. Never mistake an empty
+    # inventory for success. A restricted migrator needs a trusted, explicit
+    # inventory supplied by the operator; privileged migrators enumerate all.
+    privileged = bind.scalar(text("SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname=current_user"))
+    if privileged:
+        tenants = list(bind.scalars(text('SELECT id FROM agata.tenants ORDER BY id')))
+    else:
+        inventory = os.environ.get('AGATA_MIGRATION_TENANT_IDS', '')
+        if not inventory.strip():
+            raise RuntimeError('agata0010 requires a complete AGATA_MIGRATION_TENANT_IDS inventory for a non-bypass migrator')
+        tenants = sorted({UUID(value.strip()) for value in inventory.split(',')})
     try:
-        for tenant in bind.scalars(text('SELECT id FROM agata.tenants')):
+        for tenant in tenants:
             bind.execute(text("SELECT set_config('app.tenant_id', :tenant, true)"), {'tenant': str(tenant)})
+            if not bind.scalar(text('SELECT EXISTS(SELECT 1 FROM agata.tenants WHERE id=:tenant)'), {'tenant': tenant}):
+                raise RuntimeError(f'agata0010 tenant inventory contains an unavailable tenant: {tenant}')
             bind.execute(text("""
                 UPDATE agata.messages AS m SET incoming_read_at = transaction_timestamp()
                 FROM agata.conversations AS c

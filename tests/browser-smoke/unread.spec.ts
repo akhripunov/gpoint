@@ -99,3 +99,39 @@ for(const [width,height] of [[390,844],[360,800],[393,852],[430,932]])test(`unre
   await expect(page.locator('vite-error-overlay')).toHaveCount(0);expect(errors).toEqual([]);
   await page.screenshot({path:`test-results/browser-smoke/unread-${width}-99plus.png`});
 });
+
+test('account change cancels pending old-owner summary in a mounted provider',async({page})=>{
+  let oldStarted=false;let release=()=>{};let newCalls=0;
+  await page.route('http://127.0.0.1:5199/auth/browser',route=>route.fulfill({headers:{'access-control-allow-origin':'http://127.0.0.1:5189','access-control-allow-headers':'authorization,content-type'},contentType:'application/json',body:JSON.stringify({accessToken:route.request().postDataJSON()?.testKey==='2'?'token-b':'token-a'})}));
+  await page.route('http://127.0.0.1:5199/me',route=>route.fulfill({headers:{'access-control-allow-origin':'http://127.0.0.1:5189','access-control-allow-headers':'authorization,content-type'},contentType:'application/json',body:JSON.stringify({id:'fixture'})}));
+  await page.route('http://127.0.0.1:5199/messages/unread',async route=>{
+    if(route.request().method()==='OPTIONS'){await route.fulfill({status:204,headers:{'access-control-allow-origin':'http://127.0.0.1:5189','access-control-allow-headers':'authorization,content-type'}});return;}
+    const old=route.request().headers().authorization==='Bearer token-a';
+    if(old){oldStarted=true;await new Promise<void>(resolve=>{release=resolve;});}else newCalls++;
+    try{await route.fulfill({headers:{'access-control-allow-origin':'http://127.0.0.1:5189'},contentType:'application/json',body:JSON.stringify({totalUnread:old?99:2,items:[{creatorId:old?'old':'new',unreadCount:old?99:2}]})});}catch(error){if(!route.request().failure())throw error;}
+  });
+  const harness='/@fs'+process.cwd()+'/tests/browser-smoke/unread-harness.tsx';
+  await page.route('**/unread-provider-harness',route=>route.fulfill({contentType:'text/html',body:`<div id="root"></div><script type="module">import RefreshRuntime from "/@react-refresh"; RefreshRuntime.injectIntoGlobalHook(window); window.$RefreshReg$=()=>{}; window.$RefreshSig$=()=>type=>type; window.__vite_plugin_react_preamble_installed__=true;</script><script type="module" src="${harness}"></script>`}));
+  await page.goto('/unread-provider-harness');await expect.poll(()=>oldStarted).toBe(true);
+  await page.getByRole('button',{name:'Switch account'}).click();await expect(page.getByLabel('unread owner')).toHaveText('account-b:2');
+  await page.evaluate(()=>{const seen:string[]=[];Object.assign(window,{unreadOwnerSeen:seen});new MutationObserver(()=>seen.push(document.querySelector('output')!.textContent!)).observe(document.querySelector('output')!,{subtree:true,childList:true,characterData:true});});
+  release();await page.waitForTimeout(100);await expect(page.getByLabel('unread owner')).toHaveText('account-b:2');
+  expect(await page.evaluate(()=>(window as any).unreadHarnessClient.getQueryData(['messages-unread','account-a']))).toBeUndefined();
+  const calls=newCalls;await page.clock.install();await page.clock.fastForward(3500);await expect.poll(()=>newCalls).toBeGreaterThan(calls);
+  expect(await page.evaluate(()=>(window as any).unreadOwnerSeen.some((text:string)=>text.includes('99')))).toBe(false);
+});
+
+test('first summary reconciles an Inbox snapshot taken before a new incoming dialogue',async({page})=>{
+  await installMiniAppBrowserMocks(page,{chatHistoryAccepted:true});let calls=0;
+  await page.route('http://127.0.0.1:5199/messages',async route=>{
+    if(route.request().method()==='OPTIONS'){await route.fallback();return;}
+    calls++;await route.fulfill({headers:{'access-control-allow-origin':'http://127.0.0.1:5189'},contentType:'application/json',body:JSON.stringify({items:calls===1?[]:[{creator:{id:'browser-smoke-model-id',slug:'models_hub',displayName:'Models Hub',verified:true},lastMessagePreview:'New arrival',lastMessageRole:'assistant',lastMessageAt:new Date().toISOString(),unreadCount:1}],nextCursor:null})});
+  });
+  await page.route('http://127.0.0.1:5199/messages/unread',async route=>{
+    if(route.request().method()==='OPTIONS'){await route.fallback();return;}
+    await expect.poll(()=>calls).toBeGreaterThan(0);
+    await route.fulfill({headers:{'access-control-allow-origin':'http://127.0.0.1:5189'},contentType:'application/json',body:JSON.stringify({totalUnread:1,items:[{creatorId:'browser-smoke-model-id',unreadCount:1}]})});
+  });
+  await page.goto('/messages');await expect(page.locator('.bottom-nav .messages-unread-badge')).toHaveText('1');
+  await expect(page.getByRole('button',{name:/Models Hub/})).toBeVisible();
+});

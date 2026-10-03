@@ -1,0 +1,35 @@
+{
+  "checked_at": "2026-10-03T10:57:14.166770+00:00",
+  "real_http_path": "GPoint API :3197 \u2192 AGATA :8197 \u2192 isolated PostgreSQL",
+  "before": {
+    "totalUnread": 3,
+    "items": [
+      {
+        "creatorId": "cmusa28c60000u7ag9cipcktd",
+        "unreadCount": 2
+      },
+      {
+        "creatorId": "cmusa28co0002u7agx6k7gnog",
+        "unreadCount": 1
+      }
+    ]
+  },
+  "after_one_visible_ack": {
+    "totalUnread": 2,
+    "items": [
+      {
+        "creatorId": "cmusa28c60000u7ag9cipcktd",
+        "unreadCount": 1
+      },
+      {
+        "creatorId": "cmusa28co0002u7agx6k7gnog",
+        "unreadCount": 1
+      }
+    ]
+  },
+  "history_read_only": true,
+  "duplicate_ack_idempotent": true,
+  "new_session_persistence": true,
+  "foreign_user_status": 404,
+  "production_touched": false
+}
