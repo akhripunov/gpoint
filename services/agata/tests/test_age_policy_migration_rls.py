@@ -86,6 +86,6 @@ def test_self_attestation_policy_migration_sets_tenant_context_under_forced_rls(
                 {"tenant": TENANT_ID},
             )
             assert policy == "true"
-            assert connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0009"
+            assert connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0010"
     finally:
         engine.dispose()
