@@ -26,6 +26,7 @@ def test_self_attestation_policy_migration_sets_tenant_context_under_forced_rls(
     env = dict(os.environ)
     env["AGATA_DATABASE_URL"] = DATABASE_URL
     env["AGATA_TENANT_ID"] = TENANT_ID
+    env["AGATA_MIGRATION_TENANT_IDS"] = TENANT_ID
     subprocess.run(
         [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "agata0007"],
         cwd=ROOT,
@@ -86,6 +87,6 @@ def test_self_attestation_policy_migration_sets_tenant_context_under_forced_rls(
                 {"tenant": TENANT_ID},
             )
             assert policy == "true"
-            assert connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0009"
+            assert connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0010"
     finally:
         engine.dispose()

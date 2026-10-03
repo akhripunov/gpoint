@@ -619,3 +619,11 @@ body:has(.messages-screen) .bottom-nav{display:grid}
 .post-card[tabindex="0"]{cursor:pointer}
 .age-assurance-gate{min-height:100dvh;display:flex;flex-direction:column;justify-content:center;gap:14px;padding:28px;background:#080d18;color:#f7f2ef}.age-assurance-gate h1{font-family:var(--font-display,Georgia,serif);font-size:36px;line-height:1.08;margin:0}.age-assurance-gate p:not(.eyebrow){max-width:34rem;color:#b7becd;font-size:16px;line-height:1.55}.age-assurance-gate button{align-self:flex-start;min-height:50px;padding:0 28px;border:0;border-radius:16px;background:#e9b1a6;color:#201614;font-family:inherit;font-size:16px;font-weight:700}
 .chat-provider-unavailable{margin:12px 16px;padding:12px 14px;border:1px solid rgba(233,178,165,.35);border-radius:14px;background:rgba(233,178,165,.08);color:var(--text-secondary,#b7bac7);font-size:13px;line-height:1.45}
+
+/* Unread accounting extends the existing Messages layout and GPoint tokens. */
+.messages-unread-badge{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:var(--gpoint-radius-pill);background:var(--gpoint-accent-primary);color:var(--gpoint-background-primary);font-size:10px;font-weight:700;line-height:18px;white-space:nowrap}
+.nav-icon-with-badge{position:relative;display:inline-flex;align-items:center;justify-content:center}
+.nav-icon-with-badge .messages-unread-badge{position:absolute;top:-6px;left:15px;border:2px solid var(--gpoint-background-primary);box-sizing:content-box}
+.messages-thread-meta{display:grid;justify-items:end;gap:6px;align-self:flex-start;padding-top:2px;flex-shrink:0}
+.messages-thread-meta time{color:var(--gpoint-text-muted);font-size:10px;white-space:nowrap}
+.messages-thread.unread .messages-thread-copy>span{color:var(--gpoint-text-primary);font-weight:500}

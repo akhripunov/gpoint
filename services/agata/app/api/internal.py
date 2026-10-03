@@ -46,6 +46,7 @@ from app.memory.embedding import HuggingFaceFreeEmbeddingProvider
 from app.memory.retrieval import EmbeddingProvider, HybridRetrievalService
 from app.messages.crypto import AeadCrypto, RequestFingerprinter
 from app.messages.service import IngestMessage, MessageIngestionService
+from app.messages.unread import incoming_messages, unread_counts
 from app.responses.mac_worker import decrypt_claimed_request, encrypt_worker_result
 from app.responses.pipeline import ResponseOrchestrator, ResponseProvider, ResponseRequest
 from app.responses.provider_factory import build_response_provider
@@ -363,6 +364,7 @@ async def list_gpoint_conversations(
             .limit(limit + 1)
         )).all()
         page = rows[:limit]
+        counts = await unread_counts(session, tenant_id, user.id, gpoint_user_id, [row[2] for row in page])
         items = []
         for conversation, message, gpoint_character_id in page:
             items.append({
@@ -371,6 +373,7 @@ async def list_gpoint_conversations(
                 "lastMessagePreview": _decrypt_message(message, tenant_id, user_id=user.id)[:120],
                 "lastMessageRole": message.role,
                 "lastMessageAt": message.occurred_at.isoformat(),
+                "unreadCount": counts.get(gpoint_character_id, 0),
             })
         next_cursor = None
         if len(rows) > limit and page:
@@ -436,9 +439,72 @@ async def list_gpoint_messages(
             **({"clientMessageId": message.idempotency_key} if message.role == "user" else {}),
             "text": _decrypt_message(message, tenant_id, user_id=user.id),
             "occurredAt": message.occurred_at.isoformat(),
+            "incomingReadAt": message.incoming_read_at.isoformat() if message.incoming_read_at else None,
         } for message in reversed(page)]
         next_cursor = _encode_message_cursor(page[-1]) if len(rows) > limit and page else None
         return {"items": items, "nextCursor": next_cursor}
+
+
+async def unread_user(session: AsyncSession, tenant_id: UUID, external_id: str):
+    if not 1 <= len(external_id) <= 255 or "\x00" in external_id:
+        raise HTTPException(status_code=422, detail={"code": "invalid_identity"})
+    user = await session.scalar(select(User).where(
+        User.tenant_id == tenant_id, User.source_system == "gpoint",
+        User.external_id == external_id, User.deleted_at.is_(None),
+    ))
+    if user is not None:
+        consent = await session.scalar(select(Consent.id).where(
+            Consent.tenant_id == tenant_id, Consent.user_id == user.id,
+            Consent.purpose == "chat_history", Consent.revoked_at.is_(None),
+        ).limit(1))
+        if consent is None:
+            raise HTTPException(status_code=403, detail={"code": "chat_history_consent_required"})
+    return user
+
+
+@router.get("/users/{gpoint_user_id}/unread", dependencies=[Depends(require_internal_auth)])
+async def gpoint_unread(gpoint_user_id: str, session: AsyncSession = Depends(get_session)) -> dict:
+    tenant_id = UUID(get_settings().tenant_id)
+    async with session.begin():
+        await set_tenant_context(session, str(tenant_id))
+        user = await unread_user(session, tenant_id, gpoint_user_id)
+        if user is None:
+            return {"items": []}
+        counts = await unread_counts(session, tenant_id, user.id, gpoint_user_id)
+        return {"items": [{"gpointCharacterId": key, "unreadCount": counts[key]} for key in sorted(counts)]}
+
+
+class ReadMessagesRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    messageIds: list[UUID] = Field(min_length=1, max_length=100)
+
+
+@router.post("/users/{gpoint_user_id}/characters/{gpoint_character_id}/messages/read", dependencies=[Depends(require_internal_auth)])
+async def read_gpoint_messages(gpoint_user_id: str, gpoint_character_id: str, payload: ReadMessagesRequest,
+                              session: AsyncSession = Depends(get_session)) -> dict:
+    if not 1 <= len(gpoint_character_id) <= 255 or "\x00" in gpoint_character_id:
+        raise HTTPException(status_code=422, detail={"code": "invalid_identity"})
+    tenant_id = UUID(get_settings().tenant_id)
+    ids = sorted(set(payload.messageIds))
+    async with session.begin():
+        await set_tenant_context(session, str(tenant_id))
+        user = await unread_user(session, tenant_id, gpoint_user_id)
+        if user is None:
+            raise HTTPException(status_code=404, detail={"code": "messages_not_found"})
+        # Lock in stable ID order: concurrent duplicate acknowledgement cannot
+        # replace the first timestamp or deadlock on reversed batch ordering.
+        query = incoming_messages(tenant_id, user.id, gpoint_user_id).where(
+            Character.external_id == gpoint_character_id, Message.id.in_(ids),
+        ).order_by(Message.id).with_for_update(of=Message)
+        rows = list((await session.scalars(query)).all())
+        if len(rows) != len(ids):
+            raise HTTPException(status_code=404, detail={"code": "messages_not_found"})
+        now = datetime.now(UTC)
+        for message in rows:
+            if message.incoming_read_at is None:
+                message.incoming_read_at = now
+        await session.flush()
+        return {"acknowledgedMessageIds": [str(value) for value in ids]}
 
 
 class RespondRequest(BaseModel):

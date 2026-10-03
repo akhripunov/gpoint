@@ -29,6 +29,7 @@ export function buildAgataCharacterProfile(creator: { displayName: string; profi
 
 export function mapAgataError(error: unknown): HttpException {
   if (error instanceof AgataServiceError) {
+    if (error.status === 404 && error.code === 'messages_not_found') return new NotFoundException({ code: 'CHAT_MESSAGES_NOT_FOUND' });
     if (error.status === 404 && error.code === 'character_unavailable') return new NotFoundException({ code: 'CHAT_CHARACTER_UNAVAILABLE' });
     if (error.status === 409 && error.code === 'conversation_closed') return new HttpException({ code: 'CHAT_CONVERSATION_CLOSED' }, 409);
     if (error.status === 409 && error.code === 'idempotency_conflict') return new HttpException({ code: 'CHAT_IDEMPOTENCY_CONFLICT' }, 409);
@@ -57,6 +58,23 @@ function publicMessagesState(state: AgataChatState) {
     ageAssuranceRequired: state.ageAssuranceRequired,
     aiAvailable: process.env.AGATA_LLM_PROVIDER !== 'disabled' && process.env.AGATA_LLM_PROVIDER !== 'none',
   };
+}
+
+export function validateReadBatch(body: unknown): string[] {
+  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => key !== 'messageIds')) throw new BadRequestException({ code: 'invalid_read_batch' });
+  const ids = (body as { messageIds?: unknown }).messageIds;
+  if (!Array.isArray(ids) || ids.length < 1 || ids.length > 100 || ids.some(id => typeof id !== 'string' || !UUID_PATTERN.test(id))) throw new BadRequestException({ code: 'invalid_read_batch' });
+  return [...new Set(ids.map((id: string) => id.toLowerCase()))];
+}
+
+export function publicUnreadSummary(rows: Array<{ gpointCharacterId: string; unreadCount: number }>, eligible: ReadonlySet<string>) {
+  const items = rows.filter(row => eligible.has(row.gpointCharacterId)).map(row => {
+    if (!Number.isSafeInteger(row.unreadCount) || row.unreadCount < 0) throw new HttpException({ code: 'MESSAGES_TEMPORARILY_UNAVAILABLE' }, 503);
+    return { creatorId: row.gpointCharacterId, unreadCount: row.unreadCount };
+  });
+  const totalUnread = items.reduce((sum, row) => sum + row.unreadCount, 0);
+  if (!Number.isSafeInteger(totalUnread)) throw new HttpException({ code: 'MESSAGES_TEMPORARILY_UNAVAILABLE' }, 503);
+  return { totalUnread, items };
 }
 
 function authenticatedUser(headers: Record<string, string | undefined>): string {
@@ -103,6 +121,28 @@ async function recordChatEvent(userId: string, creatorId: string, eventType: str
 
 @Controller('messages')
 export class MessagesController {
+  @Get('unread')
+  async unread(@Headers() headers: Record<string, string | undefined>) {
+    const userId = authenticatedUser(headers);
+    const agata = createAgataIntegration();
+    if (!agata) return { totalUnread: 0, items: [] };
+    try {
+      const summary = await agata.unreadMessages(userId);
+      const ids = summary.items.map(item => item.gpointCharacterId);
+      const eligible = ids.length ? await prisma.creator.findMany({ where: { id: { in: ids }, profile: { status: 'APPROVED' } }, select: { id: true } }) : [];
+      return publicUnreadSummary(summary.items, new Set(eligible.map(creator => creator.id)));
+    } catch (error) { throw mapAgataError(error); }
+  }
+
+  @Post('creator/:creatorId/read')
+  async read(@Param('creatorId') creatorId: string, @Headers() headers: Record<string, string | undefined>, @Body() body: unknown) {
+    const userId = authenticatedUser(headers);
+    const ids = validateReadBatch(body);
+    await findApprovedCreator(creatorId);
+    try { return await agataOrUnavailable().markMessagesRead(userId, creatorId, ids); }
+    catch (error) { throw mapAgataError(error); }
+  }
+
   @Get('state')
   async state(@Headers() headers: Record<string, string | undefined>) {
     const userId = authenticatedUser(headers);
@@ -152,7 +192,7 @@ export class MessagesController {
         const creator = byId.get(item.gpointCharacterId);
         if (!creator) return null;
         const dto = await publicCreator(creator);
-        return { creator: { id: dto.id, slug: dto.slug, displayName: dto.displayName, avatarUrl: dto.avatarUrl, verified: dto.verified }, lastMessagePreview: item.lastMessagePreview, lastMessageRole: item.lastMessageRole, lastMessageAt: item.lastMessageAt };
+        return { creator: { id: dto.id, slug: dto.slug, displayName: dto.displayName, avatarUrl: dto.avatarUrl, verified: dto.verified }, lastMessagePreview: item.lastMessagePreview, lastMessageRole: item.lastMessageRole, lastMessageAt: item.lastMessageAt, unreadCount: item.unreadCount };
       }));
       const items = hydrated.filter((item) => item !== null);
       return { items, nextCursor: page.nextCursor };
@@ -224,7 +264,7 @@ export class MessagesController {
       return {
         status: 'completed' as const,
         userMessageId: body.clientMessageId,
-        response: { id: response.message_id, role: 'assistant' as const, text: response.text, occurredAt: new Date().toISOString() },
+        response: { id: response.message_id, role: 'assistant' as const, text: response.text, occurredAt: new Date().toISOString(), incomingReadAt: null },
       };
     } catch (error) {
       if (error instanceof HttpException) throw error;

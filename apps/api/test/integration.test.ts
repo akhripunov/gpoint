@@ -131,3 +131,48 @@ test('Telegram channel connection challenge is short-lived, single-use and cross
     globalThis.fetch = previousFetch; delete process.env.TELEGRAM_BOT_TOKEN; delete process.env.TELEGRAM_WEBHOOK_SECRET;
   }
 });
+
+test('Messages routes bind unread data to the session and filter unapproved creators', async () => {
+  const { createServer }=await import('node:http');
+  const { randomUUID }=await import('node:crypto');
+  const approved=await prisma.creator.create({data:{displayName:'Unread approved',slug:`unread-approved-${randomUUID()}`,profile:{create:{status:'APPROVED'}}}});
+  const hidden=await prisma.creator.create({data:{displayName:'Unread hidden',slug:`unread-hidden-${randomUUID()}`,profile:{create:{status:'DRAFT'}}}});
+  const ownUser=await prisma.user.create({data:{telegramUserId:BigInt(Date.now())+907n}});
+  const ownToken=createSession(ownUser.id);
+  const requestPaths:string[]=[];
+  const mid=randomUUID();
+  const upstream=createServer(async (req,res)=>{
+    requestPaths.push(req.url??'');
+    assert.equal(req.headers.authorization,'Bearer disposable-unread-test');
+    let raw='';for await(const chunk of req)raw+=chunk;
+    res.setHeader('content-type','application/json');
+    if(req.url?.endsWith('/read')){
+      assert.deepEqual(JSON.parse(raw),{messageIds:[mid]});
+      res.end(JSON.stringify({acknowledgedMessageIds:[mid]}));
+    }else res.end(JSON.stringify({items:[{gpointCharacterId:approved.id,unreadCount:2},{gpointCharacterId:hidden.id,unreadCount:7}]}));
+  });
+  await new Promise<void>(resolve=>upstream.listen(0,'127.0.0.1',resolve));
+  const prior={enabled:process.env.AGATA_ENABLED,url:process.env.AGATA_SERVICE_URL,token:process.env.AGATA_INTERNAL_API_TOKEN};
+  process.env.AGATA_ENABLED='true';process.env.AGATA_SERVICE_URL=`http://127.0.0.1:${(upstream.address() as any).port}`;process.env.AGATA_INTERNAL_API_TOKEN='disposable-unread-test';
+  try{
+    assert.equal((await call('/messages/unread','invalid')).response.status,401);
+    assert.equal(requestPaths.length,0);
+    const summary=await call('/messages/unread',ownToken);
+    assert.equal(summary.response.status,200);
+    assert.deepEqual(summary.data,{totalUnread:2,items:[{creatorId:approved.id,unreadCount:2}]});
+    assert.equal(requestPaths[0],`/internal/v1/users/${ownUser.id}/unread`);
+    const read=await call(`/messages/creator/${approved.id}/read`,ownToken,'POST',{messageIds:[mid]});
+    assert.equal(read.response.status,201);
+    assert.deepEqual(read.data,{acknowledgedMessageIds:[mid]});
+    assert.equal(requestPaths[1],`/internal/v1/users/${ownUser.id}/characters/${approved.id}/messages/read`);
+    assert.equal((await call(`/messages/creator/${hidden.id}/read`,ownToken,'POST',{messageIds:[mid]})).response.status,404);
+    assert.equal((await call(`/messages/creator/${approved.id}/read`,ownToken,'POST',{messageIds:[mid],userId:'foreign'})).response.status,400);
+    assert.equal(requestPaths.length,2);
+  }finally{
+    for(const [key,value] of Object.entries({AGATA_ENABLED:prior.enabled,AGATA_SERVICE_URL:prior.url,AGATA_INTERNAL_API_TOKEN:prior.token})) if(value===undefined)delete process.env[key];else process.env[key]=value;
+    await new Promise<void>((resolve,reject)=>upstream.close(error=>error?reject(error):resolve()));
+    await prisma.creatorProfile.deleteMany({where:{creatorId:{in:[approved.id,hidden.id]}}});
+    await prisma.creator.deleteMany({where:{id:{in:[approved.id,hidden.id]}}});
+    await prisma.user.delete({where:{id:ownUser.id}});
+  }
+});

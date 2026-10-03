@@ -128,3 +128,37 @@ test("provider-disabled chat remains readable and blocks sending without a fake 
   await expect(page.getByRole("button", { name: "Send message" })).toBeDisabled();
   await expect(page.getByText("Thanks for your message.", { exact: true })).toHaveCount(0);
 });
+
+test('unread badge persists across refresh and reading one dialogue keeps the other count', async ({page})=>{
+  let ownUnread=2;let inboxRequests=0;const reads:string[][]=[];
+  const ids=['2396112c-8425-440b-890a-14ebc49e94c2','3c3a4a49-4594-4e08-8daa-5bcbd470803d'];
+  await page.route('http://127.0.0.1:5199/messages**',async route=>{
+    const path=new URL(route.request().url()).pathname;
+    const headers={'access-control-allow-origin':'http://127.0.0.1:5189','access-control-allow-credentials':'true'};
+    if(route.request().method()==='OPTIONS'){await route.fallback();return;}
+    let data:any;
+    if(path==='/messages/unread')data={totalUnread:ownUnread+3,items:[{creatorId:'browser-smoke-model-id',unreadCount:ownUnread},{creatorId:'other-model',unreadCount:3}]};
+    else if(path==='/messages/state')data={enabled:true,chatHistory:true,disclosureRequired:false,onboardingCompleted:true,disclosureVersion:1,memoryOptIn:false,longTermMemory:false,aiAvailable:true};
+    else if(path==='/messages'){inboxRequests++;data={items:[{creator:{id:'browser-smoke-model-id',slug:'models_hub',displayName:'Models Hub',avatarUrl:null,verified:true},lastMessagePreview:'New incoming',lastMessageRole:'assistant',lastMessageAt:new Date().toISOString(),unreadCount:ownUnread},{creator:{id:'other-model',slug:'other_model',displayName:'Other model',avatarUrl:null,verified:false},lastMessagePreview:'Other incoming',lastMessageRole:'assistant',lastMessageAt:new Date().toISOString(),unreadCount:3}],nextCursor:null};}
+    else if(path.endsWith('/read')){const batch=route.request().postDataJSON().messageIds;reads.push(batch);ownUnread=0;data={acknowledgedMessageIds:batch};}
+    else if(path==='/messages/creator/browser-smoke-model-id')data={creator:{id:'browser-smoke-model-id',slug:'models_hub',displayName:'Models Hub'},items:ids.map((id,i)=>({id,role:'assistant',text:'New incoming '+i,occurredAt:new Date().toISOString(),incomingReadAt:ownUnread?null:new Date().toISOString()})),nextCursor:null};
+    else {await route.fallback();return;}
+    await route.fulfill({status:200,headers,contentType:'application/json',body:JSON.stringify(data)});
+  });
+  await page.goto('/messages');
+  await expect(page.locator('.bottom-nav .messages-unread-badge')).toHaveText('5');
+  await expect(page.locator('.messages-thread .messages-unread-badge')).toHaveText(['2','3']);
+  await page.reload();await expect(page.locator('.bottom-nav .messages-unread-badge')).toHaveText('5');
+  await page.getByRole('button',{name:/Models Hub/}).click();
+  await expect(page.getByText('New incoming 0',{exact:true})).toBeVisible();
+  await expect.poll(()=>reads.flat().length).toBe(2);
+  await page.getByRole('button',{name:'Back to messages'}).click();
+  await expect(page.locator('.bottom-nav .messages-unread-badge')).toHaveText('3');
+  await expect(page.locator('.messages-thread .messages-unread-badge')).toHaveText(['3']);
+  const count=inboxRequests;
+  await page.clock.install();await page.clock.fastForward(6500);
+  await expect(page.locator('.bottom-nav .messages-unread-badge')).toHaveText('3');
+  expect(inboxRequests).toBe(count);
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  await page.screenshot({path:'test-results/browser-smoke/unread-inbox-390.png'});
+});

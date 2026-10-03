@@ -61,7 +61,7 @@ from app.responses.pipeline import (
 from app.responses.provider_factory import build_response_provider
 
 _HEARTBEAT_PATH = Path("/tmp/agata-worker-heartbeat")
-_EXPECTED_ALEMBIC_HEAD = "agata0009"
+_EXPECTED_ALEMBIC_HEAD = "agata0010"
 
 
 @dataclass(frozen=True, slots=True)

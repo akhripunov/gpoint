@@ -401,6 +401,7 @@ class Message(TenantOwned):
             "coalesce(scenario_id, '00000000-0000-0000-0000-000000000000'::uuid)", persisted=True
         ),
     )
+    incoming_read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     content_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
@@ -458,6 +459,8 @@ class Message(TenantOwned):
             "language_code IN ('ru','en','mixed','unknown')", name="ck_message_language"
         ),
         Index("messages_conversation_time_idx", "tenant_id", "conversation_id", "occurred_at"),
+        Index("messages_unread_incoming_idx", "tenant_id", "user_id", "character_id", "conversation_id",
+              postgresql_where=text("role = 'assistant' AND incoming_read_at IS NULL AND deleted_at IS NULL AND scope = 'real_world' AND scenario_id IS NULL")),
         Index(
             "messages_idempotency_fingerprint_idx",
             "tenant_id",

@@ -316,6 +316,12 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
             assert len(conversations.json()["items"]) == 1
             assert conversations.json()["items"][0]["gpointCharacterId"] == character_key
             assert conversations.json()["items"][0]["externalConversationId"] == conversation_key
+            unread = await client.get(f"/internal/v1/users/{user_key}/unread", headers=headers)
+            assert unread.status_code == 200, unread.text
+            # Existing respond/replay assertions above prove duplicate ingestion;
+            # both requests must still result in exactly one unread incoming row.
+            assert unread.json()["items"] == [{"gpointCharacterId": character_key, "unreadCount": 1}]
+            assert conversations.json()["items"][0]["unreadCount"] == 1
             history_path = f"/internal/v1/users/{user_key}/characters/{character_key}/messages"
             history = await client.get(history_path, headers=headers)
             assert history.status_code == 200, history.text

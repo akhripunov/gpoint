@@ -28,7 +28,7 @@ async def ready(session: AsyncSession = Depends(get_session)) -> dict[str, str]:
         )
         revision = await session.scalar(text("SELECT version_num FROM agata.alembic_version"))
         vector = await session.scalar(text("SELECT 1 FROM pg_extension WHERE extname='vector'"))
-        if schema != 1 or revision != "agata0009" or vector != 1:
+        if schema != 1 or revision != "agata0010" or vector != 1:
             raise RuntimeError("AGATA schema, protected-content revision, or pgvector unavailable")
 
     try:

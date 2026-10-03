@@ -16,13 +16,15 @@ export interface PaginatedResponse<T> { items: T[]; nextCursor: string | null; }
 export interface ExploreResponseDTO extends PaginatedResponse<CreatorSummaryDTO> { tab: ExploreTab; }
 
 export type MessageRole = 'user' | 'assistant';
-export interface ChatMessageDTO { id: string; clientMessageId?: string; role: MessageRole; text: string; occurredAt: string; }
+export interface ChatMessageDTO { id: string; clientMessageId?: string; role: MessageRole; text: string; occurredAt: string; incomingReadAt?: string | null; }
 export interface MessageThreadDTO {
   creator: Pick<CreatorSummaryDTO, 'id' | 'slug' | 'displayName' | 'avatarUrl' | 'verified'>;
   lastMessagePreview: string | null;
   lastMessageRole: MessageRole | null;
   lastMessageAt: string;
+  unreadCount: number;
 }
+export interface MessagesUnreadDTO { totalUnread: number; items: Array<{ creatorId: string; unreadCount: number }>; }
 export interface MessageThreadListDTO { items: MessageThreadDTO[]; nextCursor: string | null; }
 export interface ChatHistoryDTO extends PaginatedResponse<ChatMessageDTO> { creator: CreatorSummaryDTO; }
 export interface MessagesStateDTO { enabled: boolean; chatHistory: boolean; longTermMemory: boolean; disclosureRequired: boolean; onboardingCompleted: boolean; disclosureVersion: number | null; onboardingCompletedAt: string | null; memoryOptIn: boolean; memoryOptInAt: string | null; ageAssuranceRequired?: boolean; aiAvailable?: boolean; }
