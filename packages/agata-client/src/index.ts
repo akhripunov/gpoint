@@ -80,6 +80,7 @@ export interface AgataConversationItem {
   lastMessagePreview: string;
   lastMessageRole: 'user' | 'assistant';
   lastMessageAt: string;
+  unreadCount: number;
 }
 
 export interface AgataConversationPage {
@@ -93,6 +94,7 @@ export interface AgataHistoryMessage {
   role: 'user' | 'assistant';
   text: string;
   occurredAt: string;
+  incomingReadAt: string | null;
 }
 
 export interface AgataHistoryPage {
@@ -178,6 +180,14 @@ export class AgataClient {
 
   async failInferenceJob(input: { job_id: string; lease_token: string; error_code: string }): Promise<{ accepted: boolean; state: string }> {
     return this.request('/internal/v1/worker/fail', 'POST', input);
+  }
+
+  async unreadMessages(id: string): Promise<{ items: Array<{ gpointCharacterId: string; unreadCount: number }> }> {
+    return this.request(`/internal/v1/users/${encodeURIComponent(id)}/unread`, 'GET', undefined);
+  }
+
+  async markMessagesRead(id: string, characterId: string, messageIds: string[]): Promise<{ acknowledgedMessageIds: string[] }> {
+    return this.request(`/internal/v1/users/${encodeURIComponent(id)}/characters/${encodeURIComponent(characterId)}/messages/read`, 'POST', { messageIds });
   }
 
   async listConversations(id: string, options: { limit?: number; cursor?: string } = {}): Promise<AgataConversationPage> {

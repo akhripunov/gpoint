@@ -81,3 +81,16 @@ test('chat read methods do not retry permanent errors', async () => {
   await assert.rejects(client.getChatState('u'), (error: unknown) => error instanceof AgataServiceError && error.status === 401);
   assert.equal(calls, 1);
 });
+
+test('unread summary and bounded acknowledgements use authenticated scoped paths', async () => {
+  const calls: Array<{path:string; method:string; body:any}> = [];
+  const client=new AgataClient({baseUrl:'http://agata.test',token:'internal-test-token',fetchImpl:async (input,init)=>{
+    assert.equal(new Headers(init?.headers).get('authorization'),'Bearer internal-test-token');
+    const path=new URL(String(input)).pathname;
+    calls.push({path,method:init?.method??'',body:init?.body?JSON.parse(String(init.body)):null});
+    return new Response(JSON.stringify(path.endsWith('/read')?{acknowledgedMessageIds:['message-1']}:{items:[{gpointCharacterId:'creator-1',unreadCount:2}]}));
+  }});
+  assert.deepEqual(await client.unreadMessages('user/a'),{items:[{gpointCharacterId:'creator-1',unreadCount:2}]});
+  assert.deepEqual(await client.markMessagesRead('user/a','creator/b',['message-1']),{acknowledgedMessageIds:['message-1']});
+  assert.deepEqual(calls,[{path:'/internal/v1/users/user%2Fa/unread',method:'GET',body:null},{path:'/internal/v1/users/user%2Fa/characters/creator%2Fb/messages/read',method:'POST',body:{messageIds:['message-1']}}]);
+});

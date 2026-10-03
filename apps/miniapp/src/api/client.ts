@@ -1,4 +1,4 @@
-import type { ChatHistoryDTO, CreatorProfileDTO, ExploreResponseDTO, CurrentUserDTO, MessageThreadListDTO, MessagesStateDTO, PaginatedResponse, PostDTO, ReelDTO, SendMessageDTO, VipClickResponseDTO, VipOfferDTO } from '../../../../packages/contracts/src/index.js';
+import type { MessagesUnreadDTO, ChatHistoryDTO, CreatorProfileDTO, ExploreResponseDTO, CurrentUserDTO, MessageThreadListDTO, MessagesStateDTO, PaginatedResponse, PostDTO, ReelDTO, SendMessageDTO, VipClickResponseDTO, VipOfferDTO } from '../../../../packages/contracts/src/index.js';
 import { markBootStage } from '../boot-diagnostics';
 // Production serves the Mini App and API from one origin; Caddy reserves /api
 // for the API while all other client routes resolve to the SPA. Keep the empty
@@ -90,3 +90,6 @@ export const creatorMediaIntent=(body:any)=>request<any>('/creator/me/media/inte
 export const creatorMediaFinalize=(id:string)=>request<any>(`/creator/me/media/${id}/finalize`,{method:'POST'});
 export const creatorMediaDelete=(id:string)=>request<any>(`/creator/me/media/${id}`,{method:'DELETE'});
 export const creatorProfileUpdate=(body:any)=>request<any>('/creator/me/profile',{method:'PATCH',body:JSON.stringify(body)});
+
+export const messagesUnread=(signal?:AbortSignal)=>request<MessagesUnreadDTO>('/messages/unread',{signal});
+export const markCreatorMessagesRead=(creatorId:string,messageIds:string[])=>request<{acknowledgedMessageIds:string[]}>(`/messages/creator/${encodeURIComponent(creatorId)}/read`,{method:'POST',body:JSON.stringify({messageIds})});

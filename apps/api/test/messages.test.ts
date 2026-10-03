@@ -40,3 +40,27 @@ test('message send is blocked with a stable age-assurance error when authoritati
   );
   assert.doesNotThrow(() => assertMessageAgeAssurance({ ageAssuranceRequired: false }));
 });
+
+test('public unread total excludes inaccessible creators and includes every eligible dialogue', async () => {
+  const { publicUnreadSummary }=await import('../src/messages.js');
+  const rows=Array.from({length:35},(_,i)=>({gpointCharacterId:`creator-${i}`,unreadCount:2}));
+  rows.push({gpointCharacterId:'hidden',unreadCount:50});
+  const summary=publicUnreadSummary(rows,new Set(rows.slice(0,35).map(r=>r.gpointCharacterId)));
+  assert.equal(summary.totalUnread,70);
+  assert.equal(summary.items.length,35);
+  assert.equal(summary.items.some(r=>r.creatorId==='hidden'),false);
+});
+
+test('read batch validation rejects malformed, empty, oversized and client-selected identity', async () => {
+  const { validateReadBatch }=await import('../src/messages.js');
+  const id='2396112c-8425-440b-890a-14ebc49e94c2';
+  assert.deepEqual(validateReadBatch({messageIds:[id,id]}),[id]);
+  for(const body of [null,{}, {messageIds:[]},{messageIds:['invalid']},{messageIds:Array(101).fill(id)},{messageIds:[id],userId:'foreign'}]) assert.throws(()=>validateReadBatch(body),HttpException);
+});
+
+test('unread and acknowledgement require a GPoint session before touching upstream state', async () => {
+  const { MessagesController }=await import('../src/messages.js');
+  const controller=new MessagesController();
+  await assert.rejects(controller.unread({}), (e:any)=>e.getStatus()===401);
+  await assert.rejects(controller.read('creator',{}, {messageIds:[]}), (e:any)=>e.getStatus()===401);
+});

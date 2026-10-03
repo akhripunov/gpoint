@@ -29,7 +29,7 @@ export interface AgataConsentInput {
 
 /** Disabled-by-default boundary for a future GPoint character-chat flow. */
 export class AgataIntegrationService {
-  constructor(private readonly client: Pick<AgataClient, 'syncCharacter' | 'syncConsent' | 'respond' | 'getChatState' | 'getAgeAssurance' | 'selfAttestAge' | 'listConversations' | 'listMessages'>) {}
+  constructor(private readonly client: Pick<AgataClient, 'syncCharacter' | 'syncConsent' | 'respond' | 'getChatState' | 'getAgeAssurance' | 'selfAttestAge' | 'listConversations' | 'listMessages' | 'unreadMessages' | 'markMessagesRead'>) {}
 
   chatState(userId: string): Promise<AgataChatState> {
     return this.client.getChatState(userId);
@@ -41,6 +41,14 @@ export class AgataIntegrationService {
 
   selfAttestAge(userId: string): ReturnType<AgataClient['selfAttestAge']> {
     return this.client.selfAttestAge(userId);
+  }
+
+  unreadMessages(userId: string): ReturnType<AgataClient['unreadMessages']> {
+    return this.client.unreadMessages(userId);
+  }
+
+  markMessagesRead(userId: string, characterId: string, messageIds: string[]): ReturnType<AgataClient['markMessagesRead']> {
+    return this.client.markMessagesRead(userId, characterId, messageIds);
   }
 
   listConversations(userId: string, options?: { limit?: number; cursor?: string }): Promise<AgataConversationPage> {
