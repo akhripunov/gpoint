@@ -14,6 +14,17 @@ Every release must record the current production SHA and database migration head
 
 The canonical entry point is `pnpm release:gpoint --dry-run --candidate <40-char-sha>`. Apply mode is deliberately fail-closed and requires an explicit operator confirmation. A release lock covers migration, runtime apply, and production-ref finalization; a stale lock is never silently removed.
 
+## Release authorization modes
+
+Use `docs/RELEASE_AUTHORIZATION.md` for the two OWNER authorization modes.
+Exact-SHA approval is the default. An explicit OWNER instruction to implement
+and deploy a named low-risk task authorizes one task-scoped release without a
+second SHA approval, only after the operator records and verifies the exact
+candidate, full unreleased diff and authorization in Linear. All technical
+release gates and production confirmation inputs remain mandatory. High-risk
+changes, failed gates and scope expansion stop this mode. This section governs
+approval semantics; the existing canonical tooling and invariants still apply.
+
 ## Automated release control
 
 - GitHub workflows `GPoint — Prepare` and `GPoint — Deploy` implement the release flow described in `docs/release/automation.md`.
