@@ -214,6 +214,7 @@ def prepare(sha, output, *, postgres_only=False):
             ('workspace_tests', ('pnpm', 'test')),
             ('release_tests', ('pnpm', 'test:release')),
             ('linear_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_*linear*.py')),
+            ('production_migration_gate_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_agata_production_migration.py')),
             ('prepare_inventory_tests', (sys.executable, '-m', 'pytest', '-q', 'tests/test_prepare_release_migration_inventory.py')),
             ('artifact_cache_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_prepared_artifact_cache.py')),
         )
@@ -291,6 +292,9 @@ def prepare(sha, output, *, postgres_only=False):
             with measured_stage(f'docker_build_{tag.replace("-", "_")}', timings):
                 run('docker', 'build', '--platform', 'linux/amd64', '--build-arg', f'GPOINT_BUILD_SHA={sha}',
                     '--label', f'org.opencontainers.image.revision={sha}', '-f', dockerfile, '-t', f'{tag}:{sha}', context)
+        with measured_stage('agata_guarded_production_migration_rehearsal', timings):
+            rehearsal_env = dict(env, GPOINT_MIGRATION_TEST_IMAGE=f'gpoint-agata-runtime:{sha}')
+            run(sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_agata_production_migration_docker.py', env=rehearsal_env)
         docker_dsn = f'postgresql://ci_owner:disposable-ci-password@{postgres}:5432/runtime_agata_test'
         with measured_stage('runtime_artifact_migration_check', timings):
             run('docker', 'run', '--rm', '--network', network, '-e', f'DATABASE_URL={docker_dsn}',

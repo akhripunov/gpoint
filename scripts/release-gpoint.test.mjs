@@ -1098,3 +1098,29 @@ test('cleanup checksum mismatch prevents execution of a changed remote script', 
     },
   }), error => error.status !== 0 && String(error.stdout ?? '') === '');
 });
+
+test('agata0010 canonical gate requires verified role and authoritative inventory only for pending migration', async () => {
+  const { inspectAgataMigrationReadiness } = await import('./release-gpoint-vps-adapter.mjs');
+  assert.equal(typeof inspectAgataMigrationReadiness, 'function', 'pending migration readiness is absent');
+  const evidence = { readiness: 'PASS', tenant_count: 2, inventory_sha256: 'a'.repeat(64), database: 'gpoint', head: 'agata0009' };
+  let calls = 0;
+  const execute = command => { calls++; assert.match(command, /python3/); return 'AGATA_MIGRATION_READINESS=' + JSON.stringify(evidence); };
+  assert.deepEqual(inspectAgataMigrationReadiness(sha, 'agata0009', 'agata0010', execute), evidence);
+  assert.equal(calls, 1);
+  assert.equal(inspectAgataMigrationReadiness(sha, 'agata0010', 'agata0010', execute), null);
+  assert.equal(calls, 1);
+  assert.throws(() => inspectAgataMigrationReadiness(sha, 'agata0008', 'agata0010', execute), /agata0009/);
+  assert.throws(() => inspectAgataMigrationReadiness(sha, 'agata0009', 'agata0010', () => ''), /readiness/);
+  assert.throws(() => inspectAgataMigrationReadiness(sha, 'agata0009', 'agata0010', () => 'AGATA_MIGRATION_READINESS={"readiness":"FAIL"}'), /readiness/);
+});
+
+test('guarded migration retains complete backup and exact SHA evidence for the manifest', async () => {
+  const { parseGuardedMigrationEvidence } = await import('./release-gpoint-vps-adapter.mjs');
+  assert.equal(typeof parseGuardedMigrationEvidence, 'function');
+  const backup = { candidate_sha: sha, database: 'gpoint', schemas: ['public','agata'], path: '/opt/gpoint/backups/test.dump', status: 'COMPLETE_PROTECTED', sha256: 'b'.repeat(64) };
+  const baseline = { candidate_sha: sha, readiness: 'PASS', head_after: 'agata0010', tenant_count: 2, inventory_sha256: 'a'.repeat(64) };
+  const lines = 'GPOINT_COMPLETE_BACKUP=' + JSON.stringify(backup) + '\nAGATA_MIGRATION_VERIFIED=' + JSON.stringify(baseline);
+  assert.deepEqual(parseGuardedMigrationEvidence(lines, sha), { backup, baseline });
+  assert.throws(() => parseGuardedMigrationEvidence(lines, 'c'.repeat(40)), /SHA/);
+  assert.throws(() => parseGuardedMigrationEvidence('AGATA_MIGRATION_VERIFIED='+JSON.stringify(baseline),sha), /backup/);
+});
