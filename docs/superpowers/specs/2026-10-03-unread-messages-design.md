@@ -20,6 +20,49 @@ No production Deploy, production migration, runtime mutation, MAXIBOT changes, T
 
 Extend these boundaries. Do not copy message bodies or maintain a second message store in Prisma.
 
+## Minimal extension map
+
+The owner reaffirmed the architecture and required this explicit changed/unchanged map on 2026-10-03. No substantial replacement of the current chat is necessary. If implementation discovers otherwise, stop before making that replacement and present evidence and justification to the owner.
+
+### Existing database tables
+
+| Existing table/model | Extension | Preserved behavior |
+| --- | --- | --- |
+| `agata.messages` / `Message` | Add nullable `incoming_read_at`, a tenant-scoped unread index, and initialize the existing-history baseline in an additive Alembic migration. | Message IDs, conversation ownership, role, encrypted content, ingestion idempotency, deletion/retention and existing RLS remain intact. |
+| `agata.conversations` / `Conversation` | No schema changes; use existing ownership and conversation identity when authorizing acknowledgement/count queries. | Conversation creation, relationships, external IDs, scope, history ordering and pagination remain intact. |
+| AGATA `User`, `Character`, `Relationship`, `Consent` | No schema changes; reuse current identity, eligibility and consent checks. | Authentication boundaries, disclosure/onboarding, memory opt-in and age assurance remain intact. |
+| GPoint Prisma tables | No schema changes and no duplicate message/read-state table. | Creator eligibility and public profile hydration remain intact. |
+
+No separate unread-message store, receipt table, event bus or materialized counter is introduced. New incoming messages use the existing nullable column default; the generation/ingestion pipeline does not need to emit new events or maintain arithmetic counters.
+
+### Existing and additive API surface
+
+| Surface | Extension | Preserved behavior |
+| --- | --- | --- |
+| AGATA `GET /internal/v1/users/{gpoint_user_id}/conversations` / `list_gpoint_conversations` | Add `unreadCount` to each conversation item. | Existing cursor, page size, preview, sorting and consent/ownership checks. |
+| AGATA `GET /internal/v1/users/{gpoint_user_id}/characters/{gpoint_character_id}/messages` / `list_gpoint_messages` | Include the persisted read status needed to acknowledge visible incoming rows. | Fetch remains read-only; existing history content, roles, IDs and pagination. |
+| AGATA internal Messages API | Add `GET /internal/v1/users/{gpoint_user_id}/unread` for complete per-character counts and `POST /internal/v1/users/{gpoint_user_id}/characters/{gpoint_character_id}/messages/read` with `{messageIds: string[]}`. | Existing internal authentication and tenant context. No new public AGATA access path. |
+| GPoint `GET /messages` / `MessagesController.inbox` | Pass through per-thread `unreadCount` after current creator eligibility checks. | Existing creator DTO hydration, Inbox pagination and preview. |
+| GPoint `GET /messages/creator/:creatorId` / `MessagesController.history` | Pass through incoming read status. | Existing approved-creator/session checks, history and CHAT_OPEN analytics. |
+| GPoint Messages API | Add `GET /messages/unread` returning `{totalUnread: number, items: {creatorId: string, unreadCount: number}[]}` for eligible creators, and `POST /messages/creator/:creatorId/read` with `{messageIds: string[]}`. | Session-derived user identity; no client-selected recipient identity. Declare fixed routes before dynamic routes as needed. |
+| `AgataClient.listConversations`, `AgataClient.listMessages`, shared DTOs and Mini App API client | Extend typed response fields and add typed summary/read methods. | Existing method signatures/options, error mapping and authenticated request transport. |
+| Existing send/respond, consent, memory and age APIs | No behavior changes. | Existing idempotency, pending responses, AI generation, memory choice and compliance gates. |
+
+The read response confirms the acknowledged owned IDs; the client then refreshes authoritative Inbox and aggregate data. It must not assume the acknowledged batch represents every unread message in the conversation.
+
+### Existing frontend components
+
+| Existing component/file | Extension | Preserved behavior |
+| --- | --- | --- |
+| `MessagesInbox` in `apps/miniapp/src/messages-ui.tsx` | Display per-dialog badge/emphasis and refresh while visible. | Thread layout, avatars, previews, ordering, navigation, pagination and loading/error states. |
+| `ModelChat` in the same file | Observe visible persisted incoming rows and acknowledge their IDs; refresh relevant count caches. | Composer, pending/retry handling, bubble content, older-history loading, back navigation, onboarding and consent UI. No chat rewrite. |
+| Application shell in `apps/miniapp/src/main.tsx` | Mount the authenticated unread-summary query across screens and supply the Messages count to navigation. | Routing, all five tabs, startup/session flow and existing hidden navigation inside Chat. |
+| Shared `BottomNav` in `apps/miniapp/src/ui/components.tsx` | Add an optional count capability for the Messages item; default absent/zero means no badge. | Other navigation items, callbacks, icons, touch targets and existing consumers. |
+| `apps/miniapp/src/style.css` / existing token styles | Small scoped badge and unread-emphasis rules using current tokens. | Page design, typography, general layout, colors and unrelated screens. |
+| Existing browser/API/AGATA test suites | Add feature regressions and fixtures. | Preserve existing tests for onboarding, pending replies, rights and navigation. |
+
+Small focused unread query/visibility helpers may be extracted to avoid bloating existing components. They remain adapters around the existing Messages API and cache; they are not a second chat implementation.
+
 ## Chosen accounting model
 
 Persist a nullable incoming-read timestamp on each AGATA Message. New `assistant` messages start unread. Count only retained, eligible incoming messages with no read timestamp. `user` and `system` messages never contribute to the user's incoming count. No arithmetic increment/decrement driven by frontend events is a source of truth.
