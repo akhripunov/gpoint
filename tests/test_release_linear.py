@@ -227,6 +227,8 @@ class ReleaseTests(unittest.TestCase):
                     'archive_download_url': 'https://api.github.com/artifact'}]}
                 class Opener:
                     def open(self, request, timeout=None):
+                        if request.get_header('Accept') != 'application/vnd.github+json':
+                            raise AssertionError('Legacy Actions ZIP requires its original media type')
                         return io.BytesIO(payload)
                 with patch.object(SYNC, 'github_json', return_value=metadata), patch.object(SYNC.urllib.request, 'build_opener', return_value=Opener()):
                     if expected == digest:
@@ -253,7 +255,8 @@ class ReleaseTests(unittest.TestCase):
                     {'id': 99, 'name': 'result.zip', 'state': 'uploaded', 'size': len(payload), 'digest': 'sha256:'+digest}]}
             class Opener:
                 def open(self, request, timeout=None):
-                    self.assert_url = request.full_url
+                    if request.get_header('Accept') != 'application/octet-stream':
+                        raise AssertionError('Release assets require binary media type')
                     return io.BytesIO(payload)
             with self.subTest(immutable=immutable, digest=digest), patch.object(SYNC, 'github_json', side_effect=github), \
                  patch.object(SYNC.urllib.request, 'build_opener', return_value=Opener()):
