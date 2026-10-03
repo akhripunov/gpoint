@@ -83,6 +83,11 @@ class DockerMigrationProtocol(unittest.TestCase):
                 counts = docker('exec',postgres,'psql','-U','postgres','-d','gpoint_restore_test','-Atc',
                     'SELECT (SELECT count(*) FROM agata.messages),(SELECT count(*) FROM agata.tenants),(SELECT id FROM public.backup_fixture)').stdout.strip()
                 self.assertEqual(counts, '2|2|42')
+                with gate.TenantGuard() as guard:
+                    backend = guard.query("SELECT json_build_object('pid',pg_backend_pid());")['pid']
+                    docker('exec',postgres,'psql','-U','postgres','-d','gpoint','-Atc',
+                        f'SELECT pg_terminate_backend({backend})')
+                    self.assertFalse(guard.alive(), 'a live psql process is not proof of a retained database lock')
                 def migrate(inventory, guard):
                     # An attempted concurrent tenant insert is refused while the guard is held.
                     blocked = docker('exec', postgres, 'psql', '-U','postgres','-d','gpoint','-v','ON_ERROR_STOP=1','-c',
