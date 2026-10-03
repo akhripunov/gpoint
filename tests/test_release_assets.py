@@ -59,6 +59,11 @@ class ImmutableReleaseTests(unittest.TestCase):
         for sha, run_id, attempt in [('a'*40, '55', '2'), ('b'*40, '55', '1'), ('a'*40, '56', '1')]:
             with self.assertRaises(RuntimeError): ASSETS.validate_result(data, sha, run_id, attempt)
 
+    def test_ci_never_requires_repository_administration_permission(self):
+        source = (ROOT / 'scripts/release_assets.py').read_text()
+        self.assertNotIn("github('immutable-releases')", source)
+        self.assertIn('resolve_asset(kind, sha, run_id, attempt, archive.name, github)', source)
+
     def test_gpoint_workflows_publish_all_evidence_without_actions_storage(self):
         prepare = (ROOT / '.github/workflows/gpoint-prepare.yml').read_text()
         deploy = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()

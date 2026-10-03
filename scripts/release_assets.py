@@ -68,8 +68,6 @@ def publish(kind, sha, run_id, attempt):
         raise RuntimeError('Only exact GPoint workflow source may publish assets')
     if subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() != sha:
         raise RuntimeError('Release publisher checkout differs from candidate')
-    if github('immutable-releases').get('enabled') is not True:
-        raise RuntimeError('Enable GPoint immutable releases before preparing')
     tag = release_tag(kind, sha, run_id, attempt)
     with tempfile.TemporaryDirectory(prefix='gpoint-release-assets-') as temporary:
         root = Path(temporary)
