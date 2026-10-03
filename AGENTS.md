@@ -35,6 +35,14 @@ approval semantics; the existing canonical tooling and invariants still apply.
 - Technical COMPLETE and owner-confirmed Telegram replies are separate facts. Never create synthetic production Messages jobs or report heartbeat as an end-to-end reply.
 - Linear publication preserves architect-owned Handoff sections and existing journal history. Missing publication or an offline runner is a visible blocker, not a successful automation setup.
 
+## Release operations interface
+
+- For any GPoint or MaxiBot release operation, do not use Computer Use, Chrome, mouse interaction, or GitHub Web UI to dispatch, approve, rerun, cancel, or coordinate workflows.
+- Dispatch GitHub Actions only through the authorized `gh workflow run` command or GitHub Actions API, with the exact workflow, SHA, and required inputs.
+- Check workflow status and logs only through GitHub MCP, GitHub API, or `gh run view/watch`.
+- Before dispatching, check whether the required workflow is already running. Never create a duplicate production Deploy, and do not cancel or rerun an active release unless necessary.
+- If CLI/API access, authorization, or the runner is unavailable, stop and report the concrete blocker. Do not fall back to browser UI or another unverified launch path.
+
 ## VPS policy
 
 The VPS is a runtime and artifact target, not a development workspace. Application fixes must be committed and pushed before deployment. MaxiBot files, containers, database, domain, and release state are outside GPoint scope and must not be touched.
