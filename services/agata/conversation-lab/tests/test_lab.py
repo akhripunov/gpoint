@@ -32,6 +32,7 @@ class NormalizationTests(unittest.TestCase):
         self.assertTrue(lab.is_pii("call +7 (999) 123-45-67"))
         self.assertTrue(lab.is_pii("mail person@example.com"))
         self.assertTrue(lab.is_pii("call 415 555 2671"))
+        self.assertTrue(lab.is_pii("call 415 555 2671 on 2019-01-02-03"))
         self.assertFalse(lab.is_pii("18 500 000 000 рублей"))
         self.assertFalse(lab.is_pii("reference 2019-01-02-03"))
 

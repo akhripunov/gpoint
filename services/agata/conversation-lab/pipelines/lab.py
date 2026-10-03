@@ -447,8 +447,8 @@ def skip_records(iterator, n):
 
 def is_pii(text):
     if EMAIL_RE.search(text): return True
-    # Date-like ISO and year-first numeric strings frequently pass generic digit-count rules.
-    if DATE_CANDIDATE_RE.search(text): return False
+    # Remove date-like fragments, but keep looking for a separate phone in the same turn.
+    text = DATE_CANDIDATE_RE.sub(" ", text)
     for match in PHONE_CANDIDATE_RE.finditer(text):
         value=match.group(); digits=re.sub(r"\D","",value)
         if not 10 <= len(digits) <= 15: continue
