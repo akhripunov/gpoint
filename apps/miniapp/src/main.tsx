@@ -1628,22 +1628,19 @@ function AuthenticatedApp() {
         setState("failed");
       });
   }, []);
+  if (state === "loading" || (state === "ready" && ageState === "loading"))
+    return (
+      <main className="gpoint-boot-splash" role="status" aria-live="polite">
+        <span className="gpoint-boot-indicator" aria-hidden="true" />
+        <span>Открываем GPoint…</span>
+      </main>
+    );
   if (state === "ready" && ageState === "required") {
     return <main className="age-assurance-gate" role="main"><p className="eyebrow">AGE ASSURANCE</p><h1>Продолжить в GPoint</h1><p>Подтвердите, что вам исполнилось 18 лет. Это самостоятельное подтверждение возраста, не проверка документов.</p><button type="button" disabled={ageSubmitting} onClick={() => { setAgeSubmitting(true); selfAttest18Plus().then((age) => setAgeState(age.required ? "required" : "ready")).catch(() => setAgeState("failed")).finally(() => setAgeSubmitting(false)); }}>{ageSubmitting ? "Проверяем…" : "Мне 18+"}</button></main>;
   }
-  if (state === "ready" && (ageState === "loading" || ageState === "failed")) {
-    return <main className="age-assurance-gate" role="main"><p className="eyebrow">AGE ASSURANCE</p><h1>{ageState === "loading" ? "Проверяем доступ…" : "Не удалось проверить возраст"}</h1><p>{ageState === "loading" ? "GPoint проверяет сохранённое подтверждение." : "Доступ закрыт, пока сервер не подтвердит состояние. Попробуйте снова."}</p>{ageState === "failed" && <button type="button" onClick={() => { setAgeState("loading"); ageAssuranceState().then((age) => setAgeState(age.required ? "required" : "ready")).catch(() => setAgeState("failed")); }}>Повторить</button>}</main>;
+  if (state === "ready" && ageState === "failed") {
+    return <main className="age-assurance-gate" role="main"><p className="eyebrow">AGE ASSURANCE</p><h1>Не удалось проверить возраст</h1><p>Доступ закрыт, пока сервер не подтвердит состояние. Попробуйте снова.</p><button type="button" onClick={() => { setAgeState("loading"); ageAssuranceState().then((age) => setAgeState(age.required ? "required" : "ready")).catch(() => setAgeState("failed")); }}>Повторить</button></main>;
   }
-  if (state === "loading")
-    return (
-      <div className="app-shell">
-        <main className="page">
-          <div className="empty">
-            <h3>Connecting to Telegram…</h3>
-          </div>
-        </main>
-      </div>
-    );
   if (state === "failed")
     return (
       <div className="app-shell">
@@ -1655,7 +1652,7 @@ function AuthenticatedApp() {
         </main>
       </div>
     );
-  if (ageState !== "ready") return <div className="app-shell"><main className="page"><div className="empty"><h3>Проверяем доступ…</h3></div></main></div>;
+  if (ageState !== "ready") return null;
   markBootStage("MAIN_VIEW_RENDER_STARTED");
   const view = <App initialUser={user} />;
   markBootStage("MAIN_VIEW_RENDER_FINISHED");

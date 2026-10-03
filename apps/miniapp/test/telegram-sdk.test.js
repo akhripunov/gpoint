@@ -8,9 +8,9 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
 test('production entrypoint loads the Telegram WebApp SDK before the app', async () => {
   const html = await readFile(join(root, 'index.html'), 'utf8');
-  const sdk = '<script src="https://telegram.org/js/telegram-web-app.js"></script>';
-  assert.ok(html.includes(sdk));
-  assert.ok(html.indexOf(sdk) < html.indexOf('<script type="module"'));
+  const sdk = /<script defer src="https:\/\/telegram\.org\/js\/telegram-web-app\.js"><\/script>/;
+  assert.match(html, sdk);
+  assert.ok(html.indexOf(html.match(sdk)[0]) < html.indexOf('<script type="module"'));
 });
 
 test('API client disables conditional caching and bounds request time', async () => {

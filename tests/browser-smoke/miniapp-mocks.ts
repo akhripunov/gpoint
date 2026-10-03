@@ -32,7 +32,7 @@ const modelPost = (index: number) => ({
 
 export async function installMiniAppBrowserMocks(
   page: Page,
-  options: { telegramStartParam?: string; ageAssuranceRequired?: boolean; ageAttestationWriteStatus?: number; aiAvailable?: boolean; pendingReply?: boolean; chatHistoryAccepted?: boolean; memoryOptIn?: boolean; existingHistory?: boolean } = {},
+  options: { telegramStartParam?: string; ageAssuranceRequired?: boolean; ageAttestationWriteStatus?: number; aiAvailable?: boolean; pendingReply?: boolean; chatHistoryAccepted?: boolean; memoryOptIn?: boolean; existingHistory?: boolean; browserAuthDelayMs?: number; ageAssuranceDelayMs?: number } = {},
 ) {
   const errors: string[] = [];
   let chatHistoryAccepted = options.chatHistoryAccepted ?? false;
@@ -70,7 +70,10 @@ export async function installMiniAppBrowserMocks(
     const items = Array.from({ length: 12 }, (_, index) => modelPost(index + 1));
     let data: unknown;
     let status = 200;
-    if (apiPath === "/auth/browser") data = { accessToken: "browser-smoke-token" };
+    if (apiPath === "/auth/browser") {
+      if (options.browserAuthDelayMs) await new Promise((resolve) => setTimeout(resolve, options.browserAuthDelayMs));
+      data = { accessToken: "browser-smoke-token" };
+    }
     else if (apiPath === "/me") data = { id: "browser-smoke-user", telegramUsername: "smoke", firstName: "Smoke", isPremium: false };
     else if (apiPath === "/feed/for-you") data = { items: [modelPost(1)], nextCursor: null };
     else if (apiPath === "/explore") data = { items: [], nextCursor: null };
@@ -78,7 +81,10 @@ export async function installMiniAppBrowserMocks(
     else if (apiPath === "/creators/models_hub") data = creator;
     else if (apiPath === "/creators/unknown-model") { status = 404; data = { message: "Creator unavailable" }; }
     else if (apiPath === "/creators/browser-smoke-model-id/posts") data = { items, nextCursor: null };
-    else if (apiPath === "/age-assurance/state") data = { required: ageAssuranceRequired, eligible: !ageAssuranceRequired, status: ageAssuranceRequired ? "pending" : "self_attested", method: ageAssuranceRequired ? "unknown" : "self_attested", jurisdiction: "GLOBAL", assertedAt: ageAssuranceRequired ? null : "2026-09-27T10:00:00.000Z", expiresAt: null, selfAttestationAllowed: true };
+    else if (apiPath === "/age-assurance/state") {
+      if (options.ageAssuranceDelayMs) await new Promise((resolve) => setTimeout(resolve, options.ageAssuranceDelayMs));
+      data = { required: ageAssuranceRequired, eligible: !ageAssuranceRequired, status: ageAssuranceRequired ? "pending" : "self_attested", method: ageAssuranceRequired ? "unknown" : "self_attested", jurisdiction: "GLOBAL", assertedAt: ageAssuranceRequired ? null : "2026-09-27T10:00:00.000Z", expiresAt: null, selfAttestationAllowed: true };
+    }
     else if (apiPath === "/age-assurance/self-attest" && route.request().method() === "POST") {
       if (options.ageAttestationWriteStatus) {
         status = options.ageAttestationWriteStatus;
