@@ -42,8 +42,8 @@ jobs:
       - name: Initialize shared retry budget
         shell: bash
         run: |
-          echo "NETWORK_RETRY_BUDGET_STATE=$RUNNER_TEMP/gpoint-network-retry-budget-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
-          printf '0\n' > "$RUNNER_TEMP/gpoint-network-retry-budget-$GITHUB_RUN_ID"
+          echo "NETWORK_RETRY_BUDGET_STATE=$RUNNER_TEMP/gpoint-network-retry-budget-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          printf '0\n' > "$RUNNER_TEMP/gpoint-network-retry-budget-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
@@ -80,11 +80,11 @@ jobs:
       - name: Set private temporary evidence paths
         shell: bash
         run: |
-          echo "GPOINT_RELEASE_EVIDENCE=$RUNNER_TEMP/gpoint-ledger-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
-          echo "GPOINT_RELEASE_BUNDLE=$RUNNER_TEMP/gpoint-bundle-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
-          echo "RELEASE_RESULT=$RUNNER_TEMP/gpoint-release-result-$GITHUB_RUN_ID.json" >> "$GITHUB_ENV"
-          echo "NETWORK_RETRY_BUDGET_STATE=$RUNNER_TEMP/gpoint-network-retry-budget-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
-          printf '%s\n' '${{ needs.validate.outputs.network_retry_budget_used_seconds }}' > "$RUNNER_TEMP/gpoint-network-retry-budget-$GITHUB_RUN_ID"
+          echo "GPOINT_RELEASE_EVIDENCE=$RUNNER_TEMP/gpoint-ledger-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          echo "GPOINT_RELEASE_BUNDLE=$RUNNER_TEMP/gpoint-bundle-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          echo "RELEASE_RESULT=$RUNNER_TEMP/gpoint-release-result-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json" >> "$GITHUB_ENV"
+          echo "NETWORK_RETRY_BUDGET_STATE=$RUNNER_TEMP/gpoint-network-retry-budget-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          printf '%s\n' '${{ needs.validate.outputs.network_retry_budget_used_seconds }}' > "$RUNNER_TEMP/gpoint-network-retry-budget-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.validate.outputs.candidate }}
@@ -122,7 +122,7 @@ jobs:
     steps:
       - name: Set publication evidence path
         shell: bash
-        run: echo "RELEASE_RESULT=$RUNNER_TEMP/release-evidence/gpoint-release-result-$GITHUB_RUN_ID.json" >> "$GITHUB_ENV"
+        run: echo "RELEASE_RESULT=$RUNNER_TEMP/release-evidence/gpoint-release-result-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}

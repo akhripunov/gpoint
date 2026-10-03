@@ -41,6 +41,12 @@ def resolve_asset(kind, sha, run_id, attempt, name, github):
     return asset
 
 
+def validate_result(data, sha, run_id, attempt):
+    if (data.get('candidateSha') != sha or str(data.get('automationRunId')) != str(run_id)
+            or str(data.get('automationRunAttempt')) != str(attempt)):
+        raise RuntimeError('Immutable Deploy result provenance mismatch')
+
+
 def gh(*args):
     return subprocess.check_output(['gh', *args], text=True, timeout=600).strip()
 
@@ -85,8 +91,7 @@ def publish(kind, sha, run_id, attempt):
                 print('RELEASE_EVIDENCE=NOT_CREATED (execution did not produce a result)')
                 return
             data = json.loads(result.read_text())
-            if data.get('candidateSha') != sha or str(data.get('automationRunId')) != run_id:
-                raise RuntimeError('Deploy result provenance mismatch')
+            validate_result(data, sha, run_id, attempt)
             target = root / 'result.zip'
             write_zip(target, [(result.name, result)])
             archives.append(target)
@@ -121,7 +126,13 @@ def read_result(sha, run_id, attempt, result_path=None, token=None):
         download(REPO, asset['id'], token, archive, release_asset=True)
         if checksum(archive) != asset['digest'][7:]:
             raise RuntimeError('Immutable result ZIP checksum mismatch')
-        extract(archive, result.parent, [result.name])
+        name = f'gpoint-release-result-{run_id}-{attempt}.json'
+        extracted = Path(temporary) / 'result'
+        extract(archive, extracted, [name])
+        validate_result(json.loads((extracted / name).read_text()), sha, run_id, attempt)
+        result.parent.mkdir(parents=True, exist_ok=True)
+        if result.is_symlink(): raise RuntimeError('Result destination must not be a symlink')
+        result.write_bytes((extracted / name).read_bytes())
 
 
 def main():

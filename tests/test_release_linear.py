@@ -238,7 +238,8 @@ class ReleaseTests(unittest.TestCase):
     def test_new_immutable_release_result_is_checksum_verified_and_mutable_is_blocked(self):
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, 'w') as archive:
-            archive.writestr('result.json', json.dumps({'status': 'PLANNED'}))
+            archive.writestr('result.json', json.dumps({'status': 'PLANNED', 'candidateSha': 'a'*40,
+                'automationRunId': '55', 'automationRunAttempt': '2'}))
         payload = buffer.getvalue()
         sha = 'a' * 40
         tag = f'gpoint-evidence-{sha}-55-2'

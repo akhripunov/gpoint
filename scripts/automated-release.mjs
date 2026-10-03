@@ -54,7 +54,7 @@ try {
   const attempt = (mode === 'preflight' ? records : records.filter(r => r.data.status !== 'PLANNED')).at(-1);
   const evidence = attempt?.data ?? { candidateSha: sha, status: 'BLOCKED', productionRef: null };
   fs.writeFileSync(process.env.RELEASE_RESULT, JSON.stringify({ ...evidence,
-    operator: process.env.GITHUB_ACTOR, automationRunId: process.env.GITHUB_RUN_ID,
+    operator: process.env.GITHUB_ACTOR, automationRunId: process.env.GITHUB_RUN_ID, automationRunAttempt: process.env.GITHUB_RUN_ATTEMPT,
     applicationVerification: mode === 'preflight' ? 'NOT_DEPLOYED' : 'OWNER_SMOKE_PENDING',
   }, null, 2) + '\n');
   if (process.env.GITHUB_OUTPUT) {

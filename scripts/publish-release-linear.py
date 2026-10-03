@@ -13,7 +13,7 @@ import zipfile
 import hashlib
 from datetime import datetime, timezone
 
-from release_assets import resolve_asset
+from release_assets import resolve_asset, validate_result
 from sync_agents_to_linear import graphql_request, sync_document, SyncError
 
 DOCUMENTS = {
@@ -43,6 +43,7 @@ def github_json(path, token=None):
 
 
 def artifact_json(run_id, prefix):
+    release_run = None
     data = github_json(f'repos/{REPOSITORY}/actions/runs/{run_id}/artifacts')
     matches = [a for a in data.get('artifacts', []) if a.get('name', '').startswith(prefix) and not a.get('expired')]
     if not matches:
@@ -59,6 +60,7 @@ def artifact_json(run_id, prefix):
             raise
         except (RuntimeError, KeyError) as exc:
             raise SyncError(f'Immutable result validation failed: {type(exc).__name__}') from exc
+        release_run = run
         matches = [dict(asset, archive_download_url=f'https://api.github.com/repos/{REPOSITORY}/releases/assets/{asset["id"]}')]
     if len(matches) != 1:
         raise SyncError(f'Expected one canonical result artifact for run {run_id}; found {len(matches)}')
@@ -87,7 +89,10 @@ def artifact_json(run_id, prefix):
             files = [name for name in archive.namelist() if name.endswith('.json')]
             if len(files) != 1 or len(archive.infolist()) != 1 or archive.infolist()[0].file_size > 16 * 1024**2:
                 raise SyncError(f'Expected one JSON result in run {run_id} artifact')
-            return json.loads(archive.read(files[0]))
+            result = json.loads(archive.read(files[0]))
+            if release_run:
+                validate_result(result, release_run['head_sha'], run_id, release_run['run_attempt'])
+            return result
     except SyncError:
         raise
     except Exception as exc:

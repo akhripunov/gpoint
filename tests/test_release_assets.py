@@ -53,6 +53,12 @@ class ImmutableReleaseTests(unittest.TestCase):
                      ('other', 'a'*40, '55', '1')]:
             with self.assertRaises(RuntimeError): ASSETS.release_tag(*args)
 
+    def test_stale_deploy_result_from_previous_attempt_cannot_be_republished(self):
+        data = {'candidateSha': 'a'*40, 'automationRunId': '55', 'automationRunAttempt': '1'}
+        ASSETS.validate_result(data, 'a'*40, '55', '1')
+        for sha, run_id, attempt in [('a'*40, '55', '2'), ('b'*40, '55', '1'), ('a'*40, '56', '1')]:
+            with self.assertRaises(RuntimeError): ASSETS.validate_result(data, sha, run_id, attempt)
+
     def test_gpoint_workflows_publish_all_evidence_without_actions_storage(self):
         prepare = (ROOT / '.github/workflows/gpoint-prepare.yml').read_text()
         deploy = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()
