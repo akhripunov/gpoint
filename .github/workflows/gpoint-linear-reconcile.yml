@@ -1,0 +1,30 @@
+name: GPoint — Linear current-state reconciliation
+
+on:
+  workflow_run:
+    workflows: ["GPoint — Prepare", "GPoint — Deploy"]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: gpoint-linear-release
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Reconcile verified current state after workflow conclusion
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          STATE_SYNC_ONLY: 'true'
+        run: python3 scripts/publish-release-linear.py

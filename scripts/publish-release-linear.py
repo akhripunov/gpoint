@@ -75,6 +75,17 @@ def latest_run(workflow, sha=None, successful=False):
     return max(runs, key=lambda r: (r.get('created_at', ''), r.get('run_attempt', 0)), default=None)
 
 
+def current_candidate_status(main_sha, current_main_run, event=None):
+    if current_main_run and current_main_run.get('status') == 'completed' and current_main_run.get('conclusion') == 'success':
+        return 'READY'
+    if (event and event.get('sha') == main_sha and current_main_run and
+            str(current_main_run.get('id')) == str(event.get('run_id')) and event.get('status') == 'READY'):
+        # PREPARE job completed successfully (needs.prepare.result=success), but
+        # the containing workflow is still running its Linear publisher job.
+        return 'PREPARE_GATES_PASS_WORKFLOW_PENDING'
+    return 'NOT_PREPARED_FOR_CURRENT_MAIN'
+
+
 def production_evidence():
     path = 'repos/akhripunov/gpoint/contents/docs/release/state/production.json?ref=gpoint-release-ledger'
     try:
@@ -104,7 +115,7 @@ def production_evidence():
     return state, manifest, deployment
 
 
-def current_state():
+def current_state(event=None):
     commit = github_json(f'repos/{REPOSITORY}/commits/main')
     main_sha = commit.get('sha', '')
     if not re.fullmatch('[a-f0-9]{40}', main_sha):
@@ -114,7 +125,7 @@ def current_state():
     production, manifest, deployment = production_evidence()
     prod_sha = production.get('currentProductionSha')
     in_sync = bool(prod_sha and prod_sha == main_sha)
-    candidate = 'READY' if latest_for_main and latest_for_main.get('conclusion') == 'success' else 'NOT_PREPARED_FOR_CURRENT_MAIN'
+    candidate = current_candidate_status(main_sha, latest_for_main, event)
     return {
         'synced_at': datetime.now(timezone.utc).isoformat(timespec='seconds'), 'main_sha': main_sha,
         'main_checked_at': commit.get('commit', {}).get('committer', {}).get('date', 'unknown'),
@@ -136,7 +147,7 @@ def render_current_state(state):
         f"GitHub main: `{state['main_sha']}` (commit time `{state['main_checked_at']}`).",
         f"Production: `{state['production_sha']}`; canonical `gpoint-release-ledger/docs/release/state/production.json` + manifest; completed `{state['production_checked_at']}`; `LEDGER VERIFIED` (отдельный свежий VPS readback не выполнялся).",
         f"Сверка SHA: **{state_name}**.",
-        f"Последний успешный Prepare: `{(prep.get('head_sha') or 'unknown')}` / run `#{prep.get('id', 'unknown')}`; candidate для текущего main: **{state['candidate']}**.",
+        f"Последний завершившийся успешный Prepare: `{(prep.get('head_sha') or 'unknown')}` / run `#{prep.get('id', 'unknown')}`; current-main run `#{(state['latest_main_prepare'] or {}).get('id', 'unknown')}`: **{state['candidate']}**.",
         f"Последний production Deploy: `{m.get('productionShaAfter', 'unknown')}` / run `#{deploy.get('id', 'unknown')}` / canonical **{state['release_status']}**.",
         f"Prisma head: `{m.get('dbHeadAfter', 'unconfirmed')}`; AGATA Alembic head: `{m.get('agataDbHeadAfter', 'unconfirmed')}` (manifest).",
         "Пользовательская приёмка: **OWNER_SMOKE_PENDING**; technical COMPLETE не является подтверждением Telegram-ответа.",
@@ -209,7 +220,29 @@ def publish(section, event_id, body, key, call=graphql_request, state=None):
         sync_document(updated, doc_id, key, call, expected_title=title)
 
 
+def sync_current_state(key, call=graphql_request):
+    if not key.strip():
+        raise SyncError('LINEAR_API_KEY is missing: release state was not published')
+    block = render_current_state(current_state())
+    for kind in ('journal', 'handoff'):
+        doc_id, title = DOCUMENTS[kind]
+        current = call('query($id: String!) { document(id: $id) { id title content } }', {'id': doc_id}, key).get('document')
+        if not current or current.get('title') != title or current.get('id') != doc_id:
+            raise SyncError('Release document identity mismatch')
+        content = current.get('content') or ''
+        updated = upsert_current_state(content, block, handoff=(kind == 'handoff'))
+        sync_document(updated, doc_id, key, call, expected_title=title)
+
+
 def main():
+    if os.environ.get('STATE_SYNC_ONLY') == 'true':
+        try:
+            sync_current_state(os.environ.get('LINEAR_API_KEY', ''))
+            print('GPOINT_CURRENT_STATE_SYNC=PASS')
+            return
+        except SyncError as error:
+            print(str(error), file=sys.stderr)
+            sys.exit(1)
     sha, run_id = os.environ['CANDIDATE_SHA'], os.environ['GITHUB_RUN_ID']
     if not re.fullmatch('[a-f0-9]{40}', sha) or not run_id.isdigit():
         raise SyncError('Invalid release identity')
@@ -248,7 +281,8 @@ def main():
         else:
             body += '\n\nПользовательская проверка: **ожидается**. Владелец отправляет новое сообщение Models Hub и подтверждает ответ; Dev фиксирует приёмку отдельно. Не считать heartbeat подтверждением ответа.'
     section = {'candidate': 'кандидат', 'preflight': 'preflight', 'production': 'production'}[phase]
-    publish(section, event_identity(run_id, attempt, phase, status), body, os.environ.get('LINEAR_API_KEY', ''), state=current_state())
+    state_event = {'sha': sha, 'run_id': run_id, 'status': status} if phase == 'candidate' else None
+    publish(section, event_identity(run_id, attempt, phase, status), body, os.environ.get('LINEAR_API_KEY', ''), state=current_state(state_event))
 
 
 if __name__ == '__main__':

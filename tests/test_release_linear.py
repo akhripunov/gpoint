@@ -127,6 +127,24 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("REPOSITORY = 'akhripunov/gpoint'", source)
         self.assertNotIn('MAXIBOT_CURRENT_STATE', source)
 
+    def test_self_run_in_progress_reports_gates_pending_not_workflow_success(self):
+        run = {'id': 44, 'head_sha': 'a' * 40, 'status': 'in_progress', 'conclusion': None}
+        event = {'sha': 'a' * 40, 'run_id': '44', 'status': 'READY'}
+        self.assertEqual(SYNC.current_candidate_status('a' * 40, run, event), 'PREPARE_GATES_PASS_WORKFLOW_PENDING')
+        self.assertEqual(SYNC.current_candidate_status('a' * 40, run), 'NOT_PREPARED_FOR_CURRENT_MAIN')
+        self.assertEqual(run['status'], 'in_progress')
+
+    def test_completed_run_reconciliation_and_stale_run_protection(self):
+        completed = {'id': 44, 'head_sha': 'a' * 40, 'status': 'completed', 'conclusion': 'success'}
+        self.assertEqual(SYNC.current_candidate_status('a' * 40, completed), 'READY')
+        stale_event = {'sha': 'a' * 40, 'run_id': '43', 'status': 'READY'}
+        current = {'id': 44, 'head_sha': 'a' * 40, 'status': 'in_progress'}
+        self.assertEqual(SYNC.current_candidate_status('a' * 40, current, stale_event), 'NOT_PREPARED_FOR_CURRENT_MAIN')
+        workflow = (ROOT / '.github/workflows/gpoint-linear-reconcile.yml').read_text()
+        self.assertIn('types: [completed]', workflow)
+        self.assertIn("STATE_SYNC_ONLY: 'true'", workflow)
+        self.assertIn('group: gpoint-linear-release', workflow)
+
     def test_newer_failed_run_blocks_older_success(self):
         base = {'head_sha': 'a' * 40, 'head_branch': 'main', 'event': 'push', 'status': 'completed'}
         with self.assertRaisesRegex(RuntimeError, 'not successful'):
