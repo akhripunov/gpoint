@@ -101,6 +101,8 @@ export async function installMiniAppBrowserMocks(
       onboardingCompletedAt = onboardingCompletedAt ?? new Date().toISOString();
       data = { enabled: true, chatHistory: true, longTermMemory: memoryOptIn, disclosureRequired: false, onboardingCompleted: true, disclosureVersion: 1, onboardingCompletedAt, memoryOptIn, memoryOptInAt: onboardingCompletedAt, ageAssuranceRequired, aiAvailable: options.aiAvailable ?? true };
     }
+    else if (apiPath === "/messages/unread") data = { totalUnread: 0, items: [] };
+    else if (apiPath.endsWith("/read") && apiPath.startsWith("/messages/creator/")) data = { acknowledgedMessageIds: JSON.parse(route.request().postData() || "{}").messageIds };
     else if (apiPath === "/messages") data = { items: [{ creator: { id: creator.id, slug: creator.slug, displayName: creator.displayName, avatarUrl: creator.avatarUrl, verified: creator.verified }, lastMessagePreview: "Hello there", lastMessageRole: "assistant", lastMessageAt: "2026-09-27T10:00:00.000Z" }], nextCursor: null };
     else if (apiPath === `/messages/creator/${creator.id}` && route.request().method() === "GET") {
       data = { creator, items: [...chatMessages], nextCursor: null };

@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { badgeText } from "../messages-unread-policy.js";
 import { ChevronLeft, ChevronRight, LoaderCircle, Send } from "lucide-react";
 
 export type StatusTone = "success" | "warm" | "danger" | "neutral";
@@ -19,8 +20,8 @@ export function Tabs({ items, active, onChange, className = "" }: { items: strin
   return <div className={`gpoint-tabs ${className}`} role="tablist">{items.map((item) => <button type="button" aria-selected={active === item} className={active === item ? "selected" : ""} onClick={() => onChange(item)} key={item}>{item}</button>)}</div>;
 }
 
-export function BottomNav({ items, active, onChange }: { items: Array<{ id: string; label: string; icon: ReactNode }>; active: string; onChange: (id: string) => void }) {
-  return <nav className="gpoint-bottom-nav bottom-nav" aria-label="Primary navigation">{items.map((item) => <button type="button" className={active === item.id ? "active" : ""} onClick={() => onChange(item.id)} key={item.id}>{item.icon}<span>{item.label}</span></button>)}</nav>;
+export function BottomNav({ items, active, onChange }: { items: Array<{ id: string; label: string; icon: ReactNode; badgeCount?: number }>; active: string; onChange: (id: string) => void }) {
+  return <nav className="gpoint-bottom-nav bottom-nav" aria-label="Primary navigation">{items.map((item) => <button type="button" className={active === item.id ? "active" : ""} onClick={() => onChange(item.id)} key={item.id} aria-label={item.badgeCount ? `${item.label}, ${item.badgeCount} unread messages` : item.label}>{item.badgeCount ? <span className="nav-icon-with-badge">{item.icon}<UnreadBadge count={item.badgeCount} /></span> : item.icon}<span>{item.label}</span></button>)}</nav>;
 }
 
 export function SectionEyebrow({ children }: { children: ReactNode }) { return <p className="gpoint-section-eyebrow">{children}</p>; }
@@ -38,3 +39,5 @@ export function CreatorToolCard({ title, description, icon, onClick }: { title: 
 }
 
 export function ImportSettingsCard({ children }: { children: ReactNode }) { return <div className="gpoint-import-settings">{children}</div>; }
+
+export function UnreadBadge({count}:{count:number}) { const text=badgeText(count); return text ? <span className="messages-unread-badge" aria-hidden="true">{text}</span> : null; }

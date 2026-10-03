@@ -64,6 +64,7 @@ import {
 } from "./platform-ui";
 import { BackButton, BottomNav } from "./ui";
 import { MessagesInbox, ModelChat } from "./messages-ui";
+import { MessagesUnreadProvider, useMessagesUnread } from "./messages-unread";
 import { messagesPath, messagesRouteFromLocation } from "./messages-routing";
 import {
   canonicalModelProfileUrl,
@@ -1373,6 +1374,7 @@ function App({ initialUser }: { initialUser: any }) {
   const [slug, setSlug] = useState(initialRoute.screen === "profile" ? initialRoute.handle : "");
   const [chatSlug, setChatSlug] = useState(initialMessagesRoute?.screen === "chat" ? initialMessagesRoute.slug : "");
   const user = initialUser;
+  const unread = useMessagesUnread();
   const [accountView, setAccountView] = useState<"profile" | "creator">(
     creatorRoute ? "creator" : "profile",
   );
@@ -1493,7 +1495,7 @@ function App({ initialUser }: { initialUser: any }) {
       {screen !== "chat" && <BottomNav active={screen} onChange={(id) => navigate(id as Screen)} items={[
         { id: "for-you", label: "For You", icon: <House size={23} strokeWidth={1.8} /> },
         { id: "reels", label: "Reels", icon: <Video size={23} strokeWidth={1.8} /> },
-        { id: "messages", label: "Messages", icon: <MessageCircle size={23} strokeWidth={1.8} /> },
+        { id: "messages", label: "Messages", badgeCount: unread.total, icon: <MessageCircle size={23} strokeWidth={1.8} /> },
         { id: "explore", label: "Explore", icon: <Search size={23} strokeWidth={1.8} /> },
         { id: "account", label: "Profile", icon: <UserRound size={23} strokeWidth={1.8} /> },
       ]} />}
@@ -1659,7 +1661,7 @@ function AuthenticatedApp() {
     );
   if (ageState !== "ready") return null;
   markBootStage("MAIN_VIEW_RENDER_STARTED");
-  const view = <App initialUser={user} />;
+  const view = <MessagesUnreadProvider key={user?.id ?? ""} userId={user?.id ?? ""}><App initialUser={user} /></MessagesUnreadProvider>;
   markBootStage("MAIN_VIEW_RENDER_FINISHED");
   return view;
 }
