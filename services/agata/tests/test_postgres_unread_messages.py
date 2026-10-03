@@ -65,3 +65,141 @@ def test_migration_baselines_existing_messages_across_tenants_without_marking_ne
         with admin.connect() as conn:
             conn.execute(text(f'DROP DATABASE {db} WITH (FORCE)'))
         admin.dispose()
+
+import asyncio
+from datetime import UTC, datetime
+from uuid import UUID
+import httpx
+import pytest_asyncio
+from sqlalchemy import select, update
+from app.config import get_settings
+from app.db.base import SessionFactory, set_tenant_context
+from app.db.models import User, Character, Conversation, Relationship, Consent, Scope
+from app.main import app
+from app.messages.crypto import AeadCrypto
+from app.messages.service import MessageIngestionService
+
+
+@pytest_asyncio.fixture(loop_scope='module')
+async def dialogue():
+    tenant = UUID(get_settings().tenant_id)
+    user, chars, conversations = uuid4(), [uuid4(), uuid4()], [uuid4(), uuid4()]
+    external, now = 'unread-' + uuid4().hex, datetime.now(UTC)
+    async with SessionFactory() as session, session.begin():
+        await set_tenant_context(session, str(tenant))
+        session.add(User(id=user, tenant_id=tenant, external_id=external))
+        session.add_all([Character(id=c, tenant_id=tenant, external_id=str(c), name='Unread fixture') for c in chars])
+        await session.flush()
+        session.add(Consent(tenant_id=tenant, user_id=user, purpose='chat_history', granted_at=now, policy_version='test'))
+        for char, conv in zip(chars, conversations):
+            rel = uuid4()
+            session.add(Relationship(id=rel, tenant_id=tenant, user_id=user, character_id=char, scope=Scope.real_world, status='ACTIVE', started_at=now))
+            await session.flush()
+            session.add(Conversation(id=conv, tenant_id=tenant, user_id=user, character_id=char, relationship_id=rel, scope=Scope.real_world, external_id=f'gpoint-chat:{external}:{char}', started_at=now))
+            await session.flush()
+    async def add(index=0, role='assistant', deleted=False):
+        mid = uuid4()
+        crypto = AeadCrypto(encoded_key=get_settings().message_aead_key.get_secret_value(), key_version='v1')
+        encrypted = crypto.encrypt('Fixture incoming', MessageIngestionService._aad_for(tenant, user, conversations[index], mid))
+        async with SessionFactory() as session, session.begin():
+            await set_tenant_context(session, str(tenant))
+            session.add(Message(id=mid, tenant_id=tenant, user_id=user, character_id=chars[index], conversation_id=conversations[index], scope=Scope.real_world, idempotency_key=str(mid), role=role, occurred_at=datetime.now(UTC), content_ciphertext=encrypted.ciphertext, content_nonce=encrypted.nonce, content_key_version=encrypted.key_version, deleted_at=now if deleted else None))
+        return str(mid)
+    mids=[await add(),await add(),await add(1)]
+    await add(role='user'); await add(role='system'); await add(deleted=True)
+    headers={'authorization':'Bearer '+get_settings().internal_api_token.get_secret_value()}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://test',headers=headers) as client:
+        yield client, external, chars, mids, add
+
+
+@pytest.mark.skipif(not DSN, reason='AGATA_TEST_DATABASE_URL not set')
+@pytest.mark.asyncio(loop_scope='module')
+async def test_counts_are_incoming_only_and_history_fetch_does_not_mark_read(dialogue):
+    client,user,chars,mids,add=dialogue
+    result=await client.get(f'/internal/v1/users/{user}/unread')
+    assert result.status_code==200,result.text
+    assert {i['gpointCharacterId']:i['unreadCount'] for i in result.json()['items']}=={str(chars[0]):2,str(chars[1]):1}
+    history=await client.get(f'/internal/v1/users/{user}/characters/{chars[0]}/messages')
+    assert history.status_code==200,history.text
+    assert all(i['incomingReadAt'] is None for i in history.json()['items'])
+    inbox=await client.get(f'/internal/v1/users/{user}/conversations?limit=1')
+    assert inbox.status_code==200 and 'unreadCount' in inbox.json()['items'][0]
+    assert (await client.get(f'/internal/v1/users/{user}/unread')).json()==result.json()
+
+
+@pytest.mark.skipif(not DSN, reason='AGATA_TEST_DATABASE_URL not set')
+@pytest.mark.asyncio(loop_scope='module')
+async def test_explicit_ack_is_idempotent_and_concurrent_arrival_remains_unread(dialogue):
+    client,user,chars,mids,add=dialogue
+    path=f'/internal/v1/users/{user}/characters/{chars[0]}/messages/read'
+    read,new=await asyncio.gather(client.post(path,json={'messageIds':[mids[0],mids[1],mids[0]]}),add())
+    assert read.status_code==200,read.text
+    assert set(read.json()['acknowledgedMessageIds'])==set(mids[:2])
+    async def timestamps():
+        async with SessionFactory() as session,session.begin():
+            await set_tenant_context(session,get_settings().tenant_id)
+            return (await session.scalars(select(Message.incoming_read_at).where(Message.id.in_([UUID(x) for x in mids[:2]])).order_by(Message.id))).all()
+    before=await timestamps(); assert all(before)
+    assert (await client.post(path,json={'messageIds':mids[:2]})).status_code==200
+    assert await timestamps()==before
+    summary=(await client.get(f'/internal/v1/users/{user}/unread')).json()
+    assert {i['gpointCharacterId']:i['unreadCount'] for i in summary['items']}=={str(chars[0]):1,str(chars[1]):1}
+
+
+@pytest.mark.skipif(not DSN, reason='AGATA_TEST_DATABASE_URL not set')
+@pytest.mark.asyncio(loop_scope='module')
+async def test_foreign_batch_cannot_partially_acknowledge_owned_messages(dialogue):
+    client,user,chars,mids,add=dialogue
+    path=f'/internal/v1/users/{user}/characters/{chars[0]}/messages/read'
+    result=await client.post(path,json={'messageIds':[mids[0],mids[2]]})
+    assert result.status_code==404,result.text
+    async with SessionFactory() as session,session.begin():
+        await set_tenant_context(session,get_settings().tenant_id)
+        assert await session.scalar(select(Message.incoming_read_at).where(Message.id==UUID(mids[0]))) is None
+    for payload in [{'messageIds':[]},{'messageIds':['malformed']},{'messageIds':[str(uuid4()) for _ in range(101)]}]:
+        assert (await client.post(path,json=payload)).status_code==422
+    assert (await client.post(path,json={'messageIds':mids[:1]},headers={'authorization':'Bearer wrong'})).status_code==401
+    assert (await client.post(f'/internal/v1/users/other/characters/{chars[0]}/messages/read',json={'messageIds':mids[:1]})).status_code==404
+
+
+@pytest.mark.skipif(not DSN, reason='AGATA_TEST_DATABASE_URL not set')
+@pytest.mark.asyncio(loop_scope='module')
+async def test_unread_requires_consent_and_excludes_inactive_characters(dialogue):
+    client,user,chars,mids,add=dialogue
+    async with SessionFactory() as session,session.begin():
+        await set_tenant_context(session,get_settings().tenant_id)
+        char=await session.get(Character,chars[0]); char.status='inactive'
+    result=await client.get(f'/internal/v1/users/{user}/unread')
+    assert result.status_code==200,result.text
+    assert result.json()['items']==[{'gpointCharacterId':str(chars[1]),'unreadCount':1}]
+    async with SessionFactory() as session,session.begin():
+        await set_tenant_context(session,get_settings().tenant_id)
+        owner=await session.scalar(select(User).where(User.external_id==user))
+        await session.execute(update(Consent).where(Consent.user_id==owner.id).values(revoked_at=datetime.now(UTC)))
+    assert (await client.get(f'/internal/v1/users/{user}/unread')).status_code==403
+
+
+@pytest.mark.skipif(not DSN, reason='AGATA_TEST_DATABASE_URL not set')
+@pytest.mark.asyncio(loop_scope='module')
+async def test_summary_is_not_limited_to_the_first_inbox_page(dialogue):
+    client,user,chars,mids,add=dialogue
+    tenant=UUID(get_settings().tenant_id)
+    async with SessionFactory() as session,session.begin():
+        await set_tenant_context(session,str(tenant))
+        owner=await session.scalar(select(User).where(User.external_id==user))
+        for _ in range(33):
+            char,rel,conv,mid=[uuid4() for _ in range(4)]
+            session.add(Character(id=char,tenant_id=tenant,external_id=str(char),name='Paging'))
+            await session.flush()
+            session.add(Relationship(id=rel,tenant_id=tenant,user_id=owner.id,character_id=char,scope=Scope.real_world,status='ACTIVE',started_at=datetime.now(UTC)))
+            await session.flush()
+            session.add(Conversation(id=conv,tenant_id=tenant,user_id=owner.id,character_id=char,relationship_id=rel,scope=Scope.real_world,external_id=f'gpoint-chat:{user}:{char}',started_at=datetime.now(UTC)))
+            await session.flush()
+            session.add(Message(id=mid,tenant_id=tenant,user_id=owner.id,character_id=char,conversation_id=conv,scope=Scope.real_world,idempotency_key=str(mid),role='assistant',occurred_at=datetime.now(UTC)))
+    result=await client.get(f'/internal/v1/users/{user}/unread')
+    assert result.status_code==200,result.text
+    assert len(result.json()['items'])==35
+    assert sum(i['unreadCount'] for i in result.json()['items'])==36
+    # A separate HTTP client/new session gets the same persisted state.
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://reopen',headers=client.headers) as fresh:
+        assert (await fresh.get(f'/internal/v1/users/{user}/unread')).json()==result.json()
