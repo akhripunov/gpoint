@@ -32,10 +32,16 @@ const modelPost = (index: number) => ({
 
 export async function installMiniAppBrowserMocks(
   page: Page,
-  options: { telegramStartParam?: string; ageAssuranceRequired?: boolean; ageAttestationWriteStatus?: number; aiAvailable?: boolean; pendingReply?: boolean } = {},
+  options: { telegramStartParam?: string; ageAssuranceRequired?: boolean; ageAttestationWriteStatus?: number; aiAvailable?: boolean; pendingReply?: boolean; chatHistoryAccepted?: boolean; memoryOptIn?: boolean; existingHistory?: boolean } = {},
 ) {
   const errors: string[] = [];
-  const chatMessages: Array<{ id: string; clientMessageId?: string; role: "user" | "assistant"; text: string; occurredAt: string }> = [];
+  let chatHistoryAccepted = options.chatHistoryAccepted ?? false;
+  let memoryOptIn = options.memoryOptIn ?? false;
+  let onboardingCompletedAt = chatHistoryAccepted ? "2026-10-03T10:00:00.000Z" : null;
+  const chatMessages: Array<{ id: string; clientMessageId?: string; role: "user" | "assistant"; text: string; occurredAt: string }> = options.existingHistory ? [
+    { id: "existing-user-message", role: "user", text: "Previously saved message", occurredAt: "2026-10-02T10:00:00.000Z" },
+    { id: "existing-assistant-message", role: "assistant", text: "Previously saved reply", occurredAt: "2026-10-02T10:01:00.000Z" },
+  ] : [];
   let ageAssuranceRequired = options.ageAssuranceRequired ?? false;
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => {
@@ -82,8 +88,13 @@ export async function installMiniAppBrowserMocks(
         data = { required: false, eligible: true, status: "self_attested", method: "self_attested", jurisdiction: "GLOBAL", assertedAt: "2026-09-27T10:00:00.000Z", expiresAt: null, selfAttestationAllowed: true };
       }
     }
-    else if (apiPath === "/messages/state") data = { enabled: true, chatHistory: false, longTermMemory: false, disclosureRequired: true, ageAssuranceRequired, aiAvailable: options.aiAvailable ?? true };
-    else if (apiPath === "/messages/consent" && route.request().method() === "POST") data = { enabled: true, chatHistory: true, longTermMemory: JSON.parse(route.request().postData() || "{}").longTermMemory, disclosureRequired: false, ageAssuranceRequired, aiAvailable: options.aiAvailable ?? true };
+    else if (apiPath === "/messages/state") data = { enabled: true, chatHistory: chatHistoryAccepted, longTermMemory: memoryOptIn, disclosureRequired: !chatHistoryAccepted, onboardingCompleted: chatHistoryAccepted, disclosureVersion: 1, onboardingCompletedAt, memoryOptIn, memoryOptInAt: onboardingCompletedAt, ageAssuranceRequired, aiAvailable: options.aiAvailable ?? true };
+    else if (apiPath === "/messages/consent" && route.request().method() === "POST") {
+      chatHistoryAccepted = true;
+      memoryOptIn = JSON.parse(route.request().postData() || "{}").longTermMemory;
+      onboardingCompletedAt = onboardingCompletedAt ?? new Date().toISOString();
+      data = { enabled: true, chatHistory: true, longTermMemory: memoryOptIn, disclosureRequired: false, onboardingCompleted: true, disclosureVersion: 1, onboardingCompletedAt, memoryOptIn, memoryOptInAt: onboardingCompletedAt, ageAssuranceRequired, aiAvailable: options.aiAvailable ?? true };
+    }
     else if (apiPath === "/messages") data = { items: [{ creator: { id: creator.id, slug: creator.slug, displayName: creator.displayName, avatarUrl: creator.avatarUrl, verified: creator.verified }, lastMessagePreview: "Hello there", lastMessageRole: "assistant", lastMessageAt: "2026-09-27T10:00:00.000Z" }], nextCursor: null };
     else if (apiPath === `/messages/creator/${creator.id}` && route.request().method() === "GET") {
       data = { creator, items: [...chatMessages], nextCursor: null };

@@ -43,6 +43,22 @@ export function assertMessageAgeAssurance(state: Pick<AgataChatState, 'ageAssura
   if (state.ageAssuranceRequired) throw new HttpException({ code: 'AGE_ASSURANCE_REQUIRED' }, 403);
 }
 
+function publicMessagesState(state: AgataChatState) {
+  return {
+    enabled: true,
+    chatHistory: state.chatHistory,
+    longTermMemory: state.longTermMemory,
+    disclosureRequired: state.disclosureRequired,
+    onboardingCompleted: state.onboardingCompleted,
+    disclosureVersion: state.disclosureVersion,
+    onboardingCompletedAt: state.onboardingCompletedAt,
+    memoryOptIn: state.memoryOptIn,
+    memoryOptInAt: state.memoryOptInAt,
+    ageAssuranceRequired: state.ageAssuranceRequired,
+    aiAvailable: process.env.AGATA_LLM_PROVIDER !== 'disabled' && process.env.AGATA_LLM_PROVIDER !== 'none',
+  };
+}
+
 function authenticatedUser(headers: Record<string, string | undefined>): string {
   const id = resolveSession(headers.authorization?.replace(/^Bearer\s+/i, ''));
   if (!id) throw new UnauthorizedException();
@@ -91,10 +107,10 @@ export class MessagesController {
   async state(@Headers() headers: Record<string, string | undefined>) {
     const userId = authenticatedUser(headers);
     const agata = createAgataIntegration();
-    if (!agata) return { enabled: false, chatHistory: false, longTermMemory: false, disclosureRequired: true, aiAvailable: false };
+    if (!agata) return { enabled: false, chatHistory: false, longTermMemory: false, disclosureRequired: true, onboardingCompleted: false, disclosureVersion: null, onboardingCompletedAt: null, memoryOptIn: false, memoryOptInAt: null, aiAvailable: false };
     try {
       const state = await agata.chatState(userId);
-      return { enabled: true, chatHistory: state.chatHistory, longTermMemory: state.longTermMemory, disclosureRequired: state.disclosureRequired, ageAssuranceRequired: state.ageAssuranceRequired, aiAvailable: process.env.AGATA_LLM_PROVIDER !== 'disabled' && process.env.AGATA_LLM_PROVIDER !== 'none' };
+      return publicMessagesState(state);
     } catch (error) { throw mapAgataError(error); }
   }
 
@@ -119,7 +135,7 @@ export class MessagesController {
       };
       await agata.acceptConsent({ userId, consent });
       const updated = await agata.chatState(userId);
-      return { enabled: true, chatHistory: updated.chatHistory, longTermMemory: updated.longTermMemory, disclosureRequired: updated.disclosureRequired, ageAssuranceRequired: updated.ageAssuranceRequired, aiAvailable: process.env.AGATA_LLM_PROVIDER !== 'disabled' && process.env.AGATA_LLM_PROVIDER !== 'none' };
+      return publicMessagesState(updated);
     } catch (error) { throw mapAgataError(error); }
   }
 

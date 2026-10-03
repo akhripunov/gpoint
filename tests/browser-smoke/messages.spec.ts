@@ -6,6 +6,7 @@ test.beforeEach(async ({ page }, testInfo) => {
     ageAssuranceRequired: testInfo.title.includes("age assurance blocks") || testInfo.title.includes("age assurance self-attestation"),
     aiAvailable: !testInfo.title.includes("provider-disabled"),
     pendingReply: testInfo.title.includes("pending send"),
+    existingHistory: testInfo.title.includes("existing conversation"),
   });
 });
 
@@ -34,6 +35,51 @@ test("creator profile opens its chat; consent and text exchange work", async ({ 
   await expect(page.getByText("Hello!", { exact: true })).toBeVisible();
   await expect(page.getByText("Thanks for your message.", { exact: true })).toBeVisible();
   await expect(page.locator(".bottom-nav")).toHaveCount(0);
+});
+
+test("one-time onboarding persists when memory is enabled across reload and existing-chat navigation", async ({ page }) => {
+  await page.goto("/messages/models_hub", { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("heading", { name: "AI character conversation" })).toBeVisible();
+  const memory = page.getByRole("checkbox", { name: /Remember things/ });
+  await memory.check();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByText("Previously saved message", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "AI character conversation" })).toHaveCount(0);
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("heading", { name: "AI character conversation" })).toHaveCount(0);
+  await expect(page.locator(".chat-welcome")).toBeVisible();
+  await page.getByRole("button", { name: "Back to messages" }).click();
+  await expect(page.getByRole("heading", { name: "Messages", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /Models Hub/ }).click();
+  await expect(page.getByRole("heading", { name: "AI character conversation" })).toHaveCount(0);
+  await expect(page.getByRole("checkbox", { name: /Remember things/ })).toHaveCount(0);
+  await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
+});
+
+test("memory remains opted out after Continue, reload, and Telegram Mini App reopen", async ({ page }) => {
+  await page.goto("/messages/models_hub", { waitUntil: "domcontentloaded" });
+  const memory = page.getByRole("checkbox", { name: /Remember things/ });
+  await expect(memory).not.toBeChecked();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("heading", { name: "AI character conversation" })).toHaveCount(0);
+  await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
+  await page.goto("/messages", { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: /Models Hub/ }).click();
+  await expect(page.getByRole("heading", { name: "AI character conversation" })).toHaveCount(0);
+});
+
+test("an existing conversation without a saved current disclosure remains gated once, then opens history", async ({ page }) => {
+  await page.goto("/messages/models_hub", { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("heading", { name: "AI character conversation" })).toBeVisible();
+  await expect(page.getByText("Previously saved message", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByText("Previously saved message", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Back to messages" }).click();
+  await page.getByRole("button", { name: /Models Hub/ }).click();
+  await expect(page.getByRole("heading", { name: "AI character conversation" })).toHaveCount(0);
+  await expect(page.getByText("Previously saved message", { exact: true })).toBeVisible();
 });
 
 test("pending send polls history without reposting and merges the persisted bubble", async ({ page }) => {
@@ -76,7 +122,7 @@ test("provider-disabled chat remains readable and blocks sending without a fake 
   await page.goto("/messages/models_hub", { waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { name: "AI character conversation" })).toBeVisible();
   await page.getByRole("button", { name: "Continue" }).click();
-  await expect(page.getByRole("status")).toContainText("AI replies are not configured yet");
+  await expect(page.getByRole("status")).toContainText("AGATA is temporarily unavailable");
   const composer = page.getByRole("textbox", { name: "Message" });
   await expect(composer).toBeDisabled();
   await expect(page.getByRole("button", { name: "Send message" })).toBeDisabled();

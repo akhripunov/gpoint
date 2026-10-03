@@ -1942,6 +1942,8 @@ class AIDisclosureReceipt(TenantOwned):
     channel: Mapped[str] = mapped_column(String(32), nullable=False)
     receipt_key: Mapped[str] = mapped_column(String(255), nullable=False)
     displayed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    memory_opt_in: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    memory_opt_in_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (
         UniqueConstraint("tenant_id", "receipt_key", name="uq_disclosure_receipt_key"),
         ForeignKeyConstraint(["tenant_id", "user_id"], ["users.tenant_id", "users.id"]),

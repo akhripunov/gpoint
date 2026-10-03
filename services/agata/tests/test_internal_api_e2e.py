@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from app.api.internal import get_embedding_provider, get_response_provider
 from app.config import get_settings
 from app.db.base import SessionFactory, dispose_engine, set_tenant_context
-from app.db.models import AgeAssurance, CharacterProfileVersion, Conversation, Message, OutboxJob, ResponseRun, User
+from app.db.models import AIDisclosureReceipt, AgeAssurance, CharacterProfileVersion, Consent, Conversation, Message, OutboxJob, ResponseRun, User
 from app.main import app
 from app.memory.retrieval import DeterministicFakeEmbeddingProvider
 from app.messages.crypto import AeadCrypto
@@ -67,6 +67,11 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
             )
             assert initial_state.status_code == 200, initial_state.text
             assert initial_state.json()["ageAssuranceRequired"] is True
+            assert initial_state.json()["onboardingCompleted"] is False
+            assert initial_state.json()["disclosureRequired"] is True
+            assert initial_state.json()["disclosureVersion"]
+            assert initial_state.json()["onboardingCompletedAt"] is None
+            assert initial_state.json()["memoryOptIn"] is False
             age_path = f"/internal/v1/users/{user_key}/age-assurance"
             initial_age = await client.get(age_path, headers=headers)
             assert initial_age.status_code == 200
@@ -139,6 +144,59 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
                 },
             )
             assert no_age_consent.status_code == 200, no_age_consent.text
+            no_age_state = await client.get(
+                f"/internal/v1/users/{no_age_user}/chat-state", headers=headers
+            )
+            assert no_age_state.status_code == 200, no_age_state.text
+            assert no_age_state.json()["onboardingCompleted"] is True
+            assert no_age_state.json()["longTermMemory"] is False
+            assert no_age_state.json()["memoryOptIn"] is False
+            assert no_age_state.json()["memoryOptInAt"]
+            async with SessionFactory() as session:
+                await set_tenant_context(session, tenant_id)
+                no_age_persisted_user = await session.scalar(select(User).where(
+                    User.tenant_id == tenant_id, User.source_system == "gpoint",
+                    User.external_id == no_age_user,
+                ))
+                assert no_age_persisted_user is not None
+                no_age_receipts = list((await session.scalars(select(AIDisclosureReceipt).where(
+                    AIDisclosureReceipt.tenant_id == tenant_id,
+                    AIDisclosureReceipt.user_id == no_age_persisted_user.id,
+                ))).all())
+                assert len(no_age_receipts) == 1
+            assert no_age_receipts[0].memory_opt_in is False
+            assert no_age_receipts[0].memory_opt_in_at is not None
+            repeated_opt_out = await client.put(
+                f"/internal/v1/users/{no_age_user}/consent",
+                headers=headers,
+                json={
+                    "chat_history": True,
+                    "long_term_memory": False,
+                    "age_band": "unknown",
+                    "age_status": "pending",
+                    "age_method": "unknown",
+                    "jurisdiction": "GLOBAL",
+                    "verified_at": None,
+                    "expires_at": None,
+                    "disclosure_accepted": True,
+                    "disclosure_receipt_id": str(uuid4()),
+                },
+            )
+            assert repeated_opt_out.status_code == 200, repeated_opt_out.text
+            async with SessionFactory() as session:
+                await set_tenant_context(session, tenant_id)
+                chat_history_consents = await session.scalar(select(func.count()).select_from(Consent).where(
+                    Consent.tenant_id == tenant_id,
+                    Consent.user_id == no_age_persisted_user.id,
+                    Consent.purpose == "chat_history",
+                    Consent.revoked_at.is_(None),
+                ))
+                all_no_age_receipts = await session.scalar(select(func.count()).select_from(AIDisclosureReceipt).where(
+                    AIDisclosureReceipt.tenant_id == tenant_id,
+                    AIDisclosureReceipt.user_id == no_age_persisted_user.id,
+                ))
+                assert chat_history_consents == 1
+                assert all_no_age_receipts == 1
             bypass_attempt = await client.post(
                 "/internal/v1/respond",
                 headers=headers,
@@ -202,7 +260,55 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
             assert state.status_code == 200, state.text
             assert state.json()["chatHistory"] is True
             assert state.json()["longTermMemory"] is True
+            assert state.json()["memoryOptIn"] is True
+            assert state.json()["memoryOptInAt"]
+            assert state.json()["onboardingCompleted"] is True
+            assert state.json()["disclosureRequired"] is False
+            assert state.json()["onboardingCompletedAt"]
+            accepted_at = state.json()["onboardingCompletedAt"]
             assert state.json()["ageAssuranceRequired"] is False
+            # Repeating the same accept request cannot create a second receipt
+            # or reset its timestamp for this user and mandatory notice version.
+            repeated_consent = await client.put(
+                f"/internal/v1/users/{user_key}/consent",
+                headers=headers,
+                json={
+                    "chat_history": True,
+                    "long_term_memory": True,
+                    "age_band": "adult",
+                    "age_status": "self_attested",
+                    "age_method": "self_attested",
+                    "jurisdiction": "GLOBAL",
+                    "verified_at": None,
+                    "disclosure_accepted": True,
+                    "disclosure_receipt_id": str(uuid4()),
+                },
+            )
+            assert repeated_consent.status_code == 200, repeated_consent.text
+            async with SessionFactory() as session:
+                await set_tenant_context(session, tenant_id)
+                persisted_user = await session.scalar(select(User).where(
+                    User.tenant_id == tenant_id, User.source_system == "gpoint",
+                    User.external_id == user_key,
+                ))
+                assert persisted_user is not None
+                receipts = list((await session.scalars(select(AIDisclosureReceipt).where(
+                    AIDisclosureReceipt.tenant_id == tenant_id,
+                    AIDisclosureReceipt.user_id == persisted_user.id,
+                    AIDisclosureReceipt.policy_version == state.json()["disclosureVersion"],
+                ))).all())
+                assert len(receipts) == 1
+                assert receipts[0].memory_opt_in is True
+                assert receipts[0].memory_opt_in_at is not None
+                # An elapsed reminder interval does not repeat an accepted
+                # onboarding notice; only a new policy version does.
+                receipts[0].displayed_at = receipts[0].displayed_at.replace(year=receipts[0].displayed_at.year - 1)
+            reopened_state = await client.get(
+                f"/internal/v1/users/{user_key}/chat-state", headers=headers
+            )
+            assert reopened_state.json()["onboardingCompleted"] is True
+            assert reopened_state.json()["disclosureRequired"] is False
+            assert reopened_state.json()["onboardingCompletedAt"] == accepted_at
             conversations = await client.get(
                 f"/internal/v1/users/{user_key}/conversations", headers=headers
             )

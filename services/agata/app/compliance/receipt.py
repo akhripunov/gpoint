@@ -17,6 +17,13 @@ class CurrentDisclosure:
     receipt: AIDisclosureReceipt | None
 
 
+def onboarding_is_complete(*, required: bool, policy_version: int | None, accepted_version: int | None) -> bool:
+    """A mandatory disclosure is complete only for its exact policy version."""
+    if not required:
+        return True
+    return policy_version is not None and accepted_version == policy_version
+
+
 async def current_disclosure(
     session: AsyncSession,
     *,

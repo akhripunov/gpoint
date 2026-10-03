@@ -42,6 +42,11 @@ export interface AgataChatState {
   chatHistory: boolean;
   longTermMemory: boolean;
   disclosureRequired: boolean;
+  onboardingCompleted: boolean;
+  disclosureVersion: number | null;
+  onboardingCompletedAt: string | null;
+  memoryOptIn: boolean;
+  memoryOptInAt: string | null;
   ageAssuranceRequired: boolean;
   ageBand: 'unknown' | 'minor' | 'adult';
   ageStatus: 'pending' | 'verified' | 'self_attested' | 'expired' | 'rejected';

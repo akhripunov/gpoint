@@ -131,7 +131,7 @@ export function ModelChat({ slug, back }: { slug: string; back: () => void }) {
   useEffect(() => {
     if (state.data?.ageAssuranceRequired) window.dispatchEvent(new Event("gpoint:age-assurance-required"));
   }, [state.data?.ageAssuranceRequired]);
-  const needsConsent = !!state.data && (!state.data.chatHistory || state.data.disclosureRequired);
+  const needsConsent = !!state.data && (!state.data.chatHistory || !state.data.onboardingCompleted || state.data.disclosureRequired);
   const canSend = Boolean(creatorId && state.data?.enabled && !needsConsent && !ageBlocked && !aiUnavailable && !send.isPending);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end", behavior: "smooth" }); }, [displayItems.length]);

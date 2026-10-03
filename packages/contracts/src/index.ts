@@ -25,7 +25,7 @@ export interface MessageThreadDTO {
 }
 export interface MessageThreadListDTO { items: MessageThreadDTO[]; nextCursor: string | null; }
 export interface ChatHistoryDTO extends PaginatedResponse<ChatMessageDTO> { creator: CreatorSummaryDTO; }
-export interface MessagesStateDTO { enabled: boolean; chatHistory: boolean; longTermMemory: boolean; disclosureRequired: boolean; ageAssuranceRequired?: boolean; aiAvailable?: boolean; }
+export interface MessagesStateDTO { enabled: boolean; chatHistory: boolean; longTermMemory: boolean; disclosureRequired: boolean; onboardingCompleted: boolean; disclosureVersion: number | null; onboardingCompletedAt: string | null; memoryOptIn: boolean; memoryOptInAt: string | null; ageAssuranceRequired?: boolean; aiAvailable?: boolean; }
 export interface SendMessageDTO { userMessageId: string; status?: 'pending' | 'completed'; response?: ChatMessageDTO; }
 
 export interface CreatorBot {

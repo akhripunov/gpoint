@@ -14,7 +14,7 @@ from sqlalchemy import and_, func, select, text, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.compliance.policy import PolicyService
-from app.compliance.receipt import current_disclosure
+from app.compliance.receipt import current_disclosure, onboarding_is_complete
 from app.config import get_settings
 from app.db.base import get_session, set_tenant_context
 from app.db.models import (
@@ -120,9 +120,15 @@ async def chat_state(gpoint_user_id: str, session: AsyncSession = Depends(get_se
         if policy is None:
             raise HTTPException(status_code=503, detail={"code": "policy_unavailable"})
         if user is None:
+            disclosure_required = bool(policy.rules.get("ai_disclosure_required", False))
             return {
                 "chatHistory": False, "longTermMemory": False,
-                "disclosureRequired": bool(policy.rules.get("ai_disclosure_required", False)),
+                "disclosureRequired": disclosure_required,
+                "onboardingCompleted": not disclosure_required,
+                "disclosureVersion": policy.version if disclosure_required else None,
+                "onboardingCompletedAt": None,
+                "memoryOptIn": False,
+                "memoryOptInAt": None,
                 "ageAssuranceRequired": True,
                 "ageBand": "unknown", "ageStatus": "pending", "ageMethod": "unknown",
                 "verifiedAt": None, "expiresAt": None, "jurisdiction": policy.jurisdiction,
@@ -131,6 +137,16 @@ async def chat_state(gpoint_user_id: str, session: AsyncSession = Depends(get_se
             Consent.tenant_id == tenant_id, Consent.user_id == user.id,
             Consent.revoked_at.is_(None), Consent.purpose.in_(("chat_history", "long_term_memory")),
         ))).all()
+        latest_memory_choice = await session.scalar(
+            select(Consent)
+            .where(
+                Consent.tenant_id == tenant_id,
+                Consent.user_id == user.id,
+                Consent.purpose == "long_term_memory",
+            )
+            .order_by(func.coalesce(Consent.revoked_at, Consent.granted_at).desc(), Consent.id.desc())
+            .limit(1)
+        )
         age = await session.scalar(select(AgeAssurance).where(
             AgeAssurance.tenant_id == tenant_id, AgeAssurance.user_id == user.id,
         ).order_by(AgeAssurance.version.desc()).limit(1))
@@ -141,18 +157,31 @@ async def chat_state(gpoint_user_id: str, session: AsyncSession = Depends(get_se
             session, tenant_id=tenant_id, user_id=user.id, now=now
         )
         disclosure = await current_disclosure(session, tenant_id=tenant_id, user_id=user.id, now=now)
-        disclosure_decision = None
-        if disclosure is not None:
-            disclosure_decision = policy_service.disclosure_required(
-                rules=disclosure.policy.rules, policy_version=disclosure.policy.version,
-                last_displayed_at=disclosure.receipt.displayed_at if disclosure.receipt else None,
-                now=now,
-            )
+        disclosure_version = disclosure.policy.version if disclosure else None
+        accepted_version = disclosure.receipt.policy_version if disclosure and disclosure.receipt else None
+        onboarding_completed = onboarding_is_complete(
+            required=disclosure is not None,
+            policy_version=disclosure_version,
+            accepted_version=accepted_version,
+        )
         active = {row.purpose for row in consent_rows}
+        memory_opt_in = "long_term_memory" in active
+        memory_opt_in_at = (
+            (latest_memory_choice.revoked_at or latest_memory_choice.granted_at).isoformat()
+            if latest_memory_choice
+            else disclosure.receipt.memory_opt_in_at.isoformat()
+            if onboarding_completed and disclosure and disclosure.receipt and disclosure.receipt.memory_opt_in_at
+            else None
+        )
         return {
             "chatHistory": "chat_history" in active,
             "longTermMemory": "long_term_memory" in active,
-            "disclosureRequired": bool(disclosure_decision and disclosure_decision.allowed),
+            "disclosureRequired": not onboarding_completed,
+            "onboardingCompleted": onboarding_completed,
+            "disclosureVersion": disclosure_version,
+            "onboardingCompletedAt": disclosure.receipt.displayed_at.isoformat() if onboarding_completed and disclosure and disclosure.receipt else None,
+            "memoryOptIn": memory_opt_in,
+            "memoryOptInAt": memory_opt_in_at,
             "ageAssuranceRequired": age_assurance_required,
             "ageBand": age.age_band if age else "unknown",
             "ageStatus": age.status if age else "pending",
@@ -926,8 +955,10 @@ async def sync_user_consent(
             existing_receipt = await session.scalar(
                 select(AIDisclosureReceipt).where(
                     AIDisclosureReceipt.tenant_id == tenant_id,
-                    AIDisclosureReceipt.receipt_key == receipt_key,
-                )
+                    AIDisclosureReceipt.user_id == user.id,
+                    AIDisclosureReceipt.policy_profile_id == policy.id,
+                    AIDisclosureReceipt.policy_version == policy.version,
+                ).with_for_update()
             )
             if existing_receipt is None:
                 session.add(
@@ -939,6 +970,8 @@ async def sync_user_consent(
                         channel="gpoint_internal",
                         receipt_key=receipt_key,
                         displayed_at=now,
+                        memory_opt_in=payload.long_term_memory,
+                        memory_opt_in_at=now,
                     )
                 )
             receipt_result = "RECORDED"
