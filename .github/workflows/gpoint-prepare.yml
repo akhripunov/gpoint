@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: gpoint-prepare-${{ github.ref }}
@@ -112,6 +113,7 @@ jobs:
       - name: Publish candidate result to existing Linear documents
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ github.sha }}
           RELEASE_PHASE: candidate
           PREPARE_RESULT: ${{ needs.prepare.result }}

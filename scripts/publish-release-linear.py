@@ -5,6 +5,11 @@ import os
 from pathlib import Path
 import re
 import sys
+import base64
+import io
+import urllib.request
+from urllib.parse import urlparse
+import zipfile
 from datetime import datetime, timezone
 
 from sync_agents_to_linear import graphql_request, sync_document, SyncError
@@ -13,6 +18,147 @@ DOCUMENTS = {
     'handoff': ('1d84a3c6-f297-40c2-b9e7-ab81bc749c48', 'Архитектор — Handoff'),
     'journal': ('56f7f9f5-c6e1-42b7-8c29-5b24e6c41a06', 'Журнал релизов'),
 }
+REPOSITORY = 'akhripunov/gpoint'
+CURRENT_MARKER = 'GPOINT_CURRENT_STATE'
+
+
+def github_json(path, token=None):
+    token = token or os.environ.get('GITHUB_TOKEN', '')
+    if not token:
+        raise SyncError('GITHUB_TOKEN is missing: cannot verify current release state')
+    base = os.environ.get('GITHUB_API_URL', 'https://api.github.com').rstrip('/')
+    request = urllib.request.Request(f'{base}/{path.lstrip("/")}', headers={
+        'Accept': 'application/vnd.github+json', 'Authorization': f'Bearer {token}',
+        'X-GitHub-Api-Version': '2022-11-28',
+    })
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return json.loads(response.read())
+    except Exception as exc:
+        raise SyncError(f'GitHub current-state read failed: {type(exc).__name__}') from exc
+
+
+def artifact_json(run_id, prefix):
+    data = github_json(f'repos/{REPOSITORY}/actions/runs/{run_id}/artifacts')
+    matches = [a for a in data.get('artifacts', []) if a.get('name', '').startswith(prefix) and not a.get('expired')]
+    if len(matches) != 1:
+        raise SyncError(f'Expected one canonical result artifact for run {run_id}; found {len(matches)}')
+    request = urllib.request.Request(matches[0]['archive_download_url'], headers={
+        'Accept': 'application/vnd.github+json',
+        'Authorization': f"Bearer {os.environ.get('GITHUB_TOKEN', '')}",
+    })
+    class SafeRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            # Artifact endpoints redirect to signed object storage URLs. Never
+            # forward the GitHub bearer token to a different host.
+            if urlparse(newurl).netloc != urlparse(req.full_url).netloc:
+                return urllib.request.Request(newurl, headers={'Accept': 'application/octet-stream'})
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+    try:
+        with urllib.request.build_opener(SafeRedirect).open(request, timeout=30) as response:
+            archive = zipfile.ZipFile(io.BytesIO(response.read()))
+            files = [name for name in archive.namelist() if name.endswith('.json')]
+            if len(files) != 1:
+                raise SyncError(f'Expected one JSON result in run {run_id} artifact')
+            return json.loads(archive.read(files[0]))
+    except SyncError:
+        raise
+    except Exception as exc:
+        raise SyncError(f'GitHub result artifact read failed for run {run_id}: {type(exc).__name__}') from exc
+
+
+def latest_run(workflow, sha=None, successful=False):
+    data = github_json(f'repos/{REPOSITORY}/actions/workflows/{workflow}/runs?branch=main&per_page=100')
+    runs = [r for r in data.get('workflow_runs', []) if (sha is None or r.get('head_sha') == sha)]
+    if successful:
+        runs = [r for r in runs if r.get('status') == 'completed' and r.get('conclusion') == 'success']
+    return max(runs, key=lambda r: (r.get('created_at', ''), r.get('run_attempt', 0)), default=None)
+
+
+def production_evidence():
+    path = 'repos/akhripunov/gpoint/contents/docs/release/state/production.json?ref=gpoint-release-ledger'
+    try:
+        state_response = github_json(path)
+        state = json.loads(base64.b64decode(state_response['content']).decode())
+        manifest_path = state['lastReleaseId']
+        manifest_response = github_json(f'repos/akhripunov/gpoint/contents/docs/release/manifests/{manifest_path}.json?ref=gpoint-release-ledger')
+        manifest = json.loads(base64.b64decode(manifest_response['content']).decode())
+    except (KeyError, ValueError, TypeError) as exc:
+        raise SyncError('GPoint canonical production ledger or manifest is invalid') from exc
+    runs = github_json(f'repos/{REPOSITORY}/actions/workflows/gpoint-deploy.yml/runs?branch=main&per_page=100').get('workflow_runs', [])
+    candidates = sorted((r for r in runs if r.get('head_sha') == state.get('currentProductionSha') and r.get('conclusion') == 'success'),
+                        key=lambda r: r.get('created_at', ''), reverse=True)
+    deployment = None
+    for run in candidates:
+        try:
+            result = artifact_json(run['id'], 'gpoint-production-result-')
+        except SyncError as exc:
+            if 'found 0' in str(exc):
+                continue
+            raise
+        if result.get('status') == 'COMPLETE' and result.get('candidateSha') == state.get('currentProductionSha'):
+            deployment = run
+            break
+    if deployment is None:
+        raise SyncError('No successful GPoint production result artifact matches the canonical ledger')
+    return state, manifest, deployment
+
+
+def current_state():
+    commit = github_json(f'repos/{REPOSITORY}/commits/main')
+    main_sha = commit.get('sha', '')
+    if not re.fullmatch('[a-f0-9]{40}', main_sha):
+        raise SyncError('GitHub main SHA is invalid')
+    latest_prepare_success = latest_run('gpoint-prepare.yml', successful=True)
+    latest_for_main = latest_run('gpoint-prepare.yml', sha=main_sha)
+    production, manifest, deployment = production_evidence()
+    prod_sha = production.get('currentProductionSha')
+    in_sync = bool(prod_sha and prod_sha == main_sha)
+    candidate = 'READY' if latest_for_main and latest_for_main.get('conclusion') == 'success' else 'NOT_PREPARED_FOR_CURRENT_MAIN'
+    return {
+        'synced_at': datetime.now(timezone.utc).isoformat(timespec='seconds'), 'main_sha': main_sha,
+        'main_checked_at': commit.get('commit', {}).get('committer', {}).get('date', 'unknown'),
+        'production_sha': prod_sha, 'production_checked_at': production.get('lastReleaseCompletedAt', 'unknown'),
+        'production_ref': production.get('currentProductionRef', production.get('currentProductionRefName', '')),
+        'release_status': production.get('lastReleaseStatus', 'UNKNOWN'), 'in_sync': in_sync,
+        'prepare': latest_prepare_success, 'candidate': candidate, 'latest_main_prepare': latest_for_main,
+        'deploy': deployment, 'manifest': manifest,
+    }
+
+
+def render_current_state(state):
+    prep = state['prepare'] or {}
+    deploy = state['deploy'] or {}
+    m = state['manifest']
+    state_name = 'IN_SYNC' if state['in_sync'] else 'MAIN_AHEAD_OF_PRODUCTION'
+    lines = [
+        f"Синхронизировано: `{state['synced_at']}` UTC.",
+        f"GitHub main: `{state['main_sha']}` (commit time `{state['main_checked_at']}`).",
+        f"Production: `{state['production_sha']}`; canonical `gpoint-release-ledger/docs/release/state/production.json` + manifest; completed `{state['production_checked_at']}`; `LEDGER VERIFIED` (отдельный свежий VPS readback не выполнялся).",
+        f"Сверка SHA: **{state_name}**.",
+        f"Последний успешный Prepare: `{(prep.get('head_sha') or 'unknown')}` / run `#{prep.get('id', 'unknown')}`; candidate для текущего main: **{state['candidate']}**.",
+        f"Последний production Deploy: `{m.get('productionShaAfter', 'unknown')}` / run `#{deploy.get('id', 'unknown')}` / canonical **{state['release_status']}**.",
+        f"Prisma head: `{m.get('dbHeadAfter', 'unconfirmed')}`; AGATA Alembic head: `{m.get('agataDbHeadAfter', 'unconfirmed')}` (manifest).",
+        "Пользовательская приёмка: **OWNER_SMOKE_PENDING**; technical COMPLETE не является подтверждением Telegram-ответа.",
+        "Следующее действие: владелец подтверждает реальный Telegram smoke либо оставляет приёмку ожидающей; production повторно не запускать.",
+    ]
+    return f"<!-- {CURRENT_MARKER}_BEGIN -->\n\n" + "\n\n".join(lines) + f"\n\n<!-- {CURRENT_MARKER}_END -->"
+
+
+def upsert_current_state(content, block, handoff=False):
+    start, end = f'<!-- {CURRENT_MARKER}_BEGIN -->', f'<!-- {CURRENT_MARKER}_END -->'
+    if content.count(start) != content.count(end) or content.count(start) > 1:
+        raise SyncError('GPoint CURRENT STATE markers are malformed')
+    if start in content:
+        before, rest = content.split(start, 1)
+        _, after = rest.split(end, 1)
+        return before + block + after
+    if handoff:
+        return block + '\n\n' + content
+    title_end = content.find('\n')
+    if not content.startswith('# ') or title_end < 0:
+        raise SyncError('GPoint Journal title anchor is missing')
+    return content[:title_end + 1] + '\n' + block + '\n\n' + content[title_end + 1:].lstrip('\n')
 
 
 def replace_section(content, section, body):
@@ -43,9 +189,10 @@ def candidate_status(prepare_result):
     return {'success': 'READY', 'cancelled': 'CANCELLED', 'skipped': 'SKIPPED'}.get(prepare_result, 'FAILED')
 
 
-def publish(section, event_id, body, key, call=graphql_request):
+def publish(section, event_id, body, key, call=graphql_request, state=None):
     if not key.strip():
         raise SyncError('LINEAR_API_KEY is missing: configure the repository secret; release facts were not published')
+    state_block = render_current_state(state or current_state())
     # Journal first: a partial failure keeps the history, and retry is idempotent.
     for kind in ('journal', 'handoff'):
         doc_id, title = DOCUMENTS[kind]
@@ -53,7 +200,12 @@ def publish(section, event_id, body, key, call=graphql_request):
         if not current or current.get('title') != title or current.get('id') != doc_id:
             raise SyncError('Release document identity mismatch')
         content = current.get('content') or ''
-        updated = append_event(content, event_id, body) if kind == 'journal' else replace_section(content, section, body)
+        if kind == 'journal':
+            updated = append_event(content, event_id, body)
+            updated = upsert_current_state(updated, state_block)
+        else:
+            updated = upsert_current_state(content, state_block, handoff=True)
+            updated = replace_section(updated, section, body)
         sync_document(updated, doc_id, key, call, expected_title=title)
 
 
@@ -96,7 +248,7 @@ def main():
         else:
             body += '\n\nПользовательская проверка: **ожидается**. Владелец отправляет новое сообщение Models Hub и подтверждает ответ; Dev фиксирует приёмку отдельно. Не считать heartbeat подтверждением ответа.'
     section = {'candidate': 'кандидат', 'preflight': 'preflight', 'production': 'production'}[phase]
-    publish(section, event_identity(run_id, attempt, phase, status), body, os.environ.get('LINEAR_API_KEY', ''))
+    publish(section, event_identity(run_id, attempt, phase, status), body, os.environ.get('LINEAR_API_KEY', ''), state=current_state())
 
 
 if __name__ == '__main__':

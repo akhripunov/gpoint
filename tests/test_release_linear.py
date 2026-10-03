@@ -47,6 +47,9 @@ class ReleaseTests(unittest.TestCase):
 
     def test_preflight_only_does_not_publish_production_and_failed_apply_has_real_status(self):
         workflow = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()
+        publisher = workflow.split('  publish:', 1)[1]
+        self.assertIn("if: always() && github.ref == 'refs/heads/main'", publisher)
+        self.assertIn('needs.validate.outputs.candidate || inputs.candidate || github.sha', publisher)
         self.assertIn("inputs.mode == 'production' && needs.deploy.outputs.status != ''", workflow)
         self.assertIn('RELEASE_PHASE: preflight', workflow)
         self.assertIn("RELEASE_STATUS: ${{ needs.deploy.outputs.preflight || 'BLOCKED' }}", workflow)
@@ -73,6 +76,56 @@ class ReleaseTests(unittest.TestCase):
     def test_candidate_does_not_replace_production(self):
         source = SYNC.replace_section('Architect', 'production', 'production facts')
         self.assertIn('production facts', SYNC.replace_section(source, 'кандидат', 'candidate facts'))
+
+    def test_current_state_is_idempotent_and_handoff_first(self):
+        block = SYNC.render_current_state({
+            'synced_at': '2026-10-03T07:00:00+00:00', 'main_sha': 'a' * 40,
+            'main_checked_at': 'now', 'production_sha': 'b' * 40, 'production_checked_at': 'then',
+            'production_ref': 'release-x', 'release_status': 'COMPLETE', 'in_sync': False,
+            'prepare': {'head_sha': 'a' * 40, 'id': 12}, 'candidate': 'READY',
+            'latest_main_prepare': {'conclusion': 'success'}, 'deploy': {'id': 14},
+            'manifest': {'productionShaAfter': 'b' * 40, 'dbHeadAfter': 'p1', 'agataDbHeadAfter': 'a1'},
+        })
+        handoff = SYNC.upsert_current_state('## Manual section\nkeep', block, handoff=True)
+        self.assertTrue(handoff.startswith('<!-- GPOINT_CURRENT_STATE_BEGIN -->'))
+        self.assertIn('## Manual section\nkeep', handoff)
+        self.assertEqual(SYNC.upsert_current_state(handoff, block, handoff=True), handoff)
+        journal = SYNC.upsert_current_state('# Journal\n\nHistory', block)
+        self.assertIn('GPOINT_CURRENT_STATE_BEGIN', journal.split('History')[0])
+        self.assertIn('MAIN_AHEAD_OF_PRODUCTION', block)
+        self.assertNotIn('production SHA', block.lower().split('prepare')[1].split('deploy')[0])
+
+    def test_current_state_rejects_bad_markers_and_preserves_unowned_text(self):
+        block = SYNC.render_current_state({'synced_at':'t','main_sha':'a'*40,'main_checked_at':'t',
+            'production_sha':'a'*40,'production_checked_at':'t','production_ref':'r','release_status':'COMPLETE',
+            'in_sync':True,'prepare':None,'candidate':'READY','latest_main_prepare':None,'deploy':{'id':1},
+            'manifest':{'productionShaAfter':'a'*40,'dbHeadAfter':'p','agataDbHeadAfter':'a'}})
+        original = 'Architect rules\n\n<!-- GPOINT_CURRENT_STATE_BEGIN -->\nstale\n<!-- GPOINT_CURRENT_STATE_END -->\n\nManual notes'
+        updated = SYNC.upsert_current_state(original, block, handoff=True)
+        self.assertIn('Architect rules', updated)
+        self.assertIn('Manual notes', updated)
+        with self.assertRaises(SYNC.SyncError):
+            SYNC.upsert_current_state('<!-- GPOINT_CURRENT_STATE_BEGIN -->x', block)
+
+    def test_latest_current_sha_failure_does_not_reuse_older_success(self):
+        runs = {'workflow_runs': [
+            {'id':1,'head_sha':'a'*40,'created_at':'2026-10-03T06:00:00Z','conclusion':'success','status':'completed'},
+            {'id':2,'head_sha':'a'*40,'created_at':'2026-10-03T07:00:00Z','conclusion':'failure','status':'completed'},
+        ]}
+        original = SYNC.github_json
+        try:
+            SYNC.github_json = lambda path, token=None: runs
+            latest = SYNC.latest_run('gpoint-prepare.yml', sha='a'*40)
+            self.assertEqual(latest['id'], 2)
+            self.assertNotEqual(latest['conclusion'], 'success')
+        finally:
+            SYNC.github_json = original
+
+    def test_current_state_is_gpoint_scoped(self):
+        source = (ROOT / 'scripts/publish-release-linear.py').read_text()
+        self.assertIn("CURRENT_MARKER = 'GPOINT_CURRENT_STATE'", source)
+        self.assertIn("REPOSITORY = 'akhripunov/gpoint'", source)
+        self.assertNotIn('MAXIBOT_CURRENT_STATE', source)
 
     def test_newer_failed_run_blocks_older_success(self):
         base = {'head_sha': 'a' * 40, 'head_branch': 'main', 'event': 'push', 'status': 'completed'}

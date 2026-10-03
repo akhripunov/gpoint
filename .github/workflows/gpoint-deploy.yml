@@ -120,14 +120,14 @@ jobs:
 
   publish:
     needs: [validate, deploy]
-    if: always() && needs.validate.result == 'success'
+    if: always() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     concurrency:
       group: gpoint-linear-release
       cancel-in-progress: false
     env:
-      CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
+      CANDIDATE_SHA: ${{ needs.validate.outputs.candidate || inputs.candidate || github.sha }}
       RELEASE_MODE: ${{ inputs.mode }}
       GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
     steps:
@@ -136,7 +136,7 @@ jobs:
         run: echo "RELEASE_RESULT=$RUNNER_TEMP/release-evidence/gpoint-release-result-$GITHUB_RUN_ID.json" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.validate.outputs.candidate }}
+          ref: ${{ github.sha }}
       - name: Read saved release evidence
         if: needs.deploy.outputs.status != ''
         uses: actions/download-artifact@v4
@@ -147,6 +147,7 @@ jobs:
         if: always()
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
           RELEASE_PHASE: preflight
           RELEASE_STATUS: ${{ needs.deploy.outputs.preflight || 'BLOCKED' }}
         run: python3 scripts/publish-release-linear.py
@@ -154,6 +155,7 @@ jobs:
         if: always() && inputs.mode == 'production' && needs.deploy.outputs.status != ''
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
           RELEASE_PHASE: production
           RELEASE_STATUS: ${{ needs.deploy.outputs.execute_outcome == 'success' && needs.deploy.outputs.status || (needs.deploy.outputs.status == 'COMPLETE' && 'RECOVERY_REQUIRED' || needs.deploy.outputs.status || 'FAILED') }}
         run: python3 scripts/publish-release-linear.py
