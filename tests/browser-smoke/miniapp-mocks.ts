@@ -22,7 +22,7 @@ const modelPost = (index: number) => ({
   id: `browser-smoke-post-${index}`,
   type: "IMAGE",
   caption: `Browser smoke post ${index}`,
-  media: [{ id: `fixture-post-${index}`, kind: "IMAGE", readUrl: `/media/assets/fixture-post-${String(index).padStart(2, "0")}` }],
+  media: [{ id: `fixture-post-${index}`, kind: "IMAGE", readUrl: `/media/assets/fixture-post-${String(index).padStart(2, "0")}`, width: 960, height: 1280, blurHash: "LEHV6nWB2yk8pyo0adR*.7kCMdnj" }],
   publishedAt: "2026-09-23T09:00:00.000Z",
   likedByMe: false,
   likesCount: 3,

@@ -1104,10 +1104,12 @@ function FeedCard({
   post,
   open,
   mode,
+  prioritizeMedia,
 }: {
   post: any;
   open: (c: any) => void;
   mode: "for-you" | "following";
+  prioritizeMedia: boolean;
 }) {
   const qc = useQueryClient();
   const [liked, setLiked] = useState(!!post.likedByMe);
@@ -1204,6 +1206,9 @@ function FeedCard({
               hash={m.blurHash}
               alt={`${post.creator.displayName} post`}
               src={mediaUrl(m.readUrl)}
+              width={m.width}
+              height={m.height}
+              prioritize={prioritizeMedia}
             />
           )}
         </div>
@@ -1337,8 +1342,8 @@ function Feed({
   return (
     <section className="feed">
       <FeedTabs mode={mode} go={go} />
-      {items.map((p: any) => (
-        <FeedCard key={p.id} post={p} open={open} mode={mode} />
+      {items.map((p: any, index: number) => (
+        <FeedCard key={p.id} post={p} open={open} mode={mode} prioritizeMedia={index < 2} />
       ))}
       {mode === "for-you" && (
         <div className="feed-discovery">
@@ -1667,10 +1672,16 @@ function BlurHashImage({
   hash,
   src,
   alt,
+  width,
+  height,
+  prioritize,
 }: {
   hash?: string;
   src: string;
   alt: string;
+  width?: number | null;
+  height?: number | null;
+  prioritize: boolean;
 }) {
   const [placeholder, setPlaceholder] = useState<string>();
   useEffect(() => {
@@ -1694,7 +1705,13 @@ function BlurHashImage({
   }, [hash]);
   return (
     <img
-      loading="lazy"
+      loading={prioritize ? "eager" : "lazy"}
+      decoding="async"
+      ref={(image) => {
+        if (image) image.setAttribute("fetchpriority", prioritize ? "high" : "auto");
+      }}
+      width={width ?? undefined}
+      height={height ?? undefined}
       alt={alt}
       src={src}
       style={
