@@ -2,6 +2,9 @@ import importlib.util
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
+import base64
+import json
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -144,6 +147,55 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn('types: [completed]', workflow)
         self.assertIn("STATE_SYNC_ONLY: 'true'", workflow)
         self.assertIn('group: gpoint-linear-release', workflow)
+
+    def production_fixture(self, workflow_status='in_progress', conclusion=None,
+                           deploy_conclusion='success', result_overrides=None):
+        sha = 'a' * 40
+        state = {'currentProductionSha': sha, 'lastReleaseId': 'release-new'}
+        manifest = {'releaseId': 'release-new', 'productionRef': 'prod-new'}
+        run = {'id': 55, 'head_sha': sha, 'status': workflow_status,
+               'conclusion': conclusion, 'created_at': '2026-10-03T08:00:00Z'}
+        result = {'status': 'COMPLETE', 'candidateSha': sha, 'productionShaAfter': sha,
+                  'releaseId': 'release-new', 'productionRef': 'prod-new', 'automationRunId': '55'}
+        result.update(result_overrides or {})
+        def github(path, token=None):
+            if 'production.json?' in path:
+                return {'content': base64.b64encode(json.dumps(state).encode()).decode()}
+            if '/manifests/' in path:
+                return {'content': base64.b64encode(json.dumps(manifest).encode()).decode()}
+            if path.endswith('/55/jobs'):
+                return {'jobs': [{'name': 'deploy', 'status': 'completed', 'conclusion': deploy_conclusion}]}
+            return {'workflow_runs': [run]}
+        return github, run, result
+
+    def test_production_self_run_in_progress_requires_completed_successful_deploy_job(self):
+        github, run, result = self.production_fixture()
+        with patch.object(SYNC, 'github_json', side_effect=github), patch.object(SYNC, 'artifact_json', return_value=result):
+            self.assertEqual(SYNC.production_evidence()[2], run)
+        self.assertEqual(run['status'], 'in_progress')
+        self.assertIsNone(run['conclusion'])
+        github, _, result = self.production_fixture(deploy_conclusion='failure')
+        with patch.object(SYNC, 'github_json', side_effect=github), patch.object(SYNC, 'artifact_json', return_value=result):
+            with self.assertRaises(SYNC.SyncError):
+                SYNC.production_evidence()
+
+    def test_complete_runtime_reconciles_after_publication_failure_without_faking_workflow_success(self):
+        github, run, result = self.production_fixture('completed', 'failure')
+        with patch.object(SYNC, 'github_json', side_effect=github), patch.object(SYNC, 'artifact_json', return_value=result):
+            self.assertEqual(SYNC.production_evidence()[2]['conclusion'], 'failure')
+        github, _, result = self.production_fixture('completed', 'success')
+        with patch.object(SYNC, 'github_json', side_effect=github), patch.object(SYNC, 'artifact_json', return_value=result):
+            self.assertEqual(SYNC.production_evidence()[2]['conclusion'], 'success')
+
+    def test_production_artifact_cannot_replace_newer_ledger_release_or_use_other_run(self):
+        for field, value in [('releaseId', 'release-old'), ('automationRunId', '54'),
+                             ('productionShaAfter', 'b' * 40), ('productionRef', 'prod-old'),
+                             ('status', 'RECOVERY_REQUIRED')]:
+            with self.subTest(field=field):
+                github, _, result = self.production_fixture(result_overrides={field: value})
+                with patch.object(SYNC, 'github_json', side_effect=github), patch.object(SYNC, 'artifact_json', return_value=result):
+                    with self.assertRaises(SYNC.SyncError):
+                        SYNC.production_evidence()
 
     def test_newer_failed_run_blocks_older_success(self):
         base = {'head_sha': 'a' * 40, 'head_branch': 'main', 'event': 'push', 'status': 'completed'}

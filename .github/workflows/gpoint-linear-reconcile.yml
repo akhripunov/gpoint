@@ -1,6 +1,7 @@
 name: GPoint — Linear current-state reconciliation
 
 on:
+  workflow_dispatch:
   workflow_run:
     workflows: ["GPoint — Prepare", "GPoint — Deploy"]
     types: [completed]
@@ -15,7 +16,7 @@ concurrency:
 
 jobs:
   reconcile:
-    if: github.event.workflow_run.head_branch == 'main'
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

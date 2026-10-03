@@ -97,7 +97,7 @@ def production_evidence():
     except (KeyError, ValueError, TypeError) as exc:
         raise SyncError('GPoint canonical production ledger or manifest is invalid') from exc
     runs = github_json(f'repos/{REPOSITORY}/actions/workflows/gpoint-deploy.yml/runs?branch=main&per_page=100').get('workflow_runs', [])
-    candidates = sorted((r for r in runs if r.get('head_sha') == state.get('currentProductionSha') and r.get('conclusion') == 'success'),
+    candidates = sorted((r for r in runs if r.get('head_sha') == state.get('currentProductionSha')),
                         key=lambda r: r.get('created_at', ''), reverse=True)
     deployment = None
     for run in candidates:
@@ -107,11 +107,26 @@ def production_evidence():
             if 'found 0' in str(exc):
                 continue
             raise
-        if result.get('status') == 'COMPLETE' and result.get('candidateSha') == state.get('currentProductionSha'):
-            deployment = run
-            break
+        # Publish runs before the workflow concludes. A failed publisher also
+        # leaves the overall workflow red after a successful runtime release.
+        # Only the exact ledger release, its immutable result and a confirmed
+        # successful deploy job prove COMPLETE; never manufacture conclusion.
+        if (result.get('status') != 'COMPLETE' or
+                result.get('candidateSha') != state.get('currentProductionSha') or
+                result.get('productionShaAfter') != state.get('currentProductionSha') or
+                result.get('releaseId') != state.get('lastReleaseId') or
+                result.get('releaseId') != manifest.get('releaseId') or
+                result.get('productionRef') != manifest.get('productionRef') or
+                str(result.get('automationRunId')) != str(run['id'])):
+            continue
+        jobs = github_json(f'repos/{REPOSITORY}/actions/runs/{run["id"]}/jobs').get('jobs', [])
+        deploy_jobs = [job for job in jobs if job.get('name') == 'deploy']
+        if len(deploy_jobs) != 1 or deploy_jobs[0].get('status') != 'completed' or deploy_jobs[0].get('conclusion') != 'success':
+            continue
+        deployment = run
+        break
     if deployment is None:
-        raise SyncError('No successful GPoint production result artifact matches the canonical ledger')
+        raise SyncError('No verified GPoint production result and successful deploy job match the canonical ledger')
     return state, manifest, deployment
 
 
@@ -149,6 +164,7 @@ def render_current_state(state):
         f"Сверка SHA: **{state_name}**.",
         f"Последний завершившийся успешный Prepare: `{(prep.get('head_sha') or 'unknown')}` / run `#{prep.get('id', 'unknown')}`; current-main run `#{(state['latest_main_prepare'] or {}).get('id', 'unknown')}`: **{state['candidate']}**.",
         f"Последний production Deploy: `{m.get('productionShaAfter', 'unknown')}` / run `#{deploy.get('id', 'unknown')}` / canonical **{state['release_status']}**.",
+        f"GitHub Deploy workflow: `{deploy.get('status', 'unknown')}` / conclusion `{deploy.get('conclusion') or 'pending'}`; deploy job **SUCCESS** подтверждён отдельно.",
         f"Prisma head: `{m.get('dbHeadAfter', 'unconfirmed')}`; AGATA Alembic head: `{m.get('agataDbHeadAfter', 'unconfirmed')}` (manifest).",
         "Пользовательская приёмка: **OWNER_SMOKE_PENDING**; technical COMPLETE не является подтверждением Telegram-ответа.",
         "Следующее действие: владелец подтверждает реальный Telegram smoke либо оставляет приёмку ожидающей; production повторно не запускать.",
