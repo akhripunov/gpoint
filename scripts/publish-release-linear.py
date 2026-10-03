@@ -10,6 +10,7 @@ import io
 import urllib.request
 from urllib.parse import urlparse
 import zipfile
+import hashlib
 from datetime import datetime, timezone
 
 from sync_agents_to_linear import graphql_request, sync_document, SyncError
@@ -56,7 +57,11 @@ def artifact_json(run_id, prefix):
             return super().redirect_request(req, fp, code, msg, headers, newurl)
     try:
         with urllib.request.build_opener(SafeRedirect).open(request, timeout=30) as response:
-            archive = zipfile.ZipFile(io.BytesIO(response.read()))
+            payload = response.read()
+            digest = matches[0].get('digest', '')
+            if not re.fullmatch(r'sha256:[a-f0-9]{64}', digest) or hashlib.sha256(payload).hexdigest() != digest[7:]:
+                raise SyncError(f'Canonical result artifact checksum mismatch for run {run_id}')
+            archive = zipfile.ZipFile(io.BytesIO(payload))
             files = [name for name in archive.namelist() if name.endswith('.json')]
             if len(files) != 1:
                 raise SyncError(f'Expected one JSON result in run {run_id} artifact')
@@ -96,6 +101,11 @@ def production_evidence():
         manifest = json.loads(base64.b64decode(manifest_response['content']).decode())
     except (KeyError, ValueError, TypeError) as exc:
         raise SyncError('GPoint canonical production ledger or manifest is invalid') from exc
+    sha = state.get('currentProductionSha')
+    if (state.get('lastReleaseStatus') != 'COMPLETE' or manifest.get('status') != 'COMPLETE' or
+            manifest.get('releaseId') != state.get('lastReleaseId') or
+            manifest.get('candidateSha') != sha or manifest.get('productionShaAfter') != sha):
+        raise SyncError('STATE_MISMATCH: GPoint canonical ledger and manifest SHA/release identity disagree')
     runs = github_json(f'repos/{REPOSITORY}/actions/workflows/gpoint-deploy.yml/runs?branch=main&per_page=100').get('workflow_runs', [])
     candidates = sorted((r for r in runs if r.get('head_sha') == state.get('currentProductionSha')),
                         key=lambda r: r.get('created_at', ''), reverse=True)

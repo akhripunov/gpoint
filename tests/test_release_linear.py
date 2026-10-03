@@ -5,6 +5,9 @@ import unittest
 from unittest.mock import patch
 import base64
 import json
+import io
+import zipfile
+import hashlib
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -151,8 +154,9 @@ class ReleaseTests(unittest.TestCase):
     def production_fixture(self, workflow_status='in_progress', conclusion=None,
                            deploy_conclusion='success', result_overrides=None):
         sha = 'a' * 40
-        state = {'currentProductionSha': sha, 'lastReleaseId': 'release-new'}
-        manifest = {'releaseId': 'release-new', 'productionRef': 'prod-new'}
+        state = {'currentProductionSha': sha, 'lastReleaseId': 'release-new', 'lastReleaseStatus': 'COMPLETE'}
+        manifest = {'releaseId': 'release-new', 'productionRef': 'prod-new', 'candidateSha': sha,
+                    'productionShaAfter': sha, 'status': 'COMPLETE'}
         run = {'id': 55, 'head_sha': sha, 'status': workflow_status,
                'conclusion': conclusion, 'created_at': '2026-10-03T08:00:00Z'}
         result = {'status': 'COMPLETE', 'candidateSha': sha, 'productionShaAfter': sha,
@@ -196,6 +200,40 @@ class ReleaseTests(unittest.TestCase):
                 with patch.object(SYNC, 'github_json', side_effect=github), patch.object(SYNC, 'artifact_json', return_value=result):
                     with self.assertRaises(SYNC.SyncError):
                         SYNC.production_evidence()
+
+    def test_production_ledger_manifest_sha_mismatch_is_not_reported_complete(self):
+        github, _, result = self.production_fixture('completed', 'failure')
+        def mismatch(path, token=None):
+            data = github(path, token)
+            if '/manifests/' in path:
+                manifest = json.loads(base64.b64decode(data['content']))
+                manifest['productionShaAfter'] = 'b' * 40
+                return {'content': base64.b64encode(json.dumps(manifest).encode()).decode()}
+            return data
+        with patch.object(SYNC, 'github_json', side_effect=mismatch), patch.object(SYNC, 'artifact_json', return_value=result):
+            with self.assertRaisesRegex(SYNC.SyncError, 'STATE_MISMATCH'):
+                SYNC.production_evidence()
+
+    def test_immutable_production_result_zip_checksum_is_required(self):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, 'w') as archive:
+            archive.writestr('result.json', json.dumps({'status': 'COMPLETE'}))
+        payload = buffer.getvalue()
+        digest = hashlib.sha256(payload).hexdigest()
+        for expected in [digest, '0' * 64, '']:
+            with self.subTest(expected=expected):
+                metadata = {'artifacts': [{'name': 'gpoint-production-result-55-1',
+                    'expired': False, 'digest': 'sha256:' + expected,
+                    'archive_download_url': 'https://api.github.com/artifact'}]}
+                class Opener:
+                    def open(self, request, timeout=None):
+                        return io.BytesIO(payload)
+                with patch.object(SYNC, 'github_json', return_value=metadata), patch.object(SYNC.urllib.request, 'build_opener', return_value=Opener()):
+                    if expected == digest:
+                        self.assertEqual(SYNC.artifact_json(55, 'gpoint-production-result-')['status'], 'COMPLETE')
+                    else:
+                        with self.assertRaisesRegex(SYNC.SyncError, 'checksum mismatch'):
+                            SYNC.artifact_json(55, 'gpoint-production-result-')
 
     def test_newer_failed_run_blocks_older_success(self):
         base = {'head_sha': 'a' * 40, 'head_branch': 'main', 'event': 'push', 'status': 'completed'}
