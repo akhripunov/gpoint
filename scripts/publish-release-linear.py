@@ -65,7 +65,7 @@ def artifact_json(run_id, prefix):
     if len(matches) != 1:
         raise SyncError(f'Expected one canonical result artifact for run {run_id}; found {len(matches)}')
     request = urllib.request.Request(matches[0]['archive_download_url'], headers={
-        'Accept': 'application/octet-stream',
+        'Accept': 'application/octet-stream' if release_run else 'application/vnd.github+json',
         'Authorization': f"Bearer {os.environ.get('GITHUB_TOKEN', '')}",
     })
     class SafeRedirect(urllib.request.HTTPRedirectHandler):
