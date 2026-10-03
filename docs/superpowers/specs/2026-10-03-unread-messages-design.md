@@ -1,6 +1,6 @@
 # GPoint unread messages — design
 
-Status: OWNER_REVIEW_REQUIRED. Conversational architecture explicitly approved by the owner on 2026-10-03. This written specification must be reviewed before implementation planning under Superpowers.
+Status: APPROVED_OWNER. The owner explicitly approved the written specification in commit `554c6cac0ad23052522de5aa4d5da82d93d67124` on 2026-10-03. Approval covers architecture and scope, not production deployment or final visual acceptance.
 
 ## Purpose and scope
 
