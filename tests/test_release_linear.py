@@ -43,7 +43,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_prepare_success_can_only_publish_ready_after_artifact_step_job_success(self):
         workflow = (ROOT / '.github/workflows/gpoint-prepare.yml').read_text()
-        upload = workflow.index('uses: actions/upload-artifact@v4')
+        upload = workflow.index('scripts/release_assets.py publish prepare')
         publish = workflow.index('name: Publish candidate result to existing Linear documents')
         self.assertLess(upload, publish)
         self.assertIn('needs.prepare.result', workflow)
@@ -234,6 +234,33 @@ class ReleaseTests(unittest.TestCase):
                     else:
                         with self.assertRaisesRegex(SYNC.SyncError, 'checksum mismatch'):
                             SYNC.artifact_json(55, 'gpoint-production-result-')
+
+    def test_new_immutable_release_result_is_checksum_verified_and_mutable_is_blocked(self):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, 'w') as archive:
+            archive.writestr('result.json', json.dumps({'status': 'PLANNED', 'candidateSha': 'a'*40,
+                'automationRunId': '55', 'automationRunAttempt': '2'}))
+        payload = buffer.getvalue()
+        sha = 'a' * 40
+        tag = f'gpoint-evidence-{sha}-55-2'
+        for immutable, digest in [(True, hashlib.sha256(payload).hexdigest()), (False, '0'*64), (True, '0'*64)]:
+            def github(path, token=None):
+                if path.endswith('/artifacts'): return {'artifacts': []}
+                if path.endswith('/55'): return {'head_sha': sha, 'head_branch': 'main', 'event': 'workflow_dispatch',
+                                                 'path': '.github/workflows/gpoint-deploy.yml', 'run_attempt': 2}
+                if '/git/ref/' in path: return {'object': {'type': 'commit', 'sha': sha}}
+                return {'tag_name': tag, 'draft': False, 'immutable': immutable, 'assets': [
+                    {'id': 99, 'name': 'result.zip', 'state': 'uploaded', 'size': len(payload), 'digest': 'sha256:'+digest}]}
+            class Opener:
+                def open(self, request, timeout=None):
+                    self.assert_url = request.full_url
+                    return io.BytesIO(payload)
+            with self.subTest(immutable=immutable, digest=digest), patch.object(SYNC, 'github_json', side_effect=github), \
+                 patch.object(SYNC.urllib.request, 'build_opener', return_value=Opener()):
+                if immutable and digest == hashlib.sha256(payload).hexdigest():
+                    self.assertEqual(SYNC.artifact_json(55, 'gpoint-production-result-')['status'], 'PLANNED')
+                else:
+                    with self.assertRaises(SYNC.SyncError): SYNC.artifact_json(55, 'gpoint-production-result-')
 
     def test_newer_failed_run_blocks_older_success(self):
         base = {'head_sha': 'a' * 40, 'head_branch': 'main', 'event': 'push', 'status': 'completed'}

@@ -91,12 +91,14 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def download(repo, artifact_id, token, target):
+def download(repo, artifact_id, token, target, release_asset=False):
     # Each bounded attempt obtains a fresh signed URL. Never forward the
     # GitHub token to blob storage or reuse a URL after a connection outage.
+    route = f'releases/assets/{artifact_id}' if release_asset else f'actions/artifacts/{artifact_id}/zip'
     request = urllib.request.Request(
-        f'https://api.github.com/repos/{repo}/actions/artifacts/{artifact_id}/zip',
-        headers={'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json'})
+        f'https://api.github.com/repos/{repo}/{route}',
+        headers={'Authorization': f'Bearer {token}',
+                 'Accept': 'application/octet-stream' if release_asset else 'application/vnd.github+json'})
 
     def copy_bounded(response):
         with response, target.open('wb') as output:
@@ -205,19 +207,31 @@ def main():
     if github(repo, 'git/ref/heads/main', token, stage)['object']['sha'] != sha:
         raise RuntimeError('Candidate is no longer current main')
     stage = 'artifact_metadata'
-    metadata = github(repo, f'actions/artifacts/{artifact_id}', token, stage)
-    name = f'gpoint-release-{sha}-{run_id}-{attempt}' if project == 'gpoint' else f'maxibot-image-{sha}-{run_id}-{attempt}'
-    if (metadata.get('expired') is not False or metadata.get('name') != name
-            or str(metadata.get('workflow_run', {}).get('id')) != run_id
-            or metadata.get('workflow_run', {}).get('head_sha') != sha):
-        raise RuntimeError('Artifact does not belong to the selected Prepare')
+    if project == 'gpoint':
+        from release_assets import resolve_asset
+        metadata = resolve_asset('prepare', sha, run_id, attempt, 'bundle.zip',
+                                 lambda route: github(repo, route, token, stage))
+        if str(metadata['id']) != artifact_id:
+            raise RuntimeError('Immutable asset changed after selection')
+    else:
+        metadata = github(repo, f'actions/artifacts/{artifact_id}', token, stage)
+        name = f'gpoint-release-{sha}-{run_id}-{attempt}' if project == 'gpoint' else f'maxibot-image-{sha}-{run_id}-{attempt}'
+        if (metadata.get('expired') is not False or metadata.get('name') != name
+                or str(metadata.get('workflow_run', {}).get('id')) != run_id
+                or metadata.get('workflow_run', {}).get('head_sha') != sha):
+            raise RuntimeError('Artifact does not belong to the selected Prepare')
     digest = metadata.get('digest', '')
     if not re.fullmatch(r'sha256:[a-f0-9]{64}', digest):
         raise RuntimeError('GitHub artifact digest is unavailable')
     cache = Path.home() / '.cache' / f'{project}-release' / 'artifacts'
     stage = 'artifact_cache_or_download'
     result = materialize(cache, Path(os.environ['ARTIFACT_DESTINATION']), artifact_id,
-                         digest[7:], expected, lambda path: download(repo, artifact_id, token, path))
+                         digest[7:], expected, lambda path: download(repo, artifact_id, token, path, release_asset=project == 'gpoint'))
+    if project == 'gpoint':
+        receipt = json.loads((Path(os.environ['ARTIFACT_DESTINATION']) / 'receipt.json').read_text())
+        if (receipt.get('candidateSha') != sha or str(receipt.get('runId')) != run_id
+                or str(receipt.get('runAttempt')) != attempt or receipt.get('status') != 'READY'):
+            raise RuntimeError('Immutable Prepare receipt provenance mismatch')
     print(f'ARTIFACT_CACHE={result} ARTIFACT_ID={artifact_id} SHA={sha}', flush=True)
     print(f'STAGE_SECONDS_ARTIFACT_DOWNLOAD={time.monotonic() - started:.3f}', flush=True)
 

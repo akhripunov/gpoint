@@ -216,6 +216,7 @@ def prepare(sha, output, *, postgres_only=False):
             ('linear_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_*linear*.py')),
             ('production_migration_gate_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_agata_production_migration.py')),
             ('prepare_inventory_tests', (sys.executable, '-m', 'pytest', '-q', 'tests/test_prepare_release_migration_inventory.py')),
+            ('release_asset_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_release_assets.py')),
             ('artifact_cache_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_prepared_artifact_cache.py')),
         )
         for name, command in commands:
@@ -359,6 +360,7 @@ def prepare(sha, output, *, postgres_only=False):
         with archive.open('rb') as source:
             digest = hashlib.file_digest(source, 'sha256').hexdigest()
         proof = {'schema': 1, 'candidateSha': sha, 'status': 'READY', 'runId': int(os.environ['GITHUB_RUN_ID']),
+                 'runAttempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
                  'gates': {name: 'PASS' for name in ['unit', 'postgres', 'docker', 'migration', 'miniapp', 'agataHealth', 'deployRehearsal']},
                  'images': images, 'archiveSha256': digest, 'prismaHead': prisma, 'agataHead': heads,
                  'prepareStages': timings,

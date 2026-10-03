@@ -21,7 +21,9 @@ class CoordinatorTest(unittest.TestCase):
      dest=Path(args[args.index('-D')+1]);dest.mkdir()
      data={'status':'PLANNED','applicationVerification':'NOT_DEPLOYED','candidateSha':SHA} if project=='gpoint' else {'production_changed':False,'preflight':'PASS','candidate_sha':SHA}
      (dest/'receipt.json').write_text(json.dumps(data));return ''
-    with patch.object(m,'api',api),patch.object(m,'dispatch',dispatch),patch.object(m,'wait_run',return_value={'id':2}),patch.object(m,'cli',cli):
+    def fetch_gpoint(sha,run_id,dest):
+     cli('-D',str(dest))
+    with patch.object(m,'fetch_gpoint_result',fetch_gpoint),patch.object(m,'api',api),patch.object(m,'dispatch',dispatch),patch.object(m,'wait_run',return_value={'id':2}),patch.object(m,'cli',cli):
      r=m.project_run(project,root,SimpleNamespace(timeout_seconds=60,prepare_missing=False,maxibot_migration='revision'))
     self.assertEqual(r['status'],'PASS');self.assertEqual(calls[0]['mode'],'preflight');self.assertEqual(calls[0]['approve_production'],'false');self.assertFalse(r['production_applied'])
  def test_production_without_exact_owner_approval_stops_before_dispatch(self):

@@ -104,3 +104,26 @@ python3 scripts/release-preflight-benchmark.py --owner-start '<ISO timestamp wit
 ветки: выполняются только hosted Linux jobs без production secrets, Mac/VPS
 операций и публикации READY в Linear. Branch artifact не подходит Deploy;
 после merge требуется успешный Prepare exact current main.
+
+
+## Бесплатное хранение сборок и evidence
+
+GPoint публикует CI bundle и документы Deploy в immutable GitHub Releases,
+чтобы расход Actions Artifact Storage не блокировал выпуск. Не требует billing
+или платного бюджета. На репозитории включён immutable-releases. Prepare создаёт
+новый lightweight tag на exact SHA `gpoint-prepare-<sha>-<run>-<attempt>`,
+загружает `bundle.zip` в draft и только затем публикует. ZIP содержит прежние
+`images.tar.gz` и `receipt.json`; receipt дополнительно закрепляет run attempt.
+Deploy использует отдельный `gpoint-evidence-<sha>-<run>-<attempt>` с `result.zip`
+и `manifests.zip`. Branch rehearsal публикует только receipt под отдельным tag
+и никогда не квалифицирует production. Опубликованные tag/assets неизменяемы.
+
+Selector и Mac cache проверяют успешный exact Prepare, current main, immutable
+publication, exact tag SHA, asset ID, uploaded state и GitHub SHA256. Перед
+использованием байтов ZIP checksum проверяется независимо; images/receipt/parity
+и все canonical gates остаются обязательными. Draft, отсутствующий digest,
+подмена run/attempt или mutable release блокируют применение. Публикация Linear
+читает новые immutable result assets и сохраняет legacy Actions evidence для
+истории. Ошибка publication не превращается в COMPLETE. Старые draft/tag после
+неудачной публикации не переиспользуются автоматически: нужен новый run attempt.
+Время и квоты hosted Actions для CI продолжают действовать; плата не включается.

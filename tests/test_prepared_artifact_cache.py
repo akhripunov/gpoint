@@ -65,11 +65,11 @@ class ArtifactCacheTests(unittest.TestCase):
 
     def test_expired_artifact_blocks_even_with_cached_bytes(self):
         self.restore()
-        env = dict(GITHUB_REPOSITORY='akhripunov/gpoint', CANDIDATE_SHA='a' * 40,
+        env = dict(GITHUB_REPOSITORY='akhripunov/maxibot', CANDIDATE_SHA='a' * 40,
                    PREPARE_RUN_ID='1', PREPARE_RUN_ATTEMPT='1', PREPARE_ARTIFACT_ID='12',
                    GITHUB_TOKEN='unused', ARTIFACT_DESTINATION=str(self.root / 'destination'))
         run = dict(status='completed', conclusion='success', head_sha='a' * 40,
-                   head_branch='main', event='push', path='.github/workflows/gpoint-prepare.yml', run_attempt=1)
+                   head_branch='main', event='push', path='.github/workflows/maxibot-prepare.yml', run_attempt=1)
         def api(repo, route, token, stage):
             if route == 'actions/runs/1': return run
             if route == 'git/ref/heads/main': return {'object': {'sha': 'a' * 40}}

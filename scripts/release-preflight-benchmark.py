@@ -31,6 +31,14 @@ def wait_run(project,run_id,out,deadline):
  if code or run['status']!='completed' or run['conclusion']!='success':raise RuntimeError(f'{project} run {run_id} failed; full logs preserved')
  return {'id':run_id,'url':run['html_url'],'created_at':run['created_at'],'finished_at':run['updated_at'],'seconds':seconds(run['created_at'],run['updated_at']),'jobs':[{'name':j['name'],'seconds':seconds(j['started_at'],j['completed_at']),'steps':[{'name':s['name'],'seconds':seconds(s['started_at'],s['completed_at']) if s.get('started_at') and s.get('completed_at') else None,'conclusion':s['conclusion']} for s in j['steps']]} for j in jobs]}
 
+def fetch_gpoint_result(sha,run_id,destination):
+ # GPoint evidence uses immutable Release assets; MaxiBot retains its existing path.
+ import release_assets
+ run=api(f'repos/akhripunov/gpoint/actions/runs/{run_id}')
+ token=os.environ.get('GITHUB_TOKEN') or cli('auth','token').strip()
+ release_assets.read_result(sha,str(run_id),str(run['run_attempt']),
+                            destination/f'gpoint-release-result-{run_id}.json',token)
+
 def project_run(project,root,args):
  out=root/project;out.mkdir()
  result={'project':project,'started_at':timestamp(),'status':'FAILED','runs':[]}
@@ -62,7 +70,8 @@ def project_run(project,root,args):
   print(f'{project}: {mode.upper()} dispatched {run_id}',flush=True)
   result['runs'].append(wait_run(project,run_id,out,deadline))
   artifact=f'gpoint-production-result-{run_id}-1' if project=='gpoint' else f'maxibot-release-result-{run_id}-1'
-  cli('run','download',str(run_id),'--repo',repo,'-n',artifact,'-D',str(out/'result'))
+  if project=='gpoint':fetch_gpoint_result(sha,run_id,out/'result')
+  else:cli('run','download',str(run_id),'--repo',repo,'-n',artifact,'-D',str(out/'result'))
   receipts=list((out/'result').glob('*.json'))
   if len(receipts)!=1:raise RuntimeError('Missing exact preflight receipt')
   receipt=json.loads(receipts[0].read_text())
