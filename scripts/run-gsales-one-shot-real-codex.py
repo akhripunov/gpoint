@@ -48,7 +48,19 @@ def status() -> dict:
 
 def preflight() -> dict:
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip()
-    if sha != EXPECTED_SHA:
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", EXPECTED_SHA, sha], cwd=REPO
+    )
+    product_diff = subprocess.run(
+        [
+            "git", "diff", "--quiet", EXPECTED_SHA, sha, "--",
+            "services/agata/app", "services/agata/worker/gpoint_mac_worker.py",
+            "services/gsales/app", "services/gsales/Dockerfile",
+            "services/gsales/migrations",
+        ],
+        cwd=REPO,
+    )
+    if ancestor.returncode != 0 or product_diff.returncode != 0:
         raise RuntimeError("candidate_sha_mismatch")
     if not all(path.is_file() for path in (PLIST, WORKER, WRAPPER, PYTHON)):
         raise RuntimeError("installed_worker_artifact_missing")
@@ -112,6 +124,11 @@ def restore(original_hashes: dict[str, str], stopped: bool) -> None:
 
 
 def main() -> int:
+    # Convert TERM into a Python exception so an in-progress test reaches finally.
+    signal.signal(
+        signal.SIGTERM,
+        lambda _signum, _frame: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
     if "--preflight-only" in sys.argv:
         try:
             preflight()
