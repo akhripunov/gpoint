@@ -185,10 +185,6 @@ def _stage_gpoint_tenant_binding(snapshot: dict, candidate: dict) -> None:
             or not isinstance(candidate_sha, str) or len(candidate_sha) != 40
             or not isinstance(worker_sha, str) or len(worker_sha) != 64):
         raise RuntimeError("gpoint_tenant_binding_snapshot_invalid")
-    observed = snapshot.get("observed_monotonic")
-    if (not isinstance(observed, (int, float)) or time.monotonic() - observed < 0
-            or time.monotonic() - observed > 5):
-        raise RuntimeError("gpoint_tenant_binding_snapshot_stale")
     value = {
         "version": 1,
         "candidate_sha": candidate_sha,

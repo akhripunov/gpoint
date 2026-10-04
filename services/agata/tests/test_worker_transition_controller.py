@@ -74,6 +74,29 @@ class WorkerTransitionTests(unittest.TestCase):
             finally:
                 transition.CONFIG = old_config
 
+    def test_tenant_binding_staging_does_not_reject_snapshot_after_approved_preflight_delay(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old_path = transition.TENANT_BINDINGS
+            transition.TENANT_BINDINGS = Path(temp) / "tenant-bindings.json"
+            snapshot = {
+                "source_system": "gpoint", "tenant_identity_verified": True,
+                "transaction_read_only": True, "same_login": True,
+                "role_superuser": False, "role_bypassrls": False,
+                "tenant_id": "81a4ba28-6de5-4b03-8332-0661ba4d46f4",
+                "source_id": "gpoint-vps:" + "b" * 40 + ":api=sha256:" + "1" * 64 + ":agata=sha256:" + "2" * 64,
+                "snapshot_at": "2026-10-04T12:00:00Z", "release_sha": "b" * 40,
+                "api_build_sha": "b" * 40, "agata_build_sha": "b" * 40,
+                "api_image_id": "sha256:" + "1" * 64, "agata_image_id": "sha256:" + "2" * 64,
+                "pending_inference_jobs": 0, "running_inference_jobs": 0,
+                "effective_inference_ttl_seconds": 420, "observed_monotonic": time.monotonic() - 10,
+            }
+            candidate = {"candidate_sha": "a" * 40, "assets": {"worker": "c" * 64}}
+            try:
+                transition._stage_gpoint_tenant_binding(snapshot, candidate)
+                self.assertTrue(transition.TENANT_BINDINGS.is_file())
+            finally:
+                transition.TENANT_BINDINGS = old_path
+
     def test_authoritative_gpoint_snapshot_stages_hash_bound_nonsecret_tenant_binding(self):
         with tempfile.TemporaryDirectory() as temp:
             old_path = transition.TENANT_BINDINGS
