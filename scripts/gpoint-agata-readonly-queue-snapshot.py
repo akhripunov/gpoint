@@ -15,11 +15,10 @@ from datetime import timezone
 
 from sqlalchemy import text
 
-GPOINT_TENANT_ID = "7508f36f-774a-48aa-8c6b-42f6f160415d"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 IMAGE_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SAFE_ERRORS = {
-    "runtime_is_not_gpoint_tenant",
+    "runtime_gpoint_tenant_not_registered",
     "runtime_release_identity_invalid",
     "gpoint_api_agata_release_mismatch",
     "runtime_image_identity_invalid",
@@ -46,7 +45,12 @@ async def read_snapshot() -> dict:
 
     settings = get_settings()
     source_system = getattr(settings, "source_system", "gpoint")
-    if source_system != "gpoint" or settings.tenant_id != GPOINT_TENANT_ID:
+    # Bind the snapshot to the tenant already selected by this live runtime.
+    # Never replace it with a candidate/test UUID or override the tenant GUC.
+    tenant_id = str(settings.tenant_id)
+    if source_system != "gpoint" or not re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", tenant_id
+    ):
         raise RuntimeError("runtime_is_not_gpoint_tenant")
 
     release_sha = os.environ.get("SNAPSHOT_RELEASE_SHA", "")
@@ -64,7 +68,7 @@ async def read_snapshot() -> dict:
     async with _engine().connect() as connection:
         await connection.begin()
         await connection.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
-        await set_tenant_context(connection, GPOINT_TENANT_ID)
+        await set_tenant_context(connection, tenant_id)
         result = await connection.execute(
             text(
                 """
@@ -74,7 +78,9 @@ async def read_snapshot() -> dict:
                        current_user = session_user AS same_login,
                        role.rolsuper AS role_superuser,
                        role.rolbypassrls AS role_bypassrls,
-                       (SELECT count(*) FROM agata.tenants WHERE id = :tenant_id) AS visible_tenant_rows,
+                       (SELECT count(*) FROM agata.tenants WHERE id = :tenant_id AND status = 'active') AS visible_tenant_rows,
+                       (SELECT count(*) FROM agata.regional_policy_profiles
+                         WHERE tenant_id = :tenant_id AND market = 'GPOINT' AND status = 'active') AS active_gpoint_profiles,
                        count(*) FILTER (WHERE jobs.state = 'pending') AS pending_inference_jobs,
                        count(*) FILTER (WHERE jobs.state = 'running') AS running_inference_jobs
                   FROM pg_roles AS role
@@ -84,7 +90,7 @@ async def read_snapshot() -> dict:
                  GROUP BY role.rolsuper, role.rolbypassrls
                 """
             ),
-            {"tenant_id": GPOINT_TENANT_ID},
+            {"tenant_id": tenant_id},
         )
         row = result.mappings().one()
         await connection.rollback()
@@ -95,8 +101,8 @@ async def read_snapshot() -> dict:
         raise RuntimeError("queue_snapshot_transaction_not_read_only_same_login")
     if row["role_superuser"] or row["role_bypassrls"]:
         raise RuntimeError("queue_snapshot_database_role_is_privileged")
-    if int(row["visible_tenant_rows"]) != 1:
-        raise RuntimeError("queue_snapshot_gpoint_tenant_not_visible")
+    if int(row["visible_tenant_rows"]) != 1 or int(row["active_gpoint_profiles"]) < 1:
+        raise RuntimeError("runtime_gpoint_tenant_not_registered")
 
     return {
         "snapshot_at": utc_iso(row["snapshot_at"]),
@@ -109,6 +115,7 @@ async def read_snapshot() -> dict:
         "api_image_id": api_image_id,
         "agata_image_id": agata_image_id,
         "tenant_identity_verified": True,
+        "active_gpoint_profiles": int(row["active_gpoint_profiles"]),
         "transaction_read_only": True,
         "same_login": True,
         "role_superuser": False,

@@ -84,28 +84,54 @@ only after the original LaunchAgent resumes polling; the test budget reserves up
 to 10s for termination and 60s for bootstrap/poll confirmation. The query is
 refreshed directly before switching, then local activity is checked again.
 
-The 2026-10-04 dry-run is **NO-GO**. The live container's effective
-`AGATA_TENANT_ID` does not match the fixed GPOINT tenant used by the worker, so
-the controller rejects the runtime before accepting any queue counts or TTL. A
-separate earlier read-only SQL probe explicitly scoped to the expected tenant
-observed zero pending/running jobs and TTL 420s, but that evidence cannot override
-the runtime configuration mismatch. The repo production ledger also records
-SHA `8c30d676809f8c0f6d3254891bf096b0b8740bd4`, while the live API/Core images
-and VPS `RELEASE_SHA` identify `68bf0212d7aa5125394b0b39ffba9226eb106c0d`.
-Reconcile both identity discrepancies before considering another rehearsal.
-The installed LaunchAgent remains loaded and locally idle; no bootout, deploy,
-migration, V3 install, or real Codex inference occurred.
+The 2026-10-04 identity reconciliation corrected the earlier **NO-GO** diagnosis.
+The live runtime is configured with tenant
+`81a4ba28-6de5-4b03-8332-0661ba4d46f4`; the same active tenant is visible in its
+ordinary tenant context, has an active GPOINT regional policy profile, and
+contains the GPOINT user, character, and conversation records. Release
+provisioning creates a UUID4 in `production.env` only when `AGATA_TENANT_ID` is
+absent; the AGATA baseline migration registers that configured UUID and creates
+the GPOINT policy profile. The observed registry creation timestamp
+`2026-09-28T06:14:55.151685Z` is consistent with the nearby initial release
+bootstrap, though the audit does not claim a specific run wrote the row. The
+fixed `7508f36f-774a-48aa-8c6b-42f6f160415d` value comes from candidate/test
+fixtures and a draft worker target map, not the running production
+configuration. Ordinary AGATA requests use the runtime-configured tenant. No
+tenant GUC override or production configuration change was made.
+
+The live API/Core release identity is
+`68bf0212d7aa5125394b0b39ffba9226eb106c0d`. The apparent ledger value
+`8c30d676809f8c0f6d3254891bf096b0b8740bd4` came from the historical
+`docs/release/state/production.json` snapshot on application `main`. The
+authoritative `gpoint-release-ledger` branch, exact Deploy run, production ref,
+immutable evidence and current Linear release journal all record 68bf. Deploy
+run `37140588175` completed production apply; immutable bundle and evidence
+receipts are attached to that SHA. The production ref is
+`gpoint-production-20261003T172830088Z`; API and AGATA image digests were
+verified against the running containers. GitHub confirms 68bf is 35 commits
+ahead of 8c30. There is no live release identity drift to reconcile.
+
+The queue-snapshot probe now scopes its read-only transaction to the tenant
+selected by live AGATA settings and requires an active tenant row plus an active
+GPOINT regional profile. It never substitutes the candidate/test UUID. The
+verified live snapshot on 2026-10-04 07:49:08Z had zero pending/running inference
+jobs and effective TTL 420 seconds; API/Core artifacts were healthy at the same
+SHA. The updated controller completed `--preflight-only` with **PASS**. This is
+GO for the Queue Preflight gate only, not authorization to stop the worker or run
+Real Codex QA. No bootout, deploy, migration, tenant mutation, or Real Codex
+inference occurred.
 
 The focused controller suite covers stale/untrusted/wrong-runtime snapshots,
 empty/non-empty queue, the TTL margin, a shared outage deadline, and the
-queue-then-local recheck order. It passes 7 tests. Ruff and `git diff --check`
-pass. The read-only preflight fails closed on the tenant mismatch before it can
-approve an outage window.
+queue-then-local recheck order. It passes 7 tests. Syntax/AST checks and
+`git diff --check` pass. Ruff was not rerun in this reconciliation.
 
-The P0 worker-token exposure is recorded without its value in
-`docs/security/gpoint-agata-worker-token-incident-2026-10-04.md`. Rotation is
-not performed; it requires separate OWNER approval and a coordinated Mac/VPS
-maintenance window.
+The P0 worker-token exposure is recorded without its value or any derived
+fingerprint in `docs/security/gpoint-agata-worker-token-incident-2026-10-04.md`.
+An exact-release rotation handoff is recorded in
+`docs/security/gpoint-agata-worker-token-rotation-handoff-2026-10-04.md`.
+Rotation is not performed; it requires separate OWNER approval and a coordinated
+Mac/VPS maintenance window.
 
 Concrete plan after the owner-approved one-shot window can satisfy queue/network preflight:
 

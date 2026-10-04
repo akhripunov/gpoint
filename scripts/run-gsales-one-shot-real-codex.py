@@ -116,6 +116,7 @@ def queue_snapshot() -> dict:
         raise RuntimeError("authoritative_queue_snapshot_invalid") from exc
     safe_errors = {
         "runtime_is_not_gpoint_tenant",
+        "runtime_gpoint_tenant_not_registered",
         "runtime_release_identity_invalid",
         "gpoint_api_agata_release_mismatch",
         "runtime_image_identity_invalid",
