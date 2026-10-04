@@ -67,3 +67,37 @@ class BenchmarkTests(unittest.TestCase):
         path=LAB/"data/golden/synthetic/agata-benchmark-v1.jsonl"
         self.assertTrue(path.exists(),"128 synthetic scenarios missing")
         self.assertEqual(self.b.validate_scenarios(self.b.load_scenarios(path))["count"],128)
+
+    def test_story_setup_is_not_sent_as_future_oracle(self):
+        self.rows[0]["context"]={"setup":"The user will announce tomorrow that the secret choice is blue","as_of":"2026-10-04","model_context":"Current session begins after a walk"}
+        out=self.b.prompt_fixture(self.rows[0])
+        self.assertNotIn("secret choice",json.dumps(out))
+        self.assertEqual(out["context"]["model_context"],"Current session begins after a walk")
+
+    def test_prompt_contains_only_current_user_turn_not_future_script(self):
+        self.rows[0]["dialogue_turns"][-2]["text"]="SECRET FUTURE CORRECTION"
+        out=self.b.prompt_fixture(self.rows[0])
+        self.assertNotIn("SECRET FUTURE",json.dumps(out))
+
+    def test_manifest_tampering_rejected(self):
+        self.assertTrue(hasattr(self.b,"validate_manifest"),"manifest verifier missing")
+        rows=self.b.load_scenarios(LAB/"data/golden/synthetic/agata-benchmark-v1.jsonl")
+        manifest=json.loads((LAB/"data/golden/synthetic/manifest-v1.json").read_text())
+        config=json.loads((LAB/"configs/benchmark-v1.json").read_text())
+        manifest["scenario_hashes"][rows[0]["scenario_id"]]="bad"
+        with self.assertRaises(ValueError):self.b.validate_manifest(rows,manifest,config)
+
+    def test_malformed_context_and_evaluation_types_rejected(self):
+        self.rows[0]["context"]["setup"]=123
+        with self.assertRaises(ValueError):self.b.validate_scenarios(self.rows)
+
+    def test_name_only_near_duplicate_alerted(self):
+        rows=copy.deepcopy(self.rows[:2])
+        rows[0]["dialogue_turns"]= [{"role":"user","text":"Я вчера гуляла с Мариной по старому парку, потом мы обсуждали новый фильм за чаем."}]
+        rows[1]["dialogue_turns"]= [{"role":"user","text":"Я вчера гуляла с Ириной по старому парку, потом мы обсуждали новый фильм за чаем!"}]
+        alerts=self.b.scenario_similarity_alerts(rows)
+        self.assertEqual(len(alerts),1)
+
+    def test_actual_benchmark_has_no_lexical_near_duplicates(self):
+        rows=self.b.load_scenarios(LAB/"data/golden/synthetic/agata-benchmark-v1.jsonl")
+        self.assertEqual(self.b.scenario_similarity_alerts(rows),[])

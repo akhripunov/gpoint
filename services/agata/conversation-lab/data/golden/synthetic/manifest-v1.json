@@ -152,5 +152,6 @@
     "long_dialogue": 8
   },
   "persona_ref": "agata-eval-v1",
-  "training_use": "evaluation-only; prohibited as few-shot/training input"
+  "training_use": "evaluation-only; prohibited as few-shot/training input",
+  "persona_hash": "158ea02fc028faedf45ff3a0d0848f301ac313656b070600755ecc8b7a4e94d3"
 }

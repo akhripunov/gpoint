@@ -36,7 +36,7 @@ def validate_scenarios(scenarios):
             raise ValueError("invalid/duplicate scenario id")
         if category not in CATEGORIES or s["language"] != "ru":
             raise ValueError("unknown category/language")
-        if not isinstance(s["context"], dict) or not s["context"].get("setup"):
+        if not isinstance(s["context"], dict) or not isinstance(s["context"].get("setup"), str) or not s["context"]["setup"].strip():
             raise ValueError("scenario context must contain setup")
         character = s["character_context"]
         if not isinstance(character, dict) or not isinstance(character.get("persona_ref"), str) or not character["persona_ref"]:
@@ -79,6 +79,46 @@ def validate_scenarios(scenarios):
     return {"status": "STRUCTURE_PASS", "count": len(scenarios), "category_counts": dict(counts), "scenario_hashes": {s["scenario_id"]: stable_hash(s) for s in scenarios}, "persona_ref": next(iter(personas)), "quality_status": "REQUIRES_MANUAL_REVIEW"}
 
 
-def prompt_fixture(scenario):
-    # Explicit projection excludes evaluator answers and failure/rubric hints.
-    return {field: scenario[field] for field in ("scenario_id", "language", "context", "character_context", "memory_fixture", "dialogue_turns")}
+def prompt_fixture(scenario, round_index=0):
+    # This is an offline round fixture, not a provider request. Previous real
+    # replies must be supplied by the future authorized Core adapter.
+    turns = scenario["dialogue_turns"]
+    if type(round_index) is not int or not 0 <= round_index < len(turns)//2:
+        raise ValueError("invalid round index")
+    context = {k: v for k, v in scenario["context"].items() if k in {"model_context", "as_of", "current_session", "current_session_at"}}
+    return {"scenario_id": scenario["scenario_id"], "language": scenario["language"],
+            "context": context, "character_context": scenario["character_context"],
+            "memory_fixture": scenario["memory_fixture"],
+            "user_turn": turns[round_index*2],
+            "prior_user_turns": [t for t in turns[:round_index*2] if t["role"] == "user"]}
+
+
+def validate_manifest(scenarios, manifest, config):
+    report = validate_scenarios(scenarios)
+    if manifest.get("schema_version") != 1 or config.get("schema_version") != 1:
+        raise ValueError("unsupported benchmark schema version")
+    if manifest.get("scenario_hashes") != report["scenario_hashes"] or manifest.get("category_counts") != report["category_counts"]:
+        raise ValueError("benchmark manifest hash/coverage mismatch")
+    if config.get("scenario_count") != 128 or config.get("per_category") != 8 or config.get("categories") != list(CATEGORIES):
+        raise ValueError("benchmark config coverage mismatch")
+    if config.get("model_calls_enabled") is not False or config.get("persona", {}).get("id") != report["persona_ref"]:
+        raise ValueError("offline mode/Persona mismatch")
+    persona_hash = stable_hash(config["persona"])
+    if manifest.get("persona_hash") != persona_hash:
+        raise ValueError("Persona manifest hash mismatch")
+    return {**report, "manifest_status": "PASS", "persona_hash": persona_hash, "benchmark_hash": stable_hash(scenarios)}
+
+
+def scenario_similarity_alerts(scenarios):
+    """Lexical near-copy alerts; semantic independence still requires review."""
+    from difflib import SequenceMatcher
+    texts = [(s["scenario_id"], " ".join(re.findall(r"\w+", normalize(" ".join(t["text"] for t in s["dialogue_turns"] if t["role"] == "user"))))) for s in scenarios]
+    alerts = []
+    for i, (left_id, left) in enumerate(texts):
+        for right_id, right in texts[i+1:]:
+            if min(len(left.split()), len(right.split())) < 12:
+                continue
+            score = SequenceMatcher(None, left, right, autojunk=False).ratio()
+            if score >= 0.9:
+                alerts.append({"left": left_id, "right": right_id, "similarity": round(score, 4), "status": "REVIEW_REQUIRED"})
+    return alerts

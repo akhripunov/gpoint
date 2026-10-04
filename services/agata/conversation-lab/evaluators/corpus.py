@@ -27,12 +27,16 @@ def verify_sources(data_root):
     root = Path(data_root).resolve()
     manifest_path = confined(root / "runs/manifest.json", root / "runs")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for area in ("raw", "processed", "runs"):
+        confined(root / area, root)
     results = {}
     for sid, entry in manifest["datasets"].items():
         if sid not in SOURCE_IDS:
             raise ValueError("unknown/deferred source in processed manifest")
         if entry.get("processing_status") != "PROCESSED" or not entry.get("files"):
             raise ValueError("source not fully processed")
+        confined(root / "raw" / sid, root / "raw")
+        confined(root / "processed" / sid, root / "processed")
         raw = []
         for item in entry["files"]:
             path = confined(Path(item["path"]), root / "raw" / sid)

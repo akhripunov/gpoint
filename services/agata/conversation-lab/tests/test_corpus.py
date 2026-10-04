@@ -69,3 +69,7 @@ class CorpusTests(unittest.TestCase):
         self.assertEqual(self.c.redact("Сумма 18 500 000 000 рублей, дата 03.10.2026, заказ 81234567890"),"Сумма 18 500 000 000 рублей, дата 03.10.2026, заказ 81234567890")
         out=self.c.redact("email person@example.com, call +7 (999) 123-45-67, https://example.com/private")
         self.assertNotIn("person@",out);self.assertNotIn("999",out);self.assertNotIn("https://",out)
+
+    def test_source_directory_symlink_escape_rejected(self):
+        folder=self.raw.parent;outside=Path(self.tmp.name)/"outside-source";folder.rename(outside);folder.symlink_to(outside)
+        with self.assertRaises(ValueError): self.c.verify_sources(self.root)
