@@ -491,3 +491,55 @@ def test_lab_rollback_refuses_to_overwrite_a_newer_v3_plist(tmp_path: Path) -> N
     assert plist_path.read_bytes() == plistlib.dumps(newer_v3, sort_keys=True)
     assert state_path.exists()
     assert controller.calls == 1
+
+
+def test_lab_activation_rejects_approval_for_different_worker_bundle(tmp_path: Path) -> None:
+    import plistlib
+    from scripts.agata import lab_launch_agent
+
+    label = "one.gpoint.agata-codex-worker"
+    plist_path = tmp_path / "worker.plist"
+    plist_path.write_bytes(plistlib.dumps({
+        "Label": label,
+        "ProgramArguments": ["/trusted/worker", "watch"],
+        "EnvironmentVariables": {},
+    }))
+    plist_path.chmod(0o600)
+    approval_path = tmp_path / "approval.json"
+    approval_path.write_text(json.dumps({
+        "approval_id": "approval-b",
+        "worker_bundle_sha256": "0" * 64,
+        "experiment_ids": ["agata-naturalness-v1"],
+        "configuration_ids": ["baseline"],
+        "scenario_ids": ["ru_naturalness-02"],
+        "max_calls": 8,
+        "expires_at": "2099-10-05T15:00:00Z",
+    }), encoding="utf-8")
+    approval_path.chmod(0o600)
+    bundle_files = []
+    for name in ("gpoint_mac_worker.py", "lab_queue.py", "lab_fixture_manifest.json"):
+        path = tmp_path / name
+        path.write_text(name, encoding="utf-8")
+        bundle_files.append((name, path))
+
+    class Controller:
+        calls = 0
+
+        def replace_plist_from_factory(self, **kwargs: object) -> None:
+            kwargs["candidate_factory"](plist_path.read_bytes())
+            self.calls += 1
+
+    controller = Controller()
+    state_path = tmp_path / "original.plist"
+    with pytest.raises(RuntimeError, match="lab_owner_approval_worker_bundle_mismatch"):
+        lab_launch_agent.activate_lab(
+            controller=controller,
+            plist_path=plist_path,
+            approval_path=approval_path,
+            state_path=state_path,
+            domain="gui/501",
+            label=label,
+            installed_bundle_files=tuple(bundle_files),
+        )
+    assert controller.calls == 0
+    assert not state_path.exists()
