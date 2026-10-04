@@ -252,3 +252,132 @@ def test_lifecycle_controller_shares_v3_transition_lock() -> None:
     spec.loader.exec_module(transition)
 
     assert DEFAULT_OPERATION_LOCK == transition.TRANSITION_LOCK
+
+
+def test_lab_activation_and_rollback_route_through_lifecycle_controller(tmp_path: Path) -> None:
+    import plistlib
+    from scripts.agata import lab_launch_agent
+
+    label = "one.gpoint.agata-codex-worker"
+    plist_path = tmp_path / f"{label}.plist"
+    approval_path = tmp_path / "lab-execution-approval.json"
+    original = {
+        "Label": label,
+        "ProgramArguments": ["/trusted/worker", "watch"],
+        "EnvironmentVariables": {"PATH": "/usr/bin", "AGATA_LAB_WORKER_ENABLED": "false"},
+    }
+    original_bytes = plistlib.dumps(original, sort_keys=True)
+    plist_path.write_bytes(original_bytes)
+    plist_path.chmod(0o600)
+    approval_path.write_text(json.dumps({
+        "approval_id": "approval-b",
+        "worker_bundle_sha256": "a" * 64,
+        "experiment_ids": ["agata-naturalness-v1"],
+        "configuration_ids": ["baseline"],
+        "scenario_ids": ["ru_naturalness-02"],
+        "max_calls": 8,
+        "expires_at": "2099-10-05T15:00:00Z",
+    }), encoding="utf-8")
+    approval_path.chmod(0o600)
+
+    class Controller:
+        calls: list[dict[str, object]] = []
+
+        def replace_plist(self, **kwargs: object) -> None:
+            self.calls.append(kwargs)
+            Path(kwargs["plist_path"]).write_bytes(kwargs["candidate"])
+
+    controller = Controller()
+    lab_launch_agent.activate_lab(
+        controller=controller,
+        plist_path=plist_path,
+        approval_path=approval_path,
+        state_path=tmp_path / "original.plist",
+        domain="gui/501",
+        label=label,
+    )
+
+    activated = plistlib.loads(plist_path.read_bytes())
+    assert activated["EnvironmentVariables"]["AGATA_LAB_WORKER_ENABLED"] == "true"
+    assert activated["ProgramArguments"] == original["ProgramArguments"]
+    assert len(controller.calls) == 1
+    assert controller.calls[0]["candidate"] == plist_path.read_bytes()
+
+    lab_launch_agent.rollback_lab(
+        controller=controller,
+        plist_path=plist_path,
+        state_path=tmp_path / "original.plist",
+        domain="gui/501",
+        label=label,
+    )
+
+    assert plist_path.read_bytes() == original_bytes
+    assert not (tmp_path / "original.plist").exists()
+    assert len(controller.calls) == 2
+    assert controller.calls[1]["candidate"] == original_bytes
+
+
+def test_lab_activation_refuses_missing_approval_or_already_active_state(tmp_path: Path) -> None:
+    import plistlib
+    from scripts.agata import lab_launch_agent
+
+    label = "one.gpoint.agata-codex-worker"
+    plist_path = tmp_path / "worker.plist"
+    plist_path.write_bytes(plistlib.dumps({
+        "Label": label,
+        "ProgramArguments": ["/trusted/worker", "watch"],
+        "EnvironmentVariables": {},
+    }))
+
+    class Controller:
+        calls = 0
+
+        def replace_plist(self, **_: object) -> None:
+            self.calls += 1
+
+    controller = Controller()
+    with pytest.raises(RuntimeError, match="lab_owner_approval_missing_or_private_file_required"):
+        lab_launch_agent.activate_lab(
+            controller=controller,
+            plist_path=plist_path,
+            approval_path=tmp_path / "missing.json",
+            state_path=tmp_path / "original.plist",
+            domain="gui/501",
+            label=label,
+        )
+    assert controller.calls == 0
+
+
+def test_lab_activation_refuses_malformed_private_approval(tmp_path: Path) -> None:
+    import plistlib
+    from scripts.agata import lab_launch_agent
+
+    label = "one.gpoint.agata-codex-worker"
+    plist_path = tmp_path / "worker.plist"
+    plist_path.write_bytes(plistlib.dumps({
+        "Label": label,
+        "ProgramArguments": ["/trusted/worker", "watch"],
+        "EnvironmentVariables": {},
+    }))
+    plist_path.chmod(0o600)
+    approval_path = tmp_path / "approval.json"
+    approval_path.write_text("{}", encoding="utf-8")
+    approval_path.chmod(0o600)
+
+    class Controller:
+        calls = 0
+
+        def replace_plist(self, **_: object) -> None:
+            self.calls += 1
+
+    controller = Controller()
+    with pytest.raises(RuntimeError, match="lab_owner_approval_schema_invalid"):
+        lab_launch_agent.activate_lab(
+            controller=controller,
+            plist_path=plist_path,
+            approval_path=approval_path,
+            state_path=tmp_path / "original.plist",
+            domain="gui/501",
+            label=label,
+        )
+    assert controller.calls == 0
