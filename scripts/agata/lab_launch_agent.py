@@ -8,6 +8,7 @@ The worker, wrapper, credentials, and LaunchAgent identity are never replaced.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import plistlib
@@ -15,7 +16,7 @@ import re
 import stat
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 from scripts.agata.launch_agent_lifecycle import LaunchAgentController
 
@@ -30,7 +31,16 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class LifecycleController(Protocol):
-    def replace_plist(self, *, domain: str, label: str, plist_path: Path, candidate: bytes) -> None: ...
+    def replace_plist_from_factory(
+        self,
+        *,
+        domain: str,
+        label: str,
+        plist_path: Path,
+        candidate_factory: Callable[[bytes | None], bytes],
+        before_replace: Callable[[bytes | None], None] | None = None,
+        after_replace: Callable[[], None] | None = None,
+    ) -> None: ...
 
 
 def _private_regular_file(path: Path) -> bool:
@@ -41,7 +51,7 @@ def _private_regular_file(path: Path) -> bool:
     return stat.S_ISREG(info.st_mode) and not path.is_symlink() and info.st_uid == os.getuid() and not (info.st_mode & 0o077)
 
 
-def _validate_approval(path: Path) -> None:
+def _validate_approval(path: Path) -> dict[str, object]:
     if not _private_regular_file(path):
         raise RuntimeError("lab_owner_approval_missing_or_private_file_required")
     try:
@@ -69,6 +79,23 @@ def _validate_approval(path: Path) -> None:
         raise RuntimeError("lab_owner_approval_expiry_invalid") from exc
     if expires.tzinfo is None or expires <= datetime.now(timezone.utc):
         raise RuntimeError("lab_owner_approval_expired_or_timezone_missing")
+    return approval
+
+
+def _installed_bundle_sha256(files: tuple[tuple[str, Path], ...] | None = None) -> str:
+    bundle_files = files or (
+        ("gpoint_mac_worker.py", SUPPORT / "gpoint_mac_worker.py"),
+        ("lab_queue.py", SUPPORT / "lab_queue.py"),
+        ("lab_fixture_manifest.json", SUPPORT / "lab_fixture_manifest.json"),
+    )
+    digest = hashlib.sha256()
+    try:
+        for name, path in bundle_files:
+            digest.update(name.encode("utf-8") + b"\0")
+            digest.update(path.read_bytes())
+    except OSError as exc:
+        raise RuntimeError("lab_installed_worker_bundle_incomplete") from exc
+    return digest.hexdigest()
 
 
 def _write_snapshot(path: Path, contents: bytes) -> None:
@@ -112,24 +139,46 @@ def activate_lab(
     state_path: Path,
     domain: str,
     label: str,
+    installed_bundle_files: tuple[tuple[str, Path], ...] | None = None,
 ) -> None:
-    _validate_approval(approval_path)
-    if state_path.exists() or state_path.is_symlink():
-        raise RuntimeError("lab_activation_snapshot_already_exists")
-    if not _private_regular_file(plist_path):
-        raise RuntimeError("lab_worker_plist_missing_or_private_file_required")
-    original = plist_path.read_bytes()
-    candidate = _lab_plist(original, label=label, enabled=True)
-    _write_snapshot(state_path, original)
+    approval = _validate_approval(approval_path)
+    original: bytes | None = None
+    snapshot_created = False
+
+    def candidate_factory(current: bytes | None) -> bytes:
+        nonlocal original
+        if current is None or not _private_regular_file(plist_path):
+            raise RuntimeError("lab_worker_plist_missing_or_private_file_required")
+        original = current
+        actual_sha = _installed_bundle_sha256(installed_bundle_files)
+        if approval["worker_bundle_sha256"] != actual_sha:
+            raise RuntimeError("lab_owner_approval_worker_bundle_mismatch")
+        return _lab_plist(current, label=label, enabled=True)
+
+    def snapshot(current: bytes | None) -> None:
+        nonlocal snapshot_created
+        if current is None:
+            raise RuntimeError("lab_worker_plist_missing_or_private_file_required")
+        if state_path.exists() or state_path.is_symlink():
+            raise RuntimeError("lab_activation_snapshot_already_exists")
+        _write_snapshot(state_path, current)
+        snapshot_created = True
+
     try:
-        controller.replace_plist(domain=domain, label=label, plist_path=plist_path, candidate=candidate)
+        controller.replace_plist_from_factory(
+            domain=domain,
+            label=label,
+            plist_path=plist_path,
+            candidate_factory=candidate_factory,
+            before_replace=snapshot,
+        )
     except Exception:
         # Keep the exact baseline if the controller could not prove it restored it.
         try:
-            restored = plist_path.read_bytes() == original
+            restored = original is not None and plist_path.read_bytes() == original
         except OSError:
             restored = False
-        if restored:
+        if restored and snapshot_created:
             state_path.unlink(missing_ok=True)
         raise
 
@@ -142,16 +191,27 @@ def rollback_lab(
     domain: str,
     label: str,
 ) -> None:
-    if not _private_regular_file(state_path):
-        raise RuntimeError("lab_activation_snapshot_missing_or_private_file_required")
-    if not _private_regular_file(plist_path):
-        raise RuntimeError("lab_worker_plist_missing_or_private_file_required")
-    original = state_path.read_bytes()
-    _lab_plist(plist_path.read_bytes(), label=label, enabled=False)
-    # Validate the snapshot's LaunchAgent identity before using its exact bytes.
-    _lab_plist(original, label=label, enabled=True)
-    controller.replace_plist(domain=domain, label=label, plist_path=plist_path, candidate=original)
-    state_path.unlink()
+    def candidate_factory(current: bytes | None) -> bytes:
+        if not _private_regular_file(state_path):
+            raise RuntimeError("lab_activation_snapshot_missing_or_private_file_required")
+        if current is None or not _private_regular_file(plist_path):
+            raise RuntimeError("lab_worker_plist_missing_or_private_file_required")
+        saved = state_path.read_bytes()
+        expected_lab = _lab_plist(saved, label=label, enabled=True)
+        if current != expected_lab:
+            raise RuntimeError("lab_worker_plist_changed_since_activation")
+        return saved
+
+    def remove_snapshot() -> None:
+        state_path.unlink(missing_ok=True)
+
+    controller.replace_plist_from_factory(
+        domain=domain,
+        label=label,
+        plist_path=plist_path,
+        candidate_factory=candidate_factory,
+        after_replace=remove_snapshot,
+    )
 
 
 def main() -> int:

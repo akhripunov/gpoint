@@ -256,8 +256,29 @@ class LaunchAgentController:
 
     def replace_plist(self, *, domain: str, label: str, plist_path: Path, candidate: bytes) -> None:
         """Unload/wait, atomically replace the plist, then bootstrap; restore old bytes on failure."""
+        self.replace_plist_from_factory(
+            domain=domain,
+            label=label,
+            plist_path=plist_path,
+            candidate_factory=lambda _previous: candidate,
+        )
+
+    def replace_plist_from_factory(
+        self,
+        *,
+        domain: str,
+        label: str,
+        plist_path: Path,
+        candidate_factory: Callable[[bytes | None], bytes],
+        before_replace: Callable[[bytes | None], None] | None = None,
+        after_replace: Callable[[], None] | None = None,
+    ) -> None:
+        """Build, snapshot, apply, and bootstrap a plist under the shared transition lock."""
         with self._operation_lock():
             previous = plist_path.read_bytes() if plist_path.exists() else None
+            candidate = candidate_factory(previous)
+            if before_replace is not None:
+                before_replace(previous)
             self._unload_and_wait(domain, label)
             try:
                 self._atomic_write(plist_path, candidate)
@@ -276,6 +297,8 @@ class LaunchAgentController:
                         f"rollback failed ({rollback_error})"
                     ) from rollback_error
                 raise RuntimeError(f"candidate activation failed; original plist restored: {candidate_error}") from candidate_error
+            if after_replace is not None:
+                after_replace()
 
     def remove_agent(
         self,

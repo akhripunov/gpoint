@@ -255,6 +255,7 @@ def test_lifecycle_controller_shares_v3_transition_lock() -> None:
 
 
 def test_lab_activation_and_rollback_route_through_lifecycle_controller(tmp_path: Path) -> None:
+    import hashlib
     import plistlib
     from scripts.agata import lab_launch_agent
 
@@ -267,6 +268,8 @@ def test_lab_activation_and_rollback_route_through_lifecycle_controller(tmp_path
         "EnvironmentVariables": {"PATH": "/usr/bin", "AGATA_LAB_WORKER_ENABLED": "false"},
     }
     original_bytes = plistlib.dumps(original, sort_keys=True)
+    latest = {**original, "ProgramArguments": ["/v3/latest-worker", "watch"]}
+    latest_bytes = plistlib.dumps(latest, sort_keys=True)
     plist_path.write_bytes(original_bytes)
     plist_path.chmod(0o600)
     approval_path.write_text(json.dumps({
@@ -279,13 +282,38 @@ def test_lab_activation_and_rollback_route_through_lifecycle_controller(tmp_path
         "expires_at": "2099-10-05T15:00:00Z",
     }), encoding="utf-8")
     approval_path.chmod(0o600)
+    support = tmp_path / "worker-bundle"
+    support.mkdir()
+    bundle_files = []
+    digest = hashlib.sha256()
+    for name in ("gpoint_mac_worker.py", "lab_queue.py", "lab_fixture_manifest.json"):
+        path = support / name
+        path.write_text(name, encoding="utf-8")
+        digest.update(name.encode("utf-8") + b"\0")
+        digest.update(path.read_bytes())
+        bundle_files.append((name, path))
+    approval = json.loads(approval_path.read_text())
+    approval["worker_bundle_sha256"] = digest.hexdigest()
+    approval_path.write_text(json.dumps(approval), encoding="utf-8")
+    approval_path.chmod(0o600)
 
     class Controller:
         calls: list[dict[str, object]] = []
+        changed_before_read = False
 
-        def replace_plist(self, **kwargs: object) -> None:
+        def replace_plist_from_factory(self, **kwargs: object) -> None:
+            path = Path(kwargs["plist_path"])
+            if not self.changed_before_read:
+                path.write_bytes(latest_bytes)
+                self.changed_before_read = True
+            current = path.read_bytes()
+            candidate = kwargs["candidate_factory"](current)
+            if kwargs.get("before_replace"):
+                kwargs["before_replace"](current)
             self.calls.append(kwargs)
-            Path(kwargs["plist_path"]).write_bytes(kwargs["candidate"])
+            path.write_bytes(candidate)
+            if kwargs.get("after_replace"):
+                kwargs["after_replace"]()
 
     controller = Controller()
     lab_launch_agent.activate_lab(
@@ -295,13 +323,14 @@ def test_lab_activation_and_rollback_route_through_lifecycle_controller(tmp_path
         state_path=tmp_path / "original.plist",
         domain="gui/501",
         label=label,
+        installed_bundle_files=tuple(bundle_files),
     )
 
     activated = plistlib.loads(plist_path.read_bytes())
     assert activated["EnvironmentVariables"]["AGATA_LAB_WORKER_ENABLED"] == "true"
-    assert activated["ProgramArguments"] == original["ProgramArguments"]
+    assert activated["ProgramArguments"] == latest["ProgramArguments"]
     assert len(controller.calls) == 1
-    assert controller.calls[0]["candidate"] == plist_path.read_bytes()
+    assert controller.calls[0]["candidate_factory"]
 
     lab_launch_agent.rollback_lab(
         controller=controller,
@@ -311,10 +340,10 @@ def test_lab_activation_and_rollback_route_through_lifecycle_controller(tmp_path
         label=label,
     )
 
-    assert plist_path.read_bytes() == original_bytes
+    assert plist_path.read_bytes() == latest_bytes
     assert not (tmp_path / "original.plist").exists()
     assert len(controller.calls) == 2
-    assert controller.calls[1]["candidate"] == original_bytes
+    assert controller.calls[1]["candidate_factory"]
 
 
 def test_lab_activation_refuses_missing_approval_or_already_active_state(tmp_path: Path) -> None:
@@ -381,3 +410,84 @@ def test_lab_activation_refuses_malformed_private_approval(tmp_path: Path) -> No
             label=label,
         )
     assert controller.calls == 0
+
+
+def test_lab_rollback_refuses_to_overwrite_a_newer_v3_plist(tmp_path: Path) -> None:
+    import hashlib
+    import plistlib
+    from scripts.agata import lab_launch_agent
+
+    label = "one.gpoint.agata-codex-worker"
+    plist_path = tmp_path / "worker.plist"
+    original = {
+        "Label": label,
+        "ProgramArguments": ["/v3/worker-before", "watch"],
+        "EnvironmentVariables": {"AGATA_LAB_WORKER_ENABLED": "false"},
+    }
+    plist_path.write_bytes(plistlib.dumps(original, sort_keys=True))
+    plist_path.chmod(0o600)
+    approval_path = tmp_path / "approval.json"
+    support = tmp_path / "bundle"
+    support.mkdir()
+    bundle_files = []
+    digest = hashlib.sha256()
+    for name in ("gpoint_mac_worker.py", "lab_queue.py", "lab_fixture_manifest.json"):
+        path = support / name
+        path.write_text(name, encoding="utf-8")
+        digest.update(name.encode("utf-8") + b"\0")
+        digest.update(path.read_bytes())
+        bundle_files.append((name, path))
+    approval_path.write_text(json.dumps({
+        "approval_id": "approval-b",
+        "worker_bundle_sha256": digest.hexdigest(),
+        "experiment_ids": ["agata-naturalness-v1"],
+        "configuration_ids": ["baseline"],
+        "scenario_ids": ["ru_naturalness-02"],
+        "max_calls": 8,
+        "expires_at": "2099-10-05T15:00:00Z",
+    }), encoding="utf-8")
+    approval_path.chmod(0o600)
+
+    class Controller:
+        calls = 0
+
+        def replace_plist_from_factory(self, **kwargs: object) -> None:
+            path = Path(kwargs["plist_path"])
+            current = path.read_bytes()
+            candidate = kwargs["candidate_factory"](current)
+            self.calls += 1
+            if kwargs.get("before_replace"):
+                kwargs["before_replace"](current)
+            path.write_bytes(candidate)
+            if kwargs.get("after_replace"):
+                kwargs["after_replace"]()
+
+    controller = Controller()
+    state_path = tmp_path / "original.plist"
+    lab_launch_agent.activate_lab(
+        controller=controller,
+        plist_path=plist_path,
+        approval_path=approval_path,
+        state_path=state_path,
+        domain="gui/501",
+        label=label,
+        installed_bundle_files=tuple(bundle_files),
+    )
+    newer_v3 = {
+        **original,
+        "ProgramArguments": ["/v3/worker-after", "watch"],
+        "EnvironmentVariables": {"AGATA_LAB_WORKER_ENABLED": "true"},
+    }
+    plist_path.write_bytes(plistlib.dumps(newer_v3, sort_keys=True))
+
+    with pytest.raises(RuntimeError, match="lab_worker_plist_changed_since_activation"):
+        lab_launch_agent.rollback_lab(
+            controller=controller,
+            plist_path=plist_path,
+            state_path=state_path,
+            domain="gui/501",
+            label=label,
+        )
+    assert plist_path.read_bytes() == plistlib.dumps(newer_v3, sort_keys=True)
+    assert state_path.exists()
+    assert controller.calls == 1
