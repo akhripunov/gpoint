@@ -56,7 +56,7 @@ only with explicit local-test mode and a literal loopback hostname. No productio
 endpoint/config is changed by this task. The existing installer replaces source
 and restarts the single agent: do not run prepare/install during this task.
 
-## Real Codex rehearsal — separate owner permission needed
+## Real Codex rehearsal — one-shot owner approval (04.10.2026)
 
 Prepared command from the repository root:
 
@@ -64,11 +64,14 @@ Prepared command from the repository root:
 PYTHONPATH=services/gsales services/gsales/.venv/bin/python services/gsales/tests/run_postgres.py --real-codex
 ```
 
-Owner granted the one-shot approval, but no stop occurred: local worker remains
-loaded/idle while its last three gateway health checks fail; DNS for the GPoint
-host also fails in this environment. The existing gateway exposes no read-only
-queue-depth endpoint, so local IDLE cannot prove the remote pending/running queue
-is empty. The controller fails closed before bootout unless both counts equal zero.
+Owner granted one test window; no stop occurred. The installed LaunchAgent is
+loaded and its fresh local status reports IDLE, no current job and zero network
+failures. Its status contract has no read-only pending/running queue depth or
+effective inference TTL, so local IDLE cannot prove the remote durable queue is
+empty. The controller reads the local status file without network calls and
+fails closed before bootout unless both remote queue counts and effective TTL
+are explicitly provided. The freshness limit is 15 seconds, above the worker's
+10-second idle poll interval.
 Synthetic rehearsal already uses the same worker/API paths with mock output.
 
 A tested controller at `scripts/run-gsales-one-shot-real-codex.py` snapshots the
@@ -77,8 +80,9 @@ poll, requires a read-only zero pending/running queue counts and effective TTL �
 maximum window (below the Core default TTL420s and 300-second lease), and restores
 in finally. Its
 unit checks prove original plist bootstrap/hash checks and missing queue data
-blocks before stop. Preflight-only currently returns BLOCKED because the deployed
-worker API cannot provide queue counts and network/DNS is unavailable.
+blocks before stop. Preflight-only returns BLOCKED because the installed
+status/gateway contract has no authoritative queue counts or effective TTL;
+no launchctl bootout has been attempted.
 
 Concrete plan after the owner-approved one-shot window can satisfy queue/network preflight:
 

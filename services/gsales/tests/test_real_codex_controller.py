@@ -51,6 +51,9 @@ def test_preflight_fails_closed_when_queue_snapshot_is_missing(monkeypatch, tmp_
     monkeypatch.setattr(controller, "PYTHON", paths[1])
     monkeypatch.setattr(controller.subprocess, "check_output", lambda *a, **k: controller.EXPECTED_SHA + "\n")
     monkeypatch.setattr(controller, "loaded", lambda: True)
+    status_path = tmp_path / "worker-status.json"
+    status_path.write_text('{"launch_agent_loaded":true,"state":"idle","current_job_present":false,"last_poll_at":"2099-01-01T00:00:00+00:00"}')
+    monkeypatch.setattr(controller, "SUPPORT", tmp_path)
     monkeypatch.setattr(controller, "status", lambda: {"launch_agent_loaded": True, "state": "idle", "current_job_present": False, "last_poll_at": "2099-01-01T00:00:00+00:00", "queue_connectivity": "reachable"})
     with pytest.raises(RuntimeError, match="gpoint_queue_empty_not_proven"):
         controller.preflight()

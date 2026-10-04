@@ -16,7 +16,7 @@ from pathlib import Path
 EXPECTED_SHA = "50034a22ff73b15b6093bf8edf6d3de7a810b8a5"
 LABEL = "one.gpoint.agata-codex-worker"
 MAX_OUTAGE_SECONDS = 220  # Core's configured default inference TTL is 420s.
-MAX_POLL_AGE_SECONDS = 5
+MAX_POLL_AGE_SECONDS = 15  # Installed worker's configured idle poll interval is 10s.
 MINIMUM_TTL_SECONDS = 221
 HOME_DIR = Path.home()
 REPO = Path(__file__).resolve().parents[1]
@@ -37,12 +37,9 @@ def loaded() -> bool:
 
 
 def status() -> dict:
-    result = subprocess.run([str(PYTHON), str(WORKER), "status"], capture_output=True, text=True, timeout=15)
-    if result.returncode:
-        raise RuntimeError("worker_status_unavailable")
     try:
-        return json.loads(result.stdout)
-    except ValueError as exc:
+        return json.loads((SUPPORT / "worker-status.json").read_text())
+    except (OSError, ValueError) as exc:
         raise RuntimeError("worker_status_invalid") from exc
 
 
@@ -69,17 +66,17 @@ def preflight() -> dict:
         raise RuntimeError("original_launchagent_contract_unexpected")
     hashes = {str(path): digest(path) for path in (PLIST, WORKER, WRAPPER)}
     snap = status()
-    if not loaded() or snap.get("launch_agent_loaded") is not True:
+    # launchctl is authoritative for registration; the worker's own compact
+    # status file intentionally does not duplicate that launchd fact.
+    if not loaded():
         raise RuntimeError("launchagent_not_loaded")
-    if snap.get("queue_connectivity") != "reachable":
-        raise RuntimeError("gpoint_gateway_unreachable")
     if snap.get("state") != "idle" or snap.get("current_job_present") is not False:
         raise RuntimeError("worker_not_idle")
     stamp = datetime.fromisoformat(str(snap.get("last_poll_at", "")).replace("Z", "+00:00"))
     if (datetime.now(timezone.utc) - stamp).total_seconds() > MAX_POLL_AGE_SECONDS:
         raise RuntimeError("worker_poll_status_stale")
-    # The deployed gateway currently exposes no read-only queue snapshot. Never
-    # infer an empty durable queue from worker-local IDLE/current_job_present.
+    # Worker-local IDLE/current_job_present never prove the remote durable queue
+    # empty. Require explicit authoritative counters in the captured status.
     if snap.get("gpoint_pending_jobs") != 0 or snap.get("gpoint_running_jobs") != 0:
         raise RuntimeError("gpoint_queue_empty_not_proven_by_readonly_gateway")
     if not isinstance(snap.get("inference_job_ttl_seconds"), int) or snap["inference_job_ttl_seconds"] < MINIMUM_TTL_SECONDS:
