@@ -1,6 +1,6 @@
 # AGATA Naturalness V1 — specification
 
-**Phase:** 4A preparation; design awaiting OWNER review
+**Phase:** 4A preparation; OWNER approved for technical planning
 
 **Base:** Phase 3 SHA `d228b862d5d345eb1d55a6fb1164f7d5b4d77902` (PR #13)
 **Purpose:** prepare an offline, reproducible Naturalness A/B design for the existing AGATA Mac worker / Codex Local route. This document does not authorize inference or production integration.
