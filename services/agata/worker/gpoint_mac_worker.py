@@ -9,8 +9,9 @@ import fcntl
 import hashlib
 import json
 import os
-import signal
+import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -109,6 +110,15 @@ def configured_tenant_bindings(
     bindings: dict[str, str] = {}
     for target in configured:
         value = os.environ.get(f"{target}_AGATA_TENANT_ID", "").strip()
+        if not value and target == "GPOINT":
+            if configured[target][0] != LEGACY_GPOINT_GATEWAY_URL:
+                raise FatalConfigurationError("worker_tenant_binding_invalid")
+            value = _legacy_gpoint_tenant_binding() or ""
+            if not value:
+                # The legacy V2 endpoint may return identity-less GPOINT claims.
+                # If a claim carries target/tenant identity, process_one still
+                # rejects it until a source-verified sidecar is installed.
+                continue
         try:
             parsed = UUID(value)
             canonical = str(parsed)
@@ -120,6 +130,46 @@ def configured_tenant_bindings(
     if len(bindings) != len(set(bindings.values())):
         raise FatalConfigurationError("worker_tenants_must_be_distinct")
     return bindings
+
+
+def _legacy_gpoint_tenant_binding() -> str | None:
+    path = SUPPORT / "tenant-bindings.json"
+    try:
+        stat = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise FatalConfigurationError("worker_tenant_binding_invalid") from exc
+    if path.is_symlink() or stat.st_uid != os.getuid() or stat.st_mode & 0o077:
+        raise FatalConfigurationError("worker_tenant_binding_invalid")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        expected_keys = {"version", "candidate_sha", "worker_sha256", "tenant_id", "source_id", "snapshot_at"}
+        if not isinstance(value, dict) or set(value) != expected_keys or value.get("version") != 1:
+            raise ValueError
+        candidate_sha = value["candidate_sha"]
+        worker_sha = value["worker_sha256"]
+        if (not isinstance(candidate_sha, str) or len(candidate_sha) != 40
+                or any(char not in "0123456789abcdef" for char in candidate_sha)
+                or not isinstance(worker_sha, str) or len(worker_sha) != 64
+                or worker_sha != hashlib.sha256(Path(__file__).resolve().read_bytes()).hexdigest()):
+            raise ValueError
+        source = value["source_id"]
+        match = re.fullmatch(
+            r"gpoint-vps:([0-9a-f]{40}):api=sha256:([0-9a-f]{64}):agata=sha256:([0-9a-f]{64})",
+            source,
+        )
+        if not match:
+            raise ValueError
+        tenant = UUID(value["tenant_id"])
+        if tenant.int == 0 or str(tenant) != value["tenant_id"]:
+            raise ValueError
+        captured_at = datetime.fromisoformat(value["snapshot_at"].replace("Z", "+00:00"))
+        if captured_at.tzinfo is None:
+            raise ValueError
+        return str(tenant)
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        raise FatalConfigurationError("worker_tenant_binding_invalid") from exc
 
 
 def target_request(target: str, path: str, body: dict | None = None) -> dict:
@@ -473,7 +523,7 @@ def process_one(target: str = "GPOINT") -> bool:
         not identity_present and not legacy_gpoint_contract
     ) or (
         identity_present and (
-            claim.get("target") != target or claim.get("tenant_id") != bindings[target]
+            claim.get("target") != target or claim.get("tenant_id") != bindings.get(target)
         )
     ):
         raise GatewayResponseError("worker_claim_target_mismatch")

@@ -10,10 +10,14 @@ Naturalness Codex generation remains independent.
 The installed LaunchAgent remains `one.gpoint.agata-codex-worker`, with the
 existing wrapper, plist, dedicated Python 3.12 venv, and mode-0600 worker config.
 V3 adds `lab_queue.py` and the hash-pinned synthetic fixture manifest beside
-`gpoint_mac_worker.py`; it adds no credential, tenant, gateway, Postgres schema,
-or public endpoint. The transition stages its worker assets atomically. LAB
-remains disabled by default and its separate worker-bundle-hash-pinned approval
-file does not exist until a future owner decision.
+`gpoint_mac_worker.py`; it adds no credential, gateway, Postgres schema, or
+public endpoint. If the existing legacy GPOINT config has no explicit tenant
+pin, the approved transition derives a private `tenant-bindings.json` sidecar
+from the validated live GPOINT snapshot and binds it to the exact worker hash.
+The sidecar contains only tenant/runtime provenance and is restored or removed
+with the other V2 artifacts on rollback. The worker env file stays byte-for-byte
+unchanged. LAB remains disabled by default and its separate worker-bundle-hash-
+pinned approval file does not exist until a future owner decision.
 
 Before the approved window, record SHA256 for installed V2 source, wrapper,
 plist, and any helper; retain a mode-0700 recovery directory containing exact
@@ -25,7 +29,7 @@ fingerprints in state or logs. Preserve existing worker config byte-for-byte.
 ## Required just-in-time preflight
 
 1. Verify clean GitHub candidate SHA and hashes for the worker, queue helper,
-   wrapper, plist contract, and prepared venv. Verify PR #11 and #14 source
+   wrapper, fixture manifest, plist contract, and prepared venv. Verify PR #11 and #14 source
    identities still match the reviewed dependency graph.
 2. Obtain an authoritative read-only queue snapshot for every configured
    production lane immediately before switching. Require pending/running `0/0`,

@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import tempfile
-import unittest
+import os
 import subprocess
+import tempfile
+import time
+import unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,6 +19,89 @@ SPEC.loader.exec_module(transition)
 
 
 class WorkerTransitionTests(unittest.TestCase):
+    def test_recovery_watchdog_process_registers_ready_without_launchagent_work(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state_path = Path(temp) / "state.json"
+            state_path.write_text(json.dumps({"complete": False, "parent_pid": os.getpid(), "watchdog_ready": False}))
+            state_path.chmod(0o600)
+            process = transition._start_watchdog(state_path)
+            state = json.loads(state_path.read_text())
+            state["complete"] = True
+            transition._write_state(state_path, state)
+            self.assertEqual(process.wait(timeout=5), 0)
+            state = json.loads(state_path.read_text())
+            self.assertTrue(state["watchdog_ready"])
+            self.assertEqual(state["watchdog_pid"], process.pid)
+
+    def test_legacy_v2_config_resolves_only_the_gpoint_lane_without_fabricated_targets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / "worker.env"
+            config.write_text(
+                "GPOINT_AGATA_WORKER_URL=https://gpoint.amiora.one/api/agata-worker\n"
+                "GPOINT_AGATA_WORKER_TOKEN=withheld\n"
+            )
+            config.chmod(0o600)
+            old_config = transition.CONFIG
+            transition.CONFIG = config
+            try:
+                self.assertEqual(transition._configured_lanes(), ("GPOINT",))
+                config.write_text(
+                    "GPOINT_AGATA_WORKER_URL=https://other.example/worker\n"
+                    "GPOINT_AGATA_WORKER_TOKEN=withheld\n"
+                )
+                config.chmod(0o600)
+                with self.assertRaisesRegex(RuntimeError, "gpoint_worker_config_incomplete"):
+                    transition._configured_lanes()
+            finally:
+                transition.CONFIG = old_config
+
+    def test_preflight_rejects_configured_gpoint_tenant_that_disagrees_with_live_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / "worker.env"
+            config.write_text(
+                "GPOINT_AGATA_WORKER_URL=https://gpoint.amiora.one/api/agata-worker\n"
+                "GPOINT_AGATA_WORKER_TOKEN=withheld\n"
+                "GPOINT_AGATA_TENANT_ID=7508f36f-774a-48aa-8c6b-42f6f160415d\n"
+            )
+            config.chmod(0o600)
+            old_config = transition.CONFIG
+            transition.CONFIG = config
+            try:
+                with self.assertRaisesRegex(RuntimeError, "gpoint_worker_tenant_mismatch"):
+                    transition._validate_configured_gpoint_binding({
+                        "tenant_id": "81a4ba28-6de5-4b03-8332-0661ba4d46f4"
+                    })
+            finally:
+                transition.CONFIG = old_config
+
+    def test_authoritative_gpoint_snapshot_stages_hash_bound_nonsecret_tenant_binding(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old_path = transition.TENANT_BINDINGS
+            transition.TENANT_BINDINGS = Path(temp) / "tenant-bindings.json"
+            snapshot = {
+                "source_system": "gpoint", "tenant_identity_verified": True,
+                "transaction_read_only": True, "same_login": True,
+                "role_superuser": False, "role_bypassrls": False,
+                "tenant_id": "81a4ba28-6de5-4b03-8332-0661ba4d46f4",
+                "source_id": "gpoint-vps:" + "b" * 40 + ":api=sha256:" + "1" * 64 + ":agata=sha256:" + "2" * 64,
+                "snapshot_at": "2026-10-04T12:00:00Z", "release_sha": "b" * 40,
+                "api_build_sha": "b" * 40, "agata_build_sha": "b" * 40,
+                "api_image_id": "sha256:" + "1" * 64, "agata_image_id": "sha256:" + "2" * 64,
+                "pending_inference_jobs": 0, "running_inference_jobs": 0,
+                "effective_inference_ttl_seconds": 420, "observed_monotonic": time.monotonic(),
+            }
+            candidate = {"candidate_sha": "a" * 40, "assets": {"worker": "c" * 64}}
+            try:
+                transition._stage_gpoint_tenant_binding(snapshot, candidate)
+                self.assertEqual(transition.TENANT_BINDINGS.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(json.loads(transition.TENANT_BINDINGS.read_text()), {
+                    "version": 1, "candidate_sha": "a" * 40, "worker_sha256": "c" * 64,
+                    "tenant_id": snapshot["tenant_id"], "source_id": snapshot["source_id"],
+                    "snapshot_at": snapshot["snapshot_at"],
+                })
+            finally:
+                transition.TENANT_BINDINGS = old_path
+
     def test_starting_record_recovers_codex_pid_from_inherited_lock(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -59,7 +144,7 @@ class WorkerTransitionTests(unittest.TestCase):
                   "transaction_read_only": True, "same_login": True, "role_superuser": False, "role_bypassrls": False}
         # Snapshot recency is evaluated at runtime, so use current UTC.
         from datetime import datetime, timezone
-        gsales["snapshot_at"] = datetime.now(timezone.utc).isoformat()
+        gsales["snapshot_at"] = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         for candidate in (gsales, gsales | {"pending_inference_jobs": 1}, {"source_id": "forged"}, None):
             with self.subTest(candidate=candidate):
                 with self.assertRaisesRegex(RuntimeError, "source_unavailable"):
@@ -73,7 +158,7 @@ class WorkerTransitionTests(unittest.TestCase):
     def test_restore_reinstates_exact_v2_artifacts_and_removes_new_helper(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            installed = {name: root / f"installed-{name}" for name in ("worker", "helper", "wrapper", "plist")}
+            installed = {name: root / f"installed-{name}" for name in ("worker", "helper", "wrapper", "plist", "tenant_bindings")}
             backup = root / "backup"
             backup.mkdir(mode=0o700)
             original = {}
@@ -84,6 +169,8 @@ class WorkerTransitionTests(unittest.TestCase):
                 (backup / name).write_bytes(content)
             installed["helper"].write_text("new v3 helper")
             original["helper"] = None
+            installed["tenant_bindings"].write_text("staged nonsecret binding")
+            original["tenant_bindings"] = None
             state_path = backup / "state.json"
             state_path.write_text(json.dumps({
                 "version": 1, "backup_dir": str(backup), "original_hashes": original,
@@ -102,6 +189,7 @@ class WorkerTransitionTests(unittest.TestCase):
                     self.assertTrue(transition.restore_v2(state_path))
                 self.assertEqual(state["bootstrapped"], 1)
                 self.assertFalse(installed["helper"].exists())
+                self.assertFalse(installed["tenant_bindings"].exists())
                 for name in ("worker", "wrapper", "plist"):
                     self.assertEqual(transition.digest(installed[name]), original[name])
                 self.assertTrue(json.loads(state_path.read_text())["restore_confirmed"])

@@ -12,7 +12,6 @@ import fcntl
 import hashlib
 import json
 import os
-import plistlib
 import shutil
 import subprocess
 import sys
@@ -37,6 +36,7 @@ WORKER = SUPPORT / "gpoint_mac_worker.py"
 HELPER = SUPPORT / "lab_queue.py"
 FIXTURE_MANIFEST = SUPPORT / "lab_fixture_manifest.json"
 WRAPPER = SUPPORT / "run_codex_worker.sh"
+TENANT_BINDINGS = SUPPORT / "tenant-bindings.json"
 SOURCES = {
     "worker": REPO / "services/agata/worker/gpoint_mac_worker.py",
     "helper": REPO / "services/agata/worker/lab_queue.py",
@@ -44,10 +44,11 @@ SOURCES = {
     "wrapper": REPO / "services/agata/worker/run_codex_worker.sh",
 }
 TARGETS = {"worker": WORKER, "helper": HELPER, "fixture_manifest": FIXTURE_MANIFEST,
-           "wrapper": WRAPPER, "plist": PLIST}
+           "wrapper": WRAPPER, "plist": PLIST, "tenant_bindings": TENANT_BINDINGS}
 STATE_ROOT = SUPPORT / "v3-transition-recovery"
 TRANSITION_LOCK = HOME / ".config/gpoint/unified-worker-transition.lock"
 UTC = timezone.utc
+LEGACY_GPOINT_GATEWAY_URL = "https://gpoint.amiora.one/api/agata-worker"
 
 
 def digest(path: Path) -> str:
@@ -92,27 +93,49 @@ def authenticated_poll_confirmed(current: dict, before: dict, lanes: tuple[str, 
     return True
 
 
-def _configured_lanes() -> tuple[str, ...]:
+def _worker_config_values() -> dict[str, str]:
     if not CONFIG.is_file() or CONFIG.stat().st_mode & 0o077:
         raise RuntimeError("worker_config_missing_or_permissions_invalid")
-    # Read only key names and whether each value is non-empty. Never return/log a value.
-    present: set[str] = set()
+    # Read values only in memory to recognize the verified legacy GPOINT
+    # endpoint. Never return/log them; credentials remain untouched.
+    values: dict[str, str] = {}
     for line in CONFIG.read_text(encoding="utf-8").splitlines():
         text = line.strip()
         if text and not text.startswith("#") and "=" in text:
             key, value = text.split("=", 1)
-            if value.strip().strip('"').strip("'"):
-                present.add(key.strip())
-    if not {"GPOINT_AGATA_WORKER_URL", "GPOINT_AGATA_WORKER_TOKEN", "GPOINT_AGATA_TENANT_ID"}.issubset(present):
+            values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def _configured_lanes() -> tuple[str, ...]:
+    values = _worker_config_values()
+    if not values.get("GPOINT_AGATA_WORKER_URL") or not values.get("GPOINT_AGATA_WORKER_TOKEN"):
         raise RuntimeError("gpoint_worker_config_incomplete")
+    if (not values.get("GPOINT_AGATA_TENANT_ID")
+            and values["GPOINT_AGATA_WORKER_URL"] != LEGACY_GPOINT_GATEWAY_URL):
+        raise RuntimeError("gpoint_worker_config_incomplete")
+    if values.get("GPOINT_AGATA_TENANT_ID"):
+        try:
+            tenant_id = uuid.UUID(values["GPOINT_AGATA_TENANT_ID"])
+        except ValueError as exc:
+            raise RuntimeError("gpoint_worker_config_incomplete") from exc
+        if tenant_id.int == 0 or str(tenant_id) != values["GPOINT_AGATA_TENANT_ID"]:
+            raise RuntimeError("gpoint_worker_config_incomplete")
     lanes = ["GPOINT"]
-    if {"GSALES_AGATA_WORKER_URL", "GSALES_AGATA_WORKER_TOKEN"}.issubset(present):
-        if "GSALES_AGATA_TENANT_ID" not in present:
+    gsales_keys = ("GSALES_AGATA_WORKER_URL", "GSALES_AGATA_WORKER_TOKEN", "GSALES_AGATA_TENANT_ID")
+    if all(values.get(key) for key in gsales_keys[:2]):
+        if not values.get(gsales_keys[2]):
             raise RuntimeError("gsales_worker_config_incomplete")
         lanes.append("GSALES")
-    elif ("GSALES_AGATA_WORKER_URL" in present) != ("GSALES_AGATA_WORKER_TOKEN" in present):
+    elif any(values.get(key) for key in gsales_keys):
         raise RuntimeError("gsales_worker_config_incomplete")
     return tuple(lanes)
+
+
+def _validate_configured_gpoint_binding(snapshot: dict) -> None:
+    configured = _worker_config_values().get("GPOINT_AGATA_TENANT_ID")
+    if configured and configured != snapshot.get("tenant_id"):
+        raise RuntimeError("gpoint_worker_tenant_mismatch")
 
 
 def _gpoint_snapshot() -> dict:
@@ -126,11 +149,69 @@ def _gpoint_snapshot() -> dict:
     spec.loader.exec_module(module)
     snapshot = module.queue_snapshot()
     module.validate_queue_snapshot(snapshot)
+    _validate_configured_gpoint_binding(snapshot)
     if snapshot.get("pending_inference_jobs") != 0 or snapshot.get("running_inference_jobs") != 0:
         raise RuntimeError("gpoint_queue_not_empty")
     if snapshot.get("effective_inference_ttl_seconds", 0) < MIN_TTL_SECONDS:
         raise RuntimeError("inference_ttl_below_transition_budget")
     return snapshot
+
+
+def _stage_gpoint_tenant_binding(snapshot: dict, candidate: dict) -> None:
+    """Pin V3 to the tenant proven by the current trusted GPOINT snapshot."""
+    tenant_id = snapshot.get("tenant_id")
+    try:
+        parsed_tenant = uuid.UUID(tenant_id)
+        captured_at = datetime.fromisoformat(str(snapshot.get("snapshot_at", "")).replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise RuntimeError("gpoint_tenant_binding_snapshot_invalid") from exc
+    source_id = snapshot.get("source_id")
+    release_sha = snapshot.get("release_sha")
+    api_image = snapshot.get("api_image_id")
+    agata_image = snapshot.get("agata_image_id")
+    candidate_sha = candidate.get("candidate_sha")
+    worker_sha = candidate.get("assets", {}).get("worker")
+    if (snapshot.get("source_system") != "gpoint" or snapshot.get("tenant_identity_verified") is not True
+            or snapshot.get("transaction_read_only") is not True or snapshot.get("same_login") is not True
+            or snapshot.get("role_superuser") is not False or snapshot.get("role_bypassrls") is not False
+            or parsed_tenant.int == 0 or str(parsed_tenant) != tenant_id or captured_at.tzinfo is None
+            or snapshot.get("pending_inference_jobs") != 0 or snapshot.get("running_inference_jobs") != 0
+            or snapshot.get("effective_inference_ttl_seconds", 0) < MIN_TTL_SECONDS
+            or not isinstance(release_sha, str) or len(release_sha) != 40
+            or snapshot.get("api_build_sha") != release_sha or snapshot.get("agata_build_sha") != release_sha
+            or not isinstance(api_image, str) or not api_image.startswith("sha256:")
+            or not isinstance(agata_image, str) or not agata_image.startswith("sha256:")
+            or source_id != f"gpoint-vps:{release_sha}:api={api_image}:agata={agata_image}"
+            or not isinstance(candidate_sha, str) or len(candidate_sha) != 40
+            or not isinstance(worker_sha, str) or len(worker_sha) != 64):
+        raise RuntimeError("gpoint_tenant_binding_snapshot_invalid")
+    observed = snapshot.get("observed_monotonic")
+    if (not isinstance(observed, (int, float)) or time.monotonic() - observed < 0
+            or time.monotonic() - observed > 5):
+        raise RuntimeError("gpoint_tenant_binding_snapshot_stale")
+    value = {
+        "version": 1,
+        "candidate_sha": candidate_sha,
+        "worker_sha256": worker_sha,
+        "tenant_id": tenant_id,
+        "source_id": source_id,
+        "snapshot_at": captured_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+    }
+    TENANT_BINDINGS.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(prefix=".tenant-bindings-", dir=TENANT_BINDINGS.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            json.dump(value, stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, TENANT_BINDINGS)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
 
 def validate_queue_snapshots(gpoint: dict, gsales: dict | None, lanes: tuple[str, ...]) -> dict:
@@ -401,7 +482,7 @@ def restore_v2(state_path: Path, *, timeout: float = 0.0) -> bool:
                 if not source.is_file() or digest(source) != expected:
                     raise RuntimeError("v2_backup_hash_invalid")
                 target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                _atomic_copy(source, target, 0o600 if name == "plist" else 0o700)
+                _atomic_copy(source, target, 0o600 if name in {"plist", "tenant_bindings"} else 0o700)
                 if digest(target) != expected:
                     raise RuntimeError("v2_restore_hash_mismatch")
         _bootstrap(outage_deadline)
@@ -535,7 +616,7 @@ def _backup_state(candidate_sha: str, candidate_assets: dict, lanes: tuple[str, 
         if target.is_file():
             original_hashes[name] = digest(target)
             shutil.copyfile(target, backup / name)
-            (backup / name).chmod(0o600 if name == "plist" else 0o700)
+            (backup / name).chmod(0o600 if name in {"plist", "tenant_bindings"} else 0o700)
         else:
             original_hashes[name] = None
     state_path = backup / "state.json"
@@ -637,6 +718,7 @@ def apply(candidate_sha: str, approval_path: Path, gsales_snapshot_path: Path | 
             _atomic_copy(source, target, 0o700)
             if digest(target) != candidate["assets"][name]:
                 raise RuntimeError("candidate_asset_hash_mismatch")
+        _stage_gpoint_tenant_binding(snapshots["GPOINT"], candidate)
         _bootstrap(outage_deadline)
         _wait_for_poll(current, lanes, min(outage_deadline, time.monotonic() + POLL_DEADLINE_SECONDS))
         if time.monotonic() >= outage_deadline:
