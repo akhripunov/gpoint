@@ -1,6 +1,6 @@
 # GPOINT AGATA worker-token rotation handoff
 
-**Status:** prepared; no credential rotation performed.
+**Status:** completed for the exact production SHA below on 2026-10-04; original V2 restored and authenticated polling verified.
 
 This handoff is for a separately approved, exact-release maintenance operation.
 It records no token value, fragment, hash, or other derived fingerprint.
@@ -47,9 +47,40 @@ exposure itself is described in
    the new credential. Never restore the exposed credential. Record only
    non-secret completion facts and timestamps.
 
-## Current decision
+## Completion record
 
-**NO-GO for rotation now.** There is no separate exact-SHA OWNER authorization
-for credential rotation in this task. Production was not changed. The
-identity-corrected read-only queue snapshot supports a later Queue Preflight,
-but does not authorize this credential maintenance or Real Codex QA.
+The OWNER approved one coordinated rotation on production SHA
+`68bf0212d7aa5125394b0b39ffba9226eb106c0d`. The V2 LaunchAgent was already
+unloaded from the earlier failed attempt, so successful polling was not treated
+as a prerequisite to this repair. The controller verified it remained
+unloaded, the worker lock was free, the installed worker/wrapper/plist hashes
+matched the expected V2 artifacts, and the checkout was clean.
+
+The fresh authoritative queue/runtime snapshot at
+`2026-10-04T09:40:59.358231Z` identified the expected GPOINT tenant, production
+SHA and immutable API/Core images; pending and running jobs were both zero and
+effective inference TTL was 420 seconds. A second queue snapshot was taken
+immediately before the secret update. No production jobs were added, removed,
+or altered.
+
+The credential was transferred through temporary mode-0600 files and replaced
+on both the Mac worker config and VPS gateway config. The secret itself and any
+derived value are intentionally absent from this handoff. Only the GPOINT API
+service was recreated; there was no application deploy, migration, V3 install,
+or worker/plist edit. The previously exposed credential was not used as
+rollback.
+
+The original V2 LaunchAgent was bootstrapped. Authenticated idle polling was
+confirmed at `2026-10-04T09:41:33.616551Z` and again at
+`2026-10-04T09:41:58.504466Z`, with no error code, no active job, and no change
+to worker, wrapper, or plist hashes. A fresh read-only runtime/queue check at
+`2026-10-04T09:42:02.989490Z` again confirmed the expected production SHA and
+image IDs, zero pending/running jobs, and 420-second TTL.
+
+The observed recovery interval was **24 minutes 15 seconds**, so the prior
+300-second objective was missed. The exact bootout timestamp was not captured;
+this duration is the recorded poll-to-poll recovery gap. This operation does
+not authorize Real Codex QA. Before a later QA window, the detached recovery
+watchdog must pass isolated tests and the changed candidate SHA must receive a
+new exact-SHA OWNER approval. A complete loss of Mac availability remains
+outside the protection a local watchdog can provide.

@@ -3,8 +3,10 @@
 import base64
 import json
 import os
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -19,7 +21,44 @@ GPOINT = "7508f36f-774a-48aa-8c6b-42f6f160415d"
 GSALES = "c4d67889-877e-4d1b-a8d8-597c479d638f"
 
 
+def install_cleanup_signal_handlers():
+    def interrupt(_signum, _frame):
+        raise KeyboardInterrupt()
+    signal.signal(signal.SIGTERM, interrupt)
+    signal.signal(signal.SIGINT, interrupt)
+
+
+def start_test_container(container, password):
+    fd, env_path = tempfile.mkstemp(prefix=".gsales-postgres-", suffix=".env")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write("POSTGRES_PASSWORD=" + password + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        args = [
+            "docker", "run", "-d", "--name", container,
+            "-p", "127.0.0.1::5432", "--env-file", env_path,
+            "pgvector/pgvector:0.8.6-pg16",
+        ]
+        try:
+            result = subprocess.run(args, check=False, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            raise RuntimeError("disposable_postgres_start_failed") from None
+        if result.returncode != 0:
+            raise RuntimeError("disposable_postgres_start_failed")
+        return Path(env_path)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        Path(env_path).unlink(missing_ok=True)
+        raise
+
+
 def main():
+    install_cleanup_signal_handlers()
     real_codex = "--real-codex" in sys.argv
     if real_codex:
         import fcntl
@@ -32,28 +71,14 @@ def main():
                 return 2
     container = "gpoint-gsales-test-" + uuid4().hex[:10]
     password = uuid4().hex
+    password_file = None
     env = {k: v for k, v in os.environ.items() if not k.startswith(("AGATA_", "GSALES_"))}
     env["PYTHONPATH"] = str(SALES)
     if real_codex:
         env["GSALES_QA_REAL_CODEX"] = "true"
         env["AGATA_CODEX_JOB_TIMEOUT_SECONDS"] = "90"
     try:
-        subprocess.run(
-            [
-                "docker",
-                "run",
-                "-d",
-                "--name",
-                container,
-                "-p",
-                "127.0.0.1::5432",
-                "-e",
-                f"POSTGRES_PASSWORD={password}",
-                "pgvector/pgvector:0.8.6-pg16",
-            ],
-            check=True,
-            capture_output=True,
-        )
+        password_file = start_test_container(container, password)
         port = (
             subprocess.check_output(["docker", "port", container, "5432/tcp"], text=True)
             .strip()
@@ -215,6 +240,8 @@ def main():
         subprocess.run(
             ["docker", "rm", "-f", container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
+        if password_file is not None:
+            password_file.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 import importlib.util
 import plistlib
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -60,7 +61,13 @@ def test_restore_bootstraps_original_and_waits_for_poll(monkeypatch, tmp_path):
     poll_state = {"count": 0}
     def status():
         poll_state["count"] += 1
-        return {"last_poll_at": "same", "updated_at": str(poll_state["count"]), "current_job_present": False}
+        return {
+            "last_poll_at": str(poll_state["count"]),
+            "updated_at": str(poll_state["count"]),
+            "state": "idle",
+            "current_job_present": False,
+            "last_error_code": None,
+        }
     monkeypatch.setattr(controller.subprocess, "run", run)
     monkeypatch.setattr(controller, "status", status)
     monkeypatch.setattr(controller.time, "sleep", lambda _seconds: None)
@@ -68,6 +75,28 @@ def test_restore_bootstraps_original_and_waits_for_poll(monkeypatch, tmp_path):
     assert state["calls"] == ["launchctl"]
     assert controller.loaded()
     assert all(controller.digest(path) == hashes[str(path)] for path in paths)
+
+
+def test_restore_rejects_changed_v2_artifact_before_bootstrap(monkeypatch, tmp_path):
+    paths = [tmp_path / name for name in ("plist", "worker", "wrapper")]
+    for path in paths:
+        path.write_text("original:" + path.name)
+    hashes = {str(path): controller.digest(path) for path in paths}
+    paths[1].write_text("changed worker")
+    monkeypatch.setattr(controller, "PLIST", paths[0])
+    monkeypatch.setattr(controller, "WORKER", paths[1])
+    monkeypatch.setattr(controller, "WRAPPER", paths[2])
+    calls = []
+    state = {"loaded": False}
+    monkeypatch.setattr(controller, "loaded", lambda: state["loaded"])
+    def run(args, **_kwargs):
+        calls.append(args)
+        state["loaded"] = True
+        return subprocess.CompletedProcess(args, 0)
+    monkeypatch.setattr(controller.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="installed_worker_hash_changed"):
+        controller.restore(hashes, stopped=True)
+    assert calls == []
 
 
 def test_preflight_fails_closed_when_queue_snapshot_is_missing(monkeypatch, tmp_path):
@@ -153,3 +182,319 @@ def test_immediate_switch_preflight_reads_queue_then_rechecks_local_worker(monke
     result = controller.immediate_switch_preflight()
     assert result["pending_inference_jobs"] == 0
     assert calls == ["queue", "local-idle"]
+
+
+def test_restore_confirmation_requires_fresh_idle_poll_without_error():
+    before = {"last_poll_at": "poll-1", "updated_at": "update-1"}
+    assert controller.authenticated_poll_confirmed(
+        {"last_poll_at": "poll-2", "state": "idle", "current_job_present": False, "last_error_code": None},
+        before,
+    )
+    assert not controller.authenticated_poll_confirmed(
+        {"last_poll_at": "poll-1", "state": "idle", "current_job_present": False, "last_error_code": None},
+        before,
+    )
+    assert not controller.authenticated_poll_confirmed(
+        {"last_poll_at": "poll-2", "state": "idle", "current_job_present": False, "last_error_code": "AUTH"},
+        before,
+    )
+
+
+def test_watchdog_recovers_when_controller_process_disappears(tmp_path):
+    path = controller.create_recovery_session(tmp_path, {}, parent_pid=99, now=100.0)
+    calls = []
+    result = controller.run_recovery_watchdog(
+        path,
+        now_fn=lambda: 101.0,
+        sleep_fn=lambda _seconds: None,
+        parent_exists_fn=lambda _pid: False,
+        restore_fn=lambda *args, **kwargs: calls.append("restore"),
+    )
+    assert result == 0
+    assert calls == ["restore"]
+    assert controller.read_recovery_state(path)["restore_confirmed"] is True
+
+
+def test_watchdog_stops_recorded_qa_process_before_restoring(tmp_path):
+    path = controller.create_recovery_session(tmp_path, {}, parent_pid=99, now=100.0)
+    controller._record_qa_pid(path, 123)
+    calls = []
+    assert controller.run_recovery_watchdog(
+        path,
+        now_fn=lambda: 101.0,
+        sleep_fn=lambda _seconds: None,
+        parent_exists_fn=lambda _pid: False,
+        terminate_qa_fn=lambda state: calls.append(("terminate", state["qa_pid"])),
+        restore_fn=lambda *_a, **_k: calls.append(("restore", None)),
+    ) == 0
+    assert calls == [("terminate", 123), ("restore", None)]
+
+
+def test_watchdog_starts_recovery_by_240_seconds_if_controller_is_alive(tmp_path):
+    path = controller.create_recovery_session(tmp_path, {}, parent_pid=99, now=100.0)
+    clock = {"now": 100.0}
+    calls = []
+    def sleep(seconds):
+        clock["now"] += seconds
+    result = controller.run_recovery_watchdog(
+        path,
+        now_fn=lambda: clock["now"],
+        sleep_fn=sleep,
+        parent_exists_fn=lambda _pid: True,
+        restore_fn=lambda *args, **kwargs: calls.append(clock["now"]),
+    )
+    assert result == 0
+    assert calls and calls[0] <= 100.0 + controller.RECOVERY_START_AFTER_SECONDS
+
+
+def test_watchdog_gives_active_controller_restore_lock_time_before_takeover(tmp_path):
+    path = controller.create_recovery_session(tmp_path, {}, parent_pid=99, now=100.0)
+    clock = {"now": 100.0 + controller.RECOVERY_START_AFTER_SECONDS}
+    restore_attempts = {"count": 0}
+    forced = []
+    def fake_restore_once(state_path, **kwargs):
+        restore_attempts["count"] += 1
+        if restore_attempts["count"] <= 3:
+            raise TimeoutError("recovery_lock_busy")
+        return controller.restore_once(
+            state_path,
+            source=kwargs["source"],
+            restore_fn=lambda *_a, **_k: None,
+        )
+    def sleep(_seconds):
+        clock["now"] += 10.0
+    result = controller.run_recovery_watchdog(
+        path,
+        now_fn=lambda: clock["now"],
+        sleep_fn=sleep,
+        parent_exists_fn=lambda _pid: True,
+        restore_once_fn=fake_restore_once,
+        terminate_controller_fn=lambda _state: forced.append(clock["now"]),
+        terminate_qa_fn=lambda _state: None,
+    )
+    assert result == 0
+    assert forced == [100.0 + controller.RECOVERY_START_AFTER_SECONDS + 20.0]
+
+
+def test_watchdog_is_idempotent_after_successful_controller_restore(tmp_path):
+    path = controller.create_recovery_session(tmp_path, {}, parent_pid=99, now=100.0)
+    controller.restore_once(path, source="controller", restore_fn=lambda *_a, **_k: None)
+    calls = []
+    assert controller.run_recovery_watchdog(
+        path,
+        now_fn=lambda: 500.0,
+        sleep_fn=lambda _seconds: None,
+        parent_exists_fn=lambda _pid: False,
+        restore_fn=lambda *_a, **_k: calls.append("restore"),
+    ) == 0
+    assert calls == []
+
+
+def test_detached_watchdog_starts_and_exits_for_cancelled_session(tmp_path):
+    path = controller.create_recovery_session(tmp_path, {}, parent_pid=99, now=100.0)
+    controller._cancel_recovery_session(path)
+    process = controller.start_recovery_watchdog(path)
+    controller.require_watchdog_success(process)
+    assert controller.read_recovery_state(path)["watchdog_pid"] == process.pid
+
+
+def test_controller_and_watchdog_restoration_are_serialized(tmp_path):
+    path = controller.create_recovery_session(tmp_path, {}, parent_pid=99, now=100.0)
+    marker = tmp_path / "restore-calls.txt"
+    child = (
+        "import importlib.util, pathlib, sys, time; "
+        "spec=importlib.util.spec_from_file_location('recovery', sys.argv[1]); "
+        "module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); "
+        "marker=pathlib.Path(sys.argv[3]); "
+        "def_restore=lambda *a, **k: (marker.open('a').write('restore\\n'), time.sleep(.15)); "
+        "module.restore_once(pathlib.Path(sys.argv[2]), source='controller', restore_fn=def_restore)"
+    )
+    first = subprocess.Popen([sys.executable, "-c", child, str(SCRIPT), str(path), str(marker)])
+    second = subprocess.Popen([sys.executable, "-c", child, str(SCRIPT), str(path), str(marker)])
+    assert first.wait(timeout=5) == 0
+    assert second.wait(timeout=5) == 0
+    assert marker.read_text().splitlines() == ["restore"]
+
+
+def test_guarded_window_restores_after_bootout_exception():
+    calls = []
+    def bootout():
+        calls.append("bootout")
+        raise subprocess.CalledProcessError(1, ["launchctl", "bootout"])
+    with pytest.raises(subprocess.CalledProcessError):
+        controller.run_guarded_window(
+            bootout_fn=bootout,
+            launch_qa_fn=lambda: pytest.fail("QA must not launch after bootout failure"),
+            restore_fn=lambda: calls.append("restore"),
+            outage_deadline=500.0,
+            now_fn=lambda: 100.0,
+        )
+    assert calls == ["bootout", "restore"]
+
+
+def test_guarded_window_terminates_qa_before_restore_on_interrupt(monkeypatch):
+    calls = []
+    class Process:
+        def __init__(self): self.running = True
+        def wait(self, timeout=None): raise KeyboardInterrupt()
+        def poll(self): return None if self.running else 0
+    process = Process()
+    monkeypatch.setattr(controller, "terminate_process_tree", lambda proc: (calls.append("terminate"), setattr(proc, "running", False)))
+    with pytest.raises(KeyboardInterrupt):
+        controller.run_guarded_window(
+            bootout_fn=lambda: calls.append("bootout"),
+            launch_qa_fn=lambda: process,
+            restore_fn=lambda: calls.append("restore"),
+            outage_deadline=500.0,
+            now_fn=lambda: 100.0,
+        )
+    assert calls == ["bootout", "terminate", "restore"]
+
+
+def test_guarded_window_success_completes_qa_then_confirms_restore():
+    calls = []
+    class Process:
+        pid = 123
+        def wait(self, timeout=None):
+            calls.append("qa-complete")
+            return 0
+        def poll(self): return 0
+    result = controller.run_guarded_window(
+        bootout_fn=lambda: calls.append("bootout"),
+        launch_qa_fn=lambda: calls.append("launch-two-sequential-jobs") or Process(),
+        restore_fn=lambda: calls.append("restore-and-poll"),
+        outage_deadline=500.0,
+        now_fn=lambda: 100.0,
+        record_qa_fn=lambda pid: calls.append(f"qa-pid-{pid}"),
+    )
+    assert result == 0
+    assert calls == ["bootout", "launch-two-sequential-jobs", "qa-pid-123", "qa-complete", "qa-pid-None", "restore-and-poll"]
+
+
+def test_guarded_window_timeout_terminates_qa_before_restoration(monkeypatch):
+    calls = []
+    class Process:
+        pid = 123
+        def wait(self, timeout=None): raise subprocess.TimeoutExpired(["codex"], timeout)
+        def poll(self): return 0
+    process = Process()
+    monkeypatch.setattr(controller, "terminate_process_tree", lambda _proc: calls.append("terminate-qa-group"))
+    result = controller.run_guarded_window(
+        bootout_fn=lambda: calls.append("bootout"),
+        launch_qa_fn=lambda: process,
+        restore_fn=lambda: calls.append("restore-and-poll"),
+        outage_deadline=500.0,
+        now_fn=lambda: 100.0,
+    )
+    assert result == 124
+    assert calls == ["bootout", "terminate-qa-group", "restore-and-poll"]
+
+
+def test_terminate_process_tree_stops_a_hung_codex_child():
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        start_new_session=True,
+    )
+    controller.terminate_process_tree(process)
+    assert process.poll() is not None
+
+
+def test_insufficient_budget_fails_before_bootout():
+    calls = []
+    with pytest.raises(RuntimeError, match="insufficient_test_budget"):
+        controller.run_guarded_window(
+            bootout_fn=lambda: calls.append("bootout"),
+            launch_qa_fn=lambda: pytest.fail("QA must not launch with no reserved recovery budget"),
+            restore_fn=lambda: calls.append("restore"),
+            outage_deadline=100.0,
+            now_fn=lambda: 100.0,
+        )
+    assert calls == []
+
+
+def test_restore_bootstrap_error_propagates_without_marking_recovered(monkeypatch, tmp_path):
+    artifacts = [tmp_path / name for name in ("plist", "worker", "wrapper")]
+    for artifact in artifacts:
+        artifact.write_text("v2:" + artifact.name)
+    monkeypatch.setattr(controller, "PLIST", artifacts[0])
+    monkeypatch.setattr(controller, "WORKER", artifacts[1])
+    monkeypatch.setattr(controller, "WRAPPER", artifacts[2])
+    hashes = {str(artifact): controller.digest(artifact) for artifact in artifacts}
+    path = controller.create_recovery_session(tmp_path, hashes, parent_pid=99)
+    monkeypatch.setattr(controller, "loaded", lambda: False)
+    monkeypatch.setattr(controller.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(subprocess.CalledProcessError(1, ["launchctl", "bootstrap"])))
+    with pytest.raises(subprocess.CalledProcessError):
+        controller.restore_once(path, source="controller")
+    assert controller.read_recovery_state(path)["restore_confirmed"] is False
+
+
+def test_restore_rejects_state_that_does_not_name_exact_v2_artifacts(tmp_path):
+    path = controller.create_recovery_session(tmp_path, {}, parent_pid=99)
+    with pytest.raises(RuntimeError, match="recovery_target_identity_invalid"):
+        controller.restore_once(path, source="controller")
+    assert controller.read_recovery_state(path)["restore_confirmed"] is False
+
+
+def test_watchdog_does_not_claim_recovery_after_authentication_error(tmp_path):
+    path = controller.create_recovery_session(tmp_path, {}, parent_pid=99, now=100.0)
+    def failed_restore(*_args, **_kwargs): raise RuntimeError("worker_authentication_failed")
+    assert controller.run_recovery_watchdog(
+        path,
+        now_fn=lambda: 400.0,
+        sleep_fn=lambda _seconds: None,
+        parent_exists_fn=lambda _pid: False,
+        restore_fn=failed_restore,
+    ) == 1
+    state = controller.read_recovery_state(path)
+    assert state["restore_confirmed"] is False
+    assert state["last_recovery_error"] == "worker_authentication_failed"
+
+
+def test_recovery_error_redacts_secret_shaped_exception_text():
+    secret_shaped = "ab12cd34ef56" * 4
+    assert controller._safe_recovery_error(RuntimeError(secret_shaped)) == "runtimeerror"
+    assert controller._safe_recovery_error(RuntimeError("worker_authentication_failed")) == "worker_authentication_failed"
+
+
+def test_controller_installs_sigint_and_sigterm_cleanup_handlers(monkeypatch):
+    installed = {}
+    monkeypatch.setattr(controller.signal, "signal", lambda signum, handler: installed.__setitem__(signum, handler))
+    controller.install_controller_signal_handlers()
+    assert set(installed) == {controller.signal.SIGINT, controller.signal.SIGTERM}
+    for handler in installed.values():
+        with pytest.raises(KeyboardInterrupt):
+            handler(0, None)
+
+
+def test_disposable_postgres_runner_converts_termination_to_cleanup(monkeypatch):
+    spec = importlib.util.spec_from_file_location("run_postgres", ROOT / "services/gsales/tests/run_postgres.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    installed = {}
+    monkeypatch.setattr(module.signal, "signal", lambda signum, handler: installed.__setitem__(signum, handler))
+    module.install_cleanup_signal_handlers()
+    assert set(installed) == {module.signal.SIGINT, module.signal.SIGTERM}
+    with pytest.raises(KeyboardInterrupt):
+        installed[module.signal.SIGTERM](module.signal.SIGTERM, None)
+
+
+def test_postgres_container_start_keeps_password_out_of_argv_and_errors(monkeypatch):
+    spec = importlib.util.spec_from_file_location("run_postgres", ROOT / "services/gsales/tests/run_postgres.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    password = "synthetic-disposable-password"
+    observed = {}
+    def failed_docker(args, **kwargs):
+        observed["args"] = args
+        env_path = Path(args[args.index("--env-file") + 1])
+        observed["mode"] = env_path.stat().st_mode & 0o777
+        observed["contents"] = env_path.read_text()
+        return subprocess.CompletedProcess(args, 1, "", "synthetic docker failure")
+    monkeypatch.setattr(module.subprocess, "run", failed_docker)
+    with pytest.raises(RuntimeError, match="disposable_postgres_start_failed") as error:
+        module.start_test_container("gpoint-test-container", password)
+    assert password not in str(error.value)
+    assert all(password not in str(arg) for arg in observed["args"])
+    assert observed["mode"] == 0o600
+    assert observed["contents"] == "POSTGRES_PASSWORD=" + password + "\n"
+    assert not Path(observed["args"][observed["args"].index("--env-file") + 1]).exists()
