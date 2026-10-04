@@ -269,13 +269,24 @@ def _terminate_active_inference(_signum=None, _frame=None) -> None:
 
 
 def _record_inference_process(process: subprocess.Popen, command: list[str]) -> None:
+    _write_inference_record({"pid": process.pid, "pgid": process.pid, "command": command[0],
+                             "started_at": datetime.now(UTC).isoformat(), "state": "running"})
+
+
+def _record_inference_start(command: list[str]) -> None:
+    # Persist intent before Popen: watchdog can find a child that inherited the
+    # worker lock if this process is killed before its PID is recorded.
+    _write_inference_record({"pid": None, "pgid": None, "command": command[0],
+                             "started_at": datetime.now(UTC).isoformat(), "state": "starting"})
+
+
+def _write_inference_record(record: dict) -> None:
     SUPPORT.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, temporary = tempfile.mkstemp(prefix=".inference-process-", dir=SUPPORT)
     try:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump({"pid": process.pid, "pgid": process.pid, "command": command[0],
-                       "started_at": datetime.now(UTC).isoformat()}, stream, separators=(",", ":"))
+            json.dump(record, stream, separators=(",", ":"))
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
@@ -368,6 +379,7 @@ def run_inference(job: dict, *, cancel_check=None, metadata_out: dict | None = N
         child_env["CI"] = "true"
         global _ACTIVE_INFERENCE
         pass_fds = (_WORKER_LOCK_FD,) if _WORKER_LOCK_FD is not None else ()
+        _record_inference_start(command)
         process = subprocess.Popen(
             command,
             text=True,

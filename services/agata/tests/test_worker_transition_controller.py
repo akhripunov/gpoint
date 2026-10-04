@@ -5,6 +5,7 @@ import importlib.util
 import json
 import tempfile
 import unittest
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +17,40 @@ SPEC.loader.exec_module(transition)
 
 
 class WorkerTransitionTests(unittest.TestCase):
+    def test_starting_record_recovers_codex_pid_from_inherited_lock(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            record_path = root / "inference-process.json"
+            record_path.write_text(json.dumps({"pid": None, "pgid": None, "command": "/opt/codex",
+                                              "state": "starting"}))
+            record_path.chmod(0o600)
+            support = transition.SUPPORT
+            transition.SUPPORT = root
+            original_run = transition.subprocess.run
+
+            def run(args, **kwargs):
+                if args[0] == "lsof":
+                    return subprocess.CompletedProcess(args, 0, "4242\n", "")
+                if args[:3] == ["ps", "-p", "4242"]:
+                    return subprocess.CompletedProcess(args, 0, "/opt/codex exec --ephemeral", "")
+                return original_run(args, **kwargs)
+
+            signals = []
+            def killpg(pgid, sig):
+                signals.append((pgid, sig))
+                if sig == 0:
+                    raise ProcessLookupError
+
+            try:
+                with patch.object(transition.subprocess, "run", side_effect=run), patch.object(
+                    transition.os, "killpg", side_effect=killpg
+                ):
+                    transition._terminate_recorded_inference()
+            finally:
+                transition.SUPPORT = support
+            self.assertEqual(signals, [(4242, 15), (4242, 0)])
+            self.assertFalse(record_path.exists())
+
     def test_caller_supplied_gsales_snapshot_never_authorizes_transition(self):
         point = {"source_id": "gpoint:snapshot", "snapshot_at": "2026-10-04T10:00:00+00:00",
                  "pending_inference_jobs": 0, "running_inference_jobs": 0, "effective_inference_ttl_seconds": 420}

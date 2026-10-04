@@ -71,8 +71,11 @@ The watchdog begins recovery at 150 seconds, even if V3 status still says a job
 is active; it stops the recorded Codex process group and uses the remaining
 150-second budget for V2 bootstrap and authenticated polling. Subprocess waits
 are capped by the absolute deadline, and unsuccessful recovery records a safe
-failure code. A Codex child inherits the global worker lock, so a restarted
-worker cannot overlap an orphaned CLI. Failed restore is a hard incident; never remove production jobs or use
+failure code. The worker atomically records launch intent before process
+creation. If it dies before recording the PID, recovery finds the exact Codex
+process holding the inherited global-lock descriptor, verifies its executable,
+and stops its process group. A restarted worker cannot overlap that CLI.
+Failed restore is a hard incident; never remove production jobs or use
 a previously exposed credential as rollback. Candidate files and approval state
 are retained for diagnosis with mode-0600 permissions.
 

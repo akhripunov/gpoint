@@ -54,6 +54,9 @@ class MacWorkerTests(unittest.TestCase):
         observed = {}
 
         def execute(args, **kwargs):
+            starting_record = json.loads(worker.INFERENCE_PROCESS.read_text(encoding="utf-8"))
+            self.assertEqual(starting_record["state"], "starting")
+            self.assertIsNone(starting_record["pid"])
             observed["args"] = args
             observed["cwd"] = args[args.index("--cd") + 1]
             observed["env"] = kwargs["env"]

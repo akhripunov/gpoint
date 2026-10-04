@@ -301,9 +301,41 @@ def _terminate_recorded_inference(deadline: float | None = None) -> None:
     except (OSError, ValueError) as exc:
         raise RuntimeError("inference_process_record_invalid") from exc
     pid, pgid = record.get("pid"), record.get("pgid")
-    if (isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1
-            or isinstance(pgid, bool) or not isinstance(pgid, int) or pgid != pid
-            or Path(str(record.get("command", ""))).name != "codex"):
+    command = record.get("command", "")
+    if Path(str(command)).name != "codex":
+        raise RuntimeError("inference_process_record_invalid")
+    if record.get("state") == "starting" and pid is None and pgid is None:
+        # The worker writes this atomic intent record before Popen. If it was
+        # killed in the Popen/return window, locate only the process holding the
+        # inherited global-lock descriptor, then still verify its executable.
+        try:
+            holders = subprocess.run(["lsof", "-t", str(SUPPORT / "worker.lock")],
+                                     capture_output=True, text=True, timeout=3, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError("inference_process_identity_unavailable") from exc
+        candidates = []
+        for value in holders.stdout.splitlines():
+            if not value.isdigit() or int(value) <= 1:
+                continue
+            try:
+                observed = subprocess.run(["ps", "-p", value, "-o", "command="],
+                                          capture_output=True, text=True, timeout=2,
+                                          check=False).stdout.strip()
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise RuntimeError("inference_process_identity_unavailable") from exc
+            if observed and observed.split(None, 1)[0] == command:
+                candidates.append(value)
+        if len(candidates) != 1:
+            if not candidates:
+                record_path.unlink(missing_ok=True)
+                return
+            raise RuntimeError("inference_process_identity_ambiguous")
+        pid = pgid = int(candidates[0])
+    elif (isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1
+          or isinstance(pgid, bool) or not isinstance(pgid, int) or pgid != pid
+          or record.get("state") != "running"):
+        raise RuntimeError("inference_process_record_invalid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1 or pgid != pid:
         raise RuntimeError("inference_process_record_invalid")
     try:
         observed = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
@@ -313,7 +345,7 @@ def _terminate_recorded_inference(deadline: float | None = None) -> None:
     if not observed:
         record_path.unlink(missing_ok=True)
         return
-    if observed.split(None, 1)[0] != record["command"]:
+    if observed.split(None, 1)[0] != command:
         raise RuntimeError("inference_process_identity_mismatch")
     try:
         os.killpg(pgid, 15)
