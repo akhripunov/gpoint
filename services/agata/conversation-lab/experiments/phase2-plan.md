@@ -92,7 +92,11 @@ Consumes: confirmed dated official model pricing and Task5 methodology.
 
 Files: README.md; existing Linear document; local verification report.
 - [x] Run full lab suite, all 128-scenario checks, real-corpus integrity/leakage audit and blind smoke; capture exact outputs.
-- [ ] Dispatch fresh whole-branch review against original TZ/spec/plan, fix important findings through RED/GREEN, record limitations.
+- [x] Dispatch fresh whole-branch review against original TZ/spec/plan, fix important findings through RED/GREEN, record limitations.
 - [ ] Verify git tracked diff is lab-only, safe synthetic content, no secrets/source text. Commit and push feature branch, no merge/production dispatch.
 - [ ] Update all completed-stage summaries/roadmap in existing Linear and independently read back.
 - [ ] Run clean:end PASS for isolated worktree; report exact SHA, files, reproduction commands and limitations.
+
+## Final review disposition
+
+Fresh read-only wholebranch review (base f3f6069, implementation 2356ac4): no Critical; two Important findings reproduced RED and fixed GREEN: public RNG seed disclosure, unchecked temporal metadata/cyclic supersession. Seed is private with random default; V1 temporal metadata types/chronology/availability contract is explicit. Minor reviewer context/time/notes omission also corrected. All128 scenario scripts reviewed independently for semantic independence; all180 report identities/dimensions and pilot arithmetic verified. Review does not independently repeat all180 editorial ratings or primary-source numerical research; real inference/semantic corpus disjointness remain outside this offline implementation.

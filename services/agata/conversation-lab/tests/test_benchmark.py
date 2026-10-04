@@ -101,3 +101,21 @@ class BenchmarkTests(unittest.TestCase):
     def test_actual_benchmark_has_no_lexical_near_duplicates(self):
         rows=self.b.load_scenarios(LAB/"data/golden/synthetic/agata-benchmark-v1.jsonl")
         self.assertEqual(self.b.scenario_similarity_alerts(rows),[])
+
+    def test_malformed_temporal_metadata_rejected(self):
+        self.rows[0]["memory_fixture"]=[{"fact_id":"a","text":"prior fact","valid_from":{"not":"date"}}]
+        with self.assertRaises(ValueError):self.b.validate_scenarios(self.rows)
+
+    def test_reversed_user_timestamps_rejected(self):
+        self.rows[0]["dialogue_turns"][0]["at"]="2026-10-04T18:00:00+03:00"
+        self.rows[0]["dialogue_turns"][2]["at"]="2026-10-03T18:00:00+03:00"
+        with self.assertRaises(ValueError):self.b.validate_scenarios(self.rows)
+
+    def test_supersession_cycle_rejected(self):
+        self.rows[0]["memory_fixture"]=[{"fact_id":"a","text":"old","supersedes":"b"},{"fact_id":"b","text":"new","supersedes":"a"}]
+        with self.assertRaises(ValueError):self.b.validate_scenarios(self.rows)
+
+    def test_v1_initial_memory_is_available_before_session(self):
+        self.rows[0]["context"]["as_of"]="2026-10-04"
+        self.rows[0]["memory_fixture"]=[{"fact_id":"a","text":"unknown future fact","valid_from":"2035-01-01"}]
+        with self.assertRaises(ValueError):self.b.validate_scenarios(self.rows)

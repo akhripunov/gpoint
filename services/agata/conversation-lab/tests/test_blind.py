@@ -37,3 +37,8 @@ class BlindTests(unittest.TestCase):
             packet,key=self.b.make_blind_packets(self.scenarios,self.results,seed)
             orders.append(tuple(m["model_id"] for m in key["mappings"]))
         self.assertGreater(len(set(orders)),1);self.assertTrue(all(set(x)=={r["model_id"] for r in self.results} for x in orders))
+
+    def test_seed_cannot_reconstruct_private_mapping_from_public_packet(self):
+        packet,key=self.b.make_blind_packets(self.scenarios,self.results,982743)
+        self.assertNotIn("seed",packet)
+        self.assertEqual(key["seed"],982743)

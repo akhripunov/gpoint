@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
+import secrets
 from corpus import CANONICAL_DATA, SOURCE_IDS, read_pointer_dialogues, redact, verify_sources, write_report
 from benchmark import load_scenarios, validate_scenarios, validate_manifest, scenario_similarity_alerts
 from leakage import check_leakage
@@ -23,7 +24,7 @@ def main(argv=None):
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--count", type=int, default=5)
     parser.add_argument("--results", type=Path)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, help="private reproduction seed; default cryptographically random")
     parser.add_argument("--run-id")
     args = parser.parse_args(argv)
     try:
@@ -55,7 +56,7 @@ def main(argv=None):
                 if not args.results or not args.run_id:
                     raise ValueError("blind requires local imported results and an exclusive run-id")
                 results = json.loads(args.results.read_text(encoding="utf-8"))
-                packet, private = make_blind_packets(scenarios, results, args.seed)
+                packet, private = make_blind_packets(scenarios, results, args.seed if args.seed is not None else secrets.randbits(128))
                 key_path = write_report(args.data_root, args.run_id, "unblinding-private.json", private)
                 public_path = write_report(args.data_root, args.run_id, "reviewer-packet.json", packet)
                 result = {"status": "OFFLINE_PACKETS_CREATED", "reviewer_packet": str(public_path),

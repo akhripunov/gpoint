@@ -52,10 +52,11 @@ def make_blind_packets(scenarios, results, seed):
                              "scenario_hash": fingerprint(s), "result_hash": fingerprint(r),
                              "usage": r.get("usage"), "latency": r.get("latency"), "cost": r.get("cost")})
             incomplete |= r["status"] != "success"
-        packets.append({"scenario_id": s["scenario_id"], "character_context": s["character_context"],
+        packets.append({"scenario_id": s["scenario_id"], "context": s.get("context", {}),
+                        "evaluation_notes": s.get("evaluation_notes", ""), "character_context": s["character_context"],
                         "memory_fixture": s["memory_fixture"], "expected_behavior": s["expected_behavior"],
                         "failure_patterns": s["failure_patterns"], "candidates": candidates})
-    return ({"schema_version": 1, "seed": seed, "completion_status": "INCOMPLETE" if incomplete else "COMPLETE_IMPORTED_RESULTS",
+    return ({"schema_version": 1, "completion_status": "INCOMPLETE" if incomplete else "COMPLETE_IMPORTED_RESULTS",
              "scenarios": packets, "quality_status": "OWNER_REVIEW_PENDING",
              "blinding_limit": "Metadata and exact model IDs removed; self-identification in prose needs manual review before OWNER packet release."},
             {"schema_version": 1, "seed": seed, "mappings": mappings, "private": True})

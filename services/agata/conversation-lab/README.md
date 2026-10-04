@@ -51,7 +51,7 @@ python3 services/agata/conversation-lab/evaluators/cli.py verify
 python3 services/agata/conversation-lab/evaluators/cli.py review --source daily-dialog --start 0 --count 5
 python3 services/agata/conversation-lab/evaluators/cli.py benchmark
 python3 services/agata/conversation-lab/evaluators/cli.py leakage --run-id phase2-my-unique-audit
-python3 services/agata/conversation-lab/evaluators/cli.py blind --results /absolute/local/results.json --seed 20261004 --run-id phase2-my-unique-blind
+python3 services/agata/conversation-lab/evaluators/cli.py blind --results /absolute/local/results.json --run-id phase2-my-unique-blind
 python3 -m unittest discover -s services/agata/conversation-lab/tests
 ```
 

@@ -1,5 +1,6 @@
 """Structural contracts, not conversational-quality scores."""
 import collections
+from datetime import date, datetime
 import hashlib
 import json
 from pathlib import Path
@@ -21,6 +22,53 @@ def stable_hash(value):
 def load_scenarios(path):
     with Path(path).open(encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
+
+
+def parse_time(value):
+    if not isinstance(value, str):
+        raise ValueError("temporal metadata must be an ISO date/time string")
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            return date.fromisoformat(value)
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("timestamp requires explicit timezone")
+        return parsed
+    except ValueError as exc:
+        raise ValueError("invalid ISO date/time") from exc
+
+
+def later(left, right):
+    if type(left) is date or type(right) is date:
+        return (left.date() if isinstance(left, datetime) else left) > (right.date() if isinstance(right, datetime) else right)
+    return left > right
+
+
+def validate_temporal(scenario):
+    context = scenario["context"]
+    parsed_context = {k: parse_time(v) for k, v in context.items() if k in {"as_of", "current_session_at", "prior_session_at"}}
+    turns = [parse_time(t["at"]) for t in scenario["dialogue_turns"] if "at" in t]
+    if any(later(a, b) for a, b in zip(turns, turns[1:])):
+        raise ValueError("reversed turn chronology")
+    start = parsed_context.get("current_session_at", turns[0] if turns else parsed_context.get("as_of"))
+    if "prior_session_at" in parsed_context and start is not None and later(parsed_context["prior_session_at"], start):
+        raise ValueError("prior session after current session")
+    facts = {f["fact_id"]: f for f in scenario["memory_fixture"]}
+    dates = {fid: parse_time(f["valid_from"]) for fid, f in facts.items() if "valid_from" in f}
+    for fid, fact in facts.items():
+        # V1 fixtures contain facts already known at session start. A known
+        # future plan is described in text, with its prior statement date here.
+        if fid in dates and start is not None and later(dates[fid], start):
+            raise ValueError("initial memory is not yet available at session start")
+        visited = set(); current = fid
+        while current is not None:
+            if current in visited:
+                raise ValueError("cyclic memory supersession")
+            visited.add(current)
+            previous = facts[current].get("supersedes")
+            if previous in dates and current in dates and later(dates[previous], dates[current]):
+                raise ValueError("memory update predates superseded fact")
+            current = previous
 
 
 def validate_scenarios(scenarios):
@@ -65,6 +113,7 @@ def validate_scenarios(scenarios):
                 utterances.append(normalize(t["text"]))
             elif t.get("response_slot") is not True or "text" in t:
                 raise ValueError("assistant must be an unfilled response slot")
+        validate_temporal(s)
         sig = stable_hash(utterances)
         if sig in signatures:
             raise ValueError("duplicate normalized dialogue")
