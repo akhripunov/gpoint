@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "pilot_id": "agata-pilot-v1-2026-10-04",
+  "benchmark_version": "agata-benchmark-v1",
+  "scenario_ids": [
+    "ru_naturalness-01",
+    "daily-01",
+    "humor-01",
+    "support-01",
+    "romance-01",
+    "persona-01",
+    "initiative-01",
+    "topic_change-01",
+    "return_after_break-01",
+    "long_memory-01",
+    "fact_update-01",
+    "false_memory-01",
+    "disagreement-01",
+    "no_excess_advice-01",
+    "long_dialogue-01",
+    "boundaries-01"
+  ],
+  "scenario_hashes": {
+    "ru_naturalness-01": "44c7d75a46511ce86c4cd8dfe90cd653474e56538a7b849f4feb111787703090",
+    "daily-01": "1736b3e9614a533fad7c2f28f33b067b5643141052065a963abe4b8d11985bf1",
+    "humor-01": "2db45e57d23a842ce8f3a51a2be808a63f3abbde9aaa6ff434977cd262460123",
+    "support-01": "1315e7f609c1e66f0dd18241709cd149d44d1f529662569cd9e4f54174745bf4",
+    "romance-01": "da3b88a7e591551fb0c8bd314649a21ec78cdb39366abd45b3c8ec757ee22085",
+    "persona-01": "459262b4166465cd893b4d50e4686622f3487e05a910e875cd4b59cea63e9c08",
+    "initiative-01": "0b51feb0490a22b510965d2ac62e526de1365acbba534be9a04bd6ad0b4d8372",
+    "topic_change-01": "a71fdde4815a800f9ce00aed54a4f7436d383f6c0f0af343dead3eb8c7216c1f",
+    "return_after_break-01": "f02718a778fca429f3497a2b325561efd4e1996cf127a6d65068b64caa9e814b",
+    "long_memory-01": "d5675b7402f5cc31a63467814a664e8a55a4ddeb661c3c9f2cbdc74f19a4df1a",
+    "fact_update-01": "628bad60a3fedd25e53f194ee0ea275787955474e6a814162ec03b1a0ab1ba69",
+    "false_memory-01": "b1323eef46fd4fadc7070e4ba90c850fdc20753362c6575bce546eff3b097040",
+    "disagreement-01": "d4e536701ddba5069a5885ccc22eb6a6d91937bcf98b8406785774da7dc5a38a",
+    "no_excess_advice-01": "2474e930b534062846c64e49200ac6a6e3e8ed100f3623f31aeb6f35fd7cb636",
+    "long_dialogue-01": "720d48a731f8d6541105976d39831662fbe0b65a2e8abbcbeeb03ec08bd1d61b",
+    "boundaries-01": "c12dd2282e2740280099d754d51259408235f089f61dd74f68743d354098fc5f"
+  },
+  "input_hashes": {
+    "benchmark_manifest": "0fa6ea32389a85f235d45fcc5965e1cc97b437e5932913a580618ba698f878a8",
+    "benchmark_all_scenarios": "1cac5a152bcadc3bca8b4debb67e49ce86be11b1f1643ddefb3f3bfac206b37c",
+    "persona": "158ea02fc028faedf45ff3a0d0848f301ac313656b070600755ecc8b7a4e94d3",
+    "rubric": "22b34079ae2261fed9d21ed9b218825e19c7afda1b85805e778966ebe9afbfd2",
+    "pilot_metrics": "b5c93560174aa7291c65f31ce10ade738e5ba8831c00fcf535291e296d3f8240"
+  },
+  "scenario_input_hashes": {
+    "ru_naturalness-01": {
+      "scenario": "44c7d75a46511ce86c4cd8dfe90cd653474e56538a7b849f4feb111787703090",
+      "memory": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "context": "9dbf9128cb7494eca000aa945970d9bce94574ae3a00b91d052130ffa375d98d",
+      "persona": "158ea02fc028faedf45ff3a0d0848f301ac313656b070600755ecc8b7a4e94d3"
+    },
+    "daily-01": {
+      "scenario": "1736b3e9614a533fad7c2f28f33b067b5643141052065a963abe4b8d11985bf1",
+      "memory": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "context": "9dbf9128cb7494eca000aa945970d9bce94574ae3a00b91d052130ffa375d98d",
+      "persona": "158ea02fc028faedf45ff3a0d0848f301ac313656b070600755ecc8b7a4e94d3"
+    },
+    "humor-01": {
+      "scenario": "2db45e57d23a842ce8f3a51a2be808a63f3abbde9aaa6ff434977cd262460123",
+      "memory": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "context": "9dbf9128cb7494eca000aa945970d9bce94574ae3a00b91d052130ffa375d98d",
+      "persona": "158ea02fc028faedf45ff3a0d0848f301ac313656b070600755ecc8b7a4e94d3"
+    },
+    "support-01": {
+      "scenario": "1315e7f609c1e66f0dd18241709cd149d44d1f529662569cd9e4f54174745bf4",
+      "memory": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "context": "9dbf9128cb7494eca000aa945970d9bce94574ae3a00b91d052130ffa375d98d",
+      "persona": "158ea02fc028faedf45ff3a0d0848f301ac313656b070600755ecc8b7a4e94d3"
+    },
+    "romance-01": {
+      "scenario": "da3b88a7e591551fb0c8bd314649a21ec78cdb39366abd45b3c8ec757ee22085",
+      "memory": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "context": "9dbf9128cb7494eca000aa945970d9bce94574ae3a00b91d052130ffa375d98d",
+      "persona": "158ea02fc028faedf45ff3a0d0848f301ac313656b070600755ecc8b7a4e94d3"
+    },
+    "persona-01": {
+      "scenario": "459262b4166465cd893b4d50e4686622f3487e05a910e875cd4b59cea63e9c08",
+      "memory": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "context": "9dbf9128cb7494eca000aa945970d9bce94574ae3a00b91d052130ffa375d98d",
+      "persona": "158ea02fc028faedf45ff3a0d0848f301ac313656b070600755ecc8b7a4e94d3"
+    },
+    "initiative-01": {
+      "scenario": "0b51feb0490a22b510965d2ac62e526de1365acbba534be9a04bd6ad0b4d8372",
+      "memory": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "context": "81c1528f0fdafecbbd83e1de102b3baa8adb63e0ead2b0961422d4fa9944d822",
+      "persona": "158ea02fc028faedf45ff3a0d0848f301ac313656b070600755ecc8b7a4e94d3"
+    },
+    "topic_change-01": {
+      "scenario": "a71fdde4815a800f9ce00aed54a4f7436d383f6c0f0af343dead3eb8c7216c1f",
+      "memory": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "context": "81c1528f0fdafecbbd83e1de102b3baa8adb63e0ead2b0961422d4fa9944d822",
+      "persona": "158ea02fc028faedf45ff3a0d0848f301ac313656b070600755ecc8b7a4e94d3"
+    },
+    "return_after_break-01": {
+      "scenario": "f02718a778fca429f3497a2b325561efd4e1996cf127a6d65068b64caa9e814b",
+      "memory": "6ab246cb42da09baa38c4a3f498d379a135770e4673aa0377a1c37568aad79c7",
+      "context": "48982e734fd860660ede033b271f0431105fe477dc145b8a299938e18f4a169f",
+      "persona": "158ea02fc028faedf45ff3a0d0848f301ac313656b070600755ecc8b7a4e94d3"
+    },
+    "long_memory-01": {
+      "scenario": "d5675b7402f5cc31a63467814a664e8a55a4ddeb661c3c9f2cbdc74f19a4df1a",
+      "memory": "6095ab070a5d991e9596675f6014cb44ef2a70a7b5f7d568aaf31a5d2e7c98bc",
+      "context": "81c1528f0fdafecbbd83e1de102b3baa8adb63e0ead2b0961422d4fa9944d822",
+      "persona": "158ea02fc028faedf45ff3a0d0848f301ac313656b070600755ecc8b7a4e94d3"
+    },
+    "fact_update-01": {
+      "scenario": "628bad60a3fedd25e53f194ee0ea275787955474e6a814162ec03b1a0ab1ba69",
+      "memory": "7a7f610f543a1c4c4de4dc3aa6e4a013c9ce32d95f4765b6887d27649ddbba6d",
+      "context": "81c1528f0fdafecbbd83e1de102b3baa8adb63e0ead2b0961422d4fa9944d822",
+      "persona": "158ea02fc028faedf45ff3a0d0848f301ac313656b070600755ecc8b7a4e94d3"
+    },
+    "false_memory-01": {
+      "scenario": "b1323eef46fd4fadc7070e4ba90c850fdc20753362c6575bce546eff3b097040",
+      "memory": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "context": "72b2d354b1e358625793cda6b58c84b01551c9ad55ed6b17509b7a526fe17bb4",
+      "persona": "158ea02fc028faedf45ff3a0d0848f301ac313656b070600755ecc8b7a4e94d3"
+    },
+    "disagreement-01": {
+      "scenario": "d4e536701ddba5069a5885ccc22eb6a6d91937bcf98b8406785774da7dc5a38a",
+      "memory": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "context": "72b2d354b1e358625793cda6b58c84b01551c9ad55ed6b17509b7a526fe17bb4",
+      "persona": "158ea02fc028faedf45ff3a0d0848f301ac313656b070600755ecc8b7a4e94d3"
+    },
+    "no_excess_advice-01": {
+      "scenario": "2474e930b534062846c64e49200ac6a6e3e8ed100f3623f31aeb6f35fd7cb636",
+      "memory": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "context": "72b2d354b1e358625793cda6b58c84b01551c9ad55ed6b17509b7a526fe17bb4",
+      "persona": "158ea02fc028faedf45ff3a0d0848f301ac313656b070600755ecc8b7a4e94d3"
+    },
+    "long_dialogue-01": {
+      "scenario": "720d48a731f8d6541105976d39831662fbe0b65a2e8abbcbeeb03ec08bd1d61b",
+      "memory": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "context": "72b2d354b1e358625793cda6b58c84b01551c9ad55ed6b17509b7a526fe17bb4",
+      "persona": "158ea02fc028faedf45ff3a0d0848f301ac313656b070600755ecc8b7a4e94d3"
+    },
+    "boundaries-01": {
+      "scenario": "c12dd2282e2740280099d754d51259408235f089f61dd74f68743d354098fc5f",
+      "memory": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "context": "72b2d354b1e358625793cda6b58c84b01551c9ad55ed6b17509b7a526fe17bb4",
+      "persona": "158ea02fc028faedf45ff3a0d0848f301ac313656b070600755ecc8b7a4e94d3"
+    }
+  },
+  "planned_replies_per_model": 72,
+  "model_ids": [
+    "codex-cli-baseline",
+    "gpt-6.1-sol",
+    "claude-sonnet-5-5",
+    "gemini-3.8-flash"
+  ],
+  "expected_configs": 4,
+  "candidate_call_cap": 219,
+  "live_inference_enabled": false
+}

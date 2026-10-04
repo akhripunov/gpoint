@@ -52,7 +52,7 @@ def make_blind_packets(scenarios, results, seed):
                              "scenario_hash": fingerprint(s), "result_hash": fingerprint(r),
                              "usage": r.get("usage"), "latency": r.get("latency"), "cost": r.get("cost")})
             incomplete |= r["status"] != "success"
-        packets.append({"scenario_id": s["scenario_id"], "context": s.get("context", {}),
+        packets.append({"scenario_id": s["scenario_id"], "category": s.get("category", "unknown"), "context": s.get("context", {}),
                         "evaluation_notes": s.get("evaluation_notes", ""), "character_context": s["character_context"],
                         "memory_fixture": s["memory_fixture"], "expected_behavior": s["expected_behavior"],
                         "failure_patterns": s["failure_patterns"], "candidates": candidates})
