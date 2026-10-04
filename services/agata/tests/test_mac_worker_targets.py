@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "worker"))
 import gpoint_mac_worker as worker
 
 ENV = {
-    "GPOINT_AGATA_WORKER_URL": "https://point.example/worker",
+    "GPOINT_AGATA_WORKER_URL": "https://gpoint.amiora.one/api/agata-worker",
     "GPOINT_AGATA_WORKER_TOKEN": "point-private",
     "GPOINT_AGATA_TENANT_ID": "81a4ba28-6de5-4b03-8332-0661ba4d46f4",
     "GSALES_AGATA_WORKER_URL": "https://sales.example/worker",
@@ -63,6 +63,20 @@ def test_gpoint_foreign_claim_identity_is_rejected_before_inference(tmp_path, mo
             worker.process_one("GPOINT")
         inference.assert_not_called()
     assert calls == ["health", "claim"]
+
+
+def test_identityless_gpoint_claim_requires_the_verified_legacy_gateway(tmp_path, monkeypatch):
+    monkeypatch.setattr(worker, "SUPPORT", tmp_path)
+    monkeypatch.setattr(worker, "STATUS", tmp_path / "status.json")
+    with patch.dict(os.environ, {**ENV, "GPOINT_AGATA_WORKER_URL": "https://other.example/worker"}), patch.object(
+        worker, "api_request", side_effect=lambda path, body=None, **kwargs: (
+            {"job": {"id": "legacy", "leaseToken": "lease", "request": {}}}
+            if path == "claim" else {"status": "ready"}
+        )
+    ), patch.object(worker, "run_inference") as inference:
+        with pytest.raises(worker.GatewayResponseError, match="worker_claim_target_mismatch"):
+            worker.process_one("GPOINT")
+        inference.assert_not_called()
 
 
 def test_target_configuration_rejects_reused_credentials():

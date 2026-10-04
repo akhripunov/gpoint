@@ -126,19 +126,23 @@ ahead of 8c30. There is no live release identity drift to reconcile.
 The queue-snapshot probe verifies the production tenant against the audited
 identity and scopes its read-only transaction to that tenant without substituting
 or overriding the runtime GUC. It requires an active tenant row plus an active
-GPOINT regional profile. The
-verified live snapshot on 2026-10-04 07:49:08Z had zero pending/running inference
-jobs and effective TTL 420 seconds; API/Core artifacts were healthy at the same
-SHA. The updated controller completed `--preflight-only` with **PASS**. This is
-GO for the Queue Preflight gate only, not authorization to stop the worker or run
-Real Codex QA. No bootout, deploy, migration, tenant mutation, or Real Codex
-inference occurred.
+GPOINT regional profile. The 2026-10-04 07:49:08Z snapshot is historical and predates the current
+exact-candidate controller. It must not be used to authorize a worker switch or
+Real Codex QA. The current controller requires `--candidate` to equal the clean
+checkout's full HEAD SHA and obtains a fresh server-side snapshot. Current
+preflight evidence and timestamp are recorded separately in the active G Sales
+integration handoff; preflight must be repeated immediately before any approved
+worker operation. A preflight pass is not itself authorization to stop the
+worker or run Real Codex QA.
 
 The controller pins full production SHA/image/tenant identities, and requires a
 clean checkout plus exact candidate SHA. The shared-worker suite tests per-runtime
-UUID bindings, malformed or duplicate pins, GPOINT legacy claims, mismatched
-claims, separate target credentials, independent scheduling/backoff and serial
-execution.
+UUID bindings, malformed or duplicate pins, mismatched claims, separate target
+credentials, independent scheduling/backoff and serial execution. V2 GPOINT
+legacy claims without tenant metadata are accepted only through the exact
+audited production gateway URL; identity-less claims from any other endpoint
+fail before inference. GSALES claims always require server-authored target and
+tenant identity.
 
 The P0 worker-token exposure is recorded without its value or any derived
 fingerprint in `docs/security/gpoint-agata-worker-token-incident-2026-10-04.md`.

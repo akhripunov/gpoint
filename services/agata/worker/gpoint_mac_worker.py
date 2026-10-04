@@ -73,12 +73,13 @@ def load_env_file(path: Path | None = None) -> None:
 
 _target_heartbeats: dict[str, float] = {}
 TARGET_NAMES = ("GPOINT", "GSALES")
+LEGACY_GPOINT_GATEWAY_URL = "https://gpoint.amiora.one/api/agata-worker"
 
 
 def configured_targets() -> dict[str, tuple[str, str]]:
     targets = {}
     for name in TARGET_NAMES:
-        base = os.environ.get(name + "_AGATA_WORKER_URL", "https://gpoint.amiora.one/api/agata-worker" if name == "GPOINT" else "").rstrip("/")
+        base = os.environ.get(name + "_AGATA_WORKER_URL", LEGACY_GPOINT_GATEWAY_URL if name == "GPOINT" else "").rstrip("/")
         token = os.environ.get(name + "_AGATA_WORKER_TOKEN", "")
         if name == "GSALES" and not base and not token:
             continue
@@ -317,7 +318,13 @@ def process_one(target: str = "GPOINT") -> bool:
     # never accepts a claim without server-authored identity. The trusted
     # binding is local config; payload fields can only confirm, never select it.
     identity_present = "target" in claim or "tenant_id" in claim
+    legacy_gpoint_contract = (
+        target == "GPOINT" and not identity_present
+        and targets[target][0] == LEGACY_GPOINT_GATEWAY_URL
+    )
     if (target == "GSALES" and not identity_present) or (
+        not identity_present and not legacy_gpoint_contract
+    ) or (
         identity_present and (
             claim.get("target") != target or claim.get("tenant_id") != bindings[target]
         )

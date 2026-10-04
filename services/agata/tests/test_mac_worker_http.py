@@ -44,7 +44,7 @@ class MacWorkerHttpTests(unittest.TestCase):
             return httpx.Response(200, json={"status": "ready"})
 
         with patch.dict(os.environ, {
-            "GPOINT_AGATA_WORKER_URL": "https://gpoint.example/api/agata-worker",
+            "GPOINT_AGATA_WORKER_URL": "https://gpoint.amiora.one/api/agata-worker",
             "GPOINT_AGATA_WORKER_TOKEN": "test-secret",
         }), patch.object(worker.httpx, "AsyncClient", side_effect=lambda **_kwargs: self.client_for(handler)):
             self.assertEqual(worker.api_request("health"), {"status": "ready"})
@@ -145,7 +145,7 @@ class MacWorkerHttpTests(unittest.TestCase):
             raise httpx.ConnectTimeout("test-secret")
 
         with patch.dict(os.environ, {
-            "GPOINT_AGATA_WORKER_URL": "https://gpoint.example/api/agata-worker",
+            "GPOINT_AGATA_WORKER_URL": "https://gpoint.amiora.one/api/agata-worker",
             "GPOINT_AGATA_WORKER_TOKEN": "test-secret",
         }), patch.object(worker.httpx, "AsyncClient", side_effect=lambda **_kwargs: self.client_for(handler)):
             with self.assertRaises(worker.TransientNetworkError) as raised:

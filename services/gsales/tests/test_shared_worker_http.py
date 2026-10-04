@@ -31,7 +31,7 @@ def test_two_targets_route_through_shared_worker_without_context_mix(tmp_path, m
     point_tenant_id = str(uuid4())
     sales_tenant_id = Settings().tenant_id
     with core_runtime(tmp_path / "sales") as sales_url, core_runtime(tmp_path / "point", "gpoint", point_tenant_id) as point_url:
-        monkeypatch.setenv("GPOINT_AGATA_WORKER_URL", "https://point.test/agata-worker")
+        monkeypatch.setenv("GPOINT_AGATA_WORKER_URL", "https://gpoint.amiora.one/api/agata-worker")
         monkeypatch.setenv("GSALES_AGATA_WORKER_URL", "https://sales.test/agata-worker")
         monkeypatch.setenv("GPOINT_AGATA_WORKER_TOKEN", "point-worker-test")
         monkeypatch.setenv("GSALES_AGATA_WORKER_TOKEN", "sales-worker-test")
