@@ -141,13 +141,13 @@
 - Consumes all previous task commits and the approved specification.
 - Produces a clean branch, verified test evidence, Linear readback, stacked Draft PR and exact HEAD/parent SHA report.
 
-- [ ] **Step 1: Run the full lab suite** with `python3 -m unittest discover -s services/agata/conversation-lab/tests`; expect all existing 77 Phase 3 checks and all new checks to pass. Run `git diff --check` and compare Benchmark V1 / Phase 3 pilot hashes to the frozen values.
-- [ ] **Step 2: Run the offline Naturalness dry-run** and inspect its manifest and blind fixture packet; require 0 live requests, explicit fixture-only status, candidate parity and holdout isolation.
-- [ ] **Step 3: Perform independent whole-branch review** against the approved spec; fix every important finding with a failing regression first, then re-run targeted and full suites.
-- [ ] **Step 4: Update the existing Linear document** with research pattern traceability, exact source/hash results, implementation, verification, remaining inference/quota blocker and roadmap. Read the document back and confirm no new document was created.
-- [ ] **Step 5: Verify PR #13 is still the intended unmerged base, create a stacked Draft PR** without merge, verify exact base/head SHA and review state, then attach the PR to this task.
-- [ ] **Step 6: Run `pnpm repo:clean:end` and verify the main G Sales checkout remains unchanged.** `pnpm repo:clean:start` previously triggered an automatic workspace dependency install and failed with `EPERM` in the managed worktree; diagnose the environment and obtain a passing start/end gate without altering lockfiles or dependency policy.
-- [ ] **Step 7: Report** exact branch/PR/SHA, tests, independent review, Linear readback, fixture-only evidence, and a separate request for OWNER approval before any controlled Codex Local A/B inference.
+- [x] **Step 1: Run the full lab suite** with `python3 -m unittest discover -s services/agata/conversation-lab/tests`; expect all existing 77 Phase 3 checks and all new checks to pass. Run `git diff --check` and compare Benchmark V1 / Phase 3 pilot hashes to the frozen values.
+- [x] **Step 2: Run the offline Naturalness dry-run** and inspect its manifest and blind fixture packet; require 0 live requests, explicit fixture-only status, candidate parity and holdout isolation.
+- [x] **Step 3: Perform independent whole-branch review** against the approved spec; fix every important finding with a failing regression first, then re-run targeted and full suites.
+- [x] **Step 4: Update the existing Linear document** with research pattern traceability, exact source/hash results, implementation, verification, remaining inference/quota blocker and roadmap. Read the document back and confirm no new document was created.
+- [x] **Step 5: Verify PR #13 is still the intended unmerged base, create a stacked Draft PR** without merge, verify exact base/head SHA and review state, then attach the PR to this task.
+- [x] **Step 6: Run `pnpm repo:clean:end` and verify the main G Sales checkout remains unchanged.** `pnpm repo:clean:start` previously triggered an automatic workspace dependency install and failed with `EPERM` in the managed worktree; diagnose the environment and obtain a passing start/end gate without altering lockfiles or dependency policy.
+- [x] **Step 7: Report** exact branch/PR/SHA, tests, independent review, Linear readback, fixture-only evidence, and a separate request for OWNER approval before any controlled Codex Local A/B inference.
 
 ## Future controlled inference gate (not part of plan execution)
 
