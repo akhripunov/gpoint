@@ -21,6 +21,7 @@ JOB_TYPES = frozenset(
         "memory_graph_sync",
         "response_retry",
         "inference",
+        "sales_draft_inference",
     }
 )
 
@@ -41,7 +42,7 @@ class OutboxRepository:
             update(OutboxJob)
             .where(
                 OutboxJob.tenant_id == tenant_id,
-                OutboxJob.job_type == "inference",
+                OutboxJob.job_type.in_(("inference", "sales_draft_inference")),
                 OutboxJob.state.in_((JobState.pending, JobState.running)),
                 OutboxJob.created_at < datetime.now(UTC) - timedelta(seconds=ttl_seconds),
             )

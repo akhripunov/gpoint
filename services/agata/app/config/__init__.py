@@ -3,8 +3,9 @@ import binascii
 import re
 import uuid
 from functools import lru_cache
+from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,10 +32,22 @@ class Settings(BaseSettings):
     inference_job_ttl_seconds: int = Field(default=420, ge=60, le=3600)
     max_pending_inference_jobs: int = Field(default=100, ge=1, le=10000)
     runtime_db_role: str | None = None
+    source_system: Literal["gpoint", "gsales"] = "gpoint"
+    sales_drafts_enabled: bool = False
+    sales_production_mode: bool = False
+    sales_always_on_provider_approved: bool = False
     db_pool_size: int = Field(default=5, ge=1, le=50)
     db_max_overflow: int = Field(default=5, ge=0, le=100)
     worker_poll_seconds: float = Field(default=2.0, ge=0.1, le=60)
     worker_batch_size: int = Field(default=4, ge=1, le=64)
+
+    @model_validator(mode="after")
+    def sales_production_provider(self):
+        if self.source_system=="gsales" and self.sales_production_mode:
+            if (self.llm_provider in {"mac_worker","local_fake","disabled","none"} or self.codex_local_enabled
+                or not self.sales_always_on_provider_approved or not self.llm_api_key):
+                raise ValueError("G Sales production requires an OWNER-approved always-on server inference provider; Mac/test providers are development-only")
+        return self
 
     @field_validator("tenant_id")
     @classmethod

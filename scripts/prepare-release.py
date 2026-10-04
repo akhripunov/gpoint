@@ -231,6 +231,7 @@ def prepare(sha, output, *, postgres_only=False):
                AGATA_INTERNAL_API_TOKEN='disposable-test-token', AGATA_LLM_PROVIDER='disabled')
     # Never inherit an operator's or CI runner's inventory into a disposable rehearsal.
     env.pop('AGATA_MIGRATION_TENANT_IDS', None)
+    env['AGATA_ROLE_TENANT_BINDINGS'] = json.dumps({'ci_owner': env['AGATA_TENANT_ID']})
     for name in ('MESSAGE_AEAD_KEY', 'REQUEST_FINGERPRINT_HMAC_KEY', 'RETRIEVAL_QUERY_HMAC_KEY',
                  'RESPONSE_FINGERPRINT_HMAC_KEY', 'SHADOW_CANDIDATE_HMAC_KEY'):
         env[f'AGATA_{name}'] = key
@@ -315,8 +316,10 @@ def prepare(sha, output, *, postgres_only=False):
             env['AGATA_MIGRATION_TENANT_IDS'] = disposable_migration_tenant_inventory(
                 postgres, 'runtime_agata_test')
             container_env.extend(['-e', 'AGATA_MIGRATION_TENANT_IDS'])
+            migration_container_env = list(container_env)
+            migration_container_env[1] = f'AGATA_DATABASE_URL={docker_dsn.replace("ci_owner:", "postgres:").replace("postgresql:", "postgresql+asyncpg:")}'
             for _ in range(2):  # Actual artifact migrations must also be idempotent.
-                run('docker', 'run', '--rm', '--network', network, *container_env,
+                run('docker', 'run', '--rm', '--network', network, *migration_container_env,
                     f'gpoint-agata-runtime:{sha}', 'alembic', 'upgrade', 'head', env=env)
             run('docker', 'run', '-d', '--name', api, '--network', network, *container_env,
                 f'gpoint-agata-runtime:{sha}', env=env)

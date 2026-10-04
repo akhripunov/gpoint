@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=70,<90"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpoint-g-sales"
+version = "0.1.0"
+requires-python = ">=3.12"
+description = "Independent G Sales CRM and controlled Telegram workflow on shared AGATA"
+dependencies = ["fastapi==0.116.1", "httpx==0.28.1", "pydantic-settings==2.10.1", "pydantic==2.11.7", "psycopg[binary]==3.2.10", "cryptography==45.0.7", "telethon==1.42.0", "uvicorn==0.35.0"]
+
+[project.optional-dependencies]
+test = ["pytest==8.4.2", "pytest-asyncio==1.2.0", "ruff==0.13.3", "mypy==1.18.2"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008", "E501"]
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = true
+files = ["app"]

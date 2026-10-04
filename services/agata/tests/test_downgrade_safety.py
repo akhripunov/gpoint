@@ -38,5 +38,5 @@ def test_cli_downgrade_refuses_without_dropping_schema() -> None:
         assert connection.scalar(
             text("SELECT 1 FROM information_schema.schemata WHERE schema_name='agata'")
         ) == 1
-        assert connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0010"
+        assert connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0011"
     engine.dispose()

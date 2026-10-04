@@ -65,7 +65,7 @@ def test_self_attestation_policy_migration_sets_tenant_context_under_forced_rls(
             assert policy == "false", "agata0007 must reproduce the existing RLS-hidden update"
 
         subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "agata0010"],
             cwd=ROOT,
             env=env,
             check=True,

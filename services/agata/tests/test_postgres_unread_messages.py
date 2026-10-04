@@ -1,5 +1,6 @@
 """Unread persistence, migration and later HTTP/accounting regressions."""
 import os
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -26,8 +27,10 @@ def test_migration_baselines_existing_messages_across_tenants_without_marking_ne
     # Dedicated database owned by this test; never reset the shared suite database.
     admin = create_engine(DSN, isolation_level='AUTOCOMMIT')
     db = 'unread_migration_' + uuid4().hex + '_agata_test'
+    foreign_role = 'unread_runtime_' + uuid4().hex
     with admin.connect() as conn:
         conn.execute(text(f'CREATE DATABASE {db}'))
+        conn.execute(text(f'CREATE ROLE {foreign_role} LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB'))
     from sqlalchemy.engine import make_url
     url = make_url(DSN).set(database=db)
     engine = create_engine(url)
@@ -43,10 +46,12 @@ def test_migration_baselines_existing_messages_across_tenants_without_marking_ne
     try:
         with engine.begin() as conn:
             conn.execute(text('CREATE EXTENSION vector; CREATE EXTENSION pgcrypto;'))
-        def upgrade(rev):
-            subprocess.run([sys.executable, '-m', 'alembic', '-c', 'alembic.ini', 'upgrade', rev], cwd=ROOT, env=env, check=True, capture_output=True, text=True)
+        def upgrade(rev, administrator=False):
+            subprocess.run([sys.executable, '-m', 'alembic', '-c', 'alembic.ini', 'upgrade', rev], cwd=ROOT, env={**env, **({"AGATA_DATABASE_URL": url.render_as_string(hide_password=False)} if administrator else {})}, check=True, capture_output=True, text=True)
         upgrade('agata0009')
         tenants = [env['AGATA_TENANT_ID'], str(uuid4())]
+        bindings = json.loads(env['AGATA_ROLE_TENANT_BINDINGS'])
+        bindings[foreign_role] = tenants[1]
         mids = []
         with engine.begin() as conn:
             # Baseline imports ORM metadata; emulate the already deployed old schema.
@@ -68,7 +73,20 @@ def test_migration_baselines_existing_messages_across_tenants_without_marking_ne
             with engine.begin() as conn:
                 assert conn.scalar(text('SELECT version_num FROM agata.alembic_version')) == 'agata0009'
             env['AGATA_MIGRATION_TENANT_IDS'] = ','.join(tenants)
-        upgrade('head')
+        # Missing a known tenant binding must fail atomically before restrictive RLS.
+        with pytest.raises(subprocess.CalledProcessError) as failure:
+            upgrade('head', administrator=True)
+        assert 'every existing tenant requires' in failure.value.stderr
+        with engine.begin() as conn:
+            assert conn.scalar(text('SELECT version_num FROM agata.alembic_version')) == 'agata0009'
+            assert not conn.scalar(text("SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='agata_identity')"))
+        env['AGATA_ROLE_TENANT_BINDINGS'] = json.dumps(bindings)
+        if restricted_role:
+            with pytest.raises(subprocess.CalledProcessError) as failure:
+                upgrade('head')
+            assert 'trusted bypass migration administrator' in failure.value.stderr
+            upgrade('agata0010')
+        upgrade('head', administrator=True)
         assert 'incoming_read_at' in {c['name'] for c in inspect(engine).get_columns('messages', schema='agata')}
         with engine.begin() as conn:
             assert conn.scalar(text('SELECT count(*) FROM agata.messages WHERE id = ANY(CAST(:ids AS uuid[])) AND incoming_read_at IS NOT NULL'), {'ids':mids}) == 2
@@ -80,6 +98,7 @@ def test_migration_baselines_existing_messages_across_tenants_without_marking_ne
         engine.dispose()
         with admin.connect() as conn:
             conn.execute(text(f'DROP DATABASE {db} WITH (FORCE)'))
+            conn.execute(text(f'DROP ROLE {foreign_role}'))
         admin.dispose()
 
 import asyncio

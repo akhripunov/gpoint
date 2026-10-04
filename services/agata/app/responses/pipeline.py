@@ -896,6 +896,7 @@ class ResponseOrchestrator:
                 scenario_id=conversation.scenario_id,
                 idempotency_key=f"assistant:{request.idempotency_key}",
                 role="assistant",
+                channel_delivery_status="draft" if conversation.source_system=="gsales" else "confirmed",
                 content_ciphertext=encrypted.ciphertext,
                 content_nonce=encrypted.nonce,
                 content_key_version=encrypted.key_version,
@@ -1325,6 +1326,7 @@ class ResponseOrchestrator:
                     Message.user_id == principal.user_id,
                     Message.character_id == conversation.character_id,
                     Message.scope == conversation.scope,
+                    or_(Message.role != "assistant", Message.channel_delivery_status == "confirmed"),
                     Message.deleted_at.is_(None),
                 )
                 .order_by(Message.occurred_at.desc())

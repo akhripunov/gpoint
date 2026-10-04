@@ -25,10 +25,10 @@ class WorkerInferenceUnavailable(Exception):
     """The worker queue is unavailable or at its configured bounded capacity."""
 
 
-def _aad(tenant_id: UUID, job_id: UUID, source_message_id: UUID, field: str) -> bytes:
+def _aad(tenant_id: UUID, job_id: UUID, source_message_id: UUID, field: str, *, sales_draft: bool = False) -> bytes:
     return canonical_tagged_fields(
         (
-            (b"version", b"gpoint/agata/mac-inference/v1"),
+            (b"version", b"agata/sales-draft-inference/v1" if sales_draft else b"gpoint/agata/mac-inference/v1"),
             (b"tenant", tenant_id.bytes),
             (b"job", job_id.bytes),
             (b"source_message", source_message_id.bytes),
@@ -40,7 +40,7 @@ def _aad(tenant_id: UUID, job_id: UUID, source_message_id: UUID, field: str) -> 
 def _encrypt_payload(crypto: AeadCrypto, tenant_id: UUID, job: OutboxJob, field: str, value: str) -> dict[str, str]:
     if not isinstance(job.aggregate_id, UUID):
         raise ValueError("inference_source_message_missing")
-    envelope = crypto.encrypt(value, _aad(tenant_id, job.id, job.aggregate_id, field))
+    envelope = crypto.encrypt(value, _aad(tenant_id, job.id, job.aggregate_id, field, sales_draft=job.job_type == "sales_draft_inference"))
     return {
         f"{field}_ciphertext": envelope.ciphertext.hex(),
         f"{field}_nonce": envelope.nonce.hex(),
@@ -57,7 +57,7 @@ def _decrypt_payload(crypto: AeadCrypto, tenant_id: UUID, job: OutboxJob, field:
         bytes.fromhex(payload[f"{field}_nonce"]),
         payload[f"{field}_key_version"],
     )
-    return crypto.decrypt(envelope, _aad(tenant_id, job.id, job.aggregate_id, field))
+    return crypto.decrypt(envelope, _aad(tenant_id, job.id, job.aggregate_id, field, sales_draft=job.job_type == "sales_draft_inference"))
 
 
 def _worker_request(context: ResponseContext) -> dict[str, object]:

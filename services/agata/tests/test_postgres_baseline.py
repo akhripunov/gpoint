@@ -70,7 +70,7 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
             text("SELECT set_config('app.tenant_id', :tenant, true)"),
             {"tenant": env["AGATA_TENANT_ID"]},
         )
-        assert connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0010"
+        assert connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0011"
         policy_allowed = connection.scalar(
             text(
                 "SELECT rules->>'self_attestation_allowed' FROM agata.regional_policy_profiles "
@@ -413,7 +413,7 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
         assert after == before
         assert "alembic_version" in agata_tables
         assert (
-            connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0010"
+            connection.scalar(text("SELECT version_num FROM agata.alembic_version")) == "agata0011"
         )
         assert {"memory_entities", "memory_relations", "memory_graph_evidence"} <= agata_tables
         assert connection.scalar(text("SELECT count(*) FROM agata.memory_entities")) == 0
@@ -429,9 +429,10 @@ def test_empty_database_baseline_only_adds_agata_schema() -> None:
             == 1
         )
         assert (
-            connection.scalar(text("SELECT count(*) FROM pg_policies WHERE schemaname='agata'"))
+            connection.scalar(text("SELECT count(*) FROM pg_policies WHERE schemaname='agata' AND permissive='PERMISSIVE'"))
             == len(agata_tables) - 1
         )
+        assert connection.scalar(text("SELECT count(*) FROM pg_policies WHERE schemaname='agata' AND policyname='runtime_login_tenant' AND permissive='RESTRICTIVE'")) == len(agata_tables)-1
         assert (
             connection.scalar(
                 text(

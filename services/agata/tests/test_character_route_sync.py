@@ -64,7 +64,7 @@ def route(model, enabled):
 async def test_unchanged_character_sync_reconciles_exact_model_route(monkeypatch, existing_current):
     tenant_id = uuid4()
     monkeypatch.setattr(internal, "get_settings", lambda: SimpleNamespace(
-        tenant_id=str(tenant_id), llm_provider="mac_worker", llm_model="codex-default"
+        tenant_id=str(tenant_id), source_system="gpoint", llm_provider="mac_worker", llm_model="codex-default"
     ))
     old = route("cx/gpt-5.6-terra", True)
     routes = [old]

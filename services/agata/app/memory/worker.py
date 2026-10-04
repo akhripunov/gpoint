@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
@@ -61,7 +61,7 @@ from app.responses.pipeline import (
 from app.responses.provider_factory import build_response_provider
 
 _HEARTBEAT_PATH = Path("/tmp/agata-worker-heartbeat")
-_EXPECTED_ALEMBIC_HEAD = "agata0010"
+_EXPECTED_ALEMBIC_HEAD = "agata0011"
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,11 +260,11 @@ class MemoryWorker:
                     Message.idempotency_key == request_id,
                     Message.role == "user",
                     Message.deleted_at.is_(None),
-                    User.source_system == "gpoint",
+                    User.source_system == get_settings().source_system,
                     User.deleted_at.is_(None),
-                    Character.source_system == "gpoint",
+                    Character.source_system == get_settings().source_system,
                     Character.status == "active",
-                    Conversation.source_system == "gpoint",
+                    Conversation.source_system == get_settings().source_system,
                 )
             )).one_or_none()
             if row is None:
@@ -413,6 +413,7 @@ class MemoryWorker:
                                 Message.conversation_id == conversation_id,
                                 Message.user_id == user_id,
                                 Message.character_id == character_id,
+                                or_(Message.role != "assistant", Message.channel_delivery_status == "confirmed"),
                                 Message.deleted_at.is_(None),
                             )
                             .order_by(Message.occurred_at, Message.id)

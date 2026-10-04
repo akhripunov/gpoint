@@ -10,7 +10,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import and_, func, select, text, tuple_, update
+from sqlalchemy import and_, func, or_, select, text, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.compliance.policy import PolicyService
@@ -108,7 +108,7 @@ async def chat_state(gpoint_user_id: str, session: AsyncSession = Depends(get_se
     async with session.begin():
         await set_tenant_context(session, str(tenant_id))
         user = await session.scalar(select(User).where(
-            User.tenant_id == tenant_id, User.source_system == "gpoint",
+            User.tenant_id == tenant_id, User.source_system == get_settings().source_system,
             User.external_id == gpoint_user_id, User.deleted_at.is_(None),
         ))
         policy_query = select(RegionalPolicyProfile).where(
@@ -205,7 +205,7 @@ async def age_assurance_state(
     async with session.begin():
         await set_tenant_context(session, str(tenant_id))
         user = await session.scalar(select(User).where(
-            User.tenant_id == tenant_id, User.source_system == "gpoint",
+            User.tenant_id == tenant_id, User.source_system == get_settings().source_system,
             User.external_id == gpoint_user_id, User.deleted_at.is_(None),
         ))
         policy = await session.scalar(select(RegionalPolicyProfile).where(
@@ -264,11 +264,11 @@ async def self_attest_age(
         if policy.rules.get("self_attestation_allowed") is not True:
             raise HTTPException(status_code=403, detail={"code": "self_attestation_not_allowed"})
         user = await session.scalar(select(User).where(
-            User.tenant_id == tenant_id, User.source_system == "gpoint",
+            User.tenant_id == tenant_id, User.source_system == get_settings().source_system,
             User.external_id == gpoint_user_id, User.deleted_at.is_(None),
         ).with_for_update())
         if user is None:
-            user = User(tenant_id=tenant_id, source_system="gpoint", external_id=gpoint_user_id)
+            user = User(tenant_id=tenant_id, source_system=get_settings().source_system, external_id=gpoint_user_id)
             session.add(user)
             await session.flush()
         prior = await session.scalar(select(AgeAssurance).where(
@@ -315,7 +315,7 @@ async def list_gpoint_conversations(
     async with session.begin():
         await set_tenant_context(session, str(tenant_id))
         user = await session.scalar(select(User).where(
-            User.tenant_id == tenant_id, User.source_system == "gpoint",
+            User.tenant_id == tenant_id, User.source_system == get_settings().source_system,
             User.external_id == external_user_id, User.deleted_at.is_(None),
         ))
         if user is None:
@@ -337,7 +337,8 @@ async def list_gpoint_conversations(
         ).where(
             Message.tenant_id == tenant_id, Message.user_id == user.id,
             Message.scope == Scope.real_world, Message.scenario_id.is_(None),
-            Message.role.in_(("user", "assistant")), Message.deleted_at.is_(None),
+            Message.role.in_(("user", "assistant")),
+            or_(Message.role != "assistant", Message.channel_delivery_status == "confirmed"), Message.deleted_at.is_(None),
         ).subquery()
         latest_query = select(latest).where(latest.c.row_num == 1)
         if decoded:
@@ -352,13 +353,13 @@ async def list_gpoint_conversations(
             .join(Character, and_(
                 Character.tenant_id == Conversation.tenant_id,
                 Character.id == Conversation.character_id,
-                Character.source_system == "gpoint",
+                Character.source_system == get_settings().source_system,
             ))
             .where(
                 Conversation.tenant_id == tenant_id, Conversation.user_id == user.id,
-                Conversation.source_system == "gpoint", Conversation.scope == Scope.real_world,
+                Conversation.source_system == get_settings().source_system, Conversation.scope == Scope.real_world,
                 Conversation.scenario_id.is_(None),
-                Conversation.external_id.startswith(f"gpoint-chat:{gpoint_user_id}:", autoescape=True),
+                Conversation.external_id.startswith(f"{get_settings().source_system}-chat:{gpoint_user_id}:", autoescape=True),
             )
             .order_by(Message.occurred_at.desc(), Message.id.desc())
             .limit(limit + 1)
@@ -397,11 +398,11 @@ async def list_gpoint_messages(
     async with session.begin():
         await set_tenant_context(session, str(tenant_id))
         user = await session.scalar(select(User).where(
-            User.tenant_id == tenant_id, User.source_system == "gpoint",
+            User.tenant_id == tenant_id, User.source_system == get_settings().source_system,
             User.external_id == gpoint_user_id, User.deleted_at.is_(None),
         ))
         character = await session.scalar(select(Character).where(
-            Character.tenant_id == tenant_id, Character.source_system == "gpoint",
+            Character.tenant_id == tenant_id, Character.source_system == get_settings().source_system,
             Character.external_id == gpoint_character_id, Character.status == "active",
         ))
         if user is None or character is None:
@@ -427,8 +428,9 @@ async def list_gpoint_messages(
             Message.tenant_id == tenant_id, Message.user_id == user.id,
             Message.character_id == character.id, Message.scope == Scope.real_world,
             Message.scenario_id.is_(None), Message.role.in_(("user", "assistant")),
-            Message.deleted_at.is_(None), Conversation.source_system == "gpoint",
-            Conversation.external_id == f"gpoint-chat:{gpoint_user_id}:{gpoint_character_id}",
+            or_(Message.role != "assistant", Message.channel_delivery_status == "confirmed"),
+            Message.deleted_at.is_(None), Conversation.source_system == get_settings().source_system,
+            Conversation.external_id == f"{get_settings().source_system}-chat:{gpoint_user_id}:{gpoint_character_id}",
         )
         if decoded:
             query = query.where(tuple_(Message.occurred_at, Message.id) < tuple_(decoded[0], decoded[1]))
@@ -449,7 +451,7 @@ async def unread_user(session: AsyncSession, tenant_id: UUID, external_id: str):
     if not 1 <= len(external_id) <= 255 or "\x00" in external_id:
         raise HTTPException(status_code=422, detail={"code": "invalid_identity"})
     user = await session.scalar(select(User).where(
-        User.tenant_id == tenant_id, User.source_system == "gpoint",
+        User.tenant_id == tenant_id, User.source_system == get_settings().source_system,
         User.external_id == external_id, User.deleted_at.is_(None),
     ))
     if user is not None:
@@ -525,6 +527,8 @@ class RespondResponse(BaseModel):
     message_id: str | None = None
     character_id: str
     text: str | None = None
+    relationship_id: str | None = None
+    user_id: str | None = None
 
 
 class CharacterSyncRequest(BaseModel):
@@ -614,18 +618,19 @@ async def claim_inference_job(
     async with session.begin():
         await set_tenant_context(session, str(tenant_id))
         repository = OutboxRepository(session)
+        worker_types = frozenset({"inference", "sales_draft_inference"}) if settings.source_system=="gsales" and settings.sales_drafts_enabled else frozenset({"inference"})
         await repository.expire_stale_inference_jobs(
             tenant_id=tenant_id,
             ttl_seconds=settings.inference_job_ttl_seconds,
         )
         await repository.requeue_expired(
-            tenant_id=tenant_id, job_types=frozenset({"inference"})
+            tenant_id=tenant_id, job_types=worker_types
         )
         jobs = await repository.claim(
             tenant_id=tenant_id,
             limit=1,
             lease_seconds=300,
-            job_types=frozenset({"inference"}),
+            job_types=worker_types,
         )
         if not jobs:
             return {"job": None}
@@ -655,7 +660,7 @@ async def complete_inference_job(
             select(OutboxJob).where(
                 OutboxJob.tenant_id == tenant_id,
                 OutboxJob.id == payload.job_id,
-                OutboxJob.job_type == "inference",
+                OutboxJob.job_type.in_(("inference", "sales_draft_inference")),
             ).with_for_update()
         )
         if job is None:
@@ -670,6 +675,18 @@ async def complete_inference_job(
             or not hmac.compare_digest(job.claim_token, payload.lease_token)
         ):
             raise HTTPException(status_code=409, detail={"code": "inference_lease_stale"})
+        if job.job_type=="sales_draft_inference":
+            if settings.source_system!="gsales" or not settings.sales_drafts_enabled or payload.model!=settings.llm_model or len(payload.text)>4000 or not payload.text.strip():
+                raise HTTPException(409,detail={"code":"draft_worker_contract_invalid"})
+            from app.api.sales import draft_aad, draft_crypto
+            envelope=draft_crypto().encrypt(payload.text.strip(),draft_aad(job))
+            job.payload={"kind":"sales-draft-v1","input_fingerprint":job.payload["input_fingerprint"],
+                "ciphertext":envelope.ciphertext.hex(),"nonce":envelope.nonce.hex(),"key_version":envelope.key_version}
+            job.state=JobState.completed
+            job.claim_token=None
+            job.lease_expires_at=None
+            job.last_error=None
+            return {"completed":True,"duplicate":False,"finalizationQueued":False}
         job.payload = {
             **job.payload,
             **encrypt_worker_result(
@@ -720,7 +737,7 @@ async def fail_inference_job(
             select(OutboxJob).where(
                 OutboxJob.tenant_id == tenant_id,
                 OutboxJob.id == payload.job_id,
-                OutboxJob.job_type == "inference",
+                OutboxJob.job_type.in_(("inference", "sales_draft_inference")),
             ).with_for_update()
         )
         if job is None:
@@ -756,7 +773,7 @@ async def sync_character(
             select(Character)
             .where(
                 Character.tenant_id == tenant_id,
-                Character.source_system == "gpoint",
+                Character.source_system == get_settings().source_system,
                 Character.external_id == gpoint_character_id,
             )
             .with_for_update()
@@ -764,7 +781,7 @@ async def sync_character(
         if character is None:
             character = Character(
                 tenant_id=tenant_id,
-                source_system="gpoint",
+                source_system=get_settings().source_system,
                 external_id=gpoint_character_id,
                 name=payload.name,
             )
@@ -883,13 +900,13 @@ async def sync_user_consent(
             select(User)
             .where(
                 User.tenant_id == tenant_id,
-                User.source_system == "gpoint",
+                User.source_system == get_settings().source_system,
                 User.external_id == gpoint_user_id,
             )
             .with_for_update()
         )
         if user is None:
-            user = User(tenant_id=tenant_id, source_system="gpoint", external_id=gpoint_user_id)
+            user = User(tenant_id=tenant_id, source_system=get_settings().source_system, external_id=gpoint_user_id)
             session.add(user)
             await session.flush()
         revoked_purposes: set[str] = set()
@@ -1066,7 +1083,7 @@ async def respond(
         external_character = await session.scalar(
             select(Character).where(
                 Character.tenant_id == tenant_id,
-                Character.source_system == "gpoint",
+                Character.source_system == get_settings().source_system,
                 Character.external_id == payload.gpoint_character_id,
                 Character.status == "active",
             )
@@ -1077,7 +1094,7 @@ async def respond(
             select(User)
             .where(
                 User.tenant_id == tenant_id,
-                User.source_system == "gpoint",
+                User.source_system == get_settings().source_system,
                 User.external_id == payload.gpoint_user_id,
                 User.deleted_at.is_(None),
             )
@@ -1086,7 +1103,7 @@ async def respond(
         if user is None:
             user = User(
                 tenant_id=tenant_id,
-                source_system="gpoint",
+                source_system=get_settings().source_system,
                 external_id=payload.gpoint_user_id,
                 locale=payload.locale,
             )
@@ -1123,7 +1140,7 @@ async def respond(
                 Conversation.tenant_id == tenant_id,
                 Conversation.user_id == user.id,
                 Conversation.character_id == external_character.id,
-                Conversation.source_system == "gpoint",
+                Conversation.source_system == get_settings().source_system,
                 Conversation.external_id == external_conversation_id,
                 Conversation.relationship_id == relationship.id,
             )
@@ -1141,7 +1158,7 @@ async def respond(
                 scenario_id=None,
                 started_at=now,
                 language_code=_language_code(payload.locale),
-                source_system="gpoint",
+                source_system=get_settings().source_system,
                 external_id=external_conversation_id,
             )
             session.add(conversation)
@@ -1225,6 +1242,8 @@ async def respond(
             request_id=payload.request_id,
             conversation_id=str(conversation_id),
             character_id=str(character_id),
+            relationship_id=str(relationship.id),
+            user_id=str(user_id),
         )
     if result.status != "completed" or result.assistant_message_id is None:
         code = (
@@ -1266,4 +1285,6 @@ async def respond(
         message_id=str(assistant.id),
         character_id=str(character_id),
         text=text,
+        relationship_id=str(relationship.id),
+        user_id=str(user_id),
     )

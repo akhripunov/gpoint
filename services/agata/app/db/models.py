@@ -401,6 +401,8 @@ class Message(TenantOwned):
             "coalesce(scenario_id, '00000000-0000-0000-0000-000000000000'::uuid)", persisted=True
         ),
     )
+    channel_delivery_status: Mapped[str] = mapped_column(String(16), server_default="confirmed", nullable=False)
+    channel_message_id: Mapped[str | None] = mapped_column(String(128))
     incoming_read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -1015,7 +1017,7 @@ class OutboxJob(TenantOwned):
             name="ck_outbox_memory_control_required",
         ),
         CheckConstraint(
-            "job_type IN ('generic','conversation_summary','relationship_note_refresh','snapshot_refresh','memory_extract','memory_promote','memory_embed','memory_graph_sync','response_retry','inference')",
+            "job_type IN ('generic','conversation_summary','relationship_note_refresh','snapshot_refresh','memory_extract','memory_promote','memory_embed','memory_graph_sync','response_retry','inference','sales_draft_inference')",
             name="ck_outbox_job_type_allowlist",
         ),
         Index(

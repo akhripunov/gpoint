@@ -294,7 +294,9 @@ async def test_relationship_rls_is_enforced_for_non_owner_role():
             connection.execute(text(f'GRANT USAGE ON SCHEMA agata TO "{role}"'))
             connection.execute(text(f'GRANT SELECT ON agata.relationships TO "{role}"'))
             connection.execute(text("SELECT set_config('app.tenant_id', :tenant, true)"), {"tenant": TENANT_ID})
-            connection.execute(text(f'SET LOCAL ROLE "{role}"'))
+            connection.execute(text("INSERT INTO agata_identity.role_tenants(login_role,tenant_id) VALUES (:role,:tenant)"), {"role":role,"tenant":UUID(TENANT_ID)})
+            # Login identity, rather than SET ROLE, is the tenant trust root.
+            connection.execute(text(f'SET LOCAL SESSION AUTHORIZATION "{role}"'))
             assert connection.scalar(
                 text("SELECT count(*) FROM agata.relationships WHERE id=:id"),
                 {"id": relationship.id},
@@ -306,6 +308,8 @@ async def test_relationship_rls_is_enforced_for_non_owner_role():
             ) == 0
     finally:
         with engine.begin() as connection:
-            connection.execute(text(f'DROP OWNED BY "{role}"'))
-            connection.execute(text(f'DROP ROLE IF EXISTS "{role}"'))
+            connection.execute(text("DELETE FROM agata_identity.role_tenants WHERE login_role=:role"),{"role":role})
+            if connection.scalar(text("SELECT 1 FROM pg_roles WHERE rolname=:role"),{"role":role}):
+                connection.execute(text(f'DROP OWNED BY "{role}"'))
+                connection.execute(text(f'DROP ROLE "{role}"'))
         engine.dispose()
