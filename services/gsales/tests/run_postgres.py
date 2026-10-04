@@ -36,6 +36,7 @@ def main():
     env["PYTHONPATH"] = str(SALES)
     if real_codex:
         env["GSALES_QA_REAL_CODEX"] = "true"
+        env["AGATA_CODEX_JOB_TIMEOUT_SECONDS"] = "90"
     try:
         subprocess.run(
             [

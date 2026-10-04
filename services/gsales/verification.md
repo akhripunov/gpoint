@@ -110,3 +110,14 @@ creation/inference. Separate owner approval is required for temporary idle-only
 stop, two serial synthetic generations and finally restore of unchanged original
 LaunchAgent. No installed source/config/LaunchAgent/process was changed.
 Production always-on guard remains enforced; no production deployment is claimed.
+
+
+One-shot owner approval was received for a controlled real Codex rehearsal. The
+installed LaunchAgent was not stopped: three health polls returned sanitized
+`worker_gateway_network_error`, DNS resolution for the GPoint host failed, and
+the deployed gateway provides no read-only pending/running queue count. An idle
+local poll does not prove its remote queue is empty. A tested controller now refuses
+bootout unless both queue counts are explicitly zero; it snapshots original hashes,
+requires a read-only zero queue snapshot and effective TTL≥221s, uses a 220-second watchdog (below default 420-second inference TTL/300-second lease), and restores
+the unchanged plist/source/wrapper in finally. Controller safeguard tests: 2 PASS.
+Real Codex remains BLOCKED on network recovery and read-only queue observability.

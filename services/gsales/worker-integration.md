@@ -64,11 +64,23 @@ Prepared command from the repository root:
 PYTHONPATH=services/gsales services/gsales/.venv/bin/python services/gsales/tests/run_postgres.py --real-codex
 ```
 
-Preflight observed `REAL_CODEX_REHEARSAL=BLOCKED`: the installed watch holds the
-common lock. It does not run Codex or create a test container in this state.
+Owner granted the one-shot approval, but no stop occurred: local worker remains
+loaded/idle while its last three gateway health checks fail; DNS for the GPoint
+host also fails in this environment. The existing gateway exposes no read-only
+queue-depth endpoint, so local IDLE cannot prove the remote pending/running queue
+is empty. The controller fails closed before bootout unless both counts equal zero.
 Synthetic rehearsal already uses the same worker/API paths with mock output.
 
-Concrete plan after separate owner approval:
+A tested controller at `scripts/run-gsales-one-shot-real-codex.py` snapshots the
+original plist/source/wrapper hashes, checks the exact candidate and a fresh idle
+poll, requires a read-only zero pending/running queue counts and effective TTL ≥221s, enforces a 220-second
+maximum window (below the Core default TTL420s and 300-second lease), and restores
+in finally. Its
+unit checks prove original plist bootstrap/hash checks and missing queue data
+blocks before stop. Preflight-only currently returns BLOCKED because the deployed
+worker API cannot provide queue counts and network/DNS is unavailable.
+
+Concrete plan after the owner-approved one-shot window can satisfy queue/network preflight:
 
 1. Recheck installed worker idle/current_job_present=false. If busy, wait for its
    existing job to finish; never interrupt generation. Preserve original plist,
