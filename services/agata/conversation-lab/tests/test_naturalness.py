@@ -3,8 +3,11 @@ import copy
 import hashlib
 import importlib.util
 import json
+import socket
+import subprocess
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 LAB = Path(__file__).resolve().parents[1]
@@ -44,6 +47,82 @@ class NaturalnessConfigTests(unittest.TestCase):
         self.assertEqual(config["development"]["scenario_ids"], EXPECTED_DEVELOPMENT_IDS)
         self.assertEqual(config["holdout"]["scenario_ids"], [f"{category}-01" for category in CATEGORIES])
         self.assertTrue(set(config["development"]["scenario_ids"]).isdisjoint(config["holdout"]["scenario_ids"]))
+
+    def test_phase3_invocation_snapshot_and_dev_allowlist_are_preserved(self):
+        pilot = NATURALNESS._module(LAB, "pilot")
+        frozen = pilot.load_frozen_pilot(LAB)
+        scenario = pilot.scenario_by_id(LAB, frozen, "long_memory-01")
+        history = [
+            {"role": "user", "text": scenario["dialogue_turns"][0]["text"]},
+            {"role": "assistant", "text": "СИНТЕТИЧЕСКИЙ FIXTURE RESPONSE — не ответ модели."},
+        ]
+        request = pilot.build_invocation(LAB, frozen, "long_memory-01", "codex-cli-baseline", 1, history)
+        encoded = json.dumps(request, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        self.assertEqual(hashlib.sha256(encoded).hexdigest(), "05f2a3fb262f72fda306134dabc5f8945f8eecc43a12b029ecd7ab70a2b4ef0e")
+        dev_scenario = pilot._inputs(LAB)[-1]["daily-02"]
+        with self.assertRaisesRegex(ValueError, "outside frozen pilot"):
+            pilot.build_invocation(LAB, frozen, "daily-02", "codex-cli-baseline", 0, [])
+        self.assertTrue(callable(getattr(pilot, "build_fixture_invocation", None)), "pure hash-checked serializer has not been extracted")
+        if callable(getattr(pilot, "build_fixture_invocation", None)):
+            self.assertEqual(
+                pilot.build_fixture_invocation(LAB, scenario, frozen["scenario_hashes"]["long_memory-01"], "codex-cli-baseline", 1, history),
+                request,
+            )
+            with self.assertRaisesRegex(ValueError, "scenario hash"):
+                pilot.build_fixture_invocation(LAB, dev_scenario, frozen["scenario_hashes"]["long_memory-01"], "codex-cli-baseline", 0, [])
+
+    def test_ab_builder_is_available_for_only_manifested_development_scenarios(self):
+        self.assertTrue(callable(getattr(NATURALNESS, "build_ab_invocations", None)), "Naturalness A/B request builder has not been implemented")
+
+    @unittest.skipUnless(NATURALNESS is not None and callable(getattr(NATURALNESS, "build_ab_invocations", None)), "RED scaffold: A/B builder not implemented yet")
+    def test_ab_builder_changes_only_candidate_instructions_and_keeps_histories_separate(self):
+        config = NATURALNESS.load_naturalness_config(LAB)
+        sid = "long_memory-02"
+        pilot = NATURALNESS._module(LAB, "pilot")
+        scenario = pilot._inputs(LAB)[-1][sid]
+        histories = {
+            "baseline": [
+                {"role": "user", "text": scenario["dialogue_turns"][0]["text"]},
+                {"role": "assistant", "text": "baseline-only previous reply"},
+            ],
+            "naturalness-v1": [
+                {"role": "user", "text": scenario["dialogue_turns"][0]["text"]},
+                {"role": "assistant", "text": "candidate-only previous reply"},
+            ],
+        }
+        baseline, candidate = NATURALNESS.build_ab_invocations(LAB, config, sid, 1, histories)
+        self.assertEqual((baseline["fixture_only"], candidate["fixture_only"]), (True, True))
+        for key in set(baseline) - {"core_request", "history"}:
+            self.assertEqual(baseline[key], candidate[key], key)
+        self.assertEqual(set(baseline["core_request"]) - {"instructions", "history"}, set(candidate["core_request"]) - {"instructions", "history"})
+        for key in set(baseline["core_request"]) - {"instructions", "history"}:
+            self.assertEqual(baseline["core_request"][key], candidate["core_request"][key], key)
+        self.assertEqual(baseline["history"][1]["text"], "baseline-only previous reply")
+        self.assertEqual(candidate["history"][1]["text"], "candidate-only previous reply")
+        self.assertNotIn("candidate-only previous reply", baseline["core_request"]["instructions"])
+        self.assertIn(NATURALNESS.load_policy(LAB, config), candidate["core_request"]["instructions"])
+        for example in NATURALNESS.candidate_visible_examples(NATURALNESS.load_examples(LAB, config)):
+            for turn in example["turns"]:
+                self.assertIn(turn["text"], candidate["core_request"]["instructions"])
+        self.assertNotIn("anti_pattern", candidate["core_request"]["instructions"])
+        self.assertNotIn("review_only", candidate["core_request"]["instructions"])
+        for example in NATURALNESS.load_examples(LAB, config):
+            for review_value in example["review_only"].values():
+                self.assertNotIn(review_value, candidate["core_request"]["instructions"])
+        with self.assertRaisesRegex(ValueError, "development"):
+            NATURALNESS.build_ab_invocations(LAB, config, "long_memory-01", 0, {"baseline": [], "naturalness-v1": []})
+        with self.assertRaises(ValueError):
+            NATURALNESS.build_ab_invocations(LAB, config, sid, 1, {"baseline": [], "naturalness-v1": []})
+
+    @unittest.skipUnless(NATURALNESS is not None and callable(getattr(NATURALNESS, "run_fixture_dry_run", None)), "RED scaffold: Naturalness fixture runner not implemented yet")
+    def test_ab_fixture_run_is_offline_and_marks_outputs_non_evidentiary(self):
+        config = NATURALNESS.load_naturalness_config(LAB)
+        with patch.object(socket, "create_connection", side_effect=AssertionError("network access is forbidden")), patch.object(subprocess, "Popen", side_effect=AssertionError("subprocess access is forbidden")):
+            report = NATURALNESS.run_fixture_dry_run(LAB, config)
+        self.assertEqual(report["planned_candidate_turns"], sum(config["development"]["scenario_rounds"].values()) * 2)
+        self.assertEqual(report["live_inference_requests"], 0)
+        self.assertEqual(report["quality_status"], "NO_MODEL_OUTPUTS_OWNER_REVIEW_NOT_APPLICABLE")
+        self.assertTrue(report["fixture_only"])
 
     @unittest.skipIf(NATURALNESS is None, "RED scaffold: loader not implemented yet")
     def test_long_dialogue_development_fixture_keeps_twelve_rounds(self):

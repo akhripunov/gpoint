@@ -38,6 +38,7 @@
 - Create `services/agata/conversation-lab/configs/naturalness-policy-v1.md`: candidate-only shared policy text and its scope/version/hash contract.
 - Create `services/agata/conversation-lab/data/golden/synthetic/naturalness-examples-v1.jsonl`: small authored examples with evaluator-only anti-pattern metadata separated from candidate-visible turns.
 - Create `services/agata/conversation-lab/evaluators/naturalness.py`: load/freeze validation, A/B request construction, fixture-only run, result validation and blind packet wrapper; no sender.
+- Modify `services/agata/conversation-lab/evaluators/pilot.py` only to extract a pure scenario-to-request serializer used by both the still-holdout-locked Phase 3 wrapper and the Naturalness `-02` adapter; preserve the current Phase 3 wrapper's strict frozen-ID gate and exact request output.
 - Create `services/agata/conversation-lab/tests/test_naturalness.py`: focused RED/GREEN regressions for manifest, policy, request parity, leakage, blind packet, safety and offline-only behavior.
 - Modify `services/agata/conversation-lab/experiments/naturalness-v1.md` only if research traceability or implementation evidence needs an additive correction; do not broaden its approved design.
 - Create `services/agata/conversation-lab/experiments/naturalness-v1-plan.md`: this execution plan and task checkboxes.
@@ -84,18 +85,19 @@
 
 **Files:**
 - Modify: `services/agata/conversation-lab/evaluators/naturalness.py`
+- Modify: `services/agata/conversation-lab/evaluators/pilot.py` (pure request serializer extraction only; preserve public frozen-pilot ID validation)
 - Test: `services/agata/conversation-lab/tests/test_naturalness.py`
-- Read-only: `services/agata/conversation-lab/evaluators/pilot.py`, `services/agata/conversation-lab/evaluators/adapters.py`
+- Read-only: `services/agata/conversation-lab/evaluators/adapters.py`
 
 **Interfaces:**
 - Consumes: validated config, policy and the existing Phase 3 request builder.
-- Produces `build_ab_invocations(lab, config, scenario_id, round_index, history) -> tuple[dict, dict]` where A and B share identical non-instruction fields, and `run_fixture_dry_run(lab, config) -> dict` always reports `live_inference_requests: 0`.
+- Produces `pilot.build_fixture_invocation(lab, scenario, expected_scenario_sha256, model_id, round_index, history) -> dict` (hash-checked pure serializer) and `build_ab_invocations(lab, config, scenario_id, round_index, history_by_candidate) -> tuple[dict, dict]`, where the public Phase 3 wrapper remains frozen-ID-only, A and B share identical non-instruction inputs, and `run_fixture_dry_run(lab, config) -> dict` always reports `live_inference_requests: 0`.
 
-- [ ] **Step 1: Write failing tests** that assert A's request is byte/hash-identical to the existing Phase 3 canonical baseline; B differs only by the candidate policy addition; Persona, settings, memories, summaries, safety boundaries, language, schema, reached user turn and history are equal; each candidate replays its own prior assistant replies; future user turns and evaluator fields are absent.
-- [ ] **Step 2: Run focused tests** and verify failure on the missing builder.
-- [ ] **Step 3: Implement the builder by calling the Phase 3 frozen request path** with the Codex baseline descriptor and attaching only a versioned policy block to B. Do not modify Phase 3 files and do not expose a method that sends, launches, enqueues or authenticates.
-- [ ] **Step 4: Add and run fixture-only dry-run tests** for every development request, explicit synthetic markers, stale hashes, wrong candidate IDs, prompt injection from context/memory, and zero socket/subprocess/worker access.
-- [ ] **Step 5: Commit** as `feat(agata-lab): construct offline Naturalness A/B payloads`.
+- [x] **Step 1: Write failing tests** that assert the existing Phase 3 wrapper remains byte/hash-identical to a pre-refactor request snapshot and still rejects `-02`; the extracted serializer reproduces that request when given the pinned scenario SHA; A differs only from B in candidate-only policy/examples; all non-instruction inputs match; distinct prior assistant histories remain candidate-specific; future user turns and evaluator fields are absent.
+- [x] **Step 2: Run focused tests** and verify failure on the missing builder.
+- [x] **Step 3: Extract the pure scenario request serializer in `pilot.py` without changing request construction, then keep `pilot.build_invocation` validating the frozen Phase 3 ID set before delegating to it. Build Naturalness `-02` requests through the serializer only after the Naturalness manifest validates exact IDs and SHA; add the versioned policy and positive examples only to B. Do not expose any method that sends, launches, enqueues or authenticates.**
+- [x] **Step 4: Add and run fixture-only dry-run tests** for every development request, explicit synthetic markers, stale hashes, wrong candidate IDs, prompt injection from context/memory, and zero socket/subprocess/worker access.
+- [x] **Step 5: Commit** as `feat(agata-lab): construct offline Naturalness A/B payloads`.
 
 ### Task 4: Reuse blind evaluation for fixture-only pairs
 
