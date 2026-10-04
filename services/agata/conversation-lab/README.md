@@ -28,7 +28,7 @@ python3 services/agata/conversation-lab/pipelines/lab.py report
 
 ## Структура и хранение
 
-`data/raw/`, `data/processed/` и `data/runs/` игнорируются Git; `data/golden/` принимает только синтетические фикстуры. Manifest данных, архивы, обработанные тексты и примеры остаются на Mac по указанному пути и не отправляются в GitHub. Golden-каталог пока пустой. Не подключать эти данные к production AGATA, PostgreSQL или обучению.
+`data/raw/`, `data/processed/` и `data/runs/` игнорируются Git; `data/golden/` принимает только синтетические фикстуры. Manifest данных, архивы, обработанные тексты и примеры остаются на Mac по указанному пути и не отправляются в GitHub. Phase 2 добавляет только синтетический Benchmark V1 в Golden-каталог. Не подключать эти данные к production AGATA, PostgreSQL или обучению.
 
 ## Известные ограничения
 
@@ -40,3 +40,25 @@ python3 services/agata/conversation-lab/pipelines/lab.py report
 ## Отчёты
 
 `python3 .../lab.py report` обновляет `data/runs/report.json` и печатает статусы, объёмы, счётчики обработки и свободное место. `data/runs/manifest.json` — подробный локальный журнал происхождения. Ни один отчёт не создаёт GitHub Release и не запускает deployment.
+
+
+## Phase 2 — безопасное исследование существующих данных
+
+Дизайн и границы: experiments/phase2-spec.md; план: experiments/phase2-plan.md. В Phase 2 оригиналы неизменяемы. **Не запускайте команды V1 download/process/quality-review над существующим canonical data:** quality-review может перезаписать обработанные записи. Используйте новый read-only CLI:
+
+```sh
+python3 services/agata/conversation-lab/evaluators/cli.py verify
+python3 services/agata/conversation-lab/evaluators/cli.py review --source daily-dialog --start 0 --count 5
+python3 services/agata/conversation-lab/evaluators/cli.py benchmark
+python3 services/agata/conversation-lab/evaluators/cli.py leakage --run-id phase2-my-unique-audit
+python3 services/agata/conversation-lab/evaluators/cli.py blind --results /absolute/local/results.json --run-id phase2-my-unique-blind
+python3 -m unittest discover -s services/agata/conversation-lab/tests
+```
+
+CLI по умолчанию читает canonical data на Mac, даже из изолированного worktree; --data-root допускает тестовую копию небольших фикстур. Не копировать реальные корпуса. Report output ограничен новой папкой data/runs/phase2-<id>, существующие файлы не заменяются. Review показывает до пяти полных диалогов за вызов; автоматическая маскировка контактов неполная и не заменяет локальную проверку персональных данных.
+
+Benchmark: 128 независимых авторских сценариев, 16 категорий × 8; обычные — минимум четыре раунда, long_dialogue — двенадцать. Проверяются схема, роли, покрытие, точные/лексически близкие дубликаты и manifest/Persona hashes. Проверка утечки сканирует исходные обработанные записи потоково; её PASS не доказывает отсутствие смыслового заимствования. Future training/few-shot collision до появления такого набора — NOT_YET_APPLICABLE.
+
+Протоколы: experiments/blind-evaluation.md и experiments/model-comparison.md; шкалы: configs/rubric-v1.json. Blind CLI только упаковывает импортированные результаты, не вызывает модели. Реальные ответы, статистика качества, OWNER-оценки и winner отсутствуют до отдельного разрешённого эксперимента.
+
+180 ручных оценок и исследования хранятся в canonical data/runs/phase2-2026-10-04-audit/. Итоговая проверка утечки — phase2-2026-10-04-final-leakage/. Все исследовательские результаты и roadmap публикуются только в существующем документе Linear AGATA Conversation Lab. Эти локальные отчёты игнорируются Git; исходные тексты не коммитятся. Production, Core, G Sales, paid API и обучение не затронуты.
