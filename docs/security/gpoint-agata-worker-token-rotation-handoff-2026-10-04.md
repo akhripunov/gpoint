@@ -84,3 +84,25 @@ not authorize Real Codex QA. Before a later QA window, the detached recovery
 watchdog must pass isolated tests and the changed candidate SHA must receive a
 new exact-SHA OWNER approval. A complete loss of Mac availability remains
 outside the protection a local watchdog can provide.
+
+## Authorized Real Codex QA attempt — 2026-10-04
+
+The OWNER subsequently approved candidate
+`5be608d33cddca201b2cb9ce104652f74b887fee`. A fresh authoritative preflight at
+`2026-10-04T10:42:06.909873Z` verified the production SHA and immutable image
+IDs, expected GPOINT tenant, pending/running counts 0/0, and effective TTL
+420 seconds. The controller repeated preflight before switch, started its
+watchdog, and temporarily unloaded V2.
+
+The disposable E2E harness then failed before claim or inference because its
+temporary status-file parent directory had not been created. Neither Codex
+Local generation ran and no production queue item was touched. The controller
+restored V2 and confirmed a fresh authenticated idle poll, unchanged original
+V2 artifact hashes, and no error code. The watchdog session's conservative
+start-to-confirmed-restore interval was 10.3 seconds. The disposable database
+container was removed.
+
+The missing test-directory setup was fixed in the QA test only; production
+worker, GSales runtime and installed V2 were not changed. That changes the
+candidate SHA, so the approval above no longer authorizes another worker stop.
+A new exact-SHA OWNER approval is required before retrying Real Codex QA.
