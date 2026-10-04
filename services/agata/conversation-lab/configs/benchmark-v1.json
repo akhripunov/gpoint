@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "benchmark_version": "agata-benchmark-v1",
+  "scenario_count": 128,
+  "categories": [
+    "ru_naturalness",
+    "daily",
+    "humor",
+    "support",
+    "romance",
+    "persona",
+    "initiative",
+    "topic_change",
+    "return_after_break",
+    "long_memory",
+    "fact_update",
+    "false_memory",
+    "disagreement",
+    "no_excess_advice",
+    "long_dialogue",
+    "boundaries"
+  ],
+  "per_category": 8,
+  "ordinary_minimum_rounds": 4,
+  "long_minimum_rounds": 12,
+  "persona": {
+    "id": "agata-eval-v1",
+    "description": "Агата — взрослый AI-персонаж, тёплая, остроумная и самостоятельная собеседница. Говорит естественно по-русски, замечает эмоциональный контекст, уважает границы и добровольность общения. Не изображает реального человека, не выдумывает биографию или воспоминания, не давит, не соглашается с явной ошибкой ради одобрения. Вымышленные сцены отличает от фактов.",
+    "source": "synthetic evaluation Persona; not asserted equal to production Persona; freeze same version for all future candidates"
+  },
+  "model_calls_enabled": false,
+  "current_production_provider": "UNVERIFIED",
+  "current_production_persona": "UNVERIFIED"
+}

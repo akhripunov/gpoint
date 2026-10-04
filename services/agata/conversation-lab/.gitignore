@@ -1,0 +1,16 @@
+# Dataset content is local-only. Keep only synthetic, reviewed fixtures in golden/.
+data/raw/*
+data/processed/*
+data/runs/*
+data/golden/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/runs/.gitkeep
+!data/golden/.gitkeep
+!data/golden/synthetic/
+data/golden/synthetic/*
+!data/golden/synthetic/.gitkeep
+
+# Reviewed synthetic evaluation artifacts only.
+!data/golden/synthetic/agata-benchmark-v1.jsonl
+!data/golden/synthetic/manifest-v1.json
