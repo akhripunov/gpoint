@@ -347,9 +347,10 @@ def _bounded_timeout(seconds: float, deadline: float | None) -> float:
 
 def _bootstrap(deadline: float | None = None) -> None:
     domain = f"gui/{os.getuid()}"
+    # The installed plist is RunAtLoad + KeepAlive. `bootstrap` starts it;
+    # force-kickstarting immediately afterward can block while launchd is
+    # already starting the worker and needlessly burn the recovery window.
     subprocess.run(["launchctl", "bootstrap", domain, str(PLIST)], check=True, capture_output=True,
-                   timeout=_bounded_timeout(15, deadline))
-    subprocess.run(["launchctl", "kickstart", "-k", f"{domain}/{LABEL}"], check=True, capture_output=True,
                    timeout=_bounded_timeout(15, deadline))
 
 

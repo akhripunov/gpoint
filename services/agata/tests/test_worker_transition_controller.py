@@ -19,6 +19,20 @@ SPEC.loader.exec_module(transition)
 
 
 class WorkerTransitionTests(unittest.TestCase):
+    def test_bootstrap_uses_launchd_run_at_load_without_kill_kickstart(self):
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.object(transition.subprocess, "run", side_effect=run):
+            transition._bootstrap()
+
+        self.assertEqual(calls, [[
+            "launchctl", "bootstrap", f"gui/{os.getuid()}", str(transition.PLIST),
+        ]])
+
     def test_recovery_watchdog_process_registers_ready_without_launchagent_work(self):
         with tempfile.TemporaryDirectory() as temp:
             state_path = Path(temp) / "state.json"
