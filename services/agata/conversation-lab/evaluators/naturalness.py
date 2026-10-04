@@ -6,7 +6,9 @@ import importlib.util
 import json
 import os
 import sys
+import copy
 from pathlib import Path
+from typing import Optional
 
 
 PHASE3_BASE_SHA = "d228b862d5d345eb1d55a6fb1164f7d5b4d77902"
@@ -154,3 +156,75 @@ def write_naturalness_config(lab: Path, *, replace_existing: bool = False) -> di
         stream.write(payload)
     os.replace(temporary, path)
     return config
+
+
+def load_policy(lab: Path, config: Optional[dict] = None) -> str:
+    """Return only the model-facing policy section after checking its hash."""
+    lab = Path(lab)
+    config = load_naturalness_config(lab) if config is None else validate_naturalness_config(lab, config)
+    path = lab / "configs/naturalness-policy-v1.md"
+    if config.get("artifact_hashes", {}).get("policy_sha256") != _file_hash(path):
+        raise ValueError("Naturalness policy hash does not match the frozen manifest")
+    raw = path.read_text(encoding="utf-8")
+    marker = "## Candidate-visible policy\n"
+    if raw.count(marker) != 1:
+        raise ValueError("Naturalness policy must contain one candidate-visible section")
+    policy = raw.split(marker, 1)[1].split("\n## ", 1)[0].strip()
+    if not policy:
+        raise ValueError("candidate-visible Naturalness policy is empty")
+    return policy
+
+
+def load_examples(lab: Path, config: Optional[dict] = None) -> list[dict]:
+    """Load only author-created examples and keep review metadata out of turns."""
+    lab = Path(lab)
+    config = load_naturalness_config(lab) if config is None else validate_naturalness_config(lab, config)
+    path = lab / "data/golden/synthetic/naturalness-examples-v1.jsonl"
+    if config.get("artifact_hashes", {}).get("examples_sha256") != _file_hash(path):
+        raise ValueError("Naturalness examples hash does not match the frozen manifest")
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    benchmark = _module(lab, "benchmark")
+    scenarios = benchmark.load_scenarios(lab / "data/golden/synthetic/agata-benchmark-v1.jsonl")
+    benchmark_turns = {
+        benchmark.normalize(turn["text"])
+        for scenario in scenarios
+        for turn in scenario["dialogue_turns"]
+        if turn["role"] == "user"
+    }
+    seen_ids, seen_dialogues = set(), set()
+    for row in rows:
+        if not isinstance(row, dict) or row.get("schema_version") != 1 or row.get("provenance") != "synthetic_authored":
+            raise ValueError("Naturalness examples must be versioned, authored synthetic fixtures")
+        example_id = row.get("example_id")
+        turns = row.get("candidate_turns")
+        review = row.get("review_only")
+        if not isinstance(example_id, str) or not example_id.strip() or example_id in seen_ids:
+            raise ValueError("Naturalness example IDs must be non-empty and unique")
+        if not isinstance(turns, list) or len(turns) < 2 or len(turns) % 2:
+            raise ValueError("candidate-visible examples require complete user/assistant turns")
+        if not isinstance(review, dict) or not all(isinstance(review.get(field), str) and review[field].strip() for field in ("anti_pattern_id", "anti_pattern_response", "rationale")):
+            raise ValueError("review-only anti-pattern response and rationale are required")
+        normalized_users, signature = [], []
+        for index, turn in enumerate(turns):
+            expected_role = "user" if index % 2 == 0 else "assistant"
+            if not isinstance(turn, dict) or turn.get("role") != expected_role or not isinstance(turn.get("text"), str) or not turn["text"].strip():
+                raise ValueError("Naturalness example has an empty or misordered turn")
+            text = benchmark.normalize(turn["text"])
+            signature.append((expected_role, text))
+            if expected_role == "user":
+                normalized_users.append(text)
+        dialogue_signature = tuple(signature)
+        if dialogue_signature in seen_dialogues:
+            raise ValueError("duplicate Naturalness example dialogue")
+        if set(normalized_users) & benchmark_turns:
+            raise ValueError("Naturalness example user text duplicates a Benchmark V1 turn")
+        seen_ids.add(example_id)
+        seen_dialogues.add(dialogue_signature)
+    if len(rows) != 15:
+        raise ValueError("Naturalness examples V1 requires fifteen authored pattern examples")
+    return rows
+
+
+def candidate_visible_examples(examples: list[dict]) -> list[dict]:
+    """Strip anti-pattern labels, bad responses and review rationale."""
+    return [{"turns": copy.deepcopy(example["candidate_turns"])} for example in examples]

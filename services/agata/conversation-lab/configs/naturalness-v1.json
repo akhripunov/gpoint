@@ -24,7 +24,10 @@
     "pilot_metrics_sha256": "6f57e5d8d9450732b3548724ff7ad880a564d12f857bc05ca9f4980f0f2a81cd",
     "rubric_sha256": "8fe5da295683f54a6424e26de7141a2266209c0d35532a9f4f422f91e4d9dfa0"
   },
-  "artifact_hashes": {},
+  "artifact_hashes": {
+    "policy_sha256": "b68d51e29b8611a053ac50bc89806bc8f1903f476126e155a7dc331927d94a6e",
+    "examples_sha256": "dcef7702d08657d3bc1ab50cc2670f4d99a21de321cb1c614e1472da98a889d6"
+  },
   "development": {
     "scenario_ids": [
       "ru_naturalness-02",
