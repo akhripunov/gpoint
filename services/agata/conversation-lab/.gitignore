@@ -10,3 +10,7 @@ data/golden/*
 !data/golden/synthetic/
 data/golden/synthetic/*
 !data/golden/synthetic/.gitkeep
+
+# Reviewed synthetic evaluation artifacts only.
+!data/golden/synthetic/agata-benchmark-v1.jsonl
+!data/golden/synthetic/manifest-v1.json
