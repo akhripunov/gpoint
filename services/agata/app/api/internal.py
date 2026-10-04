@@ -641,6 +641,8 @@ async def claim_inference_job(
                 "id": str(job.id),
                 "leaseToken": job.claim_token,
                 "attempt": job.attempts,
+                "target": settings.source_system.upper(),
+                "tenant_id": str(tenant_id),
                 "request": json.loads(request_text),
             }
         }
@@ -666,6 +668,8 @@ async def complete_inference_job(
         if job is None:
             raise HTTPException(status_code=404, detail={"code": "inference_job_unavailable"})
         if job.state == JobState.completed:
+            if not job.claim_token or not hmac.compare_digest(job.claim_token, payload.lease_token):
+                raise HTTPException(status_code=409, detail={"code": "inference_lease_stale"})
             return {"completed": True, "duplicate": True}
         if (
             job.state != JobState.running
@@ -683,7 +687,7 @@ async def complete_inference_job(
             job.payload={"kind":"sales-draft-v1","input_fingerprint":job.payload["input_fingerprint"],
                 "ciphertext":envelope.ciphertext.hex(),"nonce":envelope.nonce.hex(),"key_version":envelope.key_version}
             job.state=JobState.completed
-            job.claim_token=None
+            # Retain the receipt lease: duplicate completion must prove ownership.
             job.lease_expires_at=None
             job.last_error=None
             return {"completed":True,"duplicate":False,"finalizationQueued":False}
@@ -699,7 +703,7 @@ async def complete_inference_job(
             ),
         }
         job.state = JobState.completed
-        job.claim_token = None
+        # Keep completed receipt token for authenticated idempotent acknowledgement.
         job.lease_expires_at = None
         job.last_error = None
         source_message = await session.scalar(select(Message).where(

@@ -55,6 +55,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from app.telegram.management import install as install_management
 
     install_management(app)
+    from app.worker_gateway import install as install_worker_gateway
+
+    install_worker_gateway(app)
     if settings.secret_dir and settings.secret_master_key:
         from app.telegram.transport import TelegramTransport
 

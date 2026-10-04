@@ -13,17 +13,29 @@ import psycopg
 from psycopg import sql
 
 ROOT = Path(__file__).resolve().parents[3]
-SALES = ROOT / "services/g-sales"
+SALES = ROOT / "services/gsales"
 AGATA = ROOT / "services/agata"
 GPOINT = "7508f36f-774a-48aa-8c6b-42f6f160415d"
 GSALES = "c4d67889-877e-4d1b-a8d8-597c479d638f"
 
 
 def main():
+    real_codex = "--real-codex" in sys.argv
+    if real_codex:
+        import fcntl
+        lock_path = Path.home() / "Library/Application Support/GPoint/agata-codex-worker/worker.lock"
+        with lock_path.open("rb") as lock:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print("REAL_CODEX_REHEARSAL=BLOCKED: installed worker owns common lock; separate owner permission required to temporarily stop it")
+                return 2
     container = "gpoint-gsales-test-" + uuid4().hex[:10]
     password = uuid4().hex
     env = {k: v for k, v in os.environ.items() if not k.startswith(("AGATA_", "GSALES_"))}
     env["PYTHONPATH"] = str(SALES)
+    if real_codex:
+        env["GSALES_QA_REAL_CODEX"] = "true"
     try:
         subprocess.run(
             [
@@ -136,8 +148,8 @@ def main():
         )
         with psycopg.connect(admin) as conn:
             conn.execute((SALES / "migrations/001_gsales.sql").read_text())
-        result = subprocess.run([sys.executable, "-m", "pytest", "-q", "tests"], cwd=SALES, env=env)
-        if result.returncode:
+        result = subprocess.run([sys.executable, "-m", "pytest", "-q", "tests/test_shared_worker_http.py" if real_codex else "tests"], cwd=SALES, env=env)
+        if result.returncode or real_codex:
             return result.returncode
         # Run shared AGATA HTTP/security tests in a separate module namespace.
         env["AGATA_GSALES_TEST_DATABASE_URL"] = env["GSALES_TEST_AGATA_DSN"].replace(

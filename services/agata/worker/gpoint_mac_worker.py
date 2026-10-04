@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""GPoint-only subscription-backed AGATA inference worker."""
+"""Single-process subscription-backed AGATA inference worker with fixed targets."""
 
 from __future__ import annotations
 
-import asyncio
 import argparse
+import asyncio
 import fcntl
 import json
 import os
@@ -15,6 +15,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import certifi
 import httpx
@@ -33,7 +34,7 @@ OUTPUT_SCHEMA = {
     "required": ["text"],
     "additionalProperties": False,
 }
-WORKER_VERSION = "2"
+WORKER_VERSION = "3"
 UTC = timezone.utc  # noqa: UP017 -- macOS system Python 3.9 compatibility.
 CODEX_TIMEOUT_SECONDS = 180
 HEARTBEAT_INTERVAL_SECONDS = 30
@@ -69,11 +70,40 @@ def load_env_file(path: Path | None = None) -> None:
             os.environ[key] = raw.strip().strip('"').strip("'")
 
 
-def api_request(path: str, body: dict | None = None) -> dict:
-    base = os.environ.get("GPOINT_AGATA_WORKER_URL", "https://gpoint.amiora.one/api/agata-worker").rstrip("/")
-    token = os.environ.get("GPOINT_AGATA_WORKER_TOKEN", "")
-    if not base.startswith("https://") or not token:
-        raise FatalConfigurationError("worker_gateway_or_auth_unconfigured")
+TARGET_TENANTS = {
+    "GPOINT": "7508f36f-774a-48aa-8c6b-42f6f160415d",
+    "GSALES": "c4d67889-877e-4d1b-a8d8-597c479d638f",
+}
+_target_heartbeats: dict[str, float] = {}
+
+
+def configured_targets() -> dict[str, tuple[str, str]]:
+    targets = {}
+    for name in TARGET_TENANTS:
+        base = os.environ.get(name + "_AGATA_WORKER_URL", "https://gpoint.amiora.one/api/agata-worker" if name == "GPOINT" else "").rstrip("/")
+        token = os.environ.get(name + "_AGATA_WORKER_TOKEN", "")
+        if name == "GSALES" and not base and not token:
+            continue
+        parsed = urlsplit(base)
+        local = os.environ.get("GPOINT_AGATA_WORKER_LOCAL_TEST") == "true" and parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+        if not token or (parsed.scheme != "https" and not local) or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise FatalConfigurationError("worker_gateway_or_auth_unconfigured")
+        targets[name] = (base, token)
+    if len(targets) == 2 and (targets["GPOINT"][0] == targets["GSALES"][0] or targets["GPOINT"][1] == targets["GSALES"][1]):
+        raise FatalConfigurationError("worker_targets_must_be_distinct")
+    return targets
+
+
+def target_request(target: str, path: str, body: dict | None = None) -> dict:
+    # Preserve the existing GPOINT call shape for the installed v2 contract.
+    return api_request(path, body) if target == "GPOINT" else api_request(path, body, target=target)
+
+
+def api_request(path: str, body: dict | None = None, *, target: str = "GPOINT") -> dict:
+    targets = configured_targets()
+    if target not in targets:
+        raise FatalConfigurationError("worker_target_unconfigured")
+    base, token = targets[target]
     headers = {"Authorization": f"Bearer {token}"}
     kwargs: dict[str, object] = {}
     if body is not None:
@@ -111,7 +141,7 @@ def api_request(path: str, body: dict | None = None) -> dict:
     return result
 
 
-def write_status(**fields: object) -> None:
+def write_status(*, target: str | None = None, **fields: object) -> None:
     SUPPORT.mkdir(parents=True, exist_ok=True)
     current = {}
     if STATUS.exists():
@@ -119,7 +149,11 @@ def write_status(**fields: object) -> None:
             current = json.loads(STATUS.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             current = {}
-    current.update(fields, updated_at=datetime.now(UTC).isoformat())
+    if target:
+        targets = current.setdefault("targets", {})
+        targets[target] = {**targets.get(target, {}), **fields, "updated_at": datetime.now(UTC).isoformat()}
+    if target is None or target == "GPOINT":
+        current.update(fields, updated_at=datetime.now(UTC).isoformat())
     temp = STATUS.with_suffix(".tmp")
     temp.write_text(json.dumps(current, separators=(",", ":")) + "\n", encoding="utf-8")
     temp.chmod(0o600)
@@ -148,6 +182,7 @@ def _codex_used_tools(stdout: str) -> bool:
 
 
 def run_inference(job: dict) -> str:
+    max_length = 4000 if job.get("target") == "GSALES" else 4096
     request = job.get("request")
     if not isinstance(request, dict):
         raise RuntimeError("malformed_inference_job")
@@ -178,7 +213,9 @@ def run_inference(job: dict) -> str:
         temp = Path(temp_name)
         schema_file = temp / "response.schema.json"
         result_file = temp / "response.json"
-        schema_file.write_text(json.dumps(OUTPUT_SCHEMA), encoding="utf-8")
+        schema = json.loads(json.dumps(OUTPUT_SCHEMA))
+        schema["properties"]["text"]["maxLength"] = max_length
+        schema_file.write_text(json.dumps(schema), encoding="utf-8")
         command = [
             str(codex), "exec",
             "--sandbox", "read-only",
@@ -228,21 +265,24 @@ def run_inference(job: dict) -> str:
             raise RuntimeError("codex_tool_use_disallowed")
         parsed = json.loads(result_file.read_text(encoding="utf-8"))
         text = parsed.get("text") if isinstance(parsed, dict) else None
-        if not isinstance(text, str) or not text.strip() or len(text) > 4096:
+        if not isinstance(text, str) or not text.strip() or len(text) > max_length:
             raise RuntimeError("codex_response_invalid")
         return text.strip()
 
 
-def process_one() -> bool:
+def process_one(target: str = "GPOINT") -> bool:
     global _last_heartbeat_attempt
     now = time.monotonic()
-    if now - _last_heartbeat_attempt >= HEARTBEAT_INTERVAL_SECONDS:
-        _last_heartbeat_attempt = now
-        api_request("health")
-        write_status(last_heartbeat_at=datetime.now(UTC).isoformat())
-    claim = api_request("claim").get("job")
+    if now - (_last_heartbeat_attempt if target == "GPOINT" else _target_heartbeats.get(target, float("-inf"))) >= HEARTBEAT_INTERVAL_SECONDS:
+        if target == "GPOINT":
+            _last_heartbeat_attempt = now
+        else:
+            _target_heartbeats[target] = now
+        target_request(target, "health")
+        write_status(target=target, last_heartbeat_at=datetime.now(UTC).isoformat())
+    claim = target_request(target, "claim").get("job")
     if claim is None:
-        write_status(last_poll_at=datetime.now(UTC).isoformat(), state="idle")
+        write_status(target=target, last_poll_at=datetime.now(UTC).isoformat(), state="idle")
         return False
     if not isinstance(claim, dict):
         raise RuntimeError("worker_claim_invalid")
@@ -250,38 +290,48 @@ def process_one() -> bool:
     lease = claim.get("leaseToken")
     if not isinstance(job_id, str) or not isinstance(lease, str):
         raise RuntimeError("worker_claim_invalid")
-    write_status(last_poll_at=datetime.now(UTC).isoformat(), state="running", current_job_present=True)
+    if target not in TARGET_TENANTS:
+        raise GatewayResponseError("worker_target_invalid")
+    # GPOINT metadata is optional only for the existing legacy gateway. Sales
+    # never accepts a claim without server-authored fixed identity.
+    if (target == "GSALES" or "target" in claim or "tenant_id" in claim) and (
+        claim.get("target") != target or claim.get("tenant_id") != TARGET_TENANTS[target]
+    ):
+        raise GatewayResponseError("worker_claim_target_mismatch")
+    write_status(target=target, last_poll_at=datetime.now(UTC).isoformat(), state="running", current_job_present=True)
     try:
         response = run_inference(claim)
+        if not isinstance(response, str) or not response.strip() or len(response) > (4000 if target == "GSALES" else 4096):
+            raise RuntimeError("codex_response_invalid")
     except FatalConfigurationError:
         raise
     except Exception as exc:
         error = str(exc)
         code = error[:64] if error.replace("_", "").isalnum() else "inference_failed"
         try:
-            api_request("fail", {"job_id": job_id, "lease_token": lease, "error_code": code.lower()})
+            target_request(target, "fail", {"job_id": job_id, "lease_token": lease, "error_code": code.lower()})
         except TransientNetworkError:
             # Keep the lease untouched; the server's lease recovery remains authoritative.
-            write_status(state="network_error", last_error_code="worker_gateway_network_error")
+            write_status(target=target, state="network_error", last_error_code="worker_gateway_network_error")
             raise
-        write_status(state="error", current_job_present=False, last_error_code=code.lower())
+        write_status(target=target, state="error", current_job_present=False, last_error_code=code.lower())
         return False
 
     # Completion is the only acknowledgement. If its response is lost, do not
     # report failure or emit a second response; server-side lease/idempotency is authoritative.
     try:
-        api_request("complete", {
+        target_request(target, "complete", {
             "job_id": job_id,
             "lease_token": lease,
             "text": response,
             "model": os.environ.get("AGATA_CODEX_MODEL", "").strip() or "codex-default",
         })
     except TransientNetworkError:
-        write_status(state="network_error", last_error_code="worker_gateway_network_error")
+        write_status(target=target, state="network_error", last_error_code="worker_gateway_network_error")
         raise
     except FatalConfigurationError:
         raise
-    write_status(
+    write_status(target=target,
         last_success_at=datetime.now(UTC).isoformat(),
         last_success_job_id=job_id,
         state="idle",
@@ -291,6 +341,50 @@ def process_one() -> bool:
     return True
 
 
+class TargetScheduler:
+    """One synchronous execution slot, fair rotation and independent backoff."""
+
+    def __init__(self):
+        self.names = tuple(configured_targets())
+        self.cursor = 0
+        self.next_poll = {name: 0.0 for name in self.names}
+        self.failures = {name: 0 for name in self.names}
+
+    def poll(self, now: float | None = None) -> bool:
+        now = time.monotonic() if now is None else now
+        for _ in self.names:
+            name = self.names[self.cursor]
+            self.cursor = (self.cursor + 1) % len(self.names)
+            if self.next_poll[name] > now:
+                continue
+            try:
+                done = process_one(name)
+            except Exception as exc:
+                self.failures[name] += 1
+                delay = 60.0 if isinstance(exc, FatalConfigurationError) else POLL_BACKOFF_SECONDS[min(self.failures[name]-1, len(POLL_BACKOFF_SECONDS)-1)]
+                self.next_poll[name] = now + delay
+                write_status(target=name, state="error", last_error_code="worker_target_unavailable", next_poll_delay_seconds=delay)
+                return False
+            self.failures[name] = 0
+            self.next_poll[name] = 0.0
+            return done
+        return False
+
+
+def run_targets(poll_seconds: float, max_cycles: int | None, sleep_fn) -> int:
+    scheduler = TargetScheduler()
+    lock = acquire_worker_lock()
+    cycles = 0
+    try:
+        while max_cycles is None or cycles < max_cycles:
+            cycles += 1
+            scheduler.poll()
+            sleep_fn(min(max(poll_seconds, 1.0), 60.0))
+    finally:
+        lock.close()
+    return 0
+
+
 def run_watch(
     poll_seconds: float = 3.0,
     *,
@@ -298,6 +392,8 @@ def run_watch(
     sleep_fn=time.sleep,
 ) -> int:
     """Run a single worker process with bounded recovery from transient gateway errors."""
+    if os.environ.get("GSALES_AGATA_WORKER_URL") or os.environ.get("GSALES_AGATA_WORKER_TOKEN"):
+        return run_targets(poll_seconds, max_cycles, sleep_fn)
     lock = acquire_worker_lock()
     delay_index = 0
     consecutive_network_failures = 0
@@ -508,9 +604,7 @@ def main() -> int:
         if args.command == "network-stability":
             return network_stability_smoke()
         if args.command in {"once", "watch"}:
-            base = os.environ.get("GPOINT_AGATA_WORKER_URL", "https://gpoint.amiora.one/api/agata-worker")
-            if not base.startswith("https://") or not os.environ.get("GPOINT_AGATA_WORKER_TOKEN"):
-                raise FatalConfigurationError("worker_gateway_or_auth_unconfigured")
+            configured_targets()
         if args.command == "once":
             lock = acquire_worker_lock()
             try:

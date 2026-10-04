@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -26,8 +27,8 @@ ROOT = Path(__file__).resolve().parents[3]
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-@pytest.fixture
-def core_server(tmp_path):
+@contextmanager
+def core_runtime(tmp_path, source="gsales"):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -35,12 +36,12 @@ def core_server(tmp_path):
     key = base64.b64encode(b"a" * 32).decode()
     env.update(
         PYTHONPATH=str(ROOT / "services/agata"),
-        AGATA_DATABASE_URL=os.environ["GSALES_TEST_AGATA_DSN"].replace(
+        AGATA_DATABASE_URL=os.environ["GSALES_TEST_AGATA_DSN" if source == "gsales" else "GSALES_TEST_GPOINT_DSN"].replace(
             "postgresql://", "postgresql+asyncpg://"
         ),
-        AGATA_TENANT_ID=GSALES_TENANT_ID,
-        AGATA_SOURCE_SYSTEM="gsales",
-        AGATA_INTERNAL_API_TOKEN="disposable-e2e-core",
+        AGATA_TENANT_ID=GSALES_TENANT_ID if source == "gsales" else "7508f36f-774a-48aa-8c6b-42f6f160415d",
+        AGATA_SOURCE_SYSTEM=source,
+        AGATA_INTERNAL_API_TOKEN="disposable-e2e-core" if source == "gsales" else "disposable-point-core",
         AGATA_LLM_PROVIDER="mac_worker",
         AGATA_LLM_MODEL="codex-default",
         AGATA_CODEX_LOCAL_ENABLED="true",
@@ -62,6 +63,7 @@ def core_server(tmp_path):
             VALUES(%s,'GLOBAL','GSALES',1,'active',now(),'{"ai_disclosure_required":true,"self_attestation_allowed":true,"adult_only_features":[]}') ON CONFLICT DO NOTHING""",
             (GSALES_TENANT_ID,),
         )
+    tmp_path.mkdir(parents=True, exist_ok=True)
     with (tmp_path / "core.log").open("w") as log:
         process = subprocess.Popen(
             [sys.executable, str(FIXTURES / "core_server.py"), str(port)],
@@ -92,6 +94,12 @@ def core_server(tmp_path):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+
+
+@pytest.fixture
+def core_server(tmp_path):
+    with core_runtime(tmp_path) as url:
+        yield url
 
 
 def worker_rpc(url, action, payload=None):

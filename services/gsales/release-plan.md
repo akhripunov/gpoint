@@ -12,7 +12,7 @@ Build G Sales from a clean isolated checkout of the exact reviewed GitHub SHA:
 
 ```sh
 docker build --build-arg GPOINT_BUILD_SHA=<40-char-sha> \
-  -t gpoint-g-sales:<40-char-sha> services/g-sales
+  -t gpoint-g-sales:<40-char-sha> services/gsales
 ```
 
 Record image ID/digest, source SHA, migration checksum, effective configuration
@@ -32,6 +32,11 @@ checks that Core exposes the matching production readiness fact. No existing
 GPoint worker is redirected or replaced. Server provider selection and availability
 rehearsal are prerequisites to the later production release; no provider is enabled
 or charged by this task.
+
+V1.1 prepares shared worker v3 two-target routing; installed worker remains v2.
+See [worker integration](worker-integration.md) for the audited boundaries and
+separate-approval controlled Codex rehearsal. Canonical build/test context is
+`services/gsales/`; schema and tenant are unchanged.
 
 No G Sales production workflow is dispatched by this change. Existing GPoint
 Prepare/Deploy and release locks remain authoritative for shared Core changes.

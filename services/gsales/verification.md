@@ -25,7 +25,7 @@ disposable PostgreSQL 16/pgvector Docker container. The harness removes its
 container in finally and strips production AGATA/GSALES environment variables.
 
 ```sh
-PYTHONPATH=services/g-sales services/g-sales/.venv/bin/python services/g-sales/tests/run_postgres.py
+PYTHONPATH=services/gsales services/gsales/.venv/bin/python services/gsales/tests/run_postgres.py
 ```
 
 - G Sales suite: **29 passed**; includes actual PostgreSQL and cross-service HTTP E2E.
@@ -73,3 +73,40 @@ approved live acceptance, authenticated Sales→Creator registration contract, a
 production role inventory, restored-backup rehearsal and reviewed guarded
 agata0010→0011 release transition. All send flags default OFF. No deployment is
 authorized by this verification report.
+
+## V1.1 checkpoint — canonical path and shared worker
+
+Canonical application path is now `services/gsales/`; brand, PostgreSQL schema,
+GSALES tenant and source_system are unchanged. Owner's rename was verified as
+identical content before a dedicated commit and clean-start PASS. Active path
+references are updated; old service directory is absent.
+
+Prepared worker v3 uses one serial execution slot/common installed lock and two
+fixed targets with distinct endpoint/worker tokens, independent bounded backoff
+and fair rotation. GPOINT-only configuration remains compatible. Sales gateway
+authenticates separately and proves the bound Core identity; no worker DB access.
+Core completion retains its receipt lease and rejects wrong-lease replay.
+See `worker-integration.md` for installed v2 audit and the safe switching plan.
+
+Repeat synthetic verification: Sales **32 PASS**, dedicated Core **1 PASS**,
+baseline migration **1 PASS**, full Core **109 PASS, 0 SKIP** (previous105 plus
+four target/limit tests), focused worker suite **21 PASS**, release tooling
+**109 PASS**, Ruff/mypy (**18 files**)/workspace typecheck/Docker build+smoke PASS.
+One Starlette/AnyIO deprecation warning remains. Cross-service integration creates
+actual synthetic Sales seller/lead, persists encrypted cold pending without
+invented recipient messages/consent, generates Sales first then GPOINT via the
+same worker, verifies confirmed GPOINT response and Sales pending owner text.
+Foreign job/wrong lease rejected; matching duplicate receipt accepted. Sending
+flags OFF; no Telegram transport. Codex output in this regression is mocked.
+
+Independent V1.1 review found one P2: Sales output limit4000 vs worker4096.
+Sales-specific schema and pre-completion validation now cap4000, reporting invalid
+output through failure RPC. An oversized-output regression verifies no completion. Focused independent
+recheck: no unresolved P1/P2; four target regressions PASS.
+
+**Real Codex QA remains BLOCKED**, not PASS/SKIP: the installed watch process
+owns the shared lock. Prepared `--real-codex` command refuses before container
+creation/inference. Separate owner approval is required for temporary idle-only
+stop, two serial synthetic generations and finally restore of unchanged original
+LaunchAgent. No installed source/config/LaunchAgent/process was changed.
+Production always-on guard remains enforced; no production deployment is claimed.

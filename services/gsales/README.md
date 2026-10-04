@@ -135,5 +135,7 @@ and external credentials. These flags are OFF in local QA. Provider selection an
 availability acceptance remain pending; current development mode cannot pass
 production readiness.
 See [verification](verification.md), [release plan](release-plan.md) and [Telegram audit](telegram-audit.md).
+Shared Mac worker routing, credential boundaries and the prepared controlled QA
+switch are documented in [worker integration](worker-integration.md).
 Source preparation is not a production release. Real account/bot E2E and GPoint
 registration verification remain explicit external acceptance blockers.

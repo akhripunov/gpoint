@@ -244,6 +244,11 @@ async def test_sales_runtime_http_persona_drafts_response_and_ownership(monkeypa
                 },
             )
             assert complete.status_code == 200, complete.text
+            body = {"job_id": job["id"], "lease_token": job["leaseToken"],
+                    "text": "Я AI-помощник GPoint. Можно рассказать о платформе?", "model": "codex-default"}
+            assert (await client.post("/internal/v1/worker/complete", json=body)).json()["duplicate"] is True
+            assert (await client.post("/internal/v1/worker/complete", json={**body, "lease_token": "0" * 32})).status_code == 409
+            assert (await client.post("/internal/v1/worker/fail", json={"job_id": job["id"], "lease_token": "0" * 32, "error_code": "test"})).status_code == 409
             ready = await client.post("/internal/v1/sales/drafts", json=request)
             assert ready.status_code == 200, ready.text
             assert ready.json()["text"].startswith("Я AI-помощник")
