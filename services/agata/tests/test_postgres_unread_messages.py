@@ -42,6 +42,11 @@ def test_migration_baselines_existing_messages_across_tenants_without_marking_ne
         with admin.connect() as conn:
             conn.execute(text(f'ALTER DATABASE {db} OWNER TO {migration_url.username}'))
     env = dict(os.environ, AGATA_DATABASE_URL=migration_url.render_as_string(hide_password=False))
+    # Use a non-fixture tenant ID so agata0011 proves it binds the live inventory,
+    # rather than relying on a hard-coded GPOINT UUID from test configuration.
+    env['AGATA_TENANT_ID'] = str(uuid4())
+    bindings = {'ci_owner': env['AGATA_TENANT_ID']}
+    env['AGATA_ROLE_TENANT_BINDINGS'] = json.dumps(bindings)
     env.pop('AGATA_MIGRATION_TENANT_IDS', None)
     try:
         with engine.begin() as conn:
@@ -50,7 +55,6 @@ def test_migration_baselines_existing_messages_across_tenants_without_marking_ne
             subprocess.run([sys.executable, '-m', 'alembic', '-c', 'alembic.ini', 'upgrade', rev], cwd=ROOT, env={**env, **({"AGATA_DATABASE_URL": url.render_as_string(hide_password=False)} if administrator else {})}, check=True, capture_output=True, text=True)
         upgrade('agata0009')
         tenants = [env['AGATA_TENANT_ID'], str(uuid4())]
-        bindings = json.loads(env['AGATA_ROLE_TENANT_BINDINGS'])
         bindings[foreign_role] = tenants[1]
         mids = []
         with engine.begin() as conn:
@@ -76,7 +80,17 @@ def test_migration_baselines_existing_messages_across_tenants_without_marking_ne
         # Missing a known tenant binding must fail atomically before restrictive RLS.
         with pytest.raises(subprocess.CalledProcessError) as failure:
             upgrade('head', administrator=True)
-        assert 'every existing tenant requires' in failure.value.stderr
+        assert 'runtime tenant inventory must exactly match agata.tenants' in failure.value.stderr
+        with engine.begin() as conn:
+            assert conn.scalar(text('SELECT version_num FROM agata.alembic_version')) == 'agata0009'
+            assert not conn.scalar(text("SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='agata_identity')"))
+        env['AGATA_ROLE_TENANT_BINDINGS'] = json.dumps({
+            **bindings,
+            'unknown_runtime_role': str(uuid4()),
+        })
+        with pytest.raises(subprocess.CalledProcessError) as failure:
+            upgrade('head', administrator=True)
+        assert 'runtime tenant inventory must exactly match agata.tenants' in failure.value.stderr
         with engine.begin() as conn:
             assert conn.scalar(text('SELECT version_num FROM agata.alembic_version')) == 'agata0009'
             assert not conn.scalar(text("SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='agata_identity')"))

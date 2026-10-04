@@ -28,7 +28,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 @contextmanager
-def core_runtime(tmp_path, source="gsales", tenant_id=None):
+def core_runtime(tmp_path, source="gsales", tenant_id=None, env_overrides=None):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -56,6 +56,7 @@ def core_runtime(tmp_path, source="gsales", tenant_id=None):
         "RESPONSE_FINGERPRINT_HMAC_KEY",
     ):
         env["AGATA_" + suffix] = key
+    env.update(env_overrides or {})
     with psycopg.connect(os.environ["GSALES_TEST_ADMIN_DSN"]) as c:
         c.execute("UPDATE gsales.sellers SET status='paused'")
         if source == "gpoint":

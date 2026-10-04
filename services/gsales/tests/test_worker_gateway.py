@@ -13,7 +13,7 @@ async def test_gateway_credentials_and_fixed_identity():
     class Core:
         calls = []
 
-        async def assert_secure(self):
+        async def assert_secure(self, *, require_inference_ready=True):
             pass
 
         async def request(self, method, path, **kwargs):

@@ -5,10 +5,12 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { loadReleaseBookkeeping, persistReleaseBookkeeping } from './release-bookkeeping.mjs';
 import { migrationHead } from './release-migrations.mjs';
+import { gsalesProvisionCommand } from './release-gsales-provision.mjs';
+import { verifyReleaseBundle } from './release-bundle.mjs';
 import { acquireReleaseLock } from './release-lock.mjs';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { applyCandidate, cleanupTemporaryWorktree, inspectProductionReadOnly, inspectAgataMigrationReadiness, planReleaseRetention, provisionAgataInternalConfigForBaseline, runRemoteCommand, validateAgataProviderMode } from './release-gpoint-vps-adapter.mjs';
+import { applyCandidate, cleanupTemporaryWorktree, inspectProductionReadOnly, inspectAgataMigrationReadiness, inspectGsalesReadiness, planReleaseRetention, provisionAgataInternalConfigForBaseline, runRemoteCommand, validateAgataProviderMode } from './release-gpoint-vps-adapter.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 let STATE_FILE = process.env.GPOINT_RELEASE_STATE_FILE || path.join(ROOT, 'docs/release/state/production.json');
@@ -168,6 +170,15 @@ export function checkAgataArtifactParity(candidate, artifacts) {
   return ['agataApi', 'agataWorker'].flatMap(role =>
     artifacts?.[role]?.sourceSha === candidate ? [] : [`${role} artifact SHA mismatch`],
   );
+}
+
+export function checkGsalesArtifactParity(candidate, artifacts) {
+  return ['gsalesApi', 'gsalesAgataApi', 'gsalesAgataWorker'].flatMap(role =>
+    artifacts?.[role]?.sourceSha === candidate ? [] : [`${role} artifact SHA mismatch`]);
+}
+
+function gsalesArtifacts(candidate) {
+  return Object.fromEntries(['gsalesApi', 'gsalesAgataApi', 'gsalesAgataWorker'].map(role => [role, { sourceSha: candidate }]));
 }
 
 export function checkAgataEffectiveConfig(config) {
@@ -543,14 +554,19 @@ function runDryRun(candidate) {
     const current = state();
     const baseline = assertLiveBaseline(current, readLiveFacts());
     const { liveSha, liveDbHead } = baseline;
+    const gsalesReadiness = inspectGsalesReadiness(candidate, liveSha);
     const agataMigrationReadiness = inspectAgataMigrationReadiness(candidate, baseline.agataDbHead, candidateAgataMigrationHead(candidate));
     const build = isolatedBuild(candidate, process.env.GPOINT_RELEASE_SKIP_BUILD !== '1');
     const artifacts = { api: { sourceSha: candidate }, worker: { sourceSha: candidate }, bot: { sourceSha: candidate }, miniapp: { sourceSha: build.miniappBuildSha ?? candidate }, agataApi: { sourceSha: candidate }, agataWorker: { sourceSha: candidate } };
+    Object.assign(artifacts, gsalesArtifacts(candidate));
     const effective = { api: candidate, worker: candidate, bot: candidate, miniapp: candidate, agataApi: candidate, agataWorker: candidate, agataProvider: baseline.provider, ...providerConfigFromFacts(baseline.facts, baseline.workerStatus), enabled: true };
     const gates = evaluateSafetyGates({ candidateSha: candidate, remoteSha: proof.mainSha, artifacts, config: effective, recordedProductionSha: current.currentProductionSha, liveProductionSha: liveSha, productionRefTarget: candidate });
     gates.push(...checkAgataArtifactParity(candidate, artifacts), ...checkAgataEffectiveConfig(effective));
+    gates.push(...checkGsalesArtifactParity(candidate, artifacts));
     if (gates.length) die(gates.join('; '));
     const manifest = { releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: null, dbHeadBefore: liveDbHead, dbHeadAfter: null, agataDbHeadBefore: baseline.agataDbHead, agataDbHeadAfter: candidateAgataMigrationHead(candidate), artifactIdentities: artifacts, provider: baseline.provider, agataProvider: baseline.provider, startedAt, finishedAt: isoNow(), status: 'PLANNED', failureStage: null, failureReason: null, rollbackSha: current.currentProductionSha, rollbackDbCompatibility: 'REQUIRES_FORWARD_FIX_ASSESSMENT', productionRef: null, remoteProof: { mainSha: proof.mainSha, directRef: proof.directRef }, liveFacts: baseline.facts, agataMigrationReadiness, dryRun: true };
+    Object.assign(manifest, { gsalesReadiness, gsalesDbHeadBefore: baseline.facts.LIVE_GSALES_HEAD,
+      gsalesMigrationSha256Before: baseline.facts.LIVE_GSALES_MIGRATION_SHA256 });
     const file = writeManifest(manifest);
     console.log(JSON.stringify({ status: 'PLANNED', releaseId, candidateSha: candidate, remoteMainSha: proof.mainSha, buildCheckoutSha: build.checkoutSha, buildCheckoutClean: build.clean, dbHead: liveDbHead, rollbackSha: current.currentProductionSha, manifest: path.relative(ROOT, file) }, null, 2));
   } finally { unlock(); }
@@ -575,6 +591,58 @@ function provisionAgataConfig(candidate) {
   } finally { unlock(); }
 }
 
+function provisionGsalesConfig(candidate, approvedSha) {
+  if (candidate !== approvedSha) die('GSales provisioning requires --owner-approved-sha equal to exact candidate');
+  const releaseId = `gpoint-gsales-config-${isoNow().replace(/[-:.]/g, '')}`;
+  const unlock = acquireLock(releaseId);
+  try {
+    if (git(['rev-parse', 'HEAD']) !== candidate || git(['status', '--porcelain'])) die('GSales provisioning requires exact clean candidate checkout');
+    if (remoteProof(candidate).mainSha !== candidate) die('candidate must exactly match GitHub origin/main');
+    const bundle = verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, candidate);
+    const current = state();
+    const baseline = assertLiveBaseline(current, readLiveFacts());
+    writeManifest({ releaseId: `${releaseId}-baseline`, candidateSha: candidate, previousProductionSha: baseline.liveSha,
+      status: 'CONFIG_PROVISION_BASELINE_RECORDED', dbHeadBefore: baseline.liveDbHead,
+      agataDbHeadBefore: baseline.agataDbHead, gsalesDbHeadBefore: baseline.facts.LIVE_GSALES_HEAD,
+      authorizationMode: 'EXACT_SHA', ownerApprovedSha: approvedSha,
+      ciReceipt: { ...bundle, archive: undefined }, recordedAt: isoNow(), runtimeSwitchOccurred: false });
+    const output = runRemoteCommand(gsalesProvisionCommand(candidate, approvedSha, baseline.liveSha));
+    const evidence = JSON.parse(output.trim().split('\n').at(-1));
+    if (evidence.status !== 'PROVISIONED' || evidence.candidateSha !== candidate || evidence.baselineSha !== baseline.liveSha || evidence.backup?.status !== 'COMPLETE_PROTECTED') die('GSales provisioning evidence missing');
+    const manifest = { releaseId, candidateSha: candidate, previousProductionSha: baseline.liveSha,
+      status: 'GSales_CONFIG_PROVISIONED', authorizationMode: 'EXACT_SHA', ownerApprovedSha: approvedSha,
+      dbHeadBefore: baseline.liveDbHead, agataDbHeadBefore: baseline.agataDbHead,
+      startedAt: isoNow(), finishedAt: isoNow(), runtimeSwitchOccurred: false, evidence };
+    writeManifest(manifest);
+    console.log(JSON.stringify(manifest));
+  } finally { unlock(); }
+}
+
+function configureGsalesWorker(candidate, approvedSha) {
+  if (candidate !== approvedSha) die('Mac lane configuration requires exact-SHA OWNER approval');
+  const releaseId = `gpoint-gsales-worker-${isoNow().replace(/[-:.]/g, '')}`;
+  const unlock = acquireLock(releaseId);
+  try {
+    if (git(['rev-parse', 'HEAD']) !== candidate || git(['status', '--porcelain'])) die('Mac configuration requires a clean exact candidate');
+    if (remoteProof(candidate).mainSha !== candidate) die('candidate must match GitHub current main');
+    verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, candidate);
+    const baseline = assertLiveBaseline(state(), readLiveFacts());
+    inspectGsalesReadiness(candidate, baseline.liveSha);
+    const source = `import json,pathlib\ne=dict(line.split('=',1) for line in pathlib.Path('/opt/gpoint/env/production.env').read_text().splitlines() if line and not line.startswith('#') and '=' in line)\nassert e['RELEASE_SHA']=='${baseline.liveSha}'\nprint(json.dumps({key:e[key] for key in ('GSALES_WORKER_TOKEN','GSALES_TENANT_ID')}))\n`;
+    const credentials = runRemoteCommand(`set -e; printf '%s' '${Buffer.from(source).toString('base64')}' | base64 -d | python3 -`);
+    const result = spawnSync('python3', [path.join(ROOT, 'scripts/configure-gsales-mac-lane.py'),
+      '--candidate', candidate, '--owner-approved-sha', approvedSha, '--apply'],
+      { cwd: ROOT, input: credentials, encoding: 'utf8', timeout: 120_000 });
+    if (result.status !== 0) die(`Mac configuration blocked: ${sanitizeReleaseOutput(result.stderr)}`);
+    const evidence = JSON.parse(result.stdout);
+    if (!['CONFIGURED_GPOINT_AUTHENTICATED_GSALES_PENDING', 'ALREADY_CONFIGURED'].includes(evidence.status) || evidence.candidateSha !== candidate || evidence.generationInvoked !== false) die('Mac configuration evidence unproven');
+    const manifest = { releaseId, candidateSha: candidate, previousProductionSha: baseline.liveSha,
+      status: 'WORKER_CONFIGURED', authorizationMode: 'EXACT_SHA', ownerApprovedSha: approvedSha,
+      runtimeSwitchOccurred: false, databaseApplyOccurred: false, finishedAt: isoNow(), evidence };
+    writeManifest(manifest); console.log(JSON.stringify(manifest));
+  } finally { unlock(); }
+}
+
 function runApply(candidate) {
   const startedAt = isoNow();
   const totalStarted = Date.now();
@@ -591,11 +659,14 @@ function runApply(candidate) {
     const baseline = assertLiveBaseline(current, readLiveFacts());
     validatedProvider = baseline.provider;
     const { liveSha, liveDbHead } = baseline;
+    const gsalesReadiness = inspectGsalesReadiness(candidate, liveSha);
     const agataMigrationReadiness = inspectAgataMigrationReadiness(candidate, baseline.agataDbHead, candidateAgataMigrationHead(candidate));
     const effective = { api: candidate, worker: candidate, bot: candidate, miniapp: candidate, agataApi: candidate, agataWorker: candidate, agataProvider: baseline.provider, ...providerConfigFromFacts(baseline.facts, baseline.workerStatus), enabled: true };
     const artifacts = { api: { sourceSha: candidate }, worker: { sourceSha: candidate }, bot: { sourceSha: candidate }, miniapp: { sourceSha: candidate }, agataApi: { sourceSha: candidate }, agataWorker: { sourceSha: candidate } };
+    Object.assign(artifacts, gsalesArtifacts(candidate));
     const gates = evaluateSafetyGates({ candidateSha: candidate, remoteSha: proof.mainSha, artifacts, config: effective, recordedProductionSha: current.currentProductionSha, liveProductionSha: liveSha, productionRefTarget: candidate });
     gates.push(...checkAgataArtifactParity(candidate, artifacts), ...checkAgataEffectiveConfig(effective));
+    gates.push(...checkGsalesArtifactParity(candidate, artifacts));
     if (gates.length) die(gates.join('; '));
     const retentionCandidates = releaseRetentionCandidates();
     const retentionPlan = planReleaseRetention({
@@ -629,14 +700,21 @@ function runApply(candidate) {
     const candidateDbHead = prismaPaths.map(name => name.split('/').at(-2)).sort().at(-1);
     if (deployedDbHead !== candidateDbHead || (adapter.ciReceipt && deployedDbHead !== adapter.ciReceipt.prismaHead)) die('post-release Prisma head does not match candidate');
     if (afterFacts.LIVE_AGATA_HEAD !== adapter.agataIdentity.head) die('post-release Alembic head mismatch');
+    if (!adapter.gsalesIdentity || afterFacts.LIVE_GSALES_HEAD !== adapter.gsalesIdentity.migrationHead ||
+        afterFacts.LIVE_GSALES_MIGRATION_SHA256 !== adapter.gsalesIdentity.migrationSha256 ||
+        adapter.gsalesIdentity.buildSha !== candidate || adapter.gsalesIdentity.ready !== true) die('post-release GSales head/checksum/readiness mismatch');
     const ref = `gpoint-production-${startedAt.replace(/[-:.]/g, '')}`;
     measured(stageTimings, 'PRODUCTION_REF_CREATE', () => execFileSync('git', ['tag', '-a', ref, candidate, '-m', `GPoint production release\nproductionSha=${candidate}\ndbHead=${deployedDbHead}\nreleaseId=${releaseId}`], { cwd: ROOT, stdio: 'inherit' }));
     const remoteRef = measured(stageTimings, 'PRODUCTION_REF_PUSH_AND_VERIFY', () => pushProductionTag(ref, candidate));
     Object.assign(stageTimings, adapter.timings ?? {}, { TOTAL_RELEASE: Number(((Date.now() - totalStarted) / 1000).toFixed(1)) });
     console.log(`RELEASE_STAGE_TIMING=${JSON.stringify(stageTimings)}`);
     const artifactIdentities = { api: { sourceSha: candidate, adapter: adapter.imageIdentity }, worker: { sourceSha: candidate, adapter: adapter.imageIdentity }, bot: { sourceSha: candidate, adapter: adapter.imageIdentity }, miniapp: { sourceSha: candidate, adapter: adapter.imageIdentity }, agataApi: { sourceSha: candidate, adapter: adapter.agataIdentity }, agataWorker: { sourceSha: candidate, adapter: adapter.agataIdentity } };
+    for (const role of ['gsalesApi', 'gsalesAgataApi', 'gsalesAgataWorker']) artifactIdentities[role] = { sourceSha: candidate, adapter: adapter.gsalesIdentity };
     const manifest = { releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: candidate, dbHeadBefore: liveDbHead, dbHeadAfter: deployedDbHead, agataDbHeadBefore: baseline.agataDbHead, agataDbHeadAfter: adapter.agataIdentity.head, agataRuntimeSha: candidate, agataProvider: adapter.agataIdentity.provider, artifactIdentities, startedAt, finishedAt: isoNow(), status: 'COMPLETE', failureStage: null, failureReason: null, rollbackSha: current.currentProductionSha, rollbackDbCompatibility: 'REQUIRES_FORWARD_FIX_ASSESSMENT', productionRef: ref, remoteProof: { mainSha: proof.mainSha }, migrationOutput: adapter.migrationOutput, migrationProof: adapter.migrationProof, detectorSourceHash: adapter.detectorHash, stageTimings, releaseOrigin: 'durable-production-release', agataMigrationReadiness };
     manifest.ciReceipt = adapter.ciReceipt ?? null;
+    Object.assign(manifest, { gsalesReadiness, gsalesDbHeadBefore: baseline.facts.LIVE_GSALES_HEAD,
+      gsalesDbHeadAfter: adapter.gsalesIdentity.migrationHead, gsalesRuntime: adapter.gsalesIdentity,
+      effectiveConfigSha256: adapter.effectiveConfigSha256, authorizationMode: 'EXACT_SHA' });
     const file = writeManifest(manifest);
     const verifiedState = verifiedRuntimeState(current, { candidate, dbHead: deployedDbHead });
     fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...verifiedState, currentProductionRef: ref, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: manifest.finishedAt, releaseOrigin: 'durable-production-release', agataRuntimeSha: candidate, agataAlembicHead: adapter.agataIdentity.head, agataProvider: adapter.agataIdentity.provider, artifactIdentities: manifest.artifactIdentities }, null, 2)}\n`);
@@ -755,6 +833,8 @@ function main() {
       }
     }
   }
+  if (args.includes('--provision-gsales-config')) return persistAction(() => provisionGsalesConfig(candidateSha(args), args[args.indexOf('--owner-approved-sha') + 1]));
+  if (args.includes('--configure-gsales-worker')) return persistAction(() => configureGsalesWorker(candidateSha(args), args[args.indexOf('--owner-approved-sha') + 1]));
   if (args.includes('--finalize-recovery')) return persistAction(() => finalizeRecovery(candidateSha(args)));
   const isDryRun = args.includes('--dry-run');
   const isApply = args.includes('--apply');

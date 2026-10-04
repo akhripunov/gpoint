@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import os
 from pathlib import Path
+from uuid import UUID
 
 import psycopg
 
@@ -12,9 +13,23 @@ from app.db.session import GateError
 
 def apply(conn, directory: Path):
     conn.execute("SELECT pg_advisory_xact_lock(723803)")
-    role = conn.execute("SELECT session_user").fetchone()[0]
+    database, role = conn.execute("SELECT current_database(),session_user").fetchone()
+    if database != "gpoint":
+        raise GateError("migration_database_identity_mismatch")
     if role == "gsales_runtime":
         raise GateError("runtime_cannot_migrate")
+    try:
+        tenant_id = str(UUID(os.environ["GSALES_TENANT_ID"]))
+    except (KeyError, ValueError) as exc:
+        raise GateError("provisioned_gsales_tenant_required") from exc
+    binding = conn.execute(
+        "SELECT tenant_id::text FROM agata_identity.role_tenants WHERE login_role='gsales_runtime'"
+    ).fetchone()
+    tenant_exists = conn.execute(
+        "SELECT EXISTS(SELECT 1 FROM agata.tenants WHERE id=%s::uuid)", (tenant_id,)
+    ).fetchone()[0]
+    if not binding or binding[0] != tenant_id or not tenant_exists:
+        raise GateError("gsales_runtime_tenant_binding_mismatch")
     conn.execute("CREATE SCHEMA IF NOT EXISTS gsales_meta")
     conn.execute("REVOKE ALL ON SCHEMA gsales_meta FROM PUBLIC")
     conn.execute("""CREATE TABLE IF NOT EXISTS gsales_meta.migrations

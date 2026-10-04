@@ -1,0 +1,92 @@
+version: "3.8"
+
+services:
+  gsales-api:
+    profiles: [gsales]
+    image: gpoint-g-sales-runtime:${RELEASE_SHA}
+    restart: unless-stopped
+    env_file:
+      - /opt/gpoint/env/production.env
+    environment:
+      GSALES_PRODUCTION_MODE: ${GSALES_PRODUCTION_MODE:-false}
+      GSALES_OUTREACH_ENABLED: "false"
+      GSALES_AUTO_REPLY_ENABLED: "false"
+      GSALES_MANAGEMENT_ENABLED: "false"
+      GSALES_TELEGRAM_LISTENER_ENABLED: "false"
+      GSALES_AGATA_URL: http://gsales-agata-api:8000
+      GSALES_AGATA_API_TOKEN: ${GSALES_AGATA_INTERNAL_API_TOKEN:?GSALES_AGATA_INTERNAL_API_TOKEN is required when the GSales lane is enabled}
+    expose: ["8010"]
+    ports: ["127.0.0.1:8010:8010"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health/live', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+    networks:
+      - gpoint_app
+      - shared_internal
+
+  gsales-agata-api:
+    profiles: [gsales]
+    image: gpoint-agata-runtime:${RELEASE_SHA}
+    restart: unless-stopped
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file:
+      - /opt/gpoint/env/production.env
+    environment:
+      AGATA_SOURCE_SYSTEM: gsales
+      AGATA_CODEX_LOCAL_ENABLED: "true"
+      AGATA_LLM_API_KEY: ""
+      AGATA_SALES_DRAFTS_ENABLED: ${GSALES_PRODUCTION_MODE:-false}
+      AGATA_SALES_PRODUCTION_MODE: ${GSALES_PRODUCTION_MODE:-false}
+      AGATA_DATABASE_URL: ${GSALES_AGATA_DATABASE_URL:?GSALES_AGATA_DATABASE_URL is required when the GSales lane is enabled}
+      AGATA_TENANT_ID: ${GSALES_AGATA_TENANT_ID:?GSALES_AGATA_TENANT_ID is required when the GSales lane is enabled}
+      AGATA_INTERNAL_API_TOKEN: ${GSALES_AGATA_INTERNAL_API_TOKEN:?GSALES_AGATA_INTERNAL_API_TOKEN is required when the GSales lane is enabled}
+      AGATA_LLM_PROVIDER: ${GSALES_AGATA_LLM_PROVIDER:?GSALES_AGATA_LLM_PROVIDER is required when the GSales lane is enabled}
+      AGATA_MESSAGE_AEAD_KEY: ${GSALES_AGATA_MESSAGE_AEAD_KEY:?GSALES_AGATA_MESSAGE_AEAD_KEY is required when the GSales lane is enabled}
+      AGATA_REQUEST_FINGERPRINT_HMAC_KEY: ${GSALES_AGATA_REQUEST_FINGERPRINT_HMAC_KEY:?GSALES_AGATA_REQUEST_FINGERPRINT_HMAC_KEY is required when the GSales lane is enabled}
+      AGATA_RETRIEVAL_QUERY_HMAC_KEY: ${GSALES_AGATA_RETRIEVAL_QUERY_HMAC_KEY:?GSALES_AGATA_RETRIEVAL_QUERY_HMAC_KEY is required when the GSales lane is enabled}
+      AGATA_SHADOW_CANDIDATE_HMAC_KEY: ${GSALES_AGATA_SHADOW_CANDIDATE_HMAC_KEY:?GSALES_AGATA_SHADOW_CANDIDATE_HMAC_KEY is required when the GSales lane is enabled}
+      AGATA_RESPONSE_FINGERPRINT_HMAC_KEY: ${GSALES_AGATA_RESPONSE_FINGERPRINT_HMAC_KEY:?GSALES_AGATA_RESPONSE_FINGERPRINT_HMAC_KEY is required when the GSales lane is enabled}
+    expose: ["8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 8
+    networks:
+      - gpoint_app
+      - shared_internal
+
+  gsales-agata-memory-worker:
+    profiles: [gsales]
+    image: gpoint-agata-runtime:${RELEASE_SHA}
+    restart: unless-stopped
+    command: ["python", "-m", "app.memory.worker"]
+    env_file:
+      - /opt/gpoint/env/production.env
+    environment:
+      AGATA_SOURCE_SYSTEM: gsales
+      AGATA_CODEX_LOCAL_ENABLED: "true"
+      AGATA_LLM_API_KEY: ""
+      AGATA_SALES_DRAFTS_ENABLED: ${GSALES_PRODUCTION_MODE:-false}
+      AGATA_SALES_PRODUCTION_MODE: ${GSALES_PRODUCTION_MODE:-false}
+      AGATA_DATABASE_URL: ${GSALES_AGATA_DATABASE_URL:?GSALES_AGATA_DATABASE_URL is required when the GSales lane is enabled}
+      AGATA_TENANT_ID: ${GSALES_AGATA_TENANT_ID:?GSALES_AGATA_TENANT_ID is required when the GSales lane is enabled}
+      AGATA_INTERNAL_API_TOKEN: ${GSALES_AGATA_INTERNAL_API_TOKEN:?GSALES_AGATA_INTERNAL_API_TOKEN is required when the GSales lane is enabled}
+      AGATA_LLM_PROVIDER: ${GSALES_AGATA_LLM_PROVIDER:?GSALES_AGATA_LLM_PROVIDER is required when the GSales lane is enabled}
+      AGATA_MESSAGE_AEAD_KEY: ${GSALES_AGATA_MESSAGE_AEAD_KEY:?GSALES_AGATA_MESSAGE_AEAD_KEY is required when the GSales lane is enabled}
+      AGATA_REQUEST_FINGERPRINT_HMAC_KEY: ${GSALES_AGATA_REQUEST_FINGERPRINT_HMAC_KEY:?GSALES_AGATA_REQUEST_FINGERPRINT_HMAC_KEY is required when the GSales lane is enabled}
+      AGATA_RETRIEVAL_QUERY_HMAC_KEY: ${GSALES_AGATA_RETRIEVAL_QUERY_HMAC_KEY:?GSALES_AGATA_RETRIEVAL_QUERY_HMAC_KEY is required when the GSales lane is enabled}
+      AGATA_SHADOW_CANDIDATE_HMAC_KEY: ${GSALES_AGATA_SHADOW_CANDIDATE_HMAC_KEY:?GSALES_AGATA_SHADOW_CANDIDATE_HMAC_KEY is required when the GSales lane is enabled}
+      AGATA_RESPONSE_FINGERPRINT_HMAC_KEY: ${GSALES_AGATA_RESPONSE_FINGERPRINT_HMAC_KEY:?GSALES_AGATA_RESPONSE_FINGERPRINT_HMAC_KEY is required when the GSales lane is enabled}
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.memory.worker", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    networks:
+      - gpoint_app
+      - shared_internal

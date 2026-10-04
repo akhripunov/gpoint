@@ -1,6 +1,7 @@
 """Creates/removes only one ephemeral GPoint test container; never reads production env."""
 
 import base64
+import hashlib
 import json
 import os
 import signal
@@ -84,7 +85,8 @@ def main():
             .strip()
             .rsplit(":", 1)[1]
         )
-        admin_base = f"postgresql://postgres:{password}@127.0.0.1:{port}/postgres"
+        database_host = os.environ.get("GSALES_TEST_DB_HOST", "127.0.0.1")
+        admin_base = f"postgresql://postgres:{password}@{database_host}:{port}/postgres"
         for _ in range(45):
             try:
                 with psycopg.connect(admin_base, connect_timeout=1, autocommit=True) as conn:
@@ -94,7 +96,9 @@ def main():
                 time.sleep(0.5)
         else:
             raise RuntimeError("disposable_postgres_not_ready")
-        dbname = "gpoint_gsales_test"
+        # Production migrator rejects every other database identity. This name
+        # belongs only to the unique disposable container created above.
+        dbname = "gpoint"
         with psycopg.connect(admin_base, autocommit=True) as conn:
             conn.execute(sql.SQL("CREATE DATABASE {} ").format(sql.Identifier(dbname)))
             for role in ("gpoint_test_runtime", "gsales_agata_runtime", "gsales_runtime"):
@@ -114,6 +118,7 @@ def main():
         env.update(
             AGATA_DATABASE_URL=admin.replace("postgresql://", "postgresql+psycopg://"),
             AGATA_TENANT_ID=GPOINT,
+            GSALES_TENANT_ID=GSALES,
         )
         key = base64.b64encode(b"a" * 32).decode()
         for suffix in (
@@ -152,6 +157,29 @@ def main():
                         sql.Identifier(role)
                     )
                 )
+        # Reproduce the actual legacy owner threat: FORCE RLS does not stop a
+        # GPoint application login that owns the schema/tables from disabling it.
+        with psycopg.connect(admin) as conn:
+            conn.execute("ALTER SCHEMA agata OWNER TO gpoint_test_runtime")
+            conn.execute("""DO $$ DECLARE obj record; BEGIN
+                FOR obj IN SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                  WHERE n.nspname='agata' AND c.relkind='r' LOOP
+                  EXECUTE format('ALTER TABLE agata.%I OWNER TO gpoint_test_runtime',obj.relname);
+                END LOOP;
+                FOR obj IN SELECT format('%I.%I(%s)',n.nspname,p.proname,pg_get_function_identity_arguments(p.oid)) AS identity
+                  FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+                  WHERE n.nspname='agata' AND p.prokind='f' LOOP
+                  EXECUTE format('ALTER FUNCTION %s OWNER TO gpoint_test_runtime',obj.identity);
+                END LOOP;
+            END $$""")
+        with psycopg.connect(env["GSALES_TEST_GPOINT_DSN"]) as conn:
+            conn.execute("ALTER TABLE agata.users DISABLE ROW LEVEL SECURITY")
+            assert conn.execute("SELECT count(*) FROM agata.users").fetchone()[0] == 2
+            # Restore baseline guards so subsequent tests also reproduce the
+            # separate tenant GUC spoof rather than disabled RLS.
+            conn.execute("ALTER TABLE agata.users ENABLE ROW LEVEL SECURITY")
+            conn.execute("ALTER TABLE agata.users FORCE ROW LEVEL SECURITY")
+        print("LEGACY_GPOINT_OWNER_RLS_BYPASS_REPRODUCED", flush=True)
         # A concrete negative test before the fix: the same GSALES login can
         # read GPOINT users merely by setting a GUC. New migration must close it.
         with psycopg.connect(env["GSALES_TEST_AGATA_DSN"]) as conn:
@@ -164,7 +192,7 @@ def main():
             )
         print("LEGACY_TENANT_CONTEXT_SPOOF_REPRODUCED", flush=True)
         env["AGATA_ROLE_TENANT_BINDINGS"] = json.dumps(
-            {"gpoint_test_runtime": GPOINT, "gsales_agata_runtime": GSALES}
+            {"gpoint_test_runtime": GPOINT, "gsales_agata_runtime": GSALES, "gsales_runtime": GSALES}
         )
         subprocess.run(
             [sys.executable, "-m", "alembic", "upgrade", "head"],
@@ -172,8 +200,24 @@ def main():
             env={**env, "PYTHONPATH": str(AGATA)},
             check=True,
         )
+        env["GSALES_MIGRATION_DATABASE_URL"] = admin
+        # Exercise the real guarded migrator, never bypass its identity/binding
+        # checks by executing SQL directly. Replays must retain the ledger.
+        rehearsal_sha = "a" * 40
+        for _ in range(2):
+            applied = subprocess.run(
+                [sys.executable, "-m", "app.db.migrate", "--apply",
+                 "--candidate", rehearsal_sha, "--owner-approved-sha", rehearsal_sha],
+                cwd=SALES, env=env, capture_output=True, text=True, timeout=60,
+            )
+            if applied.returncode:
+                raise RuntimeError("disposable_gsales_migrator_failed_details_withheld")
         with psycopg.connect(admin) as conn:
-            conn.execute((SALES / "migrations/001_gsales.sql").read_text())
+            ledger = conn.execute("SELECT version,sha256 FROM gsales_meta.migrations ORDER BY version").fetchall()
+            checksum = hashlib.sha256((SALES / "migrations/001_gsales.sql").read_bytes()).hexdigest()
+            if ledger != [("001_gsales", checksum)]:
+                raise RuntimeError("disposable_gsales_migration_ledger_mismatch")
+        print("GSALES_PRODUCTION_MIGRATOR_REPLAY=PASS", flush=True)
         result = subprocess.run([sys.executable, "-m", "pytest", "-q", "tests/test_shared_worker_http.py" if real_codex else "tests"], cwd=SALES, env=env)
         if result.returncode or real_codex:
             return result.returncode

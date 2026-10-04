@@ -15,10 +15,13 @@ export function verifyReleaseBundle(directory, candidate) {
   if (!/^[A-Za-z0-9_]{1,32}$/.test(proof.agataHead ?? '') || !/^[A-Za-z0-9_]{1,128}$/.test(proof.prismaHead ?? '')) {
     throw new Error('invalid candidate migration heads');
   }
-  for (const gate of ['unit', 'postgres', 'docker', 'migration', 'miniapp', 'agataHealth', 'deployRehearsal']) {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(proof.gsalesMigrationHead ?? '') || !/^[a-f0-9]{64}$/.test(proof.gsalesMigrationSha256 ?? '')) {
+    throw new Error('invalid G Sales migration identity');
+  }
+  for (const gate of ['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'deployRehearsal']) {
     if (proof.gates?.[gate] !== 'PASS') throw new Error(`missing release gate: ${gate}`);
   }
-  for (const role of ['app', 'agata']) {
+  for (const role of ['app', 'agata', 'gsales']) {
     const image = proof.images?.[role];
     if (!image || !/^sha256:[a-f0-9]{64}$/.test(image.id) || image.revision !== candidate || image.platform !== 'linux/amd64') {
       throw new Error(`invalid ${role} image identity`);
@@ -46,7 +49,7 @@ function temporaryPath(root, name) {
 export function importBundleCommand(proof, candidate, scratch = '/tmp') {
   // Only validated values may enter the remote shell.
   if (proof.candidateSha !== candidate || !/^[a-f0-9]{40}$/.test(candidate) || !/^[a-f0-9]{64}$/.test(proof.archiveSha256)) throw new Error('invalid bundle command');
-  for (const role of ['app', 'agata']) {
+  for (const role of ['app', 'agata', 'gsales']) {
     const id = proof.images[role].id;
     if (!/^sha256:[a-f0-9]{64}$/.test(id)) throw new Error('invalid image ID');
   }
@@ -56,21 +59,21 @@ export function importBundleCommand(proof, candidate, scratch = '/tmp') {
 
 export function loadedImageVerificationCommand(proof, candidate) {
   if (proof.candidateSha !== candidate || !/^[a-f0-9]{40}$/.test(candidate) ||
-      ['app', 'agata'].some(role => !/^sha256:[a-f0-9]{64}$/.test(proof.images?.[role]?.id))) throw new Error('invalid image identity command');
+      ['app', 'agata', 'gsales'].some(role => !/^sha256:[a-f0-9]{64}$/.test(proof.images?.[role]?.id))) throw new Error('invalid image identity command');
   const code = fs.readFileSync(new URL('./verify-loaded-images.py', import.meta.url)).toString('base64');
-  return `python3 -c "import base64;exec(compile(base64.b64decode('${code}'), 'verify-loaded-images.py', 'exec'))" '${candidate}' '${proof.images.app.id}' '${proof.images.agata.id}'`;
+  return `python3 -c "import base64;exec(compile(base64.b64decode('${code}'), 'verify-loaded-images.py', 'exec'))" '${candidate}' '${proof.images.app.id}' '${proof.images.agata.id}' '${proof.images.gsales.id}'`;
 }
 
 export function preparedImageCaptureCommand(proof, candidate, scratch = '/tmp') {
   const verification = loadedImageVerificationCommand(proof, candidate);
-  return `set -e; ${verification}; docker image inspect gpoint-runtime:${candidate} --format '{{.Id}}' > ${temporaryPath(scratch, `gpoint-image-id-${candidate}`)}; docker image inspect gpoint-agata-runtime:${candidate} --format '{{.Id}}' > ${temporaryPath(scratch, `gpoint-agata-image-id-${candidate}`)}; echo GPOINT_CI_IMAGE_REUSED`;
+  return `set -e; ${verification}; docker image inspect gpoint-runtime:${candidate} --format '{{.Id}}' > ${temporaryPath(scratch, `gpoint-image-id-${candidate}`)}; docker image inspect gpoint-agata-runtime:${candidate} --format '{{.Id}}' > ${temporaryPath(scratch, `gpoint-agata-image-id-${candidate}`)}; docker image inspect gpoint-g-sales-runtime:${candidate} --format '{{.Id}}' > ${temporaryPath(scratch, `gpoint-g-sales-image-id-${candidate}`)}; echo GPOINT_CI_IMAGE_REUSED`;
 }
 
 export function preparedImageParityCommand(proof, candidate, scratch = '/tmp') {
   const verification = loadedImageVerificationCommand(proof, candidate);
   // Recorded runtime proofs use the VPS store's native IDs. Re-prove their
   // exact config identity and then compare native IDs within that same store.
-  return `set -e; ${verification}; test "$(cat ${temporaryPath(scratch, `gpoint-image-id-${candidate}`)})" = "$(docker image inspect gpoint-runtime:${candidate} --format '{{.Id}}')"; test "$(cat ${temporaryPath(scratch, `gpoint-agata-image-id-${candidate}`)})" = "$(docker image inspect gpoint-agata-runtime:${candidate} --format '{{.Id}}')"; echo GPOINT_CI_PARITY_OK`;
+  return `set -e; ${verification}; test "$(cat ${temporaryPath(scratch, `gpoint-image-id-${candidate}`)})" = "$(docker image inspect gpoint-runtime:${candidate} --format '{{.Id}}')"; test "$(cat ${temporaryPath(scratch, `gpoint-agata-image-id-${candidate}`)})" = "$(docker image inspect gpoint-agata-runtime:${candidate} --format '{{.Id}}')"; test "$(cat ${temporaryPath(scratch, `gpoint-g-sales-image-id-${candidate}`)})" = "$(docker image inspect gpoint-g-sales-runtime:${candidate} --format '{{.Id}}')"; echo GPOINT_CI_PARITY_OK`;
 }
 
 export function reuseBundleCommand(proof, candidate) {

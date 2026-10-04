@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,16 +24,34 @@ class ProductionMigrationTests(unittest.TestCase):
                              '11111111-1111-4111-8111-111111111111'],
                     messages=12, baseline=5)
 
-    def test_restricted_role_uses_complete_authoritative_sorted_inventory(self):
-        result = self.m.validate_readiness(self.proof(), self.census())
+    def test_agata0009_candidate_applies_through_agata0011_only_with_privileged_migrator(self):
+        proof = self.proof(); proof['privileged'] = True
+        result = self.m.validate_readiness(proof, self.census())
         self.assertEqual(result['tenant_count'], 2)
         self.assertEqual(result['inventory'], ','.join(sorted(self.census()['tenants'])))
         self.assertEqual(result['lock_risk'], 'BOUNDED_MIGRATION_LOCK_REQUIRED')
+        self.assertEqual(result['target_head'], 'agata0011')
+        with self.assertRaisesRegex(RuntimeError, 'privileged migration identity'):
+            self.m.validate_readiness(self.proof(), self.census())
+
+    def test_agata0010_to_agata0011_requires_verified_privileged_migrator(self):
+        proof = self.proof(); proof.update(head='agata0010', privileged=True)
+        result = self.m.validate_readiness(proof, self.census())
+        self.assertEqual(result['target_head'], 'agata0011')
+        proof['privileged'] = False
+        with self.assertRaisesRegex(RuntimeError, 'privileged migration identity'):
+            self.m.validate_readiness(proof, self.census())
+
+    def test_unsupported_migration_baseline_fails_closed(self):
+        proof = self.proof(); proof['head'] = 'agata0008'
+        with self.assertRaisesRegex(RuntimeError, 'only supports'):
+            self.m.validate_readiness(proof, self.census())
 
     def test_missing_inventory_fails_closed(self):
         census = self.census(); census['tenants'] = []
+        proof = self.proof(); proof['privileged'] = True
         with self.assertRaisesRegex(RuntimeError, 'inventory'):
-            self.m.validate_readiness(self.proof(), census)
+            self.m.validate_readiness(proof, census)
 
     def test_role_filtered_census_is_never_complete(self):
         census = self.census(); census['authoritative'] = False
@@ -48,7 +67,8 @@ class ProductionMigrationTests(unittest.TestCase):
                     self.m.validate_readiness(proof, self.census())
 
     def test_inventory_is_not_leaked_in_public_facts(self):
-        result = self.m.public_facts(self.m.validate_readiness(self.proof(), self.census()))
+        proof = self.proof(); proof['privileged'] = True
+        result = self.m.public_facts(self.m.validate_readiness(proof, self.census()))
         self.assertNotIn('inventory', result)
         self.assertNotIn('tenants', result)
         self.assertEqual(result['tenant_count'], 2)
@@ -60,15 +80,16 @@ class ProductionMigrationTests(unittest.TestCase):
             def __enter__(self): events.append('lock'); return self
             def census(self): events.append('census'); return self_outer.census()
             def alive(self): return True
-            def verify(self): events.append('verify'); return True
+            def verify(self, target_head): events.append(('verify', target_head)); return True
             def __exit__(self, *args): events.append('unlock')
         self_outer = self
         def migrate(inventory, guard):
             events.append('migrate')
             self.assertTrue(guard.alive())
             self.assertEqual(len(inventory.split(',')), 2)
-        self.m.guarded_migration(self.proof(), Guard(), migrate)
-        self.assertEqual(events, ['lock', 'census', 'migrate', 'verify', 'unlock'])
+        proof = self.proof(); proof['privileged'] = True
+        self.m.guarded_migration(proof, Guard(), migrate)
+        self.assertEqual(events, ['lock', 'census', 'migrate', ('verify', 'agata0011'), 'unlock'])
 
     def test_guard_loss_or_incomplete_baseline_is_not_success(self):
         for alive, verified in [(False, True), (True, False)]:
@@ -77,11 +98,12 @@ class ProductionMigrationTests(unittest.TestCase):
                 def __exit__(self, *args): pass
                 def census(self): return self_outer.census()
                 def alive(self): return alive
-                def verify(self): return verified
+                def verify(self, target_head): return verified
             self_outer = self
             calls = []
+            proof = self.proof(); proof['privileged'] = True
             with self.assertRaises(RuntimeError):
-                self.m.guarded_migration(self.proof(), Guard(), lambda *args: calls.append('apply'))
+                self.m.guarded_migration(proof, Guard(), lambda *args: calls.append('apply'))
             if not alive: self.assertEqual(calls, [])
 
 
@@ -90,6 +112,18 @@ class ProductionMigrationTests(unittest.TestCase):
         census = self.census(); census.update(cluster_addresses=['10.2.0.5'], database_oid=16385)
         with self.assertRaisesRegex(RuntimeError, 'identity'):
             self.m.validate_readiness(proof, census)
+
+    def test_unprotected_migration_credentials_block_probe_before_container_start(self):
+        with tempfile.TemporaryDirectory() as directory:
+            migration = Path(directory) / 'migration.env'
+            migration.write_text('AGATA_MIGRATOR_DATABASE_URL=disposable-secret\n')
+            migration.chmod(0o644)
+            self.m.MIGRATION_ENV_FILE = str(migration)
+            def forbidden_docker(*args, **kwargs):
+                self.fail('insecure credentials reached a Docker command')
+            self.m.docker_checked = forbidden_docker
+            with self.assertRaisesRegex(RuntimeError, 'protected 0600'):
+                self.m.effective_probe('disposable-image')
 
 
 if __name__ == '__main__': unittest.main()

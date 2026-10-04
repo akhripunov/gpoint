@@ -9,6 +9,11 @@ gpoint.amiora.one {
   request_body {
     max_size 60MB
   }
+  @gsales_worker path /gsales/agata-worker/*
+  handle @gsales_worker {
+    uri strip_prefix /gsales
+    reverse_proxy 127.0.0.1:8010
+  }
   @api path /api/*
   handle @api {
     uri strip_prefix /api

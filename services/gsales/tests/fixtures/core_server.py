@@ -26,6 +26,13 @@ async def worker_cycle():
     return {'claimed':result.claimed,'completed':result.completed,'failed':result.failed}
 
 
+@app.post('/test/stale-worker-poll',dependencies=[Depends(require_internal_auth)])
+async def stale_worker_poll():
+    import time
+    app.state.codex_worker_last_poll_at = time.monotonic() - get_settings().codex_worker_poll_ttl_seconds - 1
+    return {'status': 'stale'}
+
+
 if __name__=='__main__':
     import sys
     uvicorn.run(app,host='127.0.0.1',port=int(sys.argv[1]),log_level='error')

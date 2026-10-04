@@ -124,15 +124,15 @@ migration receipts. `/health/ready` verifies the non-owner, non-superuser,
 non-bypass, non-role-creating runtime role and FORCE RLS; send-enabled readiness
 also checks Core identity and transport configuration.
 
-Mac worker is a real existing provider used in the G Sales development profile;
-it is not a mandatory production architecture component. Production mode rejects
-Mac/test inference and requires an approved always-on server provider through Core.
-`GSALES_PRODUCTION_MODE=true` requires Core production readiness. Core must use
-`AGATA_SALES_PRODUCTION_MODE=true` and
-`AGATA_SALES_ALWAYS_ON_PROVIDER_APPROVED=true` with the selected server provider
-and external credentials. These flags are OFF in local QA. Provider selection and
-availability acceptance remain pending; current development mode cannot pass
-production readiness.
+The owner-approved Unified Mac Worker V3 is an allowed production provider for
+G Sales through the shared AGATA Core. Production mode rejects local fake and
+disabled inference; `mac_worker` requires the approved shared worker to be
+enabled. An approved external server provider remains a supported alternative and
+requires its separate approval flag and credential. GSales runtime readiness
+checks the authenticated Core security/provider contract and reports degraded
+when Core rejects inference or the worker is unavailable. All send, management,
+auto-reply and listener flags remain OFF by default; this approval does not enable
+them.
 See [verification](verification.md), [release plan](release-plan.md) and [Telegram audit](telegram-audit.md).
 Shared Mac worker routing, credential boundaries and the prepared controlled QA
 switch are documented in [worker integration](worker-integration.md).

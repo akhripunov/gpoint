@@ -7,6 +7,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { verifyReleaseBundle } from './release-bundle.mjs';
 import { persistReleaseBookkeeping, loadReleaseBookkeeping } from './release-bookkeeping.mjs';
 import { fileURLToPath } from 'node:url';
+import { inspectProductionReadOnly } from './release-gpoint-vps-adapter.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const sha = process.env.CANDIDATE_SHA;
@@ -31,6 +32,19 @@ const previous = new Set(fs.readdirSync(ledger.manifestDir));
 let releaseCode = 1;
 let preflightStatus = 'BLOCKED';
 try {
+  // First GSales release includes an explicitly approved protected setup.
+  // Read-only preflight never provisions identities or changes the Mac worker.
+  if (mode === 'production') {
+    const facts = inspectProductionReadOnly();
+    if (/^LIVE_GSALES_HEAD=ABSENT$/m.test(facts)) {
+      const setup = spawnSync('pnpm', ['release:gpoint', '--provision-gsales-config', '--candidate', sha, '--owner-approved-sha', sha],
+        { cwd: root, stdio: 'inherit', timeout: 300_000 });
+      if (setup.status !== 0) throw new Error('Approved GSales provisioning blocked the release');
+    }
+    const worker = spawnSync('pnpm', ['release:gpoint', '--configure-gsales-worker', '--candidate', sha, '--owner-approved-sha', sha],
+      { cwd: root, stdio: 'inherit', timeout: 150_000 });
+    if (worker.status !== 0) throw new Error('Approved Mac lane configuration blocked the release');
+  }
   // Docker artifacts already passed CI. Canonical dry-run still independently
   // checks the live baseline, config, GitHub SHA and isolated source tree.
   const preflight = spawnSync('pnpm', ['release:gpoint', '--dry-run', '--candidate', sha], {
@@ -51,9 +65,11 @@ try {
   const records = fs.readdirSync(directory).filter(name => !previous.has(name)).map(name => ({
     name, data: JSON.parse(fs.readFileSync(path.join(directory, name), 'utf8')),
   })).filter(record => record.data.candidateSha === sha);
-  const attempt = (mode === 'preflight' ? records : records.filter(r => r.data.status !== 'PLANNED')).at(-1);
+  const setupStates = new Set(['CONFIG_PROVISION_BASELINE_RECORDED', 'GSales_CONFIG_PROVISIONED', 'WORKER_CONFIGURED']);
+  const attempt = (mode === 'preflight' ? records : records.filter(r => r.data.status !== 'PLANNED' && !setupStates.has(r.data.status))).at(-1);
   const evidence = attempt?.data ?? { candidateSha: sha, status: 'BLOCKED', productionRef: null };
   fs.writeFileSync(process.env.RELEASE_RESULT, JSON.stringify({ ...evidence,
+    protectedSetupEvidence: records.filter(r => setupStates.has(r.data.status)).map(r => r.data),
     operator: process.env.GITHUB_ACTOR, automationRunId: process.env.GITHUB_RUN_ID, automationRunAttempt: process.env.GITHUB_RUN_ATTEMPT,
     applicationVerification: mode === 'preflight' ? 'NOT_DEPLOYED' : 'OWNER_SMOKE_PENDING',
   }, null, 2) + '\n');

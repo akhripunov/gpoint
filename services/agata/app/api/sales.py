@@ -5,10 +5,11 @@ import base64
 import hashlib
 import hmac
 import json
+import time
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select, text
@@ -281,8 +282,19 @@ async def read_draft(
         return draft_result(job)
 
 
+def sales_inference_ready(settings, worker_last_poll_at: float | None, *, now: float | None = None) -> bool:
+    if settings.source_system != "gsales" or not settings.sales_production_mode:
+        return False
+    if settings.llm_provider == "mac_worker":
+        if not settings.codex_local_enabled or worker_last_poll_at is None:
+            return False
+        current = time.monotonic() if now is None else now
+        return 0 <= current - worker_last_poll_at <= settings.codex_worker_poll_ttl_seconds
+    return bool(settings.llm_api_key and settings.sales_always_on_provider_approved)
+
+
 @router.get("/runtime-security")
-async def runtime_security(session: AsyncSession = Depends(get_session)):
+async def runtime_security(request: Request, session: AsyncSession = Depends(get_session)):
     async with session.begin():
         role = (
             (
@@ -323,7 +335,9 @@ async def runtime_security(session: AsyncSession = Depends(get_session)):
             "passed": passed,
             "tenant_id": str(bound) if bound else None,
             "source_system": get_settings().source_system,
-            "production_inference_ready":get_settings().source_system=="gsales" and get_settings().sales_production_mode,
+            "production_inference_ready": sales_inference_ready(
+                get_settings(), getattr(request.app.state, "codex_worker_last_poll_at", None)
+            ),
         }
 
 

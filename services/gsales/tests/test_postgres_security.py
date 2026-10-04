@@ -59,6 +59,13 @@ def test_both_tenants_isolated_even_with_direct_sql_context_spoofing():
                 )
 
 
+def test_gsales_rls_identity_is_bound_to_database_login_not_fixture_uuid():
+    with psycopg.connect(os.environ["GSALES_TEST_RUNTIME_DSN"]) as conn:
+        assert str(conn.execute("SELECT gsales.runtime_tenant_id()").fetchone()[0]) == GSALES_TENANT_ID
+        conn.execute("SELECT set_config('app.tenant_id',%s,true)", (GPOINT,))
+        assert conn.execute("SELECT count(*) FROM gsales.sellers WHERE tenant_id=%s", (GPOINT,)).fetchone()[0] == 0
+
+
 @pytest.mark.asyncio
 async def test_runtime_gsales_security_gate_and_unsafe_admin_refusal():
     for env in ("GSALES_TEST_RUNTIME_DSN", "GSALES_TEST_ADMIN_DSN"):
@@ -119,3 +126,11 @@ def test_runtime_refuses_role_creation_privilege():
     finally:
         with psycopg.connect(os.environ['GSALES_TEST_ADMIN_DSN']) as admin:
             admin.execute('ALTER ROLE gsales_runtime NOCREATEROLE')
+
+
+@pytest.mark.asyncio
+async def test_runtime_security_rejects_configured_tenant_different_from_login_binding():
+    db = Database(Settings(database_url=os.environ["GSALES_TEST_RUNTIME_DSN"], tenant_id=GPOINT))
+    async with db.transaction() as conn:
+        with pytest.raises(GateError, match="gsales_runtime_tenant_binding_mismatch"):
+            await db.assert_secure(conn)

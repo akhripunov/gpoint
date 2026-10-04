@@ -293,6 +293,7 @@ async def test_persistent_graph_projection_is_evidence_backed_private_and_scoped
         async with admin_session.begin():
             await admin_session.execute(text(f'CREATE ROLE "{runtime_role}" NOLOGIN'))
             await admin_session.execute(text(f'GRANT USAGE ON SCHEMA agata TO "{runtime_role}"'))
+            await admin_session.execute(text(f'GRANT EXECUTE ON FUNCTION agata.runtime_tenant_id() TO "{runtime_role}"'))
             await admin_session.execute(text(f'GRANT SELECT, INSERT, UPDATE, DELETE ON {graph_tables} TO "{runtime_role}"'))
     try:
         async with SessionFactory() as rls_session:

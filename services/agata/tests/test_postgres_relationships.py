@@ -292,6 +292,7 @@ async def test_relationship_rls_is_enforced_for_non_owner_role():
         with engine.begin() as connection:
             connection.execute(text(f'CREATE ROLE "{role}"'))
             connection.execute(text(f'GRANT USAGE ON SCHEMA agata TO "{role}"'))
+            connection.execute(text(f'GRANT EXECUTE ON FUNCTION agata.runtime_tenant_id() TO "{role}"'))
             connection.execute(text(f'GRANT SELECT ON agata.relationships TO "{role}"'))
             connection.execute(text("SELECT set_config('app.tenant_id', :tenant, true)"), {"tenant": TENANT_ID})
             connection.execute(text("INSERT INTO agata_identity.role_tenants(login_role,tenant_id) VALUES (:role,:tenant)"), {"role":role,"tenant":UUID(TENANT_ID)})

@@ -28,7 +28,7 @@ class AgataClient:
                 raise GateError("agata_draft_pending:" + str(result.get("message_reference", "")))
             return result
 
-    async def assert_secure(self):
+    async def assert_secure(self, *, require_inference_ready=True):
         result = await self.request("GET", "/internal/v1/sales/runtime-security")
         if any(result.get(k)!=v for k,v in {
             "passed": True,
@@ -36,8 +36,8 @@ class AgataClient:
             "source_system": "gsales",
         }.items()):
             raise GateError("agata_security_unproven")
-        if self.settings.production_mode and not result.get("production_inference_ready"):
-            raise GateError("sales_always_on_inference_not_approved")
+        if require_inference_ready and self.settings.production_mode and not result.get("production_inference_ready"):
+            raise GateError("inference_provider_not_ready")
 
     async def sync_seller(self, seller_id, name, personality):
         return await self.request(

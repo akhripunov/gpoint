@@ -37,10 +37,16 @@ backup under FORCE RLS.
 
 ## Lock envelope and failure handling
 
-The guard supports only `agata0009 -> agata0010`. It refuses other baselines,
-missing or nonauthoritative inventories, inconsistent database identities, and
-missing privileges. Conservative limits are 10000 baseline rows and 64 MiB table
-size; larger volumes need a separately evaluated release plan.
+The release candidate applies through `agata0011` from either supported
+baseline (`agata0009` or `agata0010`). It refuses other baselines, missing or
+nonauthoritative inventories, inconsistent database identities, and a
+nonprivileged migration identity. The tenant census relation lock is held while
+the snapshot is compared; agata0011 then takes `ACCESS EXCLUSIVE` on the tenant
+registry inside its migration transaction before enumerating tenants and
+installing restrictive FORCE RLS, allowing the controlled DDL to complete while
+closing the census-to-migration race. Conservative limits are 10000 baseline
+rows and 64 MiB table size; larger volumes need a separately evaluated release
+plan.
 
 `ADD COLUMN` obtains ACCESS EXCLUSIVE on messages for the migration transaction.
 The migrator receives PGOPTIONS before connection establishment: lock timeout

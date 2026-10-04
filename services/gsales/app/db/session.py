@@ -55,6 +55,11 @@ class Database:
             )
         ):
             raise GateError("runtime_role_unsafe")
+        bound = await (
+            await conn.execute("SELECT gsales.runtime_tenant_id() AS tenant_id")
+        ).fetchone()
+        if not bound or str(bound["tenant_id"]) != self.settings.tenant_id:
+            raise GateError("gsales_runtime_tenant_binding_mismatch")
         unsafe_schema = await (
             await conn.execute(
                 "SELECT has_schema_privilege(session_user,'gsales','CREATE') AS unsafe"
@@ -80,7 +85,7 @@ class Database:
         policy = await (
             await conn.execute("""
             SELECT count(*) AS n FROM pg_policies WHERE schemaname='gsales'
-            AND policyname='gsales_login_tenant' AND qual LIKE '%%SESSION_USER%%'
+            AND policyname='gsales_login_tenant' AND qual LIKE '%%runtime_tenant_id%%'
         """)
         ).fetchone()
         if not policy or policy["n"] != 6:

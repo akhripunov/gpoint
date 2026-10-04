@@ -53,11 +53,12 @@ def verify(tag, expected, sha):
 
 
 def main():
-    sha, app, agata = sys.argv[1:]
-    if not re.fullmatch(r'[a-f0-9]{40}', sha) or any(not re.fullmatch(r'sha256:[a-f0-9]{64}', value) for value in (app, agata)):
+    sha, app, agata, gsales = sys.argv[1:]
+    if not re.fullmatch(r'[a-f0-9]{40}', sha) or any(not re.fullmatch(r'sha256:[a-f0-9]{64}', value) for value in (app, agata, gsales)):
         raise RuntimeError('invalid expected image identity')
     verify(f'gpoint-runtime:{sha}', app, sha)
     verify(f'gpoint-agata-runtime:{sha}', agata, sha)
+    verify(f'gpoint-g-sales-runtime:{sha}', gsales, sha)
 
 
 if __name__ == '__main__':

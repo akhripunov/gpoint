@@ -17,8 +17,9 @@ function fixture(t) {
   const bytes = Buffer.from('a disposable image archive');
   fs.writeFileSync(path.join(dir, 'images.tar.gz'), bytes);
   const receipt = { schema: 1, candidateSha: sha, status: 'READY', runId: 1, agataHead: 'agata0008', prismaHead: '20260922090000_telegram_channel_avatar',
-    gates: Object.fromEntries(['unit', 'postgres', 'docker', 'migration', 'miniapp', 'agataHealth', 'deployRehearsal'].map(g => [g, 'PASS'])),
-    images: { app: { id, revision: sha, platform: 'linux/amd64' }, agata: { id, revision: sha, platform: 'linux/amd64' } },
+    gsalesMigrationHead: '001_gsales', gsalesMigrationSha256: 'c'.repeat(64),
+    gates: Object.fromEntries(['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'deployRehearsal'].map(g => [g, 'PASS'])),
+    images: { app: { id, revision: sha, platform: 'linux/amd64' }, agata: { id, revision: sha, platform: 'linux/amd64' }, gsales: { id, revision: sha, platform: 'linux/amd64' } },
     archiveSha256: crypto.createHash('sha256').update(bytes).digest('hex') };
   const save = () => fs.writeFileSync(path.join(dir, 'receipt.json'), JSON.stringify(receipt));
   save();
@@ -38,7 +39,7 @@ test('archive corruption fails before upload or mutation', t => {
   fs.appendFileSync(path.join(f.dir, 'images.tar.gz'), 'corruption');
   assert.throws(() => verifyReleaseBundle(f.dir, f.sha), /checksum mismatch/);
 });
-test('VPS reuse requires both exact image IDs, source labels and platform', t => {
+test('VPS reuse requires all exact image IDs, source labels and platform', t => {
   const f = fixture(t), proof = verifyReleaseBundle(f.dir, f.sha);
   const docker = path.join(f.dir, 'docker');
   fs.writeFileSync(docker, '#!/bin/sh\nprintf \'[{"Id":"%s","Os":"linux","Architecture":"%s","Config":{"Labels":{"org.opencontainers.image.revision":"%s"}}}]\' "$FAKE_ID" "$FAKE_ARCH" "$FAKE_SHA"\n', { mode: 0o700 });
@@ -58,7 +59,7 @@ test('containerd manifest IDs require exact hashed config, source, platform and 
   const layers = [`sha256:${'d'.repeat(64)}`];
   const config = Buffer.from(JSON.stringify({ os: 'linux', architecture: 'amd64', config: { Labels: { 'org.opencontainers.image.revision': f.sha } }, rootfs: { diff_ids: layers } }));
   const configId = hash(config);
-  for (const role of ['app', 'agata']) f.receipt.images[role].id = configId;
+  for (const role of ['app', 'agata', 'gsales']) f.receipt.images[role].id = configId;
   f.save();
   const proof = verifyReleaseBundle(f.dir, f.sha);
   const manifest = Buffer.from(JSON.stringify({ schemaVersion: 2, config: { digest: configId }, layers: [{ digest: layers[0] }] }));
@@ -69,7 +70,7 @@ test('containerd manifest IDs require exact hashed config, source, platform and 
   const imagePath = path.join(f.dir, 'inspect.json');
   fs.writeFileSync(imagePath, JSON.stringify([image]));
   fs.writeFileSync(path.join(f.dir, 'docker'), '#!/bin/sh\nif [ "$4" = "--format" ]; then printf "%s" "$FAKE_NATIVE"; else cat "$FAKE_INSPECT"; fi\n', { mode: 0o700 });
-  fs.writeFileSync(path.join(f.dir, 'cat'), '#!/bin/sh\ncase "$1" in /tmp/gpoint-image-id-*|/tmp/gpoint-agata-image-id-*) printf "%s" "$FAKE_CAPTURED" ;; *) /bin/cat "$@" ;; esac\n', { mode: 0o700 });
+  fs.writeFileSync(path.join(f.dir, 'cat'), '#!/bin/sh\ncase "$1" in /tmp/gpoint-image-id-*|/tmp/gpoint-agata-image-id-*|/tmp/gpoint-g-sales-image-id-*) printf "%s" "$FAKE_CAPTURED" ;; *) /bin/cat "$@" ;; esac\n', { mode: 0o700 });
   fs.writeFileSync(path.join(f.dir, 'ctr'), '#!/bin/sh\nif [ "$5" = "$FAKE_NATIVE" ]; then cat "$FAKE_MANIFEST"; else cat "$FAKE_CONFIG"; fi\n', { mode: 0o700 });
   const run = (command = reuseBundleCommand(proof, f.sha), changes = {}) => spawnSync('bash', ['-c', command], { encoding: 'utf8', env: { ...process.env, PATH: `${f.dir}:${process.env.PATH}`, FAKE_INSPECT: imagePath, FAKE_NATIVE: native, FAKE_CAPTURED: native, FAKE_MANIFEST: path.join(f.dir, 'manifest'), FAKE_CONFIG: path.join(f.dir, 'config'), ...changes } });
   assert.match(run().stdout, /GPOINT_CI_IMAGES_REUSABLE/);
@@ -94,8 +95,8 @@ test('containerd manifest IDs require exact hashed config, source, platform and 
 test('different candidate and skipped gates fail closed', t => {
   const f = fixture(t);
   assert.throws(() => verifyReleaseBundle(f.dir, 'c'.repeat(40)), /exact candidate/);
-  f.receipt.gates.postgres = 'SKIPPED'; f.save();
-  assert.throws(() => verifyReleaseBundle(f.dir, f.sha), /postgres/);
+  f.receipt.gates.gsalesPostgres = 'SKIPPED'; f.save();
+  assert.throws(() => verifyReleaseBundle(f.dir, f.sha), /gsalesPostgres/);
 });
 test('a receipt without the real containerd deployment rehearsal cannot authorize apply', t => {
   const f = fixture(t);
@@ -157,7 +158,7 @@ test('release cannot remove a lock whose ownership changed', t => {
 test('canonical CLI executes from a Mac runner path containing spaces', t => {
   const f = fixture(t), root = path.join(f.dir, 'Application Support', 'GPoint');
   fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
-  for (const name of ['release-gpoint.mjs', 'release-bookkeeping.mjs', 'release-gpoint-vps-adapter.mjs', 'release-bundle.mjs', 'verify-loaded-images.py', 'release-lock.mjs', 'release-migrations.mjs']) {
+  for (const name of ['release-gpoint.mjs', 'release-gsales.mjs', 'release-gsales-provision.mjs', 'release-bookkeeping.mjs', 'release-gpoint-vps-adapter.mjs', 'release-bundle.mjs', 'verify-loaded-images.py', 'release-lock.mjs', 'release-migrations.mjs']) {
     fs.copyFileSync(fileURLToPath(new URL(name, import.meta.url)), path.join(root, 'scripts', name));
   }
   fs.mkdirSync(path.join(root, 'docs/release/state'), { recursive: true });

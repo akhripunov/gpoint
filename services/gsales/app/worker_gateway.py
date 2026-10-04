@@ -35,7 +35,7 @@ def install(app):
 
     async def rpc(action, payload=None):
         try:
-            await app.state.core.assert_secure()
+            await app.state.core.assert_secure(require_inference_ready=False)
             kwargs = {"json": payload.model_dump(mode="json")} if payload else {}
             result = await app.state.core.request("POST", "/internal/v1/worker/" + action, **kwargs)
             if action == "claim" and result.get("job") is not None:
@@ -53,7 +53,7 @@ def install(app):
     @app.post("/agata-worker/health", dependencies=[Depends(authorize)])
     async def health():
         try:
-            await app.state.core.assert_secure()
+            await app.state.core.assert_secure(require_inference_ready=False)
         except Exception:
             raise HTTPException(503, detail={"code": "worker_core_unavailable"}) from None
         return {"status": "ready", "target": "GSALES", "tenant_id": settings.tenant_id}

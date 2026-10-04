@@ -40,13 +40,18 @@ class Settings(BaseSettings):
     db_max_overflow: int = Field(default=5, ge=0, le=100)
     worker_poll_seconds: float = Field(default=2.0, ge=0.1, le=60)
     worker_batch_size: int = Field(default=4, ge=1, le=64)
+    codex_worker_poll_ttl_seconds: int = Field(default=30, ge=5, le=300)
 
     @model_validator(mode="after")
     def sales_production_provider(self):
         if self.source_system=="gsales" and self.sales_production_mode:
-            if (self.llm_provider in {"mac_worker","local_fake","disabled","none"} or self.codex_local_enabled
-                or not self.sales_always_on_provider_approved or not self.llm_api_key):
-                raise ValueError("G Sales production requires an OWNER-approved always-on server inference provider; Mac/test providers are development-only")
+            if self.llm_provider in {"local_fake", "disabled", "none"}:
+                raise ValueError("G Sales production requires an approved inference provider")
+            if self.llm_provider == "mac_worker":
+                if not self.codex_local_enabled:
+                    raise ValueError("G Sales mac_worker provider requires the approved shared Mac worker")
+            elif self.codex_local_enabled or not self.sales_always_on_provider_approved or not self.llm_api_key:
+                raise ValueError("G Sales server provider requires OWNER approval and its API credential")
         return self
 
     @field_validator("tenant_id")

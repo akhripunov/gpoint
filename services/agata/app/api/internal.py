@@ -4,11 +4,12 @@ import base64
 import hashlib
 import hmac
 import json
+import time
 from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, func, or_, select, text, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -611,10 +612,12 @@ class UnavailableEmbeddingProvider:
 
 @router.post("/worker/claim", dependencies=[Depends(require_internal_auth)])
 async def claim_inference_job(
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     settings = get_settings()
     tenant_id = UUID(settings.tenant_id)
+    result: dict
     async with session.begin():
         await set_tenant_context(session, str(tenant_id))
         repository = OutboxRepository(session)
@@ -633,19 +636,25 @@ async def claim_inference_job(
             job_types=worker_types,
         )
         if not jobs:
-            return {"job": None}
-        job = jobs[0]
-        request_text = decrypt_claimed_request(job)
-        return {
-            "job": {
-                "id": str(job.id),
-                "leaseToken": job.claim_token,
-                "attempt": job.attempts,
-                "target": settings.source_system.upper(),
-                "tenant_id": str(tenant_id),
-                "request": json.loads(request_text),
+            result = {"job": None}
+        else:
+            job = jobs[0]
+            request_text = decrypt_claimed_request(job)
+            result = {
+                "job": {
+                    "id": str(job.id),
+                    "leaseToken": job.claim_token,
+                    "attempt": job.attempts,
+                    "target": settings.source_system.upper(),
+                    "tenant_id": str(tenant_id),
+                    "request": json.loads(request_text),
+                }
             }
-        }
+    # Only successful DB-backed claims count as evidence; this process-local
+    # monotonic timestamp expires on restart or a stale polling connection.
+    if settings.source_system == "gsales" and settings.llm_provider == "mac_worker":
+        request.app.state.codex_worker_last_poll_at = time.monotonic()
+    return result
 
 
 @router.post("/worker/complete", dependencies=[Depends(require_internal_auth)])

@@ -215,9 +215,13 @@ def prepare(sha, output, *, postgres_only=False):
             ('release_tests', ('pnpm', 'test:release')),
             ('linear_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_*linear*.py')),
             ('production_migration_gate_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_agata_production_migration.py')),
+            ('gsales_provision_gate_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_gsales_provision.py')),
+            ('gsales_mac_lane_gate_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_configure_gsales_mac_lane.py')),
             ('prepare_inventory_tests', (sys.executable, '-m', 'pytest', '-q', 'tests/test_prepare_release_migration_inventory.py')),
             ('release_asset_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_release_assets.py')),
             ('artifact_cache_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_prepared_artifact_cache.py')),
+            ('gsales_compose_profile_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_release_gsales_compose.py')),
+            ('gsales_postgres_regression', (sys.executable, 'services/gsales/tests/run_postgres.py')),
         )
         for name, command in commands:
             with measured_stage(name, timings):
@@ -290,13 +294,44 @@ def prepare(sha, output, *, postgres_only=False):
         for tag, dockerfile, context in (
                 ('gpoint-runtime', 'infra/production/Gpoint.Dockerfile', '.'),
                 ('gpoint-agata-runtime', 'services/agata/Dockerfile', 'services/agata'),
+                ('gpoint-g-sales-runtime', 'services/gsales/Dockerfile', 'services/gsales'),
         ):
             with measured_stage(f'docker_build_{tag.replace("-", "_")}', timings):
                 run('docker', 'build', '--platform', 'linux/amd64', '--build-arg', f'GPOINT_BUILD_SHA={sha}',
                     '--label', f'org.opencontainers.image.revision={sha}', '-f', dockerfile, '-t', f'{tag}:{sha}', context)
+        gsales_migration = ROOT / 'services/gsales/migrations/001_gsales.sql'
+        gsales_migration_sha = hashlib.sha256(gsales_migration.read_bytes()).hexdigest()
+        embedded_migration_sha = run('docker', 'run', '--rm', f'gpoint-g-sales-runtime:{sha}',
+            'python', '-c', "import hashlib,pathlib; print(hashlib.sha256(pathlib.Path('/srv/g-sales/migrations/001_gsales.sql').read_bytes()).hexdigest())", capture=True)
+        if embedded_migration_sha != gsales_migration_sha:
+            raise RuntimeError('G Sales image migration checksum differs from exact candidate source')
+        with measured_stage('gsales_migration_backup_restore', timings):
+            migration_env = dict(os.environ, GSALES_MIGRATION_TEST_IMAGE=f'gpoint-g-sales-runtime:{sha}')
+            run(sys.executable, 'tests/test_gsales_migration_docker.py', env=migration_env)
+        with measured_stage('gsales_image_live_health', timings):
+            smoke = f'gpoint-gsales-health-{uuid.uuid4().hex[:12]}'
+            run('docker', 'run', '-d', '--name', smoke, '--network', 'none',
+                '-e', 'GSALES_PRODUCTION_MODE=false', '-e', 'GSALES_OUTREACH_ENABLED=false',
+                '-e', 'GSALES_AUTO_REPLY_ENABLED=false', '-e', 'GSALES_MANAGEMENT_ENABLED=false',
+                '-e', 'GSALES_TELEGRAM_LISTENER_ENABLED=false', f'gpoint-g-sales-runtime:{sha}')
+            try:
+                for _ in range(45):
+                    if subprocess.run(['docker', 'exec', smoke, 'python', '-c',
+                            "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health/live', timeout=2)"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5).returncode == 0:
+                        break
+                    time.sleep(1)
+                else:
+                    raise RuntimeError('G Sales immutable image live health failed')
+            finally:
+                subprocess.run(['docker', 'rm', '-f', smoke], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=20)
         with measured_stage('agata_guarded_production_migration_rehearsal', timings):
             rehearsal_env = dict(env, GPOINT_MIGRATION_TEST_IMAGE=f'gpoint-agata-runtime:{sha}')
             run(sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_agata_production_migration_docker.py', env=rehearsal_env)
+        with measured_stage('gsales_protected_provision_rehearsal', timings):
+            provision_env = dict(os.environ, GPOINT_MIGRATION_TEST_IMAGE=f'gpoint-agata-runtime:{sha}')
+            run(sys.executable, 'tests/test_gsales_provision_docker.py', env=provision_env)
         docker_dsn = f'postgresql://ci_owner:disposable-ci-password@{postgres}:5432/runtime_agata_test'
         with measured_stage('runtime_artifact_migration_check', timings):
             run('docker', 'run', '--rm', '--network', network, '-e', f'DATABASE_URL={docker_dsn}',
@@ -344,7 +379,7 @@ def prepare(sha, output, *, postgres_only=False):
         if '\n' in expected_agata or not expected_agata or heads != expected_agata.split()[0] or prisma != expected_prisma:
             raise RuntimeError('runtime artifact migration heads do not match candidate source')
         images = {}
-        for role, tag in [('app', 'gpoint-runtime'), ('agata', 'gpoint-agata-runtime')]:
+        for role, tag in [('app', 'gpoint-runtime'), ('agata', 'gpoint-agata-runtime'), ('gsales', 'gpoint-g-sales-runtime')]:
             image = json.loads(run('docker', 'image', 'inspect', f'{tag}:{sha}', capture=True))[0]
             if image['Config']['Labels'].get('org.opencontainers.image.revision') != sha or image['Architecture'] != 'amd64' or image['Os'] != 'linux':
                 raise RuntimeError('candidate image parity failed')
@@ -352,7 +387,7 @@ def prepare(sha, output, *, postgres_only=False):
         archive = output / 'images.tar.gz'
         with measured_stage('image_archive_export', timings):
             with gzip.open(archive, 'wb', compresslevel=1) as dest:
-                proc = subprocess.Popen(['docker', 'save', f'gpoint-runtime:{sha}', f'gpoint-agata-runtime:{sha}'], stdout=subprocess.PIPE)
+                proc = subprocess.Popen(['docker', 'save', f'gpoint-runtime:{sha}', f'gpoint-agata-runtime:{sha}', f'gpoint-g-sales-runtime:{sha}'], stdout=subprocess.PIPE)
                 assert proc.stdout is not None
                 while chunk := proc.stdout.read(1024 * 1024):
                     dest.write(chunk)
@@ -364,8 +399,9 @@ def prepare(sha, output, *, postgres_only=False):
             digest = hashlib.file_digest(source, 'sha256').hexdigest()
         proof = {'schema': 1, 'candidateSha': sha, 'status': 'READY', 'runId': int(os.environ['GITHUB_RUN_ID']),
                  'runAttempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
-                 'gates': {name: 'PASS' for name in ['unit', 'postgres', 'docker', 'migration', 'miniapp', 'agataHealth', 'deployRehearsal']},
+                 'gates': {name: 'PASS' for name in ['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'deployRehearsal']},
                  'images': images, 'archiveSha256': digest, 'prismaHead': prisma, 'agataHead': heads,
+                 'gsalesMigrationHead': gsales_migration.stem, 'gsalesMigrationSha256': gsales_migration_sha,
                  'prepareStages': timings,
                  'deployRehearsal': rehearsal,
                  'applicationSmoke': 'DISPOSABLE_DB_DETERMINISTIC_PROVIDER', 'productionUserSmoke': 'NOT_RUN'}

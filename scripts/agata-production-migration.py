@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GPoint-only agata0009 -> agata0010 readiness and guarded migration.
+"""GPoint-only guarded migrations agata0009 -> agata0010 -> agata0011.
 
 The administrator channel proves census/backup completeness. Alembic continues
 to use its existing effective production identity and FORCE RLS remains enabled.
@@ -20,8 +20,10 @@ from uuid import UUID
 
 DB_CONTAINER = 'shared_postgres_1'
 ENV_FILE = '/opt/gpoint/env/production.env'
+MIGRATION_ENV_FILE = '/opt/gpoint/env/migration.env'
 DB_NETWORK = 'shared_internal'
 PREDICATE = "c.source_system='gpoint' AND m.role='assistant' AND m.scope='real_world' AND m.scenario_id IS NULL"
+TENANT_GUARD_LOCK = (1196441417, 1314150988)
 CENSUS_SQL = f"""SELECT json_build_object(
  'database',current_database(),
  'database_oid',(SELECT oid::bigint FROM pg_database WHERE datname=current_database()),
@@ -65,8 +67,8 @@ def validate_readiness(proof, census):
         raise RuntimeError('GPoint database identity mismatch')
     if proof.get('server_address') not in census.get('cluster_addresses', []) or not proof.get('database_oid') or proof['database_oid'] != census.get('database_oid'):
         raise RuntimeError('authoritative database instance identity mismatch')
-    if proof.get('head') != 'agata0009':
-        raise RuntimeError('guard only supports agata0009 -> agata0010')
+    if proof.get('head') not in ('agata0009', 'agata0010'):
+        raise RuntimeError('guard only supports agata0009 -> agata0010 or agata0010 -> agata0011')
     if not all(proof.get(key) is True for key in ('owner', 'schema_create', 'schema_usage', 'permissions', 'rls', 'force_rls')):
         raise RuntimeError('effective migrator lacks required ownership/privileges')
     if census.get('authoritative') is not True:
@@ -80,7 +82,12 @@ def validate_readiness(proof, census):
     if census.get('baseline', 10001) > 10000 or proof.get('total_bytes', 67108865) > 64 * 1024 * 1024:
         raise RuntimeError('baseline volume exceeds bounded migration rehearsal envelope')
     inventory = ','.join(tenants)
-    return dict(proof, tenant_count=len(tenants), inventory=inventory,
+    # This release candidate carries both agata0010 and agata0011. Expect its
+    # actual image head after upgrade for either supported production baseline.
+    target_head = 'agata0011'
+    if target_head == 'agata0011' and proof.get('privileged') is not True:
+        raise RuntimeError('agata0011 requires a verified privileged migration identity')
+    return dict(proof, target_head=target_head, tenant_count=len(tenants), inventory=inventory,
                 inventory_sha256=hashlib.sha256(inventory.encode()).hexdigest(),
                 messages=census['messages'], baseline=census['baseline'],
                 lock_risk='BOUNDED_MIGRATION_LOCK_REQUIRED', lock_timeout_seconds=15,
@@ -97,8 +104,11 @@ def guarded_migration(proof, guard, migrate):
         if not guard.alive():
             raise RuntimeError('tenant inventory guard lost before migration')
         migrate(readiness['inventory'], guard)
-        if not guard.alive() or not guard.verify():
-            raise RuntimeError('tenant guard or baseline verification failed')
+        if not guard.alive():
+            raise RuntimeError('tenant guard was lost during migration')
+        if not guard.verify(readiness['target_head']):
+            facts = getattr(guard, 'verification', {})
+            raise RuntimeError(f"migration verification failed (actual_head={facts.get('head', 'unknown')}, expected_head={readiness['target_head']}, baseline_missing={facts.get('missing', 'unknown')})")
         return public_facts(readiness)
 
 
@@ -121,9 +131,23 @@ def authoritative_census():
     return add_cluster_identity(json.loads(docker_checked(psql_args(), input=sql)))
 
 
+def migration_env_files():
+    files = [ENV_FILE]
+    migration = Path(MIGRATION_ENV_FILE)
+    if migration.exists():
+        if not migration.is_file() or migration.stat().st_mode & 0o777 != 0o600:
+            raise RuntimeError('migration environment must be a protected 0600 file')
+        files.append(str(migration))
+    return files
+
+
+def migration_env_args():
+    return [arg for path in migration_env_files() for arg in ('--env-file', path)]
+
+
 def effective_probe(image):
     return json.loads(docker_checked(['run', '--rm', '--network', DB_NETWORK,
-        '--env-file', ENV_FILE, '--entrypoint', 'python', image, '-c', PROBE]))
+        *migration_env_args(), '--entrypoint', 'python', image, '-c', PROBE]))
 
 
 def add_cluster_identity(census):
@@ -137,15 +161,21 @@ class TenantGuard:
         self.process = subprocess.Popen(['docker', *psql_args()], stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
         try:
-            self.snapshot = add_cluster_identity(self.query("BEGIN; SET LOCAL lock_timeout='15s'; "
+            acquired = self.query("SELECT json_build_object('pid',pg_backend_pid(),'locked',"
+                f"pg_try_advisory_lock({TENANT_GUARD_LOCK[0]},{TENANT_GUARD_LOCK[1]}));")
+            if acquired.get('locked') is not True:
+                raise RuntimeError('tenant migration guard is already held')
+            self.backend_pid = acquired['pid']
+            # Freeze tenant writes while the census is captured. Release the
+            # relation lock before Alembic: agata0011 needs ACCESS EXCLUSIVE to
+            # install RLS on agata.tenants. The advisory lock remains session-held.
+            locked_snapshot = self.query("BEGIN; SET LOCAL lock_timeout='15s'; "
                 "SET LOCAL statement_timeout='120s'; SET LOCAL idle_in_transaction_session_timeout='180s'; "
-                "LOCK TABLE agata.tenants IN SHARE MODE; SELECT json_build_object('pid',pg_backend_pid(),'tenants',coalesce(json_agg(id ORDER BY id),'[]')) FROM agata.tenants;"))
-            # Reading messages in the guard would retain ACCESS SHARE and block
-            # Alembic ADD COLUMN. Census runs in a separate, closed read-only tx.
-            self.backend_pid = self.snapshot['pid']
-            locked_tenants = self.snapshot['tenants']
+                "LOCK TABLE agata.tenants IN SHARE MODE; SELECT json_build_object('pid',pg_backend_pid(),'tenants',coalesce(json_agg(id ORDER BY id),'[]')) FROM agata.tenants; COMMIT;")
+            if locked_snapshot['pid'] != self.backend_pid:
+                raise RuntimeError('tenant inventory session identity changed')
             self.snapshot = authoritative_census()
-            if sorted(locked_tenants) != sorted(self.snapshot['tenants']):
+            if sorted(locked_snapshot['tenants']) != sorted(self.snapshot['tenants']):
                 raise RuntimeError('authoritative census does not match locked inventory')
             return self
         except BaseException:
@@ -167,21 +197,22 @@ class TenantGuard:
             return False
         try:
             result = self.query("SELECT json_build_object('pid',pg_backend_pid(),'locked',"
-                "EXISTS(SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid() "
-                "AND locktype='relation' AND relation='agata.tenants'::regclass "
-                "AND mode='ShareLock' AND granted));", timeout=2)
+                "EXISTS(SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='advisory' "
+                f"AND classid={TENANT_GUARD_LOCK[0]} AND objid={TENANT_GUARD_LOCK[1]} "
+                "AND objsubid=2 AND granted));", timeout=2)
             return result['pid'] == self.backend_pid and result['locked'] is True
         except (OSError, RuntimeError, ValueError, KeyError):
             return False
 
-    def verify(self):
+    def verify(self, target_head):
         ids = [str(UUID(value)) for value in self.snapshot['baseline_ids']]
         # Only pre-existing IDs: incoming messages after migration remain unread.
         literals = ','.join("'" + value + "'::uuid" for value in ids)
         predicate = f'm.id IN ({literals})' if ids else 'false'
         result = self.query("SELECT json_build_object('head',(SELECT version_num FROM agata.alembic_version),"
             f"'missing',(SELECT count(*) FROM agata.messages m WHERE {predicate} AND incoming_read_at IS NULL));")
-        return result['head'] == 'agata0010' and result['missing'] == 0
+        self.verification = result
+        return result['head'] == target_head and result['missing'] == 0
 
     def __exit__(self, *args):
         if getattr(self, 'process', None) is None: return
@@ -192,9 +223,9 @@ class TenantGuard:
 
 
 def migrate_image(image, inventory, guard):
-    name = 'gpoint-agata0010-migration-' + image.rsplit(':', 1)[1][:12]
+    name = 'gpoint-agata-migration-' + image.rsplit(':', 1)[1][:12]
     args = ['docker', 'run', '--rm', '--name', name, '--network', DB_NETWORK,
-            '--env-file', ENV_FILE, '-e', 'AGATA_MIGRATION_TENANT_IDS=' + inventory,
+            *migration_env_args(), '-e', 'AGATA_MIGRATION_TENANT_IDS=' + inventory,
             '-e', 'PGOPTIONS=-c lock_timeout=15000 -c statement_timeout=120000',
             image, 'alembic', 'upgrade', 'head']
     # Drain stderr without exposing SQL/credentials. Outer process has a hard deadline.
@@ -215,8 +246,8 @@ def migrate_image(image, inventory, guard):
 
 
 def complete_backup(sha, *, directory=None):
-    # Administrator identity is used only for a full logical GPoint backup.
-    # It is never passed to the application migrator or made persistent.
+    # This container administrator channel creates only the GPoint logical
+    # backup; application migration credentials use a separate protected file.
     census = authoritative_census()
     if census.get('database') != 'gpoint' or census.get('authoritative') is not True:
         raise RuntimeError('complete backup identity could not be established')
@@ -224,10 +255,18 @@ def complete_backup(sha, *, directory=None):
     directory.chmod(0o700)
     target = directory / f'gpoint-pre-release-{sha}-{time.time_ns()}.dump'
     try:
+        schemas = ['public', 'agata']
+        for schema in ('gsales', 'gsales_meta', 'agata_identity'):
+            exists = docker_checked(psql_args(), input=f"BEGIN READ ONLY; SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name='{schema}'); ROLLBACK;")
+            if exists == 't': schemas.append(schema)
+        schema_literals = ','.join("'" + schema + "'" for schema in schemas)
+        extensions = docker_checked(psql_args(), input="BEGIN READ ONLY; SELECT e.extname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE n.nspname IN (" + schema_literals + ") AND e.extname<>'plpgsql' ORDER BY e.extname; ROLLBACK;").splitlines()
+        if any(not re.fullmatch('[a-z][a-z0-9_-]*', extension) for extension in extensions):
+            raise RuntimeError('GPoint backup extension identity is invalid')
         with target.open('xb') as stream:
             target.chmod(0o600)
-            result = subprocess.run(['docker', 'exec', DB_CONTAINER, 'sh', '-ec',
-                'exec pg_dump -U "$POSTGRES_USER" -d gpoint --format=custom --no-owner --schema=public --schema=agata'],
+            dump_script = 'set -eu; set --; for schema in $GPOINT_BACKUP_SCHEMAS; do set -- "$@" "--schema=$schema"; done; for extension in $GPOINT_BACKUP_EXTENSIONS; do set -- "$@" "--extension=$extension"; done; exec pg_dump -U "$POSTGRES_USER" -d gpoint --format=custom --no-owner "$@"'
+            result = subprocess.run(['docker', 'exec', '-e', 'GPOINT_BACKUP_SCHEMAS=' + ' '.join(schemas), '-e', 'GPOINT_BACKUP_EXTENSIONS=' + ' '.join(extensions), DB_CONTAINER, 'sh', '-ec', dump_script],
                 stdout=stream, stderr=subprocess.DEVNULL, timeout=120)
         if result.returncode or not target.stat().st_size:
             raise RuntimeError('complete GPoint backup failed')
@@ -236,11 +275,14 @@ def complete_backup(sha, *, directory=None):
                 stdin=stream, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
         if result.returncode or b'TABLE DATA agata messages' not in result.stdout:
             raise RuntimeError('GPoint backup archive verification failed')
+        for extension in extensions:
+            if not re.search(rb'\bEXTENSION - ' + re.escape(extension.encode()) + rb'(?:\s|$)', result.stdout):
+                raise RuntimeError('GPoint backup extension archive verification failed')
         digest = hashlib.sha256()
         with target.open('rb') as stream:
             for block in iter(lambda: stream.read(1024 * 1024), b''): digest.update(block)
         return dict(path=str(target), sha256=digest.hexdigest(), database='gpoint',
-                    schemas=['public', 'agata'], status='COMPLETE_PROTECTED')
+                    schemas=schemas, extensions=extensions, status='COMPLETE_PROTECTED')
     except BaseException:
         target.unlink(missing_ok=True)
         raise
@@ -253,8 +295,10 @@ def main():
     args = parser.parse_args()
     if not re.fullmatch('[0-9a-f]{40}', args.sha): raise RuntimeError('exact SHA required')
     # Host configuration is consulted for source identity only; never echo values.
-    env = dict(line.split('=', 1) for line in Path(ENV_FILE).read_text().splitlines()
-               if line and not line.startswith('#') and '=' in line)
+    env = {}
+    for file in migration_env_files():
+        env.update(line.split('=', 1) for line in Path(file).read_text().splitlines()
+                   if line and not line.startswith('#') and '=' in line)
     for key in ['AGATA_MIGRATOR_DATABASE_URL' if env.get('AGATA_MIGRATOR_DATABASE_URL') else 'AGATA_DATABASE_URL', 'DATABASE_URL']:
         if urlsplit(env.get(key, '').replace('postgresql+asyncpg:', 'postgresql:').replace('postgresql+psycopg:', 'postgresql:')).path != '/gpoint':
             raise RuntimeError('production database scope could not be verified')
@@ -269,7 +313,7 @@ def main():
         image = 'gpoint-agata-runtime:' + args.sha
         proof = effective_probe(image)
         result = guarded_migration(proof, TenantGuard(), lambda ids, guard: migrate_image(image, ids, guard))
-        print('AGATA_MIGRATION_VERIFIED=' + json.dumps(dict(result, candidate_sha=args.sha, head_after='agata0010', checked_at=datetime.now(timezone.utc).isoformat(), inventory_source='administrator_share_locked_tenants'), sort_keys=True))
+        print('AGATA_MIGRATION_VERIFIED=' + json.dumps(dict(result, candidate_sha=args.sha, head_after=result['target_head'], checked_at=datetime.now(timezone.utc).isoformat(), inventory_source='administrator_share_locked_tenants'), sort_keys=True))
 
 
 if __name__ == '__main__':

@@ -18,9 +18,9 @@ with tempfile.TemporaryDirectory(prefix='gpoint-rehearsal-fixture-') as temporar
     root = Path(temporary)
     (root / 'marker').write_text(sha)
     (root / 'Dockerfile').write_text('FROM scratch\nCOPY marker /marker\n')
-    tags = [f'{name}:{sha}' for name in ('gpoint-runtime', 'gpoint-agata-runtime')]
+    tags = [f'{name}:{sha}' for name in ('gpoint-runtime', 'gpoint-agata-runtime', 'gpoint-g-sales-runtime')]
     try:
-        for role, tag in zip(('app', 'agata'), tags):
+        for role, tag in zip(('app', 'agata', 'gsales'), tags):
             prepare.run('docker', 'build', '--platform', 'linux/amd64', '--label',
                         f'org.opencontainers.image.revision={sha}', '-t', tag, temporary)
             image = json.loads(prepare.run('docker', 'image', 'inspect', tag, capture=True))[0]

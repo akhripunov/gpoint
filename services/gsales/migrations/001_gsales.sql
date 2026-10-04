@@ -4,7 +4,7 @@ REVOKE ALL ON SCHEMA gsales FROM PUBLIC;
 
 CREATE TABLE gsales.telegram_accounts (
  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
- tenant_id uuid NOT NULL CHECK (tenant_id='c4d67889-877e-4d1b-a8d8-597c479d638f'),
+ tenant_id uuid NOT NULL,
  display_name text NOT NULL, telegram_user_id bigint NOT NULL CHECK (telegram_user_id>0),
  telegram_username text, session_secret_ref uuid NOT NULL,
  connection_status text NOT NULL DEFAULT 'disconnected' CHECK (connection_status IN ('disconnected','authorized','error')),
@@ -80,13 +80,18 @@ CREATE INDEX leads_stage ON gsales.leads(tenant_id,current_stage,created_at);
 CREATE INDEX sources_lead ON gsales.lead_sources(tenant_id,lead_id);
 CREATE INDEX attempts_pending ON gsales.outreach_attempts(tenant_id,approval_status,delivery_status);
 CREATE INDEX controls_seller ON gsales.dialog_controls(tenant_id,seller_id,ai_mode);
+CREATE FUNCTION gsales.runtime_tenant_id() RETURNS uuid
+ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog
+ AS $$ SELECT tenant_id FROM agata_identity.role_tenants WHERE login_role=session_user $$;
+REVOKE ALL ON FUNCTION gsales.runtime_tenant_id() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION gsales.runtime_tenant_id() TO gsales_runtime;
 CREATE FUNCTION gsales.touch_updated_at() RETURNS trigger LANGUAGE plpgsql AS $$
  BEGIN NEW.updated_at=now(); RETURN NEW; END $$;
 DO $$ DECLARE t text; BEGIN
  FOR t IN SELECT unnest(ARRAY['sellers','telegram_accounts','leads','lead_sources','outreach_attempts','dialog_controls']) LOOP
   EXECUTE format('ALTER TABLE gsales.%I ENABLE ROW LEVEL SECURITY',t);
   EXECUTE format('ALTER TABLE gsales.%I FORCE ROW LEVEL SECURITY',t);
-  EXECUTE format('CREATE POLICY gsales_login_tenant ON gsales.%I FOR ALL USING (tenant_id=''c4d67889-877e-4d1b-a8d8-597c479d638f''::uuid AND session_user=''gsales_runtime'') WITH CHECK (tenant_id=''c4d67889-877e-4d1b-a8d8-597c479d638f''::uuid AND session_user=''gsales_runtime'')',t);
+  EXECUTE format('CREATE POLICY gsales_login_tenant ON gsales.%I FOR ALL USING (tenant_id=gsales.runtime_tenant_id()) WITH CHECK (tenant_id=gsales.runtime_tenant_id())',t);
   IF t<>'lead_sources' AND t<>'outreach_attempts' THEN
    EXECUTE format('CREATE TRIGGER updated_at BEFORE UPDATE ON gsales.%I FOR EACH ROW EXECUTE FUNCTION gsales.touch_updated_at()',t);
   END IF;

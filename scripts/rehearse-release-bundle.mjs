@@ -13,12 +13,12 @@ run(preparedImageCaptureCommand(proof, candidate, scratch));
 run(preparedImageParityCommand(proof, candidate, scratch));
 const reusable = execFileSync('bash', ['-c', reuseBundleCommand(proof, candidate)], { encoding: 'utf8', timeout: 90_000 });
 if (!reusable.includes('GPOINT_CI_IMAGES_REUSABLE')) throw new Error('Imported candidate cannot be reused');
-for (const [role, repository] of [['app', 'gpoint-runtime'], ['agata', 'gpoint-agata-runtime']]) {
+for (const [role, repository] of [['app', 'gpoint-runtime'], ['agata', 'gpoint-agata-runtime'], ['gsales', 'gpoint-g-sales-runtime']]) {
   const tag = `${repository}:${candidate}`;
   const native = execFileSync('docker', ['image', 'inspect', tag, '--format', '{{.Id}}'], { encoding: 'utf8' }).trim();
   // This is the real production-store regression, not a mocked Docker response.
   if (native === proof.images[role].id) throw new Error('Rehearsal did not exercise manifest/config identity difference');
-  const file = path.join(scratch, `gpoint-${role === 'agata' ? 'agata-' : ''}image-id-${candidate}`);
+  const file = path.join(scratch, role === 'app' ? `gpoint-image-id-${candidate}` : `gpoint-${role === 'agata' ? 'agata-' : 'g-sales-'}image-id-${candidate}`);
   const captured = fs.readFileSync(file, 'utf8');
   try {
     fs.writeFileSync(file, proof.images[role].id + '\n');

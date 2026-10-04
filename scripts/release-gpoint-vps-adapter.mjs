@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { verifyReleaseBundle, importBundleCommand, reuseBundleCommand, preparedImageCaptureCommand, preparedImageParityCommand } from './release-bundle.mjs';
 import { migrationHead } from './release-migrations.mjs';
+import { gsalesMigrationIdentity, gsalesReadinessCommand, parseGsalesReadiness, gsalesMigrationStateCommand, gsalesMigrationCommand, combinedComposeCommand, gsalesStartCommand, gsalesRuntimeCommand, parseGsalesRuntime, gsalesProductionInspectionCommand } from './release-gsales.mjs';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -461,7 +462,11 @@ export function inspectProductionReadOnly() {
   const command = `set -e; envFile=/opt/gpoint/env/production.env; test -r "$envFile"; releaseSha=$(sed -n 's/^RELEASE_SHA=//p' "$envFile" | head -1); printf 'LIVE_RELEASE_ENV_SHA=%s\\n' "$releaseSha"; for name in api worker bot; do container=compose-$name-1; image=$(docker inspect "$container" --format '{{.Image}}'); running=$(docker inspect "$container" --format '{{.State.Running}}'); health=$(docker inspect "$container" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'); restart=$(docker inspect "$container" --format '{{.RestartCount}}'); build=$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'); upper=$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]'); printf 'LIVE_%s_IMAGE=%s LIVE_%s_SHA=%s LIVE_%s_RUNNING=%s LIVE_%s_HEALTH=%s LIVE_%s_RESTARTS=%s\\n' "$upper" "$image" "$upper" "$build" "$upper" "$running" "$upper" "$health" "$upper" "$restart"; done; mini=$(grep -oE 'gpoint-build-sha" content="[0-9a-f]{40}' /opt/gpoint/app/miniapp/index.html | head -1 | cut -d'"' -f3); printf 'LIVE_MINIAPP_SHA=%s\\n' "$mini"; printf '%s' '${encodedDbScript}' | base64 -d | docker exec -i -w /app/apps/api compose-api-1 node; for name in AGATA_ENABLED AGATA_LLM_PROVIDER AGATA_DATABASE_URL AGATA_TENANT_ID AGATA_INTERNAL_API_TOKEN AGATA_MESSAGE_AEAD_KEY AGATA_REQUEST_FINGERPRINT_HMAC_KEY AGATA_RETRIEVAL_QUERY_HMAC_KEY AGATA_RESPONSE_FINGERPRINT_HMAC_KEY AGATA_SHADOW_CANDIDATE_HMAC_KEY; do if grep -Eq "^\${name}=.+$" "$envFile"; then present=YES; else present=NO; fi; printf 'LIVE_CONFIG_%s=%s\\n' "$name" "$present"; done; value=$(sed -n 's/^AGATA_ENABLED=//p' "$envFile" | head -1); printf 'LIVE_AGATA_ENABLED=%s\\n' "\${value:-unset}"; value=$(sed -n 's/^AGATA_LLM_PROVIDER=//p' "$envFile" | head -1); printf 'LIVE_AGATA_PROVIDER=%s\\n' "\${value:-unset}"`;
   const agataRuntime = run("set -e; envFile=/opt/gpoint/env/production.env; for role in API WORKER; do if [ \"$role\" = API ]; then container=compose-agata-api-1; else container=compose-agata-memory-worker-1; fi; if docker inspect \"$container\" >/dev/null 2>&1; then imageId=$(docker inspect \"$container\" --format '{{.Image}}'); image=$(docker inspect \"$container\" --format '{{.Config.Image}}'); build=$(docker image inspect \"$imageId\" --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}'); running=$(docker inspect \"$container\" --format '{{.State.Running}}'); health=$(docker inspect \"$container\" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'); printf 'LIVE_AGATA_%s_IMAGE=%s LIVE_AGATA_%s_IMAGE_ID=%s LIVE_AGATA_%s_SHA=%s LIVE_AGATA_%s_RUNNING=%s LIVE_AGATA_%s_HEALTH=%s\\n' \"$role\" \"$image\" \"$role\" \"$imageId\" \"$role\" \"$build\" \"$role\" \"$running\" \"$role\" \"$health\"; fi; done; if grep -Eq '^AGATA_LLM_API_KEY=.+$' \"$envFile\"; then echo LIVE_CONFIG_AGATA_LLM_API_KEY=YES; else echo LIVE_CONFIG_AGATA_LLM_API_KEY=NO; fi");
   const providerConfig = run("set -e; envFile=/opt/gpoint/env/production.env; for name in AGATA_CODEX_LOCAL_ENABLED GPOINT_AGATA_WORKER_TOKEN; do if grep -Eq \"^${name}=.+$\" \"$envFile\"; then present=YES; else present=NO; fi; printf 'LIVE_CONFIG_%s=%s\\n' \"$name\" \"$present\"; done; value=$(sed -n 's/^AGATA_CODEX_LOCAL_ENABLED=//p' \"$envFile\" | head -1); printf 'LIVE_AGATA_CODEX_LOCAL_ENABLED=%s\\n' \"${value:-unset}\"");
-  return `${prerequisites}\n${run(command)}\n${agataRuntime}\n${providerConfig}`;
+  return `${prerequisites}\n${run(command)}\n${agataRuntime}\n${providerConfig}\n${run(gsalesProductionInspectionCommand())}`;
+}
+
+export function inspectGsalesReadiness(candidate, baselineSha, execute = run) {
+  return parseGsalesReadiness(execute(gsalesReadinessCommand(candidate, baselineSha)), candidate, baselineSha);
 }
 
 export function exactCheckout(sha) {
@@ -480,18 +485,21 @@ export function exactCheckout(sha) {
   }
 }
 
-export function agata0010Command(sha, mode, checkout = ROOT) {
+export function agataProductionMigrationCommand(sha, mode, checkout = ROOT) {
   if (!/^[0-9a-f]{40}$/.test(sha ?? '') || !['preflight', 'backup', 'migrate'].includes(mode)) throw new Error('exact SHA and supported migration mode required');
   const source = fs.readFileSync(path.join(checkout, 'scripts/agata-production-migration.py'), 'utf8');
   const encoded = Buffer.from(source).toString('base64');
   return `python3 -c "import base64,sys;sys.argv=['agata-production-migration.py','${mode}','--sha','${sha}'];exec(base64.b64decode('${encoded}'))"`;
 }
 
+export const agata0010Command = agataProductionMigrationCommand;
+
 export function inspectAgataMigrationReadiness(sha, beforeHead, candidateHead, execute = run) {
   if (beforeHead === candidateHead) return null;
-  if (candidateHead !== 'agata0010') return null;
-  if (beforeHead !== 'agata0009') throw new Error('agata0010 production guard requires agata0009 baseline');
-  const output = execute(agata0010Command(sha, 'preflight'));
+  const expectedBaseline = { agata0010: 'agata0009', agata0011: 'agata0010' }[candidateHead];
+  if (!expectedBaseline) return null;
+  if (beforeHead !== expectedBaseline) throw new Error(`${candidateHead} production guard requires ${expectedBaseline} baseline`);
+  const output = execute(agataProductionMigrationCommand(sha, 'preflight'));
   const line = output.split(/\r?\n/).find(value => value.startsWith('AGATA_MIGRATION_READINESS='));
   let facts;
   try { facts = JSON.parse(line?.slice('AGATA_MIGRATION_READINESS='.length)); } catch { throw new Error('AGATA migration readiness evidence absent'); }
@@ -507,9 +515,16 @@ export function parseGuardedMigrationEvidence(output, sha) {
   const backup = read('GPOINT_COMPLETE_BACKUP=');
   const baseline = read('AGATA_MIGRATION_VERIFIED=');
   if (!backup && !baseline) return null;
-  if (!backup || backup.status !== 'COMPLETE_PROTECTED' || backup.database !== 'gpoint' || backup.schemas?.join(',') !== 'public,agata' || !/^[0-9a-f]{64}$/.test(backup.sha256 ?? '') || !backup.path?.startsWith('/opt/gpoint/backups/')) throw new Error('complete GPoint backup proof missing or invalid');
+  const backupSchemas = backup?.schemas?.join(',');
+  const extraSchemas = backup?.schemas?.slice(2) ?? [];
+  const schemaListValid = backupSchemas === 'public,agata' ||
+    (backup?.schemas?.[0] === 'public' && backup?.schemas?.[1] === 'agata' &&
+      extraSchemas.length > 0 && extraSchemas.join(',') === ['gsales', 'gsales_meta', 'agata_identity'].filter(schema => extraSchemas.includes(schema)).join(','));
+  const backupExtensions = backup?.extensions ?? [];
+  if (!Array.isArray(backupExtensions) || backupExtensions.some(name => typeof name !== 'string' || !/^[a-z][a-z0-9_-]*$/.test(name)) || new Set(backupExtensions).size !== backupExtensions.length) throw new Error('complete GPoint backup extension evidence invalid');
+  if (!backup || backup.status !== 'COMPLETE_PROTECTED' || backup.database !== 'gpoint' || !schemaListValid || !/^[0-9a-f]{64}$/.test(backup.sha256 ?? '') || !backup.path?.startsWith('/opt/gpoint/backups/')) throw new Error('complete GPoint backup proof missing or invalid');
   if (backup.candidate_sha !== sha || (baseline && baseline.candidate_sha !== sha)) throw new Error('guarded migration evidence exact SHA mismatch');
-  if (baseline && (baseline.readiness !== 'PASS' || baseline.head_after !== 'agata0010' || !Number.isInteger(baseline.tenant_count) || baseline.tenant_count < 1 || !/^[0-9a-f]{64}$/.test(baseline.inventory_sha256 ?? ''))) throw new Error('guarded baseline proof invalid');
+  if (baseline && (baseline.readiness !== 'PASS' || !['agata0010', 'agata0011'].includes(baseline.head_after) || !Number.isInteger(baseline.tenant_count) || baseline.tenant_count < 1 || !/^[0-9a-f]{64}$/.test(baseline.inventory_sha256 ?? ''))) throw new Error('guarded baseline proof invalid');
   return { backup, baseline };
 }
 
@@ -533,8 +548,10 @@ export function agataProviderRuntimeCommand(provider) {
 export function applyCandidate(sha, { retentionPlan = { removableShas: [], removableCacheIds: [] }, provider = 'disabled', verifyProviderReadiness = () => {}, onMigrationStart = () => {}, onAgataStart = () => {}, onSwitchStart = () => {} } = {}) {
   if (!['disabled', 'mac_worker'].includes(provider)) throw new Error(`unsupported AGATA provider: ${provider}`);
   const bundle = process.env.GPOINT_RELEASE_BUNDLE ? verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, sha) : null;
+  if (!bundle) throw new Error('verified immutable CI release bundle is required; application images are never rebuilt during apply');
   const checkout = exactCheckout(sha);
   let agataMigrations;
+  let gsalesMigrations;
   const timings = {};
   const detectorHash = detectorSourceHash(checkout);
   const detectorTag = `gpoint-sensitive-detector:${detectorHash}`;
@@ -548,6 +565,8 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
     const migrationDirectory = path.join(checkout, 'services/agata/migrations/versions');
     agataMigrations = migrationHead(fs.readdirSync(migrationDirectory).filter(name => name.endsWith('.py')).map(name => fs.readFileSync(path.join(migrationDirectory, name), 'utf8')));
     if (bundle && bundle.agataHead !== agataMigrations.head) throw new Error('CI migration head does not match candidate source');
+    gsalesMigrations = gsalesMigrationIdentity(checkout, bundle);
+    if (agataMigrations.head !== 'agata0011') throw new Error('GSales integration requires AGATA agata0011');
     createSourceArchive(checkout, archive);
     stage(timings, 'PRODUCTION_PREFLIGHT', () => run(productionPreflightCommand()));
     stage(timings, 'SOURCE_PREPARE', () => {
@@ -571,7 +590,7 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
       `mkdir -p ${releaseDir}`,
       `tar -xzf /tmp/gpoint-${sha}.tar.gz -C ${releaseDir}`,
       `mv ${releaseDir}/${path.basename(checkout)} ${releaseDir}/source`,
-      `cp ${releaseDir}/source/infra/production/docker-compose.yml /tmp/gpoint-compose-${sha}.yml`,
+      combinedComposeCommand(sha),
       `cp ${releaseDir}/source/infra/production/Gpoint.Dockerfile /tmp/gpoint-dockerfile-${sha}`,
       `cp ${releaseDir}/source/infra/production/sensitive-detector/config.mjs /tmp/gpoint-safety-config-${sha}.mjs`,
       `cp ${releaseDir}/source/infra/production/sensitive-detector/Dockerfile /tmp/gpoint-safety-dockerfile-${sha}`,
@@ -579,31 +598,30 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
       `cp ${releaseDir}/source/infra/production/Caddyfile /tmp/gpoint-caddy-${sha}`,
       `caddy validate --config /tmp/gpoint-caddy-${sha} --adapter caddyfile`,
       `RELEASE_SHA=${sha} docker compose -p compose --env-file /opt/gpoint/env/production.env -f /tmp/gpoint-compose-${sha}.yml config --quiet`,
-      ...(bundle ? [preparedImageCaptureCommand(bundle, sha)] : [
-        `if docker image inspect gpoint-runtime:${sha} >/dev/null 2>&1; then test "$(docker image inspect gpoint-runtime:${sha} --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')" = '${sha}'; echo GPOINT_BUILD_REUSED; else DOCKER_BUILDKIT=1 docker build --progress=plain --build-arg GPOINT_BUILD_SHA=${sha} --label org.opencontainers.image.revision=${sha} --label org.opencontainers.image.source=${REPO} -f /tmp/gpoint-dockerfile-${sha} -t gpoint-runtime:${sha} ${releaseDir}/source > /tmp/gpoint-build-${sha}.log 2>&1; fi`,
-        `docker image inspect gpoint-runtime:${sha} --format '{{.Id}}' > ${imageProof}`,
-        `if docker image inspect gpoint-agata-runtime:${sha} >/dev/null 2>&1; then test "$(docker image inspect gpoint-agata-runtime:${sha} --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')" = '${sha}'; echo AGATA_BUILD_REUSED; else DOCKER_BUILDKIT=1 docker build --progress=plain --build-arg GPOINT_BUILD_SHA=${sha} --label org.opencontainers.image.revision=${sha} --label org.opencontainers.image.source=${REPO} -f /tmp/gpoint-agata-dockerfile-${sha} -t gpoint-agata-runtime:${sha} ${releaseDir}/source/services/agata > /tmp/gpoint-agata-build-${sha}.log 2>&1; fi`,
-        `docker image inspect gpoint-agata-runtime:${sha} --format '{{.Id}}' > ${agataImageProof}`,
-      ]),
+      preparedImageCaptureCommand(bundle, sha),
       `mkdir -p /opt/gpoint/release-logs/${sha} && cp /tmp/gpoint-build-${sha}.log /opt/gpoint/release-logs/${sha}/runtime-build.log 2>/dev/null || true && cp /tmp/gpoint-agata-build-${sha}.log /opt/gpoint/release-logs/${sha}/agata-build.log 2>/dev/null || true`,
-      'echo GPOINT_BUILD_OK AGATA_BUILD_OK'
+      'echo GPOINT_BUILD_OK AGATA_BUILD_OK GSALES_BUILD_OK'
     ].join('; ');
-    const buildOutput = stage(timings, 'RUNTIME_BUILD', () => run(build)); if (!buildOutput.includes('GPOINT_BUILD_OK') || !buildOutput.includes('AGATA_BUILD_OK')) throw new Error('GPoint/AGATA remote image build failed');
-    if (bundle) stage(timings, 'CI_ARTIFACT_PARITY', () => run(preparedImageParityCommand(bundle, sha)));
+    const buildOutput = stage(timings, 'RUNTIME_BUILD', () => run(build)); if (!buildOutput.includes('GPOINT_BUILD_OK') || !buildOutput.includes('AGATA_BUILD_OK') || !buildOutput.includes('GSALES_BUILD_OK')) throw new Error('immutable app/AGATA/G Sales image import failed');
+    let effectiveConfigSha256 = buildOutput.match(/GPOINT_EFFECTIVE_CONFIG_SHA256=([0-9a-f]{64})/)?.[1];
+    if (!effectiveConfigSha256) throw new Error('effective production config evidence absent');
+    stage(timings, 'CI_ARTIFACT_PARITY', () => run(preparedImageParityCommand(bundle, sha)));
     const migration = stage(timings, 'MIGRATION_APPLY', () => {
       const steps = [
         'set -e',
         `status=$(docker run --rm ${databaseNetworkArgs('gpoint-migration')} --env-file /opt/gpoint/env/production.env gpoint-runtime:${sha} pnpm --filter @gpoint/db exec prisma migrate status 2>&1 || true)`,
         `printf '%s\\n' "$status"`,
         `prismaPending=0; if printf '%s' "$status" | grep -Eiq 'Database schema is up to date!|No pending migrations to apply\\.'; then echo PRISMA_NO_PENDING_MIGRATIONS; elif printf '%s' "$status" | grep -Eiq 'Following migrations have not yet been applied|The following migration(s) have not yet been applied'; then prismaPending=1; echo PRISMA_PENDING_MIGRATIONS; else echo PRISMA_STATUS_UNRECOGNIZED; exit 33; fi`,
-        `agataBefore=$(printf '%s' '${agataStatusB64}' | base64 -d | docker run --rm -i ${databaseNetworkArgs('gpoint-agata-preflight')} --env-file /opt/gpoint/env/production.env gpoint-agata-runtime:${sha} python -)`,
+        `agataBefore=$(printf '%s' '${agataStatusB64}' | base64 -d | docker run --rm -i ${databaseNetworkArgs('gpoint-agata-preflight')} --env-file /opt/gpoint/env/production.env --env-file /opt/gpoint/env/migration.env gpoint-agata-runtime:${sha} python -)`,
         `printf '%s\\n' "$agataBefore"`,
         `agataPending=0; if printf '%s' "$agataBefore" | grep -qx 'AGATA_SCHEMA_ABSENT'; then agataPending=1; elif printf '%s' "$agataBefore" | grep -Eq '^AGATA_HEAD=(${agataMigrations.revisions.join('|')})$'; then if ! printf '%s' "$agataBefore" | grep -qx 'AGATA_HEAD=${agataMigrations.head}'; then agataPending=1; fi; else echo AGATA_HEAD_UNRECOGNIZED; exit 34; fi`,
-        `if [ "$prismaPending" = 1 ] || [ "$agataPending" = 1 ]; then ${agataMigrations.head === 'agata0010' ? agata0010Command(sha, 'backup', checkout) : `backupName=gpoint-pre-release-${sha}-$(date -u +%Y%m%dT%H%M%SZ).dump; mkdir -p /opt/gpoint/backups; chmod 700 /opt/gpoint/backups; docker image inspect postgres:16 >/dev/null 2>&1 || docker pull postgres:16; docker run --rm ${databaseNetworkArgs()} --env-file /opt/gpoint/env/production.env -e GPOINT_BACKUP_NAME="$backupName" -v /opt/gpoint/backups:/backups postgres:16 sh -ec 'dburl=$(printf "%s" "$DATABASE_URL" | sed -E "s/([?&])(schema|connection_limit|pool_timeout|pgbouncer|sslaccept)=[^&]*//g; s/[?&]$//; s/\\?&/?/g"); schemas="--schema=public"; if psql "$dburl" -Atc "SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name='\''agata'\'')" | grep -qx t; then schemas="$schemas --schema=agata"; fi; pg_dump --format=custom --no-owner $schemas --dbname "$dburl" --file "/backups/$GPOINT_BACKUP_NAME"'; chmod 600 "/opt/gpoint/backups/$backupName"; test -s "/opt/gpoint/backups/$backupName"; docker run --rm -v /opt/gpoint/backups:/backups postgres:16 pg_restore --list "/backups/$backupName" >/dev/null; echo GPOINT_BACKUP_PATH=/opt/gpoint/backups/$backupName; echo GPOINT_BACKUP_STATUS=NONEMPTY_PROTECTED`}; fi`,
+        `gsalesState=$( ${gsalesMigrationStateCommand(gsalesMigrations)} ); printf '%s\\n' "$gsalesState"; gsalesPending=$(printf '%s' "$gsalesState" | sed -n 's/^GSALES_PENDING=//p'); test "$gsalesPending" = 0 || test "$gsalesPending" = 1`,
+        `if [ "$prismaPending" = 1 ] || [ "$agataPending" = 1 ] || [ "$gsalesPending" = 1 ]; then ${['agata0010', 'agata0011'].includes(agataMigrations.head) ? agataProductionMigrationCommand(sha, 'backup', checkout) : `backupName=gpoint-pre-release-${sha}-$(date -u +%Y%m%dT%H%M%SZ).dump; mkdir -p /opt/gpoint/backups; chmod 700 /opt/gpoint/backups; docker image inspect postgres:16 >/dev/null 2>&1 || docker pull postgres:16; docker run --rm ${databaseNetworkArgs()} --env-file /opt/gpoint/env/production.env -e GPOINT_BACKUP_NAME="$backupName" -v /opt/gpoint/backups:/backups postgres:16 sh -ec 'dburl=$(printf "%s" "$DATABASE_URL" | sed -E "s/([?&])(schema|connection_limit|pool_timeout|pgbouncer|sslaccept)=[^&]*//g; s/[?&]$//; s/\\?&/?/g"); schemas="--schema=public"; if psql "$dburl" -Atc "SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name='\''agata'\'')" | grep -qx t; then schemas="$schemas --schema=agata"; fi; pg_dump --format=custom --no-owner $schemas --dbname "$dburl" --file "/backups/$GPOINT_BACKUP_NAME"'; chmod 600 "/opt/gpoint/backups/$backupName"; test -s "/opt/gpoint/backups/$backupName"; docker run --rm -v /opt/gpoint/backups:/backups postgres:16 pg_restore --list "/backups/$backupName" >/dev/null; echo GPOINT_BACKUP_PATH=/opt/gpoint/backups/$backupName; echo GPOINT_BACKUP_STATUS=NONEMPTY_PROTECTED`}; fi`,
         `if [ "$prismaPending" = 1 ]; then docker run --rm ${databaseNetworkArgs('gpoint-migration')} --env-file /opt/gpoint/env/production.env gpoint-runtime:${sha} pnpm --filter @gpoint/db exec prisma migrate deploy; fi`,
-        `if [ "$agataPending" = 1 ]; then ${agataMigrations.head === 'agata0010' ? agata0010Command(sha, 'migrate', checkout) : `docker run --rm ${databaseNetworkArgs('gpoint-agata-migration')} --env-file /opt/gpoint/env/production.env gpoint-agata-runtime:${sha} alembic upgrade head`}; else echo AGATA_NO_PENDING_MIGRATIONS; fi`,
-        `agataAfter=$(printf '%s' '${agataStatusB64}' | base64 -d | docker run --rm -i ${databaseNetworkArgs('gpoint-agata-verify')} --env-file /opt/gpoint/env/production.env gpoint-agata-runtime:${sha} python -)`,
+        `if [ "$agataPending" = 1 ]; then ${['agata0010', 'agata0011'].includes(agataMigrations.head) ? agataProductionMigrationCommand(sha, 'migrate', checkout) : `docker run --rm ${databaseNetworkArgs('gpoint-agata-migration')} --env-file /opt/gpoint/env/production.env gpoint-agata-runtime:${sha} alembic upgrade head`}; else echo AGATA_NO_PENDING_MIGRATIONS; fi`,
+        `agataAfter=$(printf '%s' '${agataStatusB64}' | base64 -d | docker run --rm -i ${databaseNetworkArgs('gpoint-agata-verify')} --env-file /opt/gpoint/env/production.env --env-file /opt/gpoint/env/migration.env gpoint-agata-runtime:${sha} python -)`,
         `printf '%s\\n' "$agataAfter"; printf '%s' "$agataAfter" | grep -qx 'AGATA_HEAD=${agataMigrations.head}'`,
+        gsalesMigrationCommand(sha, gsalesMigrations),
         'echo GPOINT_MIGRATION_OK',
       ];
       onMigrationStart();
@@ -618,6 +636,7 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
       `sed -i 's#context: /opt/gpoint/compose/sensitive-detector#context: ${releaseDir}/source/infra/production/sensitive-detector#' /tmp/gpoint-compose-build-${sha}.yml`,
       `caddy validate --config /tmp/gpoint-caddy-${sha} --adapter caddyfile`,
       `RELEASE_SHA=${sha} docker compose -p compose --env-file /opt/gpoint/env/production.env -f /tmp/gpoint-compose-${sha}.yml config --quiet`,
+      `umask 077; RELEASE_SHA=${sha} docker compose -p compose --profile agata --profile gsales --env-file /opt/gpoint/env/production.env -f /tmp/gpoint-compose-${sha}.yml config --format json > /opt/gpoint/release-logs/${sha}/effective-compose.json; chmod 600 /opt/gpoint/release-logs/${sha}/effective-compose.json; sha256sum /opt/gpoint/release-logs/${sha}/effective-compose.json | awk '{print "GPOINT_EFFECTIVE_CONFIG_SHA256=" $1}'`,
       `mkdir -p ${releaseDir}/miniapp`,
       `docker rm -f gpoint-static-${sha.slice(0, 8)} >/dev/null 2>&1 || true`,
       `docker create --name gpoint-static-${sha.slice(0, 8)} gpoint-runtime:${sha} >/dev/null`,
@@ -634,14 +653,18 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
       `healthStartMs=$(date +%s%3N); consecutive=0; for attempt in $(seq 1 30); do running=$(docker inspect --format '{{.State.Running}}' compose-api-1 2>/dev/null || echo false); containerHealth=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' compose-api-1 2>/dev/null || echo missing); set +e; curl --connect-timeout 1 --max-time 3 -fsS -o /tmp/gpoint-health-${sha} http://127.0.0.1:3000/health/live; curlExit=$?; set -e; echo GPOINT_HEALTH_ATTEMPT=$attempt RUNNING=$running CONTAINER_HEALTH=$containerHealth CURL_EXIT=$curlExit; if [ "$curlExit" -eq 0 ] && grep -Fq '"status":"ok"' /tmp/gpoint-health-${sha}; then consecutive=$((consecutive + 1)); else consecutive=0; fi; if [ "$consecutive" -ge 3 ]; then echo GPOINT_DEPLOY_OK; break; fi; sleep 2; done; echo GPOINT_STAGE_TIMING=CONTAINER_HEALTH_WAIT_DURATION_MS=$(( $(date +%s%3N) - healthStartMs )); rm -f /tmp/gpoint-health-${sha}; test "$consecutive" -ge 3`,
       'echo GPOINT_DEPLOY_OK'
     ];
-    stage(timings, 'PRE_SWITCH_PREPARATION', () => {
+    const preparationOutput = stage(timings, 'PRE_SWITCH_PREPARATION', () => {
       const output = run(preparation.join('; '));
       if (!output.includes('GPOINT_PRE_SWITCH_ARTIFACTS_READY')) throw new Error('pre-switch artifact preparation did not complete');
       return output;
     });
+    effectiveConfigSha256 = preparationOutput.match(/GPOINT_EFFECTIVE_CONFIG_SHA256=([0-9a-f]{64})/)?.[1];
+    if (!effectiveConfigSha256) throw new Error('final effective production config evidence absent');
     onAgataStart();
     const agataReady = stage(timings, 'AGATA_PRE_SWITCH_READINESS', () => run(agataPreSwitchReadinessCommand(sha, provider)));
     if (!agataReady.includes('AGATA_PRE_SWITCH_READY') || !agataReady.includes(`AGATA_PROVIDER_VERIFIED=${provider}`) || !agataReady.includes('GPOINT_AGATA_INTERNAL_AUTH_OK')) throw new Error('AGATA pre-switch readiness/auth gate failed');
+    const gsalesStarted = stage(timings, 'GSALES_PRE_SWITCH_START', () => run(gsalesStartCommand(sha)));
+    if (!gsalesStarted.includes('GSALES_STARTED')) throw new Error('GSales lane start failed');
     verifyProviderReadiness();
     onSwitchStart();
     const deployOutput = run(deploy.join('; ')); applyRemoteTimingMarkers(timings, deployOutput); if (!deployOutput.includes('GPOINT_DEPLOY_OK')) throw new Error('remote runtime deploy failed');
@@ -654,7 +677,7 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
     const runtimeFailures = validateRuntimeIdentity(sha, { imageId, buildSha, apiImage: identityOutput.match(/API_IMAGE=(sha256:[a-f0-9]+)/)?.[1], workerImage: identityOutput.match(/WORKER_IMAGE=(sha256:[a-f0-9]+)/)?.[1], botImage: identityOutput.match(/BOT_IMAGE=(sha256:[a-f0-9]+)/)?.[1] });
     const postSwitch = classifyPostSwitchState({ candidate: sha, runtime: { imageId, buildSha, apiImage: identityOutput.match(/API_IMAGE=(sha256:[a-f0-9]+)/)?.[1], workerImage: identityOutput.match(/WORKER_IMAGE=(sha256:[a-f0-9]+)/)?.[1], botImage: identityOutput.match(/BOT_IMAGE=(sha256:[a-f0-9]+)/)?.[1] }, composeExitCode: Number.isNaN(composeExitCode) ? 1 : composeExitCode, health: true });
     if (!imageId || !indexSha256 || runtimeFailures.length) throw new Error(`remote runtime identity verification failed: ${runtimeFailures.join('; ') || 'missing identity fields'}: ${identityOutput}`);
-    const agataIdentityOutput = stage(timings, 'AGATA_POST_SWITCH_RECONCILIATION', () => run(`set -e; imageId=$(cat ${agataImageProof}); apiImage=$(docker inspect compose-agata-api-1 --format '{{.Image}}'); workerImage=$(docker inspect compose-agata-memory-worker-1 --format '{{.Image}}'); apiRunning=$(docker inspect compose-agata-api-1 --format '{{.State.Running}}'); apiHealth=$(docker inspect compose-agata-api-1 --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'); workerRunning=$(docker inspect compose-agata-memory-worker-1 --format '{{.State.Running}}'); workerHealth=$(docker inspect compose-agata-memory-worker-1 --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'); buildSha=$(docker image inspect gpoint-agata-runtime:${sha} --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'); head=$(printf '%s' '${agataStatusB64}' | base64 -d | docker run --rm -i ${databaseNetworkArgs('gpoint-agata-verify')} --env-file /opt/gpoint/env/production.env gpoint-agata-runtime:${sha} python - | sed -n 's/^AGATA_HEAD=//p'); printf 'AGATA_IMAGE_ID=%s AGATA_BUILD_SHA=%s AGATA_API_IMAGE=%s AGATA_API_RUNNING=%s AGATA_API_HEALTH=%s AGATA_WORKER_IMAGE=%s AGATA_WORKER_RUNNING=%s AGATA_WORKER_HEALTH=%s AGATA_HEAD=%s\\n' "$imageId" "$buildSha" "$apiImage" "$apiRunning" "$apiHealth" "$workerImage" "$workerRunning" "$workerHealth" "$head"`)).trim();
+    const agataIdentityOutput = stage(timings, 'AGATA_POST_SWITCH_RECONCILIATION', () => run(`set -e; imageId=$(cat ${agataImageProof}); apiImage=$(docker inspect compose-agata-api-1 --format '{{.Image}}'); workerImage=$(docker inspect compose-agata-memory-worker-1 --format '{{.Image}}'); apiRunning=$(docker inspect compose-agata-api-1 --format '{{.State.Running}}'); apiHealth=$(docker inspect compose-agata-api-1 --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'); workerRunning=$(docker inspect compose-agata-memory-worker-1 --format '{{.State.Running}}'); workerHealth=$(docker inspect compose-agata-memory-worker-1 --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'); buildSha=$(docker image inspect gpoint-agata-runtime:${sha} --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'); head=$(printf '%s' '${agataStatusB64}' | base64 -d | docker run --rm -i ${databaseNetworkArgs('gpoint-agata-verify')} --env-file /opt/gpoint/env/production.env --env-file /opt/gpoint/env/migration.env gpoint-agata-runtime:${sha} python - | sed -n 's/^AGATA_HEAD=//p'); printf 'AGATA_IMAGE_ID=%s AGATA_BUILD_SHA=%s AGATA_API_IMAGE=%s AGATA_API_RUNNING=%s AGATA_API_HEALTH=%s AGATA_WORKER_IMAGE=%s AGATA_WORKER_RUNNING=%s AGATA_WORKER_HEALTH=%s AGATA_HEAD=%s\\n' "$imageId" "$buildSha" "$apiImage" "$apiRunning" "$apiHealth" "$workerImage" "$workerRunning" "$workerHealth" "$head"`)).trim();
     const agataLine = agataIdentityOutput.split(/\r?\n/).find(line => line.includes('AGATA_IMAGE_ID=')) ?? '';
     const agataRuntime = parseAgataRuntimeIdentityLine(agataLine);
     const agataFailures = validateAgataRuntimeIdentity(sha, { imageId: agataRuntime.imageId, buildSha: agataRuntime.buildSha, apiImage: agataRuntime.apiImage, apiRunning: agataRuntime.apiRunning, apiHealth: agataRuntime.apiHealth, workerImage: agataRuntime.workerImage, workerRunning: agataRuntime.workerRunning, workerHealth: agataRuntime.workerHealth });
@@ -668,9 +691,10 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
     agataRuntime.provider = providerRuntime.PROVIDER;
     agataRuntime.codexLocalEnabled = providerRuntime.CODEX_LOCAL_ENABLED;
     agataRuntime.workerTokenPresent = providerRuntime.WORKER_TOKEN_PRESENT === 'YES';
+    const gsalesIdentity = stage(timings, 'GSALES_POST_SWITCH_RECONCILIATION', () => parseGsalesRuntime(run(gsalesRuntimeCommand(sha, gsalesMigrations)), sha, gsalesMigrations));
     const removableShas = [...new Set(retentionPlan.removableShas ?? [])].filter(candidate => /^[0-9a-f]{40}$/.test(candidate) && candidate !== sha).join(' ');
     const terminalCleanup = removableShas ? removableShas.split(' ').map(candidate =>
-      `for ref in gpoint-runtime:${candidate} gpoint-agata-runtime:${candidate}; do for status in created exited; do docker ps -aq --filter ancestor="$ref" --filter status="$status" | xargs -r docker rm >/dev/null; done; done; if [ -z "$(docker ps -aq --filter ancestor=gpoint-runtime:${candidate})" ] && [ -z "$(docker ps -aq --filter ancestor=gpoint-agata-runtime:${candidate})" ]; then docker image rm gpoint-runtime:${candidate} gpoint-agata-runtime:${candidate} >/dev/null 2>&1 || true; rm -f /tmp/gpoint-${candidate}.tar.gz /tmp/gpoint-compose-${candidate}.yml /tmp/gpoint-caddy-${candidate} /tmp/gpoint-dockerfile-${candidate} /tmp/gpoint-agata-dockerfile-${candidate} /tmp/gpoint-safety-dockerfile-${candidate} /tmp/gpoint-safety-config-${candidate}.mjs /tmp/gpoint-image-id-${candidate} /tmp/gpoint-agata-image-id-${candidate} /tmp/gpoint-previous-runtime-${candidate} /tmp/gpoint-aux-${candidate}; fi`
+      `for ref in gpoint-runtime:${candidate} gpoint-agata-runtime:${candidate} gpoint-g-sales-runtime:${candidate}; do for status in created exited; do docker ps -aq --filter ancestor="$ref" --filter status="$status" | xargs -r docker rm >/dev/null; done; done; if [ -z "$(docker ps -aq --filter ancestor=gpoint-runtime:${candidate})" ] && [ -z "$(docker ps -aq --filter ancestor=gpoint-agata-runtime:${candidate})" ] && [ -z "$(docker ps -aq --filter ancestor=gpoint-g-sales-runtime:${candidate})" ]; then docker image rm gpoint-runtime:${candidate} gpoint-agata-runtime:${candidate} gpoint-g-sales-runtime:${candidate} >/dev/null 2>&1 || true; rm -f /tmp/gpoint-${candidate}.tar.gz /tmp/gpoint-compose-${candidate}.yml /tmp/gpoint-caddy-${candidate} /tmp/gpoint-dockerfile-${candidate} /tmp/gpoint-agata-dockerfile-${candidate} /tmp/gpoint-safety-dockerfile-${candidate} /tmp/gpoint-safety-config-${candidate}.mjs /tmp/gpoint-image-id-${candidate} /tmp/gpoint-agata-image-id-${candidate} /tmp/gpoint-g-sales-image-id-${candidate} /tmp/gpoint-previous-runtime-${candidate} /tmp/gpoint-aux-${candidate}; fi`
     ).join('; ') : 'true';
     const cacheCleanup = removableShas
       ? removableShas.split(' ').map(candidateBuildCacheCleanupCommand).join('; ')
@@ -687,7 +711,7 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
       migration.match(/GPOINT_BACKUP_PATH=([^\s]+)/)?.[1] ? `BACKUP=${migration.match(/GPOINT_BACKUP_PATH=([^\s]+)/)[1]}` : null,
     ].filter(Boolean).join(',');
     if (!migrationOutput) throw new Error('migration gate output was not recognized');
-    return { imageIdentity: { imageId, indexSha256, buildSha, detectorHash }, agataIdentity: agataRuntime, migrationOutput, migrationProof, composeExitCode, postSwitch, detectorHash, timings, ciReceipt: bundle ? { ...bundle, archive: undefined } : null };
+    return { imageIdentity: { imageId, indexSha256, buildSha, detectorHash }, agataIdentity: agataRuntime, gsalesIdentity, effectiveConfigSha256, migrationOutput, migrationProof, composeExitCode, postSwitch, detectorHash, timings, ciReceipt: bundle ? { ...bundle, archive: undefined } : null };
   } finally {
     try { cleanupTemporaryWorktree(checkout); }
     finally { fs.rmSync(archive, { force: true }); }

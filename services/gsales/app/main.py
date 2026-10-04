@@ -32,21 +32,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             async with app.state.db.transaction() as conn:
                 await app.state.db.assert_secure(conn)
-            if settings.outreach_enabled:
-                await app.state.core.assert_secure()
-                if not getattr(app.state, "telegram", None):
-                    raise ValueError("telegram_not_configured")
-            return {"status": "ready", "sends_enabled": settings.outreach_enabled}
         except Exception:
             raise HTTPException(503, detail={"code": "database_security_not_ready"}) from None
+        if settings.production_mode or settings.outreach_enabled:
+            try:
+                await app.state.core.assert_secure()
+            except Exception:
+                code = "inference_provider_degraded" if settings.production_mode else "agata_security_not_ready"
+                raise HTTPException(503, detail={"code": code}) from None
+        if settings.outreach_enabled and not getattr(app.state, "telegram", None):
+            raise HTTPException(503, detail={"code": "telegram_not_configured"})
+        return {"status": "ready", "sends_enabled": settings.outreach_enabled}
 
     @app.get("/v1/status", dependencies=[Depends(require_owner)])
     async def status():
+        inference_status = "disabled"
+        if settings.production_mode:
+            try:
+                await app.state.core.assert_secure()
+                inference_status = "ready"
+            except Exception:
+                inference_status = "degraded"
         return {
             "service": "g-sales",
             "outreach_enabled": settings.outreach_enabled,
             "auto_reply_enabled": settings.auto_reply_enabled,
             "tenant_id": settings.tenant_id,
+            "inference_status": inference_status,
         }
 
     from app.crm import install
