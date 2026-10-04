@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "billing_status": "UNKNOWN_BASELINE",
+  "planned_initial_replies": 288,
+  "planned_candidate_replies": 216,
+  "pilot_id": "agata-pilot-v1-2026-10-04",
+  "frozen_scenario_ids_sha256": "1fcbe40d2f9d912cc2b83424296e23d02ed6d86db7e230882c0a3fd84ce9537c",
+  "frozen_pilot_config_sha256": "ea45217d858d1add4916280b4eb44290e79a7a46ca4c8a34cae94558fecd4adc",
+  "candidate_external_calls_max": 219,
+  "baseline_external_calls_max": 72,
+  "total_external_calls_max": 291,
+  "retries_per_candidate_provider_max": 1,
+  "per_request_token_caps": {"input": 32768, "output": 2048},
+  "expected_tokens_per_candidate": {"input": 433152, "output": 73728},
+  "expected_candidate_usd": 3.808512,
+  "worst_case_tokens_per_candidate": {"input": 672768, "output": 147456},
+  "contingency_factor": 1.2,
+  "candidate_worst_case_reserve_usd": 9.129063,
+  "candidate_only_stop_threshold_usd": 10.0,
+  "full_pilot_max_usd": null,
+  "baseline_account_usage_snapshot": {"as_of": "2026-10-04T10:03:52+03:00", "plan": "Plus", "current_5h_window_used_percent": 98, "current_7d_window_used_percent": 67, "additional_credits_available": false, "per_request_receipt": false},
+  "cache_assumptions": "Expected: zero-cache, based on 433,152 input and 73,728 billed output tokens per candidate. Conservative bound applies 5-minute cache-write input rate to all OpenAI and Anthropic input; Gemini uses standard input pricing. Add one retry per candidate provider at the frozen per-request maximum, then 20% contingency over the aggregate. Cache discounts are not assumed guaranteed.",
+  "reasoning_tokens": "Billed provider reasoning/thought tokens count against output cap and estimate; no separate uncapped reasoning allowance.",
+  "price_basis": {
+    "gpt-6.1-sol": {"input_per_million": 2.0, "cache_write_input_per_million": 2.5, "output_per_million": 10.0, "source": "https://developers.openai.com/api/docs/pricing"},
+    "claude-sonnet-5-5": {"input_per_million": 2.0, "cache_write_input_per_million": 2.5, "output_per_million": 10.0, "source": "https://platform.claude.com/docs/en/about-claude/pricing"},
+    "gemini-3.8-flash": {"input_per_million": 0.75, "cache_write_input_per_million": 0.75, "output_per_million": 3.75, "source": "https://ai.google.dev/gemini-api/docs/pricing", "promotion_valid_through": "2026-12-31"}
+  },
+  "notes": [
+    "Prices and token counts are planning estimates, not provider billing guarantees.",
+    "Expected and worst-case values cover paid candidates only; Codex subscription baseline quota remains unknown.",
+    "The proposed USD threshold is not execution authorization or a provider-side billing cap.",
+    "No retry is allowed for refusal or max-token partial responses."
+  ]
+}

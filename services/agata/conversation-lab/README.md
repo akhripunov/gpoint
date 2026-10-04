@@ -62,3 +62,17 @@ Benchmark: 128 независимых авторских сценариев, 16 
 Протоколы: experiments/blind-evaluation.md и experiments/model-comparison.md; шкалы: configs/rubric-v1.json. Blind CLI только упаковывает импортированные результаты, не вызывает модели. Реальные ответы, статистика качества, OWNER-оценки и winner отсутствуют до отдельного разрешённого эксперимента.
 
 180 ручных оценок и исследования хранятся в canonical data/runs/phase2-2026-10-04-audit/. Итоговая проверка утечки — phase2-2026-10-04-final-leakage/. Все исследовательские результаты и roadmap публикуются только в существующем документе Linear AGATA Conversation Lab. Эти локальные отчёты игнорируются Git; исходные тексты не коммитятся. Production, Core, G Sales, paid API и обучение не затронуты.
+
+## Phase 3 — baseline audit и offline pilot preparation
+
+Спецификация и план: `experiments/phase3-spec.md`, `experiments/phase3-plan.md`. Это подготовка, а не запуск сравнения: adapters только собирают документированные payloads и разбирают переданные fixtures; в коде нет provider transport, API-key lookup, Codex subprocess или enqueue в Mac worker. Без отдельного execution grant никакой network generation не выполняется.
+
+Замороженный пилот: `configs/pilot-v1.json` выбирает существующий сценарий `-01` из каждой категории, сохраняет scenario/manifest/Persona/rubric/memory/context hashes и задаёт 72 ответа на модель (288 всего). Точные candidate model IDs и прайс-ссылки — в `configs/pilot-budget-v1.json`; budget guard fail-closed, пока baseline quota не проверена и полный лимит не зафиксирован. `$10` — лишь предложенный candidate-only stop ceiling, не разрешение тратить деньги.
+
+Локальный офлайн-прогон (создаёт только новый каталог `data/runs/phase3-<id>`, не перезаписывает существующий):
+
+```sh
+python3 services/agata/conversation-lab/evaluators/pilot_cli.py dry-run --run-id phase3-local-20261004-rerun1
+```
+
+Вывод и reviewer packet имеют статус `FIXTURE_ONLY`; ответы — тестовые строки, а не результаты моделей. `ratings.py` требует lock до unblind, создаёт новый review cycle при исправлениях и считает описательные A–J показатели без объявления победителя. Платные API, Codex CLI benchmark jobs, worker, AGATA Core и Production запрещены в Phase 3.
