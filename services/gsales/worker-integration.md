@@ -74,15 +74,38 @@ are explicitly provided. The freshness limit is 15 seconds, above the worker's
 10-second idle poll interval.
 Synthetic rehearsal already uses the same worker/API paths with mock output.
 
-A tested controller at `scripts/run-gsales-one-shot-real-codex.py` snapshots the
-original plist/source/wrapper hashes, checks the exact candidate and a fresh idle
-poll, requires a read-only zero pending/running queue counts and effective TTL ≥221s, enforces a 220-second
-maximum window (below the Core default TTL420s and 300-second lease), and restores
-in finally. Its
-unit checks prove original plist bootstrap/hash checks and missing queue data
-blocks before stop. Preflight-only returns BLOCKED because the installed
-status/gateway contract has no authoritative queue counts or effective TTL;
-no launchctl bootout has been attempted.
+A guarded controller at `scripts/run-gsales-one-shot-real-codex.py` snapshots the
+original plist/source/wrapper hashes, checks the exact candidate and fresh local
+idle poll, and obtains aggregate pending/running counts plus effective TTL from a
+repeatable-read, read-only query inside the image-verified live AGATA API
+container. It requires an empty queue and TTL ≥420s (300s maximum full outage
+plus a 120s margin). One monotonic outage deadline starts before bootout and ends
+only after the original LaunchAgent resumes polling; the test budget reserves up
+to 10s for termination and 60s for bootstrap/poll confirmation. The query is
+refreshed directly before switching, then local activity is checked again.
+
+The 2026-10-04 dry-run is **NO-GO**. The live container's effective
+`AGATA_TENANT_ID` does not match the fixed GPOINT tenant used by the worker, so
+the controller rejects the runtime before accepting any queue counts or TTL. A
+separate earlier read-only SQL probe explicitly scoped to the expected tenant
+observed zero pending/running jobs and TTL 420s, but that evidence cannot override
+the runtime configuration mismatch. The repo production ledger also records
+SHA `8c30d676809f8c0f6d3254891bf096b0b8740bd4`, while the live API/Core images
+and VPS `RELEASE_SHA` identify `68bf0212d7aa5125394b0b39ffba9226eb106c0d`.
+Reconcile both identity discrepancies before considering another rehearsal.
+The installed LaunchAgent remains loaded and locally idle; no bootout, deploy,
+migration, V3 install, or real Codex inference occurred.
+
+The focused controller suite covers stale/untrusted/wrong-runtime snapshots,
+empty/non-empty queue, the TTL margin, a shared outage deadline, and the
+queue-then-local recheck order. It passes 7 tests. Ruff and `git diff --check`
+pass. The read-only preflight fails closed on the tenant mismatch before it can
+approve an outage window.
+
+The P0 worker-token exposure is recorded without its value in
+`docs/security/gpoint-agata-worker-token-incident-2026-10-04.md`. Rotation is
+not performed; it requires separate OWNER approval and a coordinated Mac/VPS
+maintenance window.
 
 Concrete plan after the owner-approved one-shot window can satisfy queue/network preflight:
 
