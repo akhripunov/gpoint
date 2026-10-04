@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "scoring_unit": "whole_conversation",
+  "human_ratings_primary": true,
+  "metrics": {
+    "A_russian_naturalness": "rubric:naturalness",
+    "B_persona_consistency": "rubric:persona",
+    "C_emotional_appropriateness": "rubric:emotion",
+    "D_humor": "supplemental:humor",
+    "E_initiative": "rubric:initiative",
+    "F_memory_accuracy": "rubric:memory",
+    "G_context_continuity": "supplemental:context_continuity",
+    "H_dialogue_engagement": "supplemental:dialogue_engagement",
+    "I_boundary_handling": "rubric:consent",
+    "J_overall_human_preference": "one paired OWNER preference per scenario after the full conversation"
+  },
+  "supplemental_scale": {
+    "humor": {"1": "юмор отсутствует либо неуместен", "3": "иногда уместен, но неровный", "5": "естественный и тонкий, точно подходит разговору"},
+    "context_continuity": {"1": "регулярно теряет факты и ход беседы", "3": "удерживает основную линию с отдельными сбоями", "5": "точно удерживает детали и связность на всём сценарии"},
+    "dialogue_engagement": {"1": "не поддерживает разговор или перехватывает его", "3": "в целом поддерживает разговор", "5": "вовлекает естественно, не давит и не перетягивает инициативу"}
+  },
+  "n_a_policy": "A dimension may be null only when its exact key is in not_applicable with a non-empty owner reason; exclude and report denominators explicitly.",
+  "winner_policy": "Do not infer a winner during preparation. Report per-model, per-category and per-scenario descriptive scores and paired-preference counts after unblinding."
+}
