@@ -126,10 +126,10 @@
 **Interfaces:**
 - Documents exact local fixture-only command/output and the later OWNER gate; has no runtime import into AGATA Core.
 
-- [ ] **Step 1: Add failing documentation-contract tests** for documented command existence, `FIXTURE_ONLY` output, request count 0 for live inference, no worker/production wording that implies execution, and no modifications to Core/worker/G Sales.
-- [ ] **Step 2: Implement only the documentation and a static changed-path/safety assertion**; integration proposal must separate SHARED policy, PER MODEL Persona, RELATIONSHIP context and MEMORY.
-- [ ] **Step 3: Run focused tests** and review README/spec consistency.
-- [ ] **Step 4: Commit** as `docs(agata-lab): document Naturalness offline workflow`.
+- [x] **Step 1: Add failing documentation-contract tests** for documented command existence, `FIXTURE_ONLY` output, request count 0 for live inference, no worker/production wording that implies execution, and no modifications to Core/worker/G Sales.
+- [x] **Step 2: Implement only the documentation and a static changed-path/safety assertion**; integration proposal must separate SHARED policy, PER MODEL Persona, RELATIONSHIP context and MEMORY.
+- [x] **Step 3: Run focused tests** and review README/spec consistency.
+- [x] **Step 4: Commit** as `docs(agata-lab): document Naturalness offline workflow`.
 
 ### Task 6: Full verification, independent review, Linear and stacked Draft PR
 

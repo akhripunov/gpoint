@@ -11,6 +11,8 @@ from unittest.mock import patch
 
 
 LAB = Path(__file__).resolve().parents[1]
+REPO = LAB.parents[2]
+NATURALNESS_CLI = LAB / "evaluators/naturalness_cli.py"
 CATEGORIES = (
     "ru_naturalness", "daily", "humor", "support", "romance", "persona",
     "initiative", "topic_change", "return_after_break", "long_memory",
@@ -36,6 +38,38 @@ POLICY_API_AVAILABLE = NATURALNESS is not None and callable(getattr(NATURALNESS,
 
 
 class NaturalnessConfigTests(unittest.TestCase):
+    def test_documented_fixture_cli_reports_only_offline_preparation(self):
+        readme = (LAB / "README.md").read_text(encoding="utf-8")
+        command = "python3 services/agata/conversation-lab/evaluators/naturalness_cli.py dry-run"
+        self.assertIn(command, readme, "README must document the exact local fixture-only command")
+        self.assertTrue(NATURALNESS_CLI.exists(), "documented offline CLI has not been implemented")
+        completed = subprocess.run(
+            ["python3", str(NATURALNESS_CLI), "dry-run"], cwd=REPO,
+            check=True, text=True, capture_output=True, timeout=60,
+        )
+        report = json.loads(completed.stdout)
+        self.assertEqual(report["status"], "FIXTURE_ONLY")
+        self.assertEqual(report["development_scenarios"], 16)
+        self.assertEqual(report["live_inference_requests"], 0)
+        self.assertEqual(report["holdout_scenarios_used"], 0)
+        self.assertEqual(report["quality_status"], "NO_MODEL_OUTPUTS_OWNER_REVIEW_NOT_APPLICABLE")
+
+    def test_naturalness_documentation_separates_future_integration_layers(self):
+        readme = (LAB / "README.md").read_text(encoding="utf-8")
+        for layer in ("SHARED policy", "PER MODEL Persona", "RELATIONSHIP context", "MEMORY"):
+            self.assertIn(layer, readme)
+        self.assertIn("отдельн", readme.casefold())
+        self.assertIn("не запускает модель", readme.casefold())
+
+    def test_phase4_diff_stays_inside_conversation_lab(self):
+        changed = subprocess.run(
+            ["git", "diff", "--name-only", NATURALNESS.PHASE3_BASE_SHA], cwd=REPO,
+            check=True, text=True, capture_output=True,
+        ).stdout.splitlines()
+        self.assertTrue(changed)
+        allowed = "services/agata/conversation-lab/"
+        self.assertTrue(all(path.startswith(allowed) for path in changed), f"out-of-scope changed paths: {[path for path in changed if not path.startswith(allowed)]}")
+
     def test_naturalness_config_api_is_available(self):
         self.assertIsNotNone(NATURALNESS, "offline Naturalness config loader has not been implemented")
         self.assertTrue(callable(getattr(NATURALNESS, "create_naturalness_config", None)))

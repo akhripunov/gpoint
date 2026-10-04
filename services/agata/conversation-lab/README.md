@@ -76,3 +76,23 @@ python3 services/agata/conversation-lab/evaluators/pilot_cli.py dry-run --run-id
 ```
 
 Вывод и reviewer packet имеют статус `FIXTURE_ONLY`; ответы — тестовые строки, а не результаты моделей. `ratings.py` требует lock до unblind, создаёт новый review cycle при исправлениях и считает описательные A–J показатели без объявления победителя. Платные API, Codex CLI benchmark jobs, worker, AGATA Core и Production запрещены в Phase 3.
+
+## Phase 4A — Naturalness V1 offline preparation
+
+Спецификация и пошаговый план: `experiments/naturalness-v1.md` и `experiments/naturalness-v1-plan.md`. Разработка политики использует только 16 замороженных Benchmark V1 сценариев `-02` и 15 синтетических авторских примеров. Отдельные 16 сценариев Phase 3 `-01` остаются независимым holdout: CLI ниже их не читает как материал для настройки и сообщает `holdout_scenarios_used: 0`.
+
+Из корня GPoint запустите безопасную локальную проверку:
+
+```sh
+python3 services/agata/conversation-lab/evaluators/naturalness_cli.py dry-run
+```
+
+Команда проверяет SHA манифеста, формирует парные baseline / Naturalness V1 payloads по всем репликам `-02`, собирает анонимный fixture packet через существующий Phase 3 blind evaluator и печатает JSON-сводку с `status: FIXTURE_ONLY`, `live_inference_requests: 0`, числом candidate-turn fixtures и SHA packet/private mapping. Она не сохраняет файлы, не обращается к сети, не запускает модель, Codex CLI или worker и не читает Production. Реплики в blind packet — одинаковые placeholder-строки `модель не запускалась`, поэтому packet предназначен только для проверки структуры, порядка и анонимизации. Он не является A/B-результатом и не допускает вывода о качестве или победителе. Для этого потребуется отдельное решение OWNER и отдельный безопасный план генерации.
+
+Подготовленная граница будущей интеграции: **SHARED policy** задаёт общий разговорный стиль и safety; **PER MODEL Persona** сохраняет голос и границы каждой модели/персонажа; **RELATIONSHIP context** передаёт существующую историю отношений; **MEMORY** содержит только уже доступные проверенные факты. Это описание архитектурного предложения: текущий offline workflow ничего не устанавливает в AGATA Core и не меняет API, память, модель, Mac worker или Production. Запуск реального A/B сравнения, изменение worker и интеграция в runtime требуют отдельного согласования.
+
+После dry-run можно прогнать регрессии:
+
+```sh
+python3 -m unittest discover -s services/agata/conversation-lab/tests
+```
