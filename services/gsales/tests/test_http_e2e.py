@@ -28,7 +28,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 @contextmanager
-def core_runtime(tmp_path, source="gsales"):
+def core_runtime(tmp_path, source="gsales", tenant_id=None):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -39,7 +39,7 @@ def core_runtime(tmp_path, source="gsales"):
         AGATA_DATABASE_URL=os.environ["GSALES_TEST_AGATA_DSN" if source == "gsales" else "GSALES_TEST_GPOINT_DSN"].replace(
             "postgresql://", "postgresql+asyncpg://"
         ),
-        AGATA_TENANT_ID=GSALES_TENANT_ID if source == "gsales" else "7508f36f-774a-48aa-8c6b-42f6f160415d",
+        AGATA_TENANT_ID=GSALES_TENANT_ID if source == "gsales" else (tenant_id or "7508f36f-774a-48aa-8c6b-42f6f160415d"),
         AGATA_SOURCE_SYSTEM=source,
         AGATA_INTERNAL_API_TOKEN="disposable-e2e-core" if source == "gsales" else "disposable-point-core",
         AGATA_LLM_PROVIDER="mac_worker",
@@ -58,6 +58,21 @@ def core_runtime(tmp_path, source="gsales"):
         env["AGATA_" + suffix] = key
     with psycopg.connect(os.environ["GSALES_TEST_ADMIN_DSN"]) as c:
         c.execute("UPDATE gsales.sellers SET status='paused'")
+        if source == "gpoint":
+            point_tenant = env["AGATA_TENANT_ID"]
+            c.execute("INSERT INTO agata.tenants(id) VALUES(%s) ON CONFLICT DO NOTHING", (point_tenant,))
+            c.execute(
+                """INSERT INTO agata.regional_policy_profiles(tenant_id,jurisdiction,market,version,status,effective_from,rules)
+                VALUES(%s,'GLOBAL','GPOINT',1,'active',now(),
+                  '{"ai_disclosure_required":true,"self_attestation_allowed":true,"adult_only_features":[],"disclosure_repeat_hours":24}')
+                ON CONFLICT DO NOTHING""",
+                (point_tenant,),
+            )
+        if source == "gpoint" and tenant_id:
+            c.execute(
+                "UPDATE agata_identity.role_tenants SET tenant_id=%s WHERE login_role='gpoint_test_runtime'",
+                (point_tenant,),
+            )
         c.execute(
             """INSERT INTO agata.regional_policy_profiles(tenant_id,jurisdiction,market,version,status,effective_from,rules)
             VALUES(%s,'GLOBAL','GSALES',1,'active',now(),'{"ai_disclosure_required":true,"self_attestation_allowed":true,"adult_only_features":[]}') ON CONFLICT DO NOTHING""",

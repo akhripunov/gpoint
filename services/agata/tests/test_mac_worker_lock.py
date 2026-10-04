@@ -36,6 +36,7 @@ class MacWorkerLockTests(unittest.TestCase):
         with patch.dict(os.environ, {
             "GPOINT_AGATA_WORKER_URL": "https://gpoint.example/api/agata-worker",
             "GPOINT_AGATA_WORKER_TOKEN": "test-only",
+            "GPOINT_AGATA_TENANT_ID": "7508f36f-774a-48aa-8c6b-42f6f160415d",
         }), patch.object(sys, "argv", ["gpoint_mac_worker.py", "watch"]), patch.object(
             worker, "load_env_file"
         ), patch.object(worker, "process_one", side_effect=lambda: polls.append(True)), patch.object(

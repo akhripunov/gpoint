@@ -18,6 +18,13 @@ Use `.env.example` only as a key-name/template reference. Generate independent r
 
 ## Temporary local Codex test provider
 
+Shared worker V3 additionally requires a trusted `GPOINT_AGATA_TENANT_ID` pin
+for its GPOINT runtime. An optional GSALES target requires independent
+`GSALES_AGATA_WORKER_URL`, `GSALES_AGATA_WORKER_TOKEN`, and
+`GSALES_AGATA_TENANT_ID` values. Keep both tenant pins in the mode-600 worker
+configuration; never copy the production GPOINT pin into a disposable Core
+runtime.
+
 Temporary AGATA provider = `mac_worker`/`codex_local` globally enabled for current GPoint users during this testing stage. This is not the final production LLM provider. Provider selection remains configuration-driven: only `AGATA_LLM_PROVIDER=mac_worker` together with `AGATA_CODEX_LOCAL_ENABLED=true` selects the existing Mac worker; the default remains `disabled`. This mode requires the dedicated authenticated GPoint worker gateway and a local Mac worker. It does not use an OpenAI API key or copy Codex/ChatGPT credentials to the VPS. The local worker uses the logged-in Codex CLI, has concurrency one, a 180-second generation timeout, and inference jobs expire after seven minutes. Pending/running inference backlog is capped by `AGATA_MAX_PENDING_INFERENCE_JOBS` (default 100); when full, new messages fail closed with a controlled unavailable response rather than adding more work.
 
 The local worker reads `GPOINT_AGATA_WORKER_URL`, `GPOINT_AGATA_WORKER_TOKEN`, optional `AGATA_CODEX_MODEL`, and optional `AGATA_CODEX_REASONING` from a user-local mode-600 config file. Empty model/reasoning settings defer to the installed Codex CLI's current defaults. Its dedicated Python 3.12 venv installs only `services/agata/worker/requirements.txt`; `run_codex_worker.sh` is the entrypoint used by both manual and LaunchAgent runs. Gateway requests use httpx with the certifi CA bundle, one bounded attempt (10-second connect and 20-second read/overall limits), and transient failures use 1/2/5/10/20-second capped poll backoff. The process remains alive through transient gateway failures; invalid credentials/configuration remain fatal. Use `python3 services/agata/worker/install_codex_launch_agent.py install|remove` for its distinct `one.gpoint.agata-codex-worker` LaunchAgent after completing a manual worker smoke. The temporary Codex route is not the final provider decision; later provider choices, per-user routing, allowlists, and tiers remain configuration boundaries rather than Messages/domain changes.

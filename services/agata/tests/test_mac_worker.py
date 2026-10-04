@@ -14,6 +14,8 @@ from app.memory.worker import claimed_job_types
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "worker"))
 import gpoint_mac_worker as worker  # noqa: E402
 
+TEST_GPOINT_TENANT_ID = "7508f36f-774a-48aa-8c6b-42f6f160415d"
+
 
 class MacWorkerTests(unittest.TestCase):
     def setUp(self):
@@ -121,7 +123,7 @@ class MacWorkerTests(unittest.TestCase):
             calls.append((path, body))
             return next(responses)
 
-        with patch.dict(os.environ, {"GPOINT_AGATA_WORKER_TOKEN": token, "AGATA_WORKER_MODEL": "test-model"}), patch.object(worker, "api_request", side_effect=api), patch.object(worker, "run_inference", return_value="answer"):
+        with patch.dict(os.environ, {"GPOINT_AGATA_WORKER_TOKEN": token, "GPOINT_AGATA_TENANT_ID": TEST_GPOINT_TENANT_ID, "AGATA_WORKER_MODEL": "test-model"}), patch.object(worker, "api_request", side_effect=api), patch.object(worker, "run_inference", return_value="answer"):
             self.assertTrue(worker.process_one())
             self.assertEqual(worker.status(), 0)
 
@@ -137,15 +139,15 @@ class MacWorkerTests(unittest.TestCase):
 
         for model, expected in [("", "codex-default"), ("  ", "codex-default"), (" explicit ", "explicit")]:
             worker._last_heartbeat_attempt = float("-inf")
-            def api(path, body=None):
+            def api(path, body=None, expected_model=expected):
                 if path == "claim":
                     return {"job": {"id": "7508f36f-774a-48aa-8c6b-42f6f160415d", "leaseToken": "x" * 32, "request": {}}}
                 if path == "complete":
                     validated = WorkerCompleteRequest(**body)
-                    self.assertEqual(validated.model, expected)
+                    self.assertEqual(validated.model, expected_model)
                 return {"accepted": True}
 
-            with self.subTest(model=model), patch.dict(os.environ, {"AGATA_CODEX_MODEL": model}), patch.object(worker, "api_request", side_effect=api), patch.object(worker, "run_inference", return_value="answer"):
+            with self.subTest(model=model), patch.dict(os.environ, {"AGATA_CODEX_MODEL": model, "GPOINT_AGATA_WORKER_TOKEN": "test-only", "GPOINT_AGATA_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(worker, "api_request", side_effect=api), patch.object(worker, "run_inference", return_value="answer"):
                 self.assertTrue(worker.process_one())
 
     def test_inference_failure_reports_retryable_safe_code(self):
@@ -157,7 +159,7 @@ class MacWorkerTests(unittest.TestCase):
                 return {"job": {"id": "job-2", "leaseToken": "lease-2", "request": {}}}
             return {"accepted": True, "state": "pending"}
 
-        with patch.object(worker, "api_request", side_effect=api), patch.object(
+        with patch.dict(os.environ, {"GPOINT_AGATA_WORKER_TOKEN": "test-only", "GPOINT_AGATA_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(worker, "api_request", side_effect=api), patch.object(
             worker, "run_inference", side_effect=RuntimeError("codex_execution_failed_1")
         ):
             self.assertFalse(worker.process_one())

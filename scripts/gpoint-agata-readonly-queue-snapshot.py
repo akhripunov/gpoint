@@ -17,8 +17,10 @@ from sqlalchemy import text
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 IMAGE_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+EXPECTED_GPOINT_TENANT_ID = "81a4ba28-6de5-4b03-8332-0661ba4d46f4"
 SAFE_ERRORS = {
     "runtime_gpoint_tenant_not_registered",
+    "runtime_gpoint_tenant_identity_mismatch",
     "runtime_release_identity_invalid",
     "gpoint_api_agata_release_mismatch",
     "runtime_image_identity_invalid",
@@ -48,10 +50,10 @@ async def read_snapshot() -> dict:
     # Bind the snapshot to the tenant already selected by this live runtime.
     # Never replace it with a candidate/test UUID or override the tenant GUC.
     tenant_id = str(settings.tenant_id)
-    if source_system != "gpoint" or not re.fullmatch(
+    if source_system != "gpoint" or tenant_id != EXPECTED_GPOINT_TENANT_ID or not re.fullmatch(
         r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", tenant_id
     ):
-        raise RuntimeError("runtime_is_not_gpoint_tenant")
+        raise RuntimeError("runtime_gpoint_tenant_identity_mismatch")
 
     release_sha = os.environ.get("SNAPSHOT_RELEASE_SHA", "")
     api_sha = os.environ.get("SNAPSHOT_API_BUILD_SHA", "")
@@ -115,6 +117,7 @@ async def read_snapshot() -> dict:
         "api_image_id": api_image_id,
         "agata_image_id": agata_image_id,
         "tenant_identity_verified": True,
+        "tenant_id": tenant_id,
         "active_gpoint_profiles": int(row["active_gpoint_profiles"]),
         "transaction_read_only": True,
         "same_login": True,

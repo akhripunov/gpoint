@@ -14,8 +14,8 @@ spec.loader.exec_module(controller)
 
 
 def authoritative_snapshot(**overrides):
-    api_image_id = "sha256:" + "a" * 64
-    agata_image_id = "sha256:" + "b" * 64
+    api_image_id = "sha256:940236e984cff5e0123af62c58cea6ae5986fe879ca219daa2c91ff6ca8620e2"
+    agata_image_id = "sha256:61299c506ed77971df0f75cb64cb91f739644ebbddfafc21d5cb903c4488dbb2"
     release_sha = "68bf0212d7aa5125394b0b39ffba9226eb106c0d"
     snapshot = {
         "snapshot_at": "2026-10-04T07:00:00.000000Z",
@@ -28,6 +28,8 @@ def authoritative_snapshot(**overrides):
         "agata_build_sha": release_sha,
         "api_image_id": api_image_id,
         "agata_image_id": agata_image_id,
+        "tenant_id": "81a4ba28-6de5-4b03-8332-0661ba4d46f4",
+        "active_gpoint_profiles": 1,
         "tenant_identity_verified": True,
         "transaction_read_only": True,
         "same_login": True,
@@ -77,12 +79,18 @@ def test_preflight_fails_closed_when_queue_snapshot_is_missing(monkeypatch, tmp_
     monkeypatch.setattr(controller, "WORKER", paths[1])
     monkeypatch.setattr(controller, "WRAPPER", paths[2])
     monkeypatch.setattr(controller, "PYTHON", paths[1])
-    monkeypatch.setattr(controller.subprocess, "check_output", lambda *a, **k: controller.EXPECTED_SHA + "\n")
+    monkeypatch.setattr(controller.subprocess, "check_output", lambda *a, **k: controller.PREPARATION_BASE_SHA + "\n")
+    original_run = controller.subprocess.run
+    def run(args, **kwargs):
+        if args[:3] == ["git", "status", "--porcelain"]:
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return original_run(args, **kwargs)
+    monkeypatch.setattr(controller.subprocess, "run", run)
     monkeypatch.setattr(controller, "loaded", lambda: True)
     monkeypatch.setattr(controller, "queue_snapshot", lambda: {"state": "idle", "current_job_present": False})
     monkeypatch.setattr(controller, "status", lambda: {"launch_agent_loaded": True, "state": "idle", "current_job_present": False, "last_poll_at": "2099-01-01T00:00:00+00:00", "queue_connectivity": "reachable"})
     with pytest.raises(RuntimeError, match="queue_snapshot_runtime_identity_mismatch"):
-        controller.preflight()
+        controller.preflight(controller.PREPARATION_BASE_SHA)
 
 
 def test_authoritative_snapshot_requires_empty_gpoint_queue_and_ttl_margin():
@@ -105,9 +113,23 @@ def test_authoritative_snapshot_rejects_wrong_runtime_or_untrusted_db_role():
         {"role_superuser": True},
         {"role_bypassrls": True},
         {"visible_tenant_rows": 0},
+        {"tenant_id": "7508f36f-774a-48aa-8c6b-42f6f160415d"},
+        {"active_gpoint_profiles": 0},
+        {"release_sha": "8c30d676809f8c0f6d3254891bf096b0b8740bd4"},
+        {"api_image_id": "sha256:" + "a" * 64},
     ):
         with pytest.raises(RuntimeError):
             controller.validate_queue_snapshot(authoritative_snapshot(**override), now_monotonic=100.1)
+
+
+def test_candidate_sha_must_be_full_and_match_current_head():
+    candidate = "a" * 40
+    assert controller.validate_candidate_sha(candidate, candidate) == candidate
+    for invalid in ("a" * 39, "a" * 40 + "b", "A" * 40, "branch-name"):
+        with pytest.raises(RuntimeError, match="candidate_sha_mismatch"):
+            controller.validate_candidate_sha(invalid, candidate)
+    with pytest.raises(RuntimeError, match="candidate_sha_mismatch"):
+        controller.validate_candidate_sha("b" * 40, candidate)
 
 
 def test_authoritative_snapshot_must_be_recent_at_worker_recheck():

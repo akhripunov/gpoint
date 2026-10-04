@@ -14,7 +14,11 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-EXPECTED_SHA = "50034a22ff73b15b6093bf8edf6d3de7a810b8a5"
+PREPARATION_BASE_SHA = "50034a22ff73b15b6093bf8edf6d3de7a810b8a5"
+EXPECTED_PRODUCTION_SHA = "68bf0212d7aa5125394b0b39ffba9226eb106c0d"
+EXPECTED_GPOINT_TENANT_ID = "81a4ba28-6de5-4b03-8332-0661ba4d46f4"
+EXPECTED_API_IMAGE_ID = "sha256:940236e984cff5e0123af62c58cea6ae5986fe879ca219daa2c91ff6ca8620e2"
+EXPECTED_AGATA_IMAGE_ID = "sha256:61299c506ed77971df0f75cb64cb91f739644ebbddfafc21d5cb903c4488dbb2"
 LABEL = "one.gpoint.agata-codex-worker"
 MAX_FULL_OUTAGE_SECONDS = 300
 MAX_BOOTOUT_SECONDS = 15
@@ -117,6 +121,7 @@ def queue_snapshot() -> dict:
     safe_errors = {
         "runtime_is_not_gpoint_tenant",
         "runtime_gpoint_tenant_not_registered",
+        "runtime_gpoint_tenant_identity_mismatch",
         "runtime_release_identity_invalid",
         "gpoint_api_agata_release_mismatch",
         "runtime_image_identity_invalid",
@@ -142,6 +147,7 @@ def validate_queue_snapshot(snapshot: dict, *, now_monotonic: float | None = Non
     if (
         not isinstance(release_sha, str) or len(release_sha) != 40
         or any(character not in "0123456789abcdef" for character in release_sha)
+        or release_sha != EXPECTED_PRODUCTION_SHA
         or snapshot.get("api_build_sha") != release_sha
         or snapshot.get("agata_build_sha") != release_sha
     ):
@@ -150,6 +156,11 @@ def validate_queue_snapshot(snapshot: dict, *, now_monotonic: float | None = Non
         value = snapshot.get(field)
         if not isinstance(value, str) or not value.startswith("sha256:") or len(value) != 71:
             raise RuntimeError("queue_snapshot_runtime_identity_mismatch")
+    if (
+        snapshot["api_image_id"] != EXPECTED_API_IMAGE_ID
+        or snapshot["agata_image_id"] != EXPECTED_AGATA_IMAGE_ID
+    ):
+        raise RuntimeError("queue_snapshot_runtime_identity_mismatch")
     expected_source = (
         f"gpoint-vps:{release_sha}:api={snapshot['api_image_id']}"
         f":agata={snapshot['agata_image_id']}"
@@ -165,6 +176,9 @@ def validate_queue_snapshot(snapshot: dict, *, now_monotonic: float | None = Non
         or snapshot.get("role_superuser") is not False
         or snapshot.get("role_bypassrls") is not False
         or snapshot.get("visible_tenant_rows") != 1
+        or snapshot.get("tenant_id") != EXPECTED_GPOINT_TENANT_ID
+        or type(snapshot.get("active_gpoint_profiles")) is not int
+        or snapshot.get("active_gpoint_profiles", 0) < 1
     ):
         raise RuntimeError("queue_snapshot_trust_boundary_not_proven")
     for field in ("pending_inference_jobs", "running_inference_jobs"):
@@ -208,21 +222,36 @@ def immediate_switch_preflight() -> dict:
     return snapshot
 
 
-def preflight() -> tuple[dict[str, str], dict]:
+def validate_candidate_sha(candidate_sha: str, head_sha: str) -> str:
+    if (
+        not isinstance(candidate_sha, str)
+        or len(candidate_sha) != 40
+        or any(character not in "0123456789abcdef" for character in candidate_sha)
+        or candidate_sha != head_sha
+    ):
+        raise RuntimeError("candidate_sha_mismatch")
+    return candidate_sha
+
+
+def preflight(candidate_sha: str) -> tuple[dict[str, str], dict]:
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip()
+    candidate_sha = validate_candidate_sha(candidate_sha, sha)
+    clean = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=REPO, capture_output=True, text=True
+    )
     ancestor = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", EXPECTED_SHA, sha], cwd=REPO
+        ["git", "merge-base", "--is-ancestor", PREPARATION_BASE_SHA, candidate_sha], cwd=REPO
     )
     product_diff = subprocess.run(
         [
-            "git", "diff", "--quiet", EXPECTED_SHA, sha, "--",
-            "services/agata/app", "services/agata/worker/gpoint_mac_worker.py",
+            "git", "diff", "--quiet", PREPARATION_BASE_SHA, candidate_sha, "--",
+            "apps/api/src", "services/agata/app",
             "services/gsales/app", "services/gsales/Dockerfile",
             "services/gsales/migrations",
         ],
         cwd=REPO,
     )
-    if ancestor.returncode != 0 or product_diff.returncode != 0:
+    if clean.returncode != 0 or clean.stdout.strip() or ancestor.returncode != 0 or product_diff.returncode != 0:
         raise RuntimeError("candidate_sha_mismatch")
     if not all(path.is_file() for path in (PLIST, WORKER, WRAPPER, PYTHON)):
         raise RuntimeError("installed_worker_artifact_missing")
@@ -281,22 +310,28 @@ def main() -> int:
         signal.SIGTERM,
         lambda _signum, _frame: (_ for _ in ()).throw(KeyboardInterrupt()),
     )
-    if "--preflight-only" in sys.argv:
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--candidate", required=True)
+    parser.add_argument("--preflight-only", action="store_true")
+    args = parser.parse_args()
+    if args.preflight_only:
         try:
-            _, snapshot = preflight()
+            _, snapshot = preflight(args.candidate)
         except Exception as exc:
             print(f"REAL_CODEX_PREFLIGHT=BLOCKED:{exc}")
             return 2
+        print("REAL_CODEX_CANDIDATE=" + args.candidate)
         print("REAL_CODEX_QUEUE_SNAPSHOT=" + json.dumps({key: snapshot[key] for key in (
             "snapshot_at", "source_id", "release_sha", "pending_inference_jobs",
-            "running_inference_jobs", "effective_inference_ttl_seconds",
+            "running_inference_jobs", "effective_inference_ttl_seconds", "tenant_id",
         )}, separators=(",", ":")))
         print("REAL_CODEX_PREFLIGHT=PASS")
         return 0
 
     # Environment/image/dependencies and synthetic full E2E are prepared before
     # this command. No production queue interaction or Telegram transport occurs.
-    hashes, _ = preflight()  # Fail before bootout unless live queue is proven empty.
+    hashes, _ = preflight(args.candidate)  # Fail before bootout unless live queue is proven empty.
     stopped = False
     result_code = 1
     restore_error = None

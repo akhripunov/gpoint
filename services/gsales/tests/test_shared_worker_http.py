@@ -28,11 +28,15 @@ def test_two_targets_route_through_shared_worker_without_context_mix(tmp_path, m
     real_codex = os.getenv("GSALES_QA_REAL_CODEX") == "true"
     original_inference = worker.run_inference
     outputs = {}
-    with core_runtime(tmp_path / "sales") as sales_url, core_runtime(tmp_path / "point", "gpoint") as point_url:
+    point_tenant_id = str(uuid4())
+    sales_tenant_id = Settings().tenant_id
+    with core_runtime(tmp_path / "sales") as sales_url, core_runtime(tmp_path / "point", "gpoint", point_tenant_id) as point_url:
         monkeypatch.setenv("GPOINT_AGATA_WORKER_URL", "https://point.test/agata-worker")
         monkeypatch.setenv("GSALES_AGATA_WORKER_URL", "https://sales.test/agata-worker")
         monkeypatch.setenv("GPOINT_AGATA_WORKER_TOKEN", "point-worker-test")
         monkeypatch.setenv("GSALES_AGATA_WORKER_TOKEN", "sales-worker-test")
+        monkeypatch.setenv("GPOINT_AGATA_TENANT_ID", point_tenant_id)
+        monkeypatch.setenv("GSALES_AGATA_TENANT_ID", sales_tenant_id)
         monkeypatch.setattr(worker, "SUPPORT", Path.home() / "Library/Application Support/GPoint/agata-codex-worker" if real_codex else tmp_path / "worker")
         monkeypatch.setattr(worker, "STATUS", tmp_path / "worker/status.json")
         worker._last_heartbeat_attempt = float("-inf")
@@ -61,7 +65,7 @@ def test_two_targets_route_through_shared_worker_without_context_mix(tmp_path, m
 
         account = uuid4()
         with psycopg.connect(os.environ["GSALES_TEST_ADMIN_DSN"]) as c:
-            c.execute("INSERT INTO gsales.telegram_accounts(id,tenant_id,display_name,telegram_user_id,session_secret_ref,connection_status,is_enabled) VALUES(%s,%s,'synthetic',%s,%s,'authorized',true)", (account, worker.TARGET_TENANTS["GSALES"], int(uuid4().hex[:12], 16), uuid4()))
+            c.execute("INSERT INTO gsales.telegram_accounts(id,tenant_id,display_name,telegram_user_id,session_secret_ref,connection_status,is_enabled) VALUES(%s,%s,'synthetic',%s,%s,'authorized',true)", (account, worker.configured_tenant_bindings()["GSALES"], int(uuid4().hex[:12], 16), uuid4()))
         facts = [{"text": "GPoint — платформа для моделей и креаторов", "source": "synthetic owner-verified product fixture", "verified_at": "2026-10-04T06:00:00Z"}]
         request_id = uuid4().hex
         async def prepare_sales():
@@ -82,7 +86,8 @@ def test_two_targets_route_through_shared_worker_without_context_mix(tmp_path, m
             user, character, mid = [uuid4().hex for _ in range(3)]
             assert c.put("/internal/v1/characters/" + character, json={"name": "GPoint QA Anna", "personality": {"traits": ["GPOINT-CONTEXT-ONLY"]}}).status_code == 200
             consent = {"chat_history": True, "long_term_memory": False, "age_band": "adult", "age_status": "self_attested", "age_method": "self_attested", "disclosure_receipt_id": "synthetic-qa", "jurisdiction": "GLOBAL", "disclosure_accepted": True}
-            assert c.put("/internal/v1/users/" + user + "/consent", json=consent).status_code == 200
+            consent_response = c.put("/internal/v1/users/" + user + "/consent", json=consent)
+            assert consent_response.status_code == 200, consent_response.text
             assert c.post("/internal/v1/users/" + user + "/age-assurance/self-attest", json={"confirmed_18_plus": True}).status_code == 200
             response_body = {"request_id": mid, "gpoint_user_id": user, "gpoint_character_id": character, "conversation_id": f"gpoint-chat:{user}:{character}", "message_id": mid, "text": "GPOINT-CONTEXT-ONLY: привет", "locale": "ru"}
             assert c.post("/internal/v1/respond", json=response_body).json()["status"] == "pending"
@@ -90,7 +95,7 @@ def test_two_targets_route_through_shared_worker_without_context_mix(tmp_path, m
         seen = []
         def inference(job):
             seen.append(job)
-            assert job["tenant_id"] == worker.TARGET_TENANTS[job["target"]]
+            assert job["tenant_id"] == worker.configured_tenant_bindings()[job["target"]]
             if job["target"] == "GSALES":
                 assert not job["request"]["history"] and not job["request"]["memories"]
                 assert "GPOINT-CONTEXT-ONLY" not in str(job["request"])

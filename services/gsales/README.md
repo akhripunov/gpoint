@@ -11,7 +11,6 @@ Codex chat, with agreed technical documentation in Linear. No automatic chat for
 - Persona, conversation messages, relationships and memory remain in AGATA.
   G Sales does not import Core code or retain message plaintext in CRM.
 - Fixed GSALES tenant: `c4d67889-877e-4d1b-a8d8-597c479d638f`.
-  GPOINT tenant stays `7508f36f-774a-48aa-8c6b-42f6f160415d`.
 - No cross-product FK, public schema rename, second repository/VPS or changes
   to Conversation Lab/MAXIBOT.
 - Outreach, automatic replies, management bot, MTProto listener and registration

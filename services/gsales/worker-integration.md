@@ -26,11 +26,15 @@ target endpoint/token/lease. Core encrypts the result and rejects foreign IDs,
 expired/wrong leases. Repeated completion proves the retained receipt lease.
 No PostgreSQL schema/tenant rename or new queue is introduced.
 
-Candidate worker v3 uses two fixed targets, GPOINT and optional GSALES. Tenant
-UUIDs are source constants. Sales claims must carry matching server-authored
-target/tenant. GPOINT supports the legacy gateway without metadata; if present,
-identity must match. Configuration refuses reused endpoint/token. No payload
-can select credentials, endpoint or tenant. Default GPOINT-only config remains valid.
+Candidate worker V3 supports GPOINT and optional GSALES. Each configured target
+requires a canonical `*_AGATA_TENANT_ID` trusted pin in the mode-600 local
+configuration; pins must differ. The GPOINT pin is owner-verified for the
+specific runtime, not compiled into source. GSALES claims must carry matching
+server-authored target/tenant. GPOINT retains the existing V2 URL/token/RPC
+contract and accepts legacy claims with no identity metadata; if the gateway
+provides either identity field, both must match the local pin. No inference-job
+payload can choose its route, credentials, or tenant. GPOINT-only configuration
+remains supported when its runtime pin is present.
 
 One unchanged process `worker.lock` serializes the watch lifecycle and Codex
 subprocesses. Round-robin gives each healthy target a turn; target network/auth/job
@@ -46,9 +50,14 @@ Keep current GPOINT variables and add separately generated GSALES credentials on
 after deployment/setup is separately authorized:
 
 ```text
+GPOINT_AGATA_TENANT_ID=81a4ba28-6de5-4b03-8332-0661ba4d46f4
 GSALES_AGATA_WORKER_URL=https://<approved-sales-host>/agata-worker
 GSALES_AGATA_WORKER_TOKEN=<distinct-worker-secret>
+GSALES_AGATA_TENANT_ID=c4d67889-877e-4d1b-a8d8-597c479d638f
 ```
+
+For disposable tests, set the GPOINT pin to that test Core's own tenant UUID;
+never copy the production pin into a test runtime.
 
 The Sales gateway has `GSALES_WORKER_TOKEN` with the matching worker secret and a
 different `GSALES_AGATA_API_TOKEN` for its GSALES Core. Loopback HTTP is accepted
@@ -58,27 +67,30 @@ and restarts the single agent: do not run prepare/install during this task.
 
 ## Real Codex rehearsal — one-shot owner approval (04.10.2026)
 
-Prepared command from the repository root:
+The earlier one-shot approval was limited to candidate SHA
+`50034a22ff73b15b6093bf8edf6d3de7a810b8a5`; it cannot authorize testing a new
+candidate. No test window was executed. For any future attempt, the controller
+requires a full candidate SHA argument and verifies it equals the clean current
+HEAD.
+
+Read-only preflight command after the candidate is committed:
 
 ```sh
-PYTHONPATH=services/gsales services/gsales/.venv/bin/python services/gsales/tests/run_postgres.py --real-codex
+services/gsales/.venv/bin/python scripts/run-gsales-one-shot-real-codex.py \
+  --candidate <exact-40-character-candidate-sha> --preflight-only
 ```
 
-Owner granted one test window; no stop occurred. The installed LaunchAgent is
-loaded and its fresh local status reports IDLE, no current job and zero network
-failures. Its status contract has no read-only pending/running queue depth or
-effective inference TTL, so local IDLE cannot prove the remote durable queue is
-empty. The controller reads the local status file without network calls and
-fails closed before bootout unless both remote queue counts and effective TTL
-are explicitly provided. The freshness limit is 15 seconds, above the worker's
-10-second idle poll interval.
-Synthetic rehearsal already uses the same worker/API paths with mock output.
+No bootout, credential edit, V3 install, or real inference has occurred. The
+installed LaunchAgent is V2, loaded and locally idle. Its status has no remote
+queue depth or TTL, so it is never used as proof that the durable queue is empty.
+Synthetic E2E uses the candidate V3 source and disposable database.
 
 A guarded controller at `scripts/run-gsales-one-shot-real-codex.py` snapshots the
 original plist/source/wrapper hashes, checks the exact candidate and fresh local
 idle poll, and obtains aggregate pending/running counts plus effective TTL from a
 repeatable-read, read-only query inside the image-verified live AGATA API
-container. It requires an empty queue and TTL ≥420s (300s maximum full outage
+container. It pins the verified production runtime tenant, release SHA, and
+both immutable image digests. It requires an empty queue and TTL ≥420s (300s maximum full outage
 plus a 120s margin). One monotonic outage deadline starts before bootout and ends
 only after the original LaunchAgent resumes polling; the test budget reserves up
 to 10s for termination and 60s for bootstrap/poll confirmation. The query is
@@ -111,9 +123,10 @@ receipts are attached to that SHA. The production ref is
 verified against the running containers. GitHub confirms 68bf is 35 commits
 ahead of 8c30. There is no live release identity drift to reconcile.
 
-The queue-snapshot probe now scopes its read-only transaction to the tenant
-selected by live AGATA settings and requires an active tenant row plus an active
-GPOINT regional profile. It never substitutes the candidate/test UUID. The
+The queue-snapshot probe verifies the production tenant against the audited
+identity and scopes its read-only transaction to that tenant without substituting
+or overriding the runtime GUC. It requires an active tenant row plus an active
+GPOINT regional profile. The
 verified live snapshot on 2026-10-04 07:49:08Z had zero pending/running inference
 jobs and effective TTL 420 seconds; API/Core artifacts were healthy at the same
 SHA. The updated controller completed `--preflight-only` with **PASS**. This is
@@ -121,10 +134,11 @@ GO for the Queue Preflight gate only, not authorization to stop the worker or ru
 Real Codex QA. No bootout, deploy, migration, tenant mutation, or Real Codex
 inference occurred.
 
-The focused controller suite covers stale/untrusted/wrong-runtime snapshots,
-empty/non-empty queue, the TTL margin, a shared outage deadline, and the
-queue-then-local recheck order. It passes 7 tests. Syntax/AST checks and
-`git diff --check` pass. Ruff was not rerun in this reconciliation.
+The controller pins full production SHA/image/tenant identities, and requires a
+clean checkout plus exact candidate SHA. The shared-worker suite tests per-runtime
+UUID bindings, malformed or duplicate pins, GPOINT legacy claims, mismatched
+claims, separate target credentials, independent scheduling/backoff and serial
+execution.
 
 The P0 worker-token exposure is recorded without its value or any derived
 fingerprint in `docs/security/gpoint-agata-worker-token-incident-2026-10-04.md`.

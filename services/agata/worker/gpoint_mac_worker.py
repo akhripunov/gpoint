@@ -16,6 +16,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
+from uuid import UUID
 
 import certifi
 import httpx
@@ -70,16 +71,13 @@ def load_env_file(path: Path | None = None) -> None:
             os.environ[key] = raw.strip().strip('"').strip("'")
 
 
-TARGET_TENANTS = {
-    "GPOINT": "7508f36f-774a-48aa-8c6b-42f6f160415d",
-    "GSALES": "c4d67889-877e-4d1b-a8d8-597c479d638f",
-}
 _target_heartbeats: dict[str, float] = {}
+TARGET_NAMES = ("GPOINT", "GSALES")
 
 
 def configured_targets() -> dict[str, tuple[str, str]]:
     targets = {}
-    for name in TARGET_TENANTS:
+    for name in TARGET_NAMES:
         base = os.environ.get(name + "_AGATA_WORKER_URL", "https://gpoint.amiora.one/api/agata-worker" if name == "GPOINT" else "").rstrip("/")
         token = os.environ.get(name + "_AGATA_WORKER_TOKEN", "")
         if name == "GSALES" and not base and not token:
@@ -92,6 +90,27 @@ def configured_targets() -> dict[str, tuple[str, str]]:
     if len(targets) == 2 and (targets["GPOINT"][0] == targets["GSALES"][0] or targets["GPOINT"][1] == targets["GSALES"][1]):
         raise FatalConfigurationError("worker_targets_must_be_distinct")
     return targets
+
+
+def configured_tenant_bindings(
+    targets: dict[str, tuple[str, str]] | None = None,
+) -> dict[str, str]:
+    """Load trusted per-runtime tenant pins, never deriving them from a job."""
+    configured = targets if targets is not None else configured_targets()
+    bindings: dict[str, str] = {}
+    for target in configured:
+        value = os.environ.get(f"{target}_AGATA_TENANT_ID", "").strip()
+        try:
+            parsed = UUID(value)
+            canonical = str(parsed)
+        except (ValueError, AttributeError) as exc:
+            raise FatalConfigurationError("worker_tenant_binding_invalid") from exc
+        if parsed.int == 0 or canonical != value:
+            raise FatalConfigurationError("worker_tenant_binding_invalid")
+        bindings[target] = canonical
+    if len(bindings) != len(set(bindings.values())):
+        raise FatalConfigurationError("worker_tenants_must_be_distinct")
+    return bindings
 
 
 def target_request(target: str, path: str, body: dict | None = None) -> dict:
@@ -272,6 +291,10 @@ def run_inference(job: dict) -> str:
 
 def process_one(target: str = "GPOINT") -> bool:
     global _last_heartbeat_attempt
+    targets = configured_targets()
+    bindings = configured_tenant_bindings(targets)
+    if target not in targets:
+        raise GatewayResponseError("worker_target_invalid")
     now = time.monotonic()
     if now - (_last_heartbeat_attempt if target == "GPOINT" else _target_heartbeats.get(target, float("-inf"))) >= HEARTBEAT_INTERVAL_SECONDS:
         if target == "GPOINT":
@@ -290,12 +313,14 @@ def process_one(target: str = "GPOINT") -> bool:
     lease = claim.get("leaseToken")
     if not isinstance(job_id, str) or not isinstance(lease, str):
         raise RuntimeError("worker_claim_invalid")
-    if target not in TARGET_TENANTS:
-        raise GatewayResponseError("worker_target_invalid")
     # GPOINT metadata is optional only for the existing legacy gateway. Sales
-    # never accepts a claim without server-authored fixed identity.
-    if (target == "GSALES" or "target" in claim or "tenant_id" in claim) and (
-        claim.get("target") != target or claim.get("tenant_id") != TARGET_TENANTS[target]
+    # never accepts a claim without server-authored identity. The trusted
+    # binding is local config; payload fields can only confirm, never select it.
+    identity_present = "target" in claim or "tenant_id" in claim
+    if (target == "GSALES" and not identity_present) or (
+        identity_present and (
+            claim.get("target") != target or claim.get("tenant_id") != bindings[target]
+        )
     ):
         raise GatewayResponseError("worker_claim_target_mismatch")
     write_status(target=target, last_poll_at=datetime.now(UTC).isoformat(), state="running", current_job_present=True)
@@ -345,7 +370,9 @@ class TargetScheduler:
     """One synchronous execution slot, fair rotation and independent backoff."""
 
     def __init__(self):
-        self.names = tuple(configured_targets())
+        targets = configured_targets()
+        configured_tenant_bindings(targets)
+        self.names = tuple(targets)
         self.cursor = 0
         self.next_poll = {name: 0.0 for name in self.names}
         self.failures = {name: 0 for name in self.names}
@@ -604,7 +631,8 @@ def main() -> int:
         if args.command == "network-stability":
             return network_stability_smoke()
         if args.command in {"once", "watch"}:
-            configured_targets()
+            targets = configured_targets()
+            configured_tenant_bindings(targets)
         if args.command == "once":
             lock = acquire_worker_lock()
             try:

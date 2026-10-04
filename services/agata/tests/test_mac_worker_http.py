@@ -15,6 +15,8 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "worker"))
 import gpoint_mac_worker as worker  # noqa: E402
 
+TEST_GPOINT_TENANT_ID = "7508f36f-774a-48aa-8c6b-42f6f160415d"
+
 
 class MacWorkerHttpTests(unittest.TestCase):
     def setUp(self):
@@ -84,7 +86,7 @@ class MacWorkerHttpTests(unittest.TestCase):
                 raise worker.TransientNetworkError("worker_gateway_network_error")
             self.fail(f"unexpected {path} request")
 
-        with patch.dict(os.environ, {"GPOINT_AGATA_WORKER_TOKEN": "test-secret"}), patch.object(
+        with patch.dict(os.environ, {"GPOINT_AGATA_WORKER_TOKEN": "test-secret", "GPOINT_AGATA_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(
             worker, "api_request", side_effect=api
         ), patch.object(worker, "run_inference", return_value="reply"):
             with self.assertRaises(worker.TransientNetworkError):
@@ -124,7 +126,7 @@ class MacWorkerHttpTests(unittest.TestCase):
                 return {"job": {"id": "job-2", "leaseToken": "lease-2", "request": {}}}
             return {"completed": True}
 
-        with patch.dict(os.environ, {"GPOINT_AGATA_WORKER_TOKEN": "test-secret"}), patch.object(
+        with patch.dict(os.environ, {"GPOINT_AGATA_WORKER_TOKEN": "test-secret", "GPOINT_AGATA_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(
             worker, "api_request", side_effect=api
         ), patch.object(worker, "run_inference", return_value="reply"):
             self.assertTrue(worker.process_one())
