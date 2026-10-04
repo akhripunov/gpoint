@@ -300,3 +300,87 @@ def run_fixture_dry_run(lab: Path, config: dict) -> dict:
         "fixture_only": True,
         "quality_status": "NO_MODEL_OUTPUTS_OWNER_REVIEW_NOT_APPLICABLE",
     }
+
+
+def fixture_ab_result_rows(lab: Path, config: dict) -> list[dict]:
+    """Create anonymous-ready placeholder transcripts; no model was run."""
+    lab = Path(lab)
+    config = validate_naturalness_config(lab, config)
+    _, _, scenarios, _, _, _ = _inputs(lab)
+    scenario_by_id = {scenario["scenario_id"]: scenario for scenario in scenarios}
+    rows = []
+    for scenario_id in config["development"]["scenario_ids"]:
+        scenario = scenario_by_id[scenario_id]
+        turns = []
+        for turn in scenario["dialogue_turns"]:
+            if turn["role"] == "user":
+                turns.append({"role": "user", "text": turn["text"]})
+            else:
+                turns.append({"role": "assistant", "text": "СИНТЕТИЧЕСКИЙ FIXTURE RESPONSE — модель не запускалась."})
+        for candidate_config in ("baseline", "naturalness-v1"):
+            rows.append({
+                "scenario_id": scenario_id,
+                "model_id": candidate_config,
+                "status": "success",
+                "turns": copy.deepcopy(turns),
+                "fixture_only": True,
+                "usage": None,
+                "latency": None,
+                "cost": None,
+            })
+    return rows
+
+
+def package_blind_fixture(lab: Path, config: dict, rows: list[dict], seed: int) -> tuple[dict, dict]:
+    """Reuse Phase 3 blinding and return a fixture-only packet plus private key."""
+    lab = Path(lab)
+    config = validate_naturalness_config(lab, config)
+    if type(seed) is not int:
+        raise ValueError("blind fixture seed must be an integer")
+    expected_pairs = {
+        (scenario_id, candidate)
+        for scenario_id in config["development"]["scenario_ids"]
+        for candidate in ("baseline", "naturalness-v1")
+    }
+    if not isinstance(rows, list):
+        raise ValueError("fixture transcripts must be a list")
+    actual_pairs = set()
+    _, _, scenarios, _, _, _ = _inputs(lab)
+    scenario_by_id = {scenario["scenario_id"]: scenario for scenario in scenarios}
+    for row in rows:
+        if not isinstance(row, dict) or row.get("fixture_only") is not True:
+            raise ValueError("only explicitly marked fixture transcripts may enter this packet")
+        pair = (row.get("scenario_id"), row.get("model_id"))
+        if pair not in expected_pairs or pair in actual_pairs:
+            raise ValueError("fixture transcript has an unknown or duplicate scenario/configuration pair")
+        if row.get("status") != "success" or row.get("usage") is not None or row.get("latency") is not None or row.get("cost") is not None:
+            raise ValueError("fixture transcript cannot claim model status, usage, latency, or cost")
+        scenario = scenario_by_id[pair[0]]
+        expected_turns = scenario["dialogue_turns"]
+        turns = row.get("turns")
+        if not isinstance(turns, list) or len(turns) != len(expected_turns):
+            raise ValueError("fixture transcript must contain exactly the frozen scenario turns")
+        for index, (turn, expected_turn) in enumerate(zip(turns, expected_turns)):
+            if not isinstance(turn, dict) or turn.get("role") != expected_turn["role"] or not isinstance(turn.get("text"), str) or not turn["text"].strip():
+                raise ValueError("fixture transcript turn differs from the frozen role sequence")
+            if expected_turn["role"] == "user" and turn["text"] != expected_turn["text"]:
+                raise ValueError("fixture transcript user turn differs from the frozen scenario")
+            if expected_turn["role"] == "assistant" and turn["text"] != "СИНТЕТИЧЕСКИЙ FIXTURE RESPONSE — модель не запускалась.":
+                raise ValueError("fixture assistant placeholder was changed")
+        actual_pairs.add(pair)
+    if actual_pairs != expected_pairs:
+        raise ValueError("fixture transcript set is incomplete")
+    blind = _module(lab, "blind")
+    packet, private = blind.make_blind_packets(
+        [scenario_by_id[scenario_id] for scenario_id in config["development"]["scenario_ids"]], rows, seed,
+    )
+    for scenario in packet["scenarios"]:
+        for candidate in scenario["candidates"]:
+            candidate["status"] = "FIXTURE_ONLY"
+    packet["completion_status"] = "FIXTURE_ONLY"
+    packet["quality_status"] = "NO_MODEL_OUTPUTS_OWNER_REVIEW_NOT_APPLICABLE"
+    packet["winner"] = None
+    private["identity_kind"] = "candidate_configuration_not_model_result"
+    private["mapping_sha256"] = stable_hash(private["mappings"])
+    private["private"] = True
+    return packet, private

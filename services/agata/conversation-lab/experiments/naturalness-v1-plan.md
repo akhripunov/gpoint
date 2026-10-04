@@ -110,11 +110,11 @@
 - Consumes complete fixture-only A/B transcripts validated against the exact development conversation turns.
 - Produces `package_blind_fixture(lab, config, rows, seed) -> tuple[dict, dict]`; public packet labels are anonymous and key metadata remains private.
 
-- [ ] **Step 1: Write failing tests** for complete A/B coverage, stable randomized order, model/config IDs absent from public packets, private mapping hash, no packet duplicate, no successful-model claim for fixtures, compatibility with existing `ratings.empty_ratings` and `ratings.lock_ratings`, and rejection of missing/extra turns or mismatched user turns.
-- [ ] **Step 2: Run focused tests** and verify the wrapper is absent.
-- [ ] **Step 3: Implement the wrapper with `blind.make_blind_packets` and existing ratings locks**, marking all fixture results and packets `FIXTURE_ONLY`, `quality_status=NO_MODEL_OUTPUTS_OWNER_REVIEW_NOT_APPLICABLE`, and `winner=null`. Do not fork the blind or ratings subsystem.
-- [ ] **Step 4: Run focused tests** and confirm no model identities or evaluator labels leak into public output.
-- [ ] **Step 5: Commit** as `feat(agata-lab): prepare blind Naturalness fixture packets`.
+- [x] **Step 1: Write failing tests** for complete A/B coverage, stable randomized order, model/config IDs absent from public packets, private mapping hash, no packet duplicate, no successful-model claim for fixtures, compatibility with existing `ratings.empty_ratings` and `ratings.lock_ratings`, and rejection of missing/extra turns or mismatched user turns.
+- [x] **Step 2: Run focused tests** and verify the wrapper is absent.
+- [x] **Step 3: Implement the wrapper with `blind.make_blind_packets` and existing ratings locks**, marking all fixture results and packets `FIXTURE_ONLY`, `quality_status=NO_MODEL_OUTPUTS_OWNER_REVIEW_NOT_APPLICABLE`, and `winner=null`. Do not fork the blind or ratings subsystem.
+- [x] **Step 4: Run focused tests** and confirm no model identities or evaluator labels leak into public output.
+- [x] **Step 5: Commit** as `feat(agata-lab): prepare blind Naturalness fixture packets`.
 
 ### Task 5: Document the offline workflow and integration proposal
 

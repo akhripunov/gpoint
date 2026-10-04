@@ -124,6 +124,60 @@ class NaturalnessConfigTests(unittest.TestCase):
         self.assertEqual(report["quality_status"], "NO_MODEL_OUTPUTS_OWNER_REVIEW_NOT_APPLICABLE")
         self.assertTrue(report["fixture_only"])
 
+    def test_blind_fixture_packet_api_is_available(self):
+        self.assertTrue(callable(getattr(NATURALNESS, "fixture_ab_result_rows", None)), "fixture transcript fixture has not been implemented")
+        self.assertTrue(callable(getattr(NATURALNESS, "package_blind_fixture", None)), "Naturalness blind packet wrapper has not been implemented")
+
+    @unittest.skipUnless(NATURALNESS is not None and callable(getattr(NATURALNESS, "package_blind_fixture", None)), "RED scaffold: blind packet wrapper not implemented yet")
+    def test_blind_fixture_packet_is_anonymous_seeded_private_and_not_a_model_result(self):
+        config = NATURALNESS.load_naturalness_config(LAB)
+        rows = NATURALNESS.fixture_ab_result_rows(LAB, config)
+        packet, private = NATURALNESS.package_blind_fixture(LAB, config, rows, 41004)
+        repeated, repeated_private = NATURALNESS.package_blind_fixture(LAB, config, rows, 41004)
+        self.assertEqual(packet, repeated)
+        self.assertEqual(private, repeated_private)
+        self.assertEqual(packet["completion_status"], "FIXTURE_ONLY")
+        self.assertEqual(packet["quality_status"], "NO_MODEL_OUTPUTS_OWNER_REVIEW_NOT_APPLICABLE")
+        self.assertIsNone(packet["winner"])
+        self.assertEqual(len(packet["scenarios"]), 16)
+        self.assertTrue(all(len(scenario["candidates"]) == 2 for scenario in packet["scenarios"]))
+        serialized_packet = json.dumps(packet, ensure_ascii=False)
+        self.assertNotIn("baseline", serialized_packet)
+        self.assertNotIn("naturalness-v1", serialized_packet)
+        self.assertNotIn("codex-cli-baseline", serialized_packet)
+        self.assertNotIn("review_only", serialized_packet)
+        self.assertNotIn("anti_pattern_id", serialized_packet)
+        self.assertTrue(private["private"])
+        self.assertEqual(private["mapping_sha256"], NATURALNESS.stable_hash(private["mappings"]))
+        self.assertEqual({row["model_id"] for row in private["mappings"]}, {"baseline", "naturalness-v1"})
+        self.assertNotIn("model_id", serialized_packet)
+        _, seed_change_private = NATURALNESS.package_blind_fixture(LAB, config, rows, 41005)
+        order = lambda value: [(entry["scenario_id"], entry["label"], entry["model_id"]) for entry in value["mappings"]]
+        self.assertNotEqual(order(private), order(seed_change_private))
+
+        ratings = NATURALNESS._module(LAB, "ratings")
+        template = ratings.empty_ratings(packet, LAB)
+        self.assertEqual(len(template["ratings"]), 32)
+        with self.assertRaisesRegex(ValueError, "OWNER explanation"):
+            ratings.lock_ratings(packet, template, cycle_id="naturalness-fixture-no-ratings")
+
+    @unittest.skipUnless(NATURALNESS is not None and callable(getattr(NATURALNESS, "package_blind_fixture", None)), "RED scaffold: blind packet wrapper not implemented yet")
+    def test_blind_fixture_rejects_incomplete_duplicate_extra_and_mismatched_transcripts(self):
+        config = NATURALNESS.load_naturalness_config(LAB)
+        rows = NATURALNESS.fixture_ab_result_rows(LAB, config)
+        for mutation in (
+            lambda changed: changed.pop(),
+            lambda changed: changed.append(copy.deepcopy(changed[0])),
+            lambda changed: changed[0]["turns"].append({"role": "assistant", "text": "extra"}),
+            lambda changed: changed[0]["turns"].__setitem__(0, {"role": "user", "text": "wrong user"}),
+            lambda changed: changed[0].__setitem__("fixture_only", False),
+        ):
+            changed = copy.deepcopy(rows)
+            mutation(changed)
+            with self.subTest(rows=len(changed)):
+                with self.assertRaises(ValueError):
+                    NATURALNESS.package_blind_fixture(LAB, config, changed, 41004)
+
     @unittest.skipIf(NATURALNESS is None, "RED scaffold: loader not implemented yet")
     def test_long_dialogue_development_fixture_keeps_twelve_rounds(self):
         config = NATURALNESS.create_naturalness_config(LAB)
