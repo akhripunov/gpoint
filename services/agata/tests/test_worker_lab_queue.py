@@ -7,42 +7,31 @@ import unittest
 from pathlib import Path
 
 WORKER_DIR = Path(__file__).resolve().parents[1] / "worker"
+LAB_DIR = Path(__file__).resolve().parents[1] / "conversation-lab"
+import sys
+sys.path.insert(0, str(WORKER_DIR))
+sys.path.insert(0, str(LAB_DIR / "evaluators"))
+import worker_client
 SPEC = importlib.util.spec_from_file_location("agata_lab_queue", WORKER_DIR / "lab_queue.py")
 lab_queue = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
 SPEC.loader.exec_module(lab_queue)
 
 
-def request(text: str = "Синтетическое приветствие") -> dict:
-    return {
-        "instructions": "Ответь коротко и естественно.",
-        "persona": {"name": "Тестовая персона"},
-        "communication_settings": {"tone": "warm"},
-        "memories": [],
-        "dialogue_summaries": [],
-        "history": [],
-        "user_message": text,
-    }
-
-
-def payload(job_id: str = "job-001", text: str = "Синтетическое приветствие") -> dict:
-    return {
-        "job_id": job_id,
-        "experiment_id": "naturalness-offline-2026-10",
-        "configuration_id": "baseline",
-        "origin": "conversation-lab",
-        "scenario_id": "ru_naturalness-02",
-        "turn_index": 0,
-        "data_classification": "synthetic",
-        "timeout_seconds": 20,
-        "request": request(text),
-    }
+def payload(job_id: str = "job-001") -> dict:
+    job = worker_client.build_job(
+        scenario_id="ru_naturalness-02", configuration_id="baseline",
+        turn_index=0, job_id=job_id,
+    )
+    job["timeout_seconds"] = 20
+    return job
 
 
 class LabQueueTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.support = Path(self.temp.name)
+        self.root = self.support / "lab-queue"
 
     def tearDown(self):
         self.temp.cleanup()
@@ -83,8 +72,10 @@ class LabQueueTests(unittest.TestCase):
         self.assertEqual(lab_queue.pending_count(self.root), 0)
 
     def test_oversized_payload_is_rejected(self):
-        with self.assertRaisesRegex(lab_queue.LabQueueError, "payload_too_large"):
-            lab_queue.submit(payload(text="x" * 70_000), root=self.root)
+        job = payload()
+        job["request"]["history"] = [{"role": "assistant", "content": "x" * 70_000}]
+        with self.assertRaises(lab_queue.LabQueueError):
+            lab_queue.submit(job, root=self.root)
 
     def test_running_job_after_restart_is_marked_ambiguous_and_never_requeued(self):
         lab_queue.submit(payload(), root=self.root)
@@ -92,6 +83,22 @@ class LabQueueTests(unittest.TestCase):
         self.assertEqual(lab_queue.reconcile_running(self.root), 1)
         self.assertEqual(lab_queue.pending_count(self.root), 0)
         self.assertEqual(lab_queue.read_receipt(self.root, "job-001")["status"], "ambiguous")
+
+    def test_second_turn_requires_a_same_arm_completed_worker_receipt(self):
+        first = payload()
+        lab_queue.submit(first, root=self.root)
+        lab_queue.claim_next(self.root)
+        lab_queue.finish(self.root, first["job_id"], status="completed", response="reply one", identity=first)
+        second = worker_client.build_job(
+            scenario_id="ru_naturalness-02", configuration_id="baseline", turn_index=1,
+            history_receipt_ids=[first["job_id"]], support=self.support, job_id="job-002",
+        )
+        lab_queue.submit(second, root=self.root)
+        claimed = lab_queue.claim_next(self.root)
+        self.assertEqual(claimed["request"]["history"][1]["content"], "reply one")
+        second["request"]["history"][1]["content"] = "arbitrary unverified text"
+        with self.assertRaisesRegex(lab_queue.LabQueueError, "hash|receipt_backed"):
+            lab_queue.submit(second | {"job_id": "job-003"}, root=self.root)
 
     def test_cancel_pending_job_creates_terminal_receipt_without_executor(self):
         lab_queue.submit(payload(), root=self.root)

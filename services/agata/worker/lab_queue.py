@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -11,10 +12,17 @@ from pathlib import Path
 
 MAX_PAYLOAD_BYTES = 64 * 1024
 DEFAULT_MAX_PENDING = 16
+MAX_TIMEOUT_SECONDS = 180
+FIXTURE_MANIFEST_SHA256 = "2bf4936187d4ff7c1f67d7a97fdc43c7ab5025d00bd3cbbb654c3d62ccd865d1"
+FIXTURE_MANIFEST = Path(__file__).with_name("lab_fixture_manifest.json")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 REQUEST_KEYS = {
     "instructions", "persona", "communication_settings", "memories",
     "dialogue_summaries", "history", "user_message",
+}
+JOB_KEYS = {
+    "job_id", "experiment_id", "configuration_id", "origin", "scenario_id",
+    "turn_index", "data_classification", "timeout_seconds", "history_receipt_ids", "request",
 }
 
 
@@ -39,11 +47,23 @@ def _layout(root: Path) -> tuple[Path, Path, Path, Path]:
     return result  # type: ignore[return-value]
 
 
-def _validate(job: object) -> tuple[dict, bytes]:
-    if not isinstance(job, dict) or set(job) != {
-        "job_id", "experiment_id", "configuration_id", "origin",
-        "scenario_id", "turn_index", "data_classification", "timeout_seconds", "request",
-    }:
+def _read_fixture_manifest() -> dict:
+    try:
+        payload = FIXTURE_MANIFEST.read_bytes()
+        if hashlib.sha256(payload).hexdigest() != FIXTURE_MANIFEST_SHA256:
+            raise ValueError
+        value = json.loads(payload)
+    except (OSError, ValueError) as exc:
+        raise LabQueueError("fixture_manifest_invalid") from exc
+    if (not isinstance(value, dict) or value.get("schema_version") != 1
+            or value.get("experiment_id") != "agata-naturalness-v1"
+            or not isinstance(value.get("scenarios"), dict)):
+        raise LabQueueError("fixture_manifest_invalid")
+    return value
+
+
+def _validate(job: object, *, root: Path) -> tuple[dict, bytes]:
+    if not isinstance(job, dict) or set(job) != JOB_KEYS:
         raise LabQueueError("job_schema_invalid")
     for field in ("job_id", "experiment_id", "configuration_id"):
         value = job.get(field)
@@ -56,7 +76,7 @@ def _validate(job: object) -> tuple[dict, bytes]:
             or job["turn_index"] < 0):
         raise LabQueueError("lab_scenario_or_turn_invalid")
     timeout = job["timeout_seconds"]
-    if isinstance(timeout, bool) or not isinstance(timeout, int) or not 15 <= timeout <= 600:
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or not 15 <= timeout <= MAX_TIMEOUT_SECONDS:
         raise LabQueueError("job_timeout_invalid")
     request = job["request"]
     if not isinstance(request, dict) or set(request) != REQUEST_KEYS:
@@ -66,6 +86,44 @@ def _validate(job: object) -> tuple[dict, bytes]:
             or not all(isinstance(request[key], dict) for key in ("persona", "communication_settings"))
             or not all(isinstance(request[key], list) for key in ("memories", "dialogue_summaries", "history"))):
         raise LabQueueError("lab_request_context_invalid")
+    fixtures = _read_fixture_manifest()
+    scenario = fixtures["scenarios"].get(job["scenario_id"])
+    turn = job["turn_index"]
+    arm = job["configuration_id"]
+    receipt_ids = job["history_receipt_ids"]
+    if (job["experiment_id"] != fixtures["experiment_id"] or arm not in {"baseline", "naturalness-v1"}
+            or not isinstance(scenario, dict) or turn >= len(scenario.get("user_turns", []))
+            or not isinstance(receipt_ids, list) or len(receipt_ids) != turn
+            or request["user_message"] != scenario["user_turns"][turn]):
+        raise LabQueueError("lab_fixture_identity_mismatch")
+    static_request = dict(request)
+    static_request["history"] = []
+    canonical = json.dumps(static_request, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    expected_hashes = scenario.get("request_hashes", {}).get(arm, [])
+    if (turn >= len(expected_hashes) or hashlib.sha256(canonical).hexdigest() != expected_hashes[turn]):
+        raise LabQueueError("lab_fixture_request_hash_mismatch")
+    expected_history = []
+    receipts_dir = Path(root) / "receipts"
+    for index, receipt_id in enumerate(receipt_ids):
+        if not isinstance(receipt_id, str) or not ID_RE.fullmatch(receipt_id):
+            raise LabQueueError("lab_history_receipt_invalid")
+        try:
+            receipt = json.loads((receipts_dir / (receipt_id + ".json")).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise LabQueueError("lab_history_receipt_missing") from exc
+        identity = receipt.get("identity", {}) if isinstance(receipt, dict) else {}
+        response = receipt.get("response") if isinstance(receipt, dict) else None
+        if (receipt.get("job_id") != receipt_id or receipt.get("status") != "completed"
+                or identity.get("experiment_id") != job["experiment_id"]
+                or identity.get("configuration_id") != arm or identity.get("scenario_id") != job["scenario_id"]
+                or identity.get("turn_index") != index or not isinstance(response, str) or not response.strip()):
+            raise LabQueueError("lab_history_receipt_invalid")
+        expected_history.extend([
+            {"role": "user", "content": scenario["user_turns"][index]},
+            {"role": "assistant", "content": response},
+        ])
+    if request["history"] != expected_history:
+        raise LabQueueError("lab_history_not_receipt_backed")
     try:
         payload = json.dumps(job, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
     except (TypeError, ValueError) as exc:
@@ -120,7 +178,7 @@ def _atomic_create(path: Path, payload: bytes) -> bool:
 
 
 def submit(job: object, *, root: Path, max_pending: int = DEFAULT_MAX_PENDING) -> None:
-    job, payload = _validate(job)
+    job, payload = _validate(job, root=Path(root))
     if isinstance(max_pending, bool) or not isinstance(max_pending, int) or not 1 <= max_pending <= DEFAULT_MAX_PENDING:
         raise LabQueueError("queue_limit_invalid")
     pending, running, receipts, control = _layout(root)
@@ -151,7 +209,7 @@ def claim_next(root: Path) -> dict | None:
             continue
         try:
             value = json.loads(claimed.read_text(encoding="utf-8"))
-            _validate(value)
+            _validate(value, root=Path(root))
         except Exception as exc:
             _finish_path(root, claimed.stem, {"job_id": claimed.stem, "status": "failed", "error_code": "queue_job_invalid"})
             raise LabQueueError("queue_job_invalid") from exc

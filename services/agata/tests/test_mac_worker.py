@@ -21,15 +21,16 @@ class MacWorkerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="gpoint-worker-test-")
         self.root = Path(self.temp.name)
-        self.old_paths = worker.CONFIG, worker.SUPPORT, worker.STATUS
+        self.old_paths = worker.CONFIG, worker.SUPPORT, worker.STATUS, worker.INFERENCE_PROCESS
         self.old_heartbeat = worker._last_heartbeat_attempt
         worker._last_heartbeat_attempt = float("-inf")
         worker.CONFIG = self.root / "worker.env"
         worker.SUPPORT = self.root / "support"
         worker.STATUS = worker.SUPPORT / "worker-status.json"
+        worker.INFERENCE_PROCESS = worker.SUPPORT / "inference-process.json"
 
     def tearDown(self):
-        worker.CONFIG, worker.SUPPORT, worker.STATUS = self.old_paths
+        worker.CONFIG, worker.SUPPORT, worker.STATUS, worker.INFERENCE_PROCESS = self.old_paths
         worker._last_heartbeat_attempt = self.old_heartbeat
         self.temp.cleanup()
 
@@ -64,6 +65,9 @@ class MacWorkerTests(unittest.TestCase):
                 pid = 100
                 returncode = 0
 
+                def poll(self):
+                    return self.returncode
+
                 def communicate(self, input=None, timeout=None):
                     observed["prompt"] = input
                     return None, None
@@ -93,6 +97,9 @@ class MacWorkerTests(unittest.TestCase):
         class HangingProcess:
             pid = 123
             returncode = None
+
+            def poll(self):
+                return self.returncode
 
             def communicate(self, input=None, timeout=None):
                 if not observed:

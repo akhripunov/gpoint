@@ -24,7 +24,8 @@ from pathlib import Path
 
 LABEL = "one.gpoint.agata-codex-worker"
 MAX_OUTAGE_SECONDS = 300
-RESTORE_AFTER_SECONDS = 220
+RESTORE_AFTER_SECONDS = 180
+RESTORE_BUDGET_SECONDS = 150
 MIN_TTL_SECONDS = 420
 POLL_DEADLINE_SECONDS = 60
 HOME = Path.home()
@@ -34,13 +35,16 @@ CONFIG = HOME / ".config/gpoint/agata-worker.env"
 PLIST = HOME / "Library/LaunchAgents" / f"{LABEL}.plist"
 WORKER = SUPPORT / "gpoint_mac_worker.py"
 HELPER = SUPPORT / "lab_queue.py"
+FIXTURE_MANIFEST = SUPPORT / "lab_fixture_manifest.json"
 WRAPPER = SUPPORT / "run_codex_worker.sh"
 SOURCES = {
     "worker": REPO / "services/agata/worker/gpoint_mac_worker.py",
     "helper": REPO / "services/agata/worker/lab_queue.py",
+    "fixture_manifest": REPO / "services/agata/worker/lab_fixture_manifest.json",
     "wrapper": REPO / "services/agata/worker/run_codex_worker.sh",
 }
-TARGETS = {"worker": WORKER, "helper": HELPER, "wrapper": WRAPPER, "plist": PLIST}
+TARGETS = {"worker": WORKER, "helper": HELPER, "fixture_manifest": FIXTURE_MANIFEST,
+           "wrapper": WRAPPER, "plist": PLIST}
 STATE_ROOT = SUPPORT / "v3-transition-recovery"
 TRANSITION_LOCK = HOME / ".config/gpoint/unified-worker-transition.lock"
 UTC = timezone.utc
@@ -132,26 +136,10 @@ def _gpoint_snapshot() -> dict:
 def validate_queue_snapshots(gpoint: dict, gsales: dict | None, lanes: tuple[str, ...]) -> dict:
     snapshots = {"GPOINT": gpoint}
     if "GSALES" in lanes:
-        if not isinstance(gsales, dict):
-            raise RuntimeError("gsales_authoritative_queue_snapshot_required")
-        if (gsales.get("target") != "GSALES" or gsales.get("pending_inference_jobs") != 0
-                or gsales.get("running_inference_jobs") != 0
-                or gsales.get("effective_inference_ttl_seconds", 0) < MIN_TTL_SECONDS
-                or not isinstance(gsales.get("source_id"), str) or not gsales.get("source_id")
-                or not isinstance(gsales.get("snapshot_at"), str) or not gsales.get("snapshot_at")
-                or gsales.get("transaction_read_only") is not True
-                or gsales.get("same_login") is not True
-                or gsales.get("role_superuser") is not False
-                or gsales.get("role_bypassrls") is not False):
-            raise RuntimeError("gsales_authoritative_queue_snapshot_invalid")
-        try:
-            observed = datetime.fromisoformat(gsales["snapshot_at"].replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise RuntimeError("gsales_authoritative_queue_snapshot_invalid") from exc
-        age = (datetime.now(UTC) - observed).total_seconds()
-        if observed.tzinfo is None or age < -1 or age > 5:
-            raise RuntimeError("gsales_authoritative_queue_snapshot_stale")
-        snapshots["GSALES"] = gsales
+        # A caller-supplied JSON file cannot establish the live GSALES runtime,
+        # tenant, image identity, or database query provenance. Fail closed
+        # until a source-authenticated GSALES runtime probe is implemented.
+        raise RuntimeError("gsales_authoritative_queue_source_unavailable")
     return snapshots
 
 
@@ -269,10 +257,23 @@ def _state_lock(path: Path, timeout: float = 0.0):
             time.sleep(0.05)
 
 
-def _bootstrap() -> None:
+def _remaining_seconds(deadline: float | None) -> float:
+    return float("inf") if deadline is None else max(0.0, deadline - time.monotonic())
+
+
+def _bounded_timeout(seconds: float, deadline: float | None) -> float:
+    value = min(seconds, _remaining_seconds(deadline))
+    if value <= 0:
+        raise RuntimeError("worker_transition_deadline_exceeded")
+    return value
+
+
+def _bootstrap(deadline: float | None = None) -> None:
     domain = f"gui/{os.getuid()}"
-    subprocess.run(["launchctl", "bootstrap", domain, str(PLIST)], check=True, capture_output=True, timeout=15)
-    subprocess.run(["launchctl", "kickstart", "-k", f"{domain}/{LABEL}"], check=True, capture_output=True, timeout=15)
+    subprocess.run(["launchctl", "bootstrap", domain, str(PLIST)], check=True, capture_output=True,
+                   timeout=_bounded_timeout(15, deadline))
+    subprocess.run(["launchctl", "kickstart", "-k", f"{domain}/{LABEL}"], check=True, capture_output=True,
+                   timeout=_bounded_timeout(15, deadline))
 
 
 def _wait_for_poll(before: dict, lanes: tuple[str, ...], deadline: float) -> None:
@@ -288,6 +289,60 @@ def _wait_for_poll(before: dict, lanes: tuple[str, ...], deadline: float) -> Non
     raise RuntimeError("fresh_authenticated_poll_not_confirmed")
 
 
+def _terminate_recorded_inference(deadline: float | None = None) -> None:
+    record_path = SUPPORT / "inference-process.json"
+    try:
+        stat = record_path.lstat()
+        if record_path.is_symlink() or stat.st_uid != os.getuid() or stat.st_mode & 0o077:
+            raise RuntimeError("inference_process_record_permissions_invalid")
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("inference_process_record_invalid") from exc
+    pid, pgid = record.get("pid"), record.get("pgid")
+    if (isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1
+            or isinstance(pgid, bool) or not isinstance(pgid, int) or pgid != pid
+            or Path(str(record.get("command", ""))).name != "codex"):
+        raise RuntimeError("inference_process_record_invalid")
+    try:
+        observed = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                                  capture_output=True, text=True, timeout=2, check=False).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("inference_process_identity_unavailable") from exc
+    if not observed:
+        record_path.unlink(missing_ok=True)
+        return
+    if observed.split(None, 1)[0] != record["command"]:
+        raise RuntimeError("inference_process_identity_mismatch")
+    try:
+        os.killpg(pgid, 15)
+    except ProcessLookupError:
+        record_path.unlink(missing_ok=True)
+        return
+    stop_deadline = min(time.monotonic() + 3, deadline if deadline is not None else float("inf"))
+    while time.monotonic() < stop_deadline:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            record_path.unlink(missing_ok=True)
+            return
+        time.sleep(0.05)
+    try:
+        os.killpg(pgid, 9)
+    except ProcessLookupError:
+        pass
+    kill_deadline = min(time.monotonic() + 2, deadline if deadline is not None else float("inf"))
+    while time.monotonic() < kill_deadline:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            record_path.unlink(missing_ok=True)
+            return
+        time.sleep(0.05)
+    raise RuntimeError("inference_process_did_not_stop")
+
+
 def restore_v2(state_path: Path, *, timeout: float = 0.0) -> bool:
     lock_fd = _state_lock(state_path, timeout=timeout)
     if lock_fd is None:
@@ -296,9 +351,15 @@ def restore_v2(state_path: Path, *, timeout: float = 0.0) -> bool:
         state = json.loads(state_path.read_text(encoding="utf-8"))
         if state.get("complete") or state.get("restore_confirmed"):
             return False
+        outage_deadline = state.get("outage_deadline")
+        if not isinstance(outage_deadline, (int, float)):
+            outage_deadline = None
         backup = Path(state["backup_dir"])
         if loaded():
-            subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], check=False, capture_output=True, timeout=10)
+            subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], check=False,
+                           capture_output=True, timeout=_bounded_timeout(10, outage_deadline))
+        _terminate_recorded_inference(outage_deadline)
+        _prove_global_lock_free(timeout=_bounded_timeout(10, outage_deadline))
         for name, target in TARGETS.items():
             source = backup / name
             expected = state["original_hashes"].get(name)
@@ -311,8 +372,9 @@ def restore_v2(state_path: Path, *, timeout: float = 0.0) -> bool:
                 _atomic_copy(source, target, 0o600 if name == "plist" else 0o700)
                 if digest(target) != expected:
                     raise RuntimeError("v2_restore_hash_mismatch")
-        _bootstrap()
-        _wait_for_poll(state["before_status"], tuple(state["v2_lanes"]), time.monotonic() + POLL_DEADLINE_SECONDS)
+        _bootstrap(outage_deadline)
+        _wait_for_poll(state["before_status"], tuple(state["v2_lanes"]),
+                       min(outage_deadline or float("inf"), time.monotonic() + POLL_DEADLINE_SECONDS))
         state["restore_confirmed"] = True
         state["restored_at"] = time.time()
         _write_state(state_path, state)
@@ -326,6 +388,10 @@ def _candidate_assets_match(state: dict) -> bool:
         return all(digest(TARGETS[name]) == value for name, value in state["candidate_assets"].items())
     except (KeyError, OSError):
         return False
+
+
+def _watchdog_restore_due(active: bool, parent_alive: bool, now: float, restore_at: float) -> bool:
+    return not parent_alive or (now >= restore_at)
 
 
 def _mark_complete(state_path: Path) -> bool:
@@ -385,19 +451,24 @@ def watchdog(state_path: Path) -> int:
             _lane_poll(current, lane).get("current_job_present") is True
             for lane in state["lanes"]
         )
-        if active:
-            # Let an already claimed user generation finish before attempting rollback.
+        if active and not _watchdog_restore_due(active, parent_alive, now, state["restore_at"]):
             time.sleep(1)
             continue
-        if not parent_alive or now >= state["restore_at"]:
+        if _watchdog_restore_due(active, parent_alive, now, state["restore_at"]):
             try:
                 restore_v2(state_path, timeout=0.5)
-            except Exception:
-                pass
+            except Exception as exc:
+                state["restore_failure_code"] = (
+                    str(exc) if str(exc).replace("_", "").isalnum() else "v2_restore_failed"
+                )
+                state["last_restore_attempt_at"] = time.time()
+                _write_state(state_path, state)
             latest = json.loads(state_path.read_text(encoding="utf-8"))
             if latest.get("restore_confirmed"):
                 return 0
         if now >= state["outage_deadline"]:
+            state["watchdog_failure_code"] = "outage_deadline_exceeded"
+            _write_state(state_path, state)
             return 1
         time.sleep(1)
 
@@ -479,6 +550,8 @@ def _start_watchdog(state_path: Path) -> subprocess.Popen:
 def apply(candidate_sha: str, approval_path: Path, gsales_snapshot_path: Path | None) -> None:
     candidate = candidate_manifest(candidate_sha)
     lanes = _configured_lanes()
+    if "GSALES" in lanes:
+        raise RuntimeError("gsales_authoritative_queue_source_unavailable")
     if not loaded():
         raise RuntimeError("launchagent_not_loaded")
     before = read_status()
@@ -489,10 +562,6 @@ def apply(candidate_sha: str, approval_path: Path, gsales_snapshot_path: Path | 
     approval = _approval(approval_path, candidate_sha, original_worker_sha)
     gpoint = _gpoint_snapshot()
     gsales = None
-    if "GSALES" in lanes:
-        if gsales_snapshot_path is None:
-            raise RuntimeError("gsales_authoritative_queue_snapshot_required")
-        gsales = json.loads(gsales_snapshot_path.read_text(encoding="utf-8"))
     snapshots = validate_queue_snapshots(gpoint, gsales, lanes)
     state_path = _backup_state(candidate_sha, candidate["assets"], lanes, approval, before)
     state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -508,7 +577,7 @@ def apply(candidate_sha: str, approval_path: Path, gsales_snapshot_path: Path | 
             raise RuntimeError("transition_lock_busy") from exc
         # Fresh authoritative queue and local-idle recheck immediately before bootout.
         gpoint = _gpoint_snapshot()
-        gsales = json.loads(gsales_snapshot_path.read_text(encoding="utf-8")) if "GSALES" in lanes else None
+        gsales = None
         snapshots = validate_queue_snapshots(gpoint, gsales, lanes)
         current = read_status()
         if not loaded() or current.get("state") != "idle" or current.get("current_job_present") is True:
@@ -522,20 +591,21 @@ def apply(candidate_sha: str, approval_path: Path, gsales_snapshot_path: Path | 
         switch_started = time.monotonic()
         outage_deadline = switch_started + MAX_OUTAGE_SECONDS
         state["started"] = switch_started
-        state["restore_at"] = switch_started + RESTORE_AFTER_SECONDS
+        state["restore_at"] = min(switch_started + RESTORE_AFTER_SECONDS,
+                                   outage_deadline - RESTORE_BUDGET_SECONDS)
         state["outage_deadline"] = outage_deadline
         state["bootout_attempted"] = True
         _write_state(state_path, state)
         subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], check=True, capture_output=True, timeout=10)
-        _prove_global_lock_free()
+        _prove_global_lock_free(timeout=_bounded_timeout(10, outage_deadline))
         if time.monotonic() >= outage_deadline:
             raise RuntimeError("worker_transition_deadline_exceeded")
-        for name in ("helper", "worker", "wrapper"):
+        for name in ("fixture_manifest", "helper", "worker", "wrapper"):
             source, target = SOURCES[name], TARGETS[name]
             _atomic_copy(source, target, 0o700)
             if digest(target) != candidate["assets"][name]:
                 raise RuntimeError("candidate_asset_hash_mismatch")
-        _bootstrap()
+        _bootstrap(outage_deadline)
         _wait_for_poll(current, lanes, min(outage_deadline, time.monotonic() + POLL_DEADLINE_SECONDS))
         if time.monotonic() >= outage_deadline:
             raise RuntimeError("worker_transition_deadline_exceeded")
@@ -543,7 +613,8 @@ def apply(candidate_sha: str, approval_path: Path, gsales_snapshot_path: Path | 
             raise RuntimeError("worker_config_metadata_changed")
         if not _mark_complete(state_path):
             raise RuntimeError("transition_state_lock_busy")
-        watchdog_proc.wait(timeout=5)
+        if watchdog_proc.wait(timeout=5) != 0:
+            raise RuntimeError("recovery_watchdog_failed")
     except BaseException:
         state = json.loads(state_path.read_text(encoding="utf-8"))
         if state.get("bootout_attempted") and not state.get("complete"):

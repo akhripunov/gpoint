@@ -99,19 +99,21 @@ python3 -m unittest discover -s services/agata/conversation-lab/tests
 
 ## Prepared local shared-worker lane (not enabled)
 
-`evaluators/worker_client.py` can build a synthetic job from the hash-checked
-Naturalness V1 development scenarios (`-02`) and submit/read/cancel it through a
-mode-0700 local spool consumed by the shared Mac worker. The spool has no HTTP
-listener or production gateway route. It accepts only a bounded JSON contract,
-requires unique job IDs, and writes mode-0600 local receipts. The worker executes
-LAB through the same serial Codex executor as GPOINT/GSALES; it never writes LAB
-responses to production PostgreSQL. Each candidate's history must be supplied
-independently by its caller.
+`evaluators/worker_client.py` builds a synthetic job only from the hash-checked
+Naturalness V1 development scenarios (`-02`) and submits/reads/cancels it through
+a mode-0700 local spool consumed by the shared Mac worker. The installed worker
+bundle includes a hash-pinned fixture manifest; it verifies each turn's canonical
+request and user text. Later turns can use only completed local receipts from the
+same scenario and A/B arm as history. Arbitrary chat text cannot enter through
+the adapter or queue. The worker executes LAB through the same serial Codex
+executor as GPOINT/GSALES; it never writes LAB responses to production PostgreSQL.
 
 The worker ignores LAB unless `AGATA_LAB_WORKER_ENABLED=true`; it also requires
 a separate mode-0600 OWNER approval file outside the repository, pinned to the
-exact combined worker-plus-queue-helper SHA256, an allowlist of experiment/configuration/scenario IDs,
+exact combined worker/queue/fixture-manifest SHA256, an allowlist of experiment/configuration/scenario IDs,
 an expiry, and a one-to-eight-call budget. Approval usage is consumed before
-inference. A claimed job left by a crash becomes `ambiguous` and is never
-retried. These interfaces are prepared only: this task does not create an
+inference. Each timeout is capped at 180 seconds. The Codex child inherits the
+worker's global lock, so a restarted worker cannot overlap an orphaned CLI. A
+claimed job left by a crash becomes `ambiguous` after the lock is released and
+is never retried. These interfaces are prepared only: this task does not create an
 approval file, enable the lane, start Codex, or access installed worker files.

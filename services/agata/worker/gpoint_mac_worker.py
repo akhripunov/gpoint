@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import json
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,7 @@ SUPPORT = Path(os.environ.get(
     "GPOINT_AGATA_WORKER_SUPPORT", str(Path.home() / "Library/Application Support/GPoint/agata-codex-worker")
 ))
 STATUS = SUPPORT / "worker-status.json"
+INFERENCE_PROCESS = SUPPORT / "inference-process.json"
 DEFAULT_CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex")
 OUTPUT_SCHEMA = {
     "type": "object",
@@ -40,6 +42,7 @@ OUTPUT_SCHEMA = {
 WORKER_VERSION = "3"
 UTC = timezone.utc  # noqa: UP017 -- macOS system Python 3.9 compatibility.
 CODEX_TIMEOUT_SECONDS = 180
+MAX_LAB_TIMEOUT_SECONDS = 180
 HEARTBEAT_INTERVAL_SECONDS = 30
 _last_heartbeat_attempt = float("-inf")
 REQUEST_TIMEOUT = httpx.Timeout(20.0, connect=10.0, read=20.0, write=20.0, pool=10.0)
@@ -74,6 +77,8 @@ def load_env_file(path: Path | None = None) -> None:
 
 
 _target_heartbeats: dict[str, float] = {}
+_WORKER_LOCK_FD: int | None = None
+_ACTIVE_INFERENCE: subprocess.Popen | None = None
 TARGET_NAMES = ("GPOINT", "GSALES")
 LAB_TARGET = "LAB"
 LEGACY_GPOINT_GATEWAY_URL = "https://gpoint.amiora.one/api/agata-worker"
@@ -238,7 +243,67 @@ class InferenceCancelled(RuntimeError):
     """A locally requested cancellation terminated the Codex process group."""
 
 
-def run_inference(job: dict, *, cancel_check=None, metadata_out: dict | None = None) -> str:
+def _terminate_process_group(process: subprocess.Popen) -> None:
+    import signal
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.communicate(timeout=3)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+
+
+def _terminate_active_inference(_signum=None, _frame=None) -> None:
+    if _ACTIVE_INFERENCE is not None:
+        _terminate_process_group(_ACTIVE_INFERENCE)
+    if _signum is not None:
+        raise SystemExit(128 + int(_signum))
+
+
+def _record_inference_process(process: subprocess.Popen, command: list[str]) -> None:
+    SUPPORT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(prefix=".inference-process-", dir=SUPPORT)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump({"pid": process.pid, "pgid": process.pid, "command": command[0],
+                       "started_at": datetime.now(UTC).isoformat()}, stream, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, INFERENCE_PROCESS)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def _clear_inference_process(pid: int) -> None:
+    try:
+        record = json.loads(INFERENCE_PROCESS.read_text(encoding="utf-8"))
+        if record.get("pid") == pid:
+            INFERENCE_PROCESS.unlink(missing_ok=True)
+    except (OSError, ValueError):
+        pass
+
+
+def _clear_stale_inference_record() -> None:
+    # The worker lock is held here. A Codex child inherits its descriptor, so
+    # acquiring the lock proves no earlier generation still owns that lock.
+    INFERENCE_PROCESS.unlink(missing_ok=True)
+
+
+def run_inference(job: dict, *, cancel_check=None, metadata_out: dict | None = None,
+                  timeout_seconds: int | None = None) -> str:
     max_length = 4000 if job.get("target") == "GSALES" else 4096
     request = job.get("request")
     if not isinstance(request, dict):
@@ -255,6 +320,12 @@ def run_inference(job: dict, *, cancel_check=None, metadata_out: dict | None = N
     timeout = os.environ.get("AGATA_CODEX_JOB_TIMEOUT_SECONDS", str(CODEX_TIMEOUT_SECONDS))
     if not timeout.isdigit() or not 15 <= int(timeout) <= 600:
         raise FatalConfigurationError("codex_timeout_config_invalid")
+    effective_timeout = int(timeout)
+    if job.get("target") == LAB_TARGET:
+        if (isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int)
+                or not 15 <= timeout_seconds <= MAX_LAB_TIMEOUT_SECONDS):
+            raise FatalConfigurationError("lab_timeout_invalid")
+        effective_timeout = min(effective_timeout, timeout_seconds)
     prompt = (
         "You are AGATA's text-only conversational response generator, not a coding assistant. "
         "Do not use tools, inspect files, execute commands, browse, or access anything except the "
@@ -295,6 +366,8 @@ def run_inference(job: dict, *, cancel_check=None, metadata_out: dict | None = N
             if os.environ.get(key)
         }
         child_env["CI"] = "true"
+        global _ACTIVE_INFERENCE
+        pass_fds = (_WORKER_LOCK_FD,) if _WORKER_LOCK_FD is not None else ()
         process = subprocess.Popen(
             command,
             text=True,
@@ -303,12 +376,15 @@ def run_inference(job: dict, *, cancel_check=None, metadata_out: dict | None = N
             stderr=subprocess.DEVNULL,
             env=child_env,
             start_new_session=True,
+            pass_fds=pass_fds,
         )
+        _ACTIVE_INFERENCE = process
         try:
+            _record_inference_process(process, command)
             if cancel_check is None:
-                stdout, _ = process.communicate(prompt, timeout=int(timeout))
+                stdout, _ = process.communicate(prompt, timeout=effective_timeout)
             else:
-                deadline = time.monotonic() + int(timeout)
+                deadline = time.monotonic() + effective_timeout
                 stdout = None
                 first_communicate = True
                 while stdout is None:
@@ -325,23 +401,15 @@ def run_inference(job: dict, *, cancel_check=None, metadata_out: dict | None = N
                         first_communicate = False
                         continue
         except (subprocess.TimeoutExpired, InferenceCancelled) as exc:
-            import signal
-
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                process.communicate(timeout=3)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.communicate()
+            _terminate_process_group(process)
             if isinstance(exc, InferenceCancelled):
                 raise
             raise RuntimeError("codex_execution_timeout") from exc
+        finally:
+            if process.poll() is None:
+                _terminate_process_group(process)
+            _ACTIVE_INFERENCE = None
+            _clear_inference_process(process.pid)
         if process.returncode != 0 or not result_file.is_file():
             raise RuntimeError(f"codex_execution_failed_{process.returncode}")
         if _codex_used_tools(stdout or ""):
@@ -472,7 +540,8 @@ def _load_lab_approval() -> dict:
 
 def _worker_bundle_sha256() -> str:
     digest = hashlib.sha256()
-    for name, path in (("gpoint_mac_worker.py", Path(__file__)), ("lab_queue.py", Path(lab_queue.__file__))):
+    for name, path in (("gpoint_mac_worker.py", Path(__file__)), ("lab_queue.py", Path(lab_queue.__file__)),
+                       ("lab_fixture_manifest.json", lab_queue.FIXTURE_MANIFEST)):
         digest.update(name.encode("utf-8") + b"\0")
         digest.update(path.read_bytes())
     return digest.hexdigest()
@@ -535,6 +604,7 @@ def process_lab_one() -> bool:
             {"target": LAB_TARGET, "request": job["request"]},
             cancel_check=lambda: lab_queue.cancel_requested(root, job_id),
             metadata_out=execution,
+            timeout_seconds=job["timeout_seconds"],
         )
         execution["duration_ms"] = round((time.monotonic() - started) * 1000)
         lab_queue.finish(root, job_id, status="completed", response=response, execution=execution, identity=job)
@@ -591,6 +661,11 @@ class TargetScheduler:
 def run_targets(poll_seconds: float, max_cycles: int | None, sleep_fn) -> int:
     scheduler = TargetScheduler()
     lock = acquire_worker_lock()
+    global _WORKER_LOCK_FD
+    fileno = getattr(lock, "fileno", None)
+    _WORKER_LOCK_FD = fileno() if callable(fileno) else None
+    if _WORKER_LOCK_FD is not None:
+        _clear_stale_inference_record()
     cycles = 0
     try:
         lab_queue.reconcile_running(SUPPORT / "lab-queue")
@@ -599,6 +674,7 @@ def run_targets(poll_seconds: float, max_cycles: int | None, sleep_fn) -> int:
             scheduler.poll()
             sleep_fn(min(max(poll_seconds, 1.0), 60.0))
     finally:
+        _WORKER_LOCK_FD = None
         lock.close()
     return 0
 
@@ -614,6 +690,11 @@ def run_watch(
             or os.environ.get("AGATA_LAB_WORKER_ENABLED") == "true"):
         return run_targets(poll_seconds, max_cycles, sleep_fn)
     lock = acquire_worker_lock()
+    global _WORKER_LOCK_FD
+    fileno = getattr(lock, "fileno", None)
+    _WORKER_LOCK_FD = fileno() if callable(fileno) else None
+    if _WORKER_LOCK_FD is not None:
+        _clear_stale_inference_record()
     delay_index = 0
     consecutive_network_failures = 0
     cycles = 0
@@ -656,6 +737,7 @@ def run_watch(
             )
             sleep_fn(min(max(poll_seconds, 1.0), 60.0))
     finally:
+        _WORKER_LOCK_FD = None
         lock.close()
     return 0
 
@@ -826,14 +908,22 @@ def main() -> int:
         if args.command in {"once", "watch"}:
             targets = configured_targets()
             configured_tenant_bindings(targets)
+            signal.signal(signal.SIGTERM, _terminate_active_inference)
+            signal.signal(signal.SIGINT, _terminate_active_inference)
         if args.command == "once":
             if (os.environ.get("GSALES_AGATA_WORKER_URL") or os.environ.get("GSALES_AGATA_WORKER_TOKEN")
                     or os.environ.get("AGATA_LAB_WORKER_ENABLED") == "true"):
                 return run_targets(args.poll_seconds, 1, lambda _delay: None)
             lock = acquire_worker_lock()
+            global _WORKER_LOCK_FD
+            fileno = getattr(lock, "fileno", None)
+            _WORKER_LOCK_FD = fileno() if callable(fileno) else None
+            if _WORKER_LOCK_FD is not None:
+                _clear_stale_inference_record()
             try:
                 process_one()
             finally:
+                _WORKER_LOCK_FD = None
                 lock.close()
             return 0
         return run_watch(args.poll_seconds)

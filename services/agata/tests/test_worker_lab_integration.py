@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import json
+import fcntl
 import os
+import signal
 import sys
 import tempfile
+import time
+import subprocess
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,39 +17,30 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "worker"))
 import gpoint_mac_worker as worker  # noqa: E402
 import lab_queue  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "conversation-lab" / "evaluators"))
+import worker_client  # noqa: E402
 
 
 def lab_job(job_id="lab-job-1", *, scenario="ru_naturalness-02", config="baseline"):
-    return {
-        "job_id": job_id,
-        "experiment_id": "agata-naturalness-v1",
-        "configuration_id": config,
-        "origin": "conversation-lab",
-        "scenario_id": scenario,
-        "turn_index": 0,
-        "data_classification": "synthetic",
-        "timeout_seconds": 30,
-        "request": {
-            "instructions": "synthetic instruction",
-            "persona": {"name": "synthetic persona"},
-            "communication_settings": {"tone": "warm"},
-            "memories": [], "dialogue_summaries": [], "history": [],
-            "user_message": "synthetic user turn",
-        },
-    }
+    job = worker_client.build_job(
+        scenario_id=scenario, configuration_id=config, turn_index=0, job_id=job_id,
+    )
+    job["timeout_seconds"] = 30
+    return job
 
 
 class WorkerLabIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.previous = worker.SUPPORT, worker.STATUS
+        self.previous = worker.SUPPORT, worker.STATUS, worker.INFERENCE_PROCESS
         worker.SUPPORT = self.root
         worker.STATUS = self.root / "worker-status.json"
+        worker.INFERENCE_PROCESS = self.root / "inference-process.json"
         self.approval_path = self.root / "approval.json"
 
     def tearDown(self):
-        worker.SUPPORT, worker.STATUS = self.previous
+        worker.SUPPORT, worker.STATUS, worker.INFERENCE_PROCESS = self.previous
         self.temp.cleanup()
 
     def approval(self, max_calls=8, scenarios=None):
@@ -77,7 +72,7 @@ class WorkerLabIntegrationTests(unittest.TestCase):
         infer.assert_called_once()
         args, kwargs = infer.call_args
         self.assertEqual(args[0]["target"], "LAB")
-        self.assertEqual(args[0]["request"]["user_message"], "synthetic user turn")
+        self.assertEqual(args[0]["request"]["user_message"], lab_job()["request"]["user_message"])
         self.assertTrue(callable(kwargs["cancel_check"]))
         receipt = lab_queue.read_receipt(self.root / "lab-queue", "lab-job-1")
         self.assertEqual(receipt["response"], "Синтетический ответ")
@@ -194,9 +189,12 @@ class WorkerLabIntegrationTests(unittest.TestCase):
         class FakeProcess:
             pid = 987654
             returncode = None
+            def poll(self):
+                return self.returncode
             def communicate(self, _input=None, timeout=None):
                 calls["communicate"] += 1
                 if timeout == 3:
+                    self.returncode = 0
                     return "", ""
                 raise worker.subprocess.TimeoutExpired("codex", timeout)
 
@@ -208,9 +206,96 @@ class WorkerLabIntegrationTests(unittest.TestCase):
             worker.subprocess, "Popen", return_value=FakeProcess()
         ), patch.object(worker.os, "killpg") as killpg:
             with self.assertRaises(worker.InferenceCancelled):
-                worker.run_inference({"target": "LAB", "request": {"user_message": "synthetic"}}, cancel_check=cancel_check)
+                worker.run_inference({"target": "LAB", "request": {"user_message": "synthetic"}}, cancel_check=cancel_check, timeout_seconds=30)
         killpg.assert_called_once()
         self.assertEqual(killpg.call_args.args[0], 987654)
+
+    def test_lab_timeout_caps_environment_timeout(self):
+        codex = self.root / "codex"
+        codex.write_text("test executable")
+        timeouts = []
+
+        class FakeProcess:
+            pid = 987655
+            returncode = None
+            def poll(self):
+                return self.returncode
+            def communicate(self, _input=None, timeout=None):
+                timeouts.append(timeout)
+                if timeout == 3:
+                    self.returncode = 0
+                    return "", ""
+                raise worker.subprocess.TimeoutExpired("codex", timeout)
+
+        with patch.dict(os.environ, {
+            "GPOINT_CODEX_CLI": str(codex), "AGATA_CODEX_JOB_TIMEOUT_SECONDS": "600",
+        }), patch.object(worker.subprocess, "Popen", return_value=FakeProcess()), patch.object(worker.os, "killpg"):
+            with self.assertRaisesRegex(RuntimeError, "timeout"):
+                worker.run_inference({"target": "LAB", "request": {"user_message": "fixture"}}, timeout_seconds=20)
+        self.assertEqual(timeouts[0], 20)
+
+    def test_worker_crash_keeps_global_lock_until_orphan_codex_exits(self):
+        worker_dir = Path(worker.__file__).resolve().parent
+        pid_file = self.root / "fake-codex.pid"
+        fake_codex = self.root / "codex"
+        fake_codex.write_text(
+            "#!/usr/bin/env python3\nimport os,time\n"
+            f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+            "time.sleep(300)\n",
+            encoding="utf-8",
+        )
+        fake_codex.chmod(0o700)
+        child_code = (
+            "import sys; from pathlib import Path; "
+            f"sys.path.insert(0, {str(worker_dir)!r}); "
+            "import gpoint_mac_worker as w; "
+            f"w.SUPPORT=Path({str(self.root)!r}); "
+            f"w.INFERENCE_PROCESS=Path({str(self.root / 'inference-process.json')!r}); "
+            "lock=w.acquire_worker_lock(); w._WORKER_LOCK_FD=lock.fileno(); "
+            "w.run_inference({'request': {'user_message': 'fixture'}})"
+        )
+        env = dict(os.environ)
+        env.update({"GPOINT_CODEX_CLI": str(fake_codex), "PYTHONDONTWRITEBYTECODE": "1"})
+        parent = subprocess.Popen(
+            [sys.executable, "-c", child_code], env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        codex_pid = None
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not pid_file.exists():
+                time.sleep(0.02)
+            self.assertTrue(pid_file.exists(), "fake Codex child did not start")
+            codex_pid = int(pid_file.read_text())
+            parent.kill()
+            parent.wait(timeout=3)
+            lock_path = self.root / "worker.lock"
+            descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                os.kill(codex_pid, signal.SIGTERM)
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                        break
+                    except BlockingIOError:
+                        time.sleep(0.05)
+                else:
+                    self.fail("orphan Codex child retained the worker lock after exit")
+            finally:
+                os.close(descriptor)
+        finally:
+            if parent.poll() is None:
+                parent.kill()
+                parent.wait(timeout=3)
+            if codex_pid is not None:
+                try:
+                    os.kill(codex_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 if __name__ == "__main__":

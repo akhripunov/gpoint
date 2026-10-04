@@ -9,10 +9,11 @@ Naturalness Codex generation remains independent.
 
 The installed LaunchAgent remains `one.gpoint.agata-codex-worker`, with the
 existing wrapper, plist, dedicated Python 3.12 venv, and mode-0600 worker config.
-V3 adds only `lab_queue.py` beside `gpoint_mac_worker.py`; it adds no credential,
-tenant, gateway, Postgres schema, or public endpoint. The installer stages all
-three source assets atomically. LAB remains disabled by default and its separate
-worker-bundle-hash-pinned approval file does not exist until a future owner decision.
+V3 adds `lab_queue.py` and the hash-pinned synthetic fixture manifest beside
+`gpoint_mac_worker.py`; it adds no credential, tenant, gateway, Postgres schema,
+or public endpoint. The transition stages its worker assets atomically. LAB
+remains disabled by default and its separate worker-bundle-hash-pinned approval
+file does not exist until a future owner decision.
 
 Before the approved window, record SHA256 for installed V2 source, wrapper,
 plist, and any helper; retain a mode-0700 recovery directory containing exact
@@ -44,12 +45,13 @@ Its `--preflight-only --candidate <exact-sha>` mode verifies the local clean
 candidate, source bundle hashes, current LaunchAgent state, and config-file
 permissions without reading credential contents or contacting a gateway. The
 `--apply` mode is separate and fail-closed: it requires a private exact-candidate
-OWNER approval file, a current GPOINT authoritative queue query, and (when
-GSALES credentials are configured) a fresh authoritative GSALES queue snapshot.
-It refuses an absent/privileged/stale queue source. GSALES snapshot must be
-read-only, same-login, non-superuser, non-BYPASSRLS, empty, and have the same
-minimum TTL. The approved command starts the watchdog before final queue/local
-preflight and before bootout.
+OWNER approval file and a current GPOINT authoritative queue query. The current
+tree has no source-authenticated GSALES runtime snapshot implementation. A
+caller-supplied JSON snapshot is never accepted; when GSALES credentials are
+configured, apply stops with `gsales_authoritative_queue_source_unavailable`.
+Implement and review a probe bound to the live GSALES runtime, tenant, release,
+and immutable image before seeking Approval A. The approved command starts the
+watchdog before final queue/local preflight and before bootout.
 
 The later Approval A controller must use one monotonic 300-second deadline for
 the entire interval from V2 bootout through confirmed V3 polling. It starts and
@@ -65,8 +67,12 @@ and a new authenticated idle poll. If bootstrap, hash, auth, polling, or deadlin
 checks fail, the controller's `finally` path and the independent watchdog must
 both restore the saved V2 source/wrapper/plist, verify their original hashes,
 bootstrap the original LaunchAgent, and wait for a fresh authenticated V2 poll.
-The watchdog restores V2 if the controller disappears or the recovery deadline
-arrives. Failed restore is a hard incident; never remove production jobs or use
+The watchdog begins recovery at 150 seconds, even if V3 status still says a job
+is active; it stops the recorded Codex process group and uses the remaining
+150-second budget for V2 bootstrap and authenticated polling. Subprocess waits
+are capped by the absolute deadline, and unsuccessful recovery records a safe
+failure code. A Codex child inherits the global worker lock, so a restarted
+worker cannot overlap an orphaned CLI. Failed restore is a hard incident; never remove production jobs or use
 a previously exposed credential as rollback. Candidate files and approval state
 are retained for diagnosis with mode-0600 permissions.
 
