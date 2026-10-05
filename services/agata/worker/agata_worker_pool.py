@@ -351,6 +351,7 @@ class PoolSupervisor:
         self.active: dict[str, _ActiveSlot] = {}
         self.failed_until: dict[str, float] = {}
         self.lane_errors: dict[str, str] = {}
+        self.successful_polls: set[str] = set()
         self._pool_lock = None
         self._lifecycle_lock = None
 
@@ -441,6 +442,7 @@ class PoolSupervisor:
                     offer = self.claimers[candidate]()
                     self.lane_errors.pop(candidate, None)
                     self.failed_until.pop(candidate, None)
+                    self.successful_polls.add(candidate)
                 except Exception as exc:
                     self.lane_errors[candidate] = _safe_error(exc)
                     delay = min(60.0, 2.0 ** min(5, len(self.lane_errors)))
@@ -638,7 +640,10 @@ class PoolSupervisor:
         targets = previous.get("targets") if isinstance(previous.get("targets"), dict) else {}
         for lane in LANES:
             saved = targets.get(lane) if isinstance(targets.get(lane), dict) else {}
-            targets[lane] = {**saved, "pool_state": lanes[lane]["state"]}
+            target_status = {**saved, "pool_state": lanes[lane]["state"]}
+            if lane in self.successful_polls:
+                target_status["last_error_code"] = self.lane_errors.get(lane)
+            targets[lane] = target_status
         payload = {
             **{key: previous[key] for key in (
                 "last_poll_at", "last_heartbeat_at", "last_success_at", "last_success_job_id",
