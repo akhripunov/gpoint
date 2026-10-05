@@ -128,6 +128,38 @@ def test_maintenance_marker_stops_new_claims_without_stopping_supervisor(tmp_pat
         pool.close()
 
 
+def test_successful_pool_claim_polls_clear_stale_legacy_lane_errors(tmp_path):
+    paths = PoolPaths(tmp_path)
+    paths.ensure()
+    paths.worker_status_file.write_text(json.dumps({
+        "targets": {
+            "GPOINT": {"last_error_code": "worker_target_unavailable", "last_poll_at": "old"},
+            "GSALES": {"last_error_code": "worker_target_unavailable", "last_poll_at": "old"},
+        },
+    }))
+
+    def successful_empty_claim(lane):
+        def claim():
+            status = json.loads(paths.worker_status_file.read_text())
+            status["targets"][lane]["last_poll_at"] = "new"
+            paths.worker_status_file.write_text(json.dumps(status))
+            return None
+        return claim
+
+    pool = PoolSupervisor(paths, PoolConfig(), {
+        "GPOINT": successful_empty_claim("GPOINT"),
+        "GSALES": successful_empty_claim("GSALES"),
+    }, runner=_FakeRunner(), lab_enabled=False)
+    try:
+        assert pool.poll_once() == 0
+        status = json.loads(paths.worker_status_file.read_text())
+        for lane in ("GPOINT", "GSALES"):
+            assert status["targets"][lane]["last_poll_at"] == "new"
+            assert status["targets"][lane]["last_error_code"] is None
+    finally:
+        pool.close()
+
+
 class _FakeProcess:
     def __init__(self, pid: int):
         self.pid = pid
