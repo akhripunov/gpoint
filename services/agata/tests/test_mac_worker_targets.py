@@ -158,6 +158,44 @@ def test_scheduler_fairness_and_target_failure_isolation(tmp_path, monkeypatch):
     assert "sales-private" not in worker.STATUS.read_text()
 
 
+def test_scheduler_clears_stale_error_after_successful_empty_poll(tmp_path, monkeypatch):
+    monkeypatch.setattr(worker, "SUPPORT", tmp_path)
+    monkeypatch.setattr(worker, "STATUS", tmp_path / "status.json")
+    worker.write_status(target="GPOINT", state="error", last_error_code="worker_target_unavailable")
+    with patch.dict(os.environ, ENV), patch.object(worker, "process_one", return_value=False):
+        assert worker.TargetScheduler().poll(now=0) is False
+    status = json.loads(worker.STATUS.read_text())
+    assert status["last_error_code"] is None
+    assert status["targets"]["GPOINT"]["last_error_code"] is None
+
+
+def test_scheduler_preserves_safe_gateway_error_code_without_leaking_arbitrary_text(tmp_path, monkeypatch):
+    monkeypatch.setattr(worker, "SUPPORT", tmp_path)
+    monkeypatch.setattr(worker, "STATUS", tmp_path / "status.json")
+    with patch.dict(os.environ, ENV), patch.object(
+        worker, "process_one", side_effect=worker.TransientNetworkError("worker_gateway_http_503")
+    ):
+        worker.TargetScheduler().poll(now=0)
+    status = json.loads(worker.STATUS.read_text())
+    assert status["last_error_code"] == "worker_gateway_http_503"
+
+    monkeypatch.setattr(worker, "STATUS", tmp_path / "status-redacted.json")
+    with patch.dict(os.environ, ENV), patch.object(
+        worker, "process_one", side_effect=RuntimeError("worker_bearer_sensitive_token")
+    ):
+        worker.TargetScheduler().poll(now=0)
+    redacted = worker.STATUS.read_text()
+    assert "worker_bearer_sensitive_token" not in redacted
+    assert json.loads(redacted)["last_error_code"] == "worker_target_unavailable"
+
+    monkeypatch.setattr(worker, "STATUS", tmp_path / "status-invalid-http.json")
+    with patch.dict(os.environ, ENV), patch.object(
+        worker, "process_one", side_effect=worker.TransientNetworkError("worker_gateway_http_999")
+    ):
+        worker.TargetScheduler().poll(now=0)
+    assert json.loads(worker.STATUS.read_text())["last_error_code"] == "worker_target_unavailable"
+
+
 def test_sales_claim_identity_is_checked_before_inference(tmp_path, monkeypatch):
     monkeypatch.setattr(worker, "SUPPORT", tmp_path)
     monkeypatch.setattr(worker, "STATUS", tmp_path / "status.json")
