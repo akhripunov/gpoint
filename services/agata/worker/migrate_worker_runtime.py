@@ -233,6 +233,232 @@ def _atomic_json(path: Path, value: dict, mode: int = 0o600) -> None:
             pass
 
 
+def _ensure_rollback_tree() -> Path:
+    """Atomically create and validate the private rollback root before writes."""
+    state = ROOT / "state"
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if state.is_symlink() or state.stat().st_uid != os.getuid():
+        raise RuntimeError("worker_state_directory_permissions_invalid")
+    state.chmod(0o700)
+    rollback = state / "rollback"
+    try:
+        # mkdir publishes the entire empty rollback root in one filesystem
+        # operation. Snapshot files are written only after this succeeds.
+        rollback.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    if rollback.is_symlink() or not rollback.is_dir() or rollback.stat().st_uid != os.getuid():
+        raise RuntimeError("worker_rollback_directory_invalid")
+    if rollback.stat().st_mode & 0o077:
+        raise RuntimeError("worker_rollback_directory_permissions_invalid")
+    return rollback
+
+
+def _output_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+
+
+def _redact_command_output(value: str | bytes | None) -> str:
+    """Keep command diagnostics while withholding values from secret env lines."""
+    secret_names = ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "PRIVATE_KEY")
+    lines = []
+    for line in _output_text(value).splitlines():
+        upper = line.upper()
+        if not any(name in upper for name in secret_names):
+            lines.append(line)
+        elif "=>" in line:
+            lines.append(f"{line.split('=>', 1)[0].rstrip()} => <redacted>")
+        elif "=" in line:
+            lines.append(f"{line.split('=', 1)[0].rstrip()}=<redacted>")
+        else:
+            argument = re.search(r"(?i)((?:--)?[\w.-]*(?:token|secret|password|api[_-]?key|private[_-]?key)[\w.-]*\s+)\S+", line)
+            lines.append(f"{line[:argument.start(0)]}{argument.group(1)}<redacted>" if argument else "<redacted secret-bearing output>")
+    return "\n".join(lines)
+
+
+def _run_readonly_command(command: list[str], timeout: float) -> tuple[subprocess.CompletedProcess, str | None]:
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False), None
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(command, 124, _output_text(exc.stdout), _output_text(exc.stderr)), "timeout"
+    except OSError as exc:
+        return subprocess.CompletedProcess(command, 127, "", type(exc).__name__), type(exc).__name__
+
+
+def _runtime_candidate_identity(expected_source_sha: str) -> dict:
+    current = ROOT / "runtime/current"
+    expected = ROOT / "runtime" / expected_source_sha
+    try:
+        resolved_current = current.resolve(strict=True)
+        resolved_expected = expected.resolve(strict=True)
+        manifest_path = resolved_current / "bundle-manifest.json"
+        if (not expected.is_dir() or expected.is_symlink() or manifest_path.is_symlink()
+                or any((resolved_current / name).is_symlink() or not (resolved_current / name).is_file()
+                       for name in ASSETS)):
+            raise ValueError("runtime_asset_path_invalid")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        actual_assets = {name: sha256(resolved_current / name) for name in ASSETS}
+        bundle_hash = hashlib.sha256(json.dumps(
+            actual_assets, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        manifest_assets = manifest.get("assets") if isinstance(manifest, dict) else None
+        passed = (current.is_symlink() and resolved_current == resolved_expected
+                  and manifest.get("source_sha") == expected_source_sha
+                  and manifest_assets == actual_assets
+                  and manifest.get("bundle_sha256") == bundle_hash)
+        return {"passed": passed, "expected_source_sha": expected_source_sha,
+                "runtime_source_sha": resolved_current.name,
+                "resolved_current": str(resolved_current), "bundle_sha256": bundle_hash,
+                "manifest_source_sha": manifest.get("source_sha"),
+                "asset_parity": manifest_assets == actual_assets}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {"passed": False, "expected_source_sha": expected_source_sha,
+                "runtime_source_sha": None, "resolved_current": None,
+                "bundle_sha256": None, "manifest_source_sha": None, "asset_parity": False}
+
+
+def _restart_state_snapshot(expected_source_sha: str, command_timeout: float = 8.0) -> dict:
+    """Capture one read-only snapshot of service, process, and lane readiness."""
+    service_id = f"gui/{os.getuid()}/{LABEL}"
+    command_errors = {}
+    service_command = ["launchctl", "print", service_id]
+    service_result, command_errors["launchctl_print"] = _run_readonly_command(service_command, command_timeout)
+    service_output = service_result.stdout or ""
+    pid_match = re.search(r"^\s*pid = ([0-9]+)\s*$", service_output, re.MULTILINE)
+    pid = int(pid_match.group(1)) if pid_match else None
+    pid_exists = False
+    if pid is not None:
+        try:
+            os.kill(pid, 0)
+            pid_exists = True
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            pid_exists = True
+    process_output = ""
+    if pid is not None and pid_exists:
+        process_result, command_errors["process"] = _run_readonly_command(
+            ["ps", "-p", str(pid), "-o", "command="], command_timeout)
+        process_output = process_result.stdout.strip()
+    process_identity = bool(pid_exists and str(ROOT / "runtime/current") in process_output)
+
+    runtime_identity = _runtime_candidate_identity(expected_source_sha)
+    runtime = ROOT / "runtime/current"
+    status_result, command_errors["worker_status"] = _run_readonly_command(
+        [str(runtime / ".venv/bin/python3.12"), str(runtime / "gpoint_mac_worker.py"), "status"],
+        command_timeout)
+    try:
+        status = json.loads(status_result.stdout)
+    except (ValueError, TypeError):
+        status = {}
+    lanes = status.get("lanes", {}) if isinstance(status.get("lanes"), dict) else {}
+    lane_status = {lane: value for lane, value in lanes.items() if isinstance(value, dict)}
+    lab_approval = ROOT / "config/lab-execution-approval.json"
+    lab_gate_closed = (lab_approval.is_file()
+                       or lane_status.get("LAB", {}).get("inference_gate") == "APPROVAL_REQUIRED"
+                       or lane_status.get("LAB", {}).get("last_error_code") == "lab_approval_required")
+
+    process_inventory, command_errors["process_inventory"] = _run_readonly_command(
+        ["ps", "-axo", "pid=,command="], command_timeout)
+    worker_processes = []
+    for line in (process_inventory.stdout or "").splitlines():
+        try:
+            worker_pid = int(line.strip().split(None, 1)[0])
+        except (ValueError, IndexError):
+            continue
+        if "gpoint_mac_worker.py watch" in line:
+            worker_processes.append({"pid": worker_pid,
+                                     "command": _redact_command_output(line.strip())})
+    active_pids = _running_inference_pids()
+    no_current_job = not status.get("current_job_present", False) and not any(
+        isinstance(value, dict) and value.get("current_job_present")
+        for value in lanes.values()
+    )
+    checks = {
+        "service": (service_result.returncode == 0 and f"{LABEL} = {{" in service_output
+                    and "state = running" in service_output),
+        "pid": pid_exists,
+        "process_identity": process_identity,
+        "runtime_parity": runtime_identity.get("passed") is True,
+        "status": status_result.returncode == 0 and isinstance(status, dict),
+        "concurrency": status.get("configured_concurrency") == 1,
+        "gpoint": lane_status.get("GPOINT", {}).get("health") == "HEALTHY",
+        "gsales": lane_status.get("GSALES", {}).get("health") == "HEALTHY",
+        "lab_lane": "LAB" in lanes,
+        "lab_approval_fail_closed": lab_gate_closed,
+        "no_active_inference": not active_pids and no_current_job,
+        "no_duplicate_worker": len(worker_processes) == 1 and worker_processes[0]["pid"] == pid,
+    }
+    safe_status = {
+        "configured_concurrency": status.get("configured_concurrency"),
+        "pool": status.get("pool"),
+        "lanes": {lane: {key: value for key, value in state.items()
+                          if key in {"health", "state", "current_job_present", "approval_required",
+                                     "approval_state", "inference_gate", "last_error_code"}}
+        for lane, state in lane_status.items() if lane in {"GPOINT", "GSALES", "LAB"}},
+    }
+    return {
+        "passed": all(checks.values()), "checks": checks, "pid": pid,
+        "active_inference_pids": active_pids, "worker_processes": worker_processes,
+        "command_errors": command_errors,
+        "launchctl_print": _redact_command_output(service_output),
+        "launchctl_stderr": _redact_command_output(service_result.stderr),
+        "process_command": _redact_command_output(process_output),
+        "worker_status": safe_status,
+        "runtime_identity": runtime_identity,
+        "runtime_source_sha": runtime_identity.get("runtime_source_sha"),
+    }
+
+
+def _adjudicate_restart_state(expected_source_sha: str, deadline: float = 30.0) -> dict:
+    """Boundedly recheck factual runtime state after an ambiguous restart command."""
+    until = time.monotonic() + deadline
+    attempts = []
+    while time.monotonic() < until:
+        remaining = max(1.0, until - time.monotonic())
+        try:
+            snapshot = _restart_state_snapshot(expected_source_sha, command_timeout=min(8.0, remaining))
+        except (OSError, subprocess.SubprocessError, ValueError, RuntimeError) as exc:
+            snapshot = {"passed": False, "error": type(exc).__name__}
+        attempts.append(snapshot)
+        if snapshot.get("passed"):
+            return {"passed": True, "status": snapshot.get("worker_status", {}), "attempts": attempts}
+        time.sleep(min(2.0, max(0.0, until - time.monotonic())))
+    return {"passed": False, "status": attempts[-1].get("worker_status", {}) if attempts else {},
+            "attempts": attempts}
+
+
+def _kickstart_and_verify(expected_source_sha: str) -> dict:
+    """Run restart and decide from bounded factual evidence, not CLI timing."""
+    command = ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{LABEL}"]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=20, check=False)
+        command_evidence = {
+            "outcome": "COMPLETED", "returncode": result.returncode, "timeout_seconds": 20,
+            "stdout": _redact_command_output(result.stdout),
+            "stderr": _redact_command_output(result.stderr),
+        }
+    except subprocess.TimeoutExpired as exc:
+        command_evidence = {
+            "outcome": "AMBIGUOUS_RESTART_COMMAND_RESULT", "timeout_seconds": 20,
+            "stdout": _redact_command_output(exc.stdout),
+            "stderr": _redact_command_output(exc.stderr),
+        }
+    except OSError as exc:
+        command_evidence = {"outcome": "COMMAND_LAUNCH_ERROR", "timeout_seconds": 20,
+                            "error": type(exc).__name__}
+    adjudication = _adjudicate_restart_state(expected_source_sha)
+    return {"verification": "PASS" if adjudication.get("passed") else "ROLLBACK",
+            "command": command_evidence, "adjudication": adjudication}
+
+
+def _remove_legacy_after_verification(*, health_passed: bool, restart_evidence: dict) -> None:
+    if not health_passed or restart_evidence.get("verification") != "PASS":
+        raise RuntimeError("legacy_cleanup_requires_full_verification")
+    _safe_remove_tree(LEGACY)
+
+
 def _stage_runtime(manifest: dict) -> Path:
     release = ROOT / "runtime" / manifest["source_sha"]
     if release.exists():
@@ -339,6 +565,18 @@ def _same_tree(left: Path, right: Path) -> bool:
     return inventory_tree(left) == inventory_tree(right)
 
 
+def _restore_legacy_snapshot(backup: Path) -> None:
+    if backup.is_symlink() or not backup.is_dir():
+        raise RuntimeError("rollback_snapshot_missing")
+    if LEGACY.exists() and _same_tree(LEGACY, backup):
+        return
+    _safe_remove_tree(LEGACY)
+    shutil.copytree(backup, LEGACY, symlinks=True)
+    LEGACY.chmod(0o700)
+    if not _same_tree(LEGACY, backup):
+        raise RuntimeError("rollback_legacy_snapshot_mismatch")
+
+
 def _health_check(deadline: float = 60.0) -> dict:
     python = ROOT / "runtime/current/.venv/bin/python3.12"
     worker = ROOT / "runtime/current/gpoint_mac_worker.py"
@@ -420,18 +658,20 @@ def apply() -> dict:
             if directory.is_symlink() or directory.stat().st_uid != os.getuid():
                 raise RuntimeError("worker_runtime_directory_owner_invalid")
             directory.chmod(0o700)
+        rollback_tree = _ensure_rollback_tree()
         release = _stage_runtime(manifest)
         _ensure_pool_config()
-        backup = ROOT / "state/rollback/legacy-runtime"
-        if PLIST.is_file() and not (ROOT / "state/rollback/original-launchagent.plist").exists():
-            shutil.copy2(PLIST, ROOT / "state/rollback/original-launchagent.plist")
-            (ROOT / "state/rollback/original-launchagent.plist").chmod(0o600)
+        backup = rollback_tree / "legacy-runtime"
+        if PLIST.is_file() and not (rollback_tree / "original-launchagent.plist").exists():
+            shutil.copy2(PLIST, rollback_tree / "original-launchagent.plist")
+            (rollback_tree / "original-launchagent.plist").chmod(0o600)
         original_plist = PLIST.read_bytes() if PLIST.is_file() else None
         target_link = ROOT / "runtime/current"
         prior_link_target = os.readlink(target_link) if target_link.is_symlink() else None
         maintenance_marker = ROOT / "state/maintenance-stop"
         next_plist = _render_plist(target_link)
         switch_started = False
+        restart_evidence = None
         try:
             # Freeze the verified LaunchAgent and repeat the idle check while
             # it cannot claim another job. This closes the preflight/bootout race.
@@ -494,9 +734,11 @@ def apply() -> dict:
             subprocess.run(["launchctl", "kickstart", f"gui/{os.getuid()}/{LABEL}"], check=True, timeout=15)
             status = _health_check()
             # Explicit restart/recovery verification for the same LaunchAgent.
-            subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{LABEL}"], check=True, timeout=20)
-            restarted = _health_check()
-            if not launchctl_loaded() or restarted.get("configured_concurrency") != 1:
+            restart_evidence = _kickstart_and_verify(manifest["source_sha"])
+            if restart_evidence["verification"] != "PASS":
+                raise RuntimeError("restart_verification_failed")
+            restarted = restart_evidence["adjudication"].get("status", {})
+            if restarted.get("configured_concurrency") != 1:
                 raise RuntimeError("restart_verification_failed")
             if any(not isinstance(restarted.get("lanes", {}).get(lane), dict) for lane in ("GPOINT", "GSALES", "LAB")):
                 raise RuntimeError("lane_status_missing")
@@ -504,12 +746,16 @@ def apply() -> dict:
             if network_before != network_after:
                 raise RuntimeError("network_state_changed_during_transition")
             # Legacy runtime is removed only after health and restart pass.
-            _safe_remove_tree(LEGACY)
+            _remove_legacy_after_verification(health_passed=bool(status.get("lanes"))
+                                              and all(status.get("lanes", {}).get(lane, {}).get("health") == "HEALTHY"
+                                                      for lane in ("GPOINT", "GSALES")),
+                                              restart_evidence=restart_evidence)
             evidence = {
                 "state": "COMPLETE", "at": datetime.now(UTC).isoformat(), "label": LABEL,
                 "source_sha": manifest["source_sha"], "bundle_sha256": manifest["bundle_sha256"],
                 "configured_concurrency": 1, "provider_parallel_capability": "NOT_VERIFIED",
                 "health_check": status, "restart_check": restarted,
+                "restart_evidence": restart_evidence,
                 "legacy_runtime_removed": not LEGACY.exists(),
                 "network_state_sha256_before": network_before,
                 "network_state_sha256_after": network_after,
@@ -527,14 +773,20 @@ def apply() -> dict:
             try:
                 subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], timeout=15, check=False,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if not LEGACY.exists() and backup.exists():
-                    shutil.copytree(backup, LEGACY, symlinks=True)
+                if backup.exists():
+                    _restore_legacy_snapshot(backup)
+                elif not LEGACY.exists():
+                    raise RuntimeError("rollback_snapshot_missing")
                 maintenance_marker.unlink(missing_ok=True)
                 if original_plist is not None:
                     PLIST.write_bytes(original_plist)
                     PLIST.chmod(0o600)
                     subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(PLIST)], timeout=20, check=False)
                     subprocess.run(["launchctl", "kickstart", f"gui/{os.getuid()}/{LABEL}"], timeout=15, check=False)
+                    if PLIST.read_bytes() != original_plist:
+                        raise RuntimeError("rollback_launchagent_plist_mismatch")
+                    if not launchctl_loaded():
+                        raise RuntimeError("rollback_launchagent_not_loaded")
                 target_link = ROOT / "runtime/current"
                 if prior_link_target is None:
                     _safe_remove_tree(target_link)
@@ -547,6 +799,7 @@ def apply() -> dict:
                     "state": "ROLLED_BACK", "at": datetime.now(UTC).isoformat(),
                     "source_sha": manifest["source_sha"], "legacy_restored": LEGACY.exists(),
                     "launchagent_restored": original_plist is not None,
+                    "restart_evidence": restart_evidence,
                 })
             finally:
                 raise
@@ -557,7 +810,7 @@ def apply() -> dict:
 def rollback() -> dict:
     backup = ROOT / "state/rollback/legacy-runtime"
     original_plist_file = ROOT / "state/rollback/original-launchagent.plist"
-    if not backup.is_dir() or not original_plist_file.is_file():
+    if backup.is_symlink() or not backup.is_dir() or not original_plist_file.is_file():
         raise RuntimeError("rollback_snapshot_missing")
     TRANSITION_LOCK.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(TRANSITION_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
@@ -586,9 +839,7 @@ def rollback() -> dict:
             time.sleep(1)
         if _running_inference_pids():
             raise RuntimeError("worker_process_did_not_stop")
-        _safe_remove_tree(LEGACY)
-        shutil.copytree(backup, LEGACY, symlinks=True)
-        LEGACY.chmod(0o700)
+        _restore_legacy_snapshot(backup)
         original_plist = original_plist_file.read_bytes()
         PLIST.write_bytes(original_plist)
         PLIST.chmod(0o600)
@@ -597,6 +848,8 @@ def rollback() -> dict:
         subprocess.run(["launchctl", "kickstart", f"gui/{os.getuid()}/{LABEL}"], check=True, timeout=15)
         if not launchctl_loaded():
             raise RuntimeError("rollback_launchagent_not_loaded")
+        if PLIST.read_bytes() != original_plist:
+            raise RuntimeError("rollback_launchagent_plist_mismatch")
         evidence = {
             "state": "ROLLED_BACK", "at": datetime.now(UTC).isoformat(), "label": LABEL,
             "legacy_runtime_restored": LEGACY.exists(), "launchagent_loaded": True,
