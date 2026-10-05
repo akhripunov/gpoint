@@ -138,6 +138,117 @@ def test_target_configuration_rejects_reused_credentials():
             worker.configured_targets()
 
 
+def test_validate_startup_passes_all_lanes_without_claim_or_inference(tmp_path, monkeypatch):
+    support = tmp_path / "canonical-support"
+    support.mkdir(mode=0o700)
+    pool_config = tmp_path / "pool.env"
+    pool_config.write_text(
+        "AGATA_WORKER_CONCURRENCY=1\n"
+        "AGATA_CODEX_PARALLEL_CAPABILITY=NOT_VERIFIED\n"
+        "AGATA_WORKER_POLL_SECONDS=3\n"
+    )
+    pool_config.chmod(0o600)
+    env = {
+        **ENV,
+        "GPOINT_AGATA_WORKER_SUPPORT": str(support),
+        "AGATA_WORKER_POOL_CONFIG": str(pool_config),
+        "AGATA_LAB_WORKER_ENABLED": "false",
+    }
+    current = support / "runtime/current"
+    monkeypatch.setattr(worker, "CONFIG", tmp_path / "missing-worker.env")
+    with patch.dict(os.environ, env, clear=True), \
+         patch.object(worker, "claim_target_job", side_effect=AssertionError("claim called")), \
+         patch.object(worker, "claim_lab_job", side_effect=AssertionError("LAB claim called")), \
+         patch.object(worker, "run_inference", side_effect=AssertionError("inference called")), \
+         patch.object(worker, "api_request", side_effect=AssertionError("network request called")):
+        result = worker.validate_startup_configuration()
+
+    assert result["state"] == "PASS"
+    assert result["configured_concurrency"] == 1
+    assert result["provider_parallel_capability"] == "NOT_VERIFIED"
+    assert {name for name, lane in result["lanes"].items() if lane["configured"]} == {
+        "GPOINT", "GSALES", "LAB",
+    }
+    assert result["lanes"]["LAB"]["inference_gate"] == "CLOSED_DISABLED"
+    assert result["claim_requests"] == 0
+    assert result["inference_requests"] == 0
+    assert not current.exists()
+    assert not (support / "locks").exists()
+
+
+def test_validate_startup_returns_specific_safe_error_for_invalid_lane_config(tmp_path, monkeypatch):
+    support = tmp_path / "canonical-support"
+    support.mkdir(mode=0o700)
+    pool_config = tmp_path / "pool.env"
+    pool_config.write_text("AGATA_WORKER_CONCURRENCY=1\nAGATA_CODEX_PARALLEL_CAPABILITY=NOT_VERIFIED\n")
+    pool_config.chmod(0o600)
+    monkeypatch.setattr(worker, "CONFIG", tmp_path / "missing-worker.env")
+    invalid = {**ENV, "GPOINT_AGATA_WORKER_SUPPORT": str(support),
+               "AGATA_WORKER_POOL_CONFIG": str(pool_config)}
+    invalid.pop("GSALES_AGATA_WORKER_TOKEN")
+    invalid.pop("GSALES_AGATA_WORKER_URL")
+
+    with patch.dict(os.environ, invalid, clear=True):
+        with pytest.raises(worker.FatalConfigurationError, match="worker_target_unconfigured"):
+            worker.validate_startup_configuration()
+
+
+def test_startup_check_cli_reports_validation_without_mutating_launchagent_or_runtime(tmp_path, monkeypatch, capsys):
+    support = tmp_path / "canonical-support"
+    support.mkdir(mode=0o700)
+    pool_config = tmp_path / "pool.env"
+    pool_config.write_text("AGATA_WORKER_CONCURRENCY=1\nAGATA_CODEX_PARALLEL_CAPABILITY=NOT_VERIFIED\n")
+    pool_config.chmod(0o600)
+    monkeypatch.setattr(worker, "CONFIG", tmp_path / "missing-worker.env")
+    monkeypatch.setattr(sys, "argv", ["gpoint_mac_worker.py", "validate-startup"])
+    with patch.dict(os.environ, {**ENV, "GPOINT_AGATA_WORKER_SUPPORT": str(support),
+                                 "AGATA_WORKER_POOL_CONFIG": str(pool_config)}, clear=True), \
+         patch.object(worker.subprocess, "run", side_effect=AssertionError("launchctl/network command called")), \
+         patch.object(worker, "claim_target_job", side_effect=AssertionError("claim called")), \
+         patch.object(worker, "run_inference", side_effect=AssertionError("inference called")):
+        assert worker.main() == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["state"] == "PASS"
+    assert not (support / "runtime/current").exists()
+    assert not (support / "locks").exists()
+
+
+def test_lab_lane_is_registered_but_disabled_gate_never_reads_approval(tmp_path, monkeypatch):
+    monkeypatch.setattr(worker, "SUPPORT", tmp_path)
+    with patch.dict(os.environ, {**ENV, "GPOINT_AGATA_WORKER_SUPPORT": str(tmp_path),
+                                 "AGATA_LAB_WORKER_ENABLED": "false"}, clear=True), \
+         patch.object(worker, "_load_lab_approval", side_effect=AssertionError("approval read")):
+        with pytest.raises(worker.FatalConfigurationError, match="lab_worker_disabled"):
+            worker.claim_lab_job()
+        supervisor = worker.build_pool_supervisor()
+        assert supervisor.claimers["LAB"]() is None
+    assert "LAB" in supervisor.claimers
+    assert supervisor.lab_enabled is False
+    assert not (tmp_path / "runtime/current").exists()
+
+
+def test_startup_cli_reports_specific_safe_configuration_code_without_values(tmp_path, monkeypatch, capsys):
+    support = tmp_path / "canonical-support"
+    support.mkdir(mode=0o700)
+    pool_config = tmp_path / "pool.env"
+    pool_config.write_text("AGATA_WORKER_CONCURRENCY=1\nAGATA_CODEX_PARALLEL_CAPABILITY=NOT_VERIFIED\n")
+    pool_config.chmod(0o600)
+    monkeypatch.setattr(worker, "CONFIG", tmp_path / "missing-worker.env")
+    monkeypatch.setattr(sys, "argv", ["gpoint_mac_worker.py", "validate-startup"])
+    invalid = {"GPOINT_AGATA_WORKER_URL": ENV["GPOINT_AGATA_WORKER_URL"],
+               "GPOINT_AGATA_WORKER_TOKEN": "do-not-print-point-secret",
+               "GPOINT_AGATA_TENANT_ID": ENV["GPOINT_AGATA_TENANT_ID"],
+               "GPOINT_AGATA_WORKER_SUPPORT": str(support),
+               "AGATA_WORKER_POOL_CONFIG": str(pool_config)}
+    with patch.dict(os.environ, invalid, clear=True):
+        assert worker.main() == 78
+
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "worker_target_unconfigured"
+    assert "do-not-print-point-secret" not in captured.err + captured.out
+
+
 def test_scheduler_fairness_and_target_failure_isolation(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(worker, "SUPPORT", tmp_path)

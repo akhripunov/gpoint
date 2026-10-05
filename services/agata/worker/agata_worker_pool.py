@@ -43,7 +43,7 @@ class PoolConfig:
             raise ValueError("worker_poll_interval_invalid")
 
     @classmethod
-    def from_env(cls, env: dict[str, str]) -> "PoolConfig":
+    def from_env(cls, env: dict[str, str]) -> PoolConfig:
         raw = env.get("AGATA_WORKER_CONCURRENCY", "1")
         if not raw.isdigit() or not 1 <= int(raw) <= MAX_SLOTS:
             raise ValueError("worker_concurrency_invalid")
@@ -71,7 +71,7 @@ class PoolPaths:
             raise ValueError("worker_root_must_be_absolute")
 
     @classmethod
-    def from_env(cls, env: dict[str, str] | None = None) -> "PoolPaths":
+    def from_env(cls, env: dict[str, str] | None = None) -> PoolPaths:
         values = os.environ if env is None else env
         root = values.get("GPOINT_AGATA_WORKER_SUPPORT") or values.get("AGATA_WORKER_ROOT")
         return cls(Path(root).expanduser() if root else CANONICAL_ROOT)
@@ -337,6 +337,7 @@ class PoolSupervisor:
         *,
         runner: Any | None = None,
         reject_offer: Any | None = None,
+        lab_enabled: bool | None = None,
         clock=time.monotonic,
     ) -> None:
         self.paths = paths
@@ -344,6 +345,7 @@ class PoolSupervisor:
         self.claimers = claimers
         self.runner = runner or ProcessSlotRunner(paths)
         self.reject_offer = reject_offer
+        self.lab_enabled = lab_enabled
         self.clock = clock
         self.scheduler = LaneScheduler()
         self.active: dict[str, _ActiveSlot] = {}
@@ -585,10 +587,11 @@ class PoolSupervisor:
             active = [item for item in self.active.values() if item.lane == lane]
             error = self.lane_errors.get(lane)
             approval_block = lane == "LAB" and error == "lab_approval_required"
+            lab_disabled = lane == "LAB" and self.lab_enabled is False
             lane_state = (
                 "AVAILABLE" if approval_block else
                 "UNCONFIGURED" if lane == "GSALES" and lane not in self.claimers else
-                "DISABLED" if lane == "LAB" and lane not in self.claimers else
+                "DISABLED" if lane == "LAB" and (lane not in self.claimers or lab_disabled) else
                 "AVAILABLE" if lane == "LAB" else
                 "DEGRADED" if error else
                 "RUNNING" if active else "HEALTHY"
@@ -597,8 +600,12 @@ class PoolSupervisor:
                 "state": lane_state,
                 "queue": None,
                 "running": len(active),
+                "configured": lane in self.claimers or lane == "LAB",
+                **({"enabled": self.lab_enabled} if lane == "LAB" and self.lab_enabled is not None else {}),
                 "last_error_code": error,
-                **({"inference_gate": "APPROVAL_REQUIRED"} if approval_block else {}),
+                **({"inference_gate": "CLOSED_DISABLED"} if lab_disabled else
+                   {"inference_gate": "APPROVAL_REQUIRED"} if approval_block else
+                   {"inference_gate": "REQUIRED_BEFORE_INFERENCE"} if lane == "LAB" else {}),
             }
         slot_states = {f"slot-{number:02d}": self._read_slot_state(f"slot-{number:02d}")
                        for number in range(1, self.config.concurrency + 1)}
