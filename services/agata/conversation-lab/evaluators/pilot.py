@@ -35,9 +35,11 @@ def load_frozen_pilot(lab):
 def scenario_by_id(lab,frozen,scenario_id):
  if scenario_id not in frozen["scenario_ids"]:raise ValueError("scenario is outside frozen pilot")
  return _inputs(lab)[-1][scenario_id]
-def build_invocation(lab,frozen,scenario_id,model_id,round_index,history):
- frozen=validate_frozen_pilot(lab,frozen);scenario=scenario_by_id(lab,frozen,scenario_id)
- if model_id not in frozen["model_ids"]:raise ValueError("model is outside frozen pilot")
+def build_fixture_invocation(lab,scenario,expected_scenario_sha256,model_id,round_index,history):
+ """Pure request serializer; callers must prove the scenario belongs to their frozen set."""
+ if not isinstance(scenario,dict) or stable_hash(scenario)!=expected_scenario_sha256:raise ValueError("scenario hash does not match the frozen manifest")
+ scenario_id=scenario.get("scenario_id")
+ if model_id not in MODELS:raise ValueError("model is outside the supported pilot model set")
  if type(round_index) is not int or not 0<=round_index<len(scenario["dialogue_turns"])//2:raise ValueError("round outside scenario")
  if not isinstance(history,list) or len(history)!=2*round_index:raise ValueError("candidate-specific history must contain exactly reached turns")
  expected=scenario["dialogue_turns"]
@@ -64,6 +66,10 @@ def build_invocation(lab,frozen,scenario_id,model_id,round_index,history):
   "memory":copy.deepcopy(memories),"context":scenario_context,"history":copy.deepcopy(history[-12:]),
   "user_turn":prompt["user_turn"]["text"],"core_request":core_request,
   "generation":generation,"fixture_only":True}
+def build_invocation(lab,frozen,scenario_id,model_id,round_index,history):
+ frozen=validate_frozen_pilot(lab,frozen);scenario=scenario_by_id(lab,frozen,scenario_id)
+ if model_id not in frozen["model_ids"]:raise ValueError("model is outside frozen pilot")
+ return build_fixture_invocation(lab,scenario,frozen["scenario_hashes"][scenario_id],model_id,round_index,history)
 def fixture_result_rows(lab,frozen):
  rows=[]
  for sid in frozen["scenario_ids"]:
