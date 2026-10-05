@@ -95,8 +95,23 @@ class ArtifactCacheTests(unittest.TestCase):
         cache.mkdir()
         (cache / 'operator-notes.txt').write_text('keep')
         for i in range(10, 15): self.restore(str(i))
-        self.assertEqual(len(list(cache.glob('*.zip'))), 3)
+        self.assertEqual(len(list(cache.glob('*.zip'))), 1)
         self.assertTrue((cache / 'operator-notes.txt').exists())
+
+    def test_cache_prunes_only_superseded_release_zip_identities(self):
+        cache = self.root / 'cache'
+        cache.mkdir()
+        legacy = cache / ('12-' + 'a' * 64 + '.zip')
+        previous_v2 = cache / ('v2-' + 'b' * 64 + '.zip')
+        unrelated = cache / 'operator-backup.zip'
+        for path in (legacy, previous_v2, unrelated): path.write_bytes(b'old')
+
+        self.restore('13')
+
+        self.assertFalse(legacy.exists())
+        self.assertFalse(previous_v2.exists())
+        self.assertTrue(unrelated.exists())
+        self.assertEqual(len(list(cache.glob('v2-*.zip'))), 1)
 
     def test_network_get_retries_transient_failure_with_bounded_backoff(self):
         attempts = []
@@ -238,6 +253,88 @@ class ArtifactCacheTests(unittest.TestCase):
                 CACHE.download('owner/repo',123,'test-token',self.root/'denied.zip')
         self.assertEqual(opener.return_value.open.call_count,1)
         sleep.assert_not_called()
+
+    def test_parallel_range_transfer_reassembles_exact_bytes(self):
+        content = bytes(index % 251 for index in range(1024 * 1024 + 319))
+        calls = []
+        target = self.root / 'ranges.zip'
+
+        def fetch_range(start, end, part):
+            calls.append((start, end))
+            part.write_bytes(content[start:end + 1])
+
+        CACHE.download_ranges(len(content), target, fetch_range, workers=4, chunk_size=256 * 1024)
+        self.assertEqual(target.read_bytes(), content)
+        self.assertEqual(sum(end - start + 1 for start, end in calls), len(content))
+        self.assertEqual(min(start for start, _end in calls), 0)
+        self.assertEqual(max(end for _start, end in calls), len(content) - 1)
+
+    def test_parallel_range_transfer_rejects_incomplete_part_atomically(self):
+        target = self.root / 'ranges.zip'
+        target.write_bytes(b'previous')
+
+        def fetch_range(_start, _end, part):
+            part.write_bytes(b'bad')
+
+        with self.assertRaises(CACHE.ReleaseAssetError):
+            CACHE.download_ranges(100, target, fetch_range, workers=2, chunk_size=50)
+        self.assertEqual(target.read_bytes(), b'previous')
+
+    def test_release_asset_ranges_strip_auth_and_validate_content_range(self):
+        import io
+        payload = b'immutable release bytes'
+        api_requests, storage_requests = [], []
+        token = 'test-release-token'
+
+        def api_open(request, timeout):
+            api_requests.append(request)
+            raise urllib.error.HTTPError(request.full_url, 302, 'Found',
+                {'Location': 'https://blob.example/bundle.zip?sig=short-lived'}, None)
+
+        class RangeResponse(io.BytesIO):
+            headers = {'Content-Range': f'bytes 0-{len(payload) - 1}/{len(payload)}',
+                       'Content-Length': str(len(payload))}
+            def getcode(self): return 206
+
+        def storage_open(request, timeout):
+            storage_requests.append(request)
+            self.assertIsNone(request.get_header('Authorization'))
+            self.assertEqual(request.get_header('Range'), f'bytes=0-{len(payload) - 1}')
+            return RangeResponse(payload)
+
+        with patch.object(CACHE.urllib.request, 'build_opener') as opener, \
+             patch.object(CACHE.urllib.request, 'urlopen', side_effect=storage_open), \
+             patch.object(CACHE, 'network_request', side_effect=lambda operation, *_args, **_kwargs: operation()):
+            opener.return_value.open.side_effect = api_open
+            target = self.root / 'release.zip'
+            CACHE.download('owner/repo', 72, token, target, release_asset=True, expected_size=len(payload))
+
+        self.assertEqual(api_requests[0].get_header('Authorization'), f'Bearer {token}')
+        self.assertEqual(api_requests[0].get_header('Accept'), 'application/octet-stream')
+        self.assertEqual(len(storage_requests), 1)
+        self.assertEqual(target.read_bytes(), payload)
+
+    def test_release_asset_rejects_wrong_content_range_without_replacing_target(self):
+        import io
+        payload = b'immutable release bytes'
+
+        class WrongRange(io.BytesIO):
+            headers = {'Content-Range': f'bytes 1-{len(payload)}/{len(payload) + 1}',
+                       'Content-Length': str(len(payload))}
+            def getcode(self): return 206
+
+        target = self.root / 'release.zip'
+        target.write_bytes(b'previous')
+        with patch.object(CACHE.urllib.request, 'build_opener') as opener, \
+             patch.object(CACHE.urllib.request, 'urlopen', return_value=WrongRange(payload)), \
+             patch.object(CACHE, 'network_request', side_effect=lambda operation, *_args, **_kwargs: operation()):
+            opener.return_value.open.side_effect = urllib.error.HTTPError(
+                'https://api.github.com/assets/72', 302, 'Found',
+                {'Location': 'https://blob.example/bundle.zip?sig=short-lived'}, None)
+            with self.assertRaisesRegex(CACHE.ReleaseAssetError, 'byte range'):
+                CACHE.download('owner/repo', 72, 'test-token', target,
+                               release_asset=True, expected_size=len(payload))
+        self.assertEqual(target.read_bytes(), b'previous')
 
 
 if __name__ == '__main__':
