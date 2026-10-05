@@ -40,10 +40,10 @@ try {
       const setup = spawnSync('pnpm', ['release:gpoint', '--provision-gsales-config', '--candidate', sha, '--owner-approved-sha', sha],
         { cwd: root, stdio: 'inherit', timeout: 300_000 });
       if (setup.status !== 0) throw new Error('Approved GSales provisioning blocked the release');
-    }
-    const worker = spawnSync('pnpm', ['release:gpoint', '--configure-gsales-worker', '--candidate', sha, '--owner-approved-sha', sha],
+      const worker = spawnSync('pnpm', ['release:gpoint', '--configure-gsales-worker', '--candidate', sha, '--owner-approved-sha', sha],
       { cwd: root, stdio: 'inherit', timeout: 150_000 });
-    if (worker.status !== 0) throw new Error('Approved Mac lane configuration blocked the release');
+      if (worker.status !== 0) throw new Error('Approved Mac lane configuration blocked the release');
+    }
   }
   // Docker artifacts already passed CI. Canonical dry-run still independently
   // checks the live baseline, config, GitHub SHA and isolated source tree.

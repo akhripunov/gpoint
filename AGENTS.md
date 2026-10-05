@@ -66,3 +66,14 @@ The VPS is a runtime and artifact target, not a development workspace. Applicati
 - Before starting the next task, verify `git status --porcelain` is empty.
 - The durable automation checks are `pnpm repo:clean:start` before work and
   `pnpm repo:clean:end` before reporting completion; both must print `PASS`.
+
+
+## Server deploy vs Mac worker operational readiness
+
+Worker source/protocol/tenant/lane/API/schema compatibility remains a blocking
+pre-apply gate. Temporary polling/auth/status/network/heartbeat availability is
+non-blocking postdeploy dependency evidence, separately recorded as
+`workerOperationalStatus` and `overallServiceReadiness`; it cannot turn proven
+server COMPLETE into RECOVERY_REQUIRED or trigger rollback/redeploy. Recheck a
+completed dependency through `--recheck-worker` without changing VPS release.
+Real GSales inference acceptance is independent. See docs/release/automation.md.

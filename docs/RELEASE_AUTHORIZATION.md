@@ -41,8 +41,10 @@ MAXIBOT ADS flags remain FALSE and its exact target must equal the live head;
 GPoint Prisma and AGATA heads must remain unchanged. Unknown risk blocks apply.
 
 All existing clean-checkout, exact current-main, Prepare, immutable artifact,
-platform/parity, config, preflight, lock, recovery, health, Worker and regression
-gates remain mandatory. Real-device/OWNER smoke requirements remain separate:
+platform/parity, config, preflight, lock, recovery, server health, Worker compatibility and regression
+gates remain mandatory. Worker operational availability is separately recorded
+as dependency readiness under docs/release/automation.md and does not change
+a proven server deployment outcome. Real-device/OWNER smoke requirements remain separate:
 never invent evidence or claim an unperformed end-to-end acceptance.
 
 Scope expansion, any failed required check, unexpected main/baseline drift,

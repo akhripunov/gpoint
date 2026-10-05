@@ -99,9 +99,10 @@ export function gsalesStartCommand(sha) {
   return `set -e; RELEASE_SHA=${sha} docker compose -p compose --profile gsales --env-file /opt/gpoint/env/production.env -f /tmp/gpoint-compose-${sha}.yml up -d --no-build gsales-api gsales-agata-api gsales-agata-memory-worker; ready=0; for attempt in $(seq 1 60); do ready=1; for container in compose-gsales-api-1 compose-gsales-agata-api-1 compose-gsales-agata-memory-worker-1; do test "$(docker inspect "$container" --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}')" = 'true healthy' || ready=0; done; if [ "$ready" = 1 ]; then break; fi; sleep 2; done; test "$ready" = 1; echo GSALES_STARTED`;
 }
 
-export function gsalesRuntimeCommand(sha, identity) {
+export function gsalesRuntimeCommand(sha, identity, { attempts = 60 } = {}) {
   exact(sha); gsalesMigrationStateCommand(identity);
-  const inside = `import asyncio,json,httpx\nfrom app.config import Settings\nfrom app.db.session import Database\nfrom app.core import AgataClient\ns=Settings()\nasync def verify():\n    db=Database(s)\n    async with db.transaction() as conn: await db.assert_secure(conn)\n    await AgataClient(s).assert_secure()\n    async with httpx.AsyncClient() as c:\n        r=await c.get('http://127.0.0.1:8010/health/ready'); r.raise_for_status()\n    assert s.production_mode and not any((s.outreach_enabled,s.auto_reply_enabled,s.management_enabled,s.telegram_listener_enabled))\n    print(json.dumps(dict(ready=True,securityPassed=True,inferenceReady=True,tenantId=s.tenant_id,outreachEnabled=False,autoReplyEnabled=False,managementEnabled=False,listenerEnabled=False)))\nasyncio.run(verify())`;
+  if (![1, 60].includes(attempts)) throw new Error('invalid bounded inspection attempts');
+  const inside = `import asyncio,json,httpx\nfrom app.config import Settings\nfrom app.db.session import Database\nfrom app.core import AgataClient\ns=Settings()\nasync def verify():\n    db=Database(s)\n    async with db.transaction() as conn: await db.assert_secure(conn)\n    await AgataClient(s).assert_secure(require_inference_ready=False)\n    async with httpx.AsyncClient() as c:\n        r=await c.get('http://127.0.0.1:8010/health/live'); r.raise_for_status()\n    assert s.production_mode and not any((s.outreach_enabled,s.auto_reply_enabled,s.management_enabled,s.telegram_listener_enabled))\n    try: operational=await asyncio.wait_for(AgataClient(s).request('GET','/internal/v1/sales/runtime-security'),timeout=2)\n    except Exception: operational={}\n    print(json.dumps(dict(ready=True,securityPassed=True,inferenceReady=operational.get('production_inference_ready') is True,tenantId=s.tenant_id,outreachEnabled=False,autoReplyEnabled=False,managementEnabled=False,listenerEnabled=False)))\nasyncio.run(verify())`;
   const core = `import json\nfrom app.config import get_settings\ns=get_settings()\nassert s.source_system=='gsales' and s.sales_production_mode and s.sales_drafts_enabled and s.llm_provider=='mac_worker' and s.codex_local_enabled\nprint(json.dumps(dict(provider=s.llm_provider,codexLocalEnabled=s.codex_local_enabled)))`;
   return python(ADMIN + `
 import time
@@ -112,12 +113,12 @@ def docker(*args):
     if p.returncode: raise RuntimeError('GSales runtime inspection failed')
     return p.stdout.strip()
 facts={}
-for attempt in range(60):
+for attempt in range(${attempts}):
     p=subprocess.run(['docker','exec','compose-gsales-api-1','python','-c',${JSON.stringify(inside)}],text=True,capture_output=True,timeout=30)
     if p.returncode==0:
         facts=json.loads(p.stdout); break
     time.sleep(2)
-else: raise RuntimeError('GSales DB/Core/shared-worker readiness failed')
+else: raise RuntimeError('GSales DB/Core server readiness failed')
 facts.update(json.loads(docker('exec','compose-gsales-agata-api-1','python','-c',${JSON.stringify(core)})))
 facts.update(s)
 facts.update(buildSha='${sha}',imageId=docker('image','inspect','gpoint-g-sales-runtime:${sha}','--format','{{.Id}}'),agataImageId=docker('image','inspect','gpoint-agata-runtime:${sha}','--format','{{.Id}}'))
@@ -134,7 +135,7 @@ print('GSALES_RUNTIME='+json.dumps(facts,sort_keys=True))
 export function parseGsalesRuntime(output, sha, identity) {
   const line = output.split(/\r?\n/).find(line => line.startsWith('GSALES_RUNTIME='));
   let facts; try { facts = JSON.parse(line?.slice('GSALES_RUNTIME='.length)); } catch { throw new Error('GSales runtime evidence absent'); }
-  if (facts.buildSha !== sha || facts.migrationHead !== identity.migrationHead || facts.migrationSha256 !== identity.migrationSha256 || facts.ready !== true || facts.securityPassed !== true || facts.inferenceReady !== true || facts.provider !== 'mac_worker' || facts.codexLocalEnabled !== true || !/^sha256:[0-9a-f]{64}$/.test(facts.imageId ?? '') || !/^sha256:[0-9a-f]{64}$/.test(facts.agataImageId ?? '') || facts.apiImage !== facts.imageId || facts.coreApiImage !== facts.agataImageId || facts.coreWorkerImage !== facts.agataImageId || ['outreachEnabled','autoReplyEnabled','managementEnabled','listenerEnabled'].some(key => facts[key] !== false)) throw new Error('GSales runtime proof failed');
+  if (facts.buildSha !== sha || facts.migrationHead !== identity.migrationHead || facts.migrationSha256 !== identity.migrationSha256 || facts.ready !== true || facts.securityPassed !== true || typeof facts.inferenceReady !== 'boolean' || facts.provider !== 'mac_worker' || facts.codexLocalEnabled !== true || !/^sha256:[0-9a-f]{64}$/.test(facts.imageId ?? '') || !/^sha256:[0-9a-f]{64}$/.test(facts.agataImageId ?? '') || facts.apiImage !== facts.imageId || facts.coreApiImage !== facts.agataImageId || facts.coreWorkerImage !== facts.agataImageId || ['outreachEnabled','autoReplyEnabled','managementEnabled','listenerEnabled'].some(key => facts[key] !== false)) throw new Error('GSales runtime proof failed');
   return facts;
 }
 

@@ -96,7 +96,7 @@ export function validateAgataProviderConfig(config) {
   return failures;
 }
 
-export function validateAgataProviderMode(config, { nowMs = Date.now(), maxWorkerAgeMs = 90_000, futureClockSkewMs = 5_000 } = {}) {
+export function validateAgataProviderCompatibility(config) {
   const failures = [];
   const provider = config?.provider;
   if (!['disabled', 'mac_worker'].includes(provider)) return [`unsupported AGATA provider: ${provider ?? 'unset'}`];
@@ -109,6 +109,12 @@ export function validateAgataProviderMode(config, { nowMs = Date.now(), maxWorke
   if (config?.localEnabled !== true && config?.localEnabled !== 'true') failures.push('AGATA Codex local provider is not enabled');
   if (config?.workerTokenPresent !== true) failures.push('AGATA worker token/config is missing');
   if (config?.agataApiHealthy !== true) failures.push('AGATA API is not healthy');
+  return failures;
+}
+
+export function validateAgataProviderMode(config, { nowMs = Date.now(), maxWorkerAgeMs = 90_000, futureClockSkewMs = 5_000 } = {}) {
+  const failures = validateAgataProviderCompatibility(config);
+  if (config?.provider !== 'mac_worker') return failures;
   const status = config?.workerStatus;
   if (!status || status.enabled !== true || status.queue_connectivity !== 'reachable') {
     failures.push('AGATA Mac worker authentication/status is not healthy');
@@ -462,7 +468,8 @@ export function inspectProductionReadOnly() {
   const command = `set -e; envFile=/opt/gpoint/env/production.env; test -r "$envFile"; releaseSha=$(sed -n 's/^RELEASE_SHA=//p' "$envFile" | head -1); printf 'LIVE_RELEASE_ENV_SHA=%s\\n' "$releaseSha"; for name in api worker bot; do container=compose-$name-1; image=$(docker inspect "$container" --format '{{.Image}}'); running=$(docker inspect "$container" --format '{{.State.Running}}'); health=$(docker inspect "$container" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'); restart=$(docker inspect "$container" --format '{{.RestartCount}}'); build=$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'); upper=$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]'); printf 'LIVE_%s_IMAGE=%s LIVE_%s_SHA=%s LIVE_%s_RUNNING=%s LIVE_%s_HEALTH=%s LIVE_%s_RESTARTS=%s\\n' "$upper" "$image" "$upper" "$build" "$upper" "$running" "$upper" "$health" "$upper" "$restart"; done; mini=$(grep -oE 'gpoint-build-sha" content="[0-9a-f]{40}' /opt/gpoint/app/miniapp/index.html | head -1 | cut -d'"' -f3); printf 'LIVE_MINIAPP_SHA=%s\\n' "$mini"; printf '%s' '${encodedDbScript}' | base64 -d | docker exec -i -w /app/apps/api compose-api-1 node; for name in AGATA_ENABLED AGATA_LLM_PROVIDER AGATA_DATABASE_URL AGATA_TENANT_ID AGATA_INTERNAL_API_TOKEN AGATA_MESSAGE_AEAD_KEY AGATA_REQUEST_FINGERPRINT_HMAC_KEY AGATA_RETRIEVAL_QUERY_HMAC_KEY AGATA_RESPONSE_FINGERPRINT_HMAC_KEY AGATA_SHADOW_CANDIDATE_HMAC_KEY; do if grep -Eq "^\${name}=.+$" "$envFile"; then present=YES; else present=NO; fi; printf 'LIVE_CONFIG_%s=%s\\n' "$name" "$present"; done; value=$(sed -n 's/^AGATA_ENABLED=//p' "$envFile" | head -1); printf 'LIVE_AGATA_ENABLED=%s\\n' "\${value:-unset}"; value=$(sed -n 's/^AGATA_LLM_PROVIDER=//p' "$envFile" | head -1); printf 'LIVE_AGATA_PROVIDER=%s\\n' "\${value:-unset}"`;
   const agataRuntime = run("set -e; envFile=/opt/gpoint/env/production.env; for role in API WORKER; do if [ \"$role\" = API ]; then container=compose-agata-api-1; else container=compose-agata-memory-worker-1; fi; if docker inspect \"$container\" >/dev/null 2>&1; then imageId=$(docker inspect \"$container\" --format '{{.Image}}'); image=$(docker inspect \"$container\" --format '{{.Config.Image}}'); build=$(docker image inspect \"$imageId\" --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}'); running=$(docker inspect \"$container\" --format '{{.State.Running}}'); health=$(docker inspect \"$container\" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'); printf 'LIVE_AGATA_%s_IMAGE=%s LIVE_AGATA_%s_IMAGE_ID=%s LIVE_AGATA_%s_SHA=%s LIVE_AGATA_%s_RUNNING=%s LIVE_AGATA_%s_HEALTH=%s\\n' \"$role\" \"$image\" \"$role\" \"$imageId\" \"$role\" \"$build\" \"$role\" \"$running\" \"$role\" \"$health\"; fi; done; if grep -Eq '^AGATA_LLM_API_KEY=.+$' \"$envFile\"; then echo LIVE_CONFIG_AGATA_LLM_API_KEY=YES; else echo LIVE_CONFIG_AGATA_LLM_API_KEY=NO; fi");
   const providerConfig = run("set -e; envFile=/opt/gpoint/env/production.env; for name in AGATA_CODEX_LOCAL_ENABLED GPOINT_AGATA_WORKER_TOKEN; do if grep -Eq \"^${name}=.+$\" \"$envFile\"; then present=YES; else present=NO; fi; printf 'LIVE_CONFIG_%s=%s\\n' \"$name\" \"$present\"; done; value=$(sed -n 's/^AGATA_CODEX_LOCAL_ENABLED=//p' \"$envFile\" | head -1); printf 'LIVE_AGATA_CODEX_LOCAL_ENABLED=%s\\n' \"${value:-unset}\"");
-  return `${prerequisites}\n${run(command)}\n${agataRuntime}\n${providerConfig}\n${run(gsalesProductionInspectionCommand())}`;
+  const tenant = run("set -e; sed -n 's/^AGATA_TENANT_ID=/LIVE_AGATA_TENANT_ID=/p' /opt/gpoint/env/production.env");
+  return `${tenant}\n${prerequisites}\n${run(command)}\n${agataRuntime}\n${providerConfig}\n${run(gsalesProductionInspectionCommand())}`;
 }
 
 export function inspectGsalesReadiness(candidate, baselineSha, execute = run) {
@@ -545,7 +552,7 @@ export function agataProviderRuntimeCommand(provider) {
   return `set -e; actualProvider=$(docker exec compose-agata-api-1 python -c "from app.config import get_settings; print(get_settings().llm_provider)"); localEnabled=$(docker exec compose-agata-api-1 python -c "from app.config import get_settings; print(str(get_settings().codex_local_enabled).lower())"); tokenPresent=$(docker exec compose-agata-api-1 sh -c 'test -n "$GPOINT_AGATA_WORKER_TOKEN" && printf YES || printf NO'); printf 'AGATA_PROVIDER=%s AGATA_CODEX_LOCAL_ENABLED=%s AGATA_WORKER_TOKEN_PRESENT=%s\\n' "$actualProvider" "$localEnabled" "$tokenPresent"`;
 }
 
-export function applyCandidate(sha, { retentionPlan = { removableShas: [], removableCacheIds: [] }, provider = 'disabled', verifyProviderReadiness = () => {}, onMigrationStart = () => {}, onAgataStart = () => {}, onSwitchStart = () => {} } = {}) {
+export function applyCandidate(sha, { retentionPlan = { removableShas: [], removableCacheIds: [] }, provider = 'disabled', onMigrationStart = () => {}, onAgataStart = () => {}, onSwitchStart = () => {} } = {}) {
   if (!['disabled', 'mac_worker'].includes(provider)) throw new Error(`unsupported AGATA provider: ${provider}`);
   const bundle = process.env.GPOINT_RELEASE_BUNDLE ? verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, sha) : null;
   if (!bundle) throw new Error('verified immutable CI release bundle is required; application images are never rebuilt during apply');
@@ -665,7 +672,6 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
     if (!agataReady.includes('AGATA_PRE_SWITCH_READY') || !agataReady.includes(`AGATA_PROVIDER_VERIFIED=${provider}`) || !agataReady.includes('GPOINT_AGATA_INTERNAL_AUTH_OK')) throw new Error('AGATA pre-switch readiness/auth gate failed');
     const gsalesStarted = stage(timings, 'GSALES_PRE_SWITCH_START', () => run(gsalesStartCommand(sha)));
     if (!gsalesStarted.includes('GSALES_STARTED')) throw new Error('GSales lane start failed');
-    verifyProviderReadiness();
     onSwitchStart();
     const deployOutput = run(deploy.join('; ')); applyRemoteTimingMarkers(timings, deployOutput); if (!deployOutput.includes('GPOINT_DEPLOY_OK')) throw new Error('remote runtime deploy failed');
     const composeExitCode = Number(deployOutput.match(/GPOINT_COMPOSE_EXIT=(\d+)/)?.[1] ?? NaN);

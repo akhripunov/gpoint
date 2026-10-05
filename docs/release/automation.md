@@ -35,7 +35,7 @@ production approval input по этому разрешению. Рискован
 | FAILED в Prepare | Production не изменён; Dev исправляет первый упавший шаг |
 | Queued в Deploy | Исполнитель занят/выключен/не подключён; проверять Settings → Actions → Runners |
 | PLANNED | Preflight завершён; production не переключался |
-| COMPLETE в manifest | Runtime, health, parity, миграции и production ref технически проверены |
+| COMPLETE в manifest | VPS runtime, server health, parity, миграции и production ref технически проверены; доступность Mac Worker записывается отдельно |
 | OWNER_SMOKE_PENDING | Ответ в Telegram ещё не подтверждён после этого релиза |
 | FAILED_PRE_SWITCH | Переключение не началось; Dev сверяет baseline перед новой попыткой |
 | RECOVERY_REQUIRED | Могли измениться БД/AGATA/runtime; сначала read-only reconciliation, потом отдельное восстановление |
@@ -127,3 +127,61 @@ publication, exact tag SHA, asset ID, uploaded state и GitHub SHA256. Пере�
 истории. Ошибка publication не превращается в COMPLETE. Старые draft/tag после
 неудачной публикации не переиспользуются автоматически: нужен новый run attempt.
 Время и квоты hosted Actions для CI продолжают действовать; плата не включается.
+
+
+## Server deployment и Mac Worker dependency — разные результаты
+
+OWNER contract от 2026-10-05: технический исход server apply не зависит от
+временной операционной доступности локального Mac. Это правило применяется
+к новой версии canonical tooling; прежние attempts не переписываются.
+
+| Поле | Значения | Семантика |
+| --- | --- | --- |
+| `status` / `serverDeployStatus` | legacy canonical status / `COMPLETE`, `FAILED`, `RECOVERY_REQUIRED` | Применение и доказательство VPS runtime; миграции, exact image identity, RLS, tenant, backup, server health и production ref обязательны |
+| `workerOperationalStatus` | `HEALTHY`, `DEGRADED`, `UNAVAILABLE`, `NOT_VERIFIED` | Отдельная bounded operational observation локального worker |
+| `overallServiceReadiness` | `READY`, `DEGRADED` | READY только при server COMPLETE и healthy dependencies |
+| `workerDependencies.GPOINT/GSALES` | status, reason codes, safe timestamps | Отдельные lane observations; данные LAB не читаются и не публикуются |
+| `inferenceAcceptance` | `NOT_VERIFIED` или явно записанная OWNER acceptance | Реальный end-to-end inference smoke; polling/health его не подтверждают |
+
+До apply блокируются: несовпадение exact worker assets/protocol; неверные
+gateway/lane URLs, tenant pins или известное несовпадение credentials;
+отсутствующий server API/schema contract и любая несовместимая конфигурация.
+Read-only compatibility gate не вызывает polling, generation, service restart
+или signal. Tokens сравниваются через stdin и не входят в evidence.
+
+После проверенных migrations/runtime/image parity/server health выполняется
+отдельный bounded dependency probe. Неудачная auth/status/network операция,
+`worker_target_unavailable`, stale heartbeat/poll или timeout дают DEGRADED /
+UNAVAILABLE / NOT_VERIFIED для worker и service readiness, но server остаётся
+COMPLETE. Probe не вызывает apply, rollback, token rotation или повторный
+Deploy. Обязательная GSales DB/Core RLS-проверка сохраняется; operational
+`production_inference_ready=false` больше не ломает server runtime proof.
+Пользовательский `/health/ready` GSales по-прежнему отражает готовность inference;
+release verifier отдельно проверяет server liveness, DB и Core security.
+
+Первичное явно разрешённое GSales setup сохраняет отдельный защищённый переход
+Mac lane configuration. Это локальная операция с собственными safety gates.
+Повторные server Deploy не запускают эту операцию автоматически; неизменная
+конфигурация независимо проверяется compatibility gate. Worker source/LAB/
+business flags не меняются этим контрактом.
+
+Повторная проверка для **уже записанного COMPLETE** server release:
+
+```sh
+pnpm release:gpoint --recheck-worker --candidate <exact-current-production-sha>
+```
+
+Команда использует shared lock и проверенный ledger, сохраняет
+`DEPENDENCY_RECHECK` manifest и readiness state в ledger без изменения VPS
+runtime, migrations, SHA, production ref, server release ID или acceptance.
+При восстановлении Worker получается COMPLETE / HEALTHY / READY без Deploy.
+Если ledger содержит RECOVERY_REQUIRED или другой production SHA, recheck
+блокируется; read-only reconciliation и publication repair выполняются отдельно.
+После записи ledger `STATE_SYNC_ONLY=true python3 scripts/publish-release-linear.py`
+обновляет только owned current-state блоки Linear (требуется настроенный
+`LINEAR_API_KEY`, не помещать его в командные аргументы).
+
+Результаты server/dependency отображаются отдельно в immutable release result,
+manifest, canonical state и Linear. Красная публикация ledger/Linear остаётся
+видимым bookkeeping failure и не доказывает ошибку runtime. Новый contract
+не финализирует автоматически старый run и не разрешает новый production apply.
