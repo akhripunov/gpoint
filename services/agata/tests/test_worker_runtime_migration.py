@@ -248,6 +248,7 @@ def test_prepare_stages_and_snapshots_without_stopping_or_switching_live_worker(
     root = tmp_path / "Library/Application Support/GPoint/agata-codex-worker"
     root.mkdir(parents=True)
     (root / "run_codex_worker.sh").write_text("legacy worker")
+    (root / "worker-status.json").write_text('{"last_poll_at":"before"}')
     plist = tmp_path / "Library/LaunchAgents/worker.plist"
     plist.parent.mkdir(parents=True)
     original_plist = plistlib.dumps({"Label": migration.LABEL,
@@ -266,6 +267,12 @@ def test_prepare_stages_and_snapshots_without_stopping_or_switching_live_worker(
         "launchagent_program_arguments": [str(root / "run_codex_worker.sh"), "watch"]})
     monkeypatch.setattr(migration, "_stage_runtime", lambda _manifest: staged)
     monkeypatch.setattr(migration, "_verify_staged_runtime", lambda *_args: None)
+    capture_snapshot = migration._prepare_legacy_snapshot
+    def snapshot_then_worker_poll(backup):
+        captured = capture_snapshot(backup)
+        (root / "worker-status.json").write_text('{"last_poll_at":"after"}')
+        return captured
+    monkeypatch.setattr(migration, "_prepare_legacy_snapshot", snapshot_then_worker_poll)
 
     result = migration.prepare()
 
@@ -276,6 +283,8 @@ def test_prepare_stages_and_snapshots_without_stopping_or_switching_live_worker(
     assert not (root / "runtime/current").exists()
     assert plist.read_bytes() == original_plist
     assert (snapshot / "run_codex_worker.sh").read_text() == "legacy worker"
+    assert json.loads((snapshot / "worker-status.json").read_text()) == {"last_poll_at": "before"}
+    assert json.loads((root / "worker-status.json").read_text()) == {"last_poll_at": "after"}
     assert (snapshot.parent / "original-launchagent.plist").read_bytes() == original_plist
 
 

@@ -297,7 +297,11 @@ def prepare() -> dict:
             last_error = exc
     else:
         raise RuntimeError("rollback_snapshot_not_stable") from last_error
-    if not _same_tree(backup, ROOT) or (rollback_tree / "original-launchagent.plist").read_bytes() != original_plist:
+    # _prepare_legacy_snapshot verifies its completed copy against the live
+    # tree at capture time. The running legacy worker may legitimately advance
+    # status/log files immediately afterward, so a second comparison here
+    # would reject a sound snapshot due only to that concurrent activity.
+    if not backup.is_dir() or (rollback_tree / "original-launchagent.plist").read_bytes() != original_plist:
         raise RuntimeError("rollback_snapshot_verification_failed")
     _verify_staged_runtime(staged_runtime, manifest)
     return {
