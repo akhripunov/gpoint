@@ -774,3 +774,4 @@ def test_stage_runtime_uses_running_python312_when_missing_from_path(tmp_path, m
     assert commands[0][:3] == [str(current_python), "-m", "venv"]
     assert len(commands) == 3
     assert (release / "bundle-manifest.json").is_file()
+    assert os.access(release / "run_codex_worker.sh", os.X_OK)
