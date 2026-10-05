@@ -292,6 +292,12 @@ def prepare(sha, output, *, postgres_only=False):
         for name, command in commands:
             with measured_stage(name, timings):
                 run(*command)
+        # Start after CPU-heavy workspace tests so this database gate can
+        # overlap the later disposable AGATA PostgreSQL rehearsal without
+        # competing with the candidate Docker image builds.
+        gsales_regression = start_background_stage(
+            'gsales_postgres_regression',
+            (sys.executable, 'services/gsales/tests/run_postgres.py'), timings)
 
     suffix = uuid.uuid4().hex[:12]
     network, postgres, api = (f'gpoint-ci-{suffix}-{x}' for x in ('net', 'pg', 'agata'))
@@ -358,12 +364,6 @@ def prepare(sha, output, *, postgres_only=False):
         if postgres_only:
             print('POSTGRES_REHEARSAL=PASS; no READY receipt or production images emitted')
             return
-        # This disposable DB suite is independent of AGATA fixtures. Start it
-        # with the image/rehearsal phase so it does not contend with workspace
-        # compilation or the AGATA integration database.
-        gsales_regression = start_background_stage(
-            'gsales_postgres_regression',
-            (sys.executable, 'services/gsales/tests/run_postgres.py'), timings)
         for tag, dockerfile, context in (
                 ('gpoint-runtime', 'infra/production/Gpoint.Dockerfile', '.'),
                 ('gpoint-agata-runtime', 'services/agata/Dockerfile', 'services/agata'),

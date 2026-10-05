@@ -81,3 +81,10 @@ def test_background_release_stage_is_reaped_when_foreground_gate_fails(monkeypat
 
     assert stage['process'].poll() is not None
     assert timings['aborted_probe']['status'] == 'FAIL'
+
+
+def test_gsales_postgres_gate_starts_before_agata_postgres_rehearsal():
+    source = SCRIPT.read_text()
+    assert source.index("start_background_stage(\n            'gsales_postgres_regression'") < source.index(
+        "measured_stage('disposable_postgres_setup'"
+    )
