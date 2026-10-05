@@ -125,16 +125,18 @@ class LaneControllerTests(unittest.TestCase):
         self.mod.HOME = self.mod.SUPPORT / 'home'
         sources = self.mod.REPO / 'services/agata/worker'
         sources.mkdir(parents=True)
+        installed = self.mod.SUPPORT / 'runtime/current'
+        installed.mkdir(parents=True)
         for name in self.mod.ASSETS:
             (sources / name).write_text('candidate fixture')
-            (self.mod.SUPPORT / name).write_text('candidate fixture')
+            (installed / name).write_text('candidate fixture')
         plist_path = self.mod.HOME / 'Library/LaunchAgents' / (self.mod.LABEL + '.plist')
         plist_path.parent.mkdir(parents=True)
-        plist_path.write_bytes(plistlib.dumps({'Label': self.mod.LABEL, 'ProgramArguments': [str(self.mod.SUPPORT / 'run_codex_worker.sh'), 'watch'], 'WorkingDirectory': str(self.mod.SUPPORT), 'RunAtLoad': True, 'KeepAlive': True}))
+        plist_path.write_bytes(plistlib.dumps({'Label': self.mod.LABEL, 'ProgramArguments': [str(installed / 'run_codex_worker.sh'), 'watch'], 'WorkingDirectory': str(installed), 'RunAtLoad': True, 'KeepAlive': True}))
         plist_path.chmod(0o600)
         with patch.object(self.mod, 'command', side_effect=[SHA, '']):
-            self.assertEqual(len(self.mod.verify_candidate(SHA)), 4)
-        (self.mod.SUPPORT / 'lab_queue.py').write_text('foreign source')
+            self.assertEqual(len(self.mod.verify_candidate(SHA)), len(self.mod.ASSETS))
+        (installed / 'lab_queue.py').write_text('foreign source')
         with patch.object(self.mod, 'command', side_effect=[SHA, '']):
             with self.assertRaisesRegex(RuntimeError, 'installed_worker_candidate_hash_mismatch'):
                 self.mod.verify_candidate(SHA)
@@ -147,7 +149,8 @@ class LaneControllerTests(unittest.TestCase):
         sleep.assert_not_called()
 
     def test_source_change_before_frozen_commit_blocks_config_mutation(self):
-        helper = self.mod.SUPPORT / 'lab_queue.py'
+        helper = self.mod.SUPPORT / 'runtime/current/lab_queue.py'
+        helper.parent.mkdir(parents=True, exist_ok=True)
         helper.write_text('approved')
         assets = {'lab_queue.py': hashlib.sha256(helper.read_bytes()).hexdigest()}
         original = self.mod.CONFIG.read_text()
@@ -199,7 +202,8 @@ class LaneControllerTests(unittest.TestCase):
 
     def test_launchagent_pid_verification_handles_canonical_support_path_spaces(self):
         self.mod.SUPPORT = self.mod.SUPPORT / 'Application Support'
-        command_line = str(self.mod.SUPPORT / '.venv/bin/python3.12') + ' ' + str(self.mod.SUPPORT / 'gpoint_mac_worker.py') + ' watch'
+        runtime = self.mod.SUPPORT / 'runtime/current'
+        command_line = str(runtime.resolve() / '.venv/bin/python3.12') + ' ' + str(runtime.resolve() / 'gpoint_mac_worker.py') + ' watch'
         with patch.object(self.mod, 'command', side_effect=['pid = 123', command_line]):
             try:
                 actual = self.mod.verified_pid()
