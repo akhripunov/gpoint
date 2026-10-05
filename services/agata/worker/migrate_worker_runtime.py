@@ -14,13 +14,14 @@ import json
 import os
 import plistlib
 import re
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -36,7 +37,6 @@ CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex")
 WORKER_DIR = Path(__file__).resolve().parent
 ASSETS = ("gpoint_mac_worker.py", "agata_worker_pool.py", "lab_queue.py",
           "lab_fixture_manifest.json", "requirements.txt", "run_codex_worker.sh")
-UTC = timezone.utc
 
 
 def sha256(path: Path) -> str:
@@ -285,6 +285,7 @@ def prepare() -> dict:
             [expected_program, "watch"], [current_program, "watch"]):
         raise RuntimeError("launchagent_identity_invalid")
     staged_runtime = _stage_runtime(manifest)
+    startup_check = _validate_candidate_startup(staged_runtime, manifest)
     rollback_tree = _ensure_rollback_tree(manifest["source_sha"])
     original_plist = _save_original_launchagent(rollback_tree)
     backup = rollback_tree / "legacy-runtime"
@@ -308,6 +309,7 @@ def prepare() -> dict:
         "state": "PREPARED", "source_sha": manifest["source_sha"],
         "bundle_sha256": manifest["bundle_sha256"], "staged_runtime": str(staged_runtime),
         "rollback_snapshot": str(backup), "original_plist_sha256": hashlib.sha256(original_plist).hexdigest(),
+        "startup_check": startup_check,
         "active_inference": False, "launchagent_stopped": False,
         "runtime_current_changed": False,
     }
@@ -384,6 +386,192 @@ def _redact_command_output(value: str | bytes | None) -> str:
             argument = re.search(r"(?i)((?:--)?[\w.-]*(?:token|secret|password|api[_-]?key|private[_-]?key)[\w.-]*\s+)\S+", line)
             lines.append(f"{line[:argument.start(0)]}{argument.group(1)}<redacted>" if argument else "<redacted secret-bearing output>")
     return "\n".join(lines)
+
+
+def _diagnostic_base() -> Path:
+    return ROOT.parent / ".agata-codex-worker-diagnostics"
+
+
+def _create_diagnostic_attempt(source_sha: str, attempt_id: str | None = None) -> Path:
+    if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
+        raise RuntimeError("diagnostic_source_sha_invalid")
+    attempt_id = attempt_id or uuid.uuid4().hex
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", attempt_id):
+        raise RuntimeError("diagnostic_attempt_id_invalid")
+    base = _diagnostic_base()
+    base.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if base.is_symlink() or base.stat().st_uid != os.getuid():
+        raise RuntimeError("diagnostic_directory_invalid")
+    base.chmod(0o700)
+    source_dir = base / source_sha
+    source_dir.mkdir(mode=0o700, exist_ok=True)
+    if source_dir.is_symlink() or source_dir.stat().st_uid != os.getuid():
+        raise RuntimeError("diagnostic_directory_invalid")
+    source_dir.chmod(0o700)
+    attempt_dir = source_dir / attempt_id
+    attempt_dir.mkdir(mode=0o700)
+    if attempt_dir.is_symlink() or attempt_dir.stat().st_uid != os.getuid():
+        raise RuntimeError("diagnostic_directory_invalid")
+    for name in ("candidate.stdout.log", "candidate.stderr.log"):
+        path = attempt_dir / name
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+        path.chmod(0o600)
+    return attempt_dir
+
+
+def _diagnostic_secret_values(extra: list[str] | None = None) -> list[str]:
+    values = set(value for value in (extra or []) if isinstance(value, str) and len(value) >= 4)
+    secret_key = re.compile(r"(?i)(token|secret|password|api[_-]?key|private[_-]?key|credential|auth)")
+    for key, value in os.environ.items():
+        if secret_key.search(key) and value:
+            values.add(value)
+    try:
+        for line in CONFIG.read_text(encoding="utf-8").splitlines():
+            if "=" not in line or line.lstrip().startswith("#"):
+                continue
+            key, value = line.split("=", 1)
+            if secret_key.search(key) and value.strip():
+                values.add(value.strip().strip('"').strip("'"))
+    except OSError:
+        pass
+    return sorted(values, key=len, reverse=True)
+
+
+def _redact_diagnostic_text(value: str | bytes | None, secrets: list[str] | None = None) -> str:
+    text = _output_text(value)
+    for secret in _diagnostic_secret_values(secrets):
+        text = text.replace(secret, "<redacted>")
+    text = re.sub(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+", r"\1<redacted>", text)
+    text = re.sub(
+        r"(?i)((?:[\w.-]*(?:token|secret|password|api[_-]?key|private[_-]?key)[\w.-]*)\s*(?:=>|=|:)\s*)[^\s,;]+",
+        r"\1<redacted>", text,
+    )
+    return _redact_command_output(text)
+
+
+def _safe_error_code(exc: BaseException | None) -> str | None:
+    if exc is None:
+        return None
+    message = str(exc)
+    safe_codes = {
+        "worker_config_permissions_invalid", "worker_gateway_or_auth_unconfigured",
+        "worker_gateway_url_invalid", "worker_pool_config_key_invalid",
+        "worker_pool_must_start_at_n1_unverified", "worker_poll_interval_invalid",
+        "worker_root_must_be_absolute", "worker_target_unconfigured",
+        "worker_targets_must_be_distinct", "worker_tenant_binding_invalid",
+        "worker_tenants_must_be_distinct", "worker_concurrency_invalid",
+        "parallel_provider_capability_invalid", "parallel_provider_capability_not_verified",
+        "worker_path_owner_or_symlink_invalid", "worker_path_permissions_invalid",
+        "worker_path_parent_not_writable", "worker_runtime_asset_missing",
+    }
+    if message in safe_codes:
+        return message
+    return "worker_initialization_failed"
+
+
+def _write_diagnostic_evidence(
+    directory: Path,
+    *,
+    manifest: dict,
+    attempt_id: str,
+    rendered_plist: bytes,
+    launchctl_print: str = "",
+    process_evidence: dict | None = None,
+    command_evidence: dict | None = None,
+    error: BaseException | None = None,
+    secrets: list[str] | None = None,
+    stdout: str | bytes | None = None,
+    stderr: str | bytes | None = None,
+    started_at: str | None = None,
+) -> Path:
+    secrets = _diagnostic_secret_values(secrets)
+    log_text = {}
+    for name, supplied in (("candidate.stdout.log", stdout), ("candidate.stderr.log", stderr)):
+        path = directory / name
+        raw = _output_text(supplied) if supplied is not None else (
+            path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+        )
+        safe = _redact_diagnostic_text(raw, secrets)
+        path.write_text(safe + ("\n" if safe and not safe.endswith("\n") else ""), encoding="utf-8")
+        path.chmod(0o600)
+        log_text[name.removesuffix(".log")] = safe
+
+    def redact_object(value):
+        if isinstance(value, str):
+            return _redact_diagnostic_text(value, secrets)
+        if isinstance(value, dict):
+            return {str(key): redact_object(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [redact_object(item) for item in value]
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        return None
+
+    safe_launchctl = _redact_diagnostic_text(launchctl_print, secrets)
+    exit_match = re.search(r"last exit code\s*=\s*(\d+)", safe_launchctl)
+    evidence = {
+        "kind": "AGATA_WORKER_CANDIDATE_DIAGNOSTICS",
+        "attempt_id": attempt_id,
+        "source_sha": manifest.get("source_sha"),
+        "bundle_sha256": manifest.get("bundle_sha256"),
+        "started_at": started_at,
+        "captured_at": datetime.now(UTC).isoformat(),
+        "rendered_plist_sha256": hashlib.sha256(rendered_plist).hexdigest(),
+        "stdout": log_text["candidate.stdout"],
+        "stderr": log_text["candidate.stderr"],
+        "launchctl_print": safe_launchctl,
+        "last_exit_code": int(exit_match.group(1)) if exit_match else None,
+        "process_evidence": redact_object(process_evidence or {}),
+        "command_evidence": redact_object(command_evidence or {}),
+        "error": ({"type": type(error).__name__, "code": _safe_error_code(error)} if error else None),
+    }
+    path = directory / "candidate-launch.json"
+    _atomic_json(path, evidence)
+    return path
+
+
+def _launchagent_environment() -> dict[str, str]:
+    """Return the same explicit non-secret environment rendered into the plist."""
+    return {
+        "HOME": str(HOME),
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        "PYTHONUNBUFFERED": "1",
+        "GPOINT_CODEX_CLI": str(CODEX),
+        "GPOINT_AGATA_WORKER_CONFIG": str(CONFIG),
+        "GPOINT_AGATA_WORKER_SUPPORT": str(ROOT),
+        "AGATA_WORKER_POOL_CONFIG": str(ROOT / "config/pool.env"),
+    }
+
+
+def _validate_candidate_startup(staged_runtime: Path, manifest: dict) -> dict:
+    attempt_id = uuid.uuid4().hex
+    diagnostics = _create_diagnostic_attempt(manifest["source_sha"], attempt_id)
+    python = staged_runtime / ".venv/bin/python3.12"
+    worker = staged_runtime / "gpoint_mac_worker.py"
+    command = [str(python), str(worker), "validate-startup"]
+    started_at = datetime.now(UTC).isoformat()
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30,
+                                check=False, env=_launchagent_environment())
+        stdout, stderr = result.stdout, result.stderr
+        returncode = result.returncode
+    except subprocess.TimeoutExpired as exc:
+        stdout, stderr, returncode = _output_text(exc.stdout), _output_text(exc.stderr), 124
+    try:
+        status = json.loads(stdout) if returncode == 0 else {}
+    except ValueError:
+        status = {}
+    evidence_path = _write_diagnostic_evidence(
+        diagnostics, manifest=manifest, attempt_id=attempt_id, rendered_plist=b"",
+        command_evidence={"command": command, "returncode": returncode},
+        error=None if returncode == 0 else RuntimeError(stderr.strip() or "worker_startup_check_failed"),
+        stdout=stdout, stderr=stderr, started_at=started_at,
+    )
+    if returncode != 0 or status.get("state") != "PASS":
+        code = _safe_error_code(RuntimeError(stderr.strip())) or "worker_startup_check_failed"
+        raise RuntimeError(f"worker_startup_check_failed:{code}:diagnostics={evidence_path}")
+    return {"state": "PASS", "result": status, "diagnostics": str(evidence_path)}
 
 
 def _run_readonly_command(command: list[str], timeout: float) -> tuple[subprocess.CompletedProcess, str | None]:
@@ -662,22 +850,18 @@ def _migrate_tenant_binding(manifest: dict) -> None:
     _atomic_json(destination, value)
 
 
-def _render_plist(runtime: Path) -> bytes:
+def _render_plist(runtime: Path, diagnostics_directory: Path | None = None) -> bytes:
     wrapper = str(runtime / "run_codex_worker.sh")
+    log_root = diagnostics_directory or ROOT / "logs"
     return plistlib.dumps({
         "Label": LABEL,
         "ProgramArguments": [wrapper, "watch"],
         "RunAtLoad": True,
         "KeepAlive": True,
         "WorkingDirectory": str(runtime),
-        "StandardOutPath": str(ROOT / "logs/worker.stdout.log"),
-        "StandardErrorPath": str(ROOT / "logs/worker.stderr.log"),
-        "EnvironmentVariables": {
-            "HOME": str(HOME),
-            "GPOINT_AGATA_WORKER_CONFIG": str(CONFIG),
-            "GPOINT_AGATA_WORKER_SUPPORT": str(ROOT),
-            "AGATA_WORKER_POOL_CONFIG": str(ROOT / "config/pool.env"),
-        },
+        "StandardOutPath": str(log_root / "candidate.stdout.log"),
+        "StandardErrorPath": str(log_root / "candidate.stderr.log"),
+        "EnvironmentVariables": _launchagent_environment(),
     }, fmt=plistlib.FMT_XML, sort_keys=True)
 
 
@@ -698,7 +882,6 @@ def _same_tree(left: Path, right: Path) -> bool:
             for name in (*dirs, *files):
                 item = Path(directory) / name
                 rel = str(item.relative_to(root))
-                info = item.lstat()
                 if item.is_symlink():
                     result[rel] = ("symlink", os.readlink(item))
                 elif item.is_dir():
@@ -740,7 +923,7 @@ def _prepare_legacy_snapshot(backup: Path) -> Path:
     if not backup.exists() and previous.exists():
         os.replace(previous, backup)
     shutil.copytree(LEGACY, stage, symlinks=True, copy_function=shutil.copy2)
-    for directory, dirs, files in os.walk(stage, followlinks=False):
+    for directory, _dirs, files in os.walk(stage, followlinks=False):
         Path(directory).chmod(0o700)
         for filename in files:
             item = Path(directory) / filename
@@ -865,6 +1048,10 @@ def apply() -> dict:
             raise RuntimeError("worker_runtime_root_owner_invalid")
         rollback_tree = _ensure_rollback_tree(manifest["source_sha"])
         staged_release = _stage_runtime(manifest)
+        startup_check = _validate_candidate_startup(staged_release, manifest)
+        attempt_id = uuid.uuid4().hex
+        attempt_started_at = datetime.now(UTC).isoformat()
+        diagnostics_directory = _create_diagnostic_attempt(manifest["source_sha"], attempt_id)
         backup = rollback_tree / "legacy-runtime"
         if PLIST.is_file():
             _save_original_launchagent(rollback_tree)
@@ -876,7 +1063,7 @@ def apply() -> dict:
         if state_dir.is_symlink() or state_dir.stat().st_uid != os.getuid():
             raise RuntimeError("worker_state_directory_permissions_invalid")
         maintenance_marker = ROOT / "state/maintenance-stop"
-        next_plist = _render_plist(target_link)
+        next_plist = _render_plist(target_link, diagnostics_directory)
         switch_started = False
         restart_evidence = None
         try:
@@ -949,12 +1136,19 @@ def apply() -> dict:
                 raise RuntimeError("restart_verification_failed")
             if any(not isinstance(restarted.get("lanes", {}).get(lane), dict) for lane in ("GPOINT", "GSALES", "LAB")):
                 raise RuntimeError("lane_status_missing")
-            poll_evidence = _wait_for_successful_polls(safe_worker_status(ROOT / "status/worker-status.json"))
+            poll_evidence = _wait_for_successful_polls(poll_baseline)
             if not poll_evidence["passed"]:
                 raise RuntimeError("successful_worker_polls_not_verified")
             network_after = _network_state_sha256()
             if network_before != network_after:
                 raise RuntimeError("network_state_changed_during_transition")
+            attempts = restart_evidence.get("adjudication", {}).get("attempts") or [{}]
+            diagnostic_receipt = _write_diagnostic_evidence(
+                diagnostics_directory, manifest=manifest, attempt_id=attempt_id,
+                rendered_plist=next_plist, launchctl_print=attempts[-1].get("launchctl_print", ""),
+                process_evidence=attempts[-1], command_evidence=restart_evidence.get("command", {}),
+                started_at=attempt_started_at,
+            )
             # Legacy runtime is removed only after health and restart pass.
             _remove_legacy_after_verification(health_passed=bool(status.get("lanes"))
                                               and all(status.get("lanes", {}).get(lane, {}).get("health") == "HEALTHY"
@@ -973,14 +1167,33 @@ def apply() -> dict:
                 "network_state_sha256_after": network_after,
                 "network_configuration_writes_performed": False,
                 "rollback_snapshot": str(backup),
+                "startup_check": startup_check,
+                "diagnostics": str(diagnostic_receipt),
                 "original_plist_sha256": hashlib.sha256(original_plist or b"").hexdigest(),
             }
             _atomic_json(ROOT / "receipts/runtime-migration.json", evidence)
             return evidence
-        except Exception:
+        except Exception as failure:
             if not switch_started:
                 maintenance_marker.unlink(missing_ok=True)
                 raise
+            diagnostic_receipt = None
+            try:
+                attempts = (restart_evidence or {}).get("adjudication", {}).get("attempts") or [{}]
+                launchctl_result, _ = _run_readonly_command(
+                    ["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"], 8,
+                )
+                diagnostic_receipt = _write_diagnostic_evidence(
+                    diagnostics_directory, manifest=manifest, attempt_id=attempt_id,
+                    rendered_plist=next_plist,
+                    launchctl_print=attempts[-1].get("launchctl_print") or launchctl_result.stdout,
+                    process_evidence=attempts[-1],
+                    command_evidence=(restart_evidence or {}).get("command", {}), error=failure,
+                    started_at=attempt_started_at,
+                )
+            except Exception:
+                # Diagnostic capture must never prevent a safety rollback.
+                pass
             # Restore old service and its files from the private snapshot.
             try:
                 subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], timeout=15, check=False,
@@ -1012,6 +1225,8 @@ def apply() -> dict:
                     "source_sha": manifest["source_sha"], "legacy_restored": LEGACY.exists(),
                     "launchagent_restored": original_plist is not None,
                     "rollback_snapshot": str(backup),
+                    "diagnostics": str(diagnostic_receipt) if diagnostic_receipt else str(diagnostics_directory),
+                    "startup_check": startup_check,
                     "restart_evidence": restart_evidence,
                 })
             finally:

@@ -31,6 +31,111 @@ def test_status_inventory_projection_omits_secrets_and_job_payloads(tmp_path):
     }
 
 
+def test_candidate_launch_diagnostics_survive_legacy_tree_rollback(tmp_path, monkeypatch):
+    root = tmp_path / "Library/Application Support/GPoint/agata-codex-worker"
+    root.mkdir(parents=True)
+    legacy = tmp_path / "rollback/legacy-runtime"
+    legacy.mkdir(parents=True)
+    (legacy / "worker.py").write_text("legacy")
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "LEGACY", root)
+
+    attempt_id = "attempt-123"
+    diagnostics = migration._create_diagnostic_attempt("a" * 40, attempt_id)
+    (diagnostics / "candidate.stdout.log").write_text("candidate stdout\n")
+    (diagnostics / "candidate.stderr.log").write_text("worker_initialization_failed\n")
+    receipt = migration._write_diagnostic_evidence(
+        diagnostics,
+        manifest={"source_sha": "a" * 40, "bundle_sha256": "b" * 64},
+        attempt_id=attempt_id,
+        rendered_plist=b"plist",
+        launchctl_print="state = spawn scheduled\nlast exit code = 78: EX_CONFIG\n",
+        process_evidence={"pid": None, "command": ""},
+        command_evidence={"returncode": 78},
+        error=ValueError("worker_concurrency_invalid"),
+    )
+
+    migration._restore_legacy_snapshot(legacy)
+
+    assert receipt.is_file()
+    assert (diagnostics / "candidate.stderr.log").read_text() == "worker_initialization_failed\n"
+    assert receipt.stat().st_mode & 0o077 == 0
+    assert diagnostics.stat().st_mode & 0o777 == 0o700
+    assert (diagnostics / "candidate.stderr.log").stat().st_mode & 0o777 == 0o600
+
+
+def test_candidate_diagnostic_redacts_secret_bearing_output_and_exception(tmp_path, monkeypatch):
+    monkeypatch.setattr(migration, "ROOT", tmp_path / "support/agata-codex-worker")
+    diagnostics = migration._create_diagnostic_attempt("c" * 40, "attempt-secret")
+    (diagnostics / "candidate.stdout.log").write_text("Authorization: Bearer top-secret-token\n")
+    (diagnostics / "candidate.stderr.log").write_text("ValueError: top-secret-token\n")
+
+    receipt = migration._write_diagnostic_evidence(
+        diagnostics,
+        manifest={"source_sha": "c" * 40, "bundle_sha256": "d" * 64},
+        attempt_id="attempt-secret",
+        rendered_plist=b"plist",
+        launchctl_print="environment = { GPOINT_AGATA_WORKER_TOKEN => top-secret-token }",
+        process_evidence={"command": "worker top-secret-token"},
+        command_evidence={"returncode": 1},
+        error=ValueError("top-secret-token"),
+        secrets=["top-secret-token"],
+    )
+
+    serialized = receipt.read_text() + (diagnostics / "candidate.stdout.log").read_text() + (
+        diagnostics / "candidate.stderr.log"
+    ).read_text()
+    assert "top-secret-token" not in serialized
+    assert json.loads(receipt.read_text())["error"]["code"] == "worker_initialization_failed"
+
+
+def test_launchagent_candidate_logs_are_outside_rollback_replaced_tree(tmp_path, monkeypatch):
+    root = tmp_path / "support/agata-codex-worker"
+    monkeypatch.setattr(migration, "ROOT", root)
+    diagnostics = migration._create_diagnostic_attempt("e" * 40, "attempt-plist")
+    runtime = root / "runtime/current"
+
+    plist = plistlib.loads(migration._render_plist(runtime, diagnostics))
+
+    assert Path(plist["StandardOutPath"]).parent == diagnostics
+    assert Path(plist["StandardErrorPath"]).parent == diagnostics
+    assert not Path(plist["StandardErrorPath"]).is_relative_to(root)
+
+
+def test_prepare_startup_check_uses_candidate_python_and_exact_launch_environment(tmp_path, monkeypatch):
+    root = tmp_path / "Library/Application Support/GPoint/agata-codex-worker"
+    root.mkdir(parents=True)
+    staged = tmp_path / "staged/candidate"
+    staged.mkdir(parents=True)
+    (staged / ".venv/bin").mkdir(parents=True)
+    (staged / ".venv/bin/python3.12").touch()
+    (staged / "gpoint_mac_worker.py").touch()
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "CONFIG", tmp_path / "worker.env")
+    manifest = {"source_sha": "f" * 40, "bundle_sha256": "e" * 64}
+    stdout = json.dumps({"state": "PASS", "configured_concurrency": 1})
+    observed = {}
+
+    def run(command, **kwargs):
+        observed["command"] = command
+        observed["env"] = kwargs["env"]
+        observed["timeout"] = kwargs["timeout"]
+        return subprocess.CompletedProcess(command, 0, stdout, "")
+
+    monkeypatch.setattr(migration.subprocess, "run", run)
+    result = migration._validate_candidate_startup(staged, manifest)
+
+    assert result["state"] == "PASS"
+    assert observed["command"] == [str(staged / ".venv/bin/python3.12"),
+                                    str(staged / "gpoint_mac_worker.py"), "validate-startup"]
+    assert observed["env"]["GPOINT_AGATA_WORKER_SUPPORT"] == str(root)
+    assert observed["env"]["AGATA_WORKER_POOL_CONFIG"] == str(root / "config/pool.env")
+    assert observed["env"]["GPOINT_AGATA_WORKER_CONFIG"] == str(tmp_path / "worker.env")
+    assert observed["timeout"] == 30
+    assert not (root / "runtime/current").exists()
+    assert not (tmp_path / "Library/LaunchAgents").exists()
+
+
 def test_production_runtime_and_pool_root_are_application_support():
     canonical = Path.home() / "Library/Application Support/GPoint/agata-codex-worker"
     assert migration.ROOT == canonical
@@ -149,6 +254,7 @@ def test_apply_with_absent_rollback_tree_saves_snapshot_and_restart_evidence(tmp
         return release
 
     monkeypatch.setattr(migration, "_stage_runtime", stage)
+    monkeypatch.setattr(migration, "_validate_candidate_startup", lambda _stage, _manifest: {"state": "PASS"})
     monkeypatch.setattr(migration, "_install_staged_runtime", lambda _staged, _manifest:
                         root / "runtime" / ("a" * 40))
     monkeypatch.setattr(migration, "_ensure_pool_config", lambda: None)
@@ -185,13 +291,23 @@ def test_apply_with_absent_rollback_tree_saves_snapshot_and_restart_evidence(tmp
     receipt = json.loads((root / "receipts/runtime-migration-rollback.json").read_text())
     assert receipt["state"] == "ROLLED_BACK"
     assert receipt["restart_evidence"] == restart_evidence
+    diagnostics = Path(receipt["diagnostics"])
+    assert diagnostics.is_file()
+    assert diagnostics.parent.parent.parent.name == ".agata-codex-worker-diagnostics"
+    assert (diagnostics.parent / "candidate.stderr.log").is_file()
 
 
 def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(tmp_path, monkeypatch):
     root = tmp_path / "Library/Application Support/GPoint/agata-codex-worker"
     root.mkdir(parents=True)
     (root / "gpoint_mac_worker.py").write_text("existing V3 worker")
-    (root / "worker-status.json").write_text('{"current_job_present":false}')
+    (root / "worker-status.json").write_text(json.dumps({
+        "current_job_present": False,
+        "targets": {
+            "GPOINT": {"last_poll_at": "before", "last_error_code": "worker_target_unavailable"},
+            "GSALES": {"last_poll_at": "before", "last_error_code": "worker_target_unavailable"},
+        },
+    }))
     plist = tmp_path / "Library/LaunchAgents/worker.plist"
     plist.parent.mkdir(parents=True)
     old_plist = plistlib.dumps({"Label": migration.LABEL,
@@ -212,6 +328,7 @@ def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(t
         release.mkdir(parents=True)
         return release
     monkeypatch.setattr(migration, "_stage_runtime", stage)
+    monkeypatch.setattr(migration, "_validate_candidate_startup", lambda _stage, _manifest: {"state": "PASS"})
     def install(_staged, _manifest):
         release = root / "runtime" / manifest["source_sha"]
         release.mkdir(parents=True)
@@ -226,8 +343,21 @@ def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(t
         "GPOINT": {"health": "HEALTHY"}, "GSALES": {"health": "HEALTHY"}, "LAB": {"state": "AVAILABLE"}}}
     monkeypatch.setattr(migration, "_health_check", lambda: status)
     restart = {"verification": "PASS", "adjudication": {"status": status}}
-    monkeypatch.setattr(migration, "_kickstart_and_verify", lambda _sha: restart)
-    monkeypatch.setattr(migration, "_wait_for_successful_polls", lambda _baseline: {"passed": True})
+    def kickstart(_sha):
+        worker_status = root / "status/worker-status.json"
+        value = json.loads(worker_status.read_text())
+        value["targets"] = {
+            "GPOINT": {"last_poll_at": "after", "last_error_code": None},
+            "GSALES": {"last_poll_at": "after", "last_error_code": None},
+        }
+        worker_status.write_text(json.dumps(value))
+        return restart
+    monkeypatch.setattr(migration, "_kickstart_and_verify", kickstart)
+    poll_baselines = []
+    def wait_for_polls(baseline):
+        poll_baselines.append(baseline)
+        return {"passed": True}
+    monkeypatch.setattr(migration, "_wait_for_successful_polls", wait_for_polls)
     monkeypatch.setattr(migration, "launchctl_loaded", lambda: True)
     monkeypatch.setattr(migration.subprocess, "run", lambda command, **kwargs:
                         subprocess.CompletedProcess(command, 0))
@@ -235,6 +365,13 @@ def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(t
     result = migration.apply()
 
     assert result["state"] == "COMPLETE"
+    assert poll_baselines == [{
+        "current_job_present": False,
+        "targets": {
+            "GPOINT": {"last_poll_at": "before", "last_error_code": "worker_target_unavailable"},
+            "GSALES": {"last_poll_at": "before", "last_error_code": "worker_target_unavailable"},
+        },
+    }]
     assert root.is_dir()
     assert (root / "runtime/current").resolve() == root / "runtime" / manifest["source_sha"]
     snapshot = rollback_base / manifest["source_sha"]
@@ -266,6 +403,7 @@ def test_prepare_stages_and_snapshots_without_stopping_or_switching_live_worker(
         "production_release_lock_busy": False, "active_inference": False,
         "launchagent_program_arguments": [str(root / "run_codex_worker.sh"), "watch"]})
     monkeypatch.setattr(migration, "_stage_runtime", lambda _manifest: staged)
+    monkeypatch.setattr(migration, "_validate_candidate_startup", lambda _stage, _manifest: {"state": "PASS"})
     monkeypatch.setattr(migration, "_verify_staged_runtime", lambda *_args: None)
     capture_snapshot = migration._prepare_legacy_snapshot
     def snapshot_then_worker_poll(backup):

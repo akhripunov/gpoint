@@ -29,8 +29,10 @@ from agata_worker_pool import (
     PoolLockError,
     PoolPaths,
     PoolSupervisor,
-    acquire_lock as acquire_pool_lock,
     write_slot_status,
+)
+from agata_worker_pool import (
+    acquire_lock as acquire_pool_lock,
 )
 
 CONFIG = Path(os.environ.get(
@@ -123,6 +125,18 @@ _ACTIVE_INFERENCE: subprocess.Popen | None = None
 TARGET_NAMES = ("GPOINT", "GSALES")
 LAB_TARGET = "LAB"
 LEGACY_GPOINT_GATEWAY_URL = "https://gpoint.amiora.one/api/agata-worker"
+STARTUP_LANES = ("GPOINT", "GSALES", "LAB")
+SAFE_STARTUP_ERROR_CODES = {
+    "worker_config_permissions_invalid", "worker_gateway_or_auth_unconfigured",
+    "worker_gateway_url_invalid", "worker_pool_config_key_invalid",
+    "worker_pool_must_start_at_n1_unverified", "worker_poll_interval_invalid",
+    "worker_root_must_be_absolute", "worker_target_unconfigured",
+    "worker_targets_must_be_distinct", "worker_tenant_binding_invalid",
+    "worker_tenants_must_be_distinct", "worker_concurrency_invalid",
+    "parallel_provider_capability_invalid", "parallel_provider_capability_not_verified",
+    "worker_path_owner_or_symlink_invalid", "worker_path_permissions_invalid",
+    "worker_path_parent_not_writable", "worker_runtime_asset_missing",
+}
 
 
 def configured_targets() -> dict[str, tuple[str, str]]:
@@ -170,6 +184,88 @@ def configured_tenant_bindings(
     if len(bindings) != len(set(bindings.values())):
         raise FatalConfigurationError("worker_tenants_must_be_distinct")
     return bindings
+
+
+def safe_startup_error_code(exc: BaseException) -> str:
+    """Expose known local configuration codes, never arbitrary exception text."""
+    message = str(exc)
+    if message in SAFE_STARTUP_ERROR_CODES:
+        return message
+    error_type = type(exc).__name__.lower()
+    if error_type in {"filenotfounderror", "permissionerror", "oserror", "importerror", "modulenotfounderror", "valueerror"}:
+        return f"worker_initialization_{error_type.removesuffix('error')}"
+    return "worker_initialization_failed"
+
+
+def _validate_startup_paths(paths: PoolPaths) -> None:
+    """Validate the paths watch needs without creating files or directories."""
+    required = (paths.root, paths.runtime, paths.config, paths.state, paths.locks,
+                paths.receipts, paths.status, paths.logs, paths.queues, paths.slots)
+    for path in required:
+        if path.is_symlink():
+            raise FatalConfigurationError("worker_path_owner_or_symlink_invalid")
+        if path == paths.root and not path.exists():
+            raise FatalConfigurationError("worker_path_parent_not_writable")
+        existing = path
+        while not existing.exists() and existing != existing.parent:
+            existing = existing.parent
+        if not existing.exists():
+            raise FatalConfigurationError("worker_path_parent_not_writable")
+        if existing.is_symlink() or not existing.is_dir() or existing.stat().st_uid != os.getuid():
+            raise FatalConfigurationError("worker_path_owner_or_symlink_invalid")
+        if existing.stat().st_mode & 0o077:
+            raise FatalConfigurationError("worker_path_permissions_invalid")
+        if not path.exists() and not os.access(existing, os.W_OK | os.X_OK):
+            raise FatalConfigurationError("worker_path_parent_not_writable")
+        if path.exists():
+            if path.is_symlink() or not path.is_dir() or path.stat().st_uid != os.getuid():
+                raise FatalConfigurationError("worker_path_owner_or_symlink_invalid")
+            if path.stat().st_mode & 0o077:
+                raise FatalConfigurationError("worker_path_permissions_invalid")
+
+
+def validate_startup_configuration() -> dict:
+    """Read-only equivalent of watch's configuration and supervisor construction."""
+    load_worker_configs()
+    pool_config = PoolConfig.from_env(dict(os.environ))
+    if pool_config.concurrency != 1 or pool_config.provider_parallel_capability != "NOT_VERIFIED":
+        raise FatalConfigurationError("worker_pool_must_start_at_n1_unverified")
+    targets = configured_targets()
+    if not {"GPOINT", "GSALES"}.issubset(targets):
+        raise FatalConfigurationError("worker_target_unconfigured")
+    tenants = configured_tenant_bindings(targets)
+    paths = PoolPaths.from_env()
+    _validate_startup_paths(paths)
+    assets = (
+        Path(__file__), Path(__file__).with_name("agata_worker_pool.py"),
+        Path(lab_queue.__file__), Path(lab_queue.FIXTURE_MANIFEST),
+        Path(__file__).with_name("requirements.txt"), Path(__file__).with_name("run_codex_worker.sh"),
+    )
+    if any(not path.is_file() or path.is_symlink() for path in assets):
+        raise FatalConfigurationError("worker_runtime_asset_missing")
+    # Construct exactly the supervisor watch uses, but never start it or poll it.
+    supervisor = build_pool_supervisor()
+    if set(supervisor.claimers) != set(STARTUP_LANES):
+        raise FatalConfigurationError("worker_target_unconfigured")
+    lab_enabled = os.environ.get("AGATA_LAB_WORKER_ENABLED") == "true"
+    return {
+        "state": "PASS",
+        "mode": "READ_ONLY_STARTUP_CHECK",
+        "configured_concurrency": pool_config.concurrency,
+        "provider_parallel_capability": pool_config.provider_parallel_capability,
+        "configured_targets": sorted(targets),
+        "tenant_bindings_present": sorted(tenants),
+        "lanes": {
+            "GPOINT": {"configured": True, "enabled": True},
+            "GSALES": {"configured": True, "enabled": True},
+            "LAB": {"configured": True, "enabled": lab_enabled,
+                    "inference_gate": "CLOSED_DISABLED" if not lab_enabled else "REQUIRED_BEFORE_INFERENCE"},
+        },
+        "claim_requests": 0,
+        "inference_requests": 0,
+        "runtime_current_changed": False,
+        "launchagent_changed": False,
+    }
 
 
 def _legacy_gpoint_tenant_binding() -> str | None:
@@ -878,9 +974,12 @@ def build_pool_supervisor() -> PoolSupervisor:
         target: (lambda target=target: claim_target_job(target))
         for target in targets
     }
-    if os.environ.get("AGATA_LAB_WORKER_ENABLED") == "true":
-        claimers[LAB_TARGET] = claim_lab_job
-    return PoolSupervisor(paths, config, claimers, reject_offer=reject_claim)
+    lab_enabled = os.environ.get("AGATA_LAB_WORKER_ENABLED") == "true"
+    claimers[LAB_TARGET] = claim_lab_job if lab_enabled else (lambda: None)
+    return PoolSupervisor(
+        paths, config, claimers, reject_offer=reject_claim,
+        lab_enabled=lab_enabled,
+    )
 
 
 def run_pool(*, max_cycles: int | None = None, sleep_fn=time.sleep) -> int:
@@ -1158,7 +1257,7 @@ def execute_slot(lane: str, slot_id: str) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("status", "once", "watch", "execute-slot", "conversational-smoke", "network-stability"))
+    parser.add_argument("command", choices=("status", "once", "watch", "validate-startup", "execute-slot", "conversational-smoke", "network-stability"))
     parser.add_argument("--poll-seconds", type=float, default=3.0)
     parser.add_argument("--lane", choices=("GPOINT", "GSALES", "LAB"))
     parser.add_argument("--slot")
@@ -1167,6 +1266,9 @@ def main() -> int:
         load_worker_configs()
         if args.command == "status":
             return status()
+        if args.command == "validate-startup":
+            print(json.dumps(validate_startup_configuration(), sort_keys=True, indent=2))
+            return 0
         if args.command == "conversational-smoke":
             return 0 if conversational_smoke() else 1
         if args.command == "network-stability":
@@ -1200,9 +1302,9 @@ def main() -> int:
             return 0
         return run_watch(args.poll_seconds)
     except Exception as exc:
-        message = str(exc)
-        print(message if message.replace("_", "").isalnum() else "worker_initialization_failed", file=sys.stderr)
-        return 1
+        code = safe_startup_error_code(exc)
+        print(code, file=sys.stderr)
+        return 78 if args.command == "validate-startup" else 1
 
 
 if __name__ == "__main__":
