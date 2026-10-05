@@ -110,6 +110,13 @@ python3 scripts/release-preflight-benchmark.py --owner-start '<ISO timestamp wit
 
 ## Бесплатное хранение сборок и evidence
 
+Для чистого benchmark Release Orchestrator V2 на новом main candidate отдельно
+фиксируйте push/commit, Prepare, automatic controller, read-only Deploy
+preflight и публикацию `READY_FOR_OWNER` в Linear. Считайте jobs и их runner
+seconds по GitHub API; записывайте cache hit/miss и повторные build/test/download.
+Валидный прогон проходит одной попыткой без ручного preflight/recovery и без
+production apply.
+
 GPoint публикует CI bundle и документы Deploy в immutable GitHub Releases,
 чтобы расход Actions Artifact Storage не блокировал выпуск. Не требует billing
 или платного бюджета. На репозитории включён immutable-releases. Prepare создаёт
