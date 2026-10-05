@@ -43,6 +43,13 @@ match the verified receipt before upload/load can be omitted. Upload and load
 have separate timing markers. Dependency caches accelerate package downloads;
 all tests and migration rehearsals still execute.
 
+GitHub Prepare uses separate stable BuildKit GHA cache scopes per image
+(`gpoint-runtime`, `gpoint-agata-runtime`, and `gpoint-g-sales-runtime`). Keep
+candidate-SHA metadata late in the main runtime Dockerfile, immediately before
+the Mini App build that embeds it. The final image still receives the exact
+revision label and immutable candidate tag; upstream dependency and service
+build layers can then be reused across release-only commits.
+
 Deploy saves runtime evidence before a separate Ubuntu publication job writes
 to Linear. A publication failure remains a failed workflow and a visible
 blocker, but never changes the recorded result of the runtime attempt. Reruns
