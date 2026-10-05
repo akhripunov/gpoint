@@ -138,6 +138,41 @@ def production_evidence():
                         key=lambda r: r.get('created_at', ''), reverse=True)
     deployment = None
     for run in candidates:
+        # A reconciled manifest records factual server completion separately
+        # from the historical workflow conclusion. Accept only its exact run,
+        # unchanged failure record, canonical publication repair, and matching
+        # read-only runtime/database evidence; never reinterpret that run as a
+        # successful Deploy job.
+        server = manifest.get('serverReconciliation') or {}
+        repair = manifest.get('publicationRepair') or {}
+        original_failure = manifest.get('originalFailure') or {}
+        smoke = manifest.get('smoke') or {}
+        state_repair = state.get('publicationRepair') or {}
+        if (
+            manifest.get('eventType') == 'RECONCILED_PRODUCTION_RELEASE' and
+            state.get('releaseOrigin') == 'reconciled-production-release' and
+            manifest.get('serverDeployStatus') == 'COMPLETE' and
+            str(manifest.get('automationRunId')) == str(run.get('id')) and
+            str(state_repair.get('runId')) == str(run.get('id')) and
+            manifest.get('automationRunConclusion') == run.get('conclusion') and
+            original_failure.get('rewritten') is False and
+            bool(repair.get('completedAt')) and bool(repair.get('basis')) and
+            server.get('vpsSha') == sha and
+            server.get('externalMiniappSha') == sha and
+            server.get('prismaHead') == manifest.get('dbHeadAfter') and
+            server.get('agataHead') == manifest.get('agataDbHeadAfter') and
+            server.get('gsalesHead') == manifest.get('gsalesDbHeadAfter') and
+            server.get('gsalesRlsSecurity') == 'PASS' and
+            server.get('externalApiHealth') == 'PASS' and
+            (manifest.get('runtimeFacts') or {}).get('LIVE_RELEASE_ENV_SHA') == sha and
+            (manifest.get('runtimeFacts') or {}).get('LIVE_AGATA_API_SHA') == sha and
+            (manifest.get('runtimeFacts') or {}).get('LIVE_GSALES_API_SHA') == sha and
+            smoke.get('vpsHealth') == 'PASS' and
+            smoke.get('imageRuntimeParity') == 'PASS' and
+            smoke.get('gsalesRuntimeReconciliation') == 'PASS'
+        ):
+            deployment = run
+            break
         try:
             result = artifact_json(run['id'], 'gpoint-production-result-')
         except SyncError as exc:
@@ -205,7 +240,9 @@ def render_current_state(state):
         f"Сверка SHA: **{state_name}**.",
         f"Последний завершившийся успешный Prepare: `{(prep.get('head_sha') or 'unknown')}` / run `#{prep.get('id', 'unknown')}`; current-main run `#{(state['latest_main_prepare'] or {}).get('id', 'unknown')}`: **{state['candidate']}**.",
         f"Последний production Deploy: `{m.get('productionShaAfter', 'unknown')}` / run `#{deploy.get('id', 'unknown')}` / canonical **{state['release_status']}**.",
-        f"GitHub Deploy workflow: `{deploy.get('status', 'unknown')}` / conclusion `{deploy.get('conclusion') or 'pending'}`; deploy job **SUCCESS** подтверждён отдельно.",
+        (f"GitHub Deploy workflow: run `#{deploy.get('id', 'unknown')}` / conclusion **{deploy.get('conclusion') or 'pending'}** сохранён как есть; server completion подтверждён отдельно reconciled manifest и свежими read-only фактами."
+         if m.get('eventType') == 'RECONCILED_PRODUCTION_RELEASE' else
+         f"GitHub Deploy workflow: `{deploy.get('status', 'unknown')}` / conclusion `{deploy.get('conclusion') or 'pending'}`; deploy job **SUCCESS** подтверждён отдельно."),
         f"Prisma head: `{m.get('dbHeadAfter', 'unconfirmed')}`; AGATA Alembic head: `{m.get('agataDbHeadAfter', 'unconfirmed')}` (manifest).",
         f"Server deploy: **{state.get('server_deploy_status', state['release_status'])}**; Mac worker: **{state.get('worker_operational_status', 'NOT_VERIFIED')}**; service readiness: **{state.get('service_readiness', 'DEGRADED')}**; dependency checked `{state.get('dependency_checked_at', 'not checked')}`.",
         "Пользовательская приёмка: **OWNER_SMOKE_PENDING**; technical COMPLETE не является подтверждением Telegram-ответа.",
