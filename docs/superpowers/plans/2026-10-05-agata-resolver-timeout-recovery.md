@@ -45,4 +45,6 @@
 - [x] Implement `_run_http` with a reusable event loop plus `_bounded_getaddrinfo`: one daemon thread, no executor queue, fail-fast while a lookup is outstanding; use it for API request and health probe without changing request arguments or certificate validation.
 - [x] Run targeted regressions; both bounded ordinary shutdown and lookup recovery pass. Existing HTTP and Worker tests pass.
 - [x] Run relevant Worker pool, HTTP, targets, lock, transition, runtime migration and LAB tests plus the full Conversation Lab offline suite and Naturalness fixture dry-run; run `git diff --check`. Latest results: Worker suite 99 passed; Conversation Lab suite 100 passed; dry-run FIXTURE_ONLY (16 dev, 0 holdout, 0 live, no writes); syntax/diff checks pass.
-- [ ] Commit the verified fix and plan after final verification and independent review.
+- [x] Commit the verified fix and plan after final verification and independent review.
+
+**Independent review:** READY on the exact rebased range `1473b856f153d46fed862a3e7fedc51a75c84822..f574dc572a2ba27f70eaa95ba1856cfb79854cf5`; no Critical, Important, or Minor issues. The reviewer noted only that concurrent external calls from different threads are outside current serial Worker call paths.
