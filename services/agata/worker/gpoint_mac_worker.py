@@ -54,6 +54,23 @@ HEARTBEAT_INTERVAL_SECONDS = 30
 _last_heartbeat_attempt = float("-inf")
 REQUEST_TIMEOUT = httpx.Timeout(20.0, connect=10.0, read=20.0, write=20.0, pool=10.0)
 POLL_BACKOFF_SECONDS = (1.0, 2.0, 5.0, 10.0, 20.0)
+SAFE_TARGET_ERROR_CODES = frozenset({
+    "worker_claim_invalid",
+    "worker_claim_target_mismatch",
+    "worker_config_permissions_invalid",
+    "worker_gateway_auth_rejected",
+    "worker_gateway_network_error",
+    "worker_gateway_or_auth_unconfigured",
+    "worker_gateway_response_invalid",
+    "worker_gateway_transport_error",
+    "worker_gateway_url_invalid",
+    "worker_pool_config_key_invalid",
+    "worker_target_invalid",
+    "worker_target_unconfigured",
+    "worker_targets_must_be_distinct",
+    "worker_tenant_binding_invalid",
+    "worker_tenants_must_be_distinct",
+})
 
 
 class FatalConfigurationError(RuntimeError):
@@ -816,10 +833,19 @@ class TargetScheduler:
                 self.failures[name] += 1
                 delay = 60.0 if isinstance(exc, FatalConfigurationError) else POLL_BACKOFF_SECONDS[min(self.failures[name]-1, len(POLL_BACKOFF_SECONDS)-1)]
                 self.next_poll[name] = now + delay
-                write_status(target=name, state="error", last_error_code="worker_target_unavailable", next_poll_delay_seconds=delay)
+                error_code = str(exc)
+                dynamic_http_error = re.fullmatch(r"worker_gateway_http_([45][0-9]{2})", error_code)
+                if error_code not in SAFE_TARGET_ERROR_CODES and not (
+                    dynamic_http_error and 400 <= int(dynamic_http_error.group(1)) <= 599
+                ):
+                    error_code = "worker_target_unavailable"
+                write_status(target=name, state="error", last_error_code=error_code, next_poll_delay_seconds=delay)
                 return False
             self.failures[name] = 0
             self.next_poll[name] = 0.0
+            # Successful polls supersede prior transient errors. Without this,
+            # status can report worker_target_unavailable forever after recovery.
+            write_status(target=name, last_error_code=None)
             return done
         return False
 
