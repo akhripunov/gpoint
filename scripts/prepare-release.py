@@ -289,17 +289,9 @@ def prepare(sha, output, *, postgres_only=False):
             ('artifact_cache_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_prepared_artifact_cache.py')),
             ('gsales_compose_profile_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_release_gsales_compose.py')),
         )
-        gsales_regression = start_background_stage(
-            'gsales_postgres_regression',
-            (sys.executable, 'services/gsales/tests/run_postgres.py'), timings)
-        try:
-            for name, command in commands:
-                with measured_stage(name, timings):
-                    run(*command)
-            finish_background_stage(gsales_regression)
-        except BaseException:
-            abort_background_stage(gsales_regression)
-            raise
+        for name, command in commands:
+            with measured_stage(name, timings):
+                run(*command)
 
     suffix = uuid.uuid4().hex[:12]
     network, postgres, api = (f'gpoint-ci-{suffix}-{x}' for x in ('net', 'pg', 'agata'))
@@ -313,6 +305,7 @@ def prepare(sha, output, *, postgres_only=False):
     for name in ('MESSAGE_AEAD_KEY', 'REQUEST_FINGERPRINT_HMAC_KEY', 'RETRIEVAL_QUERY_HMAC_KEY',
                  'RESPONSE_FINGERPRINT_HMAC_KEY', 'SHADOW_CANDIDATE_HMAC_KEY'):
         env[f'AGATA_{name}'] = key
+    gsales_regression = None
     try:
         with measured_stage('disposable_postgres_setup', timings):
             run('docker', 'network', 'create', network)
@@ -365,6 +358,12 @@ def prepare(sha, output, *, postgres_only=False):
         if postgres_only:
             print('POSTGRES_REHEARSAL=PASS; no READY receipt or production images emitted')
             return
+        # This disposable DB suite is independent of AGATA fixtures. Start it
+        # with the image/rehearsal phase so it does not contend with workspace
+        # compilation or the AGATA integration database.
+        gsales_regression = start_background_stage(
+            'gsales_postgres_regression',
+            (sys.executable, 'services/gsales/tests/run_postgres.py'), timings)
         for tag, dockerfile, context in (
                 ('gpoint-runtime', 'infra/production/Gpoint.Dockerfile', '.'),
                 ('gpoint-agata-runtime', 'services/agata/Dockerfile', 'services/agata'),
@@ -452,6 +451,7 @@ def prepare(sha, output, *, postgres_only=False):
         expected_agata = run('docker', 'run', '--rm', f'gpoint-agata-runtime:{sha}', 'alembic', 'heads', capture=True)
         if '\n' in expected_agata or not expected_agata or heads != expected_agata.split()[0] or prisma != expected_prisma:
             raise RuntimeError('runtime artifact migration heads do not match candidate source')
+        finish_background_stage(gsales_regression)
         images = {}
         for role, tag in [('app', 'gpoint-runtime'), ('agata', 'gpoint-agata-runtime'), ('gsales', 'gpoint-g-sales-runtime')]:
             image = json.loads(run('docker', 'image', 'inspect', f'{tag}:{sha}', capture=True))[0]
@@ -481,6 +481,8 @@ def prepare(sha, output, *, postgres_only=False):
                  'applicationSmoke': 'DISPOSABLE_DB_DETERMINISTIC_PROVIDER', 'productionUserSmoke': 'NOT_RUN'}
         receipt.write_text(json.dumps(proof, indent=2) + '\n')
     finally:
+        if gsales_regression is not None:
+            abort_background_stage(gsales_regression)
         for name in (api, postgres):
             subprocess.run(['docker', 'rm', '-f', name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
         subprocess.run(['docker', 'network', 'rm', network], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
