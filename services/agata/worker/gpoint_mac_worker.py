@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import fcntl
 import hashlib
 import json
@@ -15,6 +16,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +57,9 @@ MAX_LAB_TIMEOUT_SECONDS = 180
 HEARTBEAT_INTERVAL_SECONDS = 30
 _last_heartbeat_attempt = float("-inf")
 REQUEST_TIMEOUT = httpx.Timeout(20.0, connect=10.0, read=20.0, write=20.0, pool=10.0)
+_HTTP_LOOP = None
+_HTTP_LOOP_LOCK = threading.Lock()
+_HTTP_RESOLVER_EXECUTOR = None
 POLL_BACKOFF_SECONDS = (1.0, 2.0, 5.0, 10.0, 20.0)
 SAFE_TARGET_ERROR_CODES = frozenset({
     "worker_claim_invalid",
@@ -313,6 +318,19 @@ def target_request(target: str, path: str, body: dict | None = None) -> dict:
     return api_request(path, body) if target == "GPOINT" else api_request(path, body, target=target)
 
 
+def _run_http(coroutine):
+    """Run one HTTP coroutine without waiting for a stalled resolver at loop shutdown."""
+    global _HTTP_LOOP, _HTTP_RESOLVER_EXECUTOR
+    with _HTTP_LOOP_LOCK:
+        if _HTTP_LOOP is None or _HTTP_LOOP.is_closed():
+            _HTTP_LOOP = asyncio.new_event_loop()
+            _HTTP_RESOLVER_EXECUTOR = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="agata-http-resolver",
+            )
+            _HTTP_LOOP.set_default_executor(_HTTP_RESOLVER_EXECUTOR)
+        return _HTTP_LOOP.run_until_complete(coroutine)
+
+
 def api_request(path: str, body: dict | None = None, *, target: str = "GPOINT") -> dict:
     targets = configured_targets()
     if target not in targets:
@@ -334,7 +352,7 @@ def api_request(path: str, body: dict | None = None, *, target: str = "GPOINT") 
                 return await client.post(f"{base}/{path}", headers=headers, **kwargs)
 
     try:
-        response = asyncio.run(request_once())
+        response = _run_http(request_once())
     except (httpx.TimeoutException, httpx.NetworkError, TimeoutError) as exc:
         raise TransientNetworkError("worker_gateway_network_error") from exc
     except httpx.HTTPError as exc:
@@ -1069,7 +1087,7 @@ def unauthenticated_health_probe() -> None:
                 # 401/403 is expected without a token and proves TLS + HTTP reached the gateway.
                 await client.post(f"{base}/health")
 
-    asyncio.run(probe_once())
+    _run_http(probe_once())
 
 
 def network_stability_smoke(duration_seconds: int = 300, minimum_cycles: int = 30) -> int:
