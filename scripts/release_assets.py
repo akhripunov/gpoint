@@ -121,7 +121,8 @@ def read_result(sha, run_id, attempt, result_path=None, token=None):
     token = token or os.environ['GITHUB_TOKEN']
     with tempfile.TemporaryDirectory(prefix='gpoint-result-') as temporary:
         archive = Path(temporary) / 'result.zip'
-        download(REPO, asset['id'], token, archive, release_asset=True)
+        download(REPO, asset['id'], token, archive, release_asset=True,
+                 expected_size=asset.get('size'))
         if checksum(archive) != asset['digest'][7:]:
             raise RuntimeError('Immutable result ZIP checksum mismatch')
         name = f'gpoint-release-result-{run_id}-{attempt}.json'

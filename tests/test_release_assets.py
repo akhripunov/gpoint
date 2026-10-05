@@ -2,6 +2,7 @@ import importlib.util
 import sys
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -52,6 +53,15 @@ class ImmutableReleaseTests(unittest.TestCase):
         for args in [('prepare', 'main', '55', '1'), ('prepare', 'a'*40, '../55', '1'),
                      ('other', 'a'*40, '55', '1')]:
             with self.assertRaises(RuntimeError): ASSETS.release_tag(*args)
+
+    def test_read_result_passes_immutable_asset_size_to_range_downloader(self):
+        import prepared_artifact_cache as cache
+        asset = {'id': 72, 'size': 1234, 'digest': 'sha256:' + 'b' * 64}
+        with patch.object(ASSETS, 'resolve_asset', return_value=asset), \
+             patch.object(cache, 'download', side_effect=RuntimeError('stop after downloader call')) as download:
+            with self.assertRaisesRegex(RuntimeError, 'stop after downloader call'):
+                ASSETS.read_result('a' * 40, '55', '2', result_path='/tmp/result.json', token='unused')
+        self.assertEqual(download.call_args.kwargs['expected_size'], 1234)
 
     def test_stale_deploy_result_from_previous_attempt_cannot_be_republished(self):
         data = {'candidateSha': 'a'*40, 'automationRunId': '55', 'automationRunAttempt': '1'}
