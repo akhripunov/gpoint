@@ -159,11 +159,10 @@ class MacWorkerHttpTests(unittest.TestCase):
                 worker.api_request("health")
         self.assertNotIn("test-secret", str(raised.exception))
 
-    def test_reg_h_dns_resolution_timeout_is_bounded_and_single_threaded(self):
+    def test_reg_h_dns_stall_exits_process_without_unbounded_resolver_queue(self):
         worker_directory = str(Path(worker.__file__).resolve().parent)
         child = textwrap.dedent("""
             import asyncio
-            import os
             import socket
             import threading
             import gpoint_mac_worker as worker
@@ -187,15 +186,14 @@ class MacWorkerHttpTests(unittest.TestCase):
                 except worker.TransientNetworkError as exc:
                     if str(exc) != "worker_gateway_network_error":
                         print("unexpected_network_error", str(exc), flush=True)
-                        os._exit(3)
+                        raise SystemExit(3)
                 else:
                     print("unexpected_request_success", flush=True)
-                    os._exit(4)
+                    raise SystemExit(4)
             if len(calls) != 1:
                 print("resolver_calls", len(calls), flush=True)
-                os._exit(5)
+                raise SystemExit(5)
             print("bounded_timeouts=3 resolver_calls=1", flush=True)
-            os._exit(0)
         """)
         child_env = os.environ.copy()
         child_env["PYTHONPATH"] = os.pathsep.join(filter(None, (
@@ -209,9 +207,70 @@ class MacWorkerHttpTests(unittest.TestCase):
                 env=child_env, check=False, text=True, capture_output=True, timeout=3,
             )
         except subprocess.TimeoutExpired:
-            self.fail("timed-out getaddrinfo kept api_request blocked during asyncio.run shutdown")
+            self.fail("ordinary process shutdown waited indefinitely for a stalled resolver")
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
         self.assertIn("bounded_timeouts=3 resolver_calls=1", completed.stdout)
+
+    def test_reg_i_dns_resolver_recovers_after_blocked_lookup_returns(self):
+        worker_directory = str(Path(worker.__file__).resolve().parent)
+        child = textwrap.dedent("""
+            import asyncio
+            import socket
+            import threading
+            import time
+            import gpoint_mac_worker as worker
+
+            stalled = threading.Event()
+            calls = []
+            def blocked_then_recovered(host, port, family=0, type=0, proto=0, flags=0):
+                calls.append(host)
+                if len(calls) == 1:
+                    stalled.wait()
+                return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
+                         ("127.0.0.1", int(port or 80)))]
+
+            socket.getaddrinfo = blocked_then_recovered
+            worker.configured_targets = lambda: {
+                "GPOINT": ("https://resolver-recovery.invalid/api", "fixture-token")
+            }
+            original_timeout = asyncio.timeout
+            worker.asyncio.timeout = lambda _seconds: original_timeout(0.05)
+            for _ in range(2):
+                try:
+                    worker.api_request("health")
+                except worker.TransientNetworkError:
+                    pass
+                else:
+                    raise SystemExit("expected transient resolver failure")
+            if len(calls) != 1:
+                raise SystemExit(f"resolver calls were not bounded: {len(calls)}")
+
+            stalled.set()
+            deadline = time.monotonic() + 1
+            while worker._HTTP_RESOLVER_ACTIVE and time.monotonic() < deadline:
+                time.sleep(0.005)
+            if worker._HTTP_RESOLVER_ACTIVE:
+                raise SystemExit("resolver did not return from the released fixture")
+            addresses = worker._run_http(worker._HTTP_LOOP.getaddrinfo("recovered.test", 443))
+            if addresses[0][4] != ("127.0.0.1", 443) or len(calls) != 2:
+                raise SystemExit(f"resolver recovery mismatch: {addresses!r}, calls={len(calls)}")
+            print("resolver_recovered=true resolver_calls=2", flush=True)
+        """)
+        child_env = os.environ.copy()
+        child_env["PYTHONPATH"] = os.pathsep.join(filter(None, (
+            worker_directory, child_env.get("PYTHONPATH", ""),
+        )))
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            child_env.pop(name, None)
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", child], cwd=Path(__file__).resolve().parents[3],
+                env=child_env, check=False, text=True, capture_output=True, timeout=3,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail("recovered resolver test did not shut down in bounded time")
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        self.assertIn("resolver_recovered=true resolver_calls=2", completed.stdout)
 
 
 if __name__ == "__main__":

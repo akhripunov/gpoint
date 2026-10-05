@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import fcntl
 import hashlib
 import json
@@ -13,6 +12,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -59,7 +59,8 @@ _last_heartbeat_attempt = float("-inf")
 REQUEST_TIMEOUT = httpx.Timeout(20.0, connect=10.0, read=20.0, write=20.0, pool=10.0)
 _HTTP_LOOP = None
 _HTTP_LOOP_LOCK = threading.Lock()
-_HTTP_RESOLVER_EXECUTOR = None
+_HTTP_RESOLVER_LOCK = threading.Lock()
+_HTTP_RESOLVER_ACTIVE = False
 POLL_BACKOFF_SECONDS = (1.0, 2.0, 5.0, 10.0, 20.0)
 SAFE_TARGET_ERROR_CODES = frozenset({
     "worker_claim_invalid",
@@ -318,16 +319,63 @@ def target_request(target: str, path: str, body: dict | None = None) -> dict:
     return api_request(path, body) if target == "GPOINT" else api_request(path, body, target=target)
 
 
+async def _bounded_getaddrinfo(host, port, *, family=0, type=0, proto=0, flags=0):
+    """Resolve one hostname without a non-daemon pool or queued retries."""
+    global _HTTP_RESOLVER_ACTIVE
+    loop = asyncio.get_running_loop()
+    result_future = loop.create_future()
+    with _HTTP_RESOLVER_LOCK:
+        if _HTTP_RESOLVER_ACTIVE:
+            raise socket.gaierror(socket.EAI_AGAIN, "resolver operation still active")
+        _HTTP_RESOLVER_ACTIVE = True
+
+    def resolve():
+        global _HTTP_RESOLVER_ACTIVE
+        try:
+            result = socket.getaddrinfo(host, port, family, type, proto, flags)
+        except BaseException as exc:
+            completion = (None, exc)
+        else:
+            completion = (result, None)
+        finally:
+            with _HTTP_RESOLVER_LOCK:
+                _HTTP_RESOLVER_ACTIVE = False
+
+        def finish():
+            if result_future.done():
+                return
+            value, error = completion
+            if error is None:
+                result_future.set_result(value)
+            else:
+                result_future.set_exception(error)
+
+        try:
+            loop.call_soon_threadsafe(finish)
+        except RuntimeError:
+            # The loop can only be closed during process teardown; never keep
+            # a completed resolver thread alive because its consumer vanished.
+            pass
+
+    resolver = threading.Thread(
+        target=resolve, name="agata-http-resolver", daemon=True,
+    )
+    try:
+        resolver.start()
+    except BaseException:
+        with _HTTP_RESOLVER_LOCK:
+            _HTTP_RESOLVER_ACTIVE = False
+        raise
+    return await result_future
+
+
 def _run_http(coroutine):
-    """Run one HTTP coroutine without waiting for a stalled resolver at loop shutdown."""
-    global _HTTP_LOOP, _HTTP_RESOLVER_EXECUTOR
+    """Run one HTTP coroutine on a reusable loop with a bounded resolver."""
+    global _HTTP_LOOP
     with _HTTP_LOOP_LOCK:
         if _HTTP_LOOP is None or _HTTP_LOOP.is_closed():
             _HTTP_LOOP = asyncio.new_event_loop()
-            _HTTP_RESOLVER_EXECUTOR = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="agata-http-resolver",
-            )
-            _HTTP_LOOP.set_default_executor(_HTTP_RESOLVER_EXECUTOR)
+            _HTTP_LOOP.getaddrinfo = _bounded_getaddrinfo
         return _HTTP_LOOP.run_until_complete(coroutine)
 
 
