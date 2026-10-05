@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-CANONICAL_ROOT = Path.home() / "Downloads/Codex/Workers/AGATA Workers"
+CANONICAL_ROOT = Path.home() / "Library/Application Support/GPoint/agata-codex-worker"
 LANES = ("GPOINT", "GSALES", "LAB")
 MAX_SLOTS = 16
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")

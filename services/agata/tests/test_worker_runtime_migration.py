@@ -31,6 +31,12 @@ def test_status_inventory_projection_omits_secrets_and_job_payloads(tmp_path):
     }
 
 
+def test_production_runtime_and_pool_root_are_application_support():
+    canonical = Path.home() / "Library/Application Support/GPoint/agata-codex-worker"
+    assert migration.ROOT == canonical
+    assert migration.LEGACY == canonical
+
+
 def test_rendered_launchagent_keeps_canonical_label_and_pool_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(migration, "ROOT", tmp_path / "AGATA Workers")
     monkeypatch.setattr(migration, "CONFIG", tmp_path / "config/agata-worker.env")
@@ -104,9 +110,9 @@ def test_ensure_rollback_tree_creates_missing_rollback_directory(tmp_path, monke
     (root / "state").mkdir(parents=True)
     monkeypatch.setattr(migration, "ROOT", root)
 
-    rollback = migration._ensure_rollback_tree()
+    rollback = migration._ensure_rollback_tree("a" * 40)
 
-    assert rollback == root / "state/rollback"
+    assert rollback == root.parent / ".agata-codex-worker-rollback" / ("a" * 40)
     assert rollback.is_dir()
     assert not rollback.is_symlink()
     assert rollback.stat().st_mode & 0o777 == 0o700
@@ -115,6 +121,7 @@ def test_ensure_rollback_tree_creates_missing_rollback_directory(tmp_path, monke
 
 def test_apply_with_absent_rollback_tree_saves_snapshot_and_restart_evidence(tmp_path, monkeypatch):
     root = tmp_path / "AGATA Workers"
+    root.mkdir()
     legacy = tmp_path / "legacy-runtime"
     legacy.mkdir()
     (legacy / "run_codex_worker.sh").write_text("legacy runtime")
@@ -123,7 +130,8 @@ def test_apply_with_absent_rollback_tree_saves_snapshot_and_restart_evidence(tmp
     original_plist = plistlib.dumps({"Label": migration.LABEL,
                                      "ProgramArguments": [str(legacy / "run_codex_worker.sh"), "watch"]})
     plist.write_bytes(original_plist)
-    assert not (root / "state/rollback").exists()
+    rollback_root = root.parent / ".agata-codex-worker-rollback" / ("a" * 40)
+    assert not rollback_root.exists()
 
     monkeypatch.setattr(migration, "ROOT", root)
     monkeypatch.setattr(migration, "LEGACY", legacy)
@@ -136,11 +144,13 @@ def test_apply_with_absent_rollback_tree_saves_snapshot_and_restart_evidence(tmp
     monkeypatch.setattr(migration, "_network_state_sha256", lambda: "stable-network-state")
 
     def stage(manifest):
-        release = root / "runtime" / manifest["source_sha"]
+        release = root.parent / ".candidate-stage" / manifest["source_sha"]
         release.mkdir(parents=True)
         return release
 
     monkeypatch.setattr(migration, "_stage_runtime", stage)
+    monkeypatch.setattr(migration, "_install_staged_runtime", lambda _staged, _manifest:
+                        root / "runtime" / ("a" * 40))
     monkeypatch.setattr(migration, "_ensure_pool_config", lambda: None)
     monkeypatch.setattr(migration, "_pause_idle_launchagent", lambda: None)
     monkeypatch.setattr(migration, "_running_inference_pids", lambda: [])
@@ -154,6 +164,7 @@ def test_apply_with_absent_rollback_tree_saves_snapshot_and_restart_evidence(tmp
     }, "adjudication": {"passed": False, "attempts": [{"checks": {"service": False}}]}}
     monkeypatch.setattr(migration, "_health_check", lambda: healthy_status)
     monkeypatch.setattr(migration, "_kickstart_and_verify", lambda _sha: restart_evidence)
+    monkeypatch.setattr(migration, "_wait_for_successful_polls", lambda _baseline: {"passed": True})
     monkeypatch.setattr(migration.subprocess, "run", lambda command, **kwargs:
                         subprocess.CompletedProcess(command, 0))
 
@@ -164,7 +175,7 @@ def test_apply_with_absent_rollback_tree_saves_snapshot_and_restart_evidence(tmp
     else:
         raise AssertionError("the failed restart verification should trigger the normal rollback path")
 
-    rollback = root / "state/rollback"
+    rollback = rollback_root
     assert (rollback / "original-launchagent.plist").read_bytes() == original_plist
     assert (rollback / "legacy-runtime/run_codex_worker.sh").read_text() == "legacy runtime"
     assert plist.read_bytes() == original_plist
@@ -174,6 +185,98 @@ def test_apply_with_absent_rollback_tree_saves_snapshot_and_restart_evidence(tmp
     receipt = json.loads((root / "receipts/runtime-migration-rollback.json").read_text())
     assert receipt["state"] == "ROLLED_BACK"
     assert receipt["restart_evidence"] == restart_evidence
+
+
+def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(tmp_path, monkeypatch):
+    root = tmp_path / "Library/Application Support/GPoint/agata-codex-worker"
+    root.mkdir(parents=True)
+    (root / "gpoint_mac_worker.py").write_text("existing V3 worker")
+    (root / "worker-status.json").write_text('{"current_job_present":false}')
+    plist = tmp_path / "Library/LaunchAgents/worker.plist"
+    plist.parent.mkdir(parents=True)
+    old_plist = plistlib.dumps({"Label": migration.LABEL,
+        "ProgramArguments": [str(root / "run_codex_worker.sh"), "watch"]})
+    plist.write_bytes(old_plist)
+    rollback_base = tmp_path / "Library/Application Support/GPoint/.agata-codex-worker-rollback"
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "LEGACY", root)
+    monkeypatch.setattr(migration, "PLIST", plist)
+    monkeypatch.setattr(migration, "TRANSITION_LOCK", tmp_path / "transition.lock")
+    manifest = {"source_sha": "f" * 40, "bundle_sha256": "a" * 64, "assets": {}}
+    monkeypatch.setattr(migration, "candidate", lambda: manifest)
+    monkeypatch.setattr(migration, "inventory", lambda: {"production_release_lock_busy": False,
+                                                            "active_inference": False})
+    monkeypatch.setattr(migration, "_network_state_sha256", lambda: "unchanged")
+    def stage(_manifest):
+        release = tmp_path / "candidate-stage" / manifest["source_sha"]
+        release.mkdir(parents=True)
+        return release
+    monkeypatch.setattr(migration, "_stage_runtime", stage)
+    def install(_staged, _manifest):
+        release = root / "runtime" / manifest["source_sha"]
+        release.mkdir(parents=True)
+        return release
+    monkeypatch.setattr(migration, "_install_staged_runtime", install)
+    monkeypatch.setattr(migration, "_ensure_pool_config", lambda: None)
+    monkeypatch.setattr(migration, "_pause_idle_launchagent", lambda: 1234)
+    monkeypatch.setattr(migration, "_running_inference_pids", lambda: [])
+    monkeypatch.setattr(migration.os, "kill", lambda *_args: None)
+    monkeypatch.setattr(migration, "_migrate_tenant_binding", lambda _manifest: None)
+    status = {"configured_concurrency": 1, "lanes": {
+        "GPOINT": {"health": "HEALTHY"}, "GSALES": {"health": "HEALTHY"}, "LAB": {"state": "AVAILABLE"}}}
+    monkeypatch.setattr(migration, "_health_check", lambda: status)
+    restart = {"verification": "PASS", "adjudication": {"status": status}}
+    monkeypatch.setattr(migration, "_kickstart_and_verify", lambda _sha: restart)
+    monkeypatch.setattr(migration, "_wait_for_successful_polls", lambda _baseline: {"passed": True})
+    monkeypatch.setattr(migration, "launchctl_loaded", lambda: True)
+    monkeypatch.setattr(migration.subprocess, "run", lambda command, **kwargs:
+                        subprocess.CompletedProcess(command, 0))
+
+    result = migration.apply()
+
+    assert result["state"] == "COMPLETE"
+    assert root.is_dir()
+    assert (root / "runtime/current").resolve() == root / "runtime" / manifest["source_sha"]
+    snapshot = rollback_base / manifest["source_sha"]
+    assert (snapshot / "legacy-runtime/gpoint_mac_worker.py").read_text() == "existing V3 worker"
+    assert (snapshot / "original-launchagent.plist").read_bytes() == old_plist
+    assert plistlib.loads(plist.read_bytes())["ProgramArguments"] == [
+        str(root / "runtime/current/run_codex_worker.sh"), "watch"]
+
+
+def test_prepare_stages_and_snapshots_without_stopping_or_switching_live_worker(tmp_path, monkeypatch):
+    root = tmp_path / "Library/Application Support/GPoint/agata-codex-worker"
+    root.mkdir(parents=True)
+    (root / "run_codex_worker.sh").write_text("legacy worker")
+    plist = tmp_path / "Library/LaunchAgents/worker.plist"
+    plist.parent.mkdir(parents=True)
+    original_plist = plistlib.dumps({"Label": migration.LABEL,
+        "ProgramArguments": [str(root / "run_codex_worker.sh"), "watch"]})
+    plist.write_bytes(original_plist)
+    source_sha = "e" * 40
+    manifest = {"source_sha": source_sha, "bundle_sha256": "b" * 64, "assets": {}}
+    staged = tmp_path / "staging" / source_sha
+    staged.mkdir(parents=True)
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "LEGACY", root)
+    monkeypatch.setattr(migration, "PLIST", plist)
+    monkeypatch.setattr(migration, "candidate", lambda: manifest)
+    monkeypatch.setattr(migration, "inventory", lambda: {
+        "production_release_lock_busy": False, "active_inference": False,
+        "launchagent_program_arguments": [str(root / "run_codex_worker.sh"), "watch"]})
+    monkeypatch.setattr(migration, "_stage_runtime", lambda _manifest: staged)
+    monkeypatch.setattr(migration, "_verify_staged_runtime", lambda *_args: None)
+
+    result = migration.prepare()
+
+    snapshot = Path(result["rollback_snapshot"])
+    assert result["state"] == "PREPARED"
+    assert result["launchagent_stopped"] is False
+    assert result["runtime_current_changed"] is False
+    assert not (root / "runtime/current").exists()
+    assert plist.read_bytes() == original_plist
+    assert (snapshot / "run_codex_worker.sh").read_text() == "legacy worker"
+    assert (snapshot.parent / "original-launchagent.plist").read_bytes() == original_plist
 
 
 def test_restart_snapshot_requires_exact_runtime_identity_and_all_lanes(tmp_path, monkeypatch):
@@ -186,8 +289,8 @@ def test_restart_snapshot_requires_exact_runtime_identity_and_all_lanes(tmp_path
     launchctl = (f"gui/{os.getuid()}/{migration.LABEL} = {{\n"
                 "\tstate = running\n\tpid = 4312\n"
                 f"\tprogram = {root}/runtime/current/run_codex_worker.sh\n}}\n")
-    worker_command = (f"{root}/runtime/current/.venv/bin/python3.12 "
-                      f"{root}/runtime/current/gpoint_mac_worker.py watch")
+    worker_command = (f"{release}/.venv/bin/python3.12 "
+                      f"{release}/gpoint_mac_worker.py watch")
     status = {
         "configured_concurrency": 1, "current_job_present": False,
         "pool": {"state": "running"},
@@ -234,8 +337,8 @@ def test_restart_snapshot_rejects_current_symlink_pointing_at_other_sha(tmp_path
     monkeypatch.setattr(migration, "ROOT", root)
     launchctl = (f"gui/{os.getuid()}/{migration.LABEL} = {{\n"
                  "\tstate = running\n\tpid = 4312\n}\n")
-    worker_command = (f"{root}/runtime/current/.venv/bin/python3.12 "
-                      f"{root}/runtime/current/gpoint_mac_worker.py watch")
+    worker_command = (f"{root}/runtime/{wrong_sha}/.venv/bin/python3.12 "
+                      f"{root}/runtime/{wrong_sha}/gpoint_mac_worker.py watch")
     status = {"configured_concurrency": 1, "current_job_present": False, "pool": {"state": "running"},
               "lanes": {"GPOINT": {"health": "HEALTHY"}, "GSALES": {"health": "HEALTHY"},
                         "LAB": {"state": "AVAILABLE", "inference_gate": "APPROVAL_REQUIRED"}}}
@@ -337,7 +440,7 @@ def test_rollback_restores_exact_legacy_plist_and_runtime_path(tmp_path, monkeyp
     root = tmp_path / "new-runtime"
     legacy = tmp_path / "legacy-runtime"
     plist = tmp_path / "LaunchAgents/worker.plist"
-    rollback = root / "state/rollback"
+    rollback = root.parent / ".agata-codex-worker-rollback" / ("c" * 40)
     (rollback / "legacy-runtime").mkdir(parents=True)
     (rollback / "legacy-runtime/run_codex_worker.sh").write_text("legacy worker bytes")
     legacy.mkdir(parents=True)
@@ -373,7 +476,8 @@ def test_stale_rollback_snapshot_is_atomically_refreshed_from_legacy(tmp_path, m
     legacy.mkdir()
     (legacy / "run_codex_worker.sh").write_text("exact live runtime")
     (legacy / "worker-status.json").write_text('{"last_poll_at":"new"}')
-    rollback = root / "state/rollback"
+    rollback = root.parent / ".agata-codex-worker-rollback" / ("d" * 40)
+    rollback.mkdir(parents=True)
     backup = rollback / "legacy-runtime"
     backup.mkdir(parents=True)
     (backup / "run_codex_worker.sh").write_text("exact live runtime")
@@ -417,6 +521,45 @@ def test_legacy_runtime_is_removed_only_after_health_and_restart_pass(tmp_path, 
     assert not legacy.exists()
 
 
+def test_fresh_successful_pool_polls_clear_stale_lane_errors(tmp_path, monkeypatch):
+    monkeypatch.setattr(migration, "ROOT", tmp_path / "AGATA Workers")
+    status = migration.ROOT / "status/worker-status.json"
+    status.parent.mkdir(parents=True)
+    status.write_text(json.dumps({"targets": {
+        "GPOINT": {"last_poll_at": "2026-10-05T07:00:00+00:00", "last_error_code": None},
+        "GSALES": {"last_poll_at": "2026-10-05T07:00:01+00:00", "last_error_code": None},
+    }}))
+    baseline = {"targets": {
+        "GPOINT": {"last_poll_at": "2026-10-05T06:59:00+00:00", "last_error_code": "worker_target_unavailable"},
+        "GSALES": {"last_poll_at": "2026-10-05T06:59:01+00:00", "last_error_code": "worker_target_unavailable"},
+    }}
+
+    result = migration._wait_for_successful_polls(baseline, deadline=1)
+
+    assert result["passed"] is True
+    assert all(lane["poll_advanced"] and lane["stale_error_cleared"]
+               for lane in result["lanes"].values())
+
+
+def test_successful_poll_gate_fails_closed_while_stale_lane_error_remains(tmp_path, monkeypatch):
+    monkeypatch.setattr(migration, "ROOT", tmp_path / "AGATA Workers")
+    status = migration.ROOT / "status/worker-status.json"
+    status.parent.mkdir(parents=True)
+    status.write_text(json.dumps({"targets": {
+        "GPOINT": {"last_poll_at": "2026-10-05T07:00:00+00:00", "last_error_code": None},
+        "GSALES": {"last_poll_at": "2026-10-05T07:00:01+00:00", "last_error_code": "worker_target_unavailable"},
+    }}))
+    baseline = {"targets": {
+        "GPOINT": {"last_poll_at": "2026-10-05T06:59:00+00:00"},
+        "GSALES": {"last_poll_at": "2026-10-05T06:59:01+00:00"},
+    }}
+
+    result = migration._wait_for_successful_polls(baseline, deadline=0.05)
+
+    assert result["passed"] is False
+    assert result["lanes"]["GSALES"]["stale_error_cleared"] is False
+
+
 def test_stage_runtime_uses_running_python312_when_missing_from_path(tmp_path, monkeypatch):
     worker_dir = tmp_path / "source"
     worker_dir.mkdir()
@@ -450,7 +593,7 @@ def test_stage_runtime_uses_running_python312_when_missing_from_path(tmp_path, m
 
     release = migration._stage_runtime(manifest)
 
-    assert release == migration.ROOT / "runtime" / manifest["source_sha"]
+    assert release == migration._runtime_staging_base() / manifest["source_sha"]
     assert commands[0][:3] == [str(current_python), "-m", "venv"]
-    assert len(commands) == 2
+    assert len(commands) == 3
     assert (release / "bundle-manifest.json").is_file()

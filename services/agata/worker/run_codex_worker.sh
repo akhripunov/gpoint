@@ -3,7 +3,7 @@ set -eu
 
 HOME="${HOME:?HOME must be set}"
 RUNTIME_DIR="$(CDPATH= cd "$(dirname "$0")" && pwd -P)"
-SUPPORT="$HOME/Downloads/Codex/Workers/AGATA Workers"
+SUPPORT="$HOME/Library/Application Support/GPoint/agata-codex-worker"
 POOL_CONFIG="$SUPPORT/config/pool.env"
 PYTHON="$RUNTIME_DIR/.venv/bin/python3.12"
 CODEX_BIN="/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"
