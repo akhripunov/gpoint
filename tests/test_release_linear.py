@@ -191,6 +191,70 @@ class ReleaseTests(unittest.TestCase):
         with patch.object(SYNC, 'github_json', side_effect=github), patch.object(SYNC, 'artifact_json', return_value=result):
             self.assertEqual(SYNC.production_evidence()[2]['conclusion'], 'success')
 
+    def test_reconciled_ledger_can_sync_without_rewriting_failed_historical_deploy(self):
+        github, run, _result = self.production_fixture('completed', 'failure')
+        original = github
+        def reconciled(path, token=None):
+            data = original(path, token)
+            if 'production.json?' in path:
+                state = json.loads(base64.b64decode(data['content']))
+                state['publicationRepair'] = {'runId': 55}
+                state['releaseOrigin'] = 'reconciled-production-release'
+                return {'content': base64.b64encode(json.dumps(state).encode()).decode()}
+            if '/manifests/' in path:
+                manifest = json.loads(base64.b64decode(data['content']))
+                manifest.update({
+                    'eventType': 'RECONCILED_PRODUCTION_RELEASE', 'automationRunId': 55,
+                    'automationRunConclusion': 'failure', 'serverDeployStatus': 'COMPLETE',
+                    'originalFailure': {'rewritten': False},
+                    'publicationRepair': {'completedAt': '2026-10-05T04:36:09Z', 'basis': 'fresh read-only VPS reconciliation'},
+                    'dbHeadAfter': 'prisma-head', 'agataDbHeadAfter': 'agata0011',
+                    'gsalesDbHeadAfter': '001_gsales',
+                    'serverReconciliation': {'vpsSha': 'a' * 40, 'prismaHead': 'prisma-head',
+                        'agataHead': 'agata0011', 'gsalesHead': '001_gsales',
+                        'gsalesRlsSecurity': 'PASS', 'externalMiniappSha': 'a' * 40,
+                        'externalApiHealth': 'PASS'},
+                    'smoke': {'vpsHealth': 'PASS', 'imageRuntimeParity': 'PASS',
+                        'gsalesRuntimeReconciliation': 'PASS'},
+                    'runtimeFacts': {'LIVE_RELEASE_ENV_SHA': 'a' * 40,
+                        'LIVE_AGATA_API_SHA': 'a' * 40, 'LIVE_GSALES_API_SHA': 'a' * 40},
+                })
+                return {'content': base64.b64encode(json.dumps(manifest).encode()).decode()}
+            return data
+        with (patch.object(SYNC, 'github_json', side_effect=reconciled),
+              patch.object(SYNC, 'artifact_json', side_effect=AssertionError('reconciled manifest is the publication evidence'))):
+            state, manifest, deployment = SYNC.production_evidence()
+        self.assertEqual(state['publicationRepair']['runId'], 55)
+        self.assertEqual(manifest['eventType'], 'RECONCILED_PRODUCTION_RELEASE')
+        self.assertEqual(deployment['conclusion'], 'failure')
+        rendered = SYNC.render_current_state({
+            'synced_at': 'now', 'main_sha': 'b' * 40, 'main_checked_at': 'then',
+            'production_sha': 'a' * 40, 'production_checked_at': 'then',
+            'production_ref': 'prod-new', 'release_status': 'COMPLETE', 'in_sync': False,
+            'prepare': {}, 'candidate': 'NOT_PREPARED_FOR_CURRENT_MAIN',
+            'latest_main_prepare': {}, 'deploy': deployment, 'manifest': manifest,
+            'server_deploy_status': 'COMPLETE', 'worker_operational_status': 'NOT_VERIFIED',
+            'service_readiness': 'DEGRADED', 'dependency_checked_at': 'not checked',
+        })
+        self.assertIn('conclusion **failure** сохранён как есть', rendered)
+        self.assertNotIn('deploy job **SUCCESS**', rendered)
+
+    def test_reconciled_ledger_requires_matching_server_and_historical_run_evidence(self):
+        github, _run, _result = self.production_fixture('completed', 'failure')
+        original = github
+        def mismatch(path, token=None):
+            data = original(path, token)
+            if '/manifests/' in path:
+                manifest = json.loads(base64.b64decode(data['content']))
+                manifest.update({'eventType': 'RECONCILED_PRODUCTION_RELEASE', 'automationRunId': 55,
+                    'automationRunConclusion': 'failure', 'serverDeployStatus': 'COMPLETE',
+                    'serverReconciliation': {'vpsSha': 'b' * 40}})
+                return {'content': base64.b64encode(json.dumps(manifest).encode()).decode()}
+            return data
+        with patch.object(SYNC, 'github_json', side_effect=mismatch), patch.object(SYNC, 'artifact_json', return_value={}):
+            with self.assertRaises(SYNC.SyncError):
+                SYNC.production_evidence()
+
     def test_production_artifact_cannot_replace_newer_ledger_release_or_use_other_run(self):
         for field, value in [('releaseId', 'release-old'), ('automationRunId', '54'),
                              ('productionShaAfter', 'b' * 40), ('productionRef', 'prod-old'),
@@ -317,12 +381,13 @@ class WorkerCompatibilityTests(unittest.TestCase):
     def test_source_protocol_mismatch_blocks_before_any_worker_operation(self):
         import tempfile
         with tempfile.TemporaryDirectory() as temporary:
-            root=Path(temporary); source=root/'repo/services/agata/worker'; installed=root/'installed'
-            source.mkdir(parents=True); installed.mkdir()
+            root=Path(temporary); source=root/'repo/services/agata/worker'; support=root/'installed'
+            installed=support/'runtime/current'
+            source.mkdir(parents=True); installed.mkdir(parents=True)
             for name in self.contract.lane.ASSETS:
                 (source/name).write_text('candidate protocol')
                 (installed/name).write_text('incompatible protocol')
-            with patch.object(self.contract.lane,'REPO',root/'repo'), patch.object(self.contract.lane,'SUPPORT',installed), patch.object(self.contract.lane,'command',side_effect=lambda args: '' if 'status' in args else 'a'*40):
+            with patch.object(self.contract.lane,'REPO',root/'repo'), patch.object(self.contract.lane,'SUPPORT',support), patch.object(self.contract.lane,'command',side_effect=lambda args: '' if 'status' in args else 'a'*40):
                 with self.assertRaisesRegex(RuntimeError,'candidate_hash_mismatch'):
                     self.contract.lane.verify_candidate('a'*40)
 
