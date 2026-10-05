@@ -254,11 +254,11 @@ def render_current_state(state):
 def upsert_current_state(content, block, handoff=False):
     start, end = f'<!-- {CURRENT_MARKER}_BEGIN -->', f'<!-- {CURRENT_MARKER}_END -->'
     starts, ends = content.count(start), content.count(end)
-    # Remove only the exact duplicated orphan terminator observed in existing
-    # Linear documents. Other mismatches remain fail-closed.
-    if starts == 0 and ends == 2 and end + end in content:
-        content = content.replace(end + end, '', 1)
-        ends = 0
+    # Linear preserved two adjacent closing markers in existing documents.
+    # Collapse only that exact shape; other mismatches remain fail-closed.
+    if ends == 2 and end + end in content:
+        content = content.replace(end + end, end if starts == 1 else '', 1)
+        ends = content.count(end)
     if starts != ends or starts > 1:
         raise SyncError('GPoint CURRENT STATE markers are malformed')
     if start in content:

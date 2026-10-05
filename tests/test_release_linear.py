@@ -159,13 +159,13 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaises(SYNC.SyncError):
             SYNC.upsert_current_state('<!-- GPOINT_CURRENT_STATE_BEGIN -->x', block)
 
-    def test_current_state_removes_only_duplicate_orphaned_end_markers(self):
+    def test_current_state_collapses_only_duplicate_adjacent_end_markers(self):
         block = SYNC.render_current_state({'synced_at':'t','main_sha':'a'*40,'main_checked_at':'t',
             'production_sha':'a'*40,'production_checked_at':'t','production_ref':'r','release_status':'COMPLETE',
             'in_sync':True,'prepare':None,'candidate':'READY','latest_main_prepare':None,'deploy':{'id':1},
             'manifest':{'productionShaAfter':'a'*40,'dbHeadAfter':'p','agataDbHeadAfter':'a'}})
-        orphaned = 'Manual notes\n\n<!-- GPOINT_CURRENT_STATE_END --><!-- GPOINT_CURRENT_STATE_END -->\n\nkeep this'
-        updated = SYNC.upsert_current_state(orphaned, block, handoff=True)
+        duplicated = 'Manual notes\n\n<!-- GPOINT_CURRENT_STATE_BEGIN -->old<!-- GPOINT_CURRENT_STATE_END --><!-- GPOINT_CURRENT_STATE_END -->\n\nkeep this'
+        updated = SYNC.upsert_current_state(duplicated, block, handoff=True)
         self.assertEqual(updated.count('<!-- GPOINT_CURRENT_STATE_BEGIN -->'), 1)
         self.assertEqual(updated.count('<!-- GPOINT_CURRENT_STATE_END -->'), 1)
         self.assertIn('Manual notes', updated)
