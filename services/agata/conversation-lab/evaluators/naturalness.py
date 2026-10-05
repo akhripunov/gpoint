@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import sys
 import copy
 from pathlib import Path
@@ -48,11 +49,49 @@ def _inputs(lab: Path):
     benchmark = _module(lab, "benchmark")
     pilot = _module(lab, "pilot")
     data = lab / "data/golden/synthetic"
-    scenarios = benchmark.load_scenarios(data / "agata-benchmark-v1.jsonl")
     manifest = json.loads((data / "manifest-v1.json").read_text(encoding="utf-8"))
     benchmark_config = json.loads((lab / "configs/benchmark-v1.json").read_text(encoding="utf-8"))
-    benchmark.validate_manifest(scenarios, manifest, benchmark_config)
-    frozen_pilot = pilot.load_frozen_pilot(lab)
+    categories = list(benchmark.CATEGORIES)
+    expected_development_ids = [f"{category}{DEVELOPMENT_SUFFIX}" for category in categories]
+    expected_holdout_ids = [f"{category}-01" for category in categories]
+    expected_scenario_ids = {
+        f"{category}-{number:02d}" for category in categories for number in range(1, 9)
+    }
+    if (manifest.get("schema_version") != 1 or benchmark_config.get("schema_version") != 1
+            or benchmark_config.get("scenario_count") != 128
+            or benchmark_config.get("per_category") != 8
+            or benchmark_config.get("categories") != categories
+            or set(manifest.get("scenario_hashes", {})) != expected_scenario_ids
+            or manifest.get("category_counts") != {category: 8 for category in categories}
+            or manifest.get("persona_hash") != benchmark.stable_hash(benchmark_config.get("persona"))):
+        raise ValueError("benchmark metadata or frozen coverage is invalid")
+
+    scenarios_by_id = {}
+    with (data / "agata-benchmark-v1.jsonl").open(encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            scenario_id = re.search(r'"scenario_id"\s*:\s*"([^"]+)"', line)
+            if not scenario_id or scenario_id.group(1) not in expected_development_ids:
+                continue
+            key = scenario_id.group(1)
+            scenario = json.loads(line)
+            if scenario.get("scenario_id") != key or key in scenarios_by_id:
+                raise ValueError("development scenario identity is invalid")
+            if benchmark.stable_hash(scenario) != manifest["scenario_hashes"].get(key):
+                raise ValueError("development scenario hash differs from the frozen manifest")
+            scenarios_by_id[key] = scenario
+    if set(scenarios_by_id) != set(expected_development_ids):
+        raise ValueError("Naturalness development scenarios are incomplete")
+    scenarios = [scenarios_by_id[scenario_id] for scenario_id in expected_development_ids]
+
+    frozen_pilot = json.loads((lab / "configs/pilot-v1.json").read_text(encoding="utf-8"))
+    if (frozen_pilot.get("scenario_ids") != expected_holdout_ids
+            or set(frozen_pilot.get("scenario_hashes", {})) != set(expected_holdout_ids)
+            or any(frozen_pilot["scenario_hashes"].get(scenario_id) != manifest["scenario_hashes"].get(scenario_id)
+                   for scenario_id in expected_holdout_ids)
+            or frozen_pilot.get("input_hashes", {}).get("benchmark_manifest") != benchmark.stable_hash(manifest)):
+        raise ValueError("frozen Phase 3 holdout metadata is invalid")
     return benchmark, pilot, scenarios, manifest, benchmark_config, frozen_pilot
 
 
@@ -69,15 +108,15 @@ def create_naturalness_config(lab: Path) -> dict:
         if len(matches) != 1:
             raise ValueError("Naturalness development set requires exactly one category -02 scenario")
         selected.append(matches[0])
-    by_id = {scenario["scenario_id"]: scenario for scenario in scenarios}
     holdout_ids = list(frozen_pilot["scenario_ids"])
     development_ids = [scenario["scenario_id"] for scenario in selected]
     if set(development_ids) & set(holdout_ids):
         raise ValueError("development scenarios overlap the frozen Phase 3 holdout")
-    if any(scenario_id not in by_id for scenario_id in holdout_ids):
-        raise ValueError("frozen Phase 3 holdout scenario is absent from Benchmark V1")
 
-    baseline_fixture = pilot.build_invocation(lab, frozen_pilot, holdout_ids[0], "codex-cli-baseline", 0, [])
+    baseline_fixture = pilot.build_fixture_invocation(
+        lab, selected[0], manifest["scenario_hashes"][selected[0]["scenario_id"]],
+        "codex-cli-baseline", 0, [],
+    )
     policy_path = lab / "configs/naturalness-policy-v1.md"
     examples_path = lab / "data/golden/synthetic/naturalness-examples-v1.jsonl"
     artifact_hashes = {}
@@ -183,8 +222,7 @@ def load_examples(lab: Path, config: Optional[dict] = None) -> list[dict]:
     if config.get("artifact_hashes", {}).get("examples_sha256") != _file_hash(path):
         raise ValueError("Naturalness examples hash does not match the frozen manifest")
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    benchmark = _module(lab, "benchmark")
-    scenarios = benchmark.load_scenarios(lab / "data/golden/synthetic/agata-benchmark-v1.jsonl")
+    benchmark, _, scenarios, _, _, _ = _inputs(lab)
     benchmark_turns = {
         benchmark.normalize(turn["text"])
         for scenario in scenarios

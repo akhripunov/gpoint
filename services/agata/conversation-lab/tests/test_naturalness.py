@@ -3,6 +3,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import re
 import socket
 import subprocess
 import unittest
@@ -38,6 +39,43 @@ POLICY_API_AVAILABLE = NATURALNESS is not None and callable(getattr(NATURALNESS,
 
 
 class NaturalnessConfigTests(unittest.TestCase):
+    def test_ru_naturalness_dev_preflight_never_decodes_sealed_holdout_scenarios(self):
+        original_loads = json.loads
+        attempted_holdout_ids = []
+
+        def reject_sealed_scenario(payload, *args, **kwargs):
+            if isinstance(payload, str) and '"dialogue_turns"' in payload:
+                match = re.search(r'"scenario_id"\s*:\s*"([^"]+)"', payload)
+                if match and match.group(1).endswith("-01"):
+                    attempted_holdout_ids.append(match.group(1))
+                    raise AssertionError("sealed holdout dialogue was decoded")
+            return original_loads(payload, *args, **kwargs)
+
+        with patch.object(json, "loads", side_effect=reject_sealed_scenario):
+            config = NATURALNESS.load_naturalness_config(LAB)
+            baseline, candidate = NATURALNESS.build_ab_invocations(
+                LAB, config, "ru_naturalness-02", 0,
+                {"baseline": [], "naturalness-v1": []},
+            )
+            dry_run = NATURALNESS.run_fixture_dry_run(LAB, config)
+
+        self.assertEqual(attempted_holdout_ids, [])
+        self.assertEqual(dry_run["status"], "FIXTURE_ONLY")
+        self.assertEqual(dry_run["development_scenarios"], 16)
+        self.assertEqual(dry_run["live_inference_requests"], 0)
+        self.assertTrue(baseline["fixture_only"])
+        self.assertTrue(candidate["fixture_only"])
+        self.assertEqual(baseline["user_turn"], candidate["user_turn"])
+        self.assertEqual(baseline["context"], candidate["context"])
+        self.assertEqual(baseline["persona"], candidate["persona"])
+        self.assertEqual(baseline["memory"], candidate["memory"])
+        self.assertEqual(baseline["history"], candidate["history"])
+        self.assertEqual(
+            {key: value for key, value in baseline["core_request"].items() if key != "instructions"},
+            {key: value for key, value in candidate["core_request"].items() if key != "instructions"},
+        )
+        self.assertNotEqual(baseline["core_request"]["instructions"], candidate["core_request"]["instructions"])
+
     def test_documented_fixture_cli_reports_only_offline_preparation(self):
         readme = (LAB / "README.md").read_text(encoding="utf-8")
         command = "python3 services/agata/conversation-lab/evaluators/naturalness_cli.py dry-run"
@@ -302,12 +340,10 @@ class NaturalnessConfigTests(unittest.TestCase):
         self.assertIn("rationale", full_json)
 
     @unittest.skipUnless(POLICY_API_AVAILABLE, "RED scaffold: policy/examples not implemented yet")
-    def test_example_user_turns_are_not_exact_copies_of_benchmark_turns(self):
+    def test_example_user_turns_are_not_exact_copies_of_development_turns(self):
         config = NATURALNESS.load_naturalness_config(LAB)
         examples = NATURALNESS.load_examples(LAB, config)
-        benchmark = NATURALNESS._module(LAB, "benchmark")
-        scenario_path = LAB / "data/golden/synthetic/agata-benchmark-v1.jsonl"
-        scenarios = benchmark.load_scenarios(scenario_path)
+        benchmark, _, scenarios, _, _, _ = NATURALNESS._inputs(LAB)
         normalize = lambda value: " ".join(value.casefold().split())
         benchmark_turns = {normalize(turn["text"]) for scenario in scenarios for turn in scenario["dialogue_turns"] if turn["role"] == "user"}
         example_turns = [normalize(turn["text"]) for item in examples for turn in item["candidate_turns"] if turn["role"] == "user"]
