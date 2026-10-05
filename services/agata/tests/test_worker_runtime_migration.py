@@ -9,6 +9,8 @@ import plistlib
 import subprocess
 from pathlib import Path
 
+import pytest
+
 MODULE_PATH = Path(__file__).resolve().parents[1] / "worker/migrate_worker_runtime.py"
 SPEC = importlib.util.spec_from_file_location("worker_runtime_migration", MODULE_PATH)
 migration = importlib.util.module_from_spec(SPEC)
@@ -113,7 +115,13 @@ def test_prepare_startup_check_uses_candidate_python_and_exact_launch_environmen
     monkeypatch.setattr(migration, "ROOT", root)
     monkeypatch.setattr(migration, "CONFIG", tmp_path / "worker.env")
     manifest = {"source_sha": "f" * 40, "bundle_sha256": "e" * 64}
-    stdout = json.dumps({"state": "PASS", "configured_concurrency": 1})
+    stdout = json.dumps({
+        "state": "PASS", "configured_concurrency": 1,
+        "provider_parallel_capability": "NOT_VERIFIED",
+        "lanes": {lane: {"configured": True} for lane in ("GPOINT", "GSALES", "LAB")},
+        "claim_requests": 0, "inference_requests": 0,
+        "runtime_current_changed": False, "launchagent_changed": False,
+    })
     observed = {}
 
     def run(command, **kwargs):
@@ -134,6 +142,21 @@ def test_prepare_startup_check_uses_candidate_python_and_exact_launch_environmen
     assert observed["timeout"] == 30
     assert not (root / "runtime/current").exists()
     assert not (tmp_path / "Library/LaunchAgents").exists()
+
+
+def test_candidate_startup_rejects_incomplete_pass_payload(tmp_path, monkeypatch):
+    root = tmp_path / "support/agata-codex-worker"
+    staged = tmp_path / "staged/candidate"
+    (staged / ".venv/bin").mkdir(parents=True)
+    (staged / ".venv/bin/python3.12").touch()
+    (staged / "gpoint_mac_worker.py").touch()
+    monkeypatch.setattr(migration, "ROOT", root)
+    manifest = {"source_sha": "9" * 40, "bundle_sha256": "8" * 64}
+    result = subprocess.CompletedProcess([], 0, json.dumps({"state": "PASS"}), "")
+    monkeypatch.setattr(migration.subprocess, "run", lambda *_args, **_kwargs: result)
+
+    with pytest.raises(RuntimeError, match="worker_startup_check_contract_invalid"):
+        migration._validate_candidate_startup(staged, manifest)
 
 
 def test_production_runtime_and_pool_root_are_application_support():

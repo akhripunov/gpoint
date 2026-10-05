@@ -464,6 +464,7 @@ def _safe_error_code(exc: BaseException | None) -> str | None:
         "parallel_provider_capability_invalid", "parallel_provider_capability_not_verified",
         "worker_path_owner_or_symlink_invalid", "worker_path_permissions_invalid",
         "worker_path_parent_not_writable", "worker_runtime_asset_missing",
+        "worker_startup_check_contract_invalid",
     }
     if message in safe_codes:
         return message
@@ -562,14 +563,31 @@ def _validate_candidate_startup(staged_runtime: Path, manifest: dict) -> dict:
         status = json.loads(stdout) if returncode == 0 else {}
     except ValueError:
         status = {}
+    lanes = status.get("lanes") if isinstance(status, dict) else None
+    contract_valid = (
+        status.get("state") == "PASS"
+        and status.get("configured_concurrency") == 1
+        and status.get("provider_parallel_capability") == "NOT_VERIFIED"
+        and isinstance(lanes, dict)
+        and all(isinstance(lanes.get(lane), dict) and lanes[lane].get("configured") is True
+                for lane in ("GPOINT", "GSALES", "LAB"))
+        and status.get("claim_requests") == 0
+        and status.get("inference_requests") == 0
+        and status.get("runtime_current_changed") is False
+        and status.get("launchagent_changed") is False
+    )
+    failure = None if returncode == 0 and contract_valid else RuntimeError(
+        "worker_startup_check_contract_invalid" if returncode == 0 else
+        stderr.strip() or "worker_startup_check_failed"
+    )
     evidence_path = _write_diagnostic_evidence(
         diagnostics, manifest=manifest, attempt_id=attempt_id, rendered_plist=b"",
         command_evidence={"command": command, "returncode": returncode},
-        error=None if returncode == 0 else RuntimeError(stderr.strip() or "worker_startup_check_failed"),
+        error=failure,
         stdout=stdout, stderr=stderr, started_at=started_at,
     )
-    if returncode != 0 or status.get("state") != "PASS":
-        code = _safe_error_code(RuntimeError(stderr.strip())) or "worker_startup_check_failed"
+    if failure:
+        code = _safe_error_code(failure) or "worker_startup_check_failed"
         raise RuntimeError(f"worker_startup_check_failed:{code}:diagnostics={evidence_path}")
     return {"state": "PASS", "result": status, "diagnostics": str(evidence_path)}
 
