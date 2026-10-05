@@ -85,6 +85,7 @@ def test_background_release_stage_is_reaped_when_foreground_gate_fails(monkeypat
 
 def test_gsales_postgres_gate_starts_before_agata_postgres_rehearsal():
     source = SCRIPT.read_text()
-    assert source.index("start_background_stage(\n            'gsales_postgres_regression'") < source.index(
-        "measured_stage('disposable_postgres_setup'"
-    )
+    initialization = source.index('gsales_regression = None')
+    start = source.index("start_background_stage(\n            'gsales_postgres_regression'")
+    postgres = source.index("measured_stage('disposable_postgres_setup'")
+    assert initialization < start < postgres

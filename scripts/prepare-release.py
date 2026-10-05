@@ -272,6 +272,7 @@ def prepare(sha, output, *, postgres_only=False):
     receipt = output / 'receipt.json'
     receipt.unlink(missing_ok=True)  # Never retain READY from a failed retry.
     timings = {}
+    gsales_regression = None
     if not postgres_only:
         commands = (
             ('pnpm_install', ('pnpm', 'install', '--frozen-lockfile')),
@@ -311,7 +312,6 @@ def prepare(sha, output, *, postgres_only=False):
     for name in ('MESSAGE_AEAD_KEY', 'REQUEST_FINGERPRINT_HMAC_KEY', 'RETRIEVAL_QUERY_HMAC_KEY',
                  'RESPONSE_FINGERPRINT_HMAC_KEY', 'SHADOW_CANDIDATE_HMAC_KEY'):
         env[f'AGATA_{name}'] = key
-    gsales_regression = None
     try:
         with measured_stage('disposable_postgres_setup', timings):
             run('docker', 'network', 'create', network)
