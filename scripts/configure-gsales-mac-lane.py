@@ -21,7 +21,7 @@ from uuid import UUID
 
 REPO = Path(__file__).resolve().parents[1]
 HOME = Path.home()
-SUPPORT = HOME / 'Downloads/Codex/Workers/AGATA Workers'
+SUPPORT = HOME / 'Library/Application Support/GPoint/agata-codex-worker'
 CONFIG = HOME / '.config/gpoint/agata-worker.env'
 RELEASE_LOCK = HOME / '.config/gpoint/release-production.lock'
 STATUS = SUPPORT / 'status/worker-status.json'

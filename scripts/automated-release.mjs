@@ -19,7 +19,7 @@ if (String(proof.runId) !== process.env.PREPARE_RUN_ID) throw new Error('Receipt
 const git = (args, input) => execFileSync('git', args, { cwd: root, encoding: 'utf8', input, timeout: 30_000 }).trim();
 if (git(['rev-parse', 'HEAD']) !== sha || git(['status', '--porcelain'])) throw new Error('Release checkout must be clean and exact');
 const checksum = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-const workerRoot = path.join(os.homedir(), 'Downloads/Codex/Workers/AGATA Workers/runtime/current');
+const workerRoot = path.join(os.homedir(), 'Library/Application Support/GPoint/agata-codex-worker/runtime/current');
 const workerAssets = ['gpoint_mac_worker.py', 'agata_worker_pool.py', 'lab_queue.py', 'lab_fixture_manifest.json', 'requirements.txt', 'run_codex_worker.sh'];
 if (workerAssets.some(asset => {
   const source = path.join(root, 'services/agata/worker', asset);

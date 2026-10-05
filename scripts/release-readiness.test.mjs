@@ -68,7 +68,7 @@ test('canonical dependency recheck persists unavailable -> healthy without serve
   fs.writeFileSync(stateFile,JSON.stringify(initial));
   const runner=path.join(dir,'readonly-remote.sh'); const commandLog=path.join(dir,'remote-commands');
   fs.writeFileSync(runner,`#!/bin/sh\nprintf '%s\\n' "$REMOTE_CMD" >> "$DEPENDENCY_COMMAND_LOG"\nprintf '%s\\n' 'GSALES_RUNTIME=${JSON.stringify(runtime)}'\n`,{mode:0o700});
-  const support=path.join(dir,'Downloads/Codex/Workers/AGATA Workers');
+  const support=path.join(dir,'Library/Application Support/GPoint/agata-codex-worker');
   const runtimePath=path.join(support,'runtime/current');
   fs.mkdirSync(runtimePath,{recursive:true});fs.mkdirSync(path.join(support,'status'),{recursive:true});
   const workerScript=path.join(runtimePath,'run_codex_worker.sh');

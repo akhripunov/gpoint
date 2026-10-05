@@ -26,8 +26,8 @@ from uuid import UUID
 
 LABEL = "one.gpoint.agata-codex-worker"
 HOME = Path.home()
-ROOT = HOME / "Downloads/Codex/Workers/AGATA Workers"
-LEGACY = HOME / "Library/Application Support/GPoint/agata-codex-worker"
+ROOT = HOME / "Library/Application Support/GPoint/agata-codex-worker"
+LEGACY = ROOT
 CONFIG = HOME / ".config/gpoint/agata-worker.env"
 PLIST = HOME / "Library/LaunchAgents" / f"{LABEL}.plist"
 TRANSITION_LOCK = HOME / ".config/gpoint/agata-worker-pool-transition.lock"
@@ -95,6 +95,7 @@ def _python312_candidate(path: str | None) -> str | None:
         result = subprocess.run(
             [path, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
             capture_output=True, text=True, timeout=5, check=False,
+            env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -249,6 +250,65 @@ def read_only_plan() -> dict:
             "runtime_root": str(ROOT), "legacy_root": str(LEGACY), "mutation_performed": False}
 
 
+def _save_original_launchagent(rollback_tree: Path) -> bytes:
+    if not PLIST.is_file() or PLIST.is_symlink():
+        raise RuntimeError("launchagent_plist_missing_or_invalid")
+    original = PLIST.read_bytes()
+    try:
+        value = plistlib.loads(original)
+    except Exception as exc:
+        raise RuntimeError("launchagent_plist_invalid") from exc
+    expected_arguments = (
+        [str(LEGACY / "run_codex_worker.sh"), "watch"],
+        [str(ROOT / "runtime/current/run_codex_worker.sh"), "watch"],
+    )
+    if value.get("Label") != LABEL or value.get("ProgramArguments") not in expected_arguments:
+        raise RuntimeError("launchagent_identity_invalid")
+    temporary = rollback_tree / f".original-launchagent-{os.getpid()}.tmp"
+    temporary.write_bytes(original)
+    temporary.chmod(0o600)
+    os.replace(temporary, rollback_tree / "original-launchagent.plist")
+    return original
+
+
+def prepare() -> dict:
+    """Stage candidate and verify rollback evidence without stopping the worker."""
+    manifest = candidate()
+    before = inventory()
+    if before["production_release_lock_busy"]:
+        raise RuntimeError("production_release_lock_busy")
+    if before["active_inference"]:
+        raise RuntimeError("active_inference_blocks_transition")
+    expected_program = str(LEGACY / "run_codex_worker.sh")
+    current_program = str(ROOT / "runtime/current/run_codex_worker.sh")
+    if before["launchagent_program_arguments"] not in (
+            [expected_program, "watch"], [current_program, "watch"]):
+        raise RuntimeError("launchagent_identity_invalid")
+    staged_runtime = _stage_runtime(manifest)
+    rollback_tree = _ensure_rollback_tree(manifest["source_sha"])
+    original_plist = _save_original_launchagent(rollback_tree)
+    backup = rollback_tree / "legacy-runtime"
+    last_error = None
+    for _attempt in range(3):
+        try:
+            _prepare_legacy_snapshot(backup)
+            break
+        except RuntimeError as exc:
+            last_error = exc
+    else:
+        raise RuntimeError("rollback_snapshot_not_stable") from last_error
+    if not _same_tree(backup, ROOT) or (rollback_tree / "original-launchagent.plist").read_bytes() != original_plist:
+        raise RuntimeError("rollback_snapshot_verification_failed")
+    _verify_staged_runtime(staged_runtime, manifest)
+    return {
+        "state": "PREPARED", "source_sha": manifest["source_sha"],
+        "bundle_sha256": manifest["bundle_sha256"], "staged_runtime": str(staged_runtime),
+        "rollback_snapshot": str(backup), "original_plist_sha256": hashlib.sha256(original_plist).hexdigest(),
+        "active_inference": False, "launchagent_stopped": False,
+        "runtime_current_changed": False,
+    }
+
+
 def _atomic_json(path: Path, value: dict, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
@@ -267,14 +327,24 @@ def _atomic_json(path: Path, value: dict, mode: int = 0o600) -> None:
             pass
 
 
-def _ensure_rollback_tree() -> Path:
-    """Atomically create and validate the private rollback root before writes."""
-    state = ROOT / "state"
-    state.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if state.is_symlink() or state.stat().st_uid != os.getuid():
-        raise RuntimeError("worker_state_directory_permissions_invalid")
-    state.chmod(0o700)
-    rollback = state / "rollback"
+def _rollback_snapshot_base() -> Path:
+    return ROOT.parent / ".agata-codex-worker-rollback"
+
+
+def _runtime_staging_base() -> Path:
+    return ROOT.parent / ".agata-codex-worker-staging"
+
+
+def _ensure_rollback_tree(source_sha: str) -> Path:
+    """Create a private sibling snapshot tree so it survives in-place restore."""
+    if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
+        raise RuntimeError("rollback_source_sha_invalid")
+    base = _rollback_snapshot_base()
+    base.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if base.is_symlink() or base.stat().st_uid != os.getuid():
+        raise RuntimeError("worker_rollback_directory_invalid")
+    base.chmod(0o700)
+    rollback = base / source_sha
     try:
         # mkdir publishes the entire empty rollback root in one filesystem
         # operation. Snapshot files are written only after this succeeds.
@@ -375,10 +445,14 @@ def _restart_state_snapshot(expected_source_sha: str, command_timeout: float = 8
         process_result, command_errors["process"] = _run_readonly_command(
             ["ps", "-p", str(pid), "-o", "command="], command_timeout)
         process_output = process_result.stdout.strip()
-    process_identity = bool(pid_exists and str(ROOT / "runtime/current") in process_output)
-
     runtime_identity = _runtime_candidate_identity(expected_source_sha)
     runtime = ROOT / "runtime/current"
+    expected_runtime = ROOT / "runtime" / expected_source_sha
+    process_identity = bool(
+        pid_exists and runtime_identity.get("passed") is True
+        and str(expected_runtime) in process_output
+        and "gpoint_mac_worker.py watch" in process_output
+    )
     status_result, command_errors["worker_status"] = _run_readonly_command(
         [str(runtime / ".venv/bin/python3.12"), str(runtime / "gpoint_mac_worker.py"), "status"],
         command_timeout)
@@ -490,34 +564,71 @@ def _kickstart_and_verify(expected_source_sha: str) -> dict:
 def _remove_legacy_after_verification(*, health_passed: bool, restart_evidence: dict) -> None:
     if not health_passed or restart_evidence.get("verification") != "PASS":
         raise RuntimeError("legacy_cleanup_requires_full_verification")
-    _safe_remove_tree(LEGACY)
+    # The old flat worker files share the canonical Application Support root
+    # with pool state. Keep them in place; LaunchAgent now uses runtime/current.
+    if LEGACY != ROOT:
+        _safe_remove_tree(LEGACY)
 
 
 def _stage_runtime(manifest: dict) -> Path:
     release = ROOT / "runtime" / manifest["source_sha"]
     if release.exists():
-        for name in ASSETS:
-            if sha256(release / name) != manifest["assets"][name]:
-                raise RuntimeError("existing_runtime_bundle_mismatch")
+        _verify_staged_runtime(release, manifest)
         return release
-    stage = release.with_name(f".{release.name}.staging-{os.getpid()}")
+    staged_release = _runtime_staging_base() / manifest["source_sha"]
+    if staged_release.exists():
+        _verify_staged_runtime(staged_release, manifest)
+        return staged_release
+    staging_base = _runtime_staging_base()
+    staging_base.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if staging_base.is_symlink() or staging_base.stat().st_uid != os.getuid():
+        raise RuntimeError("worker_staging_directory_invalid")
+    staging_base.chmod(0o700)
+    stage = staged_release.with_name(f".{staged_release.name}.staging-{os.getpid()}")
     shutil.rmtree(stage, ignore_errors=True)
     stage.mkdir(parents=True, mode=0o700)
     for name in ASSETS:
         shutil.copy2(WORKER_DIR / name, stage / name)
     python = _resolve_python312()
+    stage_env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
     subprocess.run([python, "-m", "venv", str(stage / ".venv")], check=True,
-                   capture_output=True, timeout=60)
+                   capture_output=True, timeout=60, env=stage_env)
     subprocess.run([str(stage / ".venv/bin/python3.12"), "-m", "pip", "install", "--disable-pip-version-check",
-                    "-r", str(stage / "requirements.txt")], check=True, timeout=180)
+                    "-r", str(stage / "requirements.txt")], check=True, timeout=180, env=stage_env)
     for name in ASSETS:
         if sha256(stage / name) != manifest["assets"][name]:
             raise RuntimeError("staged_runtime_asset_mismatch")
     (stage / "bundle-manifest.json").write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
     (stage / "bundle-manifest.json").chmod(0o600)
+    _verify_staged_runtime(stage, manifest)
+    os.replace(stage, staged_release)
+    return staged_release
+
+
+def _install_staged_runtime(staged_release: Path, manifest: dict) -> Path:
+    release = ROOT / "runtime" / manifest["source_sha"]
     release.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.replace(stage, release)
+    if release.exists():
+        _verify_staged_runtime(release, manifest)
+        return release
+    _verify_staged_runtime(staged_release, manifest)
+    os.replace(staged_release, release)
+    _verify_staged_runtime(release, manifest)
     return release
+
+
+def _verify_staged_runtime(runtime: Path, manifest: dict) -> None:
+    manifest_path = runtime / "bundle-manifest.json"
+    python = runtime / ".venv/bin/python3.12"
+    try:
+        recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if recorded != manifest or not python.is_file() or not os.access(python, os.X_OK):
+            raise ValueError
+        subprocess.run([str(python), "-c", "import sys,httpx,certifi; assert sys.version_info >= (3,12)"],
+                       check=True, capture_output=True, timeout=10,
+                       env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"})
+    except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        raise RuntimeError("staged_runtime_environment_invalid") from exc
 
 
 def _migrate_tenant_binding(manifest: dict) -> None:
@@ -672,6 +783,35 @@ def _health_check(deadline: float = 60.0) -> dict:
     raise RuntimeError("new_worker_health_check_failed")
 
 
+def _wait_for_successful_polls(baseline: dict, deadline: float = 90.0) -> dict:
+    status_path = ROOT / "status/worker-status.json"
+    previous = baseline.get("targets", {}) if isinstance(baseline.get("targets"), dict) else {}
+    until = time.monotonic() + deadline
+    latest = {}
+    while time.monotonic() < until:
+        latest = safe_worker_status(status_path)
+        targets = latest.get("targets", {}) if isinstance(latest.get("targets"), dict) else {}
+        checks = {}
+        for lane in ("GPOINT", "GSALES"):
+            before = previous.get(lane, {}) if isinstance(previous.get(lane), dict) else {}
+            after = targets.get(lane, {}) if isinstance(targets.get(lane), dict) else {}
+            old_poll = before.get("last_poll_at")
+            new_poll = after.get("last_poll_at")
+            try:
+                progressed = bool(new_poll and (not old_poll or datetime.fromisoformat(
+                    str(new_poll).replace("Z", "+00:00")) > datetime.fromisoformat(
+                    str(old_poll).replace("Z", "+00:00"))))
+            except (ValueError, TypeError):
+                progressed = False
+            checks[lane] = {"poll_advanced": progressed,
+                            "stale_error_cleared": after.get("last_error_code") in (None, "")}
+        if all(value["poll_advanced"] and value["stale_error_cleared"] for value in checks.values()):
+            return {"passed": True, "lanes": checks}
+        time.sleep(min(2.0, max(0.0, until - time.monotonic())))
+    return {"passed": False, "lanes": checks if "checks" in locals() else {},
+            "last_poll_at": latest.get("last_poll_at")}
+
+
 def _network_state_sha256() -> str:
     observations = []
     for command in (("/usr/sbin/scutil", "--nwi"), ("/sbin/route", "-n", "get", "default")):
@@ -716,30 +856,21 @@ def apply() -> dict:
             raise RuntimeError("production_release_lock_busy")
         if before["active_inference"]:
             raise RuntimeError("active_inference_blocks_transition")
-        existing_backup = ROOT / "state/rollback/legacy-runtime"
-        if existing_backup.exists() and not LEGACY.exists():
-            raise RuntimeError("worker_runtime_already_migrated")
         network_before = _network_state_sha256()
-        ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if ROOT.is_symlink() or ROOT.stat().st_uid != os.getuid():
+        if not ROOT.is_dir() or ROOT.is_symlink() or ROOT.stat().st_uid != os.getuid():
             raise RuntimeError("worker_runtime_root_owner_invalid")
-        ROOT.chmod(0o700)
-        for name in ("runtime", "config", "state", "locks", "receipts", "status", "logs", "queues", "slots"):
-            directory = ROOT / name
-            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-            if directory.is_symlink() or directory.stat().st_uid != os.getuid():
-                raise RuntimeError("worker_runtime_directory_owner_invalid")
-            directory.chmod(0o700)
-        rollback_tree = _ensure_rollback_tree()
-        release = _stage_runtime(manifest)
-        _ensure_pool_config()
+        rollback_tree = _ensure_rollback_tree(manifest["source_sha"])
+        staged_release = _stage_runtime(manifest)
         backup = rollback_tree / "legacy-runtime"
-        if PLIST.is_file() and not (rollback_tree / "original-launchagent.plist").exists():
-            shutil.copy2(PLIST, rollback_tree / "original-launchagent.plist")
-            (rollback_tree / "original-launchagent.plist").chmod(0o600)
+        if PLIST.is_file():
+            _save_original_launchagent(rollback_tree)
         original_plist = PLIST.read_bytes() if PLIST.is_file() else None
         target_link = ROOT / "runtime/current"
         prior_link_target = os.readlink(target_link) if target_link.is_symlink() else None
+        state_dir = ROOT / "state"
+        state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if state_dir.is_symlink() or state_dir.stat().st_uid != os.getuid():
+            raise RuntimeError("worker_state_directory_permissions_invalid")
         maintenance_marker = ROOT / "state/maintenance-stop"
         next_plist = _render_plist(target_link)
         switch_started = False
@@ -767,7 +898,19 @@ def apply() -> dict:
                 raise RuntimeError("worker_process_did_not_stop")
             # Snapshot only while the old process is stopped, so queue/status
             # state cannot change between rollback capture and the switch.
+            maintenance_marker.unlink(missing_ok=True)
             backup = _prepare_legacy_snapshot(backup)
+            marker_fd = os.open(maintenance_marker, os.O_CREAT | os.O_WRONLY, 0o600)
+            os.close(marker_fd)
+            maintenance_marker.chmod(0o600)
+            for name in ("runtime", "config", "state", "locks", "receipts", "status", "logs", "queues", "slots"):
+                directory = ROOT / name
+                directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+                if directory.is_symlink() or directory.stat().st_uid != os.getuid():
+                    raise RuntimeError("worker_runtime_directory_owner_invalid")
+                directory.chmod(0o700)
+            _ensure_pool_config()
+            release = _install_staged_runtime(staged_release, manifest)
             # Migrate only queue/status state. Secret credentials stay in their
             # existing external mode-600 config; the LAB approval is rechecked
             # against the new bundle and remains fail-closed if stale.
@@ -779,6 +922,7 @@ def apply() -> dict:
                 if source.exists() and not destination.exists():
                     shutil.copytree(source, destination, dirs_exist_ok=True) if source.is_dir() else shutil.copy2(source, destination)
             _migrate_tenant_binding(manifest)
+            poll_baseline = safe_worker_status(ROOT / "status/worker-status.json")
             switch_started = True
             next_link = ROOT / "runtime/.current-next"
             _safe_remove_tree(next_link)
@@ -790,17 +934,20 @@ def apply() -> dict:
             os.replace(temp, PLIST)
             maintenance_marker.unlink(missing_ok=True)
             subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(PLIST)], check=True, timeout=20)
-            subprocess.run(["launchctl", "kickstart", f"gui/{os.getuid()}/{LABEL}"], check=True, timeout=15)
-            status = _health_check()
-            # Explicit restart/recovery verification for the same LaunchAgent.
+            # One bounded restart command owns both success and timeout
+            # adjudication. Do not fail on CLI timing before checking the live PID.
             restart_evidence = _kickstart_and_verify(manifest["source_sha"])
             if restart_evidence["verification"] != "PASS":
                 raise RuntimeError("restart_verification_failed")
             restarted = restart_evidence["adjudication"].get("status", {})
+            status = restarted
             if restarted.get("configured_concurrency") != 1:
                 raise RuntimeError("restart_verification_failed")
             if any(not isinstance(restarted.get("lanes", {}).get(lane), dict) for lane in ("GPOINT", "GSALES", "LAB")):
                 raise RuntimeError("lane_status_missing")
+            poll_evidence = _wait_for_successful_polls(safe_worker_status(ROOT / "status/worker-status.json"))
+            if not poll_evidence["passed"]:
+                raise RuntimeError("successful_worker_polls_not_verified")
             network_after = _network_state_sha256()
             if network_before != network_after:
                 raise RuntimeError("network_state_changed_during_transition")
@@ -814,8 +961,10 @@ def apply() -> dict:
                 "source_sha": manifest["source_sha"], "bundle_sha256": manifest["bundle_sha256"],
                 "configured_concurrency": 1, "provider_parallel_capability": "NOT_VERIFIED",
                 "health_check": status, "restart_check": restarted,
+                "fresh_poll_check": poll_evidence,
                 "restart_evidence": restart_evidence,
-                "legacy_runtime_removed": not LEGACY.exists(),
+                "legacy_runtime_removed": LEGACY != ROOT and not LEGACY.exists(),
+                "canonical_runtime_path": str(ROOT),
                 "network_state_sha256_before": network_before,
                 "network_state_sha256_after": network_after,
                 "network_configuration_writes_performed": False,
@@ -858,6 +1007,7 @@ def apply() -> dict:
                     "state": "ROLLED_BACK", "at": datetime.now(UTC).isoformat(),
                     "source_sha": manifest["source_sha"], "legacy_restored": LEGACY.exists(),
                     "launchagent_restored": original_plist is not None,
+                    "rollback_snapshot": str(backup),
                     "restart_evidence": restart_evidence,
                 })
             finally:
@@ -867,8 +1017,18 @@ def apply() -> dict:
 
 
 def rollback() -> dict:
-    backup = ROOT / "state/rollback/legacy-runtime"
-    original_plist_file = ROOT / "state/rollback/original-launchagent.plist"
+    snapshots = _rollback_snapshot_base()
+    candidates = []
+    if snapshots.is_dir() and not snapshots.is_symlink():
+        candidates = [entry for entry in snapshots.iterdir()
+                      if entry.is_dir() and not entry.is_symlink()
+                      and (entry / "legacy-runtime").is_dir()
+                      and (entry / "original-launchagent.plist").is_file()]
+    if not candidates:
+        raise RuntimeError("rollback_snapshot_missing")
+    snapshot_root = max(candidates, key=lambda entry: entry.stat().st_mtime)
+    backup = snapshot_root / "legacy-runtime"
+    original_plist_file = snapshot_root / "original-launchagent.plist"
     previous_backup = backup.with_name(".legacy-runtime-previous")
     if ((backup.is_symlink() or not backup.is_dir()) and
             (previous_backup.is_symlink() or not previous_backup.is_dir())) or not original_plist_file.is_file():
@@ -925,9 +1085,10 @@ def rollback() -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("plan", "apply", "rollback"))
+    parser.add_argument("action", choices=("plan", "prepare", "apply", "rollback"))
     args = parser.parse_args()
-    result = read_only_plan() if args.action == "plan" else rollback() if args.action == "rollback" else apply()
+    result = (read_only_plan() if args.action == "plan" else prepare() if args.action == "prepare"
+              else rollback() if args.action == "rollback" else apply())
     print(json.dumps(result, sort_keys=True, indent=2))
     return 0
 

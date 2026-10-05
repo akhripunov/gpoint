@@ -79,7 +79,7 @@ def test_pool_slot_and_job_ownership_are_separate_and_exclusive(tmp_path):
 
 def test_default_runtime_tree_is_canonical_and_contains_operational_roots():
     paths = PoolPaths.from_env({})
-    assert paths.root == Path.home() / "Downloads/Codex/Workers/AGATA Workers"
+    assert paths.root == Path.home() / "Library/Application Support/GPoint/agata-codex-worker"
     assert paths.runtime.name == "runtime"
     assert paths.state.name == "state"
     assert paths.locks.name == "locks"
