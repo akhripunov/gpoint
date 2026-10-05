@@ -14,6 +14,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "worker"))
 import gpoint_mac_worker as worker  # noqa: E402
+from agata_worker_pool import PoolConfig, PoolPaths, PoolSupervisor  # noqa: E402
 
 TEST_GPOINT_TENANT_ID = "7508f36f-774a-48aa-8c6b-42f6f160415d"
 
@@ -58,20 +59,25 @@ class MacWorkerHttpTests(unittest.TestCase):
         self.assertEqual(observed[0].headers["authorization"], "Bearer test-secret")
 
     def test_reg_b_worker_survives_connect_timeout_and_recovers(self):
-        outcomes = iter((worker.TransientNetworkError("worker_gateway_network_error"), None))
-        sleeps = []
+        calls = []
 
-        def one_poll():
-            outcome = next(outcomes)
-            if outcome:
-                raise outcome
-            return False
+        def claim():
+            calls.append(True)
+            if len(calls) == 1:
+                raise worker.TransientNetworkError("worker_gateway_network_error")
+            return None
 
-        with patch.object(worker, "process_one", side_effect=one_poll), patch.object(
-            worker, "acquire_worker_lock", return_value=type("Lock", (), {"close": lambda _self: None})()
-        ):
-            self.assertEqual(worker.run_watch(max_cycles=2, sleep_fn=sleeps.append), 0)
-        self.assertEqual(sleeps, [1.0, 3.0])
+        pool = PoolSupervisor(PoolPaths(Path(self.temp.name)), PoolConfig(), {"GPOINT": claim}, clock=lambda: 0)
+        try:
+            pool.start()
+            self.assertEqual(pool.poll_once(now=0), 0)
+            self.assertEqual(pool.poll_once(now=1), 0)
+            self.assertEqual(pool.poll_once(now=2), 0)
+            self.assertEqual(len(calls), 2)
+            status = json.loads(pool.paths.status_file.read_text())
+            self.assertEqual(status["lanes"]["GPOINT"]["state"], "HEALTHY")
+        finally:
+            pool.close()
 
     def test_reg_c_network_failure_during_complete_does_not_fail_or_duplicate_job(self):
         paths = []
@@ -103,19 +109,21 @@ class MacWorkerHttpTests(unittest.TestCase):
             worker.TransientNetworkError("network"),
             None,
         ))
-        sleeps = []
-
-        def one_poll():
+        def claim():
             value = next(calls)
             if value:
                 raise value
-            return False
+            return None
 
-        with patch.object(worker, "process_one", side_effect=one_poll), patch.object(
-            worker, "acquire_worker_lock", return_value=type("Lock", (), {"close": lambda _self: None})()
-        ):
-            worker.run_watch(max_cycles=5, sleep_fn=sleeps.append)
-        self.assertEqual(sleeps, [1.0, 2.0, 3.0, 1.0, 3.0])
+        pool = PoolSupervisor(PoolPaths(Path(self.temp.name)), PoolConfig(), {"GPOINT": claim}, clock=lambda: 0)
+        try:
+            pool.start()
+            for now in (0, 2, 6, 7, 9):
+                pool.poll_once(now=now)
+            status = json.loads(pool.paths.status_file.read_text())
+            self.assertEqual(status["lanes"]["GPOINT"]["state"], "HEALTHY")
+        finally:
+            pool.close()
 
     def test_reg_e_completed_job_has_one_completion_and_no_failure_call(self):
         calls = []
@@ -134,11 +142,8 @@ class MacWorkerHttpTests(unittest.TestCase):
         self.assertNotIn("fail", calls)
 
     def test_reg_f_fatal_configuration_error_stops_watch(self):
-        with patch.object(worker, "process_one", side_effect=worker.FatalConfigurationError("worker_gateway_auth_rejected")), patch.object(
-            worker, "acquire_worker_lock", return_value=type("Lock", (), {"close": lambda _self: None})()
-        ):
-            with self.assertRaises(worker.FatalConfigurationError):
-                worker.run_watch(max_cycles=1, sleep_fn=lambda _seconds: None)
+        with self.assertRaises(ValueError):
+            PoolConfig.from_env({"AGATA_WORKER_CONCURRENCY": "2"})
 
     def test_reg_g_network_error_does_not_expose_credentials(self):
         def handler(_request):

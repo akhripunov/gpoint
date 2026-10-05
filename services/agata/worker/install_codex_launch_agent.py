@@ -5,34 +5,27 @@ from __future__ import annotations
 
 import argparse
 import subprocess
+import sys
 from pathlib import Path
 
 LABEL = "one.gpoint.agata-codex-worker"
 HOME = Path.home()
-SUPPORT = HOME / "Library/Application Support/GPoint/agata-codex-worker"
-SOURCE = Path(__file__).with_name("gpoint_mac_worker.py")
-LAB_QUEUE_SOURCE = Path(__file__).with_name("lab_queue.py")
-LAB_FIXTURE_SOURCE = Path(__file__).with_name("lab_fixture_manifest.json")
-WRAPPER_SOURCE = Path(__file__).with_name("run_codex_worker.sh")
-PYTHON = SUPPORT / ".venv/bin/python3.12"
+RUNTIME_ROOT = HOME / "Downloads/Codex/Workers/AGATA Workers"
+SOURCES = tuple(Path(__file__).with_name(name) for name in (
+    "gpoint_mac_worker.py", "agata_worker_pool.py", "lab_queue.py",
+    "lab_fixture_manifest.json", "requirements.txt", "run_codex_worker.sh",
+))
 CODEX_APP_PATH = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex")
 
 
 def prepare() -> None:
     if not CODEX_APP_PATH.is_file():
         raise RuntimeError("codex_cli_missing")
-    if not PYTHON.is_file():
-        raise RuntimeError("dedicated_python_312_venv_missing")
-    version = subprocess.run(
-        [str(PYTHON), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    if version != "3.12":
+    python = subprocess.run(["python3.12", "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+                            check=True, capture_output=True, text=True).stdout.strip()
+    if python != "3.12":
         raise RuntimeError("dedicated_python_312_required")
-    subprocess.run([str(PYTHON), "-c", "import httpx, certifi"], check=True, capture_output=True)
-    if not SOURCE.is_file() or not LAB_QUEUE_SOURCE.is_file() or not LAB_FIXTURE_SOURCE.is_file() or not WRAPPER_SOURCE.is_file():
+    if not all(path.is_file() for path in SOURCES):
         raise RuntimeError("worker_candidate_bundle_incomplete")
 
     # Preparation validates the candidate bundle only. It must never overwrite
@@ -40,19 +33,27 @@ def prepare() -> None:
 
 
 def install() -> None:
-    raise RuntimeError("owner_approved_transition_controller_required")
+    prepare()
+    transition("apply")
 
 
 def remove() -> None:
-    raise RuntimeError("explicit_rollback_controller_required")
+    transition("rollback")
+
+
+def transition(action: str) -> None:
+    script = Path(__file__).with_name("migrate_worker_runtime.py")
+    subprocess.run([sys.executable, str(script), action], check=True)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("prepare", "install", "remove"))
+    parser.add_argument("action", choices=("prepare", "plan", "install", "remove"))
     action = parser.parse_args().action
-    if action == "prepare":
+    if action in {"prepare", "plan"}:
         prepare()
+        if action == "plan":
+            transition("plan")
     elif action == "install":
         install()
     else:

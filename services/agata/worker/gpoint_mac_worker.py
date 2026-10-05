@@ -24,15 +24,21 @@ from uuid import UUID
 import certifi
 import httpx
 import lab_queue
+from agata_worker_pool import (
+    PoolConfig,
+    PoolLockError,
+    PoolPaths,
+    PoolSupervisor,
+    acquire_lock as acquire_pool_lock,
+    write_slot_status,
+)
 
 CONFIG = Path(os.environ.get(
     "GPOINT_AGATA_WORKER_CONFIG", str(Path.home() / ".config/gpoint/agata-worker.env")
 ))
-SUPPORT = Path(os.environ.get(
-    "GPOINT_AGATA_WORKER_SUPPORT", str(Path.home() / "Library/Application Support/GPoint/agata-codex-worker")
-))
-STATUS = SUPPORT / "worker-status.json"
-INFERENCE_PROCESS = SUPPORT / "inference-process.json"
+SUPPORT = PoolPaths.from_env().root
+STATUS = PoolPaths(SUPPORT).worker_status_file
+INFERENCE_PROCESS = SUPPORT / "state/inference-process.json"
 DEFAULT_CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex")
 OUTPUT_SCHEMA = {
     "type": "object",
@@ -40,7 +46,7 @@ OUTPUT_SCHEMA = {
     "required": ["text"],
     "additionalProperties": False,
 }
-WORKER_VERSION = "3"
+WORKER_VERSION = "4"
 UTC = timezone.utc  # noqa: UP017 -- macOS system Python 3.9 compatibility.
 CODEX_TIMEOUT_SECONDS = 180
 MAX_LAB_TIMEOUT_SECONDS = 180
@@ -62,7 +68,9 @@ class GatewayResponseError(RuntimeError):
     """Gateway returned a non-retryable response or malformed payload."""
 
 
-def load_env_file(path: Path | None = None) -> None:
+def load_env_file(
+    path: Path | None = None, *, override: bool = False, allowed_keys: set[str] | None = None,
+) -> None:
     path = path or CONFIG
     if not path.exists():
         return
@@ -73,12 +81,27 @@ def load_env_file(path: Path | None = None) -> None:
         if not value or value.startswith("#") or "=" not in value:
             continue
         key, raw = value.split("=", 1)
-        if key and key.replace("_", "").isalnum() and key not in os.environ:
+        if allowed_keys is not None and key not in allowed_keys:
+            raise FatalConfigurationError("worker_pool_config_key_invalid")
+        if key and key.replace("_", "").isalnum() and (override or key not in os.environ):
             os.environ[key] = raw.strip().strip('"').strip("'")
+
+
+def load_worker_configs() -> None:
+    """Load external credentials and the separate non-secret pool settings."""
+    load_env_file(CONFIG)
+    pool_config = Path(os.environ.get(
+        "AGATA_WORKER_POOL_CONFIG",
+        str(PoolPaths(SUPPORT).config / "pool.env"),
+    ))
+    load_env_file(pool_config, override=True, allowed_keys={
+        "AGATA_WORKER_CONCURRENCY", "AGATA_CODEX_PARALLEL_CAPABILITY", "AGATA_WORKER_POLL_SECONDS",
+    })
 
 
 _target_heartbeats: dict[str, float] = {}
 _WORKER_LOCK_FD: int | None = None
+_WORKER_INHERITED_LOCK_FDS: tuple[int, ...] = ()
 _ACTIVE_INFERENCE: subprocess.Popen | None = None
 TARGET_NAMES = ("GPOINT", "GSALES")
 LAB_TARGET = "LAB"
@@ -133,7 +156,7 @@ def configured_tenant_bindings(
 
 
 def _legacy_gpoint_tenant_binding() -> str | None:
-    path = SUPPORT / "tenant-bindings.json"
+    path = SUPPORT / "config/tenant-bindings.json"
     try:
         stat = path.lstat()
     except FileNotFoundError:
@@ -221,6 +244,7 @@ def api_request(path: str, body: dict | None = None, *, target: str = "GPOINT") 
 
 def write_status(*, target: str | None = None, **fields: object) -> None:
     SUPPORT.mkdir(parents=True, exist_ok=True)
+    STATUS.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     current = {}
     if STATUS.exists():
         try:
@@ -232,10 +256,27 @@ def write_status(*, target: str | None = None, **fields: object) -> None:
         targets[target] = {**targets.get(target, {}), **fields, "updated_at": datetime.now(UTC).isoformat()}
     if target is None or target == "GPOINT":
         current.update(fields, updated_at=datetime.now(UTC).isoformat())
-    temp = STATUS.with_suffix(".tmp")
-    temp.write_text(json.dumps(current, separators=(",", ":")) + "\n", encoding="utf-8")
-    temp.chmod(0o600)
-    temp.replace(STATUS)
+    fd, temporary = tempfile.mkstemp(prefix=".worker-status-", dir=STATUS.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(current, stream, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, STATUS)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    slot_id = os.environ.get("AGATA_WORKER_SLOT_ID")
+    if slot_id:
+        write_slot_status(PoolPaths(SUPPORT), slot_id, {
+            **fields,
+            **({"lane": target} if target else {}),
+            **({"phase": "INFERENCE_STARTED"} if fields.get("current_job_present") else {}),
+        })
 
 
 def _codex_used_tools(stdout: str) -> bool:
@@ -331,8 +372,8 @@ def _record_inference_start(command: list[str]) -> None:
 
 
 def _write_inference_record(record: dict) -> None:
-    SUPPORT.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd, temporary = tempfile.mkstemp(prefix=".inference-process-", dir=SUPPORT)
+    INFERENCE_PROCESS.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(prefix=".inference-process-", dir=INFERENCE_PROCESS.parent)
     try:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
@@ -428,7 +469,14 @@ def run_inference(job: dict, *, cancel_check=None, metadata_out: dict | None = N
         }
         child_env["CI"] = "true"
         global _ACTIVE_INFERENCE
-        pass_fds = (_WORKER_LOCK_FD,) if _WORKER_LOCK_FD is not None else ()
+        pass_fds = tuple(dict.fromkeys((*_WORKER_INHERITED_LOCK_FDS,
+                                        *((_WORKER_LOCK_FD,) if _WORKER_LOCK_FD is not None else ()))))
+        slot_id = os.environ.get("AGATA_WORKER_SLOT_ID")
+        if slot_id:
+            write_slot_status(PoolPaths(SUPPORT), slot_id, {
+                "state": "BUSY", "phase": "INFERENCE_STARTED",
+                "job_id": job.get("id") or job.get("job_id"), "lane": job.get("target"),
+            })
         _record_inference_start(command)
         process = subprocess.Popen(
             command,
@@ -485,35 +533,15 @@ def run_inference(job: dict, *, cancel_check=None, metadata_out: dict | None = N
         return text.strip()
 
 
-def process_one(target: str = "GPOINT") -> bool:
-    if target == LAB_TARGET:
-        return process_lab_one()
-    global _last_heartbeat_attempt
+def validate_target_claim(target: str, claim: dict) -> None:
     targets = configured_targets()
     bindings = configured_tenant_bindings(targets)
-    if target not in targets:
+    if target not in targets or not isinstance(claim, dict):
         raise GatewayResponseError("worker_target_invalid")
-    now = time.monotonic()
-    if now - (_last_heartbeat_attempt if target == "GPOINT" else _target_heartbeats.get(target, float("-inf"))) >= HEARTBEAT_INTERVAL_SECONDS:
-        if target == "GPOINT":
-            _last_heartbeat_attempt = now
-        else:
-            _target_heartbeats[target] = now
-        target_request(target, "health")
-        write_status(target=target, last_heartbeat_at=datetime.now(UTC).isoformat())
-    claim = target_request(target, "claim").get("job")
-    if claim is None:
-        write_status(target=target, last_poll_at=datetime.now(UTC).isoformat(), state="idle")
-        return False
-    if not isinstance(claim, dict):
-        raise RuntimeError("worker_claim_invalid")
     job_id = claim.get("id")
     lease = claim.get("leaseToken")
     if not isinstance(job_id, str) or not isinstance(lease, str):
         raise RuntimeError("worker_claim_invalid")
-    # GPOINT metadata is optional only for the existing legacy gateway. Sales
-    # never accepts a claim without server-authored identity. The trusted
-    # binding is local config; payload fields can only confirm, never select it.
     identity_present = "target" in claim or "tenant_id" in claim
     legacy_gpoint_contract = (
         target == "GPOINT" and not identity_present
@@ -527,7 +555,40 @@ def process_one(target: str = "GPOINT") -> bool:
         )
     ):
         raise GatewayResponseError("worker_claim_target_mismatch")
-    write_status(target=target, last_poll_at=datetime.now(UTC).isoformat(), state="running", current_job_present=True)
+
+
+def claim_target_job(target: str) -> dict | None:
+    global _last_heartbeat_attempt
+    targets = configured_targets()
+    configured_tenant_bindings(targets)
+    if target not in targets:
+        raise GatewayResponseError("worker_target_invalid")
+    now = time.monotonic()
+    if now - (_last_heartbeat_attempt if target == "GPOINT" else _target_heartbeats.get(target, float("-inf"))) >= HEARTBEAT_INTERVAL_SECONDS:
+        if target == "GPOINT":
+            _last_heartbeat_attempt = now
+        else:
+            _target_heartbeats[target] = now
+        target_request(target, "health")
+        write_status(target=target, last_heartbeat_at=datetime.now(UTC).isoformat())
+    claim = target_request(target, "claim").get("job")
+    if claim is None:
+        write_status(target=target, last_poll_at=datetime.now(UTC).isoformat(), state="idle")
+        return None
+    if not isinstance(claim, dict):
+        raise RuntimeError("worker_claim_invalid")
+    validate_target_claim(target, claim)
+    write_status(target=target, last_poll_at=datetime.now(UTC).isoformat(), state="claimed", current_job_present=True)
+    return claim
+
+
+def execute_claimed_job(target: str, claim: dict) -> bool:
+    validate_target_claim(target, claim)
+    job_id = claim.get("id")
+    lease = claim.get("leaseToken")
+    if not isinstance(job_id, str) or not isinstance(lease, str):
+        raise GatewayResponseError("worker_claim_invalid")
+    write_status(target=target, state="running", current_job_present=True)
     try:
         response = run_inference(claim)
         if not isinstance(response, str) or not response.strip() or len(response) > (4000 if target == "GSALES" else 4096):
@@ -548,6 +609,11 @@ def process_one(target: str = "GPOINT") -> bool:
 
     # Completion is the only acknowledgement. If its response is lost, do not
     # report failure or emit a second response; server-side lease/idempotency is authoritative.
+    slot_id = os.environ.get("AGATA_WORKER_SLOT_ID")
+    if slot_id:
+        write_slot_status(PoolPaths(SUPPORT), slot_id, {
+            "state": "BUSY", "phase": "COMPLETING", "job_id": job_id, "lane": target,
+        })
     try:
         target_request(target, "complete", {
             "job_id": job_id,
@@ -570,9 +636,19 @@ def process_one(target: str = "GPOINT") -> bool:
     return True
 
 
+def process_one(target: str = "GPOINT") -> bool:
+    if target == LAB_TARGET:
+        return process_lab_one()
+    claim = claim_target_job(target)
+    return False if claim is None else execute_claimed_job(target, claim)
+
+
 def _load_lab_approval() -> dict:
     """Read a private, source-pinned OWNER approval before any LAB generation."""
-    path = Path(os.environ.get("AGATA_LAB_APPROVAL_FILE", str(SUPPORT / "lab-execution-approval.json")))
+    path = Path(os.environ.get(
+        "AGATA_LAB_APPROVAL_FILE",
+        str(PoolPaths(SUPPORT).config / "lab-execution-approval.json"),
+    ))
     try:
         stat = path.stat()
         if path.is_symlink() or stat.st_uid != os.getuid() or stat.st_mode & 0o077:
@@ -602,8 +678,12 @@ def _load_lab_approval() -> dict:
 
 def _worker_bundle_sha256() -> str:
     digest = hashlib.sha256()
-    for name, path in (("gpoint_mac_worker.py", Path(__file__)), ("lab_queue.py", Path(lab_queue.__file__)),
-                       ("lab_fixture_manifest.json", lab_queue.FIXTURE_MANIFEST)):
+    for name, path in (("gpoint_mac_worker.py", Path(__file__)),
+                       ("agata_worker_pool.py", Path(__file__).with_name("agata_worker_pool.py")),
+                       ("lab_queue.py", Path(lab_queue.__file__)),
+                       ("lab_fixture_manifest.json", lab_queue.FIXTURE_MANIFEST),
+                       ("run_codex_worker.sh", Path(__file__).with_name("run_codex_worker.sh")),
+                       ("requirements.txt", Path(__file__).with_name("requirements.txt"))):
         digest.update(name.encode("utf-8") + b"\0")
         digest.update(path.read_bytes())
     return digest.hexdigest()
@@ -611,7 +691,7 @@ def _worker_bundle_sha256() -> str:
 
 def _consume_lab_approval(approval: dict) -> None:
     """Consume one approval call before inference; ambiguous jobs are never retried."""
-    usage = SUPPORT / "lab-approval-usage"
+    usage = SUPPORT / "state/lab-approval-usage"
     usage.mkdir(parents=True, exist_ok=True, mode=0o700)
     usage.chmod(0o700)
     path = usage / (approval["approval_id"] + ".json")
@@ -635,16 +715,29 @@ def _consume_lab_approval(approval: dict) -> None:
         os.close(fd)
 
 
-def process_lab_one() -> bool:
+def claim_lab_job() -> dict | None:
     if os.environ.get("AGATA_LAB_WORKER_ENABLED") != "true":
         raise FatalConfigurationError("lab_worker_disabled")
-    approval = _load_lab_approval()
-    root = SUPPORT / "lab-queue"
-    job = lab_queue.claim_next(root)
-    if job is None:
-        write_status(target=LAB_TARGET, state="idle", last_poll_at=datetime.now(UTC).isoformat())
-        return False
+    try:
+        _load_lab_approval()
+    except FatalConfigurationError as exc:
+        raise FatalConfigurationError("lab_approval_required") from exc
+    root = PoolPaths(SUPPORT).lab_queue
+    return lab_queue.claim_next(root)
+
+
+def execute_lab_claimed_job(job: dict) -> bool:
+    if os.environ.get("AGATA_LAB_WORKER_ENABLED") != "true":
+        raise FatalConfigurationError("lab_worker_disabled")
+    root = PoolPaths(SUPPORT).lab_queue
     job_id = job["job_id"]
+    try:
+        approval = _load_lab_approval()
+    except FatalConfigurationError:
+        lab_queue.finish(root, job_id, status="failed", error_code="lab_approval_required", identity=job)
+        write_status(target=LAB_TARGET, state="idle", current_job_present=False,
+                     last_error_code="lab_approval_required")
+        return True
     if (job["experiment_id"] not in approval["experiment_ids"]
             or job["configuration_id"] not in approval["configuration_ids"]
             or job["scenario_id"] not in approval["scenario_ids"]):
@@ -686,6 +779,17 @@ def process_lab_one() -> bool:
     return True
 
 
+def process_lab_one() -> bool:
+    if os.environ.get("AGATA_LAB_WORKER_ENABLED") != "true":
+        raise FatalConfigurationError("lab_worker_disabled")
+    _load_lab_approval()
+    job = lab_queue.claim_next(PoolPaths(SUPPORT).lab_queue)
+    if job is None:
+        write_status(target=LAB_TARGET, state="idle", last_poll_at=datetime.now(UTC).isoformat())
+        return False
+    return execute_lab_claimed_job(job)
+
+
 class TargetScheduler:
     """One synchronous execution slot, fair rotation and independent backoff."""
 
@@ -720,6 +824,77 @@ class TargetScheduler:
         return False
 
 
+def reject_claim(lane: str, claim: dict, error_code: str) -> None:
+    """Release a claim without inference, preserving server retries/idempotency."""
+    try:
+        if lane == LAB_TARGET:
+            job_id = claim.get("job_id")
+            if isinstance(job_id, str):
+                lab_queue.finish(PoolPaths(SUPPORT).lab_queue, job_id, status="failed",
+                                 error_code=error_code, identity=claim)
+            return
+        job_id = claim.get("id")
+        lease = claim.get("leaseToken")
+        if isinstance(job_id, str) and isinstance(lease, str):
+            target_request(lane, "fail", {
+                "job_id": job_id, "lease_token": lease, "error_code": error_code,
+            })
+    except Exception:
+        write_status(target=lane, state="network_error", last_error_code="worker_claim_rejection_failed")
+
+
+def build_pool_supervisor() -> PoolSupervisor:
+    paths = PoolPaths.from_env()
+    config = PoolConfig.from_env(dict(os.environ))
+    targets = configured_targets()
+    configured_tenant_bindings(targets)
+    claimers = {
+        target: (lambda target=target: claim_target_job(target))
+        for target in targets
+    }
+    if os.environ.get("AGATA_LAB_WORKER_ENABLED") == "true":
+        claimers[LAB_TARGET] = claim_lab_job
+    return PoolSupervisor(paths, config, claimers, reject_offer=reject_claim)
+
+
+def run_pool(*, max_cycles: int | None = None, sleep_fn=time.sleep) -> int:
+    supervisor = build_pool_supervisor()
+    supervisor.start()
+    cycles = 0
+    try:
+        lab_queue.reconcile_running(
+            supervisor.paths.lab_queue,
+            active_job_ids=_active_lab_slot_job_ids(supervisor.paths),
+        )
+        while max_cycles is None or cycles < max_cycles:
+            cycles += 1
+            supervisor.poll_once()
+            sleep_fn(min(supervisor.config.poll_seconds, 60.0))
+    finally:
+        supervisor.close()
+    return 0
+
+
+def _active_lab_slot_job_ids(paths: PoolPaths) -> set[str]:
+    """Do not mark LAB jobs ambiguous while an orphaned slot still owns them."""
+    active = set()
+    for state_file in paths.slots.glob("slot-*/state.json"):
+        try:
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        job_id = state.get("job_id")
+        if state.get("state") != "BUSY" or state.get("lane") != LAB_TARGET or not isinstance(job_id, str):
+            continue
+        try:
+            slot_lock = acquire_pool_lock(paths.slot_lock(state_file.parent.name))
+        except PoolLockError:
+            active.add(job_id)
+        else:
+            slot_lock.close()
+    return active
+
+
 def run_targets(poll_seconds: float, max_cycles: int | None, sleep_fn) -> int:
     scheduler = TargetScheduler()
     lock = acquire_worker_lock()
@@ -730,7 +905,7 @@ def run_targets(poll_seconds: float, max_cycles: int | None, sleep_fn) -> int:
         _clear_stale_inference_record()
     cycles = 0
     try:
-        lab_queue.reconcile_running(SUPPORT / "lab-queue")
+        lab_queue.reconcile_running(PoolPaths(SUPPORT).lab_queue)
         while max_cycles is None or cycles < max_cycles:
             cycles += 1
             scheduler.poll()
@@ -747,61 +922,9 @@ def run_watch(
     max_cycles: int | None = None,
     sleep_fn=time.sleep,
 ) -> int:
-    """Run a single worker process with bounded recovery from transient gateway errors."""
-    if (os.environ.get("GSALES_AGATA_WORKER_URL") or os.environ.get("GSALES_AGATA_WORKER_TOKEN")
-            or os.environ.get("AGATA_LAB_WORKER_ENABLED") == "true"):
-        return run_targets(poll_seconds, max_cycles, sleep_fn)
-    lock = acquire_worker_lock()
-    global _WORKER_LOCK_FD
-    fileno = getattr(lock, "fileno", None)
-    _WORKER_LOCK_FD = fileno() if callable(fileno) else None
-    if _WORKER_LOCK_FD is not None:
-        _clear_stale_inference_record()
-    delay_index = 0
-    consecutive_network_failures = 0
-    cycles = 0
-    try:
-        lab_queue.reconcile_running(SUPPORT / "lab-queue")
-        while max_cycles is None or cycles < max_cycles:
-            cycles += 1
-            try:
-                process_one()
-            except TransientNetworkError:
-                consecutive_network_failures += 1
-                delay = POLL_BACKOFF_SECONDS[min(delay_index, len(POLL_BACKOFF_SECONDS) - 1)]
-                delay_index = min(delay_index + 1, len(POLL_BACKOFF_SECONDS) - 1)
-                write_status(
-                    state="network_error",
-                    last_error_code="worker_gateway_network_error",
-                    consecutive_network_failures=consecutive_network_failures,
-                    next_poll_delay_seconds=delay,
-                )
-                sleep_fn(delay)
-                continue
-            except FatalConfigurationError:
-                raise
-            except Exception:
-                # A malformed individual job must not create a process restart storm.
-                write_status(state="error", current_job_present=False, last_error_code="worker_poll_failed")
-                sleep_fn(min(max(poll_seconds, 1.0), 60.0))
-                continue
-
-            recovered = consecutive_network_failures > 0
-            consecutive_network_failures = 0
-            delay_index = 0
-            now = datetime.now(UTC).isoformat()
-            write_status(
-                state="idle",
-                last_poll_at=now,
-                last_error_code=None,
-                consecutive_network_failures=0,
-                **({"last_network_recovery_at": now} if recovered else {}),
-            )
-            sleep_fn(min(max(poll_seconds, 1.0), 60.0))
-    finally:
-        _WORKER_LOCK_FD = None
-        lock.close()
-    return 0
+    """Run the single pool supervisor with N=1 as the safe default."""
+    del poll_seconds
+    return run_pool(max_cycles=max_cycles, sleep_fn=sleep_fn)
 
 
 def unauthenticated_health_probe() -> None:
@@ -906,20 +1029,16 @@ def conversational_smoke() -> bool:
 
 
 def acquire_worker_lock():
-    SUPPORT.mkdir(parents=True, exist_ok=True, mode=0o700)
-    lock_path = SUPPORT / "worker.lock"
-    descriptor = lock_path.open("a", encoding="utf-8")
-    lock_path.chmod(0o600)
     try:
-        fcntl.flock(descriptor.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError as exc:
-        descriptor.close()
+        paths = PoolPaths(SUPPORT)
+        paths.ensure()
+        return acquire_pool_lock(paths.pool_lock)
+    except RuntimeError as exc:
         raise RuntimeError("worker_already_running") from exc
-    return descriptor
 
 
 def status() -> int:
-    load_env_file()
+    load_worker_configs()
     service_loaded = False
     if shutil.which("launchctl"):
         service = subprocess.run(
@@ -935,11 +1054,22 @@ def status() -> int:
             saved = json.loads(STATUS.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             saved = {}
+    lane_health = {}
+    targets = configured_targets()
+    for target in targets:
+        try:
+            target_request(target, "health")
+            lane_health[target] = "HEALTHY"
+        except Exception as exc:
+            lane_health[target] = "DEGRADED"
+            saved.setdefault("targets", {}).setdefault(target, {})["health_error_code"] = str(exc)[:64]
     try:
-        api_request("health")
-        queue_status = "reachable"
-    except Exception as exc:
-        queue_status = str(exc)[:64]
+        pool_saved = json.loads(PoolPaths(SUPPORT).status_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        pool_saved = {}
+    targets_saved = saved.get("targets") if isinstance(saved.get("targets"), dict) else {}
+    lanes = pool_saved.get("lanes") if isinstance(pool_saved.get("lanes"), dict) else {}
+    queue_status = "reachable" if all(state == "HEALTHY" for state in lane_health.values()) else "degraded"
     print(json.dumps({
         "worker_version": WORKER_VERSION,
         "enabled": bool(os.environ.get("GPOINT_AGATA_WORKER_TOKEN")),
@@ -950,23 +1080,77 @@ def status() -> int:
         "last_error_code": saved.get("last_error_code"),
         "current_job_present": saved.get("current_job_present", False),
         "queue_connectivity": queue_status,
+        "configured_concurrency": pool_saved.get("configured_concurrency", pool_saved.get("pool", {}).get("total", 1)),
+        "pool": pool_saved.get("pool", {"state": "NOT_VERIFIED"}),
+        "provider": pool_saved.get("provider", {
+            "state": "HEALTHY", "parallel_capability": os.environ.get("AGATA_CODEX_PARALLEL_CAPABILITY", "NOT_VERIFIED"),
+        }),
+        "slots": pool_saved.get("slots", {}),
+        "lanes": {
+            lane: {
+                **(lanes.get(lane) if isinstance(lanes.get(lane), dict) else {}),
+                **(targets_saved.get(lane) if isinstance(targets_saved.get(lane), dict) else {}),
+                "health": lane_health.get(lane, "NOT_VERIFIED"),
+            }
+            for lane in ("GPOINT", "GSALES", "LAB")
+        },
     }, indent=2))
+    return 0
+
+
+def execute_slot(lane: str, slot_id: str) -> int:
+    global _WORKER_INHERITED_LOCK_FDS
+    if lane not in {"GPOINT", "GSALES", LAB_TARGET} or not re.fullmatch(r"slot-[0-9]{2}", slot_id):
+        raise FatalConfigurationError("worker_slot_identity_invalid")
+    fds = []
+    for key in ("AGATA_WORKER_SLOT_LOCK_FD", "AGATA_WORKER_JOB_LOCK_FD"):
+        try:
+            fd = int(os.environ[key])
+            os.fstat(fd)
+        except (KeyError, ValueError, OSError) as exc:
+            raise FatalConfigurationError("worker_slot_lock_inheritance_invalid") from exc
+        fds.append(fd)
+    _WORKER_INHERITED_LOCK_FDS = tuple(fds)
+    offer = json.load(sys.stdin)
+    if not isinstance(offer, dict):
+        raise FatalConfigurationError("worker_claim_invalid")
+    job_id = offer.get("job_id") if lane == LAB_TARGET else offer.get("id")
+    if not isinstance(job_id, str):
+        raise FatalConfigurationError("worker_claim_invalid")
+    write_slot_status(PoolPaths(SUPPORT), slot_id, {
+        "state": "BUSY", "phase": "CLAIMED", "lane": lane, "job_id": job_id,
+        "pid": os.getpid(),
+    })
+    result = execute_lab_claimed_job(offer) if lane == LAB_TARGET else execute_claimed_job(lane, offer)
+    write_slot_status(PoolPaths(SUPPORT), slot_id, {
+        "state": "IDLE" if result else "FAILED",
+        "phase": "COMPLETE" if result else "JOB_FAILED",
+        "lane": lane, "job_id": None, "last_job_id": job_id, "pid": None,
+    })
     return 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("status", "once", "watch", "conversational-smoke", "network-stability"))
+    parser.add_argument("command", choices=("status", "once", "watch", "execute-slot", "conversational-smoke", "network-stability"))
     parser.add_argument("--poll-seconds", type=float, default=3.0)
+    parser.add_argument("--lane", choices=("GPOINT", "GSALES", "LAB"))
+    parser.add_argument("--slot")
     args = parser.parse_args()
     try:
-        load_env_file()
+        load_worker_configs()
         if args.command == "status":
             return status()
         if args.command == "conversational-smoke":
             return 0 if conversational_smoke() else 1
         if args.command == "network-stability":
             return network_stability_smoke()
+        if args.command == "execute-slot":
+            signal.signal(signal.SIGTERM, _terminate_active_inference)
+            signal.signal(signal.SIGINT, _terminate_active_inference)
+            if not args.lane or not args.slot:
+                raise FatalConfigurationError("worker_slot_identity_invalid")
+            return execute_slot(args.lane, args.slot)
         if args.command in {"once", "watch"}:
             targets = configured_targets()
             configured_tenant_bindings(targets)

@@ -18,10 +18,14 @@ const proof = verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, sha);
 if (String(proof.runId) !== process.env.PREPARE_RUN_ID) throw new Error('Receipt does not belong to the approved GitHub run');
 const git = (args, input) => execFileSync('git', args, { cwd: root, encoding: 'utf8', input, timeout: 30_000 }).trim();
 if (git(['rev-parse', 'HEAD']) !== sha || git(['status', '--porcelain'])) throw new Error('Release checkout must be clean and exact');
-const workerSource = path.join(root, 'services/agata/worker/gpoint_mac_worker.py');
-const workerInstalled = path.join(os.homedir(), 'Library/Application Support/GPoint/agata-codex-worker/gpoint_mac_worker.py');
 const checksum = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-if (!fs.existsSync(workerInstalled) || checksum(workerSource) !== checksum(workerInstalled)) {
+const workerRoot = path.join(os.homedir(), 'Downloads/Codex/Workers/AGATA Workers/runtime/current');
+const workerAssets = ['gpoint_mac_worker.py', 'agata_worker_pool.py', 'lab_queue.py', 'lab_fixture_manifest.json', 'requirements.txt', 'run_codex_worker.sh'];
+if (workerAssets.some(asset => {
+  const source = path.join(root, 'services/agata/worker', asset);
+  const installed = path.join(workerRoot, asset);
+  return !fs.existsSync(source) || !fs.existsSync(installed) || checksum(source) !== checksum(installed);
+})) {
   throw new Error('Installed Mac worker differs from candidate. Install the published candidate worker before apply.');
 }
 if (!process.env.RELEASE_RESULT || !process.env.GITHUB_RUN_ID) throw new Error('Release evidence paths are required');

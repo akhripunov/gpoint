@@ -40,11 +40,11 @@ HOME_DIR = Path.home()
 REPO = Path(__file__).resolve().parents[1]
 VPS_RUNNER = HOME_DIR / ".local/bin/gpoint-vps-runner"
 PLIST = HOME_DIR / "Library/LaunchAgents" / f"{LABEL}.plist"
-SUPPORT = HOME_DIR / "Library/Application Support/GPoint/agata-codex-worker"
+SUPPORT = HOME_DIR / "Downloads/Codex/Workers/AGATA Workers"
 RECOVERY_ROOT = HOME_DIR / "Library/Application Support/GPoint/gsales-qa-recovery"
-WORKER = SUPPORT / "gpoint_mac_worker.py"
-WRAPPER = SUPPORT / "run_codex_worker.sh"
-PYTHON = SUPPORT / ".venv/bin/python3.12"
+WORKER = SUPPORT / "runtime/current/gpoint_mac_worker.py"
+WRAPPER = SUPPORT / "runtime/current/run_codex_worker.sh"
+PYTHON = SUPPORT / "runtime/current/.venv/bin/python3.12"
 SAFE_RECOVERY_ERRORS = {
     "authoritative_queue_snapshot_failed",
     "authoritative_queue_snapshot_invalid",
@@ -105,7 +105,7 @@ def loaded() -> bool:
 
 def status() -> dict:
     try:
-        return json.loads((SUPPORT / "worker-status.json").read_text())
+        return json.loads((SUPPORT / "status/worker-status.json").read_text())
     except (OSError, ValueError) as exc:
         raise RuntimeError("worker_status_invalid") from exc
 

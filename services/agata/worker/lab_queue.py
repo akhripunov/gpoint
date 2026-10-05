@@ -267,10 +267,13 @@ def read_receipt(root: Path, job_id: str) -> dict | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def reconcile_running(root: Path) -> int:
+def reconcile_running(root: Path, *, active_job_ids: set[str] | None = None) -> int:
     _, running, _, _ = _layout(root)
     count = 0
+    active_job_ids = active_job_ids or set()
     for path in list(running.glob("*.json")):
+        if path.stem in active_job_ids:
+            continue
         finish(root, path.stem, status="ambiguous", error_code="worker_restart_during_generation")
         count += 1
     return count

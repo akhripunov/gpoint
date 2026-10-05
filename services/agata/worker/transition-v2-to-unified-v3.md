@@ -1,4 +1,8 @@
-# V2 to Unified AGATA Worker V3 transition handoff
+# V2 to Unified AGATA Worker V3 transition handoff (historical, superseded)
+
+> This describes the prior V2-to-V3 migration only. Do not use its controller
+> for current runtime changes. The canonical Worker Pool migration and rollback
+> commands are in [`migrate_worker_runtime.py`](./migrate_worker_runtime.py).
 
 This is an installation handoff only. The current task prepares and tests files;
 it does not stop or replace the installed V2 LaunchAgent. A separate OWNER

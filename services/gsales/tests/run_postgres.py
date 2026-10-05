@@ -63,7 +63,7 @@ def main():
     real_codex = "--real-codex" in sys.argv
     if real_codex:
         import fcntl
-        lock_path = Path.home() / "Library/Application Support/GPoint/agata-codex-worker/worker.lock"
+        lock_path = Path.home() / "Downloads/Codex/Workers/AGATA Workers/locks/pool.lock"
         with lock_path.open("rb") as lock:
             try:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

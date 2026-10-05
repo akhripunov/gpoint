@@ -37,7 +37,7 @@ def test_two_targets_route_through_shared_worker_without_context_mix(tmp_path, m
         monkeypatch.setenv("GSALES_AGATA_WORKER_TOKEN", "sales-worker-test")
         monkeypatch.setenv("GPOINT_AGATA_TENANT_ID", point_tenant_id)
         monkeypatch.setenv("GSALES_AGATA_TENANT_ID", sales_tenant_id)
-        monkeypatch.setattr(worker, "SUPPORT", Path.home() / "Library/Application Support/GPoint/agata-codex-worker" if real_codex else tmp_path / "worker")
+        monkeypatch.setattr(worker, "SUPPORT", Path.home() / "Downloads/Codex/Workers/AGATA Workers" if real_codex else tmp_path / "worker")
         monkeypatch.setattr(worker, "STATUS", tmp_path / "worker/status.json")
         # Real rehearsal reuses installed support files but keeps status disposable.
         worker.STATUS.parent.mkdir(parents=True, exist_ok=True)

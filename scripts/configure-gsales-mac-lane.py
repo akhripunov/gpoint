@@ -21,14 +21,14 @@ from uuid import UUID
 
 REPO = Path(__file__).resolve().parents[1]
 HOME = Path.home()
-SUPPORT = HOME / 'Library/Application Support/GPoint/agata-codex-worker'
+SUPPORT = HOME / 'Downloads/Codex/Workers/AGATA Workers'
 CONFIG = HOME / '.config/gpoint/agata-worker.env'
 RELEASE_LOCK = HOME / '.config/gpoint/release-production.lock'
-STATUS = SUPPORT / 'worker-status.json'
-INFERENCE = SUPPORT / 'inference-process.json'
+STATUS = SUPPORT / 'status/worker-status.json'
+INFERENCE = SUPPORT / 'state/inference-process.json'
 LABEL = 'one.gpoint.agata-codex-worker'
 URL = 'https://gpoint.amiora.one/gsales/agata-worker'
-ASSETS = ('gpoint_mac_worker.py', 'lab_queue.py', 'lab_fixture_manifest.json', 'run_codex_worker.sh')
+ASSETS = ('gpoint_mac_worker.py', 'agata_worker_pool.py', 'lab_queue.py', 'lab_fixture_manifest.json', 'requirements.txt', 'run_codex_worker.sh')
 TEST_TENANTS = {'c4d67889-877e-4d1b-a8d8-597c479d638f', '7508f36f-774a-48aa-8c6b-42f6f160415d'}
 
 
@@ -52,7 +52,7 @@ def verify_candidate(candidate):
     hashes = {}
     for name in ASSETS:
         source = REPO / 'services/agata/worker' / name
-        installed = SUPPORT / name
+        installed = SUPPORT / 'runtime/current' / name
         if installed.is_symlink() or not installed.is_file():
             raise RuntimeError('installed_worker_asset_invalid')
         expected = hashlib.sha256(source.read_bytes()).hexdigest()
@@ -60,8 +60,9 @@ def verify_candidate(candidate):
             raise RuntimeError('installed_worker_candidate_hash_mismatch')
         hashes[name] = expected
     plist = plistlib.loads(private_file(HOME / 'Library/LaunchAgents' / (LABEL + '.plist')))
-    if (plist.get('Label') != LABEL or plist.get('ProgramArguments') != [str(SUPPORT / 'run_codex_worker.sh'), 'watch']
-            or plist.get('WorkingDirectory') != str(SUPPORT) or plist.get('RunAtLoad') is not True or plist.get('KeepAlive') is not True):
+    runtime = SUPPORT / 'runtime/current'
+    if (plist.get('Label') != LABEL or plist.get('ProgramArguments') != [str(runtime / 'run_codex_worker.sh'), 'watch']
+            or plist.get('WorkingDirectory') != str(runtime) or plist.get('RunAtLoad') is not True or plist.get('KeepAlive') is not True):
         raise RuntimeError('installed_launchagent_identity_invalid')
     return hashes
 
@@ -76,7 +77,8 @@ def verified_pid():
         raise RuntimeError('launchagent_pid_ambiguous')
     # macOS ps prints argv joined by spaces without quoting path components.
     actual = command(['/bin/ps', '-p', str(pid), '-o', 'command='])
-    expected = ' '.join([str(SUPPORT / '.venv/bin/python3.12'), str(SUPPORT / 'gpoint_mac_worker.py'), 'watch'])
+    runtime = SUPPORT / 'runtime/current'
+    expected = ' '.join([str(runtime.resolve() / '.venv/bin/python3.12'), str(runtime.resolve() / 'gpoint_mac_worker.py'), 'watch'])
     if actual != expected:
         raise RuntimeError('launchagent_process_identity_invalid')
     return pid
@@ -167,7 +169,7 @@ def render_config(text, payload):
         raise RuntimeError('lane_credentials_must_be_distinct')
     gp = old.get('GPOINT_AGATA_TENANT_ID')
     if not gp:
-        sidecar = SUPPORT / 'tenant-bindings.json'
+        sidecar = SUPPORT / 'config/tenant-bindings.json'
         if sidecar.exists():
             gp = json.loads(private_file(sidecar)).get('tenant_id')
     if gp == tenant:
@@ -299,7 +301,7 @@ def apply_frozen(candidate, assets, original, backup, staged, before, pid, froze
     try:
         try:
             for name, expected in assets.items():
-                installed = SUPPORT / name
+                installed = SUPPORT / 'runtime/current' / name
                 if installed.is_symlink() or hashlib.sha256(installed.read_bytes()).hexdigest() != expected:
                     raise RuntimeError('installed_worker_asset_changed')
             if private_file(CONFIG).decode() != original or time.monotonic() - frozen_at >= 4:
