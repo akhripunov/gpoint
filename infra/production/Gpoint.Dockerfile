@@ -1,8 +1,6 @@
 # syntax=docker/dockerfile:1.7
 FROM node:22-bookworm-slim AS build
 WORKDIR /workspace
-ARG GPOINT_BUILD_SHA
-ENV GPOINT_BUILD_SHA=${GPOINT_BUILD_SHA}
 ENV PNPM_HOME=/pnpm
 ENV PATH=${PNPM_HOME}:${PATH}
 RUN apt-get update && apt-get install -y --no-install-recommends git openssl ca-certificates && rm -rf /var/lib/apt/lists/*
@@ -23,6 +21,8 @@ RUN pnpm --filter @gpoint/db build
 RUN pnpm --filter @gpoint/api build
 RUN pnpm --filter @gpoint/worker build
 RUN pnpm --filter @gpoint/bot build
+ARG GPOINT_BUILD_SHA
+ENV GPOINT_BUILD_SHA=${GPOINT_BUILD_SHA}
 RUN pnpm --filter @gpoint/miniapp build
 
 FROM node:22-bookworm-slim AS runtime

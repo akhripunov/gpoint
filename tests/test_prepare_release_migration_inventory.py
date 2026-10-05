@@ -103,3 +103,19 @@ def test_candidate_image_builds_use_exact_platform_and_isolated_reusable_cache_s
     assert 'cache_scope = f\'gpoint-{tag}\'' in source
     assert 'crazy-max/ghaction-github-runtime@a1014fef88934970651c7916e89aaf51bc58f38b' in workflow_source
     assert 'docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069' in workflow_source
+
+
+def test_gpoint_build_sha_does_not_invalidate_unrelated_build_layers():
+    dockerfile = (SCRIPT.parent.parent / 'infra/production/Gpoint.Dockerfile').read_text()
+    sha_env = dockerfile.index('ENV GPOINT_BUILD_SHA=${GPOINT_BUILD_SHA}')
+    miniapp_build = dockerfile.index('RUN pnpm --filter @gpoint/miniapp build')
+
+    assert sha_env < miniapp_build
+    for unrelated_build in (
+            'RUN pnpm --filter @gpoint/db exec prisma generate',
+            'RUN pnpm --filter @gpoint/agata-client build',
+            'RUN pnpm --filter @gpoint/db build',
+            'RUN pnpm --filter @gpoint/api build',
+            'RUN pnpm --filter @gpoint/worker build',
+            'RUN pnpm --filter @gpoint/bot build'):
+        assert dockerfile.index(unrelated_build) < sha_env
