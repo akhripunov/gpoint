@@ -415,3 +415,42 @@ def test_legacy_runtime_is_removed_only_after_health_and_restart_pass(tmp_path, 
         restart_evidence={"verification": "PASS"},
     )
     assert not legacy.exists()
+
+
+def test_stage_runtime_uses_running_python312_when_missing_from_path(tmp_path, monkeypatch):
+    worker_dir = tmp_path / "source"
+    worker_dir.mkdir()
+    assets = {}
+    for name in migration.ASSETS:
+        payload = f"asset:{name}".encode()
+        (worker_dir / name).write_bytes(payload)
+        assets[name] = hashlib.sha256(payload).hexdigest()
+    manifest = {"source_sha": "e" * 40, "assets": assets, "bundle_sha256": "f" * 64}
+    current_python = tmp_path / "legacy-venv/bin/python"
+    current_python.parent.mkdir(parents=True)
+    current_python.write_text("verified Python 3.12 interpreter")
+    current_python.chmod(0o700)
+    monkeypatch.setattr(migration, "WORKER_DIR", worker_dir)
+    monkeypatch.setattr(migration, "ROOT", tmp_path / "new-runtime")
+    monkeypatch.setattr(migration.sys, "version_info", (3, 12, 8, "final", 0))
+    monkeypatch.setattr(migration.sys, "executable", str(current_python))
+    monkeypatch.setattr(migration.shutil, "which", lambda _name: None)
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        if command[1:3] == ["-m", "venv"]:
+            venv_python = Path(command[3]) / "bin/python3.12"
+            venv_python.parent.mkdir(parents=True)
+            venv_python.write_text("staged Python 3.12")
+            venv_python.chmod(0o700)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(migration.subprocess, "run", run)
+
+    release = migration._stage_runtime(manifest)
+
+    assert release == migration.ROOT / "runtime" / manifest["source_sha"]
+    assert commands[0][:3] == [str(current_python), "-m", "venv"]
+    assert len(commands) == 2
+    assert (release / "bundle-manifest.json").is_file()

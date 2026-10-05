@@ -88,6 +88,40 @@ def safe_worker_status(path: Path) -> dict:
     return result
 
 
+def _python312_candidate(path: str | None) -> str | None:
+    if not path or not Path(path).is_file() or not os.access(path, os.X_OK):
+        return None
+    try:
+        result = subprocess.run(
+            [path, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        major, minor = (int(part) for part in result.stdout.strip().split(".", 1))
+    except (ValueError, TypeError):
+        return None
+    return path if (major, minor) >= (3, 12) else None
+
+
+def _resolve_python312() -> str:
+    """Prefer the interpreter running this controller, then its base, then PATH."""
+    executable = sys.executable
+    if sys.version_info >= (3, 12) and executable and Path(executable).is_file() and os.access(executable, os.X_OK):
+        return executable
+    base_executable = getattr(sys, "_base_executable", None)
+    base = _python312_candidate(base_executable)
+    if base:
+        return base
+    path_candidate = _python312_candidate(shutil.which("python3.12"))
+    if path_candidate:
+        return path_candidate
+    raise RuntimeError("python_312_missing")
+
+
 def _running_inference_pids() -> list[int]:
     result = subprocess.run(["ps", "-axo", "pid=,command="], check=True,
                             capture_output=True, text=True, timeout=8)
@@ -471,9 +505,7 @@ def _stage_runtime(manifest: dict) -> Path:
     stage.mkdir(parents=True, mode=0o700)
     for name in ASSETS:
         shutil.copy2(WORKER_DIR / name, stage / name)
-    python = shutil.which("python3.12")
-    if not python:
-        raise RuntimeError("python_312_missing")
+    python = _resolve_python312()
     subprocess.run([python, "-m", "venv", str(stage / ".venv")], check=True,
                    capture_output=True, timeout=60)
     subprocess.run([str(stage / ".venv/bin/python3.12"), "-m", "pip", "install", "--disable-pip-version-check",
