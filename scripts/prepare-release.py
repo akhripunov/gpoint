@@ -42,6 +42,73 @@ def run(*args, cwd=ROOT, env=None, capture=False):
     return result.stdout.strip() if capture else None
 
 
+def start_background_stage(name, args, timings, *, cwd=ROOT, env=None):
+    """Run an independent fail-closed gate alongside foreground preparation."""
+    output = tempfile.TemporaryFile(mode='w+t', encoding='utf-8')
+    stage = {'name': name, 'args': args, 'timings': timings,
+             'started': time.monotonic(), 'output': output, 'finished': False}
+    print(f'PREPARE_STAGE_START={name}', flush=True)
+    try:
+        stage['process'] = subprocess.Popen(
+            args, cwd=cwd, env=env, stdout=output, stderr=subprocess.STDOUT,
+            text=True, start_new_session=True)
+    except BaseException:
+        stage['returncode'] = 127
+        _finish_background_stage(stage, 'FAIL')
+        raise
+    return stage
+
+
+def _finish_background_stage(stage, status):
+    if stage['finished']:
+        return
+    output = stage['output']
+    output.flush()
+    output.seek(0)
+    shutil.copyfileobj(output, sys.stdout)
+    sys.stdout.flush()
+    seconds = round(time.monotonic() - stage['started'], 3)
+    stage['timings'][stage['name']] = {'status': status, 'seconds': seconds}
+    stage['finished'] = True
+    output.close()
+    print(f"PREPARE_STAGE={stage['name']} STATUS={status} SECONDS={seconds:.3f}", flush=True)
+
+
+def finish_background_stage(stage):
+    """Wait for an independent gate and preserve its output and failure."""
+    process = stage['process']
+    try:
+        returncode = process.wait(timeout=1800)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)
+        _finish_background_stage(stage, 'FAIL')
+        raise TimeoutError(f"background preparation stage timed out: {stage['name']}") from None
+    status = 'PASS' if returncode == 0 else 'FAIL'
+    _finish_background_stage(stage, status)
+    if returncode:
+        raise subprocess.CalledProcessError(returncode, stage['args'])
+
+
+def abort_background_stage(stage):
+    """Stop and reap an independent gate if another mandatory gate fails."""
+    if stage['finished']:
+        return
+    process = stage.get('process')
+    if process is not None and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)
+    _finish_background_stage(stage, 'FAIL')
+
+
 def disposable_migration_tenant_inventory(postgres, database):
     """Read every tenant from the isolated rehearsal DB, failing closed if absent."""
     if not re.fullmatch(r'[a-z0-9_]+', database):
@@ -221,11 +288,18 @@ def prepare(sha, output, *, postgres_only=False):
             ('release_asset_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_release_assets.py')),
             ('artifact_cache_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_prepared_artifact_cache.py')),
             ('gsales_compose_profile_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_release_gsales_compose.py')),
-            ('gsales_postgres_regression', (sys.executable, 'services/gsales/tests/run_postgres.py')),
         )
-        for name, command in commands:
-            with measured_stage(name, timings):
-                run(*command)
+        gsales_regression = start_background_stage(
+            'gsales_postgres_regression',
+            (sys.executable, 'services/gsales/tests/run_postgres.py'), timings)
+        try:
+            for name, command in commands:
+                with measured_stage(name, timings):
+                    run(*command)
+            finish_background_stage(gsales_regression)
+        except BaseException:
+            abort_background_stage(gsales_regression)
+            raise
 
     suffix = uuid.uuid4().hex[:12]
     network, postgres, api = (f'gpoint-ci-{suffix}-{x}' for x in ('net', 'pg', 'agata'))
