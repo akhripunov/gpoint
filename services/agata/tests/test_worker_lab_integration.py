@@ -35,9 +35,10 @@ class WorkerLabIntegrationTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.previous = worker.SUPPORT, worker.STATUS, worker.INFERENCE_PROCESS
         worker.SUPPORT = self.root
-        worker.STATUS = self.root / "worker-status.json"
-        worker.INFERENCE_PROCESS = self.root / "inference-process.json"
+        worker.STATUS = self.root / "status/worker-status.json"
+        worker.INFERENCE_PROCESS = self.root / "state/inference-process.json"
         self.approval_path = self.root / "approval.json"
+        self.lab_root = self.root / "queues/lab"
 
     def tearDown(self):
         worker.SUPPORT, worker.STATUS, worker.INFERENCE_PROCESS = self.previous
@@ -57,7 +58,7 @@ class WorkerLabIntegrationTests(unittest.TestCase):
         self.approval_path.chmod(0o600)
 
     def submit(self, job=None):
-        lab_queue.submit(job or lab_job(), root=self.root / "lab-queue")
+        lab_queue.submit(job or lab_job(), root=self.lab_root)
 
     def test_lab_uses_shared_executor_without_gateway_and_keeps_response_local(self):
         self.approval()
@@ -74,13 +75,13 @@ class WorkerLabIntegrationTests(unittest.TestCase):
         self.assertEqual(args[0]["target"], "LAB")
         self.assertEqual(args[0]["request"]["user_message"], lab_job()["request"]["user_message"])
         self.assertTrue(callable(kwargs["cancel_check"]))
-        receipt = lab_queue.read_receipt(self.root / "lab-queue", "lab-job-1")
+        receipt = lab_queue.read_receipt(self.lab_root, "lab-job-1")
         self.assertEqual(receipt["response"], "Синтетический ответ")
         self.assertEqual(receipt["identity"]["configuration_id"], "baseline")
         self.assertGreaterEqual(receipt["execution"]["duration_ms"], 0)
         self.assertIsNone(receipt["execution"]["actual_model"])
         self.assertNotIn("cli_reported_usage", receipt["execution"])
-        self.assertFalse((self.root / "worker-status.json").read_text().find("synthetic user turn") >= 0)
+        self.assertFalse(worker.STATUS.read_text().find("synthetic user turn") >= 0)
 
     def test_approval_missing_leaves_job_queued_and_never_calls_executor(self):
         self.submit()
@@ -90,7 +91,7 @@ class WorkerLabIntegrationTests(unittest.TestCase):
             with self.assertRaisesRegex(worker.FatalConfigurationError, "lab_owner_approval"):
                 worker.process_one("LAB")
         infer.assert_not_called()
-        self.assertEqual(lab_queue.pending_count(self.root / "lab-queue"), 1)
+        self.assertEqual(lab_queue.pending_count(self.lab_root), 1)
 
     def test_approval_is_pinned_to_both_worker_and_queue_helper_sources(self):
         self.approval()
@@ -101,7 +102,7 @@ class WorkerLabIntegrationTests(unittest.TestCase):
             with self.assertRaisesRegex(worker.FatalConfigurationError, "lab_owner_approval_scope_invalid"):
                 worker.process_one("LAB")
         infer.assert_not_called()
-        self.assertEqual(lab_queue.pending_count(self.root / "lab-queue"), 1)
+        self.assertEqual(lab_queue.pending_count(self.lab_root), 1)
 
     def test_source_hash_and_scenario_scope_gate_fail_before_generation(self):
         self.approval(scenarios=["daily-02"])
@@ -111,7 +112,7 @@ class WorkerLabIntegrationTests(unittest.TestCase):
         ) as infer:
             worker.process_one("LAB")
         infer.assert_not_called()
-        self.assertEqual(lab_queue.read_receipt(self.root / "lab-queue", "lab-job-1")["status"], "failed")
+        self.assertEqual(lab_queue.read_receipt(self.lab_root, "lab-job-1")["status"], "failed")
 
     def test_approval_call_limit_is_consumed_before_inference(self):
         self.approval(max_calls=1)
@@ -123,7 +124,7 @@ class WorkerLabIntegrationTests(unittest.TestCase):
             self.submit(lab_job("job-two"))
             worker.process_one("LAB")
         self.assertEqual(infer.call_count, 1)
-        self.assertEqual(lab_queue.read_receipt(self.root / "lab-queue", "job-two")["status"], "failed")
+        self.assertEqual(lab_queue.read_receipt(self.lab_root, "job-two")["status"], "failed")
 
     def test_scheduler_weights_user_lanes_and_reserves_a_lab_slot(self):
         env = {
@@ -155,7 +156,7 @@ class WorkerLabIntegrationTests(unittest.TestCase):
             with self.assertRaisesRegex(worker.FatalConfigurationError, "lab_worker_disabled"):
                 worker.process_one("LAB")
         infer.assert_not_called()
-        self.assertEqual(lab_queue.pending_count(self.root / "lab-queue"), 1)
+        self.assertEqual(lab_queue.pending_count(self.lab_root), 1)
 
     def test_lab_lane_failure_does_not_stop_later_user_lane_polls(self):
         env = {
@@ -250,7 +251,7 @@ class WorkerLabIntegrationTests(unittest.TestCase):
             f"sys.path.insert(0, {str(worker_dir)!r}); "
             "import gpoint_mac_worker as w; "
             f"w.SUPPORT=Path({str(self.root)!r}); "
-            f"w.INFERENCE_PROCESS=Path({str(self.root / 'inference-process.json')!r}); "
+            f"w.INFERENCE_PROCESS=Path({str(self.root / 'state/inference-process.json')!r}); "
             "lock=w.acquire_worker_lock(); w._WORKER_LOCK_FD=lock.fileno(); "
             "w.run_inference({'request': {'user_message': 'fixture'}})"
         )
@@ -269,7 +270,7 @@ class WorkerLabIntegrationTests(unittest.TestCase):
             codex_pid = int(pid_file.read_text())
             parent.kill()
             parent.wait(timeout=3)
-            lock_path = self.root / "worker.lock"
+            lock_path = self.root / "locks/pool.lock"
             descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
             try:
                 with self.assertRaises(BlockingIOError):

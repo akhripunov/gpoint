@@ -54,8 +54,9 @@ def test_legacy_gpoint_sidecar_binds_identity_to_installed_worker_hash(tmp_path,
         "source_id": "gpoint-vps:" + "b" * 40 + ":api=sha256:" + "1" * 64 + ":agata=sha256:" + "2" * 64,
         "snapshot_at": "2026-10-04T12:00:00Z",
     }
-    (tmp_path / "tenant-bindings.json").write_text(json.dumps(sidecar))
-    (tmp_path / "tenant-bindings.json").chmod(0o600)
+    (tmp_path / "config/tenant-bindings.json").parent.mkdir()
+    (tmp_path / "config/tenant-bindings.json").write_text(json.dumps(sidecar))
+    (tmp_path / "config/tenant-bindings.json").chmod(0o600)
     with patch.dict(os.environ, {
         "GPOINT_AGATA_WORKER_URL": worker.LEGACY_GPOINT_GATEWAY_URL,
         "GPOINT_AGATA_WORKER_TOKEN": "point-private",
@@ -63,8 +64,8 @@ def test_legacy_gpoint_sidecar_binds_identity_to_installed_worker_hash(tmp_path,
         assert worker.configured_tenant_bindings() == {"GPOINT": ENV["GPOINT_AGATA_TENANT_ID"]}
 
     sidecar["worker_sha256"] = "0" * 64
-    (tmp_path / "tenant-bindings.json").write_text(json.dumps(sidecar))
-    (tmp_path / "tenant-bindings.json").chmod(0o600)
+    (tmp_path / "config/tenant-bindings.json").write_text(json.dumps(sidecar))
+    (tmp_path / "config/tenant-bindings.json").chmod(0o600)
     with patch.dict(os.environ, {
         "GPOINT_AGATA_WORKER_URL": worker.LEGACY_GPOINT_GATEWAY_URL,
         "GPOINT_AGATA_WORKER_TOKEN": "point-private",
@@ -182,3 +183,47 @@ def test_sales_oversized_output_is_failed_without_completion(tmp_path, monkeypat
     with patch.dict(os.environ, ENV), patch.object(worker, "api_request", side_effect=rpc), patch.object(worker, "run_inference", return_value="a"*4001):
         assert worker.process_one("GSALES") is False
     assert "fail" in calls and "complete" not in calls
+
+
+def test_claim_and_execution_are_separate_for_supervisor_slot_dispatch(tmp_path, monkeypatch):
+    monkeypatch.setattr(worker, "SUPPORT", tmp_path)
+    monkeypatch.setattr(worker, "STATUS", tmp_path / "status.json")
+    claim = {"id": "sales-job", "leaseToken": "lease", "target": "GSALES",
+             "tenant_id": ENV["GSALES_AGATA_TENANT_ID"], "request": {"persona": {"name": "seller"}}}
+    calls = []
+
+    def rpc(path, body=None, **kwargs):
+        calls.append((path, body, kwargs))
+        if path == "claim":
+            return {"job": claim}
+        return {"accepted": True, "completed": True}
+
+    with patch.dict(os.environ, ENV), patch.object(worker, "api_request", side_effect=rpc), patch.object(
+        worker, "run_inference", return_value="draft"
+    ) as inference:
+        worker._last_heartbeat_attempt = float("-inf")
+        worker._target_heartbeats.pop("GSALES", None)
+        leased = worker.claim_target_job("GSALES")
+        assert leased == claim
+        inference.assert_not_called()
+        assert worker.execute_claimed_job("GSALES", leased) is True
+        inference.assert_called_once_with(claim)
+
+    assert [item[0] for item in calls] == ["health", "claim", "complete"]
+    assert calls[-1][1]["job_id"] == "sales-job"
+
+
+def test_orphan_lab_slot_lock_prevents_startup_from_marking_live_job_ambiguous(tmp_path):
+    from agata_worker_pool import PoolPaths, acquire_lock
+
+    paths = PoolPaths(tmp_path)
+    paths.ensure()
+    slot_dir = paths.slot_dir("slot-01")
+    slot_dir.mkdir(parents=True)
+    (slot_dir / "state.json").write_text(json.dumps({
+        "state": "BUSY", "lane": "LAB", "job_id": "lab-active-1", "phase": "INFERENCE_STARTED",
+    }))
+    lock = acquire_lock(paths.slot_lock("slot-01"))
+    assert worker._active_lab_slot_job_ids(paths) == {"lab-active-1"}
+    lock.close()
+    assert worker._active_lab_slot_job_ids(paths) == set()

@@ -68,12 +68,14 @@ test('canonical dependency recheck persists unavailable -> healthy without serve
   fs.writeFileSync(stateFile,JSON.stringify(initial));
   const runner=path.join(dir,'readonly-remote.sh'); const commandLog=path.join(dir,'remote-commands');
   fs.writeFileSync(runner,`#!/bin/sh\nprintf '%s\\n' "$REMOTE_CMD" >> "$DEPENDENCY_COMMAND_LOG"\nprintf '%s\\n' 'GSALES_RUNTIME=${JSON.stringify(runtime)}'\n`,{mode:0o700});
-  const support=path.join(dir,'Library/Application Support/GPoint/agata-codex-worker');fs.mkdirSync(support,{recursive:true});
-  const workerScript=path.join(support,'run_codex_worker.sh');
+  const support=path.join(dir,'Downloads/Codex/Workers/AGATA Workers');
+  const runtimePath=path.join(support,'runtime/current');
+  fs.mkdirSync(runtimePath,{recursive:true});fs.mkdirSync(path.join(support,'status'),{recursive:true});
+  const workerScript=path.join(runtimePath,'run_codex_worker.sh');
   for(const available of [false,true]) {
     const stamp=new Date().toISOString();const worker={enabled:true,queue_connectivity:available?'reachable':'worker_target_unavailable',last_poll_at:stamp,last_heartbeat_at:stamp};
     fs.writeFileSync(workerScript,`#!/bin/sh\nprintf '%s\\n' '${JSON.stringify(worker)}'\n`,{mode:0o700});
-    fs.writeFileSync(path.join(support,'worker-status.json'),JSON.stringify({targets:{GSALES:{state:available?'idle':'unavailable',last_poll_at:stamp,last_heartbeat_at:stamp}}}),{mode:0o600});
+    fs.writeFileSync(path.join(support,'status/worker-status.json'),JSON.stringify({targets:{GSALES:{state:available?'idle':'unavailable',last_poll_at:stamp,last_heartbeat_at:stamp}}}),{mode:0o600});
     const result=spawnSync(process.execPath,[new URL('./release-gpoint.mjs',import.meta.url).pathname,'--recheck-worker','--candidate',candidate],{encoding:'utf8',env:{...process.env,HOME:dir,GPOINT_RELEASE_STATE_FILE:stateFile,GPOINT_RELEASE_MANIFEST_DIR:manifests,GPOINT_REMOTE_RUNNER:runner,DEPENDENCY_COMMAND_LOG:commandLog},timeout:15000});
     assert.equal(result.status,0,result.stderr);
     const updated=JSON.parse(fs.readFileSync(stateFile));

@@ -27,11 +27,26 @@ class MacWorkerLockTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_watch_main_acquires_one_lock_and_enters_polling(self):
-        original_watch = worker.run_watch
         polls = []
 
-        def one_cycle(poll_seconds):
-            return original_watch(poll_seconds, max_cycles=1, sleep_fn=lambda _delay: None)
+        class FakeSupervisor:
+            def __init__(self, root):
+                self.config = type("Config", (), {"poll_seconds": 3.0})()
+                self.paths = worker.PoolPaths(root)
+
+            def start(self):
+                pass
+
+            def poll_once(self):
+                polls.append(True)
+
+            def close(self):
+                pass
+
+        original_run_pool = worker.run_pool
+
+        def one_cycle(**kwargs):
+            return original_run_pool(max_cycles=1, sleep_fn=lambda _delay: None)
 
         with patch.dict(os.environ, {
             "GPOINT_AGATA_WORKER_URL": "https://gpoint.amiora.one/api/agata-worker",
@@ -39,14 +54,13 @@ class MacWorkerLockTests(unittest.TestCase):
             "GPOINT_AGATA_TENANT_ID": "7508f36f-774a-48aa-8c6b-42f6f160415d",
         }), patch.object(sys, "argv", ["gpoint_mac_worker.py", "watch"]), patch.object(
             worker, "load_env_file"
-        ), patch.object(worker, "process_one", side_effect=lambda: polls.append(True)), patch.object(
-            worker, "run_watch", side_effect=one_cycle
-        ), patch.object(worker, "acquire_worker_lock", wraps=worker.acquire_worker_lock) as acquire:
+        ), patch.object(worker, "build_pool_supervisor", return_value=FakeSupervisor(self.root)), patch.object(
+            worker, "run_pool", side_effect=one_cycle
+        ):
             self.assertEqual(worker.main(), 0)
 
-        self.assertEqual(acquire.call_count, 1)
         self.assertEqual(polls, [True])
-        self.assertTrue(worker.STATUS.is_file())
+        self.assertTrue((self.root / "queues/lab/pending").is_dir())
 
     def test_second_independent_worker_is_refused_while_lock_is_held(self):
         lock = worker.acquire_worker_lock()

@@ -200,7 +200,7 @@ export function validateMacWorkerStatus(status, { nowMs = Date.now(), maxAgeMs =
 }
 
 function readMacWorkerStatus() {
-  const script = path.join(os.homedir(), 'Library/Application Support/GPoint/agata-codex-worker/run_codex_worker.sh');
+  const script = path.join(os.homedir(), 'Downloads/Codex/Workers/AGATA Workers/runtime/current/run_codex_worker.sh');
   try {
     const output = execFileSync(script, ['status'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 25_000, maxBuffer: 64 * 1024 });
     const status = JSON.parse(output);
@@ -215,7 +215,7 @@ function readWorkerDependencies() {
   return collectWorkerDependencies({GPOINT: readMacWorkerStatus, GSALES: () => {
   let sales = null;
   try {
-    const file = path.join(os.homedir(), 'Library/Application Support/GPoint/agata-codex-worker/worker-status.json');
+    const file = path.join(os.homedir(), 'Downloads/Codex/Workers/AGATA Workers/status/worker-status.json');
     const stat = fs.lstatSync(file);
     if (stat.isSymbolicLink() || (stat.mode & 0o077)) throw new Error('unsafe status file');
     const target = readJson(file).targets?.GSALES;

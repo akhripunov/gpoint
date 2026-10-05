@@ -36,10 +36,14 @@ provides either identity field, both must match the local pin. No inference-job
 payload can choose its route, credentials, or tenant. GPOINT-only configuration
 remains supported when its runtime pin is present.
 
-One unchanged process `worker.lock` serializes the watch lifecycle and Codex
-subprocesses. Round-robin gives each healthy target a turn; target network/auth/job
-failures have independent bounded backoff, leaving the other target running.
-No concurrent Codex CLI is added. Each Core retains its own pending/lease recovery.
+One AGATA supervisor owns GPOINT, GSALES, and LAB lanes. It schedules isolated
+execution processes with a default pool concurrency of one; separate lifecycle,
+pool, slot, and job locks guard ownership. GPOINT receives four scheduler turns
+for every two GSALES turns, while each target keeps independent network/auth/job
+backoff. LAB is only considered when production claims are empty and requires
+its own approval immediately before inference. Increasing concurrency is blocked
+until Codex provider parallel safety is explicitly verified. Each Core retains
+its own pending/lease recovery.
 Per-target status contains timestamps/states/error codes, never token/prompt/text.
 Codex retains read-only/ephemeral/ignore-rules/isolated-temp-dir/structured-output,
 environment allowlist and tool-use rejection. Production always-on guard remains.
