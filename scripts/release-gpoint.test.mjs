@@ -709,7 +709,7 @@ test('recovery finalization rejects mixed or unhealthy runtime facts', () => {
   assert.ok(recoveryRuntimeFailures(sha, { ...facts, LIVE_MINIAPP_SHA: '0'.repeat(40) }, 'prisma-head').includes('Mini App SHA mismatch'));
 });
 
-test('recovery accepts mac_worker only with current local worker and runtime config evidence', () => {
+test('recovery requires server provider config independently of local worker availability', () => {
   const facts = {
     LIVE_RELEASE_ENV_SHA: sha, LIVE_API_SHA: sha, LIVE_API_RUNNING: 'true', LIVE_API_HEALTH: 'healthy',
     LIVE_WORKER_SHA: sha, LIVE_WORKER_RUNNING: 'true', LIVE_BOT_SHA: sha, LIVE_BOT_RUNNING: 'true',
@@ -722,7 +722,8 @@ test('recovery accepts mac_worker only with current local worker and runtime con
   };
   const worker = freshWorkerStatus(Date.now());
   assert.deepEqual(recoveryRuntimeFailures(sha, facts, 'prisma-head', worker), []);
-  assert.ok(recoveryRuntimeFailures(sha, facts, 'prisma-head').some(x => x.includes('authentication/status')));
+  assert.deepEqual(recoveryRuntimeFailures(sha, facts, 'prisma-head'), []);
+  assert.ok(recoveryRuntimeFailures(sha, {...facts, LIVE_CONFIG_GPOINT_AGATA_WORKER_TOKEN:'NO'}, 'prisma-head').some(x => x.includes('token/config')));
 });
 
 test('recovery artifact identities are derived from verified live candidate facts', () => {

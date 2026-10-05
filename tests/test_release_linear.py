@@ -292,5 +292,57 @@ class ReleaseTests(unittest.TestCase):
                 SELECT.validate_request('a' * 40, ref, mode, 'true')
 
 
+
+class WorkerCompatibilityTests(unittest.TestCase):
+    def setUp(self):
+        self.contract = load('worker_release_contract', 'verify-release-worker-compatibility.py')
+        self.point = '11111111-1111-4111-8111-111111111111'
+        self.sales = '22222222-2222-4222-8222-222222222222'
+        self.values = {'GPOINT_AGATA_WORKER_TOKEN':'point-test','GSALES_AGATA_WORKER_TOKEN':'sales-test',
+          'GPOINT_AGATA_TENANT_ID':self.point,'GSALES_AGATA_TENANT_ID':self.sales,
+          'GSALES_AGATA_WORKER_URL':'https://gpoint.amiora.one/gsales/agata-worker'}
+
+    def test_launch_overrides_cannot_bypass_static_contract(self):
+        canonical={'HOME':str(self.contract.lane.HOME),'GPOINT_AGATA_WORKER_CONFIG':str(self.contract.lane.CONFIG)}
+        self.contract.verify_launch_environment(canonical,{})
+        for key in self.contract.CONTRACT_ENV_KEYS:
+            with self.subTest(key=key,empty=True):
+                with self.assertRaisesRegex(RuntimeError,'launch_contract_override'):
+                    self.contract.verify_launch_environment({key:''},{})
+            for source in ('plist','inherited'):
+                with self.subTest(key=key,source=source):
+                    with self.assertRaisesRegex(RuntimeError,'launch_contract_override'):
+                        self.contract.verify_launch_environment({key:'wrong'} if source=='plist' else {}, {key:'wrong'} if source=='inherited' else {})
+
+    def test_source_protocol_mismatch_blocks_before_any_worker_operation(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary); source=root/'repo/services/agata/worker'; installed=root/'installed'
+            source.mkdir(parents=True); installed.mkdir()
+            for name in self.contract.lane.ASSETS:
+                (source/name).write_text('candidate protocol')
+                (installed/name).write_text('incompatible protocol')
+            with patch.object(self.contract.lane,'REPO',root/'repo'), patch.object(self.contract.lane,'SUPPORT',installed), patch.object(self.contract.lane,'command',side_effect=lambda args: '' if 'status' in args else 'a'*40):
+                with self.assertRaisesRegex(RuntimeError,'candidate_hash_mismatch'):
+                    self.contract.lane.verify_candidate('a'*40)
+
+    def test_compatibility_is_independent_of_live_worker_health(self):
+        self.assertEqual(self.contract.verify_contract(self.values,self.point,self.sales), {'compatibility':'PASS'})
+
+    def test_known_static_credential_mismatch_is_compatibility_failure(self):
+        expected={'GPOINT_AGATA_WORKER_TOKEN':'point-test','GSALES_WORKER_TOKEN':'sales-test'}
+        self.assertEqual(self.contract.verify_contract(self.values,self.point,self.sales,expected_credentials=expected), {'compatibility':'PASS'})
+        with self.assertRaises(RuntimeError):
+            self.contract.verify_contract(self.values,self.point,self.sales,expected_credentials={**expected,'GSALES_WORKER_TOKEN':'other-test'})
+
+    def test_incompatible_gateway_tenant_or_lane_credentials_block_before_apply(self):
+        for change in ({'GSALES_AGATA_WORKER_URL':'https://wrong.invalid/worker'},
+            {'GSALES_AGATA_TENANT_ID':self.point}, {'GSALES_AGATA_WORKER_TOKEN':'point-test'},
+            {'GPOINT_AGATA_TENANT_ID':self.sales}, {'GPOINT_AGATA_WORKER_TOKEN':''}):
+            with self.subTest(change=list(change)):
+                with self.assertRaises(RuntimeError):
+                    self.contract.verify_contract({**self.values,**change},self.point,self.sales)
+
+
 if __name__ == '__main__':
     unittest.main()

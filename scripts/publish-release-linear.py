@@ -186,6 +186,10 @@ def current_state(event=None):
         'release_status': production.get('lastReleaseStatus', 'UNKNOWN'), 'in_sync': in_sync,
         'prepare': latest_prepare_success, 'candidate': candidate, 'latest_main_prepare': latest_for_main,
         'deploy': deployment, 'manifest': manifest,
+        'server_deploy_status': production.get('serverDeployStatus', manifest.get('status', 'UNKNOWN')),
+        'worker_operational_status': production.get('workerOperationalStatus', 'NOT_VERIFIED'),
+        'service_readiness': production.get('overallServiceReadiness', 'DEGRADED'),
+        'dependency_checked_at': production.get('dependencyCheckedAt', 'not checked'),
     }
 
 
@@ -203,8 +207,9 @@ def render_current_state(state):
         f"Последний production Deploy: `{m.get('productionShaAfter', 'unknown')}` / run `#{deploy.get('id', 'unknown')}` / canonical **{state['release_status']}**.",
         f"GitHub Deploy workflow: `{deploy.get('status', 'unknown')}` / conclusion `{deploy.get('conclusion') or 'pending'}`; deploy job **SUCCESS** подтверждён отдельно.",
         f"Prisma head: `{m.get('dbHeadAfter', 'unconfirmed')}`; AGATA Alembic head: `{m.get('agataDbHeadAfter', 'unconfirmed')}` (manifest).",
+        f"Server deploy: **{state.get('server_deploy_status', state['release_status'])}**; Mac worker: **{state.get('worker_operational_status', 'NOT_VERIFIED')}**; service readiness: **{state.get('service_readiness', 'DEGRADED')}**; dependency checked `{state.get('dependency_checked_at', 'not checked')}`.",
         "Пользовательская приёмка: **OWNER_SMOKE_PENDING**; technical COMPLETE не является подтверждением Telegram-ответа.",
-        "Следующее действие: владелец подтверждает реальный Telegram smoke либо оставляет приёмку ожидающей; production повторно не запускать.",
+        "При degraded worker повторить dependency recheck без Deploy. Реальный Telegram/GSales inference smoke подтверждается отдельно; production ради dependency check повторно не запускать.",
     ]
     return f"<!-- {CURRENT_MARKER}_BEGIN -->\n\n" + "\n\n".join(lines) + f"\n\n<!-- {CURRENT_MARKER}_END -->"
 
@@ -326,6 +331,7 @@ def main():
             actual = data.get('status')
             body += f"\n\nCanonical status: **{actual}**. Production ref: `{data.get('productionRef') or 'не создан'}`."
             body += f"\n\nДо релиза: SHA `{data.get('previousProductionSha')}`; Prisma `{data.get('dbHeadBefore')}`; Alembic `{data.get('agataDbHeadBefore')}`."
+            body += f"\n\nServer deploy: **{data.get('serverDeployStatus', actual)}**; Mac worker: **{data.get('workerOperationalStatus', 'NOT_VERIFIED')}**; service readiness: **{data.get('overallServiceReadiness', 'DEGRADED')}**."
             if data.get('failureStage'):
                 # No raw shell output, environment, prompts, tokens or user messages.
                 body += f"\n\nЭтап сбоя: `{re.sub(r'[^A-Z_0-9]', '', data['failureStage'])}`. Dev обязан сверить runtime/БД до повторной попытки."
