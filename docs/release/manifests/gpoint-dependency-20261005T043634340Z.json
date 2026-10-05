@@ -1,0 +1,36 @@
+{
+  "releaseId": "gpoint-dependency-20261005T043634340Z",
+  "eventType": "DEPENDENCY_RECHECK",
+  "serverReleaseId": "gpoint-release-20261005T015237295Z",
+  "candidateSha": "7636f92924ebf96f315df03a5a34bf0e6df5737b",
+  "status": "COMPLETE",
+  "serverDeployStatus": "COMPLETE",
+  "workerOperationalStatus": "HEALTHY",
+  "workerDependencies": {
+    "GPOINT": {
+      "status": "HEALTHY",
+      "reasons": [],
+      "evidence": {
+        "enabled": true,
+        "lastPollAt": "2026-10-05T04:36:34.473Z",
+        "lastHeartbeatAt": "2026-10-05T04:36:14.012Z"
+      }
+    },
+    "GSALES": {
+      "status": "HEALTHY",
+      "reasons": [],
+      "evidence": {
+        "enabled": true,
+        "lastPollAt": "2026-10-05T04:36:37.867Z",
+        "lastHeartbeatAt": "2026-10-05T04:36:24.196Z"
+      }
+    }
+  },
+  "overallServiceReadiness": "READY",
+  "dependencyCheckedAt": "2026-10-05T04:36:38.789Z",
+  "inferenceAcceptance": "NOT_VERIFIED",
+  "productionRef": "gpoint-production-20261005T015237295Z",
+  "runtimeSwitchOccurred": false,
+  "databaseApplyOccurred": false,
+  "finishedAt": "2026-10-05T04:36:38.789Z"
+}

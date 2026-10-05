@@ -207,14 +207,34 @@
   "agataProvider": "mac_worker",
   "recoveryFinalizationManifest": "docs/release/manifests/gpoint-recovery-20261001T071149396Z.json",
   "serverDeployStatus": "COMPLETE",
-  "workerOperationalStatus": "NOT_VERIFIED",
-  "overallServiceReadiness": "DEGRADED",
-  "dependencyCheckedAt": null,
+  "workerOperationalStatus": "HEALTHY",
+  "overallServiceReadiness": "READY",
+  "dependencyCheckedAt": "2026-10-05T04:36:38.789Z",
   "gsalesDbHead": "001_gsales",
   "gsalesMigrationSha256": "8de19ec2efd81848010379645d51243ac3f4a4cd37af0be211d71cdf36bcd111",
   "publicationRepair": {
     "runId": 37252899305,
     "originalWorkflowConclusion": "failure",
     "completedAt": "2026-10-05T04:36:09.806Z"
+  },
+  "workerDependencies": {
+    "GPOINT": {
+      "status": "HEALTHY",
+      "reasons": [],
+      "evidence": {
+        "enabled": true,
+        "lastPollAt": "2026-10-05T04:36:34.473Z",
+        "lastHeartbeatAt": "2026-10-05T04:36:14.012Z"
+      }
+    },
+    "GSALES": {
+      "status": "HEALTHY",
+      "reasons": [],
+      "evidence": {
+        "enabled": true,
+        "lastPollAt": "2026-10-05T04:36:37.867Z",
+        "lastHeartbeatAt": "2026-10-05T04:36:24.196Z"
+      }
+    }
   }
 }
