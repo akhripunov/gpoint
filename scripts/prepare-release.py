@@ -370,8 +370,13 @@ def prepare(sha, output, *, postgres_only=False):
                 ('gpoint-g-sales-runtime', 'services/gsales/Dockerfile', 'services/gsales'),
         ):
             with measured_stage(f'docker_build_{tag.replace("-", "_")}', timings):
-                run('docker', 'build', '--platform', 'linux/amd64', '--build-arg', f'GPOINT_BUILD_SHA={sha}',
-                    '--label', f'org.opencontainers.image.revision={sha}', '-f', dockerfile, '-t', f'{tag}:{sha}', context)
+                cache_scope = f'gpoint-{tag}'
+                run('docker', 'buildx', 'build', '--platform', 'linux/amd64', '--load',
+                    '--build-arg', f'GPOINT_BUILD_SHA={sha}',
+                    '--label', f'org.opencontainers.image.revision={sha}',
+                    '--cache-from', f'type=gha,scope={cache_scope}',
+                    '--cache-to', f'type=gha,scope={cache_scope},mode=max,ignore-error=true',
+                    '-f', dockerfile, '-t', f'{tag}:{sha}', context)
         gsales_migration = ROOT / 'services/gsales/migrations/001_gsales.sql'
         gsales_migration_sha = hashlib.sha256(gsales_migration.read_bytes()).hexdigest()
         embedded_migration_sha = run('docker', 'run', '--rm', f'gpoint-g-sales-runtime:{sha}',

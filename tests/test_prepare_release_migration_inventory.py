@@ -89,3 +89,17 @@ def test_gsales_postgres_gate_starts_before_agata_postgres_rehearsal():
     start = source.index("start_background_stage(\n            'gsales_postgres_regression'")
     postgres = source.index("measured_stage('disposable_postgres_setup'")
     assert initialization < start < postgres
+
+
+def test_candidate_image_builds_use_exact_platform_and_isolated_reusable_cache_scopes():
+    source = SCRIPT.read_text()
+    workflow = SCRIPT.parent.parent / '.github/workflows/gpoint-prepare.yml'
+    workflow_source = workflow.read_text()
+
+    assert "'docker', 'buildx', 'build', '--platform', 'linux/amd64', '--load'" in source
+    assert "'--label', f'org.opencontainers.image.revision={sha}'" in source
+    assert "'--cache-from', f'type=gha,scope={cache_scope}'" in source
+    assert "'--cache-to', f'type=gha,scope={cache_scope},mode=max,ignore-error=true'" in source
+    assert 'cache_scope = f\'gpoint-{tag}\'' in source
+    assert 'crazy-max/ghaction-github-runtime@a1014fef88934970651c7916e89aaf51bc58f38b' in workflow_source
+    assert 'docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069' in workflow_source

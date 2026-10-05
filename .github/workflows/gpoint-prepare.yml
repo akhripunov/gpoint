@@ -45,6 +45,12 @@ jobs:
           set-host: true
           daemon-config: |
             {"features":{"containerd-snapshotter":false}}
+      - name: Expose scoped GitHub Actions cache runtime to BuildKit
+        uses: crazy-max/ghaction-github-runtime@a1014fef88934970651c7916e89aaf51bc58f38b
+      - name: Set up isolated production-platform Buildx builder
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          platforms: linux/amd64
       - name: Check rehearsal setup before expensive branch preparation
         if: github.ref != 'refs/heads/main'
         env:
