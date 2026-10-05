@@ -294,7 +294,10 @@ def prepare() -> dict:
         try:
             _prepare_legacy_snapshot(backup)
             break
-        except RuntimeError as exc:
+        except (RuntimeError, OSError) as exc:
+            # The live worker atomically replaces small status files while the
+            # snapshot is copied; copytree may report that transient as
+            # FileNotFoundError/shutil.Error rather than RuntimeError.
             last_error = exc
     else:
         raise RuntimeError("rollback_snapshot_not_stable") from last_error

@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import plistlib
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -429,7 +430,12 @@ def test_prepare_stages_and_snapshots_without_stopping_or_switching_live_worker(
     monkeypatch.setattr(migration, "_validate_candidate_startup", lambda _stage, _manifest: {"state": "PASS"})
     monkeypatch.setattr(migration, "_verify_staged_runtime", lambda *_args: None)
     capture_snapshot = migration._prepare_legacy_snapshot
+    snapshot_attempts = []
     def snapshot_then_worker_poll(backup):
+        snapshot_attempts.append(backup)
+        if len(snapshot_attempts) == 1:
+            raise shutil.Error([(str(root / "worker-status.tmp"), str(backup / "worker-status.tmp"),
+                                 "No such file or directory: worker-status.tmp")])
         captured = capture_snapshot(backup)
         (root / "worker-status.json").write_text('{"last_poll_at":"after"}')
         return captured
@@ -439,6 +445,7 @@ def test_prepare_stages_and_snapshots_without_stopping_or_switching_live_worker(
 
     snapshot = Path(result["rollback_snapshot"])
     assert result["state"] == "PREPARED"
+    assert len(snapshot_attempts) == 2
     assert result["launchagent_stopped"] is False
     assert result["runtime_current_changed"] is False
     assert not (root / "runtime/current").exists()
