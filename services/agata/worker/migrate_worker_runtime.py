@@ -802,6 +802,9 @@ def _stage_runtime(manifest: dict) -> Path:
     stage.mkdir(parents=True, mode=0o700)
     for name in ASSETS:
         shutil.copy2(WORKER_DIR / name, stage / name)
+    # Launchd executes the wrapper directly from ProgramArguments, so preserve
+    # an executable mode even if a checkout or archive lost the Git mode bit.
+    (stage / "run_codex_worker.sh").chmod(0o700)
     python = _resolve_python312()
     stage_env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
     subprocess.run([python, "-m", "venv", str(stage / ".venv")], check=True,
