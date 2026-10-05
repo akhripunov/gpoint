@@ -566,8 +566,11 @@ def _same_tree(left: Path, right: Path) -> bool:
 
 
 def _restore_legacy_snapshot(backup: Path) -> None:
+    previous = backup.with_name(".legacy-runtime-previous")
     if backup.is_symlink() or not backup.is_dir():
-        raise RuntimeError("rollback_snapshot_missing")
+        if previous.is_symlink() or not previous.is_dir():
+            raise RuntimeError("rollback_snapshot_missing")
+        backup = previous
     if LEGACY.exists() and _same_tree(LEGACY, backup):
         return
     _safe_remove_tree(LEGACY)
@@ -575,6 +578,43 @@ def _restore_legacy_snapshot(backup: Path) -> None:
     LEGACY.chmod(0o700)
     if not _same_tree(LEGACY, backup):
         raise RuntimeError("rollback_legacy_snapshot_mismatch")
+
+
+def _prepare_legacy_snapshot(backup: Path) -> Path:
+    """Atomically refresh the rollback copy from the stopped live legacy runtime."""
+    if not LEGACY.is_dir() or LEGACY.is_symlink():
+        raise RuntimeError("legacy_runtime_missing")
+    backup.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    backup.parent.chmod(0o700)
+    previous = backup.with_name(".legacy-runtime-previous")
+    stage = backup.with_name(f".legacy-runtime-staging-{os.getpid()}")
+    _safe_remove_tree(stage)
+    # Recover an interrupted two-rename swap before creating the next snapshot.
+    if not backup.exists() and previous.exists():
+        os.replace(previous, backup)
+    shutil.copytree(LEGACY, stage, symlinks=True, copy_function=shutil.copy2)
+    for directory, dirs, files in os.walk(stage, followlinks=False):
+        Path(directory).chmod(0o700)
+        for filename in files:
+            item = Path(directory) / filename
+            if not item.is_symlink():
+                item.chmod(0o600 if filename.endswith((".env", ".json")) else 0o700 if os.access(item, os.X_OK) else 0o600)
+    _safe_remove_tree(previous)
+    if backup.exists():
+        os.replace(backup, previous)
+    try:
+        os.replace(stage, backup)
+    except Exception:
+        if not backup.exists() and previous.exists():
+            os.replace(previous, backup)
+        raise
+    if not _same_tree(LEGACY, backup):
+        _safe_remove_tree(backup)
+        if previous.exists():
+            os.replace(previous, backup)
+        raise RuntimeError("rollback_snapshot_refresh_mismatch")
+    _safe_remove_tree(previous)
+    return backup
 
 
 def _health_check(deadline: float = 60.0) -> dict:
@@ -695,20 +735,7 @@ def apply() -> dict:
                 raise RuntimeError("worker_process_did_not_stop")
             # Snapshot only while the old process is stopped, so queue/status
             # state cannot change between rollback capture and the switch.
-            if backup.exists():
-                if not LEGACY.exists() or not _same_tree(LEGACY, backup):
-                    raise RuntimeError("rollback_snapshot_does_not_match_legacy")
-            elif LEGACY.exists():
-                backup.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                shutil.copytree(LEGACY, backup, symlinks=True, copy_function=shutil.copy2)
-                for directory, dirs, files in os.walk(backup):
-                    Path(directory).chmod(0o700)
-                    for filename in files:
-                        item = Path(directory) / filename
-                        if not item.is_symlink():
-                            item.chmod(0o600 if filename.endswith((".env", ".json")) else 0o700 if os.access(item, os.X_OK) else 0o600)
-            else:
-                raise RuntimeError("legacy_runtime_missing")
+            backup = _prepare_legacy_snapshot(backup)
             # Migrate only queue/status state. Secret credentials stay in their
             # existing external mode-600 config; the LAB approval is rechecked
             # against the new bundle and remains fail-closed if stale.
@@ -810,7 +837,9 @@ def apply() -> dict:
 def rollback() -> dict:
     backup = ROOT / "state/rollback/legacy-runtime"
     original_plist_file = ROOT / "state/rollback/original-launchagent.plist"
-    if backup.is_symlink() or not backup.is_dir() or not original_plist_file.is_file():
+    previous_backup = backup.with_name(".legacy-runtime-previous")
+    if ((backup.is_symlink() or not backup.is_dir()) and
+            (previous_backup.is_symlink() or not previous_backup.is_dir())) or not original_plist_file.is_file():
         raise RuntimeError("rollback_snapshot_missing")
     TRANSITION_LOCK.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(TRANSITION_LOCK, os.O_CREAT | os.O_RDWR, 0o600)

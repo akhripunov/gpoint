@@ -367,6 +367,32 @@ def test_rollback_restores_exact_legacy_plist_and_runtime_path(tmp_path, monkeyp
     assert (legacy / "run_codex_worker.sh").read_text() == "legacy worker bytes"
 
 
+def test_stale_rollback_snapshot_is_atomically_refreshed_from_legacy(tmp_path, monkeypatch):
+    root = tmp_path / "AGATA Workers"
+    legacy = tmp_path / "legacy-runtime"
+    legacy.mkdir()
+    (legacy / "run_codex_worker.sh").write_text("exact live runtime")
+    (legacy / "worker-status.json").write_text('{"last_poll_at":"new"}')
+    rollback = root / "state/rollback"
+    backup = rollback / "legacy-runtime"
+    backup.mkdir(parents=True)
+    (backup / "run_codex_worker.sh").write_text("exact live runtime")
+    (backup / "worker-status.json").write_text('{"last_poll_at":"old"}')
+    original_plist = rollback / "original-launchagent.plist"
+    original_plist.write_bytes(b"preserve original LaunchAgent")
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "LEGACY", legacy)
+
+    result = migration._prepare_legacy_snapshot(backup)
+
+    assert result == backup
+    assert migration._same_tree(backup, legacy)
+    assert (backup / "worker-status.json").read_text() == '{"last_poll_at":"new"}'
+    assert original_plist.read_bytes() == b"preserve original LaunchAgent"
+    assert not (rollback / ".legacy-runtime-previous").exists()
+    assert not list(rollback.glob(".legacy-runtime-staging-*"))
+
+
 def test_legacy_runtime_is_removed_only_after_health_and_restart_pass(tmp_path, monkeypatch):
     legacy = tmp_path / "legacy-runtime"
     legacy.mkdir()
