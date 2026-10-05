@@ -67,7 +67,6 @@ The VPS is a runtime and artifact target, not a development workspace. Applicati
 - The durable automation checks are `pnpm repo:clean:start` before work and
   `pnpm repo:clean:end` before reporting completion; both must print `PASS`.
 
-
 ## Server deploy vs Mac worker operational readiness
 
 Worker source/protocol/tenant/lane/API/schema compatibility remains a blocking
