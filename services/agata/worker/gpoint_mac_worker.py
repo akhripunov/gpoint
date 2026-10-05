@@ -12,9 +12,11 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +57,10 @@ MAX_LAB_TIMEOUT_SECONDS = 180
 HEARTBEAT_INTERVAL_SECONDS = 30
 _last_heartbeat_attempt = float("-inf")
 REQUEST_TIMEOUT = httpx.Timeout(20.0, connect=10.0, read=20.0, write=20.0, pool=10.0)
+_HTTP_LOOP = None
+_HTTP_LOOP_LOCK = threading.Lock()
+_HTTP_RESOLVER_LOCK = threading.Lock()
+_HTTP_RESOLVER_ACTIVE = False
 POLL_BACKOFF_SECONDS = (1.0, 2.0, 5.0, 10.0, 20.0)
 SAFE_TARGET_ERROR_CODES = frozenset({
     "worker_claim_invalid",
@@ -313,6 +319,66 @@ def target_request(target: str, path: str, body: dict | None = None) -> dict:
     return api_request(path, body) if target == "GPOINT" else api_request(path, body, target=target)
 
 
+async def _bounded_getaddrinfo(host, port, *, family=0, type=0, proto=0, flags=0):
+    """Resolve one hostname without a non-daemon pool or queued retries."""
+    global _HTTP_RESOLVER_ACTIVE
+    loop = asyncio.get_running_loop()
+    result_future = loop.create_future()
+    with _HTTP_RESOLVER_LOCK:
+        if _HTTP_RESOLVER_ACTIVE:
+            raise socket.gaierror(socket.EAI_AGAIN, "resolver operation still active")
+        _HTTP_RESOLVER_ACTIVE = True
+
+    def resolve():
+        global _HTTP_RESOLVER_ACTIVE
+        try:
+            result = socket.getaddrinfo(host, port, family, type, proto, flags)
+        except BaseException as exc:
+            completion = (None, exc)
+        else:
+            completion = (result, None)
+        finally:
+            with _HTTP_RESOLVER_LOCK:
+                _HTTP_RESOLVER_ACTIVE = False
+
+        def finish():
+            if result_future.done():
+                return
+            value, error = completion
+            if error is None:
+                result_future.set_result(value)
+            else:
+                result_future.set_exception(error)
+
+        try:
+            loop.call_soon_threadsafe(finish)
+        except RuntimeError:
+            # The loop can only be closed during process teardown; never keep
+            # a completed resolver thread alive because its consumer vanished.
+            pass
+
+    resolver = threading.Thread(
+        target=resolve, name="agata-http-resolver", daemon=True,
+    )
+    try:
+        resolver.start()
+    except BaseException:
+        with _HTTP_RESOLVER_LOCK:
+            _HTTP_RESOLVER_ACTIVE = False
+        raise
+    return await result_future
+
+
+def _run_http(coroutine):
+    """Run one HTTP coroutine on a reusable loop with a bounded resolver."""
+    global _HTTP_LOOP
+    with _HTTP_LOOP_LOCK:
+        if _HTTP_LOOP is None or _HTTP_LOOP.is_closed():
+            _HTTP_LOOP = asyncio.new_event_loop()
+            _HTTP_LOOP.getaddrinfo = _bounded_getaddrinfo
+        return _HTTP_LOOP.run_until_complete(coroutine)
+
+
 def api_request(path: str, body: dict | None = None, *, target: str = "GPOINT") -> dict:
     targets = configured_targets()
     if target not in targets:
@@ -334,7 +400,7 @@ def api_request(path: str, body: dict | None = None, *, target: str = "GPOINT") 
                 return await client.post(f"{base}/{path}", headers=headers, **kwargs)
 
     try:
-        response = asyncio.run(request_once())
+        response = _run_http(request_once())
     except (httpx.TimeoutException, httpx.NetworkError, TimeoutError) as exc:
         raise TransientNetworkError("worker_gateway_network_error") from exc
     except httpx.HTTPError as exc:
@@ -1069,7 +1135,7 @@ def unauthenticated_health_probe() -> None:
                 # 401/403 is expected without a token and proves TLS + HTTP reached the gateway.
                 await client.post(f"{base}/health")
 
-    asyncio.run(probe_once())
+    _run_http(probe_once())
 
 
 def network_stability_smoke(duration_seconds: int = 300, minimum_cycles: int = 30) -> int:
