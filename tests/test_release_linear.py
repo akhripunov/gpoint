@@ -20,6 +20,7 @@ def load(name, file):
 
 SYNC = load('release_linear', 'publish-release-linear.py')
 SELECT = load('select_release', 'select-release-run.py')
+TELEMETRY = load('release_telemetry', 'release-telemetry.py')
 
 
 class ReleaseTests(unittest.TestCase):
@@ -58,7 +59,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn('needs.validate.outputs.candidate || inputs.candidate || github.sha', publisher)
         self.assertIn("inputs.mode == 'production' && needs.deploy.outputs.status != ''", workflow)
         self.assertIn('RELEASE_PHASE: preflight', workflow)
-        self.assertIn("RELEASE_STATUS: ${{ needs.deploy.outputs.preflight || 'BLOCKED' }}", workflow)
+        self.assertIn("RELEASE_STATUS: ${{ needs.deploy.outputs.preflight == 'PLANNED' && 'READY_FOR_OWNER'", workflow)
         self.assertIn("needs.deploy.outputs.status == 'COMPLETE' && 'RECOVERY_REQUIRED'", workflow)
         self.assertIn('preflight=${preflightStatus}', (ROOT / 'scripts/automated-release.mjs').read_text())
 
@@ -78,6 +79,51 @@ class ReleaseTests(unittest.TestCase):
         journal = SYNC.append_event(journal, second, 'second attempt')
         self.assertIn(first, journal)
         self.assertIn(second, journal)
+
+    def test_production_selector_requires_latest_immutable_ready_preflight(self):
+        sha = 'a' * 40
+        prepare = {'id': 12, 'run_attempt': 2}
+        ready = {'id': 50, 'run_number': 8, 'run_attempt': 1, 'head_sha': sha,
+                 'head_branch': 'main', 'event': 'workflow_dispatch',
+                 'display_title': f'GPoint preflight {sha} by owner',
+                 'status': 'completed', 'conclusion': 'success'}
+        result = {'candidateSha': sha, 'automationRunId': '50',
+                  'automationRunAttempt': '1', 'mode': 'preflight',
+                  'releaseState': 'READY_FOR_OWNER', 'status': 'PLANNED',
+                  'preflight': 'PASS', 'productionChanged': False,
+                  'prepareRunId': '12', 'prepareRunAttempt': '2'}
+        selected = SELECT.validate_ready_preflight(sha, prepare, [ready],
+                                                    lambda *_args: result)
+        self.assertEqual(selected['id'], 50)
+        with self.assertRaisesRegex(RuntimeError, 'successful READY_FOR_OWNER'):
+            SELECT.validate_ready_preflight(sha, prepare, [], lambda *_args: result)
+        failed = {**ready, 'id': 51, 'run_number': 9, 'conclusion': 'failure'}
+        with self.assertRaisesRegex(RuntimeError, 'Latest exact-SHA'):
+            SELECT.validate_ready_preflight(sha, prepare, [ready, failed],
+                                            lambda *_args: result)
+        wrong_prepare = {**result, 'prepareRunAttempt': '1'}
+        with self.assertRaisesRegex(RuntimeError, 'does not prove READY_FOR_OWNER'):
+            SELECT.validate_ready_preflight(sha, prepare, [ready],
+                                            lambda *_args: wrong_prepare)
+
+    def test_automatic_preflight_run_name_is_distinguishable_from_production(self):
+        workflow = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()
+        self.assertIn('run-name: GPoint ${{ inputs.mode }} ${{ inputs.candidate }}', workflow)
+
+    def test_runner_telemetry_classifies_runner_wall_clock_and_ignores_queued_jobs(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 10, 5, 10, 0, 30, tzinfo=timezone.utc)
+        values = TELEMETRY.summarize([[
+            {'labels': ['ubuntu-latest'], 'runner_name': 'GitHub Actions 1',
+             'started_at': '2026-10-05T10:00:00Z', 'completed_at': '2026-10-05T10:00:12Z'},
+            {'labels': ['self-hosted', 'macOS', 'gpoint-production'], 'runner_name': 'gpoint-owner-mac',
+             'started_at': '2026-10-05T10:00:05Z', 'completed_at': None},
+            {'labels': ['ubuntu-latest'], 'status': 'queued', 'started_at': None},
+        ]], now)
+        self.assertEqual(values, {'GITHUB_HOSTED_JOB_COUNT': 1,
+                                  'GITHUB_HOSTED_RUNNER_SECONDS': 12,
+                                  'SELF_HOSTED_JOB_COUNT': 1,
+                                  'SELF_HOSTED_RUNNER_SECONDS': 25})
 
     def test_candidate_does_not_replace_production(self):
         source = SYNC.replace_section('Architect', 'production', 'production facts')
@@ -341,8 +387,15 @@ class ReleaseTests(unittest.TestCase):
 
     def test_exact_completed_run_selected(self):
         run = {'id': 22, 'head_sha': 'a' * 40, 'head_branch': 'main', 'event': 'push',
-               'status': 'completed', 'conclusion': 'success'}
+               'status': 'completed', 'conclusion': 'success', 'run_attempt': 2}
         self.assertEqual(SELECT.select_run('a' * 40, [run]), run)
+        SELECT.validate_expected_run(run, '22', '2')
+
+    def test_exact_prepare_run_and_attempt_are_pinned_after_selection(self):
+        run = {'id': 22, 'run_attempt': 2}
+        for expected_run, expected_attempt in [('21', '2'), ('22', '1'), ('22', ''), ('', '2')]:
+            with self.subTest(expected_run=expected_run, expected_attempt=expected_attempt), self.assertRaises(RuntimeError):
+                SELECT.validate_expected_run(run, expected_run, expected_attempt)
 
     def test_preflight_can_run_without_production_permission(self):
         SELECT.validate_request('a' * 40, 'refs/heads/main', 'preflight', 'false')

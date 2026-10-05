@@ -119,7 +119,8 @@ def download(repo, artifact_id, token, target, release_asset=False):
             if error.code != 302:
                 raise
             location = error.headers.get('Location', '')
-            error.close()
+            if error.fp is not None:
+                error.close()
             if not location.startswith('https://'):
                 raise RuntimeError('Artifact redirect must use HTTPS')
             copy_bounded(urllib.request.urlopen(location, timeout=30))
@@ -148,11 +149,13 @@ def extract(archive, destination, expected):
                 shutil.copyfileobj(incoming, outgoing)
 
 
-def materialize(cache, destination, artifact_id, digest, expected, fetch):
+def materialize(cache, destination, artifact_id, digest, expected, fetch, identity=None):
     if not re.fullmatch(r'[0-9]+', str(artifact_id)) or not re.fullmatch(r'[a-f0-9]{64}', digest):
         raise RuntimeError('Invalid immutable artifact identity')
+    identity = identity or {'asset_id': str(artifact_id), 'asset_sha256': digest}
+    identity_key = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     cache.mkdir(parents=True, exist_ok=True, mode=0o700)
-    archive = cache / f'{artifact_id}-{digest}.zip'
+    archive = cache / f'v2-{identity_key}.zip'
     hit = archive.is_file() and not archive.is_symlink() and checksum(archive) == digest
     if not hit:
         with tempfile.TemporaryDirectory(prefix='incoming-', dir=cache) as temporary:
@@ -167,8 +170,8 @@ def materialize(cache, destination, artifact_id, digest, expected, fetch):
         extract(archive, destination, expected)
     archive.touch()
     # Only our immutable ZIPs are evicted. Job files and other projects are untouched.
-    older = sorted((p for p in cache.glob('*.zip') if p != archive and not p.is_symlink()
-                    and re.fullmatch(r'[0-9]+-[a-f0-9]{64}\.zip', p.name)),
+    older = sorted((p for p in cache.glob('v2-*.zip') if p != archive and not p.is_symlink()
+                    and re.fullmatch(r'v2-[a-f0-9]{64}\.zip', p.name)),
                    key=lambda p: p.stat().st_mtime, reverse=True)
     retained_bytes = archive.stat().st_size
     for index, path in enumerate(older):
@@ -225,15 +228,32 @@ def main():
         raise RuntimeError('GitHub artifact digest is unavailable')
     cache = Path.home() / '.cache' / f'{project}-release' / 'artifacts'
     stage = 'artifact_cache_or_download'
+    release_tag = f'gpoint-prepare-{sha}-{run_id}-{attempt}' if project == 'gpoint' else ''
+    identity = {'project': project, 'candidate_sha': sha, 'release_tag': release_tag,
+                'prepare_run_id': run_id, 'prepare_run_attempt': attempt,
+                'asset_id': artifact_id, 'asset_sha256': digest[7:]}
+    download_seconds = [0.0]
+    def timed_fetch(path):
+        before = time.monotonic()
+        download(repo, artifact_id, token, path, release_asset=project == 'gpoint')
+        download_seconds[0] += time.monotonic() - before
     result = materialize(cache, Path(os.environ['ARTIFACT_DESTINATION']), artifact_id,
-                         digest[7:], expected, lambda path: download(repo, artifact_id, token, path, release_asset=project == 'gpoint'))
+                         digest[7:], expected, timed_fetch, identity=identity)
     if project == 'gpoint':
         receipt = json.loads((Path(os.environ['ARTIFACT_DESTINATION']) / 'receipt.json').read_text())
         if (receipt.get('candidateSha') != sha or str(receipt.get('runId')) != run_id
                 or str(receipt.get('runAttempt')) != attempt or receipt.get('status') != 'READY'):
             raise RuntimeError('Immutable Prepare receipt provenance mismatch')
     print(f'ARTIFACT_CACHE={result} ARTIFACT_ID={artifact_id} SHA={sha}', flush=True)
-    print(f'STAGE_SECONDS_ARTIFACT_DOWNLOAD={time.monotonic() - started:.3f}', flush=True)
+    print(f'BUNDLE_DOWNLOAD_SECONDS={download_seconds[0]:.3f}', flush=True)
+    prevented = 'YES' if result == 'HIT' else 'NO'
+    print(f'CACHE_PREVENTED_DOWNLOAD={prevented}', flush=True)
+    output = os.environ.get('GITHUB_OUTPUT')
+    if output:
+        with open(output, 'a', encoding='utf-8') as stream:
+            stream.write(f'cache_prevented_download={prevented}\n')
+            stream.write(f'bundle_download_seconds={download_seconds[0]:.3f}\n')
+    print(f'STAGE_SECONDS_ARTIFACT_CACHE_TOTAL={time.monotonic() - started:.3f}', flush=True)
 
 
 if __name__ == '__main__':

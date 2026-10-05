@@ -1,0 +1,37 @@
+name: GPoint — Automatic preflight controller
+run-name: Auto preflight GPoint ${{ github.event.workflow_run.head_sha }}
+
+on:
+  workflow_run:
+    workflows: ["GPoint — Prepare"]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: gpoint-auto-preflight-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch-preflight:
+    if: >-
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: [self-hosted, macOS, gpoint-production]
+    timeout-minutes: 3
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Checkout trusted current main controller code
+        uses: actions/checkout@v4
+        with:
+          ref: refs/heads/main
+          fetch-depth: 1
+      - name: Atomically claim exact Prepare and dispatch read-only preflight
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: node scripts/release-orchestrator.mjs

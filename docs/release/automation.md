@@ -15,17 +15,19 @@ production approval input по этому разрешению. Рискован
 ## Для владельца
 
 1. Архитектор задаёт изменения и критерии приёмки. Dev реализует их и отправляет чистый commit в `origin/main`.
-2. Откройте [GPoint — Prepare](https://github.com/akhripunov/gpoint/actions/workflows/gpoint-prepare.yml). GitHub сам запускает проверки после push. Ждите завершения всего workflow, включая публикацию в Linear.
-3. В [Архитектор — Handoff](https://linear.app/bestuzhev/document/arhitektor-handoff-36f91afb3d2c) смотрите блок **Автоматизация: кандидат**. READY — кандидат проверен; это ещё не выкладка. Dev должен объяснить изменения, миграции, backup и риски перед вашим подтверждением.
-4. Откройте [GPoint — Deploy](https://github.com/akhripunov/gpoint/actions/workflows/gpoint-deploy.yml), нажмите **Run workflow**, выберите **main**, вставьте полный SHA из успешного Prepare, выберите режим **production**, отметьте **I authorize this exact candidate…**, затем **Run workflow**. Это ваше разрешение на production для этого SHA.
-5. Следите за шагами Validate → Deploy. Mac должен быть включён, иметь сеть, активную CLI authentication и работающий GPoint runner. Incy остаётся включённым. Пока runner не подключён, Deploy останется Queued — это не работающий автоматический деплой.
+2. Откройте [GPoint — Prepare](https://github.com/akhripunov/gpoint/actions/workflows/gpoint-prepare.yml). GitHub проверит exact SHA и автоматически запустит preflight после успешной публикации immutable bundle. Отдельный controller использует существующий GPoint self-hosted runner, атомарный claim предотвращает повторный preflight для одной пары SHA/run/attempt; он не запускает повторный CI или image build.
+3. В [Архитектор — Handoff](https://linear.app/bestuzhev/document/arhitektor-handoff-36f91afb3d2c) смотрите блок **Автоматизация: кандидат** и автоматическую запись `READY_FOR_OWNER`. Она появляется только после успешного read-only preflight и опубликованного immutable evidence. Это ещё не production release.
+4. Для Exact-SHA режима один раз запустите существующий [GPoint — Deploy](https://github.com/akhripunov/gpoint/actions/workflows/gpoint-deploy.yml) с полным SHA и явным production approval. Selector требует самый свежий успешный immutable `READY_FOR_OWNER` preflight того же SHA и Prepare run/attempt; без него production workflow блокируется.
+5. После approval существующий canonical workflow продолжает Deploy, verification, evidence и Linear publication автоматически. Mac должен быть включён, иметь сеть, активную CLI authentication и работающий GPoint runner. Incy остаётся включённым. Если runner недоступен, run останется Queued и не считается завершённым.
 6. После технического COMPLETE откройте Telegram → GPoint → Models Hub. Отправьте новое сообщение и дождитесь ответа. Сообщите Dev «ответ получил» или «ответа нет». Dev фиксирует подтверждение сценария в журнале; автоматизация не создаёт тестовые production-диалоги от вашего имени.
 
 История: [Журнал релизов](https://linear.app/bestuzhev/document/zhurnal-relizov-640efa60dacf). Каждый результат содержит SHA и ссылку на GitHub run. В Handoff история и архитектурные ограничения сохраняются, автоматизация меняет только свои именованные блоки.
 
 Можно пользоваться через Dev: «Подготовь релиз и дай SHA со ссылкой на проверки», затем «Разрешаю выкатить SHA …». Dev обязан проверить успешный Prepare, использовать его артефакты и canonical entrypoint. Кнопка Deploy удобнее тем, что фиксирует оператора и запускает стандартные шаги без пересказа команд.
 
-Режим **preflight** в той же форме проверяет доступ, live baseline, worker/config и артефакты без применения миграций и переключения runtime. Он выбран по умолчанию и не требует production approval. Результат PLANNED означает «можно планировать выкладку», а не «релиз уже выпущен».
+Режим **preflight** проверяет доступ, live baseline, worker/config и артефакты без применения миграций и переключения runtime. Он запускается автоматически после Prepare. Результат `PLANNED` плюс immutable evidence переводится в `READY_FOR_OWNER`; production не изменяется.
+
+Runner telemetry считает wall-clock seconds отдельно для GitHub-hosted и self-hosted jobs (это не billable-minute отчёт) и фиксирует cache HIT/MISS. Автоматический controller выполняется на существующем GPoint Mac runner, отдельный hosted controller job не добавлен. Prepare tests и image build не дублируются.
 
 ## Значение состояний
 

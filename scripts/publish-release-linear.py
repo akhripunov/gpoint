@@ -345,7 +345,7 @@ def main():
     status = candidate_status(os.environ.get('PREPARE_RESULT', '')) if phase == 'candidate' else os.environ['RELEASE_STATUS']
     allowed_statuses = {
         'candidate': ('READY', 'FAILED', 'CANCELLED', 'SKIPPED'),
-        'preflight': ('PLANNED', 'FAILED', 'BLOCKED'),
+        'preflight': ('PLANNED', 'READY_FOR_OWNER', 'FAILED', 'BLOCKED'),
         'production': ('FAILED', 'COMPLETE', 'RECOVERY_REQUIRED', 'FAILED_PRE_SWITCH', 'FAILED_MIGRATION', 'FAILED_AGATA_START', 'CANCELLED', 'BLOCKED'),
     }
     if phase not in allowed_statuses or status not in allowed_statuses[phase]:
@@ -355,6 +355,12 @@ def main():
         raise SyncError('Invalid release attempt')
     url = f'https://github.com/akhripunov/gpoint/actions/runs/{run_id}'
     body = f"Время: {datetime.now(timezone.utc).isoformat()}.\n\nЭтап: {phase}; статус: **{status}**.\n\nSHA: `{sha}`.\n\nПопытка GitHub Actions: `{attempt}`.\n\n[Проверки и логи]({url}/attempts/{attempt})."
+    telemetry_fields = ('GITHUB_HOSTED_JOB_COUNT', 'GITHUB_HOSTED_RUNNER_SECONDS',
+                        'SELF_HOSTED_JOB_COUNT', 'SELF_HOSTED_RUNNER_SECONDS',
+                        'DUPLICATE_HOSTED_WORK_REMOVED', 'CACHE_PREVENTED_DOWNLOAD')
+    if any(os.environ.get(key) for key in telemetry_fields):
+        body += '\n\nRunner/artifact telemetry:\n' + '\n'.join(
+            f'* {key}: `{os.environ.get(key, "UNKNOWN")}`' for key in telemetry_fields)
     if int(attempt) > 1:
         body += '\n\nЭто повторный запуск. Предыдущая запись сохранена; данный статус относится к указанной попытке.'
     if phase == 'candidate':
@@ -373,7 +379,9 @@ def main():
                 # No raw shell output, environment, prompts, tokens or user messages.
                 body += f"\n\nЭтап сбоя: `{re.sub(r'[^A-Z_0-9]', '', data['failureStage'])}`. Dev обязан сверить runtime/БД до повторной попытки."
         if phase == 'preflight':
-            body += '\n\nЭто результат preflight, который сам не меняет runtime или БД. Выкладка, если запрошена, фиксируется отдельным production-событием.'
+            if status == 'READY_FOR_OWNER':
+                body += f'\n\n**GPoint SHA {sha} полностью готов к production. Все mandatory gates PASS. Prisma/AGATA heads проверены canonical preflight. Разрешить production?**'
+            body += '\n\nЭто результат read-only preflight: runtime и БД не менялись. Подтверждение должно относиться к этому полному SHA; затем запускается один canonical production workflow.'
         else:
             body += '\n\nПользовательская проверка: **ожидается**. Владелец отправляет новое сообщение Models Hub и подтверждает ответ; Dev фиксирует приёмку отдельно. Не считать heartbeat подтверждением ответа.'
     section = {'candidate': 'кандидат', 'preflight': 'preflight', 'production': 'production'}[phase]

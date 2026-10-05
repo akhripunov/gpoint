@@ -32,21 +32,33 @@ class ArtifactCacheTests(unittest.TestCase):
         self.downloads += 1
         shutil.copyfile(self.archive, target)
 
-    def restore(self, artifact_id='12', digest=None):
+    def restore(self, artifact_id='12', digest=None, identity=None):
         return CACHE.materialize(self.root / 'cache', self.root / 'destination', artifact_id,
-                                 digest or self.digest, ['receipt.json'], self.fetch)
+                                 digest or self.digest, ['receipt.json'], self.fetch,
+                                 identity=identity or {'project':'gpoint','sha':'a'*40,'tag':'tag-1',
+                                                       'run_id':'1','attempt':'1','asset_id':artifact_id,
+                                                       'asset_sha256':digest or self.digest})
 
     def test_second_job_reuses_zip_but_checks_bytes_again(self):
         self.assertEqual(self.restore(), 'MISS')
         self.assertEqual(self.restore(), 'HIT')
         self.assertEqual(self.downloads, 1)
-        (self.root / 'cache' / f'12-{self.digest}.zip').write_bytes(b'corrupt cache')
+        next((self.root / 'cache').glob('v2-*.zip')).write_bytes(b'corrupt cache')
         self.assertEqual(self.restore(), 'MISS')
         self.assertEqual(self.downloads, 2)
 
     def test_changed_artifact_id_cannot_reuse_another_attempt(self):
         self.restore('12')
         self.assertEqual(self.restore('13'), 'MISS')
+        self.assertEqual(self.downloads, 2)
+
+    def test_changed_prepare_attempt_cannot_reuse_cached_bundle(self):
+        first = {'project':'gpoint','sha':'a'*40,'tag':'tag-1','run_id':'1','attempt':'1',
+                 'asset_id':'12','asset_sha256':self.digest}
+        second = {**first, 'attempt':'2'}
+        self.assertEqual(self.restore(identity=first), 'MISS')
+        self.assertEqual(self.restore(identity=first), 'HIT')
+        self.assertEqual(self.restore(identity=second), 'MISS')
         self.assertEqual(self.downloads, 2)
 
     def test_checksum_failure_is_not_admitted_or_extracted(self):

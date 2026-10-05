@@ -6,6 +6,7 @@ import re
 import socket
 import ssl
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -65,8 +66,49 @@ def validate_request(sha, ref, mode, approval):
         raise RuntimeError('Explicit production approval is required')
 
 
+def validate_expected_run(selected, expected_run, expected_attempt):
+    expected_run, expected_attempt = (expected_run or '').strip(), (expected_attempt or '').strip()
+    if bool(expected_run) != bool(expected_attempt):
+        raise RuntimeError('Expected Prepare run ID and attempt must be supplied together')
+    if expected_run and (not expected_run.isdigit() or not expected_attempt.isdigit()):
+        raise RuntimeError('Expected Prepare run identity is invalid')
+    if expected_run and (str(selected['id']) != expected_run
+                         or str(selected.get('run_attempt', 1)) != expected_attempt):
+        raise RuntimeError('Prepare run/attempt changed after selection')
+
+
+def validate_ready_preflight(sha, selected_prepare, deploy_runs, read_result):
+    runs = [r for r in deploy_runs if r.get('head_sha') == sha and r.get('head_branch') == 'main'
+            and r.get('event') == 'workflow_dispatch'
+            and str(r.get('display_title', '')).startswith(f'GPoint preflight {sha} by ')]
+    if not runs:
+        raise RuntimeError('Production requires a successful READY_FOR_OWNER preflight for this exact SHA')
+    latest = max(runs, key=lambda r: (r.get('run_number', 0), r.get('run_attempt', 0)))
+    if latest.get('status') != 'completed' or latest.get('conclusion') != 'success':
+        raise RuntimeError('Latest exact-SHA Deploy preflight is not successful')
+    run_id, attempt = str(latest.get('id', '')), str(latest.get('run_attempt', 1))
+    if not run_id.isdigit() or not attempt.isdigit():
+        raise RuntimeError('READY preflight run identity is invalid')
+    result = read_result(sha, run_id, attempt)
+    if (result.get('candidateSha') != sha
+            or str(result.get('automationRunId')) != run_id
+            or str(result.get('automationRunAttempt')) != attempt
+            or result.get('mode') != 'preflight'
+            or result.get('releaseState') != 'READY_FOR_OWNER'
+            or result.get('status') != 'PLANNED'
+            or result.get('preflight') != 'PASS'
+            or result.get('productionChanged') is not False
+            or str(result.get('prepareRunId')) != str(selected_prepare['id'])
+            or str(result.get('prepareRunAttempt', 1)) != str(selected_prepare.get('run_attempt', 1))):
+        raise RuntimeError('Immutable Deploy evidence does not prove READY_FOR_OWNER for this exact Prepare run')
+    return latest
+
+
 def main():
     sha = os.environ['CANDIDATE_SHA']
+    orchestrator_run_id = os.environ.get('ORCHESTRATOR_RUN_ID', '').strip()
+    if orchestrator_run_id and not orchestrator_run_id.isdigit():
+        raise RuntimeError('Automatic orchestrator run ID is invalid')
     validate_request(sha, os.environ.get('GITHUB_REF'), os.environ.get('RELEASE_MODE'), os.environ.get('APPROVE_PRODUCTION'))
     if github('git/ref/heads/main')['object']['sha'] != sha:
         raise RuntimeError('Candidate is no longer origin/main; prepare the new candidate')
@@ -74,10 +116,22 @@ def main():
     selected = select_run(sha, runs)
     asset = resolve_asset('prepare', sha, str(selected['id']), str(selected.get('run_attempt', 1)),
                           'bundle.zip', github)
-    if os.environ.get('PREPARE_RUN_ID') and (str(selected['id']) != os.environ['PREPARE_RUN_ID'] or str(selected.get('run_attempt', 1)) != os.environ.get('PREPARE_RUN_ATTEMPT')):
-        raise RuntimeError('Prepare run/attempt changed after selection')
+    validate_expected_run(selected, os.environ.get('PREPARE_RUN_ID'), os.environ.get('PREPARE_RUN_ATTEMPT'))
+    preflight = None
+    if os.environ.get('RELEASE_MODE') == 'production':
+        deploy_runs = github(f'actions/workflows/gpoint-deploy.yml/runs?branch=main&head_sha={sha}&per_page=100')['workflow_runs']
+        from release_assets import read_result
+        def read_exact_result(candidate, run_id, attempt):
+            with tempfile.TemporaryDirectory(prefix='gpoint-ready-preflight-') as directory:
+                path = Path(directory) / f'gpoint-release-result-{run_id}-{attempt}.json'
+                read_result(candidate, run_id, attempt, str(path), os.environ['GITHUB_TOKEN'])
+                return json.loads(path.read_text())
+        preflight = validate_ready_preflight(sha, selected, deploy_runs, read_exact_result)
     with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
         output.write(f"run_id={selected['id']}\nrun_attempt={selected.get('run_attempt', 1)}\nartifact_id={asset['id']}\ncandidate={sha}\n")
+        output.write(f'orchestrator_run_id={orchestrator_run_id}\n')
+        if preflight:
+            output.write(f"ready_preflight_run_id={preflight['id']}\nready_preflight_run_attempt={preflight.get('run_attempt', 1)}\n")
         state = os.environ.get('NETWORK_RETRY_BUDGET_STATE')
         used = Path(state).read_text().strip() if state and Path(state).exists() else '0'
         output.write(f'network_retry_budget_used_seconds={used}\n')

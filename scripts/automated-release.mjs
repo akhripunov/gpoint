@@ -73,6 +73,15 @@ try {
   const attempt = (mode === 'preflight' ? records : records.filter(r => r.data.status !== 'PLANNED' && !setupStates.has(r.data.status))).at(-1);
   const evidence = attempt?.data ?? { candidateSha: sha, status: 'BLOCKED', productionRef: null };
   fs.writeFileSync(process.env.RELEASE_RESULT, JSON.stringify({ ...evidence,
+    mode,
+    releaseState: mode === 'preflight' && evidence.status === 'PLANNED' ? 'READY_FOR_OWNER' :
+      mode === 'production' && evidence.status === 'COMPLETE' ? 'COMPLETE' : evidence.status,
+    authorizationMode: 'EXACT_SHA', authorizationSource: process.env.GITHUB_ACTOR ?? '',
+    cachePreventedDownload: process.env.CACHE_PREVENTED_DOWNLOAD ?? 'NO',
+    bundleDownloadSeconds: process.env.BUNDLE_DOWNLOAD_SECONDS ?? '0',
+    productionBaselineSha: evidence.previousProductionSha ?? null,
+    prepareRunId: process.env.PREPARE_RUN_ID,
+    prepareRunAttempt: process.env.PREPARE_RUN_ATTEMPT,
     protectedSetupEvidence: records.filter(r => setupStates.has(r.data.status)).map(r => r.data),
     operator: process.env.GITHUB_ACTOR, automationRunId: process.env.GITHUB_RUN_ID, automationRunAttempt: process.env.GITHUB_RUN_ATTEMPT,
     applicationVerification: mode === 'preflight' ? 'NOT_DEPLOYED' : 'OWNER_SMOKE_PENDING',

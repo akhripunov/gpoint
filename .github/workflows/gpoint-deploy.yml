@@ -1,5 +1,5 @@
 name: GPoint — Deploy
-run-name: Deploy ${{ inputs.candidate }} by ${{ github.actor }}
+run-name: GPoint ${{ inputs.mode }} ${{ inputs.candidate }} by ${{ github.actor }}
 
 on:
   workflow_dispatch:
@@ -19,6 +19,18 @@ on:
         required: true
         default: false
         type: boolean
+      prepare_run_id:
+        description: 'Exact Prepare run dispatched by trusted automatic controller; blank only for diagnostics/recovery'
+        required: false
+        type: string
+      prepare_run_attempt:
+        description: 'Exact Prepare attempt paired with prepare_run_id'
+        required: false
+        type: string
+      orchestrator_run_id:
+        description: 'Automatic preflight controller run; telemetry only'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -37,6 +49,9 @@ jobs:
       candidate: ${{ steps.select.outputs.candidate }}
       run_attempt: ${{ steps.select.outputs.run_attempt }}
       artifact_id: ${{ steps.select.outputs.artifact_id }}
+      ready_preflight_run_id: ${{ steps.select.outputs.ready_preflight_run_id }}
+      ready_preflight_run_attempt: ${{ steps.select.outputs.ready_preflight_run_attempt }}
+      orchestrator_run_id: ${{ steps.select.outputs.orchestrator_run_id }}
       network_retry_budget_used_seconds: ${{ steps.select.outputs.network_retry_budget_used_seconds }}
     steps:
       - name: Initialize shared retry budget
@@ -51,9 +66,13 @@ jobs:
         id: select
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ inputs.candidate }}
           APPROVE_PRODUCTION: ${{ inputs.approve_production }}
           RELEASE_MODE: ${{ inputs.mode }}
+          PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
+          PREPARE_RUN_ATTEMPT: ${{ inputs.prepare_run_attempt }}
+          ORCHESTRATOR_RUN_ID: ${{ inputs.orchestrator_run_id }}
         run: python scripts/select-release-run.py
 
   deploy:
@@ -68,6 +87,8 @@ jobs:
       preflight: ${{ steps.execute.outputs.preflight }}
       status: ${{ steps.execute.outputs.status }}
       execute_outcome: ${{ steps.execute.outcome }}
+      cache_prevented_download: ${{ steps.cache.outputs.cache_prevented_download }}
+      bundle_download_seconds: ${{ steps.cache.outputs.bundle_download_seconds }}
     env:
       CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
       PREPARE_RUN_ID: ${{ needs.validate.outputs.run_id }}
@@ -92,14 +113,19 @@ jobs:
       - name: Recheck current main and Prepare provenance on the Mac
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: python3 scripts/select-release-run.py
       - name: Restore or download the verified immutable artifact
+        id: cache
         env:
           GITHUB_TOKEN: ${{ github.token }}
           ARTIFACT_DESTINATION: ${{ env.GPOINT_RELEASE_BUNDLE }}
         run: python3 scripts/prepared_artifact_cache.py
       - name: Verify receipt, canonical preflight, apply and persist evidence
         id: execute
+        env:
+          CACHE_PREVENTED_DOWNLOAD: ${{ steps.cache.outputs.cache_prevented_download }}
+          BUNDLE_DOWNLOAD_SECONDS: ${{ steps.cache.outputs.bundle_download_seconds }}
         run: node scripts/automated-release.mjs
       - name: Preserve release result and canonical manifests as immutable evidence
         if: always()
@@ -126,6 +152,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
+      - name: Measure release runner usage
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TELEMETRY_RUN_IDS: ${{ github.run_id }},${{ needs.validate.outputs.run_id }},${{ needs.validate.outputs.ready_preflight_run_id }},${{ needs.validate.outputs.orchestrator_run_id }}
+          CACHE_PREVENTED_DOWNLOAD: ${{ needs.deploy.outputs.cache_prevented_download || 'NO' }}
+        run: |
+          python3 scripts/release-telemetry.py
+          cat "$GITHUB_OUTPUT" >> "$GITHUB_ENV"
       - name: Read saved release evidence
         if: needs.deploy.outputs.status != ''
         env:
@@ -137,7 +171,7 @@ jobs:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_PHASE: preflight
-          RELEASE_STATUS: ${{ needs.deploy.outputs.preflight || 'BLOCKED' }}
+          RELEASE_STATUS: ${{ needs.deploy.outputs.preflight == 'PLANNED' && 'READY_FOR_OWNER' || needs.deploy.outputs.preflight || 'BLOCKED' }}
         run: python3 scripts/publish-release-linear.py
       - name: Publish production result to GPoint Linear
         if: always() && inputs.mode == 'production' && needs.deploy.outputs.status != ''

@@ -53,7 +53,9 @@ jobs:
       - name: Install AGATA test dependencies
         run: python -m pip install './services/agata[test]' './services/gsales[test]'
       - name: Test release preflight coordinator
-        run: python3 scripts/test_release_preflight_benchmark.py
+        run: |
+          python3 scripts/test_release_preflight_benchmark.py
+          node --test scripts/release-orchestrator.test.mjs
       - name: Tests, disposable database rehearsal and immutable Docker build
         env:
           CANDIDATE_SHA: ${{ github.sha }}
@@ -86,7 +88,7 @@ jobs:
                           summary.write(f"| {name} | {result['status']} | {result['seconds']:.3f} |\n")
           PY
           if [ "$GITHUB_REF" = refs/heads/main ]; then
-            echo 'Next: await Publish PASS, then GPoint — Deploy → main → this SHA → approve production.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Next: automatic read-only Deploy preflight runs after this workflow completes; owner approval is requested only after READY_FOR_OWNER.' >> "$GITHUB_STEP_SUMMARY"
           else
             echo 'Branch rehearsal only: not eligible for production. Merge reviewed changes and await main Prepare.' >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -106,6 +108,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
+      - name: Measure Prepare runner usage
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TELEMETRY_RUN_IDS: ${{ github.run_id }}
+          CACHE_PREVENTED_DOWNLOAD: NO
+        run: |
+          python scripts/release-telemetry.py
+          cat "$GITHUB_OUTPUT" >> "$GITHUB_ENV"
       - name: Publish candidate result to existing Linear documents
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
