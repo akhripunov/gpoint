@@ -676,9 +676,10 @@ def _restart_state_snapshot(expected_source_sha: str, command_timeout: float = 8
     lanes = status.get("lanes", {}) if isinstance(status.get("lanes"), dict) else {}
     lane_status = {lane: value for lane, value in lanes.items() if isinstance(value, dict)}
     lab_approval = ROOT / "config/lab-execution-approval.json"
+    lab_state = lane_status.get("LAB", {})
     lab_gate_closed = (lab_approval.is_file()
-                       or lane_status.get("LAB", {}).get("inference_gate") == "APPROVAL_REQUIRED"
-                       or lane_status.get("LAB", {}).get("last_error_code") == "lab_approval_required")
+                       or lab_state.get("inference_gate") in {"APPROVAL_REQUIRED", "CLOSED_DISABLED"}
+                       or lab_state.get("last_error_code") == "lab_approval_required")
 
     process_inventory, command_errors["process_inventory"] = _run_readonly_command(
         ["ps", "-axo", "pid=,command="], command_timeout)

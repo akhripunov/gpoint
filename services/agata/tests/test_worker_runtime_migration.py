@@ -456,7 +456,12 @@ def test_prepare_stages_and_snapshots_without_stopping_or_switching_live_worker(
     assert (snapshot.parent / "original-launchagent.plist").read_bytes() == original_plist
 
 
-def test_restart_snapshot_requires_exact_runtime_identity_and_all_lanes(tmp_path, monkeypatch):
+@pytest.mark.parametrize("lab_status", [
+    {"state": "AVAILABLE", "last_error_code": "lab_approval_required",
+     "inference_gate": "APPROVAL_REQUIRED"},
+    {"state": "DISABLED", "inference_gate": "CLOSED_DISABLED"},
+])
+def test_restart_snapshot_requires_exact_runtime_identity_and_all_lanes(tmp_path, monkeypatch, lab_status):
     root = tmp_path / "AGATA Workers"
     source_sha = "c" * 40
     release = root / "runtime" / source_sha
@@ -473,8 +478,7 @@ def test_restart_snapshot_requires_exact_runtime_identity_and_all_lanes(tmp_path
         "pool": {"state": "running"},
         "lanes": {"GPOINT": {"health": "HEALTHY", "current_job_present": False},
                   "GSALES": {"health": "HEALTHY", "current_job_present": False},
-                  "LAB": {"state": "AVAILABLE", "last_error_code": "lab_approval_required",
-                          "inference_gate": "APPROVAL_REQUIRED"}},
+                  "LAB": lab_status},
     }
 
     def run(command, **kwargs):
