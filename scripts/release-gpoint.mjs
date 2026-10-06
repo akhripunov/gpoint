@@ -301,6 +301,13 @@ export function candidateAgataMigrationHead(candidate) {
   return migrationHead(files.map(name => git(['show', `${candidate}:${name}`]))).head;
 }
 
+export function candidatePrismaMigrationHead(candidate) {
+  const files = git(['ls-tree', '-r', '--name-only', candidate, 'packages/db/prisma/migrations'])
+    .split('\n').filter(name => name.endsWith('/migration.sql'));
+  if (!files.length) return 'NONE';
+  return files.map(name => name.split('/').at(-2)).sort().at(-1);
+}
+
 export function recoveryRuntimeFailures(candidate, facts, expectedDbHead, workerStatus = undefined, expectedAgataHead = 'agata0008') {
   const failures = [];
   if (facts.LIVE_RELEASE_ENV_SHA !== candidate) failures.push('release env SHA mismatch');
@@ -747,7 +754,11 @@ function runApply(candidate) {
     manifest.ciReceipt = adapter.ciReceipt ?? null;
     Object.assign(manifest, { workerCompatibility, gsalesReadiness, gsalesDbHeadBefore: baseline.facts.LIVE_GSALES_HEAD,
       gsalesDbHeadAfter: adapter.gsalesIdentity.migrationHead, gsalesRuntime: adapter.gsalesIdentity,
-      effectiveConfigSha256: adapter.effectiveConfigSha256, authorizationMode: 'EXACT_SHA' });
+      effectiveConfigSha256: adapter.effectiveConfigSha256,
+      authorizationMode: process.env.RELEASE_AUTHORIZATION_MODE || 'EXACT_SHA',
+      authorizationId: process.env.RELEASE_AUTHORIZATION_ID || null,
+      authorizationSourceReference: process.env.RELEASE_AUTHORIZATION_SOURCE || null,
+      authorizationRecordSha256: process.env.RELEASE_AUTHORIZATION_RECORD_SHA256 || null });
     const file = writeManifest(manifest);
     const verifiedState = verifiedRuntimeState(current, { candidate, dbHead: deployedDbHead });
     fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...verifiedState, currentProductionRef: ref, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: manifest.finishedAt, ...readiness, gsalesDbHead: adapter.gsalesIdentity.migrationHead, gsalesMigrationSha256: adapter.gsalesIdentity.migrationSha256, releaseOrigin: 'durable-production-release', agataRuntimeSha: candidate, agataAlembicHead: adapter.agataIdentity.head, agataProvider: adapter.agataIdentity.provider, artifactIdentities: manifest.artifactIdentities }, null, 2)}\n`);

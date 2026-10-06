@@ -8,17 +8,34 @@ import { verifyReleaseBundle } from './release-bundle.mjs';
 import { persistReleaseBookkeeping, loadReleaseBookkeeping } from './release-bookkeeping.mjs';
 import { fileURLToPath } from 'node:url';
 import { inspectProductionReadOnly } from './release-gpoint-vps-adapter.mjs';
+import { candidateAgataMigrationHead, candidatePrismaMigrationHead } from './release-gpoint.mjs';
+import { AuthorizationError, authorizationRecordPath, candidateScopeDiff,
+  checkTaskAuthorizationState, consumeTaskAuthorization, validateTaskAuthorization,
+  assertNoTaskScopedMigrations } from './release-authorization.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const sha = process.env.CANDIDATE_SHA;
 const mode = process.env.RELEASE_MODE;
-if (!['preflight', 'production'].includes(mode)) throw new Error('Explicit release mode is required');
+if (!['preflight', 'production', 'task-scoped-auto'].includes(mode)) throw new Error('Explicit release mode is required');
 if (mode === 'production' && process.env.APPROVE_PRODUCTION !== 'true') throw new Error('Explicit production approval is required');
+if (mode === 'task-scoped-auto' && (process.env.APPROVE_PRODUCTION !== 'false' || !process.env.TASK_AUTHORIZATION_ID)) throw new Error('TASK_SCOPED_AUTO requires its durable authorization ID and no exact-SHA approval input');
+if (mode !== 'task-scoped-auto' && process.env.TASK_AUTHORIZATION_ID) throw new Error('Task authorization ID is only valid in TASK_SCOPED_AUTO mode');
 const proof = verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, sha);
 if (String(proof.runId) !== process.env.PREPARE_RUN_ID) throw new Error('Receipt does not belong to the approved GitHub run');
 const git = (args, input) => execFileSync('git', args, { cwd: root, encoding: 'utf8', input, timeout: 30_000 }).trim();
 if (git(['rev-parse', 'HEAD']) !== sha || git(['status', '--porcelain'])) throw new Error('Release checkout must be clean and exact');
 const checksum = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+async function github(route) {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) throw new AuthorizationError('GitHub token is required for TASK_SCOPED_AUTO revalidation');
+  const response = await fetch(`https://api.github.com/repos/akhripunov/gpoint/${route}`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
+  });
+  if (!response.ok) throw new AuthorizationError(`GitHub task authorization check failed (HTTP ${response.status})`);
+  return response.json();
+}
+let taskAuthorization = null;
+let authorizationConsumed = false;
 const workerRoot = path.join(os.homedir(), 'Library/Application Support/GPoint/agata-codex-worker/runtime/current');
 const workerAssets = ['gpoint_mac_worker.py', 'agata_worker_pool.py', 'lab_queue.py', 'lab_fixture_manifest.json', 'requirements.txt', 'run_codex_worker.sh'];
 if (workerAssets.some(asset => {
@@ -56,6 +73,27 @@ try {
   });
   preflightStatus = preflight.status === 0 ? 'PLANNED' : 'FAILED';
   if (preflight.status !== 0) throw new Error('Canonical preflight blocked the release');
+  if (mode === 'task-scoped-auto') {
+    const authorizationId = process.env.TASK_AUTHORIZATION_ID;
+    const currentMainSha = (await github('git/ref/heads/main')).object?.sha;
+    const planned = fs.readdirSync(ledger.manifestDir).filter(name => !previous.has(name))
+      .map(name => JSON.parse(fs.readFileSync(path.join(ledger.manifestDir, name), 'utf8')))
+      .find(item => item.candidateSha === sha && item.status === 'PLANNED');
+    const productionBaselineSha = planned?.previousProductionSha;
+    if (!/^[a-f0-9]{40}$/.test(productionBaselineSha ?? '')) throw new AuthorizationError('Canonical preflight did not provide the exact production baseline');
+    const gsalesMigration = path.join(root, 'services/gsales/migrations/001_gsales.sql');
+    assertNoTaskScopedMigrations({manifest: planned, prismaHead: candidatePrismaMigrationHead(sha),
+      agataHead: candidateAgataMigrationHead(sha), gsalesMigrationSha256: checksum(gsalesMigration)});
+    const record = JSON.parse(fs.readFileSync(path.join(root, authorizationRecordPath(authorizationId)), 'utf8'));
+    const changedPaths = candidateScopeDiff(root, authorizationId, record.production_baseline_sha, sha);
+    taskAuthorization = validateTaskAuthorization({record, project: 'gpoint', authorizationId,
+      candidateSha: sha, currentMainSha, productionSha: productionBaselineSha, changedPaths});
+    await checkTaskAuthorizationState({project: 'gpoint', authorizationId, token: process.env.GITHUB_TOKEN});
+    process.env.RELEASE_AUTHORIZATION_MODE = 'TASK_SCOPED_AUTO';
+    process.env.RELEASE_AUTHORIZATION_ID = authorizationId;
+    process.env.RELEASE_AUTHORIZATION_SOURCE = taskAuthorization.sourceReference;
+    process.env.RELEASE_AUTHORIZATION_RECORD_SHA256 = taskAuthorization.recordSha256;
+  }
   if (mode === 'preflight') {
     releaseCode = 0;
   } else {
@@ -63,6 +101,18 @@ try {
       cwd: root, stdio: 'inherit', timeout: 1_800_000,
     });
     releaseCode = result.status ?? 1;
+    if (mode === 'task-scoped-auto' && releaseCode === 0) {
+      try {
+        await consumeTaskAuthorization({project: 'gpoint', authorizationId: process.env.TASK_AUTHORIZATION_ID,
+          candidateSha: sha, token: process.env.GITHUB_TOKEN});
+        authorizationConsumed = true;
+        process.env.RELEASE_AUTHORIZATION_CONSUMED = 'true';
+      } catch {
+        releaseCode = 1;
+        process.env.RELEASE_AUTHORIZATION_CONSUMED = 'pending';
+        console.error('TASK_AUTHORIZATION_CONSUMPTION=RECOVERY_REQUIRED');
+      }
+    }
   }
 } finally {
   const directory = ledger.manifestDir;
@@ -72,11 +122,21 @@ try {
   const setupStates = new Set(['CONFIG_PROVISION_BASELINE_RECORDED', 'GSales_CONFIG_PROVISIONED', 'WORKER_CONFIGURED']);
   const attempt = (mode === 'preflight' ? records : records.filter(r => r.data.status !== 'PLANNED' && !setupStates.has(r.data.status))).at(-1);
   const evidence = attempt?.data ?? { candidateSha: sha, status: 'BLOCKED', productionRef: null };
+  const status = mode === 'task-scoped-auto' && evidence.status === 'COMPLETE' && !authorizationConsumed
+    ? 'RECOVERY_REQUIRED' : evidence.status;
   fs.writeFileSync(process.env.RELEASE_RESULT, JSON.stringify({ ...evidence,
     mode,
+    status,
     releaseState: mode === 'preflight' && evidence.status === 'PLANNED' ? 'READY_FOR_OWNER' :
-      mode === 'production' && evidence.status === 'COMPLETE' ? 'COMPLETE' : evidence.status,
-    authorizationMode: 'EXACT_SHA', authorizationSource: process.env.GITHUB_ACTOR ?? '',
+      ['production', 'task-scoped-auto'].includes(mode) && evidence.status === 'COMPLETE' ?
+        (mode === 'task-scoped-auto' && !authorizationConsumed ? 'RECOVERY_REQUIRED' : 'COMPLETE') : evidence.status,
+    authorizationMode: mode === 'task-scoped-auto' ? 'TASK_SCOPED_AUTO' : 'EXACT_SHA',
+    authorizationId: process.env.TASK_AUTHORIZATION_ID ?? null,
+    authorizationSourceReference: taskAuthorization?.sourceReference ?? null,
+    authorizationRecordSha256: taskAuthorization?.recordSha256 ?? null,
+    authorizationChangedPaths: taskAuthorization?.changedPaths ?? null,
+    authorizationConsumed,
+    authorizationSource: process.env.GITHUB_ACTOR ?? '',
     cachePreventedDownload: process.env.CACHE_PREVENTED_DOWNLOAD ?? 'NO',
     bundleDownloadSeconds: process.env.BUNDLE_DOWNLOAD_SECONDS ?? '0',
     productionBaselineSha: evidence.previousProductionSha ?? null,
