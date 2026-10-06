@@ -1,0 +1,33 @@
+name: GPoint — Candidate coalescer
+run-name: Coalesce GPoint candidate ${{ github.event.after }}
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: gpoint-candidate-coalescer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coalesce:
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, macOS, gpoint-production]
+    timeout-minutes: 4
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/heads/main
+          fetch-depth: 1
+      - name: Wait for stable main and dispatch only the latest Prepare
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 scripts/coalesce_release_candidate.py
