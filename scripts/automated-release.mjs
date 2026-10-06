@@ -9,6 +9,7 @@ import { persistReleaseBookkeeping, loadReleaseBookkeeping } from './release-boo
 import { fileURLToPath } from 'node:url';
 import { inspectProductionReadOnly } from './release-gpoint-vps-adapter.mjs';
 import { candidateAgataMigrationHead, candidatePrismaMigrationHead } from './release-gpoint.mjs';
+import { assertInstalledWorkerMatches } from './worker-runtime-guard.mjs';
 import { AuthorizationError, authorizationRecordPath, candidateScopeDiff,
   checkTaskAuthorizationState, consumeTaskAuthorization, validateTaskAuthorization,
   assertNoTaskScopedMigrations } from './release-authorization.mjs';
@@ -38,13 +39,14 @@ let taskAuthorization = null;
 let authorizationConsumed = false;
 const workerRoot = path.join(os.homedir(), 'Library/Application Support/GPoint/agata-codex-worker/runtime/current');
 const workerAssets = ['gpoint_mac_worker.py', 'agata_worker_pool.py', 'lab_queue.py', 'lab_fixture_manifest.json', 'requirements.txt', 'run_codex_worker.sh'];
-if (workerAssets.some(asset => {
+assertInstalledWorkerMatches(mode, workerAssets.map(asset => {
   const source = path.join(root, 'services/agata/worker', asset);
   const installed = path.join(workerRoot, asset);
-  return !fs.existsSync(source) || !fs.existsSync(installed) || checksum(source) !== checksum(installed);
-})) {
-  throw new Error('Installed Mac worker differs from candidate. Install the published candidate worker before apply.');
-}
+  const sourceExists = fs.existsSync(source);
+  const installedExists = fs.existsSync(installed);
+  return { sourceExists, installedExists,
+    matches: sourceExists && installedExists && checksum(source) === checksum(installed) };
+}));
 if (!process.env.RELEASE_RESULT || !process.env.GITHUB_RUN_ID) throw new Error('Release evidence paths are required');
 const ledger = loadReleaseBookkeeping({ root, git, destination: process.env.GPOINT_RELEASE_EVIDENCE });
 process.env.GPOINT_RELEASE_STATE_FILE = ledger.stateFile;
