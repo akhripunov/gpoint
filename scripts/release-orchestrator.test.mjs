@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {dispatchPrepare, validateEvent, OrchestrationError, claimRef} from './release-orchestrator.mjs';
+import {evaluateScope} from './release-scope-gate.mjs';
 
 const sha = 'a'.repeat(40);
 const event = (change = {}) => ({repository:{full_name:'akhripunov/gpoint'}, workflow_run:{id:123,run_attempt:2,
@@ -52,4 +53,15 @@ test('mutable or draft releases fail closed',async()=>{
     const wrapped=async(method,path,body)=>{const result=await original(method,path,body);if(path.startsWith('releases/tags/'))Object.assign(result,patch);return result;};
     await assert.rejects(dispatchPrepare(event(),wrapped),/immutable and published/);
   }
+});
+test('TASK_SCOPED_AUTO allows only recorded bounded low-risk scope',()=>{
+  const base={baselineSha:'a'.repeat(40),candidateSha:'b'.repeat(40),mode:'TASK_SCOPED_AUTO',
+    authorizationRef:'linear:GPT-123',taskScope:'Fix account menu link',authorizedPrefixes:['src/account'],
+    changedPaths:['src/account/menu.ts'],riskAttestation:'LOW'};
+  assert.equal(evaluateScope(base).status,'AUTO_RELEASE_ALLOWED');
+  for (const change of [
+    {changedPaths:['src/account/menu.ts','src/other.ts']},
+    {changedPaths:['.github/workflows/deploy.yml'],authorizedPrefixes:['.']},
+    {riskAttestation:'UNKNOWN'}, {authorizationRef:''}, {mode:'EXACT_SHA'},
+  ]) assert.equal(evaluateScope({...base,...change}).status,'OWNER_DECISION_REQUIRED');
 });
