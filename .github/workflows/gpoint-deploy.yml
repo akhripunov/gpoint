@@ -110,6 +110,8 @@ jobs:
         with:
           ref: ${{ needs.validate.outputs.candidate }}
           fetch-depth: 0
+      - name: Verify release runner readiness before artifact use
+        run: node scripts/release-runner-readiness.mjs
       - name: Recheck current main and Prepare provenance on the Mac
         env:
           GITHUB_TOKEN: ${{ github.token }}
