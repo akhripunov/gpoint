@@ -2,7 +2,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {execFileSync} from 'node:child_process';
+import {execFileSync, spawnSync} from 'node:child_process';
+import {resolveRunnerPath} from './release-gpoint-vps-adapter.mjs';
 
 export const EXPECTED_RUNNER = 'gpoint-owner-mac';
 export const MIN_FREE_BYTES = 5 * 1024 ** 3;
@@ -11,16 +12,32 @@ const WORKER_ASSETS = ['gpoint_mac_worker.py', 'agata_worker_pool.py', 'lab_queu
 export class RunnerReadinessError extends Error {}
 
 export function validateRuntime({runnerName, runnerOs, runnerArch, freeBytes, dockerAvailable,
-  dockerOs, mainSha, candidateSha, activeConflict, pathsReady, workerRuntimeReady, toolchainAvailable}) {
+  dockerOs, mainSha, candidateSha, activeConflict, pathsReady, workerRuntimeReady, toolchainAvailable,
+  networkReady}) {
   if (runnerName !== EXPECTED_RUNNER || runnerOs !== 'macOS' || runnerArch !== 'ARM64') throw new RunnerReadinessError('Assigned runner identity/OS/architecture does not match GPoint lane');
   if (freeBytes < MIN_FREE_BYTES) throw new RunnerReadinessError('Insufficient free disk for release bundle/runtime work');
   if (!dockerAvailable || dockerOs !== 'linux') throw new RunnerReadinessError('Required Docker runtime is unavailable');
   if (!pathsReady) throw new RunnerReadinessError('GPoint cache/runtime paths are unavailable or unsafe');
   if (!workerRuntimeReady) throw new RunnerReadinessError('Installed GPoint worker runtime is missing or unsafe');
   if (!toolchainAvailable) throw new RunnerReadinessError('Required release command-line tools are unavailable');
+  if (!networkReady) throw new RunnerReadinessError('Canonical deployment SSH/SCP network is unavailable');
   if (!candidateSha || mainSha !== candidateSha) throw new RunnerReadinessError('Candidate is no longer exact current main');
   if (activeConflict) throw new RunnerReadinessError('Conflicting GPoint production mutation is active or queued');
   return {runner: runnerName, runnerOs, runnerArch, freeBytes, docker: 'READY', network: 'READY', projectPaths: 'READY', conflictingProductionMutation: 'NO'};
+}
+
+export function probeDeploymentNetwork({runner, env = process.env, spawn = spawnSync}) {
+  if (!runner || !path.isAbsolute(runner)) return false;
+  try {
+    fs.accessSync(runner, fs.constants.X_OK);
+    const result = spawn(runner, [], {encoding: 'utf8', timeout: 40_000, maxBuffer: 2048,
+      env: {...env, REMOTE_CMD: 'printf GPOINT_DEPLOYMENT_NETWORK_READY', GPOINT_REMOTE_COMMAND_TIMEOUT_SECONDS: '30'}});
+    return result.status === 0 && result.stdout.trim() === 'GPOINT_DEPLOYMENT_NETWORK_READY';
+  } catch { return false; }
+}
+
+export function configuredDeploymentRunner(env = process.env) {
+  return resolveRunnerPath('GPOINT_REMOTE_RUNNER', {env});
 }
 
 function safeWritable(directory, home) {
@@ -67,6 +84,8 @@ export async function runReadiness(env = process.env) {
   const workerRoot = path.join(home, 'Library/Application Support/GPoint/agata-codex-worker/runtime/current');
   const workerRuntimeReady = validWorkerRuntime(workerRoot, home);
   const toolchainAvailable = requiredToolsAvailable();
+  const remoteRunner = configuredDeploymentRunner(env);
+  const networkReady = probeDeploymentNetwork({runner: remoteRunner, env});
   let dockerOs = '';
   try { dockerOs = execFileSync('docker', ['info', '--format', '{{.OSType}}'], {encoding: 'utf8', timeout: 20_000}).trim(); } catch {}
   const [branch, runs] = await Promise.all([
@@ -78,7 +97,7 @@ export async function runReadiness(env = process.env) {
   const result = validateRuntime({runnerName: env.RUNNER_NAME, runnerOs: env.RUNNER_OS, runnerArch: env.RUNNER_ARCH,
     freeBytes: fs.existsSync(runnerTemp) ? fs.statfsSync(runnerTemp).bavail * fs.statfsSync(runnerTemp).bsize : 0,
     dockerAvailable: Boolean(dockerOs), dockerOs, mainSha: branch.object?.sha, candidateSha: env.CANDIDATE_SHA,
-    activeConflict, pathsReady, workerRuntimeReady, toolchainAvailable});
+    activeConflict, pathsReady, workerRuntimeReady, toolchainAvailable, networkReady});
   console.log(`RELEASE_RUNNER_READINESS=PASS ${Object.entries(result).map(([key, value]) => `${key.toUpperCase()}=${value}`).join(' ')}`);
   return result;
 }

@@ -167,6 +167,8 @@ jobs:
         with:
           ref: ${{ github.sha }}
       - name: Measure release runner usage
+        id: telemetry
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TELEMETRY_RUN_IDS: ${{ github.run_id }},${{ needs.validate.outputs.run_id }},${{ needs.validate.outputs.ready_preflight_run_id }},${{ needs.validate.outputs.orchestrator_run_id }}
@@ -174,6 +176,18 @@ jobs:
         run: |
           python3 scripts/release-telemetry.py
           cat "$GITHUB_OUTPUT" >> "$GITHUB_ENV"
+      - name: Mark release telemetry unknown
+        if: always() && steps.telemetry.outcome != 'success'
+        shell: bash
+        run: |
+          {
+            echo 'GITHUB_HOSTED_JOB_COUNT=UNKNOWN'
+            echo 'GITHUB_HOSTED_RUNNER_SECONDS=UNKNOWN'
+            echo 'SELF_HOSTED_JOB_COUNT=UNKNOWN'
+            echo 'SELF_HOSTED_RUNNER_SECONDS=UNKNOWN'
+            echo 'DUPLICATE_HOSTED_WORK_REMOVED=UNKNOWN'
+            echo 'CACHE_PREVENTED_DOWNLOAD=UNKNOWN'
+          } >> "$GITHUB_ENV"
       - name: Read saved release evidence
         if: needs.deploy.outputs.status != ''
         env:
