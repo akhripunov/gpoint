@@ -41,20 +41,33 @@ export function candidateScopeDiff(repoRoot, authorizationId, baselineSha, candi
   const git = (...args) => execFileSync('git', args, {cwd: repoRoot, encoding: 'utf8', timeout: 20_000}).trim();
   try {
     execFileSync('git', ['merge-base', '--is-ancestor', baselineSha, candidateSha], {cwd: repoRoot, stdio: 'ignore', timeout: 20_000});
-    const commits = git('rev-list', '--first-parent', '--reverse', '--ancestry-path', `${baselineSha}..${candidateSha}`).split('\n').filter(Boolean);
+    const commits = git('rev-list', '--topo-order', '--reverse', '--ancestry-path', `${baselineSha}..${candidateSha}`).split('\n').filter(Boolean);
     const changes = [];
-    commits.forEach((commit, index) => {
+    for (const commit of commits) {
+      const parents = git('rev-list', '--parents', '-n', '1', commit).split(' ').slice(1);
       const output = git('diff-tree', '--root', '--first-parent', '--no-commit-id', '--name-status', '-r', commit);
       for (const line of output.split('\n').filter(Boolean)) {
         const [status, changed] = line.split('\t');
-        if (status && changed) changes.push({index, status, path: changed});
+        if (status && changed) changes.push({commit, merge: parents.length > 1, status, path: changed});
       }
-    });
-    const recordChanges = changes.filter(change => change.path === path);
+    }
+    const recordAdds = changes.filter(change => change.path === path && !change.merge && change.status === 'A');
+    if (recordAdds.length !== 1 || changes.some(change => change.path === path && change.status !== 'A' && !change.merge)) {
+      throw new AuthorizationError('Durable authorization record must be added once and remain unchanged');
+    }
+    const authorizationCommit = recordAdds[0].commit;
+    const recordObject = git('rev-parse', `${authorizationCommit}:${path}`);
+    if (git('rev-parse', `${candidateSha}:${path}`) !== recordObject) {
+      throw new AuthorizationError('Durable authorization record changed after it was added');
+    }
     const scopeChanges = changes.filter(change => change.path !== path);
-    if (recordChanges.length !== 1 || recordChanges[0].status !== 'A' || !scopeChanges.length
-      || recordChanges[0].index >= Math.min(...scopeChanges.map(change => change.index))) {
-      throw new AuthorizationError('Durable authorization record must be added before implementation and remain unchanged');
+    const authorizationPrecedes = commit => {
+      try { execFileSync('git', ['merge-base', '--is-ancestor', authorizationCommit, commit], {cwd: repoRoot, stdio: 'ignore', timeout: 20_000}); return true; }
+      catch { return false; }
+    };
+    if (!scopeChanges.length || scopeChanges.some(change => change.commit === authorizationCommit
+      || !authorizationPrecedes(change.commit))) {
+      throw new AuthorizationError('Durable authorization record must precede every implementation change');
     }
     const diffPaths = git('diff', '--name-only', baselineSha, candidateSha).split('\n').filter(Boolean).filter(name => name !== path);
     if (!diffPaths.length) throw new AuthorizationError('Candidate has no implementation changes beyond the authorization record');
@@ -113,16 +126,24 @@ export async function checkTaskAuthorizationState({project, authorizationId, tok
 
 export async function consumeTaskAuthorization({project, authorizationId, candidateSha, token, fetchImpl = fetch}) {
   if (!token || !SHA.test(candidateSha ?? '')) throw new AuthorizationError('Exact candidate and GitHub token are required to consume authorization');
-  const response = await fetchImpl(`https://api.github.com/repos/akhripunov/${project}/git/refs`, {
-    method: 'POST', headers: {Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json'},
-    body: JSON.stringify({ref: authorizationStateRef(project, authorizationId, 'consumed'), sha: candidateSha}),
-  });
-  if (response.status === 422) {
-    const checked = await fetchImpl(`https://api.github.com/repos/akhripunov/${project}/git/ref/tags/${project}-task-auth/${authorizationId}/consumed`, {
-      headers: {Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'},
-    });
+  const markerUrl = `https://api.github.com/repos/akhripunov/${project}/git/ref/tags/${project}-task-auth/${authorizationId}/consumed`;
+  const readMarker = async () => {
+    const checked = await fetchImpl(markerUrl, {headers: {Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}});
     const data = checked.ok ? await checked.json() : {};
-    if (data.object?.sha === candidateSha) return;
+    return data.object?.sha === candidateSha;
+  };
+  let response;
+  try {
+    response = await fetchImpl(`https://api.github.com/repos/akhripunov/${project}/git/refs`, {
+      method: 'POST', headers: {Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json'},
+      body: JSON.stringify({ref: authorizationStateRef(project, authorizationId, 'consumed'), sha: candidateSha}),
+    });
+  } catch {
+    if (await readMarker()) return;
+    throw new AuthorizationError('Task authorization consumption response was lost and exact marker is absent');
+  }
+  if (response.status === 422) {
+    if (await readMarker()) return;
   }
   if (!response.ok) throw new AuthorizationError(`Task authorization consumption failed (HTTP ${response.status})`);
 }

@@ -3,14 +3,15 @@
 ## Два режима разрешения выпуска
 
 Актуальные условия: [Release authorization modes](../RELEASE_AUTHORIZATION.md).
-По умолчанию владелец подтверждает подготовленный exact SHA. Для небольшой
-конкретной задачи «Исправь [задачу] и выкатывай» разрешает один Task-scoped Auto
-Release без повторного запроса SHA. Dev фиксирует scope, полный unreleased diff,
-разрешение, exact SHA и проверки в Linear до apply и передаёт существующий
-production approval input по этому разрешению. Рискованные изменения, миграции,
-провал gates или расширение scope останавливают этот режим. Инструкции ручного
-согласования ниже описывают обычный Exact-SHA режим. Все технические проверки
-одинаковы в обоих режимах; это не автоматический deploy каждого push.
+По умолчанию владелец подтверждает подготовленный exact SHA. Конкретное
+поручение владельца «исправь [задачу] и выкатывай» разрешает один
+`TASK_SCOPED_AUTO` release без повторного подтверждения. До реализации создаётся
+durable authorization record; controller проверяет baseline, полный scope,
+одноразовость, eligibility и все release gates до передачи существующего
+exact-SHA approval input. Release infrastructure и другие owner-only категории
+в этот режим не входят. Runner может штатно ждать в GitHub `Queued`; первый
+этап запущенного self-hosted job выполняет fail-closed readiness check.
+Подробности: [Release authorization modes](../RELEASE_AUTHORIZATION.md).
 
 ## Для владельца
 
@@ -75,7 +76,7 @@ GitHub credentials, VPS key и production env не входят в архив и
 1. Убедиться, что GitHub Actions включён для приватного репозитория. Проверить Settings → Secrets and variables → Actions: repository secret `LINEAR_API_KEY` должен иметь доступ к двум существующим документам. Сам key в GitHub/чат/Linear не публиковать. Старый workflow AGENTS использует тот же secret, но его наличие и работоспособность нужно подтвердить успешной публикацией.
 2. На Mac в Settings → Actions → Runners → New self-hosted runner выбрать macOS и архитектуру `uname -m`. Скачать официальный runner, проверить SHA256 по команде GitHub. Установить вне репозитория, например `~/Library/Application Support/GPoint/release-runner`. При регистрации задать рабочую папку без пробелов: `--work "$HOME/.local/share/gpoint-release-work"`. Runner хранит временные shell scripts внутри рабочей папки; пробел в стандартном `Application Support/.../_work` ломает их запуск. На текущем Mac рабочая папка уже настроена в `~/.local/share/gpoint-release-work`.
 3. Перед подключением владелец подтверждает доступ: runner выполняет команды доверенного workflow GPoint на Mac от его пользователя, имеющего VPS key и локальную CLI authentication. Это не runner для PR из неизвестных веток. Никогда не назначать ему PR workflows; доступ к push/main и изменению workflows ограничить доверенными участниками.
-4. Зарегистрировать repo-scoped runner для `https://github.com/akhripunov/gpoint`, имя `gpoint-owner-mac`, label `gpoint-production`. Временный registration token из GitHub не сохранять в Git/Linear/логи. Установить пользовательский сервис официальным `svc.sh install` / `svc.sh start` согласно инструкции GitHub. Проверить **Idle** в GitHub. На Mac разрешить sleep policy по решению владельца: отключённый/спящий Mac не может выполнять релиз или отвечать через mac_worker.
+4. Зарегистрировать repo-scoped runner для `https://github.com/akhripunov/gpoint`, имя `gpoint-owner-mac`, label `gpoint-production`. Временный registration token из GitHub не сохранять в Git/Linear/логи. Установить пользовательский сервис официальным `svc.sh install` / `svc.sh start` согласно инструкции GitHub. Предварительный API опрос runner не нужен: GitHub `Queued` — штатное ожидание. Первый этап запущенной job проверяет runner identity/labels, macOS/ARM64, Docker Linux runtime, disk, cache/runtime paths, обязательные tools/network и отсутствие конфликтующей production mutation до загрузки bundle и дорогих шагов. На Mac разрешить sleep policy по решению владельца: отключённый/спящий Mac не может выполнять релиз или отвечать через mac_worker.
 5. PATH сервиса должен содержать рабочие `node`, `pnpm` и `python3`, а git — читать подтверждённые known_hosts. Проверить отдельные GPoint SSH/SCP runners, key/env, Mac worker status. Не менять Incy/DNS/hosts. Сравнить установленный `gpoint_mac_worker.py` с исходником кандидата; при изменении worker Dev обновляет его опубликованным исходником по штатному installer перед релизом. Автоматизация должна блокироваться при несовпадении.
 6. Первый запуск Prepare обязан быть зелёным, включая Linear. Выпуск нового application candidate разрешается владельцем отдельно; установка автоматизации не является разрешением произвольного production apply.
 

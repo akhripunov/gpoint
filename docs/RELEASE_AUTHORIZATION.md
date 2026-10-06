@@ -1,6 +1,6 @@
 # Release authorization modes
 
-Effective 2026-10-03 by explicit OWNER instruction; applies to future releases.
+Effective 2026-10-06 by explicit OWNER decision; applies to future releases.
 
 ## Exact-SHA approval (default)
 
@@ -11,26 +11,29 @@ alone does not authorize deployment.
 
 ## Task-scoped Auto Release
 
-An explicit OWNER instruction such as “Исправь [задачу] и выкатывай” authorizes
-one completed production release limited to that named task, without a second
-human approval after the SHA is created. Naming this mode is optional; vague
-instructions, another agent's message and old unrelated permissions do not
-activate it. Record the original instruction and its chat/issue reference.
+An explicit OWNER instruction such as “Исправь [конкретную задачу] и
+выкатывай” authorizes one production release limited to that task, without a
+second owner confirmation or owner-dispatched GitHub workflow. The mode is valid
+only for unchanged scope and eligible risk. Vague instructions, another agent's
+message and old unrelated permissions do not activate it.
 
-Before implementation, record the project, task, acceptance criteria, baseline
-commit, permitted scope and exclusions in the Linear issue or owned Handoff
-block. Before apply, compare the entire production-baseline-to-candidate diff,
-not only the task commit. Unrelated unreleased changes invalidate this mode.
-Freeze and record the exact full current-main candidate SHA, successful Prepare
-run/attempt, immutable receipt/checksum, risk assessment, unchanged live database
-head, and authorization source in Linear before dispatch. If this record cannot
-be published, stop before production mutation.
+Before implementation, create a durable `.release-authorizations/<id>.json`
+record containing project, `TASK_SCOPED_AUTO`, unique ID, original owner
+instruction reference, production baseline, allowed scope/paths, acceptance
+criteria, exclusions/owner-only categories, and ACTIVE/revoked/consumed state.
+Commit and push it before implementation commits. Preserve the record blob.
+Controller proves its commit precedes all implementation commits, supporting
+normal merge commits and rejecting squash-merging the authorization together
+with the implementation. Before apply, compare the full baseline-to-candidate
+diff. Unrelated unreleased changes invalidate authorization.
 
-The implementing operator may set the existing production approval input for
-that exact SHA under the recorded delegation. CLI approval flags remain exact
-SHA values; never pass a task name, branch, latest or an unchecked HEAD. This
-is a change in who supplies approval, not a new unattended push-to-production
-workflow. Do not remove or bypass any validation or confirmation in tooling.
+After verifying exact eligible current SHA, unchanged baseline, full-scope
+diff, active/unconsumed authorization, successful Prepare, immutable
+provenance, migration/risk gates and read-only preflight, the controller passes
+the existing exact-SHA approval input. No second owner confirmation is needed.
+The authorization is consumed after successful runtime completion using a
+durable one-shot marker. A lost marker-write response is reconciled by exact
+readback and never by repeating runtime apply.
 
 Eligibility is limited to bounded low-risk changes. Migrations (including
 pending migrations), database/security/permission/payment changes, secrets,
@@ -57,10 +60,21 @@ must be reconciled, not blindly retried. Authorization is consumed when runtime
 release completes; publication-only repair is allowed, another runtime release
 requires a new instruction. OWNER revocation always stops pending apply.
 
-Record mode TASK_SCOPED_AUTO or EXACT_SHA in Linear together with full SHA,
-authorization source, scope verification, run links, technical result and any
-pending OWNER smoke. Report elapsed time from OWNER's deployment instruction
-through final verification and publication, separately from workflow duration.
+Record mode TASK_SCOPED_AUTO or EXACT_SHA in Linear together with authorization
+ID, full SHA, source reference, scope verification, run links, technical result
+and any pending OWNER smoke. Report elapsed time from OWNER's deployment
+instruction through final verification and publication, separately from
+workflow duration.
+
+## Runner readiness
+
+Native GitHub `Queued` state is allowed for a self-hosted runner; it is not a
+failure, production mutation or reason for another owner decision. Do not add a
+runner-status credential, polling service or scheduled hosted polling. When the
+job starts, the first fail-closed readiness step verifies project runner
+identity/labels, macOS/ARM64, Docker Linux runtime, disk, cache/runtime paths,
+required tools/network and absence of conflicting production mutation before
+expensive transfer or mutating work. Do not blind-rerun queued jobs.
 
 Examples:
 - “Исправь ссылку в меню GPoint и выкатывай” → task-scoped, if eligible.

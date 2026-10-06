@@ -89,7 +89,33 @@ test('scope diff rejects authorization record added together with task code', ()
   fs.mkdirSync(path.join(root, 'apps/web/components'), {recursive: true});
   fs.writeFileSync(path.join(root, 'apps/web/components/Menu.tsx'), 'updated\n');
   git('add', '.release-authorizations', 'apps/web/components/Menu.tsx'); git('commit', '-m', 'combine record and task');
-  assert.throws(() => candidateScopeDiff(root, id, baseline, git('rev-parse', 'HEAD')), /before implementation/);
+  assert.throws(() => candidateScopeDiff(root, id, baseline, git('rev-parse', 'HEAD')), /precede every implementation change/);
+  fs.rmSync(root, {recursive: true, force: true});
+});
+
+test('scope diff accepts a non-squashed PR merge when the authorization commit precedes code', () => {
+  const {root, git, baseline} = makeGitRepo();
+  git('branch', 'base', baseline); git('switch', '-c', 'authorized-task');
+  const auth = path.join(root, '.release-authorizations'); fs.mkdirSync(auth);
+  fs.writeFileSync(path.join(auth, `${id}.json`), '{}\n'); git('add', '.release-authorizations'); git('commit', '-m', 'record task authorization');
+  fs.mkdirSync(path.join(root, 'apps/web/components'), {recursive: true});
+  fs.writeFileSync(path.join(root, 'apps/web/components/Menu.tsx'), 'updated\n');
+  git('add', 'apps/web/components/Menu.tsx'); git('commit', '-m', 'implement authorized task');
+  git('switch', 'base'); git('merge', '--no-ff', 'authorized-task', '-m', 'merge authorized task');
+  assert.deepEqual(candidateScopeDiff(root, id, baseline, git('rev-parse', 'HEAD')), ['apps/web/components/Menu.tsx']);
+  fs.rmSync(root, {recursive: true, force: true});
+});
+
+test('scope diff rejects a squash merge that hides authorization-before-code ordering', () => {
+  const {root, git, baseline} = makeGitRepo();
+  git('branch', 'base', baseline); git('switch', '-c', 'authorized-task');
+  const auth = path.join(root, '.release-authorizations'); fs.mkdirSync(auth);
+  fs.writeFileSync(path.join(auth, `${id}.json`), '{}\n'); git('add', '.release-authorizations'); git('commit', '-m', 'record task authorization');
+  fs.mkdirSync(path.join(root, 'apps/web/components'), {recursive: true});
+  fs.writeFileSync(path.join(root, 'apps/web/components/Menu.tsx'), 'updated\n');
+  git('add', 'apps/web/components/Menu.tsx'); git('commit', '-m', 'implement authorized task');
+  git('switch', 'base'); git('merge', '--squash', 'authorized-task'); git('commit', '-m', 'squash authorized task');
+  assert.throws(() => candidateScopeDiff(root, id, baseline, git('rev-parse', 'HEAD')), /precede every implementation change/);
   fs.rmSync(root, {recursive: true, force: true});
 });
 
@@ -116,6 +142,19 @@ test('authorization consumption creates an immutable candidate-bound Git ref', a
 test('authorization consumption fails closed when GitHub rejects marker creation', async () => {
   await assert.rejects(consumeTaskAuthorization({project: 'gpoint', authorizationId: id, candidateSha: candidate, token: 'test',
     fetchImpl: async () => ({status: 403, ok: false})}), /consumption failed \(HTTP 403\)/);
+});
+
+test('lost marker-creation response is reconciled by exact readback without retrying the write', async () => {
+  const requests = [];
+  await consumeTaskAuthorization({project: 'gpoint', authorizationId: id, candidateSha: candidate, token: 'test',
+    fetchImpl: async (url, options) => {
+      requests.push({url, options});
+      if (options.method === 'POST') throw new Error('network response lost');
+      return {status: 200, ok: true, json: async () => ({object: {sha: candidate}})};
+    }});
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].options.method, 'POST');
+  assert.equal(requests[1].options.method, undefined);
 });
 
 test('TASK_SCOPED_AUTO requires all live DB heads and checksums to match without migration apply', () => {
