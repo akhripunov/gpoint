@@ -27,6 +27,19 @@ export function claimRef(run) {
   return `refs/tags/gpoint-orchestrator/preflight-${run.head_sha}-${run.id}-${run.run_attempt}`;
 }
 
+async function matchingPreflightDispatch(api, run, controllerRunId) {
+  const sha = run.head_sha;
+  const route = `actions/workflows/${DEPLOY_PATH.split('/').at(-1)}/runs?branch=main&head_sha=${sha}&per_page=100`;
+  const data = await api('GET', route);
+  const title = `GPoint preflight ${sha} prepare/${run.id}-${run.run_attempt} controller/${controllerRunId}`;
+  const matches = (data.workflow_runs ?? []).filter(item => item.head_sha === sha
+    && item.head_branch === 'main' && item.event === 'workflow_dispatch'
+    && item.path === DEPLOY_PATH && item.display_title?.startsWith(title)
+    && /^\d+$/.test(String(item.id ?? '')) && /^\d+$/.test(String(item.run_attempt ?? '')));
+  if (matches.length > 1) throw new OrchestrationError('Multiple preflight runs match one controller dispatch');
+  return matches[0] ?? null;
+}
+
 export function makeApi(token, fetchImpl = fetch) {
   if (!token) throw new OrchestrationError('GITHUB_TOKEN is required');
   return async (method, path, body) => {
@@ -75,7 +88,7 @@ async function verifiedPrepare(api, eventRun) {
   return {sha, tag, asset};
 }
 
-export async function dispatchPrepare(payload, api, orchestratorRunId = process.env.GITHUB_RUN_ID ?? '') {
+export async function dispatchPrepare(payload, api, orchestratorRunId = process.env.GITHUB_RUN_ID ?? '', sleep = ms => new Promise(resolve => setTimeout(resolve, ms))) {
   const run = validateEvent(payload);
   const {sha, tag, asset} = await verifiedPrepare(api, run);
   const ref = claimRef(run);
@@ -93,8 +106,19 @@ export async function dispatchPrepare(payload, api, orchestratorRunId = process.
       prepare_run_id: String(run.id), prepare_run_attempt: String(run.run_attempt),
       orchestrator_run_id: orchestratorRunId,
     }});
-  } catch {
-    throw new OrchestrationError('Preflight dispatch failed after durable claim; manual recovery required');
+  } catch (dispatchError) {
+    // Claim is retained. Only read back the correlated run; never repeat an uncertain POST.
+    for (let index = 0; index < 3; index++) {
+      try {
+        const existing = await matchingPreflightDispatch(api, run, orchestratorRunId);
+        if (existing) return {state: 'PREFLIGHT_DISPATCH_RECONCILED', candidateSha: sha,
+          prepareRunId: String(run.id), prepareRunAttempt: String(run.run_attempt),
+          deployRunId: String(existing.id), deployRunAttempt: String(existing.run_attempt),
+          tag, assetId: String(asset.id), assetSha256: asset.digest.slice(7)};
+      } catch { /* bounded read-only retry; preserve the uncertain dispatch state */ }
+      if (index < 2) await sleep(2000);
+    }
+    throw new OrchestrationError('Preflight dispatch outcome is uncertain; no blind retry is allowed', {cause: dispatchError});
   }
   return {state: 'PREFLIGHT_DISPATCHED', candidateSha: sha, prepareRunId: String(run.id), prepareRunAttempt: String(run.run_attempt), tag, assetId: String(asset.id), assetSha256: asset.digest.slice(7)};
 }

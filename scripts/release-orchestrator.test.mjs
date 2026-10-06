@@ -40,6 +40,27 @@ test('one successful Prepare atomically claims and dispatches exact preflight on
   const dispatch=calls.find(item=>item.path.endsWith('/dispatches'));
   assert.deepEqual(dispatch.body,{ref:'main',inputs:{candidate:sha,mode:'preflight',approve_production:'false',prepare_run_id:'123',prepare_run_attempt:'2',orchestrator_run_id:'987'}});
 });
+test('accepted but timed-out preflight dispatch is read back without another POST',async()=>{
+  const {api,calls}=apiFixture();
+  const wrapped=async(method,path,body)=>{
+    if(method==='POST' && path.endsWith('/dispatches')) {
+      calls.push({method,path,body});
+      calls.push({method:'GET',path:'actions/workflows/gpoint-deploy.yml/runs?branch=main&head_sha='+sha,
+        result:{workflow_runs:[{id:789,run_attempt:1,head_sha:sha,head_branch:'main',status:'queued',event:'workflow_dispatch',
+          path:'.github/workflows/gpoint-deploy.yml',display_title:`GPoint preflight ${sha} prepare/123-2 controller/987 by owner`}]}});
+      throw Object.assign(new OrchestrationError('accepted response lost'),{status:503});
+    }
+    const found=calls.find(item=>item.method==='GET' && item.path.includes('head_sha='+sha));
+    if(method==='GET' && path.startsWith('actions/workflows/gpoint-deploy.yml/runs?branch=main&head_sha=')) {
+      calls.push({method,path}); return found.result;
+    }
+    return api(method,path,body);
+  };
+  const result=await dispatchPrepare(event(),wrapped,'987',()=>{});
+  assert.equal(result.state,'PREFLIGHT_DISPATCH_RECONCILED');
+  assert.equal(result.deployRunId,'789');
+  assert.equal(calls.filter(item=>item.method==='POST' && item.path.endsWith('/dispatches')).length,1);
+});
 test('duplicate event is a no-op after atomic claim',async()=>{
   const {api,calls}=apiFixture();
   await dispatchPrepare(event(),api);

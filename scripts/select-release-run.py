@@ -80,7 +80,7 @@ def validate_expected_run(selected, expected_run, expected_attempt):
 def validate_ready_preflight(sha, selected_prepare, deploy_runs, read_result):
     runs = [r for r in deploy_runs if r.get('head_sha') == sha and r.get('head_branch') == 'main'
             and r.get('event') == 'workflow_dispatch'
-            and str(r.get('display_title', '')).startswith(f'GPoint preflight {sha} by ')]
+            and str(r.get('display_title', '')).startswith(f'GPoint preflight {sha} prepare/')]
     if not runs:
         raise RuntimeError('Production requires a successful READY_FOR_OWNER preflight for this exact SHA')
     latest = max(runs, key=lambda r: (r.get('run_number', 0), r.get('run_attempt', 0)))
