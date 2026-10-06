@@ -168,9 +168,9 @@ export class RemoteCommandError extends Error {
 
 export function classifyPostSwitchState({ candidate, runtime, composeExitCode, health = true }) {
   const failures = validateRuntimeIdentity(candidate, runtime);
-  if (failures.length || !health) return { state: 'RECOVERY_REQUIRED', switched: true, failures: [...failures, ...(!health ? ['health check failed'] : [])] };
-  if (composeExitCode !== 0) return { state: 'SWITCHED_UNVERIFIED', switched: true, failures: [`compose returned exit ${composeExitCode} after switch`] };
-  return { state: 'VERIFIED', switched: true, failures: [] };
+  if (failures.length || !health) return { state: 'RECOVERY_REQUIRED', switched: true, rollbackVerdict: 'NOT_SAFE_TO_AUTOMATE', failures: [...failures, ...(!health ? ['health check failed'] : [])] };
+  if (composeExitCode !== 0) return { state: 'SWITCHED_UNVERIFIED', switched: true, rollbackVerdict: 'NOT_SAFE_TO_AUTOMATE', failures: [`compose returned exit ${composeExitCode} after switch`] };
+  return { state: 'VERIFIED', switched: true, rollbackVerdict: 'NOT_REQUIRED', failures: [] };
 }
 
 export function shouldReuseCandidateImage({ candidate, availableTags = [], exactRuntimeImage = false }) {

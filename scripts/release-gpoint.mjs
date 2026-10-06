@@ -768,6 +768,7 @@ function runApply(candidate) {
       agataProvider: validatedProvider,
       ...failureEvidence(error, { stage: error.releaseStage, fallbackStage: failure.failureStage }),
       rollbackSha: current.currentProductionSha,
+      rollbackVerdict: switchStarted ? 'NOT_SAFE_TO_AUTOMATE' : 'NOT_APPLICABLE',
       productionRef: null,
       releaseOrigin: 'durable-production-release'
     };

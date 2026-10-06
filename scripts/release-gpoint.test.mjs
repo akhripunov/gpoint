@@ -684,6 +684,7 @@ test('mixed runtime is recovery-required and cannot create a ref', () => {
   const old = 'sha256:' + 'b'.repeat(64);
   const state = classifyPostSwitchState({ candidate: sha, runtime: { imageId: image, buildSha: sha, apiImage: image, workerImage: old, botImage: image }, composeExitCode: 0 });
   assert.equal(state.state, 'RECOVERY_REQUIRED');
+  assert.equal(state.rollbackVerdict, 'NOT_SAFE_TO_AUTOMATE');
   assert.equal(canCreateProductionRef({ releaseState: 'RECOVERY_REQUIRED', candidate: sha, actualSha: sha, gatesPass: true }), false);
 });
 
