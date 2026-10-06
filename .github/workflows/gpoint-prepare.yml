@@ -82,7 +82,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/release_assets.py publish prepare
-      - name: Save branch rehearsal receipt without a duplicate image archive
       - name: Owner summary
         env:
           CANDIDATE_SHA: ${{ inputs.candidate || github.sha }}
