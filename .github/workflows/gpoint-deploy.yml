@@ -156,7 +156,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TELEMETRY_RUN_IDS: ${{ github.run_id }},${{ needs.validate.outputs.run_id }},${{ needs.validate.outputs.ready_preflight_run_id }},${{ needs.validate.outputs.orchestrator_run_id }}
+          CANDIDATE_SHA: ${{ needs.validate.outputs.candidate || inputs.candidate }}
+          PREPARE_RUN_ID: ${{ needs.validate.outputs.run_id }}
+          READY_PREFLIGHT_RUN_ID: ${{ needs.validate.outputs.ready_preflight_run_id }}
+          RELEASE_MODE: ${{ inputs.mode }}
           CACHE_PREVENTED_DOWNLOAD: ${{ needs.deploy.outputs.cache_prevented_download || 'NO' }}
+          BUNDLE_DOWNLOAD_SECONDS: ${{ needs.deploy.outputs.bundle_download_seconds || 'UNKNOWN' }}
         run: |
           python3 scripts/release-telemetry.py
           cat "$GITHUB_OUTPUT" >> "$GITHUB_ENV"

@@ -363,7 +363,12 @@ def main():
     body = f"Время: {datetime.now(timezone.utc).isoformat()}.\n\nЭтап: {phase}; статус: **{status}**.\n\nSHA: `{sha}`.\n\nПопытка GitHub Actions: `{attempt}`.\n\n[Проверки и логи]({url}/attempts/{attempt})."
     telemetry_fields = ('GITHUB_HOSTED_JOB_COUNT', 'GITHUB_HOSTED_RUNNER_SECONDS',
                         'SELF_HOSTED_JOB_COUNT', 'SELF_HOSTED_RUNNER_SECONDS',
-                        'DUPLICATE_HOSTED_WORK_REMOVED', 'CACHE_PREVENTED_DOWNLOAD')
+                        'DUPLICATE_HOSTED_WORK_REMOVED', 'CACHE_PREVENTED_DOWNLOAD',
+                        'BUNDLE_DOWNLOAD_SECONDS', 'TIMELINE_EVIDENCE',
+                        'COMMIT_TO_PREPARE_START_SECONDS', 'PREPARE_DURATION_SECONDS',
+                        'PREPARE_TO_PREFLIGHT_START_SECONDS', 'PREFLIGHT_DURATION_SECONDS',
+                        'COMMIT_TO_READY_SECONDS', 'PREFLIGHT_TO_DEPLOY_START_SECONDS',
+                        'DEPLOY_DURATION_SECONDS', 'COMMIT_TO_COMPLETE_SECONDS')
     if any(os.environ.get(key) for key in telemetry_fields):
         body += '\n\nRunner/artifact telemetry:\n' + '\n'.join(
             f'* {key}: `{os.environ.get(key, "UNKNOWN")}`' for key in telemetry_fields)
