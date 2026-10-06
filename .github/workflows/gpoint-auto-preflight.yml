@@ -30,6 +30,11 @@ jobs:
         with:
           ref: refs/heads/main
           fetch-depth: 1
+      - name: Verify assigned runner before controller/API work
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: node scripts/release-runner-readiness.mjs
       - name: Atomically claim exact Prepare and dispatch read-only preflight
         env:
           GITHUB_TOKEN: ${{ github.token }}

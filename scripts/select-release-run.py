@@ -5,6 +5,7 @@ import os
 import re
 import socket
 import ssl
+import subprocess
 import sys
 import tempfile
 import urllib.error
@@ -60,10 +61,12 @@ def select_run(sha, runs):
 def validate_request(sha, ref, mode, approval):
     if not re.fullmatch('[a-f0-9]{40}', sha):
         raise RuntimeError('Enter the complete 40-character candidate SHA')
-    if ref != 'refs/heads/main' or mode not in ('preflight', 'production'):
+    if ref != 'refs/heads/main' or mode not in ('preflight', 'production', 'task-scoped-auto'):
         raise RuntimeError('Select main and a valid release mode')
     if mode == 'production' and approval != 'true':
         raise RuntimeError('Explicit production approval is required')
+    if mode == 'task-scoped-auto' and approval != 'false':
+        raise RuntimeError('TASK_SCOPED_AUTO uses its durable authorization record, not the exact-SHA approval input')
 
 
 def validate_expected_run(selected, expected_run, expected_attempt):
@@ -112,13 +115,27 @@ def main():
     validate_request(sha, os.environ.get('GITHUB_REF'), os.environ.get('RELEASE_MODE'), os.environ.get('APPROVE_PRODUCTION'))
     if github('git/ref/heads/main')['object']['sha'] != sha:
         raise RuntimeError('Candidate is no longer origin/main; prepare the new candidate')
+    authorization_id = os.environ.get('TASK_AUTHORIZATION_ID', '').strip()
+    if os.environ.get('RELEASE_MODE') == 'task-scoped-auto':
+        if not authorization_id:
+            raise RuntimeError('TASK_SCOPED_AUTO requires a durable authorization ID')
+        env = {**os.environ, 'TASK_AUTHORIZATION_ID': authorization_id,
+               'TASK_CURRENT_MAIN_SHA': sha, 'CANDIDATE_SHA': sha}
+        checked = subprocess.run(['node', 'scripts/validate-task-authorization.mjs'],
+                                  cwd=Path(__file__).resolve().parents[1], env=env,
+                                  capture_output=True, text=True, timeout=30)
+        if checked.returncode != 0:
+            raise RuntimeError('TASK_SCOPED_AUTO authorization is invalid')
+        print(checked.stdout.strip())
+    elif authorization_id:
+        raise RuntimeError('Task authorization ID is only valid for task-scoped-auto mode')
     runs = github(f'actions/workflows/gpoint-prepare.yml/runs?branch=main&head_sha={sha}&per_page=100')['workflow_runs']
     selected = select_run(sha, runs)
     asset = resolve_asset('prepare', sha, str(selected['id']), str(selected.get('run_attempt', 1)),
                           'bundle.zip', github)
     validate_expected_run(selected, os.environ.get('PREPARE_RUN_ID'), os.environ.get('PREPARE_RUN_ATTEMPT'))
     preflight = None
-    if os.environ.get('RELEASE_MODE') == 'production':
+    if os.environ.get('RELEASE_MODE') in ('production', 'task-scoped-auto'):
         deploy_runs = github(f'actions/workflows/gpoint-deploy.yml/runs?branch=main&head_sha={sha}&per_page=100')['workflow_runs']
         from release_assets import read_result
         def read_exact_result(candidate, run_id, attempt):
@@ -130,6 +147,7 @@ def main():
     with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
         output.write(f"run_id={selected['id']}\nrun_attempt={selected.get('run_attempt', 1)}\nartifact_id={asset['id']}\ncandidate={sha}\n")
         output.write(f'orchestrator_run_id={orchestrator_run_id}\n')
+        output.write(f'task_authorization_id={authorization_id}\n')
         if preflight:
             output.write(f"ready_preflight_run_id={preflight['id']}\nready_preflight_run_attempt={preflight.get('run_attempt', 1)}\n")
         state = os.environ.get('NETWORK_RETRY_BUDGET_STATE')

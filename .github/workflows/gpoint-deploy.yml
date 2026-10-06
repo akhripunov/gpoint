@@ -9,11 +9,11 @@ on:
         required: true
         type: string
       mode:
-        description: 'preflight checks the live server; production applies this candidate'
+        description: 'preflight checks the live server; production uses exact-SHA approval; task-scoped-auto requires durable one-shot owner record'
         required: true
         default: preflight
         type: choice
-        options: [preflight, production]
+        options: [preflight, production, task-scoped-auto]
       approve_production:
         description: 'I authorize this exact candidate on GPoint production'
         required: true
@@ -29,6 +29,10 @@ on:
         type: string
       orchestrator_run_id:
         description: 'Automatic preflight controller run; telemetry only'
+        required: false
+        type: string
+      task_authorization_id:
+        description: 'Durable TASK_SCOPED_AUTO authorization ID; required only for that mode'
         required: false
         type: string
 
@@ -53,6 +57,7 @@ jobs:
       ready_preflight_run_attempt: ${{ steps.select.outputs.ready_preflight_run_attempt }}
       orchestrator_run_id: ${{ steps.select.outputs.orchestrator_run_id }}
       network_retry_budget_used_seconds: ${{ steps.select.outputs.network_retry_budget_used_seconds }}
+      task_authorization_id: ${{ steps.select.outputs.task_authorization_id }}
     steps:
       - name: Initialize shared retry budget
         shell: bash
@@ -62,6 +67,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
       - name: Verify operator confirmation, current main and successful preparation
         id: select
         env:
@@ -73,6 +79,7 @@ jobs:
           PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
           PREPARE_RUN_ATTEMPT: ${{ inputs.prepare_run_attempt }}
           ORCHESTRATOR_RUN_ID: ${{ inputs.orchestrator_run_id }}
+          TASK_AUTHORIZATION_ID: ${{ inputs.task_authorization_id }}
         run: python scripts/select-release-run.py
 
   deploy:
@@ -97,6 +104,7 @@ jobs:
       PYTHONDONTWRITEBYTECODE: "1"
       RELEASE_MODE: ${{ inputs.mode }}
       APPROVE_PRODUCTION: ${{ inputs.approve_production }}
+      TASK_AUTHORIZATION_ID: ${{ needs.validate.outputs.task_authorization_id }}
     steps:
       - name: Set private temporary evidence paths
         shell: bash
@@ -110,6 +118,10 @@ jobs:
         with:
           ref: ${{ needs.validate.outputs.candidate }}
           fetch-depth: 0
+      - name: Verify assigned runner before bundle or production checks
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/release-runner-readiness.mjs
       - name: Recheck current main and Prepare provenance on the Mac
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -126,6 +138,8 @@ jobs:
         env:
           CACHE_PREVENTED_DOWNLOAD: ${{ steps.cache.outputs.cache_prevented_download }}
           BUNDLE_DOWNLOAD_SECONDS: ${{ steps.cache.outputs.bundle_download_seconds }}
+          TASK_AUTHORIZATION_ID: ${{ needs.validate.outputs.task_authorization_id }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/automated-release.mjs
       - name: Preserve release result and canonical manifests as immutable evidence
         if: always()
@@ -153,6 +167,8 @@ jobs:
         with:
           ref: ${{ github.sha }}
       - name: Measure release runner usage
+        id: telemetry
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TELEMETRY_RUN_IDS: ${{ github.run_id }},${{ needs.validate.outputs.run_id }},${{ needs.validate.outputs.ready_preflight_run_id }},${{ needs.validate.outputs.orchestrator_run_id }}
@@ -160,6 +176,18 @@ jobs:
         run: |
           python3 scripts/release-telemetry.py
           cat "$GITHUB_OUTPUT" >> "$GITHUB_ENV"
+      - name: Mark release telemetry unknown
+        if: always() && steps.telemetry.outcome != 'success'
+        shell: bash
+        run: |
+          {
+            echo 'GITHUB_HOSTED_JOB_COUNT=UNKNOWN'
+            echo 'GITHUB_HOSTED_RUNNER_SECONDS=UNKNOWN'
+            echo 'SELF_HOSTED_JOB_COUNT=UNKNOWN'
+            echo 'SELF_HOSTED_RUNNER_SECONDS=UNKNOWN'
+            echo 'DUPLICATE_HOSTED_WORK_REMOVED=UNKNOWN'
+            echo 'CACHE_PREVENTED_DOWNLOAD=UNKNOWN'
+          } >> "$GITHUB_ENV"
       - name: Read saved release evidence
         if: needs.deploy.outputs.status != ''
         env:
@@ -174,7 +202,7 @@ jobs:
           RELEASE_STATUS: ${{ needs.deploy.outputs.preflight == 'PLANNED' && 'READY_FOR_OWNER' || needs.deploy.outputs.preflight || 'BLOCKED' }}
         run: python3 scripts/publish-release-linear.py
       - name: Publish production result to GPoint Linear
-        if: always() && inputs.mode == 'production' && needs.deploy.outputs.status != ''
+        if: always() && (inputs.mode == 'production' || inputs.mode == 'task-scoped-auto') && needs.deploy.outputs.status != ''
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}

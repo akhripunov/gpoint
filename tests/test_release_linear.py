@@ -57,11 +57,23 @@ class ReleaseTests(unittest.TestCase):
         publisher = workflow.split('  publish:', 1)[1]
         self.assertIn("if: always() && github.ref == 'refs/heads/main'", publisher)
         self.assertIn('needs.validate.outputs.candidate || inputs.candidate || github.sha', publisher)
-        self.assertIn("inputs.mode == 'production' && needs.deploy.outputs.status != ''", workflow)
+        self.assertIn("inputs.mode == 'production' || inputs.mode == 'task-scoped-auto'", workflow)
+        self.assertIn("needs.deploy.outputs.status != ''", workflow)
         self.assertIn('RELEASE_PHASE: preflight', workflow)
         self.assertIn("RELEASE_STATUS: ${{ needs.deploy.outputs.preflight == 'PLANNED' && 'READY_FOR_OWNER'", workflow)
         self.assertIn("needs.deploy.outputs.status == 'COMPLETE' && 'RECOVERY_REQUIRED'", workflow)
         self.assertIn('preflight=${preflightStatus}', (ROOT / 'scripts/automated-release.mjs').read_text())
+
+    def test_release_workflow_keeps_publishable_when_telemetry_fails(self):
+        workflow = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()
+        telemetry = workflow.split('- name: Measure release runner usage', 1)[1].split('- name:', 1)[0]
+        fallback = workflow.split('- name: Mark release telemetry unknown', 1)[1].split('- name:', 1)[0]
+        self.assertIn('continue-on-error: true', telemetry)
+        self.assertIn("if: always() && steps.telemetry.outcome != 'success'", fallback)
+        for key in ('GITHUB_HOSTED_JOB_COUNT', 'GITHUB_HOSTED_RUNNER_SECONDS', 'SELF_HOSTED_JOB_COUNT',
+                    'SELF_HOSTED_RUNNER_SECONDS', 'DUPLICATE_HOSTED_WORK_REMOVED', 'CACHE_PREVENTED_DOWNLOAD'):
+            self.assertIn(f'{key}=UNKNOWN', fallback)
+        self.assertIn('Publish preflight result to GPoint Linear', workflow)
 
     def test_project_linear_document_targets_are_gpoint_scoped(self):
         self.assertIn('Архитектор — Handoff', SYNC.DOCUMENTS['handoff'][1])
