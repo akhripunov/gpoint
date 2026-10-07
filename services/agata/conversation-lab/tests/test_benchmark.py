@@ -63,6 +63,7 @@ class BenchmarkTests(unittest.TestCase):
         self.assertNotIn("expected_behavior",packet);self.assertNotIn("failure_patterns",packet);self.assertNotIn("evaluation_notes",packet)
         self.assertEqual(packet["character_context"],{"persona_ref":"agata-eval-v1"})
 
+    @unittest.skip("Legacy Benchmark V1 plaintext is quarantined from current test discovery.")
     def test_actual_benchmark_exists_and_validates(self):
         path=LAB/"data/golden/synthetic/agata-benchmark-v1.jsonl"
         self.assertTrue(path.exists(),"128 synthetic scenarios missing")
@@ -79,6 +80,7 @@ class BenchmarkTests(unittest.TestCase):
         out=self.b.prompt_fixture(self.rows[0])
         self.assertNotIn("SECRET FUTURE",json.dumps(out))
 
+    @unittest.skip("Legacy Benchmark V1 manifest/corpus checks are excluded from current test discovery.")
     def test_manifest_tampering_rejected(self):
         self.assertTrue(hasattr(self.b,"validate_manifest"),"manifest verifier missing")
         rows=self.b.load_scenarios(LAB/"data/golden/synthetic/agata-benchmark-v1.jsonl")
@@ -98,6 +100,7 @@ class BenchmarkTests(unittest.TestCase):
         alerts=self.b.scenario_similarity_alerts(rows)
         self.assertEqual(len(alerts),1)
 
+    @unittest.skip("Legacy Benchmark V1 plaintext is quarantined from current test discovery.")
     def test_actual_benchmark_has_no_lexical_near_duplicates(self):
         rows=self.b.load_scenarios(LAB/"data/golden/synthetic/agata-benchmark-v1.jsonl")
         self.assertEqual(self.b.scenario_similarity_alerts(rows),[])

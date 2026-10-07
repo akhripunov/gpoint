@@ -29,8 +29,8 @@ class BlindTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.b.make_blind_packets(self.scenarios,self.results,0)
     def test_error_is_not_scored_as_success(self):
         self.results[0]["status"]="error";self.results[0]["turns"]=[]
-        packet,key=self.b.make_blind_packets(self.scenarios,self.results,0)
-        self.assertEqual(packet["completion_status"],"INCOMPLETE")
+        with self.assertRaises(ValueError):
+            self.b.make_blind_packets(self.scenarios,self.results,0)
     def test_seed_changes_order_without_omitting_models(self):
         orders=[]
         for seed in range(8):
@@ -42,3 +42,57 @@ class BlindTests(unittest.TestCase):
         packet,key=self.b.make_blind_packets(self.scenarios,self.results,982743)
         self.assertNotIn("seed",packet)
         self.assertEqual(key["seed"],982743)
+
+    def test_persona_quality_defect_escalates_privately_without_rewriting_dialogue(self):
+        scenario=copy.deepcopy(self.scenarios[0]);scenario["user_gender"]="male"
+        results=copy.deepcopy(self.results[:2])
+        results[0]["turns"][1]["text"]="Я устал тебя ждать."
+        packet,key=self.b.make_blind_packets([scenario],results,81)
+        self.assertEqual(packet["quality_status"],"HUMAN_ESCALATION")
+        self.assertEqual(key["sanity_findings"][0]["private_quality_findings"][0]["code"],"AGATA_SELF_MASCULINE_GRAMMAR")
+        public=json.dumps(packet,ensure_ascii=False)
+        self.assertNotIn("AGATA_SELF_MASCULINE_GRAMMAR",public)
+        texts=[c["turns"][1]["text"] for c in packet["scenarios"][0]["candidates"]]
+        self.assertIn("Я устал тебя ждать.",texts)
+
+    def test_structural_or_label_leak_never_emits_blind_packet(self):
+        scenario=copy.deepcopy(self.scenarios[0]);scenario["user_gender"]="male"
+        results=copy.deepcopy(self.results[:2])
+        results[0]["turns"][1]["text"]="Candidate B звучит лучше."
+        with self.assertRaises(ValueError):
+            self.b.make_blind_packets([scenario],results,81)
+        results=copy.deepcopy(self.results[:2]);results[0]["turns"].pop()
+        with self.assertRaises(ValueError):
+            self.b.make_blind_packets([scenario],results,81)
+
+    def test_v2_x_y_assignment_is_reproducible_from_immutable_batch_identity(self):
+        scenarios=copy.deepcopy(self.scenarios)
+        results=copy.deepcopy(self.results[:2])
+        results[0]["model_id"]="baseline"
+        results[1]["model_id"]="naturalness-v1"
+        first=self.b.make_v2_blind_packets(scenarios,results,batch_id="immutable-batch-004")
+        second=self.b.make_v2_blind_packets(scenarios,results,batch_id="immutable-batch-004")
+        self.assertEqual(first,second)
+        self.assertEqual(first[1]["batch_id"],"immutable-batch-004")
+        self.assertEqual(first[1]["seed"],second[1]["seed"])
+
+    def test_v2_packet_omits_evaluator_oracle_fields_and_scans_displayed_context(self):
+        scenarios=copy.deepcopy(self.scenarios)
+        scenarios[0].update({"context":{"summary":"Baseline arm; private"},"evaluation_notes":"judge secret",
+                            "expected_behavior":["oracle"],"failure_patterns":["hint"],"category":"daily"})
+        results=copy.deepcopy(self.results[:2]);results[0]["model_id"]="baseline";results[1]["model_id"]="naturalness-v1"
+        with self.assertRaises(ValueError): self.b.make_v2_blind_packets(scenarios,results,batch_id="metadata-leak")
+        scenarios[0]["context"]={"summary":"A calm morning"}
+        packet,_=self.b.make_v2_blind_packets(scenarios,results,batch_id="metadata-safe")
+        rendered=json.dumps(packet,ensure_ascii=False).casefold()
+        self.assertNotIn("evaluation_notes",rendered)
+        self.assertNotIn("expected_behavior",rendered)
+        self.assertNotIn("failure_patterns",rendered)
+        self.assertNotIn("judge secret",rendered)
+
+    def test_v2_packet_rejects_technical_metadata_in_user_turn(self):
+        scenarios=copy.deepcopy(self.scenarios)
+        scenarios[0]["dialogue_turns"][0]["text"]="Candidate A, run_id=abc"
+        results=copy.deepcopy(self.results[:2]);results[0]["model_id"]="baseline";results[1]["model_id"]="naturalness-v1"
+        for row in results: row["turns"][0]["text"]="Candidate A, run_id=abc"
+        with self.assertRaises(ValueError): self.b.make_v2_blind_packets(scenarios,results,batch_id="user-leak")

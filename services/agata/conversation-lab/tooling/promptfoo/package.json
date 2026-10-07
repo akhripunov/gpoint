@@ -1,0 +1,17 @@
+{
+  "name": "@agata/conversation-lab-promptfoo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pinned local Promptfoo execution engine for AGATA Conversation Lab",
+  "engines": {
+    "node": ">=22.22.0"
+  },
+  "scripts": {
+    "test:contract": "python3 -m unittest discover -s ../../tests -p 'test_promptfoo_runner.py' -v",
+    "promptfoo:version": "promptfoo --version"
+  },
+  "devDependencies": {
+    "@openai/codex-sdk": "0.156.1",
+    "promptfoo": "0.123.1"
+  }
+}

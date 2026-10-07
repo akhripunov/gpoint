@@ -1,0 +1,54 @@
+{
+  "schema_version": 2,
+  "dataset_id": "agata-conversation-lab-v2",
+  "provenance": "synthetic-only; split manifests contain IDs and hashes, never conversation plaintext",
+  "legacy_holdout_v1": {
+    "status": "COMPROMISED_EXCLUDED",
+    "optimizer_access": false,
+    "scenario_content_read": true,
+    "access_incident": "Current broad offline test discovery accidentally opened the V1 corpus on 2026-10-06; no further V1 reads permitted.",
+    "scenario_content_used_for_v2": false,
+    "v2_fixture_provenance": "Fresh synthetic fixtures regenerated from owner-approved category labels in an isolated temporary directory with no repository dataset files."
+  },
+  "optimizer_allowlist": {
+    "training_splits": ["DEV"],
+    "validation_splits": ["VALIDATION"],
+    "forbidden_splits": ["SEALED_HOLDOUT"]
+  },
+  "splits": {
+    "DEV": {
+      "scenario_ids": [
+        "v2-dev-clean-20261006-everyday",
+        "v2-dev-clean-20261006-humor",
+        "v2-dev-clean-20261006-boundaries",
+        "v2-dev-clean-20261006-initiative"
+      ],
+      "scenario_hashes": {
+        "v2-dev-clean-20261006-everyday": "823198b3b6dcb98f63082cd75f693f3b9a163c3bf2ea7a703ca173556867567d",
+        "v2-dev-clean-20261006-humor": "a47e120bc829be0f86d14d0c7bab87a9f33aafd4f70d76413c59f97d69533fb3",
+        "v2-dev-clean-20261006-boundaries": "9e474598bb60f74ac74e69dfa7d874d4458a3c32e5f3636f52791a8f2792008e",
+        "v2-dev-clean-20261006-initiative": "2487ba7e3a9a1540c1242f4c16de77fcadc0f8d77a914da4f4503e0a66c7fe3f"
+      }
+    },
+    "VALIDATION": {
+      "scenario_ids": [
+        "v2-validation-clean-20261006-everyday",
+        "v2-validation-clean-20261006-humor",
+        "v2-validation-clean-20261006-boundaries",
+        "v2-validation-clean-20261006-initiative"
+      ],
+      "scenario_hashes": {
+        "v2-validation-clean-20261006-everyday": "c7bc11d6d1dbc147aef106e9d57e7bd604599fae5d2ef8648da0ae1a8baa6222",
+        "v2-validation-clean-20261006-humor": "00307d512a37d593b276012bb8a190ac1878ff0371e45e4c34e9e5000fb8f663",
+        "v2-validation-clean-20261006-boundaries": "cb04ed765795bb61888d79764eb2fa089305413b51a586e5d2dc950f637feb3b",
+        "v2-validation-clean-20261006-initiative": "59d06ca6858d1a406841e941de142c45036476da29628c0fa6068180fe802c6a"
+      }
+    },
+    "SEALED_HOLDOUT": {
+      "scenario_ids": [],
+      "scenario_hashes": {},
+      "plaintext_committed": false,
+      "commitment_sha256": null
+    }
+  }
+}

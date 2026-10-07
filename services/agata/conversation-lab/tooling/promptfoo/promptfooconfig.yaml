@@ -1,0 +1,15 @@
+{
+  "description": "AGATA Conversation Lab V2 provider template; executable eval configs are created by the guarded runner",
+  "providers": [
+    {
+      "id": "file://../../evaluators/promptfoo_worker_provider.py",
+      "config": {
+        "model": "gpt-6-luna",
+        "reasoning_effort": "medium",
+        "maxRetries": 0,
+        "fallbacks": []
+      }
+    }
+  ],
+  "evaluateOptions": {"maxConcurrency": 1, "cache": false}
+}

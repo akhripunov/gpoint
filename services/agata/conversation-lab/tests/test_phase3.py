@@ -12,6 +12,7 @@ LAB=Path(__file__).resolve().parents[1]
 def load_module(name, path):
     spec=importlib.util.spec_from_file_location(name,path);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
 
+@unittest.skip("Legacy V1 pilot suite opens compromised -01 scenarios; V2 regression suite uses synthetic fixtures instead.")
 class Phase3Tests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

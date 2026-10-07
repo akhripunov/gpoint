@@ -15,6 +15,8 @@ DEFAULT_MAX_PENDING = 16
 MAX_TIMEOUT_SECONDS = 180
 FIXTURE_MANIFEST_SHA256 = "2bf4936187d4ff7c1f67d7a97fdc43c7ab5025d00bd3cbbb654c3d62ccd865d1"
 FIXTURE_MANIFEST = Path(__file__).with_name("lab_fixture_manifest.json")
+PROMPTFOO_COMPAT_MANIFEST_SHA256 = "9e3a6e0536948787993057e3389b67378bd33012cbdad5807beddb3b9573e208"
+PROMPTFOO_COMPAT_MANIFEST = Path(__file__).with_name("lab_promptfoo_compat_manifest.json")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 REQUEST_KEYS = {
     "instructions", "persona", "communication_settings", "memories",
@@ -62,8 +64,28 @@ def _read_fixture_manifest() -> dict:
     return value
 
 
+def read_promptfoo_compat_fixture() -> dict:
+    """Read the separately pinned one-turn technical fixture; never load dataset splits."""
+    try:
+        payload = PROMPTFOO_COMPAT_MANIFEST.read_bytes()
+        if hashlib.sha256(payload).hexdigest() != PROMPTFOO_COMPAT_MANIFEST_SHA256:
+            raise ValueError
+        value = json.loads(payload)
+    except (OSError, ValueError) as exc:
+        raise LabQueueError("promptfoo_compat_manifest_invalid") from exc
+    required = {"schema_version", "experiment_id", "scenario_id", "model", "reasoning_effort", "user_message", "request_sha256"}
+    if (not isinstance(value, dict) or set(value) != required or value.get("schema_version") != 1
+            or value.get("experiment_id") != "promptfoo-worker-compat"
+            or value.get("scenario_id") != "promptfoo-compat-001"
+            or value.get("model") != "gpt-6-luna" or value.get("reasoning_effort") != "medium"
+            or not isinstance(value.get("user_message"), str) or not value["user_message"].strip()
+            or not re.fullmatch(r"[0-9a-f]{64}", str(value.get("request_sha256")))):
+        raise LabQueueError("promptfoo_compat_manifest_invalid")
+    return value
+
+
 def _validate(job: object, *, root: Path) -> tuple[dict, bytes]:
-    if not isinstance(job, dict) or set(job) != JOB_KEYS:
+    if not isinstance(job, dict) or not JOB_KEYS <= set(job) or set(job) - (JOB_KEYS | {"model", "reasoning_effort"}):
         raise LabQueueError("job_schema_invalid")
     for field in ("job_id", "experiment_id", "configuration_id"):
         value = job.get(field)
@@ -86,44 +108,66 @@ def _validate(job: object, *, root: Path) -> tuple[dict, bytes]:
             or not all(isinstance(request[key], dict) for key in ("persona", "communication_settings"))
             or not all(isinstance(request[key], list) for key in ("memories", "dialogue_summaries", "history"))):
         raise LabQueueError("lab_request_context_invalid")
-    fixtures = _read_fixture_manifest()
-    scenario = fixtures["scenarios"].get(job["scenario_id"])
-    turn = job["turn_index"]
-    arm = job["configuration_id"]
-    receipt_ids = job["history_receipt_ids"]
-    if (job["experiment_id"] != fixtures["experiment_id"] or arm not in {"baseline", "naturalness-v1"}
-            or not isinstance(scenario, dict) or turn >= len(scenario.get("user_turns", []))
-            or not isinstance(receipt_ids, list) or len(receipt_ids) != turn
-            or request["user_message"] != scenario["user_turns"][turn]):
-        raise LabQueueError("lab_fixture_identity_mismatch")
-    static_request = dict(request)
-    static_request["history"] = []
-    canonical = json.dumps(static_request, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    expected_hashes = scenario.get("request_hashes", {}).get(arm, [])
-    if (turn >= len(expected_hashes) or hashlib.sha256(canonical).hexdigest() != expected_hashes[turn]):
-        raise LabQueueError("lab_fixture_request_hash_mismatch")
-    expected_history = []
-    receipts_dir = Path(root) / "receipts"
-    for index, receipt_id in enumerate(receipt_ids):
-        if not isinstance(receipt_id, str) or not ID_RE.fullmatch(receipt_id):
-            raise LabQueueError("lab_history_receipt_invalid")
-        try:
-            receipt = json.loads((receipts_dir / (receipt_id + ".json")).read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise LabQueueError("lab_history_receipt_missing") from exc
-        identity = receipt.get("identity", {}) if isinstance(receipt, dict) else {}
-        response = receipt.get("response") if isinstance(receipt, dict) else None
-        if (receipt.get("job_id") != receipt_id or receipt.get("status") != "completed"
-                or identity.get("experiment_id") != job["experiment_id"]
-                or identity.get("configuration_id") != arm or identity.get("scenario_id") != job["scenario_id"]
-                or identity.get("turn_index") != index or not isinstance(response, str) or not response.strip()):
-            raise LabQueueError("lab_history_receipt_invalid")
-        expected_history.extend([
-            {"role": "user", "content": scenario["user_turns"][index]},
-            {"role": "assistant", "content": response},
-        ])
-    if request["history"] != expected_history:
-        raise LabQueueError("lab_history_not_receipt_backed")
+    if job["experiment_id"] == "promptfoo-worker-compat":
+        fixture = read_promptfoo_compat_fixture()
+        if (set(job) != JOB_KEYS | {"model", "reasoning_effort"}
+                or job["configuration_id"] != "compat"
+                or job["scenario_id"] != fixture["scenario_id"] or job["turn_index"] != 0
+                or job["model"] != fixture["model"]
+                or job["reasoning_effort"] != fixture["reasoning_effort"]
+                or job["history_receipt_ids"] != []
+                or request["user_message"] != fixture["user_message"]):
+            raise LabQueueError("lab_fixture_identity_mismatch")
+        static_request = dict(request)
+        static_request["history"] = []
+        canonical = json.dumps(static_request, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        if hashlib.sha256(canonical).hexdigest() != fixture["request_sha256"]:
+            raise LabQueueError("lab_fixture_request_hash_mismatch")
+        if request["history"] != []:
+            raise LabQueueError("lab_history_not_receipt_backed")
+    elif job["experiment_id"] == "agata-naturalness-v1":
+        if set(job) != JOB_KEYS:
+            raise LabQueueError("job_schema_invalid")
+        fixtures = _read_fixture_manifest()
+        scenario = fixtures["scenarios"].get(job["scenario_id"])
+        turn = job["turn_index"]
+        arm = job["configuration_id"]
+        receipt_ids = job["history_receipt_ids"]
+        if (job["experiment_id"] != fixtures["experiment_id"] or arm not in {"baseline", "naturalness-v1"}
+                or not isinstance(scenario, dict) or turn >= len(scenario.get("user_turns", []))
+                or not isinstance(receipt_ids, list) or len(receipt_ids) != turn
+                or request["user_message"] != scenario["user_turns"][turn]):
+            raise LabQueueError("lab_fixture_identity_mismatch")
+        static_request = dict(request)
+        static_request["history"] = []
+        canonical = json.dumps(static_request, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        expected_hashes = scenario.get("request_hashes", {}).get(arm, [])
+        if turn >= len(expected_hashes) or hashlib.sha256(canonical).hexdigest() != expected_hashes[turn]:
+            raise LabQueueError("lab_fixture_request_hash_mismatch")
+        expected_history = []
+        receipts_dir = Path(root) / "receipts"
+        for index, receipt_id in enumerate(receipt_ids):
+            if not isinstance(receipt_id, str) or not ID_RE.fullmatch(receipt_id):
+                raise LabQueueError("lab_history_receipt_invalid")
+            try:
+                receipt = json.loads((receipts_dir / (receipt_id + ".json")).read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise LabQueueError("lab_history_receipt_missing") from exc
+            identity = receipt.get("identity", {}) if isinstance(receipt, dict) else {}
+            response = receipt.get("response") if isinstance(receipt, dict) else None
+            if (receipt.get("job_id") != receipt_id or receipt.get("status") != "completed"
+                    or identity.get("experiment_id") != job["experiment_id"]
+                    or identity.get("configuration_id") != arm or identity.get("scenario_id") != job["scenario_id"]
+                    or identity.get("turn_index") != index or not isinstance(response, str) or not response.strip()):
+                raise LabQueueError("lab_history_receipt_invalid")
+            expected_history.extend([
+                {"role": "user", "content": scenario["user_turns"][index]},
+                {"role": "assistant", "content": response},
+            ])
+        if request["history"] != expected_history:
+            raise LabQueueError("lab_history_not_receipt_backed")
+    else:
+        raise LabQueueError("lab_experiment_not_allowed")
     try:
         payload = json.dumps(job, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
     except (TypeError, ValueError) as exc:
@@ -243,7 +287,7 @@ def finish(
         }
     if execution:
         safe = {}
-        for key in ("duration_ms", "timeout_seconds", "requested_model", "requested_reasoning_effort", "actual_model"):
+        for key in ("duration_ms", "timeout_seconds", "requested_model", "requested_reasoning_effort", "actual_model", "inference_started"):
             value = execution.get(key)
             if isinstance(value, (str, int, float)) or value is None:
                 safe[key] = value

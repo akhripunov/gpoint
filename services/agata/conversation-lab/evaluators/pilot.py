@@ -1,10 +1,55 @@
 """Frozen pilot selection and strictly offline multi-turn replay."""
 from __future__ import annotations
-import copy,hashlib,importlib.util,json,sys
+import copy,hashlib,importlib.util,json,re,sys
 from pathlib import Path
 MODELS=("codex-cli-baseline","gpt-6.1-sol","claude-sonnet-5-5","gemini-3.8-flash")
 PILOT_SUFFIX="-01"
 def stable_hash(value):return hashlib.sha256(json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(",", ":")).encode()).hexdigest()
+
+def validate_v2_scenario(scenario, split_manifest, split):
+ """Validate explicit synthetic V2 input by manifest commitment; never loads V1 pilot data."""
+ if split not in {"DEV", "VALIDATION", "SEALED_HOLDOUT"}:
+  raise PermissionError("unknown V2 split")
+ if not isinstance(scenario, dict) or not isinstance(split_manifest, dict) or split_manifest.get("schema_version") != 2:
+  raise ValueError("scenario and V2 split manifest are required")
+ legacy = split_manifest.get("legacy_holdout_v1", {})
+ read_incident = isinstance(legacy, dict) and legacy.get("scenario_content_read") is True
+ incident_recorded = (isinstance(legacy, dict) and isinstance(legacy.get("access_incident"), str)
+                      and bool(legacy["access_incident"].strip())
+                      and isinstance(legacy.get("v2_fixture_provenance"), str)
+                      and bool(legacy["v2_fixture_provenance"].strip()))
+ if (not isinstance(legacy, dict) or legacy.get("status") != "COMPROMISED_EXCLUDED"
+     or legacy.get("optimizer_access") is not False
+     or legacy.get("scenario_content_used_for_v2") is not False
+     or legacy.get("scenario_content_read") not in (False, True)
+     or (read_incident and not incident_recorded)):
+  raise PermissionError("compromised V1 holdout must remain excluded")
+ scenario_id = scenario.get("scenario_id")
+ if not isinstance(scenario_id, str) or not scenario_id.strip() or scenario_id.endswith("-01"):
+  raise PermissionError("compromised or invalid scenario identity is not allowed in V2")
+ splits = split_manifest.get("splits")
+ if not isinstance(splits, dict):
+  raise ValueError("V2 split manifest entries are required")
+ split_value = splits.get(split)
+ if not isinstance(split_value, dict):
+  raise ValueError("selected V2 split is malformed")
+ scenario_ids = split_value.get("scenario_ids")
+ scenario_hashes = split_value.get("scenario_hashes")
+ if (not isinstance(scenario_ids, list) or
+     any(not isinstance(item, str) or not item.strip() for item in scenario_ids) or
+     len(scenario_ids) != len(set(scenario_ids)) or
+     not isinstance(scenario_hashes, dict) or set(scenario_ids) != set(scenario_hashes)):
+  raise ValueError("V2 split IDs and immutable hash commitments are malformed")
+ if scenario_id not in scenario_ids:
+  raise PermissionError("scenario is outside the explicitly selected V2 split")
+ expected_hash = scenario_hashes.get(scenario_id)
+ if not isinstance(expected_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+  raise ValueError("V2 scenario requires a lowercase SHA256 commitment")
+ actual_hash = stable_hash(scenario)
+ if actual_hash != expected_hash:
+  raise ValueError("V2 scenario does not match its immutable hash commitment")
+ return {"scenario_id": scenario_id, "split": split, "scenario_sha256": actual_hash, "validated": True}
+
 def _module(lab,name):
  folder=str(Path(lab)/"evaluators")
  if folder not in sys.path:sys.path.insert(0,folder)

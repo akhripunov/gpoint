@@ -657,6 +657,40 @@ async def claim_inference_job(
     return result
 
 
+@router.get("/worker/queue-status", dependencies=[Depends(require_internal_auth)])
+async def worker_queue_status(
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, object]:
+    """Return a tenant-scoped, content-free queue snapshot without claiming jobs."""
+    settings = get_settings()
+    tenant_id = UUID(settings.tenant_id)
+    lane = settings.source_system.upper()
+    if lane not in {"GPOINT", "GSALES"}:
+        raise HTTPException(status_code=503, detail={"code": "worker_queue_status_unavailable"})
+    job_types = ("inference", "sales_draft_inference") if (
+        lane == "GSALES" and settings.sales_drafts_enabled
+    ) else ("inference",)
+    async with session.begin():
+        await set_tenant_context(session, str(tenant_id))
+        grouped = await session.execute(
+            select(OutboxJob.state, func.count(OutboxJob.id))
+            .where(
+                OutboxJob.tenant_id == tenant_id,
+                OutboxJob.job_type.in_(job_types),
+                OutboxJob.state.in_((JobState.pending, JobState.running)),
+            )
+            .group_by(OutboxJob.state)
+        )
+        counts = {getattr(state, "value", state): int(count or 0) for state, count in grouped.all()}
+    return {
+        "source_id": f"agata-worker-queue-status-v1:{lane.lower()}",
+        "lane": lane,
+        "pending_jobs": counts.get(JobState.pending.value, 0),
+        "running_jobs": counts.get(JobState.running.value, 0),
+        "snapshot_at": datetime.now(UTC).isoformat(),
+    }
+
+
 @router.post("/worker/complete", dependencies=[Depends(require_internal_auth)])
 async def complete_inference_job(
     payload: WorkerCompleteRequest,

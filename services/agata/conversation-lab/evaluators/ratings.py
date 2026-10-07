@@ -42,10 +42,25 @@ def _validate_mapping(packet, private_mapping):
     return mappings
 
 
-def empty_ratings(packet, lab=None):
+def _rubric_dimensions(rubric):
+    if rubric is None:
+        return DIMENSIONS, SUPPLEMENTAL
+    core = rubric.get("core_dimensions")
+    conditional = rubric.get("conditional_dimensions")
+    if not isinstance(core, list) or not isinstance(conditional, dict):
+        raise ValueError("versioned OWNER rubric is invalid")
+    dimensions = tuple(row.get("id") for row in core if isinstance(row, dict))
+    supplemental = tuple(conditional)
+    if len(dimensions) != 8 or len(set(dimensions)) != 8 or len(supplemental) != len(conditional):
+        raise ValueError("versioned OWNER rubric must define eight unique core dimensions")
+    return dimensions, supplemental
+
+
+def empty_ratings(packet, lab=None, *, rubric=None):
+    dimensions, supplemental_dimensions = _rubric_dimensions(rubric)
     return {"schema_version": 1, "packet_sha256": _hash(packet), "ratings": [
-        {"scenario_id": sid, "label": label, "scores": {d: None for d in DIMENSIONS},
-         "supplemental": {d: None for d in SUPPLEMENTAL}, "not_applicable": {}, "critical_failures": [], "notes": ""}
+        {"scenario_id": sid, "label": label, "scores": {d: None for d in dimensions},
+         "supplemental": {d: None for d in supplemental_dimensions}, "not_applicable": {}, "critical_failures": [], "notes": ""}
         for sid, label in sorted(_expected(packet))],
         "pairwise_preferences": [{"scenario_id": scenario["scenario_id"], "left_label": left, "right_label": right,
                                    "preferred_label": None, "notes": ""}
@@ -53,7 +68,8 @@ def empty_ratings(packet, lab=None):
                 [candidate["label"] for candidate in scenario["candidates"]], 2)]}
 
 
-def _validate(packet, ratings):
+def _validate(packet, ratings, *, rubric=None):
+    dimensions, supplemental_dimensions = _rubric_dimensions(rubric)
     rows = ratings.get("ratings")
     if not isinstance(rows, list) or len(rows) != len(_expected(packet)):
         raise ValueError("all blind candidates require one rating row")
@@ -66,8 +82,8 @@ def _validate(packet, ratings):
         scores = row.get("scores", {})
         supplemental = row.get("supplemental", {})
         not_applicable = row.get("not_applicable", {})
-        all_dimensions = set(DIMENSIONS) | set(SUPPLEMENTAL)
-        if set(scores) != set(DIMENSIONS) or set(supplemental) != set(SUPPLEMENTAL) or set(not_applicable) - all_dimensions:
+        all_dimensions = set(dimensions) | set(supplemental_dimensions)
+        if set(scores) != set(dimensions) or set(supplemental) != set(supplemental_dimensions) or set(not_applicable) - all_dimensions:
             raise ValueError("rating dimensions do not match the versioned rubric and metric set")
         combined = {**scores, **supplemental}
         for dimension, value in combined.items():
@@ -92,19 +108,28 @@ def _validate(packet, ratings):
             raise ValueError("pairwise preference must select one presented candidate or tie")
 
 
-def lock_ratings(packet, ratings, *, cycle_id):
+def lock_ratings(packet, ratings, *, cycle_id, rubric=None):
     if not isinstance(cycle_id, str) or not cycle_id.strip():
         raise ValueError("review cycle ID required")
-    _validate(packet, ratings)
+    _validate(packet, ratings, rubric=rubric)
     body = {"schema_version": 1, "cycle_id": cycle_id, "packet_sha256": _hash(packet), "ratings_sha256": _hash(ratings)}
+    if rubric is not None:
+        body["rubric_sha256"] = _hash(rubric)
     body["lock_sha256"] = _hash(body)
     return body
 
 
-def verify_lock(lock, packet, ratings):
+def verify_lock(lock, packet, ratings, *, rubric=None):
     try:
-        _validate(packet, ratings)
-        body = {k: lock[k] for k in ("schema_version", "cycle_id", "packet_sha256", "ratings_sha256")}
+        _validate(packet, ratings, rubric=rubric)
+        keys = ["schema_version", "cycle_id", "packet_sha256", "ratings_sha256"]
+        if "rubric_sha256" in lock:
+            if rubric is None or lock["rubric_sha256"] != _hash(rubric):
+                return False
+            keys.append("rubric_sha256")
+        elif rubric is not None:
+            return False
+        body = {k: lock[k] for k in keys}
         return lock["lock_sha256"] == _hash(body) and body["packet_sha256"] == _hash(packet) and body["ratings_sha256"] == _hash(ratings)
     except (ValueError, KeyError, TypeError):
         return False
@@ -148,9 +173,9 @@ def persist_locked_ratings(path, packet, ratings, *, cycle_id):
     return lock
 
 
-def unblind(packet, lock, ratings, private_mapping):
-    if not verify_lock(lock, packet, ratings):
-        raise ValueError("ratings must be complete and locked before unblinding")
+def unblind(packet, lock, ratings, private_mapping, *, rubric=None):
+    if not verify_lock(lock, packet, ratings, rubric=rubric):
+        raise ValueError("ratings, packet, and rubric must be locked before unblinding")
     mappings = _validate_mapping(packet, private_mapping)
     return {"cycle_id": lock["cycle_id"], "revealed": [
         {"scenario_id": row["scenario_id"], "label": row["label"], "model_id": next(
@@ -160,9 +185,9 @@ def unblind(packet, lock, ratings, private_mapping):
         "pairwise_preferences": copy.deepcopy(ratings["pairwise_preferences"])}
 
 
-def aggregate_ratings(packet, lock, ratings, private_mapping):
+def aggregate_ratings(packet, lock, ratings, private_mapping, *, rubric=None):
     """Descriptive post-lock summary; does not rank a winner or add inference."""
-    if not verify_lock(lock, packet, ratings):
+    if not verify_lock(lock, packet, ratings, rubric=rubric):
         raise ValueError("aggregate requires an exact locked OWNER rating set")
     mappings = _validate_mapping(packet, private_mapping)
     mapping = {(m["scenario_id"], m["label"]): m["model_id"] for m in mappings}

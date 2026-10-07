@@ -15,7 +15,8 @@ HOME = Path.home()
 RUNTIME_ROOT = HOME / "Library/Application Support/GPoint/agata-codex-worker"
 SOURCES = tuple(Path(__file__).with_name(name) for name in (
     "gpoint_mac_worker.py", "agata_worker_pool.py", "lab_queue.py",
-    "lab_fixture_manifest.json", "requirements.txt", "run_codex_worker.sh",
+    "lab_fixture_manifest.json", "lab_promptfoo_compat_manifest.json",
+    "run_codex_worker.sh", "requirements.txt",
 ))
 CODEX_APP_PATH = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex")
 

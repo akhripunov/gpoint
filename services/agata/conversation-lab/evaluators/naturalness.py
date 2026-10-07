@@ -27,6 +27,36 @@ def stable_hash(value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def load_v2_split_manifest(lab: Path) -> dict:
+    """Load only the V2 ID/hash manifest; never inspect a legacy pilot manifest."""
+    path = Path(lab) / "configs/splits-v2.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    if manifest.get("schema_version") != 2:
+        raise ValueError("Conversation Lab requires split manifest V2")
+    return manifest
+
+
+def compile_v2_arms(scenario: dict, fixtures: dict, treatment, *, run_id: str, split_manifest: dict,
+                    policy_sha256: str) -> list[dict]:
+    """Build the Promptfoo V2 pair from explicit approved inputs only.
+
+    This current path deliberately does not call `_inputs`, `load_frozen_pilot`,
+    or any Benchmark V1 `-01` loader. The V2 caller supplies the validated
+    development scenario and identical canonical fixtures directly.
+    """
+    lab = Path(__file__).resolve().parents[1]
+    pilot = _module(lab, "pilot")
+    pilot.validate_v2_scenario(scenario, split_manifest, "DEV")
+    if not isinstance(policy_sha256, str) or len(policy_sha256) != 64 or not isinstance(treatment, str):
+        raise ValueError("frozen Naturalness Policy text and SHA256 are required")
+    policy_path = lab / "configs/naturalness-policy-v1.md"
+    frozen_policy = policy_path.read_bytes()
+    if hashlib.sha256(frozen_policy).hexdigest() != policy_sha256 or treatment.encode("utf-8") != frozen_policy:
+        raise ValueError("Candidate treatment does not match the frozen Naturalness Policy artifact")
+    coordinator = _module(lab, "run_coordinator")
+    return coordinator.compile_arms(scenario, fixtures, treatment, run_id=run_id)
+
+
 def _file_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
