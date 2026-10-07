@@ -1,5 +1,6 @@
 """Local-only contract tests for the subscription-backed worker."""
 
+import io
 import json
 import os
 import subprocess
@@ -126,20 +127,36 @@ class MacWorkerTests(unittest.TestCase):
             {"job": {"id": "job-1", "leaseToken": "lease-1", "request": {"user_message": "hi"}}},
             {"completed": True},
             {"status": "ready"},
+            {
+                "source_id": "agata-worker-queue-status-v1:gpoint",
+                "lane": "GPOINT",
+                "pending_jobs": 2,
+                "running_jobs": 1,
+                "snapshot_at": "2026-10-07T10:00:00+00:00",
+            },
         ])
         calls = []
+        output = io.StringIO()
 
         def api(path, body=None):
             calls.append((path, body))
             return next(responses)
 
-        with patch.dict(os.environ, {"GPOINT_AGATA_WORKER_TOKEN": token, "GPOINT_AGATA_TENANT_ID": TEST_GPOINT_TENANT_ID, "AGATA_WORKER_MODEL": "test-model"}), patch.object(worker, "api_request", side_effect=api), patch.object(worker, "run_inference", return_value="answer"):
+        with patch.dict(os.environ, {"GPOINT_AGATA_WORKER_TOKEN": token, "GPOINT_AGATA_TENANT_ID": TEST_GPOINT_TENANT_ID, "AGATA_WORKER_MODEL": "test-model"}), patch.object(worker, "api_request", side_effect=api), patch.object(worker, "run_inference", return_value="answer"), patch("sys.stdout", output):
             self.assertTrue(worker.process_one())
             self.assertEqual(worker.status(), 0)
 
         complete = next(body for path, body in calls if path == "complete")
         self.assertEqual(complete["text"], "answer")
-        self.assertEqual([path for path, _ in calls], ["health", "claim", "complete", "health"])
+        self.assertEqual([path for path, _ in calls], ["health", "claim", "complete", "health", "queue-status"])
+        self.assertIsNone(calls[-1][1])
+        status_output = output.getvalue()
+        self.assertIn('"queue_snapshot_state": "VERIFIED"', status_output)
+        self.assertIn('"pending_inference_jobs": 2', status_output)
+        self.assertIn('"running_inference_jobs": 1', status_output)
+        self.assertNotIn(token, status_output)
+        self.assertNotIn("lease-1", status_output)
+        self.assertNotIn("user_message", status_output)
         saved = worker.STATUS.read_text(encoding="utf-8")
         self.assertNotIn(token, saved)
         self.assertEqual(json.loads(saved)["last_success_job_id"], "job-1")
