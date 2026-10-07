@@ -41,6 +41,7 @@ ASSETS = ("gpoint_mac_worker.py", "agata_worker_pool.py", "lab_queue.py",
           "run_codex_worker.sh", "requirements.txt")
 QUEUE_SNAPSHOT_MAX_AGE_SECONDS = 30
 QUEUE_SNAPSHOT_FUTURE_SKEW_SECONDS = 5
+LAUNCHAGENT_UNLOAD_TIMEOUT_SECONDS = 20
 QUEUE_SNAPSHOT_SCRIPT = WORKER_DIR.parents[2] / "scripts/agata-worker-queue-snapshot.py"
 VPS_RUNNER = HOME / ".local/bin/gpoint-vps-runner"
 LIVE_QUEUE_SOURCE = "agata-live-queue-snapshot-v1"
@@ -66,9 +67,12 @@ def git(*args: str) -> str:
 
 
 def launchctl_loaded() -> bool:
-    return subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"],
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                          timeout=8, check=False).returncode == 0
+    result = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"],
+                            capture_output=True, text=True, timeout=8, check=False)
+    if result.returncode != 0:
+        return False
+    state = re.search(r"^\s*state = ([^\s]+)\s*$", result.stdout or "", re.MULTILINE)
+    return bool(state and state.group(1).lower() in {"running", "waiting"})
 
 
 def _release_lock_busy() -> bool:
@@ -179,6 +183,49 @@ def _launchagent_pid() -> tuple[int, str]:
             str(root) in command for root in (LEGACY, ROOT / "runtime")):
         raise RuntimeError("launchagent_process_identity_invalid")
     return pid, command
+
+
+def _wait_launchagent_unloaded(previous_pid: int | None, *,
+                               deadline: float = LAUNCHAGENT_UNLOAD_TIMEOUT_SECONDS) -> bool:
+    """Wait for launchd to remove the label and for observed worker PIDs to exit."""
+    service_id = f"gui/{os.getuid()}/{LABEL}"
+    observed_pids = {previous_pid} if isinstance(previous_pid, int) and previous_pid > 1 else set()
+    until = time.monotonic() + deadline
+    while True:
+        result, command_error = _run_readonly_command(["launchctl", "print", service_id], 5)
+        output = result.stdout or ""
+        error = result.stderr or ""
+        if result.returncode == 0 and f"{LABEL} = {{" in output:
+            pid_match = re.search(r"^\s*pid = ([0-9]+)\s*$", output, re.MULTILINE)
+            if pid_match:
+                observed_pids.add(int(pid_match.group(1)))
+            service_absent = False
+        elif result.returncode != 0 and f'Could not find service "{LABEL}"' in error:
+            service_absent = True
+        else:
+            raise RuntimeError("worker_launchagent_unload_state_ambiguous") from None
+
+        processes, process_error = _run_readonly_command(["ps", "-axo", "pid=,command="], 5)
+        if process_error or processes.returncode != 0:
+            raise RuntimeError("worker_launchagent_unload_state_ambiguous") from None
+        all_pids = set()
+        active_pids = set()
+        for line in (processes.stdout or "").splitlines():
+            try:
+                pid = int(line.strip().split(None, 1)[0])
+            except (ValueError, IndexError):
+                continue
+            all_pids.add(pid)
+            if "gpoint_mac_worker.py watch" in line:
+                active_pids.add(pid)
+                observed_pids.add(pid)
+
+        if service_absent and not active_pids and observed_pids.isdisjoint(all_pids):
+            return True
+        remaining = until - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("worker_launchagent_unload_timeout")
+        time.sleep(min(0.25, remaining))
 
 
 def _pause_idle_launchagent() -> int | None:
@@ -1610,6 +1657,7 @@ def apply() -> dict:
                     os.kill(paused_pid, signal.SIGCONT)
                 except ProcessLookupError:
                     pass
+            _wait_launchagent_unloaded(paused_pid)
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline and _running_inference_pids():
                 time.sleep(1)
@@ -1724,23 +1772,18 @@ def apply() -> dict:
                 # Diagnostic capture must never prevent a safety rollback.
                 pass
             # Restore old service and its files from the private snapshot.
+            legacy_restored = False
+            launchagent_restored = False
+            rollback_error_code = None
             try:
                 subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], timeout=15, check=False,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                _wait_launchagent_unloaded(None)
                 if backup.exists():
                     _restore_legacy_snapshot(backup)
                 elif not LEGACY.exists():
                     raise RuntimeError("rollback_snapshot_missing")
-                maintenance_marker.unlink(missing_ok=True)
-                if original_plist is not None:
-                    PLIST.write_bytes(original_plist)
-                    PLIST.chmod(0o600)
-                    subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(PLIST)], timeout=20, check=False)
-                    subprocess.run(["launchctl", "kickstart", f"gui/{os.getuid()}/{LABEL}"], timeout=15, check=False)
-                    if PLIST.read_bytes() != original_plist:
-                        raise RuntimeError("rollback_launchagent_plist_mismatch")
-                    if not launchctl_loaded():
-                        raise RuntimeError("rollback_launchagent_not_loaded")
+                legacy_restored = LEGACY.exists()
                 target_link = ROOT / "runtime/current"
                 if prior_link_target is None:
                     _safe_remove_tree(target_link)
@@ -1749,17 +1792,37 @@ def apply() -> dict:
                     _safe_remove_tree(temporary_link)
                     temporary_link.symlink_to(prior_link_target)
                     os.replace(temporary_link, target_link)
-                _atomic_json(ROOT / "receipts/runtime-migration-rollback.json", {
-                    "state": "ROLLED_BACK", "at": datetime.now(UTC).isoformat(),
-                    "source_sha": manifest["source_sha"], "legacy_restored": LEGACY.exists(),
-                    "launchagent_restored": original_plist is not None,
-                    "rollback_snapshot": str(backup),
-                    "diagnostics": str(diagnostic_receipt) if diagnostic_receipt else str(diagnostics_directory),
-                    "startup_check": startup_check,
-                    "restart_evidence": restart_evidence,
-                })
-            finally:
-                raise
+                maintenance_marker.unlink(missing_ok=True)
+                if original_plist is not None:
+                    PLIST.write_bytes(original_plist)
+                    PLIST.chmod(0o600)
+                    subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(PLIST)], timeout=20, check=True)
+                    subprocess.run(["launchctl", "kickstart", f"gui/{os.getuid()}/{LABEL}"], timeout=15, check=True)
+                    if PLIST.read_bytes() != original_plist:
+                        raise RuntimeError("rollback_launchagent_plist_mismatch")
+                    if not launchctl_loaded():
+                        raise RuntimeError("rollback_launchagent_not_loaded")
+                    launchagent_restored = PLIST.read_bytes() == original_plist and launchctl_loaded()
+                    if not launchagent_restored:
+                        raise RuntimeError("rollback_launchagent_not_loaded")
+            except Exception as rollback_failure:
+                rollback_error_code = _safe_error_code(rollback_failure)
+                launchagent_restored = bool(
+                    original_plist is not None and PLIST.is_file()
+                    and PLIST.read_bytes() == original_plist and launchctl_loaded()
+                )
+            _atomic_json(ROOT / "receipts/runtime-migration-rollback.json", {
+                "state": "ROLLED_BACK" if legacy_restored and launchagent_restored else "ROLLBACK_INCOMPLETE",
+                "at": datetime.now(UTC).isoformat(),
+                "source_sha": manifest["source_sha"], "legacy_restored": legacy_restored,
+                "launchagent_restored": launchagent_restored,
+                "rollback_error_code": rollback_error_code,
+                "rollback_snapshot": str(backup),
+                "diagnostics": str(diagnostic_receipt) if diagnostic_receipt else str(diagnostics_directory),
+                "startup_check": startup_check,
+                "restart_evidence": restart_evidence,
+            })
+            raise
     finally:
         os.close(fd)
 
@@ -1803,6 +1866,7 @@ def rollback() -> dict:
                     os.kill(paused_pid, signal.SIGCONT)
                 except ProcessLookupError:
                     pass
+        _wait_launchagent_unloaded(paused_pid)
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline and _running_inference_pids():
             time.sleep(1)

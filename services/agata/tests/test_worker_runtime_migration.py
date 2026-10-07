@@ -504,6 +504,8 @@ def test_apply_with_absent_rollback_tree_saves_snapshot_and_restart_evidence(tmp
     monkeypatch.setattr(migration, "_health_check", lambda: healthy_status)
     monkeypatch.setattr(migration, "_kickstart_and_verify", lambda _sha: restart_evidence)
     monkeypatch.setattr(migration, "_wait_for_successful_polls", lambda _baseline: {"passed": True})
+    monkeypatch.setattr(migration, "_wait_launchagent_unloaded", lambda *_args, **_kwargs: True, raising=False)
+    monkeypatch.setattr(migration, "launchctl_loaded", lambda: True)
     monkeypatch.setattr(migration.subprocess, "run", lambda command, **kwargs:
                         subprocess.CompletedProcess(command, 0))
 
@@ -992,12 +994,22 @@ def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(t
         return {"passed": True}
     monkeypatch.setattr(migration, "_wait_for_successful_polls", wait_for_polls)
     monkeypatch.setattr(migration, "launchctl_loaded", lambda: True)
-    monkeypatch.setattr(migration.subprocess, "run", lambda command, **kwargs:
-                        subprocess.CompletedProcess(command, 0))
+    transition_events = []
+    monkeypatch.setattr(migration, "_wait_launchagent_unloaded",
+                        lambda pid, **_kwargs: transition_events.append(("unloaded", pid)), raising=False)
+    def run(command, **kwargs):
+        if command[:2] == ["launchctl", "bootout"]:
+            transition_events.append(("bootout", None))
+        elif command[:2] == ["launchctl", "bootstrap"]:
+            transition_events.append(("bootstrap", None))
+        return subprocess.CompletedProcess(command, 0)
+    monkeypatch.setattr(migration.subprocess, "run", run)
 
     result = migration.apply()
 
     assert result["state"] == "COMPLETE"
+    assert [event[0] for event in transition_events] == ["bootout", "unloaded", "bootstrap"]
+    assert transition_events[1][1] == 1234
     assert poll_baselines == [{
         "current_job_present": False,
         "targets": {
@@ -1249,6 +1261,7 @@ def test_rollback_restores_exact_legacy_plist_and_runtime_path(tmp_path, monkeyp
     monkeypatch.setattr(migration, "_pause_idle_launchagent", lambda: 99999999)
     monkeypatch.setattr(migration, "_running_inference_pids", lambda: [])
     monkeypatch.setattr(migration, "launchctl_loaded", lambda: True)
+    monkeypatch.setattr(migration, "_wait_launchagent_unloaded", lambda *_args, **_kwargs: True, raising=False)
     monkeypatch.setattr(migration.subprocess, "run", lambda command, **kwargs:
                         subprocess.CompletedProcess(command, 0))
 
@@ -1258,6 +1271,41 @@ def test_rollback_restores_exact_legacy_plist_and_runtime_path(tmp_path, monkeyp
     assert plist.read_bytes() == exact_plist
     assert plistlib.loads(plist.read_bytes())["ProgramArguments"] == [str(legacy / "run_codex_worker.sh"), "watch"]
     assert (legacy / "run_codex_worker.sh").read_text() == "legacy worker bytes"
+
+
+def test_sigtermed_launchagent_is_not_reported_as_loaded(monkeypatch):
+    output = f'gui/{os.getuid()}/{migration.LABEL} = {{\n\tstate = SIGTERMed\n}}\n'
+    monkeypatch.setattr(migration.subprocess, "run", lambda command, **kwargs:
+                        subprocess.CompletedProcess(command, 0, output, ""))
+
+    assert migration.launchctl_loaded() is False
+
+
+def test_wait_launchagent_unloaded_waits_for_terminated_job_and_old_pid(monkeypatch):
+    service = f"gui/{os.getuid()}/{migration.LABEL}"
+    calls = []
+    responses = [
+        subprocess.CompletedProcess(["launchctl", "print", service], 0,
+                                    f'{service} = {{\n\tstate = SIGTERMed\n\tpid = 4312\n}}\n', ""),
+        subprocess.CompletedProcess(["ps", "-axo", "pid=,command="], 0,
+                                    "4312 /runtime/gpoint_mac_worker.py watch\n", ""),
+        subprocess.CompletedProcess(["launchctl", "print", service], 1, "",
+                                    f'Could not find service "{migration.LABEL}" in domain'),
+        subprocess.CompletedProcess(["ps", "-axo", "pid=,command="], 0, "", ""),
+    ]
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return responses.pop(0)
+
+    monkeypatch.setattr(migration.subprocess, "run", run)
+    monkeypatch.setattr(migration.time, "sleep", lambda _delay: None)
+
+    assert migration._wait_launchagent_unloaded(4312, deadline=1) is True
+    assert calls == [
+        ["launchctl", "print", service], ["ps", "-axo", "pid=,command="],
+        ["launchctl", "print", service], ["ps", "-axo", "pid=,command="],
+    ]
 
 
 def test_stale_rollback_snapshot_is_atomically_refreshed_from_legacy(tmp_path, monkeypatch):
