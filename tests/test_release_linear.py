@@ -103,6 +103,8 @@ class ReleaseTests(unittest.TestCase):
                   'automationRunAttempt': '1', 'mode': 'preflight',
                   'releaseState': 'READY_FOR_OWNER', 'status': 'PLANNED',
                   'preflight': 'PASS', 'productionChanged': False,
+                  'dryRun': True, 'applicationVerification': 'NOT_DEPLOYED',
+                  'authorizationMode': 'EXACT_SHA', 'authorizationConsumed': False,
                   'prepareRunId': '12', 'prepareRunAttempt': '2'}
         selected = SELECT.validate_ready_preflight(sha, prepare, [ready],
                                                     lambda *_args: result)
