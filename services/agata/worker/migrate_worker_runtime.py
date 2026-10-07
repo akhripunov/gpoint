@@ -239,7 +239,21 @@ def inventory() -> dict:
 def candidate() -> dict:
     head = git("rev-parse", "HEAD")
     main = git("rev-parse", "origin/main")
-    if head != main:
+    try:
+        remote_result = git("ls-remote", "--exit-code", "origin", "refs/heads/main")
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("origin_main_unavailable") from exc
+    remote_lines = remote_result.splitlines()
+    if len(remote_lines) != 1:
+        raise RuntimeError("origin_main_unavailable")
+    remote_fields = remote_lines[0].split()
+    if (len(remote_fields) != 2 or remote_fields[1] != "refs/heads/main"
+            or not re.fullmatch(r"[0-9a-f]{40}", remote_fields[0])):
+        raise RuntimeError("origin_main_unavailable")
+    remote_main = remote_fields[0]
+    if main != remote_main:
+        raise RuntimeError("origin_main_ref_stale")
+    if head != remote_main:
         raise RuntimeError("candidate_must_be_origin_main")
     if git("status", "--porcelain"):
         raise RuntimeError("candidate_worktree_dirty")
@@ -634,6 +648,66 @@ def _launchagent_environment() -> dict[str, str]:
     }
 
 
+def _config_declares_key(key: str) -> bool:
+    """Inspect only config key names so startup preflight never logs values."""
+    if not CONFIG.exists():
+        return False
+    if CONFIG.is_symlink() or not CONFIG.is_file():
+        raise RuntimeError("worker_config_permissions_invalid")
+    try:
+        stat = CONFIG.stat()
+        if stat.st_uid != os.getuid() or stat.st_mode & 0o077:
+            raise RuntimeError("worker_config_permissions_invalid")
+        return any(
+            line.split("=", 1)[0].strip() == key
+            for line in CONFIG.read_text(encoding="utf-8").splitlines()
+            if "=" in line and not line.lstrip().startswith("#")
+        )
+    except OSError as exc:
+        raise RuntimeError("worker_config_permissions_invalid") from exc
+
+
+def _validated_legacy_tenant_binding(manifest: dict) -> dict | None:
+    """Return only a source-verified legacy binding eligible for migration."""
+    source = LEGACY / "tenant-bindings.json"
+    destination = ROOT / "config/tenant-bindings.json"
+    if destination.exists() or not source.exists():
+        return None
+    try:
+        if source.is_symlink() or not source.is_file():
+            raise ValueError
+        stat = source.stat()
+        value = json.loads(source.read_text(encoding="utf-8"))
+        captured = datetime.fromisoformat(str(value.get("snapshot_at", "")).replace("Z", "+00:00"))
+        tenant = UUID(value.get("tenant_id", ""))
+        source_id = value.get("source_id", "")
+        if (stat.st_uid != os.getuid() or stat.st_mode & 0o077
+                or set(value) != {"version", "candidate_sha", "worker_sha256", "tenant_id", "source_id", "snapshot_at"}
+                or value.get("version") != 1
+                or value.get("worker_sha256") != sha256(LEGACY / "gpoint_mac_worker.py")
+                or not isinstance(value.get("candidate_sha"), str) or len(value["candidate_sha"]) != 40
+                or tenant.int == 0 or str(tenant) != value.get("tenant_id")
+                or captured.tzinfo is None
+                or not re.fullmatch(r"gpoint-vps:[0-9a-f]{40}:api=sha256:[0-9a-f]{64}:agata=sha256:[0-9a-f]{64}", source_id)):
+            raise ValueError
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        raise RuntimeError("legacy_tenant_binding_invalid") from exc
+    value["candidate_sha"] = manifest["source_sha"]
+    value["worker_sha256"] = manifest["assets"]["gpoint_mac_worker.py"]
+    return value
+
+
+def _candidate_startup_environment(manifest: dict) -> dict[str, str]:
+    """Validate an eligible legacy pin in memory without writing live config."""
+    environment = _launchagent_environment()
+    if _config_declares_key("GPOINT_AGATA_TENANT_ID"):
+        return environment
+    binding = _validated_legacy_tenant_binding(manifest)
+    if binding:
+        environment["GPOINT_AGATA_TENANT_ID"] = binding["tenant_id"]
+    return environment
+
+
 def _validate_candidate_startup(staged_runtime: Path, manifest: dict) -> dict:
     attempt_id = uuid.uuid4().hex
     diagnostics = _create_diagnostic_attempt(manifest["source_sha"], attempt_id)
@@ -643,7 +717,7 @@ def _validate_candidate_startup(staged_runtime: Path, manifest: dict) -> dict:
     started_at = datetime.now(UTC).isoformat()
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=30,
-                                check=False, env=_launchagent_environment())
+                                check=False, env=_candidate_startup_environment(manifest))
         stdout, stderr = result.stdout, result.stderr
         returncode = result.returncode
     except subprocess.TimeoutExpired as exc:
@@ -935,29 +1009,12 @@ def _verify_staged_runtime(runtime: Path, manifest: dict) -> None:
 
 
 def _migrate_tenant_binding(manifest: dict) -> None:
-    source = LEGACY / "tenant-bindings.json"
     destination = ROOT / "config/tenant-bindings.json"
-    if not source.is_file() or source.is_symlink() or destination.exists():
+    if destination.exists():
         return
-    try:
-        stat = source.stat()
-        value = json.loads(source.read_text(encoding="utf-8"))
-        captured = datetime.fromisoformat(str(value.get("snapshot_at", "")).replace("Z", "+00:00"))
-        tenant = UUID(value.get("tenant_id", ""))
-        source_id = value.get("source_id", "")
-        if (stat.st_uid != os.getuid() or stat.st_mode & 0o077
-                or set(value) != {"version", "candidate_sha", "worker_sha256", "tenant_id", "source_id", "snapshot_at"}
-                or value.get("version") != 1
-                or value.get("worker_sha256") != sha256(LEGACY / "gpoint_mac_worker.py")
-                or not isinstance(value.get("candidate_sha"), str) or len(value["candidate_sha"]) != 40
-                or tenant.int == 0 or str(tenant) != value.get("tenant_id")
-                or captured.tzinfo is None
-                or not re.fullmatch(r"gpoint-vps:[0-9a-f]{40}:api=sha256:[0-9a-f]{64}:agata=sha256:[0-9a-f]{64}", source_id)):
-            raise ValueError
-    except (OSError, ValueError, TypeError, AttributeError) as exc:
-        raise RuntimeError("legacy_tenant_binding_invalid") from exc
-    value["candidate_sha"] = manifest["source_sha"]
-    value["worker_sha256"] = manifest["assets"]["gpoint_mac_worker.py"]
+    value = _validated_legacy_tenant_binding(manifest)
+    if value is None:
+        return
     _atomic_json(destination, value)
 
 

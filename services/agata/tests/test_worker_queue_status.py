@@ -61,6 +61,8 @@ def test_gpoint_queue_status_is_aggregate_read_only_and_has_snapshot_identity(mo
     assert "count(" in session.aggregate_statements[0].lower()
     assert "outbox_jobs" in session.aggregate_statements[0].lower()
     assert "tenant_id" in session.aggregate_statements[0].lower()
+    assert all(not any(word in statement.lower() for word in ("update ", "delete ", "insert "))
+               for statement, _parameters in session.statements)
     assert "sales_draft_inference" not in repr(session.aggregate_parameters[0])
 
 
