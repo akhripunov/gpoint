@@ -126,6 +126,13 @@ class MacWorkerTests(unittest.TestCase):
             {"job": {"id": "job-1", "leaseToken": "lease-1", "request": {"user_message": "hi"}}},
             {"completed": True},
             {"status": "ready"},
+            {
+                "source_id": "agata-worker-queue-status-v1:gpoint",
+                "lane": "GPOINT",
+                "pending_jobs": 0,
+                "running_jobs": 0,
+                "snapshot_at": "2026-10-07T10:00:00+00:00",
+            },
         ])
         calls = []
 
@@ -139,7 +146,7 @@ class MacWorkerTests(unittest.TestCase):
 
         complete = next(body for path, body in calls if path == "complete")
         self.assertEqual(complete["text"], "answer")
-        self.assertEqual([path for path, _ in calls], ["health", "claim", "complete", "health"])
+        self.assertEqual([path for path, _ in calls], ["health", "claim", "complete", "health", "queue-status"])
         saved = worker.STATUS.read_text(encoding="utf-8")
         self.assertNotIn(token, saved)
         self.assertEqual(json.loads(saved)["last_success_job_id"], "job-1")

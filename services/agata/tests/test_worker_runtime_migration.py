@@ -147,6 +147,7 @@ def test_prepare_startup_check_uses_candidate_python_and_exact_launch_environmen
     (staged / ".venv/bin/python3.12").touch()
     (staged / "gpoint_mac_worker.py").touch()
     monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "LEGACY", tmp_path / "legacy-runtime")
     monkeypatch.setattr(migration, "CONFIG", tmp_path / "worker.env")
     manifest = {"source_sha": "f" * 40, "bundle_sha256": "e" * 64}
     stdout = json.dumps({
@@ -178,6 +179,111 @@ def test_prepare_startup_check_uses_candidate_python_and_exact_launch_environmen
     assert not (tmp_path / "Library/LaunchAgents").exists()
 
 
+def test_prepare_startup_check_uses_verified_legacy_tenant_binding_without_persisting_it(tmp_path, monkeypatch):
+    legacy = tmp_path / "legacy"
+    (legacy / "config").mkdir(parents=True)
+    old_worker = legacy / "gpoint_mac_worker.py"
+    old_worker.write_text("verified old worker")
+    tenant_id = "81a4ba28-6de5-4b03-8332-0661ba4d46f4"
+    (legacy / "tenant-bindings.json").write_text(json.dumps({
+        "version": 1,
+        "candidate_sha": "a" * 40,
+        "worker_sha256": migration.sha256(old_worker),
+        "tenant_id": tenant_id,
+        "source_id": "gpoint-vps:" + "b" * 40 + ":api=sha256:" + "1" * 64 + ":agata=sha256:" + "2" * 64,
+        "snapshot_at": "2026-10-04T12:00:00Z",
+    }))
+    (legacy / "tenant-bindings.json").chmod(0o600)
+    root = tmp_path / "pool"
+    root.mkdir()
+    config = tmp_path / "worker.env"
+    config.write_text("GPOINT_AGATA_WORKER_URL=https://gpoint.example.test\n")
+    config.chmod(0o600)
+    staged = tmp_path / "staged/candidate"
+    (staged / ".venv/bin").mkdir(parents=True)
+    (staged / ".venv/bin/python3.12").touch()
+    (staged / "gpoint_mac_worker.py").touch()
+    monkeypatch.setattr(migration, "LEGACY", legacy)
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "CONFIG", config)
+    manifest = {"source_sha": "f" * 40, "bundle_sha256": "e" * 64,
+                "assets": {"gpoint_mac_worker.py": "d" * 64}}
+    stdout = json.dumps({
+        "state": "PASS", "configured_concurrency": 1,
+        "provider_parallel_capability": "NOT_VERIFIED",
+        "lanes": {lane: {"configured": True} for lane in ("GPOINT", "GSALES", "LAB")},
+        "claim_requests": 0, "inference_requests": 0,
+        "runtime_current_changed": False, "launchagent_changed": False,
+    })
+    observed = {}
+    def run(command, **kwargs):
+        observed["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(command, 0, stdout, "")
+    monkeypatch.setattr(migration.subprocess, "run", run)
+
+    result = migration._validate_candidate_startup(staged, manifest)
+
+    assert result["state"] == "PASS"
+    assert observed["env"]["GPOINT_AGATA_TENANT_ID"] == tenant_id
+    assert not (root / "config/tenant-bindings.json").exists()
+    diagnostics = Path(result["diagnostics"]).read_text()
+    assert tenant_id not in diagnostics
+
+
+def test_candidate_requires_exact_origin_main_head_not_just_a_main_ancestor(tmp_path, monkeypatch):
+    monkeypatch.setattr(migration, "WORKER_DIR", tmp_path)
+    monkeypatch.setattr(migration, "ASSETS", ())
+    git_calls = iter(("f" * 40, "a" * 40, "a" * 40 + "\trefs/heads/main"))
+    monkeypatch.setattr(migration, "git", lambda *_args: next(git_calls))
+
+    with pytest.raises(RuntimeError, match="candidate_must_be_origin_main"):
+        migration.candidate()
+
+
+def test_candidate_rejects_stale_local_origin_main_ref(tmp_path, monkeypatch):
+    monkeypatch.setattr(migration, "WORKER_DIR", tmp_path)
+    monkeypatch.setattr(migration, "ASSETS", ())
+    git_calls = iter(("a" * 40, "a" * 40, "b" * 40 + "\trefs/heads/main"))
+    monkeypatch.setattr(migration, "git", lambda *_args: next(git_calls))
+
+    with pytest.raises(RuntimeError, match="origin_main_ref_stale"):
+        migration.candidate()
+
+
+def test_candidate_accepts_only_clean_exact_origin_main_head(tmp_path, monkeypatch):
+    monkeypatch.setattr(migration, "WORKER_DIR", tmp_path)
+    monkeypatch.setattr(migration, "ASSETS", ())
+    git_calls = iter(("a" * 40, "a" * 40, "a" * 40 + "\trefs/heads/main", ""))
+    monkeypatch.setattr(migration, "git", lambda *_args: next(git_calls))
+
+    candidate = migration.candidate()
+
+    assert candidate["source_sha"] == "a" * 40
+    assert candidate["assets"] == {}
+
+
+def test_candidate_startup_does_not_override_explicit_configured_tenant_pin(tmp_path, monkeypatch):
+    legacy = tmp_path / "legacy"
+    (legacy / "config").mkdir(parents=True)
+    source_worker = legacy / "gpoint_mac_worker.py"
+    source_worker.write_text("verified legacy worker")
+    source = legacy / "tenant-bindings.json"
+    source.write_text(json.dumps({"invalid": "must not be read when explicit config wins"}))
+    source.chmod(0o600)
+    root = tmp_path / "pool"
+    root.mkdir()
+    config = tmp_path / "worker.env"
+    config.write_text("GPOINT_AGATA_TENANT_ID=explicit-pin\n")
+    config.chmod(0o600)
+    monkeypatch.setattr(migration, "LEGACY", legacy)
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "CONFIG", config)
+
+    environment = migration._candidate_startup_environment({"source_sha": "a" * 40, "assets": {}})
+
+    assert "GPOINT_AGATA_TENANT_ID" not in environment
+
+
 def test_candidate_startup_rejects_incomplete_pass_payload(tmp_path, monkeypatch):
     root = tmp_path / "support/agata-codex-worker"
     staged = tmp_path / "staged/candidate"
@@ -185,6 +291,7 @@ def test_candidate_startup_rejects_incomplete_pass_payload(tmp_path, monkeypatch
     (staged / ".venv/bin/python3.12").touch()
     (staged / "gpoint_mac_worker.py").touch()
     monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "LEGACY", tmp_path / "legacy-runtime")
     manifest = {"source_sha": "9" * 40, "bundle_sha256": "8" * 64}
     result = subprocess.CompletedProcess([], 0, json.dumps({"state": "PASS"}), "")
     monkeypatch.setattr(migration.subprocess, "run", lambda *_args, **_kwargs: result)
@@ -347,6 +454,14 @@ def test_apply_with_absent_rollback_tree_saves_snapshot_and_restart_evidence(tmp
     assert plist.read_bytes() == original_plist
     assert plistlib.loads(plist.read_bytes())["ProgramArguments"] == [str(legacy / "run_codex_worker.sh"), "watch"]
     assert (legacy / "run_codex_worker.sh").read_text() == "legacy runtime"
+    assert not (root / "runtime/current").exists()
+    receipt = json.loads((root / "receipts/runtime-migration-rollback.json").read_text())
+    assert receipt["state"] == "ROLLED_BACK"
+    assert receipt["restart_evidence"] == restart_evidence
+    diagnostics = Path(receipt["diagnostics"])
+    assert diagnostics.is_file()
+    assert diagnostics.parent.parent.parent.name == ".agata-codex-worker-diagnostics"
+    assert (diagnostics.parent / "candidate.stderr.log").is_file()
 
 
 def test_fresh_empty_production_queue_status_allows_transition_and_ignores_lab():
@@ -493,14 +608,6 @@ def _fresh_empty_queue_status(now):
             for lane in ("GPOINT", "GSALES")
         },
     }
-    assert not (root / "runtime/current").exists()
-    receipt = json.loads((root / "receipts/runtime-migration-rollback.json").read_text())
-    assert receipt["state"] == "ROLLED_BACK"
-    assert receipt["restart_evidence"] == restart_evidence
-    diagnostics = Path(receipt["diagnostics"])
-    assert diagnostics.is_file()
-    assert diagnostics.parent.parent.parent.name == ".agata-codex-worker-diagnostics"
-    assert (diagnostics.parent / "candidate.stderr.log").is_file()
 
 
 def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(tmp_path, monkeypatch):
