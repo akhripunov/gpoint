@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+import urllib.error
 import unittest
 
 
@@ -104,6 +105,29 @@ class PrepareCoalescingTests(unittest.TestCase):
 
             def read(self):
                 return b"[]"
+
+        with self.assertRaises(COALESCING.CoalescingError):
+            COALESCING.read_current_main_sha("redacted-test-token", opener=lambda *_a, **_k: Response())
+
+    def test_github_http_error_fails_closed_without_echoing_credentials(self):
+        def reject(*_args, **_kwargs):
+            raise urllib.error.HTTPError("https://api.github.com", 403, "Forbidden", {}, None)
+
+        with self.assertRaises(COALESCING.CoalescingError) as raised:
+            COALESCING.read_current_main_sha("redacted-test-token", opener=reject)
+        self.assertIn("HTTP 403", str(raised.exception))
+        self.assertNotIn("redacted-test-token", str(raised.exception))
+
+    def test_invalid_sha_from_github_ref_fails_closed(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"object":{"sha":"invalid"}}'
 
         with self.assertRaises(COALESCING.CoalescingError):
             COALESCING.read_current_main_sha("redacted-test-token", opener=lambda *_a, **_k: Response())
