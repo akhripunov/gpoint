@@ -6,6 +6,9 @@ does not import or launch Codex; inference remains exclusively inside the Mac wo
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import json
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -15,6 +18,14 @@ WORKER_DIR = LAB.parents[0] / "worker"
 if str(WORKER_DIR) not in sys.path:
     sys.path.insert(0, str(WORKER_DIR))
 import lab_queue  # noqa: E402
+
+
+def canonical_lab_queue(env=None) -> Path:
+    """Return the sole LAB queue path selected by the installed Worker contract."""
+    source_env = dict(os.environ if env is None else env)
+    root = source_env.get("GPOINT_AGATA_WORKER_SUPPORT") or source_env.get("AGATA_WORKER_ROOT")
+    support = Path(root).expanduser() if root else Path.home() / "Library" / "Application Support" / "GPoint" / "agata-codex-worker"
+    return support / "queues" / "lab"
 
 NATURALNESS = LAB / "evaluators" / "naturalness.py"
 SPEC = importlib.util.spec_from_file_location("agata_lab_naturalness_for_worker", NATURALNESS)
@@ -101,3 +112,44 @@ def get_receipt(job_id: str, *, support: Path) -> dict | None:
 
 def cancel_job(job_id: str, *, support: Path) -> str:
     return lab_queue.cancel(Path(support) / "lab-queue", job_id)
+
+
+def build_promptfoo_compat_job(*, invocation_id: str, prompt: str | None = None) -> dict:
+    """Build only the separately pinned one-turn technical smoke job."""
+    if not isinstance(invocation_id, str) or not invocation_id.strip():
+        raise ValueError("Promptfoo invocation id is required")
+    fixture = lab_queue.read_promptfoo_compat_fixture()
+    user_message = fixture["user_message"]
+    if prompt is not None and prompt.strip() != user_message:
+        raise ValueError("Promptfoo prompt is outside the frozen technical fixture")
+    request = {
+        "instructions": (
+            "You are AGATA, a Russian-speaking conversational character. Reply to the user's "
+            "single synthetic message in one concise sentence. Do not mention tools, code, "
+            "internal labels, or the experiment."
+        ),
+        "persona": {"name": "AGATA", "gender": "female", "personality": {"tone": "warm and natural"}},
+        "communication_settings": {"language": "ru", "tone": "warm", "response_length": "short", "use_name": False},
+        "memories": [],
+        "dialogue_summaries": [],
+        "history": [],
+        "user_message": user_message,
+    }
+    canonical = json.dumps(request, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if hashlib.sha256(canonical).hexdigest() != fixture["request_sha256"]:
+        raise ValueError("Promptfoo technical request does not match its frozen fixture")
+    job_id = "pf-" + hashlib.sha256(invocation_id.encode("utf-8")).hexdigest()[:61]
+    return {
+        "job_id": job_id,
+        "experiment_id": fixture["experiment_id"],
+        "configuration_id": "compat",
+        "origin": "conversation-lab",
+        "scenario_id": fixture["scenario_id"],
+        "turn_index": 0,
+        "data_classification": "synthetic",
+        "timeout_seconds": 120,
+        "history_receipt_ids": [],
+        "request": request,
+        "model": fixture["model"],
+        "reasoning_effort": fixture["reasoning_effort"],
+    }

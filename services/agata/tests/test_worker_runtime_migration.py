@@ -1,6 +1,7 @@
 """Migration safety contracts; no LaunchAgent or installed files are changed."""
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 import json
@@ -8,6 +9,7 @@ import os
 import plistlib
 import shutil
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -32,6 +34,37 @@ def test_status_inventory_projection_omits_secrets_and_job_payloads(tmp_path):
         "state": "idle", "current_job_present": False, "last_poll_at": "now",
         "targets": {"GSALES": {"state": "idle", "last_poll_at": "then"}},
     }
+
+
+def test_canonical_installer_includes_exact_worker_bundle_assets():
+    worker_dir = MODULE_PATH.parent
+    expected = (
+        "gpoint_mac_worker.py",
+        "agata_worker_pool.py",
+        "lab_queue.py",
+        "lab_fixture_manifest.json",
+        "lab_promptfoo_compat_manifest.json",
+        "run_codex_worker.sh",
+        "requirements.txt",
+    )
+
+    wrapper_path = worker_dir / "install_codex_launch_agent.py"
+    wrapper_spec = importlib.util.spec_from_file_location("worker_install_wrapper", wrapper_path)
+    wrapper = importlib.util.module_from_spec(wrapper_spec)
+    assert wrapper_spec and wrapper_spec.loader
+    wrapper_spec.loader.exec_module(wrapper)
+
+    worker_tree = ast.parse((worker_dir / "gpoint_mac_worker.py").read_text(encoding="utf-8"))
+    bundle_function = next(
+        node for node in worker_tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_worker_bundle_sha256"
+    )
+    bundle_loop = next(node for node in bundle_function.body if isinstance(node, ast.For))
+    bundle_names = tuple(item.elts[0].value for item in bundle_loop.iter.elts)
+
+    assert migration.ASSETS == expected
+    assert tuple(path.name for path in wrapper.SOURCES) == expected
+    assert bundle_names == expected
 
 
 def test_candidate_launch_diagnostics_survive_legacy_tree_rollback(tmp_path, monkeypatch):
@@ -269,7 +302,10 @@ def test_apply_with_absent_rollback_tree_saves_snapshot_and_restart_evidence(tmp
     monkeypatch.setattr(migration, "candidate", lambda: {"source_sha": "a" * 40,
                                                            "bundle_sha256": "b" * 64, "assets": {}})
     monkeypatch.setattr(migration, "inventory", lambda: {"production_release_lock_busy": False,
+                                                            "launchagent_loaded": True,
                                                             "active_inference": False})
+    monkeypatch.setattr(migration, "_read_production_queue_status",
+                        lambda: _fresh_empty_queue_status(datetime.now(UTC)))
     monkeypatch.setattr(migration, "_network_state_sha256", lambda: "stable-network-state")
 
     def stage(manifest):
@@ -282,7 +318,7 @@ def test_apply_with_absent_rollback_tree_saves_snapshot_and_restart_evidence(tmp
     monkeypatch.setattr(migration, "_install_staged_runtime", lambda _staged, _manifest:
                         root / "runtime" / ("a" * 40))
     monkeypatch.setattr(migration, "_ensure_pool_config", lambda: None)
-    monkeypatch.setattr(migration, "_pause_idle_launchagent", lambda: None)
+    monkeypatch.setattr(migration, "_pause_idle_launchagent", lambda: 99999999)
     monkeypatch.setattr(migration, "_running_inference_pids", lambda: [])
     monkeypatch.setattr(migration, "_migrate_tenant_binding", lambda _manifest: None)
     healthy_status = {"configured_concurrency": 1, "lanes": {
@@ -311,6 +347,152 @@ def test_apply_with_absent_rollback_tree_saves_snapshot_and_restart_evidence(tmp
     assert plist.read_bytes() == original_plist
     assert plistlib.loads(plist.read_bytes())["ProgramArguments"] == [str(legacy / "run_codex_worker.sh"), "watch"]
     assert (legacy / "run_codex_worker.sh").read_text() == "legacy runtime"
+
+
+def test_fresh_empty_production_queue_status_allows_transition_and_ignores_lab():
+    now = datetime(2026, 10, 7, 10, 0, tzinfo=UTC)
+    status = _fresh_empty_queue_status(now)
+    status["lanes"]["LAB"] = {"queue_snapshot_state": "VERIFIED", "pending_inference_jobs": 9,
+                               "running_inference_jobs": 0}
+    evidence = migration.require_fresh_empty_production_queues(status, now=now)
+    assert set(evidence["lanes"]) == {"GPOINT", "GSALES"}
+
+
+def test_pending_running_or_busy_production_work_blocks_transition():
+    now = datetime(2026, 10, 7, 10, 0, tzinfo=UTC)
+    for lane, field in (("GPOINT", "pending_inference_jobs"), ("GSALES", "running_inference_jobs")):
+        status = _fresh_empty_queue_status(now)
+        status["lanes"][lane][field] = 1
+        with pytest.raises(RuntimeError, match="production_queue_not_empty"):
+            migration.require_fresh_empty_production_queues(status, now=now)
+    status = _fresh_empty_queue_status(now)
+    status["pool"]["busy"] = 1
+    with pytest.raises(RuntimeError, match="worker_slots_busy"):
+        migration.require_fresh_empty_production_queues(status, now=now)
+
+
+def test_missing_or_stale_production_queue_snapshot_fails_closed():
+    now = datetime(2026, 10, 7, 10, 0, tzinfo=UTC)
+    status = _fresh_empty_queue_status(now)
+    del status["lanes"]["GPOINT"]["pending_inference_jobs"]
+    with pytest.raises(RuntimeError, match="production_queue_snapshot_invalid"):
+        migration.require_fresh_empty_production_queues(status, now=now)
+    status = _fresh_empty_queue_status(now)
+    status["lanes"]["GSALES"]["queue_snapshot_at"] = "2026-10-07T09:58:00+00:00"
+    with pytest.raises(RuntimeError, match="production_queue_snapshot_stale"):
+        migration.require_fresh_empty_production_queues(status, now=now)
+    status = _fresh_empty_queue_status(now)
+    status["pool_snapshot_at"] = "2026-10-07T09:58:00+00:00"
+    with pytest.raises(RuntimeError, match="production_queue_snapshot_stale"):
+        migration.require_fresh_empty_production_queues(status, now=now)
+
+
+def test_apply_stops_before_runtime_mutation_when_production_queue_is_pending(tmp_path, monkeypatch):
+    now = datetime.now(UTC)
+    status = _fresh_empty_queue_status(now)
+    status["lanes"]["GPOINT"]["pending_inference_jobs"] = 1
+    staged = []
+    monkeypatch.setattr(migration, "TRANSITION_LOCK", tmp_path / "transition.lock")
+    monkeypatch.setattr(migration, "candidate", lambda: {"source_sha": "a" * 40,
+                                                           "bundle_sha256": "b" * 64, "assets": {}})
+    monkeypatch.setattr(migration, "inventory", lambda: {"production_release_lock_busy": False,
+                                                            "launchagent_loaded": True,
+                                                            "active_inference": False})
+    monkeypatch.setattr(migration, "_read_production_queue_status", lambda: status)
+    monkeypatch.setattr(migration, "_stage_runtime", lambda *_args: staged.append(True))
+
+    with pytest.raises(RuntimeError, match="production_queue_not_empty"):
+        migration.apply()
+
+    assert staged == []
+
+
+@pytest.mark.parametrize(
+    ("paused_pid", "expected_error"),
+    ((424242, "production_queue_not_empty"),
+     (None, "worker_launchagent_unloaded_during_transition")),
+)
+def test_apply_aborts_before_bootout_when_pause_or_second_queue_check_is_unsafe(
+        tmp_path, monkeypatch, paused_pid, expected_error):
+    root = tmp_path / "AGATA Workers"
+    root.mkdir()
+    legacy = tmp_path / "legacy-runtime"
+    legacy.mkdir()
+    (legacy / "run_codex_worker.sh").write_text("legacy runtime")
+    plist = tmp_path / "LaunchAgents/worker.plist"
+    plist.parent.mkdir()
+    original_plist = plistlib.dumps({
+        "Label": migration.LABEL,
+        "ProgramArguments": [str(legacy / "run_codex_worker.sh"), "watch"],
+    })
+    plist.write_bytes(original_plist)
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "LEGACY", legacy)
+    monkeypatch.setattr(migration, "PLIST", plist)
+    monkeypatch.setattr(migration, "TRANSITION_LOCK", tmp_path / "transition.lock")
+    monkeypatch.setattr(migration, "candidate", lambda: {
+        "source_sha": "a" * 40, "bundle_sha256": "b" * 64, "assets": {},
+    })
+    monkeypatch.setattr(migration, "inventory", lambda: {
+        "production_release_lock_busy": False, "launchagent_loaded": True,
+        "active_inference": False,
+    })
+    first_snapshot = _fresh_empty_queue_status(datetime.now(UTC))
+    second_snapshot = _fresh_empty_queue_status(datetime.now(UTC))
+    second_snapshot["lanes"]["GPOINT"]["pending_inference_jobs"] = 1
+    queue_reads = iter((first_snapshot, second_snapshot))
+    queue_read_calls = []
+    def read_queue():
+        queue_read_calls.append(True)
+        return next(queue_reads)
+    monkeypatch.setattr(migration, "_read_production_queue_status", read_queue)
+    monkeypatch.setattr(migration, "_network_state_sha256", lambda: "stable-network-state")
+    monkeypatch.setattr(migration, "_stage_runtime", lambda *_args: tmp_path / "candidate-stage")
+    monkeypatch.setattr(migration, "_validate_candidate_startup", lambda *_args: {"state": "PASS"})
+    monkeypatch.setattr(migration, "_pause_idle_launchagent", lambda: paused_pid)
+    signals = []
+    monkeypatch.setattr(migration.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+    commands = []
+    monkeypatch.setattr(migration.subprocess, "run", lambda command, **kwargs: (
+        commands.append(command) or subprocess.CompletedProcess(command, 0)
+    ))
+
+    with pytest.raises(RuntimeError, match=expected_error):
+        migration.apply()
+
+    expected_signals = [(424242, migration.signal.SIGCONT)] if paused_pid else []
+    assert signals == expected_signals
+    assert len(queue_read_calls) == (2 if paused_pid else 1)
+    assert not any(command[:2] == ["launchctl", "bootout"] for command in commands)
+    assert plist.read_bytes() == original_plist
+    assert not (root / "runtime/current").exists()
+    assert not (root / "state/maintenance-stop").exists()
+
+
+def test_worker_queue_status_validation_rejects_cross_lane_or_payload_counts():
+    status = _fresh_empty_queue_status(datetime.now(UTC))
+    status["lanes"]["GPOINT"]["queue_snapshot_source_id"] = "agata-worker-queue-status-v1:gsales"
+    with pytest.raises(RuntimeError, match="production_queue_snapshot_invalid"):
+        migration.require_fresh_empty_production_queues(status)
+    status = _fresh_empty_queue_status(datetime.now(UTC))
+    status["lanes"]["GSALES"]["pending_inference_jobs"] = True
+    with pytest.raises(RuntimeError, match="production_queue_snapshot_invalid"):
+        migration.require_fresh_empty_production_queues(status)
+
+
+def _fresh_empty_queue_status(now):
+    return {
+        "launch_agent_loaded": True,
+        "pool": {"state": "HEALTHY", "busy": 0},
+        "pool_snapshot_at": now.isoformat(),
+        "lanes": {
+            lane: {"health": "HEALTHY", "queue_snapshot_state": "VERIFIED",
+                   "queue_snapshot_source_id": f"agata-worker-queue-status-v1:{lane.lower()}",
+                   "queue_snapshot_at": now.isoformat(), "pending_inference_jobs": 0,
+                   "running_inference_jobs": 0}
+            for lane in ("GPOINT", "GSALES")
+        },
+    }
     assert not (root / "runtime/current").exists()
     receipt = json.loads((root / "receipts/runtime-migration-rollback.json").read_text())
     assert receipt["state"] == "ROLLED_BACK"
@@ -345,7 +527,10 @@ def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(t
     manifest = {"source_sha": "f" * 40, "bundle_sha256": "a" * 64, "assets": {}}
     monkeypatch.setattr(migration, "candidate", lambda: manifest)
     monkeypatch.setattr(migration, "inventory", lambda: {"production_release_lock_busy": False,
+                                                            "launchagent_loaded": True,
                                                             "active_inference": False})
+    monkeypatch.setattr(migration, "_read_production_queue_status",
+                        lambda: _fresh_empty_queue_status(datetime.now(UTC)))
     monkeypatch.setattr(migration, "_network_state_sha256", lambda: "unchanged")
     def stage(_manifest):
         release = tmp_path / "candidate-stage" / manifest["source_sha"]
@@ -637,7 +822,7 @@ def test_rollback_restores_exact_legacy_plist_and_runtime_path(tmp_path, monkeyp
     monkeypatch.setattr(migration, "TRANSITION_LOCK", tmp_path / "transition.lock")
     monkeypatch.setattr(migration, "inventory", lambda: {"production_release_lock_busy": False,
                                                             "active_inference": False})
-    monkeypatch.setattr(migration, "_pause_idle_launchagent", lambda: None)
+    monkeypatch.setattr(migration, "_pause_idle_launchagent", lambda: 99999999)
     monkeypatch.setattr(migration, "_running_inference_pids", lambda: [])
     monkeypatch.setattr(migration, "launchctl_loaded", lambda: True)
     monkeypatch.setattr(migration.subprocess, "run", lambda command, **kwargs:
@@ -779,3 +964,6 @@ def test_stage_runtime_uses_running_python312_when_missing_from_path(tmp_path, m
     assert len(commands) == 3
     assert (release / "bundle-manifest.json").is_file()
     assert os.access(release / "run_codex_worker.sh", os.X_OK)
+    assert all((release / name).read_bytes() == (worker_dir / name).read_bytes()
+               for name in migration.ASSETS)
+    assert (release / "lab_promptfoo_compat_manifest.json").is_file()

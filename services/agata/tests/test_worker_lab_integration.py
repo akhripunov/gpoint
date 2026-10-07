@@ -247,7 +247,8 @@ class WorkerLabIntegrationTests(unittest.TestCase):
         )
         fake_codex.chmod(0o700)
         child_code = (
-            "import sys; from pathlib import Path; "
+            "import sys, datetime; from pathlib import Path; "
+            "datetime.UTC = getattr(datetime, 'UTC', datetime.timezone.utc); "
             f"sys.path.insert(0, {str(worker_dir)!r}); "
             "import gpoint_mac_worker as w; "
             f"w.SUPPORT=Path({str(self.root)!r}); "

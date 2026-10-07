@@ -1,5 +1,23 @@
 # AGATA Conversation Lab — Dataset Collection V1
 
+## Conversation Lab V2 — Promptfoo-backed evaluation (offline implementation)
+
+Promptfoo is the execution/evaluation backbone; the AGATA-owned coordinator remains the authority for scenario allowlists, arm parity, independent histories, privacy, blinding, sanity findings, OWNER locks, and deterministic decisions. V2 split membership and SHA256 commitments live in `configs/splits-v2.json`. The manifest intentionally contains no conversation text; `SEALED_HOLDOUT` plaintext and paths are forbidden, and compromised Benchmark V1 `-01` remains excluded.
+
+Run the safe local preflight from the GPoint repository root:
+
+```sh
+python3 services/agata/conversation-lab/evaluators/naturalness_cli.py dry-run
+```
+
+This validates only the V2 split manifest. It does not open scenario payloads, contact a provider, execute Promptfoo, read legacy frozen-pilot files, write run artifacts, or access production. An empty DEV manifest reports `SPLITS_NOT_POPULATED`; it must not be presented as an A/B result. Generator calls, conversation arms, and judge calls are reported as separate zero counters.
+
+The only supported live authentication path is the existing Codex/ChatGPT subscription session through the isolated Promptfoo runner. Effective API-key environment/config paths fail closed. The provider is pinned to `gpt-6-luna / medium`, with `maxRetries=0`, no fallback, no inherited process environment, and no API-key forwarding. Offline unit tests do not prove SDK/provider compatibility. Before any live invocation, require a separately reviewed bounded compatibility decision; no live compatibility call, `promptfoo optimize` campaign, paid API, optimizer execution, production prompt/runtime, database, VPS, Worker, GPOINT, or GSALES operation is authorized by this implementation.
+
+OWNER ratings for V2 use the exact eight-dimension V2 rubric and are write-once locked against both the exact public packet hash and rubric hash. The lock and subsequent unblind are persisted as separate mode-`0600` append-only events in a receipt-specific directory; unblind requires that receipt's persisted lock event. Private receipts are atomically created with mode `0600` and contain the durable call-ledger snapshot, journal hash, run hashes, seeded randomization, sanity findings, judge/aggregate evidence, and private mapping. The call ledger fsyncs each reservation before a provider invocation, uses a file lock across processes, and recovers prior attempts after interruption; ambiguous attempts stay charged and cannot be retried. OWNER packets omit evaluator-oracle notes and fail closed if any displayed scenario/transcript field leaks arm labels or technical metadata.
+
+Candidate arm compilation requires the treatment text and SHA256 to match the committed `configs/naturalness-policy-v1.md` byte-for-byte. A receipt cannot accept caller-provided counter numbers or an in-memory ledger: it requires a verified durable ledger object and validates arm-to-scenario/configuration mapping, unique sequential turns, judge invocation receipts, and the separate 8/32/15 ceilings. These contracts are tested offline only; no provider compatibility or live evaluation has been demonstrated.
+
 Локальная лаборатория для сбора и первичной проверки корпусов диалогов. Корневая папка данных фиксирована:
 
 `/Users/akhripuniov/Downloads/Codex/GPoint/services/agata/conversation-lab/data/`
@@ -52,8 +70,10 @@ python3 services/agata/conversation-lab/evaluators/cli.py review --source daily-
 python3 services/agata/conversation-lab/evaluators/cli.py benchmark
 python3 services/agata/conversation-lab/evaluators/cli.py leakage --run-id phase2-my-unique-audit
 python3 services/agata/conversation-lab/evaluators/cli.py blind --results /absolute/local/results.json --run-id phase2-my-unique-blind
-python3 -m unittest discover -s services/agata/conversation-lab/tests
+python3 services/agata/conversation-lab/tests/run_offline_safe_suite.py
 ```
+
+The safe suite installs a Python audit guard before test discovery; opening the legacy `agata-benchmark-v1.jsonl` plaintext fails closed. The three historical tests that read that corpus are skipped during all current discovery runs. Do not invoke those tests manually; they remain excluded from this workstream.
 
 CLI по умолчанию читает canonical data на Mac, даже из изолированного worktree; --data-root допускает тестовую копию небольших фикстур. Не копировать реальные корпуса. Report output ограничен новой папкой data/runs/phase2-<id>, существующие файлы не заменяются. Review показывает до пяти полных диалогов за вызов; автоматическая маскировка контактов неполная и не заменяет локальную проверку персональных данных.
 
@@ -77,7 +97,9 @@ python3 services/agata/conversation-lab/evaluators/pilot_cli.py dry-run --run-id
 
 Вывод и reviewer packet имеют статус `FIXTURE_ONLY`; ответы — тестовые строки, а не результаты моделей. `ratings.py` требует lock до unblind, создаёт новый review cycle при исправлениях и считает описательные A–J показатели без объявления победителя. Платные API, Codex CLI benchmark jobs, worker, AGATA Core и Production запрещены в Phase 3.
 
-## Phase 4A — Naturalness V1 offline preparation
+## Phase 4A — Naturalness V1 offline preparation (historical)
+
+This V1 procedure is retained as history. Current evaluation uses the guarded V2 path; compromised V1 holdout fixtures are excluded.
 
 Спецификация и пошаговый план: `experiments/naturalness-v1.md` и `experiments/naturalness-v1-plan.md`. Разработка политики использует только 16 замороженных Benchmark V1 сценариев `-02` и 15 синтетических авторских примеров. Отдельные 16 сценариев Phase 3 `-01` остаются независимым holdout: CLI ниже их не читает как материал для настройки и сообщает `holdout_scenarios_used: 0`.
 
@@ -117,3 +139,25 @@ worker's global lock, so a restarted worker cannot overlap an orphaned CLI. A
 claimed job left by a crash becomes `ambiguous` after the lock is released and
 is never retried. These interfaces are prepared only: this task does not create an
 approval file, enable the lane, start Codex, or access installed worker files.
+
+### Promptfoo compatibility adapter (offline implementation only)
+
+The technical compatibility fixture `promptfoo-worker-compat / promptfoo-compat-001`
+is separately hash-pinned in `services/agata/worker/lab_promptfoo_compat_manifest.json`.
+Promptfoo's Python provider is `evaluators/promptfoo_worker_provider.py`; it can
+submit only to the existing LAB spool, and the Worker remains the only Codex
+process manager and approval authority. The fixture is synthetic and independent
+of DEV, VALIDATION, the compromised V1 corpus, and SEALED HOLDOUT.
+
+The provider reserves its durable generator attempt before queue submission,
+binds Promptfoo/run/attempt/Worker IDs, hashes the terminal Worker receipt, and
+writes a private mode-0600 evidence record. A terminal Worker rejection proven
+to occur before inference is `provider_error`; missing terminal evidence after
+submission is `ambiguous`, and the job is never retried. Exact `gpt-6-luna / medium`
+is enforced only on this compatibility LAB job. API-key environment/config,
+Promptfoo retries, or fallback configuration fail closed. The native
+`openai:codex-sdk` route is disabled in the runner.
+
+This code change does not install or restart a Worker, create an approval file,
+submit a LAB job, or run Promptfoo/model calls. The compatibility smoke remains
+behind a separate OWNER decision.

@@ -319,6 +319,31 @@ def target_request(target: str, path: str, body: dict | None = None) -> dict:
     return api_request(path, body) if target == "GPOINT" else api_request(path, body, target=target)
 
 
+def _validated_queue_status(target: str, value: dict) -> dict[str, object]:
+    if target not in TARGET_NAMES or not isinstance(value, dict):
+        raise GatewayResponseError("worker_queue_status_response_invalid")
+    expected_source = f"agata-worker-queue-status-v1:{target.lower()}"
+    if value.get("lane") != target or value.get("source_id") != expected_source:
+        raise GatewayResponseError("worker_queue_status_identity_invalid")
+    counts = (value.get("pending_jobs"), value.get("running_jobs"))
+    if any(isinstance(count, bool) or not isinstance(count, int) or count < 0 for count in counts):
+        raise GatewayResponseError("worker_queue_status_counts_invalid")
+    raw_timestamp = value.get("snapshot_at")
+    try:
+        timestamp = datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise GatewayResponseError("worker_queue_status_timestamp_invalid") from exc
+    if timestamp.tzinfo is None:
+        raise GatewayResponseError("worker_queue_status_timestamp_invalid")
+    return {
+        "queue_snapshot_state": "VERIFIED",
+        "queue_snapshot_source_id": expected_source,
+        "queue_snapshot_at": timestamp.isoformat(),
+        "pending_inference_jobs": counts[0],
+        "running_inference_jobs": counts[1],
+    }
+
+
 async def _bounded_getaddrinfo(host, port, *, family=0, type=0, proto=0, flags=0):
     """Resolve one hostname without a non-daemon pool or queued retries."""
     global _HTTP_RESOLVER_ACTIVE
@@ -385,6 +410,9 @@ def api_request(path: str, body: dict | None = None, *, target: str = "GPOINT") 
         raise FatalConfigurationError("worker_target_unconfigured")
     base, token = targets[target]
     headers = {"Authorization": f"Bearer {token}"}
+    method = "GET" if path == "queue-status" else "POST"
+    if method == "GET" and body is not None:
+        raise ValueError("worker_read_only_status_body_invalid")
     kwargs: dict[str, object] = {}
     if body is not None:
         kwargs["json"] = body
@@ -397,7 +425,7 @@ def api_request(path: str, body: dict | None = None, *, target: str = "GPOINT") 
             trust_env=True,
         ) as client:
             async with asyncio.timeout(20.0):
-                return await client.post(f"{base}/{path}", headers=headers, **kwargs)
+                return await client.request(method, f"{base}/{path}", headers=headers, **kwargs)
 
     try:
         response = _run_http(request_once())
@@ -583,6 +611,19 @@ def _clear_stale_inference_record() -> None:
     INFERENCE_PROCESS.unlink(missing_ok=True)
 
 
+def resolve_codex_model_for_job(job: dict, env=None) -> tuple[str, str]:
+    """Keep production lanes on global config; pin the Promptfoo smoke per LAB job."""
+    source_env = os.environ if env is None else env
+    if job.get("target") == LAB_TARGET and job.get("experiment_id") == "promptfoo-worker-compat":
+        if any(key.upper().endswith("_API_KEY") for key in source_env):
+            raise FatalConfigurationError("lab_api_key_auth_forbidden")
+        model, reasoning = job.get("model"), job.get("reasoning_effort")
+        if (model, reasoning) != ("gpt-6-luna", "medium"):
+            raise FatalConfigurationError("lab_model_contract_invalid")
+        return model, reasoning
+    return source_env.get("AGATA_CODEX_MODEL", "").strip(), source_env.get("AGATA_CODEX_REASONING", "").strip()
+
+
 def run_inference(job: dict, *, cancel_check=None, metadata_out: dict | None = None,
                   timeout_seconds: int | None = None) -> str:
     max_length = 4000 if job.get("target") == "GSALES" else 4096
@@ -592,8 +633,7 @@ def run_inference(job: dict, *, cancel_check=None, metadata_out: dict | None = N
     codex = Path(os.environ.get("GPOINT_CODEX_CLI", str(DEFAULT_CODEX)))
     if not codex.is_file():
         raise FatalConfigurationError("codex_cli_missing")
-    model = os.environ.get("AGATA_CODEX_MODEL", "").strip()
-    reasoning = os.environ.get("AGATA_CODEX_REASONING", "").strip()
+    model, reasoning = resolve_codex_model_for_job(job, os.environ)
     if model and (len(model) > 128 or any(character.isspace() for character in model)):
         raise FatalConfigurationError("codex_model_config_invalid")
     if reasoning and reasoning not in {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
@@ -668,6 +708,8 @@ def run_inference(job: dict, *, cancel_check=None, metadata_out: dict | None = N
             pass_fds=pass_fds,
         )
         _ACTIVE_INFERENCE = process
+        if metadata_out is not None:
+            metadata_out["inference_started"] = True
         try:
             _record_inference_process(process, command)
             if cancel_check is None:
@@ -861,6 +903,7 @@ def _worker_bundle_sha256() -> str:
                        ("agata_worker_pool.py", Path(__file__).with_name("agata_worker_pool.py")),
                        ("lab_queue.py", Path(lab_queue.__file__)),
                        ("lab_fixture_manifest.json", lab_queue.FIXTURE_MANIFEST),
+                       ("lab_promptfoo_compat_manifest.json", lab_queue.PROMPTFOO_COMPAT_MANIFEST),
                        ("run_codex_worker.sh", Path(__file__).with_name("run_codex_worker.sh")),
                        ("requirements.txt", Path(__file__).with_name("requirements.txt"))):
         digest.update(name.encode("utf-8") + b"\0")
@@ -925,8 +968,9 @@ def execute_lab_claimed_job(job: dict) -> bool:
     execution = {
         "actual_model": None,
         "cli_reported_usage": None,
-        "requested_model": os.environ.get("AGATA_CODEX_MODEL", "").strip() or None,
-        "requested_reasoning_effort": os.environ.get("AGATA_CODEX_REASONING", "").strip() or None,
+        "requested_model": job.get("model") or os.environ.get("AGATA_CODEX_MODEL", "").strip() or None,
+        "requested_reasoning_effort": job.get("reasoning_effort") or os.environ.get("AGATA_CODEX_REASONING", "").strip() or None,
+        "inference_started": False,
         "timeout_seconds": job["timeout_seconds"],
     }
     started = None
@@ -934,8 +978,12 @@ def execute_lab_claimed_job(job: dict) -> bool:
         _consume_lab_approval(approval)
         write_status(target=LAB_TARGET, state="running", current_job_present=True)
         started = time.monotonic()
+        inference_job = {"target": LAB_TARGET, "request": job["request"]}
+        for key in ("experiment_id", "model", "reasoning_effort"):
+            if key in job:
+                inference_job[key] = job[key]
         response = run_inference(
-            {"target": LAB_TARGET, "request": job["request"]},
+            inference_job,
             cancel_check=lambda: lab_queue.cancel_requested(root, job_id),
             metadata_out=execution,
             timeout_seconds=job["timeout_seconds"],
@@ -1246,6 +1294,7 @@ def status() -> int:
         except (OSError, json.JSONDecodeError):
             saved = {}
     lane_health = {}
+    queue_snapshots = {}
     targets = configured_targets()
     for target in targets:
         try:
@@ -1254,6 +1303,14 @@ def status() -> int:
         except Exception as exc:
             lane_health[target] = "DEGRADED"
             saved.setdefault("targets", {}).setdefault(target, {})["health_error_code"] = str(exc)[:64]
+        try:
+            queue_snapshots[target] = _validated_queue_status(
+                target, target_request(target, "queue-status")
+            )
+        except Exception:
+            # A missing or unavailable queue snapshot is deliberately not
+            # replaced by cached data: lifecycle preflight must fail closed.
+            queue_snapshots[target] = {"queue_snapshot_state": "UNAVAILABLE"}
     try:
         pool_saved = json.loads(PoolPaths(SUPPORT).status_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -1273,6 +1330,7 @@ def status() -> int:
         "queue_connectivity": queue_status,
         "configured_concurrency": pool_saved.get("configured_concurrency", pool_saved.get("pool", {}).get("total", 1)),
         "pool": pool_saved.get("pool", {"state": "NOT_VERIFIED"}),
+        "pool_snapshot_at": pool_saved.get("updated_at"),
         "provider": pool_saved.get("provider", {
             "state": "HEALTHY", "parallel_capability": os.environ.get("AGATA_CODEX_PARALLEL_CAPABILITY", "NOT_VERIFIED"),
         }),
@@ -1281,6 +1339,7 @@ def status() -> int:
             lane: {
                 **(lanes.get(lane) if isinstance(lanes.get(lane), dict) else {}),
                 **(targets_saved.get(lane) if isinstance(targets_saved.get(lane), dict) else {}),
+                **queue_snapshots.get(lane, {"queue_snapshot_state": "UNAVAILABLE"}),
                 "health": lane_health.get(lane, "NOT_VERIFIED"),
             }
             for lane in ("GPOINT", "GSALES", "LAB")

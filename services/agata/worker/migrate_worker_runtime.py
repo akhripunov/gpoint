@@ -36,7 +36,10 @@ RELEASE_LOCK = HOME / ".config/gpoint/release-production.lock"
 CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex")
 WORKER_DIR = Path(__file__).resolve().parent
 ASSETS = ("gpoint_mac_worker.py", "agata_worker_pool.py", "lab_queue.py",
-          "lab_fixture_manifest.json", "requirements.txt", "run_codex_worker.sh")
+          "lab_fixture_manifest.json", "lab_promptfoo_compat_manifest.json",
+          "run_codex_worker.sh", "requirements.txt")
+QUEUE_SNAPSHOT_MAX_AGE_SECONDS = 30
+QUEUE_SNAPSHOT_FUTURE_SKEW_SECONDS = 5
 
 
 def sha256(path: Path) -> str:
@@ -248,6 +251,89 @@ def candidate() -> dict:
 def read_only_plan() -> dict:
     return {"mode": "READ_ONLY_PLAN", "candidate": candidate(), "inventory": inventory(),
             "runtime_root": str(ROOT), "legacy_root": str(LEGACY), "mutation_performed": False}
+
+
+def validate_fresh_production_queue_snapshots(status: dict, *, now: datetime | None = None) -> dict:
+    """Validate fresh, content-free queue snapshots without requiring idleness."""
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None or not isinstance(status, dict):
+        raise RuntimeError("production_queue_snapshot_invalid")
+    pool = status.get("pool")
+    busy = pool.get("busy") if isinstance(pool, dict) else None
+    if (not isinstance(pool, dict) or pool.get("state") != "HEALTHY"
+            or status.get("launch_agent_loaded") is not True
+            or isinstance(busy, bool) or not isinstance(busy, int) or busy < 0):
+        raise RuntimeError("production_queue_snapshot_invalid")
+    try:
+        pool_captured = datetime.fromisoformat(status.get("pool_snapshot_at", "").replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise RuntimeError("production_queue_snapshot_invalid") from exc
+    if pool_captured.tzinfo is None:
+        raise RuntimeError("production_queue_snapshot_invalid")
+    pool_age = (current - pool_captured).total_seconds()
+    if pool_age > QUEUE_SNAPSHOT_MAX_AGE_SECONDS or pool_age < -QUEUE_SNAPSHOT_FUTURE_SKEW_SECONDS:
+        raise RuntimeError("production_queue_snapshot_stale")
+    lanes = status.get("lanes")
+    if not isinstance(lanes, dict):
+        raise RuntimeError("production_queue_snapshot_invalid")
+    evidence = {}
+    for lane in ("GPOINT", "GSALES"):
+        value = lanes.get(lane)
+        if not isinstance(value, dict) or value.get("health") != "HEALTHY":
+            raise RuntimeError("production_queue_snapshot_invalid")
+        if value.get("queue_snapshot_state") != "VERIFIED":
+            raise RuntimeError("production_queue_snapshot_invalid")
+        if value.get("queue_snapshot_source_id") != f"agata-worker-queue-status-v1:{lane.lower()}":
+            raise RuntimeError("production_queue_snapshot_invalid")
+        counts = (value.get("pending_inference_jobs"), value.get("running_inference_jobs"))
+        if any(isinstance(count, bool) or not isinstance(count, int) or count < 0 for count in counts):
+            raise RuntimeError("production_queue_snapshot_invalid")
+        try:
+            captured = datetime.fromisoformat(value.get("queue_snapshot_at", "").replace("Z", "+00:00"))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise RuntimeError("production_queue_snapshot_invalid") from exc
+        if captured.tzinfo is None:
+            raise RuntimeError("production_queue_snapshot_invalid")
+        age = (current - captured).total_seconds()
+        if age > QUEUE_SNAPSHOT_MAX_AGE_SECONDS or age < -QUEUE_SNAPSHOT_FUTURE_SKEW_SECONDS:
+            raise RuntimeError("production_queue_snapshot_stale")
+        evidence[lane] = {
+            "source_id": value["queue_snapshot_source_id"],
+            "snapshot_at": captured.isoformat(),
+            "pending_jobs": counts[0],
+            "running_jobs": counts[1],
+        }
+    return {"checked_at": current.isoformat(), "pool_snapshot_at": pool_captured.isoformat(),
+            "busy_slots": busy, "lanes": evidence}
+
+
+def require_fresh_empty_production_queues(status: dict, *, now: datetime | None = None) -> dict:
+    """Require both current production queues and all worker slots to be idle."""
+    evidence = validate_fresh_production_queue_snapshots(status, now=now)
+    if evidence["busy_slots"] != 0:
+        raise RuntimeError("worker_slots_busy")
+    if any(item["pending_jobs"] or item["running_jobs"] for item in evidence["lanes"].values()):
+        raise RuntimeError("production_queue_not_empty")
+    return evidence
+
+
+def _read_production_queue_status() -> dict:
+    """Invoke only the candidate's read-only status command; never claim jobs."""
+    worker = WORKER_DIR / "gpoint_mac_worker.py"
+    try:
+        result = subprocess.run(
+            [_resolve_python312(), str(worker), "status"], capture_output=True,
+            text=True, timeout=35, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("production_queue_status_unavailable") from exc
+    if result.returncode != 0:
+        raise RuntimeError("production_queue_status_unavailable")
+    try:
+        status = json.loads(result.stdout)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("production_queue_status_unavailable") from exc
+    return status
 
 
 def _save_original_launchagent(rollback_tree: Path) -> bytes:
@@ -990,6 +1076,11 @@ def _health_check(deadline: float = 60.0) -> dict:
         lanes = last.get("lanes", {}) if isinstance(last.get("lanes"), dict) else {}
         production_healthy = all(lanes.get(lane, {}).get("health") == "HEALTHY" for lane in ("GPOINT", "GSALES"))
         if result.returncode == 0 and last.get("pool") and lanes and production_healthy:
+            try:
+                last["production_queue_snapshot"] = validate_fresh_production_queue_snapshots(last)
+            except RuntimeError:
+                time.sleep(2)
+                continue
             return last
         time.sleep(2)
     raise RuntimeError("new_worker_health_check_failed")
@@ -1068,6 +1159,9 @@ def apply() -> dict:
             raise RuntimeError("production_release_lock_busy")
         if before["active_inference"]:
             raise RuntimeError("active_inference_blocks_transition")
+        if before.get("launchagent_loaded") is not True:
+            raise RuntimeError("worker_launchagent_not_loaded")
+        queue_evidence = require_fresh_empty_production_queues(_read_production_queue_status())
         network_before = _network_state_sha256()
         if not ROOT.is_dir() or ROOT.is_symlink() or ROOT.stat().st_uid != os.getuid():
             raise RuntimeError("worker_runtime_root_owner_invalid")
@@ -1098,15 +1192,27 @@ def apply() -> dict:
             os.close(marker_fd)
             maintenance_marker.chmod(0o600)
             paused_pid = _pause_idle_launchagent()
-            if paused_pid is not None:
-                switch_started = True
+            if paused_pid is None:
+                raise RuntimeError("worker_launchagent_unloaded_during_transition")
+            try:
+                # The worker cannot claim another job while paused. Re-read
+                # the authoritative queue immediately before bootout. Queue
+                # producers remain independent; any later enqueue stays durable.
+                queue_evidence = require_fresh_empty_production_queues(_read_production_queue_status())
+            except Exception:
                 try:
-                    subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], check=True, timeout=20)
-                finally:
-                    try:
-                        os.kill(paused_pid, signal.SIGCONT)
-                    except ProcessLookupError:
-                        pass
+                    os.kill(paused_pid, signal.SIGCONT)
+                except ProcessLookupError:
+                    pass
+                raise
+            switch_started = True
+            try:
+                subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], check=True, timeout=20)
+            finally:
+                try:
+                    os.kill(paused_pid, signal.SIGCONT)
+                except ProcessLookupError:
+                    pass
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline and _running_inference_pids():
                 time.sleep(1)
@@ -1191,6 +1297,7 @@ def apply() -> dict:
                 "network_state_sha256_before": network_before,
                 "network_state_sha256_after": network_after,
                 "network_configuration_writes_performed": False,
+                "production_queue_snapshot": queue_evidence,
                 "rollback_snapshot": str(backup),
                 "startup_check": startup_check,
                 "diagnostics": str(diagnostic_receipt),

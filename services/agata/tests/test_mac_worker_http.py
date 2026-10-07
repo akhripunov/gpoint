@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -59,6 +60,68 @@ class MacWorkerHttpTests(unittest.TestCase):
         self.assertEqual(json.loads(observed[1].content), {"text": "reply"})
         self.assertEqual(observed[1].headers["content-type"], "application/json")
         self.assertEqual(observed[0].headers["authorization"], "Bearer test-secret")
+
+    def test_queue_status_uses_read_only_get_and_never_claims(self):
+        observed = []
+
+        def handler(request):
+            observed.append(request)
+            return httpx.Response(200, json={
+                "source_id": "agata-worker-queue-status-v1:gpoint",
+                "lane": "GPOINT", "pending_jobs": 0, "running_jobs": 0,
+                "snapshot_at": "2026-10-07T10:00:00+00:00",
+            })
+
+        with patch.dict(os.environ, {
+            "GPOINT_AGATA_WORKER_URL": "https://gpoint.amiora.one/api/agata-worker",
+            "GPOINT_AGATA_WORKER_TOKEN": "test-secret",
+        }), patch.object(worker.httpx, "AsyncClient", side_effect=lambda **_kwargs: self.client_for(handler)):
+            result = worker.api_request("queue-status")
+
+        self.assertEqual(result["pending_jobs"], 0)
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0].method, "GET")
+        self.assertEqual(observed[0].content, b"")
+        self.assertNotIn("claim", observed[0].url.path)
+
+    def test_status_includes_sanitized_per_lane_queue_counts(self):
+        status_file = PoolPaths(Path(self.temp.name)).worker_status_file
+        status_file.parent.mkdir(parents=True, exist_ok=True)
+        status_file.write_text(json.dumps({"targets": {}}))
+        pool_status = PoolPaths(Path(self.temp.name)).status_file
+        pool_status.write_text(json.dumps({
+            "pool": {"state": "HEALTHY", "busy": 0, "total": 1, "idle": 1},
+            "updated_at": "2026-10-07T10:00:00+00:00",
+            "lanes": {"GPOINT": {"state": "HEALTHY"}, "GSALES": {"state": "HEALTHY"}},
+        }))
+        queue = {
+            "GPOINT": {"source_id": "agata-worker-queue-status-v1:gpoint", "lane": "GPOINT", "pending_jobs": 2,
+                       "running_jobs": 0, "snapshot_at": "2026-10-07T10:00:00+00:00",
+                       "private_payload": "must-not-appear"},
+            "GSALES": {"source_id": "agata-worker-queue-status-v1:gsales", "lane": "GSALES", "pending_jobs": 0,
+                       "running_jobs": 0, "snapshot_at": "2026-10-07T10:00:01+00:00"},
+        }
+        def request(target, path):
+            if path == "health":
+                return {"status": "ready"}
+            if path == "queue-status":
+                return queue[target]
+            self.fail(f"unexpected request {path}")
+        output = io.StringIO()
+        with patch.object(worker, "load_worker_configs"), patch.object(worker.shutil, "which", return_value=None), \
+             patch.object(worker, "configured_targets", return_value={"GPOINT": ("url", "token"), "GSALES": ("url", "token")}), \
+             patch.object(worker, "target_request", side_effect=request), patch("sys.stdout", output):
+            self.assertEqual(worker.status(), 0)
+
+        rendered = output.getvalue()
+        value = json.loads(rendered)
+        self.assertEqual(value["lanes"]["GPOINT"]["pending_inference_jobs"], 2)
+        self.assertEqual(value["lanes"]["GSALES"]["pending_inference_jobs"], 0)
+        self.assertEqual(value["lanes"]["GPOINT"]["queue_snapshot_state"], "VERIFIED")
+        self.assertEqual(value["lanes"]["GPOINT"]["health"], "HEALTHY")
+        self.assertEqual(value["pool"]["busy"], 0)
+        self.assertNotIn("must-not-appear", rendered)
+        self.assertNotIn("private_payload", value["lanes"]["GPOINT"])
 
     def test_reg_b_worker_survives_connect_timeout_and_recovers(self):
         calls = []
