@@ -27,6 +27,34 @@ def canonical_lab_queue(env=None) -> Path:
     support = Path(root).expanduser() if root else Path.home() / "Library" / "Application Support" / "GPoint" / "agata-codex-worker"
     return support / "queues" / "lab"
 
+
+def validate_owner_approval(job: dict, env=None) -> None:
+    """Ask the canonical Worker verifier before reserving a Promptfoo attempt.
+
+    The Worker revalidates and consumes the same approval again immediately
+    before inference; this first check prevents an unapproved job from charging
+    the Lab's durable generator ledger.
+    """
+    source_env = dict(os.environ if env is None else env)
+    support = canonical_lab_queue(source_env).parents[1]
+    try:
+        approval_path = Path(source_env.get("AGATA_LAB_APPROVAL_FILE") or
+                             (support / "config/lab-execution-approval.json"))
+        approval = lab_queue.load_owner_approval(
+            approval_path, expected_bundle_sha256=lab_queue.worker_bundle_sha256(),
+        )
+        if (job.get("experiment_id") not in approval["experiment_ids"]
+                or job.get("configuration_id") not in approval["configuration_ids"]
+                or job.get("scenario_id") not in approval["scenario_ids"]):
+            raise PermissionError("LAB OWNER approval does not cover this experiment invocation")
+        calls = lab_queue.owner_approval_usage_calls(support, approval)
+        if calls >= approval["max_calls"]:
+            raise PermissionError("LAB OWNER approval is consumed or unavailable")
+    except PermissionError:
+        raise
+    except (lab_queue.LabQueueError, OSError, ValueError, json.JSONDecodeError) as exc:
+        raise PermissionError("LAB OWNER approval is missing, invalid, expired, or unavailable") from exc
+
 NATURALNESS = LAB / "evaluators" / "naturalness.py"
 SPEC = importlib.util.spec_from_file_location("agata_lab_naturalness_for_worker", NATURALNESS)
 naturalness = importlib.util.module_from_spec(SPEC)

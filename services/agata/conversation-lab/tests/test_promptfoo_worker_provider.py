@@ -60,6 +60,11 @@ class FakeTransport:
 
 
 class PromptfooWorkerProviderTests(unittest.TestCase):
+    def setUp(self):
+        approval = patch.object(provider.worker_client, "validate_owner_approval", return_value=None)
+        approval.start()
+        self.addCleanup(approval.stop)
+
     def require_provider(self):
         self.assertIsNotNone(provider, "Worker LAB Promptfoo adapter is not implemented")
 
@@ -153,6 +158,18 @@ class PromptfooWorkerProviderTests(unittest.TestCase):
         adapter = provider.WorkerLabAdapter(ledger=ledger, transport=transport, run_id="run-env", env={"OPENAI_API_KEY": "redacted"})
         with self.assertRaises(PermissionError):
             adapter.invoke("Привет! Что тебе обычно нравится делать в спокойный выходной?", invocation_id="inv-env", scenario_id="promptfoo-compat-001")
+        self.assertEqual(ledger.events, [])
+        self.assertEqual(transport.events, [])
+
+    def test_missing_owner_approval_fails_before_durable_generator_reservation(self):
+        self.require_provider()
+        ledger, transport = FakeLedger(), FakeTransport()
+        adapter = provider.WorkerLabAdapter(ledger=ledger, transport=transport, run_id="run-no-approval")
+        with patch.object(provider.worker_client, "validate_owner_approval",
+                          side_effect=PermissionError("approval missing")):
+            with self.assertRaisesRegex(PermissionError, "approval missing"):
+                adapter.invoke("Привет! Что тебе обычно нравится делать в спокойный выходной?",
+                               invocation_id="inv-no-approval", scenario_id="promptfoo-compat-001")
         self.assertEqual(ledger.events, [])
         self.assertEqual(transport.events, [])
 

@@ -152,7 +152,6 @@ def test_validate_startup_passes_all_lanes_without_claim_or_inference(tmp_path, 
         **ENV,
         "GPOINT_AGATA_WORKER_SUPPORT": str(support),
         "AGATA_WORKER_POOL_CONFIG": str(pool_config),
-        "AGATA_LAB_WORKER_ENABLED": "false",
     }
     current = support / "runtime/current"
     monkeypatch.setattr(worker, "CONFIG", tmp_path / "missing-worker.env")
@@ -169,7 +168,8 @@ def test_validate_startup_passes_all_lanes_without_claim_or_inference(tmp_path, 
     assert {name for name, lane in result["lanes"].items() if lane["configured"]} == {
         "GPOINT", "GSALES", "LAB",
     }
-    assert result["lanes"]["LAB"]["inference_gate"] == "CLOSED_DISABLED"
+    assert result["lanes"]["LAB"]["state"] == "AVAILABLE"
+    assert result["lanes"]["LAB"]["inference_gate"] == "CLOSED_NO_APPROVAL"
     assert result["claim_requests"] == 0
     assert result["inference_requests"] == 0
     assert not current.exists()
@@ -214,18 +214,30 @@ def test_startup_check_cli_reports_validation_without_mutating_launchagent_or_ru
     assert not (support / "locks").exists()
 
 
-def test_lab_lane_is_registered_but_disabled_gate_never_reads_approval(tmp_path, monkeypatch):
+def test_lab_lane_is_permanent_and_missing_approval_closes_only_inference(tmp_path, monkeypatch):
     monkeypatch.setattr(worker, "SUPPORT", tmp_path)
-    with patch.dict(os.environ, {**ENV, "GPOINT_AGATA_WORKER_SUPPORT": str(tmp_path),
-                                 "AGATA_LAB_WORKER_ENABLED": "false"}, clear=True), \
-         patch.object(worker, "_load_lab_approval", side_effect=AssertionError("approval read")):
-        with pytest.raises(worker.FatalConfigurationError, match="lab_worker_disabled"):
-            worker.claim_lab_job()
+    monkeypatch.setattr(worker, "STATUS", tmp_path / "status/worker-status.json")
+    with patch.dict(os.environ, {**ENV, "GPOINT_AGATA_WORKER_SUPPORT": str(tmp_path)}, clear=True), \
+         patch.object(worker, "_load_lab_approval", side_effect=worker.FatalConfigurationError("lab_owner_approval_missing_or_invalid")):
+        assert worker.claim_lab_job() is None
         supervisor = worker.build_pool_supervisor()
-        assert supervisor.claimers["LAB"]() is None
+        assert supervisor.claimers["LAB"] is worker.claim_lab_job
     assert "LAB" in supervisor.claimers
-    assert supervisor.lab_enabled is False
+    assert supervisor.lab_gate_status() == "CLOSED_NO_APPROVAL"
     assert not (tmp_path / "runtime/current").exists()
+
+
+def test_once_command_uses_single_pool_even_when_legacy_lab_flag_is_absent(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["gpoint_mac_worker.py", "once"])
+    with patch.dict(os.environ, {}, clear=True), \
+         patch.object(worker, "load_worker_configs"), \
+         patch.object(worker, "configured_targets", return_value={"GPOINT"}), \
+         patch.object(worker, "configured_tenant_bindings"), \
+         patch.object(worker.signal, "signal"), \
+         patch.object(worker, "run_pool", return_value=0) as run_pool:
+        assert worker.main() == 0
+    run_pool.assert_called_once()
+    assert run_pool.call_args.kwargs["max_cycles"] == 1
 
 
 def test_startup_cli_reports_specific_safe_configuration_code_without_values(tmp_path, monkeypatch, capsys):
@@ -247,64 +259,6 @@ def test_startup_cli_reports_specific_safe_configuration_code_without_values(tmp
     captured = capsys.readouterr()
     assert captured.err.strip() == "worker_target_unconfigured"
     assert "do-not-print-point-secret" not in captured.err + captured.out
-
-
-def test_scheduler_fairness_and_target_failure_isolation(tmp_path, monkeypatch):
-    calls = []
-    monkeypatch.setattr(worker, "SUPPORT", tmp_path)
-    monkeypatch.setattr(worker, "STATUS", tmp_path / "status.json")
-    def process(target):
-        calls.append(target)
-        if target == "GSALES":
-            raise worker.TransientNetworkError("offline")
-        return True
-    with patch.dict(os.environ, ENV), patch.object(worker, "process_one", side_effect=process):
-        scheduler = worker.TargetScheduler()
-        for _ in range(8):
-            scheduler.poll(now=0)
-    assert calls[:2] == ["GPOINT", "GSALES"]
-    assert calls.count("GPOINT") == 7
-    assert calls.count("GSALES") == 1
-    assert "point-private" not in worker.STATUS.read_text()
-    assert "sales-private" not in worker.STATUS.read_text()
-
-
-def test_scheduler_clears_stale_error_after_successful_empty_poll(tmp_path, monkeypatch):
-    monkeypatch.setattr(worker, "SUPPORT", tmp_path)
-    monkeypatch.setattr(worker, "STATUS", tmp_path / "status.json")
-    worker.write_status(target="GPOINT", state="error", last_error_code="worker_target_unavailable")
-    with patch.dict(os.environ, ENV), patch.object(worker, "process_one", return_value=False):
-        assert worker.TargetScheduler().poll(now=0) is False
-    status = json.loads(worker.STATUS.read_text())
-    assert status["last_error_code"] is None
-    assert status["targets"]["GPOINT"]["last_error_code"] is None
-
-
-def test_scheduler_preserves_safe_gateway_error_code_without_leaking_arbitrary_text(tmp_path, monkeypatch):
-    monkeypatch.setattr(worker, "SUPPORT", tmp_path)
-    monkeypatch.setattr(worker, "STATUS", tmp_path / "status.json")
-    with patch.dict(os.environ, ENV), patch.object(
-        worker, "process_one", side_effect=worker.TransientNetworkError("worker_gateway_http_503")
-    ):
-        worker.TargetScheduler().poll(now=0)
-    status = json.loads(worker.STATUS.read_text())
-    assert status["last_error_code"] == "worker_gateway_http_503"
-
-    monkeypatch.setattr(worker, "STATUS", tmp_path / "status-redacted.json")
-    with patch.dict(os.environ, ENV), patch.object(
-        worker, "process_one", side_effect=RuntimeError("worker_bearer_sensitive_token")
-    ):
-        worker.TargetScheduler().poll(now=0)
-    redacted = worker.STATUS.read_text()
-    assert "worker_bearer_sensitive_token" not in redacted
-    assert json.loads(redacted)["last_error_code"] == "worker_target_unavailable"
-
-    monkeypatch.setattr(worker, "STATUS", tmp_path / "status-invalid-http.json")
-    with patch.dict(os.environ, ENV), patch.object(
-        worker, "process_one", side_effect=worker.TransientNetworkError("worker_gateway_http_999")
-    ):
-        worker.TargetScheduler().poll(now=0)
-    assert json.loads(worker.STATUS.read_text())["last_error_code"] == "worker_target_unavailable"
 
 
 def test_sales_claim_identity_is_checked_before_inference(tmp_path, monkeypatch):

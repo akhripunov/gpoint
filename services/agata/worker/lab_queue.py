@@ -8,6 +8,7 @@ import os
 import re
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 MAX_PAYLOAD_BYTES = 64 * 1024
@@ -30,6 +31,113 @@ JOB_KEYS = {
 
 class LabQueueError(RuntimeError):
     """A local LAB submission or queue operation was rejected."""
+
+
+def worker_bundle_sha256() -> str:
+    """Hash the exact Worker asset set used to bind a private LAB approval."""
+    worker_dir = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    assets = (
+        ("gpoint_mac_worker.py", worker_dir / "gpoint_mac_worker.py"),
+        ("agata_worker_pool.py", worker_dir / "agata_worker_pool.py"),
+        ("lab_queue.py", Path(__file__)),
+        ("lab_fixture_manifest.json", FIXTURE_MANIFEST),
+        ("lab_promptfoo_compat_manifest.json", PROMPTFOO_COMPAT_MANIFEST),
+        ("run_codex_worker.sh", worker_dir / "run_codex_worker.sh"),
+        ("requirements.txt", worker_dir / "requirements.txt"),
+    )
+    for name, path in assets:
+        if not path.is_file() or path.is_symlink():
+            raise LabQueueError("worker_asset_missing")
+        digest.update(name.encode("utf-8") + b"\0")
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def load_owner_approval(path: Path, *, expected_bundle_sha256: str, now=None) -> dict:
+    """Validate the Worker-owned, file-backed LAB approval without inference."""
+    path = Path(path)
+    try:
+        stat = path.stat()
+        if path.is_symlink() or stat.st_uid != os.getuid() or stat.st_mode & 0o077:
+            raise ValueError
+        approval = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise LabQueueError("lab_owner_approval_missing_or_invalid") from exc
+    required = {"approval_id", "worker_bundle_sha256", "experiment_ids", "configuration_ids", "scenario_ids", "max_calls", "expires_at"}
+    if not isinstance(approval, dict) or set(approval) != required:
+        raise LabQueueError("lab_owner_approval_schema_invalid")
+    if (not isinstance(approval["approval_id"], str) or not ID_RE.fullmatch(approval["approval_id"])
+            or approval["worker_bundle_sha256"] != expected_bundle_sha256
+            or not all(isinstance(approval[key], list) and approval[key] and all(
+                isinstance(item, str) and ID_RE.fullmatch(item) for item in approval[key]
+            ) for key in ("experiment_ids", "configuration_ids", "scenario_ids"))
+            or isinstance(approval["max_calls"], bool) or not isinstance(approval["max_calls"], int)
+            or not 1 <= approval["max_calls"] <= 8):
+        raise LabQueueError("lab_owner_approval_scope_invalid")
+    try:
+        expires = datetime.fromisoformat(approval["expires_at"].replace("Z", "+00:00"))
+    except (AttributeError, ValueError) as exc:
+        raise LabQueueError("lab_owner_approval_expiry_invalid") from exc
+    current = datetime.now(timezone.utc) if now is None else now
+    if expires.tzinfo is None or expires <= current:
+        raise LabQueueError("lab_owner_approval_expired")
+    return approval
+
+
+def owner_approval_usage_calls(root: Path, approval: dict) -> int:
+    """Read the Worker-owned usage receipt; malformed state fails closed."""
+    root = Path(root)
+    state_dir = root / "state"
+    usage_dir = state_dir / "lab-approval-usage"
+    usage = usage_dir / (approval["approval_id"] + ".json")
+    for directory in (root, state_dir, usage_dir):
+        if directory.is_symlink():
+            raise LabQueueError("lab_approval_usage_invalid")
+        try:
+            stat = directory.stat()
+        except FileNotFoundError:
+            return 0
+        except OSError as exc:
+            raise LabQueueError("lab_approval_usage_invalid") from exc
+        if (not directory.is_dir() or stat.st_uid != os.getuid() or stat.st_mode & 0o077):
+            raise LabQueueError("lab_approval_usage_invalid")
+    if usage.is_symlink():
+        raise LabQueueError("lab_approval_usage_invalid")
+    if not usage.exists():
+        return 0
+    try:
+        stat = usage.stat()
+        if (not usage.is_file() or stat.st_uid != os.getuid() or stat.st_mode & 0o077):
+            raise ValueError
+        saved = json.loads(usage.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise LabQueueError("lab_approval_usage_invalid") from exc
+    calls = saved.get("calls") if isinstance(saved, dict) else None
+    if (not isinstance(saved, dict) or set(saved) != {"worker_bundle_sha256", "calls"}
+            or saved["worker_bundle_sha256"] != approval["worker_bundle_sha256"]
+            or isinstance(calls, bool) or not isinstance(calls, int) or calls < 0):
+        raise LabQueueError("lab_approval_usage_invalid")
+    return calls
+
+
+def ensure_owner_approval_usage_dir(root: Path) -> Path:
+    """Create the private approval ledger path without following symlinks."""
+    root = Path(root)
+    if root.is_symlink() or not root.is_dir():
+        raise LabQueueError("lab_approval_usage_invalid")
+    if root.stat().st_uid != os.getuid() or root.stat().st_mode & 0o077:
+        raise LabQueueError("lab_approval_usage_invalid")
+    state_dir = root / "state"
+    usage_dir = state_dir / "lab-approval-usage"
+    for directory in (state_dir, usage_dir):
+        if directory.is_symlink():
+            raise LabQueueError("lab_approval_usage_invalid")
+        directory.mkdir(mode=0o700, exist_ok=True)
+        stat = directory.stat()
+        if (not directory.is_dir() or stat.st_uid != os.getuid() or stat.st_mode & 0o077):
+            raise LabQueueError("lab_approval_usage_invalid")
+    return usage_dir
 
 
 def _layout(root: Path) -> tuple[Path, Path, Path, Path]:

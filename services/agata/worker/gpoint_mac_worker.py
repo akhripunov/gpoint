@@ -254,7 +254,6 @@ def validate_startup_configuration() -> dict:
     supervisor = build_pool_supervisor()
     if set(supervisor.claimers) != set(STARTUP_LANES):
         raise FatalConfigurationError("worker_target_unconfigured")
-    lab_enabled = os.environ.get("AGATA_LAB_WORKER_ENABLED") == "true"
     return {
         "state": "PASS",
         "mode": "READ_ONLY_STARTUP_CHECK",
@@ -265,8 +264,8 @@ def validate_startup_configuration() -> dict:
         "lanes": {
             "GPOINT": {"configured": True, "enabled": True},
             "GSALES": {"configured": True, "enabled": True},
-            "LAB": {"configured": True, "enabled": lab_enabled,
-                    "inference_gate": "CLOSED_DISABLED" if not lab_enabled else "REQUIRED_BEFORE_INFERENCE"},
+            "LAB": {"configured": True, "state": "AVAILABLE", "presence": "PERMANENT",
+                    "inference_gate": _lab_approval_gate_status()},
         },
         "claim_requests": 0,
         "inference_requests": 0,
@@ -882,100 +881,100 @@ def process_one(target: str = "GPOINT") -> bool:
     return False if claim is None else execute_claimed_job(target, claim)
 
 
-def _load_lab_approval() -> dict:
+def _load_lab_approval(*, env=None, support: Path | None = None) -> dict:
     """Read a private, source-pinned OWNER approval before any LAB generation."""
-    path = Path(os.environ.get(
-        "AGATA_LAB_APPROVAL_FILE",
-        str(PoolPaths(SUPPORT).config / "lab-execution-approval.json"),
-    ))
+    source_env = os.environ if env is None else env
+    support_root = Path(support) if support is not None else PoolPaths.from_env(source_env).root
+    path = Path(source_env.get("AGATA_LAB_APPROVAL_FILE") or
+                 (support_root / "config/lab-execution-approval.json"))
     try:
-        stat = path.stat()
-        if path.is_symlink() or stat.st_uid != os.getuid() or stat.st_mode & 0o077:
-            raise ValueError
-        approval = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise FatalConfigurationError("lab_owner_approval_missing_or_invalid") from exc
-    required = {"approval_id", "worker_bundle_sha256", "experiment_ids", "configuration_ids", "scenario_ids", "max_calls", "expires_at"}
-    if not isinstance(approval, dict) or set(approval) != required:
-        raise FatalConfigurationError("lab_owner_approval_schema_invalid")
-    if (not isinstance(approval["approval_id"], str) or not lab_queue.ID_RE.fullmatch(approval["approval_id"])
-            or approval["worker_bundle_sha256"] != _worker_bundle_sha256()
-            or not all(isinstance(approval[key], list) and approval[key] and all(
-                isinstance(item, str) and lab_queue.ID_RE.fullmatch(item) for item in approval[key]
-            ) for key in ("experiment_ids", "configuration_ids", "scenario_ids"))
-            or isinstance(approval["max_calls"], bool) or not isinstance(approval["max_calls"], int)
-            or not 1 <= approval["max_calls"] <= 8):
-        raise FatalConfigurationError("lab_owner_approval_scope_invalid")
-    try:
-        expires = datetime.fromisoformat(approval["expires_at"].replace("Z", "+00:00"))
-    except (AttributeError, ValueError) as exc:
-        raise FatalConfigurationError("lab_owner_approval_expiry_invalid") from exc
-    if expires.tzinfo is None or expires <= datetime.now(UTC):
-        raise FatalConfigurationError("lab_owner_approval_expired")
-    return approval
+        return lab_queue.load_owner_approval(
+            path, expected_bundle_sha256=_worker_bundle_sha256(), now=datetime.now(UTC),
+        )
+    except lab_queue.LabQueueError as exc:
+        raise FatalConfigurationError(str(exc)) from exc
 
 
 def _worker_bundle_sha256() -> str:
-    digest = hashlib.sha256()
-    for name, path in (("gpoint_mac_worker.py", Path(__file__)),
-                       ("agata_worker_pool.py", Path(__file__).with_name("agata_worker_pool.py")),
-                       ("lab_queue.py", Path(lab_queue.__file__)),
-                       ("lab_fixture_manifest.json", lab_queue.FIXTURE_MANIFEST),
-                       ("lab_promptfoo_compat_manifest.json", lab_queue.PROMPTFOO_COMPAT_MANIFEST),
-                       ("run_codex_worker.sh", Path(__file__).with_name("run_codex_worker.sh")),
-                       ("requirements.txt", Path(__file__).with_name("requirements.txt"))):
-        digest.update(name.encode("utf-8") + b"\0")
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
+    return lab_queue.worker_bundle_sha256()
 
 
 def _consume_lab_approval(approval: dict) -> None:
     """Consume one approval call before inference; ambiguous jobs are never retried."""
-    usage = SUPPORT / "state/lab-approval-usage"
-    usage.mkdir(parents=True, exist_ok=True, mode=0o700)
-    usage.chmod(0o700)
+    try:
+        usage = lab_queue.ensure_owner_approval_usage_dir(SUPPORT)
+    except lab_queue.LabQueueError as exc:
+        raise FatalConfigurationError(str(exc)) from exc
     path = usage / (approval["approval_id"] + ".json")
     lock = usage / (approval["approval_id"] + ".lock")
-    fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    if lock.is_symlink():
+        raise FatalConfigurationError("lab_approval_usage_invalid")
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError as exc:
+        raise FatalConfigurationError("lab_approval_usage_invalid") from exc
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        count = 0
-        if path.exists():
-            saved = json.loads(path.read_text(encoding="utf-8"))
-            if saved.get("worker_bundle_sha256") != approval["worker_bundle_sha256"]:
-                raise FatalConfigurationError("lab_approval_usage_mismatch")
-            count = saved.get("calls", 0)
+        try:
+            count = lab_queue.owner_approval_usage_calls(SUPPORT, approval)
+        except lab_queue.LabQueueError as exc:
+            raise FatalConfigurationError(str(exc)) from exc
         if count >= approval["max_calls"]:
             raise FatalConfigurationError("lab_approval_call_limit_reached")
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps({"worker_bundle_sha256": approval["worker_bundle_sha256"], "calls": count + 1}), encoding="utf-8")
-        temporary.chmod(0o600)
-        temporary.replace(path)
+        temporary_fd, temporary_name = tempfile.mkstemp(prefix=f".{approval['approval_id']}-", dir=usage)
+        temporary = Path(temporary_name)
+        try:
+            os.fchmod(temporary_fd, 0o600)
+            with os.fdopen(temporary_fd, "w", encoding="utf-8") as stream:
+                json.dump({"worker_bundle_sha256": approval["worker_bundle_sha256"], "calls": count + 1}, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
     finally:
         os.close(fd)
 
 
+def _lab_approval_gate_status(*, env=None, support: Path | None = None) -> str:
+    """Expose only the safe state of the independent LAB inference gate."""
+    try:
+        approval = _load_lab_approval(env=env, support=support)
+    except FatalConfigurationError as exc:
+        return "CLOSED_EXPIRED" if str(exc) == "lab_owner_approval_expired" else "CLOSED_NO_APPROVAL"
+    support_root = Path(support) if support is not None else PoolPaths.from_env(env).root if env is not None else SUPPORT
+    try:
+        calls = lab_queue.owner_approval_usage_calls(support_root, approval)
+    except lab_queue.LabQueueError:
+        return "CLOSED_NO_APPROVAL"
+    return "CLOSED_CONSUMED" if calls >= approval["max_calls"] else "OPEN_APPROVED"
+
+
 def claim_lab_job() -> dict | None:
-    if os.environ.get("AGATA_LAB_WORKER_ENABLED") != "true":
-        raise FatalConfigurationError("lab_worker_disabled")
     try:
         _load_lab_approval()
-    except FatalConfigurationError as exc:
-        raise FatalConfigurationError("lab_approval_required") from exc
+    except FatalConfigurationError:
+        write_status(target="LAB", state="idle", current_job_present=False,
+                     inference_gate=_lab_approval_gate_status(), last_poll_at=datetime.now(UTC).isoformat())
+        return None
     root = PoolPaths(SUPPORT).lab_queue
-    return lab_queue.claim_next(root)
+    job = lab_queue.claim_next(root)
+    write_status(target="LAB", state="idle", current_job_present=bool(job),
+                 inference_gate=_lab_approval_gate_status(), last_poll_at=datetime.now(UTC).isoformat())
+    return job
 
 
 def execute_lab_claimed_job(job: dict) -> bool:
-    if os.environ.get("AGATA_LAB_WORKER_ENABLED") != "true":
-        raise FatalConfigurationError("lab_worker_disabled")
     root = PoolPaths(SUPPORT).lab_queue
     job_id = job["job_id"]
     try:
         approval = _load_lab_approval()
-    except FatalConfigurationError:
+    except FatalConfigurationError as exc:
         lab_queue.finish(root, job_id, status="failed", error_code="lab_approval_required", identity=job)
         write_status(target=LAB_TARGET, state="idle", current_job_present=False,
+                     inference_gate=("CLOSED_EXPIRED" if str(exc) == "lab_owner_approval_expired"
+                                     else "CLOSED_NO_APPROVAL"),
                      last_error_code="lab_approval_required")
         return True
     if (job["experiment_id"] not in approval["experiment_ids"]
@@ -1025,57 +1024,10 @@ def execute_lab_claimed_job(job: dict) -> bool:
 
 
 def process_lab_one() -> bool:
-    if os.environ.get("AGATA_LAB_WORKER_ENABLED") != "true":
-        raise FatalConfigurationError("lab_worker_disabled")
-    _load_lab_approval()
-    job = lab_queue.claim_next(PoolPaths(SUPPORT).lab_queue)
+    job = claim_lab_job()
     if job is None:
-        write_status(target=LAB_TARGET, state="idle", last_poll_at=datetime.now(UTC).isoformat())
         return False
     return execute_lab_claimed_job(job)
-
-
-class TargetScheduler:
-    """One synchronous execution slot, fair rotation and independent backoff."""
-
-    def __init__(self):
-        targets = configured_targets()
-        configured_tenant_bindings(targets)
-        self.names = (*tuple(targets), *((LAB_TARGET,) if os.environ.get("AGATA_LAB_WORKER_ENABLED") == "true" else ()))
-        weights = {"GPOINT": 4, "GSALES": 2, LAB_TARGET: 1}
-        self.schedule = tuple(name for name in self.names for _ in range(weights[name])) if LAB_TARGET in self.names else self.names
-        self.cursor = 0
-        self.next_poll = {name: 0.0 for name in self.names}
-        self.failures = {name: 0 for name in self.names}
-
-    def poll(self, now: float | None = None) -> bool:
-        now = time.monotonic() if now is None else now
-        for _ in self.schedule:
-            name = self.schedule[self.cursor]
-            self.cursor = (self.cursor + 1) % len(self.schedule)
-            if self.next_poll[name] > now:
-                continue
-            try:
-                done = process_one(name)
-            except Exception as exc:
-                self.failures[name] += 1
-                delay = 60.0 if isinstance(exc, FatalConfigurationError) else POLL_BACKOFF_SECONDS[min(self.failures[name]-1, len(POLL_BACKOFF_SECONDS)-1)]
-                self.next_poll[name] = now + delay
-                error_code = str(exc)
-                dynamic_http_error = re.fullmatch(r"worker_gateway_http_([45][0-9]{2})", error_code)
-                if error_code not in SAFE_TARGET_ERROR_CODES and not (
-                    dynamic_http_error and 400 <= int(dynamic_http_error.group(1)) <= 599
-                ):
-                    error_code = "worker_target_unavailable"
-                write_status(target=name, state="error", last_error_code=error_code, next_poll_delay_seconds=delay)
-                return False
-            self.failures[name] = 0
-            self.next_poll[name] = 0.0
-            # Successful polls supersede prior transient errors. Without this,
-            # status can report worker_target_unavailable forever after recovery.
-            write_status(target=name, last_error_code=None)
-            return done
-        return False
 
 
 def reject_claim(lane: str, claim: dict, error_code: str) -> None:
@@ -1106,11 +1058,10 @@ def build_pool_supervisor() -> PoolSupervisor:
         target: (lambda target=target: claim_target_job(target))
         for target in targets
     }
-    lab_enabled = os.environ.get("AGATA_LAB_WORKER_ENABLED") == "true"
-    claimers[LAB_TARGET] = claim_lab_job if lab_enabled else (lambda: None)
+    claimers[LAB_TARGET] = claim_lab_job
     return PoolSupervisor(
         paths, config, claimers, reject_offer=reject_claim,
-        lab_enabled=lab_enabled,
+        lab_gate_status=_lab_approval_gate_status,
     )
 
 
@@ -1150,27 +1101,6 @@ def _active_lab_slot_job_ids(paths: PoolPaths) -> set[str]:
         else:
             slot_lock.close()
     return active
-
-
-def run_targets(poll_seconds: float, max_cycles: int | None, sleep_fn) -> int:
-    scheduler = TargetScheduler()
-    lock = acquire_worker_lock()
-    global _WORKER_LOCK_FD
-    fileno = getattr(lock, "fileno", None)
-    _WORKER_LOCK_FD = fileno() if callable(fileno) else None
-    if _WORKER_LOCK_FD is not None:
-        _clear_stale_inference_record()
-    cycles = 0
-    try:
-        lab_queue.reconcile_running(PoolPaths(SUPPORT).lab_queue)
-        while max_cycles is None or cycles < max_cycles:
-            cycles += 1
-            scheduler.poll()
-            sleep_fn(min(max(poll_seconds, 1.0), 60.0))
-    finally:
-        _WORKER_LOCK_FD = None
-        lock.close()
-    return 0
 
 
 def run_watch(
@@ -1433,21 +1363,7 @@ def main() -> int:
             signal.signal(signal.SIGTERM, _terminate_active_inference)
             signal.signal(signal.SIGINT, _terminate_active_inference)
         if args.command == "once":
-            if (os.environ.get("GSALES_AGATA_WORKER_URL") or os.environ.get("GSALES_AGATA_WORKER_TOKEN")
-                    or os.environ.get("AGATA_LAB_WORKER_ENABLED") == "true"):
-                return run_targets(args.poll_seconds, 1, lambda _delay: None)
-            lock = acquire_worker_lock()
-            global _WORKER_LOCK_FD
-            fileno = getattr(lock, "fileno", None)
-            _WORKER_LOCK_FD = fileno() if callable(fileno) else None
-            if _WORKER_LOCK_FD is not None:
-                _clear_stale_inference_record()
-            try:
-                process_one()
-            finally:
-                _WORKER_LOCK_FD = None
-                lock.close()
-            return 0
+            return run_pool(max_cycles=1, sleep_fn=lambda _delay: None)
         return run_watch(args.poll_seconds)
     except Exception as exc:
         code = safe_startup_error_code(exc)

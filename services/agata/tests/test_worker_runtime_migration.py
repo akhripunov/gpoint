@@ -56,12 +56,22 @@ def test_canonical_installer_includes_exact_worker_bundle_assets():
     wrapper_spec.loader.exec_module(wrapper)
 
     worker_tree = ast.parse((worker_dir / "gpoint_mac_worker.py").read_text(encoding="utf-8"))
+    queue_tree = ast.parse((worker_dir / "lab_queue.py").read_text(encoding="utf-8"))
     bundle_function = next(
+        node for node in queue_tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "worker_bundle_sha256"
+    )
+    bundle_assets = next(
+        node.value for node in bundle_function.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "assets" for target in node.targets)
+    )
+    bundle_names = tuple(item.elts[0].value for item in bundle_assets.elts)
+    worker_bundle_function = next(
         node for node in worker_tree.body
         if isinstance(node, ast.FunctionDef) and node.name == "_worker_bundle_sha256"
     )
-    bundle_loop = next(node for node in bundle_function.body if isinstance(node, ast.For))
-    bundle_names = tuple(item.elts[0].value for item in bundle_loop.iter.elts)
+    assert any(isinstance(node, ast.Return) for node in worker_bundle_function.body)
 
     assert migration.ASSETS == expected
     assert tuple(path.name for path in wrapper.SOURCES) == expected
@@ -1078,6 +1088,9 @@ def test_prepare_stages_and_snapshots_without_stopping_or_switching_live_worker(
 
 
 @pytest.mark.parametrize("lab_status", [
+    {"state": "AVAILABLE", "presence": "PERMANENT", "inference_gate": "CLOSED_NO_APPROVAL"},
+    {"state": "AVAILABLE", "presence": "PERMANENT", "inference_gate": "CLOSED_EXPIRED"},
+    {"state": "AVAILABLE", "presence": "PERMANENT", "inference_gate": "CLOSED_CONSUMED"},
     {"state": "AVAILABLE", "last_error_code": "lab_approval_required",
      "inference_gate": "APPROVAL_REQUIRED"},
     {"state": "DISABLED", "inference_gate": "CLOSED_DISABLED"},
@@ -1127,6 +1140,49 @@ def test_restart_snapshot_requires_exact_runtime_identity_and_all_lanes(tmp_path
     assert evidence["checks"]["lab_approval_fail_closed"] is True
     assert evidence["worker_status"]["configured_concurrency"] == 1
     assert set(evidence["worker_status"]["lanes"]) == {"GPOINT", "GSALES", "LAB"}
+
+
+@pytest.mark.parametrize("lab_status", [
+    {"state": "AVAILABLE", "presence": "PERMANENT", "inference_gate": "OPEN_APPROVED"},
+    {"state": "DEGRADED", "presence": "PERMANENT", "inference_gate": "CLOSED_NO_APPROVAL"},
+])
+def test_restart_snapshot_does_not_treat_open_or_broken_lab_gate_as_closed(tmp_path, monkeypatch, lab_status):
+    root = tmp_path / "AGATA Workers"
+    source_sha = "c" * 40
+    release = root / "runtime" / source_sha
+    _write_runtime_bundle(release, source_sha)
+    (root / "runtime/current").symlink_to(source_sha)
+    monkeypatch.setattr(migration, "ROOT", root)
+    launchctl = (f"gui/{os.getuid()}/{migration.LABEL} = {{\n"
+                "\tstate = running\n\tpid = 4312\n}\n")
+    worker_command = (f"{release}/.venv/bin/python3.12 "
+                      f"{release}/gpoint_mac_worker.py watch")
+    status = {
+        "configured_concurrency": 1, "current_job_present": False,
+        "pool": {"state": "running"},
+        "lanes": {"GPOINT": {"health": "HEALTHY", "current_job_present": False},
+                  "GSALES": {"health": "HEALTHY", "current_job_present": False}, "LAB": lab_status},
+    }
+
+    def run(command, **kwargs):
+        if command[:2] == ["launchctl", "print"]:
+            return subprocess.CompletedProcess(command, 0, launchctl, "")
+        if command[:3] == ["ps", "-p", "4312"]:
+            return subprocess.CompletedProcess(command, 0, worker_command, "")
+        if command[:2] == [str(root / "runtime/current/.venv/bin/python3.12"),
+                           str(root / "runtime/current/gpoint_mac_worker.py")]:
+            return subprocess.CompletedProcess(command, 0, json.dumps(status), "")
+        if command == ["ps", "-axo", "pid=,command="]:
+            return subprocess.CompletedProcess(command, 0, f"4312 {worker_command}\n", "")
+        raise AssertionError(f"unexpected read-only command: {command}")
+
+    monkeypatch.setattr(migration.subprocess, "run", run)
+    monkeypatch.setattr(migration.os, "kill", lambda _pid, _signal: None)
+    monkeypatch.setattr(migration, "_running_inference_pids", lambda: [])
+
+    evidence = migration._restart_state_snapshot(expected_source_sha=source_sha)
+
+    assert evidence["checks"]["lab_approval_fail_closed"] is False
 
 
 def test_restart_snapshot_rejects_current_symlink_pointing_at_other_sha(tmp_path, monkeypatch):
