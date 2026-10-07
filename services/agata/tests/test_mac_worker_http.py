@@ -5,10 +5,8 @@ from __future__ import annotations
 import io
 import json
 import os
-import subprocess
 import sys
 import tempfile
-import textwrap
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -39,6 +37,36 @@ class MacWorkerHttpTests(unittest.TestCase):
 
     def client_for(self, handler):
         return self.async_client_type(transport=httpx.MockTransport(handler))
+
+    def test_async_resolver_uses_bounded_dig_for_macos_synthetic_gateway_hosts(self):
+        calls = []
+
+        class DigProcess:
+            returncode = 0
+
+            async def communicate(self):
+                return b"240.0.0.17\n", b""
+
+        async def create_process(*args, **kwargs):
+            calls.append((args, kwargs))
+            return DigProcess()
+
+        numeric_results = [(worker.socket.AF_INET, worker.socket.SOCK_STREAM, 6, "", ("240.0.0.17", 443))]
+        with patch.object(worker.asyncio, "create_subprocess_exec", side_effect=create_process), \
+             patch.object(worker.socket, "getaddrinfo", return_value=numeric_results) as system_resolver:
+            result = worker._run_http(worker._bounded_getaddrinfo(
+                b"gpoint.amiora.one", 443, family=worker.socket.AF_INET,
+                type=worker.socket.SOCK_STREAM,
+            ))
+
+        self.assertEqual(result, numeric_results)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0][0], "/usr/bin/dig")
+        self.assertIn("gpoint.amiora.one", calls[0][0])
+        self.assertEqual(calls[0][0][-1], "A")
+        system_resolver.assert_called_once()
+        self.assertEqual(system_resolver.call_args.args[0], "240.0.0.17")
+        self.assertTrue(system_resolver.call_args.args[5] & worker.socket.AI_NUMERICHOST)
 
     def test_reg_a_json_body_and_bodyless_health_contract(self):
         observed = []
@@ -122,6 +150,28 @@ class MacWorkerHttpTests(unittest.TestCase):
         self.assertEqual(value["pool"]["busy"], 0)
         self.assertNotIn("must-not-appear", rendered)
         self.assertNotIn("private_payload", value["lanes"]["GPOINT"])
+
+    def test_status_preserves_only_safe_queue_endpoint_404_for_version_skew_bootstrap(self):
+        output = io.StringIO()
+
+        def request(_target, path):
+            if path == "health":
+                return {"status": "ready"}
+            raise worker.GatewayResponseError("worker_gateway_http_404")
+
+        with patch.object(worker, "load_worker_configs"), \
+             patch.object(worker.shutil, "which", return_value=None), \
+             patch.object(worker, "configured_targets", return_value={"GPOINT": ("url", "token")}), \
+             patch.object(worker, "target_request", side_effect=request), \
+             patch("sys.stdout", output):
+            self.assertEqual(worker.status(), 0)
+
+        value = json.loads(output.getvalue())
+        lane = value["lanes"]["GPOINT"]
+        self.assertEqual(lane["health"], "HEALTHY")
+        self.assertEqual(lane["queue_snapshot_state"], "UNAVAILABLE")
+        self.assertEqual(lane["queue_snapshot_error_code"], "worker_gateway_http_404")
+        self.assertNotIn("token", value)
 
     def test_reg_b_worker_survives_connect_timeout_and_recovers(self):
         calls = []
@@ -222,118 +272,62 @@ class MacWorkerHttpTests(unittest.TestCase):
                 worker.api_request("health")
         self.assertNotIn("test-secret", str(raised.exception))
 
-    def test_reg_h_dns_stall_exits_process_without_unbounded_resolver_queue(self):
-        worker_directory = str(Path(worker.__file__).resolve().parent)
-        child = textwrap.dedent("""
-            import asyncio
-            import socket
-            import threading
-            import gpoint_mac_worker as worker
+    def test_reg_h_dns_failure_is_bounded_and_does_not_use_system_resolver(self):
+        calls = []
 
-            stalled = threading.Event()
-            calls = []
-            def blocked_getaddrinfo(*args, **kwargs):
-                calls.append(args[0] if args else None)
-                stalled.wait()
-                return []
+        class EmptyDigProcess:
+            returncode = 0
 
-            socket.getaddrinfo = blocked_getaddrinfo
-            worker.configured_targets = lambda: {
-                "GPOINT": ("https://resolver-stall.invalid/api", "fixture-token")
-            }
-            original_timeout = asyncio.timeout
-            worker.asyncio.timeout = lambda _seconds: original_timeout(0.05)
-            for _ in range(3):
-                try:
-                    worker.api_request("health")
-                except worker.TransientNetworkError as exc:
-                    if str(exc) != "worker_gateway_network_error":
-                        print("unexpected_network_error", str(exc), flush=True)
-                        raise SystemExit(3)
-                else:
-                    print("unexpected_request_success", flush=True)
-                    raise SystemExit(4)
-            if len(calls) != 1:
-                print("resolver_calls", len(calls), flush=True)
-                raise SystemExit(5)
-            print("bounded_timeouts=3 resolver_calls=1", flush=True)
-        """)
-        child_env = os.environ.copy()
-        child_env["PYTHONPATH"] = os.pathsep.join(filter(None, (
-            worker_directory, child_env.get("PYTHONPATH", ""),
-        )))
-        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
-            child_env.pop(name, None)
-        try:
-            completed = subprocess.run(
-                [sys.executable, "-c", child], cwd=Path(__file__).resolve().parents[3],
-                env=child_env, check=False, text=True, capture_output=True, timeout=3,
-            )
-        except subprocess.TimeoutExpired:
-            self.fail("ordinary process shutdown waited indefinitely for a stalled resolver")
-        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
-        self.assertIn("bounded_timeouts=3 resolver_calls=1", completed.stdout)
+            async def communicate(self):
+                return b"", b""
 
-    def test_reg_i_dns_resolver_recovers_after_blocked_lookup_returns(self):
-        worker_directory = str(Path(worker.__file__).resolve().parent)
-        child = textwrap.dedent("""
-            import asyncio
-            import socket
-            import threading
-            import time
-            import gpoint_mac_worker as worker
+        async def create_process(*args, **kwargs):
+            calls.append(args)
+            return EmptyDigProcess()
 
-            stalled = threading.Event()
-            calls = []
-            def blocked_then_recovered(host, port, family=0, type=0, proto=0, flags=0):
-                calls.append(host)
-                if len(calls) == 1:
-                    stalled.wait()
-                return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
-                         ("127.0.0.1", int(port or 80)))]
+        with patch.object(worker.asyncio, "create_subprocess_exec", side_effect=create_process), \
+             patch.object(worker.socket, "getaddrinfo") as system_resolver:
+            with self.assertRaises(worker.socket.gaierror):
+                worker._run_http(worker._bounded_getaddrinfo(
+                    "unresolved.invalid", 443, family=worker.socket.AF_INET,
+                    type=worker.socket.SOCK_STREAM,
+                ))
 
-            socket.getaddrinfo = blocked_then_recovered
-            worker.configured_targets = lambda: {
-                "GPOINT": ("https://resolver-recovery.invalid/api", "fixture-token")
-            }
-            original_timeout = asyncio.timeout
-            worker.asyncio.timeout = lambda _seconds: original_timeout(0.05)
-            for _ in range(2):
-                try:
-                    worker.api_request("health")
-                except worker.TransientNetworkError:
-                    pass
-                else:
-                    raise SystemExit("expected transient resolver failure")
-            if len(calls) != 1:
-                raise SystemExit(f"resolver calls were not bounded: {len(calls)}")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "/usr/bin/dig")
+        system_resolver.assert_not_called()
 
-            stalled.set()
-            deadline = time.monotonic() + 1
-            while worker._HTTP_RESOLVER_ACTIVE and time.monotonic() < deadline:
-                time.sleep(0.005)
-            if worker._HTTP_RESOLVER_ACTIVE:
-                raise SystemExit("resolver did not return from the released fixture")
-            addresses = worker._run_http(worker._HTTP_LOOP.getaddrinfo("recovered.test", 443))
-            if addresses[0][4] != ("127.0.0.1", 443) or len(calls) != 2:
-                raise SystemExit(f"resolver recovery mismatch: {addresses!r}, calls={len(calls)}")
-            print("resolver_recovered=true resolver_calls=2", flush=True)
-        """)
-        child_env = os.environ.copy()
-        child_env["PYTHONPATH"] = os.pathsep.join(filter(None, (
-            worker_directory, child_env.get("PYTHONPATH", ""),
-        )))
-        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
-            child_env.pop(name, None)
-        try:
-            completed = subprocess.run(
-                [sys.executable, "-c", child], cwd=Path(__file__).resolve().parents[3],
-                env=child_env, check=False, text=True, capture_output=True, timeout=3,
-            )
-        except subprocess.TimeoutExpired:
-            self.fail("recovered resolver test did not shut down in bounded time")
-        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
-        self.assertIn("resolver_recovered=true resolver_calls=2", completed.stdout)
+    def test_reg_i_dns_timeout_kills_dig_process(self):
+        class SlowDigProcess:
+            returncode = None
+            killed = False
+
+            async def communicate(self):
+                await worker.asyncio.sleep(1)
+                return b"", b""
+
+            def kill(self):
+                self.killed = True
+
+            async def wait(self):
+                self.returncode = -9
+                return self.returncode
+
+        process = SlowDigProcess()
+
+        async def create_process(*_args, **_kwargs):
+            return process
+
+        with patch.object(worker.asyncio, "create_subprocess_exec", side_effect=create_process), \
+             patch.object(worker, "DNS_LOOKUP_TIMEOUT_SECONDS", 0.01):
+            with self.assertRaises(worker.socket.gaierror):
+                worker._run_http(worker._bounded_getaddrinfo(
+                    "slow.invalid", 443, family=worker.socket.AF_INET,
+                    type=worker.socket.SOCK_STREAM,
+                ))
+
+        self.assertTrue(process.killed)
+        self.assertEqual(process.returncode, -9)
 
 
 if __name__ == "__main__":

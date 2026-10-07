@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -359,6 +360,71 @@ def test_migration_rebinds_trusted_tenant_sidecar_to_exact_worker_source(tmp_pat
     assert result["worker_sha256"] == manifest["assets"]["gpoint_mac_worker.py"]
 
 
+def test_existing_tenant_sidecar_is_rebound_only_from_verified_installed_runtime(tmp_path, monkeypatch):
+    root = tmp_path / "support"
+    runtime = root / "runtime" / ("a" * 40)
+    runtime.mkdir(parents=True)
+    installed_worker = runtime / "gpoint_mac_worker.py"
+    installed_worker.write_text("installed worker")
+    current = root / "runtime/current"
+    current.symlink_to(runtime.name)
+    tenant_id = "81a4ba28-6de5-4b03-8332-0661ba4d46f4"
+    sidecar_path = root / "config/tenant-bindings.json"
+    sidecar_path.parent.mkdir(parents=True)
+    original = {
+        "version": 1, "candidate_sha": "a" * 40,
+        "worker_sha256": migration.sha256(installed_worker),
+        "tenant_id": tenant_id,
+        "source_id": "gpoint-vps:" + "b" * 40 + ":api=sha256:" + "1" * 64 + ":agata=sha256:" + "2" * 64,
+        "snapshot_at": "2026-10-04T12:00:00Z",
+    }
+    sidecar_path.write_text(json.dumps(original))
+    sidecar_path.chmod(0o600)
+    config = tmp_path / "worker.env"
+    config.write_text("GSALES_AGATA_TENANT_ID=c4d67889-877e-4d1b-a8d8-597c479d638f\n")
+    config.chmod(0o600)
+    manifest = {"source_sha": "c" * 40,
+                "assets": {"gpoint_mac_worker.py": "d" * 64}}
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "LEGACY", root)
+    monkeypatch.setattr(migration, "CONFIG", config)
+
+    assert migration._configured_tenant_id("GPOINT", manifest) == tenant_id
+    migration._migrate_tenant_binding(manifest)
+
+    updated = json.loads(sidecar_path.read_text())
+    assert updated["tenant_id"] == original["tenant_id"]
+    assert updated["source_id"] == original["source_id"]
+    assert updated["candidate_sha"] == manifest["source_sha"]
+    assert updated["worker_sha256"] == manifest["assets"]["gpoint_mac_worker.py"]
+
+
+def test_existing_tenant_sidecar_with_unverified_runtime_is_not_rebound(tmp_path, monkeypatch):
+    root = tmp_path / "support"
+    (root / "config").mkdir(parents=True)
+    original = {"version": 1, "candidate_sha": "a" * 40,
+        "worker_sha256": "e" * 64, "tenant_id": "81a4ba28-6de5-4b03-8332-0661ba4d46f4",
+        "source_id": "gpoint-vps:" + "b" * 40 + ":api=sha256:" + "1" * 64 + ":agata=sha256:" + "2" * 64,
+        "snapshot_at": "2026-10-04T12:00:00Z"}
+    path = root / "config/tenant-bindings.json"
+    path.write_text(json.dumps(original))
+    path.chmod(0o600)
+    config = root / "worker.env"
+    config.write_text("GSALES_AGATA_TENANT_ID=c4d67889-877e-4d1b-a8d8-597c479d638f\n")
+    config.chmod(0o600)
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "LEGACY", root)
+    monkeypatch.setattr(migration, "CONFIG", config)
+    manifest = {"source_sha": "c" * 40,
+                "assets": {"gpoint_mac_worker.py": "d" * 64}}
+
+    with pytest.raises(RuntimeError, match="worker_tenant_binding_invalid"):
+        migration._configured_tenant_id("GPOINT", manifest)
+    with pytest.raises(RuntimeError, match="worker_tenant_binding_invalid"):
+        migration._migrate_tenant_binding(manifest)
+    assert json.loads(path.read_text()) == original
+
+
 def test_pool_config_migration_refuses_to_start_with_unverified_parallelism(tmp_path, monkeypatch):
     root = tmp_path / "root"
     (root / "config").mkdir(parents=True)
@@ -595,11 +661,262 @@ def test_worker_queue_status_validation_rejects_cross_lane_or_payload_counts():
         migration.require_fresh_empty_production_queues(status)
 
 
+@pytest.mark.parametrize("lane", ("GPOINT", "GSALES"))
+def test_live_runtime_readonly_snapshot_is_normalized_with_provenance(lane):
+    now = datetime.now(UTC)
+    snapshot = _live_runtime_queue_snapshot(lane, now)
+
+    normalized = migration.normalize_live_runtime_queue_snapshot(snapshot, lane, snapshot["tenant_id"])
+
+    assert normalized["health"] == "HEALTHY"
+    assert normalized["queue_snapshot_state"] == "VERIFIED"
+    assert normalized["queue_snapshot_authority"] == "live_runtime_readonly_snapshot_v1"
+    assert normalized["queue_snapshot_runtime_release_sha"] == "a" * 40
+    assert normalized["queue_snapshot_tenant_id"] == snapshot["tenant_id"]
+    status = _fresh_empty_queue_status(now)
+    status["lanes"][lane] = normalized
+    migration.require_fresh_empty_production_queues(status, now=now)
+
+
+def test_live_runtime_readonly_snapshot_rejects_untrusted_or_mismatched_identity():
+    now = datetime.now(UTC)
+    bad_snapshots = (
+        _live_runtime_queue_snapshot("GSALES", now) | {"source_system": "gpoint"},
+        _live_runtime_queue_snapshot("GSALES", now) | {"tenant_identity_verified": False},
+        _live_runtime_queue_snapshot("GSALES", now) | {"role_bypassrls": True},
+        _live_runtime_queue_snapshot("GSALES", now) | {"visible_tenant_rows": True},
+        _live_runtime_queue_snapshot("GSALES", now) | {"database_name": ""},
+        _live_runtime_queue_snapshot("GSALES", now) | {"api_build_sha": "b" * 40},
+        _live_runtime_queue_snapshot("GSALES", now) | {"snapshot_at": "not-a-time"},
+    )
+    for snapshot in bad_snapshots:
+        with pytest.raises(RuntimeError, match="production_queue_snapshot_invalid"):
+            migration.normalize_live_runtime_queue_snapshot(
+                snapshot, "GSALES", "c4d67889-877e-4d1b-a8d8-597c479d638f",
+            )
+
+
+def test_queue_status_404_bootstraps_both_lanes_from_live_readonly_runtime_snapshots(tmp_path, monkeypatch):
+    now = datetime.now(UTC)
+    unavailable_status = _fresh_empty_queue_status(now)
+    unavailable_status["pool"]["state"] = "DEGRADED"
+    unavailable_status["pool"]["total"] = 1
+    unavailable_status["pool_snapshot_at"] = (now.replace(year=now.year - 1)).isoformat()
+    unavailable_status["slots"] = {"slot-01": {"state": "IDLE", "lane": None, "job_id": None}}
+    unavailable_status["current_job_present"] = False
+    for lane in ("GPOINT", "GSALES"):
+        unavailable_status["lanes"][lane] = {
+            "health": "HEALTHY", "queue_snapshot_state": "UNAVAILABLE",
+            "queue_snapshot_error_code": "worker_gateway_http_404",
+        }
+    snapshots = {
+        lane: _live_runtime_queue_snapshot(lane, now)
+        for lane in ("GPOINT", "GSALES")
+    }
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append((command, kwargs))
+        if any("gpoint_mac_worker.py" in part for part in command):
+            return subprocess.CompletedProcess(command, 0, json.dumps(unavailable_status), "")
+        remote_command = kwargs["env"]["REMOTE_CMD"]
+        lane = "GSALES" if "compose-gsales-agata-api-1" in remote_command else "GPOINT"
+        return subprocess.CompletedProcess(command, 0, json.dumps(snapshots[lane]), "")
+
+    config = tmp_path / "worker.env"
+    config.write_text(
+        "GPOINT_AGATA_TENANT_ID=81a4ba28-6de5-4b03-8332-0661ba4d46f4\n"
+        "GSALES_AGATA_TENANT_ID=c4d67889-877e-4d1b-a8d8-597c479d638f\n"
+    )
+    config.chmod(0o600)
+    root = tmp_path / "runtime"
+    _create_installed_runtime(root)
+    slot_lock = root / "slots/slot-01/ownership.lock"
+    slot_lock.parent.mkdir(parents=True)
+    slot_lock.touch(mode=0o600)
+    slot_lock.chmod(0o600)
+    monkeypatch.setattr(migration, "CONFIG", config)
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "candidate", lambda: {"source_sha": "f" * 40, "assets": {}})
+    monkeypatch.setattr(migration, "inventory", lambda: {
+        "launchagent_loaded": True, "production_release_lock_busy": False,
+        "active_inference": False,
+    })
+    monkeypatch.setattr(migration, "_launchagent_pid", lambda: (123, "gpoint_mac_worker.py watch"))
+    monkeypatch.setattr(migration, "VPS_RUNNER", Path("/trusted/gpoint-vps-runner"))
+    monkeypatch.setattr(Path, "is_file", lambda _self: True)
+    monkeypatch.setattr(os, "access", lambda *_args: True)
+    monkeypatch.setattr(migration.subprocess, "run", run)
+
+    status = migration._read_production_queue_status()
+    evidence = migration.require_fresh_empty_production_queues(status, now=now)
+
+    assert set(evidence["lanes"]) == {"GPOINT", "GSALES"}
+    assert len(commands) == 3
+    assert "compose-agata-api-1" in commands[1][1]["env"]["REMOTE_CMD"]
+    assert "compose-gsales-agata-api-1" in commands[2][1]["env"]["REMOTE_CMD"]
+    assert all("queue_snapshot_authority" in status["lanes"][lane]
+               for lane in ("GPOINT", "GSALES"))
+    assert status["pool"]["state"] == "IDLE_CONFIRMED"
+    assert status["pool_snapshot_authority"] == "mac_worker_live_idle_inventory_v1"
+
+
+def test_queue_status_uses_installed_runtime_python_not_orchestrator_python(tmp_path, monkeypatch):
+    root = tmp_path / "worker-runtime"
+    runtime = root / "runtime" / ("a" * 40)
+    python = runtime / ".venv/bin/python3.12"
+    worker = tmp_path / "candidate-worker/gpoint_mac_worker.py"
+    python.parent.mkdir(parents=True)
+    python.touch()
+    python.chmod(0o700)
+    worker.parent.mkdir(parents=True)
+    worker.touch()
+    (runtime / "gpoint_mac_worker.py").touch()
+    (root / "runtime/current").symlink_to(runtime)
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "WORKER_DIR", worker.parent)
+    monkeypatch.setattr(migration, "_resolve_python312",
+                        lambda: "/codex/runtime/python-without-worker-dependencies")
+    status = _fresh_empty_queue_status(datetime.now(UTC))
+    observed = {}
+
+    def run(command, **_kwargs):
+        observed["command"] = command
+        return subprocess.CompletedProcess(command, 0, json.dumps(status), "")
+
+    monkeypatch.setattr(migration.subprocess, "run", run)
+    result = migration._read_production_queue_status({"source_sha": "a" * 40})
+
+    assert observed["command"][0] == str(python)
+    assert observed["command"][1] == str(worker)
+    assert result["lanes"]["GPOINT"]["queue_snapshot_state"] == "VERIFIED"
+
+
+def test_local_poll_lock_does_not_replace_authoritative_queue_snapshot(tmp_path, monkeypatch):
+    root = tmp_path / "runtime"
+    slot_lock = root / "slots/slot-01/ownership.lock"
+    slot_lock.parent.mkdir(parents=True)
+    slot_lock.touch(mode=0o600)
+    slot_lock.chmod(0o600)
+    descriptor = os.open(slot_lock, os.O_RDWR)
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    status = _fresh_empty_queue_status(datetime.now(UTC))
+    status.update({"configured_concurrency": 1, "current_job_present": False,
+                   "launch_agent_loaded": True,
+                   "slots": {"slot-01": {"state": "IDLE", "job_id": None}}})
+    status["pool"]["total"] = 1
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "inventory", lambda: {
+        "launchagent_loaded": True, "production_release_lock_busy": False,
+        "active_inference": False,
+    })
+    monkeypatch.setattr(migration, "_launchagent_pid", lambda: (123, "gpoint_mac_worker.py watch"))
+    try:
+        migration._refresh_local_pool_evidence(status)
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+    assert status["pool_snapshot_authority"] == "mac_worker_live_idle_inventory_v1"
+    # This local poll/slot lock establishes no queue state; both verified
+    # tenant-scoped DB snapshots are still mandatory before transition.
+    for lane in ("GPOINT", "GSALES"):
+        status["lanes"][lane] = {"health": "HEALTHY", "queue_snapshot_state": "UNAVAILABLE"}
+    with pytest.raises(RuntimeError, match="production_queue_snapshot_invalid"):
+        migration.require_fresh_empty_production_queues(status)
+
+
+def test_local_inventory_is_explicit_idle_evidence_not_worker_pool_health(monkeypatch):
+    status = _fresh_empty_queue_status(datetime.now(UTC))
+    status.update({"configured_concurrency": 1, "current_job_present": False,
+                   "launch_agent_loaded": True,
+                   "slots": {"slot-01": {"state": "IDLE", "job_id": None}}})
+    status["pool"]["total"] = 1
+    monkeypatch.setattr(migration, "inventory", lambda: {
+        "launchagent_loaded": True, "production_release_lock_busy": False,
+        "active_inference": False,
+    })
+    monkeypatch.setattr(migration, "_launchagent_pid", lambda: (123, "gpoint_mac_worker.py watch"))
+
+    migration._refresh_local_pool_evidence(status)
+
+    assert status["pool"]["state"] == "IDLE_CONFIRMED"
+    assert status["pool_snapshot_authority"] == "mac_worker_live_idle_inventory_v1"
+    assert status["pool_snapshot_inventory"] == {
+        "configured_concurrency": 1,
+        "slot_count": 1,
+        "all_slots_idle": True,
+        "current_job_present": False,
+        "launch_agent_loaded": True,
+        "active_inference": False,
+    }
+    evidence = migration.validate_fresh_production_queue_snapshots(status)
+    assert evidence["pool_authority"] == "mac_worker_live_idle_inventory_v1"
+
+    status["configured_concurrency"] = True
+    with pytest.raises(RuntimeError, match="production_queue_snapshot_invalid"):
+        migration.validate_fresh_production_queue_snapshots(status)
+    status["configured_concurrency"] = 1
+    status["pool_snapshot_inventory"]["active_inference"] = True
+    with pytest.raises(RuntimeError, match="production_queue_snapshot_invalid"):
+        migration.validate_fresh_production_queue_snapshots(status)
+
+
+def test_non_404_queue_failure_never_uses_live_runtime_bootstrap(tmp_path, monkeypatch):
+    root = tmp_path / "worker-runtime"
+    _create_installed_runtime(root)
+    monkeypatch.setattr(migration, "ROOT", root)
+    status = _fresh_empty_queue_status(datetime.now(UTC))
+    status["lanes"]["GPOINT"].update({
+        "queue_snapshot_state": "UNAVAILABLE",
+        "queue_snapshot_error_code": "worker_gateway_network_error",
+    })
+    monkeypatch.setattr(migration.subprocess, "run", lambda command, **_kwargs:
+                        subprocess.CompletedProcess(command, 0, json.dumps(status), ""))
+    monkeypatch.setattr(migration, "_read_live_runtime_queue_snapshot",
+                        lambda *_args: pytest.fail("live bootstrap must be limited to endpoint 404"))
+    with pytest.raises(RuntimeError, match="production_queue_status_unavailable"):
+        migration._read_production_queue_status()
+
+
+def _live_runtime_queue_snapshot(lane, now):
+    source = lane.lower()
+    tenant = "81a4ba28-6de5-4b03-8332-0661ba4d46f4" if lane == "GPOINT" else "c4d67889-877e-4d1b-a8d8-597c479d638f"
+    api_image = "sha256:" + "1" * 64
+    core_image = "sha256:" + "2" * 64
+    return {
+        "snapshot_version": "agata_live_queue_snapshot_v1",
+        "lane": lane, "source_system": source, "source_id": (
+            f"agata-live-queue-snapshot-v1:{source}:release={'a' * 40}:api={api_image}:core={core_image}:tenant={tenant}"
+        ),
+        "release_sha": "a" * 40, "api_build_sha": "a" * 40, "core_build_sha": "a" * 40,
+        "api_image_id": api_image, "core_image_id": core_image,
+        "tenant_id": tenant, "tenant_identity_verified": True,
+        "snapshot_at": now.isoformat(), "transaction_read_only": True,
+        "same_login": True, "role_superuser": False, "role_bypassrls": False,
+        "visible_tenant_rows": 1, "database_name": "gpoint", "pending_inference_jobs": 0,
+        "running_inference_jobs": 0, "effective_inference_ttl_seconds": 600,
+    }
+
+
+def _create_installed_runtime(root):
+    runtime = root / "runtime" / ("a" * 40)
+    python = runtime / ".venv/bin/python3.12"
+    python.parent.mkdir(parents=True)
+    python.touch()
+    python.chmod(0o700)
+    (runtime / "gpoint_mac_worker.py").touch()
+    (root / "runtime/current").symlink_to(runtime)
+    return runtime
+
+
 def _fresh_empty_queue_status(now):
     return {
         "launch_agent_loaded": True,
-        "pool": {"state": "HEALTHY", "busy": 0},
+        "configured_concurrency": 1,
+        "pool": {"state": "HEALTHY", "busy": 0, "total": 1},
         "pool_snapshot_at": now.isoformat(),
+        "current_job_present": False,
+        "slots": {"slot-01": {"state": "IDLE", "job_id": None}},
         "lanes": {
             lane: {"health": "HEALTHY", "queue_snapshot_state": "VERIFIED",
                    "queue_snapshot_source_id": f"agata-worker-queue-status-v1:{lane.lower()}",

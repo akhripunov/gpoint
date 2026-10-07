@@ -8,6 +8,7 @@ failed health/restart check. VPS, database, and MAXIBOT are never contacted.
 from __future__ import annotations
 
 import argparse
+import base64
 import fcntl
 import hashlib
 import json
@@ -40,6 +41,15 @@ ASSETS = ("gpoint_mac_worker.py", "agata_worker_pool.py", "lab_queue.py",
           "run_codex_worker.sh", "requirements.txt")
 QUEUE_SNAPSHOT_MAX_AGE_SECONDS = 30
 QUEUE_SNAPSHOT_FUTURE_SKEW_SECONDS = 5
+QUEUE_SNAPSHOT_SCRIPT = WORKER_DIR.parents[2] / "scripts/agata-worker-queue-snapshot.py"
+VPS_RUNNER = HOME / ".local/bin/gpoint-vps-runner"
+LIVE_QUEUE_SOURCE = "agata-live-queue-snapshot-v1"
+QUEUE_IMAGE_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+QUEUE_SOURCE_RE = re.compile(
+    r"^agata-live-queue-snapshot-v1:(gpoint|gsales):release=([0-9a-f]{40})"
+    r":api=(sha256:[0-9a-f]{64}):core=(sha256:[0-9a-f]{64})"
+    r":tenant=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
+)
 
 
 def sha256(path: Path) -> str:
@@ -274,9 +284,41 @@ def validate_fresh_production_queue_snapshots(status: dict, *, now: datetime | N
         raise RuntimeError("production_queue_snapshot_invalid")
     pool = status.get("pool")
     busy = pool.get("busy") if isinstance(pool, dict) else None
-    if (not isinstance(pool, dict) or pool.get("state") != "HEALTHY"
-            or status.get("launch_agent_loaded") is not True
+    pool_authority = status.get("pool_snapshot_authority", "worker_pool_status_v1")
+    if pool_authority == "worker_pool_status_v1":
+        pool_state_valid = isinstance(pool, dict) and pool.get("state") == "HEALTHY"
+    elif pool_authority == "mac_worker_live_idle_inventory_v1":
+        inventory = status.get("pool_snapshot_inventory")
+        pool_state_valid = (
+            isinstance(pool, dict) and pool.get("state") == "IDLE_CONFIRMED"
+            and isinstance(inventory, dict)
+            and inventory == {
+                "configured_concurrency": 1,
+                "slot_count": 1,
+                "all_slots_idle": True,
+                "current_job_present": False,
+                "launch_agent_loaded": True,
+                "active_inference": False,
+            }
+            and isinstance(total := pool.get("total"), int) and not isinstance(total, bool)
+            and total == 1
+            and isinstance(status.get("configured_concurrency"), int)
+            and not isinstance(status.get("configured_concurrency"), bool)
+            and status.get("configured_concurrency") == 1
+            and status.get("current_job_present") is False
+            and status.get("launch_agent_loaded") is True
+            and isinstance(status.get("slots"), dict)
+            and len(status["slots"]) == 1
+            and all(isinstance(slot, dict) and slot.get("state") == "IDLE"
+                    and slot.get("job_id") is None for slot in status["slots"].values())
+        )
+    else:
+        raise RuntimeError("production_queue_snapshot_invalid")
+    total = pool.get("total") if isinstance(pool, dict) else None
+    if (not pool_state_valid or status.get("launch_agent_loaded") is not True
             or isinstance(busy, bool) or not isinstance(busy, int) or busy < 0):
+        raise RuntimeError("production_queue_snapshot_invalid")
+    if total is not None and (isinstance(total, bool) or not isinstance(total, int) or total < busy):
         raise RuntimeError("production_queue_snapshot_invalid")
     try:
         pool_captured = datetime.fromisoformat(status.get("pool_snapshot_at", "").replace("Z", "+00:00"))
@@ -297,7 +339,12 @@ def validate_fresh_production_queue_snapshots(status: dict, *, now: datetime | N
             raise RuntimeError("production_queue_snapshot_invalid")
         if value.get("queue_snapshot_state") != "VERIFIED":
             raise RuntimeError("production_queue_snapshot_invalid")
-        if value.get("queue_snapshot_source_id") != f"agata-worker-queue-status-v1:{lane.lower()}":
+        api_source = f"agata-worker-queue-status-v1:{lane.lower()}"
+        live_source = f"{LIVE_QUEUE_SOURCE}:{lane.lower()}"
+        source = value.get("queue_snapshot_source_id")
+        if source == live_source:
+            _validate_live_queue_snapshot_provenance(value, lane)
+        elif source != api_source or value.get("queue_snapshot_provenance") is not None:
             raise RuntimeError("production_queue_snapshot_invalid")
         counts = (value.get("pending_inference_jobs"), value.get("running_inference_jobs"))
         if any(isinstance(count, bool) or not isinstance(count, int) or count < 0 for count in counts):
@@ -318,6 +365,7 @@ def validate_fresh_production_queue_snapshots(status: dict, *, now: datetime | N
             "running_jobs": counts[1],
         }
     return {"checked_at": current.isoformat(), "pool_snapshot_at": pool_captured.isoformat(),
+            "pool_authority": pool_authority,
             "busy_slots": busy, "lanes": evidence}
 
 
@@ -331,12 +379,272 @@ def require_fresh_empty_production_queues(status: dict, *, now: datetime | None 
     return evidence
 
 
-def _read_production_queue_status() -> dict:
-    """Invoke only the candidate's read-only status command; never claim jobs."""
-    worker = WORKER_DIR / "gpoint_mac_worker.py"
+def _validate_live_queue_snapshot_provenance(value: dict, lane: str) -> dict:
+    provenance = value.get("queue_snapshot_provenance")
+    if not isinstance(provenance, dict):
+        raise RuntimeError("production_queue_snapshot_invalid")
+    match = QUEUE_SOURCE_RE.fullmatch(provenance.get("source_id", ""))
+    tenant_id = provenance.get("tenant_id")
+    visible_tenant_rows = provenance.get("visible_tenant_rows")
+    try:
+        tenant = UUID(tenant_id)
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise RuntimeError("production_queue_snapshot_invalid") from exc
+    if (match is None or match.group(1) != lane.lower()
+            or provenance.get("snapshot_version") != "agata_live_queue_snapshot_v1"
+            or provenance.get("lane") != lane
+            or provenance.get("source_system") != lane.lower()
+            or not re.fullmatch(r"[0-9a-f]{40}", provenance.get("release_sha", ""))
+            or provenance.get("release_sha") != match.group(2)
+            or provenance.get("api_build_sha") != match.group(2)
+            or provenance.get("core_build_sha") != match.group(2)
+            or not QUEUE_IMAGE_RE.fullmatch(provenance.get("api_image_id", ""))
+            or provenance.get("api_image_id") != match.group(3)
+            or not QUEUE_IMAGE_RE.fullmatch(provenance.get("core_image_id", ""))
+            or provenance.get("core_image_id") != match.group(4)
+            or tenant.int == 0 or str(tenant) != tenant_id or tenant_id != match.group(5)
+            or provenance.get("tenant_identity_verified") is not True
+            or provenance.get("transaction_read_only") is not True
+            or provenance.get("same_login") is not True
+            or provenance.get("role_superuser") is not False
+            or provenance.get("role_bypassrls") is not False
+            or isinstance(visible_tenant_rows, bool) or visible_tenant_rows != 1
+            or not isinstance(provenance.get("database_name"), str)
+            or not provenance.get("database_name")
+            or value.get("queue_snapshot_runtime_release_sha") != match.group(2)
+            or value.get("queue_snapshot_tenant_id") != tenant_id):
+        raise RuntimeError("production_queue_snapshot_invalid")
+    return provenance
+
+
+def normalize_live_runtime_queue_snapshot(snapshot: dict, lane: str, expected_tenant_id: str) -> dict:
+    """Bind a source-authenticated DB snapshot to one configured worker lane."""
+    if lane not in {"GPOINT", "GSALES"} or not isinstance(snapshot, dict):
+        raise RuntimeError("production_queue_snapshot_invalid")
+    try:
+        captured = datetime.fromisoformat(snapshot.get("snapshot_at", "").replace("Z", "+00:00"))
+        tenant = UUID(snapshot.get("tenant_id", ""))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise RuntimeError("production_queue_snapshot_invalid") from exc
+    if captured.tzinfo is None or tenant.int == 0 or str(tenant) != snapshot.get("tenant_id"):
+        raise RuntimeError("production_queue_snapshot_invalid")
+    if snapshot.get("tenant_id") != expected_tenant_id:
+        raise RuntimeError("production_queue_snapshot_invalid")
+    counts = (snapshot.get("pending_inference_jobs"), snapshot.get("running_inference_jobs"))
+    if any(isinstance(count, bool) or not isinstance(count, int) or count < 0 for count in counts):
+        raise RuntimeError("production_queue_snapshot_invalid")
+    provenance = {
+        key: snapshot.get(key) for key in (
+            "snapshot_version", "source_id", "lane", "source_system", "release_sha",
+            "api_build_sha", "core_build_sha", "api_image_id", "core_image_id",
+            "tenant_id", "tenant_identity_verified", "transaction_read_only", "same_login",
+            "role_superuser", "role_bypassrls", "visible_tenant_rows", "database_name",
+        )
+    }
+    result = {
+        "health": "HEALTHY",
+        "queue_snapshot_state": "VERIFIED",
+        "queue_snapshot_source_id": f"{LIVE_QUEUE_SOURCE}:{lane.lower()}",
+        "queue_snapshot_at": captured.isoformat(),
+        "pending_inference_jobs": counts[0],
+        "running_inference_jobs": counts[1],
+        "queue_snapshot_authority": "live_runtime_readonly_snapshot_v1",
+        "queue_snapshot_runtime_release_sha": snapshot.get("release_sha"),
+        "queue_snapshot_tenant_id": snapshot.get("tenant_id"),
+        "queue_snapshot_provenance": provenance,
+    }
+    _validate_live_queue_snapshot_provenance(result, lane)
+    return result
+
+
+def _configured_tenant_id(lane: str, manifest: dict) -> str:
+    key = f"{lane}_AGATA_TENANT_ID"
+    if not CONFIG.is_file() or CONFIG.is_symlink() or CONFIG.stat().st_uid != os.getuid() or CONFIG.stat().st_mode & 0o077:
+        raise RuntimeError("worker_config_missing_or_permissions_invalid")
+    values = {}
+    for line in CONFIG.read_text(encoding="utf-8").splitlines():
+        item = line.strip()
+        if item and not item.startswith("#") and "=" in item:
+            name, value = item.split("=", 1)
+            values[name.strip()] = value.strip().strip('"').strip("'")
+    tenant_id = values.get(key, "")
+    if lane == "GPOINT" and not tenant_id:
+        binding = _validated_current_tenant_binding()
+        if binding is None:
+            binding = _validated_legacy_tenant_binding(manifest)
+        tenant_id = binding.get("tenant_id", "") if binding else ""
+    try:
+        tenant = UUID(tenant_id)
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise RuntimeError("worker_tenant_binding_invalid") from exc
+    if tenant.int == 0 or str(tenant) != tenant_id:
+        raise RuntimeError("worker_tenant_binding_invalid")
+    return tenant_id
+
+
+def _validated_current_tenant_binding() -> dict | None:
+    """Validate the durable GPOINT pin against the currently installed runtime."""
+    path = ROOT / "config/tenant-bindings.json"
+    if not path.exists():
+        return None
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError
+        file_stat = path.stat()
+        value = json.loads(path.read_text(encoding="utf-8"))
+        runtime_link = ROOT / "runtime/current"
+        if not runtime_link.is_symlink():
+            raise ValueError
+        runtime = runtime_link.resolve(strict=True)
+        runtime_root = (ROOT / "runtime").resolve(strict=True)
+        worker = runtime / "gpoint_mac_worker.py"
+        source_id = value.get("source_id", "")
+        tenant_id = value.get("tenant_id", "")
+        captured = datetime.fromisoformat(str(value.get("snapshot_at", "")).replace("Z", "+00:00"))
+        tenant = UUID(tenant_id)
+        if (file_stat.st_uid != os.getuid() or file_stat.st_mode & 0o077
+                or set(value) != {"version", "candidate_sha", "worker_sha256", "tenant_id", "source_id", "snapshot_at"}
+                or value.get("version") != 1
+                or not re.fullmatch(r"[0-9a-f]{40}", value.get("candidate_sha", ""))
+                or value.get("candidate_sha") != runtime.name
+                or not re.fullmatch(r"[0-9a-f]{64}", value.get("worker_sha256", ""))
+                or not worker.is_file() or worker.is_symlink()
+                or value.get("worker_sha256") != sha256(worker)
+                or not runtime.is_relative_to(runtime_root)
+                or not re.fullmatch(r"gpoint-vps:[0-9a-f]{40}:api=sha256:[0-9a-f]{64}:agata=sha256:[0-9a-f]{64}", source_id)
+                or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", tenant_id)
+                or tenant.int == 0 or str(tenant) != tenant_id or captured.tzinfo is None):
+            raise ValueError
+    except (OSError, ValueError, TypeError, AttributeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("worker_tenant_binding_invalid") from exc
+    return value
+
+
+def _remote_queue_snapshot_command(lane: str) -> str:
+    targets = {
+        "GPOINT": ("compose-api-1", "compose-agata-api-1", "AGATA_TENANT_ID"),
+        "GSALES": ("compose-gsales-api-1", "compose-gsales-agata-api-1", "GSALES_AGATA_TENANT_ID"),
+    }
+    if lane not in targets or not QUEUE_SNAPSHOT_SCRIPT.is_file():
+        raise RuntimeError("authoritative_queue_snapshot_unavailable")
+    api, core, tenant_key = targets[lane]
+    script = base64.b64encode(QUEUE_SNAPSHOT_SCRIPT.read_bytes()).decode("ascii")
+    return f"""set -eu
+env_file=/opt/gpoint/env/production.env
+release_sha=$(sed -n 's/^RELEASE_SHA=//p' "$env_file" | head -1)
+case "$release_sha" in *[!0-9a-f]*|'') exit 41 ;; esac
+test "${{#release_sha}}" -eq 40
+tenant=$(sed -n 's/^{tenant_key}=//p' "$env_file" | head -1)
+api={api}
+core={core}
+for container in "$api" "$core"; do
+  running=$(docker inspect "$container" --format '{{{{.State.Running}}}}')
+  health=$(docker inspect "$container" --format '{{{{if .State.Health}}}}{{{{.State.Health.Status}}}}{{{{else}}}}none{{{{end}}}}')
+  image=$(docker inspect "$container" --format '{{{{.Image}}}}')
+  revision=$(docker image inspect "$image" --format '{{{{index .Config.Labels "org.opencontainers.image.revision"}}}}')
+  test "$running" = true && test "$health" = healthy && test "$revision" = "$release_sha"
+done
+api_image=$(docker inspect "$api" --format '{{{{.Image}}}}')
+core_image=$(docker inspect "$core" --format '{{{{.Image}}}}')
+api_sha=$(docker image inspect "$api_image" --format '{{{{index .Config.Labels "org.opencontainers.image.revision"}}}}')
+core_sha=$(docker image inspect "$core_image" --format '{{{{index .Config.Labels "org.opencontainers.image.revision"}}}}')
+printf '%s' '{script}' | base64 -d | docker exec -i -w /srv/agata \\
+  -e SNAPSHOT_LANE={lane} \\
+  -e SNAPSHOT_EXPECTED_TENANT_ID="$tenant" \\
+  -e SNAPSHOT_RELEASE_SHA="$release_sha" \\
+  -e SNAPSHOT_API_BUILD_SHA="$api_sha" \\
+  -e SNAPSHOT_CORE_BUILD_SHA="$core_sha" \\
+  -e SNAPSHOT_API_IMAGE_ID="$api_image" \\
+  -e SNAPSHOT_CORE_IMAGE_ID="$core_image" \\
+  "$core" python -"""
+
+
+def _read_live_runtime_queue_snapshot(lane: str, expected_tenant_id: str) -> dict:
+    if not VPS_RUNNER.is_file() or not os.access(VPS_RUNNER, os.X_OK):
+        raise RuntimeError("authoritative_queue_snapshot_runner_unavailable")
+    env = dict(os.environ)
+    env["REMOTE_CMD"] = _remote_queue_snapshot_command(lane)
+    env["GPOINT_REMOTE_COMMAND_TIMEOUT_SECONDS"] = "25"
+    try:
+        result = subprocess.run([str(VPS_RUNNER)], capture_output=True, text=True,
+                                timeout=30, check=False, env=env)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("authoritative_queue_snapshot_unavailable") from exc
+    if result.returncode != 0:
+        raise RuntimeError("authoritative_queue_snapshot_failed")
+    try:
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        snapshot = json.loads(lines[-1])
+    except (IndexError, TypeError, ValueError) as exc:
+        raise RuntimeError("authoritative_queue_snapshot_invalid") from exc
+    if not isinstance(snapshot, dict):
+        raise RuntimeError("authoritative_queue_snapshot_invalid")
+    if snapshot.get("preflight_error"):
+        raise RuntimeError("authoritative_queue_snapshot_failed")
+    return normalize_live_runtime_queue_snapshot(snapshot, lane, expected_tenant_id)
+
+
+def _refresh_local_pool_evidence(status: dict) -> None:
+    """Record local idle inventory separately from health and production queue state."""
+    pool = status.get("pool")
+    slots = status.get("slots")
+    lanes = status.get("lanes")
+    concurrency = status.get("configured_concurrency")
+    total = pool.get("total") if isinstance(pool, dict) else None
+    if (not isinstance(pool, dict) or isinstance(pool.get("busy"), bool) or pool.get("busy") != 0
+            or isinstance(concurrency, bool) or concurrency != 1
+            or isinstance(total, bool) or total != 1
+            or not isinstance(slots, dict) or len(slots) != 1
+            or any(not isinstance(slot, dict) or slot.get("state") != "IDLE"
+                   or slot.get("job_id") is not None
+                                for slot in slots.values())
+            or not isinstance(lanes, dict) or status.get("current_job_present") is not False
+            or status.get("launch_agent_loaded") is not True):
+        raise RuntimeError("production_queue_status_unavailable")
+    for lane in ("GPOINT", "GSALES"):
+        value = lanes.get(lane)
+        if not isinstance(value, dict):
+            raise RuntimeError("production_queue_status_unavailable")
+        if value.get("configured", True) and value.get("health") != "HEALTHY":
+            raise RuntimeError("production_queue_status_unavailable")
+    local = inventory()
+    if (local.get("launchagent_loaded") is not True or local.get("production_release_lock_busy")
+            or local.get("active_inference") is not False):
+        raise RuntimeError("production_queue_status_unavailable")
+    _launchagent_pid()
+    pool["state"] = "IDLE_CONFIRMED"
+    status["pool_snapshot_at"] = datetime.now(UTC).isoformat()
+    status["pool_snapshot_authority"] = "mac_worker_live_idle_inventory_v1"
+    status["pool_snapshot_inventory"] = {
+        "configured_concurrency": 1,
+        "slot_count": 1,
+        "all_slots_idle": True,
+        "current_job_present": False,
+        "launch_agent_loaded": True,
+        "active_inference": False,
+    }
+
+
+def _read_production_queue_status(manifest: dict | None = None) -> dict:
+    """Read status and bootstrap queue evidence only for explicit endpoint 404 version skew."""
+    runtime_link = ROOT / "runtime/current"
+    try:
+        if not runtime_link.is_symlink():
+            raise RuntimeError("installed_worker_runtime_unavailable")
+        runtime = runtime_link.resolve(strict=True)
+        runtime_root = (ROOT / "runtime").resolve(strict=True)
+        if not runtime.is_relative_to(runtime_root):
+            raise RuntimeError("installed_worker_runtime_invalid")
+        worker = WORKER_DIR / "gpoint_mac_worker.py"
+        python = runtime / ".venv/bin/python3.12"
+        if (not worker.is_file() or worker.is_symlink()
+                or not python.is_file() or not os.access(python, os.X_OK)):
+            raise RuntimeError("installed_worker_runtime_unavailable")
+    except OSError as exc:
+        raise RuntimeError("installed_worker_runtime_unavailable") from exc
     try:
         result = subprocess.run(
-            [_resolve_python312(), str(worker), "status"], capture_output=True,
+            [str(python), str(worker), "status"], capture_output=True,
             text=True, timeout=35, check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -347,6 +655,25 @@ def _read_production_queue_status() -> dict:
         status = json.loads(result.stdout)
     except (TypeError, ValueError) as exc:
         raise RuntimeError("production_queue_status_unavailable") from exc
+    lanes = status.get("lanes") if isinstance(status, dict) else None
+    if not isinstance(lanes, dict):
+        raise RuntimeError("production_queue_status_unavailable")
+    configured_lanes = [lane for lane in ("GPOINT", "GSALES")
+                        if isinstance(lanes.get(lane), dict) and lanes[lane].get("configured", True)]
+    if not configured_lanes:
+        raise RuntimeError("production_queue_status_unavailable")
+    if all(lanes[lane].get("queue_snapshot_state") == "VERIFIED" for lane in configured_lanes):
+        return status
+    if any(lanes[lane].get("health") != "HEALTHY"
+           or lanes[lane].get("queue_snapshot_error_code") != "worker_gateway_http_404"
+           for lane in configured_lanes):
+        raise RuntimeError("production_queue_status_unavailable")
+    _refresh_local_pool_evidence(status)
+    candidate_manifest = manifest or candidate()
+    for lane in configured_lanes:
+        expected_tenant = _configured_tenant_id(lane, candidate_manifest)
+        snapshot = _read_live_runtime_queue_snapshot(lane, expected_tenant)
+        lanes[lane].update(snapshot)
     return status
 
 
@@ -702,7 +1029,9 @@ def _candidate_startup_environment(manifest: dict) -> dict[str, str]:
     environment = _launchagent_environment()
     if _config_declares_key("GPOINT_AGATA_TENANT_ID"):
         return environment
-    binding = _validated_legacy_tenant_binding(manifest)
+    binding = _validated_current_tenant_binding()
+    if binding is None:
+        binding = _validated_legacy_tenant_binding(manifest)
     if binding:
         environment["GPOINT_AGATA_TENANT_ID"] = binding["tenant_id"]
     return environment
@@ -1010,12 +1339,23 @@ def _verify_staged_runtime(runtime: Path, manifest: dict) -> None:
 
 def _migrate_tenant_binding(manifest: dict) -> None:
     destination = ROOT / "config/tenant-bindings.json"
+    if destination.is_symlink():
+        raise RuntimeError("worker_tenant_binding_invalid")
     if destination.exists():
-        return
-    value = _validated_legacy_tenant_binding(manifest)
-    if value is None:
-        return
-    _atomic_json(destination, value)
+        binding = _validated_current_tenant_binding()
+        if binding is None:
+            raise RuntimeError("worker_tenant_binding_invalid")
+    else:
+        binding = _validated_legacy_tenant_binding(manifest)
+        if binding is None:
+            return
+    if (not re.fullmatch(r"[0-9a-f]{40}", manifest.get("source_sha", ""))
+            or not re.fullmatch(r"[0-9a-f]{64}", manifest.get("assets", {}).get("gpoint_mac_worker.py", ""))):
+        raise RuntimeError("worker_tenant_binding_invalid")
+    binding = dict(binding)
+    binding["candidate_sha"] = manifest["source_sha"]
+    binding["worker_sha256"] = manifest["assets"]["gpoint_mac_worker.py"]
+    _atomic_json(destination, binding)
 
 
 def _render_plist(runtime: Path, diagnostics_directory: Path | None = None) -> bytes:
