@@ -19,6 +19,7 @@ from app.config import Settings
 from app.main import create_app
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "agata/worker"))
+import agata_worker_pool
 import gpoint_mac_worker as worker
 
 pytestmark = pytest.mark.skipif(not os.getenv("GSALES_TEST_ADMIN_DSN"), reason="disposable PostgreSQL required")
@@ -109,12 +110,17 @@ def test_two_targets_route_through_shared_worker_without_context_mix(tmp_path, m
 
         monkeypatch.setattr(worker.httpx, "AsyncClient", worker_client)
         monkeypatch.setattr(worker, "run_inference", inference)
-        scheduler = worker.TargetScheduler()
-        scheduler.cursor = 1  # Generate Sales first, then prove GPOINT still responds.
+        # Use the canonical weighted lane scheduler to choose a deterministic
+        # GSALES-first order, then exercise the existing target-specific HTTP
+        # claim path without starting a second production scheduler.
+        scheduler = agata_worker_pool.LaneScheduler()
+        scheduler._cursor = 2  # First weighted slot is GSALES.
+        order = scheduler.production_order({"GPOINT", "GSALES"})
         lock = worker.acquire_worker_lock()
         try:
-            assert scheduler.poll() is True
-            assert scheduler.poll() is True
+            for target in order:
+                assert worker.process_one(target) is True
+                scheduler.record_dispatch(target)
         finally:
             lock.close()
         assert [job["target"] for job in seen] == ["GSALES", "GPOINT"]
