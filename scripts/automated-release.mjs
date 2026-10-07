@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { inspectProductionReadOnly } from './release-gpoint-vps-adapter.mjs';
 import { candidateAgataMigrationHead, candidatePrismaMigrationHead } from './release-gpoint.mjs';
 import { assertInstalledWorkerMatches } from './worker-runtime-guard.mjs';
+import { withPreflightEvidence } from './release-evidence.mjs';
 import { AuthorizationError, authorizationRecordPath, candidateScopeDiff,
   checkTaskAuthorizationState, consumeTaskAuthorization, validateTaskAuthorization,
   assertNoTaskScopedMigrations } from './release-authorization.mjs';
@@ -126,7 +127,7 @@ try {
   const evidence = attempt?.data ?? { candidateSha: sha, status: 'BLOCKED', productionRef: null };
   const status = mode === 'task-scoped-auto' && evidence.status === 'COMPLETE' && !authorizationConsumed
     ? 'RECOVERY_REQUIRED' : evidence.status;
-  fs.writeFileSync(process.env.RELEASE_RESULT, JSON.stringify({ ...evidence,
+  fs.writeFileSync(process.env.RELEASE_RESULT, JSON.stringify({ ...withPreflightEvidence(evidence, preflightStatus, mode),
     mode,
     status,
     releaseState: mode === 'preflight' && evidence.status === 'PLANNED' ? 'READY_FOR_OWNER' :

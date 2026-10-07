@@ -80,6 +80,11 @@ def validate_expected_run(selected, expected_run, expected_attempt):
         raise RuntimeError('Prepare run/attempt changed after selection')
 
 
+def validate_current_main(sha, current_main_sha):
+    if current_main_sha != sha:
+        raise RuntimeError('Candidate is no longer origin/main; prepare the new candidate')
+
+
 def validate_ready_preflight(sha, selected_prepare, deploy_runs, read_result):
     runs = [r for r in deploy_runs if r.get('head_sha') == sha and r.get('head_branch') == 'main'
             and r.get('event') == 'workflow_dispatch'
@@ -97,10 +102,14 @@ def validate_ready_preflight(sha, selected_prepare, deploy_runs, read_result):
             or str(result.get('automationRunId')) != run_id
             or str(result.get('automationRunAttempt')) != attempt
             or result.get('mode') != 'preflight'
+            or result.get('preflight') != 'PASS'
             or result.get('releaseState') != 'READY_FOR_OWNER'
             or result.get('status') != 'PLANNED'
-            or result.get('preflight') != 'PASS'
             or result.get('productionChanged') is not False
+            or result.get('dryRun') is not True
+            or result.get('applicationVerification') != 'NOT_DEPLOYED'
+            or result.get('authorizationMode') != 'EXACT_SHA'
+            or result.get('authorizationConsumed') is not False
             or str(result.get('prepareRunId')) != str(selected_prepare['id'])
             or str(result.get('prepareRunAttempt', 1)) != str(selected_prepare.get('run_attempt', 1))):
         raise RuntimeError('Immutable Deploy evidence does not prove READY_FOR_OWNER for this exact Prepare run')
@@ -113,8 +122,7 @@ def main():
     if orchestrator_run_id and not orchestrator_run_id.isdigit():
         raise RuntimeError('Automatic orchestrator run ID is invalid')
     validate_request(sha, os.environ.get('GITHUB_REF'), os.environ.get('RELEASE_MODE'), os.environ.get('APPROVE_PRODUCTION'))
-    if github('git/ref/heads/main')['object']['sha'] != sha:
-        raise RuntimeError('Candidate is no longer origin/main; prepare the new candidate')
+    validate_current_main(sha, github('git/ref/heads/main')['object']['sha'])
     authorization_id = os.environ.get('TASK_AUTHORIZATION_ID', '').strip()
     if os.environ.get('RELEASE_MODE') == 'task-scoped-auto':
         if not authorization_id:

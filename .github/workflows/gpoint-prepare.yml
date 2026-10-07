@@ -61,7 +61,9 @@ jobs:
       - name: Test release preflight coordinator
         run: |
           python3 scripts/test_release_preflight_benchmark.py
+          python3 scripts/select-release-run.test.py
           node --test scripts/release-orchestrator.test.mjs
+          node --test scripts/release-evidence.test.mjs
           node --test scripts/release-authorization.test.mjs scripts/release-runner-readiness.test.mjs
       - name: Tests, disposable database rehearsal and immutable Docker build
         env:
