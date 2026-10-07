@@ -119,7 +119,7 @@ python3 services/agata/conversation-lab/evaluators/naturalness_cli.py dry-run
 python3 -m unittest discover -s services/agata/conversation-lab/tests
 ```
 
-## Prepared local shared-worker lane (not enabled)
+## Shared-worker LAB lane (permanent candidate contract)
 
 `evaluators/worker_client.py` builds a synthetic job only from the hash-checked
 Naturalness V1 development scenarios (`-02`) and submits/reads/cancels it through
@@ -130,15 +130,28 @@ same scenario and A/B arm as history. Arbitrary chat text cannot enter through
 the adapter or queue. The worker executes LAB through the same serial Codex
 executor as GPOINT/GSALES; it never writes LAB responses to production PostgreSQL.
 
-The worker ignores LAB unless `AGATA_LAB_WORKER_ENABLED=true`; it also requires
-a separate mode-0600 OWNER approval file outside the repository, pinned to the
-exact combined worker/queue/fixture-manifest SHA256, an allowlist of experiment/configuration/scenario IDs,
-an expiry, and a one-to-eight-call budget. Approval usage is consumed before
-inference. Each timeout is capped at 180 seconds. The Codex child inherits the
-worker's global lock, so a restarted worker cannot overlap an orphaned CLI. A
-claimed job left by a crash becomes `ambiguous` after the lock is released and
-is never retried. These interfaces are prepared only: this task does not create an
-approval file, enable the lane, start Codex, or access installed worker files.
+In the canonical candidate, LAB is permanently registered in the existing
+single Worker Pool beside GPOINT and GSALES. Lane presence is independent from
+authorization: without a valid mode-0600 OWNER approval file outside the
+repository, LAB remains `AVAILABLE` with its inference gate closed. Approval is
+pinned to the exact combined worker/queue/fixture-manifest SHA256, an allowlist
+of experiment/configuration/scenario IDs, expiry, and a one-to-eight-call
+budget. The Lab adapter checks the Worker-owned approval before reserving a
+durable attempt; the Worker rechecks and consumes it immediately before
+inference. No experiment toggles LAB presence or edits the LaunchAgent.
+
+The shared scheduler checks configured GPOINT/GSALES queues before LAB. LAB is
+considered only after both production claim paths have returned successfully
+with no claimable work; a failed/backed-off production poll blocks LAB. With
+`N=1`, active inference is not preempted. Ordinary Lab experiments submit only
+to the canonical LAB spool and do not require a production queue `0/0` snapshot.
+Fresh authoritative queue snapshots, idle checks, locks, plist preservation,
+and rollback remain mandatory for actual Worker lifecycle operations such as
+install, runtime migration/switch, LaunchAgent mutation, and rollback.
+
+The canonical candidate contract is not an installation record: this change
+does not modify the installed Worker, LaunchAgent, production configuration,
+create an approval file, or start Codex.
 
 ### Promptfoo compatibility adapter (offline implementation only)
 

@@ -54,6 +54,143 @@ def test_scheduler_skips_unconfigured_target_and_only_offers_lab_after_productio
     assert scheduler.lab_may_run(production_claims_empty=False) is False
 
 
+def test_pool_offers_lab_only_after_fresh_empty_production_claims_and_with_available_lane(tmp_path):
+    calls = []
+    runner = _FakeRunner()
+    pool = PoolSupervisor(PoolPaths(tmp_path), PoolConfig(), {
+        "GPOINT": lambda: calls.append("GPOINT") or None,
+        "GSALES": lambda: calls.append("GSALES") or None,
+        "LAB": lambda: calls.append("LAB") or {"job_id": "lab-1"},
+    }, runner=runner)
+    try:
+        assert pool.poll_once() == 1
+        assert calls == ["GPOINT", "GSALES", "LAB"]
+        assert runner.started[0][1] == "LAB"
+    finally:
+        pool.close()
+
+
+def test_pool_keeps_lab_available_when_approval_is_closed(tmp_path):
+    paths = PoolPaths(tmp_path)
+    pool = PoolSupervisor(paths, PoolConfig(), {
+        "GPOINT": lambda: None, "GSALES": lambda: None, "LAB": lambda: None,
+    }, runner=_FakeRunner(), lab_gate_status=lambda: "CLOSED_NO_APPROVAL")
+    try:
+        assert pool.poll_once() == 0
+        status = json.loads(paths.status_file.read_text())
+        assert status["lanes"]["LAB"]["state"] == "AVAILABLE"
+        assert status["lanes"]["LAB"]["presence"] == "PERMANENT"
+        assert status["lanes"]["LAB"]["inference_gate"] == "CLOSED_NO_APPROVAL"
+        assert status["pool"]["state"] == "HEALTHY"
+    finally:
+        pool.close()
+
+
+@pytest.mark.parametrize("priority_lane", ["GPOINT", "GSALES"])
+def test_claimable_production_work_is_dispatched_before_lab(priority_lane, tmp_path):
+    calls = []
+    runner = _FakeRunner()
+    pool = PoolSupervisor(PoolPaths(tmp_path), PoolConfig(), {
+        "GPOINT": lambda: calls.append("GPOINT") or ({"id": "point-1"} if priority_lane == "GPOINT" else None),
+        "GSALES": lambda: calls.append("GSALES") or ({"id": "sales-1"} if priority_lane == "GSALES" else None),
+        "LAB": lambda: calls.append("LAB") or {"job_id": "lab-1"},
+    }, runner=runner)
+    try:
+        assert pool.poll_once() == 1
+        assert "LAB" not in calls
+        assert runner.started[0][1] == priority_lane
+    finally:
+        pool.close()
+
+
+def test_production_arriving_during_lab_inference_waits_for_slot_without_state_corruption(tmp_path):
+    calls = []
+    runner = _FakeRunner()
+    point_jobs = iter([None, {"id": "point-arrived"}])
+    pool = PoolSupervisor(PoolPaths(tmp_path), PoolConfig(), {
+        "GPOINT": lambda: calls.append("GPOINT") or next(point_jobs),
+        "GSALES": lambda: calls.append("GSALES") or None,
+        "LAB": lambda: calls.append("LAB") or {"job_id": "lab-in-flight"},
+    }, runner=runner)
+    try:
+        assert pool.poll_once() == 1
+        assert runner.started[0][1] == "LAB"
+        calls.clear()
+        assert pool.poll_once() == 0
+        assert calls == []
+        runner.started[0][3].code = 0
+        assert pool.poll_once() == 1
+        assert runner.started[1][1] == "GPOINT"
+        assert runner.started[1][2]["id"] == "point-arrived"
+    finally:
+        pool.close()
+
+
+def test_unknown_gsales_visibility_blocks_lab_even_when_gpoint_is_empty(tmp_path):
+    calls = []
+    runner = _FakeRunner()
+    def unavailable_sales():
+        calls.append("GSALES")
+        raise RuntimeError("worker_gateway_network_error")
+    pool = PoolSupervisor(PoolPaths(tmp_path), PoolConfig(), {
+        "GPOINT": lambda: calls.append("GPOINT") or None,
+        "GSALES": unavailable_sales,
+        "LAB": lambda: calls.append("LAB") or {"job_id": "lab-must-not-claim"},
+    }, runner=runner, clock=lambda: 0)
+    try:
+        assert pool.poll_once(now=0) == 0
+        assert calls == ["GPOINT", "GSALES"]
+        assert runner.started == []
+    finally:
+        pool.close()
+
+
+def test_gsales_visibility_failure_does_not_prevent_claimable_gpoint_work(tmp_path):
+    calls = []
+    runner = _FakeRunner()
+
+    def unavailable_sales():
+        calls.append("GSALES")
+        raise RuntimeError("worker_gateway_network_error")
+
+    pool = PoolSupervisor(PoolPaths(tmp_path), PoolConfig(), {
+        "GPOINT": lambda: calls.append("GPOINT") or {"id": "point-still-runs"},
+        "GSALES": unavailable_sales,
+        "LAB": lambda: calls.append("LAB") or {"job_id": "lab-blocked"},
+    }, runner=runner, clock=lambda: 0)
+    try:
+        # Exercise the order where GSALES visibility fails before GPOINT is polled.
+        pool.scheduler._cursor = 2
+        assert pool.poll_once(now=0) == 1
+        assert calls == ["GSALES", "GPOINT"]
+        assert runner.started[0][1] == "GPOINT"
+    finally:
+        pool.close()
+
+
+def test_lab_claim_failure_isolated_and_next_cycle_still_checks_production(tmp_path):
+    calls = []
+    def fail_lab():
+        calls.append("LAB")
+        raise RuntimeError("fixture_lab_queue_failure")
+    pool = PoolSupervisor(PoolPaths(tmp_path), PoolConfig(), {
+        "GPOINT": lambda: calls.append("GPOINT") or None,
+        "GSALES": lambda: calls.append("GSALES") or None,
+        "LAB": fail_lab,
+    }, runner=_FakeRunner(), clock=lambda: 0)
+    try:
+        assert pool.poll_once(now=0) == 0
+        status = json.loads(pool.paths.status_file.read_text())
+        assert status["pool"]["state"] == "HEALTHY"
+        assert status["lanes"]["LAB"]["state"] == "DEGRADED"
+        assert pool.poll_once(now=0) == 0
+        assert calls.count("GPOINT") == 2
+        assert calls.count("GSALES") == 2
+        assert calls.count("LAB") == 2
+    finally:
+        pool.close()
+
+
 def test_pool_slot_and_job_ownership_are_separate_and_exclusive(tmp_path):
     paths = PoolPaths(tmp_path)
     paths.ensure()
@@ -149,7 +286,7 @@ def test_successful_pool_claim_polls_clear_stale_legacy_lane_errors(tmp_path):
     pool = PoolSupervisor(paths, PoolConfig(), {
         "GPOINT": successful_empty_claim("GPOINT"),
         "GSALES": successful_empty_claim("GSALES"),
-    }, runner=_FakeRunner(), lab_enabled=False)
+    }, runner=_FakeRunner())
     try:
         assert pool.poll_once() == 0
         status = json.loads(paths.worker_status_file.read_text())

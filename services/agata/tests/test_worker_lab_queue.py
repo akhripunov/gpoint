@@ -77,6 +77,31 @@ class LabQueueTests(unittest.TestCase):
         with self.assertRaises(lab_queue.LabQueueError):
             lab_queue.submit(job, root=self.root)
 
+    def test_owner_approval_usage_fails_closed_on_malformed_receipt_or_symlink(self):
+        approval = {"approval_id": "offline-approval", "worker_bundle_sha256": "a" * 64}
+        usage_dir = self.support / "state/lab-approval-usage"
+        usage_dir.mkdir(parents=True, mode=0o700)
+        receipt = usage_dir / "offline-approval.json"
+        receipt.write_text("null", encoding="utf-8")
+        receipt.chmod(0o600)
+        with self.assertRaisesRegex(lab_queue.LabQueueError, "usage_invalid"):
+            lab_queue.owner_approval_usage_calls(self.support, approval)
+
+        receipt.unlink()
+        receipt.symlink_to(self.support / "missing-target")
+        with self.assertRaisesRegex(lab_queue.LabQueueError, "usage_invalid"):
+            lab_queue.owner_approval_usage_calls(self.support, approval)
+
+        receipt.unlink()
+        usage_dir.rmdir()
+        external = self.support / "external-usage"
+        external.mkdir(mode=0o700)
+        usage_dir.symlink_to(external, target_is_directory=True)
+        with self.assertRaisesRegex(lab_queue.LabQueueError, "usage_invalid"):
+            lab_queue.owner_approval_usage_calls(self.support, approval)
+        with self.assertRaisesRegex(lab_queue.LabQueueError, "usage_invalid"):
+            lab_queue.ensure_owner_approval_usage_dir(self.support)
+
     def test_running_job_after_restart_is_marked_ambiguous_and_never_requeued(self):
         lab_queue.submit(payload(), root=self.root)
         lab_queue.claim_next(self.root)

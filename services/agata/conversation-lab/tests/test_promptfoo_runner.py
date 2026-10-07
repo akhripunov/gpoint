@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import hashlib
 from pathlib import Path
 import subprocess
 import tempfile
@@ -98,6 +99,44 @@ class WorkerPromptfooRunnerTests(unittest.TestCase):
             self.assertEqual(observed["timeout"], runner.EVAL_TIMEOUT_SECONDS)
             self.assertEqual(observed["env"]["AGATA_LAB_QUEUE"], str(queue))
             self.assertNotIn("OTHER_SECRET", observed["env"])
+            # An ordinary Lab experiment is queue work, not a lifecycle operation.
+            # No Worker status snapshot, lock, plist, or activation file is needed.
+            self.assertFalse(support.exists())
+
+    def test_ordinary_eval_leaves_launchagent_pid_and_runtime_sentinels_byte_identical(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            ledger = new_ledger(temp)
+            support = root / "support"
+            plist = root / "one.gpoint.agata-codex-worker.plist"
+            pid = root / "worker.pid"
+            runtime = root / "runtime/current/worker.py"
+            for path, content in ((plist, b"plist-before"), (pid, b"74500"), (runtime, b"worker-before")):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+            targets = (plist, pid, runtime)
+            before = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in targets}
+
+            def fake_eval(_args, *, env, timeout_seconds, on_started, on_ambiguous):
+                child = ledger.__class__(journal_path=ledger.journal_path)
+                child.reserve("generator", "inv-safe", metadata={
+                    "run_id": "run-safe", "arm_id": "promptfoo-worker-compat",
+                    "experiment_id": "promptfoo-worker-compat", "scenario_id": "promptfoo-compat-001",
+                    "turn_index": 0, "model": "gpt-6-luna", "reasoning_effort": "medium",
+                })
+                child.complete("generator", "inv-safe", "success")
+                on_started()
+                return SimpleNamespace(returncode=0, stdout="offline", stderr="")
+
+            result = runner.run_promptfoo_worker_eval(
+                self.prompt, run_id="run-safe", invocation_id="inv-safe", scenario_id="promptfoo-compat-001",
+                promptfoo_executable="/fake/promptfoo", worker_queue=support / "queues/lab",
+                private_receipt_directory=root / "receipts", call_ledger=ledger,
+                env={"PATH": "/usr/bin", "GPOINT_AGATA_WORKER_SUPPORT": str(support)}, eval_runner=fake_eval,
+            )
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(before, {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in targets})
+            self.assertFalse(support.exists())
 
     def test_runner_rejects_noncanonical_worker_queue_before_promptfoo(self):
         with tempfile.TemporaryDirectory() as temp:

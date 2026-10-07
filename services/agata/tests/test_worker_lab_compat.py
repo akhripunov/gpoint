@@ -24,6 +24,30 @@ import gpoint_mac_worker as worker  # noqa: E402
 
 
 class WorkerLabCompatibilityTests(unittest.TestCase):
+    def test_promptfoo_adapter_uses_worker_approval_verifier_before_reservation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            support = Path(temp) / "support"
+            config = support / "config"
+            config.mkdir(parents=True, mode=0o700)
+            support.chmod(0o700)
+            approval_file = config / "approval.json"
+            approval_file.write_text(json.dumps({
+                "approval_id":"offline-approval", "worker_bundle_sha256":worker._worker_bundle_sha256(),
+                "experiment_ids":["promptfoo-worker-compat"], "configuration_ids":["compat"],
+                "scenario_ids":["promptfoo-compat-001"], "max_calls":1,
+                "expires_at":(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=5)).isoformat(),
+            }), encoding="utf-8")
+            approval_file.chmod(0o600)
+            job = worker_client.build_promptfoo_compat_job(invocation_id="approval-preflight")
+            env = {"GPOINT_AGATA_WORKER_SUPPORT":str(support), "AGATA_LAB_APPROVAL_FILE":str(approval_file)}
+            # The Promptfoo provider uses the stdlib-only shared verifier; it
+            # must not import the full Worker runtime and its network stack.
+            with patch.dict(sys.modules, {"gpoint_mac_worker": None}):
+                worker_client.validate_owner_approval(job, env)
+            job["scenario_id"] = "outside-approved-scope"
+            with self.assertRaisesRegex(PermissionError, "does not cover"):
+                worker_client.validate_owner_approval(job, env)
+
     def test_compatibility_fixture_is_separate_synthetic_one_turn_exact_model_job(self):
         job = worker_client.build_promptfoo_compat_job(invocation_id="invocation-1")
         self.assertEqual(job["experiment_id"], "promptfoo-worker-compat")
@@ -93,7 +117,7 @@ class WorkerLabCompatibilityTests(unittest.TestCase):
             with patch.object(worker, "SUPPORT", support), \
                  patch.object(worker, "write_status"), \
                  patch.object(worker, "run_inference", side_effect=fake_inference), \
-                 patch.dict(worker.os.environ, {"AGATA_LAB_WORKER_ENABLED":"true", "AGATA_LAB_APPROVAL_FILE":str(approval_file)}, clear=False):
+                 patch.dict(worker.os.environ, {"AGATA_LAB_APPROVAL_FILE":str(approval_file)}, clear=False):
                 self.assertTrue(worker.execute_lab_claimed_job(job))
             self.assertEqual(observed["target"], "LAB")
             self.assertEqual(observed["experiment_id"], "promptfoo-worker-compat")
@@ -104,11 +128,12 @@ class WorkerLabCompatibilityTests(unittest.TestCase):
             self.assertEqual(receipt["execution"]["requested_reasoning_effort"], "medium")
 
     def test_missing_approval_fails_before_lab_job_is_claimed(self):
-        with patch.dict(worker.os.environ, {"AGATA_LAB_WORKER_ENABLED": "true"}), \
+        with tempfile.TemporaryDirectory() as temp, patch.object(worker, "SUPPORT", Path(temp)), \
+             patch.object(worker, "STATUS", Path(temp) / "status/worker-status.json"), \
+             patch.dict(worker.os.environ, {"GPOINT_AGATA_WORKER_SUPPORT":temp}, clear=True), \
              patch.object(worker, "_load_lab_approval", side_effect=worker.FatalConfigurationError("lab_owner_approval_missing_or_invalid")), \
              patch.object(worker.lab_queue, "claim_next") as claim:
-            with self.assertRaisesRegex(worker.FatalConfigurationError, "lab_approval_required"):
-                worker.claim_lab_job()
+            self.assertIsNone(worker.claim_lab_job())
         claim.assert_not_called()
 
 

@@ -146,6 +146,7 @@ class WorkerLabAdapter:
             raise PermissionError("Promptfoo Worker LAB invocation requires the verified durable call ledger")
 
         job = worker_client.build_promptfoo_compat_job(invocation_id=invocation_id, prompt=prompt)
+        worker_client.validate_owner_approval(job, self.env)
         attempt = {
             "run_id": self.run_id,
             "arm_id": EXPERIMENT,

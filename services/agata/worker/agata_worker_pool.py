@@ -337,7 +337,7 @@ class PoolSupervisor:
         *,
         runner: Any | None = None,
         reject_offer: Any | None = None,
-        lab_enabled: bool | None = None,
+        lab_gate_status: Any | None = None,
         clock=time.monotonic,
     ) -> None:
         self.paths = paths
@@ -345,7 +345,7 @@ class PoolSupervisor:
         self.claimers = claimers
         self.runner = runner or ProcessSlotRunner(paths)
         self.reject_offer = reject_offer
-        self.lab_enabled = lab_enabled
+        self.lab_gate_status = lab_gate_status or (lambda: "CLOSED_NO_APPROVAL")
         self.clock = clock
         self.scheduler = LaneScheduler()
         self.active: dict[str, _ActiveSlot] = {}
@@ -588,12 +588,13 @@ class PoolSupervisor:
         for lane in LANES:
             active = [item for item in self.active.values() if item.lane == lane]
             error = self.lane_errors.get(lane)
-            approval_block = lane == "LAB" and error == "lab_approval_required"
-            lab_disabled = lane == "LAB" and self.lab_enabled is False
+            try:
+                lab_gate = self.lab_gate_status() if lane == "LAB" else None
+            except Exception:
+                lab_gate = "CLOSED_NO_APPROVAL"
             lane_state = (
-                "AVAILABLE" if approval_block else
                 "UNCONFIGURED" if lane == "GSALES" and lane not in self.claimers else
-                "DISABLED" if lane == "LAB" and (lane not in self.claimers or lab_disabled) else
+                "DEGRADED" if lane == "LAB" and error else
                 "AVAILABLE" if lane == "LAB" else
                 "DEGRADED" if error else
                 "RUNNING" if active else "HEALTHY"
@@ -603,19 +604,14 @@ class PoolSupervisor:
                 "queue": None,
                 "running": len(active),
                 "configured": lane in self.claimers or lane == "LAB",
-                **({"enabled": self.lab_enabled} if lane == "LAB" and self.lab_enabled is not None else {}),
+                **({"presence": "PERMANENT", "inference_gate": lab_gate} if lane == "LAB" else {}),
                 "last_error_code": error,
-                **({"inference_gate": "CLOSED_DISABLED"} if lab_disabled else
-                   {"inference_gate": "APPROVAL_REQUIRED"} if approval_block else
-                   {"inference_gate": "REQUIRED_BEFORE_INFERENCE"} if lane == "LAB" else {}),
             }
         slot_states = {f"slot-{number:02d}": self._read_slot_state(f"slot-{number:02d}")
                        for number in range(1, self.config.concurrency + 1)}
         busy = len(self.active)
-        pool_state = "MAINTENANCE" if maintenance else "DEGRADED" if any(
-            not (lane == "LAB" and error == "lab_approval_required")
-            for lane, error in self.lane_errors.items()
-        ) else "HEALTHY"
+        production_error = any(lane in {"GPOINT", "GSALES"} for lane in self.lane_errors)
+        pool_state = "MAINTENANCE" if maintenance else "DEGRADED" if production_error else "HEALTHY"
         write_pool_status(self.paths, {
             "pool": {"state": pool_state, "total": self.config.concurrency,
                      "busy": busy, "idle": self.config.concurrency - busy,
