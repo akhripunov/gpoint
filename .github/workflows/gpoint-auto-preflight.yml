@@ -18,7 +18,8 @@ jobs:
   dispatch-preflight:
     if: >-
       github.event.workflow_run.head_branch == 'main' &&
-      github.event.workflow_run.conclusion == 'success'
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_sha == github.sha
     runs-on: [self-hosted, macOS, gpoint-production]
     timeout-minutes: 3
     permissions:
