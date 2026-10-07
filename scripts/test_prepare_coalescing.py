@@ -94,6 +94,20 @@ class PrepareCoalescingTests(unittest.TestCase):
                 window_seconds=60,
             )
 
+    def test_malformed_github_ref_payload_fails_closed(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b"[]"
+
+        with self.assertRaises(COALESCING.CoalescingError):
+            COALESCING.read_current_main_sha("redacted-test-token", opener=lambda *_a, **_k: Response())
+
     def test_all_expensive_prepare_steps_are_gated_before_execution(self):
         workflow = (ROOT / ".github" / "workflows" / "gpoint-prepare.yml").read_text()
         gate = "steps.coalesce.outputs.result == 'WINNER'"
