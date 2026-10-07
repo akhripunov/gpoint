@@ -225,16 +225,21 @@ function readWorkerDependencies() {
   }});
 }
 
-function verifyWorkerCompatibility(candidate, facts) {
+function verifyWorkerCompatibility(candidate, facts, mode) {
+  if (!['preflight', 'apply'].includes(mode)) die('Worker compatibility mode is invalid');
   // Secrets are compared through stdin only, never arguments, logs or evidence.
   const script = `import json,pathlib\ne=dict(line.split('=',1) for line in pathlib.Path('/opt/gpoint/env/production.env').read_text().splitlines() if line and not line.startswith('#') and '=' in line)\nassert e['RELEASE_SHA']=='${facts.LIVE_RELEASE_ENV_SHA}'\nprint(json.dumps({key:e[key] for key in ('GPOINT_AGATA_WORKER_TOKEN','GSALES_WORKER_TOKEN')}))\n`;
   const credentials = runRemoteCommand(`set -e; printf '%s' '${Buffer.from(script).toString('base64')}' | base64 -d | python3 -`);
   const result = spawnSync('python3', [path.join(ROOT, 'scripts/verify-release-worker-compatibility.py'),
-    '--candidate', candidate, '--gpoint-tenant', facts.LIVE_AGATA_TENANT_ID ?? '',
+    '--candidate', candidate, '--mode', mode, '--gpoint-tenant', facts.LIVE_AGATA_TENANT_ID ?? '',
     '--gsales-tenant', facts.LIVE_GSALES_TENANT_ID ?? ''], { cwd: ROOT, input: credentials, encoding: 'utf8', timeout: 10_000 });
-  if (result.status !== 0) die('Worker source/protocol/tenant/lane compatibility is unproven');
+  if (result.status !== 0) {
+    const reason = result.stderr.match(/WORKER_COMPATIBILITY_BLOCKED reason=([a-z0-9_]+)/)?.[1];
+    die(`Worker ${mode} compatibility blocked${reason ? `: ${reason}` : ''}`);
+  }
   const evidence = JSON.parse(result.stdout);
   if (evidence.compatibility !== 'PASS' || evidence.candidateSha !== candidate) die('Worker compatibility evidence invalid');
+  if (mode === 'apply' && evidence.sourceStatus !== 'EXACT_MATCH') die('Installed worker source differs from candidate');
   return evidence;
 }
 
@@ -591,7 +596,7 @@ function runDryRun(candidate) {
     const baseline = assertLiveBaseline(current, readLiveFacts());
     const { liveSha, liveDbHead } = baseline;
     const gsalesReadiness = inspectGsalesReadiness(candidate, liveSha);
-    const workerCompatibility = verifyWorkerCompatibility(candidate, baseline.facts);
+    const workerCompatibility = verifyWorkerCompatibility(candidate, baseline.facts, 'preflight');
     const agataMigrationReadiness = inspectAgataMigrationReadiness(candidate, baseline.agataDbHead, candidateAgataMigrationHead(candidate));
     const build = isolatedBuild(candidate, process.env.GPOINT_RELEASE_SKIP_BUILD !== '1');
     const artifacts = { api: { sourceSha: candidate }, worker: { sourceSha: candidate }, bot: { sourceSha: candidate }, miniapp: { sourceSha: build.miniappBuildSha ?? candidate }, agataApi: { sourceSha: candidate }, agataWorker: { sourceSha: candidate } };
@@ -697,7 +702,7 @@ function runApply(candidate) {
     validatedProvider = baseline.provider;
     const { liveSha, liveDbHead } = baseline;
     const gsalesReadiness = inspectGsalesReadiness(candidate, liveSha);
-    const workerCompatibility = verifyWorkerCompatibility(candidate, baseline.facts);
+    const workerCompatibility = verifyWorkerCompatibility(candidate, baseline.facts, 'apply');
     const agataMigrationReadiness = inspectAgataMigrationReadiness(candidate, baseline.agataDbHead, candidateAgataMigrationHead(candidate));
     const effective = { api: candidate, worker: candidate, bot: candidate, miniapp: candidate, agataApi: candidate, agataWorker: candidate, agataProvider: baseline.provider, ...providerConfigFromFacts(baseline.facts, baseline.workerStatus), enabled: true };
     const artifacts = { api: { sourceSha: candidate }, worker: { sourceSha: candidate }, bot: { sourceSha: candidate }, miniapp: { sourceSha: candidate }, agataApi: { sourceSha: candidate }, agataWorker: { sourceSha: candidate } };
