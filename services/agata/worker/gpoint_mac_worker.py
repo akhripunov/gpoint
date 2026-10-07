@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import fcntl
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -57,16 +58,16 @@ MAX_LAB_TIMEOUT_SECONDS = 180
 HEARTBEAT_INTERVAL_SECONDS = 30
 _last_heartbeat_attempt = float("-inf")
 REQUEST_TIMEOUT = httpx.Timeout(20.0, connect=10.0, read=20.0, write=20.0, pool=10.0)
+DNS_LOOKUP_TIMEOUT_SECONDS = 3.0
 _HTTP_LOOP = None
 _HTTP_LOOP_LOCK = threading.Lock()
-_HTTP_RESOLVER_LOCK = threading.Lock()
-_HTTP_RESOLVER_ACTIVE = False
 POLL_BACKOFF_SECONDS = (1.0, 2.0, 5.0, 10.0, 20.0)
 SAFE_TARGET_ERROR_CODES = frozenset({
     "worker_claim_invalid",
     "worker_claim_target_mismatch",
     "worker_config_permissions_invalid",
     "worker_gateway_auth_rejected",
+    "worker_gateway_http_404",
     "worker_gateway_network_error",
     "worker_gateway_or_auth_unconfigured",
     "worker_gateway_response_invalid",
@@ -345,53 +346,70 @@ def _validated_queue_status(target: str, value: dict) -> dict[str, object]:
 
 
 async def _bounded_getaddrinfo(host, port, *, family=0, type=0, proto=0, flags=0):
-    """Resolve one hostname without a non-daemon pool or queued retries."""
-    global _HTTP_RESOLVER_ACTIVE
-    loop = asyncio.get_running_loop()
-    result_future = loop.create_future()
-    with _HTTP_RESOLVER_LOCK:
-        if _HTTP_RESOLVER_ACTIVE:
-            raise socket.gaierror(socket.EAI_AGAIN, "resolver operation still active")
-        _HTTP_RESOLVER_ACTIVE = True
-
-    def resolve():
-        global _HTTP_RESOLVER_ACTIVE
+    """Resolve through the active macOS DNS path without blocking its Python resolver."""
+    if isinstance(host, bytes):
         try:
-            result = socket.getaddrinfo(host, port, family, type, proto, flags)
-        except BaseException as exc:
-            completion = (None, exc)
-        else:
-            completion = (result, None)
-        finally:
-            with _HTTP_RESOLVER_LOCK:
-                _HTTP_RESOLVER_ACTIVE = False
-
-        def finish():
-            if result_future.done():
-                return
-            value, error = completion
-            if error is None:
-                result_future.set_result(value)
-            else:
-                result_future.set_exception(error)
-
-        try:
-            loop.call_soon_threadsafe(finish)
-        except RuntimeError:
-            # The loop can only be closed during process teardown; never keep
-            # a completed resolver thread alive because its consumer vanished.
-            pass
-
-    resolver = threading.Thread(
-        target=resolve, name="agata-http-resolver", daemon=True,
-    )
+            host = host.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise socket.gaierror(socket.EAI_NONAME, "invalid hostname") from exc
     try:
-        resolver.start()
-    except BaseException:
-        with _HTTP_RESOLVER_LOCK:
-            _HTTP_RESOLVER_ACTIVE = False
-        raise
-    return await result_future
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    numeric_flags = flags | socket.AI_NUMERICHOST
+    if address is not None:
+        return socket.getaddrinfo(str(address), port, family, type, proto, numeric_flags)
+
+    if not isinstance(host, str) or not host or any(char.isspace() for char in host):
+        raise socket.gaierror(socket.EAI_NONAME, "invalid hostname")
+    if family in (0, socket.AF_UNSPEC):
+        query_types = ("A", "AAAA")
+    elif family == socket.AF_INET:
+        query_types = ("A",)
+    elif family == socket.AF_INET6:
+        query_types = ("AAAA",)
+    else:
+        raise socket.gaierror(socket.EAI_FAMILY, "unsupported address family")
+
+    async def query(record_type: str) -> list[str]:
+        process = await asyncio.create_subprocess_exec(
+            "/usr/bin/dig", "+time=2", "+tries=1", "+short", host, record_type,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            async with asyncio.timeout(DNS_LOOKUP_TIMEOUT_SECONDS):
+                stdout, _stderr = await process.communicate()
+        except TimeoutError as exc:
+            process.kill()
+            await process.wait()
+            raise socket.gaierror(socket.EAI_AGAIN, "DNS lookup timed out") from exc
+        if process.returncode != 0:
+            raise socket.gaierror(socket.EAI_AGAIN, "DNS lookup failed")
+        addresses = []
+        for item in stdout.decode("ascii", errors="ignore").splitlines():
+            try:
+                parsed = ipaddress.ip_address(item.strip())
+            except ValueError:
+                continue
+            if (record_type == "A" and parsed.version == 4) or (record_type == "AAAA" and parsed.version == 6):
+                addresses.append(str(parsed))
+        return addresses
+
+    resolved = await asyncio.gather(*(query(record_type) for record_type in query_types))
+    results = []
+    seen = set()
+    for addresses in resolved:
+        for resolved_address in addresses:
+            for item in socket.getaddrinfo(
+                resolved_address, port, family, type, proto, numeric_flags,
+            ):
+                identity = (item[0], item[1], item[2], item[4])
+                if identity not in seen:
+                    seen.add(identity)
+                    results.append(item)
+    if not results:
+        raise socket.gaierror(socket.EAI_NONAME, "hostname has no usable addresses")
+    return results
 
 
 def _run_http(coroutine):
@@ -1307,10 +1325,15 @@ def status() -> int:
             queue_snapshots[target] = _validated_queue_status(
                 target, target_request(target, "queue-status")
             )
-        except Exception:
+        except Exception as exc:
             # A missing or unavailable queue snapshot is deliberately not
             # replaced by cached data: lifecycle preflight must fail closed.
-            queue_snapshots[target] = {"queue_snapshot_state": "UNAVAILABLE"}
+            safe_error = str(exc)
+            queue_snapshots[target] = {
+                "queue_snapshot_state": "UNAVAILABLE",
+                **({"queue_snapshot_error_code": safe_error}
+                   if safe_error in SAFE_TARGET_ERROR_CODES else {}),
+            }
     try:
         pool_saved = json.loads(PoolPaths(SUPPORT).status_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
