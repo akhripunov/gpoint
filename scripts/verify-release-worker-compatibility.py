@@ -44,6 +44,24 @@ def verify_contract(values, gpoint_tenant, gsales_tenant, legacy_tenant=None, ex
     return {'compatibility': 'PASS'}
 
 
+def contract_evidence(values, gpoint_tenant, gsales_tenant, expected_credentials):
+    point_url = values.get('GPOINT_AGATA_WORKER_URL', 'https://gpoint.amiora.one/api/agata-worker').rstrip('/')
+    sales_url = values.get('GSALES_AGATA_WORKER_URL', '').rstrip('/')
+    return {
+        'protocols': {'GPOINT': point_url, 'GSALES': sales_url},
+        'tenants': {'GPOINT': gpoint_tenant, 'GSALES': gsales_tenant},
+        'lanes': {
+            'GPOINT': 'CONFIGURED' if values.get('GPOINT_AGATA_WORKER_TOKEN') else 'MISSING',
+            'GSALES': 'CONFIGURED' if values.get('GSALES_AGATA_WORKER_TOKEN') else 'MISSING',
+        },
+        'credentialParity': {
+            'GPOINT': 'MATCH' if values.get('GPOINT_AGATA_WORKER_TOKEN') == expected_credentials.get('GPOINT_AGATA_WORKER_TOKEN') else 'MISMATCH',
+            'GSALES': 'MATCH' if values.get('GSALES_AGATA_WORKER_TOKEN') == expected_credentials.get('GSALES_WORKER_TOKEN') else 'MISMATCH',
+            'distinct': 'YES' if values.get('GPOINT_AGATA_WORKER_TOKEN') != values.get('GSALES_AGATA_WORKER_TOKEN') else 'NO',
+        },
+    }
+
+
 # These values bypass load_env_file or select another config/support directory.
 CONTRACT_ENV_KEYS = ('HOME', 'GPOINT_AGATA_WORKER_CONFIG', 'GPOINT_AGATA_WORKER_SUPPORT',
     'GPOINT_AGATA_WORKER_LOCAL_TEST', 'GPOINT_AGATA_WORKER_URL', 'GPOINT_AGATA_WORKER_TOKEN',
@@ -79,8 +97,11 @@ def main():
     parser.add_argument('--candidate', required=True)
     parser.add_argument('--gpoint-tenant', required=True)
     parser.add_argument('--gsales-tenant', required=True)
+    parser.add_argument('--mode', choices=('preflight', 'apply'), default='apply')
     args = parser.parse_args()
-    assets = lane.verify_candidate(args.candidate)
+    source = lane.verify_candidate(args.candidate, allow_source_drift=True)
+    if args.mode == 'apply' and source['sourceStatus'] != 'EXACT_MATCH':
+        raise RuntimeError('installed_worker_candidate_hash_mismatch')
     inspect_launch_environment()
     values = lane.parse_env(lane.private_file(lane.CONFIG).decode())
     legacy = None
@@ -96,12 +117,27 @@ def main():
     if not isinstance(credentials, dict) or set(credentials) != {'GPOINT_AGATA_WORKER_TOKEN', 'GSALES_WORKER_TOKEN'}:
         raise RuntimeError('expected_credentials_missing')
     result = verify_contract(values, args.gpoint_tenant, args.gsales_tenant, legacy, credentials)
-    print(json.dumps({**result, 'candidateSha': args.candidate, 'assets': assets}))
+    print(json.dumps({**result, 'candidateSha': args.candidate, 'sourceStatus': source['sourceStatus'],
+        'assets': source['assets'], 'contract': contract_evidence(values, args.gpoint_tenant,
+        args.gsales_tenant, credentials)}))
 
 
 if __name__ == '__main__':
+    safe_reasons = {
+        'worker_tenant_contract_invalid', 'worker_lane_tenants_not_distinct',
+        'worker_lane_auth_config_missing', 'worker_lane_auth_config_mismatch',
+        'worker_lane_credentials_not_distinct', 'worker_gpoint_protocol_contract_mismatch',
+        'worker_gsales_protocol_contract_mismatch', 'worker_gpoint_tenant_contract_mismatch',
+        'worker_gpoint_tenant_contract_missing', 'worker_gsales_tenant_contract_mismatch',
+        'worker_launch_environment_invalid', 'worker_launch_contract_override',
+        'candidate_checkout_not_clean_exact_sha', 'installed_worker_asset_invalid',
+        'installed_worker_candidate_hash_mismatch', 'installed_launchagent_identity_invalid',
+        'protected_file_permissions_invalid', 'worker_launch_environment_unproven',
+        'expected_credentials_missing',
+    }
     try:
         main()
-    except Exception:
-        print('WORKER_COMPATIBILITY_BLOCKED', file=sys.stderr)
+    except Exception as exc:
+        reason = str(exc) if str(exc) in safe_reasons else 'worker_contract_check_failed'
+        print(f'WORKER_COMPATIBILITY_BLOCKED reason={reason}', file=sys.stderr)
         sys.exit(1)

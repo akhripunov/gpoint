@@ -46,25 +46,31 @@ def private_file(path):
     return path.read_bytes()
 
 
-def verify_candidate(candidate):
+def verify_candidate(candidate, *, allow_source_drift=False):
     if command(['git', 'rev-parse', 'HEAD']) != candidate or command(['git', 'status', '--porcelain']):
         raise RuntimeError('candidate_checkout_not_clean_exact_sha')
     hashes = {}
+    source_matches = []
     for name in ASSETS:
         source = REPO / 'services/agata/worker' / name
         installed = SUPPORT / 'runtime/current' / name
         if installed.is_symlink() or not installed.is_file():
             raise RuntimeError('installed_worker_asset_invalid')
         expected = hashlib.sha256(source.read_bytes()).hexdigest()
-        if hashlib.sha256(installed.read_bytes()).hexdigest() != expected:
+        actual = hashlib.sha256(installed.read_bytes()).hexdigest()
+        matches = actual == expected
+        source_matches.append(matches)
+        hashes[name] = {'candidateSha256': expected, 'installedSha256': actual, 'matches': matches}
+        if not matches and not allow_source_drift:
             raise RuntimeError('installed_worker_candidate_hash_mismatch')
-        hashes[name] = expected
     plist = plistlib.loads(private_file(HOME / 'Library/LaunchAgents' / (LABEL + '.plist')))
     runtime = SUPPORT / 'runtime/current'
     if (plist.get('Label') != LABEL or plist.get('ProgramArguments') != [str(runtime / 'run_codex_worker.sh'), 'watch']
             or plist.get('WorkingDirectory') != str(runtime) or plist.get('RunAtLoad') is not True or plist.get('KeepAlive') is not True):
         raise RuntimeError('installed_launchagent_identity_invalid')
-    return hashes
+    if allow_source_drift:
+        return {'sourceStatus': 'EXACT_MATCH' if all(source_matches) else 'CANDIDATE_DIFFERS', 'assets': hashes}
+    return {name: value['candidateSha256'] for name, value in hashes.items()}
 
 
 def verified_pid():

@@ -468,6 +468,39 @@ class WorkerCompatibilityTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError,'candidate_hash_mismatch'):
                     self.contract.lane.verify_candidate('a'*40)
 
+    def test_read_only_preflight_reports_candidate_worker_source_drift_without_weakening_apply(self):
+        import tempfile
+        import plistlib
+        with tempfile.TemporaryDirectory() as temporary:
+            base=Path(temporary); repo=base/'repo'; home=base/'home'
+            support=home/'Library/Application Support/GPoint/agata-codex-worker'
+            runtime=support/'runtime/current'; source=repo/'services/agata/worker'
+            source.mkdir(parents=True); runtime.mkdir(parents=True)
+            for name in self.contract.lane.ASSETS:
+                (source/name).write_text('candidate source '+name)
+                (runtime/name).write_text('installed source '+name if name=='gpoint_mac_worker.py' else 'candidate source '+name)
+            launch_agents=home/'Library/LaunchAgents'; launch_agents.mkdir(parents=True)
+            plist=launch_agents/(self.contract.lane.LABEL+'.plist')
+            plist.write_bytes(plistlib.dumps({'Label':self.contract.lane.LABEL,
+                'ProgramArguments':[str(runtime/'run_codex_worker.sh'),'watch'],
+                'WorkingDirectory':str(runtime),'RunAtLoad':True,'KeepAlive':True}))
+            plist.chmod(0o600)
+            def git_command(args):
+                return self.point if args[1:3]==['rev-parse','HEAD'] else ''
+            with patch.object(self.contract.lane,'REPO',repo), patch.object(self.contract.lane,'HOME',home), \
+                 patch.object(self.contract.lane,'SUPPORT',support), patch.object(self.contract.lane,'command',side_effect=git_command):
+                evidence=self.contract.lane.verify_candidate(self.point, allow_source_drift=True)
+                self.assertEqual(evidence['sourceStatus'],'CANDIDATE_DIFFERS')
+                self.assertFalse(evidence['assets']['gpoint_mac_worker.py']['matches'])
+                self.assertTrue(evidence['assets']['agata_worker_pool.py']['matches'])
+                with self.assertRaisesRegex(RuntimeError,'candidate_hash_mismatch'):
+                    self.contract.lane.verify_candidate(self.point)
+
+    def test_dry_run_uses_read_only_worker_compatibility_and_apply_stays_strict(self):
+        source=(ROOT/'scripts/release-gpoint.mjs').read_text()
+        self.assertRegex(source,r'const workerCompatibility = verifyWorkerCompatibility\(candidate, baseline\.facts, [\'\"]preflight[\'\"]\)')
+        self.assertRegex(source,r'const workerCompatibility = verifyWorkerCompatibility\(candidate, baseline\.facts, [\'\"]apply[\'\"]\)')
+
     def test_compatibility_is_independent_of_live_worker_health(self):
         self.assertEqual(self.contract.verify_contract(self.values,self.point,self.sales), {'compatibility':'PASS'})
 
@@ -476,6 +509,18 @@ class WorkerCompatibilityTests(unittest.TestCase):
         self.assertEqual(self.contract.verify_contract(self.values,self.point,self.sales,expected_credentials=expected), {'compatibility':'PASS'})
         with self.assertRaises(RuntimeError):
             self.contract.verify_contract(self.values,self.point,self.sales,expected_credentials={**expected,'GSALES_WORKER_TOKEN':'other-test'})
+
+    def test_read_only_contract_evidence_reports_lanes_without_credentials(self):
+        expected={'GPOINT_AGATA_WORKER_TOKEN':'point-test','GSALES_WORKER_TOKEN':'sales-test'}
+        evidence=self.contract.contract_evidence(self.values,self.point,self.sales,expected)
+        self.assertEqual(evidence['protocols'],{
+            'GPOINT':'https://gpoint.amiora.one/api/agata-worker',
+            'GSALES':'https://gpoint.amiora.one/gsales/agata-worker'})
+        self.assertEqual(evidence['tenants'],{'GPOINT':self.point,'GSALES':self.sales})
+        self.assertEqual(evidence['lanes'],{'GPOINT':'CONFIGURED','GSALES':'CONFIGURED'})
+        self.assertEqual(evidence['credentialParity'],{'GPOINT':'MATCH','GSALES':'MATCH','distinct':'YES'})
+        self.assertNotIn('point-test',repr(evidence))
+        self.assertNotIn('sales-test',repr(evidence))
 
     def test_incompatible_gateway_tenant_or_lane_credentials_block_before_apply(self):
         for change in ({'GSALES_AGATA_WORKER_URL':'https://wrong.invalid/worker'},
