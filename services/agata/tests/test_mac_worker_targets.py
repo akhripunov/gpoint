@@ -322,7 +322,7 @@ def test_orphan_lab_slot_lock_prevents_startup_from_marking_live_job_ambiguous(t
     paths = PoolPaths(tmp_path)
     paths.ensure()
     slot_dir = paths.slot_dir("slot-01")
-    slot_dir.mkdir(parents=True)
+    slot_dir.mkdir(parents=True, exist_ok=True)
     (slot_dir / "state.json").write_text(json.dumps({
         "state": "BUSY", "lane": "LAB", "job_id": "lab-active-1", "phase": "INFERENCE_STARTED",
     }))
