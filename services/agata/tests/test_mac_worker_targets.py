@@ -10,6 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "worker"))
 import gpoint_mac_worker as worker
+from agata_worker_pool import PoolConfig, PoolPaths, PoolSupervisor
 
 ENV = {
     "GPOINT_AGATA_WORKER_URL": "https://gpoint.amiora.one/api/agata-worker",
@@ -225,6 +226,62 @@ def test_lab_lane_is_permanent_and_missing_approval_closes_only_inference(tmp_pa
     assert "LAB" in supervisor.claimers
     assert supervisor.lab_gate_status() == "CLOSED_NO_APPROVAL"
     assert not (tmp_path / "runtime/current").exists()
+
+
+def test_status_preserves_permanent_lab_contract_from_real_pool_serialization(tmp_path, monkeypatch, capsys):
+    """The real pool writer and status CLI must not let stale operational state hide LAB presence."""
+    paths = PoolPaths(tmp_path)
+    paths.ensure()
+    # Reproduce a legacy operational snapshot left by the old Worker before the
+    # three-slot supervisor writes its canonical permanent-LAB lane contract.
+    paths.worker_status_file.write_text(json.dumps({
+        "targets": {
+            "GPOINT": {"state": "idle"},
+            "GSALES": {"state": "idle"},
+            "LAB": {"state": "idle", "inference_gate": "CLOSED_NO_APPROVAL"},
+        },
+    }))
+    supervisor = PoolSupervisor(
+        paths, PoolConfig(),
+        {"GPOINT": lambda: None, "GSALES": lambda: None, "LAB": lambda: None},
+        lab_gate_status=lambda: "CLOSED_NO_APPROVAL",
+    )
+    try:
+        assert supervisor.poll_once() == 0
+    finally:
+        supervisor.close()
+
+    monkeypatch.setattr(worker, "SUPPORT", tmp_path)
+    monkeypatch.setattr(worker, "STATUS", paths.worker_status_file)
+    monkeypatch.setattr(worker, "load_worker_configs", lambda: None)
+    monkeypatch.setattr(worker, "configured_targets", lambda: {"GPOINT": (), "GSALES": ()})
+    monkeypatch.setattr(worker.shutil, "which", lambda _name: None)
+
+    def target_request(target, path, body=None):
+        if path == "health":
+            return {"status": "ok"}
+        return {
+            "lane": target,
+            "source_id": f"agata-worker-queue-status-v1:{target.lower()}",
+            "pending_jobs": 0,
+            "running_jobs": 0,
+            "snapshot_at": "2026-10-08T10:00:00Z",
+        }
+
+    monkeypatch.setattr(worker, "target_request", target_request)
+    assert worker.status() == 0
+    result = json.loads(capsys.readouterr().out)
+
+    # Production lane interfaces keep their legacy operational state while the
+    # LAB lifecycle contract is sourced from the actual pool serialization.
+    assert result["lanes"]["GPOINT"]["state"] == "idle"
+    assert result["lanes"]["GSALES"]["state"] == "idle"
+    assert result["lanes"]["GPOINT"]["pool_state"] == "HEALTHY"
+    assert result["lanes"]["GSALES"]["pool_state"] == "HEALTHY"
+    assert result["lanes"]["LAB"]["state"] == "AVAILABLE"
+    assert result["lanes"]["LAB"]["presence"] == "PERMANENT"
+    assert result["lanes"]["LAB"]["inference_gate"] == "CLOSED_NO_APPROVAL"
+    assert result["lanes"]["LAB"]["operational_state"] == "idle"
 
 
 def test_once_command_uses_single_pool_even_when_legacy_lab_flag_is_absent(monkeypatch):

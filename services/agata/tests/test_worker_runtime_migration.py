@@ -2055,11 +2055,16 @@ def test_restart_snapshot_requires_exact_runtime_identity_and_all_lanes(tmp_path
     assert evidence["checks"]["lab_approval_fail_closed"] is True
     assert evidence["worker_status"]["configured_concurrency"] == 1
     assert set(evidence["worker_status"]["lanes"]) == {"GPOINT", "GSALES", "LAB"}
+    if lab_status.get("presence"):
+        assert evidence["worker_status"]["lanes"]["LAB"]["presence"] == "PERMANENT"
 
 
 @pytest.mark.parametrize("lab_status", [
     {"state": "AVAILABLE", "presence": "PERMANENT", "inference_gate": "OPEN_APPROVED"},
     {"state": "DEGRADED", "presence": "PERMANENT", "inference_gate": "CLOSED_NO_APPROVAL"},
+    {"state": "AVAILABLE", "inference_gate": "CLOSED_NO_APPROVAL"},
+    {"state": "AVAILABLE", "presence": "TEMPORARY", "inference_gate": "CLOSED_NO_APPROVAL"},
+    {"state": "UNKNOWN", "presence": "PERMANENT", "inference_gate": "CLOSED_NO_APPROVAL"},
 ])
 def test_restart_snapshot_does_not_treat_open_or_broken_lab_gate_as_closed(tmp_path, monkeypatch, lab_status):
     root = tmp_path / "AGATA Workers"
