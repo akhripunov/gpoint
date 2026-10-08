@@ -1195,8 +1195,12 @@ def test_non_404_queue_failure_never_uses_live_runtime_bootstrap(tmp_path, monke
                         subprocess.CompletedProcess(command, 0, json.dumps(status), ""))
     monkeypatch.setattr(migration, "_read_live_runtime_queue_snapshot",
                         lambda *_args: pytest.fail("live bootstrap must be limited to endpoint 404"))
-    with pytest.raises(RuntimeError, match="production_queue_status_unavailable"):
+    with pytest.raises(migration.PreflightFailure, match="production_queue_status_unavailable") as raised:
         migration._read_production_queue_status()
+
+    assert raised.value.reason_code == "queue_snapshot_error_not_allowlisted"
+    assert raised.value.lane == "GPOINT"
+    assert raised.value.safe_fields["queue_snapshot_error_code"] == "worker_gateway_network_error"
 
 
 def test_worker_status_timeout_has_structured_reason_code(tmp_path, monkeypatch):
@@ -1534,7 +1538,7 @@ def test_queue_retry_budget_enforces_one_common_deadline(monkeypatch):
         ("UNKNOWN", None, None, "lane_health_invalid"),
         ("DEGRADED", "worker_gateway_auth_error", "worker_gateway_http_404",
          "lane_health_queue_error_combination_disallowed"),
-        ("HEALTHY", None, "worker_gateway_http_403", "authoritative_queue_snapshot_unavailable"),
+        ("HEALTHY", None, "worker_gateway_http_403", "queue_snapshot_error_not_allowlisted"),
     ),
 )
 def test_local_health_and_queue_error_states_have_structured_reasons(
@@ -1583,7 +1587,9 @@ def test_preflight_receipt_is_private_structured_and_contains_no_raw_evidence(tm
     monkeypatch.setattr(migration, "ROOT", root)
     failure = migration.PreflightFailure(
         "authoritative_vps_snapshot_timeout", stage="authoritative_vps_snapshot", lane="GPOINT",
-        safe_fields={"runner_exit_code": 124}, error_category="transport", exit_class="transient_transport",
+        safe_fields={"runner_exit_code": 124, "queue_snapshot_error_code": "worker_gateway_network_error",
+                     "health_error_code": "private.example"},
+        error_category="transport", exit_class="transient_transport",
     )
 
     attempts = [{
@@ -1608,6 +1614,8 @@ def test_preflight_receipt_is_private_structured_and_contains_no_raw_evidence(tm
     assert receipt["runner_exit_code"] == 124
     assert receipt["error_category"] == "transport"
     assert receipt["exit_class"] == "transient_transport"
+    assert receipt["queue_snapshot_error_code"] == "worker_gateway_network_error"
+    assert "health_error_code" not in receipt
     assert receipt["started_at"] == "2026-10-08T09:59:59+00:00"
     assert receipt["finished_at"]
     assert receipt["attempts"][0]["lane"] == "GPOINT"
@@ -1616,7 +1624,8 @@ def test_preflight_receipt_is_private_structured_and_contains_no_raw_evidence(tm
     assert receipt_path.stat().st_mode & 0o777 == 0o600
     serialized = json.dumps(receipt)
     assert "tenant" not in serialized
-    assert "queue_snapshot" not in serialized
+    assert "pending_inference_jobs" not in serialized
+    assert "queue_snapshot_provenance" not in serialized
     assert "private.example" not in serialized and "secret queue payload" not in serialized
     assert str(tmp_path) not in serialized
     assert "stderr" not in receipt and "stdout" not in receipt

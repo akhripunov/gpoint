@@ -55,6 +55,14 @@ QUEUE_SOURCE_RE = re.compile(
     r":api=(sha256:[0-9a-f]{64}):core=(sha256:[0-9a-f]{64})"
     r":tenant=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
 )
+SAFE_DIAGNOSTIC_ERROR_CODES = frozenset({
+    "worker_claim_invalid", "worker_claim_target_mismatch", "worker_config_permissions_invalid",
+    "worker_gateway_auth_rejected", "worker_gateway_http_404", "worker_gateway_network_error",
+    "worker_gateway_or_auth_unconfigured", "worker_gateway_response_invalid", "worker_gateway_transport_error",
+    "worker_gateway_url_invalid", "worker_pool_config_key_invalid", "worker_target_invalid",
+    "worker_target_unconfigured", "worker_tenant_binding_invalid", "worker_tenants_must_be_distinct",
+    "worker_targets_must_be_distinct",
+})
 
 
 class PreflightFailure(RuntimeError):
@@ -74,6 +82,11 @@ class PreflightFailure(RuntimeError):
             key: value for key, value in (safe_fields or {}).items()
             if key in self.SAFE_FIELDS and isinstance(value, int) and not isinstance(value, bool)
         }
+        self.safe_fields.update({
+            key: value for key, value in (safe_fields or {}).items()
+            if key in {"health_error_code", "queue_snapshot_error_code"}
+            and isinstance(value, str) and value in SAFE_DIAGNOSTIC_ERROR_CODES
+        })
         self.receipt_written = False
         inferred_category = "unknown"
         inferred_exit_class = "unknown"
@@ -1026,16 +1039,19 @@ def _refresh_local_pool_evidence(status: dict) -> None:
             raise PreflightFailure("lane_health_invalid", stage="lane_health_validation", lane=lane,
                                    legacy_error="production_queue_status_unavailable")
         if not _live_snapshot_fallback_allowed(value):
-            if value.get("health") != "HEALTHY" and value.get("queue_snapshot_error_code") == "worker_gateway_http_404":
+            queue_error = value.get("queue_snapshot_error_code")
+            if value.get("health") != "HEALTHY" and queue_error == "worker_gateway_http_404":
                 raise PreflightFailure("lane_health_queue_error_combination_disallowed",
                                        stage="lane_health_validation", lane=lane,
                                        legacy_error="production_queue_status_unavailable")
             if value.get("health") != "HEALTHY":
                 raise PreflightFailure("lane_health_invalid", stage="lane_health_validation", lane=lane,
                                        legacy_error="production_queue_status_unavailable")
-            raise PreflightFailure("authoritative_queue_snapshot_unavailable",
+            raise PreflightFailure("queue_snapshot_error_not_allowlisted",
                                    stage="queue_snapshot", lane=lane,
-                                   legacy_error="production_queue_status_unavailable")
+                                   safe_fields={"queue_snapshot_error_code": queue_error},
+                                   legacy_error="production_queue_status_unavailable",
+                                   error_category="queue", exit_class="unknown")
     try:
         local = inventory()
     except Exception as exc:
@@ -1137,9 +1153,11 @@ def _read_production_queue_status(manifest: dict | None = None, *,
                                        legacy_error="production_queue_status_unavailable")
             if health != "HEALTHY":
                 raise PreflightFailure("lane_health_invalid", stage="lane_health_validation", lane=lane)
-            raise PreflightFailure("authoritative_queue_snapshot_unavailable",
+            raise PreflightFailure("queue_snapshot_error_not_allowlisted",
                                    stage="queue_snapshot", lane=lane,
-                                   legacy_error="production_queue_status_unavailable")
+                                   safe_fields={"queue_snapshot_error_code": queue_error},
+                                   legacy_error="production_queue_status_unavailable",
+                                   error_category="queue", exit_class="unknown")
     _refresh_local_pool_evidence(status)
     try:
         candidate_manifest = manifest or candidate()
