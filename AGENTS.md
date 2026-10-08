@@ -2,10 +2,11 @@
 
 ## Canonical Sources
 
-- GitHub `origin/main` is the durable source of application code. Verify repository state and exact SHA before release work.
+- GitHub `origin/main` is the durable source of application code and `AGENTS.md` instructions; the Linear AGENTS mirror is a synchronized copy, never an independent release policy. Verify repository state and exact SHA before release work.
 - OWNER policy and frozen Release Orchestrator V2: [Правила релиза GPoint](https://linear.app/bestuzhev/document/pravila-reliza-gpoint-183dba239394), current canonical block first. Release history: [Журнал релизов](https://linear.app/bestuzhev/document/zhurnal-relizov-640efa60dacf); it is not fresh runtime evidence.
 - Technical authorization: [docs/RELEASE_AUTHORIZATION.md](docs/RELEASE_AUTHORIZATION.md). Release procedures and executable behavior: [docs/release/automation.md](docs/release/automation.md), workflows, scripts, and tests. Keep detailed procedures there.
 - For design work, use the repo-local [gpoint-design skill](.agents/skills/gpoint-design/SKILL.md).
+- For editable Pen work, use the canonical connected Pen MCP/CLI only; Computer Use/GUI may inspect but must not modify canvas, files, artboards, or properties. Validate render/read-back and preserve OWNER visual approval.
 
 ## Safety & Release Invariants
 
