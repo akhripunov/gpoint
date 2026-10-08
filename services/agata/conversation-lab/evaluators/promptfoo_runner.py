@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -19,10 +21,67 @@ if str(_WORKER_DIR) not in sys.path:
 if str(_EVALUATORS_DIR) not in sys.path:
     sys.path.insert(0, str(_EVALUATORS_DIR))
 import worker_client  # noqa: E402
+from preinference_diagnostics import write_preinference_failure  # noqa: E402
 FORBIDDEN_ENV_KEYS = frozenset({"OPENAI_API_KEY", "CODEX_API_KEY"})
 MINIMAL_ENV_KEYS = frozenset({"PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "CODEX_HOME", "PROMPTFOO_PYTHON", "PROMPTFOO_DISABLE_TELEMETRY", "PROMPTFOO_CONFIG_DIR", "GPOINT_AGATA_WORKER_SUPPORT", "AGATA_WORKER_ROOT", "AGATA_LAB_APPROVAL_FILE"})
 EVAL_TIMEOUT_SECONDS = 300
 PROCESS_TERMINATION_GRACE_SECONDS = 5
+MIN_PROMPTFOO_NODE_VERSION = (22, 22, 0)
+
+
+def resolve_promptfoo_node(env: Mapping[str, str], *, node_executable: str | None = None) -> Path:
+    """Resolve and verify the Node runtime needed by the pinned Promptfoo CLI."""
+    candidate = node_executable or shutil.which("node", path=env.get("PATH", ""))
+    if candidate is None:
+        # The Lab caller may intentionally pass a minimal environment. Resolve
+        # the already-installed runtime from this process without forwarding its
+        # environment to Promptfoo.
+        candidate = shutil.which("node", path=os.environ.get("PATH", ""))
+    if candidate is None:
+        raise PermissionError("Promptfoo requires an installed Node.js runtime")
+    path = Path(candidate).expanduser().resolve()
+    if not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):
+        raise PermissionError("Promptfoo Node.js runtime is unavailable")
+    check_env = {"PATH": str(path.parent)}
+    for key in ("HOME", "TMPDIR", "LANG", "LC_ALL"):
+        if env.get(key):
+            check_env[key] = env[key]
+    try:
+        result = subprocess.run([str(path), "--version"], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                timeout=5, check=True, text=True, env=check_env)
+        match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", result.stdout.strip())
+        if match is None or tuple(map(int, match.groups())) < MIN_PROMPTFOO_NODE_VERSION:
+            raise ValueError("unsupported Node.js version")
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise PermissionError("Promptfoo requires verified Node.js 22.22.0 or newer") from exc
+    return path
+
+
+def ensure_promptfoo_node_path(env: Mapping[str, str], *, node_executable: str | None = None) -> str:
+    """Add only the verified Node directory to the child-only Promptfoo PATH."""
+    node = resolve_promptfoo_node(env, node_executable=node_executable)
+    existing = env.get("PATH", "")
+    entries = [item for item in existing.split(os.pathsep) if item]
+    node_dir = str(node.parent)
+    return os.pathsep.join([node_dir, *[entry for entry in entries if entry != node_dir]])
+
+
+def _preflight_call(function, *, receipts: Path, invocation_id: str,
+                    stage: str, reason_code: str, source_location: str):
+    try:
+        return function()
+    except BaseException as exc:
+        try:
+            write_preinference_failure(
+                receipts, invocation_id=invocation_id, stage=stage,
+                reason_code=reason_code, exception=exc, source_location=source_location,
+            )
+        except (OSError, PermissionError, ValueError, FileExistsError):
+            # Keep the original validation failure visible; receipt-write
+            # failures must never replace its exception or trigger a retry.
+            pass
+        raise
 
 
 def _check_config_for_api_auth(value: object, path: str = "config") -> None:
@@ -59,7 +118,9 @@ def validate_live_environment(env: Mapping[str, str], provider_config: Mapping[s
 def build_cli_environment(env: Mapping[str, str]) -> dict[str, str]:
     """Return only shell essentials needed by Promptfoo/Codex; never forward secrets."""
     allowed = set(MINIMAL_ENV_KEYS) | {"AGATA_LAB_CALL_LEDGER", "AGATA_LAB_QUEUE", "AGATA_LAB_PRIVATE_RECEIPTS"}
-    return {key: env[key] for key in sorted(allowed) if key in env and env[key]}
+    result = {key: env[key] for key in sorted(allowed) if key in env and env[key]}
+    result["PATH"] = ensure_promptfoo_node_path(result)
+    return result
 
 
 def validate_promptfoo_python(executable: str, env: Mapping[str, str]) -> Path:
@@ -325,29 +386,59 @@ def run_promptfoo_v2_dev_eval(
     import worker_client
 
     source_env = os.environ if env is None else env
+    diagnostic_root = Path(private_receipt_directory)
+    def check(function, stage, reason_code, location):
+        return _preflight_call(function, receipts=diagnostic_root,
+                              invocation_id=invocation_id, stage=stage,
+                              reason_code=reason_code, source_location=location)
+
     limits = {"conversation_arms": 8, "generator_invocations": 32, "judge_invocations": 15}
-    if (getattr(call_ledger, "durable", False) is not True or not call_ledger.verify_persisted()
-            or call_ledger.snapshot().get("limits") != limits
-            or getattr(call_ledger, "journal_path", None) is None):
-        raise PermissionError("V2 Promptfoo eval requires a verified durable call ledger")
-    config = build_worker_v2_provider_request(
+    def validate_ledger():
+        if (getattr(call_ledger, "durable", False) is not True or not call_ledger.verify_persisted()
+                or call_ledger.snapshot().get("limits") != limits
+                or getattr(call_ledger, "journal_path", None) is None):
+            raise PermissionError("V2 Promptfoo eval requires a verified durable call ledger")
+    check(validate_ledger, "GENERATOR_RESERVATION", "DURABLE_LEDGER_INVALID",
+          "promptfoo_runner.run_promptfoo_v2_dev_eval")
+    config = check(lambda: build_worker_v2_provider_request(
         request, run_id=run_id, invocation_id=invocation_id, arm_id=arm_id,
         configuration_id=configuration_id, scenario_id=scenario_id,
         turn_index=turn_index, history_receipt_ids=history_receipt_ids,
         python_executable=source_env.get("PROMPTFOO_PYTHON") or sys.executable,
-    )
-    validate_live_environment(source_env, config)
-    validate_promptfoo_python(config["providers"][0]["config"]["pythonExecutable"], source_env)
-    validate_promptfoo_cli(promptfoo_executable)
-    queue = worker_client.canonical_lab_queue(source_env)
+    ), "IMMUTABLE_V2_JOB_CONTRACT", "V2_JOB_CONTRACT_INVALID",
+       "promptfoo_runner.run_promptfoo_v2_dev_eval")
+    forbidden_keys = {key for key in source_env
+                      if key in FORBIDDEN_ENV_KEYS or key.upper().endswith("_API_KEY")}
+    if forbidden_keys:
+        check(lambda: (_ for _ in ()).throw(PermissionError("API-key environment is forbidden")),
+              "ENV_VALIDATION", "API_KEY_ENV_FORBIDDEN", "promptfoo_runner.validate_live_environment")
+    check(lambda: _check_config_for_api_auth(config), "PROVIDER_CONFIG",
+          "PROVIDER_AUTH_CONFIG_FORBIDDEN", "promptfoo_runner._check_config_for_api_auth")
+    check(lambda: validate_live_environment(source_env, config), "ENV_VALIDATION",
+          "WORKER_PROVIDER_ROUTE_INVALID", "promptfoo_runner.validate_live_environment")
+    check(lambda: validate_promptfoo_python(
+        config["providers"][0]["config"]["pythonExecutable"], source_env),
+        "PYTHON_VALIDATION", "PYTHON_RUNTIME_INVALID", "promptfoo_runner.validate_promptfoo_python")
+    check(lambda: resolve_promptfoo_node(build_cli_environment(source_env)),
+          "PROMPTFOO_CLI_VALIDATION", "NODE_RUNTIME_INVALID",
+          "promptfoo_runner.resolve_promptfoo_node")
+    check(lambda: validate_promptfoo_cli(promptfoo_executable), "PROMPTFOO_CLI_VALIDATION",
+          "PROMPTFOO_VERSION_OR_EXECUTABLE_INVALID", "promptfoo_runner.validate_promptfoo_cli")
+    queue = check(lambda: worker_client.canonical_lab_queue(source_env), "LAB_QUEUE_VALIDATION",
+                  "CANONICAL_LAB_QUEUE_INVALID", "promptfoo_runner.run_promptfoo_v2_dev_eval")
     requested_queue = Path(worker_queue).expanduser()
     if requested_queue.absolute() != queue.absolute() or requested_queue.resolve(strict=False) != queue.resolve(strict=False):
-        raise PermissionError("Promptfoo V2 may submit only to the canonical LAB queue")
+        check(lambda: (_ for _ in ()).throw(PermissionError("noncanonical queue")),
+              "LAB_QUEUE_VALIDATION", "CANONICAL_LAB_QUEUE_MISMATCH",
+              "promptfoo_runner.run_promptfoo_v2_dev_eval")
     if turn_index == 0:
         state_path = queue / "state" / "v2-approval-phase.json"
         if not state_path.is_file():
-            raise PermissionError("V2 Phase A approval state is not active")
-    child_env = build_cli_environment(source_env)
+            check(lambda: (_ for _ in ()).throw(PermissionError("V2 phase state unavailable")),
+                  "PHASE_STATE_VALIDATION", "PHASE_STATE_INACTIVE",
+                  "promptfoo_runner.run_promptfoo_v2_dev_eval")
+    child_env = check(lambda: build_cli_environment(source_env), "PROMPTFOO_CLI_VALIDATION",
+                      "PROMPTFOO_CHILD_ENV_INVALID", "promptfoo_runner.build_cli_environment")
     child_env.update({
         "PROMPTFOO_DISABLE_TELEMETRY": "1",
         "AGATA_LAB_CALL_LEDGER": str(call_ledger.journal_path),
@@ -373,10 +464,16 @@ def run_promptfoo_v2_dev_eval(
         rows = call_ledger.snapshot()["generator_invocations"]["invocations"]
         ledger_row = next((row for row in rows if row.get("invocation_id") == invocation_id), None)
         if ledger_row is None:
-            raw_detail = (result.stderr or "").strip()
-            detail = (raw_detail[:1200] + (" … " + raw_detail[-600:] if len(raw_detail) > 1800 else ""))
-            raise RuntimeError("Promptfoo exited without reserving the V2 generator attempt" +
-                               (f": {detail}" if detail else ""))
+            exc = RuntimeError("Promptfoo exited before durable generator reservation")
+            try:
+                write_preinference_failure(
+                    diagnostic_root, invocation_id=invocation_id,
+                    stage="PROMPTFOO_CLI_VALIDATION", reason_code="CLI_EXITED_BEFORE_RESERVATION",
+                    exception=exc, source_location="promptfoo_runner.run_promptfoo_v2_dev_eval",
+                )
+            except (OSError, PermissionError, ValueError, FileExistsError):
+                pass
+            raise exc
         if result.returncode != 0:
             if ledger_row.get("outcome") is None:
                 call_ledger.complete("generator", invocation_id, "ambiguous")

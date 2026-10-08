@@ -1,6 +1,8 @@
 import importlib.util
 import json
 import hashlib
+import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -75,8 +77,119 @@ class WorkerPromptfooRunnerTests(unittest.TestCase):
 
     def test_promptfoo_python_preflight_rejects_older_runtime(self):
         with patch.object(runner.subprocess, "run", return_value=SimpleNamespace(stdout="3.9\n")):
-            with self.assertRaisesRegex(PermissionError, "Python 3.11\+"):
+            with self.assertRaisesRegex(PermissionError, r"Python 3.11\+"):
                 runner.validate_promptfoo_python(sys.executable, {"PATH": "/usr/bin"})
+
+    def test_restricted_promptfoo_path_adds_verified_node_without_changing_parent_environment(self):
+        node = "/Users/akhripuniov/.local/bin/node"
+        parent_path = os.environ.get("PATH")
+        child_path = runner.ensure_promptfoo_node_path({"PATH": "/usr/bin:/bin"}, node_executable=node)
+        self.assertEqual(child_path.split(":")[0], str(Path(node).resolve().parent))
+        self.assertIn("/usr/bin:/bin", child_path)
+        self.assertEqual(os.environ.get("PATH"), parent_path)
+
+    def test_promptfoo_01231_cli_runs_with_the_same_restricted_child_path(self):
+        cli = LAB / "tooling/promptfoo/node_modules/.bin/promptfoo"
+        restricted_path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        if shutil.which("node", path=restricted_path):
+            self.skipTest("the canonical restricted PATH already contains Node on this host")
+        original = subprocess.run([str(cli), "--version"],
+                                  env={"PATH": restricted_path, "HOME": "/tmp"},
+                                  capture_output=True, text=True, timeout=15)
+        self.assertEqual(original.returncode, 127)
+        self.assertIn("env: node: No such file or directory", original.stderr)
+        env = runner.build_cli_environment({"PATH": restricted_path, "HOME": "/tmp"})
+        result = subprocess.run([str(cli), "--version"], env=env, capture_output=True,
+                                text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "0.123.1")
+        self.assertTrue(Path(env["PATH"].split(":")[0], "node").is_file())
+
+    def test_preinference_receipt_is_private_and_contains_no_error_or_secret_payload(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); root.chmod(0o700)
+            path = runner.write_preinference_failure(
+                root, invocation_id="inv-safe-1", stage="ENV_VALIDATION",
+                reason_code="API_KEY_AUTH_FORBIDDEN", exception=PermissionError("sk-secret prompt text"),
+                source_location="promptfoo_runner.run_promptfoo_v2_dev_eval",
+            )
+            payload = json.loads(path.read_text())
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(payload["stage"], "ENV_VALIDATION")
+            self.assertEqual(payload["reason_code"], "API_KEY_AUTH_FORBIDDEN")
+            self.assertEqual(payload["exception_class"], "PermissionError")
+            self.assertFalse(payload["generator_reservation_created"])
+            self.assertFalse(payload["worker_job_submitted"])
+            self.assertNotIn("sk-secret", path.read_text())
+            self.assertNotIn("prompt text", path.read_text())
+
+    def test_v2_runner_preflight_failures_record_stage_specific_safe_receipts(self):
+        cases = {
+            "provider": ("PROVIDER_CONFIG", "PROVIDER_AUTH_CONFIG_FORBIDDEN"),
+            "environment": ("ENV_VALIDATION", "API_KEY_ENV_FORBIDDEN"),
+            "python": ("PYTHON_VALIDATION", "PYTHON_RUNTIME_INVALID"),
+            "cli": ("PROMPTFOO_CLI_VALIDATION", "NODE_RUNTIME_INVALID"),
+            "queue": ("LAB_QUEUE_VALIDATION", "CANONICAL_LAB_QUEUE_INVALID"),
+            "phase": ("PHASE_STATE_VALIDATION", "PHASE_STATE_INACTIVE"),
+            "job": ("IMMUTABLE_V2_JOB_CONTRACT", "V2_JOB_CONTRACT_INVALID"),
+            "ledger": ("GENERATOR_RESERVATION", "DURABLE_LEDGER_INVALID"),
+        }
+        for name, expected in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp); root.chmod(0o700)
+                receipts = root / "receipts"; receipts.mkdir(mode=0o700)
+                support = root / "support"
+                ledger = new_ledger(temp)
+                config = {"providers": [{
+                    "id": "file://" + str(PROVIDER_PATH.resolve()),
+                    "config": {"pythonExecutable": sys.executable},
+                }]}
+                env = {"PATH": "/usr/bin:/bin", "HOME": str(root),
+                       "PROMPTFOO_PYTHON": sys.executable,
+                       "GPOINT_AGATA_WORKER_SUPPORT": str(support)}
+                if name == "environment":
+                    env["OPENAI_API_KEY"] = "sentinel-not-for-receipt"
+                if name == "provider":
+                    config["providers"][0]["config"]["api_key"] = "sentinel-not-for-receipt"
+                if name == "ledger":
+                    ledger.durable = False
+                patches = []
+                if name != "job":
+                    patches.append(patch.object(runner, "build_worker_v2_provider_request", return_value=config))
+                patches.append(patch.object(runner, "validate_promptfoo_cli", return_value="0.123.1"))
+                if name == "python":
+                    patches.append(patch.object(runner, "validate_promptfoo_python",
+                                                side_effect=PermissionError("python rejected")))
+                if name == "cli":
+                    patches.append(patch.object(runner, "resolve_promptfoo_node",
+                                                side_effect=PermissionError("node rejected")))
+                if name == "queue":
+                    patches.append(patch.object(runner.worker_client, "canonical_lab_queue",
+                                                side_effect=PermissionError("queue rejected")))
+                if name == "job":
+                    patches.append(patch.object(runner, "build_worker_v2_provider_request",
+                                                side_effect=PermissionError("contract rejected")))
+                for mocked in patches:
+                    mocked.start()
+                try:
+                    with self.assertRaises(PermissionError):
+                        runner.run_promptfoo_v2_dev_eval(
+                            {"user_message": "synthetic"}, run_id="run-safe", invocation_id="inv-safe",
+                            arm_id="run-safe-baseline", configuration_id="baseline", scenario_id="dev-safe",
+                            turn_index=0, history_receipt_ids=[], promptfoo_executable="/fake/promptfoo",
+                            worker_queue=support / "queues/lab", private_receipt_directory=receipts,
+                            call_ledger=ledger, env=env,
+                            eval_runner=lambda *args, **kwargs: self.fail("preflight reached Promptfoo"),
+                        )
+                finally:
+                    for mocked in reversed(patches):
+                        mocked.stop()
+                receipt = receipts / "inv-safe.preinference-diagnostic.json"
+                payload = json.loads(receipt.read_text())
+                self.assertEqual((payload["stage"], payload["reason_code"]), expected)
+                self.assertFalse(payload["generator_reservation_created"])
+                self.assertFalse(payload["worker_job_submitted"])
+                self.assertNotIn("sentinel-not-for-receipt", receipt.read_text())
 
     def test_eval_uses_promptfoo_and_only_explicit_nonsecret_lab_environment(self):
         with tempfile.TemporaryDirectory() as temp:
