@@ -3,6 +3,18 @@ name: GPoint — Prepare
 on:
   push:
     branches: [main]
+    # AGATA Worker / Conversation Lab run and test locally on the owner's Mac.
+    # A pure Worker/Lab/docs change must not consume GitHub-hosted Actions minutes.
+    # Mixed changes to production paths still run the normal GPoint Prepare.
+    paths-ignore:
+      - '.github/workflows/gpoint-prepare.yml'
+      - 'services/agata/worker/**'
+      - 'services/agata/conversation-lab/**'
+      - 'services/agata/tests/*worker*.py'
+      - 'services/agata/tests/*conversation_lab*.py'
+      - 'scripts/*worker*'
+      - 'scripts/*lab*'
+      - 'docs/**'
   workflow_dispatch:
 
 permissions:
