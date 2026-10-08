@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,6 +26,26 @@ def payload(job_id: str = "job-001") -> dict:
     )
     job["timeout_seconds"] = 20
     return job
+
+
+def judge_payload(job_id="judge-job-001", *, split="DEV"):
+    from judges import CORE_IDS, judge_output_schema
+    verdict = {"overall": "first", "core_dimensions": {name: "first" for name in CORE_IDS},
+               "conditional_evidence": {}, "reasons": ["Direct and coherent."], "defects": [],
+               "uncertainty": False, "position_sensitivity": False}
+    invocation_id = "batch-a-judge-1"
+    return {
+        "job_id": job_id, "job_type": "judge", "experiment_id": "agata-lab-judge-v1",
+        "configuration_id": "judge-1", "origin": "conversation-lab-judge", "scenario_id": "dev-clean-01",
+        "turn_index": 0, "data_classification": "synthetic", "dataset_split": split,
+        "timeout_seconds": 60, "history_receipt_ids": [], "judge_slot": 1,
+        "promptfoo_invocation_id": invocation_id, "judge_schema_version": 1,
+        "presented_labels": ["X", "Y"], "model": "gpt-6-luna", "reasoning_effort": "medium",
+        "request": {"instructions": "AGATA Lab isolated judge protocol v1.", "persona": {},
+                    "communication_settings": {}, "memories": [], "dialogue_summaries": [],
+                    "history": [], "user_message": "Compare anonymous X and Y."},
+        "_test_verdict": verdict,
+    }
 
 
 class LabQueueTests(unittest.TestCase):
@@ -148,6 +169,56 @@ class LabQueueTests(unittest.TestCase):
         lab_queue.finish(self.root, "slot-receipt", status="completed", slot_id="slot-03")
         receipt = lab_queue.read_receipt(self.root, "slot-receipt")
         self.assertEqual(receipt["slot_id"], "slot-03")
+
+    def test_judge_job_is_source_verified_and_uses_strict_structured_verdict(self):
+        job = judge_payload("judge-" + hashlib.sha256(b"batch-a-judge-1").hexdigest()[:58])
+        verdict = job.pop("_test_verdict")
+        lab_queue.submit(job, root=self.root)
+        claimed = lab_queue.claim_next(self.root)
+        self.assertEqual(claimed["job_type"], "judge")
+        self.assertEqual(claimed["origin"], "conversation-lab-judge")
+        self.assertEqual(claimed["dataset_split"], "DEV")
+        self.assertTrue(lab_queue.validate_judge_verdict(verdict))
+
+    def test_judge_job_rejects_wrong_source_holdout_and_model(self):
+        for field, value in (("origin", "conversation-lab"), ("dataset_split", "SEALED_HOLDOUT"),
+                             ("model", "gpt-6.1-sol"), ("reasoning_effort", "high")):
+            job = judge_payload("bad-" + field)
+            job.pop("_test_verdict")
+            job[field] = value
+            with self.subTest(field=field), self.assertRaises(lab_queue.LabQueueError):
+                lab_queue.submit(job, root=self.root)
+
+    def test_judge_verdict_rejects_missing_dimensions_and_private_metadata(self):
+        from judges import CORE_IDS
+        valid = {"overall": "first", "core_dimensions": {name: "first" for name in CORE_IDS},
+                 "conditional_evidence": {}, "reasons": ["Direct."], "defects": [],
+                 "uncertainty": False, "position_sensitivity": False}
+        incomplete = dict(valid)
+        incomplete["core_dimensions"] = {name: "first" for name in CORE_IDS[:-1]}
+        with self.assertRaises(lab_queue.LabQueueError):
+            lab_queue.validate_judge_verdict(incomplete)
+        contaminated = dict(valid, private_mapping={"X": "baseline"})
+        with self.assertRaises(lab_queue.LabQueueError):
+            lab_queue.validate_judge_verdict(contaminated)
+
+    def test_judge_job_builder_pins_one_slot_and_nonsealed_split(self):
+        job = worker_client.build_judge_job(
+            "anonymous rubric and X/Y pair", batch_id="batch-a", scenario_id="dev-clean-01",
+            dataset_split="DEV", judge_slot=2, presented_labels=["Y", "X"],
+        )
+        self.assertEqual(job["origin"], "conversation-lab-judge")
+        self.assertEqual(job["experiment_id"], "agata-lab-judge-v1")
+        self.assertEqual(job["configuration_id"], "judge-2")
+        self.assertEqual(job["job_type"], "judge")
+        self.assertEqual(job["model"], "gpt-6-luna")
+        self.assertEqual(job["reasoning_effort"], "medium")
+        self.assertEqual(job["presented_labels"], ["Y", "X"])
+        with self.assertRaises(PermissionError):
+            worker_client.build_judge_job(
+                "prompt", batch_id="batch-a", scenario_id="sealed-01", dataset_split="SEALED_HOLDOUT",
+                judge_slot=1, presented_labels=["X", "Y"],
+            )
 
 if __name__ == "__main__":
     unittest.main()

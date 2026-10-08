@@ -84,6 +84,18 @@ class DeterministicAggregatorTests(unittest.TestCase):
         rows = receipts(); rows[0]["core_dimension_positions"]["unexpected"] = "first"
         self.assertIn("OUT_OF_RUBRIC_CORE_DIMENSIONS", self.decide(rows)["reason_codes"])
 
+    def test_declared_position_sensitivity_and_critical_defect_escalate(self):
+        rows = receipts()
+        rows[0]["position_sensitivity"] = True
+        result = self.decide(rows)
+        self.assertEqual(result["decision"], "HUMAN_ESCALATION")
+        self.assertIn("ORDER_SENSITIVE", result["reason_codes"])
+        rows = receipts()
+        rows[2]["critical_defects"] = ["PERSONA_CONTRADICTION"]
+        result = self.decide(rows)
+        self.assertEqual(result["decision"], "HUMAN_ESCALATION")
+        self.assertIn("CONDITIONAL_CRITICAL_EVIDENCE", result["reason_codes"])
+
 
 if __name__ == "__main__":
     unittest.main()

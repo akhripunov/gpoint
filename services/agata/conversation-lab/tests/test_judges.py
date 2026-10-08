@@ -94,6 +94,47 @@ class JudgeIsolationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             judges.judge_inputs(packet(6), json.loads(RUBRIC.read_text()), batch_id="batch-too-large")
 
+    def test_structured_verdict_is_validated_and_normalized_without_private_mapping(self):
+        self.require_module()
+        dimensions = {key: "first" for key in judges.CORE_IDS}
+        raw = json.dumps({
+            "overall": "first",
+            "core_dimensions": dimensions,
+            "conditional_evidence": {"memory": {"applicable": False, "winner": "not_applicable", "reason": "not tested"}},
+            "reasons": ["The first conversation follows the request directly."],
+            "defects": [],
+            "uncertainty": False,
+            "position_sensitivity": False,
+        })
+        receipt = judges.parse_judge_output(raw, judge_slot=1, scenario_id="dev-a", presented_labels=["X", "Y"])
+        self.assertEqual(receipt["preferred_position"], "first")
+        self.assertEqual(receipt["core_dimension_positions"], dimensions)
+        self.assertEqual(receipt["judge_slot"], 1)
+        self.assertEqual(receipt["critical_defects"], [])
+
+    def test_missing_dimension_or_extra_private_output_fails_closed(self):
+        self.require_module()
+        raw = {"overall": "first", "core_dimensions": {key: "first" for key in judges.CORE_IDS[:-1]},
+               "conditional_evidence": {}, "reasons": ["ok"], "defects": [],
+               "uncertainty": False, "position_sensitivity": False}
+        with self.assertRaises(ValueError):
+            judges.parse_judge_output(json.dumps(raw), judge_slot=1, scenario_id="dev-a", presented_labels=["X", "Y"])
+        raw["core_dimensions"][judges.CORE_IDS[-1]] = "first"
+        raw["private_mapping"] = {"X": "baseline"}
+        with self.assertRaises(ValueError):
+            judges.parse_judge_output(json.dumps(raw), judge_slot=1, scenario_id="dev-a", presented_labels=["X", "Y"])
+
+    def test_defect_uncertainty_and_position_sensitivity_are_receipt_evidence(self):
+        self.require_module()
+        raw = {"overall": "uncertain", "core_dimensions": {key: "tie" for key in judges.CORE_IDS},
+               "conditional_evidence": {}, "reasons": ["The comparison is uncertain."],
+               "defects": [{"code": "PERSONA_CONTRADICTION", "severity": "critical", "position": "first", "reason": "Identity changed."}],
+               "uncertainty": True, "position_sensitivity": True}
+        receipt = judges.parse_judge_output(json.dumps(raw), judge_slot=2, scenario_id="dev-a", presented_labels=["Y", "X"])
+        self.assertEqual(receipt["critical_defects"], ["PERSONA_CONTRADICTION"])
+        self.assertTrue(receipt["uncertainty"])
+        self.assertTrue(receipt["position_sensitivity"])
+
 
 if __name__ == "__main__":
     unittest.main()

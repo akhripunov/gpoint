@@ -118,13 +118,11 @@ class PrivateReceiptTests(unittest.TestCase):
                 receipts.write_private_receipt(path, receipt)
 
     def test_owner_packet_stays_blind_and_contains_no_private_receipt_or_judge_verdict(self):
-        scenario = {"scenario_id": "synthetic-dev-001", "category": "daily", "context": {},
-                    "character_context": {}, "memory_fixture": [], "expected_behavior": ["respond naturally"],
-                    "failure_patterns": ["invented facts"], "dialogue_turns": [
-                        {"role": "user", "text": "Привет"}, {"role": "assistant", "response_slot": True}]}
+        scenario = json.loads((LAB / "data/golden/synthetic/v2-dev-scenarios.jsonl").read_text().splitlines()[0])
         results = [
             {"scenario_id": scenario["scenario_id"], "model_id": model, "status": "success",
-             "turns": [{"role": "user", "text": "Привет"}, {"role": "assistant", "text": reply}]}
+             "turns": [{"role": turn["role"], "text": turn["text"]} if turn["role"] == "user"
+                       else {"role": "assistant", "text": reply} for turn in scenario["dialogue_turns"]]}
             for model, reply in (("baseline", "Привет."), ("naturalness-v1", "Привет!"))]
         packet, private = blind.make_v2_blind_packets([scenario], results, batch_id="receipt-blind-batch")
         public_text = json.dumps(packet, ensure_ascii=False)

@@ -5,7 +5,14 @@ import copy
 import hashlib
 import json
 import random
+import sys
+from pathlib import Path
 from typing import Mapping
+
+WORKER_DIR = Path(__file__).resolve().parents[2] / "worker"
+if str(WORKER_DIR) not in sys.path:
+    sys.path.insert(0, str(WORKER_DIR))
+import lab_queue  # noqa: E402
 
 
 CORE_IDS = (
@@ -143,9 +150,15 @@ def judge_inputs(packet, rubric, *, batch_id, judge_count=3):
             presented = [{"display_position": "first", "turns": pair[order[0]]},
                          {"display_position": "second", "turns": pair[order[1]]}]
             prompt = (
-                "Independently compare these two anonymous complete conversations. "
-                "Use only the supplied rubric. Return structured JSON; choose first, second, tie, or uncertain. "
-                "Do not infer model identity or mention evaluation metadata.\n"
+                "You are one independent conversation-quality judge. Evaluate only this pair and the rubric; "
+                "do not infer model identity, coordinate with another judge, or mention evaluation metadata. "
+                "Persona brief: AGATA is a woman and uses feminine self-reference; the current synthetic user is a man, "
+                "so use masculine address when Russian grammar requires it. Report defects without rewriting either transcript. "
+                "Return exactly the structured JSON schema: overall (first|second|tie|uncertain), core_dimensions "
+                "(all eight rubric IDs mapped to first|second|tie), conditional_evidence (applicable dimensions only, "
+                "each with applicable, winner, reason), reasons (1-8 concise strings), defects (0-16 objects with "
+                "code, severity critical|major|minor, position first|second|both, reason), uncertainty (boolean), "
+                "position_sensitivity (boolean). No extra keys.\n"
                 + json.dumps({"rubric": rubric_for_prompt, "pair": presented}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             )
             prompts.append({"scenario_id": scenario["scenario_id"], "prompt": prompt})
@@ -177,3 +190,43 @@ def normalize_choice(choice, presented_order):
     if choice not in {"first", "second"}:
         raise ValueError("judge choice must be first, second, tie, or uncertain")
     return presented_order[0 if choice == "first" else 1]
+
+
+def judge_output_schema() -> dict:
+    """Strict schema passed to Worker Codex Local for structured judge output."""
+    return lab_queue.judge_output_schema()
+
+
+def parse_judge_output(text: str, *, judge_slot: int, scenario_id: str, presented_labels: list[str]) -> dict:
+    """Validate exact structured output, then normalize it to aggregator receipts."""
+    if type(judge_slot) is not int or judge_slot not in {1, 2, 3}:
+        raise ValueError("judge slot must be 1, 2, or 3")
+    if not isinstance(scenario_id, str) or not scenario_id.strip():
+        raise ValueError("judge scenario identity is required")
+    if not isinstance(presented_labels, list) or len(presented_labels) != 2 or set(presented_labels) != {"X", "Y"}:
+        raise ValueError("judge presentation must be an X/Y permutation")
+    try:
+        value = json.loads(text)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("judge output is not valid JSON") from exc
+    try:
+        lab_queue.validate_judge_verdict(value)
+    except lab_queue.LabQueueError as exc:
+        raise ValueError(str(exc)) from exc
+    dimensions = value["core_dimensions"]
+    conditional = value["conditional_evidence"]
+    reasons = value["reasons"]
+    defects = value["defects"]
+    return {
+        "judge_slot": judge_slot,
+        "scenario_id": scenario_id,
+        "presented_labels": list(presented_labels),
+        "preferred_position": "uncertain" if value["uncertainty"] else value["overall"],
+        "core_dimension_positions": dict(dimensions),
+        "conditional_evidence": copy.deepcopy(conditional),
+        "reasons": list(reasons),
+        "defects": copy.deepcopy(defects),
+        "critical_defects": [row["code"] for row in defects if row["severity"] == "critical"],
+        "uncertainty": value["uncertainty"],
+        "position_sensitivity": value["position_sensitivity"],
+    }

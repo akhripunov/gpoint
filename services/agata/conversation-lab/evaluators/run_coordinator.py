@@ -342,6 +342,16 @@ class CallLedger:
             result["journal_sha256"] = hashlib.sha256(self.journal_path.read_bytes()).hexdigest()
         return result
 
+    def refresh(self):
+        """Reload durable events written by a Promptfoo provider child process."""
+        lock_fd = self._refresh_under_lock()
+        try:
+            return self.snapshot()
+        finally:
+            if lock_fd is not None:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                os.close(lock_fd)
+
     def verify_persisted(self):
         if not self.durable or self.journal_path is None or not self.journal_path.is_file():
             return False

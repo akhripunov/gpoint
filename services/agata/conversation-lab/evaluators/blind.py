@@ -91,6 +91,14 @@ def make_v2_blind_packets(scenarios, results, *, batch_id):
     """Use reproducible X/Y assignment derived from immutable V2 batch identity."""
     if not isinstance(batch_id, str) or not batch_id.strip():
         raise ValueError("immutable V2 batch identity is required")
+    import importlib.util
+    provenance_path = Path(__file__).with_name("v2_provenance.py")
+    provenance_spec = importlib.util.spec_from_file_location("agata_v2_blind_provenance", provenance_path)
+    if provenance_spec is None or provenance_spec.loader is None:
+        raise PermissionError("V2 provenance validator is unavailable")
+    provenance = importlib.util.module_from_spec(provenance_spec)
+    provenance_spec.loader.exec_module(provenance)
+    source_provenance = provenance.validate_source_scenarios(scenarios)
     if not isinstance(results, list) or {row.get("model_id") for row in results if isinstance(row, dict)} != {"baseline", "naturalness-v1"}:
         raise ValueError("V2 blindness requires exactly the Baseline and Naturalness V1 arms")
     source = {"batch_id": batch_id, "scenarios": scenarios, "result_hashes": [fingerprint(row) for row in results]}
@@ -99,4 +107,13 @@ def make_v2_blind_packets(scenarios, results, *, batch_id):
     packet, private = make_blind_packets(scenarios, results, seed)
     private["batch_id"] = batch_id
     private["batch_sha256"] = fingerprint(source)
+    private.update(source_provenance)
+    private["blind_packet_sha256"] = fingerprint(packet)
+    for mapping in private["mappings"]:
+        candidate = next(
+            item for scenario in packet["scenarios"] if scenario["scenario_id"] == mapping["scenario_id"]
+            for item in scenario["candidates"] if item["label"] == mapping["label"]
+        )
+        mapping["blind_candidate_sha256"] = fingerprint(candidate)
+    private["mapping_sha256"] = fingerprint(private["mappings"])
     return packet, private

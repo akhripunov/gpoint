@@ -29,6 +29,15 @@ JOB_KEYS = {
     "job_id", "experiment_id", "configuration_id", "origin", "scenario_id",
     "turn_index", "data_classification", "timeout_seconds", "history_receipt_ids", "request",
 }
+JUDGE_EXPERIMENT_ID = "agata-lab-judge-v1"
+JUDGE_INSTRUCTIONS = "AGATA Lab isolated judge protocol v1."
+JUDGE_SLOT_ID = "slot-03"
+JUDGE_CORE_DIMENSIONS = (
+    "naturalness", "human_likeness", "emotional_appropriateness", "persona_consistency",
+    "initiative", "less_ai_template_like", "conversation_coherence", "direct_request_fulfillment_responsiveness",
+)
+JUDGE_CONDITIONAL_DIMENSIONS = ("memory", "disagreement_boundaries", "humor_flirt", "engagement")
+JUDGE_PRIVATE_MARKERS = ("baseline", "naturalness-v1", "candidate_sha", "model_id", "gpt-6-luna", "policy text", "judge 1", "judge 2", "judge 3")
 
 
 class LabQueueError(RuntimeError):
@@ -174,6 +183,73 @@ def _read_fixture_manifest() -> dict:
     return value
 
 
+def judge_output_schema() -> dict:
+    """Single source of truth for the versioned Worker/Lab judge verdict contract."""
+    return {
+        "type": "object", "additionalProperties": False,
+        "properties": {
+            "overall": {"type": "string", "enum": ["first", "second", "tie", "uncertain"]},
+            "core_dimensions": {"type": "object", "additionalProperties": False,
+                "properties": {key: {"type": "string", "enum": ["first", "second", "tie"]} for key in JUDGE_CORE_DIMENSIONS},
+                "required": list(JUDGE_CORE_DIMENSIONS)},
+            "conditional_evidence": {"type": "object", "additionalProperties": False,
+                "properties": {key: {"type": "object", "additionalProperties": False,
+                    "properties": {"applicable": {"type": "boolean"}, "winner": {"type": "string", "enum": ["first", "second", "tie", "not_applicable"]}, "reason": {"type": "string", "maxLength": 500}},
+                    "required": ["applicable", "winner", "reason"]} for key in JUDGE_CONDITIONAL_DIMENSIONS}},
+            "reasons": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "minLength": 1, "maxLength": 500}},
+            "defects": {"type": "array", "maxItems": 16, "items": {"type": "object", "additionalProperties": False,
+                "properties": {"code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,63}$"}, "severity": {"type": "string", "enum": ["critical", "major", "minor"]}, "position": {"type": "string", "enum": ["first", "second", "both"]}, "reason": {"type": "string", "minLength": 1, "maxLength": 500}},
+                "required": ["code", "severity", "position", "reason"]}},
+            "uncertainty": {"type": "boolean"},
+            "position_sensitivity": {"type": "boolean"},
+        },
+        "required": ["overall", "core_dimensions", "conditional_evidence", "reasons", "defects", "uncertainty", "position_sensitivity"],
+    }
+
+
+def validate_judge_verdict(value: object) -> bool:
+    """Validate parsed Codex judge JSON against the strict LAB-only schema."""
+    import re
+    if not isinstance(value, dict) or set(value) != set(judge_output_schema()["required"]):
+        raise LabQueueError("judge_verdict_schema_invalid")
+    if value["overall"] not in {"first", "second", "tie", "uncertain"}:
+        raise LabQueueError("judge_verdict_schema_invalid")
+    dimensions = value["core_dimensions"]
+    if not isinstance(dimensions, dict) or set(dimensions) != set(JUDGE_CORE_DIMENSIONS) or any(
+            winner not in {"first", "second", "tie"} for winner in dimensions.values()):
+        raise LabQueueError("judge_verdict_dimensions_invalid")
+    conditional = value["conditional_evidence"]
+    if not isinstance(conditional, dict) or set(conditional) - set(JUDGE_CONDITIONAL_DIMENSIONS):
+        raise LabQueueError("judge_verdict_conditional_invalid")
+    for item in conditional.values():
+        if (not isinstance(item, dict) or set(item) != {"applicable", "winner", "reason"}
+                or type(item["applicable"]) is not bool
+                or item["winner"] not in {"first", "second", "tie", "not_applicable"}
+                or not isinstance(item["reason"], str) or len(item["reason"]) > 500):
+            raise LabQueueError("judge_verdict_conditional_invalid")
+    reasons = value["reasons"]
+    if (not isinstance(reasons, list) or not 1 <= len(reasons) <= 8
+            or any(not isinstance(reason, str) or not reason.strip() or len(reason) > 500 for reason in reasons)):
+        raise LabQueueError("judge_verdict_reasons_invalid")
+    defects = value["defects"]
+    if not isinstance(defects, list) or len(defects) > 16:
+        raise LabQueueError("judge_verdict_defects_invalid")
+    for defect in defects:
+        if (not isinstance(defect, dict) or set(defect) != {"code", "severity", "position", "reason"}
+                or not isinstance(defect["code"], str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", defect["code"])
+                or defect["severity"] not in {"critical", "major", "minor"}
+                or defect["position"] not in {"first", "second", "both"}
+                or not isinstance(defect["reason"], str) or not defect["reason"].strip() or len(defect["reason"]) > 500):
+            raise LabQueueError("judge_verdict_defects_invalid")
+    if type(value["uncertainty"]) is not bool or type(value["position_sensitivity"]) is not bool:
+        raise LabQueueError("judge_verdict_flags_invalid")
+    for text in reasons + [defect["reason"] for defect in defects]:
+        lowered = text.casefold()
+        if any(marker in lowered for marker in JUDGE_PRIVATE_MARKERS):
+            raise LabQueueError("judge_verdict_private_metadata")
+    return True
+
+
 def read_promptfoo_compat_fixture() -> dict:
     """Read the separately pinned one-turn technical fixture; never load dataset splits."""
     try:
@@ -195,13 +271,13 @@ def read_promptfoo_compat_fixture() -> dict:
 
 
 def _validate(job: object, *, root: Path) -> tuple[dict, bytes]:
-    if not isinstance(job, dict) or not JOB_KEYS <= set(job) or set(job) - (JOB_KEYS | {"model", "reasoning_effort"}):
+    if not isinstance(job, dict) or not JOB_KEYS <= set(job):
         raise LabQueueError("job_schema_invalid")
     for field in ("job_id", "experiment_id", "configuration_id"):
         value = job.get(field)
         if not isinstance(value, str) or not ID_RE.fullmatch(value):
             raise LabQueueError("job_identity_invalid")
-    if job["origin"] != "conversation-lab" or job["data_classification"] != "synthetic":
+    if job["data_classification"] != "synthetic":
         raise LabQueueError("lab_origin_or_data_classification_invalid")
     if (not isinstance(job["scenario_id"], str) or not ID_RE.fullmatch(job["scenario_id"])
             or isinstance(job["turn_index"], bool) or not isinstance(job["turn_index"], int)
@@ -218,10 +294,38 @@ def _validate(job: object, *, root: Path) -> tuple[dict, bytes]:
             or not all(isinstance(request[key], dict) for key in ("persona", "communication_settings"))
             or not all(isinstance(request[key], list) for key in ("memories", "dialogue_summaries", "history"))):
         raise LabQueueError("lab_request_context_invalid")
-    if job["experiment_id"] == "promptfoo-worker-compat":
+    if job.get("experiment_id") == JUDGE_EXPERIMENT_ID:
+        judge_keys = JOB_KEYS | {"job_type", "dataset_split", "judge_slot", "promptfoo_invocation_id",
+                                 "judge_schema_version", "presented_labels", "model", "reasoning_effort"}
+        if (set(job) != judge_keys or job.get("job_type") != "judge"
+                or job.get("origin") != "conversation-lab-judge"
+                or job.get("dataset_split") not in {"DEV", "VALIDATION"}
+                or type(job.get("judge_schema_version")) is not int or job["judge_schema_version"] != 1
+                or type(job.get("judge_slot")) is not int or job["judge_slot"] not in {1, 2, 3}
+                or job.get("configuration_id") != f"judge-{job['judge_slot']}"
+                or not isinstance(job.get("promptfoo_invocation_id"), str)
+                or not ID_RE.fullmatch(job["promptfoo_invocation_id"])
+                or job.get("presented_labels") not in (["X", "Y"], ["Y", "X"])
+                or job.get("model") != "gpt-6-luna" or job.get("reasoning_effort") != "medium"
+                or job.get("turn_index") != 0 or job.get("history_receipt_ids") != []
+                or request["instructions"] != JUDGE_INSTRUCTIONS or request["persona"] != {}
+                or request["communication_settings"] != {} or request["memories"] != []
+                or request["dialogue_summaries"] != [] or request["history"] != []):
+            raise LabQueueError("judge_job_contract_invalid")
+        expected_job_id = "judge-" + hashlib.sha256(job["promptfoo_invocation_id"].encode()).hexdigest()[:58]
+        if job["job_id"] != expected_job_id:
+            raise LabQueueError("judge_job_correlation_invalid")
+        prompt = request["user_message"]
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 48 * 1024:
+            raise LabQueueError("judge_prompt_invalid")
+        lowered = prompt.casefold()
+        if any(marker in lowered for marker in JUDGE_PRIVATE_MARKERS):
+            raise LabQueueError("judge_prompt_private_metadata")
+    elif job["experiment_id"] == "promptfoo-worker-compat":
+        if set(job) != JOB_KEYS | {"model", "reasoning_effort"} or job["origin"] != "conversation-lab":
+            raise LabQueueError("job_schema_invalid")
         fixture = read_promptfoo_compat_fixture()
-        if (set(job) != JOB_KEYS | {"model", "reasoning_effort"}
-                or job["configuration_id"] != "compat"
+        if (job["configuration_id"] != "compat"
                 or job["scenario_id"] != fixture["scenario_id"] or job["turn_index"] != 0
                 or job["model"] != fixture["model"]
                 or job["reasoning_effort"] != fixture["reasoning_effort"]
@@ -236,7 +340,7 @@ def _validate(job: object, *, root: Path) -> tuple[dict, bytes]:
         if request["history"] != []:
             raise LabQueueError("lab_history_not_receipt_backed")
     elif job["experiment_id"] == "agata-naturalness-v1":
-        if set(job) != JOB_KEYS:
+        if set(job) != JOB_KEYS or job["origin"] != "conversation-lab":
             raise LabQueueError("job_schema_invalid")
         fixtures = _read_fixture_manifest()
         scenario = fixtures["scenarios"].get(job["scenario_id"])
@@ -396,9 +500,18 @@ def finish(
         receipt["error_code"] = re.sub(r"[^a-zA-Z0-9_-]", "_", error_code)[:64]
     if identity:
         receipt["identity"] = {
-            key: identity[key] for key in ("experiment_id", "configuration_id", "scenario_id", "turn_index")
+            key: identity[key] for key in ("experiment_id", "configuration_id", "scenario_id", "turn_index",
+                                           "job_type", "dataset_split", "judge_slot", "promptfoo_invocation_id",
+                                           "judge_schema_version", "presented_labels")
             if key in identity
         }
+        if identity.get("job_type") == "judge" and status == "completed":
+            try:
+                verdict = json.loads(response)
+                validate_judge_verdict(verdict)
+            except (TypeError, ValueError, json.JSONDecodeError, LabQueueError) as exc:
+                raise LabQueueError("judge_receipt_verdict_invalid") from exc
+            receipt["judge_verdict"] = verdict
     if execution:
         safe = {}
         for key in ("duration_ms", "timeout_seconds", "requested_model", "requested_reasoning_effort", "actual_model", "inference_started"):

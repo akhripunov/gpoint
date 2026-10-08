@@ -3,6 +3,7 @@ import json
 import hashlib
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -71,6 +72,11 @@ class WorkerPromptfooRunnerTests(unittest.TestCase):
                     eval_runner=lambda *args, **kwargs: invoked.append((args, kwargs)),
                 )
             self.assertEqual(invoked, [])
+
+    def test_promptfoo_python_preflight_rejects_older_runtime(self):
+        with patch.object(runner.subprocess, "run", return_value=SimpleNamespace(stdout="3.9\n")):
+            with self.assertRaisesRegex(PermissionError, "Python 3.11\+"):
+                runner.validate_promptfoo_python(sys.executable, {"PATH": "/usr/bin"})
 
     def test_eval_uses_promptfoo_and_only_explicit_nonsecret_lab_environment(self):
         with tempfile.TemporaryDirectory() as temp:
