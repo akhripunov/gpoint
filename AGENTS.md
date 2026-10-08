@@ -1,78 +1,39 @@
-# GPoint release rules
+# GPoint Project Instructions
 
-## Source of truth
+## Canonical Sources
 
-- GitHub `origin/main` is the only durable source of application source.
-- Production changes flow `Mac/repository → exact Git SHA → GitHub → immutable artifacts → VPS`.
-- Never copy source edits from the VPS back into GitHub.
-- Never release a dirty checkout, a branch name, `HEAD` without SHA verification, `latest`, or an unverified mutable image tag.
-- Production secrets and environment files stay outside Git.
+- GitHub `origin/main` is the durable source of application code and `AGENTS.md` instructions; the Linear AGENTS mirror is a synchronized copy, never an independent release policy. Verify repository state and exact SHA before release work.
+- OWNER policy and frozen Release Orchestrator V2: [Правила релиза GPoint](https://linear.app/bestuzhev/document/pravila-reliza-gpoint-183dba239394), current canonical block first. Release history: [Журнал релизов](https://linear.app/bestuzhev/document/zhurnal-relizov-640efa60dacf); it is not fresh runtime evidence.
+- Technical authorization: [docs/RELEASE_AUTHORIZATION.md](docs/RELEASE_AUTHORIZATION.md). Release procedures and executable behavior: [docs/release/automation.md](docs/release/automation.md), workflows, scripts, and tests. Keep detailed procedures there.
+- For design work, use the repo-local [gpoint-design skill](.agents/skills/gpoint-design/SKILL.md).
+- For editable Pen work, use the canonical connected Pen MCP/CLI only; Computer Use/GUI may inspect but must not modify canvas, files, artboards, or properties. Validate render/read-back and preserve OWNER visual approval.
 
-## Release gates
+## Safety & Release Invariants
 
-Every release must record the current production SHA and database migration head before mutation, then verify the exact candidate SHA on GitHub, build from an isolated clean checkout, prove API/Worker/Bot/Mini App artifact parity, render effective production configuration, create a GPoint-only backup when migrations are pending, migrate with `prisma migrate deploy`, switch runtime, run health/smoke checks, and persist a complete manifest.
+- Use only the canonical release flow, exact verified SHA, applicable `EXACT_SHA` or `TASK_SCOPED_AUTO` authorization, and all fail-closed gates. Successful main Prepare automatically starts controller read-only preflight; only its successful immutable `READY_FOR_OWNER` evidence plus applicable OWNER authorization permits production apply. A push alone is never apply authorization.
+- Never release a dirty checkout, branch name, unverified `HEAD`, mutable image tag, or artifact without exact immutable provenance. Never bypass approval, locks, backup/migration, compatibility, identity/parity, recovery, health, or other canonical gates.
+- Before an Actions dispatch, check for an existing run and do not create a duplicate. Do not cancel/rerun an active release without authority. Use only the supported CLI/API with exact workflow/SHA and supported status/log interfaces. Never use Computer Use or browser UI to manage Actions or production; if the supported path is unavailable, stop and report it.
+- The VPS is a runtime/artifact target, not a source-editing workspace. Publish source fixes through GitHub first; never copy VPS source edits back. Under GPoint work, never touch MAXIBOT files, containers, database, domain, or release state.
+- Release policies are strictly repository-scoped. GPoint and MAXIBOT are independent projects with separate canonical Linear documents, authorization records, workflows, runners, migration systems, artifacts, release ledgers, and production environments. Never apply one project's release procedure or authorization to the other. Shared OWNER restrictions apply to both only where explicitly stated. For cross-project work, resolve and verify each project's policy independently.
+- Keep production credentials, secrets, private user data, and environment files out of Git, Linear, and logs. Never assign the trusted GPoint production runner to untrusted PR work.
+- Record server deployment, Mac Worker readiness, and real user/end-to-end acceptance separately; heartbeat is not a user response. Never create synthetic production Messages jobs. Preserve Worker compatibility gates.
 
-The canonical entry point is `pnpm release:gpoint --dry-run --candidate <40-char-sha>`. Apply mode is deliberately fail-closed and requires an explicit operator confirmation. A release lock covers migration, runtime apply, and production-ref finalization; a stale lock is never silently removed.
+## Autonomous Execution
 
-## Release authorization modes
+Treat a complete OWNER-approved task or handoff as the contract. Check current repository state; plan, implement, test, review, correct, and document through acceptance. Resolve ordinary technical questions and reversible choices within scope. Do not reopen settled Compass/design decisions or request repeated approval for authorized work. Use applicable Superpowers without weakening gates.
 
-Use `docs/RELEASE_AUTHORIZATION.md` for the two OWNER authorization modes.
-Exact-SHA approval is the default. An explicit OWNER instruction to implement
-and deploy a named low-risk task authorizes one task-scoped release without a
-second SHA approval, only after the operator records and verifies the exact
-candidate, full unreleased diff and authorization in Linear. All technical
-release gates and production confirmation inputs remain mandatory. High-risk
-changes, failed gates and scope expansion stop this mode. This section governs
-approval semantics; the existing canonical tooling and invariants still apply.
+Delegate bounded work when useful, request Luna/Medium when supported, integrate results, and remain accountable. Diagnose and fix ordinary failures. Stop for a material unresolved decision, scope/authority boundary, required protected-operation approval, conflicting canonical rule, or objective blocker.
 
-## Automated release control
+Do not transfer secrets, personal data, sealed inputs, or private role-chat context except the exact minimum necessary and authorized. Updates do not block continued work. Autonomy grants no additional production, database, payment, security, or release authority.
 
-- GitHub workflows `GPoint — Prepare` and `GPoint — Deploy` implement the release flow described in `docs/release/automation.md`.
-- Prepare must succeed for the exact current main SHA, including publication of release facts to Linear. Deploy is manually dispatched from main with exact SHA: preflight is read-only; production mode requires explicit production approval. The shared Mac lock lives outside checkout at `~/.config/gpoint/release-production.lock`; legacy checkout locks also fail closed.
-- The production runner is repository-scoped, Mac-only and labelled `gpoint-production`; never assign it untrusted PR jobs. VPS secrets stay on the Mac/VPS.
-- CI artifacts are consumed by `GPOINT_RELEASE_BUNDLE`; verify successful GitHub run provenance, receipt/run ID, archive checksum and exact image IDs. Do not rebuild those application images during apply.
-- Compare the installed Mac worker source to the candidate before apply. A changed worker requires installation from the published candidate before resuming.
-- Technical COMPLETE and owner-confirmed Telegram replies are separate facts. Never create synthetic production Messages jobs or report heartbeat as an end-to-end reply.
-- Linear publication preserves architect-owned Handoff sections and existing journal history. Missing publication or an offline runner is a visible blocker, not a successful automation setup.
+## Role Selection
 
-## Release operations interface
+The root is role-neutral. Initialize exactly one role with `ROLE=DEV`, `ROLE=LAB`, or `ROLE=DEVOPS`; then read only its profile and required Linear context: [DEV](.codex/roles/dev.md), [LAB](.codex/roles/conversation-lab.md), or [DEVOPS](.codex/roles/devops.md). Without a role, ordinary research/auxiliary work is allowed, but no specialized workflow or role context loads. Titles do not select roles. Keep roles and histories separate; recommend a new chat when specialization changes unless OWNER directs otherwise. See [role initialization](docs/codex/role-bootstrap.md).
 
-- For any GPoint or MaxiBot release operation, do not use Computer Use, Chrome, mouse interaction, or GitHub Web UI to dispatch, approve, rerun, cancel, or coordinate workflows.
-- Dispatch GitHub Actions only through the authorized `gh workflow run` command or GitHub Actions API, with the exact workflow, SHA, and required inputs.
-- Check workflow status and logs only through GitHub MCP, GitHub API, or `gh run view/watch`.
-- Before dispatching, check whether the required workflow is already running. Never create a duplicate production Deploy, and do not cancel or rerun an active release unless necessary.
-- If CLI/API access, authorization, or the runner is unavailable, stop and report the concrete blocker. Do not fall back to browser UI or another unverified launch path.
+## Instruction Changes — GitHub Publication
 
-## VPS policy
+`AGENTS.md` is version-controlled; `origin/main` is canonical. Publish authorized changes through an isolated branch, commit, push, and PR. Changes to autonomy, authority, security, approval gates, or release rules require explicit OWNER approval before merge; CI alone is insufficient. Other documentation-only changes follow existing authorization and branch protection. Never bypass checks, approvals, or protection. Merge only when authorized and verify `origin/main`. Update a local main checkout only when clean and safe; never reset, switch, or update another active chat's worktree. No production deploy is needed for instruction changes. If blocked, report state, PR, and reason.
 
-The VPS is a runtime and artifact target, not a development workspace. Application fixes must be committed and pushed before deployment. MaxiBot files, containers, database, domain, and release state are outside GPoint scope and must not be touched.
+## Task Completion
 
-## GPoint UI/design skill
-
-- For GPoint UI/design, Pen, visual-reference, Golden, and design-to-React tasks, use the repo-local `gpoint-design` skill.
-
-## Canonical Pen workflow
-
-- For reference-image to editable-design work, use the connected `pencil` Pen MCP against `design/gpoint-design-system.pen`; the current Mac has no `pen` CLI in PATH.
-- Automated Pen editing must use Pen MCP/CLI only. Do not use Computer Use to open Finder, operate file dialogs, move canvas objects, or edit Pen properties; GUI inspection is diagnostic-only.
-- The required design chain is `design/references/*.png` → editable `.pen` layers/components → Pen screenshot/render → existing `tools/visual-diff/` comparison → bounded MCP correction loop → owner review.
-- A reference PNG is never the final flattened design layer. Reuse canonical GPoint tokens/components and keep new screens editable.
-- Screenshot/diff validation is required before reporting visual fidelity. Automated checks do not grant owner approval.
-
-## Clean worktree after task
-
-- After completing any GPoint task, leave the main repository either clean with verified changes committed and pushed, or explicitly BLOCKED with every remaining uncommitted file listed.
-- Do not report a task COMPLETE while unexplained tracked modifications remain.
-- Before starting the next task, verify `git status --porcelain` is empty.
-- The durable automation checks are `pnpm repo:clean:start` before work and
-  `pnpm repo:clean:end` before reporting completion; both must print `PASS`.
-
-## Server deploy vs Mac worker operational readiness
-
-Worker source/protocol/tenant/lane/API/schema compatibility remains a blocking
-pre-apply gate. Temporary polling/auth/status/network/heartbeat availability is
-non-blocking postdeploy dependency evidence, separately recorded as
-`workerOperationalStatus` and `overallServiceReadiness`; it cannot turn proven
-server COMPLETE into RECOVERY_REQUIRED or trigger rollback/redeploy. Recheck a
-completed dependency through `--recheck-worker` without changing VPS release.
-Real GSales inference acceptance is independent. See docs/release/automation.md.
+Run `pnpm repo:clean:start` before work and `pnpm repo:clean:end` before completion. Leave the worktree clean with committed/published changes, or report all remaining files and the blocker. New chats use current project instructions.
