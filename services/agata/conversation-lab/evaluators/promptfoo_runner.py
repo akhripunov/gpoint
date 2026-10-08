@@ -86,7 +86,7 @@ def build_provider_request(
         "description": "Offline-only Promptfoo provider preview; not authorized for live execution",
         "prompts": [prompt],
         "providers": [provider],
-        "tests": [{}],
+        "tests": [{"vars": {}}],
         "evaluateOptions": {"maxConcurrency": 1, "cache": False},
     }
     validate_live_environment({}, config)
@@ -203,7 +203,7 @@ def build_worker_provider_request(
         "description": "AGATA Conversation Lab compatibility invocation via Worker LAB",
         "prompts": [prompt],
         "providers": [provider],
-        "tests": [{}],
+        "tests": [{"vars": {}}],
         "evaluateOptions": {"maxConcurrency": 1, "cache": False},
     }
     _check_config_for_api_auth(config)

@@ -34,6 +34,13 @@ def new_ledger(temp):
 class WorkerPromptfooRunnerTests(unittest.TestCase):
     prompt = "Привет! Что тебе обычно нравится делать в спокойный выходной?"
 
+    def test_offline_preview_config_uses_valid_promptfoo_test_case(self):
+        with tempfile.TemporaryDirectory() as temp:
+            working_dir = Path(temp) / "empty"
+            working_dir.mkdir()
+            config = runner.build_provider_request(self.prompt, working_dir=str(working_dir))
+        self.assertEqual(config["tests"], [{"vars": {}}])
+
     def test_config_uses_exact_python_lab_provider_and_frozen_compat_fixture(self):
         config = runner.build_worker_provider_request(
             self.prompt, run_id="run-1", invocation_id="inv-1", scenario_id="promptfoo-compat-001")
@@ -43,7 +50,7 @@ class WorkerPromptfooRunnerTests(unittest.TestCase):
         self.assertEqual(provider["config"]["reasoning_effort"], "medium")
         self.assertEqual(provider["config"]["maxRetries"], 0)
         self.assertEqual(config["evaluateOptions"], {"maxConcurrency": 1, "cache": False})
-        self.assertEqual(config["tests"], [{}])
+        self.assertEqual(config["tests"], [{"vars": {}}])
         self.assertNotIn("fallbacks", provider["config"])
 
     def test_config_rejects_other_prompt_scenario_or_provider_configuration(self):
