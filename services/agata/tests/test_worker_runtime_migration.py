@@ -78,6 +78,182 @@ def test_canonical_installer_includes_exact_worker_bundle_assets():
     assert bundle_names == expected
 
 
+def test_lab_slot_pointer_switch_changes_only_lab_and_keeps_production_slots(tmp_path):
+    root = tmp_path / "worker"
+    runtime = root / "runtime"
+    slots = runtime / "slots"
+    old_sha, new_sha = "a" * 40, "b" * 40
+    (runtime / old_sha).mkdir(parents=True)
+    (runtime / new_sha).mkdir()
+    (runtime / old_sha).chmod(0o700)
+    (runtime / new_sha).chmod(0o700)
+    root.chmod(0o700)
+    runtime.chmod(0o700)
+    slots.mkdir(parents=True, exist_ok=True)
+    slots.chmod(0o700)
+    for lane in ("GPOINT", "GSALES", "LAB"):
+        lane_dir = slots / lane
+        lane_dir.mkdir(parents=True)
+        lane_dir.chmod(0o700)
+        (lane_dir / "current").symlink_to(os.path.relpath(runtime / old_sha, lane_dir))
+
+    previous = migration._replace_lane_runtime_pointer(root, "LAB", new_sha)
+
+    assert previous == "../../" + old_sha
+    assert (slots / "LAB/current").resolve() == runtime / new_sha
+    assert (slots / "GPOINT/current").resolve() == runtime / old_sha
+    assert (slots / "GSALES/current").resolve() == runtime / old_sha
+
+
+def test_lab_slot_install_is_fail_closed_when_live_supervisor_lacks_lane_pointer_contract(tmp_path, monkeypatch):
+    root = tmp_path / "worker"
+    current_release = root / "runtime" / "current-release"
+    current_release.mkdir(parents=True)
+    root.chmod(0o700)
+    (root / "runtime").chmod(0o700)
+    (current_release / "agata_worker_pool.py").write_text("legacy supervisor")
+    (root / "runtime/current").symlink_to(current_release)
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "TRANSITION_LOCK", tmp_path / "transition.lock")
+    monkeypatch.setattr(migration, "RELEASE_LOCK", tmp_path / "release.lock")
+    monkeypatch.setattr(migration, "_release_lock_busy", lambda: False)
+
+    with pytest.raises(RuntimeError, match="installed_supervisor_does_not_support_lane_runtime_pointers"):
+        migration.install_lab_slot()
+
+    assert not (root / "runtime/slots/LAB/current").exists()
+    assert (root / "runtime/current").resolve() == current_release
+
+
+def test_lab_slot_install_switches_only_lab_without_launchagent_or_production_gate(tmp_path, monkeypatch):
+    root = tmp_path / "worker"
+    runtime = root / "runtime"
+    old_sha, new_sha = "a" * 40, "b" * 40
+    old_release, new_release = runtime / old_sha, runtime / new_sha
+    old_release.mkdir(parents=True)
+    new_release.mkdir()
+    old_release.chmod(0o700)
+    new_release.chmod(0o700)
+    root.chmod(0o700)
+    runtime.chmod(0o700)
+    (old_release / "agata_worker_pool.py").write_text("def slot_runtime_current(lane): pass")
+    (runtime / "current").symlink_to(old_sha)
+    (runtime / "slots").mkdir()
+    (runtime / "slots").chmod(0o700)
+    for lane in ("GPOINT", "GSALES", "LAB"):
+        lane_dir = runtime / "slots" / lane
+        lane_dir.mkdir(parents=True)
+        lane_dir.chmod(0o700)
+        (lane_dir / "current").symlink_to(os.path.relpath(old_release, lane_dir))
+    (root / "slots/slot-03").mkdir(parents=True)
+    (root / "slots").chmod(0o700)
+    (root / "slots/slot-03").chmod(0o700)
+    (root / "receipts").mkdir()
+    (root / "receipts").chmod(0o700)
+    manifest = {"source_sha": new_sha, "bundle_sha256": "c" * 64, "assets": {}}
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "TRANSITION_LOCK", tmp_path / "transition.lock")
+    monkeypatch.setattr(migration, "RELEASE_LOCK", tmp_path / "release.lock")
+    monkeypatch.setattr(migration, "_release_lock_busy", lambda: False)
+    monkeypatch.setattr(migration, "candidate", lambda: manifest)
+    monkeypatch.setattr(migration, "_stage_runtime", lambda _manifest: new_release)
+    monkeypatch.setattr(migration, "_install_staged_runtime", lambda _staged, _manifest: new_release)
+    monkeypatch.setattr(migration, "_verify_staged_runtime", lambda _release, _manifest: None)
+
+    receipt = migration.install_lab_slot()
+
+    assert receipt["state"] == "COMPLETE"
+    assert receipt["scope"] == "LAB_SLOT_ONLY"
+    assert receipt["other_lane_slots_changed"] is False
+    assert receipt["launchagent_changed"] is False
+    assert (runtime / "slots/LAB/current").resolve() == new_release
+    assert (runtime / "slots/GPOINT/current").resolve() == old_release
+    assert (runtime / "slots/GSALES/current").resolve() == old_release
+    assert (runtime / "current").resolve() == old_release
+    receipts = list((root / "receipts").glob("lane-slot-runtime-switch-lab-*.json"))
+    assert len(receipts) == 1
+    assert json.loads(receipts[0].read_text()) == receipt
+
+
+def test_production_lane_slot_install_requires_fresh_empty_queue_preflight_before_staging(tmp_path, monkeypatch):
+    root = tmp_path / "worker"
+    current = root / "runtime/current"
+    current.mkdir(parents=True)
+    current.joinpath("agata_worker_pool.py").write_text("def slot_runtime_current(lane): pass")
+    root.chmod(0o700)
+    (root / "runtime").chmod(0o700)
+    current.chmod(0o700)
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "TRANSITION_LOCK", tmp_path / "transition.lock")
+    monkeypatch.setattr(migration, "RELEASE_LOCK", tmp_path / "release.lock")
+    monkeypatch.setattr(migration, "_release_lock_busy", lambda: False)
+    monkeypatch.setattr(migration, "_read_production_queue_status", lambda _manifest: (_ for _ in ()).throw(
+        RuntimeError("production_queue_status_unavailable")))
+    monkeypatch.setattr(migration, "candidate", lambda: {"source_sha": "b" * 40})
+    monkeypatch.setattr(migration, "_stage_runtime", lambda _manifest: pytest.fail("runtime staging must follow queue preflight"))
+
+    with pytest.raises(RuntimeError, match="production_queue_status_unavailable"):
+        migration.install_lane_slot("GPOINT")
+
+
+def test_install_lane_cli_requires_lane_before_any_apply(monkeypatch):
+    monkeypatch.setattr(migration.sys, "argv", ["migrate_worker_runtime.py", "install-lane-slot"])
+    monkeypatch.setattr(migration, "apply", lambda: pytest.fail("missing lane must never fall through to apply"))
+
+    with pytest.raises(RuntimeError, match="worker_lane_required"):
+        migration.main()
+
+
+def test_gsales_slot_install_switches_only_gsales_after_fresh_queue_gate(tmp_path, monkeypatch):
+    root = tmp_path / "worker"
+    runtime = root / "runtime"
+    old_sha, new_sha = "a" * 40, "b" * 40
+    old_release, new_release = runtime / old_sha, runtime / new_sha
+    old_release.mkdir(parents=True)
+    new_release.mkdir()
+    old_release.chmod(0o700)
+    new_release.chmod(0o700)
+    root.chmod(0o700)
+    runtime.chmod(0o700)
+    (old_release / "agata_worker_pool.py").write_text("def slot_runtime_current(lane): pass")
+    (runtime / "current").symlink_to(old_sha)
+    (runtime / "slots").mkdir()
+    (runtime / "slots").chmod(0o700)
+    for lane in ("GPOINT", "GSALES", "LAB"):
+        lane_dir = runtime / "slots" / lane
+        lane_dir.mkdir(parents=True)
+        lane_dir.chmod(0o700)
+        (lane_dir / "current").symlink_to(os.path.relpath(old_release, lane_dir))
+    (root / "slots/slot-02").mkdir(parents=True)
+    (root / "slots").chmod(0o700)
+    (root / "slots/slot-02").chmod(0o700)
+    (root / "receipts").mkdir()
+    (root / "receipts").chmod(0o700)
+    manifest = {"source_sha": new_sha, "bundle_sha256": "c" * 64, "assets": {}}
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "TRANSITION_LOCK", tmp_path / "transition.lock")
+    monkeypatch.setattr(migration, "RELEASE_LOCK", tmp_path / "release.lock")
+    monkeypatch.setattr(migration, "_release_lock_busy", lambda: False)
+    monkeypatch.setattr(migration, "candidate", lambda: manifest)
+    monkeypatch.setattr(migration, "_stage_runtime", lambda _manifest: new_release)
+    monkeypatch.setattr(migration, "_install_staged_runtime", lambda _staged, _manifest: new_release)
+    monkeypatch.setattr(migration, "_verify_staged_runtime", lambda _release, _manifest: None)
+    preflight = {"verified": True, "lanes": {"GPOINT": {"pending_jobs": 0}, "GSALES": {"pending_jobs": 0}}}
+    monkeypatch.setattr(migration, "_read_production_queue_status", lambda _manifest: object())
+    monkeypatch.setattr(migration, "require_fresh_empty_production_queues", lambda _status: preflight)
+
+    receipt = migration.install_lane_slot("GSALES")
+
+    assert receipt["scope"] == "GSALES_SLOT_ONLY"
+    assert receipt["queue_preflight"] == preflight
+    assert receipt["other_lane_slots_changed"] is False
+    assert receipt["launchagent_changed"] is False
+    assert (runtime / "slots/GSALES/current").resolve() == new_release
+    assert (runtime / "slots/GPOINT/current").resolve() == old_release
+    assert (runtime / "slots/LAB/current").resolve() == old_release
+    assert (runtime / "current").resolve() == old_release
+
+
 def test_candidate_launch_diagnostics_survive_legacy_tree_rollback(tmp_path, monkeypatch):
     root = tmp_path / "Library/Application Support/GPoint/agata-codex-worker"
     root.mkdir(parents=True)
@@ -498,8 +674,14 @@ def test_apply_with_absent_rollback_tree_saves_snapshot_and_restart_evidence(tmp
 
     monkeypatch.setattr(migration, "_stage_runtime", stage)
     monkeypatch.setattr(migration, "_validate_candidate_startup", lambda _stage, _manifest: {"state": "PASS"})
-    monkeypatch.setattr(migration, "_install_staged_runtime", lambda _staged, _manifest:
-                        root / "runtime" / ("a" * 40))
+    def install_staged(_staged, _manifest):
+        (root / "runtime").mkdir(parents=True, exist_ok=True)
+        (root / "runtime").chmod(0o700)
+        release = root / "runtime" / ("a" * 40)
+        release.mkdir(parents=True, exist_ok=True)
+        release.chmod(0o700)
+        return release
+    monkeypatch.setattr(migration, "_install_staged_runtime", install_staged)
     monkeypatch.setattr(migration, "_ensure_pool_config", lambda: None)
     monkeypatch.setattr(migration, "_pause_idle_launchagent", lambda: 99999999)
     monkeypatch.setattr(migration, "_running_inference_pids", lambda: [])
@@ -864,13 +1046,59 @@ def test_local_inventory_is_explicit_idle_evidence_not_worker_pool_health(monkey
     evidence = migration.validate_fresh_production_queue_snapshots(status)
     assert evidence["pool_authority"] == "mac_worker_live_idle_inventory_v1"
 
+    with pytest.raises(RuntimeError, match="production_queue_snapshot_invalid"):
+        migration.validate_fresh_production_queue_snapshots({**status, "configured_concurrency": True})
     status["configured_concurrency"] = True
-    with pytest.raises(RuntimeError, match="production_queue_snapshot_invalid"):
-        migration.validate_fresh_production_queue_snapshots(status)
-    status["configured_concurrency"] = 1
-    status["pool_snapshot_inventory"]["active_inference"] = True
-    with pytest.raises(RuntimeError, match="production_queue_snapshot_invalid"):
-        migration.validate_fresh_production_queue_snapshots(status)
+
+
+def test_local_inventory_accepts_three_dedicated_idle_slots_at_provider_n1(monkeypatch):
+    status = _fresh_empty_queue_status(datetime.now(UTC))
+    status.update({
+        "configured_concurrency": 1,
+        "current_job_present": False,
+        "launch_agent_loaded": True,
+        "slots": {
+            "slot-01": {"state": "IDLE", "lane": "GPOINT", "job_id": None},
+            "slot-02": {"state": "IDLE", "lane": "GSALES", "job_id": None},
+            "slot-03": {"state": "IDLE", "lane": "LAB", "job_id": None},
+        },
+    })
+    status["pool"]["total"] = 3
+    monkeypatch.setattr(migration, "inventory", lambda: {
+        "launchagent_loaded": True, "production_release_lock_busy": False,
+        "active_inference": False,
+    })
+    monkeypatch.setattr(migration, "_launchagent_pid", lambda: (123, "gpoint_mac_worker.py watch"))
+
+    migration._refresh_local_pool_evidence(status)
+
+    assert status["configured_concurrency"] == 1
+    assert status["pool_snapshot_inventory"]["slot_count"] == 3
+    assert set(status["slots"]) == {"slot-01", "slot-02", "slot-03"}
+    assert migration.validate_fresh_production_queue_snapshots(status)["busy_slots"] == 0
+
+
+def test_local_inventory_rejects_noncanonical_dedicated_slot_set(monkeypatch):
+    status = _fresh_empty_queue_status(datetime.now(UTC))
+    status.update({
+        "configured_concurrency": 1,
+        "current_job_present": False,
+        "launch_agent_loaded": True,
+        "slots": {
+            "slot-01": {"state": "IDLE", "lane": "GPOINT", "job_id": None},
+            "slot-02": {"state": "IDLE", "lane": "GSALES", "job_id": None},
+            "slot-04": {"state": "IDLE", "lane": "LAB", "job_id": None},
+        },
+    })
+    status["pool"]["total"] = 3
+    monkeypatch.setattr(migration, "inventory", lambda: {
+        "launchagent_loaded": True, "production_release_lock_busy": False,
+        "active_inference": False,
+    })
+    monkeypatch.setattr(migration, "_launchagent_pid", lambda: (123, "gpoint_mac_worker.py watch"))
+
+    with pytest.raises(RuntimeError, match="production_queue_status_unavailable"):
+        migration._refresh_local_pool_evidence(status)
 
 
 def test_non_404_queue_failure_never_uses_live_runtime_bootstrap(tmp_path, monkeypatch):
@@ -976,7 +1204,9 @@ def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(t
     monkeypatch.setattr(migration, "_validate_candidate_startup", lambda _stage, _manifest: {"state": "PASS"})
     def install(_staged, _manifest):
         release = root / "runtime" / manifest["source_sha"]
-        release.mkdir(parents=True)
+        release.mkdir(parents=True, mode=0o700)
+        release.parent.chmod(0o700)
+        release.chmod(0o700)
         return release
     monkeypatch.setattr(migration, "_install_staged_runtime", install)
     monkeypatch.setattr(migration, "_ensure_pool_config", lambda: None)
@@ -1029,6 +1259,8 @@ def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(t
     }]
     assert root.is_dir()
     assert (root / "runtime/current").resolve() == root / "runtime" / manifest["source_sha"]
+    for lane in ("GPOINT", "GSALES", "LAB"):
+        assert (root / "runtime/slots" / lane / "current").resolve() == root / "runtime" / manifest["source_sha"]
     snapshot = rollback_base / manifest["source_sha"]
     assert (snapshot / "legacy-runtime/gpoint_mac_worker.py").read_text() == "existing V3 worker"
     assert (snapshot / "original-launchagent.plist").read_bytes() == old_plist

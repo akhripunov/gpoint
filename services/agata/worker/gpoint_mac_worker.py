@@ -28,10 +28,12 @@ import certifi
 import httpx
 import lab_queue
 from agata_worker_pool import (
+    LANE_SLOTS,
     PoolConfig,
     PoolLockError,
     PoolPaths,
     PoolSupervisor,
+    SLOT_LANES,
     write_slot_status,
 )
 from agata_worker_pool import (
@@ -951,6 +953,11 @@ def _lab_approval_gate_status(*, env=None, support: Path | None = None) -> str:
     return "CLOSED_CONSUMED" if calls >= approval["max_calls"] else "OPEN_APPROVED"
 
 
+def _lab_receipt_slot_id() -> str:
+    """Keep LAB lane identity on receipts, including pre-run rejections."""
+    return os.environ.get("AGATA_WORKER_SLOT_ID") or LANE_SLOTS[LAB_TARGET]
+
+
 def claim_lab_job() -> dict | None:
     try:
         _load_lab_approval()
@@ -971,7 +978,7 @@ def execute_lab_claimed_job(job: dict) -> bool:
     try:
         approval = _load_lab_approval()
     except FatalConfigurationError as exc:
-        lab_queue.finish(root, job_id, status="failed", error_code="lab_approval_required", identity=job)
+        lab_queue.finish(root, job_id, status="failed", error_code="lab_approval_required", identity=job, slot_id=_lab_receipt_slot_id())
         write_status(target=LAB_TARGET, state="idle", current_job_present=False,
                      inference_gate=("CLOSED_EXPIRED" if str(exc) == "lab_owner_approval_expired"
                                      else "CLOSED_NO_APPROVAL"),
@@ -980,7 +987,7 @@ def execute_lab_claimed_job(job: dict) -> bool:
     if (job["experiment_id"] not in approval["experiment_ids"]
             or job["configuration_id"] not in approval["configuration_ids"]
             or job["scenario_id"] not in approval["scenario_ids"]):
-        lab_queue.finish(root, job_id, status="failed", error_code="owner_approval_scope_mismatch", identity=job)
+        lab_queue.finish(root, job_id, status="failed", error_code="owner_approval_scope_mismatch", identity=job, slot_id=_lab_receipt_slot_id())
         return True
     execution = {
         "actual_model": None,
@@ -1006,19 +1013,19 @@ def execute_lab_claimed_job(job: dict) -> bool:
             timeout_seconds=job["timeout_seconds"],
         )
         execution["duration_ms"] = round((time.monotonic() - started) * 1000)
-        lab_queue.finish(root, job_id, status="completed", response=response, execution=execution, identity=job)
+        lab_queue.finish(root, job_id, status="completed", response=response, execution=execution, identity=job, slot_id=_lab_receipt_slot_id())
         write_status(target=LAB_TARGET, state="idle", current_job_present=False,
                      last_success_at=datetime.now(UTC).isoformat(), last_success_job_id=job_id)
     except InferenceCancelled:
         execution["duration_ms"] = round((time.monotonic() - started) * 1000) if started is not None else 0
         lab_queue.finish(root, job_id, status="cancelled", error_code="cancelled_during_generation",
-                         execution=execution, identity=job)
+                         execution=execution, identity=job, slot_id=_lab_receipt_slot_id())
         write_status(target=LAB_TARGET, state="idle", current_job_present=False, last_error_code="lab_job_cancelled")
     except Exception as exc:
         error = str(exc)
         code = error[:64] if error.replace("_", "").isalnum() else "lab_inference_failed"
         execution["duration_ms"] = round((time.monotonic() - started) * 1000) if started is not None else 0
-        lab_queue.finish(root, job_id, status="failed", error_code=code.lower(), execution=execution, identity=job)
+        lab_queue.finish(root, job_id, status="failed", error_code=code.lower(), execution=execution, identity=job, slot_id=_lab_receipt_slot_id())
         write_status(target=LAB_TARGET, state="error", current_job_present=False, last_error_code=code.lower())
     return True
 
@@ -1037,7 +1044,7 @@ def reject_claim(lane: str, claim: dict, error_code: str) -> None:
             job_id = claim.get("job_id")
             if isinstance(job_id, str):
                 lab_queue.finish(PoolPaths(SUPPORT).lab_queue, job_id, status="failed",
-                                 error_code=error_code, identity=claim)
+                                 error_code=error_code, identity=claim, slot_id=LANE_SLOTS[LAB_TARGET])
             return
         job_id = claim.get("id")
         lease = claim.get("leaseToken")
@@ -1303,10 +1310,15 @@ def status() -> int:
 
 def execute_slot(lane: str, slot_id: str) -> int:
     global _WORKER_INHERITED_LOCK_FDS
-    if lane not in {"GPOINT", "GSALES", LAB_TARGET} or not re.fullmatch(r"slot-[0-9]{2}", slot_id):
+    if lane not in {"GPOINT", "GSALES", LAB_TARGET} or slot_id not in SLOT_LANES:
         raise FatalConfigurationError("worker_slot_identity_invalid")
+    if SLOT_LANES.get(slot_id) != lane:
+        raise FatalConfigurationError("worker_slot_lane_mismatch")
     fds = []
-    for key in ("AGATA_WORKER_SLOT_LOCK_FD", "AGATA_WORKER_JOB_LOCK_FD"):
+    for key in (
+        "AGATA_WORKER_SLOT_LOCK_FD", "AGATA_WORKER_JOB_LOCK_FD",
+        "AGATA_WORKER_PROVIDER_LOCK_FD",
+    ):
         try:
             fd = int(os.environ[key])
             os.fstat(fd)

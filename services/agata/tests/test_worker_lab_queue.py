@@ -141,5 +141,20 @@ class LabQueueTests(unittest.TestCase):
             lab_queue.submit(payload(), root=self.root)
 
 
+
+    def test_terminal_receipt_records_fixed_lab_slot_identity(self):
+        lab_queue.submit(payload("slot-receipt"), root=self.root)
+        lab_queue.claim_next(self.root)
+        lab_queue.finish(self.root, "slot-receipt", status="completed", slot_id="slot-03")
+        receipt = lab_queue.read_receipt(self.root, "slot-receipt")
+        self.assertEqual(receipt["slot_id"], "slot-03")
+
 if __name__ == "__main__":
     unittest.main()
+
+    def test_terminal_receipt_records_fixed_lab_slot_identity(self):
+        lab_queue.submit(payload("slot-receipt"), root=self.root)
+        lab_queue.claim_next(self.root)
+        lab_queue.finish(self.root, "slot-receipt", status="completed", slot_id="slot-03")
+        receipt = lab_queue.read_receipt(self.root, "slot-receipt")
+        self.assertEqual(receipt["slot_id"], "slot-03")
