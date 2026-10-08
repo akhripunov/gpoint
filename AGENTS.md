@@ -76,3 +76,19 @@ non-blocking postdeploy dependency evidence, separately recorded as
 server COMPLETE into RECOVERY_REQUIRED or trigger rollback/redeploy. Recheck a
 completed dependency through `--recheck-worker` without changing VPS release.
 Real GSales inference acceptance is independent. See docs/release/automation.md.
+
+## Autonomous Codex Execution
+
+Treat a complete OWNER-approved handoff as the execution contract. Read the relevant project and role context, form an internal technical plan, and implement, test, review, correct, and document the work through its acceptance criteria. Do not ask for another design or approval round when the handoff already settles those decisions. Give progress updates when useful; do not make an update a prerequisite for continuing.
+
+Resolve routine technical questions and reversible implementation choices within the approved scope. Delegate bounded, independent work when it improves quality or speed; give each subagent a precise scope, integrate its findings, and remain responsible for the result. In this repository, explicitly request gpt-6-luna with medium reasoning for every subagent when the tool supports those options.
+
+Continue after an ordinary failure by diagnosing its cause, fixing it within scope, and rerunning the relevant checks. Stop only for a missing material product/architecture decision, an irreconcilable requirements conflict, a scope or authority boundary, a separately required protected-operation approval, or an objective blocker that cannot be resolved safely. Do not repeat an authorization already granted for the same bounded action.
+
+Security, sandbox, privacy, payment, database, production, and release gates remain in force. Never move secrets, personal data, sealed evaluation inputs, or private task context between role chats or into a subagent unless that exact minimum context is necessary and authorized. Autonomy never creates production authorization or permits bypassing technical gates. Treat approved handoffs as settled context and use applicable Superpowers for execution and verification without restarting already-approved brainstorming.
+
+## Codex Role Selection
+
+This root contract is role-neutral. A new chat has no specialized role until the user explicitly initializes it with exactly one of `ROLE=DEV`, `ROLE=LAB`, or `ROLE=DEVOPS`. Only then load the matching `.codex/roles/` profile and its required Linear context. Without a selected role, ordinary research and auxiliary tasks are allowed; do not start role-specific workflows or load role-specific context. A chat title alone never selects a role.
+
+Keep the selected role for the rest of the chat unless the OWNER explicitly directs otherwise. Do not mix role profiles, histories, or private task context. When specialization changes, recommend starting a new chat under the other role rather than repurposing the existing chat. A role command grants no authority beyond the user's task. See `docs/codex/role-bootstrap.md` for initialization commands.
