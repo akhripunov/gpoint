@@ -140,11 +140,13 @@ budget. The Lab adapter checks the Worker-owned approval before reserving a
 durable attempt; the Worker rechecks and consumes it immediately before
 inference. No experiment toggles LAB presence or edits the LaunchAgent.
 
-The shared scheduler checks configured GPOINT/GSALES queues before LAB. LAB is
-considered only after both production claim paths have returned successfully
-with no claimable work; a failed/backed-off production poll blocks LAB. With
-`N=1`, active inference is not preempted. Ordinary Lab experiments submit only
-to the canonical LAB spool and do not require a production queue `0/0` snapshot.
+The shared scheduler checks configured GPOINT/GSALES queues first to preserve
+production priority when their work is observable. A GPOINT or GSALES network
+failure/backoff is recorded for that lane and does not block the later local LAB
+claim; LAB remains pollable when both VPS paths are unavailable. With `N=1`, an
+active inference keeps the shared provider slot until it finishes, so another
+lane may wait but cannot overlap it. Ordinary Lab experiments submit only to the
+canonical LAB spool and do not require a production queue `0/0` snapshot.
 Fresh authoritative queue snapshots, idle checks, locks, plist preservation,
 and rollback remain mandatory for actual Worker lifecycle operations such as
 install, runtime migration/switch, LaunchAgent mutation, and rollback.

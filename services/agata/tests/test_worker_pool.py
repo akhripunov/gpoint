@@ -425,6 +425,31 @@ def test_production_network_failure_does_not_prevent_local_lab_claim(failed_lane
         pool.close()
 
 
+def test_both_production_gateways_unavailable_still_dispatches_local_lab(tmp_path):
+    calls = []
+    runner = _FakeRunner()
+
+    def unavailable(lane):
+        calls.append(lane)
+        raise RuntimeError("worker_gateway_network_error")
+
+    pool = PoolSupervisor(PoolPaths(tmp_path), PoolConfig(), {
+        "GPOINT": lambda: unavailable("GPOINT"),
+        "GSALES": lambda: unavailable("GSALES"),
+        "LAB": lambda: calls.append("LAB") or {"job_id": "lab-with-vps-unavailable"},
+    }, runner=runner, clock=lambda: 0)
+    try:
+        assert pool.poll_once(now=0) == 1
+        assert calls == ["GPOINT", "GSALES", "LAB"]
+        assert runner.started[0][0:2] == ("slot-03", "LAB")
+        assert pool.lane_errors == {
+            "GPOINT": "worker_gateway_network_error",
+            "GSALES": "worker_gateway_network_error",
+        }
+    finally:
+        pool.close()
+
+
 def test_lab_claim_failure_does_not_stop_production_dispatch(tmp_path):
     runner = _FakeRunner()
     sales_jobs = iter([None, {"id": "sales-after-lab-error"}])
