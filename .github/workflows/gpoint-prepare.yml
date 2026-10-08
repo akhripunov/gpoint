@@ -10,11 +10,12 @@ on:
       - '.github/workflows/gpoint-prepare.yml'
       - 'services/agata/worker/**'
       - 'services/agata/conversation-lab/**'
-      - 'services/agata/tests/*worker*.py'
-      - 'services/agata/tests/*conversation_lab*.py'
-      - 'scripts/*worker*'
-      - 'scripts/*lab*'
-      - 'docs/**'
+      - 'services/agata/tests/test_worker_*.py'
+      - 'services/agata/tests/test_mac_worker*.py'
+      - 'services/agata/tests/test_*conversation_lab*.py'
+      - 'docs/superpowers/plans/*agata*.md'
+      - 'docs/superpowers/plans/*worker*.md'
+      - 'docs/superpowers/plans/*conversation-lab*.md'
   workflow_dispatch:
 
 permissions:
