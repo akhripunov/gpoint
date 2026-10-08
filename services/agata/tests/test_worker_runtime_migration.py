@@ -118,11 +118,59 @@ def test_lab_slot_install_is_fail_closed_when_live_supervisor_lacks_lane_pointer
     monkeypatch.setattr(migration, "RELEASE_LOCK", tmp_path / "release.lock")
     monkeypatch.setattr(migration, "_release_lock_busy", lambda: False)
 
-    with pytest.raises(RuntimeError, match="installed_supervisor_does_not_support_lane_runtime_pointers"):
+    with pytest.raises(RuntimeError, match="worker_pool_bootstrap_required_use_full_transition_apply"):
         migration.install_lab_slot()
 
     assert not (root / "runtime/slots/LAB/current").exists()
-    assert (root / "runtime/current").resolve() == current_release
+    assert (root / "runtime/current").resolve().samefile(current_release)
+
+
+def test_lab_slot_install_never_queries_production_queues(tmp_path, monkeypatch):
+    root = tmp_path / "worker"
+    runtime = root / "runtime"
+    old_sha, new_sha = "a" * 40, "b" * 40
+    old_release, new_release = runtime / old_sha, runtime / new_sha
+    old_release.mkdir(parents=True)
+    new_release.mkdir()
+    old_release.chmod(0o700)
+    new_release.chmod(0o700)
+    root.chmod(0o700)
+    runtime.chmod(0o700)
+    (old_release / "agata_worker_pool.py").write_text("def slot_runtime_current(lane): pass")
+    (runtime / "current").symlink_to(old_sha)
+    (runtime / "slots").mkdir()
+    (runtime / "slots").chmod(0o700)
+    for lane in ("GPOINT", "GSALES", "LAB"):
+        lane_dir = runtime / "slots" / lane
+        lane_dir.mkdir()
+        lane_dir.chmod(0o700)
+        (lane_dir / "current").symlink_to(os.path.relpath(old_release, lane_dir))
+    (root / "slots/slot-03").mkdir(parents=True)
+    (root / "slots").chmod(0o700)
+    (root / "slots/slot-03").chmod(0o700)
+    (root / "receipts").mkdir()
+    (root / "receipts").chmod(0o700)
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "TRANSITION_LOCK", tmp_path / "transition.lock")
+    monkeypatch.setattr(migration, "RELEASE_LOCK", tmp_path / "release.lock")
+    monkeypatch.setattr(migration, "_release_lock_busy", lambda: False)
+    monkeypatch.setattr(migration, "candidate", lambda: {
+        "source_sha": new_sha, "bundle_sha256": "c" * 64, "assets": {},
+    })
+    monkeypatch.setattr(migration, "_stage_runtime", lambda _manifest: new_release)
+    monkeypatch.setattr(migration, "_install_staged_runtime", lambda _staged, _manifest: new_release)
+    monkeypatch.setattr(migration, "_verify_staged_runtime", lambda _release, _manifest: None)
+    monkeypatch.setattr(migration, "_read_production_queue_status", lambda _manifest: pytest.fail(
+        "LAB-only installs must not require production queue snapshots"))
+
+    receipt = migration.install_lab_slot()
+
+    assert receipt["scope"] == "LAB_SLOT_ONLY"
+    assert "queue_preflight" not in receipt
+    assert (runtime / "slots/LAB/current").resolve().samefile(new_release)
+    assert (runtime / "slots/GPOINT/current").resolve().samefile(old_release)
+    assert (runtime / "slots/GSALES/current").resolve().samefile(old_release)
+    assert (runtime / "current").resolve().samefile(old_release)
 
 
 def test_lab_slot_install_switches_only_lab_without_launchagent_or_production_gate(tmp_path, monkeypatch):
@@ -166,10 +214,10 @@ def test_lab_slot_install_switches_only_lab_without_launchagent_or_production_ga
     assert receipt["scope"] == "LAB_SLOT_ONLY"
     assert receipt["other_lane_slots_changed"] is False
     assert receipt["launchagent_changed"] is False
-    assert (runtime / "slots/LAB/current").resolve() == new_release
-    assert (runtime / "slots/GPOINT/current").resolve() == old_release
-    assert (runtime / "slots/GSALES/current").resolve() == old_release
-    assert (runtime / "current").resolve() == old_release
+    assert (runtime / "slots/LAB/current").resolve().samefile(new_release)
+    assert (runtime / "slots/GPOINT/current").resolve().samefile(old_release)
+    assert (runtime / "slots/GSALES/current").resolve().samefile(old_release)
+    assert (runtime / "current").resolve().samefile(old_release)
     receipts = list((root / "receipts").glob("lane-slot-runtime-switch-lab-*.json"))
     assert len(receipts) == 1
     assert json.loads(receipts[0].read_text()) == receipt

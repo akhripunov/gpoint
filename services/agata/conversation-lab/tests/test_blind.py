@@ -11,6 +11,13 @@ class BlindTests(unittest.TestCase):
         spec=importlib.util.spec_from_file_location("blind",MODULE);self.b=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.b)
         self.scenarios=[{"scenario_id":"s1","character_context":{"persona_ref":"same"},"memory_fixture":[],"dialogue_turns":[{"role":"user","text":"Поговорим о саде?"},{"role":"assistant","response_slot":True}],"expected_behavior":["gentle"],"failure_patterns":["coercive"]}]
         self.results=[{"scenario_id":"s1","model_id":m,"status":"success","turns":[{"role":"user","text":"Поговорим о саде?"},{"role":"assistant","text":"Да, о саде!"}],"provider_header":"SECRET-HEADER","usage":{"output":42}} for m in ["private-model-alpha","private-model-beta","private-model-gamma"]]
+    def v2_examples(self):
+        scenario=json.loads((MODULE.parents[1]/"data/golden/synthetic/v2-dev-scenarios.jsonl").read_text().splitlines()[0])
+        turns=[{"role":t["role"],"text":t["text"]} if t["role"]=="user" else {"role":"assistant","text":"Хорошо, спасибо."}
+               for t in scenario["dialogue_turns"]]
+        results=[{"scenario_id":scenario["scenario_id"],"model_id":m,"status":"success","turns":turns}
+                 for m in ("baseline","naturalness-v1")]
+        return [scenario],results
     def test_same_seed_reproduces_and_key_stays_private(self):
         packet,key=self.b.make_blind_packets(self.scenarios,self.results,41)
         self.assertEqual((packet,key),self.b.make_blind_packets(self.scenarios,self.results,41))
@@ -66,10 +73,7 @@ class BlindTests(unittest.TestCase):
             self.b.make_blind_packets([scenario],results,81)
 
     def test_v2_x_y_assignment_is_reproducible_from_immutable_batch_identity(self):
-        scenarios=copy.deepcopy(self.scenarios)
-        results=copy.deepcopy(self.results[:2])
-        results[0]["model_id"]="baseline"
-        results[1]["model_id"]="naturalness-v1"
+        scenarios,results=self.v2_examples()
         first=self.b.make_v2_blind_packets(scenarios,results,batch_id="immutable-batch-004")
         second=self.b.make_v2_blind_packets(scenarios,results,batch_id="immutable-batch-004")
         self.assertEqual(first,second)
@@ -77,12 +81,9 @@ class BlindTests(unittest.TestCase):
         self.assertEqual(first[1]["seed"],second[1]["seed"])
 
     def test_v2_packet_omits_evaluator_oracle_fields_and_scans_displayed_context(self):
-        scenarios=copy.deepcopy(self.scenarios)
-        scenarios[0].update({"context":{"summary":"Baseline arm; private"},"evaluation_notes":"judge secret",
-                            "expected_behavior":["oracle"],"failure_patterns":["hint"],"category":"daily"})
-        results=copy.deepcopy(self.results[:2]);results[0]["model_id"]="baseline";results[1]["model_id"]="naturalness-v1"
-        with self.assertRaises(ValueError): self.b.make_v2_blind_packets(scenarios,results,batch_id="metadata-leak")
-        scenarios[0]["context"]={"summary":"A calm morning"}
+        scenarios,results=self.v2_examples()
+        tampered=copy.deepcopy(scenarios);tampered[0]["context"]={"summary":"Baseline arm; private"}
+        with self.assertRaises(PermissionError): self.b.make_v2_blind_packets(tampered,results,batch_id="metadata-leak")
         packet,_=self.b.make_v2_blind_packets(scenarios,results,batch_id="metadata-safe")
         rendered=json.dumps(packet,ensure_ascii=False).casefold()
         self.assertNotIn("evaluation_notes",rendered)
@@ -91,8 +92,7 @@ class BlindTests(unittest.TestCase):
         self.assertNotIn("judge secret",rendered)
 
     def test_v2_packet_rejects_technical_metadata_in_user_turn(self):
-        scenarios=copy.deepcopy(self.scenarios)
+        scenarios,results=self.v2_examples()
         scenarios[0]["dialogue_turns"][0]["text"]="Candidate A, run_id=abc"
-        results=copy.deepcopy(self.results[:2]);results[0]["model_id"]="baseline";results[1]["model_id"]="naturalness-v1"
         for row in results: row["turns"][0]["text"]="Candidate A, run_id=abc"
-        with self.assertRaises(ValueError): self.b.make_v2_blind_packets(scenarios,results,batch_id="user-leak")
+        with self.assertRaises(PermissionError): self.b.make_v2_blind_packets(scenarios,results,batch_id="user-leak")

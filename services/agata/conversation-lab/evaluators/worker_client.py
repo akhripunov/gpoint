@@ -181,3 +181,47 @@ def build_promptfoo_compat_job(*, invocation_id: str, prompt: str | None = None)
         "model": fixture["model"],
         "reasoning_effort": fixture["reasoning_effort"],
     }
+
+
+def build_judge_job(prompt: str, *, batch_id: str, scenario_id: str, dataset_split: str,
+                    judge_slot: int, presented_labels: list[str]) -> dict:
+    """Build one isolated, source-verified LAB judge job without opening datasets."""
+    if not isinstance(batch_id, str) or not batch_id.strip() or not lab_queue.ID_RE.fullmatch(batch_id):
+        raise ValueError("immutable LAB judge batch identity is required")
+    if not isinstance(scenario_id, str) or not lab_queue.ID_RE.fullmatch(scenario_id):
+        raise ValueError("judge scenario identity is invalid")
+    if dataset_split not in {"DEV", "VALIDATION"}:
+        raise PermissionError("LAB judges cannot access sealed holdout")
+    if type(judge_slot) is not int or judge_slot not in {1, 2, 3}:
+        raise ValueError("AGATA Lab requires judge slots 1 through 3")
+    if not isinstance(presented_labels, list) or len(presented_labels) != 2 or set(presented_labels) != {"X", "Y"}:
+        raise ValueError("judge presentation must be an X/Y permutation")
+    if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 48 * 1024:
+        raise ValueError("judge prompt is empty or too large")
+    invocation_source = json.dumps([batch_id, scenario_id, judge_slot], separators=(",", ":"))
+    invocation_id = "judge-" + hashlib.sha256(invocation_source.encode()).hexdigest()[:58]
+    job_id = "judge-" + hashlib.sha256(invocation_id.encode()).hexdigest()[:58]
+    return {
+        "job_id": job_id,
+        "job_type": "judge",
+        "experiment_id": lab_queue.JUDGE_EXPERIMENT_ID,
+        "configuration_id": f"judge-{judge_slot}",
+        "origin": "conversation-lab-judge",
+        "scenario_id": scenario_id,
+        "turn_index": 0,
+        "data_classification": "synthetic",
+        "dataset_split": dataset_split,
+        "timeout_seconds": 180,
+        "history_receipt_ids": [],
+        "judge_slot": judge_slot,
+        "promptfoo_invocation_id": invocation_id,
+        "judge_schema_version": 1,
+        "presented_labels": list(presented_labels),
+        "request": {
+            "instructions": lab_queue.JUDGE_INSTRUCTIONS,
+            "persona": {}, "communication_settings": {}, "memories": [],
+            "dialogue_summaries": [], "history": [], "user_message": prompt,
+        },
+        "model": "gpt-6-luna",
+        "reasoning_effort": "medium",
+    }

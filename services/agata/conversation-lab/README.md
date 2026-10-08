@@ -14,6 +14,17 @@ This validates only the V2 split manifest. It does not open scenario payloads, c
 
 The only supported live authentication path is the existing Codex/ChatGPT subscription session through the isolated Promptfoo runner. Effective API-key environment/config paths fail closed. The provider is pinned to `gpt-6-luna / medium`, with `maxRetries=0`, no fallback, no inherited process environment, and no API-key forwarding. Offline unit tests do not prove SDK/provider compatibility. Before any live invocation, require a separately reviewed bounded compatibility decision; no live compatibility call, `promptfoo optimize` campaign, paid API, optimizer execution, production prompt/runtime, database, VPS, Worker, GPOINT, or GSALES operation is authorized by this implementation.
 
+For a separately owner-approved **direct Codex Local Naturalness experiment** when the Worker path is blocked, run the no-inference app-server preflight in the same normal macOS execution context intended for the experiment:
+
+```sh
+python3 services/agata/conversation-lab/evaluators/codex_app_server_preflight.py \
+  --codex /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex \
+  --working-dir /absolute/path/to/empty-isolated-dir \
+  --timeout-seconds 10 --repeat 2
+```
+
+Both sequential checks must report `PASS`. The preflight verifies the existing ChatGPT subscription login and performs only the Codex app-server `initialize` handshake; `model_calls` remains zero. It rejects API-key environment/configuration paths, does not forward API-key variables, and never starts `codex exec`. A direct experiment still requires a separate bounded OWNER approval and does not demonstrate Promptfoo/Worker compatibility.
+
 OWNER ratings for V2 use the exact eight-dimension V2 rubric and are write-once locked against both the exact public packet hash and rubric hash. The lock and subsequent unblind are persisted as separate mode-`0600` append-only events in a receipt-specific directory; unblind requires that receipt's persisted lock event. Private receipts are atomically created with mode `0600` and contain the durable call-ledger snapshot, journal hash, run hashes, seeded randomization, sanity findings, judge/aggregate evidence, and private mapping. The call ledger fsyncs each reservation before a provider invocation, uses a file lock across processes, and recovers prior attempts after interruption; ambiguous attempts stay charged and cannot be retried. OWNER packets omit evaluator-oracle notes and fail closed if any displayed scenario/transcript field leaks arm labels or technical metadata.
 
 Candidate arm compilation requires the treatment text and SHA256 to match the committed `configs/naturalness-policy-v1.md` byte-for-byte. A receipt cannot accept caller-provided counter numbers or an in-memory ledger: it requires a verified durable ledger object and validates arm-to-scenario/configuration mapping, unique sequential turns, judge invocation receipts, and the separate 8/32/15 ceilings. These contracts are tested offline only; no provider compatibility or live evaluation has been demonstrated.
@@ -140,14 +151,21 @@ budget. The Lab adapter checks the Worker-owned approval before reserving a
 durable attempt; the Worker rechecks and consumes it immediately before
 inference. No experiment toggles LAB presence or edits the LaunchAgent.
 
-The shared scheduler checks configured GPOINT/GSALES queues before LAB. LAB is
-considered only after both production claim paths have returned successfully
-with no claimable work; a failed/backed-off production poll blocks LAB. With
-`N=1`, active inference is not preempted. Ordinary Lab experiments submit only
-to the canonical LAB spool and do not require a production queue `0/0` snapshot.
-Fresh authoritative queue snapshots, idle checks, locks, plist preservation,
-and rollback remain mandatory for actual Worker lifecycle operations such as
-install, runtime migration/switch, LaunchAgent mutation, and rollback.
+The shared scheduler checks configured GPOINT/GSALES queues first to preserve
+production priority when their work is observable. A GPOINT or GSALES network
+failure/backoff is recorded for that lane and does not block the later local LAB
+claim; LAB remains pollable when both VPS paths are unavailable. With `N=1`, an
+active inference keeps the shared provider slot until it finishes, so another
+lane may wait but cannot overlap it. Ordinary Lab experiments submit only to the
+canonical LAB spool and do not require a production queue `0/0` snapshot.
+Fresh authoritative GPOINT/GSALES queue snapshots at 0/0, idle checks, locks,
+plist preservation, and rollback remain mandatory for a full-pool bootstrap or
+any operation that stops/replaces the shared supervisor or LaunchAgent. After
+that bootstrap, a LAB-only slot update changes only the LAB runtime pointer;
+it requires the local transition/release/slot locks but does not require
+GPOINT/GSALES queue 0/0 and does not restart the LaunchAgent. See
+`../worker/THREE_SLOT_BOOTSTRAP.md` for the exact transition
+boundary.
 
 The canonical candidate contract is not an installation record: this change
 does not modify the installed Worker, LaunchAgent, production configuration,

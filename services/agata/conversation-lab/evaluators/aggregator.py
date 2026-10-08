@@ -79,7 +79,20 @@ def aggregate(judge_receipts, private_mapping, sanity_findings) -> dict:
         if not isinstance(conditional, Mapping) or set(conditional) - CONDITIONAL_DIMENSIONS:
             reasons.append("OUT_OF_RUBRIC_CONDITIONAL_DIMENSION")
             continue
-        if receipt.get("conditional_critical") is True or receipt.get("critical_defects"):
+        declared_uncertainty = receipt.get("uncertainty", False)
+        position_sensitivity = receipt.get("position_sensitivity", False)
+        critical_defects = receipt.get("critical_defects", [])
+        if type(declared_uncertainty) is not bool or type(position_sensitivity) is not bool or not isinstance(critical_defects, list):
+            reasons.append("INVALID_JUDGE_RECEIPT")
+            continue
+        if any(not isinstance(code, str) or not code for code in critical_defects):
+            reasons.append("INVALID_JUDGE_RECEIPT")
+            continue
+        if declared_uncertainty:
+            reasons.append("UNCERTAINTY")
+        if position_sensitivity:
+            reasons.append("ORDER_SENSITIVE")
+        if receipt.get("conditional_critical") is True or critical_defects:
             reasons.append("CONDITIONAL_CRITICAL_EVIDENCE")
         normalized_dims = {}
         for dimension, position in dimension_positions.items():

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import fcntl
 import os
 import signal
@@ -29,6 +30,23 @@ def lab_job(job_id="lab-job-1", *, scenario="ru_naturalness-02", config="baselin
     return job
 
 
+def judge_job(job_id="judge-job-1"):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "conversation-lab" / "evaluators"))
+    from judges import CORE_IDS, judge_output_schema
+    invocation_id = "batch-a-judge-1"
+    return {
+        "job_id": job_id, "job_type": "judge", "experiment_id": "agata-lab-judge-v1",
+        "configuration_id": "judge-1", "origin": "conversation-lab-judge", "scenario_id": "dev-clean-01",
+        "turn_index": 0, "data_classification": "synthetic", "dataset_split": "DEV",
+        "timeout_seconds": 30, "history_receipt_ids": [], "judge_slot": 1,
+        "promptfoo_invocation_id": invocation_id, "judge_schema_version": 1,
+        "presented_labels": ["X", "Y"], "model": "gpt-6-luna", "reasoning_effort": "medium",
+        "request": {"instructions": lab_queue.JUDGE_INSTRUCTIONS, "persona": {},
+                    "communication_settings": {}, "memories": [], "dialogue_summaries": [],
+                    "history": [], "user_message": "Compare anonymous X and Y."},
+    }
+
+
 class WorkerLabIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -44,12 +62,13 @@ class WorkerLabIntegrationTests(unittest.TestCase):
         worker.SUPPORT, worker.STATUS, worker.INFERENCE_PROCESS = self.previous
         self.temp.cleanup()
 
-    def approval(self, max_calls=8, scenarios=None, *, expired=False):
+    def approval(self, max_calls=8, scenarios=None, *, expired=False,
+                 experiments=None, configurations=None):
         value = {
             "approval_id": "owner-approval-001",
             "worker_bundle_sha256": worker._worker_bundle_sha256(),
-            "experiment_ids": ["agata-naturalness-v1"],
-            "configuration_ids": ["baseline", "naturalness-v1"],
+            "experiment_ids": experiments or ["agata-naturalness-v1"],
+            "configuration_ids": configurations or ["baseline", "naturalness-v1"],
             "scenario_ids": scenarios or ["ru_naturalness-02"],
             "max_calls": max_calls,
             "expires_at": (datetime.now(timezone.utc) + timedelta(hours=-1 if expired else 1)).isoformat(),
@@ -133,6 +152,52 @@ class WorkerLabIntegrationTests(unittest.TestCase):
             self.assertFalse(worker.process_one("LAB"))
         infer.assert_not_called()
         self.assertEqual(lab_queue.pending_count(self.lab_root), 1)
+
+    def test_judge_approval_and_worker_receipt_are_scoped_and_structured(self):
+        invocation_id = "batch-a-judge-1"
+        job = judge_job("judge-" + hashlib.sha256(invocation_id.encode()).hexdigest()[:58])
+        from judges import CORE_IDS
+        verdict = {"overall": "first", "core_dimensions": {key: "first" for key in CORE_IDS},
+                   "conditional_evidence": {}, "reasons": ["The first reply is direct."], "defects": [],
+                   "uncertainty": False, "position_sensitivity": False}
+        self.approval(experiments=["agata-lab-judge-v1"], configurations=["judge-1"], scenarios=["dev-clean-01"])
+        self.submit(job)
+        with patch.dict(os.environ, {"AGATA_LAB_APPROVAL_FILE": str(self.approval_path), "AGATA_WORKER_SLOT_ID": "slot-03"}, clear=True), \
+             patch.object(worker, "run_inference", return_value=json.dumps(verdict)) as infer:
+            self.assertTrue(worker.process_one("LAB"))
+        call_job = infer.call_args.args[0]
+        self.assertEqual(call_job["target"], "LAB")
+        self.assertEqual(call_job["job_type"], "judge")
+        self.assertEqual(worker.resolve_codex_model_for_job(call_job, {}), ("gpt-6-luna", "medium"))
+        receipt = lab_queue.read_receipt(self.lab_root, job["job_id"])
+        self.assertEqual(receipt["status"], "completed")
+        self.assertEqual(receipt["slot_id"], "slot-03")
+        self.assertEqual(receipt["identity"]["promptfoo_invocation_id"], "batch-a-judge-1")
+        self.assertEqual(receipt["judge_verdict"]["overall"], "first")
+
+    def test_judge_approval_mismatch_fails_before_executor(self):
+        self.approval(experiments=["agata-naturalness-v1"])
+        invocation_id = "batch-a-judge-1"
+        job = judge_job("judge-" + hashlib.sha256(invocation_id.encode()).hexdigest()[:58])
+        self.submit(job)
+        with patch.dict(os.environ, {"AGATA_LAB_APPROVAL_FILE": str(self.approval_path), "AGATA_WORKER_SLOT_ID": "slot-03"}, clear=True), \
+             patch.object(worker, "run_inference") as infer:
+            self.assertTrue(worker.process_one("LAB"))
+        infer.assert_not_called()
+        self.assertEqual(lab_queue.read_receipt(self.lab_root, job["job_id"])["error_code"], "owner_approval_scope_mismatch")
+
+    def test_judge_execution_is_rejected_outside_slot_03(self):
+        invocation_id = "batch-a-judge-1"
+        job = judge_job("judge-" + hashlib.sha256(invocation_id.encode()).hexdigest()[:58])
+        self.approval(experiments=["agata-lab-judge-v1"], configurations=["judge-1"], scenarios=["dev-clean-01"])
+        self.submit(job)
+        with patch.dict(os.environ, {"AGATA_LAB_APPROVAL_FILE": str(self.approval_path), "AGATA_WORKER_SLOT_ID": "slot-01"}, clear=True), \
+             patch.object(worker, "run_inference") as infer:
+            self.assertTrue(worker.process_one("LAB"))
+        infer.assert_not_called()
+        receipt = lab_queue.read_receipt(self.lab_root, job["job_id"])
+        self.assertEqual(receipt["error_code"], "worker_slot_lane_mismatch")
+        self.assertNotIn("response", receipt)
 
     def test_lab_without_approval_never_claims_queued_work_without_legacy_flag(self):
         self.submit()
