@@ -633,6 +633,22 @@ def _read_live_runtime_queue_snapshot(lane: str, expected_tenant_id: str) -> dic
     return normalize_live_runtime_queue_snapshot(snapshot, lane, expected_tenant_id)
 
 
+def _live_snapshot_fallback_allowed(lane_status: dict) -> bool:
+    """Allow direct VPS evidence only for legacy queue-404 or its known gateway failure."""
+    if not isinstance(lane_status, dict):
+        return False
+    if lane_status.get("queue_snapshot_state") == "VERIFIED":
+        return lane_status.get("health") == "HEALTHY"
+    if lane_status.get("queue_snapshot_error_code") != "worker_gateway_http_404":
+        return False
+    if lane_status.get("health") == "HEALTHY":
+        return True
+    return (
+        lane_status.get("health") == "DEGRADED"
+        and lane_status.get("health_error_code") == "worker_gateway_network_error"
+    )
+
+
 def _refresh_local_pool_evidence(status: dict) -> None:
     """Record local idle inventory separately from health and production queue state."""
     pool = status.get("pool")
@@ -656,7 +672,8 @@ def _refresh_local_pool_evidence(status: dict) -> None:
         value = lanes.get(lane)
         if not isinstance(value, dict):
             raise RuntimeError("production_queue_status_unavailable")
-        if value.get("configured", True) and value.get("health") != "HEALTHY":
+        if (value.get("configured", True) and value.get("health") != "HEALTHY"
+                and not _live_snapshot_fallback_allowed(value)):
             raise RuntimeError("production_queue_status_unavailable")
     local = inventory()
     if (local.get("launchagent_loaded") is not True or local.get("production_release_lock_busy")
@@ -715,9 +732,10 @@ def _read_production_queue_status(manifest: dict | None = None) -> dict:
         raise RuntimeError("production_queue_status_unavailable")
     if all(lanes[lane].get("queue_snapshot_state") == "VERIFIED" for lane in configured_lanes):
         return status
-    if any(lanes[lane].get("health") != "HEALTHY"
-           or lanes[lane].get("queue_snapshot_error_code") != "worker_gateway_http_404"
-           for lane in configured_lanes):
+    unresolved_lanes = [lane for lane in configured_lanes
+                        if lanes[lane].get("queue_snapshot_state") != "VERIFIED"]
+    if not unresolved_lanes or any(not _live_snapshot_fallback_allowed(lanes[lane])
+                                   for lane in unresolved_lanes):
         raise RuntimeError("production_queue_status_unavailable")
     _refresh_local_pool_evidence(status)
     candidate_manifest = manifest or candidate()
