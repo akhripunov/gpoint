@@ -1494,7 +1494,11 @@ def install_lane_slot(lane: str) -> dict:
         except OSError:
             supports_lane_pointers = False
         if not supports_lane_pointers:
-            raise RuntimeError("installed_supervisor_does_not_support_lane_runtime_pointers")
+            # A lane-only update must never silently turn into a pool-wide
+            # supervisor/LaunchAgent transition. The one-time legacy bootstrap
+            # is the explicit full-pool `apply` action, with its own idle,
+            # authoritative queue, lock, health, and rollback gates.
+            raise RuntimeError("worker_pool_bootstrap_required_use_full_transition_apply")
         manifest = candidate()
         queue_preflight = None
         if lane in {"GPOINT", "GSALES"}:

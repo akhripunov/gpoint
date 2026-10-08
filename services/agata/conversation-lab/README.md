@@ -147,9 +147,14 @@ claim; LAB remains pollable when both VPS paths are unavailable. With `N=1`, an
 active inference keeps the shared provider slot until it finishes, so another
 lane may wait but cannot overlap it. Ordinary Lab experiments submit only to the
 canonical LAB spool and do not require a production queue `0/0` snapshot.
-Fresh authoritative queue snapshots, idle checks, locks, plist preservation,
-and rollback remain mandatory for actual Worker lifecycle operations such as
-install, runtime migration/switch, LaunchAgent mutation, and rollback.
+Fresh authoritative GPOINT/GSALES queue snapshots at 0/0, idle checks, locks,
+plist preservation, and rollback remain mandatory for a full-pool bootstrap or
+any operation that stops/replaces the shared supervisor or LaunchAgent. After
+that bootstrap, a LAB-only slot update changes only the LAB runtime pointer;
+it requires the local transition/release/slot locks but does not require
+GPOINT/GSALES queue 0/0 and does not restart the LaunchAgent. See
+`services/agata/worker/THREE_SLOT_BOOTSTRAP.md` for the exact transition
+boundary.
 
 The canonical candidate contract is not an installation record: this change
 does not modify the installed Worker, LaunchAgent, production configuration,
