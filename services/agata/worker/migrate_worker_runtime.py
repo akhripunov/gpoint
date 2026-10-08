@@ -37,7 +37,7 @@ RELEASE_LOCK = HOME / ".config/gpoint/release-production.lock"
 CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex")
 WORKER_DIR = Path(__file__).resolve().parent
 ASSETS = ("gpoint_mac_worker.py", "agata_worker_pool.py", "lab_queue.py",
-          "lab_fixture_manifest.json", "lab_promptfoo_compat_manifest.json",
+          "lab_fixture_manifest.json", "lab_promptfoo_compat_manifest.json", "lab_v2_dev_manifest.json",
           "run_codex_worker.sh", "requirements.txt")
 QUEUE_SNAPSHOT_MAX_AGE_SECONDS = 30
 QUEUE_SNAPSHOT_FUTURE_SKEW_SECONDS = 5

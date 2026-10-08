@@ -45,6 +45,7 @@ def test_canonical_installer_includes_exact_worker_bundle_assets():
         "lab_queue.py",
         "lab_fixture_manifest.json",
         "lab_promptfoo_compat_manifest.json",
+        "lab_v2_dev_manifest.json",
         "run_codex_worker.sh",
         "requirements.txt",
     )

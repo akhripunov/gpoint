@@ -251,6 +251,109 @@ class WorkerLabAdapter:
                     pass
             raise
 
+    def invoke_v2_dev(self, request: dict, *, invocation_id: str, run_id: str, arm_id: str,
+                      configuration_id: str, scenario_id: str, turn_index: int,
+                      history_receipt_ids: list[str], model: str = MODEL,
+                      reasoning: str = REASONING) -> dict:
+        """Reserve once, then submit one hash-verified V2 DEV turn to Slot 03."""
+        config = {"model": model, "reasoning_effort": reasoning, "scenario_id": scenario_id,
+                  "maxRetries": 0, "fallbacks": []}
+        _validate_no_api_auth(self.env, config)
+        if (model, reasoning) != (MODEL, REASONING):
+            raise PermissionError("V2 LAB model contract is fixed to gpt-6-luna / medium")
+        if self.receipt_directory is not None:
+            _validate_receipt_directory(Path(self.receipt_directory), invocation_id)
+        ledger = self.ledger
+        limits = {"conversation_arms": 8, "generator_invocations": 32, "judge_invocations": 15}
+        if (getattr(ledger, "durable", False) is not True or not callable(getattr(ledger, "verify_persisted", None))
+                or not ledger.verify_persisted() or ledger.snapshot().get("limits") != limits):
+            raise PermissionError("V2 Worker LAB invocation requires the verified durable call ledger")
+        job = worker_client.build_v2_dev_job(
+            request=request, run_id=run_id, arm_id=arm_id, configuration_id=configuration_id,
+            scenario_id=scenario_id, turn_index=turn_index,
+            history_receipt_ids=history_receipt_ids, invocation_id=invocation_id,
+        )
+        worker_client.validate_owner_approval(job, self.env)
+        attempt = {
+            "run_id": run_id, "arm_id": arm_id, "experiment_id": job["experiment_id"],
+            "configuration": configuration_id, "scenario_id": scenario_id, "turn_index": turn_index,
+            "dataset_split": "DEV", "model": MODEL, "reasoning_effort": REASONING,
+            "worker_job_id": job["job_id"],
+        }
+        # Durable reservation is written before the LAB queue's atomic submission.
+        ledger.reserve("generator", invocation_id, metadata=attempt)
+        submitted = False
+        completed = False
+        receipt = None
+        outcome = "ambiguous"
+        try:
+            returned_id = self.transport.submit(job)
+            submitted = True
+            if returned_id != job["job_id"]:
+                raise AmbiguousWorkerResult("Worker submission returned a mismatched correlation id")
+            receipt = self.transport.wait_terminal(job["job_id"], MAX_WAIT_SECONDS)
+            if (not isinstance(receipt, dict) or receipt.get("job_id") != job["job_id"]
+                    or receipt.get("status") not in {"completed", "failed", "cancelled", "ambiguous"}):
+                raise AmbiguousWorkerResult("V2 Worker terminal receipt is missing or malformed")
+            identity = receipt.get("identity") if isinstance(receipt.get("identity"), dict) else {}
+            execution = receipt.get("execution") if isinstance(receipt.get("execution"), dict) else {}
+            expected = {key: job[key] for key in (
+                "experiment_id", "configuration_id", "scenario_id", "turn_index", "run_id", "arm_id",
+                "promptfoo_invocation_id", "dataset_split", "source_scenario_sha256")}
+            if (receipt.get("slot_id") != "slot-03"
+                    or any(identity.get(key) != value for key, value in expected.items())):
+                raise AmbiguousWorkerResult("V2 receipt does not match the frozen run/arm/turn identity")
+            if receipt["status"] == "completed":
+                output = receipt.get("response")
+                if (not isinstance(output, str) or not output.strip()
+                        or execution.get("requested_model") != MODEL
+                        or execution.get("requested_reasoning_effort") != REASONING
+                        or execution.get("actual_model") != MODEL):
+                    raise AmbiguousWorkerResult("V2 receipt does not prove the requested model contract")
+                outcome = "success"
+            elif receipt["status"] == "failed" and execution.get("inference_started") is False:
+                output, outcome = None, "provider_error"
+            else:
+                output, outcome = None, "ambiguous"
+            evidence = {
+                "schema_version": 1, **attempt,
+                "promptfoo_invocation_id": invocation_id,
+                "lab_ledger_attempt_id": invocation_id,
+                "worker_receipt_sha256": self.transport.receipt_sha256(job["job_id"]),
+                "worker_terminal_status": receipt["status"], "promptfoo_outcome": outcome,
+                "output_sha256": hashlib.sha256(output.encode()).hexdigest() if output else None,
+            }
+            ledger.complete("generator", invocation_id, outcome)
+            completed = True
+            if self.receipt_directory is not None:
+                _atomic_receipt(Path(self.receipt_directory), invocation_id, evidence)
+            if outcome == "success":
+                return {"output": output}
+            if outcome == "ambiguous":
+                raise AmbiguousWorkerResult("V2 Worker outcome is ambiguous; retries are forbidden")
+            raise RuntimeError("Worker rejected the V2 LAB job before inference")
+        except BaseException:
+            if not completed:
+                outcome = "ambiguous" if submitted or receipt is not None else "provider_error"
+                try:
+                    ledger.complete("generator", invocation_id, outcome)
+                    completed = True
+                except (ValueError, KeyError):
+                    pass
+            if self.receipt_directory is not None and not (
+                    Path(self.receipt_directory) / (invocation_id + ".worker-receipt.json")).exists():
+                try:
+                    _atomic_receipt(Path(self.receipt_directory), invocation_id, {
+                        "schema_version": 1, **attempt,
+                        "promptfoo_invocation_id": invocation_id,
+                        "lab_ledger_attempt_id": invocation_id,
+                        "worker_receipt_sha256": None, "worker_terminal_status": "unavailable",
+                        "promptfoo_outcome": outcome, "output_sha256": None,
+                    })
+                except FileExistsError:
+                    pass
+            raise
+
 
 def _provider_config(options: object) -> Mapping[str, object]:
     if not isinstance(options, Mapping):
@@ -285,6 +388,26 @@ def call_api(prompt: str, options: dict, context: dict | None = None) -> dict:
         receipt_directory=Path(private_receipts),
         env=os.environ,
     )
+    if config.get("job_type") == "v2-dev-generator":
+        try:
+            prefix = "AGATA_V2_WORKER_REQUEST\n"
+            if not prompt.startswith(prefix):
+                raise ValueError("missing request envelope")
+            request = json.loads(prompt[len(prefix):])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise PermissionError("Promptfoo V2 payload must be the serialized committed Worker request") from exc
+        if not isinstance(request, dict):
+            raise PermissionError("Promptfoo V2 payload must be a request object")
+        return adapter.invoke_v2_dev(
+            request, invocation_id=invocation_id, run_id=run_id,
+            arm_id=str(config.get("arm_id", "")),
+            configuration_id=str(config.get("configuration_id", "")),
+            scenario_id=str(config.get("scenario_id", "")),
+            turn_index=config.get("turn_index"),
+            history_receipt_ids=config.get("history_receipt_ids", []),
+            model=str(config.get("model", "")),
+            reasoning=str(config.get("reasoning_effort", "")),
+        )
     return adapter.invoke(
         prompt,
         invocation_id=invocation_id,

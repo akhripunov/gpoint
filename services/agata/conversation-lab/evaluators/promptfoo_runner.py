@@ -231,6 +231,191 @@ def build_worker_provider_request(
     return config
 
 
+def build_worker_v2_provider_request(
+    request: Mapping[str, object], *, run_id: str, invocation_id: str, arm_id: str,
+    configuration_id: str, scenario_id: str, turn_index: int,
+    history_receipt_ids: list[str], python_executable: str,
+) -> dict:
+    """Build one Promptfoo eval bound to a single immutable V2 DEV turn."""
+    import json
+    import lab_queue
+    manifest = lab_queue.read_v2_dev_manifest()
+    if (scenario_id not in manifest["scenarios"] or configuration_id not in {"baseline", "naturalness-v1"}
+            or type(turn_index) is not int or turn_index not in range(4)
+            or len(history_receipt_ids) != turn_index):
+        raise PermissionError("Promptfoo may execute only a committed V2 DEV turn")
+    worker_client.build_v2_dev_job(
+        request=dict(request), run_id=run_id, arm_id=arm_id, configuration_id=configuration_id,
+        scenario_id=scenario_id, turn_index=turn_index,
+        history_receipt_ids=history_receipt_ids, invocation_id=invocation_id,
+    )
+    provider_path = Path(__file__).with_name("promptfoo_worker_provider.py").resolve()
+    provider = {"id": "file://" + str(provider_path), "config": {
+        "job_type": "v2-dev-generator", "model": "gpt-6-luna", "reasoning_effort": "medium",
+        "maxRetries": 0, "fallbacks": [], "run_id": run_id, "invocation_id": invocation_id,
+        "arm_id": arm_id, "configuration_id": configuration_id, "scenario_id": scenario_id,
+        "turn_index": turn_index, "history_receipt_ids": list(history_receipt_ids),
+        "dataset_split": "DEV", "pythonExecutable": python_executable,
+    }}
+    config = {
+        "description": "AGATA V2 DEV generator through the canonical Worker LAB lane",
+        "prompts": ["AGATA_V2_WORKER_REQUEST\n" + json.dumps(
+            dict(request), ensure_ascii=False, sort_keys=True, separators=(",", ":"))],
+        "providers": [provider], "tests": [{"vars": {}}],
+        "evaluateOptions": {"maxConcurrency": 1, "cache": False},
+    }
+    _check_config_for_api_auth(config)
+    return config
+
+
+def validate_promptfoo_cli(executable: str, *, command_runner=subprocess.run) -> str:
+    """Verify the local, Lab-pinned Promptfoo CLI without invoking any provider."""
+    path = Path(executable).expanduser().resolve()
+    tooling = (_LAB / "tooling" / "promptfoo").resolve()
+    try:
+        path.relative_to(tooling)
+    except ValueError as exc:
+        raise PermissionError("Promptfoo must be the Lab-local pinned CLI") from exc
+    package = json.loads((tooling / "package.json").read_text(encoding="utf-8"))
+    lock = json.loads((tooling / "package-lock.json").read_text(encoding="utf-8"))
+    if (package.get("devDependencies", {}).get("promptfoo") != "0.123.1"
+            or lock.get("packages", {}).get("node_modules/promptfoo", {}).get("version") != "0.123.1"
+            or not path.is_file() or not os.access(path, os.X_OK)):
+        raise PermissionError("Promptfoo package, lockfile, or local executable is not exact 0.123.1")
+    version_env = build_cli_environment(os.environ)
+    version_env["PROMPTFOO_DISABLE_TELEMETRY"] = "1"
+    version_env["PROMPTFOO_DISABLE_UPDATE_CHECK"] = "1"
+    result = command_runner([str(path), "--version"], stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            timeout=10, env=version_env)
+    if result.returncode != 0 or result.stdout.strip() != "0.123.1":
+        raise PermissionError("Lab-local Promptfoo CLI did not report pinned version 0.123.1")
+    return result.stdout.strip()
+
+
+def _promptfoo_result_output(path: Path) -> str:
+    import json
+    value = json.loads(path.read_text(encoding="utf-8"))
+    result_root = value.get("results") if isinstance(value, dict) else None
+    rows = result_root.get("results") if isinstance(result_root, dict) else result_root
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], Mapping) or rows[0].get("error"):
+        raise RuntimeError("Promptfoo did not return exactly one successful V2 generator result")
+    response = rows[0].get("response")
+    output = response.get("output") if isinstance(response, Mapping) else None
+    if isinstance(output, Mapping):
+        output = output.get("output")
+    if not isinstance(output, str) or not output.strip():
+        raise RuntimeError("Promptfoo result has no model output")
+    return output
+
+
+def run_promptfoo_v2_dev_eval(
+    request: Mapping[str, object], *, run_id: str, invocation_id: str, arm_id: str,
+    configuration_id: str, scenario_id: str, turn_index: int,
+    history_receipt_ids: list[str], promptfoo_executable: str, worker_queue: Path,
+    private_receipt_directory: Path, call_ledger, env: Mapping[str, str] | None = None,
+    eval_runner=_run_eval_bounded,
+) -> dict:
+    """Run one actual Promptfoo CLI eval; provider can only submit one LAB job."""
+    import hashlib
+    import json
+    from datetime import datetime, timezone
+    from approval_phases import PhaseApprovalState
+    import lab_queue
+    import worker_client
+
+    source_env = os.environ if env is None else env
+    limits = {"conversation_arms": 8, "generator_invocations": 32, "judge_invocations": 15}
+    if (getattr(call_ledger, "durable", False) is not True or not call_ledger.verify_persisted()
+            or call_ledger.snapshot().get("limits") != limits
+            or getattr(call_ledger, "journal_path", None) is None):
+        raise PermissionError("V2 Promptfoo eval requires a verified durable call ledger")
+    config = build_worker_v2_provider_request(
+        request, run_id=run_id, invocation_id=invocation_id, arm_id=arm_id,
+        configuration_id=configuration_id, scenario_id=scenario_id,
+        turn_index=turn_index, history_receipt_ids=history_receipt_ids,
+        python_executable=source_env.get("PROMPTFOO_PYTHON") or sys.executable,
+    )
+    validate_live_environment(source_env, config)
+    validate_promptfoo_python(config["providers"][0]["config"]["pythonExecutable"], source_env)
+    validate_promptfoo_cli(promptfoo_executable)
+    queue = worker_client.canonical_lab_queue(source_env)
+    requested_queue = Path(worker_queue).expanduser()
+    if requested_queue.absolute() != queue.absolute() or requested_queue.resolve(strict=False) != queue.resolve(strict=False):
+        raise PermissionError("Promptfoo V2 may submit only to the canonical LAB queue")
+    if turn_index == 0:
+        state_path = queue / "state" / "v2-approval-phase.json"
+        if not state_path.is_file():
+            raise PermissionError("V2 Phase A approval state is not active")
+    child_env = build_cli_environment(source_env)
+    child_env.update({
+        "PROMPTFOO_DISABLE_TELEMETRY": "1",
+        "AGATA_LAB_CALL_LEDGER": str(call_ledger.journal_path),
+        "AGATA_LAB_QUEUE": str(queue),
+        "AGATA_LAB_PRIVATE_RECEIPTS": str(Path(private_receipt_directory)),
+    })
+    with tempfile.TemporaryDirectory(prefix="agata-promptfoo-v2-generator-") as temp_dir:
+        temp = Path(temp_dir)
+        config_path, result_path = temp / "promptfooconfig.json", temp / "promptfoo-result.json"
+        config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+        config_path.chmod(0o600)
+        child_env["PROMPTFOO_CONFIG_DIR"] = temp_dir
+        command = [promptfoo_executable, "eval", "--config", str(config_path), "--no-cache",
+                   "--no-write", "--no-share", "--no-progress-bar", "--max-concurrency", "1",
+                   "--output", str(result_path)]
+        try:
+            result = eval_runner(command, env=child_env, timeout_seconds=EVAL_TIMEOUT_SECONDS,
+                                 on_started=lambda: None,
+                                 on_ambiguous=lambda: _mark_v2_ambiguous(call_ledger, invocation_id))
+        except BaseException:
+            raise
+        call_ledger.refresh()
+        rows = call_ledger.snapshot()["generator_invocations"]["invocations"]
+        ledger_row = next((row for row in rows if row.get("invocation_id") == invocation_id), None)
+        if ledger_row is None:
+            raw_detail = (result.stderr or "").strip()
+            detail = (raw_detail[:1200] + (" … " + raw_detail[-600:] if len(raw_detail) > 1800 else ""))
+            raise RuntimeError("Promptfoo exited without reserving the V2 generator attempt" +
+                               (f": {detail}" if detail else ""))
+        if result.returncode != 0:
+            if ledger_row.get("outcome") is None:
+                call_ledger.complete("generator", invocation_id, "ambiguous")
+            raise RuntimeError("Promptfoo V2 eval failed; the reserved attempt cannot be retried")
+        output = _promptfoo_result_output(result_path)
+        receipt_path = Path(private_receipt_directory) / (invocation_id + ".worker-receipt.json")
+        worker_evidence = json.loads(receipt_path.read_text(encoding="utf-8"))
+        if (worker_evidence.get("promptfoo_outcome") != "success"
+                or worker_evidence.get("output_sha256") != hashlib.sha256(output.encode()).hexdigest()
+                or ledger_row.get("outcome") != "success"):
+            raise RuntimeError("Promptfoo result is not bound to one successful Worker terminal receipt")
+        cli_path = Path(private_receipt_directory) / (invocation_id + ".promptfoo-receipt.json")
+        cli_receipt = {
+            "schema_version": 1, "run_id": run_id, "promptfoo_invocation_id": invocation_id,
+            "worker_job_id": worker_evidence["worker_job_id"],
+            "worker_receipt_sha256": worker_evidence["worker_receipt_sha256"],
+            "promptfoo_success": True, "result_count": 1,
+            "promptfoo_result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        fd = os.open(cli_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as stream:
+                json.dump(cli_receipt, stream, sort_keys=True, separators=(",", ":"))
+                stream.flush(); os.fsync(stream.fileno())
+        finally:
+            os.close(fd)
+        return {"output": output, "worker_receipt": worker_evidence, "promptfoo_receipt": cli_receipt}
+
+
+def _mark_v2_ambiguous(ledger, invocation_id: str) -> None:
+    ledger.refresh()
+    row = next((item for item in ledger.snapshot()["generator_invocations"]["invocations"]
+                if item.get("invocation_id") == invocation_id), None)
+    if row is not None and row.get("outcome") is None:
+        ledger.complete("generator", invocation_id, "ambiguous")
+
+
 def run_promptfoo_worker_eval(
     prompt: str, *, run_id: str, invocation_id: str, scenario_id: str,
     promptfoo_executable: str, worker_queue: Path, private_receipt_directory: Path,

@@ -20,6 +20,7 @@ for path in (LAB / "evaluators", WORKER_DIR):
         sys.path.insert(0, str(path))
 
 import lab_queue
+import approval_phases
 import promptfoo_runner
 import worker_client
 from run_coordinator import CallLedger
@@ -38,6 +39,41 @@ class PromptfooJudgeMockE2ETests(unittest.TestCase):
             approval_path = config_dir / "lab-approval.json"
             scenario = json.loads((LAB / "data/golden/synthetic/v2-dev-scenarios.jsonl").read_text().splitlines()[0])
             scenario_id = scenario["scenario_id"]
+            run_id = "mock-e2e-batch"
+            queue_root = worker_client.canonical_lab_queue({"GPOINT_AGATA_WORKER_SUPPORT": str(support)})
+            lab_queue._layout(queue_root)
+            phase_dir = queue_root / "state"; phase_dir.mkdir(mode=0o700)
+            phase = approval_phases.PhaseApprovalState(phase_dir / "v2-approval-phase.json")
+            bundle = lab_queue.worker_bundle_sha256()
+            phase.begin_generator(run_id=run_id, scenario_id=scenario_id, worker_bundle_sha256=bundle,
+                                  approval_id="mock-phase-a", max_calls=8)
+            generator_receipts = []
+            generator_ledger_rows = []
+            generator_promptfoo_receipts = []
+            for arm in ("baseline", "naturalness-v1"):
+                for turn in range(4):
+                    job_id = f"seed-{arm}-{turn}"
+                    invocation_id = "pfv2-" + __import__("hashlib").sha256(
+                        "\0".join((run_id, arm, str(turn))).encode()).hexdigest()[:59]
+                    lab_queue.finish(queue_root, job_id, status="completed", response="mock generator response",
+                        execution={"requested_model": "gpt-6-luna", "requested_reasoning_effort": "medium",
+                                   "actual_model": "gpt-6-luna", "inference_started": True},
+                        identity={"experiment_id": "agata-v2-naturalness-dev", "configuration_id": arm,
+                                  "scenario_id": scenario_id, "turn_index": turn,
+                                  "job_type": "v2-dev-generator", "dataset_split": "DEV",
+                                  "run_id": run_id, "arm_id": f"{run_id}-{arm}",
+                                  "promptfoo_invocation_id": invocation_id}, slot_id="slot-03")
+                    generator_receipts.append(lab_queue.read_receipt(queue_root, job_id))
+                    generator_ledger_rows.append({"invocation_id": invocation_id, "outcome": "success",
+                        "metadata": {"run_id": run_id, "scenario_id": scenario_id, "configuration": arm,
+                                     "turn_index": turn, "worker_job_id": job_id}})
+                    generator_promptfoo_receipts.append({"promptfoo_invocation_id": invocation_id,
+                        "promptfoo_success": True, "result_count": 1, "run_id": run_id,
+                        "worker_job_id": job_id})
+            phase.close_generator(generator_receipts, call_ledger_snapshot={
+                "generator_invocations": {"attempted": 8, "outcomes": {"success": 8},
+                                          "invocations": generator_ledger_rows}
+            }, promptfoo_receipts=generator_promptfoo_receipts)
             turns = [{"role": turn["role"], "text": turn["text"]} if turn["role"] == "user"
                      else {"role": "assistant", "text": "Хорошо, спасибо, что спросил."}
                      for turn in scenario["dialogue_turns"]]
@@ -48,15 +84,18 @@ class PromptfooJudgeMockE2ETests(unittest.TestCase):
             packet, private_mapping = blind.make_v2_blind_packets(
                 [scenario], results, batch_id="judge-e2e-generation")
             approval = {
-                "approval_id": "offline-mock-approval",
-                "worker_bundle_sha256": lab_queue.worker_bundle_sha256(),
+                "approval_id": "offline-mock-phase-b-approval", "phase": "JUDGES", "run_id": run_id,
+                "worker_bundle_sha256": bundle,
                 "experiment_ids": [lab_queue.JUDGE_EXPERIMENT_ID],
                 "configuration_ids": ["judge-1", "judge-2", "judge-3"],
-                "scenario_ids": [scenario_id], "max_calls": 8,
+                "scenario_ids": [scenario_id], "max_calls": 3,
                 "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
             }
             approval_path.write_text(json.dumps(approval), encoding="utf-8")
             approval_path.chmod(0o600)
+            phase.begin_judges(run_id=run_id, scenario_id=scenario_id, worker_bundle_sha256=bundle,
+                               approval_id=approval["approval_id"], max_calls=3,
+                               generator_receipts=generator_receipts)
             receipts = root / "receipts"; receipts.mkdir(mode=0o700)
             ledger = CallLedger(journal_path=root / "call-ledger.jsonl")
             python_paths = [Path(sys.executable).parent]
