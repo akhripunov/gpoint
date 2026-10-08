@@ -865,14 +865,24 @@ def test_apply_aborts_before_bootout_when_pause_or_second_queue_check_is_unsafe(
     second_snapshot["lanes"]["GPOINT"]["pending_inference_jobs"] = 1
     queue_reads = iter((first_snapshot, second_snapshot))
     queue_read_calls = []
+    pause_observed = {"paused": False}
+    queue_read_states = []
+
     def read_queue():
         queue_read_calls.append(True)
+        queue_read_states.append((
+            (root / "state/maintenance-stop").exists(), pause_observed["paused"],
+        ))
         return next(queue_reads)
     monkeypatch.setattr(migration, "_read_production_queue_status", read_queue)
     monkeypatch.setattr(migration, "_network_state_sha256", lambda: "stable-network-state")
     monkeypatch.setattr(migration, "_stage_runtime", lambda *_args: tmp_path / "candidate-stage")
     monkeypatch.setattr(migration, "_validate_candidate_startup", lambda *_args: {"state": "PASS"})
-    monkeypatch.setattr(migration, "_pause_idle_launchagent", lambda: paused_pid)
+    def pause_idle_worker():
+        pause_observed["paused"] = paused_pid is not None
+        return paused_pid
+
+    monkeypatch.setattr(migration, "_pause_idle_launchagent", pause_idle_worker)
     signals = []
     monkeypatch.setattr(migration.os, "kill", lambda pid, sig: signals.append((pid, sig)))
     commands = []
@@ -886,6 +896,7 @@ def test_apply_aborts_before_bootout_when_pause_or_second_queue_check_is_unsafe(
     expected_signals = [(424242, migration.signal.SIGCONT)] if paused_pid else []
     assert signals == expected_signals
     assert len(queue_read_calls) == (2 if paused_pid else 1)
+    assert queue_read_states == ([(False, False), (True, True)] if paused_pid else [(False, False)])
     assert not any(command[:2] == ["launchctl", "bootout"] for command in commands)
     assert plist.read_bytes() == original_plist
     assert not (root / "runtime/current").exists()
@@ -938,7 +949,7 @@ def test_live_runtime_readonly_snapshot_rejects_untrusted_or_mismatched_identity
             )
 
 
-def test_queue_status_404_bootstraps_both_lanes_from_live_readonly_runtime_snapshots(tmp_path, monkeypatch):
+def test_queue_status_404_and_gateway_network_error_use_live_readonly_snapshots(tmp_path, monkeypatch):
     now = datetime.now(UTC)
     unavailable_status = _fresh_empty_queue_status(now)
     unavailable_status["pool"]["state"] = "DEGRADED"
@@ -948,7 +959,8 @@ def test_queue_status_404_bootstraps_both_lanes_from_live_readonly_runtime_snaps
     unavailable_status["current_job_present"] = False
     for lane in ("GPOINT", "GSALES"):
         unavailable_status["lanes"][lane] = {
-            "health": "HEALTHY", "queue_snapshot_state": "UNAVAILABLE",
+            "health": "DEGRADED", "health_error_code": "worker_gateway_network_error",
+            "queue_snapshot_state": "UNAVAILABLE",
             "queue_snapshot_error_code": "worker_gateway_http_404",
         }
     snapshots = {
@@ -1162,6 +1174,35 @@ def test_non_404_queue_failure_never_uses_live_runtime_bootstrap(tmp_path, monke
                         subprocess.CompletedProcess(command, 0, json.dumps(status), ""))
     monkeypatch.setattr(migration, "_read_live_runtime_queue_snapshot",
                         lambda *_args: pytest.fail("live bootstrap must be limited to endpoint 404"))
+    with pytest.raises(RuntimeError, match="production_queue_status_unavailable"):
+        migration._read_production_queue_status()
+
+
+@pytest.mark.parametrize(
+    ("health", "health_error", "queue_error"),
+    (
+        ("DEGRADED", "worker_gateway_auth_error", "worker_gateway_http_404"),
+        ("DEGRADED", "worker_gateway_http_500", "worker_gateway_http_404"),
+        ("HEALTHY", None, "worker_gateway_http_403"),
+    ),
+)
+def test_live_snapshot_fallback_rejects_nonallowlisted_worker_errors(
+        tmp_path, monkeypatch, health, health_error, queue_error):
+    root = tmp_path / "worker-runtime"
+    _create_installed_runtime(root)
+    monkeypatch.setattr(migration, "ROOT", root)
+    status = _fresh_empty_queue_status(datetime.now(UTC))
+    status["lanes"]["GPOINT"].update({
+        "health": health,
+        "health_error_code": health_error,
+        "queue_snapshot_state": "UNAVAILABLE",
+        "queue_snapshot_error_code": queue_error,
+    })
+    monkeypatch.setattr(migration.subprocess, "run", lambda command, **_kwargs:
+                        subprocess.CompletedProcess(command, 0, json.dumps(status), ""))
+    monkeypatch.setattr(migration, "_read_live_runtime_queue_snapshot",
+                        lambda *_args: pytest.fail("nonallowlisted state must not use VPS fallback"))
+
     with pytest.raises(RuntimeError, match="production_queue_status_unavailable"):
         migration._read_production_queue_status()
 
