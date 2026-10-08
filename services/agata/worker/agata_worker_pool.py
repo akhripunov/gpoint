@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -16,7 +17,9 @@ from typing import Any
 
 CANONICAL_ROOT = Path.home() / "Library/Application Support/GPoint/agata-codex-worker"
 LANES = ("GPOINT", "GSALES", "LAB")
-MAX_SLOTS = 16
+SLOT_LANES = {"slot-01": "GPOINT", "slot-02": "GSALES", "slot-03": "LAB"}
+LANE_SLOTS = {lane: slot for slot, lane in SLOT_LANES.items()}
+MAX_SLOTS = len(SLOT_LANES)
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SAFE_TOP_LEVEL = {"pool", "provider", "configured_concurrency", "lanes", "slots", "updated_at", "targets"}
 _SENSITIVE_KEY_PARTS = ("token", "secret", "lease", "prompt", "request", "context", "response", "credential")
@@ -37,7 +40,7 @@ class PoolConfig:
             raise ValueError("worker_concurrency_invalid")
         if self.provider_parallel_capability not in {"NOT_VERIFIED", "VERIFIED"}:
             raise ValueError("parallel_provider_capability_invalid")
-        if self.concurrency > 1 and self.provider_parallel_capability != "VERIFIED":
+        if self.concurrency > 1:
             raise ValueError("parallel_provider_capability_not_verified")
         if not 1 <= self.poll_seconds <= 60:
             raise ValueError("worker_poll_interval_invalid")
@@ -51,7 +54,7 @@ class PoolConfig:
         capability = env.get("AGATA_CODEX_PARALLEL_CAPABILITY", "NOT_VERIFIED")
         if capability not in {"NOT_VERIFIED", "VERIFIED"}:
             raise ValueError("parallel_provider_capability_invalid")
-        if concurrency > 1 and capability != "VERIFIED":
+        if concurrency > 1:
             raise ValueError("parallel_provider_capability_not_verified")
         try:
             poll_seconds = float(env.get("AGATA_WORKER_POLL_SECONDS", "3"))
@@ -121,6 +124,15 @@ class PoolPaths:
         return self.locks / "pool.lock"
 
     @property
+    def provider_lock(self) -> Path:
+        return self.locks / "provider.lock"
+
+    def slot_runtime_current(self, lane: str) -> Path:
+        if lane not in LANES:
+            raise ValueError("worker_lane_invalid")
+        return self.runtime / "slots" / lane / "current"
+
+    @property
     def lifecycle_lock(self) -> Path:
         return self.locks / "lifecycle.lock"
 
@@ -137,7 +149,8 @@ class PoolPaths:
         return self.status / "worker-status.json"
 
     def slot_dir(self, slot_id: str) -> Path:
-        _validate_id(slot_id, "slot_identity_invalid")
+        if slot_id not in SLOT_LANES:
+            raise ValueError("slot_identity_invalid")
         return self.slots / slot_id
 
     def slot_lock(self, slot_id: str) -> Path:
@@ -149,9 +162,11 @@ class PoolPaths:
 
     def ensure(self) -> None:
         directories = (
-            self.root, self.runtime, self.config, self.state, self.locks,
+            self.root, self.runtime, self.runtime / "slots", self.config, self.state, self.locks,
             self.locks / "jobs", self.receipts, self.status, self.logs,
             self.queues, self.lab_queue, self.slots,
+            *(self.runtime / "slots" / lane for lane in LANES),
+            *(self.slot_dir(slot_id) for slot_id in SLOT_LANES),
         )
         for directory in directories:
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -161,7 +176,7 @@ class PoolPaths:
 
 
 class LaneScheduler:
-    """Weighted production rotation; LAB is considered only after production is empty."""
+    """Weighted production rotation before the independent local LAB lane."""
 
     _CYCLE = ("GPOINT", "GPOINT", "GSALES", "GPOINT", "GPOINT", "GSALES")
 
@@ -195,11 +210,6 @@ class LaneScheduler:
             if self._CYCLE[index] == lane:
                 self._cursor = (index + 1) % len(self._CYCLE)
                 return
-
-    @staticmethod
-    def lab_may_run(*, production_claims_empty: bool) -> bool:
-        return production_claims_empty
-
 
 def _validate_id(value: str, error: str) -> None:
     if not isinstance(value, str) or not _ID_RE.fullmatch(value):
@@ -286,6 +296,7 @@ class _ActiveSlot:
     process: subprocess.Popen
     slot_lock: Any
     job_lock: Any
+    provider_lock: Any
 
 
 class ProcessSlotRunner:
@@ -293,26 +304,29 @@ class ProcessSlotRunner:
 
     def __init__(self, paths: PoolPaths, command_prefix: list[str] | None = None) -> None:
         self.paths = paths
-        self.command_prefix = command_prefix or [
-            sys.executable,
-            str(Path(__file__).with_name("gpoint_mac_worker.py")),
-        ]
+        self.command_prefix = command_prefix
 
-    def start(self, slot_id: str, lane: str, offer: dict[str, Any], slot_lock, job_lock):
+    def start(self, slot_id: str, lane: str, offer: dict[str, Any], slot_lock, job_lock, provider_lock):
+        if SLOT_LANES.get(slot_id) != lane:
+            raise ValueError("worker_slot_lane_mismatch")
         env = os.environ.copy()
         env["GPOINT_AGATA_WORKER_SUPPORT"] = str(self.paths.root)
         env["AGATA_WORKER_SLOT_ID"] = slot_id
         env["AGATA_WORKER_POOL_ROOT"] = str(self.paths.root)
         env["AGATA_WORKER_SLOT_LOCK_FD"] = str(slot_lock.fileno())
         env["AGATA_WORKER_JOB_LOCK_FD"] = str(job_lock.fileno())
-        command = [*self.command_prefix, "execute-slot", "--lane", lane, "--slot", slot_id]
+        env["AGATA_WORKER_PROVIDER_LOCK_FD"] = str(provider_lock.fileno())
+        command_prefix = self.command_prefix or [
+            sys.executable, str(self.paths.slot_runtime_current(lane) / "gpoint_mac_worker.py"),
+        ]
+        command = [*command_prefix, "execute-slot", "--lane", lane, "--slot", slot_id]
         process = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             env=env,
-            pass_fds=(slot_lock.fileno(), job_lock.fileno()),
+            pass_fds=(slot_lock.fileno(), job_lock.fileno(), provider_lock.fileno()),
             start_new_session=True,
         )
         assert process.stdin is not None
@@ -320,8 +334,18 @@ class ProcessSlotRunner:
             process.stdin.write(json.dumps(offer, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
             process.stdin.close()
         except Exception:
-            process.terminate()
-            process.wait(timeout=5)
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=5)
             raise
         return process
 
@@ -413,6 +437,12 @@ class PoolSupervisor:
                 "job_id": job_id if isinstance(job_id, str) else None,
                 "phase": phase,
             })
+        for slot_id, lane in SLOT_LANES.items():
+            state_file = self.paths.slot_dir(slot_id) / "state.json"
+            if not state_file.exists():
+                self._write_slot_state(slot_id, {
+                    "state": "IDLE", "lane": lane, "job_id": None, "phase": "READY",
+                })
 
     def poll_once(self, now: float | None = None) -> int:
         if self._pool_lock is None:
@@ -422,103 +452,121 @@ class PoolSupervisor:
             self._write_status(maintenance=True)
             return 0
         launched = 0
-        for slot_number in range(1, self.config.concurrency + 1):
-            slot_id = f"slot-{slot_number:02d}"
-            if slot_id in self.active:
-                continue
-            try:
-                slot_lock = acquire_lock(self.paths.slot_lock(slot_id))
-            except PoolLockError:
-                continue
-            offer = None
-            lane = None
-            production_error = False
-            configured = set(self.claimers).intersection({"GPOINT", "GSALES"})
-            for candidate in self.scheduler.production_order(configured):
-                if self.failed_until.get(candidate, 0) > (self.clock() if now is None else now):
-                    production_error = True
+        configured = set(self.claimers).intersection({"GPOINT", "GSALES"})
+        current_time = self.clock() if now is None else now
+        while len(self.active) < self.config.concurrency:
+            dispatched = False
+            for lane in self.scheduler.production_order(configured):
+                if self.failed_until.get(lane, 0) > current_time:
                     continue
-                try:
-                    offer = self.claimers[candidate]()
-                    self.lane_errors.pop(candidate, None)
-                    self.failed_until.pop(candidate, None)
-                    self.successful_polls.add(candidate)
-                except Exception as exc:
-                    self.lane_errors[candidate] = _safe_error(exc)
-                    delay = min(60.0, 2.0 ** min(5, len(self.lane_errors)))
-                    self.failed_until[candidate] = (self.clock() if now is None else now) + delay
-                    production_error = True
-                    continue
-                if offer:
-                    lane = candidate
-                    self.scheduler.record_dispatch(candidate)
+                if self._dispatch_lane(lane):
+                    self.scheduler.record_dispatch(lane)
+                    launched += 1
+                    dispatched = True
                     break
-            if lane is None and not production_error and self.scheduler.lab_may_run(production_claims_empty=True):
-                lab_claim = self.claimers.get("LAB")
-                if lab_claim is not None:
-                    try:
-                        offer = lab_claim()
-                        self.lane_errors.pop("LAB", None)
-                    except Exception as exc:
-                        self.lane_errors["LAB"] = _safe_error(exc)
-                        offer = None
-                    if offer:
-                        lane = "LAB"
-            if lane is None or not isinstance(offer, dict):
-                slot_lock.close()
-                previous = self._read_slot_state(slot_id)
-                if previous.get("state") not in {"FAILED", "AMBIGUOUS"}:
-                    self._write_slot_state(slot_id, {"state": "IDLE", "lane": None, "job_id": None})
+            if dispatched:
                 continue
-            job_id = offer.get("id") if lane != "LAB" else offer.get("job_id")
-            if not isinstance(job_id, str):
-                slot_lock.close()
-                if self.reject_offer:
-                    self.reject_offer(lane, offer, "worker_claim_invalid")
+            if ("LAB" in self.claimers and self.failed_until.get("LAB", 0) <= current_time
+                    and self._dispatch_lane("LAB")):
+                launched += 1
                 continue
-            try:
-                job_lock = acquire_lock(self.paths.job_lock(job_id))
-            except PoolLockError:
-                slot_lock.close()
-                if self.reject_offer:
-                    self.reject_offer(lane, offer, "worker_duplicate_claim_blocked")
-                continue
-            if lane in {"GPOINT", "GSALES"} and (
-                self.paths.state / "ambiguous-jobs" / f"{job_id}.json"
-            ).is_file():
-                job_lock.close()
-                slot_lock.close()
-                if self.reject_offer:
-                    self.reject_offer(lane, offer, "worker_execution_ambiguous")
-                self._write_slot_state(slot_id, {
-                    "state": "AMBIGUOUS", "lane": lane, "job_id": job_id,
-                    "phase": "AMBIGUOUS_REDELIVERY_BLOCKED",
-                })
-                continue
-            self._write_slot_state(slot_id, {
-                "state": "BUSY", "lane": lane, "job_id": job_id,
-                "phase": "CLAIMED", "pid": None,
-            })
-            try:
-                process = self.runner.start(slot_id, lane, offer, slot_lock, job_lock)
-            except Exception as exc:
-                self._write_slot_state(slot_id, {
-                    "state": "FAILED", "lane": lane, "job_id": job_id,
-                    "phase": "SLOT_START_FAILED", "error_code": _safe_error(exc),
-                })
-                job_lock.close()
-                slot_lock.close()
-                if self.reject_offer:
-                    self.reject_offer(lane, offer, "worker_slot_start_failed")
-                continue
-            self._write_slot_state(slot_id, {
-                "state": "BUSY", "lane": lane, "job_id": job_id,
-                "phase": "CLAIMED", "pid": process.pid,
-            })
-            self.active[slot_id] = _ActiveSlot(slot_id, lane, job_id, process, slot_lock, job_lock)
-            launched += 1
+            break
         self._write_status()
         return launched
+
+    def _dispatch_lane(self, lane: str) -> bool:
+        slot_id = LANE_SLOTS.get(lane)
+        claimer = self.claimers.get(lane)
+        if slot_id is None or claimer is None or slot_id in self.active:
+            return False
+        try:
+            provider_lock = acquire_lock(self.paths.provider_lock)
+        except PoolLockError:
+            return False
+        try:
+            slot_lock = acquire_lock(self.paths.slot_lock(slot_id))
+        except PoolLockError:
+            provider_lock.close()
+            return False
+        try:
+            offer = claimer()
+            self.lane_errors.pop(lane, None)
+            self.failed_until.pop(lane, None)
+            self.successful_polls.add(lane)
+        except Exception as exc:
+            self.lane_errors[lane] = _safe_error(exc)
+            delay = min(60.0, 2.0 ** min(5, len(self.lane_errors)))
+            self.failed_until[lane] = self.clock() + delay
+            slot_lock.close()
+            provider_lock.close()
+            return False
+        if offer is None:
+            slot_lock.close()
+            provider_lock.close()
+            return False
+        if not isinstance(offer, dict):
+            slot_lock.close()
+            provider_lock.close()
+            self._reject_claim(lane, offer, "worker_claim_invalid")
+            return False
+        job_id = offer.get("job_id") if lane == "LAB" else offer.get("id")
+        if not isinstance(job_id, str):
+            slot_lock.close()
+            provider_lock.close()
+            self._reject_claim(lane, offer, "worker_claim_invalid")
+            return False
+        try:
+            job_lock = acquire_lock(self.paths.job_lock(job_id))
+        except PoolLockError:
+            slot_lock.close()
+            provider_lock.close()
+            self._reject_claim(lane, offer, "worker_duplicate_claim_blocked")
+            return False
+        if lane in {"GPOINT", "GSALES"} and (
+            self.paths.state / "ambiguous-jobs" / f"{job_id}.json"
+        ).is_file():
+            job_lock.close()
+            slot_lock.close()
+            provider_lock.close()
+            self._reject_claim(lane, offer, "worker_execution_ambiguous")
+            self._write_slot_state(slot_id, {
+                "state": "AMBIGUOUS", "lane": lane, "job_id": job_id,
+                "phase": "AMBIGUOUS_REDELIVERY_BLOCKED",
+            })
+            return False
+        self._write_slot_state(slot_id, {
+            "state": "BUSY", "lane": lane, "job_id": job_id,
+            "phase": "CLAIMED", "pid": None,
+        })
+        try:
+            process = self.runner.start(slot_id, lane, offer, slot_lock, job_lock, provider_lock)
+        except Exception as exc:
+            self._write_slot_state(slot_id, {
+                "state": "FAILED", "lane": lane, "job_id": job_id,
+                "phase": "SLOT_START_FAILED", "error_code": _safe_error(exc),
+            })
+            job_lock.close()
+            slot_lock.close()
+            provider_lock.close()
+            self._reject_claim(lane, offer, "worker_slot_start_failed")
+            return False
+        self._write_slot_state(slot_id, {
+            "state": "BUSY", "lane": lane, "job_id": job_id,
+            "phase": "CLAIMED", "pid": process.pid,
+        })
+        self.active[slot_id] = _ActiveSlot(
+            slot_id, lane, job_id, process, slot_lock, job_lock, provider_lock,
+        )
+        return True
+
+    def _reject_claim(self, lane: str, offer: Any, reason: str) -> None:
+        if self.reject_offer is None:
+            return
+        try:
+            self.reject_offer(lane, offer, reason)
+        except Exception as exc:
+            self.lane_errors[lane] = _safe_error(exc)
+            self.failed_until[lane] = self.clock() + 2.0
 
     def run_forever(self) -> int:
         try:
@@ -557,6 +605,7 @@ class PoolSupervisor:
     def _release(self, active: _ActiveSlot) -> None:
         active.job_lock.close()
         active.slot_lock.close()
+        active.provider_lock.close()
 
     def _read_slot_state(self, slot_id: str) -> dict[str, Any]:
         try:
@@ -607,14 +656,13 @@ class PoolSupervisor:
                 **({"presence": "PERMANENT", "inference_gate": lab_gate} if lane == "LAB" else {}),
                 "last_error_code": error,
             }
-        slot_states = {f"slot-{number:02d}": self._read_slot_state(f"slot-{number:02d}")
-                       for number in range(1, self.config.concurrency + 1)}
+        slot_states = {slot_id: self._read_slot_state(slot_id) for slot_id in SLOT_LANES}
         busy = len(self.active)
         production_error = any(lane in {"GPOINT", "GSALES"} for lane in self.lane_errors)
         pool_state = "MAINTENANCE" if maintenance else "DEGRADED" if production_error else "HEALTHY"
         write_pool_status(self.paths, {
-            "pool": {"state": pool_state, "total": self.config.concurrency,
-                     "busy": busy, "idle": self.config.concurrency - busy,
+            "pool": {"state": pool_state, "total": len(SLOT_LANES),
+                     "busy": busy, "idle": len(SLOT_LANES) - busy,
                      "failed": sum(state.get("state") == "FAILED" for state in slot_states.values())},
             "provider": {
                 "state": "HEALTHY" if self.config.concurrency == 1 else "VERIFIED",

@@ -11,6 +11,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agata_worker_pool import LANE_SLOTS
+
 MAX_PAYLOAD_BYTES = 64 * 1024
 DEFAULT_MAX_PENDING = 16
 MAX_TIMEOUT_SECONDS = 180
@@ -379,11 +381,15 @@ def _finish_path(root: Path, job_id: str, receipt: dict) -> None:
 def finish(
     root: Path, job_id: str, *, status: str, response: str = "",
     error_code: str | None = None, execution: dict | None = None,
-    identity: dict | None = None,
+    identity: dict | None = None, slot_id: str | None = None,
 ) -> None:
     if not ID_RE.fullmatch(job_id) or status not in {"completed", "failed", "cancelled", "ambiguous"}:
         raise LabQueueError("receipt_identity_or_status_invalid")
+    if slot_id is not None and slot_id != LANE_SLOTS["LAB"]:
+        raise LabQueueError("receipt_slot_lane_mismatch")
     receipt = {"job_id": job_id, "status": status, "finished_at": time.time()}
+    if slot_id is not None:
+        receipt["slot_id"] = slot_id
     if response:
         receipt["response"] = response
     if error_code:

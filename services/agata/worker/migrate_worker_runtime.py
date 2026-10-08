@@ -336,28 +336,30 @@ def validate_fresh_production_queue_snapshots(status: dict, *, now: datetime | N
         pool_state_valid = isinstance(pool, dict) and pool.get("state") == "HEALTHY"
     elif pool_authority == "mac_worker_live_idle_inventory_v1":
         inventory = status.get("pool_snapshot_inventory")
+        slots = status.get("slots")
+        slot_count = len(slots) if isinstance(slots, dict) else None
         pool_state_valid = (
             isinstance(pool, dict) and pool.get("state") == "IDLE_CONFIRMED"
             and isinstance(inventory, dict)
             and inventory == {
                 "configured_concurrency": 1,
-                "slot_count": 1,
+                "slot_count": slot_count,
                 "all_slots_idle": True,
                 "current_job_present": False,
                 "launch_agent_loaded": True,
                 "active_inference": False,
             }
             and isinstance(total := pool.get("total"), int) and not isinstance(total, bool)
-            and total == 1
+            and total == slot_count and slot_count in {1, 3}
             and isinstance(status.get("configured_concurrency"), int)
             and not isinstance(status.get("configured_concurrency"), bool)
             and status.get("configured_concurrency") == 1
             and status.get("current_job_present") is False
             and status.get("launch_agent_loaded") is True
-            and isinstance(status.get("slots"), dict)
-            and len(status["slots"]) == 1
+            and isinstance(slots, dict)
+            and set(slots) in ({"slot-01"}, {"slot-01", "slot-02", "slot-03"})
             and all(isinstance(slot, dict) and slot.get("state") == "IDLE"
-                    and slot.get("job_id") is None for slot in status["slots"].values())
+                    and slot.get("job_id") is None for slot in slots.values())
         )
     else:
         raise RuntimeError("production_queue_snapshot_invalid")
@@ -638,10 +640,12 @@ def _refresh_local_pool_evidence(status: dict) -> None:
     lanes = status.get("lanes")
     concurrency = status.get("configured_concurrency")
     total = pool.get("total") if isinstance(pool, dict) else None
+    slot_ids = set(slots) if isinstance(slots, dict) else set()
+    canonical_slot_sets = ({"slot-01"}, {"slot-01", "slot-02", "slot-03"})
     if (not isinstance(pool, dict) or isinstance(pool.get("busy"), bool) or pool.get("busy") != 0
             or isinstance(concurrency, bool) or concurrency != 1
-            or isinstance(total, bool) or total != 1
-            or not isinstance(slots, dict) or len(slots) != 1
+            or isinstance(total, bool) or total not in {1, 3}
+            or not isinstance(slots, dict) or slot_ids not in canonical_slot_sets or total != len(slots)
             or any(not isinstance(slot, dict) or slot.get("state") != "IDLE"
                    or slot.get("job_id") is not None
                                 for slot in slots.values())
@@ -664,7 +668,7 @@ def _refresh_local_pool_evidence(status: dict) -> None:
     status["pool_snapshot_authority"] = "mac_worker_live_idle_inventory_v1"
     status["pool_snapshot_inventory"] = {
         "configured_concurrency": 1,
-        "slot_count": 1,
+        "slot_count": len(slots),
         "all_slots_idle": True,
         "current_job_present": False,
         "launch_agent_loaded": True,
@@ -1380,6 +1384,175 @@ def _install_staged_runtime(staged_release: Path, manifest: dict) -> Path:
     return release
 
 
+def _replace_lane_runtime_pointer(root: Path, lane: str, source_sha: str) -> str | None:
+    """Atomically point one lane at an immutable installed runtime release."""
+    if lane not in {"GPOINT", "GSALES", "LAB"} or not re.fullmatch(r"[0-9a-f]{40}", source_sha):
+        raise RuntimeError("worker_lane_runtime_identity_invalid")
+    root = Path(root)
+    runtime_root = root / "runtime"
+    slots_root = runtime_root / "slots"
+    lane_dir = slots_root / lane
+    release = runtime_root / source_sha
+    for directory in (runtime_root, slots_root, lane_dir):
+        if not directory.exists() and not directory.is_symlink():
+            directory.mkdir(mode=0o700)
+        if (directory.is_symlink() or not directory.is_dir()
+                or directory.stat().st_uid != os.getuid() or directory.stat().st_mode & 0o077):
+            raise RuntimeError("worker_lane_runtime_path_invalid")
+    if (release.is_symlink() or not release.is_dir() or release.parent != runtime_root
+            or release.stat().st_uid != os.getuid() or release.stat().st_mode & 0o077):
+        raise RuntimeError("worker_lane_runtime_release_invalid")
+    current = lane_dir / "current"
+    previous = os.readlink(current) if current.is_symlink() else None
+    if current.exists() and not current.is_symlink():
+        raise RuntimeError("worker_lane_runtime_pointer_invalid")
+    if previous is not None:
+        try:
+            resolved_previous = current.resolve(strict=True)
+        except OSError as exc:
+            raise RuntimeError("worker_lane_runtime_pointer_invalid") from exc
+        if resolved_previous.parent != runtime_root.resolve(strict=True):
+            raise RuntimeError("worker_lane_runtime_pointer_invalid")
+    temporary = lane_dir / ".current-next"
+    if temporary.exists() or temporary.is_symlink():
+        if temporary.is_dir() and not temporary.is_symlink():
+            raise RuntimeError("worker_lane_runtime_pointer_invalid")
+        temporary.unlink()
+    temporary.symlink_to(os.path.relpath(release, lane_dir))
+    os.replace(temporary, current)
+    if current.resolve(strict=True) != release.resolve(strict=True):
+        if previous is None:
+            current.unlink(missing_ok=True)
+        else:
+            rollback = lane_dir / ".current-rollback"
+            rollback.unlink(missing_ok=True)
+            rollback.symlink_to(previous)
+            os.replace(rollback, current)
+        raise RuntimeError("worker_lane_runtime_switch_verification_failed")
+    return previous
+
+
+def _switch_all_lane_runtime_pointers(root: Path, source_sha: str) -> dict[str, str | None]:
+    """Switch all slots as part of the already-paused full-pool transition."""
+    changed: dict[str, str | None] = {}
+    try:
+        for lane in ("GPOINT", "GSALES", "LAB"):
+            changed[lane] = _replace_lane_runtime_pointer(root, lane, source_sha)
+    except Exception:
+        for lane, previous in reversed(list(changed.items())):
+            current = Path(root) / "runtime/slots" / lane / "current"
+            if previous is None:
+                current.unlink(missing_ok=True)
+            else:
+                rollback = current.parent / ".current-rollback"
+                rollback.unlink(missing_ok=True)
+                rollback.symlink_to(previous)
+                os.replace(rollback, current)
+        raise
+    return changed
+
+
+def _restore_lane_runtime_pointer(root: Path, lane: str, previous: str | None) -> None:
+    """Restore and verify one lane pointer after an incomplete switch."""
+    lane_dir = Path(root) / "runtime/slots" / lane
+    current = lane_dir / "current"
+    if previous is None:
+        current.unlink(missing_ok=True)
+        if current.exists() or current.is_symlink():
+            raise RuntimeError("worker_lane_runtime_rollback_failed")
+        return
+    rollback = lane_dir / ".current-rollback"
+    rollback.unlink(missing_ok=True)
+    rollback.symlink_to(previous)
+    os.replace(rollback, current)
+    try:
+        if current.resolve(strict=True) != (lane_dir / previous).resolve(strict=True):
+            raise RuntimeError("worker_lane_runtime_rollback_failed")
+    except OSError as exc:
+        raise RuntimeError("worker_lane_runtime_rollback_failed") from exc
+
+
+def install_lane_slot(lane: str) -> dict:
+    """Update one lane child runtime without stopping the shared supervisor."""
+    if lane not in {"GPOINT", "GSALES", "LAB"}:
+        raise RuntimeError("worker_lane_runtime_identity_invalid")
+    TRANSITION_LOCK.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    transition_fd = os.open(TRANSITION_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(transition_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        os.close(transition_fd)
+        raise RuntimeError("worker_transition_already_running") from exc
+    try:
+        if _release_lock_busy():
+            raise RuntimeError("production_release_lock_busy")
+        if (ROOT / "state/maintenance-stop").exists():
+            raise RuntimeError("worker_runtime_maintenance_active")
+        current_supervisor = ROOT / "runtime/current/agata_worker_pool.py"
+        try:
+            supports_lane_pointers = "def slot_runtime_current(" in current_supervisor.read_text(encoding="utf-8")
+        except OSError:
+            supports_lane_pointers = False
+        if not supports_lane_pointers:
+            raise RuntimeError("installed_supervisor_does_not_support_lane_runtime_pointers")
+        manifest = candidate()
+        queue_preflight = None
+        if lane in {"GPOINT", "GSALES"}:
+            status = _read_production_queue_status(manifest)
+            queue_preflight = require_fresh_empty_production_queues(status)
+        staged = _stage_runtime(manifest)
+        release = _install_staged_runtime(staged, manifest)
+        _verify_staged_runtime(release, manifest)
+        slot_id = {"GPOINT": "slot-01", "GSALES": "slot-02", "LAB": "slot-03"}[lane]
+        slots_root = ROOT / "slots"
+        if not slots_root.exists():
+            slots_root.mkdir(mode=0o700)
+        if (slots_root.is_symlink() or not slots_root.is_dir()
+                or slots_root.stat().st_uid != os.getuid() or slots_root.stat().st_mode & 0o077):
+            raise RuntimeError("worker_lane_slot_lock_path_invalid")
+        slot_directory = slots_root / slot_id
+        slot_directory.mkdir(exist_ok=True, mode=0o700)
+        slot_lock_path = slot_directory / "ownership.lock"
+        if (slot_directory.is_symlink() or not slot_directory.is_dir()
+                or slot_directory.stat().st_uid != os.getuid()
+                or slot_directory.stat().st_mode & 0o077 or slot_lock_path.is_symlink()):
+            raise RuntimeError("worker_lane_slot_lock_path_invalid")
+        slot_fd = os.open(slot_lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            os.fchmod(slot_fd, 0o600)
+            try:
+                fcntl.flock(slot_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError("worker_lane_slot_busy") from exc
+            previous = _replace_lane_runtime_pointer(ROOT, lane, manifest["source_sha"])
+            attempt_id = uuid.uuid4().hex
+            receipt = {
+                "state": "COMPLETE", "scope": f"{lane}_SLOT_ONLY", "lane": lane,
+                "attempt_id": attempt_id,
+                "source_sha": manifest["source_sha"], "bundle_sha256": manifest["bundle_sha256"],
+                "previous_pointer": previous, "current_pointer": manifest["source_sha"],
+                "other_lane_slots_changed": False, "launchagent_changed": False,
+                "recorded_at": datetime.now(UTC).isoformat(),
+            }
+            if queue_preflight is not None:
+                receipt["queue_preflight"] = queue_preflight
+            try:
+                _atomic_json(ROOT / "receipts" / f"lane-slot-runtime-switch-{lane.lower()}-{attempt_id}.json", receipt)
+            except Exception:
+                _restore_lane_runtime_pointer(ROOT, lane, previous)
+                raise
+            return receipt
+        finally:
+            os.close(slot_fd)
+    finally:
+        os.close(transition_fd)
+
+
+def install_lab_slot() -> dict:
+    """Compatibility entry point for updating only the local LAB slot."""
+    return install_lane_slot("LAB")
+
+
 def _verify_staged_runtime(runtime: Path, manifest: dict) -> None:
     manifest_path = runtime / "bundle-manifest.json"
     python = runtime / ".venv/bin/python3.12"
@@ -1688,6 +1861,7 @@ def apply() -> dict:
                 directory.chmod(0o700)
             _ensure_pool_config()
             release = _install_staged_runtime(staged_release, manifest)
+            _switch_all_lane_runtime_pointers(ROOT, manifest["source_sha"])
             # Migrate only queue/status state. Secret credentials stay in their
             # existing external mode-600 config; the LAB approval is rechecked
             # against the new bundle and remains fail-closed if stale.
@@ -1907,10 +2081,16 @@ def rollback() -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("plan", "prepare", "apply", "rollback"))
+    parser.add_argument("action", choices=("plan", "prepare", "apply", "rollback", "install-lab-slot", "install-lane-slot"))
+    parser.add_argument("--lane", choices=("GPOINT", "GSALES", "LAB"))
     args = parser.parse_args()
+    if args.action == "install-lane-slot" and not args.lane:
+        raise RuntimeError("worker_lane_required")
     result = (read_only_plan() if args.action == "plan" else prepare() if args.action == "prepare"
-              else rollback() if args.action == "rollback" else apply())
+              else rollback() if args.action == "rollback" else
+              install_lab_slot() if args.action == "install-lab-slot" else
+              install_lane_slot(args.lane) if args.action == "install-lane-slot" and args.lane else
+              apply())
     print(json.dumps(result, sort_keys=True, indent=2))
     return 0
 

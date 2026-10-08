@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
+import subprocess
 import textwrap
 import time
 from pathlib import Path
@@ -17,21 +19,24 @@ from agata_worker_pool import (  # noqa: E402
     LaneScheduler,
     PoolConfig,
     PoolPaths,
+    PoolLockError,
     PoolSupervisor,
     ProcessSlotRunner,
     acquire_lock,
     write_pool_status,
 )
+import agata_worker_pool as pool_module  # noqa: E402
 
 
 def test_production_defaults_to_one_slot_and_requires_explicit_provider_gate_for_more():
     assert PoolConfig.from_env({}).concurrency == 1
     with pytest.raises(ValueError, match="parallel_provider_capability_not_verified"):
         PoolConfig.from_env({"AGATA_WORKER_CONCURRENCY": "2"})
-    assert PoolConfig.from_env({
-        "AGATA_WORKER_CONCURRENCY": "3",
-        "AGATA_CODEX_PARALLEL_CAPABILITY": "VERIFIED",
-    }).concurrency == 3
+    with pytest.raises(ValueError, match="parallel_provider_capability_not_verified"):
+        PoolConfig.from_env({
+            "AGATA_WORKER_CONCURRENCY": "3",
+            "AGATA_CODEX_PARALLEL_CAPABILITY": "VERIFIED",
+        })
     with pytest.raises(ValueError, match="parallel_provider_capability_not_verified"):
         PoolConfig(concurrency=2)
 
@@ -44,14 +49,12 @@ def test_weighted_scheduler_preserves_gpoint_gsales_priority_without_starvation(
     ]
 
 
-def test_scheduler_skips_unconfigured_target_and_only_offers_lab_after_production_empty():
+def test_scheduler_skips_unconfigured_target_and_keeps_production_weighted_order():
     scheduler = LaneScheduler()
     assert scheduler.next_production_lane({"GPOINT"}) == "GPOINT"
     assert scheduler.next_production_lane({"GPOINT"}) == "GPOINT"
     assert scheduler.next_production_lane({"GPOINT"}) == "GPOINT"
     assert scheduler.next_production_lane(set()) is None
-    assert scheduler.lab_may_run(production_claims_empty=True) is True
-    assert scheduler.lab_may_run(production_claims_empty=False) is False
 
 
 def test_pool_offers_lab_only_after_fresh_empty_production_claims_and_with_available_lane(tmp_path):
@@ -82,6 +85,57 @@ def test_pool_keeps_lab_available_when_approval_is_closed(tmp_path):
         assert status["lanes"]["LAB"]["presence"] == "PERMANENT"
         assert status["lanes"]["LAB"]["inference_gate"] == "CLOSED_NO_APPROVAL"
         assert status["pool"]["state"] == "HEALTHY"
+    finally:
+        pool.close()
+
+
+def test_pool_status_initializes_three_dedicated_idle_slots_at_concurrency_one(tmp_path):
+    paths = PoolPaths(tmp_path)
+    pool = PoolSupervisor(paths, PoolConfig(), {
+        "GPOINT": lambda: None,
+        "GSALES": lambda: None,
+        "LAB": lambda: None,
+    }, runner=_FakeRunner())
+    try:
+        assert pool.poll_once() == 0
+        status = json.loads(paths.status_file.read_text())
+        assert status["pool"] == {
+            "state": "HEALTHY", "total": 3, "busy": 0, "idle": 3, "failed": 0,
+        }
+        assert status["configured_concurrency"] == 1
+        assert {slot: value["lane"] for slot, value in status["slots"].items()} == {
+            "slot-01": "GPOINT", "slot-02": "GSALES", "slot-03": "LAB",
+        }
+        assert all(value["state"] == "IDLE" and value["job_id"] is None
+                   for value in status["slots"].values())
+    finally:
+        pool.close()
+
+
+def test_lab_start_and_reject_failure_stays_local_to_lab_lane(tmp_path):
+    calls = []
+
+    class FailingRunner:
+        def start(self, *_args):
+            raise RuntimeError("lab_child_spawn_failed")
+
+    def reject(*_args):
+        raise RuntimeError("lab_reject_receipt_failed")
+
+    pool = PoolSupervisor(PoolPaths(tmp_path), PoolConfig(), {
+        "GPOINT": lambda: calls.append("GPOINT") or None,
+        "GSALES": lambda: calls.append("GSALES") or None,
+        "LAB": lambda: calls.append("LAB") or {"job_id": "lab-spawn-fail"},
+    }, runner=FailingRunner(), reject_offer=reject, clock=lambda: 0)
+    try:
+        assert pool.poll_once(now=0) == 0
+        assert calls == ["GPOINT", "GSALES", "LAB"]
+        status = json.loads(pool.paths.status_file.read_text())
+        assert status["pool"]["state"] == "HEALTHY"
+        assert status["lanes"]["GPOINT"]["state"] == "HEALTHY"
+        assert status["lanes"]["LAB"]["state"] == "DEGRADED"
+        assert pool.poll_once(now=3) == 0
+        assert calls[-3:] == ["GPOINT", "GSALES", "LAB"]
     finally:
         pool.close()
 
@@ -126,7 +180,7 @@ def test_production_arriving_during_lab_inference_waits_for_slot_without_state_c
         pool.close()
 
 
-def test_unknown_gsales_visibility_blocks_lab_even_when_gpoint_is_empty(tmp_path):
+def test_gsales_visibility_failure_does_not_block_lab_when_gpoint_is_empty(tmp_path):
     calls = []
     runner = _FakeRunner()
     def unavailable_sales():
@@ -138,9 +192,9 @@ def test_unknown_gsales_visibility_blocks_lab_even_when_gpoint_is_empty(tmp_path
         "LAB": lambda: calls.append("LAB") or {"job_id": "lab-must-not-claim"},
     }, runner=runner, clock=lambda: 0)
     try:
-        assert pool.poll_once(now=0) == 0
-        assert calls == ["GPOINT", "GSALES"]
-        assert runner.started == []
+        assert pool.poll_once(now=0) == 1
+        assert calls == ["GPOINT", "GSALES", "LAB"]
+        assert runner.started[0][1] == "LAB"
     finally:
         pool.close()
 
@@ -183,7 +237,7 @@ def test_lab_claim_failure_isolated_and_next_cycle_still_checks_production(tmp_p
         status = json.loads(pool.paths.status_file.read_text())
         assert status["pool"]["state"] == "HEALTHY"
         assert status["lanes"]["LAB"]["state"] == "DEGRADED"
-        assert pool.poll_once(now=0) == 0
+        assert pool.poll_once(now=3) == 0
         assert calls.count("GPOINT") == 2
         assert calls.count("GSALES") == 2
         assert calls.count("LAB") == 2
@@ -320,43 +374,206 @@ class _FakeRunner:
     def __init__(self):
         self.started = []
 
-    def start(self, slot_id, lane, offer, slot_lock, job_lock):
+    def start(self, slot_id, lane, offer, slot_lock, job_lock, provider_lock):
         process = _FakeProcess(100 + len(self.started))
         self.started.append((slot_id, lane, offer, process))
         return process
 
 
-def test_supervisor_limits_assignments_to_configured_isolated_slots(tmp_path):
+def test_supervisor_assigns_each_active_lane_to_its_fixed_slot(tmp_path):
     runner = _FakeRunner()
-    point_jobs = iter([{"id": "p1"}, {"id": "p2"}])
+    point_jobs = iter([{"id": "p1"}])
+    sales_jobs = iter([{"id": "s1"}])
     pool = PoolSupervisor(
         PoolPaths(tmp_path),
-        PoolConfig(concurrency=2, provider_parallel_capability="VERIFIED"),
-        {"GPOINT": lambda: next(point_jobs, None), "GSALES": lambda: None},
+        PoolConfig(),
+        {"GPOINT": lambda: next(point_jobs, None), "GSALES": lambda: next(sales_jobs, None)},
         runner=runner,
     )
     try:
-        assert pool.poll_once() == 2
-        assert [item[0] for item in runner.started] == ["slot-01", "slot-02"]
-        assert [item[2]["id"] for item in runner.started] == ["p1", "p2"]
+        assert pool.poll_once() == 1
+        assert [(runner.started[0][0], runner.started[0][1])] == [("slot-01", "GPOINT")]
+        runner.started[0][3].code = 0
+        assert pool.poll_once() == 1
+        assert [(item[0], item[1]) for item in runner.started] == [("slot-01", "GPOINT"), ("slot-02", "GSALES")]
+        assert [item[2]["id"] for item in runner.started] == ["p1", "s1"]
         assert pool.poll_once() == 0
     finally:
         pool.close()
 
 
+@pytest.mark.parametrize("failed_lane", ["GPOINT", "GSALES"])
+def test_production_network_failure_does_not_prevent_local_lab_claim(failed_lane, tmp_path):
+    calls = []
+    runner = _FakeRunner()
+
+    def unavailable(lane):
+        calls.append(lane)
+        raise RuntimeError("worker_gateway_network_error")
+
+    pool = PoolSupervisor(PoolPaths(tmp_path), PoolConfig(), {
+        "GPOINT": (lambda: unavailable("GPOINT")) if failed_lane == "GPOINT" else lambda: calls.append("GPOINT") or None,
+        "GSALES": (lambda: unavailable("GSALES")) if failed_lane == "GSALES" else lambda: calls.append("GSALES") or None,
+        "LAB": lambda: calls.append("LAB") or {"job_id": f"lab-after-{failed_lane.lower()}-failure"},
+    }, runner=runner, clock=lambda: 0)
+    try:
+        assert pool.poll_once(now=0) == 1
+        assert runner.started[0][1] == "LAB"
+        assert calls[-1] == "LAB"
+        assert pool.lane_errors.get(failed_lane) == "worker_gateway_network_error"
+    finally:
+        pool.close()
+
+
+def test_lab_claim_failure_does_not_stop_production_dispatch(tmp_path):
+    runner = _FakeRunner()
+    sales_jobs = iter([None, {"id": "sales-after-lab-error"}])
+    def lab_failure():
+        raise RuntimeError("lab_queue_unavailable")
+    pool = PoolSupervisor(PoolPaths(tmp_path), PoolConfig(), {
+        "GPOINT": lambda: None,
+        "GSALES": lambda: next(sales_jobs, None),
+        "LAB": lab_failure,
+    }, runner=runner, clock=lambda: 0)
+    try:
+        assert pool.poll_once(now=0) == 0
+        assert pool.lane_errors["LAB"] == "lab_queue_unavailable"
+        assert pool.poll_once(now=100) == 1
+        assert runner.started[0][1] == "GSALES"
+        assert runner.started[0][2]["id"] == "sales-after-lab-error"
+    finally:
+        pool.close()
+
+
+def test_lab_claim_backoff_is_lane_local_and_does_not_block_production(tmp_path):
+    runner = _FakeRunner()
+    point_jobs = iter([None, None, {"id": "point-after-local-lab-error"}])
+    pool = PoolSupervisor(PoolPaths(tmp_path), PoolConfig(), {
+        "GPOINT": lambda: next(point_jobs, None),
+        "GSALES": lambda: None,
+        "LAB": lambda: (_ for _ in ()).throw(RuntimeError("lab_queue_unavailable")),
+    }, runner=runner, clock=lambda: 0)
+    try:
+        assert pool.poll_once(now=0) == 0
+        assert pool.poll_once(now=1) == 0
+        assert pool.poll_once(now=3) == 1
+        assert runner.started[0][1] == "GPOINT"
+    finally:
+        pool.close()
+
+
+def test_rejection_callback_failure_does_not_block_independent_lab_lane(tmp_path):
+    runner = _FakeRunner()
+    def reject(_lane, _offer, _reason):
+        raise RuntimeError("remote_reject_unavailable")
+    pool = PoolSupervisor(PoolPaths(tmp_path), PoolConfig(), {
+        "GPOINT": lambda: [],
+        "GSALES": lambda: None,
+        "LAB": lambda: {"job_id": "lab-after-reject-error"},
+    }, runner=runner, reject_offer=reject, clock=lambda: 0)
+    try:
+        assert pool.poll_once(now=0) == 1
+        assert runner.started[0][1] == "LAB"
+        assert pool.lane_errors["GPOINT"] == "remote_reject_unavailable"
+    finally:
+        pool.close()
+
+
+def test_provider_lock_is_inherited_until_slot_child_exits(tmp_path):
+    script = tmp_path / "held_provider_lock.py"
+    script.write_text("import time; time.sleep(0.5)\n")
+    paths = PoolPaths(tmp_path / "pool")
+    paths.ensure()
+    provider = acquire_lock(paths.provider_lock)
+    slot = acquire_lock(paths.slot_lock("slot-03"))
+    job = acquire_lock(paths.job_lock("lab-lock-inheritance"))
+    child = ProcessSlotRunner(paths, [sys.executable, str(script)]).start(
+        "slot-03", "LAB", {"job_id": "lab-lock-inheritance"}, slot, job, provider,
+    )
+    provider.close()
+    slot.close()
+    job.close()
+    try:
+        with pytest.raises(PoolLockError, match="lock_already_held"):
+            acquire_lock(paths.provider_lock)
+        child.wait(timeout=5)
+        recovered = acquire_lock(paths.provider_lock)
+        recovered.close()
+    finally:
+        if child.poll() is None:
+            child.terminate()
+            child.wait(timeout=5)
+
+
+def test_slot_runner_pipe_failure_terminates_and_reaps_the_whole_child_group(tmp_path, monkeypatch):
+    events = []
+
+    class BrokenPipe:
+        def write(self, _value):
+            raise OSError("stdin_write_failed")
+        def close(self):
+            events.append("stdin_closed")
+
+    class FakeProcess:
+        pid = 43210
+        stdin = BrokenPipe()
+        waits = 0
+        def wait(self, timeout):
+            events.append(("wait", timeout))
+            self.waits += 1
+            if self.waits == 1:
+                raise subprocess.TimeoutExpired("worker", timeout)
+            return -signal.SIGKILL
+
+    fake = FakeProcess()
+    monkeypatch.setattr(pool_module.subprocess, "Popen", lambda *_args, **_kwargs: fake)
+    monkeypatch.setattr(pool_module.os, "killpg", lambda pid, sig: events.append(("killpg", pid, sig)))
+
+    class LockHandle:
+        def fileno(self):
+            return 20
+
+    runner = ProcessSlotRunner(PoolPaths(tmp_path / "pool"), ["worker"])
+    with pytest.raises(OSError, match="stdin_write_failed"):
+        runner.start("slot-03", "LAB", {"job_id": "lab-pipe-fail"}, LockHandle(), LockHandle(), LockHandle())
+
+    assert ("killpg", fake.pid, signal.SIGTERM) in events
+    assert ("killpg", fake.pid, signal.SIGKILL) in events
+    assert fake.waits == 2
+
+
+def test_busy_provider_lock_prevents_queue_claim_side_effects(tmp_path):
+    paths = PoolPaths(tmp_path)
+    paths.ensure()
+    held = acquire_lock(paths.provider_lock)
+    calls = []
+    pool = PoolSupervisor(paths, PoolConfig(), {
+        "GPOINT": lambda: calls.append("GPOINT") or {"id": "must-not-claim"},
+        "GSALES": lambda: None,
+        "LAB": lambda: calls.append("LAB") or {"job_id": "must-not-claim-lab"},
+    }, runner=_FakeRunner())
+    try:
+        assert pool.poll_once() == 0
+        assert calls == []
+    finally:
+        pool.close()
+        held.close()
+
+
 def test_failed_slot_does_not_stop_other_active_slot(tmp_path):
     runner = _FakeRunner()
-    point_jobs = iter([{"id": "p1"}, {"id": "p2"}])
+    point_jobs = iter([{"id": "p1"}])
+    sales_jobs = iter([{"id": "s1"}])
     pool = PoolSupervisor(
         PoolPaths(tmp_path),
-        PoolConfig(concurrency=2, provider_parallel_capability="VERIFIED"),
-        {"GPOINT": lambda: next(point_jobs, None), "GSALES": lambda: None},
+        PoolConfig(),
+        {"GPOINT": lambda: next(point_jobs, None), "GSALES": lambda: next(sales_jobs, None)},
         runner=runner,
     )
     try:
-        assert pool.poll_once() == 2
+        assert pool.poll_once() == 1
         runner.started[0][3].code = 1
-        assert pool.poll_once() == 0
+        assert pool.poll_once() == 1
         assert set(pool.active) == {"slot-02"}
         status = json.loads(pool.paths.status_file.read_text())
         assert status["pool"]["busy"] == 1
@@ -425,7 +642,7 @@ def test_lab_is_dispatched_only_after_all_production_lanes_report_empty(tmp_path
         pool.close()
 
 
-def test_n2_mock_jobs_execute_in_real_isolated_processes_without_context_mixing(tmp_path):
+def test_mock_jobs_use_isolated_processes_sequentially_at_unverified_n1(tmp_path):
     script = tmp_path / "mock_slot.py"
     script.write_text(textwrap.dedent("""
         import fcntl, json, os, sys, time
@@ -465,14 +682,14 @@ def test_n2_mock_jobs_execute_in_real_isolated_processes_without_context_mixing(
     runner = ProcessSlotRunner(PoolPaths(tmp_path / "pool"), [sys.executable, str(script)])
     pool = PoolSupervisor(
         PoolPaths(tmp_path / "pool"),
-        PoolConfig(concurrency=2, provider_parallel_capability="VERIFIED"),
+        PoolConfig(),
         {"GPOINT": lambda: jobs.pop("GPOINT", None), "GSALES": lambda: jobs.pop("GSALES", None)},
         runner=runner,
     )
     try:
-        assert pool.poll_once() == 2
+        assert pool.poll_once() == 1
         deadline = time.monotonic() + 5
-        while pool.active and time.monotonic() < deadline:
+        while (pool.active or jobs) and time.monotonic() < deadline:
             time.sleep(0.03)
             pool.poll_once()
         assert not pool.active
@@ -481,8 +698,58 @@ def test_n2_mock_jobs_execute_in_real_isolated_processes_without_context_mixing(
         for key in ("TEST_COUNTER", "TEST_OUTCOMES"):
             os.environ.pop(key, None)
         os.environ.update({key: value for key, value in original_env.items() if key in {"TEST_COUNTER", "TEST_OUTCOMES"}})
-    assert json.loads(counter.read_text())["maximum"] == 2
+    assert json.loads(counter.read_text())["maximum"] == 1
     observed = {item["id"]: (item["tenant"], item["persona"])
                 for item in map(json.loads, outcomes.read_text().splitlines())}
     assert observed == {"point-1": ("tenant-point", "point-persona"),
                         "sales-1": ("tenant-sales", "sales-persona")}
+
+
+@pytest.mark.parametrize(("selected_lane", "expected_slot"), [
+    ("GPOINT", "slot-01"),
+    ("GSALES", "slot-02"),
+    ("LAB", "slot-03"),
+])
+def test_dedicated_slots_are_pinned_to_their_lanes(selected_lane, expected_slot, tmp_path):
+    runner = _FakeRunner()
+    offers = {
+        "GPOINT": {"id": "point-1"},
+        "GSALES": {"id": "sales-1"},
+        "LAB": {"job_id": "lab-1"},
+    }
+    pool = PoolSupervisor(
+        PoolPaths(tmp_path), PoolConfig(),
+        {lane: (lambda lane=lane: offers.pop(lane) if lane == selected_lane else None)
+         for lane in ("GPOINT", "GSALES", "LAB")},
+        runner=runner,
+    )
+    try:
+        assert pool.poll_once() == 1
+        assert (runner.started[0][0], runner.started[0][1]) == (expected_slot, selected_lane)
+    finally:
+        pool.close()
+
+
+def test_lane_runtime_pointer_is_canonical_and_lane_scoped(tmp_path):
+    paths = PoolPaths(tmp_path)
+    paths.ensure()
+    assert paths.slot_runtime_current("LAB") == tmp_path / "runtime/slots/LAB/current"
+    assert paths.slot_runtime_current("GPOINT") == tmp_path / "runtime/slots/GPOINT/current"
+    with pytest.raises(ValueError, match="worker_lane_invalid"):
+        paths.slot_runtime_current("OTHER")
+
+
+def test_runner_rejects_slot_lane_mismatch_before_starting_a_child(tmp_path, monkeypatch):
+    paths = PoolPaths(tmp_path)
+    paths.ensure()
+    slot = acquire_lock(paths.slot_lock("slot-01"))
+    job = acquire_lock(paths.job_lock("mismatch-job"))
+    provider = acquire_lock(paths.provider_lock)
+    monkeypatch.setattr("agata_worker_pool.subprocess.Popen", lambda *_args, **_kwargs: pytest.fail("child started"))
+    try:
+        with pytest.raises(ValueError, match="worker_slot_lane_mismatch"):
+            ProcessSlotRunner(paths).start("slot-01", "LAB", {"job_id": "mismatch-job"}, slot, job, provider)
+    finally:
+        provider.close()
+        job.close()
+        slot.close()

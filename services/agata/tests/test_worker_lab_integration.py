@@ -214,6 +214,9 @@ class WorkerLabIntegrationTests(unittest.TestCase):
             "import gpoint_mac_worker as w; "
             f"w.SUPPORT=Path({str(self.root)!r}); "
             f"w.INFERENCE_PROCESS=Path({str(self.root / 'state/inference-process.json')!r}); "
+            "paths=w.PoolPaths(w.SUPPORT); paths.ensure(); "
+            "provider=w.acquire_pool_lock(paths.provider_lock); "
+            "w._WORKER_INHERITED_LOCK_FDS=(provider.fileno(),); "
             "lock=w.acquire_worker_lock(); w._WORKER_LOCK_FD=lock.fileno(); "
             "w.run_inference({'request': {'user_message': 'fixture'}})"
         )
@@ -232,24 +235,32 @@ class WorkerLabIntegrationTests(unittest.TestCase):
             codex_pid = int(pid_file.read_text())
             parent.kill()
             parent.wait(timeout=3)
-            lock_path = self.root / "locks/pool.lock"
-            descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-            try:
-                with self.assertRaises(BlockingIOError):
-                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                os.kill(codex_pid, signal.SIGTERM)
-                deadline = time.monotonic() + 5
-                while time.monotonic() < deadline:
-                    try:
+            for lock_path in (self.root / "locks/pool.lock", self.root / "locks/provider.lock"):
+                descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+                try:
+                    with self.assertRaises(BlockingIOError):
                         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(descriptor)
+            os.kill(codex_pid, signal.SIGTERM)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    released = []
+                    for lock_path in (self.root / "locks/pool.lock", self.root / "locks/provider.lock"):
+                        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+                        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        released.append(descriptor)
+                    for descriptor in released:
                         fcntl.flock(descriptor, fcntl.LOCK_UN)
-                        break
-                    except BlockingIOError:
-                        time.sleep(0.05)
-                else:
-                    self.fail("orphan Codex child retained the worker lock after exit")
-            finally:
-                os.close(descriptor)
+                        os.close(descriptor)
+                    break
+                except BlockingIOError:
+                    for descriptor in locals().get("released", []):
+                        os.close(descriptor)
+                    time.sleep(0.05)
+            else:
+                self.fail("orphan Codex child retained a worker/provider lock after exit")
         finally:
             if parent.poll() is None:
                 parent.kill()
@@ -261,5 +272,14 @@ class WorkerLabIntegrationTests(unittest.TestCase):
                     pass
 
 
+
+    def test_execute_slot_rejects_lane_mismatch_before_lock_or_queue_access(self):
+        with self.assertRaisesRegex(worker.FatalConfigurationError, "worker_slot_lane_mismatch"):
+            worker.execute_slot("LAB", "slot-01")
+
 if __name__ == "__main__":
     unittest.main()
+
+    def test_execute_slot_rejects_lane_mismatch_before_lock_or_queue_access(self):
+        with self.assertRaisesRegex(worker.FatalConfigurationError, "worker_slot_lane_mismatch"):
+            worker.execute_slot("LAB", "slot-01")
