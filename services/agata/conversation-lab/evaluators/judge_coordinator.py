@@ -90,7 +90,16 @@ def _judge_receipt(path: Path, invocation_id: str, expected: dict) -> dict | Non
                 "critical_defects", "uncertainty", "position_sensitivity"}
     if not isinstance(normalized, dict) or set(normalized) != required:
         return None
-    return normalized
+    return {
+        **normalized,
+        "invocation_id": invocation_id,
+        "batch_id": expected["batch_id"],
+        "worker_job_id": value["worker_job_id"],
+        "worker_receipt_sha256": value["worker_receipt_sha256"],
+        "promptfoo_result_sha256": cli_value.get("promptfoo_result_sha256"),
+        "model": value.get("model"),
+        "reasoning_effort": value.get("reasoning_effort"),
+    }
 
 
 def run_judge_batch(packet: Mapping[str, object], rubric: Mapping[str, object], *, batch_id: str,
@@ -243,6 +252,8 @@ def run_judge_batch(packet: Mapping[str, object], rubric: Mapping[str, object], 
         "decision_type": "AUTO_DECISION" if all_auto else "HUMAN_ESCALATION",
         "scenarios": scenario_results, "judge_invocations": len(calls),
         "retries": 0, "aggregator_version": 1,
+        "call_ledger": ledger.snapshot(), "private": True,
     }
+    private_result["receipt_sha256"] = v2_provenance.stable_hash(private_result)
     _write_once(private_directory / (batch_id + ".judge-outcome.json"), private_result)
     return private_result

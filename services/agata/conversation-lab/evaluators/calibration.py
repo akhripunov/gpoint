@@ -10,6 +10,7 @@ from typing import Mapping
 
 import judges
 import ratings
+import receipts as private_receipts
 from optimizer_gate import systematic_critical_dimension_failure
 import v2_provenance
 
@@ -21,9 +22,105 @@ def _sha(value) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _validate_execution_evidence(pair, receipt):
+    private_mapping = receipt.get("private_mapping", {})
+    mapping_rows = private_mapping.get("mappings", [])
+    if (receipt.get("batch_id") != pair.get("generation_run_id")
+            or receipt.get("requested_model") != private_receipts.MODEL
+            or receipt.get("requested_reasoning") != private_receipts.REASONING
+            or private_mapping.get("dataset_split") != pair.get("dataset_split")
+            or private_mapping.get("private") is not True
+            or private_mapping.get("mapping_sha256") != private_receipts.fingerprint(mapping_rows)
+            or receipt.get("scenario_commitments", {}).get(pair.get("source_scenario_id")) != pair.get("scenario_commitment")):
+        raise PermissionError("generation receipt does not bind this pair to its committed run/split")
+    candidates = pair.get("candidates")
+    mappings = [row for row in mapping_rows
+                if row.get("scenario_id") == pair.get("source_scenario_id")]
+    if len(mappings) != 2 or {row.get("label") for row in mappings} != {"X", "Y"}:
+        raise PermissionError("generation receipt is missing the calibrated blind arm mapping")
+    for candidate in candidates:
+        mapping = next((row for row in mappings if row.get("label") == candidate.get("label")), None)
+        if (mapping is None or mapping.get("blind_candidate_sha256") != _sha(candidate)
+                or mapping.get("scenario_hash") != pair.get("scenario_commitment")
+                or not isinstance(mapping.get("result_hash"), str)
+                or len(mapping["result_hash"]) != 64):
+            raise PermissionError("calibration transcript differs from its persisted generated result hash")
+    ledger = receipt.get("call_ledger", {})
+    if (ledger.get("durable") is not True or not isinstance(ledger.get("journal_sha256"), str)
+            or len(ledger["journal_sha256"]) != 64):
+        raise PermissionError("generation receipt lacks a durable call-ledger journal commitment")
+    arms = ledger.get("conversation_arms", {}).get("invocations", [])
+    generators = ledger.get("generator_invocations", {}).get("invocations", [])
+    pair_arms = [row for row in arms if row.get("metadata", {}).get("scenario_id") == pair["source_scenario_id"]]
+    if len(pair_arms) != 2 or {row.get("configuration") for row in pair_arms} != {"baseline", "naturalness-v1"}:
+        raise PermissionError("durable generation ledger does not prove both calibrated arms")
+    for arm in pair_arms:
+        arm_id = arm.get("metadata", {}).get("arm_id")
+        mapping = next((row for row in mappings
+                        if row.get("model_id") == arm.get("configuration")
+                        and row.get("scenario_id") == pair["source_scenario_id"]), None)
+        label = next((candidate.get("label") for candidate in candidates
+                      if mapping and mapping.get("blind_candidate_sha256") == _sha(candidate)), None)
+        if label is None:
+            raise PermissionError("private arm mapping does not bind each generated model to the durable arm ledger")
+        turns = [row for row in generators if row.get("metadata", {}).get("arm_id") == arm_id]
+        if (arm.get("outcome") != "success" or len(turns) != 4
+                or {row.get("metadata", {}).get("turn_index") for row in turns} != {0, 1, 2, 3}
+                or any(row.get("outcome") != "success" for row in turns)):
+            raise PermissionError("each calibrated arm must have four successful ledger-backed generator turns")
+
+
+def _validate_judge_evidence(pair_id, assessment, path):
+    evidence = private_receipts.load_private_receipt(path)
+    if (evidence.get("schema_version") != 1 or evidence.get("batch_id") != assessment.get("batch_id")
+            or evidence.get("dataset_split") != assessment.get("dataset_split")
+            or evidence.get("decision") not in {"AUTO_DECISION", "HUMAN_ESCALATION"}):
+        raise PermissionError("persisted judge outcome receipt does not match its assessment")
+    rows = [row for row in evidence.get("scenarios", [])
+            if isinstance(row, Mapping) and row.get("scenario_id") == pair_id]
+    if (len(rows) != 1 or rows[0].get("judge_receipts") != assessment.get("judge_receipts")
+            or rows[0].get("decision") != assessment.get("decision")):
+        raise PermissionError("judge assessment is not the exact persisted outcome for this pair")
+    receipts = rows[0]["judge_receipts"]
+    slots = [row.get("judge_slot") for row in receipts if isinstance(row, Mapping)]
+    invocation_ids = [row.get("invocation_id") for row in receipts if isinstance(row, Mapping)]
+    if len(slots) != 3 or set(slots) != {1, 2, 3}:
+        raise PermissionError("persisted judge receipts must cover slots 1, 2, and 3 exactly once")
+    if len(invocation_ids) != 3 or len(set(invocation_ids)) != 3:
+        raise PermissionError("each judge receipt must have a unique durable invocation identity")
+    for row in receipts:
+        if (row.get("scenario_id") != pair_id or row.get("batch_id") != evidence["batch_id"]
+                or row.get("model") != private_receipts.MODEL
+                or row.get("reasoning_effort") != private_receipts.REASONING
+                or not isinstance(row.get("worker_receipt_sha256"), str)
+                or len(row["worker_receipt_sha256"]) != 64
+                or not isinstance(row.get("promptfoo_result_sha256"), str)
+                or len(row["promptfoo_result_sha256"]) != 64):
+            raise PermissionError("judge receipts lack matching Worker/Promptfoo/model evidence")
+    ledger_rows = evidence.get("call_ledger", {}).get("judge_invocations", {}).get("invocations", [])
+    by_id = {row.get("invocation_id"): row for row in ledger_rows}
+    if (evidence.get("call_ledger", {}).get("durable") is not True
+            or len(by_id) != len(ledger_rows)
+            or any(invocation_id not in by_id or by_id[invocation_id].get("outcome") != "success"
+                   for invocation_id in invocation_ids)):
+        raise PermissionError("judge verdicts are not backed by successful durable ledger attempts")
+    for row in receipts:
+        ledger_row = by_id[row["invocation_id"]]
+        metadata = ledger_row.get("metadata", {})
+        if (metadata.get("judge_slot") != row["judge_slot"]
+                or metadata.get("scenario_id") != pair_id
+                or metadata.get("batch_id") != evidence["batch_id"]
+                or metadata.get("model") != private_receipts.MODEL
+                or metadata.get("reasoning_effort") != private_receipts.REASONING):
+            raise PermissionError("judge receipt and durable invocation ledger do not match")
+    return evidence
+
+
 def prepare_owner_calibration_packet(pairs: list[Mapping[str, object]], judge_assessments: Mapping[str, object], *,
                                      packet_id: str, dataset_split: str,
-                                     rubric: Mapping[str, object]) -> dict:
+                                     rubric: Mapping[str, object],
+                                     generation_receipt_paths: Mapping[str, str],
+                                     judge_receipt_paths: Mapping[str, str]) -> dict:
     """Create one blind 10+ pair OWNER packet; keep judge evidence in a separate private sidecar.
 
     Input pairs must already be anonymized. Model mappings, policy text, provider
@@ -49,6 +146,12 @@ def prepare_owner_calibration_packet(pairs: list[Mapping[str, object]], judge_as
         if not isinstance(run_id, str) or not ID_RE.fullmatch(run_id) or run_id in run_ids:
             raise ValueError("calibration pairs must come from distinct immutable generation runs")
         source = v2_provenance.validate_calibration_pair(pair, dataset_split)
+        generation_path = generation_receipt_paths.get(run_id)
+        judge_path = judge_receipt_paths.get(pair_id)
+        if not isinstance(generation_path, str) or not isinstance(judge_path, str):
+            raise PermissionError("calibration requires persisted generation and judge receipt paths")
+        generation_receipt = private_receipts.load_private_receipt(generation_path)
+        _validate_execution_evidence(pair, generation_receipt)
         # Pair IDs are opaque to OWNER; source IDs and commitments stay in the private sidecar.
         public_pair = {"scenario_id": pair_id, "candidates": copy.deepcopy(pair.get("candidates"))}
         judges._validate_pair(public_pair)
@@ -58,11 +161,14 @@ def prepare_owner_calibration_packet(pairs: list[Mapping[str, object]], judge_as
                 or not isinstance(assessment.get("judge_receipts"), list)
                 or len(assessment["judge_receipts"]) != 3):
             raise ValueError("each calibration pair needs the complete private three-judge preassessment")
+        judge_receipt = _validate_judge_evidence(pair_id, assessment, judge_path)
         seen.add(pair_id)
         run_ids.add(run_id)
         scenarios.append(public_pair)
         private_assessments.append({"pair_id": pair_id, **source,
                                     "generation_run_id_sha256": _sha(run_id),
+                                    "generation_receipt_sha256": generation_receipt["receipt_sha256"],
+                                    "judge_receipt_sha256": judge_receipt["receipt_sha256"],
                                     "assessment_sha256": _sha(assessment)})
     packet = {"schema_version": 1, "packet_id": packet_id,
               "rubric_id": rubric["rubric_id"], "scenarios": scenarios}

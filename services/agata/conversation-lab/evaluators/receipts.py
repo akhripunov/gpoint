@@ -166,6 +166,20 @@ def verify_private_receipt(receipt):
     return isinstance(digest, str) and digest == fingerprint(body)
 
 
+def load_private_receipt(path):
+    """Load a persisted owner-only private receipt and verify its immutable digest."""
+    source = Path(path)
+    if source.is_symlink() or not source.is_file():
+        raise PermissionError("private receipt must be a regular, non-symlink file")
+    metadata = source.stat()
+    if metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+        raise PermissionError("private receipt must be owned by this user and owner-only")
+    value = json.loads(source.read_text(encoding="utf-8"))
+    if not verify_private_receipt(value):
+        raise ValueError("private receipt integrity check failed")
+    return value
+
+
 def _reseal(receipt):
     body = copy.deepcopy(dict(receipt))
     body.pop("receipt_sha256", None)
