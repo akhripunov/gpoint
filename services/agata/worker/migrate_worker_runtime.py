@@ -53,6 +53,72 @@ QUEUE_SOURCE_RE = re.compile(
 )
 
 
+class PreflightFailure(RuntimeError):
+    """A fail-closed preflight result with safe, non-payload diagnostics."""
+
+    SAFE_FIELDS = {"runner_exit_code", "worker_status_exit_code", "timeout_seconds", "snapshot_age_seconds"}
+
+    def __init__(self, reason_code: str, *, stage: str, lane: str | None = None,
+                 safe_fields: dict | None = None, legacy_error: str | None = None):
+        super().__init__(legacy_error or reason_code)
+        self.reason_code = reason_code
+        self.stage = stage
+        self.lane = lane if lane in {"GPOINT", "GSALES", "LAB"} else None
+        self.safe_fields = {
+            key: value for key, value in (safe_fields or {}).items()
+            if key in self.SAFE_FIELDS and isinstance(value, int) and not isinstance(value, bool)
+        }
+        self.receipt_written = False
+
+
+def _write_preflight_receipt(stage: str, failure: PreflightFailure | None = None,
+                             *, outcome: str | None = None,
+                             summary: dict | None = None) -> Path:
+    """Persist only allowlisted preflight metadata, never raw status or command output."""
+    receipts = ROOT / "receipts"
+    if ROOT.is_symlink() or (ROOT.exists() and ROOT.stat().st_uid != os.getuid()):
+        raise RuntimeError("preflight_receipt_storage_unavailable")
+    receipts.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if (receipts.is_symlink() or receipts.stat().st_uid != os.getuid()
+            or receipts.stat().st_mode & 0o077):
+        raise RuntimeError("preflight_receipt_storage_unavailable")
+    receipt = {
+        "schema_version": 1,
+        "at": datetime.now(UTC).isoformat(),
+        "stage": stage,
+        "outcome": outcome or ("BLOCKED" if failure else "PASS"),
+    }
+    if failure:
+        receipt["reason_code"] = failure.reason_code
+        receipt["failure_stage"] = failure.stage
+        if failure.lane:
+            receipt["lane"] = failure.lane
+        receipt.update(failure.safe_fields)
+    if summary:
+        allowed_summary = {
+            "candidate_verified", "launchagent_loaded", "active_inference_absent",
+            "locks_free", "queue_snapshots_verified", "queues_empty", "lane_health_healthy",
+        }
+        receipt.update({key: value for key, value in summary.items()
+                        if key in allowed_summary and isinstance(value, bool)})
+    path = receipts / f"preflight-{uuid.uuid4().hex}.json"
+    _atomic_json(path, receipt, mode=0o600)
+    return path
+
+
+def _record_preflight(stage: str, failure: PreflightFailure | None = None,
+                      *, summary: dict | None = None) -> bool:
+    try:
+        _write_preflight_receipt(stage, failure, summary=summary)
+        if failure:
+            failure.receipt_written = True
+        return True
+    except (OSError, RuntimeError):
+        if failure:
+            failure.receipt_written = False
+        return False
+
+
 def sha256(path: Path) -> str:
     h = hashlib.sha256()
     with Path(path).open("rb") as stream:
@@ -312,7 +378,7 @@ def candidate() -> dict:
         raise RuntimeError("origin_main_ref_stale")
     if head != remote_main:
         raise RuntimeError("candidate_must_be_origin_main")
-    if git("status", "--porcelain"):
+    if git("status", "--porcelain", "--untracked-files=all"):
         raise RuntimeError("candidate_worktree_dirty")
     assets = {name: sha256(WORKER_DIR / name) for name in ASSETS}
     bundle_hash = hashlib.sha256(json.dumps(assets, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -328,7 +394,8 @@ def validate_fresh_production_queue_snapshots(status: dict, *, now: datetime | N
     """Validate fresh, content-free queue snapshots without requiring idleness."""
     current = now or datetime.now(UTC)
     if current.tzinfo is None or not isinstance(status, dict):
-        raise RuntimeError("production_queue_snapshot_invalid")
+        raise PreflightFailure("queue_snapshot_invalid", stage="queue_validation",
+                               legacy_error="production_queue_snapshot_invalid")
     pool = status.get("pool")
     busy = pool.get("busy") if isinstance(pool, dict) else None
     pool_authority = status.get("pool_snapshot_authority", "worker_pool_status_v1")
@@ -362,51 +429,74 @@ def validate_fresh_production_queue_snapshots(status: dict, *, now: datetime | N
                     and slot.get("job_id") is None for slot in slots.values())
         )
     else:
-        raise RuntimeError("production_queue_snapshot_invalid")
+        raise PreflightFailure("pool_evidence_invalid", stage="local_pool_validation",
+                               legacy_error="production_queue_snapshot_invalid")
     total = pool.get("total") if isinstance(pool, dict) else None
     if (not pool_state_valid or status.get("launch_agent_loaded") is not True
             or isinstance(busy, bool) or not isinstance(busy, int) or busy < 0):
-        raise RuntimeError("production_queue_snapshot_invalid")
+        raise PreflightFailure("local_pool_not_idle", stage="local_pool_validation",
+                               legacy_error="production_queue_snapshot_invalid")
     if total is not None and (isinstance(total, bool) or not isinstance(total, int) or total < busy):
-        raise RuntimeError("production_queue_snapshot_invalid")
+        raise PreflightFailure("local_pool_status_invalid", stage="local_pool_validation",
+                               legacy_error="production_queue_snapshot_invalid")
     try:
         pool_captured = datetime.fromisoformat(status.get("pool_snapshot_at", "").replace("Z", "+00:00"))
     except (AttributeError, TypeError, ValueError) as exc:
-        raise RuntimeError("production_queue_snapshot_invalid") from exc
+        raise PreflightFailure("pool_snapshot_invalid", stage="queue_validation",
+                               legacy_error="production_queue_snapshot_invalid") from exc
     if pool_captured.tzinfo is None:
-        raise RuntimeError("production_queue_snapshot_invalid")
+        raise PreflightFailure("pool_snapshot_invalid", stage="queue_validation",
+                               legacy_error="production_queue_snapshot_invalid")
     pool_age = (current - pool_captured).total_seconds()
     if pool_age > QUEUE_SNAPSHOT_MAX_AGE_SECONDS or pool_age < -QUEUE_SNAPSHOT_FUTURE_SKEW_SECONDS:
-        raise RuntimeError("production_queue_snapshot_stale")
+        raise PreflightFailure("queue_snapshot_stale", stage="queue_validation",
+                               safe_fields={"snapshot_age_seconds": int(pool_age)},
+                               legacy_error="production_queue_snapshot_stale")
     lanes = status.get("lanes")
     if not isinstance(lanes, dict):
-        raise RuntimeError("production_queue_snapshot_invalid")
+        raise PreflightFailure("worker_status_schema_invalid", stage="queue_validation",
+                               legacy_error="production_queue_snapshot_invalid")
     evidence = {}
     for lane in ("GPOINT", "GSALES"):
         value = lanes.get(lane)
-        if not isinstance(value, dict) or value.get("health") != "HEALTHY":
-            raise RuntimeError("production_queue_snapshot_invalid")
+        if not isinstance(value, dict):
+            raise PreflightFailure("worker_status_schema_invalid", stage="queue_validation", lane=lane,
+                                   legacy_error="production_queue_snapshot_invalid")
+        if value.get("health") != "HEALTHY":
+            raise PreflightFailure("lane_health_invalid", stage="lane_health_validation", lane=lane,
+                                   legacy_error="production_queue_snapshot_invalid")
         if value.get("queue_snapshot_state") != "VERIFIED":
-            raise RuntimeError("production_queue_snapshot_invalid")
+            raise PreflightFailure("authoritative_queue_snapshot_unavailable", stage="queue_validation",
+                                   lane=lane, legacy_error="production_queue_snapshot_invalid")
         api_source = f"agata-worker-queue-status-v1:{lane.lower()}"
         live_source = f"{LIVE_QUEUE_SOURCE}:{lane.lower()}"
         source = value.get("queue_snapshot_source_id")
         if source == live_source:
-            _validate_live_queue_snapshot_provenance(value, lane)
+            try:
+                _validate_live_queue_snapshot_provenance(value, lane)
+            except RuntimeError as exc:
+                raise PreflightFailure("queue_snapshot_provenance_invalid", stage="queue_validation",
+                                       lane=lane, legacy_error="production_queue_snapshot_invalid") from exc
         elif source != api_source or value.get("queue_snapshot_provenance") is not None:
-            raise RuntimeError("production_queue_snapshot_invalid")
+            raise PreflightFailure("queue_snapshot_provenance_invalid", stage="queue_validation",
+                                   lane=lane, legacy_error="production_queue_snapshot_invalid")
         counts = (value.get("pending_inference_jobs"), value.get("running_inference_jobs"))
         if any(isinstance(count, bool) or not isinstance(count, int) or count < 0 for count in counts):
-            raise RuntimeError("production_queue_snapshot_invalid")
+            raise PreflightFailure("queue_snapshot_counts_invalid", stage="queue_validation", lane=lane,
+                                   legacy_error="production_queue_snapshot_invalid")
         try:
             captured = datetime.fromisoformat(value.get("queue_snapshot_at", "").replace("Z", "+00:00"))
         except (AttributeError, TypeError, ValueError) as exc:
-            raise RuntimeError("production_queue_snapshot_invalid") from exc
+            raise PreflightFailure("queue_snapshot_invalid", stage="queue_validation", lane=lane,
+                                   legacy_error="production_queue_snapshot_invalid") from exc
         if captured.tzinfo is None:
-            raise RuntimeError("production_queue_snapshot_invalid")
+            raise PreflightFailure("queue_snapshot_invalid", stage="queue_validation", lane=lane,
+                                   legacy_error="production_queue_snapshot_invalid")
         age = (current - captured).total_seconds()
         if age > QUEUE_SNAPSHOT_MAX_AGE_SECONDS or age < -QUEUE_SNAPSHOT_FUTURE_SKEW_SECONDS:
-            raise RuntimeError("production_queue_snapshot_stale")
+            raise PreflightFailure("queue_snapshot_stale", stage="queue_validation", lane=lane,
+                                   safe_fields={"snapshot_age_seconds": int(age)},
+                                   legacy_error="production_queue_snapshot_stale")
         evidence[lane] = {
             "source_id": value["queue_snapshot_source_id"],
             "snapshot_at": captured.isoformat(),
@@ -422,23 +512,28 @@ def require_fresh_empty_production_queues(status: dict, *, now: datetime | None 
     """Require both current production queues and all worker slots to be idle."""
     evidence = validate_fresh_production_queue_snapshots(status, now=now)
     if evidence["busy_slots"] != 0:
-        raise RuntimeError("worker_slots_busy")
-    if any(item["pending_jobs"] or item["running_jobs"] for item in evidence["lanes"].values()):
-        raise RuntimeError("production_queue_not_empty")
+        raise PreflightFailure("local_pool_not_idle", stage="queue_validation",
+                               legacy_error="worker_slots_busy")
+    for lane, item in evidence["lanes"].items():
+        if item["pending_jobs"] or item["running_jobs"]:
+            raise PreflightFailure("production_queue_not_empty", stage="queue_validation", lane=lane,
+                                   legacy_error="production_queue_not_empty")
     return evidence
 
 
 def _validate_live_queue_snapshot_provenance(value: dict, lane: str) -> dict:
     provenance = value.get("queue_snapshot_provenance")
     if not isinstance(provenance, dict):
-        raise RuntimeError("production_queue_snapshot_invalid")
+        raise PreflightFailure("queue_snapshot_provenance_invalid", stage="queue_provenance", lane=lane,
+                               legacy_error="production_queue_snapshot_invalid")
     match = QUEUE_SOURCE_RE.fullmatch(provenance.get("source_id", ""))
     tenant_id = provenance.get("tenant_id")
     visible_tenant_rows = provenance.get("visible_tenant_rows")
     try:
         tenant = UUID(tenant_id)
     except (ValueError, TypeError, AttributeError) as exc:
-        raise RuntimeError("production_queue_snapshot_invalid") from exc
+        raise PreflightFailure("queue_snapshot_provenance_invalid", stage="queue_provenance", lane=lane,
+                               legacy_error="production_queue_snapshot_invalid") from exc
     if (match is None or match.group(1) != lane.lower()
             or provenance.get("snapshot_version") != "agata_live_queue_snapshot_v1"
             or provenance.get("lane") != lane
@@ -462,7 +557,8 @@ def _validate_live_queue_snapshot_provenance(value: dict, lane: str) -> dict:
             or not provenance.get("database_name")
             or value.get("queue_snapshot_runtime_release_sha") != match.group(2)
             or value.get("queue_snapshot_tenant_id") != tenant_id):
-        raise RuntimeError("production_queue_snapshot_invalid")
+        raise PreflightFailure("queue_snapshot_provenance_invalid", stage="queue_provenance", lane=lane,
+                               legacy_error="production_queue_snapshot_invalid")
     return provenance
 
 
@@ -610,27 +706,80 @@ printf '%s' '{script}' | base64 -d | docker exec -i -w /srv/agata \\
 
 def _read_live_runtime_queue_snapshot(lane: str, expected_tenant_id: str) -> dict:
     if not VPS_RUNNER.is_file() or not os.access(VPS_RUNNER, os.X_OK):
-        raise RuntimeError("authoritative_queue_snapshot_runner_unavailable")
+        raise PreflightFailure("authoritative_vps_runner_unavailable", stage="authoritative_vps_snapshot",
+                               lane=lane, legacy_error="authoritative_queue_snapshot_runner_unavailable")
     env = dict(os.environ)
     env["REMOTE_CMD"] = _remote_queue_snapshot_command(lane)
     env["GPOINT_REMOTE_COMMAND_TIMEOUT_SECONDS"] = "25"
     try:
         result = subprocess.run([str(VPS_RUNNER)], capture_output=True, text=True,
                                 timeout=30, check=False, env=env)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise RuntimeError("authoritative_queue_snapshot_unavailable") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise PreflightFailure("authoritative_vps_snapshot_timeout", stage="authoritative_vps_snapshot",
+                               lane=lane, safe_fields={"timeout_seconds": 30},
+                               legacy_error="authoritative_queue_snapshot_unavailable") from exc
+    except OSError as exc:
+        raise PreflightFailure("authoritative_vps_runner_launch_failed", stage="authoritative_vps_snapshot",
+                               lane=lane, legacy_error="authoritative_queue_snapshot_unavailable") from exc
+    except subprocess.SubprocessError as exc:
+        raise PreflightFailure("authoritative_vps_runner_execution_failed", stage="authoritative_vps_snapshot",
+                               lane=lane, legacy_error="authoritative_queue_snapshot_unavailable") from exc
+    lines = [line for line in (result.stdout or "").splitlines() if line.strip()]
+    snapshot = None
+    if lines:
+        try:
+            snapshot = json.loads(lines[-1])
+        except (TypeError, ValueError):
+            snapshot = None
+    if isinstance(snapshot, dict) and snapshot.get("preflight_error"):
+        code = snapshot.get("preflight_error")
+        remote_reasons = {
+            "runtime_lane_identity_mismatch": "remote_tenant_or_lane_identity_mismatch",
+            "runtime_release_identity_invalid": "remote_release_or_image_identity_mismatch",
+            "queue_snapshot_trust_boundary_invalid": "remote_read_only_db_snapshot_contract_failed",
+            "readonly_snapshot_blocked": "remote_read_only_snapshot_failed",
+        }
+        reason = remote_reasons.get(code, "remote_read_only_snapshot_failed")
+        raise PreflightFailure(reason, stage="remote_snapshot", lane=lane,
+                               safe_fields={"runner_exit_code": result.returncode})
     if result.returncode != 0:
-        raise RuntimeError("authoritative_queue_snapshot_failed")
-    try:
-        lines = [line for line in result.stdout.splitlines() if line.strip()]
-        snapshot = json.loads(lines[-1])
-    except (IndexError, TypeError, ValueError) as exc:
-        raise RuntimeError("authoritative_queue_snapshot_invalid") from exc
+        error_text = f"{result.stderr or ''}\n{result.stdout or ''}".lower()
+        if result.returncode == 124:
+            reason = "authoritative_vps_snapshot_timeout"
+        elif result.returncode == 78:
+            reason = "vps_runner_local_configuration_invalid"
+        elif "permission denied" in error_text or "authentication failed" in error_text:
+            reason = "ssh_authentication_failed"
+        elif "host key verification failed" in error_text or "remote host identification has changed" in error_text:
+            reason = "ssh_host_identity_failed"
+        elif any(marker in error_text for marker in ("connect timed out", "connection timed out", "operation timed out")):
+            reason = "ssh_transport_timeout"
+        elif any(marker in error_text for marker in (
+                "could not resolve hostname", "network is unreachable", "no route to host",
+                "connection refused", "connection reset", "connection closed")):
+            reason = "ssh_transport_unavailable"
+        elif any(marker in error_text for marker in (
+                "banner exchange", "kex_exchange_identification", "ssh_exchange_identification")):
+            reason = "ssh_handshake_failed"
+        else:
+            reason = "authoritative_vps_runner_nonzero_exit"
+        raise PreflightFailure(reason, stage="authoritative_vps_snapshot", lane=lane,
+                               safe_fields={"runner_exit_code": result.returncode},
+                               legacy_error="authoritative_queue_snapshot_failed")
+    if not lines or not isinstance(snapshot, dict):
+        raise PreflightFailure("authoritative_vps_snapshot_invalid_json", stage="remote_snapshot", lane=lane,
+                               legacy_error="authoritative_queue_snapshot_invalid")
     if not isinstance(snapshot, dict):
-        raise RuntimeError("authoritative_queue_snapshot_invalid")
-    if snapshot.get("preflight_error"):
-        raise RuntimeError("authoritative_queue_snapshot_failed")
-    return normalize_live_runtime_queue_snapshot(snapshot, lane, expected_tenant_id)
+        raise PreflightFailure("authoritative_vps_snapshot_invalid_schema", stage="remote_snapshot", lane=lane,
+                               legacy_error="authoritative_queue_snapshot_invalid")
+    try:
+        return normalize_live_runtime_queue_snapshot(snapshot, lane, expected_tenant_id)
+    except PreflightFailure:
+        raise
+    except RuntimeError as exc:
+        reason = "queue_snapshot_identity_mismatch" if str(exc) == "production_queue_snapshot_invalid" else "queue_snapshot_invalid"
+        raise PreflightFailure(reason, stage="queue_provenance", lane=lane,
+                               legacy_error="authoritative_queue_snapshot_invalid") from exc
 
 
 def _live_snapshot_fallback_allowed(lane_status: dict) -> bool:
@@ -658,28 +807,73 @@ def _refresh_local_pool_evidence(status: dict) -> None:
     total = pool.get("total") if isinstance(pool, dict) else None
     slot_ids = set(slots) if isinstance(slots, dict) else set()
     canonical_slot_sets = ({"slot-01"}, {"slot-01", "slot-02", "slot-03"})
-    if (not isinstance(pool, dict) or isinstance(pool.get("busy"), bool) or pool.get("busy") != 0
-            or isinstance(concurrency, bool) or concurrency != 1
-            or isinstance(total, bool) or total not in {1, 3}
-            or not isinstance(slots, dict) or slot_ids not in canonical_slot_sets or total != len(slots)
-            or any(not isinstance(slot, dict) or slot.get("state") != "IDLE"
-                   or slot.get("job_id") is not None
-                                for slot in slots.values())
-            or not isinstance(lanes, dict) or status.get("current_job_present") is not False
-            or status.get("launch_agent_loaded") is not True):
-        raise RuntimeError("production_queue_status_unavailable")
+    if not isinstance(pool, dict) or isinstance(pool.get("busy"), bool) or not isinstance(pool.get("busy"), int):
+        raise PreflightFailure("local_pool_status_invalid", stage="local_pool_validation",
+                               legacy_error="production_queue_status_unavailable")
+    if pool.get("busy") != 0 or status.get("current_job_present") is not False:
+        raise PreflightFailure("local_pool_not_idle", stage="local_pool_validation",
+                               legacy_error="production_queue_status_unavailable")
+    if isinstance(concurrency, bool) or concurrency != 1 or isinstance(total, bool) or total not in {1, 3}:
+        raise PreflightFailure("local_pool_configuration_invalid", stage="local_pool_validation",
+                               legacy_error="production_queue_status_unavailable")
+    if not isinstance(slots, dict) or slot_ids not in canonical_slot_sets or total != len(slots):
+        raise PreflightFailure("local_slot_inventory_invalid", stage="local_pool_validation",
+                               legacy_error="production_queue_status_unavailable")
+    for slot_id, slot in slots.items():
+        if not isinstance(slot, dict):
+            raise PreflightFailure("local_slot_inventory_invalid", stage="local_pool_validation",
+                                   lane=None, legacy_error="production_queue_status_unavailable")
+        if slot.get("state") != "IDLE" or slot.get("job_id") is not None:
+            slot_lane = slot.get("lane")
+            lane = slot_lane if slot_lane in {"GPOINT", "GSALES", "LAB"} else None
+            raise PreflightFailure("local_slot_not_idle", stage="local_pool_validation", lane=lane,
+                                   legacy_error="production_queue_status_unavailable")
+    if not isinstance(lanes, dict):
+        raise PreflightFailure("worker_status_schema_invalid", stage="local_pool_validation",
+                               legacy_error="production_queue_status_unavailable")
+    if status.get("launch_agent_loaded") is not True:
+        raise PreflightFailure("launchagent_not_loaded", stage="local_pool_validation",
+                               legacy_error="production_queue_status_unavailable")
     for lane in ("GPOINT", "GSALES"):
         value = lanes.get(lane)
         if not isinstance(value, dict):
-            raise RuntimeError("production_queue_status_unavailable")
-        if (value.get("configured", True) and value.get("health") != "HEALTHY"
-                and not _live_snapshot_fallback_allowed(value)):
-            raise RuntimeError("production_queue_status_unavailable")
-    local = inventory()
-    if (local.get("launchagent_loaded") is not True or local.get("production_release_lock_busy")
-            or local.get("active_inference") is not False):
-        raise RuntimeError("production_queue_status_unavailable")
-    _launchagent_pid()
+            raise PreflightFailure("worker_status_schema_invalid", stage="local_pool_validation", lane=lane,
+                                   legacy_error="production_queue_status_unavailable")
+        if not value.get("configured", True):
+            continue
+        if value.get("health") not in {"HEALTHY", "DEGRADED"}:
+            raise PreflightFailure("lane_health_invalid", stage="lane_health_validation", lane=lane,
+                                   legacy_error="production_queue_status_unavailable")
+        if not _live_snapshot_fallback_allowed(value):
+            if value.get("health") != "HEALTHY" and value.get("queue_snapshot_error_code") == "worker_gateway_http_404":
+                raise PreflightFailure("lane_health_queue_error_combination_disallowed",
+                                       stage="lane_health_validation", lane=lane,
+                                       legacy_error="production_queue_status_unavailable")
+            if value.get("health") != "HEALTHY":
+                raise PreflightFailure("lane_health_invalid", stage="lane_health_validation", lane=lane,
+                                       legacy_error="production_queue_status_unavailable")
+            raise PreflightFailure("authoritative_queue_snapshot_unavailable",
+                                   stage="queue_snapshot", lane=lane,
+                                   legacy_error="production_queue_status_unavailable")
+    try:
+        local = inventory()
+    except Exception as exc:
+        raise PreflightFailure("worker_local_inventory_unavailable", stage="local_inventory",
+                               legacy_error="production_queue_status_unavailable") from exc
+    if local.get("launchagent_loaded") is not True:
+        raise PreflightFailure("launchagent_not_loaded", stage="local_inventory",
+                               legacy_error="production_queue_status_unavailable")
+    if local.get("production_release_lock_busy"):
+        raise PreflightFailure("production_release_lock_busy", stage="lock_validation",
+                               legacy_error="production_queue_status_unavailable")
+    if local.get("active_inference") is not False:
+        raise PreflightFailure("active_inference_present", stage="local_inventory",
+                               legacy_error="production_queue_status_unavailable")
+    try:
+        _launchagent_pid()
+    except Exception as exc:
+        raise PreflightFailure("launchagent_process_identity_invalid", stage="local_inventory",
+                               legacy_error="production_queue_status_unavailable") from exc
     pool["state"] = "IDLE_CONFIRMED"
     status["pool_snapshot_at"] = datetime.now(UTC).isoformat()
     status["pool_snapshot_authority"] = "mac_worker_live_idle_inventory_v1"
@@ -709,38 +903,71 @@ def _read_production_queue_status(manifest: dict | None = None) -> dict:
                 or not python.is_file() or not os.access(python, os.X_OK)):
             raise RuntimeError("installed_worker_runtime_unavailable")
     except OSError as exc:
-        raise RuntimeError("installed_worker_runtime_unavailable") from exc
+        raise PreflightFailure("installed_worker_runtime_unavailable", stage="worker_status") from exc
     try:
         result = subprocess.run(
             [str(python), str(worker), "status"], capture_output=True,
             text=True, timeout=35, check=False,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise RuntimeError("production_queue_status_unavailable") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise PreflightFailure("worker_status_timeout", stage="worker_status",
+                               safe_fields={"timeout_seconds": 35},
+                               legacy_error="production_queue_status_unavailable") from exc
+    except OSError as exc:
+        raise PreflightFailure("worker_status_launch_failed", stage="worker_status",
+                               legacy_error="production_queue_status_unavailable") from exc
+    except subprocess.SubprocessError as exc:
+        raise PreflightFailure("worker_status_execution_failed", stage="worker_status",
+                               legacy_error="production_queue_status_unavailable") from exc
     if result.returncode != 0:
-        raise RuntimeError("production_queue_status_unavailable")
+        raise PreflightFailure("worker_status_nonzero_exit", stage="worker_status",
+                               safe_fields={"worker_status_exit_code": result.returncode},
+                               legacy_error="production_queue_status_unavailable")
     try:
         status = json.loads(result.stdout)
     except (TypeError, ValueError) as exc:
-        raise RuntimeError("production_queue_status_unavailable") from exc
+        raise PreflightFailure("worker_status_invalid_json", stage="worker_status",
+                               legacy_error="production_queue_status_unavailable") from exc
     lanes = status.get("lanes") if isinstance(status, dict) else None
     if not isinstance(lanes, dict):
-        raise RuntimeError("production_queue_status_unavailable")
+        raise PreflightFailure("worker_status_schema_invalid", stage="worker_status",
+                               legacy_error="production_queue_status_unavailable")
     configured_lanes = [lane for lane in ("GPOINT", "GSALES")
                         if isinstance(lanes.get(lane), dict) and lanes[lane].get("configured", True)]
     if not configured_lanes:
-        raise RuntimeError("production_queue_status_unavailable")
+        raise PreflightFailure("no_configured_production_lanes", stage="worker_status")
     if all(lanes[lane].get("queue_snapshot_state") == "VERIFIED" for lane in configured_lanes):
         return status
     unresolved_lanes = [lane for lane in configured_lanes
                         if lanes[lane].get("queue_snapshot_state") != "VERIFIED"]
-    if not unresolved_lanes or any(not _live_snapshot_fallback_allowed(lanes[lane])
-                                   for lane in unresolved_lanes):
-        raise RuntimeError("production_queue_status_unavailable")
+    if not unresolved_lanes:
+        raise PreflightFailure("authoritative_queue_snapshot_unavailable", stage="queue_snapshot")
+    for lane in unresolved_lanes:
+        lane_status = lanes[lane]
+        health = lane_status.get("health")
+        queue_error = lane_status.get("queue_snapshot_error_code")
+        if health not in {"HEALTHY", "DEGRADED"}:
+            raise PreflightFailure("lane_health_invalid", stage="lane_health_validation", lane=lane)
+        if not _live_snapshot_fallback_allowed(lane_status):
+            if health != "HEALTHY" and queue_error == "worker_gateway_http_404":
+                raise PreflightFailure("lane_health_queue_error_combination_disallowed",
+                                       stage="lane_health_validation", lane=lane,
+                                       legacy_error="production_queue_status_unavailable")
+            if health != "HEALTHY":
+                raise PreflightFailure("lane_health_invalid", stage="lane_health_validation", lane=lane)
+            raise PreflightFailure("authoritative_queue_snapshot_unavailable",
+                                   stage="queue_snapshot", lane=lane,
+                                   legacy_error="production_queue_status_unavailable")
     _refresh_local_pool_evidence(status)
-    candidate_manifest = manifest or candidate()
+    try:
+        candidate_manifest = manifest or candidate()
+    except Exception as exc:
+        raise PreflightFailure("candidate_verification_failed", stage="origin_verification") from exc
     for lane in configured_lanes:
-        expected_tenant = _configured_tenant_id(lane, candidate_manifest)
+        try:
+            expected_tenant = _configured_tenant_id(lane, candidate_manifest)
+        except Exception as exc:
+            raise PreflightFailure("tenant_binding_invalid", stage="tenant_validation", lane=lane) from exc
         snapshot = _read_live_runtime_queue_snapshot(lane, expected_tenant)
         lanes[lane].update(snapshot)
     return status
@@ -1792,6 +2019,110 @@ def _ensure_pool_config() -> None:
         raise RuntimeError("worker_pool_must_start_at_n1_unverified")
 
 
+def _transition_lock_is_busy() -> bool:
+    if not TRANSITION_LOCK.exists():
+        return False
+    try:
+        descriptor = os.open(TRANSITION_LOCK, os.O_RDONLY)
+    except OSError as exc:
+        raise PreflightFailure("transition_lock_check_failed", stage="lock_validation") from exc
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(descriptor)
+
+
+def _run_safety_preflight(stage: str, *, manifest: dict | None = None,
+                          transition_lock_already_held: bool = False) -> dict:
+    """Run the same fail-closed health/queue gate used by apply and record a safe receipt."""
+    try:
+        if not transition_lock_already_held and _transition_lock_is_busy():
+            raise PreflightFailure("transition_lock_busy", stage="lock_validation")
+        try:
+            candidate_manifest = manifest or candidate()
+        except Exception as exc:
+            code = str(exc)
+            if code not in {"origin_main_unavailable", "origin_main_ref_stale", "candidate_must_be_origin_main",
+                            "candidate_worktree_dirty"}:
+                code = "candidate_verification_failed"
+            raise PreflightFailure(code, stage="origin_verification") from exc
+        try:
+            before = inventory()
+        except Exception as exc:
+            raise PreflightFailure("worker_local_inventory_unavailable", stage="local_inventory") from exc
+        if before.get("production_release_lock_busy"):
+            raise PreflightFailure("production_release_lock_busy", stage="lock_validation")
+        if before.get("active_inference") is not False:
+            raise PreflightFailure("active_inference_present", stage="local_inventory",
+                                   legacy_error="active_inference_blocks_transition")
+        if before.get("launchagent_loaded") is not True:
+            raise PreflightFailure("launchagent_not_loaded", stage="local_inventory",
+                                   legacy_error="worker_launchagent_not_loaded")
+        status = _read_production_queue_status(candidate_manifest)
+        evidence = require_fresh_empty_production_queues(status)
+        summary = {
+            "candidate_verified": True,
+            "launchagent_loaded": True,
+            "active_inference_absent": True,
+            "locks_free": True,
+            "queue_snapshots_verified": True,
+            "queues_empty": True,
+            "lane_health_healthy": True,
+        }
+        _record_preflight(stage, summary=summary)
+        return {"manifest": candidate_manifest, "inventory": before, "status": status, "queue_evidence": evidence}
+    except PreflightFailure as exc:
+        _record_preflight(stage, exc)
+        raise
+    except RuntimeError as exc:
+        code = str(exc)
+        mappings = {
+            "production_queue_snapshot_invalid": "queue_snapshot_invalid",
+            "production_queue_snapshot_stale": "queue_snapshot_stale",
+            "worker_slots_busy": "local_pool_not_idle",
+            "production_queue_not_empty": "production_queue_not_empty",
+            "production_queue_status_unavailable": "authoritative_queue_snapshot_unavailable",
+        }
+        failure = PreflightFailure(mappings.get(code, "preflight_validation_failed"), stage="preflight_validation",
+                                   legacy_error=code)
+        _record_preflight(stage, failure)
+        raise failure from exc
+
+
+def read_only_preflight() -> dict:
+    """Run one read-only installation gate and return only sanitized summaries."""
+    preflight = _run_safety_preflight("READ_ONLY_PREFLIGHT")
+    status = preflight["status"]
+    evidence = preflight["queue_evidence"]
+    lanes = {}
+    for lane in ("GPOINT", "GSALES"):
+        lane_status = status["lanes"][lane]
+        queue = evidence["lanes"][lane]
+        lanes[lane] = {
+            "health": lane_status.get("health"),
+            "queue_snapshot_state": lane_status.get("queue_snapshot_state"),
+            "pending": queue["pending_jobs"],
+            "running": queue["running_jobs"],
+            "snapshot_fresh": True,
+            "identity_and_readonly_provenance_verified": True,
+        }
+    return {
+        "outcome": "PASS",
+        "candidate_verified": True,
+        "launchagent_loaded": True,
+        "active_inference_absent": True,
+        "release_and_transition_locks_free": True,
+        "pool_busy": evidence["busy_slots"],
+        "lanes": lanes,
+        "mutation_performed": False,
+    }
+
+
 def apply() -> dict:
     TRANSITION_LOCK.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(TRANSITION_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
@@ -1799,18 +2130,16 @@ def apply() -> dict:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as exc:
         os.close(fd)
-        raise RuntimeError("worker_transition_already_running") from exc
+        failure = PreflightFailure("transition_lock_busy", stage="lock_validation",
+                                   legacy_error="worker_transition_already_running")
+        _record_preflight("APPLY_INITIAL", failure)
+        raise failure from exc
     try:
         # Repeat all safety checks at the point of mutation.
-        manifest = candidate()
-        before = inventory()
-        if before["production_release_lock_busy"]:
-            raise RuntimeError("production_release_lock_busy")
-        if before["active_inference"]:
-            raise RuntimeError("active_inference_blocks_transition")
-        if before.get("launchagent_loaded") is not True:
-            raise RuntimeError("worker_launchagent_not_loaded")
-        queue_evidence = require_fresh_empty_production_queues(_read_production_queue_status())
+        preflight = _run_safety_preflight("APPLY_INITIAL", transition_lock_already_held=True)
+        manifest = preflight["manifest"]
+        before = preflight["inventory"]
+        queue_evidence = preflight["queue_evidence"]
         network_before = _network_state_sha256()
         if not ROOT.is_dir() or ROOT.is_symlink() or ROOT.stat().st_uid != os.getuid():
             raise RuntimeError("worker_runtime_root_owner_invalid")
@@ -1847,7 +2176,10 @@ def apply() -> dict:
                 # The worker cannot claim another job while paused. Re-read
                 # the authoritative queue immediately before bootout. Queue
                 # producers remain independent; any later enqueue stays durable.
-                queue_evidence = require_fresh_empty_production_queues(_read_production_queue_status())
+                paused_preflight = _run_safety_preflight(
+                    "APPLY_PAUSED_PRE_BOOTOUT", manifest=manifest, transition_lock_already_held=True,
+                )
+                queue_evidence = paused_preflight["queue_evidence"]
             except Exception:
                 try:
                     os.kill(paused_pid, signal.SIGCONT)
@@ -2103,12 +2435,14 @@ def rollback() -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("plan", "prepare", "apply", "rollback", "install-lab-slot", "install-lane-slot"))
+    parser.add_argument("action", choices=("plan", "preflight", "prepare", "apply", "rollback",
+                                            "install-lab-slot", "install-lane-slot"))
     parser.add_argument("--lane", choices=("GPOINT", "GSALES", "LAB"))
     args = parser.parse_args()
     if args.action == "install-lane-slot" and not args.lane:
         raise RuntimeError("worker_lane_required")
-    result = (read_only_plan() if args.action == "plan" else prepare() if args.action == "prepare"
+    result = (read_only_plan() if args.action == "plan" else read_only_preflight() if args.action == "preflight"
+              else prepare() if args.action == "prepare"
               else rollback() if args.action == "rollback" else
               install_lab_slot() if args.action == "install-lab-slot" else
               install_lane_slot(args.lane) if args.action == "install-lane-slot" and args.lane else
@@ -2120,5 +2454,14 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+    except PreflightFailure as exc:
+        if len(sys.argv) > 1 and sys.argv[1] == "preflight":
+            print(json.dumps({
+                "outcome": "BLOCKED", "reason_code": exc.reason_code, "stage": exc.stage,
+                "lane": exc.lane, "diagnostic_receipt_written": exc.receipt_written,
+                **exc.safe_fields,
+            }, sort_keys=True))
+            raise SystemExit(1) from exc
+        raise SystemExit(exc.reason_code) from exc
     except Exception as exc:
         raise SystemExit(str(exc)) from exc

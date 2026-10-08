@@ -10,7 +10,7 @@ import os
 import plistlib
 import shutil
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -497,6 +497,24 @@ def test_candidate_accepts_only_clean_exact_origin_main_head(tmp_path, monkeypat
     assert candidate["assets"] == {}
 
 
+def test_candidate_rejects_diagnostic_changes_in_candidate_worktree(tmp_path, monkeypatch):
+    monkeypatch.setattr(migration, "WORKER_DIR", tmp_path)
+    monkeypatch.setattr(migration, "ASSETS", ())
+    main = "a" * 40
+    def fake_git(*args):
+        if args[:2] == ("rev-parse", "HEAD") or args[:2] == ("rev-parse", "origin/main"):
+            return main
+        if args[:2] == ("ls-remote", "--exit-code"):
+            return main + "\trefs/heads/main"
+        if args[:1] == ("status",):
+            return " M services/agata/worker/migrate_worker_runtime.py\n M services/agata/tests/test_worker_runtime_migration.py"
+        raise AssertionError(args)
+    monkeypatch.setattr(migration, "git", fake_git)
+
+    with pytest.raises(RuntimeError, match="candidate_worktree_dirty"):
+        migration.candidate()
+
+
 def test_candidate_startup_does_not_override_explicit_configured_tenant_pin(tmp_path, monkeypatch):
     legacy = tmp_path / "legacy"
     (legacy / "config").mkdir(parents=True)
@@ -563,7 +581,10 @@ def test_apply_rechecks_and_blocks_active_inference_before_any_mutation(tmp_path
         assert str(exc) == "active_inference_blocks_transition"
     else:
         raise AssertionError("active inference must fail closed")
-    assert not migration.ROOT.exists()
+    receipts = list((migration.ROOT / "receipts").glob("preflight-*.json"))
+    assert len(receipts) == 1
+    assert json.loads(receipts[0].read_text())["reason_code"] == "active_inference_present"
+    assert not (migration.ROOT / "runtime").exists()
 
 
 def test_migration_rebinds_trusted_tenant_sidecar_to_exact_worker_source(tmp_path, monkeypatch):
@@ -712,7 +733,7 @@ def test_apply_with_absent_rollback_tree_saves_snapshot_and_restart_evidence(tmp
                                                             "launchagent_loaded": True,
                                                             "active_inference": False})
     monkeypatch.setattr(migration, "_read_production_queue_status",
-                        lambda: _fresh_empty_queue_status(datetime.now(UTC)))
+                        lambda *_args: _fresh_empty_queue_status(datetime.now(UTC)))
     monkeypatch.setattr(migration, "_network_state_sha256", lambda: "stable-network-state")
 
     def stage(manifest):
@@ -821,7 +842,7 @@ def test_apply_stops_before_runtime_mutation_when_production_queue_is_pending(tm
     monkeypatch.setattr(migration, "inventory", lambda: {"production_release_lock_busy": False,
                                                             "launchagent_loaded": True,
                                                             "active_inference": False})
-    monkeypatch.setattr(migration, "_read_production_queue_status", lambda: status)
+    monkeypatch.setattr(migration, "_read_production_queue_status", lambda *_args: status)
     monkeypatch.setattr(migration, "_stage_runtime", lambda *_args: staged.append(True))
 
     with pytest.raises(RuntimeError, match="production_queue_not_empty"):
@@ -874,7 +895,7 @@ def test_apply_aborts_before_bootout_when_pause_or_second_queue_check_is_unsafe(
             (root / "state/maintenance-stop").exists(), pause_observed["paused"],
         ))
         return next(queue_reads)
-    monkeypatch.setattr(migration, "_read_production_queue_status", read_queue)
+    monkeypatch.setattr(migration, "_read_production_queue_status", lambda *_args: read_queue())
     monkeypatch.setattr(migration, "_network_state_sha256", lambda: "stable-network-state")
     monkeypatch.setattr(migration, "_stage_runtime", lambda *_args: tmp_path / "candidate-stage")
     monkeypatch.setattr(migration, "_validate_candidate_startup", lambda *_args: {"state": "PASS"})
@@ -1178,6 +1199,199 @@ def test_non_404_queue_failure_never_uses_live_runtime_bootstrap(tmp_path, monke
         migration._read_production_queue_status()
 
 
+def test_worker_status_timeout_has_structured_reason_code(tmp_path, monkeypatch):
+    root = tmp_path / "worker-runtime"
+    _create_installed_runtime(root)
+    worker_dir = tmp_path / "candidate-worker"
+    worker_dir.mkdir()
+    (worker_dir / "gpoint_mac_worker.py").touch()
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "WORKER_DIR", worker_dir)
+
+    def timeout(command, **_kwargs):
+        raise subprocess.TimeoutExpired(command, timeout=35)
+
+    monkeypatch.setattr(migration.subprocess, "run", timeout)
+
+    with pytest.raises(migration.PreflightFailure) as raised:
+        migration._read_production_queue_status({"source_sha": "a" * 40})
+
+    assert raised.value.reason_code == "worker_status_timeout"
+    assert raised.value.stage == "worker_status"
+    assert raised.value.lane is None
+
+
+@pytest.mark.parametrize(
+    ("completed", "expected_reason"),
+    (
+        (subprocess.CompletedProcess([], 7, "", "private stderr"), "worker_status_nonzero_exit"),
+        (subprocess.CompletedProcess([], 0, "not json", ""), "worker_status_invalid_json"),
+    ),
+)
+def test_worker_status_nonzero_and_invalid_json_have_distinct_reason_codes(
+        tmp_path, monkeypatch, completed, expected_reason):
+    root = tmp_path / "worker-runtime"
+    _create_installed_runtime(root)
+    worker_dir = tmp_path / "candidate-worker"
+    worker_dir.mkdir()
+    (worker_dir / "gpoint_mac_worker.py").touch()
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "WORKER_DIR", worker_dir)
+    monkeypatch.setattr(migration.subprocess, "run", lambda *_args, **_kwargs: completed)
+
+    with pytest.raises(migration.PreflightFailure) as raised:
+        migration._read_production_queue_status()
+
+    assert raised.value.reason_code == expected_reason
+    assert raised.value.stage == "worker_status"
+    assert "private stderr" not in str(raised.value)
+
+
+def test_runner_timeout_has_lane_scoped_structured_reason(tmp_path, monkeypatch):
+    root = tmp_path / "worker-runtime"
+    _create_installed_runtime(root)
+    worker_dir = tmp_path / "candidate-worker"
+    worker_dir.mkdir()
+    (worker_dir / "gpoint_mac_worker.py").touch()
+    config = tmp_path / "worker.env"
+    config.write_text("GPOINT_AGATA_TENANT_ID=81a4ba28-6de5-4b03-8332-0661ba4d46f4\n")
+    config.chmod(0o600)
+    status = _fresh_empty_queue_status(datetime.now(UTC))
+    for lane in ("GPOINT", "GSALES"):
+        status["lanes"][lane].update({
+            "health": "DEGRADED", "health_error_code": "worker_gateway_network_error",
+            "queue_snapshot_state": "UNAVAILABLE", "queue_snapshot_error_code": "worker_gateway_http_404",
+        })
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "WORKER_DIR", worker_dir)
+    monkeypatch.setattr(migration, "CONFIG", config)
+    monkeypatch.setattr(migration, "VPS_RUNNER", Path("/trusted/runner"))
+    monkeypatch.setattr(migration, "candidate", lambda: {"source_sha": "a" * 40})
+    monkeypatch.setattr(migration, "inventory", lambda: {
+        "launchagent_loaded": True, "production_release_lock_busy": False, "active_inference": False,
+    })
+    monkeypatch.setattr(migration, "_launchagent_pid", lambda: (123, "worker watch"))
+
+    def run(command, **_kwargs):
+        if any("gpoint_mac_worker.py" in str(part) for part in command):
+            return subprocess.CompletedProcess(command, 0, json.dumps(status), "")
+        raise subprocess.TimeoutExpired(command, timeout=30)
+
+    monkeypatch.setattr(migration.subprocess, "run", run)
+    monkeypatch.setattr(Path, "is_file", lambda self: True)
+    monkeypatch.setattr(migration.os, "access", lambda *_args: True)
+
+    with pytest.raises(migration.PreflightFailure) as raised:
+        migration._read_production_queue_status({"source_sha": "a" * 40})
+
+    assert raised.value.reason_code == "authoritative_vps_snapshot_timeout"
+    assert raised.value.stage == "authoritative_vps_snapshot"
+    assert raised.value.lane == "GPOINT"
+
+
+@pytest.mark.parametrize(
+    ("health", "health_error", "queue_error", "expected_reason"),
+    (
+        ("UNKNOWN", None, None, "lane_health_invalid"),
+        ("DEGRADED", "worker_gateway_auth_error", "worker_gateway_http_404",
+         "lane_health_queue_error_combination_disallowed"),
+        ("HEALTHY", None, "worker_gateway_http_403", "authoritative_queue_snapshot_unavailable"),
+    ),
+)
+def test_local_health_and_queue_error_states_have_structured_reasons(
+        tmp_path, monkeypatch, health, health_error, queue_error, expected_reason):
+    root = tmp_path / "worker"
+    root.mkdir(mode=0o700)
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "inventory", lambda: {
+        "launchagent_loaded": True, "production_release_lock_busy": False, "active_inference": False,
+    })
+    monkeypatch.setattr(migration, "_launchagent_pid", lambda: (123, "worker watch"))
+    status = {
+        "pool": {"busy": 0, "total": 1}, "current_job_present": False,
+        "configured_concurrency": 1, "launch_agent_loaded": True,
+        "slots": {"slot-01": {"state": "IDLE", "job_id": None, "lane": "GPOINT"}},
+        "lanes": {"GPOINT": {
+            "configured": True, "health": health, "health_error_code": health_error,
+            "queue_snapshot_state": "UNAVAILABLE", "queue_snapshot_error_code": queue_error,
+        }, "GSALES": {"configured": False}},
+    }
+
+    with pytest.raises(migration.PreflightFailure) as raised:
+        migration._refresh_local_pool_evidence(status)
+
+    assert raised.value.reason_code == expected_reason
+    assert raised.value.lane == "GPOINT"
+
+
+def test_idle_requirement_classifies_stale_and_invalid_queue_evidence():
+    now = datetime.now(UTC)
+    stale = _fresh_empty_queue_status(now - timedelta(seconds=migration.QUEUE_SNAPSHOT_MAX_AGE_SECONDS + 1))
+    with pytest.raises(migration.PreflightFailure) as stale_error:
+        migration.require_fresh_empty_production_queues(stale, now=now)
+    assert stale_error.value.reason_code == "queue_snapshot_stale"
+
+    invalid = _fresh_empty_queue_status(now)
+    invalid["lanes"]["GPOINT"]["pending_inference_jobs"] = "0"
+    with pytest.raises(migration.PreflightFailure) as invalid_error:
+        migration.require_fresh_empty_production_queues(invalid, now=now)
+    assert invalid_error.value.reason_code == "queue_snapshot_counts_invalid"
+
+
+def test_preflight_receipt_is_private_structured_and_contains_no_raw_evidence(tmp_path, monkeypatch):
+    root = tmp_path / "worker"
+    root.mkdir(mode=0o700)
+    monkeypatch.setattr(migration, "ROOT", root)
+    failure = migration.PreflightFailure(
+        "authoritative_vps_snapshot_timeout", stage="authoritative_vps_snapshot", lane="GPOINT",
+        safe_fields={"runner_exit_code": 124},
+    )
+
+    receipt_path = migration._write_preflight_receipt("APPLY_INITIAL", failure)
+    receipt = json.loads(receipt_path.read_text())
+
+    assert receipt["outcome"] == "BLOCKED"
+    assert receipt["reason_code"] == "authoritative_vps_snapshot_timeout"
+    assert receipt["stage"] == "APPLY_INITIAL"
+    assert receipt["failure_stage"] == "authoritative_vps_snapshot"
+    assert receipt["lane"] == "GPOINT"
+    assert receipt["runner_exit_code"] == 124
+    assert receipt_path.stat().st_mode & 0o777 == 0o600
+    serialized = json.dumps(receipt)
+    assert "tenant" not in serialized
+    assert "queue_snapshot" not in serialized
+    assert str(tmp_path) not in serialized
+    assert "stderr" not in receipt and "stdout" not in receipt
+
+
+def test_apply_records_reason_code_before_staging_when_queue_gate_fails(tmp_path, monkeypatch):
+    root = tmp_path / "worker"
+    root.mkdir(mode=0o700)
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "TRANSITION_LOCK", tmp_path / "transition.lock")
+    monkeypatch.setattr(migration, "candidate", lambda: {"source_sha": "a" * 40})
+    monkeypatch.setattr(migration, "inventory", lambda: {
+        "launchagent_loaded": True, "production_release_lock_busy": False, "active_inference": False,
+    })
+    monkeypatch.setattr(migration, "_read_production_queue_status", lambda *_args: (_ for _ in ()).throw(
+        migration.PreflightFailure("authoritative_vps_snapshot_timeout", stage="authoritative_vps_snapshot",
+                                    lane="GPOINT", safe_fields={"runner_exit_code": 124})))
+    monkeypatch.setattr(migration, "_stage_runtime", lambda *_args: pytest.fail("must abort before staging"))
+
+    with pytest.raises(migration.PreflightFailure) as raised:
+        migration.apply()
+
+    assert raised.value.reason_code == "authoritative_vps_snapshot_timeout"
+    receipts = list((root / "receipts").glob("preflight-*.json"))
+    assert len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text())
+    assert receipt["stage"] == "APPLY_INITIAL"
+    assert receipt["reason_code"] == "authoritative_vps_snapshot_timeout"
+    assert receipt["lane"] == "GPOINT"
+    assert receipt["runner_exit_code"] == 124
+    assert not (root / "state/maintenance-stop").exists()
+
+
 @pytest.mark.parametrize(
     ("health", "health_error", "queue_error"),
     (
@@ -1283,7 +1497,7 @@ def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(t
                                                             "launchagent_loaded": True,
                                                             "active_inference": False})
     monkeypatch.setattr(migration, "_read_production_queue_status",
-                        lambda: _fresh_empty_queue_status(datetime.now(UTC)))
+                        lambda *_args: _fresh_empty_queue_status(datetime.now(UTC)))
     monkeypatch.setattr(migration, "_network_state_sha256", lambda: "unchanged")
     def stage(_manifest):
         release = tmp_path / "candidate-stage" / manifest["source_sha"]
