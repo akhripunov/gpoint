@@ -28,10 +28,30 @@ if str(WORKER_DIR) not in sys.path:
 import lab_queue  # noqa: E402
 import worker_client  # noqa: E402
 from run_coordinator import CallLedger  # noqa: E402
+from preinference_diagnostics import write_preinference_failure  # noqa: E402
 
 
 class AmbiguousWorkerResult(RuntimeError):
     """The Worker may have started inference; this invocation cannot be retried."""
+
+
+def _record_preinference_failure(env: Mapping[str, str], invocation_id: object, *,
+                                 stage: str, reason_code: str, exception: BaseException,
+                                 source_location: str, reservation_created: bool = False,
+                                 worker_job_submitted: bool = False) -> None:
+    receipts = env.get("AGATA_LAB_PRIVATE_RECEIPTS")
+    if not isinstance(receipts, str) or not isinstance(invocation_id, str):
+        return
+    try:
+        write_preinference_failure(
+            receipts, invocation_id=invocation_id, stage=stage, reason_code=reason_code,
+            exception=exception, source_location=source_location,
+            generator_reservation_created=reservation_created,
+            worker_job_submitted=worker_job_submitted,
+        )
+    except (OSError, PermissionError, ValueError, FileExistsError):
+        # Keep the original validation exception; never retry or mask it.
+        return
 
 
 def _validate_no_api_auth(env: Mapping[str, str], config: Mapping[str, object]) -> None:
@@ -256,24 +276,45 @@ class WorkerLabAdapter:
                       history_receipt_ids: list[str], model: str = MODEL,
                       reasoning: str = REASONING) -> dict:
         """Reserve once, then submit one hash-verified V2 DEV turn to Slot 03."""
+        def checked(function, stage, code, location):
+            try:
+                return function()
+            except BaseException as exc:
+                _record_preinference_failure(
+                    self.env, invocation_id, stage=stage, reason_code=code,
+                    exception=exc, source_location=location,
+                )
+                raise
+
         config = {"model": model, "reasoning_effort": reasoning, "scenario_id": scenario_id,
                   "maxRetries": 0, "fallbacks": []}
-        _validate_no_api_auth(self.env, config)
-        if (model, reasoning) != (MODEL, REASONING):
-            raise PermissionError("V2 LAB model contract is fixed to gpt-6-luna / medium")
+        checked(lambda: _validate_no_api_auth(self.env, config), "ENV_VALIDATION",
+                "API_AUTH_OR_PROVIDER_CONFIG_FORBIDDEN", "promptfoo_worker_provider.WorkerLabAdapter.invoke_v2_dev")
+        def validate_model():
+            if (model, reasoning) != (MODEL, REASONING):
+                raise PermissionError("V2 LAB model contract is fixed to gpt-6-luna / medium")
+        checked(validate_model, "PROVIDER_CONFIG", "MODEL_CONTRACT_INVALID",
+                "promptfoo_worker_provider.WorkerLabAdapter.invoke_v2_dev")
         if self.receipt_directory is not None:
-            _validate_receipt_directory(Path(self.receipt_directory), invocation_id)
+            checked(lambda: _validate_receipt_directory(Path(self.receipt_directory), invocation_id),
+                    "PROVIDER_CONFIG", "PRIVATE_RECEIPT_DIRECTORY_INVALID",
+                    "promptfoo_worker_provider.WorkerLabAdapter.invoke_v2_dev")
         ledger = self.ledger
         limits = {"conversation_arms": 8, "generator_invocations": 32, "judge_invocations": 15}
-        if (getattr(ledger, "durable", False) is not True or not callable(getattr(ledger, "verify_persisted", None))
-                or not ledger.verify_persisted() or ledger.snapshot().get("limits") != limits):
-            raise PermissionError("V2 Worker LAB invocation requires the verified durable call ledger")
-        job = worker_client.build_v2_dev_job(
+        def validate_ledger():
+            if (getattr(ledger, "durable", False) is not True or not callable(getattr(ledger, "verify_persisted", None))
+                    or not ledger.verify_persisted() or ledger.snapshot().get("limits") != limits):
+                raise PermissionError("V2 Worker LAB invocation requires the verified durable call ledger")
+        checked(validate_ledger, "GENERATOR_RESERVATION", "DURABLE_LEDGER_INVALID",
+                "promptfoo_worker_provider.WorkerLabAdapter.invoke_v2_dev")
+        job = checked(lambda: worker_client.build_v2_dev_job(
             request=request, run_id=run_id, arm_id=arm_id, configuration_id=configuration_id,
             scenario_id=scenario_id, turn_index=turn_index,
             history_receipt_ids=history_receipt_ids, invocation_id=invocation_id,
-        )
-        worker_client.validate_owner_approval(job, self.env)
+        ), "IMMUTABLE_V2_JOB_CONTRACT", "V2_JOB_CONTRACT_INVALID",
+            "promptfoo_worker_provider.WorkerLabAdapter.invoke_v2_dev")
+        checked(lambda: worker_client.validate_owner_approval(job, self.env), "APPROVAL_VALIDATION",
+                "OWNER_APPROVAL_REJECTED", "promptfoo_worker_provider.WorkerLabAdapter.invoke_v2_dev")
         attempt = {
             "run_id": run_id, "arm_id": arm_id, "experiment_id": job["experiment_id"],
             "configuration": configuration_id, "scenario_id": scenario_id, "turn_index": turn_index,
@@ -281,7 +322,25 @@ class WorkerLabAdapter:
             "worker_job_id": job["job_id"],
         }
         # Durable reservation is written before the LAB queue's atomic submission.
-        ledger.reserve("generator", invocation_id, metadata=attempt)
+        try:
+            ledger.reserve("generator", invocation_id, metadata=attempt)
+        except BaseException as exc:
+            reservation_created = None
+            try:
+                ledger.refresh()
+                reservation_created = any(
+                    row.get("invocation_id") == invocation_id
+                    for row in ledger.snapshot().get("generator_invocations", {}).get("invocations", [])
+                )
+            except BaseException:
+                pass
+            _record_preinference_failure(
+                self.env, invocation_id, stage="GENERATOR_RESERVATION",
+                reason_code="GENERATOR_RESERVATION_FAILED", exception=exc,
+                source_location="promptfoo_worker_provider.WorkerLabAdapter.invoke_v2_dev",
+                reservation_created=reservation_created, worker_job_submitted=False,
+            )
+            raise
         submitted = False
         completed = False
         receipt = None
@@ -366,24 +425,66 @@ def _provider_config(options: object) -> Mapping[str, object]:
 
 def call_api(prompt: str, options: dict, context: dict | None = None) -> dict:
     """Promptfoo Python provider entry point; the only execution route is Worker LAB."""
-    config = _provider_config(options)
-    _validate_no_api_auth(os.environ, config)
+    config_hint = options.get("config", options) if isinstance(options, Mapping) else {}
+    invocation_hint = config_hint.get("invocation_id") if isinstance(config_hint, Mapping) else None
+    def checked(function, stage, code, location):
+        try:
+            return function()
+        except BaseException as exc:
+            _record_preinference_failure(
+                os.environ, invocation_hint, stage=stage, reason_code=code,
+                exception=exc, source_location=location,
+            )
+            raise
+
+    config = checked(lambda: _provider_config(options), "PROVIDER_CONFIG", "PROVIDER_OPTIONS_INVALID",
+                     "promptfoo_worker_provider.call_api")
+    present_api_env = sorted(key for key in os.environ
+                             if key in API_KEY_ENV or key.upper().endswith("_API_KEY"))
+    if present_api_env:
+        exc = PermissionError("API-key auth is forbidden for Promptfoo to Worker LAB")
+        _record_preinference_failure(
+            os.environ, invocation_hint, stage="ENV_VALIDATION", reason_code="API_KEY_ENV_FORBIDDEN",
+            exception=exc, source_location="promptfoo_worker_provider.call_api",
+        )
+        raise exc
+    checked(lambda: _validate_no_api_auth({}, config), "PROVIDER_CONFIG",
+            "PROVIDER_AUTH_CONFIG_FORBIDDEN", "promptfoo_worker_provider.call_api")
     if (config.get("model") != MODEL or config.get("reasoning_effort") != REASONING
             or config.get("maxRetries") != 0 or config.get("fallbacks", []) != []):
-        raise PermissionError("Promptfoo provider retry, fallback, and model contract must remain exact")
+        exc = PermissionError("Promptfoo provider retry, fallback, and model contract must remain exact")
+        _record_preinference_failure(
+            os.environ, invocation_hint, stage="PROVIDER_CONFIG", reason_code="MODEL_RETRY_FALLBACK_CONTRACT_INVALID",
+            exception=exc, source_location="promptfoo_worker_provider.call_api",
+        )
+        raise exc
     run_id = config.get("run_id")
     invocation_id = config.get("invocation_id")
     if not isinstance(run_id, str) or not run_id or not isinstance(invocation_id, str) or not invocation_id:
-        raise PermissionError("Promptfoo invocation must include immutable run and invocation IDs")
+        exc = PermissionError("Promptfoo invocation must include immutable run and invocation IDs")
+        _record_preinference_failure(
+            os.environ, invocation_hint, stage="PROVIDER_CONFIG", reason_code="IMMUTABLE_INVOCATION_ID_MISSING",
+            exception=exc, source_location="promptfoo_worker_provider.call_api",
+        )
+        raise exc
     ledger_path = os.environ.get("AGATA_LAB_CALL_LEDGER")
     queue_root = os.environ.get("AGATA_LAB_QUEUE")
     private_receipts = os.environ.get("AGATA_LAB_PRIVATE_RECEIPTS")
     if not ledger_path or not queue_root or not private_receipts:
-        raise PermissionError("Promptfoo Worker LAB private paths are not configured")
-    ledger = CallLedger(journal_path=Path(ledger_path))
+        exc = PermissionError("Promptfoo Worker LAB private paths are not configured")
+        _record_preinference_failure(
+            os.environ, invocation_id, stage="LAB_QUEUE_VALIDATION", reason_code="LAB_PRIVATE_PATHS_MISSING",
+            exception=exc, source_location="promptfoo_worker_provider.call_api",
+        )
+        raise exc
+    ledger = checked(lambda: CallLedger(journal_path=Path(ledger_path)),
+                     "GENERATOR_RESERVATION", "DURABLE_LEDGER_OPEN_FAILED",
+                     "promptfoo_worker_provider.call_api")
+    transport = checked(lambda: LocalLabTransport(Path(queue_root)), "LAB_QUEUE_VALIDATION",
+                        "CANONICAL_LAB_QUEUE_INVALID", "promptfoo_worker_provider.call_api")
     adapter = WorkerLabAdapter(
         ledger=ledger,
-        transport=LocalLabTransport(Path(queue_root)),
+        transport=transport,
         run_id=run_id,
         receipt_directory=Path(private_receipts),
         env=os.environ,
@@ -395,9 +496,18 @@ def call_api(prompt: str, options: dict, context: dict | None = None) -> dict:
                 raise ValueError("missing request envelope")
             request = json.loads(prompt[len(prefix):])
         except (TypeError, json.JSONDecodeError) as exc:
+            _record_preinference_failure(
+                os.environ, invocation_id, stage="IMMUTABLE_V2_JOB_CONTRACT", reason_code="V2_PAYLOAD_INVALID",
+                exception=exc, source_location="promptfoo_worker_provider.call_api",
+            )
             raise PermissionError("Promptfoo V2 payload must be the serialized committed Worker request") from exc
         if not isinstance(request, dict):
-            raise PermissionError("Promptfoo V2 payload must be a request object")
+            exc = PermissionError("Promptfoo V2 payload must be a request object")
+            _record_preinference_failure(
+                os.environ, invocation_id, stage="IMMUTABLE_V2_JOB_CONTRACT", reason_code="V2_PAYLOAD_NOT_OBJECT",
+                exception=exc, source_location="promptfoo_worker_provider.call_api",
+            )
+            raise exc
         return adapter.invoke_v2_dev(
             request, invocation_id=invocation_id, run_id=run_id,
             arm_id=str(config.get("arm_id", "")),

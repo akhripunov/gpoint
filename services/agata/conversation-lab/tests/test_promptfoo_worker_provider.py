@@ -173,6 +173,93 @@ class PromptfooWorkerProviderTests(unittest.TestCase):
         self.assertEqual(ledger.events, [])
         self.assertEqual(transport.events, [])
 
+    def test_v2_approval_failure_writes_stage_reason_without_reservation_or_job(self):
+        self.require_provider()
+        with tempfile.TemporaryDirectory() as temp:
+            receipts = Path(temp); receipts.chmod(0o700)
+            ledger, transport = FakeLedger(), FakeTransport()
+            adapter = provider.WorkerLabAdapter(
+                ledger=ledger, transport=transport, run_id="run-v2",
+                receipt_directory=receipts, env={"AGATA_LAB_PRIVATE_RECEIPTS": str(receipts)},
+            )
+            job = {"job_id": "job-v2", "experiment_id": "agata-v2-naturalness-dev"}
+            with patch.object(provider.worker_client, "build_v2_dev_job", return_value=job), \
+                 patch.object(provider.worker_client, "validate_owner_approval",
+                              side_effect=PermissionError("approval missing; private token must not be copied")), \
+                 self.assertRaisesRegex(PermissionError, "approval missing"):
+                adapter.invoke_v2_dev(
+                    {"user_message": "synthetic"}, invocation_id="inv-v2-approval", run_id="run-v2",
+                    arm_id="run-v2-baseline", configuration_id="baseline", scenario_id="dev-sample",
+                    turn_index=0, history_receipt_ids=[],
+                )
+            receipt = receipts / "inv-v2-approval.preinference-diagnostic.json"
+            payload = json.loads(receipt.read_text())
+            self.assertEqual(payload["stage"], "APPROVAL_VALIDATION")
+            self.assertEqual(payload["reason_code"], "OWNER_APPROVAL_REJECTED")
+            self.assertEqual(payload["exception_class"], "PermissionError")
+            self.assertFalse(payload["generator_reservation_created"])
+            self.assertFalse(payload["worker_job_submitted"])
+            self.assertNotIn("private token", receipt.read_text())
+            self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(ledger.events, [])
+            self.assertEqual(transport.events, [])
+
+    def test_v2_immutable_job_contract_failure_has_private_reason_receipt(self):
+        self.require_provider()
+        with tempfile.TemporaryDirectory() as temp:
+            receipts = Path(temp); receipts.chmod(0o700)
+            ledger, transport = FakeLedger(), FakeTransport()
+            adapter = provider.WorkerLabAdapter(
+                ledger=ledger, transport=transport, run_id="run-v2",
+                receipt_directory=receipts, env={"AGATA_LAB_PRIVATE_RECEIPTS": str(receipts)},
+            )
+            with patch.object(provider.worker_client, "build_v2_dev_job",
+                              side_effect=PermissionError("immutable request rejected")), \
+                 self.assertRaisesRegex(PermissionError, "immutable request"):
+                adapter.invoke_v2_dev(
+                    {}, invocation_id="inv-v2-job", run_id="run-v2", arm_id="run-v2-baseline",
+                    configuration_id="baseline", scenario_id="dev-sample", turn_index=0,
+                    history_receipt_ids=[],
+                )
+            payload = json.loads((receipts / "inv-v2-job.preinference-diagnostic.json").read_text())
+            self.assertEqual((payload["stage"], payload["reason_code"]),
+                             ("IMMUTABLE_V2_JOB_CONTRACT", "V2_JOB_CONTRACT_INVALID"))
+            self.assertFalse(payload["generator_reservation_created"])
+            self.assertFalse(payload["worker_job_submitted"])
+            self.assertEqual(ledger.events, [])
+            self.assertEqual(transport.events, [])
+
+    def test_v2_generator_reservation_failure_is_receipted_before_worker_submission(self):
+        self.require_provider()
+        class RefusingLedger(FakeLedger):
+            def reserve(self, stage, invocation_id, *, metadata):
+                raise PermissionError("private reservation failure")
+        with tempfile.TemporaryDirectory() as temp:
+            receipts = Path(temp); receipts.chmod(0o700)
+            ledger, transport = RefusingLedger(), FakeTransport()
+            adapter = provider.WorkerLabAdapter(
+                ledger=ledger, transport=transport, run_id="run-v2",
+                receipt_directory=receipts, env={"AGATA_LAB_PRIVATE_RECEIPTS": str(receipts)},
+            )
+            job = {
+                "job_id": "job-v2", "experiment_id": "agata-v2-naturalness-dev",
+                "configuration_id": "baseline", "scenario_id": "dev-sample", "turn_index": 0,
+                "run_id": "run-v2", "arm_id": "run-v2-baseline",
+            }
+            with patch.object(provider.worker_client, "build_v2_dev_job", return_value=job), \
+                 self.assertRaisesRegex(PermissionError, "private reservation"):
+                adapter.invoke_v2_dev(
+                    {"user_message": "synthetic"}, invocation_id="inv-v2-reserve", run_id="run-v2",
+                    arm_id="run-v2-baseline", configuration_id="baseline", scenario_id="dev-sample",
+                    turn_index=0, history_receipt_ids=[],
+                )
+            payload = json.loads((receipts / "inv-v2-reserve.preinference-diagnostic.json").read_text())
+            self.assertEqual((payload["stage"], payload["reason_code"]),
+                             ("GENERATOR_RESERVATION", "GENERATOR_RESERVATION_FAILED"))
+            self.assertIsNone(payload["generator_reservation_created"])
+            self.assertFalse(payload["worker_job_submitted"])
+            self.assertEqual(transport.events, [])
+
     def test_failed_receipt_proven_before_inference_is_provider_error_once(self):
         self.require_provider()
         ledger = FakeLedger()

@@ -14,6 +14,10 @@ from typing import Mapping
 
 _LAB = Path(__file__).resolve().parents[1]
 _RUNNER_PATH = _LAB / "evaluators" / "promptfoo_runner.py"
+_EVALUATORS_DIR = _LAB / "evaluators"
+if str(_EVALUATORS_DIR) not in sys.path:
+    sys.path.insert(0, str(_EVALUATORS_DIR))
+from preinference_diagnostics import write_preinference_failure
 
 
 def _promptfoo_runner():
@@ -231,53 +235,92 @@ def run_v2_dev_scenario(
     import worker_client
     from v2_provenance import load_split
 
+    diagnostic_invocation = ("pfv2-" + hashlib.sha256(
+        f"{run_id}\0baseline\0{0}".encode()).hexdigest()[:59]) if isinstance(run_id, str) else ""
+    def checked(function, stage, code, location):
+        try:
+            return function()
+        except BaseException as exc:
+            try:
+                write_preinference_failure(
+                    private_receipt_directory, invocation_id=diagnostic_invocation,
+                    stage=stage, reason_code=code, exception=exc, source_location=location,
+                )
+            except (OSError, PermissionError, ValueError, FileExistsError):
+                pass
+            raise
+
     if not isinstance(run_id, str) or not lab_queue.ID_RE.fullmatch(run_id):
         raise ValueError("V2 run ID must be immutable and Worker-safe")
-    _manifest, committed = load_split("DEV")
+    _manifest, committed = checked(lambda: load_split("DEV"),
+                                   "IMMUTABLE_V2_JOB_CONTRACT", "DEV_MANIFEST_INVALID",
+                                   "run_coordinator.run_v2_dev_scenario")
     scenario = committed.get(scenario_id)
     if scenario is None:
-        raise PermissionError("V2 run scenario is not in the committed DEV split")
-    queue = worker_client.canonical_lab_queue(env)
+        checked(lambda: (_ for _ in ()).throw(PermissionError("scenario is outside committed DEV")),
+                "IMMUTABLE_V2_JOB_CONTRACT", "SCENARIO_NOT_IN_DEV_SPLIT",
+                "run_coordinator.run_v2_dev_scenario")
+    queue = checked(lambda: worker_client.canonical_lab_queue(env), "LAB_QUEUE_VALIDATION",
+                    "CANONICAL_LAB_QUEUE_INVALID", "run_coordinator.run_v2_dev_scenario")
     if Path(worker_queue).resolve(strict=False) != queue.resolve(strict=False):
-        raise PermissionError("V2 run may use only the canonical LAB queue")
+        checked(lambda: (_ for _ in ()).throw(PermissionError("noncanonical queue")),
+                "LAB_QUEUE_VALIDATION", "CANONICAL_LAB_QUEUE_MISMATCH",
+                "run_coordinator.run_v2_dev_scenario")
     approval_path = Path(env.get("AGATA_LAB_APPROVAL_FILE") or
                          (queue.parents[1] / "config" / "lab-execution-approval.json"))
-    approval = lab_queue.load_owner_approval(
+    approval = checked(lambda: lab_queue.load_owner_approval(
         approval_path, expected_bundle_sha256=lab_queue.worker_bundle_sha256(),
-    )
-    if (approval.get("phase") != "GENERATOR" or approval.get("run_id") != run_id
-            or approval.get("max_calls") != 8
-            or set(approval.get("experiment_ids", [])) != {"agata-v2-naturalness-dev"}
-            or set(approval.get("scenario_ids", [])) != {scenario_id}
-            or set(approval.get("configuration_ids", [])) != {"baseline", "naturalness-v1"}):
-        raise PermissionError("Phase A approval must exactly cover one V2 DEV scenario and eight generator calls")
-    phase_state.assert_generator_active(
+    ), "APPROVAL_VALIDATION", "OWNER_APPROVAL_UNAVAILABLE", "run_coordinator.run_v2_dev_scenario")
+    def validate_approval_scope():
+        if (approval.get("phase") != "GENERATOR" or approval.get("run_id") != run_id
+                or approval.get("max_calls") != 8
+                or set(approval.get("experiment_ids", [])) != {"agata-v2-naturalness-dev"}
+                or set(approval.get("scenario_ids", [])) != {scenario_id}
+                or set(approval.get("configuration_ids", [])) != {"baseline", "naturalness-v1"}):
+            raise PermissionError("Phase A approval scope does not match this V2 run")
+    checked(validate_approval_scope, "APPROVAL_VALIDATION", "OWNER_APPROVAL_SCOPE_MISMATCH",
+            "run_coordinator.run_v2_dev_scenario")
+    checked(lambda: phase_state.assert_generator_active(
         run_id=run_id, scenario_id=scenario_id,
         worker_bundle_sha256=lab_queue.worker_bundle_sha256(), approval_id=approval["approval_id"],
-    )
-    if (not ledger.durable or not ledger.verify_persisted()
-            or ledger.snapshot()["limits"] != {
-                "conversation_arms": 8, "generator_invocations": 32, "judge_invocations": 15}):
-        raise PermissionError("V2 run requires the verified durable Conversation Lab ledger")
+    ), "PHASE_STATE_VALIDATION", "PHASE_A_NOT_ACTIVE",
+       "run_coordinator.run_v2_dev_scenario")
+    def validate_ledger():
+        if (not ledger.durable or not ledger.verify_persisted()
+                or ledger.snapshot()["limits"] != {
+                    "conversation_arms": 8, "generator_invocations": 32, "judge_invocations": 15}):
+            raise PermissionError("V2 run requires the verified durable Conversation Lab ledger")
+    checked(validate_ledger, "GENERATOR_RESERVATION", "DURABLE_LEDGER_INVALID",
+            "run_coordinator.run_v2_dev_scenario")
     fixtures = {
         "persona": {"persona_ref": scenario["character_context"]["persona_ref"], "gender": "female"},
         "context": scenario["context"], "memory": scenario["memory_fixture"],
     }
-    arms = compile_arms(scenario, fixtures, _naturalness_treatment(), run_id=run_id)
+    arms = checked(lambda: compile_arms(scenario, fixtures, _naturalness_treatment(), run_id=run_id),
+                   "PROVIDER_CONFIG", "V2_ARM_CONFIGURATION_INVALID",
+                   "run_coordinator.run_v2_dev_scenario")
     results = []
     for arm in arms:
         private = arm["private"]
         configuration_id = private["configuration_id"]
         arm_id = f"{run_id}-{configuration_id}"
+        diagnostic_invocation = "pfv2-" + hashlib.sha256(
+            f"{run_id}\0{configuration_id}\0{0}".encode()).hexdigest()[:59]
         private["arm_id"] = arm_id
         arm_ledger_id = "arm-" + hashlib.sha256(arm_id.encode()).hexdigest()[:60]
-        ledger.reserve("arm", arm_ledger_id, configuration=configuration_id,
-                       metadata={"arm_id": arm_id, "scenario_id": scenario_id,
-                                 "run_id": run_id, "dataset_split": "DEV"})
+        checked(lambda: ledger.reserve("arm", arm_ledger_id, configuration=configuration_id,
+                                       metadata={"arm_id": arm_id, "scenario_id": scenario_id,
+                                                 "run_id": run_id, "dataset_split": "DEV"}),
+                "GENERATOR_RESERVATION", "ARM_RESERVATION_FAILED",
+                "run_coordinator.run_v2_dev_scenario")
         worker_receipt_ids = []
         promptfoo_invocation_ids = []
         for turn_index in range(4):
-            request = build_v2_dev_request(scenario, configuration_id, turn_index, arm["history"])
+            diagnostic_invocation = "pfv2-" + hashlib.sha256(
+                f"{run_id}\0{configuration_id}\0{turn_index}".encode()).hexdigest()[:59]
+            request = checked(lambda: build_v2_dev_request(scenario, configuration_id, turn_index, arm["history"]),
+                              "IMMUTABLE_V2_JOB_CONTRACT", "V2_REQUEST_CONTRACT_INVALID",
+                              "run_coordinator.run_v2_dev_scenario")
             invocation_id = "pfv2-" + hashlib.sha256(
                 f"{run_id}\0{configuration_id}\0{turn_index}".encode()).hexdigest()[:59]
             private["pending_turn"] = turn_index
