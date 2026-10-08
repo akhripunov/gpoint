@@ -153,7 +153,7 @@ any operation that stops/replaces the shared supervisor or LaunchAgent. After
 that bootstrap, a LAB-only slot update changes only the LAB runtime pointer;
 it requires the local transition/release/slot locks but does not require
 GPOINT/GSALES queue 0/0 and does not restart the LaunchAgent. See
-`services/agata/worker/THREE_SLOT_BOOTSTRAP.md` for the exact transition
+`../worker/THREE_SLOT_BOOTSTRAP.md` for the exact transition
 boundary.
 
 The canonical candidate contract is not an installation record: this change
