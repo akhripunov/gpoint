@@ -20,6 +20,8 @@ FIXTURE_MANIFEST_SHA256 = "2bf4936187d4ff7c1f67d7a97fdc43c7ab5025d00bd3cbbb654c3
 FIXTURE_MANIFEST = Path(__file__).with_name("lab_fixture_manifest.json")
 PROMPTFOO_COMPAT_MANIFEST_SHA256 = "9e3a6e0536948787993057e3389b67378bd33012cbdad5807beddb3b9573e208"
 PROMPTFOO_COMPAT_MANIFEST = Path(__file__).with_name("lab_promptfoo_compat_manifest.json")
+V2_DEV_MANIFEST_SHA256 = "f8afd3dd13d48d0ad112fe073bfcf2d9956f0a4b20d14e258ba03d28fe2eeebe"
+V2_DEV_MANIFEST = Path(__file__).with_name("lab_v2_dev_manifest.json")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 REQUEST_KEYS = {
     "instructions", "persona", "communication_settings", "memories",
@@ -54,6 +56,7 @@ def worker_bundle_sha256() -> str:
         ("lab_queue.py", Path(__file__)),
         ("lab_fixture_manifest.json", FIXTURE_MANIFEST),
         ("lab_promptfoo_compat_manifest.json", PROMPTFOO_COMPAT_MANIFEST),
+        ("lab_v2_dev_manifest.json", V2_DEV_MANIFEST),
         ("run_codex_worker.sh", worker_dir / "run_codex_worker.sh"),
         ("requirements.txt", worker_dir / "requirements.txt"),
     )
@@ -76,7 +79,8 @@ def load_owner_approval(path: Path, *, expected_bundle_sha256: str, now=None) ->
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise LabQueueError("lab_owner_approval_missing_or_invalid") from exc
     required = {"approval_id", "worker_bundle_sha256", "experiment_ids", "configuration_ids", "scenario_ids", "max_calls", "expires_at"}
-    if not isinstance(approval, dict) or set(approval) != required:
+    phase_fields = {"phase", "run_id"}
+    if not isinstance(approval, dict) or frozenset(approval) not in {frozenset(required), frozenset(required | phase_fields)}:
         raise LabQueueError("lab_owner_approval_schema_invalid")
     if (not isinstance(approval["approval_id"], str) or not ID_RE.fullmatch(approval["approval_id"])
             or approval["worker_bundle_sha256"] != expected_bundle_sha256
@@ -86,6 +90,11 @@ def load_owner_approval(path: Path, *, expected_bundle_sha256: str, now=None) ->
             or isinstance(approval["max_calls"], bool) or not isinstance(approval["max_calls"], int)
             or not 1 <= approval["max_calls"] <= 8):
         raise LabQueueError("lab_owner_approval_scope_invalid")
+    if phase_fields <= set(approval):
+        expected_limit = 8 if approval["phase"] == "GENERATOR" else 3 if approval["phase"] == "JUDGES" else 0
+        if (not ID_RE.fullmatch(str(approval["run_id"])) or expected_limit == 0
+                or approval["max_calls"] != expected_limit):
+            raise LabQueueError("lab_owner_approval_phase_invalid")
     try:
         expires = datetime.fromisoformat(approval["expires_at"].replace("Z", "+00:00"))
     except (AttributeError, ValueError) as exc:
@@ -94,6 +103,121 @@ def load_owner_approval(path: Path, *, expected_bundle_sha256: str, now=None) ->
     if expires.tzinfo is None or expires <= current:
         raise LabQueueError("lab_owner_approval_expired")
     return approval
+
+
+def validate_approval_for_job(job: dict, approval: dict, *, root: Path | None = None) -> None:
+    """Bind V2 generator/judge jobs to one phase and one immutable run approval."""
+    experiment = job.get("experiment_id")
+    if experiment == "agata-v2-naturalness-dev" or job.get("job_type") == "judge":
+        phase = "GENERATOR" if experiment == "agata-v2-naturalness-dev" else "JUDGES"
+        run_id = job.get("run_id") or job.get("batch_id")
+        if approval.get("phase") != phase or approval.get("run_id") != run_id:
+            raise LabQueueError("lab_owner_approval_phase_scope_mismatch")
+        if phase == "JUDGES" and approval.get("max_calls", 0) > 3:
+            raise LabQueueError("lab_owner_approval_phase_scope_mismatch")
+        if root is None:
+            raise LabQueueError("lab_owner_approval_phase_state_missing")
+        state_path = Path(root) / "state" / "v2-approval-phase.json"
+        try:
+            stat = state_path.stat()
+            if state_path.is_symlink() or stat.st_uid != os.getuid() or stat.st_mode & 0o077:
+                raise ValueError
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise LabQueueError("lab_owner_approval_phase_state_missing") from exc
+        if (not isinstance(state, dict) or state.get("schema_version") != 1
+                or state.get("run_id") != run_id or state.get("scenario_id") != job.get("scenario_id")
+                or state.get("worker_bundle_sha256") != approval.get("worker_bundle_sha256")):
+            raise LabQueueError("lab_owner_approval_phase_state_mismatch")
+        expected_scope = (
+            {"experiment_ids": ["agata-v2-naturalness-dev"],
+             "configuration_ids": {"baseline", "naturalness-v1"},
+             "scenario_ids": {state.get("scenario_id")}, "max_calls": 8}
+            if phase == "GENERATOR" else
+            {"experiment_ids": [JUDGE_EXPERIMENT_ID],
+             "configuration_ids": {"judge-1", "judge-2", "judge-3"},
+             "scenario_ids": {state.get("scenario_id")}, "max_calls": 3}
+        )
+        if (approval.get("experiment_ids") != expected_scope["experiment_ids"]
+                or set(approval.get("configuration_ids", [])) != expected_scope["configuration_ids"]
+                or set(approval.get("scenario_ids", [])) != expected_scope["scenario_ids"]
+                or approval.get("max_calls") != expected_scope["max_calls"]):
+            raise LabQueueError("lab_owner_approval_phase_scope_mismatch")
+        approval_field = "generator_approval_id" if phase == "GENERATOR" else "judge_approval_id"
+        if state.get("active_phase") != phase or state.get(approval_field) != approval.get("approval_id"):
+            raise LabQueueError("lab_owner_approval_phase_state_mismatch")
+        if phase == "JUDGES":
+            if (state.get("generator_closed") is not True
+                    or state.get("judge_approval_id") == state.get("generator_approval_id")
+                    or state.get("judge_max_calls") != 3):
+                raise LabQueueError("lab_owner_approval_phase_state_mismatch")
+            generator_rows = state.get("generator_receipts")
+            if not isinstance(generator_rows, list) or len(generator_rows) != 8:
+                raise LabQueueError("lab_owner_approval_phase_receipts_invalid")
+            expected_pairs = set()
+            invocation_ids = set()
+            for row in generator_rows:
+                if not isinstance(row, dict):
+                    raise LabQueueError("lab_owner_approval_phase_receipts_invalid")
+                invocation_id = row.get("promptfoo_invocation_id")
+                promptfoo_hash = row.get("promptfoo_receipt_sha256")
+                if (not isinstance(invocation_id, str) or not ID_RE.fullmatch(invocation_id)
+                        or invocation_id in invocation_ids or not isinstance(promptfoo_hash, str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", promptfoo_hash)):
+                    raise LabQueueError("lab_owner_approval_phase_receipts_invalid")
+                invocation_ids.add(invocation_id)
+                receipt = read_receipt(Path(root), row.get("job_id", ""))
+                identity = receipt.get("identity", {}) if isinstance(receipt, dict) else {}
+                execution = receipt.get("execution", {}) if isinstance(receipt, dict) else {}
+                digest = hashlib.sha256(json.dumps(
+                    receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ).encode()).hexdigest() if isinstance(receipt, dict) else None
+                pair = (identity.get("configuration_id"), identity.get("turn_index"))
+                if (receipt is None or receipt.get("status") != "completed" or receipt.get("slot_id") != "slot-03"
+                        or not isinstance(receipt.get("response"), str) or not receipt["response"].strip()
+                        or identity.get("experiment_id") != "agata-v2-naturalness-dev"
+                        or identity.get("job_type") != "v2-dev-generator"
+                        or identity.get("dataset_split") != "DEV"
+                        or identity.get("run_id") != run_id or identity.get("scenario_id") != job.get("scenario_id")
+                        or execution.get("requested_model") != "gpt-6-luna"
+                        or execution.get("requested_reasoning_effort") != "medium"
+                        or pair in expected_pairs or digest != row.get("receipt_sha256")):
+                    raise LabQueueError("lab_owner_approval_phase_receipts_invalid")
+                expected_pairs.add(pair)
+            if expected_pairs != {(arm, turn) for arm in ("baseline", "naturalness-v1") for turn in range(4)}:
+                raise LabQueueError("lab_owner_approval_phase_receipts_invalid")
+    elif "phase" in approval:
+        raise LabQueueError("lab_owner_approval_phase_scope_mismatch")
+
+
+def read_v2_dev_manifest() -> dict:
+    """Load only the Worker-bundled, hash-pinned V2 development commitments."""
+    try:
+        payload = V2_DEV_MANIFEST.read_bytes()
+        if hashlib.sha256(payload).hexdigest() != V2_DEV_MANIFEST_SHA256:
+            raise ValueError
+        value = json.loads(payload)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise LabQueueError("lab_v2_dev_manifest_invalid") from exc
+    if (not isinstance(value, dict) or value.get("schema_version") != 1
+            or value.get("dataset_id") != "agata-conversation-lab-v2"
+            or value.get("dataset_split") != "DEV"
+            or value.get("model") != "gpt-6-luna"
+            or value.get("reasoning_effort") != "medium"
+            or not isinstance(value.get("scenarios"), dict)):
+        raise LabQueueError("lab_v2_dev_manifest_invalid")
+    for scenario_id, row in value["scenarios"].items():
+        if (not ID_RE.fullmatch(scenario_id) or not isinstance(row, dict)
+                or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("source_sha256")))
+                or not isinstance(row.get("user_turns"), list) or len(row["user_turns"]) != 4
+                or not isinstance(row.get("request_hashes"), dict)):
+            raise LabQueueError("lab_v2_dev_manifest_invalid")
+        for arm in ("baseline", "naturalness-v1"):
+            hashes = row["request_hashes"].get(arm)
+            if not isinstance(hashes, list) or len(hashes) != 4 or any(
+                    not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item) for item in hashes):
+                raise LabQueueError("lab_v2_dev_manifest_invalid")
+    return value
 
 
 def owner_approval_usage_calls(root: Path, approval: dict) -> int:
@@ -295,7 +419,7 @@ def _validate(job: object, *, root: Path) -> tuple[dict, bytes]:
             or not all(isinstance(request[key], list) for key in ("memories", "dialogue_summaries", "history"))):
         raise LabQueueError("lab_request_context_invalid")
     if job.get("experiment_id") == JUDGE_EXPERIMENT_ID:
-        judge_keys = JOB_KEYS | {"job_type", "dataset_split", "judge_slot", "promptfoo_invocation_id",
+        judge_keys = JOB_KEYS | {"job_type", "dataset_split", "judge_slot", "promptfoo_invocation_id", "run_id",
                                  "judge_schema_version", "presented_labels", "model", "reasoning_effort"}
         if (set(job) != judge_keys or job.get("job_type") != "judge"
                 or job.get("origin") != "conversation-lab-judge"
@@ -305,6 +429,7 @@ def _validate(job: object, *, root: Path) -> tuple[dict, bytes]:
                 or job.get("configuration_id") != f"judge-{job['judge_slot']}"
                 or not isinstance(job.get("promptfoo_invocation_id"), str)
                 or not ID_RE.fullmatch(job["promptfoo_invocation_id"])
+                or not isinstance(job.get("run_id"), str) or not ID_RE.fullmatch(job["run_id"])
                 or job.get("presented_labels") not in (["X", "Y"], ["Y", "X"])
                 or job.get("model") != "gpt-6-luna" or job.get("reasoning_effort") != "medium"
                 or job.get("turn_index") != 0 or job.get("history_receipt_ids") != []
@@ -339,6 +464,65 @@ def _validate(job: object, *, root: Path) -> tuple[dict, bytes]:
             raise LabQueueError("lab_fixture_request_hash_mismatch")
         if request["history"] != []:
             raise LabQueueError("lab_history_not_receipt_backed")
+    elif job["experiment_id"] == "agata-v2-naturalness-dev":
+        v2_keys = JOB_KEYS | {"job_type", "dataset_split", "run_id", "arm_id",
+                              "promptfoo_invocation_id", "source_scenario_sha256", "model", "reasoning_effort"}
+        if (set(job) != v2_keys or job.get("job_type") != "v2-dev-generator"
+                or job.get("origin") != "conversation-lab-v2" or job.get("dataset_split") != "DEV"
+                or job.get("model") != "gpt-6-luna" or job.get("reasoning_effort") != "medium"
+                or job.get("configuration_id") not in {"baseline", "naturalness-v1"}
+                or not isinstance(job.get("run_id"), str) or not ID_RE.fullmatch(job["run_id"])
+                or not isinstance(job.get("arm_id"), str) or not ID_RE.fullmatch(job["arm_id"])
+                or not isinstance(job.get("promptfoo_invocation_id"), str)
+                or not ID_RE.fullmatch(job["promptfoo_invocation_id"])):
+            raise LabQueueError("lab_v2_dev_job_contract_invalid")
+        if (job["arm_id"] != f"{job['run_id']}-{job['configuration_id']}"
+                or job["promptfoo_invocation_id"] != "pfv2-" + hashlib.sha256(
+                    f"{job['run_id']}\0{job['configuration_id']}\0{job['turn_index']}".encode()
+                ).hexdigest()[:59]):
+            raise LabQueueError("lab_v2_dev_correlation_invalid")
+        manifest = read_v2_dev_manifest()
+        scenario = manifest["scenarios"].get(job["scenario_id"])
+        turn = job["turn_index"]
+        arm = job["configuration_id"]
+        receipt_ids = job["history_receipt_ids"]
+        if (scenario is None or job.get("source_scenario_sha256") != scenario["source_sha256"]
+                or type(turn) is not int or turn not in range(4)
+                or not isinstance(receipt_ids, list) or len(receipt_ids) != turn
+                or request["user_message"] != scenario["user_turns"][turn]):
+            raise LabQueueError("lab_v2_dev_fixture_identity_mismatch")
+        static_request = dict(request)
+        static_request["history"] = []
+        canonical = json.dumps(static_request, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        if hashlib.sha256(canonical).hexdigest() != scenario["request_hashes"][arm][turn]:
+            raise LabQueueError("lab_v2_dev_request_hash_mismatch")
+        expected_history = []
+        receipts_dir = Path(root) / "receipts"
+        for index, receipt_id in enumerate(receipt_ids):
+            if not isinstance(receipt_id, str) or not ID_RE.fullmatch(receipt_id):
+                raise LabQueueError("lab_history_receipt_invalid")
+            try:
+                receipt = json.loads((receipts_dir / (receipt_id + ".json")).read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise LabQueueError("lab_history_receipt_missing") from exc
+            identity = receipt.get("identity", {}) if isinstance(receipt, dict) else {}
+            response = receipt.get("response") if isinstance(receipt, dict) else None
+            if (receipt.get("job_id") != receipt_id or receipt.get("status") != "completed"
+                    or identity.get("experiment_id") != job["experiment_id"]
+                    or identity.get("configuration_id") != arm
+                    or identity.get("scenario_id") != job["scenario_id"]
+                    or identity.get("run_id") != job["run_id"] or identity.get("arm_id") != job["arm_id"]
+                    or identity.get("turn_index") != index or not isinstance(response, str) or not response.strip()):
+                raise LabQueueError("lab_history_receipt_invalid")
+            expected_history.extend([
+                {"role": "user", "content": scenario["user_turns"][index]},
+                {"role": "assistant", "content": response},
+            ])
+        if request["history"] != expected_history:
+            raise LabQueueError("lab_history_not_receipt_backed")
+        expected_job_id = "v2pf-" + hashlib.sha256(job["promptfoo_invocation_id"].encode()).hexdigest()[:59]
+        if job["job_id"] != expected_job_id:
+            raise LabQueueError("lab_v2_dev_correlation_invalid")
     elif job["experiment_id"] == "agata-naturalness-v1":
         if set(job) != JOB_KEYS or job["origin"] != "conversation-lab":
             raise LabQueueError("job_schema_invalid")
@@ -502,7 +686,8 @@ def finish(
         receipt["identity"] = {
             key: identity[key] for key in ("experiment_id", "configuration_id", "scenario_id", "turn_index",
                                            "job_type", "dataset_split", "judge_slot", "promptfoo_invocation_id",
-                                           "judge_schema_version", "presented_labels")
+                                           "judge_schema_version", "presented_labels", "run_id", "arm_id",
+                                           "source_scenario_sha256")
             if key in identity
         }
         if identity.get("job_type") == "judge" and status == "completed":

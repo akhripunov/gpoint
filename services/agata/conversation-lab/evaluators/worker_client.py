@@ -47,6 +47,7 @@ def validate_owner_approval(job: dict, env=None) -> None:
                 or job.get("configuration_id") not in approval["configuration_ids"]
                 or job.get("scenario_id") not in approval["scenario_ids"]):
             raise PermissionError("LAB OWNER approval does not cover this experiment invocation")
+        lab_queue.validate_approval_for_job(job, approval, root=canonical_lab_queue(source_env))
         calls = lab_queue.owner_approval_usage_calls(support, approval)
         if calls >= approval["max_calls"]:
             raise PermissionError("LAB OWNER approval is consumed or unavailable")
@@ -138,6 +139,55 @@ def get_receipt(job_id: str, *, support: Path) -> dict | None:
     return lab_queue.read_receipt(Path(support) / "lab-queue", job_id)
 
 
+def build_v2_dev_job(*, request: dict, run_id: str, arm_id: str, configuration_id: str,
+                     scenario_id: str, turn_index: int, history_receipt_ids: list[str],
+                     invocation_id: str) -> dict:
+    """Build exactly one hash-bound V2 DEV generator job for the LAB queue."""
+    manifest = lab_queue.read_v2_dev_manifest()
+    scenario = manifest["scenarios"].get(scenario_id)
+    if (scenario is None or configuration_id not in {"baseline", "naturalness-v1"}
+            or type(turn_index) is not int or turn_index not in range(4)
+            or not isinstance(history_receipt_ids, list) or len(history_receipt_ids) != turn_index
+            or not all(isinstance(value, str) and lab_queue.ID_RE.fullmatch(value)
+                       for value in (run_id, arm_id, invocation_id))):
+        raise PermissionError("V2 generator invocation is outside the committed DEV run contract")
+    if arm_id != f"{run_id}-{configuration_id}" or invocation_id != "pfv2-" + hashlib.sha256(
+            f"{run_id}\0{configuration_id}\0{turn_index}".encode()).hexdigest()[:59]:
+        raise PermissionError("V2 generator invocation correlation is not deterministic for this run/arm/turn")
+    if request.get("user_message") != scenario["user_turns"][turn_index]:
+        raise PermissionError("V2 generator input is not the committed source user turn")
+    static_request = dict(request)
+    static_request["history"] = []
+    expected_hash = scenario["request_hashes"][configuration_id][turn_index]
+    actual_hash = hashlib.sha256(json.dumps(
+        static_request, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+    if actual_hash != expected_hash:
+        raise PermissionError("V2 generator Persona, context, memory, instructions, or treatment changed")
+    if request.get("history") and len(request["history"]) != turn_index * 2:
+        raise PermissionError("V2 generator history length does not match its turn")
+    return {
+        "job_id": "v2pf-" + hashlib.sha256(invocation_id.encode()).hexdigest()[:59],
+        "job_type": "v2-dev-generator",
+        "experiment_id": "agata-v2-naturalness-dev",
+        "configuration_id": configuration_id,
+        "origin": "conversation-lab-v2",
+        "scenario_id": scenario_id,
+        "turn_index": turn_index,
+        "data_classification": "synthetic",
+        "dataset_split": "DEV",
+        "timeout_seconds": 180,
+        "history_receipt_ids": list(history_receipt_ids),
+        "run_id": run_id,
+        "arm_id": arm_id,
+        "promptfoo_invocation_id": invocation_id,
+        "source_scenario_sha256": scenario["source_sha256"],
+        "model": manifest["model"],
+        "reasoning_effort": manifest["reasoning_effort"],
+        "request": request,
+    }
+
+
 def cancel_job(job_id: str, *, support: Path) -> str:
     return lab_queue.cancel(Path(support) / "lab-queue", job_id)
 
@@ -205,6 +255,7 @@ def build_judge_job(prompt: str, *, batch_id: str, scenario_id: str, dataset_spl
         "job_id": job_id,
         "job_type": "judge",
         "experiment_id": lab_queue.JUDGE_EXPERIMENT_ID,
+        "run_id": batch_id,
         "configuration_id": f"judge-{judge_slot}",
         "origin": "conversation-lab-judge",
         "scenario_id": scenario_id,

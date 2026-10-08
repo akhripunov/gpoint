@@ -33,6 +33,70 @@ def stable_hash(value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+V2_BASE_INSTRUCTIONS = (
+    "You are AGATA, a conversational character. Respond in the scenario language. "
+    "Use only the supplied Persona, context, memory, and this arm history. "
+    "Do not invent facts. Follow safety and privacy boundaries."
+)
+
+
+def _naturalness_treatment() -> str:
+    path = _LAB / "configs" / "naturalness-policy-v1.md"
+    text = path.read_text(encoding="utf-8")
+    marker = "## Candidate-visible policy\n"
+    if marker not in text:
+        raise PermissionError("Naturalness V1 candidate policy section is missing")
+    treatment = text.split(marker, 1)[1].split("\n## Evidence map", 1)[0].strip()
+    if not treatment:
+        raise PermissionError("Naturalness V1 candidate treatment is empty")
+    worker_dir = str(_LAB.parents[0] / "worker")
+    if worker_dir not in sys.path:
+        sys.path.insert(0, worker_dir)
+    import lab_queue
+    if hashlib.sha256(treatment.encode("utf-8")).hexdigest() != lab_queue.read_v2_dev_manifest().get("naturalness_policy_sha256"):
+        raise PermissionError("Naturalness V1 policy does not match the Worker-bundled V2 treatment commitment")
+    return treatment
+
+
+def build_v2_dev_request(scenario: Mapping[str, object], configuration_id: str,
+                         turn_index: int, history: list[Mapping[str, object]]) -> dict:
+    """Build a Worker request only from an exact committed V2 DEV fixture."""
+    from v2_provenance import validate_source_scenarios
+    validate_source_scenarios([dict(scenario)])
+    if configuration_id not in {"baseline", "naturalness-v1"}:
+        raise PermissionError("V2 generator configuration is outside the frozen pair")
+    users = _user_turns(scenario)
+    if type(turn_index) is not int or turn_index not in range(4) or len(history) != turn_index * 2:
+        raise ValueError("V2 generator turn/history boundary is invalid")
+    request_history = []
+    for index, row in enumerate(history):
+        if not isinstance(row, Mapping) or row.get("role") not in {"user", "assistant"}:
+            raise ValueError("V2 history has an invalid role")
+        expected_role = "user" if index % 2 == 0 else "assistant"
+        if row.get("role") != expected_role or not isinstance(row.get("text"), str) or not row["text"].strip():
+            raise ValueError("V2 history is not a complete independent arm transcript")
+        request_history.append({"role": expected_role, "content": row["text"]})
+    character_context = scenario.get("character_context")
+    if not isinstance(character_context, Mapping) or character_context.get("persona_ref") != "agata-v2-canonical":
+        raise PermissionError("V2 DEV fixture does not use the canonical AGATA Persona")
+    instructions = V2_BASE_INSTRUCTIONS
+    if configuration_id == "naturalness-v1":
+        instructions += "\n\nNaturalness V1 policy:\n" + _naturalness_treatment()
+    context = scenario.get("context")
+    memories = scenario.get("memory_fixture")
+    if not isinstance(context, Mapping) or not isinstance(memories, list):
+        raise PermissionError("V2 DEV context/memory fixture is malformed")
+    return {
+        "instructions": instructions,
+        "persona": {"persona_ref": character_context["persona_ref"], "gender": "female"},
+        "communication_settings": {"language": scenario.get("language"), "user_gender": scenario.get("user_gender")},
+        "memories": copy.deepcopy(memories),
+        "dialogue_summaries": [],
+        "history": request_history,
+        "user_message": users[turn_index],
+    }
+
+
 def _user_turns(scenario: Mapping[str, object]) -> list[str]:
     turns = scenario.get("dialogue_turns")
     if not isinstance(turns, list) or len(turns) != 8:
@@ -153,6 +217,99 @@ def record_assistant_reply(arm, turn_index, reply):
     history.extend([{"role": "user", "text": user_text}, {"role": "assistant", "text": reply}])
     private["next_turn"] += 1
     private["pending_turn"] = None
+
+
+def run_v2_dev_scenario(
+    scenario_id: str, *, run_id: str, ledger, promptfoo_executable: str,
+    worker_queue: Path, private_receipt_directory: Path, env: Mapping[str, str],
+    phase_state,
+    eval_runner=None,
+) -> list[dict]:
+    """Run the fixed two-arm/four-turn V2 DEV pair through eight Promptfoo evals."""
+    import lab_queue
+    import promptfoo_runner
+    import worker_client
+    from v2_provenance import load_split
+
+    if not isinstance(run_id, str) or not lab_queue.ID_RE.fullmatch(run_id):
+        raise ValueError("V2 run ID must be immutable and Worker-safe")
+    _manifest, committed = load_split("DEV")
+    scenario = committed.get(scenario_id)
+    if scenario is None:
+        raise PermissionError("V2 run scenario is not in the committed DEV split")
+    queue = worker_client.canonical_lab_queue(env)
+    if Path(worker_queue).resolve(strict=False) != queue.resolve(strict=False):
+        raise PermissionError("V2 run may use only the canonical LAB queue")
+    approval_path = Path(env.get("AGATA_LAB_APPROVAL_FILE") or
+                         (queue.parents[1] / "config" / "lab-execution-approval.json"))
+    approval = lab_queue.load_owner_approval(
+        approval_path, expected_bundle_sha256=lab_queue.worker_bundle_sha256(),
+    )
+    if (approval.get("phase") != "GENERATOR" or approval.get("run_id") != run_id
+            or approval.get("max_calls") != 8
+            or set(approval.get("experiment_ids", [])) != {"agata-v2-naturalness-dev"}
+            or set(approval.get("scenario_ids", [])) != {scenario_id}
+            or set(approval.get("configuration_ids", [])) != {"baseline", "naturalness-v1"}):
+        raise PermissionError("Phase A approval must exactly cover one V2 DEV scenario and eight generator calls")
+    phase_state.assert_generator_active(
+        run_id=run_id, scenario_id=scenario_id,
+        worker_bundle_sha256=lab_queue.worker_bundle_sha256(), approval_id=approval["approval_id"],
+    )
+    if (not ledger.durable or not ledger.verify_persisted()
+            or ledger.snapshot()["limits"] != {
+                "conversation_arms": 8, "generator_invocations": 32, "judge_invocations": 15}):
+        raise PermissionError("V2 run requires the verified durable Conversation Lab ledger")
+    fixtures = {
+        "persona": {"persona_ref": scenario["character_context"]["persona_ref"], "gender": "female"},
+        "context": scenario["context"], "memory": scenario["memory_fixture"],
+    }
+    arms = compile_arms(scenario, fixtures, _naturalness_treatment(), run_id=run_id)
+    results = []
+    for arm in arms:
+        private = arm["private"]
+        configuration_id = private["configuration_id"]
+        arm_id = f"{run_id}-{configuration_id}"
+        private["arm_id"] = arm_id
+        arm_ledger_id = "arm-" + hashlib.sha256(arm_id.encode()).hexdigest()[:60]
+        ledger.reserve("arm", arm_ledger_id, configuration=configuration_id,
+                       metadata={"arm_id": arm_id, "scenario_id": scenario_id,
+                                 "run_id": run_id, "dataset_split": "DEV"})
+        worker_receipt_ids = []
+        promptfoo_invocation_ids = []
+        for turn_index in range(4):
+            request = build_v2_dev_request(scenario, configuration_id, turn_index, arm["history"])
+            invocation_id = "pfv2-" + hashlib.sha256(
+                f"{run_id}\0{configuration_id}\0{turn_index}".encode()).hexdigest()[:59]
+            private["pending_turn"] = turn_index
+            kwargs = {
+                "request": request, "run_id": run_id, "invocation_id": invocation_id,
+                "arm_id": arm_id, "configuration_id": configuration_id,
+                "scenario_id": scenario_id, "turn_index": turn_index,
+                "history_receipt_ids": list(worker_receipt_ids),
+                "promptfoo_executable": promptfoo_executable, "worker_queue": queue,
+                "private_receipt_directory": Path(private_receipt_directory),
+                "call_ledger": ledger, "env": env,
+            }
+            if eval_runner is not None:
+                result = eval_runner(**kwargs)
+            else:
+                result = promptfoo_runner.run_promptfoo_v2_dev_eval(**kwargs)
+            if not isinstance(result, Mapping) or not isinstance(result.get("output"), str):
+                raise RuntimeError("Promptfoo did not return one Worker-backed V2 generator result")
+            evidence = result.get("worker_receipt")
+            if not isinstance(evidence, Mapping) or not isinstance(evidence.get("worker_job_id"), str):
+                raise RuntimeError("V2 Promptfoo result is missing its exact Worker receipt identity")
+            worker_receipt_ids.append(evidence["worker_job_id"])
+            promptfoo_invocation_ids.append(invocation_id)
+            record_assistant_reply(arm, turn_index, result["output"])
+        ledger.complete("arm", arm_ledger_id, "success")
+        results.append({
+            "scenario_id": scenario_id, "model_id": configuration_id, "status": "success",
+            "turns": [dict(row) for row in arm["history"]],
+            "worker_receipt_ids": list(worker_receipt_ids),
+            "promptfoo_invocation_ids": list(promptfoo_invocation_ids),
+        })
+    return results
 
 
 class CallLedger:

@@ -85,7 +85,7 @@ class JudgeCoordinatorTests(unittest.TestCase):
                 call_ledger.complete("judge", invocation_id, "success")
                 return 0
 
-            fake_approval = {"approval_id": "mock-approval", "max_calls": 8,
+            fake_approval = {"approval_id": "mock-approval", "phase": "JUDGES", "run_id": "batch-a", "max_calls": 3,
                              "experiment_ids": ["agata-lab-judge-v1"],
                              "configuration_ids": ["judge-1", "judge-2", "judge-3"],
                              "scenario_ids": [scenario_id]}
@@ -124,7 +124,7 @@ class JudgeCoordinatorTests(unittest.TestCase):
                 call_ledger.complete("judge", config["invocation_id"], "ambiguous")
                 return 1
 
-            fake_approval = {"approval_id": "mock-approval", "max_calls": 8,
+            fake_approval = {"approval_id": "mock-approval", "phase": "JUDGES", "run_id": "batch-missing", "max_calls": 3,
                              "experiment_ids": ["agata-lab-judge-v1"],
                              "configuration_ids": ["judge-1", "judge-2", "judge-3"],
                              "scenario_ids": [scenario_id]}
@@ -150,7 +150,7 @@ class JudgeCoordinatorTests(unittest.TestCase):
             root = Path(temp); root.chmod(0o700)
             receipts = root / "receipts"; receipts.mkdir(mode=0o700)
             ledger = CallLedger(journal_path=root / "ledger.jsonl")
-            fake_approval = {"approval_id": "mock-approval", "max_calls": 8,
+            fake_approval = {"approval_id": "mock-approval", "phase": "JUDGES", "run_id": "sealed", "max_calls": 3,
                              "experiment_ids": ["agata-lab-judge-v1"],
                              "configuration_ids": ["judge-1", "judge-2", "judge-3"],
                              "scenario_ids": [blind_packet["scenarios"][0]["scenario_id"]]}

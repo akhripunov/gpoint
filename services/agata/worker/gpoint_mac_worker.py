@@ -248,6 +248,7 @@ def validate_startup_configuration() -> dict:
     assets = (
         Path(__file__), Path(__file__).with_name("agata_worker_pool.py"),
         Path(lab_queue.__file__), Path(lab_queue.FIXTURE_MANIFEST),
+        Path(lab_queue.PROMPTFOO_COMPAT_MANIFEST), Path(lab_queue.V2_DEV_MANIFEST),
         Path(__file__).with_name("requirements.txt"), Path(__file__).with_name("run_codex_worker.sh"),
     )
     if any(not path.is_file() or path.is_symlink() for path in assets):
@@ -634,7 +635,7 @@ def resolve_codex_model_for_job(job: dict, env=None) -> tuple[str, str]:
     """Keep production lanes on global config; pin approved LAB model contracts."""
     source_env = os.environ if env is None else env
     if job.get("target") == LAB_TARGET and job.get("experiment_id") in {
-            "promptfoo-worker-compat", lab_queue.JUDGE_EXPERIMENT_ID}:
+            "promptfoo-worker-compat", lab_queue.JUDGE_EXPERIMENT_ID, "agata-v2-naturalness-dev"}:
         if any(key.upper().endswith("_API_KEY") for key in source_env):
             raise FatalConfigurationError("lab_api_key_auth_forbidden")
         model, reasoning = job.get("model"), job.get("reasoning_effort")
@@ -1012,6 +1013,12 @@ def execute_lab_claimed_job(job: dict) -> bool:
             or job["configuration_id"] not in approval["configuration_ids"]
             or job["scenario_id"] not in approval["scenario_ids"]):
         lab_queue.finish(root, job_id, status="failed", error_code="owner_approval_scope_mismatch", identity=job, slot_id=_lab_receipt_slot_id())
+        return True
+    try:
+        lab_queue.validate_approval_for_job(job, approval, root=root)
+    except lab_queue.LabQueueError:
+        lab_queue.finish(root, job_id, status="failed", error_code="owner_approval_scope_mismatch",
+                         identity=job, slot_id=_lab_receipt_slot_id())
         return True
     execution = {
         "actual_model": None,

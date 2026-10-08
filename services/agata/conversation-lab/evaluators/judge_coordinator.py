@@ -50,8 +50,12 @@ def _approval_capacity(jobs: list[dict], env: Mapping[str, str]) -> None:
     approval = lab_queue.load_owner_approval(
         approval_path, expected_bundle_sha256=lab_queue.worker_bundle_sha256(),
     )
-    if approval.get("experiment_ids") is None:
-        raise PermissionError("LAB judge approval scope is incomplete")
+    if (approval.get("phase") != "JUDGES" or approval.get("run_id") != jobs[0].get("run_id")
+            or approval.get("max_calls") != 3 or len(jobs) != 3
+            or approval.get("experiment_ids") != [lab_queue.JUDGE_EXPERIMENT_ID]
+            or set(approval.get("configuration_ids", [])) != {"judge-1", "judge-2", "judge-3"}
+            or set(approval.get("scenario_ids", [])) != {jobs[0].get("scenario_id")}):
+        raise PermissionError("Phase B approval must be the distinct exact-scope three-call judge approval")
     for job in jobs:
         worker_client.validate_owner_approval(job, env)
         if (job["experiment_id"] not in approval["experiment_ids"]
@@ -107,7 +111,7 @@ def run_judge_batch(packet: Mapping[str, object], rubric: Mapping[str, object], 
                     sanity_findings: list, receipt_directory: Path, private_directory: Path,
                     env: Mapping[str, str], promptfoo_executable: str,
                     _invoke_promptfoo=None) -> dict:
-    """Execute at most 2 pairs / 6 judges through Promptfoo and the canonical LAB queue.
+    """Execute one pair / exactly three judges through Promptfoo and the canonical LAB queue.
 
     The call ledger and OWNER approval are checked/reserved before the first CLI
     process. Missing or ambiguous receipts are never retried and always escalate.
@@ -120,8 +124,8 @@ def run_judge_batch(packet: Mapping[str, object], rubric: Mapping[str, object], 
         raise ValueError("blind packet is malformed")
     v2_provenance.validate_blind_packet(packet, private_mapping, dataset_split)
     scenarios = packet["scenarios"]
-    if not 1 <= len(scenarios) <= 2:
-        raise PermissionError("one Worker approval can cover at most two pairs / six judge calls")
+    if len(scenarios) != 1:
+        raise PermissionError("one Phase B approval covers exactly one pair / three judge calls")
     if (getattr(ledger, "durable", False) is not True or not ledger.verify_persisted()
             or ledger.snapshot().get("limits") != {
                 "conversation_arms": 8, "generator_invocations": 32, "judge_invocations": 15

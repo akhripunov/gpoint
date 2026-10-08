@@ -171,7 +171,37 @@ The canonical candidate contract is not an installation record: this change
 does not modify the installed Worker, LaunchAgent, production configuration,
 create an approval file, or start Codex.
 
-### Promptfoo compatibility adapter (offline implementation only)
+### Promptfoo → Worker V2 DEV and judge pipeline (offline implementation only)
+
+The bounded V2 DEV path uses only the hash-committed `DEV` scenarios in
+`configs/splits-v2.json` and the Worker-bundled
+`services/agata/worker/lab_v2_dev_manifest.json`. For one approved scenario,
+`run_v2_dev_scenario` runs four turns for Baseline and four for Naturalness V1
+as eight separate local Promptfoo CLI evaluations. Each evaluation uses the
+Python Worker provider, the canonical LAB spool, Slot 03, and a receipt-backed
+history belonging only to its own arm. The Worker revalidates the fixed model,
+Persona/context/memory/user-turn request hash and DEV membership before claim.
+The compromised V1 corpus and `SEALED_HOLDOUT` are outside this path.
+
+Approvals are sequential and separate. Phase A is an exact, expiring,
+bundle-bound approval for one run/scenario and exactly eight generator calls.
+Only after all eight Promptfoo results, Worker terminal receipts, and durable
+ledger entries verify can Phase A close. Phase B requires a distinct approval
+for the same run/scenario and exactly three independent judge calls. The Worker
+rechecks the closed Phase A receipts before accepting judge work. The phase
+state code does not create or activate approvals. Live inference remains
+disabled until separately authorized approvals are created and the LAB runtime
+is safely installed.
+
+The offline integration test invokes the pinned Promptfoo 0.123.1 CLI against
+the real Python provider and local Worker queue using only fake model output;
+it exercises eight generator and three judge invocations followed by the
+deterministic aggregator. This proves the offline orchestration contract only,
+not live subscription authentication, Worker installation, or model
+compatibility. The old one-turn `promptfoo-worker-compat` fixture below remains
+a separate historical compatibility contract.
+
+### Historical one-turn Promptfoo compatibility fixture (offline contract)
 
 The technical compatibility fixture `promptfoo-worker-compat / promptfoo-compat-001`
 is separately hash-pinned in `services/agata/worker/lab_promptfoo_compat_manifest.json`.

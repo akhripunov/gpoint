@@ -1,0 +1,166 @@
+"""Real Promptfoo CLI → V2 Worker LAB generator and judge chain, all inference mocked."""
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import shutil
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+LAB = Path(__file__).resolve().parents[1]
+WORKER_DIR = LAB.parents[0] / "worker"
+for path in (LAB / "evaluators", WORKER_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
+import approval_phases
+import blind
+import judge_coordinator
+import lab_queue
+import promptfoo_runner
+import worker_client
+import v2_provenance
+from run_coordinator import CallLedger, run_v2_dev_scenario
+
+
+class PromptfooV2MockE2ETests(unittest.TestCase):
+    def test_real_cli_runs_eight_generators_then_three_judges_in_distinct_phases(self):
+        tooling = LAB / "tooling/promptfoo"
+        promptfoo = tooling / "node_modules/.bin/promptfoo"
+        self.assertTrue(promptfoo.is_file())
+        self.assertEqual(promptfoo_runner.validate_promptfoo_cli(str(promptfoo)), "0.123.1")
+        _manifest, scenarios = v2_provenance.load_split("DEV")
+        scenario_id = "v2-dev-clean-20261006-everyday"
+        scenario = scenarios[scenario_id]
+        with tempfile.TemporaryDirectory(prefix="agata-v2-cli-e2e-") as temp_name:
+            root = Path(temp_name); root.chmod(0o700)
+            support = root / "support"; support.mkdir(mode=0o700)
+            config_dir = support / "config"; config_dir.mkdir(mode=0o700)
+            approval_path = config_dir / "lab-execution-approval.json"
+            queue_root = worker_client.canonical_lab_queue({"GPOINT_AGATA_WORKER_SUPPORT": str(support)})
+            queue_root.mkdir(parents=True, mode=0o700)
+            phase_dir = queue_root / "state"; phase_dir.mkdir(mode=0o700)
+            receipts = root / "receipts"; receipts.mkdir(mode=0o700)
+            ledger = CallLedger(journal_path=root / "call-ledger.jsonl")
+            run_id = "v2-run-e2e-001"
+            bundle = lab_queue.worker_bundle_sha256()
+            phase = approval_phases.PhaseApprovalState(phase_dir / "v2-approval-phase.json")
+            env = {
+                "PATH": os.environ.get("PATH", ""), "HOME": str(root), "TMPDIR": str(root),
+                "LANG": "en_US.UTF-8", "PROMPTFOO_DISABLE_TELEMETRY": "1",
+                "GPOINT_AGATA_WORKER_SUPPORT": str(support),
+                "AGATA_LAB_APPROVAL_FILE": str(approval_path), "AGATA_WORKER_SLOT_ID": "slot-03",
+            }
+
+            def write_approval(approval_id, phase_name, experiment_ids, configuration_ids, max_calls):
+                approval = {
+                    "approval_id": approval_id, "phase": phase_name, "run_id": run_id,
+                    "worker_bundle_sha256": bundle, "experiment_ids": experiment_ids,
+                    "configuration_ids": configuration_ids, "scenario_ids": [scenario_id],
+                    "max_calls": max_calls,
+                    "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+                }
+                approval_path.write_text(json.dumps(approval), encoding="utf-8")
+                approval_path.chmod(0o600)
+                return approval
+
+            generator_approval = write_approval(
+                "mock-phase-a-approval", "GENERATOR", ["agata-v2-naturalness-dev"],
+                ["baseline", "naturalness-v1"], 8,
+            )
+            phase.begin_generator(run_id=run_id, scenario_id=scenario_id,
+                                  worker_bundle_sha256=bundle, approval_id=generator_approval["approval_id"],
+                                  max_calls=8)
+            old_env = dict(os.environ)
+            os.environ.update(env)
+            stopped = threading.Event()
+            worker_errors = []
+            cli_runs = []
+            try:
+                spec = importlib.util.spec_from_file_location("agata_v2_e2e_worker", WORKER_DIR / "gpoint_mac_worker.py")
+                worker = importlib.util.module_from_spec(spec)
+                assert spec and spec.loader
+                spec.loader.exec_module(worker)
+                worker.SUPPORT = support
+                worker.STATUS = support / "worker-status.json"
+
+                def mock_inference(job, *, metadata_out=None, **_kwargs):
+                    if metadata_out is not None:
+                        metadata_out.update({"actual_model": "gpt-6-luna", "inference_started": True})
+                    if job.get("job_type") == "judge":
+                        return json.dumps({
+                            "overall": "first",
+                            "core_dimensions": {key: "first" for key in lab_queue.JUDGE_CORE_DIMENSIONS},
+                            "conditional_evidence": {}, "reasons": ["Both transcripts are evaluated consistently."],
+                            "defects": [], "uncertainty": False, "position_sensitivity": False,
+                        })
+                    return "Я сама люблю такие прогулки: иногда новая дорога приятно проветривает мысли."
+
+                worker.run_inference = mock_inference
+
+                def worker_loop():
+                    deadline = time.monotonic() + 240
+                    try:
+                        while not stopped.is_set() and time.monotonic() < deadline:
+                            worker.process_one("LAB")
+                            time.sleep(0.01)
+                    except BaseException as exc:
+                        worker_errors.append(exc)
+
+                thread = threading.Thread(target=worker_loop, daemon=True)
+                thread.start()
+                generator_results = run_v2_dev_scenario(
+                    scenario_id, run_id=run_id, ledger=ledger,
+                    promptfoo_executable=str(promptfoo), worker_queue=queue_root,
+                    private_receipt_directory=receipts, env=env, phase_state=phase,
+                )
+                self.assertEqual(len(generator_results), 2)
+                self.assertEqual(ledger.snapshot()["generator_invocations"]["attempted"], 8)
+                self.assertEqual(ledger.snapshot()["generator_invocations"]["outcomes"], {"success": 8})
+                self.assertEqual(lab_queue.owner_approval_usage_calls(support, generator_approval), 8)
+                worker_receipts = [lab_queue.read_receipt(queue_root, job_id)
+                                   for arm in generator_results for job_id in arm["worker_receipt_ids"]]
+                self.assertTrue(all(row and row["status"] == "completed" for row in worker_receipts))
+                promptfoo_receipts = [json.loads((receipts / (invocation_id + ".promptfoo-receipt.json")).read_text())
+                                      for arm in generator_results for invocation_id in arm["promptfoo_invocation_ids"]]
+                phase.close_generator(worker_receipts, call_ledger_snapshot=ledger.snapshot(),
+                                      promptfoo_receipts=promptfoo_receipts)
+
+                judge_approval = write_approval(
+                    "mock-phase-b-approval", "JUDGES", [lab_queue.JUDGE_EXPERIMENT_ID],
+                    ["judge-1", "judge-2", "judge-3"], 3,
+                )
+                phase.begin_judges(run_id=run_id, scenario_id=scenario_id,
+                                   worker_bundle_sha256=bundle, approval_id=judge_approval["approval_id"],
+                                   max_calls=3, generator_receipts=worker_receipts)
+                packet, private_mapping = blind.make_v2_blind_packets(
+                    [scenario], generator_results, batch_id=run_id)
+                rubric = json.loads((LAB / "configs/owner-preference-rubric-v1.json").read_text())
+                outcome = judge_coordinator.run_judge_batch(
+                    packet, rubric, batch_id=run_id, dataset_split="DEV", ledger=ledger,
+                    private_mapping=private_mapping, sanity_findings=[], receipt_directory=receipts,
+                    private_directory=root, env=env, promptfoo_executable=str(promptfoo),
+                )
+                self.assertEqual(outcome["judge_invocations"], 3)
+                self.assertEqual(ledger.snapshot()["judge_invocations"]["outcomes"], {"success": 3})
+                self.assertEqual(lab_queue.owner_approval_usage_calls(support, judge_approval), 3)
+                self.assertEqual(len(list(receipts.glob("*.promptfoo-receipt.json"))), 11)
+                self.assertEqual(len(list(queue_root.glob("receipts/*.json"))), 11)
+                self.assertEqual(outcome["retries"], 0)
+                self.assertIn(outcome["decision_type"], {"AUTO_DECISION", "HUMAN_ESCALATION"})
+                self.assertFalse(worker_errors, worker_errors)
+            finally:
+                stopped.set()
+                if "thread" in locals():
+                    thread.join(timeout=5)
+                os.environ.clear(); os.environ.update(old_env)
+
+
+if __name__ == "__main__":
+    unittest.main()
