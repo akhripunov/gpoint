@@ -1302,6 +1302,32 @@ def status() -> int:
     targets_saved = saved.get("targets") if isinstance(saved.get("targets"), dict) else {}
     lanes = pool_saved.get("lanes") if isinstance(pool_saved.get("lanes"), dict) else {}
     queue_status = "reachable" if all(state == "HEALTHY" for state in lane_health.values()) else "degraded"
+
+    def lane_status(lane: str) -> dict:
+        pool_lane = lanes.get(lane) if isinstance(lanes.get(lane), dict) else {}
+        target_lane = targets_saved.get(lane) if isinstance(targets_saved.get(lane), dict) else {}
+        result = {
+            **pool_lane,
+            **target_lane,
+            **queue_snapshots.get(lane, {"queue_snapshot_state": "UNAVAILABLE"}),
+            "health": lane_health.get(lane, "NOT_VERIFIED"),
+        }
+        if lane == LAB_TARGET:
+            # The old target status records operational state (for example
+            # ``idle``), while the pool snapshot owns LAB's lifecycle contract.
+            # Keep the operational value visible without letting it replace
+            # AVAILABLE/PERMANENT or the approval gate used by readiness checks.
+            if "state" in target_lane:
+                result["operational_state"] = target_lane["state"]
+            for key in ("state", "presence", "inference_gate"):
+                if key in pool_lane:
+                    result[key] = pool_lane[key]
+                else:
+                    # Missing canonical fields stay missing so consumers fail
+                    # closed instead of treating stale legacy data as proof.
+                    result.pop(key, None)
+        return result
+
     print(json.dumps({
         "worker_version": WORKER_VERSION,
         "enabled": bool(os.environ.get("GPOINT_AGATA_WORKER_TOKEN")),
@@ -1320,12 +1346,7 @@ def status() -> int:
         }),
         "slots": pool_saved.get("slots", {}),
         "lanes": {
-            lane: {
-                **(lanes.get(lane) if isinstance(lanes.get(lane), dict) else {}),
-                **(targets_saved.get(lane) if isinstance(targets_saved.get(lane), dict) else {}),
-                **queue_snapshots.get(lane, {"queue_snapshot_state": "UNAVAILABLE"}),
-                "health": lane_health.get(lane, "NOT_VERIFIED"),
-            }
+            lane: lane_status(lane)
             for lane in ("GPOINT", "GSALES", "LAB")
         },
     }, indent=2))

@@ -1761,7 +1761,8 @@ def _restart_state_snapshot(expected_source_sha: str, command_timeout: float = 8
         "pool": status.get("pool"),
         "lanes": {lane: {key: value for key, value in state.items()
                           if key in {"health", "state", "current_job_present", "approval_required",
-                                     "approval_state", "inference_gate", "last_error_code"}}
+                                     "approval_state", "presence", "operational_state",
+                                     "inference_gate", "last_error_code"}}
         for lane, state in lane_status.items() if lane in {"GPOINT", "GSALES", "LAB"}},
     }
     return {
