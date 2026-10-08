@@ -977,19 +977,39 @@ def _read_live_runtime_queue_snapshot(lane: str, expected_tenant_id: str, *,
 
 
 def _live_snapshot_fallback_allowed(lane_status: dict) -> bool:
-    """Allow direct VPS evidence only for legacy queue-404 or its known gateway failure."""
+    """Allow independent VPS queue evidence only for verified legacy transport cases."""
     if not isinstance(lane_status, dict):
         return False
+    health = lane_status.get("health")
+    health_error = lane_status.get("health_error_code")
+    queue_error = lane_status.get("queue_snapshot_error_code")
     if lane_status.get("queue_snapshot_state") == "VERIFIED":
-        return lane_status.get("health") == "HEALTHY"
-    if lane_status.get("queue_snapshot_error_code") != "worker_gateway_http_404":
+        return health == "HEALTHY" and health_error is None and queue_error is None
+    # This code is emitted by the installed Worker only for HTTP/DNS/connect/read
+    # transport exceptions. Authentication and response/data failures have distinct
+    # codes and must never be converted into permission to use the fallback.
+    if not isinstance(queue_error, str) or queue_error not in {
+            "worker_gateway_http_404", "worker_gateway_network_error"}:
         return False
-    if lane_status.get("health") == "HEALTHY":
-        return True
-    return (
-        lane_status.get("health") == "DEGRADED"
-        and lane_status.get("health_error_code") == "worker_gateway_network_error"
-    )
+    if health == "HEALTHY":
+        return health_error is None
+    if health != "DEGRADED":
+        return False
+    if queue_error == "worker_gateway_http_404":
+        return health_error == "worker_gateway_network_error"
+    return health_error == "worker_gateway_network_error"
+
+
+def _safe_lane_error_fields(lane_status: dict) -> dict[str, str]:
+    """Expose only fixed Worker error codes in local preflight receipts."""
+    if not isinstance(lane_status, dict):
+        return {}
+    safe = {}
+    for key in ("health_error_code", "queue_snapshot_error_code"):
+        value = lane_status.get(key)
+        if isinstance(value, str) and value in SAFE_DIAGNOSTIC_ERROR_CODES:
+            safe[key] = value
+    return safe
 
 
 def _refresh_local_pool_evidence(status: dict) -> None:
@@ -1040,16 +1060,18 @@ def _refresh_local_pool_evidence(status: dict) -> None:
                                    legacy_error="production_queue_status_unavailable")
         if not _live_snapshot_fallback_allowed(value):
             queue_error = value.get("queue_snapshot_error_code")
-            if value.get("health") != "HEALTHY" and queue_error == "worker_gateway_http_404":
+            if value.get("health") != "HEALTHY" and queue_error is not None:
                 raise PreflightFailure("lane_health_queue_error_combination_disallowed",
                                        stage="lane_health_validation", lane=lane,
+                                       safe_fields=_safe_lane_error_fields(value),
                                        legacy_error="production_queue_status_unavailable")
             if value.get("health") != "HEALTHY":
                 raise PreflightFailure("lane_health_invalid", stage="lane_health_validation", lane=lane,
+                                       safe_fields=_safe_lane_error_fields(value),
                                        legacy_error="production_queue_status_unavailable")
             raise PreflightFailure("queue_snapshot_error_not_allowlisted",
                                    stage="queue_snapshot", lane=lane,
-                                   safe_fields={"queue_snapshot_error_code": queue_error},
+                                   safe_fields=_safe_lane_error_fields(value),
                                    legacy_error="production_queue_status_unavailable",
                                    error_category="queue", exit_class="unknown")
     try:
@@ -1150,12 +1172,17 @@ def _read_production_queue_status(manifest: dict | None = None, *,
             if health != "HEALTHY" and queue_error == "worker_gateway_http_404":
                 raise PreflightFailure("lane_health_queue_error_combination_disallowed",
                                        stage="lane_health_validation", lane=lane,
+                                       safe_fields=_safe_lane_error_fields(lane_status),
                                        legacy_error="production_queue_status_unavailable")
             if health != "HEALTHY":
-                raise PreflightFailure("lane_health_invalid", stage="lane_health_validation", lane=lane)
+                reason = ("lane_health_queue_error_combination_disallowed" if queue_error is not None
+                          else "lane_health_invalid")
+                raise PreflightFailure(reason, stage="lane_health_validation", lane=lane,
+                                       safe_fields=_safe_lane_error_fields(lane_status),
+                                       legacy_error="production_queue_status_unavailable")
             raise PreflightFailure("queue_snapshot_error_not_allowlisted",
                                    stage="queue_snapshot", lane=lane,
-                                   safe_fields={"queue_snapshot_error_code": queue_error},
+                                   safe_fields=_safe_lane_error_fields(lane_status),
                                    legacy_error="production_queue_status_unavailable",
                                    error_category="queue", exit_class="unknown")
     _refresh_local_pool_evidence(status)

@@ -1182,7 +1182,7 @@ def test_local_inventory_rejects_noncanonical_dedicated_slot_set(monkeypatch):
         migration._refresh_local_pool_evidence(status)
 
 
-def test_non_404_queue_failure_never_uses_live_runtime_bootstrap(tmp_path, monkeypatch):
+def test_confirmed_gateway_transport_queue_failure_uses_live_runtime_bootstrap(tmp_path, monkeypatch):
     root = tmp_path / "worker-runtime"
     _create_installed_runtime(root)
     monkeypatch.setattr(migration, "ROOT", root)
@@ -1193,14 +1193,103 @@ def test_non_404_queue_failure_never_uses_live_runtime_bootstrap(tmp_path, monke
     })
     monkeypatch.setattr(migration.subprocess, "run", lambda command, **_kwargs:
                         subprocess.CompletedProcess(command, 0, json.dumps(status), ""))
+    snapshots = {
+        lane: _live_runtime_queue_snapshot(lane, datetime.now(UTC))
+        for lane in ("GPOINT", "GSALES")
+    }
+    snapshots = {
+        lane: migration.normalize_live_runtime_queue_snapshot(raw, lane, raw["tenant_id"])
+        for lane, raw in snapshots.items()
+    }
+    calls = []
+    monkeypatch.setattr(migration, "inventory", lambda: {
+        "launchagent_loaded": True, "production_release_lock_busy": False,
+        "active_inference": False,
+    })
+    monkeypatch.setattr(migration, "_launchagent_pid", lambda: (123, "worker watch"))
+    monkeypatch.setattr(migration, "_configured_tenant_id", lambda lane, _manifest: snapshots[lane]["queue_snapshot_tenant_id"])
     monkeypatch.setattr(migration, "_read_live_runtime_queue_snapshot",
-                        lambda *_args: pytest.fail("live bootstrap must be limited to endpoint 404"))
-    with pytest.raises(migration.PreflightFailure, match="production_queue_status_unavailable") as raised:
+                        lambda lane, _tenant, **_kwargs: calls.append(lane) or snapshots[lane])
+
+    result = migration._read_production_queue_status({"source_sha": "a" * 40})
+    evidence = migration.require_fresh_empty_production_queues(result)
+
+    assert calls == ["GPOINT", "GSALES"]
+    assert set(evidence["lanes"]) == {"GPOINT", "GSALES"}
+    assert result["pool"]["state"] == "IDLE_CONFIRMED"
+    assert all(result["lanes"][lane]["queue_snapshot_authority"] == "live_runtime_readonly_snapshot_v1"
+               for lane in ("GPOINT", "GSALES"))
+
+
+def test_gateway_transport_failure_does_not_substitute_for_vps_queue_counts(tmp_path, monkeypatch):
+    root = tmp_path / "worker-runtime"
+    _create_installed_runtime(root)
+    monkeypatch.setattr(migration, "ROOT", root)
+    status = _fresh_empty_queue_status(datetime.now(UTC))
+    status["lanes"]["GPOINT"].update({
+        "queue_snapshot_state": "UNAVAILABLE",
+        "queue_snapshot_error_code": "worker_gateway_network_error",
+    })
+    monkeypatch.setattr(migration.subprocess, "run", lambda command, **_kwargs:
+                        subprocess.CompletedProcess(command, 0, json.dumps(status), ""))
+    raw = _live_runtime_queue_snapshot("GPOINT", datetime.now(UTC))
+    raw["pending_inference_jobs"] = 1
+    gsales_raw = _live_runtime_queue_snapshot("GSALES", datetime.now(UTC))
+    snapshots = {
+        "GPOINT": migration.normalize_live_runtime_queue_snapshot(raw, "GPOINT", raw["tenant_id"]),
+        "GSALES": migration.normalize_live_runtime_queue_snapshot(gsales_raw, "GSALES", gsales_raw["tenant_id"]),
+    }
+    monkeypatch.setattr(migration, "inventory", lambda: {
+        "launchagent_loaded": True, "production_release_lock_busy": False,
+        "active_inference": False,
+    })
+    monkeypatch.setattr(migration, "_launchagent_pid", lambda: (123, "worker watch"))
+    monkeypatch.setattr(migration, "_configured_tenant_id",
+                        lambda lane, _manifest: snapshots[lane]["queue_snapshot_tenant_id"])
+    monkeypatch.setattr(migration, "_read_live_runtime_queue_snapshot",
+                        lambda lane, _tenant, **_kwargs: snapshots[lane])
+
+    result = migration._read_production_queue_status({"source_sha": "a" * 40})
+
+    with pytest.raises(migration.PreflightFailure, match="production_queue_not_empty"):
+        migration.require_fresh_empty_production_queues(result)
+
+
+@pytest.mark.parametrize("error_code", (
+    "worker_gateway_auth_rejected", "worker_gateway_http_403",
+    "worker_queue_status_identity_invalid", "worker_queue_status_counts_invalid",
+    "unclassified_queue_error", None, {"unexpected": "shape"},
+))
+def test_unconfirmed_or_non_transport_queue_errors_do_not_allow_live_fallback(error_code):
+    lane_status = {
+        "health": "HEALTHY", "queue_snapshot_state": "UNAVAILABLE",
+        "queue_snapshot_error_code": error_code,
+    }
+    assert migration._live_snapshot_fallback_allowed(lane_status) is False
+
+
+def test_gsales_unavailable_error_is_not_misclassified_as_gpoint_transport_failure(tmp_path, monkeypatch):
+    root = tmp_path / "worker-runtime"
+    _create_installed_runtime(root)
+    monkeypatch.setattr(migration, "ROOT", root)
+    status = _fresh_empty_queue_status(datetime.now(UTC))
+    status["lanes"]["GSALES"].update({
+        "health": "DEGRADED", "health_error_code": "worker_gateway_network_error",
+        "queue_snapshot_state": "UNAVAILABLE",
+        "queue_snapshot_error_code": "authoritative_queue_snapshot_unavailable",
+    })
+    monkeypatch.setattr(migration.subprocess, "run", lambda command, **_kwargs:
+                        subprocess.CompletedProcess(command, 0, json.dumps(status), ""))
+    monkeypatch.setattr(migration, "_read_live_runtime_queue_snapshot",
+                        lambda *_args, **_kwargs: pytest.fail("unconfirmed GSALES failure must fail closed"))
+
+    with pytest.raises(migration.PreflightFailure) as raised:
         migration._read_production_queue_status()
 
-    assert raised.value.reason_code == "queue_snapshot_error_not_allowlisted"
-    assert raised.value.lane == "GPOINT"
-    assert raised.value.safe_fields["queue_snapshot_error_code"] == "worker_gateway_network_error"
+    assert raised.value.reason_code == "lane_health_queue_error_combination_disallowed"
+    assert raised.value.lane == "GSALES"
+    assert raised.value.safe_fields["health_error_code"] == "worker_gateway_network_error"
+    assert "queue_snapshot_error_code" not in raised.value.safe_fields
 
 
 def test_worker_status_timeout_has_structured_reason_code(tmp_path, monkeypatch):
