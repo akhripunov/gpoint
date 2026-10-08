@@ -41,6 +41,10 @@ ASSETS = ("gpoint_mac_worker.py", "agata_worker_pool.py", "lab_queue.py",
           "run_codex_worker.sh", "requirements.txt")
 QUEUE_SNAPSHOT_MAX_AGE_SECONDS = 30
 QUEUE_SNAPSHOT_FUTURE_SKEW_SECONDS = 5
+QUEUE_SNAPSHOT_MAX_RETRIES = 2
+QUEUE_SNAPSHOT_REQUEST_TIMEOUT_SECONDS = 25
+QUEUE_SNAPSHOT_PREFLIGHT_DEADLINE_SECONDS = 90
+QUEUE_SNAPSHOT_RETRY_DELAYS_SECONDS = (0.25, 0.5)
 LAUNCHAGENT_UNLOAD_TIMEOUT_SECONDS = 20
 QUEUE_SNAPSHOT_SCRIPT = WORKER_DIR.parents[2] / "scripts/agata-worker-queue-snapshot.py"
 VPS_RUNNER = HOME / ".local/bin/gpoint-vps-runner"
@@ -59,7 +63,9 @@ class PreflightFailure(RuntimeError):
     SAFE_FIELDS = {"runner_exit_code", "worker_status_exit_code", "timeout_seconds", "snapshot_age_seconds"}
 
     def __init__(self, reason_code: str, *, stage: str, lane: str | None = None,
-                 safe_fields: dict | None = None, legacy_error: str | None = None):
+                 safe_fields: dict | None = None, legacy_error: str | None = None,
+                 error_category: str | None = None, exit_class: str | None = None,
+                 attempts: list[dict] | None = None):
         super().__init__(legacy_error or reason_code)
         self.reason_code = reason_code
         self.stage = stage
@@ -69,11 +75,90 @@ class PreflightFailure(RuntimeError):
             if key in self.SAFE_FIELDS and isinstance(value, int) and not isinstance(value, bool)
         }
         self.receipt_written = False
+        inferred_category = "unknown"
+        inferred_exit_class = "unknown"
+        if any(token in reason_code for token in ("identity", "provenance", "tenant_binding", "release")):
+            inferred_category, inferred_exit_class = "provenance", "identity_provenance"
+        elif "queue" in reason_code or "snapshot" in reason_code:
+            inferred_category, inferred_exit_class = "queue", "queue_state"
+        elif "health" in reason_code or "lane" in reason_code:
+            inferred_category, inferred_exit_class = "health", "local_preflight"
+        elif any(token in reason_code for token in ("lock", "pool", "slot", "worker", "launchagent", "candidate")):
+            inferred_category, inferred_exit_class = "local", "local_preflight"
+        self.error_category = error_category if error_category in {
+            "transport", "runner", "identity", "provenance", "queue", "health", "local", "unknown"
+        } else inferred_category
+        self.exit_class = exit_class if exit_class in {
+            "transient_transport", "permanent_transport", "identity_provenance", "queue_state",
+            "local_preflight", "unknown",
+        } else inferred_exit_class
+        self.attempts = list(attempts or [])
+
+
+def _safe_queue_attempts(attempts: list[dict]) -> list[dict]:
+    """Keep only fixed, non-sensitive fields from snapshot attempt receipts."""
+    result = []
+    for item in attempts:
+        if not isinstance(item, dict) or item.get("lane") not in {"GPOINT", "GSALES"}:
+            continue
+        entry = {
+            "lane": item["lane"],
+            "attempt": item.get("attempt") if isinstance(item.get("attempt"), int) else None,
+            "outcome": item.get("outcome") if item.get("outcome") in {
+                "RESPONSE", "RETRYABLE_FAILURE", "BLOCKED_FAILURE", "DEADLINE_EXCEEDED"
+            } else "BLOCKED_FAILURE",
+            "reason_code": item.get("reason_code") if isinstance(item.get("reason_code"), str)
+            and re.fullmatch(r"[a-z0-9_]{1,80}", item["reason_code"]) else "unknown",
+            "error_category": item.get("error_category") if item.get("error_category") in {
+                "transport", "runner", "identity", "provenance", "queue", "health", "local", "unknown"
+            } else "unknown",
+            "exit_class": item.get("exit_class") if item.get("exit_class") in {
+                "transient_transport", "permanent_transport", "identity_provenance", "queue_state",
+                "local_preflight", "unknown",
+            } else "unknown",
+            "started_at": item.get("started_at") if isinstance(item.get("started_at"), str) else None,
+            "finished_at": item.get("finished_at") if isinstance(item.get("finished_at"), str) else None,
+        }
+        result.append(entry)
+    return result
+
+
+class QueueSnapshotRetryBudget:
+    """One bounded retry allowance and deadline shared across all production lanes."""
+
+    def __init__(self, *, deadline_seconds: float = QUEUE_SNAPSHOT_PREFLIGHT_DEADLINE_SECONDS):
+        self.deadline_monotonic = time.monotonic() + deadline_seconds
+        self.retries_remaining = QUEUE_SNAPSHOT_MAX_RETRIES
+        self.attempts: list[dict] = []
+
+    def request_timeout_seconds(self) -> int:
+        remaining = self.deadline_monotonic - time.monotonic()
+        if remaining < 1:
+            raise PreflightFailure(
+                "authoritative_snapshot_deadline_exceeded", stage="queue_snapshot",
+                error_category="transport", exit_class="transient_transport",
+            )
+        return max(1, min(QUEUE_SNAPSHOT_REQUEST_TIMEOUT_SECONDS, int(remaining)))
+
+    def record(self, lane: str, outcome: str, failure: PreflightFailure | None = None,
+               *, started_at: str | None = None) -> None:
+        self.attempts.append({
+            "lane": lane,
+            "attempt": 1 + sum(entry["lane"] == lane for entry in self.attempts),
+            "outcome": outcome,
+            "reason_code": failure.reason_code if failure else "snapshot_received",
+            "error_category": failure.error_category if failure else "queue",
+            "exit_class": failure.exit_class if failure else "queue_state",
+            "started_at": started_at or getattr(failure, "attempt_started_at", None) or datetime.now(UTC).isoformat(),
+            "finished_at": datetime.now(UTC).isoformat(),
+        })
 
 
 def _write_preflight_receipt(stage: str, failure: PreflightFailure | None = None,
                              *, outcome: str | None = None,
-                             summary: dict | None = None) -> Path:
+                             summary: dict | None = None,
+                             attempts: list[dict] | None = None,
+                             started_at: str | None = None) -> Path:
     """Persist only allowlisted preflight metadata, never raw status or command output."""
     receipts = ROOT / "receipts"
     if ROOT.is_symlink() or (ROOT.exists() and ROOT.stat().st_uid != os.getuid()):
@@ -83,17 +168,20 @@ def _write_preflight_receipt(stage: str, failure: PreflightFailure | None = None
             or receipts.stat().st_mode & 0o077):
         raise RuntimeError("preflight_receipt_storage_unavailable")
     receipt = {
-        "schema_version": 1,
-        "at": datetime.now(UTC).isoformat(),
+        "schema_version": 2,
+        "started_at": started_at or datetime.now(UTC).isoformat(),
         "stage": stage,
         "outcome": outcome or ("BLOCKED" if failure else "PASS"),
     }
     if failure:
         receipt["reason_code"] = failure.reason_code
         receipt["failure_stage"] = failure.stage
+        receipt["error_category"] = failure.error_category
+        receipt["exit_class"] = failure.exit_class
         if failure.lane:
             receipt["lane"] = failure.lane
         receipt.update(failure.safe_fields)
+        attempts = attempts if attempts is not None else failure.attempts
     if summary:
         allowed_summary = {
             "candidate_verified", "launchagent_loaded", "active_inference_absent",
@@ -101,15 +189,21 @@ def _write_preflight_receipt(stage: str, failure: PreflightFailure | None = None
         }
         receipt.update({key: value for key, value in summary.items()
                         if key in allowed_summary and isinstance(value, bool)})
+    receipt["attempts"] = _safe_queue_attempts(attempts or [])
+    receipt["finished_at"] = datetime.now(UTC).isoformat()
+    receipt["at"] = receipt["finished_at"]  # compatibility with existing receipt readers
     path = receipts / f"preflight-{uuid.uuid4().hex}.json"
     _atomic_json(path, receipt, mode=0o600)
     return path
 
 
 def _record_preflight(stage: str, failure: PreflightFailure | None = None,
-                      *, summary: dict | None = None) -> bool:
+                      *, summary: dict | None = None,
+                      attempts: list[dict] | None = None,
+                      started_at: str | None = None) -> bool:
     try:
-        _write_preflight_receipt(stage, failure, summary=summary)
+        _write_preflight_receipt(stage, failure, summary=summary, attempts=attempts,
+                                 started_at=started_at)
         if failure:
             failure.receipt_written = True
         return True
@@ -704,26 +798,54 @@ printf '%s' '{script}' | base64 -d | docker exec -i -w /srv/agata \\
   "$core" python -"""
 
 
-def _read_live_runtime_queue_snapshot(lane: str, expected_tenant_id: str) -> dict:
+def _read_live_runtime_queue_snapshot_once(lane: str, expected_tenant_id: str, *, timeout_seconds: int) -> dict:
     if not VPS_RUNNER.is_file() or not os.access(VPS_RUNNER, os.X_OK):
         raise PreflightFailure("authoritative_vps_runner_unavailable", stage="authoritative_vps_snapshot",
-                               lane=lane, legacy_error="authoritative_queue_snapshot_runner_unavailable")
+                               lane=lane, legacy_error="authoritative_queue_snapshot_runner_unavailable",
+                               error_category="runner", exit_class="local_preflight")
     env = dict(os.environ)
     env["REMOTE_CMD"] = _remote_queue_snapshot_command(lane)
-    env["GPOINT_REMOTE_COMMAND_TIMEOUT_SECONDS"] = "25"
+    env["GPOINT_REMOTE_COMMAND_TIMEOUT_SECONDS"] = str(max(1, min(25, timeout_seconds)))
     try:
-        result = subprocess.run([str(VPS_RUNNER)], capture_output=True, text=True,
-                                timeout=30, check=False, env=env)
-    except subprocess.TimeoutExpired as exc:
-        raise PreflightFailure("authoritative_vps_snapshot_timeout", stage="authoritative_vps_snapshot",
-                               lane=lane, safe_fields={"timeout_seconds": 30},
-                               legacy_error="authoritative_queue_snapshot_unavailable") from exc
+        attempt_directory = tempfile.TemporaryDirectory(prefix="agata-queue-preflight-")
     except OSError as exc:
-        raise PreflightFailure("authoritative_vps_runner_launch_failed", stage="authoritative_vps_snapshot",
-                               lane=lane, legacy_error="authoritative_queue_snapshot_unavailable") from exc
-    except subprocess.SubprocessError as exc:
-        raise PreflightFailure("authoritative_vps_runner_execution_failed", stage="authoritative_vps_snapshot",
-                               lane=lane, legacy_error="authoritative_queue_snapshot_unavailable") from exc
+        raise PreflightFailure("authoritative_vps_diagnostic_channel_unavailable",
+                               stage="authoritative_vps_snapshot", lane=lane,
+                               error_category="runner", exit_class="local_preflight") from exc
+    with attempt_directory as attempt_dir:
+        attempt_status = Path(attempt_dir) / "transport-status"
+        env["GPOINT_REMOTE_ATTEMPT_STATUS_FILE"] = str(attempt_status)
+        try:
+            result = subprocess.run([str(VPS_RUNNER)], capture_output=True, text=True,
+                                    timeout=timeout_seconds, check=False, env=env)
+        except subprocess.TimeoutExpired as exc:
+            marker = _runner_attempt_status(attempt_status)
+            transient_reason = _proven_pre_exec_transient_reason(marker, exc.stderr)
+            if transient_reason:
+                raise PreflightFailure(transient_reason, stage="authoritative_vps_snapshot",
+                                       lane=lane, safe_fields={"timeout_seconds": timeout_seconds},
+                                       legacy_error="authoritative_queue_snapshot_unavailable",
+                                       error_category="transport", exit_class="transient_transport") from exc
+            raise PreflightFailure("authoritative_vps_runner_deadline_exceeded",
+                                   stage="authoritative_vps_snapshot", lane=lane,
+                                   safe_fields={"timeout_seconds": timeout_seconds},
+                                   legacy_error="authoritative_queue_snapshot_unavailable",
+                                   error_category="runner", exit_class="unknown") from exc
+        except OSError as exc:
+            raise PreflightFailure("authoritative_vps_runner_launch_failed", stage="authoritative_vps_snapshot",
+                                   lane=lane, legacy_error="authoritative_queue_snapshot_unavailable",
+                                   error_category="runner", exit_class="local_preflight") from exc
+        except subprocess.SubprocessError as exc:
+            raise PreflightFailure("authoritative_vps_runner_execution_failed", stage="authoritative_vps_snapshot",
+                                   lane=lane, legacy_error="authoritative_queue_snapshot_unavailable",
+                                   error_category="runner", exit_class="local_preflight") from exc
+        marker = _runner_attempt_status(attempt_status)
+    transient_reason = _proven_pre_exec_transient_reason(marker, result.stderr)
+    if transient_reason:
+        raise PreflightFailure(transient_reason, stage="authoritative_vps_snapshot",
+                               lane=lane, safe_fields={"runner_exit_code": result.returncode},
+                               legacy_error="authoritative_queue_snapshot_failed",
+                               error_category="transport", exit_class="transient_transport")
     lines = [line for line in (result.stdout or "").splitlines() if line.strip()]
     snapshot = None
     if lines:
@@ -741,34 +863,49 @@ def _read_live_runtime_queue_snapshot(lane: str, expected_tenant_id: str) -> dic
         }
         reason = remote_reasons.get(code, "remote_read_only_snapshot_failed")
         raise PreflightFailure(reason, stage="remote_snapshot", lane=lane,
-                               safe_fields={"runner_exit_code": result.returncode})
+                               safe_fields={"runner_exit_code": result.returncode},
+                               error_category="identity" if "identity" in reason else "provenance",
+                               exit_class="identity_provenance")
     if result.returncode != 0:
         error_text = f"{result.stderr or ''}\n{result.stdout or ''}".lower()
         if result.returncode == 124:
-            reason = "authoritative_vps_snapshot_timeout"
+            reason = "authoritative_vps_runner_deadline_exceeded"
+            category, exit_class = "runner", "unknown"
         elif result.returncode == 78:
             reason = "vps_runner_local_configuration_invalid"
+            category, exit_class = "runner", "local_preflight"
         elif "permission denied" in error_text or "authentication failed" in error_text:
             reason = "ssh_authentication_failed"
+            category, exit_class = "transport", "permanent_transport"
         elif "host key verification failed" in error_text or "remote host identification has changed" in error_text:
             reason = "ssh_host_identity_failed"
+            category, exit_class = "identity", "identity_provenance"
         elif any(marker in error_text for marker in ("connect timed out", "connection timed out", "operation timed out")):
-            reason = "ssh_transport_timeout"
+            reason = "ssh_transport_timeout_unconfirmed"
+            category, exit_class = "transport", "unknown"
         elif any(marker in error_text for marker in (
-                "could not resolve hostname", "network is unreachable", "no route to host",
-                "connection refused", "connection reset", "connection closed")):
+                "connection reset", "connection closed", "connection lost", "broken pipe")):
+            reason = "ssh_transport_interrupted_unconfirmed"
+            category, exit_class = "transport", "unknown"
+        elif any(marker in error_text for marker in (
+                "could not resolve hostname", "network is unreachable", "no route to host", "connection refused")):
             reason = "ssh_transport_unavailable"
+            category, exit_class = "transport", "permanent_transport"
         elif any(marker in error_text for marker in (
                 "banner exchange", "kex_exchange_identification", "ssh_exchange_identification")):
             reason = "ssh_handshake_failed"
+            category, exit_class = "transport", "permanent_transport"
         else:
             reason = "authoritative_vps_runner_nonzero_exit"
+            category, exit_class = "runner", "unknown"
         raise PreflightFailure(reason, stage="authoritative_vps_snapshot", lane=lane,
                                safe_fields={"runner_exit_code": result.returncode},
-                               legacy_error="authoritative_queue_snapshot_failed")
+                               legacy_error="authoritative_queue_snapshot_failed",
+                               error_category=category, exit_class=exit_class)
     if not lines or not isinstance(snapshot, dict):
         raise PreflightFailure("authoritative_vps_snapshot_invalid_json", stage="remote_snapshot", lane=lane,
-                               legacy_error="authoritative_queue_snapshot_invalid")
+                               legacy_error="authoritative_queue_snapshot_invalid",
+                               error_category="provenance", exit_class="identity_provenance")
     if not isinstance(snapshot, dict):
         raise PreflightFailure("authoritative_vps_snapshot_invalid_schema", stage="remote_snapshot", lane=lane,
                                legacy_error="authoritative_queue_snapshot_invalid")
@@ -779,7 +916,51 @@ def _read_live_runtime_queue_snapshot(lane: str, expected_tenant_id: str) -> dic
     except RuntimeError as exc:
         reason = "queue_snapshot_identity_mismatch" if str(exc) == "production_queue_snapshot_invalid" else "queue_snapshot_invalid"
         raise PreflightFailure(reason, stage="queue_provenance", lane=lane,
-                               legacy_error="authoritative_queue_snapshot_invalid") from exc
+                               legacy_error="authoritative_queue_snapshot_invalid",
+                               error_category="provenance", exit_class="identity_provenance") from exc
+
+
+def _read_live_runtime_queue_snapshot(lane: str, expected_tenant_id: str, *,
+                                      retry_budget: QueueSnapshotRetryBudget | None = None) -> dict:
+    budget = retry_budget or QueueSnapshotRetryBudget()
+    while True:
+        attempt_started_at = datetime.now(UTC).isoformat()
+        try:
+            timeout_seconds = budget.request_timeout_seconds()
+        except PreflightFailure as exc:
+            exc.attempts = list(budget.attempts)
+            raise
+        try:
+            snapshot = _read_live_runtime_queue_snapshot_once(
+                lane, expected_tenant_id, timeout_seconds=timeout_seconds,
+            )
+        except PreflightFailure as exc:
+            exc.attempt_started_at = attempt_started_at
+            retryable = exc.exit_class == "transient_transport"
+            if not retryable:
+                budget.record(lane, "BLOCKED_FAILURE", exc, started_at=attempt_started_at)
+                exc.attempts = list(budget.attempts)
+                raise
+            if budget.retries_remaining <= 0:
+                budget.record(lane, "BLOCKED_FAILURE", exc, started_at=attempt_started_at)
+                exc.attempts = list(budget.attempts)
+                raise
+            budget.retries_remaining -= 1
+            budget.record(lane, "RETRYABLE_FAILURE", exc, started_at=attempt_started_at)
+            delay_index = QUEUE_SNAPSHOT_MAX_RETRIES - budget.retries_remaining - 1
+            delay = QUEUE_SNAPSHOT_RETRY_DELAYS_SECONDS[min(delay_index, len(QUEUE_SNAPSHOT_RETRY_DELAYS_SECONDS) - 1)]
+            remaining = budget.deadline_monotonic - time.monotonic()
+            if remaining <= 0:
+                deadline_failure = PreflightFailure(
+                    "authoritative_snapshot_deadline_exceeded", stage="queue_snapshot", lane=lane,
+                    error_category="transport", exit_class="transient_transport",
+                    attempts=list(budget.attempts),
+                )
+                raise deadline_failure from exc
+            time.sleep(min(delay, remaining))
+            continue
+        budget.record(lane, "RESPONSE", started_at=attempt_started_at)
+        return snapshot
 
 
 def _live_snapshot_fallback_allowed(lane_status: dict) -> bool:
@@ -887,7 +1068,8 @@ def _refresh_local_pool_evidence(status: dict) -> None:
     }
 
 
-def _read_production_queue_status(manifest: dict | None = None) -> dict:
+def _read_production_queue_status(manifest: dict | None = None, *,
+                                  retry_budget: QueueSnapshotRetryBudget | None = None) -> dict:
     """Read status and bootstrap queue evidence only for explicit endpoint 404 version skew."""
     runtime_link = ROOT / "runtime/current"
     try:
@@ -963,14 +1145,36 @@ def _read_production_queue_status(manifest: dict | None = None) -> dict:
         candidate_manifest = manifest or candidate()
     except Exception as exc:
         raise PreflightFailure("candidate_verification_failed", stage="origin_verification") from exc
+    budget = retry_budget or QueueSnapshotRetryBudget()
     for lane in configured_lanes:
         try:
             expected_tenant = _configured_tenant_id(lane, candidate_manifest)
         except Exception as exc:
             raise PreflightFailure("tenant_binding_invalid", stage="tenant_validation", lane=lane) from exc
-        snapshot = _read_live_runtime_queue_snapshot(lane, expected_tenant)
+        snapshot = _read_live_runtime_queue_snapshot(lane, expected_tenant, retry_budget=budget)
         lanes[lane].update(snapshot)
     return status
+
+
+def _runner_attempt_status(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip() if path.is_file() and not path.is_symlink() else ""
+    except OSError:
+        return ""
+
+
+def _proven_pre_exec_transient_reason(marker: str, stderr: str | bytes | None) -> str | None:
+    if marker != "PRE_EXEC_TRANSPORT_FAILURE:255":
+        return None
+    diagnostic = _output_text(stderr).lower()
+    if any(token in diagnostic for token in ("connect timed out", "connection timed out", "operation timed out")):
+        return "ssh_pre_exec_transport_timeout"
+    if any(token in diagnostic for token in (
+            "connection reset by peer", "connection closed by", "connection lost", "broken pipe")):
+        return "ssh_pre_exec_transport_interrupted"
+    if "banner exchange" in diagnostic or re.search(r"kex_exchange_identification.*(closed|reset|timeout)", diagnostic):
+        return "ssh_pre_exec_handshake_interrupted"
+    return None
 
 
 def _save_original_launchagent(rollback_tree: Path) -> bytes:
@@ -2040,6 +2244,8 @@ def _transition_lock_is_busy() -> bool:
 def _run_safety_preflight(stage: str, *, manifest: dict | None = None,
                           transition_lock_already_held: bool = False) -> dict:
     """Run the same fail-closed health/queue gate used by apply and record a safe receipt."""
+    started_at = datetime.now(UTC).isoformat()
+    retry_budget = QueueSnapshotRetryBudget()
     try:
         if not transition_lock_already_held and _transition_lock_is_busy():
             raise PreflightFailure("transition_lock_busy", stage="lock_validation")
@@ -2063,8 +2269,12 @@ def _run_safety_preflight(stage: str, *, manifest: dict | None = None,
         if before.get("launchagent_loaded") is not True:
             raise PreflightFailure("launchagent_not_loaded", stage="local_inventory",
                                    legacy_error="worker_launchagent_not_loaded")
-        status = _read_production_queue_status(candidate_manifest)
-        evidence = require_fresh_empty_production_queues(status)
+        status = _read_production_queue_status(candidate_manifest, retry_budget=retry_budget)
+        try:
+            evidence = require_fresh_empty_production_queues(status)
+        except PreflightFailure as exc:
+            exc.attempts = list(retry_budget.attempts)
+            raise
         summary = {
             "candidate_verified": True,
             "launchagent_loaded": True,
@@ -2074,10 +2284,12 @@ def _run_safety_preflight(stage: str, *, manifest: dict | None = None,
             "queues_empty": True,
             "lane_health_healthy": True,
         }
-        _record_preflight(stage, summary=summary)
+        _record_preflight(stage, summary=summary, attempts=retry_budget.attempts, started_at=started_at)
         return {"manifest": candidate_manifest, "inventory": before, "status": status, "queue_evidence": evidence}
     except PreflightFailure as exc:
-        _record_preflight(stage, exc)
+        if not exc.attempts:
+            exc.attempts = list(retry_budget.attempts)
+        _record_preflight(stage, exc, attempts=retry_budget.attempts, started_at=started_at)
         raise
     except RuntimeError as exc:
         code = str(exc)
@@ -2090,7 +2302,7 @@ def _run_safety_preflight(stage: str, *, manifest: dict | None = None,
         }
         failure = PreflightFailure(mappings.get(code, "preflight_validation_failed"), stage="preflight_validation",
                                    legacy_error=code)
-        _record_preflight(stage, failure)
+        _record_preflight(stage, failure, attempts=retry_budget.attempts, started_at=started_at)
         raise failure from exc
 
 
