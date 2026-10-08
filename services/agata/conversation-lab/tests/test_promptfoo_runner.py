@@ -88,6 +88,28 @@ class WorkerPromptfooRunnerTests(unittest.TestCase):
         self.assertIn("/usr/bin:/bin", child_path)
         self.assertEqual(os.environ.get("PATH"), parent_path)
 
+    def test_promptfoo_child_environment_disables_update_check_without_forwarding_parent_value(self):
+        child_env = runner.build_cli_environment({
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/tmp",
+            "PROMPTFOO_DISABLE_UPDATE": "0",
+            "PROMPTFOO_DISABLE_UPDATE_CHECK": "1",
+        })
+        self.assertEqual(child_env.get("PROMPTFOO_DISABLE_UPDATE"), "1")
+        self.assertNotIn("PROMPTFOO_DISABLE_UPDATE_CHECK", child_env)
+
+    def test_promptfoo_version_validator_uses_update_disabled_child_environment(self):
+        cli = LAB / "tooling/promptfoo/node_modules/.bin/promptfoo"
+        seen = {}
+
+        def command_runner(*args, **kwargs):
+            seen.update(kwargs["env"])
+            return SimpleNamespace(returncode=0, stdout="0.123.1\n", stderr="")
+
+        self.assertEqual(runner.validate_promptfoo_cli(str(cli), command_runner=command_runner), "0.123.1")
+        self.assertEqual(seen.get("PROMPTFOO_DISABLE_UPDATE"), "1")
+        self.assertNotIn("PROMPTFOO_DISABLE_UPDATE_CHECK", seen)
+
     def test_promptfoo_01231_cli_runs_with_the_same_restricted_child_path(self):
         cli = LAB / "tooling/promptfoo/node_modules/.bin/promptfoo"
         restricted_path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
