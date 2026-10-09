@@ -63,11 +63,18 @@ def test_canonical_installer_includes_exact_worker_bundle_assets():
         if isinstance(node, ast.FunctionDef) and node.name == "worker_bundle_sha256"
     )
     bundle_assets = next(
-        node.value for node in bundle_function.body
+        node.value for node in queue_tree.body
         if isinstance(node, ast.Assign)
-        and any(isinstance(target, ast.Name) and target.id == "assets" for target in node.targets)
+        and any(isinstance(target, ast.Name) and target.id == "WORKER_BUNDLE_ASSET_NAMES"
+                for target in node.targets)
     )
-    bundle_names = tuple(item.elts[0].value for item in bundle_assets.elts)
+    bundle_names = tuple(item.value for item in bundle_assets.elts)
+    assert any(
+        isinstance(node, ast.For)
+        and isinstance(node.iter, ast.Name)
+        and node.iter.id == "WORKER_BUNDLE_ASSET_NAMES"
+        for node in bundle_function.body
+    )
     worker_bundle_function = next(
         node for node in worker_tree.body
         if isinstance(node, ast.FunctionDef) and node.name == "_worker_bundle_sha256"
