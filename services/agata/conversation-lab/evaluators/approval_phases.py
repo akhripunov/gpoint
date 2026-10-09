@@ -45,6 +45,7 @@ class PhaseApprovalState:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary_name, self.path)
+            lab_queue._fsync_directory(parent)
         finally:
             Path(temporary_name).unlink(missing_ok=True)
 

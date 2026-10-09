@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 LAB = Path(__file__).resolve().parents[1]
@@ -199,7 +200,9 @@ class RunCoordinatorTests(unittest.TestCase):
         self.require_module()
         with tempfile.TemporaryDirectory() as folder:
             journal=Path(folder)/"calls.jsonl"
-            first=coordinator.CallLedger(journal_path=journal)
+            with patch.object(coordinator, "_fsync_directory", wraps=coordinator._fsync_directory) as fsync_directory:
+                first=coordinator.CallLedger(journal_path=journal)
+            fsync_directory.assert_called_once_with(journal.parent)
             first.reserve("arm","arm-1",configuration="baseline",metadata={"arm_id":"arm-1","scenario_id":"s1"})
             first.reserve("generator","attempt-1",metadata={"arm_id":"arm-1","turn_index":0,"scenario_id":"s1","configuration":"baseline"})
             recovered=coordinator.CallLedger(journal_path=journal)

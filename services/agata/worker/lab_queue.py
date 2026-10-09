@@ -51,6 +51,16 @@ class LabQueueError(RuntimeError):
     """A local LAB submission or queue operation was rejected."""
 
 
+def _fsync_directory(path: Path) -> None:
+    """Persist directory-entry changes after durable private state updates."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(Path(path), flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def worker_bundle_sha256(worker_dir: Path | None = None) -> str:
     """Hash the exact Worker asset set used to bind a private LAB approval."""
     worker_dir = Path(worker_dir).resolve() if worker_dir is not None else Path(__file__).resolve().parent
@@ -330,7 +340,10 @@ def ensure_owner_approval_usage_dir(root: Path) -> Path:
     for directory in (state_dir, usage_dir):
         if directory.is_symlink():
             raise LabQueueError("lab_approval_usage_invalid")
+        created = not directory.exists()
         directory.mkdir(mode=0o700, exist_ok=True)
+        if created:
+            _fsync_directory(directory.parent)
         stat = directory.stat()
         if (not directory.is_dir() or stat.st_uid != os.getuid() or stat.st_mode & 0o077):
             raise LabQueueError("lab_approval_usage_invalid")

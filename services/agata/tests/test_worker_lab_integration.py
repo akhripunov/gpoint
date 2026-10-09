@@ -327,7 +327,8 @@ class WorkerLabIntegrationTests(unittest.TestCase):
         self.prepare_judge_phase()
         self.submit(job)
         with patch.dict(os.environ, {"AGATA_LAB_APPROVAL_FILE": str(self.approval_path), "AGATA_WORKER_SLOT_ID": "slot-03"}, clear=True), \
-             patch.object(worker, "run_inference", return_value=json.dumps(verdict)) as infer:
+             patch.object(worker, "run_inference", return_value=json.dumps(verdict)) as infer, \
+             patch.object(lab_queue, "_fsync_directory", wraps=lab_queue._fsync_directory) as fsync_directory:
             self.assertTrue(worker.process_one("LAB"))
         call_job = infer.call_args.args[0]
         self.assertEqual(call_job["target"], "LAB")
@@ -341,6 +342,8 @@ class WorkerLabIntegrationTests(unittest.TestCase):
         approval = json.loads(self.approval_path.read_text(encoding="utf-8"))
         self.assertEqual(lab_queue.owner_approval_usage_calls(self.root, approval, phase="JUDGES"), 1)
         self.assertEqual(lab_queue.owner_approval_usage_calls(self.root, approval), 1)
+        self.assertIn(self.root / "state" / "lab-approval-usage",
+                      [call.args[0] for call in fsync_directory.call_args_list])
 
     def test_judge_approval_mismatch_fails_before_executor(self):
         self.prepare_judge_phase(approval_experiments=["agata-naturalness-v1"])
@@ -374,6 +377,20 @@ class WorkerLabIntegrationTests(unittest.TestCase):
             self.assertFalse(worker.process_one("LAB"))
         infer.assert_not_called()
         self.assertEqual(lab_queue.pending_count(self.lab_root), 1)
+
+    def test_approval_usage_directory_fsync_failure_blocks_inference(self):
+        self.approval()
+        self.submit()
+        usage = lab_queue.ensure_owner_approval_usage_dir(self.root)
+        with patch.dict(os.environ, {"AGATA_LAB_APPROVAL_FILE": str(self.approval_path)}, clear=True), \
+             patch.object(worker, "run_inference") as infer, \
+             patch.object(lab_queue, "_fsync_directory", side_effect=OSError("mock fsync failure")) as sync_dir:
+            self.assertTrue(worker.process_one("LAB"))
+        infer.assert_not_called()
+        sync_dir.assert_called_once_with(usage)
+        receipt = lab_queue.read_receipt(self.lab_root, "lab-job-1")
+        self.assertEqual(receipt["status"], "failed")
+        self.assertNotIn("response", receipt)
 
     def test_executor_cancellation_kills_only_its_codex_process_group(self):
         codex = self.root / "codex"

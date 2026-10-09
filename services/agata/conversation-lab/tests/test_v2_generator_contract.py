@@ -165,13 +165,17 @@ class V2GeneratorContractTests(unittest.TestCase):
 
     def test_two_phase_approval_contract_is_sequential_and_bounded(self):
         from approval_phases import PhaseApprovalState
+        import approval_phases
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); root.chmod(0o700)
             phase_dir = root / "state"; phase_dir.mkdir(mode=0o700)
             state = PhaseApprovalState(phase_dir / "v2-approval-phase.json")
-            state.begin_generator(run_id="run-contract", scenario_id=self.scenario["scenario_id"],
-                                  worker_bundle_sha256=lab_queue.worker_bundle_sha256(),
-                                  approval_id="approval-generator", max_calls=8)
+            with patch.object(approval_phases.lab_queue, "_fsync_directory",
+                              wraps=approval_phases.lab_queue._fsync_directory) as fsync_directory:
+                state.begin_generator(run_id="run-contract", scenario_id=self.scenario["scenario_id"],
+                                      worker_bundle_sha256=lab_queue.worker_bundle_sha256(),
+                                      approval_id="approval-generator", max_calls=8)
+            fsync_directory.assert_called_once_with(phase_dir)
             scoped_job = {"experiment_id": "agata-v2-naturalness-dev", "job_type": "v2-dev-generator",
                           "run_id": "run-contract", "scenario_id": self.scenario["scenario_id"]}
             approval = {"approval_id": "approval-generator", "worker_bundle_sha256": lab_queue.worker_bundle_sha256(),

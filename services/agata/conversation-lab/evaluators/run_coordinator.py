@@ -37,6 +37,16 @@ def stable_hash(value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _fsync_directory(path: Path) -> None:
+    """Persist a newly created durable journal's directory entry."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(Path(path), flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 V2_BASE_INSTRUCTIONS = (
     "You are AGATA, a conversational character. Respond in the scenario language. "
     "Use only the supplied Persona, context, memory, and this arm history. "
@@ -386,6 +396,7 @@ class CallLedger:
             if not self.journal_path.exists():
                 fd = os.open(self.journal_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 os.close(fd)
+                _fsync_directory(self.journal_path.parent)
             self._recover_journal()
 
     def _append_event(self, event):

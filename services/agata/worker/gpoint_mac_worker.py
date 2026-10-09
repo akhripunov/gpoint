@@ -1023,6 +1023,7 @@ def _consume_lab_approval(approval: dict, job: dict | None = None) -> None:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
+            lab_queue._fsync_directory(usage)
         finally:
             if temporary.exists():
                 temporary.unlink()
