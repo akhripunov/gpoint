@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -12,8 +13,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 LAB = Path(__file__).resolve().parents[1]
+WORKER_FOR_TESTS = LAB.parents[0] / "worker"
 REPO_ROOT = LAB.parents[2]
-for path in (LAB / "evaluators", LAB.parents[0] / "worker"):
+for path in (LAB / "evaluators", WORKER_FOR_TESTS):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
@@ -22,7 +24,7 @@ import live_e2e_cli
 
 
 class LiveEntrypointPreflightTests(unittest.TestCase):
-    def _valid_preflight(self):
+    def _valid_preflight(self, installed_identity=None):
         context = {
             "source_sha": "a" * 40, "lab_bundle_sha256": "b" * 64,
             "naturalness_policy_sha256": "c" * 64, "rubric_sha256": "d" * 64,
@@ -39,6 +41,11 @@ class LiveEntrypointPreflightTests(unittest.TestCase):
             patch.object(live_e2e.promptfoo_runner, "validate_live_environment"),
             patch.object(live_e2e.lab_queue, "worker_bundle_sha256", return_value="f" * 64),
             patch.object(live_e2e, "worker_install_bundle_sha256", return_value="g" * 64),
+            patch.object(live_e2e, "installed_lab_runtime_identity", return_value=installed_identity or {
+                "runtime_source_sha": "1" * 40,
+                "worker_install_bundle_sha256": "g" * 64,
+                "lab_approval_bundle_sha256": "f" * 64,
+            }),
         )
 
     def test_preflight_only_checks_runner_without_reading_approval_or_creating_run_state(self):
@@ -66,6 +73,9 @@ class LiveEntrypointPreflightTests(unittest.TestCase):
             self.assertEqual(summary["model_contract"], "gpt-6-luna / medium")
             self.assertEqual(summary["lab_approval_bundle_sha256"], "f" * 64)
             self.assertEqual(summary["worker_install_bundle_sha256"], "g" * 64)
+            self.assertEqual(summary["installed_lab_runtime_source_sha"], "1" * 40)
+            self.assertEqual(summary["installed_lab_approval_bundle_sha256"], "f" * 64)
+            self.assertEqual(summary["installed_worker_install_bundle_sha256"], "g" * 64)
             self.assertFalse(summary["approval_read"])
             self.assertFalse(summary["run_state_created"])
             queue.assert_not_called()
@@ -87,6 +97,11 @@ class LiveEntrypointPreflightTests(unittest.TestCase):
                     }), \
                     patch.object(live_e2e.lab_queue, "worker_bundle_sha256", return_value="f" * 64), \
                     patch.object(live_e2e, "worker_install_bundle_sha256", return_value="g" * 64), \
+                    patch.object(live_e2e, "installed_lab_runtime_identity", return_value={
+                        "runtime_source_sha": "1" * 40,
+                        "worker_install_bundle_sha256": "g" * 64,
+                        "lab_approval_bundle_sha256": "f" * 64,
+                    }), \
                     patch.object(live_e2e_cli, "canonical_lab_queue") as queue:
                 out = io.StringIO()
                 with patch.object(sys, "stdout", out):
@@ -129,6 +144,90 @@ class LiveEntrypointPreflightTests(unittest.TestCase):
                 )
         self.assertEqual(error.exception.reason_code, "EXACT_SOURCE_MISMATCH")
         cli_probe.assert_not_called()
+
+    def test_installed_lab_bundle_mismatch_blocks_even_when_checkout_bundle_matches(self):
+        with contextlib.ExitStack() as stack:
+            installed_identity = {
+                "runtime_source_sha": "2" * 40,
+                "worker_install_bundle_sha256": "x" * 64,
+                "lab_approval_bundle_sha256": "y" * 64,
+            }
+            for mocked in self._valid_preflight(installed_identity):
+                stack.enter_context(mocked)
+            cli_probe = stack.enter_context(patch.object(live_e2e.promptfoo_runner, "validate_promptfoo_cli"))
+            with self.assertRaises(live_e2e.OfflinePreflightError) as error:
+                live_e2e.validate_offline_runner_prerequisites(
+                    "v2-dev-clean-20261006-everyday", "/irrelevant", {}, cwd=REPO_ROOT,
+                    expected_source_sha="a" * 40, expected_lab_bundle_sha256="b" * 64,
+                    expected_lab_approval_bundle_sha256="f" * 64,
+                    expected_worker_install_bundle_sha256="g" * 64,
+                )
+        self.assertEqual(error.exception.stage, "INSTALLED_LAB_RUNTIME")
+        self.assertEqual(error.exception.reason_code, "INSTALLED_WORKER_BUNDLE_MISMATCH")
+        cli_probe.assert_not_called()
+
+    def test_installed_lab_identity_reads_pointer_manifest_and_private_asset_modes(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name) / "support"
+            runtime = root / "runtime"
+            slot_dir = runtime / "slots/LAB"
+            release = runtime / ("a" * 40)
+            for directory in (root, runtime, runtime / "slots", slot_dir, release):
+                directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+                directory.chmod(0o700)
+            asset_hashes = {}
+            for name in live_e2e.migrate_worker_runtime.ASSETS:
+                asset = release / name
+                asset.write_text(f"asset:{name}")
+                asset.chmod(0o700 if name == "run_codex_worker.sh" else 0o600)
+                asset_hashes[name] = live_e2e.migrate_worker_runtime.sha256(asset)
+            install_bundle = hashlib.sha256(
+                json.dumps(asset_hashes, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            manifest = {"source_sha": "a" * 40, "assets": asset_hashes, "bundle_sha256": install_bundle}
+            manifest_path = release / "bundle-manifest.json"
+            manifest_path.write_text(json.dumps(manifest, sort_keys=True))
+            manifest_path.chmod(0o600)
+            (slot_dir / "current").symlink_to(os.path.relpath(release, slot_dir))
+
+            identity = live_e2e.installed_lab_runtime_identity({"GPOINT_AGATA_WORKER_SUPPORT": str(root)})
+            self.assertEqual(identity["runtime_source_sha"], "a" * 40)
+            self.assertEqual(identity["worker_install_bundle_sha256"], install_bundle)
+            self.assertEqual(identity["lab_approval_bundle_sha256"], live_e2e.lab_queue.worker_bundle_sha256(release))
+
+            unsafe_asset = release / "lab_queue.py"
+            unsafe_asset.chmod(0o644)
+            with self.assertRaises(PermissionError):
+                live_e2e.installed_lab_runtime_identity({"GPOINT_AGATA_WORKER_SUPPORT": str(root)})
+            unsafe_asset.chmod(0o600)
+
+            manifest_path.write_text("{}", encoding="utf-8")
+            manifest_path.chmod(0o600)
+            with self.assertRaises(PermissionError):
+                live_e2e.installed_lab_runtime_identity({"GPOINT_AGATA_WORKER_SUPPORT": str(root)})
+
+            manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+            manifest_path.chmod(0o600)
+            unsafe_asset.unlink()
+            unsafe_asset.symlink_to(WORKER_FOR_TESTS / "lab_queue.py")
+            with self.assertRaises(PermissionError):
+                live_e2e.installed_lab_runtime_identity({"GPOINT_AGATA_WORKER_SUPPORT": str(root)})
+
+            unsafe_asset.unlink()
+            unsafe_asset.write_text("asset:lab_queue.py")
+            unsafe_asset.chmod(0o600)
+            external_runtime_root = root.parent / "external-runtime"
+            external_release = external_runtime_root / ("b" * 40)
+            external_release.mkdir(mode=0o700, parents=True)
+            external_slot = external_runtime_root / "slots/LAB"
+            external_slot.mkdir(mode=0o700, parents=True)
+            external_pointer = external_slot / "current"
+            external_pointer.symlink_to(external_release)
+            pointer = slot_dir / "current"
+            pointer.unlink()
+            pointer.symlink_to(external_release)
+            with self.assertRaises(PermissionError):
+                live_e2e.installed_lab_runtime_identity({"GPOINT_AGATA_WORKER_SUPPORT": str(root)})
 
     def test_live_mode_requires_exact_fingerprints_before_queue_or_run_state(self):
         with tempfile.TemporaryDirectory() as temp_name:

@@ -1,9 +1,10 @@
 """One bounded V2 DEV run: Promptfoo generators, blind judges, AGATA aggregation."""
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Mapping
@@ -44,11 +45,68 @@ import migrate_worker_runtime  # noqa: E402
 import promptfoo_runner  # noqa: E402
 import v2_provenance  # noqa: E402
 import worker_client  # noqa: E402
+from agata_worker_pool import PoolPaths  # noqa: E402
 from run_coordinator import (  # noqa: E402
     CallLedger,
     build_v2_dev_request,
     run_v2_dev_scenario,
 )
+
+
+def installed_lab_runtime_identity(env: Mapping[str, str]) -> dict:
+    """Read and verify the exact immutable runtime selected by LAB Slot 03."""
+    paths = PoolPaths.from_env(dict(env))
+    root = paths.root
+    runtime_root = paths.runtime
+    slots_root = runtime_root / "slots"
+    slot_dir = slots_root / "LAB"
+    pointer = paths.slot_runtime_current("LAB")
+    if (root.is_symlink() or runtime_root.is_symlink() or slots_root.is_symlink()
+            or slot_dir.is_symlink() or not pointer.is_symlink()):
+        raise PermissionError("installed LAB runtime pointer is missing or unsafe")
+    for directory in (root, runtime_root, slots_root, slot_dir):
+        info = directory.stat(follow_symlinks=False)
+        if info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise PermissionError("installed LAB runtime directory permissions are unsafe")
+    runtime_dir = pointer.resolve(strict=True)
+    if (runtime_dir.parent != runtime_root.resolve(strict=True)
+            or not re.fullmatch(r"[0-9a-f]{40}", runtime_dir.name)):
+        raise PermissionError("installed LAB runtime pointer target is invalid")
+    runtime_info = runtime_dir.stat(follow_symlinks=False)
+    if runtime_info.st_uid != os.getuid() or runtime_info.st_mode & 0o077:
+        raise PermissionError("installed LAB runtime permissions are unsafe")
+
+    assets = {}
+    for name in migrate_worker_runtime.ASSETS:
+        asset = runtime_dir / name
+        if asset.is_symlink() or not asset.is_file():
+            raise PermissionError("installed LAB runtime asset is missing or unsafe")
+        info = asset.stat(follow_symlinks=False)
+        expected_mode = 0o700 if name == "run_codex_worker.sh" else 0o600
+        if (info.st_uid != os.getuid() or info.st_mode & 0o077
+                or (info.st_mode & 0o777) != expected_mode):
+            raise PermissionError("installed LAB runtime asset permissions are unsafe")
+        assets[name] = migrate_worker_runtime.sha256(asset)
+
+    manifest_path = runtime_dir / "bundle-manifest.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise PermissionError("installed LAB runtime manifest is missing or unsafe")
+    manifest_info = manifest_path.stat(follow_symlinks=False)
+    if manifest_info.st_uid != os.getuid() or manifest_info.st_mode & 0o077:
+        raise PermissionError("installed LAB runtime manifest permissions are unsafe")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    install_bundle = hashlib.sha256(
+        json.dumps(assets, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    if (not isinstance(manifest, dict) or manifest.get("source_sha") != runtime_dir.name
+            or manifest.get("assets") != assets or manifest.get("bundle_sha256") != install_bundle):
+        raise PermissionError("installed LAB runtime manifest does not match assets")
+    approval_bundle = lab_queue.worker_bundle_sha256(runtime_dir)
+    return {
+        "runtime_source_sha": runtime_dir.name,
+        "worker_install_bundle_sha256": install_bundle,
+        "lab_approval_bundle_sha256": approval_bundle,
+    }
 
 
 def _private_sanity_findings(private_mapping: Mapping[str, object], scenario_id: str) -> list:
@@ -110,6 +168,16 @@ def validate_offline_runner_prerequisites(
             and worker_install_bundle != expected_worker_install_bundle_sha256):
         raise OfflinePreflightError("WORKER_INSTALL_BUNDLE", "WORKER_INSTALL_BUNDLE_MISMATCH",
                                     PermissionError("Worker install bundle mismatch"))
+    installed_identity = checked(
+        "INSTALLED_LAB_RUNTIME", "INSTALLED_LAB_RUNTIME_INVALID",
+        lambda: installed_lab_runtime_identity(env),
+    )
+    if installed_identity["worker_install_bundle_sha256"] != expected_worker_install_bundle_sha256:
+        raise OfflinePreflightError("INSTALLED_LAB_RUNTIME", "INSTALLED_WORKER_BUNDLE_MISMATCH",
+                                    PermissionError("installed Worker bundle mismatch"))
+    if installed_identity["lab_approval_bundle_sha256"] != expected_lab_approval_bundle_sha256:
+        raise OfflinePreflightError("INSTALLED_LAB_RUNTIME", "INSTALLED_LAB_APPROVAL_BUNDLE_MISMATCH",
+                                    PermissionError("installed LAB approval bundle mismatch"))
     promptfoo_version = checked(
         "PROMPTFOO_CLI", "PINNED_CLI_INVALID",
         lambda: promptfoo_runner.validate_promptfoo_cli(promptfoo_executable),
@@ -157,6 +225,9 @@ def validate_offline_runner_prerequisites(
         "model_contract": "gpt-6-luna / medium", "provider": "canonical Worker LAB adapter",
         "lab_approval_bundle_sha256": lab_approval_bundle,
         "worker_install_bundle_sha256": worker_install_bundle,
+        "installed_lab_runtime_source_sha": installed_identity["runtime_source_sha"],
+        "installed_lab_approval_bundle_sha256": installed_identity["lab_approval_bundle_sha256"],
+        "installed_worker_install_bundle_sha256": installed_identity["worker_install_bundle_sha256"],
         "approval_read": False, "run_state_created": False,
     }
 

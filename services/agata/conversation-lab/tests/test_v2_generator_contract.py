@@ -233,6 +233,11 @@ class V2GeneratorContractTests(unittest.TestCase):
                 stack.enter_context(patch.object(v2_provenance, "live_run_context", return_value=context))
                 stack.enter_context(patch.object(live_e2e.promptfoo_runner, "validate_promptfoo_cli",
                                                  return_value="0.123.1"))
+                stack.enter_context(patch.object(live_e2e, "installed_lab_runtime_identity", return_value={
+                    "runtime_source_sha": "1" * 40,
+                    "worker_install_bundle_sha256": live_e2e.worker_install_bundle_sha256(),
+                    "lab_approval_bundle_sha256": bundle,
+                }))
                 stack.enter_context(patch.object(live_e2e.migrate_worker_runtime, "read_only_preflight",
                                                  side_effect=preflight_results))
                 stack.enter_context(patch.object(live_e2e, "run_v2_dev_scenario", generator_mock))
