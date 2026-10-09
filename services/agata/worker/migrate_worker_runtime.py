@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
 import fcntl
 import hashlib
 import json
@@ -17,6 +18,7 @@ import plistlib
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1831,11 +1833,11 @@ def _remove_legacy_after_verification(*, health_passed: bool, restart_evidence: 
 
 def _stage_runtime(manifest: dict) -> Path:
     release = ROOT / "runtime" / manifest["source_sha"]
-    if release.exists():
+    if _runtime_directory_present(release, "worker_runtime_release_path_symlink_invalid"):
         _verify_staged_runtime(release, manifest)
         return release
     staged_release = _runtime_staging_base() / manifest["source_sha"]
-    if staged_release.exists():
+    if _runtime_directory_present(staged_release, "worker_runtime_release_path_symlink_invalid"):
         _verify_staged_runtime(staged_release, manifest)
         return staged_release
     staging_base = _runtime_staging_base()
@@ -1846,11 +1848,7 @@ def _stage_runtime(manifest: dict) -> Path:
     stage = staged_release.with_name(f".{staged_release.name}.staging-{os.getpid()}")
     shutil.rmtree(stage, ignore_errors=True)
     stage.mkdir(parents=True, mode=0o700)
-    for name in ASSETS:
-        shutil.copy2(WORKER_DIR / name, stage / name)
-    # Launchd executes the wrapper directly from ProgramArguments, so preserve
-    # an executable mode even if a checkout or archive lost the Git mode bit.
-    (stage / "run_codex_worker.sh").chmod(0o700)
+    _copy_worker_assets(stage, manifest)
     python = _resolve_python312()
     stage_env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
     subprocess.run([python, "-m", "venv", str(stage / ".venv")], check=True,
@@ -1870,13 +1868,30 @@ def _stage_runtime(manifest: dict) -> Path:
 def _install_staged_runtime(staged_release: Path, manifest: dict) -> Path:
     release = ROOT / "runtime" / manifest["source_sha"]
     release.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if release.exists():
+    if _runtime_directory_present(release, "worker_runtime_release_path_symlink_invalid"):
         _verify_staged_runtime(release, manifest)
         return release
+    if not _runtime_directory_present(staged_release, "worker_runtime_release_path_symlink_invalid"):
+        raise RuntimeError("worker_staged_runtime_missing")
     _verify_staged_runtime(staged_release, manifest)
     os.replace(staged_release, release)
     _verify_staged_runtime(release, manifest)
     return release
+
+
+def _runtime_directory_present(path: Path, symlink_error: str) -> bool:
+    """Inspect a runtime path without following dangling links or other entries."""
+    try:
+        entry = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise RuntimeError("worker_runtime_path_unavailable") from exc
+    if stat.S_ISLNK(entry.st_mode):
+        raise RuntimeError(symlink_error)
+    if not stat.S_ISDIR(entry.st_mode):
+        raise RuntimeError("worker_runtime_path_invalid")
+    return True
 
 
 def _replace_lane_runtime_pointer(root: Path, lane: str, source_sha: str) -> str | None:
@@ -2055,15 +2070,153 @@ def install_lab_slot() -> dict:
 def _verify_staged_runtime(runtime: Path, manifest: dict) -> None:
     manifest_path = runtime / "bundle-manifest.json"
     python = runtime / ".venv/bin/python3.12"
+    manifest_fd = None
     try:
-        recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
+        _verify_runtime_assets(runtime, manifest)
+        manifest_stat = manifest_path.lstat()
+        if (stat.S_ISLNK(manifest_stat.st_mode) or not stat.S_ISREG(manifest_stat.st_mode)
+                or manifest_stat.st_uid != os.getuid()
+                or stat.S_IMODE(manifest_stat.st_mode) != 0o600):
+            raise RuntimeError("worker_runtime_manifest_identity_invalid")
+        manifest_fd = os.open(manifest_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        opened_manifest = os.fstat(manifest_fd)
+        if ((opened_manifest.st_dev, opened_manifest.st_ino) !=
+                (manifest_stat.st_dev, manifest_stat.st_ino)
+                or opened_manifest.st_uid != os.getuid()
+                or stat.S_IMODE(opened_manifest.st_mode) != 0o600):
+            raise RuntimeError("worker_runtime_manifest_identity_invalid")
+        manifest_bytes = bytearray()
+        while True:
+            block = os.read(manifest_fd, 64 * 1024)
+            if not block:
+                break
+            manifest_bytes.extend(block)
+        recorded = json.loads(manifest_bytes)
         if recorded != manifest or not python.is_file() or not os.access(python, os.X_OK):
             raise ValueError
         subprocess.run([str(python), "-c", "import sys,httpx,certifi; assert sys.version_info >= (3,12)"],
                        check=True, capture_output=True, timeout=10,
                        env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"})
+    except RuntimeError:
+        raise
     except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
         raise RuntimeError("staged_runtime_environment_invalid") from exc
+    finally:
+        if manifest_fd is not None:
+            os.close(manifest_fd)
+
+
+def _copy_worker_assets(stage: Path, manifest: dict) -> None:
+    """Copy the exact source assets into a private, mode-verified runtime."""
+    if set(manifest.get("assets", {})) != set(ASSETS):
+        raise RuntimeError("worker_runtime_asset_manifest_invalid")
+    try:
+        stage_stat = stage.lstat()
+    except OSError as exc:
+        raise RuntimeError("worker_runtime_staging_directory_invalid") from exc
+    if (stat.S_ISLNK(stage_stat.st_mode) or not stat.S_ISDIR(stage_stat.st_mode)
+            or stage_stat.st_uid != os.getuid() or stat.S_IMODE(stage_stat.st_mode) != 0o700):
+        raise RuntimeError("worker_runtime_staging_directory_invalid")
+
+    for name in ASSETS:
+        source = WORKER_DIR / name
+        destination = stage / name
+        expected_mode = 0o700 if name == "run_codex_worker.sh" else 0o600
+        try:
+            source_stat = source.lstat()
+        except OSError as exc:
+            raise RuntimeError("worker_runtime_asset_source_invalid") from exc
+        if stat.S_ISLNK(source_stat.st_mode):
+            raise RuntimeError("worker_runtime_asset_source_symlink_invalid")
+        if (not stat.S_ISREG(source_stat.st_mode)
+                or source_stat.st_uid != os.getuid()):
+            raise RuntimeError("worker_runtime_asset_source_invalid")
+        source_fd = destination_fd = None
+        digest = hashlib.sha256()
+        try:
+            source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            opened_source = os.fstat(source_fd)
+            if ((opened_source.st_dev, opened_source.st_ino) !=
+                    (source_stat.st_dev, source_stat.st_ino)
+                    or not stat.S_ISREG(opened_source.st_mode)
+                    or opened_source.st_uid != os.getuid()):
+                raise RuntimeError("worker_runtime_asset_source_invalid")
+            destination_fd = os.open(
+                destination,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                expected_mode,
+            )
+            os.fchmod(destination_fd, expected_mode)
+            while True:
+                block = os.read(source_fd, 1024 * 1024)
+                if not block:
+                    break
+                digest.update(block)
+                view = memoryview(block)
+                while view:
+                    written = os.write(destination_fd, view)
+                    view = view[written:]
+            os.fsync(destination_fd)
+            if digest.hexdigest() != manifest["assets"][name]:
+                raise RuntimeError("worker_runtime_asset_content_mismatch")
+        except OSError as exc:
+            code = ("worker_runtime_asset_source_symlink_invalid"
+                    if exc.errno == errno.ELOOP else "worker_runtime_asset_copy_failed")
+            raise RuntimeError(code) from exc
+        finally:
+            if source_fd is not None:
+                os.close(source_fd)
+            if destination_fd is not None:
+                os.close(destination_fd)
+
+
+def _verify_runtime_assets(runtime: Path, manifest: dict) -> None:
+    """Fail closed on unsafe runtime directories, asset identity, modes, or bytes."""
+    try:
+        runtime_stat = runtime.lstat()
+    except OSError as exc:
+        raise RuntimeError("worker_runtime_directory_invalid") from exc
+    if (stat.S_ISLNK(runtime_stat.st_mode) or not stat.S_ISDIR(runtime_stat.st_mode)
+            or runtime_stat.st_uid != os.getuid()
+            or stat.S_IMODE(runtime_stat.st_mode) != 0o700):
+        raise RuntimeError("worker_runtime_owner_invalid")
+    if set(manifest.get("assets", {})) != set(ASSETS):
+        raise RuntimeError("worker_runtime_asset_manifest_invalid")
+    for name in ASSETS:
+        path = runtime / name
+        expected_mode = 0o700 if name == "run_codex_worker.sh" else 0o600
+        try:
+            path_stat = path.lstat()
+        except OSError as exc:
+            raise RuntimeError("worker_runtime_asset_missing") from exc
+        if stat.S_ISLNK(path_stat.st_mode):
+            raise RuntimeError("worker_runtime_asset_symlink_invalid")
+        if not stat.S_ISREG(path_stat.st_mode) or path_stat.st_uid != os.getuid():
+            raise RuntimeError("worker_runtime_owner_invalid")
+        if stat.S_IMODE(path_stat.st_mode) != expected_mode:
+            raise RuntimeError("worker_runtime_asset_permissions_invalid")
+        fd = None
+        digest = hashlib.sha256()
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            opened = os.fstat(fd)
+            if ((opened.st_dev, opened.st_ino) != (path_stat.st_dev, path_stat.st_ino)
+                    or not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid()):
+                raise RuntimeError("worker_runtime_owner_invalid")
+            if stat.S_IMODE(opened.st_mode) != expected_mode:
+                raise RuntimeError("worker_runtime_asset_permissions_invalid")
+            while True:
+                block = os.read(fd, 1024 * 1024)
+                if not block:
+                    break
+                digest.update(block)
+        except OSError as exc:
+            raise RuntimeError("worker_runtime_asset_unavailable") from exc
+        finally:
+            if fd is not None:
+                os.close(fd)
+        if digest.hexdigest() != manifest["assets"][name]:
+            raise RuntimeError("worker_runtime_asset_content_mismatch")
 
 
 def _migrate_tenant_binding(manifest: dict) -> None:

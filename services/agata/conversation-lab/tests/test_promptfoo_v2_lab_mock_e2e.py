@@ -4,7 +4,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import shutil
 import sys
 import tempfile
 import threading
@@ -12,6 +11,8 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 LAB = Path(__file__).resolve().parents[1]
 WORKER_DIR = LAB.parents[0] / "worker"
@@ -27,6 +28,12 @@ import promptfoo_runner
 import worker_client
 import v2_provenance
 from run_coordinator import CallLedger, run_v2_dev_scenario
+
+MIGRATION_PATH = WORKER_DIR / "migrate_worker_runtime.py"
+MIGRATION_SPEC = importlib.util.spec_from_file_location("lab_runtime_migration", MIGRATION_PATH)
+migration = importlib.util.module_from_spec(MIGRATION_SPEC)
+assert MIGRATION_SPEC and MIGRATION_SPEC.loader
+MIGRATION_SPEC.loader.exec_module(migration)
 
 
 class PromptfooV2MockE2ETests(unittest.TestCase):
@@ -51,17 +58,36 @@ class PromptfooV2MockE2ETests(unittest.TestCase):
             run_id = "v2-run-e2e-001"
             # Model the canonical installed Slot 03 pointer. LAB approvals bind
             # to the selected lane runtime, which may differ from the supervisor.
+            # Build it through the real Worker installer code; never repair fixture
+            # permissions by hand, since that would hide installer regressions.
             runtime_root = support / "runtime"
             runtime_root.mkdir(mode=0o700)
-            lab_runtime = runtime_root / ("a" * 40)
-            lab_runtime.mkdir(mode=0o700)
-            for asset_name in lab_queue.WORKER_BUNDLE_ASSET_NAMES:
-                shutil.copyfile(WORKER_DIR / asset_name, lab_runtime / asset_name)
-                (lab_runtime / asset_name).chmod(0o600)
+            runtime_root.chmod(0o700)
+            source_sha = "a" * 40
+            worker_bundle_expected = lab_queue.worker_bundle_sha256(WORKER_DIR)
+            manifest = {
+                "source_sha": source_sha,
+                "bundle_sha256": worker_bundle_expected,
+                "assets": {name: migration.sha256(WORKER_DIR / name) for name in migration.ASSETS},
+            }
+
+            def fake_installer_subprocess_run(command, **_kwargs):
+                if command[1:3] == ["-m", "venv"]:
+                    venv_python = Path(command[3]) / "bin/python3.12"
+                    venv_python.parent.mkdir(parents=True)
+                    venv_python.write_text("staged Python 3.12")
+                    venv_python.chmod(0o700)
+                return __import__("subprocess").CompletedProcess(command, 0)
+
+            with patch.object(migration, "ROOT", support), \
+                    patch.object(migration, "subprocess", SimpleNamespace(run=fake_installer_subprocess_run)):
+                staged_runtime = migration._stage_runtime(manifest)
+                lab_runtime = migration._install_staged_runtime(staged_runtime, manifest)
             slot_dir = runtime_root / "slots" / "LAB"
             slot_dir.mkdir(parents=True, mode=0o700)
             (slot_dir / "current").symlink_to(lab_runtime)
             bundle = lab_queue.worker_bundle_sha256(lab_runtime)
+            self.assertEqual(bundle, worker_bundle_expected)
             phase = approval_phases.PhaseApprovalState(phase_dir / "v2-approval-phase.json")
             env = {
                 "PATH": os.environ.get("PATH", ""), "HOME": str(root), "TMPDIR": str(root),
@@ -101,6 +127,7 @@ class PromptfooV2MockE2ETests(unittest.TestCase):
                 spec.loader.exec_module(worker)
                 worker.SUPPORT = support
                 worker.STATUS = support / "worker-status.json"
+                self.assertEqual(worker._lab_slot_bundle_sha256(support), worker_bundle_expected)
 
                 def mock_inference(job, *, metadata_out=None, **_kwargs):
                     if metadata_out is not None:
