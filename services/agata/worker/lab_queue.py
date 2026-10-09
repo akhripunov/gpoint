@@ -40,27 +40,23 @@ JUDGE_CORE_DIMENSIONS = (
 )
 JUDGE_CONDITIONAL_DIMENSIONS = ("memory", "disagreement_boundaries", "humor_flirt", "engagement")
 JUDGE_PRIVATE_MARKERS = ("baseline", "naturalness-v1", "candidate_sha", "model_id", "gpt-6-luna", "policy text", "judge 1", "judge 2", "judge 3")
+WORKER_BUNDLE_ASSET_NAMES = (
+    "gpoint_mac_worker.py", "agata_worker_pool.py", "lab_queue.py",
+    "lab_fixture_manifest.json", "lab_promptfoo_compat_manifest.json",
+    "lab_v2_dev_manifest.json", "run_codex_worker.sh", "requirements.txt",
+)
 
 
 class LabQueueError(RuntimeError):
     """A local LAB submission or queue operation was rejected."""
 
 
-def worker_bundle_sha256() -> str:
+def worker_bundle_sha256(worker_dir: Path | None = None) -> str:
     """Hash the exact Worker asset set used to bind a private LAB approval."""
-    worker_dir = Path(__file__).resolve().parent
+    worker_dir = Path(worker_dir).resolve() if worker_dir is not None else Path(__file__).resolve().parent
     digest = hashlib.sha256()
-    assets = (
-        ("gpoint_mac_worker.py", worker_dir / "gpoint_mac_worker.py"),
-        ("agata_worker_pool.py", worker_dir / "agata_worker_pool.py"),
-        ("lab_queue.py", Path(__file__)),
-        ("lab_fixture_manifest.json", FIXTURE_MANIFEST),
-        ("lab_promptfoo_compat_manifest.json", PROMPTFOO_COMPAT_MANIFEST),
-        ("lab_v2_dev_manifest.json", V2_DEV_MANIFEST),
-        ("run_codex_worker.sh", worker_dir / "run_codex_worker.sh"),
-        ("requirements.txt", worker_dir / "requirements.txt"),
-    )
-    for name, path in assets:
+    for name in WORKER_BUNDLE_ASSET_NAMES:
+        path = worker_dir / name
         if not path.is_file() or path.is_symlink():
             raise LabQueueError("worker_asset_missing")
         digest.update(name.encode("utf-8") + b"\0")
