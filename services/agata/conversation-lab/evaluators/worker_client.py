@@ -48,8 +48,12 @@ def validate_owner_approval(job: dict, env=None) -> None:
                 or job.get("scenario_id") not in approval["scenario_ids"]):
             raise PermissionError("LAB OWNER approval does not cover this experiment invocation")
         lab_queue.validate_approval_for_job(job, approval, root=canonical_lab_queue(source_env))
-        calls = lab_queue.owner_approval_usage_calls(support, approval)
-        if calls >= approval["max_calls"]:
+        phase = ("GENERATOR" if job.get("experiment_id") == "agata-v2-naturalness-dev"
+                 else "JUDGES" if job.get("job_type") == "judge" else None)
+        calls = lab_queue.owner_approval_usage_calls(support, approval, phase=phase)
+        limit = (approval["max_generator_calls"] if phase == "GENERATOR" else
+                 approval["max_judge_calls"] if phase == "JUDGES" else approval.get("max_calls", 0))
+        if calls >= limit:
             raise PermissionError("LAB OWNER approval is consumed or unavailable")
     except PermissionError:
         raise

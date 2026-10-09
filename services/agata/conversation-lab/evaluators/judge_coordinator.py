@@ -50,20 +50,23 @@ def _approval_capacity(jobs: list[dict], env: Mapping[str, str]) -> None:
     approval = lab_queue.load_owner_approval(
         approval_path, expected_bundle_sha256=lab_queue.worker_bundle_sha256(),
     )
-    if (approval.get("phase") != "JUDGES" or approval.get("run_id") != jobs[0].get("run_id")
-            or approval.get("max_calls") != 3 or len(jobs) != 3
-            or approval.get("experiment_ids") != [lab_queue.JUDGE_EXPERIMENT_ID]
-            or set(approval.get("configuration_ids", [])) != {"judge-1", "judge-2", "judge-3"}
+    context = v2_provenance.live_run_context(jobs[0].get("scenario_id"))
+    if (approval.get("authorization_type") != "LIVE_RUN_AUTHORIZATION"
+            or any(approval.get(key) != value for key, value in context.items())
+            or approval.get("run_id") != jobs[0].get("run_id")
+            or approval.get("max_judge_calls") != 3 or len(jobs) != 3
+            or lab_queue.JUDGE_EXPERIMENT_ID not in approval.get("experiment_ids", [])
+            or not {"judge-1", "judge-2", "judge-3"}.issubset(set(approval.get("configuration_ids", [])))
             or set(approval.get("scenario_ids", [])) != {jobs[0].get("scenario_id")}):
-        raise PermissionError("Phase B approval must be the distinct exact-scope three-call judge approval")
+        raise PermissionError("Phase B requires the same exact-scope run authorization and three-call judge ceiling")
     for job in jobs:
         worker_client.validate_owner_approval(job, env)
         if (job["experiment_id"] not in approval["experiment_ids"]
                 or job["configuration_id"] not in approval["configuration_ids"]
                 or job["scenario_id"] not in approval["scenario_ids"]):
             raise PermissionError("LAB approval does not cover every judge invocation")
-    used = lab_queue.owner_approval_usage_calls(support, approval)
-    if used + len(jobs) > approval["max_calls"]:
+    used = lab_queue.owner_approval_usage_calls(support, approval, phase="JUDGES")
+    if used + len(jobs) > approval["max_judge_calls"]:
         raise PermissionError("LAB approval has insufficient remaining calls for the complete judge batch")
 
 
@@ -266,7 +269,9 @@ def run_judge_batch(packet: Mapping[str, object], rubric: Mapping[str, object], 
                               if row["invocation_id"] == invocation_id), None)
                 if entry is not None and entry["outcome"] is None:
                     ledger.complete("judge", invocation_id, "ambiguous")
-                continue
+                # A missing/invalid verdict is a failed invocation. Do not spend
+                # the remaining bounded judge budget after the first failure.
+                break
             collected[plan["scenario_id"]].append(normalized)
         except Exception:
             if _confirmed_model_mismatch(receipt_directory, invocation_id, expected_receipt):
@@ -278,6 +283,9 @@ def run_judge_batch(packet: Mapping[str, object], rubric: Mapping[str, object], 
                           if row["invocation_id"] == invocation_id), None)
             if entry is not None and entry["outcome"] is None:
                 ledger.complete("judge", invocation_id, "ambiguous")
+            # Exceptions may follow submission, so their outcome is ambiguous;
+            # later judges must not run after this invocation.
+            break
         finally:
             # Each Promptfoo Python provider is a child process and appends to
             # the same journal; refresh before the next invocation validates it.

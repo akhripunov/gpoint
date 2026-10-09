@@ -974,7 +974,7 @@ def _lab_slot_bundle_sha256(support: Path | None = None) -> str:
         raise FatalConfigurationError("lab_runtime_identity_invalid") from exc
 
 
-def _consume_lab_approval(approval: dict) -> None:
+def _consume_lab_approval(approval: dict, job: dict | None = None) -> None:
     """Consume one approval call before inference; ambiguous jobs are never retried."""
     try:
         usage = lab_queue.ensure_owner_approval_usage_dir(SUPPORT)
@@ -991,17 +991,35 @@ def _consume_lab_approval(approval: dict) -> None:
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
-            count = lab_queue.owner_approval_usage_calls(SUPPORT, approval)
+            if approval.get("authorization_type") == "LIVE_RUN_AUTHORIZATION":
+                phase = ("GENERATOR" if job and job.get("experiment_id") == "agata-v2-naturalness-dev"
+                         else "JUDGES" if job and job.get("job_type") == "judge" else None)
+                if phase is None:
+                    raise FatalConfigurationError("lab_approval_phase_invalid")
+                usage_counts = lab_queue.owner_approval_usage(SUPPORT, approval)
+                count = usage_counts["calls"]
+                phase_count = usage_counts["generator_calls" if phase == "GENERATOR" else "judge_calls"]
+                phase_limit = approval["max_generator_calls" if phase == "GENERATOR" else "max_judge_calls"]
+                if phase_count >= phase_limit or count >= approval["max_generator_calls"] + approval["max_judge_calls"]:
+                    raise FatalConfigurationError("lab_approval_call_limit_reached")
+                usage_payload = {
+                    "worker_bundle_sha256": approval["worker_bundle_sha256"], "calls": count + 1,
+                    "generator_calls": usage_counts["generator_calls"] + (phase == "GENERATOR"),
+                    "judge_calls": usage_counts["judge_calls"] + (phase == "JUDGES"),
+                }
+            else:
+                count = lab_queue.owner_approval_usage_calls(SUPPORT, approval)
+                if count >= approval["max_calls"]:
+                    raise FatalConfigurationError("lab_approval_call_limit_reached")
+                usage_payload = {"worker_bundle_sha256": approval["worker_bundle_sha256"], "calls": count + 1}
         except lab_queue.LabQueueError as exc:
             raise FatalConfigurationError(str(exc)) from exc
-        if count >= approval["max_calls"]:
-            raise FatalConfigurationError("lab_approval_call_limit_reached")
         temporary_fd, temporary_name = tempfile.mkstemp(prefix=f".{approval['approval_id']}-", dir=usage)
         temporary = Path(temporary_name)
         try:
             os.fchmod(temporary_fd, 0o600)
             with os.fdopen(temporary_fd, "w", encoding="utf-8") as stream:
-                json.dump({"worker_bundle_sha256": approval["worker_bundle_sha256"], "calls": count + 1}, stream)
+                json.dump(usage_payload, stream)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
@@ -1027,7 +1045,10 @@ def _lab_approval_gate_status(*, env=None, support: Path | None = None,
         calls = lab_queue.owner_approval_usage_calls(support_root, approval)
     except lab_queue.LabQueueError:
         return "CLOSED_NO_APPROVAL"
-    return "CLOSED_CONSUMED" if calls >= approval["max_calls"] else "OPEN_APPROVED"
+    limit = (approval["max_generator_calls"] + approval["max_judge_calls"]
+             if approval.get("authorization_type") == "LIVE_RUN_AUTHORIZATION"
+             else approval["max_calls"])
+    return "CLOSED_CONSUMED" if calls >= limit else "OPEN_APPROVED"
 
 
 def _lab_slot_approval_gate_status(support: Path) -> str:
@@ -1102,7 +1123,7 @@ def execute_lab_claimed_job(job: dict) -> bool:
     }
     started = None
     try:
-        _consume_lab_approval(approval)
+        _consume_lab_approval(approval, job)
         write_status(target=LAB_TARGET, state="running", current_job_present=True)
         started = time.monotonic()
         inference_job = {"target": LAB_TARGET, "request": job["request"]}
