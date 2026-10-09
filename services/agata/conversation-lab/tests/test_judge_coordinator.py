@@ -57,7 +57,7 @@ class JudgeCoordinatorTests(unittest.TestCase):
                           "critical_defects": [], "uncertainty": False, "position_sensitivity": False}
             common = {**expected, "outcome": "success", "worker_terminal_status": "completed",
                       "worker_receipt_sha256": "a" * 64, "model": "gpt-6-luna",
-                      "reasoning_effort": "medium", "actual_model": None,
+                      "reasoning_effort": "medium", "actual_model": None, "actual_model_source": None,
                       "model_identity_status": "MODEL_IDENTITY_UNVERIFIED",
                       "normalized_judge_receipt": normalized}
             cli = {"run_id": "batch-a", "batch_id": "batch-a",
@@ -187,6 +187,64 @@ class JudgeCoordinatorTests(unittest.TestCase):
             self.assertEqual(result["decision"], "HUMAN_ESCALATION")
             self.assertIn("MISSING_OR_INVALID_JUDGE_OUTPUT", result["scenarios"][0]["reason_codes"])
             self.assertEqual(ledger.snapshot()["judge_invocations"]["attempted"], 3)
+
+    def test_explicit_model_mismatch_stops_before_later_judges(self):
+        self.require_coordinator()
+        from run_coordinator import CallLedger
+        blind_packet, private_mapping = packet_and_mapping()
+        scenario_id = blind_packet["scenarios"][0]["scenario_id"]
+        rubric = json.loads((LAB / "configs/owner-preference-rubric-v1.json").read_text())
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); root.chmod(0o700)
+            receipts = root / "receipts"; receipts.mkdir(mode=0o700)
+            ledger = CallLedger(journal_path=root / "ledger.jsonl")
+            calls = []
+
+            def mismatch(prompt, *, config, call_ledger, receipt_directory, **_kwargs):
+                calls.append(config["judge_slot"])
+                invocation_id = config["invocation_id"]
+                job = coordinator.worker_client.build_judge_job(
+                    prompt, batch_id=config["batch_id"], scenario_id=config["scenario_id"],
+                    dataset_split=config["dataset_split"], judge_slot=config["judge_slot"],
+                    presented_labels=config["presented_labels"],
+                )
+                mismatch_receipt = {
+                    "run_id": config["run_id"], "batch_id": config["batch_id"],
+                    "promptfoo_invocation_id": invocation_id,
+                    "lab_ledger_attempt_id": invocation_id, "worker_job_id": job["job_id"],
+                    "worker_terminal_status": "completed", "worker_receipt_sha256": "b" * 64,
+                    "outcome": "provider_error", "model": "gpt-6-luna",
+                    "reasoning_effort": "medium", "actual_model": "gpt-6-sol",
+                    "actual_model_source": "codex_provider_response_metadata",
+                    "model_identity_status": "MODEL_IDENTITY_MISMATCH",
+                    "judge_slot": config["judge_slot"], "scenario_id": scenario_id,
+                    "dataset_split": "DEV", "presentation_labels": config["presented_labels"],
+                }
+                (receipt_directory / (invocation_id + ".judge-receipt.json")).write_text(
+                    json.dumps(mismatch_receipt))
+                call_ledger.complete("judge", invocation_id, "provider_error")
+                return 1
+
+            fake_approval = {"approval_id": "mock-approval", "phase": "JUDGES", "run_id": "batch-mismatch",
+                             "max_calls": 3, "experiment_ids": ["agata-lab-judge-v1"],
+                             "configuration_ids": ["judge-1", "judge-2", "judge-3"],
+                             "scenario_ids": [scenario_id]}
+            with patch.object(coordinator.worker_client, "validate_owner_approval"), \
+                 patch.object(coordinator.lab_queue, "load_owner_approval", return_value=fake_approval), \
+                 patch.object(coordinator.lab_queue, "owner_approval_usage_calls", return_value=0):
+                result = coordinator.run_judge_batch(
+                    blind_packet, rubric, batch_id="batch-mismatch", dataset_split="DEV", ledger=ledger,
+                    private_mapping=private_mapping, sanity_findings=[], receipt_directory=receipts,
+                    private_directory=root, env={"GPOINT_AGATA_WORKER_SUPPORT": str(root / "support")},
+                    promptfoo_executable="promptfoo", _invoke_promptfoo=mismatch,
+                )
+
+            self.assertEqual(calls, [1], "a confirmed mismatch must stop the remaining judge invocations")
+            self.assertEqual(result["decision"], "HUMAN_ESCALATION")
+            self.assertIn("MODEL_IDENTITY_MISMATCH", result["scenarios"][0]["reason_codes"])
+            snapshot = ledger.snapshot()["judge_invocations"]
+            self.assertEqual(snapshot["attempted"], 1)
+            self.assertEqual(snapshot["outcomes"], {"provider_error": 1})
 
     def test_sealed_split_and_three_pair_batch_fail_before_promptfoo_or_reservation(self):
         self.require_coordinator()

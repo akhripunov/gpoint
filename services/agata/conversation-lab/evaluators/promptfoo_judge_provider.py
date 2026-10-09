@@ -24,6 +24,7 @@ from run_coordinator import CallLedger  # noqa: E402
 
 MODEL = "gpt-6-luna"
 REASONING = "medium"
+PROVIDER_MODEL_IDENTITY_SOURCE = "codex_provider_response_metadata"
 MAX_WAIT_SECONDS = 240
 
 
@@ -110,6 +111,7 @@ class LabJudgeAdapter:
         receipt = None
         outcome = "ambiguous"
         actual_model = None
+        actual_model_source = None
         model_identity_status = "MODEL_IDENTITY_UNVERIFIED"
         try:
             returned_id = self.transport.submit(job)
@@ -143,7 +145,11 @@ class LabJudgeAdapter:
                     )
                 except (ValueError, TypeError) as exc:
                     raise AmbiguousJudgeResult("Worker receipt has no valid structured judge verdict") from exc
-                actual_model = execution.get("actual_model")
+                actual_model_source = execution.get("actual_model_source")
+                actual_model = (execution.get("actual_model")
+                                if actual_model_source == PROVIDER_MODEL_IDENTITY_SOURCE else None)
+                if actual_model is None:
+                    actual_model_source = None
                 if (execution.get("requested_model") != MODEL
                         or execution.get("requested_reasoning_effort") != REASONING):
                     raise AmbiguousJudgeResult("Worker receipt does not prove the exact judge model contract")
@@ -169,7 +175,8 @@ class LabJudgeAdapter:
                 "worker_job_id": job["job_id"],
                 "worker_receipt_sha256": self.transport.receipt_sha256(job["job_id"]),
                 "worker_terminal_status": receipt["status"], "model": MODEL,
-                "actual_model": actual_model, "model_identity_status": model_identity_status,
+                "actual_model": actual_model, "actual_model_source": actual_model_source,
+                "model_identity_status": model_identity_status,
                 "reasoning_effort": REASONING, "judge_slot": slot,
                 "scenario_id": scenario_id, "dataset_split": split,
                 "presentation_labels": order, "outcome": outcome,
@@ -199,6 +206,7 @@ class LabJudgeAdapter:
                         if submitted else None,
                         "worker_terminal_status": receipt.get("status") if isinstance(receipt, dict) else "unavailable",
                         "model": MODEL, "actual_model": actual_model,
+                        "actual_model_source": actual_model_source,
                         "model_identity_status": model_identity_status,
                         "reasoning_effort": REASONING, "judge_slot": slot,
                         "scenario_id": scenario_id, "dataset_split": split, "presentation_labels": order,

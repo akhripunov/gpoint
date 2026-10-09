@@ -115,7 +115,7 @@ class PromptfooJudgeProviderTests(unittest.TestCase):
                                 "promptfoo_invocation_id": INVOCATION_ID, "judge_schema_version": 1,
                                 "presented_labels": ["X", "Y"]},
                    "execution": {"requested_model": "gpt-6-luna", "requested_reasoning_effort": "medium",
-                                 "actual_model": None, "inference_started": True},
+                                 "actual_model": "gpt-6-sol", "inference_started": True},
                    "judge_verdict": verdict}
         with tempfile.TemporaryDirectory() as temporary:
             receipt_dir = Path(temporary)
@@ -129,6 +129,7 @@ class PromptfooJudgeProviderTests(unittest.TestCase):
         self.assertEqual(json.loads(result["output"]), verdict)
         self.assertEqual(evidence["outcome"], "success")
         self.assertIsNone(evidence["actual_model"])
+        self.assertIsNone(evidence["actual_model_source"])
         self.assertEqual(evidence["model_identity_status"], "MODEL_IDENTITY_UNVERIFIED")
 
     def test_explicit_worker_model_mismatch_fails_closed_and_is_recorded(self):
@@ -148,7 +149,9 @@ class PromptfooJudgeProviderTests(unittest.TestCase):
                                 "promptfoo_invocation_id": INVOCATION_ID, "judge_schema_version": 1,
                                 "presented_labels": ["X", "Y"]},
                    "execution": {"requested_model": "gpt-6-luna", "requested_reasoning_effort": "medium",
-                                 "actual_model": "gpt-6.1-sol", "inference_started": True},
+                                 "actual_model": "gpt-6.1-sol",
+                                 "actual_model_source": "codex_provider_response_metadata",
+                                 "inference_started": True},
                    "judge_verdict": verdict}
         with tempfile.TemporaryDirectory() as temporary:
             receipt_dir = Path(temporary)

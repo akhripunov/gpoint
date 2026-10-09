@@ -324,7 +324,8 @@ class PromptfooWorkerProviderTests(unittest.TestCase):
                 "job_id": "job-v2", "status": "completed", "response": "must not escape",
                 "slot_id": "slot-03", "identity": identity,
                 "execution": {"requested_model": "gpt-6-luna", "requested_reasoning_effort": "medium",
-                              "actual_model": "gpt-6-sol", "inference_started": True},
+                              "actual_model": "gpt-6-sol", "actual_model_source": "codex_provider_response_metadata",
+                              "inference_started": True},
             }, ledger=ledger)
             adapter = provider.WorkerLabAdapter(
                 ledger=ledger, transport=transport, run_id="run-v2",
@@ -346,6 +347,42 @@ class PromptfooWorkerProviderTests(unittest.TestCase):
             self.assertEqual(ledger.events[-1],
                              ("complete", "generator", "inv-v2-model-mismatch", "provider_error"))
             self.assertEqual(sum(event[0] == "submit" for event in transport.events), 1)
+
+    def test_unattributed_worker_model_field_is_unverified_not_provider_identity(self):
+        self.require_provider()
+        with tempfile.TemporaryDirectory() as temp:
+            receipts = Path(temp); receipts.chmod(0o700)
+            ledger = FakeLedger()
+            job = {
+                "job_id": "job-v2", "experiment_id": "agata-v2-naturalness-dev",
+                "configuration_id": "baseline", "scenario_id": "dev-sample", "turn_index": 0,
+                "run_id": "run-v2", "arm_id": "run-v2-baseline",
+                "promptfoo_invocation_id": "inv-v2-unattributed-model", "dataset_split": "DEV",
+                "source_scenario_sha256": "a" * 64,
+            }
+            identity = {key: job[key] for key in (
+                "experiment_id", "configuration_id", "scenario_id", "turn_index", "run_id",
+                "arm_id", "promptfoo_invocation_id", "dataset_split", "source_scenario_sha256")}
+            transport = FakeTransport({
+                "job_id": "job-v2", "status": "completed", "response": "synthetic response",
+                "slot_id": "slot-03", "identity": identity,
+                "execution": {"requested_model": "gpt-6-luna", "requested_reasoning_effort": "medium",
+                              "actual_model": "gpt-6-sol", "inference_started": True},
+            }, ledger=ledger)
+            adapter = provider.WorkerLabAdapter(
+                ledger=ledger, transport=transport, run_id="run-v2",
+                receipt_directory=receipts, env={"AGATA_LAB_PRIVATE_RECEIPTS": str(receipts)},
+            )
+            with patch.object(provider.worker_client, "build_v2_dev_job", return_value=job):
+                result = adapter.invoke_v2_dev(
+                    {"user_message": "synthetic"}, invocation_id="inv-v2-unattributed-model", run_id="run-v2",
+                    arm_id="run-v2-baseline", configuration_id="baseline", scenario_id="dev-sample",
+                    turn_index=0, history_receipt_ids=[],
+                )
+            payload = json.loads((receipts / "inv-v2-unattributed-model.worker-receipt.json").read_text())
+            self.assertEqual(payload["model_identity_status"], "MODEL_IDENTITY_UNVERIFIED")
+            self.assertIsNone(payload["actual_model"])
+            self.assertEqual(result, {"output": "synthetic response"})
 
     def test_v2_missing_receipt_wrong_identity_and_failed_or_ambiguous_inference_fail_closed(self):
         self.require_provider()

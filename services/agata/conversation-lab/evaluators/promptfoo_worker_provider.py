@@ -12,6 +12,7 @@ from typing import Mapping
 
 MODEL = "gpt-6-luna"
 REASONING = "medium"
+PROVIDER_MODEL_IDENTITY_SOURCE = "codex_provider_response_metadata"
 EXPERIMENT = "promptfoo-worker-compat"
 SCENARIO = "promptfoo-compat-001"
 POLL_SECONDS = 0.1
@@ -351,6 +352,7 @@ class WorkerLabAdapter:
         outcome = "ambiguous"
         model_identity_status = None
         actual_model = None
+        actual_model_source = None
         try:
             returned_id = self.transport.submit(job)
             submitted = True
@@ -374,7 +376,11 @@ class WorkerLabAdapter:
                         or execution.get("requested_model") != MODEL
                         or execution.get("requested_reasoning_effort") != REASONING):
                     raise AmbiguousWorkerResult("V2 receipt does not prove the configured model contract")
-                actual_model = execution.get("actual_model")
+                actual_model_source = execution.get("actual_model_source")
+                actual_model = (execution.get("actual_model")
+                                if actual_model_source == PROVIDER_MODEL_IDENTITY_SOURCE else None)
+                if actual_model is None:
+                    actual_model_source = None
                 if actual_model is None:
                     model_identity_status = "MODEL_IDENTITY_UNVERIFIED"
                     outcome = "success"
@@ -396,7 +402,8 @@ class WorkerLabAdapter:
                 "lab_ledger_attempt_id": invocation_id,
                 "worker_receipt_sha256": self.transport.receipt_sha256(job["job_id"]),
                 "worker_terminal_status": receipt["status"], "promptfoo_outcome": outcome,
-                "actual_model": actual_model, "model_identity_status": model_identity_status,
+                "actual_model": actual_model, "actual_model_source": actual_model_source,
+                "model_identity_status": model_identity_status,
                 "output_sha256": hashlib.sha256(output.encode()).hexdigest() if output else None,
             }
             ledger.complete("generator", invocation_id, outcome)
