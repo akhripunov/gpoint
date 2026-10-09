@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -9,6 +10,28 @@ from typing import Mapping
 
 LAB = Path(__file__).resolve().parents[1]
 WORKER = LAB.parents[0] / "worker"
+REPO_ROOT = LAB.parents[2]
+
+
+class OfflinePreflightError(PermissionError):
+    """Sanitized, stable failure for a deterministic no-approval preflight."""
+
+    def __init__(self, stage: str, reason_code: str, cause: BaseException):
+        self.stage = stage
+        self.reason_code = reason_code
+        self.cause_type = type(cause).__name__
+        super().__init__(f"{stage}:{reason_code}")
+
+
+def worker_install_bundle_sha256() -> str:
+    """Compute the canonical immutable install-manifest fingerprint without network access."""
+    assets = {}
+    for name in migrate_worker_runtime.ASSETS:
+        path = WORKER / name
+        if path.is_symlink() or not path.is_file():
+            raise PermissionError("canonical Worker install asset is missing or unsafe")
+        assets[name] = migrate_worker_runtime.sha256(path)
+    return hashlib.sha256(json.dumps(assets, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 for _path in (LAB / "evaluators", WORKER):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
@@ -21,7 +44,11 @@ import migrate_worker_runtime  # noqa: E402
 import promptfoo_runner  # noqa: E402
 import v2_provenance  # noqa: E402
 import worker_client  # noqa: E402
-from run_coordinator import CallLedger, run_v2_dev_scenario  # noqa: E402
+from run_coordinator import (  # noqa: E402
+    CallLedger,
+    build_v2_dev_request,
+    run_v2_dev_scenario,
+)
 
 
 def _private_sanity_findings(private_mapping: Mapping[str, object], scenario_id: str) -> list:
@@ -31,6 +58,107 @@ def _private_sanity_findings(private_mapping: Mapping[str, object], scenario_id:
             or not isinstance(records[0].get("private_quality_findings"), list)):
         return [{"code": "INVALID_SANITY_RECEIPT"}]
     return list(records[0]["private_quality_findings"])
+
+
+def validate_offline_runner_prerequisites(
+    scenario_id: str, promptfoo_executable: str, env: Mapping[str, str], *, cwd: Path | None = None,
+    expected_source_sha: str | None = None, expected_lab_bundle_sha256: str | None = None,
+    expected_lab_approval_bundle_sha256: str | None = None,
+    expected_worker_install_bundle_sha256: str | None = None,
+) -> dict:
+    """Validate deterministic source/runtime/CLI prerequisites without approval or run state."""
+    def checked(stage: str, reason_code: str, function):
+        try:
+            return function()
+        except OfflinePreflightError:
+            raise
+        except Exception as exc:
+            raise OfflinePreflightError(stage, reason_code, exc) from exc
+
+    def verify_root():
+        if (Path.cwd() if cwd is None else Path(cwd)).resolve() != REPO_ROOT.resolve():
+            raise PermissionError("repository root mismatch")
+
+    checked("WORKING_DIRECTORY", "REPOSITORY_ROOT_MISMATCH", verify_root)
+    if not all((expected_source_sha, expected_lab_bundle_sha256,
+                expected_lab_approval_bundle_sha256, expected_worker_install_bundle_sha256)):
+        raise OfflinePreflightError("EXACT_CANDIDATE", "EXPECTED_FINGERPRINT_REQUIRED",
+                                    ValueError("exact source and bundle fingerprints are required"))
+    context = checked("SOURCE_AND_FIXTURES", "V2_CONTEXT_INVALID",
+                      lambda: v2_provenance.live_run_context(scenario_id))
+    if context.get("dataset_split") != "DEV":
+        raise OfflinePreflightError("SOURCE_AND_FIXTURES", "V2_SCENARIO_NOT_DEV",
+                                    PermissionError("scenario is outside DEV"))
+    if expected_source_sha is not None and context.get("source_sha") != expected_source_sha:
+        raise OfflinePreflightError("SOURCE_AND_FIXTURES", "EXACT_SOURCE_MISMATCH",
+                                    PermissionError("exact source mismatch"))
+    if (expected_lab_bundle_sha256 is not None
+            and context.get("lab_bundle_sha256") != expected_lab_bundle_sha256):
+        raise OfflinePreflightError("SOURCE_AND_FIXTURES", "LAB_BUNDLE_MISMATCH",
+                                    PermissionError("Lab bundle mismatch"))
+    lab_approval_bundle = checked("LAB_APPROVAL_BUNDLE", "LAB_APPROVAL_FINGERPRINT_INVALID",
+                                  lab_queue.worker_bundle_sha256)
+    if (expected_lab_approval_bundle_sha256 is not None
+            and lab_approval_bundle != expected_lab_approval_bundle_sha256):
+        raise OfflinePreflightError("LAB_APPROVAL_BUNDLE", "LAB_APPROVAL_BUNDLE_MISMATCH",
+                                    PermissionError("LAB approval bundle mismatch"))
+
+    worker_install_bundle = checked(
+        "WORKER_INSTALL_BUNDLE", "WORKER_INSTALL_FINGERPRINT_INVALID", worker_install_bundle_sha256,
+    )
+    if (expected_worker_install_bundle_sha256 is not None
+            and worker_install_bundle != expected_worker_install_bundle_sha256):
+        raise OfflinePreflightError("WORKER_INSTALL_BUNDLE", "WORKER_INSTALL_BUNDLE_MISMATCH",
+                                    PermissionError("Worker install bundle mismatch"))
+    promptfoo_version = checked(
+        "PROMPTFOO_CLI", "PINNED_CLI_INVALID",
+        lambda: promptfoo_runner.validate_promptfoo_cli(promptfoo_executable),
+    )
+    checked("NODE_RUNTIME", "NODE_VERSION_OR_PATH_INVALID",
+            lambda: promptfoo_runner.resolve_promptfoo_node(promptfoo_runner.build_cli_environment(env)))
+    checked("PYTHON_RUNTIME", "WORKER_PYTHON_INVALID", lambda: promptfoo_runner.validate_promptfoo_python(
+        env.get("PROMPTFOO_PYTHON") or sys.executable, env,
+    ))
+    def validate_provider_contracts():
+        manifest, scenarios = v2_provenance.load_split("DEV")
+        scenario = scenarios.get(scenario_id)
+        if scenario is None:
+            raise PermissionError("scenario not in committed DEV split")
+        run_id = "agata-offline-preflight"
+        configs = []
+        for configuration_id in ("baseline", "naturalness-v1"):
+            request = build_v2_dev_request(scenario, configuration_id, 0, [])
+            invocation_id = "pfv2-" + hashlib.sha256(
+                f"{run_id}\0{configuration_id}\0{0}".encode()).hexdigest()[:59]
+            config = promptfoo_runner.build_worker_v2_provider_request(
+                request, run_id=run_id, invocation_id=invocation_id,
+                arm_id=f"{run_id}-{configuration_id}", configuration_id=configuration_id,
+                scenario_id=scenario_id, turn_index=0, history_receipt_ids=[],
+                python_executable=env.get("PROMPTFOO_PYTHON") or sys.executable,
+            )
+            provider = config["providers"][0]
+            provider_config = provider.get("config", {})
+            if (provider_config.get("model") != "gpt-6-luna"
+                    or provider_config.get("reasoning_effort") != "medium"
+                    or provider_config.get("maxRetries") != 0
+                    or provider_config.get("fallbacks") != []):
+                raise PermissionError("provider model/budget contract is not exact")
+            promptfoo_runner.validate_live_environment(env, config)
+            configs.append(config)
+        if len(configs) != 2 or manifest.get("dataset_id") != "agata-conversation-lab-v2":
+            raise PermissionError("V2 provider arm contracts are incomplete")
+
+    checked("PROVIDER_AND_ENVIRONMENT", "V2_WORKER_PROVIDER_CONTRACT_INVALID", validate_provider_contracts)
+    return {
+        "status": "OFFLINE_PREFLIGHT_PASS", "source_sha": context["source_sha"],
+        "lab_bundle_sha256": context["lab_bundle_sha256"], "scenario_id": scenario_id,
+        "dataset_split": "DEV", "promptfoo_version": promptfoo_version,
+        "node_requirement": "22.22.0+ verified", "python_requirement": "3.11+ verified",
+        "model_contract": "gpt-6-luna / medium", "provider": "canonical Worker LAB adapter",
+        "lab_approval_bundle_sha256": lab_approval_bundle,
+        "worker_install_bundle_sha256": worker_install_bundle,
+        "approval_read": False, "run_state_created": False,
+    }
 
 
 def _require_phase_safety_preflight(phase: str) -> dict:
@@ -84,8 +212,19 @@ def _require_phase_safety_preflight(phase: str) -> dict:
 def run_v2_live_e2e(
     scenario_id: str, *, run_id: str, ledger: CallLedger, promptfoo_executable: str,
     receipt_directory: Path, private_directory: Path, env: Mapping[str, str],
+    expected_source_sha: str, expected_lab_bundle_sha256: str,
+    expected_lab_approval_bundle_sha256: str, expected_worker_install_bundle_sha256: str,
 ) -> dict:
     """Run one immutable A+B authorization; never creates approvals or retries calls."""
+    # Keep every deterministic local prerequisite ahead of approval lookup and
+    # phase-state creation. The CLI also runs this before creating the durable run directory.
+    validate_offline_runner_prerequisites(
+        scenario_id, promptfoo_executable, env,
+        expected_source_sha=expected_source_sha,
+        expected_lab_bundle_sha256=expected_lab_bundle_sha256,
+        expected_lab_approval_bundle_sha256=expected_lab_approval_bundle_sha256,
+        expected_worker_install_bundle_sha256=expected_worker_install_bundle_sha256,
+    )
     queue = worker_client.canonical_lab_queue(env)
     support = queue.parents[1]
     approval_path = Path(env.get("AGATA_LAB_APPROVAL_FILE") or

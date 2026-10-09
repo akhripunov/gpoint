@@ -198,6 +198,10 @@ class PromptfooV2MockE2ETests(unittest.TestCase):
                         scenario_id, run_id=run_id, ledger=ledger,
                         promptfoo_executable=str(promptfoo), receipt_directory=receipts,
                         private_directory=root, env=env,
+                        expected_source_sha=source_sha,
+                        expected_lab_bundle_sha256=approval["lab_bundle_sha256"],
+                        expected_lab_approval_bundle_sha256=approval["worker_bundle_sha256"],
+                        expected_worker_install_bundle_sha256=live_e2e.worker_install_bundle_sha256(),
                     )
                 self.assertEqual(outcome["status"], "COMPLETED")
                 self.assertEqual(preflight_generator_counts, [0, 8])

@@ -243,6 +243,10 @@ class V2GeneratorContractTests(unittest.TestCase):
                     live_e2e.run_v2_live_e2e(
                         scenario_id, run_id=run_id, ledger=ledger, promptfoo_executable="/mock/promptfoo",
                         receipt_directory=receipts, private_directory=private, env=env,
+                        expected_source_sha=context["source_sha"],
+                        expected_lab_bundle_sha256=context["lab_bundle_sha256"],
+                        expected_lab_approval_bundle_sha256=bundle,
+                        expected_worker_install_bundle_sha256=live_e2e.worker_install_bundle_sha256(),
                     )
 
             phase_state = approval_phases.PhaseApprovalState(
