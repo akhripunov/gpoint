@@ -2388,7 +2388,9 @@ def test_stage_runtime_uses_running_python312_when_missing_from_path(tmp_path, m
     assets = {}
     for name in migration.ASSETS:
         payload = f"asset:{name}".encode()
-        (worker_dir / name).write_bytes(payload)
+        source = worker_dir / name
+        source.write_bytes(payload)
+        source.chmod(0o644)
         assets[name] = hashlib.sha256(payload).hexdigest()
     manifest = {"source_sha": "e" * 40, "assets": assets, "bundle_sha256": "f" * 64}
     current_python = tmp_path / "legacy-venv/bin/python"
@@ -2422,4 +2424,169 @@ def test_stage_runtime_uses_running_python312_when_missing_from_path(tmp_path, m
     assert os.access(release / "run_codex_worker.sh", os.X_OK)
     assert all((release / name).read_bytes() == (worker_dir / name).read_bytes()
                for name in migration.ASSETS)
+    assert all((release / name).stat().st_mode & 0o777 ==
+               (0o700 if name == "run_codex_worker.sh" else 0o600)
+               for name in migration.ASSETS)
     assert (release / "lab_promptfoo_compat_manifest.json").is_file()
+
+
+def _make_staged_runtime_fixture(tmp_path):
+    runtime = tmp_path / "runtime" / ("a" * 40)
+    runtime.mkdir(parents=True, mode=0o700)
+    runtime.chmod(0o700)
+    assets = {}
+    for name in migration.ASSETS:
+        payload = f"verified:{name}".encode()
+        path = runtime / name
+        path.write_bytes(payload)
+        path.chmod(0o700 if name == "run_codex_worker.sh" else 0o600)
+        assets[name] = hashlib.sha256(payload).hexdigest()
+    manifest = {"source_sha": "a" * 40, "assets": assets, "bundle_sha256": "b" * 64}
+    manifest_path = runtime / "bundle-manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    manifest_path.chmod(0o600)
+    python = runtime / ".venv/bin/python3.12"
+    python.parent.mkdir(parents=True, mode=0o700)
+    python.write_text("test interpreter")
+    python.chmod(0o700)
+    return runtime, manifest
+
+
+def test_verify_staged_runtime_rejects_world_readable_worker_asset(tmp_path, monkeypatch):
+    runtime, manifest = _make_staged_runtime_fixture(tmp_path)
+    (runtime / "lab_queue.py").chmod(0o644)
+    monkeypatch.setattr(migration.subprocess, "run", lambda *args, **kwargs:
+                        subprocess.CompletedProcess(args[0], 0))
+
+    with pytest.raises(RuntimeError, match="worker_runtime_asset_permissions_invalid"):
+        migration._verify_staged_runtime(runtime, manifest)
+
+
+def test_verify_staged_runtime_rejects_symlink_worker_asset(tmp_path, monkeypatch):
+    runtime, manifest = _make_staged_runtime_fixture(tmp_path)
+    asset = runtime / "lab_queue.py"
+    payload = tmp_path / "replacement.py"
+    payload.write_bytes(asset.read_bytes())
+    payload.chmod(0o600)
+    asset.unlink()
+    asset.symlink_to(payload)
+    monkeypatch.setattr(migration.subprocess, "run", lambda *args, **kwargs:
+                        subprocess.CompletedProcess(args[0], 0))
+
+    with pytest.raises(RuntimeError, match="worker_runtime_asset_symlink_invalid"):
+        migration._verify_staged_runtime(runtime, manifest)
+
+
+def test_verify_staged_runtime_rejects_unowned_worker_asset(tmp_path, monkeypatch):
+    runtime, manifest = _make_staged_runtime_fixture(tmp_path)
+    real_uid = os.getuid()
+    real_lstat = Path.lstat
+    asset = runtime / "lab_queue.py"
+
+    def fake_lstat(path):
+        result = real_lstat(path)
+        if path == asset:
+            return type(result)(tuple(result[:4]) + (real_uid + 1,) + tuple(result[5:]))
+        return result
+
+    monkeypatch.setattr(Path, "lstat", fake_lstat)
+    monkeypatch.setattr(migration.subprocess, "run", lambda *args, **kwargs:
+                        subprocess.CompletedProcess(args[0], 0))
+
+    with pytest.raises(RuntimeError, match="worker_runtime_owner_invalid"):
+        migration._verify_staged_runtime(runtime, manifest)
+
+
+def test_stage_runtime_rejects_symlink_source_asset(tmp_path, monkeypatch):
+    worker_dir = tmp_path / "source"
+    worker_dir.mkdir()
+    assets = {}
+    for name in migration.ASSETS:
+        payload = f"asset:{name}".encode()
+        path = worker_dir / name
+        path.write_bytes(payload)
+        path.chmod(0o644)
+        assets[name] = hashlib.sha256(payload).hexdigest()
+    replacement = tmp_path / "replacement.py"
+    replacement.write_bytes((worker_dir / "lab_queue.py").read_bytes())
+    (worker_dir / "lab_queue.py").unlink()
+    (worker_dir / "lab_queue.py").symlink_to(replacement)
+    manifest = {"source_sha": "c" * 40, "assets": assets, "bundle_sha256": "d" * 64}
+    monkeypatch.setattr(migration, "WORKER_DIR", worker_dir)
+    monkeypatch.setattr(migration, "ROOT", tmp_path / "new-runtime")
+
+    def run(command, **kwargs):
+        if command[1:3] == ["-m", "venv"]:
+            python = Path(command[3]) / "bin/python3.12"
+            python.parent.mkdir(parents=True)
+            python.write_text("staged Python 3.12")
+            python.chmod(0o700)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(migration.subprocess, "run", run)
+
+    with pytest.raises(RuntimeError, match="worker_runtime_asset_source_symlink_invalid"):
+        migration._stage_runtime(manifest)
+
+
+def test_stage_runtime_reuse_rejects_unsafe_existing_asset_mode(tmp_path, monkeypatch):
+    runtime, manifest = _make_staged_runtime_fixture(tmp_path)
+    monkeypatch.setattr(migration, "ROOT", tmp_path)
+    (runtime / "lab_queue.py").chmod(0o644)
+
+    with pytest.raises(RuntimeError, match="worker_runtime_asset_permissions_invalid"):
+        migration._stage_runtime(manifest)
+
+
+def test_stage_runtime_reuse_rejects_modified_existing_asset_bytes(tmp_path, monkeypatch):
+    runtime, manifest = _make_staged_runtime_fixture(tmp_path)
+    monkeypatch.setattr(migration, "ROOT", tmp_path)
+    asset = runtime / "lab_queue.py"
+    asset.write_text("changed content")
+    asset.chmod(0o600)
+
+    with pytest.raises(RuntimeError, match="worker_runtime_asset_content_mismatch"):
+        migration._stage_runtime(manifest)
+
+
+@pytest.mark.parametrize("target_kind", ["release", "staged_release"])
+def test_stage_runtime_rejects_dangling_release_symlink(tmp_path, monkeypatch, target_kind):
+    runtime_root = tmp_path / "runtime"
+    stage_root = tmp_path / "staging"
+    runtime_root.mkdir(mode=0o700)
+    stage_root.mkdir(mode=0o700)
+    runtime_root.chmod(0o700)
+    stage_root.chmod(0o700)
+    monkeypatch.setattr(migration, "ROOT", tmp_path)
+    monkeypatch.setattr(migration, "_runtime_staging_base", lambda: stage_root)
+    target = runtime_root / ("a" * 40) if target_kind == "release" else stage_root / ("a" * 40)
+    target.symlink_to(tmp_path / "missing-target")
+    manifest = {"source_sha": "a" * 40, "assets": {name: "0" * 64 for name in migration.ASSETS},
+                "bundle_sha256": "b" * 64}
+
+    with pytest.raises(RuntimeError, match="worker_runtime_release_path_symlink_invalid"):
+        migration._stage_runtime(manifest)
+
+    assert target.is_symlink()
+
+
+@pytest.mark.parametrize("target_kind", ["release", "staged_release"])
+def test_install_staged_runtime_rejects_dangling_release_symlink(tmp_path, monkeypatch, target_kind):
+    runtime_root = tmp_path / "runtime"
+    stage_root = tmp_path / "staging"
+    runtime_root.mkdir(mode=0o700)
+    stage_root.mkdir(mode=0o700)
+    runtime_root.chmod(0o700)
+    stage_root.chmod(0o700)
+    monkeypatch.setattr(migration, "ROOT", tmp_path)
+    release = runtime_root / ("a" * 40)
+    staged_release = stage_root / ("a" * 40)
+    target = release if target_kind == "release" else staged_release
+    target.symlink_to(tmp_path / "missing-target")
+    manifest = {"source_sha": "a" * 40, "assets": {name: "0" * 64 for name in migration.ASSETS},
+                "bundle_sha256": "b" * 64}
+
+    with pytest.raises(RuntimeError, match="worker_runtime_release_path_symlink_invalid"):
+        migration._install_staged_runtime(staged_release, manifest)
+
+    assert target.is_symlink()
