@@ -695,10 +695,19 @@ def finish(
             receipt["judge_verdict"] = verdict
     if execution:
         safe = {}
-        for key in ("duration_ms", "timeout_seconds", "requested_model", "requested_reasoning_effort", "actual_model", "inference_started"):
+        for key in ("duration_ms", "timeout_seconds", "requested_model", "requested_reasoning_effort", "inference_started"):
             value = execution.get(key)
             if isinstance(value, (str, int, float)) or value is None:
                 safe[key] = value
+        actual_model = execution.get("actual_model")
+        actual_model_source = execution.get("actual_model_source")
+        if (isinstance(actual_model, str) and actual_model.strip() and len(actual_model) <= 128
+                and actual_model_source == "codex_provider_response_metadata"):
+            safe["actual_model"] = actual_model.strip()
+            safe["actual_model_source"] = actual_model_source
+        else:
+            safe["actual_model"] = None
+            safe["actual_model_source"] = None
         usage = execution.get("cli_reported_usage")
         if isinstance(usage, dict) and all(
             isinstance(key, str) and (isinstance(value, (str, int, float, bool)) or value is None)

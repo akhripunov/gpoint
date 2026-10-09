@@ -70,6 +70,31 @@ class LabQueueTests(unittest.TestCase):
         self.assertEqual(receipt["status"], "completed")
         self.assertEqual((self.root / "receipts/job-001.json").stat().st_mode & 0o077, 0)
 
+    def test_receipt_preserves_only_source_attributed_provider_model_identity(self):
+        job = payload()
+        lab_queue.submit(job, root=self.root)
+        lab_queue.claim_next(self.root)
+        lab_queue.finish(
+            self.root, job["job_id"], status="completed", response="reply",
+            execution={"requested_model": "gpt-6-luna", "requested_reasoning_effort": "medium",
+                       "actual_model": "gpt-6-sol", "actual_model_source": "codex_provider_response_metadata"},
+        )
+        execution = lab_queue.read_receipt(self.root, job["job_id"])["execution"]
+        self.assertEqual(execution["actual_model"], "gpt-6-sol")
+        self.assertEqual(execution["actual_model_source"], "codex_provider_response_metadata")
+
+        second = payload("job-002")
+        lab_queue.submit(second, root=self.root)
+        lab_queue.claim_next(self.root)
+        lab_queue.finish(
+            self.root, second["job_id"], status="completed", response="reply",
+            execution={"requested_model": "gpt-6-luna", "requested_reasoning_effort": "medium",
+                       "actual_model": "gpt-6-sol", "actual_model_source": "untrusted-banner"},
+        )
+        execution = lab_queue.read_receipt(self.root, second["job_id"])["execution"]
+        self.assertIsNone(execution["actual_model"])
+        self.assertIsNone(execution["actual_model_source"])
+
     def test_duplicate_id_and_queue_limit_fail_closed(self):
         lab_queue.submit(payload(), root=self.root, max_pending=1)
         with self.assertRaisesRegex(lab_queue.LabQueueError, "duplicate"):

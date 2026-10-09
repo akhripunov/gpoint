@@ -2,7 +2,9 @@
 import importlib.util
 import hashlib
 import json
+import os
 from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -95,6 +97,78 @@ class PromptfooJudgeProviderTests(unittest.TestCase):
         self.assertEqual(transport.jobs[0]["origin"], "conversation-lab-judge")
         self.assertEqual(transport.jobs[0]["model"], "gpt-6-luna")
         self.assertEqual(ledger.events, [("judge", INVOCATION_ID, "success")])
+
+    def test_missing_provider_model_identity_is_success_but_explicitly_unverified(self):
+        self.require_provider()
+        from judges import CORE_IDS
+        verdict = {"overall": "first", "core_dimensions": {key: "first" for key in CORE_IDS},
+                   "conditional_evidence": {}, "reasons": ["The first is responsive."], "defects": [],
+                   "uncertainty": False, "position_sensitivity": False}
+        job = provider.worker_client.build_judge_job(
+            "blind prompt", batch_id="batch-a", scenario_id="dev-clean-01", dataset_split="DEV",
+            judge_slot=1, presented_labels=["X", "Y"],
+        )
+        receipt = {"job_id": job["job_id"], "status": "completed", "slot_id": "slot-03",
+                   "identity": {"experiment_id": job["experiment_id"], "configuration_id": job["configuration_id"],
+                                "scenario_id": job["scenario_id"], "turn_index": 0, "job_type": "judge",
+                                "dataset_split": "DEV", "judge_slot": 1,
+                                "promptfoo_invocation_id": INVOCATION_ID, "judge_schema_version": 1,
+                                "presented_labels": ["X", "Y"]},
+                   "execution": {"requested_model": "gpt-6-luna", "requested_reasoning_effort": "medium",
+                                 "actual_model": "gpt-6-sol", "inference_started": True},
+                   "judge_verdict": verdict}
+        with tempfile.TemporaryDirectory() as temporary:
+            receipt_dir = Path(temporary)
+            os.chmod(receipt_dir, 0o700)
+            ledger, transport = FakeLedger(), FakeTransport(receipt)
+            adapter = provider.LabJudgeAdapter(ledger=ledger, transport=transport, run_id="batch-a",
+                                               receipt_directory=receipt_dir)
+            with patch.object(provider.worker_client, "validate_owner_approval"):
+                result = adapter.invoke("blind prompt", config=config())
+            evidence = json.loads((receipt_dir / f"{INVOCATION_ID}.judge-receipt.json").read_text())
+        self.assertEqual(json.loads(result["output"]), verdict)
+        self.assertEqual(evidence["outcome"], "success")
+        self.assertIsNone(evidence["actual_model"])
+        self.assertIsNone(evidence["actual_model_source"])
+        self.assertEqual(evidence["model_identity_status"], "MODEL_IDENTITY_UNVERIFIED")
+
+    def test_explicit_worker_model_mismatch_fails_closed_and_is_recorded(self):
+        self.require_provider()
+        from judges import CORE_IDS
+        verdict = {"overall": "first", "core_dimensions": {key: "first" for key in CORE_IDS},
+                   "conditional_evidence": {}, "reasons": ["The first is responsive."], "defects": [],
+                   "uncertainty": False, "position_sensitivity": False}
+        job = provider.worker_client.build_judge_job(
+            "blind prompt", batch_id="batch-a", scenario_id="dev-clean-01", dataset_split="DEV",
+            judge_slot=1, presented_labels=["X", "Y"],
+        )
+        receipt = {"job_id": job["job_id"], "status": "completed", "slot_id": "slot-03",
+                   "identity": {"experiment_id": job["experiment_id"], "configuration_id": job["configuration_id"],
+                                "scenario_id": job["scenario_id"], "turn_index": 0, "job_type": "judge",
+                                "dataset_split": "DEV", "judge_slot": 1,
+                                "promptfoo_invocation_id": INVOCATION_ID, "judge_schema_version": 1,
+                                "presented_labels": ["X", "Y"]},
+                   "execution": {"requested_model": "gpt-6-luna", "requested_reasoning_effort": "medium",
+                                 "actual_model": "gpt-6.1-sol",
+                                 "actual_model_source": "codex_provider_response_metadata",
+                                 "inference_started": True},
+                   "judge_verdict": verdict}
+        with tempfile.TemporaryDirectory() as temporary:
+            receipt_dir = Path(temporary)
+            os.chmod(receipt_dir, 0o700)
+            ledger, transport = FakeLedger(), FakeTransport(receipt)
+            adapter = provider.LabJudgeAdapter(ledger=ledger, transport=transport, run_id="batch-a",
+                                               receipt_directory=receipt_dir)
+            with patch.object(provider.worker_client, "validate_owner_approval"), self.assertRaises(
+                provider.JudgeModelIdentityMismatch
+            ):
+                adapter.invoke("blind prompt", config=config())
+            evidence = json.loads((receipt_dir / f"{INVOCATION_ID}.judge-receipt.json").read_text())
+        self.assertEqual(ledger.events, [("judge", INVOCATION_ID, "provider_error")])
+        self.assertEqual(evidence["outcome"], "provider_error")
+        self.assertEqual(evidence["actual_model"], "gpt-6.1-sol")
+        self.assertEqual(evidence["model_identity_status"], "MODEL_IDENTITY_MISMATCH")
+        self.assertIsNone(evidence["normalized_judge_receipt"])
 
     def test_api_key_model_override_and_unreserved_invocations_fail_before_submission(self):
         self.require_provider()

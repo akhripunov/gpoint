@@ -24,11 +24,16 @@ from run_coordinator import CallLedger  # noqa: E402
 
 MODEL = "gpt-6-luna"
 REASONING = "medium"
+PROVIDER_MODEL_IDENTITY_SOURCE = "codex_provider_response_metadata"
 MAX_WAIT_SECONDS = 240
 
 
 class AmbiguousJudgeResult(RuntimeError):
     """The Worker may have started a judge invocation; retries are forbidden."""
+
+
+class JudgeModelIdentityMismatch(RuntimeError):
+    """A provider-reported judge model differs from the approved model."""
 
 
 def _config(options: object) -> Mapping[str, object]:
@@ -105,6 +110,9 @@ class LabJudgeAdapter:
         completed = False
         receipt = None
         outcome = "ambiguous"
+        actual_model = None
+        actual_model_source = None
+        model_identity_status = "MODEL_IDENTITY_UNVERIFIED"
         try:
             returned_id = self.transport.submit(job)
             submitted = True
@@ -137,11 +145,25 @@ class LabJudgeAdapter:
                     )
                 except (ValueError, TypeError) as exc:
                     raise AmbiguousJudgeResult("Worker receipt has no valid structured judge verdict") from exc
+                actual_model_source = execution.get("actual_model_source")
+                actual_model = (execution.get("actual_model")
+                                if actual_model_source == PROVIDER_MODEL_IDENTITY_SOURCE else None)
+                if actual_model is None:
+                    actual_model_source = None
                 if (execution.get("requested_model") != MODEL
-                        or execution.get("requested_reasoning_effort") != REASONING
-                        or execution.get("actual_model") not in {None, MODEL}):
+                        or execution.get("requested_reasoning_effort") != REASONING):
                     raise AmbiguousJudgeResult("Worker receipt does not prove the exact judge model contract")
-                outcome = "success"
+                if actual_model is None:
+                    model_identity_status = "MODEL_IDENTITY_UNVERIFIED"
+                    outcome = "success"
+                elif not isinstance(actual_model, str) or not actual_model.strip():
+                    raise AmbiguousJudgeResult("Worker receipt has malformed provider model identity")
+                elif actual_model != MODEL:
+                    model_identity_status = "MODEL_IDENTITY_MISMATCH"
+                    normalized, outcome = None, "provider_error"
+                else:
+                    model_identity_status = "MODEL_IDENTITY_VERIFIED"
+                    outcome = "success"
             elif receipt["status"] == "failed" and execution.get("inference_started") is False:
                 normalized, outcome = None, "provider_error"
             else:
@@ -153,6 +175,8 @@ class LabJudgeAdapter:
                 "worker_job_id": job["job_id"],
                 "worker_receipt_sha256": self.transport.receipt_sha256(job["job_id"]),
                 "worker_terminal_status": receipt["status"], "model": MODEL,
+                "actual_model": actual_model, "actual_model_source": actual_model_source,
+                "model_identity_status": model_identity_status,
                 "reasoning_effort": REASONING, "judge_slot": slot,
                 "scenario_id": scenario_id, "dataset_split": split,
                 "presentation_labels": order, "outcome": outcome,
@@ -165,6 +189,8 @@ class LabJudgeAdapter:
                 return {"output": json.dumps(verdict, ensure_ascii=False, sort_keys=True, separators=(",", ":"))}
             if outcome == "ambiguous":
                 raise AmbiguousJudgeResult("judge result is ambiguous; retries are forbidden")
+            if model_identity_status == "MODEL_IDENTITY_MISMATCH":
+                raise JudgeModelIdentityMismatch("provider-reported judge model mismatched the approved model")
             raise RuntimeError("Worker rejected judge job before inference")
         except BaseException:
             if not completed and _reserved(self.ledger, invocation_id):
@@ -179,7 +205,10 @@ class LabJudgeAdapter:
                         "worker_receipt_sha256": self.transport.receipt_sha256(job["job_id"])
                         if submitted else None,
                         "worker_terminal_status": receipt.get("status") if isinstance(receipt, dict) else "unavailable",
-                        "model": MODEL, "reasoning_effort": REASONING, "judge_slot": slot,
+                        "model": MODEL, "actual_model": actual_model,
+                        "actual_model_source": actual_model_source,
+                        "model_identity_status": model_identity_status,
+                        "reasoning_effort": REASONING, "judge_slot": slot,
                         "scenario_id": scenario_id, "dataset_split": split, "presentation_labels": order,
                         "outcome": outcome, "normalized_judge_receipt": None,
                     })

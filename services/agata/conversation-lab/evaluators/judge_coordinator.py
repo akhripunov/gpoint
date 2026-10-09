@@ -73,8 +73,19 @@ def _judge_receipt(path: Path, invocation_id: str, expected: dict) -> dict | Non
         cli_value = json.loads((path / (invocation_id + ".promptfoo-receipt.json")).read_text(encoding="utf-8"))
     except (OSError, ValueError, json.JSONDecodeError):
         return None
+    identity_status = value.get("model_identity_status") if isinstance(value, dict) else None
+    actual_model = value.get("actual_model") if isinstance(value, dict) else None
+    actual_model_source = value.get("actual_model_source") if isinstance(value, dict) else None
     if (not isinstance(value, dict) or value.get("outcome") != "success"
             or value.get("worker_terminal_status") != "completed"
+            or value.get("model") != "gpt-6-luna"
+            or value.get("reasoning_effort") != "medium"
+            or identity_status not in {"MODEL_IDENTITY_VERIFIED", "MODEL_IDENTITY_UNVERIFIED"}
+            or (identity_status == "MODEL_IDENTITY_UNVERIFIED"
+                and (actual_model is not None or actual_model_source is not None))
+            or (identity_status == "MODEL_IDENTITY_VERIFIED"
+                and (actual_model != "gpt-6-luna"
+                     or actual_model_source != "codex_provider_response_metadata"))
             or any(value.get(key) != item for key, item in expected.items())
             or not isinstance(value.get("worker_receipt_sha256"), str)
             or len(value["worker_receipt_sha256"]) != 64):
@@ -103,7 +114,33 @@ def _judge_receipt(path: Path, invocation_id: str, expected: dict) -> dict | Non
         "promptfoo_result_sha256": cli_value.get("promptfoo_result_sha256"),
         "model": value.get("model"),
         "reasoning_effort": value.get("reasoning_effort"),
+        "actual_model": actual_model,
+        "actual_model_source": actual_model_source,
+        "model_identity_status": identity_status,
     }
+
+
+def _confirmed_model_mismatch(path: Path, invocation_id: str, expected: dict) -> bool:
+    """Recognize a completed, invocation-bound provider mismatch receipt."""
+    try:
+        value = json.loads((path / (invocation_id + ".judge-receipt.json")).read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    actual_model = value.get("actual_model") if isinstance(value, dict) else None
+    return bool(
+        isinstance(value, dict)
+        and value.get("outcome") == "provider_error"
+        and value.get("worker_terminal_status") == "completed"
+        and value.get("model") == "gpt-6-luna"
+        and value.get("reasoning_effort") == "medium"
+        and value.get("model_identity_status") == "MODEL_IDENTITY_MISMATCH"
+        and value.get("actual_model_source") == "codex_provider_response_metadata"
+        and isinstance(actual_model, str) and actual_model.strip()
+        and actual_model != "gpt-6-luna"
+        and isinstance(value.get("worker_receipt_sha256"), str)
+        and len(value["worker_receipt_sha256"]) == 64
+        and all(value.get(key) == item for key, item in expected.items())
+    )
 
 
 def run_judge_batch(packet: Mapping[str, object], rubric: Mapping[str, object], *, batch_id: str,
@@ -170,6 +207,10 @@ def run_judge_batch(packet: Mapping[str, object], rubric: Mapping[str, object], 
     # any reservation/provider invocation; write-once prevents accidental reuse.
     _write_once(plan_path, private_plan)
 
+    invoke = _invoke_promptfoo
+    collected: dict[str, list[dict]] = {scenario["scenario_id"]: [] for scenario in scenarios}
+    failures: dict[str, list[str]] = {scenario["scenario_id"]: [] for scenario in scenarios}
+    initial_attempted = snapshot["attempted"]
     for prompt_record, plan, job in calls:
         invocation_id = job["promptfoo_invocation_id"]
         ledger.reserve("judge", invocation_id, metadata={
@@ -179,12 +220,13 @@ def run_judge_batch(packet: Mapping[str, object], rubric: Mapping[str, object], 
             "worker_job_id": job["job_id"], "model": "gpt-6-luna",
             "reasoning_effort": "medium",
         })
-
-    invoke = _invoke_promptfoo
-    collected: dict[str, list[dict]] = {scenario["scenario_id"]: [] for scenario in scenarios}
-    failures: dict[str, list[str]] = {scenario["scenario_id"]: [] for scenario in scenarios}
-    for prompt_record, plan, job in calls:
-        invocation_id = job["promptfoo_invocation_id"]
+        expected_receipt = {
+            "run_id": batch_id, "batch_id": batch_id,
+            "promptfoo_invocation_id": invocation_id,
+            "lab_ledger_attempt_id": invocation_id, "worker_job_id": job["job_id"],
+            "judge_slot": plan["judge_slot"], "scenario_id": plan["scenario_id"],
+            "dataset_split": dataset_split, "presentation_labels": plan["presented_labels"],
+        }
         try:
             kwargs = {
                 "run_id": batch_id, "batch_id": batch_id,
@@ -215,6 +257,9 @@ def run_judge_batch(packet: Mapping[str, object], rubric: Mapping[str, object], 
                 "presentation_labels": plan["presented_labels"],
             }) if success else None
             if normalized is None:
+                if _confirmed_model_mismatch(receipt_directory, invocation_id, expected_receipt):
+                    failures[plan["scenario_id"]].append("MODEL_IDENTITY_MISMATCH")
+                    break
                 failures[plan["scenario_id"]].append("MISSING_OR_INVALID_JUDGE_OUTPUT")
                 current = ledger.__class__(journal_path=ledger.journal_path)
                 entry = next((row for row in current.snapshot()["judge_invocations"]["invocations"]
@@ -224,6 +269,9 @@ def run_judge_batch(packet: Mapping[str, object], rubric: Mapping[str, object], 
                 continue
             collected[plan["scenario_id"]].append(normalized)
         except Exception:
+            if _confirmed_model_mismatch(receipt_directory, invocation_id, expected_receipt):
+                failures[plan["scenario_id"]].append("MODEL_IDENTITY_MISMATCH")
+                break
             failures[plan["scenario_id"]].append("MISSING_OR_INVALID_JUDGE_OUTPUT")
             current = ledger.__class__(journal_path=ledger.journal_path)
             entry = next((row for row in current.snapshot()["judge_invocations"]["invocations"]
@@ -254,7 +302,8 @@ def run_judge_batch(packet: Mapping[str, object], rubric: Mapping[str, object], 
         "schema_version": 1, "batch_id": batch_id, "dataset_split": dataset_split,
         "decision": "AUTO_DECISION" if all_auto else "HUMAN_ESCALATION",
         "decision_type": "AUTO_DECISION" if all_auto else "HUMAN_ESCALATION",
-        "scenarios": scenario_results, "judge_invocations": len(calls),
+        "scenarios": scenario_results,
+        "judge_invocations": ledger.snapshot()["judge_invocations"]["attempted"] - initial_attempted,
         "retries": 0, "aggregator_version": 1,
         "call_ledger": ledger.snapshot(), "private": True,
     }

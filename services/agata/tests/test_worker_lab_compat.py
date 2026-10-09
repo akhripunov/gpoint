@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import hashlib
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,9 +22,111 @@ sys.path.insert(0, str(LAB_DIR / "evaluators"))
 import lab_queue  # noqa: E402
 import worker_client  # noqa: E402
 import gpoint_mac_worker as worker  # noqa: E402
+import promptfoo_worker_provider as worker_provider  # noqa: E402
 
 
 class WorkerLabCompatibilityTests(unittest.TestCase):
+    def test_provider_model_identity_flows_through_worker_receipt_to_promptfoo(self):
+        for provider_model, expected_outcome in (
+            ("gpt-6-luna", "success"), ("gpt-6-sol", "provider_error"), (None, "unverified")
+        ):
+            with self.subTest(provider_model=provider_model), tempfile.TemporaryDirectory() as temp:
+                event = {"type": "turn.completed"}
+                if provider_model is not None:
+                    event["server_model"] = provider_model
+                metadata = worker._codex_reported_metadata(json.dumps(event))
+                invocation_id = "model-identity-" + (provider_model or "missing")
+                job_id = "identity-" + (provider_model or "missing")
+                job = {
+                    "job_id": job_id, "experiment_id": "agata-v2-naturalness-dev",
+                    "configuration_id": "baseline", "scenario_id": "dev-sample", "turn_index": 0,
+                    "run_id": "run-v2", "arm_id": "run-v2-baseline",
+                    "promptfoo_invocation_id": invocation_id, "dataset_split": "DEV",
+                    "source_scenario_sha256": "a" * 64,
+                }
+                root = Path(temp) / "queue"
+                private = Path(temp) / "private"
+                private.mkdir(mode=0o700)
+                lab_queue.finish(
+                    root, job["job_id"], status="completed", response="synthetic response",
+                    execution={
+                        **metadata, "requested_model": "gpt-6-luna",
+                        "requested_reasoning_effort": "medium", "inference_started": True,
+                    },
+                    identity=job, slot_id="slot-03",
+                )
+                terminal_receipt = lab_queue.read_receipt(root, job["job_id"])
+
+                class Ledger:
+                    durable = True
+
+                    def __init__(self):
+                        self.rows = []
+
+                    def verify_persisted(self):
+                        return True
+
+                    def snapshot(self):
+                        return {"limits": {"conversation_arms": 8, "generator_invocations": 32,
+                                            "judge_invocations": 15}}
+
+                    def reserve(self, stage, invocation_id, *, metadata):
+                        self.rows.append(("reserve", stage, invocation_id))
+
+                    def complete(self, stage, invocation_id, outcome):
+                        self.rows.append(("complete", stage, invocation_id, outcome))
+
+                class ReceiptTransport:
+                    def submit(self, submitted_job):
+                        self.submitted_job = submitted_job
+                        return submitted_job["job_id"]
+
+                    def wait_terminal(self, job_id, timeout_seconds):
+                        return terminal_receipt
+
+                    def receipt_sha256(self, job_id):
+                        return hashlib.sha256(json.dumps(terminal_receipt, sort_keys=True).encode()).hexdigest()
+
+                ledger = Ledger()
+                adapter = worker_provider.WorkerLabAdapter(
+                    ledger=ledger, transport=ReceiptTransport(), run_id="run-v2",
+                    receipt_directory=private,
+                    env={"AGATA_LAB_PRIVATE_RECEIPTS": str(private)},
+                )
+                with patch.object(worker_provider.worker_client, "build_v2_dev_job", return_value=job), \
+                     patch.object(worker_provider.worker_client, "validate_owner_approval", return_value=None):
+                    call = lambda: adapter.invoke_v2_dev(
+                        {"user_message": "synthetic"}, invocation_id=invocation_id,
+                        run_id=job["run_id"], arm_id=job["arm_id"],
+                        configuration_id=job["configuration_id"], scenario_id=job["scenario_id"],
+                        turn_index=job["turn_index"], history_receipt_ids=[],
+                    )
+                    if expected_outcome == "provider_error":
+                        with self.assertRaises(worker_provider.ModelIdentityMismatch):
+                            call()
+                    else:
+                        self.assertEqual(call(), {"output": "synthetic response"})
+
+                linked = json.loads((private / (invocation_id + ".worker-receipt.json")).read_text())
+                self.assertEqual(terminal_receipt["execution"]["actual_model"], provider_model)
+                self.assertEqual(
+                    terminal_receipt["execution"]["actual_model_source"],
+                    "codex_provider_response_metadata" if provider_model is not None else None,
+                )
+                if expected_outcome == "unverified":
+                    self.assertEqual(linked["model_identity_status"], "MODEL_IDENTITY_UNVERIFIED")
+                    self.assertIsNone(linked["actual_model"])
+                elif expected_outcome == "provider_error":
+                    self.assertEqual(linked["model_identity_status"], "MODEL_IDENTITY_MISMATCH")
+                    self.assertEqual(linked["actual_model"], "gpt-6-sol")
+                    self.assertIsNone(linked["output_sha256"])
+                else:
+                    self.assertEqual(linked["model_identity_status"], "MODEL_IDENTITY_VERIFIED")
+                    self.assertEqual(linked["actual_model"], "gpt-6-luna")
+                self.assertEqual(ledger.rows[-1], ("complete", "generator", invocation_id,
+                                                   "success" if expected_outcome != "provider_error"
+                                                   else "provider_error"))
+
     def test_promptfoo_adapter_uses_worker_approval_verifier_before_reservation(self):
         with tempfile.TemporaryDirectory() as temp:
             support = Path(temp) / "support"

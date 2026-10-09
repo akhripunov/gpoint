@@ -528,8 +528,10 @@ def _codex_used_tools(stdout: str) -> bool:
 
 
 def _codex_reported_metadata(stdout: str) -> dict:
-    """Retain only model/usage facts the CLI actually emitted."""
-    result: dict[str, object] = {"actual_model": None, "cli_reported_usage": None}
+    """Retain provider identity only from terminal provider metadata."""
+    result: dict[str, object] = {
+        "actual_model": None, "actual_model_source": None, "cli_reported_usage": None,
+    }
     for line in stdout.splitlines():
         try:
             event = json.loads(line)
@@ -537,14 +539,19 @@ def _codex_reported_metadata(stdout: str) -> dict:
             continue
         if not isinstance(event, dict):
             continue
+        # Generic `model`/`model_id` fields can describe requested/configured
+        # state. Only a provider-reported `server_model` on the terminal event
+        # is evidence of the model that served this turn.
+        if event.get("type") == "turn.completed":
+            model = event.get("server_model")
+            if isinstance(model, str) and model.strip() and len(model) <= 128:
+                result["actual_model"] = model.strip()
+                result["actual_model_source"] = "codex_provider_response_metadata"
         candidates = [event]
         item = event.get("item")
         if isinstance(item, dict):
             candidates.append(item)
         for candidate in candidates:
-            model = candidate.get("model") or candidate.get("model_id")
-            if isinstance(model, str) and model.strip() and len(model) <= 128:
-                result["actual_model"] = model.strip()
             usage = candidate.get("usage")
             if isinstance(usage, dict):
                 safe_usage = {
@@ -1086,6 +1093,7 @@ def execute_lab_claimed_job(job: dict) -> bool:
         return True
     execution = {
         "actual_model": None,
+        "actual_model_source": None,
         "cli_reported_usage": None,
         "requested_model": job.get("model") or os.environ.get("AGATA_CODEX_MODEL", "").strip() or None,
         "requested_reasoning_effort": job.get("reasoning_effort") or os.environ.get("AGATA_CODEX_REASONING", "").strip() or None,
