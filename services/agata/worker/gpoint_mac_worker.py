@@ -904,15 +904,19 @@ def process_one(target: str = "GPOINT") -> bool:
     return False if claim is None else execute_claimed_job(target, claim)
 
 
-def _load_lab_approval(*, env=None, support: Path | None = None) -> dict:
+def _load_lab_approval(*, env=None, support: Path | None = None,
+                       expected_bundle_sha256: str | None = None) -> dict:
     """Read a private, source-pinned OWNER approval before any LAB generation."""
     source_env = os.environ if env is None else env
-    support_root = Path(support) if support is not None else PoolPaths.from_env(source_env).root
+    support_root = Path(support) if support is not None else (
+        Path(SUPPORT) if env is None else PoolPaths.from_env(source_env).root
+    )
     path = Path(source_env.get("AGATA_LAB_APPROVAL_FILE") or
                  (support_root / "config/lab-execution-approval.json"))
     try:
         return lab_queue.load_owner_approval(
-            path, expected_bundle_sha256=_worker_bundle_sha256(), now=datetime.now(UTC),
+            path, expected_bundle_sha256=expected_bundle_sha256 or _worker_bundle_sha256(),
+            now=datetime.now(UTC),
         )
     except lab_queue.LabQueueError as exc:
         raise FatalConfigurationError(str(exc)) from exc
@@ -920,6 +924,47 @@ def _load_lab_approval(*, env=None, support: Path | None = None) -> dict:
 
 def _worker_bundle_sha256() -> str:
     return lab_queue.worker_bundle_sha256()
+
+
+def _lab_slot_bundle_sha256(support: Path | None = None) -> str:
+    """Verify approval against the exact immutable runtime selected for LAB Slot 03.
+
+    The pool supervisor and lane runtimes can be updated independently. Loading
+    the selected LAB assets into the approval digest keeps identity tied to the
+    code that will execute the claimed job, rather than to the supervisor bundle.
+    """
+    paths = PoolPaths(Path(support) if support is not None else SUPPORT)
+    pointer = paths.slot_runtime_current(LAB_TARGET)
+    try:
+        if paths.runtime.is_symlink():
+            raise ValueError("lab_runtime_root_symlink_invalid")
+        runtime_root = paths.runtime.resolve(strict=True)
+        runtime_dir = pointer.resolve(strict=True)
+        runtime_root_stat = runtime_root.stat()
+        slot_dir = pointer.parent
+        slot_stat = slot_dir.stat()
+        if (not pointer.is_symlink() or runtime_dir.parent != runtime_root
+                or not re.fullmatch(r"[0-9a-f]{40}", runtime_dir.name)
+                or not runtime_dir.is_dir() or slot_dir.is_symlink()
+                or slot_dir.resolve(strict=True) != runtime_root / "slots" / LAB_TARGET):
+            raise ValueError("lab_runtime_pointer_invalid")
+        if (runtime_root_stat.st_uid != os.getuid() or runtime_root_stat.st_mode & 0o077
+                or slot_stat.st_uid != os.getuid() or slot_stat.st_mode & 0o077):
+            raise ValueError("lab_runtime_directory_permissions_invalid")
+        runtime_stat = runtime_dir.stat()
+        if runtime_stat.st_uid != os.getuid() or runtime_stat.st_mode & 0o077:
+            raise ValueError("lab_runtime_permissions_invalid")
+        for name in lab_queue.WORKER_BUNDLE_ASSET_NAMES:
+            asset = runtime_dir / name
+            if asset.is_symlink() or not asset.is_file():
+                raise ValueError("lab_runtime_asset_missing")
+            else:
+                asset_stat = asset.stat(follow_symlinks=False)
+                if asset_stat.st_uid != os.getuid() or asset_stat.st_mode & 0o077:
+                    raise ValueError("lab_runtime_asset_permissions_invalid")
+        return lab_queue.worker_bundle_sha256(runtime_dir)
+    except (AttributeError, ImportError, OSError, ValueError, lab_queue.LabQueueError) as exc:
+        raise FatalConfigurationError("lab_runtime_identity_invalid") from exc
 
 
 def _consume_lab_approval(approval: dict) -> None:
@@ -960,10 +1005,14 @@ def _consume_lab_approval(approval: dict) -> None:
         os.close(fd)
 
 
-def _lab_approval_gate_status(*, env=None, support: Path | None = None) -> str:
+def _lab_approval_gate_status(*, env=None, support: Path | None = None,
+                              expected_bundle_sha256: str | None = None) -> str:
     """Expose only the safe state of the independent LAB inference gate."""
     try:
-        approval = _load_lab_approval(env=env, support=support)
+        approval = _load_lab_approval(
+            env=env, support=support,
+            expected_bundle_sha256=expected_bundle_sha256,
+        )
     except FatalConfigurationError as exc:
         return "CLOSED_EXPIRED" if str(exc) == "lab_owner_approval_expired" else "CLOSED_NO_APPROVAL"
     support_root = Path(support) if support is not None else PoolPaths.from_env(env).root if env is not None else SUPPORT
@@ -974,22 +1023,37 @@ def _lab_approval_gate_status(*, env=None, support: Path | None = None) -> str:
     return "CLOSED_CONSUMED" if calls >= approval["max_calls"] else "OPEN_APPROVED"
 
 
+def _lab_slot_approval_gate_status(support: Path) -> str:
+    """Report LAB's gate without letting a bad lane pointer degrade the pool."""
+    try:
+        bundle_hash = _lab_slot_bundle_sha256(support)
+    except FatalConfigurationError:
+        return "CLOSED_NO_APPROVAL"
+    return _lab_approval_gate_status(support=support, expected_bundle_sha256=bundle_hash)
+
+
 def _lab_receipt_slot_id() -> str:
     """Keep LAB lane identity on receipts, including pre-run rejections."""
     return os.environ.get("AGATA_WORKER_SLOT_ID") or LANE_SLOTS[LAB_TARGET]
 
 
 def claim_lab_job() -> dict | None:
+    lab_bundle = None
     try:
-        _load_lab_approval()
+        lab_bundle = _lab_slot_bundle_sha256(SUPPORT)
+        _load_lab_approval(expected_bundle_sha256=lab_bundle)
     except FatalConfigurationError:
         write_status(target="LAB", state="idle", current_job_present=False,
-                     inference_gate=_lab_approval_gate_status(), last_poll_at=datetime.now(UTC).isoformat())
+                     inference_gate=(
+                         _lab_approval_gate_status(expected_bundle_sha256=lab_bundle)
+                         if lab_bundle else "CLOSED_NO_APPROVAL"
+                     ), last_poll_at=datetime.now(UTC).isoformat())
         return None
     root = PoolPaths(SUPPORT).lab_queue
     job = lab_queue.claim_next(root)
     write_status(target="LAB", state="idle", current_job_present=bool(job),
-                 inference_gate=_lab_approval_gate_status(), last_poll_at=datetime.now(UTC).isoformat())
+                 inference_gate=_lab_approval_gate_status(expected_bundle_sha256=lab_bundle),
+                 last_poll_at=datetime.now(UTC).isoformat())
     return job
 
 
@@ -1099,7 +1163,7 @@ def build_pool_supervisor() -> PoolSupervisor:
     claimers[LAB_TARGET] = claim_lab_job
     return PoolSupervisor(
         paths, config, claimers, reject_offer=reject_claim,
-        lab_gate_status=_lab_approval_gate_status,
+        lab_gate_status=lambda: _lab_slot_approval_gate_status(paths.root),
     )
 
 

@@ -44,7 +44,19 @@ class PromptfooJudgeMockE2ETests(unittest.TestCase):
             lab_queue._layout(queue_root)
             phase_dir = queue_root / "state"; phase_dir.mkdir(mode=0o700)
             phase = approval_phases.PhaseApprovalState(phase_dir / "v2-approval-phase.json")
-            bundle = lab_queue.worker_bundle_sha256()
+            # The LAB approval is bound to the immutable Slot 03 runtime, not
+            # the supervisor source loaded by this test process.
+            runtime_root = support / "runtime"
+            runtime_root.mkdir(mode=0o700)
+            lab_runtime = runtime_root / ("a" * 40)
+            lab_runtime.mkdir(mode=0o700)
+            for asset_name in lab_queue.WORKER_BUNDLE_ASSET_NAMES:
+                shutil.copyfile(WORKER_DIR / asset_name, lab_runtime / asset_name)
+                (lab_runtime / asset_name).chmod(0o600)
+            slot_dir = runtime_root / "slots" / "LAB"
+            slot_dir.mkdir(parents=True, mode=0o700)
+            (slot_dir / "current").symlink_to(lab_runtime)
+            bundle = lab_queue.worker_bundle_sha256(lab_runtime)
             phase.begin_generator(run_id=run_id, scenario_id=scenario_id, worker_bundle_sha256=bundle,
                                   approval_id="mock-phase-a", max_calls=8)
             generator_receipts = []

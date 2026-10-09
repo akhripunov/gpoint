@@ -39,7 +39,7 @@ def judge_payload(job_id="judge-job-001", *, split="DEV"):
         "configuration_id": "judge-1", "origin": "conversation-lab-judge", "scenario_id": "dev-clean-01",
         "turn_index": 0, "data_classification": "synthetic", "dataset_split": split,
         "timeout_seconds": 60, "history_receipt_ids": [], "judge_slot": 1,
-        "promptfoo_invocation_id": invocation_id, "judge_schema_version": 1,
+        "promptfoo_invocation_id": invocation_id, "run_id": "batch-a", "judge_schema_version": 1,
         "presented_labels": ["X", "Y"], "model": "gpt-6-luna", "reasoning_effort": "medium",
         "request": {"instructions": "AGATA Lab isolated judge protocol v1.", "persona": {},
                     "communication_settings": {}, "memories": [], "dialogue_summaries": [],

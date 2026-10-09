@@ -120,6 +120,10 @@ def build_cli_environment(env: Mapping[str, str]) -> dict[str, str]:
     allowed = set(MINIMAL_ENV_KEYS) | {"AGATA_LAB_CALL_LEDGER", "AGATA_LAB_QUEUE", "AGATA_LAB_PRIVATE_RECEIPTS"}
     result = {key: env[key] for key in sorted(allowed) if key in env and env[key]}
     result["PATH"] = ensure_promptfoo_node_path(result)
+    # The pinned CLI otherwise emits an update banner to stdout, which breaks
+    # exact version validation and can make a supposedly offline preflight
+    # contact the update endpoint. Force this in the child only.
+    result["PROMPTFOO_DISABLE_UPDATE"] = "1"
     return result
 
 
@@ -345,7 +349,6 @@ def validate_promptfoo_cli(executable: str, *, command_runner=subprocess.run) ->
         raise PermissionError("Promptfoo package, lockfile, or local executable is not exact 0.123.1")
     version_env = build_cli_environment(os.environ)
     version_env["PROMPTFOO_DISABLE_TELEMETRY"] = "1"
-    version_env["PROMPTFOO_DISABLE_UPDATE_CHECK"] = "1"
     result = command_runner([str(path), "--version"], stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             timeout=10, env=version_env)
