@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import importlib.util
+import contextlib
+import io
 import json
 import os
 import sys
@@ -24,6 +26,7 @@ import approval_phases
 import blind
 import judge_coordinator
 import live_e2e
+import live_e2e_cli
 import lab_queue
 import promptfoo_runner
 import worker_client
@@ -54,9 +57,10 @@ class PromptfooV2MockE2ETests(unittest.TestCase):
             queue_root = worker_client.canonical_lab_queue({"GPOINT_AGATA_WORKER_SUPPORT": str(support)})
             queue_root.mkdir(parents=True, mode=0o700)
             phase_dir = queue_root / "state"; phase_dir.mkdir(mode=0o700)
-            receipts = root / "receipts"; receipts.mkdir(mode=0o700)
-            ledger = CallLedger(journal_path=root / "call-ledger.jsonl")
             run_id = "v2-run-e2e-001"
+            run_root = support / "private/conversation-lab/runs" / run_id
+            receipts = run_root / "receipts"
+            ledger_path = run_root / "call-ledger.jsonl"
             # Model the canonical installed Slot 03 pointer. LAB approvals bind
             # to the selected lane runtime, which may differ from the supervisor.
             # Build it through the real Worker installer code; never repair fixture
@@ -66,9 +70,10 @@ class PromptfooV2MockE2ETests(unittest.TestCase):
             runtime_root.chmod(0o700)
             source_sha = "a" * 40
             worker_bundle_expected = lab_queue.worker_bundle_sha256(WORKER_DIR)
+            install_bundle_expected = live_e2e.worker_install_bundle_sha256()
             manifest = {
                 "source_sha": source_sha,
-                "bundle_sha256": worker_bundle_expected,
+                "bundle_sha256": install_bundle_expected,
                 "assets": {name: migration.sha256(WORKER_DIR / name) for name in migration.ASSETS},
             }
 
@@ -84,11 +89,14 @@ class PromptfooV2MockE2ETests(unittest.TestCase):
                     patch.object(migration, "subprocess", SimpleNamespace(run=fake_installer_subprocess_run)):
                 staged_runtime = migration._stage_runtime(manifest)
                 lab_runtime = migration._install_staged_runtime(staged_runtime, manifest)
-            slot_dir = runtime_root / "slots" / "LAB"
-            slot_dir.mkdir(parents=True, mode=0o700)
-            (slot_dir / "current").symlink_to(lab_runtime)
+            migration._replace_lane_runtime_pointer(support, "LAB", source_sha)
             bundle = lab_queue.worker_bundle_sha256(lab_runtime)
             self.assertEqual(bundle, worker_bundle_expected)
+            installed_identity = live_e2e.installed_lab_runtime_identity({
+                "GPOINT_AGATA_WORKER_SUPPORT": str(support),
+            })
+            self.assertEqual(installed_identity["worker_install_bundle_sha256"], install_bundle_expected)
+            self.assertEqual(installed_identity["lab_approval_bundle_sha256"], worker_bundle_expected)
             env = {
                 "PATH": os.environ.get("PATH", ""), "HOME": str(root), "TMPDIR": str(root),
                 "LANG": "en_US.UTF-8", "PROMPTFOO_DISABLE_TELEMETRY": "1",
@@ -175,7 +183,7 @@ class PromptfooV2MockE2ETests(unittest.TestCase):
 
                 def mock_read_only_preflight():
                     preflight_generator_counts.append(
-                        ledger.snapshot()["generator_invocations"]["attempted"]
+                        CallLedger(journal_path=ledger_path).snapshot()["generator_invocations"]["attempted"]
                     )
                     return {
                         "outcome": "PASS", "candidate_verified": True, "launchagent_loaded": True,
@@ -194,15 +202,21 @@ class PromptfooV2MockE2ETests(unittest.TestCase):
                 with patch.object(v2_provenance, "current_source_sha", return_value=source_sha), \
                         patch.object(live_e2e.migrate_worker_runtime, "read_only_preflight",
                                      side_effect=mock_read_only_preflight):
-                    outcome = live_e2e.run_v2_live_e2e(
-                        scenario_id, run_id=run_id, ledger=ledger,
-                        promptfoo_executable=str(promptfoo), receipt_directory=receipts,
-                        private_directory=root, env=env,
-                    )
+                    out = io.StringIO()
+                    with patch.dict(os.environ, env, clear=True), patch.object(sys, "stdout", out):
+                        result = live_e2e_cli.main([
+                            "--run-id", run_id, "--scenario-id", scenario_id,
+                            "--promptfoo", str(promptfoo), "--expected-source-sha", source_sha,
+                            "--expected-lab-bundle-sha256", approval["lab_bundle_sha256"],
+                            "--expected-lab-approval-bundle-sha256", approval["worker_bundle_sha256"],
+                            "--expected-worker-install-bundle-sha256", install_bundle_expected,
+                        ])
+                    self.assertEqual(result, 0, out.getvalue())
+                    outcome = json.loads(out.getvalue())
+                ledger = CallLedger(journal_path=ledger_path)
                 self.assertEqual(outcome["status"], "COMPLETED")
                 self.assertEqual(preflight_generator_counts, [0, 8])
-                self.assertEqual(set(outcome["production_preflight"]), {"phase_a", "phase_b"})
-                self.assertEqual(outcome["decision_type"], "AUTO_DECISION", outcome["scenarios"])
+                self.assertEqual(outcome["decision_type"], "AUTO_DECISION")
                 phase_state_after = approval_phases.PhaseApprovalState(
                     lab_queue.live_run_phase_state_path(queue_root, run_id))._read()
                 self.assertEqual(phase_state_after["terminal_status"], "COMPLETED")

@@ -203,8 +203,28 @@ not live subscription authentication, Worker installation, or model
 compatibility. The old one-turn `promptfoo-worker-compat` fixture below remains
 a separate historical compatibility contract.
 
+Before asking for live authorization, run the no-approval check from the exact repository root with the same environment and pinned CLI intended for the run:
+
+```sh
+export PROMPTFOO_PYTHON="${AGATA_WORKER_PYTHON:?set to the verified Worker Python 3.11+}"
+export AGATA_PROMPTFOO_CLI="services/agata/conversation-lab/tooling/promptfoo/node_modules/.bin/promptfoo"
+export AGATA_EXPECTED_SOURCE_SHA="${AGATA_EXPECTED_SOURCE_SHA:?set to the reviewed exact source SHA}"
+export AGATA_EXPECTED_LAB_BUNDLE_SHA256="${AGATA_EXPECTED_LAB_BUNDLE_SHA256:?set to the reviewed V2 execution bundle SHA256}"
+export AGATA_EXPECTED_LAB_APPROVAL_BUNDLE_SHA256="${AGATA_EXPECTED_LAB_APPROVAL_BUNDLE_SHA256:?set to the approved LAB approval bundle SHA256}"
+export AGATA_EXPECTED_WORKER_INSTALL_BUNDLE_SHA256="${AGATA_EXPECTED_WORKER_INSTALL_BUNDLE_SHA256:?set to the canonical Worker install bundle SHA256}"
+"$PROMPTFOO_PYTHON" services/agata/conversation-lab/evaluators/live_e2e_cli.py \
+  --preflight-only --scenario-id v2-dev-clean-20261006-everyday \
+  --promptfoo "$AGATA_PROMPTFOO_CLI" \
+  --expected-source-sha "$AGATA_EXPECTED_SOURCE_SHA" \
+  --expected-lab-bundle-sha256 "$AGATA_EXPECTED_LAB_BUNDLE_SHA256" \
+  --expected-lab-approval-bundle-sha256 "$AGATA_EXPECTED_LAB_APPROVAL_BUNDLE_SHA256" \
+  --expected-worker-install-bundle-sha256 "$AGATA_EXPECTED_WORKER_INSTALL_BUNDLE_SHA256"
+```
+
+The check compares the clean exact source, V2 execution bundle, LAB approval bundle, and canonical Worker install bundle against the reviewed fingerprints; it validates the DEV scenario and arm provider configurations, repository-root working directory, Promptfoo 0.123.1, Node.js 22.22.0+, Worker-compatible Python, and the restricted Worker-provider/no-API-key route. It does not read approvals, create run state, touch the LAB queue, or call a model. A failed check must be fixed and rerun before requesting OWNER authorization.
+
 The single-run operator entry point is
-`evaluators/live_e2e_cli.py --run-id <approved-run-id> --scenario-id <approved-dev-scenario> --promptfoo <lab-local-promptfoo>`. It reads, but never creates, the exact combined `LIVE_RUN_AUTHORIZATION`, checks the clean source and committed runtime fingerprints, opens Phase A once, verifies all eight Worker/Promptfoo/ledger receipts, and only then opens Phase B under the same authorization. It persists the blind packet, private mapping, phase state, run receipt, and call ledger in owner-only local directories. Reusing a run ID is rejected. This command performs real model calls when a valid live authorization is present; it must not be invoked before the separate exact-run OWNER approval and fresh preflight.
+`evaluators/live_e2e_cli.py --run-id <approved-run-id> --scenario-id <approved-dev-scenario> --promptfoo <lab-local-promptfoo> --expected-source-sha <sha> --expected-lab-bundle-sha256 <sha256> --expected-lab-approval-bundle-sha256 <sha256> --expected-worker-install-bundle-sha256 <sha256>`. It repeats the same deterministic checks and exact fingerprint comparisons before creating the run ledger or reading authorization, then revalidates the exact combined `LIVE_RUN_AUTHORIZATION`, opens Phase A once, verifies all eight Worker/Promptfoo/ledger receipts, and only then opens Phase B under the same authorization. It persists the blind packet, private mapping, phase state, run receipt, and call ledger in owner-only local directories. Reusing a run ID is rejected. This command performs real model calls when a valid live authorization is present; it must not be invoked before the separate exact-run OWNER approval and fresh production preflight.
 
 ### Historical one-turn Promptfoo compatibility fixture (offline contract)
 
