@@ -73,8 +73,15 @@ def _judge_receipt(path: Path, invocation_id: str, expected: dict) -> dict | Non
         cli_value = json.loads((path / (invocation_id + ".promptfoo-receipt.json")).read_text(encoding="utf-8"))
     except (OSError, ValueError, json.JSONDecodeError):
         return None
+    identity_status = value.get("model_identity_status") if isinstance(value, dict) else None
+    actual_model = value.get("actual_model") if isinstance(value, dict) else None
     if (not isinstance(value, dict) or value.get("outcome") != "success"
             or value.get("worker_terminal_status") != "completed"
+            or value.get("model") != "gpt-6-luna"
+            or value.get("reasoning_effort") != "medium"
+            or identity_status not in {"MODEL_IDENTITY_VERIFIED", "MODEL_IDENTITY_UNVERIFIED"}
+            or (identity_status == "MODEL_IDENTITY_UNVERIFIED" and actual_model is not None)
+            or (identity_status == "MODEL_IDENTITY_VERIFIED" and actual_model != "gpt-6-luna")
             or any(value.get(key) != item for key, item in expected.items())
             or not isinstance(value.get("worker_receipt_sha256"), str)
             or len(value["worker_receipt_sha256"]) != 64):
@@ -103,6 +110,8 @@ def _judge_receipt(path: Path, invocation_id: str, expected: dict) -> dict | Non
         "promptfoo_result_sha256": cli_value.get("promptfoo_result_sha256"),
         "model": value.get("model"),
         "reasoning_effort": value.get("reasoning_effort"),
+        "actual_model": actual_model,
+        "model_identity_status": identity_status,
     }
 
 

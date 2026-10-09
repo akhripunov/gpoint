@@ -42,6 +42,47 @@ class JudgeCoordinatorTests(unittest.TestCase):
     def require_coordinator(self):
         self.assertIsNotNone(coordinator, "three-judge AGATA coordinator is not implemented")
 
+    def test_coordinator_preserves_configured_model_contract_and_rejects_identity_conflicts(self):
+        self.require_coordinator()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); root.chmod(0o700)
+            expected = {"run_id": "batch-a", "batch_id": "batch-a",
+                        "promptfoo_invocation_id": "judge-invocation",
+                        "lab_ledger_attempt_id": "judge-invocation", "worker_job_id": "lab-job",
+                        "judge_slot": 1, "scenario_id": "dev-v2-01", "dataset_split": "DEV",
+                        "presentation_labels": ["X", "Y"]}
+            normalized = {"judge_slot": 1, "scenario_id": "dev-v2-01", "presented_labels": ["X", "Y"],
+                          "preferred_position": "first", "core_dimension_positions": {},
+                          "conditional_evidence": {}, "reasons": [], "defects": [],
+                          "critical_defects": [], "uncertainty": False, "position_sensitivity": False}
+            common = {**expected, "outcome": "success", "worker_terminal_status": "completed",
+                      "worker_receipt_sha256": "a" * 64, "model": "gpt-6-luna",
+                      "reasoning_effort": "medium", "actual_model": None,
+                      "model_identity_status": "MODEL_IDENTITY_UNVERIFIED",
+                      "normalized_judge_receipt": normalized}
+            cli = {"run_id": "batch-a", "batch_id": "batch-a",
+                   "promptfoo_invocation_id": "judge-invocation", "worker_job_id": "lab-job",
+                   "worker_receipt_sha256": "a" * 64, "promptfoo_success": True,
+                   "result_count": 1}
+            (root / "judge-invocation.promptfoo-receipt.json").write_text(json.dumps(cli))
+            receipt_path = root / "judge-invocation.judge-receipt.json"
+            receipt_path.write_text(json.dumps(common))
+            expected_adapter = {**expected, "presentation_labels": ["X", "Y"]}
+            receipt = coordinator._judge_receipt(root, "judge-invocation", expected_adapter)
+            self.assertEqual(receipt["model_identity_status"], "MODEL_IDENTITY_UNVERIFIED")
+            self.assertIsNone(receipt["actual_model"])
+
+            for changes in (
+                {"model_identity_status": "MODEL_IDENTITY_MISMATCH", "actual_model": "gpt-6-sol"},
+                {"model_identity_status": "MODEL_IDENTITY_UNVERIFIED", "actual_model": "gpt-6-sol"},
+                {"model_identity_status": "MODEL_IDENTITY_VERIFIED", "actual_model": None},
+                {"model": "gpt-6-sol"},
+                {"reasoning_effort": "high"},
+            ):
+                with self.subTest(changes=changes):
+                    receipt_path.write_text(json.dumps({**common, **changes}))
+                    self.assertIsNone(coordinator._judge_receipt(root, "judge-invocation", expected_adapter))
+
     def test_reserves_before_promptfoo_and_aggregates_three_structured_receipts(self):
         self.require_coordinator()
         from run_coordinator import CallLedger
@@ -68,6 +109,8 @@ class JudgeCoordinatorTests(unittest.TestCase):
                 calls.append({"prompt": prompt, "config": config})
                 evidence = {"normalized_judge_receipt": valid_receipt(config), "outcome": "success",
                             "run_id": "batch-a", "batch_id": "batch-a",
+                            "model": "gpt-6-luna", "reasoning_effort": "medium",
+                            "actual_model": None, "model_identity_status": "MODEL_IDENTITY_UNVERIFIED",
                             "promptfoo_invocation_id": invocation_id,
                             "lab_ledger_attempt_id": invocation_id,
                             "worker_job_id": job["job_id"],
@@ -101,6 +144,10 @@ class JudgeCoordinatorTests(unittest.TestCase):
             self.assertEqual(len(calls), 3)
             self.assertEqual(result["scenarios"][0]["decision"], "AUTO_WIN_X")
             self.assertEqual(result["decision_type"], "AUTO_DECISION")
+            self.assertTrue(all(row["model"] == "gpt-6-luna" and row["reasoning_effort"] == "medium"
+                                and row["actual_model"] is None
+                                and row["model_identity_status"] == "MODEL_IDENTITY_UNVERIFIED"
+                                for row in result["scenarios"][0]["judge_receipts"]))
             self.assertEqual(ledger.snapshot()["judge_invocations"]["attempted"], 3)
             self.assertTrue((root / "batch-a.judge-plan.json").exists())
             for call in calls:

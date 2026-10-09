@@ -131,7 +131,7 @@ class PromptfooV2MockE2ETests(unittest.TestCase):
 
                 def mock_inference(job, *, metadata_out=None, **_kwargs):
                     if metadata_out is not None:
-                        metadata_out.update({"actual_model": "gpt-6-luna", "inference_started": True})
+                        metadata_out.update({"actual_model": None, "inference_started": True})
                     if job.get("job_type") == "judge":
                         return json.dumps({
                             "overall": "first",
@@ -168,6 +168,10 @@ class PromptfooV2MockE2ETests(unittest.TestCase):
                 self.assertTrue(all(row and row["status"] == "completed" for row in worker_receipts))
                 promptfoo_receipts = [json.loads((receipts / (invocation_id + ".promptfoo-receipt.json")).read_text())
                                       for arm in generator_results for invocation_id in arm["promptfoo_invocation_ids"]]
+                adapter_receipts = [json.loads((receipts / (invocation_id + ".worker-receipt.json")).read_text())
+                                    for arm in generator_results for invocation_id in arm["promptfoo_invocation_ids"]]
+                self.assertTrue(all(row["model_identity_status"] == "MODEL_IDENTITY_UNVERIFIED"
+                                    and row["actual_model"] is None for row in adapter_receipts))
                 phase.close_generator(worker_receipts, call_ledger_snapshot=ledger.snapshot(),
                                       promptfoo_receipts=promptfoo_receipts)
 
@@ -189,6 +193,10 @@ class PromptfooV2MockE2ETests(unittest.TestCase):
                 self.assertEqual(outcome["judge_invocations"], 3)
                 self.assertEqual(ledger.snapshot()["judge_invocations"]["outcomes"], {"success": 3})
                 self.assertEqual(lab_queue.owner_approval_usage_calls(support, judge_approval), 3)
+                judge_adapter_receipts = [json.loads(path.read_text()) for path in receipts.glob("*.judge-receipt.json")]
+                self.assertEqual(len(judge_adapter_receipts), 3)
+                self.assertTrue(all(row["model_identity_status"] == "MODEL_IDENTITY_UNVERIFIED"
+                                    and row["actual_model"] is None for row in judge_adapter_receipts))
                 self.assertEqual(len(list(receipts.glob("*.promptfoo-receipt.json"))), 11)
                 self.assertEqual(len(list(queue_root.glob("receipts/*.json"))), 11)
                 self.assertEqual(outcome["retries"], 0)

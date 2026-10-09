@@ -50,13 +50,16 @@ class FakeTransport:
             self.ledger.snapshot()
             assert any(event[0] == "reserve" for event in self.ledger.events)
         self.events.append(("submit", job))
-        if self.receipt.get("job_id") == "job-1":
+        if isinstance(self.receipt, dict) and self.receipt.get("job_id") == "job-1":
             self.receipt["job_id"] = job["job_id"]
         return job["job_id"]
 
     def wait_terminal(self, job_id, timeout_seconds):
         self.events.append(("wait", job_id, timeout_seconds))
         return self.receipt
+
+    def receipt_sha256(self, job_id):
+        return "a" * 64
 
 
 class PromptfooWorkerProviderTests(unittest.TestCase):
@@ -260,7 +263,7 @@ class PromptfooWorkerProviderTests(unittest.TestCase):
             self.assertFalse(payload["worker_job_submitted"])
             self.assertEqual(transport.events, [])
 
-    def test_v2_missing_actual_model_preserves_received_terminal_status_in_private_receipt(self):
+    def test_v2_missing_actual_model_succeeds_but_marks_identity_unverified(self):
         self.require_provider()
         with tempfile.TemporaryDirectory() as temp:
             receipts = Path(temp); receipts.chmod(0o700)
@@ -285,20 +288,116 @@ class PromptfooWorkerProviderTests(unittest.TestCase):
                 ledger=ledger, transport=transport, run_id="run-v2",
                 receipt_directory=receipts, env={"AGATA_LAB_PRIVATE_RECEIPTS": str(receipts)},
             )
-            with patch.object(provider.worker_client, "build_v2_dev_job", return_value=job), \
-                 self.assertRaises(provider.AmbiguousWorkerResult):
-                adapter.invoke_v2_dev(
+            with patch.object(provider.worker_client, "build_v2_dev_job", return_value=job):
+                result = adapter.invoke_v2_dev(
                     {"user_message": "synthetic"}, invocation_id="inv-v2-model-missing", run_id="run-v2",
                     arm_id="run-v2-baseline", configuration_id="baseline", scenario_id="dev-sample",
                     turn_index=0, history_receipt_ids=[],
                 )
             payload = json.loads((receipts / "inv-v2-model-missing.worker-receipt.json").read_text())
             self.assertEqual(payload["worker_terminal_status"], "completed")
-            self.assertEqual(payload["promptfoo_outcome"], "ambiguous")
+            self.assertEqual(payload["promptfoo_outcome"], "success")
+            self.assertEqual(payload["model_identity_status"], "MODEL_IDENTITY_UNVERIFIED")
+            self.assertIsNone(payload["actual_model"])
+            self.assertIsNotNone(payload["output_sha256"])
+            self.assertEqual(result, {"output": "synthetic response"})
+            self.assertEqual(ledger.events[-1],
+                             ("complete", "generator", "inv-v2-model-missing", "success"))
+            self.assertEqual(sum(event[0] == "submit" for event in transport.events), 1)
+
+    def test_v2_explicit_model_mismatch_stops_and_records_provider_error(self):
+        self.require_provider()
+        with tempfile.TemporaryDirectory() as temp:
+            receipts = Path(temp); receipts.chmod(0o700)
+            ledger = FakeLedger()
+            job = {
+                "job_id": "job-v2", "experiment_id": "agata-v2-naturalness-dev",
+                "configuration_id": "baseline", "scenario_id": "dev-sample", "turn_index": 0,
+                "run_id": "run-v2", "arm_id": "run-v2-baseline",
+                "promptfoo_invocation_id": "inv-v2-model-mismatch", "dataset_split": "DEV",
+                "source_scenario_sha256": "a" * 64,
+            }
+            identity = {key: job[key] for key in (
+                "experiment_id", "configuration_id", "scenario_id", "turn_index", "run_id",
+                "arm_id", "promptfoo_invocation_id", "dataset_split", "source_scenario_sha256")}
+            transport = FakeTransport({
+                "job_id": "job-v2", "status": "completed", "response": "must not escape",
+                "slot_id": "slot-03", "identity": identity,
+                "execution": {"requested_model": "gpt-6-luna", "requested_reasoning_effort": "medium",
+                              "actual_model": "gpt-6-sol", "inference_started": True},
+            }, ledger=ledger)
+            adapter = provider.WorkerLabAdapter(
+                ledger=ledger, transport=transport, run_id="run-v2",
+                receipt_directory=receipts, env={"AGATA_LAB_PRIVATE_RECEIPTS": str(receipts)},
+            )
+            with patch.object(provider.worker_client, "build_v2_dev_job", return_value=job), \
+                 self.assertRaises(provider.ModelIdentityMismatch):
+                adapter.invoke_v2_dev(
+                    {"user_message": "synthetic"}, invocation_id="inv-v2-model-mismatch", run_id="run-v2",
+                    arm_id="run-v2-baseline", configuration_id="baseline", scenario_id="dev-sample",
+                    turn_index=0, history_receipt_ids=[],
+                )
+            payload = json.loads((receipts / "inv-v2-model-mismatch.worker-receipt.json").read_text())
+            self.assertEqual(payload["worker_terminal_status"], "completed")
+            self.assertEqual(payload["promptfoo_outcome"], "provider_error")
+            self.assertEqual(payload["model_identity_status"], "MODEL_IDENTITY_MISMATCH")
+            self.assertEqual(payload["actual_model"], "gpt-6-sol")
             self.assertIsNone(payload["output_sha256"])
             self.assertEqual(ledger.events[-1],
-                             ("complete", "generator", "inv-v2-model-missing", "ambiguous"))
+                             ("complete", "generator", "inv-v2-model-mismatch", "provider_error"))
             self.assertEqual(sum(event[0] == "submit" for event in transport.events), 1)
+
+    def test_v2_missing_receipt_wrong_identity_and_failed_or_ambiguous_inference_fail_closed(self):
+        self.require_provider()
+        receipt_variants = ("missing", "wrong_identity", "failed_after_inference", "ambiguous")
+        for variant in receipt_variants:
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as temp:
+                receipts = Path(temp); receipts.chmod(0o700)
+                ledger = FakeLedger()
+                invocation_id = f"inv-v2-{variant}"
+                job = {
+                    "job_id": "job-v2", "experiment_id": "agata-v2-naturalness-dev",
+                    "configuration_id": "baseline", "scenario_id": "dev-sample", "turn_index": 0,
+                    "run_id": "run-v2", "arm_id": "run-v2-baseline",
+                    "promptfoo_invocation_id": invocation_id, "dataset_split": "DEV",
+                    "source_scenario_sha256": "a" * 64,
+                }
+                identity = {key: job[key] for key in (
+                    "experiment_id", "configuration_id", "scenario_id", "turn_index", "run_id",
+                    "arm_id", "promptfoo_invocation_id", "dataset_split", "source_scenario_sha256")}
+                if variant == "wrong_identity":
+                    identity["arm_id"] = "some-other-arm"
+                if variant == "missing":
+                    receipt = None
+                elif variant == "ambiguous":
+                    receipt = {"job_id": "job-v2", "status": "ambiguous", "slot_id": "slot-03",
+                               "identity": identity, "execution": {"inference_started": True}}
+                elif variant == "failed_after_inference":
+                    receipt = {"job_id": "job-v2", "status": "failed", "slot_id": "slot-03",
+                               "identity": identity, "execution": {"inference_started": True}}
+                else:
+                    receipt = {"job_id": "job-v2", "status": "completed", "response": "text",
+                               "slot_id": "slot-03", "identity": identity,
+                               "execution": {"requested_model": "gpt-6-luna",
+                                             "requested_reasoning_effort": "medium",
+                                             "actual_model": None, "inference_started": True}}
+                transport = FakeTransport(receipt, ledger=ledger)
+                transport.receipt = receipt
+                adapter = provider.WorkerLabAdapter(
+                    ledger=ledger, transport=transport, run_id="run-v2",
+                    receipt_directory=receipts, env={"AGATA_LAB_PRIVATE_RECEIPTS": str(receipts)},
+                )
+                with patch.object(provider.worker_client, "build_v2_dev_job", return_value=job), \
+                     self.assertRaises(provider.AmbiguousWorkerResult):
+                    adapter.invoke_v2_dev(
+                        {"user_message": "synthetic"}, invocation_id=invocation_id, run_id="run-v2",
+                        arm_id="run-v2-baseline", configuration_id="baseline", scenario_id="dev-sample",
+                        turn_index=0, history_receipt_ids=[],
+                    )
+                self.assertEqual(sum(event[0] == "submit" for event in transport.events), 1)
+                self.assertEqual(ledger.events[-1], ("complete", "generator", invocation_id, "ambiguous"))
+                payload = json.loads((receipts / f"{invocation_id}.worker-receipt.json").read_text())
+                self.assertEqual(payload["promptfoo_outcome"], "ambiguous")
 
     def test_failed_receipt_proven_before_inference_is_provider_error_once(self):
         self.require_provider()

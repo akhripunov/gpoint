@@ -35,6 +35,10 @@ class AmbiguousWorkerResult(RuntimeError):
     """The Worker may have started inference; this invocation cannot be retried."""
 
 
+class ModelIdentityMismatch(RuntimeError):
+    """The provider reported a model outside the approved configured-model contract."""
+
+
 def _record_preinference_failure(env: Mapping[str, str], invocation_id: object, *,
                                  stage: str, reason_code: str, exception: BaseException,
                                  source_location: str, reservation_created: bool = False,
@@ -345,6 +349,8 @@ class WorkerLabAdapter:
         completed = False
         receipt = None
         outcome = "ambiguous"
+        model_identity_status = None
+        actual_model = None
         try:
             returned_id = self.transport.submit(job)
             submitted = True
@@ -366,10 +372,20 @@ class WorkerLabAdapter:
                 output = receipt.get("response")
                 if (not isinstance(output, str) or not output.strip()
                         or execution.get("requested_model") != MODEL
-                        or execution.get("requested_reasoning_effort") != REASONING
-                        or execution.get("actual_model") != MODEL):
-                    raise AmbiguousWorkerResult("V2 receipt does not prove the requested model contract")
-                outcome = "success"
+                        or execution.get("requested_reasoning_effort") != REASONING):
+                    raise AmbiguousWorkerResult("V2 receipt does not prove the configured model contract")
+                actual_model = execution.get("actual_model")
+                if actual_model is None:
+                    model_identity_status = "MODEL_IDENTITY_UNVERIFIED"
+                    outcome = "success"
+                elif not isinstance(actual_model, str) or not actual_model:
+                    raise AmbiguousWorkerResult("V2 receipt has malformed provider-reported model identity")
+                elif actual_model != MODEL:
+                    model_identity_status = "MODEL_IDENTITY_MISMATCH"
+                    output, outcome = None, "provider_error"
+                else:
+                    model_identity_status = "MODEL_IDENTITY_VERIFIED"
+                    outcome = "success"
             elif receipt["status"] == "failed" and execution.get("inference_started") is False:
                 output, outcome = None, "provider_error"
             else:
@@ -380,6 +396,7 @@ class WorkerLabAdapter:
                 "lab_ledger_attempt_id": invocation_id,
                 "worker_receipt_sha256": self.transport.receipt_sha256(job["job_id"]),
                 "worker_terminal_status": receipt["status"], "promptfoo_outcome": outcome,
+                "actual_model": actual_model, "model_identity_status": model_identity_status,
                 "output_sha256": hashlib.sha256(output.encode()).hexdigest() if output else None,
             }
             ledger.complete("generator", invocation_id, outcome)
@@ -390,6 +407,8 @@ class WorkerLabAdapter:
                 return {"output": output}
             if outcome == "ambiguous":
                 raise AmbiguousWorkerResult("V2 Worker outcome is ambiguous; retries are forbidden")
+            if model_identity_status == "MODEL_IDENTITY_MISMATCH":
+                raise ModelIdentityMismatch("V2 provider-reported model differs from the approved model")
             raise RuntimeError("Worker rejected the V2 LAB job before inference")
         except BaseException:
             if not completed:
