@@ -211,7 +211,8 @@ class PhaseApprovalState:
     def fail_run(self, *, stage: str, reason_code: str) -> None:
         state = self._read()
         if (state is None or state.get("schema_version") != 2
-                or stage not in {"GENERATOR", "PHASE_A_VERIFY", "BLIND_PACKET", "JUDGES"}
+                or stage not in {"PHASE_A_PREFLIGHT", "GENERATOR", "PHASE_A_VERIFY",
+                                 "PHASE_B_PREFLIGHT", "BLIND_PACKET", "JUDGES"}
                 or not isinstance(reason_code, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", reason_code)):
             raise PermissionError("combined LIVE run failure state is invalid")
         if state.get("terminal_status") is not None:

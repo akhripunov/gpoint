@@ -171,13 +171,37 @@ class PromptfooV2MockE2ETests(unittest.TestCase):
 
                 thread = threading.Thread(target=worker_loop, daemon=True)
                 thread.start()
-                with patch.object(v2_provenance, "current_source_sha", return_value=source_sha):
+                preflight_generator_counts = []
+
+                def mock_read_only_preflight():
+                    preflight_generator_counts.append(
+                        ledger.snapshot()["generator_invocations"]["attempted"]
+                    )
+                    return {
+                        "outcome": "PASS", "candidate_verified": True, "launchagent_loaded": True,
+                        "active_inference_absent": True, "release_and_transition_locks_free": True,
+                        "pool_busy": 0, "mutation_performed": False,
+                        "lanes": {
+                            lane: {
+                                "health": "HEALTHY", "queue_snapshot_state": "VERIFIED",
+                                "pending": 0, "running": 0, "snapshot_fresh": True,
+                                "identity_and_readonly_provenance_verified": True,
+                            }
+                            for lane in ("GPOINT", "GSALES")
+                        },
+                    }
+
+                with patch.object(v2_provenance, "current_source_sha", return_value=source_sha), \
+                        patch.object(live_e2e.migrate_worker_runtime, "read_only_preflight",
+                                     side_effect=mock_read_only_preflight):
                     outcome = live_e2e.run_v2_live_e2e(
                         scenario_id, run_id=run_id, ledger=ledger,
                         promptfoo_executable=str(promptfoo), receipt_directory=receipts,
                         private_directory=root, env=env,
                     )
                 self.assertEqual(outcome["status"], "COMPLETED")
+                self.assertEqual(preflight_generator_counts, [0, 8])
+                self.assertEqual(set(outcome["production_preflight"]), {"phase_a", "phase_b"})
                 self.assertEqual(outcome["decision_type"], "AUTO_DECISION", outcome["scenarios"])
                 phase_state_after = approval_phases.PhaseApprovalState(
                     lab_queue.live_run_phase_state_path(queue_root, run_id))._read()
