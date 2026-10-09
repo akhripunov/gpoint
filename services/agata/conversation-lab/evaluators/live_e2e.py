@@ -17,6 +17,7 @@ import approval_phases  # noqa: E402
 import blind  # noqa: E402
 import judge_coordinator  # noqa: E402
 import lab_queue  # noqa: E402
+import migrate_worker_runtime  # noqa: E402
 import promptfoo_runner  # noqa: E402
 import v2_provenance  # noqa: E402
 import worker_client  # noqa: E402
@@ -30,6 +31,54 @@ def _private_sanity_findings(private_mapping: Mapping[str, object], scenario_id:
             or not isinstance(records[0].get("private_quality_findings"), list)):
         return [{"code": "INVALID_SANITY_RECEIPT"}]
     return list(records[0]["private_quality_findings"])
+
+
+def _require_phase_safety_preflight(phase: str) -> dict:
+    """Require canonical, fresh production safety evidence before each live phase."""
+    result = migrate_worker_runtime.read_only_preflight()
+    if not isinstance(result, Mapping):
+        raise PermissionError(f"{phase} canonical safety preflight returned no result")
+    valid = (
+        result.get("outcome") == "PASS"
+        and result.get("candidate_verified") is True
+        and result.get("launchagent_loaded") is True
+        and result.get("active_inference_absent") is True
+        and result.get("release_and_transition_locks_free") is True
+        and type(result.get("pool_busy")) is int and result["pool_busy"] == 0
+        and result.get("mutation_performed") is False
+    )
+    lanes = result.get("lanes")
+    if not isinstance(lanes, Mapping) or set(lanes) != {"GPOINT", "GSALES"}:
+        valid = False
+    else:
+        for lane in ("GPOINT", "GSALES"):
+            evidence = lanes.get(lane)
+            if not isinstance(evidence, Mapping) or not (
+                evidence.get("health") == "HEALTHY"
+                and evidence.get("queue_snapshot_state") == "VERIFIED"
+                and type(evidence.get("pending")) is int and evidence["pending"] == 0
+                and type(evidence.get("running")) is int and evidence["running"] == 0
+                and evidence.get("snapshot_fresh") is True
+                and evidence.get("identity_and_readonly_provenance_verified") is True
+            ):
+                valid = False
+    if not valid:
+        raise PermissionError(f"{phase} canonical production safety preflight failed closed")
+
+    # Keep only the canonical controller's fixed, non-sensitive summary fields.
+    return {
+        "outcome": "PASS", "candidate_verified": True, "launchagent_loaded": True,
+        "active_inference_absent": True, "release_and_transition_locks_free": True,
+        "pool_busy": 0, "mutation_performed": False,
+        "lanes": {
+            lane: {
+                "health": "HEALTHY", "queue_snapshot_state": "VERIFIED",
+                "pending": 0, "running": 0, "snapshot_fresh": True,
+                "identity_and_readonly_provenance_verified": True,
+            }
+            for lane in ("GPOINT", "GSALES")
+        },
+    }
 
 
 def run_v2_live_e2e(
@@ -76,12 +125,15 @@ def run_v2_live_e2e(
 
     phase = approval_phases.PhaseApprovalState(lab_queue.live_run_phase_state_path(queue, run_id))
     auth_sha256 = lab_queue.live_run_authorization_sha256(approval)
-    phase.begin_generator(
-        run_id=run_id, scenario_id=scenario_id, worker_bundle_sha256=approval["worker_bundle_sha256"],
-        approval_id=approval["approval_id"], max_calls=8, authorization_sha256=auth_sha256,
-    )
-    stage = "GENERATOR"
+    phase_preflight_evidence = {}
+    stage = "PHASE_A_PREFLIGHT"
     try:
+        phase.begin_generator(
+            run_id=run_id, scenario_id=scenario_id, worker_bundle_sha256=approval["worker_bundle_sha256"],
+            approval_id=approval["approval_id"], max_calls=8, authorization_sha256=auth_sha256,
+        )
+        phase_preflight_evidence["phase_a"] = _require_phase_safety_preflight("PHASE_A")
+        stage = "GENERATOR"
         generator_results = run_v2_dev_scenario(
             scenario_id, run_id=run_id, ledger=ledger, promptfoo_executable=promptfoo_executable,
             worker_queue=queue, private_receipt_directory=receipt_directory, env=env,
@@ -99,6 +151,8 @@ def run_v2_live_e2e(
         phase.close_generator(
             worker_receipts, call_ledger_snapshot=ledger.snapshot(), promptfoo_receipts=promptfoo_receipts,
         )
+        stage = "PHASE_B_PREFLIGHT"
+        phase_preflight_evidence["phase_b"] = _require_phase_safety_preflight("PHASE_B")
         phase.begin_judges(
             run_id=run_id, scenario_id=scenario_id,
             worker_bundle_sha256=approval["worker_bundle_sha256"], approval_id=approval["approval_id"],
@@ -131,6 +185,7 @@ def run_v2_live_e2e(
             "scenario_id": scenario_id, "approval_id": approval["approval_id"],
             "model": "gpt-6-luna", "reasoning_effort": "medium",
             "model_identity_status": "CONFIGURED_MODEL_ONLY / ACTUAL_MODEL_UNVERIFIED",
+            "production_preflight": phase_preflight_evidence,
             "generator_invocations": ledger.snapshot()["generator_invocations"]["attempted"],
             "judge_invocations": outcome["judge_invocations"], "retries": 0,
             "decision_type": outcome["decision_type"], "scenarios": outcome["scenarios"],

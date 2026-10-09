@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from contextlib import ExitStack
 from unittest.mock import patch
 
 LAB = Path(__file__).resolve().parents[1]
@@ -21,6 +22,8 @@ for path in (LAB / "evaluators", WORKER):
         sys.path.insert(0, str(path))
 
 import lab_queue
+import approval_phases
+import live_e2e
 import worker_client
 import v2_provenance
 from run_coordinator import CallLedger
@@ -79,6 +82,179 @@ class V2GeneratorContractTests(unittest.TestCase):
                     self.assertEqual(row["request_hashes"][arm][turn], digest)
         self.assertEqual(bundled["dataset_split"], "DEV")
         self.assertEqual(bundled["scenarios"].keys(), source.keys())
+
+    def test_live_phase_preflight_requires_fresh_idle_verified_production_queues(self):
+        valid = {
+            "outcome": "PASS", "candidate_verified": True, "launchagent_loaded": True,
+            "active_inference_absent": True, "release_and_transition_locks_free": True,
+            "pool_busy": 0, "mutation_performed": False,
+            "lanes": {
+                lane: {
+                    "health": "HEALTHY", "queue_snapshot_state": "VERIFIED",
+                    "pending": 0, "running": 0, "snapshot_fresh": True,
+                    "identity_and_readonly_provenance_verified": True,
+                }
+                for lane in ("GPOINT", "GSALES")
+            },
+        }
+        with patch.object(live_e2e.migrate_worker_runtime, "read_only_preflight", return_value=valid):
+            evidence = live_e2e._require_phase_safety_preflight("PHASE_A")
+            self.assertEqual(evidence["outcome"], "PASS")
+            self.assertEqual(set(evidence["lanes"]), {"GPOINT", "GSALES"})
+
+        invalid_cases = [
+            ("candidate_verified", False), ("launchagent_loaded", False),
+            ("active_inference_absent", False), ("release_and_transition_locks_free", False),
+            ("pool_busy", 1), ("mutation_performed", True), ("outcome", "BLOCKED"),
+        ]
+        for key, value in invalid_cases:
+            with self.subTest(key=key):
+                result = {**valid, key: value}
+                with patch.object(live_e2e.migrate_worker_runtime, "read_only_preflight", return_value=result):
+                    with self.assertRaises(PermissionError):
+                        live_e2e._require_phase_safety_preflight("PHASE_B")
+
+        for lane in ("GPOINT", "GSALES"):
+            for key, value in (
+                ("health", "DEGRADED"), ("queue_snapshot_state", "UNAVAILABLE"),
+                ("pending", 1), ("running", 1), ("snapshot_fresh", False),
+                ("identity_and_readonly_provenance_verified", False),
+            ):
+                with self.subTest(lane=lane, key=key):
+                    lanes = {name: dict(row) for name, row in valid["lanes"].items()}
+                    lanes[lane][key] = value
+                    result = {**valid, "lanes": lanes}
+                    with patch.object(live_e2e.migrate_worker_runtime, "read_only_preflight", return_value=result):
+                        with self.assertRaises(PermissionError):
+                            live_e2e._require_phase_safety_preflight("PHASE_B")
+
+    def test_phase_a_preflight_failure_stops_before_generator_reservation(self):
+        self._assert_live_preflight_failure_stops_calls(fail_phase="PHASE_A")
+
+    def test_phase_b_preflight_failure_stops_before_any_judge_invocation(self):
+        self._assert_live_preflight_failure_stops_calls(fail_phase="PHASE_B")
+
+    def _assert_live_preflight_failure_stops_calls(self, *, fail_phase):
+        scenario_id = self.scenario["scenario_id"]
+        run_id = "preflight-test-" + fail_phase.lower()
+        bundle = "b" * 64
+        context = {
+            "source_sha": "a" * 40, "lab_bundle_sha256": "c" * 64,
+            "naturalness_policy_sha256": "d" * 64, "rubric_sha256": "e" * 64,
+            "dataset_id": "agata-conversation-lab-v2", "dataset_split": "DEV",
+            "dataset_manifest_sha256": "f" * 64,
+        }
+        approval = {
+            "authorization_type": "LIVE_RUN_AUTHORIZATION", "approval_id": "approval-preflight-test",
+            "run_id": run_id, "worker_bundle_sha256": bundle, **context,
+            "experiment_ids": ["agata-v2-naturalness-dev", lab_queue.JUDGE_EXPERIMENT_ID],
+            "configuration_ids": ["baseline", "naturalness-v1", "judge-1", "judge-2", "judge-3"],
+            "scenario_ids": [scenario_id], "model": "gpt-6-luna", "reasoning_effort": "medium",
+            "max_generator_calls": 8, "max_judge_calls": 3, "retries": 0,
+            "fallbacks": 0, "concurrency": 1, "expires_at": "2099-01-01T00:00:00Z",
+        }
+        valid = {
+            "outcome": "PASS", "candidate_verified": True, "launchagent_loaded": True,
+            "active_inference_absent": True, "release_and_transition_locks_free": True,
+            "pool_busy": 0, "mutation_performed": False,
+            "lanes": {
+                lane: {
+                    "health": "HEALTHY", "queue_snapshot_state": "VERIFIED",
+                    "pending": 0, "running": 0, "snapshot_fresh": True,
+                    "identity_and_readonly_provenance_verified": True,
+                }
+                for lane in ("GPOINT", "GSALES")
+            },
+        }
+        blocked = {**valid, "outcome": "BLOCKED"}
+        preflight_results = [blocked] if fail_phase == "PHASE_A" else [valid, blocked]
+
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name); root.chmod(0o700)
+            support = root / "support"; support.mkdir(mode=0o700)
+            config = support / "config"; config.mkdir(mode=0o700)
+            queues = support / "queues"; queues.mkdir(mode=0o700)
+            queue = queues / "lab"; queue.mkdir(mode=0o700)
+            state_dir = queue / "state"; state_dir.mkdir(mode=0o700)
+            receipts = root / "receipts"; receipts.mkdir(mode=0o700)
+            private = root / "private"; private.mkdir(mode=0o700)
+            ledger = CallLedger(journal_path=root / "call-ledger.jsonl")
+            receipt_rows = {}
+            generator_mock = unittest.mock.Mock()
+            judge_mock = unittest.mock.Mock()
+
+            def fake_generator(_scenario_id, **_kwargs):
+                arms = []
+                for configuration in ("baseline", "naturalness-v1"):
+                    arm_id = f"{run_id}-{configuration}"
+                    arm_ledger_id = "arm-" + configuration
+                    ledger.reserve("arm", arm_ledger_id, configuration=configuration,
+                                   metadata={"arm_id": arm_id, "scenario_id": scenario_id})
+                    job_ids, invocation_ids = [], []
+                    for turn in range(4):
+                        invocation_id = "pfv2-" + hashlib.sha256(
+                            f"{run_id}\0{configuration}\0{turn}".encode()).hexdigest()[:59]
+                        job_id = f"job-{configuration}-{turn}"
+                        ledger.reserve("generator", invocation_id, metadata={
+                            "arm_id": arm_id, "turn_index": turn, "configuration": configuration,
+                            "scenario_id": scenario_id, "run_id": run_id,
+                            "experiment_id": "agata-v2-naturalness-dev",
+                            "worker_job_id": f"job-{configuration}-{turn}",
+                        })
+                        ledger.complete("generator", invocation_id, "success")
+                        job_ids.append(job_id); invocation_ids.append(invocation_id)
+                        receipt_rows[job_id] = {
+                            "job_id": job_id, "status": "completed", "slot_id": "slot-03",
+                            "response": "mock response", "identity": {
+                                "experiment_id": "agata-v2-naturalness-dev", "job_type": "v2-dev-generator",
+                                "dataset_split": "DEV", "run_id": run_id, "scenario_id": scenario_id,
+                                "configuration_id": configuration, "turn_index": turn,
+                                "promptfoo_invocation_id": invocation_id,
+                            },
+                        }
+                        (receipts / (invocation_id + ".promptfoo-receipt.json")).write_text(json.dumps({
+                            "promptfoo_invocation_id": invocation_id, "promptfoo_success": True,
+                            "result_count": 1, "run_id": run_id, "worker_job_id": job_id,
+                        }), encoding="utf-8")
+                    ledger.complete("arm", arm_ledger_id, "success")
+                    arms.append({"worker_receipt_ids": job_ids, "promptfoo_invocation_ids": invocation_ids})
+                return arms
+
+            if fail_phase == "PHASE_B":
+                generator_mock.side_effect = fake_generator
+
+            env = {"GPOINT_AGATA_WORKER_SUPPORT": str(support)}
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(live_e2e.worker_client, "canonical_lab_queue", return_value=queue))
+                stack.enter_context(patch.object(lab_queue, "worker_bundle_sha256", return_value=bundle))
+                stack.enter_context(patch.object(lab_queue, "load_owner_approval", return_value=approval))
+                stack.enter_context(patch.object(lab_queue, "owner_approval_usage",
+                                                 return_value={"calls": 0, "generator_calls": 0, "judge_calls": 0}))
+                stack.enter_context(patch.object(v2_provenance, "live_run_context", return_value=context))
+                stack.enter_context(patch.object(live_e2e.promptfoo_runner, "validate_promptfoo_cli",
+                                                 return_value="0.123.1"))
+                stack.enter_context(patch.object(live_e2e.migrate_worker_runtime, "read_only_preflight",
+                                                 side_effect=preflight_results))
+                stack.enter_context(patch.object(live_e2e, "run_v2_dev_scenario", generator_mock))
+                stack.enter_context(patch.object(live_e2e.lab_queue, "read_receipt",
+                                                 side_effect=lambda _queue, job_id: receipt_rows[job_id]))
+                stack.enter_context(patch.object(live_e2e.judge_coordinator, "run_judge_batch", judge_mock))
+                with self.assertRaisesRegex(RuntimeError, "LIVE E2E stopped during") as error:
+                    live_e2e.run_v2_live_e2e(
+                        scenario_id, run_id=run_id, ledger=ledger, promptfoo_executable="/mock/promptfoo",
+                        receipt_directory=receipts, private_directory=private, env=env,
+                    )
+
+            phase_state = approval_phases.PhaseApprovalState(
+                lab_queue.live_run_phase_state_path(queue, run_id))._read()
+            self.assertEqual(phase_state["terminal_status"], "FAILED")
+            self.assertEqual(phase_state["failure"]["stage"], fail_phase + "_PREFLIGHT",
+                             repr(error.exception.__cause__))
+            self.assertEqual(ledger.snapshot()["generator_invocations"]["attempted"],
+                             0 if fail_phase == "PHASE_A" else 8)
+            self.assertEqual(ledger.snapshot()["judge_invocations"]["attempted"], 0)
+            self.assertEqual(generator_mock.call_count, 0 if fail_phase == "PHASE_A" else 1)
+            judge_mock.assert_not_called()
 
     def test_live_source_sha_rejects_dirty_lab_checkout(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -227,6 +403,28 @@ class V2GeneratorContractTests(unittest.TestCase):
                                    worker_bundle_sha256=lab_queue.worker_bundle_sha256(),
                                    approval_id="approval-generator", max_calls=3,
                                    generator_receipts=receipts)
+
+    def test_phase_preflight_failure_is_durably_terminal_without_reopening_approval(self):
+        from approval_phases import PhaseApprovalState
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); root.chmod(0o700)
+            phase_dir = root / "state"; phase_dir.mkdir(mode=0o700)
+            for stage in ("PHASE_A_PREFLIGHT", "PHASE_B_PREFLIGHT"):
+                with self.subTest(stage=stage):
+                    state = PhaseApprovalState(lab_queue.live_run_phase_state_path(root, "run-contract" + stage))
+                    state.begin_generator(run_id="run-contract" + stage,
+                                          scenario_id=self.scenario["scenario_id"],
+                                          worker_bundle_sha256=lab_queue.worker_bundle_sha256(),
+                                          approval_id="approval-generator", max_calls=8,
+                                          authorization_sha256="a" * 64)
+                    state.fail_run(stage=stage, reason_code="LIVE_E2E_FAILED")
+                    self.assertEqual(state._read()["terminal_status"], "FAILED")
+                    with self.assertRaises(PermissionError):
+                        state.begin_generator(run_id="run-contract" + stage,
+                                              scenario_id=self.scenario["scenario_id"],
+                                              worker_bundle_sha256=lab_queue.worker_bundle_sha256(),
+                                              approval_id="approval-generator", max_calls=8,
+                                              authorization_sha256="a" * 64)
 
     def test_worker_approval_schema_enforces_expiry_bundle_and_phase_budgets(self):
         with tempfile.TemporaryDirectory() as directory:
