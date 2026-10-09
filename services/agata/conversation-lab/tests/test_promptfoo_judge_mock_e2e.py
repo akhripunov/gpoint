@@ -45,7 +45,8 @@ class PromptfooJudgeMockE2ETests(unittest.TestCase):
             queue_root = worker_client.canonical_lab_queue({"GPOINT_AGATA_WORKER_SUPPORT": str(support)})
             lab_queue._layout(queue_root)
             phase_dir = queue_root / "state"; phase_dir.mkdir(mode=0o700)
-            phase = approval_phases.PhaseApprovalState(phase_dir / "v2-approval-phase.json")
+            phase = approval_phases.PhaseApprovalState(
+                lab_queue.live_run_phase_state_path(queue_root, run_id))
             # The LAB approval is bound to the immutable Slot 03 runtime, not
             # the supervisor source loaded by this test process.
             runtime_root = support / "runtime"

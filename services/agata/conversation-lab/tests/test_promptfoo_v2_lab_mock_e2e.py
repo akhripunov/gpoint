@@ -180,13 +180,13 @@ class PromptfooV2MockE2ETests(unittest.TestCase):
                 self.assertEqual(outcome["status"], "COMPLETED")
                 self.assertEqual(outcome["decision_type"], "AUTO_DECISION", outcome["scenarios"])
                 phase_state_after = approval_phases.PhaseApprovalState(
-                    queue_root / "state" / "v2-approval-phase.json")._read()
+                    lab_queue.live_run_phase_state_path(queue_root, run_id))._read()
                 self.assertEqual(phase_state_after["terminal_status"], "COMPLETED")
                 self.assertEqual(phase_state_after["generator_success_count"], 8)
                 self.assertEqual(phase_state_after["judge_invocations"], 3)
                 with self.assertRaises(PermissionError):
                     approval_phases.PhaseApprovalState(
-                        queue_root / "state" / "v2-approval-phase.json").begin_generator(
+                        lab_queue.live_run_phase_state_path(queue_root, run_id)).begin_generator(
                             run_id=run_id, scenario_id=scenario_id, worker_bundle_sha256=bundle,
                             approval_id=generator_approval["approval_id"], max_calls=8,
                             authorization_sha256=lab_queue.live_run_authorization_sha256(generator_approval),

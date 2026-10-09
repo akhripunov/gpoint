@@ -172,6 +172,13 @@ def live_run_authorization_sha256(approval: dict) -> str:
     ).encode("utf-8")).hexdigest()
 
 
+def live_run_phase_state_path(root: Path, run_id: str) -> Path:
+    """Return the private phase receipt path bound to one immutable run ID."""
+    if not isinstance(run_id, str) or not ID_RE.fullmatch(run_id):
+        raise LabQueueError("lab_live_run_scope_mismatch")
+    return Path(root) / "state" / f"v2-approval-phase-{run_id}.json"
+
+
 def validate_live_run_phase(approval: dict, job: dict, *, phase: str, root: Path | None) -> None:
     """Verify a V2 job against the one immutable authorization and phase receipt."""
     run_id = job.get("run_id") or job.get("batch_id")
@@ -180,7 +187,7 @@ def validate_live_run_phase(approval: dict, job: dict, *, phase: str, root: Path
             or approval.get("scenario_ids") != [scenario_id]
             or approval.get("dataset_split") != "DEV"):
         raise LabQueueError("lab_live_run_scope_mismatch")
-    state_path = Path(root) / "state" / "v2-approval-phase.json"
+    state_path = live_run_phase_state_path(Path(root), run_id)
     try:
         stat = state_path.stat()
         if state_path.is_symlink() or stat.st_uid != os.getuid() or stat.st_mode & 0o077:

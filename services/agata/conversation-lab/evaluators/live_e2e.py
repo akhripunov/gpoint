@@ -74,7 +74,7 @@ def run_v2_live_e2e(
     judge_coordinator._private_directory(Path(receipt_directory))
     judge_coordinator._private_directory(Path(private_directory))
 
-    phase = approval_phases.PhaseApprovalState(queue / "state" / "v2-approval-phase.json")
+    phase = approval_phases.PhaseApprovalState(lab_queue.live_run_phase_state_path(queue, run_id))
     auth_sha256 = lab_queue.live_run_authorization_sha256(approval)
     phase.begin_generator(
         run_id=run_id, scenario_id=scenario_id, worker_bundle_sha256=approval["worker_bundle_sha256"],

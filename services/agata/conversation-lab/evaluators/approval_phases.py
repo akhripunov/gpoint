@@ -49,16 +49,35 @@ class PhaseApprovalState:
         finally:
             Path(temporary_name).unlink(missing_ok=True)
 
+    def _write_once(self, value: dict) -> None:
+        """Claim this run atomically; a partially written claim stays fail-closed."""
+        parent = self.path.parent
+        if (not parent.is_dir() or parent.is_symlink()
+                or parent.stat().st_uid != os.getuid() or parent.stat().st_mode & 0o077):
+            raise PermissionError("LAB phase-state directory permissions are unsafe")
+        try:
+            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError as exc:
+            raise PermissionError("Phase A approval must be a fresh, exact eight-call run scope") from exc
+        # Preserve the O_EXCL claim if writing or durability confirmation
+        # fails. A later invocation must not silently reuse this run ID.
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            json.dump(value, stream, sort_keys=True, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        lab_queue._fsync_directory(parent)
+
     def begin_generator(self, *, run_id: str, scenario_id: str, worker_bundle_sha256: str,
                         approval_id: str, max_calls: int, authorization_sha256: str | None = None) -> None:
         if (not lab_queue.ID_RE.fullmatch(run_id) or not lab_queue.ID_RE.fullmatch(scenario_id)
                 or not lab_queue.ID_RE.fullmatch(approval_id)
                 or not isinstance(worker_bundle_sha256, str) or len(worker_bundle_sha256) != 64
-                or max_calls != 8 or self._read() is not None):
+                or max_calls != 8):
             raise PermissionError("Phase A approval must be a fresh, exact eight-call run scope")
         if authorization_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", authorization_sha256):
             raise PermissionError("Combined run authorization fingerprint is invalid")
-        self._write({
+        self._write_once({
             "schema_version": 2 if authorization_sha256 is not None else 1,
             "run_id": run_id, "scenario_id": scenario_id,
             "worker_bundle_sha256": worker_bundle_sha256, "active_phase": "GENERATOR",

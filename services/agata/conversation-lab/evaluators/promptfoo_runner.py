@@ -438,7 +438,7 @@ def run_promptfoo_v2_dev_eval(
               "LAB_QUEUE_VALIDATION", "CANONICAL_LAB_QUEUE_MISMATCH",
               "promptfoo_runner.run_promptfoo_v2_dev_eval")
     if turn_index == 0:
-        state_path = queue / "state" / "v2-approval-phase.json"
+        state_path = lab_queue.live_run_phase_state_path(queue, run_id)
         if not state_path.is_file():
             check(lambda: (_ for _ in ()).throw(PermissionError("V2 phase state unavailable")),
                   "PHASE_STATE_VALIDATION", "PHASE_STATE_INACTIVE",

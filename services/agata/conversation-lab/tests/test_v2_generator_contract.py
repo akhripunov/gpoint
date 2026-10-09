@@ -4,6 +4,8 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import sys
 import subprocess
 import tempfile
@@ -169,7 +171,7 @@ class V2GeneratorContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); root.chmod(0o700)
             phase_dir = root / "state"; phase_dir.mkdir(mode=0o700)
-            state = PhaseApprovalState(phase_dir / "v2-approval-phase.json")
+            state = PhaseApprovalState(lab_queue.live_run_phase_state_path(root, "run-contract"))
             with patch.object(approval_phases.lab_queue, "_fsync_directory",
                               wraps=approval_phases.lab_queue._fsync_directory) as fsync_directory:
                 state.begin_generator(run_id="run-contract", scenario_id=self.scenario["scenario_id"],
@@ -286,13 +288,18 @@ class V2GeneratorContractTests(unittest.TestCase):
                 path, expected_bundle_sha256=lab_queue.worker_bundle_sha256())
             self.assertEqual(loaded, authorization)
             phase_dir = root / "state"; phase_dir.mkdir(mode=0o700)
-            state = PhaseApprovalState(phase_dir / "v2-approval-phase.json")
+            state = PhaseApprovalState(lab_queue.live_run_phase_state_path(root, "run-contract"))
             auth_digest = hashlib.sha256(json.dumps(
                 authorization, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             state.begin_generator(run_id="run-contract", scenario_id=self.scenario["scenario_id"],
                                   worker_bundle_sha256=loaded["worker_bundle_sha256"],
                                   approval_id=loaded["approval_id"], max_calls=8,
                                   authorization_sha256=auth_digest)
+            # Ignore the pre-fix global phase file. It may contain a terminal
+            # receipt from an older run and must neither block nor authorize this run.
+            legacy_state = phase_dir / "v2-approval-phase.json"
+            legacy_state.write_text(json.dumps({"terminal_status": "FAILED", "run_id": "old-run"}))
+            legacy_state.chmod(0o600)
             state.assert_generator_active(run_id="run-contract", scenario_id=self.scenario["scenario_id"],
                                           worker_bundle_sha256=loaded["worker_bundle_sha256"],
                                           approval_id=loaded["approval_id"], authorization_sha256=auth_digest)
@@ -309,6 +316,8 @@ class V2GeneratorContractTests(unittest.TestCase):
                 state.assert_generator_active(run_id="run-contract", scenario_id=self.scenario["scenario_id"],
                                               worker_bundle_sha256=loaded["worker_bundle_sha256"],
                                               approval_id=loaded["approval_id"], authorization_sha256="f" * 64)
+            with self.assertRaises(lab_queue.LabQueueError):
+                lab_queue.live_run_phase_state_path(root, "../other-run")
 
     def test_combined_live_authorization_rejects_phase_specific_or_expanded_scope(self):
         base = {
@@ -357,6 +366,41 @@ class V2GeneratorContractTests(unittest.TestCase):
                                       worker_bundle_sha256=lab_queue.worker_bundle_sha256(),
                                       approval_id="approval-failed", max_calls=8,
                                       authorization_sha256="a" * 64)
+            # A terminal run remains non-reusable, while a new immutable run ID
+            # receives a distinct phase receipt and can start independently.
+            next_state = PhaseApprovalState(lab_queue.live_run_phase_state_path(root, "run-next"))
+            next_state.begin_generator(run_id="run-next", scenario_id=self.scenario["scenario_id"],
+                                       worker_bundle_sha256=lab_queue.worker_bundle_sha256(),
+                                       approval_id="approval-next", max_calls=8,
+                                       authorization_sha256="b" * 64)
+            self.assertEqual(next_state._read()["run_id"], "run-next")
+            self.assertEqual(state._read()["terminal_status"], "FAILED")
+
+    def test_concurrent_same_run_start_has_one_durable_owner(self):
+        from approval_phases import PhaseApprovalState
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); root.chmod(0o700)
+            state_dir = root / "state"; state_dir.mkdir(mode=0o700)
+            path = lab_queue.live_run_phase_state_path(root, "run-race")
+            barrier = threading.Barrier(2)
+
+            def start():
+                state = PhaseApprovalState(path)
+                barrier.wait()
+                try:
+                    state.begin_generator(run_id="run-race", scenario_id=self.scenario["scenario_id"],
+                                          worker_bundle_sha256=lab_queue.worker_bundle_sha256(),
+                                          approval_id="approval-race", max_calls=8,
+                                          authorization_sha256="c" * 64)
+                    return "OWNER"
+                except (PermissionError, OSError, json.JSONDecodeError):
+                    return "REJECTED"
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(start) for _ in range(2)]
+                results = [future.result() for future in futures]
+            self.assertCountEqual(results, ["OWNER", "REJECTED"])
+            self.assertEqual(PhaseApprovalState(path)._read()["active_phase"], "GENERATOR")
 
     def test_live_e2e_passes_only_actual_persona_findings_to_aggregator(self):
         import live_e2e

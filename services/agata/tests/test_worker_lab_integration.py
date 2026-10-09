@@ -152,7 +152,7 @@ class WorkerLabIntegrationTests(unittest.TestCase):
             "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
         }
         state["authorization_sha256"] = lab_queue.live_run_authorization_sha256(authorization)
-        state_path = state_dir / "v2-approval-phase.json"
+        state_path = lab_queue.live_run_phase_state_path(self.lab_root, "batch-a")
         state_path.write_text(json.dumps(state), encoding="utf-8")
         state_path.chmod(0o600)
         if approval_experiments is not None:
