@@ -49,7 +49,19 @@ class PromptfooV2MockE2ETests(unittest.TestCase):
             receipts = root / "receipts"; receipts.mkdir(mode=0o700)
             ledger = CallLedger(journal_path=root / "call-ledger.jsonl")
             run_id = "v2-run-e2e-001"
-            bundle = lab_queue.worker_bundle_sha256()
+            # Model the canonical installed Slot 03 pointer. LAB approvals bind
+            # to the selected lane runtime, which may differ from the supervisor.
+            runtime_root = support / "runtime"
+            runtime_root.mkdir(mode=0o700)
+            lab_runtime = runtime_root / ("a" * 40)
+            lab_runtime.mkdir(mode=0o700)
+            for asset_name in lab_queue.WORKER_BUNDLE_ASSET_NAMES:
+                shutil.copyfile(WORKER_DIR / asset_name, lab_runtime / asset_name)
+                (lab_runtime / asset_name).chmod(0o600)
+            slot_dir = runtime_root / "slots" / "LAB"
+            slot_dir.mkdir(parents=True, mode=0o700)
+            (slot_dir / "current").symlink_to(lab_runtime)
+            bundle = lab_queue.worker_bundle_sha256(lab_runtime)
             phase = approval_phases.PhaseApprovalState(phase_dir / "v2-approval-phase.json")
             env = {
                 "PATH": os.environ.get("PATH", ""), "HOME": str(root), "TMPDIR": str(root),
