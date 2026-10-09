@@ -260,6 +260,46 @@ class PromptfooWorkerProviderTests(unittest.TestCase):
             self.assertFalse(payload["worker_job_submitted"])
             self.assertEqual(transport.events, [])
 
+    def test_v2_missing_actual_model_preserves_received_terminal_status_in_private_receipt(self):
+        self.require_provider()
+        with tempfile.TemporaryDirectory() as temp:
+            receipts = Path(temp); receipts.chmod(0o700)
+            ledger = FakeLedger()
+            job = {
+                "job_id": "job-v2", "experiment_id": "agata-v2-naturalness-dev",
+                "configuration_id": "baseline", "scenario_id": "dev-sample", "turn_index": 0,
+                "run_id": "run-v2", "arm_id": "run-v2-baseline",
+                "promptfoo_invocation_id": "inv-v2-model-missing", "dataset_split": "DEV",
+                "source_scenario_sha256": "a" * 64,
+            }
+            identity = {key: job[key] for key in (
+                "experiment_id", "configuration_id", "scenario_id", "turn_index", "run_id",
+                "arm_id", "promptfoo_invocation_id", "dataset_split", "source_scenario_sha256")}
+            transport = FakeTransport({
+                "job_id": "job-v2", "status": "completed", "response": "synthetic response",
+                "slot_id": "slot-03", "identity": identity,
+                "execution": {"requested_model": "gpt-6-luna", "requested_reasoning_effort": "medium",
+                              "actual_model": None, "inference_started": True},
+            }, ledger=ledger)
+            adapter = provider.WorkerLabAdapter(
+                ledger=ledger, transport=transport, run_id="run-v2",
+                receipt_directory=receipts, env={"AGATA_LAB_PRIVATE_RECEIPTS": str(receipts)},
+            )
+            with patch.object(provider.worker_client, "build_v2_dev_job", return_value=job), \
+                 self.assertRaises(provider.AmbiguousWorkerResult):
+                adapter.invoke_v2_dev(
+                    {"user_message": "synthetic"}, invocation_id="inv-v2-model-missing", run_id="run-v2",
+                    arm_id="run-v2-baseline", configuration_id="baseline", scenario_id="dev-sample",
+                    turn_index=0, history_receipt_ids=[],
+                )
+            payload = json.loads((receipts / "inv-v2-model-missing.worker-receipt.json").read_text())
+            self.assertEqual(payload["worker_terminal_status"], "completed")
+            self.assertEqual(payload["promptfoo_outcome"], "ambiguous")
+            self.assertIsNone(payload["output_sha256"])
+            self.assertEqual(ledger.events[-1],
+                             ("complete", "generator", "inv-v2-model-missing", "ambiguous"))
+            self.assertEqual(sum(event[0] == "submit" for event in transport.events), 1)
+
     def test_failed_receipt_proven_before_inference_is_provider_error_once(self):
         self.require_provider()
         ledger = FakeLedger()

@@ -401,12 +401,16 @@ class WorkerLabAdapter:
                     pass
             if self.receipt_directory is not None and not (
                     Path(self.receipt_directory) / (invocation_id + ".worker-receipt.json")).exists():
+                terminal_status = "unavailable"
+                if (isinstance(receipt, dict) and receipt.get("job_id") == job.get("job_id")
+                        and receipt.get("status") in {"completed", "failed", "cancelled", "ambiguous"}):
+                    terminal_status = receipt["status"]
                 try:
                     _atomic_receipt(Path(self.receipt_directory), invocation_id, {
                         "schema_version": 1, **attempt,
                         "promptfoo_invocation_id": invocation_id,
                         "lab_ledger_attempt_id": invocation_id,
-                        "worker_receipt_sha256": None, "worker_terminal_status": "unavailable",
+                        "worker_receipt_sha256": None, "worker_terminal_status": terminal_status,
                         "promptfoo_outcome": outcome, "output_sha256": None,
                     })
                 except FileExistsError:
