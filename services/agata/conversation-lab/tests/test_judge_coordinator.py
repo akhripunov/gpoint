@@ -38,6 +38,23 @@ def valid_receipt(prompt_record):
                               presented_labels=prompt_record["presented_labels"])
 
 
+def live_approval(run_id, scenario_id):
+    import v2_provenance
+    return {
+        "authorization_type": "LIVE_RUN_AUTHORIZATION", "approval_id": "mock-combined",
+        "run_id": run_id, "worker_bundle_sha256": "a" * 64,
+        "experiment_ids": ["agata-v2-naturalness-dev", "agata-lab-judge-v1"],
+        "configuration_ids": ["baseline", "naturalness-v1", "judge-1", "judge-2", "judge-3"],
+        "scenario_ids": [scenario_id], "max_generator_calls": 8, "max_judge_calls": 3,
+        **_mock_live_run_context(v2_provenance, scenario_id),
+    }
+
+
+def _mock_live_run_context(v2_provenance, scenario_id):
+    with patch.object(v2_provenance, "current_source_sha", return_value="a" * 40):
+        return v2_provenance.live_run_context(scenario_id)
+
+
 class JudgeCoordinatorTests(unittest.TestCase):
     def require_coordinator(self):
         self.assertIsNotNone(coordinator, "three-judge AGATA coordinator is not implemented")
@@ -128,11 +145,9 @@ class JudgeCoordinatorTests(unittest.TestCase):
                 call_ledger.complete("judge", invocation_id, "success")
                 return 0
 
-            fake_approval = {"approval_id": "mock-approval", "phase": "JUDGES", "run_id": "batch-a", "max_calls": 3,
-                             "experiment_ids": ["agata-lab-judge-v1"],
-                             "configuration_ids": ["judge-1", "judge-2", "judge-3"],
-                             "scenario_ids": [scenario_id]}
-            with patch.object(coordinator.worker_client, "validate_owner_approval"), \
+            fake_approval = live_approval("batch-a", scenario_id)
+            with patch.object(coordinator.v2_provenance, "current_source_sha", return_value="a" * 40), \
+                 patch.object(coordinator.worker_client, "validate_owner_approval"), \
                  patch.object(coordinator.lab_queue, "load_owner_approval", return_value=fake_approval), \
                  patch.object(coordinator.lab_queue, "owner_approval_usage_calls", return_value=0):
                 result = coordinator.run_judge_batch(
@@ -166,16 +181,16 @@ class JudgeCoordinatorTests(unittest.TestCase):
             root = Path(temp); root.chmod(0o700)
             receipts = root / "receipts"; receipts.mkdir(mode=0o700)
             ledger = CallLedger(journal_path=root / "ledger.jsonl")
+            calls = []
 
             def missing(_prompt, *, config, call_ledger, **_kwargs):
+                calls.append(config["judge_slot"])
                 call_ledger.complete("judge", config["invocation_id"], "ambiguous")
-                return 1
+                raise RuntimeError("mock provider interruption")
 
-            fake_approval = {"approval_id": "mock-approval", "phase": "JUDGES", "run_id": "batch-missing", "max_calls": 3,
-                             "experiment_ids": ["agata-lab-judge-v1"],
-                             "configuration_ids": ["judge-1", "judge-2", "judge-3"],
-                             "scenario_ids": [scenario_id]}
-            with patch.object(coordinator.worker_client, "validate_owner_approval"), \
+            fake_approval = live_approval("batch-missing", scenario_id)
+            with patch.object(coordinator.v2_provenance, "current_source_sha", return_value="a" * 40), \
+                 patch.object(coordinator.worker_client, "validate_owner_approval"), \
                  patch.object(coordinator.lab_queue, "load_owner_approval", return_value=fake_approval), \
                  patch.object(coordinator.lab_queue, "owner_approval_usage_calls", return_value=0):
                 result = coordinator.run_judge_batch(
@@ -186,7 +201,9 @@ class JudgeCoordinatorTests(unittest.TestCase):
                 )
             self.assertEqual(result["decision"], "HUMAN_ESCALATION")
             self.assertIn("MISSING_OR_INVALID_JUDGE_OUTPUT", result["scenarios"][0]["reason_codes"])
-            self.assertEqual(ledger.snapshot()["judge_invocations"]["attempted"], 3)
+            self.assertEqual(calls, [1], "a failed/ambiguous judge must stop the batch")
+            self.assertEqual(ledger.snapshot()["judge_invocations"]["attempted"], 1)
+            self.assertEqual(ledger.snapshot()["judge_invocations"]["outcomes"], {"ambiguous": 1})
 
     def test_explicit_model_mismatch_stops_before_later_judges(self):
         self.require_coordinator()
@@ -225,11 +242,9 @@ class JudgeCoordinatorTests(unittest.TestCase):
                 call_ledger.complete("judge", invocation_id, "provider_error")
                 return 1
 
-            fake_approval = {"approval_id": "mock-approval", "phase": "JUDGES", "run_id": "batch-mismatch",
-                             "max_calls": 3, "experiment_ids": ["agata-lab-judge-v1"],
-                             "configuration_ids": ["judge-1", "judge-2", "judge-3"],
-                             "scenario_ids": [scenario_id]}
-            with patch.object(coordinator.worker_client, "validate_owner_approval"), \
+            fake_approval = live_approval("batch-mismatch", scenario_id)
+            with patch.object(coordinator.v2_provenance, "current_source_sha", return_value="a" * 40), \
+                 patch.object(coordinator.worker_client, "validate_owner_approval"), \
                  patch.object(coordinator.lab_queue, "load_owner_approval", return_value=fake_approval), \
                  patch.object(coordinator.lab_queue, "owner_approval_usage_calls", return_value=0):
                 result = coordinator.run_judge_batch(
@@ -255,10 +270,7 @@ class JudgeCoordinatorTests(unittest.TestCase):
             root = Path(temp); root.chmod(0o700)
             receipts = root / "receipts"; receipts.mkdir(mode=0o700)
             ledger = CallLedger(journal_path=root / "ledger.jsonl")
-            fake_approval = {"approval_id": "mock-approval", "phase": "JUDGES", "run_id": "sealed", "max_calls": 3,
-                             "experiment_ids": ["agata-lab-judge-v1"],
-                             "configuration_ids": ["judge-1", "judge-2", "judge-3"],
-                             "scenario_ids": [blind_packet["scenarios"][0]["scenario_id"]]}
+            fake_approval = live_approval("sealed", blind_packet["scenarios"][0]["scenario_id"])
             with self.assertRaises(PermissionError):
                 with patch.object(coordinator.lab_queue, "load_owner_approval", return_value=fake_approval):
                     coordinator.run_judge_batch(blind_packet, rubric, batch_id="sealed", dataset_split="SEALED_HOLDOUT",

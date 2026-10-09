@@ -38,7 +38,8 @@ def judge_job(job_id="judge-job-1"):
     return {
         "job_id": job_id, "job_type": "judge", "experiment_id": "agata-lab-judge-v1",
         "run_id": "batch-a",
-        "configuration_id": "judge-1", "origin": "conversation-lab-judge", "scenario_id": "dev-clean-01",
+        "configuration_id": "judge-1", "origin": "conversation-lab-judge",
+        "scenario_id": "v2-dev-clean-20261006-everyday",
         "turn_index": 0, "data_classification": "synthetic", "dataset_split": "DEV",
         "timeout_seconds": 30, "history_receipt_ids": [], "judge_slot": 1,
         "promptfoo_invocation_id": invocation_id, "judge_schema_version": 1,
@@ -111,7 +112,7 @@ class WorkerLabIntegrationTests(unittest.TestCase):
                     self.lab_root, job_id, status="completed", response="mock response",
                     execution={"requested_model": "gpt-6-luna", "requested_reasoning_effort": "medium"},
                     identity={"experiment_id": "agata-v2-naturalness-dev", "configuration_id": arm,
-                              "scenario_id": "dev-clean-01", "turn_index": turn,
+                              "scenario_id": "v2-dev-clean-20261006-everyday", "turn_index": turn,
                               "job_type": "v2-dev-generator", "dataset_split": "DEV",
                               "run_id": "batch-a", "promptfoo_invocation_id": invocation_id},
                     slot_id="slot-03",
@@ -129,22 +130,39 @@ class WorkerLabIntegrationTests(unittest.TestCase):
         state_dir = self.lab_root / "state"
         state_dir.mkdir(mode=0o700, exist_ok=True)
         state = {
-            "schema_version": 1, "run_id": "batch-a", "scenario_id": "dev-clean-01",
+            "schema_version": 2, "run_id": "batch-a", "scenario_id": "v2-dev-clean-20261006-everyday",
             "worker_bundle_sha256": self.lab_bundle, "active_phase": "JUDGES",
-            "generator_approval_id": "phase-a-approval", "generator_max_calls": 8,
+            "generator_approval_id": "phase-combined-approval", "generator_max_calls": 8,
             "generator_closed": True, "generator_receipts": rows,
-            "judge_approval_id": "phase-b-approval", "judge_max_calls": 3,
+            "generator_success_count": 8, "authorization_id": "phase-combined-approval",
+            "judge_approval_id": "phase-combined-approval", "judge_max_calls": 3,
         }
-        state_path = state_dir / "v2-approval-phase.json"
+        authorization = {
+            "schema_version": 1, "authorization_type": "LIVE_RUN_AUTHORIZATION",
+            "approval_id": "phase-combined-approval", "run_id": "batch-a", "source_sha": "a" * 40,
+            "worker_bundle_sha256": self.lab_bundle, "lab_bundle_sha256": "b" * 64,
+            "naturalness_policy_sha256": "c" * 64, "rubric_sha256": "d" * 64,
+            "dataset_id": "agata-conversation-lab-v2", "dataset_split": "DEV",
+            "dataset_manifest_sha256": "e" * 64,
+            "experiment_ids": ["agata-v2-naturalness-dev", lab_queue.JUDGE_EXPERIMENT_ID],
+            "configuration_ids": ["baseline", "naturalness-v1", "judge-1", "judge-2", "judge-3"],
+            "scenario_ids": ["v2-dev-clean-20261006-everyday"],
+            "model": "gpt-6-luna", "reasoning_effort": "medium", "max_generator_calls": 8,
+            "max_judge_calls": 3, "retries": 0, "fallbacks": 0, "concurrency": 1,
+            "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        }
+        state["authorization_sha256"] = lab_queue.live_run_authorization_sha256(authorization)
+        state_path = lab_queue.live_run_phase_state_path(self.lab_root, "batch-a")
         state_path.write_text(json.dumps(state), encoding="utf-8")
         state_path.chmod(0o600)
-        self.approval(
-            max_calls=3, scenarios=["dev-clean-01"],
-            experiments=approval_experiments or ["agata-lab-judge-v1"],
-            configurations=["judge-1", "judge-2", "judge-3"],
-            bundle_sha256=self.lab_bundle, phase="JUDGES", run_id="batch-a",
-            approval_id="phase-b-approval",
-        )
+        if approval_experiments is not None:
+            authorization["experiment_ids"] = approval_experiments
+        authorization["expires_at"] = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        state["authorization_sha256"] = lab_queue.live_run_authorization_sha256(authorization)
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        state_path.chmod(0o600)
+        self.approval_path.write_text(json.dumps(authorization), encoding="utf-8")
+        self.approval_path.chmod(0o600)
 
     def test_supervisor_verifies_approval_against_lab_slot_runtime_bundle(self):
         worker_dir = Path(worker.__file__).resolve().parent
@@ -309,7 +327,8 @@ class WorkerLabIntegrationTests(unittest.TestCase):
         self.prepare_judge_phase()
         self.submit(job)
         with patch.dict(os.environ, {"AGATA_LAB_APPROVAL_FILE": str(self.approval_path), "AGATA_WORKER_SLOT_ID": "slot-03"}, clear=True), \
-             patch.object(worker, "run_inference", return_value=json.dumps(verdict)) as infer:
+             patch.object(worker, "run_inference", return_value=json.dumps(verdict)) as infer, \
+             patch.object(lab_queue, "_fsync_directory", wraps=lab_queue._fsync_directory) as fsync_directory:
             self.assertTrue(worker.process_one("LAB"))
         call_job = infer.call_args.args[0]
         self.assertEqual(call_job["target"], "LAB")
@@ -320,6 +339,11 @@ class WorkerLabIntegrationTests(unittest.TestCase):
         self.assertEqual(receipt["slot_id"], "slot-03")
         self.assertEqual(receipt["identity"]["promptfoo_invocation_id"], "batch-a-judge-1")
         self.assertEqual(receipt["judge_verdict"]["overall"], "first")
+        approval = json.loads(self.approval_path.read_text(encoding="utf-8"))
+        self.assertEqual(lab_queue.owner_approval_usage_calls(self.root, approval, phase="JUDGES"), 1)
+        self.assertEqual(lab_queue.owner_approval_usage_calls(self.root, approval), 1)
+        self.assertIn(self.root / "state" / "lab-approval-usage",
+                      [call.args[0] for call in fsync_directory.call_args_list])
 
     def test_judge_approval_mismatch_fails_before_executor(self):
         self.prepare_judge_phase(approval_experiments=["agata-naturalness-v1"])
@@ -328,9 +352,9 @@ class WorkerLabIntegrationTests(unittest.TestCase):
         self.submit(job)
         with patch.dict(os.environ, {"AGATA_LAB_APPROVAL_FILE": str(self.approval_path), "AGATA_WORKER_SLOT_ID": "slot-03"}, clear=True), \
              patch.object(worker, "run_inference") as infer:
-            self.assertTrue(worker.process_one("LAB"))
+            self.assertFalse(worker.process_one("LAB"))
         infer.assert_not_called()
-        self.assertEqual(lab_queue.read_receipt(self.lab_root, job["job_id"])["error_code"], "owner_approval_scope_mismatch")
+        self.assertEqual(lab_queue.pending_count(self.lab_root), 1)
 
     def test_judge_execution_is_rejected_outside_slot_03(self):
         invocation_id = "batch-a-judge-1"
@@ -353,6 +377,20 @@ class WorkerLabIntegrationTests(unittest.TestCase):
             self.assertFalse(worker.process_one("LAB"))
         infer.assert_not_called()
         self.assertEqual(lab_queue.pending_count(self.lab_root), 1)
+
+    def test_approval_usage_directory_fsync_failure_blocks_inference(self):
+        self.approval()
+        self.submit()
+        usage = lab_queue.ensure_owner_approval_usage_dir(self.root)
+        with patch.dict(os.environ, {"AGATA_LAB_APPROVAL_FILE": str(self.approval_path)}, clear=True), \
+             patch.object(worker, "run_inference") as infer, \
+             patch.object(lab_queue, "_fsync_directory", side_effect=OSError("mock fsync failure")) as sync_dir:
+            self.assertTrue(worker.process_one("LAB"))
+        infer.assert_not_called()
+        sync_dir.assert_called_once_with(usage)
+        receipt = lab_queue.read_receipt(self.lab_root, "lab-job-1")
+        self.assertEqual(receipt["status"], "failed")
+        self.assertNotIn("response", receipt)
 
     def test_executor_cancellation_kills_only_its_codex_process_group(self):
         codex = self.root / "codex"

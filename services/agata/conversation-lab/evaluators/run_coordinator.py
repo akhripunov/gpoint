@@ -37,6 +37,16 @@ def stable_hash(value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _fsync_directory(path: Path) -> None:
+    """Persist a newly created durable journal's directory entry."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(Path(path), flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 V2_BASE_INSTRUCTIONS = (
     "You are AGATA, a conversational character. Respond in the scenario language. "
     "Use only the supplied Persona, context, memory, and this arm history. "
@@ -233,6 +243,7 @@ def run_v2_dev_scenario(
     import lab_queue
     import promptfoo_runner
     import worker_client
+    import v2_provenance
     from v2_provenance import load_split
 
     diagnostic_invocation = ("pfv2-" + hashlib.sha256(
@@ -272,17 +283,27 @@ def run_v2_dev_scenario(
         approval_path, expected_bundle_sha256=lab_queue.worker_bundle_sha256(),
     ), "APPROVAL_VALIDATION", "OWNER_APPROVAL_UNAVAILABLE", "run_coordinator.run_v2_dev_scenario")
     def validate_approval_scope():
-        if (approval.get("phase") != "GENERATOR" or approval.get("run_id") != run_id
-                or approval.get("max_calls") != 8
-                or set(approval.get("experiment_ids", [])) != {"agata-v2-naturalness-dev"}
+        live_context = v2_provenance.live_run_context(scenario_id)
+        if (approval.get("authorization_type") != "LIVE_RUN_AUTHORIZATION"
+                or any(approval.get(key) != value for key, value in live_context.items())
+                or approval.get("run_id") != run_id
+                or approval.get("max_generator_calls") != 8
+                or approval.get("max_judge_calls") != 3
+                or set(approval.get("experiment_ids", [])) != {
+                    "agata-v2-naturalness-dev", lab_queue.JUDGE_EXPERIMENT_ID}
                 or set(approval.get("scenario_ids", [])) != {scenario_id}
-                or set(approval.get("configuration_ids", [])) != {"baseline", "naturalness-v1"}):
-            raise PermissionError("Phase A approval scope does not match this V2 run")
+                or set(approval.get("configuration_ids", [])) != {
+                    "baseline", "naturalness-v1", "judge-1", "judge-2", "judge-3"}
+                or approval.get("model") != "gpt-6-luna" or approval.get("reasoning_effort") != "medium"
+                or approval.get("retries") != 0 or approval.get("fallbacks") != 0
+                or approval.get("concurrency") != 1):
+            raise PermissionError("Combined live-run authorization scope does not match this V2 run")
     checked(validate_approval_scope, "APPROVAL_VALIDATION", "OWNER_APPROVAL_SCOPE_MISMATCH",
             "run_coordinator.run_v2_dev_scenario")
     checked(lambda: phase_state.assert_generator_active(
         run_id=run_id, scenario_id=scenario_id,
         worker_bundle_sha256=lab_queue.worker_bundle_sha256(), approval_id=approval["approval_id"],
+        authorization_sha256=lab_queue.live_run_authorization_sha256(approval),
     ), "PHASE_STATE_VALIDATION", "PHASE_A_NOT_ACTIVE",
        "run_coordinator.run_v2_dev_scenario")
     def validate_ledger():
@@ -375,6 +396,7 @@ class CallLedger:
             if not self.journal_path.exists():
                 fd = os.open(self.journal_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 os.close(fd)
+                _fsync_directory(self.journal_path.parent)
             self._recover_journal()
 
     def _append_event(self, event):

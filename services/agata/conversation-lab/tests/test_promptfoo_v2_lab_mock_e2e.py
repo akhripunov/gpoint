@@ -23,6 +23,7 @@ for path in (LAB / "evaluators", WORKER_DIR):
 import approval_phases
 import blind
 import judge_coordinator
+import live_e2e
 import lab_queue
 import promptfoo_runner
 import worker_client
@@ -39,7 +40,7 @@ MIGRATION_SPEC.loader.exec_module(migration)
 class PromptfooV2MockE2ETests(unittest.TestCase):
     def test_real_cli_runs_eight_generators_then_three_judges_in_distinct_phases(self):
         tooling = LAB / "tooling/promptfoo"
-        promptfoo = tooling / "node_modules/.bin/promptfoo"
+        promptfoo = Path(os.environ.get("AGATA_PROMPTFOO_CLI", tooling / "node_modules/.bin/promptfoo"))
         self.assertTrue(promptfoo.is_file())
         self.assertEqual(promptfoo_runner.validate_promptfoo_cli(str(promptfoo)), "0.123.1")
         _manifest, scenarios = v2_provenance.load_split("DEV")
@@ -88,7 +89,6 @@ class PromptfooV2MockE2ETests(unittest.TestCase):
             (slot_dir / "current").symlink_to(lab_runtime)
             bundle = lab_queue.worker_bundle_sha256(lab_runtime)
             self.assertEqual(bundle, worker_bundle_expected)
-            phase = approval_phases.PhaseApprovalState(phase_dir / "v2-approval-phase.json")
             env = {
                 "PATH": os.environ.get("PATH", ""), "HOME": str(root), "TMPDIR": str(root),
                 "LANG": "en_US.UTF-8", "PROMPTFOO_DISABLE_TELEMETRY": "1",
@@ -96,25 +96,30 @@ class PromptfooV2MockE2ETests(unittest.TestCase):
                 "AGATA_LAB_APPROVAL_FILE": str(approval_path), "AGATA_WORKER_SLOT_ID": "slot-03",
             }
 
-            def write_approval(approval_id, phase_name, experiment_ids, configuration_ids, max_calls):
-                approval = {
-                    "approval_id": approval_id, "phase": phase_name, "run_id": run_id,
-                    "worker_bundle_sha256": bundle, "experiment_ids": experiment_ids,
-                    "configuration_ids": configuration_ids, "scenario_ids": [scenario_id],
-                    "max_calls": max_calls,
+            approval = {
+                    "schema_version": 1, "authorization_type": "LIVE_RUN_AUTHORIZATION",
+                    "approval_id": "mock-combined-live-run", "run_id": run_id, "source_sha": source_sha,
+                    "worker_bundle_sha256": bundle, "lab_bundle_sha256": "b" * 64,
+                    "naturalness_policy_sha256": "c" * 64, "rubric_sha256": "d" * 64,
+                    "dataset_id": "agata-conversation-lab-v2", "dataset_split": "DEV",
+                    "dataset_manifest_sha256": "e" * 64,
+                    "experiment_ids": ["agata-v2-naturalness-dev", lab_queue.JUDGE_EXPERIMENT_ID],
+                    "configuration_ids": ["baseline", "naturalness-v1", "judge-1", "judge-2", "judge-3"],
+                    "scenario_ids": [scenario_id], "model": "gpt-6-luna", "reasoning_effort": "medium",
+                    "max_generator_calls": 8, "max_judge_calls": 3, "retries": 0, "fallbacks": 0,
+                    "concurrency": 1,
                     "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
                 }
+            # The test simulates an immutable committed candidate while this
+            # source tree may be under development; live paths never patch this.
+            with patch.object(v2_provenance, "current_source_sha", return_value=source_sha):
+                approval.update(v2_provenance.live_run_context(scenario_id))
+            def write_approval():
                 approval_path.write_text(json.dumps(approval), encoding="utf-8")
                 approval_path.chmod(0o600)
                 return approval
 
-            generator_approval = write_approval(
-                "mock-phase-a-approval", "GENERATOR", ["agata-v2-naturalness-dev"],
-                ["baseline", "naturalness-v1"], 8,
-            )
-            phase.begin_generator(run_id=run_id, scenario_id=scenario_id,
-                                  worker_bundle_sha256=bundle, approval_id=generator_approval["approval_id"],
-                                  max_calls=8)
+            generator_approval = write_approval()
             old_env = dict(os.environ)
             os.environ.update(env)
             stopped = threading.Event()
@@ -133,13 +138,25 @@ class PromptfooV2MockE2ETests(unittest.TestCase):
                     if metadata_out is not None:
                         metadata_out.update({"actual_model": None, "inference_started": True})
                     if job.get("job_type") == "judge":
+                        prompt = job["request"]["user_message"]
+                        payload = json.loads(prompt[prompt.index("\n") + 1:])
+                        candidate_marker = "новая дорога приятно проветривает мысли"
+                        preferred_position = next(
+                            position for position in ("first", "second")
+                            if any(turn["role"] == "assistant" and candidate_marker in turn["text"]
+                                   for candidate in payload["pair"]
+                                   if candidate["display_position"] == position
+                                   for turn in candidate["turns"])
+                        )
                         return json.dumps({
-                            "overall": "first",
-                            "core_dimensions": {key: "first" for key in lab_queue.JUDGE_CORE_DIMENSIONS},
+                            "overall": preferred_position,
+                            "core_dimensions": {key: preferred_position for key in lab_queue.JUDGE_CORE_DIMENSIONS},
                             "conditional_evidence": {}, "reasons": ["Both transcripts are evaluated consistently."],
                             "defects": [], "uncertainty": False, "position_sensitivity": False,
                         })
-                    return "Я сама люблю такие прогулки: иногда новая дорога приятно проветривает мысли."
+                    if "Naturalness V1 policy:" in job["request"]["instructions"]:
+                        return "Я сама люблю такие прогулки: иногда новая дорога приятно проветривает мысли."
+                    return "Понятно. Что ещё ты обычно делаешь?"
 
                 worker.run_inference = mock_inference
 
@@ -154,45 +171,47 @@ class PromptfooV2MockE2ETests(unittest.TestCase):
 
                 thread = threading.Thread(target=worker_loop, daemon=True)
                 thread.start()
-                generator_results = run_v2_dev_scenario(
-                    scenario_id, run_id=run_id, ledger=ledger,
-                    promptfoo_executable=str(promptfoo), worker_queue=queue_root,
-                    private_receipt_directory=receipts, env=env, phase_state=phase,
-                )
-                self.assertEqual(len(generator_results), 2)
+                with patch.object(v2_provenance, "current_source_sha", return_value=source_sha):
+                    outcome = live_e2e.run_v2_live_e2e(
+                        scenario_id, run_id=run_id, ledger=ledger,
+                        promptfoo_executable=str(promptfoo), receipt_directory=receipts,
+                        private_directory=root, env=env,
+                    )
+                self.assertEqual(outcome["status"], "COMPLETED")
+                self.assertEqual(outcome["decision_type"], "AUTO_DECISION", outcome["scenarios"])
+                phase_state_after = approval_phases.PhaseApprovalState(
+                    lab_queue.live_run_phase_state_path(queue_root, run_id))._read()
+                self.assertEqual(phase_state_after["terminal_status"], "COMPLETED")
+                self.assertEqual(phase_state_after["generator_success_count"], 8)
+                self.assertEqual(phase_state_after["judge_invocations"], 3)
+                with self.assertRaises(PermissionError):
+                    approval_phases.PhaseApprovalState(
+                        lab_queue.live_run_phase_state_path(queue_root, run_id)).begin_generator(
+                            run_id=run_id, scenario_id=scenario_id, worker_bundle_sha256=bundle,
+                            approval_id=generator_approval["approval_id"], max_calls=8,
+                            authorization_sha256=lab_queue.live_run_authorization_sha256(generator_approval),
+                        )
                 self.assertEqual(ledger.snapshot()["generator_invocations"]["attempted"], 8)
                 self.assertEqual(ledger.snapshot()["generator_invocations"]["outcomes"], {"success": 8})
-                self.assertEqual(lab_queue.owner_approval_usage_calls(support, generator_approval), 8)
-                worker_receipts = [lab_queue.read_receipt(queue_root, job_id)
-                                   for arm in generator_results for job_id in arm["worker_receipt_ids"]]
+                self.assertEqual(lab_queue.owner_approval_usage_calls(
+                    support, generator_approval, phase="GENERATOR"), 8)
+                worker_receipts = [row for path in (queue_root / "receipts").glob("*.json")
+                                   if (row := json.loads(path.read_text())).get("identity", {}).get("job_type")
+                                   == "v2-dev-generator"]
                 self.assertTrue(all(row and row["status"] == "completed" for row in worker_receipts))
-                promptfoo_receipts = [json.loads((receipts / (invocation_id + ".promptfoo-receipt.json")).read_text())
-                                      for arm in generator_results for invocation_id in arm["promptfoo_invocation_ids"]]
+                promptfoo_receipts = [json.loads(path.read_text()) for path in receipts.glob("*.promptfoo-receipt.json")
+                                      if json.loads(path.read_text()).get("promptfoo_success")]
                 adapter_receipts = [json.loads((receipts / (invocation_id + ".worker-receipt.json")).read_text())
-                                    for arm in generator_results for invocation_id in arm["promptfoo_invocation_ids"]]
+                                    for invocation_id in [row["promptfoo_invocation_id"] for row in promptfoo_receipts
+                                                          if row["promptfoo_invocation_id"].startswith("pfv2-")]]
                 self.assertTrue(all(row["model_identity_status"] == "MODEL_IDENTITY_UNVERIFIED"
                                     and row["actual_model"] is None for row in adapter_receipts))
-                phase.close_generator(worker_receipts, call_ledger_snapshot=ledger.snapshot(),
-                                      promptfoo_receipts=promptfoo_receipts)
-
-                judge_approval = write_approval(
-                    "mock-phase-b-approval", "JUDGES", [lab_queue.JUDGE_EXPERIMENT_ID],
-                    ["judge-1", "judge-2", "judge-3"], 3,
-                )
-                phase.begin_judges(run_id=run_id, scenario_id=scenario_id,
-                                   worker_bundle_sha256=bundle, approval_id=judge_approval["approval_id"],
-                                   max_calls=3, generator_receipts=worker_receipts)
-                packet, private_mapping = blind.make_v2_blind_packets(
-                    [scenario], generator_results, batch_id=run_id)
-                rubric = json.loads((LAB / "configs/owner-preference-rubric-v1.json").read_text())
-                outcome = judge_coordinator.run_judge_batch(
-                    packet, rubric, batch_id=run_id, dataset_split="DEV", ledger=ledger,
-                    private_mapping=private_mapping, sanity_findings=[], receipt_directory=receipts,
-                    private_directory=root, env=env, promptfoo_executable=str(promptfoo),
-                )
+                judge_approval = generator_approval
                 self.assertEqual(outcome["judge_invocations"], 3)
                 self.assertEqual(ledger.snapshot()["judge_invocations"]["outcomes"], {"success": 3})
-                self.assertEqual(lab_queue.owner_approval_usage_calls(support, judge_approval), 3)
+                self.assertEqual(lab_queue.owner_approval_usage_calls(
+                    support, judge_approval, phase="JUDGES"), 3)
+                self.assertEqual(lab_queue.owner_approval_usage_calls(support, generator_approval), 11)
                 judge_adapter_receipts = [json.loads(path.read_text()) for path in receipts.glob("*.judge-receipt.json")]
                 self.assertEqual(len(judge_adapter_receipts), 3)
                 self.assertTrue(all(row["model_identity_status"] == "MODEL_IDENTITY_UNVERIFIED"

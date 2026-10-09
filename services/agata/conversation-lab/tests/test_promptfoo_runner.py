@@ -99,7 +99,8 @@ class WorkerPromptfooRunnerTests(unittest.TestCase):
         self.assertNotIn("PROMPTFOO_DISABLE_UPDATE_CHECK", child_env)
 
     def test_promptfoo_version_validator_uses_update_disabled_child_environment(self):
-        cli = LAB / "tooling/promptfoo/node_modules/.bin/promptfoo"
+        cli = Path(os.environ.get(
+            "AGATA_PROMPTFOO_CLI", LAB / "tooling/promptfoo/node_modules/.bin/promptfoo"))
         seen = {}
 
         def command_runner(*args, **kwargs):
@@ -111,7 +112,8 @@ class WorkerPromptfooRunnerTests(unittest.TestCase):
         self.assertNotIn("PROMPTFOO_DISABLE_UPDATE_CHECK", seen)
 
     def test_promptfoo_01231_cli_runs_with_the_same_restricted_child_path(self):
-        cli = LAB / "tooling/promptfoo/node_modules/.bin/promptfoo"
+        cli = Path(os.environ.get(
+            "AGATA_PROMPTFOO_CLI", LAB / "tooling/promptfoo/node_modules/.bin/promptfoo"))
         restricted_path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         if shutil.which("node", path=restricted_path):
             self.skipTest("the canonical restricted PATH already contains Node on this host")

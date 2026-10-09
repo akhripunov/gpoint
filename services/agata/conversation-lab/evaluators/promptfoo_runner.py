@@ -347,14 +347,17 @@ def validate_promptfoo_cli(executable: str, *, command_runner=subprocess.run) ->
             or lock.get("packages", {}).get("node_modules/promptfoo", {}).get("version") != "0.123.1"
             or not path.is_file() or not os.access(path, os.X_OK)):
         raise PermissionError("Promptfoo package, lockfile, or local executable is not exact 0.123.1")
-    version_env = build_cli_environment(os.environ)
-    version_env["PROMPTFOO_DISABLE_TELEMETRY"] = "1"
-    result = command_runner([str(path), "--version"], stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            timeout=10, env=version_env)
-    if result.returncode != 0 or result.stdout.strip() != "0.123.1":
-        raise PermissionError("Lab-local Promptfoo CLI did not report pinned version 0.123.1")
-    return result.stdout.strip()
+    with tempfile.TemporaryDirectory(prefix="agata-promptfoo-version-") as temp_home:
+        version_env = build_cli_environment({**os.environ, "HOME": temp_home})
+        version_env["HOME"] = temp_home
+        version_env["PROMPTFOO_CONFIG_DIR"] = temp_home
+        version_env["PROMPTFOO_DISABLE_TELEMETRY"] = "1"
+        result = command_runner([str(path), "--version"], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                timeout=10, env=version_env)
+        if result.returncode != 0 or result.stdout.strip() != "0.123.1":
+            raise PermissionError("Lab-local Promptfoo CLI did not report pinned version 0.123.1")
+        return result.stdout.strip()
 
 
 def _promptfoo_result_output(path: Path) -> str:
@@ -435,7 +438,7 @@ def run_promptfoo_v2_dev_eval(
               "LAB_QUEUE_VALIDATION", "CANONICAL_LAB_QUEUE_MISMATCH",
               "promptfoo_runner.run_promptfoo_v2_dev_eval")
     if turn_index == 0:
-        state_path = queue / "state" / "v2-approval-phase.json"
+        state_path = lab_queue.live_run_phase_state_path(queue, run_id)
         if not state_path.is_file():
             check(lambda: (_ for _ in ()).throw(PermissionError("V2 phase state unavailable")),
                   "PHASE_STATE_VALIDATION", "PHASE_STATE_INACTIVE",

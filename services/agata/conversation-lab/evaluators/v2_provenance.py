@@ -3,17 +3,93 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 from typing import Mapping
 
 LAB = Path(__file__).resolve().parents[1]
 DATA = LAB / "data/golden/synthetic"
 MANIFEST = LAB / "configs/splits-v2.json"
+LAB_RUN_ASSETS = (
+    "evaluators/approval_phases.py", "evaluators/aggregator.py",
+    "evaluators/blind.py", "evaluators/judge_coordinator.py", "evaluators/judges.py",
+    "evaluators/live_e2e.py", "evaluators/live_e2e_cli.py", "evaluators/naturalness.py",
+    "evaluators/persona_sanity.py", "evaluators/preinference_diagnostics.py",
+    "evaluators/promptfoo_judge_provider.py", "evaluators/promptfoo_runner.py",
+    "evaluators/promptfoo_worker_provider.py", "evaluators/run_coordinator.py", "evaluators/v2_provenance.py",
+    "evaluators/worker_client.py", "configs/naturalness-policy-v1.md",
+    "configs/owner-preference-rubric-v1.json", "configs/splits-v2.json",
+    "data/golden/synthetic/v2-dev-scenarios.jsonl", "tooling/promptfoo/package.json",
+    "tooling/promptfoo/package-lock.json",
+)
 
 
 def stable_hash(value: object) -> str:
     payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def current_source_sha() -> str:
+    """Read exact source identity only when the Lab checkout has no local drift."""
+    repo_root = LAB.parents[2]
+    status = subprocess.run(
+        ["git", "-C", str(repo_root), "status", "--porcelain", "--untracked-files=all", "--",
+         str(LAB.relative_to(repo_root))],
+        capture_output=True, text=True, timeout=3, check=False,
+    )
+    if status.returncode != 0 or status.stdout.strip():
+        raise PermissionError("Conversation Lab working tree is not clean")
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "--verify", "HEAD^{commit}"],
+        capture_output=True, text=True, timeout=3, check=False,
+    )
+    source_sha = result.stdout.strip()
+    if result.returncode != 0 or len(source_sha) != 40 or any(ch not in "0123456789abcdef" for ch in source_sha):
+        raise PermissionError("exact Conversation Lab source identity is unavailable")
+    return source_sha
+
+
+def lab_run_bundle_sha256() -> str:
+    """Hash only the explicit V2 LIVE run allowlist; never read legacy V1 inputs."""
+    digest = hashlib.sha256()
+    for relative in LAB_RUN_ASSETS:
+        path = LAB / relative
+        if path.is_symlink() or not path.is_file():
+            raise PermissionError("V2 LIVE bundle asset is missing or unsafe")
+        digest.update(relative.encode("utf-8") + b"\0")
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def live_run_context(scenario_id: str) -> dict:
+    """Return current exact commitments needed to validate one LIVE authorization."""
+    manifest, scenarios = load_split("DEV")
+    scenario = scenarios.get(scenario_id)
+    if scenario is None:
+        raise PermissionError("LIVE scenario is not in committed DEV")
+    worker_manifest = json.loads((LAB.parents[0] / "worker/lab_v2_dev_manifest.json").read_text(encoding="utf-8"))
+    policy_path = LAB / "configs/naturalness-policy-v1.md"
+    policy_text = policy_path.read_text(encoding="utf-8")
+    marker = "## Candidate-visible policy\n"
+    if marker not in policy_text or "\n## Evidence map" not in policy_text.split(marker, 1)[1]:
+        raise PermissionError("Naturalness Policy candidate section is unavailable")
+    treatment = policy_text.split(marker, 1)[1].split("\n## Evidence map", 1)[0].strip()
+    if not treatment:
+        raise PermissionError("Naturalness Policy candidate section is empty")
+    policy_sha256 = hashlib.sha256(treatment.encode("utf-8")).hexdigest()
+    if worker_manifest.get("naturalness_policy_sha256") != policy_sha256:
+        raise PermissionError("Naturalness Policy differs from Worker commitment")
+    rubric_path = LAB / "configs/owner-preference-rubric-v1.json"
+    split_payload = MANIFEST.read_bytes()
+    return {
+        "source_sha": current_source_sha(),
+        "lab_bundle_sha256": lab_run_bundle_sha256(),
+        "naturalness_policy_sha256": policy_sha256,
+        "rubric_sha256": hashlib.sha256(rubric_path.read_bytes()).hexdigest(),
+        "dataset_id": manifest["dataset_id"],
+        "dataset_split": "DEV",
+        "dataset_manifest_sha256": hashlib.sha256(split_payload).hexdigest(),
+    }
 
 
 def load_split(split: str) -> tuple[dict, dict[str, dict]]:

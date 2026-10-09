@@ -23,12 +23,14 @@ import lab_queue
 import approval_phases
 import promptfoo_runner
 import worker_client
+import v2_provenance
 from run_coordinator import CallLedger
 
 
 class PromptfooJudgeMockE2ETests(unittest.TestCase):
     def test_real_promptfoo_cli_completes_three_receipt_judge_chain_without_model_call(self):
-        promptfoo = LAB / "tooling/promptfoo/node_modules/.bin/promptfoo"
+        promptfoo = Path(os.environ.get(
+            "AGATA_PROMPTFOO_CLI", LAB / "tooling/promptfoo/node_modules/.bin/promptfoo"))
         self.assertTrue(promptfoo.is_file())
         version = shutil.which("node")
         self.assertIsNotNone(version)
@@ -43,7 +45,8 @@ class PromptfooJudgeMockE2ETests(unittest.TestCase):
             queue_root = worker_client.canonical_lab_queue({"GPOINT_AGATA_WORKER_SUPPORT": str(support)})
             lab_queue._layout(queue_root)
             phase_dir = queue_root / "state"; phase_dir.mkdir(mode=0o700)
-            phase = approval_phases.PhaseApprovalState(phase_dir / "v2-approval-phase.json")
+            phase = approval_phases.PhaseApprovalState(
+                lab_queue.live_run_phase_state_path(queue_root, run_id))
             # The LAB approval is bound to the immutable Slot 03 runtime, not
             # the supervisor source loaded by this test process.
             runtime_root = support / "runtime"
@@ -57,8 +60,28 @@ class PromptfooJudgeMockE2ETests(unittest.TestCase):
             slot_dir.mkdir(parents=True, mode=0o700)
             (slot_dir / "current").symlink_to(lab_runtime)
             bundle = lab_queue.worker_bundle_sha256(lab_runtime)
+            approval = {
+                "schema_version": 1, "authorization_type": "LIVE_RUN_AUTHORIZATION",
+                "approval_id": "offline-combined-authorization", "run_id": run_id,
+                "source_sha": "a" * 40, "worker_bundle_sha256": bundle, "lab_bundle_sha256": "b" * 64,
+                "naturalness_policy_sha256": "c" * 64, "rubric_sha256": "d" * 64,
+                "dataset_id": "agata-conversation-lab-v2", "dataset_split": "DEV",
+                "dataset_manifest_sha256": "e" * 64,
+                "experiment_ids": ["agata-v2-naturalness-dev", lab_queue.JUDGE_EXPERIMENT_ID],
+                "configuration_ids": ["baseline", "naturalness-v1", "judge-1", "judge-2", "judge-3"],
+                "scenario_ids": [scenario_id], "model": "gpt-6-luna", "reasoning_effort": "medium",
+                "max_generator_calls": 8, "max_judge_calls": 3, "retries": 0, "fallbacks": 0,
+                "concurrency": 1,
+                "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+            }
+            with patch.object(v2_provenance, "current_source_sha", return_value="a" * 40):
+                approval.update(v2_provenance.live_run_context(scenario_id))
+            approval_path.write_text(json.dumps(approval), encoding="utf-8")
+            approval_path.chmod(0o600)
+            authorization_sha256 = lab_queue.live_run_authorization_sha256(approval)
             phase.begin_generator(run_id=run_id, scenario_id=scenario_id, worker_bundle_sha256=bundle,
-                                  approval_id="mock-phase-a", max_calls=8)
+                                  approval_id=approval["approval_id"], max_calls=8,
+                                  authorization_sha256=authorization_sha256)
             generator_receipts = []
             generator_ledger_rows = []
             generator_promptfoo_receipts = []
@@ -95,16 +118,6 @@ class PromptfooJudgeMockE2ETests(unittest.TestCase):
             blind = importlib.util.module_from_spec(blind_spec); blind_spec.loader.exec_module(blind)
             packet, private_mapping = blind.make_v2_blind_packets(
                 [scenario], results, batch_id="judge-e2e-generation")
-            approval = {
-                "approval_id": "offline-mock-phase-b-approval", "phase": "JUDGES", "run_id": run_id,
-                "worker_bundle_sha256": bundle,
-                "experiment_ids": [lab_queue.JUDGE_EXPERIMENT_ID],
-                "configuration_ids": ["judge-1", "judge-2", "judge-3"],
-                "scenario_ids": [scenario_id], "max_calls": 3,
-                "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
-            }
-            approval_path.write_text(json.dumps(approval), encoding="utf-8")
-            approval_path.chmod(0o600)
             phase.begin_judges(run_id=run_id, scenario_id=scenario_id, worker_bundle_sha256=bundle,
                                approval_id=approval["approval_id"], max_calls=3,
                                generator_receipts=generator_receipts)
@@ -178,7 +191,8 @@ class PromptfooJudgeMockE2ETests(unittest.TestCase):
                         invocation_errors.append({"stdout": exc.stdout, "stderr": exc.stderr})
                         raise
 
-                with patch.object(promptfoo_runner, "run_promptfoo_judge_eval", side_effect=run_real_cli):
+                with patch.object(judge_coordinator.v2_provenance, "current_source_sha", return_value="a" * 40), \
+                     patch.object(promptfoo_runner, "run_promptfoo_judge_eval", side_effect=run_real_cli):
                     result = judge_coordinator.run_judge_batch(
                         packet, rubric, batch_id="mock-e2e-batch", dataset_split="DEV",
                         ledger=ledger, private_mapping=private_mapping, sanity_findings=[],
@@ -206,7 +220,8 @@ class PromptfooJudgeMockE2ETests(unittest.TestCase):
                     terminal = lab_queue.read_receipt(support / "queues/lab", job_id)
                     self.assertEqual(terminal["status"], "completed")
                     self.assertEqual(terminal["slot_id"], "slot-03")
-                self.assertEqual(lab_queue.owner_approval_usage_calls(support, approval), 3)
+                self.assertEqual(lab_queue.owner_approval_usage_calls(
+                    support, approval, phase="JUDGES"), 3)
             finally:
                 completed.set()
                 if "thread" in locals():
