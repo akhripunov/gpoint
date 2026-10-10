@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr | None = None
     llm_api_base_url: str = "https://anymodel.org/v1"
     llm_timeout_seconds: int = Field(default=12, ge=1, le=30)
+    naturalness_policy_enabled: bool = False
     worker_wait_seconds: float = Field(default=6.0, ge=0.5, le=10.0)
     codex_local_enabled: bool = False
     inference_job_ttl_seconds: int = Field(default=420, ge=60, le=3600)

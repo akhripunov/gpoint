@@ -16,6 +16,9 @@ def build_response_provider(
     session: AsyncSession, settings: Settings | None = None
 ) -> ResponseProvider | None:
     configured = settings or get_settings()
+    naturalness_policy_enabled = (
+        getattr(configured, "naturalness_policy_enabled", False) is True
+    )
     if configured.llm_provider in {"disabled", "none"}:
         return None
     if configured.llm_provider == "mac_worker":
@@ -30,6 +33,7 @@ def build_response_provider(
             tenant_id=UUID(configured.tenant_id),
             model=configured.llm_model,
             wait_seconds=configured.worker_wait_seconds,
+            naturalness_policy_enabled=naturalness_policy_enabled,
         )
     if not configured.llm_api_key:
         raise HTTPException(status_code=503, detail={"code": "provider_unconfigured"})
@@ -39,4 +43,5 @@ def build_response_provider(
         timeout_seconds=configured.llm_timeout_seconds,
         provider=configured.llm_provider,
         model=configured.llm_model,
+        naturalness_policy_enabled=naturalness_policy_enabled,
     )

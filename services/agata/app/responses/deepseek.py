@@ -28,6 +28,7 @@ class DeepSeekResponseProvider:
         transport: httpx.AsyncBaseTransport | None = None,
         provider: str = "anymodel",
         model: str = "cx/gpt-5.6-terra",
+        naturalness_policy_enabled: bool = False,
     ) -> None:
         # AnyModel/Terra is the configured production route.  The exact
         # DeepSeek origin remains accepted only for isolated compatibility
@@ -46,6 +47,7 @@ class DeepSeekResponseProvider:
         self._transport = transport
         self.provider = provider
         self.model = model
+        self.naturalness_policy_enabled = naturalness_policy_enabled
 
     async def complete(self, context: ResponseContext) -> object:
         if not isinstance(context, ResponseContext):
@@ -263,6 +265,13 @@ class DeepSeekResponseProvider:
                         "родственников, реальные адреса, встречи или физические действия."
                     ),
                 }
+            )
+
+        if self.naturalness_policy_enabled:
+            from app.responses.naturalness import build_naturalness_instructions
+
+            messages.append(
+                {"role": "system", "content": build_naturalness_instructions()}
             )
 
         # Conversation history (lower priority — the model knows facts override it)
