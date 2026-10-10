@@ -7,7 +7,6 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
-
 POLICY_ID = "agata-naturalness-v1"
 POLICY_VERSION = 1
 POLICY_SHA256 = "b68d51e29b8611a053ac50bc89806bc8f1903f476126e155a7dc331927d94a6e"
