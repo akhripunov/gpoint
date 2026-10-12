@@ -98,6 +98,7 @@ jobs:
         run: |
           python3 scripts/test_prepare_coalescing.py
           python3 -m unittest discover -s tests -p test_release_impact_v3.py
+          python3 -m unittest discover -s tests -p test_gpoint_docker_cache_v3.py
           python3 scripts/test_release_preflight_benchmark.py
           python3 scripts/select-release-run.test.py
           node --test scripts/release-orchestrator.test.mjs

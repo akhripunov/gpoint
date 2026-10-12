@@ -40,9 +40,14 @@ risking an incorrect skip. A malformed claimed UI plan causes a hard failure.
 
 ## Not yet implemented (requires separate verification)
 
-- Content-addressed reuse of unchanged Docker images, since existing canonical
+- Cross-SHA reuse of *completed images* is deliberately not implemented because
   exact-SHA image IDs and revision labels cannot safely be repointed to old
-  images. The current full exact-SHA artifact builds remain mandatory.
+  artifacts. BuildKit cache **layers** are safely reused: Gpoint.Dockerfile now
+  copies the stable shared/API/Bot/Worker sources and builds them before adding
+  Mini App source. An unchanged backend build can use the verified GHA cache,
+  while UI is rebuilt with the exact candidate SHA. The final context copy
+  preserves the V2 runtime file inventory. All three exact-SHA images are
+  still built, migrated, rehearsed and shipped with fresh provenance.
 - Automatically skipping other components' tests based on a complete dependency
   graph. This initial allowlist is intentionally limited to low-risk Mini App
   source/public changes.
