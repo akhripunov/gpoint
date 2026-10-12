@@ -16,13 +16,13 @@ class DockerCacheV3Tests(unittest.TestCase):
         backend = [i for i, x in enumerate(stages) if x.startswith("RUN pnpm --filter") and "build" in x and "@gpoint/miniapp" not in x]
         mini = next(i for i, x in enumerate(stages) if x == "COPY apps/miniapp ./apps/miniapp")
         client = next(i for i, x in enumerate(stages) if x == "RUN pnpm --filter @gpoint/miniapp build")
-        complete = [i for i, x in enumerate(stages) if x == "COPY . ."]
-        self.assertEqual(len(complete), 1)
+        full_context = [i for i, x in enumerate(stages) if x == "COPY . /app"]
+        self.assertEqual(len(full_context), 1)
         self.assertLess(install, stable)
         self.assertTrue(backend)
         self.assertTrue(all(stable < i < mini for i in backend))
         self.assertLess(mini, client)
-        self.assertLess(client, complete[0])
+        self.assertLess(client, full_context[0])
         # SHA affects client-build output, never a cacheable backend layer.
         arg = next(i for i, x in enumerate(stages) if x == "ARG GPOINT_BUILD_SHA")
         self.assertTrue(all(i < arg for i in backend))
@@ -51,11 +51,26 @@ class DockerCacheV3Tests(unittest.TestCase):
         s = DOCKERFILE.read_text()
         for snippet in ("COPY tsconfig.base.json", "COPY apps/api ./apps/api",
                         "COPY apps/worker ./apps/worker", "COPY apps/bot ./apps/bot",
-                        "COPY packages ./packages", "COPY apps/miniapp ./apps/miniapp",
-                        "COPY . .", "COPY --from=build /workspace /app"):
+                        "COPY packages ./packages", "FROM build AS miniapp-build",
+                        "COPY apps/miniapp ./apps/miniapp",
+                        "COPY --from=build /workspace /app", "COPY . /app",
+                        "COPY --from=miniapp-build /workspace/apps/miniapp/dist /app/apps/miniapp/dist"):
             self.assertIn(snippet, s)
-        self.assertGreater(s.index("FROM node:22-bookworm-slim AS runtime"),
-                           s.index("RUN pnpm --filter @gpoint/miniapp build"))
+        runtime = s.index("FROM node:22-bookworm-slim AS runtime")
+        self.assertGreater(runtime, s.index("RUN pnpm --filter @gpoint/miniapp build"))
+        self.assertLess(s.index("COPY --from=build /workspace /app"),
+                        s.index("COPY . /app"))
+        self.assertLess(s.index("COPY . /app"),
+                        s.index("COPY --from=miniapp-build /workspace/apps/miniapp/dist /app/apps/miniapp/dist"))
+        self.assertLess(s.index("RUN mkdir -p /app/apps/miniapp/node_modules/.vite-temp"),
+                        s.index("COPY . /app"))
+        # The final source overlay is small because the Docker context must
+        # omit all generated dependency trees and built outputs.
+        ignore = (pathlib.Path(__file__).resolve().parents[1] / ".dockerignore").read_text().splitlines()
+        for excluded in ("node_modules", "**/node_modules", "dist", "**/dist"):
+            self.assertIn(excluded, ignore)
+        self.assertNotIn("COPY . .", [line.strip() for line in s.splitlines() if not line.lstrip().startswith("#")])
+
 
 
 if __name__ == "__main__":
