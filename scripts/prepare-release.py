@@ -16,7 +16,17 @@ import tempfile
 import time
 import uuid
 
-from release_impact_v3 import load_verified_plan
+# This module is also loaded via importlib.util by the existing migration
+# inventory tests. Resolve our sibling module by its canonical path rather
+# than depending on scripts/ being present in sys.path.
+import importlib.util
+_impact_spec = importlib.util.spec_from_file_location(
+    'gpoint_release_impact_v3', Path(__file__).resolve().with_name('release_impact_v3.py'))
+if _impact_spec is None or _impact_spec.loader is None:
+    raise RuntimeError('V3 impact selector module is unavailable')
+_impact_module = importlib.util.module_from_spec(_impact_spec)
+_impact_spec.loader.exec_module(_impact_module)
+load_verified_plan = _impact_module.load_verified_plan
 
 ROOT = Path(__file__).resolve().parents[1]
 
