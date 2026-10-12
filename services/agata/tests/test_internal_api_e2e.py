@@ -327,6 +327,8 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
             assert history.status_code == 200, history.text
             history_items = history.json()["items"]
             assert {message["role"] for message in history_items} == {"user", "assistant"}
+            assert [message["role"] for message in history_items] == ["user", "assistant"]
+            assert history_items[0]["occurredAt"] < history_items[1]["occurredAt"]
             assert next(message["text"] for message in history_items if message["role"] == "user") == "Привет"
             assert next(message["text"] for message in history_items if message["role"] == "assistant") == first.json()["text"]
             persisted_user_message = next(message for message in history_items if message["role"] == "user")

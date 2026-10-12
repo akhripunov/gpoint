@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from hmac import new
 from typing import Protocol, cast
@@ -82,6 +82,14 @@ from app.responses.protocols import PsychologyProtocol, select_psychology_protoc
 
 RESPONSE_DOMAIN = b"gptgirls/response-request-fingerprint/v1"
 CONTEXT_SCHEMA_VERSION = "context-v1"
+
+
+def assistant_message_timestamp(
+    user_timestamp: datetime, *, now: datetime | None = None
+) -> datetime:
+    """Order a generated reply after its incoming message in durable history."""
+    generated_at = now or datetime.now(UTC)
+    return max(generated_at, user_timestamp + timedelta(microseconds=1))
 
 
 @dataclass(frozen=True, slots=True)
@@ -903,7 +911,7 @@ class ResponseOrchestrator:
                 request_fingerprint=fingerprint,
                 consent_id=user_message.consent_id,
                 retention_policy_id=user_message.retention_policy_id,
-                occurred_at=request.as_of,
+                occurred_at=assistant_message_timestamp(user_message.occurred_at),
                 language_code=language,
             )
             self.session.add(message)
