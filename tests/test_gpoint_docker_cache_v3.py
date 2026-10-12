@@ -29,6 +29,24 @@ class DockerCacheV3Tests(unittest.TestCase):
         self.assertLess(arg, client)
         self.assertIn("org.opencontainers.image.revision", DOCKERFILE.read_text() if "org.opencontainers.image.revision" in DOCKERFILE.read_text() else (pathlib.Path(__file__).resolve().parents[1] / "scripts/prepare-release.py").read_text())
 
+    def test_skip_builder_teardown_only_on_disposable_hosted_prepare(self):
+        workflow = (pathlib.Path(__file__).resolve().parents[1] /
+                    ".github/workflows/gpoint-prepare.yml").read_text()
+        self.assertIn("  prepare:", workflow)
+        self.assertIn("  publish:", workflow)
+        prepare = workflow.split("  prepare:", 1)[1].split("  publish:", 1)[0]
+        # Not valid on a persistent self-hosted runner: cleanup there must
+        # remain enabled to avoid leaked builders, resources, and build state.
+        self.assertRegex(prepare, r"(?m)^    runs-on: ubuntu-latest\s*$")
+        self.assertNotIn("self-hosted", prepare)
+        builder = re.search(
+            r"(?ms)^      - name: Set up isolated production-platform Buildx builder\n"
+            r"(.*?)(?=^      - |\Z)", prepare)
+        self.assertIsNotNone(builder)
+        self.assertIn("docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069", builder.group(1))
+        self.assertRegex(builder.group(1), r"(?m)^          platforms: linux/amd64$")
+        self.assertRegex(builder.group(1), r"(?m)^          cleanup: false$")
+
     def test_source_graph_is_complete_and_keeps_runtime_stage(self):
         s = DOCKERFILE.read_text()
         for snippet in ("COPY tsconfig.base.json", "COPY apps/api ./apps/api",

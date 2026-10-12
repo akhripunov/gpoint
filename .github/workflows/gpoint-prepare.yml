@@ -85,6 +85,11 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           platforms: linux/amd64
+          # Prepare runs only on disposable ubuntu-latest. Its hosted runner is
+          # destroyed after this job, so removing the builder again in the
+          # action's 20+ second post-step does not improve isolation or safety.
+          # Keep this guarded by test_gpoint_docker_cache_v3 if runs-on changes.
+          cleanup: false
       - name: Check rehearsal setup before expensive branch preparation
         if: github.ref != 'refs/heads/main' && steps.coalesce.outputs.result != 'SUPERSEDED'
         env:
