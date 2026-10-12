@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ArrowUp, MessageCircle, Plus, ShieldAlert } from "lucide-react";
+import { ArrowLeft, ArrowUp, MessageCircle, Plus, Search, ShieldAlert } from "lucide-react";
 import { ApiError, acceptMessagesConsent, creator, creatorMessages, mediaUrl, messages, messagesState, sendCreatorMessage } from "./api/client";
 import type { ChatMessageDTO, MessageThreadDTO } from "../../../packages/contracts/src/index.js";
 import { mergePendingMessages } from "./messages-pending.js";
 import { Button, UnreadBadge } from "./ui";
+import { filterMessageThreads } from "./messages-search.js";
 import { useMessagesUnread, useVisibleMessageReads } from "./messages-unread";
 
 function Avatar({ src, name, className = "" }: { src: string | null; name: string; className?: string }) {
@@ -28,6 +29,7 @@ function preview(item: MessageThreadDTO) {
 }
 
 export function MessagesInbox({ openChat, explore }: { openChat: (slug: string) => void; explore: () => void }) {
+  const [search, setSearch] = useState("");
   const unread = useMessagesUnread();
   const state = useQuery({ queryKey: ["messages-state"], queryFn: messagesState });
   const inbox = useInfiniteQuery({
@@ -39,21 +41,23 @@ export function MessagesInbox({ openChat, explore }: { openChat: (slug: string) 
   });
   const unreadCount = (item: MessageThreadDTO) => unread.hasSummary ? unread.counts.get(item.creator.id) ?? 0 : item.unreadCount ?? 0;
   const items = useMemo(() => (inbox.data?.pages.flatMap((page) => page.items) ?? []).sort((a, b) => Date.parse(b.lastMessageAt) - Date.parse(a.lastMessageAt)), [inbox.data]);
+  const filteredItems = useMemo(() => filterMessageThreads(items, search), [items, search]);
 
   if (state.isLoading) return <div className="messages-state"><span className="messages-spinner" /><p>Loading messages…</p></div>;
   if (state.isError || !state.data?.enabled) return <div className="messages-state"><MessageCircle size={32} /><h2>Messages unavailable</h2><p>Conversations are temporarily unavailable. Please try again later.</p></div>;
   if (inbox.isError) return <div className="messages-state"><MessageCircle size={32} /><h2>Couldn't load messages</h2><p>Your conversations are safe. Try again.</p><Button variant="secondary" onClick={() => void inbox.refetch()}>Retry</Button></div>;
 
   return <section className="messages-inbox" aria-label="Messages">
-    <header className="messages-page-heading"><div><p className="eyebrow">YOUR CONVERSATIONS</p><h1>Messages</h1></div><button type="button" className="messages-compose" aria-label="Explore models" onClick={explore}><Plus size={20} /></button></header>
-    {inbox.isLoading ? <div className="messages-state"><span className="messages-spinner" /><p>Loading conversations…</p></div> : items.length ? <div className="messages-thread-list">
-      {items.map((item) => <button type="button" className={`messages-thread${unreadCount(item) > 0 ? " unread" : ""}`} aria-label={`${item.creator.displayName}${unreadCount(item) > 0 ? `, ${unreadCount(item)} unread messages` : ""}`} key={item.creator.id} onClick={() => openChat(item.creator.slug)}>
+    <header className="messages-page-heading"><div><p className="eyebrow">YOUR CONVERSATIONS</p><h1>Messages</h1></div><button type="button" className="messages-compose" aria-label="Explore models to start a conversation" title="Explore models to start a conversation" onClick={explore}><Plus size={20} /></button></header>
+    <label className="messages-search"><Search size={19} aria-hidden="true" /><input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search messages…" aria-label="Search messages" /><span className="sr-only">Searches loaded conversations by creator and last message.</span></label>
+    {inbox.isLoading ? <div className="messages-state"><span className="messages-spinner" /><p>Loading conversations…</p></div> : filteredItems.length ? <div className="messages-thread-list">
+      {filteredItems.map((item) => <button type="button" className={`messages-thread${unreadCount(item) > 0 ? " unread" : ""}`} aria-label={`${item.creator.displayName}${unreadCount(item) > 0 ? `, ${unreadCount(item)} unread messages` : ""}`} key={item.creator.id} onClick={() => openChat(item.creator.slug)}>
         <Avatar src={item.creator.avatarUrl} name={item.creator.displayName} />
         <span className="messages-thread-copy"><strong>{item.creator.displayName}{item.creator.verified && <span className="messages-verified" aria-label="Verified">✓</span>}</strong><span>{preview(item)}</span></span>
         <span className="messages-thread-meta"><time dateTime={item.lastMessageAt}>{activityTime(item.lastMessageAt)}</time><UnreadBadge count={unreadCount(item)} /></span>
       </button>)}
       {inbox.hasNextPage && <button type="button" className="messages-load-more" disabled={inbox.isFetchingNextPage} onClick={() => void inbox.fetchNextPage()}>{inbox.isFetchingNextPage ? "Loading…" : "Load more"}</button>}
-    </div> : <div className="messages-empty"><span className="messages-empty-icon"><MessageCircle size={26} /></span><h2>No messages yet</h2><p>Start a conversation from a model profile.</p><Button onClick={explore}>Explore models</Button></div>}
+    </div> : search.trim() ? <div className="messages-empty messages-no-results"><span className="messages-empty-icon"><Search size={26} /></span><h2>No conversations found</h2><p>Try another creator name or message.</p><button type="button" className="messages-clear-search" onClick={() => setSearch("")}>Clear search</button></div> : <div className="messages-empty"><span className="messages-empty-icon"><MessageCircle size={26} /></span><h2>No messages yet</h2><p>Start a conversation from a model profile.</p><Button onClick={explore}>Explore models</Button></div>}
   </section>;
 }
 

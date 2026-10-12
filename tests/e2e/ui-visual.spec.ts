@@ -14,14 +14,14 @@ test('captures the reusable GPoint UI foundation surfaces', async ({ page, brows
   await expect(page.locator('.app-shell')).toBeVisible();
   await shot('for-you');
 
-  await page.getByRole('button', { name: /Reels/ }).click();
+  await page.getByRole('button', { name: 'Reels', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Reels', exact: true })).toBeVisible();
   await shot('reels');
 
-  await page.getByRole('button', { name: /Explore/ }).click();
+  await page.getByRole('button', { name: 'Explore', exact: true }).click();
   await shot('explore');
 
-  await page.getByRole('button', { name: /Profile/ }).click();
+  await page.getByRole('button', { name: 'Profile', exact: true }).click();
   await shot('profile');
 
   await creatorPage(page, 'visual-dashboard');
@@ -40,11 +40,11 @@ test('captures the reusable GPoint UI foundation surfaces', async ({ page, brows
     await page390.goto('/');
     await expect(page390.locator('.app-shell')).toBeVisible();
     await shot390('for-you');
-    await page390.getByRole('button', { name: /Reels/ }).click();
+    await page390.getByRole('button', { name: 'Reels', exact: true }).click();
     await shot390('reels');
-    await page390.getByRole('button', { name: /Explore/ }).click();
+    await page390.getByRole('button', { name: 'Explore', exact: true }).click();
     await shot390('explore');
-    await page390.getByRole('button', { name: /Profile/ }).click();
+    await page390.getByRole('button', { name: 'Profile', exact: true }).click();
     await shot390('profile');
     await creatorPage(page390, 'visual-dashboard-390');
     await shot390('creator-overview');

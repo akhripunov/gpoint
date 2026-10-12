@@ -44,6 +44,10 @@ import {
   Settings,
   Settings2,
   ShieldCheck,
+  Users,
+  Video,
+  WalletCards,
+  Heart,
   Unplug,
   UserRound,
 } from "lucide-react";
@@ -861,6 +865,33 @@ export function TelegramImportSettings() {
   );
 }
 
+function ReferenceDashboardSummary() {
+  const metrics = [
+    { label: "FOLLOWERS", value: "284.5K", detail: "↑ 1.2K this week", icon: <Users size={22} /> },
+    { label: "LIFETIME EARNINGS", value: "$156K", detail: "Total earnings", icon: <WalletCards size={22} /> },
+    { label: "FOLLOWING", value: "892", detail: "Creators", icon: <UserRound size={22} /> },
+    { label: "PUBLISHED", value: "247", detail: "Videos", icon: <Video size={22} /> },
+  ];
+  return <div className="reference-dashboard-summary" aria-label="Local preview metrics">
+    <div className="reference-preview-label">LOCAL PREVIEW FIXTURE</div>
+    <section className="reference-earnings-card" aria-label="Example earnings summary">
+      <p>EARNINGS</p><strong>$12,847</strong><span className="reference-balance-caption">↗ Available balance</span>
+      <div className="reference-balance-row"><span>Available <b>$8,420</b></span><span>Pending <b>$4,427</b></span></div>
+      <BarChart3 size={29} aria-hidden="true" />
+    </section>
+    <div className="reference-metric-grid">{metrics.map((metric) => <article className="reference-metric-card" key={metric.label}><span className="reference-metric-icon">{metric.icon}</span><div><small>{metric.label}</small><strong>{metric.value}</strong><span>{metric.detail}</span></div></article>)}</div>
+  </div>;
+}
+
+function ReferenceDashboardActivity() {
+  const rows = [
+    { icon: <UserRound size={17} />, title: "New subscriber", detail: "Joined your circle", time: "2m ago" },
+    { icon: <FileText size={17} />, title: "Post imported", detail: "From Telegram", time: "18m ago" },
+    { icon: <Heart size={17} />, title: "Tip received", detail: "$25.00", time: "1h ago" },
+  ];
+  return <section className="dashboard-section reference-recent-activity"><SectionEyebrow>RECENT ACTIVITY</SectionEyebrow><div className="reference-activity-list">{rows.map((row) => <div className="reference-activity-row" key={row.title}><span>{row.icon}</span><div><strong>{row.title}</strong><small>{row.detail}</small></div><time>{row.time}</time></div>)}</div></section>;
+}
+
 export function CreatorWorkspaceDashboard() {
   const q = useQuery({ queryKey: ["creator-me"], queryFn: creatorMe });
   const channelQ = useQuery({ queryKey: ["telegram-channel"], queryFn: telegramChannel });
@@ -903,16 +934,20 @@ export function CreatorWorkspaceDashboard() {
   ];
   return (
     <section className={`creator-workspace${creatorDashboardVisualFixture ? " visual-fixture" : ""}`} aria-label="Creator tools">
-      <div className="dashboard-heading"><p className="dashboard-eyebrow">CREATOR TOOLS</p><h1>Creator Dashboard</h1><p>Your content, your audience, more possibilities.</p></div>
+      <div className="dashboard-heading"><h1><span>Creator</span> Dashboard</h1><p>Your content, your audience, more possibilities.</p></div>
       <Tabs items={['Overview', 'Profile settings', 'Imported Posts', 'Stats']} active={tab} onChange={setTab} className="content-tabs" />
-      {tab === 'Overview' && (
-        <>
+      {tab === 'Overview' && (creatorDashboardVisualFixture ? <>
+          <ReferenceDashboardSummary />
+          <TelegramChannelControls />
+          <div className="dashboard-section"><SectionEyebrow>CREATOR TOOLS</SectionEyebrow><div className="gpoint-tool-grid">{tools.map((tool) => <CreatorToolCard key={tool.tab} title={tool.title} description={tool.copy} icon={tool.icon} onClick={() => setTab(tool.tab)} />)}</div></div>
+          <TelegramImportSettings />
+          <ReferenceDashboardActivity />
+        </> : <>
           <WorkspaceStatusCard icon={<Check size={28} strokeWidth={1.8} />} title={channelConnected ? "Creator workspace active" : "Reconnect your Telegram channel"} body={channelConnected ? "Telegram channel connected and ready for ingestion." : "Reconnect your Telegram channel to resume ingestion."} status={channelConnected ? (creator.status === "APPROVED" ? "Live" : "Pending review") : "Reconnect required"} tone={channelConnected && creator.status === "APPROVED" ? "success" : "warm"} />
           <TelegramChannelControls />
           <div className="dashboard-section"><SectionEyebrow>CREATOR TOOLS</SectionEyebrow><div className="gpoint-tool-grid">{tools.map((tool) => <CreatorToolCard key={tool.tab} title={tool.title} description={tool.copy} icon={tool.icon} onClick={() => setTab(tool.tab)} />)}</div></div>
           <TelegramImportSettings />
-        </>
-      )}
+        </>)}
       {tab === 'Profile settings' && (
         <div className="dashboard-section profile-settings-panel">
           <SectionEyebrow>PROFILE SETTINGS</SectionEyebrow><h2>Shape your public profile</h2><p className="dashboard-copy">Keep your creator identity clear and easy to recognize.</p>

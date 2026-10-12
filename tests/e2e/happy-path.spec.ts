@@ -7,6 +7,7 @@ test('creator dashboard exposes the canonical workspace surface', async ({ page 
   await expect(page.getByRole('button', { name: 'Profile settings', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Imported Posts', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Stats', exact: true })).toBeVisible();
+  await expect(page.locator('.gpoint-bottom-nav .gpoint-nav-label')).toHaveText(['For You', 'Reels', 'Messages', 'Explore', 'Profile']);
   await expect(page.getByRole('heading', { name: 'Connect Telegram Channel' })).toBeVisible();
   await expect(page.getByRole('button', { name: /Submit for Moderation|Under review/ })).toHaveCount(0);
 

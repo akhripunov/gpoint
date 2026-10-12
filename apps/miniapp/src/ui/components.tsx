@@ -21,7 +21,7 @@ export function Tabs({ items, active, onChange, className = "" }: { items: strin
 }
 
 export function BottomNav({ items, active, onChange }: { items: Array<{ id: string; label: string; icon: ReactNode; badgeCount?: number }>; active: string; onChange: (id: string) => void }) {
-  return <nav className="gpoint-bottom-nav bottom-nav" aria-label="Primary navigation">{items.map((item) => <button type="button" className={active === item.id ? "active" : ""} onClick={() => onChange(item.id)} key={item.id} aria-label={item.badgeCount ? `${item.label}, ${item.badgeCount} unread messages` : item.label}>{item.badgeCount ? <span className="nav-icon-with-badge">{item.icon}<UnreadBadge count={item.badgeCount} /></span> : item.icon}<span>{item.label}</span></button>)}</nav>;
+  return <nav className="gpoint-bottom-nav bottom-nav" aria-label="Primary navigation">{items.map((item) => <button type="button" className={`gpoint-nav-item${active === item.id ? " active" : ""}`} onClick={() => onChange(item.id)} key={item.id} aria-current={active === item.id ? "page" : undefined} aria-label={item.badgeCount ? `${item.label}, ${item.badgeCount} unread messages` : item.label}><span className="gpoint-nav-icon">{item.badgeCount ? <span className="nav-icon-with-badge">{item.icon}<UnreadBadge count={item.badgeCount} /></span> : item.icon}</span><span className="gpoint-nav-label">{item.label}</span></button>)}</nav>;
 }
 
 export function SectionEyebrow({ children }: { children: ReactNode }) { return <p className="gpoint-section-eyebrow">{children}</p>; }

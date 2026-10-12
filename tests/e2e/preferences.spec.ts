@@ -1,15 +1,35 @@
 import { test, expect } from '@playwright/test';
-import { apiRead, creatorPage, waitForApi } from './helpers';
+import { apiRead, apiRequest, createPendingImagePost, creatorPage, tinyMp4, waitForApi } from './helpers';
 
-test('recommendation controls work from For You, Reels and Profile', async ({ page }) => {
+test('recommendation controls work from For You and Reels; Profile retains Creator tools', async ({ page }) => {
   await creatorPage(page, 'preference-controls');
   const e2eUserId = new URL(page.url()).searchParams.get('e2eUserId');
+  const creator = (await apiRead<any>(page, '/creator/me')).creator;
+  await apiRequest(page, `/admin/creators/${creator.id}/APPROVE`, 'POST', {});
+  const post = await createPendingImagePost(page, 'Preference fixture post');
+  await apiRequest(page, `/admin/posts/${post.id}/APPROVE`, 'POST', {});
+  const video = await apiRequest<{ mediaId: string }>(page, '/creator/me/media/intent', 'POST', { kind: 'VIDEO', mimeType: 'video/mp4', fileSize: tinyMp4.length });
+  await apiRequest(page, `/creator/me/media/${video.mediaId}/data`, 'POST', { dataBase64: tinyMp4.toString('base64') });
+  await apiRequest(page, `/creator/me/media/${video.mediaId}/finalize`, 'POST');
+  const reelFixture = await apiRequest<{ id: string }>(page, '/creator/me/reels', 'POST', { caption: 'Preference fixture reel', mediaIds: [video.mediaId] });
+  await apiRequest(page, `/creator/me/posts/${reelFixture.id}`, 'PATCH', { status: 'PENDING', caption: 'Preference fixture reel', mediaIds: [video.mediaId] });
+  await apiRequest(page, `/admin/posts/${reelFixture.id}/APPROVE`, 'POST', {});
   await page.goto(`/?e2eUserId=${e2eUserId}`);
   await page.getByRole('button', { name: 'For You', exact: true }).click();
   const card = page.locator('.creator-card').first();
   await expect(card).toBeVisible();
-  await card.locator('summary[aria-label="Recommendation actions"]').click();
-  await waitForApi(page, '/preferences', () => card.getByRole('button', { name: 'Don\'t recommend this creator', exact: true }).click());
+  const cardMenu = card.locator('summary[aria-label="Recommendation actions"]');
+  await cardMenu.focus();
+  await page.keyboard.press('Enter');
+  const excludeCreator = card.getByRole('button', { name: 'Don\'t recommend this creator', exact: true });
+  await expect(excludeCreator).toBeVisible();
+  const optionBox = await excludeCreator.boundingBox();
+  const viewport = page.viewportSize();
+  expect(optionBox).not.toBeNull();
+  expect(optionBox!.x).toBeGreaterThanOrEqual(0);
+  expect(optionBox!.x + optionBox!.width).toBeLessThanOrEqual(viewport!.width);
+  await excludeCreator.focus();
+  await waitForApi(page, '/preferences', () => page.keyboard.press('Enter'));
   await expect(card.getByRole('status')).toContainText("won't recommend this creator");
   let prefs = await apiRead<any>(page, '/preferences');
   expect(prefs.items.some((item: any) => item.preferenceType === 'DO_NOT_RECOMMEND_CREATOR')).toBeTruthy();
@@ -28,6 +48,5 @@ test('recommendation controls work from For You, Reels and Profile', async ({ pa
   await expect.poll(async () => (await apiRead<any>(page, '/preferences')).items.length).toBe(0);
 
   await page.getByRole('button', { name: 'Profile', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Recommendation controls' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Reset recommendations', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Creator tools/ })).toBeVisible();
 });

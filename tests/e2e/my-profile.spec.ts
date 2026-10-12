@@ -7,9 +7,9 @@ test('consumer My Profile matches the approved UserProfile structure and uses re
   await expect(page.getByText('MY PROFILE', { exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Local Dev' })).toBeVisible();
   await expect(page.getByText('Saved', { exact: true })).toBeVisible();
-  await expect(page.getByText('12', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Saved: unavailable')).toBeVisible();
   await expect(page.getByText('Following', { exact: true })).toBeVisible();
-  await expect(page.getByText('248', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Following: unavailable')).toBeVisible();
   await expect(page.getByText('My Subscription', { exact: true })).toBeVisible();
   await expect(page.getByText('Wallet', { exact: true })).toBeVisible();
   await expect(page.getByText('Settings', { exact: true })).toBeVisible();

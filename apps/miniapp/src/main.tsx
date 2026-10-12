@@ -43,6 +43,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Crown,
+  Flame,
   House,
   MessageCircle,
   Pencil,
@@ -51,6 +52,7 @@ import {
   Settings,
   Settings2,
   Sparkles,
+  Star,
   UserRound,
   Users,
   Video,
@@ -65,6 +67,8 @@ import {
 import { BackButton, BottomNav } from "./ui";
 import { MessagesInbox, ModelChat } from "./messages-ui";
 import { MessagesUnreadProvider, useMessagesUnread } from "./messages-unread";
+import { GPointAppHeader } from "./ui/brand";
+import { userProfileCounts } from "./user-profile-data.js";
 import { messagesPath, messagesRouteFromLocation } from "./messages-routing";
 import {
   canonicalModelProfileUrl,
@@ -93,6 +97,7 @@ type Screen =
   | "following"
   | "messages"
   | "chat";
+const isReferenceVisualFixture = import.meta.env.DEV && new URLSearchParams(window.location.search).get("referenceFixture") === "1";
 const V = ({ on }: { on?: boolean }) =>
   on ? <span className="verified">✓</span> : null;
 function VipButton({
@@ -132,6 +137,7 @@ function Card({
   surface?: string;
 }) {
   const ref = useRef<HTMLElement>(null);
+  const [coverFailed, setCoverFailed] = useState(false);
   useEffect(() => {
     const node = ref.current;
     if (!node) return;
@@ -160,6 +166,9 @@ function Card({
         open(c);
       }}
       onKeyDown={(e) => {
+        // Let nested controls, including the recommendation menu's native
+        // <summary>, handle their own keyboard activation.
+        if (e.target !== e.currentTarget) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           open(c);
@@ -168,25 +177,18 @@ function Card({
     >
       <div
         className="cover"
-        style={{
-          background: `linear-gradient(130deg,hsl(${c.id.length * 17} 22% 25%),hsl(${c.id.length * 17} 45% 62%))`,
-        }}
+        style={{ background: "linear-gradient(145deg, #322b35, #121821)" }}
       >
-        <span className="avatar small">
-          {c.displayName.slice(0, 2).toUpperCase()}
-        </span>
+        {(c.coverUrl || c.avatarUrl) && !coverFailed ? <img src={mediaUrl(c.coverUrl || c.avatarUrl)} alt={`${c.displayName} creator profile`} loading="lazy" onError={() => setCoverFailed(true)} /> : <span className="cover-fallback" aria-hidden="true">{c.displayName.slice(0, 2).toUpperCase()}</span>}
       </div>
       <div className="card-copy">
+        {c.avatarUrl ? <img className="creator-avatar" src={mediaUrl(c.avatarUrl)} alt="" aria-hidden="true" loading="lazy" /> : <span className="creator-avatar creator-avatar-fallback" aria-hidden="true">{c.displayName.slice(0, 2).toUpperCase()}</span>}
         <div className="name-line">
           <strong>{c.displayName}</strong>
           <V on={c.verified} />
         </div>
         <span className="handle">@{c.slug}</span>
-        <p>{c.bio ?? "A GPoint creator."}</p>
-        <div className="card-meta">
-          <span>Free content</span>
-          <span>VIP from {c.vipPriceStars ?? "—"} ⭐</span>
-        </div>
+        {c.bio && <p>{c.bio}</p>}
       </div>
       <PreferenceMenu entityType="CREATOR" entityId={c.id} creatorId={c.id} />
     </article>
@@ -235,6 +237,8 @@ function Explore({
   setTab: (x: string) => void;
   open: (c: any) => void;
 }) {
+  const [search, setSearch] = useState("");
+  const [searchExpanded, setSearchExpanded] = useState(false);
   const isFollowing = tab === "Following";
   const q = useInfiniteQuery({
     queryKey: ["explore", tab],
@@ -244,27 +248,31 @@ function Explore({
     enabled: !isFollowing,
   });
   const items = q.data?.pages.flatMap((x) => x.items) ?? [];
+  const filteredItems = search.trim()
+    ? items.filter((creator) => `${creator.displayName} ${creator.slug}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()))
+    : items;
   return (
     <>
-      <section className="hero">
-        <p className="eyebrow">THE CREATOR EDIT</p>
-        <h1>
-          Find your
-          <br />
-          <i>favorite</i> world.
-        </h1>
-        <span className="hero-mark">✳</span>
+      <section className="explore-heading">
+        <h1>Explore</h1>
       </section>
-      <div className="segmented">
-        {["For You", "Following", "Trending", "Popular", "New"].map((x) => (
-          <button
-            className={tab === x ? "selected" : ""}
-            onClick={() => setTab(x)}
-            key={x}
-          >
-            {x}
-          </button>
-        ))}
+      <div className="explore-controls">
+        {!isFollowing && <label className={`explore-search${searchExpanded ? " expanded" : ""}`}>
+          <button type="button" aria-label="Search creators" aria-expanded={searchExpanded} onClick={() => setSearchExpanded((value) => !value)}><Search size={20} aria-hidden="true" /></button>
+          <input tabIndex={searchExpanded ? 0 : -1} value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search loaded creators" placeholder="Search creators" />
+        </label>}
+        <div className="segmented explore-filters">
+          {["Trending", "Popular", "New", "For You", "Following"].map((x) => (
+            <button
+              className={tab === x ? "selected" : ""}
+              onClick={() => setTab(x)}
+              key={x}
+            >
+              {x === "Trending" ? <Flame size={19} strokeWidth={1.8} aria-hidden="true" /> : x === "Popular" ? <Star size={19} strokeWidth={1.8} aria-hidden="true" /> : x === "New" ? <Sparkles size={19} strokeWidth={1.8} aria-hidden="true" /> : null}
+              {x}
+            </button>
+          ))}
+        </div>
       </div>
       {isFollowing ? (
         <Following />
@@ -289,19 +297,8 @@ function Explore({
           )}
           {q.data && (
             <>
-              <div className="section-head">
-                <div>
-                  <p className="eyebrow">
-                    {tab === "For You"
-                      ? "PERSONALIZED FOR YOU"
-                      : "CURATED FOR YOU"}
-                  </p>
-                  <h2>{tab} creators</h2>
-                </div>
-                <span className="muted">{items.length} profiles</span>
-              </div>
-              <div className="creator-grid">
-                {items.map((c) => (
+              <div className="creator-grid" aria-live="polite">
+                {filteredItems.map((c) => (
                   <Card
                     c={c}
                     open={open}
@@ -310,6 +307,7 @@ function Explore({
                   />
                 ))}
               </div>
+              {search && !filteredItems.length && <div className="empty explore-no-results"><h3>No creators found</h3><p>Try a different name or handle.</p></div>}
               {q.hasNextPage && (
                 <button
                   className="primary"
@@ -361,6 +359,10 @@ function Profile({ slug, back, explore, message }: { slug: string; back: () => v
     );
   const c = q.data;
   const profilePosts = p.data?.items ?? c.posts;
+  const fixturePostCount = (c as typeof c & { postsCount?: number }).postsCount;
+  const postCount = isReferenceVisualFixture
+    ? fixturePostCount ?? profilePosts.length
+    : profilePosts.length;
   const mediaPosts = profilePosts.flatMap((post) => post.media.map((media) => ({ post, media })));
   const reelPosts = mediaPosts.filter(({ media }) => media.kind === "VIDEO");
   const shareProfile = async () => {
@@ -393,15 +395,7 @@ function Profile({ slug, back, explore, message }: { slug: string; back: () => v
   };
   return (
     <section className="profile-view model-profile" aria-label={`${c.displayName} model profile`}>
-      <header className="model-profile-header">
-        <button type="button" className="model-profile-icon" onClick={back} aria-label="Back to feed">
-          <ChevronLeft size={25} strokeWidth={1.6} aria-hidden="true" />
-        </button>
-        <span className="model-profile-brand">GPoint<span>•</span></span>
-        <button type="button" className="model-profile-icon model-profile-search" onClick={explore} aria-label="Explore models">
-          <Search size={22} strokeWidth={1.6} aria-hidden="true" />
-        </button>
-      </header>
+      <GPointAppHeader centered className="model-profile-header" left={<button type="button" className="model-profile-icon" onClick={back} aria-label="Back to feed"><ChevronLeft size={25} strokeWidth={1.6} aria-hidden="true" /></button>} right={<button type="button" className="model-profile-icon model-profile-search" onClick={explore} aria-label="Explore models"><Search size={22} strokeWidth={1.6} aria-hidden="true" /></button>} />
       <div className="model-profile-main">
         <div className="model-profile-overview">
           <span className="model-profile-avatar">
@@ -412,7 +406,7 @@ function Profile({ slug, back, explore, message }: { slug: string; back: () => v
             <span className="model-profile-handle">@{c.slug}</span>
             {c.bio && <p className="model-profile-bio">{c.bio}</p>}
             <div className="model-profile-stats">
-              <span><strong>{profilePosts.length}</strong><small>Posts</small></span>
+              <span><strong>{postCount}</strong><small>Posts</small></span>
               <span><strong>{Intl.NumberFormat("en", { notation: "compact" }).format(c.followersCount)}</strong><small>Followers</small></span>
             </div>
             <div className="model-profile-controls">
@@ -1018,12 +1012,13 @@ function ProfileSettingsRow({
     </button>
   );
 }
-function ProfileStatCard({ label, value, icon: Icon }: { label: string; value: number; icon: LucideIcon }) {
+function ProfileStatCard({ label, value, icon: Icon }: { label: string; value: number | null; icon: LucideIcon }) {
   return (
-    <div className="profile-stat-card">
+    <div className="profile-stat-card" aria-label={`${label}: ${value === null ? "unavailable" : value}`}>
       <span className="profile-stat-icon" aria-hidden="true"><Icon size={18} strokeWidth={1.8} /></span>
-      <strong>{value}</strong>
+      <strong>{value === null ? "—" : value}</strong>
       <span>{label}</span>
+      {value === null && <small className="profile-stat-unavailable">Unavailable</small>}
     </div>
   );
 }
@@ -1041,13 +1036,9 @@ function MyProfile({
     .join("")
     .slice(0, 2)
     .toUpperCase();
-  const savedCount = Number.isFinite(user?.savedCount) ? user.savedCount : 12;
-  const followingCount = Number.isFinite(user?.followingCount) ? user.followingCount : 248;
+  const counts = userProfileCounts(user);
   return (
     <section className="my-profile">
-      <div className="my-profile-brand">
-        GPoint<span aria-hidden="true">•</span>
-      </div>
       <div className="profile-identity-header">
         <span className="profile-avatar">{initials || "GP"}</span>
         <div className="profile-name-block">
@@ -1059,13 +1050,13 @@ function MyProfile({
               : "GPoint member"}
           </span>
         </div>
-        <button className="profile-edit-button" type="button" onClick={onBecomeCreator} aria-label="Edit profile">
+        <button className="profile-edit-button" type="button" disabled aria-label="Profile editing unavailable" title="Profile editing is not available yet">
           <Pencil size={17} strokeWidth={1.8} />
         </button>
       </div>
       <div className="profile-stats" aria-label="Profile information">
-        <ProfileStatCard label="Saved" value={savedCount} icon={Bookmark} />
-        <ProfileStatCard label="Following" value={followingCount} icon={Users} />
+        <ProfileStatCard label="Saved" value={counts.saved} icon={Bookmark} />
+        <ProfileStatCard label="Following" value={counts.following} icon={Users} />
       </div>
       <div className="profile-space-block">
         <p className="eyebrow">YOUR SPACE</p>
@@ -1073,12 +1064,12 @@ function MyProfile({
           <ProfileSettingsRow
             icon={Crown}
             title="My Subscription"
-            subtitle="Manage your plan and benefits"
+            subtitle="Subscriptions are not available yet"
           />
           <ProfileSettingsRow
             icon={WalletCards}
             title="Wallet"
-            subtitle="Credits, payouts and payment methods"
+            subtitle="Wallet is not available yet"
           />
           <ProfileSettingsRow
             icon={Settings2}
@@ -1148,12 +1139,6 @@ function FeedCard({
       mode === "for-you" ? "FOR_YOU" : "FOLLOWING",
     ).catch(() => undefined);
   }, [post.id, mode]);
-  const stamp = post.publishedAt
-    ? new Date(post.publishedAt).toLocaleDateString(undefined, {
-        month: "short",
-        day: "numeric",
-      })
-    : "";
   return (
     <article
       className="post-card"
@@ -1181,7 +1166,6 @@ function FeedCard({
           <span className="post-identity">
             <strong>{post.creator.displayName}</strong>
             {post.creator.verified && <V on />}
-            <small>{stamp}</small>
           </span>
         </button>
         <button className="post-follow" onClick={() => f.mutate()}>
@@ -1447,18 +1431,18 @@ function App({ initialUser }: { initialUser: any }) {
   };
   const creatorWorkspace = screen === "account" && accountView === "creator";
   const messagesView = screen === "messages" || screen === "chat";
+  const activeNavigation = screen === "profile" ? "account" : screen === "following" ? "for-you" : screen;
   return (
-    <div className={`app-shell${screen === "account" && accountView === "profile" ? " profile-screen" : ""}${screen === "profile" ? " model-profile-screen" : ""}${screen === "messages" ? " messages-screen" : ""}${screen === "chat" ? " chat-screen" : ""}`}>
-      {!messagesView && <header className={`topbar${creatorWorkspace ? " creator-topbar" : ""}`}>
-        {creatorWorkspace && (
-          <BackButton className="creator-back" label="Back to Profile" onClick={() => setAccountView("profile")} />
-        )}
-        <button className="brand" onClick={() => navigate("for-you")}>
-          GPoint<span>•</span>
-        </button>
-        {creatorWorkspace && <span className="creator-settings-control" aria-hidden="true"><Settings size={20} strokeWidth={1.7} /></span>}
-        {!creatorWorkspace && <button className="icon-button" aria-label="Search"><Search size={18} strokeWidth={1.8} aria-hidden="true" /></button>}
-      </header>}
+    <div className={`app-shell${screen === "account" && accountView === "profile" ? " profile-screen" : ""}${screen === "profile" ? " model-profile-screen" : ""}${screen === "messages" ? " messages-screen" : ""}${screen === "chat" ? " chat-screen" : ""}${screen === "for-you" ? " feed-screen" : ""}${screen === "explore" ? " explore-screen" : ""}`}>
+      {screen !== "chat" && <GPointAppHeader
+        className={`topbar${creatorWorkspace ? " creator-topbar" : ""}${messagesView ? " messages-root-header" : ""}`}
+        onHome={() => navigate("for-you")}
+        logo={undefined}
+        subtitle={screen === "for-you" ? "Curated for you" : undefined}
+        centered={false}
+        left={undefined}
+        right={messagesView ? undefined : creatorWorkspace ? <span className="creator-settings-control" aria-hidden="true"><Settings size={20} strokeWidth={1.7} /></span> : <button type="button" className="icon-button" aria-label="Explore creators" onClick={() => navigate("explore")}><Search size={18} strokeWidth={1.8} aria-hidden="true" /></button>}
+      />}
       <main className={`page${messagesView ? " messages-page" : ""}`}>
         {screen === "for-you" && (
           <Feed mode="for-you" open={open} go={navigate} />
@@ -1492,12 +1476,15 @@ function App({ initialUser }: { initialUser: any }) {
           </div>
         )}
       </main>
-      {screen !== "chat" && <BottomNav active={screen} onChange={(id) => navigate(id as Screen)} items={[
-        { id: "for-you", label: "For You", icon: <House size={23} strokeWidth={1.8} /> },
-        { id: "reels", label: "Reels", icon: <Video size={23} strokeWidth={1.8} /> },
-        { id: "messages", label: "Messages", badgeCount: unread.total, icon: <MessageCircle size={23} strokeWidth={1.8} /> },
-        { id: "explore", label: "Explore", icon: <Search size={23} strokeWidth={1.8} /> },
-        { id: "account", label: "Profile", icon: <UserRound size={23} strokeWidth={1.8} /> },
+      {screen !== "chat" && <BottomNav active={activeNavigation} onChange={(id) => {
+        if (creatorWorkspace && id === "account") { setAccountView("profile"); return; }
+        navigate(id as Screen);
+      }} items={[
+              { id: "for-you", label: "For You", icon: <House size={23} strokeWidth={1.8} /> },
+              { id: "reels", label: "Reels", icon: <Video size={23} strokeWidth={1.8} /> },
+              { id: "messages", label: "Messages", badgeCount: unread.total, icon: <MessageCircle size={23} strokeWidth={1.8} /> },
+              { id: "explore", label: "Explore", icon: <Search size={23} strokeWidth={1.8} /> },
+              { id: "account", label: "Profile", icon: <UserRound size={23} strokeWidth={1.8} /> },
       ]} />}
     </div>
   );
@@ -1544,10 +1531,10 @@ function PreferenceMenu({
     <div className="preference-menu" onClick={(e) => e.stopPropagation()}>
       <details>
         <summary aria-label="Recommendation actions">⋯</summary>
-        <button onClick={() => set.mutate("NOT_INTERESTED")}>
+        <button onClick={(event) => { set.mutate("NOT_INTERESTED"); event.currentTarget.closest("details")?.removeAttribute("open"); }}>
           Not interested
         </button>
-        <button onClick={() => set.mutate("DO_NOT_RECOMMEND_CREATOR")}>
+        <button onClick={(event) => { set.mutate("DO_NOT_RECOMMEND_CREATOR"); event.currentTarget.closest("details")?.removeAttribute("open"); }}>
           Don't recommend this creator
         </button>
       </details>
