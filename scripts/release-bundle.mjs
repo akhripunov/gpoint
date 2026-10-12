@@ -18,8 +18,38 @@ export function verifyReleaseBundle(directory, candidate) {
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(proof.gsalesMigrationHead ?? '') || !/^[a-f0-9]{64}$/.test(proof.gsalesMigrationSha256 ?? '')) {
     throw new Error('invalid G Sales migration identity');
   }
+  // V3 proves unchanged backend source on the exact candidate in trusted CI.
+  // Generic SKIPPED must never satisfy the immutable receipt gate.
+  const sourceGates = ['postgres', 'gsalesPostgres'];
+  const covered = sourceGates.filter(g => proof.gates?.[g] === 'COVERED_UNCHANGED');
+  if (covered.length) {
+    const impact = proof.impactV3;
+    const safeUI = p => typeof p === 'string' &&
+      (((p.startsWith('apps/miniapp/src/') || p.startsWith('apps/miniapp/public/')) &&
+       p.split('/').length >= 4 && !p.split('/').some(x => x === '.' || x === '..' || !x) && !p.includes('\0')) ||
+       p === 'apps/miniapp/index.html');
+    if (covered.length !== sourceGates.length ||
+        impact?.version !== 1 || impact?.candidateSha !== candidate ||
+        impact?.classification !== 'UI_ONLY' ||
+        impact?.baselineSource !== 'gpoint-release-ledger' ||
+        impact?.reason !== 'narrow-unchanged-backend' ||
+        !/^[a-f0-9]{40}$/.test(impact?.productionBaselineSha ?? '') ||
+        impact.productionBaselineSha === candidate ||
+        impact.checks?.agata_postgres_rehearsal !== false ||
+        impact.checks?.gsales_postgres_regression !== false ||
+        !Array.isArray(impact.changedPaths) || impact.changedPaths.length === 0 ||
+        !impact.changedPaths.every(safeUI) ||
+        !Array.isArray(impact.invariantChecks) ||
+        !['docker_images_exact_sha', 'artifact_migrations', 'deploy_rehearsal', 'canonical_preflight', 'production_approval']
+          .every(k => impact.invariantChecks.includes(k))) {
+      throw new Error('unverified V3 unchanged-source coverage');
+    }
+  }
   for (const gate of ['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'deployRehearsal']) {
-    if (proof.gates?.[gate] !== 'PASS') throw new Error(`missing release gate: ${gate}`);
+    if (proof.gates?.[gate] !== 'PASS' &&
+        !(sourceGates.includes(gate) && proof.gates?.[gate] === 'COVERED_UNCHANGED' && covered.length === 2)) {
+      throw new Error('missing release gate: ' + gate);
+    }
   }
   for (const role of ['app', 'agata', 'gsales']) {
     const image = proof.images?.[role];

@@ -16,6 +16,18 @@ import tempfile
 import time
 import uuid
 
+# This module is also loaded via importlib.util by the existing migration
+# inventory tests. Resolve our sibling module by its canonical path rather
+# than depending on scripts/ being present in sys.path.
+import importlib.util
+_impact_spec = importlib.util.spec_from_file_location(
+    'gpoint_release_impact_v3', Path(__file__).resolve().with_name('release_impact_v3.py'))
+if _impact_spec is None or _impact_spec.loader is None:
+    raise RuntimeError('V3 impact selector module is unavailable')
+_impact_module = importlib.util.module_from_spec(_impact_spec)
+_impact_spec.loader.exec_module(_impact_module)
+load_verified_plan = _impact_module.load_verified_plan
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -272,6 +284,11 @@ def prepare(sha, output, *, postgres_only=False):
     receipt = output / 'receipt.json'
     receipt.unlink(missing_ok=True)  # Never retain READY from a failed retry.
     timings = {}
+    # A missing plan is FULL; malformed or stale evidence blocks rather than skipping.
+    impact = load_verified_plan(os.environ.get('GPOINT_V3_IMPACT_PLAN_PATH'), sha, ROOT)
+    if postgres_only:
+        impact = load_verified_plan(None, sha, ROOT)
+    print('V3_IMPACT_USED=' + impact['classification'], flush=True)
     gsales_regression = None
     if not postgres_only:
         commands = (
@@ -296,9 +313,12 @@ def prepare(sha, output, *, postgres_only=False):
         # Start after CPU-heavy workspace tests so this database gate can
         # overlap the later disposable AGATA PostgreSQL rehearsal without
         # competing with the candidate Docker image builds.
-        gsales_regression = start_background_stage(
-            'gsales_postgres_regression',
-            (sys.executable, 'services/gsales/tests/run_postgres.py'), timings)
+        if impact['checks']['gsales_postgres_regression']:
+            gsales_regression = start_background_stage(
+                'gsales_postgres_regression',
+                (sys.executable, 'services/gsales/tests/run_postgres.py'), timings)
+        else:
+            print('V3_COVERED_UNCHANGED=gsales_postgres_regression', flush=True)
 
     suffix = uuid.uuid4().hex[:12]
     network, postgres, api = (f'gpoint-ci-{suffix}-{x}' for x in ('net', 'pg', 'agata'))
@@ -347,18 +367,19 @@ def prepare(sha, output, *, postgres_only=False):
         migration_env = dict(env)
         migration_env['AGATA_TEST_DATABASE_URL'] = dsn.replace('ci_owner:', 'postgres:')
         migration_env['AGATA_DATABASE_URL'] = migration_env['AGATA_TEST_DATABASE_URL'].replace('+psycopg', '+asyncpg')
+        # The baseline schema and real non-bypass HTTP dialogue are application
+        # smoke gates, not optional source-regression suites. Always run them.
         with measured_stage('agata_baseline_migration_tests', timings):
             run(sys.executable, '-m', 'pytest', '-q', 'tests/test_postgres_baseline.py', cwd=agata, env=migration_env)
         run('docker', 'exec', postgres, 'psql', '-U', 'postgres', '-d', 'gpoint_agata_test', '-v', 'ON_ERROR_STOP=1', '-c',
             'GRANT USAGE ON SCHEMA agata TO ci_owner; GRANT ALL ON ALL TABLES IN SCHEMA agata TO ci_owner; GRANT ALL ON ALL SEQUENCES IN SCHEMA agata TO ci_owner;')
-        # Existing integration fixtures deliberately create tenants and roles.
-        # Keep those administrative setup operations on the test administrator;
-        # the explicit RLS migration test uses its isolated non-bypass role.
         migration_env['AGATA_RLS_TEST_DATABASE_URL'] = dsn.replace('/gpoint_agata_test', '/rls_agata_test')
-        with measured_stage('agata_postgres_integration_tests', timings):
-            run(sys.executable, '-m', 'pytest', '-q', '--ignore=tests/test_postgres_baseline.py', cwd=agata, env=migration_env)
-        # Repeat the actual HTTP dialogue under the application's non-bypass
-        # role, independently of privileged fixture creation above.
+        if impact['checks']['agata_postgres_rehearsal']:
+            with measured_stage('agata_postgres_integration_tests', timings):
+                run(sys.executable, '-m', 'pytest', '-q', '--ignore=tests/test_postgres_baseline.py', cwd=agata, env=migration_env)
+        else:
+            print('V3_COVERED_UNCHANGED=agata_postgres_source_regression', flush=True)
+        # Keep the real HTTP dialogue under the application's non-bypass role.
         with measured_stage('agata_api_e2e_tests', timings):
             run(sys.executable, '-m', 'pytest', '-q', 'tests/test_internal_api_e2e.py', cwd=agata, env=env)
         if postgres_only:
@@ -456,7 +477,8 @@ def prepare(sha, output, *, postgres_only=False):
         expected_agata = run('docker', 'run', '--rm', f'gpoint-agata-runtime:{sha}', 'alembic', 'heads', capture=True)
         if '\n' in expected_agata or not expected_agata or heads != expected_agata.split()[0] or prisma != expected_prisma:
             raise RuntimeError('runtime artifact migration heads do not match candidate source')
-        finish_background_stage(gsales_regression)
+        if gsales_regression is not None:
+            finish_background_stage(gsales_regression)
         images = {}
         for role, tag in [('app', 'gpoint-runtime'), ('agata', 'gpoint-agata-runtime'), ('gsales', 'gpoint-g-sales-runtime')]:
             image = json.loads(run('docker', 'image', 'inspect', f'{tag}:{sha}', capture=True))[0]
@@ -479,11 +501,15 @@ def prepare(sha, output, *, postgres_only=False):
         proof = {'schema': 1, 'candidateSha': sha, 'status': 'READY', 'runId': int(os.environ['GITHUB_RUN_ID']),
                  'runAttempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
                  'gates': {name: 'PASS' for name in ['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'deployRehearsal']},
+                 'impactV3': impact,
                  'images': images, 'archiveSha256': digest, 'prismaHead': prisma, 'agataHead': heads,
                  'gsalesMigrationHead': gsales_migration.stem, 'gsalesMigrationSha256': gsales_migration_sha,
                  'prepareStages': timings,
                  'deployRehearsal': rehearsal,
                  'applicationSmoke': 'DISPOSABLE_DB_DETERMINISTIC_PROVIDER', 'productionUserSmoke': 'NOT_RUN'}
+        if impact['classification'] == 'UI_ONLY':
+            proof['gates']['postgres'] = 'COVERED_UNCHANGED'
+            proof['gates']['gsalesPostgres'] = 'COVERED_UNCHANGED'
         receipt.write_text(json.dumps(proof, indent=2) + '\n')
     finally:
         if gsales_regression is not None:
