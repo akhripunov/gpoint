@@ -47,6 +47,12 @@ jobs:
           CANDIDATE_SHA: ${{ github.sha }}
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/prepare_coalescing.py
+      - name: Release V3 exact-production impact plan (fail closed)
+        if: github.ref != 'refs/heads/main' || steps.coalesce.outputs.result == 'WINNER'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: python3 scripts/release_impact_v3.py --candidate "$CANDIDATE_SHA" --output "$RUNNER_TEMP/gpoint-impact-v3.json"
       - uses: pnpm/action-setup@v4
         if: github.ref != 'refs/heads/main' || steps.coalesce.outputs.result == 'WINNER'
         with:
@@ -91,16 +97,23 @@ jobs:
         if: github.ref != 'refs/heads/main' || steps.coalesce.outputs.result == 'WINNER'
         run: |
           python3 scripts/test_prepare_coalescing.py
+          python3 -m unittest discover -s tests -p test_release_impact_v3.py
           python3 scripts/test_release_preflight_benchmark.py
           python3 scripts/select-release-run.test.py
           node --test scripts/release-orchestrator.test.mjs
           node --test scripts/release-evidence.test.mjs
-          node --test scripts/release-authorization.test.mjs scripts/release-runner-readiness.test.mjs
       - name: Tests, disposable database rehearsal and immutable Docker build
         if: github.ref != 'refs/heads/main' || steps.coalesce.outputs.result == 'WINNER'
         env:
           CANDIDATE_SHA: ${{ github.sha }}
+          GPOINT_V3_IMPACT_PLAN_PATH: ${{ runner.temp }}/gpoint-impact-v3.json
         run: python scripts/prepare-release.py "$CANDIDATE_SHA" "$RUNNER_TEMP/gpoint-bundle"
+      - name: Verify V3 baseline has not drifted before immutable publication
+        if: github.ref != 'refs/heads/main' || steps.coalesce.outputs.result == 'WINNER'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: python3 scripts/release_impact_v3.py --candidate "$CANDIDATE_SHA" --verify-receipt "$RUNNER_TEMP/gpoint-bundle/receipt.json"
       - name: Save exact candidate images and readiness receipt
         if: github.ref == 'refs/heads/main' && steps.coalesce.outputs.result == 'WINNER'
         env:

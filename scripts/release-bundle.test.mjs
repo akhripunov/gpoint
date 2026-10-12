@@ -168,3 +168,36 @@ test('canonical CLI executes from a Mac runner path containing spaces', t => {
   assert.equal(run.status, 0, run.stderr);
   assert.equal(JSON.parse(run.stdout).state.currentProductionSha, f.sha);
 });
+
+test('V3 immutable receipt accepts precisely proven unchanged-source DB regressions', t => {
+  const f = fixture(t);
+  const impact = {
+    version: 1, candidateSha: f.sha, productionBaselineSha: 'b'.repeat(40),
+    baselineSource: 'gpoint-release-ledger', classification: 'UI_ONLY',
+    reason: 'narrow-unchanged-backend', changedPaths: ['apps/miniapp/src/ui.tsx'],
+    checks: { agata_postgres_rehearsal: false, gsales_postgres_regression: false },
+    invariantChecks: ['docker_images_exact_sha', 'artifact_migrations', 'deploy_rehearsal', 'canonical_preflight', 'production_approval'],
+  };
+  f.receipt.impactV3 = impact;
+  f.receipt.gates.postgres = 'COVERED_UNCHANGED';
+  f.receipt.gates.gsalesPostgres = 'COVERED_UNCHANGED';
+  f.save();
+  assert.equal(verifyReleaseBundle(f.dir, f.sha).gates.gsalesPostgres, 'COVERED_UNCHANGED');
+  for (const bad of [
+    { changedPaths: ['services/agata/app/api.py'] },
+    { baselineSource: 'manual-guess' },
+    { productionBaselineSha: f.sha },
+    { candidateSha: 'c'.repeat(40) },
+    { checks: { agata_postgres_rehearsal: true, gsales_postgres_regression: false } },
+    { invariantChecks: ['docker_images_exact_sha'] },
+  ]) {
+    f.receipt.impactV3 = { ...impact, ...bad }; f.save();
+    assert.throws(() => verifyReleaseBundle(f.dir, f.sha), /unverified V3/);
+  }
+  f.receipt.impactV3 = impact;
+  f.receipt.gates.postgres = 'PASS'; f.save();
+  assert.throws(() => verifyReleaseBundle(f.dir, f.sha), /unverified V3/);
+  f.receipt.gates.postgres = 'COVERED_UNCHANGED';
+  delete f.receipt.impactV3; f.save();
+  assert.throws(() => verifyReleaseBundle(f.dir, f.sha), /unverified V3/);
+});
