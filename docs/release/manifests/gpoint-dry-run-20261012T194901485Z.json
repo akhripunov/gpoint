@@ -1,0 +1,194 @@
+{
+  "releaseId": "gpoint-dry-run-20261012T194901485Z",
+  "candidateSha": "dd6ca175ecb78362aa352b82f15767ba724b2744",
+  "previousProductionSha": "6afdf62692a58f8e8333c9da99ac7abbe603adc5",
+  "productionShaAfter": null,
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": null,
+  "agataDbHeadBefore": "agata0011",
+  "agataDbHeadAfter": "agata0011",
+  "artifactIdentities": {
+    "api": {
+      "sourceSha": "dd6ca175ecb78362aa352b82f15767ba724b2744"
+    },
+    "worker": {
+      "sourceSha": "dd6ca175ecb78362aa352b82f15767ba724b2744"
+    },
+    "bot": {
+      "sourceSha": "dd6ca175ecb78362aa352b82f15767ba724b2744"
+    },
+    "miniapp": {
+      "sourceSha": "dd6ca175ecb78362aa352b82f15767ba724b2744"
+    },
+    "agataApi": {
+      "sourceSha": "dd6ca175ecb78362aa352b82f15767ba724b2744"
+    },
+    "agataWorker": {
+      "sourceSha": "dd6ca175ecb78362aa352b82f15767ba724b2744"
+    },
+    "gsalesApi": {
+      "sourceSha": "dd6ca175ecb78362aa352b82f15767ba724b2744"
+    },
+    "gsalesAgataApi": {
+      "sourceSha": "dd6ca175ecb78362aa352b82f15767ba724b2744"
+    },
+    "gsalesAgataWorker": {
+      "sourceSha": "dd6ca175ecb78362aa352b82f15767ba724b2744"
+    }
+  },
+  "provider": "mac_worker",
+  "agataProvider": "mac_worker",
+  "startedAt": "2026-10-12T19:49:01.485Z",
+  "finishedAt": "2026-10-12T19:49:12.854Z",
+  "status": "PLANNED",
+  "failureStage": null,
+  "failureReason": null,
+  "rollbackSha": "6afdf62692a58f8e8333c9da99ac7abbe603adc5",
+  "rollbackDbCompatibility": "REQUIRES_FORWARD_FIX_ASSESSMENT",
+  "productionRef": null,
+  "remoteProof": {
+    "mainSha": "dd6ca175ecb78362aa352b82f15767ba724b2744",
+    "directRef": "refs/heads/main"
+  },
+  "liveFacts": {
+    "LIVE_AGATA_TENANT_ID": "81a4ba28-6de5-4b03-8332-0661ba4d46f4",
+    "LIVE_DOCKER_VERSION": "29.1.3",
+    "LIVE_COMPOSE_VERSION": "5.5.1",
+    "LIVE_BUILDX_VERSION": "v0.37.1",
+    "LIVE_BUILDKIT": "ready",
+    "LIVE_DISK_FREE_KB": "12280484",
+    "LIVE_ROLLBACK_IMAGE_AVAILABLE": "YES",
+    "LIVE_RELEASE_ENV_SHA": "6afdf62692a58f8e8333c9da99ac7abbe603adc5",
+    "LIVE_API_IMAGE": "sha256:653f017aa653c4932c303f8cb96b17ef7eb58c238e892bfe27356c3fe9f9beef",
+    "LIVE_API_SHA": "6afdf62692a58f8e8333c9da99ac7abbe603adc5",
+    "LIVE_API_RUNNING": "true",
+    "LIVE_API_HEALTH": "healthy",
+    "LIVE_API_RESTARTS": "0",
+    "LIVE_WORKER_IMAGE": "sha256:653f017aa653c4932c303f8cb96b17ef7eb58c238e892bfe27356c3fe9f9beef",
+    "LIVE_WORKER_SHA": "6afdf62692a58f8e8333c9da99ac7abbe603adc5",
+    "LIVE_WORKER_RUNNING": "true",
+    "LIVE_WORKER_HEALTH": "none",
+    "LIVE_WORKER_RESTARTS": "0",
+    "LIVE_BOT_IMAGE": "sha256:653f017aa653c4932c303f8cb96b17ef7eb58c238e892bfe27356c3fe9f9beef",
+    "LIVE_BOT_SHA": "6afdf62692a58f8e8333c9da99ac7abbe603adc5",
+    "LIVE_BOT_RUNNING": "true",
+    "LIVE_BOT_HEALTH": "none",
+    "LIVE_BOT_RESTARTS": "0",
+    "LIVE_MINIAPP_SHA": "6afdf62692a58f8e8333c9da99ac7abbe603adc5",
+    "LIVE_PRISMA_HEAD": "20260922090000_telegram_channel_avatar",
+    "LIVE_AGATA_HEAD": "agata0011",
+    "LIVE_CONFIG_AGATA_ENABLED": "YES",
+    "LIVE_CONFIG_AGATA_LLM_PROVIDER": "YES",
+    "LIVE_CONFIG_AGATA_DATABASE_URL": "YES",
+    "LIVE_CONFIG_AGATA_TENANT_ID": "YES",
+    "LIVE_CONFIG_AGATA_INTERNAL_API_TOKEN": "YES",
+    "LIVE_CONFIG_AGATA_MESSAGE_AEAD_KEY": "YES",
+    "LIVE_CONFIG_AGATA_REQUEST_FINGERPRINT_HMAC_KEY": "YES",
+    "LIVE_CONFIG_AGATA_RETRIEVAL_QUERY_HMAC_KEY": "YES",
+    "LIVE_CONFIG_AGATA_RESPONSE_FINGERPRINT_HMAC_KEY": "YES",
+    "LIVE_CONFIG_AGATA_SHADOW_CANDIDATE_HMAC_KEY": "YES",
+    "LIVE_AGATA_ENABLED": "true",
+    "LIVE_AGATA_PROVIDER": "mac_worker",
+    "LIVE_AGATA_API_IMAGE": "gpoint-agata-runtime:6afdf62692a58f8e8333c9da99ac7abbe603adc5",
+    "LIVE_AGATA_API_IMAGE_ID": "sha256:b6514c575187066fded6e39c4d9176121c7ec8c0b0cfd58e2218666fc753baa2",
+    "LIVE_AGATA_API_SHA": "6afdf62692a58f8e8333c9da99ac7abbe603adc5",
+    "LIVE_AGATA_API_RUNNING": "true",
+    "LIVE_AGATA_API_HEALTH": "healthy",
+    "LIVE_AGATA_WORKER_IMAGE": "gpoint-agata-runtime:6afdf62692a58f8e8333c9da99ac7abbe603adc5",
+    "LIVE_AGATA_WORKER_IMAGE_ID": "sha256:b6514c575187066fded6e39c4d9176121c7ec8c0b0cfd58e2218666fc753baa2",
+    "LIVE_AGATA_WORKER_SHA": "6afdf62692a58f8e8333c9da99ac7abbe603adc5",
+    "LIVE_AGATA_WORKER_RUNNING": "true",
+    "LIVE_AGATA_WORKER_HEALTH": "healthy",
+    "LIVE_CONFIG_AGATA_LLM_API_KEY": "NO",
+    "LIVE_CONFIG_AGATA_CODEX_LOCAL_ENABLED": "YES",
+    "LIVE_CONFIG_GPOINT_AGATA_WORKER_TOKEN": "YES",
+    "LIVE_AGATA_CODEX_LOCAL_ENABLED": "true",
+    "LIVE_GSALES_HEAD": "001_gsales",
+    "LIVE_GSALES_MIGRATION_SHA256": "8de19ec2efd81848010379645d51243ac3f4a4cd37af0be211d71cdf36bcd111",
+    "LIVE_GSALES_SCHEMA_PRESENT": "true",
+    "LIVE_GSALES_TENANT_ID": "7a33f79f-1226-4d42-a8cb-8f70f636c3ee",
+    "LIVE_GSALES_API_IMAGE_ID": "sha256:23bc0d621881d83a8baae2f3c71b6ab1f23a06cb10ebc5a6ee8e329b53698254",
+    "LIVE_GSALES_API_RUNNING": "true",
+    "LIVE_GSALES_API_HEALTH": "healthy",
+    "LIVE_GSALES_API_SHA": "6afdf62692a58f8e8333c9da99ac7abbe603adc5",
+    "LIVE_GSALES_AGATA_API_IMAGE_ID": "sha256:b6514c575187066fded6e39c4d9176121c7ec8c0b0cfd58e2218666fc753baa2",
+    "LIVE_GSALES_AGATA_API_RUNNING": "true",
+    "LIVE_GSALES_AGATA_API_HEALTH": "healthy",
+    "LIVE_GSALES_AGATA_API_SHA": "6afdf62692a58f8e8333c9da99ac7abbe603adc5",
+    "LIVE_GSALES_AGATA_MEMORY_WORKER_IMAGE_ID": "sha256:b6514c575187066fded6e39c4d9176121c7ec8c0b0cfd58e2218666fc753baa2",
+    "LIVE_GSALES_AGATA_MEMORY_WORKER_RUNNING": "true",
+    "LIVE_GSALES_AGATA_MEMORY_WORKER_HEALTH": "healthy",
+    "LIVE_GSALES_AGATA_MEMORY_WORKER_SHA": "6afdf62692a58f8e8333c9da99ac7abbe603adc5"
+  },
+  "agataMigrationReadiness": null,
+  "dryRun": true,
+  "workerCompatibility": {
+    "compatibility": "PASS",
+    "candidateSha": "dd6ca175ecb78362aa352b82f15767ba724b2744",
+    "sourceStatus": "EXACT_MATCH",
+    "assets": {
+      "gpoint_mac_worker.py": {
+        "candidateSha256": "8e1c34ab09581c4ebe129e5cc13db30f956a79566933f0a64842cdf6107ad1f8",
+        "installedSha256": "8e1c34ab09581c4ebe129e5cc13db30f956a79566933f0a64842cdf6107ad1f8",
+        "matches": true
+      },
+      "agata_worker_pool.py": {
+        "candidateSha256": "f1eb582b5f0b9fc6482e3b36091319573376dfe0b5c45326e04673288ede439f",
+        "installedSha256": "f1eb582b5f0b9fc6482e3b36091319573376dfe0b5c45326e04673288ede439f",
+        "matches": true
+      },
+      "lab_queue.py": {
+        "candidateSha256": "006328c66c14549bae39a29ac85a1c34350d460e818dcde1a403ceb5faf6e910",
+        "installedSha256": "006328c66c14549bae39a29ac85a1c34350d460e818dcde1a403ceb5faf6e910",
+        "matches": true
+      },
+      "lab_fixture_manifest.json": {
+        "candidateSha256": "2bf4936187d4ff7c1f67d7a97fdc43c7ab5025d00bd3cbbb654c3d62ccd865d1",
+        "installedSha256": "2bf4936187d4ff7c1f67d7a97fdc43c7ab5025d00bd3cbbb654c3d62ccd865d1",
+        "matches": true
+      },
+      "requirements.txt": {
+        "candidateSha256": "8e32dea33b5b45165c6e856ad0e702ea563dc3bc8a7a015ed523b9f3c60d2300",
+        "installedSha256": "8e32dea33b5b45165c6e856ad0e702ea563dc3bc8a7a015ed523b9f3c60d2300",
+        "matches": true
+      },
+      "run_codex_worker.sh": {
+        "candidateSha256": "0e52790950808c5778904cd98d47e19a0a8069a88c273ee7823bba3ce4dd26c9",
+        "installedSha256": "0e52790950808c5778904cd98d47e19a0a8069a88c273ee7823bba3ce4dd26c9",
+        "matches": true
+      }
+    },
+    "contract": {
+      "protocols": {
+        "GPOINT": "https://gpoint.amiora.one/api/agata-worker",
+        "GSALES": "https://gpoint.amiora.one/gsales/agata-worker"
+      },
+      "tenants": {
+        "GPOINT": "81a4ba28-6de5-4b03-8332-0661ba4d46f4",
+        "GSALES": "7a33f79f-1226-4d42-a8cb-8f70f636c3ee"
+      },
+      "lanes": {
+        "GPOINT": "CONFIGURED",
+        "GSALES": "CONFIGURED"
+      },
+      "credentialParity": {
+        "GPOINT": "MATCH",
+        "GSALES": "MATCH",
+        "distinct": "YES"
+      }
+    }
+  },
+  "gsalesReadiness": {
+    "baselineSha": "6afdf62692a58f8e8333c9da99ac7abbe603adc5",
+    "candidateSha": "dd6ca175ecb78362aa352b82f15767ba724b2744",
+    "migrationHead": "001_gsales",
+    "migrationSha256": "8de19ec2efd81848010379645d51243ac3f4a4cd37af0be211d71cdf36bcd111",
+    "provider": "mac_worker",
+    "readiness": "PASS",
+    "schemaPresent": true,
+    "sendingEnabled": false,
+    "tenantId": "7a33f79f-1226-4d42-a8cb-8f70f636c3ee"
+  },
+  "gsalesDbHeadBefore": "001_gsales",
+  "gsalesMigrationSha256Before": "8de19ec2efd81848010379645d51243ac3f4a4cd37af0be211d71cdf36bcd111"
+}
