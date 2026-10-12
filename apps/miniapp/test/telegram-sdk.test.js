@@ -70,7 +70,7 @@ test('connected creators get a dedicated workspace without moderation or recomme
   const dashboardStart = platform.indexOf('export function CreatorWorkspaceDashboard');
   assert.notEqual(dashboardStart, -1);
   const dashboard = platform.slice(dashboardStart);
-  assert.match(dashboard, /Creator workspace active/);
+  assert.match(dashboard, /CreatorDashboardSummary/);
   assert.match(dashboard, /Profile settings/);
   assert.match(dashboard, /Imported Posts/);
   assert.match(dashboard, /Stats/);
@@ -103,15 +103,34 @@ test('disconnected creator channels use native selection so existing bot members
   assert.doesNotMatch(controls, /openTelegramStartChannel/);
 });
 
-test('creator workspace derives its hero state from the durable channel query', async () => {
+test('creator workspace keeps Telegram connection details in the channel panel', async () => {
+  const platform = await readFile(join(root, 'src', 'platform-ui.tsx'), 'utf8');
+  const controlsStart = platform.indexOf('export function TelegramChannelControls');
+  const settingsStart = platform.indexOf('function CreatorChannelSelectionAction', controlsStart);
+  assert.notEqual(controlsStart, -1);
+  assert.notEqual(settingsStart, -1);
+  const controls = platform.slice(controlsStart, settingsStart);
+  assert.match(controls, /queryKey: \["telegram-channel"\]/);
+  assert.match(controls, /queryFn: telegramChannel/);
+  assert.match(controls, /status="Connected"/);
+  assert.match(controls, /CreatorReverifyAction/);
+});
+
+test('production creator overview uses real dashboard data instead of the local-only status screen', async () => {
   const platform = await readFile(join(root, 'src', 'platform-ui.tsx'), 'utf8');
   const dashboardStart = platform.indexOf('export function CreatorWorkspaceDashboard');
   assert.notEqual(dashboardStart, -1);
   const dashboard = platform.slice(dashboardStart);
-  assert.match(dashboard, /queryKey: \["telegram-channel"\], queryFn: telegramChannel/);
-  assert.match(dashboard, /const channelConnected = channelQ\.data\?\.status === "CONNECTED"/);
-  assert.match(dashboard, /title=\{channelConnected \? "Creator workspace active" : "Reconnect your Telegram channel"\}/);
-  assert.match(dashboard, /body=\{channelConnected \? "Telegram channel connected and ready for ingestion\." : "Reconnect your Telegram channel to resume ingestion\."\}/);
+  const overviewStart = dashboard.indexOf("{tab === 'Overview'");
+  const nextTabStart = dashboard.indexOf("{tab === 'Profile settings'", overviewStart);
+  assert.notEqual(overviewStart, -1);
+  assert.notEqual(nextTabStart, -1);
+  const overview = dashboard.slice(overviewStart, nextTabStart);
+
+  assert.match(overview, /<CreatorDashboardSummary[^>]*data=\{stats\.data\}/);
+  assert.match(overview, /<CreatorRecentActivity[^>]*posts=\{posts\.data\?\.items/);
+  assert.doesNotMatch(overview, /<WorkspaceStatusCard/);
+  assert.match(dashboard, /enabled: tab === ['"]Overview['"] \|\| tab === ['"]Imported Posts['"]/);
 });
 
 test('authenticated app passes the single authenticated user into the app shell', async () => {

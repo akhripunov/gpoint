@@ -46,7 +46,6 @@ import {
   ShieldCheck,
   Users,
   Video,
-  WalletCards,
   Heart,
   Unplug,
   UserRound,
@@ -58,7 +57,6 @@ import {
   StatusBadge as DesignStatusBadge,
   Tabs,
   TelegramChannelCard,
-  WorkspaceStatusCard,
 } from "./ui";
 
 function Preview({ asset, admin = false }: { asset: any; admin?: boolean }) {
@@ -865,36 +863,43 @@ export function TelegramImportSettings() {
   );
 }
 
-function ReferenceDashboardSummary() {
-  const metrics = [
-    { label: "FOLLOWERS", value: "284.5K", detail: "↑ 1.2K this week", icon: <Users size={22} /> },
-    { label: "LIFETIME EARNINGS", value: "$156K", detail: "Total earnings", icon: <WalletCards size={22} /> },
-    { label: "FOLLOWING", value: "892", detail: "Creators", icon: <UserRound size={22} /> },
-    { label: "PUBLISHED", value: "247", detail: "Videos", icon: <Video size={22} /> },
-  ];
-  return <div className="reference-dashboard-summary" aria-label="Local preview metrics">
-    <div className="reference-preview-label">LOCAL PREVIEW FIXTURE</div>
-    <section className="reference-earnings-card" aria-label="Example earnings summary">
-      <p>EARNINGS</p><strong>$12,847</strong><span className="reference-balance-caption">↗ Available balance</span>
-      <div className="reference-balance-row"><span>Available <b>$8,420</b></span><span>Pending <b>$4,427</b></span></div>
-      <BarChart3 size={29} aria-hidden="true" />
-    </section>
-    <div className="reference-metric-grid">{metrics.map((metric) => <article className="reference-metric-card" key={metric.label}><span className="reference-metric-icon">{metric.icon}</span><div><small>{metric.label}</small><strong>{metric.value}</strong><span>{metric.detail}</span></div></article>)}</div>
-  </div>;
+function dashboardMetric(value: unknown, loading: boolean, failed: boolean) {
+  if (loading) return "…";
+  if (failed || typeof value !== "number" || !Number.isFinite(value) || value < 0) return "—";
+  return new Intl.NumberFormat().format(value);
 }
 
-function ReferenceDashboardActivity() {
-  const rows = [
-    { icon: <UserRound size={17} />, title: "New subscriber", detail: "Joined your circle", time: "2m ago" },
-    { icon: <FileText size={17} />, title: "Post imported", detail: "From Telegram", time: "18m ago" },
-    { icon: <Heart size={17} />, title: "Tip received", detail: "$25.00", time: "1h ago" },
+function CreatorDashboardSummary({ data, isLoading, isError }: { data?: any; isLoading: boolean; isError: boolean }) {
+  const metrics = [
+    { label: "PROFILE VIEWS", value: data?.profileViews, detail: "Last 30 days", icon: <UserRound size={22} /> },
+    { label: "POST VIEWS", value: data?.postViews, detail: "Last 30 days", icon: <FileText size={20} /> },
+    { label: "REEL VIEWS", value: data?.reelViews, detail: "Last 30 days", icon: <Video size={21} /> },
+    { label: "VIP CLICKS", value: data?.vipClicks, detail: "Last 30 days", icon: <Heart size={20} /> },
   ];
-  return <section className="dashboard-section reference-recent-activity"><SectionEyebrow>RECENT ACTIVITY</SectionEyebrow><div className="reference-activity-list">{rows.map((row) => <div className="reference-activity-row" key={row.title}><span>{row.icon}</span><div><strong>{row.title}</strong><small>{row.detail}</small></div><time>{row.time}</time></div>)}</div></section>;
+  return <section className="creator-dashboard-summary" aria-label="Creator analytics overview">
+    <section className="creator-dashboard-summary-hero" aria-label="Current followers">
+      <p>YOUR AUDIENCE</p>
+      <strong>{dashboardMetric(data?.followers, isLoading, isError)}</strong>
+      <span className="creator-dashboard-summary-caption">Followers</span>
+      <Users size={29} aria-hidden="true" />
+    </section>
+    <div className="creator-dashboard-metric-grid">{metrics.map((metric) => <article className="creator-dashboard-metric-card" key={metric.label}><span className="creator-dashboard-metric-icon">{metric.icon}</span><div><small>{metric.label}</small><strong>{dashboardMetric(metric.value, isLoading, isError)}</strong><span>{metric.detail}</span></div></article>)}</div>
+    {isError && <p className="dashboard-error" role="alert">Analytics are temporarily unavailable.</p>}
+  </section>;
+}
+
+function CreatorRecentActivity({ posts, isLoading, isError }: { posts?: any[]; isLoading: boolean; isError: boolean }) {
+  const recentPosts = posts?.slice(0, 3) ?? [];
+  return <section className="dashboard-section creator-dashboard-recent-activity" aria-label="Recent posts"><SectionEyebrow>RECENT POSTS</SectionEyebrow>
+    {isLoading && <p aria-label="Loading recent posts">Loading recent posts…</p>}
+    {isError && <p className="dashboard-error" role="alert">Recent posts are temporarily unavailable.</p>}
+    {!isLoading && !isError && recentPosts.length > 0 && <div className="creator-dashboard-activity-list">{recentPosts.map((post) => <article className="creator-dashboard-activity-row" key={post.id}><span aria-hidden="true"><FileText size={17} /></span><div><strong>{post.caption?.trim() || "Creator post"}</strong><small>Creator content</small></div><time>{formatDashboardDate(post.createdAt)}</time></article>)}</div>}
+    {!isLoading && !isError && recentPosts.length === 0 && <div className="dashboard-empty-card"><FileText size={19} /><p>No posts yet.</p></div>}
+  </section>;
 }
 
 export function CreatorWorkspaceDashboard() {
   const q = useQuery({ queryKey: ["creator-me"], queryFn: creatorMe });
-  const channelQ = useQuery({ queryKey: ["telegram-channel"], queryFn: telegramChannel });
   const [tab, setTab] = useState("Overview");
   const posts = useQuery({
     queryKey: ["creator-imported-posts"],
@@ -905,12 +910,12 @@ export function CreatorWorkspaceDashboard() {
       if (!response.ok) throw new Error(`posts ${response.status}`);
       return response.json();
     },
-    enabled: tab === "Imported Posts",
+    enabled: tab === "Overview" || tab === "Imported Posts",
   });
   const stats = useQuery({
     queryKey: ["creator-analytics"],
     queryFn: creatorAnalytics,
-    enabled: tab === "Stats",
+    enabled: true,
   });
   const profileSave = useMutation({ mutationFn: (body: any) => creatorProfileUpdate(body), onSuccess: () => q.refetch() });
   const [profileName, setProfileName] = useState("");
@@ -926,28 +931,22 @@ export function CreatorWorkspaceDashboard() {
   if (q.isLoading) return <div className="empty">Loading creator workspace…</div>;
   const creator = q.data?.creator;
   if (!creator) return <div className="empty">Creator workspace unavailable.</div>;
-  const channelConnected = channelQ.data?.status === "CONNECTED";
   const tools = [
     { tab: "Profile settings", title: "Profile settings", copy: "Manage your creator profile", icon: <UserRound size={20} /> },
     { tab: "Imported Posts", title: "Imported posts", copy: "View and manage content", icon: <FileText size={18} /> },
     { tab: "Stats", title: "Stats", copy: "Track your growth", icon: <BarChart3 size={18} /> },
   ];
   return (
-    <section className={`creator-workspace${creatorDashboardVisualFixture ? " visual-fixture" : ""}`} aria-label="Creator tools">
+    <section className={`creator-workspace creator-dashboard${creatorDashboardVisualFixture ? " visual-fixture" : ""}`} aria-label="Creator tools">
       <div className="dashboard-heading"><h1><span>Creator</span> Dashboard</h1><p>Your content, your audience, more possibilities.</p></div>
       <Tabs items={['Overview', 'Profile settings', 'Imported Posts', 'Stats']} active={tab} onChange={setTab} className="content-tabs" />
-      {tab === 'Overview' && (creatorDashboardVisualFixture ? <>
-          <ReferenceDashboardSummary />
-          <TelegramChannelControls />
-          <div className="dashboard-section"><SectionEyebrow>CREATOR TOOLS</SectionEyebrow><div className="gpoint-tool-grid">{tools.map((tool) => <CreatorToolCard key={tool.tab} title={tool.title} description={tool.copy} icon={tool.icon} onClick={() => setTab(tool.tab)} />)}</div></div>
-          <TelegramImportSettings />
-          <ReferenceDashboardActivity />
-        </> : <>
-          <WorkspaceStatusCard icon={<Check size={28} strokeWidth={1.8} />} title={channelConnected ? "Creator workspace active" : "Reconnect your Telegram channel"} body={channelConnected ? "Telegram channel connected and ready for ingestion." : "Reconnect your Telegram channel to resume ingestion."} status={channelConnected ? (creator.status === "APPROVED" ? "Live" : "Pending review") : "Reconnect required"} tone={channelConnected && creator.status === "APPROVED" ? "success" : "warm"} />
-          <TelegramChannelControls />
-          <div className="dashboard-section"><SectionEyebrow>CREATOR TOOLS</SectionEyebrow><div className="gpoint-tool-grid">{tools.map((tool) => <CreatorToolCard key={tool.tab} title={tool.title} description={tool.copy} icon={tool.icon} onClick={() => setTab(tool.tab)} />)}</div></div>
-          <TelegramImportSettings />
-        </>)}
+      {tab === 'Overview' && <>
+        <CreatorDashboardSummary data={stats.data} isLoading={stats.isLoading} isError={stats.isError} />
+        <TelegramChannelControls />
+        <div className="dashboard-section"><SectionEyebrow>CREATOR TOOLS</SectionEyebrow><div className="gpoint-tool-grid">{tools.map((tool) => <CreatorToolCard key={tool.tab} title={tool.title} description={tool.copy} icon={tool.icon} onClick={() => setTab(tool.tab)} />)}</div></div>
+        <TelegramImportSettings />
+        <CreatorRecentActivity posts={posts.data?.items} isLoading={posts.isLoading} isError={posts.isError} />
+      </>}
       {tab === 'Profile settings' && (
         <div className="dashboard-section profile-settings-panel">
           <SectionEyebrow>PROFILE SETTINGS</SectionEyebrow><h2>Shape your public profile</h2><p className="dashboard-copy">Keep your creator identity clear and easy to recognize.</p>
