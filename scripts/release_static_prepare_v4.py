@@ -73,8 +73,11 @@ def prepare_static(sha, output, impact):
     create_bundle(ROOT / "apps/miniapp/dist", sha, static)
     stages["immutable_static_archive"] = {"seconds": round(time.monotonic() - start, 3),
                                           "status": "PASS"}
+    digest = hashlib.sha256()
     with static.open("rb") as f:
-        static_sha = hashlib.file_digest(f, "sha256").hexdigest()
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    static_sha = digest.hexdigest()
     migration_dir = ROOT / "packages/db/prisma/migrations"
     prisma = sorted(p.name for p in migration_dir.iterdir()
                     if (p / "migration.sql").is_file())[-1]
