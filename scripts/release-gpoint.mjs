@@ -9,6 +9,7 @@ import { loadReleaseBookkeeping, persistReleaseBookkeeping } from './release-boo
 import { migrationHead } from './release-migrations.mjs';
 import { gsalesProvisionCommand } from './release-gsales-provision.mjs';
 import { verifyReleaseBundle } from './release-bundle.mjs';
+import { deriveV3ProductionParent } from './release-component-bundle-v4.mjs';
 import { acquireReleaseLock } from './release-lock.mjs';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -752,11 +753,21 @@ function runApply(candidate) {
     console.log(`RELEASE_STAGE_TIMING=${JSON.stringify(stageTimings)}`);
     const artifactIdentities = { api: { sourceSha: candidate, adapter: adapter.imageIdentity }, worker: { sourceSha: candidate, adapter: adapter.imageIdentity }, bot: { sourceSha: candidate, adapter: adapter.imageIdentity }, miniapp: { sourceSha: candidate, adapter: adapter.imageIdentity }, agataApi: { sourceSha: candidate, adapter: adapter.agataIdentity }, agataWorker: { sourceSha: candidate, adapter: adapter.agataIdentity } };
     for (const role of ['gsalesApi', 'gsalesAgataApi', 'gsalesAgataWorker']) artifactIdentities[role] = { sourceSha: candidate, adapter: adapter.gsalesIdentity };
+    const componentImages = deriveV3ProductionParent({
+      currentProductionSha: candidate, activeRuntimeSha: candidate,
+      agataRuntimeSha: candidate, lastReleaseStatus: 'COMPLETE',
+      serverDeployStatus: 'COMPLETE', releaseOrigin: 'durable-production-release',
+      recoveryRequired: false, artifactIdentities,
+    }).images;
     const readiness = observeDeploymentReadiness('COMPLETE', readWorkerDependencies, { gsalesInferenceReady: adapter.gsalesIdentity.inferenceReady });
     const manifest = { releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: candidate, dbHeadBefore: liveDbHead, dbHeadAfter: deployedDbHead, agataDbHeadBefore: baseline.agataDbHead, agataDbHeadAfter: adapter.agataIdentity.head, agataRuntimeSha: candidate, agataProvider: adapter.agataIdentity.provider, artifactIdentities, startedAt, finishedAt: isoNow(), status: 'COMPLETE', failureStage: null, failureReason: null, rollbackSha: current.currentProductionSha, rollbackDbCompatibility: 'REQUIRES_FORWARD_FIX_ASSESSMENT', productionRef: ref, remoteProof: { mainSha: proof.mainSha }, migrationOutput: adapter.migrationOutput, migrationProof: adapter.migrationProof, detectorSourceHash: adapter.detectorHash, stageTimings, releaseOrigin: 'durable-production-release', agataMigrationReadiness };
     Object.assign(manifest, readiness);
     manifest.workerCompatibility = workerCompatibility;
     manifest.ciReceipt = adapter.ciReceipt ?? null;
+    // Additive V4 component identity, not an authorization to reuse images.
+    // Any future inherited image must still pass source/CI/native VPS proofs.
+    manifest.componentImages = componentImages;
+    manifest.miniappSourceSha = candidate;
     Object.assign(manifest, { workerCompatibility, gsalesReadiness, gsalesDbHeadBefore: baseline.facts.LIVE_GSALES_HEAD,
       gsalesDbHeadAfter: adapter.gsalesIdentity.migrationHead, gsalesRuntime: adapter.gsalesIdentity,
       effectiveConfigSha256: adapter.effectiveConfigSha256,
@@ -766,7 +777,7 @@ function runApply(candidate) {
       authorizationRecordSha256: process.env.RELEASE_AUTHORIZATION_RECORD_SHA256 || null });
     const file = writeManifest(manifest);
     const verifiedState = verifiedRuntimeState(current, { candidate, dbHead: deployedDbHead });
-    fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...verifiedState, currentProductionRef: ref, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: manifest.finishedAt, ...readiness, gsalesDbHead: adapter.gsalesIdentity.migrationHead, gsalesMigrationSha256: adapter.gsalesIdentity.migrationSha256, releaseOrigin: 'durable-production-release', agataRuntimeSha: candidate, agataAlembicHead: adapter.agataIdentity.head, agataProvider: adapter.agataIdentity.provider, artifactIdentities: manifest.artifactIdentities }, null, 2)}\n`);
+    fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...verifiedState, currentProductionRef: ref, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: manifest.finishedAt, ...readiness, gsalesDbHead: adapter.gsalesIdentity.migrationHead, gsalesMigrationSha256: adapter.gsalesIdentity.migrationSha256, releaseOrigin: 'durable-production-release', agataRuntimeSha: candidate, agataAlembicHead: adapter.agataIdentity.head, agataProvider: adapter.agataIdentity.provider, artifactIdentities: manifest.artifactIdentities, componentImages, miniappSourceSha: candidate }, null, 2)}\n`);
     console.log(JSON.stringify({ status: 'COMPLETE', ...readiness, releaseId, candidateSha: candidate, productionRef: ref, manifest: path.relative(ROOT, file) }, null, 2));
   } catch (error) {
     const failure = classifyReleaseFailure({ switchStarted, migrationStarted, agataStartStarted });

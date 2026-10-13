@@ -63,6 +63,28 @@ def write_zip(target, files):
             archive.write(source, name)
 
 
+def verified_optional_v4_static_asset(receipt, bundle, sha):
+    """Only accept standalone static asset explicitly attested by V3 receipt."""
+    if 'staticArtifactSha256' not in receipt:
+        if any(key in receipt for key in ('staticArtifactName', 'staticArtifactRoute')):
+            raise RuntimeError('Partial V4 static artifact identity is prohibited')
+        return None
+    from release_ui_artifact_v4 import verify_bundle
+    from prepared_artifact_cache import checksum
+    static = bundle / 'miniapp.zip'
+    expected = receipt.get('staticArtifactSha256')
+    if (receipt.get('candidateSha') != sha or
+            receipt.get('impactV3', {}).get('classification') != 'UI_ONLY' or
+            receipt.get('staticArtifactName') != 'miniapp.zip' or
+            receipt.get('staticArtifactRoute') != 'V4_ADVISORY_ONLY' or
+            not re.fullmatch(r'[a-f0-9]{64}', expected or '')):
+        raise RuntimeError('V4 static candidate receipt scope or identity invalid')
+    if not static.is_file() or static.is_symlink() or checksum(static) != expected:
+        raise RuntimeError('V4 static candidate archive mismatch')
+    verify_bundle(static, sha)
+    return static
+
+
 def publish(kind, sha, run_id, attempt):
     if os.environ.get('GITHUB_REPOSITORY') != REPO or os.environ.get('GITHUB_SHA') != sha:
         raise RuntimeError('Only exact GPoint workflow source may publish assets')
@@ -83,6 +105,12 @@ def publish(kind, sha, run_id, attempt):
             target = root / ('bundle.zip' if kind == 'prepare' else 'receipt.zip')
             write_zip(target, [(name, bundle / name) for name in names])
             archives.append(target)
+            if kind == 'prepare':
+                # Published separately by the same immutable Release tag.
+                # Never authorizes V4 selective apply or V3 gate bypass.
+                static = verified_optional_v4_static_asset(receipt, bundle, sha)
+                if static is not None:
+                    archives.append(static)
         else:
             result = Path(os.environ['RELEASE_RESULT'])
             if not result.is_file():

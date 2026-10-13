@@ -158,7 +158,7 @@ test('release cannot remove a lock whose ownership changed', t => {
 test('canonical CLI executes from a Mac runner path containing spaces', t => {
   const f = fixture(t), root = path.join(f.dir, 'Application Support', 'GPoint');
   fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
-  for (const name of ['release-readiness.mjs', 'release-gpoint.mjs', 'release-gsales.mjs', 'release-gsales-provision.mjs', 'release-bookkeeping.mjs', 'release-gpoint-vps-adapter.mjs', 'release-bundle.mjs', 'verify-loaded-images.py', 'release-lock.mjs', 'release-migrations.mjs']) {
+  for (const name of ['release-readiness.mjs', 'release-gpoint.mjs', 'release-gsales.mjs', 'release-gsales-provision.mjs', 'release-bookkeeping.mjs', 'release-gpoint-vps-adapter.mjs', 'release-bundle.mjs', 'release-component-bundle-v4.mjs', 'verify-loaded-images.py', 'release-lock.mjs', 'release-migrations.mjs']) {
     fs.copyFileSync(fileURLToPath(new URL(name, import.meta.url)), path.join(root, 'scripts', name));
   }
   fs.mkdirSync(path.join(root, 'docs/release/state'), { recursive: true });

@@ -51,6 +51,43 @@ preflight, Deploy or production ledger. Any advisory failure stops the
 candidate without applying changes. New unit regressions run in the existing
 preflight-coordinator test step. Activation awaits the remaining milestones.
 
+## Verified next engineering stage: component provenance and CI static artifact
+
+Added source-backend-safe V4 evidence without changing the actual trusted V3
+production apply:
+- scripts/release-component-bundle-v4.mjs strictly verifies current immutable
+  parent COMPLETE and each new/inherited role image identity/digest/revision,
+  plus shared AGATA/GSales dependency provenance. It can derive the image
+  baseline from existing V3 ledger artifactIdentities, including GSales-AGATA
+  (which uses the AGATA runtime image rather than GSales runtime).
+- scripts/release-component-vps-proof-v4.mjs builds only read-only Docker
+  inspect commands and verifies native image IDs/labels/platform and each of
+  eight running API/Bot/Worker/AGATA/GSales containers. The command was actually
+  executed read-only on GPoint VPS against canonical exact release
+  dd6ca175ecb78362aa352b82f15767ba724b2744: PASS for all 3 roles.
+- scripts/prepare-release.py generates a deterministic static Mini App
+  miniapp.zip during canonical V3 UI_ONLY Prepare (additional advisory asset).
+  The normal 3-image V3 receipt, mandatory gates and image archive are NOT
+  replaced or skipped. scripts/release_assets.py validates and publishes the
+  extra ZIP using the same immutable exact-SHA GitHub Release, with receipt
+  SHA256 and fail-closed UI_ONLY proof.
+- scripts/release-gpoint.mjs adds componentImages and miniappSourceSha to
+  successful FULL V3 manifest and ledger, without altering existing global
+  SHA and recovery semantics. This identity is additive only.
+- New Node and Python regression coverage added to existing Prepare tests.
+  Existing Node regressions were adjusted to recognize the now-versioned
+  Compose image fallback and explicitly copy the required new module into
+  paths containing spaces.
+
+**Proof:** 130 release Node tests PASS and V3 + V4 Python suites PASS. The
+V4 native VPS proof used read-only Docker inspection only. No image, container,
+schema, current ledger, source files, or live static directory was modified.
+
+**Still NOT a fast Deploy.** To satisfy the owner-facing objective, the
+canonical V3 selector/cache/bundle preflight/Apply/ledger must be upgraded
+atomically to understand a V4 receipt and distinct source revisions for
+inherited components. The source remains a draft PR, not main or production.
+
 ## Not done — required next integration, no shortcuts
 
 - [ ] Wire component plan to trusted V3 Prepare / exact production ledger.
