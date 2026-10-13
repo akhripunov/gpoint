@@ -81,7 +81,7 @@ if [ "$ssh_status" -eq 255 ] && [ -n "${GPOINT_REMOTE_ATTEMPT_STATUS_FILE:-}" ];
   auth_or_hostkey_failure=no
   if grep -Eiq 'Permission denied|publickey|Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED' "$ssh_stderr" "$debug_log"; then auth_or_hostkey_failure=yes; fi
   pre_exec_transport_failure=no
-  if grep -Eiq 'Could not resolve hostname|Could not resolve host|Name or service not known|nodename nor servname|temporary failure in name resolution|Network is unreachable|No route to host|Connection refused|Connection timed out|banner exchange|kex_exchange_identification.*(closed|reset|timeout)|Connection reset by peer|Connection closed by' "$ssh_stderr" "$debug_log"; then pre_exec_transport_failure=yes; fi
+  if grep -Eiq 'Could not resolve hostname|Could not resolve host|Name or service not known|nodename nor servname|temporary failure in name resolution|Network is unreachable|No route to host|Connection refused|Connection timed out|Operation timed out|banner exchange|kex_exchange_identification.*(closed|reset|timeout)|Connection reset by peer|Connection closed by' "$ssh_stderr" "$debug_log"; then pre_exec_transport_failure=yes; fi
   if [ "$command_sent" = no ] && [ "$auth_or_hostkey_failure" = no ] && [ "$pre_exec_transport_failure" = yes ]; then
     printf '%s\n' 'PRE_EXEC_TRANSPORT_FAILURE:255' > "$GPOINT_REMOTE_ATTEMPT_STATUS_FILE"
     exit 75

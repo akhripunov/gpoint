@@ -914,15 +914,18 @@ test('pre-exec runner marker is emitted only for recognized SSH failure before c
   fs.mkdirSync(path.dirname(identity), { recursive: true });
   fs.writeFileSync(identity, 'test-private-key-placeholder');
   fs.writeFileSync(path.join(configDir, 'release-tools.env'), 'GPOINT_SSH_IDENTITY_FILE=$HOME/.ssh/gpoint_deploy_ed25519\n');
-  fs.writeFileSync(path.join(bin, 'ssh'), `#!/bin/sh\ndebug=\nwhile [ "$#" -gt 0 ]; do if [ "$1" = -E ]; then shift; debug=$1; fi; shift; done\ncase "$(cat "$MODE_FILE")" in\npreexec) echo 'Connection timed out during banner exchange' >&2; echo 'ssh: Connection timed out during banner exchange' >> "$debug"; exit 255;;\nambiguous) echo 'Connection reset by peer' >&2; echo 'debug1: Sending command: hostname' >> "$debug"; exit 255;;\nauth) echo 'Permission denied (publickey).' >&2; echo 'debug1: Offering public key' >> "$debug"; exit 255;;\nhostkey) echo 'Host key verification failed.' >&2; echo 'Host key verification failed.' >> "$debug"; exit 255;;\nremote) echo 'remote docker failure' >&2; echo 'debug1: Sending command: hostname' >> "$debug"; exit 17;;\nesac\n`, { mode: 0o700 });
+  fs.writeFileSync(path.join(bin, 'ssh'), `#!/bin/sh\ndebug=\nwhile [ "$#" -gt 0 ]; do if [ "$1" = -E ]; then shift; debug=$1; fi; shift; done\ncase "$(cat "$MODE_FILE")" in\npreexec) echo 'Connection timed out during banner exchange' >&2; echo 'ssh: Connection timed out during banner exchange' >> "$debug"; exit 255;;\npreexecoperation) echo 'ssh: connect to host 203.0.113.5 port 22: Operation timed out' >&2; echo 'ssh: connect to host 203.0.113.5 port 22: Operation timed out' >> "$debug"; exit 255;;\nambiguous) echo 'Connection reset by peer' >&2; echo 'debug1: Sending command: hostname' >> "$debug"; exit 255;;\nambiguousoperation) echo 'Operation timed out' >&2; echo 'debug1: Sending command: hostname' >> "$debug"; exit 255;;\nauth) echo 'Permission denied (publickey).' >&2; echo 'debug1: Offering public key' >> "$debug"; exit 255;;\nhostkey) echo 'Host key verification failed.' >&2; echo 'Host key verification failed.' >> "$debug"; exit 255;;\nremote) echo 'remote docker failure' >&2; echo 'debug1: Sending command: hostname' >> "$debug"; exit 17;;\nesac\n`, { mode: 0o700 });
   const runner = path.join(path.dirname(new URL(import.meta.url).pathname), 'gpoint-vps-runner.sh');
   const env = { HOME: home, PATH: `${bin}:${process.env.PATH}`, GPOINT_REMOTE_ATTEMPT_STATUS_FILE: statusFile, MODE_FILE: modeFile, REMOTE_CMD: 'hostname' };
   try {
-    fs.writeFileSync(modeFile, 'preexec');
-    const preexec = spawnSync(runner, [], { encoding: 'utf8', env });
-    assert.equal(preexec.status, 75);
-    assert.equal(fs.readFileSync(statusFile, 'utf8').trim(), 'PRE_EXEC_TRANSPORT_FAILURE:255');
-    for (const mode of ['ambiguous', 'auth', 'hostkey', 'remote']) {
+    for (const mode of ['preexec', 'preexecoperation']) {
+      fs.writeFileSync(modeFile, mode);
+      fs.writeFileSync(statusFile, '');
+      const preexec = spawnSync(runner, [], { encoding: 'utf8', env });
+      assert.equal(preexec.status, 75, mode);
+      assert.equal(fs.readFileSync(statusFile, 'utf8').trim(), 'PRE_EXEC_TRANSPORT_FAILURE:255', mode);
+    }
+    for (const mode of ['ambiguous', 'ambiguousoperation', 'auth', 'hostkey', 'remote']) {
       fs.writeFileSync(modeFile, mode);
       fs.writeFileSync(statusFile, '');
       const result = spawnSync(runner, [], { encoding: 'utf8', env });
