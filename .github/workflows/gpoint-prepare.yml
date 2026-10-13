@@ -53,6 +53,9 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ github.sha }}
         run: python3 scripts/release_impact_v3.py --candidate "$CANDIDATE_SHA" --output "$RUNNER_TEMP/gpoint-impact-v3.json"
+      - name: V4 component scope (read-only advisory; V3 gates unchanged)
+        if: github.ref != 'refs/heads/main' || steps.coalesce.outputs.result == 'WINNER'
+        run: python3 scripts/release_component_impact_v4.py --candidate "$GITHUB_SHA" --v3-plan "$RUNNER_TEMP/gpoint-impact-v3.json" --output "$RUNNER_TEMP/gpoint-impact-v4-advisory.json"
       - uses: pnpm/action-setup@v4
         if: github.ref != 'refs/heads/main' || steps.coalesce.outputs.result == 'WINNER'
         with:
@@ -103,10 +106,13 @@ jobs:
         run: |
           python3 scripts/test_prepare_coalescing.py
           python3 -m unittest discover -s tests -p test_release_impact_v3.py
+          python3 -m unittest discover -s tests -p 'test_release_*v4.py'
           python3 -m unittest discover -s tests -p test_gpoint_docker_cache_v3.py
           python3 scripts/test_release_preflight_benchmark.py
           python3 scripts/select-release-run.test.py
           node --test scripts/release-orchestrator.test.mjs
+          node --test scripts/release-component-bundle-v4.test.mjs scripts/release-component-vps-proof-v4.test.mjs
+          node --test scripts/release-static-v4.test.mjs scripts/release-static-transfer-v4.test.mjs scripts/release-static-publish-v4.test.mjs scripts/release-static-baseline-v4.test.mjs
           node --test scripts/release-evidence.test.mjs
       - name: Tests, disposable database rehearsal and immutable Docker build
         if: github.ref != 'refs/heads/main' || steps.coalesce.outputs.result == 'WINNER'

@@ -234,7 +234,11 @@ def download(repo, artifact_id, token, target, release_asset=False, expected_siz
 def extract(archive, destination, expected):
     with zipfile.ZipFile(archive) as source:
         entries = source.infolist()
-        if {entry.filename for entry in entries} != set(expected) or len(entries) != len(expected):
+        allowed = (expected if expected and isinstance(expected[0], (list, tuple))
+                   else [expected])
+        members = {entry.filename for entry in entries}
+        if not any(members == set(choice) and len(entries) == len(choice)
+                   for choice in allowed):
             raise RuntimeError('Unexpected artifact members')
         if sum(entry.file_size for entry in entries) > MAX_BYTES:
             raise RuntimeError('Expanded artifact exceeds size limit')
@@ -287,7 +291,8 @@ def main():
     started = time.monotonic()
     repo = os.environ['GITHUB_REPOSITORY']
     projects = {
-        'akhripunov/gpoint': ('gpoint', 'gpoint-prepare.yml', ['images.tar.gz', 'receipt.json']),
+        'akhripunov/gpoint': ('gpoint', 'gpoint-prepare.yml',
+                             [['images.tar.gz', 'receipt.json'], ['miniapp.zip', 'receipt.json']]),
         'akhripunov/maxibot': ('maxibot', 'maxibot-prepare.yml', [
             f"maxibot-image-{os.environ['CANDIDATE_SHA']}.tar.gz",
             'maxibot-image-manifest.json', 'maxibot-prepare-result.json']),

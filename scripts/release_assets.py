@@ -63,6 +63,29 @@ def write_zip(target, files):
             archive.write(source, name)
 
 
+def verified_optional_v4_static_asset(receipt, bundle, sha):
+    """Only accept standalone static asset explicitly attested by V3 receipt."""
+    if 'staticArtifactSha256' not in receipt:
+        if any(key in receipt for key in ('staticArtifactName', 'staticArtifactRoute')):
+            raise RuntimeError('Partial V4 static artifact identity is prohibited')
+        return None
+    from release_ui_artifact_v4 import verify_bundle
+    from prepared_artifact_cache import checksum
+    static = bundle / 'miniapp.zip'
+    expected = receipt.get('staticArtifactSha256')
+    expected_route = ('V4_FAST_STATIC' if receipt.get('schema') == 2 else 'V4_ADVISORY_ONLY')
+    if (receipt.get('candidateSha') != sha or
+            receipt.get('impactV3', {}).get('classification') != 'UI_ONLY' or
+            receipt.get('staticArtifactName') != 'miniapp.zip' or
+            receipt.get('staticArtifactRoute') != expected_route or
+            not re.fullmatch(r'[a-f0-9]{64}', expected or '')):
+        raise RuntimeError('V4 static candidate receipt scope or identity invalid')
+    if not static.is_file() or static.is_symlink() or checksum(static) != expected:
+        raise RuntimeError('V4 static candidate archive mismatch')
+    verify_bundle(static, sha)
+    return static
+
+
 def publish(kind, sha, run_id, attempt):
     if os.environ.get('GITHUB_REPOSITORY') != REPO or os.environ.get('GITHUB_SHA') != sha:
         raise RuntimeError('Only exact GPoint workflow source may publish assets')
@@ -80,9 +103,26 @@ def publish(kind, sha, run_id, attempt):
             if (receipt.get('candidateSha') != sha or str(receipt.get('runId')) != run_id
                     or str(receipt.get('runAttempt')) != attempt or receipt.get('status') != 'READY'):
                 raise RuntimeError('Prepare receipt candidate mismatch')
-            target = root / ('bundle.zip' if kind == 'prepare' else 'receipt.zip')
-            write_zip(target, [(name, bundle / name) for name in names])
-            archives.append(target)
+            if kind == 'prepare' and receipt.get('schema') == 2:
+                if receipt.get('route') != 'STATIC_UI_ONLY':
+                    raise RuntimeError('unknown V4 Prepare receipt route')
+                static = verified_optional_v4_static_asset(receipt, bundle, sha)
+                if static is None:
+                    raise RuntimeError('V4 static bundle missing')
+                names = ['miniapp.zip', 'receipt.json']
+                target = root / 'bundle.zip'
+                write_zip(target, [(name, bundle / name) for name in names])
+                archives.append(target)
+            else:
+                target = root / ('bundle.zip' if kind == 'prepare' else 'receipt.zip')
+                write_zip(target, [(name, bundle / name) for name in names])
+                archives.append(target)
+                if kind == 'prepare':
+                    # Existing V3 advisory: an extra standalone static ZIP
+                    # that does NOT change the legacy complete Docker bundle.
+                    static = verified_optional_v4_static_asset(receipt, bundle, sha)
+                    if static is not None:
+                        archives.append(static)
         else:
             result = Path(os.environ['RELEASE_RESULT'])
             if not result.is_file():

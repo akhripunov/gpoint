@@ -65,7 +65,7 @@ test('Docker Compose can persist a merged lane without embedding runtime credent
     const result=spawnSync('docker',args,{encoding:'utf8',env:{...process.env,RELEASE_SHA:sha}});
     assert.equal(result.status,0,result.stderr);
     const config=JSON.parse(result.stdout);
-    assert.equal(config.services['gsales-api'].image,'gpoint-g-sales-runtime:${RELEASE_SHA}');
+    assert.equal(config.services['gsales-api'].image,'gpoint-g-sales-runtime:' + '$' + '{GPOINT_GSALES_IMAGE_SHA:-' + '$' + '{RELEASE_SHA}}');
     assert.equal(config.services['gsales-agata-api'].environment.AGATA_CODEX_LOCAL_ENABLED,'true');
     assert.equal(config.services['gsales-agata-api'].environment.AGATA_LLM_API_KEY,'');
     assert.equal(config.services['gsales-api'].environment.GSALES_OUTREACH_ENABLED,'false');

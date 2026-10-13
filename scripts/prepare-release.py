@@ -289,6 +289,12 @@ def prepare(sha, output, *, postgres_only=False):
     if postgres_only:
         impact = load_verified_plan(None, sha, ROOT)
     print('V3_IMPACT_USED=' + impact['classification'], flush=True)
+    if not postgres_only and impact['classification'] == 'UI_ONLY':
+        # Fail closed: independent V4 git inventory must prove only regular
+        # Mini App source files changed against immutable COMPLETE production.
+        # No three-image Docker bundle, database startup or image transfer.
+        from release_static_prepare_v4 import prepare_static
+        return prepare_static(sha, output, impact)
     gsales_regression = None
     if not postgres_only:
         commands = (
@@ -469,6 +475,16 @@ def prepare(sha, output, *, postgres_only=False):
         index = run('docker', 'run', '--rm', f'gpoint-runtime:{sha}', 'cat', '/app/apps/miniapp/dist/index.html', capture=True)
         if f'gpoint-build-sha" content="{sha}' not in index:
             raise RuntimeError('Mini App candidate SHA mismatch')
+        static_artifact_sha256 = None
+        if impact['classification'] == 'UI_ONLY':
+            # Advisory-only asset for future V4 fast route. The canonical V3
+            # receipt, three images, PostgreSQL gates and Deploy are unchanged.
+            from release_ui_artifact_v4 import create_bundle
+            with measured_stage('v4_immutable_static_artifact', timings):
+                static_path = output / 'miniapp.zip'
+                create_bundle(ROOT / 'apps/miniapp/dist', sha, static_path)
+                with static_path.open('rb') as archive_file:
+                    static_artifact_sha256 = hashlib.file_digest(archive_file, 'sha256').hexdigest()
         heads = run('docker', 'exec', postgres, 'psql', '-U', 'postgres', '-d', 'runtime_agata_test', '-At', '-c',
                     'SELECT version_num FROM agata.alembic_version;', capture=True)
         prisma = run('docker', 'exec', postgres, 'psql', '-U', 'postgres', '-d', 'runtime_agata_test', '-At', '-c',
@@ -510,6 +526,10 @@ def prepare(sha, output, *, postgres_only=False):
         if impact['classification'] == 'UI_ONLY':
             proof['gates']['postgres'] = 'COVERED_UNCHANGED'
             proof['gates']['gsalesPostgres'] = 'COVERED_UNCHANGED'
+        if static_artifact_sha256 is not None:
+            proof['staticArtifactSha256'] = static_artifact_sha256
+            proof['staticArtifactName'] = 'miniapp.zip'
+            proof['staticArtifactRoute'] = 'V4_ADVISORY_ONLY'
         receipt.write_text(json.dumps(proof, indent=2) + '\n')
     finally:
         if gsales_regression is not None:

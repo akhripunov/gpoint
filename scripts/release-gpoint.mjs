@@ -9,10 +9,15 @@ import { loadReleaseBookkeeping, persistReleaseBookkeeping } from './release-boo
 import { migrationHead } from './release-migrations.mjs';
 import { gsalesProvisionCommand } from './release-gsales-provision.mjs';
 import { verifyReleaseBundle } from './release-bundle.mjs';
+import { deriveV3ProductionParent } from './release-component-bundle-v4.mjs';
+import { expectedStaticParent, staticReceiptAndImages, verifyStaticLiveBaseline,
+  v4NativeProofOnVPS, verifyV4SourceAtCheckout } from './release-static-v4.mjs';
+import { applyStaticArtifactV4 } from './release-static-transfer-v4.mjs';
+
 import { acquireReleaseLock } from './release-lock.mjs';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { applyCandidate, cleanupTemporaryWorktree, inspectProductionReadOnly, inspectAgataMigrationReadiness, inspectGsalesReadiness, planReleaseRetention, provisionAgataInternalConfigForBaseline, runRemoteCommand, validateAgataProviderMode, validateAgataProviderCompatibility } from './release-gpoint-vps-adapter.mjs';
+import { applyCandidate, cleanupTemporaryWorktree, inspectProductionReadOnly, inspectAgataMigrationReadiness, inspectGsalesReadiness, planReleaseRetention, provisionAgataInternalConfigForBaseline, upload, runRemoteCommand, validateAgataProviderMode, validateAgataProviderCompatibility } from './release-gpoint-vps-adapter.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 let STATE_FILE = process.env.GPOINT_RELEASE_STATE_FILE || path.join(ROOT, 'docs/release/state/production.json');
@@ -543,17 +548,41 @@ function readLiveFacts() {
   return facts;
 }
 
+export function expectedV3LiveRevisions(current) {
+  if (!current?.componentImages) {
+    return { runtimeSha: current?.currentProductionSha,
+             miniappSha: current?.currentProductionSha,
+             agataSha: current?.currentProductionSha, mixed: false };
+  }
+  const candidate = current.currentProductionSha;
+  if (!SHA_RE.test(candidate ?? '') || current.miniappSourceSha !== candidate ||
+      current.lastReleaseStatus !== 'COMPLETE' ||
+      current.serverDeployStatus !== 'COMPLETE' || current.recoveryRequired !== false)
+    die('V4 component baseline not immutable COMPLETE');
+  const roles = current.componentImages;
+  const source = role => roles?.[role]?.sourceSha;
+  if (!['app','agata','gsales'].every(role => SHA_RE.test(source(role) ?? '') &&
+      /^sha256:[0-9a-f]{64}$/.test(roles?.[role]?.imageId ?? '') &&
+      roles?.[role]?.platform === 'linux/amd64'))
+    die('V4 production component source inventory incomplete');
+  if (current.activeRuntimeSha !== source('app') || current.agataRuntimeSha !== source('agata'))
+    die('V4 production component/runtime ledger drift');
+  return { runtimeSha: source('app'), miniappSha: candidate,
+           agataSha: source('agata'), mixed: source('app') !== candidate };
+}
+
 function assertLiveBaseline(current, facts, { requireAgataConfig = true } = {}) {
   const liveSha = facts.LIVE_RELEASE_ENV_SHA;
-  if (!SHA_RE.test(liveSha ?? '') || liveSha !== current.currentProductionSha) die(`live production SHA drift: recorded=${current.currentProductionSha} live=${liveSha ?? 'unavailable'}`);
+  const expected = expectedV3LiveRevisions(current);
+  if (!SHA_RE.test(liveSha ?? '') || liveSha !== expected.runtimeSha) die(`live production SHA drift: recorded=${current.currentProductionSha} live=${liveSha ?? 'unavailable'}`);
   if (!facts.LIVE_DOCKER_VERSION || !facts.LIVE_COMPOSE_VERSION || !facts.LIVE_BUILDX_VERSION || facts.LIVE_BUILDKIT !== 'ready') die('production Docker/Compose/Buildx/BuildKit preflight failed');
   if (Number(facts.LIVE_DISK_FREE_KB) < 5242880) die('production disk preflight requires at least 5 GiB free');
   if (facts.LIVE_ROLLBACK_IMAGE_AVAILABLE !== 'YES') die('current production rollback image is unavailable');
   for (const role of ['API', 'WORKER', 'BOT']) {
-    if (facts[`LIVE_${role}_SHA`] !== liveSha || facts[`LIVE_${role}_RUNNING`] !== 'true') die(`live ${role.toLowerCase()} runtime does not match RELEASE_SHA`);
+    if (facts[`LIVE_${role}_SHA`] !== expected.runtimeSha || facts[`LIVE_${role}_RUNNING`] !== 'true') die(`live ${role.toLowerCase()} runtime does not match RELEASE_SHA`);
     if (facts[`LIVE_${role}_HEALTH`] !== 'healthy' && role === 'API') die('live API health is not healthy');
   }
-  if (facts.LIVE_MINIAPP_SHA !== liveSha) die('live Mini App SHA does not match RELEASE_SHA');
+  if (facts.LIVE_MINIAPP_SHA !== expected.miniappSha) die('live Mini App SHA does not match RELEASE_SHA');
   if (facts.LIVE_PRISMA_HEAD !== current.currentProductionDbHead) die(`live Prisma head drift: recorded=${current.currentProductionDbHead} live=${facts.LIVE_PRISMA_HEAD ?? 'unavailable'}`);
   let providerReadiness = { provider: facts.LIVE_AGATA_PROVIDER };
   if (requireAgataConfig) {
@@ -563,6 +592,12 @@ function assertLiveBaseline(current, facts, { requireAgataConfig = true } = {}) 
     providerReadiness = assertProviderCompatibility(facts);
     if (providerReadiness.provider === 'mac_worker' && facts.LIVE_CONFIG_GPOINT_AGATA_WORKER_TOKEN !== 'YES') die('AGATA worker token/config is missing');
     if (providerReadiness.provider === 'disabled' && facts.LIVE_CONFIG_AGATA_LLM_API_KEY !== 'NO') die('AGATA LLM API key must remain absent while provider is disabled');
+  }
+  if (expected.mixed) {
+    for (const role of ['API','WORKER']) {
+      if (facts['LIVE_AGATA_' + role + '_SHA'] !== expected.agataSha)
+        die('inherited AGATA runtime source SHA drift');
+    }
   }
   if (!facts.LIVE_AGATA_HEAD || facts.LIVE_AGATA_HEAD === 'READ_ONLY_DB_INSPECTION_FAILED') die('live AGATA migration head could not be verified');
   return { liveSha, liveDbHead: facts.LIVE_PRISMA_HEAD, agataDbHead: facts.LIVE_AGATA_HEAD, facts, ...providerReadiness };
@@ -584,7 +619,94 @@ function isolatedBuild(candidate, shouldBuild) {
   } finally { cleanupTemporaryWorktree(worktree); }
 }
 
+function requireV4StaticPreflight(candidate, bundle, current) {
+  if (!bundle?.staticOnly || bundle.candidateSha !== candidate)
+    die('V4 static release requires exact immutable typed receipt');
+  const proof = remoteProof(candidate);
+  if (proof.mainSha !== candidate) die('V4 candidate no longer matches remote main');
+  if (current.currentProductionSha !== bundle.productionBaselineSha)
+    die('V4 candidate production baseline differs from immutable receipt');
+  const parent = expectedStaticParent(current);
+  verifyV4SourceAtCheckout({ root: ROOT, candidate, baseline: current.currentProductionSha,
+                            impact: bundle.impactV4 });
+  const expectedPrisma = candidatePrismaMigrationHead(candidate);
+  const expectedAgata = candidateAgataMigrationHead(candidate);
+  const expectedGsalesChecksum = crypto.createHash('sha256').update(
+    fs.readFileSync(path.join(ROOT, 'services/gsales/migrations/001_gsales.sql'))).digest('hex');
+  if (bundle.prismaHead !== expectedPrisma || bundle.agataHead !== expectedAgata ||
+      bundle.gsalesMigrationHead !== '001_gsales' ||
+      bundle.gsalesMigrationSha256 !== expectedGsalesChecksum ||
+      current.currentProductionDbHead !== expectedPrisma)
+    die('V4 static release migration source/baseline drift');
+  const facts = readLiveFacts();
+  if (facts.LIVE_DISK_FREE_KB == null || Number(facts.LIVE_DISK_FREE_KB) < 1048576 ||
+      facts.LIVE_DOCKER_VERSION == null || facts.LIVE_AGATA_ENABLED !== 'true' ||
+      facts.LIVE_GSALES_API_HEALTH !== 'healthy' ||
+      facts.LIVE_GSALES_AGATA_API_HEALTH !== 'healthy' ||
+      facts.LIVE_GSALES_AGATA_MEMORY_WORKER_HEALTH !== 'healthy')
+    die('V4 static release cannot prove live baseline readiness');
+  const providerFailures = validateAgataProviderCompatibility(providerConfigFromFacts(facts));
+  if (providerFailures.length) die('V4 static provider incompatibility: ' + providerFailures.join('; '));
+  const observed = v4NativeProofOnVPS(parent.images, runRemoteCommand);
+  const componentManifest = verifyStaticLiveBaseline(current, bundle, facts, observed);
+  // Current Docker Compose files must support distinct component source SHA.
+  // Otherwise a future restart after RELEASE_SHA advances would pull missing images.
+  const ready = runRemoteCommand(
+    "set -eu; test -d /opt/gpoint/app/miniapp; test ! -L /opt/gpoint/app/miniapp; " +
+    "grep -Fq 'GPOINT_APP_IMAGE_SHA' /opt/gpoint/compose/docker-compose.yml; " +
+    "grep -Fq 'GPOINT_AGATA_IMAGE_SHA' /opt/gpoint/compose/docker-compose.yml; " +
+    "grep -Fq 'GPOINT_GSALES_IMAGE_SHA' /opt/gpoint/compose/docker-compose.yml; " +
+    "test ! -e /opt/gpoint/app/static-v4-" + candidate + "; " +
+    "python3 -c 'import pathlib,json; p=pathlib.Path(\"/opt/gpoint/app\"); " +
+    "assert all(json.loads(f.read_text()).get(\"phase\") not in (\"ARMED\",\"SWITCHED\") for f in p.glob(\".static-v4-*.json\"))'; " +
+    "echo V4_STATIC_PREFLIGHT=PASS");
+  if (!ready.includes('V4_STATIC_PREFLIGHT=PASS')) die('V4 static filesystem readiness missing');
+  // The canonical source baseline may have advanced through one or more
+  // static-only releases. GSales config remains bound to the actual immutable
+  // running runtime RELEASE_SHA, not the latest UI commit.
+  inspectGsalesReadiness(candidate, parent.images.app.sourceSha);
+  const workerCompatibility = verifyWorkerCompatibility(candidate, facts, 'preflight');
+  return { parent, componentManifest, facts, workerCompatibility, remoteMainSha: proof.mainSha };
+}
+
+function runStaticDryRun(candidate, bundle) {
+  const startedAt = isoNow();
+  const releaseId = `gpoint-dry-run-${startedAt.replace(/[-:.]/g, '')}`;
+  const unlock = acquireLock(releaseId);
+  try {
+    const current = state();
+    const checked = requireV4StaticPreflight(candidate, bundle, current);
+    const manifest = {
+      releaseId, candidateSha: candidate,
+      previousProductionSha: current.currentProductionSha,
+      productionShaAfter: null, status: 'PLANNED', dryRun: true,
+      productionChanged: false, route: 'STATIC_UI_ONLY',
+      remoteMainSha: checked.remoteMainSha,
+      artifactIdentities: { miniapp: { sourceSha: candidate,
+        staticArtifactSha256: bundle.staticArtifactSha256 } },
+      componentImages: checked.parent.images,
+      workerCompatibility: checked.workerCompatibility,
+      dbHeadBefore: current.currentProductionDbHead,
+      dbHeadAfter: null, agataDbHeadBefore: checked.facts.LIVE_AGATA_HEAD,
+      agataDbHeadAfter: checked.facts.LIVE_AGATA_HEAD,
+      gsalesDbHeadBefore: checked.facts.LIVE_GSALES_HEAD,
+      startedAt, finishedAt: isoNow(),
+      failureStage: null, failureReason: null,
+      rollbackSha: current.currentProductionSha,
+      ciReceipt: { ...bundle, archive: undefined },
+    };
+    writeManifest(manifest);
+    console.log(JSON.stringify({ status: 'PLANNED', candidateSha: candidate,
+      previousProductionSha: current.currentProductionSha,
+      route: 'STATIC_UI_ONLY', dryRun: true, productionChanged: false,
+      releaseId, rollbackSha: current.currentProductionSha }));
+  } finally { unlock(); }
+}
+
 function runDryRun(candidate) {
+  const staticBundle = process.env.GPOINT_RELEASE_BUNDLE
+    ? verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, candidate) : null;
+  if (staticBundle?.staticOnly) return runStaticDryRun(candidate, staticBundle);
   const startedAt = isoNow();
   const releaseId = `gpoint-dry-run-${startedAt.replace(/[-:.]/g, '')}`;
   const unlock = acquireLock(releaseId);
@@ -602,7 +724,9 @@ function runDryRun(candidate) {
     const artifacts = { api: { sourceSha: candidate }, worker: { sourceSha: candidate }, bot: { sourceSha: candidate }, miniapp: { sourceSha: build.miniappBuildSha ?? candidate }, agataApi: { sourceSha: candidate }, agataWorker: { sourceSha: candidate } };
     Object.assign(artifacts, gsalesArtifacts(candidate));
     const effective = { api: candidate, worker: candidate, bot: candidate, miniapp: candidate, agataApi: candidate, agataWorker: candidate, agataProvider: baseline.provider, ...providerConfigFromFacts(baseline.facts, baseline.workerStatus), enabled: true };
-    const gates = evaluateSafetyGates({ candidateSha: candidate, remoteSha: proof.mainSha, artifacts, config: effective, recordedProductionSha: current.currentProductionSha, liveProductionSha: liveSha, productionRefTarget: candidate });
+    const gates = evaluateSafetyGates({ candidateSha: candidate, remoteSha: proof.mainSha, artifacts, config: effective, recordedProductionSha: current.currentProductionSha,
+      liveProductionSha: expectedV3LiveRevisions(current).mixed ? current.currentProductionSha : liveSha,
+      productionRefTarget: candidate });
     gates.push(...checkAgataArtifactParity(candidate, artifacts), ...checkAgataEffectiveConfig(effective));
     gates.push(...checkGsalesArtifactParity(candidate, artifacts));
     if (gates.length) die(gates.join('; '));
@@ -685,7 +809,201 @@ function configureGsalesWorker(candidate, approvedSha) {
   } finally { unlock(); }
 }
 
+function checkV4PublicStaticHealth(sourceSha) {
+  assertSha(sourceSha);
+  const baseUrl = 'https://gpoint.amiora.one';
+  const paths = ['/', '/messages', '/model/models_hub'];
+  for (const route of paths) {
+    const page = execFileSync('/usr/bin/curl', ['-fsS', '--connect-timeout', '3',
+      '--max-time', '12', baseUrl + route + '?gpoint_v4=' + sourceSha],
+      { encoding: 'utf8', timeout: 15_000 });
+    if (!page.includes('gpoint-build-sha" content="' + sourceSha))
+      die('public Mini App did not serve required exact SHA at ' + route);
+  }
+  execFileSync('/usr/bin/curl', ['-fsS', '--connect-timeout', '3', '--max-time', '12',
+    baseUrl + '/api/health/live'], { stdio: 'ignore', timeout: 15_000 });
+  return 'PASS';
+}
+
+export function staticPublishFailureDecision({
+  switchStarted = false, rollbackProven = false, tagPublishAttempted = false,
+} = {}) {
+  if (tagPublishAttempted) return 'RECOVERY_REQUIRED';
+  if (!switchStarted) return 'FAILED_PRE_SWITCH';
+  return rollbackProven ? 'FAILED_ROLLED_BACK' : 'RECOVERY_REQUIRED';
+}
+
+function runStaticApply(candidate, bundle) {
+  const startedAt = isoNow();
+  const releaseId = 'gpoint-release-' + startedAt.replace(/[-:.]/g, '');
+  const unlock = acquireLock(releaseId);
+  const current = state();
+  let switched = false;
+  let rollbackProven = false;
+  let immutableProductionTagPublishAttempted = false;
+  const timings = {};
+  try {
+    const checked = requireV4StaticPreflight(candidate, bundle, current);
+    const { parent, facts } = checked;
+    verifyWorkerCompatibility(candidate, facts, 'apply');
+
+    // Deploy only static site bytes. No Docker load, image rebuild, database
+    // apply, worker restart, GSales enablement, or production.env mutation.
+    const nativeProof = images => {
+      const observed = v4NativeProofOnVPS(images, runRemoteCommand);
+      for (const [role, source] of Object.entries(images)) {
+        if (observed[role]?.nativeImageId !== source.imageId ||
+            observed[role]?.revisionLabel !== source.sourceSha)
+          die('V4 inherited Docker image changed during static switch');
+      }
+      return observed;
+    };
+    const done = applyStaticArtifactV4({
+      candidate, baseline: current.currentProductionSha,
+      bundle, images: parent.images, sourceRoot: ROOT,
+      upload, runRemote: runRemoteCommand,
+      healthCheck: checkV4PublicStaticHealth, nativeProof,
+      onSwitchStart: () => { switched = true; },
+    });
+    Object.assign(timings, done.timings);
+    const after = readLiveFacts();
+    if (after.LIVE_RELEASE_ENV_SHA !== parent.images.app.sourceSha ||
+        after.LIVE_MINIAPP_SHA !== candidate ||
+        after.LIVE_PRISMA_HEAD !== current.currentProductionDbHead ||
+        after.LIVE_AGATA_HEAD !== facts.LIVE_AGATA_HEAD ||
+        after.LIVE_GSALES_HEAD !== bundle.gsalesMigrationHead ||
+        after.LIVE_GSALES_MIGRATION_SHA256 !== bundle.gsalesMigrationSha256 ||
+        after.LIVE_API_HEALTH !== 'healthy' ||
+        after.LIVE_GSALES_API_HEALTH !== 'healthy' ||
+        after.LIVE_GSALES_AGATA_API_HEALTH !== 'healthy' ||
+        after.LIVE_GSALES_AGATA_MEMORY_WORKER_HEALTH !== 'healthy')
+      die('V4 static post-switch runtime/database/health parity failed');
+    nativeProof(parent.images);
+    const gsIdentity = { migrationHead: bundle.gsalesMigrationHead,
+                         migrationSha256: bundle.gsalesMigrationSha256 };
+    const sourceSha = parent.images.gsales.sourceSha;
+    const gsRuntime = parseGsalesRuntime(
+      runRemoteCommand(gsalesRuntimeCommand(sourceSha, gsIdentity, { attempts: 1 })),
+      sourceSha, gsIdentity);
+    if (gsRuntime.ready !== true) die('unchanged GSales was not ready after static switch');
+    const readiness = observeDeploymentReadiness('COMPLETE', readWorkerDependencies,
+       { gsalesInferenceReady: gsRuntime.inferenceReady });
+    if (readiness.overallServiceReadiness !== 'READY' ||
+        readiness.workerOperationalStatus !== 'HEALTHY')
+      die('V4 static release cannot finalize with degraded service readiness');
+
+    const ref = 'gpoint-production-' + startedAt.replace(/[-:.]/g, '');
+    execFileSync('git', ['tag', '-a', ref, candidate, '-m',
+       'GPoint static-only production release\nproductionSha=' + candidate +
+       '\npreviousProductionSha=' + current.currentProductionSha +
+       '\nreleaseId=' + releaseId], { cwd: ROOT, stdio: 'inherit' });
+    // An inconclusive transport error can occur after GitHub received the
+    // immutable production tag. From this point, do not undo the site and
+    // falsely claim the immutable tag did not publish. Force reconciliation.
+    immutableProductionTagPublishAttempted = true;
+    const remoteRef = pushProductionTag(ref, candidate);
+    const finishedAt = isoNow();
+    const artifactIdentities = { ...(current.artifactIdentities || {}),
+      miniapp: { sourceSha: candidate, servedBuildSha: candidate,
+        staticArtifactSha256: bundle.staticArtifactSha256 } };
+    const manifest = {
+      releaseId, candidateSha: candidate,
+      previousProductionSha: current.currentProductionSha,
+      productionShaAfter: candidate, status: 'COMPLETE',
+      route: 'STATIC_UI_ONLY', releaseOrigin: 'durable-production-release',
+      staticSwitchOccurred: true, runtimeSwitchOccurred: false,
+      databaseApplyOccurred: false, containersRestarted: false,
+      componentImages: parent.images, artifactIdentities,
+      miniappSourceSha: candidate, activeRuntimeSha: parent.images.app.sourceSha,
+      agataRuntimeSha: parent.images.agata.sourceSha,
+      dbHeadBefore: current.currentProductionDbHead,
+      dbHeadAfter: current.currentProductionDbHead,
+      agataDbHeadBefore: facts.LIVE_AGATA_HEAD,
+      agataDbHeadAfter: facts.LIVE_AGATA_HEAD,
+      gsalesDbHeadBefore: facts.LIVE_GSALES_HEAD,
+      gsalesDbHeadAfter: facts.LIVE_GSALES_HEAD,
+      gsalesMigrationSha256: bundle.gsalesMigrationSha256,
+      authorizationMode: process.env.RELEASE_AUTHORIZATION_MODE || 'EXACT_SHA',
+      authorizationId: process.env.RELEASE_AUTHORIZATION_ID || null,
+      productionRef: ref, remoteProductionRefTarget: remoteRef,
+      ciReceipt: { ...bundle, archive: undefined },
+      ...readiness,
+      startedAt, finishedAt, timings, failureStage: null, failureReason: null,
+    };
+    writeManifest(manifest);
+    fs.writeFileSync(STATE_FILE, JSON.stringify({
+      ...current,
+      currentProductionSha: candidate,
+      previousProductionSha: current.currentProductionSha,
+      activeRuntimeSha: parent.images.app.sourceSha,
+      agataRuntimeSha: parent.images.agata.sourceSha,
+      miniappSourceSha: candidate,
+      currentProductionRef: ref,
+      lastReleaseId: releaseId,
+      lastReleaseStatus: 'COMPLETE',
+      lastReleaseCompletedAt: finishedAt,
+      releaseStatus: 'COMPLETE', serverDeployStatus: 'COMPLETE',
+      recoveryRequired: false,
+      componentImages: parent.images, artifactIdentities,
+      ...readiness, releaseOrigin: 'durable-production-release',
+    }, null, 2) + '\n');
+    console.log(JSON.stringify({ status: 'COMPLETE', releaseId,
+      route: 'STATIC_UI_ONLY', candidateSha: candidate,
+      previousProductionSha: current.currentProductionSha,
+      productionShaAfter: candidate, runtimeImageSourceSha: parent.images.app.sourceSha,
+      staticSwitchOccurred: true, containersRestarted: false,
+      databaseApplyOccurred: false, ...readiness }));
+  } catch (error) {
+    // An exception *after* the transfer helper returned may still leave the
+    // site changed. Roll back the exact journal, never guess a runtime state.
+    if (switched && error.rollbackProven !== true && !immutableProductionTagPublishAttempted) {
+      try {
+        const temp = '/tmp/gpoint-v4-static-' + candidate + '/release_static_executor_v4.py';
+        const output = runRemoteCommand('set -eu; python3 ' + temp + ' rollback --baseline ' +
+          current.currentProductionSha + ' --candidate ' + candidate);
+        if (!output.includes('"phase": "ROLLED_BACK"') &&
+            !output.includes('"phase":"ROLLED_BACK"'))
+          throw new Error('rollback evidence is absent');
+        checkV4PublicStaticHealth(current.currentProductionSha);
+        if (readLiveFacts().LIVE_RELEASE_ENV_SHA !== (current.activeRuntimeSha || current.currentProductionSha))
+          throw new Error('runtime baseline changed during rollback');
+        rollbackProven = true;
+      } catch (rollbackError) {
+        error.rollbackFailure = rollbackError.message;
+      }
+    } else if (error.rollbackProven === true) {
+      rollbackProven = true;
+    }
+    const status = staticPublishFailureDecision({
+      switchStarted: switched, rollbackProven,
+      tagPublishAttempted: immutableProductionTagPublishAttempted,
+    });
+    const failureManifest = {
+      releaseId, candidateSha: candidate,
+      previousProductionSha: current.currentProductionSha,
+      status, route: 'STATIC_UI_ONLY', recoveryRequired: status === 'RECOVERY_REQUIRED',
+      failureStage: switched ? 'STATIC_SWITCH' : 'PRE_SWITCH',
+      failureReason: String(error.message).slice(0, 512),
+      rollbackEvidence: rollbackProven ? 'VERIFIED' : 'NOT_VERIFIED',
+      startedAt, finishedAt: isoNow(),
+      productionRef: null, productionShaAfter: null,
+    };
+    writeManifest(failureManifest);
+    if (status === 'RECOVERY_REQUIRED') {
+      fs.writeFileSync(STATE_FILE, JSON.stringify({ ...current,
+        lastReleaseId: releaseId, lastReleaseStatus: 'RECOVERY_REQUIRED',
+        lastReleaseFailureManifest: manifestReference(path.join(MANIFEST_DIR, releaseId + '.json')),
+        serverDeployStatus: 'RECOVERY_REQUIRED', recoveryRequired: true,
+      }, null, 2) + '\n');
+    }
+    throw error;
+  } finally { unlock(); }
+}
+
 function runApply(candidate) {
+  const staticBundle = process.env.GPOINT_RELEASE_BUNDLE
+    ? verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, candidate) : null;
+  if (staticBundle?.staticOnly) return runStaticApply(candidate, staticBundle);
   const startedAt = isoNow();
   const totalStarted = Date.now();
   const releaseId = `gpoint-release-${startedAt.replace(/[-:.]/g, '')}`;
@@ -707,7 +1025,9 @@ function runApply(candidate) {
     const effective = { api: candidate, worker: candidate, bot: candidate, miniapp: candidate, agataApi: candidate, agataWorker: candidate, agataProvider: baseline.provider, ...providerConfigFromFacts(baseline.facts, baseline.workerStatus), enabled: true };
     const artifacts = { api: { sourceSha: candidate }, worker: { sourceSha: candidate }, bot: { sourceSha: candidate }, miniapp: { sourceSha: candidate }, agataApi: { sourceSha: candidate }, agataWorker: { sourceSha: candidate } };
     Object.assign(artifacts, gsalesArtifacts(candidate));
-    const gates = evaluateSafetyGates({ candidateSha: candidate, remoteSha: proof.mainSha, artifacts, config: effective, recordedProductionSha: current.currentProductionSha, liveProductionSha: liveSha, productionRefTarget: candidate });
+    const gates = evaluateSafetyGates({ candidateSha: candidate, remoteSha: proof.mainSha, artifacts, config: effective, recordedProductionSha: current.currentProductionSha,
+      liveProductionSha: expectedV3LiveRevisions(current).mixed ? current.currentProductionSha : liveSha,
+      productionRefTarget: candidate });
     gates.push(...checkAgataArtifactParity(candidate, artifacts), ...checkAgataEffectiveConfig(effective));
     gates.push(...checkGsalesArtifactParity(candidate, artifacts));
     if (gates.length) die(gates.join('; '));
@@ -752,11 +1072,29 @@ function runApply(candidate) {
     console.log(`RELEASE_STAGE_TIMING=${JSON.stringify(stageTimings)}`);
     const artifactIdentities = { api: { sourceSha: candidate, adapter: adapter.imageIdentity }, worker: { sourceSha: candidate, adapter: adapter.imageIdentity }, bot: { sourceSha: candidate, adapter: adapter.imageIdentity }, miniapp: { sourceSha: candidate, adapter: adapter.imageIdentity }, agataApi: { sourceSha: candidate, adapter: adapter.agataIdentity }, agataWorker: { sourceSha: candidate, adapter: adapter.agataIdentity } };
     for (const role of ['gsalesApi', 'gsalesAgataApi', 'gsalesAgataWorker']) artifactIdentities[role] = { sourceSha: candidate, adapter: adapter.gsalesIdentity };
+    // V4 metadata is additive: missing optional per-role evidence must NOT
+    // fail a completed, otherwise healthy, canonical V3 production Deploy.
+    // Future selective releases must fail closed if componentImages is absent.
+    let componentImages = null;
+    try {
+      componentImages = deriveV3ProductionParent({
+        currentProductionSha: candidate, activeRuntimeSha: candidate,
+        agataRuntimeSha: candidate, lastReleaseStatus: 'COMPLETE',
+        serverDeployStatus: 'COMPLETE', releaseOrigin: 'durable-production-release',
+        recoveryRequired: false, artifactIdentities,
+      }).images;
+    } catch {
+      console.error('V4_COMPONENT_IDENTITIES=UNAVAILABLE (V3 remains authoritative)');
+    }
     const readiness = observeDeploymentReadiness('COMPLETE', readWorkerDependencies, { gsalesInferenceReady: adapter.gsalesIdentity.inferenceReady });
     const manifest = { releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: candidate, dbHeadBefore: liveDbHead, dbHeadAfter: deployedDbHead, agataDbHeadBefore: baseline.agataDbHead, agataDbHeadAfter: adapter.agataIdentity.head, agataRuntimeSha: candidate, agataProvider: adapter.agataIdentity.provider, artifactIdentities, startedAt, finishedAt: isoNow(), status: 'COMPLETE', failureStage: null, failureReason: null, rollbackSha: current.currentProductionSha, rollbackDbCompatibility: 'REQUIRES_FORWARD_FIX_ASSESSMENT', productionRef: ref, remoteProof: { mainSha: proof.mainSha }, migrationOutput: adapter.migrationOutput, migrationProof: adapter.migrationProof, detectorSourceHash: adapter.detectorHash, stageTimings, releaseOrigin: 'durable-production-release', agataMigrationReadiness };
     Object.assign(manifest, readiness);
     manifest.workerCompatibility = workerCompatibility;
     manifest.ciReceipt = adapter.ciReceipt ?? null;
+    // Additive V4 component identity, not an authorization to reuse images.
+    // Any future inherited image must still pass source/CI/native VPS proofs.
+    if (componentImages) manifest.componentImages = componentImages;
+    manifest.miniappSourceSha = candidate;
     Object.assign(manifest, { workerCompatibility, gsalesReadiness, gsalesDbHeadBefore: baseline.facts.LIVE_GSALES_HEAD,
       gsalesDbHeadAfter: adapter.gsalesIdentity.migrationHead, gsalesRuntime: adapter.gsalesIdentity,
       effectiveConfigSha256: adapter.effectiveConfigSha256,
@@ -766,7 +1104,7 @@ function runApply(candidate) {
       authorizationRecordSha256: process.env.RELEASE_AUTHORIZATION_RECORD_SHA256 || null });
     const file = writeManifest(manifest);
     const verifiedState = verifiedRuntimeState(current, { candidate, dbHead: deployedDbHead });
-    fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...verifiedState, currentProductionRef: ref, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: manifest.finishedAt, ...readiness, gsalesDbHead: adapter.gsalesIdentity.migrationHead, gsalesMigrationSha256: adapter.gsalesIdentity.migrationSha256, releaseOrigin: 'durable-production-release', agataRuntimeSha: candidate, agataAlembicHead: adapter.agataIdentity.head, agataProvider: adapter.agataIdentity.provider, artifactIdentities: manifest.artifactIdentities }, null, 2)}\n`);
+    fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...verifiedState, currentProductionRef: ref, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: manifest.finishedAt, ...readiness, gsalesDbHead: adapter.gsalesIdentity.migrationHead, gsalesMigrationSha256: adapter.gsalesIdentity.migrationSha256, releaseOrigin: 'durable-production-release', agataRuntimeSha: candidate, agataAlembicHead: adapter.agataIdentity.head, agataProvider: adapter.agataIdentity.provider, artifactIdentities: manifest.artifactIdentities, ...(componentImages ? { componentImages } : {}), miniappSourceSha: candidate }, null, 2)}\n`);
     console.log(JSON.stringify({ status: 'COMPLETE', ...readiness, releaseId, candidateSha: candidate, productionRef: ref, manifest: path.relative(ROOT, file) }, null, 2));
   } catch (error) {
     const failure = classifyReleaseFailure({ switchStarted, migrationStarted, agataStartStarted });
