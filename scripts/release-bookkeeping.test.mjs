@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { persistReleaseBookkeeping, loadReleaseBookkeeping, LEDGER_REF } from './release-bookkeeping.mjs';
+import { createRetryingGit } from './release-network-retry.mjs';
 
 function fixture(t) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-ledger-test-'));
@@ -66,4 +67,25 @@ test('a conflicting writer cannot overwrite remote ledger', t => {
   assert.throws(() => persistReleaseBookkeeping({ mode: 'production', records: [{ name }], evidence: { status: 'COMPLETE', candidateSha: f.candidateSha }, ...ledger, git }), /non-fast-forward/);
   assert.equal(conflict, true);
   assert.equal(f.git(['ls-remote', 'origin', 'refs/heads/main']).split(/\s/)[0], f.candidateSha);
+});
+
+test('ledger load recovers from one transient fetch timeout before reading the canonical ref', t => {
+  const f = fixture(t);
+  const first = loadReleaseBookkeeping({ ...f, allowMissing: true, destination: path.join(f.base, 'initial') });
+  const name = 'gpoint-release-existing.json';
+  fs.writeFileSync(path.join(first.manifestDir, name), JSON.stringify({ candidateSha: f.candidateSha }));
+  persistReleaseBookkeeping({ mode: 'production', records: [{ name }], evidence: { status: 'COMPLETE', candidateSha: f.candidateSha }, ...f, ...first });
+
+  let fetchAttempts = 0;
+  const git = createRetryingGit((args, input) => {
+    if (args[0] === 'fetch' && args.includes(LEDGER_REF) && fetchAttempts++ === 0) {
+      throw Object.assign(new Error('transient subprocess timeout'), {code: 'ETIMEDOUT'});
+    }
+    return f.git(args, input);
+  }, {budgetSeconds: 5, statePath: null, sleep: () => {}, jitter: () => 0, emit: () => {}});
+
+  const loaded = loadReleaseBookkeeping({ ...f, destination: path.join(f.base, 'recovered'), git });
+  assert.equal(loaded.ledgerSha, f.git(['ls-remote', 'origin', LEDGER_REF]).split(/\s/)[0]);
+  assert.equal(fetchAttempts, 2);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(loaded.manifestDir, name), 'utf8')), { candidateSha: f.candidateSha });
 });

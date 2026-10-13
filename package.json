@@ -13,7 +13,7 @@
     "repo:clean:end": "node scripts/repo-clean-gate.mjs end",
     "release:gpoint": "node scripts/release-gpoint.mjs",
     "release:gpoint:status": "node scripts/release-gpoint.mjs status",
-    "test:release": "node --test scripts/release-readiness.test.mjs scripts/release-gpoint.test.mjs scripts/release-gsales.test.mjs scripts/release-bundle.test.mjs scripts/release-bookkeeping.test.mjs scripts/release-authorization.test.mjs scripts/release-runner-readiness.test.mjs scripts/worker-runtime-guard.test.mjs",
+    "test:release": "node --test scripts/release-readiness.test.mjs scripts/release-gpoint.test.mjs scripts/release-gsales.test.mjs scripts/release-bundle.test.mjs scripts/release-bookkeeping.test.mjs scripts/release-network-retry.test.mjs scripts/release-authorization.test.mjs scripts/release-runner-readiness.test.mjs scripts/worker-runtime-guard.test.mjs",
     "db:migrate": "pnpm --filter @gpoint/db exec prisma migrate dev",
     "db:seed": "pnpm --filter @gpoint/db exec tsx prisma/seed.ts"
   },
