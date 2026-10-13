@@ -4,6 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createRetryingGit } from './release-network-retry.mjs';
 import { verifyReleaseBundle } from './release-bundle.mjs';
 import { persistReleaseBookkeeping, loadReleaseBookkeeping } from './release-bookkeeping.mjs';
 import { fileURLToPath } from 'node:url';
@@ -24,7 +25,8 @@ if (mode === 'task-scoped-auto' && (process.env.APPROVE_PRODUCTION !== 'false' |
 if (mode !== 'task-scoped-auto' && process.env.TASK_AUTHORIZATION_ID) throw new Error('Task authorization ID is only valid in TASK_SCOPED_AUTO mode');
 const proof = verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, sha);
 if (String(proof.runId) !== process.env.PREPARE_RUN_ID) throw new Error('Receipt does not belong to the approved GitHub run');
-const git = (args, input) => execFileSync('git', args, { cwd: root, encoding: 'utf8', input, timeout: 30_000 }).trim();
+const runGit = (args, input, timeout) => execFileSync('git', args, { cwd: root, encoding: 'utf8', input, timeout }).trim();
+const git = createRetryingGit(runGit);
 if (git(['rev-parse', 'HEAD']) !== sha || git(['status', '--porcelain'])) throw new Error('Release checkout must be clean and exact');
 const checksum = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 async function github(route) {
