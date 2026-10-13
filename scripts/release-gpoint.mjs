@@ -981,7 +981,7 @@ function runStaticApply(candidate, bundle) {
     const failureManifest = {
       releaseId, candidateSha: candidate,
       previousProductionSha: current.currentProductionSha,
-      status, route: 'STATIC_UI_ONLY', recoveryRequired: !rollbackProven && switched,
+      status, route: 'STATIC_UI_ONLY', recoveryRequired: status === 'RECOVERY_REQUIRED',
       failureStage: switched ? 'STATIC_SWITCH' : 'PRE_SWITCH',
       failureReason: String(error.message).slice(0, 512),
       rollbackEvidence: rollbackProven ? 'VERIFIED' : 'NOT_VERIFIED',
