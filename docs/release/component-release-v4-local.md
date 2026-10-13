@@ -35,6 +35,16 @@ Existing V3 remains the ONLY production release process.
 5. 28 local new unit tests PASS; 9 existing V3 impact tests PASS. No GitHub
    Actions or production mutations in this work.
 
+## Integration with V3 Prepare (still advisory)
+
+The V4 source plan is now invoked as an additional read-only step after the
+existing V3 exact-SHA impact analysis during Prepare. It recomputes the git
+diff from V3 immutable baseline and emits an advisory JSON outside checkout.
+The output does NOT feed Prepare gate selection, receipts, image builds,
+preflight, Deploy or production ledger. Any advisory failure stops the
+candidate without applying changes. New unit regressions run in the existing
+preflight-coordinator test step. Activation awaits the remaining milestones.
+
 ## Not done — required next integration, no shortcuts
 
 - [ ] Wire component plan to trusted V3 Prepare / exact production ledger.

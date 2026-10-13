@@ -114,5 +114,42 @@ def verify_again(repo, baseline, candidate, receipt):
     return actual
 
 
+def main():
+    # Advisory only: V3 already establishes canonical source provenance.
+    # This output never controls V3's bundle verifier or deploy executor.
+    import argparse
+    from release_impact_v3 import load_verified_plan
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--candidate", required=True)
+    parser.add_argument("--v3-plan", required=True)
+    parser.add_argument("--output", required=True)
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parents[1]
+    if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root,
+                               text=True).strip() != args.candidate:
+        raise ValueError("V4 checkout SHA mismatch")
+    if subprocess.check_output(["git", "status", "--porcelain"], cwd=root).strip():
+        raise ValueError("V4 source checkout must be clean")
+    v3 = load_verified_plan(args.v3_plan, args.candidate, root)
+    baseline = v3.get("productionBaselineSha")
+    proved = (
+        v3.get("baselineSource") == "gpoint-release-ledger" and
+        v3.get("reason") in ("narrow-unchanged-backend", "impact-not-proven") and
+        isinstance(baseline, str)
+    )
+    advisory = verified_plan(root, baseline, args.candidate,
+                             baseline_verified=bool(proved))
+    if advisory["maySkipV3Gates"] or advisory["mayDeploySelectively"]:
+        raise ValueError("V4 advisory cannot bypass operational V3 gates")
+    destination = Path(args.output).resolve()
+    if destination.is_relative_to(root):
+        raise ValueError("advisory evidence must stay outside checkout")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(advisory, indent=2, sort_keys=True) + "\n")
+    print("V4_COMPONENT_ADVISORY=" + advisory["classification"])
+    print("V4_COMPONENT_OWNER=" + str(advisory["component"]))
+    print("V4_PARTIAL_DEPLOY_ENABLED=NO")
+
+
 if __name__ == "__main__":
-    raise SystemExit("Use verified_plan with an immutable COMPLETE production baseline")
+    main()
