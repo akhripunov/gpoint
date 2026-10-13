@@ -32,8 +32,14 @@ Existing V3 remains the ONLY production release process.
 4. scripts/release_ui_switch_v4.py — offline immutable directory staging,
    atomic symlink switching and rollback. Refuses to overwrite real live
    directory or rollback after concurrent source change.
-5. 28 local new unit tests PASS; 9 existing V3 impact tests PASS. No GitHub
-   Actions or production mutations in this work.
+5. infra/production/docker-compose.yml and docker-compose.gsales.yml now
+   support per-role optional image source-SHA overrides (APP/AGATA/GSALES).
+   Their defaults resolve to the legacy RELEASE_SHA, as tested by actual
+   Docker Compose config rendering with override absent and present. The
+   shared AGATA image maps to both GPoint and GSales AGATA consumers.
+6. 31 local new unit tests PASS, 9 existing V3 impact tests PASS, real
+   Docker Compose config fallback PASS. No GitHub Actions or production
+   mutations were performed in this work.
 
 ## Integration with V3 Prepare (still advisory)
 

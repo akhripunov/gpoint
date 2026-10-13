@@ -2,7 +2,7 @@ version: "3.8"
 
 services:
   api:
-    image: gpoint-runtime:${RELEASE_SHA}
+    image: gpoint-runtime:${GPOINT_APP_IMAGE_SHA:-${RELEASE_SHA}}
     restart: unless-stopped
     command: ["node", "apps/api/dist/apps/api/src/main.js"]
     env_file:
@@ -26,7 +26,7 @@ services:
 
   agata-api:
     profiles: [agata]
-    image: gpoint-agata-runtime:${RELEASE_SHA}
+    image: gpoint-agata-runtime:${GPOINT_AGATA_IMAGE_SHA:-${RELEASE_SHA}}
     build:
       context: /opt/gpoint/releases/${RELEASE_SHA}/source/services/agata
       dockerfile: Dockerfile
@@ -47,7 +47,7 @@ services:
 
   agata-memory-worker:
     profiles: [agata]
-    image: gpoint-agata-runtime:${RELEASE_SHA}
+    image: gpoint-agata-runtime:${GPOINT_AGATA_IMAGE_SHA:-${RELEASE_SHA}}
     build:
       context: /opt/gpoint/releases/${RELEASE_SHA}/source/services/agata
       dockerfile: Dockerfile
@@ -66,7 +66,7 @@ services:
       - shared_internal
 
   worker:
-    image: gpoint-runtime:${RELEASE_SHA}
+    image: gpoint-runtime:${GPOINT_APP_IMAGE_SHA:-${RELEASE_SHA}}
     restart: unless-stopped
     command: ["node", "apps/worker/dist/main.js"]
     env_file:
@@ -76,7 +76,7 @@ services:
       - shared_internal
 
   bot:
-    image: gpoint-runtime:${RELEASE_SHA}
+    image: gpoint-runtime:${GPOINT_APP_IMAGE_SHA:-${RELEASE_SHA}}
     restart: unless-stopped
     command: ["node", "apps/bot/dist/main.js"]
     env_file:

@@ -3,7 +3,7 @@ version: "3.8"
 services:
   gsales-api:
     profiles: [gsales]
-    image: gpoint-g-sales-runtime:${RELEASE_SHA}
+    image: gpoint-g-sales-runtime:${GPOINT_GSALES_IMAGE_SHA:-${RELEASE_SHA}}
     restart: unless-stopped
     env_file:
       - /opt/gpoint/env/production.env
@@ -28,7 +28,7 @@ services:
 
   gsales-agata-api:
     profiles: [gsales]
-    image: gpoint-agata-runtime:${RELEASE_SHA}
+    image: gpoint-agata-runtime:${GPOINT_AGATA_IMAGE_SHA:-${RELEASE_SHA}}
     restart: unless-stopped
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     env_file:
@@ -61,7 +61,7 @@ services:
 
   gsales-agata-memory-worker:
     profiles: [gsales]
-    image: gpoint-agata-runtime:${RELEASE_SHA}
+    image: gpoint-agata-runtime:${GPOINT_AGATA_IMAGE_SHA:-${RELEASE_SHA}}
     restart: unless-stopped
     command: ["python", "-m", "app.memory.worker"]
     env_file:
