@@ -113,3 +113,42 @@ inherited components. The source remains a draft PR, not main or production.
 Not allowed: a new uncontrolled release path, treating COMPONENT_CANDIDATE
 as deployment approval, bypassing migrations/security/Worker/health gates,
 touching MAXIBOT, or publishing instructions solely to spend Actions.
+
+## 2026-10-13: integrated STATIC_UI_ONLY implementation
+
+A separate typed schema 2 / STATIC_UI_ONLY receipt now supports proven
+Mini App-only exact-SHA diffs inside existing V3 GitHub main Prepare -> pinned
+artifact -> Mac preflight -> OWNER exact-SHA approval -> Deploy/ledger.
+
+- Prepare runs Vite build, Mini App test and pnpm test:release, validates
+  immutable COMPLETE production source baseline, and creates deterministic
+  SHA256-member-attested static ZIP without Docker images or disposable DB
+  when and only when V3 proves UI_ONLY. Mixed/unknown changes remain FULL.
+- Release bundle, asset publication and Mac artifact cache recognize strictly
+  differentiated legacy V3 and V4 static typed receipts.
+- Preflight checks main SHA, verified parent, native live Docker identity and
+  eight containers, AGATA/GSales/Worker/config, DB migration identities,
+  current site directory, release journal and immutable source diff.
+- Apply uses canonical production lock, no container restart, unchanged
+  runtime RELEASE_SHA in production.env, no schema mutation, staged immutable
+  ZIP, Linux atomic same-filesystem RENAME_EXCHANGE, journalled rollback,
+  external HTTP route and API smoke, native Docker parity, and release ledger
+  source-vs-runtime version vectors. Ambiguous recovery is fail-closed.
+- Multiple static releases can inherit the same runtime images. Full V3
+  baseline checks now distinguish served UI SHA from running image revision.
+- Synthetic single-file UI change in disposable local worktree: fast Prepare
+  on warm Mac took 24.20 seconds, yielding 1.1 MiB static ZIP, schema2
+  receipt verified, 165 Node release tests PASS; no VPS mutation. Cold first
+  run exposed Python 3.9 incompatibility after 42.77 seconds; fixed and
+  successfully reran. This is NOT a hosted GitHub Actions measurement.
+- Linux Python 3.12 Docker atomic exchange/rollback tests: 16 PASS.
+  Actual VPS read-only exact ledger/native parity for all 8 containers:
+  PASS. Current root is a real directory, supported without symlink migration.
+
+**Outstanding before production:** hosted branch rehearsal and independent
+review, then FULL bootstrap integration to main, Prepare and read-only
+preflight, new exact-SHA OWNER approval and actual production Deploy.
+Afterwards a separate UI-only commit must complete hosted-to-production
+cycle for time/Actions-minute measurement. The AGATA, API, Bot and Worker
+selective-image routes are NOT implemented; their changes continue FULL V3.
+Do not claim fast backend deployments or full production speed until measured.

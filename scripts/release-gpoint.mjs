@@ -661,7 +661,10 @@ function requireV4StaticPreflight(candidate, bundle, current) {
     "assert all(json.loads(f.read_text()).get(\"phase\") not in (\"ARMED\",\"SWITCHED\") for f in p.glob(\".static-v4-*.json\"))'; " +
     "echo V4_STATIC_PREFLIGHT=PASS");
   if (!ready.includes('V4_STATIC_PREFLIGHT=PASS')) die('V4 static filesystem readiness missing');
-  inspectGsalesReadiness(candidate, current.currentProductionSha);
+  // The canonical source baseline may have advanced through one or more
+  // static-only releases. GSales config remains bound to the actual immutable
+  // running runtime RELEASE_SHA, not the latest UI commit.
+  inspectGsalesReadiness(candidate, parent.images.app.sourceSha);
   const workerCompatibility = verifyWorkerCompatibility(candidate, facts, 'preflight');
   return { parent, componentManifest, facts, workerCompatibility, remoteMainSha: proof.mainSha };
 }
@@ -721,7 +724,9 @@ function runDryRun(candidate) {
     const artifacts = { api: { sourceSha: candidate }, worker: { sourceSha: candidate }, bot: { sourceSha: candidate }, miniapp: { sourceSha: build.miniappBuildSha ?? candidate }, agataApi: { sourceSha: candidate }, agataWorker: { sourceSha: candidate } };
     Object.assign(artifacts, gsalesArtifacts(candidate));
     const effective = { api: candidate, worker: candidate, bot: candidate, miniapp: candidate, agataApi: candidate, agataWorker: candidate, agataProvider: baseline.provider, ...providerConfigFromFacts(baseline.facts, baseline.workerStatus), enabled: true };
-    const gates = evaluateSafetyGates({ candidateSha: candidate, remoteSha: proof.mainSha, artifacts, config: effective, recordedProductionSha: current.currentProductionSha, liveProductionSha: liveSha, productionRefTarget: candidate });
+    const gates = evaluateSafetyGates({ candidateSha: candidate, remoteSha: proof.mainSha, artifacts, config: effective, recordedProductionSha: current.currentProductionSha,
+      liveProductionSha: expectedV3LiveRevisions(current).mixed ? current.currentProductionSha : liveSha,
+      productionRefTarget: candidate });
     gates.push(...checkAgataArtifactParity(candidate, artifacts), ...checkAgataEffectiveConfig(effective));
     gates.push(...checkGsalesArtifactParity(candidate, artifacts));
     if (gates.length) die(gates.join('; '));
@@ -809,13 +814,13 @@ function checkV4PublicStaticHealth(sourceSha) {
   const baseUrl = 'https://gpoint.amiora.one';
   const paths = ['/', '/messages', '/model/models_hub'];
   for (const route of paths) {
-    const page = execFileSync('curl', ['-fsS', '--connect-timeout', '3',
+    const page = execFileSync('/usr/bin/curl', ['-fsS', '--connect-timeout', '3',
       '--max-time', '12', baseUrl + route + '?gpoint_v4=' + sourceSha],
       { encoding: 'utf8', timeout: 15_000 });
     if (!page.includes('gpoint-build-sha" content="' + sourceSha))
       die('public Mini App did not serve required exact SHA at ' + route);
   }
-  execFileSync('curl', ['-fsS', '--connect-timeout', '3', '--max-time', '12',
+  execFileSync('/usr/bin/curl', ['-fsS', '--connect-timeout', '3', '--max-time', '12',
     baseUrl + '/api/health/live'], { stdio: 'ignore', timeout: 15_000 });
   return 'PASS';
 }
@@ -827,6 +832,7 @@ function runStaticApply(candidate, bundle) {
   const current = state();
   let switched = false;
   let rollbackProven = false;
+  let immutableProductionTagPublished = false;
   const timings = {};
   try {
     const checked = requireV4StaticPreflight(candidate, bundle, current);
@@ -884,6 +890,7 @@ function runStaticApply(candidate, bundle) {
        '\npreviousProductionSha=' + current.currentProductionSha +
        '\nreleaseId=' + releaseId], { cwd: ROOT, stdio: 'inherit' });
     const remoteRef = pushProductionTag(ref, candidate);
+    immutableProductionTagPublished = true;
     const finishedAt = isoNow();
     const artifactIdentities = { ...(current.artifactIdentities || {}),
       miniapp: { sourceSha: candidate, servedBuildSha: candidate,
@@ -938,7 +945,7 @@ function runStaticApply(candidate, bundle) {
   } catch (error) {
     // An exception *after* the transfer helper returned may still leave the
     // site changed. Roll back the exact journal, never guess a runtime state.
-    if (switched && error.rollbackProven !== true) {
+    if (switched && error.rollbackProven !== true && !immutableProductionTagPublished) {
       try {
         const temp = '/tmp/gpoint-v4-static-' + candidate + '/release_static_executor_v4.py';
         const output = runRemoteCommand('set -eu; python3 ' + temp + ' rollback --baseline ' +
@@ -956,7 +963,8 @@ function runStaticApply(candidate, bundle) {
     } else if (error.rollbackProven === true) {
       rollbackProven = true;
     }
-    const status = !switched ? 'FAILED_PRE_SWITCH' :
+    const status = immutableProductionTagPublished ? 'RECOVERY_REQUIRED' :
+      !switched ? 'FAILED_PRE_SWITCH' :
       rollbackProven ? 'FAILED_ROLLED_BACK' : 'RECOVERY_REQUIRED';
     const failureManifest = {
       releaseId, candidateSha: candidate,
@@ -1005,7 +1013,9 @@ function runApply(candidate) {
     const effective = { api: candidate, worker: candidate, bot: candidate, miniapp: candidate, agataApi: candidate, agataWorker: candidate, agataProvider: baseline.provider, ...providerConfigFromFacts(baseline.facts, baseline.workerStatus), enabled: true };
     const artifacts = { api: { sourceSha: candidate }, worker: { sourceSha: candidate }, bot: { sourceSha: candidate }, miniapp: { sourceSha: candidate }, agataApi: { sourceSha: candidate }, agataWorker: { sourceSha: candidate } };
     Object.assign(artifacts, gsalesArtifacts(candidate));
-    const gates = evaluateSafetyGates({ candidateSha: candidate, remoteSha: proof.mainSha, artifacts, config: effective, recordedProductionSha: current.currentProductionSha, liveProductionSha: liveSha, productionRefTarget: candidate });
+    const gates = evaluateSafetyGates({ candidateSha: candidate, remoteSha: proof.mainSha, artifacts, config: effective, recordedProductionSha: current.currentProductionSha,
+      liveProductionSha: expectedV3LiveRevisions(current).mixed ? current.currentProductionSha : liveSha,
+      productionRefTarget: candidate });
     gates.push(...checkAgataArtifactParity(candidate, artifacts), ...checkAgataEffectiveConfig(effective));
     gates.push(...checkGsalesArtifactParity(candidate, artifacts));
     if (gates.length) die(gates.join('; '));
