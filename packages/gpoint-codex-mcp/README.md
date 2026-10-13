@@ -1,0 +1,11 @@
+# GPoint AGATA Codex connection
+
+This local MCP process is a client for GPoint's existing message API. It never calls an LLM. Once the server/API migration has been released and the OWNER allowlist configured, set `GPOINT_API_URL` in the environment inherited by Codex to the trusted GPoint API base URL (HTTPS). The value is an address, not a credential.
+
+Restart/open a new Codex session after MCP configuration changes. Run `connect_gpoint`; enter the one-time code in the selected existing GPoint Mini App conversation; then run `finish_gpoint_connection`. The MCP stores the device code and resulting scoped tokens in the macOS login Keychain. It displays the user code only. `read_gpoint_history` and `send_gpoint_message` are bound to that one approved creator. `disconnect_gpoint` revokes the server connection and deletes local Keychain items.
+
+The API must be deployed through the normal release process with `GPOINT_CODEX_OWNER_USER_IDS` set to the exact OWNER GPoint user ID. Missing configuration disables OWNER access. Never add Telegram initData, GPoint session cookies/tokens, bearer tokens, or API secrets to project config or chat.
+
+Before enabling device authorization in production, set `GPOINT_CODEX_DEVICE_START_TRUSTED_PROXY_IPS` to the exact socket-peer IPs of every trusted reverse-proxy hop in the path, separated by commas. The API walks the forwarded chain from the API outward and skips only those exact trusted hops. Every forwarding proxy must append the observed socket peer to `X-Forwarded-For`; if that header is absent, malformed, or contains only trusted hops, authorization start fails closed. If the API is directly exposed, set it explicitly to `none`. Production device authorization fails closed when this setting is absent/invalid. Do not add wildcard entries or use client-provided forwarded IPs as trusted proxies. Fastify proxy trust remains disabled globally.
+
+Messages sent with `send_gpoint_message` pass through `POST /messages/creator/:creatorId`, including GPoint's current consent/age gates, idempotency, Persona/profile construction, AGATA relationship/history/memory handling, Naturalness V1, configured provider and Mac Worker. Pending replies remain pending; the tool does not write synthetic messages or invent a reply.

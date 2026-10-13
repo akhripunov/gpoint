@@ -604,6 +604,11 @@ body:has(.creator-workspace) { background: #050b16; }
 .chat-header-name{display:grid;gap:3px;min-width:0}
 .chat-header-name strong{overflow:hidden;color:var(--gpoint-text-primary);font-size:14px;text-overflow:ellipsis;white-space:nowrap}
 .chat-header-name span{color:var(--gpoint-text-muted);font-size:11px}
+.codex-connection-button{margin-left:auto;border:1px solid var(--gpoint-border-subtle);border-radius:12px;padding:8px 10px;background:var(--gpoint-background-secondary);color:var(--gpoint-text-primary);font:inherit;font-size:12px;white-space:nowrap}
+.codex-connection-panel{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--gpoint-border-subtle);background:var(--gpoint-background-secondary);color:var(--gpoint-text-primary);font-size:13px}
+.codex-connection-panel label{display:flex;align-items:center;gap:8px}
+.codex-connection-panel input{width:112px;border:1px solid var(--gpoint-border-subtle);border-radius:8px;padding:7px;background:var(--gpoint-background-primary);color:var(--gpoint-text-primary);font:inherit}
+.codex-connection-panel button{border:1px solid var(--gpoint-border-subtle);border-radius:8px;padding:7px 9px;background:var(--gpoint-background-primary);color:var(--gpoint-text-primary);font:inherit}
 .chat-history{min-height:0;flex:1;overflow-y:auto;overscroll-behavior:contain;padding:14px 14px 10px;scrollbar-width:thin}
 .chat-message-row{display:flex;margin:8px 0}
 .chat-message-row.mine{justify-content:flex-end}

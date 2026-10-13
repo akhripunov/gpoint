@@ -62,6 +62,10 @@ export const acceptMessagesConsent=(longTermMemory:boolean)=>request<MessagesSta
 export const messages=(cursor?:string)=>request<MessageThreadListDTO>(`/messages${cursor?`?cursor=${encodeURIComponent(cursor)}`:''}`);
 export const creatorMessages=(creatorId:string,cursor?:string,limit=50)=>request<ChatHistoryDTO>(`/messages/creator/${encodeURIComponent(creatorId)}?limit=${limit}${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`);
 export const sendCreatorMessage=(creatorId:string,body:{clientMessageId:string;text:string})=>request<SendMessageDTO>(`/messages/creator/${encodeURIComponent(creatorId)}`,{method:'POST',body:JSON.stringify(body)});
+export type CodexConnectionState={enabled:boolean;connected:boolean;accessExpiresAt?:string;refreshExpiresAt?:string};
+export const codexConnection=(creatorId:string)=>request<CodexConnectionState>(`/auth/codex/connection/${encodeURIComponent(creatorId)}`);
+export const approveCodexConnection=(userCode:string,creatorId:string)=>request<{approved:boolean}>('/auth/codex/device/approve',{method:'POST',body:JSON.stringify({userCode,creatorId})});
+export const revokeCodexConnection=(creatorId:string)=>request<{revoked:boolean}>(`/auth/codex/connection/${encodeURIComponent(creatorId)}/revoke`,{method:'POST'});
 export const posts=(id:string,cursor?:string)=>request<PaginatedResponse<PostDTO>>(`/creators/${id}/posts${cursor?`?cursor=${encodeURIComponent(cursor)}`:''}`);
 export const reels=(cursor?:string)=>request<PaginatedResponse<ReelDTO>>(`/reels${cursor?`?cursor=${encodeURIComponent(cursor)}`:''}`);
 export const follow=(id:string,following:boolean)=>request<{following:boolean}>(`/creators/${id}/follow`,{method:following?'POST':'DELETE'});

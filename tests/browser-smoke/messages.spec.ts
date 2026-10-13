@@ -37,6 +37,26 @@ test("creator profile opens its chat; consent and text exchange work", async ({ 
   await expect(page.locator(".bottom-nav")).toHaveCount(0);
 });
 
+test("Codex authorization is hidden when the server does not allow this account", async ({ page }) => {
+  await installMiniAppBrowserMocks(page, { chatHistoryAccepted: true });
+  await page.goto("/messages/models_hub", { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("button", { name: "Connect Codex" })).toHaveCount(0);
+});
+
+test("Codex can be approved and revoked in the selected chat", async ({ page }) => {
+  await installMiniAppBrowserMocks(page, { chatHistoryAccepted: true, codexOwnerEnabled: true });
+  await page.goto("/messages/models_hub", { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "Connect Codex" }).click();
+  await page.getByRole("textbox", { name: "Enter the one-time code shown by Codex" }).fill("1A2B-3C4D");
+  await expect(page.getByRole("button", { name: "Approve Codex" })).toBeEnabled();
+  await page.getByRole("button", { name: "Approve Codex" }).click();
+  await expect(page.getByRole("status")).toHaveText("Codex is connected to this conversation.");
+  await expect(page.getByRole("button", { name: "Codex connected" })).toBeVisible();
+  await page.getByRole("button", { name: "Revoke access" }).click();
+  await expect(page.getByRole("status")).toHaveText("Codex access was revoked.");
+  await expect(page.getByRole("button", { name: "Connect Codex" })).toBeVisible();
+});
+
 test("one-time onboarding persists when memory is enabled across reload and existing-chat navigation", async ({ page }) => {
   await page.goto("/messages/models_hub", { waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { name: "AI character conversation" })).toBeVisible();

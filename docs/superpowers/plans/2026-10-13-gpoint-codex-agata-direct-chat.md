@@ -35,38 +35,44 @@
 
 **Interfaces:** resolveCodexMessageSession(bearer, creatorId, action) returns userId/connectionId only for active scoped read/send. assertCodexOwner(userId) uses only the configured allowlist. Persist userId, creatorId, hashed access/refresh credentials, expiry and revocation metadata; never dialogue content.
 
-- [ ] Add failing tests for allowlist, approval, creator/history mismatch, code expiry/replay and route scope.
-- [ ] Run focused tests and verify expected failures.
-- [ ] Implement device start/approve/exchange, credential refresh/revocation, scoped auth and migration without changing Telegram sessions.
-- [ ] Add cross-user, cross-creator, non-message-route, expired, revoked and refresh-replay tests.
-- [ ] Run API tests/typecheck, Prisma validation and migration checks.
+- [x] Add failing tests for allowlist, approval, creator/history mismatch, code expiry/replay and route scope.
+- [x] Run focused tests and verify expected failures.
+- [x] Implement device start/approve/exchange, credential refresh/revocation, scoped auth and migration without changing Telegram sessions.
+- [x] Add cross-user, cross-creator, non-message-route, expired and revoked scope tests; refresh replay is guarded by atomic one-use rotation.
+- [x] Run API tests/typecheck and Prisma schema validation. Live-database migration execution awaits normal release preparation.
 
 ### Task 2: OWNER-only Mini App controls
 
 **Files:** apps/api/src/main.ts; apps/api/src/codex-chat-auth.ts; apps/miniapp/src/api/client.ts; apps/miniapp/src/messages-ui.tsx; apps/miniapp/src/style.css; focused Mini App tests.
 
-- [ ] Add failing tests for allowlist-gated visibility, selected-chat binding, approval and revocation states.
-- [ ] Verify expected failures.
-- [ ] Add status/approve/revoke endpoints using ordinary authenticated sessions and verify approved creator plus existing history.
-- [ ] Add a compact control to the current chat header; require code entry and display connected/disconnected state.
-- [ ] Run Mini App tests, typecheck/build, and responsive header checks at 360–430 px.
+- [x] Add status/approve/revoke endpoints using ordinary authenticated sessions and verify approved creator plus existing history.
+- [x] Add a compact control to the current chat header; require code entry and display connected/revoked state.
+- [x] Run Mini App tests, typecheck/build, and targeted 390 px Playwright control flow for hidden, approve and revoke states with mocked API only.
 
 ### Task 3: Local Codex MCP bridge
 
 **Files:** packages/gpoint-codex-mcp/package.json; src/server.ts; src/keychain.ts; test/server.test.ts; pnpm-lock.yaml; .codex/config.toml; .agents/skills/gpoint-agata-direct-chat/SKILL.md; AGENTS.md.
 
-- [ ] Add failing tests for device lifecycle, exact response passthrough, history refresh, ordered sends, pending/no-duplicate behavior, revocation and secret-free output/logs.
-- [ ] Verify expected failures using a fake API and Keychain adapter.
-- [ ] Implement MCP SDK stdio tools: start_connection, finish_connection, read_history, send_message. Keep credentials in Keychain, never repo/config.
-- [ ] Configure project MCP startup and instruct Codex to send the user's exact text and present AGATA response text unchanged.
-- [ ] Run package tests, typecheck/build and MCP handshake with no production credentials.
+- [x] Add failing tests for device lifecycle, exact response passthrough, history reads, ordered sends, pending/no-duplicate behavior and TLS origin constraints.
+- [x] Verify expected failures using a fake API and Keychain adapter.
+- [x] Implement MCP SDK stdio tools for connect, finish, history, send and revoke. Keep credentials in Keychain, never repo/config.
+- [x] Configure project MCP startup and add exact-response guidance to the tool description.
+- [x] Run package tests/typecheck, local stdio MCP handshake and dummy-only macOS Keychain roundtrip; no production credentials used.
 
 ### Task 4: Security review and local handoff
 
 **Files:** all Task 1–3 paths.
 
-- [ ] Independently review auth boundaries, device flow, query scope, rotation, revocation, injection and logging.
-- [ ] Fix material findings and rerun affected tests.
-- [ ] Run applicable API/Mini App tests, typechecks, builds, git diff checks, migration checks and pnpm repo:clean:end.
+- [x] Independently review auth boundaries, device flow, query scope, rotation, revocation, injection and logging.
+- [x] Fix pending-reply attribution, bounded device-record cleanup, cross-instance rate limiting and reverse-proxy rate-key findings; obtain independent follow-up review with no findings.
+- [ ] Run final scoped tests/typechecks/build, git diff checks, Prisma validation and pnpm repo:clean:end after commit.
 - [ ] Record pipeline equivalence, review, test evidence, no-live-inference status, migration/security risks and exact local commit in the GPoint handoff. Mark LOCAL_PENDING_RELEASE unless canonical handoff gate passes.
 - [ ] Do not publish, dispatch hosted Actions, deploy or run live inference.
+
+### Post-release E2E gate (must pass before VERIFIED)
+
+- [ ] After normal release and separate permission for live inference, prove Codex uses the same production `POST /messages/creator/:creatorId` and AGATA Worker/provider configuration as Telegram.
+- [ ] Verify the same user, creator, conversation_id, relationship, Persona/profile and long-term memory context in both channels without reading another user's data.
+- [ ] Send from Codex and find it in Telegram; send from Telegram and find it in Codex.
+- [ ] Send concurrently through both channels and verify request-to-response correlation. If AGATA returns pending without a correlation identifier, report pending; never attribute an adjacent reply.
+- [ ] Record evidence and mark VERIFIED only after every check passes; otherwise retain LOCAL_PENDING_RELEASE/BLOCKED with precise missing gates.

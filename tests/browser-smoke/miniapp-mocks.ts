@@ -33,7 +33,7 @@ const modelPost = (index: number) => ({
 
 export async function installMiniAppBrowserMocks(
   page: Page,
-  options: { telegramStartParam?: string; ageAssuranceRequired?: boolean; ageAttestationWriteStatus?: number; aiAvailable?: boolean; pendingReply?: boolean; chatHistoryAccepted?: boolean; memoryOptIn?: boolean; existingHistory?: boolean; browserAuthDelayMs?: number; ageAssuranceDelayMs?: number } = {},
+  options: { telegramStartParam?: string; ageAssuranceRequired?: boolean; ageAttestationWriteStatus?: number; aiAvailable?: boolean; pendingReply?: boolean; chatHistoryAccepted?: boolean; memoryOptIn?: boolean; existingHistory?: boolean; codexOwnerEnabled?: boolean; browserAuthDelayMs?: number; ageAssuranceDelayMs?: number } = {},
 ) {
   const errors: string[] = [];
   let chatHistoryAccepted = options.chatHistoryAccepted ?? false;
@@ -44,6 +44,7 @@ export async function installMiniAppBrowserMocks(
     { id: "existing-assistant-message", role: "assistant", text: "Previously saved reply", occurredAt: "2026-10-02T10:01:00.000Z" },
   ] : [];
   let ageAssuranceRequired = options.ageAssuranceRequired ?? false;
+  let codexConnected = false;
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => {
     if (message.type() === "error") errors.push(message.text());
@@ -103,6 +104,9 @@ export async function installMiniAppBrowserMocks(
       data = { enabled: true, chatHistory: true, longTermMemory: memoryOptIn, disclosureRequired: false, onboardingCompleted: true, disclosureVersion: 1, onboardingCompletedAt, memoryOptIn, memoryOptInAt: onboardingCompletedAt, ageAssuranceRequired, aiAvailable: options.aiAvailable ?? true };
     }
     else if (apiPath === "/messages/unread") data = { totalUnread: 0, items: [] };
+    else if (apiPath === `/auth/codex/connection/${creator.id}`) data = { enabled: options.codexOwnerEnabled ?? false, connected: codexConnected };
+    else if (apiPath === "/auth/codex/device/approve" && route.request().method() === "POST") { codexConnected = true; data = { approved: true }; }
+    else if (apiPath === `/auth/codex/connection/${creator.id}/revoke` && route.request().method() === "POST") { codexConnected = false; data = { revoked: true }; }
     else if (apiPath.endsWith("/read") && apiPath.startsWith("/messages/creator/")) data = { acknowledgedMessageIds: JSON.parse(route.request().postData() || "{}").messageIds };
     else if (apiPath === "/messages") data = { items: [{ creator: { id: creator.id, slug: creator.slug, displayName: creator.displayName, avatarUrl: creator.avatarUrl, verified: creator.verified }, lastMessagePreview: "Hello there", lastMessageRole: "assistant", lastMessageAt: "2026-09-27T10:00:00.000Z" }], nextCursor: null };
     else if (apiPath === `/messages/creator/${creator.id}` && route.request().method() === "GET") {

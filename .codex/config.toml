@@ -5,3 +5,12 @@ model_reasoning_effort = "medium"
 enabled = true
 default_subagent_model = "gpt-6-luna"
 default_subagent_reasoning_effort = "medium"
+
+[mcp_servers.gpoint_agata]
+command = "pnpm"
+args = ["--filter", "@gpoint/codex-mcp", "start"]
+env_vars = ["GPOINT_API_URL"]
+startup_timeout_sec = 30
+tool_timeout_sec = 50
+default_tools_approval_mode = "prompt"
+enabled_tools = ["connect_gpoint", "finish_gpoint_connection", "read_gpoint_history", "send_gpoint_message", "disconnect_gpoint"]

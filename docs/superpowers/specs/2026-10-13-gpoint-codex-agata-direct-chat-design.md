@@ -16,14 +16,14 @@ The MCP process creates a random device secret and short user code. Only the use
 
 Persist only credential hashes and scope metadata in one GPoint API credential table. It contains no messages, prompts, memories or AGATA state. Access credentials are short-lived; refresh credentials rotate. Every scoped message request checks expiry and revocation. Disconnect revokes the selected connection. The scoped credential is denied on every route except reading/sending messages for its bound creator.
 
-A user code expires after five minutes and is single-use with bounded failed attempts. Refresh credentials are stored in macOS Keychain. MCP logs and diagnostics omit tokens, codes and message contents.
+A user code expires after five minutes and can be approved/exchanged only once. Device starts are rate-limited across API instances by source hash and database transaction; authenticated OWNER approval attempts also have a per-user fixed-window limit. Refresh credentials are stored in macOS Keychain. MCP logs and diagnostics omit tokens, codes and message contents.
 
 ## Components and flow
 
 1. A local MCP stdio server provides start_connection, finish_connection, read_history and send_message. A project MCP configuration starts it in a newly opened Codex chat.
 2. The OWNER opens the existing Mini App chat for the chosen character. A control appears only when the signed-in account is allowlisted. OWNER enters the one-time code and approves; the control then offers disconnect.
 3. MCP exchanges the approved device secret for scoped credentials and stores them in Keychain.
-4. read_history calls the existing GET /messages/creator/:creatorId. send_message calls POST /messages/creator/:creatorId with a UUID idempotency key. GPoint applies existing age/consent checks and submits to AGATA. AGATA records and processes the message using the existing relationship and memory, provider and Mac Worker. MCP returns the API response text unchanged. For an asynchronous response it polls that same authorized history and never resends with a new key.
+4. read_history calls the existing GET /messages/creator/:creatorId. send_message calls POST /messages/creator/:creatorId with a UUID idempotency key. GPoint applies existing age/consent checks and submits to AGATA. AGATA records and processes the message using the existing relationship and memory, provider and Mac Worker. MCP returns a completed API response text unchanged. If AGATA reports pending, MCP reports pending without guessing which later assistant message belongs to that send; the owner can read the shared conversation separately.
 5. Mini App disconnect revokes the credential. Subsequent refresh or messages calls fail closed.
 
 The MCP server cannot enumerate users or the OWNER's inbox. Character selection occurs inside the authenticated Mini App chat.
@@ -41,6 +41,6 @@ The MCP server cannot enumerate users or the OWNER's inbox. Character selection 
 
 Automated tests cover device authorization expiry/consumption/rate limits, allowlist and creator scope, route denial, refresh/revocation races, message idempotency/order, exact response preservation, OWNER-only UI and history refresh. MCP tests use a local fake GPoint API and Keychain adapter; no live inference.
 
-After security review and standard release, a separately authorized production smoke must verify: Codex send and exact AGATA response, same Mini App history, Telegram continuation, then Codex history refresh.
+After security review and standard release, a separately authorized real production E2E must verify the same user/creator conversation_id, relationship, Persona/profile, Naturalness V1, memory and provider path as Telegram; a Codex send visible in Telegram; a Telegram send visible in Codex; and concurrent sends from both interfaces with correctly attributed responses. Do not call the integration VERIFIED until all checks pass. A pending response with no request correlation must remain pending, never be assigned to a neighboring reply.
 
 Authentication/schema changes require independent security review and standard release gates. This design does not authorize publication, hosted CI, deployment, production data mutation or live inference.
