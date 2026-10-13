@@ -825,6 +825,14 @@ function checkV4PublicStaticHealth(sourceSha) {
   return 'PASS';
 }
 
+export function staticPublishFailureDecision({
+  switchStarted = false, rollbackProven = false, tagPublishAttempted = false,
+} = {}) {
+  if (tagPublishAttempted) return 'RECOVERY_REQUIRED';
+  if (!switchStarted) return 'FAILED_PRE_SWITCH';
+  return rollbackProven ? 'FAILED_ROLLED_BACK' : 'RECOVERY_REQUIRED';
+}
+
 function runStaticApply(candidate, bundle) {
   const startedAt = isoNow();
   const releaseId = 'gpoint-release-' + startedAt.replace(/[-:.]/g, '');
@@ -832,7 +840,7 @@ function runStaticApply(candidate, bundle) {
   const current = state();
   let switched = false;
   let rollbackProven = false;
-  let immutableProductionTagPublished = false;
+  let immutableProductionTagPublishAttempted = false;
   const timings = {};
   try {
     const checked = requireV4StaticPreflight(candidate, bundle, current);
@@ -889,8 +897,11 @@ function runStaticApply(candidate, bundle) {
        'GPoint static-only production release\nproductionSha=' + candidate +
        '\npreviousProductionSha=' + current.currentProductionSha +
        '\nreleaseId=' + releaseId], { cwd: ROOT, stdio: 'inherit' });
+    // An inconclusive transport error can occur after GitHub received the
+    // immutable production tag. From this point, do not undo the site and
+    // falsely claim the immutable tag did not publish. Force reconciliation.
+    immutableProductionTagPublishAttempted = true;
     const remoteRef = pushProductionTag(ref, candidate);
-    immutableProductionTagPublished = true;
     const finishedAt = isoNow();
     const artifactIdentities = { ...(current.artifactIdentities || {}),
       miniapp: { sourceSha: candidate, servedBuildSha: candidate,
@@ -945,7 +956,7 @@ function runStaticApply(candidate, bundle) {
   } catch (error) {
     // An exception *after* the transfer helper returned may still leave the
     // site changed. Roll back the exact journal, never guess a runtime state.
-    if (switched && error.rollbackProven !== true && !immutableProductionTagPublished) {
+    if (switched && error.rollbackProven !== true && !immutableProductionTagPublishAttempted) {
       try {
         const temp = '/tmp/gpoint-v4-static-' + candidate + '/release_static_executor_v4.py';
         const output = runRemoteCommand('set -eu; python3 ' + temp + ' rollback --baseline ' +
@@ -963,9 +974,10 @@ function runStaticApply(candidate, bundle) {
     } else if (error.rollbackProven === true) {
       rollbackProven = true;
     }
-    const status = immutableProductionTagPublished ? 'RECOVERY_REQUIRED' :
-      !switched ? 'FAILED_PRE_SWITCH' :
-      rollbackProven ? 'FAILED_ROLLED_BACK' : 'RECOVERY_REQUIRED';
+    const status = staticPublishFailureDecision({
+      switchStarted: switched, rollbackProven,
+      tagPublishAttempted: immutableProductionTagPublishAttempted,
+    });
     const failureManifest = {
       releaseId, candidateSha: candidate,
       previousProductionSha: current.currentProductionSha,
