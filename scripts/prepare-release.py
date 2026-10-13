@@ -289,6 +289,12 @@ def prepare(sha, output, *, postgres_only=False):
     if postgres_only:
         impact = load_verified_plan(None, sha, ROOT)
     print('V3_IMPACT_USED=' + impact['classification'], flush=True)
+    if not postgres_only and impact['classification'] == 'UI_ONLY':
+        # Fail closed: independent V4 git inventory must prove only regular
+        # Mini App source files changed against immutable COMPLETE production.
+        # No three-image Docker bundle, database startup or image transfer.
+        from release_static_prepare_v4 import prepare_static
+        return prepare_static(sha, output, impact)
     gsales_regression = None
     if not postgres_only:
         commands = (

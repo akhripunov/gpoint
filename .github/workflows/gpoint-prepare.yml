@@ -112,6 +112,7 @@ jobs:
           python3 scripts/select-release-run.test.py
           node --test scripts/release-orchestrator.test.mjs
           node --test scripts/release-component-bundle-v4.test.mjs scripts/release-component-vps-proof-v4.test.mjs
+          node --test scripts/release-static-v4.test.mjs scripts/release-static-transfer-v4.test.mjs
           node --test scripts/release-evidence.test.mjs
       - name: Tests, disposable database rehearsal and immutable Docker build
         if: github.ref != 'refs/heads/main' || steps.coalesce.outputs.result == 'WINNER'

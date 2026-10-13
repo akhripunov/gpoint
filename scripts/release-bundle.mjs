@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 
 // The workflow independently verifies the successful GitHub run before using
 // this receipt. A receipt alone is not a GitHub provenance check.
@@ -8,6 +9,7 @@ export function verifyReleaseBundle(directory, candidate) {
   if (!/^[a-f0-9]{40}$/.test(candidate)) throw new Error('invalid candidate SHA');
   const root = fs.realpathSync(directory);
   const proof = JSON.parse(fs.readFileSync(path.join(root, 'receipt.json'), 'utf8'));
+  if (proof.schema === 2) return verifyV4StaticBundle(root, candidate, proof);
   if (proof.schema !== 1 || proof.candidateSha !== candidate || proof.status !== 'READY') {
     throw new Error('release bundle is not READY for the exact candidate');
   }
@@ -69,6 +71,74 @@ export function verifyReleaseBundle(directory, candidate) {
   } finally { fs.closeSync(fd); }
   if (hash.digest('hex') !== proof.archiveSha256) throw new Error('release archive checksum mismatch');
   return { ...proof, archive };
+}
+
+const SHA40_V4 = /^[a-f0-9]{40}$/;
+const SHA64_V4 = /^[a-f0-9]{64}$/;
+
+export function verifyV4StaticBundle(root, candidate, proof) {
+  if (proof.schema !== 2 || proof.route !== 'STATIC_UI_ONLY' ||
+      proof.staticArtifactRoute !== 'V4_FAST_STATIC' ||
+      proof.status !== 'READY' || proof.candidateSha !== candidate ||
+      !SHA40_V4.test(proof.productionBaselineSha ?? '') ||
+      proof.productionBaselineSha === candidate ||
+      !Number.isSafeInteger(proof.runId) || proof.runId < 1 ||
+      !Number.isSafeInteger(proof.runAttempt) || proof.runAttempt < 1 ||
+      proof.staticArtifactName !== 'miniapp.zip' ||
+      !SHA64_V4.test(proof.staticArtifactSha256 ?? ''))
+    throw new Error('invalid exact static V4 identity');
+  const impact = proof.impactV3;
+  const v4 = proof.impactV4;
+  if (impact?.version !== 1 || impact?.candidateSha !== candidate ||
+      impact?.productionBaselineSha !== proof.productionBaselineSha ||
+      impact?.classification !== 'UI_ONLY' ||
+      impact?.reason !== 'narrow-unchanged-backend' ||
+      impact?.baselineSource !== 'gpoint-release-ledger' ||
+      impact?.checks?.agata_postgres_rehearsal !== false ||
+      impact?.checks?.gsales_postgres_regression !== false ||
+      !Array.isArray(impact.changedPaths) || !impact.changedPaths.length ||
+      impact.changedPaths.some(p => typeof p !== 'string' ||
+        !((p.startsWith('apps/miniapp/src/') || p.startsWith('apps/miniapp/public/')) &&
+          p.split('/').length >= 4 && p.split('/').every(s => s && s !== '.' && s !== '..') ||
+          p === 'apps/miniapp/index.html')) ||
+      v4?.classification !== 'COMPONENT_CANDIDATE' ||
+      v4?.component !== 'ui' || v4?.candidateSha !== candidate ||
+      v4?.productionBaselineSha !== proof.productionBaselineSha ||
+      v4?.baselineProvenance !== 'immutable-COMPLETE' ||
+      v4?.mayDeploySelectively !== false || v4?.maySkipV3Gates !== false ||
+      JSON.stringify([...v4.changedPaths].sort()) !== JSON.stringify([...impact.changedPaths].sort()))
+    throw new Error('unverified static source scope');
+  for (const gate of ['sourceDiff', 'miniappBuild', 'miniappTests', 'releaseTests',
+                      'staticArchive', 'migrationUnchanged']) {
+    if (proof.gates?.[gate] !== 'PASS') throw new Error('missing V4 source gate: ' + gate);
+  }
+  if (!/^[A-Za-z0-9_]{1,32}$/.test(proof.agataHead ?? '') ||
+      !/^[A-Za-z0-9_]{1,128}$/.test(proof.prismaHead ?? '') ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(proof.gsalesMigrationHead ?? '') ||
+      !SHA64_V4.test(proof.gsalesMigrationSha256 ?? ''))
+    throw new Error('missing static candidate migration source identity');
+  const archive = path.join(root, 'miniapp.zip');
+  if (!fs.existsSync(archive) || fs.realpathSync(archive) !== archive ||
+      !fs.statSync(archive).isFile()) throw new Error('untrusted static archive');
+  const hash = crypto.createHash('sha256');
+  const fd = fs.openSync(archive, 'r');
+  try {
+    const block = Buffer.alloc(65536);
+    let count;
+    while ((count = fs.readSync(fd, block, 0, block.length, null)) > 0)
+      hash.update(block.subarray(0, count));
+  } finally { fs.closeSync(fd); }
+  if (hash.digest('hex') !== proof.staticArtifactSha256)
+    throw new Error('static artifact checksum mismatch');
+  // Verify inner ZIP inventory and every member's SHA256 before release.
+  const script = "import sys; from release_ui_artifact_v4 import verify_bundle; verify_bundle(__import__('pathlib').Path(sys.argv[1]),sys.argv[2])";
+  try {
+    execFileSync('python3', ['-c', script, archive, candidate],
+      { cwd: path.dirname(new URL(import.meta.url).pathname), stdio: 'pipe', timeout: 30_000 });
+  } catch {
+    throw new Error('static ZIP member identity invalid');
+  }
+  return { ...proof, archive, staticOnly: true };
 }
 
 function temporaryPath(root, name) {
