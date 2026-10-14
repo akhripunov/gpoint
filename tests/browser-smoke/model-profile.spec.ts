@@ -11,12 +11,24 @@ test.beforeEach(async ({ page }, testInfo) => {
   runtimeErrors.set(page, errors);
 });
 
-test("A — direct /model/:handle resolves the model", async ({ page }) => {
+test("A — direct /model/:handle resolves the model", async ({ page }, testInfo) => {
   console.log("DIRECT_ROUTE_START");
   await page.goto("/model/models_hub", { waitUntil: "domcontentloaded" });
   await expect(page.locator("h1")).toContainText("Models Hub");
   await expect(page).toHaveURL(/\/model\/models_hub$/);
+  const avatar = page.locator(".model-profile-avatar img");
+  await expect(avatar).toHaveAttribute("src", /fixture-avatar/);
+  await expect.poll(() => avatar.evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0);
+  await page.screenshot({ path: testInfo.outputPath("model-profile-channel-avatar.png") });
   console.log("DIRECT_ROUTE_PASS");
+});
+
+test("A2 — unavailable channel avatar falls back to initials", async ({ page }) => {
+  await page.route("**/media/assets/fixture-avatar", (route) => route.fulfill({ status: 404, body: "missing" }));
+  await page.goto("/model/models_hub", { waitUntil: "domcontentloaded" });
+  await expect(page.locator("h1")).toContainText("Models Hub");
+  await expect(page.locator(".model-profile-avatar img")).toHaveCount(0);
+  await expect(page.locator(".model-profile-avatar")).toHaveText("MO");
 });
 
 test("B — unknown handle shows Model unavailable", async ({ page }) => {

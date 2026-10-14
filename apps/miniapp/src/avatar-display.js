@@ -6,8 +6,10 @@ export function avatarFallbackText(name, length = 1) {
   return String(name ?? '').trim().slice(0, Math.max(1, length)).toUpperCase();
 }
 
-export function messageChannelAvatarSource(creator) {
+export function creatorChannelAvatarSource(creator) {
   return typeof creator?.channelAvatarUrl === 'string' && creator.channelAvatarUrl.trim().length > 0
     ? creator.channelAvatarUrl
     : null;
 }
+
+export const messageChannelAvatarSource = creatorChannelAvatarSource;

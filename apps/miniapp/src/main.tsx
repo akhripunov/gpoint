@@ -65,6 +65,7 @@ import {
   CreatorWorkspaceDashboard,
 } from "./platform-ui";
 import { AvatarImage, BackButton, BottomNav } from "./ui";
+import { creatorChannelAvatarSource } from "./avatar-display.js";
 import { MessagesInbox, ModelChat } from "./messages-ui";
 import { MessagesUnreadProvider, useMessagesUnread } from "./messages-unread";
 import { GPointAppHeader } from "./ui/brand";
@@ -399,7 +400,7 @@ function Profile({ slug, back, explore, message }: { slug: string; back: () => v
       <div className="model-profile-main">
         <div className="model-profile-overview">
           <span className="model-profile-avatar">
-            {c.avatarUrl ? <img src={mediaUrl(c.avatarUrl)} alt={`${c.displayName} avatar`} /> : c.displayName.slice(0, 2).toUpperCase()}
+            <AvatarImage src={creatorChannelAvatarSource(c)} name={c.displayName} fallbackLength={2} alt={`${c.displayName} avatar`} />
           </span>
           <div className="model-profile-details">
             <h1>{c.displayName}{c.verified && <BadgeCheck size={19} className="model-profile-verified" aria-label="Verified" />}</h1>
