@@ -12,6 +12,10 @@ function apiFixture() {
     calls.push({method,path,body});
     if(path==='git/ref/heads/main') return {object:{sha}};
     if(path==='actions/runs/123') return event().workflow_run;
+    if(path==='actions/runs/123/attempts/2') return {run_attempt:2,run_started_at:'2026-10-14T04:51:39Z'};
+    if(path==='actions/runs/123/attempts/1') return {run_attempt:1,run_started_at:'2026-10-14T04:38:31Z'};
+    if(path==='actions/runs/123/attempts/2/jobs?per_page=100') return {total_count:1,jobs:[{name:'prepare',status:'completed',conclusion:'success',head_sha:sha,started_at:'2026-10-14T04:51:40Z',completed_at:'2026-10-14T04:52:20Z'}]};
+    if(path==='actions/runs/123/attempts/1/jobs?per_page=100') return {total_count:1,jobs:[{name:'prepare',status:'completed',conclusion:'success',head_sha:sha,started_at:'2026-10-14T04:38:34Z',completed_at:'2026-10-14T04:46:48Z'}]};
     if(path.startsWith('releases/tags/')) return {tag_name:path.split('/').at(-1),draft:false,immutable:true,assets:[{id:456,name:'bundle.zip',state:'uploaded',size:100,digest:`sha256:${'b'.repeat(64)}`}]};
     if(path.startsWith('git/ref/tags/gpoint-prepare-')) return {object:{type:'commit',sha}};
     if(path.includes('actions/workflows/gpoint-deploy.yml/runs')) return {workflow_runs:[]};
@@ -45,6 +49,32 @@ test('duplicate event is a no-op after atomic claim',async()=>{
   const duplicate=await dispatchPrepare(event(),api);
   assert.equal(duplicate.state,'PREFLIGHT_ALREADY_CLAIMED');
   assert.equal(calls.filter(item=>item.path.endsWith('/dispatches')).length,1);
+});
+test('publish-only rerun uses earlier real Prepare job and exact immutable bundle',async()=>{
+  const {api,calls}=apiFixture();
+  const wrapped=async(method,path,body)=>{
+    if(path==='releases/tags/gpoint-prepare-'+sha+'-123-2'){
+      const e=new OrchestrationError('missing');e.status=404;throw e;
+    }
+    if(path==='actions/runs/123/attempts/2/jobs?per_page=100')
+      return {total_count:1,jobs:[{name:'prepare',status:'completed',conclusion:'success',head_sha:sha,
+        started_at:'2026-10-14T04:38:34Z',completed_at:'2026-10-14T04:46:48Z'}]};
+    return api(method,path,body);
+  };
+  const result=await dispatchPrepare(event(),wrapped,'987');
+  assert.equal(result.prepareRunAttempt,'1');
+  assert.equal(result.tag,`gpoint-prepare-${sha}-123-1`);
+  assert.equal(calls.find(x=>x.path.endsWith('/dispatches')).body.inputs.prepare_run_attempt,'1');
+});
+test('new Prepare execution without immutable evidence blocks preflight',async()=>{
+  const {api}=apiFixture();
+  const wrapped=async(method,path,body)=>{
+    if(path==='releases/tags/gpoint-prepare-'+sha+'-123-2'){
+      const e=new OrchestrationError('missing');e.status=404;throw e;
+    }
+    return api(method,path,body);
+  };
+  await assert.rejects(dispatchPrepare(event(),wrapped),/Executed Prepare has no immutable bundle/);
 });
 test('mutable or draft releases fail closed',async()=>{
   for(const patch of [{immutable:false},{draft:true}]) {

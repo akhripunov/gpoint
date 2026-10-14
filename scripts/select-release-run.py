@@ -12,7 +12,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from release_assets import resolve_asset
+from release_assets import resolve_asset, find_prepare_evidence
 from network_retry import NetworkUnavailable, RetryBudget, retry_network_read
 
 REPO = 'akhripunov/gpoint'
@@ -139,8 +139,11 @@ def main():
         raise RuntimeError('Task authorization ID is only valid for task-scoped-auto mode')
     runs = github(f'actions/workflows/gpoint-prepare.yml/runs?branch=main&head_sha={sha}&per_page=100')['workflow_runs']
     selected = select_run(sha, runs)
-    asset = resolve_asset('prepare', sha, str(selected['id']), str(selected.get('run_attempt', 1)),
-                          'bundle.zip', github)
+    executed_attempt, asset = find_prepare_evidence(
+        sha, str(selected['id']), str(selected.get('run_attempt', 1)), github)
+    # Preserve GitHub's actual workflow run attempt for audit while pinning
+    # the immutable bundle to the attempt which executed Prepare.
+    selected = {**selected, 'run_attempt': int(executed_attempt)}
     validate_expected_run(selected, os.environ.get('PREPARE_RUN_ID'), os.environ.get('PREPARE_RUN_ATTEMPT'))
     preflight = None
     if os.environ.get('RELEASE_MODE') in ('production', 'task-scoped-auto'):
