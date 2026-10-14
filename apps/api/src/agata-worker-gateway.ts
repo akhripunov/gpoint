@@ -1,5 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
-import { Body, Controller, Headers, HttpException, Post, UnauthorizedException } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Header, HttpException, Post, UnauthorizedException } from '@nestjs/common';
 import { createAgataClient } from './agata-client.js';
 
 function assertWorkerAuth(
@@ -26,6 +26,17 @@ function internalClient() {
 
 @Controller('agata-worker')
 export class AgataWorkerGatewayController {
+  @Get('queue-status')
+  @Header('Cache-Control', 'no-store')
+  async queueStatus(@Headers() headers: Record<string, string | string[] | undefined>) {
+    assertWorkerAuth(headers);
+    try {
+      return await internalClient().getWorkerQueueStatus('GPOINT');
+    } catch {
+      throw new HttpException({ code: 'AGATA_UNAVAILABLE' }, 503);
+    }
+  }
+
   @Post('health')
   async health(@Headers() headers: Record<string, string | string[] | undefined>) {
     assertWorkerAuth(headers);

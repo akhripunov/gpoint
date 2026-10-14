@@ -129,6 +129,42 @@ export interface AgataHealth {
   status: 'ok' | 'ready';
 }
 
+export type AgataWorkerQueueLane = 'GPOINT' | 'GSALES';
+
+export interface AgataWorkerQueueStatus {
+  source_id: string;
+  lane: AgataWorkerQueueLane;
+  pending_jobs: number;
+  running_jobs: number;
+  snapshot_at: string;
+}
+
+function parseWorkerQueueStatus(value: unknown, lane: AgataWorkerQueueLane): AgataWorkerQueueStatus {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new AgataServiceError('AGATA queue status invalid', 502, 'worker_queue_status_invalid');
+  }
+  const record = value as Record<string, unknown>;
+  const expectedSource = `agata-worker-queue-status-v1:${lane.toLowerCase()}`;
+  const timestamp = typeof record.snapshot_at === 'string' ? Date.parse(record.snapshot_at) : Number.NaN;
+  const keys = Object.keys(record).sort();
+  if (
+    keys.join(',') !== 'lane,pending_jobs,running_jobs,snapshot_at,source_id' ||
+    record.source_id !== expectedSource || record.lane !== lane ||
+    !Number.isSafeInteger(record.pending_jobs) || (record.pending_jobs as number) < 0 ||
+    !Number.isSafeInteger(record.running_jobs) || (record.running_jobs as number) < 0 ||
+    !Number.isFinite(timestamp) || !/(?:Z|[+-]\d{2}:\d{2})$/i.test(record.snapshot_at as string)
+  ) {
+    throw new AgataServiceError('AGATA queue status invalid', 502, 'worker_queue_status_invalid');
+  }
+  return {
+    source_id: expectedSource,
+    lane,
+    pending_jobs: record.pending_jobs as number,
+    running_jobs: record.running_jobs as number,
+    snapshot_at: record.snapshot_at as string,
+  };
+}
+
 /** Internal service-to-service client. No user credential is forwarded. */
 export class AgataClient {
   private readonly baseUrl: string;
@@ -180,6 +216,11 @@ export class AgataClient {
 
   async failInferenceJob(input: { job_id: string; lease_token: string; error_code: string }): Promise<{ accepted: boolean; state: string }> {
     return this.request('/internal/v1/worker/fail', 'POST', input);
+  }
+
+  async getWorkerQueueStatus(lane: AgataWorkerQueueLane): Promise<AgataWorkerQueueStatus> {
+    const result = await this.request<unknown>('/internal/v1/worker/queue-status', 'GET', undefined);
+    return parseWorkerQueueStatus(result, lane);
   }
 
   async unreadMessages(id: string): Promise<{ items: Array<{ gpointCharacterId: string; unreadCount: number }> }> {

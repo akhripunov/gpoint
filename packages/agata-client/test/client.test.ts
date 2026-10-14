@@ -50,6 +50,43 @@ test('live and ready use the health endpoints without a request body', async () 
   assert.deepEqual(paths, ['/health/live', '/health/ready']);
 });
 
+test('worker queue status uses authenticated read-only GET and validates a GPOINT-only content-free shape', async () => {
+  const requests: Array<{ path: string; method: string | undefined; authorization: string | null; body: string | null }> = [];
+  const client = new AgataClient({
+    baseUrl: 'https://agata.internal/', token: 'internal-service-test-token',
+    fetchImpl: async (input, init) => {
+      requests.push({
+        path: new URL(String(input)).pathname,
+        method: init?.method,
+        authorization: new Headers(init?.headers).get('authorization'),
+        body: init?.body ? String(init.body) : null,
+      });
+      return new Response(JSON.stringify({
+        source_id: 'agata-worker-queue-status-v1:gpoint', lane: 'GPOINT',
+        pending_jobs: 2, running_jobs: 1, snapshot_at: '2026-10-14T05:00:00Z',
+      }), { status: 200 });
+    },
+  });
+  const status = await client.getWorkerQueueStatus('GPOINT');
+  assert.equal(status.lane, 'GPOINT');
+  assert.deepEqual(requests, [{
+    path: '/internal/v1/worker/queue-status', method: 'GET',
+    authorization: 'Bearer internal-service-test-token', body: null,
+  }]);
+
+  const invalid = new AgataClient({
+    baseUrl: 'https://agata.internal', token: 'internal-service-test-token',
+    fetchImpl: async () => new Response(JSON.stringify({
+      source_id: 'agata-worker-queue-status-v1:gsales', lane: 'GSALES',
+      pending_jobs: 2, running_jobs: 1, snapshot_at: '2026-10-14T05:00:00Z', private_payload: 'must-not-escape',
+    }), { status: 200 }),
+  });
+  await assert.rejects(
+    invalid.getWorkerQueueStatus('GPOINT'),
+    (error: unknown) => error instanceof AgataServiceError && error.status === 502 && error.code === 'worker_queue_status_invalid',
+  );
+});
+
 test('chat read methods authenticate and encode user, character, cursor and limits', async () => {
   const requests: Array<{ url: URL; headers: Headers }> = [];
   const client = new AgataClient({

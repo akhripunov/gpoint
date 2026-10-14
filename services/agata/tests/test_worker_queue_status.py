@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+from fastapi.routing import APIRoute
+
 from app.api import internal
 
 
@@ -40,6 +42,15 @@ class _Session:
         self.aggregate_statements.append(str(statement))
         self.aggregate_parameters.append(statement.compile().params)
         return _Result(next(self.counts), next(self.counts))
+
+
+def test_queue_status_route_is_get_and_uses_existing_internal_auth():
+    route = next(
+        route for route in internal.router.routes
+        if isinstance(route, APIRoute) and route.path == "/internal/v1/worker/queue-status"
+    )
+    assert route.methods == {"GET"}
+    assert any(dependency.call is internal.require_internal_auth for dependency in route.dependant.dependencies)
 
 
 def test_gpoint_queue_status_is_aggregate_read_only_and_has_snapshot_identity(monkeypatch):
