@@ -73,10 +73,10 @@ def find_deploy_evidence(sha, run_id, current_attempt, api=evidence_api):
                 raise RuntimeError('Missing Deploy attempt job evidence')
             if missing_jobs.get('total_count', len(missing_jobs['jobs'])) > 100:
                 raise RuntimeError('Incomplete Deploy attempt jobs')
-            for job in missing_jobs['jobs']:
-                if job.get('name') == 'deploy' and job.get('conclusion') in (
-                        'failure', 'cancelled', 'timed_out', 'action_required'):
-                    raise RuntimeError('Newer failed Deploy cannot reuse older immutable evidence')
+            if any(job.get('name') == 'deploy' for job in missing_jobs['jobs']):
+                # Any real Deploy execution (queued, running, successful or
+                # failed) needs its own immutable result; no older fallback.
+                raise RuntimeError('Newer Deploy attempt has no immutable evidence')
             continue
         def exact_api(route):
             return release if route == f'releases/tags/{tag}' else api(route)

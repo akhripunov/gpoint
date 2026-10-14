@@ -73,16 +73,25 @@ def graphql_request(
                 raise SyncError("Linear API returned an invalid response")
             errors = result.get("errors")
             if errors:
-                retryable = any(
-                    isinstance(error, dict)
-                    and isinstance(error.get("extensions"), dict)
-                    and error["extensions"].get("code") == "RATELIMITED"
+                # Do not log arbitrary error messages, GraphQL variables, tokens
+                # or document bodies. Only an allowlisted machine-readable code.
+                codes = {
+                    error.get("extensions", {}).get("code")
                     for error in errors
-                )
+                    if isinstance(error, dict) and isinstance(error.get("extensions"), dict)
+                    and isinstance(error["extensions"].get("code"), str)
+                }
+                safe_codes = {"RATELIMITED", "INTERNAL_SERVER_ERROR",
+                              "SERVICE_UNAVAILABLE", "TIMEOUT", "UNAUTHENTICATED",
+                              "FORBIDDEN", "BAD_USER_INPUT", "GRAPHQL_VALIDATION_FAILED"}
+                code = sorted(codes & safe_codes)[0] if codes & safe_codes else "UNKNOWN"
+                transient_codes = {"RATELIMITED", "INTERNAL_SERVER_ERROR",
+                                   "SERVICE_UNAVAILABLE", "TIMEOUT"}
+                retryable = bool(codes) and codes.issubset(transient_codes)
                 if retryable and attempt < MAX_ATTEMPTS:
                     sleep(_retry_delay(attempt))
                     continue
-                raise SyncError("Linear GraphQL request failed")
+                raise SyncError(f"Linear GraphQL request failed (code={code})")
             data = result.get("data")
             if not isinstance(data, dict):
                 raise SyncError("Linear API response is missing data")

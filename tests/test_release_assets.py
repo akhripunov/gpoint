@@ -100,8 +100,23 @@ class ImmutableReleaseTests(unittest.TestCase):
             if route == 'actions/runs/55/attempts/2/jobs?per_page=100':
                 return {'total_count': 1, 'jobs': [{'name': 'deploy', 'conclusion': 'failure'}]}
             raise AssertionError('Must fail before inspecting previous evidence: ' + route)
-        with self.assertRaisesRegex(RuntimeError, 'Newer failed Deploy'):
+        with self.assertRaisesRegex(RuntimeError, 'Newer Deploy attempt'):
             ASSETS.find_deploy_evidence(sha, '55', '2', api)
+
+    def test_successful_or_running_newer_deploy_missing_evidence_fails_closed(self):
+        sha = 'a' * 40
+        for status, conclusion in [('completed', 'success'), ('in_progress', None),
+                                   ('queued', None), ('completed', 'cancelled')]:
+            def api(route):
+                if route.startswith('releases/tags/'):
+                    return None
+                if route == 'actions/runs/55/attempts/2/jobs?per_page=100':
+                    return {'total_count': 1, 'jobs': [{'name': 'deploy', 'status': status,
+                                                        'conclusion': conclusion, 'head_sha': sha}]}
+                raise AssertionError('Must not read old evidence: ' + route)
+            with self.subTest(status=status, conclusion=conclusion), self.assertRaisesRegex(
+                    RuntimeError, 'Newer Deploy attempt'):
+                ASSETS.find_deploy_evidence(sha, '55', '2', api)
 
     def test_immutable_evidence_mismatch_fails_closed(self):
         sha = 'a' * 40
