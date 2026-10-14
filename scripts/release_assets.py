@@ -66,6 +66,17 @@ def find_deploy_evidence(sha, run_id, current_attempt, api=evidence_api):
         tag = release_tag('evidence', sha, run_id, attempt)
         release = api(f'releases/tags/{tag}')
         if release is None:
+            # A fresh unsuccessful Deploy must never silently borrow evidence
+            # from an older successful attempt of the same workflow.
+            missing_jobs = api(f'actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100')
+            if not isinstance(missing_jobs, dict) or not isinstance(missing_jobs.get('jobs'), list):
+                raise RuntimeError('Missing Deploy attempt job evidence')
+            if missing_jobs.get('total_count', len(missing_jobs['jobs'])) > 100:
+                raise RuntimeError('Incomplete Deploy attempt jobs')
+            for job in missing_jobs['jobs']:
+                if job.get('name') == 'deploy' and job.get('conclusion') in (
+                        'failure', 'cancelled', 'timed_out', 'action_required'):
+                    raise RuntimeError('Newer failed Deploy cannot reuse older immutable evidence')
             continue
         def exact_api(route):
             return release if route == f'releases/tags/{tag}' else api(route)

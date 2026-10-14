@@ -78,6 +78,8 @@ class ImmutableReleaseTests(unittest.TestCase):
         def api(route):
             if route.endswith('-2') and route.startswith('releases/tags/'):
                 return None
+            if route == 'actions/runs/55/attempts/2/jobs?per_page=100':
+                return {'total_count': 1, 'jobs': [{'name': 'publish', 'conclusion': 'failure'}]}
             if route == 'releases/tags/' + tag:
                 return release
             if route == 'git/ref/tags/' + tag:
@@ -89,6 +91,17 @@ class ImmutableReleaseTests(unittest.TestCase):
         attempt, asset = ASSETS.find_deploy_evidence(sha, '55', '2', api)
         self.assertEqual(attempt, '1')
         self.assertEqual(asset['id'], 99)
+
+    def test_failed_newer_deploy_must_not_borrow_older_evidence(self):
+        sha = 'a' * 40
+        def api(route):
+            if route.endswith('-2') and route.startswith('releases/tags/'):
+                return None
+            if route == 'actions/runs/55/attempts/2/jobs?per_page=100':
+                return {'total_count': 1, 'jobs': [{'name': 'deploy', 'conclusion': 'failure'}]}
+            raise AssertionError('Must fail before inspecting previous evidence: ' + route)
+        with self.assertRaisesRegex(RuntimeError, 'Newer failed Deploy'):
+            ASSETS.find_deploy_evidence(sha, '55', '2', api)
 
     def test_immutable_evidence_mismatch_fails_closed(self):
         sha = 'a' * 40
@@ -119,8 +132,10 @@ class ImmutableReleaseTests(unittest.TestCase):
 
     def test_missing_evidence_and_unexpected_api_error_fail_closed(self):
         sha = 'a' * 40
+        def missing(route):
+            return {'total_count': 0, 'jobs': []} if route.endswith('/jobs?per_page=100') else None
         with self.assertRaisesRegex(RuntimeError, 'No immutable evidence'):
-            ASSETS.find_deploy_evidence(sha, '55', '3', lambda route: None)
+            ASSETS.find_deploy_evidence(sha, '55', '3', missing)
         def api_error(route):
             raise ConnectionError('read failed')
         with self.assertRaises(ConnectionError):

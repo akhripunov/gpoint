@@ -69,6 +69,8 @@ def artifact_json(run_id, prefix):
                 raise SyncError(f'Expected one canonical result artifact for run {run_id}; found 0') from exc
             raise
         except (RuntimeError, KeyError) as exc:
+            if str(exc).startswith('No immutable evidence'):
+                raise SyncError(f'Expected one canonical result artifact for run {run_id}; found 0') from exc
             raise SyncError(f'Immutable result validation failed: {type(exc).__name__}') from exc
         release_run = run
         matches = [dict(asset, archive_download_url=f'https://api.github.com/repos/{REPOSITORY}/releases/assets/{asset["id"]}')]
