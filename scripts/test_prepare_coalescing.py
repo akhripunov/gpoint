@@ -71,6 +71,42 @@ class PrepareCoalescingTests(unittest.TestCase):
         )
         self.assertEqual(sleeps, [60])
 
+    def test_quiet_window_remains_bounded_and_urgent_candidate_is_not_held_longer(self):
+        with self.assertRaises(COALESCING.CoalescingError):
+            COALESCING.wait_for_quiet_main(
+                "a" * 40, lambda: "a" * 40, sleep=lambda _: None, window_seconds=301
+            )
+        self.assertEqual(COALESCING.QUIET_WINDOW_SECONDS, 60)
+
+    def test_new_sha_during_expensive_prepare_cancels_run_and_cannot_publish(self):
+        workflow = (ROOT / ".github" / "workflows" / "gpoint-prepare.yml").read_text()
+        concurrency = workflow[workflow.index("concurrency:"):workflow.index("jobs:")]
+        self.assertIn("cancel-in-progress: ${{ github.event_name == 'push' }}", concurrency)
+        publish = workflow[workflow.index("  publish:"):]
+        self.assertIn("needs.prepare.result != 'cancelled'", publish)
+
+    def test_new_sha_after_artifact_exists_blocks_stale_controller_preflight(self):
+        controller = (ROOT / ".github" / "workflows" / "gpoint-auto-preflight.yml").read_text()
+        self.assertIn("github.event.workflow_run.head_sha == github.sha", controller)
+        orchestrator = (ROOT / "scripts" / "release-orchestrator.mjs").read_text()
+        self.assertIn("current main", orchestrator)
+        self.assertIn("!== sha", orchestrator)
+
+    def test_mixed_ui_and_backend_changes_still_run_full_prepare(self):
+        workflow = (ROOT / ".github" / "workflows" / "gpoint-prepare.yml").read_text()
+        push_trigger = workflow[workflow.index("  push:"):workflow.index("  workflow_dispatch:")]
+        self.assertIn("paths-ignore:", push_trigger)
+        self.assertNotIn("paths:", push_trigger)
+        self.assertIn("Tests, disposable database rehearsal and immutable Docker build", workflow)
+
+    def test_worker_only_skip_policy_remains_scoped_to_existing_paths(self):
+        workflow = (ROOT / ".github" / "workflows" / "gpoint-prepare.yml").read_text()
+        push_trigger = workflow[workflow.index("  push:"):workflow.index("  workflow_dispatch:")]
+        self.assertIn("services/agata/worker/**", push_trigger)
+        self.assertIn("services/agata/conversation-lab/**", push_trigger)
+        self.assertIn("services/agata/tests/test_worker_*.py", push_trigger)
+        self.assertNotIn("apps/", push_trigger)
+
     def test_stale_retry_is_rejected_before_wait_or_expensive_work(self):
         old, current = "a" * 40, "b" * 40
         sleeps, expensive = [], []
@@ -134,7 +170,23 @@ class PrepareCoalescingTests(unittest.TestCase):
 
     def test_all_expensive_prepare_steps_are_gated_before_execution(self):
         workflow = (ROOT / ".github" / "workflows" / "gpoint-prepare.yml").read_text()
-        gate = "steps.coalesce.outputs.result == 'WINNER'"
+        gate = "needs.coalesce.outputs.result == 'WINNER'"
+        self.assertIn("needs: coalesce", workflow)
+        coalesce_job = workflow[workflow.index("  coalesce:"):workflow.index("  prepare:")]
+        self.assertIn("runs-on: [self-hosted, macOS, gpoint-production]", coalesce_job)
+        self.assertIn("outputs:", coalesce_job)
+        self.assertIn("id: coalesce", coalesce_job)
+        self.assertIn("runs-on: ubuntu-latest", workflow[workflow.index("  prepare:"):])
+        self.assertIn("contents: read", coalesce_job)
+        self.assertIn("persist-credentials: false", coalesce_job)
+        self.assertLess(workflow.index("  coalesce:"), workflow.index("  prepare:"))
+        prepare = workflow[workflow.index("  prepare:"):workflow.index("  publish:")]
+        self.assertIn("always()", prepare)
+        self.assertIn("needs.coalesce.result == 'failure'", prepare)
+        self.assertIn("needs.coalesce.outputs.result == 'WINNER'", prepare)
+        self.assertIn("Fail closed when main coalescing did not complete", prepare)
+        self.assertIn("run: exit 1", prepare)
+        self.assertIn("needs.coalesce.result != 'cancelled'", workflow[workflow.index("  publish:"):])
         self.assertIn("cancel-in-progress: ${{ github.event_name == 'push' }}", workflow)
         self.assertLess(workflow.index("id: coalesce"), workflow.index("actions/setup-node"))
         self.assertLess(workflow.index("id: coalesce"), workflow.index("prepare-release.py"))
@@ -151,10 +203,12 @@ class PrepareCoalescingTests(unittest.TestCase):
         self.assertIn("github.event.workflow_run.head_sha == github.sha", (
             ROOT / ".github" / "workflows" / "gpoint-auto-preflight.yml"
         ).read_text())
-        publish_if = workflow[workflow.index("needs: prepare"):workflow.index("runs-on: ubuntu-latest", workflow.index("needs: prepare"))]
+        publish_if = workflow[workflow.index("  publish:"):workflow.index("runs-on: ubuntu-latest", workflow.index("  publish:"))]
         self.assertIn("always() && github.ref == 'refs/heads/main'", publish_if)
         self.assertIn("needs.prepare.outputs.coalescing != 'SUPERSEDED'", publish_if)
         self.assertIn("needs.prepare.result != 'cancelled'", publish_if)
+        self.assertIn("needs.coalesce.result != 'cancelled'", publish_if)
+        self.assertIn("needs.coalesce.outputs.result != 'SUPERSEDED'", publish_if)
         deploy = (ROOT / ".github" / "workflows" / "gpoint-deploy.yml").read_text()
         self.assertIn("current main", deploy.lower())
         self.assertIn("select-release-run.py", deploy)
