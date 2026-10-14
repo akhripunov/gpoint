@@ -1,6 +1,8 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { badgeText } from "../messages-unread-policy.js";
 import { ChevronLeft, ChevronRight, LoaderCircle, Send } from "lucide-react";
+import { mediaUrl } from "../api/client";
+import { avatarFallbackText, shouldShowAvatarImage } from "../avatar-display.js";
 
 export type StatusTone = "success" | "warm" | "danger" | "neutral";
 
@@ -14,6 +16,15 @@ export function Button({ children, variant = "primary", loading = false, ...prop
 
 export function StatusBadge({ status, tone = "neutral" }: { status: string; tone?: StatusTone }) {
   return <span className={`gpoint-status-badge gpoint-status-${tone}`}>{status}</span>;
+}
+
+export function AvatarImage({ src, name, imageClassName, fallbackClassName, fallbackLength = 1, alt = "" }: { src: string | null; name: string; imageClassName?: string; fallbackClassName?: string; fallbackLength?: number; alt?: string }) {
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  if (src && shouldShowAvatarImage(src, failedSrc)) {
+    return <img className={imageClassName} src={mediaUrl(src)} alt={alt} aria-hidden={alt ? undefined : true} loading="lazy" decoding="async" style={{ objectFit: "cover", borderRadius: "inherit" }} onError={() => setFailedSrc(src)} />;
+  }
+  const text = avatarFallbackText(name, fallbackLength);
+  return fallbackClassName ? <span className={fallbackClassName} aria-hidden="true">{text}</span> : <>{text}</>;
 }
 
 export function Tabs({ items, active, onChange, className = "" }: { items: string[]; active: string; onChange: (item: string) => void; className?: string }) {
@@ -31,7 +42,7 @@ export function WorkspaceStatusCard({ icon, title, body, status, tone = "warm" }
 }
 
 export function TelegramChannelCard({ title, subtitle = "Telegram channel", lastSync, status = "Connected", icon, avatarUrl, meta }: { title: string; subtitle?: string; lastSync?: string; status?: string; icon?: ReactNode; avatarUrl?: string | null; meta?: ReactNode }) {
-  return <div className="gpoint-telegram-channel"><span className="gpoint-channel-avatar">{avatarUrl ? <img src={avatarUrl} alt="" /> : icon ?? title.slice(0, 1).toUpperCase()}</span><div className="gpoint-channel-copy"><h2>{title}</h2><p>{subtitle}</p><StatusBadge status={status} tone="success" /></div><Send className="gpoint-channel-motif" size={42} strokeWidth={1.15} aria-hidden="true" /><ChevronRight className="gpoint-channel-chevron" size={20} />{(lastSync || meta) && <div className="gpoint-channel-meta"><span>Last sync</span><strong>{meta ?? lastSync}</strong></div>}</div>;
+  return <div className="gpoint-telegram-channel"><span className="gpoint-channel-avatar">{avatarUrl ? <AvatarImage src={avatarUrl} name={title} /> : icon ?? title.slice(0, 1).toUpperCase()}</span><div className="gpoint-channel-copy"><h2>{title}</h2><p>{subtitle}</p><StatusBadge status={status} tone="success" /></div><Send className="gpoint-channel-motif" size={42} strokeWidth={1.15} aria-hidden="true" /><ChevronRight className="gpoint-channel-chevron" size={20} />{(lastSync || meta) && <div className="gpoint-channel-meta"><span>Last sync</span><strong>{meta ?? lastSync}</strong></div>}</div>;
 }
 
 export function CreatorToolCard({ title, description, icon, onClick }: { title: string; description: string; icon: ReactNode; onClick?: () => void }) {

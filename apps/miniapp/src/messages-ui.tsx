@@ -1,15 +1,16 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ArrowUp, MessageCircle, Plus, Search, ShieldAlert } from "lucide-react";
-import { ApiError, acceptMessagesConsent, creator, creatorMessages, mediaUrl, messages, messagesState, sendCreatorMessage } from "./api/client";
+import { ApiError, acceptMessagesConsent, creator, creatorMessages, messages, messagesState, sendCreatorMessage } from "./api/client";
 import type { ChatMessageDTO, MessageThreadDTO } from "../../../packages/contracts/src/index.js";
 import { mergePendingMessages } from "./messages-pending.js";
-import { Button, UnreadBadge } from "./ui";
+import { messageChannelAvatarSource } from "./avatar-display.js";
+import { AvatarImage, Button, UnreadBadge } from "./ui";
 import { filterMessageThreads } from "./messages-search.js";
 import { useMessagesUnread, useVisibleMessageReads } from "./messages-unread";
 
 function Avatar({ src, name, className = "" }: { src: string | null; name: string; className?: string }) {
-  return <span className={`messages-avatar ${className}`}>{src ? <img src={mediaUrl(src)} alt="" /> : name.slice(0, 1).toUpperCase()}</span>;
+  return <span className={`messages-avatar ${className}`}><AvatarImage src={src} name={name} /></span>;
 }
 
 function activityTime(value: string) {
@@ -174,7 +175,7 @@ export function ModelChat({ slug, back }: { slug: string; back: () => void }) {
   };
 
   return <section className="messages-chat" aria-label="Chat">
-    <header className="chat-header"><button type="button" onClick={back} aria-label="Back to messages"><ArrowLeft size={22} /></button>{model.data && <><Avatar src={model.data.avatarUrl} name={model.data.displayName} /><div className="chat-header-name"><strong>{model.data.displayName}</strong><span>@{model.data.slug}</span></div></>}</header>
+    <header className="chat-header"><button type="button" onClick={back} aria-label="Back to messages"><ArrowLeft size={22} /></button>{model.data && <><Avatar src={messageChannelAvatarSource(model.data)} name={model.data.displayName} /><div className="chat-header-name"><strong>{model.data.displayName}</strong><span>@{model.data.slug}</span></div></>}</header>
     {model.isLoading || state.isLoading ? <div className="messages-state"><span className="messages-spinner" /><p>Opening conversation…</p></div> : model.isError || !model.data ? <div className="messages-state"><h2>Model unavailable</h2><p>This model profile can't be opened right now.</p><Button variant="secondary" onClick={back}>Back to messages</Button></div> : state.isError || !state.data?.enabled ? <div className="messages-state"><h2>Messages unavailable</h2><p>Conversations are temporarily unavailable.</p></div> : ageBlocked ? <div className="messages-gate" role="alert"><ShieldAlert size={25} /><h2>Messages are unavailable</h2><p>Age assurance is required before you can send messages. Messages cannot collect or change your age status.</p></div> : needsConsent ? <div className="messages-gate"><span className="messages-empty-icon"><MessageCircle size={25} /></span><p className="eyebrow">BEFORE YOUR FIRST MESSAGE</p><h2>AI character conversation</h2><p>You’re chatting with an AI character for this creator. Your conversation history is saved so you can continue this chat later.</p><label className="messages-memory-choice"><input type="checkbox" checked={remember ?? state.data.longTermMemory} onChange={(event) => setRemember(event.target.checked)} /><span><strong>Remember things from our conversations</strong><small>Optional. You can continue without long-term memory.</small></span></label><Button loading={consent.isPending} disabled={consent.isPending} onClick={() => consent.mutate(remember ?? state.data!.longTermMemory)}>Continue</Button>{consent.isError && <p className="messages-error" role="alert">Consent couldn't be saved. Try again.</p>}</div> : <>
         <div className="chat-history" ref={historyRoot} aria-live="polite">
         {aiUnavailable && <div className="chat-provider-unavailable" role="status">AGATA is temporarily unavailable. Please try again later.</div>}
@@ -182,7 +183,7 @@ export function ModelChat({ slug, back }: { slug: string; back: () => void }) {
         {history.hasNextPage && <button className="chat-older" disabled={history.isFetchingNextPage} type="button" onClick={() => void history.fetchNextPage()}>{history.isFetchingNextPage ? "Loading…" : "Load earlier messages"}</button>}
         {history.isLoading && <div className="messages-state"><span className="messages-spinner" /><p>Loading conversation…</p></div>}
         {!history.isLoading && displayItems.map((item) => <div className={`chat-message-row ${item.role === "user" ? "mine" : "theirs"}`} data-incoming-message-id={item.role === "assistant" ? item.id : undefined} key={item.id}><article className={`chat-bubble ${item.role === "user" ? "mine" : "theirs"}`}><p>{item.text}</p>{item.status && <small className={item.status}>{item.status === "sending" ? "Sending…" : item.status === "waiting" ? "Агата отвечает…" : item.status === "accepted" ? "Sent" : <>Couldn't confirm · <button type="button" onClick={() => retry({ id: item.clientMessageId ?? item.id, text: item.text, status: "failed", createdAt: Date.now() })}>Retry</button></>}</small>}<time>{activityTime(item.occurredAt)}</time></article></div>)}
-        {!history.isLoading && !displayItems.length && <div className="chat-welcome"><Avatar src={model.data.avatarUrl} name={model.data.displayName} className="large" /><h2>{model.data.displayName}</h2><p>Start a conversation. You’re chatting with an AI character for this creator.</p></div>}
+        {!history.isLoading && !displayItems.length && <div className="chat-welcome"><Avatar src={messageChannelAvatarSource(model.data)} name={model.data.displayName} className="large" /><h2>{model.data.displayName}</h2><p>Start a conversation. You’re chatting with an AI character for this creator.</p></div>}
         <div ref={bottomRef} />
       </div>
       {displayItems.some((item) => item.status === "failed") && <p className="chat-send-error" role="alert">Delivery couldn't be confirmed. Retrying uses the same message ID.</p>}

@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { join, normalize, relative } from 'node:path';
 import { mediaStorageFromEnv } from './media-storage.js';
 import { resolveSession } from './session.js';
+import { connectedChannelAvatarFilter } from './telegram-channel-avatars.js';
 
 const prisma = new PrismaClient();
 const storage = mediaStorageFromEnv();
@@ -20,7 +21,7 @@ export class MediaReadController {
     const isPublicPost = asset.postMedia.some((x: any) => x.post.status === 'PUBLISHED' && x.post.creator.profile?.status === 'APPROVED');
     const profile = await prisma.creatorProfile.findFirst({ where: { OR: [{ avatarMediaId: id }, { coverMediaId: id }] }, select: { creator: { select: { profile: { select: { status: true } } } } } });
     const isPublicProfile = profile?.creator.profile?.status === 'APPROVED';
-    const isConnectedChannelAvatar = !!await prisma.telegramChannel.findFirst({ where: { avatarMediaId: id, status: 'CONNECTED' }, select: { id: true } });
+    const isConnectedChannelAvatar = !!await prisma.telegramChannel.findFirst({ where: connectedChannelAvatarFilter(id, asset.creatorId), select: { id: true } });
     const isAdmin = session ? !!await prisma.userRole.findUnique({ where: { userId_role: { userId: session, role: 'ADMIN' } } }) : false;
     if (asset.status !== 'READY' || (!isOwner && !isAdmin && !isPublicPost && !isPublicProfile && !isConnectedChannelAvatar)) throw new NotFoundException('media unavailable');
     if (asset.storageProvider === 'local') {
