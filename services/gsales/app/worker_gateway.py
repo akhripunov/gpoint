@@ -1,10 +1,11 @@
 """Finite worker RPC gateway; never exposes Core credentials or accepts a tenant."""
 
 import hmac
+from typing import Literal
 from uuid import UUID
 
 from fastapi import Depends, Header, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictInt
 
 from app.db.session import GateError
 
@@ -24,6 +25,15 @@ class Failure(BaseModel):
     error_code: str = Field(pattern=r"^[a-z0-9_]{1,64}$")
 
 
+class QueueStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_id: Literal["agata-worker-queue-status-v1:gsales"]
+    lane: Literal["GSALES"]
+    pending_jobs: StrictInt = Field(ge=0)
+    running_jobs: StrictInt = Field(ge=0)
+    snapshot_at: AwareDatetime
+
+
 def install(app):
     settings = app.state.settings
 
@@ -33,11 +43,11 @@ def install(app):
         ):
             raise HTTPException(401, detail={"code": "unauthorized"})
 
-    async def rpc(action, payload=None):
+    async def rpc(action, payload=None, method="POST"):
         try:
             await app.state.core.assert_secure(require_inference_ready=False)
             kwargs = {"json": payload.model_dump(mode="json")} if payload else {}
-            result = await app.state.core.request("POST", "/internal/v1/worker/" + action, **kwargs)
+            result = await app.state.core.request(method, "/internal/v1/worker/" + action, **kwargs)
             if action == "claim" and result.get("job") is not None:
                 job = result["job"]
                 if not isinstance(job, dict) or job.get("target") != "GSALES" or job.get("tenant_id") != settings.tenant_id:
@@ -69,3 +79,11 @@ def install(app):
     @app.post("/agata-worker/fail", dependencies=[Depends(authorize)])
     async def fail(payload: Failure):
         return await rpc("fail", payload)
+
+    @app.get("/agata-worker/queue-status", dependencies=[Depends(authorize)])
+    async def queue_status():
+        result = await rpc("queue-status", method="GET")
+        try:
+            return QueueStatus.model_validate(result).model_dump(mode="json")
+        except Exception:
+            raise HTTPException(503, detail={"code": "worker_core_unavailable"}) from None
