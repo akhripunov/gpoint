@@ -1,0 +1,541 @@
+{
+  "releaseId": "gpoint-release-20261014T075956434Z",
+  "candidateSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+  "previousProductionSha": "9e6c8377d3d6b34ca7e816669055322152980c06",
+  "productionShaAfter": "f93237102bfb359e07c39f258225aac188d8dc40",
+  "dbHeadBefore": "20260922090000_telegram_channel_avatar",
+  "dbHeadAfter": "20260922090000_telegram_channel_avatar",
+  "agataDbHeadBefore": "agata0011",
+  "agataDbHeadAfter": "agata0011",
+  "agataRuntimeSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+  "agataProvider": "mac_worker",
+  "artifactIdentities": {
+    "api": {
+      "sourceSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+      "adapter": {
+        "imageId": "sha256:ab6ea388360357de34a06559b84a415bc13c27aba4825a1b398a1ef24cd2c018",
+        "indexSha256": "ed691d5134799e576399f97570538e037606310d13a47a94586d536e63e9d1f2",
+        "buildSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    },
+    "worker": {
+      "sourceSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+      "adapter": {
+        "imageId": "sha256:ab6ea388360357de34a06559b84a415bc13c27aba4825a1b398a1ef24cd2c018",
+        "indexSha256": "ed691d5134799e576399f97570538e037606310d13a47a94586d536e63e9d1f2",
+        "buildSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    },
+    "bot": {
+      "sourceSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+      "adapter": {
+        "imageId": "sha256:ab6ea388360357de34a06559b84a415bc13c27aba4825a1b398a1ef24cd2c018",
+        "indexSha256": "ed691d5134799e576399f97570538e037606310d13a47a94586d536e63e9d1f2",
+        "buildSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    },
+    "miniapp": {
+      "sourceSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+      "adapter": {
+        "imageId": "sha256:ab6ea388360357de34a06559b84a415bc13c27aba4825a1b398a1ef24cd2c018",
+        "indexSha256": "ed691d5134799e576399f97570538e037606310d13a47a94586d536e63e9d1f2",
+        "buildSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+        "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
+      }
+    },
+    "agataApi": {
+      "sourceSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+      "adapter": {
+        "imageId": "sha256:18ffcfb5dbab7c370490bf6d2493ce2b3f26066cc6d25f272dfa3f6dec2ec63b",
+        "buildSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+        "apiImage": "sha256:18ffcfb5dbab7c370490bf6d2493ce2b3f26066cc6d25f272dfa3f6dec2ec63b",
+        "apiRunning": "true",
+        "apiHealth": "healthy",
+        "workerImage": "sha256:18ffcfb5dbab7c370490bf6d2493ce2b3f26066cc6d25f272dfa3f6dec2ec63b",
+        "workerRunning": "true",
+        "workerHealth": "healthy",
+        "head": "agata0011",
+        "provider": "mac_worker",
+        "codexLocalEnabled": "true",
+        "workerTokenPresent": true
+      }
+    },
+    "agataWorker": {
+      "sourceSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+      "adapter": {
+        "imageId": "sha256:18ffcfb5dbab7c370490bf6d2493ce2b3f26066cc6d25f272dfa3f6dec2ec63b",
+        "buildSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+        "apiImage": "sha256:18ffcfb5dbab7c370490bf6d2493ce2b3f26066cc6d25f272dfa3f6dec2ec63b",
+        "apiRunning": "true",
+        "apiHealth": "healthy",
+        "workerImage": "sha256:18ffcfb5dbab7c370490bf6d2493ce2b3f26066cc6d25f272dfa3f6dec2ec63b",
+        "workerRunning": "true",
+        "workerHealth": "healthy",
+        "head": "agata0011",
+        "provider": "mac_worker",
+        "codexLocalEnabled": "true",
+        "workerTokenPresent": true
+      }
+    },
+    "gsalesApi": {
+      "sourceSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+      "adapter": {
+        "agataImageId": "sha256:18ffcfb5dbab7c370490bf6d2493ce2b3f26066cc6d25f272dfa3f6dec2ec63b",
+        "apiImage": "sha256:2f8244ea4dbd556d0a99d3beb90b7a06bb52b870d68c10de36a0ace280848f8a",
+        "autoReplyEnabled": false,
+        "buildSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+        "codexLocalEnabled": true,
+        "coreApiImage": "sha256:18ffcfb5dbab7c370490bf6d2493ce2b3f26066cc6d25f272dfa3f6dec2ec63b",
+        "coreWorkerImage": "sha256:18ffcfb5dbab7c370490bf6d2493ce2b3f26066cc6d25f272dfa3f6dec2ec63b",
+        "imageId": "sha256:2f8244ea4dbd556d0a99d3beb90b7a06bb52b870d68c10de36a0ace280848f8a",
+        "inferenceReady": true,
+        "listenerEnabled": false,
+        "managementEnabled": false,
+        "migrationHead": "001_gsales",
+        "migrationSha256": "8de19ec2efd81848010379645d51243ac3f4a4cd37af0be211d71cdf36bcd111",
+        "outreachEnabled": false,
+        "provider": "mac_worker",
+        "ready": true,
+        "schemaPresent": true,
+        "securityPassed": true,
+        "tenantId": "7a33f79f-1226-4d42-a8cb-8f70f636c3ee"
+      }
+    },
+    "gsalesAgataApi": {
+      "sourceSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+      "adapter": {
+        "agataImageId": "sha256:18ffcfb5dbab7c370490bf6d2493ce2b3f26066cc6d25f272dfa3f6dec2ec63b",
+        "apiImage": "sha256:2f8244ea4dbd556d0a99d3beb90b7a06bb52b870d68c10de36a0ace280848f8a",
+        "autoReplyEnabled": false,
+        "buildSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+        "codexLocalEnabled": true,
+        "coreApiImage": "sha256:18ffcfb5dbab7c370490bf6d2493ce2b3f26066cc6d25f272dfa3f6dec2ec63b",
+        "coreWorkerImage": "sha256:18ffcfb5dbab7c370490bf6d2493ce2b3f26066cc6d25f272dfa3f6dec2ec63b",
+        "imageId": "sha256:2f8244ea4dbd556d0a99d3beb90b7a06bb52b870d68c10de36a0ace280848f8a",
+        "inferenceReady": true,
+        "listenerEnabled": false,
+        "managementEnabled": false,
+        "migrationHead": "001_gsales",
+        "migrationSha256": "8de19ec2efd81848010379645d51243ac3f4a4cd37af0be211d71cdf36bcd111",
+        "outreachEnabled": false,
+        "provider": "mac_worker",
+        "ready": true,
+        "schemaPresent": true,
+        "securityPassed": true,
+        "tenantId": "7a33f79f-1226-4d42-a8cb-8f70f636c3ee"
+      }
+    },
+    "gsalesAgataWorker": {
+      "sourceSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+      "adapter": {
+        "agataImageId": "sha256:18ffcfb5dbab7c370490bf6d2493ce2b3f26066cc6d25f272dfa3f6dec2ec63b",
+        "apiImage": "sha256:2f8244ea4dbd556d0a99d3beb90b7a06bb52b870d68c10de36a0ace280848f8a",
+        "autoReplyEnabled": false,
+        "buildSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+        "codexLocalEnabled": true,
+        "coreApiImage": "sha256:18ffcfb5dbab7c370490bf6d2493ce2b3f26066cc6d25f272dfa3f6dec2ec63b",
+        "coreWorkerImage": "sha256:18ffcfb5dbab7c370490bf6d2493ce2b3f26066cc6d25f272dfa3f6dec2ec63b",
+        "imageId": "sha256:2f8244ea4dbd556d0a99d3beb90b7a06bb52b870d68c10de36a0ace280848f8a",
+        "inferenceReady": true,
+        "listenerEnabled": false,
+        "managementEnabled": false,
+        "migrationHead": "001_gsales",
+        "migrationSha256": "8de19ec2efd81848010379645d51243ac3f4a4cd37af0be211d71cdf36bcd111",
+        "outreachEnabled": false,
+        "provider": "mac_worker",
+        "ready": true,
+        "schemaPresent": true,
+        "securityPassed": true,
+        "tenantId": "7a33f79f-1226-4d42-a8cb-8f70f636c3ee"
+      }
+    }
+  },
+  "startedAt": "2026-10-14T07:59:56.434Z",
+  "finishedAt": "2026-10-14T08:06:49.359Z",
+  "status": "COMPLETE",
+  "failureStage": null,
+  "failureReason": null,
+  "rollbackSha": "9e6c8377d3d6b34ca7e816669055322152980c06",
+  "rollbackDbCompatibility": "REQUIRES_FORWARD_FIX_ASSESSMENT",
+  "productionRef": "gpoint-production-20261014T075956434Z",
+  "remoteProof": {
+    "mainSha": "f93237102bfb359e07c39f258225aac188d8dc40"
+  },
+  "migrationOutput": "DATABASE_SCHEMA_UP_TO_DATE,AGATA_HEAD=agata0011",
+  "migrationProof": null,
+  "detectorSourceHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32",
+  "stageTimings": {
+    "API_HEALTH": 0.4,
+    "WORKER_HEALTH": 0.2,
+    "PRODUCTION_REF_CREATE": 0,
+    "PRODUCTION_REF_PUSH_AND_VERIFY": 2.5,
+    "PRODUCTION_PREFLIGHT": 6,
+    "SOURCE_PREPARE": 3.4,
+    "CI_ARTIFACT_REUSE_CHECK": 1.5,
+    "CI_ARTIFACT_UPLOAD": 159.9,
+    "CI_ARTIFACT_LOAD": 53.3,
+    "CI_ARTIFACT_IMPORT": 214.7,
+    "RUNTIME_BUILD": 3.3,
+    "CI_ARTIFACT_PARITY": 1.5,
+    "MIGRATION_APPLY": 19,
+    "PRE_SWITCH_PREPARATION": 2.7,
+    "AGATA_PRE_SWITCH_READINESS": 18.5,
+    "GSALES_PRE_SWITCH_START": 22.3,
+    "AUX_BUILD": 0.2,
+    "RUNTIME_SWITCH": 14.3,
+    "CONTAINER_HEALTH_WAIT": 9,
+    "POST_SWITCH_RECONCILIATION": 1,
+    "AGATA_POST_SWITCH_RECONCILIATION": 4.1,
+    "AGATA_PROVIDER_POST_SWITCH": 4.6,
+    "GSALES_POST_SWITCH_RECONCILIATION": 6.8,
+    "POST_RELEASE_CLEANUP": 49.1,
+    "TOTAL_RELEASE": 406.2
+  },
+  "releaseOrigin": "durable-production-release",
+  "agataMigrationReadiness": null,
+  "serverDeployStatus": "COMPLETE",
+  "workerOperationalStatus": "HEALTHY",
+  "workerDependencies": {
+    "GPOINT": {
+      "status": "HEALTHY",
+      "reasons": [],
+      "evidence": {
+        "enabled": true,
+        "lastPollAt": "2026-10-14T08:06:42.315Z",
+        "lastHeartbeatAt": "2026-10-14T08:06:42.172Z"
+      }
+    },
+    "GSALES": {
+      "status": "HEALTHY",
+      "reasons": [],
+      "evidence": {
+        "enabled": true,
+        "lastPollAt": "2026-10-14T08:06:45.593Z",
+        "lastHeartbeatAt": "2026-10-14T08:06:26.608Z"
+      }
+    }
+  },
+  "overallServiceReadiness": "READY",
+  "dependencyCheckedAt": "2026-10-14T08:06:49.359Z",
+  "inferenceAcceptance": "NOT_VERIFIED",
+  "workerCompatibility": {
+    "compatibility": "PASS",
+    "candidateSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+    "sourceStatus": "EXACT_MATCH",
+    "assets": {
+      "gpoint_mac_worker.py": {
+        "candidateSha256": "8e1c34ab09581c4ebe129e5cc13db30f956a79566933f0a64842cdf6107ad1f8",
+        "installedSha256": "8e1c34ab09581c4ebe129e5cc13db30f956a79566933f0a64842cdf6107ad1f8",
+        "matches": true
+      },
+      "agata_worker_pool.py": {
+        "candidateSha256": "f1eb582b5f0b9fc6482e3b36091319573376dfe0b5c45326e04673288ede439f",
+        "installedSha256": "f1eb582b5f0b9fc6482e3b36091319573376dfe0b5c45326e04673288ede439f",
+        "matches": true
+      },
+      "lab_queue.py": {
+        "candidateSha256": "006328c66c14549bae39a29ac85a1c34350d460e818dcde1a403ceb5faf6e910",
+        "installedSha256": "006328c66c14549bae39a29ac85a1c34350d460e818dcde1a403ceb5faf6e910",
+        "matches": true
+      },
+      "lab_fixture_manifest.json": {
+        "candidateSha256": "2bf4936187d4ff7c1f67d7a97fdc43c7ab5025d00bd3cbbb654c3d62ccd865d1",
+        "installedSha256": "2bf4936187d4ff7c1f67d7a97fdc43c7ab5025d00bd3cbbb654c3d62ccd865d1",
+        "matches": true
+      },
+      "requirements.txt": {
+        "candidateSha256": "8e32dea33b5b45165c6e856ad0e702ea563dc3bc8a7a015ed523b9f3c60d2300",
+        "installedSha256": "8e32dea33b5b45165c6e856ad0e702ea563dc3bc8a7a015ed523b9f3c60d2300",
+        "matches": true
+      },
+      "run_codex_worker.sh": {
+        "candidateSha256": "0e52790950808c5778904cd98d47e19a0a8069a88c273ee7823bba3ce4dd26c9",
+        "installedSha256": "0e52790950808c5778904cd98d47e19a0a8069a88c273ee7823bba3ce4dd26c9",
+        "matches": true
+      }
+    },
+    "contract": {
+      "protocols": {
+        "GPOINT": "https://gpoint.amiora.one/api/agata-worker",
+        "GSALES": "https://gpoint.amiora.one/gsales/agata-worker"
+      },
+      "tenants": {
+        "GPOINT": "81a4ba28-6de5-4b03-8332-0661ba4d46f4",
+        "GSALES": "7a33f79f-1226-4d42-a8cb-8f70f636c3ee"
+      },
+      "lanes": {
+        "GPOINT": "CONFIGURED",
+        "GSALES": "CONFIGURED"
+      },
+      "credentialParity": {
+        "GPOINT": "MATCH",
+        "GSALES": "MATCH",
+        "distinct": "YES"
+      }
+    }
+  },
+  "ciReceipt": {
+    "schema": 1,
+    "candidateSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+    "status": "READY",
+    "runId": 38526599004,
+    "runAttempt": 1,
+    "gates": {
+      "unit": "PASS",
+      "postgres": "PASS",
+      "gsalesPostgres": "PASS",
+      "gsalesImage": "PASS",
+      "gsalesMigrationChecksum": "PASS",
+      "docker": "PASS",
+      "migration": "PASS",
+      "miniapp": "PASS",
+      "agataHealth": "PASS",
+      "deployRehearsal": "PASS"
+    },
+    "impactV3": {
+      "baselineSource": "gpoint-release-ledger",
+      "candidateSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+      "changedPaths": [
+        ".github/workflows/gpoint-prepare.yml",
+        "scripts/test_prepare_coalescing.py"
+      ],
+      "checks": {
+        "agata_postgres_rehearsal": true,
+        "gsales_postgres_regression": true
+      },
+      "classification": "FULL",
+      "invariantChecks": [
+        "workspace_build",
+        "workspace_typecheck",
+        "workspace_tests",
+        "release_tests",
+        "artifact_migrations",
+        "docker_images_exact_sha",
+        "artifact_parity",
+        "immutable_receipt",
+        "deploy_rehearsal",
+        "canonical_preflight",
+        "production_approval"
+      ],
+      "productionBaselineSha": "9e6c8377d3d6b34ca7e816669055322152980c06",
+      "reason": "impact-not-proven",
+      "version": 1
+    },
+    "images": {
+      "app": {
+        "id": "sha256:162bbab77ce2c7248d5ed25fd4edc23e3734969c169a822a81e61d888cdd9ab9",
+        "revision": "f93237102bfb359e07c39f258225aac188d8dc40",
+        "platform": "linux/amd64"
+      },
+      "agata": {
+        "id": "sha256:2bf939fce21cb048d16aaa6267b8a10b597aa995dd9c9b4afd5227eb29baf89c",
+        "revision": "f93237102bfb359e07c39f258225aac188d8dc40",
+        "platform": "linux/amd64"
+      },
+      "gsales": {
+        "id": "sha256:2c9462e678e97e5ecaf5ac1153c6d7dd8341de648832b097555903b1efef63d9",
+        "revision": "f93237102bfb359e07c39f258225aac188d8dc40",
+        "platform": "linux/amd64"
+      }
+    },
+    "archiveSha256": "d3b8f6f5a99fc9a7d1bcfc3167942f83959b83f94739ac6caa288319b21d66d7",
+    "prismaHead": "20260922090000_telegram_channel_avatar",
+    "agataHead": "agata0011",
+    "gsalesMigrationHead": "001_gsales",
+    "gsalesMigrationSha256": "8de19ec2efd81848010379645d51243ac3f4a4cd37af0be211d71cdf36bcd111",
+    "prepareStages": {
+      "pnpm_install": {
+        "status": "PASS",
+        "seconds": 2.728
+      },
+      "prisma_generate": {
+        "status": "PASS",
+        "seconds": 2.387
+      },
+      "workspace_build": {
+        "status": "PASS",
+        "seconds": 26.577
+      },
+      "workspace_typecheck": {
+        "status": "PASS",
+        "seconds": 19.92
+      },
+      "workspace_tests": {
+        "status": "PASS",
+        "seconds": 8.789
+      },
+      "release_tests": {
+        "status": "PASS",
+        "seconds": 10.453
+      },
+      "linear_tests": {
+        "status": "PASS",
+        "seconds": 0.215
+      },
+      "production_migration_gate_tests": {
+        "status": "PASS",
+        "seconds": 0.114
+      },
+      "gsales_provision_gate_tests": {
+        "status": "PASS",
+        "seconds": 0.115
+      },
+      "gsales_mac_lane_gate_tests": {
+        "status": "PASS",
+        "seconds": 0.215
+      },
+      "prepare_inventory_tests": {
+        "status": "PASS",
+        "seconds": 0.666
+      },
+      "release_asset_tests": {
+        "status": "PASS",
+        "seconds": 0.165
+      },
+      "artifact_cache_tests": {
+        "status": "PASS",
+        "seconds": 0.265
+      },
+      "gsales_compose_profile_tests": {
+        "status": "PASS",
+        "seconds": 1.019
+      },
+      "disposable_postgres_setup": {
+        "status": "PASS",
+        "seconds": 13.228
+      },
+      "agata_baseline_migration_tests": {
+        "status": "PASS",
+        "seconds": 11.574
+      },
+      "agata_postgres_integration_tests": {
+        "status": "PASS",
+        "seconds": 66.53
+      },
+      "agata_api_e2e_tests": {
+        "status": "PASS",
+        "seconds": 5.239
+      },
+      "docker_build_gpoint_runtime": {
+        "status": "PASS",
+        "seconds": 71.718
+      },
+      "docker_build_gpoint_agata_runtime": {
+        "status": "PASS",
+        "seconds": 45.562
+      },
+      "docker_build_gpoint_g_sales_runtime": {
+        "status": "PASS",
+        "seconds": 24.035
+      },
+      "gsales_migration_backup_restore": {
+        "status": "PASS",
+        "seconds": 8.81
+      },
+      "gsales_image_live_health": {
+        "status": "PASS",
+        "seconds": 2.112
+      },
+      "agata_guarded_production_migration_rehearsal": {
+        "status": "PASS",
+        "seconds": 11.358
+      },
+      "gsales_protected_provision_rehearsal": {
+        "status": "PASS",
+        "seconds": 27.059
+      },
+      "runtime_artifact_migration_check": {
+        "status": "PASS",
+        "seconds": 4.145
+      },
+      "agata_artifact_migration_and_health": {
+        "status": "PASS",
+        "seconds": 7.903
+      },
+      "gsales_postgres_regression": {
+        "status": "PASS",
+        "seconds": 301.621
+      },
+      "image_archive_export": {
+        "status": "PASS",
+        "seconds": 21.387
+      },
+      "deploy_artifact_roundtrip": {
+        "status": "PASS",
+        "seconds": 37.003
+      }
+    },
+    "deployRehearsal": {
+      "dockerVersion": "29.1.3",
+      "store": "containerd",
+      "snapshotter": "overlayfs",
+      "identityRegressionRejected": [
+        "app",
+        "agata"
+      ],
+      "seconds": 32.9
+    },
+    "applicationSmoke": "DISPOSABLE_DB_DETERMINISTIC_PROVIDER",
+    "productionUserSmoke": "NOT_RUN"
+  },
+  "componentImages": {
+    "app": {
+      "imageId": "sha256:ab6ea388360357de34a06559b84a415bc13c27aba4825a1b398a1ef24cd2c018",
+      "sourceSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+      "platform": "linux/amd64"
+    },
+    "agata": {
+      "imageId": "sha256:18ffcfb5dbab7c370490bf6d2493ce2b3f26066cc6d25f272dfa3f6dec2ec63b",
+      "sourceSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+      "platform": "linux/amd64"
+    },
+    "gsales": {
+      "imageId": "sha256:2f8244ea4dbd556d0a99d3beb90b7a06bb52b870d68c10de36a0ace280848f8a",
+      "sourceSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+      "platform": "linux/amd64"
+    }
+  },
+  "miniappSourceSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+  "gsalesReadiness": {
+    "baselineSha": "9e6c8377d3d6b34ca7e816669055322152980c06",
+    "candidateSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+    "migrationHead": "001_gsales",
+    "migrationSha256": "8de19ec2efd81848010379645d51243ac3f4a4cd37af0be211d71cdf36bcd111",
+    "provider": "mac_worker",
+    "readiness": "PASS",
+    "schemaPresent": true,
+    "sendingEnabled": false,
+    "tenantId": "7a33f79f-1226-4d42-a8cb-8f70f636c3ee"
+  },
+  "gsalesDbHeadBefore": "001_gsales",
+  "gsalesDbHeadAfter": "001_gsales",
+  "gsalesRuntime": {
+    "agataImageId": "sha256:18ffcfb5dbab7c370490bf6d2493ce2b3f26066cc6d25f272dfa3f6dec2ec63b",
+    "apiImage": "sha256:2f8244ea4dbd556d0a99d3beb90b7a06bb52b870d68c10de36a0ace280848f8a",
+    "autoReplyEnabled": false,
+    "buildSha": "f93237102bfb359e07c39f258225aac188d8dc40",
+    "codexLocalEnabled": true,
+    "coreApiImage": "sha256:18ffcfb5dbab7c370490bf6d2493ce2b3f26066cc6d25f272dfa3f6dec2ec63b",
+    "coreWorkerImage": "sha256:18ffcfb5dbab7c370490bf6d2493ce2b3f26066cc6d25f272dfa3f6dec2ec63b",
+    "imageId": "sha256:2f8244ea4dbd556d0a99d3beb90b7a06bb52b870d68c10de36a0ace280848f8a",
+    "inferenceReady": true,
+    "listenerEnabled": false,
+    "managementEnabled": false,
+    "migrationHead": "001_gsales",
+    "migrationSha256": "8de19ec2efd81848010379645d51243ac3f4a4cd37af0be211d71cdf36bcd111",
+    "outreachEnabled": false,
+    "provider": "mac_worker",
+    "ready": true,
+    "schemaPresent": true,
+    "securityPassed": true,
+    "tenantId": "7a33f79f-1226-4d42-a8cb-8f70f636c3ee"
+  },
+  "effectiveConfigSha256": "921b7cf2f711b05859995f590660dd3f8de532f3b3e3060057c3c2c5ad56d021",
+  "authorizationMode": "EXACT_SHA",
+  "authorizationId": null,
+  "authorizationSourceReference": null,
+  "authorizationRecordSha256": null
+}
