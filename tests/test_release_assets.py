@@ -57,7 +57,7 @@ class ImmutableReleaseTests(unittest.TestCase):
     def test_read_result_passes_immutable_asset_size_to_range_downloader(self):
         import prepared_artifact_cache as cache
         asset = {'id': 72, 'size': 1234, 'digest': 'sha256:' + 'b' * 64}
-        with patch.object(ASSETS, 'resolve_asset', return_value=asset), \
+        with patch.object(ASSETS, 'find_deploy_evidence', return_value=('2', asset)), \
              patch.object(cache, 'download', side_effect=RuntimeError('stop after downloader call')) as download:
             with self.assertRaisesRegex(RuntimeError, 'stop after downloader call'):
                 ASSETS.read_result('a' * 40, '55', '2', result_path='/tmp/result.json', token='unused')
@@ -68,6 +68,63 @@ class ImmutableReleaseTests(unittest.TestCase):
         ASSETS.validate_result(data, 'a'*40, '55', '1')
         for sha, run_id, attempt in [('a'*40, '55', '2'), ('b'*40, '55', '1'), ('a'*40, '56', '1')]:
             with self.assertRaises(RuntimeError): ASSETS.validate_result(data, sha, run_id, attempt)
+
+    def test_publish_rerun_uses_actual_successful_deploy_attempt(self):
+        sha = 'a' * 40
+        tag = ASSETS.release_tag('evidence', sha, '55', '1')
+        release = {'tag_name': tag, 'draft': False, 'immutable': True,
+                   'assets': [{'id': 99, 'name': 'result.zip', 'state': 'uploaded',
+                               'size': 123, 'digest': 'sha256:' + 'b' * 64}]}
+        def api(route):
+            if route.endswith('-2') and route.startswith('releases/tags/'):
+                return None
+            if route == 'releases/tags/' + tag:
+                return release
+            if route == 'git/ref/tags/' + tag:
+                return {'object': {'type': 'commit', 'sha': sha}}
+            if route == 'actions/runs/55/attempts/1/jobs?per_page=100':
+                return {'total_count': 1, 'jobs': [{'name': 'deploy', 'status': 'completed',
+                                                    'conclusion': 'success', 'head_sha': sha}]}
+            raise AssertionError(route)
+        attempt, asset = ASSETS.find_deploy_evidence(sha, '55', '2', api)
+        self.assertEqual(attempt, '1')
+        self.assertEqual(asset['id'], 99)
+
+    def test_immutable_evidence_mismatch_fails_closed(self):
+        sha = 'a' * 40
+        tag = ASSETS.release_tag('evidence', sha, '55', '1')
+        base = {'tag_name': tag, 'draft': False, 'immutable': True,
+                'assets': [{'id': 99, 'name': 'result.zip', 'state': 'uploaded',
+                            'size': 123, 'digest': 'sha256:' + 'b' * 64}]}
+        def api(route):
+            if route == 'releases/tags/' + tag:
+                return base
+            if route.startswith('releases/tags/'):
+                return None
+            if route.startswith('git/ref/'):
+                return {'object': {'type': 'commit', 'sha': sha}}
+            if route.endswith('/jobs?per_page=100'):
+                return {'total_count': 1, 'jobs': [{'name': 'deploy', 'status': 'completed',
+                                                    'conclusion': 'failure', 'head_sha': sha}]}
+            raise AssertionError(route)
+        with self.assertRaises(RuntimeError):
+            ASSETS.find_deploy_evidence(sha, '55', '2', api)
+        base['immutable'] = False
+        with self.assertRaises(RuntimeError):
+            ASSETS.find_deploy_evidence(sha, '55', '2', api)
+        base['immutable'] = True
+        base['assets'] = []
+        with self.assertRaises(RuntimeError):
+            ASSETS.find_deploy_evidence(sha, '55', '2', api)
+
+    def test_missing_evidence_and_unexpected_api_error_fail_closed(self):
+        sha = 'a' * 40
+        with self.assertRaisesRegex(RuntimeError, 'No immutable evidence'):
+            ASSETS.find_deploy_evidence(sha, '55', '3', lambda route: None)
+        def api_error(route):
+            raise ConnectionError('read failed')
+        with self.assertRaises(ConnectionError):
+            ASSETS.find_deploy_evidence(sha, '55', '2', api_error)
 
     def test_ci_never_requires_repository_administration_permission(self):
         source = (ROOT / 'scripts/release_assets.py').read_text()

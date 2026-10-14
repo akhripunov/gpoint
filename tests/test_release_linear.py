@@ -386,6 +386,9 @@ class ReleaseTests(unittest.TestCase):
                 if path.endswith('/artifacts'): return {'artifacts': []}
                 if path.endswith('/55'): return {'head_sha': sha, 'head_branch': 'main', 'event': 'workflow_dispatch',
                                                  'path': '.github/workflows/gpoint-deploy.yml', 'run_attempt': 2}
+                if '/actions/runs/55/attempts/2/jobs' in path:
+                    return {'total_count': 1, 'jobs': [{'name': 'deploy', 'status': 'completed',
+                                                        'conclusion': 'success', 'head_sha': sha}]}
                 if '/git/ref/' in path: return {'object': {'type': 'commit', 'sha': sha}}
                 return {'tag_name': tag, 'draft': False, 'immutable': immutable, 'assets': [
                     {'id': 99, 'name': 'result.zip', 'state': 'uploaded', 'size': len(payload), 'digest': 'sha256:'+digest}]}

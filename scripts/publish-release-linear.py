@@ -13,7 +13,7 @@ import zipfile
 import hashlib
 from datetime import datetime, timezone
 
-from release_assets import resolve_asset, validate_result
+from release_assets import resolve_asset, validate_result, find_deploy_evidence
 from sync_agents_to_linear import graphql_request, sync_document, SyncError
 
 DOCUMENTS = {
@@ -42,6 +42,15 @@ def github_json(path, token=None):
         raise error from exc
 
 
+def _optional_github(route):
+    try:
+        return github_json(f'repos/{REPOSITORY}/{route}')
+    except SyncError as exc:
+        if getattr(exc, 'http_status', None) == 404 and route.startswith('releases/tags/'):
+            return None
+        raise
+
+
 def artifact_json(run_id, prefix):
     release_run = None
     data = github_json(f'repos/{REPOSITORY}/actions/runs/{run_id}/artifacts')
@@ -52,8 +61,9 @@ def artifact_json(run_id, prefix):
                 or run.get('head_branch') != 'main' or run.get('event') != 'workflow_dispatch'):
             raise SyncError('Unverified Deploy result provenance')
         try:
-            asset = resolve_asset('evidence', run['head_sha'], str(run_id), str(run['run_attempt']),
-                                  'result.zip', lambda route: github_json(f'repos/{REPOSITORY}/{route}'))
+            source_attempt, asset = find_deploy_evidence(
+                run['head_sha'], str(run_id), str(run['run_attempt']),
+                lambda route: _optional_github(route))
         except SyncError as exc:
             if getattr(exc, 'http_status', None) == 404:
                 raise SyncError(f'Expected one canonical result artifact for run {run_id}; found 0') from exc
@@ -91,7 +101,7 @@ def artifact_json(run_id, prefix):
                 raise SyncError(f'Expected one JSON result in run {run_id} artifact')
             result = json.loads(archive.read(files[0]))
             if release_run:
-                validate_result(result, release_run['head_sha'], run_id, release_run['run_attempt'])
+                validate_result(result, release_run['head_sha'], run_id, source_attempt)
             return result
     except SyncError:
         raise
