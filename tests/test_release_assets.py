@@ -174,6 +174,42 @@ class ImmutableReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'timing evidence invalid'):
             ASSETS.find_deploy_evidence(sha, '55', '2', api)
 
+    def test_prepare_publish_only_rerun_uses_actual_build_attempt(self):
+        sha = 'a' * 40
+        tag = ASSETS.release_tag('prepare', sha, '55', '1')
+        release = {'tag_name': tag, 'draft': False, 'immutable': True,
+                   'assets': [{'id': 87, 'name': 'bundle.zip', 'state': 'uploaded',
+                               'size': 444, 'digest': 'sha256:' + 'c' * 64}]}
+        def api(route):
+            if route == 'releases/tags/' + tag: return release
+            if route.startswith('releases/tags/'): return None
+            if route == 'git/ref/tags/' + tag: return {'object': {'type': 'commit', 'sha': sha}}
+            if route == 'actions/runs/55/attempts/2':
+                return {'run_attempt': 2, 'run_started_at': '2026-10-14T04:51:39Z'}
+            if route == 'actions/runs/55/attempts/1':
+                return {'run_attempt': 1, 'run_started_at': '2026-10-14T04:38:31Z'}
+            if route.endswith('/jobs?per_page=100'):
+                return {'total_count': 1, 'jobs': [{'name': 'prepare', 'status': 'completed',
+                    'conclusion': 'success', 'head_sha': sha, 'started_at': '2026-10-14T04:38:34Z',
+                    'completed_at': '2026-10-14T04:46:48Z'}]}
+            raise AssertionError(route)
+        attempt, asset = ASSETS.find_prepare_evidence(sha, '55', '2', api)
+        self.assertEqual((attempt, asset['id']), ('1', 87))
+
+    def test_prepare_new_execute_without_bundle_rejected(self):
+        sha = 'a' * 40
+        def api(route):
+            if route.startswith('releases/tags/'): return None
+            if route == 'actions/runs/55/attempts/2':
+                return {'run_attempt': 2, 'run_started_at': '2026-10-14T04:51:39Z'}
+            if route.endswith('/jobs?per_page=100'):
+                return {'total_count': 1, 'jobs': [{'name': 'prepare', 'status': 'completed',
+                    'conclusion': 'success', 'head_sha': sha, 'started_at': '2026-10-14T04:52:00Z',
+                    'completed_at': '2026-10-14T04:55:00Z'}]}
+            raise AssertionError(route)
+        with self.assertRaisesRegex(RuntimeError, 'no immutable bundle'):
+            ASSETS.find_prepare_evidence(sha, '55', '2', api)
+
     def test_immutable_evidence_mismatch_fails_closed(self):
         sha = 'a' * 40
         tag = ASSETS.release_tag('evidence', sha, '55', '1')

@@ -51,6 +51,58 @@ export function makeApi(token, fetchImpl = fetch) {
   };
 }
 
+export async function executedPrepareBundle(api, run) {
+  const sha = run.head_sha;
+  const runId = String(run.id);
+  const attemptCount = Number(run.run_attempt);
+  if (!SHA.test(sha) || !/^\d+$/.test(runId) || !Number.isSafeInteger(attemptCount) || attemptCount < 1) {
+    throw new OrchestrationError('Invalid Prepare source identity');
+  }
+  const epoch = value => {
+    if (typeof value !== 'string' || !/Z$|[+-]\d\d:\d\d$/.test(value)) throw new OrchestrationError('Invalid Prepare chronology');
+    const ms = Date.parse(value);
+    if (!Number.isFinite(ms)) throw new OrchestrationError('Invalid Prepare chronology');
+    return ms;
+  };
+  for (let number = attemptCount; number >= 1; number--) {
+    const tag = `gpoint-prepare-${sha}-${runId}-${number}`;
+    const details = await api('GET', `actions/runs/${runId}/attempts/${number}`);
+    const jobs = await api('GET', `actions/runs/${runId}/attempts/${number}/jobs?per_page=100`);
+    if (String(details.run_attempt) !== String(number) || !Array.isArray(jobs.jobs) ||
+        (jobs.total_count ?? jobs.jobs.length) > 100) throw new OrchestrationError('Prepare attempts are incomplete');
+    const matched = jobs.jobs.filter(job => job.name === 'prepare');
+    if (matched.length !== 1) throw new OrchestrationError('Ambiguous executed Prepare job');
+    const job = matched[0];
+    if (job.status !== 'completed' || job.conclusion !== 'success' || job.head_sha !== sha) {
+      throw new OrchestrationError('Exact Prepare job did not succeed');
+    }
+    const started = epoch(details.run_started_at);
+    const actualStart = epoch(job.started_at);
+    const actualEnd = epoch(job.completed_at);
+    if (actualEnd < actualStart) throw new OrchestrationError('Invalid Prepare job chronology');
+    let release;
+    try { release = await api('GET', `releases/tags/${tag}`); }
+    catch (error) { if (error.status !== 404) throw error; }
+    if (!release) {
+      if (actualStart < started && actualEnd <= started) continue;
+      throw new OrchestrationError('Executed Prepare has no immutable bundle');
+    }
+    if (actualStart < started) throw new OrchestrationError('Prepare artifact attempt does not match executed job');
+    if (release.tag_name !== tag || release.draft !== false || release.immutable !== true) {
+      throw new OrchestrationError('Prepare release is not immutable and published');
+    }
+    const ref = await api('GET', `git/ref/tags/${tag}`);
+    if (ref.object?.type !== 'commit' || ref.object?.sha !== sha) throw new OrchestrationError('Prepare tag source mismatch');
+    const assets = (release.assets ?? []).filter(asset => asset.name === 'bundle.zip');
+    if (release.assets?.length !== 1 || assets.length !== 1) throw new OrchestrationError('Expected exactly one immutable Prepare bundle');
+    const asset = assets[0];
+    if (!/^\d+$/.test(String(asset.id ?? '')) || asset.state !== 'uploaded' || !Number.isSafeInteger(asset.size)
+        || asset.size <= 0 || !/^sha256:[a-f0-9]{64}$/.test(asset.digest ?? '')) throw new OrchestrationError('Prepare asset digest/provenance is invalid');
+    return {tag, asset, sourceAttempt: String(number)};
+  }
+  throw new OrchestrationError('No executed immutable Prepare bundle');
+}
+
 async function verifiedPrepare(api, eventRun) {
   const sha = eventRun.head_sha;
   if ((await api('GET', 'git/ref/heads/main')).object?.sha !== sha) throw new OrchestrationError('Prepare candidate is no longer current main');
@@ -58,26 +110,17 @@ async function verifiedPrepare(api, eventRun) {
   for (const key of ['head_sha', 'head_branch', 'status', 'conclusion', 'event', 'path', 'run_attempt']) {
     if (String(run[key]) !== String(eventRun[key])) throw new OrchestrationError('Prepare run metadata changed');
   }
-  const tag = `gpoint-prepare-${sha}-${eventRun.id}-${eventRun.run_attempt}`;
-  const release = await api('GET', `releases/tags/${tag}`);
-  if (release.tag_name !== tag || release.draft !== false || release.immutable !== true) throw new OrchestrationError('Prepare release is not immutable and published');
-  const ref = await api('GET', `git/ref/tags/${tag}`);
-  if (ref.object?.type !== 'commit' || ref.object?.sha !== sha) throw new OrchestrationError('Prepare release tag does not point to candidate SHA');
-  const assets = (release.assets ?? []).filter(asset => asset.name === 'bundle.zip');
-  if (release.assets?.length !== 1 || assets.length !== 1) throw new OrchestrationError('Expected exactly one immutable Prepare bundle');
-  const asset = assets[0];
-  if (!/^\d+$/.test(String(asset.id ?? '')) || asset.state !== 'uploaded' || !Number.isSafeInteger(asset.size)
-      || asset.size <= 0 || !/^sha256:[a-f0-9]{64}$/.test(asset.digest ?? '')) throw new OrchestrationError('Prepare asset digest/provenance is invalid');
+  const {tag, asset, sourceAttempt} = await executedPrepareBundle(api, eventRun);
   const active = await api('GET', `actions/workflows/gpoint-deploy.yml/runs?branch=main&per_page=100`);
   if ((active.workflow_runs ?? []).some(item => ['queued', 'in_progress', 'waiting', 'pending'].includes(item.status))) {
     throw new OrchestrationError('A GPoint Deploy workflow is active');
   }
-  return {sha, tag, asset};
+  return {sha, tag, asset, sourceAttempt};
 }
 
 export async function dispatchPrepare(payload, api, orchestratorRunId = process.env.GITHUB_RUN_ID ?? '') {
   const run = validateEvent(payload);
-  const {sha, tag, asset} = await verifiedPrepare(api, run);
+  const {sha, tag, asset, sourceAttempt} = await verifiedPrepare(api, run);
   const ref = claimRef(run);
   try {
     await api('POST', 'git/refs', {ref, sha});
@@ -85,18 +128,18 @@ export async function dispatchPrepare(payload, api, orchestratorRunId = process.
     if (error.status !== 422) throw new OrchestrationError('Atomic preflight claim failed');
     const existing = await api('GET', `git/ref/tags/${ref.replace('refs/tags/', '')}`);
     if (existing.object?.type !== 'commit' || existing.object?.sha !== sha) throw new OrchestrationError('Existing preflight claim differs from candidate');
-    return {state: 'PREFLIGHT_ALREADY_CLAIMED', candidateSha: sha, prepareRunId: String(run.id), prepareRunAttempt: String(run.run_attempt), tag, assetId: String(asset.id), assetSha256: asset.digest.slice(7)};
+    return {state: 'PREFLIGHT_ALREADY_CLAIMED', candidateSha: sha, prepareRunId: String(run.id), prepareRunAttempt: String(sourceAttempt), tag, assetId: String(asset.id), assetSha256: asset.digest.slice(7)};
   }
   try {
     await api('POST', `actions/workflows/${DEPLOY_PATH.split('/').at(-1)}/dispatches`, {ref: 'main', inputs: {
       candidate: sha, mode: 'preflight', approve_production: 'false',
-      prepare_run_id: String(run.id), prepare_run_attempt: String(run.run_attempt),
+      prepare_run_id: String(run.id), prepare_run_attempt: String(sourceAttempt),
       orchestrator_run_id: orchestratorRunId,
     }});
   } catch {
     throw new OrchestrationError('Preflight dispatch failed after durable claim; manual recovery required');
   }
-  return {state: 'PREFLIGHT_DISPATCHED', candidateSha: sha, prepareRunId: String(run.id), prepareRunAttempt: String(run.run_attempt), tag, assetId: String(asset.id), assetSha256: asset.digest.slice(7)};
+  return {state: 'PREFLIGHT_DISPATCHED', candidateSha: sha, prepareRunId: String(run.id), prepareRunAttempt: String(sourceAttempt), tag, assetId: String(asset.id), assetSha256: asset.digest.slice(7)};
 }
 
 async function main() {

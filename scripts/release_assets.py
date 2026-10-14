@@ -122,6 +122,52 @@ def find_deploy_evidence(sha, run_id, current_attempt, api=evidence_api):
     raise RuntimeError('No immutable evidence for successful Deploy job')
 
 
+def find_prepare_evidence(sha, run_id, current_attempt, api=evidence_api):
+    """Resolve an immutable Prepare bundle from the actual executed job attempt."""
+    release_tag('prepare', sha, run_id, current_attempt)
+    def timestamp(value):
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if parsed.tzinfo is None:
+            raise ValueError('timezone required')
+        return parsed.astimezone(timezone.utc)
+    for number in range(int(current_attempt), 0, -1):
+        attempt = str(number)
+        tag = release_tag('prepare', sha, run_id, attempt)
+        release = api(f'releases/tags/{tag}')
+        details = api(f'actions/runs/{run_id}/attempts/{attempt}')
+        jobs = api(f'actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100')
+        if (not isinstance(details, dict) or str(details.get('run_attempt')) != attempt
+                or not isinstance(jobs, dict) or not isinstance(jobs.get('jobs'), list)
+                or jobs.get('total_count', len(jobs['jobs'])) > 100):
+            raise RuntimeError('Prepare attempt identity or jobs invalid')
+        matched = [j for j in jobs['jobs'] if j.get('name') == 'prepare']
+        if len(matched) != 1:
+            raise RuntimeError('Prepare job identity ambiguous or missing')
+        job = matched[0]
+        if (job.get('status') != 'completed' or job.get('conclusion') != 'success'
+                or job.get('head_sha') != sha):
+            raise RuntimeError('Prepare job must be successful for exact SHA')
+        try:
+            attempt_start = timestamp(details['run_started_at'])
+            actual_start = timestamp(job['started_at'])
+            actual_end = timestamp(job['completed_at'])
+            if actual_end < actual_start:
+                raise ValueError('invalid job chronology')
+        except (KeyError, AttributeError, ValueError, TypeError) as exc:
+            raise RuntimeError('Prepare job chronology invalid') from exc
+        if release is None:
+            if actual_end <= attempt_start and actual_start < attempt_start:
+                # GitHub repeats earlier successful jobs on publish-only reruns.
+                continue
+            raise RuntimeError('Executed Prepare has no immutable bundle')
+        if actual_start < attempt_start:
+            raise RuntimeError('Immutable Prepare tag does not match executed attempt')
+        exact_api = lambda route: release if route == f'releases/tags/{tag}' else api(route)
+        asset = resolve_asset('prepare', sha, run_id, attempt, 'bundle.zip', exact_api)
+        return attempt, asset
+    raise RuntimeError('No immutable successful executed Prepare attempt')
+
+
 def validate_result(data, sha, run_id, attempt):
     if (data.get('candidateSha') != sha or str(data.get('automationRunId')) != str(run_id)
             or str(data.get('automationRunAttempt')) != str(attempt)):
