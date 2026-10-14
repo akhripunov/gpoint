@@ -112,11 +112,67 @@ class ImmutableReleaseTests(unittest.TestCase):
                     return None
                 if route == 'actions/runs/55/attempts/2/jobs?per_page=100':
                     return {'total_count': 1, 'jobs': [{'name': 'deploy', 'status': status,
-                                                        'conclusion': conclusion, 'head_sha': sha}]}
+                                                        'conclusion': conclusion, 'head_sha': sha,
+                                                        'started_at': '2026-10-14T03:58:00Z',
+                                                        'completed_at': '2026-10-14T04:00:00Z'}]}
+                if route == 'actions/runs/55/attempts/2':
+                    return {'run_attempt': 2, 'run_started_at': '2026-10-14T03:57:53Z'}
                 raise AssertionError('Must not read old evidence: ' + route)
             with self.subTest(status=status, conclusion=conclusion), self.assertRaisesRegex(
                     RuntimeError, 'Newer Deploy attempt'):
                 ASSETS.find_deploy_evidence(sha, '55', '2', api)
+
+    def test_carried_over_successful_job_does_not_require_new_evidence(self):
+        sha = 'a' * 40
+        tag = ASSETS.release_tag('evidence', sha, '55', '1')
+        release = {'tag_name': tag, 'draft': False, 'immutable': True,
+                   'assets': [{'id': 9, 'name': 'result.zip', 'state': 'uploaded',
+                               'size': 100, 'digest': 'sha256:' + 'b' * 64}]}
+        def api(route):
+            if route == 'releases/tags/' + tag: return release
+            if route.startswith('releases/tags/'): return None
+            if route == 'git/ref/tags/' + tag: return {'object': {'type': 'commit', 'sha': sha}}
+            if route == 'actions/runs/55/attempts/2/jobs?per_page=100':
+                return {'total_count': 1, 'jobs': [{'name': 'deploy', 'status': 'completed',
+                    'conclusion': 'success', 'head_sha': sha,
+                    'started_at': '2026-10-14T03:51:08Z',
+                    'completed_at': '2026-10-14T03:56:39Z'}]}
+            if route == 'actions/runs/55/attempts/2':
+                return {'run_attempt': 2, 'run_started_at': '2026-10-14T03:57:53Z'}
+            if route == 'actions/runs/55/attempts/1/jobs?per_page=100':
+                return {'total_count': 1, 'jobs': [{'name': 'deploy', 'status': 'completed',
+                    'conclusion': 'success', 'head_sha': sha}]}
+            raise AssertionError(route)
+        attempt, asset = ASSETS.find_deploy_evidence(sha, '55', '2', api)
+        self.assertEqual((attempt, asset['id']), ('1', 9))
+
+    def test_reexecuted_deploy_missing_evidence_never_uses_older_artifact(self):
+        sha = 'a' * 40
+        def api(route):
+            if route.startswith('releases/tags/'): return None
+            if route == 'actions/runs/55/attempts/2/jobs?per_page=100':
+                return {'total_count': 1, 'jobs': [{'name': 'deploy', 'status': 'completed',
+                    'conclusion': 'success', 'head_sha': sha,
+                    'started_at': '2026-10-14T03:58:00Z',
+                    'completed_at': '2026-10-14T04:00:00Z'}]}
+            if route == 'actions/runs/55/attempts/2':
+                return {'run_attempt': 2, 'run_started_at': '2026-10-14T03:57:53Z'}
+            raise AssertionError(route)
+        with self.assertRaisesRegex(RuntimeError, 'Newer Deploy attempt'):
+            ASSETS.find_deploy_evidence(sha, '55', '2', api)
+
+    def test_missing_timing_identity_fails_closed(self):
+        sha = 'a' * 40
+        def api(route):
+            if route.startswith('releases/tags/'): return None
+            if route.endswith('/jobs?per_page=100'):
+                return {'total_count': 1, 'jobs': [{'name': 'deploy', 'status': 'completed',
+                    'conclusion': 'success', 'head_sha': sha}]}
+            if route == 'actions/runs/55/attempts/2':
+                return {'run_attempt': 2, 'run_started_at': '2026-10-14T03:57:53Z'}
+            raise AssertionError(route)
+        with self.assertRaisesRegex(RuntimeError, 'timing evidence invalid'):
+            ASSETS.find_deploy_evidence(sha, '55', '2', api)
 
     def test_immutable_evidence_mismatch_fails_closed(self):
         sha = 'a' * 40

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """GPoint-only immutable Release assets, independent of Actions storage quota."""
 import json
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 import re
@@ -73,10 +74,37 @@ def find_deploy_evidence(sha, run_id, current_attempt, api=evidence_api):
                 raise RuntimeError('Missing Deploy attempt job evidence')
             if missing_jobs.get('total_count', len(missing_jobs['jobs'])) > 100:
                 raise RuntimeError('Incomplete Deploy attempt jobs')
-            if any(job.get('name') == 'deploy' for job in missing_jobs['jobs']):
-                # Any real Deploy execution (queued, running, successful or
-                # failed) needs its own immutable result; no older fallback.
-                raise RuntimeError('Newer Deploy attempt has no immutable evidence')
+            deploy_jobs = [job for job in missing_jobs['jobs'] if job.get('name') == 'deploy']
+            if deploy_jobs:
+                if len(deploy_jobs) != 1:
+                    raise RuntimeError('Ambiguous Deploy job without immutable evidence')
+                if (deploy_jobs[0].get('status') != 'completed'
+                        or deploy_jobs[0].get('conclusion') != 'success'):
+                    raise RuntimeError('Newer Deploy attempt has no immutable evidence')
+                # GitHub's /attempts/N/jobs endpoint repeats previously
+                # successful jobs as run_attempt=N with a new job ID. Their
+                # actual started/completed timestamps precede rerun start.
+                # A genuinely re-executed Deploy must produce new evidence.
+                attempt_run = api(f'actions/runs/{run_id}/attempts/{attempt}')
+                if not isinstance(attempt_run, dict) or str(attempt_run.get('run_attempt')) != attempt:
+                    raise RuntimeError('Deploy attempt identity mismatch')
+                try:
+                    def timestamp(value):
+                        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                        if parsed.tzinfo is None:
+                            raise ValueError('timezone is required')
+                        return parsed.astimezone(timezone.utc)
+                    started = timestamp(attempt_run['run_started_at'])
+                    job = deploy_jobs[0]
+                    carried = (job.get('status') == 'completed'
+                               and job.get('conclusion') == 'success'
+                               and job.get('head_sha') == sha
+                               and timestamp(job['started_at']) < started
+                               and timestamp(job['completed_at']) <= started)
+                except (ValueError, TypeError, KeyError, AttributeError) as exc:
+                    raise RuntimeError('Deploy job timing evidence invalid') from exc
+                if not carried:
+                    raise RuntimeError('Newer Deploy attempt has no immutable evidence')
             continue
         def exact_api(route):
             return release if route == f'releases/tags/{tag}' else api(route)
