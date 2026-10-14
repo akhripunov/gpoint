@@ -11,11 +11,16 @@ import { createAgataIntegration } from './agata-integration.js';
 import { publicCreator } from './core-v2.js';
 import { FixedWindowRateLimiter } from './rate-limit.js';
 import { resolveSession } from './session.js';
+import { connectedTelegramChannelAvatarUrls } from './telegram-channel-avatars.js';
 
 const prisma = new PrismaClient();
 const sendLimiter = new FixedWindowRateLimiter(30, 60_000);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CREATOR_INCLUDE = { profile: true, vipOffers: { where: { status: 'ACTIVE' }, take: 1 } } as const;
+
+export function messageThreadCreatorDto(creator: { id: string; slug: string; displayName: string; verified: boolean; avatarUrl?: string | null }, channelAvatarUrl: string | null = null) {
+  return { id: creator.id, slug: creator.slug, displayName: creator.displayName, avatarUrl: channelAvatarUrl, verified: creator.verified };
+}
 
 export function buildAgataCharacterProfile(creator: { displayName: string; profile?: { bio?: string | null } | null }): AgataCharacterProfile {
   return {
@@ -187,12 +192,13 @@ export class MessagesController {
       const page = await agata.listConversations(userId, { limit: 30, ...(cursor ? { cursor } : {}) });
       const creatorIds = [...new Set(page.items.map((item) => item.gpointCharacterId))];
       const creators = creatorIds.length ? await prisma.creator.findMany({ where: { id: { in: creatorIds }, profile: { status: 'APPROVED' } }, include: CREATOR_INCLUDE }) : [];
+      const channelAvatarUrls = await connectedTelegramChannelAvatarUrls(creators.map(creator => creator.id), prisma);
       const byId = new Map(creators.map((creator) => [creator.id, creator]));
       const hydrated = await Promise.all(page.items.map(async (item) => {
         const creator = byId.get(item.gpointCharacterId);
         if (!creator) return null;
         const dto = await publicCreator(creator);
-        return { creator: { id: dto.id, slug: dto.slug, displayName: dto.displayName, avatarUrl: dto.avatarUrl, verified: dto.verified }, lastMessagePreview: item.lastMessagePreview, lastMessageRole: item.lastMessageRole, lastMessageAt: item.lastMessageAt, unreadCount: item.unreadCount };
+        return { creator: messageThreadCreatorDto(dto, channelAvatarUrls.get(dto.id) ?? null), lastMessagePreview: item.lastMessagePreview, lastMessageRole: item.lastMessageRole, lastMessageAt: item.lastMessageAt, unreadCount: item.unreadCount };
       }));
       const items = hydrated.filter((item) => item !== null);
       return { items, nextCursor: page.nextCursor };

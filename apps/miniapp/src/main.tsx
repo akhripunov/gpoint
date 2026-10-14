@@ -64,7 +64,7 @@ import {
   AdminPanel,
   CreatorWorkspaceDashboard,
 } from "./platform-ui";
-import { BackButton, BottomNav } from "./ui";
+import { AvatarImage, BackButton, BottomNav } from "./ui";
 import { MessagesInbox, ModelChat } from "./messages-ui";
 import { MessagesUnreadProvider, useMessagesUnread } from "./messages-unread";
 import { GPointAppHeader } from "./ui/brand";
@@ -182,7 +182,7 @@ function Card({
         {(c.coverUrl || c.avatarUrl) && !coverFailed ? <img src={mediaUrl(c.coverUrl || c.avatarUrl)} alt={`${c.displayName} creator profile`} loading="lazy" onError={() => setCoverFailed(true)} /> : <span className="cover-fallback" aria-hidden="true">{c.displayName.slice(0, 2).toUpperCase()}</span>}
       </div>
       <div className="card-copy">
-        {c.avatarUrl ? <img className="creator-avatar" src={mediaUrl(c.avatarUrl)} alt="" aria-hidden="true" loading="lazy" /> : <span className="creator-avatar creator-avatar-fallback" aria-hidden="true">{c.displayName.slice(0, 2).toUpperCase()}</span>}
+        <AvatarImage src={c.avatarUrl} name={c.displayName} imageClassName="creator-avatar" fallbackClassName="creator-avatar creator-avatar-fallback" fallbackLength={2} />
         <div className="name-line">
           <strong>{c.displayName}</strong>
           <V on={c.verified} />
@@ -1160,9 +1160,7 @@ function FeedCard({
     >
       <div className="post-header">
         <button className="post-creator" onClick={() => open(post.creator)}>
-          <span className="avatar tiny">
-            {post.creator.displayName.slice(0, 2).toUpperCase()}
-          </span>
+          <AvatarImage src={post.creator.avatarUrl} name={post.creator.displayName} imageClassName="avatar tiny" fallbackClassName="avatar tiny" fallbackLength={2} />
           <span className="post-identity">
             <strong>{post.creator.displayName}</strong>
             {post.creator.verified && <V on />}

@@ -8,7 +8,7 @@ export interface CurrentUserDTO { id: string; telegramUsername: string | null; f
 export interface CreatorSummaryDTO { id: string; slug: string; displayName: string; bio: string | null; avatarUrl: string | null; coverUrl: string | null; verified: boolean; vipPriceStars: number | null; vipOffer?: VipOfferDTO; }
 export interface PostDTO { id: string; type: 'IMAGE' | 'VIDEO' | 'TEXT' | 'MIXED'; caption: string | null; media: { id: string; kind: 'IMAGE' | 'VIDEO'; readUrl: string }[]; publishedAt: string | null; likedByMe?: boolean; likesCount?: number; creator?: CreatorSummaryDTO; following?: boolean; }
 export interface MediaDTO { id: string; kind: 'IMAGE' | 'VIDEO'; readUrl: string; }
-export interface CreatorProfileDTO extends CreatorSummaryDTO { tags: string[]; posts: PostDTO[]; following: boolean; followersCount: number; vipOffer?: VipOfferDTO; }
+export interface CreatorProfileDTO extends CreatorSummaryDTO { channelAvatarUrl: string | null; tags: string[]; posts: PostDTO[]; following: boolean; followersCount: number; vipOffer?: VipOfferDTO; }
 export interface ReelDTO extends PostDTO { creator: CreatorSummaryDTO; }
 export interface VipOfferDTO { id: string; title: string; description: string | null; priceStars: number | null; billingLabel: string | null; }
 export interface VipClickResponseDTO { redirectUrl: string; clickRecorded: true; }

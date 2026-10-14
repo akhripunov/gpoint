@@ -4,6 +4,7 @@ import type { ExploreResponseDTO, ExploreTab } from '../../../packages/contracts
 import { DISCOVERY_RANKING_CONFIG } from './discovery-ranking.js';
 import { boundedAffinity, diversifyCandidates, PERSONALIZATION_EVENT_WEIGHTS, personalizedScore, recencyDecay } from './discovery-ranking.js';
 import { resolveSession } from './session.js';
+import { connectedTelegramChannelAvatarUrls } from './telegram-channel-avatars.js';
 
 const prisma = new PrismaClient();
 const allowedTabs = new Set<ExploreTab>(['new', 'popular', 'trending', 'for-you']);
@@ -36,9 +37,15 @@ export async function queryExplore(tab: ExploreTab, limit = DEFAULT_LIMIT, curso
       LEFT JOIN "Follow" f ON f."creatorId" = c.id LEFT JOIN "ProductEvent" e ON e."creatorId" = c.id LEFT JOIN "VipOffer" v ON v."creatorId" = c.id
       GROUP BY c.id, c.slug, c."displayName", cp.bio
     ) SELECT * FROM ranked ${cursorWhere} ORDER BY score DESC, id ASC LIMIT ${safeLimit + 1}`);
-  const items = rows.slice(0, safeLimit).map(row => ({ id: row.id, slug: row.slug, displayName: row.displayName, bio: row.bio, avatarUrl: null, coverUrl: null, verified: false, vipPriceStars: row.vipPriceStars }));
+  const page = rows.slice(0, safeLimit);
+  const avatars = await connectedTelegramChannelAvatarUrls(page.map(row => row.id), prisma);
+  const items = page.map(row => exploreCreatorDto(row, avatars.get(row.id) ?? null));
   const last = rows.length > safeLimit ? rows[safeLimit - 1] : undefined;
   return { tab, items, nextCursor: last ? encodeCursor({ score: Number(last.score), id: last.id }) : null };
+}
+
+export function exploreCreatorDto(row: { id: string; slug: string; displayName: string; bio: string | null; vipPriceStars: number | null }, channelAvatarUrl: string | null = null) {
+  return { id: row.id, slug: row.slug, displayName: row.displayName, bio: row.bio, avatarUrl: channelAvatarUrl, coverUrl: null, verified: false, vipPriceStars: row.vipPriceStars };
 }
 
 export async function queryForYou(userId: string, limit = DEFAULT_LIMIT, cursorValue?: string): Promise<ExploreResponseDTO> {
@@ -72,7 +79,9 @@ export async function queryForYou(userId: string, limit = DEFAULT_LIMIT, cursorV
   }).sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
   const diversified = diversifyCandidates(ranked.map(c => ({ ...c, creatorId: c.id, tags: safeTags(c.tagsJson) })));
   const filtered = cursor ? diversified.filter(x => x.score < cursor.score || (x.score === cursor.score && x.id > cursor.id)) : diversified;
-  const items = filtered.slice(0, safeLimit).map(c => ({ id: c.id, slug: c.slug, displayName: c.displayName, bio: c.bio, avatarUrl: null, coverUrl: null, verified: false, vipPriceStars: c.vipPriceStars }));
+  const page = filtered.slice(0, safeLimit);
+  const avatars = await connectedTelegramChannelAvatarUrls(page.map(c => c.id), prisma);
+  const items = page.map(c => exploreCreatorDto(c, avatars.get(c.id) ?? null));
   const last = filtered.length > safeLimit ? filtered[safeLimit - 1] : undefined;
   return { tab: 'for-you', items, nextCursor: last ? encodeCursor({ score: last.score, id: last.id }) : null };
 }
