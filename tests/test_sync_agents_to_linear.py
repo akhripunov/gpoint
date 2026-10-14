@@ -91,6 +91,29 @@ class SyncContractTests(unittest.TestCase):
         with self.assertRaisesRegex(SYNC.SyncError, "GraphQL request failed"):
             SYNC.graphql_request("query { viewer { id } }", {}, "test-key", opener=lambda *_args, **_kwargs: Response(), sleep=lambda _: None)
 
+    def test_graphql_machine_codes_are_safe_and_transients_retry_bounded(self):
+        for code, expected in [('INTERNAL_SERVER_ERROR', 3),
+                               ('RATELIMITED', 3), ('BAD_USER_INPUT', 1),
+                               ('SECRET_DO_NOT_LOG', 1)]:
+            calls = []
+            class Response:
+                status = 200
+                def __enter__(self): return self
+                def __exit__(self, *_): return False
+                def read(self):
+                    return json.dumps({'errors': [{
+                        'message': 'sensitive query and token', 'extensions': {'code': code}}]}).encode()
+            def opener(*_args, **_kwargs):
+                calls.append(1)
+                return Response()
+            with self.subTest(code=code), self.assertRaises(SYNC.SyncError) as failure:
+                SYNC.graphql_request('query { viewer { id } }', {}, 'test-key',
+                                     opener=opener, sleep=lambda _: None)
+            self.assertEqual(len(calls), expected)
+            self.assertNotIn('sensitive', str(failure.exception))
+            self.assertNotIn('SECRET_DO_NOT_LOG', str(failure.exception))
+            self.assertIn('code=', str(failure.exception))
+
     def test_network_retries_are_bounded(self):
         attempts = []
 

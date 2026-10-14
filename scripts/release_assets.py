@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+import urllib.request
+import urllib.error
 
 REPO = 'akhripunov/gpoint'
 
@@ -39,6 +41,57 @@ def resolve_asset(kind, sha, run_id, attempt, name, github):
             or not re.fullmatch(r'sha256:[a-f0-9]{64}', asset.get('digest', ''))):
         raise RuntimeError('Immutable release asset identity/digest is unavailable')
     return asset
+
+
+def evidence_api(route):
+    """Keep 404 distinct from transient GitHub or authorization failures."""
+    token = os.environ['GITHUB_TOKEN']
+    request = urllib.request.Request(
+        f'https://api.github.com/repos/{REPO}/{route}',
+        headers={'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json'})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404 and route.startswith('releases/tags/'):
+            return None
+        raise
+
+
+def find_deploy_evidence(sha, run_id, current_attempt, api=evidence_api):
+    """Use the successful Deploy attempt, not a rerun of the publisher."""
+    release_tag('evidence', sha, run_id, current_attempt)
+    for num in range(int(current_attempt), 0, -1):
+        attempt = str(num)
+        tag = release_tag('evidence', sha, run_id, attempt)
+        release = api(f'releases/tags/{tag}')
+        if release is None:
+            # A fresh unsuccessful Deploy must never silently borrow evidence
+            # from an older successful attempt of the same workflow.
+            missing_jobs = api(f'actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100')
+            if not isinstance(missing_jobs, dict) or not isinstance(missing_jobs.get('jobs'), list):
+                raise RuntimeError('Missing Deploy attempt job evidence')
+            if missing_jobs.get('total_count', len(missing_jobs['jobs'])) > 100:
+                raise RuntimeError('Incomplete Deploy attempt jobs')
+            if any(job.get('name') == 'deploy' for job in missing_jobs['jobs']):
+                # Any real Deploy execution (queued, running, successful or
+                # failed) needs its own immutable result; no older fallback.
+                raise RuntimeError('Newer Deploy attempt has no immutable evidence')
+            continue
+        def exact_api(route):
+            return release if route == f'releases/tags/{tag}' else api(route)
+        asset = resolve_asset('evidence', sha, run_id, attempt, 'result.zip', exact_api)
+        jobs = api(f'actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100')
+        if (not isinstance(jobs, dict) or not isinstance(jobs.get('jobs'), list)
+                or jobs.get('total_count', len(jobs['jobs'])) > 100):
+            raise RuntimeError('Incomplete Deploy jobs evidence')
+        matched = [job for job in jobs['jobs'] if job.get('name') == 'deploy']
+        if (len(matched) != 1 or matched[0].get('conclusion') != 'success'
+                or matched[0].get('status') != 'completed'
+                or matched[0].get('head_sha') != sha):
+            raise RuntimeError('Immutable evidence without matching successful Deploy job')
+        return attempt, asset
+    raise RuntimeError('No immutable evidence for successful Deploy job')
 
 
 def validate_result(data, sha, run_id, attempt):
@@ -156,8 +209,10 @@ def publish(kind, sha, run_id, attempt):
 
 def read_result(sha, run_id, attempt, result_path=None, token=None):
     from prepared_artifact_cache import download, extract, checksum
-    asset = resolve_asset('evidence', sha, run_id, attempt, 'result.zip', github)
+    source_attempt, asset = find_deploy_evidence(sha, run_id, attempt)
     result = Path(result_path or os.environ['RELEASE_RESULT'])
+    if result_path is None and os.environ.get('GITHUB_ENV'):
+        result = result.with_name(f'gpoint-release-result-{run_id}-{source_attempt}.json')
     token = token or os.environ['GITHUB_TOKEN']
     with tempfile.TemporaryDirectory(prefix='gpoint-result-') as temporary:
         archive = Path(temporary) / 'result.zip'
@@ -165,13 +220,19 @@ def read_result(sha, run_id, attempt, result_path=None, token=None):
                  expected_size=asset.get('size'))
         if checksum(archive) != asset['digest'][7:]:
             raise RuntimeError('Immutable result ZIP checksum mismatch')
-        name = f'gpoint-release-result-{run_id}-{attempt}.json'
+        name = f'gpoint-release-result-{run_id}-{source_attempt}.json'
         extracted = Path(temporary) / 'result'
         extract(archive, extracted, [name])
-        validate_result(json.loads((extracted / name).read_text()), sha, run_id, attempt)
+        validate_result(json.loads((extracted / name).read_text()), sha, run_id, source_attempt)
         result.parent.mkdir(parents=True, exist_ok=True)
         if result.is_symlink(): raise RuntimeError('Result destination must not be a symlink')
         result.write_bytes((extracted / name).read_bytes())
+        if result_path is None and os.environ.get('GITHUB_ENV'):
+            with open(os.environ['GITHUB_ENV'], 'a') as stream:
+                stream.write(f'RELEASE_RESULT={result}\n')
+                stream.write(f'RELEASE_EVIDENCE_ATTEMPT={source_attempt}\n')
+        print(f'RELEASE_EVIDENCE_ATTEMPT={source_attempt}')
+
 
 
 def main():
