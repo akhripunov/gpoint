@@ -102,6 +102,7 @@ async function authenticatedMessageUser(headers: Record<string, string | undefin
       const row = await prisma.codexChatConnection.findUnique({ where: { accessTokenHash: hash } });
       return row ? { id: row.id, userId: row.userId, creatorId: row.creatorId, accessTokenHash: row.accessTokenHash, accessExpiresAt: row.accessExpiresAt, revokedAt: row.revokedAt } : null;
     },
+    isCurrentCreatorOwner: async (userId, currentCreatorId) => Boolean(await prisma.creatorOwner.findFirst({ where: { userId, creatorId: currentCreatorId }, select: { creatorId: true } })),
   });
   if (scoped && isCodexOwnerAllowed(scoped.userId, ownerUserIds)) return scoped.userId;
   throw new UnauthorizedException();

@@ -13,6 +13,11 @@ export function isCodexOwnerAllowed(userId: string, allowlist: ReadonlySet<strin
   return Boolean(userId) && allowlist.has(userId);
 }
 
+export async function isCodexRefreshOwnerCurrent(userId: string, creatorId: string, ownerUserIds: ReadonlySet<string>, isCurrentCreatorOwner: (userId: string, creatorId: string) => Promise<boolean>): Promise<boolean> {
+  if (!isCodexOwnerAllowed(userId, ownerUserIds)) return false;
+  return isCurrentCreatorOwner(userId, creatorId);
+}
+
 export function hashCodexCredential(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -117,10 +122,12 @@ export async function resolveCodexMessageSession(token: string | undefined, crea
   now: () => number;
   ownerUserIds: ReadonlySet<string>;
   findByAccessTokenHash: (hash: string) => Promise<{ id: string; userId: string; creatorId: string; accessTokenHash: string; accessExpiresAt: number | Date; revokedAt: Date | null } | null>;
+  isCurrentCreatorOwner?: (userId: string, creatorId: string) => Promise<boolean>;
 }) {
   if (!token) return null;
   const row = await deps.findByAccessTokenHash(hashCodexCredential(token));
   const expiry = row?.accessExpiresAt instanceof Date ? row.accessExpiresAt.getTime() : row?.accessExpiresAt;
   if (!row || !constantTimeEqual(row.accessTokenHash, hashCodexCredential(token)) || row.creatorId !== creatorId || row.revokedAt || expiry === undefined || expiry <= deps.now() || !isCodexOwnerAllowed(row.userId, deps.ownerUserIds)) return null;
+  if (action !== 'revoke' && (!deps.isCurrentCreatorOwner || !(await deps.isCurrentCreatorOwner(row.userId, row.creatorId)))) return null;
   return { connectionId: row.id, userId: row.userId };
 }

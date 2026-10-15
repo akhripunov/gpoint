@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { BadRequestException, Body, Controller, Headers, HttpException, Param, Post, Req, UnauthorizedException } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 import { createAgataIntegration } from './agata-integration.js';
-import { hashCodexCredential, isCodexOwnerAllowed, parseCodexOwnerUserIds, parseCodexTrustedProxyIps, resolveCodexDeviceStartRateKey, resolveCodexMessageSession, validateTelegramCodexApproval, validTelegramWebhookSecret, CODEX_ACCESS_TTL_MS, CODEX_DEVICE_TTL_MS, CODEX_REFRESH_TTL_MS } from './codex-chat-auth.js';
+import { hashCodexCredential, isCodexOwnerAllowed, isCodexRefreshOwnerCurrent, parseCodexOwnerUserIds, parseCodexTrustedProxyIps, resolveCodexDeviceStartRateKey, resolveCodexMessageSession, validateTelegramCodexApproval, validTelegramWebhookSecret, CODEX_ACCESS_TTL_MS, CODEX_DEVICE_TTL_MS, CODEX_REFRESH_TTL_MS } from './codex-chat-auth.js';
 import { FixedWindowRateLimiter } from './rate-limit.js';
 
 const prisma = new PrismaClient();
@@ -93,7 +93,14 @@ export class CodexChatController {
     const refreshToken = bearer(body, 'refreshToken');
     const current = await prisma.codexChatConnection.findUnique({ where: { refreshTokenHash: hashCodexCredential(refreshToken) } });
     const now = new Date();
-    if (!current || current.revokedAt || current.refreshExpiresAt <= now || !isCodexOwnerAllowed(current.userId, ownerIds())) throw new UnauthorizedException();
+    if (!current || current.revokedAt || current.refreshExpiresAt <= now) throw new UnauthorizedException();
+    const ownerIsCurrent = await isCodexRefreshOwnerCurrent(
+      current.userId,
+      current.creatorId,
+      ownerIds(),
+      async (userId, creatorId) => Boolean(await prisma.creatorOwner.findFirst({ where: { userId, creatorId }, select: { creatorId: true } })),
+    );
+    if (!ownerIsCurrent) throw new UnauthorizedException();
     const accessToken = secret();
     const nextRefreshToken = secret();
     const accessExpiresAt = new Date(Date.now() + CODEX_ACCESS_TTL_MS);

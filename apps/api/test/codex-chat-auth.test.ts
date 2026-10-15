@@ -113,6 +113,7 @@ test('scoped message resolution rejects wrong creator, expired, revoked and non-
     now: () => now,
     ownerUserIds: new Set(['owner-1']),
     findByAccessTokenHash: async (hash: string) => hash === row.accessTokenHash ? row : null,
+    isCurrentCreatorOwner: async (userId: string, creatorId: string) => userId === row.userId && creatorId === row.creatorId,
   };
   assert.deepEqual(await resolveCodexMessageSession('access-1', 'creator-1', 'read', deps), {
     connectionId: 'connection-1', userId: 'owner-1',
@@ -129,4 +130,23 @@ test('scoped message resolution rejects wrong creator, expired, revoked and non-
   assert.equal(await resolveCodexMessageSession('access-1', 'creator-1', 'read', {
     ...deps, findByAccessTokenHash: async () => ({ ...row, revokedAt: new Date(now) }),
   }), null);
+  assert.equal(await resolveCodexMessageSession('access-1', 'creator-1', 'read', {
+    ...deps, isCurrentCreatorOwner: async () => false,
+  }), null, 'read must stop when CreatorOwner has been removed');
+  assert.equal(await resolveCodexMessageSession('access-1', 'creator-1', 'send', {
+    ...deps, isCurrentCreatorOwner: async () => false,
+  }), null, 'send must stop when CreatorOwner has been removed');
+  assert.deepEqual(await resolveCodexMessageSession('access-1', 'creator-1', 'revoke', {
+    ...deps, isCurrentCreatorOwner: async () => false,
+  }), { connectionId: 'connection-1', userId: 'owner-1' }, 'former owners must be able to revoke their stale grant');
+  assert.equal(await resolveCodexMessageSession('access-1', 'creator-1', 'read', {
+    now: deps.now, ownerUserIds: deps.ownerUserIds, findByAccessTokenHash: deps.findByAccessTokenHash,
+  }), null, 'missing ownership lookup must fail closed');
+});
+
+test('refresh authorization is revoked when current creator ownership is gone', async () => {
+  const { isCodexRefreshOwnerCurrent } = await import('../src/codex-chat-auth.js');
+  assert.equal(await isCodexRefreshOwnerCurrent('owner-1', 'creator-1', new Set(['owner-1']), async () => true), true);
+  assert.equal(await isCodexRefreshOwnerCurrent('owner-1', 'creator-1', new Set(['owner-1']), async () => false), false);
+  assert.equal(await isCodexRefreshOwnerCurrent('owner-1', 'creator-1', new Set(), async () => true), false);
 });
