@@ -57,11 +57,12 @@ def _job_key(run_id, attempt, job):
     return (str(run_id), str(attempt), str(job_id)) if job_id is not None else None
 
 
-def _job_projection(job, run_id, attempt, attempt_started=None):
+def _job_projection(job, run_id, attempt, attempt_started=None, observed_at=None):
     """Return only safe, measured job fields; never copy arbitrary API payloads."""
     created = _timestamp(job.get('created_at'))
     started = _timestamp(job.get('started_at'))
     completed = _timestamp(job.get('completed_at'))
+    observed = _timestamp(observed_at)
     skipped = job.get('conclusion') == 'skipped'
     host = _host_class(job)
     runner_seconds = _seconds(started, completed) if not skipped else 0.0
@@ -80,6 +81,11 @@ def _job_projection(job, run_id, attempt, attempt_started=None):
         queue_wait = 0.0
     elif attempt_timing_ambiguous or (int(attempt) > 1 and attempt_started is None and not skipped):
         runner_seconds = queue_wait = None
+    elapsed_lower_bound = (
+        _seconds(started, observed)
+        if job.get('status') == 'in_progress' and started and not completed and observed and observed >= started
+        else None
+    )
     steps = []
     for step in job.get('steps') or []:
         if not isinstance(step, dict):
@@ -105,6 +111,10 @@ def _job_projection(job, run_id, attempt, attempt_started=None):
         'completed_at': _iso(job.get('completed_at')),
         'queue_wait_seconds': queue_wait if queue_wait is not None else NOT_MEASURED,
         'runner_seconds': runner_seconds if runner_seconds is not None else NOT_MEASURED,
+        'elapsed_seconds_lower_bound_at_collection': (
+            elapsed_lower_bound if elapsed_lower_bound is not None else NOT_MEASURED
+        ),
+        'elapsed_lower_bound_observed_at': _iso(observed_at),
         'job_minutes_estimate': math.ceil(runner_seconds / 60)
         if runner_seconds is not None and runner_seconds > 0 and host else
         (0 if runner_seconds == 0 and host else NOT_MEASURED),
@@ -245,7 +255,8 @@ def summarize_runs(records, now=None):
         for key, (raw, _) in unique_jobs.items():
             if key in local_conflicts:
                 continue
-            item = _job_projection(raw, run_id, attempt, started)
+            observed_at = (record.get('job_observed_at') or {}).get(str(raw.get('id')))
+            item = _job_projection(raw, run_id, attempt, started, observed_at)
             item['_start'] = _timestamp(raw.get('started_at'))
             item['_end'] = _timestamp(raw.get('completed_at'))
             if item['runner_class'] == 'UNKNOWN' and item['conclusion'] != 'skipped':
@@ -265,7 +276,8 @@ def summarize_runs(records, now=None):
             active_names = {item['name'] for item in active_jobs}
             dependency_map = {name: [parent for parent in parents if parent in active_names]
                               for name, parents in dependency_map.items() if name in active_names}
-        dependency_path = _dependency_path(active_jobs, dependency_map, started)
+        dependency_path = (_dependency_path(active_jobs, dependency_map, started)
+                           if run.get('status') == 'completed' else NOT_MEASURED)
         visible_jobs = [{key: value for key, value in item.items() if not key.startswith('_')}
                         for item in projected]
         stage_values = {}
@@ -298,7 +310,7 @@ def summarize_runs(records, now=None):
     totals = {}
     for runner_class, prefix in (('GITHUB_HOSTED', 'GITHUB_HOSTED'), ('SELF_HOSTED', 'SELF_HOSTED')):
         selected = [job for job in all_jobs if job['runner_class'] == runner_class and not job['carried_over']
-                    and job['status'] != 'queued'
+                    and job['status'] == 'completed'
                     and job['conclusion'] != 'skipped']
         totals[prefix + '_JOB_COUNT'] = len(selected)
         seconds = _sum_measured(selected, 'runner_seconds') if selected else 0.0
@@ -308,9 +320,23 @@ def summarize_runs(records, now=None):
             seconds = minutes = NOT_MEASURED
         totals[prefix + '_RUNNER_SECONDS'] = seconds
         totals[prefix + '_JOB_MINUTES_ESTIMATE'] = minutes
+        active = [job for job in all_jobs if job['runner_class'] == runner_class and not job['carried_over']
+                  and job['status'] == 'in_progress']
+        totals[prefix + '_IN_PROGRESS_JOB_COUNT'] = len(active)
+        totals[prefix + '_IN_PROGRESS_ELAPSED_SECONDS_LOWER_BOUND'] = (
+            _sum_measured(active, 'elapsed_seconds_lower_bound_at_collection') if active else 0.0
+        )
     totals['UNKNOWN_RUNNER_JOB_COUNT'] = sum(
-        1 for job in all_jobs if job['runner_class'] == 'UNKNOWN' and not job['carried_over'] and job['status'] != 'queued'
+        1 for job in all_jobs if job['runner_class'] == 'UNKNOWN' and not job['carried_over'] and job['status'] == 'completed'
         and job['conclusion'] != 'skipped')
+    totals['UNKNOWN_IN_PROGRESS_JOB_COUNT'] = sum(
+        1 for job in all_jobs if job['runner_class'] == 'UNKNOWN'
+        and not job['carried_over'] and job['status'] == 'in_progress')
+    unknown_active = [job for job in all_jobs if job['runner_class'] == 'UNKNOWN'
+                      and not job['carried_over'] and job['status'] == 'in_progress']
+    totals['UNKNOWN_IN_PROGRESS_ELAPSED_SECONDS_LOWER_BOUND'] = (
+        _sum_measured(unknown_active, 'elapsed_seconds_lower_bound_at_collection') if unknown_active else 0.0
+    )
     if totals['UNKNOWN_RUNNER_JOB_COUNT']:
         for prefix in ('GITHUB_HOSTED', 'SELF_HOSTED'):
             totals[prefix + '_RUNNER_SECONDS'] = NOT_MEASURED
@@ -354,12 +380,16 @@ def render_report(report):
         f"Critical-path elapsed: {report['critical_path_elapsed_seconds']} seconds",
         f"Basis: {report['critical_path_basis']}",
         f"Stage critical path: {report['stage_critical_path_seconds']}",
-        f"Hosted jobs / seconds / minute estimate: {report['totals']['GITHUB_HOSTED_JOB_COUNT']} / "
+        f"Completed hosted jobs / runner seconds / per-job ceil estimate: {report['totals']['GITHUB_HOSTED_JOB_COUNT']} / "
         f"{report['totals']['GITHUB_HOSTED_RUNNER_SECONDS']} / "
         f"{report['totals']['GITHUB_HOSTED_JOB_MINUTES_ESTIMATE']}",
-        f"Self-hosted jobs / seconds / minute estimate: {report['totals']['SELF_HOSTED_JOB_COUNT']} / "
+        f"Completed self-hosted jobs / runner seconds / per-job ceil estimate: {report['totals']['SELF_HOSTED_JOB_COUNT']} / "
         f"{report['totals']['SELF_HOSTED_RUNNER_SECONDS']} / "
         f"{report['totals']['SELF_HOSTED_JOB_MINUTES_ESTIMATE']}",
+        f"In-progress hosted jobs / elapsed lower bound: {report['totals']['GITHUB_HOSTED_IN_PROGRESS_JOB_COUNT']} / "
+        f"{report['totals']['GITHUB_HOSTED_IN_PROGRESS_ELAPSED_SECONDS_LOWER_BOUND']}s",
+        f"In-progress self-hosted jobs / elapsed lower bound: {report['totals']['SELF_HOSTED_IN_PROGRESS_JOB_COUNT']} / "
+        f"{report['totals']['SELF_HOSTED_IN_PROGRESS_ELAPSED_SECONDS_LOWER_BOUND']}s",
         report['minute_estimate_note'],
         '',
         '| Run | Attempt | Status | Created | Started | Completed | Created→finish | Queued | Execution | Dependency path |',
@@ -372,13 +402,14 @@ def render_report(report):
             elapsed=run['workflow_elapsed_seconds'], queue=run['workflow_queue_wait_seconds'],
             execution=run['workflow_execution_seconds'], dependency=run['job_dependency_critical_path_seconds']))
         lines += ['', f"### Jobs for run {run['run_id']} attempt {run['attempt']}",
-                  '', '| Job | ID | Runner | Status | Queue wait (s) | Runner (s) | Minutes (ceil estimate) |',
-                  '|---|---:|---|---|---:|---:|---:|']
+                  '', '| Job | ID | Runner | Status | Queue wait (s) | Runner (s) | Minutes (ceil estimate) | Elapsed at collection (lower bound, s) |',
+                  '|---|---:|---|---|---:|---:|---:|---:|']
         for job in run['jobs']:
-            lines.append('| {name} | {id} | {runner} | {status}/{conclusion} | {queue} | {seconds} | {minutes} |'.format(
+            lines.append('| {name} | {id} | {runner} | {status}/{conclusion} | {queue} | {seconds} | {minutes} | {lower_bound} |'.format(
                 name=job['name'], id=job['job_id'], runner=job['runner_class'], status=job['status'],
                 conclusion=job['conclusion'], queue=job['queue_wait_seconds'], seconds=job['runner_seconds'],
-                minutes=job['job_minutes_estimate']))
+                minutes=job['job_minutes_estimate'],
+                lower_bound=job['elapsed_seconds_lower_bound_at_collection']))
         if run['stage_timings']:
             lines += ['', 'Measured stages (individual only; no aggregation because overlap is unknown):', '']
             lines.extend(f"- `{name}`: {seconds:.3f}s" for name, seconds in sorted(run['stage_timings'].items()))
@@ -433,6 +464,7 @@ def _fetch_records(repo, run_ids, token):
             if attempt > 1 and not attempt_details.get('created_at'):
                 attempt_run['created_at'] = None
             jobs = []
+            job_observed_at = {}
             page = 1
             total_count = None
             while total_count is None or len(jobs) < total_count:
@@ -440,16 +472,20 @@ def _fetch_records(repo, run_ids, token):
                     f'{base}/attempts/{attempt}/jobs?per_page=100&page={page}', headers=headers)
                 with urllib.request.urlopen(jobs_request, timeout=20) as response:
                     payload = json.loads(response.read())
+                page_observed_at = dt.datetime.now(UTC).isoformat().replace('+00:00', 'Z')
                 page_jobs = payload.get('jobs')
                 if not isinstance(page_jobs, list) or not isinstance(payload.get('total_count'), int):
                     raise ValueError('job metadata unavailable')
                 if total_count is None:
                     total_count = payload['total_count']
                 jobs.extend(page_jobs)
+                for page_job in page_jobs:
+                    if isinstance(page_job, dict) and page_job.get('id') is not None:
+                        job_observed_at[str(page_job['id'])] = page_observed_at
                 if not page_jobs and len(jobs) < total_count:
                     raise ValueError('job metadata pagination incomplete')
                 page += 1
-            records.append({'run': attempt_run, 'jobs': jobs})
+            records.append({'run': attempt_run, 'jobs': jobs, 'job_observed_at': job_observed_at})
     return records
 
 
@@ -463,6 +499,12 @@ def _flat_outputs(report, cache_prevented_download='NO'):
         'SELF_HOSTED_JOB_COUNT': totals['SELF_HOSTED_JOB_COUNT'],
         'SELF_HOSTED_RUNNER_SECONDS': totals['SELF_HOSTED_RUNNER_SECONDS'],
         'SELF_HOSTED_JOB_MINUTES_ESTIMATE': totals['SELF_HOSTED_JOB_MINUTES_ESTIMATE'],
+        'GITHUB_HOSTED_IN_PROGRESS_JOB_COUNT': totals['GITHUB_HOSTED_IN_PROGRESS_JOB_COUNT'],
+        'GITHUB_HOSTED_IN_PROGRESS_ELAPSED_SECONDS_LOWER_BOUND': totals['GITHUB_HOSTED_IN_PROGRESS_ELAPSED_SECONDS_LOWER_BOUND'],
+        'SELF_HOSTED_IN_PROGRESS_JOB_COUNT': totals['SELF_HOSTED_IN_PROGRESS_JOB_COUNT'],
+        'SELF_HOSTED_IN_PROGRESS_ELAPSED_SECONDS_LOWER_BOUND': totals['SELF_HOSTED_IN_PROGRESS_ELAPSED_SECONDS_LOWER_BOUND'],
+        'UNKNOWN_IN_PROGRESS_JOB_COUNT': totals['UNKNOWN_IN_PROGRESS_JOB_COUNT'],
+        'UNKNOWN_IN_PROGRESS_ELAPSED_SECONDS_LOWER_BOUND': totals['UNKNOWN_IN_PROGRESS_ELAPSED_SECONDS_LOWER_BOUND'],
         'WORKFLOW_CRITICAL_PATH_SECONDS': report['critical_path_elapsed_seconds'],
         'WORKFLOW_QUEUE_WAIT_SECONDS': report['runs'][0]['workflow_queue_wait_seconds'] if len(report['runs']) == 1 else NOT_MEASURED,
         'WORKFLOW_ELAPSED_SECONDS': report['runs'][0]['workflow_elapsed_seconds'] if len(report['runs']) == 1 else NOT_MEASURED,
@@ -505,6 +547,12 @@ def main(argv=None):
         for key in ('GITHUB_HOSTED_JOB_COUNT', 'GITHUB_HOSTED_RUNNER_SECONDS',
                     'GITHUB_HOSTED_JOB_MINUTES_ESTIMATE', 'SELF_HOSTED_JOB_COUNT',
                     'SELF_HOSTED_RUNNER_SECONDS', 'SELF_HOSTED_JOB_MINUTES_ESTIMATE',
+                    'GITHUB_HOSTED_IN_PROGRESS_JOB_COUNT',
+                    'GITHUB_HOSTED_IN_PROGRESS_ELAPSED_SECONDS_LOWER_BOUND',
+                    'SELF_HOSTED_IN_PROGRESS_JOB_COUNT',
+                    'SELF_HOSTED_IN_PROGRESS_ELAPSED_SECONDS_LOWER_BOUND',
+                    'UNKNOWN_IN_PROGRESS_JOB_COUNT',
+                    'UNKNOWN_IN_PROGRESS_ELAPSED_SECONDS_LOWER_BOUND',
                     'UNKNOWN_RUNNER_JOB_COUNT', 'DUPLICATE_RUNS_REMOVED', 'DUPLICATE_JOBS_REMOVED'):
             report['totals'][key] = NOT_MEASURED
     outputs = _flat_outputs(report, os.environ.get('CACHE_PREVENTED_DOWNLOAD', 'NO'))

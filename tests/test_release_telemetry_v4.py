@@ -104,6 +104,8 @@ class ReleaseTelemetryV4Tests(unittest.TestCase):
             records = TELEMETRY._fetch_records('akhripunov/gpoint', ['10'], 'secret-token')
         self.assertEqual([record['run']['run_attempt'] for record in records], [1, 2])
         self.assertEqual(len(records[1]['jobs']), 2)
+        self.assertEqual(set(records[1]['job_observed_at']), {'1', '2'})
+        self.assertTrue(all(TELEMETRY._timestamp(value) for value in records[1]['job_observed_at'].values()))
         self.assertIn(base + '/attempts/1/jobs?per_page=100&page=1', calls)
         self.assertIn(base + '/attempts/2/jobs?per_page=100&page=1', calls)
 
@@ -178,7 +180,10 @@ class ReleaseTelemetryV4Tests(unittest.TestCase):
         report = TELEMETRY.summarize_runs([item])
         self.assertEqual(report['critical_path_elapsed_seconds'], 120.0)
         self.assertEqual(report['job_dependency_critical_path_seconds'], 'NOT_MEASURED')
-        self.assertEqual(report['totals']['GITHUB_HOSTED_RUNNER_SECONDS'], 'NOT_MEASURED')
+        self.assertEqual(report['totals']['GITHUB_HOSTED_JOB_COUNT'], 0)
+        self.assertEqual(report['totals']['GITHUB_HOSTED_RUNNER_SECONDS'], 0.0)
+        self.assertEqual(report['totals']['GITHUB_HOSTED_IN_PROGRESS_JOB_COUNT'], 1)
+        self.assertEqual(report['totals']['GITHUB_HOSTED_IN_PROGRESS_ELAPSED_SECONDS_LOWER_BOUND'], 'NOT_MEASURED')
 
     def test_each_job_uses_ceil_minute_estimate_and_runner_classes_are_separate(self):
         item = run(10, 1, [
@@ -233,6 +238,41 @@ class ReleaseTelemetryV4Tests(unittest.TestCase):
         self.assertEqual(report['duplicate_run_conflicts'], 1)
         self.assertEqual(report['runs'], [])
         self.assertEqual(report['totals']['GITHUB_HOSTED_RUNNER_SECONDS'], 'NOT_MEASURED')
+
+    def test_live_attempt_keeps_completed_subtotal_and_marks_active_job_lower_bound(self):
+        active = job(3, '2026-10-15T10:00:50Z', None,
+                     labels=['self-hosted', 'macOS', 'gpoint-production'])
+        item = run(10, 1, [
+            job(1, '2026-10-15T10:00:05Z', '2026-10-15T10:01:06Z'),
+            job(2, '2026-10-15T10:00:10Z', '2026-10-15T10:00:40Z',
+                labels=['self-hosted', 'macOS', 'gpoint-production']),
+            active,
+        ], completed=None, dependencies={'job-1': [], 'job-2': [], 'job-3': []})
+        item['job_observed_at'] = {'3': '2026-10-15T10:01:20Z'}
+
+        report = TELEMETRY.summarize_runs([item])
+        totals = report['totals']
+        self.assertEqual(report['status'], 'PARTIAL')
+        self.assertEqual(totals['GITHUB_HOSTED_JOB_COUNT'], 1)
+        self.assertEqual(totals['GITHUB_HOSTED_RUNNER_SECONDS'], 61.0)
+        self.assertEqual(totals['GITHUB_HOSTED_JOB_MINUTES_ESTIMATE'], 2)
+        self.assertEqual(totals['SELF_HOSTED_JOB_COUNT'], 1)
+        self.assertEqual(totals['SELF_HOSTED_RUNNER_SECONDS'], 30.0)
+        self.assertEqual(totals['SELF_HOSTED_JOB_MINUTES_ESTIMATE'], 1)
+        self.assertEqual(totals['SELF_HOSTED_IN_PROGRESS_JOB_COUNT'], 1)
+        self.assertEqual(totals['SELF_HOSTED_IN_PROGRESS_ELAPSED_SECONDS_LOWER_BOUND'], 30.0)
+        self.assertEqual(report['jobs'][2]['runner_seconds'], 'NOT_MEASURED')
+        self.assertEqual(report['jobs'][2]['elapsed_seconds_lower_bound_at_collection'], 30.0)
+        self.assertEqual(report['critical_path_elapsed_seconds'], 'NOT_MEASURED')
+        self.assertEqual(report['job_dependency_critical_path_seconds'], 'NOT_MEASURED')
+
+    def test_live_job_without_observation_timestamp_has_no_elapsed_lower_bound(self):
+        item = run(10, 1, [job(3, '2026-10-15T10:00:50Z', None,
+                              labels=['self-hosted', 'macOS', 'gpoint-production'])],
+                   completed=None)
+        report = TELEMETRY.summarize_runs([item])
+        self.assertEqual(report['jobs'][0]['elapsed_seconds_lower_bound_at_collection'], 'NOT_MEASURED')
+        self.assertEqual(report['totals']['SELF_HOSTED_IN_PROGRESS_ELAPSED_SECONDS_LOWER_BOUND'], 'NOT_MEASURED')
 
 
 if __name__ == '__main__':
