@@ -97,3 +97,50 @@ not modified. No push, PR, merge, Actions dispatch, production change, database
 mutation, worker transition, or AGATA inference occurred. Status remains
 `LOCAL_PENDING_RELEASE`; any hosted rehearsal or publication needs separate
 owner authorization.
+
+## Owner continuation — ME-33/34/35 (2026-10-15)
+
+Candidate continuation started from clean local commit
+`47e66818f92f7f06741deeaa7e24f448e241bdcb`; work remains on the isolated
+feature branch and is not published.
+
+- **ME-33:** historical Prepare `38714817433` shows the GSales PostgreSQL
+  runner stage took 312.619 s and ended about 47.7 s after the final Docker
+  build. It ended about 60 s before artifact roundtrip completion. Thus this
+  stage is heavy work but the sampled run does not prove an equal end-to-end
+  latency reduction. For a verified exact GSales-only component diff, the
+  proposed narrow runner retains all GSales tests and the separate
+  AGATA-to-GSales tenant PostgreSQL tests, while omitting only the duplicated
+  AGATA Core suite inside that runner. The independent primary AGATA
+  PostgreSQL gate remains mandatory on the same candidate. AGATA/shared/mixed,
+  unknown, unsafe, baseline-mismatched, or missing-gate scope selects FULL.
+  The immutable receipt records exact baseline, changed paths, mode and the
+  independently covered subset; bundle validation fails closed on missing,
+  contradictory or malformed evidence. No end-to-end or hosted-minute saving
+  is claimed before an authorized hosted run.
+- Independent review found and reproduced a receipt-validation gap where a
+  GSales component receipt could omit coverage after falsifying the V3 AGATA
+  regression flag. The verifier now requires coverage for every exact
+  GSales component candidate and validates both V3 regression flags and
+  candidate identity. The new malformed-receipt regression test passes after
+  the fix.
+- **ME-34:** no repository change can repair GitHub's external ResultsLog /
+  Azure Blob post-job finalization transport. Existing bounded workflow
+  timeout, exact run/attempt controller claim, preserved log/artifact upload,
+  and read-only reconciliation remain the safe controls. A cancelled or
+  incomplete parent remains non-PASS; reconcile its exact child run before
+  considering a new dispatch. No architecture, upload, runner, or network
+  settings were changed.
+- **ME-35:** additional tests cover queued/unstarted jobs, per-job rounding at
+  59.999/60/60.001 seconds, and a failed completed attempt followed by a live
+  retry. Completed attempts contribute measured runtime; active retry time is
+  only an elapsed lower bound and never a completed cost estimate.
+- Targeted Python release suites: **113 passed**. Full canonical Node release
+  test set: **176 passed** after the existing worktree-creation test received
+  required local host approval. Bundle verifier suite passes **19/19**,
+  including the FULL fallback receipt with unavailable baseline evidence. The
+  broad pnpm/DNS-dependent checks remain
+  blocked by npm registry DNS (`ENOTFOUND`); they are not reported as PASS.
+- No paid Actions run was authorized, so new runner-seconds and end-to-end
+  savings remain `NOT_MEASURED`. The original dirty checkout, GitHub, and
+  production remain untouched. ME-31 remains open and local pending release.

@@ -86,6 +86,16 @@ GitHub credentials, VPS key и production env не входят в архив и
 
 При таком состоянии сохраняйте штатную загрузку логов и artifacts. Не объявляйте job успешной по результату шага dispatch: итог `cancelled`/`failure` остаётся неуспешным. Сначала по точным `run_id` и `run_attempt` сверьте атомарную controller claim и созданный дочерний preflight; повторно используйте найденный child-run только после проверки его exact SHA и receipt. Не запускайте duplicate controller/preflight, пока reconciliation не доказала, что прежний dispatch не создал пригодного child-run. Не выключайте ResultsLog upload и не перезапускайте Mac runner во время активной работы. Сетевую доступность Actions Results/Blob исследуйте отдельно в разрешённом runner-контексте; изменение глобальной сети не является способом обхода этого состояния.
 
+ME-34 reliability assessment (local): workflow job timeout bounds repository
+controlled execution, while exact `run_id`/`run_attempt` claims and child-run
+reconciliation prevent duplicate orchestration after ambiguous parent
+finalization. GitHub Actions ResultsLog/Azure Blob post-job transport and its
+runner-side finalization are externally managed; the repository cannot make
+that transport reliable without changing the workflow/runner architecture.
+Therefore preserve logs/artifacts, classify cancelled or incomplete runs as
+non-PASS, reconcile existing evidence read-only, and do not blindly retry.
+No safe repository-only fix for the observed external hang was established.
+
 ## Команды для Dev
 
 Каноническая ручная диагностика сохраняется:

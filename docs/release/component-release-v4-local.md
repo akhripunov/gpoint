@@ -170,3 +170,27 @@ Afterwards a separate UI-only commit must complete hosted-to-production
 cycle for time/Actions-minute measurement. The AGATA, API, Bot and Worker
 selective-image routes are NOT implemented; their changes continue FULL V3.
 Do not claim fast backend deployments or full production speed until measured.
+
+## 2026-10-15: bounded GSales regression reuse (LOCAL_PENDING_RELEASE)
+
+The current local ME-33 continuation adds one narrow test-suite selection for
+an exact, independently verified GSales-only app-source diff. It skips only
+the second copy of the full AGATA Core PostgreSQL suite inside the GSales
+runner. The GSales suite, its AGATA sales-tenant PostgreSQL tests, and the
+separate primary AGATA PostgreSQL gate remain required for the same candidate.
+Any uncertain/shared/AGATA/mixed scope, unsafe paths, baseline drift, or missing
+V3 gate selects the original full suite. This does not enable selective image
+build/deploy or skip any release gate.
+
+Prepare receipt records candidate, immutable production baseline, exact
+component paths, selected mode, and which suites passed or were proven covered
+by the independent AGATA gate. The bundle verifier requires this proof for
+every GSales component candidate and rejects missing or contradictory V3
+regression evidence.
+
+Historical run `38714817433` measured the GSales PostgreSQL stage at 312.619 s.
+That stage finished about 48 s after Docker builds, but roughly 60 s before
+artifact roundtrip completed. This establishes duplicated heavy work, not a
+measured reduction of total Prepare wall time or billed Actions minutes. A
+new hosted comparison needs separate OWNER authorization; no Actions run has
+been made for this local continuation.
