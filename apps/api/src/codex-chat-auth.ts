@@ -23,7 +23,7 @@ export function validateTelegramCodexApproval(input: { payload?: unknown; chat?:
   const chatId = input?.chat?.id;
   const senderId = typeof sender === 'number' || typeof sender === 'string' ? String(sender) : '';
   const privateChatId = typeof chatId === 'number' || typeof chatId === 'string' ? String(chatId) : '';
-  if (typeof payload !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(payload) || input?.chat?.type !== 'private' || !/^\d{1,20}$/.test(senderId) || senderId === '0' || senderId !== privateChatId) return null;
+  if (typeof payload !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(payload) || input?.chat?.type !== 'private' || !/^\d{1,20}$/.test(senderId) || senderId === '0' || BigInt(senderId) > 9_223_372_036_854_775_807n || senderId !== privateChatId) return null;
   return { payload, telegramUserId: senderId };
 }
 

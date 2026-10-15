@@ -73,6 +73,7 @@ test('Telegram authorization requires an exact private chat identity and unmodif
   assert.equal(validateTelegramCodexApproval({ payload, chat: { id: 123, type: 'group' }, from: { id: 123 } }), null);
   assert.equal(validateTelegramCodexApproval({ payload, chat: { id: 124, type: 'private' }, from: { id: 123 } }), null);
   assert.equal(validateTelegramCodexApproval({ payload: `${payload}=`, chat: { id: 123, type: 'private' }, from: { id: 123 } }), null);
+  assert.equal(validateTelegramCodexApproval({ payload, chat: { id: '9223372036854775808', type: 'private' }, from: { id: '9223372036854775808' } }), null);
   assert.equal(validateTelegramCodexApproval({ payload, chat: { id: 123, type: 'private' } }), null);
 });
 

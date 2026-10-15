@@ -9,7 +9,7 @@ export async function forwardCodexStart(payload: string, chat: TelegramChat, fro
   const chatId = typeof chat?.id === 'number' || typeof chat?.id === 'string' ? String(chat.id) : '';
   const endpoint = telegramInternalUrl('codex-approve', { baseUrl: process.env.GPOINT_INGEST_URL, production: process.env.NODE_ENV === 'production' });
   const webhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET;
-  if (!challenge || chat?.type !== 'private' || !/^\d{1,19}$/.test(senderId) || senderId === '0' || chatId !== senderId || !endpoint || !webhookSecret) return { approved: false };
+  if (!challenge || chat?.type !== 'private' || !/^\d{1,20}$/.test(senderId) || senderId === '0' || BigInt(senderId) > 9_223_372_036_854_775_807n || chatId !== senderId || !endpoint || !webhookSecret) return { approved: false };
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8_000);
