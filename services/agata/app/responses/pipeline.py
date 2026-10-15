@@ -382,6 +382,31 @@ class ContextBuilder:
             route_tuple=("", "", "", "", ""),
             current_message=current_message.replace("\x00", ""),
             memories=tuple(blocks),
+            recall_context=tuple(
+                UntrustedMemoryBlock(
+                    item.memory_id,
+                    item.version,
+                    _bounded_untrusted_text(item.subject, limit=80),
+                    _bounded_untrusted_text(item.predicate, limit=80),
+                    _bounded_untrusted_text(item.value, limit=300),
+                    item.observed_at,
+                    reason_code="recall_memory_data",
+                    evidence_state=item.evidence_state,
+                    lifecycle_state=item.lifecycle_state,
+                    valid_from=item.valid_from,
+                    valid_until=item.valid_until,
+                    truth_role=item.truth_role,
+                )
+                for item in recall_context[:5]
+                if isinstance(item, UntrustedMemoryBlock)
+                and item.evidence_state
+                in {
+                    EvidenceState.explicit.value,
+                    EvidenceState.confirmed.value,
+                    EvidenceState.inferred.value,
+                }
+                and _bounded_untrusted_text(item.value, limit=300) is not None
+            ),
             response_language=plan.response_language,
             locale_fragment=locale_fragment,
             personality=_bounded_profile_data(profile.personality),
