@@ -118,6 +118,17 @@ feature branch and is not published.
   independently covered subset; bundle validation fails closed on missing,
   contradictory or malformed evidence. No end-to-end or hosted-minute saving
   is claimed before an authorized hosted run.
+- Detailed job log for `38714817433` shows the duplicate AGATA Core suite
+  inside the GSales runner executed **355 tests in 38.11 s**; the separate
+  primary AGATA PostgreSQL suite had already passed. The primary final
+  artifact-migration check ended at `09:49:55.107Z`, and GSales regression at
+  `09:49:56.447Z`, a gap of about **1.34 s**. The following image export and
+  artifact roundtrip took **59.950 s**. Therefore the local change proves
+  removal of 38.11 s of repeated suite execution for eligible candidates, but
+  this historical run suggests only about 1.34 s of possible critical-path
+  reduction before the unchanged export/roundtrip path; no rounded hosted
+  minute is saved in that sample. This is timeline analysis, not a measured
+  post-change run.
 - Independent review found and reproduced a receipt-validation gap where a
   GSales component receipt could omit coverage after falsifying the V3 AGATA
   regression flag. The verifier now requires coverage for every exact
