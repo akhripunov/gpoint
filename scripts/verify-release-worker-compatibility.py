@@ -3,7 +3,9 @@
 import argparse
 import importlib.util
 import json
+import os
 import plistlib
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -107,7 +109,25 @@ def inspect_migration_readiness(candidate_sha, source, configured_gpoint_tenant)
     runtime_link = lane.SUPPORT / 'runtime/current'
     if not runtime_link.is_symlink():
         raise RuntimeError('installed_worker_source_unavailable')
-    runtime = runtime_link.resolve(strict=True)
+    runtime_root_path = lane.SUPPORT / 'runtime'
+    try:
+        root_before = runtime_root_path.lstat()
+        link_before = runtime_link.lstat()
+        pointer = runtime_link.readlink()
+        runtime_root = runtime_root_path.resolve(strict=True)
+        runtime = runtime_link.resolve(strict=True)
+        runtime_stat = runtime.lstat()
+        if (stat.S_ISLNK(root_before.st_mode) or not stat.S_ISDIR(root_before.st_mode)
+                or root_before.st_uid != os.getuid()
+                or stat.S_IMODE(root_before.st_mode) & 0o022
+                or not stat.S_ISLNK(link_before.st_mode)
+                or runtime.parent != runtime_root or pointer != runtime.name
+                or stat.S_ISLNK(runtime_stat.st_mode) or not stat.S_ISDIR(runtime_stat.st_mode)
+                or runtime_stat.st_uid != os.getuid()
+                or stat.S_IMODE(runtime_stat.st_mode) != 0o700):
+            raise ValueError
+    except (OSError, ValueError) as exc:
+        raise RuntimeError('worker_migration_runtime_invalid') from exc
     installed = migration._read_installed_runtime_manifest(runtime)
     candidate_assets = {name: migration.sha256(migration.WORKER_DIR / name) for name in migration.ASSETS}
     installed_hashes = {name: migration.sha256(runtime / name) for name in migration.ASSETS}
@@ -139,6 +159,18 @@ def inspect_migration_readiness(candidate_sha, source, configured_gpoint_tenant)
     )
     if not plan['candidateAssetsVerified']:
         raise RuntimeError('worker_migration_candidate_assets_invalid')
+    try:
+        root_after = runtime_root_path.lstat()
+        link_after = runtime_link.lstat()
+        runtime_after = runtime.lstat()
+        if ((root_before.st_dev, root_before.st_ino) != (root_after.st_dev, root_after.st_ino)
+                or (link_before.st_dev, link_before.st_ino) != (link_after.st_dev, link_after.st_ino)
+                or runtime_link.readlink() != pointer or runtime_link.resolve(strict=True) != runtime
+                or (runtime_stat.st_dev, runtime_stat.st_ino) != (
+                    runtime_after.st_dev, runtime_after.st_ino)):
+            raise ValueError
+    except (OSError, ValueError) as exc:
+        raise RuntimeError('worker_migration_runtime_invalid') from exc
     # If asset parity is exact, no transition is required; still return the
     # verified static prerequisites and unchanged apply-time gates.
     plan['status'] = ('NO_TRANSITION_REQUIRED'

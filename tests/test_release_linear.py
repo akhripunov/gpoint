@@ -563,6 +563,64 @@ class WorkerCompatibilityTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'assets_invalid'):
             self.contract.build_migration_readiness(sha,{**assets,'bad':'not-a-hash'},'VERIFIED','VERIFIED_CURRENT',True)
 
+    def test_read_only_worker_plan_rejects_runtime_current_symlink_outside_root_with_configured_tenant(self):
+        import hashlib
+        import tempfile
+        from unittest.mock import patch
+
+        sha = 'a' * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            repo = base / 'repo'
+            support = base / 'support'
+            runtime_root = support / 'runtime'
+            runtime_root.mkdir(parents=True, mode=0o700)
+            external_runtime = base / 'external' / sha
+            external_runtime.mkdir(parents=True)
+
+            worker_source = repo / 'services/agata/worker'
+            worker_source.mkdir(parents=True)
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                'candidate_worker_migration_test',
+                ROOT / 'services/agata/worker/migrate_worker_runtime.py')
+            migration = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(migration)
+
+            for name in migration.ASSETS:
+                source_asset = worker_source / name
+                installed_asset = external_runtime / name
+                source_asset.write_text('candidate-' + name)
+                installed_asset.write_text('installed-' + name)
+                installed_asset.chmod(0o700 if name == 'run_codex_worker.sh' else 0o600)
+            external_runtime.chmod(0o700)
+            assets = {name: hashlib.sha256((external_runtime / name).read_bytes()).hexdigest()
+                      for name in migration.ASSETS}
+            bundle_sha = hashlib.sha256(json.dumps(
+                assets, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+            manifest = {'source_sha': sha, 'bundle_sha256': bundle_sha, 'assets': assets}
+            manifest_path = external_runtime / 'bundle-manifest.json'
+            manifest_path.write_text(json.dumps(manifest))
+            manifest_path.chmod(0o600)
+
+            (support / 'legacy').mkdir()
+            (support / 'legacy/run_codex_worker.sh').write_text('#!/bin/sh\n')
+            (runtime_root / 'current').symlink_to(external_runtime, target_is_directory=True)
+
+            no_op_spec = type('Spec', (), {'loader': type('Loader', (), {
+                'exec_module': staticmethod(lambda _module: None)})()})()
+            with patch.object(self.contract.lane, 'REPO', repo), \
+                 patch.object(self.contract.lane, 'SUPPORT', support), \
+                 patch.object(migration, 'ROOT', support), \
+                 patch.object(migration, 'LEGACY', support / 'legacy'), \
+                 patch.object(migration, 'WORKER_DIR', worker_source), \
+                 patch.object(migration, '_validated_current_tenant_binding', return_value=None), \
+                 patch.object(migration, '_validated_legacy_tenant_binding', return_value=None), \
+                 patch.object(importlib.util, 'module_from_spec', return_value=migration), \
+                 patch.object(importlib.util, 'spec_from_file_location', return_value=no_op_spec):
+                with self.assertRaisesRegex(RuntimeError, 'worker_migration_runtime_invalid'):
+                    self.contract.inspect_migration_readiness(sha, {}, self.point)
+
     def test_known_static_credential_mismatch_is_compatibility_failure(self):
         expected={'GPOINT_AGATA_WORKER_TOKEN':'point-test','GSALES_WORKER_TOKEN':'sales-test'}
         self.assertEqual(self.contract.verify_contract(self.values,self.point,self.sales,expected_credentials=expected), {'compatibility':'PASS'})
