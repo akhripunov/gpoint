@@ -199,6 +199,46 @@ class ReleaseTelemetryV4Tests(unittest.TestCase):
         self.assertEqual(totals['SELF_HOSTED_RUNNER_SECONDS'], 60.001)
         self.assertIn('estimate, not billing', report['minute_estimate_note'].lower())
 
+    def test_minute_estimate_rounds_each_nonzero_job_at_the_sixty_second_boundary(self):
+        item = run(10, 1, [
+            job(1, '2026-10-15T10:00:00Z', '2026-10-15T10:00:59.999Z'),
+            job(2, '2026-10-15T10:00:00Z', '2026-10-15T10:01:00Z'),
+            job(3, '2026-10-15T10:00:00Z', '2026-10-15T10:01:00.001Z'),
+        ])
+        report = TELEMETRY.summarize_runs([item])
+        self.assertEqual([job['job_minutes_estimate'] for job in report['jobs']], [1, 1, 2])
+        self.assertEqual(report['totals']['GITHUB_HOSTED_JOB_MINUTES_ESTIMATE'], 4)
+
+    def test_queued_job_is_incomplete_and_never_counted_as_runner_work(self):
+        queued = job(3, None, None, conclusion=None)
+        queued.update(status='queued', started_at=None, completed_at=None, conclusion=None)
+        report = TELEMETRY.summarize_runs([
+            run(10, 1, [queued], completed=None, started=None)
+        ])
+        self.assertEqual(report['status'], 'PARTIAL')
+        self.assertEqual(report['jobs'][0]['runner_seconds'], 'NOT_MEASURED')
+        self.assertEqual(report['jobs'][0]['job_minutes_estimate'], 'NOT_MEASURED')
+        self.assertEqual(report['totals']['GITHUB_HOSTED_JOB_COUNT'], 0)
+        self.assertEqual(report['totals']['GITHUB_HOSTED_RUNNER_SECONDS'], 0.0)
+        self.assertEqual(report['totals']['GITHUB_HOSTED_IN_PROGRESS_JOB_COUNT'], 0)
+
+    def test_failed_first_attempt_cost_is_counted_but_live_retry_remains_only_a_lower_bound(self):
+        failed = run(10, 1, [job(1, '2026-10-15T10:00:00Z', '2026-10-15T10:01:01Z', conclusion='failure')],
+                     completed='2026-10-15T10:01:05Z')
+        retry_job = job(2, '2026-10-15T10:02:00Z', None, conclusion=None)
+        retry_job.update(status='in_progress', conclusion=None)
+        retry = run(10, 2, [retry_job], completed=None,
+                    started='2026-10-15T10:02:00Z')
+        retry['job_observed_at'] = {'2': '2026-10-15T10:02:20Z'}
+        report = TELEMETRY.summarize_runs([failed, retry])
+        self.assertEqual(report['status'], 'PARTIAL')
+        self.assertEqual(report['totals']['GITHUB_HOSTED_JOB_COUNT'], 1)
+        self.assertEqual(report['totals']['GITHUB_HOSTED_RUNNER_SECONDS'], 61.0)
+        self.assertEqual(report['totals']['GITHUB_HOSTED_JOB_MINUTES_ESTIMATE'], 2)
+        self.assertEqual(report['totals']['GITHUB_HOSTED_IN_PROGRESS_JOB_COUNT'], 1)
+        self.assertEqual(report['totals']['GITHUB_HOSTED_IN_PROGRESS_ELAPSED_SECONDS_LOWER_BOUND'], 20.0)
+        self.assertEqual(report['jobs'][1]['runner_seconds'], 'NOT_MEASURED')
+
     def test_stage_overlap_is_reported_per_stage_and_never_summed(self):
         item = run(10, 1, [job(1, '2026-10-15T10:00:05Z', '2026-10-15T10:01:35Z')],
                    dependencies={'job-1': []}, stages={
