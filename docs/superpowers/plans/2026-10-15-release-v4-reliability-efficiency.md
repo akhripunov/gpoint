@@ -32,8 +32,11 @@ Implement only ME-32, ME-33, ME-34, and ME-35. Preserve immutable artifacts, exa
 
 ## Local execution result — 2026-10-15
 
-Integrated local candidate: `ce853b2d7c971fcf4243b7111e07c39592338b57`, branch
-`codex/release-v4-reliability-20261015`, base production/main
+Integrated code candidate before this results note:
+`ce853b2d7c971fcf4243b7111e07c39592338b57`. This documentation-only
+checkpoint records its verification; the exact final handoff commit SHA is
+recorded in the handoff evidence and Linear. Branch:
+`codex/release-v4-reliability-20261015`; base production/main
 `a700198a843c12a84f2e537178de752e3eddd54d`.
 
 - **ME-32 Worker readiness:** preflight now requires a candidate-bound static
