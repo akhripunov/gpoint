@@ -77,3 +77,39 @@ publication; Deploy run 36968491432 took 261 seconds including publication.
 Canonical apply took 200.1 seconds (upload 41.1s, load 41.4s). Compare future
 whole-workflow durations and repeated-cycle count, not just apply time. The
 new rehearsal's CI duration must be measured before claiming speed gains.
+
+## Prepare V4 Phase 2 — bounded Docker image builds
+
+On 2026-10-15, the latest comparable full Prepare before this local change was
+run 38714817433: 528 seconds for Prepare and 21 seconds for the separate
+publication job (549 hosted job-seconds total; 10 rounded billed minutes).
+Baseline run 38695939791 took 652 hosted job-seconds (12 rounded billed
+minutes). This is one post-change observation, not a repeatable performance
+claim. Its 103-second reduction is 15.8% by hosted job-seconds.
+
+Prepare spends 199.4 seconds in the three sequential Docker builds in that
+run: GPoint 142.4s, AGATA 38.8s and GSales 18.2s. Phase 2 locally schedules
+those same exact-SHA, linux/amd64 builds with a maximum concurrency of two;
+tags, revision labels, BuildKit scopes, tests and migration rehearsals stay
+unchanged. A simple ideal schedule would reduce this build segment to about
+142.4s, a theoretical 57s wall-time reduction. This estimate excludes resource
+contention and is not measured evidence. If the total Prepare crosses the
+480-second billing boundary, it could save one rounded hosted minute; the
+separate publication job remains unchanged.
+
+The full Docker rehearsal is pending. The isolated Mac currently has another
+active disposable GPoint database test container and uses a shared BuildKit
+cache, so running concurrent image builds now would interfere with unrelated
+work and would not provide a clean measurement. No GitHub Actions run was
+started for this change. The next authorized canonical Prepare can validate
+image correctness and record actual wall time, BuildKit cache hits, and hosted
+runner usage. Do not claim the theoretical saving until those measurements
+exist.
+
+Recent hosted logs also show that workspace pnpm installation reused all 325
+packages from the Actions cache, while Docker dependency layers downloaded
+322 packages during the first runs after the Dockerfile graph changed. Because
+the feature-branch rehearsal could not seed the main cache and there has been
+no later comparable main run, this does not yet prove a persistent Docker
+cache miss. Preserve the existing per-image cache scopes and test suite; use a
+future normal main Prepare to determine whether the new graph now hits cache.

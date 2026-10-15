@@ -29,6 +29,7 @@ _impact_spec.loader.exec_module(_impact_module)
 load_verified_plan = _impact_module.load_verified_plan
 
 ROOT = Path(__file__).resolve().parents[1]
+BACKGROUND_STAGE_TIMEOUT_SECONDS = 1800
 
 
 @contextmanager
@@ -90,7 +91,7 @@ def finish_background_stage(stage):
     """Wait for an independent gate and preserve its output and failure."""
     process = stage['process']
     try:
-        returncode = process.wait(timeout=1800)
+        returncode = process.wait(timeout=BACKGROUND_STAGE_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         process.terminate()
         try:
@@ -119,6 +120,47 @@ def abort_background_stage(stage):
             process.kill()
             process.wait(timeout=10)
     _finish_background_stage(stage, 'FAIL')
+
+
+def run_bounded_stages(stages, timings, *, max_concurrent):
+    """Run independent required stages with bounded concurrency and fail closed."""
+    if isinstance(max_concurrent, bool) or not isinstance(max_concurrent, int) or max_concurrent < 1:
+        raise ValueError('max_concurrent must be a positive integer')
+    pending = iter(stages)
+    active = []
+    names = set()
+    try:
+        while True:
+            while len(active) < max_concurrent:
+                try:
+                    name, args = next(pending)
+                except StopIteration:
+                    break
+                if not isinstance(name, str) or not name or name in names:
+                    raise ValueError('stage names must be unique non-empty strings')
+                if not args:
+                    raise ValueError('stage command must not be empty')
+                names.add(name)
+                active.append(start_background_stage(name, args, timings))
+            if not active:
+                return
+            for stage in list(active):
+                returncode = stage['process'].poll()
+                if returncode is None:
+                    if time.monotonic() - stage['started'] >= BACKGROUND_STAGE_TIMEOUT_SECONDS:
+                        raise TimeoutError(
+                            f"background preparation stage timed out: {stage['name']}")
+                    continue
+                _finish_background_stage(stage, 'PASS' if returncode == 0 else 'FAIL')
+                active.remove(stage)
+                if returncode:
+                    raise subprocess.CalledProcessError(returncode, stage['args'])
+            if active:
+                time.sleep(0.05)
+    except BaseException:
+        for stage in active:
+            abort_background_stage(stage)
+        raise
 
 
 def docker_build_command(tag, dockerfile, context, sha, *, dependency_manifest_context=None):
@@ -413,17 +455,19 @@ def prepare(sha, output, *, postgres_only=False):
             return
         with tempfile.TemporaryDirectory(prefix='gpoint-docker-dependency-manifests-') as dependency_context:
             run(sys.executable, 'scripts/docker_dependency_manifests.py', dependency_context)
+            builds = []
             for tag, dockerfile, context in (
                     ('gpoint-runtime', 'infra/production/Gpoint.Dockerfile', '.'),
                     ('gpoint-agata-runtime', 'services/agata/Dockerfile', 'services/agata'),
                     ('gpoint-g-sales-runtime', 'services/gsales/Dockerfile', 'services/gsales'),
             ):
-                with measured_stage(f'docker_build_{tag.replace("-", "_")}', timings):
-                    command = docker_build_command(
-                        tag, dockerfile, context, sha,
-                        dependency_manifest_context=(dependency_context
-                                                     if tag == 'gpoint-runtime' else None))
-                    run(*command)
+                command = docker_build_command(
+                    tag, dockerfile, context, sha,
+                    dependency_manifest_context=(dependency_context
+                                                 if tag == 'gpoint-runtime' else None))
+                builds.append((f'docker_build_{tag.replace("-", "_")}', tuple(command)))
+            with measured_stage('docker_image_build_batch', timings):
+                run_bounded_stages(builds, timings, max_concurrent=2)
         with measured_stage('bot_production_image_startup', timings):
             run(sys.executable, 'scripts/smoke_bot_image.py', f'gpoint-runtime:{sha}')
         gsales_migration = ROOT / 'services/gsales/migrations/001_gsales.sql'
