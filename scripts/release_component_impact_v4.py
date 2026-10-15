@@ -10,6 +10,10 @@ SHA = re.compile(r"^[a-f0-9]{40}$")
 SAFETY = ("immutable_baseline", "exact_candidate", "image_integrity",
           "migration_compatibility", "preflight", "owner_approval",
           "runtime_health", "rollback", "recovery_evidence")
+REQUIRED_HEAVY_WORK = (
+    "agata_postgres_rehearsal", "gsales_postgres_regression",
+    "exact_sha_docker_images",
+)
 
 
 def safe_path(path):
@@ -29,9 +33,9 @@ def owner(path):
     if (path.startswith("services/agata/app/responses/") and
             path.endswith(".py") and len(path.split("/")) >= 5):
         return "agata"
-    if path in ("services/agata/tests/test_message_chronology.py",
-                "services/agata/tests/test_internal_api_e2e.py"):
-        return "agata"
+    if (path.startswith("services/gsales/app/") and path.endswith(".py") and
+            len(path.split("/")) >= 4):
+        return "gsales"
     return None
 
 
@@ -59,7 +63,12 @@ def plan(candidate, baseline, entries, *, baseline_verified=False):
         "ui": ["miniapp_static"],
         "agata": ["agata-api", "agata-memory-worker",
                   "gsales-agata-api", "gsales-agata-memory-worker"],
+        "gsales": ["gsales-api"],
     }.get(component, ["ui", "app", "agata", "gsales"])
+    affected_build_roles = {
+        "ui": [], "agata": ["agata"], "gsales": ["gsales"],
+    }.get(component, ["app", "agata", "gsales"])
+    required_work = (list(REQUIRED_HEAVY_WORK) if component != "ui" else [])
     return {
         "schema": 1, "candidateSha": candidate,
         "productionBaselineSha": baseline if verified else None,
@@ -67,8 +76,16 @@ def plan(candidate, baseline, entries, *, baseline_verified=False):
         "classification": "COMPONENT_CANDIDATE" if narrow else "FULL",
         "component": component,
         "affectedRuntimeServices": consumers,
+        "affectedBuildRoles": affected_build_roles,
+        # Selective image builds are not enabled: source impact is not enough
+        # to reuse immutable image provenance across a new release SHA.
+        "requiredExactShaBuildRoles": [] if component == "ui" else ["app", "agata", "gsales"],
         "changedPaths": sorted(seen) if verified else [],
         "unsafePaths": sorted(set(unsafe)) if verified else [],
+        # Component identity is descriptive only. Until immutable image reuse
+        # is proven end to end, AGATA/GSales candidates retain every heavy gate.
+        "requiredHeavyWork": required_work,
+        "skippedHeavyWork": [],
         "maySkipV3Gates": False, "mayDeploySelectively": False,
         "requiredSafetyGates": list(SAFETY),
     }
@@ -114,6 +131,29 @@ def verify_again(repo, baseline, candidate, receipt):
     return actual
 
 
+def verify_prepare_advisory(repo, v3_plan, candidate, receipt):
+    """Bind V4 advisory to the exact V3 ledger proof and candidate source tree."""
+    if not isinstance(v3_plan, dict) or not isinstance(receipt, dict):
+        raise ValueError("component advisory evidence is malformed")
+    if receipt.get("candidateSha") != candidate:
+        raise ValueError("component advisory candidate mismatch")
+    baseline = v3_plan.get("productionBaselineSha")
+    proved = (
+        v3_plan.get("baselineSource") == "gpoint-release-ledger" and
+        v3_plan.get("reason") in ("narrow-unchanged-backend", "impact-not-proven") and
+        isinstance(baseline, str)
+    )
+    expected = verified_plan(repo, baseline, candidate,
+                             baseline_verified=bool(proved))
+    if receipt != expected:
+        raise ValueError("component advisory differs from verified source scope")
+    if receipt.get("maySkipV3Gates") is not False or \
+            receipt.get("mayDeploySelectively") is not False or \
+            receipt.get("skippedHeavyWork") != []:
+        raise ValueError("component advisory cannot skip required release work")
+    return expected
+
+
 def main():
     # Advisory only: V3 already establishes canonical source provenance.
     # This output never controls V3's bundle verifier or deploy executor.
@@ -132,13 +172,11 @@ def main():
         raise ValueError("V4 source checkout must be clean")
     v3 = load_verified_plan(args.v3_plan, args.candidate, root)
     baseline = v3.get("productionBaselineSha")
-    proved = (
-        v3.get("baselineSource") == "gpoint-release-ledger" and
-        v3.get("reason") in ("narrow-unchanged-backend", "impact-not-proven") and
-        isinstance(baseline, str)
-    )
     advisory = verified_plan(root, baseline, args.candidate,
-                             baseline_verified=bool(proved))
+                             baseline_verified=(
+                                 v3.get("baselineSource") == "gpoint-release-ledger" and
+                                 v3.get("reason") in ("narrow-unchanged-backend", "impact-not-proven") and
+                                 isinstance(baseline, str)))
     if advisory["maySkipV3Gates"] or advisory["mayDeploySelectively"]:
         raise ValueError("V4 advisory cannot bypass operational V3 gates")
     destination = Path(args.output).resolve()

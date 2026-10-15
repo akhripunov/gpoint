@@ -144,6 +144,7 @@ jobs:
         env:
           CANDIDATE_SHA: ${{ github.sha }}
           GPOINT_V3_IMPACT_PLAN_PATH: ${{ runner.temp }}/gpoint-impact-v3.json
+          GPOINT_V4_COMPONENT_PLAN_PATH: ${{ runner.temp }}/gpoint-impact-v4-advisory.json
         run: python scripts/prepare-release.py "$CANDIDATE_SHA" "$RUNNER_TEMP/gpoint-bundle"
       - name: Verify V3 baseline has not drifted before immutable publication
         if: github.ref != 'refs/heads/main' || needs.coalesce.outputs.result == 'WINNER'

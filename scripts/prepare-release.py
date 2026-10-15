@@ -27,6 +27,13 @@ if _impact_spec is None or _impact_spec.loader is None:
 _impact_module = importlib.util.module_from_spec(_impact_spec)
 _impact_spec.loader.exec_module(_impact_module)
 load_verified_plan = _impact_module.load_verified_plan
+_component_spec = importlib.util.spec_from_file_location(
+    'gpoint_release_component_impact_v4',
+    Path(__file__).resolve().with_name('release_component_impact_v4.py'))
+if _component_spec is None or _component_spec.loader is None:
+    raise RuntimeError('V4 component impact selector module is unavailable')
+_component_module = importlib.util.module_from_spec(_component_spec)
+_component_spec.loader.exec_module(_component_module)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -308,13 +315,24 @@ def prepare(sha, output, *, postgres_only=False):
     impact = load_verified_plan(os.environ.get('GPOINT_V3_IMPACT_PLAN_PATH'), sha, ROOT)
     if postgres_only:
         impact = load_verified_plan(None, sha, ROOT)
+    component_impact = None
+    if not postgres_only:
+        component_path = os.environ.get('GPOINT_V4_COMPONENT_PLAN_PATH')
+        if not component_path:
+            raise RuntimeError('exact candidate V4 component advisory path is required')
+        try:
+            component_receipt = json.loads(Path(component_path).read_text())
+            component_impact = _component_module.verify_prepare_advisory(
+                ROOT, impact, sha, component_receipt)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            raise RuntimeError('exact candidate V4 component advisory verification failed') from error
     print('V3_IMPACT_USED=' + impact['classification'], flush=True)
     if not postgres_only and impact['classification'] == 'UI_ONLY':
         # Fail closed: independent V4 git inventory must prove only regular
         # Mini App source files changed against immutable COMPLETE production.
         # No three-image Docker bundle, database startup or image transfer.
         from release_static_prepare_v4 import prepare_static
-        return prepare_static(sha, output, impact)
+        return prepare_static(sha, output, impact, component_impact=component_impact)
     gsales_regression = None
     if not postgres_only:
         commands = (
@@ -540,6 +558,7 @@ def prepare(sha, output, *, postgres_only=False):
                  'runAttempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
                  'gates': {name: 'PASS' for name in ['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'botImageStartup', 'deployRehearsal']},
                  'impactV3': impact,
+                 'impactV4': component_impact,
                  'images': images, 'archiveSha256': digest, 'prismaHead': prisma, 'agataHead': heads,
                  'gsalesMigrationHead': gsales_migration.stem, 'gsalesMigrationSha256': gsales_migration_sha,
                  'prepareStages': timings,

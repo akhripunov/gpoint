@@ -24,15 +24,121 @@ class TestImpactV4(unittest.TestCase):
                 p = v4.plan(B, A, [("M", name)], baseline_verified=True)
                 self.assertEqual(p["component"], "ui")
                 self.assertEqual(p["affectedRuntimeServices"], ["miniapp_static"])
+                self.assertEqual(p["affectedBuildRoles"], [])
+                self.assertEqual(p["requiredExactShaBuildRoles"], [])
                 self.assertFalse(p["mayDeploySelectively"])
                 self.assertFalse(p["maySkipV3Gates"])
 
     def test_agata_includes_gsales_consumer(self):
-        p = v4.plan(B, A, [("M", "services/agata/app/responses/pipeline.py"),
-                            ("A", "services/agata/tests/test_message_chronology.py")],
+        p = v4.plan(B, A, [("M", "services/agata/app/responses/pipeline.py")],
                     baseline_verified=True)
         self.assertEqual(p["component"], "agata")
-        self.assertIn("gsales-agata-api", p["affectedRuntimeServices"])
+        self.assertEqual(p["affectedRuntimeServices"], [
+            "agata-api", "agata-memory-worker",
+            "gsales-agata-api", "gsales-agata-memory-worker",
+        ])
+        self.assertEqual(p["affectedBuildRoles"], ["agata"])
+        self.assertEqual(p["requiredExactShaBuildRoles"], ["app", "agata", "gsales"])
+        self.assertEqual(p["requiredHeavyWork"], [
+            "agata_postgres_rehearsal", "gsales_postgres_regression",
+            "exact_sha_docker_images",
+        ])
+
+    def test_gsales_runtime_source_is_identified_but_heavy_work_stays_required(self):
+        p = v4.plan(B, A, [("M", "services/gsales/app/main.py")], baseline_verified=True)
+        self.assertEqual(p["classification"], "COMPONENT_CANDIDATE")
+        self.assertEqual(p["component"], "gsales")
+        self.assertEqual(p["affectedRuntimeServices"], ["gsales-api"])
+        self.assertEqual(p["affectedBuildRoles"], ["gsales"])
+        self.assertEqual(p["requiredExactShaBuildRoles"], ["app", "agata", "gsales"])
+        self.assertEqual(p["requiredHeavyWork"], [
+            "agata_postgres_rehearsal", "gsales_postgres_regression",
+            "exact_sha_docker_images",
+        ])
+        self.assertEqual(p["skippedHeavyWork"], [])
+        self.assertFalse(p["maySkipV3Gates"])
+        self.assertFalse(p["mayDeploySelectively"])
+
+    def test_changed_test_files_force_full_instead_of_component_classification(self):
+        for path in (
+            "services/agata/tests/test_message_chronology.py",
+            "services/agata/tests/test_internal_api_e2e.py",
+            "services/gsales/tests/test_routes.py",
+        ):
+            with self.subTest(path=path):
+                p = v4.plan(B, A, [("M", path)], baseline_verified=True)
+                self.assertEqual(p["classification"], "FULL")
+                self.assertEqual(p["component"], None)
+                self.assertEqual(p["skippedHeavyWork"], [])
+
+    def test_agata_and_gsales_source_mix_is_full(self):
+        p = v4.plan(B, A, [
+            ("M", "services/agata/app/responses/pipeline.py"),
+            ("M", "services/gsales/app/main.py"),
+        ], baseline_verified=True)
+        self.assertEqual(p["classification"], "FULL")
+        self.assertEqual(p["requiredHeavyWork"], [
+            "agata_postgres_rehearsal", "gsales_postgres_regression",
+            "exact_sha_docker_images",
+        ])
+
+    def test_component_advisory_requires_verifiable_source_and_rejects_tampering(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            git(repo, "init", "-q")
+            git(repo, "config", "user.name", "test")
+            git(repo, "config", "user.email", "test@example.invalid")
+            f = repo / "services/gsales/app/main.py"
+            f.parent.mkdir(parents=True)
+            f.write_text("old")
+            git(repo, "add", ".")
+            git(repo, "commit", "-qm", "baseline")
+            base = git(repo, "rev-parse", "HEAD")
+            f.write_text("new")
+            git(repo, "commit", "-qam", "update")
+            candidate = git(repo, "rev-parse", "HEAD")
+            p = v4.verified_plan(repo, base, candidate, baseline_verified=True)
+            self.assertEqual(v4.verify_again(repo, base, candidate, p), p)
+            forged = dict(p, affectedRuntimeServices=["gsales-api", "agata-api"])
+            with self.assertRaises(ValueError):
+                v4.verify_again(repo, base, candidate, forged)
+
+    def test_prepare_advisory_binds_v3_ledger_baseline_and_exact_candidate_diff(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            git(repo, "init", "-q")
+            git(repo, "config", "user.name", "test")
+            git(repo, "config", "user.email", "test@example.invalid")
+            f = repo / "services/gsales/app/main.py"
+            f.parent.mkdir(parents=True)
+            f.write_text("old")
+            git(repo, "add", ".")
+            git(repo, "commit", "-qm", "baseline")
+            base = git(repo, "rev-parse", "HEAD")
+            f.write_text("new")
+            git(repo, "commit", "-qam", "update")
+            candidate = git(repo, "rev-parse", "HEAD")
+            v3 = {
+                "candidateSha": candidate,
+                "productionBaselineSha": base,
+                "baselineSource": "gpoint-release-ledger",
+                "reason": "impact-not-proven",
+            }
+            advisory = v4.verified_plan(repo, base, candidate, baseline_verified=True)
+            self.assertEqual(
+                v4.verify_prepare_advisory(repo, v3, candidate, advisory), advisory)
+            self.assertEqual(advisory["skippedHeavyWork"], [])
+            self.assertFalse(advisory["maySkipV3Gates"])
+            self.assertFalse(advisory["mayDeploySelectively"])
+            forged = dict(advisory, changedPaths=["services/gsales/app/other.py"])
+            with self.assertRaises(ValueError):
+                v4.verify_prepare_advisory(repo, v3, candidate, forged)
+            forged_skip = dict(advisory, skippedHeavyWork=["gsales_postgres_regression"])
+            with self.assertRaises(ValueError):
+                v4.verify_prepare_advisory(repo, v3, candidate, forged_skip)
+            with self.assertRaises(ValueError):
+                v4.verify_prepare_advisory(
+                    repo, dict(v3, baselineSource="unverified"), candidate, advisory)
 
     def test_shared_and_security_are_full(self):
         for name in ["packages/contracts/src/index.ts", "services/agata/app/security.py",

@@ -25,7 +25,7 @@ def _exec(*args, env=None):
     subprocess.run(args, cwd=ROOT, env=env, check=True)
 
 
-def prepare_static(sha, output, impact):
+def prepare_static(sha, output, impact, *, component_impact=None):
     if not SHA.fullmatch(sha or "") or not isinstance(impact, dict):
         raise ValueError("invalid static candidate")
     baseline = impact.get("productionBaselineSha")
@@ -44,6 +44,8 @@ def prepare_static(sha, output, impact):
         sorted(own["changedPaths"]) != sorted(impact.get("changedPaths", [])) or
         own["mayDeploySelectively"] is not False or own["maySkipV3Gates"] is not False):
         raise ValueError("V4 static source contains unsafe paths")
+    if component_impact is not None and component_impact != own:
+        raise ValueError("V4 static advisory differs from exact candidate source")
     if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip() != sha or \
        subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT).strip():
         raise ValueError("source workspace not clean/exact")
@@ -89,7 +91,7 @@ def prepare_static(sha, output, impact):
         "candidateSha": sha, "productionBaselineSha": baseline,
         "runId": int(os.environ["GITHUB_RUN_ID"]),
         "runAttempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
-        "impactV3": impact, "impactV4": own,
+        "impactV3": impact, "impactV4": component_impact or own,
         "gates": {k: "PASS" for k in ("sourceDiff", "miniappBuild", "miniappTests",
                                     "releaseTests", "staticArchive", "migrationUnchanged")},
         "staticArtifactName": "miniapp.zip", "staticArtifactSha256": static_sha,

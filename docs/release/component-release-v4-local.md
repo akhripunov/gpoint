@@ -1,8 +1,9 @@
 # GPoint component release V4 — local engineering groundwork
 
-Status: LOCAL_ENGINEERING_READY / NOT_INTEGRATED / NOT_DEPLOYED.
+Status: LOCAL_PENDING_RELEASE / ME-33 ADVISORY INTEGRATED / NOT DEPLOYED.
 This is not an authorized partial-release workflow or a performance claim.
-Existing V3 remains the ONLY production release process.
+Existing V3 remains the ONLY production release process; AGATA/GSales
+changes still run all heavy Prepare gates and all exact-SHA image builds.
 
 ## Baseline and dependency facts
 
@@ -20,8 +21,9 @@ Existing V3 remains the ONLY production release process.
 
 1. scripts/release_component_impact_v4.py — conservative exact-SHA full-diff
    planner; rejects mixed/security/DB/CI/unknown paths, deletes, symlinks,
-   unsafe git status and missing provenance. Narrows only UI/AGATA response
-   source paths. Flags maySkipV3Gates and mayDeploySelectively are false.
+   unsafe git status and missing provenance. Identifies UI, AGATA response,
+   and GSales runtime source paths descriptively. Flags maySkipV3Gates and
+   mayDeploySelectively are false.
 2. scripts/release_component_manifest_v4.py — offline per-role image metadata
    for inherited and new revisions, with SOURCE SHA DISTINCT FROM RELEASE SHA.
    Existing immutable COMPLETE receipt, native VPS image IDs, compatibility
@@ -43,13 +45,13 @@ Existing V3 remains the ONLY production release process.
 
 ## Integration with V3 Prepare (still advisory)
 
-The V4 source plan is now invoked as an additional read-only step after the
-existing V3 exact-SHA impact analysis during Prepare. It recomputes the git
-diff from V3 immutable baseline and emits an advisory JSON outside checkout.
-The output does NOT feed Prepare gate selection, receipts, image builds,
-preflight, Deploy or production ledger. Any advisory failure stops the
-candidate without applying changes. New unit regressions run in the existing
-preflight-coordinator test step. Activation awaits the remaining milestones.
+The V4 source plan is invoked after the existing V3 exact-SHA impact analysis
+during Prepare. It recomputes the git diff from the V3 immutable baseline and
+emits advisory JSON outside checkout. The exact verified advisory is copied
+into the receipt as evidence; it does not feed Prepare gate selection, image
+builds, preflight decisions, Deploy or production ledger. Any advisory failure
+stops the candidate without applying changes. New regressions run in the
+existing preflight-coordinator test step.
 
 ## Verified next engineering stage: component provenance and CI static artifact
 
@@ -90,7 +92,8 @@ inherited components. The source remains a draft PR, not main or production.
 
 ## Not done — required next integration, no shortcuts
 
-- [ ] Wire component plan to trusted V3 Prepare / exact production ledger.
+- [x] Wire component plan to trusted V3 Prepare / exact production ledger
+      as descriptive receipt evidence only; it cannot select or skip gates.
 - [ ] Produce/verify versioned immutable static artifact for UI in CI.
 - [ ] Add actual selective Docker build/transport only after full dependency,
       source and PostgreSQL/HTTP integration-test coverage proofs.
@@ -113,6 +116,21 @@ inherited components. The source remains a draft PR, not main or production.
 Not allowed: a new uncontrolled release path, treating COMPONENT_CANDIDATE
 as deployment approval, bypassing migrations/security/Worker/health gates,
 touching MAXIBOT, or publishing instructions solely to spend Actions.
+
+## 2026-10-15: ME-33 component-impact advisory
+
+The exact-source V4 component plan is now revalidated during canonical
+Prepare and recorded in both FULL and `STATIC_UI_ONLY` receipts. It is bound
+to the V3 verified production-ledger baseline and exact candidate diff.
+AGATA source impact lists both GPoint and GSales AGATA consumers; GSales
+runtime source is identified separately. These classifications are
+descriptive only: AGATA/GSales changes still require both PostgreSQL suites
+and exact-SHA builds for all three image roles. No heavy work is skipped,
+`skippedHeavyWork` remains empty, and immutable image reuse is not enabled.
+Unknown, mixed, test, config, migration, shared, lockfile, infrastructure,
+rename, delete, symlink, or unverified-baseline changes remain `FULL`.
+Targeted V4/V3/migration tests pass locally; no hosted minutes or savings are
+claimed for this advisory-only change.
 
 ## 2026-10-13: integrated STATIC_UI_ONLY implementation
 
