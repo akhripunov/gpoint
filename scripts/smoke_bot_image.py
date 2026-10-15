@@ -8,7 +8,9 @@ import time
 import uuid
 
 
-FETCH_STUB = r'''globalThis.fetch = async input => {
+FETCH_STUB = r'''const Module = require('node:module');
+const originalLoad = Module._load;
+const fetchStub = async input => {
   const value = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
   const url = new URL(value);
   const method = url.pathname.split('/').at(-1);
@@ -20,10 +22,14 @@ FETCH_STUB = r'''globalThis.fetch = async input => {
     await new Promise(resolve => setTimeout(resolve, 100));
     result = [];
   }
-  return new Response(JSON.stringify({ ok: true, result }), {
-    status: 200,
-    headers: { 'content-type': 'application/json' },
-  });
+  return { ok: true, json: async () => ({ ok: true, result }) };
+};
+fetchStub.default = fetchStub;
+Module._load = function(request, parent, isMain) {
+  if (request === 'node-fetch') {
+    return fetchStub;
+  }
+  return originalLoad.call(this, request, parent, isMain);
 };
 '''
 
@@ -38,17 +44,17 @@ def run(*args, capture=False):
 def smoke(image):
     container = f'gpoint-bot-smoke-{uuid.uuid4().hex[:12]}'
     with tempfile.TemporaryDirectory(prefix='gpoint-bot-smoke-') as temp:
-        stub = Path(temp) / 'telegram-fetch.mjs'
+        stub = Path(temp) / 'telegram-fetch.cjs'
         stub.write_text(FETCH_STUB)
         stub.chmod(0o600)
         try:
             run('docker', 'run', '-d', '--name', container, '--network', 'none',
-                '--read-only', '--tmpfs', '/tmp', '-v', f'{stub}:/tmp/telegram-fetch.mjs:ro',
+                '--read-only', '--tmpfs', '/tmp', '-v', f'{stub}:/tmp/telegram-fetch.cjs:ro',
                 '-e', 'NODE_ENV=production', '-e', 'TELEGRAM_BOT_TOKEN=123456:offline-smoke-token',
                 '-e', 'GPOINT_INGEST_URL=https://gpoint-smoke.invalid/api/internal/telegram/update',
                 '-e', 'TELEGRAM_WEBHOOK_SECRET=offline-smoke-secret',
                 '-e', 'PUBLIC_APP_URL=https://gpoint-smoke.invalid',
-                '-e', 'NODE_OPTIONS=--import=file:///tmp/telegram-fetch.mjs',
+                '-e', 'NODE_OPTIONS=--require=/tmp/telegram-fetch.cjs',
                 image, 'node', 'apps/bot/dist/main.js')
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
