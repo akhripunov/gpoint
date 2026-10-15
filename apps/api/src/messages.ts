@@ -5,13 +5,14 @@ import {
   type AgataCharacterProfile,
   type AgataConsentSnapshot,
 } from '@gpoint/agata-client';
-import { BadRequestException, Body, Controller, Get, Headers, HttpException, NotFoundException, Param, Post, Query, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Headers, HttpException, NotFoundException, Param, Post, Query, Req, UnauthorizedException } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 import { createAgataIntegration } from './agata-integration.js';
 import { publicCreator } from './core-v2.js';
 import { FixedWindowRateLimiter } from './rate-limit.js';
 import { resolveSession } from './session.js';
 import { connectedTelegramChannelAvatarUrls } from './telegram-channel-avatars.js';
+import { isAllowedCodexMessageRequest, isCodexOwnerAllowed, parseCodexOwnerUserIds, resolveCodexMessageSession } from './codex-chat-auth.js';
 
 const prisma = new PrismaClient();
 const sendLimiter = new FixedWindowRateLimiter(30, 60_000);
@@ -86,6 +87,25 @@ function authenticatedUser(headers: Record<string, string | undefined>): string 
   const id = resolveSession(headers.authorization?.replace(/^Bearer\s+/i, ''));
   if (!id) throw new UnauthorizedException();
   return id;
+}
+
+async function authenticatedMessageUser(headers: Record<string, string | undefined>, creatorId: string, action: 'read' | 'send', method: string, path: string): Promise<string> {
+  const token = headers.authorization?.replace(/^Bearer\s+/i, '');
+  const sessionUserId = resolveSession(token);
+  if (sessionUserId) return sessionUserId;
+  if (!isAllowedCodexMessageRequest(method, path, creatorId)) throw new UnauthorizedException();
+  const ownerUserIds = parseCodexOwnerUserIds(process.env.GPOINT_CODEX_OWNER_USER_IDS);
+  const scoped = await resolveCodexMessageSession(token, creatorId, action, {
+    now: Date.now,
+    ownerUserIds,
+    findByAccessTokenHash: async hash => {
+      const row = await prisma.codexChatConnection.findUnique({ where: { accessTokenHash: hash } });
+      return row ? { id: row.id, userId: row.userId, creatorId: row.creatorId, accessTokenHash: row.accessTokenHash, accessExpiresAt: row.accessExpiresAt, revokedAt: row.revokedAt } : null;
+    },
+    isCurrentCreatorOwner: async (userId, currentCreatorId) => Boolean(await prisma.creatorOwner.findFirst({ where: { userId, creatorId: currentCreatorId }, select: { creatorId: true } })),
+  });
+  if (scoped && isCodexOwnerAllowed(scoped.userId, ownerUserIds)) return scoped.userId;
+  throw new UnauthorizedException();
 }
 
 function agataOrUnavailable() {
@@ -211,8 +231,9 @@ export class MessagesController {
     @Headers() headers: Record<string, string | undefined>,
     @Query('cursor') cursor?: string,
     @Query('limit') limitValue?: string,
+    @Req() request?: { method?: string; url?: string },
   ) {
-    const userId = authenticatedUser(headers);
+    const userId = await authenticatedMessageUser(headers, creatorId, 'read', request?.method ?? 'GET', request?.url ?? `/messages/creator/${encodeURIComponent(creatorId)}`);
     const limit = limitValue === undefined ? 50 : Number(limitValue);
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new BadRequestException({ code: 'invalid_limit' });
     const [creator, agata] = [await findApprovedCreator(creatorId), agataOrUnavailable()];
@@ -229,8 +250,9 @@ export class MessagesController {
     @Param('creatorId') creatorId: string,
     @Headers() headers: Record<string, string | undefined>,
     @Body() body: { clientMessageId?: unknown; text?: unknown },
+    @Req() request?: { method?: string; url?: string },
   ) {
-    const userId = authenticatedUser(headers);
+    const userId = await authenticatedMessageUser(headers, creatorId, 'send', request?.method ?? 'POST', request?.url ?? `/messages/creator/${encodeURIComponent(creatorId)}`);
     if (typeof body?.clientMessageId !== 'string' || !UUID_PATTERN.test(body.clientMessageId) || typeof body.text !== 'string') throw new BadRequestException({ code: 'invalid_message' });
     const text = body.text.trim();
     if (!text || text.length > 4000) throw new BadRequestException({ code: 'invalid_message' });

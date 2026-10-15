@@ -37,6 +37,13 @@ test("creator profile opens its chat; consent and text exchange work", async ({ 
   await expect(page.locator(".bottom-nav")).toHaveCount(0);
 });
 
+test("Codex connection controls never appear in the Mini App", async ({ page }) => {
+  await installMiniAppBrowserMocks(page, { chatHistoryAccepted: true });
+  await page.goto("/messages/models_hub", { waitUntil: "domcontentloaded" });
+  await expect(page.getByText(/Codex access/i)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Codex/i })).toHaveCount(0);
+});
+
 test("one-time onboarding persists when memory is enabled across reload and existing-chat navigation", async ({ page }) => {
   await page.goto("/messages/models_hub", { waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { name: "AI character conversation" })).toBeVisible();

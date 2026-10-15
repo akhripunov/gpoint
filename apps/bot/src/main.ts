@@ -1,7 +1,10 @@
 import { Bot, InlineKeyboard } from 'grammy';
+import { forwardCodexStart } from './codex-start.js';
+import { telegramInternalUrl } from './telegram-api-url.js';
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
-const ingestUrl = process.env.GPOINT_INGEST_URL ?? 'http://127.0.0.1:3000/internal/telegram/update';
+const production = process.env.NODE_ENV === 'production';
+const ingestUrl = telegramInternalUrl('update', { baseUrl: process.env.GPOINT_INGEST_URL, production });
 const webhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET;
 const publicAppUrl = process.env.PUBLIC_APP_URL;
 const releaseSha = process.env.RELEASE_SHA;
@@ -15,6 +18,9 @@ function miniAppLaunchUrl(url: string) {
 if (!token) {
   console.error('TELEGRAM_BOT_TOKEN is required');
   process.exitCode = 1;
+} else if (!ingestUrl) {
+  console.error('GPOINT_INGEST_URL must be HTTPS in production and point to /api/internal/telegram/update');
+  process.exitCode = 1;
 } else if (!publicAppUrl) {
   console.error('PUBLIC_APP_URL is required for the Open GPoint button');
   process.exitCode = 1;
@@ -27,7 +33,17 @@ if (!token) {
     .then(() => console.info('[GPoint] Telegram Mini App menu button synchronized', { releaseShaPresent: Boolean(releaseSha) }))
     .catch(error => console.error('[GPoint] Telegram Mini App menu button sync failed', { reason: error instanceof Error ? error.message : 'UNKNOWN' }));
 
-  bot.command('start', ctx => ctx.reply('Welcome to GPoint — a creator-first feed.', { reply_markup: openKeyboard }));
+  bot.command('start', async ctx => {
+    const payload = typeof ctx.match === 'string' ? ctx.match.trim() : '';
+    if (payload.startsWith('codex_')) {
+      const result = await forwardCodexStart(payload, ctx.chat, ctx.from);
+      await ctx.reply(result.approved
+        ? 'Codex is authorized. Return to Codex to finish connecting.'
+        : 'Could not authorize Codex. Return to Codex and request a new link.');
+      return;
+    }
+    await ctx.reply('Welcome to GPoint — a creator-first feed.', { reply_markup: openKeyboard });
+  });
 
   const forward = async (update: any) => {
     if (!webhookSecret) return;
@@ -60,6 +76,7 @@ if (!token) {
     } catch { if (message) message.mediaDownloadFailed = true; }
     await fetch(ingestUrl, {
       method: 'POST',
+      redirect: 'error',
       headers: { 'content-type': 'application/json', 'x-telegram-webhook-secret': webhookSecret },
       body: JSON.stringify(update),
     }).catch(() => undefined);
@@ -69,8 +86,9 @@ if (!token) {
   bot.on('edited_channel_post', ctx => forward(ctx.update));
   bot.on('message:chat_shared', async ctx => {
     if (!webhookSecret) return;
-    await fetch(ingestUrl.replace(/\/internal\/telegram\/update$/, '/internal/telegram/chat-shared'), {
+    await fetch(telegramInternalUrl('chat-shared', { baseUrl: process.env.GPOINT_INGEST_URL, production })!, {
       method: 'POST',
+      redirect: 'error',
       headers: { 'content-type': 'application/json', 'x-telegram-webhook-secret': webhookSecret },
       body: JSON.stringify({ from: ctx.from, chat_shared: ctx.msg.chat_shared }),
     }).catch(() => undefined);
@@ -84,8 +102,9 @@ if (!token) {
       newStatus: update?.new_chat_member?.status ?? null,
       actorPresent: Boolean(update?.from?.id),
     });
-    const response = await fetch(ingestUrl.replace(/\/internal\/telegram\/update$/, '/internal/telegram/my-chat-member'), {
+    const response = await fetch(telegramInternalUrl('my-chat-member', { baseUrl: process.env.GPOINT_INGEST_URL, production })!, {
       method: 'POST',
+      redirect: 'error',
       headers: { 'content-type': 'application/json', 'x-telegram-webhook-secret': webhookSecret },
       body: JSON.stringify({ ...update, updateId: ctx.update.update_id }),
     }).catch(() => undefined);

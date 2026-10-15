@@ -26,6 +26,8 @@ model User {
   personalizationResetAt DateTime?
   channelChallenges TelegramConnectionChallenge[]
   channelInstallAttempts CreatorChannelInstallAttempt[]
+  codexChatConnections CodexChatConnection[]
+  codexDeviceAuthorizations CodexDeviceAuthorization[]
 }
 model UserPreference {
   id String @id @default(cuid())
@@ -54,6 +56,41 @@ model Creator {
   posts Post[]
   mediaAssets MediaAsset[]
   telegramChannel TelegramChannel?
+  codexChatConnections CodexChatConnection[]
+  codexDeviceAuthorizations CodexDeviceAuthorization[]
+}
+
+// Contains only revocable, hashed Codex capability tokens. Conversation data remains in AGATA.
+model CodexChatConnection {
+  id String @id @default(cuid())
+  userId String
+  creatorId String
+  accessTokenHash String @unique
+  refreshTokenHash String @unique
+  accessExpiresAt DateTime
+  refreshExpiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  creator Creator @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  @@index([userId, creatorId, revokedAt])
+  @@index([refreshExpiresAt])
+}
+
+model CodexDeviceAuthorization {
+  id String @id @default(cuid())
+  deviceCodeHash String @unique
+  telegramChallengeHash String @unique
+  sourceHash String
+  expiresAt DateTime
+  userId String?
+  creatorId String?
+  consumedAt DateTime?
+  createdAt DateTime @default(now())
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+  creator Creator? @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  @@index([expiresAt])
 }
 model CreatorProfile {
   id String @id @default(cuid())
