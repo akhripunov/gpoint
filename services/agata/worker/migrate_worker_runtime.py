@@ -671,6 +671,34 @@ def _validate_live_queue_snapshot_provenance(value: dict, lane: str) -> dict:
     return provenance
 
 
+def _validate_binding_migration_snapshot(tenant_id: str, snapshot: dict, *,
+                                         now: datetime | None = None) -> str:
+    """Require a fresh, empty, source-authenticated GPOINT snapshot for this tenant."""
+    current = now or datetime.now(UTC)
+    try:
+        provenance = _validate_live_queue_snapshot_provenance(snapshot, "GPOINT")
+        captured = datetime.fromisoformat(snapshot["queue_snapshot_at"].replace("Z", "+00:00"))
+    except (KeyError, AttributeError, TypeError, ValueError, PreflightFailure) as exc:
+        raise RuntimeError("worker_tenant_binding_invalid") from exc
+    if captured.tzinfo is None:
+        raise RuntimeError("worker_tenant_binding_invalid")
+    age = (current - captured).total_seconds()
+    counts = (snapshot.get("pending_inference_jobs"), snapshot.get("running_inference_jobs"))
+    if age > QUEUE_SNAPSHOT_MAX_AGE_SECONDS or age < -QUEUE_SNAPSHOT_FUTURE_SKEW_SECONDS:
+        raise RuntimeError("queue_snapshot_stale")
+    if (snapshot.get("health") != "HEALTHY"
+            or snapshot.get("queue_snapshot_state") != "VERIFIED"
+            or snapshot.get("queue_snapshot_authority") != "live_runtime_readonly_snapshot_v1"
+            or provenance["tenant_id"] != tenant_id
+            or snapshot.get("queue_snapshot_tenant_id") != tenant_id
+            or snapshot.get("queue_snapshot_source_id") != f"{LIVE_QUEUE_SOURCE}:gpoint"
+            or any(isinstance(count, bool) or not isinstance(count, int) or count < 0 for count in counts)
+            or counts != (0, 0)):
+        raise RuntimeError("worker_tenant_binding_invalid")
+    return (f"gpoint-vps:{provenance['release_sha']}:api={provenance['api_image_id']}"
+            f":agata={provenance['core_image_id']}")
+
+
 def normalize_live_runtime_queue_snapshot(snapshot: dict, lane: str, expected_tenant_id: str) -> dict:
     """Bind a source-authenticated DB snapshot to one configured worker lane."""
     if lane not in {"GPOINT", "GSALES"} or not isinstance(snapshot, dict):
@@ -736,22 +764,67 @@ def _configured_tenant_id(lane: str, manifest: dict) -> str:
     return tenant_id
 
 
+def _read_owned_regular_file(path: Path, *, expected_mode: int | None = None,
+                             forbidden_mode_bits: int = 0) -> tuple[bytes, os.stat_result]:
+    """Read a private file without following a swapped or symlink path."""
+    before = path.lstat()
+    if (stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid() or before.st_nlink != 1
+            or (expected_mode is not None and stat.S_IMODE(before.st_mode) != expected_mode)
+            or stat.S_IMODE(before.st_mode) & forbidden_mode_bits):
+        raise ValueError("owned_file_identity_invalid")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        if ((opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                or not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid()
+                or opened.st_nlink != 1
+                or (expected_mode is not None and stat.S_IMODE(opened.st_mode) != expected_mode)
+                or stat.S_IMODE(opened.st_mode) & forbidden_mode_bits):
+            raise ValueError("owned_file_identity_changed")
+        chunks = []
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block:
+                break
+            chunks.append(block)
+        after_fd = os.fstat(fd)
+        after_path = path.lstat()
+        identity = ("st_dev", "st_ino", "st_uid", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (any(getattr(opened, item) != getattr(after_fd, item) for item in identity)
+                or any(getattr(opened, item) != getattr(after_path, item) for item in identity)
+                or sum(map(len, chunks)) != opened.st_size):
+            raise ValueError("owned_file_identity_changed")
+        return b"".join(chunks), opened
+    finally:
+        os.close(fd)
+
+
 def _validated_current_tenant_binding() -> dict | None:
-    """Validate the durable GPOINT pin against the currently installed runtime."""
+    """Validate the durable GPOINT pin against the installed bundle evidence."""
     path = ROOT / "config/tenant-bindings.json"
-    if not path.exists():
+    if not path.exists() and not path.is_symlink():
         return None
     try:
         if path.is_symlink() or not path.is_file():
             raise ValueError
-        file_stat = path.stat()
-        value = json.loads(path.read_text(encoding="utf-8"))
+        binding_bytes, file_stat = _read_owned_regular_file(path, forbidden_mode_bits=0o077)
+        value = json.loads(binding_bytes)
         runtime_link = ROOT / "runtime/current"
         if not runtime_link.is_symlink():
             raise ValueError
+        runtime_root_path = ROOT / "runtime"
+        runtime_root_stat = runtime_root_path.lstat()
+        if (stat.S_ISLNK(runtime_root_stat.st_mode) or not stat.S_ISDIR(runtime_root_stat.st_mode)
+                or runtime_root_stat.st_uid != os.getuid()
+                or stat.S_IMODE(runtime_root_stat.st_mode) & 0o022):
+            raise ValueError
+        runtime_root = runtime_root_path.resolve(strict=True)
+        link_stat = runtime_link.lstat()
+        pointer = os.readlink(runtime_link)
         runtime = runtime_link.resolve(strict=True)
-        runtime_root = (ROOT / "runtime").resolve(strict=True)
         worker = runtime / "gpoint_mac_worker.py"
+        manifest = _read_installed_runtime_manifest(runtime)
         source_id = value.get("source_id", "")
         tenant_id = value.get("tenant_id", "")
         captured = datetime.fromisoformat(str(value.get("snapshot_at", "")).replace("Z", "+00:00"))
@@ -760,18 +833,117 @@ def _validated_current_tenant_binding() -> dict | None:
                 or set(value) != {"version", "candidate_sha", "worker_sha256", "tenant_id", "source_id", "snapshot_at"}
                 or value.get("version") != 1
                 or not re.fullmatch(r"[0-9a-f]{40}", value.get("candidate_sha", ""))
-                or value.get("candidate_sha") != runtime.name
+                or value.get("candidate_sha") != manifest["source_sha"]
                 or not re.fullmatch(r"[0-9a-f]{64}", value.get("worker_sha256", ""))
                 or not worker.is_file() or worker.is_symlink()
+                or value.get("worker_sha256") != manifest["assets"]["gpoint_mac_worker.py"]
                 or value.get("worker_sha256") != sha256(worker)
-                or not runtime.is_relative_to(runtime_root)
+                or runtime.parent != runtime_root or pointer != runtime.name
                 or not re.fullmatch(r"gpoint-vps:[0-9a-f]{40}:api=sha256:[0-9a-f]{64}:agata=sha256:[0-9a-f]{64}", source_id)
                 or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", tenant_id)
                 or tenant.int == 0 or str(tenant) != tenant_id or captured.tzinfo is None):
             raise ValueError
+        link_after = runtime_link.lstat()
+        root_after = runtime_root_path.lstat()
+        if ((link_stat.st_dev, link_stat.st_ino) != (link_after.st_dev, link_after.st_ino)
+                or not stat.S_ISLNK(link_after.st_mode) or os.readlink(runtime_link) != pointer
+                or runtime_link.resolve(strict=True) != runtime
+                or (runtime_root_stat.st_dev, runtime_root_stat.st_ino) != (root_after.st_dev, root_after.st_ino)):
+            raise ValueError
     except (OSError, ValueError, TypeError, AttributeError, json.JSONDecodeError) as exc:
         raise RuntimeError("worker_tenant_binding_invalid") from exc
     return value
+
+
+def _read_installed_runtime_manifest(runtime: Path) -> dict:
+    """Read the protected manifest and verify every installed source asset."""
+    path = runtime / "bundle-manifest.json"
+    try:
+        manifest_bytes, _ = _read_owned_regular_file(path, expected_mode=0o600)
+        manifest = json.loads(manifest_bytes)
+        if not isinstance(manifest, dict):
+            raise ValueError
+
+        # Normal releases use the source SHA as their runtime directory name.
+        # Product-worker migration releases have a separate immutable runtime ID
+        # because they also bind Python environments; source_sha still identifies
+        # the exact worker asset source and must not be compared to that directory.
+        base_keys = {"source_sha", "bundle_sha256", "assets"}
+        migration_keys = base_keys | {
+            "asset_source_root", "candidate_kind", "python_runtime",
+            "rollback_python_runtime", "runtime_release_id",
+        }
+        source_sha = manifest.get("source_sha")
+        assets = manifest.get("assets")
+        bundle_sha = manifest.get("bundle_sha256")
+        if (not isinstance(source_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", source_sha)
+                or not isinstance(bundle_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", bundle_sha)
+                or not isinstance(assets, dict) or set(assets) != set(ASSETS)
+                or any(not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                       for digest in assets.values())):
+            raise ValueError
+
+        if set(manifest) == base_keys:
+            if source_sha != runtime.name:
+                raise ValueError
+            _verify_runtime_assets(runtime, manifest)
+            actual_bundle = hashlib.sha256(json.dumps(
+                assets, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            if actual_bundle != bundle_sha:
+                raise ValueError
+            return manifest
+
+        if (set(manifest) != migration_keys
+                or manifest.get("candidate_kind") != "INSTALLED_PRODUCT_WORKER_MIGRATION"
+                or not isinstance(manifest.get("python_runtime"), dict)
+                or not isinstance(manifest.get("rollback_python_runtime"), dict)):
+            raise ValueError
+
+        runtime_root_path = runtime.parent
+        runtime_root_stat = runtime_root_path.lstat()
+        if (stat.S_ISLNK(runtime_root_stat.st_mode) or not stat.S_ISDIR(runtime_root_stat.st_mode)
+                or runtime_root_stat.st_uid != os.getuid()
+                or stat.S_IMODE(runtime_root_stat.st_mode) & 0o022):
+            raise ValueError
+        runtime_root = runtime_root_path.resolve(strict=True)
+        runtime_stat = runtime.lstat()
+        runtime_id = manifest.get("runtime_release_id")
+        source_root = runtime_root / source_sha
+        if (not isinstance(runtime_id, str) or not re.fullmatch(r"[0-9a-f]{40}", runtime_id)
+                or runtime_id != runtime.name or runtime != runtime_root / runtime_id
+                or stat.S_ISLNK(runtime_stat.st_mode) or not stat.S_ISDIR(runtime_stat.st_mode)
+                or runtime_stat.st_uid != os.getuid() or stat.S_IMODE(runtime_stat.st_mode) & 0o022
+                or manifest.get("asset_source_root") != str(source_root)
+                or source_root == runtime or source_root.is_symlink() or not source_root.is_dir()
+                or source_root.stat().st_uid != os.getuid()
+                or stat.S_IMODE(source_root.stat().st_mode) & 0o022):
+            raise ValueError
+
+        _verify_runtime_assets(runtime, manifest)
+        _verify_runtime_assets(source_root, manifest)
+        source_manifest_path = source_root / "bundle-manifest.json"
+        source_manifest_bytes, _ = _read_owned_regular_file(source_manifest_path, expected_mode=0o600)
+        source_manifest = json.loads(source_manifest_bytes)
+        if (not isinstance(source_manifest, dict)
+                or set(source_manifest) != base_keys
+                or source_manifest.get("source_sha") != source_sha
+                or source_manifest.get("assets") != assets
+                or source_manifest.get("bundle_sha256") != bundle_sha):
+            raise ValueError
+
+        actual_bundle = hashlib.sha256(json.dumps(
+            assets, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        runtime_identity = hashlib.sha256(json.dumps({
+            "source_sha": source_sha,
+            "bundle_sha256": actual_bundle,
+            "python_runtime": manifest["python_runtime"],
+            "rollback_python_runtime": manifest["rollback_python_runtime"],
+        }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:40]
+        if actual_bundle != bundle_sha or runtime_identity != runtime_id:
+            raise ValueError
+        return manifest
+    except (OSError, ValueError, TypeError, AttributeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("worker_tenant_binding_invalid") from exc
 
 
 def _remote_queue_snapshot_command(lane: str) -> str:
@@ -1035,7 +1207,7 @@ def _refresh_local_pool_evidence(status: dict) -> None:
     if not isinstance(slots, dict) or slot_ids not in canonical_slot_sets or total != len(slots):
         raise PreflightFailure("local_slot_inventory_invalid", stage="local_pool_validation",
                                legacy_error="production_queue_status_unavailable")
-    for slot_id, slot in slots.items():
+    for slot in slots.values():
         if not isinstance(slot, dict):
             raise PreflightFailure("local_slot_inventory_invalid", stage="local_pool_validation",
                                    lane=None, legacy_error="production_queue_status_unavailable")
@@ -2219,7 +2391,7 @@ def _verify_runtime_assets(runtime: Path, manifest: dict) -> None:
             raise RuntimeError("worker_runtime_asset_content_mismatch")
 
 
-def _migrate_tenant_binding(manifest: dict) -> None:
+def _migrate_tenant_binding(manifest: dict, queue_status: dict | None = None) -> None:
     destination = ROOT / "config/tenant-bindings.json"
     if destination.is_symlink():
         raise RuntimeError("worker_tenant_binding_invalid")
@@ -2231,12 +2403,19 @@ def _migrate_tenant_binding(manifest: dict) -> None:
         binding = _validated_legacy_tenant_binding(manifest)
         if binding is None:
             return
+    if queue_status is None:
+        raise RuntimeError("authoritative_queue_snapshot_unavailable")
+    require_fresh_empty_production_queues(queue_status)
+    snapshot = _read_live_runtime_queue_snapshot("GPOINT", binding["tenant_id"])
+    source_id = _validate_binding_migration_snapshot(binding["tenant_id"], snapshot)
     if (not re.fullmatch(r"[0-9a-f]{40}", manifest.get("source_sha", ""))
             or not re.fullmatch(r"[0-9a-f]{64}", manifest.get("assets", {}).get("gpoint_mac_worker.py", ""))):
         raise RuntimeError("worker_tenant_binding_invalid")
     binding = dict(binding)
     binding["candidate_sha"] = manifest["source_sha"]
     binding["worker_sha256"] = manifest["assets"]["gpoint_mac_worker.py"]
+    binding["source_id"] = source_id
+    binding["snapshot_at"] = snapshot["queue_snapshot_at"]
     _atomic_json(destination, binding)
 
 
@@ -2549,7 +2728,6 @@ def apply() -> dict:
         # Repeat all safety checks at the point of mutation.
         preflight = _run_safety_preflight("APPLY_INITIAL", transition_lock_already_held=True)
         manifest = preflight["manifest"]
-        before = preflight["inventory"]
         queue_evidence = preflight["queue_evidence"]
         network_before = _network_state_sha256()
         if not ROOT.is_dir() or ROOT.is_symlink() or ROOT.stat().st_uid != os.getuid():
@@ -2574,6 +2752,7 @@ def apply() -> dict:
         next_plist = _render_plist(target_link, diagnostics_directory)
         switch_started = False
         restart_evidence = None
+        paused_queue_status = None
         try:
             # Freeze the verified LaunchAgent and repeat the idle check while
             # it cannot claim another job. This closes the preflight/bootout race.
@@ -2591,6 +2770,7 @@ def apply() -> dict:
                     "APPLY_PAUSED_PRE_BOOTOUT", manifest=manifest, transition_lock_already_held=True,
                 )
                 queue_evidence = paused_preflight["queue_evidence"]
+                paused_queue_status = paused_preflight["status"]
             except Exception:
                 try:
                     os.kill(paused_pid, signal.SIGCONT)
@@ -2637,7 +2817,7 @@ def apply() -> dict:
                 source = LEGACY / source_name
                 if source.exists() and not destination.exists():
                     shutil.copytree(source, destination, dirs_exist_ok=True) if source.is_dir() else shutil.copy2(source, destination)
-            _migrate_tenant_binding(manifest)
+            _migrate_tenant_binding(manifest, paused_queue_status)
             poll_baseline = safe_worker_status(ROOT / "status/worker-status.json")
             switch_started = True
             next_link = ROOT / "runtime/.current-next"

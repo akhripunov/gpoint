@@ -22,6 +22,65 @@ assert SPEC and SPEC.loader
 SPEC.loader.exec_module(migration)
 
 
+def _write_verified_runtime(root: Path, directory_sha: str, source_sha: str) -> tuple[Path, Path]:
+    runtime = root / "runtime" / directory_sha
+    runtime.mkdir(parents=True)
+    runtime.chmod(0o700)
+    assets = {}
+    for name in migration.ASSETS:
+        path = runtime / name
+        path.write_text(f"verified {name}")
+        path.chmod(0o700 if name == "run_codex_worker.sh" else 0o600)
+        assets[name] = migration.sha256(path)
+    worker = runtime / "gpoint_mac_worker.py"
+    bundle_sha = hashlib.sha256(json.dumps(assets, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    manifest = {"source_sha": source_sha, "bundle_sha256": bundle_sha, "assets": assets}
+    manifest_path = runtime / "bundle-manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    manifest_path.chmod(0o600)
+    return runtime, worker
+
+
+def _fresh_gpoint_live_snapshot(tenant_id: str, *, captured_at: datetime | None = None) -> dict:
+    captured = captured_at or datetime.now(UTC)
+    release_sha = "f" * 40
+    api_image = "sha256:" + "1" * 64
+    core_image = "sha256:" + "2" * 64
+    source_id = (f"{migration.LIVE_QUEUE_SOURCE}:gpoint:release={release_sha}"
+                 f":api={api_image}:core={core_image}:tenant={tenant_id}")
+    provenance = {
+        "snapshot_version": "agata_live_queue_snapshot_v1",
+        "source_id": source_id,
+        "lane": "GPOINT",
+        "source_system": "gpoint",
+        "release_sha": release_sha,
+        "api_build_sha": release_sha,
+        "core_build_sha": release_sha,
+        "api_image_id": api_image,
+        "core_image_id": core_image,
+        "tenant_id": tenant_id,
+        "tenant_identity_verified": True,
+        "transaction_read_only": True,
+        "same_login": True,
+        "role_superuser": False,
+        "role_bypassrls": False,
+        "visible_tenant_rows": 1,
+        "database_name": "gpoint_test",
+    }
+    return {
+        "health": "HEALTHY",
+        "queue_snapshot_state": "VERIFIED",
+        "queue_snapshot_source_id": f"{migration.LIVE_QUEUE_SOURCE}:gpoint",
+        "queue_snapshot_at": captured.isoformat(),
+        "pending_inference_jobs": 0,
+        "running_inference_jobs": 0,
+        "queue_snapshot_authority": "live_runtime_readonly_snapshot_v1",
+        "queue_snapshot_runtime_release_sha": release_sha,
+        "queue_snapshot_tenant_id": tenant_id,
+        "queue_snapshot_provenance": provenance,
+    }
+
+
 def test_status_inventory_projection_omits_secrets_and_job_payloads(tmp_path):
     path = tmp_path / "status.json"
     path.write_text(json.dumps({
@@ -615,20 +674,21 @@ def test_migration_rebinds_trusted_tenant_sidecar_to_exact_worker_source(tmp_pat
     monkeypatch.setattr(migration, "LEGACY", legacy)
     monkeypatch.setattr(migration, "ROOT", root)
     manifest = {"source_sha": "c" * 40, "assets": {"gpoint_mac_worker.py": "d" * 64}}
-    migration._migrate_tenant_binding(manifest)
+    snapshot = _fresh_gpoint_live_snapshot(value["tenant_id"])
+    monkeypatch.setattr(migration, "_read_live_runtime_queue_snapshot",
+                        lambda *_args, **_kwargs: snapshot)
+    migration._migrate_tenant_binding(manifest, _fresh_empty_queue_status(datetime.now(UTC)))
     result = json.loads((root / "config/tenant-bindings.json").read_text())
     assert result["tenant_id"] == value["tenant_id"]
-    assert result["source_id"] == value["source_id"]
+    assert result["source_id"] != value["source_id"]
+    assert result["snapshot_at"] == snapshot["queue_snapshot_at"]
     assert result["candidate_sha"] == manifest["source_sha"]
     assert result["worker_sha256"] == manifest["assets"]["gpoint_mac_worker.py"]
 
 
 def test_existing_tenant_sidecar_is_rebound_only_from_verified_installed_runtime(tmp_path, monkeypatch):
     root = tmp_path / "support"
-    runtime = root / "runtime" / ("a" * 40)
-    runtime.mkdir(parents=True)
-    installed_worker = runtime / "gpoint_mac_worker.py"
-    installed_worker.write_text("installed worker")
+    runtime, installed_worker = _write_verified_runtime(root, "a" * 40, "a" * 40)
     current = root / "runtime/current"
     current.symlink_to(runtime.name)
     tenant_id = "81a4ba28-6de5-4b03-8332-0661ba4d46f4"
@@ -651,15 +711,232 @@ def test_existing_tenant_sidecar_is_rebound_only_from_verified_installed_runtime
     monkeypatch.setattr(migration, "ROOT", root)
     monkeypatch.setattr(migration, "LEGACY", root)
     monkeypatch.setattr(migration, "CONFIG", config)
+    snapshot = _fresh_gpoint_live_snapshot(tenant_id)
+    monkeypatch.setattr(migration, "_read_live_runtime_queue_snapshot",
+                        lambda *_args, **_kwargs: snapshot)
 
     assert migration._configured_tenant_id("GPOINT", manifest) == tenant_id
-    migration._migrate_tenant_binding(manifest)
+    migration._migrate_tenant_binding(manifest, _fresh_empty_queue_status(datetime.now(UTC)))
 
     updated = json.loads(sidecar_path.read_text())
     assert updated["tenant_id"] == original["tenant_id"]
-    assert updated["source_id"] == original["source_id"]
+    assert updated["source_id"] != original["source_id"]
+    assert updated["snapshot_at"] == snapshot["queue_snapshot_at"]
     assert updated["candidate_sha"] == manifest["source_sha"]
     assert updated["worker_sha256"] == manifest["assets"]["gpoint_mac_worker.py"]
+
+
+def test_current_tenant_binding_accepts_legacy_runtime_with_source_sha_directory(tmp_path, monkeypatch):
+    root = tmp_path / "support"
+    source_sha = "b" * 40
+    runtime, worker = _write_verified_runtime(root, source_sha, source_sha)
+    (root / "runtime/current").symlink_to(runtime.name)
+    binding_path = root / "config/tenant-bindings.json"
+    binding_path.parent.mkdir(parents=True)
+    binding = {
+        "version": 1,
+        "candidate_sha": source_sha,
+        "worker_sha256": migration.sha256(worker),
+        "tenant_id": "81a4ba28-6de5-4b03-8332-0661ba4d46f4",
+        "source_id": "gpoint-vps:" + "c" * 40 + ":api=sha256:" + "1" * 64 + ":agata=sha256:" + "2" * 64,
+        "snapshot_at": "2026-10-04T12:00:00Z",
+    }
+    binding_path.write_text(json.dumps(binding))
+    binding_path.chmod(0o600)
+    monkeypatch.setattr(migration, "ROOT", root)
+
+    assert migration._validated_current_tenant_binding() == binding
+
+
+def test_current_tenant_binding_accepts_verified_product_migration_runtime(tmp_path, monkeypatch):
+    root = tmp_path / "support"
+    source_sha = "a" * 40
+    source, _ = _write_verified_runtime(root, source_sha, source_sha)
+    source_assets = json.loads((source / "bundle-manifest.json").read_text())
+    runtime_root = root / "runtime"
+    runtime_assets = {}
+    runtime_id = "b" * 40
+    runtime = runtime_root / runtime_id
+    runtime.mkdir(mode=0o700)
+    runtime.chmod(0o700)
+    for name in migration.ASSETS:
+        destination = runtime / name
+        shutil.copyfile(source / name, destination)
+        destination.chmod(0o700 if name == "run_codex_worker.sh" else 0o600)
+        runtime_assets[name] = migration.sha256(destination)
+    python_runtime = {"resolved_binary_path": "/private/runtime/python", "python_binary_sha256": "c" * 64}
+    rollback_runtime = {"resolved_binary_path": "/private/rollback/python", "python_binary_sha256": "d" * 64}
+    bundle_sha = hashlib.sha256(json.dumps(
+        runtime_assets, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    runtime_id = hashlib.sha256(json.dumps({
+        "source_sha": source_sha,
+        "bundle_sha256": bundle_sha,
+        "python_runtime": python_runtime,
+        "rollback_python_runtime": rollback_runtime,
+    }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:40]
+    runtime.rename(runtime_root / runtime_id)
+    runtime = runtime_root / runtime_id
+    manifest = {
+        "asset_source_root": str(source),
+        "assets": runtime_assets,
+        "bundle_sha256": bundle_sha,
+        "candidate_kind": "INSTALLED_PRODUCT_WORKER_MIGRATION",
+        "python_runtime": python_runtime,
+        "rollback_python_runtime": rollback_runtime,
+        "runtime_release_id": runtime_id,
+        "source_sha": source_sha,
+    }
+    manifest_path = runtime / "bundle-manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    manifest_path.chmod(0o600)
+    (runtime_root / "current").symlink_to(runtime_id)
+    binding_path = root / "config/tenant-bindings.json"
+    binding_path.parent.mkdir(parents=True)
+    binding = {
+        "version": 1,
+        "candidate_sha": source_sha,
+        "worker_sha256": runtime_assets["gpoint_mac_worker.py"],
+        "tenant_id": "81a4ba28-6de5-4b03-8332-0661ba4d46f4",
+        "source_id": "gpoint-vps:" + "c" * 40 + ":api=sha256:" + "1" * 64 + ":agata=sha256:" + "2" * 64,
+        "snapshot_at": "2026-10-04T12:00:00Z",
+    }
+    binding_path.write_text(json.dumps(binding))
+    binding_path.chmod(0o600)
+    monkeypatch.setattr(migration, "ROOT", root)
+
+    assert source_assets["assets"] == runtime_assets
+    assert migration._validated_current_tenant_binding() == binding
+
+
+def test_current_tenant_binding_rejects_product_migration_runtime_id_mismatch(tmp_path, monkeypatch):
+    root = tmp_path / "support"
+    source_sha = "a" * 40
+    source, worker = _write_verified_runtime(root, source_sha, source_sha)
+    manifest = {
+        "asset_source_root": str(source),
+        "assets": json.loads((source / "bundle-manifest.json").read_text())["assets"],
+        "bundle_sha256": json.loads((source / "bundle-manifest.json").read_text())["bundle_sha256"],
+        "candidate_kind": "INSTALLED_PRODUCT_WORKER_MIGRATION",
+        "python_runtime": {"resolved_binary_path": "/private/runtime/python", "python_binary_sha256": "c" * 64},
+        "rollback_python_runtime": {"resolved_binary_path": "/private/rollback/python", "python_binary_sha256": "d" * 64},
+        "runtime_release_id": "d" * 40,
+        "source_sha": source_sha,
+    }
+    runtime_root = root / "runtime"
+    runtime = runtime_root / ("b" * 40)
+    runtime.mkdir(mode=0o700)
+    runtime.chmod(0o700)
+    for name in migration.ASSETS:
+        shutil.copyfile(source / name, runtime / name)
+        (runtime / name).chmod(0o700 if name == "run_codex_worker.sh" else 0o600)
+    manifest_path = runtime / "bundle-manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    manifest_path.chmod(0o600)
+    (runtime_root / "current").symlink_to(runtime.name)
+    binding_path = root / "config/tenant-bindings.json"
+    binding_path.parent.mkdir()
+    binding_path.write_text(json.dumps({
+        "version": 1,
+        "candidate_sha": source_sha,
+        "worker_sha256": migration.sha256(worker),
+        "tenant_id": "81a4ba28-6de5-4b03-8332-0661ba4d46f4",
+        "source_id": "gpoint-vps:" + "c" * 40 + ":api=sha256:" + "1" * 64 + ":agata=sha256:" + "2" * 64,
+        "snapshot_at": "2026-10-04T12:00:00Z",
+    }))
+    binding_path.chmod(0o600)
+    monkeypatch.setattr(migration, "ROOT", root)
+
+    with pytest.raises(RuntimeError, match="worker_tenant_binding_invalid"):
+        migration._validated_current_tenant_binding()
+
+
+def test_current_tenant_binding_rejects_manifest_sha_mismatch(tmp_path, monkeypatch):
+    root = tmp_path / "support"
+    runtime, worker = _write_verified_runtime(root, "b" * 40, "c" * 40)
+    (root / "runtime/current").symlink_to(runtime.name)
+    binding_path = root / "config/tenant-bindings.json"
+    binding_path.parent.mkdir(parents=True)
+    binding_path.write_text(json.dumps({
+        "version": 1,
+        "candidate_sha": "a" * 40,
+        "worker_sha256": migration.sha256(worker),
+        "tenant_id": "81a4ba28-6de5-4b03-8332-0661ba4d46f4",
+        "source_id": "gpoint-vps:" + "d" * 40 + ":api=sha256:" + "1" * 64 + ":agata=sha256:" + "2" * 64,
+        "snapshot_at": "2026-10-04T12:00:00Z",
+    }))
+    binding_path.chmod(0o600)
+    monkeypatch.setattr(migration, "ROOT", root)
+
+    with pytest.raises(RuntimeError, match="worker_tenant_binding_invalid"):
+        migration._validated_current_tenant_binding()
+
+
+def test_binding_migration_accepts_fresh_source_verified_same_tenant_snapshot():
+    tenant_id = "81a4ba28-6de5-4b03-8332-0661ba4d46f4"
+    snapshot = _fresh_gpoint_live_snapshot(tenant_id)
+
+    source_id = migration._validate_binding_migration_snapshot(
+        tenant_id, snapshot, now=datetime.now(UTC),
+    )
+
+    provenance = snapshot["queue_snapshot_provenance"]
+    assert source_id == (f"gpoint-vps:{provenance['release_sha']}"
+                         f":api={provenance['api_image_id']}:agata={provenance['core_image_id']}")
+
+
+def test_binding_migration_rejects_stale_queue_snapshot():
+    tenant_id = "81a4ba28-6de5-4b03-8332-0661ba4d46f4"
+    snapshot = _fresh_gpoint_live_snapshot(
+        tenant_id,
+        captured_at=datetime.now(UTC) - timedelta(seconds=migration.QUEUE_SNAPSHOT_MAX_AGE_SECONDS + 1),
+    )
+
+    with pytest.raises(RuntimeError, match="queue_snapshot_stale"):
+        migration._validate_binding_migration_snapshot(tenant_id, snapshot, now=datetime.now(UTC))
+
+
+def test_binding_migration_rejects_wrong_tenant_snapshot():
+    expected_tenant = "81a4ba28-6de5-4b03-8332-0661ba4d46f4"
+    other_tenant = "c4d67889-877e-4d1b-a8d8-597c479d638f"
+    snapshot = _fresh_gpoint_live_snapshot(other_tenant)
+
+    with pytest.raises(RuntimeError, match="worker_tenant_binding_invalid"):
+        migration._validate_binding_migration_snapshot(expected_tenant, snapshot, now=datetime.now(UTC))
+
+
+def test_binding_migration_does_not_write_when_live_tenant_differs(tmp_path, monkeypatch):
+    root = tmp_path / "support"
+    runtime, worker = _write_verified_runtime(root, "a" * 40, "a" * 40)
+    (root / "runtime/current").symlink_to(runtime.name)
+    sidecar_path = root / "config/tenant-bindings.json"
+    sidecar_path.parent.mkdir(parents=True)
+    expected_tenant = "81a4ba28-6de5-4b03-8332-0661ba4d46f4"
+    wrong_tenant = "c4d67889-877e-4d1b-a8d8-597c479d638f"
+    original = {
+        "version": 1,
+        "candidate_sha": "a" * 40,
+        "worker_sha256": migration.sha256(worker),
+        "tenant_id": expected_tenant,
+        "source_id": "gpoint-vps:" + "b" * 40 + ":api=sha256:" + "1" * 64 + ":agata=sha256:" + "2" * 64,
+        "snapshot_at": "2026-10-04T12:00:00Z",
+    }
+    sidecar_path.write_text(json.dumps(original))
+    sidecar_path.chmod(0o600)
+    config = root / "worker.env"
+    config.write_text("GSALES_AGATA_TENANT_ID=c4d67889-877e-4d1b-a8d8-597c479d638f\n")
+    config.chmod(0o600)
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "LEGACY", root)
+    monkeypatch.setattr(migration, "CONFIG", config)
+    monkeypatch.setattr(migration, "_read_live_runtime_queue_snapshot",
+                        lambda *_args, **_kwargs: _fresh_gpoint_live_snapshot(wrong_tenant))
+    manifest = {"source_sha": "c" * 40, "assets": {"gpoint_mac_worker.py": "d" * 64}}
+    original_bytes = sidecar_path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="worker_tenant_binding_invalid"):
+        migration._migrate_tenant_binding(manifest, _fresh_empty_queue_status(datetime.now(UTC)))
+
+    assert sidecar_path.read_bytes() == original_bytes
 
 
 def test_existing_tenant_sidecar_with_unverified_runtime_is_not_rebound(tmp_path, monkeypatch):
@@ -762,7 +1039,7 @@ def test_apply_with_absent_rollback_tree_saves_snapshot_and_restart_evidence(tmp
     monkeypatch.setattr(migration, "_ensure_pool_config", lambda: None)
     monkeypatch.setattr(migration, "_pause_idle_launchagent", lambda: 99999999)
     monkeypatch.setattr(migration, "_running_inference_pids", lambda: [])
-    monkeypatch.setattr(migration, "_migrate_tenant_binding", lambda _manifest: None)
+    monkeypatch.setattr(migration, "_migrate_tenant_binding", lambda _manifest, _queue_status: None)
     healthy_status = {"configured_concurrency": 1, "lanes": {
         "GPOINT": {"health": "HEALTHY"}, "GSALES": {"health": "HEALTHY"},
     }}
@@ -1904,7 +2181,7 @@ def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(t
     monkeypatch.setattr(migration, "_pause_idle_launchagent", lambda: 1234)
     monkeypatch.setattr(migration, "_running_inference_pids", lambda: [])
     monkeypatch.setattr(migration.os, "kill", lambda *_args: None)
-    monkeypatch.setattr(migration, "_migrate_tenant_binding", lambda _manifest: None)
+    monkeypatch.setattr(migration, "_migrate_tenant_binding", lambda _manifest, _queue_status: None)
     status = {"configured_concurrency": 1, "lanes": {
         "GPOINT": {"health": "HEALTHY"}, "GSALES": {"health": "HEALTHY"}, "LAB": {"state": "AVAILABLE"}}}
     monkeypatch.setattr(migration, "_health_check", lambda: status)
