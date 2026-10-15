@@ -273,3 +273,29 @@ test('GSales component coverage may omit only duplicate AGATA Core tests with ex
     assert.throws(() => verifyReleaseBundle(f.dir, f.sha), /component regression coverage/);
   }
 });
+
+test('FULL GSales-runner receipt remains valid when baseline proof is unavailable', t => {
+  const f = fixture(t);
+  f.receipt.impactV3 = {
+    version: 1, candidateSha: f.sha, productionBaselineSha: null,
+    baselineSource: null, classification: 'FULL', reason: 'canonical-proof-unavailable',
+    changedPaths: [],
+    checks: { agata_postgres_rehearsal: true, gsales_postgres_regression: true },
+    invariantChecks: ['artifact_migrations'],
+  };
+  f.receipt.impactV4 = {
+    schema: 1, candidateSha: f.sha, productionBaselineSha: null,
+    baselineProvenance: null, classification: 'FULL', component: null,
+    changedPaths: [], unsafePaths: [], maySkipV3Gates: false,
+    mayDeploySelectively: false, skippedHeavyWork: [],
+  };
+  f.receipt.componentRegressionCoverage = {
+    schema: 1, candidateSha: f.sha, mode: 'FULL',
+    gsalesPostgresSuite: 'PASS', agataSalesTenantPostgresSuite: 'PASS',
+    agataCorePostgresSuite: 'PASS', primaryAgataPostgresGate: 'PASS',
+    impactV3BaselineSha: null, impactV4Component: null,
+    impactV4ChangedPaths: [],
+  };
+  f.save();
+  assert.equal(verifyReleaseBundle(f.dir, f.sha).componentRegressionCoverage.mode, 'FULL');
+});
