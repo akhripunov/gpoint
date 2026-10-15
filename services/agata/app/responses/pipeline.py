@@ -1789,7 +1789,6 @@ async def run_retention_cleanup(session: AsyncSession, tenant_id: UUID) -> int:
         memory_params,
     )
     purged_rows = purged.all()
-    affected_relationship_ids = {row.relationship_id for row in purged_rows}
     for relationship_id in sorted({row.relationship_id for row in purged_rows}):
         await session.execute(
             text(
