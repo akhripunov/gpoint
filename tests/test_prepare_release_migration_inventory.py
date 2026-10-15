@@ -142,7 +142,7 @@ def test_gpoint_build_sha_does_not_invalidate_unrelated_build_layers():
         assert dockerfile.index(unrelated_build) < sha_env
 
 
-def test_bounded_build_stages_start_next_work_when_a_slot_frees(tmp_path):
+def test_bounded_build_stages_start_next_work_when_a_slot_frees(tmp_path, monkeypatch):
     code = (
         "import pathlib,sys,time\n"
         "root=pathlib.Path(sys.argv[1]); name=sys.argv[2]; delay=float(sys.argv[3])\n"
@@ -155,10 +155,25 @@ def test_bounded_build_stages_start_next_work_when_a_slot_frees(tmp_path):
         for name, delay in (('slow', '0.8'), ('short', '0.1'), ('third', '0.1'))
     ]
     timings = {}
+    processes = []
+    peak_active = 0
+    start_stage = prepare_release.start_background_stage
+
+    def track_active_builds(name, args, stage_timings):
+        nonlocal peak_active
+        active = sum(process.poll() is None for process in processes)
+        assert active < 2
+        stage = start_stage(name, args, stage_timings)
+        processes.append(stage['process'])
+        peak_active = max(peak_active, active + 1)
+        return stage
+
+    monkeypatch.setattr(prepare_release, 'start_background_stage', track_active_builds)
 
     prepare_release.run_bounded_stages(stages, timings, max_concurrent=2)
 
     assert float((tmp_path / 'third.started').read_text()) < float((tmp_path / 'slow.done').read_text())
+    assert peak_active == 2
     assert set(timings) == {'slow', 'short', 'third'}
     assert all(stage['status'] == 'PASS' for stage in timings.values())
 
