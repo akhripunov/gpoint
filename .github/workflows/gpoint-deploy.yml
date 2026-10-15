@@ -181,12 +181,22 @@ jobs:
         shell: bash
         run: |
           {
-            echo 'GITHUB_HOSTED_JOB_COUNT=UNKNOWN'
-            echo 'GITHUB_HOSTED_RUNNER_SECONDS=UNKNOWN'
-            echo 'SELF_HOSTED_JOB_COUNT=UNKNOWN'
-            echo 'SELF_HOSTED_RUNNER_SECONDS=UNKNOWN'
-            echo 'DUPLICATE_HOSTED_WORK_REMOVED=UNKNOWN'
-            echo 'CACHE_PREVENTED_DOWNLOAD=UNKNOWN'
+            echo 'GITHUB_HOSTED_JOB_COUNT=NOT_MEASURED'
+            echo 'GITHUB_HOSTED_RUNNER_SECONDS=NOT_MEASURED'
+            echo 'GITHUB_HOSTED_JOB_MINUTES_ESTIMATE=NOT_MEASURED'
+            echo 'SELF_HOSTED_JOB_COUNT=NOT_MEASURED'
+            echo 'SELF_HOSTED_RUNNER_SECONDS=NOT_MEASURED'
+            echo 'SELF_HOSTED_JOB_MINUTES_ESTIMATE=NOT_MEASURED'
+            echo 'WORKFLOW_CRITICAL_PATH_SECONDS=NOT_MEASURED'
+            echo 'WORKFLOW_QUEUE_WAIT_SECONDS=NOT_MEASURED'
+            echo 'WORKFLOW_ELAPSED_SECONDS=NOT_MEASURED'
+            echo 'OWNER_WAIT_SECONDS=NOT_MEASURED'
+            echo 'TELEMETRY_STATUS=NOT_MEASURED'
+            echo 'DUPLICATE_RUNS_REMOVED=NOT_MEASURED'
+            echo 'DUPLICATE_JOBS_REMOVED=NOT_MEASURED'
+            echo 'UNKNOWN_RUNNER_JOB_COUNT=NOT_MEASURED'
+            echo 'DUPLICATE_HOSTED_WORK_REMOVED=NOT_MEASURED'
+            echo 'CACHE_PREVENTED_DOWNLOAD=NOT_MEASURED'
           } >> "$GITHUB_ENV"
       - name: Read saved release evidence
         if: needs.deploy.outputs.status != ''

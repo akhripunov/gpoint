@@ -207,6 +207,8 @@ jobs:
         with:
           ref: ${{ github.sha }}
       - name: Measure Prepare runner usage
+        id: telemetry
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TELEMETRY_RUN_IDS: ${{ github.run_id }}
@@ -214,6 +216,28 @@ jobs:
         run: |
           python scripts/release-telemetry.py
           cat "$GITHUB_OUTPUT" >> "$GITHUB_ENV"
+      - name: Mark Prepare telemetry unknown
+        if: always() && steps.telemetry.outcome != 'success'
+        shell: bash
+        run: |
+          {
+            echo 'GITHUB_HOSTED_JOB_COUNT=NOT_MEASURED'
+            echo 'GITHUB_HOSTED_RUNNER_SECONDS=NOT_MEASURED'
+            echo 'GITHUB_HOSTED_JOB_MINUTES_ESTIMATE=NOT_MEASURED'
+            echo 'SELF_HOSTED_JOB_COUNT=NOT_MEASURED'
+            echo 'SELF_HOSTED_RUNNER_SECONDS=NOT_MEASURED'
+            echo 'SELF_HOSTED_JOB_MINUTES_ESTIMATE=NOT_MEASURED'
+            echo 'WORKFLOW_CRITICAL_PATH_SECONDS=NOT_MEASURED'
+            echo 'WORKFLOW_QUEUE_WAIT_SECONDS=NOT_MEASURED'
+            echo 'WORKFLOW_ELAPSED_SECONDS=NOT_MEASURED'
+            echo 'OWNER_WAIT_SECONDS=NOT_MEASURED'
+            echo 'TELEMETRY_STATUS=NOT_MEASURED'
+            echo 'DUPLICATE_RUNS_REMOVED=NOT_MEASURED'
+            echo 'DUPLICATE_JOBS_REMOVED=NOT_MEASURED'
+            echo 'UNKNOWN_RUNNER_JOB_COUNT=NOT_MEASURED'
+            echo 'DUPLICATE_HOSTED_WORK_REMOVED=NOT_MEASURED'
+            echo 'CACHE_PREVENTED_DOWNLOAD=NOT_MEASURED'
+          } >> "$GITHUB_ENV"
       - name: Publish candidate result to existing Linear documents
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}

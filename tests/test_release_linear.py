@@ -72,7 +72,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("if: always() && steps.telemetry.outcome != 'success'", fallback)
         for key in ('GITHUB_HOSTED_JOB_COUNT', 'GITHUB_HOSTED_RUNNER_SECONDS', 'SELF_HOSTED_JOB_COUNT',
                     'SELF_HOSTED_RUNNER_SECONDS', 'DUPLICATE_HOSTED_WORK_REMOVED', 'CACHE_PREVENTED_DOWNLOAD'):
-            self.assertIn(f'{key}=UNKNOWN', fallback)
+            self.assertIn(f'{key}=NOT_MEASURED', fallback)
         self.assertIn('Publish preflight result to GPoint Linear', workflow)
 
     def test_project_linear_document_targets_are_gpoint_scoped(self):
@@ -138,6 +138,28 @@ class ReleaseTests(unittest.TestCase):
                                   'GITHUB_HOSTED_RUNNER_SECONDS': 12,
                                   'SELF_HOSTED_JOB_COUNT': 1,
                                   'SELF_HOSTED_RUNNER_SECONDS': 25})
+
+    def test_linear_release_publication_includes_me35_measured_and_unknown_fields(self):
+        source = (ROOT / 'scripts/publish-release-linear.py').read_text()
+        fields = source.split("telemetry_fields = (", 1)[1].split(')', 1)[0]
+        for name in ('GITHUB_HOSTED_JOB_MINUTES_ESTIMATE', 'SELF_HOSTED_JOB_MINUTES_ESTIMATE',
+                     'WORKFLOW_CRITICAL_PATH_SECONDS', 'WORKFLOW_QUEUE_WAIT_SECONDS',
+                     'WORKFLOW_ELAPSED_SECONDS', 'OWNER_WAIT_SECONDS', 'TELEMETRY_STATUS',
+                     'DUPLICATE_RUNS_REMOVED', 'DUPLICATE_JOBS_REMOVED', 'UNKNOWN_RUNNER_JOB_COUNT'):
+            self.assertIn(name, fields)
+
+    def test_prepare_telemetry_failure_does_not_block_candidate_publication(self):
+        workflow = (ROOT / '.github/workflows/gpoint-prepare.yml').read_text()
+        measure = workflow.split('- name: Measure Prepare runner usage', 1)[1].split('- name:', 1)[0]
+        self.assertIn('id: telemetry', measure)
+        self.assertIn('continue-on-error: true', measure)
+        fallback = workflow.split('- name: Mark Prepare telemetry unknown', 1)[1].split('- name:', 1)[0]
+        self.assertIn("if: always() && steps.telemetry.outcome != 'success'", fallback)
+        for name in ('GITHUB_HOSTED_JOB_MINUTES_ESTIMATE', 'WORKFLOW_CRITICAL_PATH_SECONDS',
+                     'WORKFLOW_QUEUE_WAIT_SECONDS', 'WORKFLOW_ELAPSED_SECONDS', 'TELEMETRY_STATUS'):
+            self.assertIn(f'{name}=NOT_MEASURED', fallback)
+        publish = workflow.split('- name: Publish candidate result to existing Linear documents', 1)[1].split('- name:', 1)[0]
+        self.assertIn('run: python scripts/publish-release-linear.py', publish)
 
     def test_candidate_does_not_replace_production(self):
         source = SYNC.replace_section('Architect', 'production', 'production facts')

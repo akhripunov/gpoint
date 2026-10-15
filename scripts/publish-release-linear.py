@@ -374,7 +374,12 @@ def main():
     url = f'https://github.com/akhripunov/gpoint/actions/runs/{run_id}'
     body = f"Время: {datetime.now(timezone.utc).isoformat()}.\n\nЭтап: {phase}; статус: **{status}**.\n\nSHA: `{sha}`.\n\nПопытка GitHub Actions: `{attempt}`.\n\n[Проверки и логи]({url}/attempts/{attempt})."
     telemetry_fields = ('GITHUB_HOSTED_JOB_COUNT', 'GITHUB_HOSTED_RUNNER_SECONDS',
+                        'GITHUB_HOSTED_JOB_MINUTES_ESTIMATE',
                         'SELF_HOSTED_JOB_COUNT', 'SELF_HOSTED_RUNNER_SECONDS',
+                        'SELF_HOSTED_JOB_MINUTES_ESTIMATE',
+                        'WORKFLOW_CRITICAL_PATH_SECONDS', 'WORKFLOW_QUEUE_WAIT_SECONDS',
+                        'WORKFLOW_ELAPSED_SECONDS', 'OWNER_WAIT_SECONDS', 'TELEMETRY_STATUS',
+                        'DUPLICATE_RUNS_REMOVED', 'DUPLICATE_JOBS_REMOVED', 'UNKNOWN_RUNNER_JOB_COUNT',
                         'DUPLICATE_HOSTED_WORK_REMOVED', 'CACHE_PREVENTED_DOWNLOAD')
     if any(os.environ.get(key) for key in telemetry_fields):
         body += '\n\nRunner/artifact telemetry:\n' + '\n'.join(
