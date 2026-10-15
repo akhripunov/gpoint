@@ -18,7 +18,7 @@ function fixture(t) {
   fs.writeFileSync(path.join(dir, 'images.tar.gz'), bytes);
   const receipt = { schema: 1, candidateSha: sha, status: 'READY', runId: 1, agataHead: 'agata0008', prismaHead: '20260922090000_telegram_channel_avatar',
     gsalesMigrationHead: '001_gsales', gsalesMigrationSha256: 'c'.repeat(64),
-    gates: Object.fromEntries(['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'deployRehearsal'].map(g => [g, 'PASS'])),
+    gates: Object.fromEntries(['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'botImageStartup', 'deployRehearsal'].map(g => [g, 'PASS'])),
     images: { app: { id, revision: sha, platform: 'linux/amd64' }, agata: { id, revision: sha, platform: 'linux/amd64' }, gsales: { id, revision: sha, platform: 'linux/amd64' } },
     archiveSha256: crypto.createHash('sha256').update(bytes).digest('hex') };
   const save = () => fs.writeFileSync(path.join(dir, 'receipt.json'), JSON.stringify(receipt));
@@ -102,6 +102,12 @@ test('a receipt without the real containerd deployment rehearsal cannot authoriz
   const f = fixture(t);
   delete f.receipt.gates.deployRehearsal; f.save();
   assert.throws(() => verifyReleaseBundle(f.dir, f.sha), /deployRehearsal/);
+});
+test('a receipt without production Bot image startup smoke cannot authorize apply', t => {
+  const f = fixture(t);
+  delete f.receipt.gates.botImageStartup;
+  f.save();
+  assert.throws(() => verifyReleaseBundle(f.dir, f.sha), /botImageStartup/);
 });
 test('rehearsal scratch paths cannot introduce shell commands or escape via parent traversal', t => {
   const f = fixture(t), proof = verifyReleaseBundle(f.dir, f.sha);
