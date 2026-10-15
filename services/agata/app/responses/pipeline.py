@@ -509,7 +509,9 @@ class ResponseOrchestrator:
             locale_fragment = await resolve_locale_response_fragment(
                 self.session, principal, conversation.character_id
             )
-            conversation_history = await self._recent_messages(principal, conversation)
+            conversation_history = await self._recent_messages(
+                principal, conversation, current_message_id=user_message.id
+            )
             conversation_summaries = await self._recent_summaries(
                 principal, conversation, plaintext, request.as_of
             )
@@ -1322,7 +1324,11 @@ class ResponseOrchestrator:
         )
 
     async def _recent_messages(
-        self, principal: PrincipalContext, conversation: Conversation
+        self,
+        principal: PrincipalContext,
+        conversation: Conversation,
+        *,
+        current_message_id: UUID,
     ) -> tuple[ConversationEntry, ...]:
         """Return decrypted recent messages for conversation history."""
         rows = (
@@ -1334,6 +1340,7 @@ class ResponseOrchestrator:
                     Message.user_id == principal.user_id,
                     Message.character_id == conversation.character_id,
                     Message.scope == conversation.scope,
+                    Message.id != current_message_id,
                     or_(Message.role != "assistant", Message.channel_delivery_status == "confirmed"),
                     Message.deleted_at.is_(None),
                 )
