@@ -194,3 +194,16 @@ artifact roundtrip completed. This establishes duplicated heavy work, not a
 measured reduction of total Prepare wall time or billed Actions minutes. A
 new hosted comparison needs separate OWNER authorization; no Actions run has
 been made for this local continuation.
+
+Detailed job-log timestamps refine the estimate: the repeated AGATA Core suite
+inside the GSales runner executed 355 tests in 38.11 s. The primary final
+migration check ended at `09:49:55.107Z`; the GSales regression stage ended at
+`09:49:56.447Z`, only 1.34 s later. Image archive export (14.251 s) plus
+artifact roundtrip (45.699 s) then took 59.950 s. The local narrow mode removes
+the proven duplicate suite for eligible GSales-only candidates while keeping
+the independent AGATA gate and both GSales-specific suites. In this historical
+critical path, removing 38.11 s of runner work exposes at most about 1.34 s
+before the primary migration gate becomes the blocker; rounded hosted minutes
+remain unchanged at 10. These are historical-path calculations, not measured
+post-change savings. Actual post-change hosted and end-to-end savings remain
+`NOT_MEASURED` until a separately authorized hosted run.
