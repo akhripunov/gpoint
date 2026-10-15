@@ -161,6 +161,57 @@ def test_context_builder_excludes_disputed_memory_and_unconfirmed_shared_history
     assert [item["value"] for item in request["shared_history"]] == ["confirmed-episode"]
 
 
+def test_context_builder_keeps_newest_history_entries_after_limit():
+    now = datetime(2026, 10, 15, tzinfo=UTC)
+    profile = CharacterProfileVersion(
+        tenant_id=uuid4(), character_id=uuid4(), version=1,
+        personality={}, speech_style={}, backstory={}, boundaries={}, effective_at=now,
+    )
+    history = tuple(
+        ConversationEntry("user" if index % 2 == 0 else "assistant", f"turn-{index:02d}")
+        for index in range(20)
+    )
+
+    context = ContextBuilder.build(
+        profile, "latest query", (), QueryPlanner().plan("latest query", now),
+        conversation_history=history, as_of=now,
+    )
+
+    assert [entry.content for entry in context.conversation_history] == [
+        f"turn-{index:02d}" for index in range(8, 20)
+    ]
+    worker_request = _worker_request(context)
+    assert [entry["content"] for entry in worker_request["history"]] == [
+        f"turn-{index:02d}" for index in range(8, 20)
+    ]
+
+    payloads = []
+
+    async def capture(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(
+            200, json={"id": "response", "choices": [{"message": {"content": "ответ"}}]}
+        )
+
+    async def run_deepseek():
+        provider = DeepSeekResponseProvider(
+            api_key="offline-test-key",
+            base_url="https://anymodel.org/v1",
+            timeout_seconds=1,
+            transport=httpx.MockTransport(capture),
+        )
+        await provider.complete(context)
+
+    asyncio.run(run_deepseek())
+    serialized_history = [
+        message["content"] for message in payloads[0]["messages"]
+        if message.get("role") in {"user", "assistant"}
+    ]
+    assert serialized_history == [
+        *(f"turn-{index:02d}" for index in range(14, 20)), "latest query"
+    ]
+
+
 def test_empty_context_is_serialized_without_invented_memory_or_protocol():
     request = _worker_request(
         ResponseContext(

@@ -222,9 +222,11 @@ def _bounded_untrusted_text(value: object, *, limit: int) -> str | None:
 def _bounded_history(values: object) -> tuple[ConversationEntry, ...]:
     if not isinstance(values, tuple):
         return ()
+    # The database loader returns chronological history. Bound from the newest
+    # end so the provider sees the current conversation state after long chats.
     output: list[ConversationEntry] = []
     used = 0
-    for value in values:
+    for value in reversed(values[-12:]):
         if not isinstance(value, ConversationEntry) or value.role not in {
             "user",
             "assistant",
@@ -236,9 +238,7 @@ def _bounded_history(values: object) -> tuple[ConversationEntry, ...]:
             continue
         output.append(ConversationEntry(value.role, content))
         used += len(content)
-        if len(output) >= 12:
-            break
-    return tuple(output)
+    return tuple(reversed(output))
 
 
 def _derive_dialogue_state(
