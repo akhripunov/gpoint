@@ -1,58 +1,58 @@
 {
-  "currentProductionSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+  "currentProductionSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
   "currentProductionDbHead": "20261015130000_codex_telegram_challenge",
-  "currentProductionRef": "gpoint-production-20261015T062430517Z",
-  "previousProductionSha": "08358304714dfe3e247a21270703673741224d8b",
-  "lastReleaseId": "gpoint-release-20261015T062430517Z",
+  "currentProductionRef": "gpoint-production-20261015T073216045Z",
+  "previousProductionSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+  "lastReleaseId": "gpoint-release-20261015T073216045Z",
   "lastReleaseStatus": "COMPLETE",
-  "lastReleaseCompletedAt": "2026-10-15T06:30:20.983Z",
+  "lastReleaseCompletedAt": "2026-10-15T07:39:30.253Z",
   "releaseOrigin": "durable-production-release",
   "artifactIdentities": {
     "api": {
-      "sourceSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+      "sourceSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
       "adapter": {
-        "imageId": "sha256:358e72ddc028ce9d00963ffd3df41e1e8b75cef5134a630227d89269454bf98b",
-        "indexSha256": "17e1202ca72fc2af4f7814518c4b186d3b1ce328a47c1c7e82bbe6e7b7fcf6b4",
-        "buildSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+        "imageId": "sha256:9c1e895fd3cadb115b6c7a411c929954359a54bf3c860fa4ac5ef18a9134f3d6",
+        "indexSha256": "b36abc3226ec7bdc5eff99e8b4f13bfe078a7b6adeb43f361b4a60d32735dc86",
+        "buildSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
         "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
       }
     },
     "worker": {
-      "sourceSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+      "sourceSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
       "adapter": {
-        "imageId": "sha256:358e72ddc028ce9d00963ffd3df41e1e8b75cef5134a630227d89269454bf98b",
-        "indexSha256": "17e1202ca72fc2af4f7814518c4b186d3b1ce328a47c1c7e82bbe6e7b7fcf6b4",
-        "buildSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+        "imageId": "sha256:9c1e895fd3cadb115b6c7a411c929954359a54bf3c860fa4ac5ef18a9134f3d6",
+        "indexSha256": "b36abc3226ec7bdc5eff99e8b4f13bfe078a7b6adeb43f361b4a60d32735dc86",
+        "buildSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
         "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
       }
     },
     "bot": {
-      "sourceSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+      "sourceSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
       "adapter": {
-        "imageId": "sha256:358e72ddc028ce9d00963ffd3df41e1e8b75cef5134a630227d89269454bf98b",
-        "indexSha256": "17e1202ca72fc2af4f7814518c4b186d3b1ce328a47c1c7e82bbe6e7b7fcf6b4",
-        "buildSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+        "imageId": "sha256:9c1e895fd3cadb115b6c7a411c929954359a54bf3c860fa4ac5ef18a9134f3d6",
+        "indexSha256": "b36abc3226ec7bdc5eff99e8b4f13bfe078a7b6adeb43f361b4a60d32735dc86",
+        "buildSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
         "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
       }
     },
     "miniapp": {
-      "sourceSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+      "sourceSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
       "adapter": {
-        "imageId": "sha256:358e72ddc028ce9d00963ffd3df41e1e8b75cef5134a630227d89269454bf98b",
-        "indexSha256": "17e1202ca72fc2af4f7814518c4b186d3b1ce328a47c1c7e82bbe6e7b7fcf6b4",
-        "buildSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+        "imageId": "sha256:9c1e895fd3cadb115b6c7a411c929954359a54bf3c860fa4ac5ef18a9134f3d6",
+        "indexSha256": "b36abc3226ec7bdc5eff99e8b4f13bfe078a7b6adeb43f361b4a60d32735dc86",
+        "buildSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
         "detectorHash": "bd9e9b0ac259f1a557cb0bb575de29c2c187f0c1d82a8b3c7b95bbefc0de6f32"
       }
     },
     "agataApi": {
-      "sourceSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+      "sourceSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
       "adapter": {
-        "imageId": "sha256:dbe6b5c558513e3e5aae0072612b270e5957bc125ddceef16112117a97d724de",
-        "buildSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
-        "apiImage": "sha256:dbe6b5c558513e3e5aae0072612b270e5957bc125ddceef16112117a97d724de",
+        "imageId": "sha256:d0fc17753c15f6b39ad37d68ebb8374789d92676447049380c7b0daa42c46bde",
+        "buildSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
+        "apiImage": "sha256:d0fc17753c15f6b39ad37d68ebb8374789d92676447049380c7b0daa42c46bde",
         "apiRunning": "true",
         "apiHealth": "healthy",
-        "workerImage": "sha256:dbe6b5c558513e3e5aae0072612b270e5957bc125ddceef16112117a97d724de",
+        "workerImage": "sha256:d0fc17753c15f6b39ad37d68ebb8374789d92676447049380c7b0daa42c46bde",
         "workerRunning": "true",
         "workerHealth": "healthy",
         "head": "agata0011",
@@ -62,14 +62,14 @@
       }
     },
     "agataWorker": {
-      "sourceSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+      "sourceSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
       "adapter": {
-        "imageId": "sha256:dbe6b5c558513e3e5aae0072612b270e5957bc125ddceef16112117a97d724de",
-        "buildSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
-        "apiImage": "sha256:dbe6b5c558513e3e5aae0072612b270e5957bc125ddceef16112117a97d724de",
+        "imageId": "sha256:d0fc17753c15f6b39ad37d68ebb8374789d92676447049380c7b0daa42c46bde",
+        "buildSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
+        "apiImage": "sha256:d0fc17753c15f6b39ad37d68ebb8374789d92676447049380c7b0daa42c46bde",
         "apiRunning": "true",
         "apiHealth": "healthy",
-        "workerImage": "sha256:dbe6b5c558513e3e5aae0072612b270e5957bc125ddceef16112117a97d724de",
+        "workerImage": "sha256:d0fc17753c15f6b39ad37d68ebb8374789d92676447049380c7b0daa42c46bde",
         "workerRunning": "true",
         "workerHealth": "healthy",
         "head": "agata0011",
@@ -79,16 +79,16 @@
       }
     },
     "gsalesApi": {
-      "sourceSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+      "sourceSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
       "adapter": {
-        "agataImageId": "sha256:dbe6b5c558513e3e5aae0072612b270e5957bc125ddceef16112117a97d724de",
-        "apiImage": "sha256:9a7935b1bad3661fddd622c98d1e52f7565a596570ce59e8eb6d2e6088bf95e7",
+        "agataImageId": "sha256:d0fc17753c15f6b39ad37d68ebb8374789d92676447049380c7b0daa42c46bde",
+        "apiImage": "sha256:ff8dd5689e0fd52059465d5347306af5443f5f71fc8988423051100c4d16a266",
         "autoReplyEnabled": false,
-        "buildSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+        "buildSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
         "codexLocalEnabled": true,
-        "coreApiImage": "sha256:dbe6b5c558513e3e5aae0072612b270e5957bc125ddceef16112117a97d724de",
-        "coreWorkerImage": "sha256:dbe6b5c558513e3e5aae0072612b270e5957bc125ddceef16112117a97d724de",
-        "imageId": "sha256:9a7935b1bad3661fddd622c98d1e52f7565a596570ce59e8eb6d2e6088bf95e7",
+        "coreApiImage": "sha256:d0fc17753c15f6b39ad37d68ebb8374789d92676447049380c7b0daa42c46bde",
+        "coreWorkerImage": "sha256:d0fc17753c15f6b39ad37d68ebb8374789d92676447049380c7b0daa42c46bde",
+        "imageId": "sha256:ff8dd5689e0fd52059465d5347306af5443f5f71fc8988423051100c4d16a266",
         "inferenceReady": true,
         "listenerEnabled": false,
         "managementEnabled": false,
@@ -103,16 +103,16 @@
       }
     },
     "gsalesAgataApi": {
-      "sourceSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+      "sourceSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
       "adapter": {
-        "agataImageId": "sha256:dbe6b5c558513e3e5aae0072612b270e5957bc125ddceef16112117a97d724de",
-        "apiImage": "sha256:9a7935b1bad3661fddd622c98d1e52f7565a596570ce59e8eb6d2e6088bf95e7",
+        "agataImageId": "sha256:d0fc17753c15f6b39ad37d68ebb8374789d92676447049380c7b0daa42c46bde",
+        "apiImage": "sha256:ff8dd5689e0fd52059465d5347306af5443f5f71fc8988423051100c4d16a266",
         "autoReplyEnabled": false,
-        "buildSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+        "buildSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
         "codexLocalEnabled": true,
-        "coreApiImage": "sha256:dbe6b5c558513e3e5aae0072612b270e5957bc125ddceef16112117a97d724de",
-        "coreWorkerImage": "sha256:dbe6b5c558513e3e5aae0072612b270e5957bc125ddceef16112117a97d724de",
-        "imageId": "sha256:9a7935b1bad3661fddd622c98d1e52f7565a596570ce59e8eb6d2e6088bf95e7",
+        "coreApiImage": "sha256:d0fc17753c15f6b39ad37d68ebb8374789d92676447049380c7b0daa42c46bde",
+        "coreWorkerImage": "sha256:d0fc17753c15f6b39ad37d68ebb8374789d92676447049380c7b0daa42c46bde",
+        "imageId": "sha256:ff8dd5689e0fd52059465d5347306af5443f5f71fc8988423051100c4d16a266",
         "inferenceReady": true,
         "listenerEnabled": false,
         "managementEnabled": false,
@@ -127,16 +127,16 @@
       }
     },
     "gsalesAgataWorker": {
-      "sourceSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+      "sourceSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
       "adapter": {
-        "agataImageId": "sha256:dbe6b5c558513e3e5aae0072612b270e5957bc125ddceef16112117a97d724de",
-        "apiImage": "sha256:9a7935b1bad3661fddd622c98d1e52f7565a596570ce59e8eb6d2e6088bf95e7",
+        "agataImageId": "sha256:d0fc17753c15f6b39ad37d68ebb8374789d92676447049380c7b0daa42c46bde",
+        "apiImage": "sha256:ff8dd5689e0fd52059465d5347306af5443f5f71fc8988423051100c4d16a266",
         "autoReplyEnabled": false,
-        "buildSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+        "buildSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
         "codexLocalEnabled": true,
-        "coreApiImage": "sha256:dbe6b5c558513e3e5aae0072612b270e5957bc125ddceef16112117a97d724de",
-        "coreWorkerImage": "sha256:dbe6b5c558513e3e5aae0072612b270e5957bc125ddceef16112117a97d724de",
-        "imageId": "sha256:9a7935b1bad3661fddd622c98d1e52f7565a596570ce59e8eb6d2e6088bf95e7",
+        "coreApiImage": "sha256:d0fc17753c15f6b39ad37d68ebb8374789d92676447049380c7b0daa42c46bde",
+        "coreWorkerImage": "sha256:d0fc17753c15f6b39ad37d68ebb8374789d92676447049380c7b0daa42c46bde",
+        "imageId": "sha256:ff8dd5689e0fd52059465d5347306af5443f5f71fc8988423051100c4d16a266",
         "inferenceReady": true,
         "listenerEnabled": false,
         "managementEnabled": false,
@@ -151,7 +151,7 @@
       }
     }
   },
-  "activeRuntimeSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+  "activeRuntimeSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
   "activeRuntimeDbHead": "20261015130000_codex_telegram_challenge",
   "releaseStatus": "COMPLETE",
   "recoveryRequired": false,
@@ -225,14 +225,14 @@
     "rollbackRequired": false,
     "basis": "Read-only production reconciliation verified all API/Worker/Bot runtime revisions and RELEASE_SHA remain on ca00b191db4fa26fb1f2746f9e6c218a8538ab49; Prisma head is unchanged. The agata schema exists but is empty, with no alembic_version table/head. Original failure evidence and the validated pre-release backup are retained."
   },
-  "agataRuntimeSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+  "agataRuntimeSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
   "agataAlembicHead": "agata0011",
   "agataProvider": "mac_worker",
   "recoveryFinalizationManifest": "docs/release/manifests/gpoint-recovery-20261001T071149396Z.json",
   "serverDeployStatus": "COMPLETE",
   "workerOperationalStatus": "HEALTHY",
   "overallServiceReadiness": "READY",
-  "dependencyCheckedAt": "2026-10-15T06:30:20.983Z",
+  "dependencyCheckedAt": "2026-10-15T07:39:30.253Z",
   "gsalesDbHead": "001_gsales",
   "gsalesMigrationSha256": "8de19ec2efd81848010379645d51243ac3f4a4cd37af0be211d71cdf36bcd111",
   "publicationRepair": {
@@ -246,8 +246,8 @@
       "reasons": [],
       "evidence": {
         "enabled": true,
-        "lastPollAt": "2026-10-15T06:30:18.879Z",
-        "lastHeartbeatAt": "2026-10-15T06:29:58.288Z"
+        "lastPollAt": "2026-10-15T07:39:28.384Z",
+        "lastHeartbeatAt": "2026-10-15T07:39:20.226Z"
       }
     },
     "GSALES": {
@@ -255,28 +255,28 @@
       "reasons": [],
       "evidence": {
         "enabled": true,
-        "lastPollAt": "2026-10-15T06:30:19.267Z",
-        "lastHeartbeatAt": "2026-10-15T06:29:58.766Z"
+        "lastPollAt": "2026-10-15T07:39:28.819Z",
+        "lastHeartbeatAt": "2026-10-15T07:39:04.921Z"
       }
     }
   },
   "inferenceAcceptance": "NOT_VERIFIED",
   "componentImages": {
     "app": {
-      "imageId": "sha256:358e72ddc028ce9d00963ffd3df41e1e8b75cef5134a630227d89269454bf98b",
-      "sourceSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+      "imageId": "sha256:9c1e895fd3cadb115b6c7a411c929954359a54bf3c860fa4ac5ef18a9134f3d6",
+      "sourceSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
       "platform": "linux/amd64"
     },
     "agata": {
-      "imageId": "sha256:dbe6b5c558513e3e5aae0072612b270e5957bc125ddceef16112117a97d724de",
-      "sourceSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+      "imageId": "sha256:d0fc17753c15f6b39ad37d68ebb8374789d92676447049380c7b0daa42c46bde",
+      "sourceSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
       "platform": "linux/amd64"
     },
     "gsales": {
-      "imageId": "sha256:9a7935b1bad3661fddd622c98d1e52f7565a596570ce59e8eb6d2e6088bf95e7",
-      "sourceSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6",
+      "imageId": "sha256:ff8dd5689e0fd52059465d5347306af5443f5f71fc8988423051100c4d16a266",
+      "sourceSha": "e876e5135683ef34b40289b4418f08ec4802c3af",
       "platform": "linux/amd64"
     }
   },
-  "miniappSourceSha": "8e003702ee0a336f5a74663f081d43ae7121b7c6"
+  "miniappSourceSha": "e876e5135683ef34b40289b4418f08ec4802c3af"
 }
