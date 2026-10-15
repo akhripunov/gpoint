@@ -146,14 +146,13 @@ feature branch and is not published.
   59.999/60/60.001 seconds, and a failed completed attempt followed by a live
   retry. Completed attempts contribute measured runtime; active retry time is
   only an elapsed lower bound and never a completed cost estimate.
-- Targeted Python release suites: **113 passed**. Full canonical Node release
-  test set: **176 passed** after the existing worktree-creation test received
-  required local host approval. Bundle verifier suite passes **19/19**,
-  including the FULL fallback receipt with unavailable baseline evidence. The
-  migration-inventory suite, previously blocked by the bundled runtime, was
-  rerun with system pytest: **11 passed**. Repo clean start/end gates also
-  report PASS. Ruff is not installed; broader pnpm dependency/install gates
-  remain blocked by npm registry DNS (`ENOTFOUND`) and are not reported PASS.
+- Fresh final verification after restoring local workspace dependencies:
+  **125 Python unittest cases**, **11 migration-inventory pytest cases**, and
+  **176 Node release-tooling tests** passed. `pnpm test:release`, workspace
+  `typecheck`, `build`, and `test`, plus `pnpm repo:clean:start/end` passed.
+  The initial typecheck lacked generated Prisma Client types; after generating
+  the client from the checked-in schema, the full workspace typecheck passed.
+  Ruff remains unavailable and is `NOT_RUN`.
 - No paid Actions run was authorized, so new runner-seconds and end-to-end
   savings remain `NOT_MEASURED`. The original dirty checkout, GitHub, and
   production remain untouched. ME-31 remains open and local pending release.
