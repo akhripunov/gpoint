@@ -669,7 +669,9 @@ test('release source archive excludes AppleDouble and Python cache artifacts', (
 
 test('production runtime image includes and builds AGATA client before API', () => {
   const dockerfile = fs.readFileSync(new URL('../infra/production/Gpoint.Dockerfile', import.meta.url), 'utf8');
-  assert.match(dockerfile, /COPY packages\/agata-client\/package\.json packages\/agata-client\/package\.json/);
+  assert.match(dockerfile, /COPY --from=dependency-manifests \/packages\/agata-client\/package\.json packages\/agata-client\/package\.json/);
+  const projection = fs.readFileSync(new URL('./docker_dependency_manifests.py', import.meta.url), 'utf8');
+  assert.match(projection, /"packages\/agata-client\/package\.json"/);
   assert.ok(dockerfile.indexOf('RUN pnpm --filter @gpoint/agata-client build') < dockerfile.indexOf('RUN pnpm --filter @gpoint/api build'));
 });
 

@@ -121,6 +121,26 @@ def abort_background_stage(stage):
     _finish_background_stage(stage, 'FAIL')
 
 
+def docker_build_command(tag, dockerfile, context, sha, *, dependency_manifest_context=None):
+    if not re.fullmatch(r"[a-f0-9]{40}", sha):
+        raise ValueError('Docker candidate SHA must be exact')
+    cache_scope = f'gpoint-{tag}'
+    command = ['docker', 'buildx', 'build', '--platform', 'linux/amd64', '--load']
+    if tag == 'gpoint-runtime':
+        if not dependency_manifest_context:
+            raise ValueError('GPoint build requires dependency manifest context')
+        command.extend(['--build-context',
+                        f'dependency-manifests={dependency_manifest_context}'])
+    elif dependency_manifest_context:
+        raise ValueError('dependency manifest context is only valid for GPoint runtime')
+    command.extend(['--build-arg', f'GPOINT_BUILD_SHA={sha}',
+                    '--label', f'org.opencontainers.image.revision={sha}',
+                    '--cache-from', f'type=gha,scope={cache_scope}',
+                    '--cache-to', f'type=gha,scope={cache_scope},mode=max,ignore-error=true',
+                    '-f', dockerfile, '-t', f'{tag}:{sha}', context])
+    return command
+
+
 def disposable_migration_tenant_inventory(postgres, database):
     """Read every tenant from the isolated rehearsal DB, failing closed if absent."""
     if not re.fullmatch(r'[a-z0-9_]+', database):
@@ -391,19 +411,19 @@ def prepare(sha, output, *, postgres_only=False):
         if postgres_only:
             print('POSTGRES_REHEARSAL=PASS; no READY receipt or production images emitted')
             return
-        for tag, dockerfile, context in (
-                ('gpoint-runtime', 'infra/production/Gpoint.Dockerfile', '.'),
-                ('gpoint-agata-runtime', 'services/agata/Dockerfile', 'services/agata'),
-                ('gpoint-g-sales-runtime', 'services/gsales/Dockerfile', 'services/gsales'),
-        ):
-            with measured_stage(f'docker_build_{tag.replace("-", "_")}', timings):
-                cache_scope = f'gpoint-{tag}'
-                run('docker', 'buildx', 'build', '--platform', 'linux/amd64', '--load',
-                    '--build-arg', f'GPOINT_BUILD_SHA={sha}',
-                    '--label', f'org.opencontainers.image.revision={sha}',
-                    '--cache-from', f'type=gha,scope={cache_scope}',
-                    '--cache-to', f'type=gha,scope={cache_scope},mode=max,ignore-error=true',
-                    '-f', dockerfile, '-t', f'{tag}:{sha}', context)
+        with tempfile.TemporaryDirectory(prefix='gpoint-docker-dependency-manifests-') as dependency_context:
+            run(sys.executable, 'scripts/docker_dependency_manifests.py', dependency_context)
+            for tag, dockerfile, context in (
+                    ('gpoint-runtime', 'infra/production/Gpoint.Dockerfile', '.'),
+                    ('gpoint-agata-runtime', 'services/agata/Dockerfile', 'services/agata'),
+                    ('gpoint-g-sales-runtime', 'services/gsales/Dockerfile', 'services/gsales'),
+            ):
+                with measured_stage(f'docker_build_{tag.replace("-", "_")}', timings):
+                    command = docker_build_command(
+                        tag, dockerfile, context, sha,
+                        dependency_manifest_context=(dependency_context
+                                                     if tag == 'gpoint-runtime' else None))
+                    run(*command)
         with measured_stage('bot_production_image_startup', timings):
             run(sys.executable, 'scripts/smoke_bot_image.py', f'gpoint-runtime:{sha}')
         gsales_migration = ROOT / 'services/gsales/migrations/001_gsales.sql'

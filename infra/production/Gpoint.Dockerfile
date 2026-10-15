@@ -4,28 +4,29 @@ WORKDIR /workspace
 ENV PNPM_HOME=/pnpm
 ENV PATH=${PNPM_HOME}:${PATH}
 RUN apt-get update && apt-get install -y --no-install-recommends git openssl ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY apps/api/package.json apps/api/package.json
-COPY apps/bot/package.json apps/bot/package.json
-COPY apps/miniapp/package.json apps/miniapp/package.json
-COPY apps/worker/package.json apps/worker/package.json
-COPY packages/agata-client/package.json packages/agata-client/package.json
-COPY packages/contracts/package.json packages/contracts/package.json
-COPY packages/db/package.json packages/db/package.json
+COPY pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY --from=dependency-manifests /package.json ./package.json
+COPY --from=dependency-manifests /apps/api/package.json apps/api/package.json
+COPY --from=dependency-manifests /apps/bot/package.json apps/bot/package.json
+COPY --from=dependency-manifests /apps/miniapp/package.json apps/miniapp/package.json
+COPY --from=dependency-manifests /apps/worker/package.json apps/worker/package.json
+COPY --from=dependency-manifests /packages/agata-client/package.json packages/agata-client/package.json
+COPY --from=dependency-manifests /packages/contracts/package.json packages/contracts/package.json
+COPY --from=dependency-manifests /packages/db/package.json packages/db/package.json
 RUN corepack enable && corepack prepare pnpm@9.15.0 --activate && pnpm config set store-dir /pnpm/store
 RUN --mount=type=cache,id=gpoint-pnpm-store,target=/pnpm/store pnpm install --frozen-lockfile
 # Separate stable backend builds from Mini App sources. Previously COPY . .
 # invalidated every backend compilation on UI-only changes.
 COPY tsconfig.base.json ./tsconfig.base.json
 COPY packages ./packages
-COPY apps/api ./apps/api
-COPY apps/worker ./apps/worker
-COPY apps/bot ./apps/bot
 RUN pnpm --filter @gpoint/db exec prisma generate
 RUN pnpm --filter @gpoint/agata-client build
 RUN pnpm --filter @gpoint/db build
+COPY apps/api ./apps/api
 RUN pnpm --filter @gpoint/api build
+COPY apps/worker ./apps/worker
 RUN pnpm --filter @gpoint/worker build
+COPY apps/bot ./apps/bot
 RUN pnpm --filter @gpoint/bot build
 
 # Keep the exact-SHA Mini App build separate from stable backend/dependencies.
