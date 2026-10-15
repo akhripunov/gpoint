@@ -71,6 +71,23 @@ class DockerCacheV3Tests(unittest.TestCase):
             self.assertIn(excluded, ignore)
         self.assertNotIn("COPY . .", [line.strip() for line in s.splitlines() if not line.lstrip().startswith("#")])
 
+    def test_bot_source_build_is_after_shared_backend_build_layers(self):
+        lines = [x.strip() for x in DOCKERFILE.read_text().splitlines()
+                 if x.strip() and not x.lstrip().startswith("#")]
+        expected_order = (
+            "RUN pnpm --filter @gpoint/db exec prisma generate",
+            "RUN pnpm --filter @gpoint/agata-client build",
+            "RUN pnpm --filter @gpoint/db build",
+            "COPY apps/api ./apps/api",
+            "RUN pnpm --filter @gpoint/api build",
+            "COPY apps/worker ./apps/worker",
+            "RUN pnpm --filter @gpoint/worker build",
+            "COPY apps/bot ./apps/bot",
+            "RUN pnpm --filter @gpoint/bot build",
+        )
+        positions = [lines.index(item) for item in expected_order]
+        self.assertEqual(positions, sorted(positions))
+
 
 
 if __name__ == "__main__":

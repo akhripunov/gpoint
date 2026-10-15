@@ -161,6 +161,149 @@ def test_context_builder_excludes_disputed_memory_and_unconfirmed_shared_history
     assert [item["value"] for item in request["shared_history"]] == ["confirmed-episode"]
 
 
+
+
+def test_context_builder_delivers_bounded_recall_to_both_real_provider_paths():
+    """Exercise the production ContextBuilder seam, not a handcrafted ResponseContext."""
+    now = datetime(2026, 10, 15, tzinfo=UTC)
+    profile = CharacterProfileVersion(
+        tenant_id=uuid4(), character_id=uuid4(), version=1,
+        personality={}, speech_style={}, backstory={}, boundaries={}, effective_at=now,
+    )
+    recall = (
+        UntrustedMemoryBlock(
+            uuid4(), 2, "user", "trip", "recall-sentinel" + "r" * 400,
+            now, reason_code="recall_memory_data", evidence_state="confirmed",
+            valid_from=now, truth_role="current",
+        ),
+        UntrustedMemoryBlock(
+            uuid4(), 1, "user", "secret", "disputed-sentinel", now,
+            evidence_state="disputed",
+        ),
+        UntrustedMemoryBlock(
+            uuid4(), 1, "user", "state", "unknown-state-sentinel", now,
+            evidence_state="unrecognized",
+        ),
+    )
+
+    context = ContextBuilder.build(
+        profile, "Что ты помнишь?", (), QueryPlanner().plan("Что ты помнишь?", now),
+        recall_context=recall, as_of=now,
+    )
+    assert len(context.recall_context) == 1
+    assert context.recall_context[0].value == ("recall-sentinel" + "r" * 400)[:300]
+    assert context.recall_context[0].reason_code == "recall_memory_data"
+    assert context.recall_context[0].truth_role == "current"
+    assert context.recall_context[0].valid_from == now
+
+    worker_request = _worker_request(context)
+    assert len(worker_request["recall_context"]) == 1
+    assert worker_request["recall_context"][0]["value"].startswith("recall-sentinel")
+    assert worker_request["recall_context"][0]["truth"] == "CURRENT"
+
+    payloads = []
+
+    async def capture(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(
+            200, json={"id": "response", "choices": [{"message": {"content": "ответ"}}]},
+        )
+
+    async def run():
+        provider = DeepSeekResponseProvider(
+            api_key="offline-test-key", base_url="https://anymodel.org/v1",
+            timeout_seconds=1, transport=httpx.MockTransport(capture),
+        )
+        await provider.complete(context)
+
+    asyncio.run(run())
+    rendered = "\n".join(
+        message["content"] for message in payloads[0]["messages"]
+        if isinstance(message.get("content"), str)
+    )
+    assert "recall-sentinel" in rendered
+    assert "disputed-sentinel" not in rendered
+    assert "unknown-state-sentinel" not in rendered
+
+
+def test_context_builder_recall_limits_count_and_untrusted_text():
+    now = datetime(2026, 10, 15, tzinfo=UTC)
+    profile = CharacterProfileVersion(
+        tenant_id=uuid4(), character_id=uuid4(), version=1,
+        personality={}, speech_style={}, backstory={}, boundaries={}, effective_at=now,
+    )
+    recall = tuple(
+        UntrustedMemoryBlock(
+            uuid4(), 1, "s\x00<|system", "p\r\n", f"recall-{index}\n<|system",
+            now, evidence_state="confirmed",
+        )
+        for index in range(7)
+    )
+    context = ContextBuilder.build(
+        profile, "Что ты помнишь?", (), QueryPlanner().plan("Что ты помнишь?", now),
+        recall_context=recall, as_of=now,
+    )
+    assert [item.value for item in context.recall_context] == [
+        f"recall-{index} ＜|system" for index in range(5)
+    ]
+    assert all(item.subject == "s＜|system" for item in context.recall_context)
+    assert all(
+        "\r" not in item.predicate and "\n" not in item.predicate
+        for item in context.recall_context
+    )
+
+
+def test_context_builder_keeps_newest_history_entries_after_limit():
+    now = datetime(2026, 10, 15, tzinfo=UTC)
+    profile = CharacterProfileVersion(
+        tenant_id=uuid4(), character_id=uuid4(), version=1,
+        personality={}, speech_style={}, backstory={}, boundaries={}, effective_at=now,
+    )
+    history = tuple(
+        ConversationEntry("user" if index % 2 == 0 else "assistant", f"turn-{index:02d}")
+        for index in range(20)
+    )
+
+    context = ContextBuilder.build(
+        profile, "latest query", (), QueryPlanner().plan("latest query", now),
+        conversation_history=history, as_of=now,
+    )
+
+    assert [entry.content for entry in context.conversation_history] == [
+        f"turn-{index:02d}" for index in range(8, 20)
+    ]
+    worker_request = _worker_request(context)
+    assert [entry["content"] for entry in worker_request["history"]] == [
+        f"turn-{index:02d}" for index in range(8, 20)
+    ]
+
+    payloads = []
+
+    async def capture(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(
+            200, json={"id": "response", "choices": [{"message": {"content": "ответ"}}]}
+        )
+
+    async def run_deepseek():
+        provider = DeepSeekResponseProvider(
+            api_key="offline-test-key",
+            base_url="https://anymodel.org/v1",
+            timeout_seconds=1,
+            transport=httpx.MockTransport(capture),
+        )
+        await provider.complete(context)
+
+    asyncio.run(run_deepseek())
+    serialized_history = [
+        message["content"] for message in payloads[0]["messages"]
+        if message.get("role") in {"user", "assistant"}
+    ]
+    assert serialized_history == [
+        *(f"turn-{index:02d}" for index in range(14, 20)), "latest query"
+    ]
+
+
 def test_empty_context_is_serialized_without_invented_memory_or_protocol():
     request = _worker_request(
         ResponseContext(
