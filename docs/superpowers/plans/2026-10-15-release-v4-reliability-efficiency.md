@@ -77,11 +77,11 @@ recorded in the handoff evidence and Linear. Branch:
 - Independent review of the integrated commit: **PASS**. Prepare remains
   `coalesce → prepare → publish`; Deploy remains a separate
   `validate → deploy → publish` workflow.
-- `pnpm repo:clean:start/end` and the broader `pnpm test:release` could not
-  complete: missing dependencies required npm registry access and DNS returned
-  `ENOTFOUND`. The migration-inventory pytest module also could not be loaded
-  in the bundled Python because `pytest` is unavailable. These are unrun gates,
-  not passing tests.
+- At the initial verification checkpoint, `pnpm repo:clean:start/end` and the
+  broader `pnpm test:release` could not complete because npm registry DNS
+  returned `ENOTFOUND`; migration inventory pytest was unavailable in the
+  bundled Python. The later continuation below records the clean-gate rerun
+  and migration-inventory pytest using the system Python.
 - Historical baseline Prepare `38714817433`: 528 s of recorded hosted job
   runtime plus a separately recorded 21 s publication step; rounded job-minute
   estimate 10, not billed minutes. The Docker rehearsal reduced the Docker
@@ -139,8 +139,10 @@ feature branch and is not published.
   test set: **176 passed** after the existing worktree-creation test received
   required local host approval. Bundle verifier suite passes **19/19**,
   including the FULL fallback receipt with unavailable baseline evidence. The
-  broad pnpm/DNS-dependent checks remain
-  blocked by npm registry DNS (`ENOTFOUND`); they are not reported as PASS.
+  migration-inventory suite, previously blocked by the bundled runtime, was
+  rerun with system pytest: **11 passed**. Repo clean start/end gates also
+  report PASS. Ruff is not installed; broader pnpm dependency/install gates
+  remain blocked by npm registry DNS (`ENOTFOUND`) and are not reported PASS.
 - No paid Actions run was authorized, so new runner-seconds and end-to-end
   savings remain `NOT_MEASURED`. The original dirty checkout, GitHub, and
   production remain untouched. ME-31 remains open and local pending release.
