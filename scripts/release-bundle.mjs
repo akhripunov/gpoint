@@ -47,6 +47,50 @@ export function verifyReleaseBundle(directory, candidate) {
       throw new Error('unverified V3 unchanged-source coverage');
     }
   }
+  const impactV3 = proof.impactV3;
+  const impactV4 = proof.impactV4;
+  const regressionCoverage = proof.componentRegressionCoverage;
+  const gsalesComponentCandidate = impactV4?.candidateSha === candidate &&
+    impactV4?.classification === 'COMPONENT_CANDIDATE' && impactV4?.component === 'gsales';
+  const componentCoverageRequired = gsalesComponentCandidate;
+  if (componentCoverageRequired && !regressionCoverage) {
+    throw new Error('missing component regression coverage');
+  }
+  if (regressionCoverage) {
+    const validPaths = Array.isArray(regressionCoverage.impactV4ChangedPaths) &&
+      regressionCoverage.impactV4ChangedPaths.length > 0 &&
+      regressionCoverage.impactV4ChangedPaths.every(p => typeof p === 'string' &&
+        /^services\/gsales\/app\/(?!.*(?:^|\/)\.\.?\/)[A-Za-z0-9_./-]+\.py$/.test(p));
+    const commonCoverage = regressionCoverage.schema === 1 &&
+      regressionCoverage.candidateSha === candidate &&
+      regressionCoverage.impactV3BaselineSha === impactV3?.productionBaselineSha &&
+      regressionCoverage.impactV4Component === impactV4?.component &&
+      JSON.stringify(regressionCoverage.impactV4ChangedPaths) === JSON.stringify(impactV4?.changedPaths) &&
+      regressionCoverage.gsalesPostgresSuite === 'PASS' &&
+      regressionCoverage.agataSalesTenantPostgresSuite === 'PASS' &&
+      regressionCoverage.primaryAgataPostgresGate === 'PASS' &&
+      ['FULL', 'GSALES_COMPONENT'].includes(regressionCoverage.mode) &&
+      impactV3?.candidateSha === candidate &&
+      impactV3?.version === 1 &&
+      impactV3?.checks?.agata_postgres_rehearsal === true &&
+      impactV3?.checks?.gsales_postgres_regression === true &&
+      proof.gates?.postgres === 'PASS' && proof.gates?.gsalesPostgres === 'PASS';
+    const nestedSuiteIsPass = regressionCoverage.agataCorePostgresSuite === 'PASS';
+    const coveredByIndependentGate = regressionCoverage.agataCorePostgresSuite === 'COVERED_UNCHANGED' &&
+      regressionCoverage.mode === 'GSALES_COMPONENT' &&
+      impactV4?.schema === 1 && impactV4?.candidateSha === candidate &&
+      impactV4?.classification === 'COMPONENT_CANDIDATE' && impactV4?.component === 'gsales' &&
+      impactV4?.productionBaselineSha === impactV3?.productionBaselineSha &&
+      impactV4?.baselineProvenance === 'immutable-COMPLETE' &&
+      impactV4?.unsafePaths?.length === 0 &&
+      impactV4?.maySkipV3Gates === false && impactV4?.mayDeploySelectively === false &&
+      impactV4?.skippedHeavyWork?.length === 0 && validPaths;
+    if (!commonCoverage || (!nestedSuiteIsPass && !coveredByIndependentGate) ||
+        (regressionCoverage.mode === 'FULL' && !nestedSuiteIsPass) ||
+        (regressionCoverage.mode === 'GSALES_COMPONENT' && !coveredByIndependentGate)) {
+      throw new Error('invalid component regression coverage');
+    }
+  }
   for (const gate of ['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'botImageStartup', 'deployRehearsal']) {
     if (proof.gates?.[gate] !== 'PASS' &&
         !(sourceGates.includes(gate) && proof.gates?.[gate] === 'COVERED_UNCHANGED' && covered.length === 2)) {

@@ -148,6 +148,54 @@ def docker_build_command(tag, dockerfile, context, sha, *, dependency_manifest_c
     return command
 
 
+def gsales_regression_command(candidate, impact_v3, impact_v4):
+    """Select only the duplicate AGATA-core subset for a verified GSales-only diff."""
+    command = (sys.executable, str(ROOT / 'services/gsales/tests/run_postgres.py'))
+    checks = impact_v3.get('checks') if isinstance(impact_v3, dict) else None
+    safe_gsales_only = (
+        isinstance(candidate, str) and re.fullmatch(r'[a-f0-9]{40}', candidate) and
+        isinstance(checks, dict) and
+        impact_v3.get('candidateSha') == candidate and
+        isinstance(impact_v3.get('productionBaselineSha'), str) and
+        re.fullmatch(r'[a-f0-9]{40}', impact_v3['productionBaselineSha']) and
+        impact_v3['productionBaselineSha'] != candidate and
+        checks.get('agata_postgres_rehearsal') is True and
+        checks.get('gsales_postgres_regression') is True and
+        isinstance(impact_v4, dict) and
+        impact_v4.get('schema') == 1 and
+        impact_v4.get('candidateSha') == candidate and
+        impact_v4.get('productionBaselineSha') == impact_v3.get('productionBaselineSha') and
+        impact_v4.get('baselineProvenance') == 'immutable-COMPLETE' and
+        impact_v4.get('classification') == 'COMPONENT_CANDIDATE' and
+        impact_v4.get('component') == 'gsales' and
+        isinstance(impact_v4.get('changedPaths'), list) and bool(impact_v4['changedPaths']) and
+        all(_component_module.safe_path(path) and
+            path.startswith('services/gsales/app/') and path.endswith('.py')
+            for path in impact_v4['changedPaths']) and
+        impact_v4.get('unsafePaths') == [] and
+        impact_v4.get('maySkipV3Gates') is False and
+        impact_v4.get('mayDeploySelectively') is False and
+        impact_v4.get('skippedHeavyWork') == []
+    )
+    return (*command, '--gsales-component-only') if safe_gsales_only else command
+
+
+def gsales_regression_coverage(candidate, impact_v3, impact_v4, component_only):
+    """Return receipt facts after the parent has observed every mandatory gate PASS."""
+    return {
+        'schema': 1,
+        'candidateSha': candidate,
+        'mode': 'GSALES_COMPONENT' if component_only else 'FULL',
+        'gsalesPostgresSuite': 'PASS',
+        'agataSalesTenantPostgresSuite': 'PASS',
+        'agataCorePostgresSuite': 'COVERED_UNCHANGED' if component_only else 'PASS',
+        'primaryAgataPostgresGate': 'PASS',
+        'impactV3BaselineSha': impact_v3.get('productionBaselineSha'),
+        'impactV4Component': impact_v4.get('component'),
+        'impactV4ChangedPaths': impact_v4.get('changedPaths'),
+    }
+
+
 def disposable_migration_tenant_inventory(postgres, database):
     """Read every tenant from the isolated rehearsal DB, failing closed if absent."""
     if not re.fullmatch(r'[a-z0-9_]+', database):
@@ -358,9 +406,10 @@ def prepare(sha, output, *, postgres_only=False):
         # overlap the later disposable AGATA PostgreSQL rehearsal without
         # competing with the candidate Docker image builds.
         if impact['checks']['gsales_postgres_regression']:
+            gsales_command = gsales_regression_command(sha, impact, component_impact)
             gsales_regression = start_background_stage(
                 'gsales_postgres_regression',
-                (sys.executable, 'services/gsales/tests/run_postgres.py'), timings)
+                gsales_command, timings)
         else:
             print('V3_COVERED_UNCHANGED=gsales_postgres_regression', flush=True)
 
@@ -564,6 +613,10 @@ def prepare(sha, output, *, postgres_only=False):
                  'prepareStages': timings,
                  'deployRehearsal': rehearsal,
                  'applicationSmoke': 'DISPOSABLE_DB_DETERMINISTIC_PROVIDER', 'productionUserSmoke': 'NOT_RUN'}
+        if gsales_regression is not None:
+            component_only = gsales_regression['args'][-1:] == ('--gsales-component-only',)
+            proof['componentRegressionCoverage'] = gsales_regression_coverage(
+                sha, impact, component_impact, component_only)
         if impact['classification'] == 'UI_ONLY':
             proof['gates']['postgres'] = 'COVERED_UNCHANGED'
             proof['gates']['gsalesPostgres'] = 'COVERED_UNCHANGED'

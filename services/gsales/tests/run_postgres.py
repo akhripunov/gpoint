@@ -12,14 +12,20 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-import psycopg
-from psycopg import sql
-
 ROOT = Path(__file__).resolve().parents[3]
 SALES = ROOT / "services/gsales"
 AGATA = ROOT / "services/agata"
 GPOINT = "7508f36f-774a-48aa-8c6b-42f6f160415d"
 GSALES = "c4d67889-877e-4d1b-a8d8-597c479d638f"
+
+
+def postgres_suite_plan(*, gsales_component_only):
+    """Keep GSales and cross-tenant Core checks while avoiding duplicate Core suite work."""
+    return {
+        "gsales_tests": True,
+        "agata_sales_tenant_postgres": True,
+        "agata_core_postgres_regression": not (gsales_component_only is True),
+    }
 
 
 def install_cleanup_signal_handlers():
@@ -59,8 +65,15 @@ def start_test_container(container, password):
 
 
 def main():
+    import psycopg
+    from psycopg import sql
+
     install_cleanup_signal_handlers()
     real_codex = "--real-codex" in sys.argv
+    gsales_component_only = "--gsales-component-only" in sys.argv
+    if real_codex and gsales_component_only:
+        raise RuntimeError("real_codex_rehearsal_requires_full_postgres_scope")
+    suite_plan = postgres_suite_plan(gsales_component_only=gsales_component_only)
     if real_codex:
         import fcntl
         lock_path = Path.home() / "Library/Application Support/GPoint/agata-codex-worker/locks/pool.lock"
@@ -233,53 +246,58 @@ def main():
         )
         if result.returncode:
             return result.returncode
-        # Full pre-existing Core PostgreSQL regression suite, in distinct fresh
-        # databases. Its fixture administration never uses application roles.
-        with psycopg.connect(admin_base, autocommit=True) as conn:
-            conn.execute(
-                sql.SQL(
-                    "CREATE ROLE ci_owner LOGIN PASSWORD {} NOSUPERUSER NOBYPASSRLS NOINHERIT"
-                ).format(sql.Literal(password))
-            )
-            for name in ("gpoint_core_agata_test", "rls_core_agata_test"):
+        if suite_plan["agata_core_postgres_regression"]:
+            # Full pre-existing Core PostgreSQL regression suite, in distinct fresh
+            # databases. Its fixture administration never uses application roles.
+            with psycopg.connect(admin_base, autocommit=True) as conn:
                 conn.execute(
-                    sql.SQL("CREATE DATABASE {} OWNER ci_owner").format(sql.Identifier(name))
+                    sql.SQL(
+                        "CREATE ROLE ci_owner LOGIN PASSWORD {} NOSUPERUSER NOBYPASSRLS NOINHERIT"
+                    ).format(sql.Literal(password))
                 )
-        for name in ("gpoint_core_agata_test", "rls_core_agata_test"):
-            dsn = admin_base.rsplit("/", 1)[0] + "/" + name
-            with psycopg.connect(dsn) as conn:
-                conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        regression = {
-            **env,
-            "PYTHONPATH": str(AGATA),
-            "AGATA_ROLE_TENANT_BINDINGS": json.dumps({"ci_owner": GPOINT}),
-            "AGATA_INTERNAL_API_TOKEN": "disposable-regression-token",
-            "AGATA_TEST_DATABASE_URL": admin_base.rsplit("/", 1)[0].replace(
-                "postgresql://", "postgresql+psycopg://"
+                for name in ("gpoint_core_agata_test", "rls_core_agata_test"):
+                    conn.execute(
+                        sql.SQL("CREATE DATABASE {} OWNER ci_owner").format(sql.Identifier(name))
+                    )
+            for name in ("gpoint_core_agata_test", "rls_core_agata_test"):
+                dsn = admin_base.rsplit("/", 1)[0] + "/" + name
+                with psycopg.connect(dsn) as conn:
+                    conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            regression = {
+                **env,
+                "PYTHONPATH": str(AGATA),
+                "AGATA_ROLE_TENANT_BINDINGS": json.dumps({"ci_owner": GPOINT}),
+                "AGATA_INTERNAL_API_TOKEN": "disposable-regression-token",
+                "AGATA_TEST_DATABASE_URL": admin_base.rsplit("/", 1)[0].replace(
+                    "postgresql://", "postgresql+psycopg://"
+                )
+                + "/gpoint_core_agata_test",
+                "AGATA_RLS_TEST_DATABASE_URL": admin_base.rsplit("/", 1)[0]
+                .replace("postgres:", "ci_owner:")
+                .replace("postgresql://", "postgresql+psycopg://")
+                + "/rls_core_agata_test",
+            }
+            # Keep the dedicated GSALES test DSN to run every Core test without SKIP.
+            regression["AGATA_DATABASE_URL"] = regression["AGATA_TEST_DATABASE_URL"].replace(
+                "+psycopg", "+asyncpg"
             )
-            + "/gpoint_core_agata_test",
-            "AGATA_RLS_TEST_DATABASE_URL": admin_base.rsplit("/", 1)[0]
-            .replace("postgres:", "ci_owner:")
-            .replace("postgresql://", "postgresql+psycopg://")
-            + "/rls_core_agata_test",
-        }
-        # Keep the dedicated GSALES test DSN to run every Core test without SKIP.
-        regression["AGATA_DATABASE_URL"] = regression["AGATA_TEST_DATABASE_URL"].replace(
-            "+psycopg", "+asyncpg"
-        )
-        result = subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", "tests/test_postgres_baseline.py"],
-            cwd=AGATA,
-            env=regression,
-        )
-        if result.returncode:
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", "-q", "tests/test_postgres_baseline.py"],
+                cwd=AGATA,
+                env=regression,
+            )
+            if result.returncode:
+                return result.returncode
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", "-q", "--ignore=tests/test_postgres_baseline.py", "-rs"],
+                cwd=AGATA,
+                env=regression,
+            )
             return result.returncode
-        result = subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", "--ignore=tests/test_postgres_baseline.py", "-rs"],
-            cwd=AGATA,
-            env=regression,
-        )
-        return result.returncode
+        print("AGATA_CORE_POSTGRES_REGRESSION=COVERED_UNCHANGED", flush=True)
+        print("GSALES_POSTGRES_SUITE=PASS", flush=True)
+        print("AGATA_SALES_TENANT_POSTGRES_SUITE=PASS", flush=True)
+        return 0
     finally:
         subprocess.run(
             ["docker", "rm", "-f", container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL

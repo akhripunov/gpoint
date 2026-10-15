@@ -207,3 +207,69 @@ test('V3 immutable receipt accepts precisely proven unchanged-source DB regressi
   delete f.receipt.impactV3; f.save();
   assert.throws(() => verifyReleaseBundle(f.dir, f.sha), /unverified V3/);
 });
+
+test('GSales component coverage may omit only duplicate AGATA Core tests with exact independent coverage', t => {
+  const f = fixture(t), baseline = 'b'.repeat(40);
+  f.receipt.impactV3 = {
+    version: 1, candidateSha: f.sha, productionBaselineSha: baseline,
+    baselineSource: 'gpoint-release-ledger', classification: 'FULL', reason: 'impact-not-proven',
+    changedPaths: ['services/gsales/app/api.py'],
+    checks: { agata_postgres_rehearsal: true, gsales_postgres_regression: true },
+    invariantChecks: ['artifact_migrations'],
+  };
+  f.receipt.impactV4 = {
+    schema: 1, candidateSha: f.sha, productionBaselineSha: baseline,
+    baselineProvenance: 'immutable-COMPLETE', classification: 'COMPONENT_CANDIDATE',
+    component: 'gsales', changedPaths: ['services/gsales/app/api.py'], unsafePaths: [],
+    maySkipV3Gates: false, mayDeploySelectively: false, skippedHeavyWork: [],
+  };
+  f.receipt.componentRegressionCoverage = {
+    schema: 1, candidateSha: f.sha, mode: 'GSALES_COMPONENT',
+    gsalesPostgresSuite: 'PASS', agataSalesTenantPostgresSuite: 'PASS',
+    agataCorePostgresSuite: 'COVERED_UNCHANGED', primaryAgataPostgresGate: 'PASS',
+    impactV3BaselineSha: baseline, impactV4Component: 'gsales',
+    impactV4ChangedPaths: ['services/gsales/app/api.py'],
+  };
+  f.save();
+  assert.equal(verifyReleaseBundle(f.dir, f.sha).componentRegressionCoverage.agataCorePostgresSuite,
+    'COVERED_UNCHANGED');
+  // A malformed receipt cannot suppress the requirement by deleting or
+  // falsifying the V3 AGATA gate that justified component coverage.
+  for (const malformedChecks of [
+    { agata_postgres_rehearsal: false, gsales_postgres_regression: true },
+    { gsales_postgres_regression: true },
+  ]) {
+    f.receipt.impactV3.checks = malformedChecks;
+    delete f.receipt.componentRegressionCoverage;
+    f.save();
+    assert.throws(() => verifyReleaseBundle(f.dir, f.sha), /component regression coverage/);
+    f.receipt.componentRegressionCoverage = {
+      schema: 1, candidateSha: f.sha, mode: 'GSALES_COMPONENT',
+      gsalesPostgresSuite: 'PASS', agataSalesTenantPostgresSuite: 'PASS',
+      agataCorePostgresSuite: 'COVERED_UNCHANGED', primaryAgataPostgresGate: 'PASS',
+      impactV3BaselineSha: baseline, impactV4Component: 'gsales',
+      impactV4ChangedPaths: ['services/gsales/app/api.py'],
+    };
+    f.save();
+    assert.throws(() => verifyReleaseBundle(f.dir, f.sha), /invalid component regression coverage/);
+  }
+  f.receipt.impactV3.checks.agata_postgres_rehearsal = true;
+  f.receipt.componentRegressionCoverage = {
+    schema: 1, candidateSha: f.sha, mode: 'GSALES_COMPONENT',
+    gsalesPostgresSuite: 'PASS', agataSalesTenantPostgresSuite: 'PASS',
+    agataCorePostgresSuite: 'COVERED_UNCHANGED', primaryAgataPostgresGate: 'PASS',
+    impactV3BaselineSha: baseline, impactV4Component: 'gsales',
+    impactV4ChangedPaths: ['services/gsales/app/api.py'],
+  };
+  f.save();
+  for (const changes of [
+    { mode: 'FULL' },
+    { impactV3BaselineSha: f.sha },
+    { agataSalesTenantPostgresSuite: 'COVERED_UNCHANGED' },
+    { impactV4ChangedPaths: ['services/agata/app/api.py'] },
+  ]) {
+    f.receipt.componentRegressionCoverage = { ...f.receipt.componentRegressionCoverage, ...changes };
+    f.save();
+    assert.throws(() => verifyReleaseBundle(f.dir, f.sha), /component regression coverage/);
+  }
+});
