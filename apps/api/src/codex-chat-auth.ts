@@ -17,6 +17,20 @@ export function hashCodexCredential(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
+export function validateTelegramCodexApproval(input: { payload?: unknown; chat?: { id?: unknown; type?: unknown }; from?: { id?: unknown } }): { payload: string; telegramUserId: string } | null {
+  const payload = input?.payload;
+  const sender = input?.from?.id;
+  const chatId = input?.chat?.id;
+  const senderId = typeof sender === 'number' || typeof sender === 'string' ? String(sender) : '';
+  const privateChatId = typeof chatId === 'number' || typeof chatId === 'string' ? String(chatId) : '';
+  if (typeof payload !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(payload) || input?.chat?.type !== 'private' || !/^\d{1,20}$/.test(senderId) || senderId === '0' || senderId !== privateChatId) return null;
+  return { payload, telegramUserId: senderId };
+}
+
+export function validTelegramWebhookSecret(received: string | undefined, expected: string | undefined): boolean {
+  return Boolean(received && expected && constantTimeEqual(received, expected));
+}
+
 export function parseCodexTrustedProxyIps(value: string | undefined): ReadonlySet<string> | null {
   if (value === undefined || value.trim() === '') return null;
   if (value.trim().toLowerCase() === 'none') return new Set();
@@ -104,7 +118,7 @@ export async function resolveCodexMessageSession(token: string | undefined, crea
   ownerUserIds: ReadonlySet<string>;
   findByAccessTokenHash: (hash: string) => Promise<{ id: string; userId: string; creatorId: string; accessTokenHash: string; accessExpiresAt: number | Date; revokedAt: Date | null } | null>;
 }) {
-  if (!token || (action !== 'read' && action !== 'send')) return null;
+  if (!token) return null;
   const row = await deps.findByAccessTokenHash(hashCodexCredential(token));
   const expiry = row?.accessExpiresAt instanceof Date ? row.accessExpiresAt.getTime() : row?.accessExpiresAt;
   if (!row || !constantTimeEqual(row.accessTokenHash, hashCodexCredential(token)) || row.creatorId !== creatorId || row.revokedAt || expiry === undefined || expiry <= deps.now() || !isCodexOwnerAllowed(row.userId, deps.ownerUserIds)) return null;

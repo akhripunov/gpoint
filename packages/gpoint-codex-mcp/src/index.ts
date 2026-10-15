@@ -108,10 +108,11 @@ export function createCodexTools(api: Api, keychain: Keychain) {
     return refreshInFlight;
   };
   return {
-    async connect() {
-      const started = await api.request<{ deviceCode: string; userCode: string; expiresIn: number; verificationPath: string }>('/auth/codex/device/start', { method: 'POST', body: '{}' });
+    async connect(creatorSlug: string) {
+      if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(creatorSlug)) throw new Error('Use the existing GPoint creator slug for your conversation.');
+      const started = await api.request<{ deviceCode: string; telegramLink: string; expiresIn: number }>('/auth/codex/device/start', { method: 'POST', body: JSON.stringify({ creatorSlug }) });
       await keychain.set(accounts.pending, started.deviceCode);
-      return `Open your GPoint Mini App, select the existing conversation, choose Connect Codex, and enter ${started.userCode}. The code expires in ${Math.round(started.expiresIn / 60)} minutes.`;
+      return `Confirm this one-time connection in the existing GPoint bot chat: ${started.telegramLink}\nThe link expires in ${Math.round(started.expiresIn / 60)} minutes. After confirming, run finish_gpoint_connection.`;
     },
     async finish() {
       const deviceCode = await readCredential(accounts.pending);
@@ -148,7 +149,7 @@ export function buildServer() {
   const api: Api = { request: (path, init) => createApi(process.env.GPOINT_API_URL).request(path, init) };
   const tools = createCodexTools(api, macKeychain);
   const server = new McpServer({ name: 'gpoint-agata', version: '0.1.0' });
-  server.registerTool('connect_gpoint', { description: 'Begin owner-authorized connection to one existing GPoint conversation; only a one-time user code is shown.', inputSchema: z.object({}) }, async () => ({ content: [{ type: 'text', text: await tools.connect() }] }));
+  server.registerTool('connect_gpoint', { description: 'Begin owner-authorized connection to one existing GPoint conversation using its GPoint creator slug and a one-time link to the existing Telegram bot.', inputSchema: z.object({ creatorSlug: z.string().min(1).max(64) }) }, async ({ creatorSlug }) => ({ content: [{ type: 'text', text: await tools.connect(creatorSlug) }] }));
   server.registerTool('finish_gpoint_connection', { description: 'Complete the approved one-time GPoint connection and store capability tokens in macOS Keychain.', inputSchema: z.object({}) }, async () => ({ content: [{ type: 'text', text: await tools.finish() }] }));
   server.registerTool('read_gpoint_history', { description: 'Read the latest messages from the one owner-approved GPoint conversation.', inputSchema: z.object({ limit: z.number().int().min(1).max(100).default(50) }) }, async ({ limit }) => ({ content: [{ type: 'text', text: await tools.history(limit) }] }));
   server.registerTool('send_gpoint_message', { description: 'Send the owner’s exact text to AGATA through the existing GPoint message pipeline and return the exact AGATA response.', inputSchema: z.object({ text: z.string().min(1).max(4000) }) }, async ({ text }) => ({ content: [{ type: 'text', text: await tools.send(text) }] }));

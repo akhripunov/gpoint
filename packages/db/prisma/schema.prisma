@@ -81,7 +81,7 @@ model CodexChatConnection {
 model CodexDeviceAuthorization {
   id String @id @default(cuid())
   deviceCodeHash String @unique
-  userCodeHash String @unique
+  telegramChallengeHash String @unique
   sourceHash String
   expiresAt DateTime
   userId String?

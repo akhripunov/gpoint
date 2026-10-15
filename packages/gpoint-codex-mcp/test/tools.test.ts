@@ -14,12 +14,15 @@ function fixture(responses: unknown[]) {
   return { tools: createCodexTools(api, keychain), values, calls };
 }
 
-test('MCP connection persists device secret privately and surfaces only the one-time code', async () => {
-  const { tools, values } = fixture([{ deviceCode: 'x'.repeat(43), userCode: '1234-ABCD', expiresIn: 300, verificationPath: '/messages' }]);
-  const result = await tools.connect();
-  assert.match(result, /1234-ABCD/);
+test('MCP connection persists device secret privately and surfaces only the short-lived Telegram link', async () => {
+  const link = 'https://t.me/GPointBot?start=codex_' + 'T'.repeat(43);
+  const { tools, values, calls } = fixture([{ deviceCode: 'x'.repeat(43), telegramLink: link, expiresIn: 300 }]);
+  const result = await tools.connect('models-hub');
+  assert.match(result, new RegExp(link.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.equal(result.includes('x'.repeat(43)), false);
   assert.equal(values.get('pending-device-code'), 'x'.repeat(43));
+  assert.equal(JSON.parse(String(calls[0].init?.body)).creatorSlug, 'models-hub');
+  await assert.rejects(tools.connect('../other'), /creator slug/);
 });
 
 test('MCP exchange keeps both credentials in Keychain and history uses the one bound creator', async () => {

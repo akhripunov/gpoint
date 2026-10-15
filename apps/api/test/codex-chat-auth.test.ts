@@ -66,6 +66,24 @@ test('credential storage uses a one-way digest, not the bearer text', async () =
   assert.notEqual(hashCodexCredential('other-secret'), first);
 });
 
+test('Telegram authorization requires an exact private chat identity and unmodified deep-link challenge', async () => {
+  const { validateTelegramCodexApproval } = await import('../src/codex-chat-auth.js');
+  const payload = 'A'.repeat(43);
+  assert.deepEqual(validateTelegramCodexApproval({ payload, chat: { id: 123, type: 'private' }, from: { id: 123 } }), { payload, telegramUserId: '123' });
+  assert.equal(validateTelegramCodexApproval({ payload, chat: { id: 123, type: 'group' }, from: { id: 123 } }), null);
+  assert.equal(validateTelegramCodexApproval({ payload, chat: { id: 124, type: 'private' }, from: { id: 123 } }), null);
+  assert.equal(validateTelegramCodexApproval({ payload: `${payload}=`, chat: { id: 123, type: 'private' }, from: { id: 123 } }), null);
+  assert.equal(validateTelegramCodexApproval({ payload, chat: { id: 123, type: 'private' } }), null);
+});
+
+test('bot callback webhook secret is required and compared exactly', async () => {
+  const { validTelegramWebhookSecret } = await import('../src/codex-chat-auth.js');
+  assert.equal(validTelegramWebhookSecret('secret', 'secret'), true);
+  assert.equal(validTelegramWebhookSecret(undefined, 'secret'), false);
+  assert.equal(validTelegramWebhookSecret('secret', undefined), false);
+  assert.equal(validTelegramWebhookSecret('Secret', 'secret'), false);
+});
+
 test('device-start rate key trusts forwarded IP only from explicitly trusted proxies', async () => {
   const { parseCodexTrustedProxyIps, resolveCodexDeviceStartRateKey } = await import('../src/codex-chat-auth.js');
   assert.equal(parseCodexTrustedProxyIps(undefined), null);
@@ -99,7 +117,7 @@ test('scoped message resolution rejects wrong creator, expired, revoked and non-
     connectionId: 'connection-1', userId: 'owner-1',
   });
   assert.equal(await resolveCodexMessageSession('access-1', 'creator-2', 'read', deps), null);
-  assert.equal(await resolveCodexMessageSession('access-1', 'creator-1', 'revoke', deps), null);
+  assert.deepEqual(await resolveCodexMessageSession('access-1', 'creator-1', 'revoke', deps), { connectionId: 'connection-1', userId: 'owner-1' });
   assert.equal(await resolveCodexMessageSession('unknown', 'creator-1', 'read', deps), null);
   assert.equal(await resolveCodexMessageSession('access-1', 'creator-1', 'read', {
     ...deps, ownerUserIds: new Set(['another-owner']),

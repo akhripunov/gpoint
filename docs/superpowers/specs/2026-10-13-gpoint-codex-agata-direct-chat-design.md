@@ -1,46 +1,54 @@
 # GPoint Codex direct chat with AGATA — Design
 
-**Status:** OWNER APPROVED 2026-10-13. Local implementation only; production rollout and live inference require separate authorization.
+**Status:** OWNER APPROVED 2026-10-15 — revised Telegram authorization. Local implementation only. Production release and live inference are not authorized.
 
 ## Goal and constraints
 
-Let the allowlisted GPoint OWNER connect local Codex to one existing approved character conversation. Codex reads and sends through the existing authenticated GPoint messages API. AGATA retains the same identity, conversation, relationship, Persona, Naturalness V1, memory, provider, Mac Worker, idempotency and response guards. No transcript or memory is copied. MCP never calls an LLM.
+Let the allowlisted OWNER start a local Codex connection to one existing GPoint conversation, then read and send messages from Codex. Codex uses only the existing GPoint message API; that API submits to the same AGATA Core and production provider/Worker path as Telegram Mini App. Persona, Identity Core, Naturalness V1, relationship, history, memory, consent, response handling and idempotency remain owned by the existing pipeline. No transcript, relationship, memory or generated reply is copied or recreated. MCP never calls an LLM.
 
-Do not create another AGATA, relationship, dialogue ledger or memory store. Do not use Telegram initData outside ordinary login, admin rights, raw credentials in chat or direct database writes for dialogue.
+Do not add Codex controls to any GPoint user interface. Do not create another bot, AGATA, relationship, conversation, memory store, test database, or hidden admin route. Do not spoof Telegram initData, disable access checks, expose permanent credentials in chat, read another user's data, change AGATA behavior, or deploy/run live inference without separate OWNER authorization.
 
 ## Authorization and storage
 
-GPOINT_CODEX_OWNER_USER_IDS is a fail-closed deployment allowlist. It is an independent OWNER grant; ADMIN or creator-owner roles do not grant access. The normal authenticated Mini App session approves the connection.
+`GPOINT_CODEX_OWNER_USER_IDS` remains a fail-closed exact GPoint-user allowlist. Admin or creator-owner roles alone grant no access. The existing GPoint Telegram bot authenticates the Telegram principal: it accepts only `/start codex_<opaque-token>` in a private chat where `chat.id == from.id`, then forwards the Telegram-supplied sender/chat identity and payload over HTTPS authenticated by `TELEGRAM_WEBHOOK_SECRET`. Repository inspection found the production bot and API share Docker networks and the API binds loopback HTTP; that topology does not encrypt the container bridge. Therefore production bot startup now fails closed unless `GPOINT_INGEST_URL` is an HTTPS API URL with the fixed external `/api/internal/telegram/update` path. The existing Caddy `/api/*` handler strips `/api` before proxying to the API, so all derived bot/API paths must retain `/api` externally. The API maps Telegram ID to its existing GPoint user, checks the OWNER allowlist, and never accepts a user ID supplied by Codex as identity. The deployed TLS ingress and effective runtime URL are not available in local verification and must be confirmed by DevOps before release.
 
-The MCP process creates a random device secret and short user code. Only the user code is shown to Codex. OWNER opens the selected existing chat and approves the code. The API verifies the allowlist, authenticated user, approved creator and existing conversation history, then binds access to that user and creator.
+The MCP starts device authorization with the requested existing creator slug. The API returns a `t.me/<existing bot>?start=codex_<random 256-bit token>` link and stores only a hash of that token, the MCP device-secret hash, source rate key, expiry and eventual user/creator binding. The Telegram token expires in five minutes and can grant once. The API grants only after the bot callback passes private-chat, Telegram identity, OWNER allowlist, APPROVED creator and existing-history checks. A copied link cannot authorize a different Telegram account; the callback is replay-safe. Token exchange is one-use. No GPoint session, Telegram initData, bot token, bearer token or raw device token is placed in the URL except the short-lived one-use challenge itself.
 
-Persist only credential hashes and scope metadata in one GPoint API credential table. It contains no messages, prompts, memories or AGATA state. Access credentials are short-lived; refresh credentials rotate. Every scoped message request checks expiry and revocation. Disconnect revokes the selected connection. The scoped credential is denied on every route except reading/sending messages for its bound creator.
+**Authorization scope limitation:** the current callback additionally requires the OWNER GPoint user to appear in the selected creator's `CreatorOwner` relation before it checks that OWNER's own existing AGATA history. This may prevent an OWNER from connecting to a creator they chat with as a normal GPoint user. The independent security gate rejected removing that predicate without explicit scope confirmation. Keep it until OWNER confirms the correct existing-conversation authorization predicate; do not report this path as usable for the intended target unless the relation is verified.
 
-A user code expires after five minutes and can be approved/exchanged only once. Device starts are rate-limited across API instances by source hash and database transaction; authenticated OWNER approval attempts also have a per-user fixed-window limit. Refresh credentials are stored in macOS Keychain. MCP logs and diagnostics omit tokens, codes and message contents.
+Credential rows contain authorization metadata only, never messages, prompts or AGATA state. The access token is short-lived; refresh credentials rotate; every read/send request checks expiry, revocation, OWNER allowlist, and exact creator scope. Refresh credentials remain in macOS Keychain. Codex disconnect calls the scoped revoke endpoint and deletes local credentials. The device start rate limit and trusted-proxy fail-closed behavior remain in force.
 
 ## Components and flow
 
-1. A local MCP stdio server provides start_connection, finish_connection, read_history and send_message. A project MCP configuration starts it in a newly opened Codex chat.
-2. The OWNER opens the existing Mini App chat for the chosen character. A control appears only when the signed-in account is allowlisted. OWNER enters the one-time code and approves; the control then offers disconnect.
-3. MCP exchanges the approved device secret for scoped credentials and stores them in Keychain.
-4. read_history calls the existing GET /messages/creator/:creatorId. send_message calls POST /messages/creator/:creatorId with a UUID idempotency key. GPoint applies existing age/consent checks and submits to AGATA. AGATA records and processes the message using the existing relationship and memory, provider and Mac Worker. MCP returns a completed API response text unchanged. If AGATA reports pending, MCP reports pending without guessing which later assistant message belongs to that send; the owner can read the shared conversation separately.
-5. Mini App disconnect revokes the credential. Subsequent refresh or messages calls fail closed.
-
-The MCP server cannot enumerate users or the OWNER's inbox. Character selection occurs inside the authenticated Mini App chat.
+1. The existing local MCP stdio server exposes `connect_gpoint(creatorSlug)`, `finish_gpoint_connection`, `read_gpoint_history`, `send_gpoint_message` and `disconnect_gpoint`. MCP stores its pending device secret and resulting scoped credentials in macOS Keychain.
+2. OWNER runs `connect_gpoint` from Codex for the slug of the existing conversation. Codex displays the short-lived Telegram deep link and expiration. OWNER opens it and starts the existing GPoint bot chat.
+3. The existing bot's `/start` handler distinguishes the `codex_` payload, requires a private chat, and forwards that single update to a new internal API approval endpoint using the existing bot→API secret channel. It does not expose any Codex control in the Mini App or send authorization to a different service. The bot returns a generic approved/expired response.
+4. The API validates the payload hash, expiry, one-use state, `chat.id == from.id`, mapped GPoint account, exact OWNER allowlist, requested APPROVED creator and pre-existing AGATA conversation. It binds the pending device request to that exact existing user/creator. MCP polls/exchanges the device secret, then stores scoped credentials in Keychain.
+5. History calls the existing `GET /messages/creator/:creatorId`. Sends call the existing `POST /messages/creator/:creatorId` with a UUID idempotency key. The same conversation and relationship state used by Telegram are read and updated by AGATA's current production flow. MCP returns the completed API response text unchanged. A pending response remains pending; Codex does not guess which subsequent assistant message belongs to it.
+6. `disconnect_gpoint` revokes the bound server credential and removes local Keychain items. No Mini App Codex status, approval, button, panel, or revoke control remains.
 
 ## Failure behavior
 
-- Missing allowlist, invalid/expired/reused code, non-allowlisted user, unapproved creator, or missing existing history: deny without issuing credentials.
-- Expired/revoked access: require reconnection; never fall back to a broad user token.
-- AGATA/provider unavailable or still pending: return the actual state; never fabricate a Codex answer or retry with a new ID.
-- Refresh rotation is atomic; prior refresh tokens fail.
-- Keychain failure: do not write credentials to plaintext files or environment variables.
-- Do not log HTTP bodies, messages, tokens, device secrets, user codes or provider results.
+- Missing OWNER allowlist, Telegram username/configuration, webhook secret, invalid private-chat proof, mismatched Telegram sender/chat IDs, unknown/non-OWNER GPoint account, invalid/expired/replayed token, unapproved creator, or missing pre-existing conversation: deny and issue no credential.
+- No user enumeration: a failed approval does not disclose account, creator or history existence to the bot or caller.
+- Bot/API/network unavailable: leave the request pending only until expiry; never fall back to a GPoint user token or an LLM call from Codex.
+- Expired/revoked scope: require a fresh Telegram authorization; never broaden scope.
+- AGATA/provider unavailable or pending: report the actual API state; never synthesize a reply or submit a duplicate with a new idempotency key.
+- Keychain failure: do not fall back to plaintext files, environment variables or chat-stored persistent credentials.
+- Logs omit deep-link token, device/access/refresh credentials, message bodies and provider results.
 
-## Verification
+## Verification and release boundary
 
-Automated tests cover device authorization expiry/consumption/rate limits, allowlist and creator scope, route denial, refresh/revocation races, message idempotency/order, exact response preservation, OWNER-only UI and history refresh. MCP tests use a local fake GPoint API and Keychain adapter; no live inference.
+Offline tests prove the Telegram callback input checks, one-use/expiry/scope properties represented by the shared auth helpers, MCP Keychain persistence, exact response passthrough, send ordering, Mini App removal, and URL transport policy. Tests use fake API/Keychain dependencies and never invoke live inference.
 
-After security review and standard release, a separately authorized real production E2E must verify the same user/creator conversation_id, relationship, Persona/profile, Naturalness V1, memory and provider path as Telegram; a Codex send visible in Telegram; a Telegram send visible in Codex; and concurrent sends from both interfaces with correctly attributed responses. Do not call the integration VERIFIED until all checks pass. A pending response with no request correlation must remain pending, never be assigned to a neighboring reply.
+Static route/source inspection can establish that Codex sends through the same production API route as Telegram. It cannot prove deployed Worker/provider configuration, same production `conversation_id`/relationship/Persona/memory, Telegram visibility in both directions, or concurrent response attribution. Those facts require a separately authorized post-release production E2E; until it passes, status is never `VERIFIED`. No production deploy, migration apply, Telegram production message, or live inference is part of this implementation.
 
-Authentication/schema changes require independent security review and standard release gates. This design does not authorize publication, hosted CI, deployment, production data mutation or live inference.
+After standard security review and release, and only after separate OWNER permission for live inference, the real E2E must prove: same OWNER/creator/conversation_id/relationship/Persona/Naturalness V1/memory/provider path; Codex send visible in Telegram; Telegram send visible in Codex; concurrent sends correctly correlated; and a fact introduced through one interface recalled through the other after normal asynchronous memory processing. Do not inspect another user's data. Preserve pending-response behavior if production lacks an unambiguous response correlation ID.
+
+## Alternatives considered
+
+- Reusing the Mini App approval control violates the revised no-Codex-UI requirement.
+- A new bot would add credentials, deployment and lifecycle with no capability gain: the existing grammY bot already receives private `/start` messages and forwards authenticated internal Telegram events.
+- Browser login would require a new public callback/login surface and would not be simpler than the existing bot's Telegram identity proof.
+
+Therefore the approved path reuses the existing bot and API callback authorization while requiring TLS for production bot→API traffic. The current runtime environment value and external TLS routing cannot be inspected in this local task; those remain explicit release checks.
