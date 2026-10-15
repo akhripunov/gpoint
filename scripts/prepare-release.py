@@ -404,6 +404,8 @@ def prepare(sha, output, *, postgres_only=False):
                     '--cache-from', f'type=gha,scope={cache_scope}',
                     '--cache-to', f'type=gha,scope={cache_scope},mode=max,ignore-error=true',
                     '-f', dockerfile, '-t', f'{tag}:{sha}', context)
+        with measured_stage('bot_production_image_startup', timings):
+            run(sys.executable, 'scripts/smoke_bot_image.py', f'gpoint-runtime:{sha}')
         gsales_migration = ROOT / 'services/gsales/migrations/001_gsales.sql'
         gsales_migration_sha = hashlib.sha256(gsales_migration.read_bytes()).hexdigest()
         embedded_migration_sha = run('docker', 'run', '--rm', f'gpoint-g-sales-runtime:{sha}',
@@ -516,7 +518,7 @@ def prepare(sha, output, *, postgres_only=False):
             digest = hashlib.file_digest(source, 'sha256').hexdigest()
         proof = {'schema': 1, 'candidateSha': sha, 'status': 'READY', 'runId': int(os.environ['GITHUB_RUN_ID']),
                  'runAttempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
-                 'gates': {name: 'PASS' for name in ['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'deployRehearsal']},
+                 'gates': {name: 'PASS' for name in ['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'botImageStartup', 'deployRehearsal']},
                  'impactV3': impact,
                  'images': images, 'archiveSha256': digest, 'prismaHead': prisma, 'agataHead': heads,
                  'gsalesMigrationHead': gsales_migration.stem, 'gsalesMigrationSha256': gsales_migration_sha,

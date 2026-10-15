@@ -47,7 +47,7 @@ export function verifyReleaseBundle(directory, candidate) {
       throw new Error('unverified V3 unchanged-source coverage');
     }
   }
-  for (const gate of ['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'deployRehearsal']) {
+  for (const gate of ['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'botImageStartup', 'deployRehearsal']) {
     if (proof.gates?.[gate] !== 'PASS' &&
         !(sourceGates.includes(gate) && proof.gates?.[gate] === 'COVERED_UNCHANGED' && covered.length === 2)) {
       throw new Error('missing release gate: ' + gate);
