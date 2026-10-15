@@ -80,6 +80,12 @@ GitHub credentials, VPS key и production env не входят в архив и
 5. PATH сервиса должен содержать рабочие `node`, `pnpm` и `python3`, а git — читать подтверждённые known_hosts. Проверить отдельные GPoint SSH/SCP runners, key/env, Mac worker status. Не менять Incy/DNS/hosts. Сравнить установленный `gpoint_mac_worker.py` с исходником кандидата; при изменении worker Dev обновляет его опубликованным исходником по штатному installer перед релизом. Автоматизация должна блокироваться при несовпадении.
 6. Первый запуск Prepare обязан быть зелёным, включая Linear. Выпуск нового application candidate разрешается владельцем отдельно; установка автоматизации не является разрешением произвольного production apply.
 
+## Зависание self-hosted job при финализации
+
+В run `38769710148` все шаги Mac controller и post-checkout завершились успешно; job оставалась в `Complete job`. Локальный runner diagnostic зафиксировал повторные таймауты загрузки ResultsLog step logs в GitHub Actions/Azure Blob во время финализации, затем завершение cancellation window и статус run `cancelled`. Это подтверждает сбой пути загрузки/финализации для того запуска, но не устанавливает инициатора отмены и не доказывает общий отказ сети или самого controller.
+
+При таком состоянии сохраняйте штатную загрузку логов и artifacts. Не объявляйте job успешной по результату шага dispatch: итог `cancelled`/`failure` остаётся неуспешным. Сначала по точным `run_id` и `run_attempt` сверьте атомарную controller claim и созданный дочерний preflight; повторно используйте найденный child-run только после проверки его exact SHA и receipt. Не запускайте duplicate controller/preflight, пока reconciliation не доказала, что прежний dispatch не создал пригодного child-run. Не выключайте ResultsLog upload и не перезапускайте Mac runner во время активной работы. Сетевую доступность Actions Results/Blob исследуйте отдельно в разрешённом runner-контексте; изменение глобальной сети не является способом обхода этого состояния.
+
 ## Команды для Dev
 
 Каноническая ручная диагностика сохраняется:
