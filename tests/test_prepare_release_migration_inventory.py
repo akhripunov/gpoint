@@ -92,17 +92,38 @@ def test_gsales_postgres_gate_starts_before_agata_postgres_rehearsal():
 
 
 def test_candidate_image_builds_use_exact_platform_and_isolated_reusable_cache_scopes():
-    source = SCRIPT.read_text()
     workflow = SCRIPT.parent.parent / '.github/workflows/gpoint-prepare.yml'
     workflow_source = workflow.read_text()
+    app = prepare_release.docker_build_command(
+        'gpoint-runtime', 'infra/production/Gpoint.Dockerfile', '.', 'a' * 40,
+        dependency_manifest_context='/tmp/dependency-manifests')
+    agata = prepare_release.docker_build_command(
+        'gpoint-agata-runtime', 'services/agata/Dockerfile', 'services/agata', 'a' * 40)
 
-    assert "'docker', 'buildx', 'build', '--platform', 'linux/amd64', '--load'" in source
-    assert "'--label', f'org.opencontainers.image.revision={sha}'" in source
-    assert "'--cache-from', f'type=gha,scope={cache_scope}'" in source
-    assert "'--cache-to', f'type=gha,scope={cache_scope},mode=max,ignore-error=true'" in source
-    assert 'cache_scope = f\'gpoint-{tag}\'' in source
+    assert app[:5] == ['docker', 'buildx', 'build', '--platform', 'linux/amd64']
+    assert app[5] == '--load'
+    assert app[6:8] == ['--build-context', 'dependency-manifests=/tmp/dependency-manifests']
+    assert '--label' in app and 'org.opencontainers.image.revision=' + 'a' * 40 in app
+    assert '--cache-from' in app and 'type=gha,scope=gpoint-gpoint-runtime' in app
+    assert '--cache-to' in app and 'type=gha,scope=gpoint-gpoint-runtime,mode=max,ignore-error=true' in app
+    assert '--build-context' not in agata
+    assert 'type=gha,scope=gpoint-gpoint-agata-runtime' in agata
     assert 'crazy-max/ghaction-github-runtime@a1014fef88934970651c7916e89aaf51bc58f38b' in workflow_source
     assert 'docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069' in workflow_source
+
+
+def test_gpoint_docker_build_rejects_missing_or_misapplied_dependency_context():
+    with pytest.raises(ValueError, match='requires dependency manifest context'):
+        prepare_release.docker_build_command(
+            'gpoint-runtime', 'infra/production/Gpoint.Dockerfile', '.', 'a' * 40)
+    with pytest.raises(ValueError, match='only valid for GPoint runtime'):
+        prepare_release.docker_build_command(
+            'gpoint-agata-runtime', 'services/agata/Dockerfile', 'services/agata', 'a' * 40,
+            dependency_manifest_context='/tmp/unused')
+    with pytest.raises(ValueError, match='exact'):
+        prepare_release.docker_build_command(
+            'gpoint-runtime', 'infra/production/Gpoint.Dockerfile', '.', 'mutable',
+            dependency_manifest_context='/tmp/dependency-manifests')
 
 
 def test_gpoint_build_sha_does_not_invalidate_unrelated_build_layers():
