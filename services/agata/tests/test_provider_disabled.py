@@ -36,6 +36,8 @@ def test_provider_and_codex_local_default_to_disabled():
     assert configured.naturalness_policy_enabled is False
     assert configured.inference_job_ttl_seconds == 420
     assert configured.max_pending_inference_jobs == 100
+    assert configured.max_pending_background_inference_jobs == 8
+    assert configured.background_inference_timeout_seconds == 30
 
 
 def test_mac_worker_is_disabled_unless_explicitly_enabled():

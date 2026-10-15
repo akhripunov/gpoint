@@ -26,11 +26,17 @@ from app.db.models import (
     Message,
     OutboxJob,
     Relationship,
+    RetentionPolicy,
     User,
 )
 from app.domain.principal import PrincipalContext
 from app.jobs.outbox import OutboxRepository, StaleCreationEpoch
 from app.memory.embedding import HuggingFaceFreeEmbeddingProvider
+from app.memory.mac_worker import (
+    MacWorkerExtractionProvider,
+    MacWorkerMemoryTaskClient,
+    MacWorkerSummaryProvider,
+)
 from app.memory.persistent_graph import PersistentMemoryGraphService
 from app.memory.promotion import AutoWritePromotionService
 from app.memory.retrieval import EmbeddingWorker, HybridRetrievalService
@@ -52,6 +58,7 @@ from app.messages.protected_content import (
 )
 from app.messages.service import MessageIngestionService
 from app.responses.deepseek import DeepSeekResponseProvider
+from app.responses.mac_worker import WorkerInferencePending
 from app.responses.pipeline import (
     ProviderEnvelope,
     ResponseContext,
@@ -69,6 +76,7 @@ class MemoryWorkerCycle:
     claimed: int
     completed: int
     failed: int
+    deferred: int = 0
 
 
 class SummaryProcessingError(ValueError):
@@ -102,6 +110,7 @@ class MemoryWorker:
         suppression_hmac_roots: tuple[bytes, ...] = (),
         extraction_provider: ExtractionProvider | None = None,
         summary_provider: DeepSeekResponseProvider | None = None,
+        extraction_timeout_seconds: float = 12.0,
         batch_size: int = 4,
     ) -> None:
         self.session_factory = session_factory
@@ -112,6 +121,7 @@ class MemoryWorker:
         self.suppression_hmac_roots = suppression_hmac_roots or (shadow_hmac_key,)
         self.extraction_provider = extraction_provider
         self.summary_provider = summary_provider
+        self.extraction_timeout_seconds = extraction_timeout_seconds
         self.batch_size = batch_size
 
     async def run_once(self) -> MemoryWorkerCycle:
@@ -127,11 +137,14 @@ class MemoryWorker:
                 )
                 jobs = await repository.claim(
                     tenant_id=self.tenant_id,
-                    limit=self.batch_size,
+                    # Provider-backed tasks can wait up to 50 seconds each.
+                    # A serial batch would let later 60-second leases expire.
+                    limit=1 if self.extraction_provider is not None or self.summary_provider is not None else self.batch_size,
+                    lease_seconds=120 if self.extraction_provider is not None or self.summary_provider is not None else 60,
                     job_types=owned_job_types,
                 )
             memory_jobs = jobs
-        completed = failed = 0
+        completed = failed = deferred = 0
         for job in memory_jobs:
             async with self.session_factory() as session:
                 if job.job_type == "relationship_note_refresh":
@@ -154,6 +167,9 @@ class MemoryWorker:
                     try:
                         await self._process_summary(job)
                         completed += 1
+                    except WorkerInferencePending:
+                        await self._defer_claimed(job)
+                        deferred += 1
                     except StaleCreationEpoch:
                         await self._fail_claimed(job, "summary_stale")
                         failed += 1
@@ -198,7 +214,12 @@ class MemoryWorker:
                             crypto=self.crypto,
                             hmac_key=self.shadow_hmac_key,
                             provider=self.extraction_provider,
+                            provider_timeout_seconds=self.extraction_timeout_seconds,
                         ).process_claimed(job)
+                    except WorkerInferencePending:
+                        await self._defer_claimed(job)
+                        deferred += 1
+                        continue
                     except StaleCreationEpoch:
                         # A deletion/epoch race makes the claimed job obsolete;
                         # it must not take down the long-running worker.
@@ -235,7 +256,15 @@ class MemoryWorker:
                     completed += 1
                 else:
                     failed += 1
-        return MemoryWorkerCycle(len(memory_jobs), completed, failed)
+        return MemoryWorkerCycle(len(memory_jobs), completed, failed, deferred)
+
+    async def _defer_claimed(self, job: OutboxJob) -> None:
+        async with self.session_factory() as session:
+            async with session.begin():
+                await set_tenant_context(session, str(self.tenant_id))
+                await OutboxRepository(session).defer_pending_memory_job(
+                    job, delay_seconds=5, reason="awaiting_mac_worker"
+                )
 
     async def _process_response_retry(self, job, session: AsyncSession) -> None:
         """Finalize a completed Mac inference using AGATA's normal response pipeline."""
@@ -408,6 +437,11 @@ class MemoryWorker:
                     (
                         await session.scalars(
                             select(Message)
+                            .outerjoin(
+                                RetentionPolicy,
+                                (RetentionPolicy.tenant_id == Message.tenant_id)
+                                & (RetentionPolicy.id == Message.retention_policy_id),
+                            )
                             .where(
                                 Message.tenant_id == self.tenant_id,
                                 Message.conversation_id == conversation_id,
@@ -415,6 +449,14 @@ class MemoryWorker:
                                 Message.character_id == character_id,
                                 or_(Message.role != "assistant", Message.channel_delivery_status == "confirmed"),
                                 Message.deleted_at.is_(None),
+                                or_(
+                                    Message.retention_policy_id.is_(None),
+                                    RetentionPolicy.id.is_(None),
+                                    RetentionPolicy.message_days.is_(None),
+                                    Message.occurred_at
+                                    + func.make_interval(0, 0, 0, RetentionPolicy.message_days)
+                                    > datetime.now(UTC),
+                                ),
                             )
                             .order_by(Message.occurred_at, Message.id)
                             .offset(int(segment_count or 0) * 10)
@@ -440,7 +482,7 @@ class MemoryWorker:
                     await OutboxRepository(session).complete_memory_job(job)
                 return
             dialogue: list[str] = []
-            for message in reversed(rows):
+            for message in rows:
                 try:
                     assert message.content_ciphertext is not None
                     assert message.content_nonce is not None
@@ -468,16 +510,24 @@ class MemoryWorker:
             "Сделай краткую нейтральную сводку последних сообщений разговора на русском, "
             "2-3 предложения. Не добавляй фактов, которых нет в тексте.\n" + "\n".join(dialogue)
         )
-        try:
-            envelope = await self.summary_provider.complete(
-                ResponseContext(
+        summary_context = ResponseContext(
                     profile_version=0,
                     route_tuple=("", "", "", "", ""),
                     current_message=prompt,
                     response_language="ru",
                     personality={"name": "conversation_summarizer"},
+                    source_message_id=rows[-1].id,
+                    source_idempotency_key=f"summary:{job.id}",
+                    background_source_message_ids=tuple(message.id for message in rows),
                 )
-            )
+        try:
+            complete_for_job = getattr(self.summary_provider, "complete_for_job", None)
+            if callable(complete_for_job):
+                envelope = await complete_for_job(summary_context, parent_job_id=job.id)
+            else:
+                envelope = await self.summary_provider.complete(summary_context)
+        except WorkerInferencePending:
+            raise
         except Exception as exc:
             raise SummaryProcessingError("summary_provider_failed") from exc
         summary = envelope.text[:1000] if isinstance(envelope, ProviderEnvelope) else ""
@@ -729,7 +779,20 @@ async def _amain() -> int:
     )
     summary_provider = None
     extraction_provider: ExtractionProvider | None = None
-    if settings.llm_provider not in {"disabled", "none"} and settings.llm_api_key:
+    if settings.llm_provider == "mac_worker" and settings.codex_local_enabled:
+        memory_client = MacWorkerMemoryTaskClient(
+            SessionFactory,
+            crypto=AeadCrypto(
+                encoded_key=settings.message_aead_key.get_secret_value(),
+                key_version=settings.message_aead_key_version,
+            ),
+            tenant_id=UUID(settings.tenant_id),
+            model=settings.llm_model,
+            wait_seconds=settings.worker_wait_seconds,
+        )
+        summary_provider = MacWorkerSummaryProvider(memory_client)
+        extraction_provider = MacWorkerExtractionProvider(memory_client)
+    elif settings.llm_provider not in {"disabled", "none", "mac_worker"} and settings.llm_api_key:
         summary_provider = DeepSeekResponseProvider(
             api_key=settings.llm_api_key.get_secret_value(),
             base_url=settings.llm_api_base_url,
@@ -760,6 +823,10 @@ async def _amain() -> int:
         ),
         extraction_provider=extraction_provider,
         summary_provider=summary_provider,
+        extraction_timeout_seconds=min(
+            max(settings.llm_timeout_seconds, settings.background_inference_timeout_seconds + 15),
+            55,
+        ),
         batch_size=settings.worker_batch_size,
     )
     stop_event = asyncio.Event()

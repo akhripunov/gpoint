@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import json
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
@@ -26,12 +26,14 @@ from app.db.models import (
     Consent,
     Conversation,
     JobState,
+    MemoryControlState,
     MemorySnapshot,
     Message,
     OutboxJob,
     RegionalPolicyProfile,
     Relationship,
     ResponseRoutePolicy,
+    RetentionPolicy,
     Scope,
     Tenant,
     User,
@@ -575,6 +577,214 @@ class WorkerFailRequest(BaseModel):
     error_code: str = Field(pattern=r"^[a-z0-9_]{1,64}$")
 
 
+async def _background_inference_is_current(
+    session: AsyncSession, *, tenant_id: UUID, job: OutboxJob, purpose: str
+) -> bool:
+    """Recheck the running parent, source ownership, consent, epoch and retention."""
+    try:
+        parent_id = UUID(job.payload["parent_job_id"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    parent = await session.scalar(select(OutboxJob).where(
+        OutboxJob.tenant_id == tenant_id, OutboxJob.id == parent_id,
+    ))
+    expected_type = purpose
+    now = datetime.now(UTC)
+    if (
+        parent is None
+        or parent.job_type != expected_type
+        or parent.state != JobState.running
+        or parent.lease_expires_at is None
+        or parent.lease_expires_at <= now
+        or parent.memory_control_state_id is None
+    ):
+        return False
+    control = await session.scalar(select(MemoryControlState).where(
+        MemoryControlState.tenant_id == tenant_id,
+        MemoryControlState.id == parent.memory_control_state_id,
+    ))
+    if control is None or control.deletion_epoch != parent.creation_epoch:
+        return False
+
+    summary_source_ids: list[UUID] | None = None
+    if purpose == "memory_extract":
+        try:
+            message_id = UUID(parent.payload["message_id"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if parent.aggregate_id != message_id or job.aggregate_id != message_id:
+            return False
+        source = await session.scalar(select(Message).where(
+            Message.tenant_id == tenant_id,
+            Message.id == message_id,
+            Message.role == "user",
+            Message.deleted_at.is_(None),
+        ))
+        if source is None:
+            return False
+        conversation_id = source.conversation_id
+        character_id = source.character_id
+        conversation = await session.scalar(select(Conversation).where(
+            Conversation.tenant_id == tenant_id,
+            Conversation.id == source.conversation_id,
+            Conversation.user_id == source.user_id,
+            Conversation.character_id == source.character_id,
+            Conversation.relationship_id == control.relationship_id,
+        ))
+        if (
+            source.user_id != control.user_id
+            or source.character_id != control.character_id
+            or source.scope != control.scope
+            or source.scenario_id != control.scenario_id
+        ):
+            return False
+        if conversation is None:
+            return False
+        consent_purpose = "long_term_memory"
+        user_id = source.user_id if source is not None else None
+    elif purpose == "conversation_summary":
+        try:
+            conversation_id = UUID(parent.payload["conversation_id"])
+            user_id = UUID(parent.payload["user_id"])
+            character_id = UUID(parent.payload["character_id"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if parent.aggregate_id != conversation_id:
+            return False
+        try:
+            encoded_source_ids = job.payload["source_message_ids"]
+            decoded_source_ids = json.loads(encoded_source_ids)
+            summary_source_ids = [UUID(value) for value in decoded_source_ids]
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if (
+            not 1 <= len(summary_source_ids) <= 10
+            or len(set(summary_source_ids)) != len(summary_source_ids)
+            or job.aggregate_id not in summary_source_ids
+        ):
+            return False
+        conversation = await session.scalar(select(Conversation).where(
+            Conversation.tenant_id == tenant_id,
+            Conversation.id == conversation_id,
+            Conversation.user_id == user_id,
+            Conversation.character_id == character_id,
+            Conversation.relationship_id == control.relationship_id,
+        ))
+        source = await session.scalar(select(Message).where(
+            Message.tenant_id == tenant_id,
+            Message.id == job.aggregate_id,
+            Message.conversation_id == conversation_id,
+            Message.user_id == user_id,
+            Message.character_id == character_id,
+            Message.deleted_at.is_(None),
+            (Message.role != "assistant") | (Message.channel_delivery_status == "confirmed"),
+        ))
+        if conversation is None:
+            return False
+        consent_purpose = "chat_history"
+    else:
+        return False
+
+    if source is None or user_id is None:
+        return False
+    # Consent writes lock User before MemoryControlState. Take that same
+    # order, then re-read the epoch-guarded parent so revocation and deletion
+    # cannot pass this authority check concurrently.
+    user = await session.scalar(select(User).where(
+        User.tenant_id == tenant_id,
+        User.id == user_id,
+        User.deleted_at.is_(None),
+    ).with_for_update())
+    if user is None:
+        return False
+    control = await session.scalar(select(MemoryControlState).where(
+        MemoryControlState.tenant_id == tenant_id,
+        MemoryControlState.id == parent.memory_control_state_id,
+    ).with_for_update())
+    if control is None or control.deletion_epoch != parent.creation_epoch:
+        return False
+    parent = await session.scalar(select(OutboxJob).where(
+        OutboxJob.tenant_id == tenant_id,
+        OutboxJob.id == parent_id,
+    ).with_for_update())
+    if (
+        parent is None
+        or parent.state != JobState.running
+        or parent.lease_expires_at is None
+        or parent.lease_expires_at <= datetime.now(UTC)
+        or parent.creation_epoch != control.deletion_epoch
+    ):
+        return False
+    source_query = select(Message).where(
+        Message.tenant_id == tenant_id,
+        Message.id == source.id,
+        Message.user_id == user_id,
+        Message.deleted_at.is_(None),
+        (Message.role != "assistant") | (Message.channel_delivery_status == "confirmed"),
+    )
+    if purpose == "memory_extract":
+        source_query = source_query.where(
+            Message.role == "user",
+            Message.conversation_id == conversation_id,
+            Message.character_id == character_id,
+            Message.scope == control.scope,
+            Message.scenario_id == control.scenario_id,
+        )
+    if summary_source_ids is not None:
+        source_query = select(Message).where(
+            Message.tenant_id == tenant_id,
+            Message.id.in_(summary_source_ids),
+            Message.conversation_id == conversation_id,
+            Message.user_id == user_id,
+            Message.character_id == character_id,
+            Message.deleted_at.is_(None),
+            (Message.role != "assistant") | (Message.channel_delivery_status == "confirmed"),
+        ).order_by(Message.id)
+    sources = list((await session.scalars(
+        source_query.execution_options(populate_existing=True).with_for_update()
+    )).all())
+    if summary_source_ids is not None:
+        if len(sources) != len(summary_source_ids):
+            return False
+    elif len(sources) != 1:
+        return False
+    # A preliminary unlocked read above discovers the authority tuple. Re-read
+    # and lock the source only after the control/parent locks so a retention
+    # cleanup cannot purge the row while stale ORM state is being authorized.
+    now = datetime.now(UTC)
+    for source_message in sources:
+        if source_message.retention_policy_id is None:
+            continue
+        retention = await session.scalar(select(RetentionPolicy).where(
+            RetentionPolicy.tenant_id == tenant_id,
+            RetentionPolicy.id == source_message.retention_policy_id,
+        ))
+        if (
+            retention is not None
+            and retention.message_days is not None
+            and source_message.occurred_at + timedelta(days=retention.message_days) <= now
+        ):
+            return False
+    return await session.scalar(select(Consent.id).where(
+        Consent.tenant_id == tenant_id,
+        Consent.user_id == user_id,
+        Consent.purpose == consent_purpose,
+        Consent.revoked_at.is_(None),
+    ).limit(1).with_for_update()) is not None
+
+
+def _discard_background_inference(job: OutboxJob, reason: str) -> None:
+    job.state = JobState.dead
+    job.claim_token = None
+    job.lease_expires_at = None
+    job.last_error = reason
+    job.payload = {
+        key: job.payload[key]
+        for key in ("purpose", "parent_job_id")
+        if key in job.payload
+    }
+
+
 def _language_code(locale: str | None) -> str:
     """Map BCP-47 locale tags to the finite language codes stored by AGATA."""
     if not locale:
@@ -634,14 +844,27 @@ async def claim_inference_job(
             limit=1,
             lease_seconds=300,
             job_types=worker_types,
+            response_jobs_first=settings.source_system == "gpoint",
         )
         if not jobs:
             result = {"job": None}
         else:
             job = jobs[0]
-            request_text = decrypt_claimed_request(job)
-            result = {
-                "job": {
+            purpose = job.payload.get("purpose", "response")
+            if purpose not in {"response", "memory_extract", "conversation_summary"}:
+                _discard_background_inference(job, "inference_purpose_invalid")
+                result = {"job": None}
+            elif purpose != "response" and (
+                settings.source_system != "gpoint"
+                or not await _background_inference_is_current(
+                    session, tenant_id=tenant_id, job=job, purpose=purpose
+                )
+            ):
+                _discard_background_inference(job, "memory_task_authority_stale")
+                result = {"job": None}
+            else:
+                request_text = decrypt_claimed_request(job)
+                worker_job = {
                     "id": str(job.id),
                     "leaseToken": job.claim_token,
                     "attempt": job.attempts,
@@ -649,7 +872,12 @@ async def claim_inference_job(
                     "tenant_id": str(tenant_id),
                     "request": json.loads(request_text),
                 }
-            }
+                if purpose != "response":
+                    worker_job.update({
+                        "purpose": purpose,
+                        "timeout_seconds": settings.background_inference_timeout_seconds,
+                    })
+                result = {"job": worker_job}
     # Only successful DB-backed claims count as evidence; this process-local
     # monotonic timestamp expires on restart or a stale polling connection.
     if settings.source_system == "gsales" and settings.llm_provider == "mac_worker":
@@ -722,6 +950,9 @@ async def complete_inference_job(
             or not hmac.compare_digest(job.claim_token, payload.lease_token)
         ):
             raise HTTPException(status_code=409, detail={"code": "inference_lease_stale"})
+        purpose = job.payload.get("purpose", "response")
+        if purpose not in {"response", "memory_extract", "conversation_summary"}:
+            raise HTTPException(status_code=409, detail={"code": "inference_purpose_invalid"})
         if job.job_type=="sales_draft_inference":
             if settings.source_system!="gsales" or not settings.sales_drafts_enabled or payload.model!=settings.llm_model or len(payload.text)>4000 or not payload.text.strip():
                 raise HTTPException(409,detail={"code":"draft_worker_contract_invalid"})
@@ -734,6 +965,28 @@ async def complete_inference_job(
             job.lease_expires_at=None
             job.last_error=None
             return {"completed":True,"duplicate":False,"finalizationQueued":False}
+        if purpose != "response":
+            if settings.source_system != "gpoint" or not await _background_inference_is_current(
+                session, tenant_id=tenant_id, job=job, purpose=purpose
+            ):
+                _discard_background_inference(job, "memory_task_authority_stale")
+                return {"completed": True, "duplicate": False, "discarded": True, "finalizationQueued": False}
+            job.payload = {
+                **job.payload,
+                **encrypt_worker_result(
+                    job,
+                    json.dumps(
+                        {"text": payload.text, "model": payload.model},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                ),
+            }
+            job.state = JobState.completed
+            job.lease_expires_at = None
+            job.last_error = None
+            await session.flush()
+            return {"completed": True, "duplicate": False, "finalizationQueued": False}
         job.payload = {
             **job.payload,
             **encrypt_worker_result(
@@ -797,7 +1050,8 @@ async def fail_inference_job(
             or not hmac.compare_digest(job.claim_token, payload.lease_token)
         ):
             raise HTTPException(status_code=409, detail={"code": "inference_lease_stale"})
-        await OutboxRepository(session).fail(job, payload.error_code, max_attempts=2)
+        max_attempts = 1 if job.payload.get("purpose") in {"memory_extract", "conversation_summary"} else 2
+        await OutboxRepository(session).fail(job, payload.error_code, max_attempts=max_attempts)
         return {"accepted": True, "state": job.state.value}
 
 
@@ -956,6 +1210,17 @@ async def sync_user_consent(
             user = User(tenant_id=tenant_id, source_system=get_settings().source_system, external_id=gpoint_user_id)
             session.add(user)
             await session.flush()
+        # Keep consent changes ordered with background-task authority checks:
+        # User → MemoryControlState → OutboxJob/Consent.
+        await session.scalars(
+            select(MemoryControlState)
+            .where(
+                MemoryControlState.tenant_id == tenant_id,
+                MemoryControlState.user_id == user.id,
+            )
+            .order_by(MemoryControlState.id)
+            .with_for_update()
+        )
         revoked_purposes: set[str] = set()
         for purpose, granted in (
             ("chat_history", payload.chat_history),

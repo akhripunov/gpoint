@@ -8,11 +8,12 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from conftest import ensure_test_relationship
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.db.base import SessionFactory, set_tenant_context
-from app.db.models import JobState, OutboxJob, Tenant
+from app.db.models import Character, JobState, MemoryControlState, OutboxJob, Scope, Tenant, User
 from app.jobs.outbox import OutboxRepository
 from app.messages.crypto import AeadCrypto
 from app.responses.mac_worker import MacWorkerResponseProvider, WorkerInferenceUnavailable
@@ -20,6 +21,78 @@ from app.responses.pipeline import ResponseContext
 
 TEST_DSN = os.getenv("AGATA_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not TEST_DSN, reason="AGATA_TEST_DATABASE_URL not set")
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_memory_job_deferral_locks_control_before_parent_job():
+    tenant_id, user_id, character_id, control_id = (uuid4() for _ in range(4))
+    suffix = uuid4().hex
+    now = datetime.now(UTC)
+    async with SessionFactory() as session:
+        async with session.begin():
+            session.add(Tenant(id=tenant_id))
+            await session.flush()
+            await set_tenant_context(session, str(tenant_id))
+            session.add_all([
+                User(id=user_id, tenant_id=tenant_id, external_id=f"defer-{suffix}"),
+                Character(
+                    id=character_id, tenant_id=tenant_id,
+                    external_id=f"defer-{suffix}", name="Synthetic defer character",
+                ),
+            ])
+            await session.flush()
+            relationship = await ensure_test_relationship(
+                session, tenant_id, user_id, character_id, Scope.real_world, None
+            )
+            control = MemoryControlState(
+                id=control_id, tenant_id=tenant_id,
+                relationship_id=relationship.id, user_id=user_id,
+                character_id=character_id, scope=Scope.real_world,
+                scenario_id=None,
+            )
+            session.add(control)
+            await session.flush()
+            parent = await OutboxRepository(session).enqueue(
+                tenant_id=tenant_id,
+                job_type="memory_extract",
+                dedupe_key=f"defer-lock-order:{suffix}",
+                aggregate_id=uuid4(),
+                memory_control_state_id=control_id,
+                creation_epoch=0,
+                payload={"message_id": str(uuid4())},
+            )
+            parent.state = JobState.running
+            parent.claimed_at = now
+            parent.lease_expires_at = now + timedelta(seconds=60)
+            parent_id = parent.id
+
+    async def defer_parent():
+        async with SessionFactory() as session:
+            async with session.begin():
+                await set_tenant_context(session, str(tenant_id))
+                parent = await session.get(OutboxJob, parent_id)
+                assert parent is not None
+                return await OutboxRepository(session).defer_pending_memory_job(parent)
+
+    async with SessionFactory() as session:
+        async with session.begin():
+            await set_tenant_context(session, str(tenant_id))
+            await session.scalar(select(MemoryControlState).where(
+                MemoryControlState.tenant_id == tenant_id,
+                MemoryControlState.id == control_id,
+            ).with_for_update())
+            deferred = asyncio.create_task(defer_parent())
+            await asyncio.sleep(0.1)
+            parent = await session.scalar(select(OutboxJob).where(
+                OutboxJob.tenant_id == tenant_id,
+                OutboxJob.id == parent_id,
+            ).with_for_update(nowait=True))
+            assert parent is not None and parent.state == JobState.running
+    assert await deferred is True
+    async with SessionFactory() as session:
+        await set_tenant_context(session, str(tenant_id))
+        parent = await session.get(OutboxJob, parent_id)
+        assert parent is not None and parent.state == JobState.pending
 @pytest.mark.asyncio(loop_scope="module")
 async def test_outbox_postgres_dedupe_skip_locked_lease_recovery_and_bounded_retry():
     tenant_id = uuid4()
@@ -226,6 +299,45 @@ async def test_concurrent_inference_enqueue_reuses_only_the_matching_dedupe_iden
                 )
             )
             assert count == 1
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_mac_worker_claims_live_responses_before_older_background_jobs():
+    tenant_id = uuid4()
+    source_id = uuid4()
+    parent_id = uuid4()
+    async with SessionFactory() as session:
+        async with session.begin():
+            session.add(Tenant(id=tenant_id))
+            await session.flush()
+            await set_tenant_context(session, str(tenant_id))
+            repository = OutboxRepository(session)
+            background, _ = await repository.enqueue_idempotent(
+                tenant_id=tenant_id,
+                job_type="inference",
+                dedupe_key=f"memory-task:memory_extract:{parent_id}",
+                aggregate_id=source_id,
+                payload={"purpose": "memory_extract", "parent_job_id": str(parent_id)},
+            )
+            live, _ = await repository.enqueue_inference_idempotent(
+                tenant_id=tenant_id,
+                dedupe_key=f"inference:{uuid4()}",
+                aggregate_id=uuid4(),
+                payload={},
+            )
+            background.available_at = datetime.now(UTC) - timedelta(seconds=10)
+            live.available_at = datetime.now(UTC)
+
+            claimed = await repository.claim(
+                tenant_id=tenant_id,
+                limit=1,
+                job_types=frozenset({"inference"}),
+                response_jobs_first=True,
+            )
+
+            assert len(claimed) == 1
+            assert claimed[0].id == live.id
+            assert background.state == JobState.pending
 
 
 @pytest.mark.asyncio(loop_scope="module")

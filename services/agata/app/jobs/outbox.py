@@ -2,7 +2,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import case, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -191,8 +191,23 @@ class OutboxRepository:
         limit: int = 1,
         lease_seconds: int = 60,
         job_types: frozenset[str] | None = None,
+        response_jobs_first: bool = False,
     ) -> list[OutboxJob]:
         now = datetime.now(UTC)
+        order_by = [OutboxJob.available_at, OutboxJob.id]
+        if response_jobs_first:
+            order_by.insert(
+                0,
+                case(
+                    (
+                        OutboxJob.payload["purpose"].astext.in_(
+                            ("memory_extract", "conversation_summary")
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                ),
+            )
         stmt = (
             select(OutboxJob)
             .where(
@@ -200,7 +215,7 @@ class OutboxRepository:
                 OutboxJob.state == JobState.pending,
                 OutboxJob.available_at <= now,
             )
-            .order_by(OutboxJob.available_at, OutboxJob.id)
+            .order_by(*order_by)
             .limit(limit)
             .with_for_update(skip_locked=True)
         )
@@ -260,6 +275,63 @@ class OutboxRepository:
         locked.lease_expires_at = None
         locked.claim_token = None
         await self.session.flush()
+
+    async def defer_pending_memory_job(
+        self, job: OutboxJob, *, delay_seconds: int = 5, reason: str = "awaiting_provider"
+    ) -> bool:
+        """Release a memory lease while its idempotent Mac Worker child is pending."""
+        if (
+            not isinstance(delay_seconds, int)
+            or isinstance(delay_seconds, bool)
+            or not 1 <= delay_seconds <= 60
+            or not isinstance(reason, str)
+            or not reason.isascii()
+            or not reason.replace("_", "").isalnum()
+            or len(reason) > 64
+        ):
+            raise ValueError("memory_job_defer_invalid")
+        identity = await self.session.scalar(select(OutboxJob).where(
+            OutboxJob.id == job.id,
+            OutboxJob.tenant_id == job.tenant_id,
+        ))
+        if identity is None or identity.memory_control_state_id is None:
+            raise StaleCreationEpoch("memory job is not running")
+        control = await self.session.scalar(
+            select(MemoryControlState).where(
+                MemoryControlState.tenant_id == identity.tenant_id,
+                MemoryControlState.id == identity.memory_control_state_id,
+            ).with_for_update()
+        )
+        locked = await self.session.scalar(
+            select(OutboxJob).where(
+                OutboxJob.id == job.id,
+                OutboxJob.tenant_id == job.tenant_id,
+            ).with_for_update()
+        )
+        if (
+            not isinstance(locked, OutboxJob)
+            or locked.state != JobState.running
+            or locked.memory_control_state_id != identity.memory_control_state_id
+        ):
+            raise StaleCreationEpoch("memory job is not running")
+        if control is None or control.deletion_epoch != locked.creation_epoch:
+            locked.state = JobState.dead
+            locked.last_error = "stale_epoch"
+            locked.claim_token = None
+            locked.lease_expires_at = None
+            await self.session.flush()
+            return False
+        if locked.lease_expires_at is not None and locked.lease_expires_at <= datetime.now(UTC):
+            raise StaleCreationEpoch("memory job lease expired")
+        locked.attempts = max(0, locked.attempts - 1)
+        locked.state = JobState.pending
+        locked.available_at = datetime.now(UTC) + timedelta(seconds=delay_seconds)
+        locked.claimed_at = None
+        locked.lease_expires_at = None
+        locked.claim_token = None
+        locked.last_error = reason
+        await self.session.flush()
+        return True
 
     async def bump_deletion_epoch(self, control_id: UUID, tenant_id: UUID) -> int:
         control = await self.session.scalar(

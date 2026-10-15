@@ -45,6 +45,7 @@ _OUTBOX_KEYS = {
     "inference": frozenset({
         "context_ciphertext", "context_nonce", "context_key_version",
         "result_ciphertext", "result_nonce", "result_key_version",
+        "purpose", "parent_job_id", "source_message_ids",
     }),
 }
 
@@ -199,6 +200,27 @@ def validate_outbox_payload(job_type: str, payload: object) -> None:
         raise CryptoError("outbox_payload_not_content_safe")
     if any(not isinstance(key, str) or not isinstance(value, str) for key, value in payload.items()):
         raise CryptoError("outbox_payload_not_content_safe")
+    if job_type == "inference":
+        purpose = payload.get("purpose", "response")
+        if purpose not in {"response", "memory_extract", "conversation_summary"}:
+            raise CryptoError("outbox_payload_not_content_safe")
+        if purpose == "response" and "parent_job_id" in payload:
+            raise CryptoError("outbox_payload_not_content_safe")
+        if purpose != "response":
+            try:
+                UUID(payload["parent_job_id"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise CryptoError("outbox_payload_not_content_safe") from exc
+        if "source_message_ids" in payload:
+            if purpose != "conversation_summary":
+                raise CryptoError("outbox_payload_not_content_safe")
+            try:
+                source_ids = json.loads(payload["source_message_ids"])
+                parsed_ids = [UUID(value) for value in source_ids]
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                raise CryptoError("outbox_payload_not_content_safe") from exc
+            if not 1 <= len(parsed_ids) <= 10 or len(set(parsed_ids)) != len(parsed_ids):
+                raise CryptoError("outbox_payload_not_content_safe")
     encrypted_context = {
         "reply_context_ciphertext",
         "reply_context_nonce",

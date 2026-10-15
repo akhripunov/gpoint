@@ -1,5 +1,6 @@
 """Disposable PostgreSQL E2E for message → segment → canonical snapshots."""
 
+import json
 import os
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -8,6 +9,7 @@ import pytest
 from conftest import ensure_test_relationship
 from sqlalchemy import select
 
+from app.api.internal import _background_inference_is_current
 from app.config import get_settings
 from app.db.base import SessionFactory, set_tenant_context
 from app.db.models import (
@@ -20,6 +22,7 @@ from app.db.models import (
     MemorySnapshot,
     Message,
     OutboxJob,
+    RetentionPolicy,
     Scope,
     Tenant,
     User,
@@ -43,8 +46,17 @@ TENANT_ID = UUID("7508f36f-774a-48aa-8c6b-42f6f160415d")
 
 
 class _SummaryProvider:
-    async def complete(self, _context):
+    def __init__(self):
+        self.context = None
+        self.parent_job_id = None
+
+    async def complete(self, context):
+        self.context = context
         return ProviderEnvelope("PRIVATE_SUMMARY_SENTINEL — проверенная тестовая сводка", (), "fake")
+
+    async def complete_for_job(self, context, *, parent_job_id):
+        self.parent_job_id = parent_job_id
+        return await self.complete(context)
 
 
 @pytest.mark.asyncio(loop_scope="module")
@@ -57,6 +69,8 @@ async def test_postgres_summary_worker_persists_chronological_encrypted_segment_
     user_id, character_id, conversation_id, control_id = (uuid4() for _ in range(4))
     suffix = uuid4().hex
     now = datetime.now(UTC)
+    expired_message_id = None
+    retained_message_ids = []
     async with SessionFactory() as session:
         async with session.begin():
             await set_tenant_context(session, str(TENANT_ID))
@@ -104,11 +118,21 @@ async def test_postgres_summary_worker_persists_chronological_encrypted_segment_
                 tenant_id=TENANT_ID, user_id=user_id, purpose="long_term_memory",
                 granted_at=now, policy_version="test-v1",
             ))
+            retention = RetentionPolicy(
+                tenant_id=TENANT_ID,
+                name=f"summary-expired-{suffix}",
+                message_days=1,
+            )
+            session.add(retention)
             await session.flush()
-            for index in range(5):
+            for index in range(6):
                 message_id = uuid4()
+                if index == 0:
+                    expired_message_id = message_id
+                else:
+                    retained_message_ids.append(message_id)
                 envelope = crypto.encrypt(
-                    f"synthetic message {index}",
+                    "EXPIRED_RETENTION_SENTINEL" if index == 0 else f"synthetic message {index}",
                     MessageIngestionService._aad_for(
                         TENANT_ID, user_id, conversation_id, message_id
                     ),
@@ -127,7 +151,8 @@ async def test_postgres_summary_worker_persists_chronological_encrypted_segment_
                         content_ciphertext=envelope.ciphertext,
                         content_nonce=envelope.nonce,
                         content_key_version=envelope.key_version,
-                        occurred_at=now + timedelta(seconds=index),
+                        occurred_at=(now - timedelta(days=3)) if index == 0 else now + timedelta(seconds=index),
+                        retention_policy_id=retention.id if index == 0 else None,
                     )
                 )
             await session.flush()
@@ -145,13 +170,14 @@ async def test_postgres_summary_worker_persists_chronological_encrypted_segment_
                 },
             )
 
+    summary_provider = _SummaryProvider()
     worker = MemoryWorker(
         SessionFactory,
         tenant_id=TENANT_ID,
         provider=DeterministicFakeEmbeddingProvider(),
         crypto=crypto,
         shadow_hmac_key=b"s" * 32,
-        summary_provider=_SummaryProvider(),
+        summary_provider=summary_provider,
     )
     async with SessionFactory() as session:
         async with session.begin():
@@ -164,6 +190,13 @@ async def test_postgres_summary_worker_persists_chronological_encrypted_segment_
             job.claimed_at = datetime.now(UTC)
             job.lease_expires_at = datetime.now(UTC) + timedelta(minutes=2)
     await worker._process_summary(job)
+    assert summary_provider.parent_job_id == job.id
+    assert summary_provider.context is not None
+    assert len(summary_provider.context.background_source_message_ids) == 5
+    assert "EXPIRED_RETENTION_SENTINEL" not in summary_provider.context.current_message
+    assert summary_provider.context.current_message.index("synthetic message 1") < (
+        summary_provider.context.current_message.index("synthetic message 5")
+    )
 
     async with SessionFactory() as session:
         async with session.begin():
@@ -174,8 +207,8 @@ async def test_postgres_summary_worker_persists_chronological_encrypted_segment_
                 )
             )
             assert segment is not None
-            assert segment.started_at == now
-            assert segment.ended_at == now + timedelta(seconds=4)
+            assert segment.started_at == now + timedelta(seconds=1)
+            assert segment.ended_at == now + timedelta(seconds=5)
             assert segment.summary is not None
             assert "PRIVATE_SUMMARY_SENTINEL" not in segment.summary
             conversation = await session.get(Conversation, conversation_id)
@@ -217,3 +250,48 @@ async def test_postgres_summary_worker_persists_chronological_encrypted_segment_
                 select(OutboxJob).where(OutboxJob.dedupe_key == f"summary-e2e:{suffix}")
             )
             assert job is not None and job.state == JobState.completed
+
+            # A message can expire after summary construction but before a
+            # queued Product Worker child is claimed. Recheck every source ID.
+            assert expired_message_id is not None
+            parent = await OutboxRepository(session).enqueue(
+                tenant_id=TENANT_ID,
+                job_type="conversation_summary",
+                dedupe_key=f"summary-retention-parent:{suffix}",
+                aggregate_id=conversation_id,
+                memory_control_state_id=control_id,
+                creation_epoch=0,
+                payload={
+                    "conversation_id": str(conversation_id),
+                    "user_id": str(user_id),
+                    "character_id": str(character_id),
+                },
+            )
+            parent.state = JobState.running
+            parent.claimed_at = datetime.now(UTC)
+            parent.lease_expires_at = datetime.now(UTC) + timedelta(minutes=2)
+            child = OutboxJob(
+                tenant_id=TENANT_ID,
+                job_type="inference",
+                aggregate_id=retained_message_ids[-1],
+                dedupe_key=f"summary-retention-child:{suffix}",
+                payload={
+                    "purpose": "conversation_summary",
+                    "parent_job_id": str(parent.id),
+                    "source_message_ids": json.dumps(
+                        [str(expired_message_id), str(retained_message_ids[-1])]
+                    ),
+                },
+                state=JobState.running,
+                claim_token="s" * 32,
+                claimed_at=datetime.now(UTC),
+                lease_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
+            session.add(child)
+            await session.flush()
+            assert not await _background_inference_is_current(
+                session,
+                tenant_id=TENANT_ID,
+                job=child,
+                purpose="conversation_summary",
+            )

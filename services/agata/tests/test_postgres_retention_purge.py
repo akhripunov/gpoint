@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from conftest import ensure_test_relationship
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from app.config import get_settings
 from app.db.base import SessionFactory, set_tenant_context
@@ -190,7 +190,33 @@ async def test_retention_physically_purges_content_and_respects_legal_hold():
             )
             # Exercise graph cleanup after an established projection.
             memory.retention_policy_id = policy_id
-            deleted = await run_retention_cleanup(session, TENANT_ID)
+            await session.flush()
+            lock_order: list[str] = []
+            sync_engine = session.bind.sync_engine
+
+            def record_statement(_conn, _cursor, statement, _parameters, _context, _many):
+                normalized = statement.lstrip().lower()
+                if "from agata.memory_control_state" in normalized and "for update" in normalized:
+                    lock_order.append("control_lock")
+                elif normalized.startswith("update agata.messages"):
+                    lock_order.append("messages")
+                elif normalized.startswith("update agata.memories"):
+                    lock_order.append("memories")
+                elif normalized.startswith("update agata.shadow_memory_candidates"):
+                    lock_order.append("candidates")
+                elif normalized.startswith("update agata.outbox_jobs"):
+                    lock_order.append("outbox")
+
+            event.listen(sync_engine, "before_cursor_execute", record_statement)
+            try:
+                deleted = await run_retention_cleanup(session, TENANT_ID)
+            finally:
+                event.remove(sync_engine, "before_cursor_execute", record_statement)
+            control_index = lock_order.index("control_lock")
+            assert control_index < lock_order.index("messages"), lock_order
+            assert control_index < lock_order.index("memories"), lock_order
+            assert control_index < lock_order.index("candidates"), lock_order
+            assert control_index < lock_order.index("outbox"), lock_order
             assert deleted == 2
             assert await session.scalar(select(MemoryGraphEvidence.id).where(
                 MemoryGraphEvidence.tenant_id == TENANT_ID,

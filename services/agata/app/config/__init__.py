@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     codex_local_enabled: bool = False
     inference_job_ttl_seconds: int = Field(default=420, ge=60, le=3600)
     max_pending_inference_jobs: int = Field(default=100, ge=1, le=10000)
+    max_pending_background_inference_jobs: int = Field(default=8, ge=1, le=64)
+    background_inference_timeout_seconds: int = Field(default=30, ge=15, le=60)
     runtime_db_role: str | None = None
     source_system: Literal["gpoint", "gsales"] = "gpoint"
     sales_drafts_enabled: bool = False

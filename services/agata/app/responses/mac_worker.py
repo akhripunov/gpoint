@@ -177,6 +177,8 @@ class MacWorkerResponseProvider:
         model: str,
         wait_seconds: float = 6.0,
         naturalness_policy_enabled: bool = False,
+        task_purpose: str = "response",
+        parent_job_id: UUID | None = None,
     ) -> None:
         self.session = session
         self.crypto = crypto
@@ -184,6 +186,14 @@ class MacWorkerResponseProvider:
         self.model = model
         self.wait_seconds = wait_seconds
         self.naturalness_policy_enabled = naturalness_policy_enabled
+        if task_purpose not in {"response", "memory_extract", "conversation_summary"}:
+            raise ValueError("inference_purpose_invalid")
+        if task_purpose == "response" and parent_job_id is not None:
+            raise ValueError("inference_parent_invalid")
+        if task_purpose != "response" and not isinstance(parent_job_id, UUID):
+            raise ValueError("inference_parent_invalid")
+        self.task_purpose = task_purpose
+        self.parent_job_id = parent_job_id
 
     async def complete(self, context: ResponseContext) -> ProviderEnvelope:
         if (
@@ -193,7 +203,28 @@ class MacWorkerResponseProvider:
         ):
             raise ValueError("inference_source_message_missing")
         message_id = context.source_message_id
-        dedupe_key = f"inference:{message_id}"
+        dedupe_key = (
+            f"inference:{message_id}"
+            if self.task_purpose == "response"
+            else f"memory-task:{self.task_purpose}:{self.parent_job_id}"
+        )
+        task_identity = (
+            {"purpose": self.task_purpose, "parent_job_id": str(self.parent_job_id)}
+            if self.task_purpose != "response" else {}
+        )
+        if self.task_purpose == "conversation_summary":
+            source_ids = context.background_source_message_ids
+            if (
+                not isinstance(source_ids, tuple)
+                or not 1 <= len(source_ids) <= 10
+                or any(not isinstance(source_id, UUID) for source_id in source_ids)
+                or message_id not in source_ids
+            ):
+                raise ValueError("summary_source_identity_invalid")
+            task_identity["source_message_ids"] = json.dumps(
+                [str(source_id) for source_id in source_ids],
+                separators=(",", ":"),
+            )
         encoded_request = json.dumps(
             _worker_request(
                 context,
@@ -234,7 +265,23 @@ class MacWorkerResponseProvider:
                         OutboxJob.state.in_((JobState.pending, JobState.running)),
                     )
                 )
+                pending_background_count = 0
+                if self.task_purpose != "response":
+                    pending_background_count = await self.session.scalar(select(func.count(OutboxJob.id)).where(
+                        OutboxJob.tenant_id == self.tenant_id,
+                        OutboxJob.job_type == "inference",
+                        OutboxJob.payload["purpose"].astext.in_(
+                            ("memory_extract", "conversation_summary")
+                        ),
+                        OutboxJob.state.in_((JobState.pending, JobState.running)),
+                    )) or 0
                 if tenant is None:
+                    queue_full = True
+                elif (
+                    job is None
+                    and self.task_purpose != "response"
+                    and pending_background_count >= settings.max_pending_background_inference_jobs
+                ):
                     queue_full = True
                 elif job is None and (pending_count or 0) >= settings.max_pending_inference_jobs:
                     queue_full = True
@@ -243,15 +290,27 @@ class MacWorkerResponseProvider:
                         tenant_id=self.tenant_id,
                         dedupe_key=dedupe_key,
                         aggregate_id=message_id,
-                        payload={},
+                        payload=task_identity,
                     )
                     if created:
-                        job.payload = _encrypt_payload(
-                            self.crypto, self.tenant_id, job, "context", encoded_request
-                        )
+                        job.payload = {
+                            **job.payload,
+                            **_encrypt_payload(
+                                self.crypto, self.tenant_id, job, "context", encoded_request
+                            ),
+                        }
             if queue_full:
                 # Commit stale-job expiry before returning a controlled unavailable result.
                 pass
+            elif job.payload.get("purpose", "response") != self.task_purpose or (
+                self.task_purpose != "response"
+                and job.payload.get("parent_job_id") != str(self.parent_job_id)
+            ) or (
+                self.task_purpose == "conversation_summary"
+                and job.payload.get("source_message_ids")
+                != task_identity.get("source_message_ids")
+            ):
+                raise ValueError("inference_task_identity_conflict")
             elif job.state == JobState.completed:
                 return self._result(job)
             elif job.state == JobState.dead:
@@ -269,7 +328,7 @@ class MacWorkerResponseProvider:
                     OutboxJob.tenant_id == self.tenant_id,
                     OutboxJob.job_type == "inference",
                     OutboxJob.dedupe_key == dedupe_key,
-                ))
+                ).execution_options(populate_existing=True))
                 if job is None:
                     raise ValueError("inference_job_missing")
                 if job.state == JobState.completed:

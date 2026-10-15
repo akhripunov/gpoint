@@ -93,6 +93,45 @@ class MacWorkerTests(unittest.TestCase):
         self.assertIn('"user_message":"hello"', observed["prompt"])
         self.assertNotIn("GPOINT_AGATA_WORKER_TOKEN", observed["env"])
 
+    def test_memory_task_uses_a_separate_server_authored_prompt(self):
+        executable = self.root / "codex"
+        executable.touch()
+        observed = {}
+
+        def execute(args, **kwargs):
+            Path(args[args.index("--output-last-message") + 1]).write_text(
+                json.dumps({"text": '{"abstain_reason":"uncertain","candidates":[]}'}),
+                encoding="utf-8",
+            )
+
+            class MockProcess:
+                pid = 101
+                returncode = 0
+
+                def poll(self):
+                    return self.returncode
+
+                def communicate(self, input=None, timeout=None):
+                    observed["prompt"] = input
+                    return None, None
+
+            return MockProcess()
+
+        job = {
+            "purpose": "memory_extract",
+            "request": {"user_message": "Extract from this synthetic message."},
+        }
+        with patch.dict(os.environ, {"GPOINT_CODEX_CLI": str(executable)}), patch.object(
+            worker.subprocess, "Popen", side_effect=execute
+        ):
+            result = worker.run_inference(job)
+
+        self.assertEqual(result, '{"abstain_reason":"uncertain","candidates":[]}')
+        self.assertIn("structured user-memory extraction task", observed["prompt"])
+        self.assertIn('"user_message":"Extract from this synthetic message."', observed["prompt"])
+        self.assertIn("Return only the JSON value as text", observed["prompt"])
+        self.assertNotIn("Return only an object with one key, text", observed["prompt"])
+
     def test_inference_timeout_terminates_the_process_group(self):
         executable = self.root / "codex"
         executable.touch()

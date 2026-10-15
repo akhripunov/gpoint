@@ -466,6 +466,72 @@ async def test_explicit_memory_commands_encrypt_idempotently_correct_and_forget(
             ),
         )
 
+    # Continue the conversation through an unrelated topic shift. The city
+    # source is older than the recent-history window by the time it is recalled.
+    city_question_id = uuid4()
+    topic_messages: list[Message] = []
+    for index in range(14):
+        topic_message_id = uuid4()
+        topic_envelope = crypto.encrypt(
+            f"Новая тема {index + 1}: синтетический разговор о погоде и книгах.",
+            MessageIngestionService._aad_for(
+                TENANT_ID, user_id, second_conversation_id, topic_message_id
+            ),
+        )
+        topic_messages.append(Message(
+            id=topic_message_id,
+            tenant_id=TENANT_ID,
+            conversation_id=second_conversation_id,
+            user_id=user_id,
+            character_id=character_id,
+            scope=Scope.real_world,
+            scenario_id=None,
+            idempotency_key=f"city-topic-{suffix}-{index}",
+            role="user",
+            content_ciphertext=topic_envelope.ciphertext,
+            content_nonce=topic_envelope.nonce,
+            content_key_version=topic_envelope.key_version,
+            occurred_at=retrieval_at + timedelta(seconds=index + 1),
+        ))
+    city_question = "Напомни, в каком городе живёт персонаж?"
+    question_envelope = crypto.encrypt(
+        city_question,
+        MessageIngestionService._aad_for(
+            TENANT_ID, user_id, second_conversation_id, city_question_id
+        ),
+    )
+    topic_messages.append(Message(
+        id=city_question_id,
+        tenant_id=TENANT_ID,
+        conversation_id=second_conversation_id,
+        user_id=user_id,
+        character_id=character_id,
+        scope=Scope.real_world,
+        scenario_id=None,
+        idempotency_key=f"city-question-{suffix}",
+        role="user",
+        content_ciphertext=question_envelope.ciphertext,
+        content_nonce=question_envelope.nonce,
+        content_key_version=question_envelope.key_version,
+        occurred_at=retrieval_at + timedelta(seconds=15),
+    ))
+    async with SessionFactory() as session:
+        async with session.begin():
+            await set_tenant_context(session, str(TENANT_ID))
+            session.add_all(topic_messages)
+    async with SessionFactory() as session:
+        await set_tenant_context(session, str(TENANT_ID))
+        conversation = await session.get(Conversation, second_conversation_id)
+        assert conversation is not None
+        orchestrator = object.__new__(ResponseOrchestrator)
+        orchestrator.session = session
+        orchestrator.crypto = crypto
+        recent_history = await orchestrator._recent_messages(
+            principal, conversation, current_message_id=city_question_id
+        )
+        assert len(recent_history) == 15
+        assert "Лесогорск" in recent_history[0].content
+
     async with SessionFactory() as session:
         cross_conversation_result = await HybridRetrievalService(
             session,
@@ -479,19 +545,25 @@ async def test_explicit_memory_commands_encrypt_idempotently_correct_and_forget(
                 scope=Scope.real_world,
                 scenario_id=None,
                 query="lives_in",
-                as_of=retrieval_at + timedelta(seconds=1),
+                as_of=retrieval_at + timedelta(seconds=16),
             ),
         )
-    city_question = "В каком городе живёт персонаж?"
     city_context = ContextBuilder.build(
         profile,
         city_question,
         cross_conversation_result.results,
-        QueryPlanner().plan(city_question, retrieval_at + timedelta(seconds=1)),
-        as_of=retrieval_at + timedelta(seconds=1),
+        QueryPlanner().plan(city_question, retrieval_at + timedelta(seconds=16)),
+        conversation_history=recent_history,
+        as_of=retrieval_at + timedelta(seconds=16),
     )
     city_payload = _worker_request(city_context)
     assert any(item["value"] == "Лесогорск" for item in city_payload["memories"])
+    assert len(city_context.conversation_history) == 12
+    assert "Лесогорск" not in " ".join(
+        item["content"] for item in city_payload["history"]
+        if item.get("role") == "user"
+    )
+    assert city_payload["user_message"] == city_question
 
     async with SessionFactory() as session:
         trip_result = await HybridRetrievalService(

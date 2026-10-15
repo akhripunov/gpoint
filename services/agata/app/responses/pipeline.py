@@ -186,6 +186,7 @@ class ResponseContext:
     character_name: str = "Персонаж"
     source_message_id: UUID | None = None
     source_idempotency_key: str | None = None
+    background_source_message_ids: tuple[UUID, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1684,33 +1685,15 @@ async def run_retention_cleanup(session: AsyncSession, tenant_id: UUID) -> int:
         rows = (
             await session.execute(
                 text(
-                    "UPDATE agata.messages SET deleted_at=:now, content_ciphertext=NULL, "
-                    "content_nonce=NULL, content_key_version=NULL "
+                    "SELECT id,conversation_id FROM agata.messages "
                     "WHERE tenant_id=:tid AND retention_policy_id=:policy AND deleted_at IS NULL "
-                    "AND occurred_at < :cutoff RETURNING id,conversation_id"
+                    "AND occurred_at < :cutoff"
                 ),
-                {"tid": tenant_id, "policy": policy_id, "cutoff": cutoff, "now": now},
+                {"tid": tenant_id, "policy": policy_id, "cutoff": cutoff},
             )
         ).all()
         message_ids.extend(row.id for row in rows)
         conversation_ids.update(row.conversation_id for row in rows)
-
-    if message_ids:
-        await session.execute(
-            text(
-                "UPDATE agata.outbox_jobs SET state='dead', claimed_at=NULL, lease_expires_at=NULL, "
-                "last_error='retention_purged', payload=payload - 'reply_context_ciphertext' "
-                "- 'reply_context_nonce' - 'reply_context_key_version' "
-                "WHERE tenant_id=:tid AND state IN ('pending','running','failed') "
-                "AND (payload->>'message_id' = ANY(CAST(:ids AS text[])) "
-                "OR payload->>'conversation_id' = ANY(CAST(:conversations AS text[])))"
-            ),
-            {
-                "tid": tenant_id,
-                "ids": [str(value) for value in message_ids],
-                "conversations": [str(value) for value in conversation_ids],
-            },
-        )
 
     memory_expiry = " OR ".join(
         f"(m.retention_policy_id=:memory_policy_{index} AND m.observed_at<:memory_cutoff_{index})"
@@ -1720,6 +1703,78 @@ async def run_retention_cleanup(session: AsyncSession, tenant_id: UUID) -> int:
     for index, (policy_id, cutoff) in enumerate(memory_cutoffs.items()):
         memory_params[f"memory_policy_{index}"] = policy_id
         memory_params[f"memory_cutoff_{index}"] = cutoff
+    candidate_expiry = " OR ".join(
+        f"(retention_policy_id=:candidate_policy_{index} AND created_at<:candidate_cutoff_{index})"
+        for index in range(len(memory_cutoffs))
+    ) or "FALSE"
+    candidate_params = {"tid": tenant_id, "message_ids": message_ids}
+    for index, (policy_id, cutoff) in enumerate(memory_cutoffs.items()):
+        candidate_params[f"candidate_policy_{index}"] = policy_id
+        candidate_params[f"candidate_cutoff_{index}"] = cutoff
+
+    control_relationship_ids: set[UUID] = set()
+    if conversation_ids:
+        control_relationship_ids.update(
+            (await session.scalars(select(Conversation.relationship_id).where(
+                Conversation.tenant_id == tenant_id,
+                Conversation.id.in_(conversation_ids),
+            ))).all()
+        )
+    memory_relationship_rows = await session.execute(
+        text(
+            "SELECT DISTINCT m.relationship_id FROM agata.memories m "
+            "WHERE m.tenant_id=:tid AND m.deleted_at IS NULL AND ("
+            "EXISTS (SELECT 1 FROM agata.memory_sources s WHERE s.tenant_id=m.tenant_id "
+            "AND s.memory_id=m.id AND s.message_id=ANY(CAST(:message_ids AS uuid[]))) OR "
+            f"({memory_expiry})"
+            ")"
+        ),
+        memory_params,
+    )
+    control_relationship_ids.update(row.relationship_id for row in memory_relationship_rows)
+    candidate_relationship_rows = await session.execute(
+        text(
+            "SELECT DISTINCT relationship_id FROM agata.shadow_memory_candidates "
+            "WHERE tenant_id=:tid AND status IN ('shadow','promoting') AND ("
+            "source_message_id=ANY(CAST(:message_ids AS uuid[])) OR "
+            f"({candidate_expiry})"
+            ")"
+        ),
+        candidate_params,
+    )
+    control_relationship_ids.update(row.relationship_id for row in candidate_relationship_rows)
+    if control_relationship_ids:
+        # Promotion, memory completion and inference authority lock control
+        # before source messages, candidates or parent outbox rows. Retention
+        # takes the same locks before mutating any of those records.
+        locked_controls = await session.scalars(
+            select(MemoryControlState.id)
+            .where(
+                MemoryControlState.tenant_id == tenant_id,
+                MemoryControlState.relationship_id.in_(control_relationship_ids),
+            )
+            .order_by(MemoryControlState.id)
+            .with_for_update()
+        )
+        locked_controls.all()
+
+    for policy_id, cutoff in message_cutoffs.items():
+        rows = (
+            await session.execute(
+                text(
+                    "UPDATE agata.messages SET deleted_at=:now, content_ciphertext=NULL, "
+                    "content_nonce=NULL, content_key_version=NULL "
+                    "WHERE tenant_id=:tid AND retention_policy_id=:policy AND deleted_at IS NULL "
+                    "AND occurred_at < :cutoff RETURNING id,conversation_id"
+                ),
+                {"tid": tenant_id, "policy": policy_id, "cutoff": cutoff, "now": now},
+            )
+        ).all()
+        message_ids.extend(row.id for row in rows if row.id not in message_ids)
+        conversation_ids.update(row.conversation_id for row in rows)
+    memory_params["message_ids"] = message_ids
+    candidate_params["message_ids"] = message_ids
+
     purged = await session.execute(
         text(
             "UPDATE agata.memories m SET lifecycle_state='deleted', deleted_at=:now, valid_until=:now, "
@@ -1734,42 +1789,8 @@ async def run_retention_cleanup(session: AsyncSession, tenant_id: UUID) -> int:
         memory_params,
     )
     purged_rows = purged.all()
-    candidate_expiry = " OR ".join(
-        f"(retention_policy_id=:candidate_policy_{index} AND created_at<:candidate_cutoff_{index})"
-        for index in range(len(memory_cutoffs))
-    ) or "FALSE"
-    candidate_params = {"tid": tenant_id, "message_ids": message_ids}
-    for index, (policy_id, cutoff) in enumerate(memory_cutoffs.items()):
-        candidate_params[f"candidate_policy_{index}"] = policy_id
-        candidate_params[f"candidate_cutoff_{index}"] = cutoff
-    invalidated_candidates = (
-        await session.execute(
-            text(
-                "UPDATE agata.shadow_memory_candidates SET status='invalidated', invalidated_at=now(), "
-                "value_ciphertext=NULL,value_nonce=NULL,value_key_version=NULL "
-                "WHERE tenant_id=:tid AND status IN ('shadow','promoting') AND ("
-                "source_message_id=ANY(CAST(:message_ids AS uuid[])) OR "
-                f"({candidate_expiry})"
-                ") RETURNING id"
-            ),
-            candidate_params,
-        )
-    ).all()
-    if invalidated_candidates:
-        await session.execute(
-            text(
-                "UPDATE agata.outbox_jobs SET state='dead', claimed_at=NULL, lease_expires_at=NULL, "
-                "last_error='retention_purged' WHERE tenant_id=:tid "
-                "AND state IN ('pending','running','failed') "
-                "AND payload->>'candidate_id'=ANY(CAST(:ids AS text[]))"
-            ),
-            {
-                "tid": tenant_id,
-                "ids": [str(row.id) for row in invalidated_candidates],
-            },
-        )
     affected_relationship_ids = {row.relationship_id for row in purged_rows}
-    for relationship_id in affected_relationship_ids:
+    for relationship_id in sorted({row.relationship_id for row in purged_rows}):
         await session.execute(
             text(
                 "UPDATE agata.memory_control_state SET deletion_epoch=deletion_epoch+1 "
@@ -1797,6 +1818,55 @@ async def run_retention_cleanup(session: AsyncSession, tenant_id: UUID) -> int:
                 "WHERE tenant_id=:tid AND relationship_id=:relationship_id"
             ),
             {"tid": tenant_id, "relationship_id": relationship_id, "now": now},
+        )
+    # Promotion completion also holds MemoryControlState before it writes a
+    # shadow candidate and completes its parent job, so invalidate candidates
+    # only after the relationship control rows above are locked.
+    invalidated_candidates = (
+        await session.execute(
+            text(
+                "UPDATE agata.shadow_memory_candidates SET status='invalidated', invalidated_at=now(), "
+                "value_ciphertext=NULL,value_nonce=NULL,value_key_version=NULL "
+                "WHERE tenant_id=:tid AND status IN ('shadow','promoting') AND ("
+                "source_message_id=ANY(CAST(:message_ids AS uuid[])) OR "
+                f"({candidate_expiry})"
+                ") RETURNING id"
+            ),
+            candidate_params,
+        )
+    ).all()
+    if invalidated_candidates:
+        await session.execute(
+            text(
+                "UPDATE agata.outbox_jobs SET state='dead', claimed_at=NULL, lease_expires_at=NULL, "
+                "last_error='retention_purged' WHERE tenant_id=:tid "
+                "AND state IN ('pending','running','failed') "
+                "AND payload->>'candidate_id'=ANY(CAST(:ids AS text[]))"
+            ),
+            {
+                "tid": tenant_id,
+                "ids": [str(row.id) for row in invalidated_candidates],
+            },
+        )
+    # Memory authority and deferral paths lock MemoryControlState before their
+    # parent outbox row. Lock/update controls before invalidating jobs here too,
+    # or a retention transaction can hold an outbox row while waiting for the
+    # control row that the worker already holds.
+    if message_ids:
+        await session.execute(
+            text(
+                "UPDATE agata.outbox_jobs SET state='dead', claimed_at=NULL, lease_expires_at=NULL, "
+                "last_error='retention_purged', payload=payload - 'reply_context_ciphertext' "
+                "- 'reply_context_nonce' - 'reply_context_key_version' "
+                "WHERE tenant_id=:tid AND state IN ('pending','running','failed') "
+                "AND (payload->>'message_id' = ANY(CAST(:ids AS text[])) "
+                "OR payload->>'conversation_id' = ANY(CAST(:conversations AS text[])))"
+            ),
+            {
+                "tid": tenant_id,
+                "ids": [str(value) for value in message_ids],
+                "conversations": [str(value) for value in conversation_ids],
+            },
         )
     if conversation_ids:
         await session.execute(
