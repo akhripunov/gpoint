@@ -1131,6 +1131,45 @@ test('agata0011 canonical gate cannot bypass the guarded migration path', async 
   assert.throws(() => inspectAgataMigrationReadiness(sha, 'agata0010', 'agata0011', () => ''), /readiness/);
 });
 
+test('READY_FOR_OWNER worker evidence requires a candidate-bound read-only migration plan and preserves JIT gates', async () => {
+  const { validateWorkerMigrationReadiness } = await import('./release-gpoint.mjs');
+  const candidate = 'a'.repeat(40);
+  const base = {
+    compatibility: 'PASS', candidateSha: candidate, sourceStatus: 'CANDIDATE_DIFFERS',
+    migrationReadiness: {
+      status: 'TRANSITION_REQUIRED_PLAN_VERIFIED', candidateSha: candidate,
+      readinessBasis: 'STATIC_PLAN_ONLY', mutationPerformed: false,
+      candidateAssetsVerified: true, installedSourceProvenance: 'VERIFIED',
+      tenantBindingSource: 'VERIFIED_CURRENT', rollbackSource: 'LEGACY_RUNTIME_PRESENT',
+      rollbackSnapshotCapture: 'REQUIRED_AT_APPLY',
+      startupValidation: 'REQUIRED_DURING_APPLY',
+      remainingJitGates: ['FRESH_GPOINT_QUEUE', 'FRESH_GSALES_QUEUE', 'NO_ACTIVE_INFERENCE',
+        'RELEASE_LOCK_FREE', 'TRANSITION_LOCK_FREE', 'CAPTURE_AND_VERIFY_ROLLBACK',
+        'CANDIDATE_STARTUP_VALIDATION', 'QUEUE_REVALIDATION_BEFORE_SWITCH'],
+    },
+  };
+  assert.deepEqual(validateWorkerMigrationReadiness(candidate, base), base.migrationReadiness);
+  const exact = { ...base, sourceStatus: 'EXACT_MATCH', migrationReadiness: {
+    ...base.migrationReadiness, status: 'NO_TRANSITION_REQUIRED',
+  } };
+  assert.equal(validateWorkerMigrationReadiness(candidate, exact).status, 'NO_TRANSITION_REQUIRED');
+  assert.throws(() => validateWorkerMigrationReadiness(candidate, { ...base, migrationReadiness: undefined }), /readiness/);
+  assert.throws(() => validateWorkerMigrationReadiness(candidate, { ...base, candidateSha: 'b'.repeat(40) }), /candidate/);
+  assert.throws(() => validateWorkerMigrationReadiness(candidate, { ...base, migrationReadiness: {
+    ...base.migrationReadiness, tenantBindingSource: 'UNVERIFIED',
+  } }), /readiness/);
+  assert.throws(() => validateWorkerMigrationReadiness(candidate, { ...base, migrationReadiness: {
+    ...base.migrationReadiness, rollbackSource: 'MISSING',
+  } }), /readiness/);
+  assert.throws(() => validateWorkerMigrationReadiness(candidate, { ...base, migrationReadiness: {
+    ...base.migrationReadiness, remainingJitGates: [],
+  } }), /JIT/);
+  assert.throws(() => validateWorkerMigrationReadiness(candidate, { ...base, migrationReadiness: {
+    ...base.migrationReadiness, mutationPerformed: true,
+  } }), /readiness/);
+  assert.throws(() => validateWorkerMigrationReadiness(candidate, { ...base, sourceStatus: 'STALE' }), /source status/);
+});
+
 test('guarded migration retains complete backup and exact SHA evidence for the manifest', async () => {
   const { parseGuardedMigrationEvidence } = await import('./release-gpoint-vps-adapter.mjs');
   assert.equal(typeof parseGuardedMigrationEvidence, 'function');

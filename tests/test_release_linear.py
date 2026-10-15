@@ -506,8 +506,40 @@ class WorkerCompatibilityTests(unittest.TestCase):
         self.assertRegex(source,r'const workerCompatibility = verifyWorkerCompatibility\(candidate, baseline\.facts, [\'\"]preflight[\'\"]\)')
         self.assertRegex(source,r'const workerCompatibility = verifyWorkerCompatibility\(candidate, baseline\.facts, [\'\"]apply[\'\"]\)')
 
+        self.assertIn("if (mode === 'preflight') validateWorkerMigrationReadiness(candidate, evidence)",source)
+        self.assertIn('workerMigrationReadiness: workerCompatibility.migrationReadiness',source)
+
     def test_compatibility_is_independent_of_live_worker_health(self):
         self.assertEqual(self.contract.verify_contract(self.values,self.point,self.sales), {'compatibility':'PASS'})
+
+    def test_read_only_worker_migration_plan_is_candidate_bound_and_keeps_apply_jit(self):
+        sha='a'*40
+        assets={'gpoint_mac_worker.py':'b'*64,'lab_queue.py':'c'*64}
+        exact=self.contract.build_migration_readiness(sha,assets,'VERIFIED','VERIFIED_CURRENT',True,candidate_differs=False)
+        self.assertEqual(exact['status'],'NO_TRANSITION_REQUIRED')
+        self.assertFalse(exact['mutationPerformed'])
+        self.assertEqual(exact['readinessBasis'],'STATIC_PLAN_ONLY')
+        changed=self.contract.build_migration_readiness(sha,assets,'VERIFIED','VERIFIED_LEGACY',True)
+        self.assertEqual(changed['status'],'TRANSITION_REQUIRED_PLAN_VERIFIED')
+        self.assertEqual(changed['rollbackSnapshotCapture'],'REQUIRED_AT_APPLY')
+        self.assertEqual(changed['startupValidation'],'REQUIRED_DURING_APPLY')
+        self.assertIn('QUEUE_REVALIDATION_BEFORE_SWITCH',changed['remainingJitGates'])
+        self.assertIn('FRESH_GPOINT_QUEUE',changed['remainingJitGates'])
+        configured=self.contract.build_migration_readiness(
+            sha,assets,'VERIFIED','VERIFIED_CONFIG',True)
+        self.assertEqual(configured['tenantBindingSource'],'VERIFIED_CONFIG')
+        for kwargs, reason in [
+            ({'installed_source_provenance':'MISSING'},'provenance'),
+            ({'tenant_binding_source':'UNVERIFIED'},'tenant_binding'),
+            ({'tenant_binding_source':'STALE'},'tenant_binding'),
+            ({'legacy_runtime_present':False},'rollback_source'),
+        ]:
+            options={'installed_source_provenance':'VERIFIED','tenant_binding_source':'VERIFIED_CURRENT','legacy_runtime_present':True}
+            options.update(kwargs)
+            with self.subTest(reason=reason), self.assertRaisesRegex(RuntimeError,reason):
+                self.contract.build_migration_readiness(sha,assets,**options)
+        with self.assertRaisesRegex(RuntimeError,'assets_invalid'):
+            self.contract.build_migration_readiness(sha,{**assets,'bad':'not-a-hash'},'VERIFIED','VERIFIED_CURRENT',True)
 
     def test_known_static_credential_mismatch_is_compatibility_failure(self):
         expected={'GPOINT_AGATA_WORKER_TOKEN':'point-test','GSALES_WORKER_TOKEN':'sales-test'}

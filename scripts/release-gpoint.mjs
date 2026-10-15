@@ -244,8 +244,38 @@ function verifyWorkerCompatibility(candidate, facts, mode) {
   }
   const evidence = JSON.parse(result.stdout);
   if (evidence.compatibility !== 'PASS' || evidence.candidateSha !== candidate) die('Worker compatibility evidence invalid');
+  if (mode === 'preflight') validateWorkerMigrationReadiness(candidate, evidence);
   if (mode === 'apply' && evidence.sourceStatus !== 'EXACT_MATCH') die('Installed worker source differs from candidate');
   return evidence;
+}
+
+const WORKER_MIGRATION_JIT_GATES = Object.freeze([
+  'FRESH_GPOINT_QUEUE', 'FRESH_GSALES_QUEUE', 'NO_ACTIVE_INFERENCE',
+  'RELEASE_LOCK_FREE', 'TRANSITION_LOCK_FREE', 'CAPTURE_AND_VERIFY_ROLLBACK',
+  'CANDIDATE_STARTUP_VALIDATION', 'QUEUE_REVALIDATION_BEFORE_SWITCH',
+]);
+
+export function validateWorkerMigrationReadiness(candidate, evidence) {
+  if (!/^[a-f0-9]{40}$/.test(candidate) || evidence?.candidateSha !== candidate || evidence?.compatibility !== 'PASS')
+    throw new Error('worker migration readiness candidate evidence invalid');
+  const plan = evidence.migrationReadiness;
+  const commonValid = plan && plan.candidateSha === candidate && plan.readinessBasis === 'STATIC_PLAN_ONLY'
+    && plan.mutationPerformed === false && plan.candidateAssetsVerified === true
+    && plan.installedSourceProvenance === 'VERIFIED'
+    && ['VERIFIED_CURRENT', 'VERIFIED_LEGACY', 'VERIFIED_CONFIG'].includes(plan.tenantBindingSource)
+    && plan.rollbackSource === 'LEGACY_RUNTIME_PRESENT'
+    && plan.rollbackSnapshotCapture === 'REQUIRED_AT_APPLY'
+    && plan.startupValidation === 'REQUIRED_DURING_APPLY';
+  if (!commonValid) throw new Error('worker migration readiness evidence missing or invalid');
+  if (!Array.isArray(plan.remainingJitGates)
+      || JSON.stringify(plan.remainingJitGates) !== JSON.stringify(WORKER_MIGRATION_JIT_GATES))
+    throw new Error('worker migration JIT gates missing or invalid');
+  if (evidence.sourceStatus === 'EXACT_MATCH') {
+    if (plan.status !== 'NO_TRANSITION_REQUIRED') throw new Error('worker migration readiness source status mismatch');
+  } else if (evidence.sourceStatus === 'CANDIDATE_DIFFERS') {
+    if (plan.status !== 'TRANSITION_REQUIRED_PLAN_VERIFIED') throw new Error('worker migration readiness source status mismatch');
+  } else throw new Error('worker migration readiness source status invalid');
+  return plan;
 }
 
 function providerConfigFromFacts(facts, workerStatus = undefined) {
@@ -686,6 +716,7 @@ function runStaticDryRun(candidate, bundle) {
         staticArtifactSha256: bundle.staticArtifactSha256 } },
       componentImages: checked.parent.images,
       workerCompatibility: checked.workerCompatibility,
+      workerMigrationReadiness: checked.workerCompatibility.migrationReadiness,
       dbHeadBefore: current.currentProductionDbHead,
       dbHeadAfter: null, agataDbHeadBefore: checked.facts.LIVE_AGATA_HEAD,
       agataDbHeadAfter: checked.facts.LIVE_AGATA_HEAD,
@@ -732,7 +763,8 @@ function runDryRun(candidate) {
     if (gates.length) die(gates.join('; '));
     const manifest = { releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: null, dbHeadBefore: liveDbHead, dbHeadAfter: null, agataDbHeadBefore: baseline.agataDbHead, agataDbHeadAfter: candidateAgataMigrationHead(candidate), artifactIdentities: artifacts, provider: baseline.provider, agataProvider: baseline.provider, startedAt, finishedAt: isoNow(), status: 'PLANNED', failureStage: null, failureReason: null, rollbackSha: current.currentProductionSha, rollbackDbCompatibility: 'REQUIRES_FORWARD_FIX_ASSESSMENT', productionRef: null, remoteProof: { mainSha: proof.mainSha, directRef: proof.directRef }, liveFacts: baseline.facts, agataMigrationReadiness, dryRun: true };
     Object.assign(manifest, { workerCompatibility, gsalesReadiness, gsalesDbHeadBefore: baseline.facts.LIVE_GSALES_HEAD,
-      gsalesMigrationSha256Before: baseline.facts.LIVE_GSALES_MIGRATION_SHA256 });
+      gsalesMigrationSha256Before: baseline.facts.LIVE_GSALES_MIGRATION_SHA256,
+      workerMigrationReadiness: workerCompatibility.migrationReadiness });
     const file = writeManifest(manifest);
     console.log(JSON.stringify({ status: 'PLANNED', releaseId, candidateSha: candidate, remoteMainSha: proof.mainSha, buildCheckoutSha: build.checkoutSha, buildCheckoutClean: build.clean, dbHead: liveDbHead, rollbackSha: current.currentProductionSha, manifest: path.relative(ROOT, file) }, null, 2));
   } finally { unlock(); }
@@ -1090,6 +1122,7 @@ function runApply(candidate) {
     const manifest = { releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: candidate, dbHeadBefore: liveDbHead, dbHeadAfter: deployedDbHead, agataDbHeadBefore: baseline.agataDbHead, agataDbHeadAfter: adapter.agataIdentity.head, agataRuntimeSha: candidate, agataProvider: adapter.agataIdentity.provider, artifactIdentities, startedAt, finishedAt: isoNow(), status: 'COMPLETE', failureStage: null, failureReason: null, rollbackSha: current.currentProductionSha, rollbackDbCompatibility: 'REQUIRES_FORWARD_FIX_ASSESSMENT', productionRef: ref, remoteProof: { mainSha: proof.mainSha }, migrationOutput: adapter.migrationOutput, migrationProof: adapter.migrationProof, detectorSourceHash: adapter.detectorHash, stageTimings, releaseOrigin: 'durable-production-release', agataMigrationReadiness };
     Object.assign(manifest, readiness);
     manifest.workerCompatibility = workerCompatibility;
+    manifest.workerMigrationReadiness = workerCompatibility.migrationReadiness;
     manifest.ciReceipt = adapter.ciReceipt ?? null;
     // Additive V4 component identity, not an authorization to reuse images.
     // Any future inherited image must still pass source/CI/native VPS proofs.
