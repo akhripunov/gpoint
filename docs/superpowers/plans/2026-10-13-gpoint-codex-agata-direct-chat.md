@@ -26,7 +26,7 @@
 
 - Telegram link opened outside a private chat or by a sender whose chat ID differs — API/bot tests must deny and leave authorization pending.
 - Copied, replayed, expired, malformed, or brute-forced challenge — API tests must prove no grant, one-time redemption and bounded rate limits.
-- Telegram ID missing from OWNER allowlist, creator slug unapproved, or no existing history — callback must fail generically without granting or enumerating account data.
+- Telegram ID missing from OWNER allowlist, creator slug unapproved, selected user missing the `CreatorOwner` relation, or no existing AGATA history for that same user/creator — callback must fail generically without granting or enumerating account data. All predicates are required together.
 - Codex credential targets another creator, unsupported API route, revoked scope, or refresh replay — auth integration tests must deny.
 - Pending or concurrently arriving AGATA replies — MCP returns exact completed text or explicit pending and never claims an adjacent reply.
 
@@ -43,7 +43,7 @@
 - Consumes: Telegram grammY `/start <payload>` updates; `GPOINT_INGEST_URL`; existing `TELEGRAM_WEBHOOK_SECRET`.
 - Produces: `forwardCodexStart(payload, chat, from, fetchImpl)` sends one JSON request to the approval callback only for `chat.type === 'private'`, numeric sender ID, and `chat.id === from.id`; production requires the external Caddy-routed `/api/internal/telegram/update` base and keeps `/api` on derived paths, while local direct API development uses unprefixed paths. It returns a generic outcome and never logs the payload.
 
-- [ ] **Step 1: Add failing bot tests** for valid private owner-shaped input forwarding; group chat denial; sender/chat mismatch denial; absent secret; API failure; no token in captured logs or reply.
+- [ ] **Step 1: Add failing bot tests** for valid private owner-shaped input forwarding; group chat denial; sender/chat mismatch denial; absent secret; API failure; redirect refusal when the shared webhook secret is attached; no token in captured logs or reply.
 - [ ] **Step 2: Run `pnpm --filter @gpoint/bot test`** and verify the new behavior tests fail before implementation.
 - [ ] **Step 3: Implement payload parsing and callback forwarding** in the existing `/start` handler; keep generic GPoint welcome behavior for normal `/start` and other bot commands unchanged. Forward only the payload and Telegram's actual `chat`/`from` fields with existing internal secret.
 - [ ] **Step 4: Run `pnpm --filter @gpoint/bot test && pnpm --filter @gpoint/bot typecheck`**; all bot tests and typecheck must pass.
@@ -58,10 +58,10 @@
 - Consumes: `POST /auth/codex/device/start { creatorSlug }`; bot callback `{ payload, chat:{id,type}, from:{id} }` over HTTPS; existing `TELEGRAM_WEBHOOK_SECRET`, OWNER allowlist, source rate limiter and AGATA integration.
 - Produces: device start `{ deviceCode, telegramLink, expiresIn }`; exchange `{ status:'pending'|'expired'|'connected', ...scopedTokens }`; callback `{ approved:true }` or generic denial. The additive migration renames the challenge digest column; raw challenge is never stored.
 
-- [ ] **Step 1: Add failing API tests** for private-chat proof, exact `chat.id == from.id`, Telegram→GPoint identity mapping, OWNER allowlist, APPROVED creator slug, existing history, missing bot settings, expiry, replay/atomic one-use, source rate limiting, generic failure/no enumeration, and one-time exchange.
+- [ ] **Step 1: Add failing API tests** for private-chat proof, exact `chat.id == from.id`, Telegram→GPoint identity mapping, OWNER allowlist, APPROVED creator slug, `CreatorOwner` relation, existing history for the same OWNER, missing bot settings, expiry, replay/atomic one-use, source rate limiting, generic failure/no enumeration, and one-time exchange.
 - [ ] **Step 2: Run the focused API tests** and confirm they fail for the missing Telegram approval path and current Mini App user-code approval contract.
 - [ ] **Step 3: Implement `POST /auth/codex/device/start`** accepting a bounded creator slug, mint 256-bit Telegram challenge and device secret, store only hashes with five-minute expiry, preserve the cross-instance start rate limit, and return a `t.me` deep link for the configured existing bot username. Fail closed when required bot/OWNER/proxy configuration is absent.
-- [ ] **Step 4: Implement `POST /auth/codex/telegram/codex-approve`** protected by the existing webhook secret and reached through the bot's HTTPS GPoint API URL; validate the payload, private chat and matching numeric sender/chat IDs, map the real Telegram ID to `User`, check exact OWNER allowlist, APPROVED creator and `agata.listMessages(userId, creatorId, {limit:1})`, then atomically grant the pending authorization once. Use generic denial responses.
+- [ ] **Step 4: Implement `POST /auth/codex/telegram/codex-approve`** protected by the existing webhook secret and reached through the bot's HTTPS GPoint API URL; validate the payload, private chat and matching numeric sender/chat IDs, map the real Telegram ID to `User`, check exact OWNER allowlist, APPROVED creator, that OWNER's `CreatorOwner` relation, and `agata.listMessages(userId, creatorId, {limit:1})` for the same OWNER; then atomically grant the pending authorization once. Use generic denial responses. Do not weaken or bypass any predicate.
 - [ ] **Step 5: Remove Mini App approval/status API endpoints** and retain no GPoint user-session approval bypass. Add scoped `POST /auth/codex/connection/:creatorId/revoke` authorization that accepts the current scoped bearer only for its bound creator, verifies allowlist/expiry/revocation state, then revokes it. Existing `/messages/creator/:creatorId` scope remains unchanged.
 - [ ] **Step 6: Register the new API test file in the API test script, then run `pnpm --filter @gpoint/api exec node --import tsx --test test/codex-chat-auth.test.ts test/codex-chat.test.ts`, `pnpm --filter @gpoint/api typecheck`, and `pnpm --filter @gpoint/db exec prisma validate`**; all must pass. Run the package's regular API suite as final verification. Do not apply migrations to any database.
 

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { forwardCodexStart } from '../src/codex-start.ts';
 
-test('valid private Telegram /start proof is forwarded to the fixed internal approval route', async () => {
+test('valid private Telegram /start proof is forwarded to the fixed internal approval route without redirects', async () => {
   const prior = { url: process.env.GPOINT_INGEST_URL, secret: process.env.TELEGRAM_WEBHOOK_SECRET };
   process.env.GPOINT_INGEST_URL = 'http://127.0.0.1:3000/internal/telegram/update';
   process.env.TELEGRAM_WEBHOOK_SECRET = 'internal-test-secret';
@@ -15,6 +15,7 @@ test('valid private Telegram /start proof is forwarded to the fixed internal app
     assert.deepEqual(result, { approved: true });
     assert.equal(requests.length, 1);
     assert.equal(requests[0].url, 'http://127.0.0.1:3000/auth/codex/telegram/codex-approve');
+    assert.equal(requests[0].init.redirect, 'error');
     assert.equal(new Headers(requests[0].init.headers).get('x-telegram-webhook-secret'), 'internal-test-secret');
     assert.deepEqual(JSON.parse(requests[0].init.body), {
       payload: 'A'.repeat(43), chat: { id: 42, type: 'private' }, from: { id: 42 },

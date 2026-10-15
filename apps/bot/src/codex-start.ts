@@ -16,6 +16,7 @@ export async function forwardCodexStart(payload: string, chat: TelegramChat, fro
   try {
     const response = await fetchImpl(endpoint, {
       method: 'POST',
+      redirect: 'error',
       headers: { 'content-type': 'application/json', 'x-telegram-webhook-secret': webhookSecret },
       body: JSON.stringify({ payload: challenge[1], chat: { id: chat!.id, type: chat!.type }, from: { id: from!.id } }),
       signal: controller.signal,

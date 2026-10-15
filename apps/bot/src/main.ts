@@ -76,6 +76,7 @@ if (!token) {
     } catch { if (message) message.mediaDownloadFailed = true; }
     await fetch(ingestUrl, {
       method: 'POST',
+      redirect: 'error',
       headers: { 'content-type': 'application/json', 'x-telegram-webhook-secret': webhookSecret },
       body: JSON.stringify(update),
     }).catch(() => undefined);
@@ -87,6 +88,7 @@ if (!token) {
     if (!webhookSecret) return;
     await fetch(telegramInternalUrl('chat-shared', { baseUrl: process.env.GPOINT_INGEST_URL, production })!, {
       method: 'POST',
+      redirect: 'error',
       headers: { 'content-type': 'application/json', 'x-telegram-webhook-secret': webhookSecret },
       body: JSON.stringify({ from: ctx.from, chat_shared: ctx.msg.chat_shared }),
     }).catch(() => undefined);
@@ -102,6 +104,7 @@ if (!token) {
     });
     const response = await fetch(telegramInternalUrl('my-chat-member', { baseUrl: process.env.GPOINT_INGEST_URL, production })!, {
       method: 'POST',
+      redirect: 'error',
       headers: { 'content-type': 'application/json', 'x-telegram-webhook-secret': webhookSecret },
       body: JSON.stringify({ ...update, updateId: ctx.update.update_id }),
     }).catch(() => undefined);
