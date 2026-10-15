@@ -222,9 +222,11 @@ def _bounded_untrusted_text(value: object, *, limit: int) -> str | None:
 def _bounded_history(values: object) -> tuple[ConversationEntry, ...]:
     if not isinstance(values, tuple):
         return ()
+    # The database loader returns chronological history. Bound from the newest
+    # end so the provider sees the current conversation state after long chats.
     output: list[ConversationEntry] = []
     used = 0
-    for value in values:
+    for value in reversed(values[-12:]):
         if not isinstance(value, ConversationEntry) or value.role not in {
             "user",
             "assistant",
@@ -236,9 +238,7 @@ def _bounded_history(values: object) -> tuple[ConversationEntry, ...]:
             continue
         output.append(ConversationEntry(value.role, content))
         used += len(content)
-        if len(output) >= 12:
-            break
-    return tuple(output)
+    return tuple(reversed(output))
 
 
 def _derive_dialogue_state(
@@ -382,6 +382,31 @@ class ContextBuilder:
             route_tuple=("", "", "", "", ""),
             current_message=current_message.replace("\x00", ""),
             memories=tuple(blocks),
+            recall_context=tuple(
+                UntrustedMemoryBlock(
+                    item.memory_id,
+                    item.version,
+                    _bounded_untrusted_text(item.subject, limit=80),
+                    _bounded_untrusted_text(item.predicate, limit=80),
+                    _bounded_untrusted_text(item.value, limit=300),
+                    item.observed_at,
+                    reason_code="recall_memory_data",
+                    evidence_state=item.evidence_state,
+                    lifecycle_state=item.lifecycle_state,
+                    valid_from=item.valid_from,
+                    valid_until=item.valid_until,
+                    truth_role=item.truth_role,
+                )
+                for item in recall_context[:5]
+                if isinstance(item, UntrustedMemoryBlock)
+                and item.evidence_state
+                in {
+                    EvidenceState.explicit.value,
+                    EvidenceState.confirmed.value,
+                    EvidenceState.inferred.value,
+                }
+                and _bounded_untrusted_text(item.value, limit=300) is not None
+            ),
             response_language=plan.response_language,
             locale_fragment=locale_fragment,
             personality=_bounded_profile_data(profile.personality),
@@ -509,7 +534,9 @@ class ResponseOrchestrator:
             locale_fragment = await resolve_locale_response_fragment(
                 self.session, principal, conversation.character_id
             )
-            conversation_history = await self._recent_messages(principal, conversation)
+            conversation_history = await self._recent_messages(
+                principal, conversation, current_message_id=user_message.id
+            )
             conversation_summaries = await self._recent_summaries(
                 principal, conversation, plaintext, request.as_of
             )
@@ -1322,7 +1349,11 @@ class ResponseOrchestrator:
         )
 
     async def _recent_messages(
-        self, principal: PrincipalContext, conversation: Conversation
+        self,
+        principal: PrincipalContext,
+        conversation: Conversation,
+        *,
+        current_message_id: UUID,
     ) -> tuple[ConversationEntry, ...]:
         """Return decrypted recent messages for conversation history."""
         rows = (
@@ -1334,6 +1365,7 @@ class ResponseOrchestrator:
                     Message.user_id == principal.user_id,
                     Message.character_id == conversation.character_id,
                     Message.scope == conversation.scope,
+                    Message.id != current_message_id,
                     or_(Message.role != "assistant", Message.channel_delivery_status == "confirmed"),
                     Message.deleted_at.is_(None),
                 )
