@@ -1,8 +1,11 @@
 import importlib.util
 import io
+import os
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 RUNNER = Path(__file__).resolve().with_name("run_postgres.py")
 SPEC = importlib.util.spec_from_file_location("gsales_prepare_runner", RUNNER)
@@ -12,6 +15,22 @@ SPEC.loader.exec_module(RUNNER_MODULE)
 
 
 class PrepareTimingTests(unittest.TestCase):
+    def test_autonomous_timeline_accounts_for_its_own_start(self):
+        ticks = iter([10.0, 12.0, 15.0, 16.0, 20.0, 21.0])
+        timeline = RUNNER_MODULE.PhaseTimeline(now=lambda: next(ticks))
+
+        with timeline.phase("database_setup"):
+            pass
+        with timeline.phase("postgres_tests"):
+            pass
+        summary = timeline.finish()
+
+        self.assertEqual(summary["timing_scope"], "runner_main_entry_to_accounting_snapshot")
+        self.assertEqual(summary["total_seconds"], 11.0)
+        self.assertEqual(summary["measured_phase_seconds"], 7.0)
+        self.assertEqual(summary["unmeasured_gap_seconds"], 4.0)
+        self.assertEqual(summary["accounting_residual_seconds"], 0.0)
+
     def test_timeline_accounts_for_phase_gaps_and_total_runtime(self):
         ticks = iter([12.0, 15.0, 20.0, 24.0, 24.0])
         timeline = RUNNER_MODULE.PhaseTimeline(
@@ -113,7 +132,7 @@ class PrepareTimingTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "invalid_parent_start_time"):
             RUNNER_MODULE.parse_parent_start("nan", now=lambda: 5.0)
 
-    def test_main_emits_accounting_on_runner_failure_without_echoing_exception(self):
+    def test_main_emits_autonomous_accounting_on_failure_without_echoing_exception(self):
         def fail(_timeline):
             raise RuntimeError("private details must not be logged")
 
@@ -121,14 +140,35 @@ class PrepareTimingTests(unittest.TestCase):
         RUNNER_MODULE._run = fail
         output = io.StringIO()
         try:
-            with redirect_stdout(output), self.assertRaisesRegex(RuntimeError, "private details"):
-                RUNNER_MODULE.main()
+            with patch.dict(os.environ):
+                os.environ.pop("GPOINT_PREPARE_GSALES_STARTED_MONOTONIC", None)
+                with redirect_stdout(output), self.assertRaisesRegex(RuntimeError, "private details"):
+                    RUNNER_MODULE.main()
         finally:
             RUNNER_MODULE._run = original
 
         self.assertIn("GS_POSTGRES_ACCOUNTING=", output.getvalue())
         self.assertIn("GS_POSTGRES_TIMING_SCOPE=runner_main_entry_to_accounting_snapshot", output.getvalue())
         self.assertNotIn("private details must not be logged", output.getvalue())
+
+    def test_main_emits_parent_scoped_accounting_on_failure_without_echoing_exception(self):
+        def fail(_timeline):
+            raise RuntimeError("private parent-scoped details must not be logged")
+
+        original = RUNNER_MODULE._run
+        RUNNER_MODULE._run = fail
+        output = io.StringIO()
+        try:
+            parent_start = str(time.monotonic() - 1.0)
+            with patch.dict(os.environ, {"GPOINT_PREPARE_GSALES_STARTED_MONOTONIC": parent_start}):
+                with redirect_stdout(output), self.assertRaisesRegex(RuntimeError, "private parent-scoped"):
+                    RUNNER_MODULE.main()
+        finally:
+            RUNNER_MODULE._run = original
+
+        self.assertIn("GS_POSTGRES_ACCOUNTING=", output.getvalue())
+        self.assertIn("GS_POSTGRES_TIMING_SCOPE=parent_start_to_accounting_snapshot", output.getvalue())
+        self.assertNotIn("private parent-scoped details must not be logged", output.getvalue())
 
 
 if __name__ == "__main__":
