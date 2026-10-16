@@ -73,6 +73,23 @@ def test_pool_offers_lab_only_after_fresh_empty_production_claims_and_with_avail
         pool.close()
 
 
+def test_eros_has_a_dedicated_slot_and_queue_after_existing_production_polls(tmp_path):
+    calls = []
+    runner = _FakeRunner()
+    pool = PoolSupervisor(PoolPaths(tmp_path), PoolConfig(), {
+        "GPOINT": lambda: calls.append("GPOINT") or None,
+        "GSALES": lambda: calls.append("GSALES") or None,
+        "EROS": lambda: calls.append("EROS") or {"id": "eros-job-1"},
+        "LAB": lambda: calls.append("LAB") or None,
+    }, runner=runner)
+    try:
+        assert pool.poll_once() == 1
+        assert calls == ["GPOINT", "GSALES", "EROS"]
+        assert runner.started[0][0:2] == ("slot-04", "EROS")
+    finally:
+        pool.close()
+
+
 def test_pool_keeps_lab_available_when_approval_is_closed(tmp_path):
     paths = PoolPaths(tmp_path)
     pool = PoolSupervisor(paths, PoolConfig(), {
@@ -89,7 +106,7 @@ def test_pool_keeps_lab_available_when_approval_is_closed(tmp_path):
         pool.close()
 
 
-def test_pool_status_initializes_three_dedicated_idle_slots_at_concurrency_one(tmp_path):
+def test_pool_status_initializes_four_dedicated_idle_slots_at_concurrency_one(tmp_path):
     paths = PoolPaths(tmp_path)
     pool = PoolSupervisor(paths, PoolConfig(), {
         "GPOINT": lambda: None,
@@ -100,11 +117,11 @@ def test_pool_status_initializes_three_dedicated_idle_slots_at_concurrency_one(t
         assert pool.poll_once() == 0
         status = json.loads(paths.status_file.read_text())
         assert status["pool"] == {
-            "state": "HEALTHY", "total": 3, "busy": 0, "idle": 3, "failed": 0,
+            "state": "HEALTHY", "total": 4, "busy": 0, "idle": 4, "failed": 0,
         }
         assert status["configured_concurrency"] == 1
         assert {slot: value["lane"] for slot, value in status["slots"].items()} == {
-            "slot-01": "GPOINT", "slot-02": "GSALES", "slot-03": "LAB",
+            "slot-01": "GPOINT", "slot-02": "GSALES", "slot-03": "LAB", "slot-04": "EROS",
         }
         assert all(value["state"] == "IDLE" and value["job_id"] is None
                    for value in status["slots"].values())
@@ -487,6 +504,32 @@ def test_lab_claim_backoff_is_lane_local_and_does_not_block_production(tmp_path)
         pool.close()
 
 
+def test_eros_gateway_error_does_not_degrade_gpoint_or_gsales_pool_readiness(tmp_path):
+    paths = PoolPaths(tmp_path)
+
+    def eros_unavailable():
+        raise RuntimeError("worker_gateway_network_error")
+
+    pool = PoolSupervisor(paths, PoolConfig(), {
+        "GPOINT": lambda: None,
+        "GSALES": lambda: None,
+        "EROS": eros_unavailable,
+    }, clock=lambda: 0)
+    try:
+        assert pool.poll_once(now=0) == 0
+        pool_status = json.loads(paths.status_file.read_text(encoding="utf-8"))
+        worker_status = json.loads(paths.worker_status_file.read_text(encoding="utf-8"))
+        assert pool_status["pool"]["state"] == "HEALTHY"
+        assert pool_status["lanes"]["GPOINT"]["state"] == "HEALTHY"
+        assert pool_status["lanes"]["GSALES"]["state"] == "HEALTHY"
+        assert pool_status["lanes"]["EROS"]["state"] == "DEGRADED"
+        assert worker_status["queue_connectivity"] == "reachable"
+        assert worker_status["last_error_code"] is None
+        assert worker_status["targets"]["EROS"]["pool_state"] == "DEGRADED"
+    finally:
+        pool.close()
+
+
 def test_rejection_callback_failure_does_not_block_independent_lab_lane(tmp_path):
     runner = _FakeRunner()
     def reject(_lane, _offer, _reason):
@@ -734,6 +777,7 @@ def test_mock_jobs_use_isolated_processes_sequentially_at_unverified_n1(tmp_path
     ("GPOINT", "slot-01"),
     ("GSALES", "slot-02"),
     ("LAB", "slot-03"),
+    ("EROS", "slot-04"),
 ])
 def test_dedicated_slots_are_pinned_to_their_lanes(selected_lane, expected_slot, tmp_path):
     runner = _FakeRunner()
@@ -741,11 +785,12 @@ def test_dedicated_slots_are_pinned_to_their_lanes(selected_lane, expected_slot,
         "GPOINT": {"id": "point-1"},
         "GSALES": {"id": "sales-1"},
         "LAB": {"job_id": "lab-1"},
+        "EROS": {"id": "eros-1", "target": "EROS"},
     }
     pool = PoolSupervisor(
         PoolPaths(tmp_path), PoolConfig(),
         {lane: (lambda lane=lane: offers.pop(lane) if lane == selected_lane else None)
-         for lane in ("GPOINT", "GSALES", "LAB")},
+         for lane in ("GPOINT", "GSALES", "LAB", "EROS")},
         runner=runner,
     )
     try:

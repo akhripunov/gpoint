@@ -1444,6 +1444,34 @@ def test_local_inventory_accepts_three_dedicated_idle_slots_at_provider_n1(monke
     assert migration.validate_fresh_production_queue_snapshots(status)["busy_slots"] == 0
 
 
+def test_local_inventory_accepts_eros_slot_without_weakening_production_queue_gates(monkeypatch):
+    status = _fresh_empty_queue_status(datetime.now(UTC))
+    status.update({
+        "configured_concurrency": 1,
+        "current_job_present": False,
+        "launch_agent_loaded": True,
+        "slots": {
+            "slot-01": {"state": "IDLE", "lane": "GPOINT", "job_id": None},
+            "slot-02": {"state": "IDLE", "lane": "GSALES", "job_id": None},
+            "slot-03": {"state": "IDLE", "lane": "LAB", "job_id": None},
+            "slot-04": {"state": "IDLE", "lane": "EROS", "job_id": None},
+        },
+    })
+    status["pool"]["total"] = 4
+    monkeypatch.setattr(migration, "inventory", lambda: {
+        "launchagent_loaded": True, "production_release_lock_busy": False,
+        "active_inference": False,
+    })
+    monkeypatch.setattr(migration, "_launchagent_pid", lambda: (123, "gpoint_mac_worker.py watch"))
+
+    migration._refresh_local_pool_evidence(status)
+
+    assert status["configured_concurrency"] == 1
+    assert status["pool_snapshot_inventory"]["slot_count"] == 4
+    assert set(status["slots"]) == {"slot-01", "slot-02", "slot-03", "slot-04"}
+    assert migration.validate_fresh_production_queue_snapshots(status)["busy_slots"] == 0
+
+
 def test_local_inventory_rejects_noncanonical_dedicated_slot_set(monkeypatch):
     status = _fresh_empty_queue_status(datetime.now(UTC))
     status.update({

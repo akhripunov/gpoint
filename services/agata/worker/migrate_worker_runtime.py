@@ -526,14 +526,18 @@ def validate_fresh_production_queue_snapshots(status: dict, *, now: datetime | N
                 "active_inference": False,
             }
             and isinstance(total := pool.get("total"), int) and not isinstance(total, bool)
-            and total == slot_count and slot_count in {1, 3}
+            and total == slot_count and slot_count in {1, 3, 4}
             and isinstance(status.get("configured_concurrency"), int)
             and not isinstance(status.get("configured_concurrency"), bool)
             and status.get("configured_concurrency") == 1
             and status.get("current_job_present") is False
             and status.get("launch_agent_loaded") is True
             and isinstance(slots, dict)
-            and set(slots) in ({"slot-01"}, {"slot-01", "slot-02", "slot-03"})
+            and set(slots) in (
+                {"slot-01"},
+                {"slot-01", "slot-02", "slot-03"},
+                {"slot-01", "slot-02", "slot-03", "slot-04"},
+            )
             and all(isinstance(slot, dict) and slot.get("state") == "IDLE"
                     and slot.get("job_id") is None for slot in slots.values())
         )
@@ -1194,14 +1198,18 @@ def _refresh_local_pool_evidence(status: dict) -> None:
     concurrency = status.get("configured_concurrency")
     total = pool.get("total") if isinstance(pool, dict) else None
     slot_ids = set(slots) if isinstance(slots, dict) else set()
-    canonical_slot_sets = ({"slot-01"}, {"slot-01", "slot-02", "slot-03"})
+    canonical_slot_sets = (
+        {"slot-01"},
+        {"slot-01", "slot-02", "slot-03"},
+        {"slot-01", "slot-02", "slot-03", "slot-04"},
+    )
     if not isinstance(pool, dict) or isinstance(pool.get("busy"), bool) or not isinstance(pool.get("busy"), int):
         raise PreflightFailure("local_pool_status_invalid", stage="local_pool_validation",
                                legacy_error="production_queue_status_unavailable")
     if pool.get("busy") != 0 or status.get("current_job_present") is not False:
         raise PreflightFailure("local_pool_not_idle", stage="local_pool_validation",
                                legacy_error="production_queue_status_unavailable")
-    if isinstance(concurrency, bool) or concurrency != 1 or isinstance(total, bool) or total not in {1, 3}:
+    if isinstance(concurrency, bool) or concurrency != 1 or isinstance(total, bool) or total not in {1, 3, 4}:
         raise PreflightFailure("local_pool_configuration_invalid", stage="local_pool_validation",
                                legacy_error="production_queue_status_unavailable")
     if not isinstance(slots, dict) or slot_ids not in canonical_slot_sets or total != len(slots):
@@ -1213,7 +1221,7 @@ def _refresh_local_pool_evidence(status: dict) -> None:
                                    lane=None, legacy_error="production_queue_status_unavailable")
         if slot.get("state") != "IDLE" or slot.get("job_id") is not None:
             slot_lane = slot.get("lane")
-            lane = slot_lane if slot_lane in {"GPOINT", "GSALES", "LAB"} else None
+            lane = slot_lane if slot_lane in {"GPOINT", "GSALES", "LAB", "EROS"} else None
             raise PreflightFailure("local_slot_not_idle", stage="local_pool_validation", lane=lane,
                                    legacy_error="production_queue_status_unavailable")
     if not isinstance(lanes, dict):

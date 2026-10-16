@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any
 
 CANONICAL_ROOT = Path.home() / "Library/Application Support/GPoint/agata-codex-worker"
-LANES = ("GPOINT", "GSALES", "LAB")
-SLOT_LANES = {"slot-01": "GPOINT", "slot-02": "GSALES", "slot-03": "LAB"}
+LANES = ("GPOINT", "GSALES", "LAB", "EROS")
+SLOT_LANES = {"slot-01": "GPOINT", "slot-02": "GSALES", "slot-03": "LAB", "slot-04": "EROS"}
 LANE_SLOTS = {lane: slot for slot, lane in SLOT_LANES.items()}
 MAX_SLOTS = len(SLOT_LANES)
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -176,7 +176,7 @@ class PoolPaths:
 
 
 class LaneScheduler:
-    """Weighted production rotation before the independent local LAB lane."""
+    """Weighted GPoint/GSales rotation, then Eros, then background LAB."""
 
     _CYCLE = ("GPOINT", "GPOINT", "GSALES", "GPOINT", "GPOINT", "GSALES")
 
@@ -466,6 +466,10 @@ class PoolSupervisor:
                     break
             if dispatched:
                 continue
+            if ("EROS" in self.claimers and self.failed_until.get("EROS", 0) <= current_time
+                    and self._dispatch_lane("EROS")):
+                launched += 1
+                continue
             if ("LAB" in self.claimers and self.failed_until.get("LAB", 0) <= current_time
                     and self._dispatch_lane("LAB")):
                 launched += 1
@@ -642,8 +646,8 @@ class PoolSupervisor:
             except Exception:
                 lab_gate = "CLOSED_NO_APPROVAL"
             lane_state = (
-                "UNCONFIGURED" if lane == "GSALES" and lane not in self.claimers else
-                "DEGRADED" if lane == "LAB" and error else
+                "UNCONFIGURED" if lane in {"GPOINT", "GSALES", "EROS"} and lane not in self.claimers else
+                "DEGRADED" if lane in {"LAB", "EROS"} and error else
                 "AVAILABLE" if lane == "LAB" else
                 "DEGRADED" if error else
                 "RUNNING" if active else "HEALTHY"
@@ -658,6 +662,9 @@ class PoolSupervisor:
             }
         slot_states = {slot_id: self._read_slot_state(slot_id) for slot_id in SLOT_LANES}
         busy = len(self.active)
+        # EROS has its own queue and readiness state. A local EROS gateway
+        # outage must not mark the existing Product Worker/GPOINT/GSales
+        # service unavailable.
         production_error = any(lane in {"GPOINT", "GSALES"} for lane in self.lane_errors)
         pool_state = "MAINTENANCE" if maintenance else "DEGRADED" if production_error else "HEALTHY"
         write_pool_status(self.paths, {
@@ -700,7 +707,8 @@ class PoolSupervisor:
             "launch_agent_loaded": previous.get("launch_agent_loaded", False),
             "current_job_present": any(state.get("state") == "BUSY" for state in slots.values()),
             "state": pool_state.lower(),
-            "last_error_code": next(iter(self.lane_errors.values()), None),
+            "last_error_code": next((self.lane_errors[lane] for lane in ("GPOINT", "GSALES")
+                                      if lane in self.lane_errors), None),
             "queue_connectivity": "reachable" if pool_state == "HEALTHY" else "degraded",
             "targets": targets,
         }

@@ -27,6 +27,15 @@ table. This bootstrap supports a fresh Eros `engine` schema; adopting a prior
 Eros install whose history is only in `public._sqlx_migrations` is deliberately
 not automatic and currently fails closed.
 
+`patches/0003-gpoint-worker-bridge-identity.patch` adds an opaque bridge
+identity to Eros chat requests. On the GPoint custom provider path only, the
+bridge identity replaces Eros's caller-controlled OpenAI `user` audit field.
+The Eros server signs a 60-second HS256 JWT from trusted tenant, user, session,
+persona-instance and triggering user-message IDs. The GPoint gateway validates
+issuer, audience, signature, lifetime and UUID claims, then checks the signed
+tenant against its server-configured Eros tenant. Other custom providers and
+built-in OpenRouter keep their previous audit behavior.
+
 Migration coexistence was tested in a disposable PostgreSQL database after all
 18 current GPoint Prisma migrations and all 11 AGATA Alembic revisions. Eros
 then recorded 72 revisions (`0..71`) in `engine._sqlx_migrations`; the public
@@ -40,38 +49,64 @@ Apply from a clean, exact v2.2.1 checkout:
 services/eros-engine/apply-patches.sh /path/to/eros-engine-v2.2.1
 ```
 
+The wrapper verifies the exact upstream revision, a clean source tree, and all
+patches before applying any of them.
+
 After applying, run the upstream Rust tests for `eros-engine-server` and
 `eros-engine-llm`. The patch is intentionally separate from the upstream
 checkout so rebasing Eros is explicit and reviewable.
 
-## Current boundary
+## Current local boundary
 
-The existing Mac Worker Gateway is AGATA's tenant-scoped encrypted lease queue,
-not an OpenAI-compatible endpoint. It accepts only jobs already created by the
-AGATA response pipeline. No generic Eros prompt/response route exists. A safe
-Eros-to-Worker bridge therefore requires a separately authorized AGATA queue
-extension or a dedicated local provider runtime; neither is implemented here,
-and no AGATA files or production jobs were changed.
+The GPoint API has a distinct Eros-only OpenAI-compatible bridge and
+`engine.eros_inference_jobs` queue. It uses separate credentials, signed
+identity claims, tenant-scoped queue queries, a bounded queue, one-attempt
+leases, deadlines, cancellation checks and no prompt logging. The Mac Worker
+uses a distinct `EROS` target and `slot-04`; local test mode requires the exact
+target set `{EROS}` and cannot poll GPOINT, GSALES or LAB. The shared supervisor
+still enforces one global inference slot at `N=1`. An EROS poll failure marks
+only its own lane degraded; it does not degrade GPOINT/GSales readiness.
+Production installation/configuration is unchanged and not authorized here.
+
+The signed `creator_id` is read from the active `(instance_id, owner_uid)` row
+in Eros PostgreSQL, then carried through the short-lived bridge identity and
+persisted on the EROS queue row. A client cannot choose it. EROS request IDs are
+global idempotency keys: replayed requests attach to one inference, and a
+disconnect cancels that logical request for all replays. The cancellation
+check stops the Worker before it submits a result; deadlines remain the bounded
+fallback if the Worker is unreachable.
+
+Local chat configuration is in `test-model-config.toml`. Eros's provider key
+`GPOINT_API_KEY`, the API's `EROS_BRIDGE_API_KEY`, and the Mac Worker's
+`EROS_WORKER_TOKEN` are supplied through private local environment files.
+`EROS_WORKER_SIGNING_SECRET` must match between Eros and GPoint, and
+`EROS_WORKER_TENANT_ID` must match the server-owned tenant. Do not put secrets
+in the committed test configuration.
 
 The local embedding candidate is Qwen3-Embedding-0.6B through Ollama's
-OpenAI-compatible `/v1/embeddings` endpoint. The official model supports 100+
+`/api/embed` endpoint. The official model supports 100+
 languages and configurable output dimensions through 1024; Ollama documents a
 `dimensions` request field, and Eros sends `dimensions: 512`. The candidate
 model ref is `qwen3-embedding:0.6b`; see [the model card](https://ollama.com/library/qwen3-embedding)
 and [Ollama's embedding endpoint](https://docs.ollama.com/api/embed). The test
-config sets a custom local default for all chat tasks and points embeddings to
-local Ollama; it contains no hosted provider route. Runtime/model verification remains NOT_VERIFIED because
-the local Docker registry request for `ollama/ollama:0.40.5` ended in EOF. No
-model weights are committed; retry after registry access is restored and pin
-the resolved image/model identities before relying on this provider.
+config routes chat to the Worker bridge and embeddings to its Ollama-compatible
+endpoint; it contains no hosted provider route. Runtime/model verification is
+NOT_VERIFIED: two bounded pulls of the official `ollama/ollama:0.40.5` image
+failed with TLS EOF at the registry/auth endpoint. TLS verification was not
+disabled; no model weights or fabricated embeddings are committed.
 
-The complete chat E2E remains blocked. GPoint's Mac Worker Gateway accepts
-only AGATA-created tenant-scoped encrypted leases; it has no generic prompt
-submission contract. Do not enqueue synthetic AGATA jobs or mutate AGATA. A
-separately authorized AGATA gateway contract is required to use that Worker.
-The current local Ollama runtime is also unavailable because its image pull
-failed; after registry access returns it can serve a local quality-only E2E,
-but it does not satisfy the Mac Worker bridge requirement. Two independent
-synthetic users successfully created isolated sessions and received HTTP 403
-when crossing session ownership. No messages or provider inference were
-generated in this run.
+One synthetic chat request was verified through GPoint bridge -> isolated
+EROS-only test Worker -> authenticated Codex CLI -> OpenAI-compatible response.
+It completed one real Codex generation, returned a Russian response, and wrote
+a completed row to the disposable PostgreSQL queue. A preceding test claim was
+cancelled before inference after the temporary runtime slot pointer was
+missing. No AGATA or GSales job was created or claimed.
+
+Full Eros Engine chat/session/memory/relationship E2E remains NOT_VERIFIED.
+The successful smoke called the GPoint local gateway directly; the Eros server
+has not been rebuilt from the third downstream patch, and no embedding provider
+could be started. The prior 72-migration synthetic audit remains valid for its
+recorded fixture. The disposable gateway-test database is not a clean Eros
+migration fixture and was not used to rerun the Eros migrations. The audit's
+35 Eros tables are distinct from the GPoint queue table; both migration sets
+would yield 36 tables in the combined local `engine` schema.

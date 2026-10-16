@@ -1,0 +1,214 @@
+diff --git a/crates/eros-engine-llm/src/openrouter.rs b/crates/eros-engine-llm/src/openrouter.rs
+index 2fa2672..7d66734 100644
+--- a/crates/eros-engine-llm/src/openrouter.rs
++++ b/crates/eros-engine-llm/src/openrouter.rs
+@@ -80,0 +81,4 @@ pub struct ChatRequest {
++    /// Short-lived server-signed GPoint Worker identity. Custom providers may
++    /// prefer this over caller-supplied audit `user`; built-in OpenRouter
++    /// continues to receive only the audit field.
++    pub bridge_identity: Option<String>,
+@@ -397,0 +402,16 @@ fn is_false(b: &bool) -> bool {
++/// The GPoint bridge receives only a short-lived signed server identity. The
++/// audit passthrough must never become a trusted queue identity. Only the
++/// GPoint provider receives the bridge identity; every other route gets only
++/// the existing audit identity.
++fn request_user_for_endpoint<'a>(
++    provider_name: Option<&str>,
++    audit_user: Option<&'a str>,
++    bridge_identity: Option<&'a str>,
++) -> Option<&'a str> {
++    match provider_name {
++        Some("gpoint") => bridge_identity,
++        Some(_) => audit_user,
++        None => audit_user,
++    }
++}
++
+@@ -862,0 +883 @@ impl OpenRouterClient {
++                    req.bridge_identity.as_deref(),
+@@ -1119,0 +1141 @@ impl OpenRouterClient {
++        req_bridge_identity: Option<&str>,
+@@ -1136 +1158 @@ impl OpenRouterClient {
+-            user: req_user,
++            user: request_user_for_endpoint(ep.name, req_user, req_bridge_identity),
+@@ -1295 +1317,5 @@ impl OpenRouterClient {
+-            user: req.user.as_deref(),
++            user: request_user_for_endpoint(
++                ep.name,
++                req.user.as_deref(),
++                req.bridge_identity.as_deref(),
++            ),
+@@ -4460,0 +4487,28 @@ data: [DONE]\n\n";
++    #[test]
++    fn non_gpoint_endpoint_uses_only_audit_identity() {
++        assert_eq!(
++            request_user_for_endpoint(Some("custom"), Some("caller-controlled"), Some("signed-eros-claim")),
++            Some("caller-controlled"),
++        );
++        assert_eq!(
++            request_user_for_endpoint(Some("custom"), Some("caller-controlled"), None),
++            Some("caller-controlled"),
++        );
++        assert_eq!(
++            request_user_for_endpoint(None, Some("caller-controlled"), Some("signed-eros-claim")),
++            Some("caller-controlled"),
++        );
++    }
++
++    #[test]
++    fn gpoint_bridge_never_uses_caller_controlled_audit_identity() {
++        assert_eq!(
++            request_user_for_endpoint(Some("gpoint"), Some("caller-controlled"), None),
++            None,
++        );
++        assert_eq!(
++            request_user_for_endpoint(Some("gpoint"), Some("caller-controlled"), Some("signed-eros-claim")),
++            Some("signed-eros-claim"),
++        );
++    }
++
+diff --git a/crates/eros-engine-server/src/pipeline/handlers.rs b/crates/eros-engine-server/src/pipeline/handlers.rs
+index 7e3f80b..0c1f659 100644
+--- a/crates/eros-engine-server/src/pipeline/handlers.rs
++++ b/crates/eros-engine-server/src/pipeline/handlers.rs
+@@ -20,0 +21,71 @@ use eros_engine_store::memory::MemoryRepo;
++fn gpoint_bridge_model(model: &str) -> bool {
++    model.rsplit_once('@').is_some_and(|(_, provider)| provider == "gpoint")
++}
++
++#[derive(serde::Serialize)]
++struct WorkerBridgeClaims {
++    iss: &'static str,
++    aud: &'static str,
++    sub: String,
++    tenant_id: String,
++    session_id: String,
++    instance_id: String,
++    creator_id: String,
++    jti: String,
++    iat: usize,
++    exp: usize,
++}
++
++fn sign_worker_bridge_identity(
++    user_id: Uuid,
++    session_id: Uuid,
++    instance_id: Uuid,
++    creator_id: Uuid,
++    user_message_id: Uuid,
++) -> Result<String, AppError> {
++    let secret = std::env::var("GPOINT_WORKER_BRIDGE_SIGNING_SECRET")
++        .map_err(|_| AppError::Internal("worker bridge identity is not configured".into()))?;
++    if secret.len() < 32 {
++        return Err(AppError::Internal("worker bridge identity is not configured".into()));
++    }
++    let tenant_id = std::env::var("GPOINT_WORKER_TENANT_ID")
++        .map_err(|_| AppError::Internal("worker bridge identity is not configured".into()))?;
++    let tenant_id = Uuid::parse_str(&tenant_id)
++        .map_err(|_| AppError::Internal("worker bridge identity is not configured".into()))?;
++    let now = std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .map_err(|_| AppError::Internal("worker bridge clock is invalid".into()))?
++        .as_secs() as usize;
++    sign_worker_bridge_identity_with(secret.as_bytes(), tenant_id, user_id, session_id, instance_id, creator_id, user_message_id, now)
++}
++
++fn sign_worker_bridge_identity_with(
++    secret: &[u8],
++    tenant_id: Uuid,
++    user_id: Uuid,
++    session_id: Uuid,
++    instance_id: Uuid,
++    creator_id: Uuid,
++    user_message_id: Uuid,
++    now: usize,
++) -> Result<String, AppError> {
++    let claims = WorkerBridgeClaims {
++        iss: "eros-engine",
++        aud: "gpoint-worker-gateway",
++        sub: user_id.to_string(),
++        tenant_id: tenant_id.to_string(),
++        session_id: session_id.to_string(),
++        instance_id: instance_id.to_string(),
++        creator_id: creator_id.to_string(),
++        jti: user_message_id.to_string(),
++        iat: now,
++        exp: now + 60,
++    };
++    jsonwebtoken::encode(
++        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
++        &claims,
++        &jsonwebtoken::EncodingKey::from_secret(secret),
++    )
++    .map_err(|_| AppError::Internal("worker bridge identity could not be signed".into()))
++}
++
+@@ -1152,2 +1223 @@ pub(crate) async fn build_reply_request_with(
+-    Ok((
+-        assemble_chat_request(
++    let mut request = assemble_chat_request(
+@@ -1158,3 +1228,22 @@ pub(crate) async fn build_reply_request_with(
+-        ),
+-        injected_tags,
+-    ))
++        );
++    if gpoint_bridge_model(&request.model)
++        || request.fallback_model.iter().any(|model| gpoint_bridge_model(model))
++    {
++        let creator_id = sqlx::query_scalar::<_, Uuid>(
++            "SELECT genome_id FROM engine.persona_instances WHERE id = $1 AND owner_uid = $2 AND status = 'active'",
++        )
++        .bind(instance_id)
++        .bind(user_id)
++        .fetch_optional(&state.pool)
++        .await
++        .map_err(|_| AppError::Internal("worker bridge relationship is not available".into()))?
++        .ok_or_else(|| AppError::Internal("worker bridge relationship is not available".into()))?;
++        request.bridge_identity = Some(sign_worker_bridge_identity(
++            user_id,
++            session_id,
++            instance_id,
++            creator_id,
++            user_message_id,
++        )?);
++    }
++    Ok((request, injected_tags))
+@@ -1166,0 +1256,38 @@ mod tests {
++    #[test]
++    fn gpoint_bridge_identity_is_signed_from_trusted_server_ids_and_expires_quickly() {
++        use jsonwebtoken::{decode, DecodingKey, Validation};
++        let user = Uuid::new_v4();
++        let session = Uuid::new_v4();
++        let instance = Uuid::new_v4();
++        let creator = Uuid::new_v4();
++        let message = Uuid::new_v4();
++        let tenant = Uuid::new_v4();
++        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as usize;
++        let secret = b"local-eros-bridge-signing-secret-32-bytes-minimum";
++        let token = sign_worker_bridge_identity_with(secret, tenant, user, session, instance, creator, message, now)
++            .expect("identity signs");
++        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
++        validation.set_issuer(&["eros-engine"]);
++        validation.set_audience(&["gpoint-worker-gateway"]);
++        validation.set_required_spec_claims(&["exp", "iat", "iss", "aud", "sub", "jti"]);
++        let claims = decode::<serde_json::Value>(
++            &token,
++            &DecodingKey::from_secret(secret),
++            &validation,
++        ).expect("signature and standard claims validate").claims;
++        assert_eq!(claims["sub"], user.to_string());
++        assert_eq!(claims["tenant_id"], tenant.to_string());
++        assert_eq!(claims["session_id"], session.to_string());
++        assert_eq!(claims["instance_id"], instance.to_string());
++        assert_eq!(claims["creator_id"], creator.to_string());
++        assert_eq!(claims["jti"], message.to_string());
++        assert_eq!(claims["exp"].as_u64(), Some((now + 60) as u64));
++    }
++
++    #[test]
++    fn only_gpoint_custom_chat_route_requires_bridge_identity_signing() {
++        assert!(gpoint_bridge_model("gpoint-codex@gpoint"));
++        assert!(!gpoint_bridge_model("qwen3:0.6b@local"));
++        assert!(!gpoint_bridge_model("gpoint-codex"));
++    }
++

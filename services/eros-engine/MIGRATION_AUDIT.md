@@ -57,6 +57,17 @@ migrations, the row, RLS state, and both grants were unchanged. GPoint's
 installed in `public`. The representative public GPoint RLS fixture retained
 both `relrowsecurity` and `relforcerowsecurity` and its authenticated grant.
 
+The GPoint Eros gateway adds `engine.eros_inference_jobs` through the GPoint
+Prisma migration `20261016120000_eros_worker_queue`. Its schema is owned by the
+GPoint repository, not by the upstream Eros migration chain. It stores bounded,
+short-lived bridge requests, lease state and responses. Its migration was
+applied to a separate disposable gateway-test database, not to this audited
+fixture. When both migration sets are present, the combined schema has 36
+tables: the 35 Eros tables above plus this GPoint-owned queue table. The prior
+72-revision coexistence measurements remain the evidence for Eros's migration
+chain; the new queue table has not yet been included in a fresh full-chain
+coexistence rerun.
+
 **Migration boundary:** this proves fresh Eros bootstrap coexists with the
 current synthetic Prisma/Alembic schemas. An older Eros installation with
 `engine.*` tables but only a public SQLx ledger is rejected before migration;
