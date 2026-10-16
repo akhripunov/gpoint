@@ -1,9 +1,9 @@
-name: GPoint — Automatic preflight controller
-run-name: Auto preflight GPoint ${{ github.event.workflow_run.head_sha }}
+name: GPoint — Automatic release controller
+run-name: Auto release GPoint ${{ github.event.workflow_run.head_sha }}
 
 on:
   workflow_run:
-    workflows: ["GPoint — Prepare", "GPoint — Deploy"]
+    workflows: ["GPoint — Prepare"]
     types: [completed]
 
 permissions:
@@ -11,18 +11,16 @@ permissions:
   actions: read
 
 concurrency:
-  group: gpoint-auto-preflight-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  group: gpoint-auto-release-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
   cancel-in-progress: false
 
 jobs:
-  dispatch-preflight:
+  dispatch-release:
     if: >-
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_sha == github.sha &&
-      (github.event.workflow_run.path == '.github/workflows/gpoint-prepare.yml' ||
-       (github.event.workflow_run.path == '.github/workflows/gpoint-deploy.yml' &&
-        startsWith(github.event.workflow_run.display_title, 'GPoint preflight ')))
+      github.event.workflow_run.path == '.github/workflows/gpoint-prepare.yml'
     runs-on: [self-hosted, macOS, gpoint-production]
     timeout-minutes: 3
     permissions:
@@ -39,7 +37,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha }}
         run: node scripts/release-runner-readiness.mjs
-      - name: Atomically dispatch exact preflight or authorized task-scoped Deploy
+      - name: Atomically dispatch authorized Deploy or leave exact-SHA approval path
         env:
           GITHUB_TOKEN: ${{ github.token }}
           PYTHONDONTWRITEBYTECODE: '1'

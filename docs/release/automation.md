@@ -7,10 +7,12 @@
 поручение владельца «исправь [задачу] и выкатывай» разрешает один
 `TASK_SCOPED_AUTO` release без повторного подтверждения. До реализации
 фиксируется schema-v3 durable authorization record. После exact-SHA Prepare
-и immutable `READY_FOR_OWNER` preflight existing controller проверяет
-baseline, полный scope и одноразовость, атомарно claim-ит authorization и
-вызывает тот же Deploy workflow в `task-scoped-auto` режиме. Повторные Prepare
-и preflight не создаются. Release infrastructure и неподдержанные owner-only
+existing controller проверяет baseline, полный scope и одноразовость,
+атомарно claim-ит authorization и вызывает тот же Deploy workflow напрямую в
+`task-scoped-auto` режиме. Read-only preflight проходит внутри этого Deploy
+непосредственно перед Apply; отдельный обязательный preflight-run не создаётся.
+Без действующей авторизации controller не запускает Deploy, и сохраняется
+обычный exact-SHA approval. Release infrastructure и неподдержанные owner-only
 категории остаются за отдельным exact-SHA approval; database migration
 допускается только с полным task risk contract и всеми штатными gates.
 Runner может штатно ждать в GitHub `Queued`; readiness check остаётся
@@ -20,9 +22,9 @@ fail-closed.
 ## Для владельца
 
 1. Архитектор задаёт изменения и критерии приёмки. Dev реализует их и отправляет чистый commit в `origin/main`.
-2. После успешного exact-SHA Prepare и immutable bundle существующий controller выполняет один read-only preflight. Для поручения только на разработку он не передаёт task authorization. Для заранее зарегистрированной schema-v3 авторизации полного production-цикла controller связывает запись с точным кандидатом; новый Prepare или preflight не создаются.
-3. В [Архитектор — Handoff](https://linear.app/bestuzhev/document/arhitektor-handoff-36f91afb3d2c) смотрите блок **Автоматизация: кандидат** и immutable `READY_FOR_OWNER`. Если подходящая авторизация полного цикла действительна, scope и baseline совпадают, все gates PASS, а глобальный одноразовый claim успешно создан, controller автоматически запускает существующий production Deploy. Иначе сохраняется обычное требование exact-SHA approval. Сам статус READY не является разрешением.
-4. Автоматический Deploy использует тот же exact-SHA workflow и повторно проверяет claim, authorization, baseline, provenance и все production gates. Любой drift, неизвестный риск, повторный/активный Deploy или неопределённый исход останавливает автоматизацию; после частичного применения требуется reconciliation, а не слепой повтор.
+2. После успешного exact-SHA Prepare и immutable bundle controller перепроверяет текущий SHA, provenance и отсутствие активного Deploy. Для задачи без действующей full-cycle authorization он не запускает production. OWNER применяет обычное exact-SHA approval через тот же Deploy workflow; отдельный диагностический preflight можно запустить вручную.
+3. Для заранее зарегистрированной schema-v3 авторизации полного production-цикла controller повторно проверяет scope/baseline/risk и атомарно claim-ит её. Затем он сразу вызывает существующий production Deploy в `task-scoped-auto`; дополнительное READY и второе подтверждение не требуются.
+4. Deploy валидирует Prepare artifact и authorization, затем внутри того же run проводит полноценный read-only preflight до Apply. Под release lock критичные live conditions проверяются снова перед первой mutation. Любой drift, неизвестный риск, провал preflight, повторный/активный Deploy или неопределённый исход останавливает автоматизацию; после частичного применения требуется reconciliation, а не слепой повтор.
 5. Existing canonical workflow продолжает Deploy, verification, evidence и Linear publication. Mac должен быть включён, иметь сеть, активную CLI authentication и работающий GPoint runner. Incy остаётся включённым. Если runner недоступен, run останется Queued и не считается завершённым.
 6. После технического COMPLETE откройте Telegram → GPoint → Models Hub. Отправьте новое сообщение и дождитесь ответа. Сообщите Dev «ответ получил» или «ответа нет». Dev фиксирует подтверждение сценария в журнале; автоматизация не создаёт тестовые production-диалоги от вашего имени.
 
@@ -30,7 +32,7 @@ fail-closed.
 
 Можно пользоваться через Dev: «Подготовь релиз и дай SHA со ссылкой на проверки», затем «Разрешаю выкатить SHA …». Dev обязан проверить успешный Prepare, использовать его артефакты и canonical entrypoint. Кнопка Deploy удобнее тем, что фиксирует оператора и запускает стандартные шаги без пересказа команд.
 
-Режим **preflight** проверяет доступ, live baseline, worker/config и артефакты без применения миграций и переключения runtime. Он запускается автоматически после Prepare. Результат `PLANNED` плюс immutable evidence переводится в `READY_FOR_OWNER`; production не изменяется.
+Режим **preflight** остаётся ручной read-only диагностикой: проверяет доступ, live baseline, worker/config и артефакты без применения миграций и переключения runtime. При успешной отдельной диагностике `PLANNED` плюс immutable evidence публикуются как `READY_FOR_OWNER`. В production или `task-scoped-auto` статус `PASS` означает, что тот же read-only preflight прошёл внутри Deploy до Apply; `READY_FOR_OWNER` для уже выполняемого production цикла не публикуется.
 
 Runner telemetry считает wall-clock seconds отдельно для GitHub-hosted и self-hosted jobs (это не billable-minute отчёт) и фиксирует cache HIT/MISS. Автоматический controller выполняется на существующем GPoint Mac runner, отдельный hosted controller job не добавлен. Prepare tests и image build не дублируются.
 
@@ -105,7 +107,7 @@ Release bookkeeping хранится в отдельной ветке `gpoint-re
 python3 scripts/release-preflight-benchmark.py --owner-start '<ISO timestamp with timezone>' --output '<new evidence directory>' --maxibot-migration 0098_durable_autopilot_execution_claim_v1 --prepare-missing
 ```
 
-Координатор выполняет только read-only preflight, проверяет exact receipt и неизменность main; По умолчанию production apply не выполняется. Для mode production отдельно требуются --approved-gpoint и --approved-maxibot с явно разрешёнными exact SHA; несовпадение с текущим main блокирует запуск. Runtime изменяют только канонические workflows, не сам координатор. Время от команды владельца до завершения отчёта и время самого координатора записываются отдельно. Неудачный последний Prepare не обходится и не заменяется более старым успешным. Полные workflow logs, run/job boundaries, receipts и checksum списка файлов собираются без ручного копирования. Измерение не включает VPS upload/import/runtime switch.
+Координатор выполняет только read-only benchmark/preflight и проверяет exact receipt и неизменность main; production apply выполняет только канонический Deploy workflow с отдельной применимой authorization. Runtime изменяют только канонические workflows, не сам координатор. Время от команды владельца до завершения отчёта и длительность workflow измеряются отдельно. Неудачный последний Prepare не обходится и не заменяется более старым успешным. Полные workflow logs, run/job boundaries, receipts и checksum списка файлов собираются без ручного копирования.
 
 Для проверки самого конвейера до merge разрешён ручной Prepare dispatch из
 ветки: выполняются только hosted Linux jobs без production secrets, Mac/VPS
@@ -115,12 +117,12 @@ python3 scripts/release-preflight-benchmark.py --owner-start '<ISO timestamp wit
 
 ## Бесплатное хранение сборок и evidence
 
-Для чистого benchmark Release Orchestrator V2 на новом main candidate отдельно
-фиксируйте push/commit, Prepare, automatic controller, read-only Deploy
-preflight и публикацию `READY_FOR_OWNER` в Linear. Считайте jobs и их runner
-seconds по GitHub API; записывайте cache hit/miss и повторные build/test/download.
-Валидный прогон проходит одной попыткой без ручного preflight/recovery и без
-production apply.
+Для сопоставимого benchmark отдельно фиксируйте commit/push, Prepare,
+automatic controller, Deploy preflight/apply/verify и публикацию результата в
+Linear. Считайте jobs и runner seconds по GitHub API; записывайте cache hit/miss
+и повторные build/test/download. Для TASK_SCOPED_AUTO preflight находится
+внутри Deploy и должен пройти до Apply; ручной диагностический preflight
+отдельно маркируется `READY_FOR_OWNER` и не является обязательным шагом.
 
 GPoint публикует CI bundle и документы Deploy в immutable GitHub Releases,
 чтобы расход Actions Artifact Storage не блокировал выпуск. Не требует billing

@@ -8,7 +8,6 @@ import { createRetryingGit } from './release-network-retry.mjs';
 import { verifyReleaseBundle } from './release-bundle.mjs';
 import { persistReleaseBookkeeping, loadReleaseBookkeeping } from './release-bookkeeping.mjs';
 import { fileURLToPath } from 'node:url';
-import { inspectProductionReadOnly } from './release-gpoint-vps-adapter.mjs';
 import { candidateAgataMigrationHead, candidatePrismaMigrationHead } from './release-gpoint.mjs';
 import { assertInstalledWorkerMatches } from './worker-runtime-guard.mjs';
 import { withPreflightEvidence } from './release-evidence.mjs';
@@ -58,21 +57,9 @@ const previous = new Set(fs.readdirSync(ledger.manifestDir));
 let releaseCode = 1;
 let preflightStatus = 'BLOCKED';
 try {
-  // First GSales release includes an explicitly approved protected setup.
-  // Read-only preflight never provisions identities or changes the Mac worker.
-  if (mode === 'production') {
-    const facts = inspectProductionReadOnly();
-    if (/^LIVE_GSALES_HEAD=ABSENT$/m.test(facts)) {
-      const setup = spawnSync('pnpm', ['release:gpoint', '--provision-gsales-config', '--candidate', sha, '--owner-approved-sha', sha],
-        { cwd: root, stdio: 'inherit', timeout: 300_000 });
-      if (setup.status !== 0) throw new Error('Approved GSales provisioning blocked the release');
-      const worker = spawnSync('pnpm', ['release:gpoint', '--configure-gsales-worker', '--candidate', sha, '--owner-approved-sha', sha],
-      { cwd: root, stdio: 'inherit', timeout: 150_000 });
-      if (worker.status !== 0) throw new Error('Approved Mac lane configuration blocked the release');
-    }
-  }
-  // Docker artifacts already passed CI. Canonical dry-run still independently
-  // checks the live baseline, config, GitHub SHA and isolated source tree.
+  // The first production operation is the canonical read-only preflight.
+  // Configuration bootstrap and Worker setup are separate protected operations
+  // and must never run ahead of this gate.
   const preflight = spawnSync('pnpm', ['release:gpoint', '--dry-run', '--candidate', sha], {
     cwd: root, env: { ...process.env, GPOINT_RELEASE_SKIP_BUILD: '1' }, stdio: 'inherit', timeout: 2_100_000,
   });

@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 import sys
 import unittest
+import tempfile
 from unittest.mock import patch
 import base64
 import json
@@ -52,7 +53,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual([SYNC.candidate_status(x) for x in ('success', 'failure', 'cancelled', 'skipped')],
                          ['READY', 'FAILED', 'CANCELLED', 'SKIPPED'])
 
-    def test_preflight_only_does_not_publish_production_and_failed_apply_has_real_status(self):
+    def test_diagnostic_preflight_and_internal_preflight_publish_distinct_statuses(self):
         workflow = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()
         publisher = workflow.split('  publish:', 1)[1]
         self.assertIn("if: always() && github.ref == 'refs/heads/main'", publisher)
@@ -60,9 +61,26 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("inputs.mode == 'production' || inputs.mode == 'task-scoped-auto'", workflow)
         self.assertIn("needs.deploy.outputs.status != ''", workflow)
         self.assertIn('RELEASE_PHASE: preflight', workflow)
-        self.assertIn("RELEASE_STATUS: ${{ needs.deploy.outputs.preflight == 'PLANNED' && 'READY_FOR_OWNER'", workflow)
+        self.assertIn("inputs.mode == 'preflight' && needs.deploy.outputs.preflight == 'PLANNED' && 'READY_FOR_OWNER'", workflow)
+        self.assertIn("needs.deploy.outputs.preflight == 'PLANNED' && 'PASS'", workflow)
         self.assertIn("needs.deploy.outputs.status == 'COMPLETE' && 'RECOVERY_REQUIRED'", workflow)
         self.assertIn('preflight=${preflightStatus}', (ROOT / 'scripts/automated-release.mjs').read_text())
+        publisher = (ROOT / 'scripts/publish-release-linear.py').read_text()
+        self.assertIn("'preflight': ('PASS', 'PLANNED', 'READY_FOR_OWNER', 'FAILED', 'BLOCKED')", publisher)
+        self.assertIn('READY_FOR_OWNER не публикуется для уже выполняемого production цикла', publisher)
+
+    def test_gpoint_deploy_runs_read_only_preflight_before_any_setup_or_apply(self):
+        source = (ROOT / 'scripts/automated-release.mjs').read_text()
+        workflow = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()
+        controller = (ROOT / '.github/workflows/gpoint-auto-preflight.yml').read_text()
+        self.assertNotIn('--provision-gsales-config', source)
+        self.assertNotIn('--configure-gsales-worker', source)
+        self.assertLess(source.index("['release:gpoint', '--dry-run'"),
+                        source.index("['release:gpoint', '--apply'"))
+        self.assertIn("inputs.mode == 'production' || inputs.mode == 'task-scoped-auto'", workflow)
+        self.assertIn('GPOINT_RELEASE_SKIP_BUILD', source)
+        self.assertIn('workflows: ["GPoint — Prepare"]', controller)
+        self.assertNotIn('workflows: ["GPoint — Prepare", "GPoint — Deploy"]', controller)
 
     def test_release_workflow_keeps_publishable_when_telemetry_fails(self):
         workflow = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()
@@ -92,7 +110,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn(first, journal)
         self.assertIn(second, journal)
 
-    def test_production_selector_requires_latest_immutable_ready_preflight(self):
+    def test_diagnostic_preflight_evidence_can_still_be_validated_for_ready(self):
         sha = 'a' * 40
         prepare = {'id': 12, 'run_attempt': 2}
         ready = {'id': 50, 'run_number': 8, 'run_attempt': 1, 'head_sha': sha,
@@ -119,6 +137,35 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'does not prove READY_FOR_OWNER'):
             SELECT.validate_ready_preflight(sha, prepare, [ready],
                                             lambda *_args: wrong_prepare)
+
+    def test_production_selector_accepts_exact_prepare_without_separate_preflight(self):
+        sha = 'a' * 40
+        prepare = {'id': 12, 'run_attempt': 2, 'head_sha': sha, 'head_branch': 'main',
+                   'event': 'workflow_dispatch', 'status': 'completed', 'conclusion': 'success',
+                   'path': '.github/workflows/gpoint-prepare.yml'}
+        calls = []
+
+        def github(path):
+            calls.append(path)
+            if path == 'git/ref/heads/main':
+                return {'object': {'sha': sha}}
+            if path.startswith('actions/workflows/gpoint-prepare.yml/runs'):
+                return {'workflow_runs': [prepare]}
+            raise AssertionError(f'unexpected GitHub read: {path}')
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'github-output'
+            with patch.dict('os.environ', {
+                'CANDIDATE_SHA': sha, 'GITHUB_REF': 'refs/heads/main', 'RELEASE_MODE': 'production',
+                'APPROVE_PRODUCTION': 'true', 'GITHUB_TOKEN': 'test-token',
+                'GITHUB_OUTPUT': str(output),
+            }), patch.object(SELECT, 'github', side_effect=github), \
+                    patch.object(SELECT, 'find_prepare_evidence', return_value=('2', {'id': 99})):
+                SELECT.main()
+            rendered = output.read_text()
+        self.assertFalse(any('gpoint-deploy.yml/runs' in path for path in calls))
+        self.assertIn('run_id=12', rendered)
+        self.assertIn('run_attempt=2', rendered)
 
     def test_automatic_preflight_run_name_is_distinguishable_from_production(self):
         workflow = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()

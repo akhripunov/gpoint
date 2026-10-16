@@ -9,7 +9,7 @@ on:
         required: true
         type: string
       mode:
-        description: 'preflight checks the live server; production uses exact-SHA approval; task-scoped-auto requires durable one-shot owner record'
+        description: 'preflight is optional read-only diagnostics; production uses exact-SHA approval; task-scoped-auto requires durable one-shot owner record and runs preflight before apply'
         required: true
         default: preflight
         type: choice
@@ -28,7 +28,7 @@ on:
         required: false
         type: string
       orchestrator_run_id:
-        description: 'Automatic preflight controller run; telemetry only'
+        description: 'Automatic release controller run; telemetry only'
         required: false
         type: string
       task_authorization_id:
@@ -53,8 +53,6 @@ jobs:
       candidate: ${{ steps.select.outputs.candidate }}
       run_attempt: ${{ steps.select.outputs.run_attempt }}
       artifact_id: ${{ steps.select.outputs.artifact_id }}
-      ready_preflight_run_id: ${{ steps.select.outputs.ready_preflight_run_id }}
-      ready_preflight_run_attempt: ${{ steps.select.outputs.ready_preflight_run_attempt }}
       orchestrator_run_id: ${{ steps.select.outputs.orchestrator_run_id }}
       network_retry_budget_used_seconds: ${{ steps.select.outputs.network_retry_budget_used_seconds }}
       task_authorization_id: ${{ steps.select.outputs.task_authorization_id }}
@@ -171,7 +169,7 @@ jobs:
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          TELEMETRY_RUN_IDS: ${{ github.run_id }},${{ needs.validate.outputs.run_id }},${{ needs.validate.outputs.ready_preflight_run_id }},${{ needs.validate.outputs.orchestrator_run_id }}
+          TELEMETRY_RUN_IDS: ${{ github.run_id }},${{ needs.validate.outputs.run_id }},${{ needs.validate.outputs.orchestrator_run_id }}
           CACHE_PREVENTED_DOWNLOAD: ${{ needs.deploy.outputs.cache_prevented_download || 'NO' }}
         run: |
           python3 scripts/release-telemetry.py
@@ -199,7 +197,7 @@ jobs:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_PHASE: preflight
-          RELEASE_STATUS: ${{ needs.deploy.outputs.preflight == 'PLANNED' && 'READY_FOR_OWNER' || needs.deploy.outputs.preflight || 'BLOCKED' }}
+          RELEASE_STATUS: ${{ inputs.mode == 'preflight' && needs.deploy.outputs.preflight == 'PLANNED' && 'READY_FOR_OWNER' || (needs.deploy.outputs.preflight == 'PLANNED' && 'PASS' || needs.deploy.outputs.preflight || 'BLOCKED') }}
         run: python3 scripts/publish-release-linear.py
       - name: Publish production result to GPoint Linear
         if: always() && (inputs.mode == 'production' || inputs.mode == 'task-scoped-auto') && needs.deploy.outputs.status != ''

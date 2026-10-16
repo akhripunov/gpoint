@@ -180,7 +180,7 @@ jobs:
                           summary.write(f"| {name} | {result['status']} | {result['seconds']:.3f} |\n")
           PY
           if [ "$GITHUB_REF" = refs/heads/main ]; then
-            echo 'Next: automatic read-only Deploy preflight runs after this workflow completes; owner approval is requested only after READY_FOR_OWNER.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Next: the trusted controller checks durable full-cycle authorization. If valid, the existing Deploy runs its read-only preflight before Apply; otherwise exact-SHA approval remains required.' >> "$GITHUB_STEP_SUMMARY"
           else
             echo 'Branch rehearsal only: not eligible for production. Merge reviewed changes and await main Prepare.' >> "$GITHUB_STEP_SUMMARY"
           fi

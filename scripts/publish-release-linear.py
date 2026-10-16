@@ -363,7 +363,7 @@ def main():
     status = candidate_status(os.environ.get('PREPARE_RESULT', '')) if phase == 'candidate' else os.environ['RELEASE_STATUS']
     allowed_statuses = {
         'candidate': ('READY', 'FAILED', 'CANCELLED', 'SKIPPED'),
-        'preflight': ('PLANNED', 'READY_FOR_OWNER', 'FAILED', 'BLOCKED'),
+        'preflight': ('PASS', 'PLANNED', 'READY_FOR_OWNER', 'FAILED', 'BLOCKED'),
         'production': ('FAILED', 'COMPLETE', 'RECOVERY_REQUIRED', 'FAILED_PRE_SWITCH', 'FAILED_MIGRATION', 'FAILED_AGATA_START', 'CANCELLED', 'BLOCKED'),
     }
     if phase not in allowed_statuses or status not in allowed_statuses[phase]:
@@ -399,7 +399,9 @@ def main():
         if phase == 'preflight':
             if status == 'READY_FOR_OWNER':
                 body += f'\n\n**GPoint SHA {sha} полностью готов к production. Все mandatory gates PASS. Prisma/AGATA heads проверены canonical preflight. Разрешить production?**'
-            body += '\n\nЭто результат read-only preflight: runtime и БД не менялись. Подтверждение должно относиться к этому полному SHA; затем запускается один canonical production workflow.'
+                body += '\n\nЭто отдельный read-only диагностический preflight: runtime и БД не менялись. Подтверждение должно относиться к этому полному SHA; затем запускается один canonical production workflow.'
+            elif status == 'PASS':
+                body += '\n\nRead-only preflight прошёл внутри этого Deploy до Apply. READY_FOR_OWNER не публикуется для уже выполняемого production цикла.'
         else:
             body += '\n\nПользовательская проверка: **ожидается**. Владелец отправляет новое сообщение Models Hub и подтверждает ответ; Dev фиксирует приёмку отдельно. Не считать heartbeat подтверждением ответа.'
     section = {'candidate': 'кандидат', 'preflight': 'preflight', 'production': 'production'}[phase]

@@ -7,7 +7,6 @@ import socket
 import ssl
 import subprocess
 import sys
-import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -145,22 +144,12 @@ def main():
     # the immutable bundle to the attempt which executed Prepare.
     selected = {**selected, 'run_attempt': int(executed_attempt)}
     validate_expected_run(selected, os.environ.get('PREPARE_RUN_ID'), os.environ.get('PREPARE_RUN_ATTEMPT'))
-    preflight = None
-    if os.environ.get('RELEASE_MODE') in ('production', 'task-scoped-auto'):
-        deploy_runs = github(f'actions/workflows/gpoint-deploy.yml/runs?branch=main&head_sha={sha}&per_page=100')['workflow_runs']
-        from release_assets import read_result
-        def read_exact_result(candidate, run_id, attempt):
-            with tempfile.TemporaryDirectory(prefix='gpoint-ready-preflight-') as directory:
-                path = Path(directory) / f'gpoint-release-result-{run_id}-{attempt}.json'
-                read_result(candidate, run_id, attempt, str(path), os.environ['GITHUB_TOKEN'])
-                return json.loads(path.read_text())
-        preflight = validate_ready_preflight(sha, selected, deploy_runs, read_exact_result)
+    # Production/task-scoped Deploy performs the read-only preflight on the Mac
+    # immediately before apply. A separate diagnostic preflight is optional.
     with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
         output.write(f"run_id={selected['id']}\nrun_attempt={selected.get('run_attempt', 1)}\nartifact_id={asset['id']}\ncandidate={sha}\n")
         output.write(f'orchestrator_run_id={orchestrator_run_id}\n')
         output.write(f'task_authorization_id={authorization_id}\n')
-        if preflight:
-            output.write(f"ready_preflight_run_id={preflight['id']}\nready_preflight_run_attempt={preflight.get('run_attempt', 1)}\n")
         state = os.environ.get('NETWORK_RETRY_BUDGET_STATE')
         used = Path(state).read_text().strip() if state and Path(state).exists() else '0'
         output.write(f'network_retry_budget_used_seconds={used}\n')

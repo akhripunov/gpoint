@@ -30,13 +30,16 @@ normal merge commits and rejecting squash-merging the authorization together
 with the implementation. Before apply, compare the full baseline-to-candidate
 diff. Unrelated unreleased changes invalidate authorization.
 
-After the exact current-main candidate passes Prepare and its immutable
-read-only preflight receipt is `READY_FOR_OWNER`, the existing project
+After the exact current-main candidate passes Prepare, the existing project
 controller rechecks the complete scope and production baseline, creates an
 atomic claim for the authorization, and dispatches the existing Deploy
-workflow in `task-scoped-auto` mode with its explicit SHA approval input set
-to false. It does not create another Prepare or preflight. A single claim per
-authorization prevents different events from racing into duplicate Deploys.
+workflow directly in `task-scoped-auto` mode with its exact-SHA approval input
+set to false. That Deploy performs the read-only preflight immediately before
+apply and rechecks critical live conditions under the release lock. No separate
+preflight workflow is required. Without an eligible authorization the
+controller does not dispatch Deploy; the normal exact-SHA approval path remains.
+A single claim per authorization prevents duplicate events from racing into
+multiple Deploys.
 The authorization is consumed after successful runtime completion using a
 durable one-shot marker. A lost dispatch or marker-write response is
 reconciled; no blind Deploy retry is performed. A failed or uncertain attempt
@@ -57,7 +60,9 @@ changes always require separate exact-SHA OWNER approval. Unknown risk blocks.
 
 All existing clean-checkout, exact current-main, Prepare, immutable artifact,
 platform/parity, config, preflight, lock, recovery, server health, Worker compatibility and regression
-gates remain mandatory. Worker operational availability is separately recorded
+gates remain mandatory. A manual diagnostic preflight remains available; its
+`READY_FOR_OWNER` status is distinct from the `PASS` result of preflight inside
+a production Deploy. Worker operational availability is separately recorded
 as dependency readiness under docs/release/automation.md and does not change
 a proven server deployment outcome. Real-device/OWNER smoke requirements remain separate:
 never invent evidence or claim an unperformed end-to-end acceptance.

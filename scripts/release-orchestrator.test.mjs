@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
-import {dispatchPrepare, dispatchTaskScopedAuto, findTaskAuthorization, validateEvent, OrchestrationError, claimRef} from './release-orchestrator.mjs';
+import {dispatchPrepare, findTaskAuthorization, validateEvent, OrchestrationError, taskAutoClaimRef} from './release-orchestrator.mjs';
 
 const sha = 'a'.repeat(40);
 const event = (change = {}) => ({repository:{full_name:'akhripunov/gpoint'}, workflow_run:{id:123,run_attempt:2,
@@ -23,7 +23,7 @@ function apiFixture() {
     if(path.startsWith('releases/tags/')) return {tag_name:path.split('/').at(-1),draft:false,immutable:true,assets:[{id:456,name:'bundle.zip',state:'uploaded',size:100,digest:`sha256:${'b'.repeat(64)}`}]};
     if(path.startsWith('git/ref/tags/gpoint-prepare-')) return {object:{type:'commit',sha}};
     if(path.includes('actions/workflows/gpoint-deploy.yml/runs')) return {workflow_runs:[]};
-    if(path.startsWith('git/ref/tags/gpoint-orchestrator/')) { if(claimed)return {object:{type:'commit',sha}}; const e=new OrchestrationError('missing');e.status=404;throw e; }
+    if(path.startsWith('git/ref/tags/gpoint-task-auth/')) { if(claimed)return {object:{type:'commit',sha}}; const e=new OrchestrationError('missing');e.status=404;throw e; }
     if(path==='git/refs') {if(claimed){const e=new OrchestrationError('duplicate');e.status=422;throw e;} claimed=true;return {};}
     if(path.endsWith('/dispatches')) return {};
     throw new Error(`Unexpected ${method} ${path}`);
@@ -39,20 +39,46 @@ test('failed, stale or untrusted Prepare never reaches the API',async()=>{
     assert.equal(calls.some(item=>item.path.endsWith('/dispatches')),false);
   }
 });
-test('one successful Prepare atomically claims and dispatches exact preflight only',async()=>{
+test('Prepare without durable full-cycle authorization leaves exact-SHA path and does not dispatch',async()=>{
   const {api,calls}=apiFixture();
   const result=await dispatchPrepare(event(),api,'987');
-  assert.equal(result.state,'PREFLIGHT_DISPATCHED');
-  assert.equal(claimRef(event().workflow_run),`refs/tags/gpoint-orchestrator/preflight-${sha}-123-2`);
-  const dispatch=calls.find(item=>item.path.endsWith('/dispatches'));
-  assert.deepEqual(dispatch.body,{ref:'main',inputs:{candidate:sha,mode:'preflight',approve_production:'false',prepare_run_id:'123',prepare_run_attempt:'2',orchestrator_run_id:'987'}});
+  assert.equal(result.state,'OWNER_EXACT_SHA_APPROVAL_REQUIRED');
+  assert.equal(calls.some(item=>item.path==='git/refs'),false);
+  assert.equal(calls.some(item=>item.path.endsWith('/dispatches')),false);
 });
-test('duplicate event is a no-op after atomic claim',async()=>{
+test('ambiguous authorization never dispatches production',async()=>{
   const {api,calls}=apiFixture();
-  await dispatchPrepare(event(),api);
-  const duplicate=await dispatchPrepare(event(),api);
-  assert.equal(duplicate.state,'PREFLIGHT_ALREADY_CLAIMED');
+  const result=await dispatchPrepare(event(),api,'987',process.cwd(),async()=>({authorizationId:'',ambiguous:true}));
+  assert.equal(result.state,'TASK_AUTHORIZATION_AMBIGUOUS');
+  assert.equal(calls.some(item=>item.path==='git/refs'),false);
+  assert.equal(calls.some(item=>item.path.endsWith('/dispatches')),false);
+});
+test('Prepare with one full-cycle authorization claims once and dispatches the existing Deploy workflow',async()=>{
+  const {api,calls}=apiFixture(); const authorizationId='gpoint-task-2026-10-16-001';
+  const result=await dispatchPrepare(event(),api,'987',process.cwd(),async()=>({authorizationId,ambiguous:false}));
+  assert.equal(result.state,'TASK_SCOPED_AUTO_DISPATCHED');
+  assert.equal(taskAutoClaimRef(authorizationId),`refs/tags/gpoint-task-auth/${authorizationId}/claimed`);
+  const dispatch=calls.find(item=>item.path.endsWith('/dispatches'));
+  assert.deepEqual(dispatch.body,{ref:'main',inputs:{candidate:sha,mode:'task-scoped-auto',approve_production:'false',
+    prepare_run_id:'123',prepare_run_attempt:'2',orchestrator_run_id:'987',task_authorization_id:authorizationId}});
+});
+test('duplicate Prepare events cannot dispatch twice under one authorization',async()=>{
+  const {api,calls}=apiFixture(); const authorizationId='gpoint-task-2026-10-16-001';
+  const lookup=async()=>({authorizationId,ambiguous:false});
+  const first=await dispatchPrepare(event(),api,'987',process.cwd(),lookup);
+  const second=await dispatchPrepare(event(),api,'988',process.cwd(),lookup);
+  assert.equal(first.state,'TASK_SCOPED_AUTO_DISPATCHED');
+  assert.equal(second.state,'TASK_SCOPED_AUTO_ALREADY_CLAIMED');
   assert.equal(calls.filter(item=>item.path.endsWith('/dispatches')).length,1);
+});
+test('an existing authorization claim for a different SHA blocks instead of counting as a duplicate',async()=>{
+  const {api}=apiFixture(); const authorizationId='gpoint-task-2026-10-16-001'; let claimed=true;
+  const wrapped=async(method,route,body)=>{
+    if(method==='POST'&&route==='git/refs'){const error=new OrchestrationError('already claimed');error.status=422;throw error;}
+    if(method==='GET'&&route.endsWith('/claimed'))return {object:{type:'commit',sha:'c'.repeat(40)}};
+    return api(method,route,body);
+  };
+  await assert.rejects(dispatchPrepare(event(),wrapped,'987',process.cwd(),async()=>({authorizationId,ambiguous:false})),OrchestrationError);
 });
 test('publish-only rerun uses earlier real Prepare job and exact immutable bundle',async()=>{
   const {api,calls}=apiFixture();
@@ -68,7 +94,7 @@ test('publish-only rerun uses earlier real Prepare job and exact immutable bundl
   const result=await dispatchPrepare(event(),wrapped,'987');
   assert.equal(result.prepareRunAttempt,'1');
   assert.equal(result.tag,`gpoint-prepare-${sha}-123-1`);
-  assert.equal(calls.find(x=>x.path.endsWith('/dispatches')).body.inputs.prepare_run_attempt,'1');
+  assert.equal(calls.some(x=>x.path.endsWith('/dispatches')),false);
 });
 test('new Prepare execution without immutable evidence blocks preflight',async()=>{
   const {api}=apiFixture();
@@ -88,78 +114,7 @@ test('mutable or draft releases fail closed',async()=>{
   }
 });
 
-const readyEvent = (change = {}) => ({repository:{full_name:'akhripunov/gpoint'}, workflow_run:{id:456,run_attempt:1,
-  head_sha:sha,head_branch:'main',status:'completed',conclusion:'success',event:'workflow_dispatch',
-  path:'.github/workflows/gpoint-deploy.yml',display_title:`GPoint preflight ${sha} by github-actions[bot]`,...change}});
-const readyReceipt = (change = {}) => ({candidateSha:sha,automationRunId:'456',automationRunAttempt:'1',
-  mode:'preflight',preflight:'PASS',releaseState:'READY_FOR_OWNER',status:'PLANNED',productionChanged:false,
-  dryRun:true,applicationVerification:'NOT_DEPLOYED',authorizationMode:'EXACT_SHA',authorizationConsumed:false,
-  authorizationId:'gpoint-task-2026-10-16-001',productionBaselineSha:'d'.repeat(40),prepareRunId:'123',
-  prepareRunAttempt:'2',...change});
-
-test('READY immutable preflight with a verified task authorization dispatches existing task-scoped Deploy once',async()=>{
-  const {api,calls}=apiFixture();
-  const result=await dispatchTaskScopedAuto(readyEvent(),api,{readResult:async()=>readyReceipt(),
-    validateAuthorization:async()=>({authorizationId:'gpoint-task-2026-10-16-001'}),orchestratorRunId:'987'});
-  assert.equal(result.state,'TASK_SCOPED_AUTO_DISPATCHED');
-  const dispatch=calls.find(item=>item.path.endsWith('/dispatches'));
-  assert.deepEqual(dispatch.body,{ref:'main',inputs:{candidate:sha,mode:'task-scoped-auto',approve_production:'false',
-    prepare_run_id:'123',prepare_run_attempt:'2',orchestrator_run_id:'987',task_authorization_id:'gpoint-task-2026-10-16-001'}});
-});
-
-test('two successful READY events cannot dispatch twice for one authorization',async()=>{
-  const {api,calls}=apiFixture(); let authorizationClaimed=false;
-  const wrapped=async(method,route,body)=>{
-    if(method==='POST'&&route==='git/refs'&&body.ref.endsWith('/claimed')){
-      if(authorizationClaimed){const error=new OrchestrationError('already claimed');error.status=422;throw error;}
-      authorizationClaimed=true;return {};
-    }
-    if(method==='GET'&&route.endsWith('/claimed')){
-      if(authorizationClaimed)return {object:{type:'commit',sha}};
-      const error=new OrchestrationError('missing');error.status=404;throw error;
-    }
-    return api(method,route,body);
-  };
-  const validateAuthorization=async()=>({authorizationId:'gpoint-task-2026-10-16-001'});
-  const first=await dispatchTaskScopedAuto(readyEvent(),wrapped,{readResult:async()=>readyReceipt(),validateAuthorization});
-  const nextEvent=readyEvent({id:457,display_title:`GPoint preflight ${sha} by github-actions[bot]`});
-  const nextReceipt=readyReceipt({automationRunId:'457'});
-  const second=await dispatchTaskScopedAuto(nextEvent,wrapped,{readResult:async()=>nextReceipt,validateAuthorization});
-  assert.equal(first.state,'TASK_SCOPED_AUTO_DISPATCHED');
-  assert.equal(second.state,'TASK_SCOPED_AUTO_ALREADY_CLAIMED');
-  assert.equal(calls.filter(call=>call.path.endsWith('/dispatches')).length,1);
-});
-
-test('missing authorization or non-READY evidence never dispatches production',async()=>{
-  for(const receipt of [readyReceipt({authorizationId:null}),readyReceipt({preflight:'FAILED'}),
-    readyReceipt({releaseState:'BLOCKED'}),readyReceipt({productionChanged:true}),
-    readyReceipt({authorizationMode:'TASK_SCOPED_AUTO'})]) {
-    const {api,calls}=apiFixture();
-    await assert.rejects(dispatchTaskScopedAuto(readyEvent(),api,{readResult:async()=>receipt,
-      validateAuthorization:async()=>({authorizationId:'gpoint-task-2026-10-16-001'})}),OrchestrationError);
-    assert.equal(calls.some(item=>item.path.endsWith('/dispatches')),false);
-  }
-});
-
-test('task-scoped dispatch stops on main drift, active Deploy, or invalid authorization',async()=>{
-  const cases=[
-    {name:'main drift',apiWrap:async(api,method,path,body)=>path==='git/ref/heads/main'?{object:{sha:'c'.repeat(40)}}:api(method,path,body)},
-    {name:'active Deploy',apiWrap:async(api,method,path,body)=>path.includes('gpoint-deploy.yml/runs')?{workflow_runs:[{status:'in_progress'}]}:api(method,path,body)},
-  ];
-  for(const item of cases){
-    const {api,calls}=apiFixture();
-    const wrapped=(method,path,body)=>item.apiWrap(api,method,path,body);
-    await assert.rejects(dispatchTaskScopedAuto(readyEvent(),wrapped,{readResult:async()=>readyReceipt(),
-      validateAuthorization:async()=>({authorizationId:'gpoint-task-2026-10-16-001'})}),OrchestrationError);
-    assert.equal(calls.some(call=>call.path.endsWith('/dispatches')),false);
-  }
-  const {api,calls}=apiFixture();
-  await assert.rejects(dispatchTaskScopedAuto(readyEvent(),api,{readResult:async()=>readyReceipt(),
-    validateAuthorization:async()=>{throw new Error('scope drift');}}),OrchestrationError);
-  assert.equal(calls.some(call=>call.path.endsWith('/dispatches')),false);
-});
-
-test('preflight controller carries only one valid full-cycle authorization record',async()=>{
+test('Prepare controller carries only one valid full-cycle authorization record',async()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'gpoint-task-auto-record-'));
   try {
     const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8'}).trim();
