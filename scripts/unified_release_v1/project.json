@@ -1,0 +1,14 @@
+{
+  "standard_version": "1.0.0",
+  "project": "GPoint",
+  "repository": "akhripunov/gpoint",
+  "prepare_executor": "github-hosted",
+  "deploy_executor": "mac-self-hosted",
+  "lifecycle": ["COALESCE", "PREPARE", "AUTHORIZE", "PREFLIGHT", "PULL", "APPLY", "VERIFY", "EVIDENCE"],
+  "image_transports": ["ghcr-oci", "archive"],
+  "archive_fallback_required_until_e2e_pass": true,
+  "production_state_scope": "project-local",
+  "project_gates": ["exact_sha", "immutable_provenance", "owner_authorization", "migration_safety", "worker_compatibility", "rollback_readiness", "health_verification", "agata_tenant_isolation", "gsales_compatibility"],
+  "coalesce_workflow": ".github/workflows/gpoint-prepare.yml",
+  "deploy_workflow": ".github/workflows/gpoint-deploy.yml"
+}

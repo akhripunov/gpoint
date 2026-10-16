@@ -5,11 +5,12 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createRetryingGit } from './release-network-retry.mjs';
-import { verifyReleaseBundle } from './release-bundle.mjs';
+import { verifyReleaseBundle, selectImageTransport } from './release-bundle.mjs';
 import { persistReleaseBookkeeping, loadReleaseBookkeeping } from './release-bookkeeping.mjs';
 import { fileURLToPath } from 'node:url';
 import { candidateAgataMigrationHead, candidatePrismaMigrationHead } from './release-gpoint.mjs';
 import { assertInstalledWorkerMatches } from './worker-runtime-guard.mjs';
+import { verifyOciReadAccess } from './release-oci.mjs';
 import { withPreflightEvidence } from './release-evidence.mjs';
 import { AuthorizationError, authorizationRecordPath, candidateScopeDiff,
   checkTaskAuthorizationState, consumeTaskAuthorization, validateTaskAuthorization,
@@ -24,6 +25,10 @@ if (mode === 'task-scoped-auto' && (process.env.APPROVE_PRODUCTION !== 'false' |
 if (!['preflight', 'task-scoped-auto'].includes(mode) && process.env.TASK_AUTHORIZATION_ID) throw new Error('Task authorization ID is only valid in linked preflight or TASK_SCOPED_AUTO mode');
 const proof = verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, sha);
 if (String(proof.runId) !== process.env.PREPARE_RUN_ID) throw new Error('Receipt does not belong to the approved GitHub run');
+const selectedImageTransport = selectImageTransport(proof, process.env.IMAGE_TRANSPORT || 'prepared');
+if (selectedImageTransport === 'ghcr-oci') {
+  await verifyOciReadAccess(proof, process.env.GHCR_READ_USERNAME, process.env.GHCR_READ_TOKEN);
+}
 const runGit = (args, input, timeout) => execFileSync('git', args, { cwd: root, encoding: 'utf8', input, timeout }).trim();
 const git = createRetryingGit(runGit);
 if (git(['rev-parse', 'HEAD']) !== sha || git(['status', '--porcelain'])) throw new Error('Release checkout must be clean and exact');
@@ -60,8 +65,11 @@ try {
   // The first production operation is the canonical read-only preflight.
   // Configuration bootstrap and Worker setup are separate protected operations
   // and must never run ahead of this gate.
+  const preflightEnv = { ...process.env, IMAGE_TRANSPORT: selectedImageTransport,
+    GPOINT_RELEASE_SKIP_BUILD: '1' };
+  delete preflightEnv.GHCR_READ_TOKEN;
   const preflight = spawnSync('pnpm', ['release:gpoint', '--dry-run', '--candidate', sha], {
-    cwd: root, env: { ...process.env, GPOINT_RELEASE_SKIP_BUILD: '1' }, stdio: 'inherit', timeout: 2_100_000,
+    cwd: root, env: preflightEnv, stdio: 'inherit', timeout: 2_100_000,
   });
   preflightStatus = preflight.status === 0 ? 'PLANNED' : 'FAILED';
   if (preflight.status !== 0) throw new Error('Canonical preflight blocked the release');
@@ -88,8 +96,9 @@ try {
     if (mode === 'task-scoped-auto') {
       process.env.RELEASE_AUTHORIZATION_MODE = 'TASK_SCOPED_AUTO';
       process.env.RELEASE_AUTHORIZATION_ID = authorizationId;
-      process.env.RELEASE_AUTHORIZATION_SOURCE = taskAuthorization.sourceReference;
+      process.env.RELEASE_AUTHORIZATION_SOURCE_INSTRUCTION_ID = taskAuthorization.sourceInstructionIdentifier;
       process.env.RELEASE_AUTHORIZATION_RECORD_SHA256 = taskAuthorization.recordSha256;
+      process.env.RELEASE_AUTHORIZATION_SCOPE_SHA256 = taskAuthorization.ownerTaskCommitmentSha256;
     }
   }
   if (mode === 'preflight') {
@@ -130,7 +139,8 @@ try {
         (mode === 'task-scoped-auto' && !authorizationConsumed ? 'RECOVERY_REQUIRED' : 'COMPLETE') : evidence.status,
     authorizationMode: mode === 'task-scoped-auto' ? 'TASK_SCOPED_AUTO' : 'EXACT_SHA',
     authorizationId: process.env.TASK_AUTHORIZATION_ID ?? null,
-    authorizationSourceReference: taskAuthorization?.sourceReference ?? null,
+    authorizationSourceInstructionId: taskAuthorization?.sourceInstructionIdentifier ?? null,
+    authorizationScopeSha256: taskAuthorization?.ownerTaskCommitmentSha256 ?? null,
     authorizationRecordSha256: taskAuthorization?.recordSha256 ?? null,
     authorizationChangedPaths: taskAuthorization?.changedPaths ?? null,
     authorizationConsumed,

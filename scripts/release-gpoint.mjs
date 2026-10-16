@@ -59,6 +59,25 @@ function isoNow() { return new Date().toISOString(); }
 function measured(timings, name, action) { const started = Date.now(); try { return action(); } finally { timings[name] = Number(((Date.now() - started) / 1000).toFixed(1)); } }
 function git(args, cwd = ROOT) { return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); }
 const ledgerGit = (args, input) => execFileSync('git', args, { cwd: ROOT, input, encoding: 'utf8', timeout: 30_000 }).trim();
+function recheckTaskAuthorizationBeforeMutation(candidateSha, boundary) {
+  if (process.env.RELEASE_AUTHORIZATION_MODE !== 'TASK_SCOPED_AUTO') return;
+  const authorizationId = process.env.RELEASE_AUTHORIZATION_ID;
+  const token = process.env.GITHUB_TOKEN;
+  if (!authorizationId || !token) die(`TASK_SCOPED_AUTO authorization is unavailable before ${boundary}`);
+  const env = {...process.env};
+  delete env.GITHUB_TOKEN;
+  delete env.GH_TOKEN;
+  const authorizationModule = new URL('./release-authorization.mjs', import.meta.url).href;
+  const script = `import {checkTaskAuthorizationState} from ${JSON.stringify(authorizationModule)};
+const token = await new Promise(resolve => { let value = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', chunk => value += chunk); process.stdin.on('end', () => resolve(value.trim())); });
+try { await checkTaskAuthorizationState({project: 'gpoint', authorizationId: ${JSON.stringify(authorizationId)}, candidateSha: ${JSON.stringify(candidateSha)}, token}); process.stdout.write('TASK_AUTHORIZATION_MUTATION_GATE=PASS\\n'); }
+catch { process.stderr.write('TASK_AUTHORIZATION_MUTATION_GATE=BLOCKED\\n'); process.exitCode = 1; }`;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {cwd: ROOT, env, input: token, encoding: 'utf8',
+    timeout: 30_000, stdio: ['pipe', 'pipe', 'pipe']});
+  if (result.error || result.status !== 0 || result.stdout.trim() !== 'TASK_AUTHORIZATION_MUTATION_GATE=PASS') {
+    die(`TASK_SCOPED_AUTO authorization could not be revalidated before ${boundary}`);
+  }
+}
 function manifestReference(file) { return `docs/release/manifests/${path.basename(file)}`; }
 function command(args, cwd) { const r = spawnSync(args[0], args.slice(1), { cwd, encoding: 'utf8', stdio: 'inherit' }); if (r.status !== 0) die(`${args.join(' ')} exited with ${r.status}`); }
 export function localDiskDecision(freeBytes) {
@@ -1038,9 +1057,14 @@ function runApply(candidate) {
       candidates: retentionCandidates,
       imageTags: retentionCandidates.flatMap(({ sha }) => [`gpoint-runtime:${sha}`, `gpoint-agata-runtime:${sha}`]),
     });
+    const ghcrReadToken = process.env.GHCR_READ_TOKEN || '';
+    delete process.env.GHCR_READ_TOKEN;
     const adapter = applyCandidate(candidate, {
       retentionPlan,
       provider: baseline.provider,
+      imageTransport: process.env.IMAGE_TRANSPORT || 'prepared',
+      ghcrReadToken,
+      onBeforeMutation: boundary => recheckTaskAuthorizationBeforeMutation(candidate, boundary),
       onMigrationStart: () => { migrationStarted = true; },
       onAgataStart: () => { agataStartStarted = true; },
       onSwitchStart: () => { switchStarted = true; },
@@ -1049,6 +1073,10 @@ function runApply(candidate) {
       const error = new Error(`post-switch reconciliation required: ${adapter.postSwitch?.state ?? 'UNKNOWN'}`);
       error.code = adapter.postSwitch?.state ?? 'SWITCHED_UNVERIFIED';
       throw error;
+    }
+    if (adapter.ciReceipt?.selectedTransport === 'ghcr-oci' &&
+        (adapter.ciReceipt.ghcrVerified !== true || adapter.ciReceipt.ghcrPostSwitchVerified !== true)) {
+      throw new Error('GHCR digest identity was not verified both before Apply and after runtime switch');
     }
     if (adapter.agataIdentity.provider !== baseline.provider) die('post-switch AGATA provider does not match validated baseline');
     if (baseline.provider === 'mac_worker') assertProviderCompatibility(baseline.facts);
@@ -1100,7 +1128,8 @@ function runApply(candidate) {
       effectiveConfigSha256: adapter.effectiveConfigSha256,
       authorizationMode: process.env.RELEASE_AUTHORIZATION_MODE || 'EXACT_SHA',
       authorizationId: process.env.RELEASE_AUTHORIZATION_ID || null,
-      authorizationSourceReference: process.env.RELEASE_AUTHORIZATION_SOURCE || null,
+      authorizationSourceInstructionId: process.env.RELEASE_AUTHORIZATION_SOURCE_INSTRUCTION_ID || null,
+      authorizationScopeSha256: process.env.RELEASE_AUTHORIZATION_SCOPE_SHA256 || null,
       authorizationRecordSha256: process.env.RELEASE_AUTHORIZATION_RECORD_SHA256 || null });
     const file = writeManifest(manifest);
     const verifiedState = verifiedRuntimeState(current, { candidate, dbHead: deployedDbHead });

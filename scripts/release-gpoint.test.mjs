@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { canCreateProductionRef, checkAgataEffectiveConfig, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, cleanupLocalPackageCaches, evaluateSafetyGates, failureEvidence, isTransientGitHubTransportFailure, localDiskDecision, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runLocalDiskPreflight, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, validateMacWorkerStatus, verifiedRuntimeState } from './release-gpoint.mjs';
-import { agataInternalConfigProvisionCommand, agataPreSwitchReadinessCommand, agataProviderRuntimeCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, cleanupTemporaryWorktree, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, parseAgataRuntimeIdentityLine, planReleaseRetention, productionPreflightCommand, resolveRunnerPath, runCleanupCommand, runRemoteCommand, runWithPreExecRetry, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataProviderMode, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
+import { agataInternalConfigProvisionCommand, agataPreSwitchReadinessCommand, agataProviderRuntimeCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, cleanupTemporaryWorktree, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, migrationPendingFromPreflight, parseAgataRuntimeIdentityLine, planReleaseRetention, productionPreflightCommand, resolveRunnerPath, runAuthorizedMutationPlan, runCleanupCommand, runRemoteCommand, runWithPreExecRetry, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataProviderMode, validateAgataRuntimeIdentity, validateRuntimeIdentity, remoteCommandEnvironment } from './release-gpoint-vps-adapter.mjs';
 
 test('temporary worktree cleanup uses git metadata removal when available', () => {
   const calls = [];
@@ -17,6 +17,94 @@ test('temporary worktree cleanup uses git metadata removal when available', () =
   });
   assert.equal(result, 'GIT_WORKTREE_REMOVE');
   assert.deepEqual(calls, [['git', tempWorktree]]);
+});
+
+test('TASK_SCOPED_AUTO revalidates authorization immediately before each mutation boundary', () => {
+  const adapter = fs.readFileSync(new URL('./release-gpoint-vps-adapter.mjs', import.meta.url), 'utf8');
+  const helperStart = adapter.indexOf('export function runAuthorizedMutationPlan');
+  const authCheck = adapter.indexOf('onBeforeMutation(mutation.boundary)', helperStart);
+  const mutationRun = adapter.indexOf('outputs.push(run(mutation.command))', authCheck);
+  assert.ok(helperStart >= 0 && helperStart < authCheck && authCheck < mutationRun,
+    'each mutation must be dispatched only after the boundary authorization check');
+  for (const boundary of ['prisma-migration', 'agata-migration', 'gsales-migration', 'runtime-switch']) {
+    assert.ok(adapter.includes(`boundary: '${boundary}'`), `${boundary} needs its own fresh authorization boundary`);
+  }
+  const migrationPreflight = adapter.indexOf('const migrationPreflight = steps.slice(0, 9).join');
+  const migrationPlan = adapter.indexOf('runAuthorizedMutationPlan({', migrationPreflight);
+  assert.ok(migrationPreflight >= 0 && migrationPlan > migrationPreflight,
+    'read-only database inspection and backup must finish before migration authorization is rechecked');
+  const switchPreparation = adapter.indexOf('const switchPreparation =', migrationPlan);
+  const switchPlan = adapter.indexOf('runAuthorizedMutationPlan({', switchPreparation);
+  assert.ok(switchPreparation >= 0 && switchPlan > switchPreparation,
+    'runtime staging and backups must finish before authorization is rechecked for production mutation');
+});
+
+test('migration authorization is rechecked after database preflight and backup, before any migration runs', () => {
+  const events = [];
+  let revoked = false;
+  assert.throws(() => runAuthorizedMutationPlan({
+    preflightCommand: 'database-preflight-and-backup',
+    mutations: [{boundary: 'prisma-migration', command: 'prisma-migrate-deploy', shouldRun: () => true}],
+    run: command => {
+      events.push(command);
+      if (command === 'database-preflight-and-backup') {
+        revoked = true;
+        return 'PRISMA_PENDING_MIGRATIONS';
+      }
+      return 'MIGRATION_APPLIED';
+    },
+    onBeforeMutation: () => {
+      events.push('authorization-check');
+      if (revoked) throw new Error('authorization revoked after preflight');
+    },
+  }), /authorization revoked after preflight/);
+  assert.deepEqual(events, ['database-preflight-and-backup', 'authorization-check']);
+});
+
+test('each planned database mutation gets its own immediately preceding authorization check', () => {
+  const events = [];
+  const output = runAuthorizedMutationPlan({
+    preflightCommand: 'database-preflight',
+    mutations: [
+      {boundary: 'prisma-migration', command: 'prisma-migrate', shouldRun: facts => facts.includes('PRISMA_PENDING')},
+      {boundary: 'agata-migration', command: 'agata-migrate', shouldRun: facts => facts.includes('AGATA_PENDING')},
+      {boundary: 'gsales-migration', command: 'gsales-migrate', shouldRun: facts => facts.includes('GSALES_PENDING')},
+    ],
+    run: command => { events.push(command); return command === 'database-preflight' ? 'PRISMA_PENDING AGATA_PENDING GSALES_PENDING' : `${command}-done`; },
+    onBeforeMutation: boundary => events.push(`authorize:${boundary}`),
+  });
+  assert.equal(output.includes('gsales-migrate-done'), true);
+  assert.deepEqual(events, [
+    'database-preflight',
+    'authorize:prisma-migration', 'prisma-migrate',
+    'authorize:agata-migration', 'agata-migrate',
+    'authorize:gsales-migration', 'gsales-migrate',
+  ]);
+});
+
+test('migration planning uses explicit pending states and fails closed when a lane state is absent', () => {
+  assert.equal(migrationPendingFromPreflight('PRISMA_PENDING_MIGRATIONS', 'PRISMA'), true);
+  assert.equal(migrationPendingFromPreflight('PRISMA_NO_PENDING_MIGRATIONS', 'PRISMA'), false);
+  assert.equal(migrationPendingFromPreflight('AGATA_PENDING_MIGRATIONS', 'AGATA'), true);
+  assert.equal(migrationPendingFromPreflight('AGATA_NO_PENDING_MIGRATIONS', 'AGATA'), false);
+  assert.equal(migrationPendingFromPreflight('GSALES_PENDING=1', 'GSALES'), true);
+  assert.equal(migrationPendingFromPreflight('GSALES_PENDING=0', 'GSALES'), false);
+  assert.throws(() => migrationPendingFromPreflight('AGATA_HEAD=agata0009', 'AGATA'), /state is absent/);
+  assert.throws(() => migrationPendingFromPreflight('AGATA_PENDING_MIGRATIONS\nAGATA_NO_PENDING_MIGRATIONS', 'AGATA'), /state is contradictory/);
+  assert.throws(() => migrationPendingFromPreflight('AGATA_PENDING_MIGRATIONS\nAGATA_PENDING_MIGRATIONS', 'AGATA'), /state is contradictory/);
+  assert.throws(() => migrationPendingFromPreflight('GSALES_PENDING=1\nGSALES_PENDING=0', 'GSALES'), /state is contradictory/);
+});
+
+test('production migration preflight emits the AGATA state consumed by its fail-closed planner', () => {
+  const adapter = fs.readFileSync(new URL('./release-gpoint-vps-adapter.mjs', import.meta.url), 'utf8');
+  assert.match(adapter, /if \[ "\$agataPending" = 1 \]; then echo AGATA_PENDING_MIGRATIONS; else echo AGATA_NO_PENDING_MIGRATIONS; fi/);
+  assert.match(adapter, /shouldRun: output => migrationPendingFromPreflight\(output, 'AGATA'\)/);
+});
+
+test('GHCR read credential is removed from all remote process environments', () => {
+  const env = remoteCommandEnvironment({ GHCR_READ_TOKEN: 'secret-ghcr-token', GPOINT_TEST_VALUE: 'kept' });
+  assert.equal(env.GHCR_READ_TOKEN, undefined);
+  assert.equal(env.GPOINT_TEST_VALUE, 'kept');
 });
 
 test('temporary worktree cleanup falls back to its exact directory and prunes stale metadata', () => {
@@ -643,7 +731,12 @@ test('production config and Mini App writes begin only after the runtime switch 
   assert.match(deploy, /switchStartMs=\$\(date \+%s%3N\); set -e;[\s\S]*\/opt\/gpoint\/compose\/docker-compose\.yml/);
   assert.match(deploy, /\/opt\/gpoint\/app\/miniapp\.rollback-/);
   assert.match(adapter, /run\(preparation\.join\('; '\)\)/);
-  assert.match(adapter, /run\(deploy\.join\('; '\)\)/);
+  const splitPreparation = adapter.indexOf('const switchPreparation =', prepareRun);
+  const guardedApply = adapter.indexOf("boundary: 'runtime-switch'", splitPreparation);
+  const authorizationPlan = adapter.indexOf('runAuthorizedMutationPlan({', splitPreparation);
+  assert.ok(splitPreparation > prepareRun && authorizationPlan > splitPreparation && guardedApply > authorizationPlan);
+  assert.match(adapter.slice(splitPreparation, authorizationPlan), /const switchApply =/);
+  assert.match(adapter.slice(authorizationPlan, adapter.indexOf('const composeExitCode', authorizationPlan)), /onBeforeMutation,[\s\S]*run,/);
 });
 
 test('release source archive excludes AppleDouble and Python cache artifacts', () => {

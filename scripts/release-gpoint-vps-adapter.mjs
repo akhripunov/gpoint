@@ -3,7 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { verifyReleaseBundle, importBundleCommand, reuseBundleCommand, preparedImageCaptureCommand, preparedImageParityCommand } from './release-bundle.mjs';
+import { verifyReleaseBundle, importBundleCommand, reuseBundleCommand, preparedImageCaptureCommand, preparedImageParityCommand, selectImageTransport } from './release-bundle.mjs';
+import { createOciPullScript, createOciVerifyScript } from './release-oci.mjs';
 import { migrationHead } from './release-migrations.mjs';
 import { gsalesMigrationIdentity, gsalesReadinessCommand, parseGsalesReadiness, gsalesMigrationStateCommand, gsalesMigrationCommand, combinedComposeCommand, gsalesStartCommand, gsalesRuntimeCommand, parseGsalesRuntime, gsalesProductionInspectionCommand } from './release-gsales.mjs';
 import { fileURLToPath } from 'node:url';
@@ -268,6 +269,21 @@ export function migrationNeedsDeploy(statusOutput) {
   return !/Database schema is up to date!|No pending migrations to apply\./i.test(statusOutput ?? '');
 }
 
+export function migrationPendingFromPreflight(output, lane) {
+  const markers = {
+    PRISMA: ['PRISMA_PENDING_MIGRATIONS', 'PRISMA_NO_PENDING_MIGRATIONS'],
+    AGATA: ['AGATA_PENDING_MIGRATIONS', 'AGATA_NO_PENDING_MIGRATIONS'],
+    GSALES: ['GSALES_PENDING=1', 'GSALES_PENDING=0'],
+  }[lane];
+  if (!markers) throw new Error(`unsupported migration lane: ${lane}`);
+  const lines = String(output ?? '').split(/\r?\n/);
+  const pendingCount = lines.filter(line => line === markers[0]).length;
+  const currentCount = lines.filter(line => line === markers[1]).length;
+  if (pendingCount === 0 && currentCount === 0) throw new Error(`${lane} migration state is absent`);
+  if (pendingCount + currentCount !== 1) throw new Error(`${lane} migration state is contradictory`);
+  return pendingCount === 1;
+}
+
 export function detectorSourceHash(checkout) {
   const root = path.join(checkout, 'infra/production/sensitive-detector');
   const files = fs.readdirSync(root).filter(name => fs.statSync(path.join(root, name)).isFile()).sort();
@@ -317,7 +333,7 @@ function applyRemoteTimingMarkers(timings, output) {
   }
 }
 
-function run(command, env = {}, retryOptions = {}) {
+function run(command, env = {}, retryOptions = {}, input = undefined) {
   const runner = resolveRunnerPath('GPOINT_REMOTE_RUNNER');
   if (!runner) throw new Error('GPOINT_REMOTE_RUNNER is required for apply mode; no implicit SSH credentials are used');
   const captureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-remote-run-'));
@@ -336,8 +352,10 @@ function run(command, env = {}, retryOptions = {}) {
       let result;
       try {
         result = spawnSync(runner, [], {
-          env: { ...process.env, ...env, REMOTE_CMD: command, GPOINT_REMOTE_ATTEMPT_STATUS_FILE: statusFile },
-          stdio: ['ignore', stdoutFd, stderrFd],
+          env: remoteCommandEnvironment({ ...env, REMOTE_CMD: command, GPOINT_REMOTE_ATTEMPT_STATUS_FILE: statusFile }),
+          ...(input === undefined ? { stdio: ['ignore', stdoutFd, stderrFd] } : {
+            input, encoding: 'utf8', stdio: ['pipe', stdoutFd, stderrFd],
+          }),
         });
       } finally {
         fs.closeSync(stdoutFd);
@@ -365,6 +383,19 @@ function run(command, env = {}, retryOptions = {}) {
   } finally {
     fs.rmSync(captureDir, { recursive: true, force: true });
   }
+}
+
+export function remoteCommandEnvironment(overrides = {}) {
+  const environment = { ...process.env, ...overrides };
+  // Registry credentials travel only through runRemoteCommandWithInput stdin.
+  delete environment.GHCR_READ_TOKEN;
+  return environment;
+}
+
+export function runRemoteCommandWithInput(command, input, env = {}) {
+  if (typeof input !== 'string' || !input || input.includes('\0'))
+    throw new Error('remote stdin payload is required');
+  return run(command, env, {}, input);
 }
 
 export function runWithPreExecRetry(operation, {
@@ -535,6 +566,26 @@ export function parseGuardedMigrationEvidence(output, sha) {
   return { backup, baseline };
 }
 
+export function runAuthorizedMutationPlan({preflightCommand, mutations, onBeforeMutation, run}) {
+  if (typeof preflightCommand !== 'string' || !preflightCommand.trim()
+      || !Array.isArray(mutations) || typeof onBeforeMutation !== 'function'
+      || typeof run !== 'function') throw new Error('complete authorized mutation plan is required');
+  const preflightOutput = run(preflightCommand);
+  const outputs = [preflightOutput];
+  for (const mutation of mutations) {
+    if (!mutation || typeof mutation.boundary !== 'string' || typeof mutation.command !== 'string'
+        || typeof mutation.shouldRun !== 'function') throw new Error('invalid authorized mutation step');
+    if (!mutation.shouldRun(preflightOutput)) {
+      if (mutation.skippedOutput) outputs.push(mutation.skippedOutput);
+      continue;
+    }
+    onBeforeMutation(mutation.boundary);
+    mutation.afterAuthorization?.();
+    outputs.push(run(mutation.command));
+  }
+  return outputs.join('\n');
+}
+
 export function productionPreflightCommand() {
   return `set -e; command -v docker >/dev/null; docker version --format 'DOCKER_VERSION={{.Server.Version}}'; docker compose version; docker buildx version; docker buildx inspect --bootstrap >/dev/null; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n "$freeKb"; test "$freeKb" -ge 5242880; test -r /opt/gpoint/env/production.env; currentSha=$(sed -n 's/^RELEASE_SHA=//p' /opt/gpoint/env/production.env | head -1); printf '%s\\n' "$currentSha" | grep -Eq '^[0-9a-f]{40}$'; currentImage=$(docker inspect compose-api-1 --format '{{.Config.Image}}'); dbStatus=$(docker run --rm ${databaseNetworkArgs('gpoint-preflight')} --env-file /opt/gpoint/env/production.env "$currentImage" pnpm --filter @gpoint/db exec prisma migrate status 2>&1); test -n "$dbStatus"; printf '%s\\n' "$dbStatus" | tail -5; for name in AGATA_ENABLED AGATA_LLM_PROVIDER AGATA_DATABASE_URL AGATA_TENANT_ID AGATA_INTERNAL_API_TOKEN AGATA_MESSAGE_AEAD_KEY AGATA_REQUEST_FINGERPRINT_HMAC_KEY AGATA_RETRIEVAL_QUERY_HMAC_KEY AGATA_RESPONSE_FINGERPRINT_HMAC_KEY AGATA_SHADOW_CANDIDATE_HMAC_KEY; do grep -Eq "^$name=.+\\$" /opt/gpoint/env/production.env || { echo AGATA_CONFIG_MISSING=$name; exit 32; }; done; grep -qx 'AGATA_ENABLED=true' /opt/gpoint/env/production.env; provider=$(sed -n 's/^AGATA_LLM_PROVIDER=//p' /opt/gpoint/env/production.env | head -1); case "$provider" in disabled) grep -qx 'AGATA_CODEX_LOCAL_ENABLED=false' /opt/gpoint/env/production.env && ! grep -Eq '^AGATA_LLM_API_KEY=.+$' /opt/gpoint/env/production.env ;; mac_worker) grep -qx 'AGATA_CODEX_LOCAL_ENABLED=true' /opt/gpoint/env/production.env && grep -Eq '^GPOINT_AGATA_WORKER_TOKEN=.+$' /opt/gpoint/env/production.env ;; *) echo AGATA_PROVIDER_UNSUPPORTED; exit 32 ;; esac; printf 'GPOINT_PREFLIGHT_OK\\n'`;
 }
@@ -552,10 +603,11 @@ export function agataProviderRuntimeCommand(provider) {
   return `set -e; actualProvider=$(docker exec compose-agata-api-1 python -c "from app.config import get_settings; print(get_settings().llm_provider)"); localEnabled=$(docker exec compose-agata-api-1 python -c "from app.config import get_settings; print(str(get_settings().codex_local_enabled).lower())"); tokenPresent=$(docker exec compose-agata-api-1 sh -c 'test -n "$GPOINT_AGATA_WORKER_TOKEN" && printf YES || printf NO'); printf 'AGATA_PROVIDER=%s AGATA_CODEX_LOCAL_ENABLED=%s AGATA_WORKER_TOKEN_PRESENT=%s\\n' "$actualProvider" "$localEnabled" "$tokenPresent"`;
 }
 
-export function applyCandidate(sha, { retentionPlan = { removableShas: [], removableCacheIds: [] }, provider = 'disabled', onMigrationStart = () => {}, onAgataStart = () => {}, onSwitchStart = () => {} } = {}) {
+export function applyCandidate(sha, { retentionPlan = { removableShas: [], removableCacheIds: [] }, provider = 'disabled', imageTransport: requestedImageTransport = process.env.IMAGE_TRANSPORT || 'prepared', ghcrReadToken = '', onBeforeMutation = () => {}, onMigrationStart = () => {}, onAgataStart = () => {}, onSwitchStart = () => {} } = {}) {
   if (!['disabled', 'mac_worker'].includes(provider)) throw new Error(`unsupported AGATA provider: ${provider}`);
   const bundle = process.env.GPOINT_RELEASE_BUNDLE ? verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, sha) : null;
   if (!bundle) throw new Error('verified immutable CI release bundle is required; application images are never rebuilt during apply');
+  const imageTransport = selectImageTransport(bundle, requestedImageTransport);
   const checkout = exactCheckout(sha);
   let agataMigrations;
   let gsalesMigrations;
@@ -574,12 +626,18 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
     if (bundle && bundle.agataHead !== agataMigrations.head) throw new Error('CI migration head does not match candidate source');
     gsalesMigrations = gsalesMigrationIdentity(checkout, bundle);
     if (agataMigrations.head !== 'agata0011') throw new Error('GSales integration requires AGATA agata0011');
-    createSourceArchive(checkout, archive);
     stage(timings, 'PRODUCTION_PREFLIGHT', () => run(productionPreflightCommand()));
-    stage(timings, 'SOURCE_PREPARE', () => {
-      upload(archive, `/tmp/gpoint-${sha}.tar.gz`);
-    });
-    if (bundle) stage(timings, 'CI_ARTIFACT_IMPORT', () => {
+    if (imageTransport === 'ghcr-oci') {
+      const registryUser = process.env.GHCR_READ_USERNAME || 'akhripunov';
+      if (!ghcrReadToken) throw new Error('read-only GHCR credential is unavailable');
+      const output = stage(timings, 'GHCR_IMAGE_PULL_AND_VERIFY', () =>
+        runRemoteCommandWithInput(createOciPullScript(bundle, sha, { username: registryUser }), ghcrReadToken));
+      if (!output.includes('GPOINT_GHCR_IMAGES_VERIFIED=YES'))
+        throw new Error('GHCR image pull/identity gate failed before production apply');
+      bundle.ghcrVerified = true;
+    } else if (bundle) {
+      if (!bundle.archive) throw new Error('verified archive fallback is unavailable before Apply');
+      stage(timings, 'CI_ARTIFACT_IMPORT', () => {
       const reuse = stage(timings, 'CI_ARTIFACT_REUSE_CHECK', () => run(reuseBundleCommand(bundle, sha)));
       if (reuse.includes('GPOINT_CI_IMAGES_REUSABLE')) {
         console.error('CI_ARTIFACT_REUSED=YES');
@@ -588,6 +646,11 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
       stage(timings, 'CI_ARTIFACT_UPLOAD', () => upload(bundle.archive, `/tmp/gpoint-images-${sha}.tar.gz`));
       const output = stage(timings, 'CI_ARTIFACT_LOAD', () => run(importBundleCommand(bundle, sha)));
       if (!output.includes('GPOINT_CI_IMAGES_VERIFIED')) throw new Error('CI image import failed');
+      });
+    }
+    createSourceArchive(checkout, archive);
+    stage(timings, 'SOURCE_PREPARE', () => {
+      upload(archive, `/tmp/gpoint-${sha}.tar.gz`);
     });
     const diskGuard = run("set -e; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n \"$freeKb\"; if [ \"$freeKb\" -lt 8388608 ]; then echo GPOINT_DISK_GUARD_WARN; fi; test \"$freeKb\" -ge 5242880; echo GPOINT_DISK_GUARD_OK");
     if (!diskGuard.includes('GPOINT_DISK_GUARD_OK')) throw new Error('remote disk guard failed: minimum 5 GiB free space required');
@@ -621,18 +684,34 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
         `prismaPending=0; if printf '%s' "$status" | grep -Eiq 'Database schema is up to date!|No pending migrations to apply\\.'; then echo PRISMA_NO_PENDING_MIGRATIONS; elif printf '%s' "$status" | grep -Eiq 'Following migrations have not yet been applied|The following migration(s) have not yet been applied'; then prismaPending=1; echo PRISMA_PENDING_MIGRATIONS; else echo PRISMA_STATUS_UNRECOGNIZED; exit 33; fi`,
         `agataBefore=$(printf '%s' '${agataStatusB64}' | base64 -d | docker run --rm -i ${databaseNetworkArgs('gpoint-agata-preflight')} --env-file /opt/gpoint/env/production.env --env-file /opt/gpoint/env/migration.env gpoint-agata-runtime:${sha} python -)`,
         `printf '%s\\n' "$agataBefore"`,
-        `agataPending=0; if printf '%s' "$agataBefore" | grep -qx 'AGATA_SCHEMA_ABSENT'; then agataPending=1; elif printf '%s' "$agataBefore" | grep -Eq '^AGATA_HEAD=(${agataMigrations.revisions.join('|')})$'; then if ! printf '%s' "$agataBefore" | grep -qx 'AGATA_HEAD=${agataMigrations.head}'; then agataPending=1; fi; else echo AGATA_HEAD_UNRECOGNIZED; exit 34; fi`,
+        `agataPending=0; if printf '%s' "$agataBefore" | grep -qx 'AGATA_SCHEMA_ABSENT'; then agataPending=1; elif printf '%s' "$agataBefore" | grep -Eq '^AGATA_HEAD=(${agataMigrations.revisions.join('|')})$'; then if ! printf '%s' "$agataBefore" | grep -qx 'AGATA_HEAD=${agataMigrations.head}'; then agataPending=1; fi; else echo AGATA_HEAD_UNRECOGNIZED; exit 34; fi; if [ "$agataPending" = 1 ]; then echo AGATA_PENDING_MIGRATIONS; else echo AGATA_NO_PENDING_MIGRATIONS; fi`,
         `gsalesState=$( ${gsalesMigrationStateCommand(gsalesMigrations)} ); printf '%s\\n' "$gsalesState"; gsalesPending=$(printf '%s' "$gsalesState" | sed -n 's/^GSALES_PENDING=//p'); test "$gsalesPending" = 0 || test "$gsalesPending" = 1`,
         `if [ "$prismaPending" = 1 ] || [ "$agataPending" = 1 ] || [ "$gsalesPending" = 1 ]; then ${['agata0010', 'agata0011'].includes(agataMigrations.head) ? agataProductionMigrationCommand(sha, 'backup', checkout) : `backupName=gpoint-pre-release-${sha}-$(date -u +%Y%m%dT%H%M%SZ).dump; mkdir -p /opt/gpoint/backups; chmod 700 /opt/gpoint/backups; docker image inspect postgres:16 >/dev/null 2>&1 || docker pull postgres:16; docker run --rm ${databaseNetworkArgs()} --env-file /opt/gpoint/env/production.env -e GPOINT_BACKUP_NAME="$backupName" -v /opt/gpoint/backups:/backups postgres:16 sh -ec 'dburl=$(printf "%s" "$DATABASE_URL" | sed -E "s/([?&])(schema|connection_limit|pool_timeout|pgbouncer|sslaccept)=[^&]*//g; s/[?&]$//; s/\\?&/?/g"); schemas="--schema=public"; if psql "$dburl" -Atc "SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name='\''agata'\'')" | grep -qx t; then schemas="$schemas --schema=agata"; fi; pg_dump --format=custom --no-owner $schemas --dbname "$dburl" --file "/backups/$GPOINT_BACKUP_NAME"'; chmod 600 "/opt/gpoint/backups/$backupName"; test -s "/opt/gpoint/backups/$backupName"; docker run --rm -v /opt/gpoint/backups:/backups postgres:16 pg_restore --list "/backups/$backupName" >/dev/null; echo GPOINT_BACKUP_PATH=/opt/gpoint/backups/$backupName; echo GPOINT_BACKUP_STATUS=NONEMPTY_PROTECTED`}; fi`,
-        `if [ "$prismaPending" = 1 ]; then docker run --rm ${databaseNetworkArgs('gpoint-migration')} --env-file /opt/gpoint/env/production.env gpoint-runtime:${sha} pnpm --filter @gpoint/db exec prisma migrate deploy; fi`,
-        `if [ "$agataPending" = 1 ]; then ${['agata0010', 'agata0011'].includes(agataMigrations.head) ? agataProductionMigrationCommand(sha, 'migrate', checkout) : `docker run --rm ${databaseNetworkArgs('gpoint-agata-migration')} --env-file /opt/gpoint/env/production.env gpoint-agata-runtime:${sha} alembic upgrade head`}; else echo AGATA_NO_PENDING_MIGRATIONS; fi`,
-        `agataAfter=$(printf '%s' '${agataStatusB64}' | base64 -d | docker run --rm -i ${databaseNetworkArgs('gpoint-agata-verify')} --env-file /opt/gpoint/env/production.env --env-file /opt/gpoint/env/migration.env gpoint-agata-runtime:${sha} python -)`,
-        `printf '%s\\n' "$agataAfter"; printf '%s' "$agataAfter" | grep -qx 'AGATA_HEAD=${agataMigrations.head}'`,
-        gsalesMigrationCommand(sha, gsalesMigrations),
-        'echo GPOINT_MIGRATION_OK',
       ];
-      onMigrationStart();
-      return run(steps.join('; '));
+      const migrationPreflight = steps.slice(0, 9).join('; ');
+      const prismaMigration = `docker run --rm ${databaseNetworkArgs('gpoint-migration')} --env-file /opt/gpoint/env/production.env gpoint-runtime:${sha} pnpm --filter @gpoint/db exec prisma migrate deploy`;
+      const agataMigration = ['agata0010', 'agata0011'].includes(agataMigrations.head)
+        ? agataProductionMigrationCommand(sha, 'migrate', checkout)
+        : `docker run --rm ${databaseNetworkArgs('gpoint-agata-migration')} --env-file /opt/gpoint/env/production.env gpoint-agata-runtime:${sha} alembic upgrade head`;
+      const agataVerification = `agataAfter=$(printf '%s' '${agataStatusB64}' | base64 -d | docker run --rm -i ${databaseNetworkArgs('gpoint-agata-verify')} --env-file /opt/gpoint/env/production.env --env-file /opt/gpoint/env/migration.env gpoint-agata-runtime:${sha} python -); printf '%s\\n' "$agataAfter"; printf '%s' "$agataAfter" | grep -qx 'AGATA_HEAD=${agataMigrations.head}'`;
+      const migrationOutput = runAuthorizedMutationPlan({
+        preflightCommand: migrationPreflight,
+        mutations: [
+          {boundary: 'prisma-migration', command: prismaMigration,
+            shouldRun: output => migrationPendingFromPreflight(output, 'PRISMA'),
+            skippedOutput: 'PRISMA_NO_PENDING_MIGRATIONS', afterAuthorization: onMigrationStart},
+          {boundary: 'agata-migration', command: `${agataMigration}; ${agataVerification}`,
+            shouldRun: output => migrationPendingFromPreflight(output, 'AGATA'),
+            skippedOutput: 'AGATA_NO_PENDING_MIGRATIONS', afterAuthorization: onMigrationStart},
+          {boundary: 'gsales-migration', command: gsalesMigrationCommand(sha, gsalesMigrations),
+            shouldRun: output => migrationPendingFromPreflight(output, 'GSALES'),
+            skippedOutput: 'GSALES_NO_PENDING_MIGRATIONS', afterAuthorization: onMigrationStart},
+        ],
+        onBeforeMutation,
+        run,
+      });
+      if (!migrationOutput.includes('GPOINT_MIGRATION_OK')) return `${migrationOutput}\\nGPOINT_MIGRATION_OK`;
+      return migrationOutput;
     });
     if (!migration.includes('GPOINT_MIGRATION_OK')) throw new Error('Prisma/AGATA migration gate failed');
     const migrationProof = parseGuardedMigrationEvidence(migration, sha);
@@ -655,8 +734,9 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
       `docker inspect compose-api-1 --format '{{.Config.Image}}' > /tmp/gpoint-previous-runtime-${sha} 2>/dev/null || true`,
       'echo GPOINT_PRE_SWITCH_ARTIFACTS_READY'
     ];
+    const backupStamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
     const deploy = [
-      `switchStartMs=$(date +%s%3N); set -e; mkdir -p /opt/gpoint/backups; chmod 700 /opt/gpoint/backups; backupStamp=$(date -u +%Y%m%dT%H%M%SZ); cp /opt/gpoint/compose/docker-compose.yml /opt/gpoint/backups/compose-before-${sha}-$backupStamp.yml; chmod 600 /opt/gpoint/backups/compose-before-${sha}-$backupStamp.yml; cp /etc/caddy/Caddyfile /opt/gpoint/backups/caddy-before-${sha}-$backupStamp; chmod 600 /opt/gpoint/backups/caddy-before-${sha}-$backupStamp; cp /opt/gpoint/compose/sensitive-detector/config.mjs /opt/gpoint/backups/detector-config-before-${sha}-$backupStamp.mjs; cp /opt/gpoint/compose/sensitive-detector/Dockerfile /opt/gpoint/backups/detector-dockerfile-before-${sha}-$backupStamp; chmod 600 /opt/gpoint/backups/detector-config-before-${sha}-$backupStamp.mjs /opt/gpoint/backups/detector-dockerfile-before-${sha}-$backupStamp; envStage=/opt/gpoint/env/.production-${sha}.staged; cp /opt/gpoint/env/production.env \"$envStage\"; chmod 600 \"$envStage\"; sed -i 's/^RELEASE_SHA=.*/RELEASE_SHA=${sha}/' \"$envStage\"; grep -q '^GPOINT_SAFETY_PROVIDER=' \"$envStage\" && sed -i 's#^GPOINT_SAFETY_PROVIDER=.*#GPOINT_SAFETY_PROVIDER=misskey-sensitive-detector#' \"$envStage\" || printf '%s\\n' 'GPOINT_SAFETY_PROVIDER=misskey-sensitive-detector' >> \"$envStage\"; grep -q '^GPOINT_SAFETY_URL=' \"$envStage\" && sed -i 's#^GPOINT_SAFETY_URL=.*#GPOINT_SAFETY_URL=http://gpoint-sensitive-detector:3009#' \"$envStage\" || printf '%s\\n' 'GPOINT_SAFETY_URL=http://gpoint-sensitive-detector:3009' >> \"$envStage\"; grep -q '^GPOINT_SAFETY_TIMEOUT_MS=' \"$envStage\" && sed -i 's#^GPOINT_SAFETY_TIMEOUT_MS=.*#GPOINT_SAFETY_TIMEOUT_MS=60000#' \"$envStage\" || printf '%s\\n' 'GPOINT_SAFETY_TIMEOUT_MS=60000' >> \"$envStage\"; if ! grep -q '^GPOINT_SAFETY_API_KEY=.' \"$envStage\"; then printf 'GPOINT_SAFETY_API_KEY=%s\\n' \"$(openssl rand -hex 32)\" >> \"$envStage\"; fi; chmod 600 \"$envStage\"; cp /opt/gpoint/env/production.env /opt/gpoint/backups/production-env-before-${sha}-$backupStamp.env; chmod 600 /opt/gpoint/backups/production-env-before-${sha}-$backupStamp.env; mv \"$envStage\" /opt/gpoint/env/production.env; cp /tmp/gpoint-compose-${sha}.yml /opt/gpoint/compose/docker-compose.yml; caddy validate --config /tmp/gpoint-caddy-${sha} --adapter caddyfile; cp /tmp/gpoint-caddy-${sha} /etc/caddy/Caddyfile; systemctl reload caddy; mkdir -p /opt/gpoint/compose/sensitive-detector && cp /tmp/gpoint-safety-config-${sha}.mjs /opt/gpoint/compose/sensitive-detector/config.mjs && cp /tmp/gpoint-safety-dockerfile-${sha} /opt/gpoint/compose/sensitive-detector/Dockerfile; if [ -d /opt/gpoint/app/miniapp ]; then mv /opt/gpoint/app/miniapp /opt/gpoint/app/miniapp.rollback-${sha}; fi; mv ${releaseDir}/miniapp /opt/gpoint/app/miniapp; chmod -R a+rX /opt/gpoint/app/miniapp; auxStartMs=$(date +%s%3N); auxNeedsRecreate=0; if docker image inspect ${detectorTag} >/dev/null 2>&1; then echo GPOINT_AUX_REUSED; else auxNeedsRecreate=1; RELEASE_SHA=${sha} DOCKER_BUILDKIT=1 docker compose -p compose --env-file /opt/gpoint/env/production.env -f /opt/gpoint/compose/docker-compose.yml build --progress=plain gpoint-sensitive-detector > /tmp/gpoint-detector-build-${detectorHash}.log 2>&1; fi; printf 'GPOINT_AUX_NEEDS_RECREATE=%s\\n' \"$auxNeedsRecreate\" > /tmp/gpoint-aux-${sha}; echo GPOINT_STAGE_TIMING=AUX_BUILD_DURATION_MS=$(( $(date +%s%3N) - auxStartMs )); docker inspect compose-api-1 --format '{{.Config.Image}}' > /tmp/gpoint-previous-runtime-${sha} 2>/dev/null || true; set +e; services='api worker bot'; if grep -q 'GPOINT_AUX_NEEDS_RECREATE=1' /tmp/gpoint-aux-${sha}; then services=\"$services gpoint-sensitive-detector\"; fi; docker compose --env-file /opt/gpoint/env/production.env -f /opt/gpoint/compose/docker-compose.yml up -d --force-recreate $services > /tmp/gpoint-compose-switch-${sha}.log 2>&1; composeExit=$?; set -e; echo GPOINT_STAGE_TIMING=RUNTIME_SWITCH_DURATION_MS=$(( $(date +%s%3N) - switchStartMs )); printf 'GPOINT_COMPOSE_EXIT=%s\\n' \"$composeExit\"; mkdir -p /opt/gpoint/release-logs/${sha} && cp /tmp/gpoint-compose-switch-${sha}.log /opt/gpoint/release-logs/${sha}/compose-switch.log; tail -80 /tmp/gpoint-compose-switch-${sha}.log`,
+      `switchStartMs=$(date +%s%3N); set -e; mkdir -p /opt/gpoint/backups; chmod 700 /opt/gpoint/backups; backupStamp=${backupStamp}; cp /opt/gpoint/compose/docker-compose.yml /opt/gpoint/backups/compose-before-${sha}-$backupStamp.yml; chmod 600 /opt/gpoint/backups/compose-before-${sha}-$backupStamp.yml; cp /etc/caddy/Caddyfile /opt/gpoint/backups/caddy-before-${sha}-$backupStamp; chmod 600 /opt/gpoint/backups/caddy-before-${sha}-$backupStamp; cp /opt/gpoint/compose/sensitive-detector/config.mjs /opt/gpoint/backups/detector-config-before-${sha}-$backupStamp.mjs; cp /opt/gpoint/compose/sensitive-detector/Dockerfile /opt/gpoint/backups/detector-dockerfile-before-${sha}-$backupStamp; chmod 600 /opt/gpoint/backups/detector-config-before-${sha}-$backupStamp.mjs /opt/gpoint/backups/detector-dockerfile-before-${sha}-$backupStamp; envStage=/opt/gpoint/env/.production-${sha}.staged; cp /opt/gpoint/env/production.env \"$envStage\"; chmod 600 \"$envStage\"; sed -i 's/^RELEASE_SHA=.*/RELEASE_SHA=${sha}/' \"$envStage\"; grep -q '^GPOINT_SAFETY_PROVIDER=' \"$envStage\" && sed -i 's#^GPOINT_SAFETY_PROVIDER=.*#GPOINT_SAFETY_PROVIDER=misskey-sensitive-detector#' \"$envStage\" || printf '%s\\n' 'GPOINT_SAFETY_PROVIDER=misskey-sensitive-detector' >> \"$envStage\"; grep -q '^GPOINT_SAFETY_URL=' \"$envStage\" && sed -i 's#^GPOINT_SAFETY_URL=.*#GPOINT_SAFETY_URL=http://gpoint-sensitive-detector:3009#' \"$envStage\" || printf '%s\\n' 'GPOINT_SAFETY_URL=http://gpoint-sensitive-detector:3009' >> \"$envStage\"; grep -q '^GPOINT_SAFETY_TIMEOUT_MS=' \"$envStage\" && sed -i 's#^GPOINT_SAFETY_TIMEOUT_MS=.*#GPOINT_SAFETY_TIMEOUT_MS=60000#' \"$envStage\" || printf '%s\\n' 'GPOINT_SAFETY_TIMEOUT_MS=60000' >> \"$envStage\"; if ! grep -q '^GPOINT_SAFETY_API_KEY=.' \"$envStage\"; then printf 'GPOINT_SAFETY_API_KEY=%s\\n' \"$(openssl rand -hex 32)\" >> \"$envStage\"; fi; chmod 600 \"$envStage\"; cp /opt/gpoint/env/production.env /opt/gpoint/backups/production-env-before-${sha}-$backupStamp.env; chmod 600 /opt/gpoint/backups/production-env-before-${sha}-$backupStamp.env; mv \"$envStage\" /opt/gpoint/env/production.env; cp /tmp/gpoint-compose-${sha}.yml /opt/gpoint/compose/docker-compose.yml; caddy validate --config /tmp/gpoint-caddy-${sha} --adapter caddyfile; cp /tmp/gpoint-caddy-${sha} /etc/caddy/Caddyfile; systemctl reload caddy; mkdir -p /opt/gpoint/compose/sensitive-detector && cp /tmp/gpoint-safety-config-${sha}.mjs /opt/gpoint/compose/sensitive-detector/config.mjs && cp /tmp/gpoint-safety-dockerfile-${sha} /opt/gpoint/compose/sensitive-detector/Dockerfile; if [ -d /opt/gpoint/app/miniapp ]; then mv /opt/gpoint/app/miniapp /opt/gpoint/app/miniapp.rollback-${sha}; fi; mv ${releaseDir}/miniapp /opt/gpoint/app/miniapp; chmod -R a+rX /opt/gpoint/app/miniapp; auxStartMs=$(date +%s%3N); auxNeedsRecreate=0; if docker image inspect ${detectorTag} >/dev/null 2>&1; then echo GPOINT_AUX_REUSED; else auxNeedsRecreate=1; RELEASE_SHA=${sha} DOCKER_BUILDKIT=1 docker compose -p compose --env-file /opt/gpoint/env/production.env -f /opt/gpoint/compose/docker-compose.yml build --progress=plain gpoint-sensitive-detector > /tmp/gpoint-detector-build-${detectorHash}.log 2>&1; fi; printf 'GPOINT_AUX_NEEDS_RECREATE=%s\\n' \"$auxNeedsRecreate\" > /tmp/gpoint-aux-${sha}; echo GPOINT_STAGE_TIMING=AUX_BUILD_DURATION_MS=$(( $(date +%s%3N) - auxStartMs )); docker inspect compose-api-1 --format '{{.Config.Image}}' > /tmp/gpoint-previous-runtime-${sha} 2>/dev/null || true; set +e; services='api worker bot'; if grep -q 'GPOINT_AUX_NEEDS_RECREATE=1' /tmp/gpoint-aux-${sha}; then services=\"$services gpoint-sensitive-detector\"; fi; docker compose --env-file /opt/gpoint/env/production.env -f /opt/gpoint/compose/docker-compose.yml up -d --force-recreate $services > /tmp/gpoint-compose-switch-${sha}.log 2>&1; composeExit=$?; set -e; echo GPOINT_STAGE_TIMING=RUNTIME_SWITCH_DURATION_MS=$(( $(date +%s%3N) - switchStartMs )); printf 'GPOINT_COMPOSE_EXIT=%s\\n' \"$composeExit\"; mkdir -p /opt/gpoint/release-logs/${sha} && cp /tmp/gpoint-compose-switch-${sha}.log /opt/gpoint/release-logs/${sha}/compose-switch.log; tail -80 /tmp/gpoint-compose-switch-${sha}.log`,
       `healthStartMs=$(date +%s%3N); consecutive=0; for attempt in $(seq 1 30); do running=$(docker inspect --format '{{.State.Running}}' compose-api-1 2>/dev/null || echo false); containerHealth=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' compose-api-1 2>/dev/null || echo missing); set +e; curl --connect-timeout 1 --max-time 3 -fsS -o /tmp/gpoint-health-${sha} http://127.0.0.1:3000/health/live; curlExit=$?; set -e; echo GPOINT_HEALTH_ATTEMPT=$attempt RUNNING=$running CONTAINER_HEALTH=$containerHealth CURL_EXIT=$curlExit; if [ "$curlExit" -eq 0 ] && grep -Fq '"status":"ok"' /tmp/gpoint-health-${sha}; then consecutive=$((consecutive + 1)); else consecutive=0; fi; if [ "$consecutive" -ge 3 ]; then echo GPOINT_DEPLOY_OK; break; fi; sleep 2; done; echo GPOINT_STAGE_TIMING=CONTAINER_HEALTH_WAIT_DURATION_MS=$(( $(date +%s%3N) - healthStartMs )); rm -f /tmp/gpoint-health-${sha}; test "$consecutive" -ge 3`,
       'echo GPOINT_DEPLOY_OK'
     ];
@@ -667,13 +747,28 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
     });
     effectiveConfigSha256 = preparationOutput.match(/GPOINT_EFFECTIVE_CONFIG_SHA256=([0-9a-f]{64})/)?.[1];
     if (!effectiveConfigSha256) throw new Error('final effective production config evidence absent');
+    onBeforeMutation('agata-start');
     onAgataStart();
     const agataReady = stage(timings, 'AGATA_PRE_SWITCH_READINESS', () => run(agataPreSwitchReadinessCommand(sha, provider)));
     if (!agataReady.includes('AGATA_PRE_SWITCH_READY') || !agataReady.includes(`AGATA_PROVIDER_VERIFIED=${provider}`) || !agataReady.includes('GPOINT_AGATA_INTERNAL_AUTH_OK')) throw new Error('AGATA pre-switch readiness/auth gate failed');
+    onBeforeMutation('gsales-start');
     const gsalesStarted = stage(timings, 'GSALES_PRE_SWITCH_START', () => run(gsalesStartCommand(sha)));
     if (!gsalesStarted.includes('GSALES_STARTED')) throw new Error('GSales lane start failed');
-    onSwitchStart();
-    const deployOutput = run(deploy.join('; ')); applyRemoteTimingMarkers(timings, deployOutput); if (!deployOutput.includes('GPOINT_DEPLOY_OK')) throw new Error('remote runtime deploy failed');
+    const activeSwitchMarker = `mv \"$envStage\" /opt/gpoint/env/production.env;`;
+    const activeSwitchOffset = deploy[0].indexOf(activeSwitchMarker);
+    if (activeSwitchOffset < 0) throw new Error('runtime switch preparation/apply boundary is missing');
+    const stagedEnvironment = `/opt/gpoint/env/.production-${sha}.staged`;
+    const switchPreparation = `${deploy[0].slice(0, activeSwitchOffset)}echo GPOINT_SWITCH_PREPARATION_READY`;
+    const switchApply = `switchStartMs=$(date +%s%3N); set -e; ${deploy[0].slice(activeSwitchOffset)
+      .replace(activeSwitchMarker, `mv \"${stagedEnvironment}\" /opt/gpoint/env/production.env;`)}; ${deploy.slice(1).join('; ')}`;
+    const deployOutput = runAuthorizedMutationPlan({
+      preflightCommand: switchPreparation,
+      mutations: [{boundary: 'runtime-switch', command: switchApply,
+        shouldRun: output => output.includes('GPOINT_SWITCH_PREPARATION_READY'), afterAuthorization: onSwitchStart}],
+      onBeforeMutation,
+      run,
+    });
+    applyRemoteTimingMarkers(timings, deployOutput); if (!deployOutput.includes('GPOINT_DEPLOY_OK')) throw new Error('remote runtime deploy failed');
     const composeExitCode = Number(deployOutput.match(/GPOINT_COMPOSE_EXIT=(\d+)/)?.[1] ?? NaN);
     const identityOutput = stage(timings, 'POST_SWITCH_RECONCILIATION', () => run(`set -e; imageId=$(cat ${imageProof}); apiImage=$(docker inspect compose-api-1 --format '{{.Image}}'); workerImage=$(docker inspect compose-worker-1 --format '{{.Image}}'); botImage=$(docker inspect compose-bot-1 --format '{{.Image}}'); detectorImage=$(docker inspect compose-gpoint-sensitive-detector-1 --format '{{.Config.Image}}'); indexSha256=$(sha256sum /opt/gpoint/app/miniapp/index.html | awk '{print $1}'); grep -F -q 'gpoint-build-sha" content="${sha}' /opt/gpoint/app/miniapp/index.html; test "$apiImage" = "$imageId"; test "$workerImage" = "$imageId"; test "$botImage" = "$imageId"; test "$detectorImage" = '${detectorTag}'; docker rm gpoint-static-${sha.slice(0, 8)} >/dev/null 2>&1 || true; printf 'IMAGE_ID=%s INDEX_SHA256=%s BUILD_SHA=%s API_IMAGE=%s WORKER_IMAGE=%s BOT_IMAGE=%s DETECTOR_IMAGE=%s\\n' "$imageId" "$indexSha256" '${sha}' "$apiImage" "$workerImage" "$botImage" "$detectorImage"`)).trim();
     const identityLine = identityOutput.split(/\\r?\\n/).find(line => line.includes('IMAGE_ID=')) ?? '';
@@ -698,6 +793,12 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
     agataRuntime.codexLocalEnabled = providerRuntime.CODEX_LOCAL_ENABLED;
     agataRuntime.workerTokenPresent = providerRuntime.WORKER_TOKEN_PRESENT === 'YES';
     const gsalesIdentity = stage(timings, 'GSALES_POST_SWITCH_RECONCILIATION', () => parseGsalesRuntime(run(gsalesRuntimeCommand(sha, gsalesMigrations)), sha, gsalesMigrations));
+    if (imageTransport === 'ghcr-oci') {
+      const parity = stage(timings, 'GHCR_POST_SWITCH_PARITY', () => run(createOciVerifyScript(bundle, sha)));
+      if (!parity.includes('GPOINT_GHCR_POST_SWITCH_PARITY=YES'))
+        throw new Error('post-switch GHCR digest parity gate failed');
+      bundle.ghcrPostSwitchVerified = true;
+    }
     const removableShas = [...new Set(retentionPlan.removableShas ?? [])].filter(candidate => /^[0-9a-f]{40}$/.test(candidate) && candidate !== sha).join(' ');
     const terminalCleanup = removableShas ? removableShas.split(' ').map(candidate =>
       `for ref in gpoint-runtime:${candidate} gpoint-agata-runtime:${candidate} gpoint-g-sales-runtime:${candidate}; do for status in created exited; do docker ps -aq --filter ancestor="$ref" --filter status="$status" | xargs -r docker rm >/dev/null; done; done; if [ -z "$(docker ps -aq --filter ancestor=gpoint-runtime:${candidate})" ] && [ -z "$(docker ps -aq --filter ancestor=gpoint-agata-runtime:${candidate})" ] && [ -z "$(docker ps -aq --filter ancestor=gpoint-g-sales-runtime:${candidate})" ]; then docker image rm gpoint-runtime:${candidate} gpoint-agata-runtime:${candidate} gpoint-g-sales-runtime:${candidate} >/dev/null 2>&1 || true; rm -f /tmp/gpoint-${candidate}.tar.gz /tmp/gpoint-compose-${candidate}.yml /tmp/gpoint-caddy-${candidate} /tmp/gpoint-dockerfile-${candidate} /tmp/gpoint-agata-dockerfile-${candidate} /tmp/gpoint-safety-dockerfile-${candidate} /tmp/gpoint-safety-config-${candidate}.mjs /tmp/gpoint-image-id-${candidate} /tmp/gpoint-agata-image-id-${candidate} /tmp/gpoint-g-sales-image-id-${candidate} /tmp/gpoint-previous-runtime-${candidate} /tmp/gpoint-aux-${candidate}; fi`
@@ -717,7 +818,7 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
       migration.match(/GPOINT_BACKUP_PATH=([^\s]+)/)?.[1] ? `BACKUP=${migration.match(/GPOINT_BACKUP_PATH=([^\s]+)/)[1]}` : null,
     ].filter(Boolean).join(',');
     if (!migrationOutput) throw new Error('migration gate output was not recognized');
-    return { imageIdentity: { imageId, indexSha256, buildSha, detectorHash }, agataIdentity: agataRuntime, gsalesIdentity, effectiveConfigSha256, migrationOutput, migrationProof, composeExitCode, postSwitch, detectorHash, timings, ciReceipt: bundle ? { ...bundle, archive: undefined } : null };
+    return { imageIdentity: { imageId, indexSha256, buildSha, detectorHash }, agataIdentity: agataRuntime, gsalesIdentity, effectiveConfigSha256, migrationOutput, migrationProof, composeExitCode, postSwitch, detectorHash, timings, ciReceipt: bundle ? { ...bundle, archive: undefined, selectedTransport: imageTransport } : null };
   } finally {
     try { cleanupTemporaryWorktree(checkout); }
     finally { fs.rmSync(archive, { force: true }); }

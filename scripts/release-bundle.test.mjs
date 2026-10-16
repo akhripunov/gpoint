@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { verifyReleaseBundle, importBundleCommand, reuseBundleCommand, preparedImageParityCommand } from './release-bundle.mjs';
+import { verifyReleaseBundle, importBundleCommand, reuseBundleCommand, preparedImageParityCommand, selectImageTransport } from './release-bundle.mjs';
 import { migrationHead } from './release-migrations.mjs';
 import { acquireReleaseLock } from './release-lock.mjs';
 import { fileURLToPath } from 'node:url';
@@ -98,6 +98,70 @@ test('different candidate and skipped gates fail closed', t => {
   f.receipt.gates.gsalesPostgres = 'SKIPPED'; f.save();
   assert.throws(() => verifyReleaseBundle(f.dir, f.sha), /gsalesPostgres/);
 });
+
+test('GHCR receipt is accepted only with exact run identity and digest-bound images', t => {
+  const f = fixture(t);
+  const gates = Object.fromEntries(['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'botImageStartup', 'deployRehearsal'].map(g => [g, 'PASS']));
+  f.receipt.schema = 3;
+  f.receipt.runAttempt = 1;
+  f.receipt.transport = 'ghcr-oci';
+  f.receipt.gates = gates;
+  for (const [role, imageName] of Object.entries({ app: 'gpoint-runtime', agata: 'gpoint-agata-runtime', gsales: 'gpoint-g-sales-runtime' })) {
+    f.receipt.images[role] = {
+      repository: `ghcr.io/akhripunov/${imageName}`,
+      digest: `sha256:${(role === 'app' ? 'a' : role === 'agata' ? 'b' : 'd').repeat(64)}`,
+      configDigest: `sha256:${(role === 'app' ? 'c' : role === 'agata' ? 'e' : 'f').repeat(64)}`,
+      sourceSha: f.sha,
+      platform: 'linux/amd64',
+    };
+  }
+  f.save();
+  const proof = verifyReleaseBundle(f.dir, f.sha);
+  assert.equal(proof.transport, 'ghcr-oci');
+  assert.equal(proof.images.app.reference, `ghcr.io/akhripunov/gpoint-runtime@${proof.images.app.digest}`);
+  f.receipt.images.app.digest = 'latest';
+  f.save();
+  assert.throws(() => verifyReleaseBundle(f.dir, f.sha), /digest/i);
+});
+test('GHCR schema preserves proven V3 COVERED_UNCHANGED gates', t => {
+  const f = fixture(t);
+  const gates = Object.fromEntries(['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'botImageStartup', 'deployRehearsal'].map(g => [g, 'PASS']));
+  f.receipt.schema = 3;
+  f.receipt.runAttempt = 1;
+  f.receipt.transport = 'ghcr-oci';
+  f.receipt.gates = gates;
+  for (const [role, imageName] of Object.entries({ app: 'gpoint-runtime', agata: 'gpoint-agata-runtime', gsales: 'gpoint-g-sales-runtime' })) {
+    f.receipt.images[role] = {
+      repository: `ghcr.io/akhripunov/${imageName}`,
+      digest: `sha256:${(role === 'app' ? 'a' : role === 'agata' ? 'b' : 'd').repeat(64)}`,
+      configDigest: `sha256:${(role === 'app' ? 'c' : role === 'agata' ? 'e' : 'f').repeat(64)}`,
+      sourceSha: f.sha, platform: 'linux/amd64',
+    };
+  }
+  f.receipt.gates.postgres = 'COVERED_UNCHANGED';
+  f.receipt.gates.gsalesPostgres = 'COVERED_UNCHANGED';
+  f.receipt.impactV3 = {
+    version: 1, candidateSha: f.sha, productionBaselineSha: 'b'.repeat(40),
+    baselineSource: 'gpoint-release-ledger', classification: 'UI_ONLY',
+    reason: 'narrow-unchanged-backend', changedPaths: ['apps/miniapp/src/ui.tsx'],
+    checks: { agata_postgres_rehearsal: false, gsales_postgres_regression: false },
+    invariantChecks: ['docker_images_exact_sha', 'artifact_migrations', 'deploy_rehearsal', 'canonical_preflight', 'production_approval'],
+  };
+  f.save();
+  assert.equal(verifyReleaseBundle(f.dir, f.sha).gates.gsalesPostgres, 'COVERED_UNCHANGED');
+  f.receipt.impactV3.changedPaths = ['services/agata/app/api.py'];
+  f.save();
+  assert.throws(() => verifyReleaseBundle(f.dir, f.sha), /unverified V3/);
+});
+test('OCI archive fallback is explicit and requires the separately verified archive', t => {
+  const f = fixture(t);
+  const proof = { schema: 3, transport: 'ghcr-oci', archive: null };
+  assert.equal(selectImageTransport(proof, 'prepared'), 'ghcr-oci');
+  assert.equal(selectImageTransport(proof, 'ghcr-oci'), 'ghcr-oci');
+  assert.throws(() => selectImageTransport(proof, 'archive'), /unavailable/);
+  assert.equal(selectImageTransport({ ...proof, archive: path.join(f.dir, 'images.tar.gz') }, 'archive'), 'archive');
+  assert.throws(() => selectImageTransport(proof, 'unknown'), /unsupported/);
+});
 test('a receipt without the real containerd deployment rehearsal cannot authorize apply', t => {
   const f = fixture(t);
   delete f.receipt.gates.deployRehearsal; f.save();
@@ -164,7 +228,7 @@ test('release cannot remove a lock whose ownership changed', t => {
 test('canonical CLI executes from a Mac runner path containing spaces', t => {
   const f = fixture(t), root = path.join(f.dir, 'Application Support', 'GPoint');
   fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
-  for (const name of ['release-readiness.mjs', 'release-gpoint.mjs', 'release-gsales.mjs', 'release-gsales-provision.mjs', 'release-bookkeeping.mjs', 'release-gpoint-vps-adapter.mjs', 'release-bundle.mjs', 'release-component-bundle-v4.mjs', 'release-component-vps-proof-v4.mjs', 'release-static-v4.mjs', 'release-static-transfer-v4.mjs', 'verify-loaded-images.py', 'release-lock.mjs', 'release-migrations.mjs']) {
+  for (const name of ['release-readiness.mjs', 'release-gpoint.mjs', 'release-gsales.mjs', 'release-gsales-provision.mjs', 'release-bookkeeping.mjs', 'release-gpoint-vps-adapter.mjs', 'release-bundle.mjs', 'release-oci.mjs', 'release-component-bundle-v4.mjs', 'release-component-vps-proof-v4.mjs', 'release-static-v4.mjs', 'release-static-transfer-v4.mjs', 'verify-loaded-images.py', 'release-lock.mjs', 'release-migrations.mjs']) {
     fs.copyFileSync(fileURLToPath(new URL(name, import.meta.url)), path.join(root, 'scripts', name));
   }
   fs.mkdirSync(path.join(root, 'docs/release/state'), { recursive: true });

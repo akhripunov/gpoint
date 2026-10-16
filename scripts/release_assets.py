@@ -162,7 +162,9 @@ def find_prepare_evidence(sha, run_id, current_attempt, api=evidence_api):
             raise RuntimeError('Executed Prepare has no immutable bundle')
         if actual_start < attempt_start:
             raise RuntimeError('Immutable Prepare tag does not match executed attempt')
-        exact_api = lambda route: release if route == f'releases/tags/{tag}' else api(route)
+        def exact_api(route):
+            return release if route == f'releases/tags/{tag}' else api(route)
+
         asset = resolve_asset('prepare', sha, run_id, attempt, 'bundle.zip', exact_api)
         return attempt, asset
     raise RuntimeError('No immutable successful executed Prepare attempt')
@@ -188,6 +190,22 @@ def write_zip(target, files):
             if source.is_symlink() or not source.is_file():
                 raise RuntimeError('Release input must be a regular file')
             archive.write(source, name)
+
+
+def build_oci_prepare_assets(bundle, output_dir):
+    """Keep the normal Deploy asset small; retain the verified archive separately for fallback."""
+    bundle, output_dir = Path(bundle), Path(output_dir)
+    receipt_path = bundle / 'receipt.json'
+    archive_path = bundle / 'images.tar.gz'
+    receipt = json.loads(receipt_path.read_text())
+    if (receipt.get('schema') != 3 or receipt.get('transport') != 'ghcr-oci'
+            or not archive_path.is_file() or archive_path.is_symlink()):
+        raise RuntimeError('OCI Prepare receipt or fallback archive is invalid')
+    primary = output_dir / 'bundle.zip'
+    fallback = output_dir / 'fallback-images.zip'
+    write_zip(primary, [('receipt.json', receipt_path)])
+    write_zip(fallback, [('images.tar.gz', archive_path), ('receipt.json', receipt_path)])
+    return primary, fallback
 
 
 def verified_optional_v4_static_asset(receipt, bundle, sha):
@@ -240,6 +258,10 @@ def publish(kind, sha, run_id, attempt):
                 target = root / 'bundle.zip'
                 write_zip(target, [(name, bundle / name) for name in names])
                 archives.append(target)
+            elif kind == 'prepare' and receipt.get('schema') == 3:
+                if receipt.get('transport') != 'ghcr-oci':
+                    raise RuntimeError('unknown OCI Prepare receipt transport')
+                archives.extend(build_oci_prepare_assets(bundle, root))
             else:
                 target = root / ('bundle.zip' if kind == 'prepare' else 'receipt.zip')
                 write_zip(target, [(name, bundle / name) for name in names])
@@ -299,7 +321,8 @@ def read_result(sha, run_id, attempt, result_path=None, token=None):
         extract(archive, extracted, [name])
         validate_result(json.loads((extracted / name).read_text()), sha, run_id, source_attempt)
         result.parent.mkdir(parents=True, exist_ok=True)
-        if result.is_symlink(): raise RuntimeError('Result destination must not be a symlink')
+        if result.is_symlink():
+            raise RuntimeError('Result destination must not be a symlink')
         result.write_bytes((extracted / name).read_bytes())
         if result_path is None and os.environ.get('GITHUB_ENV'):
             with open(os.environ['GITHUB_ENV'], 'a') as stream:
@@ -312,9 +335,13 @@ def read_result(sha, run_id, attempt, result_path=None, token=None):
 def main():
     sha = os.environ.get('CANDIDATE_SHA', os.environ.get('GITHUB_SHA', ''))
     run_id, attempt = os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT']
-    if sys.argv[1] == 'publish': publish(sys.argv[2], sha, run_id, attempt)
-    elif sys.argv[1] == 'read-result': read_result(sha, run_id, attempt)
-    else: raise RuntimeError('Unknown release asset command')
+    if sys.argv[1] == 'publish':
+        publish(sys.argv[2], sha, run_id, attempt)
+    elif sys.argv[1] == 'read-result':
+        read_result(sha, run_id, attempt)
+    else:
+        raise RuntimeError('Unknown release asset command')
 
 
-if __name__ == '__main__': main()
+if __name__ == '__main__':
+    main()

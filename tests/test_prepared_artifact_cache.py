@@ -11,7 +11,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
-import network_retry
+import network_retry  # noqa: E402
 SPEC = importlib.util.spec_from_file_location('artifact_cache', ROOT / 'scripts/prepared_artifact_cache.py')
 CACHE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CACHE)
@@ -46,6 +46,44 @@ class ArtifactCacheTests(unittest.TestCase):
         next((self.root / 'cache').glob('v2-*.zip')).write_bytes(b'corrupt cache')
         self.assertEqual(self.restore(), 'MISS')
         self.assertEqual(self.downloads, 2)
+
+    def test_archive_fallback_requires_exact_receipt_members_and_checksum(self):
+        import json
+        receipt = {'schema': 3, 'candidateSha': 'a' * 40,
+                   'archiveSha256': __import__('hashlib').sha256(b'image archive').hexdigest()}
+        fallback = self.root / 'fallback.zip'
+        with zipfile.ZipFile(fallback, 'w') as output:
+            output.writestr('images.tar.gz', b'image archive')
+            output.writestr('receipt.json', json.dumps(receipt, sort_keys=True))
+        target = CACHE.verify_and_install_archive_fallback(fallback, self.root / 'selected', receipt)
+        self.assertEqual(target.read_bytes(), b'image archive')
+        with self.assertRaisesRegex(RuntimeError, 'differs'):
+            CACHE.verify_and_install_archive_fallback(fallback, self.root / 'other', {**receipt, 'candidateSha': 'b' * 40})
+        with zipfile.ZipFile(fallback, 'w') as output:
+            output.writestr('images.tar.gz', b'changed')
+            output.writestr('receipt.json', json.dumps(receipt))
+        with self.assertRaisesRegex(RuntimeError, 'checksum'):
+            CACHE.verify_and_install_archive_fallback(fallback, self.root / 'bad', receipt)
+
+    def test_archive_fallback_streams_large_image_member_instead_of_reading_it_all(self):
+        import json
+        receipt = {'schema': 3, 'candidateSha': 'a' * 40,
+                   'archiveSha256': __import__('hashlib').sha256(b'image archive').hexdigest()}
+        fallback = self.root / 'fallback-stream.zip'
+        with zipfile.ZipFile(fallback, 'w') as output:
+            output.writestr('images.tar.gz', b'image archive')
+            output.writestr('receipt.json', json.dumps(receipt, sort_keys=True))
+        original_read = CACHE.zipfile.ZipFile.read
+
+        def reject_unbounded_image_read(archive, name, *args, **kwargs):
+            if name == 'images.tar.gz':
+                raise AssertionError('large image member must be streamed')
+            return original_read(archive, name, *args, **kwargs)
+
+        with patch.object(CACHE.zipfile.ZipFile, 'read', new=reject_unbounded_image_read):
+            target = CACHE.verify_and_install_archive_fallback(
+                fallback, self.root / 'streamed', receipt)
+        self.assertEqual(target.read_bytes(), b'image archive')
 
     def test_changed_artifact_id_cannot_reuse_another_attempt(self):
         self.restore('12')
@@ -83,8 +121,10 @@ class ArtifactCacheTests(unittest.TestCase):
         run = dict(status='completed', conclusion='success', head_sha='a' * 40,
                    head_branch='main', event='push', path='.github/workflows/maxibot-prepare.yml', run_attempt=1)
         def api(repo, route, token, stage):
-            if route == 'actions/runs/1': return run
-            if route == 'git/ref/heads/main': return {'object': {'sha': 'a' * 40}}
+            if route == 'actions/runs/1':
+                return run
+            if route == 'git/ref/heads/main':
+                return {'object': {'sha': 'a' * 40}}
             return {'expired': True}
         with patch.dict(CACHE.os.environ, env), patch.object(CACHE, 'github', api):
             with self.assertRaisesRegex(RuntimeError, 'selected Prepare'):
@@ -94,7 +134,8 @@ class ArtifactCacheTests(unittest.TestCase):
         cache = self.root / 'cache'
         cache.mkdir()
         (cache / 'operator-notes.txt').write_text('keep')
-        for i in range(10, 15): self.restore(str(i))
+        for i in range(10, 15):
+            self.restore(str(i))
         self.assertEqual(len(list(cache.glob('*.zip'))), 1)
         self.assertTrue((cache / 'operator-notes.txt').exists())
 
@@ -104,7 +145,8 @@ class ArtifactCacheTests(unittest.TestCase):
         legacy = cache / ('12-' + 'a' * 64 + '.zip')
         previous_v2 = cache / ('v2-' + 'b' * 64 + '.zip')
         unrelated = cache / 'operator-backup.zip'
-        for path in (legacy, previous_v2, unrelated): path.write_bytes(b'old')
+        for path in (legacy, previous_v2, unrelated):
+            path.write_bytes(b'old')
 
         self.restore('13')
 
@@ -227,12 +269,15 @@ class ArtifactCacheTests(unittest.TestCase):
             return io.BytesIO(b'verified complete artifact')
         def bounded_retry(operation, stage, allow_redirect=False):
             for attempt in range(2):
-                try:return operation()
+                try:
+                    return operation()
                 except urllib.error.HTTPError as exc:
-                    if allow_redirect and exc.code==302:return exc
+                    if allow_redirect and exc.code == 302:
+                        return exc
                     raise
                 except TimeoutError:
-                    if attempt:raise
+                    if attempt:
+                        raise
         with patch.object(CACHE.urllib.request,'build_opener') as opener, \
              patch.object(CACHE.urllib.request,'urlopen',side_effect=storage_open), \
              patch.object(CACHE,'network_request',side_effect=bounded_retry):
