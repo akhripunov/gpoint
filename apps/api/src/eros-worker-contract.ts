@@ -107,7 +107,7 @@ export function buildChatCompletionSse(input: { id: string; model: string; text:
 
 export function parseErosEmbeddingRequest(value: unknown): ParsedErosEmbeddingRequest {
   if (!isRecord(value) || Object.keys(value).some((key) => !['model', 'input', 'dimensions'].includes(key)) ||
-      value.dimensions !== 512 || value.model !== 'qwen3-embedding:0.6b@gpoint') throw new Error('eros_embedding_request_invalid');
+      value.dimensions !== 512 || value.model !== 'qwen3-embedding:0.6b') throw new Error('eros_embedding_request_invalid');
   const raw = typeof value.input === 'string' ? [value.input] : value.input;
   if (!Array.isArray(raw) || raw.length < 1 || raw.length > 16 ||
       raw.some((text) => typeof text !== 'string' || text.trim().length === 0 || text.length > 6_000)) {

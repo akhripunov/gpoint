@@ -1,7 +1,84 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { jwtVerify } from 'jose';
-import { decodeErosCursor, encodeErosCursor, ErosAdapterError, ErosEngineClient, buildErosPersonaPrompt, erosIdentityFor, isErosChatAllowed, isSyntheticErosPair, markErosAssistantMessagesRead, mergeErosInboxItems, erosInboxLastMessageSummary, prepareErosRelationship, resolveErosRelationshipInstanceId, shouldUseErosChat, syncErosPersona, syncErosRelationship, unreadErosAssistantCounts, uuidV5 } from '../src/eros-adapter.js';
+import { createErosEngineClient, decodeErosCursor, encodeErosCursor, ErosAdapterError, ErosEngineClient, buildErosPersonaPrompt, erosIdentityFor, erosTestCreatorIds, isErosChatAllowed, isSyntheticErosPair, markErosAssistantMessagesRead, mergeErosInboxItems, erosInboxLastMessageSummary, prepareErosRelationship, resolveErosRelationshipInstanceId, shouldUseErosChat, syncErosPersona, syncErosRelationship, unreadErosAssistantCounts, uuidV5 } from '../src/eros-adapter.js';
+
+test('Eros client uses the configured bounded request timeout', async () => {
+  let observedTimeout: number | undefined;
+  const originalTimeout = AbortSignal.timeout;
+  AbortSignal.timeout = (milliseconds: number) => {
+    observedTimeout = milliseconds;
+    return originalTimeout(milliseconds);
+  };
+  try {
+    const fetchImpl: typeof fetch = async () => Response.json({ total: 0, messages: [] });
+    const client = createErosEngineClient({
+      NODE_ENV: 'test',
+      EROS_ENABLED: 'true',
+      EROS_SERVICE_URL: 'http://eros:8080',
+      EROS_JWT_SECRET: 'unit-test-eros-jwt-secret-at-least-32-bytes',
+      EROS_REQUEST_TIMEOUT_MS: '240000',
+    }, fetchImpl)!;
+    await client.history('7f43ff08-7bf9-5647-9dc2-bb4a46f8edc0', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1');
+    assert.equal(observedTimeout, 240_000);
+  } finally {
+    AbortSignal.timeout = originalTimeout;
+  }
+});
+
+test('Eros client can be explicitly enabled in production', () => {
+  const base = {
+    NODE_ENV: 'production',
+    EROS_SERVICE_URL: 'http://eros:8080',
+    EROS_JWT_SECRET: 'unit-test-eros-jwt-secret-at-least-32-bytes',
+  };
+  assert.ok(createErosEngineClient({ ...base, EROS_ENABLED: 'true' }));
+  assert.equal(createErosEngineClient({ ...base, EROS_ENABLED: 'false' }), null);
+});
+
+test('Eros timeout configuration accepts only decimal milliseconds within the worker deadline', () => {
+  const base = {
+    NODE_ENV: 'test',
+    EROS_ENABLED: 'true',
+    EROS_SERVICE_URL: 'http://eros:8080',
+    EROS_JWT_SECRET: 'unit-test-eros-jwt-secret-at-least-32-bytes',
+  };
+  assert.ok(createErosEngineClient({ ...base, EROS_REQUEST_TIMEOUT_MS: '210000' }));
+  for (const value of ['999', '240001', '1e3', '0x3e8', ' 1000']) {
+    assert.throws(
+      () => createErosEngineClient({ ...base, EROS_REQUEST_TIMEOUT_MS: value }),
+      (error: unknown) => error instanceof ErosAdapterError && error.code === 'eros_timeout_invalid',
+    );
+  }
+});
+
+test('production Eros routing is limited to explicitly enabled synthetic pilot identities', () => {
+  const production = {
+    NODE_ENV: 'production',
+    EROS_ENABLED: 'true',
+    EROS_PRODUCTION_TEST_MODE: 'true',
+    EROS_DATA_MODE: 'synthetic',
+    EROS_PRODUCTION_TEST_USER_IDS: 'pilot-user-1,pilot-user-2',
+    EROS_PRODUCTION_TEST_CREATOR_IDS: 'pilot-creator-1',
+  };
+  assert.equal(isErosChatAllowed('pilot-user-1', 'pilot-creator-1', production), true);
+  assert.equal(isErosChatAllowed('pilot-user-1-extra', 'pilot-creator-1', production), false);
+  assert.equal(isErosChatAllowed('pilot-user-1', 'pilot-creator-2', production), false);
+  assert.equal(isErosChatAllowed('pilot-user-1', 'pilot-creator-1', { ...production, EROS_PRODUCTION_TEST_MODE: 'false' }), false);
+  assert.equal(isErosChatAllowed('pilot-user-1', 'pilot-creator-1', { ...production, EROS_DATA_MODE: 'shared' }), false);
+  assert.equal(isErosChatAllowed('pilot-user-1', 'pilot-creator-1', { ...production, EROS_PRODUCTION_TEST_USER_IDS: '' }), false);
+  assert.equal(isErosChatAllowed('pilot-user-1', 'pilot-creator-1', { ...production, EROS_PRODUCTION_TEST_CREATOR_IDS: '' }), false);
+  assert.equal(shouldUseErosChat('pilot-user-1', 'pilot-creator-1', false, production), false);
+  assert.deepEqual(erosTestCreatorIds(production), ['pilot-creator-1']);
+  assert.equal(isSyntheticErosPair(
+    { telegramUsername: 'eros_test_pilot' },
+    { slug: 'eros-test-pilot', profileStatus: 'APPROVED' },
+  ), true);
+  assert.equal(isSyntheticErosPair(
+    { telegramUsername: 'real_user' },
+    { slug: 'eros-test-pilot', profileStatus: 'APPROVED' },
+  ), false);
+});
 
 test('UUIDv5 identity mapping is stable and separates GPoint users, personas, and relationships', () => {
   assert.equal(uuidV5('6ba7b810-9dad-11d1-80b4-00c04fd430c8', 'www.widgets.com'), '21f7f8de-8051-5b89-8680-0195ef798b6a');
@@ -140,7 +217,7 @@ test('relationship sync does not reactivate a relationship ended in Eros', async
   assert.equal(inserted, true);
 });
 
-test('Eros local routing requires a non-production process and exact synthetic allowlist matches', () => {
+test('local Eros routing requires a non-production process and exact synthetic allowlist matches', () => {
   const enabled = {
     NODE_ENV: 'development',
     EROS_ENABLED: 'true',

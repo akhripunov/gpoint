@@ -8,6 +8,7 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3
 const MESSAGE_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const MAX_REPLY_CHARS = 4_096;
 const MAX_STREAM_BYTES = 128 * 1024;
+const MAX_EROS_REQUEST_TIMEOUT_MS = 240_000;
 
 export interface ErosIdentity {
   userId: string;
@@ -43,12 +44,17 @@ function csvIds(value: string | undefined): Set<string> {
   return new Set((value ?? '').split(',').map((item) => item.trim()).filter(Boolean));
 }
 
-/** Eros is restricted to explicitly allowlisted synthetic identities outside production. */
+/** Eros is available only to exact synthetic identity allowlists; production requires a separate pilot gate. */
 export function isErosChatAllowed(userId: string, creatorId: string, env: NodeJS.ProcessEnv = process.env): boolean {
-  return ['development', 'test'].includes(env.NODE_ENV ?? '') && env.EROS_ENABLED === 'true' &&
+  const productionPilot = env.NODE_ENV === 'production' && env.EROS_ENABLED === 'true' &&
+    env.EROS_PRODUCTION_TEST_MODE === 'true' && env.EROS_DATA_MODE === 'synthetic' &&
+    csvIds(env.EROS_PRODUCTION_TEST_USER_IDS).has(userId) &&
+    csvIds(env.EROS_PRODUCTION_TEST_CREATOR_IDS).has(creatorId);
+  const localSynthetic = ['development', 'test'].includes(env.NODE_ENV ?? '') && env.EROS_ENABLED === 'true' &&
     env.EROS_DATA_MODE === 'synthetic' && isLocalSandboxDatabaseUrl(env.DATABASE_URL) &&
     isLocalSandboxDatabaseUrl(env.EROS_ADAPTER_DATABASE_URL) &&
     csvIds(env.EROS_TEST_USER_IDS).has(userId) && csvIds(env.EROS_TEST_CREATOR_IDS).has(creatorId);
+  return productionPilot || localSynthetic;
 }
 
 export function isSyntheticErosPair(
@@ -60,7 +66,8 @@ export function isSyntheticErosPair(
 }
 
 export function erosTestCreatorIds(env: NodeJS.ProcessEnv = process.env): string[] {
-  return [...csvIds(env.EROS_TEST_CREATOR_IDS)].slice(0, 20);
+  const allowlist = env.NODE_ENV === 'production' ? env.EROS_PRODUCTION_TEST_CREATOR_IDS : env.EROS_TEST_CREATOR_IDS;
+  return [...csvIds(allowlist)].slice(0, 20);
 }
 
 export function shouldUseErosChat(userId: string, creatorId: string, longTermMemoryConsent: boolean, env: NodeJS.ProcessEnv = process.env): boolean {
@@ -361,7 +368,7 @@ export class ErosEngineClient {
     }
     this.baseUrl = url.toString().replace(/\/$/, '');
     this.fetchImpl = options.fetchImpl ?? fetch;
-    this.timeoutMs = Math.max(1_000, Math.min(options.timeoutMs ?? 15_000, 60_000));
+    this.timeoutMs = Math.max(1_000, Math.min(options.timeoutMs ?? 15_000, MAX_EROS_REQUEST_TIMEOUT_MS));
     this.secret = new TextEncoder().encode(options.jwtSecret);
     if (this.secret.byteLength < 32) throw new Error('eros_jwt_secret_too_short');
   }
@@ -564,7 +571,15 @@ export class ErosEngineClient {
 }
 
 export function createErosEngineClient(env: NodeJS.ProcessEnv = process.env, fetchImpl?: typeof fetch): ErosEngineClient | null {
-  if (env.EROS_ENABLED !== 'true' || env.NODE_ENV === 'production') return null;
+  if (env.EROS_ENABLED !== 'true') return null;
   if (!env.EROS_SERVICE_URL || !env.EROS_JWT_SECRET) throw new ErosAdapterError('eros_configuration_incomplete');
-  return new ErosEngineClient({ baseUrl: env.EROS_SERVICE_URL, jwtSecret: env.EROS_JWT_SECRET, fetchImpl });
+  let timeoutMs: number | undefined;
+  if (env.EROS_REQUEST_TIMEOUT_MS !== undefined) {
+    if (!/^[0-9]{1,6}$/.test(env.EROS_REQUEST_TIMEOUT_MS)) throw new ErosAdapterError('eros_timeout_invalid', 500);
+    timeoutMs = Number(env.EROS_REQUEST_TIMEOUT_MS);
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > MAX_EROS_REQUEST_TIMEOUT_MS) {
+      throw new ErosAdapterError('eros_timeout_invalid', 500);
+    }
+  }
+  return new ErosEngineClient({ baseUrl: env.EROS_SERVICE_URL, jwtSecret: env.EROS_JWT_SECRET, timeoutMs, fetchImpl });
 }

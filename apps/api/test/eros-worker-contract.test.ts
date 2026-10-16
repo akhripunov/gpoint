@@ -91,11 +91,12 @@ test('streaming completion emits standard OpenAI SSE deltas and one terminal mar
 
 test('embedding proxy contract requires exact Qwen model and native 512-dimensional vectors', () => {
   const request = parseErosEmbeddingRequest({
-    model: 'qwen3-embedding:0.6b@gpoint', input: ['Привет', 'память'], dimensions: 512,
+    model: 'qwen3-embedding:0.6b', input: ['Привет', 'память'], dimensions: 512,
   });
   assert.equal(request.input.length, 2);
   assert.equal(request.dimensions, 512);
   assert.throws(() => parseErosEmbeddingRequest({ ...request, dimensions: 1024 }));
+  assert.throws(() => parseErosEmbeddingRequest({ ...request, model: 'other-model' }));
   assert.throws(() => parseErosEmbeddingRequest({ ...request, extra: 'untrusted' }));
   const output = buildOpenAiEmbeddingResponse(request.model, [Array(512).fill(0.25), Array(512).fill(-0.25)]);
   assert.equal(output.data.length, 2);
