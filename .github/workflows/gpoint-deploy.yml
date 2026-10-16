@@ -32,7 +32,7 @@ on:
         required: false
         type: string
       task_authorization_id:
-        description: 'Durable TASK_SCOPED_AUTO authorization ID; required only for that mode'
+        description: 'Durable full-cycle TASK_SCOPED_AUTO authorization; optional in preflight and required for task-scoped-auto'
         required: false
         type: string
 

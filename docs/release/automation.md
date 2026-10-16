@@ -5,21 +5,25 @@
 Актуальные условия: [Release authorization modes](../RELEASE_AUTHORIZATION.md).
 По умолчанию владелец подтверждает подготовленный exact SHA. Конкретное
 поручение владельца «исправь [задачу] и выкатывай» разрешает один
-`TASK_SCOPED_AUTO` release без повторного подтверждения. До реализации создаётся
-durable authorization record; controller проверяет baseline, полный scope,
-одноразовость, eligibility и все release gates до передачи существующего
-exact-SHA approval input. Release infrastructure и другие owner-only категории
-в этот режим не входят. Runner может штатно ждать в GitHub `Queued`; первый
-этап запущенного self-hosted job выполняет fail-closed readiness check.
+`TASK_SCOPED_AUTO` release без повторного подтверждения. До реализации
+фиксируется schema-v3 durable authorization record. После exact-SHA Prepare
+и immutable `READY_FOR_OWNER` preflight existing controller проверяет
+baseline, полный scope и одноразовость, атомарно claim-ит authorization и
+вызывает тот же Deploy workflow в `task-scoped-auto` режиме. Повторные Prepare
+и preflight не создаются. Release infrastructure и неподдержанные owner-only
+категории остаются за отдельным exact-SHA approval; database migration
+допускается только с полным task risk contract и всеми штатными gates.
+Runner может штатно ждать в GitHub `Queued`; readiness check остаётся
+fail-closed.
 Подробности: [Release authorization modes](../RELEASE_AUTHORIZATION.md).
 
 ## Для владельца
 
 1. Архитектор задаёт изменения и критерии приёмки. Dev реализует их и отправляет чистый commit в `origin/main`.
-2. Откройте [GPoint — Prepare](https://github.com/akhripunov/gpoint/actions/workflows/gpoint-prepare.yml). GitHub проверит exact SHA и автоматически запустит preflight после успешной публикации immutable bundle. Отдельный controller использует существующий GPoint self-hosted runner, атомарный claim предотвращает повторный preflight для одной пары SHA/run/attempt; он не запускает повторный CI или image build.
-3. В [Архитектор — Handoff](https://linear.app/bestuzhev/document/arhitektor-handoff-36f91afb3d2c) смотрите блок **Автоматизация: кандидат** и автоматическую запись `READY_FOR_OWNER`. Она появляется только после успешного read-only preflight и опубликованного immutable evidence. Это ещё не production release.
-4. Для Exact-SHA режима один раз запустите существующий [GPoint — Deploy](https://github.com/akhripunov/gpoint/actions/workflows/gpoint-deploy.yml) с полным SHA и явным production approval. Selector требует самый свежий успешный immutable `READY_FOR_OWNER` preflight того же SHA и Prepare run/attempt; без него production workflow блокируется.
-5. После approval существующий canonical workflow продолжает Deploy, verification, evidence и Linear publication автоматически. Mac должен быть включён, иметь сеть, активную CLI authentication и работающий GPoint runner. Incy остаётся включённым. Если runner недоступен, run останется Queued и не считается завершённым.
+2. После успешного exact-SHA Prepare и immutable bundle существующий controller выполняет один read-only preflight. Для поручения только на разработку он не передаёт task authorization. Для заранее зарегистрированной schema-v3 авторизации полного production-цикла controller связывает запись с точным кандидатом; новый Prepare или preflight не создаются.
+3. В [Архитектор — Handoff](https://linear.app/bestuzhev/document/arhitektor-handoff-36f91afb3d2c) смотрите блок **Автоматизация: кандидат** и immutable `READY_FOR_OWNER`. Если подходящая авторизация полного цикла действительна, scope и baseline совпадают, все gates PASS, а глобальный одноразовый claim успешно создан, controller автоматически запускает существующий production Deploy. Иначе сохраняется обычное требование exact-SHA approval. Сам статус READY не является разрешением.
+4. Автоматический Deploy использует тот же exact-SHA workflow и повторно проверяет claim, authorization, baseline, provenance и все production gates. Любой drift, неизвестный риск, повторный/активный Deploy или неопределённый исход останавливает автоматизацию; после частичного применения требуется reconciliation, а не слепой повтор.
+5. Existing canonical workflow продолжает Deploy, verification, evidence и Linear publication. Mac должен быть включён, иметь сеть, активную CLI authentication и работающий GPoint runner. Incy остаётся включённым. Если runner недоступен, run останется Queued и не считается завершённым.
 6. После технического COMPLETE откройте Telegram → GPoint → Models Hub. Отправьте новое сообщение и дождитесь ответа. Сообщите Dev «ответ получил» или «ответа нет». Dev фиксирует подтверждение сценария в журнале; автоматизация не создаёт тестовые production-диалоги от вашего имени.
 
 История: [Журнал релизов](https://linear.app/bestuzhev/document/zhurnal-relizov-640efa60dacf). Каждый результат содержит SHA и ссылку на GitHub run. В Handoff история и архитектурные ограничения сохраняются, автоматизация меняет только свои именованные блоки.

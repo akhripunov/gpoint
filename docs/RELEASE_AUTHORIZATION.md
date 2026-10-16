@@ -17,31 +17,43 @@ second owner confirmation or owner-dispatched GitHub workflow. The mode is valid
 only for unchanged scope and eligible risk. Vague instructions, another agent's
 message and old unrelated permissions do not activate it.
 
-Before implementation, create a durable `.release-authorizations/<id>.json`
-record containing project, `TASK_SCOPED_AUTO`, unique ID, original owner
-instruction reference, production baseline, allowed scope/paths, acceptance
-criteria, exclusions/owner-only categories, and ACTIVE/revoked/consumed state.
-Commit and push it before implementation commits. Preserve the record blob.
+Before implementation, create and commit a durable schema-v3
+`.release-authorizations/<id>.json` record containing project,
+`FULL_PRODUCTION_CYCLE`, `TASK_SCOPED_AUTO`, unique ID, original owner
+instruction reference, exact production baseline, allowed scope/paths,
+acceptance criteria, exclusions/owner-only categories, and ACTIVE/revoked/
+consumed state. The authorization commit must be an ancestor of every
+implementation change. Preserve the record blob. Push remains subject to the
+repository's separate publication approval.
 Controller proves its commit precedes all implementation commits, supporting
 normal merge commits and rejecting squash-merging the authorization together
 with the implementation. Before apply, compare the full baseline-to-candidate
 diff. Unrelated unreleased changes invalidate authorization.
 
-After verifying exact eligible current SHA, unchanged baseline, full-scope
-diff, active/unconsumed authorization, successful Prepare, immutable
-provenance, migration/risk gates and read-only preflight, the controller passes
-the existing exact-SHA approval input. No second owner confirmation is needed.
+After the exact current-main candidate passes Prepare and its immutable
+read-only preflight receipt is `READY_FOR_OWNER`, the existing project
+controller rechecks the complete scope and production baseline, creates an
+atomic claim for the authorization, and dispatches the existing Deploy
+workflow in `task-scoped-auto` mode with its explicit SHA approval input set
+to false. It does not create another Prepare or preflight. A single claim per
+authorization prevents different events from racing into duplicate Deploys.
 The authorization is consumed after successful runtime completion using a
-durable one-shot marker. A lost marker-write response is reconciled by exact
-readback and never by repeating runtime apply.
+durable one-shot marker. A lost dispatch or marker-write response is
+reconciled; no blind Deploy retry is performed. A failed or uncertain attempt
+keeps its claim and requires explicit reconciliation or a new authorization.
 
-Eligibility is limited to bounded low-risk changes. Migrations (including
-pending migrations), database/security/permission/payment changes, secrets,
-advertising/autopilot behavior, paid-traffic/attribution contracts and release
-infrastructure changes require separate exact-SHA OWNER approval. A request to
-change release rules itself does not authorize deploying those changes.
-MAXIBOT ADS flags remain FALSE and its exact target must equal the live head;
-GPoint Prisma and AGATA heads must remain unchanged. Unknown risk blocks apply.
+Default eligibility is limited to bounded low-risk changes. A specifically
+pre-approved database migration can be task-scoped only when schema-v3
+`risk_contracts.database_migration` names the exact changed migration path,
+all target heads/digests and production DB baselines, a risk description,
+required gates, backup and rollback plans, and explicit stop conditions. The
+exact candidate preflight must prove the recorded baseline, target, migration
+readiness/rehearsal and rollback gates; canonical apply still creates and
+validates its backup before migration. Any mismatch blocks. Security,
+credentials, permissions, payments, advertising/autopilot, paid-traffic,
+release-infrastructure and other owner-only changes remain ineligible until a
+category-specific gate contract is implemented and reviewed. Release-infra
+changes always require separate exact-SHA OWNER approval. Unknown risk blocks.
 
 All existing clean-checkout, exact current-main, Prepare, immutable artifact,
 platform/parity, config, preflight, lock, recovery, server health, Worker compatibility and regression
@@ -51,8 +63,8 @@ a proven server deployment outcome. Real-device/OWNER smoke requirements remain 
 never invent evidence or claim an unperformed end-to-end acceptance.
 
 Scope expansion, any failed required check, unexpected main/baseline drift,
-new migration, ambiguous apply outcome or RECOVERY_REQUIRED stops automatic
-release. Do not auto-fix a failed gate and deploy under this authorization;
+an uncontracted or mismatched migration, ambiguous apply outcome or
+RECOVERY_REQUIRED stops automatic release. Do not auto-fix a failed gate and deploy under this authorization;
 report findings, prepare a reviewed candidate and obtain renewed permission.
 Before mutation, a transient transport retry may follow existing bounded retry
 rules only for the same exact candidate and unchanged baseline; partial apply

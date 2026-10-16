@@ -12,7 +12,8 @@ const id = 'gpoint-task-2026-10-06-001';
 const baseline = 'a'.repeat(40);
 const candidate = 'b'.repeat(40);
 const record = (extra = {}) => ({
-  schema_version: 1,
+  schema_version: 3,
+  owner_instruction_scope: 'FULL_PRODUCTION_CYCLE',
   project: 'gpoint',
   authorization_mode: 'TASK_SCOPED_AUTO',
   authorization_id: id,
@@ -45,6 +46,27 @@ for (const path of ['.github/workflows/gpoint-deploy.yml', 'scripts/release-gpoi
   });
 }
 
+test('a complete pre-approved migration contract admits only its exact scoped migration path', () => {
+  const migration = 'packages/db/prisma/migrations/0099_add_field/migration.sql';
+  const risk = {risk_description: 'Add one nullable profile field with a bounded forward migration.',
+    allowed_paths: [migration], prisma_target: '0099_add_field', agata_target: 'agata-1',
+    gsales_migration_sha256: 'b'.repeat(64), production_prisma_head: 'prisma-1',
+    production_agata_head: 'agata-1', production_gsales_head: 'gsales-1',
+    production_gsales_migration_sha256: 'a'.repeat(64),
+    backup_plan: 'Create and verify the canonical GPoint database backup before migration.',
+    rollback_plan: 'Restore the verified backup or use the recorded forward-repair procedure.',
+    stop_conditions: ['Stop if live baseline differs.', 'Stop if backup verification fails.'],
+    required_gates: ['migration_preflight', 'backup_before_migration', 'rollback_readiness', 'tenant_isolation', 'postdeploy_health']};
+  const proof = validate({record: record({allowed_paths: [migration], risk_contracts: {database_migration: risk}}),
+    changedPaths: [migration]});
+  assert.equal(proof.changedPaths, migration);
+  assert.throws(() => validate({record: record({allowed_paths: [migration]}), changedPaths: [migration]}),
+    /complete pre-approved database risk contract/);
+  assert.throws(() => validate({record: record({allowed_paths: [migration], risk_contracts: {database_migration: risk}}),
+    changedPaths: [migration, 'packages/db/prisma/migrations/0100_other/migration.sql']}),
+    /complete pre-approved database risk contract/);
+});
+
 test('task authorization rejects unrelated paths and baseline drift', () => {
   assert.throws(() => validate({ changedPaths: ['apps/web/components/Menu.tsx', 'README.md'] }), /outside authorized scope/);
   assert.throws(() => validate({ productionSha: 'c'.repeat(40) }), /production baseline/);
@@ -56,6 +78,11 @@ test('task authorization rejects incomplete, revoked and consumed records', () =
     { exclusions: ['database'] }, { state: 'REVOKED' }, { revoked: true }, { consumed: true }]) {
     assert.throws(() => validate({ record: record(extra) }), AuthorizationError);
   }
+});
+
+test('task authorization requires explicit full-cycle owner intent in the durable record', () => {
+  assert.throws(() => validate({record: record({owner_instruction_scope: 'PREPARE_ONLY'})}), /explicitly authorize the full production cycle/);
+  assert.throws(() => validate({record: record({schema_version: 1})}), /Unsupported task authorization record/);
 });
 
 test('task authorization rejects wrong project and authorization id', () => {
@@ -119,14 +146,21 @@ test('scope diff rejects a squash merge that hides authorization-before-code ord
   fs.rmSync(root, {recursive: true, force: true});
 });
 
-test('authorization state check accepts only absent revoked and consumed refs', async () => {
+test('authorization state check observes revoked, consumed and claimed markers', async () => {
   const paths = [];
   const state = await checkTaskAuthorizationState({project: 'gpoint', authorizationId: id, token: 'test',
     fetchImpl: async url => { paths.push(url); return {status: 404, ok: false}; }});
-  assert.deepEqual(state, {revoked: false, consumed: false});
-  assert.equal(paths.length, 2);
+  assert.deepEqual(state, {revoked: false, consumed: false, claimed: false});
+  assert.equal(paths.length, 3);
   await assert.rejects(checkTaskAuthorizationState({project: 'gpoint', authorizationId: id, token: 'test',
-    fetchImpl: async () => ({status: 200, ok: true})}), /revoked or already consumed/);
+    fetchImpl: async () => ({status: 200, ok: true, json: async () => ({object: {sha: candidate}})})}), /revoked or already consumed/);
+  await assert.rejects(checkTaskAuthorizationState({project: 'gpoint', authorizationId: id, candidateSha: candidate, token: 'test',
+    fetchImpl: async () => ({status: 404, ok: false})}), /claim is absent or belongs to another candidate/);
+  const claimed = await checkTaskAuthorizationState({project: 'gpoint', authorizationId: id, candidateSha: candidate, token: 'test',
+    fetchImpl: async url => url.includes('/claimed')
+      ? ({status: 200, ok: true, json: async () => ({object: {sha: candidate}})})
+      : ({status: 404, ok: false})});
+  assert.equal(claimed.claimed, true);
   await assert.rejects(checkTaskAuthorizationState({project: 'gpoint', authorizationId: id, token: '',
     fetchImpl: async () => assert.fail('must not query without token')}), /token is required/);
 });
@@ -157,15 +191,30 @@ test('lost marker-creation response is reconciled by exact readback without retr
   assert.equal(requests[1].options.method, undefined);
 });
 
-test('TASK_SCOPED_AUTO requires all live DB heads and checksums to match without migration apply', () => {
-  const manifest = {dbHeadBefore: 'prisma-1', agataDbHeadBefore: 'agata-1', gsalesDbHeadBefore: '001_gsales',
-    liveFacts: {LIVE_GSALES_MIGRATION_SHA256: 'f'.repeat(64)}};
-  assert.doesNotThrow(() => assertNoTaskScopedMigrations({manifest, prismaHead: 'prisma-1', agataHead: 'agata-1',
-    gsalesMigrationSha256: 'f'.repeat(64)}));
-  for (const change of [
-    {prismaHead: 'prisma-2'}, {agataHead: 'agata-2'},
-    {manifest: {...manifest, gsalesDbHeadBefore: 'NONE'}},
-    {gsalesMigrationSha256: 'e'.repeat(64)},
-  ]) assert.throws(() => assertNoTaskScopedMigrations({manifest, prismaHead: 'prisma-1', agataHead: 'agata-1',
-    gsalesMigrationSha256: 'f'.repeat(64), ...change}), /cannot apply or reconcile database migrations/);
+test('TASK_SCOPED_AUTO permits unchanged DB heads and only an exact pre-approved migration contract', () => {
+  const liveSha = 'f'.repeat(64);
+  const manifest = {status: 'PLANNED', dbHeadBefore: 'prisma-1', dbHeadAfter: null,
+    agataDbHeadBefore: 'agata-1', gsalesDbHeadBefore: 'gsales-1', gsalesMigrationSha256Before: liveSha,
+    previousProductionSha: baseline, rollbackSha: baseline,
+    liveFacts: {LIVE_AGATA_HEAD: 'agata-1', LIVE_GSALES_HEAD: 'gsales-1',
+      LIVE_GSALES_MIGRATION_SHA256: liveSha, LIVE_ROLLBACK_IMAGE_AVAILABLE: 'YES'}};
+  assert.deepEqual(assertNoTaskScopedMigrations({manifest, prismaHead: 'prisma-1', agataHead: 'agata-1',
+    gsalesMigrationSha256: liveSha}), {state: 'NO_MIGRATION_CHANGE'});
+  const migrationPath = 'packages/db/prisma/migrations/0099_add_field/migration.sql';
+  const contract = {allowed_paths: [migrationPath], prisma_target: 'prisma-2', agata_target: 'agata-1',
+    gsales_migration_sha256: 'e'.repeat(64), production_prisma_head: 'prisma-1',
+    production_agata_head: 'agata-1', production_gsales_head: 'gsales-1',
+    production_gsales_migration_sha256: liveSha, risk_description: 'Add a reviewed nullable field.',
+    backup_plan: 'Create and verify full protected backup before migration.',
+    rollback_plan: 'Restore exact verified backup or stop for forward fix.',
+    stop_conditions: ['Stop if database baseline differs.', 'Stop if backup validation fails.'],
+    required_gates: ['migration_preflight', 'backup_before_migration', 'rollback_readiness', 'tenant_isolation', 'postdeploy_health']};
+  assert.equal(assertNoTaskScopedMigrations({manifest, prismaHead: 'prisma-2', agataHead: 'agata-1',
+    gsalesMigrationSha256: 'e'.repeat(64), record: {risk_contracts: {database_migration: contract}},
+    changedPaths: [migrationPath]}).state, 'PREAPPROVED_MIGRATION');
+  assert.throws(() => assertNoTaskScopedMigrations({manifest, prismaHead: 'prisma-2', agataHead: 'agata-1',
+    gsalesMigrationSha256: 'e'.repeat(64), changedPaths: [migrationPath]}), /exact pre-approved risk contract/);
+  assert.throws(() => assertNoTaskScopedMigrations({manifest: {...manifest, rollbackSha: 'c'.repeat(40)},
+    prismaHead: 'prisma-2', agataHead: 'agata-1', gsalesMigrationSha256: 'e'.repeat(64),
+    record: {risk_contracts: {database_migration: contract}}, changedPaths: [migrationPath]}), /rollback or readiness differ/);
 });

@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 
 const SHA = /^[a-f0-9]{40}$/;
+const MIGRATION_TARGET = /^[A-Za-z0-9_.-]{1,128}$/;
 const AUTH_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$/;
 const REQUIRED_EXCLUSIONS = new Set(['database', 'migrations', 'security', 'secrets', 'payments', 'ads', 'paid_traffic', 'release_infrastructure']);
 const OWNER_ONLY_PREFIXES = [
@@ -15,19 +16,11 @@ const OWNER_ONLY_PREFIXES = [
 
 export class AuthorizationError extends Error {}
 
-export function assertNoTaskScopedMigrations({manifest, prismaHead, agataHead, gsalesMigrationSha256}) {
-  if (!manifest || manifest.dbHeadBefore !== prismaHead || manifest.agataDbHeadBefore !== agataHead
-    || manifest.gsalesDbHeadBefore !== '001_gsales'
-    || manifest.liveFacts?.LIVE_GSALES_MIGRATION_SHA256 !== gsalesMigrationSha256) {
-    throw new AuthorizationError('TASK_SCOPED_AUTO cannot apply or reconcile database migrations');
-  }
-}
-
 export function authorizationStateRef(project, authorizationId, state) {
   if (!['maxibot', 'gpoint'].includes(String(project).toLowerCase()) || !AUTH_ID.test(authorizationId)) {
     throw new AuthorizationError('Invalid project-scoped authorization ID');
   }
-  if (!['revoked', 'consumed'].includes(state)) throw new AuthorizationError('Invalid authorization state marker');
+  if (!['revoked', 'consumed', 'claimed'].includes(state)) throw new AuthorizationError('Invalid authorization state marker');
   return `refs/tags/${String(project).toLowerCase()}-task-auth/${authorizationId}/${state}`;
 }
 
@@ -80,11 +73,66 @@ export function candidateScopeDiff(repoRoot, authorizationId, baselineSha, candi
 
 const inScope = (path, allowed) => allowed.some(scope => path === scope.replace(/\/$/, '') || (scope.endsWith('/') && path.startsWith(scope)));
 const ownerOnly = path => OWNER_ONLY_PREFIXES.some(prefix => path.toLowerCase() === prefix.replace(/\/$/, '').toLowerCase() || path.toLowerCase().startsWith(prefix.toLowerCase()));
+const migrationPath = value => /(?:^|\/)(?:migrations|prisma\/migrations)\//i.test(value);
+
+function validateMigrationRiskContract(record, changedPath) {
+  const contract = record.risk_contracts?.database_migration;
+  const requiredGates = ['migration_preflight', 'backup_before_migration', 'rollback_readiness', 'tenant_isolation', 'postdeploy_health'];
+  if (!migrationPath(changedPath) || !contract || !Array.isArray(contract.allowed_paths)
+      || !contract.allowed_paths.includes(changedPath) || !Array.isArray(record.allowed_paths)
+      || !record.allowed_paths.some(scope => inScope(changedPath, [scope]))
+      || !MIGRATION_TARGET.test(contract.prisma_target ?? '') || !MIGRATION_TARGET.test(contract.agata_target ?? '')
+      || !/^[a-f0-9]{64}$/.test(contract.gsales_migration_sha256 ?? '')
+      || !MIGRATION_TARGET.test(contract.production_prisma_head ?? '')
+      || !MIGRATION_TARGET.test(contract.production_agata_head ?? '')
+      || !MIGRATION_TARGET.test(contract.production_gsales_head ?? '')
+      || !/^[a-f0-9]{64}$/.test(contract.production_gsales_migration_sha256 ?? '')
+      || typeof contract.risk_description !== 'string' || contract.risk_description.trim().length < 20
+      || typeof contract.backup_plan !== 'string' || contract.backup_plan.trim().length < 20
+      || typeof contract.rollback_plan !== 'string' || contract.rollback_plan.trim().length < 20
+      || !Array.isArray(contract.stop_conditions) || contract.stop_conditions.length < 2
+      || contract.stop_conditions.some(value => typeof value !== 'string' || value.trim().length < 8)
+      || !Array.isArray(contract.required_gates) || requiredGates.some(gate => !contract.required_gates.includes(gate))) {
+    throw new AuthorizationError('Candidate touches owner-only migration path without a complete pre-approved database risk contract');
+  }
+}
+
+export function assertNoTaskScopedMigrations({manifest, prismaHead, agataHead,
+  gsalesMigrationSha256, record, changedPaths = []}) {
+  const changedMigrationPaths = changedPaths.filter(migrationPath);
+  const currentHeadsMatch = manifest && manifest.dbHeadAfter === null
+    && manifest.dbHeadBefore === prismaHead && manifest.agataDbHeadBefore === agataHead
+    && manifest.agataDbHeadBefore === manifest.liveFacts?.LIVE_AGATA_HEAD
+    && manifest.gsalesDbHeadBefore === manifest.liveFacts?.LIVE_GSALES_HEAD
+    && manifest.gsalesMigrationSha256Before === manifest.liveFacts?.LIVE_GSALES_MIGRATION_SHA256
+    && manifest.liveFacts?.LIVE_GSALES_MIGRATION_SHA256 === gsalesMigrationSha256;
+  if (!changedMigrationPaths.length && currentHeadsMatch) return {state: 'NO_MIGRATION_CHANGE'};
+  const contract = record?.risk_contracts?.database_migration;
+  if (!changedMigrationPaths.length || changedMigrationPaths.some(path => !contract?.allowed_paths?.includes(path))) {
+    throw new AuthorizationError('TASK_SCOPED_AUTO cannot apply database migrations without the exact pre-approved risk contract');
+  }
+  const candidateGsales = record?.risk_contracts?.database_migration?.gsales_migration_sha256;
+  const baselineGsales = manifest?.gsalesMigrationSha256Before ?? manifest?.liveFacts?.LIVE_GSALES_MIGRATION_SHA256;
+  if (!manifest || manifest.status !== 'PLANNED' || manifest.rollbackSha !== manifest.previousProductionSha
+      || manifest.liveFacts?.LIVE_ROLLBACK_IMAGE_AVAILABLE !== 'YES'
+      || contract.prisma_target !== prismaHead || contract.agata_target !== agataHead
+      || candidateGsales !== gsalesMigrationSha256
+      || contract.production_prisma_head !== manifest.dbHeadBefore
+      || contract.production_agata_head !== manifest.agataDbHeadBefore
+      || contract.production_gsales_head !== manifest.gsalesDbHeadBefore
+      || contract.production_gsales_migration_sha256 !== baselineGsales
+      || (contract.agata_target !== contract.production_agata_head
+        && manifest.agataMigrationReadiness?.readiness !== 'PASS')) {
+    throw new AuthorizationError('Preflight migration targets, production baseline, rollback or readiness differ from the pre-approved risk contract');
+  }
+  return {state: 'PREAPPROVED_MIGRATION', target: contract};
+}
 
 export function validateTaskAuthorization({record, project, authorizationId, candidateSha,
   currentMainSha, productionSha, changedPaths}) {
   if (!AUTH_ID.test(authorizationId ?? '')) throw new AuthorizationError('Invalid task authorization ID');
-  if (!record || record.schema_version !== 1) throw new AuthorizationError('Unsupported task authorization record');
+  if (!record || record.schema_version !== 3) throw new AuthorizationError('Unsupported task authorization record');
+  if (record.owner_instruction_scope !== 'FULL_PRODUCTION_CYCLE') throw new AuthorizationError('Original owner instruction must explicitly authorize the full production cycle');
   if (record.authorization_id !== authorizationId) throw new AuthorizationError('authorization ID does not match durable record');
   if (record.project !== project || record.authorization_mode !== 'TASK_SCOPED_AUTO') throw new AuthorizationError('Authorization project or mode does not match');
   if (record.state !== 'ACTIVE' || record.revoked !== false || record.consumed !== false) throw new AuthorizationError('Task authorization is revoked, consumed, or inactive');
@@ -99,7 +147,10 @@ export function validateTaskAuthorization({record, project, authorizationId, can
   if (!Array.isArray(changedPaths) || !changedPaths.length) throw new AuthorizationError('Candidate diff from production baseline is empty or unavailable');
   for (const path of changedPaths) {
     if (typeof path !== 'string' || !path || path.startsWith('/') || path.split('/').includes('..')) throw new AuthorizationError('Candidate diff contains an invalid path');
-    if (ownerOnly(path)) throw new AuthorizationError(`Candidate touches owner-only path: ${path}`);
+    if (ownerOnly(path)) {
+      validateMigrationRiskContract(record, path);
+      continue;
+    }
     if (!inScope(path, record.allowed_paths)) throw new AuthorizationError(`Candidate path is outside authorized scope: ${path}`);
   }
   const canonical = JSON.stringify(Object.fromEntries(Object.entries(record).sort(([a], [b]) => a.localeCompare(b))));
@@ -108,19 +159,24 @@ export function validateTaskAuthorization({record, project, authorizationId, can
     recordSha256: crypto.createHash('sha256').update(canonical).digest('hex'), changedPaths: [...new Set(changedPaths)].sort().join(',')};
 }
 
-export async function checkTaskAuthorizationState({project, authorizationId, token, fetchImpl = fetch}) {
+export async function checkTaskAuthorizationState({project, authorizationId, candidateSha, token, fetchImpl = fetch}) {
   if (!token) throw new AuthorizationError('GitHub token is required to check one-shot authorization state');
   const states = {};
-  for (const state of ['revoked', 'consumed']) {
+  for (const state of ['revoked', 'consumed', 'claimed']) {
     const route = authorizationStateRef(project, authorizationId, state).replace(/^refs\/tags\//, 'git/ref/tags/');
     const response = await fetchImpl(`https://api.github.com/repos/akhripunov/${project}/${route}`, {
       headers: {Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'},
     });
     if (response.status === 404) { states[state] = false; continue; }
     if (!response.ok) throw new AuthorizationError(`GitHub authorization state read failed (HTTP ${response.status})`);
+    const data = await response.json();
     states[state] = true;
+    if (state === 'claimed') states.claimedSha = data.object?.sha ?? '';
   }
   if (states.revoked || states.consumed) throw new AuthorizationError('Task authorization is revoked or already consumed');
+  if (candidateSha && (!states.claimed || states.claimedSha !== candidateSha)) {
+    throw new AuthorizationError('Task authorization claim is absent or belongs to another candidate');
+  }
   return states;
 }
 

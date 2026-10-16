@@ -124,8 +124,8 @@ def main():
     validate_request(sha, os.environ.get('GITHUB_REF'), os.environ.get('RELEASE_MODE'), os.environ.get('APPROVE_PRODUCTION'))
     validate_current_main(sha, github('git/ref/heads/main')['object']['sha'])
     authorization_id = os.environ.get('TASK_AUTHORIZATION_ID', '').strip()
-    if os.environ.get('RELEASE_MODE') == 'task-scoped-auto':
-        if not authorization_id:
+    if os.environ.get('RELEASE_MODE') == 'task-scoped-auto' or (os.environ.get('RELEASE_MODE') == 'preflight' and authorization_id):
+        if os.environ.get('RELEASE_MODE') == 'task-scoped-auto' and not authorization_id:
             raise RuntimeError('TASK_SCOPED_AUTO requires a durable authorization ID')
         env = {**os.environ, 'TASK_AUTHORIZATION_ID': authorization_id,
                'TASK_CURRENT_MAIN_SHA': sha, 'CANDIDATE_SHA': sha}
@@ -136,7 +136,7 @@ def main():
             raise RuntimeError('TASK_SCOPED_AUTO authorization is invalid')
         print(checked.stdout.strip())
     elif authorization_id:
-        raise RuntimeError('Task authorization ID is only valid for task-scoped-auto mode')
+        raise RuntimeError('Task authorization ID is only valid for task-scoped-auto or linked preflight mode')
     runs = github(f'actions/workflows/gpoint-prepare.yml/runs?branch=main&head_sha={sha}&per_page=100')['workflow_runs']
     selected = select_run(sha, runs)
     executed_attempt, asset = find_prepare_evidence(

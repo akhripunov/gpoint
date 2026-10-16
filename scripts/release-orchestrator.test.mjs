@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {dispatchPrepare, validateEvent, OrchestrationError, claimRef} from './release-orchestrator.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {execFileSync} from 'node:child_process';
+import {dispatchPrepare, dispatchTaskScopedAuto, findTaskAuthorization, validateEvent, OrchestrationError, claimRef} from './release-orchestrator.mjs';
 
 const sha = 'a'.repeat(40);
 const event = (change = {}) => ({repository:{full_name:'akhripunov/gpoint'}, workflow_run:{id:123,run_attempt:2,
@@ -82,4 +86,113 @@ test('mutable or draft releases fail closed',async()=>{
     const wrapped=async(method,path,body)=>{const result=await original(method,path,body);if(path.startsWith('releases/tags/'))Object.assign(result,patch);return result;};
     await assert.rejects(dispatchPrepare(event(),wrapped),/immutable and published/);
   }
+});
+
+const readyEvent = (change = {}) => ({repository:{full_name:'akhripunov/gpoint'}, workflow_run:{id:456,run_attempt:1,
+  head_sha:sha,head_branch:'main',status:'completed',conclusion:'success',event:'workflow_dispatch',
+  path:'.github/workflows/gpoint-deploy.yml',display_title:`GPoint preflight ${sha} by github-actions[bot]`,...change}});
+const readyReceipt = (change = {}) => ({candidateSha:sha,automationRunId:'456',automationRunAttempt:'1',
+  mode:'preflight',preflight:'PASS',releaseState:'READY_FOR_OWNER',status:'PLANNED',productionChanged:false,
+  dryRun:true,applicationVerification:'NOT_DEPLOYED',authorizationMode:'EXACT_SHA',authorizationConsumed:false,
+  authorizationId:'gpoint-task-2026-10-16-001',productionBaselineSha:'d'.repeat(40),prepareRunId:'123',
+  prepareRunAttempt:'2',...change});
+
+test('READY immutable preflight with a verified task authorization dispatches existing task-scoped Deploy once',async()=>{
+  const {api,calls}=apiFixture();
+  const result=await dispatchTaskScopedAuto(readyEvent(),api,{readResult:async()=>readyReceipt(),
+    validateAuthorization:async()=>({authorizationId:'gpoint-task-2026-10-16-001'}),orchestratorRunId:'987'});
+  assert.equal(result.state,'TASK_SCOPED_AUTO_DISPATCHED');
+  const dispatch=calls.find(item=>item.path.endsWith('/dispatches'));
+  assert.deepEqual(dispatch.body,{ref:'main',inputs:{candidate:sha,mode:'task-scoped-auto',approve_production:'false',
+    prepare_run_id:'123',prepare_run_attempt:'2',orchestrator_run_id:'987',task_authorization_id:'gpoint-task-2026-10-16-001'}});
+});
+
+test('two successful READY events cannot dispatch twice for one authorization',async()=>{
+  const {api,calls}=apiFixture(); let authorizationClaimed=false;
+  const wrapped=async(method,route,body)=>{
+    if(method==='POST'&&route==='git/refs'&&body.ref.endsWith('/claimed')){
+      if(authorizationClaimed){const error=new OrchestrationError('already claimed');error.status=422;throw error;}
+      authorizationClaimed=true;return {};
+    }
+    if(method==='GET'&&route.endsWith('/claimed')){
+      if(authorizationClaimed)return {object:{type:'commit',sha}};
+      const error=new OrchestrationError('missing');error.status=404;throw error;
+    }
+    return api(method,route,body);
+  };
+  const validateAuthorization=async()=>({authorizationId:'gpoint-task-2026-10-16-001'});
+  const first=await dispatchTaskScopedAuto(readyEvent(),wrapped,{readResult:async()=>readyReceipt(),validateAuthorization});
+  const nextEvent=readyEvent({id:457,display_title:`GPoint preflight ${sha} by github-actions[bot]`});
+  const nextReceipt=readyReceipt({automationRunId:'457'});
+  const second=await dispatchTaskScopedAuto(nextEvent,wrapped,{readResult:async()=>nextReceipt,validateAuthorization});
+  assert.equal(first.state,'TASK_SCOPED_AUTO_DISPATCHED');
+  assert.equal(second.state,'TASK_SCOPED_AUTO_ALREADY_CLAIMED');
+  assert.equal(calls.filter(call=>call.path.endsWith('/dispatches')).length,1);
+});
+
+test('missing authorization or non-READY evidence never dispatches production',async()=>{
+  for(const receipt of [readyReceipt({authorizationId:null}),readyReceipt({preflight:'FAILED'}),
+    readyReceipt({releaseState:'BLOCKED'}),readyReceipt({productionChanged:true}),
+    readyReceipt({authorizationMode:'TASK_SCOPED_AUTO'})]) {
+    const {api,calls}=apiFixture();
+    await assert.rejects(dispatchTaskScopedAuto(readyEvent(),api,{readResult:async()=>receipt,
+      validateAuthorization:async()=>({authorizationId:'gpoint-task-2026-10-16-001'})}),OrchestrationError);
+    assert.equal(calls.some(item=>item.path.endsWith('/dispatches')),false);
+  }
+});
+
+test('task-scoped dispatch stops on main drift, active Deploy, or invalid authorization',async()=>{
+  const cases=[
+    {name:'main drift',apiWrap:async(api,method,path,body)=>path==='git/ref/heads/main'?{object:{sha:'c'.repeat(40)}}:api(method,path,body)},
+    {name:'active Deploy',apiWrap:async(api,method,path,body)=>path.includes('gpoint-deploy.yml/runs')?{workflow_runs:[{status:'in_progress'}]}:api(method,path,body)},
+  ];
+  for(const item of cases){
+    const {api,calls}=apiFixture();
+    const wrapped=(method,path,body)=>item.apiWrap(api,method,path,body);
+    await assert.rejects(dispatchTaskScopedAuto(readyEvent(),wrapped,{readResult:async()=>readyReceipt(),
+      validateAuthorization:async()=>({authorizationId:'gpoint-task-2026-10-16-001'})}),OrchestrationError);
+    assert.equal(calls.some(call=>call.path.endsWith('/dispatches')),false);
+  }
+  const {api,calls}=apiFixture();
+  await assert.rejects(dispatchTaskScopedAuto(readyEvent(),api,{readResult:async()=>readyReceipt(),
+    validateAuthorization:async()=>{throw new Error('scope drift');}}),OrchestrationError);
+  assert.equal(calls.some(call=>call.path.endsWith('/dispatches')),false);
+});
+
+test('preflight controller carries only one valid full-cycle authorization record',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'gpoint-task-auto-record-'));
+  try {
+    const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8'}).trim();
+    git('init','-q');git('config','user.name','Release test');git('config','user.email','release-test@example.invalid');
+    fs.writeFileSync(path.join(root,'README.md'),'base\n');
+    const records=path.join(root,'.release-authorizations');fs.mkdirSync(records);
+    fs.writeFileSync(path.join(records,'gpoint-task-2026-10-16-002.json'),JSON.stringify({schema_version:3,
+      owner_instruction_scope:'FULL_PRODUCTION_CYCLE',project:'gpoint',authorization_mode:'TASK_SCOPED_AUTO',
+      authorization_id:'gpoint-task-2026-10-16-002',source_reference:'linear:ME-998',
+      production_baseline_sha:'0'.repeat(40),task:'older task',allowed_paths:['apps/miniapp/src/label.ts'],
+      acceptance_criteria:['label visible'],exclusions:['database','migrations','security','secrets','payments','ads','paid_traffic','release_infrastructure'],
+      state:'ACTIVE',revoked:false,consumed:false}));
+    git('add','README.md','.release-authorizations');git('commit','-m','baseline');
+    const baseline=git('rev-parse','HEAD');
+    fs.writeFileSync(path.join(records,'gpoint-task-2026-10-16-001.json'),JSON.stringify({schema_version:3,
+      owner_instruction_scope:'FULL_PRODUCTION_CYCLE',project:'gpoint',authorization_mode:'TASK_SCOPED_AUTO',
+      authorization_id:'gpoint-task-2026-10-16-001',source_reference:'linear:ME-999',
+      production_baseline_sha:baseline,task:'update one safe UI label',allowed_paths:['apps/miniapp/src/label.ts'],
+      acceptance_criteria:['label visible'],exclusions:['database','migrations','security','secrets','payments','ads','paid_traffic','release_infrastructure'],
+      state:'ACTIVE',revoked:false,consumed:false}));
+    git('add','.release-authorizations');git('commit','-m','register full-cycle authorization');
+    fs.mkdirSync(path.join(root,'apps/miniapp/src'),{recursive:true});
+    fs.writeFileSync(path.join(root,'apps/miniapp/src/label.ts'),'export const label="hello";\n');
+    git('add','apps/miniapp/src/label.ts');git('commit','-m','implement authorized scope');
+    const candidate=git('rev-parse','HEAD');
+    const api=async(method,route)=>{if(route.includes('gpoint-task-2026-10-16-002/consumed'))return {object:{sha:candidate}};if(route.includes('/revoked')||route.includes('/consumed')||route.includes('/claimed')){const error=new Error('not found');error.status=404;throw error;}return {object:{sha:candidate}};};
+    const selected=await findTaskAuthorization(root,candidate,api);
+    assert.equal(selected.authorizationId,'gpoint-task-2026-10-16-001');
+    assert.equal(selected.ambiguous,false);
+    const selectedAgain=await findTaskAuthorization(root,candidate,async(method,route)=>{
+      if(route.includes('/revoked')||route.includes('/consumed')||route.includes('/claimed')){const error=new Error('not found');error.status=404;throw error;}
+      return {object:{sha:candidate}};
+    });
+    assert.deepEqual(selectedAgain,{authorizationId:'gpoint-task-2026-10-16-001',ambiguous:false});
+  } finally {fs.rmSync(root,{recursive:true,force:true});}
 });

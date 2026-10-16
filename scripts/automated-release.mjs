@@ -22,7 +22,7 @@ const mode = process.env.RELEASE_MODE;
 if (!['preflight', 'production', 'task-scoped-auto'].includes(mode)) throw new Error('Explicit release mode is required');
 if (mode === 'production' && process.env.APPROVE_PRODUCTION !== 'true') throw new Error('Explicit production approval is required');
 if (mode === 'task-scoped-auto' && (process.env.APPROVE_PRODUCTION !== 'false' || !process.env.TASK_AUTHORIZATION_ID)) throw new Error('TASK_SCOPED_AUTO requires its durable authorization ID and no exact-SHA approval input');
-if (mode !== 'task-scoped-auto' && process.env.TASK_AUTHORIZATION_ID) throw new Error('Task authorization ID is only valid in TASK_SCOPED_AUTO mode');
+if (!['preflight', 'task-scoped-auto'].includes(mode) && process.env.TASK_AUTHORIZATION_ID) throw new Error('Task authorization ID is only valid in linked preflight or TASK_SCOPED_AUTO mode');
 const proof = verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, sha);
 if (String(proof.runId) !== process.env.PREPARE_RUN_ID) throw new Error('Receipt does not belong to the approved GitHub run');
 const runGit = (args, input, timeout) => execFileSync('git', args, { cwd: root, encoding: 'utf8', input, timeout }).trim();
@@ -78,8 +78,9 @@ try {
   });
   preflightStatus = preflight.status === 0 ? 'PLANNED' : 'FAILED';
   if (preflight.status !== 0) throw new Error('Canonical preflight blocked the release');
-  if (mode === 'task-scoped-auto') {
-    const authorizationId = process.env.TASK_AUTHORIZATION_ID;
+  const linkedAuthorizationId = process.env.TASK_AUTHORIZATION_ID;
+  if (mode === 'task-scoped-auto' || (mode === 'preflight' && linkedAuthorizationId)) {
+    const authorizationId = linkedAuthorizationId;
     const currentMainSha = (await github('git/ref/heads/main')).object?.sha;
     const planned = fs.readdirSync(ledger.manifestDir).filter(name => !previous.has(name))
       .map(name => JSON.parse(fs.readFileSync(path.join(ledger.manifestDir, name), 'utf8')))
@@ -87,17 +88,22 @@ try {
     const productionBaselineSha = planned?.previousProductionSha;
     if (!/^[a-f0-9]{40}$/.test(productionBaselineSha ?? '')) throw new AuthorizationError('Canonical preflight did not provide the exact production baseline');
     const gsalesMigration = path.join(root, 'services/gsales/migrations/001_gsales.sql');
-    assertNoTaskScopedMigrations({manifest: planned, prismaHead: candidatePrismaMigrationHead(sha),
-      agataHead: candidateAgataMigrationHead(sha), gsalesMigrationSha256: checksum(gsalesMigration)});
     const record = JSON.parse(fs.readFileSync(path.join(root, authorizationRecordPath(authorizationId)), 'utf8'));
     const changedPaths = candidateScopeDiff(root, authorizationId, record.production_baseline_sha, sha);
     taskAuthorization = validateTaskAuthorization({record, project: 'gpoint', authorizationId,
       candidateSha: sha, currentMainSha, productionSha: productionBaselineSha, changedPaths});
-    await checkTaskAuthorizationState({project: 'gpoint', authorizationId, token: process.env.GITHUB_TOKEN});
-    process.env.RELEASE_AUTHORIZATION_MODE = 'TASK_SCOPED_AUTO';
-    process.env.RELEASE_AUTHORIZATION_ID = authorizationId;
-    process.env.RELEASE_AUTHORIZATION_SOURCE = taskAuthorization.sourceReference;
-    process.env.RELEASE_AUTHORIZATION_RECORD_SHA256 = taskAuthorization.recordSha256;
+    assertNoTaskScopedMigrations({manifest: planned, prismaHead: candidatePrismaMigrationHead(sha),
+      agataHead: candidateAgataMigrationHead(sha), gsalesMigrationSha256: checksum(gsalesMigration),
+      record, changedPaths});
+    const state = await checkTaskAuthorizationState({project: 'gpoint', authorizationId,
+      ...(mode === 'task-scoped-auto' ? {candidateSha: sha} : {}), token: process.env.GITHUB_TOKEN});
+    if (mode === 'preflight' && state.claimed) throw new AuthorizationError('Task authorization already has a production claim');
+    if (mode === 'task-scoped-auto') {
+      process.env.RELEASE_AUTHORIZATION_MODE = 'TASK_SCOPED_AUTO';
+      process.env.RELEASE_AUTHORIZATION_ID = authorizationId;
+      process.env.RELEASE_AUTHORIZATION_SOURCE = taskAuthorization.sourceReference;
+      process.env.RELEASE_AUTHORIZATION_RECORD_SHA256 = taskAuthorization.recordSha256;
+    }
   }
   if (mode === 'preflight') {
     releaseCode = 0;
