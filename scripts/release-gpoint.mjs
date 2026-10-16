@@ -1038,9 +1038,13 @@ function runApply(candidate) {
       candidates: retentionCandidates,
       imageTags: retentionCandidates.flatMap(({ sha }) => [`gpoint-runtime:${sha}`, `gpoint-agata-runtime:${sha}`]),
     });
+    const ghcrReadToken = process.env.GHCR_READ_TOKEN || '';
+    delete process.env.GHCR_READ_TOKEN;
     const adapter = applyCandidate(candidate, {
       retentionPlan,
       provider: baseline.provider,
+      imageTransport: process.env.IMAGE_TRANSPORT || 'prepared',
+      ghcrReadToken,
       onMigrationStart: () => { migrationStarted = true; },
       onAgataStart: () => { agataStartStarted = true; },
       onSwitchStart: () => { switchStarted = true; },
@@ -1049,6 +1053,10 @@ function runApply(candidate) {
       const error = new Error(`post-switch reconciliation required: ${adapter.postSwitch?.state ?? 'UNKNOWN'}`);
       error.code = adapter.postSwitch?.state ?? 'SWITCHED_UNVERIFIED';
       throw error;
+    }
+    if (adapter.ciReceipt?.selectedTransport === 'ghcr-oci' &&
+        (adapter.ciReceipt.ghcrVerified !== true || adapter.ciReceipt.ghcrPostSwitchVerified !== true)) {
+      throw new Error('GHCR digest identity was not verified both before Apply and after runtime switch');
     }
     if (adapter.agataIdentity.provider !== baseline.provider) die('post-switch AGATA provider does not match validated baseline');
     if (baseline.provider === 'mac_worker') assertProviderCompatibility(baseline.facts);
@@ -1100,7 +1108,8 @@ function runApply(candidate) {
       effectiveConfigSha256: adapter.effectiveConfigSha256,
       authorizationMode: process.env.RELEASE_AUTHORIZATION_MODE || 'EXACT_SHA',
       authorizationId: process.env.RELEASE_AUTHORIZATION_ID || null,
-      authorizationSourceReference: process.env.RELEASE_AUTHORIZATION_SOURCE || null,
+      authorizationSourceInstructionId: process.env.RELEASE_AUTHORIZATION_SOURCE_INSTRUCTION_ID || null,
+      authorizationScopeSha256: process.env.RELEASE_AUTHORIZATION_SCOPE_SHA256 || null,
       authorizationRecordSha256: process.env.RELEASE_AUTHORIZATION_RECORD_SHA256 || null });
     const file = writeManifest(manifest);
     const verifiedState = verifiedRuntimeState(current, { candidate, dbHead: deployedDbHead });

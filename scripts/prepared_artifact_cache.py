@@ -285,6 +285,61 @@ def materialize(cache, destination, artifact_id, digest, expected, fetch, identi
     return 'HIT' if hit else 'MISS'
 
 
+def verify_and_install_archive_fallback(zip_path, destination, expected_receipt):
+    """Accept only the separate immutable, receipt-matched fallback asset."""
+    zip_path, destination = Path(zip_path), Path(destination)
+    if zip_path.is_symlink() or not zip_path.is_file():
+        raise RuntimeError('Fallback archive must be a regular file')
+    with zipfile.ZipFile(zip_path) as source:
+        entries = source.infolist()
+        if ({entry.filename for entry in entries} != {'images.tar.gz', 'receipt.json'}
+                or len(entries) != 2 or any(stat.S_ISLNK(e.external_attr >> 16) or e.is_dir() for e in entries)
+                or sum(entry.file_size for entry in entries) > MAX_BYTES):
+            raise RuntimeError('Unexpected fallback archive members')
+        receipt_info = next(entry for entry in entries if entry.filename == 'receipt.json')
+        if receipt_info.file_size > 1024 * 1024:
+            raise RuntimeError('Fallback receipt exceeds its size limit')
+        with source.open('receipt.json') as receipt_file:
+            receipt_bytes = receipt_file.read(1024 * 1024 + 1)
+    try:
+        receipt = json.loads(receipt_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError('Fallback receipt is invalid') from exc
+    if receipt != expected_receipt or receipt.get('schema') != 3:
+        raise RuntimeError('Fallback receipt differs from selected immutable Prepare receipt')
+    target = destination / 'images.tar.gz'
+    if target.is_symlink():
+        raise RuntimeError('Fallback destination must not be a symlink')
+    destination.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with tempfile.NamedTemporaryFile(prefix='.images.tar.gz.', dir=destination,
+                                         delete=False) as output:
+            temporary = Path(output.name)
+            with zipfile.ZipFile(zip_path) as source, source.open('images.tar.gz') as image_file:
+                while True:
+                    chunk = image_file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > MAX_BYTES:
+                        raise RuntimeError('Fallback image archive exceeds its size limit')
+                    digest.update(chunk)
+                    output.write(chunk)
+        if total != next(entry.file_size for entry in entries if entry.filename == 'images.tar.gz'):
+            raise RuntimeError('Fallback image archive length is inconsistent')
+        if digest.hexdigest() != receipt.get('archiveSha256'):
+            raise RuntimeError('Fallback image archive checksum mismatch')
+        os.replace(temporary, target)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return target
+
+
 def main():
     global NETWORK_BUDGET
     NETWORK_BUDGET = RetryBudget()
@@ -292,7 +347,7 @@ def main():
     repo = os.environ['GITHUB_REPOSITORY']
     projects = {
         'akhripunov/gpoint': ('gpoint', 'gpoint-prepare.yml',
-                             [['images.tar.gz', 'receipt.json'], ['miniapp.zip', 'receipt.json']]),
+                             [['receipt.json'], ['images.tar.gz', 'receipt.json'], ['miniapp.zip', 'receipt.json']]),
         'akhripunov/maxibot': ('maxibot', 'maxibot-prepare.yml', [
             f"maxibot-image-{os.environ['CANDIDATE_SHA']}.tar.gz",
             'maxibot-image-manifest.json', 'maxibot-prepare-result.json']),
@@ -350,6 +405,26 @@ def main():
         if (receipt.get('candidateSha') != sha or str(receipt.get('runId')) != run_id
                 or str(receipt.get('runAttempt')) != attempt or receipt.get('status') != 'READY'):
             raise RuntimeError('Immutable Prepare receipt provenance mismatch')
+        requested_transport = os.environ.get('IMAGE_TRANSPORT', 'prepared')
+        if requested_transport not in {'prepared', 'ghcr-oci', 'archive'}:
+            raise RuntimeError('Requested image transport is invalid')
+        if requested_transport == 'ghcr-oci' and receipt.get('transport') != 'ghcr-oci':
+            raise RuntimeError('GHCR transport is not proven by the Prepare receipt')
+        if requested_transport == 'archive' and receipt.get('schema') == 3:
+            from release_assets import resolve_asset
+            fallback = resolve_asset('prepare', sha, run_id, attempt, 'fallback-images.zip',
+                                     lambda route: github(repo, route, token, 'fallback_asset_metadata'))
+            with tempfile.TemporaryDirectory(prefix='gpoint-fallback-') as temporary:
+                fallback_zip = Path(temporary) / 'fallback-images.zip'
+                download(repo, fallback['id'], token, fallback_zip, release_asset=True,
+                         expected_size=fallback['size'])
+                if checksum(fallback_zip) != fallback['digest'][7:]:
+                    raise RuntimeError('Immutable fallback asset checksum mismatch')
+                verify_and_install_archive_fallback(fallback_zip,
+                    Path(os.environ['ARTIFACT_DESTINATION']), receipt)
+        elif requested_transport == 'archive' and receipt.get('schema') != 3:
+            if not (Path(os.environ['ARTIFACT_DESTINATION']) / 'images.tar.gz').is_file():
+                raise RuntimeError('Prepared archive transport is unavailable')
     print(f'ARTIFACT_CACHE={result} ARTIFACT_ID={artifact_id} SHA={sha}', flush=True)
     print(f'BUNDLE_DOWNLOAD_SECONDS={download_seconds[0]:.3f}', flush=True)
     prevented = 'YES' if result == 'HIT' else 'NO'

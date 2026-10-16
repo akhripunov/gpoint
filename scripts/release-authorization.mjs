@@ -5,7 +5,11 @@ import {execFileSync} from 'node:child_process';
 const SHA = /^[a-f0-9]{40}$/;
 const MIGRATION_TARGET = /^[A-Za-z0-9_.-]{1,128}$/;
 const AUTH_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$/;
-const REQUIRED_EXCLUSIONS = new Set(['database', 'migrations', 'security', 'secrets', 'payments', 'ads', 'paid_traffic', 'release_infrastructure']);
+const OWNER_INSTRUCTION_ID = /^OWNER_TASK_[A-Z0-9_]{8,96}$/;
+const REQUIRED_EXCLUSIONS = new Set(['database', 'migrations', 'security', 'secrets', 'payments', 'ads', 'paid_traffic']);
+const RELEASE_INFRASTRUCTURE_GATES = ['exact_candidate', 'complete_scope', 'prepare_provenance',
+  'immutable_artifact', 'security_review', 'preflight', 'rollback_readiness',
+  'worker_compatibility', 'postdeploy_health', 'reconciliation'];
 const OWNER_ONLY_PREFIXES = [
   '.github/', 'packages/db/', 'migrations/', 'db/', 'deploy/', 'docker/',
   'docs/release/', 'scripts/release', 'scripts/prepare-release', 'scripts/select-release-run',
@@ -15,6 +19,43 @@ const OWNER_ONLY_PREFIXES = [
 ];
 
 export class AuthorizationError extends Error {}
+
+const canonicalize = value => Array.isArray(value) ? value.map(canonicalize) :
+  value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+    .map(([key, child]) => [key, canonicalize(child)])) : value;
+
+export function ownerTaskCommitment(record) {
+  return canonicalize({schema: 1, authorization_id: record.authorization_id,
+    project: record.project, environment: record.environment,
+    source_instruction_identifier: record.source_instruction_identifier,
+    owner_task_reference: record.owner_task_reference,
+    owner_instruction_scope: record.owner_instruction_scope,
+    production_baseline_sha: record.production_baseline_sha,
+    candidate_selection_rule: record.candidate_selection_rule,
+    task: record.task, allowed_paths: [...(record.allowed_paths ?? [])].sort(),
+    allowed_operations: [...(record.allowed_operations ?? [])].sort(),
+    preauthorized_commits: [...(record.preauthorized_commits ?? [])].sort(),
+    preauthorized_paths: [...(record.preauthorized_paths ?? [])].sort(),
+    acceptance_criteria: [...(record.acceptance_criteria ?? [])].sort(),
+    exclusions: [...(record.exclusions ?? [])].sort(),
+    risk_contracts: record.risk_contracts ?? {}});
+}
+
+export function ownerTaskCommitmentSha256(record) {
+  return crypto.createHash('sha256').update(JSON.stringify(ownerTaskCommitment(record)), 'utf8').digest('hex');
+}
+
+export function verifyOwnerTaskRecord(record) {
+  const identifier = record?.source_instruction_identifier ?? '';
+  if (!OWNER_INSTRUCTION_ID.test(identifier)) {
+    throw new AuthorizationError('Direct OWNER source instruction identifier is missing or invalid');
+  }
+  const expectedCommitment = ownerTaskCommitmentSha256(record);
+  if (record.owner_task_commitment_sha256 !== expectedCommitment) {
+    throw new AuthorizationError('Direct OWNER task scope commitment does not match the durable record');
+  }
+  return {sourceInstructionIdentifier: identifier, commitmentSha256: expectedCommitment};
+}
 
 export function authorizationStateRef(project, authorizationId, state) {
   if (!['maxibot', 'gpoint'].includes(String(project).toLowerCase()) || !AUTH_ID.test(authorizationId)) {
@@ -54,12 +95,29 @@ export function candidateScopeDiff(repoRoot, authorizationId, baselineSha, candi
       throw new AuthorizationError('Durable authorization record changed after it was added');
     }
     const scopeChanges = changes.filter(change => change.path !== path);
+    const authorizationIndex = commits.indexOf(authorizationCommit);
+    const preparedBeforeAuthorization = scopeChanges.filter(change => commits.indexOf(change.commit) < authorizationIndex);
+    let record;
+    try { record = JSON.parse(git('show', `${candidateSha}:${path}`)); }
+    catch { throw new AuthorizationError('Durable authorization record is unreadable'); }
+    const actualPreparedCommits = [...new Set(preparedBeforeAuthorization.map(change => change.commit))].sort();
+    const actualPreparedPaths = [...new Set(preparedBeforeAuthorization.map(change => change.path))].sort();
+    const declaredPreparedCommits = Array.isArray(record.preauthorized_commits) ? [...record.preauthorized_commits].sort() : [];
+    const declaredPreparedPaths = Array.isArray(record.preauthorized_paths) ? [...record.preauthorized_paths].sort() : [];
+    if (preparedBeforeAuthorization.some(change => change.merge)
+        || JSON.stringify(actualPreparedCommits) !== JSON.stringify(declaredPreparedCommits)
+        || JSON.stringify(actualPreparedPaths) !== JSON.stringify(declaredPreparedPaths)
+        || actualPreparedPaths.some(name => !Array.isArray(record.allowed_paths)
+          || !inScope(name, record.allowed_paths))) {
+      throw new AuthorizationError('Pre-authorization candidate history is not exactly listed in the release task record');
+    }
     const authorizationPrecedes = commit => {
       try { execFileSync('git', ['merge-base', '--is-ancestor', authorizationCommit, commit], {cwd: repoRoot, stdio: 'ignore', timeout: 20_000}); return true; }
       catch { return false; }
     };
-    if (!scopeChanges.length || scopeChanges.some(change => change.commit === authorizationCommit
-      || !authorizationPrecedes(change.commit))) {
+    if (!scopeChanges.length || scopeChanges.some(change => change.commit === authorizationCommit)
+        || scopeChanges.filter(change => commits.indexOf(change.commit) > authorizationIndex)
+          .some(change => !authorizationPrecedes(change.commit))) {
       throw new AuthorizationError('Durable authorization record must precede every implementation change');
     }
     const diffPaths = git('diff', '--name-only', baselineSha, candidateSha).split('\n').filter(Boolean).filter(name => name !== path);
@@ -74,6 +132,30 @@ export function candidateScopeDiff(repoRoot, authorizationId, baselineSha, candi
 const inScope = (path, allowed) => allowed.some(scope => path === scope.replace(/\/$/, '') || (scope.endsWith('/') && path.startsWith(scope)));
 const ownerOnly = path => OWNER_ONLY_PREFIXES.some(prefix => path.toLowerCase() === prefix.replace(/\/$/, '').toLowerCase() || path.toLowerCase().startsWith(prefix.toLowerCase()));
 const migrationPath = value => /(?:^|\/)(?:migrations|prisma\/migrations)\//i.test(value);
+const releaseInfrastructurePath = value => {
+  const normalized = value.toLowerCase();
+  if (normalized.startsWith('.github/') || normalized === 'docs/release/authorization.md'
+      || normalized === 'docs/release_authorization.md' || normalized.startsWith('docs/release/')) return true;
+  if (!normalized.startsWith('scripts/')) return false;
+  return /(?:release|prepare|ghcr|oci|artifact|coalesc|worker.*guard)/.test(normalized.slice('scripts/'.length));
+};
+
+function validateReleaseInfrastructureRiskContract(record, changedPath) {
+  const contract = record.risk_contracts?.release_infrastructure;
+  const requiredOperations = ['integrate', 'coalesce', 'prepare', 'preflight', 'deploy', 'verify', 'rollback', 'publish_evidence'];
+  if (!contract || !Array.isArray(contract.allowed_paths) || !contract.allowed_paths.includes(changedPath)
+      || !Array.isArray(record.allowed_paths) || !record.allowed_paths.some(scope => inScope(changedPath, [scope]))
+      || contract.baseline_sha !== record.production_baseline_sha
+      || typeof contract.risk_description !== 'string' || contract.risk_description.trim().length < 20
+      || !Array.isArray(contract.allowed_operations) || requiredOperations.some(operation => !contract.allowed_operations.includes(operation))
+      || !Array.isArray(contract.required_gates) || RELEASE_INFRASTRUCTURE_GATES.some(gate => !contract.required_gates.includes(gate))
+      || typeof contract.backup_plan !== 'string' || contract.backup_plan.trim().length < 20
+      || typeof contract.rollback_plan !== 'string' || contract.rollback_plan.trim().length < 20
+      || !Array.isArray(contract.stop_conditions) || contract.stop_conditions.length < 2
+      || contract.stop_conditions.some(value => typeof value !== 'string' || value.trim().length < 8)) {
+    throw new AuthorizationError('Candidate touches release infrastructure without a complete pre-approved release-infrastructure risk contract');
+  }
+}
 
 function validateMigrationRiskContract(record, changedPath) {
   const contract = record.risk_contracts?.database_migration;
@@ -135,11 +217,19 @@ export function validateTaskAuthorization({record, project, authorizationId, can
   if (record.owner_instruction_scope !== 'FULL_PRODUCTION_CYCLE') throw new AuthorizationError('Original owner instruction must explicitly authorize the full production cycle');
   if (record.authorization_id !== authorizationId) throw new AuthorizationError('authorization ID does not match durable record');
   if (record.project !== project || record.authorization_mode !== 'TASK_SCOPED_AUTO') throw new AuthorizationError('Authorization project or mode does not match');
+  if (record.environment !== 'production') throw new AuthorizationError('Task authorization is not bound to the production environment');
   if (record.state !== 'ACTIVE' || record.revoked !== false || record.consumed !== false) throw new AuthorizationError('Task authorization is revoked, consumed, or inactive');
-  if (typeof record.source_reference !== 'string' || !/^(linear:|https:\/\/linear\.app\/)/i.test(record.source_reference.trim())) throw new AuthorizationError('A verifiable Linear owner-instruction reference is required');
+  const sourceInstruction = verifyOwnerTaskRecord(record);
+  if (record.selected_candidate_sha !== undefined) throw new AuthorizationError('Durable authorization must not pin a candidate SHA before integration');
+  if (Object.values(record.risk_contracts ?? {}).some(contract => contract && typeof contract === 'object' && 'selected_candidate_sha' in contract)) throw new AuthorizationError('Durable authorization risk contracts must not pin a stale candidate SHA');
+  if (record.candidate_selection_rule !== 'EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE') throw new AuthorizationError('Unsupported candidate selection rule');
+  if (typeof record.owner_task_reference !== 'string' || record.owner_task_reference.trim().length < 20) throw new AuthorizationError('Original OWNER release task reference is required');
   if (typeof record.task !== 'string' || !record.task.trim()) throw new AuthorizationError('Task description is required');
   if (!Array.isArray(record.acceptance_criteria) || !record.acceptance_criteria.length || record.acceptance_criteria.some(value => typeof value !== 'string' || !value.trim())) throw new AuthorizationError('Acceptance criteria are required');
+  if (!Array.isArray(record.allowed_operations) || !['integrate', 'coalesce', 'prepare', 'preflight', 'deploy', 'verify', 'rollback', 'publish_evidence'].every(value => record.allowed_operations.includes(value))) throw new AuthorizationError('Full release operations are not authorized by the OWNER task');
   if (!Array.isArray(record.exclusions) || [...REQUIRED_EXCLUSIONS].some(value => !record.exclusions.includes(value))) throw new AuthorizationError('Required owner-only exclusions are missing');
+  if (record.risk_contracts?.release_infrastructure && record.exclusions.includes('release_infrastructure')) throw new AuthorizationError('Release infrastructure scope conflicts with its exclusion');
+  if (!record.risk_contracts?.release_infrastructure && !record.exclusions.includes('release_infrastructure')) throw new AuthorizationError('Release infrastructure must be excluded without its risk contract');
   if (!Array.isArray(record.allowed_paths) || !record.allowed_paths.length || record.allowed_paths.some(value => typeof value !== 'string' || !value.trim() || value.startsWith('/') || value.split('/').includes('..'))) throw new AuthorizationError('A safe non-empty allowed-path scope is required');
   if (!SHA.test(record.production_baseline_sha ?? '')) throw new AuthorizationError('Exact production baseline SHA is required');
   if (!SHA.test(candidateSha ?? '') || candidateSha !== currentMainSha) throw new AuthorizationError('Candidate must be the exact current main SHA');
@@ -147,15 +237,25 @@ export function validateTaskAuthorization({record, project, authorizationId, can
   if (!Array.isArray(changedPaths) || !changedPaths.length) throw new AuthorizationError('Candidate diff from production baseline is empty or unavailable');
   for (const path of changedPaths) {
     if (typeof path !== 'string' || !path || path.startsWith('/') || path.split('/').includes('..')) throw new AuthorizationError('Candidate diff contains an invalid path');
-    if (ownerOnly(path)) {
+    if (migrationPath(path)) {
       validateMigrationRiskContract(record, path);
       continue;
     }
-    if (!inScope(path, record.allowed_paths)) throw new AuthorizationError(`Candidate path is outside authorized scope: ${path}`);
+    if (releaseInfrastructurePath(path)) {
+      validateReleaseInfrastructureRiskContract(record, path);
+      continue;
+    }
+    if (ownerOnly(path)) {
+      throw new AuthorizationError('Candidate path is owner-only and cannot use TASK_SCOPED_AUTO');
+    }
+    if (!inScope(path, record.allowed_paths)) {
+      throw new AuthorizationError(`Candidate path is outside authorized scope: ${path}`);
+    }
   }
   const canonical = JSON.stringify(Object.fromEntries(Object.entries(record).sort(([a], [b]) => a.localeCompare(b))));
   return {authorizationId, candidateSha, productionBaselineSha: record.production_baseline_sha,
-    sourceReference: record.source_reference,
+    sourceInstructionIdentifier: sourceInstruction.sourceInstructionIdentifier,
+    ownerTaskCommitmentSha256: sourceInstruction.commitmentSha256,
     recordSha256: crypto.createHash('sha256').update(canonical).digest('hex'), changedPaths: [...new Set(changedPaths)].sort().join(',')};
 }
 

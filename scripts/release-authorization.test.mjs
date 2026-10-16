@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { validateTaskAuthorization, AuthorizationError, checkTaskAuthorizationState,
+  ownerTaskCommitmentSha256,
   consumeTaskAuthorization, authorizationStateRef, assertNoTaskScopedMigrations } from './release-authorization.mjs';
 import {candidateScopeDiff} from './release-authorization.mjs';
 import fs from 'node:fs';
@@ -11,21 +12,32 @@ import {execFileSync} from 'node:child_process';
 const id = 'gpoint-task-2026-10-06-001';
 const baseline = 'a'.repeat(40);
 const candidate = 'b'.repeat(40);
-const record = (extra = {}) => ({
+const record = (extra = {}) => {
+  const value = ({
   schema_version: 3,
   owner_instruction_scope: 'FULL_PRODUCTION_CYCLE',
   project: 'gpoint',
+  environment: 'production',
   authorization_mode: 'TASK_SCOPED_AUTO',
   authorization_id: id,
-  source_reference: 'linear:gpoint-release-handoff#owner-instruction-2026-10-06',
+  source_instruction_identifier: 'OWNER_TASK_UNIFIED_RELEASE_V1_2026_10_16',
+  source_reference: 'https://linear.app/bestuzhev/issue/ME-31/task#comment-stale',
+  candidate_selection_rule: 'EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE',
+  owner_task_reference: 'OWNER release task: ship the scoped GPoint menu change after required gates.',
   production_baseline_sha: baseline,
   task: 'Change one user-facing menu label',
   allowed_paths: ['apps/web/components/Menu.tsx'],
+  allowed_operations: ['integrate', 'coalesce', 'prepare', 'preflight', 'deploy', 'verify', 'rollback', 'publish_evidence'],
   acceptance_criteria: ['the menu label is updated'],
   exclusions: ['database', 'migrations', 'security', 'secrets', 'payments', 'ads', 'paid_traffic', 'release_infrastructure'],
   state: 'ACTIVE', revoked: false, consumed: false,
   ...extra,
-});
+  });
+  if (!Object.hasOwn(extra, 'owner_task_commitment_sha256')) {
+    value.owner_task_commitment_sha256 = ownerTaskCommitmentSha256(value);
+  }
+  return value;
+};
 const validate = (overrides = {}) => validateTaskAuthorization({
   record: record(), project: 'gpoint', authorizationId: id,
   candidateSha: candidate, currentMainSha: candidate,
@@ -37,14 +49,67 @@ test('task authorization accepts exact candidate, baseline and allowed path', ()
   assert.equal(validate().authorizationId, id);
 });
 
+test('direct OWNER release instruction authorizes scope without a live or current Linear reference', () => {
+  const direct = record({source_instruction_identifier: 'OWNER_TASK_UNIFIED_RELEASE_V1_2026_10_16',
+    source_reference: '', source_issue_identifier: '', source_comment_id: ''});
+  const proof = validate({record: direct});
+  assert.equal(proof.authorizationId, id);
+  assert.match(proof.recordSha256, /^[a-f0-9]{64}$/);
+});
+
+test('direct OWNER authorization is independent of absent, stale, or unavailable Linear references', () => {
+  const task = record({source_reference: '', source_issue_identifier: 'stale', source_comment_id: 'stale'});
+  const proof = validate({record: task});
+  assert.equal(proof.sourceInstructionIdentifier, task.source_instruction_identifier);
+  assert.match(ownerTaskCommitmentSha256(task), /^[a-f0-9]{64}$/);
+});
+
+test('direct OWNER authorization requires its instruction identity and rejects commitment tampering', () => {
+  assert.throws(() => validate({record: record({source_instruction_identifier: ''})}), /source instruction identifier/);
+  assert.throws(() => validate({record: record({owner_task_commitment_sha256: '0'.repeat(64)})}), /commitment/);
+});
+
+test('task authorization requires dynamic exact-main candidate selection instead of a pinned stale SHA', () => {
+  assert.throws(()=>validate({record:record({selected_candidate_sha:baseline})}),/must not pin a candidate SHA/);
+  assert.throws(()=>validate({record:record({risk_contracts:{release_infrastructure:{selected_candidate_sha:baseline}}})}),/risk contracts must not pin/);
+  assert.throws(()=>validate({record:record({candidate_selection_rule:'ANY_MAIN_SHA'})}),/candidate selection rule/);
+});
+
 for (const path of ['.github/workflows/gpoint-deploy.yml', 'scripts/release-gpoint.mjs',
   'packages/db/prisma/migrations/0001/migration.sql', 'services/agata/app/main.py',
   'services/core/auth.ts', 'services/gpoint-ads/direct.ts', 'payments/checkout.ts']) {
   test(`task authorization rejects owner-only path ${path}`, () => {
     assert.throws(() => validate({ record: record({ allowed_paths: [path] }), changedPaths: [path] }),
-      (error) => error instanceof AuthorizationError && /owner-only/.test(error.message));
+      (error) => error instanceof AuthorizationError && /(owner-only|risk contract)/.test(error.message));
   });
 }
+
+test('task authorization permits only explicitly contracted release-infrastructure paths', () => {
+  const workflow = '.github/workflows/gpoint-deploy.yml';
+  const risk = {
+    allowed_paths: [workflow],
+    baseline_sha: baseline,
+    risk_description: 'Change the trusted GPoint release workflow under the owner release task.',
+    allowed_operations: ['integrate', 'coalesce', 'prepare', 'preflight', 'deploy', 'verify', 'rollback', 'publish_evidence'],
+    required_gates: ['exact_candidate', 'complete_scope', 'prepare_provenance', 'immutable_artifact',
+      'security_review', 'preflight', 'rollback_readiness', 'worker_compatibility',
+      'postdeploy_health', 'reconciliation'],
+    backup_plan: 'Retain the previous immutable production manifest and delivery artifact.',
+    rollback_plan: 'Restore the previous verified production manifest and reconcile partial apply.',
+    stop_conditions: ['Stop if exact SHA or baseline differs.', 'Stop if rollback or health evidence is missing.'],
+  };
+  const exclusions = ['database', 'migrations', 'security', 'secrets', 'payments', 'ads', 'paid_traffic'];
+  const proof = validate({
+    record: record({allowed_paths: [workflow], exclusions, risk_contracts: {release_infrastructure: risk}}),
+    changedPaths: [workflow],
+  });
+  assert.equal(proof.changedPaths, workflow);
+  assert.throws(() => validate({record: record({allowed_paths: [workflow], exclusions}), changedPaths: [workflow]}),
+    /risk contract/);
+  assert.throws(() => validate({record: record({allowed_paths: [workflow], exclusions,
+    risk_contracts: {release_infrastructure: risk}}), changedPaths: ['.github/workflows/other.yml']}),
+  /risk contract/);
+});
 
 test('a complete pre-approved migration contract admits only its exact scoped migration path', () => {
   const migration = 'packages/db/prisma/migrations/0099_add_field/migration.sql';
@@ -74,7 +139,7 @@ test('task authorization rejects unrelated paths and baseline drift', () => {
 });
 
 test('task authorization rejects incomplete, revoked and consumed records', () => {
-  for (const extra of [{ source_reference: '' }, { acceptance_criteria: [] }, { allowed_paths: [] },
+  for (const extra of [{ source_instruction_identifier: '' }, { owner_task_reference: '' }, { acceptance_criteria: [] }, { allowed_paths: [] },
     { exclusions: ['database'] }, { state: 'REVOKED' }, { revoked: true }, { consumed: true }]) {
     assert.throws(() => validate({ record: record(extra) }), AuthorizationError);
   }
@@ -83,6 +148,12 @@ test('task authorization rejects incomplete, revoked and consumed records', () =
 test('task authorization requires explicit full-cycle owner intent in the durable record', () => {
   assert.throws(() => validate({record: record({owner_instruction_scope: 'PREPARE_ONLY'})}), /explicitly authorize the full production cycle/);
   assert.throws(() => validate({record: record({schema_version: 1})}), /Unsupported task authorization record/);
+});
+
+test('task authorization must be bound to production and development-only tasks cannot apply', () => {
+  assert.throws(() => validate({record: record({environment: 'staging'})}), /production environment/);
+  assert.throws(() => validate({record: record({owner_instruction_scope: 'PREPARE_ONLY'})}),
+    /explicitly authorize the full production cycle/);
 });
 
 test('task authorization rejects wrong project and authorization id', () => {
@@ -106,6 +177,46 @@ test('scope diff requires the durable authorization commit before task code', ()
   fs.writeFileSync(path.join(root, 'apps/web/components/Menu.tsx'), 'updated\n');
   git('add', 'apps/web/components/Menu.tsx'); git('commit', '-m', 'implement authorized task');
   assert.deepEqual(candidateScopeDiff(root, id, baseline, git('rev-parse', 'HEAD')), ['apps/web/components/Menu.tsx']);
+  fs.rmSync(root, {recursive: true, force: true});
+});
+
+test('scope diff admits exact listed prepared commits before the task authorization', () => {
+  const {root, git, baseline} = makeGitRepo();
+  const preparedPath = '.github/workflows/gpoint-deploy.yml';
+  fs.mkdirSync(path.dirname(path.join(root, preparedPath)), {recursive: true});
+  fs.writeFileSync(path.join(root, preparedPath), 'prepared release workflow\n');
+  git('add', preparedPath); git('commit', '-m', 'owner-selected prepared release change');
+  const preparedCommit = git('rev-parse', 'HEAD');
+  const authPath = path.join(root, '.release-authorizations', `${id}.json`);
+  fs.mkdirSync(path.dirname(authPath));
+  fs.writeFileSync(authPath, JSON.stringify({preauthorized_commits: [preparedCommit],
+    preauthorized_paths: [preparedPath], allowed_paths: [preparedPath, 'scripts/release-authorization.mjs']}) + '\n');
+  git('add', '.release-authorizations'); git('commit', '-m', 'record owner release task authorization');
+  fs.mkdirSync(path.join(root, 'scripts'), {recursive: true});
+  fs.writeFileSync(path.join(root, 'scripts/release-authorization.mjs'), 'release auth fix\n');
+  git('add', 'scripts/release-authorization.mjs'); git('commit', '-m', 'continue authorized integration');
+  assert.deepEqual(candidateScopeDiff(root, id, baseline, git('rev-parse', 'HEAD')),
+    [preparedPath, 'scripts/release-authorization.mjs']);
+  fs.rmSync(root, {recursive: true, force: true});
+});
+
+test('scope diff rejects prepared history omitted from the authorization record', () => {
+  const {root, git, baseline} = makeGitRepo();
+  const preparedPath = '.github/workflows/gpoint-deploy.yml';
+  fs.mkdirSync(path.dirname(path.join(root, preparedPath)), {recursive: true});
+  fs.writeFileSync(path.join(root, preparedPath), 'prepared release workflow\n');
+  git('add', preparedPath); git('commit', '-m', 'unlisted prepared release change');
+  const preparedCommit = git('rev-parse', 'HEAD');
+  const authPath = path.join(root, '.release-authorizations', `${id}.json`);
+  fs.mkdirSync(path.dirname(authPath));
+  fs.writeFileSync(authPath, JSON.stringify({preauthorized_commits: [], preauthorized_paths: [],
+    allowed_paths: [preparedPath, 'scripts/release-authorization.mjs']}) + '\n');
+  git('add', '.release-authorizations'); git('commit', '-m', 'record owner release task authorization');
+  fs.mkdirSync(path.join(root, 'scripts'), {recursive: true});
+  fs.writeFileSync(path.join(root, 'scripts/release-authorization.mjs'), 'release auth fix\n');
+  git('add', 'scripts/release-authorization.mjs'); git('commit', '-m', 'continue authorized integration');
+  assert.throws(() => candidateScopeDiff(root, id, baseline, git('rev-parse', 'HEAD')),
+    /candidate history is not exactly listed/);
   fs.rmSync(root, {recursive: true, force: true});
 });
 

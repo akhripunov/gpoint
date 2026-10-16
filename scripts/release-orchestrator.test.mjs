@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {dispatchPrepare, findTaskAuthorization, validateEvent, OrchestrationError, taskAutoClaimRef} from './release-orchestrator.mjs';
+import {ownerTaskCommitmentSha256, candidateScopeDiff, validateTaskAuthorization} from './release-authorization.mjs';
 
 const sha = 'a'.repeat(40);
 const event = (change = {}) => ({repository:{full_name:'akhripunov/gpoint'}, workflow_run:{id:123,run_attempt:2,
@@ -123,27 +124,39 @@ test('Prepare controller carries only one valid full-cycle authorization record'
     const records=path.join(root,'.release-authorizations');fs.mkdirSync(records);
     fs.writeFileSync(path.join(records,'gpoint-task-2026-10-16-002.json'),JSON.stringify({schema_version:3,
       owner_instruction_scope:'FULL_PRODUCTION_CYCLE',project:'gpoint',authorization_mode:'TASK_SCOPED_AUTO',
-      authorization_id:'gpoint-task-2026-10-16-002',source_reference:'linear:ME-998',
+      authorization_id:'gpoint-task-2026-10-16-002',source_instruction_identifier:'OWNER_TASK_OLD_RELEASE_2026_10_01',
+      candidate_selection_rule:'EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE',
+      allowed_operations:['integrate','coalesce','prepare','preflight','deploy','verify','rollback','publish_evidence'],
       production_baseline_sha:'0'.repeat(40),task:'older task',allowed_paths:['apps/miniapp/src/label.ts'],
       acceptance_criteria:['label visible'],exclusions:['database','migrations','security','secrets','payments','ads','paid_traffic','release_infrastructure'],
       state:'ACTIVE',revoked:false,consumed:false}));
     git('add','README.md','.release-authorizations');git('commit','-m','baseline');
     const baseline=git('rev-parse','HEAD');
-    fs.writeFileSync(path.join(records,'gpoint-task-2026-10-16-001.json'),JSON.stringify({schema_version:3,
-      owner_instruction_scope:'FULL_PRODUCTION_CYCLE',project:'gpoint',authorization_mode:'TASK_SCOPED_AUTO',
-      authorization_id:'gpoint-task-2026-10-16-001',source_reference:'linear:ME-999',
+    const selected={schema_version:3,
+      owner_instruction_scope:'FULL_PRODUCTION_CYCLE',project:'gpoint',environment:'production',authorization_mode:'TASK_SCOPED_AUTO',
+      authorization_id:'gpoint-task-2026-10-16-001',source_instruction_identifier:'OWNER_TASK_UNIFIED_RELEASE_V1_2026_10_16',
+      owner_task_reference:'OWNER task: release the exact scoped GPoint change after required gates.',
+      candidate_selection_rule:'EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE',
+      allowed_operations:['integrate','coalesce','prepare','preflight','deploy','verify','rollback','publish_evidence'],
       production_baseline_sha:baseline,task:'update one safe UI label',allowed_paths:['apps/miniapp/src/label.ts'],
       acceptance_criteria:['label visible'],exclusions:['database','migrations','security','secrets','payments','ads','paid_traffic','release_infrastructure'],
-      state:'ACTIVE',revoked:false,consumed:false}));
+      state:'ACTIVE',revoked:false,consumed:false};
+    selected.owner_task_commitment_sha256=ownerTaskCommitmentSha256(selected);
+    fs.writeFileSync(path.join(records,'gpoint-task-2026-10-16-001.json'),JSON.stringify(selected));
     git('add','.release-authorizations');git('commit','-m','register full-cycle authorization');
     fs.mkdirSync(path.join(root,'apps/miniapp/src'),{recursive:true});
     fs.writeFileSync(path.join(root,'apps/miniapp/src/label.ts'),'export const label="hello";\n');
     git('add','apps/miniapp/src/label.ts');git('commit','-m','implement authorized scope');
     const candidate=git('rev-parse','HEAD');
-    const api=async(method,route)=>{if(route.includes('gpoint-task-2026-10-16-002/consumed'))return {object:{sha:candidate}};if(route.includes('/revoked')||route.includes('/consumed')||route.includes('/claimed')){const error=new Error('not found');error.status=404;throw error;}return {object:{sha:candidate}};};
-    const selected=await findTaskAuthorization(root,candidate,api);
-    assert.equal(selected.authorizationId,'gpoint-task-2026-10-16-001');
-    assert.equal(selected.ambiguous,false);
+    const changedPaths=candidateScopeDiff(root,selected.authorization_id,baseline,candidate);
+    validateTaskAuthorization({record:selected,project:'gpoint',authorizationId:selected.authorization_id,
+      candidateSha:candidate,currentMainSha:candidate,productionSha:baseline,changedPaths});
+    const apiCalls=[];
+    const api=async(method,route)=>{apiCalls.push(route);if(route.includes('gpoint-task-2026-10-16-002/consumed'))return {object:{sha:candidate}};if(route.includes('/revoked')||route.includes('/consumed')||route.includes('/claimed')){const error=new Error('not found');error.status=404;throw error;}return {object:{sha:candidate}};};
+    const selectedAuth=await findTaskAuthorization(root,candidate,api);
+    assert.equal(selectedAuth.authorizationId,'gpoint-task-2026-10-16-001');
+    assert.equal(selectedAuth.ambiguous,false);
+    assert.ok(apiCalls.every(route => !route.toLowerCase().includes('linear')));
     const selectedAgain=await findTaskAuthorization(root,candidate,async(method,route)=>{
       if(route.includes('/revoked')||route.includes('/consumed')||route.includes('/claimed')){const error=new Error('not found');error.status=404;throw error;}
       return {object:{sha:candidate}};

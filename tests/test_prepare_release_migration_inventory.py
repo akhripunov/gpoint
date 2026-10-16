@@ -104,6 +104,7 @@ def test_candidate_image_builds_use_exact_platform_and_isolated_reusable_cache_s
     assert app[5] == '--load'
     assert app[6:8] == ['--build-context', 'dependency-manifests=/tmp/dependency-manifests']
     assert '--label' in app and 'org.opencontainers.image.revision=' + 'a' * 40 in app
+    assert 'org.opencontainers.image.source=https://github.com/akhripunov/gpoint' in app
     assert '--cache-from' in app and 'type=gha,scope=gpoint-gpoint-runtime' in app
     assert '--cache-to' in app and 'type=gha,scope=gpoint-gpoint-runtime,mode=max,ignore-error=true' in app
     assert '--build-context' not in agata

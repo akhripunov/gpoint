@@ -3,18 +3,16 @@
 ## Два режима разрешения выпуска
 
 Актуальные условия: [Release authorization modes](../RELEASE_AUTHORIZATION.md).
-По умолчанию владелец подтверждает подготовленный exact SHA. Конкретное
-поручение владельца «исправь [задачу] и выкатывай» разрешает один
-`TASK_SCOPED_AUTO` release без повторного подтверждения. До реализации
-фиксируется schema-v3 durable authorization record. После exact-SHA Prepare
-existing controller проверяет baseline, полный scope и одноразовость,
-атомарно claim-ит authorization и вызывает тот же Deploy workflow напрямую в
-`task-scoped-auto` режиме. Read-only preflight проходит внутри этого Deploy
-непосредственно перед Apply; отдельный обязательный preflight-run не создаётся.
-Без действующей авторизации controller не запускает Deploy, и сохраняется
-обычный exact-SHA approval. Release infrastructure и неподдержанные owner-only
-категории остаются за отдельным exact-SHA approval; database migration
-допускается только с полным task risk contract и всеми штатными gates.
+OWNER task, прямо разрешающее полный выпуск подготовленных изменений до
+production, является одноразовой авторизацией на штатный цикл в границах
+scope и перечисленных рисков. Финальный SHA определяется после интеграции. До
+изменений фиксируется schema-v3 durable authorization record. Разработка без
+поручения о выпуске не разрешает Deploy. После exact-SHA Prepare controller
+повторно проверяет baseline, полный scope и одноразовость, атомарно claim-ит
+authorization и вызывает тот же Deploy workflow в `task-scoped-auto` режиме,
+без промежуточного запроса OWNER. Read-only preflight проходит внутри Deploy
+перед Apply. Критичные категории допускаются только при явном risk contract в
+исходном OWNER release task и durable record; без контракта выпуск блокируется.
 Runner может штатно ждать в GitHub `Queued`; readiness check остаётся
 fail-closed.
 Подробности: [Release authorization modes](../RELEASE_AUTHORIZATION.md).
@@ -30,7 +28,7 @@ fail-closed.
 
 История: [Журнал релизов](https://linear.app/bestuzhev/document/zhurnal-relizov-640efa60dacf). Каждый результат содержит SHA и ссылку на GitHub run. В Handoff история и архитектурные ограничения сохраняются, автоматизация меняет только свои именованные блоки.
 
-Можно пользоваться через Dev: «Подготовь релиз и дай SHA со ссылкой на проверки», затем «Разрешаю выкатить SHA …». Dev обязан проверить успешный Prepare, использовать его артефакты и canonical entrypoint. Кнопка Deploy удобнее тем, что фиксирует оператора и запускает стандартные шаги без пересказа команд.
+Если OWNER поручил только подготовить релиз, отдельное разрешение на production остаётся обязательным. Если OWNER выдал полное ТЗ на выпуск, система сама проводит разрешённый цикл после прохождения технических gates; ручной ввод SHA и подтверждение после READY не требуются. В обоих режимах Deploy использует canonical entrypoint и Prepare artifacts.
 
 Режим **preflight** остаётся ручной read-only диагностикой: проверяет доступ, live baseline, worker/config и артефакты без применения миграций и переключения runtime. При успешной отдельной диагностике `PLANNED` плюс immutable evidence публикуются как `READY_FOR_OWNER`. В production или `task-scoped-auto` статус `PASS` означает, что тот же read-only preflight прошёл внутри Deploy до Apply; `READY_FOR_OWNER` для уже выполняемого production цикла не публикуется.
 

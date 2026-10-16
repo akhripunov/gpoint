@@ -2,7 +2,33 @@
 
 Effective 2026-10-06 by explicit OWNER decision; applies to future releases.
 
-## Exact-SHA approval (default)
+## OWNER release task authorization (one-shot)
+
+An OWNER task that explicitly requests release of prepared changes through
+production authorizes the complete canonical release cycle for the named
+project and scope. It need not list the final SHA: the operator records the
+source task, project, production baseline, authorized paths and operations,
+acceptance gates, stop conditions and risk contracts in a durable
+`.release-authorizations/<id>.json` record before implementation changes. The
+exact candidate is derived from the reviewed integration and must remain within
+that recorded scope. A development-only task does not authorize production.
+
+Once that record is validated, no second OWNER approval is required at PR,
+merge, Prepare, preflight or Deploy for the same scope. GitHub Actions remains
+the orchestrator. The path is integration → coalescing → exact-current Prepare
+→ authorization/scope validation → Deploy with read-only preflight inside
+Deploy → verification → immutable evidence and Linear reconciliation.
+Security, migration, artifact, Worker, rollback, health, recovery and
+deduplication gates remain mandatory. Scope or baseline drift, a failed gate,
+an ambiguous apply or an operation outside the authorization stops release.
+
+Changes to database, security, secrets, payments, advertising, paid traffic or
+release infrastructure require a matching explicit risk contract in the
+original OWNER release task and durable authorization record. The contract
+must name exact scope, gates, backup and rollback plans, and stop conditions.
+Without that contract, the category remains excluded and release blocks.
+
+## Exact-SHA approval (default when no OWNER release task exists)
 
 Without an explicit task-scoped deployment instruction, prepare the candidate
 and request OWNER approval for its full SHA before production apply. MAXIBOT
@@ -25,6 +51,18 @@ acceptance criteria, exclusions/owner-only categories, and ACTIVE/revoked/
 consumed state. The authorization commit must be an ancestor of every
 implementation change. Preserve the record blob. Push remains subject to the
 repository's separate publication approval.
+The record names the direct OWNER instruction with a stable instruction ID and
+human-readable task reference. Its commitment hash is an integrity check that
+binds the project, production baseline, deterministic candidate rule, scope,
+permitted operations, acceptance criteria, exclusions, risk contracts, and
+exact pre-authorization commits/paths; it is not an OWNER signature.
+Authorization is established when the release operator verifies the direct
+OWNER Release Task received in the DevOps Codex task and records it before
+implementation. Linear is documentation and evidence publication only; the
+controller and Deploy do not query Linear to authorize release, and missing,
+stale, or mismatched Linear links do not block it. Candidate SHA fields are
+forbidden in the task record; the exact candidate is selected from current main
+after integration.
 Controller proves its commit precedes all implementation commits, supporting
 normal merge commits and rejecting squash-merging the authorization together
 with the implementation. Before apply, compare the full baseline-to-candidate
@@ -54,9 +92,9 @@ exact candidate preflight must prove the recorded baseline, target, migration
 readiness/rehearsal and rollback gates; canonical apply still creates and
 validates its backup before migration. Any mismatch blocks. Security,
 credentials, permissions, payments, advertising/autopilot, paid-traffic,
-release-infrastructure and other owner-only changes remain ineligible until a
-category-specific gate contract is implemented and reviewed. Release-infra
-changes always require separate exact-SHA OWNER approval. Unknown risk blocks.
+release-infrastructure and other owner-only changes remain ineligible unless a
+category-specific gate contract is explicitly included in the original OWNER
+release task, durably recorded and implemented. Unknown risk blocks.
 
 All existing clean-checkout, exact current-main, Prepare, immutable artifact,
 platform/parity, config, preflight, lock, recovery, server health, Worker compatibility and regression
@@ -78,7 +116,7 @@ release completes; publication-only repair is allowed, another runtime release
 requires a new instruction. OWNER revocation always stops pending apply.
 
 Record mode TASK_SCOPED_AUTO or EXACT_SHA in Linear together with authorization
-ID, full SHA, source reference, scope verification, run links, technical result
+ID, full SHA, source instruction ID, scope verification, run links, technical result
 and any pending OWNER smoke. Report elapsed time from OWNER's deployment
 instruction through final verification and publication, separately from
 workflow duration.
