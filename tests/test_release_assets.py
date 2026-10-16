@@ -10,6 +10,17 @@ import release_assets as ASSETS
 
 
 class ImmutableReleaseTests(unittest.TestCase):
+    def test_privileged_prepare_is_main_push_only_and_branch_jobs_are_not_dispatchable(self):
+        workflow = (ROOT / '.github/workflows/gpoint-prepare.yml').read_text()
+        trigger = workflow.split('\npermissions:', 1)[0]
+        self.assertIn('push:', trigger)
+        self.assertNotIn('workflow_dispatch:', trigger)
+        self.assertIn('permissions:\n  contents: read\n  actions: read', workflow)
+        prepare = workflow.split('  prepare:\n', 1)[1].split('    steps:\n', 1)[0]
+        self.assertIn("github.ref == 'refs/heads/main'", prepare)
+        self.assertNotIn("github.ref != 'refs/heads/main'", prepare)
+        self.assertIn('permissions:\n      contents: write\n      actions: read\n      packages: write', prepare)
+
     def fixture(self):
         sha = 'a' * 40
         tag = ASSETS.release_tag('prepare', sha, '55', '2')
@@ -24,6 +35,21 @@ class ImmutableReleaseTests(unittest.TestCase):
     def test_exact_immutable_release_selects_digest_and_asset(self):
         sha, _, _, github = self.fixture()
         self.assertEqual(ASSETS.resolve_asset('prepare', sha, '55', '2', 'bundle.zip', github)['id'], 99)
+
+    def test_oci_prepare_download_bundle_is_receipt_only_and_archive_is_separate_fallback(self):
+        import json
+        import tempfile
+        import zipfile
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'source'; source.mkdir()
+            (source / 'receipt.json').write_text(json.dumps({'schema': 3, 'transport': 'ghcr-oci'}))
+            (source / 'images.tar.gz').write_bytes(b'fallback image archive')
+            primary, fallback = ASSETS.build_oci_prepare_assets(source, root)
+            with zipfile.ZipFile(primary) as archive:
+                self.assertEqual(archive.namelist(), ['receipt.json'])
+            with zipfile.ZipFile(fallback) as archive:
+                self.assertEqual(set(archive.namelist()), {'receipt.json', 'images.tar.gz'})
 
     def test_draft_mutable_tag_mismatch_and_moved_tag_are_rejected(self):
         for field, value in [('draft', True), ('immutable', False), ('tag_name', 'wrong')]:

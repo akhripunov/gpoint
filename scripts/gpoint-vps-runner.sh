@@ -30,23 +30,9 @@ case "$deadline" in ''|*[!0-9]*) echo 'GPoint remote timeout must be an integer 
 
 debug_log=$(mktemp "${TMPDIR:-/tmp}/gpoint-ssh-debug.XXXXXX")
 ssh_stderr=$(mktemp "${TMPDIR:-/tmp}/gpoint-ssh-stderr.XXXXXX")
-trap 'rm -f "$debug_log" "$ssh_stderr"' EXIT HUP INT TERM
-
-set +e
-perl - "$deadline" ssh \
-  -E "$debug_log" \
-  -vv \
-  -i "$identity" \
-  -o IdentitiesOnly=yes \
-  -o StrictHostKeyChecking=yes \
-  -o BatchMode=yes \
-  -o ConnectTimeout=20 \
-  -o ConnectionAttempts=1 \
-  -o ServerAliveInterval=15 \
-  -o ServerAliveCountMax=3 \
-  -p 22 \
-  root@38.180.110.92 \
-  "$REMOTE_CMD" 2>"$ssh_stderr" <<'PERL'
+perl_script=$(mktemp "${TMPDIR:-/tmp}/gpoint-ssh-runner.XXXXXX")
+trap 'rm -f "$debug_log" "$ssh_stderr" "$perl_script"' EXIT HUP INT TERM
+cat > "$perl_script" <<'PERL'
 use strict;
 use warnings;
 my $seconds = shift @ARGV;
@@ -71,6 +57,22 @@ alarm(0);
 my $status = $?;
 exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
 PERL
+
+set +e
+perl "$perl_script" "$deadline" ssh \
+  -E "$debug_log" \
+  -vv \
+  -i "$identity" \
+  -o IdentitiesOnly=yes \
+  -o StrictHostKeyChecking=yes \
+  -o BatchMode=yes \
+  -o ConnectTimeout=20 \
+  -o ConnectionAttempts=1 \
+  -o ServerAliveInterval=15 \
+  -o ServerAliveCountMax=3 \
+  -p 22 \
+  root@38.180.110.92 \
+  "$REMOTE_CMD" 2>"$ssh_stderr"
 ssh_status=$?
 set -e
 cat "$ssh_stderr" >&2

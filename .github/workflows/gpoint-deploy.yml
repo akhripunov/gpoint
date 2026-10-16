@@ -35,6 +35,12 @@ on:
         description: 'Durable full-cycle TASK_SCOPED_AUTO authorization; optional in preflight and required for task-scoped-auto'
         required: false
         type: string
+      image_transport:
+        description: 'Use the Prepare transport, or explicitly select its verified archive fallback before deployment starts'
+        required: true
+        default: prepared
+        type: choice
+        options: [prepared, ghcr-oci, archive]
 
 permissions:
   contents: read
@@ -130,14 +136,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           ARTIFACT_DESTINATION: ${{ env.GPOINT_RELEASE_BUNDLE }}
+          IMAGE_TRANSPORT: ${{ inputs.image_transport }}
         run: python3 scripts/prepared_artifact_cache.py
       - name: Verify receipt, canonical preflight, apply and persist evidence
         id: execute
         env:
           CACHE_PREVENTED_DOWNLOAD: ${{ steps.cache.outputs.cache_prevented_download }}
           BUNDLE_DOWNLOAD_SECONDS: ${{ steps.cache.outputs.bundle_download_seconds }}
+          IMAGE_TRANSPORT: ${{ inputs.image_transport }}
           TASK_AUTHORIZATION_ID: ${{ needs.validate.outputs.task_authorization_id }}
           GITHUB_TOKEN: ${{ github.token }}
+          GHCR_READ_USERNAME: akhripunov
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
         run: node scripts/automated-release.mjs
       - name: Preserve release result and canonical manifests as immutable evidence
         if: always()

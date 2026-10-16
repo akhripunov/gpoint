@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { validateOciReceipt } from './release-oci.mjs';
 
 // The workflow independently verifies the successful GitHub run before using
 // this receipt. A receipt alone is not a GitHub provenance check.
@@ -10,6 +11,7 @@ export function verifyReleaseBundle(directory, candidate) {
   const root = fs.realpathSync(directory);
   const proof = JSON.parse(fs.readFileSync(path.join(root, 'receipt.json'), 'utf8'));
   if (proof.schema === 2) return verifyV4StaticBundle(root, candidate, proof);
+  if (proof.schema === 3) return verifyOciReleaseBundle(root, candidate, proof);
   if (proof.schema !== 1 || proof.candidateSha !== candidate || proof.status !== 'READY') {
     throw new Error('release bundle is not READY for the exact candidate');
   }
@@ -24,29 +26,7 @@ export function verifyReleaseBundle(directory, candidate) {
   // Generic SKIPPED must never satisfy the immutable receipt gate.
   const sourceGates = ['postgres', 'gsalesPostgres'];
   const covered = sourceGates.filter(g => proof.gates?.[g] === 'COVERED_UNCHANGED');
-  if (covered.length) {
-    const impact = proof.impactV3;
-    const safeUI = p => typeof p === 'string' &&
-      (((p.startsWith('apps/miniapp/src/') || p.startsWith('apps/miniapp/public/')) &&
-       p.split('/').length >= 4 && !p.split('/').some(x => x === '.' || x === '..' || !x) && !p.includes('\0')) ||
-       p === 'apps/miniapp/index.html');
-    if (covered.length !== sourceGates.length ||
-        impact?.version !== 1 || impact?.candidateSha !== candidate ||
-        impact?.classification !== 'UI_ONLY' ||
-        impact?.baselineSource !== 'gpoint-release-ledger' ||
-        impact?.reason !== 'narrow-unchanged-backend' ||
-        !/^[a-f0-9]{40}$/.test(impact?.productionBaselineSha ?? '') ||
-        impact.productionBaselineSha === candidate ||
-        impact.checks?.agata_postgres_rehearsal !== false ||
-        impact.checks?.gsales_postgres_regression !== false ||
-        !Array.isArray(impact.changedPaths) || impact.changedPaths.length === 0 ||
-        !impact.changedPaths.every(safeUI) ||
-        !Array.isArray(impact.invariantChecks) ||
-        !['docker_images_exact_sha', 'artifact_migrations', 'deploy_rehearsal', 'canonical_preflight', 'production_approval']
-          .every(k => impact.invariantChecks.includes(k))) {
-      throw new Error('unverified V3 unchanged-source coverage');
-    }
-  }
+  if (covered.length) validateV3CoveredUnchanged(proof, candidate, sourceGates, covered);
   for (const gate of ['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'botImageStartup', 'deployRehearsal']) {
     if (proof.gates?.[gate] !== 'PASS' &&
         !(sourceGates.includes(gate) && proof.gates?.[gate] === 'COVERED_UNCHANGED' && covered.length === 2)) {
@@ -71,6 +51,79 @@ export function verifyReleaseBundle(directory, candidate) {
   } finally { fs.closeSync(fd); }
   if (hash.digest('hex') !== proof.archiveSha256) throw new Error('release archive checksum mismatch');
   return { ...proof, archive };
+}
+
+export function selectImageTransport(proof, requested = 'prepared') {
+  if (!['prepared', 'ghcr-oci', 'archive'].includes(requested)) throw new Error('unsupported image transport selection');
+  const prepared = proof?.transport === 'ghcr-oci' ? 'ghcr-oci' : 'archive';
+  if (requested === 'prepared' || requested === prepared) return prepared;
+  if (requested === 'archive' && prepared === 'ghcr-oci' &&
+      typeof proof.archive === 'string' && fs.existsSync(proof.archive) && !fs.lstatSync(proof.archive).isSymbolicLink()) return 'archive';
+  throw new Error('requested image transport is unavailable or not proven by the immutable Prepare receipt');
+}
+
+function verifyOciReleaseBundle(root, candidate, proof) {
+  const validated = validateOciReceipt(proof, candidate,
+    { runId: proof.runId, runAttempt: proof.runAttempt });
+  const gates = ['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum',
+    'docker', 'migration', 'miniapp', 'agataHealth', 'botImageStartup', 'deployRehearsal'];
+  const sourceGates = ['postgres', 'gsalesPostgres'];
+  const covered = sourceGates.filter(g => proof.gates?.[g] === 'COVERED_UNCHANGED');
+  if (covered.length) validateV3CoveredUnchanged(proof, candidate, sourceGates, covered);
+  for (const gate of gates) {
+    if (proof.gates?.[gate] !== 'PASS' &&
+        !(sourceGates.includes(gate) && proof.gates?.[gate] === 'COVERED_UNCHANGED' && covered.length === sourceGates.length)) {
+      throw new Error('missing OCI release gate: ' + gate);
+    }
+  }
+  if (!/^[A-Za-z0-9_]{1,32}$/.test(proof.agataHead ?? '') ||
+      !/^[A-Za-z0-9_]{1,128}$/.test(proof.prismaHead ?? '') ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(proof.gsalesMigrationHead ?? '') ||
+      !/^[a-f0-9]{64}$/.test(proof.gsalesMigrationSha256 ?? '')) {
+    throw new Error('invalid OCI candidate migration heads');
+  }
+  if (!/^[a-f0-9]{64}$/.test(proof.archiveSha256 ?? ''))
+    throw new Error('missing OCI fallback archive checksum');
+  const archive = path.join(root, 'images.tar.gz');
+  if (fs.existsSync(archive)) {
+    if (fs.realpathSync(archive) !== archive) throw new Error('OCI fallback archive must not be a symlink');
+    const hash = crypto.createHash('sha256');
+    const fd = fs.openSync(archive, 'r');
+    try {
+      const chunk = Buffer.alloc(1024 * 1024);
+      let count;
+      while ((count = fs.readSync(fd, chunk, 0, chunk.length, null))) hash.update(chunk.subarray(0, count));
+    } finally { fs.closeSync(fd); }
+    if (hash.digest('hex') !== proof.archiveSha256) throw new Error('OCI fallback archive checksum mismatch');
+  }
+  const images = Object.fromEntries(Object.entries(validated.images).map(([role, image]) => [role, {
+    ...image, id: image.configDigest, revision: image.sourceSha,
+  }]));
+  return { ...validated, images, archive: fs.existsSync(archive) ? archive : null, ghcrVerified: false };
+}
+
+function validateV3CoveredUnchanged(proof, candidate, sourceGates, covered) {
+  const impact = proof.impactV3;
+  const safeUI = p => typeof p === 'string' &&
+    (((p.startsWith('apps/miniapp/src/') || p.startsWith('apps/miniapp/public/')) &&
+     p.split('/').length >= 4 && !p.split('/').some(x => x === '.' || x === '..' || !x) && !p.includes('\0')) ||
+     p === 'apps/miniapp/index.html');
+  if (covered.length !== sourceGates.length ||
+      impact?.version !== 1 || impact?.candidateSha !== candidate ||
+      impact?.classification !== 'UI_ONLY' ||
+      impact?.baselineSource !== 'gpoint-release-ledger' ||
+      impact?.reason !== 'narrow-unchanged-backend' ||
+      !/^[a-f0-9]{40}$/.test(impact?.productionBaselineSha ?? '') ||
+      impact.productionBaselineSha === candidate ||
+      impact.checks?.agata_postgres_rehearsal !== false ||
+      impact.checks?.gsales_postgres_regression !== false ||
+      !Array.isArray(impact.changedPaths) || impact.changedPaths.length === 0 ||
+      !impact.changedPaths.every(safeUI) ||
+      !Array.isArray(impact.invariantChecks) ||
+      !['docker_images_exact_sha', 'artifact_migrations', 'deploy_rehearsal', 'canonical_preflight', 'production_approval']
+        .every(k => impact.invariantChecks.includes(k))) {
+    throw new Error('unverified V3 unchanged-source coverage');
+  }
 }
 
 const SHA40_V4 = /^[a-f0-9]{40}$/;

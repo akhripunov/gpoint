@@ -135,6 +135,7 @@ def docker_build_command(tag, dockerfile, context, sha, *, dependency_manifest_c
         raise ValueError('dependency manifest context is only valid for GPoint runtime')
     command.extend(['--build-arg', f'GPOINT_BUILD_SHA={sha}',
                     '--label', f'org.opencontainers.image.revision={sha}',
+                    '--label', 'org.opencontainers.image.source=https://github.com/akhripunov/gpoint',
                     '--cache-from', f'type=gha,scope={cache_scope}',
                     '--cache-to', f'type=gha,scope={cache_scope},mode=max,ignore-error=true',
                     '-f', dockerfile, '-t', f'{tag}:{sha}', context])
