@@ -1,0 +1,105 @@
+diff --git a/crates/eros-engine-store/migrations/0003_memory.sql b/crates/eros-engine-store/migrations/0003_memory.sql
+index ae7ef7e..2935a9a 100644
+--- a/crates/eros-engine-store/migrations/0003_memory.sql
++++ b/crates/eros-engine-store/migrations/0003_memory.sql
+@@ -5 +5,14 @@
+-CREATE EXTENSION IF NOT EXISTS vector;
++CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
++
++DO $$
++BEGIN
++    IF NOT EXISTS (
++        SELECT 1
++        FROM pg_extension e
++        JOIN pg_namespace n ON n.oid = e.extnamespace
++        WHERE e.extname = 'vector' AND n.nspname = 'public'
++    ) THEN
++        RAISE EXCEPTION 'pgvector must be installed in public schema for shared-database compatibility';
++    END IF;
++END
++$$;
+diff --git a/crates/eros-engine-store/migrations/0016_lockdown_sqlx_migrations.sql b/crates/eros-engine-store/migrations/0016_lockdown_sqlx_migrations.sql
+index 0ca4fdc..12616da 100644
+--- a/crates/eros-engine-store/migrations/0016_lockdown_sqlx_migrations.sql
++++ b/crates/eros-engine-store/migrations/0016_lockdown_sqlx_migrations.sql
+@@ -3,7 +3,5 @@
+--- Lock down public._sqlx_migrations. After the 2026-05-22 eros-app /
+--- eros-gateway decommission this is the only table left in `public`, the
+--- schema Supabase exposes over PostgREST at /rest/v1/. Same defense-in-depth
+--- posture as 0013_supabase_lockdown for engine.* tables: revoke the anon /
+--- authenticated roles and enable RLS so the migration history (schema
+--- versions + descriptions) can't be read by holders of the publishable anon
+--- key.
++-- Lock down engine._sqlx_migrations. The migration runner configures
++-- search_path=engine,public so its SQLx ledger is isolated from other
++-- applications sharing the PostgreSQL database. SQLx test harnesses create
++-- their ledger in public; do not mistake that harness ledger for Eros' ledger
++-- or mutate a shared public migration table.
+@@ -20,0 +19 @@ DO $$
++DECLARE ledger regclass;
+@@ -21,0 +21,7 @@ BEGIN
++    ledger := to_regclass('engine._sqlx_migrations');
++    IF ledger IS NULL THEN
++        -- The isolated SQLx test macro uses public by default. Production
++        -- bootstrap creates engine._sqlx_migrations before running migrations.
++        RETURN;
++    END IF;
++
+@@ -23 +29 @@ BEGIN
+-        REVOKE ALL ON public._sqlx_migrations FROM anon;
++        EXECUTE format('REVOKE ALL ON TABLE %s FROM anon', ledger);
+@@ -26 +32 @@ BEGIN
+-        REVOKE ALL ON public._sqlx_migrations FROM authenticated;
++        EXECUTE format('REVOKE ALL ON TABLE %s FROM authenticated', ledger);
+@@ -27,0 +34,2 @@ BEGIN
++
++    EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', ledger);
+@@ -30,2 +37,0 @@ $$;
+-
+-ALTER TABLE public._sqlx_migrations ENABLE ROW LEVEL SECURITY;
+diff --git a/crates/eros-engine-store/src/lib.rs b/crates/eros-engine-store/src/lib.rs
+index 34328d9..4bfa253 100644
+--- a/crates/eros-engine-store/src/lib.rs
++++ b/crates/eros-engine-store/src/lib.rs
+@@ -229 +229 @@ mod migration_tests {
+-    async fn sqlx_migrations_has_rls_enabled(pool: PgPool) {
++    async fn isolated_test_ledger_does_not_mutate_public_migration_table(pool: PgPool) {
+@@ -237 +237,4 @@ mod migration_tests {
+-        assert!(enabled, "RLS must be enabled on public._sqlx_migrations");
++        assert!(
++            !enabled,
++            "test-only public ledger must remain untouched; production Eros ledger is engine._sqlx_migrations"
++        );
+diff --git a/crates/eros-engine-store/src/pool.rs b/crates/eros-engine-store/src/pool.rs
+index 05eeda7..f81e5ed 100644
+--- a/crates/eros-engine-store/src/pool.rs
++++ b/crates/eros-engine-store/src/pool.rs
+@@ -2 +2 @@
+-use sqlx::postgres::PgPoolOptions;
++use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+@@ -3,0 +4 @@ use sqlx::PgPool;
++use std::str::FromStr;
+@@ -6,0 +8,5 @@ pub async fn build(database_url: &str) -> Result<PgPool, sqlx::Error> {
++    // Keep Eros' unqualified SQLx migration ledger inside its own schema.
++    // engine is created before migrations run; public stays in the path for
++    // extensions such as pgvector and PostgreSQL built-ins.
++    let options = PgConnectOptions::from_str(database_url)?
++        .options([("search_path", "engine,public")]);
+@@ -10 +16 @@ pub async fn build(database_url: &str) -> Result<PgPool, sqlx::Error> {
+-        .connect(database_url)
++        .connect_with(options)
+@@ -12,0 +19,14 @@ pub async fn build(database_url: &str) -> Result<PgPool, sqlx::Error> {
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn connection_search_path_is_engine_then_public() {
++        let options = PgConnectOptions::from_str("postgres://test:test@localhost/eros")
++            .expect("valid test connection URL")
++            .options([("search_path", "engine,public")]);
++
++        assert_eq!(options.get_options(), Some("-c search_path=engine,public"));
++    }
++}

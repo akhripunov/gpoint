@@ -1,0 +1,17 @@
+# Local acceptance-only config. It is not suitable for production.
+# Both routes point to an isolated local Ollama endpoint; no hosted provider is
+# selected. Do not invoke chat or embedding endpoints until the local runtime
+# and pinned model are actually available.
+[defaults]
+fallback_model = "qwen3:0.6b@local"
+
+[tasks.chat_companion]
+model = "qwen3:0.6b@local"
+retry_depth = 1
+
+[providers.local]
+chat = "http://host.docker.internal:11434/v1/chat/completions"
+embeddings = "http://host.docker.internal:11434/v1/embeddings"
+
+[tasks.embedding]
+model = "qwen3-embedding:0.6b@local"
