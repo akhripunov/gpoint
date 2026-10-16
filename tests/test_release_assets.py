@@ -1,4 +1,3 @@
-import importlib.util
 import sys
 from pathlib import Path
 import unittest
@@ -6,7 +5,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
-import release_assets as ASSETS
+import release_assets as ASSETS  # noqa: E402
 
 
 class ImmutableReleaseTests(unittest.TestCase):
@@ -78,11 +77,16 @@ class ImmutableReleaseTests(unittest.TestCase):
     def test_missing_duplicate_unuploaded_and_digestless_asset_fail_closed(self):
         for change in ('missing', 'duplicate', 'pending', 'digest', 'identity'):
             sha, release, _, github = self.fixture()
-            if change == 'missing': release['assets'] = []
-            if change == 'duplicate': release['assets'] *= 2
-            if change == 'pending': release['assets'][0]['state'] = 'new'
-            if change == 'digest': release['assets'][0]['digest'] = ''
-            if change == 'identity': release['assets'][0]['id'] = 'bad'
+            if change == 'missing':
+                release['assets'] = []
+            if change == 'duplicate':
+                release['assets'] *= 2
+            if change == 'pending':
+                release['assets'][0]['state'] = 'new'
+            if change == 'digest':
+                release['assets'][0]['digest'] = ''
+            if change == 'identity':
+                release['assets'][0]['id'] = 'bad'
             with self.subTest(change=change), self.assertRaises(RuntimeError):
                 ASSETS.resolve_asset('prepare', sha, '55', '2', 'bundle.zip', github)
 
@@ -91,7 +95,8 @@ class ImmutableReleaseTests(unittest.TestCase):
                             ASSETS.release_tag('prepare', 'a'*40, '55', '2'))
         for args in [('prepare', 'main', '55', '1'), ('prepare', 'a'*40, '../55', '1'),
                      ('other', 'a'*40, '55', '1')]:
-            with self.assertRaises(RuntimeError): ASSETS.release_tag(*args)
+            with self.assertRaises(RuntimeError):
+                ASSETS.release_tag(*args)
 
     def test_read_result_passes_immutable_asset_size_to_range_downloader(self):
         import prepared_artifact_cache as cache
@@ -106,7 +111,8 @@ class ImmutableReleaseTests(unittest.TestCase):
         data = {'candidateSha': 'a'*40, 'automationRunId': '55', 'automationRunAttempt': '1'}
         ASSETS.validate_result(data, 'a'*40, '55', '1')
         for sha, run_id, attempt in [('a'*40, '55', '2'), ('b'*40, '55', '1'), ('a'*40, '56', '1')]:
-            with self.assertRaises(RuntimeError): ASSETS.validate_result(data, sha, run_id, attempt)
+            with self.assertRaises(RuntimeError):
+                ASSETS.validate_result(data, sha, run_id, attempt)
 
     def test_publish_rerun_uses_actual_successful_deploy_attempt(self):
         sha = 'a' * 40
@@ -168,9 +174,12 @@ class ImmutableReleaseTests(unittest.TestCase):
                    'assets': [{'id': 9, 'name': 'result.zip', 'state': 'uploaded',
                                'size': 100, 'digest': 'sha256:' + 'b' * 64}]}
         def api(route):
-            if route == 'releases/tags/' + tag: return release
-            if route.startswith('releases/tags/'): return None
-            if route == 'git/ref/tags/' + tag: return {'object': {'type': 'commit', 'sha': sha}}
+            if route == 'releases/tags/' + tag:
+                return release
+            if route.startswith('releases/tags/'):
+                return None
+            if route == 'git/ref/tags/' + tag:
+                return {'object': {'type': 'commit', 'sha': sha}}
             if route == 'actions/runs/55/attempts/2/jobs?per_page=100':
                 return {'total_count': 1, 'jobs': [{'name': 'deploy', 'status': 'completed',
                     'conclusion': 'success', 'head_sha': sha,
@@ -188,7 +197,8 @@ class ImmutableReleaseTests(unittest.TestCase):
     def test_reexecuted_deploy_missing_evidence_never_uses_older_artifact(self):
         sha = 'a' * 40
         def api(route):
-            if route.startswith('releases/tags/'): return None
+            if route.startswith('releases/tags/'):
+                return None
             if route == 'actions/runs/55/attempts/2/jobs?per_page=100':
                 return {'total_count': 1, 'jobs': [{'name': 'deploy', 'status': 'completed',
                     'conclusion': 'success', 'head_sha': sha,
@@ -203,7 +213,8 @@ class ImmutableReleaseTests(unittest.TestCase):
     def test_missing_timing_identity_fails_closed(self):
         sha = 'a' * 40
         def api(route):
-            if route.startswith('releases/tags/'): return None
+            if route.startswith('releases/tags/'):
+                return None
             if route.endswith('/jobs?per_page=100'):
                 return {'total_count': 1, 'jobs': [{'name': 'deploy', 'status': 'completed',
                     'conclusion': 'success', 'head_sha': sha}]}
@@ -220,9 +231,12 @@ class ImmutableReleaseTests(unittest.TestCase):
                    'assets': [{'id': 87, 'name': 'bundle.zip', 'state': 'uploaded',
                                'size': 444, 'digest': 'sha256:' + 'c' * 64}]}
         def api(route):
-            if route == 'releases/tags/' + tag: return release
-            if route.startswith('releases/tags/'): return None
-            if route == 'git/ref/tags/' + tag: return {'object': {'type': 'commit', 'sha': sha}}
+            if route == 'releases/tags/' + tag:
+                return release
+            if route.startswith('releases/tags/'):
+                return None
+            if route == 'git/ref/tags/' + tag:
+                return {'object': {'type': 'commit', 'sha': sha}}
             if route == 'actions/runs/55/attempts/2':
                 return {'run_attempt': 2, 'run_started_at': '2026-10-14T04:51:39Z'}
             if route == 'actions/runs/55/attempts/1':
@@ -238,7 +252,8 @@ class ImmutableReleaseTests(unittest.TestCase):
     def test_prepare_new_execute_without_bundle_rejected(self):
         sha = 'a' * 40
         def api(route):
-            if route.startswith('releases/tags/'): return None
+            if route.startswith('releases/tags/'):
+                return None
             if route == 'actions/runs/55/attempts/2':
                 return {'run_attempt': 2, 'run_started_at': '2026-10-14T04:51:39Z'}
             if route.endswith('/jobs?per_page=100'):
@@ -302,4 +317,5 @@ class ImmutableReleaseTests(unittest.TestCase):
         self.assertIn('release_assets.py publish evidence', deploy)
         self.assertIn('release_assets.py read-result', deploy)
 
-if __name__ == '__main__': unittest.main()
+if __name__ == '__main__':
+    unittest.main()
