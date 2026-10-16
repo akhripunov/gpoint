@@ -3,12 +3,14 @@
 import base64
 import hashlib
 import json
+import math
 import os
 import signal
 import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -19,12 +21,118 @@ GPOINT = "7508f36f-774a-48aa-8c6b-42f6f160415d"
 GSALES = "c4d67889-877e-4d1b-a8d8-597c479d638f"
 
 
+class PhaseTimeline:
+    """Account for measured work and gaps over one disposable regression run."""
+
+    def __init__(self, *, started_at=None, now=time.monotonic):
+        self._now = now
+        self._has_parent_start = started_at is not None
+        self._started_at = now() if started_at is None else started_at
+        self._last_ended_at = self._started_at
+        self._last_phase = None
+        self._phases = []
+        self._gaps = []
+        self._phase_seconds = 0.0
+        self._gap_seconds = 0.0
+        self._finished = False
+        self._active_phase = None
+
+    def start_phase(self, name):
+        if (
+            self._finished
+            or self._active_phase is not None
+            or not isinstance(name, str)
+            or not name.isidentifier()
+        ):
+            raise ValueError("invalid PostgreSQL phase transition")
+        started_at = self._now()
+        gap = max(0.0, started_at - self._last_ended_at)
+        self._gap_seconds += gap
+        self._gaps.append({"before": name, "seconds": round(gap, 3)})
+        self._active_phase = {"name": name, "started_at": started_at}
+
+    def end_phase(self, *, status="PASS"):
+        if self._active_phase is None or status not in {"PASS", "FAIL"}:
+            raise ValueError("invalid PostgreSQL phase completion")
+        ended_at = self._now()
+        duration = max(0.0, ended_at - self._active_phase["started_at"])
+        self._phase_seconds += duration
+        self._phases.append({
+            "name": self._active_phase["name"],
+            "status": status,
+            "seconds": round(duration, 3),
+        })
+        self._last_phase = self._active_phase["name"]
+        self._last_ended_at = ended_at
+        self._active_phase = None
+
+    @contextmanager
+    def phase(self, name):
+        if self._finished:
+            raise ValueError("invalid or completed PostgreSQL phase")
+        self.start_phase(name)
+        try:
+            yield
+        except BaseException:
+            raise
+        finally:
+            self.end_phase(status="FAIL" if sys.exc_info()[0] else "PASS")
+
+    def finish(self):
+        if self._finished or self._active_phase is not None:
+            raise ValueError("PostgreSQL timing already finalized")
+        finished_at = self._now()
+        trailing = max(0.0, finished_at - self._last_ended_at)
+        self._gap_seconds += trailing
+        self._gaps.append({"after": self._last_phase, "seconds": round(trailing, 3)})
+        total = max(0.0, finished_at - self._started_at)
+        measured = self._phase_seconds
+        residual = total - measured - self._gap_seconds
+        if abs(residual) < 0.001:
+            residual = 0.0
+        self._finished = True
+        return {
+            "total_seconds": round(total, 3),
+            "measured_phase_seconds": round(measured, 3),
+            "unmeasured_gap_seconds": round(self._gap_seconds, 3),
+            "accounting_residual_seconds": round(residual, 3),
+            "timing_scope": (
+                "parent_start_to_accounting_snapshot"
+                if self._has_parent_start
+                else "runner_main_entry_to_accounting_snapshot"
+            ),
+            "phases": self._phases,
+            "gaps": self._gaps,
+        }
+
+    def emit_summary(self):
+        summary = self.finish()
+        for phase in summary["phases"]:
+            print(
+                f"GS_POSTGRES_PHASE={phase['name']} STATUS={phase['status']} "
+                f"SECONDS={phase['seconds']:.3f}",
+                flush=True,
+            )
+        for gap in summary["gaps"]:
+            position = f"before_{gap['before']}" if "before" in gap else f"after_{gap['after']}"
+            print(f"GS_POSTGRES_GAP={position} SECONDS={gap['seconds']:.3f}", flush=True)
+        print(
+            "GS_POSTGRES_ACCOUNTING="
+            f"TOTAL_SECONDS={summary['total_seconds']:.3f} "
+            f"MEASURED_PHASE_SECONDS={summary['measured_phase_seconds']:.3f} "
+            f"UNMEASURED_GAP_SECONDS={summary['unmeasured_gap_seconds']:.3f} "
+            f"ACCOUNTING_RESIDUAL_SECONDS={summary['accounting_residual_seconds']:.3f}",
+            flush=True,
+        )
+        print(f"GS_POSTGRES_TIMING_SCOPE={summary['timing_scope']}", flush=True)
+
+
 def postgres_suite_plan(*, gsales_component_only):
     """Keep GSales and cross-tenant Core checks while avoiding duplicate Core suite work."""
     return {
         "gsales_tests": True,
         "agata_sales_tenant_postgres": True,
-        "agata_core_postgres_regression": not (gsales_component_only is True),
+        "agata_core_postgres_regression": gsales_component_only is not True,
     }
 
 
@@ -64,10 +172,57 @@ def start_test_container(container, password):
         raise
 
 
-def main():
-    import psycopg
-    from psycopg import sql
+def parse_parent_start(value, *, now=time.monotonic):
+    if value is None:
+        return None
+    try:
+        started_at = float(value)
+    except (TypeError, ValueError):
+        raise RuntimeError("invalid_parent_start_time") from None
+    if not math.isfinite(started_at) or started_at > now() + 0.05:
+        raise RuntimeError("invalid_parent_start_time")
+    return started_at
 
+
+def run_timed_command(timeline, phase_name, *args, run=subprocess.run, **kwargs):
+    with timeline.phase(phase_name):
+        return run(*args, **kwargs)
+
+
+def cleanup_test_container(timeline, container, *, run=subprocess.run):
+    timeline.start_phase("container_cleanup")
+    try:
+        result = run(
+            ["docker", "rm", "-f", container],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except BaseException:
+        timeline.end_phase(status="FAIL")
+        raise
+    timeline.end_phase(status="FAIL" if result.returncode else "PASS")
+    return result.returncode
+
+
+def main():
+    started_at = parse_parent_start(
+        os.environ.get("GPOINT_PREPARE_GSALES_STARTED_MONOTONIC")
+    )
+    timeline = PhaseTimeline(started_at=started_at)
+    try:
+        return _run(timeline)
+    finally:
+        if timeline._active_phase is not None:
+            timeline.end_phase(status="FAIL" if sys.exc_info()[0] else "PASS")
+        timeline.emit_summary()
+
+
+def _run(timeline):
+    with timeline.phase("runner_imports"):
+        import psycopg
+        from psycopg import sql
+
+    timeline.start_phase("runner_setup")
     install_cleanup_signal_handlers()
     real_codex = "--real-codex" in sys.argv
     gsales_component_only = "--gsales-component-only" in sys.argv
@@ -82,6 +237,7 @@ def main():
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 print("REAL_CODEX_REHEARSAL=BLOCKED: installed worker owns common lock; separate owner permission required to temporarily stop it")
+                timeline.end_phase(status="FAIL")
                 return 2
     container = "gpoint-gsales-test-" + uuid4().hex[:10]
     password = uuid4().hex
@@ -91,13 +247,17 @@ def main():
     if real_codex:
         env["GSALES_QA_REAL_CODEX"] = "true"
         env["AGATA_CODEX_JOB_TIMEOUT_SECONDS"] = "90"
+    timeline.end_phase()
     try:
+        timeline.start_phase("container_start_and_port")
         password_file = start_test_container(container, password)
         port = (
             subprocess.check_output(["docker", "port", container, "5432/tcp"], text=True)
             .strip()
             .rsplit(":", 1)[1]
         )
+        timeline.end_phase()
+        timeline.start_phase("postgres_readiness")
         database_host = os.environ.get("GSALES_TEST_DB_HOST", "127.0.0.1")
         admin_base = f"postgresql://postgres:{password}@{database_host}:{port}/postgres"
         for _ in range(45):
@@ -109,6 +269,8 @@ def main():
                 time.sleep(0.5)
         else:
             raise RuntimeError("disposable_postgres_not_ready")
+        timeline.end_phase()
+        timeline.start_phase("database_setup_and_initial_migration")
         # Production migrator rejects every other database identity. This name
         # belongs only to the unique disposable container created above.
         dbname = "gpoint"
@@ -204,10 +366,13 @@ def main():
                 == 1
             )
         print("LEGACY_TENANT_CONTEXT_SPOOF_REPRODUCED", flush=True)
+        timeline.end_phase()
         env["AGATA_ROLE_TENANT_BINDINGS"] = json.dumps(
             {"gpoint_test_runtime": GPOINT, "gsales_agata_runtime": GSALES, "gsales_runtime": GSALES}
         )
-        subprocess.run(
+        run_timed_command(
+            timeline,
+            "agata_head_migration",
             [sys.executable, "-m", "alembic", "upgrade", "head"],
             cwd=AGATA,
             env={**env, "PYTHONPATH": str(AGATA)},
@@ -216,6 +381,7 @@ def main():
         env["GSALES_MIGRATION_DATABASE_URL"] = admin
         # Exercise the real guarded migrator, never bypass its identity/binding
         # checks by executing SQL directly. Replays must retain the ledger.
+        timeline.start_phase("agata_head_migration_and_gsales_ledger")
         rehearsal_sha = "a" * 40
         for _ in range(2):
             applied = subprocess.run(
@@ -231,7 +397,10 @@ def main():
             if ledger != [("001_gsales", checksum)]:
                 raise RuntimeError("disposable_gsales_migration_ledger_mismatch")
         print("GSALES_PRODUCTION_MIGRATOR_REPLAY=PASS", flush=True)
+        timeline.end_phase()
+        timeline.start_phase("gsales_pytest_suite")
         result = subprocess.run([sys.executable, "-m", "pytest", "-q", "tests/test_shared_worker_http.py" if real_codex else "tests"], cwd=SALES, env=env)
+        timeline.end_phase(status="FAIL" if result.returncode else "PASS")
         if result.returncode or real_codex:
             return result.returncode
         # Run shared AGATA HTTP/security tests in a separate module namespace.
@@ -239,14 +408,17 @@ def main():
             "postgresql://", "postgresql+asyncpg://"
         )
         env["AGATA_GSALES_TEST_ADMIN_DSN"] = admin
+        timeline.start_phase("agata_sales_tenant_postgres_suite")
         result = subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "tests/test_sales_postgres.py"],
             cwd=AGATA,
             env={**env, "PYTHONPATH": str(AGATA)},
         )
+        timeline.end_phase(status="FAIL" if result.returncode else "PASS")
         if result.returncode:
             return result.returncode
         if suite_plan["agata_core_postgres_regression"]:
+            timeline.start_phase("agata_core_postgres_setup_and_suite")
             # Full pre-existing Core PostgreSQL regression suite, in distinct fresh
             # databases. Its fixture administration never uses application roles.
             with psycopg.connect(admin_base, autocommit=True) as conn:
@@ -287,21 +459,23 @@ def main():
                 env=regression,
             )
             if result.returncode:
+                timeline.end_phase(status="FAIL")
                 return result.returncode
             result = subprocess.run(
                 [sys.executable, "-m", "pytest", "-q", "--ignore=tests/test_postgres_baseline.py", "-rs"],
                 cwd=AGATA,
                 env=regression,
             )
+            timeline.end_phase(status="FAIL" if result.returncode else "PASS")
             return result.returncode
         print("AGATA_CORE_POSTGRES_REGRESSION=COVERED_UNCHANGED", flush=True)
         print("GSALES_POSTGRES_SUITE=PASS", flush=True)
         print("AGATA_SALES_TENANT_POSTGRES_SUITE=PASS", flush=True)
         return 0
     finally:
-        subprocess.run(
-            ["docker", "rm", "-f", container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+        if timeline._active_phase is not None:
+            timeline.end_phase(status="FAIL" if sys.exc_info()[0] else "PASS")
+        cleanup_test_container(timeline, container)
         if password_file is not None:
             password_file.unlink(missing_ok=True)
 

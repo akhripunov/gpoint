@@ -61,15 +61,21 @@ def run(*args, cwd=ROOT, env=None, capture=False):
     return result.stdout.strip() if capture else None
 
 
-def start_background_stage(name, args, timings, *, cwd=ROOT, env=None):
+def start_background_stage(name, args, timings, *, cwd=ROOT, env=None, started_at_env=None):
     """Run an independent fail-closed gate alongside foreground preparation."""
     output = tempfile.TemporaryFile(mode='w+t', encoding='utf-8')
     stage = {'name': name, 'args': args, 'timings': timings,
              'started': time.monotonic(), 'output': output, 'finished': False}
     print(f'PREPARE_STAGE_START={name}', flush=True)
     try:
+        child_env = env
+        if started_at_env is not None:
+            if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', started_at_env):
+                raise ValueError('invalid background-stage start-time environment key')
+            child_env = dict(os.environ if env is None else env)
+            child_env[started_at_env] = f"{stage['started']:.9f}"
         stage['process'] = subprocess.Popen(
-            args, cwd=cwd, env=env, stdout=output, stderr=subprocess.STDOUT,
+            args, cwd=cwd, env=child_env, stdout=output, stderr=subprocess.STDOUT,
             text=True, start_new_session=True)
     except BaseException:
         stage['returncode'] = 127
@@ -409,7 +415,8 @@ def prepare(sha, output, *, postgres_only=False):
             gsales_command = gsales_regression_command(sha, impact, component_impact)
             gsales_regression = start_background_stage(
                 'gsales_postgres_regression',
-                gsales_command, timings)
+                gsales_command, timings,
+                started_at_env='GPOINT_PREPARE_GSALES_STARTED_MONOTONIC')
         else:
             print('V3_COVERED_UNCHANGED=gsales_postgres_regression', flush=True)
 

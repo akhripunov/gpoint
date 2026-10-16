@@ -57,6 +57,30 @@ def test_background_release_stage_runs_while_foreground_work_continues(monkeypat
     assert 'BACKGROUND_DONE' in output.getvalue()
 
 
+def test_background_stage_can_pass_parent_start_time_to_child(monkeypatch):
+    output = io.StringIO()
+    monkeypatch.setattr(prepare_release.sys, 'stdout', output)
+    timings = {}
+    key = 'GPOINT_TEST_PARENT_START_MONOTONIC'
+    child = (
+        'import os; print("PARENT_START=" + os.environ.get('
+        + repr(key) + ', "missing"))'
+    )
+
+    stage = prepare_release.start_background_stage(
+        'timed_probe', (prepare_release.sys.executable, '-c', child), timings,
+        started_at_env=key,
+    )
+    prepare_release.finish_background_stage(stage)
+
+    parent_start = float(next(
+        line.partition('=')[2]
+        for line in output.getvalue().splitlines()
+        if line.startswith('PARENT_START=')
+    ))
+    assert parent_start == stage['started']
+
+
 def test_background_release_stage_failure_blocks_preparation(monkeypatch):
     monkeypatch.setattr(prepare_release.sys, 'stdout', io.StringIO())
     timings = {}

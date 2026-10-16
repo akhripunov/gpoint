@@ -156,3 +156,88 @@ feature branch and is not published.
 - No paid Actions run was authorized, so new runner-seconds and end-to-end
   savings remain `NOT_MEASURED`. The original dirty checkout, GitHub, and
   production remain untouched. ME-31 remains open and local pending release.
+
+## Owner continuation — GSales critical-path accounting (2026-10-16)
+
+Historical run [38723866244, prepare job](https://github.com/akhripunov/gpoint/actions/runs/38723866244/job/116384809404)
+was re-read from the job and step timestamps. The job ran 398 seconds
+(`10:57:07Z`–`11:03:45Z`), approximately 7 rounded hosted minutes for this job;
+this is an estimate, not a billing statement. The main Prepare step ran 300 s
+(`10:58:13Z`–`11:03:13Z`).
+
+- Docker build batch: 82.658 s, ended `11:01:29.525Z`.
+- GSales PostgreSQL child: 189.293 s, started `10:59:06.366Z` and ended
+  `11:02:15.659Z`, 46.134 s after the build batch.
+- The final AGATA artifact-migration/health gate ended `11:02:14.284Z`, only
+  1.376 s before GSales. Removing the duplicate AGATA Core suite (35.260 s in
+  this run) can expose at most about 1.376 s before that independent gate
+  becomes the blocker.
+- Image archive export and artifact roundtrip then took 13.896 s + 42.511 s.
+  The overall prepare job would remain about 397 s after the possible 1.376 s
+  wall reduction, still 7 rounded minutes. The component-aware skip therefore
+  removes real repeated runner work for exact GSales-only candidates but
+  proves **0 hosted-minute savings** in this run.
+
+The old child log accounted for 94.143 s of the 189.293 s GSales stage; the
+remaining 95.150 s was outside its 14 named timers. Its original timestamps
+were emitted only when the parent reaped the child, so they do not locate that
+gap. No hosted replay is authorized, and a local Mac run cannot explain a
+hosted-only gap. The historical 95.150 s cause therefore remains
+`NOT_MEASURED`.
+
+For the next authorized rehearsal, `prepare-release.py` passes the parent
+monotonic start into the disposable GSales runner. The runner accounts for
+startup/imports, container/readiness, DB setup, both AGATA and GSales
+migrations, each test group, cleanup, and every interval between those phases.
+The final AGATA `alembic upgrade head` now has its own named phase; it had been
+counted only as a gap in the first review. The summary identifies whether the
+window begins at parent launch or direct runner entry; phase plus gap totals
+are checked, residual is reported separately, cleanup and failures are
+attributed, and failure details/credentials are not echoed. This is diagnostic
+instrumentation, not a performance reduction.
+
+Local disposable Mac measurements on the current source were: FULL 40.548 s
+(Core PostgreSQL setup/suite 27.025 s) and GSales-only component mode 13.771 s.
+That is 26.777 s lower runner wall time for the narrow mode in this sample.
+The surrounding container/readiness timings varied, and this is not a hosted
+or complete-Prepare comparison. The FULL mode still passed 78 GSales tests,
+the separate AGATA sales-tenant PostgreSQL test, and 379 AGATA Core PostgreSQL
+tests. Component mode passed GSales and AGATA sales-tenant tests while marking
+the Core suite covered by the independent AGATA gate. Unknown/shared scope
+continues to select FULL.
+
+Final telemetry verification after independent review: 19 timing/Prepare
+inventory tests PASS; Ruff check PASS; `git diff --check` and `py_compile` PASS.
+A fresh full disposable PostgreSQL run passed 81 GSales tests, 1 AGATA
+sales-tenant test, and 380 AGATA Core tests (including the separately invoked
+baseline test). Its local runner window was 39.568 s: 39.567 s measured phases,
+0.001 s explicit gaps, 0.000 s accounting residual. Docker cleanup returned
+success. The observed phase lines were:
+
+| Phase | Status | Seconds |
+| --- | --- | ---: |
+| runner_imports | PASS | 0.095 |
+| runner_setup | PASS | 0.000 |
+| container_start_and_port | PASS | 0.205 |
+| postgres_readiness | PASS | 1.116 |
+| database_setup_and_initial_migration | PASS | 1.237 |
+| agata_head_migration | PASS | 0.412 |
+| agata_head_migration_and_gsales_ledger | PASS | 0.288 |
+| gsales_pytest_suite | PASS | 9.406 |
+| agata_sales_tenant_postgres_suite | PASS | 1.010 |
+| agata_core_postgres_setup_and_suite | PASS | 25.544 |
+| container_cleanup | PASS | 0.254 |
+
+This local Mac run is not comparable evidence of hosted or complete-Prepare
+savings. A Python 3.12 disposable venv and uniquely named local Docker database
+were used. No hosted Actions, production, persistent DB, or worker was changed.
+A subsequent same-source local component-only runner invocation passed the
+same 81 GSales tests and 1 sales-tenant test, then emitted
+`AGATA_CORE_POSTGRES_REGRESSION=COVERED_UNCHANGED`: 14.239 s total versus the
+FULL run's 39.568 s, a 25.329 s lower local runner window in this sequential
+warm-image sample. The independent AGATA Core PostgreSQL gate was not part of
+that direct component-only invocation and remains mandatory in a complete
+Prepare. This supports only local elimination of duplicate GSales-runner work;
+it does not demonstrate a shorter full Prepare critical path or lower hosted
+minutes. The unresolved hosted gap and absence of measured end-to-end or
+Actions-minute savings are carried forward explicitly.
