@@ -1023,6 +1023,26 @@ def execute_claimed_job(target: str, claim: dict) -> bool:
             raise RuntimeError("codex_response_invalid")
     except FatalConfigurationError:
         raise
+    except InferenceCancelled:
+        if target == "EROS":
+            try:
+                terminal = target_request(target, "cancel-check", {
+                    "job_id": job_id, "lease_token": lease,
+                })
+            except TransientNetworkError:
+                write_status(target=target, state="network_error", last_error_code="worker_gateway_network_error")
+                raise
+            terminal_status = terminal.get("terminal_status")
+            if terminal.get("active") is False and terminal_status in {"CANCELLED", "EXPIRED"}:
+                write_status(
+                    target=target,
+                    state="idle",
+                    current_job_present=False,
+                    last_error_code=None,
+                    last_terminal_job_status=terminal_status,
+                )
+                return False
+        raise
     except Exception as exc:
         error = str(exc)
         code = error[:64] if error.replace("_", "").isalnum() else "inference_failed"

@@ -42,6 +42,50 @@ class MacWorkerTests(unittest.TestCase):
         self.assertNotIn("memory_embed", without_embeddings)
         self.assertIn("memory_embed", with_embeddings)
 
+    def test_eros_cancelled_lease_clears_local_running_state_without_reporting_failure(self):
+        self._assert_eros_terminal_lease_clears_state("CANCELLED")
+
+    def test_eros_expired_lease_clears_local_running_state_without_reporting_failure(self):
+        self._assert_eros_terminal_lease_clears_state("EXPIRED")
+
+    def _assert_eros_terminal_lease_clears_state(self, terminal_status):
+        claim = {
+            "id": "e0fbe77f-a09d-4d85-b52d-c277e6af1187",
+            "leaseToken": "a2d9dab3-f2d1-488a-8b1a-d31c4f4eec44",
+            "target": "EROS",
+            "tenant_id": TEST_GPOINT_TENANT_ID,
+            "creator_id": "728bf984-79be-475c-bd80-2b8dfb504a3e",
+            "job_type": "CHAT_COMPLETION",
+            "request": {"model": "gpoint-codex", "messages": [{"role": "user", "content": "synthetic"}]},
+        }
+        calls = []
+
+        def request(target, path, body=None):
+            calls.append((target, path, body))
+            if path == "cancel-check":
+                return {"active": False, "terminal_status": terminal_status}
+            if path == "fail":
+                raise worker.GatewayResponseError("worker_gateway_http_409")
+            raise AssertionError(f"unexpected request path: {path}")
+
+        with patch.dict(os.environ, {
+            "EROS_WORKER_LOCAL_TEST": "true",
+            "EROS_WORKER_URL": "http://127.0.0.1:18080/eros-worker",
+            "EROS_WORKER_TOKEN": "local-eros-token",
+            "EROS_WORKER_TENANT_ID": TEST_GPOINT_TENANT_ID,
+        }, clear=True), patch.object(worker, "target_request", side_effect=request), patch.object(
+            worker, "run_inference", side_effect=worker.InferenceCancelled("worker_job_cancelled")
+        ):
+            result = worker.execute_claimed_job("EROS", claim)
+
+        self.assertFalse(result)
+        status = json.loads(worker.STATUS.read_text(encoding="utf-8"))
+        target_status = status["targets"]["EROS"]
+        self.assertEqual(target_status["state"], "idle")
+        self.assertFalse(target_status["current_job_present"])
+        self.assertIsNone(target_status["last_error_code"])
+        self.assertEqual([call[1] for call in calls], ["cancel-check"])
+
     def test_codex_tool_events_are_rejected(self):
         event = json.dumps({"type": "item.started", "item": {"type": "command_execution"}})
         self.assertTrue(worker._codex_used_tools(event))

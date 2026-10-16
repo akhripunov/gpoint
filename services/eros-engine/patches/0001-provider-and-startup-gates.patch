@@ -206,10 +206,10 @@ index 59b4bc6..fbf7eef 100644
 +                    .then(|| "k".to_string())
 +            })
 diff --git a/crates/eros-engine-server/src/main.rs b/crates/eros-engine-server/src/main.rs
-index fa7555a..1cbc973 100644
+index fa7555a..c9a9bf0 100644
 --- a/crates/eros-engine-server/src/main.rs
 +++ b/crates/eros-engine-server/src/main.rs
-@@ -152,0 +153,24 @@ async fn run_migrations() -> Result<()> {
+@@ -152,0 +153,22 @@ async fn run_migrations() -> Result<()> {
 +    // SQLx creates its unqualified `_sqlx_migrations` table before migration
 +    // 0000 runs, so ensure the isolated schema exists before invoking it.
 +    sqlx::query("CREATE SCHEMA IF NOT EXISTS engine")
@@ -221,35 +221,39 @@ index fa7555a..1cbc973 100644
 +            .fetch_one(&pool)
 +            .await
 +            .context("failed to inspect Eros migration ledger")?;
-+    let engine_objects_exist: bool = sqlx::query_scalar(
-+        "SELECT EXISTS (\
-+            SELECT 1 FROM pg_class c \
-+            JOIN pg_namespace n ON n.oid = c.relnamespace \
-+            WHERE n.nspname = 'engine' AND c.relkind IN ('r', 'p') \
-+              AND c.relname <> '_sqlx_migrations'\
-+        )",
++    let engine_tables: Vec<String> = sqlx::query_scalar(
++        "SELECT COALESCE(array_agg(c.relname::text ORDER BY c.relname), ARRAY[]::text[]) \
++         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
++         WHERE n.nspname = 'engine' AND c.relkind IN ('r', 'p') \
++           AND c.relname <> '_sqlx_migrations'",
 +    )
 +    .fetch_one(&pool)
 +    .await
 +    .context("failed to inspect existing Eros tables")?;
-+    validate_migration_ledger_state(engine_ledger_exists, engine_objects_exist)
++    validate_migration_ledger_state(engine_ledger_exists, &engine_tables)
 +        .map_err(anyhow::Error::msg)?;
-@@ -179,2 +203,3 @@ async fn run_server() -> Result<()> {
+@@ -179,2 +201,3 @@ async fn run_server() -> Result<()> {
 -    let openrouter_key =
 -        std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY is required")?;
 +    // The built-in OpenRouter route checks its key when selected. A custom-only
 +    // model config must not require an unrelated OpenRouter credential.
 +    let openrouter_key = openrouter_key(std::env::var("OPENROUTER_API_KEY").ok());
-@@ -458,0 +484,16 @@ fn resolve_legacy_secret(has_jwks: bool, jwt_secret: Option<String>) -> Result<O
+@@ -458,0 +482,22 @@ fn resolve_legacy_secret(has_jwks: bool, jwt_secret: Option<String>) -> Result<O
 +fn openrouter_key(value: Option<String>) -> String {
 +    value.unwrap_or_default()
 +}
 +
 +fn validate_migration_ledger_state(
 +    engine_ledger_exists: bool,
-+    engine_objects_exist: bool,
++    engine_tables: &[String],
 +) -> Result<(), String> {
-+    if engine_objects_exist && !engine_ledger_exists {
++    // The GPoint queue is a separately-owned prerequisite migration and may
++    // precede the Eros SQLx ledger. Allow that exact single table, but never
++    // adopt arbitrary pre-existing engine objects as an Eros installation.
++    if !engine_ledger_exists
++        && !engine_tables.is_empty()
++        && engine_tables != ["eros_inference_jobs"]
++    {
 +        return Err(
 +            "engine tables exist without engine._sqlx_migrations; refusing to rerun migrations or adopt public history automatically".into(),
 +        );
@@ -257,20 +261,30 @@ index fa7555a..1cbc973 100644
 +    Ok(())
 +}
 +
-@@ -461 +502,19 @@ mod tests {
+@@ -461 +506,29 @@ mod tests {
 -    use super::resolve_legacy_secret;
 +    use super::{openrouter_key, resolve_legacy_secret};
 +
 +    #[test]
 +    fn migration_startup_rejects_existing_engine_tables_without_private_ledger() {
-+        let error = super::validate_migration_ledger_state(false, true).unwrap_err();
++        let error = super::validate_migration_ledger_state(false, &["persona_genomes".into()]).unwrap_err();
 +        assert!(error.contains("engine._sqlx_migrations"), "{error}");
 +    }
 +
 +    #[test]
 +    fn migration_startup_allows_fresh_schema_or_existing_private_ledger() {
-+        assert!(super::validate_migration_ledger_state(false, false).is_ok());
-+        assert!(super::validate_migration_ledger_state(true, true).is_ok());
++        assert!(super::validate_migration_ledger_state(false, &[]).is_ok());
++        assert!(super::validate_migration_ledger_state(true, &["persona_genomes".into()]).is_ok());
++    }
++
++    #[test]
++    fn migration_startup_allows_only_the_gpoint_queue_before_private_ledger() {
++        assert!(super::validate_migration_ledger_state(false, &["eros_inference_jobs".into()]).is_ok());
++        let error = super::validate_migration_ledger_state(
++            false,
++            &["eros_inference_jobs".into(), "unexpected".into()],
++        ).unwrap_err();
++        assert!(error.contains("engine._sqlx_migrations"), "{error}");
 +    }
 +
 +    #[test]

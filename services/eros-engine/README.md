@@ -79,7 +79,10 @@ fallback if the Worker is unreachable.
 Local chat configuration is in `test-model-config.toml`. Eros's provider key
 `GPOINT_API_KEY`, the API's `EROS_BRIDGE_API_KEY`, and the Mac Worker's
 `EROS_WORKER_TOKEN` are supplied through private local environment files.
-`EROS_WORKER_SIGNING_SECRET` must match between Eros and GPoint, and
+The same secret bytes must be configured under `GPOINT_WORKER_BRIDGE_SIGNING_SECRET`
+for Eros and `EROS_WORKER_SIGNING_SECRET` for the GPoint API. The names differ
+because each process owns its own configuration namespace. The secret must be at
+least 32 bytes. Never put it in logs or handoff records.
 `EROS_WORKER_TENANT_ID` must match the server-owned tenant. Do not put secrets
 in the committed test configuration.
 

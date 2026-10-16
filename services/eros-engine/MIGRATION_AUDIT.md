@@ -60,13 +60,30 @@ both `relrowsecurity` and `relforcerowsecurity` and its authenticated grant.
 The GPoint Eros gateway adds `engine.eros_inference_jobs` through the GPoint
 Prisma migration `20261016120000_eros_worker_queue`. Its schema is owned by the
 GPoint repository, not by the upstream Eros migration chain. It stores bounded,
-short-lived bridge requests, lease state and responses. Its migration was
-applied to a separate disposable gateway-test database, not to this audited
-fixture. When both migration sets are present, the combined schema has 36
-tables: the 35 Eros tables above plus this GPoint-owned queue table. The prior
-72-revision coexistence measurements remain the evidence for Eros's migration
-chain; the new queue table has not yet been included in a fresh full-chain
-coexistence rerun.
+short-lived bridge requests, lease state and responses. The migration now
+enables and forces RLS with a transaction-local `app.tenant_id` policy. A
+disposable PostgreSQL check using a non-superuser role verified that missing
+tenant context sees no rows, tenant A sees only its own row, and tenant B cannot
+see or update tenant A's row.
+
+**Follow-up checks (2026-10-16):** a fresh Eros-only database applied all 72
+Eros migrations and a repeat migration invocation succeeded. A separate
+disposable database applied all 19 current Prisma migrations and all 11 AGATA
+Alembic revisions; repeating both deploy commands was a no-op. That database
+also retained a synthetic `public._sqlx_migrations` sentinel and pgvector
+0.8.6. The fresh Eros-only run again had 35 `engine` tables; its private SQLx
+ledger measured 64 kB (relation-size estimates can vary between empty fixtures).
+The exact combined order with `eros_inference_jobs` present before Eros
+bootstrap remains NOT_VERIFIED. The only locally available Eros binary
+predates the queue-only startup guard and failed closed with
+`engine tables exist without engine._sqlx_migrations`. Rebuilding the patched
+binary was blocked when the pinned Rust toolchain image could not fetch its
+anonymous registry token (TLS EOF). No production database was accessed.
+
+The expected combined schema has 36 `engine` tables: the 35 Eros tables above
+plus this GPoint-owned queue table. A fresh full-chain run reaching that exact
+combined state is still required. The existing count/size table above reflects
+the measured Eros-only fixture, not the queue table.
 
 **Migration boundary:** this proves fresh Eros bootstrap coexists with the
 current synthetic Prisma/Alembic schemas. An older Eros installation with

@@ -1,10 +1,19 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { SignJWT } from 'jose';
 import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, parseBridgeRequest, parseErosEmbeddingRequest, verifyBridgeIdentity } from '../src/eros-worker-contract.js';
 
 const secret = new TextEncoder().encode('local-test-bridge-signing-secret-at-least-32-bytes');
 const now = Math.floor(Date.now() / 1000);
+
+test('Eros queue migration forces tenant RLS and binds access to transaction-local context', () => {
+  const sql = readFileSync(new URL('../../../packages/db/prisma/migrations/20261016120000_eros_worker_queue/migration.sql', import.meta.url), 'utf8');
+  assert.match(sql, /ALTER TABLE engine\.eros_inference_jobs ENABLE ROW LEVEL SECURITY/);
+  assert.match(sql, /ALTER TABLE engine\.eros_inference_jobs FORCE ROW LEVEL SECURITY/);
+  assert.match(sql, /tenant_id = NULLIF\(current_setting\('app\.tenant_id', true\), ''\)/);
+  assert.match(sql, /WITH CHECK \(tenant_id = NULLIF\(current_setting\('app\.tenant_id', true\), ''\)\)/);
+});
 
 async function identity(overrides: Record<string, unknown> = {}) {
   return new SignJWT({

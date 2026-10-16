@@ -43,3 +43,18 @@ CREATE INDEX IF NOT EXISTS eros_inference_jobs_claim_idx
   ON engine.eros_inference_jobs (tenant_id, created_at, id) WHERE status = 'PENDING';
 CREATE INDEX IF NOT EXISTS eros_inference_jobs_deadline_idx
   ON engine.eros_inference_jobs (tenant_id, deadline_at, status);
+
+ALTER TABLE engine.eros_inference_jobs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE engine.eros_inference_jobs FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'engine' AND tablename = 'eros_inference_jobs'
+       AND policyname = 'eros_inference_jobs_tenant_isolation'
+  ) THEN
+    CREATE POLICY eros_inference_jobs_tenant_isolation
+      ON engine.eros_inference_jobs
+      USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), ''))
+      WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), ''));
+  END IF;
+END $$;

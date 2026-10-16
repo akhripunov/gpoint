@@ -1,7 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { BadRequestException, Body, Controller, Get, Headers, Header, HttpException, OnModuleDestroy, OnModuleInit, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, type Prisma } from '@prisma/client';
 import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, parseBridgeRequest, parseErosEmbeddingRequest, type ParsedErosBridgeRequest } from './eros-worker-contract.js';
 
 const prisma = new PrismaClient();
@@ -10,6 +10,7 @@ const POLL_MS = 500;
 const MAX_OUTSTANDING_JOBS = 16;
 const MAX_RETAINED_JOBS = 272;
 const IDEMPOTENCY_RETENTION = '10 minutes';
+type WorkerTx = Prisma.TransactionClient;
 type JobRow = {
   id: string; request_id: string; request_hash: string; tenant_id: string; user_id: string; creator_id: string;
   session_id: string; instance_id: string; job_type: string; request: Record<string, unknown>; status: string;
@@ -37,6 +38,14 @@ function workerTenant(env = process.env): string {
     throw new HttpException({ code: 'EROS_BRIDGE_UNAVAILABLE' }, 503);
   }
   return value;
+}
+
+async function withWorkerTenant<T>(operation: (tx: WorkerTx) => Promise<T>): Promise<T> {
+  const tenantId = workerTenant();
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRawUnsafe('SELECT set_config(\'app.tenant_id\', $1, true)', tenantId);
+    return operation(tx);
+  });
 }
 
 function requestFingerprint(request: ParsedErosBridgeRequest): string {
@@ -81,16 +90,18 @@ export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestro
   }
 
   private async cleanupQueue(): Promise<void> {
-    const tenantId = workerTenant();
-    await prisma.$executeRawUnsafe(
-      `UPDATE engine.eros_inference_jobs SET status = 'EXPIRED', lease_token = NULL, lease_expires_at = NULL,
-         error_code = 'deadline_expired', updated_at = now()
-       WHERE tenant_id = $1 AND status IN ('PENDING', 'RUNNING') AND deadline_at <= now()`, tenantId,
-    );
-    await prisma.$executeRawUnsafe(
-      `DELETE FROM engine.eros_inference_jobs WHERE status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
-         AND tenant_id = $1 AND updated_at < now() - ($2::text)::interval`, tenantId, IDEMPOTENCY_RETENTION,
-    );
+    await withWorkerTenant(async (tx) => {
+      const tenantId = workerTenant();
+      await tx.$executeRawUnsafe(
+        `UPDATE engine.eros_inference_jobs SET status = 'EXPIRED', lease_token = NULL, lease_expires_at = NULL,
+           error_code = 'deadline_expired', updated_at = now()
+         WHERE tenant_id = $1 AND status IN ('PENDING', 'RUNNING') AND deadline_at <= now()`, tenantId,
+      );
+      await tx.$executeRawUnsafe(
+        `DELETE FROM engine.eros_inference_jobs WHERE status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
+           AND tenant_id = $1 AND updated_at < now() - ($2::text)::interval`, tenantId, IDEMPOTENCY_RETENTION,
+      );
+    });
   }
 
   private async createOrReadJob(request: ParsedErosBridgeRequest): Promise<JobRow> {
@@ -102,7 +113,7 @@ export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestro
     if (!Number.isInteger(timeoutRaw) || timeoutRaw < 30 || timeoutRaw > 240) throw new HttpException({ code: 'EROS_BRIDGE_UNAVAILABLE' }, 503);
     const deadline = new Date(Date.now() + timeoutRaw * 1000);
     const fingerprint = requestFingerprint(request);
-    const row = await prisma.$transaction(async (tx) => {
+    const row = await withWorkerTenant(async (tx) => {
       // Serialize admission for this tenant so both the pending and retained
       // bounds remain true under concurrent Eros requests.
       await tx.$queryRawUnsafe(
@@ -159,27 +170,27 @@ export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestro
   }
 
   private async expireJob(id: string): Promise<void> {
-    await prisma.$executeRawUnsafe(
+    await withWorkerTenant((tx) => tx.$executeRawUnsafe(
       `UPDATE engine.eros_inference_jobs SET status = 'EXPIRED', lease_token = NULL, lease_expires_at = NULL,
          error_code = 'deadline_expired', updated_at = now()
        WHERE id = $1::uuid AND tenant_id = $2 AND status IN ('PENDING', 'RUNNING') AND deadline_at <= now()`, id, workerTenant(),
-    );
+    ));
   }
 
   private async cancelJob(id: string): Promise<void> {
-    await prisma.$executeRawUnsafe(
+    await withWorkerTenant((tx) => tx.$executeRawUnsafe(
       `UPDATE engine.eros_inference_jobs SET status = 'CANCELLED', lease_token = NULL, lease_expires_at = NULL,
          error_code = 'client_cancelled', updated_at = now()
        WHERE id = $1::uuid AND tenant_id = $2 AND status IN ('PENDING', 'RUNNING')`, id, workerTenant(),
-    );
+    ));
   }
 
   private async readJob(id: string): Promise<JobRow | undefined> {
-    const rows = await prisma.$queryRawUnsafe<JobRow[]>(
+    const rows = await withWorkerTenant((tx) => tx.$queryRawUnsafe<JobRow[]>(
       `SELECT id::text, request_id::text, request_hash, tenant_id, user_id::text, creator_id::text, session_id::text,
               instance_id::text, job_type, request, status, lease_token::text, deadline_at, response_text, error_code
        FROM engine.eros_inference_jobs WHERE id = $1::uuid AND tenant_id = $2`, id, workerTenant(),
-    );
+    ));
     return rows[0];
   }
 
@@ -317,11 +328,11 @@ export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestro
   @Header('Cache-Control', 'no-store')
   async queueStatus(@Headers() headers: Record<string, string | string[] | undefined>) {
     bearer(headers, 'EROS_WORKER_TOKEN');
-    const rows = await prisma.$queryRawUnsafe<Array<{ pending: bigint; running: bigint; snapshot: Date }>>(
+    const rows = await withWorkerTenant((tx) => tx.$queryRawUnsafe<Array<{ pending: bigint; running: bigint; snapshot: Date }>>(
       `SELECT count(*) FILTER (WHERE status = 'PENDING')::bigint AS pending,
               count(*) FILTER (WHERE status = 'RUNNING')::bigint AS running, now() AS snapshot
        FROM engine.eros_inference_jobs WHERE tenant_id = $1`, workerTenant(),
-    );
+    ));
     return {
       source_id: 'eros-worker-queue-status-v1:eros', lane: 'EROS',
       pending_jobs: Number(rows[0]?.pending ?? 0), running_jobs: Number(rows[0]?.running ?? 0),
@@ -333,17 +344,18 @@ export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestro
   async claim(@Headers() headers: Record<string, string | string[] | undefined>) {
     bearer(headers, 'EROS_WORKER_TOKEN');
     const tenantId = workerTenant();
-    await prisma.$executeRawUnsafe(
+    const job = await withWorkerTenant(async (tx) => {
+    await tx.$executeRawUnsafe(
       `UPDATE engine.eros_inference_jobs SET status = 'EXPIRED', error_code = 'lease_expired',
          lease_token = NULL, lease_expires_at = NULL, updated_at = now()
        WHERE tenant_id = $1 AND status = 'RUNNING' AND lease_expires_at <= now()`, tenantId,
     );
-    await prisma.$executeRawUnsafe(
+    await tx.$executeRawUnsafe(
       `UPDATE engine.eros_inference_jobs SET status = 'EXPIRED', error_code = 'deadline_expired', updated_at = now()
        WHERE tenant_id = $1 AND status = 'PENDING' AND deadline_at <= now()`, tenantId,
     );
     const lease = randomUUID();
-    const rows = await prisma.$queryRawUnsafe<JobRow[]>(
+    const rows = await tx.$queryRawUnsafe<JobRow[]>(
       `WITH candidate AS (
          SELECT id FROM engine.eros_inference_jobs
          WHERE tenant_id = $1 AND status = 'PENDING' AND deadline_at > now()
@@ -357,7 +369,8 @@ export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestro
          job.status, job.lease_token::text, job.deadline_at, job.response_text, job.error_code`,
       tenantId, lease,
     );
-    const job = rows[0];
+    return rows[0];
+    });
     if (!job) return { job: null };
     return { job: {
       id: job.id, leaseToken: job.lease_token, target: 'EROS', tenant_id: job.tenant_id,
@@ -370,11 +383,24 @@ export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestro
   async cancelCheck(@Headers() headers: Record<string, string | string[] | undefined>, @Body() body: { job_id?: unknown; lease_token?: unknown }) {
     bearer(headers, 'EROS_WORKER_TOKEN');
     if (typeof body?.job_id !== 'string' || typeof body.lease_token !== 'string') throw new HttpException({ code: 'INVALID_WORKER_REQUEST' }, 400);
-    const rows = await prisma.$queryRawUnsafe<Array<{ active: boolean }>>(
-      `SELECT (status = 'RUNNING' AND lease_token = $2::uuid AND deadline_at > now()) AS active
-       FROM engine.eros_inference_jobs WHERE id = $1::uuid AND tenant_id = $3`, body.job_id, body.lease_token, workerTenant(),
-    );
-    return { active: rows[0]?.active === true };
+    const row = await withWorkerTenant(async (tx) => {
+      const tenantId = workerTenant();
+      await tx.$executeRawUnsafe(
+        `UPDATE engine.eros_inference_jobs SET status = 'EXPIRED', lease_token = NULL,
+           lease_expires_at = NULL, error_code = 'deadline_expired', updated_at = now()
+         WHERE id = $1::uuid AND lease_token = $2::uuid AND tenant_id = $3
+           AND status = 'RUNNING' AND deadline_at <= now()`, body.job_id, body.lease_token, tenantId,
+      );
+      const rows = await tx.$queryRawUnsafe<Array<{ active: boolean; status: string }>>(
+        `SELECT (status = 'RUNNING' AND lease_token = $2::uuid AND deadline_at > now()) AS active, status
+         FROM engine.eros_inference_jobs WHERE id = $1::uuid AND tenant_id = $3`, body.job_id, body.lease_token, tenantId,
+      );
+      return rows[0];
+    });
+    return {
+      active: row?.active === true,
+      terminal_status: row && ['CANCELLED', 'EXPIRED'].includes(row.status) ? row.status : null,
+    };
   }
 
   @Post('complete')
@@ -384,12 +410,12 @@ export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestro
         !body.text.trim() || body.text.length > REPLY_LIMIT || typeof body.model !== 'string' || body.model.length > 128) {
       throw new HttpException({ code: 'INVALID_WORKER_RESULT' }, 400);
     }
-    const count = await prisma.$executeRawUnsafe(
+    const count = await withWorkerTenant((tx) => tx.$executeRawUnsafe(
       `UPDATE engine.eros_inference_jobs SET status = 'COMPLETED', response_text = $3, lease_token = NULL,
          lease_expires_at = NULL, updated_at = now()
        WHERE id = $1::uuid AND lease_token = $2::uuid AND tenant_id = $4 AND status = 'RUNNING'
          AND deadline_at > now()`, body.job_id, body.lease_token, body.text, workerTenant(),
-    );
+    ));
     if (count !== 1) throw new HttpException({ code: 'WORKER_LEASE_REJECTED' }, 409);
     return { completed: true };
   }
@@ -401,12 +427,12 @@ export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestro
         typeof body.error_code !== 'string' || !/^[a-z0-9_]{1,64}$/.test(body.error_code)) {
       throw new HttpException({ code: 'INVALID_WORKER_FAILURE' }, 400);
     }
-    const count = await prisma.$executeRawUnsafe(
+    const count = await withWorkerTenant((tx) => tx.$executeRawUnsafe(
       `UPDATE engine.eros_inference_jobs SET status = 'FAILED', error_code = $3, lease_token = NULL,
          lease_expires_at = NULL, updated_at = now()
        WHERE id = $1::uuid AND lease_token = $2::uuid AND tenant_id = $4 AND status = 'RUNNING'`,
       body.job_id, body.lease_token, body.error_code, workerTenant(),
-    );
+    ));
     if (count !== 1) throw new HttpException({ code: 'WORKER_LEASE_REJECTED' }, 409);
     return { failed: true };
   }
