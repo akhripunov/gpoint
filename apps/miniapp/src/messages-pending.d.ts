@@ -6,5 +6,5 @@ type PendingChatMessage = {
 };
 
 export function mergePendingMessages<
-  T extends { id: string; clientMessageId?: string; role: "user" | "assistant" },
+  T extends { id: string; clientMessageId?: string; role: "user" | "assistant" | "system" },
 >(historyItems: T[], pendingItems: PendingChatMessage[]): Array<T & { status?: "accepted" | PendingChatMessage["status"] }>;

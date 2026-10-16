@@ -1,6 +1,11 @@
 export function badgeText(count) { return Number.isSafeInteger(count) && count > 0 ? count > 99 ? '99+' : String(count) : null; }
 export function initialPollDelay(random = Math.random) { return Math.floor(random() * 3000); }
 export function unreadPollDelay(failures) { return Math.min(60000, 3000 * 2 ** Math.max(0, Math.min(failures - 1, 5))); }
+export function chatMessagePresentation(role) {
+  if (role === 'user') return { side: 'mine', incoming: false };
+  if (role === 'system') return { side: 'system', incoming: false };
+  return { side: 'theirs', incoming: role === 'assistant' };
+}
 
 /** One chat's visible ID queue; no unread arithmetic or message content. */
 export function createReadQueue({ acknowledge, isActive, setTimer = setTimeout, clearTimer = clearTimeout }) {

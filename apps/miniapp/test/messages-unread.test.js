@@ -6,6 +6,12 @@ test('badges hide zero, cap visual text and keep exact counts available separate
   assert.equal(typeof policy.badgeText,'function','unread badge policy missing');
   for(const [n,want] of [[0,null],[1,'1'],[99,'99'],[100,'99+']])assert.equal(policy.badgeText(n),want);
 });
+test('system notices are displayed separately and never enter assistant read acknowledgements',()=>{
+  assert.equal(typeof policy.chatMessagePresentation,'function','chat message presentation policy missing');
+  assert.deepEqual(policy.chatMessagePresentation('user'),{side:'mine',incoming:false});
+  assert.deepEqual(policy.chatMessagePresentation('assistant'),{side:'theirs',incoming:true});
+  assert.deepEqual(policy.chatMessagePresentation('system'),{side:'system',incoming:false});
+});
 test('polling spreads clients and backs off failures without unbounded retry delay',()=>{
   assert.equal(typeof policy.initialPollDelay,'function','unread polling policy missing');
   assert.equal(policy.initialPollDelay(()=>0),0);assert.equal(policy.initialPollDelay(()=>.9),2700);

@@ -15,7 +15,7 @@ export interface VipClickResponseDTO { redirectUrl: string; clickRecorded: true;
 export interface PaginatedResponse<T> { items: T[]; nextCursor: string | null; }
 export interface ExploreResponseDTO extends PaginatedResponse<CreatorSummaryDTO> { tab: ExploreTab; }
 
-export type MessageRole = 'user' | 'assistant';
+export type MessageRole = 'user' | 'assistant' | 'system';
 export interface ChatMessageDTO { id: string; clientMessageId?: string; role: MessageRole; text: string; occurredAt: string; incomingReadAt?: string | null; }
 export interface MessageThreadDTO {
   creator: Pick<CreatorSummaryDTO, 'id' | 'slug' | 'displayName' | 'avatarUrl' | 'verified'>;

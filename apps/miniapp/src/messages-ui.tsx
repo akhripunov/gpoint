@@ -8,6 +8,7 @@ import { messageChannelAvatarSource } from "./avatar-display.js";
 import { AvatarImage, Button, UnreadBadge } from "./ui";
 import { filterMessageThreads } from "./messages-search.js";
 import { useMessagesUnread, useVisibleMessageReads } from "./messages-unread";
+import { chatMessagePresentation } from "./messages-unread-policy.js";
 
 function Avatar({ src, name, className = "" }: { src: string | null; name: string; className?: string }) {
   return <span className={`messages-avatar ${className}`}><AvatarImage src={src} name={name} /></span>;
@@ -182,7 +183,7 @@ export function ModelChat({ slug, back }: { slug: string; back: () => void }) {
       {history.isError && <div className="chat-load-error" role="alert">Couldn't load chat history. <button type="button" onClick={() => void history.refetch()}>Retry</button></div>}
         {history.hasNextPage && <button className="chat-older" disabled={history.isFetchingNextPage} type="button" onClick={() => void history.fetchNextPage()}>{history.isFetchingNextPage ? "Loading…" : "Load earlier messages"}</button>}
         {history.isLoading && <div className="messages-state"><span className="messages-spinner" /><p>Loading conversation…</p></div>}
-        {!history.isLoading && displayItems.map((item) => <div className={`chat-message-row ${item.role === "user" ? "mine" : "theirs"}`} data-incoming-message-id={item.role === "assistant" ? item.id : undefined} key={item.id}><article className={`chat-bubble ${item.role === "user" ? "mine" : "theirs"}`}><p>{item.text}</p>{item.status && <small className={item.status}>{item.status === "sending" ? "Sending…" : item.status === "waiting" ? "Агата отвечает…" : item.status === "accepted" ? "Sent" : <>Couldn't confirm · <button type="button" onClick={() => retry({ id: item.clientMessageId ?? item.id, text: item.text, status: "failed", createdAt: Date.now() })}>Retry</button></>}</small>}<time>{activityTime(item.occurredAt)}</time></article></div>)}
+        {!history.isLoading && displayItems.map((item) => { const presentation = chatMessagePresentation(item.role); return <div className={`chat-message-row ${presentation.side}`} data-incoming-message-id={presentation.incoming ? item.id : undefined} key={item.id}><article className={`chat-bubble ${presentation.side}`}><p>{item.text}</p>{item.status && <small className={item.status}>{item.status === "sending" ? "Sending…" : item.status === "waiting" ? "Агата отвечает…" : item.status === "accepted" ? "Sent" : <>Couldn't confirm · <button type="button" onClick={() => retry({ id: item.clientMessageId ?? item.id, text: item.text, status: "failed", createdAt: Date.now() })}>Retry</button></>}</small>}<time>{activityTime(item.occurredAt)}</time></article></div>; })}
         {!history.isLoading && !displayItems.length && <div className="chat-welcome"><Avatar src={messageChannelAvatarSource(model.data)} name={model.data.displayName} className="large" /><h2>{model.data.displayName}</h2><p>Start a conversation. You’re chatting with an AI character for this creator.</p></div>}
         <div ref={bottomRef} />
       </div>
