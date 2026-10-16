@@ -3,7 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { verifyReleaseBundle, importBundleCommand, reuseBundleCommand, preparedImageCaptureCommand, preparedImageParityCommand } from './release-bundle.mjs';
+import { verifyReleaseBundle, importBundleCommand, reuseBundleCommand, preparedImageCaptureCommand, preparedImageParityCommand, selectImageTransport } from './release-bundle.mjs';
+import { createOciPullScript, createOciVerifyScript } from './release-oci.mjs';
 import { migrationHead } from './release-migrations.mjs';
 import { gsalesMigrationIdentity, gsalesReadinessCommand, parseGsalesReadiness, gsalesMigrationStateCommand, gsalesMigrationCommand, combinedComposeCommand, gsalesStartCommand, gsalesRuntimeCommand, parseGsalesRuntime, gsalesProductionInspectionCommand } from './release-gsales.mjs';
 import { fileURLToPath } from 'node:url';
@@ -317,7 +318,7 @@ function applyRemoteTimingMarkers(timings, output) {
   }
 }
 
-function run(command, env = {}, retryOptions = {}) {
+function run(command, env = {}, retryOptions = {}, input = undefined) {
   const runner = resolveRunnerPath('GPOINT_REMOTE_RUNNER');
   if (!runner) throw new Error('GPOINT_REMOTE_RUNNER is required for apply mode; no implicit SSH credentials are used');
   const captureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-remote-run-'));
@@ -336,8 +337,10 @@ function run(command, env = {}, retryOptions = {}) {
       let result;
       try {
         result = spawnSync(runner, [], {
-          env: { ...process.env, ...env, REMOTE_CMD: command, GPOINT_REMOTE_ATTEMPT_STATUS_FILE: statusFile },
-          stdio: ['ignore', stdoutFd, stderrFd],
+          env: remoteCommandEnvironment({ ...env, REMOTE_CMD: command, GPOINT_REMOTE_ATTEMPT_STATUS_FILE: statusFile }),
+          ...(input === undefined ? { stdio: ['ignore', stdoutFd, stderrFd] } : {
+            input, encoding: 'utf8', stdio: ['pipe', stdoutFd, stderrFd],
+          }),
         });
       } finally {
         fs.closeSync(stdoutFd);
@@ -365,6 +368,19 @@ function run(command, env = {}, retryOptions = {}) {
   } finally {
     fs.rmSync(captureDir, { recursive: true, force: true });
   }
+}
+
+export function remoteCommandEnvironment(overrides = {}) {
+  const environment = { ...process.env, ...overrides };
+  // Registry credentials travel only through runRemoteCommandWithInput stdin.
+  delete environment.GHCR_READ_TOKEN;
+  return environment;
+}
+
+export function runRemoteCommandWithInput(command, input, env = {}) {
+  if (typeof input !== 'string' || !input || input.includes('\0'))
+    throw new Error('remote stdin payload is required');
+  return run(command, env, {}, input);
 }
 
 export function runWithPreExecRetry(operation, {
@@ -552,10 +568,11 @@ export function agataProviderRuntimeCommand(provider) {
   return `set -e; actualProvider=$(docker exec compose-agata-api-1 python -c "from app.config import get_settings; print(get_settings().llm_provider)"); localEnabled=$(docker exec compose-agata-api-1 python -c "from app.config import get_settings; print(str(get_settings().codex_local_enabled).lower())"); tokenPresent=$(docker exec compose-agata-api-1 sh -c 'test -n "$GPOINT_AGATA_WORKER_TOKEN" && printf YES || printf NO'); printf 'AGATA_PROVIDER=%s AGATA_CODEX_LOCAL_ENABLED=%s AGATA_WORKER_TOKEN_PRESENT=%s\\n' "$actualProvider" "$localEnabled" "$tokenPresent"`;
 }
 
-export function applyCandidate(sha, { retentionPlan = { removableShas: [], removableCacheIds: [] }, provider = 'disabled', onMigrationStart = () => {}, onAgataStart = () => {}, onSwitchStart = () => {} } = {}) {
+export function applyCandidate(sha, { retentionPlan = { removableShas: [], removableCacheIds: [] }, provider = 'disabled', imageTransport: requestedImageTransport = process.env.IMAGE_TRANSPORT || 'prepared', ghcrReadToken = '', onMigrationStart = () => {}, onAgataStart = () => {}, onSwitchStart = () => {} } = {}) {
   if (!['disabled', 'mac_worker'].includes(provider)) throw new Error(`unsupported AGATA provider: ${provider}`);
   const bundle = process.env.GPOINT_RELEASE_BUNDLE ? verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, sha) : null;
   if (!bundle) throw new Error('verified immutable CI release bundle is required; application images are never rebuilt during apply');
+  const imageTransport = selectImageTransport(bundle, requestedImageTransport);
   const checkout = exactCheckout(sha);
   let agataMigrations;
   let gsalesMigrations;
@@ -574,12 +591,18 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
     if (bundle && bundle.agataHead !== agataMigrations.head) throw new Error('CI migration head does not match candidate source');
     gsalesMigrations = gsalesMigrationIdentity(checkout, bundle);
     if (agataMigrations.head !== 'agata0011') throw new Error('GSales integration requires AGATA agata0011');
-    createSourceArchive(checkout, archive);
     stage(timings, 'PRODUCTION_PREFLIGHT', () => run(productionPreflightCommand()));
-    stage(timings, 'SOURCE_PREPARE', () => {
-      upload(archive, `/tmp/gpoint-${sha}.tar.gz`);
-    });
-    if (bundle) stage(timings, 'CI_ARTIFACT_IMPORT', () => {
+    if (imageTransport === 'ghcr-oci') {
+      const registryUser = process.env.GHCR_READ_USERNAME || 'akhripunov';
+      if (!ghcrReadToken) throw new Error('read-only GHCR credential is unavailable');
+      const output = stage(timings, 'GHCR_IMAGE_PULL_AND_VERIFY', () =>
+        runRemoteCommandWithInput(createOciPullScript(bundle, sha, { username: registryUser }), ghcrReadToken));
+      if (!output.includes('GPOINT_GHCR_IMAGES_VERIFIED=YES'))
+        throw new Error('GHCR image pull/identity gate failed before production apply');
+      bundle.ghcrVerified = true;
+    } else if (bundle) {
+      if (!bundle.archive) throw new Error('verified archive fallback is unavailable before Apply');
+      stage(timings, 'CI_ARTIFACT_IMPORT', () => {
       const reuse = stage(timings, 'CI_ARTIFACT_REUSE_CHECK', () => run(reuseBundleCommand(bundle, sha)));
       if (reuse.includes('GPOINT_CI_IMAGES_REUSABLE')) {
         console.error('CI_ARTIFACT_REUSED=YES');
@@ -588,6 +611,11 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
       stage(timings, 'CI_ARTIFACT_UPLOAD', () => upload(bundle.archive, `/tmp/gpoint-images-${sha}.tar.gz`));
       const output = stage(timings, 'CI_ARTIFACT_LOAD', () => run(importBundleCommand(bundle, sha)));
       if (!output.includes('GPOINT_CI_IMAGES_VERIFIED')) throw new Error('CI image import failed');
+      });
+    }
+    createSourceArchive(checkout, archive);
+    stage(timings, 'SOURCE_PREPARE', () => {
+      upload(archive, `/tmp/gpoint-${sha}.tar.gz`);
     });
     const diskGuard = run("set -e; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n \"$freeKb\"; if [ \"$freeKb\" -lt 8388608 ]; then echo GPOINT_DISK_GUARD_WARN; fi; test \"$freeKb\" -ge 5242880; echo GPOINT_DISK_GUARD_OK");
     if (!diskGuard.includes('GPOINT_DISK_GUARD_OK')) throw new Error('remote disk guard failed: minimum 5 GiB free space required');
@@ -698,6 +726,12 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
     agataRuntime.codexLocalEnabled = providerRuntime.CODEX_LOCAL_ENABLED;
     agataRuntime.workerTokenPresent = providerRuntime.WORKER_TOKEN_PRESENT === 'YES';
     const gsalesIdentity = stage(timings, 'GSALES_POST_SWITCH_RECONCILIATION', () => parseGsalesRuntime(run(gsalesRuntimeCommand(sha, gsalesMigrations)), sha, gsalesMigrations));
+    if (imageTransport === 'ghcr-oci') {
+      const parity = stage(timings, 'GHCR_POST_SWITCH_PARITY', () => run(createOciVerifyScript(bundle, sha)));
+      if (!parity.includes('GPOINT_GHCR_POST_SWITCH_PARITY=YES'))
+        throw new Error('post-switch GHCR digest parity gate failed');
+      bundle.ghcrPostSwitchVerified = true;
+    }
     const removableShas = [...new Set(retentionPlan.removableShas ?? [])].filter(candidate => /^[0-9a-f]{40}$/.test(candidate) && candidate !== sha).join(' ');
     const terminalCleanup = removableShas ? removableShas.split(' ').map(candidate =>
       `for ref in gpoint-runtime:${candidate} gpoint-agata-runtime:${candidate} gpoint-g-sales-runtime:${candidate}; do for status in created exited; do docker ps -aq --filter ancestor="$ref" --filter status="$status" | xargs -r docker rm >/dev/null; done; done; if [ -z "$(docker ps -aq --filter ancestor=gpoint-runtime:${candidate})" ] && [ -z "$(docker ps -aq --filter ancestor=gpoint-agata-runtime:${candidate})" ] && [ -z "$(docker ps -aq --filter ancestor=gpoint-g-sales-runtime:${candidate})" ]; then docker image rm gpoint-runtime:${candidate} gpoint-agata-runtime:${candidate} gpoint-g-sales-runtime:${candidate} >/dev/null 2>&1 || true; rm -f /tmp/gpoint-${candidate}.tar.gz /tmp/gpoint-compose-${candidate}.yml /tmp/gpoint-caddy-${candidate} /tmp/gpoint-dockerfile-${candidate} /tmp/gpoint-agata-dockerfile-${candidate} /tmp/gpoint-safety-dockerfile-${candidate} /tmp/gpoint-safety-config-${candidate}.mjs /tmp/gpoint-image-id-${candidate} /tmp/gpoint-agata-image-id-${candidate} /tmp/gpoint-g-sales-image-id-${candidate} /tmp/gpoint-previous-runtime-${candidate} /tmp/gpoint-aux-${candidate}; fi`
@@ -717,7 +751,7 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
       migration.match(/GPOINT_BACKUP_PATH=([^\s]+)/)?.[1] ? `BACKUP=${migration.match(/GPOINT_BACKUP_PATH=([^\s]+)/)[1]}` : null,
     ].filter(Boolean).join(',');
     if (!migrationOutput) throw new Error('migration gate output was not recognized');
-    return { imageIdentity: { imageId, indexSha256, buildSha, detectorHash }, agataIdentity: agataRuntime, gsalesIdentity, effectiveConfigSha256, migrationOutput, migrationProof, composeExitCode, postSwitch, detectorHash, timings, ciReceipt: bundle ? { ...bundle, archive: undefined } : null };
+    return { imageIdentity: { imageId, indexSha256, buildSha, detectorHash }, agataIdentity: agataRuntime, gsalesIdentity, effectiveConfigSha256, migrationOutput, migrationProof, composeExitCode, postSwitch, detectorHash, timings, ciReceipt: bundle ? { ...bundle, archive: undefined, selectedTransport: imageTransport } : null };
   } finally {
     try { cleanupTemporaryWorktree(checkout); }
     finally { fs.rmSync(archive, { force: true }); }

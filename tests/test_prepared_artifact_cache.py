@@ -47,6 +47,44 @@ class ArtifactCacheTests(unittest.TestCase):
         self.assertEqual(self.restore(), 'MISS')
         self.assertEqual(self.downloads, 2)
 
+    def test_archive_fallback_requires_exact_receipt_members_and_checksum(self):
+        import json
+        receipt = {'schema': 3, 'candidateSha': 'a' * 40,
+                   'archiveSha256': __import__('hashlib').sha256(b'image archive').hexdigest()}
+        fallback = self.root / 'fallback.zip'
+        with zipfile.ZipFile(fallback, 'w') as output:
+            output.writestr('images.tar.gz', b'image archive')
+            output.writestr('receipt.json', json.dumps(receipt, sort_keys=True))
+        target = CACHE.verify_and_install_archive_fallback(fallback, self.root / 'selected', receipt)
+        self.assertEqual(target.read_bytes(), b'image archive')
+        with self.assertRaisesRegex(RuntimeError, 'differs'):
+            CACHE.verify_and_install_archive_fallback(fallback, self.root / 'other', {**receipt, 'candidateSha': 'b' * 40})
+        with zipfile.ZipFile(fallback, 'w') as output:
+            output.writestr('images.tar.gz', b'changed')
+            output.writestr('receipt.json', json.dumps(receipt))
+        with self.assertRaisesRegex(RuntimeError, 'checksum'):
+            CACHE.verify_and_install_archive_fallback(fallback, self.root / 'bad', receipt)
+
+    def test_archive_fallback_streams_large_image_member_instead_of_reading_it_all(self):
+        import json
+        receipt = {'schema': 3, 'candidateSha': 'a' * 40,
+                   'archiveSha256': __import__('hashlib').sha256(b'image archive').hexdigest()}
+        fallback = self.root / 'fallback-stream.zip'
+        with zipfile.ZipFile(fallback, 'w') as output:
+            output.writestr('images.tar.gz', b'image archive')
+            output.writestr('receipt.json', json.dumps(receipt, sort_keys=True))
+        original_read = CACHE.zipfile.ZipFile.read
+
+        def reject_unbounded_image_read(archive, name, *args, **kwargs):
+            if name == 'images.tar.gz':
+                raise AssertionError('large image member must be streamed')
+            return original_read(archive, name, *args, **kwargs)
+
+        with patch.object(CACHE.zipfile.ZipFile, 'read', new=reject_unbounded_image_read):
+            target = CACHE.verify_and_install_archive_fallback(
+                fallback, self.root / 'streamed', receipt)
+        self.assertEqual(target.read_bytes(), b'image archive')
+
     def test_changed_artifact_id_cannot_reuse_another_attempt(self):
         self.restore('12')
         self.assertEqual(self.restore('13'), 'MISS')

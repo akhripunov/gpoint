@@ -1,0 +1,28 @@
+{
+  "standard_version": "1.0.0",
+  "lifecycle": ["COALESCE", "PREPARE", "AUTHORIZE", "PREFLIGHT", "PULL", "APPLY", "VERIFY", "EVIDENCE"],
+  "coalescing": {
+    "executor": "mac-self-hosted",
+    "quiet_window_seconds": 60,
+    "max_window_seconds": 300,
+    "main_sha_lookup_required": true,
+    "failure_result": "BLOCKED",
+    "superseded_result": "SUPERSEDED",
+    "prepare_requires": "WINNER"
+  },
+  "executors": {"prepare": "github-hosted", "deploy": "mac-self-hosted"},
+  "deploy_stages": ["PREFLIGHT", "PULL", "APPLY", "VERIFY"],
+  "separate_preflight_required_in_automatic_path": false,
+  "statuses": {
+    "coalesce": ["WINNER", "SUPERSEDED", "BLOCKED"],
+    "prepare": ["READY", "BLOCKED"],
+    "deploy": ["PREFLIGHTING", "PULLING", "APPLYING", "VERIFYING", "COMPLETE", "BLOCKED", "RECOVERY_REQUIRED"]
+  },
+  "authorization": {"task_scoped": true, "one_shot": true, "exact_sha": true, "scope_and_baseline_bound": true},
+  "image_transports": ["ghcr-oci", "archive"],
+  "required_evidence": ["candidate_sha", "prepare_run_id", "prepare_attempt", "image_digests", "provenance", "baseline", "rollback", "verification"],
+  "required_safety_gates": ["exact_sha", "immutable_provenance", "owner_authorization", "migration_safety", "worker_compatibility", "rollback_readiness", "health_verification"],
+  "production_state_scope": "project-local",
+  "completion_requires": ["apply_verified", "runtime_identity_verified", "health_verified", "evidence_published"],
+  "recovery_required_on_ambiguous_apply": true
+}

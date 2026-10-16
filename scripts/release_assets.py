@@ -190,6 +190,22 @@ def write_zip(target, files):
             archive.write(source, name)
 
 
+def build_oci_prepare_assets(bundle, output_dir):
+    """Keep the normal Deploy asset small; retain the verified archive separately for fallback."""
+    bundle, output_dir = Path(bundle), Path(output_dir)
+    receipt_path = bundle / 'receipt.json'
+    archive_path = bundle / 'images.tar.gz'
+    receipt = json.loads(receipt_path.read_text())
+    if (receipt.get('schema') != 3 or receipt.get('transport') != 'ghcr-oci'
+            or not archive_path.is_file() or archive_path.is_symlink()):
+        raise RuntimeError('OCI Prepare receipt or fallback archive is invalid')
+    primary = output_dir / 'bundle.zip'
+    fallback = output_dir / 'fallback-images.zip'
+    write_zip(primary, [('receipt.json', receipt_path)])
+    write_zip(fallback, [('images.tar.gz', archive_path), ('receipt.json', receipt_path)])
+    return primary, fallback
+
+
 def verified_optional_v4_static_asset(receipt, bundle, sha):
     """Only accept standalone static asset explicitly attested by V3 receipt."""
     if 'staticArtifactSha256' not in receipt:
@@ -240,6 +256,10 @@ def publish(kind, sha, run_id, attempt):
                 target = root / 'bundle.zip'
                 write_zip(target, [(name, bundle / name) for name in names])
                 archives.append(target)
+            elif kind == 'prepare' and receipt.get('schema') == 3:
+                if receipt.get('transport') != 'ghcr-oci':
+                    raise RuntimeError('unknown OCI Prepare receipt transport')
+                archives.extend(build_oci_prepare_assets(bundle, root))
             else:
                 target = root / ('bundle.zip' if kind == 'prepare' else 'receipt.zip')
                 write_zip(target, [(name, bundle / name) for name in names])

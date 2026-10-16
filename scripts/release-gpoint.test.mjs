@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { canCreateProductionRef, checkAgataEffectiveConfig, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, cleanupLocalPackageCaches, evaluateSafetyGates, failureEvidence, isTransientGitHubTransportFailure, localDiskDecision, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runLocalDiskPreflight, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, validateMacWorkerStatus, verifiedRuntimeState } from './release-gpoint.mjs';
-import { agataInternalConfigProvisionCommand, agataPreSwitchReadinessCommand, agataProviderRuntimeCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, cleanupTemporaryWorktree, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, parseAgataRuntimeIdentityLine, planReleaseRetention, productionPreflightCommand, resolveRunnerPath, runCleanupCommand, runRemoteCommand, runWithPreExecRetry, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataProviderMode, validateAgataRuntimeIdentity, validateRuntimeIdentity } from './release-gpoint-vps-adapter.mjs';
+import { agataInternalConfigProvisionCommand, agataPreSwitchReadinessCommand, agataProviderRuntimeCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, cleanupTemporaryWorktree, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, parseAgataRuntimeIdentityLine, planReleaseRetention, productionPreflightCommand, resolveRunnerPath, runCleanupCommand, runRemoteCommand, runWithPreExecRetry, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataProviderMode, validateAgataRuntimeIdentity, validateRuntimeIdentity, remoteCommandEnvironment } from './release-gpoint-vps-adapter.mjs';
 
 test('temporary worktree cleanup uses git metadata removal when available', () => {
   const calls = [];
@@ -17,6 +17,12 @@ test('temporary worktree cleanup uses git metadata removal when available', () =
   });
   assert.equal(result, 'GIT_WORKTREE_REMOVE');
   assert.deepEqual(calls, [['git', tempWorktree]]);
+});
+
+test('GHCR read credential is removed from all remote process environments', () => {
+  const env = remoteCommandEnvironment({ GHCR_READ_TOKEN: 'secret-ghcr-token', GPOINT_TEST_VALUE: 'kept' });
+  assert.equal(env.GHCR_READ_TOKEN, undefined);
+  assert.equal(env.GPOINT_TEST_VALUE, 'kept');
 });
 
 test('temporary worktree cleanup falls back to its exact directory and prunes stale metadata', () => {
