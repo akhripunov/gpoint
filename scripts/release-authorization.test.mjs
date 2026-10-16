@@ -276,6 +276,20 @@ test('authorization state check observes revoked, consumed and claimed markers',
     fetchImpl: async () => assert.fail('must not query without token')}), /token is required/);
 });
 
+test('a fresh mutation-boundary authorization read observes revocation after an earlier pass', async () => {
+  let revoked = false;
+  const fetchImpl = async url => {
+    if (url.endsWith('/revoked') && revoked) return {status: 200, ok: true, json: async () => ({object: {sha: candidate}})};
+    if (url.endsWith('/claimed')) return {status: 200, ok: true, json: async () => ({object: {sha: candidate}})};
+    return {status: 404, ok: false};
+  };
+  assert.equal((await checkTaskAuthorizationState({project: 'gpoint', authorizationId: id,
+    candidateSha: candidate, token: 'test', fetchImpl})).claimed, true);
+  revoked = true;
+  await assert.rejects(checkTaskAuthorizationState({project: 'gpoint', authorizationId: id,
+    candidateSha: candidate, token: 'test', fetchImpl}), /revoked or already consumed/);
+});
+
 test('authorization consumption creates an immutable candidate-bound Git ref', async () => {
   let request;
   await consumeTaskAuthorization({project: 'gpoint', authorizationId: id, candidateSha: candidate, token: 'test',

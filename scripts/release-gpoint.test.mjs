@@ -19,6 +19,22 @@ test('temporary worktree cleanup uses git metadata removal when available', () =
   assert.deepEqual(calls, [['git', tempWorktree]]);
 });
 
+test('TASK_SCOPED_AUTO revalidates authorization immediately before each mutation boundary', () => {
+  const adapter = fs.readFileSync(new URL('./release-gpoint-vps-adapter.mjs', import.meta.url), 'utf8');
+  const migrationGate = adapter.indexOf("onBeforeMutation('database-migration')");
+  const migrationStart = adapter.indexOf("onMigrationStart();", migrationGate);
+  const agataGate = adapter.indexOf("onBeforeMutation('agata-start')");
+  const agataStart = adapter.indexOf('onAgataStart();', agataGate);
+  const gsalesGate = adapter.indexOf("onBeforeMutation('gsales-start')");
+  const gsalesStart = adapter.indexOf("stage(timings, 'GSALES_PRE_SWITCH_START'", gsalesGate);
+  const switchGate = adapter.indexOf("onBeforeMutation('runtime-switch')");
+  const switchStart = adapter.indexOf('onSwitchStart();', switchGate);
+  assert.ok(migrationGate >= 0 && migrationGate < migrationStart, 'database migration needs a fresh auth check');
+  assert.ok(agataGate >= 0 && agataGate < agataStart, 'AGATA startup needs a fresh auth check');
+  assert.ok(gsalesGate >= 0 && gsalesGate < gsalesStart, 'GSales startup needs a fresh auth check');
+  assert.ok(switchGate >= 0 && switchGate < switchStart, 'runtime switch needs a fresh auth check');
+});
+
 test('GHCR read credential is removed from all remote process environments', () => {
   const env = remoteCommandEnvironment({ GHCR_READ_TOKEN: 'secret-ghcr-token', GPOINT_TEST_VALUE: 'kept' });
   assert.equal(env.GHCR_READ_TOKEN, undefined);

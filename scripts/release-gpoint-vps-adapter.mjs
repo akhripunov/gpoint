@@ -568,7 +568,7 @@ export function agataProviderRuntimeCommand(provider) {
   return `set -e; actualProvider=$(docker exec compose-agata-api-1 python -c "from app.config import get_settings; print(get_settings().llm_provider)"); localEnabled=$(docker exec compose-agata-api-1 python -c "from app.config import get_settings; print(str(get_settings().codex_local_enabled).lower())"); tokenPresent=$(docker exec compose-agata-api-1 sh -c 'test -n "$GPOINT_AGATA_WORKER_TOKEN" && printf YES || printf NO'); printf 'AGATA_PROVIDER=%s AGATA_CODEX_LOCAL_ENABLED=%s AGATA_WORKER_TOKEN_PRESENT=%s\\n' "$actualProvider" "$localEnabled" "$tokenPresent"`;
 }
 
-export function applyCandidate(sha, { retentionPlan = { removableShas: [], removableCacheIds: [] }, provider = 'disabled', imageTransport: requestedImageTransport = process.env.IMAGE_TRANSPORT || 'prepared', ghcrReadToken = '', onMigrationStart = () => {}, onAgataStart = () => {}, onSwitchStart = () => {} } = {}) {
+export function applyCandidate(sha, { retentionPlan = { removableShas: [], removableCacheIds: [] }, provider = 'disabled', imageTransport: requestedImageTransport = process.env.IMAGE_TRANSPORT || 'prepared', ghcrReadToken = '', onBeforeMutation = () => {}, onMigrationStart = () => {}, onAgataStart = () => {}, onSwitchStart = () => {} } = {}) {
   if (!['disabled', 'mac_worker'].includes(provider)) throw new Error(`unsupported AGATA provider: ${provider}`);
   const bundle = process.env.GPOINT_RELEASE_BUNDLE ? verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, sha) : null;
   if (!bundle) throw new Error('verified immutable CI release bundle is required; application images are never rebuilt during apply');
@@ -659,6 +659,7 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
         gsalesMigrationCommand(sha, gsalesMigrations),
         'echo GPOINT_MIGRATION_OK',
       ];
+      onBeforeMutation('database-migration');
       onMigrationStart();
       return run(steps.join('; '));
     });
@@ -695,11 +696,14 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
     });
     effectiveConfigSha256 = preparationOutput.match(/GPOINT_EFFECTIVE_CONFIG_SHA256=([0-9a-f]{64})/)?.[1];
     if (!effectiveConfigSha256) throw new Error('final effective production config evidence absent');
+    onBeforeMutation('agata-start');
     onAgataStart();
     const agataReady = stage(timings, 'AGATA_PRE_SWITCH_READINESS', () => run(agataPreSwitchReadinessCommand(sha, provider)));
     if (!agataReady.includes('AGATA_PRE_SWITCH_READY') || !agataReady.includes(`AGATA_PROVIDER_VERIFIED=${provider}`) || !agataReady.includes('GPOINT_AGATA_INTERNAL_AUTH_OK')) throw new Error('AGATA pre-switch readiness/auth gate failed');
+    onBeforeMutation('gsales-start');
     const gsalesStarted = stage(timings, 'GSALES_PRE_SWITCH_START', () => run(gsalesStartCommand(sha)));
     if (!gsalesStarted.includes('GSALES_STARTED')) throw new Error('GSales lane start failed');
+    onBeforeMutation('runtime-switch');
     onSwitchStart();
     const deployOutput = run(deploy.join('; ')); applyRemoteTimingMarkers(timings, deployOutput); if (!deployOutput.includes('GPOINT_DEPLOY_OK')) throw new Error('remote runtime deploy failed');
     const composeExitCode = Number(deployOutput.match(/GPOINT_COMPOSE_EXIT=(\d+)/)?.[1] ?? NaN);
