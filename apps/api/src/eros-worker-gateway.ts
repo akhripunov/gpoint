@@ -3,6 +3,7 @@ import { BadRequestException, Body, Controller, Get, Headers, Header, HttpExcept
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { PrismaClient, type Prisma } from '@prisma/client';
 import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, parseBridgeRequest, parseErosEmbeddingRequest, type ParsedErosBridgeRequest } from './eros-worker-contract.js';
+import { isAllowedOllamaEmbeddingEndpoint } from './eros-network-policy.js';
 
 const prisma = new PrismaClient();
 const REPLY_LIMIT = 4_096;
@@ -291,15 +292,11 @@ export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestro
     try { parsed = parseErosEmbeddingRequest(body); }
     catch { throw new BadRequestException({ code: 'EROS_EMBEDDING_REQUEST_INVALID' }); }
     const endpoint = process.env.EROS_OLLAMA_EMBEDDING_URL ?? '';
-    let url: URL;
-    try { url = new URL(endpoint); }
-    catch { throw new HttpException({ code: 'EROS_EMBEDDINGS_UNAVAILABLE' }, 503); }
     const localMode = process.env.EROS_WORKER_LOCAL_TEST === 'true';
-    if (url.username || url.password || url.search || url.hash ||
-        !(url.protocol === 'https:' || (localMode && url.protocol === 'http:' && url.hostname === '127.0.0.1')) ||
-        !url.pathname.endsWith('/api/embed')) {
+    if (!isAllowedOllamaEmbeddingEndpoint(endpoint, { localTest: localMode })) {
       throw new HttpException({ code: 'EROS_EMBEDDINGS_UNAVAILABLE' }, 503);
     }
+    const url = new URL(endpoint);
     let result: unknown;
     try {
       const response = await fetch(url, {
