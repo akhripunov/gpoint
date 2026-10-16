@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { canCreateProductionRef, checkAgataEffectiveConfig, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, cleanupLocalPackageCaches, evaluateSafetyGates, failureEvidence, isTransientGitHubTransportFailure, localDiskDecision, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runLocalDiskPreflight, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, validateMacWorkerStatus, verifiedRuntimeState } from './release-gpoint.mjs';
-import { agataInternalConfigProvisionCommand, agataPreSwitchReadinessCommand, agataProviderRuntimeCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, cleanupTemporaryWorktree, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, parseAgataRuntimeIdentityLine, planReleaseRetention, productionPreflightCommand, resolveRunnerPath, runAuthorizedMutationPlan, runCleanupCommand, runRemoteCommand, runWithPreExecRetry, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataProviderMode, validateAgataRuntimeIdentity, validateRuntimeIdentity, remoteCommandEnvironment } from './release-gpoint-vps-adapter.mjs';
+import { agataInternalConfigProvisionCommand, agataPreSwitchReadinessCommand, agataProviderRuntimeCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, cleanupTemporaryWorktree, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, migrationPendingFromPreflight, parseAgataRuntimeIdentityLine, planReleaseRetention, productionPreflightCommand, resolveRunnerPath, runAuthorizedMutationPlan, runCleanupCommand, runRemoteCommand, runWithPreExecRetry, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataProviderMode, validateAgataRuntimeIdentity, validateRuntimeIdentity, remoteCommandEnvironment } from './release-gpoint-vps-adapter.mjs';
 
 test('temporary worktree cleanup uses git metadata removal when available', () => {
   const calls = [];
@@ -80,6 +80,25 @@ test('each planned database mutation gets its own immediately preceding authoriz
     'authorize:agata-migration', 'agata-migrate',
     'authorize:gsales-migration', 'gsales-migrate',
   ]);
+});
+
+test('migration planning uses explicit pending states and fails closed when a lane state is absent', () => {
+  assert.equal(migrationPendingFromPreflight('PRISMA_PENDING_MIGRATIONS', 'PRISMA'), true);
+  assert.equal(migrationPendingFromPreflight('PRISMA_NO_PENDING_MIGRATIONS', 'PRISMA'), false);
+  assert.equal(migrationPendingFromPreflight('AGATA_PENDING_MIGRATIONS', 'AGATA'), true);
+  assert.equal(migrationPendingFromPreflight('AGATA_NO_PENDING_MIGRATIONS', 'AGATA'), false);
+  assert.equal(migrationPendingFromPreflight('GSALES_PENDING=1', 'GSALES'), true);
+  assert.equal(migrationPendingFromPreflight('GSALES_PENDING=0', 'GSALES'), false);
+  assert.throws(() => migrationPendingFromPreflight('AGATA_HEAD=agata0009', 'AGATA'), /state is absent/);
+  assert.throws(() => migrationPendingFromPreflight('AGATA_PENDING_MIGRATIONS\nAGATA_NO_PENDING_MIGRATIONS', 'AGATA'), /state is contradictory/);
+  assert.throws(() => migrationPendingFromPreflight('AGATA_PENDING_MIGRATIONS\nAGATA_PENDING_MIGRATIONS', 'AGATA'), /state is contradictory/);
+  assert.throws(() => migrationPendingFromPreflight('GSALES_PENDING=1\nGSALES_PENDING=0', 'GSALES'), /state is contradictory/);
+});
+
+test('production migration preflight emits the AGATA state consumed by its fail-closed planner', () => {
+  const adapter = fs.readFileSync(new URL('./release-gpoint-vps-adapter.mjs', import.meta.url), 'utf8');
+  assert.match(adapter, /if \[ "\$agataPending" = 1 \]; then echo AGATA_PENDING_MIGRATIONS; else echo AGATA_NO_PENDING_MIGRATIONS; fi/);
+  assert.match(adapter, /shouldRun: output => migrationPendingFromPreflight\(output, 'AGATA'\)/);
 });
 
 test('GHCR read credential is removed from all remote process environments', () => {

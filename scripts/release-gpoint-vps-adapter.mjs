@@ -269,6 +269,21 @@ export function migrationNeedsDeploy(statusOutput) {
   return !/Database schema is up to date!|No pending migrations to apply\./i.test(statusOutput ?? '');
 }
 
+export function migrationPendingFromPreflight(output, lane) {
+  const markers = {
+    PRISMA: ['PRISMA_PENDING_MIGRATIONS', 'PRISMA_NO_PENDING_MIGRATIONS'],
+    AGATA: ['AGATA_PENDING_MIGRATIONS', 'AGATA_NO_PENDING_MIGRATIONS'],
+    GSALES: ['GSALES_PENDING=1', 'GSALES_PENDING=0'],
+  }[lane];
+  if (!markers) throw new Error(`unsupported migration lane: ${lane}`);
+  const lines = String(output ?? '').split(/\r?\n/);
+  const pendingCount = lines.filter(line => line === markers[0]).length;
+  const currentCount = lines.filter(line => line === markers[1]).length;
+  if (pendingCount === 0 && currentCount === 0) throw new Error(`${lane} migration state is absent`);
+  if (pendingCount + currentCount !== 1) throw new Error(`${lane} migration state is contradictory`);
+  return pendingCount === 1;
+}
+
 export function detectorSourceHash(checkout) {
   const root = path.join(checkout, 'infra/production/sensitive-detector');
   const files = fs.readdirSync(root).filter(name => fs.statSync(path.join(root, name)).isFile()).sort();
@@ -669,7 +684,7 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
         `prismaPending=0; if printf '%s' "$status" | grep -Eiq 'Database schema is up to date!|No pending migrations to apply\\.'; then echo PRISMA_NO_PENDING_MIGRATIONS; elif printf '%s' "$status" | grep -Eiq 'Following migrations have not yet been applied|The following migration(s) have not yet been applied'; then prismaPending=1; echo PRISMA_PENDING_MIGRATIONS; else echo PRISMA_STATUS_UNRECOGNIZED; exit 33; fi`,
         `agataBefore=$(printf '%s' '${agataStatusB64}' | base64 -d | docker run --rm -i ${databaseNetworkArgs('gpoint-agata-preflight')} --env-file /opt/gpoint/env/production.env --env-file /opt/gpoint/env/migration.env gpoint-agata-runtime:${sha} python -)`,
         `printf '%s\\n' "$agataBefore"`,
-        `agataPending=0; if printf '%s' "$agataBefore" | grep -qx 'AGATA_SCHEMA_ABSENT'; then agataPending=1; elif printf '%s' "$agataBefore" | grep -Eq '^AGATA_HEAD=(${agataMigrations.revisions.join('|')})$'; then if ! printf '%s' "$agataBefore" | grep -qx 'AGATA_HEAD=${agataMigrations.head}'; then agataPending=1; fi; else echo AGATA_HEAD_UNRECOGNIZED; exit 34; fi`,
+        `agataPending=0; if printf '%s' "$agataBefore" | grep -qx 'AGATA_SCHEMA_ABSENT'; then agataPending=1; elif printf '%s' "$agataBefore" | grep -Eq '^AGATA_HEAD=(${agataMigrations.revisions.join('|')})$'; then if ! printf '%s' "$agataBefore" | grep -qx 'AGATA_HEAD=${agataMigrations.head}'; then agataPending=1; fi; else echo AGATA_HEAD_UNRECOGNIZED; exit 34; fi; if [ "$agataPending" = 1 ]; then echo AGATA_PENDING_MIGRATIONS; else echo AGATA_NO_PENDING_MIGRATIONS; fi`,
         `gsalesState=$( ${gsalesMigrationStateCommand(gsalesMigrations)} ); printf '%s\\n' "$gsalesState"; gsalesPending=$(printf '%s' "$gsalesState" | sed -n 's/^GSALES_PENDING=//p'); test "$gsalesPending" = 0 || test "$gsalesPending" = 1`,
         `if [ "$prismaPending" = 1 ] || [ "$agataPending" = 1 ] || [ "$gsalesPending" = 1 ]; then ${['agata0010', 'agata0011'].includes(agataMigrations.head) ? agataProductionMigrationCommand(sha, 'backup', checkout) : `backupName=gpoint-pre-release-${sha}-$(date -u +%Y%m%dT%H%M%SZ).dump; mkdir -p /opt/gpoint/backups; chmod 700 /opt/gpoint/backups; docker image inspect postgres:16 >/dev/null 2>&1 || docker pull postgres:16; docker run --rm ${databaseNetworkArgs()} --env-file /opt/gpoint/env/production.env -e GPOINT_BACKUP_NAME="$backupName" -v /opt/gpoint/backups:/backups postgres:16 sh -ec 'dburl=$(printf "%s" "$DATABASE_URL" | sed -E "s/([?&])(schema|connection_limit|pool_timeout|pgbouncer|sslaccept)=[^&]*//g; s/[?&]$//; s/\\?&/?/g"); schemas="--schema=public"; if psql "$dburl" -Atc "SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name='\''agata'\'')" | grep -qx t; then schemas="$schemas --schema=agata"; fi; pg_dump --format=custom --no-owner $schemas --dbname "$dburl" --file "/backups/$GPOINT_BACKUP_NAME"'; chmod 600 "/opt/gpoint/backups/$backupName"; test -s "/opt/gpoint/backups/$backupName"; docker run --rm -v /opt/gpoint/backups:/backups postgres:16 pg_restore --list "/backups/$backupName" >/dev/null; echo GPOINT_BACKUP_PATH=/opt/gpoint/backups/$backupName; echo GPOINT_BACKUP_STATUS=NONEMPTY_PROTECTED`}; fi`,
       ];
@@ -683,13 +698,13 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
         preflightCommand: migrationPreflight,
         mutations: [
           {boundary: 'prisma-migration', command: prismaMigration,
-            shouldRun: output => output.includes('PRISMA_PENDING_MIGRATIONS'),
+            shouldRun: output => migrationPendingFromPreflight(output, 'PRISMA'),
             skippedOutput: 'PRISMA_NO_PENDING_MIGRATIONS', afterAuthorization: onMigrationStart},
           {boundary: 'agata-migration', command: `${agataMigration}; ${agataVerification}`,
-            shouldRun: output => output.includes('AGATA_PENDING_MIGRATIONS'),
+            shouldRun: output => migrationPendingFromPreflight(output, 'AGATA'),
             skippedOutput: 'AGATA_NO_PENDING_MIGRATIONS', afterAuthorization: onMigrationStart},
           {boundary: 'gsales-migration', command: gsalesMigrationCommand(sha, gsalesMigrations),
-            shouldRun: output => output.includes('GSALES_PENDING=1'),
+            shouldRun: output => migrationPendingFromPreflight(output, 'GSALES'),
             skippedOutput: 'GSALES_NO_PENDING_MIGRATIONS', afterAuthorization: onMigrationStart},
         ],
         onBeforeMutation,
