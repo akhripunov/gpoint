@@ -107,6 +107,37 @@ test('new Prepare execution without immutable evidence blocks preflight',async()
   };
   await assert.rejects(dispatchPrepare(event(),wrapped),/Executed Prepare has no immutable bundle/);
 });
+test('immutable Prepare release accepts the exact bundle plus archive-fallback asset set',async()=>{
+  const {api}=apiFixture();
+  const wrapped=async(method,path,body)=>{
+    const result=await api(method,path,body);
+    if(path.startsWith('releases/tags/')) result.assets.push({id:457,name:'fallback-images.zip',state:'uploaded',
+      size:200,digest:`sha256:${'c'.repeat(64)}`});
+    return result;
+  };
+  const result=await dispatchPrepare(event(),wrapped);
+  assert.equal(result.state,'OWNER_EXACT_SHA_APPROVAL_REQUIRED');
+});
+test('immutable Prepare release rejects missing, duplicate, invalid or unexpected assets',async()=>{
+  const bundle={id:456,name:'bundle.zip',state:'uploaded',size:100,digest:`sha256:${'b'.repeat(64)}`};
+  const fallback={id:457,name:'fallback-images.zip',state:'uploaded',size:200,digest:`sha256:${'c'.repeat(64)}`};
+  const invalidSets=[
+    [fallback],
+    [bundle,bundle,fallback],
+    [bundle,fallback,fallback],
+    [bundle,{...fallback,name:'unexpected.zip'}],
+    [bundle,{...fallback,digest:'sha256:invalid'}],
+  ];
+  for (const assets of invalidSets) {
+    const {api}=apiFixture();
+    const wrapped=async(method,path,body)=>{
+      const result=await api(method,path,body);
+      if(path.startsWith('releases/tags/')) result.assets=assets;
+      return result;
+    };
+    await assert.rejects(dispatchPrepare(event(),wrapped),OrchestrationError);
+  }
+});
 test('mutable or draft releases fail closed',async()=>{
   for(const patch of [{immutable:false},{draft:true}]) {
     const {api}=apiFixture(); const original=api;

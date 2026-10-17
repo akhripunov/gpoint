@@ -63,6 +63,20 @@ controller and Deploy do not query Linear to authorize release, and missing,
 stale, or mismatched Linear links do not block it. Candidate SHA fields are
 forbidden in the task record; the exact candidate is selected from current main
 after integration.
+
+An OWNER-approved correction to an already committed path scope is recorded as
+an append-only file under
+`.release-authorizations/addenda/<authorization-id>/<amendment-id>.json`. It
+must bind to the unchanged original authorization-record Git blob, identify the
+direct OWNER addendum, and name one exact path together with its source commit,
+path-specific patch SHA-256, resulting file SHA-256, and Git blob SHA. The
+validator accepts only a new immutable addendum file and verifies all of those
+identities against the candidate history and tree. The addendum metadata is
+excluded from the implementation-path list; its exact approved source path
+remains in that list and all other scope checks still apply. A malformed,
+changed, duplicate, stale, or unapproved path fails closed. The addendum
+commitment is an integrity check, not a cryptographic OWNER signature; the
+release operator must verify the direct OWNER instruction before recording it.
 Controller proves its commit precedes all implementation commits, supporting
 normal merge commits and rejecting squash-merging the authorization together
 with the implementation. Before apply, compare the full baseline-to-candidate
