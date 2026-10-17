@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { canCreateProductionRef, checkAgataEffectiveConfig, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, cleanupLocalPackageCaches, evaluateSafetyGates, failureEvidence, githubLedgerGitEnvironment, githubSourceGitEnvironment, isTransientGitHubTransportFailure, localDiskDecision, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runLocalDiskPreflight, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, validateMacWorkerStatus, verifiedRuntimeState } from './release-gpoint.mjs';
+import { canCreateProductionRef, checkAgataEffectiveConfig, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, cleanupLocalPackageCaches, evaluateSafetyGates, failureEvidence, githubLedgerGitEnvironment, githubProductionTagGitEnvironment, githubSourceGitEnvironment, isTransientGitHubTransportFailure, localDiskDecision, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runLocalDiskPreflight, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, validateMacWorkerStatus, verifiedRuntimeState } from './release-gpoint.mjs';
 import { agataInternalConfigProvisionCommand, agataPreSwitchReadinessCommand, agataProviderRuntimeCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, cleanupTemporaryWorktree, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, migrationPendingFromPreflight, parseAgataRuntimeIdentityLine, planReleaseRetention, productionPreflightCommand, resolveRunnerPath, runAuthorizedMutationPlan, runCleanupCommand, runRemoteCommand, runWithPreExecRetry, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataProviderMode, validateAgataRuntimeIdentity, validateRuntimeIdentity, remoteCommandEnvironment } from './release-gpoint-vps-adapter.mjs';
 
 test('GitHub token is attached only to exact production-ledger Git operations', () => {
@@ -75,6 +75,69 @@ test('ledger Git auth fails closed without a token and for noncanonical ledger w
   const otherBranch = githubLedgerGitEnvironment(['push', 'origin', `${'a'.repeat(40)}:refs/heads/main`], 'token', {});
   assert.equal(otherBranch.GIT_CONFIG_KEY_1, undefined);
   assert.throws(() => githubLedgerGitEnvironment(['push', 'origin', 'HEAD:refs/heads/gpoint-release-ledger'], 'token', {}), /not authorized/);
+});
+
+test('production tag Git auth is scoped to one exact canonical tag push', () => {
+  const token = 'ephemeral-production-tag-token';
+  const tag = 'gpoint-production-20261017T064101334Z';
+  const args = ['push', 'origin', `refs/tags/${tag}`];
+  const env = githubProductionTagGitEnvironment(args, token, {});
+  assert.equal(env.GITHUB_TOKEN, undefined);
+  assert.equal(env.GH_TOKEN, undefined);
+  assert.equal(env.GIT_TERMINAL_PROMPT, '0');
+  assert.equal(env.GIT_CONFIG_KEY_0, 'credential.helper');
+  assert.equal(env.GIT_CONFIG_VALUE_0, '');
+  assert.equal(env.GIT_CONFIG_KEY_1, 'http.https://github.com/akhripunov/gpoint.git/.extraheader');
+  assert.equal(env.GIT_CONFIG_VALUE_1, '');
+  assert.match(env.GIT_CONFIG_VALUE_2, /^AUTHORIZATION: basic /);
+  assert.equal(JSON.stringify(env).includes(token), false);
+  const expectedRepo = spawnSync('git', ['config', '--get-urlmatch', 'http.extraheader', 'https://github.com/akhripunov/gpoint.git'], {encoding: 'utf8', env});
+  const siblingRepo = spawnSync('git', ['config', '--get-urlmatch', 'http.extraheader', 'https://github.com/akhripunov/other.git'], {encoding: 'utf8', env});
+  assert.equal(expectedRepo.status, 0);
+  assert.equal(expectedRepo.stdout.trim(), env.GIT_CONFIG_VALUE_2);
+  assert.notEqual(siblingRepo.status, 0);
+  for (const denied of [
+    ['push', 'origin', 'refs/tags/other-tag'],
+    ['push', 'origin', `refs/tags/${tag}`, '--force'],
+    ['push', 'other', `refs/tags/${tag}`],
+    ['push', 'origin', `HEAD:refs/tags/${tag}`],
+  ]) assert.throws(() => githubProductionTagGitEnvironment(denied, token, {}), /not authorized/);
+  assert.throws(() => githubProductionTagGitEnvironment(args, '', {}), /GITHUB_TOKEN is required/);
+});
+
+test('production tag is checked before push; matching target is idempotent', () => {
+  let pushes = 0;
+  const result = pushProductionTag('gpoint-production-20261017T064101334Z', sha, {
+    localLookup: () => sha,
+    lookup: () => sha,
+    push: () => { pushes += 1; },
+  });
+  assert.equal(result, sha);
+  assert.equal(pushes, 0);
+});
+
+test('production tag lookup failure or conflicting target blocks before push', () => {
+  for (const lookup of [() => { throw new Error('remote unavailable'); }, () => '0'.repeat(40)]) {
+    let pushes = 0;
+    assert.throws(() => pushProductionTag('gpoint-production-20261017T064101334Z', sha, {
+      localLookup: () => sha,
+      lookup,
+      push: () => { pushes += 1; },
+    }));
+    assert.equal(pushes, 0);
+  }
+});
+
+test('production tag local ref must peel to the exact candidate before any remote operation', () => {
+  let lookups = 0;
+  let pushes = 0;
+  assert.throws(() => pushProductionTag('gpoint-production-20261017T064101334Z', sha, {
+    localLookup: () => '0'.repeat(40),
+    lookup: () => { lookups += 1; return null; },
+    push: () => { pushes += 1; },
+  }), /local production tag target mismatch/);
+  assert.equal(lookups, 0);
+  assert.equal(pushes, 0);
 });
 
 test('Deploy workflow uses its scoped GITHUB_TOKEN for GHCR and keeps checkout credentials disabled', () => {
@@ -447,62 +510,68 @@ test('tag push retries transient connection loss after confirming remote tag is 
   let pushes = 0;
   const lookups = [];
   const delays = [];
-  const result = pushProductionTag('gpoint-production-test', sha, {
+  const result = pushProductionTag('gpoint-production-20261017T064101334Z', sha, {
+    localLookup: () => sha,
     push: () => { pushes += 1; if (pushes === 1) throw new Error('Connection reset by peer'); },
-    lookup: () => { const value = lookups.length === 0 ? null : sha; lookups.push(value); return value; },
+    lookup: () => { const value = lookups.length < 2 ? null : sha; lookups.push(value); return value; },
     sleep: milliseconds => delays.push(milliseconds),
   });
   assert.equal(result, sha);
   assert.equal(pushes, 2);
-  assert.deepEqual(lookups, [null, sha]);
+  assert.deepEqual(lookups, [null, null, sha]);
   assert.deepEqual(delays, [1_000]);
 });
 
 test('tag push connection loss is treated as success when exact remote tag already exists', () => {
   let pushes = 0;
-  const result = pushProductionTag('gpoint-production-test', sha, {
+  const result = pushProductionTag('gpoint-production-20261017T064101334Z', sha, {
+    localLookup: () => sha,
     push: () => { pushes += 1; throw new Error('Connection closed during push'); },
     lookup: () => sha,
     sleep: () => assert.fail('verified remote tag does not need a retry'),
   });
   assert.equal(result, sha);
-  assert.equal(pushes, 1);
+  assert.equal(pushes, 0);
 });
 
 test('three transient tag push failures stop after remote reconciliation checks', () => {
   let pushes = 0;
   let lookups = 0;
   const delays = [];
-  assert.throws(() => pushProductionTag('gpoint-production-test', sha, {
+  assert.throws(() => pushProductionTag('gpoint-production-20261017T064101334Z', sha, {
+    localLookup: () => sha,
     push: () => { pushes += 1; throw new Error('Connection timed out during banner exchange'); },
     lookup: () => { lookups += 1; return null; },
     sleep: milliseconds => delays.push(milliseconds),
   }), /three bounded transport attempts/);
   assert.equal(pushes, 3);
-  assert.equal(lookups, 3);
+  assert.equal(lookups, 4);
   assert.deepEqual(delays, [1_000, 3_000]);
 });
 
 test('tag push fails closed when an existing remote tag points elsewhere', () => {
   let pushes = 0;
-  assert.throws(() => pushProductionTag('gpoint-production-test', sha, {
+  assert.throws(() => pushProductionTag('gpoint-production-20261017T064101334Z', sha, {
+    localLookup: () => sha,
     push: () => { pushes += 1; throw new Error('Connection closed during push'); },
     lookup: () => '0'.repeat(40),
     sleep: () => assert.fail('wrong remote tag must not be retried'),
   }), /different target/);
-  assert.equal(pushes, 1);
+  assert.equal(pushes, 0);
 });
 
 test('tag push does not retry authentication, host-key, or rejected-push failures', () => {
   for (const [message, expected] of [
     ['Permission denied (publickey)', /authentication failed/],
     ['Host key verification failed', /host-key verification failed/],
+    ['remote: GH013: Repository rule violations found for refs/tags/gpoint-production-20261017T064101334Z', /repository tag policy/],
     ['[rejected] non-fast-forward', /non-transient error/],
   ]) {
     let pushes = 0;
-    assert.throws(() => pushProductionTag('gpoint-production-test', sha, {
+    assert.throws(() => pushProductionTag('gpoint-production-20261017T064101334Z', sha, {
+      localLookup: () => sha,
       push: () => { pushes += 1; throw new Error(message); },
-      lookup: () => assert.fail('non-transient failure must not query/retry'),
+      lookup: () => null,
       sleep: () => assert.fail('non-transient failure must not sleep'),
     }), expected);
     assert.equal(pushes, 1);

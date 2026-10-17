@@ -56,6 +56,26 @@ test('preflight and safe failures never push; transport/persistence errors stay 
   assert.throws(() => loadReleaseBookkeeping({ root: '.', git: () => { throw Error('network unavailable'); }, destination: '/nonexistent-denied-test' }));
 });
 
+test('TASK_SCOPED_AUTO persists post-switch recovery state to the dedicated ledger', t => {
+  const f = fixture(t);
+  const ledger = loadReleaseBookkeeping({ ...f, allowMissing: true, destination: path.join(f.base, 'task-auto') });
+  const name = 'gpoint-release-task-auto.json';
+  fs.writeFileSync(path.join(ledger.manifestDir, name), JSON.stringify({
+    status: 'RECOVERY_REQUIRED', candidateSha: f.candidateSha,
+  }));
+  fs.writeFileSync(ledger.stateFile, JSON.stringify({
+    currentProductionSha: 'a'.repeat(40), recoveryRequired: true, lastReleaseStatus: 'RECOVERY_REQUIRED',
+  }));
+  assert.equal(persistReleaseBookkeeping({
+    mode: 'task-scoped-auto', records: [{ name }],
+    evidence: { status: 'RECOVERY_REQUIRED', candidateSha: f.candidateSha }, ...f, ...ledger,
+  }), 'PERSISTED_TO_LEDGER');
+  const reloaded = loadReleaseBookkeeping({ ...f, destination: path.join(f.base, 'task-auto-reloaded') });
+  assert.equal(JSON.parse(fs.readFileSync(reloaded.stateFile)).recoveryRequired, true);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(reloaded.manifestDir, name))).candidateSha, f.candidateSha);
+  assert.equal(f.git(['status', '--porcelain']), '');
+});
+
 test('a conflicting writer cannot overwrite remote ledger', t => {
   const f = fixture(t), ledger = loadReleaseBookkeeping({ ...f, allowMissing: true, destination: path.join(f.base, 'evidence') });
   const name = 'gpoint-release-test.json'; fs.writeFileSync(path.join(ledger.manifestDir, name), '{}');

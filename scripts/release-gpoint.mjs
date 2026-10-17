@@ -122,6 +122,32 @@ export function githubSourceGitEnvironment(args, token, baseEnv = process.env) {
   return env;
 }
 
+/** Attach ephemeral Actions credentials only to a single, exact production-tag push. */
+export function githubProductionTagGitEnvironment(args, token, baseEnv = process.env) {
+  const env = {...baseEnv};
+  delete env.GITHUB_TOKEN;
+  delete env.GH_TOKEN;
+  env.GIT_TERMINAL_PROMPT = '0';
+  const exactProductionTagPush = args.length === 3 && args[0] === 'push' && args[1] === 'origin'
+    && /^refs\/tags\/gpoint-production-\d{8}T\d{9}Z$/.test(args[2] ?? '');
+  const touchesProductionRefs = args.some(value => typeof value === 'string' && value.includes('refs/tags/'));
+  if (!exactProductionTagPush) {
+    if (touchesProductionRefs) throw new Error('GitHub production tag Git operation is not authorized');
+    return env;
+  }
+  if (!token) throw new Error('GITHUB_TOKEN is required for production tag Git access');
+  const offset = Number(env.GIT_CONFIG_COUNT ?? 0);
+  if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('Invalid inherited Git config count');
+  env.GIT_CONFIG_COUNT = String(offset + 3);
+  env[`GIT_CONFIG_KEY_${offset}`] = 'credential.helper';
+  env[`GIT_CONFIG_VALUE_${offset}`] = '';
+  env[`GIT_CONFIG_KEY_${offset + 1}`] = 'http.https://github.com/akhripunov/gpoint.git/.extraheader';
+  env[`GIT_CONFIG_VALUE_${offset + 1}`] = '';
+  env[`GIT_CONFIG_KEY_${offset + 2}`] = 'http.https://github.com/akhripunov/gpoint.git/.extraheader';
+  env[`GIT_CONFIG_VALUE_${offset + 2}`] = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`;
+  return env;
+}
+
 const ledgerGit = (args, input) => execFileSync('git', args, { cwd: ROOT, input, encoding: 'utf8', timeout: 30_000,
   env: githubLedgerGitEnvironment(args, process.env.GITHUB_TOKEN) }).trim();
 function recheckTaskAuthorizationBeforeMutation(candidateSha, boundary) {
@@ -595,8 +621,19 @@ export function pushProductionTag(tag, candidate, { push = () => execFileSync('g
   stdio: ['ignore', 'pipe', 'pipe'],
   timeout: GITHUB_REMOTE_TIMEOUT_MS,
   maxBuffer: 8 * 1024 * 1024,
-  env: githubTransportEnv(),
-}), lookup = remoteTagTarget, sleep } = {}) {
+  env: githubProductionTagGitEnvironment(['push', 'origin', `refs/tags/${tag}`], process.env.GITHUB_TOKEN, githubTransportEnv()),
+}), lookup = remoteTagTarget, localLookup = tagName => git(['rev-parse', '--verify', `refs/tags/${tagName}^{}`]), sleep } = {}) {
+  if (!/^gpoint-production-\d{8}T\d{9}Z$/.test(tag) || !SHA_RE.test(candidate ?? ''))
+    die('production tag identity is invalid');
+  let localTarget;
+  try { localTarget = localLookup(tag); }
+  catch { die('local production tag could not be verified before push'); }
+  if (localTarget !== candidate) die(`local production tag target mismatch: ${tag}`);
+  let initialTarget;
+  try { initialTarget = lookup(tag); }
+  catch { die('production tag could not be checked before push'); }
+  if (initialTarget === candidate) return initialTarget;
+  if (initialTarget !== null) die(`production tag already exists with a different target: ${tag}`);
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
       push(attempt);
@@ -605,11 +642,14 @@ export function pushProductionTag(tag, candidate, { push = () => execFileSync('g
       return target;
     } catch (error) {
       if (!isTransientGitHubTransportFailure(error)) {
-        die(/permission denied|publickey|authentication failed/i.test(errorText(error))
-          ? 'GitHub production tag push authentication failed; refusing retry'
-          : /host key verification failed/i.test(errorText(error))
-            ? 'GitHub production tag push host-key verification failed; refusing retry'
-            : 'GitHub production tag push failed on a non-transient error; refusing retry');
+        const failureText = errorText(error);
+        if (/GH013|repository rule violations|protected tag|tag is protected|pre-receive hook declined/i.test(failureText))
+          die('GitHub production tag push was rejected by repository tag policy; refusing retry');
+        if (/permission denied|publickey|authentication failed|resource not accessible by integration|(?:http|status)[ =:]*(?:401|403)/i.test(failureText))
+          die('GitHub production tag push authentication failed or write permission denied; refusing retry');
+        if (/host key verification failed/i.test(failureText))
+          die('GitHub production tag push host-key verification failed; refusing retry');
+        die('GitHub production tag push failed on a non-transient error; refusing retry');
       }
       // A failed push can have reached GitHub; always reconcile before any retry.
       let existing;

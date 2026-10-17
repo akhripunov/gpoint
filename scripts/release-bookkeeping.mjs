@@ -44,7 +44,7 @@ export function loadReleaseBookkeeping({ root, git, allowMissing = false, destin
 }
 
 export function persistReleaseBookkeeping({ mode, records, evidence, git, stateFile, manifestDir }) {
-  if (mode !== 'production' || !records.length) return 'NOT_REQUIRED';
+  if (!['production', 'task-scoped-auto'].includes(mode) || !records.length) return 'NOT_REQUIRED';
   if (['BLOCKED', 'FAILED_PRE_SWITCH'].includes(evidence.status)) return 'ARTIFACT_AND_LINEAR_ONLY';
   if (!stateFile || !manifestDir) throw new Error('External release evidence paths are required');
   if (!SHA.test(evidence.candidateSha ?? '') || records.some(r => !MANIFEST.test(r.name))) throw new Error('Invalid release ledger evidence');

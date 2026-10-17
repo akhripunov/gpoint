@@ -1,8 +1,11 @@
 import importlib.util
 from pathlib import Path
 import sys
+import socket
+import ssl
 import unittest
 import tempfile
+import urllib.error
 from unittest.mock import patch
 import base64
 import json
@@ -25,6 +28,34 @@ TELEMETRY = load('release_telemetry', 'release-telemetry.py')
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_github_json_reports_safe_urlerror_category_without_raw_details(self):
+        token = 'private-token-value'
+        failures = [
+            (urllib.error.URLError(TimeoutError('secret-host timeout')), 'timeout'),
+            (urllib.error.URLError(socket.gaierror('secret-host lookup failed')), 'dns'),
+            (urllib.error.URLError(ssl.SSLError('secret-host tls failed')), 'tls'),
+            (urllib.error.URLError(OSError('secret-host connection failed')), 'connection'),
+        ]
+        for failure, category in failures:
+            with self.subTest(category=category), patch.object(SYNC.urllib.request, 'urlopen', side_effect=failure):
+                with self.assertRaises(SYNC.SyncError) as raised:
+                    SYNC.github_json('repos/akhripunov/gpoint/commits/main', token=token)
+            self.assertEqual(getattr(raised.exception, 'network_category', None), category)
+            self.assertEqual(getattr(raised.exception, 'reason_type', None), type(failure.reason).__name__)
+            self.assertNotIn(token, str(raised.exception))
+            self.assertNotIn('secret-host', str(raised.exception))
+
+    def test_github_json_preserves_http_status_as_safe_category(self):
+        failure = urllib.error.HTTPError('https://private.invalid/path', 403, 'secret response', {}, None)
+        with patch.object(SYNC.urllib.request, 'urlopen', side_effect=failure):
+            with self.assertRaises(SYNC.SyncError) as raised:
+                SYNC.github_json('repos/akhripunov/gpoint/commits/main', token='private-token')
+        self.assertEqual(raised.exception.http_status, 403)
+        self.assertEqual(raised.exception.network_category, 'http_status')
+        self.assertIn('http_status_403', str(raised.exception))
+        self.assertNotIn('private.invalid', str(raised.exception))
+        self.assertNotIn('secret response', str(raised.exception))
+
     def test_handoff_preserves_architect_context_and_replaces_only_owned_section(self):
         source = '# Architect\n\nImportant constraints\n'
         first = SYNC.replace_section(source, 'кандидат', 'READY')
