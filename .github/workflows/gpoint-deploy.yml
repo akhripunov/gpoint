@@ -169,6 +169,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
+          RECOVERY_FAILURE_RUN_ID: ${{ inputs.recovery_failure_run_id }}
+          RECOVERY_FAILURE_RUN_ATTEMPT: ${{ inputs.recovery_failure_run_attempt }}
+          RECOVERY_DB_RISK_ACCEPTED: ${{ inputs.recovery_db_risk_accepted }}
+          RECOVERY_DB_RISK_BASELINE_SHA: ${{ inputs.recovery_db_risk_baseline_sha }}
+          RECOVERY_DB_RISK_DECISION_ID: ${{ inputs.recovery_db_risk_decision_id }}
+          CREATE_RECOVERY_BACKUP: ${{ inputs.create_recovery_backup }}
         run: python3 scripts/select-release-run.py
       - name: Restore or download the verified immutable artifact
         id: cache

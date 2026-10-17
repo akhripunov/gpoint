@@ -121,6 +121,35 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn('actions: read', workflow)
         self.assertIn('persist-credentials: false', publish)
 
+    def test_both_deploy_selectors_receive_every_recovery_authorization_input(self):
+        workflow = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()
+        selector_steps = {
+            'Verify operator confirmation, current main and successful preparation': 'validate',
+            'Recheck current main and Prepare provenance on the Mac': 'deploy',
+        }
+        required_inputs = {
+            'RECOVERY_FAILURE_RUN_ID': 'recovery_failure_run_id',
+            'RECOVERY_FAILURE_RUN_ATTEMPT': 'recovery_failure_run_attempt',
+            'RECOVERY_DB_RISK_ACCEPTED': 'recovery_db_risk_accepted',
+            'RECOVERY_DB_RISK_BASELINE_SHA': 'recovery_db_risk_baseline_sha',
+            'RECOVERY_DB_RISK_DECISION_ID': 'recovery_db_risk_decision_id',
+            'CREATE_RECOVERY_BACKUP': 'create_recovery_backup',
+        }
+
+        for step_name, job_name in selector_steps.items():
+            with self.subTest(step=step_name):
+                start = workflow.index(f'      - name: {step_name}\n')
+                next_step = workflow.find('\n      - name:', start + 1)
+                block = workflow[start:next_step if next_step >= 0 else None]
+                self.assertIn('run: python' + ('3' if job_name == 'deploy' else '') + ' scripts/select-release-run.py', block)
+                environment = block.split('\n        env:\n', 1)[1].split('\n        run:', 1)[0]
+                for variable, input_name in required_inputs.items():
+                    self.assertIn(
+                        f'          {variable}: ${{{{ inputs.{input_name} }}}}',
+                        environment,
+                        f'{job_name} selector is missing {variable} from canonical input {input_name}',
+                    )
+
     def test_linear_maintenance_jobs_run_on_mac_with_source_provenance(self):
         reconcile = (ROOT / '.github/workflows/gpoint-linear-reconcile.yml').read_text()
         agents = (ROOT / '.github/workflows/sync-agents-to-linear.yml').read_text()
