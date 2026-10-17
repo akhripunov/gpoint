@@ -12,6 +12,7 @@ import { candidateAgataMigrationHead, candidatePrismaMigrationHead, githubLedger
 import { assertInstalledWorkerMatches } from './worker-runtime-guard.mjs';
 import { verifyOciReadAccess } from './release-oci.mjs';
 import { recoveryEvidenceFromReadback, withPreflightEvidence } from './release-evidence.mjs';
+import { createRecoveryActiveDeploysFile } from './recovery-active-deploys.mjs';
 import { AuthorizationError, authorizationRecordPath, candidateScopeDiff,
   checkTaskAuthorizationState, consumeTaskAuthorization, validateTaskAuthorization,
   assertNoTaskScopedMigrations } from './release-authorization.mjs';
@@ -86,7 +87,6 @@ if (mode === 'recovery-diagnostics') {
   }
   if (totalCount === null || runs.length !== totalCount) throw new Error('GitHub active Deploy inventory is incomplete');
   recoveryActiveDeploys = {workflow_runs: runs, total_count: totalCount};
-  process.env.GPOINT_RECOVERY_ACTIVE_DEPLOYS = JSON.stringify(recoveryActiveDeploys);
 }
 const workerRoot = path.join(os.homedir(), 'Library/Application Support/GPoint/agata-codex-worker/runtime/current');
 const workerAssets = ['gpoint_mac_worker.py', 'agata_worker_pool.py', 'lab_queue.py', 'lab_fixture_manifest.json', 'requirements.txt', 'run_codex_worker.sh'];
@@ -110,9 +110,20 @@ let preflightStatus = 'BLOCKED';
 try {
   if (mode === 'recovery-diagnostics') {
     // This branch has no Apply, migration, rollback, tag, or ledger writer.
-    const result = spawnSync('pnpm', ['release:gpoint', '--recovery-diagnostics', '--candidate', sha], {
-      cwd: root, env: {...process.env, GPOINT_RELEASE_SKIP_BUILD: '1'}, stdio: 'inherit', timeout: 1_800_000,
-    });
+    if (!recoveryActiveDeploys) throw new Error('Complete GitHub active Deploy inventory is required for recovery diagnostics');
+    const inventoryFile = createRecoveryActiveDeploysFile(recoveryActiveDeploys);
+    let result;
+    try {
+      const childEnv = {...process.env, GPOINT_RELEASE_SKIP_BUILD: '1',
+        GPOINT_RECOVERY_ACTIVE_DEPLOYS_FILE: inventoryFile.filePath};
+      delete childEnv.GPOINT_RECOVERY_ACTIVE_DEPLOYS;
+      console.log(`RECOVERY_ACTIVE_DEPLOYS_BYTES=${inventoryFile.byteLength}`);
+      result = spawnSync('pnpm', ['release:gpoint', '--recovery-diagnostics', '--candidate', sha], {
+        cwd: root, env: childEnv, stdio: 'inherit', timeout: 1_800_000,
+      });
+    } finally {
+      inventoryFile.cleanup();
+    }
     releaseCode = result.status ?? 1;
     preflightStatus = 'NOT_APPLICABLE';
   } else if (mode === 'recovery-finalization') {
