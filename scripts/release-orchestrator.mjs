@@ -177,16 +177,18 @@ export async function dispatchPrepare(payload, api, orchestratorRunId = process.
     throw new OrchestrationError('A GPoint Deploy workflow is active');
   }
   const ref = taskAutoClaimRef(authorization.authorizationId);
+  let claimCreated = false;
+  let previousClaimSha = '';
   try {
     await api('POST', 'git/refs', {ref, sha});
+    claimCreated = true;
   } catch (error) {
     if (error.status !== 422) throw new OrchestrationError('Atomic task-scoped Deploy claim failed');
     const existing = await api('GET', `git/ref/tags/${ref.replace('refs/tags/', '')}`);
-    if (existing.object?.type !== 'commit' || existing.object?.sha !== sha) {
+    if (existing.object?.type !== 'commit' || !SHA.test(existing.object?.sha ?? '')) {
       throw new OrchestrationError('Existing task-scoped authorization claim is invalid');
     }
-    return {state: 'TASK_SCOPED_AUTO_ALREADY_CLAIMED', candidateSha: existing.object.sha,
-      authorizationId: authorization.authorizationId};
+    previousClaimSha = existing.object.sha;
   }
   try {
     await api('POST', `actions/workflows/${DEPLOY_PATH.split('/').at(-1)}/dispatches`, {ref: 'main', inputs: {
@@ -195,11 +197,12 @@ export async function dispatchPrepare(payload, api, orchestratorRunId = process.
       orchestrator_run_id: orchestratorRunId, task_authorization_id: authorization.authorizationId,
     }});
   } catch {
-    throw new OrchestrationError('Task-scoped Deploy dispatch failed after durable claim; reconcile before any retry');
+    throw new OrchestrationError('Task-scoped Deploy dispatch result is unknown; confirm workflow and production state before retry');
   }
-  return {state: 'TASK_SCOPED_AUTO_DISPATCHED', candidateSha: sha,
+  return {state: claimCreated ? 'TASK_SCOPED_AUTO_DISPATCHED' : 'TASK_SCOPED_AUTO_RETRY_DISPATCHED', candidateSha: sha,
     prepareRunId: String(run.id), prepareRunAttempt: String(sourceAttempt),
-    authorizationId: authorization.authorizationId};
+    authorizationId: authorization.authorizationId,
+    ...(previousClaimSha ? {previousClaimSha} : {})};
 }
 
 async function main() {
@@ -208,7 +211,7 @@ async function main() {
   const api = makeApi(process.env.GITHUB_TOKEN);
   const result = await dispatchPrepare(payload, api);
   const elapsed = Math.round((performance.now() - started) / 1000);
-  fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## GPoint automatic release orchestration\n\n- State: \`${result.state}\`\n- Candidate: \`${result.candidateSha}\`\n- Authorization: \`${result.authorizationId ?? result.taskAuthorizationId ?? 'EXACT_SHA_REQUIRED'}\`\n- Controller job: \`SELF_HOSTED_REQUIRED\`, trusted project runner; measured controller seconds: \`${elapsed}\`\n- \`SELF_HOSTED_JOB_COUNT=1\`; \`SELF_HOSTED_RUNNER_SECONDS=${elapsed}\` (controller only)\n`);
+  fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## GPoint automatic release orchestration\n\n- State: \`${result.state}\`\n- Candidate: \`${result.candidateSha}\`\n- Previous authorization claim SHA: \`${result.previousClaimSha ?? 'NONE'}\`\n- Authorization: \`${result.authorizationId ?? result.taskAuthorizationId ?? 'EXACT_SHA_REQUIRED'}\`\n- Controller job: \`SELF_HOSTED_REQUIRED\`, trusted project runner; measured controller seconds: \`${elapsed}\`\n- \`SELF_HOSTED_JOB_COUNT=1\`; \`SELF_HOSTED_RUNNER_SECONDS=${elapsed}\` (controller only)\n`);
   console.log(JSON.stringify(result));
 }
 

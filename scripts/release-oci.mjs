@@ -1,5 +1,6 @@
 const SHA40 = /^[a-f0-9]{40}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
+const GHCR_USERNAME = /^[A-Za-z0-9-]{1,39}(?:\[bot\])?$/;
 const IMAGE_REPOSITORIES = Object.freeze({
   app: 'ghcr.io/akhripunov/gpoint-runtime',
   agata: 'ghcr.io/akhripunov/gpoint-agata-runtime',
@@ -29,7 +30,7 @@ export function validateOciReceipt(receipt, candidate, { runId, runAttempt } = {
 }
 
 export async function verifyOciReadAccess(receipt, username, token, fetcher = fetch) {
-  if (!/^[A-Za-z0-9-]{1,39}$/.test(username ?? '') || typeof token !== 'string' || !token.trim()) {
+  if (!GHCR_USERNAME.test(username ?? '') || typeof token !== 'string' || !token.trim()) {
     fail('GHCR exact-digest read check failed');
   }
   if (receipt?.schema !== 3 || receipt?.transport !== 'ghcr-oci') fail('GHCR exact-digest read check failed');
@@ -93,7 +94,7 @@ export function createOciPullScript(receipt, candidate, { username = 'akhripunov
   if (!SHA40.test(candidate ?? '') || receipt?.candidateSha !== candidate || receipt?.schema !== 3) {
     fail('OCI pull candidate mismatch');
   }
-  if (!/^[A-Za-z0-9-]{1,39}$/.test(username)) fail('GHCR username is invalid');
+  if (!GHCR_USERNAME.test(username)) fail('GHCR username is invalid');
   const lines = [
     'set -eu',
     'set +x',

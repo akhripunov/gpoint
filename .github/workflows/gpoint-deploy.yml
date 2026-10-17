@@ -9,7 +9,7 @@ on:
         required: true
         type: string
       mode:
-        description: 'preflight is optional read-only diagnostics; production uses exact-SHA approval; task-scoped-auto requires durable one-shot owner record and runs preflight before apply'
+        description: 'preflight is optional read-only diagnostics; production uses exact-SHA approval; task-scoped-auto reuses active task authorization for in-scope retries and runs preflight before apply'
         required: true
         default: preflight
         type: choice
@@ -148,7 +148,7 @@ jobs:
           IMAGE_TRANSPORT: ${{ inputs.image_transport }}
           TASK_AUTHORIZATION_ID: ${{ needs.validate.outputs.task_authorization_id }}
           GITHUB_TOKEN: ${{ github.token }}
-          GHCR_READ_USERNAME: akhripunov
+          GHCR_READ_USERNAME: ${{ github.actor }}
           GHCR_READ_TOKEN: ${{ github.token }}
         run: node scripts/automated-release.mjs
       - name: Preserve release result and canonical manifests as immutable evidence

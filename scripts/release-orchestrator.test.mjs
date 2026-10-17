@@ -11,20 +11,20 @@ const sha = 'a'.repeat(40);
 const event = (change = {}) => ({repository:{full_name:'akhripunov/gpoint'}, workflow_run:{id:123,run_attempt:2,
   head_sha:sha,head_branch:'main',status:'completed',conclusion:'success',event:'push',path:'.github/workflows/gpoint-prepare.yml',...change}});
 
-function apiFixture() {
-  const calls=[]; let claimed=false;
+function apiFixture({candidateSha = sha, existingClaimSha = null} = {}) {
+  const calls=[]; let claimed=existingClaimSha !== null;
   const api=async(method,path,body)=>{
     calls.push({method,path,body});
-    if(path==='git/ref/heads/main') return {object:{sha}};
-    if(path==='actions/runs/123') return event().workflow_run;
+    if(path==='git/ref/heads/main') return {object:{sha:candidateSha}};
+    if(path==='actions/runs/123') return event({head_sha:candidateSha}).workflow_run;
     if(path==='actions/runs/123/attempts/2') return {run_attempt:2,run_started_at:'2026-10-14T04:51:39Z'};
     if(path==='actions/runs/123/attempts/1') return {run_attempt:1,run_started_at:'2026-10-14T04:38:31Z'};
-    if(path==='actions/runs/123/attempts/2/jobs?per_page=100') return {total_count:1,jobs:[{name:'prepare',status:'completed',conclusion:'success',head_sha:sha,started_at:'2026-10-14T04:51:40Z',completed_at:'2026-10-14T04:52:20Z'}]};
-    if(path==='actions/runs/123/attempts/1/jobs?per_page=100') return {total_count:1,jobs:[{name:'prepare',status:'completed',conclusion:'success',head_sha:sha,started_at:'2026-10-14T04:38:34Z',completed_at:'2026-10-14T04:46:48Z'}]};
+    if(path==='actions/runs/123/attempts/2/jobs?per_page=100') return {total_count:1,jobs:[{name:'prepare',status:'completed',conclusion:'success',head_sha:candidateSha,started_at:'2026-10-14T04:51:40Z',completed_at:'2026-10-14T04:52:20Z'}]};
+    if(path==='actions/runs/123/attempts/1/jobs?per_page=100') return {total_count:1,jobs:[{name:'prepare',status:'completed',conclusion:'success',head_sha:candidateSha,started_at:'2026-10-14T04:38:34Z',completed_at:'2026-10-14T04:46:48Z'}]};
     if(path.startsWith('releases/tags/')) return {tag_name:path.split('/').at(-1),draft:false,immutable:true,assets:[{id:456,name:'bundle.zip',state:'uploaded',size:100,digest:`sha256:${'b'.repeat(64)}`}]};
-    if(path.startsWith('git/ref/tags/gpoint-prepare-')) return {object:{type:'commit',sha}};
+    if(path.startsWith('git/ref/tags/gpoint-prepare-')) return {object:{type:'commit',sha:candidateSha}};
     if(path.includes('actions/workflows/gpoint-deploy.yml/runs')) return {workflow_runs:[]};
-    if(path.startsWith('git/ref/tags/gpoint-task-auth/')) { if(claimed)return {object:{type:'commit',sha}}; const e=new OrchestrationError('missing');e.status=404;throw e; }
+    if(path.startsWith('git/ref/tags/gpoint-task-auth/')) { if(claimed)return {object:{type:'commit',sha:existingClaimSha ?? candidateSha}}; const e=new OrchestrationError('missing');e.status=404;throw e; }
     if(path==='git/refs') {if(claimed){const e=new OrchestrationError('duplicate');e.status=422;throw e;} claimed=true;return {};}
     if(path.endsWith('/dispatches')) return {};
     throw new Error(`Unexpected ${method} ${path}`);
@@ -63,23 +63,46 @@ test('Prepare with one full-cycle authorization claims once and dispatches the e
   assert.deepEqual(dispatch.body,{ref:'main',inputs:{candidate:sha,mode:'task-scoped-auto',approve_production:'false',
     prepare_run_id:'123',prepare_run_attempt:'2',orchestrator_run_id:'987',task_authorization_id:authorizationId}});
 });
-test('duplicate Prepare events cannot dispatch twice under one authorization',async()=>{
-  const {api,calls}=apiFixture(); const authorizationId='gpoint-task-2026-10-16-001';
-  const lookup=async()=>({authorizationId,ambiguous:false});
-  const first=await dispatchPrepare(event(),api,'987',process.cwd(),lookup);
-  const second=await dispatchPrepare(event(),api,'988',process.cwd(),lookup);
-  assert.equal(first.state,'TASK_SCOPED_AUTO_DISPATCHED');
-  assert.equal(second.state,'TASK_SCOPED_AUTO_ALREADY_CLAIMED');
+test('an existing task claim allows a fresh exact-main Prepare candidate to retry within the same authorization',async()=>{
+  const newSha='c'.repeat(40); const oldSha='b'.repeat(40);
+  const {api,calls}=apiFixture({candidateSha:newSha,existingClaimSha:oldSha});
+  const authorizationId='gpoint-task-2026-10-16-001';
+  const result=await dispatchPrepare(event({head_sha:newSha}),api,'987',process.cwd(),async()=>({authorizationId,ambiguous:false}));
+  assert.equal(result.state,'TASK_SCOPED_AUTO_RETRY_DISPATCHED');
+  assert.equal(result.candidateSha,newSha);
+  assert.equal(calls.filter(item=>item.path==='git/refs').length,1,
+    'the immutable first claim is preserved and never rewritten');
+  const dispatch=calls.find(item=>item.path.endsWith('/dispatches'));
+  assert.equal(dispatch.body.inputs.candidate,newSha);
+});
+
+test('the same immutable successful Prepare can retry after a failed Deploy has ended',async()=>{
+  const {api,calls}=apiFixture({candidateSha:sha,existingClaimSha:sha});
+  const authorizationId='gpoint-task-2026-10-16-001';
+  const result=await dispatchPrepare(event(),api,'989',process.cwd(),async()=>({authorizationId,ambiguous:false}));
+  assert.equal(result.state,'TASK_SCOPED_AUTO_RETRY_DISPATCHED');
+  assert.equal(result.candidateSha,sha);
+  assert.equal(result.prepareRunId,'123');
+  assert.equal(result.prepareRunAttempt,'2');
   assert.equal(calls.filter(item=>item.path.endsWith('/dispatches')).length,1);
 });
-test('an existing authorization claim for a different SHA blocks instead of counting as a duplicate',async()=>{
-  const {api}=apiFixture(); const authorizationId='gpoint-task-2026-10-16-001'; let claimed=true;
-  const wrapped=async(method,route,body)=>{
-    if(method==='POST'&&route==='git/refs'){const error=new OrchestrationError('already claimed');error.status=422;throw error;}
-    if(method==='GET'&&route.endsWith('/claimed'))return {object:{type:'commit',sha:'c'.repeat(40)}};
-    return api(method,route,body);
+
+test('duplicate Prepare event is blocked while a Deploy is active',async()=>{
+  const {api,calls}=apiFixture(); const authorizationId='gpoint-task-2026-10-16-001';
+  const lookup=async()=>({authorizationId,ambiguous:false});
+  let deployActive=false;
+  const activeApi=async(method,route,body)=>{
+    if(route.includes('actions/workflows/gpoint-deploy.yml/runs'))
+      return {workflow_runs:deployActive?[{status:'in_progress'}]:[]};
+    const result=await api(method,route,body);
+    if(route.endsWith('/dispatches')) deployActive=true;
+    return result;
   };
-  await assert.rejects(dispatchPrepare(event(),wrapped,'987',process.cwd(),async()=>({authorizationId,ambiguous:false})),OrchestrationError);
+  const first=await dispatchPrepare(event(),activeApi,'987',process.cwd(),lookup);
+  assert.equal(first.state,'TASK_SCOPED_AUTO_DISPATCHED');
+  assert.equal(calls.filter(item=>item.path.endsWith('/dispatches')).length,1);
+  await assert.rejects(dispatchPrepare(event(),activeApi,'988',process.cwd(),lookup),/Deploy workflow is active/);
+  assert.equal(calls.filter(item=>item.path.endsWith('/dispatches')).length,1);
 });
 test('publish-only rerun uses earlier real Prepare job and exact immutable bundle',async()=>{
   const {api,calls}=apiFixture();

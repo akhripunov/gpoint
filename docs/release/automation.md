@@ -4,15 +4,18 @@
 
 Актуальные условия: [Release authorization modes](../RELEASE_AUTHORIZATION.md).
 OWNER task, прямо разрешающее полный выпуск подготовленных изменений до
-production, является одноразовой авторизацией на штатный цикл в границах
-scope и перечисленных рисков. Финальный SHA определяется после интеграции. До
-изменений фиксируется schema-v3 durable authorization record. Разработка без
-поручения о выпуске не разрешает Deploy. После exact-SHA Prepare controller
-повторно проверяет baseline, полный scope и одноразовость, атомарно claim-ит
-authorization и вызывает тот же Deploy workflow в `task-scoped-auto` режиме,
-без промежуточного запроса OWNER. Read-only preflight проходит внутри Deploy
-перед Apply. Критичные категории допускаются только при явном risk contract в
-исходном OWNER release task и durable record; без контракта выпуск блокируется.
+production, авторизует штатные попытки в границах одного scope, production
+baseline и перечисленных рисков. Финальный SHA определяется после интеграции.
+До изменений фиксируется schema-v3 durable authorization record. Разработка
+без поручения о выпуске не разрешает Deploy. После exact-SHA Prepare controller
+повторно проверяет baseline и полный scope и вызывает тот же Deploy workflow в
+`task-scoped-auto` режиме. Неудачная попытка не требует нового OWNER approval:
+можно повторно использовать действительный immutable Prepare для того же
+exact SHA либо выполнить новую Prepare для replacement SHA в том же scope.
+Read-only preflight проходит внутри Deploy перед Apply; изменившийся baseline,
+recovery state, отозванная/использованная авторизация или неизвестное состояние
+блокируют Apply. Критичные категории допускаются только при явном risk contract
+в исходном OWNER release task и durable record; без контракта выпуск блокируется.
 Runner может штатно ждать в GitHub `Queued`; readiness check остаётся
 fail-closed.
 Подробности: [Release authorization modes](../RELEASE_AUTHORIZATION.md).
@@ -21,8 +24,8 @@ fail-closed.
 
 1. Архитектор задаёт изменения и критерии приёмки. Dev реализует их и отправляет чистый commit в `origin/main`.
 2. После успешного exact-SHA Prepare и immutable bundle controller перепроверяет текущий SHA, provenance и отсутствие активного Deploy. Для задачи без действующей full-cycle authorization он не запускает production. OWNER применяет обычное exact-SHA approval через тот же Deploy workflow; отдельный диагностический preflight можно запустить вручную.
-3. Для заранее зарегистрированной schema-v3 авторизации полного production-цикла controller повторно проверяет scope/baseline/risk и атомарно claim-ит её. Затем он сразу вызывает существующий production Deploy в `task-scoped-auto`; дополнительное READY и второе подтверждение не требуются.
-4. Deploy валидирует Prepare artifact и authorization, затем внутри того же run проводит полноценный read-only preflight до Apply. Под release lock критичные live conditions проверяются снова перед первой mutation. Любой drift, неизвестный риск, провал preflight, повторный/активный Deploy или неопределённый исход останавливает автоматизацию; после частичного применения требуется reconciliation, а не слепой повтор.
+3. Для заранее зарегистрированной schema-v3 авторизации полного production-цикла controller повторно проверяет scope/baseline/risk и сохраняет первоначальный immutable claim. Затем он вызывает существующий production Deploy в `task-scoped-auto`; дополнительное READY и второе подтверждение не требуются. После известной неудачи допустим повторный dispatch того же действительного immutable Prepare либо нового Prepare для replacement SHA в том же scope.
+4. Deploy валидирует Prepare artifact и authorization, затем внутри того же run проводит полноценный read-only preflight до Apply. Под release lock критичные live conditions проверяются снова перед первой mutation. Любой scope/baseline drift, неизвестный риск, провал preflight, recovery state или неопределённый исход останавливают автоматизацию. Успешный выпуск отмечает authorization consumed; неизвестный результат не повторяется вслепую.
 5. Existing canonical workflow продолжает Deploy, verification, evidence и Linear publication. Mac должен быть включён, иметь сеть, активную CLI authentication и работающий GPoint runner. Incy остаётся включённым. Если runner недоступен, run останется Queued и не считается завершённым.
 6. После технического COMPLETE откройте Telegram → GPoint → Models Hub. Отправьте новое сообщение и дождитесь ответа. Сообщите Dev «ответ получил» или «ответа нет». Dev фиксирует подтверждение сценария в журнале; автоматизация не создаёт тестовые production-диалоги от вашего имени.
 
@@ -48,7 +51,7 @@ Runner telemetry считает wall-clock seconds отдельно для GitHu
 | RECOVERY_REQUIRED | Могли измениться БД/AGATA/runtime; сначала read-only reconciliation, потом отдельное восстановление |
 | Красный Publish Linear / bookkeeping | Не считать приложение автоматически упавшим. Сверить canonical manifest, live runtime и результат выкладки; восстановить публикацию/запись отдельно |
 
-Новый SHA требует нового Prepare; в Exact-SHA режиме — нового разрешения. В Task-scoped режиме применяются ограничения Release authorization modes. Устаревший кандидат, проваленный/незавершённый последний Prepare, отсутствующий/истёкший artifact или неверный checksum блокируют Deploy. Артефакты хранятся семь дней: после истечения повторно запустите Prepare для текущего main. Автоматический rollback БД не выполняется.
+Новый SHA требует нового Prepare; в Exact-SHA режиме — нового разрешения. В Task-scoped режиме применяются ограничения Release authorization modes. Устаревший кандидат, проваленный/незавершённый Prepare, отсутствующий/истёкший artifact или неверный checksum блокируют Deploy. Для повтора того же exact SHA можно использовать успешный Prepare, пока immutable artifact действителен; после истечения срока снова выполните Prepare для текущего main. Автоматический rollback БД не выполняется.
 
 ## Что выполняется автоматически
 

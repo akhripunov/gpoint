@@ -2,7 +2,7 @@
 
 Effective 2026-10-06 by explicit OWNER decision; applies to future releases.
 
-## OWNER release task authorization (one-shot)
+## OWNER release task authorization (task-scoped)
 
 An OWNER task that explicitly requests release of prepared changes through
 production authorizes the complete canonical release cycle for the named
@@ -12,6 +12,10 @@ acceptance gates, stop conditions and risk contracts in a durable
 `.release-authorizations/<id>.json` record before implementation changes. The
 exact candidate is derived from the reviewed integration and must remain within
 that recorded scope. A development-only task does not authorize production.
+The authorization covers technical retries and replacement SHAs that remain
+inside the same scope and production baseline. A new OWNER instruction is
+required only for scope, environment, risk, or baseline changes outside that
+task.
 
 Once that record is validated, no second OWNER approval is required at PR,
 merge, Prepare, preflight or Deploy for the same scope. GitHub Actions remains
@@ -83,19 +87,27 @@ with the implementation. Before apply, compare the full baseline-to-candidate
 diff. Unrelated unreleased changes invalidate authorization.
 
 After the exact current-main candidate passes Prepare, the existing project
-controller rechecks the complete scope and production baseline, creates an
-atomic claim for the authorization, and dispatches the existing Deploy
+controller rechecks the complete scope and production baseline, creates the
+initial immutable claim when needed, and dispatches the existing Deploy
 workflow directly in `task-scoped-auto` mode with its exact-SHA approval input
-set to false. That Deploy performs the read-only preflight immediately before
-apply and rechecks critical live conditions under the release lock. No separate
-preflight workflow is required. Without an eligible authorization the
-controller does not dispatch Deploy; the normal exact-SHA approval path remains.
-A single claim per authorization prevents duplicate events from racing into
-multiple Deploys.
+set to false. The claim records the first authorized attempt and is never
+rewritten. After a failed attempt, an immutable successful Prepare for an
+exact-current-main candidate may be dispatched again, or a new Prepare may be
+used for a replacement candidate, when the full candidate diff remains in
+scope. The controller will not dispatch while a Deploy is queued or running.
+Deploy rechecks the active claim and current candidate scope, then performs a
+fresh read-only production preflight under the release lock before Apply. A
+changed production baseline, recovery state, revoked/consumed authorization,
+or unknown result blocks Apply. No separate preflight workflow is required.
+Without an eligible authorization the controller does not dispatch Deploy;
+the normal exact-SHA approval path remains.
+
 The authorization is consumed after successful runtime completion using a
-durable one-shot marker. A lost dispatch or marker-write response is
-reconciled; no blind Deploy retry is performed. A failed or uncertain attempt
-keeps its claim and requires explicit reconciliation or a new authorization.
+durable marker. A failed attempt does not consume it, so an in-scope candidate
+may be prepared and deployed again without another OWNER approval. The fresh
+preflight and ledger checks decide whether production is safe to continue; an
+uncertain or partial Apply is never repeated blindly and remains blocked when
+the ledger reports recovery required or the live baseline cannot be proven.
 
 Default eligibility is limited to bounded low-risk changes. A specifically
 pre-approved database migration can be task-scoped only when schema-v3
