@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import {decideRecoveryFinalizationStep, recoveryFinalizationIdentity, recoveryFinalizationIdentityFromFailureEvidence, runRecoveryFinalization,
   validateRecoveryFinalizationApproval, assertNoConcurrentRelease} from './recovery-finalization.mjs';
 
@@ -87,6 +88,37 @@ test('diagnostic identity uses the verified canonical failure manifest releaseId
 
 test('stale COMPLETE ledger is reconciled before production tag or final state writes', () => {
   assert.equal(decideRecoveryFinalizationStep(snapshot()).action, 'RECORD_RECOVERY_REQUIRED');
+});
+
+test('finalization validates or creates a protected backup before any recovery state or tag write', () => {
+  const source = fs.readFileSync(new URL('./release-gpoint.mjs', import.meta.url), 'utf8');
+  const finalizer = source.slice(source.indexOf('async function finalizeRecovery(candidate)'));
+  const backupGate = finalizer.indexOf('if (current.currentProductionSha !== candidate)');
+  const backupCreate = finalizer.indexOf('createRecoveryBackup(candidate, baselineSha, beforeBackup.runtime.facts)');
+  const firstRecoveryWrite = finalizer.indexOf('const persistRecoveryRequired = async');
+  const orchestrator = finalizer.indexOf('await runRecoveryFinalization({readSnapshot, persistRecoveryRequired');
+  const productionTagWrite = finalizer.indexOf('pushProductionTag(stableIdentity.productionTag, candidate)');
+  const ledgerWrite = finalizer.indexOf('persistRecoveryLedgerCheckpoint(reconciliation, nextState, expectedLedgerHead)');
+  assert.ok(backupGate >= 0 && backupCreate > backupGate);
+  assert.ok(firstRecoveryWrite > backupCreate);
+  assert.ok(orchestrator > backupCreate);
+  assert.ok(orchestrator > firstRecoveryWrite);
+  assert.ok(productionTagWrite > firstRecoveryWrite);
+  assert.ok(ledgerWrite > firstRecoveryWrite);
+  assert.match(finalizer.slice(backupGate, firstRecoveryWrite), /validateRecoveryBackup\(backup, candidate, baselineSha\)/);
+  assert.match(finalizer.slice(backupGate, firstRecoveryWrite), /assertRecoveryFinalizationAuthorization\(candidate, baselineSha, 'current protected backup creation'\)/);
+  assert.doesNotMatch(finalizer, /applyCandidate\(|prisma migrate deploy|alembic upgrade|docker compose up|docker restart/);
+});
+
+test('invalid recovery backup prevents reconciliation, production tag, and ledger writes', async () => {
+  let writes = 0;
+  await assert.rejects(runRecoveryFinalization({
+    readSnapshot: async () => snapshot({backup: {...snapshot().backup, verified: false}}),
+    persistRecoveryRequired: async () => { writes += 1; },
+    ensureProductionTag: async () => { writes += 1; },
+    persistCompleteState: async () => { writes += 1; },
+  }), /current protected backup is absent or invalid/);
+  assert.equal(writes, 0);
 });
 
 test('durable recovery state proceeds to exact tag then one atomic complete ledger append', () => {

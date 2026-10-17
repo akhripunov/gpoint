@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
@@ -87,12 +88,106 @@ class ProductionMigrationTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0, stdout=b'')
             return SimpleNamespace(returncode=0, stdout=b'TABLE DATA agata messages')
         with tempfile.TemporaryDirectory() as directory, \
-                patch.object(self.m, 'authoritative_census', return_value=self.census()), \
+                patch.object(self.m, 'resolve_recovery_postgres_container', return_value='a' * 64), \
+                patch.object(self.m, 'authoritative_census', side_effect=lambda container=None: self.census()), \
                 patch.object(self.m, 'docker_checked', side_effect=docker_checked), \
                 patch.object(self.m.subprocess, 'run', side_effect=docker_run):
             result = self.m.complete_backup('a' * 40, directory=Path(directory), purpose='recovery-current')
-        self.assertTrue(Path(result['path']).name.startswith('gpoint-recovery-current-' + 'a' * 40 + '-'))
-        self.assertEqual(result['status'], 'COMPLETE_PROTECTED')
+            self.assertTrue(Path(result['path']).name.startswith('gpoint-recovery-current-' + 'a' * 40 + '-'))
+            self.assertEqual(result['status'], 'COMPLETE_PROTECTED')
+            backup_path = Path(result['path'])
+            self.assertEqual(backup_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(result['sha256'], hashlib.sha256(backup_path.read_bytes()).hexdigest())
+            self.assertEqual(result['postgres_container_name'], '/shared_postgres_1')
+
+    def test_damaged_recovery_dump_is_removed_and_never_reported_complete(self):
+        def docker_checked(args, *, input=None, timeout=30):
+            return 'f' if 'information_schema.schemata' in (input or '') else ''
+        def docker_run(args, **kwargs):
+            if any('pg_dump' in str(value) for value in args):
+                kwargs['stdout'].write(b'damaged archive')
+                return SimpleNamespace(returncode=0, stdout=b'')
+            return SimpleNamespace(returncode=1, stdout=b'')
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(self.m, 'resolve_recovery_postgres_container', return_value='a' * 64), \
+                patch.object(self.m, 'authoritative_census', side_effect=lambda container=None: self.census()), \
+                patch.object(self.m, 'docker_checked', side_effect=docker_checked), \
+                patch.object(self.m.subprocess, 'run', side_effect=docker_run):
+            with self.assertRaisesRegex(RuntimeError, 'archive verification failed'):
+                self.m.complete_backup('a' * 40, directory=Path(directory), purpose='recovery-current')
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_recovery_postgres_identity_requires_one_running_compose_postgres(self):
+        container = {'Id': 'a' * 64, 'Name': '/shared_postgres_1',
+                     'Config': {'Labels': {'com.docker.compose.project': 'shared',
+                                           'com.docker.compose.service': 'postgres'}},
+                     'State': {'Running': True}}
+        def docker(args, **kwargs):
+            if args[:3] == ['docker', 'ps', '-aq']:
+                return SimpleNamespace(returncode=0, stdout='a' * 64 + '\n')
+            if args[:3] == ['docker', 'inspect', 'a' * 64]:
+                import json
+                return SimpleNamespace(returncode=0, stdout=json.dumps([container]))
+            self.fail(f'unexpected docker invocation: {args}')
+        with patch.object(self.m.subprocess, 'run', side_effect=docker):
+            self.assertEqual(self.m.resolve_recovery_postgres_container(), 'a' * 64)
+
+    def test_recovery_postgres_identity_fails_closed_when_missing_or_ambiguous(self):
+        for ids in ('', 'one\ntwo\n'):
+            with self.subTest(ids=ids), patch.object(self.m.subprocess, 'run',
+                    return_value=SimpleNamespace(returncode=0, stdout=ids)):
+                with self.assertRaisesRegex(RuntimeError, 'unique running PostgreSQL'):
+                    self.m.resolve_recovery_postgres_container()
+
+    def test_recovery_backup_stops_before_census_or_file_creation_when_identity_is_unknown(self):
+        for message in ('container missing', 'ambiguous containers'):
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as directory, \
+                    patch.object(self.m, 'resolve_recovery_postgres_container', side_effect=RuntimeError(message)), \
+                    patch.object(self.m, 'authoritative_census') as census:
+                with self.assertRaisesRegex(RuntimeError, message):
+                    self.m.complete_backup('a' * 40, directory=Path(directory), purpose='recovery-current')
+                census.assert_not_called()
+                self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_recovery_postgres_identity_rejects_wrong_name_labels_or_stopped_container(self):
+        invalid = [
+            {'Name': '/compose-postgres-1', 'Config': {'Labels': {'com.docker.compose.project': 'shared', 'com.docker.compose.service': 'postgres'}}, 'State': {'Running': True}},
+            {'Name': '/shared_postgres_1', 'Config': {'Labels': {'com.docker.compose.project': 'other', 'com.docker.compose.service': 'postgres'}}, 'State': {'Running': True}},
+            {'Name': '/shared_postgres_1', 'Config': {'Labels': {'com.docker.compose.project': 'shared', 'com.docker.compose.service': 'postgres'}}, 'State': {'Running': False}},
+        ]
+        for item in invalid:
+            with self.subTest(item=item):
+                import json
+                def docker(args, **kwargs):
+                    if args[:3] == ['docker', 'ps', '-aq']:
+                        return SimpleNamespace(returncode=0, stdout='a' * 64 + '\n')
+                    return SimpleNamespace(returncode=0, stdout=json.dumps([item]))
+                with patch.object(self.m.subprocess, 'run', side_effect=docker):
+                    with self.assertRaisesRegex(RuntimeError, 'identity|PostgreSQL'):
+                        self.m.resolve_recovery_postgres_container()
+
+    def test_recovery_backup_uses_resolved_container_for_census_dump_and_restore(self):
+        calls = []
+        def docker_checked(args, *, input=None, timeout=30):
+            calls.append((args, input))
+            return 'f' if 'information_schema.schemata' in (input or '') else ''
+        def docker_run(args, **kwargs):
+            calls.append((args, None))
+            if any('pg_dump' in str(value) for value in args):
+                kwargs['stdout'].write(b'disposable verified backup bytes')
+                return SimpleNamespace(returncode=0, stdout=b'')
+            return SimpleNamespace(returncode=0, stdout=b'TABLE DATA agata messages')
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(self.m, 'resolve_recovery_postgres_container', return_value='a' * 64), \
+                patch.object(self.m, 'authoritative_census', return_value=self.census()) as census, \
+                patch.object(self.m, 'docker_checked', side_effect=docker_checked), \
+                patch.object(self.m.subprocess, 'run', side_effect=docker_run):
+            result = self.m.complete_backup('a' * 40, directory=Path(directory), purpose='recovery-current')
+        census.assert_called_once_with(container='a' * 64)
+        docker_invocations = [args for args, _ in calls if args and args[0] == 'exec']
+        self.assertTrue(docker_invocations)
+        self.assertTrue(all('a' * 64 in args for args in docker_invocations))
+        self.assertEqual(result['postgres_container_id'], 'a' * 64)
 
     def test_guard_precedes_census_and_is_held_through_migration(self):
         events = []

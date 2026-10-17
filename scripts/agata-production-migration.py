@@ -121,14 +121,41 @@ def docker_checked(args, *, input=None, timeout=30):
     return result.stdout.strip()
 
 
-def psql_args():
-    return ['exec', '-i', DB_CONTAINER, 'sh', '-ec',
+def psql_args(container=DB_CONTAINER):
+    return ['exec', '-i', container, 'sh', '-ec',
             'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d gpoint']
 
 
-def authoritative_census():
+def authoritative_census(container=DB_CONTAINER):
     sql = "BEGIN READ ONLY; SET LOCAL statement_timeout='15s'; " + CENSUS_SQL + ' ROLLBACK;'
-    return add_cluster_identity(json.loads(docker_checked(psql_args(), input=sql)))
+    return add_cluster_identity(json.loads(docker_checked(psql_args(container), input=sql)), container)
+
+
+def resolve_recovery_postgres_container():
+    """Resolve exactly one running GPoint shared PostgreSQL by Compose identity."""
+    result = subprocess.run(['docker', 'ps', '-aq',
+        '--filter', 'label=com.docker.compose.project=shared',
+        '--filter', 'label=com.docker.compose.service=postgres'],
+        capture_output=True, text=True, timeout=15)
+    if result.returncode:
+        raise RuntimeError('recovery PostgreSQL container identity could not be read')
+    container_ids = result.stdout.split()
+    if len(container_ids) != 1 or not re.fullmatch(r'[0-9a-f]{12,64}', container_ids[0]):
+        raise RuntimeError('recovery requires one unique running PostgreSQL container')
+    try:
+        inspected = subprocess.run(['docker', 'inspect', container_ids[0]],
+            capture_output=True, text=True, timeout=15)
+        item = json.loads(inspected.stdout)[0] if inspected.returncode == 0 else None
+        labels = (item or {}).get('Config', {}).get('Labels') or {}
+    except (IndexError, json.JSONDecodeError, OSError, subprocess.TimeoutExpired):
+        item = None
+        labels = {}
+    if (not item or item.get('Name') != '/shared_postgres_1'
+            or labels.get('com.docker.compose.project') != 'shared'
+            or labels.get('com.docker.compose.service') != 'postgres'
+            or item.get('State', {}).get('Running') is not True):
+        raise RuntimeError('recovery PostgreSQL container identity is invalid or not running')
+    return container_ids[0]
 
 
 def migration_env_files():
@@ -150,8 +177,8 @@ def effective_probe(image):
         *migration_env_args(), '--entrypoint', 'python', image, '-c', PROBE]))
 
 
-def add_cluster_identity(census):
-    networks = json.loads(docker_checked(['inspect', '--format', '{{json .NetworkSettings.Networks}}', DB_CONTAINER]))
+def add_cluster_identity(census, container=DB_CONTAINER):
+    networks = json.loads(docker_checked(['inspect', '--format', '{{json .NetworkSettings.Networks}}', container]))
     census['cluster_addresses'] = [network['IPAddress'] for network in networks.values() if network.get('IPAddress')]
     return census
 
@@ -250,7 +277,8 @@ def complete_backup(sha, *, directory=None, purpose='pre-release'):
     # backup; application migration credentials use a separate protected file.
     if purpose not in ('pre-release', 'recovery-current'):
         raise RuntimeError('complete backup purpose is invalid')
-    census = authoritative_census()
+    postgres_container = resolve_recovery_postgres_container() if purpose == 'recovery-current' else DB_CONTAINER
+    census = authoritative_census(container=postgres_container)
     if census.get('database') != 'gpoint' or census.get('authoritative') is not True:
         raise RuntimeError('complete backup identity could not be established')
     directory = directory if directory is not None else Path('/opt/gpoint/backups'); directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -259,21 +287,21 @@ def complete_backup(sha, *, directory=None, purpose='pre-release'):
     try:
         schemas = ['public', 'agata']
         for schema in ('gsales', 'gsales_meta', 'agata_identity'):
-            exists = docker_checked(psql_args(), input=f"BEGIN READ ONLY; SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name='{schema}'); ROLLBACK;")
+            exists = docker_checked(psql_args(postgres_container), input=f"BEGIN READ ONLY; SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name='{schema}'); ROLLBACK;")
             if exists == 't': schemas.append(schema)
         schema_literals = ','.join("'" + schema + "'" for schema in schemas)
-        extensions = docker_checked(psql_args(), input="BEGIN READ ONLY; SELECT e.extname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE n.nspname IN (" + schema_literals + ") AND e.extname<>'plpgsql' ORDER BY e.extname; ROLLBACK;").splitlines()
+        extensions = docker_checked(psql_args(postgres_container), input="BEGIN READ ONLY; SELECT e.extname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE n.nspname IN (" + schema_literals + ") AND e.extname<>'plpgsql' ORDER BY e.extname; ROLLBACK;").splitlines()
         if any(not re.fullmatch('[a-z][a-z0-9_-]*', extension) for extension in extensions):
             raise RuntimeError('GPoint backup extension identity is invalid')
         with target.open('xb') as stream:
             target.chmod(0o600)
             dump_script = 'set -eu; set --; for schema in $GPOINT_BACKUP_SCHEMAS; do set -- "$@" "--schema=$schema"; done; for extension in $GPOINT_BACKUP_EXTENSIONS; do set -- "$@" "--extension=$extension"; done; exec pg_dump -U "$POSTGRES_USER" -d gpoint --format=custom --no-owner "$@"'
-            result = subprocess.run(['docker', 'exec', '-e', 'GPOINT_BACKUP_SCHEMAS=' + ' '.join(schemas), '-e', 'GPOINT_BACKUP_EXTENSIONS=' + ' '.join(extensions), DB_CONTAINER, 'sh', '-ec', dump_script],
+            result = subprocess.run(['docker', 'exec', '-e', 'GPOINT_BACKUP_SCHEMAS=' + ' '.join(schemas), '-e', 'GPOINT_BACKUP_EXTENSIONS=' + ' '.join(extensions), postgres_container, 'sh', '-ec', dump_script],
                 stdout=stream, stderr=subprocess.DEVNULL, timeout=120)
         if result.returncode or not target.stat().st_size:
             raise RuntimeError('complete GPoint backup failed')
         with target.open('rb') as stream:
-            result = subprocess.run(['docker', 'exec', '-i', DB_CONTAINER, 'pg_restore', '--list'],
+            result = subprocess.run(['docker', 'exec', '-i', postgres_container, 'pg_restore', '--list'],
                 stdin=stream, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
         if result.returncode or b'TABLE DATA agata messages' not in result.stdout:
             raise RuntimeError('GPoint backup archive verification failed')
@@ -283,8 +311,12 @@ def complete_backup(sha, *, directory=None, purpose='pre-release'):
         digest = hashlib.sha256()
         with target.open('rb') as stream:
             for block in iter(lambda: stream.read(1024 * 1024), b''): digest.update(block)
-        return dict(path=str(target), sha256=digest.hexdigest(), database='gpoint',
-                    schemas=schemas, extensions=extensions, status='COMPLETE_PROTECTED')
+        result = dict(path=str(target), sha256=digest.hexdigest(), database='gpoint',
+                      schemas=schemas, extensions=extensions, status='COMPLETE_PROTECTED')
+        if purpose == 'recovery-current':
+            result.update(postgres_container_id=postgres_container,
+                          postgres_container_name='/shared_postgres_1')
+        return result
     except BaseException:
         target.unlink(missing_ok=True)
         raise
