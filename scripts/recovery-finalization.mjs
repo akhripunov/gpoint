@@ -102,6 +102,9 @@ export function assertNoConcurrentRelease({runs, totalCount, currentRunId}) {
   requireThat(Array.isArray(runs) && Number.isInteger(totalCount) && totalCount === runs.length
     && typeof currentRunId === 'string' && /^\d+$/.test(currentRunId),
   'active release inventory is incomplete or current workflow identity is unavailable');
+  const runIds = runs.map(run => String(run?.id ?? ''));
+  requireThat(new Set(runIds).size === runIds.length,
+    'active release inventory contains a duplicate run ID');
   requireThat(runs.every(run => /^\d+$/.test(String(run?.id ?? ''))
     && typeof run?.status === 'string'
     && typeof run?.path === 'string'
@@ -110,6 +113,72 @@ export function assertNoConcurrentRelease({runs, totalCount, currentRunId}) {
   const conflicting = runs.filter(run => String(run.id) !== currentRunId && run.status !== 'completed');
   requireThat(conflicting.length === 0, 'another Deploy workflow is active or queued');
   return true;
+}
+
+const DEPLOY_RUNS_PER_PAGE = 100;
+const MAX_DEPLOY_RUNS = 10_000;
+
+function deployInventoryFingerprint(runs) {
+  return JSON.stringify(runs.map(run => ({id: String(run.id), status: run.status, path: run.path,
+    head_sha: run.head_sha ?? null, run_attempt: run.run_attempt ?? null, event: run.event ?? null}))
+    .sort((left, right) => left.id.localeCompare(right.id)));
+}
+
+/** Read the entire Deploy history twice and reject any unstable or incomplete view. */
+export async function loadCompleteDeployInventory({fetchPage, currentRunId, perPage = DEPLOY_RUNS_PER_PAGE}) {
+  requireThat(typeof fetchPage === 'function' && Number.isInteger(perPage) && perPage > 0 && perPage <= 100,
+    'Deploy inventory reader configuration is invalid');
+
+  const readPass = async () => {
+    const runs = [];
+    const seen = new Set();
+    let totalCount = null;
+    for (let page = 1; ; page += 1) {
+      requireThat(page <= Math.ceil(MAX_DEPLOY_RUNS / perPage),
+        'active release inventory exceeds the supported complete-read limit');
+      const response = await fetchPage(page, perPage);
+      requireThat(response && response.ok === true && typeof response.json === 'function',
+        'active Deploy inventory request failed');
+      const body = await response.json();
+      requireThat(body && !Array.isArray(body) && Number.isInteger(body.total_count)
+        && body.total_count >= 0 && Array.isArray(body.workflow_runs),
+      'active Deploy inventory response has an invalid structure');
+      if (totalCount === null) {
+        totalCount = body.total_count;
+        requireThat(totalCount <= MAX_DEPLOY_RUNS, 'active release inventory exceeds the supported complete-read limit');
+      } else {
+        requireThat(body.total_count === totalCount, 'active Deploy inventory total_count changed during read');
+      }
+      const expectedPageLength = Math.min(perPage, Math.max(0, totalCount - runs.length));
+      requireThat(body.workflow_runs.length === expectedPageLength,
+        'active Deploy inventory page is incomplete or exceeds total_count');
+      for (const run of body.workflow_runs) {
+        const id = run && (typeof run.id === 'number' && Number.isSafeInteger(run.id) && run.id > 0
+          ? String(run.id) : typeof run.id === 'string' && /^[1-9][0-9]*$/.test(run.id) ? run.id : '');
+        requireThat(id && typeof run.status === 'string' && run.status.length > 0
+          && typeof run.path === 'string' && run.path.length > 0,
+        'active Deploy inventory contains a malformed run');
+        requireThat(!seen.has(id), 'active Deploy inventory contains a duplicate run ID');
+        seen.add(id);
+        runs.push(run);
+      }
+      if (runs.length === totalCount) break;
+      requireThat(body.workflow_runs.length === perPage,
+        'active Deploy inventory page is incomplete before the declared total_count');
+    }
+    requireThat(totalCount !== null && runs.length === totalCount && seen.size === totalCount,
+      'active Deploy inventory is incomplete');
+    return {runs, totalCount, fingerprint: deployInventoryFingerprint(runs)};
+  };
+
+  const first = await readPass();
+  const second = await readPass();
+  requireThat(first.totalCount === second.totalCount && first.fingerprint === second.fingerprint,
+    'active Deploy inventory changed during read');
+  requireThat(first.runs.some(run => String(run.id) === currentRunId),
+    'active Deploy inventory does not contain the current workflow run');
+  assertNoConcurrentRelease({runs: first.runs, totalCount: first.totalCount, currentRunId});
+  return {workflow_runs: first.runs, total_count: first.totalCount};
 }
 
 /** Choose one metadata-only step from a fresh read-only production snapshot. */

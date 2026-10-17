@@ -8,7 +8,8 @@ import { createRetryingGit } from './release-network-retry.mjs';
 import { verifyReleaseBundle, selectImageTransport } from './release-bundle.mjs';
 import { persistReleaseBookkeeping, loadReleaseBookkeeping } from './release-bookkeeping.mjs';
 import { fileURLToPath } from 'node:url';
-import { candidateAgataMigrationHead, candidatePrismaMigrationHead, githubLedgerGitEnvironment } from './release-gpoint.mjs';
+import { candidateAgataMigrationHead, candidatePrismaMigrationHead, finalizationProcessFailure,
+  githubLedgerGitEnvironment, sanitizeReleaseOutput } from './release-gpoint.mjs';
 import { assertInstalledWorkerMatches } from './worker-runtime-guard.mjs';
 import { verifyOciReadAccess } from './release-oci.mjs';
 import { recoveryEvidenceFromReadback, withPreflightEvidence } from './release-evidence.mjs';
@@ -107,6 +108,7 @@ process.env.GPOINT_RELEASE_LEDGER_SHA = ledger.ledgerSha ?? '';
 const previous = new Set(fs.readdirSync(ledger.manifestDir));
 let releaseCode = 1;
 let preflightStatus = 'BLOCKED';
+let executionFailure = null;
 try {
   if (mode === 'recovery-diagnostics') {
     // This branch has no Apply, migration, rollback, tag, or ledger writer.
@@ -130,10 +132,14 @@ try {
     // Recovery has its own complete read-only gates inside the finalizer; it
     // must never enter ordinary Apply or migration code.
     const result = spawnSync('pnpm', ['release:gpoint', '--finalize-recovery', '--candidate', sha], {
-      cwd: root, stdio: 'inherit', timeout: 1_800_000,
+      cwd: root, stdio: ['inherit', 'pipe', 'pipe'], encoding: 'utf8', maxBuffer: 8 * 1024 * 1024,
+      timeout: 1_800_000,
     });
+    if (result.stdout) process.stdout.write(sanitizeReleaseOutput(result.stdout));
+    if (result.stderr) process.stderr.write(sanitizeReleaseOutput(result.stderr));
     releaseCode = result.status ?? 1;
     preflightStatus = releaseCode === 0 ? 'PASS' : 'FAILED';
+    executionFailure = finalizationProcessFailure(result);
   } else {
     // The first ordinary production operation is the canonical read-only preflight.
     const preflightEnv = { ...process.env, IMAGE_TRANSPORT: selectedImageTransport,
@@ -208,6 +214,7 @@ try {
   const attempt = (mode === 'preflight' ? records : records.filter(r => r.data.status !== 'PLANNED' && !setupStates.has(r.data.status))).at(-1);
   let evidence = attempt?.data ?? { candidateSha: sha, status: 'BLOCKED', productionRef: null };
   let recoveryReadbackState = null;
+  let recoveryReadbackFailure = null;
   if (mode === 'recovery-finalization') {
     let destination;
     try {
@@ -216,7 +223,10 @@ try {
       recoveryReadbackState = JSON.parse(fs.readFileSync(check.stateFile, 'utf8'));
       if (recoveryReadbackState.recoveryRequired === true || recoveryReadbackState.lastReleaseStatus === 'COMPLETE')
         evidence = recoveryEvidenceFromReadback(recoveryReadbackState, check.manifestDir, sha);
-    } catch { recoveryReadbackState = null; }
+    } catch (error) {
+      recoveryReadbackState = null;
+      recoveryReadbackFailure = sanitizeReleaseOutput(error?.message);
+    }
     finally { if (destination) fs.rmSync(destination, {recursive: true, force: true}); }
   }
   const status = mode === 'recovery-diagnostics'
@@ -228,9 +238,15 @@ try {
         ? 'RECOVERY_REQUIRED' : 'BLOCKED')
     : mode === 'task-scoped-auto' && evidence.status === 'COMPLETE' && !authorizationConsumed
       ? 'RECOVERY_REQUIRED' : evidence.status;
+  if (mode === 'recovery-finalization' && !executionFailure && status !== 'COMPLETE') {
+    executionFailure = {stage: 'RECOVERY_RESULT_READBACK', executionStatus: 'BLOCKED',
+      exitCode: null, signal: null,
+      diagnostic: recoveryReadbackFailure || 'Finalizer returned without a verified COMPLETE production-ledger read-back'};
+  }
   fs.writeFileSync(process.env.RELEASE_RESULT, JSON.stringify({ ...withPreflightEvidence(evidence, preflightStatus, mode),
     mode,
     status,
+    ...(executionFailure ? {executionFailure} : {}),
     releaseState: mode === 'recovery-diagnostics' ? 'RECOVERY_DIAGNOSTICS_ONLY'
       : mode === 'recovery-finalization' ? status : mode === 'preflight' && evidence.status === 'PLANNED' ? 'READY_FOR_OWNER' :
       ['production', 'task-scoped-auto'].includes(mode) && evidence.status === 'COMPLETE' ?

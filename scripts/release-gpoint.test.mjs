@@ -7,7 +7,7 @@ import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createRecoveryActiveDeploysFile, readRecoveryActiveDeploysFile } from './recovery-active-deploys.mjs';
 import { buildRecoveryDiagnosticsSnapshot } from './recovery-diagnostics.mjs';
-import { canCreateProductionRef, canonicalRecoveryRunId, checkAgataEffectiveConfig, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, cleanupLocalPackageCaches, evaluateSafetyGates, failureEvidence, githubLedgerGitEnvironment, githubProductionTagGitEnvironment, githubSourceGitEnvironment, isTransientGitHubTransportFailure, localDiskDecision, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runLocalDiskPreflight, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, validateImmutableRecoveryFailure, validateMacWorkerStatus, validateRecoveryBackup, verifiedRuntimeState } from './release-gpoint.mjs';
+import { canCreateProductionRef, canonicalRecoveryRunId, checkAgataEffectiveConfig, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, cleanupLocalPackageCaches, evaluateSafetyGates, failureEvidence, finalizationProcessFailure, githubLedgerGitEnvironment, githubProductionTagGitEnvironment, githubSourceGitEnvironment, isTransientGitHubTransportFailure, localDiskDecision, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runLocalDiskPreflight, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, validateImmutableRecoveryFailure, validateMacWorkerStatus, validateRecoveryBackup, verifiedRuntimeState } from './release-gpoint.mjs';
 import { agataInternalConfigProvisionCommand, agataPreSwitchReadinessCommand, agataProviderRuntimeCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, cleanupTemporaryWorktree, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, migrationPendingFromPreflight, parseAgataRuntimeIdentityLine, planReleaseRetention, productionPreflightCommand, resolveRunnerPath, runAuthorizedMutationPlan, runCleanupCommand, runRemoteCommand, runWithPreExecRetry, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataProviderMode, validateAgataRuntimeIdentity, validateRuntimeIdentity, remoteCommandEnvironment } from './release-gpoint-vps-adapter.mjs';
 
 test('GitHub token is attached only to exact production-ledger Git operations', () => {
@@ -1295,6 +1295,18 @@ test('remote runner retains exact exit code and stderr without a parent pipe buf
   assert.equal(failureEvidence(captured, { stage: 'MIGRATION_APPLY' }).failureExitCode, 17);
   if (previous === undefined) delete process.env.GPOINT_REMOTE_RUNNER; else process.env.GPOINT_REMOTE_RUNNER = previous;
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('recovery finalizer failures keep the exact exit status and sanitized diagnostic', () => {
+  const failure = finalizationProcessFailure({status: 1, signal: null,
+    stdout: 'preflight started\n', stderr: 'active release inventory is incomplete\nBearer gho_abcdefghijklmnopqrstuvwxyz012345\n'});
+  assert.equal(failure.stage, 'RECOVERY_FINALIZATION');
+  assert.equal(failure.executionStatus, 'FAILED');
+  assert.equal(failure.exitCode, 1);
+  assert.match(failure.diagnostic, /active release inventory is incomplete/);
+  assert.doesNotMatch(failure.diagnostic, /gho_abcdefghijklmnopqrstuvwxyz012345/);
+  assert.match(failure.diagnostic, /\[REDACTED\]/);
+  assert.equal(finalizationProcessFailure({status: 0, error: null, stdout: '', stderr: ''}), null);
 });
 
 test('remote runner retries a proven banner timeout once and preserves the exact command', () => {
