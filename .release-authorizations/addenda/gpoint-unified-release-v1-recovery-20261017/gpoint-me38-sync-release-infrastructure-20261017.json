@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "amendment_id": "gpoint-me38-sync-release-infrastructure-20261017",
+  "project": "gpoint",
+  "authorization_id": "gpoint-unified-release-v1-recovery-20261017",
+  "source_instruction_identifier": "OWNER_SCOPE_ADDENDUM_GPOINT_ME38_20261017",
+  "owner_decision": "Continue ME-38 by preparing an append-only authorization for exactly the four named paths and their complete release-infrastructure risk contract; GitHub publication requires the specified separate one-Prepare approval.",
+  "original_authorization_record_blob_sha": "e2da4bd947e3927c6493491f569f1844504d2c48",
+  "scope_additions": [
+    {
+      "path": ".github/workflows/gpoint-linear-reconcile.yml",
+      "source_commit_sha": "4b7049c6ee97319c56b2a605a9c8f2d99288bbca",
+      "patch_sha256": "017f7d02525135bd41382488b3b08fcf32bf580268894ab6d5f3530b878ff372",
+      "result_file_sha256": "59b4b1be7580b3e7db6ceed28e65b5fcf6b07943c57d673080de16f52586efbc",
+      "result_blob_sha": "fde28bd4072b29c85ecfdb9cd8f43ca6702ba7a1"
+    },
+    {
+      "path": ".github/workflows/sync-agents-to-linear.yml",
+      "source_commit_sha": "8900f854c3833a8eeb0c618fa1ae35a74bdcac63",
+      "patch_sha256": "b42b84d0b9eee3ad3f4ba7dea58e2f2814dfef1ef808c918b53afd6ee50c81e8",
+      "result_file_sha256": "dbc13ef6ceca3827dbbdeb8b18a6eee8d43a28c45e006e3632155bd2859a86e3",
+      "result_blob_sha": "7e09cec3bc99b46b922b01e306d4a27077eba502"
+    },
+    {
+      "path": "scripts/sync_agents_to_linear.py",
+      "source_commit_sha": "8900f854c3833a8eeb0c618fa1ae35a74bdcac63",
+      "patch_sha256": "6f2ad310ee1f7396f2fb21e0101d513a7f8e308f1af8de6655f60be7e2e106c3",
+      "result_file_sha256": "fe882ab3d8aed8dd0340955d7d2699cb30a5aca3ee469fc743b7a1605621cd4f",
+      "result_blob_sha": "5bc271d958861ccaec96256625ed0e9b8cc93dbc"
+    },
+    {
+      "path": "tests/test_sync_agents_to_linear.py",
+      "source_commit_sha": "8900f854c3833a8eeb0c618fa1ae35a74bdcac63",
+      "patch_sha256": "5d08ac65aea8a1132f22428b114d59592bc5219c26532b7d75adceb9dd2579c6",
+      "result_file_sha256": "1b4072657e412ee17107d699a975903c8c5e3e7d0e60d18a6ad116023101a7aa",
+      "result_blob_sha": "9ae1095e1f06e6cb7cebc8617a19af02af7aa1a3"
+    }
+  ],
+  "release_infrastructure_risk_contract": {
+    "allowed_paths": [
+      ".github/workflows/gpoint-linear-reconcile.yml",
+      ".github/workflows/sync-agents-to-linear.yml",
+      "scripts/sync_agents_to_linear.py",
+      "tests/test_sync_agents_to_linear.py"
+    ],
+    "baseline_sha": "a700198a843c12a84f2e537178de752e3eddd54d",
+    "risk_description": "Limit this release infrastructure change to GHCR digest verification and the two GPoint Linear synchronization jobs plus their sync retry and regression test paths.",
+    "allowed_operations": [
+      "integrate",
+      "coalesce",
+      "prepare",
+      "preflight",
+      "deploy",
+      "verify",
+      "rollback",
+      "publish_evidence"
+    ],
+    "required_gates": [
+      "exact_candidate",
+      "complete_scope",
+      "prepare_provenance",
+      "immutable_artifact",
+      "security_review",
+      "preflight",
+      "rollback_readiness",
+      "worker_compatibility",
+      "postdeploy_health",
+      "reconciliation"
+    ],
+    "backup_plan": "Preserve the production ledger and prior immutable image digests; run the canonical GPoint backup gate if any approved migration is pending.",
+    "rollback_plan": "On failure restore the previous immutable production manifest; reconcile uncertain or partial apply before any retry.",
+    "stop_conditions": [
+      "Stop on candidate, production baseline, or four-path scope drift.",
+      "Stop if artifact provenance, digest, preflight, backup, rollback, Worker, or health evidence is missing."
+    ]
+  },
+  "amendment_commitment_sha256": "c6ab69d2b3bdce909ffb1649115f3295a07d6ba05933866f070273c20cbae216"
+}
