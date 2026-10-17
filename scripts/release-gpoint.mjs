@@ -27,6 +27,7 @@ let MANIFEST_DIR = process.env.GPOINT_RELEASE_MANIFEST_DIR || path.join(ROOT, 'd
 const LOCK_FILE = path.join(os.homedir(), '.config/gpoint/release-production.lock');
 const LEGACY_LOCK_FILE = path.join(ROOT, '.gpoint-release.lock');
 const SHA_RE = /^[0-9a-f]{40}$/;
+const GITHUB_SOURCE_URL = 'https://github.com/akhripunov/gpoint.git';
 const REMOTE_VERIFY_TIMEOUT_MS = 15_000;
 const GITHUB_REMOTE_TIMEOUT_MS = 20_000;
 const NETWORK_RETRY_BUDGET_MS = 30 * 60 * 1000;
@@ -78,6 +79,37 @@ export function githubLedgerGitEnvironment(args, token, baseEnv = process.env) {
     return env;
   }
   if (!token) throw new Error('GITHUB_TOKEN is required for production ledger Git access');
+  const offset = Number(env.GIT_CONFIG_COUNT ?? 0);
+  if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('Invalid inherited Git config count');
+  env.GIT_CONFIG_COUNT = String(offset + 3);
+  env[`GIT_CONFIG_KEY_${offset}`] = 'credential.helper';
+  env[`GIT_CONFIG_VALUE_${offset}`] = '';
+  env[`GIT_CONFIG_KEY_${offset + 1}`] = 'http.https://github.com/.extraheader';
+  env[`GIT_CONFIG_VALUE_${offset + 1}`] = '';
+  env[`GIT_CONFIG_KEY_${offset + 2}`] = 'http.https://github.com/.extraheader';
+  env[`GIT_CONFIG_VALUE_${offset + 2}`] = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`;
+  return env;
+}
+
+/** Attach Actions credentials only to read-only refs for this private repository. */
+export function githubSourceGitEnvironment(args, token, baseEnv = process.env) {
+  const env = {...baseEnv};
+  delete env.GITHUB_TOKEN;
+  delete env.GH_TOKEN;
+  env.GIT_TERMINAL_PROMPT = '0';
+  const canonicalRepo = args[0] === 'ls-remote' && args[1] === GITHUB_SOURCE_URL;
+  const mainOnly = canonicalRepo && args.length === 3 && args[2] === 'refs/heads/main';
+  const mainAndTags = canonicalRepo && args.length === 4 && args[2] === 'refs/heads/main' && args[3] === 'refs/tags/*';
+  const tagPair = canonicalRepo && args.length === 4
+    && /^refs\/tags\/[A-Za-z0-9._-]{1,120}$/.test(args[2] ?? '')
+    && args[3] === `${args[2]}^{}`;
+  if (!mainOnly && !mainAndTags && !tagPair) {
+    const touchesSourceRefs = args.some(value => typeof value === 'string'
+      && (value.includes('refs/heads/') || value.includes('refs/tags/')));
+    if (touchesSourceRefs) throw new Error('GitHub source Git operation is not authorized');
+    return env;
+  }
+  if (!token) throw new Error('GITHUB_TOKEN is required for private GitHub source verification');
   const offset = Number(env.GIT_CONFIG_COUNT ?? 0);
   if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('Invalid inherited Git config count');
   env.GIT_CONFIG_COUNT = String(offset + 3);
@@ -503,13 +535,14 @@ function githubTransportEnv() {
 }
 
 export function runRemoteShaList({ runner = execFileSync } = {}) {
-  return runner('git', ['ls-remote', 'origin', 'refs/heads/main', 'refs/tags/*'], {
+  const args = ['ls-remote', GITHUB_SOURCE_URL, 'refs/heads/main', 'refs/tags/*'];
+  return runner('git', args, {
     cwd: ROOT,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: REMOTE_VERIFY_TIMEOUT_MS,
     maxBuffer: 8 * 1024 * 1024,
-    env: githubTransportEnv(),
+    env: githubSourceGitEnvironment(args, process.env.GITHUB_TOKEN),
   }).trim();
 }
 
@@ -537,7 +570,7 @@ function runGitHubRemoteGit(args, { timeout = GITHUB_REMOTE_TIMEOUT_MS } = {}) {
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout,
       maxBuffer: 8 * 1024 * 1024,
-      env: githubTransportEnv(),
+      env: githubSourceGitEnvironment(args, process.env.GITHUB_TOKEN),
     }).trim());
   } catch (error) {
     if (error?.code === 'NETWORK_UNAVAILABLE') die('NETWORK_UNAVAILABLE during GitHub remote operation');
@@ -548,7 +581,7 @@ function runGitHubRemoteGit(args, { timeout = GITHUB_REMOTE_TIMEOUT_MS } = {}) {
 }
 
 function remoteTagTarget(tag) {
-  const output = runGitHubRemoteGit(['ls-remote', 'origin', `refs/tags/${tag}`, `refs/tags/${tag}^{}`]);
+  const output = runGitHubRemoteGit(['ls-remote', GITHUB_SOURCE_URL, `refs/tags/${tag}`, `refs/tags/${tag}^{}`]);
   const refs = new Map(output.split('\n').filter(Boolean).map(line => {
     const [objectSha, ref] = line.split(/\s+/);
     return [ref, objectSha];
@@ -1210,7 +1243,7 @@ function finalizeRecovery(candidate) {
     assertSha(candidate);
     if (git(['rev-parse', candidate]) !== candidate) die('recovery candidate is not present locally');
 
-    const remoteMain = runGitHubRemoteGit(['ls-remote', 'origin', 'refs/heads/main']).split(/\s+/)[0];
+    const remoteMain = runGitHubRemoteGit(['ls-remote', GITHUB_SOURCE_URL, 'refs/heads/main']).split(/\s+/)[0];
     if (!SHA_RE.test(remoteMain ?? '') || remoteMain !== git(['rev-parse', 'origin/main'])) die('origin/main exact SHA could not be independently reconciled');
     try { execFileSync('git', ['merge-base', '--is-ancestor', candidate, 'origin/main'], { cwd: ROOT, stdio: 'ignore' }); }
     catch { die('recovery candidate is not contained in verified origin/main history'); }
