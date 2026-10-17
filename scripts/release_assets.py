@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,9 @@ RECOVERY_IMAGE_REPOSITORIES = {
     'agata': 'ghcr.io/akhripunov/gpoint-agata-runtime',
     'gsales': 'ghcr.io/akhripunov/gpoint-g-sales-runtime',
 }
+MAX_FAILURE_MANIFEST_MEMBERS = 4096
+MAX_FAILURE_MANIFEST_MEMBER_BYTES = 32 * 1024**2
+MAX_FAILURE_MANIFEST_TOTAL_BYTES = 2 * 1024**3
 
 
 def release_tag(kind, sha, run_id, attempt):
@@ -215,6 +219,48 @@ def _download_immutable_asset(asset, target, token):
         raise RuntimeError('Immutable release asset checksum mismatch')
 
 
+def _read_failure_manifest_archive(archive_path, release_id):
+    """Read one manifest from the exact directory layout emitted by publish()."""
+    expected = f'manifests/{release_id}.json'
+    with zipfile.ZipFile(archive_path) as archive:
+        infos = archive.infolist()
+        names = [info.filename for info in infos]
+        if (not infos or len(infos) > MAX_FAILURE_MANIFEST_MEMBERS
+                or len(names) != len(set(names))):
+            raise RuntimeError('Failure manifest archive members are unsafe or incomplete')
+        selected = None
+        total_size = 0
+        for info in infos:
+            name = info.filename
+            parts = name.split('/')
+            mode = info.external_attr >> 16
+            file_type = stat.S_IFMT(mode)
+            canonical = (
+                len(parts) == 2 and parts[0] == 'manifests' and parts[1].endswith('.json')
+                and parts[1] not in ('', '.', '..')
+            ) or name == 'state/production.json'
+            if (not canonical or name.startswith('/') or '\\' in name
+                    or any(part in ('', '.', '..') for part in parts)
+                    or info.is_dir() or info.flag_bits & 0x41
+                    or info.compress_type != zipfile.ZIP_STORED
+                    or file_type not in (0, stat.S_IFREG)):
+                raise RuntimeError('Failure manifest archive members are unsafe or incomplete')
+            if info.file_size > MAX_FAILURE_MANIFEST_MEMBER_BYTES:
+                raise RuntimeError('Failure manifest archive member exceeds size limit')
+            total_size += info.file_size
+            if total_size > MAX_FAILURE_MANIFEST_TOTAL_BYTES:
+                raise RuntimeError('Failure manifest archive exceeds size limit')
+            if name == expected:
+                selected = info
+        if selected is None:
+            raise RuntimeError('Failure manifest archive members are unsafe or incomplete')
+        with archive.open(selected) as stream:
+            data = stream.read(MAX_FAILURE_MANIFEST_MEMBER_BYTES + 1)
+        if len(data) > MAX_FAILURE_MANIFEST_MEMBER_BYTES or len(data) != selected.file_size:
+            raise RuntimeError('Failure manifest archive member exceeds size limit')
+        return data
+
+
 def read_post_switch_failure(sha, run_id, attempt, output_path, token=None, api=evidence_api):
     """Download and verify failed-run evidence without authorizing production mutation."""
     from prepared_artifact_cache import extract
@@ -243,18 +289,7 @@ def read_post_switch_failure(sha, run_id, attempt, output_path, token=None, api=
         if not isinstance(release_id, str) or not re.fullmatch(r'gpoint-release-\d{8}T\d{9}Z', release_id):
             raise RuntimeError('Failed release identity is invalid')
         member = f'{release_id}.json'
-        with zipfile.ZipFile(manifests_zip) as archive:
-            infos = archive.infolist()
-            names = [info.filename for info in infos]
-            if (not infos or len(names) != len(set(names)) or member not in names
-                    or sum(info.file_size for info in infos) > 2 * 1024**3
-                    or any(Path(name).name != name or '\\' in name or not name.endswith('.json') or info.is_dir()
-                           or __import__('stat').S_ISLNK(info.external_attr >> 16)
-                           for name, info in zip(names, infos))):
-                raise RuntimeError('Failure manifest archive members are unsafe or incomplete')
-        manifest_dir = root / 'manifests'
-        extract(manifests_zip, manifest_dir, [names])
-        manifest_bytes = (manifest_dir / member).read_bytes()
+        manifest_bytes = _read_failure_manifest_archive(manifests_zip, release_id)
         manifest = json.loads(manifest_bytes)
         if (manifest.get('candidateSha') != sha or manifest.get('releaseId') != release_id
                 or manifest.get('status') != 'RECOVERY_REQUIRED' or manifest.get('failureStage') != 'POST_SWITCH'

@@ -378,7 +378,10 @@ class ImmutableReleaseTests(unittest.TestCase):
                                      'digest': 'sha256:' + str(index) * 64,
                                      'configDigest': 'sha256:' + str(index + 3) * 64}
                               for index, (role, repository) in enumerate(ASSETS.RECOVERY_IMAGE_REPOSITORIES.items(), 1)}}
-        payloads = {1: zip_bytes({result_name: result}), 2: zip_bytes({f'{release_id}.json': manifest}),
+        payloads = {1: zip_bytes({result_name: result}), 2: zip_bytes({
+                        f'manifests/{release_id}.json': manifest,
+                        'manifests/gpoint-release-20261016T120000000Z.json': {'older': True},
+                        'state/production.json': {'productionSha': 'b' * 40}}),
                     3: zip_bytes({'receipt.json': receipt})}
         asset_digests = {i: hashlib.sha256(data).hexdigest() for i, data in payloads.items()}
         def download(_repo, asset_id, _token, target, **_kwargs):
@@ -410,6 +413,78 @@ class ImmutableReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'checksum'):
                 ASSETS.read_post_switch_failure(sha, run_id, attempt, target, token='readonly', api=lambda _route: None)
 
+    def test_failure_manifest_archive_rejects_unsafe_members(self):
+        import io
+        release_id = 'gpoint-release-20261017T064101334Z'
+        expected = f'manifests/{release_id}.json'
+        cases = {
+            'traversal': [('../outside.json', b'{}'), (expected, b'{}')],
+            'unknown path': [('other/extra.json', b'{}'), (expected, b'{}')],
+            'compressed member': [(expected, b'{}')],
+        }
+        for label, entries in cases.items():
+            with self.subTest(label=label):
+                buffer = io.BytesIO()
+                compression = zipfile.ZIP_DEFLATED if label == 'compressed member' else zipfile.ZIP_STORED
+                with zipfile.ZipFile(buffer, 'w', compression=compression) as archive:
+                    for name, payload in entries:
+                        archive.writestr(name, payload)
+                with tempfile.NamedTemporaryFile() as target:
+                    target.write(buffer.getvalue())
+                    target.flush()
+                    with self.assertRaisesRegex(RuntimeError, 'unsafe or incomplete'):
+                        ASSETS._read_failure_manifest_archive(target.name, release_id)
+
+        with self.subTest(label='symlink'):
+            buffer = io.BytesIO()
+            link = zipfile.ZipInfo(expected)
+            link.create_system = 3
+            link.external_attr = (0o120777 << 16)
+            with zipfile.ZipFile(buffer, 'w') as archive:
+                archive.writestr(link, b'outside')
+            with tempfile.NamedTemporaryFile() as target:
+                target.write(buffer.getvalue())
+                target.flush()
+                with self.assertRaisesRegex(RuntimeError, 'unsafe or incomplete'):
+                    ASSETS._read_failure_manifest_archive(target.name, release_id)
+
+        with self.subTest(label='duplicate'):
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, 'w') as archive:
+                archive.writestr(expected, b'{}')
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', UserWarning)
+                    archive.writestr(expected, b'{"candidateSha":"different"}')
+            with tempfile.NamedTemporaryFile() as target:
+                target.write(buffer.getvalue())
+                target.flush()
+                with self.assertRaisesRegex(RuntimeError, 'unsafe or incomplete'):
+                    ASSETS._read_failure_manifest_archive(target.name, release_id)
+
+        with self.subTest(label='member count limit'):
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, 'w') as archive:
+                archive.writestr(expected, b'{}')
+                for index in range(ASSETS.MAX_FAILURE_MANIFEST_MEMBERS):
+                    archive.writestr(f'manifests/extra-{index}.json', b'')
+            with tempfile.NamedTemporaryFile() as target:
+                target.write(buffer.getvalue())
+                target.flush()
+                with self.assertRaisesRegex(RuntimeError, 'unsafe or incomplete'):
+                    ASSETS._read_failure_manifest_archive(target.name, release_id)
+
+        with self.subTest(label='member size limit'):
+            buffer = io.BytesIO()
+            oversized = b'x' * (ASSETS.MAX_FAILURE_MANIFEST_MEMBER_BYTES + 1)
+            with zipfile.ZipFile(buffer, 'w') as archive:
+                archive.writestr(expected, oversized)
+            with tempfile.NamedTemporaryFile() as target:
+                target.write(buffer.getvalue())
+                target.flush()
+                with self.assertRaisesRegex(RuntimeError, 'member exceeds size limit'):
+                    ASSETS._read_failure_manifest_archive(target.name, release_id)
+
     def test_failed_deploy_cannot_silently_substitute_an_earlier_prepare_attempt(self):
         sha, run_id, attempt = 'a' * 40, '39010750184', '1'
         result_name = f'gpoint-release-result-{run_id}-{attempt}.json'
@@ -426,7 +501,7 @@ class ImmutableReleaseTests(unittest.TestCase):
         digest = hashlib.sha256(result_bytes).hexdigest()
         manifest_buff = io.BytesIO()
         with zipfile.ZipFile(manifest_buff, 'w') as archive:
-            archive.writestr('gpoint-release-20261017T064101334Z.json', json.dumps({
+            archive.writestr('manifests/gpoint-release-20261017T064101334Z.json', json.dumps({
                 'candidateSha': sha, 'releaseId': result['releaseId'], 'status': 'RECOVERY_REQUIRED',
                 'failureStage': 'POST_SWITCH', 'previousProductionSha': 'b' * 40,
                 'productionShaAfter': None, 'productionRef': None,
