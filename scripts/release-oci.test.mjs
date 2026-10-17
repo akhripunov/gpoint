@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import {fileURLToPath} from 'node:url';
 import { validateOciReceipt, createOciPullScript, createOciVerifyScript,
   verifyOciReadAccess } from './release-oci.mjs';
 
@@ -68,6 +70,42 @@ test('pull plan addresses exact digests, verifies labels, and never embeds crede
   assert.doesNotMatch(script, new RegExp(secret));
   assert.doesNotMatch(script, /Bearer\s/i);
   assert.throws(() => createOciPullScript(validated, 'd'.repeat(40)), /candidate/i);
+});
+
+test('workflow actor identity is used for GITHUB_TOKEN GHCR access and Docker pulls', async () => {
+  const validated = validateOciReceipt(receipt(), sha, { runId: 123, runAttempt: 1 });
+  const username = 'github-actions[bot]';
+  const script = createOciPullScript(validated, sha, { username });
+  assert.match(script, /docker login ghcr\.io --username 'github-actions\[bot\]' --password-stdin/);
+
+  const requests = [];
+  const fetcher = async (url, options) => {
+    requests.push({url, options});
+    if (url.includes('/manifests/')) {
+      if (options.headers.Authorization === 'Bearer bearer-secret') return {
+        ok: true, status: 200, url, headers: new Headers({'Docker-Content-Digest': digest}),
+      };
+      return {ok: false, status: 401, url,
+        headers: new Headers({ 'WWW-Authenticate': `Bearer realm="https://ghcr.io/token",service="ghcr.io",scope="repository:${url.split('/v2/')[1].split('/manifests/')[0]}:pull"` })};
+    }
+    return {ok: true, status: 200, url, headers: new Headers(),
+      arrayBuffer: async () => new TextEncoder().encode('{"token":"bearer-secret"}').buffer};
+  };
+  assert.equal(await verifyOciReadAccess(validated, username, 'workflow-token', fetcher), 'PASS');
+  const basic = requests.find(request => request.url.startsWith('https://ghcr.io/token?')).options.headers.Authorization;
+  assert.equal(Buffer.from(basic.slice('Basic '.length), 'base64').toString('utf8'), `${username}:workflow-token`);
+
+  const workflowPath = fileURLToPath(new URL('../.github/workflows/gpoint-deploy.yml', import.meta.url));
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  assert.match(workflow, /GHCR_READ_USERNAME:\s*\$\{\{\s*github\.actor\s*\}\}/);
+  assert.match(workflow, /GHCR_READ_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}/);
+});
+
+test('GHCR username validation permits GitHub Actions bot identity and rejects shell metacharacters', async () => {
+  const validated = validateOciReceipt(receipt(), sha, { runId: 123, runAttempt: 1 });
+  assert.doesNotThrow(() => createOciPullScript(validated, sha, {username: 'github-actions[bot]'}));
+  assert.throws(() => createOciPullScript(validated, sha, {username: "bad';touch /tmp/pwned;#"}), /username/i);
+  await assert.rejects(verifyOciReadAccess(validated, "bad';touch /tmp/pwned;#", 'token', fetch), /GHCR exact-digest read check failed/);
 });
 
 test('post-switch proof checks local tags against the same exact OCI digests and config IDs', () => {
