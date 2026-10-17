@@ -232,6 +232,7 @@ jobs:
     outputs:
       status: ${{ steps.execute.outputs.status }}
       snapshot_sha256: ${{ steps.execute.outputs.snapshot_sha256 }}
+      diagnostic_bundle: ${{ steps.package.outputs.recovery_diagnostic_bundle }}
     env:
       CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
       PREPARE_RUN_ID: ${{ needs.validate.outputs.run_id }}
@@ -300,17 +301,42 @@ jobs:
           GPOINT_RECOVERY_FAILURE_RUN_ATTEMPT: ${{ inputs.recovery_failure_run_attempt }}
           GPOINT_RECOVERY_EXECUTOR_SHA: ${{ github.sha }}
         run: node scripts/automated-release.mjs
-      - name: Preserve read-only snapshot and receipt as workflow artifact
+      - name: Package bounded read-only diagnostic evidence for isolated publisher
+        id: package
         if: always()
-        uses: actions/upload-artifact@v4
+        env:
+          GPOINT_RECOVERY_EXECUTOR_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f "$GPOINT_RECOVERY_SNAPSHOT_PATH" && -f "$RELEASE_RESULT" && -f "$GPOINT_RECOVERY_DIAGNOSTIC_MANIFEST" ]]; then
+            python3 scripts/release_assets.py package-recovery-diagnostics
+          else
+            echo 'RECOVERY_DIAGNOSTIC_BUNDLE=NOT_CREATED'
+          fi
+
+  publish-recovery-diagnostics:
+    needs: [validate, recovery-diagnostics]
+    if: always() && needs.validate.result == 'success' && needs.recovery-diagnostics.outputs.diagnostic_bundle != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # GITHUB_TOKEN contents:write is repository-wide; the script's diagnostic
+    # tag allowlist is not a credential boundary. Integration needs an enforced
+    # ref protection or a separate narrowly scoped evidence publisher/repository.
+    permissions:
+      contents: write
+    env:
+      GITHUB_SHA: ${{ github.sha }}
+      GITHUB_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ github.token }}
+      RECOVERY_DIAGNOSTICS_BUNDLE_B64: ${{ needs.recovery-diagnostics.outputs.diagnostic_bundle }}
+    steps:
+      - uses: actions/checkout@v4
         with:
-          name: gpoint-me38-recovery-readonly-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/gpoint-recovery-snapshot-${{ github.run_id }}-${{ github.run_attempt }}.json
-            ${{ runner.temp }}/gpoint-recovery-result-${{ github.run_id }}-${{ github.run_attempt }}.json
-            ${{ runner.temp }}/gpoint-recovery-ledger-${{ github.run_id }}-${{ github.run_attempt }}/manifests/gpoint-recovery-diagnostics-*.json
-          if-no-files-found: warn
-          retention-days: 90
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Publish verified immutable recovery diagnostic Release
+        run: python3 scripts/release_assets.py publish-recovery-diagnostics
 
   publish:
     permissions:

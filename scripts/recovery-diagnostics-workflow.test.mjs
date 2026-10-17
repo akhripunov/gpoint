@@ -8,14 +8,23 @@ const workflow = fs.readFileSync(new URL('../.github/workflows/gpoint-deploy.yml
 const releaseEntrypoint = fs.readFileSync(new URL('./automated-release.mjs', import.meta.url), 'utf8');
 const canonicalRelease = fs.readFileSync(new URL('./release-gpoint.mjs', import.meta.url), 'utf8');
 const start = workflow.indexOf('  recovery-diagnostics:\n');
-const end = workflow.indexOf('\n  publish:\n', start);
+const end = workflow.indexOf('\n  publish-recovery-diagnostics:\n', start);
 const diagnosticJob = workflow.slice(start, end);
 
-test('recovery diagnostics workflow is read-only and artifacts are uploaded without ledger publication', () => {
+test('recovery diagnostics remains read-only and publishes through isolated immutable Release job', () => {
   assert.ok(start >= 0 && end > start);
   assert.match(diagnosticJob, /permissions:\n\s+contents: read\n\s+actions: read\n\s+packages: read/);
   assert.doesNotMatch(diagnosticJob, /contents: write|release_assets\.py publish evidence|--apply|--finalize-recovery/);
-  assert.match(diagnosticJob, /actions\/upload-artifact@v4/);
+  assert.doesNotMatch(diagnosticJob, /actions\/(?:upload|download)-artifact/);
+  assert.match(diagnosticJob, /permissions:\n\s+contents: read\n\s+actions: read\n\s+packages: read/);
+  assert.match(diagnosticJob, /diagnostic_bundle: \$\{\{ steps\.package\.outputs\.recovery_diagnostic_bundle \}\}/);
+  const publisher = workflow.split('  publish-recovery-diagnostics:\n', 2)[1]?.split('\n  publish:\n', 1)[0];
+  assert.ok(publisher, 'separate diagnostic release publisher is required');
+  assert.match(publisher, /permissions:\n\s+contents: write/);
+  assert.match(publisher, /needs: \[validate, recovery-diagnostics\]/);
+  assert.match(publisher, /release_assets\.py publish-recovery-diagnostics/);
+  assert.doesNotMatch(publisher, /GPOINT_RELEASE_BUNDLE|GHCR_READ_TOKEN|GITHUB_ENV.*(?:VPS|DB)/);
+  assert.match(workflow, /RECOVERY_DIAGNOSTICS_BUNDLE_B64: \$\{\{ needs\.recovery-diagnostics\.outputs\.diagnostic_bundle \}\}/);
   assert.match(workflow, /if: inputs\.mode != 'recovery-diagnostics'/);
   assert.match(workflow, /if: always\(\).*inputs\.mode != 'recovery-diagnostics'/);
   assert.match(workflow, /snapshot_sha256: \${{ steps\.execute\.outputs\.snapshot_sha256 }}/);
@@ -30,6 +39,7 @@ test('recovery diagnostics workflow is read-only and artifacts are uploaded with
   assert.match(releaseEntrypoint, /snapshot_sha256=\$\{evidence\.recoverySnapshot\?\.snapshotSha256/);
   assert.match(canonicalRelease, /const liveSha = facts\.LIVE_RELEASE_ENV_SHA;[\s\S]*liveSha !== expected\.runtimeSha/);
   assert.match(canonicalRelease, /if \(recoveryReadOnlyDiagnostics\) return recoveryDiagnostics\(candidateSha\(args\)\);/);
+  assert.match(canonicalRelease, /recoveryFinalizationIdentityFromFailureEvidence\(incident\.manifest, incident\.result, candidate\)/);
 });
 
 test('recovery diagnostics selector receives the pinned incident run identity', () => {

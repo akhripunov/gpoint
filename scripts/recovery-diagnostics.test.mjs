@@ -45,6 +45,10 @@ test('recovery-only diagnostics accepts only the known runtime/ledger drift and 
   assert.equal(result.factsComplete, true);
   assert.ok(result.blockers.includes('FINALIZATION_REQUIRES_SEPARATE_OWNER_AUTHORIZATION'));
   assert.equal(result.releaseState, 'RECOVERY_DIAGNOSTICS_ONLY');
+  assert.equal(result.checks.runtime, 'PASS');
+  assert.equal(result.checks.database, 'PASS');
+  assert.equal(result.checks.mutationBoundary, 'PASS');
+  assert.equal(result.checks.finalization, 'BLOCKED');
   assert.equal(verifyRecoveryDiagnosticsSnapshot(result), true);
   assert.equal(verifyRecoveryDiagnosticsSnapshot({ ...result, drift: { ...result.drift, ledgerSha: candidateSha } }), false);
 });
@@ -64,6 +68,8 @@ test('incomplete readback is explicitly incomplete and cannot become a usable sn
   const result = buildRecoveryDiagnosticsSnapshot(input);
   assert.equal(result.status, 'INCOMPLETE');
   assert.ok(result.missingEvidence.includes('runtime.migrationHeads.gsales'));
+  assert.equal(result.checks.database, 'NOT_VERIFIED');
+  assert.equal(result.checks.finalization, 'BLOCKED');
   assert.equal(result.finalizationReady, false);
 });
 
@@ -91,6 +97,7 @@ test('missing protected backup is recorded as a fact but blocks finalization rea
   assert.equal(result.backup.status, 'MISSING');
   assert.equal(result.finalizationReady, false);
   assert.ok(result.blockers.includes('PROTECTED_BACKUP_MISSING'));
+  assert.equal(result.checks.backup, 'BLOCKED');
 });
 
 test('diagnostic execution writes only the snapshot and rejects production mutations', async () => {

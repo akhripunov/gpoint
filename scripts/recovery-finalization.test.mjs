@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {decideRecoveryFinalizationStep, recoveryFinalizationIdentity, runRecoveryFinalization,
+import {decideRecoveryFinalizationStep, recoveryFinalizationIdentity, recoveryFinalizationIdentityFromFailureEvidence, runRecoveryFinalization,
   validateRecoveryFinalizationApproval, assertNoConcurrentRelease} from './recovery-finalization.mjs';
 
 const candidate = 'd'.repeat(40);
@@ -73,6 +73,16 @@ test('finalization identity is deterministic and binds the original incident', (
     reconciliationManifestName: 'gpoint-recovery-reconcile-20261017T064101334Z.json',
   });
   assert.deepEqual(recoveryFinalizationIdentity(releaseId, candidate), identity);
+});
+
+test('diagnostic identity uses the verified canonical failure manifest releaseId, not the numeric run id', () => {
+  const manifest = {releaseId, candidateSha: candidate, status: 'RECOVERY_REQUIRED', failureStage: 'POST_SWITCH'};
+  const result = {releaseId, candidateSha: candidate};
+  assert.deepEqual(recoveryFinalizationIdentityFromFailureEvidence(manifest, result, candidate), identity);
+  assert.throws(() => recoveryFinalizationIdentityFromFailureEvidence(manifest, result, '39010750184'), /candidate SHA/);
+  assert.throws(() => recoveryFinalizationIdentityFromFailureEvidence(manifest, {...result, releaseId: '39010750184'}, candidate), /release identity mismatch/);
+  assert.throws(() => recoveryFinalizationIdentityFromFailureEvidence({...manifest, releaseId: undefined}, result, candidate), /release identity mismatch/);
+  assert.throws(() => recoveryFinalizationIdentityFromFailureEvidence({...manifest, releaseId: '39010750184'}, {...result, releaseId: '39010750184'}, candidate), /failed release identity/);
 });
 
 test('stale COMPLETE ledger is reconciled before production tag or final state writes', () => {
