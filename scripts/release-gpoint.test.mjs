@@ -1035,7 +1035,7 @@ test('recovery backup verification binds the unique shared PostgreSQL and immuta
   fs.writeFileSync(file, 'synthetic custom-format archive');
   fs.chmodSync(file, 0o600);
   const dockerId = 'b'.repeat(64);
-  fs.writeFileSync(path.join(bin, 'stat'), '#!/bin/sh\n[ "$1" = "-c" ] && [ "$2" = "%a" ] || exit 2\nexec /usr/bin/stat -f %Lp "$3"\n', {mode: 0o700});
+  fs.writeFileSync(path.join(bin, 'stat'), "#!/bin/sh\n[ \"$1\" = \"-c\" ] && [ \"$2\" = \"%a\" ] || exit 2\nexec python3 -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777)[2:])' \"$3\"\n", {mode: 0o700});
   fs.writeFileSync(path.join(bin, 'sha256sum'), '#!/bin/sh\nexec /usr/bin/shasum -a 256 "$1"\n', {mode: 0o700});
   fs.writeFileSync(path.join(bin, 'docker'), `#!/bin/sh
 case "$1" in
