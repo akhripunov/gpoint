@@ -4,8 +4,54 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { canCreateProductionRef, checkAgataEffectiveConfig, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, cleanupLocalPackageCaches, evaluateSafetyGates, failureEvidence, isTransientGitHubTransportFailure, localDiskDecision, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runLocalDiskPreflight, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, validateMacWorkerStatus, verifiedRuntimeState } from './release-gpoint.mjs';
+import { canCreateProductionRef, checkAgataEffectiveConfig, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, cleanupLocalPackageCaches, evaluateSafetyGates, failureEvidence, githubLedgerGitEnvironment, isTransientGitHubTransportFailure, localDiskDecision, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runLocalDiskPreflight, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, validateMacWorkerStatus, verifiedRuntimeState } from './release-gpoint.mjs';
 import { agataInternalConfigProvisionCommand, agataPreSwitchReadinessCommand, agataProviderRuntimeCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, cleanupTemporaryWorktree, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, migrationPendingFromPreflight, parseAgataRuntimeIdentityLine, planReleaseRetention, productionPreflightCommand, resolveRunnerPath, runAuthorizedMutationPlan, runCleanupCommand, runRemoteCommand, runWithPreExecRetry, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataProviderMode, validateAgataRuntimeIdentity, validateRuntimeIdentity, remoteCommandEnvironment } from './release-gpoint-vps-adapter.mjs';
+
+test('GitHub token is attached only to exact production-ledger Git operations', () => {
+  const token = 'ephemeral-test-token';
+  const base = {GITHUB_TOKEN: token, GH_TOKEN: token, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'safe.directory', GIT_CONFIG_VALUE_0: '*'};
+  for (const args of [
+    ['ls-remote', 'origin', 'refs/heads/gpoint-release-ledger'],
+    ['fetch', '--quiet', 'origin', 'refs/heads/gpoint-release-ledger'],
+    ['push', 'origin', `${'a'.repeat(40)}:refs/heads/gpoint-release-ledger`],
+  ]) {
+    const env = githubLedgerGitEnvironment(args, token, base);
+    assert.equal(env.GITHUB_TOKEN, undefined);
+    assert.equal(env.GH_TOKEN, undefined);
+    assert.equal(env.GIT_TERMINAL_PROMPT, '0');
+    assert.equal(env.GIT_CONFIG_COUNT, '4');
+    assert.equal(env.GIT_CONFIG_KEY_1, 'credential.helper');
+    assert.equal(env.GIT_CONFIG_VALUE_1, '');
+    assert.equal(env.GIT_CONFIG_KEY_2, 'http.https://github.com/.extraheader');
+    assert.equal(env.GIT_CONFIG_VALUE_2, '');
+    assert.equal(env.GIT_CONFIG_KEY_3, 'http.https://github.com/.extraheader');
+    assert.equal(env.GIT_CONFIG_VALUE_3, `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`);
+    assert.equal(JSON.stringify(env).includes(token), false);
+    const resolvedHeader = spawnSync('git', ['config', '--get-urlmatch', 'http.extraheader', 'https://github.com/akhripunov/gpoint.git'], {encoding: 'utf8', env});
+    assert.equal(resolvedHeader.status, 0);
+    assert.equal(resolvedHeader.stdout.trim(), env.GIT_CONFIG_VALUE_3);
+  }
+  const unrelated = githubLedgerGitEnvironment(['ls-remote', 'origin', 'refs/heads/main'], token, base);
+  assert.equal(unrelated.GIT_CONFIG_COUNT, '1');
+  assert.equal(unrelated.GIT_CONFIG_KEY_1, undefined);
+  assert.equal(unrelated.GITHUB_TOKEN, undefined);
+  assert.equal(unrelated.GH_TOKEN, undefined);
+});
+
+test('ledger Git auth fails closed without a token and for noncanonical ledger writes', () => {
+  assert.throws(() => githubLedgerGitEnvironment(['ls-remote', 'origin', 'refs/heads/gpoint-release-ledger'], '', {}), /GITHUB_TOKEN is required/);
+  const otherBranch = githubLedgerGitEnvironment(['push', 'origin', `${'a'.repeat(40)}:refs/heads/main`], 'token', {});
+  assert.equal(otherBranch.GIT_CONFIG_KEY_1, undefined);
+  assert.throws(() => githubLedgerGitEnvironment(['push', 'origin', 'HEAD:refs/heads/gpoint-release-ledger'], 'token', {}), /not authorized/);
+});
+
+test('Deploy workflow uses its scoped GITHUB_TOKEN for GHCR and keeps checkout credentials disabled', () => {
+  const workflow = fs.readFileSync(new URL('../.github/workflows/gpoint-deploy.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /deploy:\n[\s\S]*?permissions:\n\s+contents: write\n\s+actions: read\n\s+packages: read/);
+  assert.match(workflow, /GHCR_READ_TOKEN: \$\{\{ github\.token \}\}/);
+  assert.doesNotMatch(workflow, /GHCR_READ_TOKEN: \$\{\{ secrets\.GHCR_READ_TOKEN \}\}/);
+  assert.match(workflow, /persist-credentials: false/);
+});
 
 test('temporary worktree cleanup uses git metadata removal when available', () => {
   const calls = [];
