@@ -307,6 +307,62 @@ class ImmutableReleaseTests(unittest.TestCase):
         self.assertEqual(attempt, '1')
         self.assertEqual(asset['id'], 99)
 
+    def test_recovery_finalization_evidence_publisher_keeps_executor_and_candidate_independent(self):
+        executor = 'e' * 40
+        candidate = 'd367c2ec24242a733dbb2c4145c91d2d4682ba2c'
+        run_id, attempt = '39058724038', '1'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = root / 'result.json'
+            evidence = root / 'evidence'
+            evidence.mkdir()
+            (evidence / 'recovery.json').write_text('{"eventType":"RECOVERY_FINALIZATION"}\n')
+            result.write_text(json.dumps({'candidateSha': candidate, 'automationRunId': run_id,
+                                          'automationRunAttempt': attempt}))
+            env = {'GITHUB_REPOSITORY': ASSETS.REPO, 'GITHUB_SHA': executor,
+                   'GITHUB_EVENT_NAME': 'workflow_dispatch',
+                   'GITHUB_WORKFLOW_REF': f'{ASSETS.REPO}/.github/workflows/gpoint-deploy.yml@refs/heads/main',
+                   'CANDIDATE_SHA': candidate, 'RELEASE_MODE': 'recovery-finalization',
+                   'GITHUB_RUN_ID': run_id, 'GITHUB_RUN_ATTEMPT': attempt,
+                   'RELEASE_RESULT': str(result), 'GPOINT_RELEASE_EVIDENCE': str(evidence)}
+            commands = []
+            with patch.dict('os.environ', env, clear=True), \
+                 patch.object(ASSETS.subprocess, 'check_output', return_value=executor), \
+                 patch.object(ASSETS, 'gh', side_effect=lambda *args: commands.append(args) or ''), \
+                 patch.object(ASSETS, 'github', return_value={}), \
+                 patch.object(ASSETS, 'resolve_asset', return_value={'digest': 'sha256:' + 'a' * 64}), \
+                 patch('prepared_artifact_cache.checksum', return_value='a' * 64):
+                ASSETS.publish('evidence', candidate, run_id, attempt)
+            self.assertEqual(commands[0][0:3], ('api', '--method', 'POST'))
+            self.assertIn(f'ref=refs/tags/{ASSETS.release_tag("evidence", candidate, run_id, attempt)}', commands[0])
+            self.assertIn(f'sha={candidate}', commands[0])
+
+            for changed in [
+                {'GITHUB_SHA': candidate},
+                {'GITHUB_WORKFLOW_REF': f'{ASSETS.REPO}/.github/workflows/other.yml@refs/heads/main'},
+                {'GITHUB_EVENT_NAME': 'push'},
+                {'CANDIDATE_SHA': executor},
+            ]:
+                invalid_env = {**env, **changed}
+                commands.clear()
+                with patch.dict('os.environ', invalid_env, clear=True), \
+                     patch.object(ASSETS.subprocess, 'check_output', return_value=executor), \
+                     patch.object(ASSETS, 'gh', side_effect=lambda *args: commands.append(args) or ''):
+                    with self.assertRaisesRegex(RuntimeError, 'source or independent candidate identity'):
+                        ASSETS.publish('evidence', candidate, run_id, attempt)
+                self.assertEqual(commands, [])
+
+    def test_ordinary_evidence_publisher_still_requires_exact_candidate_checkout(self):
+        candidate = 'd' * 40
+        with patch.dict('os.environ', {'GITHUB_REPOSITORY': ASSETS.REPO,
+                                      'GITHUB_SHA': 'e' * 40,
+                                      'RELEASE_MODE': 'production'}, clear=True), \
+             patch.object(ASSETS.subprocess, 'check_output', return_value='e' * 40), \
+             patch.object(ASSETS, 'gh') as gh:
+            with self.assertRaisesRegex(RuntimeError, 'Only exact GPoint workflow source'):
+                ASSETS.publish('evidence', candidate, '55', '1')
+        gh.assert_not_called()
+
     def test_failed_newer_deploy_must_not_borrow_older_evidence(self):
         sha = 'a' * 40
         def api(route):

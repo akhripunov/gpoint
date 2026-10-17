@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createRecoveryActiveDeploysFile, readRecoveryActiveDeploysFile } from './recovery-active-deploys.mjs';
-import { canCreateProductionRef, checkAgataEffectiveConfig, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, cleanupLocalPackageCaches, evaluateSafetyGates, failureEvidence, githubLedgerGitEnvironment, githubProductionTagGitEnvironment, githubSourceGitEnvironment, isTransientGitHubTransportFailure, localDiskDecision, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runLocalDiskPreflight, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, validateMacWorkerStatus, validateRecoveryBackup, verifiedRuntimeState } from './release-gpoint.mjs';
+import { buildRecoveryDiagnosticsSnapshot } from './recovery-diagnostics.mjs';
+import { canCreateProductionRef, canonicalRecoveryRunId, checkAgataEffectiveConfig, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, cleanupLocalPackageCaches, evaluateSafetyGates, failureEvidence, githubLedgerGitEnvironment, githubProductionTagGitEnvironment, githubSourceGitEnvironment, isTransientGitHubTransportFailure, localDiskDecision, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runLocalDiskPreflight, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, validateImmutableRecoveryFailure, validateMacWorkerStatus, validateRecoveryBackup, verifiedRuntimeState } from './release-gpoint.mjs';
 import { agataInternalConfigProvisionCommand, agataPreSwitchReadinessCommand, agataProviderRuntimeCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, cleanupTemporaryWorktree, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, migrationPendingFromPreflight, parseAgataRuntimeIdentityLine, planReleaseRetention, productionPreflightCommand, resolveRunnerPath, runAuthorizedMutationPlan, runCleanupCommand, runRemoteCommand, runWithPreExecRetry, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataProviderMode, validateAgataRuntimeIdentity, validateRuntimeIdentity, remoteCommandEnvironment } from './release-gpoint-vps-adapter.mjs';
 
 test('GitHub token is attached only to exact production-ledger Git operations', () => {
@@ -37,6 +39,71 @@ test('GitHub token is attached only to exact production-ledger Git operations', 
   assert.equal(unrelated.GIT_CONFIG_KEY_1, undefined);
   assert.equal(unrelated.GITHUB_TOKEN, undefined);
   assert.equal(unrelated.GH_TOKEN, undefined);
+});
+
+test('recovery provenance accepts safe numeric and string Prepare run IDs and rejects invalid identities', () => {
+  const candidate = 'd367c2ec24242a733dbb2c4145c91d2d4682ba2c';
+  const baseline = 'a700198a843c12a84f2e537178de752e3eddd54d';
+  const manifest = {status: 'RECOVERY_REQUIRED', failureStage: 'POST_SWITCH', releaseId: 'gpoint-release-20261017T064101334Z',
+    candidateSha: candidate, previousProductionSha: baseline, productionShaAfter: null, productionRef: null,
+    failureReason: 'post-switch verification failed', fileName: 'gpoint-release-20261017T064101334Z.json'};
+  const manifestBytes = Buffer.from(JSON.stringify(manifest));
+  const makeEvidence = ({prepareRunId = '39009939478', prepareSummaryRunId = '39009939478', receiptRunId = 39009939478,
+    receiptAttempt = 1, receiptStatus = 'READY', receiptTransport = 'ghcr-oci'} = {}) => ({
+    run: {id: '39010750184', attempt: '1', headSha: candidate},
+    result: {candidateSha: candidate, status: 'RECOVERY_REQUIRED', releaseState: 'RECOVERY_REQUIRED',
+      failureStage: 'POST_SWITCH', productionRef: null, productionBaselineSha: baseline,
+      previousProductionSha: baseline, releaseId: manifest.releaseId, failureReason: manifest.failureReason,
+      prepareRunId, prepareRunAttempt: '1'},
+    prepare: {runId: prepareSummaryRunId, attempt: 1, candidateSha: candidate, status: 'success',
+      receipt: {candidateSha: candidate, runId: receiptRunId, runAttempt: receiptAttempt,
+        status: receiptStatus, schema: 3, transport: receiptTransport}},
+    failureManifestBytesBase64: manifestBytes.toString('base64'),
+    failureManifestSha256: crypto.createHash('sha256').update(manifestBytes).digest('hex'),
+  });
+  assert.equal(canonicalRecoveryRunId(39009939478), '39009939478');
+  assert.equal(canonicalRecoveryRunId('39009939478'), '39009939478');
+  const validated = validateImmutableRecoveryFailure(makeEvidence(), candidate,
+    {expectedRun: '39010750184', expectedAttempt: '1', dbRiskBaselineSha: baseline});
+  assert.equal(validated.baselineSha, baseline);
+  const now = new Date().toISOString();
+  const diagnosticInput = {
+    observedAt: now, candidateSha: candidate,
+    incident: {runId: '39010750184', attempt: '1', candidateSha: candidate, baselineSha: baseline,
+      failureStage: 'POST_SWITCH', status: 'RECOVERY_REQUIRED', manifestSha256: validated.imported.failureManifestSha256},
+    incidentEvidence: {observedAt: now, verified: true, runId: '39010750184', attempt: '1',
+      assetSha256: 'a'.repeat(64), resultAssetSha256: 'b'.repeat(64), prepareBundleDigest: 'c'.repeat(64),
+      prepareRunId: '39009939478', prepareRunAttempt: '1'},
+    ledger: {observedAt: now, headSha: '1'.repeat(40), productionSha: baseline, stateSha256: '2'.repeat(64),
+      refTargetSha: baseline, state: {currentProductionSha: baseline, recoveryRequired: false}},
+    runtime: {observedAt: now, releaseEnvSha: candidate, miniappSha: candidate, databaseReadOnlyQueryExitCode: 0,
+      services: Object.fromEntries(['api', 'worker', 'bot', 'agata-api', 'agata-memory-worker', 'gsales-api']
+        .map(name => [name, {running: true, sourceSha: candidate, imageId: `sha256:${'3'.repeat(64)}`, health: 'healthy'}])),
+      migrationHeads: {prisma: 'prisma-head', agata: 'agata-head', gsales: 'gsales-head', gsalesMigrationSha256: '4'.repeat(64)}},
+    workers: {observedAt: now, lanes: Object.fromEntries(['GPOINT', 'GSALES'].map(lane => [lane,
+      {status: 'HEALTHY', sourceId: `agata-worker-queue-status-v1:${lane.toLowerCase()}`,
+        snapshotAt: now, pending: 0, running: 0, queueSnapshotState: 'VERIFIED'}]))},
+    backup: {observedAt: now, status: 'MISSING'},
+    locks: {observedAt: now, local: {checked: true, held: false}, github: {checked: true, activeConflicts: 0}},
+    productionTag: {observedAt: now, baselineTagChecked: true, candidateTagChecked: true,
+      name: 'gpoint-production-20261016T120000000Z', targetSha: baseline,
+      candidateTagName: 'gpoint-production-20261017T064101334Z', candidateTagTargetSha: null},
+  };
+  const snapshot = buildRecoveryDiagnosticsSnapshot(diagnosticInput);
+  assert.equal(snapshot.status, 'FACTS_COMPLETE');
+  assert.equal(snapshot.checks.incidentEvidence, 'PASS');
+  assert.equal(snapshot.checks.mutationBoundary, 'PASS');
+  assert.equal(snapshot.finalizationReady, false);
+  for (const invalid of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '0', '039009939478',
+    '9007199254740992', 'not-a-run-id', null])
+    assert.equal(canonicalRecoveryRunId(invalid), null);
+  for (const evidence of [makeEvidence({prepareRunId: '39009939479'}),
+    makeEvidence({prepareSummaryRunId: 'bad'}), makeEvidence({receiptRunId: 'bad'}),
+    makeEvidence({receiptRunId: '39009939479'}), makeEvidence({receiptAttempt: 2}),
+    makeEvidence({receiptStatus: 'FAILED'}), makeEvidence({receiptTransport: 'archive'})]) {
+    assert.throws(() => validateImmutableRecoveryFailure(evidence, candidate,
+      {expectedRun: '39010750184', expectedAttempt: '1', dbRiskBaselineSha: baseline}), /original immutable Prepare receipt/);
+  }
 });
 
 test('ledger Git child starts with a large recovery inventory without inheriting it', () => {
