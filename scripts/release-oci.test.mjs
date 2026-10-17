@@ -1,14 +1,25 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {createHash} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import { validateOciReceipt, createOciPullScript, createOciVerifyScript,
   verifyOciReadAccess } from './release-oci.mjs';
 
 const sha = 'a'.repeat(40);
-const digest = 'sha256:' + 'b'.repeat(64);
 const configDigest = 'sha256:' + 'c'.repeat(64);
-const receipt = () => ({
+const manifestJson = (config = configDigest) => JSON.stringify({
+  schemaVersion: 2,
+  mediaType: 'application/vnd.oci.image.manifest.v1+json',
+  config: { mediaType: 'application/vnd.oci.image.config.v1+json', digest: config, size: 1 },
+  layers: [],
+});
+const digestOf = (value) => `sha256:${createHash('sha256').update(value).digest('hex')}`;
+const digest = digestOf(manifestJson());
+const receipt = (manifestDigest = digest) => ({
   schema: 3,
   status: 'READY',
   candidateSha: sha,
@@ -19,7 +30,7 @@ const receipt = () => ({
     ['app', 'gpoint-runtime'], ['agata', 'gpoint-agata-runtime'], ['gsales', 'gpoint-g-sales-runtime'],
   ].map(([role, name]) => [role, {
     repository: `ghcr.io/akhripunov/${name}`,
-    digest,
+    digest: manifestDigest,
     configDigest,
     sourceSha: sha,
     platform: 'linux/amd64',
@@ -72,6 +83,145 @@ test('pull plan addresses exact digests, verifies labels, and never embeds crede
   assert.throws(() => createOciPullScript(validated, 'd'.repeat(40)), /candidate/i);
 });
 
+test('GHCR pull verifies the manifest config descriptor before accepting Docker image-store identity', () => {
+  const validated = validateOciReceipt(receipt(), sha, { runId: 123, runAttempt: 1 });
+  const script = createOciPullScript(validated, sha, { username: 'akhripunov' });
+  assert.match(script, /docker buildx imagetools inspect --raw/);
+  assert.match(script, /GHCR_CONFIG_DIGEST_MISMATCH/);
+  assert.match(script, /GHCR_IMAGE_ID_MISMATCH/);
+  assert.match(script, /RepoDigests/);
+});
+
+test('GHCR pull accepts Docker image stores that report the verified manifest digest as Id', () => {
+  const validated = validateOciReceipt(receipt(), sha, { runId: 123, runAttempt: 1 });
+  const script = createOciPullScript(validated, sha, { username: 'akhripunov' });
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-oci-test-'));
+  try {
+    const docker = path.join(root, 'docker');
+    fs.writeFileSync(docker, `#!/bin/sh
+set -eu
+case "$1 $2" in
+  'login ghcr.io') cat >/dev/null; exit 0 ;;
+  'logout ghcr.io') exit 0 ;;
+  'buildx imagetools')
+    case "$5" in
+      *"@$FAKE_CHILD_DIGEST") printf '%s' "$FAKE_CHILD_MANIFEST" ;;
+      *) printf '%s' "$FAKE_MANIFEST" ;;
+    esac
+    exit 0 ;;
+  'pull '*) exit 0 ;;
+  'image inspect')
+    ref=$3
+    format=$5
+    case "$format" in
+      '{{.Os}}/{{.Architecture}}') printf '%s\\n' "\${FAKE_PLATFORM:-linux/amd64}" ;;
+      '{{.Id}}') printf '%s\\n' "$FAKE_IMAGE_ID" ;;
+      '{{index .Config.Labels "org.opencontainers.image.revision"}}') printf '%s\\n' "$FAKE_REVISION" ;;
+      '{{index .Config.Labels "org.opencontainers.image.source"}}') printf '%s\\n' "\${FAKE_SOURCE:-https://github.com/akhripunov/gpoint}" ;;
+      '{{range .RepoDigests}}{{println .}}{{end}}') printf '%s\\n' "$ref" ;;
+      *) exit 90 ;;
+    esac
+    ;;
+  'image tag') exit 0 ;;
+  *) exit 91 ;;
+esac
+`);
+    fs.chmodSync(docker, 0o755);
+    const run = (scriptText, imageId, rawManifest = manifestJson(), overrides = {}) => spawnSync('/bin/bash', ['-c', scriptText], {
+      encoding: 'utf8',
+      input: 'dummy-read-only-token',
+      env: {
+        ...process.env,
+        PATH: `${root}:${process.env.PATH}`,
+        FAKE_MANIFEST: rawManifest,
+        FAKE_CHILD_MANIFEST: overrides.FAKE_CHILD_MANIFEST || '',
+        FAKE_CHILD_DIGEST: overrides.FAKE_CHILD_DIGEST || 'no-child-manifest',
+        FAKE_IMAGE_ID: imageId,
+        FAKE_REVISION: sha,
+        ...overrides,
+      },
+    });
+
+    const result = run(script, digest);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /GPOINT_GHCR_IMAGES_VERIFIED=YES/);
+    assert.doesNotMatch(result.stdout + result.stderr, /dummy-read-only-token/);
+
+    const configIdStore = run(script, configDigest);
+    assert.equal(configIdStore.status, 0, configIdStore.stderr);
+    assert.match(configIdStore.stdout, /GPOINT_GHCR_IMAGES_VERIFIED=YES/);
+
+    const childManifest = manifestJson();
+    const childDigest = digestOf(childManifest);
+    const indexManifest = JSON.stringify({ schemaVersion: 2, mediaType: 'application/vnd.oci.image.index.v1+json',
+      manifests: [{ digest: childDigest, platform: { os: 'linux', architecture: 'amd64' } }] });
+    const indexDigest = digestOf(indexManifest);
+    const indexScript = createOciPullScript(
+      validateOciReceipt(receipt(indexDigest), sha, { runId: 123, runAttempt: 1 }), sha,
+      { username: 'akhripunov' },
+    );
+    const indexPull = run(indexScript, indexDigest, indexManifest, {
+      FAKE_CHILD_MANIFEST: childManifest, FAKE_CHILD_DIGEST: childDigest,
+    });
+    assert.equal(indexPull.status, 0, indexPull.stderr);
+    assert.match(indexPull.stdout, /GPOINT_GHCR_IMAGES_VERIFIED=YES/);
+
+    const wrongChildManifest = manifestJson('sha256:' + 'd'.repeat(64));
+    const wrongChildDigest = digestOf(wrongChildManifest);
+    const wrongIndexManifest = JSON.stringify({ schemaVersion: 2, mediaType: 'application/vnd.oci.image.index.v1+json',
+      manifests: [{ digest: wrongChildDigest, platform: { os: 'linux', architecture: 'amd64' } }] });
+    const wrongIndexDigest = digestOf(wrongIndexManifest);
+    const wrongIndexScript = createOciPullScript(
+      validateOciReceipt(receipt(wrongIndexDigest), sha, { runId: 123, runAttempt: 1 }), sha,
+      { username: 'akhripunov' },
+    );
+    const badIndexConfig = run(wrongIndexScript, wrongIndexDigest, wrongIndexManifest, {
+      FAKE_CHILD_MANIFEST: wrongChildManifest, FAKE_CHILD_DIGEST: wrongChildDigest,
+    });
+    assert.notEqual(badIndexConfig.status, 0);
+    assert.match(badIndexConfig.stdout + badIndexConfig.stderr, /GHCR_CONFIG_DIGEST_MISMATCH/);
+
+    const tamperedRoot = run(script, digest, manifestJson().replace(configDigest, 'sha256:' + 'd'.repeat(64)));
+    assert.notEqual(tamperedRoot.status, 0);
+    assert.match(tamperedRoot.stdout + tamperedRoot.stderr, /GHCR_MANIFEST_DIGEST_OR_CONTENT_MISMATCH/);
+
+    const tamperedChild = run(indexScript, indexDigest, indexManifest, {
+      FAKE_CHILD_MANIFEST: childManifest.replace(configDigest, 'sha256:' + 'd'.repeat(64)),
+      FAKE_CHILD_DIGEST: childDigest,
+    });
+    assert.notEqual(tamperedChild.status, 0);
+    assert.match(tamperedChild.stdout + tamperedChild.stderr, /GHCR_CHILD_MANIFEST_DIGEST_OR_CONTENT_MISMATCH/);
+
+    const wrongConfig = manifestJson('sha256:' + 'd'.repeat(64));
+    const wrongConfigDigest = digestOf(wrongConfig);
+    const wrongConfigScript = createOciPullScript(
+      validateOciReceipt(receipt(wrongConfigDigest), sha, { runId: 123, runAttempt: 1 }), sha,
+      { username: 'akhripunov' },
+    );
+    const badConfig = run(wrongConfigScript, wrongConfigDigest, wrongConfig);
+    assert.notEqual(badConfig.status, 0);
+    assert.match(badConfig.stdout + badConfig.stderr, /GHCR_CONFIG_DIGEST_MISMATCH/);
+
+    const badImageId = run(script, 'sha256:' + 'e'.repeat(64));
+    assert.notEqual(badImageId.status, 0);
+    assert.match(badImageId.stdout + badImageId.stderr, /GHCR_IMAGE_ID_MISMATCH/);
+
+    const badPlatform = run(script, configDigest, manifestJson(), { FAKE_PLATFORM: 'linux/arm64' });
+    assert.notEqual(badPlatform.status, 0);
+    assert.match(badPlatform.stdout + badPlatform.stderr, /GHCR_PLATFORM_MISMATCH/);
+
+    const badRevision = run(script, configDigest, manifestJson(), { FAKE_REVISION: 'd'.repeat(40) });
+    assert.notEqual(badRevision.status, 0);
+    assert.match(badRevision.stdout + badRevision.stderr, /GHCR_REVISION_LABEL_MISMATCH/);
+
+    const badSource = run(script, configDigest, manifestJson(), { FAKE_SOURCE: 'https://attacker.invalid/repository' });
+    assert.notEqual(badSource.status, 0);
+    assert.match(badSource.stdout + badSource.stderr, /GHCR_SOURCE_LABEL_MISMATCH/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('workflow actor identity is used for GITHUB_TOKEN GHCR access and Docker pulls', async () => {
   const validated = validateOciReceipt(receipt(), sha, { runId: 123, runAttempt: 1 });
   const username = 'github-actions[bot]';
@@ -113,7 +263,8 @@ test('post-switch proof checks local tags against the same exact OCI digests and
   const validated = validateOciReceipt(receipt(), sha, { runId: 123, runAttempt: 1 });
   const script = createOciVerifyScript(validated, sha);
   assert.equal((script.match(/RepoDigests/g) || []).length, 3);
-  assert.equal((script.match(/grep -Fx '[^']+@sha256:[a-f0-9]{64}'/g) || []).length, 3);
+  assert.equal((script.match(/grep -Fxq '[^']+@sha256:[a-f0-9]{64}'/g) || []).length, 3);
+  assert.equal((script.match(/case "\$image_id" in/g) || []).length, 6);
   assert.equal((script.match(/linux\/amd64/g) || []).length, 3);
   assert.equal((script.match(/org\.opencontainers\.image\.source/g) || []).length, 3);
   assert.equal((script.match(/org\.opencontainers\.image\.revision/g) || []).length, 3);

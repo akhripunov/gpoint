@@ -185,7 +185,8 @@ class PrepareCoalescingTests(unittest.TestCase):
         self.assertIn("runs-on: [self-hosted, macOS, gpoint-production]", coalesce_job)
         self.assertIn("outputs:", coalesce_job)
         self.assertIn("id: coalesce", coalesce_job)
-        self.assertIn("runs-on: ubuntu-latest", workflow[workflow.index("  prepare:"):])
+        prepare_job = workflow[workflow.index("  prepare:"):workflow.index("  publish:")]
+        self.assertIn("runs-on: ubuntu-latest", prepare_job)
         self.assertIn("contents: read", coalesce_job)
         self.assertIn("persist-credentials: false", coalesce_job)
         self.assertLess(workflow.index("  coalesce:"), workflow.index("  prepare:"))
@@ -211,7 +212,10 @@ class PrepareCoalescingTests(unittest.TestCase):
         self.assertIn("github.event.workflow_run.head_sha == github.sha", (
             ROOT / ".github" / "workflows" / "gpoint-auto-preflight.yml"
         ).read_text())
-        publish_if = workflow[workflow.index("  publish:"):workflow.index("runs-on: ubuntu-latest", workflow.index("  publish:"))]
+        publish_job = workflow[workflow.index("  publish:"):]
+        self.assertIn("runs-on: ubuntu-latest", publish_job)
+        self.assertIn("persist-credentials: false", publish_job)
+        publish_if = publish_job
         self.assertIn("always() && github.ref == 'refs/heads/main'", publish_if)
         self.assertIn("needs.coalesce.outputs.result == 'WINNER'", publish_if)
         self.assertIn("needs.prepare.result != 'cancelled'", publish_if)
@@ -219,6 +223,12 @@ class PrepareCoalescingTests(unittest.TestCase):
         deploy = (ROOT / ".github" / "workflows" / "gpoint-deploy.yml").read_text()
         self.assertIn("current main", deploy.lower())
         self.assertIn("select-release-run.py", deploy)
+        validate_job = deploy[deploy.index("  validate:"):deploy.index("  deploy:")]
+        self.assertIn("runs-on: ubuntu-latest", validate_job)
+        self.assertIn("python scripts/select-release-run.py", validate_job)
+        deploy_publish = deploy[deploy.index("  publish:"):]
+        self.assertIn("runs-on: ubuntu-latest", deploy_publish)
+        self.assertIn("persist-credentials: false", deploy_publish)
 
 
 if __name__ == "__main__":

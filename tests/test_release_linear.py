@@ -52,6 +52,9 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn('PREPARE_RESULT: ${{ needs.prepare.result }}', workflow)
         self.assertEqual([SYNC.candidate_status(x) for x in ('success', 'failure', 'cancelled', 'skipped')],
                          ['READY', 'FAILED', 'CANCELLED', 'SKIPPED'])
+        publish_job = workflow.split('  publish:', 1)[1]
+        self.assertIn('runs-on: ubuntu-latest', publish_job)
+        self.assertIn('persist-credentials: false', publish_job)
 
     def test_diagnostic_preflight_and_internal_preflight_publish_distinct_statuses(self):
         workflow = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()
@@ -68,6 +71,28 @@ class ReleaseTests(unittest.TestCase):
         publisher = (ROOT / 'scripts/publish-release-linear.py').read_text()
         self.assertIn("'preflight': ('PASS', 'PLANNED', 'READY_FOR_OWNER', 'FAILED', 'BLOCKED')", publisher)
         self.assertIn('READY_FOR_OWNER не публикуется для уже выполняемого production цикла', publisher)
+
+    def test_deploy_validation_stays_hosted_while_publication_moves_to_mac(self):
+        workflow = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()
+        validate = workflow.split('  validate:', 1)[1].split('  deploy:', 1)[0]
+        publish = workflow.split('  publish:', 1)[1]
+        self.assertIn('runs-on: ubuntu-latest', validate)
+        self.assertIn('python scripts/select-release-run.py', validate)
+        self.assertIn('runs-on: ubuntu-latest', publish)
+        self.assertIn('contents: read', workflow)
+        self.assertIn('actions: read', workflow)
+        self.assertIn('persist-credentials: false', publish)
+
+    def test_linear_maintenance_jobs_run_on_mac_with_source_provenance(self):
+        reconcile = (ROOT / '.github/workflows/gpoint-linear-reconcile.yml').read_text()
+        agents = (ROOT / '.github/workflows/sync-agents-to-linear.yml').read_text()
+        self.assertIn('runs-on: [self-hosted, macOS, gpoint-production]', reconcile)
+        self.assertIn('ref: main', reconcile)
+        self.assertIn('persist-credentials: false', reconcile)
+        self.assertIn('runs-on: [self-hosted, macOS, gpoint-production]', agents)
+        self.assertIn('group: gpoint-agents-linear-sync', agents)
+        self.assertIn('persist-credentials: false', agents)
+        self.assertIn('GITHUB_TOKEN: ${{ github.token }}', agents)
 
     def test_gpoint_deploy_runs_read_only_preflight_before_any_setup_or_apply(self):
         source = (ROOT / 'scripts/automated-release.mjs').read_text()
