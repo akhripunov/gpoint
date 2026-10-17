@@ -92,6 +92,7 @@ test('workflow actor identity is used for GITHUB_TOKEN GHCR access and Docker pu
       arrayBuffer: async () => new TextEncoder().encode('{"token":"bearer-secret"}').buffer};
   };
   assert.equal(await verifyOciReadAccess(validated, username, 'workflow-token', fetcher), 'PASS');
+  assert.equal(requests[0].url, `https://ghcr.io/v2/akhripunov/gpoint-runtime/manifests/${digest}`);
   const basic = requests.find(request => request.url.startsWith('https://ghcr.io/token?')).options.headers.Authorization;
   assert.equal(Buffer.from(basic.slice('Basic '.length), 'base64').toString('utf8'), `${username}:workflow-token`);
 
@@ -130,6 +131,7 @@ test('preflight verifies public exact manifest digests without downloading layer
   assert.equal(await verifyOciReadAccess(validated, 'akhripunov', 'read-token', fetcher), 'PASS');
   assert.equal(requests.length, 3);
   for (const { url, options } of requests) {
+    assert.match(url, /^https:\/\/ghcr\.io\/v2\/akhripunov\/[a-z0-9-]+\/manifests\/sha256:[a-f0-9]{64}$/);
     assert.match(url, new RegExp(`/manifests/${digest.replace(':', ':')}$`));
     assert.equal(options.headers.Authorization, undefined);
     assert.equal(options.method, 'GET');
