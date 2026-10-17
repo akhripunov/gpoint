@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { applyCandidate, cleanupTemporaryWorktree, inspectProductionReadOnly, inspectRecoveryProductionReadOnly, inspectAgataMigrationReadiness, inspectGsalesReadiness, planReleaseRetention, provisionAgataInternalConfigForBaseline, upload, runRemoteCommand, parseGuardedMigrationEvidence, validateAgataProviderMode, validateAgataProviderCompatibility } from './release-gpoint-vps-adapter.mjs';
 import { buildRecoveryDiagnosticsSnapshot } from './recovery-diagnostics.mjs';
+import { readRecoveryActiveDeploysFile } from './recovery-active-deploys.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 let STATE_FILE = process.env.GPOINT_RELEASE_STATE_FILE || path.join(ROOT, 'docs/release/state/production.json');
@@ -42,6 +43,14 @@ const GIB = 1024 ** 3;
 const LOCAL_DISK_HARD_MIN_BYTES = 10 * GIB;
 const LOCAL_DISK_TARGET_BYTES = 15 * GIB;
 const LOCAL_CACHE_CLEANUP_TIMEOUT_MS = 30_000;
+function githubGitBaseEnvironment(baseEnv) {
+  const env = {...baseEnv};
+  // Recovery history is passed to the diagnostics child through a private
+  // temporary file. Git subprocesses must not inherit either representation.
+  delete env.GPOINT_RECOVERY_ACTIVE_DEPLOYS;
+  delete env.GPOINT_RECOVERY_ACTIVE_DEPLOYS_FILE;
+  return env;
+}
 function githubSshCommand() {
   return [
     'ssh',
@@ -67,7 +76,7 @@ function git(args, cwd = ROOT) { return execFileSync('git', args, { cwd, encodin
 
 /** Pass the Actions token only to exact production-ledger operations; never depend on checkout credential persistence or Keychain. */
 export function githubLedgerGitEnvironment(args, token, baseEnv = process.env) {
-  const env = {...baseEnv};
+  const env = githubGitBaseEnvironment(baseEnv);
   delete env.GITHUB_TOKEN;
   delete env.GH_TOKEN;
   env.GIT_TERMINAL_PROMPT = '0';
@@ -98,7 +107,7 @@ export function githubLedgerGitEnvironment(args, token, baseEnv = process.env) {
 
 /** Attach Actions credentials only to read-only refs for this private repository. */
 export function githubSourceGitEnvironment(args, token, baseEnv = process.env) {
-  const env = {...baseEnv};
+  const env = githubGitBaseEnvironment(baseEnv);
   delete env.GITHUB_TOKEN;
   delete env.GH_TOKEN;
   env.GIT_TERMINAL_PROMPT = '0';
@@ -129,7 +138,7 @@ export function githubSourceGitEnvironment(args, token, baseEnv = process.env) {
 
 /** Attach ephemeral Actions credentials only to a single, exact production-tag push. */
 export function githubProductionTagGitEnvironment(args, token, baseEnv = process.env) {
-  const env = {...baseEnv};
+  const env = githubGitBaseEnvironment(baseEnv);
   delete env.GITHUB_TOKEN;
   delete env.GH_TOKEN;
   env.GIT_TERMINAL_PROMPT = '0';
@@ -987,7 +996,11 @@ function recoveryDiagnostics(candidate) {
 
   const workerStatus = (() => { try { return readMacWorkerStatus(); } catch { return null; } })();
   let activeRuns = null;
-  try { activeRuns = JSON.parse(process.env.GPOINT_RECOVERY_ACTIVE_DEPLOYS ?? 'null'); } catch { activeRuns = null; }
+  try {
+    const inventoryPath = process.env.GPOINT_RECOVERY_ACTIVE_DEPLOYS_FILE;
+    if (!inventoryPath) throw new Error('missing inventory file');
+    activeRuns = readRecoveryActiveDeploysFile(inventoryPath);
+  } catch { activeRuns = null; }
   const currentRunId = String(process.env.GITHUB_RUN_ID ?? '');
   let activeChecked = false;
   let activeConflicts = null;

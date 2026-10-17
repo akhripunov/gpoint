@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createRecoveryActiveDeploysFile, readRecoveryActiveDeploysFile } from './recovery-active-deploys.mjs';
 import { canCreateProductionRef, checkAgataEffectiveConfig, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, cleanupLocalPackageCaches, evaluateSafetyGates, failureEvidence, githubLedgerGitEnvironment, githubProductionTagGitEnvironment, githubSourceGitEnvironment, isTransientGitHubTransportFailure, localDiskDecision, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runLocalDiskPreflight, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, validateMacWorkerStatus, verifiedRuntimeState } from './release-gpoint.mjs';
 import { agataInternalConfigProvisionCommand, agataPreSwitchReadinessCommand, agataProviderRuntimeCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, cleanupTemporaryWorktree, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, migrationPendingFromPreflight, parseAgataRuntimeIdentityLine, planReleaseRetention, productionPreflightCommand, resolveRunnerPath, runAuthorizedMutationPlan, runCleanupCommand, runRemoteCommand, runWithPreExecRetry, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataProviderMode, validateAgataRuntimeIdentity, validateRuntimeIdentity, remoteCommandEnvironment } from './release-gpoint-vps-adapter.mjs';
 
@@ -36,6 +37,68 @@ test('GitHub token is attached only to exact production-ledger Git operations', 
   assert.equal(unrelated.GIT_CONFIG_KEY_1, undefined);
   assert.equal(unrelated.GITHUB_TOKEN, undefined);
   assert.equal(unrelated.GH_TOKEN, undefined);
+});
+
+test('ledger Git child starts with a large recovery inventory without inheriting it', () => {
+  const inventory = {workflow_runs: Array.from({length: 128}, (_, id) => ({
+    id, status: 'completed', path: '.github/workflows/gpoint-deploy.yml',
+    opaqueMetadata: 'x'.repeat(64 * 1024),
+  })), total_count: 128};
+  const serialized = JSON.stringify(inventory);
+  assert.ok(Buffer.byteLength(serialized) > 8 * 1024 * 1024);
+  const inventoryFile = createRecoveryActiveDeploysFile(inventory);
+  try {
+    assert.deepEqual(readRecoveryActiveDeploysFile(inventoryFile.filePath), inventory);
+    assert.equal(fs.statSync(path.dirname(inventoryFile.filePath)).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(inventoryFile.filePath).mode & 0o777, 0o600);
+    const env = githubLedgerGitEnvironment(
+      ['ls-remote', 'origin', 'refs/heads/gpoint-release-ledger'],
+      'ephemeral-test-token',
+      {PATH: process.env.PATH, GPOINT_RECOVERY_ACTIVE_DEPLOYS: serialized,
+        GPOINT_RECOVERY_ACTIVE_DEPLOYS_FILE: inventoryFile.filePath},
+    );
+    assert.equal(env.GPOINT_RECOVERY_ACTIVE_DEPLOYS, undefined);
+    assert.equal(env.GPOINT_RECOVERY_ACTIVE_DEPLOYS_FILE, undefined);
+    const child = spawnSync('git', ['--version'], {encoding: 'utf8', env});
+    assert.equal(child.error, undefined, child.error?.code);
+    assert.equal(child.status, 0, child.stderr);
+    assert.match(child.stdout, /^git version /);
+
+    const otherGitEnvironments = [
+      githubSourceGitEnvironment(
+        ['ls-remote', 'https://github.com/akhripunov/gpoint.git', 'refs/heads/main'],
+        'ephemeral-test-token',
+        {PATH: process.env.PATH, GPOINT_RECOVERY_ACTIVE_DEPLOYS: serialized,
+          GPOINT_RECOVERY_ACTIVE_DEPLOYS_FILE: inventoryFile.filePath},
+      ),
+      githubProductionTagGitEnvironment(
+        ['push', 'origin', 'refs/tags/gpoint-production-20261017T064101334Z'],
+        'ephemeral-test-token',
+        {PATH: process.env.PATH, GPOINT_RECOVERY_ACTIVE_DEPLOYS: serialized,
+          GPOINT_RECOVERY_ACTIVE_DEPLOYS_FILE: inventoryFile.filePath},
+      ),
+    ];
+    for (const childEnv of otherGitEnvironments) {
+      assert.equal(childEnv.GPOINT_RECOVERY_ACTIVE_DEPLOYS, undefined);
+      assert.equal(childEnv.GPOINT_RECOVERY_ACTIVE_DEPLOYS_FILE, undefined);
+      const gitChild = spawnSync('git', ['--version'], {encoding: 'utf8', env: childEnv});
+      assert.equal(gitChild.error, undefined, gitChild.error?.code);
+      assert.equal(gitChild.status, 0, gitChild.stderr);
+    }
+  } finally {
+    inventoryFile.cleanup();
+  }
+  assert.equal(fs.existsSync(inventoryFile.filePath), false);
+});
+
+test('recovery active Deploy inventory rejects permissive temporary files', () => {
+  const inventoryFile = createRecoveryActiveDeploysFile({workflow_runs: [], total_count: 0});
+  try {
+    fs.chmodSync(inventoryFile.filePath, 0o644);
+    assert.throws(() => readRecoveryActiveDeploysFile(inventoryFile.filePath), /invalid/);
+  } finally {
+    inventoryFile.cleanup();
+  }
 });
 
 test('GitHub token is attached only to canonical read-only source-ref checks for the private repository', () => {

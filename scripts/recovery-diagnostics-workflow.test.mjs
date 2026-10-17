@@ -19,7 +19,14 @@ test('recovery diagnostics workflow is read-only and artifacts are uploaded with
   assert.match(workflow, /if: inputs\.mode != 'recovery-diagnostics'/);
   assert.match(workflow, /if: always\(\).*inputs\.mode != 'recovery-diagnostics'/);
   assert.match(workflow, /snapshot_sha256: \${{ steps\.execute\.outputs\.snapshot_sha256 }}/);
-  assert.match(releaseEntrypoint, /GPOINT_RECOVERY_ACTIVE_DEPLOYS = JSON\.stringify\(recoveryActiveDeploys\)/);
+  assert.doesNotMatch(releaseEntrypoint, /GPOINT_RECOVERY_ACTIVE_DEPLOYS = JSON\.stringify\(recoveryActiveDeploys\)/);
+  assert.match(releaseEntrypoint, /createRecoveryActiveDeploysFile\(recoveryActiveDeploys\)/);
+  assert.match(releaseEntrypoint, /GPOINT_RECOVERY_ACTIVE_DEPLOYS_FILE: inventoryFile\.filePath/);
+  assert.match(releaseEntrypoint, /delete childEnv\.GPOINT_RECOVERY_ACTIVE_DEPLOYS/);
+  assert.match(canonicalRelease, /activeRuns\.total_count !== runs\.length/);
+  assert.match(canonicalRelease, /const runs = activeRuns\.workflow_runs/);
+  assert.match(canonicalRelease, /runs\.some\(run => !\/\^\\d\+\$\/\.test/);
+  assert.match(canonicalRelease, /GPOINT_RECOVERY_ACTIVE_DEPLOYS_FILE/);
   assert.match(releaseEntrypoint, /snapshot_sha256=\$\{evidence\.recoverySnapshot\?\.snapshotSha256/);
   assert.match(canonicalRelease, /const liveSha = facts\.LIVE_RELEASE_ENV_SHA;[\s\S]*liveSha !== expected\.runtimeSha/);
   assert.match(canonicalRelease, /if \(recoveryReadOnlyDiagnostics\) return recoveryDiagnostics\(candidateSha\(args\)\);/);
