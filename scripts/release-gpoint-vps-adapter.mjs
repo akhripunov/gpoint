@@ -503,6 +503,95 @@ export function inspectProductionReadOnly() {
   return `${tenant}\n${prerequisites}\n${run(command)}\n${agataRuntime}\n${providerConfig}\n${run(gsalesProductionInspectionCommand())}`;
 }
 
+/** Recovery-only VPS inspection. It performs observations only and deliberately
+ * does not bootstrap Buildx or enforce the ledger/runtime SHA equality gate. */
+export function recoveryProductionInspectionSource(candidateSha) {
+  if (!/^[a-f0-9]{40}$/.test(candidateSha ?? '')) throw new Error('Exact recovery candidate SHA is required');
+  return `import glob,hashlib,json,os,re,stat,subprocess
+def run(args, data=None, timeout=20):
+ p=subprocess.run(args,input=data,text=True,capture_output=True,timeout=timeout)
+ return p
+facts={"candidateSha":"${candidateSha}"}
+try:
+ env={}
+ for line in open('/opt/gpoint/env/production.env'):
+  if line.startswith('RELEASE_SHA='): env['releaseEnvSha']=line.rstrip().split('=',1)[1]; break
+ facts['releaseEnvSha']=env.get('releaseEnvSha')
+except Exception: facts['releaseEnvSha']=None
+services={}
+try:
+ ids=run(['docker','ps','-aq'],timeout=15).stdout.split()
+ for cid in ids:
+  inspected=run(['docker','inspect',cid],timeout=10)
+  if inspected.returncode: continue
+  item=json.loads(inspected.stdout)[0]
+  labels=item.get('Config',{}).get('Labels') or {}
+  service=labels.get('com.docker.compose.service','')
+  project=labels.get('com.docker.compose.project','')
+  if project != 'compose' or service not in ('api','worker','bot','agata-api','agata-memory-worker') and not service.startswith('gsales'):
+   continue
+  name=service
+  image_id=item.get('Image')
+  image=run(['docker','image','inspect',image_id],timeout=10)
+  revision=None
+  if image.returncode == 0:
+   revision=(json.loads(image.stdout)[0].get('Config',{}).get('Labels') or {}).get('org.opencontainers.image.revision')
+  services[name]={"running":bool(item.get('State',{}).get('Running')),
+   "health":(item.get('State',{}).get('Health') or {}).get('Status','none'),
+   "restartCount":item.get('RestartCount'),"sourceSha":revision,"imageId":image_id,
+   "configuredImage":item.get('Config',{}).get('Image')}
+ facts['services']=services
+except Exception: facts['servicesError']='CONTAINER_INSPECTION_FAILED'
+try:
+ html=open('/opt/gpoint/app/miniapp/index.html').read()
+ match=re.search(r'gpoint-build-sha" content="([0-9a-f]{40})',html)
+ facts['miniappSha']=match.group(1) if match else None
+except Exception: facts['miniappSha']=None
+sql=\"\"\"BEGIN READ ONLY; SET LOCAL statement_timeout='5000';
+SELECT 'LIVE_PRISMA_HEAD='||COALESCE((SELECT migration_name FROM public._prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY finished_at DESC LIMIT 1),'NONE');
+DO $$ DECLARE v text; BEGIN IF to_regclass('agata.alembic_version') IS NULL THEN v='ABSENT'; ELSE EXECUTE 'SELECT version_num FROM agata.alembic_version' INTO v; END IF; RAISE NOTICE 'LIVE_AGATA_HEAD=%',v; END $$;
+DO $$ DECLARE v text; BEGIN IF to_regclass('gsales_meta.migrations') IS NULL THEN v='ABSENT'; ELSE EXECUTE 'SELECT version || ''|'' || sha256 FROM gsales_meta.migrations ORDER BY version DESC LIMIT 1' INTO v; END IF; RAISE NOTICE 'LIVE_GSALES_IDENTITY=%',v; END $$;
+COMMIT;\"\"\"
+db=run(['docker','exec','-i','-u','postgres','compose-postgres-1','psql','-XAt','-v','ON_ERROR_STOP=1','-d','gpoint'],sql,timeout=15)
+facts['databaseReadOnlyQueryExitCode']=db.returncode
+dbtext=db.stdout+'\\n'+db.stderr
+for key,pattern in [('prismaHead',r'LIVE_PRISMA_HEAD=([A-Za-z0-9_-]+)'),('agataHead',r'LIVE_AGATA_HEAD=([A-Za-z0-9_-]+)'),('gsalesIdentity',r'LIVE_GSALES_IDENTITY=([A-Za-z0-9_|-]+)')]:
+ m=re.search(pattern,dbtext); facts[key]=m.group(1) if m else None
+if facts.get('gsalesIdentity') and '|' in facts['gsalesIdentity']:
+ facts['gsalesHead'],facts['gsalesMigrationSha256']=facts.pop('gsalesIdentity').split('|',1)
+else: facts['gsalesHead']=facts.pop('gsalesIdentity',None); facts['gsalesMigrationSha256']=None
+backup_path=None
+matches=sorted(glob.glob('/opt/gpoint/backups/gpoint-recovery-current-${candidateSha}-*.dump'))
+if matches:
+ backup_path=matches[-1]
+if backup_path:
+ try:
+  descriptor=os.open(backup_path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
+  file_stat=os.fstat(descriptor)
+  if not stat.S_ISREG(file_stat.st_mode): raise OSError('backup is not a regular file')
+  mode=oct(stat.S_IMODE(file_stat.st_mode))[2:]
+  hasher=hashlib.sha256()
+  with os.fdopen(descriptor,'rb') as backup_file:
+   descriptor=-1
+   for chunk in iter(lambda: backup_file.read(1024*1024),b''): hasher.update(chunk)
+   backup_file.seek(0)
+   restore=subprocess.run(['docker','exec','-i','compose-postgres-1','pg_restore','--list'],stdin=backup_file,capture_output=True,timeout=20)
+  ok=restore.returncode==0 and b'TABLE DATA agata messages' in restore.stdout
+  facts['backup']={"status":"VERIFIED" if mode=='600' and ok else 'UNVERIFIED',"path":backup_path,"sha256":hasher.hexdigest(),"mode":mode,"readback":"PASS" if ok else 'FAIL'}
+ except Exception:
+  if 'descriptor' in locals() and descriptor >= 0: os.close(descriptor)
+  facts['backup']={"status":"UNVERIFIED","path":backup_path}
+else: facts['backup']={"status":"MISSING"}
+print('RECOVERY_RUNTIME_FACTS='+json.dumps(facts,sort_keys=True,separators=(',',':')))`;
+}
+
+export function inspectRecoveryProductionReadOnly(candidateSha) {
+  const source = recoveryProductionInspectionSource(candidateSha);
+  const encoded = Buffer.from(source).toString('base64');
+  const command = `python3 -c "import base64;exec(base64.b64decode('${encoded}'))"`;
+  return run(command);
+}
+
 export function inspectGsalesReadiness(candidate, baselineSha, execute = run) {
   return parseGsalesReadiness(execute(gsalesReadinessCommand(candidate, baselineSha)), candidate, baselineSha);
 }

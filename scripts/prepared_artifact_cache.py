@@ -37,7 +37,7 @@ class ReleaseAssetError(RuntimeError):
 
 
 def validate_current_main_candidate(candidate_sha, release_mode, executor_sha, current_main_sha, is_ancestor):
-    if release_mode == 'recovery-finalization':
+    if release_mode in ('recovery-finalization', 'recovery-diagnostics'):
         if (not re.fullmatch(r'[a-f0-9]{40}', executor_sha or '')
                 or current_main_sha != executor_sha
                 or not is_ancestor(candidate_sha, executor_sha)):

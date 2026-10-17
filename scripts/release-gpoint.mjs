@@ -20,7 +20,8 @@ import { recoveryFinalizationIdentity, runRecoveryFinalization,
 import { acquireReleaseLock } from './release-lock.mjs';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { applyCandidate, cleanupTemporaryWorktree, inspectProductionReadOnly, inspectAgataMigrationReadiness, inspectGsalesReadiness, planReleaseRetention, provisionAgataInternalConfigForBaseline, upload, runRemoteCommand, parseGuardedMigrationEvidence, validateAgataProviderMode, validateAgataProviderCompatibility } from './release-gpoint-vps-adapter.mjs';
+import { applyCandidate, cleanupTemporaryWorktree, inspectProductionReadOnly, inspectRecoveryProductionReadOnly, inspectAgataMigrationReadiness, inspectGsalesReadiness, planReleaseRetention, provisionAgataInternalConfigForBaseline, upload, runRemoteCommand, parseGuardedMigrationEvidence, validateAgataProviderMode, validateAgataProviderCompatibility } from './release-gpoint-vps-adapter.mjs';
+import { buildRecoveryDiagnosticsSnapshot } from './recovery-diagnostics.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 let STATE_FILE = process.env.GPOINT_RELEASE_STATE_FILE || path.join(ROOT, 'docs/release/state/production.json');
@@ -891,6 +892,169 @@ function runDryRun(candidate) {
 
 function status() { console.log(JSON.stringify({ state: state(), activeLock: fs.existsSync(LOCK_FILE) ? readJson(LOCK_FILE) : null, manifests: fs.readdirSync(MANIFEST_DIR).filter(x => x.endsWith('.json')).sort() }, null, 2)); }
 
+function readRecoveryDiagnosticsIncident(candidate) {
+  const file = process.env.GPOINT_RECOVERY_FAILURE_EVIDENCE;
+  if (!file || !path.isAbsolute(file)) die('immutable recovery incident evidence path is unavailable');
+  let stat;
+  try { stat = fs.lstatSync(file); } catch { die('immutable recovery incident evidence is unavailable'); }
+  if (stat.isSymbolicLink() || !stat.isFile() || (stat.mode & 0o077) !== 0) die('recovery incident evidence file is not protected');
+  const imported = readJson(file);
+  const runId = String(imported.run?.id ?? '');
+  const attempt = String(imported.run?.attempt ?? '');
+  const manifestBytes = Buffer.from(imported.failureManifestBytesBase64 ?? '', 'base64');
+  const manifestSha256 = crypto.createHash('sha256').update(manifestBytes).digest('hex');
+  if (runId !== '39010750184' || attempt !== '1' || imported.run?.headSha !== candidate
+      || !['workflow_dispatch', 'push'].includes(imported.run?.event)
+      || imported.run?.path !== '.github/workflows/gpoint-deploy.yml'
+      || imported.run?.conclusion !== 'failure'
+      || imported.evidence?.immutable !== true || imported.evidence?.manifestChecksumVerified !== true
+      || imported.evidence?.resultChecksumVerified !== true
+      || !/^sha256:[a-f0-9]{64}$/.test(imported.evidence?.manifestDigest ?? '')
+      || !/^sha256:[a-f0-9]{64}$/.test(imported.evidence?.resultDigest ?? '')
+      || manifestSha256 !== imported.failureManifestSha256
+      || manifestBytes.toString('base64') !== imported.failureManifestBytesBase64) {
+    die('immutable incident evidence does not match the pinned ME-38 run');
+  }
+  let manifest;
+  try { manifest = JSON.parse(manifestBytes.toString('utf8')); } catch { die('immutable incident manifest is invalid'); }
+  const result = imported.result ?? {};
+  const prepare = imported.prepare ?? {};
+  if (manifest.status !== 'RECOVERY_REQUIRED' || manifest.failureStage !== 'POST_SWITCH'
+      || manifest.candidateSha !== candidate || manifest.previousProductionSha !== 'a700198a843c12a84f2e537178de752e3eddd54d'
+      || manifest.productionShaAfter !== null || manifest.productionRef !== null
+      || result.releaseId !== manifest.releaseId || result.failureStage !== 'POST_SWITCH'
+      || result.failureReason !== manifest.failureReason
+      || result.candidateSha !== candidate || result.previousProductionSha !== manifest.previousProductionSha
+      || String(prepare.runId) !== String(result.prepareRunId) || String(prepare.attempt) !== String(result.prepareRunAttempt)
+      || prepare.status !== 'success' || prepare.candidateSha !== candidate
+      || prepare.receipt?.candidateSha !== candidate || prepare.receipt?.status !== 'READY') {
+    die('immutable incident, failed Deploy, and Prepare evidence are inconsistent');
+  }
+  return {
+    incident: {runId, attempt, candidateSha: candidate, baselineSha: manifest.previousProductionSha,
+      failureStage: manifest.failureStage, status: manifest.status, manifestSha256},
+    incidentEvidence: {observedAt: isoNow(), verified: true, runId, attempt,
+      assetSha256: imported.evidence.manifestDigest.slice('sha256:'.length),
+      resultAssetSha256: imported.evidence.resultDigest?.slice?.('sha256:'.length) ?? null,
+      prepareRunId: String(prepare.runId), prepareRunAttempt: String(prepare.attempt),
+      prepareBundleDigest: prepare.bundleDigest?.slice?.('sha256:'.length) ?? null},
+  };
+}
+
+function readLocalReleaseLocks() {
+  const existing = [];
+  for (const file of [LOCK_FILE, LEGACY_LOCK_FILE]) {
+    try {
+      const info = fs.lstatSync(file);
+      if (info.isSymbolicLink() || !info.isFile() || (info.mode & 0o077) !== 0) return {checked: false, held: null, files: []};
+      const value = readJson(file);
+      existing.push({name: path.basename(file), releaseId: String(value.releaseId ?? ''), createdAt: value.createdAt ?? null});
+    } catch (error) { if (error.code !== 'ENOENT') return {checked: false, held: null, files: []}; }
+  }
+  return {checked: true, held: existing.length > 0, files: existing};
+}
+
+function recoveryWorkerLaneFacts(status) {
+  const savedFile = path.join(os.homedir(), 'Library/Application Support/GPoint/agata-codex-worker/status/worker-status.json');
+  let targets = {};
+  try {
+    const stat = fs.lstatSync(savedFile);
+    if (!stat.isSymbolicLink() && stat.isFile() && (stat.mode & 0o077) === 0) targets = readJson(savedFile).targets ?? {};
+  } catch { /* Missing status remains incomplete. */ }
+  const lanes = status?.lanes ?? {};
+  return Object.fromEntries(['GPOINT', 'GSALES'].map(lane => {
+    const value = lanes[lane] ?? targets[lane] ?? {};
+    const snapshot = value.queue_snapshot ?? value.queueSnapshot ?? value;
+    return [lane, {status: value.status ?? value.operational_status
+      ?? (value.health === 'HEALTHY' || value.queue_connectivity === 'reachable' ? 'HEALTHY' : 'NOT_VERIFIED'),
+      sourceId: snapshot.queue_snapshot_source_id ?? snapshot.source_id ?? null,
+      snapshotAt: snapshot.queue_snapshot_at ?? snapshot.snapshot_at ?? null,
+      pending: snapshot.pending_inference_jobs ?? null, running: snapshot.running_inference_jobs ?? null,
+      queueSnapshotState: snapshot.queue_snapshot_state ?? null}];
+  }));
+}
+
+function recoveryDiagnostics(candidate) {
+  if (candidate !== 'd367c2ec24242a733dbb2c4145c91d2d4682ba2c') die('recovery diagnostics are pinned to the ME-38 incident candidate');
+  const incident = readRecoveryDiagnosticsIncident(candidate);
+  const ledgerState = state();
+  let facts = {};
+  try {
+    const output = inspectRecoveryProductionReadOnly(candidate);
+    const line = output.split(/\r?\n/).find(value => value.startsWith('RECOVERY_RUNTIME_FACTS='));
+    facts = JSON.parse(line?.slice('RECOVERY_RUNTIME_FACTS='.length) ?? '{}');
+  } catch { facts = {}; }
+
+  const workerStatus = (() => { try { return readMacWorkerStatus(); } catch { return null; } })();
+  let activeRuns = null;
+  try { activeRuns = JSON.parse(process.env.GPOINT_RECOVERY_ACTIVE_DEPLOYS ?? 'null'); } catch { activeRuns = null; }
+  const currentRunId = String(process.env.GITHUB_RUN_ID ?? '');
+  let activeChecked = false;
+  let activeConflicts = null;
+  try {
+    const runs = activeRuns.workflow_runs;
+    if (!Array.isArray(runs) || activeRuns.total_count !== runs.length || !/^\d+$/.test(currentRunId)
+        || runs.some(run => !/^\d+$/.test(String(run.id ?? '')) || typeof run.status !== 'string'
+          || run.path?.split('@')[0] !== '.github/workflows/gpoint-deploy.yml')) throw new Error('incomplete');
+    activeConflicts = runs.filter(run => String(run.id) !== currentRunId && run.status !== 'completed').length;
+    activeChecked = true;
+  } catch { /* Missing inventory remains incomplete. */ }
+
+  const baselineTagName = String(ledgerState.currentProductionRef ?? '').replace(/^refs\/tags\//, '');
+  const identity = recoveryFinalizationIdentity(incident.incident.runId, candidate);
+  let baselineTagTarget = null;
+  let candidateTagTarget = null;
+  let baselineTagChecked = false;
+  let candidateTagChecked = false;
+  try { if (/^gpoint-production-\d{8}T\d{9}Z$/.test(baselineTagName)) { baselineTagTarget = remoteTagTarget(baselineTagName); baselineTagChecked = true; } } catch { /* Incomplete evidence is recorded below. */ }
+  try { candidateTagTarget = remoteTagTarget(identity.productionTag); candidateTagChecked = true; } catch { /* Incomplete evidence is recorded below. */ }
+
+  const runtimeServices = facts.services ?? {};
+  if (!runtimeServices['gsales-api'] && runtimeServices.gsales) runtimeServices['gsales-api'] = runtimeServices.gsales;
+  const runtime = {observedAt: isoNow(), releaseEnvSha: facts.releaseEnvSha ?? null,
+    miniappSha: facts.miniappSha ?? null, services: runtimeServices,
+    databaseReadOnlyQueryExitCode: facts.databaseReadOnlyQueryExitCode ?? null,
+    migrationHeads: {prisma: facts.prismaHead ?? null, agata: facts.agataHead ?? null,
+      gsales: facts.gsalesHead ?? null, gsalesMigrationSha256: facts.gsalesMigrationSha256 ?? null}};
+  const snapshotInput = {
+    observedAt: isoNow(), candidateSha: candidate, ...incident,
+    ledger: {observedAt: isoNow(), headSha: RELEASE_LEDGER_SHA,
+      productionSha: ledgerState.currentProductionSha,
+      stateSha256: crypto.createHash('sha256').update(fs.readFileSync(STATE_FILE)).digest('hex'),
+      refTargetSha: baselineTagTarget, currentProductionRef: baselineTagName,
+      state: {currentProductionSha: ledgerState.currentProductionSha, recoveryRequired: ledgerState.recoveryRequired,
+        lastReleaseStatus: ledgerState.lastReleaseStatus}},
+    runtime,
+    incidentEvidence: incident.incidentEvidence,
+    workers: {observedAt: isoNow(), lanes: recoveryWorkerLaneFacts(workerStatus)},
+    backup: {...(facts.backup ?? {status: 'UNVERIFIED'}), observedAt: isoNow()},
+    locks: {observedAt: isoNow(), local: readLocalReleaseLocks(),
+      github: {checked: activeChecked, activeConflicts}},
+    productionTag: {observedAt: isoNow(), name: baselineTagName || null, baselineTagChecked, candidateTagChecked,
+      targetSha: baselineTagTarget, candidateTagName: identity.productionTag,
+      candidateTagTargetSha: candidateTagTarget},
+  };
+  const snapshot = buildRecoveryDiagnosticsSnapshot(snapshotInput);
+  const releaseId = `gpoint-recovery-diagnostics-${Date.now()}-${currentRunId || 'local'}`;
+  const manifest = {releaseId, eventType: 'RECOVERY_READ_ONLY_DIAGNOSTICS', candidateSha: candidate,
+    previousProductionSha: incident.incident.baselineSha, productionShaAfter: null,
+    status: 'RECOVERY_DIAGNOSTICS_ONLY', recoverySnapshot: snapshot,
+    startedAt: snapshot.observedAt, finishedAt: isoNow(), runtimeSwitchOccurred: false,
+    databaseApplyOccurred: false, productionMutationOccurred: false};
+  const file = writeManifest(manifest);
+  const output = process.env.GPOINT_RECOVERY_SNAPSHOT_PATH;
+  if (output) {
+    if (!path.isAbsolute(output) || fs.existsSync(output)) die('recovery snapshot output path is invalid or already exists');
+    const parent = fs.lstatSync(path.dirname(output));
+    if (parent.isSymbolicLink() || !parent.isDirectory()) die('recovery snapshot output directory is unsafe');
+    fs.writeFileSync(output, `${JSON.stringify(snapshot, null, 2)}\n`, {flag: 'wx', mode: 0o600});
+  }
+  console.log(JSON.stringify({status: snapshot.status, releaseState: snapshot.releaseState,
+    finalizationReady: snapshot.finalizationReady, blockers: snapshot.blockers,
+    snapshotSha256: snapshot.snapshotSha256, manifest: path.relative(ROOT, file)}, null, 2));
+  if (snapshot.status !== 'FACTS_COMPLETE') process.exitCode = 1;
+}
+
 function provisionAgataConfig(candidate) {
   const localHead = git(['rev-parse', candidate]);
   if (localHead !== candidate) die('candidate does not exist locally');
@@ -1689,7 +1853,9 @@ async function main() {
   const args = process.argv.slice(2);
   if (args[0] === 'status' || args.includes('--status')) return status();
   const recoveryFinalization = args.includes('--finalize-recovery');
-  if (!args.includes('--recheck-worker') && !recoveryFinalization) runLocalDiskPreflight();
+  const recoveryReadOnlyDiagnostics = args.includes('--recovery-diagnostics');
+  if (!args.includes('--recheck-worker') && !recoveryFinalization && !recoveryReadOnlyDiagnostics) runLocalDiskPreflight();
+  if (recoveryReadOnlyDiagnostics) return recoveryDiagnostics(candidateSha(args));
   if (args.includes('--provision-agata-config')) return provisionAgataConfig(candidateSha(args));
   async function persistAction(action) {
     const previous = new Set(fs.readdirSync(MANIFEST_DIR));

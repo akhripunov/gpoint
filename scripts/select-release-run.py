@@ -63,10 +63,12 @@ def select_run(sha, runs):
 def validate_request(sha, ref, mode, approval):
     if not re.fullmatch('[a-f0-9]{40}', sha):
         raise RuntimeError('Enter the complete 40-character candidate SHA')
-    if ref != 'refs/heads/main' or mode not in ('preflight', 'production', 'task-scoped-auto', 'recovery-finalization'):
+    if ref != 'refs/heads/main' or mode not in ('preflight', 'production', 'task-scoped-auto', 'recovery-finalization', 'recovery-diagnostics'):
         raise RuntimeError('Select main and a valid release mode')
     if mode in ('production', 'recovery-finalization') and approval != 'true':
         raise RuntimeError('Explicit exact-candidate production approval is required')
+    if mode == 'recovery-diagnostics' and approval != 'false':
+        raise RuntimeError('Read-only recovery diagnostics cannot accept production approval')
     if mode == 'task-scoped-auto' and approval != 'false':
         raise RuntimeError('TASK_SCOPED_AUTO uses its durable authorization record, not the exact-SHA approval input')
 
@@ -103,7 +105,7 @@ def validate_current_main(sha, current_main_sha):
 
 def validate_recovery_executor(candidate_sha, executor_sha, current_main_sha, repo_root):
     if candidate_sha != RECOVERY_CANDIDATE_SHA:
-        raise RuntimeError('Recovery finalization is pinned to the original ME-38 incident candidate')
+        raise RuntimeError('Recovery mode is pinned to the original ME-38 incident candidate')
     if not re.fullmatch('[a-f0-9]{40}', executor_sha or '') or current_main_sha != executor_sha:
         raise RuntimeError('Recovery executor is not the exact current main SHA')
     ancestry = subprocess.run(['git', 'merge-base', '--is-ancestor', candidate_sha, executor_sha],
@@ -167,12 +169,13 @@ def main():
     if orchestrator_run_id and not orchestrator_run_id.isdigit():
         raise RuntimeError('Automatic orchestrator run ID is invalid')
     validate_request(sha, os.environ.get('GITHUB_REF'), os.environ.get('RELEASE_MODE'), os.environ.get('APPROVE_PRODUCTION'))
+    recovery_mode = os.environ.get('RELEASE_MODE') in ('recovery-finalization', 'recovery-diagnostics')
     if os.environ.get('RELEASE_MODE') == 'recovery-finalization':
         validate_recovery_finalization_inputs(sha, os.environ)
     current_main_sha = github('git/ref/heads/main')['object']['sha']
-    if os.environ.get('RELEASE_MODE') == 'recovery-finalization':
+    if recovery_mode:
         if os.environ.get('RECOVERY_FAILURE_RUN_ID') != RECOVERY_FAILURE_RUN_ID:
-            raise RuntimeError('Recovery finalization is pinned to the original ME-38 incident candidate')
+            raise RuntimeError('Recovery mode is pinned to the original ME-38 incident run')
         repo_root = Path(__file__).resolve().parents[1]
         executor_sha = os.environ.get('GITHUB_SHA', '')
         validate_recovery_executor(sha, executor_sha, current_main_sha, repo_root)
@@ -208,7 +211,7 @@ def main():
     selected = {**selected, 'run_attempt': int(executed_attempt)}
     expected_run = os.environ.get('PREPARE_RUN_ID')
     expected_attempt = os.environ.get('PREPARE_RUN_ATTEMPT')
-    if os.environ.get('RELEASE_MODE') == 'recovery-finalization':
+    if recovery_mode:
         expected_run, expected_attempt = original_prepare_id, original_prepare_attempt
     validate_expected_run(selected, expected_run, expected_attempt)
     # Production/task-scoped Deploy performs the read-only preflight on the Mac

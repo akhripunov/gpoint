@@ -9,11 +9,11 @@ on:
         required: true
         type: string
       mode:
-        description: 'preflight; exact-SHA production; task-scoped-auto; recovery-finalization verifies an already-switched runtime, creates an explicitly authorized current backup, reconciles one exact tag and appends ledger evidence without Apply or migrations'
+        description: 'preflight; exact-SHA production; task-scoped-auto; recovery-diagnostics is read-only and records incident drift facts; recovery-finalization verifies the switched runtime, creates an authorized current backup, reconciles the exact tag, and appends ledger evidence without Apply or migrations'
         required: true
         default: preflight
         type: choice
-        options: [preflight, production, task-scoped-auto, recovery-finalization]
+        options: [preflight, production, task-scoped-auto, recovery-diagnostics, recovery-finalization]
       approve_production:
         description: 'I authorize this exact candidate on GPoint production'
         required: true
@@ -122,6 +122,7 @@ jobs:
 
   deploy:
     needs: validate
+    if: inputs.mode != 'recovery-diagnostics'
     # Only a repository-scoped runner on the owner's Mac may receive this job.
     runs-on: [self-hosted, macOS, gpoint-production]
     timeout-minutes: 40
@@ -219,12 +220,102 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/release_assets.py publish evidence
 
+  recovery-diagnostics:
+    needs: validate
+    if: inputs.mode == 'recovery-diagnostics'
+    runs-on: [self-hosted, macOS, gpoint-production]
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+    outputs:
+      status: ${{ steps.execute.outputs.status }}
+      snapshot_sha256: ${{ steps.execute.outputs.snapshot_sha256 }}
+    env:
+      CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
+      PREPARE_RUN_ID: ${{ needs.validate.outputs.run_id }}
+      PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.run_attempt }}
+      PREPARE_ARTIFACT_ID: ${{ needs.validate.outputs.artifact_id }}
+      RELEASE_MODE: recovery-diagnostics
+      APPROVE_PRODUCTION: 'false'
+      TASK_AUTHORIZATION_ID: ''
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Set read-only diagnostic artifact paths
+        shell: bash
+        run: |
+          echo "GPOINT_RELEASE_EVIDENCE=$RUNNER_TEMP/gpoint-recovery-ledger-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          echo "GPOINT_RELEASE_BUNDLE=$RUNNER_TEMP/gpoint-recovery-bundle-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          echo "RELEASE_RESULT=$RUNNER_TEMP/gpoint-recovery-result-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json" >> "$GITHUB_ENV"
+          echo "GPOINT_RECOVERY_SNAPSHOT_PATH=$RUNNER_TEMP/gpoint-recovery-snapshot-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify assigned runner
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/release-runner-readiness.mjs
+      - name: Verify original candidate and Prepare provenance
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/select-release-run.py
+      - name: Restore verified immutable Prepare receipt
+        id: cache
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_MODE: recovery-diagnostics
+          GPOINT_RECOVERY_EXECUTOR_SHA: ${{ github.sha }}
+          ARTIFACT_DESTINATION: ${{ env.GPOINT_RELEASE_BUNDLE }}
+          IMAGE_TRANSPORT: ${{ inputs.image_transport }}
+        run: python3 scripts/prepared_artifact_cache.py
+      - name: Import immutable failure evidence
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
+          RECOVERY_FAILURE_RUN_ID: ${{ inputs.recovery_failure_run_id }}
+          RECOVERY_FAILURE_RUN_ATTEMPT: ${{ inputs.recovery_failure_run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/gpoint-recovery-failure-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          python3 scripts/release_assets.py read-recovery-failure "$CANDIDATE_SHA" "$RECOVERY_FAILURE_RUN_ID" "$RECOVERY_FAILURE_RUN_ATTEMPT" "$evidence"
+          chmod 600 "$evidence"
+          echo "GPOINT_RECOVERY_FAILURE_EVIDENCE=$evidence" >> "$GITHUB_ENV"
+      - name: Collect recovery-only read-only snapshot
+        id: execute
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GHCR_READ_USERNAME: ${{ github.actor }}
+          GHCR_READ_TOKEN: ${{ github.token }}
+          IMAGE_TRANSPORT: ${{ inputs.image_transport }}
+          CACHE_PREVENTED_DOWNLOAD: ${{ steps.cache.outputs.cache_prevented_download }}
+          BUNDLE_DOWNLOAD_SECONDS: ${{ steps.cache.outputs.bundle_download_seconds }}
+          GPOINT_RECOVERY_FAILURE_RUN_ID: ${{ inputs.recovery_failure_run_id }}
+          GPOINT_RECOVERY_FAILURE_RUN_ATTEMPT: ${{ inputs.recovery_failure_run_attempt }}
+          GPOINT_RECOVERY_EXECUTOR_SHA: ${{ github.sha }}
+        run: node scripts/automated-release.mjs
+      - name: Preserve read-only snapshot and receipt as workflow artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpoint-me38-recovery-readonly-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/gpoint-recovery-snapshot-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/gpoint-recovery-result-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/gpoint-recovery-ledger-${{ github.run_id }}-${{ github.run_attempt }}/manifests/gpoint-recovery-diagnostics-*.json
+          if-no-files-found: warn
+          retention-days: 90
+
   publish:
     permissions:
       contents: read
       actions: read
     needs: [validate, deploy]
-    if: always() && github.ref == 'refs/heads/main'
+    if: always() && github.ref == 'refs/heads/main' && inputs.mode != 'recovery-diagnostics'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     concurrency:

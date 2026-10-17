@@ -139,6 +139,23 @@ class ReadyPreflightEvidenceTests(unittest.TestCase):
             self.validate(canonical_preflight_receipt(prepareRunAttempt='1'))
 
 
+class RecoveryDiagnosticsSelectionTests(unittest.TestCase):
+    def test_read_only_diagnostics_needs_no_production_approval(self):
+        SELECTOR.validate_request(SELECTOR.RECOVERY_CANDIDATE_SHA, 'refs/heads/main',
+                                  'recovery-diagnostics', 'false')
+        with self.assertRaisesRegex(RuntimeError, 'cannot accept production approval'):
+            SELECTOR.validate_request(SELECTOR.RECOVERY_CANDIDATE_SHA, 'refs/heads/main',
+                                      'recovery-diagnostics', 'true')
+
+    def test_diagnostics_requires_exact_incident_and_current_main_executor(self):
+        root = Path(__file__).resolve().parents[1]
+        with patch.object(SELECTOR.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):
+            SELECTOR.validate_recovery_executor(SELECTOR.RECOVERY_CANDIDATE_SHA, 'e' * 40, 'e' * 40, root)
+        with self.assertRaisesRegex(RuntimeError, 'pinned'):
+            SELECTOR.validate_recovery_executor('f' * 40, 'e' * 40, 'e' * 40, root)
+        with self.assertRaisesRegex(RuntimeError, 'current main'):
+            SELECTOR.validate_recovery_executor(SELECTOR.RECOVERY_CANDIDATE_SHA, 'e' * 40, 'f' * 40, root)
+
 class RecoveryFinalizationAuthorizationTests(unittest.TestCase):
     def test_mode_requires_exact_candidate_approval(self):
         SELECTOR.validate_request(SHA, 'refs/heads/main', 'recovery-finalization', 'true')
