@@ -58,7 +58,40 @@ function readJson(file) { return JSON.parse(fs.readFileSync(file, 'utf8')); }
 function isoNow() { return new Date().toISOString(); }
 function measured(timings, name, action) { const started = Date.now(); try { return action(); } finally { timings[name] = Number(((Date.now() - started) / 1000).toFixed(1)); } }
 function git(args, cwd = ROOT) { return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); }
-const ledgerGit = (args, input) => execFileSync('git', args, { cwd: ROOT, input, encoding: 'utf8', timeout: 30_000 }).trim();
+
+/** Pass the Actions token only to exact production-ledger operations; never depend on checkout credential persistence or Keychain. */
+export function githubLedgerGitEnvironment(args, token, baseEnv = process.env) {
+  const env = {...baseEnv};
+  delete env.GITHUB_TOKEN;
+  delete env.GH_TOKEN;
+  env.GIT_TERMINAL_PROMPT = '0';
+  const ledgerRead = args.length === 3 && args[0] === 'ls-remote' && args[1] === 'origin'
+    && args[2] === 'refs/heads/gpoint-release-ledger';
+  const ledgerFetch = args.length === 4 && args[0] === 'fetch' && args[1] === '--quiet'
+    && args[2] === 'origin' && args[3] === 'refs/heads/gpoint-release-ledger';
+  const ledgerWrite = args.length === 3 && args[0] === 'push' && args[1] === 'origin'
+    && /^[a-f0-9]{40}:refs\/heads\/gpoint-release-ledger$/.test(args[2] ?? '');
+  const looksLikeLedgerOperation = args.includes('refs/heads/gpoint-release-ledger')
+    || args.some(value => typeof value === 'string' && value.includes('refs/heads/gpoint-release-ledger'));
+  if (!ledgerRead && !ledgerFetch && !ledgerWrite) {
+    if (looksLikeLedgerOperation) throw new Error('GitHub ledger Git operation is not authorized');
+    return env;
+  }
+  if (!token) throw new Error('GITHUB_TOKEN is required for production ledger Git access');
+  const offset = Number(env.GIT_CONFIG_COUNT ?? 0);
+  if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('Invalid inherited Git config count');
+  env.GIT_CONFIG_COUNT = String(offset + 3);
+  env[`GIT_CONFIG_KEY_${offset}`] = 'credential.helper';
+  env[`GIT_CONFIG_VALUE_${offset}`] = '';
+  env[`GIT_CONFIG_KEY_${offset + 1}`] = 'http.https://github.com/.extraheader';
+  env[`GIT_CONFIG_VALUE_${offset + 1}`] = '';
+  env[`GIT_CONFIG_KEY_${offset + 2}`] = 'http.https://github.com/.extraheader';
+  env[`GIT_CONFIG_VALUE_${offset + 2}`] = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`;
+  return env;
+}
+
+const ledgerGit = (args, input) => execFileSync('git', args, { cwd: ROOT, input, encoding: 'utf8', timeout: 30_000,
+  env: githubLedgerGitEnvironment(args, process.env.GITHUB_TOKEN) }).trim();
 function recheckTaskAuthorizationBeforeMutation(candidateSha, boundary) {
   if (process.env.RELEASE_AUTHORIZATION_MODE !== 'TASK_SCOPED_AUTO') return;
   const authorizationId = process.env.RELEASE_AUTHORIZATION_ID;

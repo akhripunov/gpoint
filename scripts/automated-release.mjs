@@ -8,7 +8,7 @@ import { createRetryingGit } from './release-network-retry.mjs';
 import { verifyReleaseBundle, selectImageTransport } from './release-bundle.mjs';
 import { persistReleaseBookkeeping, loadReleaseBookkeeping } from './release-bookkeeping.mjs';
 import { fileURLToPath } from 'node:url';
-import { candidateAgataMigrationHead, candidatePrismaMigrationHead } from './release-gpoint.mjs';
+import { candidateAgataMigrationHead, candidatePrismaMigrationHead, githubLedgerGitEnvironment } from './release-gpoint.mjs';
 import { assertInstalledWorkerMatches } from './worker-runtime-guard.mjs';
 import { verifyOciReadAccess } from './release-oci.mjs';
 import { withPreflightEvidence } from './release-evidence.mjs';
@@ -29,7 +29,8 @@ const selectedImageTransport = selectImageTransport(proof, process.env.IMAGE_TRA
 if (selectedImageTransport === 'ghcr-oci') {
   await verifyOciReadAccess(proof, process.env.GHCR_READ_USERNAME, process.env.GHCR_READ_TOKEN);
 }
-const runGit = (args, input, timeout) => execFileSync('git', args, { cwd: root, encoding: 'utf8', input, timeout }).trim();
+const runGit = (args, input, timeout) => execFileSync('git', args, { cwd: root, encoding: 'utf8', input, timeout,
+  env: githubLedgerGitEnvironment(args, process.env.GITHUB_TOKEN) }).trim();
 const git = createRetryingGit(runGit);
 if (git(['rev-parse', 'HEAD']) !== sha || git(['status', '--porcelain'])) throw new Error('Release checkout must be clean and exact');
 const checksum = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
