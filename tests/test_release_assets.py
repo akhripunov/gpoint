@@ -314,9 +314,14 @@ class ImmutableReleaseTests(unittest.TestCase):
     def test_gpoint_workflows_publish_all_evidence_without_actions_storage(self):
         prepare = (ROOT / '.github/workflows/gpoint-prepare.yml').read_text()
         deploy = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()
-        for workflow in (prepare, deploy):
-            self.assertNotIn('actions/upload-artifact', workflow)
-            self.assertNotIn('actions/download-artifact', workflow)
+        diagnostic_job = deploy.split('  recovery-diagnostics:\n', 1)[1].split('\n  publish:', 1)[0]
+        deploy_without_diagnostics = deploy.replace('  recovery-diagnostics:\n' + diagnostic_job + '\n  publish:', '  publish:', 1)
+        self.assertNotIn('actions/upload-artifact', prepare)
+        self.assertNotIn('actions/download-artifact', prepare)
+        self.assertNotIn('actions/upload-artifact', deploy_without_diagnostics)
+        self.assertNotIn('actions/download-artifact', deploy_without_diagnostics)
+        self.assertEqual(diagnostic_job.count('actions/upload-artifact@v4'), 1)
+        self.assertNotIn('actions/download-artifact', diagnostic_job)
         self.assertIn('release_assets.py publish prepare', prepare)
         self.assertIn('release_assets.py publish evidence', deploy)
         self.assertIn('release_assets.py read-result', deploy)
