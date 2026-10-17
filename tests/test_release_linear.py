@@ -100,8 +100,11 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("inputs.mode == 'preflight' && needs.deploy.outputs.preflight == 'PLANNED' && 'READY_FOR_OWNER'", workflow)
         self.assertIn("needs.deploy.outputs.preflight == 'PLANNED' && 'PASS'", workflow)
         self.assertIn("needs.deploy.outputs.status == 'COMPLETE' && 'RECOVERY_REQUIRED'", workflow)
-        self.assertIn("preflight=${mode === 'recovery-finalization' ? 'NOT_APPLICABLE' : preflightStatus}",
-                      (ROOT / 'scripts/automated-release.mjs').read_text())
+        release_entrypoint = (ROOT / 'scripts/automated-release.mjs').read_text()
+        self.assertIn("preflight=${['recovery-finalization', 'recovery-diagnostics'].includes(mode) ? 'NOT_APPLICABLE' : preflightStatus}",
+                      release_entrypoint)
+        self.assertIn("if (mode === 'recovery-diagnostics')", release_entrypoint)
+        self.assertIn("preflightStatus = 'NOT_APPLICABLE'", release_entrypoint)
         self.assertIn('status=${status}', (ROOT / 'scripts/automated-release.mjs').read_text())
         publisher = (ROOT / 'scripts/publish-release-linear.py').read_text()
         self.assertIn("'preflight': ('PASS', 'PLANNED', 'READY_FOR_OWNER', 'FAILED', 'BLOCKED')", publisher)

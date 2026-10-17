@@ -262,6 +262,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
+          RECOVERY_FAILURE_RUN_ID: ${{ inputs.recovery_failure_run_id }}
+          RECOVERY_FAILURE_RUN_ATTEMPT: ${{ inputs.recovery_failure_run_attempt }}
         run: python3 scripts/select-release-run.py
       - name: Restore verified immutable Prepare receipt
         id: cache
