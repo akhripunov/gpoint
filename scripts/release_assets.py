@@ -3,13 +3,17 @@
 import json
 import base64
 from datetime import datetime, timezone
+import errno
 import os
 from pathlib import Path
 import re
+import random
+import socket
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 import urllib.request
 import urllib.error
@@ -23,6 +27,103 @@ RECOVERY_IMAGE_REPOSITORIES = {
 MAX_FAILURE_MANIFEST_MEMBERS = 4096
 MAX_FAILURE_MANIFEST_MEMBER_BYTES = 32 * 1024**2
 MAX_FAILURE_MANIFEST_TOTAL_BYTES = 2 * 1024**3
+EVIDENCE_API_TOTAL_BUDGET_SECONDS = 60
+EVIDENCE_API_REQUEST_TIMEOUT_SECONDS = 20
+EVIDENCE_API_MAX_RETRIES = 5
+EVIDENCE_API_BACKOFF_CAP_SECONDS = 5
+
+
+def _transient_github_read_category(error):
+    """Only classify transport failures that are safe to retry for a GET."""
+    if isinstance(error, urllib.error.HTTPError):
+        return None
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return 'timeout'
+    if isinstance(reason, socket.gaierror) and reason.errno == getattr(socket, 'EAI_AGAIN', None):
+        return 'temporary_dns'
+    if isinstance(reason, OSError) and reason.errno in {
+            errno.ETIMEDOUT, errno.ECONNRESET, errno.ECONNABORTED,
+            errno.EHOSTUNREACH, errno.ENETUNREACH}:
+        return 'connection'
+    return None
+
+
+class _EvidenceApiClient:
+    """Read immutable GitHub evidence with one bounded operation-wide deadline."""
+
+    def __init__(self, token, *, budget_seconds=EVIDENCE_API_TOTAL_BUDGET_SECONDS,
+                 request_timeout=EVIDENCE_API_REQUEST_TIMEOUT_SECONDS,
+                 max_retries=EVIDENCE_API_MAX_RETRIES,
+                 backoff_cap=EVIDENCE_API_BACKOFF_CAP_SECONDS,
+                 opener=None, clock=None, sleep=None, jitter=None, emit=None):
+        self.token = token
+        self.clock = clock or time.monotonic
+        self.sleep = sleep or time.sleep
+        self.jitter = jitter or random.uniform
+        self.opener = opener or urllib.request.urlopen
+        self.request_timeout = request_timeout
+        self.max_retries = max_retries
+        self.backoff_cap = backoff_cap
+        self.deadline = self.clock() + budget_seconds
+        self.emit = emit or print
+
+    def __call__(self, route):
+        retries = 0
+        while True:
+            remaining = self.deadline - self.clock()
+            if remaining <= 0:
+                raise RuntimeError('GitHub immutable evidence read retry budget exhausted') from None
+            request = urllib.request.Request(
+                f'https://api.github.com/repos/{REPO}/{route}',
+                headers={'Authorization': f'Bearer {self.token}',
+                         'Accept': 'application/vnd.github+json'})
+            try:
+                with self.opener(request, timeout=min(self.request_timeout, remaining)) as response:
+                    body = response.read()
+                if self.clock() > self.deadline:
+                    raise RuntimeError('GitHub immutable evidence read retry budget exhausted') from None
+                return json.loads(body)
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404 and route.startswith('releases/tags/'):
+                    return None
+                raise
+            except (urllib.error.URLError, OSError) as exc:
+                category = _transient_github_read_category(exc)
+                if category is None:
+                    raise
+                if retries >= self.max_retries:
+                    raise RuntimeError('GitHub immutable evidence read retry limit exhausted') from None
+                remaining = self.deadline - self.clock()
+                if remaining <= 0:
+                    raise RuntimeError('GitHub immutable evidence read retry budget exhausted') from None
+                cap = min(self.backoff_cap, 2 ** min(retries, 6))
+                delay = min(max(0.0, self.jitter(0.0, cap)), remaining)
+                self.emit(f'GITHUB_API_READ_RETRY stage=immutable_evidence attempt={retries + 1} '
+                          f'category={category} delay_s={delay:.1f}')
+                retries += 1
+                self.sleep(delay)
+
+
+def _evidence_api_client():
+    return _EvidenceApiClient(os.environ['GITHUB_TOKEN'])
+
+
+def _api_for_operation(api):
+    # Each top-level evidence import shares one deadline across all its GETs.
+    # Defer token lookup until the first actual read so callers that replace
+    # the reader do not need GitHub credentials for a fully mocked path.
+    if api is not evidence_api:
+        return api
+    client = None
+
+    def read(route):
+        nonlocal client
+        if client is None:
+            client = _evidence_api_client()
+        return client(route)
+
+    return read
 
 
 def release_tag(kind, sha, run_id, attempt):
@@ -56,21 +157,12 @@ def resolve_asset(kind, sha, run_id, attempt, name, github):
 
 def evidence_api(route):
     """Keep 404 distinct from transient GitHub or authorization failures."""
-    token = os.environ['GITHUB_TOKEN']
-    request = urllib.request.Request(
-        f'https://api.github.com/repos/{REPO}/{route}',
-        headers={'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json'})
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            return json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404 and route.startswith('releases/tags/'):
-            return None
-        raise
+    return _evidence_api_client()(route)
 
 
 def find_deploy_evidence(sha, run_id, current_attempt, api=evidence_api):
     """Use the successful Deploy attempt, not a rerun of the publisher."""
+    api = _api_for_operation(api)
     release_tag('evidence', sha, run_id, current_attempt)
     for num in range(int(current_attempt), 0, -1):
         attempt = str(num)
@@ -134,6 +226,7 @@ def find_deploy_evidence(sha, run_id, current_attempt, api=evidence_api):
 
 def find_prepare_evidence(sha, run_id, current_attempt, api=evidence_api):
     """Resolve an immutable Prepare bundle from the actual executed job attempt."""
+    api = _api_for_operation(api)
     release_tag('prepare', sha, run_id, current_attempt)
     def timestamp(value):
         parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
@@ -182,6 +275,7 @@ def find_prepare_evidence(sha, run_id, current_attempt, api=evidence_api):
 
 def find_post_switch_failure_evidence(sha, run_id, attempt, api=evidence_api):
     """Resolve only the immutable evidence for the named failed Deploy attempt."""
+    api = _api_for_operation(api)
     release_tag('evidence', sha, run_id, attempt)
     details = api(f'actions/runs/{run_id}/attempts/{attempt}')
     jobs = api(f'actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100')
@@ -264,6 +358,7 @@ def _read_failure_manifest_archive(archive_path, release_id):
 def read_post_switch_failure(sha, run_id, attempt, output_path, token=None, api=evidence_api):
     """Download and verify failed-run evidence without authorizing production mutation."""
     from prepared_artifact_cache import extract
+    api = _api_for_operation(api)
     token = token or os.environ['GITHUB_TOKEN']
     identity = find_post_switch_failure_evidence(sha, run_id, attempt, api)
     output = Path(output_path)
