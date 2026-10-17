@@ -548,6 +548,18 @@ test('ME-38 owner addendum binds four exact sync paths and release infrastructur
   git('add', amendmentsPath); git('commit', '-m', 'attempt unapproved scope amendment');
   assert.throws(() => candidateScopeDiff(root, authorizationId, measuredBaseline, git('rev-parse', 'HEAD')),
     /approved scope additions/);
+
+  git('switch', '-c', 'merge-parent', `${candidateSha}^`);
+  fs.writeFileSync(path.join(root, 'README.md'), 'merge-side change\n');
+  git('add', 'README.md'); git('commit', '-m', 'merge side change');
+  git('merge', '--no-ff', candidateSha, '-m', 'integrate approved branch');
+  const mergedAmendment = JSON.parse(fs.readFileSync(addendumBlobPath, 'utf8'));
+  mergedAmendment.release_infrastructure_risk_contract.risk_description = 'Changed during merge after source authorization was created.';
+  mergedAmendment.amendment_commitment_sha256 = scopeAmendmentCommitmentSha256(mergedAmendment);
+  fs.writeFileSync(addendumBlobPath, `${JSON.stringify(mergedAmendment)}\n`);
+  git('add', amendmentsPath); git('commit', '--amend', '--no-edit');
+  assert.throws(() => candidateScopeAmendments(root, authorizationId, measuredBaseline, git('rev-parse', 'HEAD')),
+    /blob changed after its immutable source commit/);
   fs.rmSync(root, {recursive: true, force: true});
 });
 

@@ -157,6 +157,10 @@ export function candidateScopeAmendments(repoRoot, authorizationId, baselineSha,
     if (history.length !== 1 || history[0].status !== 'A') {
       throw new AuthorizationError('Scope amendment must be added once and remain immutable');
     }
+    if (git('rev-parse', `${candidateSha}:${amendmentPath}`)
+        !== git('rev-parse', `${history[0].commit}:${amendmentPath}`)) {
+      throw new AuthorizationError('Scope amendment blob changed after its immutable source commit');
+    }
     const amendmentBytes = bytes('show', `${candidateSha}:${amendmentPath}`);
     const value = JSON.parse(amendmentBytes.toString('utf8'));
     if (value.schema_version !== 1 || value.project !== record.project || value.authorization_id !== authorizationId
