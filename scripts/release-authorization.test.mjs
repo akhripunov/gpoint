@@ -417,6 +417,140 @@ test('scope addendum rejects a different path even when its proof and commitment
   fs.rmSync(root, {recursive: true, force: true});
 });
 
+test('legacy test-only addendum cannot authorize modification of a pre-existing file', () => {
+  const {root, git} = makeGitRepo();
+  const scopedPath = 'tests/test_prepare_workflow_summary.py';
+  fs.mkdirSync(path.dirname(path.join(root, scopedPath)), {recursive: true});
+  fs.writeFileSync(path.join(root, scopedPath), 'baseline test\n');
+  git('add', scopedPath); git('commit', '-m', 'baseline existing test');
+  const baselineSha = git('rev-parse', 'HEAD');
+  const originalAuth = record({authorization_id: scopeAddendumAuthorizationId, production_baseline_sha: baselineSha});
+  originalAuth.owner_task_commitment_sha256 = ownerTaskCommitmentSha256(originalAuth);
+  const authPath = `.release-authorizations/${scopeAddendumAuthorizationId}.json`;
+  fs.mkdirSync(path.dirname(path.join(root, authPath)), {recursive: true});
+  fs.writeFileSync(path.join(root, authPath), `${JSON.stringify(originalAuth)}\n`);
+  git('add', authPath); git('commit', '-m', 'record original owner task');
+  const originalRecordBlob = git('rev-parse', `HEAD:${authPath}`);
+
+  fs.writeFileSync(path.join(root, scopedPath), 'modified test\n');
+  git('add', scopedPath); git('commit', '-m', 'modify existing test');
+  const sourceCommit = git('rev-parse', 'HEAD');
+  const patch = execFileSync('git', ['show', '--format=', '--no-ext-diff', sourceCommit, '--', scopedPath], {cwd: root});
+  const amendment = {schema_version: 1, amendment_id: scopeAddendumId, project: 'gpoint',
+    authorization_id: scopeAddendumAuthorizationId,
+    source_instruction_identifier: 'OWNER_SCOPE_ADDENDUM_GPOINT_RELEASE_20261017',
+    owner_decision: 'Authorize only adding the exact Prepare summary regression test path.',
+    original_authorization_record_blob_sha: originalRecordBlob,
+    scope_additions: [{path: scopedPath, source_commit_sha: sourceCommit,
+      patch_sha256: createHash('sha256').update(patch).digest('hex'),
+      result_file_sha256: createHash('sha256').update(fs.readFileSync(path.join(root, scopedPath))).digest('hex'),
+      result_blob_sha: git('rev-parse', `${sourceCommit}:${scopedPath}`)}]};
+  amendment.amendment_commitment_sha256 = scopeAmendmentCommitmentSha256(amendment);
+  const amendmentsPath = `.release-authorizations/addenda/${scopeAddendumAuthorizationId}/${scopeAddendumId}.json`;
+  fs.mkdirSync(path.dirname(path.join(root, amendmentsPath)), {recursive: true});
+  fs.writeFileSync(path.join(root, amendmentsPath), `${JSON.stringify(amendment)}\n`);
+  git('add', amendmentsPath); git('commit', '-m', 'record attempted legacy scope amendment');
+  assert.throws(() => candidateScopeAmendments(root, scopeAddendumAuthorizationId, baselineSha,
+    git('rev-parse', 'HEAD')), /did not add the exact path/);
+  fs.rmSync(root, {recursive: true, force: true});
+});
+
+test('ME-38 owner addendum binds four exact sync paths and release infrastructure risk contract', () => {
+  const {root, git, baseline: repoBaseline} = makeGitRepo();
+  const authorizationId = 'gpoint-unified-release-v1-recovery-20261017';
+  const amendmentId = 'gpoint-me38-sync-release-infrastructure-20261017';
+  const sourceInstructionIdentifier = 'OWNER_SCOPE_ADDENDUM_GPOINT_ME38_20261017';
+  const paths = ['.github/workflows/gpoint-linear-reconcile.yml',
+    '.github/workflows/sync-agents-to-linear.yml', 'scripts/sync_agents_to_linear.py',
+    'tests/test_sync_agents_to_linear.py'];
+  for (const [index, scopedPath] of paths.entries()) {
+    fs.mkdirSync(path.dirname(path.join(root, scopedPath)), {recursive: true});
+    fs.writeFileSync(path.join(root, scopedPath), `baseline ${index}\n`);
+  }
+  git('add', ...paths); git('commit', '-m', 'baseline target paths');
+  const measuredBaseline = git('rev-parse', 'HEAD');
+  const originalAuth = record({authorization_id: authorizationId,
+    source_instruction_identifier: 'OWNER_TASK_GPOINT_INFRASTRUCTURE_RECOVERY_20261017',
+    production_baseline_sha: measuredBaseline,
+    allowed_paths: ['scripts/release-authorization.mjs', 'scripts/release-authorization.test.mjs'],
+    exclusions: ['database', 'migrations', 'security', 'secrets', 'payments', 'ads', 'paid_traffic'],
+    risk_contracts: {release_infrastructure: {allowed_paths: [], baseline_sha: measuredBaseline}}});
+  originalAuth.owner_task_commitment_sha256 = ownerTaskCommitmentSha256(originalAuth);
+  const authPath = `.release-authorizations/${authorizationId}.json`;
+  fs.mkdirSync(path.dirname(path.join(root, authPath)), {recursive: true});
+  fs.writeFileSync(path.join(root, authPath), `${JSON.stringify(originalAuth)}\n`);
+  git('add', authPath); git('commit', '-m', 'record original owner task');
+  const originalRecordBlob = git('rev-parse', `HEAD:${authPath}`);
+
+  const additions = [];
+  for (const [index, scopedPath] of paths.entries()) {
+    fs.writeFileSync(path.join(root, scopedPath), `approved ME-38 path ${index}\n`);
+    git('add', scopedPath); git('commit', '-m', `add approved ME-38 path ${index}`);
+    const sourceCommitSha = git('rev-parse', 'HEAD');
+    const patch = execFileSync('git', ['show', '--format=', '--no-ext-diff', sourceCommitSha, '--', scopedPath], {cwd: root});
+    additions.push({path: scopedPath, source_commit_sha: sourceCommitSha,
+      patch_sha256: createHash('sha256').update(patch).digest('hex'),
+      result_file_sha256: createHash('sha256').update(fs.readFileSync(path.join(root, scopedPath))).digest('hex'),
+      result_blob_sha: git('rev-parse', `${sourceCommitSha}:${scopedPath}`)});
+  }
+  const riskContract = {
+    allowed_paths: paths,
+    baseline_sha: measuredBaseline,
+    risk_description: 'Change only the four named GPoint release publication and Linear synchronization paths.',
+    allowed_operations: ['integrate', 'coalesce', 'prepare', 'preflight', 'deploy', 'verify', 'rollback', 'publish_evidence'],
+    required_gates: ['exact_candidate', 'complete_scope', 'prepare_provenance', 'immutable_artifact',
+      'security_review', 'preflight', 'rollback_readiness', 'worker_compatibility',
+      'postdeploy_health', 'reconciliation'],
+    backup_plan: 'Retain current production ledger and immutable release artifacts before any apply.',
+    rollback_plan: 'Restore the previous immutable manifest and reconcile any uncertain apply before retry.',
+    stop_conditions: ['Stop on candidate, scope, or production baseline drift.',
+      'Stop if provenance, backup, rollback, or health evidence is incomplete.'],
+  };
+  const amendment = {schema_version: 1, amendment_id: amendmentId, project: 'gpoint',
+    authorization_id: authorizationId, source_instruction_identifier: sourceInstructionIdentifier,
+    owner_decision: 'Continue ME-38 by preparing an append-only authorization for exactly the four named paths and their complete release-infrastructure risk contract; GitHub publication requires the specified separate one-Prepare approval.',
+    original_authorization_record_blob_sha: originalRecordBlob,
+    scope_additions: additions, release_infrastructure_risk_contract: riskContract};
+  amendment.amendment_commitment_sha256 = scopeAmendmentCommitmentSha256(amendment);
+  const amendmentsPath = `.release-authorizations/addenda/${authorizationId}/${amendmentId}.json`;
+  fs.mkdirSync(path.dirname(path.join(root, amendmentsPath)), {recursive: true});
+  fs.writeFileSync(path.join(root, amendmentsPath), `${JSON.stringify(amendment)}\n`);
+  git('add', amendmentsPath); git('commit', '-m', 'record ME-38 exact owner scope addendum');
+  const candidateSha = git('rev-parse', 'HEAD');
+
+  const approvedPaths = candidateScopeDiff(root, authorizationId, measuredBaseline, candidateSha);
+  assert.deepEqual(approvedPaths, paths.sort());
+  assert.doesNotThrow(() => validateTaskAuthorization({record: originalAuth, project: 'gpoint',
+    authorizationId, candidateSha, currentMainSha: candidateSha, productionSha: measuredBaseline,
+    changedPaths: approvedPaths}));
+  assert.equal(git('rev-parse', `${candidateSha}:${authPath}`), originalRecordBlob,
+    'the original immutable owner authorization must remain unchanged');
+
+  const addendumBlobPath = path.join(root, amendmentsPath);
+  git('switch', '-c', 'invalid-risk-contract', `${candidateSha}^`);
+  fs.mkdirSync(path.dirname(addendumBlobPath), {recursive: true});
+  fs.writeFileSync(addendumBlobPath, execFileSync('git', ['show', `${candidateSha}:${amendmentsPath}`], {cwd: root}));
+  const invalidRisk = JSON.parse(fs.readFileSync(addendumBlobPath, 'utf8'));
+  invalidRisk.release_infrastructure_risk_contract.rollback_plan = '';
+  invalidRisk.amendment_commitment_sha256 = scopeAmendmentCommitmentSha256(invalidRisk);
+  fs.writeFileSync(addendumBlobPath, `${JSON.stringify(invalidRisk)}\n`);
+  git('add', amendmentsPath); git('commit', '-m', 'attempt incomplete risk amendment');
+  assert.throws(() => candidateScopeDiff(root, authorizationId, measuredBaseline, git('rev-parse', 'HEAD')),
+    /risk contract is incomplete/);
+
+  git('switch', '-c', 'invalid-scope-addition', `${candidateSha}^`);
+  fs.mkdirSync(path.dirname(addendumBlobPath), {recursive: true});
+  fs.writeFileSync(addendumBlobPath, execFileSync('git', ['show', `${candidateSha}:${amendmentsPath}`], {cwd: root}));
+  const invalidScope = JSON.parse(fs.readFileSync(addendumBlobPath, 'utf8'));
+  invalidScope.scope_additions[0].path = 'tests/unapproved_scope_test.py';
+  invalidScope.amendment_commitment_sha256 = scopeAmendmentCommitmentSha256(invalidScope);
+  fs.writeFileSync(addendumBlobPath, `${JSON.stringify(invalidScope)}\n`);
+  git('add', amendmentsPath); git('commit', '-m', 'attempt unapproved scope amendment');
+  assert.throws(() => candidateScopeDiff(root, authorizationId, measuredBaseline, git('rev-parse', 'HEAD')),
+    /approved scope additions/);
+  fs.rmSync(root, {recursive: true, force: true});
+});
+
 test('authorization state check observes revoked, consumed and claimed markers', async () => {
   const paths = [];
   const state = await checkTaskAuthorizationState({project: 'gpoint', authorizationId: id, token: 'test',

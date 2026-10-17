@@ -16,6 +16,15 @@ const GPOINT_RELEASE_SCOPE_ADDENDUM = Object.freeze({
   sourceInstructionIdentifier: 'OWNER_SCOPE_ADDENDUM_GPOINT_RELEASE_20261017',
   path: 'tests/test_prepare_workflow_summary.py',
 });
+const GPOINT_ME38_SCOPE_ADDENDUM = Object.freeze({
+  authorizationId: 'gpoint-unified-release-v1-recovery-20261017',
+  amendmentId: 'gpoint-me38-sync-release-infrastructure-20261017',
+  sourceInstructionIdentifier: 'OWNER_SCOPE_ADDENDUM_GPOINT_ME38_20261017',
+  ownerDecision: 'Continue ME-38 by preparing an append-only authorization for exactly the four named paths and their complete release-infrastructure risk contract; GitHub publication requires the specified separate one-Prepare approval.',
+  paths: Object.freeze(['.github/workflows/gpoint-linear-reconcile.yml',
+    '.github/workflows/sync-agents-to-linear.yml', 'scripts/sync_agents_to_linear.py',
+    'tests/test_sync_agents_to_linear.py']),
+});
 const VERIFIED_CANDIDATE_AMENDMENTS = new WeakMap();
 const OWNER_ONLY_PREFIXES = [
   '.github/', 'packages/db/', 'migrations/', 'db/', 'deploy/', 'docker/',
@@ -88,11 +97,29 @@ function amendmentCommitment(value) {
     source_instruction_identifier: value.source_instruction_identifier,
     owner_decision: value.owner_decision,
     original_authorization_record_blob_sha: value.original_authorization_record_blob_sha,
-    scope_additions: value.scope_additions});
+    scope_additions: value.scope_additions,
+    release_infrastructure_risk_contract: value.release_infrastructure_risk_contract});
 }
 
 export function scopeAmendmentCommitmentSha256(value) {
   return sha256(JSON.stringify(amendmentCommitment(value)));
+}
+
+function validateAddendumRiskContract(contract, paths, baselineSha) {
+  const requiredOperations = ['integrate', 'coalesce', 'prepare', 'preflight', 'deploy', 'verify', 'rollback', 'publish_evidence'];
+  if (!contract || !Array.isArray(contract.allowed_paths)
+      || JSON.stringify([...contract.allowed_paths].sort()) !== JSON.stringify([...paths].sort())
+      || contract.baseline_sha !== baselineSha
+      || typeof contract.risk_description !== 'string' || contract.risk_description.trim().length < 20
+      || !Array.isArray(contract.allowed_operations)
+      || JSON.stringify([...contract.allowed_operations].sort()) !== JSON.stringify([...requiredOperations].sort())
+      || !Array.isArray(contract.required_gates) || RELEASE_INFRASTRUCTURE_GATES.some(gate => !contract.required_gates.includes(gate))
+      || typeof contract.backup_plan !== 'string' || contract.backup_plan.trim().length < 20
+      || typeof contract.rollback_plan !== 'string' || contract.rollback_plan.trim().length < 20
+      || !Array.isArray(contract.stop_conditions) || contract.stop_conditions.length < 2
+      || contract.stop_conditions.some(value => typeof value !== 'string' || value.trim().length < 8)) {
+    throw new AuthorizationError('Scope addendum release-infrastructure risk contract is incomplete or mismatched');
+  }
 }
 
 /** Verify append-only, exact-file scope amendments without changing the original authorization. */
@@ -139,43 +166,60 @@ export function candidateScopeAmendments(repoRoot, authorizationId, baselineSha,
         || typeof value.owner_decision !== 'string' || value.owner_decision.trim().length < 20
         || value.original_authorization_record_blob_sha !== originalRecordBlob
         || value.amendment_commitment_sha256 !== scopeAmendmentCommitmentSha256(value)
-        || !Array.isArray(value.scope_additions) || value.scope_additions.length !== 1) {
+        || !Array.isArray(value.scope_additions)) {
       throw new AuthorizationError('Scope amendment identity or commitment is invalid');
     }
-    if (authorizationId !== GPOINT_RELEASE_SCOPE_ADDENDUM.authorizationId
-        || value.amendment_id !== GPOINT_RELEASE_SCOPE_ADDENDUM.amendmentId
-        || value.source_instruction_identifier !== GPOINT_RELEASE_SCOPE_ADDENDUM.sourceInstructionIdentifier) {
+    const approvedAddendum = [GPOINT_RELEASE_SCOPE_ADDENDUM, GPOINT_ME38_SCOPE_ADDENDUM].find(item =>
+      item.authorizationId === authorizationId && item.amendmentId === value.amendment_id
+        && item.sourceInstructionIdentifier === value.source_instruction_identifier);
+    if (!approvedAddendum) {
       throw new AuthorizationError('Scope amendment identity is not an approved addendum');
     }
-    const addition = value.scope_additions[0];
-    const scopedPath = addition.path;
-    if (scopedPath !== GPOINT_RELEASE_SCOPE_ADDENDUM.path) {
-      throw new AuthorizationError('Scope amendment does not match the approved scope addition');
+    if ('paths' in approvedAddendum && value.owner_decision !== approvedAddendum.ownerDecision) {
+      throw new AuthorizationError('Scope amendment owner decision does not match the approved instruction');
     }
-    if (typeof scopedPath !== 'string' || !scopedPath || scopedPath.startsWith('/')
-        || scopedPath.split('/').includes('..') || inScope(scopedPath, record.allowed_paths)
-        || ownerOnly(scopedPath) || !SHA.test(addition.source_commit_sha ?? '')
-        || !/^[a-f0-9]{64}$/.test(addition.patch_sha256 ?? '')
-        || !/^[a-f0-9]{64}$/.test(addition.result_file_sha256 ?? '')
-        || !/^[a-f0-9]{40}$/.test(addition.result_blob_sha ?? '')) {
-      throw new AuthorizationError('Scope amendment path or source proof is invalid');
+    const approvedPaths = 'paths' in approvedAddendum ? approvedAddendum.paths : [approvedAddendum.path];
+    const additions = value.scope_additions;
+    if (JSON.stringify(additions.map(addition => addition?.path).sort())
+        !== JSON.stringify([...approvedPaths].sort())) {
+      throw new AuthorizationError('Scope amendment does not match the approved scope additions');
     }
-    execFileSync('git', ['merge-base', '--is-ancestor', addition.source_commit_sha, candidateSha], {cwd: repoRoot, stdio: 'ignore', timeout: 20_000});
-    const sourceNames = git('diff-tree', '--root', '--no-commit-id', '--name-status', '-r', '--no-renames', addition.source_commit_sha)
-      .split('\n').filter(Boolean).map(line => line.split('\t'));
-    if (!sourceNames.some(([status, name]) => status === 'A' && name === scopedPath)) {
-      throw new AuthorizationError('Scope amendment source commit did not add the exact path');
+    if ('paths' in approvedAddendum) {
+      validateAddendumRiskContract(value.release_infrastructure_risk_contract, approvedPaths, record.production_baseline_sha);
+    } else if (value.release_infrastructure_risk_contract !== undefined) {
+      throw new AuthorizationError('Unapproved scope addendum cannot add a release-infrastructure risk contract');
     }
-    const sourcePatch = bytes('show', '--format=', '--no-ext-diff', addition.source_commit_sha, '--', scopedPath);
-    const candidateFile = bytes('show', `${candidateSha}:${scopedPath}`);
-    if (sha256(sourcePatch) !== addition.patch_sha256
-        || sha256(candidateFile) !== addition.result_file_sha256
-        || git('rev-parse', `${addition.source_commit_sha}:${scopedPath}`) !== addition.result_blob_sha
-        || git('rev-parse', `${candidateSha}:${scopedPath}`) !== addition.result_blob_sha) {
-      throw new AuthorizationError('Scope amendment diff, blob, or candidate file does not match');
+    for (const addition of additions) {
+      const scopedPath = addition.path;
+      if (typeof scopedPath !== 'string' || !scopedPath || scopedPath.startsWith('/')
+          || scopedPath.split('/').includes('..') || inScope(scopedPath, record.allowed_paths)
+          || (ownerOnly(scopedPath) && !('paths' in approvedAddendum)) || !SHA.test(addition.source_commit_sha ?? '')
+          || !/^[a-f0-9]{64}$/.test(addition.patch_sha256 ?? '')
+          || !/^[a-f0-9]{64}$/.test(addition.result_file_sha256 ?? '')
+          || !/^[a-f0-9]{40}$/.test(addition.result_blob_sha ?? '')) {
+        throw new AuthorizationError('Scope amendment path or source proof is invalid');
+      }
+      execFileSync('git', ['merge-base', '--is-ancestor', addition.source_commit_sha, candidateSha], {cwd: repoRoot, stdio: 'ignore', timeout: 20_000});
+      const sourceNames = git('diff-tree', '--root', '--no-commit-id', '--name-status', '-r', '--no-renames', addition.source_commit_sha)
+        .split('\n').filter(Boolean).map(line => line.split('\t'));
+      const acceptableSourceStatuses = 'paths' in approvedAddendum ? ['A', 'M'] : ['A'];
+      if (!sourceNames.some(([status, name]) => acceptableSourceStatuses.includes(status) && name === scopedPath)) {
+        throw new AuthorizationError('Scope amendment source commit did not add the exact path required by its owner instruction');
+      }
+      const sourcePatch = bytes('show', '--format=', '--no-ext-diff', addition.source_commit_sha, '--', scopedPath);
+      const candidateFile = bytes('show', `${candidateSha}:${scopedPath}`);
+      if (sha256(sourcePatch) !== addition.patch_sha256
+          || sha256(candidateFile) !== addition.result_file_sha256
+          || git('rev-parse', `${addition.source_commit_sha}:${scopedPath}`) !== addition.result_blob_sha
+          || git('rev-parse', `${candidateSha}:${scopedPath}`) !== addition.result_blob_sha) {
+        throw new AuthorizationError('Scope amendment diff, blob, or candidate file does not match');
+      }
     }
     // Keep metadata out of the application diff; the exact amended source path remains in it.
-    return verifiedAmendedPaths([scopedPath]);
+    const result = verifiedAmendedPaths(approvedPaths);
+    VERIFIED_CANDIDATE_AMENDMENTS.set(result, {amendedPaths: result,
+      riskContract: value.release_infrastructure_risk_contract ?? null});
+    return result;
   } catch (error) {
     if (error instanceof AuthorizationError) throw error;
     throw new AuthorizationError('Scope amendment could not be verified');
@@ -240,8 +284,10 @@ export function candidateScopeDiff(repoRoot, authorizationId, baselineSha, candi
     if (!diffPaths.length) throw new AuthorizationError('Candidate has no implementation changes beyond the authorization record');
     if (amendedPaths.some(name => !diffPaths.includes(name))) throw new AuthorizationError('Scope amendment does not reference a candidate diff path');
     const result = Object.freeze([...new Set(diffPaths)].sort());
+    const amendmentProof = VERIFIED_CANDIDATE_AMENDMENTS.get(amendedPaths);
     VERIFIED_CANDIDATE_AMENDMENTS.set(result, {authorizationId, baselineSha, candidateSha,
-      amendedPaths, changedPathsJson: JSON.stringify(result)});
+      amendedPaths, amendmentRiskContract: amendmentProof?.riskContract ?? null,
+      changedPathsJson: JSON.stringify(result)});
     return result;
   } catch (error) {
     if (error instanceof AuthorizationError) throw error;
@@ -260,11 +306,12 @@ const releaseInfrastructurePath = value => {
   return /(?:release|prepare|ghcr|oci|artifact|coalesc|worker.*guard)/.test(normalized.slice('scripts/'.length));
 };
 
-function validateReleaseInfrastructureRiskContract(record, changedPath) {
-  const contract = record.risk_contracts?.release_infrastructure;
+function validateReleaseInfrastructureRiskContract(record, changedPath, amendedContract = null) {
+  const contract = amendedContract ?? record.risk_contracts?.release_infrastructure;
   const requiredOperations = ['integrate', 'coalesce', 'prepare', 'preflight', 'deploy', 'verify', 'rollback', 'publish_evidence'];
   if (!contract || !Array.isArray(contract.allowed_paths) || !contract.allowed_paths.includes(changedPath)
-      || !Array.isArray(record.allowed_paths) || !record.allowed_paths.some(scope => inScope(changedPath, [scope]))
+      || !(Array.isArray(record.allowed_paths) && record.allowed_paths.some(scope => inScope(changedPath, [scope]))
+        || amendedContract && amendedContract.allowed_paths.includes(changedPath))
       || contract.baseline_sha !== record.production_baseline_sha
       || typeof contract.risk_description !== 'string' || contract.risk_description.trim().length < 20
       || !Array.isArray(contract.allowed_operations) || requiredOperations.some(operation => !contract.allowed_operations.includes(operation))
@@ -370,7 +417,8 @@ export function validateTaskAuthorization({record, project, authorizationId, can
       continue;
     }
     if (releaseInfrastructurePath(path)) {
-      validateReleaseInfrastructureRiskContract(record, path);
+      validateReleaseInfrastructureRiskContract(record, path,
+        effectiveAmendedPaths.includes(path) ? scopeProof?.amendmentRiskContract : null);
       continue;
     }
     if (ownerOnly(path)) {
