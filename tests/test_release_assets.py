@@ -2,6 +2,10 @@ import sys
 from pathlib import Path
 import unittest
 from unittest.mock import patch
+import hashlib
+import json
+import tempfile
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -316,6 +320,135 @@ class ImmutableReleaseTests(unittest.TestCase):
         self.assertIn('release_assets.py publish prepare', prepare)
         self.assertIn('release_assets.py publish evidence', deploy)
         self.assertIn('release_assets.py read-result', deploy)
+
+    def test_failed_post_switch_recovery_evidence_requires_exact_workflow_jobs_and_immutable_assets(self):
+        sha, run_id, attempt = 'a' * 40, '39010750184', '1'
+        tag = ASSETS.release_tag('evidence', sha, run_id, attempt)
+        assets = [{'id': i, 'name': name, 'state': 'uploaded', 'size': 500,
+                   'digest': 'sha256:' + str(i) * 64} for i, name in enumerate(('result.zip', 'manifests.zip'), 1)]
+        release = {'tag_name': tag, 'draft': False, 'immutable': True, 'assets': assets}
+        def api(route):
+            if route == f'actions/runs/{run_id}/attempts/{attempt}':
+                return {'run_attempt': 1, 'head_sha': sha, 'event': 'workflow_dispatch',
+                        'path': '.github/workflows/gpoint-deploy.yml', 'status': 'completed', 'conclusion': 'failure'}
+            if route == f'actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100':
+                return {'total_count': 2, 'jobs': [
+                    {'name': 'validate', 'status': 'completed', 'conclusion': 'success', 'head_sha': sha},
+                    {'name': 'deploy', 'status': 'completed', 'conclusion': 'failure', 'head_sha': sha}]}
+            if route == f'releases/tags/{tag}':
+                return release
+            if route == f'git/ref/tags/{tag}':
+                return {'object': {'type': 'commit', 'sha': sha}}
+            raise AssertionError(route)
+        selected = ASSETS.find_post_switch_failure_evidence(sha, run_id, attempt, api)
+        self.assertEqual(selected['resultAsset']['id'], 1)
+        self.assertEqual(selected['manifestAsset']['id'], 2)
+        for bad_route, bad_value in [('actions/runs/39010750184/attempts/1', {'run_attempt': 2}),
+                                     (f'actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100',
+                                      {'total_count': 1, 'jobs': []})]:
+            def bad_api(route, bad_route=bad_route, bad_value=bad_value):
+                return bad_value if route == bad_route else api(route)
+            with self.assertRaises(RuntimeError):
+                ASSETS.find_post_switch_failure_evidence(sha, run_id, attempt, bad_api)
+
+    def test_read_post_switch_failure_checks_asset_hashes_and_manifest_identity(self):
+        sha, run_id, attempt = 'a' * 40, '39010750184', '1'
+        result_name = f'gpoint-release-result-{run_id}-{attempt}.json'
+        release_id = 'gpoint-release-20261017T064101334Z'
+        result = {'candidateSha': sha, 'automationRunId': run_id, 'automationRunAttempt': attempt,
+                  'status': 'RECOVERY_REQUIRED', 'releaseState': 'RECOVERY_REQUIRED', 'failureStage': 'POST_SWITCH',
+                  'releaseId': release_id, 'previousProductionSha': 'b' * 40, 'productionBaselineSha': 'b' * 40,
+                  'productionRef': None, 'prepareRunId': '39009939478', 'prepareRunAttempt': '1',
+                  'failureReason': 'GitHub production tag push failed on a non-transient error; refusing retry'}
+        manifest = {'candidateSha': sha, 'releaseId': release_id, 'status': 'RECOVERY_REQUIRED',
+                    'failureStage': 'POST_SWITCH', 'previousProductionSha': 'b' * 40,
+                    'productionShaAfter': None, 'productionRef': None, 'failureReason': result['failureReason']}
+        def zip_bytes(files):
+            import io
+            buff = io.BytesIO()
+            with zipfile.ZipFile(buff, 'w') as archive:
+                for name, data in files.items():
+                    archive.writestr(name, json.dumps(data) if isinstance(data, dict) else data)
+            return buff.getvalue()
+        receipt = {'schema': 3, 'transport': 'ghcr-oci', 'candidateSha': sha,
+                   'runId': 39009939478, 'runAttempt': 1, 'status': 'READY',
+                   'prismaHead': '20261015130000_codex_telegram_challenge', 'agataHead': 'agata0011',
+                   'gsalesMigrationHead': '001_gsales', 'gsalesMigrationSha256': 'c' * 64,
+                   'images': {role: {'repository': repository, 'sourceSha': sha, 'platform': 'linux/amd64',
+                                     'digest': 'sha256:' + str(index) * 64,
+                                     'configDigest': 'sha256:' + str(index + 3) * 64}
+                              for index, (role, repository) in enumerate(ASSETS.RECOVERY_IMAGE_REPOSITORIES.items(), 1)}}
+        payloads = {1: zip_bytes({result_name: result}), 2: zip_bytes({f'{release_id}.json': manifest}),
+                    3: zip_bytes({'receipt.json': receipt})}
+        asset_digests = {i: hashlib.sha256(data).hexdigest() for i, data in payloads.items()}
+        def download(_repo, asset_id, _token, target, **_kwargs):
+            Path(target).write_bytes(payloads[asset_id])
+        evidence = {'run': {'id': run_id, 'attempt': attempt, 'headSha': sha,
+                            'event': 'workflow_dispatch', 'path': '.github/workflows/gpoint-deploy.yml',
+                            'conclusion': 'failure'},
+                    'validateJob': {'status': 'completed', 'conclusion': 'success', 'headSha': sha},
+                    'deployJob': {'status': 'completed', 'conclusion': 'failure', 'headSha': sha},
+                    'tag': ASSETS.release_tag('evidence', sha, run_id, attempt),
+                    'resultAsset': {'id': 1, 'size': len(payloads[1]), 'digest': 'sha256:' + asset_digests[1]},
+                    'manifestAsset': {'id': 2, 'size': len(payloads[2]), 'digest': 'sha256:' + asset_digests[2]}}
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(ASSETS, 'find_post_switch_failure_evidence', return_value=evidence), \
+             patch.object(ASSETS, 'find_prepare_evidence', return_value=('1', {'id': 3, 'size': len(payloads[3]),
+                    'digest': 'sha256:' + asset_digests[3]})), \
+             patch('prepared_artifact_cache.download', side_effect=download):
+            target = Path(temporary) / 'verified-recovery.json'
+            verified = ASSETS.read_post_switch_failure(sha, run_id, attempt, target, token='readonly', api=lambda _route: None)
+            self.assertEqual(json.loads(target.read_text())['prepare']['receipt'], receipt)
+            self.assertEqual(verified['failureManifestSha256'], hashlib.sha256(
+                json.dumps(manifest).encode()).hexdigest())
+            self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+            original_bytes = target.read_bytes()
+            with self.assertRaises(FileExistsError):
+                ASSETS.read_post_switch_failure(sha, run_id, attempt, target, token='readonly', api=lambda _route: None)
+            self.assertEqual(target.read_bytes(), original_bytes)
+            payloads[2] = b'corrupted'
+            with self.assertRaisesRegex(RuntimeError, 'checksum'):
+                ASSETS.read_post_switch_failure(sha, run_id, attempt, target, token='readonly', api=lambda _route: None)
+
+    def test_failed_deploy_cannot_silently_substitute_an_earlier_prepare_attempt(self):
+        sha, run_id, attempt = 'a' * 40, '39010750184', '1'
+        result_name = f'gpoint-release-result-{run_id}-{attempt}.json'
+        result = {'candidateSha': sha, 'automationRunId': run_id, 'automationRunAttempt': attempt,
+                  'status': 'RECOVERY_REQUIRED', 'releaseState': 'RECOVERY_REQUIRED', 'failureStage': 'POST_SWITCH',
+                  'releaseId': 'gpoint-release-20261017T064101334Z', 'previousProductionSha': 'b' * 40,
+                  'productionBaselineSha': 'b' * 40, 'productionRef': None, 'prepareRunId': '39009939478',
+                  'prepareRunAttempt': '1', 'failureReason': 'GitHub production tag push failed on a non-transient error; refusing retry'}
+        import io
+        buff = io.BytesIO()
+        with zipfile.ZipFile(buff, 'w') as archive:
+            archive.writestr(result_name, json.dumps(result))
+        result_bytes = buff.getvalue()
+        digest = hashlib.sha256(result_bytes).hexdigest()
+        manifest_buff = io.BytesIO()
+        with zipfile.ZipFile(manifest_buff, 'w') as archive:
+            archive.writestr('gpoint-release-20261017T064101334Z.json', json.dumps({
+                'candidateSha': sha, 'releaseId': result['releaseId'], 'status': 'RECOVERY_REQUIRED',
+                'failureStage': 'POST_SWITCH', 'previousProductionSha': 'b' * 40,
+                'productionShaAfter': None, 'productionRef': None,
+                'failureReason': result['failureReason']}))
+        manifest_bytes = manifest_buff.getvalue()
+        manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
+        evidence = {'run': {'id': run_id, 'attempt': attempt, 'headSha': sha,
+                            'event': 'workflow_dispatch', 'path': '.github/workflows/gpoint-deploy.yml',
+                            'conclusion': 'failure'},
+                    'validateJob': {'status': 'completed', 'conclusion': 'success', 'headSha': sha},
+                    'deployJob': {'status': 'completed', 'conclusion': 'failure', 'headSha': sha},
+                    'tag': ASSETS.release_tag('evidence', sha, run_id, attempt),
+                    'resultAsset': {'id': 1, 'size': len(result_bytes), 'digest': 'sha256:' + digest},
+                    'manifestAsset': {'id': 2, 'size': len(manifest_bytes), 'digest': 'sha256:' + manifest_digest}}
+        def download(_repo, asset_id, _token, target, **_kwargs):
+            Path(target).write_bytes(result_bytes if asset_id == 1 else manifest_bytes)
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(ASSETS, 'find_post_switch_failure_evidence', return_value=evidence), \
+             patch.object(ASSETS, 'find_prepare_evidence', return_value=('2', {'id': 3})), \
+             patch('prepared_artifact_cache.download', side_effect=download):
+            with self.assertRaisesRegex(RuntimeError, 'attempt differs'):
+                ASSETS.read_post_switch_failure(sha, run_id, attempt, Path(temporary) / 'recovery.json', token='readonly')
 
 if __name__ == '__main__':
     unittest.main()

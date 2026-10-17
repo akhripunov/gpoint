@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """GPoint-only immutable Release assets, independent of Actions storage quota."""
 import json
+import base64
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -13,6 +14,11 @@ import urllib.request
 import urllib.error
 
 REPO = 'akhripunov/gpoint'
+RECOVERY_IMAGE_REPOSITORIES = {
+    'app': 'ghcr.io/akhripunov/gpoint-runtime',
+    'agata': 'ghcr.io/akhripunov/gpoint-agata-runtime',
+    'gsales': 'ghcr.io/akhripunov/gpoint-g-sales-runtime',
+}
 
 
 def release_tag(kind, sha, run_id, attempt):
@@ -168,6 +174,168 @@ def find_prepare_evidence(sha, run_id, current_attempt, api=evidence_api):
         asset = resolve_asset('prepare', sha, run_id, attempt, 'bundle.zip', exact_api)
         return attempt, asset
     raise RuntimeError('No immutable successful executed Prepare attempt')
+
+
+def find_post_switch_failure_evidence(sha, run_id, attempt, api=evidence_api):
+    """Resolve only the immutable evidence for the named failed Deploy attempt."""
+    release_tag('evidence', sha, run_id, attempt)
+    details = api(f'actions/runs/{run_id}/attempts/{attempt}')
+    jobs = api(f'actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100')
+    if (not isinstance(details, dict) or str(details.get('run_attempt')) != str(attempt)
+            or details.get('head_sha') != sha or details.get('event') != 'workflow_dispatch'
+            or details.get('path') != '.github/workflows/gpoint-deploy.yml'
+            or details.get('status') != 'completed' or details.get('conclusion') != 'failure'
+            or not isinstance(jobs, dict) or not isinstance(jobs.get('jobs'), list)
+            or jobs.get('total_count', len(jobs['jobs'])) != len(jobs['jobs'])):
+        raise RuntimeError('Failed Deploy attempt provenance is incomplete or mismatched')
+    validate = [job for job in jobs['jobs'] if job.get('name') == 'validate']
+    deploy = [job for job in jobs['jobs'] if job.get('name') == 'deploy']
+    if (len(validate) != 1 or len(deploy) != 1
+            or validate[0].get('status') != 'completed' or validate[0].get('conclusion') != 'success'
+            or validate[0].get('head_sha') != sha
+            or deploy[0].get('status') != 'completed' or deploy[0].get('conclusion') != 'failure'
+            or deploy[0].get('head_sha') != sha):
+        raise RuntimeError('Deploy attempt jobs do not prove validate PASS and deploy failure')
+    tag = release_tag('evidence', sha, run_id, attempt)
+    release = api(f'releases/tags/{tag}')
+    if release is None:
+        raise RuntimeError('Immutable failure evidence release is missing')
+    def exact_api(route):
+        return release if route == f'releases/tags/{tag}' else api(route)
+    result = resolve_asset('evidence', sha, run_id, attempt, 'result.zip', exact_api)
+    manifests = resolve_asset('evidence', sha, run_id, attempt, 'manifests.zip', exact_api)
+    return {'run': details, 'validateJob': validate[0], 'deployJob': deploy[0], 'tag': tag,
+            'resultAsset': result, 'manifestAsset': manifests}
+
+
+def _download_immutable_asset(asset, target, token):
+    from prepared_artifact_cache import download, checksum
+    download(REPO, asset['id'], token, target, release_asset=True, expected_size=asset['size'])
+    if checksum(target) != asset['digest'][7:]:
+        raise RuntimeError('Immutable release asset checksum mismatch')
+
+
+def read_post_switch_failure(sha, run_id, attempt, output_path, token=None, api=evidence_api):
+    """Download and verify failed-run evidence without authorizing production mutation."""
+    from prepared_artifact_cache import extract
+    token = token or os.environ['GITHUB_TOKEN']
+    identity = find_post_switch_failure_evidence(sha, run_id, attempt, api)
+    output = Path(output_path)
+    if output.is_symlink():
+        raise RuntimeError('Recovery evidence destination must not be a symlink')
+    with tempfile.TemporaryDirectory(prefix='gpoint-recovery-evidence-') as temporary:
+        root = Path(temporary)
+        result_zip, manifests_zip = root / 'result.zip', root / 'manifests.zip'
+        _download_immutable_asset(identity['resultAsset'], result_zip, token)
+        _download_immutable_asset(identity['manifestAsset'], manifests_zip, token)
+        result_name = f'gpoint-release-result-{run_id}-{attempt}.json'
+        result_dir = root / 'result'
+        extract(result_zip, result_dir, [result_name])
+        result = json.loads((result_dir / result_name).read_text())
+        validate_result(result, sha, run_id, attempt)
+        if (result.get('status') != 'RECOVERY_REQUIRED' or result.get('releaseState') != 'RECOVERY_REQUIRED'
+                or result.get('failureStage') != 'POST_SWITCH' or result.get('productionRef') is not None
+                or result.get('productionBaselineSha') != result.get('previousProductionSha')
+                or not re.search(r'GitHub production tag push failed on a non-transient error; refusing retry',
+                                 result.get('failureReason', ''))):
+            raise RuntimeError('Immutable result does not prove the expected post-switch tag failure')
+        release_id = result.get('releaseId')
+        if not isinstance(release_id, str) or not re.fullmatch(r'gpoint-release-\d{8}T\d{9}Z', release_id):
+            raise RuntimeError('Failed release identity is invalid')
+        member = f'{release_id}.json'
+        with zipfile.ZipFile(manifests_zip) as archive:
+            infos = archive.infolist()
+            names = [info.filename for info in infos]
+            if (not infos or len(names) != len(set(names)) or member not in names
+                    or sum(info.file_size for info in infos) > 2 * 1024**3
+                    or any(Path(name).name != name or '\\' in name or not name.endswith('.json') or info.is_dir()
+                           or __import__('stat').S_ISLNK(info.external_attr >> 16)
+                           for name, info in zip(names, infos))):
+                raise RuntimeError('Failure manifest archive members are unsafe or incomplete')
+        manifest_dir = root / 'manifests'
+        extract(manifests_zip, manifest_dir, [names])
+        manifest_bytes = (manifest_dir / member).read_bytes()
+        manifest = json.loads(manifest_bytes)
+        if (manifest.get('candidateSha') != sha or manifest.get('releaseId') != release_id
+                or manifest.get('status') != 'RECOVERY_REQUIRED' or manifest.get('failureStage') != 'POST_SWITCH'
+                or manifest.get('previousProductionSha') != result.get('previousProductionSha')
+                or manifest.get('productionShaAfter') is not None
+                or manifest.get('productionRef') is not None
+                or manifest.get('failureReason') != result.get('failureReason')):
+            raise RuntimeError('Immutable failure manifest does not match result')
+        prepare_run, prepare_attempt = result.get('prepareRunId'), result.get('prepareRunAttempt')
+        if not re.fullmatch(r'[1-9][0-9]*', str(prepare_run)) or not re.fullmatch(r'[1-9][0-9]*', str(prepare_attempt)):
+            raise RuntimeError('Failed Deploy result has no exact Prepare identity')
+        selected_prepare_attempt, prepare_asset = find_prepare_evidence(
+            sha, str(prepare_run), str(prepare_attempt), api)
+        if str(selected_prepare_attempt) != str(prepare_attempt):
+            raise RuntimeError('Prepare evidence attempt differs from failed Deploy input identity')
+        prepare_dir = root / 'prepare'
+        prepare_dir.mkdir()
+        prepare_zip = prepare_dir / 'bundle.zip'
+        _download_immutable_asset(prepare_asset, prepare_zip, token)
+        prepare_contents = root / 'prepare-contents'
+        with zipfile.ZipFile(prepare_zip) as archive:
+            prepare_names = [info.filename for info in archive.infolist()]
+            if ('receipt.json' not in prepare_names or len(prepare_names) != len(set(prepare_names))
+                    or any(Path(name).name != name for name in prepare_names)):
+                raise RuntimeError('Prepare bundle members are unsafe or incomplete')
+        extract(prepare_zip, prepare_contents, [prepare_names])
+        receipt = json.loads((prepare_contents / 'receipt.json').read_text())
+        if (receipt.get('candidateSha') != sha or str(receipt.get('runId')) != str(prepare_run)
+                or str(receipt.get('runAttempt')) != str(prepare_attempt) or receipt.get('status') != 'READY'
+                or receipt.get('schema') != 3 or receipt.get('transport') != 'ghcr-oci'
+                or set(receipt.get('images', {})) != set(RECOVERY_IMAGE_REPOSITORIES)
+                or not re.fullmatch(r'[A-Za-z0-9_]{1,128}', receipt.get('prismaHead', ''))
+                or not re.fullmatch(r'[A-Za-z0-9_]{1,32}', receipt.get('agataHead', ''))
+                or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', receipt.get('gsalesMigrationHead', ''))
+                or not re.fullmatch(r'[a-f0-9]{64}', receipt.get('gsalesMigrationSha256', ''))):
+            raise RuntimeError('Immutable Prepare receipt does not match failure result')
+        for role, repository in RECOVERY_IMAGE_REPOSITORIES.items():
+            image = receipt['images'][role]
+            if (image.get('repository') != repository or image.get('sourceSha') != sha
+                    or image.get('platform') != 'linux/amd64'
+                    or not re.fullmatch(r'sha256:[a-f0-9]{64}', image.get('digest', ''))
+                    or not re.fullmatch(r'sha256:[a-f0-9]{64}', image.get('configDigest', ''))):
+                raise RuntimeError(f'Immutable Prepare image identity is invalid: {role}')
+        # Record verified asset identities and manifest bytes digest; callers must
+        # still supply independent, fresh production readback before reconciliation.
+        verified = {
+            'run': {'id': str(run_id), 'attempt': str(attempt), 'headSha': sha,
+                    'event': identity['run']['event'], 'path': identity['run']['path'],
+                    'conclusion': identity['run']['conclusion']},
+            'validateJob': {'status': identity['validateJob']['status'],
+                            'conclusion': identity['validateJob']['conclusion'], 'headSha': sha},
+            'deployJob': {'status': identity['deployJob']['status'],
+                          'conclusion': identity['deployJob']['conclusion'], 'headSha': sha},
+            'evidence': {'tag': identity['tag'], 'immutable': True,
+                         'resultDigest': identity['resultAsset']['digest'],
+                         'manifestDigest': identity['manifestAsset']['digest'],
+                         'resultChecksumVerified': True, 'manifestChecksumVerified': True},
+            'result': result,
+            'failureManifest': {**manifest, 'fileName': member},
+            'failureManifestSha256': __import__('hashlib').sha256(manifest_bytes).hexdigest(),
+            'failureManifestBytesBase64': base64.b64encode(manifest_bytes).decode('ascii'),
+            'prepare': {'runId': str(prepare_run), 'attempt': str(prepare_attempt),
+                        'candidateSha': sha, 'tag': f'gpoint-prepare-{sha}-{prepare_run}-{prepare_attempt}',
+                        'status': 'success', 'immutable': True, 'bundleDigest': prepare_asset['digest'],
+                        'receipt': receipt},
+        }
+        output.parent.mkdir(parents=True, exist_ok=True)
+        payload = (json.dumps(verified, sort_keys=True, indent=2) + '\n').encode()
+        descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+        try:
+            with os.fdopen(descriptor, 'wb') as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            try:
+                os.unlink(output)
+            except OSError:
+                pass
+            raise
+        return verified
 
 
 def validate_result(data, sha, run_id, attempt):
@@ -334,6 +502,9 @@ def read_result(sha, run_id, attempt, result_path=None, token=None):
 
 def main():
     sha = os.environ.get('CANDIDATE_SHA', os.environ.get('GITHUB_SHA', ''))
+    if len(sys.argv) > 1 and sys.argv[1] == 'read-recovery-failure' and len(sys.argv) == 6:
+        read_post_switch_failure(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
+        return
     run_id, attempt = os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT']
     if sys.argv[1] == 'publish':
         publish(sys.argv[2], sha, run_id, attempt)

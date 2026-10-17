@@ -87,15 +87,17 @@ test('production tag Git auth is scoped to one exact canonical tag push', () => 
   assert.equal(env.GIT_TERMINAL_PROMPT, '0');
   assert.equal(env.GIT_CONFIG_KEY_0, 'credential.helper');
   assert.equal(env.GIT_CONFIG_VALUE_0, '');
-  assert.equal(env.GIT_CONFIG_KEY_1, 'http.https://github.com/akhripunov/gpoint.git/.extraheader');
+  assert.equal(env.GIT_CONFIG_KEY_1, 'http.https://github.com/akhripunov/gpoint/.extraheader');
   assert.equal(env.GIT_CONFIG_VALUE_1, '');
   assert.match(env.GIT_CONFIG_VALUE_2, /^AUTHORIZATION: basic /);
   assert.equal(JSON.stringify(env).includes(token), false);
-  const expectedRepo = spawnSync('git', ['config', '--get-urlmatch', 'http.extraheader', 'https://github.com/akhripunov/gpoint.git'], {encoding: 'utf8', env});
+  const expectedRepo = spawnSync('git', ['config', '--get-urlmatch', 'http.extraheader', 'https://github.com/akhripunov/gpoint'], {encoding: 'utf8', env});
   const siblingRepo = spawnSync('git', ['config', '--get-urlmatch', 'http.extraheader', 'https://github.com/akhripunov/other.git'], {encoding: 'utf8', env});
   assert.equal(expectedRepo.status, 0);
   assert.equal(expectedRepo.stdout.trim(), env.GIT_CONFIG_VALUE_2);
   assert.notEqual(siblingRepo.status, 0);
+  const alternateRemoteForm = spawnSync('git', ['config', '--get-urlmatch', 'http.extraheader', 'https://github.com/akhripunov/gpoint.git'], {encoding: 'utf8', env});
+  assert.notEqual(alternateRemoteForm.status, 0);
   for (const denied of [
     ['push', 'origin', 'refs/tags/other-tag'],
     ['push', 'origin', `refs/tags/${tag}`, '--force'],

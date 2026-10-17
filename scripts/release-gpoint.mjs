@@ -141,9 +141,9 @@ export function githubProductionTagGitEnvironment(args, token, baseEnv = process
   env.GIT_CONFIG_COUNT = String(offset + 3);
   env[`GIT_CONFIG_KEY_${offset}`] = 'credential.helper';
   env[`GIT_CONFIG_VALUE_${offset}`] = '';
-  env[`GIT_CONFIG_KEY_${offset + 1}`] = 'http.https://github.com/akhripunov/gpoint.git/.extraheader';
+  env[`GIT_CONFIG_KEY_${offset + 1}`] = 'http.https://github.com/akhripunov/gpoint/.extraheader';
   env[`GIT_CONFIG_VALUE_${offset + 1}`] = '';
-  env[`GIT_CONFIG_KEY_${offset + 2}`] = 'http.https://github.com/akhripunov/gpoint.git/.extraheader';
+  env[`GIT_CONFIG_KEY_${offset + 2}`] = 'http.https://github.com/akhripunov/gpoint/.extraheader';
   env[`GIT_CONFIG_VALUE_${offset + 2}`] = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`;
   return env;
 }
