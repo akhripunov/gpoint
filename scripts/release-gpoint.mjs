@@ -14,7 +14,7 @@ import { deriveV3ProductionParent } from './release-component-bundle-v4.mjs';
 import { expectedStaticParent, staticReceiptAndImages, verifyStaticLiveBaseline,
   v4NativeProofOnVPS, verifyV4SourceAtCheckout } from './release-static-v4.mjs';
 import { applyStaticArtifactV4 } from './release-static-transfer-v4.mjs';
-import { recoveryFinalizationIdentity, runRecoveryFinalization,
+import { recoveryFinalizationIdentity, recoveryFinalizationIdentityFromFailureEvidence, runRecoveryFinalization,
   validateRecoveryFinalizationApproval, assertNoConcurrentRelease } from './recovery-finalization.mjs';
 
 import { acquireReleaseLock } from './release-lock.mjs';
@@ -940,7 +940,9 @@ function readRecoveryDiagnosticsIncident(candidate) {
     die('immutable incident, failed Deploy, and Prepare evidence are inconsistent');
   }
   return {
-    incident: {runId, attempt, candidateSha: candidate, baselineSha: manifest.previousProductionSha,
+    manifest,
+    result,
+    incident: {runId, attempt, releaseId: manifest.releaseId, candidateSha: candidate, baselineSha: manifest.previousProductionSha,
       failureStage: manifest.failureStage, status: manifest.status, manifestSha256},
     incidentEvidence: {observedAt: isoNow(), verified: true, runId, attempt,
       assetSha256: imported.evidence.manifestDigest.slice('sha256:'.length),
@@ -1014,7 +1016,7 @@ function recoveryDiagnostics(candidate) {
   } catch { /* Missing inventory remains incomplete. */ }
 
   const baselineTagName = String(ledgerState.currentProductionRef ?? '').replace(/^refs\/tags\//, '');
-  const identity = recoveryFinalizationIdentity(incident.incident.runId, candidate);
+  const identity = recoveryFinalizationIdentityFromFailureEvidence(incident.manifest, incident.result, candidate);
   let baselineTagTarget = null;
   let candidateTagTarget = null;
   let baselineTagChecked = false;
@@ -1048,13 +1050,17 @@ function recoveryDiagnostics(candidate) {
       candidateTagTargetSha: candidateTagTarget},
   };
   const snapshot = buildRecoveryDiagnosticsSnapshot(snapshotInput);
-  const releaseId = `gpoint-recovery-diagnostics-${Date.now()}-${currentRunId || 'local'}`;
+  const executorSha = process.env.GPOINT_RECOVERY_EXECUTOR_SHA ?? '';
+  if (!SHA_RE.test(executorSha) || !/^\d+$/.test(currentRunId) || !/^\d+$/.test(process.env.GITHUB_RUN_ATTEMPT ?? ''))
+    die('recovery diagnostic Release identity is incomplete');
+  const releaseId = `gpoint-recovery-diagnostics-${executorSha}-${currentRunId}-${process.env.GITHUB_RUN_ATTEMPT}`;
   const manifest = {releaseId, eventType: 'RECOVERY_READ_ONLY_DIAGNOSTICS', candidateSha: candidate,
     previousProductionSha: incident.incident.baselineSha, productionShaAfter: null,
     status: 'RECOVERY_DIAGNOSTICS_ONLY', recoverySnapshot: snapshot,
     startedAt: snapshot.observedAt, finishedAt: isoNow(), runtimeSwitchOccurred: false,
     databaseApplyOccurred: false, productionMutationOccurred: false};
   const file = writeManifest(manifest);
+  if (process.env.GITHUB_ENV) fs.appendFileSync(process.env.GITHUB_ENV, `GPOINT_RECOVERY_DIAGNOSTIC_MANIFEST=${file}\n`);
   const output = process.env.GPOINT_RECOVERY_SNAPSHOT_PATH;
   if (output) {
     if (!path.isAbsolute(output) || fs.existsSync(output)) die('recovery snapshot output path is invalid or already exists');

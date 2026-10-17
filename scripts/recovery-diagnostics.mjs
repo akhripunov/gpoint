@@ -138,6 +138,11 @@ export function buildRecoveryDiagnosticsSnapshot(input, { nowMs = Date.now() } =
   const status = missingEvidence.length ? 'INCOMPLETE' : 'FACTS_COMPLETE';
   if (missingEvidence.length) blockers.push('READ_ONLY_SNAPSHOT_INCOMPLETE');
   blockers.push('FINALIZATION_REQUIRES_SEPARATE_OWNER_AUTHORIZATION');
+  const statusFor = (prefixes, blockerCodes = []) => {
+    if (missingEvidence.some((item) => prefixes.some((prefix) => item.startsWith(prefix)))) return 'NOT_VERIFIED';
+    if (blockers.some((item) => blockerCodes.includes(item))) return 'BLOCKED';
+    return 'PASS';
+  };
   const snapshot = {
     schema: 'gpoint-recovery-read-only-snapshot-v1',
     mode: 'recovery-diagnostics-read-only',
@@ -157,6 +162,20 @@ export function buildRecoveryDiagnosticsSnapshot(input, { nowMs = Date.now() } =
     missingEvidence,
     blockers: [...new Set(blockers)],
     factsComplete: status === 'FACTS_COMPLETE',
+    checks: {
+      incidentEvidence: statusFor(['incidentEvidence']),
+      ledger: statusFor(['ledger.']),
+      runtime: statusFor(['runtime.'], ['RUNTIME_IMAGE_SOURCE_PARITY_FAILED', 'MINIAPP_SOURCE_PARITY_FAILED', 'PRODUCTION_SERVICE_NOT_HEALTHY']),
+      database: statusFor(['runtime.database', 'runtime.migrationHeads.']),
+      workers: statusFor(['workers.'], ['WORKER_LANES_NOT_VERIFIED_HEALTHY']),
+      backup: !isTime(backup.observedAt, nowMs) || !['VERIFIED', 'MISSING', 'UNVERIFIED'].includes(backup.status)
+        ? 'NOT_VERIFIED'
+        : backup.status === 'VERIFIED' ? statusFor(['backup.']) : 'BLOCKED',
+      locks: statusFor(['locks.'], ['RELEASE_LOCK_CONFLICT']),
+      productionTag: statusFor(['productionTag.'], ['PRODUCTION_TAG_BASELINE_NOT_VERIFIED', 'CANDIDATE_PRODUCTION_TAG_CONFLICT']),
+      mutationBoundary: 'PASS',
+      finalization: 'BLOCKED',
+    },
     finalizationReady: false,
     mutationPolicy: { allowed: ['read_only_observation', 'write_diagnostic_snapshot_artifact'], forbidden: MUTATIONS },
   };

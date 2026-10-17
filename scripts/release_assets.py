@@ -2,6 +2,8 @@
 """GPoint-only immutable Release assets, independent of Actions storage quota."""
 import json
 import base64
+import hashlib
+import io
 from datetime import datetime, timezone
 import errno
 import os
@@ -27,6 +29,13 @@ RECOVERY_IMAGE_REPOSITORIES = {
 MAX_FAILURE_MANIFEST_MEMBERS = 4096
 MAX_FAILURE_MANIFEST_MEMBER_BYTES = 32 * 1024**2
 MAX_FAILURE_MANIFEST_TOTAL_BYTES = 2 * 1024**3
+# Actions accounts workflow outputs approximately as UTF-16. Keep this below
+# half the 1 MiB per-job cap to leave room for output metadata.
+MAX_RECOVERY_DIAGNOSTIC_BUNDLE_BYTES = 192 * 1024
+MAX_RECOVERY_DIAGNOSTIC_OUTPUT_BYTES = 256 * 1024
+MAX_RECOVERY_DIAGNOSTIC_OUTPUT_UTF16_BYTES = 512 * 1024
+ME38_INCIDENT_CANDIDATE = 'd367c2ec24242a733dbb2c4145c91d2d4682ba2c'
+ME38_INCIDENT_BASELINE = 'a700198a843c12a84f2e537178de752e3eddd54d'
 EVIDENCE_API_TOTAL_BUDGET_SECONDS = 60
 EVIDENCE_API_REQUEST_TIMEOUT_SECONDS = 20
 EVIDENCE_API_MAX_RETRIES = 5
@@ -85,7 +94,8 @@ class _EvidenceApiClient:
                     raise RuntimeError('GitHub immutable evidence read retry budget exhausted') from None
                 return json.loads(body)
             except urllib.error.HTTPError as exc:
-                if exc.code == 404 and route.startswith('releases/tags/'):
+                if (exc.code == 404 and (route.startswith('releases/tags/')
+                        or route.startswith('git/ref/tags/gpoint-recovery-diagnostics-'))):
                     return None
                 raise
             except (urllib.error.URLError, OSError) as exc:
@@ -132,6 +142,198 @@ def release_tag(kind, sha, run_id, attempt):
             or not all(re.fullmatch(r'[1-9][0-9]*', str(x)) for x in (run_id, attempt))):
         raise RuntimeError('Invalid GPoint immutable release identity')
     return f'gpoint-{kind}-{sha}-{run_id}-{attempt}'
+
+
+def recovery_diagnostics_tag(executor_sha, run_id, attempt):
+    if (not re.fullmatch(r'[a-f0-9]{40}', executor_sha or '')
+            or not re.fullmatch(r'[1-9][0-9]*', str(run_id))
+            or not re.fullmatch(r'[1-9][0-9]*', str(attempt))):
+        raise RuntimeError('Invalid recovery diagnostic Release identity')
+    return f'gpoint-recovery-diagnostics-{executor_sha}-{run_id}-{attempt}'
+
+
+def _stable_json_digest(value):
+    def stable(item):
+        if isinstance(item, list):
+            return [stable(child) for child in item]
+        if isinstance(item, dict):
+            return {key: stable(item[key]) for key in sorted(item)}
+        return item
+    encoded = json.dumps(stable(value), ensure_ascii=False, separators=(',', ':')).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def recovery_snapshot_digest(snapshot):
+    body = dict(snapshot)
+    supplied = body.pop('snapshotSha256', None)
+    digest = _stable_json_digest(body)
+    if supplied != digest:
+        raise RuntimeError('Recovery snapshot SHA-256 verification failed')
+    return digest
+
+
+def _validate_recovery_snapshot_semantics(snapshot):
+    missing, blockers, checks = (snapshot.get('missingEvidence'), snapshot.get('blockers'),
+                                 snapshot.get('checks'))
+    if (snapshot.get('releaseState') != 'RECOVERY_DIAGNOSTICS_ONLY'
+            or not isinstance(missing, list)
+            or any(not isinstance(item, str) or not item for item in missing)
+            or len(set(missing)) != len(missing)
+            or not isinstance(blockers, list)
+            or any(not isinstance(item, str) or not item for item in blockers)
+            or not isinstance(checks, dict)):
+        raise RuntimeError('Recovery snapshot semantic fields are invalid')
+    allowed_missing = {'snapshot.observedAt', 'ledger.observedAt', 'ledger.headSha',
+        'ledger.productionSha', 'ledger.stateSha256', 'ledger.refTargetSha', 'runtime.observedAt',
+        'runtime.releaseEnvSha', 'runtime.miniappSha', 'runtime.databaseReadOnlyQueryExitCode',
+        *(f'runtime.services.{name}' for name in ('api', 'worker', 'bot', 'agata-api',
+            'agata-memory-worker', 'gsales-api')),
+        'runtime.migrationHeads.prisma', 'runtime.migrationHeads.agata',
+        'runtime.migrationHeads.gsales', 'runtime.migrationHeads.gsalesMigrationSha256',
+        'workers.observedAt', 'workers.lanes.GPOINT', 'workers.lanes.GSALES',
+        'backup.status', 'backup.integrity', 'locks', 'productionTag', 'incidentEvidence'}
+    allowed_blockers = {'RUNTIME_IMAGE_SOURCE_PARITY_FAILED', 'MINIAPP_SOURCE_PARITY_FAILED',
+        'PRODUCTION_SERVICE_NOT_HEALTHY', 'WORKER_LANES_NOT_VERIFIED_HEALTHY',
+        'PROTECTED_BACKUP_MISSING', 'PROTECTED_BACKUP_UNVERIFIED', 'RELEASE_LOCK_CONFLICT',
+        'PRODUCTION_TAG_BASELINE_NOT_VERIFIED', 'CANDIDATE_PRODUCTION_TAG_CONFLICT',
+        'READ_ONLY_SNAPSHOT_INCOMPLETE', 'FINALIZATION_REQUIRES_SEPARATE_OWNER_AUTHORIZATION'}
+    if not set(missing).issubset(allowed_missing) or not set(blockers).issubset(allowed_blockers):
+        raise RuntimeError('Recovery snapshot contains unknown evidence or blocker fields')
+    complete = snapshot.get('factsComplete')
+    if (complete is not (len(missing) == 0)
+            or snapshot.get('status') != ('FACTS_COMPLETE' if complete else 'INCOMPLETE')):
+        raise RuntimeError('Recovery snapshot completeness fields are inconsistent')
+    expected = {'incidentEvidence', 'ledger', 'runtime', 'database', 'workers', 'backup',
+                'locks', 'productionTag', 'mutationBoundary', 'finalization'}
+    states = {'PASS', 'BLOCKED', 'NOT_VERIFIED'}
+    if (set(checks) != expected
+            or any(not isinstance(value, str) or value not in states for value in checks.values())):
+        raise RuntimeError('Recovery snapshot check statuses are invalid')
+    def status(prefixes=(), blocker_codes=()):
+        if prefixes and any(item.startswith(prefixes) for item in missing):
+            return 'NOT_VERIFIED'
+        if any(item in blocker_codes for item in blockers):
+            return 'BLOCKED'
+        return 'PASS'
+    backup_status = snapshot.get('backup', {}).get('status')
+    expected_checks = {
+        'incidentEvidence': status(('incidentEvidence',)),
+        'ledger': status(('ledger.',)),
+        'runtime': status(('runtime.',), ('RUNTIME_IMAGE_SOURCE_PARITY_FAILED',
+            'MINIAPP_SOURCE_PARITY_FAILED', 'PRODUCTION_SERVICE_NOT_HEALTHY')),
+        'database': status(('runtime.database', 'runtime.migrationHeads.')),
+        'workers': status(('workers.',), ('WORKER_LANES_NOT_VERIFIED_HEALTHY',)),
+        'backup': ('NOT_VERIFIED' if backup_status not in ('VERIFIED', 'MISSING', 'UNVERIFIED')
+                   else status(('backup.',)) if backup_status == 'VERIFIED' else 'BLOCKED'),
+        'locks': status(('locks.',), ('RELEASE_LOCK_CONFLICT',)),
+        'productionTag': status(('productionTag.',), ('PRODUCTION_TAG_BASELINE_NOT_VERIFIED',
+            'CANDIDATE_PRODUCTION_TAG_CONFLICT')),
+        'mutationBoundary': 'PASS',
+        'finalization': 'BLOCKED',
+    }
+    blocker_checks = {
+        'RUNTIME_IMAGE_SOURCE_PARITY_FAILED': 'runtime',
+        'MINIAPP_SOURCE_PARITY_FAILED': 'runtime',
+        'PRODUCTION_SERVICE_NOT_HEALTHY': 'runtime',
+        'WORKER_LANES_NOT_VERIFIED_HEALTHY': 'workers',
+        'PROTECTED_BACKUP_MISSING': 'backup',
+        'PROTECTED_BACKUP_UNVERIFIED': 'backup',
+        'RELEASE_LOCK_CONFLICT': 'locks',
+        'PRODUCTION_TAG_BASELINE_NOT_VERIFIED': 'productionTag',
+        'CANDIDATE_PRODUCTION_TAG_CONFLICT': 'productionTag',
+    }
+    if (checks != expected_checks
+            or 'FINALIZATION_REQUIRES_SEPARATE_OWNER_AUTHORIZATION' not in blockers
+            or (bool(missing) != ('READ_ONLY_SNAPSHOT_INCOMPLETE' in blockers))
+            or any(checks[blocker_checks[item]] not in ('BLOCKED', 'NOT_VERIFIED')
+                   for item in blockers if item in blocker_checks)):
+        raise RuntimeError('Recovery snapshot check statuses contradict its evidence')
+    mutation = snapshot.get('mutationPolicy')
+    if (not isinstance(mutation, dict)
+            or mutation.get('allowed') != ['read_only_observation', 'write_diagnostic_snapshot_artifact']):
+        raise RuntimeError('Recovery diagnostic mutation policy is not read-only')
+
+
+def build_recovery_diagnostics_bundle(snapshot_path, result_path, executor_sha, run_id, attempt):
+    """Validate and prepare the small, provenance-bound handoff to the isolated publisher."""
+    tag = recovery_diagnostics_tag(executor_sha, run_id, attempt)
+    snapshot_path, result_path = Path(snapshot_path), Path(result_path)
+    if any(path.is_symlink() or not path.is_file() for path in (snapshot_path, result_path)):
+        raise RuntimeError('Recovery diagnostic inputs must be regular files')
+    snapshot_bytes, result_bytes = snapshot_path.read_bytes(), result_path.read_bytes()
+    if len(snapshot_bytes) + len(result_bytes) > MAX_RECOVERY_DIAGNOSTIC_BUNDLE_BYTES:
+        raise RuntimeError('Recovery diagnostic bundle exceeds the bounded workflow-output size')
+    snapshot, result = json.loads(snapshot_bytes), json.loads(result_bytes)
+    recovery_snapshot_digest(snapshot)
+    _validate_recovery_snapshot_semantics(snapshot)
+    incident = snapshot.get('incident', {})
+    forbidden = set(snapshot.get('mutationPolicy', {}).get('forbidden', []))
+    required_forbidden = {'apply', 'migration', 'rollback', 'runtime_switch', 'tag_write',
+                          'ledger_write', 'config_write', 'restart'}
+    if (snapshot.get('schema') != 'gpoint-recovery-read-only-snapshot-v1'
+            or snapshot.get('mode') != 'recovery-diagnostics-read-only'
+            or snapshot.get('status') not in ('FACTS_COMPLETE', 'INCOMPLETE')
+            or snapshot.get('finalizationReady') is not False
+            or not required_forbidden.issubset(forbidden)):
+        raise RuntimeError('Recovery snapshot schema, status or mutation policy is invalid')
+    candidate = snapshot.get('candidateSha')
+    original_run, original_attempt = '39010750184', '1'
+    if (candidate != ME38_INCIDENT_CANDIDATE or incident.get('baselineSha') != ME38_INCIDENT_BASELINE
+            or candidate == executor_sha
+            or incident.get('candidateSha') != candidate
+            or incident.get('runId') != original_run or str(incident.get('attempt')) != original_attempt
+            or not re.fullmatch(r'gpoint-release-\d{8}T\d{9}Z', incident.get('releaseId', ''))):
+        raise RuntimeError('Recovery snapshot incident or executor identity is inconsistent')
+    if (result.get('mode') != 'recovery-diagnostics' or result.get('status') != snapshot.get('status')
+            or result.get('candidateSha') != candidate
+            or str(result.get('automationRunId')) != str(run_id)
+            or str(result.get('automationRunAttempt')) != str(attempt)
+            or result.get('recoverySnapshot') != snapshot):
+        raise RuntimeError('Recovery diagnostic result does not match snapshot and workflow attempt')
+    manifest = {
+        'schema': 'gpoint-recovery-diagnostics-release-v1',
+        'releaseId': tag,
+        'eventType': 'RECOVERY_READ_ONLY_DIAGNOSTICS',
+        'status': snapshot['status'],
+        'executorSha': executor_sha,
+        'candidateSha': candidate,
+        'workflowRunId': str(run_id),
+        'workflowRunAttempt': str(attempt),
+        'originalIncidentRunId': original_run,
+        'originalIncidentRunAttempt': original_attempt,
+        'originalIncidentReleaseId': incident['releaseId'],
+        'snapshotSha256': snapshot['snapshotSha256'],
+        'resultSha256': hashlib.sha256(result_bytes).hexdigest(),
+        'productionMutationOccurred': False,
+        'finalizationReady': False,
+    }
+    return {
+        'snapshot.json': snapshot_bytes,
+        'result.json': result_bytes,
+        'diagnostic-manifest.json': (json.dumps(manifest, sort_keys=True, separators=(',', ':')) + '\n').encode(),
+    }
+
+
+def _read_diagnostic_bundle(bundle_b64):
+    if (not bundle_b64 or len(bundle_b64) > MAX_RECOVERY_DIAGNOSTIC_OUTPUT_BYTES
+            or len(bundle_b64.encode('utf-16-le')) > MAX_RECOVERY_DIAGNOSTIC_OUTPUT_UTF16_BYTES):
+        raise RuntimeError('Recovery diagnostic workflow output is missing or too large')
+    try:
+        payload = base64.b64decode(bundle_b64, validate=True)
+        if len(payload) > MAX_RECOVERY_DIAGNOSTIC_BUNDLE_BYTES:
+            raise ValueError('oversized')
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            expected = {'snapshot.json', 'result.json', 'diagnostic-manifest.json'}
+            infos = archive.infolist()
+            if ({item.filename for item in infos} != expected or len(infos) != len(expected)
+                    or any(item.is_dir() or item.filename.startswith('/') or '..' in Path(item.filename).parts
+                           or stat.S_ISLNK(item.external_attr >> 16) or item.file_size > MAX_RECOVERY_DIAGNOSTIC_BUNDLE_BYTES
+                           for item in infos)
+                    or sum(item.file_size for item in infos) > MAX_RECOVERY_DIAGNOSTIC_BUNDLE_BYTES):
+                raise ValueError('unsafe member set')
+            return {item.filename: archive.read(item) for item in infos}
+    except (ValueError, OSError, zipfile.BadZipFile) as exc:
+        raise RuntimeError('Recovery diagnostic bundle is invalid') from exc
 
 
 def resolve_asset(kind, sha, run_id, attempt, name, github):
@@ -601,6 +803,143 @@ def publish(kind, sha, run_id, attempt):
         print(f'IMMUTABLE_RELEASE=PASS TAG={tag}')
 
 
+def package_recovery_diagnostics(snapshot_path=None, result_path=None, manifest_path=None,
+                                 executor_sha=None, run_id=None, attempt=None, output_path=None):
+    executor_sha = executor_sha or os.environ.get('GPOINT_RECOVERY_EXECUTOR_SHA', '')
+    run_id = str(run_id or os.environ.get('GITHUB_RUN_ID', ''))
+    attempt = str(attempt or os.environ.get('GITHUB_RUN_ATTEMPT', ''))
+    snapshot_path = snapshot_path or os.environ.get('GPOINT_RECOVERY_SNAPSHOT_PATH')
+    result_path = result_path or os.environ.get('RELEASE_RESULT')
+    manifest_path = manifest_path or os.environ.get('GPOINT_RECOVERY_DIAGNOSTIC_MANIFEST')
+    output_path = output_path or os.environ.get('GITHUB_OUTPUT')
+    if not output_path:
+        raise RuntimeError('Recovery diagnostic workflow output is unavailable')
+    files = build_recovery_diagnostics_bundle(snapshot_path, result_path, executor_sha, run_id, attempt)
+    diagnostic_manifest = json.loads(files['diagnostic-manifest.json'])
+    if not manifest_path:
+        raise RuntimeError('Recovery diagnostic local manifest path is unavailable')
+    source_manifest = Path(manifest_path)
+    if source_manifest.is_symlink() or not source_manifest.is_file():
+        raise RuntimeError('Recovery diagnostic local manifest is unavailable')
+    local_manifest = json.loads(source_manifest.read_text())
+    if (local_manifest.get('releaseId') != diagnostic_manifest['releaseId']
+            or local_manifest.get('recoverySnapshot') != json.loads(files['snapshot.json'])
+            or local_manifest.get('productionMutationOccurred') is not False
+            or local_manifest.get('databaseApplyOccurred') is not False
+            or local_manifest.get('runtimeSwitchOccurred') is not False):
+        raise RuntimeError('Recovery diagnostic local manifest conflicts with verified snapshot')
+    files['diagnostic-manifest.json'] = (json.dumps(diagnostic_manifest,
+        sort_keys=True, separators=(',', ':')) + '\n').encode()
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, 'w', compression=zipfile.ZIP_STORED) as archive:
+        for name in ('snapshot.json', 'result.json', 'diagnostic-manifest.json'):
+            archive.writestr(name, files[name])
+    encoded = base64.b64encode(payload.getvalue()).decode('ascii')
+    if (len(encoded) > MAX_RECOVERY_DIAGNOSTIC_OUTPUT_BYTES
+            or len(encoded.encode('utf-16-le')) > MAX_RECOVERY_DIAGNOSTIC_OUTPUT_UTF16_BYTES):
+        raise RuntimeError('Recovery diagnostic bundle exceeds the bounded workflow-output size')
+    with open(output_path, 'a', encoding='utf-8') as output:
+        output.write(f'recovery_diagnostic_bundle={encoded}\n')
+    print(f'RECOVERY_DIAGNOSTIC_BUNDLE=READY bytes={len(payload.getvalue())} sha256={hashlib.sha256(payload.getvalue()).hexdigest()}')
+
+
+def _verify_diagnostic_release_metadata(release, tag, executor_sha, expected, *, draft, immutable):
+    if (not isinstance(release, dict) or release.get('tag_name') != tag
+            or release.get('draft') is not draft
+            or (immutable and release.get('immutable') is not True)
+            or (not immutable and release.get('immutable') is True)):
+        raise RuntimeError('Recovery diagnostic Release metadata identity/status mismatch')
+    assets = release.get('assets')
+    if not isinstance(assets, list) or {asset.get('name') for asset in assets} != set(expected) or len(assets) != len(expected):
+        raise RuntimeError('Recovery diagnostic Release asset set is incomplete or unexpected')
+    for asset in assets:
+        name = asset['name']
+        if (asset.get('state') != 'uploaded' or asset.get('digest') != 'sha256:' + expected[name][0]
+                or asset.get('size') != expected[name][1]
+                or not re.fullmatch(r'[1-9][0-9]*', str(asset.get('id', '')))):
+            raise RuntimeError('Recovery diagnostic Release asset checksum or identity mismatch')
+
+
+def publish_recovery_diagnostics(executor_sha=None, run_id=None, attempt=None, bundle_b64=None,
+                                 api=None, command=None, downloader=None):
+    """Publish only a new, provenance-bound diagnostic Release; never reuse a tag."""
+    executor_sha = executor_sha or os.environ.get('GITHUB_SHA', '')
+    run_id = str(run_id or os.environ.get('GITHUB_RUN_ID', ''))
+    attempt = str(attempt or os.environ.get('GITHUB_RUN_ATTEMPT', ''))
+    bundle_b64 = bundle_b64 if bundle_b64 is not None else os.environ.get('RECOVERY_DIAGNOSTICS_BUNDLE_B64', '')
+    token = os.environ.get('GITHUB_TOKEN') or os.environ.get('GH_TOKEN')
+    if not token:
+        raise RuntimeError('Recovery diagnostic publication authorization is unavailable')
+    if (os.environ.get('GITHUB_REPOSITORY') != REPO or os.environ.get('GITHUB_SHA') != executor_sha
+            or subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() != executor_sha):
+        raise RuntimeError('Recovery diagnostic publisher checkout differs from exact executor SHA')
+    files = _read_diagnostic_bundle(bundle_b64)
+    snapshot, result, manifest = (json.loads(files[name]) for name in
+                                  ('snapshot.json', 'result.json', 'diagnostic-manifest.json'))
+    verified_files = build_recovery_diagnostics_bundle_from_bytes(snapshot, result, manifest,
+        executor_sha, run_id, attempt, files['snapshot.json'], files['result.json'])
+    if json.loads(files['snapshot.json']) != snapshot or json.loads(files['result.json']) != result:
+        raise RuntimeError('Recovery diagnostic bundle contains altered evidence')
+    if files['diagnostic-manifest.json'] != verified_files['diagnostic-manifest.json']:
+        raise RuntimeError('Recovery diagnostic bundle manifest is not reproducible')
+    tag = recovery_diagnostics_tag(executor_sha, run_id, attempt)
+    reader = api or _EvidenceApiClient(token)
+    writer = command or gh
+    fetch_asset = downloader or _download_immutable_asset
+    if reader(f'releases/tags/{tag}') is not None or reader(f'git/ref/tags/{tag}') is not None:
+        raise RuntimeError('Recovery diagnostic immutable Release identity already exists')
+    expected = {name: (hashlib.sha256(data).hexdigest(), len(data)) for name, data in files.items()}
+    with tempfile.TemporaryDirectory(prefix='gpoint-recovery-diagnostics-publish-') as temporary:
+        root = Path(temporary)
+        local = {}
+        for name, data in files.items():
+            path = root / name
+            with path.open('xb') as stream:
+                stream.write(data)
+            local[name] = path
+        writer('api', '--method', 'POST', f'repos/{REPO}/git/refs',
+               '-f', f'ref=refs/tags/{tag}', '-f', f'sha={executor_sha}')
+        writer('release', 'create', tag, '--repo', REPO, '--verify-tag', '--draft',
+               '--title', tag, '--notes', f'Read-only recovery diagnostics; executor {executor_sha}, run {run_id}, attempt {attempt}.')
+        writer('release', 'upload', tag, '--repo', REPO, *map(str, local.values()))
+        draft = reader(f'releases/tags/{tag}')
+        ref = reader(f'git/ref/tags/{tag}')
+        if ref is None or ref.get('object', {}).get('type') != 'commit' or ref.get('object', {}).get('sha') != executor_sha:
+            raise RuntimeError('Recovery diagnostic draft tag does not target the exact executor SHA')
+        _verify_diagnostic_release_metadata(draft, tag, executor_sha, expected, draft=True, immutable=False)
+        writer('release', 'edit', tag, '--repo', REPO, '--draft=false', '--latest=false')
+        release = reader(f'releases/tags/{tag}')
+        ref = reader(f'git/ref/tags/{tag}')
+        if ref is None or ref.get('object', {}).get('type') != 'commit' or ref.get('object', {}).get('sha') != executor_sha:
+            raise RuntimeError('Published recovery diagnostic tag target changed')
+        _verify_diagnostic_release_metadata(release, tag, executor_sha, expected, draft=False, immutable=True)
+        assets = {asset['name']: asset for asset in release['assets']}
+        for name, path in local.items():
+            readback = root / f'readback-{name}'
+            fetch_asset(assets[name], readback, token)
+            if hashlib.sha256(readback.read_bytes()).hexdigest() != expected[name][0]:
+                raise RuntimeError('Recovery diagnostic immutable asset readback checksum mismatch')
+    print(f'RECOVERY_DIAGNOSTIC_RELEASE=IMMUTABLE tag={tag} snapshot_sha256={manifest["snapshotSha256"]}')
+
+
+def build_recovery_diagnostics_bundle_from_bytes(snapshot, result, manifest, executor_sha, run_id, attempt,
+                                                 snapshot_bytes, result_bytes):
+    """Revalidate the publisher input without trusting the producer job output."""
+    # Reuse the same identity, mutation-policy, snapshot digest and result checks.
+    with tempfile.TemporaryDirectory(prefix='gpoint-recovery-diagnostic-verify-') as temporary:
+        root = Path(temporary)
+        snapshot_path, result_path = root/'snapshot.json', root/'result.json'
+        snapshot_path.write_bytes(snapshot_bytes)
+        result_path.write_bytes(result_bytes)
+        if json.loads(snapshot_bytes) != snapshot or json.loads(result_bytes) != result:
+            raise RuntimeError('Recovery diagnostic JSON bytes do not match parsed evidence')
+        generated = build_recovery_diagnostics_bundle(snapshot_path, result_path, executor_sha, run_id, attempt)
+    if generated['diagnostic-manifest.json'] != json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode() + b'\n':
+        raise RuntimeError('Recovery diagnostic manifest identity or digest mismatch')
+    return {'snapshot.json': snapshot_bytes, 'result.json': result_bytes,
+            'diagnostic-manifest.json': (json.dumps(manifest, sort_keys=True, separators=(',', ':')) + '\n').encode()}
+
+
 def read_result(sha, run_id, attempt, result_path=None, token=None):
     from prepared_artifact_cache import download, extract, checksum
     source_attempt, asset = find_deploy_evidence(sha, run_id, attempt)
@@ -632,6 +971,12 @@ def read_result(sha, run_id, attempt, result_path=None, token=None):
 
 def main():
     sha = os.environ.get('CANDIDATE_SHA', os.environ.get('GITHUB_SHA', ''))
+    if len(sys.argv) > 1 and sys.argv[1] == 'package-recovery-diagnostics':
+        package_recovery_diagnostics()
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == 'publish-recovery-diagnostics':
+        publish_recovery_diagnostics()
+        return
     if len(sys.argv) > 1 and sys.argv[1] == 'read-recovery-failure' and len(sys.argv) == 6:
         read_post_switch_failure(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
         return

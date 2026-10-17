@@ -480,17 +480,260 @@ class ImmutableReleaseTests(unittest.TestCase):
     def test_gpoint_workflows_publish_all_evidence_without_actions_storage(self):
         prepare = (ROOT / '.github/workflows/gpoint-prepare.yml').read_text()
         deploy = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()
-        diagnostic_job = deploy.split('  recovery-diagnostics:\n', 1)[1].split('\n  publish:', 1)[0]
+        diagnostic_job = deploy.split('  recovery-diagnostics:\n', 1)[1].split('\n  publish-recovery-diagnostics:', 1)[0]
         deploy_without_diagnostics = deploy.replace('  recovery-diagnostics:\n' + diagnostic_job + '\n  publish:', '  publish:', 1)
         self.assertNotIn('actions/upload-artifact', prepare)
         self.assertNotIn('actions/download-artifact', prepare)
         self.assertNotIn('actions/upload-artifact', deploy_without_diagnostics)
         self.assertNotIn('actions/download-artifact', deploy_without_diagnostics)
-        self.assertEqual(diagnostic_job.count('actions/upload-artifact@v4'), 1)
+        self.assertNotIn('actions/upload-artifact', diagnostic_job)
         self.assertNotIn('actions/download-artifact', diagnostic_job)
+        self.assertIn('package-recovery-diagnostics', diagnostic_job)
+        diagnostic_publisher = deploy.split('  publish-recovery-diagnostics:\n', 1)[1].split('\n  publish:', 1)[0]
+        self.assertIn('contents: write', diagnostic_publisher)
+        self.assertIn('publish-recovery-diagnostics', diagnostic_publisher)
+        self.assertNotIn('GHCR_READ_TOKEN', diagnostic_publisher)
         self.assertIn('release_assets.py publish prepare', prepare)
         self.assertIn('release_assets.py publish evidence', deploy)
         self.assertIn('release_assets.py read-result', deploy)
+
+    def test_recovery_diagnostic_tag_is_unique_and_separate_from_production_namespaces(self):
+        executor = 'a' * 40
+        one = ASSETS.recovery_diagnostics_tag(executor, '39043470160', '1')
+        two = ASSETS.recovery_diagnostics_tag(executor, '39043470160', '2')
+        self.assertEqual(one, f'gpoint-recovery-diagnostics-{executor}-39043470160-1')
+        self.assertNotEqual(one, two)
+        self.assertNotIn('gpoint-production-', one)
+        for args in [(executor, '0', '1'), ('bad', '2', '1'), (executor, '2', '0')]:
+            with self.assertRaises(RuntimeError):
+                ASSETS.recovery_diagnostics_tag(*args)
+
+    def test_recovery_diagnostic_bundle_binds_executor_incident_and_run(self):
+        executor = 'a' * 40
+        snapshot = self._diagnostic_snapshot()
+        result = {'mode': 'recovery-diagnostics', 'status': 'FACTS_COMPLETE',
+                  'candidateSha': snapshot['candidateSha'], 'automationRunId': '39043470160',
+                  'automationRunAttempt': '1', 'recoverySnapshot': snapshot}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot_path, result_path, manifest_path = root/'snapshot.json', root/'result.json', root/'manifest.json'
+            snapshot_path.write_text(json.dumps(snapshot))
+            result_path.write_text(json.dumps(result))
+            bundle = ASSETS.build_recovery_diagnostics_bundle(snapshot_path, result_path, executor, '39043470160', '1')
+            names = set(bundle)
+            self.assertEqual(names, {'snapshot.json', 'result.json', 'diagnostic-manifest.json'})
+            metadata = json.loads(bundle['diagnostic-manifest.json'])
+            self.assertEqual(metadata['executorSha'], executor)
+            self.assertEqual(metadata['candidateSha'], snapshot['candidateSha'])
+            self.assertEqual(metadata['originalIncidentRunId'], '39010750184')
+            with self.assertRaisesRegex(RuntimeError, 'executor identity'):
+                ASSETS.build_recovery_diagnostics_bundle(snapshot_path, result_path, snapshot['candidateSha'], '39043470160', '1')
+            for field, value in [('automationRunId', '39043470161'), ('automationRunAttempt', '2'),
+                                 ('candidateSha', 'f'*40)]:
+                altered = dict(result)
+                altered[field] = value
+                result_path.write_text(json.dumps(altered))
+                with self.assertRaisesRegex(RuntimeError, 'does not match snapshot'):
+                    ASSETS.build_recovery_diagnostics_bundle(snapshot_path, result_path, executor, '39043470160', '1')
+
+    def test_recovery_diagnostic_package_exports_only_bounded_verified_payload(self):
+        executor, run_id, attempt = 'a'*40, '39043470160', '1'
+        snapshot = self._diagnostic_snapshot()
+        result = {'mode': 'recovery-diagnostics', 'status': 'FACTS_COMPLETE',
+                  'candidateSha': snapshot['candidateSha'], 'automationRunId': run_id,
+                  'automationRunAttempt': attempt, 'recoverySnapshot': snapshot}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot_path, result_path = root/'snapshot.json', root/'result.json'
+            local_manifest_path, output_path = root/'local-manifest.json', root/'github-output'
+            snapshot_path.write_text(json.dumps(snapshot))
+            result_path.write_text(json.dumps(result))
+            local_manifest_path.write_text(json.dumps({'releaseId': ASSETS.recovery_diagnostics_tag(executor, run_id, attempt),
+                'recoverySnapshot': snapshot, 'productionMutationOccurred': False,
+                'databaseApplyOccurred': False, 'runtimeSwitchOccurred': False}))
+            with patch.dict('os.environ', {'GPOINT_RECOVERY_EXECUTOR_SHA': executor, 'GITHUB_RUN_ID': run_id,
+                'GITHUB_RUN_ATTEMPT': attempt, 'GPOINT_RECOVERY_SNAPSHOT_PATH': str(snapshot_path),
+                'RELEASE_RESULT': str(result_path), 'GPOINT_RECOVERY_DIAGNOSTIC_MANIFEST': str(local_manifest_path),
+                'GITHUB_OUTPUT': str(output_path)}, clear=True):
+                ASSETS.package_recovery_diagnostics()
+            line = output_path.read_text().strip()
+            self.assertTrue(line.startswith('recovery_diagnostic_bundle='))
+            payload = __import__('base64').b64decode(line.partition('=')[2], validate=True)
+            self.assertLessEqual(len(payload), ASSETS.MAX_RECOVERY_DIAGNOSTIC_BUNDLE_BYTES)
+            with zipfile.ZipFile(__import__('io').BytesIO(payload)) as archive:
+                self.assertEqual(set(archive.namelist()), {'snapshot.json', 'result.json', 'diagnostic-manifest.json'})
+
+    def test_recovery_diagnostic_publisher_fails_closed_on_existing_tag_and_missing_auth(self):
+        executor = 'a' * 40
+        bundle = self._diagnostic_bundle(executor)
+        with patch.dict('os.environ', {'GITHUB_REPOSITORY': ASSETS.REPO, 'GITHUB_SHA': executor,
+                                       'GITHUB_TOKEN': 'test-token'}, clear=True), \
+             patch.object(ASSETS.subprocess, 'check_output', return_value=executor):
+            with self.assertRaisesRegex(RuntimeError, 'already exists'):
+                ASSETS.publish_recovery_diagnostics(executor, '39043470160', '1', bundle,
+                    api=lambda route: {'tag_name': ASSETS.recovery_diagnostics_tag(executor, '39043470160', '1')}
+                    if route.startswith('releases/tags/') else {'object': {'type': 'commit', 'sha': executor}})
+        with patch.dict('os.environ', {'GITHUB_REPOSITORY': ASSETS.REPO, 'GITHUB_SHA': executor}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, 'authorization is unavailable'):
+                ASSETS.publish_recovery_diagnostics(executor, '39043470160', '1', bundle)
+
+    def test_recovery_diagnostic_release_is_draft_verified_then_published_and_read_back(self):
+        executor, run_id, attempt = 'a'*40, '39043470160', '1'
+        bundle = self._diagnostic_bundle(executor)
+        files = ASSETS._read_diagnostic_bundle(bundle)
+        tag = ASSETS.recovery_diagnostics_tag(executor, run_id, attempt)
+        expected = {name: (hashlib.sha256(data).hexdigest(), len(data)) for name, data in files.items()}
+        uploaded = [{'id': i, 'name': name, 'state': 'uploaded', 'size': size,
+                     'digest': 'sha256:' + digest} for i, (name, (digest, size)) in enumerate(expected.items(), 1)]
+        routes = []
+        release_reads = 0
+        tag_created = False
+        def api(route):
+            nonlocal release_reads
+            routes.append(route)
+            if route == f'releases/tags/{tag}':
+                release_reads += 1
+                if release_reads == 1:
+                    return None
+                return {'tag_name': tag, 'draft': release_reads == 2,
+                        'immutable': release_reads >= 3, 'assets': uploaded}
+            if route == f'git/ref/tags/{tag}':
+                return {'object': {'type': 'commit', 'sha': executor}} if tag_created else None
+            raise AssertionError(route)
+        commands = []
+        def command(*args):
+            nonlocal tag_created
+            commands.append(args)
+            if args[:3] == ('api', '--method', 'POST'):
+                tag_created = True
+            return ''
+        def download(asset, target, token):
+            self.assertEqual(token, 'test-token')
+            target.write_bytes(files[asset['name']])
+        with patch.dict('os.environ', {'GITHUB_REPOSITORY': ASSETS.REPO, 'GITHUB_SHA': executor,
+                                       'GITHUB_TOKEN': 'test-token'}, clear=True), \
+             patch.object(ASSETS.subprocess, 'check_output', return_value=executor):
+            ASSETS.publish_recovery_diagnostics(executor, run_id, attempt, bundle, api, command, download)
+        write_commands = [call for call in commands if call[:2] == ('api', '--method') or call[0] == 'release']
+        self.assertEqual([call[0] for call in write_commands], ['api', 'release', 'release', 'release'])
+        self.assertIn(f'ref=refs/tags/{tag}', write_commands[0])
+        self.assertIn(f'sha={executor}', write_commands[0])
+        self.assertEqual(write_commands[-1][2], tag)
+        self.assertIn('--draft=false', write_commands[-1])
+        self.assertGreaterEqual(release_reads, 3)
+
+    def test_recovery_diagnostic_draft_digest_mismatch_blocks_publish(self):
+        executor, run_id, attempt = 'a'*40, '39043470160', '1'
+        bundle = self._diagnostic_bundle(executor)
+        files = ASSETS._read_diagnostic_bundle(bundle)
+        tag = ASSETS.recovery_diagnostics_tag(executor, run_id, attempt)
+        assets = [{'id': i, 'name': name, 'state': 'uploaded', 'size': len(data),
+                   'digest': 'sha256:' + ('0'*64 if name == 'snapshot.json' else hashlib.sha256(data).hexdigest())}
+                  for i, (name, data) in enumerate(files.items(), 1)]
+        reads, commands, tag_created = 0, [], False
+        def api(route):
+            nonlocal reads
+            if route == f'releases/tags/{tag}':
+                reads += 1
+                return None if reads == 1 else {'tag_name': tag, 'draft': True, 'immutable': False, 'assets': assets}
+            if route == f'git/ref/tags/{tag}':
+                return {'object': {'type': 'commit', 'sha': executor}} if tag_created else None
+            raise AssertionError(route)
+        with patch.dict('os.environ', {'GITHUB_REPOSITORY': ASSETS.REPO, 'GITHUB_SHA': executor,
+                                       'GITHUB_TOKEN': 'test-token'}, clear=True), \
+             patch.object(ASSETS.subprocess, 'check_output', return_value=executor):
+            def command(*args):
+                nonlocal tag_created
+                commands.append(args)
+                if args[:3] == ('api', '--method', 'POST'):
+                    tag_created = True
+            with self.assertRaisesRegex(RuntimeError, 'checksum or identity mismatch'):
+                ASSETS.publish_recovery_diagnostics(executor, run_id, attempt, bundle, api, command)
+        self.assertFalse(any(call[0:2] == ('release', 'edit') for call in commands))
+
+    @staticmethod
+    def _diagnostic_snapshot():
+        body = {'schema': 'gpoint-recovery-read-only-snapshot-v1', 'mode': 'recovery-diagnostics-read-only',
+                'status': 'FACTS_COMPLETE', 'candidateSha': 'd367c2ec24242a733dbb2c4145c91d2d4682ba2c',
+                'releaseState': 'RECOVERY_DIAGNOSTICS_ONLY', 'factsComplete': True,
+                'missingEvidence': [], 'blockers': ['FINALIZATION_REQUIRES_SEPARATE_OWNER_AUTHORIZATION'],
+                'checks': {'incidentEvidence': 'PASS', 'ledger': 'PASS', 'runtime': 'PASS',
+                    'database': 'PASS', 'workers': 'PASS', 'backup': 'PASS', 'locks': 'PASS',
+                    'productionTag': 'PASS', 'mutationBoundary': 'PASS', 'finalization': 'BLOCKED'},
+                'incident': {'runId': '39010750184', 'attempt': '1', 'releaseId': 'gpoint-release-20261017T064101334Z',
+                             'baselineSha': 'a700198a843c12a84f2e537178de752e3eddd54d',
+                             'candidateSha': 'd367c2ec24242a733dbb2c4145c91d2d4682ba2c'},
+                'backup': {'status': 'VERIFIED'},
+                'finalizationReady': False, 'mutationPolicy': {
+                    'allowed': ['read_only_observation', 'write_diagnostic_snapshot_artifact'],
+                    'forbidden': ['apply', 'migration', 'rollback',
+                    'runtime_switch', 'tag_write', 'ledger_write', 'config_write', 'restart']}}
+        body['snapshotSha256'] = ASSETS._stable_json_digest(body)
+        return body
+
+    def test_recovery_diagnostic_publisher_rejects_inconsistent_snapshot_semantics(self):
+        executor = 'a' * 40
+        cases = []
+        forged_complete = self._diagnostic_snapshot()
+        forged_complete['missingEvidence'] = ['runtime.migrationHeads.gsales']
+        forged_complete['snapshotSha256'] = ASSETS._stable_json_digest(
+            {key: value for key, value in forged_complete.items() if key != 'snapshotSha256'})
+        cases.append(forged_complete)
+        mutating_allowlist = self._diagnostic_snapshot()
+        mutating_allowlist['mutationPolicy']['allowed'].append('apply')
+        mutating_allowlist['snapshotSha256'] = ASSETS._stable_json_digest(
+            {key: value for key, value in mutating_allowlist.items() if key != 'snapshotSha256'})
+        cases.append(mutating_allowlist)
+        unknown_missing = self._diagnostic_snapshot()
+        unknown_missing.update({'status': 'INCOMPLETE', 'factsComplete': False,
+                                'missingEvidence': ['future.unmapped.field']})
+        unknown_missing['snapshotSha256'] = ASSETS._stable_json_digest(
+            {key: value for key, value in unknown_missing.items() if key != 'snapshotSha256'})
+        cases.append(unknown_missing)
+        unknown_blocker = self._diagnostic_snapshot()
+        unknown_blocker['blockers'].append('UNRECOGNIZED_BLOCKER')
+        unknown_blocker['snapshotSha256'] = ASSETS._stable_json_digest(
+            {key: value for key, value in unknown_blocker.items() if key != 'snapshotSha256'})
+        cases.append(unknown_blocker)
+        for snapshot in cases:
+            with self.subTest(snapshot=snapshot['mutationPolicy']['allowed']):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    result = {'mode': 'recovery-diagnostics', 'status': snapshot['status'],
+                              'candidateSha': snapshot['candidateSha'], 'automationRunId': '39043470160',
+                              'automationRunAttempt': '1', 'recoverySnapshot': snapshot}
+                    snapshot_path, result_path = root/'snapshot.json', root/'result.json'
+                    snapshot_path.write_text(json.dumps(snapshot))
+                    result_path.write_text(json.dumps(result))
+                    with self.assertRaisesRegex(RuntimeError, 'snapshot|read-only'):
+                        ASSETS.build_recovery_diagnostics_bundle(snapshot_path, result_path,
+                            executor, '39043470160', '1')
+
+    def test_recovery_diagnostic_output_limit_has_utf16_quota_margin(self):
+        self.assertEqual(ASSETS.MAX_RECOVERY_DIAGNOSTIC_OUTPUT_BYTES * 2,
+                         ASSETS.MAX_RECOVERY_DIAGNOSTIC_OUTPUT_UTF16_BYTES)
+        self.assertLess(ASSETS.MAX_RECOVERY_DIAGNOSTIC_OUTPUT_UTF16_BYTES, 1024 * 1024)
+        oversized = 'A' * (ASSETS.MAX_RECOVERY_DIAGNOSTIC_OUTPUT_BYTES + 1)
+        with self.assertRaisesRegex(RuntimeError, 'too large'):
+            ASSETS._read_diagnostic_bundle(oversized)
+
+    @classmethod
+    def _diagnostic_bundle(cls, executor):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = cls._diagnostic_snapshot()
+            result = {'mode': 'recovery-diagnostics', 'status': 'FACTS_COMPLETE',
+                      'candidateSha': snapshot['candidateSha'], 'automationRunId': '39043470160',
+                      'automationRunAttempt': '1', 'recoverySnapshot': snapshot}
+            snapshot_path, result_path = root/'snapshot.json', root/'result.json'
+            snapshot_path.write_text(json.dumps(snapshot))
+            result_path.write_text(json.dumps(result))
+            files = ASSETS.build_recovery_diagnostics_bundle(snapshot_path, result_path, executor, '39043470160', '1')
+            payload = root/'input.zip'
+            with zipfile.ZipFile(payload, 'w', compression=zipfile.ZIP_STORED) as archive:
+                for name, data in files.items():
+                    archive.writestr(name, data)
+            return __import__('base64').b64encode(payload.read_bytes()).decode()
 
     def test_failed_post_switch_recovery_evidence_requires_exact_workflow_jobs_and_immutable_assets(self):
         sha, run_id, attempt = 'a' * 40, '39010750184', '1'

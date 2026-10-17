@@ -31,6 +31,17 @@ export function recoveryFinalizationIdentity(failedReleaseId, candidateSha) {
   });
 }
 
+/** Bind a derived recovery identity to the already verified immutable failure evidence. */
+export function recoveryFinalizationIdentityFromFailureEvidence(manifest, result, candidateSha) {
+  requireThat(manifest && result && manifest.releaseId === result.releaseId,
+    'immutable failure manifest and result release identity mismatch');
+  requireThat(manifest.candidateSha === candidateSha && result.candidateSha === candidateSha,
+    'immutable failure evidence candidate SHA mismatch');
+  requireThat(manifest.status === 'RECOVERY_REQUIRED' && manifest.failureStage === 'POST_SWITCH',
+    'immutable failure evidence is not the expected post-switch failure');
+  return recoveryFinalizationIdentity(manifest.releaseId, candidateSha);
+}
+
 function verifySnapshot(snapshot, {nowMs, maxReadbackAgeMs}) {
   const {candidateSha, failedRelease, ledger, ownerAuthorization, databaseRiskDecision,
     backup, runtime} = snapshot ?? {};
