@@ -1547,19 +1547,28 @@ function recoveryManifestSnapshot(name) {
   return {...value, name, contentSha256: crypto.createHash('sha256').update(bytes).digest('hex')};
 }
 
-function validateRecoveryBackup(backup, candidate, baselineSha) {
+export function validateRecoveryBackup(backup, candidate, baselineSha, {
+  remoteRun = runRemoteCommand,
+  now = Date.now(),
+} = {}) {
+  const expectedPathPrefix = `/opt/gpoint/backups/gpoint-recovery-current-${candidate}-`;
+  const backupPathSuffix = backup?.path?.startsWith(expectedPathPrefix)
+    ? backup.path.slice(expectedPathPrefix.length) : '';
   if (!backup || backup.status !== 'COMPLETE_PROTECTED' || backup.database !== 'gpoint'
+      || !/^[a-f0-9]{40}$/.test(candidate ?? '')
       || backup.candidate_sha !== candidate || backup.baselineSha !== baselineSha
-      || !/^\/opt\/gpoint\/backups\/gpoint-recovery-current-[a-f0-9]{40}-[0-9]+\.dump$/.test(backup.path ?? '')
+      || !/^[a-f0-9]{12,64}$/.test(backup.postgres_container_id ?? '')
+      || backup.postgres_container_name !== '/shared_postgres_1'
+      || !/^\d+\.dump$/.test(backupPathSuffix)
       || !/^[a-f0-9]{64}$/.test(backup.sha256 ?? '')
       || !Array.isArray(backup.schemas) || !backup.schemas.includes('public') || !backup.schemas.includes('agata')
       || backup.purpose !== 'CURRENT_AFTER_CANDIDATE_DEPLOY'
       || !Number.isFinite(Date.parse(backup.createdAt ?? ''))
-      || Date.parse(backup.createdAt) > Date.now() + 5_000) {
+      || Date.parse(backup.createdAt) > now + 5_000) {
     die('current protected GPoint backup evidence is invalid');
   }
-  const commandText = `set -euo pipefail; file='${backup.path}'; test -s "$file"; test "$(stat -c '%a' "$file")" = 600; actual=$(sha256sum "$file" | awk '{print $1}'); test "$actual" = '${backup.sha256}'; docker exec -i compose-postgres-1 pg_restore --list < "$file" > /tmp/gpoint-recovery-backup-${candidate}.toc; grep -Fq 'TABLE DATA agata messages' /tmp/gpoint-recovery-backup-${candidate}.toc; rm -f /tmp/gpoint-recovery-backup-${candidate}.toc; echo RECOVERY_BACKUP_READBACK=PASS`;
-  const output = runRemoteCommand(commandText);
+  const commandText = `set -euo pipefail; file='${backup.path}'; test -s "$file"; test "$(stat -c '%a' "$file")" = 600; actual=$(sha256sum "$file" | awk '{print $1}'); test "$actual" = '${backup.sha256}'; ids=$(docker ps -aq --filter label=com.docker.compose.project=shared --filter label=com.docker.compose.service=postgres); test -n "$ids"; test "$(printf '%s\\n' "$ids" | wc -l | tr -d ' ')" = 1; postgres_id="$ids"; [[ "$postgres_id" =~ ^[a-f0-9]{12,64}$ ]]; test "$postgres_id" = '${backup.postgres_container_id}'; identity=$(docker inspect --format '{{.Name}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.State.Running}}' "$postgres_id"); test "$identity" = '/shared_postgres_1|shared|postgres|true'; toc='/tmp/gpoint-recovery-backup-${candidate}.toc'; trap 'rm -f "$toc"' EXIT; docker exec -i "$postgres_id" pg_restore --list < "$file" > "$toc"; grep -Fq 'TABLE DATA agata messages' "$toc"; rm -f "$toc"; trap - EXIT; echo RECOVERY_BACKUP_READBACK=PASS`;
+  const output = remoteRun(commandText);
   if (!output.includes('RECOVERY_BACKUP_READBACK=PASS')) die('current protected backup could not be verified on VPS');
   return {...backup, verified: true, baselineSha};
 }

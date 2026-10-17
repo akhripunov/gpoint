@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createRecoveryActiveDeploysFile, readRecoveryActiveDeploysFile } from './recovery-active-deploys.mjs';
-import { canCreateProductionRef, checkAgataEffectiveConfig, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, cleanupLocalPackageCaches, evaluateSafetyGates, failureEvidence, githubLedgerGitEnvironment, githubProductionTagGitEnvironment, githubSourceGitEnvironment, isTransientGitHubTransportFailure, localDiskDecision, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runLocalDiskPreflight, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, validateMacWorkerStatus, verifiedRuntimeState } from './release-gpoint.mjs';
+import { canCreateProductionRef, checkAgataEffectiveConfig, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, cleanupLocalPackageCaches, evaluateSafetyGates, failureEvidence, githubLedgerGitEnvironment, githubProductionTagGitEnvironment, githubSourceGitEnvironment, isTransientGitHubTransportFailure, localDiskDecision, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runLocalDiskPreflight, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, validateMacWorkerStatus, validateRecoveryBackup, verifiedRuntimeState } from './release-gpoint.mjs';
 import { agataInternalConfigProvisionCommand, agataPreSwitchReadinessCommand, agataProviderRuntimeCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, cleanupTemporaryWorktree, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, migrationPendingFromPreflight, parseAgataRuntimeIdentityLine, planReleaseRetention, productionPreflightCommand, resolveRunnerPath, runAuthorizedMutationPlan, runCleanupCommand, runRemoteCommand, runWithPreExecRetry, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataProviderMode, validateAgataRuntimeIdentity, validateRuntimeIdentity, remoteCommandEnvironment } from './release-gpoint-vps-adapter.mjs';
 
 test('GitHub token is attached only to exact production-ledger Git operations', () => {
@@ -1023,6 +1023,79 @@ test('recovery finalization rejects mixed or unhealthy runtime facts', () => {
   assert.deepEqual(recoveryRuntimeFailures(sha, facts, 'prisma-head'), []);
   assert.ok(recoveryRuntimeFailures(sha, { ...facts, LIVE_AGATA_WORKER_HEALTH: 'unhealthy' }, 'prisma-head').includes('AGATA worker is not healthy'));
   assert.ok(recoveryRuntimeFailures(sha, { ...facts, LIVE_MINIAPP_SHA: '0'.repeat(40) }, 'prisma-head').includes('Mini App SHA mismatch'));
+});
+
+test('recovery backup verification binds the unique shared PostgreSQL and immutable dump identity', () => {
+  const candidate = 'd'.repeat(40);
+  const baseline = 'a'.repeat(40);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-recovery-backup-verify-'));
+  const bin = path.join(directory, 'bin');
+  const file = path.join(directory, 'backup.dump');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(file, 'synthetic custom-format archive');
+  fs.chmodSync(file, 0o600);
+  const dockerId = 'b'.repeat(64);
+  fs.writeFileSync(path.join(bin, 'stat'), '#!/bin/sh\n[ "$1" = "-c" ] && [ "$2" = "%a" ] || exit 2\nexec /usr/bin/stat -f %Lp "$3"\n', {mode: 0o700});
+  fs.writeFileSync(path.join(bin, 'sha256sum'), '#!/bin/sh\nexec /usr/bin/shasum -a 256 "$1"\n', {mode: 0o700});
+  fs.writeFileSync(path.join(bin, 'docker'), `#!/bin/sh
+case "$1" in
+  ps) printf '%s\\n' '${dockerId}' ;;
+  inspect) printf '%s\\n' '/shared_postgres_1|shared|postgres|true' ;;
+  exec) [ "\${FAKE_RESTORE_FAIL:-}" != 1 ] || exit 1; printf '%s\\n' 'TABLE DATA agata messages' ;;
+  *) exit 2 ;;
+esac
+`, {mode: 0o700});
+  try {
+    const digest = execFileSync('shasum', ['-a', '256', file], {encoding: 'utf8'}).split(' ')[0];
+    const backup = {status: 'COMPLETE_PROTECTED', database: 'gpoint', candidate_sha: candidate,
+      baselineSha: baseline, postgres_container_id: dockerId, postgres_container_name: '/shared_postgres_1',
+      path: `/opt/gpoint/backups/gpoint-recovery-current-${candidate}-123.dump`, sha256: digest,
+      schemas: ['public', 'agata'], purpose: 'CURRENT_AFTER_CANDIDATE_DEPLOY',
+      createdAt: new Date().toISOString()};
+    let command;
+    const remoteRun = value => {
+      command = value.replace(`file='${backup.path}'`, `file='${file}'`)
+        .replace(`/tmp/gpoint-recovery-backup-${candidate}.toc`, `${directory}/backup.toc`);
+      const childResult = spawnSync('bash', ['-c', command], {encoding: 'utf8', env: {
+        ...process.env, PATH: `${bin}:${process.env.PATH}`,
+      }});
+      return childResult.status === 0 ? childResult.stdout : '';
+    };
+    const result = validateRecoveryBackup(backup, candidate, baseline, {remoteRun});
+    assert.equal(result.verified, true);
+    assert.match(command, /docker ps -aq --filter label=com\.docker\.compose\.project=shared/);
+    assert.match(command, /label=com\.docker\.compose\.service=postgres/);
+    assert.match(command, /\/shared_postgres_1\|shared\|postgres\|true/);
+    assert.match(command, new RegExp(`test "\\$postgres_id" = '${dockerId}'`));
+    assert.match(command, /stat -c '%a'/);
+    assert.match(command, /sha256sum/);
+    assert.match(command, /docker exec -i "\$postgres_id" pg_restore --list/);
+    assert.match(command, /wc -l/);
+    assert.doesNotMatch(command, /mapfile/);
+    assert.doesNotMatch(command, /compose-postgres-1/);
+    for (const invalid of [
+      {...backup, postgres_container_name: '/compose-postgres-1'},
+      {...backup, postgres_container_id: 'not-a-container'},
+      {...backup, path: `/opt/gpoint/backups/gpoint-recovery-current-${'e'.repeat(40)}-123.dump`},
+      {...backup, path: backup.path + "'; echo untrusted; '"},
+    ]) assert.throws(() => validateRecoveryBackup(invalid, candidate, baseline, {remoteRun}), /backup evidence is invalid/);
+    assert.throws(() => validateRecoveryBackup({...backup, sha256: 'c'.repeat(64)}, candidate, baseline, {remoteRun}), /could not be verified/);
+    fs.chmodSync(file, 0o640);
+    assert.throws(() => validateRecoveryBackup(backup, candidate, baseline, {remoteRun}), /could not be verified/);
+    fs.chmodSync(file, 0o600);
+    assert.throws(() => validateRecoveryBackup(backup, candidate, baseline, {
+      remoteRun: value => {
+        command = value.replace(`file='${backup.path}'`, `file='${file}'`)
+          .replace(`/tmp/gpoint-recovery-backup-${candidate}.toc`, `${directory}/backup.toc`);
+        const childResult = spawnSync('bash', ['-c', command], {encoding: 'utf8', env: {
+          ...process.env, PATH: `${bin}:${process.env.PATH}`, FAKE_RESTORE_FAIL: '1',
+        }});
+        return childResult.status === 0 ? childResult.stdout : '';
+      },
+    }), /could not be verified/);
+  } finally {
+    fs.rmSync(directory, {recursive: true, force: true});
+  }
 });
 
 test('recovery requires server provider config independently of local worker availability', () => {

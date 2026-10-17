@@ -512,6 +512,19 @@ def run(args, data=None, timeout=20):
  p=subprocess.run(args,input=data,text=True,capture_output=True,timeout=timeout)
  return p
 facts={"candidateSha":"${candidateSha}"}
+postgres_container_id=None
+try:
+ p=run(['docker','ps','-aq','--filter','label=com.docker.compose.project=shared','--filter','label=com.docker.compose.service=postgres'],timeout=15)
+ ids=p.stdout.split()
+ if p.returncode or len(ids)!=1 or not re.fullmatch(r'[0-9a-f]{12,64}',ids[0]): raise RuntimeError('not unique')
+ inspected=run(['docker','inspect',ids[0]],timeout=10)
+ if inspected.returncode: raise RuntimeError('inspect failed')
+ item=json.loads(inspected.stdout)[0]
+ labels=item.get('Config',{}).get('Labels') or {}
+ if item.get('Name')!='/shared_postgres_1' or labels.get('com.docker.compose.project')!='shared' or labels.get('com.docker.compose.service')!='postgres' or item.get('State',{}).get('Running') is not True: raise RuntimeError('identity mismatch')
+ postgres_container_id=ids[0]
+ facts['postgresContainerIdentity']={"name":"/shared_postgres_1","project":"shared","service":"postgres","running":True,"containerId":postgres_container_id}
+except Exception: facts['postgresContainerIdentityError']='POSTGRES_CONTAINER_IDENTITY_INVALID'
 try:
  env={}
  for line in open('/opt/gpoint/env/production.env'):
@@ -552,7 +565,7 @@ SELECT 'LIVE_PRISMA_HEAD='||COALESCE((SELECT migration_name FROM public._prisma_
 DO $$ DECLARE v text; BEGIN IF to_regclass('agata.alembic_version') IS NULL THEN v='ABSENT'; ELSE EXECUTE 'SELECT version_num FROM agata.alembic_version' INTO v; END IF; RAISE NOTICE 'LIVE_AGATA_HEAD=%',v; END $$;
 DO $$ DECLARE v text; BEGIN IF to_regclass('gsales_meta.migrations') IS NULL THEN v='ABSENT'; ELSE EXECUTE 'SELECT version || ''|'' || sha256 FROM gsales_meta.migrations ORDER BY version DESC LIMIT 1' INTO v; END IF; RAISE NOTICE 'LIVE_GSALES_IDENTITY=%',v; END $$;
 COMMIT;\"\"\"
-db=run(['docker','exec','-i','-u','postgres','compose-postgres-1','psql','-XAt','-v','ON_ERROR_STOP=1','-d','gpoint'],sql,timeout=15)
+db=run(['docker','exec','-i','-u','postgres',postgres_container_id,'psql','-XAt','-v','ON_ERROR_STOP=1','-d','gpoint'],sql,timeout=15) if postgres_container_id else subprocess.CompletedProcess([],1,'','POSTGRES_CONTAINER_IDENTITY_INVALID')
 facts['databaseReadOnlyQueryExitCode']=db.returncode
 dbtext=db.stdout+'\\n'+db.stderr
 for key,pattern in [('prismaHead',r'LIVE_PRISMA_HEAD=([A-Za-z0-9_-]+)'),('agataHead',r'LIVE_AGATA_HEAD=([A-Za-z0-9_-]+)'),('gsalesIdentity',r'LIVE_GSALES_IDENTITY=([A-Za-z0-9_|-]+)')]:
@@ -566,6 +579,7 @@ if matches:
  backup_path=matches[-1]
 if backup_path:
  try:
+  if not postgres_container_id: raise RuntimeError('PostgreSQL identity unavailable')
   descriptor=os.open(backup_path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
   file_stat=os.fstat(descriptor)
   if not stat.S_ISREG(file_stat.st_mode): raise OSError('backup is not a regular file')
@@ -575,7 +589,7 @@ if backup_path:
    descriptor=-1
    for chunk in iter(lambda: backup_file.read(1024*1024),b''): hasher.update(chunk)
    backup_file.seek(0)
-   restore=subprocess.run(['docker','exec','-i','compose-postgres-1','pg_restore','--list'],stdin=backup_file,capture_output=True,timeout=20)
+   restore=subprocess.run(['docker','exec','-i',postgres_container_id,'pg_restore','--list'],stdin=backup_file,capture_output=True,timeout=20)
   ok=restore.returncode==0 and b'TABLE DATA agata messages' in restore.stdout
   facts['backup']={"status":"VERIFIED" if mode=='600' and ok else 'UNVERIFIED',"path":backup_path,"sha256":hasher.hexdigest(),"mode":mode,"readback":"PASS" if ok else 'FAIL'}
  except Exception:
