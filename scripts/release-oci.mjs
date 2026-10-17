@@ -40,7 +40,7 @@ export async function verifyOciReadAccess(receipt, username, token, fetcher = fe
       if (!image || image.repository !== expectedRepository || !DIGEST.test(image.digest ?? '')) {
         fail('GHCR exact-digest read check failed');
       }
-      const url = `https://${expectedRepository}/v2/${expectedRepository.slice('ghcr.io/'.length)}/manifests/${image.digest}`;
+      const url = `https://ghcr.io/v2/${expectedRepository.slice('ghcr.io/'.length)}/manifests/${image.digest}`;
       const headers = {
         Accept: [
           'application/vnd.oci.image.index.v1+json',
