@@ -78,6 +78,8 @@ class DockerMigrationProtocol(unittest.TestCase):
                 docker('exec', '-i', postgres, 'psql', '-U', 'postgres', '-d', 'gpoint', '-v', 'ON_ERROR_STOP=1', input=sql)
                 gate.DB_CONTAINER, gate.DB_NETWORK, gate.ENV_FILE = postgres, network, str(env)
                 gate.MIGRATION_ENV_FILE = str(migration_env)
+                self.assertEqual(gate.psql_args()[2], postgres,
+                                 'default PostgreSQL helpers must use the active disposable container')
                 proof = gate.effective_probe(IMAGE)
                 self.assertTrue(proof['privileged']); self.assertTrue(proof['force_rls'])
                 census = gate.authoritative_census()

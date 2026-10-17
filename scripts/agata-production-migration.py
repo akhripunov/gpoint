@@ -121,12 +121,14 @@ def docker_checked(args, *, input=None, timeout=30):
     return result.stdout.strip()
 
 
-def psql_args(container=DB_CONTAINER):
+def psql_args(container=None):
+    container = DB_CONTAINER if container is None else container
     return ['exec', '-i', container, 'sh', '-ec',
             'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d gpoint']
 
 
-def authoritative_census(container=DB_CONTAINER):
+def authoritative_census(container=None):
+    container = DB_CONTAINER if container is None else container
     sql = "BEGIN READ ONLY; SET LOCAL statement_timeout='15s'; " + CENSUS_SQL + ' ROLLBACK;'
     return add_cluster_identity(json.loads(docker_checked(psql_args(container), input=sql)), container)
 
@@ -177,7 +179,8 @@ def effective_probe(image):
         *migration_env_args(), '--entrypoint', 'python', image, '-c', PROBE]))
 
 
-def add_cluster_identity(census, container=DB_CONTAINER):
+def add_cluster_identity(census, container=None):
+    container = DB_CONTAINER if container is None else container
     networks = json.loads(docker_checked(['inspect', '--format', '{{json .NetworkSettings.Networks}}', container]))
     census['cluster_addresses'] = [network['IPAddress'] for network in networks.values() if network.get('IPAddress')]
     return census
