@@ -1,4 +1,4 @@
-/** Validate durable, one-shot TASK_SCOPED_AUTO authorization records. */
+/** Validate durable, task-scoped TASK_SCOPED_AUTO authorization records. */
 import crypto from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 
@@ -388,7 +388,8 @@ export function validateTaskAuthorization({record, project, authorizationId, can
 }
 
 export async function checkTaskAuthorizationState({project, authorizationId, candidateSha, token, fetchImpl = fetch}) {
-  if (!token) throw new AuthorizationError('GitHub token is required to check one-shot authorization state');
+  if (!token) throw new AuthorizationError('GitHub token is required to check task authorization state');
+  if (candidateSha && !SHA.test(candidateSha)) throw new AuthorizationError('Invalid exact candidate SHA');
   const states = {};
   for (const state of ['revoked', 'consumed', 'claimed']) {
     const route = authorizationStateRef(project, authorizationId, state).replace(/^refs\/tags\//, 'git/ref/tags/');
@@ -399,11 +400,16 @@ export async function checkTaskAuthorizationState({project, authorizationId, can
     if (!response.ok) throw new AuthorizationError(`GitHub authorization state read failed (HTTP ${response.status})`);
     const data = await response.json();
     states[state] = true;
-    if (state === 'claimed') states.claimedSha = data.object?.sha ?? '';
+    if (state === 'claimed') {
+      if (data.object?.type !== 'commit' || !SHA.test(data.object?.sha ?? '')) {
+        throw new AuthorizationError('Task authorization claim is not a valid commit reference');
+      }
+      states.claimedSha = data.object.sha;
+    }
   }
   if (states.revoked || states.consumed) throw new AuthorizationError('Task authorization is revoked or already consumed');
-  if (candidateSha && (!states.claimed || states.claimedSha !== candidateSha)) {
-    throw new AuthorizationError('Task authorization claim is absent or belongs to another candidate');
+  if (candidateSha && !states.claimed) {
+    throw new AuthorizationError('Task authorization has no active release claim');
   }
   return states;
 }

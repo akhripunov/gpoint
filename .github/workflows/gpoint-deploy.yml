@@ -9,7 +9,7 @@ on:
         required: true
         type: string
       mode:
-        description: 'preflight is optional read-only diagnostics; production uses exact-SHA approval; task-scoped-auto requires durable one-shot owner record and runs preflight before apply'
+        description: 'preflight is optional read-only diagnostics; production uses exact-SHA approval; task-scoped-auto reuses active task authorization for in-scope retries and runs preflight before apply'
         required: true
         default: preflight
         type: choice

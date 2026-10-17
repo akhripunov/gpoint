@@ -424,14 +424,23 @@ test('authorization state check observes revoked, consumed and claimed markers',
   assert.deepEqual(state, {revoked: false, consumed: false, claimed: false});
   assert.equal(paths.length, 3);
   await assert.rejects(checkTaskAuthorizationState({project: 'gpoint', authorizationId: id, token: 'test',
-    fetchImpl: async () => ({status: 200, ok: true, json: async () => ({object: {sha: candidate}})})}), /revoked or already consumed/);
+    fetchImpl: async () => ({status: 200, ok: true, json: async () => ({object: {type: 'commit', sha: candidate}})})}), /revoked or already consumed/);
   await assert.rejects(checkTaskAuthorizationState({project: 'gpoint', authorizationId: id, candidateSha: candidate, token: 'test',
-    fetchImpl: async () => ({status: 404, ok: false})}), /claim is absent or belongs to another candidate/);
+    fetchImpl: async () => ({status: 404, ok: false})}), /no active release claim/);
+  const earlierCandidateClaim = await checkTaskAuthorizationState({project: 'gpoint', authorizationId: id,
+    candidateSha: candidate, token: 'test', fetchImpl: async url => url.includes('/claimed')
+      ? ({status: 200, ok: true, json: async () => ({object: {type: 'commit', sha: 'c'.repeat(40)}})})
+      : ({status: 404, ok: false})});
+  assert.equal(earlierCandidateClaim.claimedSha, 'c'.repeat(40));
   const claimed = await checkTaskAuthorizationState({project: 'gpoint', authorizationId: id, candidateSha: candidate, token: 'test',
     fetchImpl: async url => url.includes('/claimed')
-      ? ({status: 200, ok: true, json: async () => ({object: {sha: candidate}})})
+      ? ({status: 200, ok: true, json: async () => ({object: {type: 'commit', sha: candidate}})})
       : ({status: 404, ok: false})});
   assert.equal(claimed.claimed, true);
+  await assert.rejects(checkTaskAuthorizationState({project: 'gpoint', authorizationId: id, candidateSha: candidate, token: 'test',
+    fetchImpl: async url => url.includes('/claimed')
+      ? ({status: 200, ok: true, json: async () => ({object: {type: 'blob', sha: candidate}})})
+      : ({status: 404, ok: false})}), /not a valid commit reference/);
   await assert.rejects(checkTaskAuthorizationState({project: 'gpoint', authorizationId: id, token: '',
     fetchImpl: async () => assert.fail('must not query without token')}), /token is required/);
 });
@@ -440,7 +449,7 @@ test('a fresh mutation-boundary authorization read observes revocation after an 
   let revoked = false;
   const fetchImpl = async url => {
     if (url.endsWith('/revoked') && revoked) return {status: 200, ok: true, json: async () => ({object: {sha: candidate}})};
-    if (url.endsWith('/claimed')) return {status: 200, ok: true, json: async () => ({object: {sha: candidate}})};
+    if (url.endsWith('/claimed')) return {status: 200, ok: true, json: async () => ({object: {type: 'commit', sha: candidate}})};
     return {status: 404, ok: false};
   };
   assert.equal((await checkTaskAuthorizationState({project: 'gpoint', authorizationId: id,
@@ -448,6 +457,22 @@ test('a fresh mutation-boundary authorization read observes revocation after an 
   revoked = true;
   await assert.rejects(checkTaskAuthorizationState({project: 'gpoint', authorizationId: id,
     candidateSha: candidate, token: 'test', fetchImpl}), /revoked or already consumed/);
+});
+
+test('a claimed task authorization can cover a new exact candidate while revoked or consumed states still block', async () => {
+  const earlierSha = 'c'.repeat(40);
+  const fetchImpl = async url => {
+    if (url.endsWith('/claimed')) return {status: 200, ok: true, json: async () => ({object: {type: 'commit', sha: earlierSha}})};
+    return {status: 404, ok: false};
+  };
+  const state = await checkTaskAuthorizationState({project: 'gpoint', authorizationId: id,
+    candidateSha: candidate, token: 'test', fetchImpl});
+  assert.equal(state.claimed, true);
+  assert.equal(state.claimedSha, earlierSha);
+  await assert.rejects(checkTaskAuthorizationState({project: 'gpoint', authorizationId: id,
+    candidateSha: candidate, token: 'test', fetchImpl: async url => url.endsWith('/consumed')
+      ? {status: 200, ok: true, json: async () => ({object: {sha: earlierSha}})} : fetchImpl(url)}),
+  /revoked or already consumed/);
 });
 
 test('authorization consumption creates an immutable candidate-bound Git ref', async () => {
