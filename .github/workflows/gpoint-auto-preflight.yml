@@ -31,7 +31,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: refs/heads/main
-          fetch-depth: 1
+          # Authorization scope proof walks ancestry from the production baseline and source commits.
+          fetch-depth: 0
       - name: Verify assigned runner before controller/API work
         env:
           GITHUB_TOKEN: ${{ github.token }}

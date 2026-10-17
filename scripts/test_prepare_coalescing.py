@@ -92,6 +92,12 @@ class PrepareCoalescingTests(unittest.TestCase):
         self.assertIn("current main", orchestrator)
         self.assertIn("!== sha", orchestrator)
 
+    def test_release_controller_checks_full_history_for_durable_authorization(self):
+        controller = (ROOT / ".github" / "workflows" / "gpoint-auto-preflight.yml").read_text()
+        checkout = controller.split("uses: actions/checkout@v4", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("fetch-depth: 0", checkout,
+                      "authorization scope validation needs the production-baseline and source commit ancestry")
+
     def test_mixed_ui_and_backend_changes_still_run_full_prepare(self):
         workflow = (ROOT / ".github" / "workflows" / "gpoint-prepare.yml").read_text()
         triggers = workflow[workflow.index("on:"):workflow.index("permissions:")]
