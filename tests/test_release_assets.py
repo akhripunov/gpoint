@@ -2,6 +2,9 @@ import sys
 from pathlib import Path
 import unittest
 from unittest.mock import patch
+import socket
+import ssl
+import urllib.error
 import hashlib
 import json
 import tempfile
@@ -10,6 +13,169 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import release_assets as ASSETS  # noqa: E402
+
+
+class GitHubEvidenceApiRetryTests(unittest.TestCase):
+    class Response:
+        def __init__(self, body=b'{"ok":true}'):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return self.body
+
+    def test_temporary_tls_handshake_timeout_recovers_with_bounded_backoff(self):
+        calls = []
+        delays = []
+
+        def open_url(request, timeout):
+            calls.append((request, timeout))
+            if len(calls) == 1:
+                raise urllib.error.URLError(socket.timeout('TLS handshake timed out'))
+            return self.Response()
+
+        with patch.dict('os.environ', {'GITHUB_TOKEN': 'test-token'}), \
+             patch('urllib.request.urlopen', side_effect=open_url), \
+             patch('time.sleep', side_effect=delays.append), \
+             patch('random.uniform', side_effect=lambda _low, high: min(high, 0.25)), \
+             patch('builtins.print') as emit:
+            result = ASSETS.evidence_api('git/ref/tags/example')
+
+        self.assertEqual(result, {'ok': True})
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(delays), 1)
+        self.assertGreaterEqual(delays[0], 0)
+        self.assertLessEqual(delays[0], 5)
+        self.assertNotIn('test-token', str(emit.call_args_list))
+
+    def test_persistent_tls_timeout_stops_within_shared_retry_budget(self):
+        now = [0.0]
+        calls = []
+        delays = []
+
+        def open_url(_request, timeout):
+            calls.append(timeout)
+            now[0] += timeout
+            raise urllib.error.URLError(socket.timeout('TLS handshake timed out'))
+
+        def sleep(delay):
+            delays.append(delay)
+            now[0] += delay
+
+        with patch.dict('os.environ', {'GITHUB_TOKEN': 'test-token'}), \
+             patch('urllib.request.urlopen', side_effect=open_url), \
+             patch('time.monotonic', side_effect=lambda: now[0]), \
+             patch('time.sleep', side_effect=sleep), \
+             patch('random.uniform', side_effect=lambda _low, high: high), \
+             patch('builtins.print'):
+            with self.assertRaisesRegex(RuntimeError, 'retry budget exhausted'):
+                ASSETS.evidence_api('git/ref/tags/example')
+
+        self.assertGreater(len(calls), 1)
+        self.assertLessEqual(now[0], 60.001)
+        self.assertTrue(all(0 <= delay <= 5 for delay in delays))
+        self.assertTrue(all(0 < timeout <= 20 for timeout in calls))
+
+    def test_authorization_failures_are_not_retried(self):
+        for status in (401, 403):
+            calls = []
+
+            def open_url(_request, **_kwargs):
+                calls.append(status)
+                raise urllib.error.HTTPError(
+                    'https://api.github.com/', status, 'authorization failure', None, None)
+
+            with self.subTest(status=status), \
+                 patch.dict('os.environ', {'GITHUB_TOKEN': 'test-token'}), \
+                 patch('urllib.request.urlopen', side_effect=open_url), \
+                 patch('time.sleep') as sleep:
+                with self.assertRaises(urllib.error.HTTPError):
+                    ASSETS.evidence_api('git/ref/tags/example')
+                self.assertEqual(calls, [status])
+                sleep.assert_not_called()
+
+    def test_certificate_identity_failure_is_not_retried(self):
+        calls = []
+
+        def open_url(_request, **_kwargs):
+            calls.append(True)
+            raise urllib.error.URLError(ssl.SSLCertVerificationError(1, 'certificate verify failed'))
+
+        with patch.dict('os.environ', {'GITHUB_TOKEN': 'test-token'}), \
+             patch('urllib.request.urlopen', side_effect=open_url), \
+             patch('time.sleep') as sleep:
+            with self.assertRaises(urllib.error.URLError):
+                ASSETS.evidence_api('git/ref/tags/example')
+        self.assertEqual(calls, [True])
+        sleep.assert_not_called()
+
+    def test_real_not_found_is_not_retried_and_release_tag_404_stays_optional(self):
+        for route, expected in (
+            ('git/ref/tags/example', 'raise'),
+            ('releases/tags/gpoint-prepare-' + 'a' * 40 + '-55-1', None),
+        ):
+            calls = []
+
+            def open_url(_request, **_kwargs):
+                calls.append(route)
+                raise urllib.error.HTTPError(
+                    'https://api.github.com/', 404, 'not found', None, None)
+
+            with self.subTest(route=route), \
+                 patch.dict('os.environ', {'GITHUB_TOKEN': 'test-token'}), \
+                 patch('urllib.request.urlopen', side_effect=open_url), \
+                 patch('time.sleep') as sleep:
+                if expected == 'raise':
+                    with self.assertRaises(urllib.error.HTTPError):
+                        ASSETS.evidence_api(route)
+                else:
+                    self.assertIsNone(ASSETS.evidence_api(route))
+                self.assertEqual(calls, [route])
+                sleep.assert_not_called()
+
+    def test_multiple_evidence_reads_share_one_operation_deadline(self):
+        now = [0.0]
+        calls = []
+
+        def open_url(_request, timeout):
+            calls.append(timeout)
+            now[0] += 30
+            return self.Response()
+
+        with patch.dict('os.environ', {'GITHUB_TOKEN': 'test-token'}), \
+             patch('urllib.request.urlopen', side_effect=open_url), \
+             patch('time.monotonic', side_effect=lambda: now[0]), \
+             patch('builtins.print'):
+            api = ASSETS._api_for_operation(ASSETS.evidence_api)
+            self.assertEqual(api('actions/first'), {'ok': True})
+            self.assertEqual(api('actions/second'), {'ok': True})
+            with self.assertRaisesRegex(RuntimeError, 'retry budget exhausted'):
+                api('actions/third')
+
+        self.assertEqual(calls, [20, 20])
+
+    def test_sha_identity_mismatch_is_not_retried(self):
+        sha = 'a' * 40
+        tag = ASSETS.release_tag('prepare', sha, '55', '1')
+        release = {'tag_name': tag, 'draft': False, 'immutable': True, 'assets': []}
+        mismatch = {'object': {'type': 'commit', 'sha': 'b' * 40}}
+        payloads = [json.dumps(release).encode(), json.dumps(mismatch).encode()]
+        calls = []
+
+        def open_url(_request, **_kwargs):
+            calls.append(True)
+            return self.Response(payloads.pop(0))
+
+        client = ASSETS._EvidenceApiClient(
+            'test-token', opener=open_url, sleep=lambda _delay: self.fail('identity mismatch must not retry'))
+        with self.assertRaisesRegex(RuntimeError, 'exact candidate'):
+            ASSETS.resolve_asset('prepare', sha, '55', '1', 'bundle.zip', client)
+        self.assertEqual(len(calls), 2)
 
 
 class ImmutableReleaseTests(unittest.TestCase):
