@@ -1476,12 +1476,16 @@ function runApply(candidate) {
   } finally { unlock(); }
 }
 
-function loadImmutableRecoveryFailure(candidate) {
-  const evidencePath = process.env.GPOINT_RECOVERY_FAILURE_EVIDENCE;
-  if (!evidencePath || !path.isAbsolute(evidencePath)) die('verified immutable failed-run evidence path is required');
-  const imported = readJson(evidencePath);
-  const expectedRun = process.env.GPOINT_RECOVERY_FAILURE_RUN_ID;
-  const expectedAttempt = process.env.GPOINT_RECOVERY_FAILURE_RUN_ATTEMPT;
+export function canonicalRecoveryRunId(value) {
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value) || value <= 0) return null;
+    return String(value);
+  }
+  if (typeof value === 'string' && /^[1-9][0-9]*$/.test(value) && Number.isSafeInteger(Number(value))) return value;
+  return null;
+}
+
+export function validateImmutableRecoveryFailure(imported, candidate, {expectedRun, expectedAttempt, dbRiskBaselineSha}) {
   if (expectedRun !== '39010750184' || expectedAttempt !== '1'
       || imported.run?.id !== expectedRun || imported.run?.attempt !== expectedAttempt
       || imported.run?.headSha !== candidate || imported.result?.candidateSha !== candidate
@@ -1510,18 +1514,32 @@ function loadImmutableRecoveryFailure(candidate) {
       || failed.fileName !== undefined && failed.fileName !== `${failed.releaseId}.json`) {
     die('immutable failure manifest identity conflicts with its result');
   }
-  if (process.env.GPOINT_RECOVERY_DB_RISK_BASELINE_SHA !== failed.previousProductionSha)
+  if (dbRiskBaselineSha !== failed.previousProductionSha)
     die('historical database risk acknowledgement does not bind the original production baseline');
   const prepare = imported.prepare;
-  if (String(prepare.runId) !== String(result.prepareRunId)
-      || String(prepare.attempt) !== String(result.prepareRunAttempt)
-      || prepare.receipt.runId !== result.prepareRunId
-      || String(prepare.receipt.runAttempt) !== String(result.prepareRunAttempt)
-      || prepare.receipt.status !== 'READY' || prepare.receipt.schema !== 3
-      || prepare.receipt.transport !== 'ghcr-oci') {
+  const prepareRunId = canonicalRecoveryRunId(prepare?.runId);
+  const receiptRunId = canonicalRecoveryRunId(prepare?.receipt?.runId);
+  const resultPrepareRunId = canonicalRecoveryRunId(result.prepareRunId);
+  if (!prepareRunId || !receiptRunId || !resultPrepareRunId
+      || prepareRunId !== receiptRunId || receiptRunId !== resultPrepareRunId
+      || String(prepare?.attempt) !== String(result.prepareRunAttempt)
+      || String(prepare?.receipt?.runAttempt) !== String(result.prepareRunAttempt)
+      || prepare?.receipt?.status !== 'READY' || prepare?.receipt?.schema !== 3
+      || prepare?.receipt?.transport !== 'ghcr-oci') {
     die('original immutable Prepare receipt is not bound to the failed Deploy');
   }
   return {imported, failed, manifestBytes, baselineSha: failed.previousProductionSha};
+}
+
+function loadImmutableRecoveryFailure(candidate) {
+  const evidencePath = process.env.GPOINT_RECOVERY_FAILURE_EVIDENCE;
+  if (!evidencePath || !path.isAbsolute(evidencePath)) die('verified immutable failed-run evidence path is required');
+  const imported = readJson(evidencePath);
+  return validateImmutableRecoveryFailure(imported, candidate, {
+    expectedRun: process.env.GPOINT_RECOVERY_FAILURE_RUN_ID,
+    expectedAttempt: process.env.GPOINT_RECOVERY_FAILURE_RUN_ATTEMPT,
+    dbRiskBaselineSha: process.env.GPOINT_RECOVERY_DB_RISK_BASELINE_SHA,
+  });
 }
 
 function appendImmutableBytes(file, bytes) {

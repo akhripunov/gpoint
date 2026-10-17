@@ -732,9 +732,21 @@ def verified_optional_v4_static_asset(receipt, bundle, sha):
 
 
 def publish(kind, sha, run_id, attempt):
-    if os.environ.get('GITHUB_REPOSITORY') != REPO or os.environ.get('GITHUB_SHA') != sha:
+    recovery_finalization = kind == 'evidence' and os.environ.get('RELEASE_MODE') == 'recovery-finalization'
+    checkout_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+    if recovery_finalization:
+        executor_sha = os.environ.get('GITHUB_SHA', '')
+        workflow_ref = f'{REPO}/.github/workflows/gpoint-deploy.yml@refs/heads/main'
+        if (os.environ.get('GITHUB_REPOSITORY') != REPO
+                or os.environ.get('GITHUB_EVENT_NAME') != 'workflow_dispatch'
+                or os.environ.get('GITHUB_WORKFLOW_REF') != workflow_ref
+                or not re.fullmatch(r'[a-f0-9]{40}', executor_sha)
+                or checkout_sha != executor_sha
+                or os.environ.get('CANDIDATE_SHA') != sha):
+            raise RuntimeError('Recovery evidence publisher source or independent candidate identity mismatch')
+    elif os.environ.get('GITHUB_REPOSITORY') != REPO or os.environ.get('GITHUB_SHA') != sha:
         raise RuntimeError('Only exact GPoint workflow source may publish assets')
-    if subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() != sha:
+    elif checkout_sha != sha:
         raise RuntimeError('Release publisher checkout differs from candidate')
     tag = release_tag(kind, sha, run_id, attempt)
     with tempfile.TemporaryDirectory(prefix='gpoint-release-assets-') as temporary:
