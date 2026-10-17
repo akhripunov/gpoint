@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { canCreateProductionRef, checkAgataEffectiveConfig, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, cleanupLocalPackageCaches, evaluateSafetyGates, failureEvidence, githubLedgerGitEnvironment, isTransientGitHubTransportFailure, localDiskDecision, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runLocalDiskPreflight, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, validateMacWorkerStatus, verifiedRuntimeState } from './release-gpoint.mjs';
+import { canCreateProductionRef, checkAgataEffectiveConfig, checkArtifactParity, checkEffectiveConfig, classifyReleaseFailure, cleanupLocalPackageCaches, evaluateSafetyGates, failureEvidence, githubLedgerGitEnvironment, githubSourceGitEnvironment, isTransientGitHubTransportFailure, localDiskDecision, pushProductionTag, recoveryArtifactIdentities, recoveryRuntimeFailures, releaseStateAfterError, remoteProof, runLocalDiskPreflight, runRemoteShaList, runWithBoundedGitHubRetries, shouldFinalizeRecovery, validateCandidate, validateMacWorkerStatus, verifiedRuntimeState } from './release-gpoint.mjs';
 import { agataInternalConfigProvisionCommand, agataPreSwitchReadinessCommand, agataProviderRuntimeCommand, candidateBuildCacheCleanupCommand, classifyPostSwitchState, cleanupTemporaryWorktree, createSourceArchive, databaseNetworkArgs, detectorNeedsRebuild, detectorSourceHash, exactCheckout, GPOINT_DATABASE_NETWORK, migrationNeedsDeploy, migrationPendingFromPreflight, parseAgataRuntimeIdentityLine, planReleaseRetention, productionPreflightCommand, resolveRunnerPath, runAuthorizedMutationPlan, runCleanupCommand, runRemoteCommand, runWithPreExecRetry, shouldReuseCandidateImage, SOURCE_ARCHIVE_EXCLUDES, upload, validateAgataProviderConfig, validateAgataProviderMode, validateAgataRuntimeIdentity, validateRuntimeIdentity, remoteCommandEnvironment } from './release-gpoint-vps-adapter.mjs';
 
 test('GitHub token is attached only to exact production-ledger Git operations', () => {
@@ -36,6 +36,38 @@ test('GitHub token is attached only to exact production-ledger Git operations', 
   assert.equal(unrelated.GIT_CONFIG_KEY_1, undefined);
   assert.equal(unrelated.GITHUB_TOKEN, undefined);
   assert.equal(unrelated.GH_TOKEN, undefined);
+});
+
+test('GitHub token is attached only to canonical read-only source-ref checks for the private repository', () => {
+  const token = 'ephemeral-source-token';
+  const base = {GITHUB_TOKEN: token, GH_TOKEN: token, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'safe.directory', GIT_CONFIG_VALUE_0: '*'};
+  const allowed = [
+    ['ls-remote', 'https://github.com/akhripunov/gpoint.git', 'refs/heads/main'],
+    ['ls-remote', 'https://github.com/akhripunov/gpoint.git', 'refs/heads/main', 'refs/tags/*'],
+    ['ls-remote', 'https://github.com/akhripunov/gpoint.git', 'refs/tags/gpoint-production-20261017T040607Z', 'refs/tags/gpoint-production-20261017T040607Z^{}'],
+  ];
+  for (const args of allowed) {
+    const env = githubSourceGitEnvironment(args, token, base);
+    assert.equal(env.GITHUB_TOKEN, undefined);
+    assert.equal(env.GH_TOKEN, undefined);
+    assert.equal(env.GIT_TERMINAL_PROMPT, '0');
+    assert.equal(env.GIT_CONFIG_KEY_1, 'credential.helper');
+    assert.equal(env.GIT_CONFIG_VALUE_1, '');
+    assert.equal(env.GIT_CONFIG_KEY_2, 'http.https://github.com/.extraheader');
+    assert.equal(env.GIT_CONFIG_VALUE_2, '');
+    assert.equal(env.GIT_CONFIG_KEY_3, 'http.https://github.com/.extraheader');
+    assert.equal(env.GIT_CONFIG_VALUE_3, `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`);
+    assert.equal(JSON.stringify(env).includes(token), false);
+  }
+  for (const args of [
+    ['ls-remote', 'origin', 'refs/heads/main'],
+    ['ls-remote', 'https://github.com/other/repo.git', 'refs/heads/main'],
+    ['fetch', 'https://github.com/akhripunov/gpoint.git', 'refs/heads/main'],
+    ['ls-remote', 'https://github.com/akhripunov/gpoint.git', 'refs/heads/*'],
+  ]) {
+    assert.throws(() => githubSourceGitEnvironment(args, token, base), /not authorized/);
+  }
+  assert.throws(() => githubSourceGitEnvironment(allowed[0], '', base), /GITHUB_TOKEN is required/);
 });
 
 test('ledger Git auth fails closed without a token and for noncanonical ledger writes', () => {
@@ -249,31 +281,29 @@ test('transient transport failure retries once then accepts exact main SHA', () 
   assert.deepEqual(delays, [1_000]);
 });
 
-test('canonical SSH-over-443 command inherits the configured identity and strict verification', () => {
-  const previousIdentity = process.env.GPOINT_GITHUB_SSH_IDENTITY_FILE;
-  const previousCommand = process.env.GIT_SSH_COMMAND;
-  process.env.GPOINT_GITHUB_SSH_IDENTITY_FILE = '/local/known github key';
-  delete process.env.GIT_SSH_COMMAND;
+test('private source SHA verification uses the scoped token against the exact repository URL', () => {
+  const previousToken = process.env.GITHUB_TOKEN;
+  const previousGhToken = process.env.GH_TOKEN;
+  process.env.GITHUB_TOKEN = 'ephemeral-source-token';
+  process.env.GH_TOKEN = 'ephemeral-source-token';
   try {
   runRemoteShaList({
     runner: (file, args, options) => {
       assert.equal(file, 'git');
-      assert.deepEqual(args, ['ls-remote', 'origin', 'refs/heads/main', 'refs/tags/*']);
+      assert.deepEqual(args, ['ls-remote', 'https://github.com/akhripunov/gpoint.git', 'refs/heads/main', 'refs/tags/*']);
       assert.equal(options.timeout, 15_000);
-      assert.match(options.env.GIT_SSH_COMMAND, /HostName=ssh\.github\.com/);
-      assert.match(options.env.GIT_SSH_COMMAND, /HostKeyAlias=github\.com/);
-      assert.match(options.env.GIT_SSH_COMMAND, /StrictHostKeyChecking=yes/);
-      assert.match(options.env.GIT_SSH_COMMAND, /ConnectionAttempts=1/);
-      assert.match(options.env.GIT_SSH_COMMAND, /ConnectTimeout=8/);
-      assert.match(options.env.GIT_SSH_COMMAND, /-i "\/local\/known github key"/);
+      assert.equal(options.env.GITHUB_TOKEN, undefined);
+      assert.equal(options.env.GH_TOKEN, undefined);
+      assert.equal(options.env.GIT_CONFIG_VALUE_0, '');
+      assert.match(options.env.GIT_CONFIG_VALUE_2, /^AUTHORIZATION: basic /);
       return `${sha}\trefs/heads/main`;
     },
   });
   } finally {
-    if (previousIdentity === undefined) delete process.env.GPOINT_GITHUB_SSH_IDENTITY_FILE;
-    else process.env.GPOINT_GITHUB_SSH_IDENTITY_FILE = previousIdentity;
-    if (previousCommand === undefined) delete process.env.GIT_SSH_COMMAND;
-    else process.env.GIT_SSH_COMMAND = previousCommand;
+    if (previousToken === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = previousToken;
+    if (previousGhToken === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = previousGhToken;
   }
 });
 
