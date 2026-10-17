@@ -125,12 +125,20 @@ export async function executedPrepareBundle(api, run) {
     }
     const ref = await api('GET', `git/ref/tags/${tag}`);
     if (ref.object?.type !== 'commit' || ref.object?.sha !== sha) throw new OrchestrationError('Prepare tag source mismatch');
-    const assets = (release.assets ?? []).filter(asset => asset.name === 'bundle.zip');
-    if (release.assets?.length !== 1 || assets.length !== 1) throw new OrchestrationError('Expected exactly one immutable Prepare bundle');
-    const asset = assets[0];
-    if (!/^\d+$/.test(String(asset.id ?? '')) || asset.state !== 'uploaded' || !Number.isSafeInteger(asset.size)
-        || asset.size <= 0 || !/^sha256:[a-f0-9]{64}$/.test(asset.digest ?? '')) throw new OrchestrationError('Prepare asset digest/provenance is invalid');
-    return {tag, asset, sourceAttempt: String(number)};
+    const assets = release.assets ?? [];
+    const bundleAssets = assets.filter(asset => asset.name === 'bundle.zip');
+    const fallbackAssets = assets.filter(asset => asset.name === 'fallback-images.zip');
+    const expectedAssetCount = fallbackAssets.length ? 2 : 1;
+    if (assets.length !== expectedAssetCount || bundleAssets.length !== 1 || fallbackAssets.length > 1) {
+      throw new OrchestrationError('Prepare release asset set is incomplete or unexpected');
+    }
+    for (const asset of assets) {
+      if (!/^\d+$/.test(String(asset.id ?? '')) || asset.state !== 'uploaded' || !Number.isSafeInteger(asset.size)
+          || asset.size <= 0 || !/^sha256:[a-f0-9]{64}$/.test(asset.digest ?? '')) {
+        throw new OrchestrationError('Prepare asset digest/provenance is invalid');
+      }
+    }
+    return {tag, asset: bundleAssets[0], fallbackAsset: fallbackAssets[0] ?? null, sourceAttempt: String(number)};
   }
   throw new OrchestrationError('No executed immutable Prepare bundle');
 }

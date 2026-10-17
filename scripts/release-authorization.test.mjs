@@ -3,13 +3,16 @@ import assert from 'node:assert/strict';
 import { validateTaskAuthorization, AuthorizationError, checkTaskAuthorizationState,
   ownerTaskCommitmentSha256,
   consumeTaskAuthorization, authorizationStateRef, assertNoTaskScopedMigrations } from './release-authorization.mjs';
-import {candidateScopeDiff} from './release-authorization.mjs';
+import {candidateScopeDiff, candidateScopeAmendments, scopeAmendmentCommitmentSha256} from './release-authorization.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
 
 const id = 'gpoint-task-2026-10-06-001';
+const scopeAddendumAuthorizationId = 'gpoint-unified-release-v1-20261016';
+const scopeAddendumId = 'gpoint-unified-release-v1-summary-test-2026-10-17';
 const baseline = 'a'.repeat(40);
 const candidate = 'b'.repeat(40);
 const record = (extra = {}) => {
@@ -254,6 +257,163 @@ test('scope diff rejects a squash merge that hides authorization-before-code ord
   git('add', 'apps/web/components/Menu.tsx'); git('commit', '-m', 'implement authorized task');
   git('switch', 'base'); git('merge', '--squash', 'authorized-task'); git('commit', '-m', 'squash authorized task');
   assert.throws(() => candidateScopeDiff(root, id, baseline, git('rev-parse', 'HEAD')), /precede every implementation change/);
+  fs.rmSync(root, {recursive: true, force: true});
+});
+
+test('append-only owner scope addendum cannot hide an unauthorized path by mutating verified scope', () => {
+  const {root, git, baseline} = makeGitRepo();
+  const originalAuth = record({authorization_id: scopeAddendumAuthorizationId, production_baseline_sha: baseline});
+  originalAuth.owner_task_commitment_sha256 = ownerTaskCommitmentSha256(originalAuth);
+  const authPath = `.release-authorizations/${scopeAddendumAuthorizationId}.json`;
+  fs.mkdirSync(path.dirname(path.join(root, authPath)), {recursive: true});
+  fs.writeFileSync(path.join(root, authPath), `${JSON.stringify(originalAuth)}\n`);
+  git('add', authPath); git('commit', '-m', 'record original owner task');
+  const originalRecordBlob = git(`rev-parse`, `HEAD:${authPath}`);
+
+  const scopedPath = 'tests/test_prepare_workflow_summary.py';
+  fs.mkdirSync(path.dirname(path.join(root, scopedPath)), {recursive: true});
+  fs.writeFileSync(path.join(root, scopedPath), 'assert_shell_syntax()\n');
+  git('add', scopedPath); git('commit', '-m', 'add exact release summary regression test');
+  const sourceCommit = git('rev-parse', 'HEAD');
+  const patch = execFileSync('git', ['show', '--format=', '--no-ext-diff', sourceCommit, '--', scopedPath], {cwd: root});
+  const patchSha = createHash('sha256').update(patch).digest('hex');
+  const fileSha = createHash('sha256').update(fs.readFileSync(path.join(root, scopedPath))).digest('hex');
+  const blobSha = git('rev-parse', `${sourceCommit}:${scopedPath}`);
+  const amendment = {
+    schema_version: 1,
+    amendment_id: scopeAddendumId,
+    project: 'gpoint',
+    authorization_id: scopeAddendumAuthorizationId,
+    source_instruction_identifier: 'OWNER_SCOPE_ADDENDUM_GPOINT_RELEASE_20261017',
+    owner_decision: 'Authorize only the Prepare workflow summary regression test path.',
+    original_authorization_record_blob_sha: originalRecordBlob,
+    scope_additions: [{path: scopedPath, source_commit_sha: sourceCommit,
+      patch_sha256: patchSha, result_file_sha256: fileSha, result_blob_sha: blobSha}],
+  };
+  amendment.amendment_commitment_sha256 = scopeAmendmentCommitmentSha256(amendment);
+  const amendmentsPath = `.release-authorizations/addenda/${scopeAddendumAuthorizationId}/${amendment.amendment_id}.json`;
+  fs.mkdirSync(path.dirname(path.join(root, amendmentsPath)), {recursive: true});
+  fs.writeFileSync(path.join(root, amendmentsPath), `${JSON.stringify(amendment)}\n`);
+  git('add', amendmentsPath); git('commit', '-m', 'record exact owner scope addendum');
+  const approvedCandidate = git('rev-parse', 'HEAD');
+  const approvedPaths = candidateScopeDiff(root, scopeAddendumAuthorizationId, baseline, approvedCandidate);
+  assert.deepEqual(approvedPaths, [scopedPath]);
+  assert.doesNotThrow(() => validateTaskAuthorization({record: originalAuth, project: 'gpoint',
+    authorizationId: scopeAddendumAuthorizationId, candidateSha: approvedCandidate,
+    currentMainSha: approvedCandidate, productionSha: baseline, changedPaths: approvedPaths}));
+  const unauthorizedPath = 'tests/unapproved_scope_test.py';
+  fs.mkdirSync(path.dirname(path.join(root, unauthorizedPath)), {recursive: true});
+  fs.writeFileSync(path.join(root, unauthorizedPath), 'unapproved\n');
+  git('add', unauthorizedPath); git('commit', '-m', 'add unapproved release change');
+  const candidate = git('rev-parse', 'HEAD');
+
+  const changedPaths = candidateScopeDiff(root, scopeAddendumAuthorizationId, baseline, candidate);
+  assert.deepEqual(changedPaths, [scopedPath, unauthorizedPath]);
+  assert.throws(() => validateTaskAuthorization({record: originalAuth, project: 'gpoint',
+    authorizationId: scopeAddendumAuthorizationId, candidateSha: candidate, currentMainSha: candidate,
+    productionSha: baseline, changedPaths}), /outside authorized scope/);
+  assert.throws(() => changedPaths.splice(changedPaths.indexOf(unauthorizedPath), 1), TypeError,
+    'callers must not be able to mutate the exact path list after scope proof is attached');
+  assert.deepEqual(changedPaths, [scopedPath, unauthorizedPath]);
+  const amendedPaths = candidateScopeAmendments(root, scopeAddendumAuthorizationId, baseline, candidate);
+  assert.deepEqual(amendedPaths, [scopedPath]);
+  assert.throws(() => validateTaskAuthorization({record: originalAuth, project: 'gpoint',
+    authorizationId: scopeAddendumAuthorizationId, candidateSha: candidate, currentMainSha: candidate,
+    productionSha: baseline, changedPaths, amendedPaths}), /outside authorized scope/);
+  assert.throws(() => validateTaskAuthorization({record: originalAuth, project: 'gpoint',
+    authorizationId: scopeAddendumAuthorizationId, candidateSha: 'f'.repeat(40), currentMainSha: 'f'.repeat(40),
+    productionSha: baseline, changedPaths: [scopedPath], amendedPaths}),
+  /outside authorized scope/);
+  assert.throws(() => validateTaskAuthorization({record: originalAuth, project: 'gpoint',
+    authorizationId: scopeAddendumAuthorizationId, candidateSha: candidate, currentMainSha: candidate,
+    productionSha: baseline, changedPaths}), /outside authorized scope/,
+  'the normal candidate diff API must keep unapproved paths in the verified set');
+  assert.equal(git('rev-parse', `${candidate}:${authPath}`), originalRecordBlob,
+    'the original authorization record must remain byte-identical');
+  fs.writeFileSync(path.join(root, scopedPath), 'modified after owner amendment\n');
+  git('add', scopedPath); git('commit', '-m', 'change scoped test after its exact addendum');
+  const driftedCandidate = git('rev-parse', 'HEAD');
+  assert.throws(() => candidateScopeAmendments(root, scopeAddendumAuthorizationId, baseline, driftedCandidate),
+    /diff, blob, or candidate file does not match/);
+  fs.rmSync(root, {recursive: true, force: true});
+});
+
+test('scope addendum remains valid when its source branch is integrated by a non-squash PR merge', () => {
+  const {root, git, baseline: repoBaseline} = makeGitRepo();
+  git('branch', 'base', repoBaseline);
+  git('switch', '-c', 'authorized-release');
+  const originalAuth = record({authorization_id: scopeAddendumAuthorizationId, production_baseline_sha: repoBaseline});
+  originalAuth.owner_task_commitment_sha256 = ownerTaskCommitmentSha256(originalAuth);
+  const authPath = `.release-authorizations/${scopeAddendumAuthorizationId}.json`;
+  fs.mkdirSync(path.dirname(path.join(root, authPath)), {recursive: true});
+  fs.writeFileSync(path.join(root, authPath), `${JSON.stringify(originalAuth)}\n`);
+  git('add', authPath); git('commit', '-m', 'record original owner task');
+  const originalRecordBlob = git('rev-parse', `HEAD:${authPath}`);
+
+  const scopedPath = 'tests/test_prepare_workflow_summary.py';
+  fs.mkdirSync(path.dirname(path.join(root, scopedPath)), {recursive: true});
+  fs.writeFileSync(path.join(root, scopedPath), 'assert_shell_syntax()\n');
+  git('add', scopedPath); git('commit', '-m', 'add exact release summary regression test');
+  const sourceCommit = git('rev-parse', 'HEAD');
+  const patch = execFileSync('git', ['show', '--format=', '--no-ext-diff', sourceCommit, '--', scopedPath], {cwd: root});
+  const amendment = {
+    schema_version: 1,
+    amendment_id: scopeAddendumId,
+    project: 'gpoint',
+    authorization_id: scopeAddendumAuthorizationId,
+    source_instruction_identifier: 'OWNER_SCOPE_ADDENDUM_GPOINT_RELEASE_20261017',
+    owner_decision: 'Authorize only the Prepare workflow summary regression test path.',
+    original_authorization_record_blob_sha: originalRecordBlob,
+    scope_additions: [{path: scopedPath, source_commit_sha: sourceCommit,
+      patch_sha256: createHash('sha256').update(patch).digest('hex'),
+      result_file_sha256: createHash('sha256').update(fs.readFileSync(path.join(root, scopedPath))).digest('hex'),
+      result_blob_sha: git('rev-parse', `${sourceCommit}:${scopedPath}`)}],
+  };
+  amendment.amendment_commitment_sha256 = scopeAmendmentCommitmentSha256(amendment);
+  const amendmentsPath = `.release-authorizations/addenda/${scopeAddendumAuthorizationId}/${amendment.amendment_id}.json`;
+  fs.mkdirSync(path.dirname(path.join(root, amendmentsPath)), {recursive: true});
+  fs.writeFileSync(path.join(root, amendmentsPath), `${JSON.stringify(amendment)}\n`);
+  git('add', amendmentsPath); git('commit', '-m', 'record exact owner scope addendum');
+
+  git('switch', 'base');
+  git('merge', '--no-ff', 'authorized-release', '-m', 'merge authorized release');
+  const candidate = git('rev-parse', 'HEAD');
+  assert.deepEqual(candidateScopeAmendments(root, scopeAddendumAuthorizationId, repoBaseline, candidate), [scopedPath]);
+  assert.deepEqual(candidateScopeDiff(root, scopeAddendumAuthorizationId, repoBaseline, candidate), [scopedPath]);
+  fs.rmSync(root, {recursive: true, force: true});
+});
+
+test('scope addendum rejects a different path even when its proof and commitment are valid', () => {
+  const {root, git, baseline} = makeGitRepo();
+  const originalAuth = record({authorization_id: scopeAddendumAuthorizationId, production_baseline_sha: baseline});
+  originalAuth.owner_task_commitment_sha256 = ownerTaskCommitmentSha256(originalAuth);
+  const authPath = `.release-authorizations/${scopeAddendumAuthorizationId}.json`;
+  fs.mkdirSync(path.dirname(path.join(root, authPath)), {recursive: true});
+  fs.writeFileSync(path.join(root, authPath), `${JSON.stringify(originalAuth)}\n`);
+  git('add', authPath); git('commit', '-m', 'record original owner task');
+  const unauthorizedPath = 'tests/another_test.py';
+  fs.mkdirSync(path.dirname(path.join(root, unauthorizedPath)), {recursive: true});
+  fs.writeFileSync(path.join(root, unauthorizedPath), 'unapproved test path\n');
+  git('add', unauthorizedPath); git('commit', '-m', 'add another test path');
+  const sourceCommit = git('rev-parse', 'HEAD');
+  const patch = execFileSync('git', ['show', '--format=', '--no-ext-diff', sourceCommit, '--', unauthorizedPath], {cwd: root});
+  const amendment = {schema_version: 1, amendment_id: scopeAddendumId, project: 'gpoint',
+    authorization_id: scopeAddendumAuthorizationId,
+    source_instruction_identifier: 'OWNER_SCOPE_ADDENDUM_GPOINT_RELEASE_20261017',
+    owner_decision: 'Authorize only one exact regression test path for this release task.',
+    original_authorization_record_blob_sha: git('rev-parse', `HEAD~1:${authPath}`),
+    scope_additions: [{path: unauthorizedPath, source_commit_sha: sourceCommit,
+      patch_sha256: createHash('sha256').update(patch).digest('hex'),
+      result_file_sha256: createHash('sha256').update(fs.readFileSync(path.join(root, unauthorizedPath))).digest('hex'),
+      result_blob_sha: git('rev-parse', `${sourceCommit}:${unauthorizedPath}`)}]};
+  amendment.amendment_commitment_sha256 = scopeAmendmentCommitmentSha256(amendment);
+  const amendmentsPath = `.release-authorizations/addenda/${scopeAddendumAuthorizationId}/${scopeAddendumId}.json`;
+  fs.mkdirSync(path.dirname(path.join(root, amendmentsPath)), {recursive: true});
+  fs.writeFileSync(path.join(root, amendmentsPath), `${JSON.stringify(amendment)}\n`);
+  git('add', amendmentsPath); git('commit', '-m', 'record exact owner scope addendum');
+
+  assert.throws(() => candidateScopeAmendments(root, scopeAddendumAuthorizationId, baseline,
+    git('rev-parse', 'HEAD')), /does not match the approved scope addition/);
   fs.rmSync(root, {recursive: true, force: true});
 });
 

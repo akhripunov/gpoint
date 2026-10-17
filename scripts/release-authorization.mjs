@@ -10,6 +10,13 @@ const REQUIRED_EXCLUSIONS = new Set(['database', 'migrations', 'security', 'secr
 const RELEASE_INFRASTRUCTURE_GATES = ['exact_candidate', 'complete_scope', 'prepare_provenance',
   'immutable_artifact', 'security_review', 'preflight', 'rollback_readiness',
   'worker_compatibility', 'postdeploy_health', 'reconciliation'];
+const GPOINT_RELEASE_SCOPE_ADDENDUM = Object.freeze({
+  authorizationId: 'gpoint-unified-release-v1-20261016',
+  amendmentId: 'gpoint-unified-release-v1-summary-test-2026-10-17',
+  sourceInstructionIdentifier: 'OWNER_SCOPE_ADDENDUM_GPOINT_RELEASE_20261017',
+  path: 'tests/test_prepare_workflow_summary.py',
+});
+const VERIFIED_CANDIDATE_AMENDMENTS = new WeakMap();
 const OWNER_ONLY_PREFIXES = [
   '.github/', 'packages/db/', 'migrations/', 'db/', 'deploy/', 'docker/',
   'docs/release/', 'scripts/release', 'scripts/prepare-release', 'scripts/select-release-run',
@@ -70,6 +77,111 @@ export function authorizationRecordPath(authorizationId) {
   return `.release-authorizations/${authorizationId}.json`;
 }
 
+const amendmentDirectory = authorizationId => `.release-authorizations/addenda/${authorizationId}`;
+const sha256 = value => crypto.createHash('sha256').update(value).digest('hex');
+const verifiedAmendedPaths = paths => Object.freeze([...new Set(paths)].sort());
+const NO_SCOPE_AMENDMENTS = Object.freeze([]);
+
+function amendmentCommitment(value) {
+  return canonicalize({schema_version: value.schema_version, amendment_id: value.amendment_id,
+    project: value.project, authorization_id: value.authorization_id,
+    source_instruction_identifier: value.source_instruction_identifier,
+    owner_decision: value.owner_decision,
+    original_authorization_record_blob_sha: value.original_authorization_record_blob_sha,
+    scope_additions: value.scope_additions});
+}
+
+export function scopeAmendmentCommitmentSha256(value) {
+  return sha256(JSON.stringify(amendmentCommitment(value)));
+}
+
+/** Verify append-only, exact-file scope amendments without changing the original authorization. */
+export function candidateScopeAmendments(repoRoot, authorizationId, baselineSha, candidateSha) {
+  const dir = amendmentDirectory(authorizationId);
+  const git = (...args) => execFileSync('git', args, {cwd: repoRoot, encoding: 'utf8', timeout: 20_000}).trim();
+  const bytes = (...args) => execFileSync('git', args, {cwd: repoRoot, encoding: 'buffer', timeout: 20_000, maxBuffer: 4 * 1024 * 1024});
+  try {
+    const recordPath = authorizationRecordPath(authorizationId);
+    const recordBytes = bytes('show', `${candidateSha}:${recordPath}`);
+    const record = JSON.parse(recordBytes.toString('utf8'));
+    const originalRecordBlob = git('rev-parse', `${candidateSha}:${recordPath}`);
+    const names = git('diff', '--name-only', baselineSha, candidateSha, '--', dir).split('\n').filter(Boolean);
+    const treeNames = git('ls-tree', '-r', '--name-only', candidateSha, '--', dir).split('\n').filter(Boolean);
+    if (names.length === 0) return NO_SCOPE_AMENDMENTS;
+    if (names.length !== 1 || treeNames.length !== 1 || names[0] !== treeNames[0]
+        || !names[0].startsWith(`${dir}/`) || names[0].slice(dir.length + 1).includes('/')) {
+      throw new AuthorizationError('Scope amendment must be a single new immutable file');
+    }
+    const amendmentPath = names[0];
+    // Per-commit history is checked below; the candidate tree itself must contain exactly one amendment.
+    const commits = git('rev-list', '--topo-order', '--reverse', '--ancestry-path', `${baselineSha}..${candidateSha}`).split('\n').filter(Boolean);
+    const history = [];
+    for (const commit of commits) {
+      const parents = git('rev-list', '--parents', '-n', '1', commit).split(' ').slice(1);
+      // A normal PR merge carries the source addition into its tree; only the source commit
+      // establishes the immutable addendum, while the final tree/blob checks cover integration.
+      if (parents.length > 1) continue;
+      const output = git('diff-tree', '--root', '--first-parent', '--no-commit-id', '--name-status', '-r', commit);
+      for (const line of output.split('\n').filter(Boolean)) {
+        const [status, changed] = line.split('\t');
+        if (changed === amendmentPath) history.push({commit, status});
+      }
+    }
+    if (history.length !== 1 || history[0].status !== 'A') {
+      throw new AuthorizationError('Scope amendment must be added once and remain immutable');
+    }
+    const amendmentBytes = bytes('show', `${candidateSha}:${amendmentPath}`);
+    const value = JSON.parse(amendmentBytes.toString('utf8'));
+    if (value.schema_version !== 1 || value.project !== record.project || value.authorization_id !== authorizationId
+        || !/^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$/.test(value.amendment_id ?? '')
+        || amendmentPath !== `${dir}/${value.amendment_id}.json`
+        || !/^OWNER_SCOPE_ADDENDUM_[A-Z0-9_]{8,96}$/.test(value.source_instruction_identifier ?? '')
+        || typeof value.owner_decision !== 'string' || value.owner_decision.trim().length < 20
+        || value.original_authorization_record_blob_sha !== originalRecordBlob
+        || value.amendment_commitment_sha256 !== scopeAmendmentCommitmentSha256(value)
+        || !Array.isArray(value.scope_additions) || value.scope_additions.length !== 1) {
+      throw new AuthorizationError('Scope amendment identity or commitment is invalid');
+    }
+    if (authorizationId !== GPOINT_RELEASE_SCOPE_ADDENDUM.authorizationId
+        || value.amendment_id !== GPOINT_RELEASE_SCOPE_ADDENDUM.amendmentId
+        || value.source_instruction_identifier !== GPOINT_RELEASE_SCOPE_ADDENDUM.sourceInstructionIdentifier) {
+      throw new AuthorizationError('Scope amendment identity is not an approved addendum');
+    }
+    const addition = value.scope_additions[0];
+    const scopedPath = addition.path;
+    if (scopedPath !== GPOINT_RELEASE_SCOPE_ADDENDUM.path) {
+      throw new AuthorizationError('Scope amendment does not match the approved scope addition');
+    }
+    if (typeof scopedPath !== 'string' || !scopedPath || scopedPath.startsWith('/')
+        || scopedPath.split('/').includes('..') || inScope(scopedPath, record.allowed_paths)
+        || ownerOnly(scopedPath) || !SHA.test(addition.source_commit_sha ?? '')
+        || !/^[a-f0-9]{64}$/.test(addition.patch_sha256 ?? '')
+        || !/^[a-f0-9]{64}$/.test(addition.result_file_sha256 ?? '')
+        || !/^[a-f0-9]{40}$/.test(addition.result_blob_sha ?? '')) {
+      throw new AuthorizationError('Scope amendment path or source proof is invalid');
+    }
+    execFileSync('git', ['merge-base', '--is-ancestor', addition.source_commit_sha, candidateSha], {cwd: repoRoot, stdio: 'ignore', timeout: 20_000});
+    const sourceNames = git('diff-tree', '--root', '--no-commit-id', '--name-status', '-r', '--no-renames', addition.source_commit_sha)
+      .split('\n').filter(Boolean).map(line => line.split('\t'));
+    if (!sourceNames.some(([status, name]) => status === 'A' && name === scopedPath)) {
+      throw new AuthorizationError('Scope amendment source commit did not add the exact path');
+    }
+    const sourcePatch = bytes('show', '--format=', '--no-ext-diff', addition.source_commit_sha, '--', scopedPath);
+    const candidateFile = bytes('show', `${candidateSha}:${scopedPath}`);
+    if (sha256(sourcePatch) !== addition.patch_sha256
+        || sha256(candidateFile) !== addition.result_file_sha256
+        || git('rev-parse', `${addition.source_commit_sha}:${scopedPath}`) !== addition.result_blob_sha
+        || git('rev-parse', `${candidateSha}:${scopedPath}`) !== addition.result_blob_sha) {
+      throw new AuthorizationError('Scope amendment diff, blob, or candidate file does not match');
+    }
+    // Keep metadata out of the application diff; the exact amended source path remains in it.
+    return verifiedAmendedPaths([scopedPath]);
+  } catch (error) {
+    if (error instanceof AuthorizationError) throw error;
+    throw new AuthorizationError('Scope amendment could not be verified');
+  }
+}
+
 export function candidateScopeDiff(repoRoot, authorizationId, baselineSha, candidateSha) {
   const path = authorizationRecordPath(authorizationId);
   const git = (...args) => execFileSync('git', args, {cwd: repoRoot, encoding: 'utf8', timeout: 20_000}).trim();
@@ -94,6 +206,9 @@ export function candidateScopeDiff(repoRoot, authorizationId, baselineSha, candi
     if (git('rev-parse', `${candidateSha}:${path}`) !== recordObject) {
       throw new AuthorizationError('Durable authorization record changed after it was added');
     }
+    const amendedPaths = candidateScopeAmendments(repoRoot, authorizationId, baselineSha, candidateSha);
+    const amendmentPaths = git('diff', '--name-only', baselineSha, candidateSha, '--', amendmentDirectory(authorizationId))
+      .split('\n').filter(Boolean);
     const scopeChanges = changes.filter(change => change.path !== path);
     const authorizationIndex = commits.indexOf(authorizationCommit);
     const preparedBeforeAuthorization = scopeChanges.filter(change => commits.indexOf(change.commit) < authorizationIndex);
@@ -120,9 +235,14 @@ export function candidateScopeDiff(repoRoot, authorizationId, baselineSha, candi
           .some(change => !authorizationPrecedes(change.commit))) {
       throw new AuthorizationError('Durable authorization record must precede every implementation change');
     }
-    const diffPaths = git('diff', '--name-only', baselineSha, candidateSha).split('\n').filter(Boolean).filter(name => name !== path);
+    const diffPaths = git('diff', '--name-only', baselineSha, candidateSha).split('\n').filter(Boolean)
+      .filter(name => name !== path && !amendmentPaths.includes(name));
     if (!diffPaths.length) throw new AuthorizationError('Candidate has no implementation changes beyond the authorization record');
-    return [...new Set(diffPaths)].sort();
+    if (amendedPaths.some(name => !diffPaths.includes(name))) throw new AuthorizationError('Scope amendment does not reference a candidate diff path');
+    const result = Object.freeze([...new Set(diffPaths)].sort());
+    VERIFIED_CANDIDATE_AMENDMENTS.set(result, {authorizationId, baselineSha, candidateSha,
+      amendedPaths, changedPathsJson: JSON.stringify(result)});
+    return result;
   } catch (error) {
     if (error instanceof AuthorizationError) throw error;
     throw new AuthorizationError('Candidate diff from production baseline could not be proven');
@@ -212,6 +332,14 @@ export function assertNoTaskScopedMigrations({manifest, prismaHead, agataHead,
 
 export function validateTaskAuthorization({record, project, authorizationId, candidateSha,
   currentMainSha, productionSha, changedPaths}) {
+  if (!Array.isArray(changedPaths)) throw new AuthorizationError('Candidate changed paths are required');
+  const scopeProof = VERIFIED_CANDIDATE_AMENDMENTS.get(changedPaths);
+  if (scopeProof && JSON.stringify([...new Set(changedPaths)].sort()) !== scopeProof.changedPathsJson) {
+    throw new AuthorizationError('Candidate changed paths differ from the verified scope proof');
+  }
+  const effectiveAmendedPaths = scopeProof && scopeProof.authorizationId === authorizationId
+      && scopeProof.candidateSha === candidateSha && scopeProof.baselineSha === record?.production_baseline_sha
+      && productionSha === scopeProof.baselineSha ? scopeProof.amendedPaths : [];
   if (!AUTH_ID.test(authorizationId ?? '')) throw new AuthorizationError('Invalid task authorization ID');
   if (!record || record.schema_version !== 3) throw new AuthorizationError('Unsupported task authorization record');
   if (record.owner_instruction_scope !== 'FULL_PRODUCTION_CYCLE') throw new AuthorizationError('Original owner instruction must explicitly authorize the full production cycle');
@@ -248,7 +376,7 @@ export function validateTaskAuthorization({record, project, authorizationId, can
     if (ownerOnly(path)) {
       throw new AuthorizationError('Candidate path is owner-only and cannot use TASK_SCOPED_AUTO');
     }
-    if (!inScope(path, record.allowed_paths)) {
+    if (!inScope(path, record.allowed_paths) && !effectiveAmendedPaths.includes(path)) {
       throw new AuthorizationError(`Candidate path is outside authorized scope: ${path}`);
     }
   }

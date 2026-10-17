@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "amendment_id": "gpoint-unified-release-v1-summary-test-2026-10-17",
+  "project": "gpoint",
+  "authorization_id": "gpoint-unified-release-v1-20261016",
+  "source_instruction_identifier": "OWNER_SCOPE_ADDENDUM_GPOINT_RELEASE_20261017",
+  "owner_decision": "OWNER DECISION — GPoint Release Scope\nРазрешаю точечное дополнение scope текущего GPoint Release Task для файла `tests/test_prepare_workflow_summary.py` при условии подтверждения, что его изменения относятся исключительно к тестированию уже разрешённого релизного механизма.\nНе изменять исходную immutable authorization record задним числом.\nОформить новое проверяемое дополнение к существующему OWNER-разрешению с точным путём и фактическим diff/SHA. Не расширять разрешение на другие файлы.",
+  "original_authorization_record_blob_sha": "91419eca4459aa80b2580b854b415689aad679f7",
+  "scope_additions": [
+    {
+      "path": "tests/test_prepare_workflow_summary.py",
+      "source_commit_sha": "1b2e8bdaab89e567feb67fdce5e1a3272dc4e3ef",
+      "patch_sha256": "451d864a15490e984d06621958e36b5184ef7bd9b1c720b3b1a8ee720f3ef706",
+      "result_file_sha256": "bddfffc4fae702c3f9901030ce21438d49624f1a3bc434eb2448568793af24b8",
+      "result_blob_sha": "aeaf8fd94bc7dc577f24f0375d8caafa69ca59cf"
+    }
+  ],
+  "amendment_commitment_sha256": "db4b8abc30e03481e1958b4376723105d553b2b1a51c10ffd271abde054517cf"
+}
