@@ -9,6 +9,35 @@ const IMAGE_REPOSITORIES = Object.freeze({
 
 function fail(message) { throw new Error(message); }
 
+const OCI_MANIFEST_CONFIG_PYTHON = [
+  'import hashlib,json,re,sys; p=sys.argv[1]; expected=sys.argv[2]; raw=open(p,"rb").read(); actual="sha256:"+hashlib.sha256(raw).hexdigest(); assert actual==expected,"manifest digest mismatch"; m=json.loads(raw); ds=m.get("manifests"); matches=[d for d in (ds if isinstance(ds,list) else []) if isinstance(d,dict) and d.get("platform",{}).get("os")=="linux" and d.get("platform",{}).get("architecture")=="amd64"]; d=("manifest:"+matches[0].get("digest","") if "manifests" in m and len(matches)==1 else ((m.get("config") or {}).get("digest","") if "manifests" not in m else "")); assert re.fullmatch(r"(?:manifest:)?sha256:[a-f0-9]{64}",d); print(d)',
+].join('');
+
+const OCI_CHILD_CONFIG_PYTHON = [
+  'import hashlib,json,re,sys; p=sys.argv[1]; expected=sys.argv[2]; raw=open(p,"rb").read(); actual="sha256:"+hashlib.sha256(raw).hexdigest(); assert actual==expected,"child manifest digest mismatch"; m=json.loads(raw); d=(m.get("config") or {}).get("digest",""); assert "manifests" not in m and re.fullmatch(r"sha256:[a-f0-9]{64}",d); print(d)',
+].join('');
+
+function appendOciManifestConfigCheck(lines, image, reference, role) {
+  const repository = image.repository;
+  const manifestFile = `$oci_tempdir/${role}-manifest.json`;
+  const childFile = `$oci_tempdir/${role}-child-manifest.json`;
+  lines.push(`docker buildx imagetools inspect --raw '${reference}' > "${manifestFile}" 2>/dev/null || { echo 'GHCR_MANIFEST_READ_FAILED role=${role}'; exit 1; }`);
+  lines.push(`manifest_config=$(python3 -c '${OCI_MANIFEST_CONFIG_PYTHON}' "${manifestFile}" '${image.digest}' 2>/dev/null) || { echo 'GHCR_MANIFEST_DIGEST_OR_CONTENT_MISMATCH role=${role}'; exit 1; }`);
+  lines.push('case "$manifest_config" in');
+  lines.push('  manifest:*)');
+  lines.push(`    child_digest="\${manifest_config#manifest:}"`);
+  lines.push(`    docker buildx imagetools inspect --raw '${repository}@'"$child_digest" > "${childFile}" 2>/dev/null || { echo 'GHCR_CHILD_MANIFEST_READ_FAILED role=${role}'; exit 1; }`);
+  lines.push(`    manifest_config=$(python3 -c '${OCI_CHILD_CONFIG_PYTHON}' "${childFile}" "$child_digest" 2>/dev/null) || { echo 'GHCR_CHILD_MANIFEST_DIGEST_OR_CONTENT_MISMATCH role=${role}'; exit 1; }`);
+  lines.push('    ;;');
+  lines.push('esac');
+  lines.push(`test "$manifest_config" = '${image.configDigest}' || { echo 'GHCR_CONFIG_DIGEST_MISMATCH role=${role}'; exit 1; }`);
+}
+
+function appendDockerImageIdentityCheck(lines, reference, image, role, label) {
+  lines.push(`image_id=$(docker image inspect '${reference}' --format '{{.Id}}' 2>/dev/null) || { echo 'GHCR_IMAGE_INSPECT_FAILED role=${role} point=${label}'; exit 1; }`);
+  lines.push(`case "$image_id" in '${image.configDigest}'|'${image.digest}') ;; *) echo 'GHCR_IMAGE_ID_MISMATCH role=${role} point=${label}'; exit 1 ;; esac`);
+}
+
 export function validateOciReceipt(receipt, candidate, { runId, runAttempt } = {}) {
   if (!SHA40.test(candidate ?? '') || receipt?.schema !== 3 || receipt?.transport !== 'ghcr-oci' ||
       receipt?.status !== 'READY' || receipt?.candidateSha !== candidate) fail('OCI receipt candidate or schema mismatch');
@@ -100,8 +129,10 @@ export function createOciPullScript(receipt, candidate, { username = 'akhripunov
     'set +x',
     'docker_config=$(mktemp -d /tmp/gpoint-ghcr-auth.XXXXXX)',
     'chmod 700 "$docker_config"',
+    'oci_tempdir=$(mktemp -d /tmp/gpoint-ghcr-manifests.XXXXXX)',
+    'chmod 700 "$oci_tempdir"',
     'export DOCKER_CONFIG="$docker_config"',
-    'trap \'docker logout ghcr.io >/dev/null 2>&1 || true; rm -rf "$docker_config"\' EXIT',
+    'trap \'docker logout ghcr.io >/dev/null 2>&1 || true; rm -rf "$docker_config" "$oci_tempdir"\' EXIT',
     `docker login ghcr.io --username '${username}' --password-stdin`,
   ];
   for (const [role, localName] of Object.entries({
@@ -115,14 +146,15 @@ export function createOciPullScript(receipt, candidate, { username = 'akhripunov
     }
     const reference = `${expectedRepository}@${image.digest}`;
     const target = `${localName}:${candidate}`;
-    lines.push(`docker pull '${reference}'`);
-    lines.push(`test "$(docker image inspect '${reference}' --format '{{.Os}}/{{.Architecture}}')" = 'linux/amd64'`);
-    lines.push(`test "$(docker image inspect '${reference}' --format '{{.Id}}')" = '${image.configDigest}'`);
-    lines.push(`test "$(docker image inspect '${reference}' --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = '${candidate}'`);
-    lines.push(`test "$(docker image inspect '${reference}' --format '{{index .Config.Labels "org.opencontainers.image.source"}}')" = 'https://github.com/akhripunov/gpoint'`);
-    lines.push(`docker image inspect '${reference}' --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep -Fx '${reference}'`);
+    lines.push(`docker pull '${reference}' >/dev/null 2>&1 || { echo 'GHCR_PULL_FAILED role=${role}'; exit 1; }`);
+    lines.push(`test "$(docker image inspect '${reference}' --format '{{.Os}}/{{.Architecture}}' 2>/dev/null)" = 'linux/amd64' || { echo 'GHCR_PLATFORM_MISMATCH role=${role}'; exit 1; }`);
+    appendOciManifestConfigCheck(lines, image, reference, role);
+    appendDockerImageIdentityCheck(lines, reference, image, role, 'pulled');
+    lines.push(`test "$(docker image inspect '${reference}' --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null)" = '${candidate}' || { echo 'GHCR_REVISION_LABEL_MISMATCH role=${role}'; exit 1; }`);
+    lines.push(`test "$(docker image inspect '${reference}' --format '{{index .Config.Labels "org.opencontainers.image.source"}}' 2>/dev/null)" = 'https://github.com/akhripunov/gpoint' || { echo 'GHCR_SOURCE_LABEL_MISMATCH role=${role}'; exit 1; }`);
+    lines.push(`if ! docker image inspect '${reference}' --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null | grep -Fxq '${reference}'; then echo 'GHCR_MANIFEST_DIGEST_MISMATCH role=${role}'; exit 1; fi`);
     lines.push(`docker image tag '${reference}' '${target}'`);
-    lines.push(`test "$(docker image inspect '${target}' --format '{{.Id}}')" = '${image.configDigest}'`);
+    appendDockerImageIdentityCheck(lines, target, image, role, 'tagged');
   }
   lines.push('echo GPOINT_GHCR_IMAGES_VERIFIED=YES');
   return lines.join('\n');
@@ -144,12 +176,12 @@ export function createOciVerifyScript(receipt, candidate) {
     }
     const reference = `${expectedRepository}@${image.digest}`;
     const target = `${localName}:${candidate}`;
-    lines.push(`test "$(docker image inspect '${reference}' --format '{{.Id}}')" = '${image.configDigest}'`);
-    lines.push(`test "$(docker image inspect '${target}' --format '{{.Id}}')" = '${image.configDigest}'`);
-    lines.push(`test "$(docker image inspect '${target}' --format '{{.Os}}/{{.Architecture}}')" = 'linux/amd64'`);
-    lines.push(`test "$(docker image inspect '${target}' --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = '${candidate}'`);
-    lines.push(`test "$(docker image inspect '${target}' --format '{{index .Config.Labels "org.opencontainers.image.source"}}')" = 'https://github.com/akhripunov/gpoint'`);
-    lines.push(`docker image inspect '${reference}' --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep -Fx '${reference}'`);
+    appendDockerImageIdentityCheck(lines, reference, image, role, 'remote-reference');
+    appendDockerImageIdentityCheck(lines, target, image, role, 'tagged');
+    lines.push(`test "$(docker image inspect '${target}' --format '{{.Os}}/{{.Architecture}}' 2>/dev/null)" = 'linux/amd64' || { echo 'GHCR_PLATFORM_MISMATCH role=${role}'; exit 1; }`);
+    lines.push(`test "$(docker image inspect '${target}' --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null)" = '${candidate}' || { echo 'GHCR_REVISION_LABEL_MISMATCH role=${role}'; exit 1; }`);
+    lines.push(`test "$(docker image inspect '${target}' --format '{{index .Config.Labels "org.opencontainers.image.source"}}' 2>/dev/null)" = 'https://github.com/akhripunov/gpoint' || { echo 'GHCR_SOURCE_LABEL_MISMATCH role=${role}'; exit 1; }`);
+    lines.push(`if ! docker image inspect '${reference}' --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null | grep -Fxq '${reference}'; then echo 'GHCR_MANIFEST_DIGEST_MISMATCH role=${role}'; exit 1; fi`);
   }
   lines.push('echo GPOINT_GHCR_POST_SWITCH_PARITY=YES');
   return lines.join('\n');

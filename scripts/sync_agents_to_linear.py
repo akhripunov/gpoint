@@ -18,6 +18,8 @@ from typing import Any, Callable
 ENDPOINT = "https://api.linear.app/graphql"
 MAX_ATTEMPTS = 3
 TIMEOUT_SECONDS = 20
+GITHUB_MAIN_REF = "https://api.github.com/repos/akhripunov/gpoint/git/ref/heads/main"
+SHA40 = re.compile(r"^[a-f0-9]{40}$")
 
 
 class SyncError(RuntimeError):
@@ -114,6 +116,45 @@ def graphql_request(
     raise SyncError("Linear API request exhausted retries")
 
 
+def verify_current_main_sha(
+    source_sha: str,
+    github_token: str,
+    *,
+    opener: Callable[..., Any] = urllib.request.urlopen,
+) -> None:
+    """Fail closed unless this event still represents the current GPoint main."""
+    if not SHA40.fullmatch(source_sha or ""):
+        raise SyncError("SOURCE_SHA must be a full commit SHA")
+    if not github_token.strip():
+        raise SyncError("GITHUB_TOKEN is required to verify current main")
+    request = urllib.request.Request(
+        GITHUB_MAIN_REF,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {github_token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        method="GET",
+    )
+    try:
+        with opener(request, timeout=TIMEOUT_SECONDS) as response:
+            if getattr(response, "status", 200) != 200:
+                raise SyncError("GitHub current-main lookup failed")
+            body = response.read(65536)
+        if len(body) >= 65536:
+            raise SyncError("GitHub current-main response is invalid")
+        payload = json.loads(body.decode("utf-8"))
+        current_sha = payload.get("object", {}).get("sha") if isinstance(payload, dict) else None
+    except SyncError:
+        raise
+    except (urllib.error.URLError, TimeoutError, OSError, UnicodeError, json.JSONDecodeError):
+        raise SyncError("GitHub current-main lookup failed") from None
+    if not isinstance(current_sha, str) or not SHA40.fullmatch(current_sha):
+        raise SyncError("GitHub current-main response is invalid")
+    if current_sha != source_sha:
+        raise SyncError("source commit is no longer current main")
+
+
 def _linear_markdown_comparison_form(content: str) -> str:
     """Apply only Markdown-equivalent formatting observed in Linear read-back."""
     output: list[str] = []
@@ -196,6 +237,7 @@ def sync_document(
     graphql_call: Callable[[str, dict[str, Any], str], dict[str, Any]],
     *,
     expected_title: str = "AGENTS.md",
+    before_update: Callable[[], None] | None = None,
 ) -> None:
     if not api_key.strip():
         raise SyncError("LINEAR_API_KEY is required")
@@ -219,6 +261,9 @@ def sync_document(
         raise SyncError("Linear returned a different document ID")
     if existing.get("title") != expected_title:
         raise SyncError("Linear document title does not match expected AGENTS.md")
+
+    if before_update is not None:
+        before_update()
 
     update_mutation = """
       mutation UpdateDocument($id: String!, $input: DocumentUpdateInput!) {
@@ -255,6 +300,7 @@ def main() -> int:
     api_key = os.environ.get("LINEAR_API_KEY", "")
     document_id = os.environ.get("LINEAR_DOCUMENT_ID", "")
     source_sha = os.environ.get("SOURCE_SHA", "")
+    github_token = os.environ.get("GITHUB_TOKEN", "")
     source_path = Path(__file__).resolve().parents[1] / "AGENTS.md"
     try:
         if not source_path.is_file():
@@ -262,7 +308,11 @@ def main() -> int:
         source = source_path.read_text(encoding="utf-8")
         if not document_id:
             raise SyncError("LINEAR_DOCUMENT_ID is required")
-        sync_document(source, document_id, api_key, graphql_request)
+        def check_current_main() -> None:
+            verify_current_main_sha(source_sha, github_token)
+
+        check_current_main()
+        sync_document(source, document_id, api_key, graphql_request, before_update=check_current_main)
     except (OSError, UnicodeError) as exc:
         raise SyncError("AGENTS.md could not be read as UTF-8") from exc
     except SyncError as exc:

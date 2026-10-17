@@ -37,6 +37,47 @@ class SyncContractTests(unittest.TestCase):
         self.assertNotIn("documentCreate", " ".join(query for query, _, _ in calls))
         self.assertEqual(calls[1][1], {"id": DOC_ID, "input": {"content": CONTENT}})
 
+    def test_current_main_check_runs_immediately_before_linear_update(self):
+        call, calls = self.successful_call()
+        checks = []
+        SYNC.sync_document(CONTENT, DOC_ID, "test-key", call,
+                           before_update=lambda: checks.append(len(calls)))
+        self.assertEqual(checks, [1])
+        self.assertEqual(len(calls), 3)
+
+    def test_stale_source_is_rejected_before_linear_mutation(self):
+        call, calls = self.successful_call()
+        def stale_source():
+            raise SYNC.SyncError("source commit is no longer current main")
+        with self.assertRaisesRegex(SYNC.SyncError, "no longer current main"):
+            SYNC.sync_document(CONTENT, DOC_ID, "test-key", call, before_update=stale_source)
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(any("documentUpdate" in query for query, _, _ in calls))
+
+    def test_current_main_probe_requires_exact_sha_and_token(self):
+        with self.assertRaisesRegex(SYNC.SyncError, "full commit SHA"):
+            SYNC.verify_current_main_sha("short", "test-token", opener=lambda *_a, **_k: self.fail("API called"))
+        with self.assertRaisesRegex(SYNC.SyncError, "GITHUB_TOKEN"):
+            SYNC.verify_current_main_sha("a" * 40, "", opener=lambda *_a, **_k: self.fail("API called"))
+
+    def test_current_main_probe_fails_closed_on_drift_without_leaking_token(self):
+        class Response:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def read(self, _size):
+                return json.dumps({"object": {"sha": "b" * 40}}).encode()
+
+        seen = []
+        def opener(request, **kwargs):
+            seen.append((request, kwargs))
+            return Response()
+        with self.assertRaisesRegex(SYNC.SyncError, "no longer current main") as failure:
+            SYNC.verify_current_main_sha("a" * 40, "secret-token", opener=opener)
+        self.assertEqual(seen[0][0].get_method(), "GET")
+        self.assertEqual(seen[0][0].get_header("Authorization"), "Bearer secret-token")
+        self.assertNotIn("secret-token", str(failure.exception))
+
     def test_missing_secret_fails_before_api_call(self):
         with self.assertRaisesRegex(SYNC.SyncError, "LINEAR_API_KEY is required"):
             SYNC.sync_document(CONTENT, DOC_ID, "", lambda *_: self.fail("API called"))
