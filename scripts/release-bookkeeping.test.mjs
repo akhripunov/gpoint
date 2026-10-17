@@ -56,6 +56,26 @@ test('preflight and safe failures never push; transport/persistence errors stay 
   assert.throws(() => loadReleaseBookkeeping({ root: '.', git: () => { throw Error('network unavailable'); }, destination: '/nonexistent-denied-test' }));
 });
 
+test('TASK_SCOPED_AUTO persists post-switch recovery state to the dedicated ledger', t => {
+  const f = fixture(t);
+  const ledger = loadReleaseBookkeeping({ ...f, allowMissing: true, destination: path.join(f.base, 'task-auto') });
+  const name = 'gpoint-release-task-auto.json';
+  fs.writeFileSync(path.join(ledger.manifestDir, name), JSON.stringify({
+    status: 'RECOVERY_REQUIRED', candidateSha: f.candidateSha,
+  }));
+  fs.writeFileSync(ledger.stateFile, JSON.stringify({
+    currentProductionSha: 'a'.repeat(40), recoveryRequired: true, lastReleaseStatus: 'RECOVERY_REQUIRED',
+  }));
+  assert.equal(persistReleaseBookkeeping({
+    mode: 'task-scoped-auto', records: [{ name }],
+    evidence: { status: 'RECOVERY_REQUIRED', candidateSha: f.candidateSha }, ...f, ...ledger,
+  }), 'PERSISTED_TO_LEDGER');
+  const reloaded = loadReleaseBookkeeping({ ...f, destination: path.join(f.base, 'task-auto-reloaded') });
+  assert.equal(JSON.parse(fs.readFileSync(reloaded.stateFile)).recoveryRequired, true);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(reloaded.manifestDir, name))).candidateSha, f.candidateSha);
+  assert.equal(f.git(['status', '--porcelain']), '');
+});
+
 test('a conflicting writer cannot overwrite remote ledger', t => {
   const f = fixture(t), ledger = loadReleaseBookkeeping({ ...f, allowMissing: true, destination: path.join(f.base, 'evidence') });
   const name = 'gpoint-release-test.json'; fs.writeFileSync(path.join(ledger.manifestDir, name), '{}');
@@ -67,6 +87,30 @@ test('a conflicting writer cannot overwrite remote ledger', t => {
   assert.throws(() => persistReleaseBookkeeping({ mode: 'production', records: [{ name }], evidence: { status: 'COMPLETE', candidateSha: f.candidateSha }, ...ledger, git }), /non-fast-forward/);
   assert.equal(conflict, true);
   assert.equal(f.git(['ls-remote', 'origin', 'refs/heads/main']).split(/\s/)[0], f.candidateSha);
+});
+
+test('ledger compare-and-swap rejects a head that moved after the verified read', t => {
+  const f = fixture(t), ledger = loadReleaseBookkeeping({...f, allowMissing: true,
+    destination: path.join(f.base, 'expected-head')});
+  const name = 'gpoint-release-cas.json';
+  fs.writeFileSync(path.join(ledger.manifestDir, name), '{}');
+  const other = f.git(['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+    'commit-tree', f.git(['rev-parse', 'HEAD^{tree}']), '-p', f.candidateSha, '-m', 'concurrent ledger update']);
+  f.git(['push', 'origin', `${other}:${LEDGER_REF}`]);
+  assert.throws(() => persistReleaseBookkeeping({mode: 'production', records: [{name}],
+    evidence: {status: 'COMPLETE', candidateSha: f.candidateSha}, ...f, ...ledger}), /changed since its verified read/);
+});
+
+test('persisting evidence cannot replace a manifest already in immutable history', t => {
+  const f = fixture(t), first = loadReleaseBookkeeping({...f, allowMissing: true,
+    destination: path.join(f.base, 'immutable-first')});
+  const name = 'gpoint-release-immutable.json';
+  fs.writeFileSync(path.join(first.manifestDir, name), JSON.stringify({candidateSha: f.candidateSha, status: 'COMPLETE'}));
+  persistReleaseBookkeeping({mode: 'production', records: [{name}], evidence: {status: 'COMPLETE', candidateSha: f.candidateSha}, ...f, ...first});
+  const second = loadReleaseBookkeeping({...f, destination: path.join(f.base, 'immutable-second')});
+  fs.writeFileSync(path.join(second.manifestDir, name), JSON.stringify({candidateSha: f.candidateSha, status: 'BLOCKED'}));
+  assert.throws(() => persistReleaseBookkeeping({mode: 'production', records: [{name}],
+    evidence: {status: 'COMPLETE', candidateSha: f.candidateSha}, ...f, ...second}), /manifest is immutable/);
 });
 
 test('ledger load recovers from one transient fetch timeout before reading the canonical ref', t => {

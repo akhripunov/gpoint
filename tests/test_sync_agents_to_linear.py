@@ -59,6 +59,12 @@ class SyncContractTests(unittest.TestCase):
         self.assertIn("  push:\n    branches: [main]\n", push_trigger.group(1))
         self.assertNotIn("paths:", push_trigger.group(1))
 
+    def test_agents_sync_workflow_uses_available_python3_executable(self):
+        workflow = (ROOT / ".github" / "workflows" / "sync-agents-to-linear.yml").read_text()
+        self.assertIn("run: python3 -m py_compile scripts/sync_agents_to_linear.py", workflow)
+        self.assertIn("run: python3 scripts/sync_agents_to_linear.py", workflow)
+        self.assertNotRegex(workflow, r"run: python(?:\s|$)")
+
     def test_current_main_check_runs_immediately_before_linear_update(self):
         call, calls = self.successful_call()
         checks = []

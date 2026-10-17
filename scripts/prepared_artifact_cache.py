@@ -9,6 +9,7 @@ import shutil
 import socket
 import ssl
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -33,6 +34,17 @@ class NetworkStageError(RuntimeError):
 
 class ReleaseAssetError(RuntimeError):
     pass
+
+
+def validate_current_main_candidate(candidate_sha, release_mode, executor_sha, current_main_sha, is_ancestor):
+    if release_mode in ('recovery-finalization', 'recovery-diagnostics'):
+        if (not re.fullmatch(r'[a-f0-9]{40}', executor_sha or '')
+                or current_main_sha != executor_sha
+                or not is_ancestor(candidate_sha, executor_sha)):
+            raise RuntimeError('Recovery candidate is not an ancestor of the exact current-main executor')
+        return
+    if current_main_sha != candidate_sha:
+        raise RuntimeError('Candidate is no longer current main')
 
 
 def retryable(error):
@@ -367,8 +379,13 @@ def main():
             or str(run.get('run_attempt')) != attempt):
         raise RuntimeError('Successful Prepare provenance changed')
     stage = 'current_main_ref'
-    if github(repo, 'git/ref/heads/main', token, stage)['object']['sha'] != sha:
-        raise RuntimeError('Candidate is no longer current main')
+    current_main_sha = github(repo, 'git/ref/heads/main', token, stage)['object']['sha']
+    release_mode = os.environ.get('RELEASE_MODE', '')
+    executor_sha = os.environ.get('GPOINT_RECOVERY_EXECUTOR_SHA', '')
+    validate_current_main_candidate(sha, release_mode, executor_sha, current_main_sha,
+        lambda candidate, executor: subprocess.run(
+            ['git', 'merge-base', '--is-ancestor', candidate, executor],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0)
     stage = 'artifact_metadata'
     if project == 'gpoint':
         from release_assets import resolve_asset

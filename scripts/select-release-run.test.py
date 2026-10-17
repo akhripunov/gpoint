@@ -1,6 +1,10 @@
 import importlib.util
+import os
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).with_name('select-release-run.py')
@@ -133,6 +137,81 @@ class ReadyPreflightEvidenceTests(unittest.TestCase):
     def test_prepare_run_identity_mismatch_is_rejected(self):
         with self.assertRaisesRegex(RuntimeError, 'does not prove READY_FOR_OWNER'):
             self.validate(canonical_preflight_receipt(prepareRunAttempt='1'))
+
+
+class RecoveryDiagnosticsSelectionTests(unittest.TestCase):
+    def test_read_only_diagnostics_needs_no_production_approval(self):
+        SELECTOR.validate_request(SELECTOR.RECOVERY_CANDIDATE_SHA, 'refs/heads/main',
+                                  'recovery-diagnostics', 'false')
+        with self.assertRaisesRegex(RuntimeError, 'cannot accept production approval'):
+            SELECTOR.validate_request(SELECTOR.RECOVERY_CANDIDATE_SHA, 'refs/heads/main',
+                                      'recovery-diagnostics', 'true')
+
+    def test_diagnostics_requires_exact_incident_and_current_main_executor(self):
+        root = Path(__file__).resolve().parents[1]
+        with patch.object(SELECTOR.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):
+            SELECTOR.validate_recovery_executor(SELECTOR.RECOVERY_CANDIDATE_SHA, 'e' * 40, 'e' * 40, root)
+        with self.assertRaisesRegex(RuntimeError, 'pinned'):
+            SELECTOR.validate_recovery_executor('f' * 40, 'e' * 40, 'e' * 40, root)
+        with self.assertRaisesRegex(RuntimeError, 'current main'):
+            SELECTOR.validate_recovery_executor(SELECTOR.RECOVERY_CANDIDATE_SHA, 'e' * 40, 'f' * 40, root)
+
+class RecoveryFinalizationAuthorizationTests(unittest.TestCase):
+    def test_mode_requires_exact_candidate_approval(self):
+        SELECTOR.validate_request(SHA, 'refs/heads/main', 'recovery-finalization', 'true')
+        with self.assertRaisesRegex(RuntimeError, 'approval'):
+            SELECTOR.validate_request(SHA, 'refs/heads/main', 'recovery-finalization', 'false')
+
+    def test_only_original_failure_and_explicit_baseline_risk_decision_are_accepted(self):
+        evidence = {'RECOVERY_FAILURE_RUN_ID': '39010750184', 'RECOVERY_FAILURE_RUN_ATTEMPT': '1',
+            'RECOVERY_DB_RISK_ACCEPTED': 'true', 'RECOVERY_DB_RISK_BASELINE_SHA': 'a' * 40,
+            'RECOVERY_DB_RISK_DECISION_ID': 'ME38_DB_RISK_01', 'CREATE_RECOVERY_BACKUP': 'true',
+            'GITHUB_ACTOR': 'akhripunov'}
+        self.assertEqual(SELECTOR.validate_recovery_finalization_inputs(SHA, evidence)['baseline_sha'], 'a' * 40)
+        for key, value in [('RECOVERY_FAILURE_RUN_ID', '1'), ('RECOVERY_FAILURE_RUN_ATTEMPT', '2'),
+                           ('RECOVERY_DB_RISK_ACCEPTED', 'false'), ('RECOVERY_DB_RISK_BASELINE_SHA', 'bad'),
+                           ('RECOVERY_DB_RISK_DECISION_ID', ''), ('CREATE_RECOVERY_BACKUP', 'false'),
+                           ('GITHUB_ACTOR', 'other-user')]:
+            with self.subTest(key=key):
+                invalid = dict(evidence); invalid[key] = value
+                with self.assertRaisesRegex(RuntimeError, 'exact incident'):
+                    SELECTOR.validate_recovery_finalization_inputs(SHA, invalid)
+
+    def test_recovery_executor_must_be_current_main_and_contain_exact_incident_candidate(self):
+        root = Path(__file__).resolve().parents[1]
+        with patch.object(SELECTOR.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
+            SELECTOR.validate_recovery_executor(SELECTOR.RECOVERY_CANDIDATE_SHA, 'e' * 40, 'e' * 40, root)
+            self.assertEqual(run.call_args.args[0], ['git', 'merge-base', '--is-ancestor',
+                SELECTOR.RECOVERY_CANDIDATE_SHA, 'e' * 40])
+        with self.assertRaisesRegex(RuntimeError, 'pinned'):
+            SELECTOR.validate_recovery_executor('f' * 40, 'e' * 40, 'e' * 40, root)
+        with self.assertRaisesRegex(RuntimeError, 'current main'):
+            SELECTOR.validate_recovery_executor(SELECTOR.RECOVERY_CANDIDATE_SHA, 'e' * 40, 'f' * 40, root)
+        with patch.object(SELECTOR.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1)):
+            with self.assertRaisesRegex(RuntimeError, 'ancestor'):
+                SELECTOR.validate_recovery_executor(SELECTOR.RECOVERY_CANDIDATE_SHA, 'e' * 40, 'e' * 40, root)
+
+    def test_original_prepare_identity_is_read_from_verified_immutable_failure_asset(self):
+        def fake_run(command, **kwargs):
+            output = Path(command[-1])
+            output.write_text(__import__('json').dumps({'prepare': {'runId': '39001890156', 'attempt': '1',
+                'candidateSha': SELECTOR.RECOVERY_CANDIDATE_SHA}}))
+            return subprocess.CompletedProcess(command, 0, '', '')
+        with patch.object(SELECTOR.subprocess, 'run', side_effect=fake_run) as run:
+            self.assertEqual(SELECTOR.original_prepare_identity(SELECTOR.RECOVERY_CANDIDATE_SHA,
+                Path('/repo'), {'GITHUB_TOKEN': 'not-read-by-test'}), ('39001890156', '1'))
+        self.assertEqual(run.call_args.args[0][1:5], ['scripts/release_assets.py', 'read-recovery-failure',
+            SELECTOR.RECOVERY_CANDIDATE_SHA, SELECTOR.RECOVERY_FAILURE_RUN_ID])
+
+    def test_original_prepare_identity_rejects_unbound_or_missing_prepare(self):
+        for prepare in [{'runId': '1', 'attempt': '1', 'candidateSha': 'f' * 40}, None]:
+            def fake_run(command, prepare=prepare, **kwargs):
+                Path(command[-1]).write_text(__import__('json').dumps({'prepare': prepare}))
+                return subprocess.CompletedProcess(command, 0, '', '')
+            with patch.object(SELECTOR.subprocess, 'run', side_effect=fake_run):
+                with self.assertRaisesRegex(RuntimeError, 'exact Prepare'):
+                    SELECTOR.original_prepare_identity(SELECTOR.RECOVERY_CANDIDATE_SHA,
+                        Path('/repo'), {})
 
 
 if __name__ == '__main__':

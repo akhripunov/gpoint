@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
-import { observeDeploymentReadiness, dependencyRecheckState, collectWorkerDependencies } from './release-readiness.mjs';
+import { observeDeploymentReadiness, dependencyRecheckState, collectWorkerDependencies,
+  validateRecoveryQueueSnapshots } from './release-readiness.mjs';
 import { gsalesRuntimeCommand, parseGsalesRuntime } from './release-gsales.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { loadReleaseBookkeeping, persistReleaseBookkeeping } from './release-bookkeeping.mjs';
+import { loadReleaseBookkeeping, persistReleaseBookkeeping, verifyReleaseBookkeeping } from './release-bookkeeping.mjs';
 import { migrationHead } from './release-migrations.mjs';
 import { gsalesProvisionCommand } from './release-gsales-provision.mjs';
 import { verifyReleaseBundle } from './release-bundle.mjs';
@@ -13,15 +14,19 @@ import { deriveV3ProductionParent } from './release-component-bundle-v4.mjs';
 import { expectedStaticParent, staticReceiptAndImages, verifyStaticLiveBaseline,
   v4NativeProofOnVPS, verifyV4SourceAtCheckout } from './release-static-v4.mjs';
 import { applyStaticArtifactV4 } from './release-static-transfer-v4.mjs';
+import { recoveryFinalizationIdentity, runRecoveryFinalization,
+  validateRecoveryFinalizationApproval, assertNoConcurrentRelease } from './recovery-finalization.mjs';
 
 import { acquireReleaseLock } from './release-lock.mjs';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { applyCandidate, cleanupTemporaryWorktree, inspectProductionReadOnly, inspectAgataMigrationReadiness, inspectGsalesReadiness, planReleaseRetention, provisionAgataInternalConfigForBaseline, upload, runRemoteCommand, validateAgataProviderMode, validateAgataProviderCompatibility } from './release-gpoint-vps-adapter.mjs';
+import { applyCandidate, cleanupTemporaryWorktree, inspectProductionReadOnly, inspectRecoveryProductionReadOnly, inspectAgataMigrationReadiness, inspectGsalesReadiness, planReleaseRetention, provisionAgataInternalConfigForBaseline, upload, runRemoteCommand, parseGuardedMigrationEvidence, validateAgataProviderMode, validateAgataProviderCompatibility } from './release-gpoint-vps-adapter.mjs';
+import { buildRecoveryDiagnosticsSnapshot } from './recovery-diagnostics.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 let STATE_FILE = process.env.GPOINT_RELEASE_STATE_FILE || path.join(ROOT, 'docs/release/state/production.json');
 let MANIFEST_DIR = process.env.GPOINT_RELEASE_MANIFEST_DIR || path.join(ROOT, 'docs/release/manifests');
+let RELEASE_LEDGER_SHA = process.env.GPOINT_RELEASE_LEDGER_SHA || null;
 // Keep the lock outside Actions checkout: checkout cleanup must never erase a
 // stale release lock left by interruption, and all Mac checkouts share it.
 const LOCK_FILE = path.join(os.homedir(), '.config/gpoint/release-production.lock');
@@ -122,6 +127,32 @@ export function githubSourceGitEnvironment(args, token, baseEnv = process.env) {
   return env;
 }
 
+/** Attach ephemeral Actions credentials only to a single, exact production-tag push. */
+export function githubProductionTagGitEnvironment(args, token, baseEnv = process.env) {
+  const env = {...baseEnv};
+  delete env.GITHUB_TOKEN;
+  delete env.GH_TOKEN;
+  env.GIT_TERMINAL_PROMPT = '0';
+  const exactProductionTagPush = args.length === 3 && args[0] === 'push' && args[1] === 'origin'
+    && /^refs\/tags\/gpoint-production-\d{8}T\d{9}Z$/.test(args[2] ?? '');
+  const touchesProductionRefs = args.some(value => typeof value === 'string' && value.includes('refs/tags/'));
+  if (!exactProductionTagPush) {
+    if (touchesProductionRefs) throw new Error('GitHub production tag Git operation is not authorized');
+    return env;
+  }
+  if (!token) throw new Error('GITHUB_TOKEN is required for production tag Git access');
+  const offset = Number(env.GIT_CONFIG_COUNT ?? 0);
+  if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('Invalid inherited Git config count');
+  env.GIT_CONFIG_COUNT = String(offset + 3);
+  env[`GIT_CONFIG_KEY_${offset}`] = 'credential.helper';
+  env[`GIT_CONFIG_VALUE_${offset}`] = '';
+  env[`GIT_CONFIG_KEY_${offset + 1}`] = 'http.https://github.com/akhripunov/gpoint/.extraheader';
+  env[`GIT_CONFIG_VALUE_${offset + 1}`] = '';
+  env[`GIT_CONFIG_KEY_${offset + 2}`] = 'http.https://github.com/akhripunov/gpoint/.extraheader';
+  env[`GIT_CONFIG_VALUE_${offset + 2}`] = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`;
+  return env;
+}
+
 const ledgerGit = (args, input) => execFileSync('git', args, { cwd: ROOT, input, encoding: 'utf8', timeout: 30_000,
   env: githubLedgerGitEnvironment(args, process.env.GITHUB_TOKEN) }).trim();
 function recheckTaskAuthorizationBeforeMutation(candidateSha, boundary) {
@@ -142,6 +173,28 @@ catch { process.stderr.write('TASK_AUTHORIZATION_MUTATION_GATE=BLOCKED\\n'); pro
   if (result.error || result.status !== 0 || result.stdout.trim() !== 'TASK_AUTHORIZATION_MUTATION_GATE=PASS') {
     die(`TASK_SCOPED_AUTO authorization could not be revalidated before ${boundary}`);
   }
+}
+function assertRecoveryFinalizationAuthorization(candidateSha, baselineSha, boundary) {
+  let decision;
+  try {
+    decision = {
+      accepted: process.env.GPOINT_RECOVERY_DB_RISK_ACCEPTED === 'true',
+      candidateSha: process.env.GPOINT_RECOVERY_DB_RISK_CANDIDATE_SHA,
+      baselineSha: process.env.GPOINT_RECOVERY_DB_RISK_BASELINE_SHA,
+      instructionId: process.env.GPOINT_RECOVERY_DB_RISK_DECISION_ID,
+      allowedOperations: (process.env.GPOINT_RECOVERY_DB_RISK_ALLOWED_OPERATIONS ?? '').split(',').filter(Boolean),
+      forbiddenOperations: (process.env.GPOINT_RECOVERY_DB_RISK_FORBIDDEN_OPERATIONS ?? '').split(',').filter(Boolean),
+    };
+    validateRecoveryFinalizationApproval({releaseMode: process.env.RELEASE_MODE,
+      approveProduction: process.env.APPROVE_PRODUCTION === 'true',
+      approvalActor: process.env.GITHUB_ACTOR,
+      workflowCandidate: process.env.CANDIDATE_SHA, candidateSha, baselineSha,
+      databaseRiskDecision: decision});
+    if (process.env.GPOINT_RECOVERY_CREATE_BACKUP !== 'true') throw new Error('protected current backup creation was not authorized');
+  } catch {
+    die(`exact-SHA finalization approval and separate DB-risk decision are required before ${boundary}`);
+  }
+  return decision;
 }
 function manifestReference(file) { return `docs/release/manifests/${path.basename(file)}`; }
 function command(args, cwd) { const r = spawnSync(args[0], args.slice(1), { cwd, encoding: 'utf8', stdio: 'inherit' }); if (r.status !== 0) die(`${args.join(' ')} exited with ${r.status}`); }
@@ -315,7 +368,7 @@ function readWorkerDependencies() {
 }
 
 function verifyWorkerCompatibility(candidate, facts, mode) {
-  if (!['preflight', 'apply'].includes(mode)) die('Worker compatibility mode is invalid');
+  if (!['preflight', 'apply', 'recovery-finalization'].includes(mode)) die('Worker compatibility mode is invalid');
   // Secrets are compared through stdin only, never arguments, logs or evidence.
   const script = `import json,pathlib\ne=dict(line.split('=',1) for line in pathlib.Path('/opt/gpoint/env/production.env').read_text().splitlines() if line and not line.startswith('#') and '=' in line)\nassert e['RELEASE_SHA']=='${facts.LIVE_RELEASE_ENV_SHA}'\nprint(json.dumps({key:e[key] for key in ('GPOINT_AGATA_WORKER_TOKEN','GSALES_WORKER_TOKEN')}))\n`;
   const credentials = runRemoteCommand(`set -e; printf '%s' '${Buffer.from(script).toString('base64')}' | base64 -d | python3 -`);
@@ -595,8 +648,19 @@ export function pushProductionTag(tag, candidate, { push = () => execFileSync('g
   stdio: ['ignore', 'pipe', 'pipe'],
   timeout: GITHUB_REMOTE_TIMEOUT_MS,
   maxBuffer: 8 * 1024 * 1024,
-  env: githubTransportEnv(),
-}), lookup = remoteTagTarget, sleep } = {}) {
+  env: githubProductionTagGitEnvironment(['push', 'origin', `refs/tags/${tag}`], process.env.GITHUB_TOKEN, githubTransportEnv()),
+}), lookup = remoteTagTarget, localLookup = tagName => git(['rev-parse', '--verify', `refs/tags/${tagName}^{}`]), sleep } = {}) {
+  if (!/^gpoint-production-\d{8}T\d{9}Z$/.test(tag) || !SHA_RE.test(candidate ?? ''))
+    die('production tag identity is invalid');
+  let localTarget;
+  try { localTarget = localLookup(tag); }
+  catch { die('local production tag could not be verified before push'); }
+  if (localTarget !== candidate) die(`local production tag target mismatch: ${tag}`);
+  let initialTarget;
+  try { initialTarget = lookup(tag); }
+  catch { die('production tag could not be checked before push'); }
+  if (initialTarget === candidate) return initialTarget;
+  if (initialTarget !== null) die(`production tag already exists with a different target: ${tag}`);
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
       push(attempt);
@@ -605,11 +669,14 @@ export function pushProductionTag(tag, candidate, { push = () => execFileSync('g
       return target;
     } catch (error) {
       if (!isTransientGitHubTransportFailure(error)) {
-        die(/permission denied|publickey|authentication failed/i.test(errorText(error))
-          ? 'GitHub production tag push authentication failed; refusing retry'
-          : /host key verification failed/i.test(errorText(error))
-            ? 'GitHub production tag push host-key verification failed; refusing retry'
-            : 'GitHub production tag push failed on a non-transient error; refusing retry');
+        const failureText = errorText(error);
+        if (/GH013|repository rule violations|protected tag|tag is protected|pre-receive hook declined/i.test(failureText))
+          die('GitHub production tag push was rejected by repository tag policy; refusing retry');
+        if (/permission denied|publickey|authentication failed|resource not accessible by integration|(?:http|status)[ =:]*(?:401|403)/i.test(failureText))
+          die('GitHub production tag push authentication failed or write permission denied; refusing retry');
+        if (/host key verification failed/i.test(failureText))
+          die('GitHub production tag push host-key verification failed; refusing retry');
+        die('GitHub production tag push failed on a non-transient error; refusing retry');
       }
       // A failed push can have reached GitHub; always reconcile before any retry.
       let existing;
@@ -824,6 +891,169 @@ function runDryRun(candidate) {
 }
 
 function status() { console.log(JSON.stringify({ state: state(), activeLock: fs.existsSync(LOCK_FILE) ? readJson(LOCK_FILE) : null, manifests: fs.readdirSync(MANIFEST_DIR).filter(x => x.endsWith('.json')).sort() }, null, 2)); }
+
+function readRecoveryDiagnosticsIncident(candidate) {
+  const file = process.env.GPOINT_RECOVERY_FAILURE_EVIDENCE;
+  if (!file || !path.isAbsolute(file)) die('immutable recovery incident evidence path is unavailable');
+  let stat;
+  try { stat = fs.lstatSync(file); } catch { die('immutable recovery incident evidence is unavailable'); }
+  if (stat.isSymbolicLink() || !stat.isFile() || (stat.mode & 0o077) !== 0) die('recovery incident evidence file is not protected');
+  const imported = readJson(file);
+  const runId = String(imported.run?.id ?? '');
+  const attempt = String(imported.run?.attempt ?? '');
+  const manifestBytes = Buffer.from(imported.failureManifestBytesBase64 ?? '', 'base64');
+  const manifestSha256 = crypto.createHash('sha256').update(manifestBytes).digest('hex');
+  if (runId !== '39010750184' || attempt !== '1' || imported.run?.headSha !== candidate
+      || !['workflow_dispatch', 'push'].includes(imported.run?.event)
+      || imported.run?.path !== '.github/workflows/gpoint-deploy.yml'
+      || imported.run?.conclusion !== 'failure'
+      || imported.evidence?.immutable !== true || imported.evidence?.manifestChecksumVerified !== true
+      || imported.evidence?.resultChecksumVerified !== true
+      || !/^sha256:[a-f0-9]{64}$/.test(imported.evidence?.manifestDigest ?? '')
+      || !/^sha256:[a-f0-9]{64}$/.test(imported.evidence?.resultDigest ?? '')
+      || manifestSha256 !== imported.failureManifestSha256
+      || manifestBytes.toString('base64') !== imported.failureManifestBytesBase64) {
+    die('immutable incident evidence does not match the pinned ME-38 run');
+  }
+  let manifest;
+  try { manifest = JSON.parse(manifestBytes.toString('utf8')); } catch { die('immutable incident manifest is invalid'); }
+  const result = imported.result ?? {};
+  const prepare = imported.prepare ?? {};
+  if (manifest.status !== 'RECOVERY_REQUIRED' || manifest.failureStage !== 'POST_SWITCH'
+      || manifest.candidateSha !== candidate || manifest.previousProductionSha !== 'a700198a843c12a84f2e537178de752e3eddd54d'
+      || manifest.productionShaAfter !== null || manifest.productionRef !== null
+      || result.releaseId !== manifest.releaseId || result.failureStage !== 'POST_SWITCH'
+      || result.failureReason !== manifest.failureReason
+      || result.candidateSha !== candidate || result.previousProductionSha !== manifest.previousProductionSha
+      || String(prepare.runId) !== String(result.prepareRunId) || String(prepare.attempt) !== String(result.prepareRunAttempt)
+      || prepare.status !== 'success' || prepare.candidateSha !== candidate
+      || prepare.receipt?.candidateSha !== candidate || prepare.receipt?.status !== 'READY') {
+    die('immutable incident, failed Deploy, and Prepare evidence are inconsistent');
+  }
+  return {
+    incident: {runId, attempt, candidateSha: candidate, baselineSha: manifest.previousProductionSha,
+      failureStage: manifest.failureStage, status: manifest.status, manifestSha256},
+    incidentEvidence: {observedAt: isoNow(), verified: true, runId, attempt,
+      assetSha256: imported.evidence.manifestDigest.slice('sha256:'.length),
+      resultAssetSha256: imported.evidence.resultDigest?.slice?.('sha256:'.length) ?? null,
+      prepareRunId: String(prepare.runId), prepareRunAttempt: String(prepare.attempt),
+      prepareBundleDigest: prepare.bundleDigest?.slice?.('sha256:'.length) ?? null},
+  };
+}
+
+function readLocalReleaseLocks() {
+  const existing = [];
+  for (const file of [LOCK_FILE, LEGACY_LOCK_FILE]) {
+    try {
+      const info = fs.lstatSync(file);
+      if (info.isSymbolicLink() || !info.isFile() || (info.mode & 0o077) !== 0) return {checked: false, held: null, files: []};
+      const value = readJson(file);
+      existing.push({name: path.basename(file), releaseId: String(value.releaseId ?? ''), createdAt: value.createdAt ?? null});
+    } catch (error) { if (error.code !== 'ENOENT') return {checked: false, held: null, files: []}; }
+  }
+  return {checked: true, held: existing.length > 0, files: existing};
+}
+
+function recoveryWorkerLaneFacts(status) {
+  const savedFile = path.join(os.homedir(), 'Library/Application Support/GPoint/agata-codex-worker/status/worker-status.json');
+  let targets = {};
+  try {
+    const stat = fs.lstatSync(savedFile);
+    if (!stat.isSymbolicLink() && stat.isFile() && (stat.mode & 0o077) === 0) targets = readJson(savedFile).targets ?? {};
+  } catch { /* Missing status remains incomplete. */ }
+  const lanes = status?.lanes ?? {};
+  return Object.fromEntries(['GPOINT', 'GSALES'].map(lane => {
+    const value = lanes[lane] ?? targets[lane] ?? {};
+    const snapshot = value.queue_snapshot ?? value.queueSnapshot ?? value;
+    return [lane, {status: value.status ?? value.operational_status
+      ?? (value.health === 'HEALTHY' || value.queue_connectivity === 'reachable' ? 'HEALTHY' : 'NOT_VERIFIED'),
+      sourceId: snapshot.queue_snapshot_source_id ?? snapshot.source_id ?? null,
+      snapshotAt: snapshot.queue_snapshot_at ?? snapshot.snapshot_at ?? null,
+      pending: snapshot.pending_inference_jobs ?? null, running: snapshot.running_inference_jobs ?? null,
+      queueSnapshotState: snapshot.queue_snapshot_state ?? null}];
+  }));
+}
+
+function recoveryDiagnostics(candidate) {
+  if (candidate !== 'd367c2ec24242a733dbb2c4145c91d2d4682ba2c') die('recovery diagnostics are pinned to the ME-38 incident candidate');
+  const incident = readRecoveryDiagnosticsIncident(candidate);
+  const ledgerState = state();
+  let facts = {};
+  try {
+    const output = inspectRecoveryProductionReadOnly(candidate);
+    const line = output.split(/\r?\n/).find(value => value.startsWith('RECOVERY_RUNTIME_FACTS='));
+    facts = JSON.parse(line?.slice('RECOVERY_RUNTIME_FACTS='.length) ?? '{}');
+  } catch { facts = {}; }
+
+  const workerStatus = (() => { try { return readMacWorkerStatus(); } catch { return null; } })();
+  let activeRuns = null;
+  try { activeRuns = JSON.parse(process.env.GPOINT_RECOVERY_ACTIVE_DEPLOYS ?? 'null'); } catch { activeRuns = null; }
+  const currentRunId = String(process.env.GITHUB_RUN_ID ?? '');
+  let activeChecked = false;
+  let activeConflicts = null;
+  try {
+    const runs = activeRuns.workflow_runs;
+    if (!Array.isArray(runs) || activeRuns.total_count !== runs.length || !/^\d+$/.test(currentRunId)
+        || runs.some(run => !/^\d+$/.test(String(run.id ?? '')) || typeof run.status !== 'string'
+          || run.path?.split('@')[0] !== '.github/workflows/gpoint-deploy.yml')) throw new Error('incomplete');
+    activeConflicts = runs.filter(run => String(run.id) !== currentRunId && run.status !== 'completed').length;
+    activeChecked = true;
+  } catch { /* Missing inventory remains incomplete. */ }
+
+  const baselineTagName = String(ledgerState.currentProductionRef ?? '').replace(/^refs\/tags\//, '');
+  const identity = recoveryFinalizationIdentity(incident.incident.runId, candidate);
+  let baselineTagTarget = null;
+  let candidateTagTarget = null;
+  let baselineTagChecked = false;
+  let candidateTagChecked = false;
+  try { if (/^gpoint-production-\d{8}T\d{9}Z$/.test(baselineTagName)) { baselineTagTarget = remoteTagTarget(baselineTagName); baselineTagChecked = true; } } catch { /* Incomplete evidence is recorded below. */ }
+  try { candidateTagTarget = remoteTagTarget(identity.productionTag); candidateTagChecked = true; } catch { /* Incomplete evidence is recorded below. */ }
+
+  const runtimeServices = facts.services ?? {};
+  if (!runtimeServices['gsales-api'] && runtimeServices.gsales) runtimeServices['gsales-api'] = runtimeServices.gsales;
+  const runtime = {observedAt: isoNow(), releaseEnvSha: facts.releaseEnvSha ?? null,
+    miniappSha: facts.miniappSha ?? null, services: runtimeServices,
+    databaseReadOnlyQueryExitCode: facts.databaseReadOnlyQueryExitCode ?? null,
+    migrationHeads: {prisma: facts.prismaHead ?? null, agata: facts.agataHead ?? null,
+      gsales: facts.gsalesHead ?? null, gsalesMigrationSha256: facts.gsalesMigrationSha256 ?? null}};
+  const snapshotInput = {
+    observedAt: isoNow(), candidateSha: candidate, ...incident,
+    ledger: {observedAt: isoNow(), headSha: RELEASE_LEDGER_SHA,
+      productionSha: ledgerState.currentProductionSha,
+      stateSha256: crypto.createHash('sha256').update(fs.readFileSync(STATE_FILE)).digest('hex'),
+      refTargetSha: baselineTagTarget, currentProductionRef: baselineTagName,
+      state: {currentProductionSha: ledgerState.currentProductionSha, recoveryRequired: ledgerState.recoveryRequired,
+        lastReleaseStatus: ledgerState.lastReleaseStatus}},
+    runtime,
+    incidentEvidence: incident.incidentEvidence,
+    workers: {observedAt: isoNow(), lanes: recoveryWorkerLaneFacts(workerStatus)},
+    backup: {...(facts.backup ?? {status: 'UNVERIFIED'}), observedAt: isoNow()},
+    locks: {observedAt: isoNow(), local: readLocalReleaseLocks(),
+      github: {checked: activeChecked, activeConflicts}},
+    productionTag: {observedAt: isoNow(), name: baselineTagName || null, baselineTagChecked, candidateTagChecked,
+      targetSha: baselineTagTarget, candidateTagName: identity.productionTag,
+      candidateTagTargetSha: candidateTagTarget},
+  };
+  const snapshot = buildRecoveryDiagnosticsSnapshot(snapshotInput);
+  const releaseId = `gpoint-recovery-diagnostics-${Date.now()}-${currentRunId || 'local'}`;
+  const manifest = {releaseId, eventType: 'RECOVERY_READ_ONLY_DIAGNOSTICS', candidateSha: candidate,
+    previousProductionSha: incident.incident.baselineSha, productionShaAfter: null,
+    status: 'RECOVERY_DIAGNOSTICS_ONLY', recoverySnapshot: snapshot,
+    startedAt: snapshot.observedAt, finishedAt: isoNow(), runtimeSwitchOccurred: false,
+    databaseApplyOccurred: false, productionMutationOccurred: false};
+  const file = writeManifest(manifest);
+  const output = process.env.GPOINT_RECOVERY_SNAPSHOT_PATH;
+  if (output) {
+    if (!path.isAbsolute(output) || fs.existsSync(output)) die('recovery snapshot output path is invalid or already exists');
+    const parent = fs.lstatSync(path.dirname(output));
+    if (parent.isSymbolicLink() || !parent.isDirectory()) die('recovery snapshot output directory is unsafe');
+    fs.writeFileSync(output, `${JSON.stringify(snapshot, null, 2)}\n`, {flag: 'wx', mode: 0o600});
+  }
+  console.log(JSON.stringify({status: snapshot.status, releaseState: snapshot.releaseState,
+    finalizationReady: snapshot.finalizationReady, blockers: snapshot.blockers,
+    snapshotSha256: snapshot.snapshotSha256, manifest: path.relative(ROOT, file)}, null, 2));
+  if (snapshot.status !== 'FACTS_COMPLETE') process.exitCode = 1;
+}
 
 function provisionAgataConfig(candidate) {
   const localHead = git(['rev-parse', candidate]);
@@ -1227,75 +1457,360 @@ function runApply(candidate) {
   } finally { unlock(); }
 }
 
-function finalizeRecovery(candidate) {
+function loadImmutableRecoveryFailure(candidate) {
+  const evidencePath = process.env.GPOINT_RECOVERY_FAILURE_EVIDENCE;
+  if (!evidencePath || !path.isAbsolute(evidencePath)) die('verified immutable failed-run evidence path is required');
+  const imported = readJson(evidencePath);
+  const expectedRun = process.env.GPOINT_RECOVERY_FAILURE_RUN_ID;
+  const expectedAttempt = process.env.GPOINT_RECOVERY_FAILURE_RUN_ATTEMPT;
+  if (expectedRun !== '39010750184' || expectedAttempt !== '1'
+      || imported.run?.id !== expectedRun || imported.run?.attempt !== expectedAttempt
+      || imported.run?.headSha !== candidate || imported.result?.candidateSha !== candidate
+      || imported.result?.status !== 'RECOVERY_REQUIRED'
+      || imported.result?.releaseState !== 'RECOVERY_REQUIRED'
+      || imported.result?.failureStage !== 'POST_SWITCH'
+      || imported.result?.productionRef !== null
+      || imported.result?.productionBaselineSha !== imported.result?.previousProductionSha
+      || imported.prepare?.candidateSha !== candidate || imported.prepare?.status !== 'success'
+      || imported.prepare?.receipt?.candidateSha !== candidate) {
+    die('immutable failed-run evidence is not bound to the approved incident and candidate');
+  }
+  const manifestBytes = Buffer.from(imported.failureManifestBytesBase64 ?? '', 'base64');
+  if (!manifestBytes.length || manifestBytes.toString('base64') !== imported.failureManifestBytesBase64
+      || crypto.createHash('sha256').update(manifestBytes).digest('hex') !== imported.failureManifestSha256) {
+    die('immutable failure manifest bytes or checksum are invalid');
+  }
+  let failed;
+  try { failed = JSON.parse(manifestBytes.toString('utf8')); } catch { die('immutable failure manifest JSON is invalid'); }
+  const result = imported.result;
+  if (failed.status !== 'RECOVERY_REQUIRED' || failed.failureStage !== 'POST_SWITCH'
+      || failed.releaseId !== result.releaseId || failed.candidateSha !== candidate
+      || failed.previousProductionSha !== result.previousProductionSha
+      || failed.productionShaAfter !== null || failed.productionRef !== null
+      || failed.failureReason !== result.failureReason
+      || failed.fileName !== undefined && failed.fileName !== `${failed.releaseId}.json`) {
+    die('immutable failure manifest identity conflicts with its result');
+  }
+  if (process.env.GPOINT_RECOVERY_DB_RISK_BASELINE_SHA !== failed.previousProductionSha)
+    die('historical database risk acknowledgement does not bind the original production baseline');
+  const prepare = imported.prepare;
+  if (String(prepare.runId) !== String(result.prepareRunId)
+      || String(prepare.attempt) !== String(result.prepareRunAttempt)
+      || prepare.receipt.runId !== result.prepareRunId
+      || String(prepare.receipt.runAttempt) !== String(result.prepareRunAttempt)
+      || prepare.receipt.status !== 'READY' || prepare.receipt.schema !== 3
+      || prepare.receipt.transport !== 'ghcr-oci') {
+    die('original immutable Prepare receipt is not bound to the failed Deploy');
+  }
+  return {imported, failed, manifestBytes, baselineSha: failed.previousProductionSha};
+}
+
+function appendImmutableBytes(file, bytes) {
+  if (fs.existsSync(file)) {
+    if (!fs.readFileSync(file).equals(bytes)) die(`immutable recovery manifest conflicts with existing bytes: ${path.basename(file)}`);
+    return file;
+  }
+  fs.writeFileSync(file, bytes, {flag: 'wx', mode: 0o600});
+  return file;
+}
+
+function writeCanonicalRecoveryManifest(file, manifest) {
+  const bytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
+  appendImmutableBytes(file, bytes);
+  return crypto.createHash('sha256').update(bytes).digest('hex');
+}
+
+function recoveryManifestSnapshot(name) {
+  const file = path.join(MANIFEST_DIR, name);
+  if (!fs.existsSync(file)) return null;
+  const bytes = fs.readFileSync(file);
+  const value = JSON.parse(bytes.toString('utf8'));
+  return {...value, name, contentSha256: crypto.createHash('sha256').update(bytes).digest('hex')};
+}
+
+function validateRecoveryBackup(backup, candidate, baselineSha) {
+  if (!backup || backup.status !== 'COMPLETE_PROTECTED' || backup.database !== 'gpoint'
+      || backup.candidate_sha !== candidate || backup.baselineSha !== baselineSha
+      || !/^\/opt\/gpoint\/backups\/gpoint-recovery-current-[a-f0-9]{40}-[0-9]+\.dump$/.test(backup.path ?? '')
+      || !/^[a-f0-9]{64}$/.test(backup.sha256 ?? '')
+      || !Array.isArray(backup.schemas) || !backup.schemas.includes('public') || !backup.schemas.includes('agata')
+      || backup.purpose !== 'CURRENT_AFTER_CANDIDATE_DEPLOY'
+      || !Number.isFinite(Date.parse(backup.createdAt ?? ''))
+      || Date.parse(backup.createdAt) > Date.now() + 5_000) {
+    die('current protected GPoint backup evidence is invalid');
+  }
+  const commandText = `set -euo pipefail; file='${backup.path}'; test -s "$file"; test "$(stat -c '%a' "$file")" = 600; actual=$(sha256sum "$file" | awk '{print $1}'); test "$actual" = '${backup.sha256}'; docker exec -i compose-postgres-1 pg_restore --list < "$file" > /tmp/gpoint-recovery-backup-${candidate}.toc; grep -Fq 'TABLE DATA agata messages' /tmp/gpoint-recovery-backup-${candidate}.toc; rm -f /tmp/gpoint-recovery-backup-${candidate}.toc; echo RECOVERY_BACKUP_READBACK=PASS`;
+  const output = runRemoteCommand(commandText);
+  if (!output.includes('RECOVERY_BACKUP_READBACK=PASS')) die('current protected backup could not be verified on VPS');
+  return {...backup, verified: true, baselineSha};
+}
+
+function createRecoveryBackup(candidate, baselineSha, beforeFacts) {
+  const output = runRemoteCommand(agataProductionMigrationCommand(candidate, 'backup', ROOT, 'recovery-current'));
+  const parsed = parseGuardedMigrationEvidence(output, candidate)?.backup;
+  const backup = validateRecoveryBackup({...parsed, baselineSha,
+    createdAt: isoNow(), purpose: 'CURRENT_AFTER_CANDIDATE_DEPLOY'}, candidate, baselineSha);
+  const afterFacts = readLiveFacts();
+  for (const field of ['LIVE_PRISMA_HEAD', 'LIVE_AGATA_HEAD', 'LIVE_GSALES_HEAD', 'LIVE_GSALES_MIGRATION_SHA256']) {
+    if (afterFacts[field] !== beforeFacts[field]) die(`database identity changed while creating the current backup (${field})`);
+  }
+  return backup;
+}
+
+function persistRecoveryLedgerCheckpoint(evidence, expectedState, expectedParent) {
+  if (!SHA_RE.test(expectedParent ?? '')) die('verified release-ledger parent is unavailable');
+  const records = fs.readdirSync(MANIFEST_DIR).filter(name => /^gpoint-[a-zA-Z0-9_.-]+\.json$/.test(name))
+    .map(name => ({name, data: readJson(path.join(MANIFEST_DIR, name))}));
+  persistReleaseBookkeeping({mode: 'production', records, evidence, git: ledgerGit,
+    stateFile: STATE_FILE, manifestDir: MANIFEST_DIR, ledgerSha: expectedParent});
+  const verified = verifyReleaseBookkeeping({git: ledgerGit, stateFile: STATE_FILE,
+    manifestDir: MANIFEST_DIR, expectedState});
+  RELEASE_LEDGER_SHA = verified.headSha;
+  return verified.headSha;
+}
+
+async function finalizeRecovery(candidate) {
   const startedAt = isoNow();
-  const releaseId = `gpoint-recovery-${startedAt.replace(/[-:.]/g, '')}`;
+  const releaseId = `gpoint-recovery-finalization-${startedAt.replace(/[-:.]/g, '')}`;
   const unlock = acquireLock(releaseId);
   try {
-    const current = state();
-    if (current.recoveryRequired !== true || current.lastReleaseStatus !== 'RECOVERY_REQUIRED') die('no unresolved RECOVERY_REQUIRED release is recorded');
-    const failedReference = current.lastReleaseFailureManifest ?? '';
-    if (!/^docs\/release\/manifests\/gpoint-[a-zA-Z0-9_.-]+\.json$/.test(failedReference)) die('invalid recovery manifest reference');
-    const failedManifestPath = path.join(MANIFEST_DIR, path.basename(failedReference));
-    if (!failedManifestPath.startsWith(`${MANIFEST_DIR}${path.sep}`) || !fs.existsSync(failedManifestPath)) die('recovery failure manifest is missing or outside the release manifest directory');
-    const failed = readJson(failedManifestPath);
-    if (failed.status !== 'RECOVERY_REQUIRED' || failed.candidateSha !== candidate || failed.releaseId !== current.lastReleaseId) die('candidate does not match the unresolved release attempt');
     assertSha(candidate);
-    if (git(['rev-parse', candidate]) !== candidate) die('recovery candidate is not present locally');
+    if (git(['rev-parse', candidate]) !== candidate || !SHA_RE.test(RELEASE_LEDGER_SHA ?? ''))
+      die('exact candidate or current ledger parent is unavailable');
+    const {imported, failed, manifestBytes, baselineSha} = loadImmutableRecoveryFailure(candidate);
+    const identity = recoveryFinalizationIdentity(failed.releaseId, candidate);
+    const current = state();
+    if (current.currentProductionSha !== baselineSha && current.currentProductionSha !== candidate)
+      die('production ledger baseline differs from the immutable failed Deploy');
+    if (current.currentProductionSha === candidate
+        && (current.lastReleaseStatus !== 'COMPLETE' || current.recoveryRequired !== false))
+      die('candidate production SHA has a contradictory ledger status');
 
+    const executorSha = process.env.GPOINT_RECOVERY_EXECUTOR_SHA;
+    if (!SHA_RE.test(executorSha ?? '') || git(['rev-parse', 'HEAD']) !== executorSha
+        || git(['rev-parse', 'origin/main']) !== executorSha)
+      die('recovery finalizer is not running from the exact checked-out current-main executor');
     const remoteMain = runGitHubRemoteGit(['ls-remote', GITHUB_SOURCE_URL, 'refs/heads/main']).split(/\s+/)[0];
-    if (!SHA_RE.test(remoteMain ?? '') || remoteMain !== git(['rev-parse', 'origin/main'])) die('origin/main exact SHA could not be independently reconciled');
-    try { execFileSync('git', ['merge-base', '--is-ancestor', candidate, 'origin/main'], { cwd: ROOT, stdio: 'ignore' }); }
-    catch { die('recovery candidate is not contained in verified origin/main history'); }
+    if (!SHA_RE.test(remoteMain ?? '') || remoteMain !== executorSha)
+      die('current remote main changed from the exact recovery executor SHA');
+    try { execFileSync('git', ['merge-base', '--is-ancestor', candidate, executorSha], {cwd: ROOT, stdio: 'ignore'}); }
+    catch { die('recovery candidate is not contained in verified current-main executor history'); }
 
-    const facts = readLiveFacts();
-    const prismaFiles = git(['ls-tree', '-r', '--name-only', candidate, 'packages/db/prisma/migrations']).split('\n').filter(name => name.endsWith('/migration.sql'));
-    const expectedPrismaHead = prismaFiles.map(name => name.split('/').at(-2)).sort().at(-1);
-    const runtimeFailures = recoveryRuntimeFailures(candidate, facts, expectedPrismaHead, undefined, candidateAgataMigrationHead(candidate));
-    if (runtimeFailures.length) die(`live runtime is not safe to finalize: ${runtimeFailures.join('; ')}`);
-    const root = measured({}, 'RECOVERY_ROOT_HEALTH', () => execFileSync('curl', ['-fsS', '--connect-timeout', '3', '--max-time', '10', 'https://gpoint.amiora.one/'], { encoding: 'utf8' }));
-    if (!root.includes(`gpoint-build-sha" content="${candidate}`)) die('external Mini App root does not serve the recovery candidate');
-    measured({}, 'RECOVERY_API_HEALTH', () => execFileSync('curl', ['-fsS', '--connect-timeout', '3', '--max-time', '10', 'https://gpoint.amiora.one/api/health/live'], { stdio: 'ignore' }));
-    const messagesStatus = execFileSync('curl', ['-sS', '-o', os.devNull, '-w', '%{http_code}', '--connect-timeout', '3', '--max-time', '10', 'https://gpoint.amiora.one/api/messages/state'], { encoding: 'utf8' }).trim();
-    const ageStatus = execFileSync('curl', ['-sS', '-o', os.devNull, '-w', '%{http_code}', '--connect-timeout', '3', '--max-time', '10', 'https://gpoint.amiora.one/api/age-assurance/state'], { encoding: 'utf8' }).trim();
-    if (messagesStatus !== '401' || ageStatus !== '401') die(`Messages/Age routes did not return the expected unauthenticated guard: messages=${messagesStatus} age=${ageStatus}`);
-    for (const route of ['/messages', '/model/models_hub']) {
-      const html = execFileSync('curl', ['-fsS', '--connect-timeout', '3', '--max-time', '10', `https://gpoint.amiora.one${route}`], { encoding: 'utf8' });
-      if (!html.includes(`gpoint-build-sha" content="${candidate}`)) die(`Mini App route shell mismatch at ${route}`);
-    }
-    const gsalesIdentity = { migrationHead: facts.LIVE_GSALES_HEAD, migrationSha256: facts.LIVE_GSALES_MIGRATION_SHA256 };
-    // Derive expected migration checksum from exact candidate, not the live response.
-    const expectedSalesChecksum = crypto.createHash('sha256').update(execFileSync('git', ['show', `${candidate}:services/gsales/migrations/001_gsales.sql`], { cwd: ROOT })).digest('hex');
-    if (gsalesIdentity.migrationHead !== '001_gsales' || gsalesIdentity.migrationSha256 !== expectedSalesChecksum) die('recovery GSales migration identity mismatch');
-    const gsalesRuntime = parseGsalesRuntime(runRemoteCommand(gsalesRuntimeCommand(candidate, gsalesIdentity)), candidate, gsalesIdentity);
-    const provider = facts.LIVE_AGATA_PROVIDER;
-    const agataSmoke = runRemoteCommand(`set -e; docker exec compose-agata-api-1 python -c "from app.config import get_settings; assert get_settings().llm_provider == '${provider}'; print('AGATA_PROVIDER_VERIFIED=${provider}')"; docker run --rm --network gpoint_app --env-file /opt/gpoint/env/production.env --entrypoint node gpoint-runtime:${candidate} -e 'fetch("http://agata-api:8000/internal/v1/users/gpoint-release-readiness/age-assurance", {headers:{authorization:"Bearer "+process.env.AGATA_INTERNAL_API_TOKEN}}).then(async r=>{if(!r.ok) throw Error("age readiness HTTP "+r.status); await r.arrayBuffer(); console.log("AGE_ASSURANCE_INTERNAL_READINESS=PASS")}).catch(e=>{console.error(e.message);process.exit(1)})'; echo AGATA_RECOVERY_SMOKE=PASS`);
-    if (!agataSmoke.includes(`AGATA_PROVIDER_VERIFIED=${provider}`) || !agataSmoke.includes('AGE_ASSURANCE_INTERNAL_READINESS=PASS')) die('AGATA/age-assurance recovery smoke failed');
+    const existingReconciliation = recoveryManifestSnapshot(identity.reconciliationManifestName);
+    const existingFinalization = recoveryManifestSnapshot(identity.manifestName);
+    let backup = existingReconciliation?.backup ?? existingFinalization?.backup ?? null;
+    const readSnapshot = async ({allowMissingBackup = false} = {}) => {
+      const workflowRunId = process.env.GITHUB_RUN_ID;
+      const token = process.env.GITHUB_TOKEN;
+      if (!/^\d+$/.test(workflowRunId ?? '') || !token) die('GitHub Deploy identity is unavailable for concurrency verification');
+      const runResponse = await fetch('https://api.github.com/repos/akhripunov/gpoint/actions/workflows/gpoint-deploy.yml/runs?branch=main&per_page=100', {
+        headers: {authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28'},
+        signal: AbortSignal.timeout(20_000)});
+      if (!runResponse.ok) die(`active Deploy inventory unavailable (HTTP ${runResponse.status})`);
+      const runList = await runResponse.json();
+      assertNoConcurrentRelease({runs: runList.workflow_runs, totalCount: runList.total_count, currentRunId: workflowRunId});
+      const ledgerState = state();
+      const freshLedger = loadReleaseBookkeeping({root: ROOT, git: ledgerGit,
+        destination: fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-recovery-ledger-read-'))});
+      try {
+        if (freshLedger.ledgerSha !== RELEASE_LEDGER_SHA) die('production ledger changed during finalization read; reconciliation is required');
+        const remoteState = readJson(freshLedger.stateFile);
+        if (JSON.stringify(remoteState) !== JSON.stringify(ledgerState)) die('local recovery evidence differs from the verified remote ledger');
+      } finally { fs.rmSync(freshLedger.destination, {recursive: true, force: true}); }
 
-    const ref = `gpoint-production-${startedAt.replace(/[-:.]/g, '')}`;
-    const localTag = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/tags/${ref}`], { cwd: ROOT, stdio: 'ignore' });
-    if (localTag.status === 0) die(`production ref already exists locally: ${ref}`);
-    execFileSync('git', ['tag', '-a', ref, candidate, '-m', `GPoint production recovery finalization\nproductionSha=${candidate}\ndbHead=${facts.LIVE_PRISMA_HEAD}\nreleaseId=${failed.releaseId}`], { cwd: ROOT, stdio: 'inherit' });
-    const remoteRef = pushProductionTag(ref, candidate);
-
-    const readiness = observeDeploymentReadiness('COMPLETE', readWorkerDependencies, { gsalesInferenceReady: gsalesRuntime.inferenceReady });
-    const finishedAt = isoNow();
-    const recoveryManifest = {
-      releaseId, eventType: 'RECOVERY_FINALIZATION', failedReleaseId: failed.releaseId,
-      candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: candidate,
-      dbHeadBefore: current.currentProductionDbHead, dbHeadAfter: facts.LIVE_PRISMA_HEAD,
-      agataDbHeadAfter: facts.LIVE_AGATA_HEAD, agataRuntimeSha: candidate, agataProvider: provider,
-      artifactIdentities: recoveryArtifactIdentities(candidate, facts), gsalesRuntime, gsalesDbHeadAfter: gsalesIdentity.migrationHead,
-      startedAt, finishedAt, status: 'COMPLETE', ...readiness, failureStage: null, failureReason: null,
-      productionRef: ref, remoteProductionRefTarget: remoteRef, remoteMainSha: remoteMain,
-      runtimeFacts: Object.fromEntries(Object.entries(facts).filter(([key]) => key.startsWith('LIVE_'))),
-      smoke: { root: 'PASS', apiHealth: 'PASS', messagesUnauthenticatedRoute: 'PASS', ageUnauthenticatedRoute: 'PASS', messagesRouteShell: 'PASS', modelRouteShell: 'PASS', ageInternalReadiness: 'PASS', provider },
-      recoveryBasis: 'Live runtime, API/Worker/Bot/AGATA image parity, Mini App build SHA, Prisma/Alembic heads, and health/smoke checks were independently verified after the original release apply switched runtime but failed AGATA identity parsing.'
+      const observedMain = runGitHubRemoteGit(['ls-remote', GITHUB_SOURCE_URL, 'refs/heads/main']).split(/\s+/)[0];
+      if (observedMain !== executorSha || git(['rev-parse', 'origin/main']) !== executorSha)
+        die('remote main drifted from the recovery executor during finalization');
+      const facts = readLiveFacts();
+      const expectedPrismaHead = candidatePrismaMigrationHead(candidate);
+      const expectedAgataHead = candidateAgataMigrationHead(candidate);
+      const failures = recoveryRuntimeFailures(candidate, facts, expectedPrismaHead, undefined, expectedAgataHead);
+      if (failures.length) die(`live runtime is not safe to finalize: ${failures.join('; ')}`);
+      const root = execFileSync('curl', ['-fsS', '--connect-timeout', '3', '--max-time', '10', 'https://gpoint.amiora.one/'], {encoding: 'utf8'});
+      if (!root.includes(`gpoint-build-sha" content="${candidate}`)) die('external Mini App root does not serve the recovery candidate');
+      execFileSync('curl', ['-fsS', '--connect-timeout', '3', '--max-time', '10', 'https://gpoint.amiora.one/api/health/live'], {stdio: 'ignore'});
+      const messagesStatus = execFileSync('curl', ['-sS', '-o', os.devNull, '-w', '%{http_code}', '--connect-timeout', '3', '--max-time', '10', 'https://gpoint.amiora.one/api/messages/state'], {encoding: 'utf8'}).trim();
+      const ageStatus = execFileSync('curl', ['-sS', '-o', os.devNull, '-w', '%{http_code}', '--connect-timeout', '3', '--max-time', '10', 'https://gpoint.amiora.one/api/age-assurance/state'], {encoding: 'utf8'}).trim();
+      if (messagesStatus !== '401' || ageStatus !== '401') die('Messages/Age unauthenticated routes failed their expected guard');
+      for (const route of ['/messages', '/model/models_hub']) {
+        const html = execFileSync('curl', ['-fsS', '--connect-timeout', '3', '--max-time', '10', `https://gpoint.amiora.one${route}`], {encoding: 'utf8'});
+        if (!html.includes(`gpoint-build-sha" content="${candidate}`)) die(`Mini App route shell mismatch at ${route}`);
+      }
+      const expectedSalesChecksum = crypto.createHash('sha256').update(execFileSync('git', ['show', `${candidate}:services/gsales/migrations/001_gsales.sql`], {cwd: ROOT})).digest('hex');
+      const gsalesIdentity = {migrationHead: facts.LIVE_GSALES_HEAD, migrationSha256: facts.LIVE_GSALES_MIGRATION_SHA256};
+      if (gsalesIdentity.migrationHead !== '001_gsales' || gsalesIdentity.migrationSha256 !== expectedSalesChecksum)
+        die('recovery GSales migration identity mismatch');
+      const gsalesRuntime = parseGsalesRuntime(runRemoteCommand(gsalesRuntimeCommand(candidate, gsalesIdentity)), candidate, gsalesIdentity);
+      const provider = facts.LIVE_AGATA_PROVIDER;
+      const agataSmoke = runRemoteCommand(`set -e; docker exec compose-agata-api-1 python -c "from app.config import get_settings; assert get_settings().llm_provider == '${provider}'; print('AGATA_PROVIDER_VERIFIED=${provider}')"; docker run --rm --network gpoint_app --env-file /opt/gpoint/env/production.env --entrypoint node gpoint-runtime:${candidate} -e 'fetch("http://agata-api:8000/internal/v1/users/gpoint-release-readiness/age-assurance", {headers:{authorization:"Bearer "+process.env.AGATA_INTERNAL_API_TOKEN}}).then(async r=>{if(!r.ok) throw Error("age readiness HTTP "+r.status); await r.arrayBuffer(); console.log("AGE_ASSURANCE_INTERNAL_READINESS=PASS")}).catch(e=>{console.error(e.message);process.exit(1)})'; echo AGATA_RECOVERY_SMOKE=PASS`);
+      if (!agataSmoke.includes(`AGATA_PROVIDER_VERIFIED=${provider}`) || !agataSmoke.includes('AGE_ASSURANCE_INTERNAL_READINESS=PASS'))
+        die('AGATA/age-assurance recovery smoke failed');
+      const workerStatus = readMacWorkerStatus();
+      const queueFailures = validateRecoveryQueueSnapshots(workerStatus);
+      if (!workerStatus || queueFailures.length) die(`fresh GPOINT/GSALES Worker queue snapshots blocked recovery: ${queueFailures.join(',') || 'status unavailable'}`);
+      const readiness = observeDeploymentReadiness('COMPLETE', readWorkerDependencies,
+        {gsalesInferenceReady: gsalesRuntime.inferenceReady});
+      if (readiness.workerOperationalStatus !== 'HEALTHY') die('both Product Worker lanes must be freshly healthy before recovery finalization');
+      const ref = identity.productionTag;
+      const baselineRef = String(ledgerState.currentProductionRef ?? '').replace(/^refs\/tags\//, '');
+      if (!/^gpoint-production-\d{8}T\d{9}Z$/.test(baselineRef)) die('production baseline tag identity is missing');
+      const productionRefTarget = remoteTagTarget(baselineRef);
+      const productionTagTarget = remoteTagTarget(ref);
+      const backupSnapshot = backup ? validateRecoveryBackup(backup, candidate, baselineSha)
+        : allowMissingBackup ? {verified: false, baselineSha} : die('current protected backup evidence is unavailable');
+      const workerQueue = Object.fromEntries(['GPOINT', 'GSALES'].map(lane => [lane, workerStatus.lanes[lane]]));
+      return {candidateSha: candidate,
+        failedRelease: {...failed, status: 'RECOVERY_REQUIRED', fileName: `${failed.releaseId}.json`,
+          runId: imported.run.id, attempt: imported.run.attempt,
+          failureManifestAssetDigest: imported.evidence.manifestDigest,
+          failureManifestSha256: imported.failureManifestSha256},
+        ledger: {headSha: RELEASE_LEDGER_SHA, state: ledgerState},
+        productionRefTarget, productionTagTarget,
+        reconciliationManifest: recoveryManifestSnapshot(identity.reconciliationManifestName),
+        finalizationManifest: recoveryManifestSnapshot(identity.manifestName),
+        vpsReachable: true, githubReachable: true, concurrentRelease: false,
+        runtime: {observedAt: isoNow(), sourceSha: facts.LIVE_RELEASE_ENV_SHA,
+          healthy: true, imageParity: true, databaseHeadsVerified: true, workerLanesVerified: true,
+          prismaHead: facts.LIVE_PRISMA_HEAD, agataHead: facts.LIVE_AGATA_HEAD,
+          gsalesHead: facts.LIVE_GSALES_HEAD, gsalesMigrationSha256: facts.LIVE_GSALES_MIGRATION_SHA256,
+          workerQueue, facts, gsalesRuntime, provider, readiness,
+          remoteMainSha: remoteMain, smoke: {root: 'PASS', apiHealth: 'PASS', messagesUnauthenticatedRoute: 'PASS',
+            ageUnauthenticatedRoute: 'PASS', messagesRouteShell: 'PASS', modelRouteShell: 'PASS', ageInternalReadiness: 'PASS'}},
+        ownerAuthorization: {valid: process.env.RELEASE_MODE === 'recovery-finalization'
+          && process.env.APPROVE_PRODUCTION === 'true' && process.env.GITHUB_ACTOR === 'akhripunov'
+          && process.env.CANDIDATE_SHA === candidate,
+          candidateSha: candidate, baselineSha, operation: 'FINALIZATION_ONLY'},
+        databaseRiskDecision: {accepted: process.env.GPOINT_RECOVERY_DB_RISK_ACCEPTED === 'true',
+          candidateSha: process.env.GPOINT_RECOVERY_DB_RISK_CANDIDATE_SHA,
+          baselineSha: process.env.GPOINT_RECOVERY_DB_RISK_BASELINE_SHA,
+          instructionId: process.env.GPOINT_RECOVERY_DB_RISK_DECISION_ID},
+        backup: backupSnapshot};
     };
-    const manifestFile = writeManifest(recoveryManifest);
-    const verifiedState = verifiedRuntimeState(current, { candidate, dbHead: facts.LIVE_PRISMA_HEAD });
-    fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...verifiedState, currentProductionRef: ref, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: finishedAt, ...readiness, gsalesDbHead: gsalesIdentity.migrationHead, gsalesMigrationSha256: gsalesIdentity.migrationSha256, releaseOrigin: 'durable-production-release', agataRuntimeSha: candidate, agataAlembicHead: facts.LIVE_AGATA_HEAD, agataProvider: provider, artifactIdentities: recoveryManifest.artifactIdentities, recoveryRequired: false, lastReleaseFailureManifest: manifestReference(failedManifestPath), recoveryFinalizationManifest: manifestReference(manifestFile) }, null, 2)}\n`);
-    console.log(JSON.stringify({ status: 'COMPLETE', candidateSha: candidate, productionRef: ref, recoveryManifest: manifestReference(manifestFile), failedAttemptPreserved: manifestReference(failedManifestPath) }, null, 2));
+
+    if (current.currentProductionSha !== candidate) {
+      const beforeBackup = await readSnapshot({allowMissingBackup: true});
+      assertRecoveryFinalizationAuthorization(candidate, baselineSha, 'current protected backup creation');
+      if (backup) backup = validateRecoveryBackup(backup, candidate, baselineSha);
+      else backup = createRecoveryBackup(candidate, baselineSha, beforeBackup.runtime.facts);
+    } else if (backup) {
+      backup = validateRecoveryBackup(backup, candidate, baselineSha);
+    } else {
+      die('completed recovery ledger has no immutable verified backup evidence');
+    }
+
+    const persistRecoveryRequired = async ({snapshot, identity: stableIdentity, expectedLedgerHead}) => {
+      assertRecoveryFinalizationAuthorization(candidate, baselineSha, 'append-only RECOVERY_REQUIRED reconciliation');
+      const fresh = await readSnapshot();
+      if (fresh.ledger.headSha !== expectedLedgerHead || fresh.productionRefTarget !== baselineSha
+          || (fresh.productionTagTarget !== null && fresh.productionTagTarget !== candidate)
+          || fresh.runtime.sourceSha !== candidate)
+        die('baseline, ledger, runtime, or candidate tag changed before recovery reconciliation write');
+      const originalPath = path.join(MANIFEST_DIR, `${failed.releaseId}.json`);
+      appendImmutableBytes(originalPath, manifestBytes);
+      const reconciliationPath = path.join(MANIFEST_DIR, stableIdentity.reconciliationManifestName);
+      const reconciliation = {releaseId: stableIdentity.reconciliationReleaseId,
+        eventType: 'RECOVERY_STATE_RECONCILIATION', failedReleaseId: failed.releaseId,
+        failedDeployRunId: imported.run.id, failedDeployRunAttempt: imported.run.attempt,
+        failureManifestAssetDigest: imported.evidence.manifestDigest,
+        candidateSha: candidate, previousProductionSha: baselineSha, productionShaAfter: null,
+        status: 'RECOVERY_REQUIRED', failureStage: 'POST_SWITCH', failureReason: failed.failureReason,
+        failureManifest: manifestReference(originalPath), failureManifestSha256: imported.failureManifestSha256,
+        prepareRunId: imported.prepare.runId, prepareRunAttempt: imported.prepare.attempt,
+        backup: backupSnapshot, reconciledAt: isoNow(), runtimeFacts: snapshot.runtime.facts};
+      const reconciliationSha = writeCanonicalRecoveryManifest(reconciliationPath, reconciliation);
+      const nextState = {...snapshot.ledger.state, currentProductionSha: baselineSha,
+        lastReleaseId: failed.releaseId, lastReleaseStatus: 'RECOVERY_REQUIRED',
+        lastReleaseFailureManifest: manifestReference(originalPath), recoveryRequired: true,
+        recoveryReconciliationManifest: manifestReference(reconciliationPath),
+        recoveryReconciliationManifestSha256: reconciliationSha,
+        recoveryFinalizationManifest: null};
+      fs.writeFileSync(STATE_FILE, `${JSON.stringify(nextState, null, 2)}\n`);
+      persistRecoveryLedgerCheckpoint(reconciliation, nextState, expectedLedgerHead);
+    };
+
+    const ensureProductionTag = async ({snapshot, identity: stableIdentity, expectedLedgerHead}) => {
+      assertRecoveryFinalizationAuthorization(candidate, baselineSha, 'exact production tag reconciliation');
+      const fresh = await readSnapshot();
+      if (fresh.ledger.headSha !== expectedLedgerHead || fresh.ledger.state.recoveryRequired !== true
+          || fresh.productionRefTarget !== baselineSha || (fresh.productionTagTarget !== null && fresh.productionTagTarget !== candidate))
+        die('production baseline or ledger changed before production tag reconciliation');
+      let localTag = null;
+      try { localTag = git(['rev-parse', '--verify', `refs/tags/${stableIdentity.productionTag}^{}`]); }
+      catch { /* a missing local tag may be created only after the exact remote ref is checked */ }
+      if (localTag && localTag !== candidate) die('local recovery production tag has a conflicting target');
+      if (!localTag) execFileSync('git', ['tag', '-a', stableIdentity.productionTag, candidate,
+        '-m', `GPoint production recovery finalization\nproductionSha=${candidate}\ndbHead=${fresh.runtime.prismaHead}\nreleaseId=${failed.releaseId}`], {cwd: ROOT, stdio: 'inherit'});
+      const remote = pushProductionTag(stableIdentity.productionTag, candidate);
+      if (remote !== candidate) die('remote production tag did not resolve to the exact candidate');
+    };
+
+    const persistCompleteState = async ({snapshot, identity: stableIdentity, expectedLedgerHead}) => {
+      assertRecoveryFinalizationAuthorization(candidate, baselineSha, 'append-only finalization manifest and ledger state');
+      const fresh = await readSnapshot();
+      if (fresh.ledger.headSha !== expectedLedgerHead || fresh.ledger.state.recoveryRequired !== true
+          || fresh.productionRefTarget !== baselineSha || fresh.productionTagTarget !== candidate)
+        die('production baseline, ledger, or exact tag changed before finalization ledger write');
+      const finalPath = path.join(MANIFEST_DIR, stableIdentity.manifestName);
+      const priorFinal = recoveryManifestSnapshot(stableIdentity.manifestName);
+      if (priorFinal) die('uncommitted or conflicting finalization manifest exists while ledger is not complete');
+      const manifest = {releaseId: stableIdentity.releaseId,
+        eventType: 'RECOVERY_FINALIZATION', failedReleaseId: failed.releaseId,
+        failedDeployRunId: imported.run.id, failedDeployRunAttempt: imported.run.attempt,
+        failedDeployManifestDigest: imported.evidence.manifestDigest,
+        failedDeployManifestSha256: imported.failureManifestSha256,
+        candidateSha: candidate, previousProductionSha: baselineSha, productionShaAfter: candidate,
+        dbHeadBefore: snapshot.ledger.state.currentProductionDbHead ?? null,
+        dbHeadAfter: fresh.runtime.prismaHead, agataDbHeadAfter: fresh.runtime.agataHead,
+        gsalesDbHeadAfter: fresh.runtime.gsalesHead,
+        gsalesMigrationSha256: fresh.runtime.gsalesMigrationSha256,
+        agataRuntimeSha: candidate, agataProvider: fresh.runtime.provider,
+        artifactIdentities: recoveryArtifactIdentities(candidate, fresh.runtime.facts),
+        gsalesRuntime: fresh.runtime.gsalesRuntime, backup: fresh.backup,
+        prepare: {runId: imported.prepare.runId, attempt: imported.prepare.attempt,
+          receiptDigest: imported.prepare.bundleDigest},
+        failedDeploy: {runId: imported.run.id, attempt: imported.run.attempt,
+          resultDigest: imported.evidence.resultDigest, manifestDigest: imported.evidence.manifestDigest},
+        startedAt, finishedAt: isoNow(), status: 'COMPLETE', ...fresh.runtime.readiness,
+        productionRef: stableIdentity.productionTag, remoteProductionRefTarget: candidate,
+        remoteMainSha: fresh.runtime.remoteMainSha, runtimeFacts: fresh.runtime.facts,
+        workerQueueSnapshots: fresh.runtime.workerQueue,
+        smoke: {...fresh.runtime.smoke, provider: fresh.runtime.provider},
+        inferenceAcceptance: 'NOT_VERIFIED', e2eAcceptance: 'NOT_VERIFIED',
+        runtimeSwitchOccurred: false, databaseApplyOccurred: false,
+        recoveryBasis: 'Finalization-only recovery after the immutable Deploy record proves a post-switch production-tag failure; no runtime or database apply is performed.'};
+      const manifestSha = writeCanonicalRecoveryManifest(finalPath, manifest);
+      const currentState = snapshot.ledger.state;
+      const nextState = verifiedRuntimeState(currentState, {candidate, dbHead: fresh.runtime.prismaHead});
+      Object.assign(nextState, {currentProductionRef: stableIdentity.productionTag,
+        previousProductionSha: baselineSha, lastReleaseId: failed.releaseId,
+        lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: manifest.finishedAt,
+        ...fresh.runtime.readiness, gsalesDbHead: fresh.runtime.gsalesHead,
+        gsalesMigrationSha256: fresh.runtime.gsalesMigrationSha256,
+        releaseOrigin: 'durable-production-release', agataRuntimeSha: candidate,
+        agataAlembicHead: fresh.runtime.agataHead, agataProvider: fresh.runtime.provider,
+        artifactIdentities: manifest.artifactIdentities, recoveryRequired: false,
+        lastReleaseFailureManifest: manifestReference(path.join(MANIFEST_DIR, `${failed.releaseId}.json`)),
+        recoveryReconciliationManifest: manifestReference(path.join(MANIFEST_DIR, stableIdentity.reconciliationManifestName)),
+        recoveryReconciliationManifestSha256: snapshot.ledger.state.recoveryReconciliationManifestSha256,
+        recoveryFinalizationManifest: manifestReference(finalPath), recoveryFinalizationManifestSha256: manifestSha});
+      fs.writeFileSync(STATE_FILE, `${JSON.stringify(nextState, null, 2)}\n`);
+      persistRecoveryLedgerCheckpoint(manifest, nextState, expectedLedgerHead);
+      if (remoteTagTarget(stableIdentity.productionTag) !== candidate) die('production tag failed exact-target read-back');
+    };
+
+    const result = await runRecoveryFinalization({readSnapshot, persistRecoveryRequired,
+      ensureProductionTag, persistCompleteState});
+    const verified = await readSnapshot();
+    if (verified.ledger.state.lastReleaseStatus !== 'COMPLETE'
+        || verified.ledger.state.currentProductionSha !== candidate
+        || verified.productionTagTarget !== candidate
+        || verified.finalizationManifest?.status !== 'COMPLETE') die('finalization completion read-back did not prove exact COMPLETE state');
+    console.log(JSON.stringify({status: 'COMPLETE', candidateSha: candidate,
+      productionRef: identity.productionTag,
+      recoveryManifest: manifestReference(path.join(MANIFEST_DIR, identity.manifestName)),
+      reconciliationManifest: manifestReference(path.join(MANIFEST_DIR, identity.reconciliationManifestName)),
+      ledgerSha: verified.ledger.headSha, idempotent: result.idempotent === true,
+      inferenceAcceptance: 'NOT_VERIFIED', e2eAcceptance: 'NOT_VERIFIED'}, null, 2));
   } finally { unlock(); }
 }
 
@@ -1326,22 +1841,27 @@ function recheckWorkerDependency(candidate) {
   } finally { unlock(); }
 }
 
-function main() {
+async function main() {
   let standaloneLedger;
   if (Boolean(process.env.GPOINT_RELEASE_STATE_FILE) !== Boolean(process.env.GPOINT_RELEASE_MANIFEST_DIR)) die('release evidence paths must be supplied together');
   if (!process.env.GPOINT_RELEASE_STATE_FILE && !process.env.GPOINT_RELEASE_MANIFEST_DIR) {
     const ledger = loadReleaseBookkeeping({ root: ROOT, git: ledgerGit });
     standaloneLedger = ledger;
+    RELEASE_LEDGER_SHA = ledger.ledgerSha;
     STATE_FILE = ledger.stateFile; MANIFEST_DIR = ledger.manifestDir;
   }
   const args = process.argv.slice(2);
   if (args[0] === 'status' || args.includes('--status')) return status();
-  if (!args.includes('--recheck-worker')) runLocalDiskPreflight();
+  const recoveryFinalization = args.includes('--finalize-recovery');
+  const recoveryReadOnlyDiagnostics = args.includes('--recovery-diagnostics');
+  if (!args.includes('--recheck-worker') && !recoveryFinalization && !recoveryReadOnlyDiagnostics) runLocalDiskPreflight();
+  if (recoveryReadOnlyDiagnostics) return recoveryDiagnostics(candidateSha(args));
   if (args.includes('--provision-agata-config')) return provisionAgataConfig(candidateSha(args));
-  function persistAction(action) {
+  async function persistAction(action) {
     const previous = new Set(fs.readdirSync(MANIFEST_DIR));
-    try { return action(); } finally {
-      if (standaloneLedger) {
+    let succeeded = false;
+    try { const result = await action(); succeeded = true; return result; } finally {
+      if (standaloneLedger && succeeded && !recoveryFinalization) {
         const records = fs.readdirSync(MANIFEST_DIR).filter(name => !previous.has(name)).map(name => ({ name, data: readJson(path.join(MANIFEST_DIR, name)) }));
         const evidence = records.filter(r => r.data.status !== 'PLANNED').at(-1)?.data;
         if (evidence) persistReleaseBookkeeping({ mode: 'production', records, evidence, git: ledgerGit, ...standaloneLedger });
@@ -1360,4 +1880,6 @@ function main() {
   runDryRun(candidateSha(args));
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(process.argv[1])) { try { main(); } catch (error) { console.error(error.message); process.exitCode = 1; } }
+if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(process.argv[1])) {
+  main().catch(error => { console.error(error.message); process.exitCode = 1; });
+}

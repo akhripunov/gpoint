@@ -7,6 +7,9 @@ import re
 import sys
 import base64
 import io
+import socket
+import ssl
+import urllib.error
 import urllib.request
 from urllib.parse import urlparse
 import zipfile
@@ -36,9 +39,34 @@ def github_json(path, token=None):
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             return json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        error = SyncError(f'GitHub current-state read failed: http_status_{exc.code} ({type(exc).__name__})')
+        error.http_status = exc.code
+        error.network_category = 'http_status'
+        error.reason_type = type(exc).__name__
+        raise error from exc
+    except urllib.error.URLError as exc:
+        reason = exc.reason
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            category = 'timeout'
+        elif isinstance(reason, socket.gaierror):
+            category = 'dns'
+        elif isinstance(reason, ssl.SSLError):
+            category = 'tls'
+        elif isinstance(reason, (ConnectionError, OSError)):
+            category = 'connection'
+        else:
+            category = 'network_unknown'
+        error = SyncError(f'GitHub current-state read failed: {category} ({type(reason).__name__})')
+        error.http_status = None
+        error.network_category = category
+        error.reason_type = type(reason).__name__
+        raise error from exc
     except Exception as exc:
-        error = SyncError(f'GitHub current-state read failed: {type(exc).__name__}')
+        error = SyncError(f'GitHub current-state read failed: request_error ({type(exc).__name__})')
         error.http_status = getattr(exc, 'code', None)
+        error.network_category = 'request_error'
+        error.reason_type = type(exc).__name__
         raise error from exc
 
 

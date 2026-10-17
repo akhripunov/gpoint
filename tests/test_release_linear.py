@@ -1,8 +1,11 @@
 import importlib.util
 from pathlib import Path
 import sys
+import socket
+import ssl
 import unittest
 import tempfile
+import urllib.error
 from unittest.mock import patch
 import base64
 import json
@@ -25,6 +28,34 @@ TELEMETRY = load('release_telemetry', 'release-telemetry.py')
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_github_json_reports_safe_urlerror_category_without_raw_details(self):
+        token = 'private-token-value'
+        failures = [
+            (urllib.error.URLError(TimeoutError('secret-host timeout')), 'timeout'),
+            (urllib.error.URLError(socket.gaierror('secret-host lookup failed')), 'dns'),
+            (urllib.error.URLError(ssl.SSLError('secret-host tls failed')), 'tls'),
+            (urllib.error.URLError(OSError('secret-host connection failed')), 'connection'),
+        ]
+        for failure, category in failures:
+            with self.subTest(category=category), patch.object(SYNC.urllib.request, 'urlopen', side_effect=failure):
+                with self.assertRaises(SYNC.SyncError) as raised:
+                    SYNC.github_json('repos/akhripunov/gpoint/commits/main', token=token)
+            self.assertEqual(getattr(raised.exception, 'network_category', None), category)
+            self.assertEqual(getattr(raised.exception, 'reason_type', None), type(failure.reason).__name__)
+            self.assertNotIn(token, str(raised.exception))
+            self.assertNotIn('secret-host', str(raised.exception))
+
+    def test_github_json_preserves_http_status_as_safe_category(self):
+        failure = urllib.error.HTTPError('https://private.invalid/path', 403, 'secret response', {}, None)
+        with patch.object(SYNC.urllib.request, 'urlopen', side_effect=failure):
+            with self.assertRaises(SYNC.SyncError) as raised:
+                SYNC.github_json('repos/akhripunov/gpoint/commits/main', token='private-token')
+        self.assertEqual(raised.exception.http_status, 403)
+        self.assertEqual(raised.exception.network_category, 'http_status')
+        self.assertIn('http_status_403', str(raised.exception))
+        self.assertNotIn('private.invalid', str(raised.exception))
+        self.assertNotIn('secret response', str(raised.exception))
+
     def test_handoff_preserves_architect_context_and_replaces_only_owned_section(self):
         source = '# Architect\n\nImportant constraints\n'
         first = SYNC.replace_section(source, 'кандидат', 'READY')
@@ -62,12 +93,16 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("if: always() && github.ref == 'refs/heads/main'", publisher)
         self.assertIn('needs.validate.outputs.candidate || inputs.candidate || github.sha', publisher)
         self.assertIn("inputs.mode == 'production' || inputs.mode == 'task-scoped-auto'", workflow)
+        self.assertIn("inputs.mode == 'recovery-finalization')", workflow)
+        self.assertIn("inputs.mode != 'recovery-finalization'", workflow)
         self.assertIn("needs.deploy.outputs.status != ''", workflow)
         self.assertIn('RELEASE_PHASE: preflight', workflow)
         self.assertIn("inputs.mode == 'preflight' && needs.deploy.outputs.preflight == 'PLANNED' && 'READY_FOR_OWNER'", workflow)
         self.assertIn("needs.deploy.outputs.preflight == 'PLANNED' && 'PASS'", workflow)
         self.assertIn("needs.deploy.outputs.status == 'COMPLETE' && 'RECOVERY_REQUIRED'", workflow)
-        self.assertIn('preflight=${preflightStatus}', (ROOT / 'scripts/automated-release.mjs').read_text())
+        self.assertIn("preflight=${mode === 'recovery-finalization' ? 'NOT_APPLICABLE' : preflightStatus}",
+                      (ROOT / 'scripts/automated-release.mjs').read_text())
+        self.assertIn('status=${status}', (ROOT / 'scripts/automated-release.mjs').read_text())
         publisher = (ROOT / 'scripts/publish-release-linear.py').read_text()
         self.assertIn("'preflight': ('PASS', 'PLANNED', 'READY_FOR_OWNER', 'FAILED', 'BLOCKED')", publisher)
         self.assertIn('READY_FOR_OWNER не публикуется для уже выполняемого production цикла', publisher)

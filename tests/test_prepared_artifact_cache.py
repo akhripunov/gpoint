@@ -32,6 +32,20 @@ class ArtifactCacheTests(unittest.TestCase):
         self.downloads += 1
         shutil.copyfile(self.archive, target)
 
+    def test_historical_recovery_candidate_requires_exact_main_executor_and_ancestry(self):
+        candidate, executor = 'd' * 40, '8' * 40
+        CACHE.validate_current_main_candidate(candidate, 'recovery-finalization', executor, executor,
+                                              lambda child, parent: (child, parent) == (candidate, executor))
+        with self.assertRaisesRegex(RuntimeError, 'exact current-main executor'):
+            CACHE.validate_current_main_candidate(candidate, 'recovery-finalization', executor, '9' * 40,
+                                                  lambda *_: True)
+        with self.assertRaisesRegex(RuntimeError, 'exact current-main executor'):
+            CACHE.validate_current_main_candidate(candidate, 'recovery-finalization', executor, executor,
+                                                  lambda *_: False)
+        with self.assertRaisesRegex(RuntimeError, 'current main'):
+            CACHE.validate_current_main_candidate(candidate, 'production', executor, executor,
+                                                  lambda *_: True)
+
     def restore(self, artifact_id='12', digest=None, identity=None):
         return CACHE.materialize(self.root / 'cache', self.root / 'destination', artifact_id,
                                  digest or self.digest, ['receipt.json'], self.fetch,

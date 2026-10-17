@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { observeDeploymentReadiness, dependencyRecheckState, collectWorkerDependencies } from './release-readiness.mjs';
+import { observeDeploymentReadiness, dependencyRecheckState, collectWorkerDependencies,
+  validateRecoveryQueueSnapshots } from './release-readiness.mjs';
 import { checkAgataEffectiveConfig } from './release-gpoint.mjs';
 const nowMs = Date.parse('2026-10-05T04:00:00Z');
 const healthy = {enabled:true,queue_connectivity:'reachable',last_poll_at:'2026-10-05T03:59:59Z',last_heartbeat_at:'2026-10-05T03:59:58Z'};
@@ -53,6 +54,23 @@ test('server compatibility blocks invalid protocol/config but not temporary work
   const config={enabled:true,provider:'mac_worker',localEnabled:true,workerTokenPresent:true,agataApiHealthy:true};
   assert.deepEqual(checkAgataEffectiveConfig(config),[]);
   for(const invalid of [{provider:'unknown'},{localEnabled:false},{workerTokenPresent:false},{agataApiHealthy:false}]) assert.ok(checkAgataEffectiveConfig({...config,...invalid}).length>0);
+});
+
+test('recovery requires fresh empty GPOINT and GSALES queue snapshots with exact source identity', () => {
+  const stamp = new Date(nowMs).toISOString();
+  const status = {lanes: Object.fromEntries(['GPOINT', 'GSALES'].map(lane => [lane, {
+    queue_snapshot_state: 'VERIFIED', queue_snapshot_source_id: `agata-worker-queue-status-v1:${lane.toLowerCase()}`,
+    queue_snapshot_at: stamp, pending_inference_jobs: 0, running_inference_jobs: 0,
+  }]))};
+  assert.deepEqual(validateRecoveryQueueSnapshots(status, {nowMs}), []);
+  assert.ok(validateRecoveryQueueSnapshots({...status, lanes: {...status.lanes,
+    GSALES: {...status.lanes.GSALES, queue_snapshot_source_id: 'agata-worker-queue-status-v1:gpoint'}}}, {nowMs})
+    .includes('GSALES_QUEUE_SNAPSHOT_IDENTITY_INVALID'));
+  assert.ok(validateRecoveryQueueSnapshots({...status, lanes: {...status.lanes,
+    GPOINT: {...status.lanes.GPOINT, pending_inference_jobs: 1}}}, {nowMs}).includes('GPOINT_QUEUE_NOT_EMPTY'));
+  assert.ok(validateRecoveryQueueSnapshots({...status, lanes: {...status.lanes,
+    GSALES: {...status.lanes.GSALES, queue_snapshot_at: '2020-01-01T00:00:00Z'}}}, {nowMs})
+    .includes('GSALES_QUEUE_SNAPSHOT_STALE'));
 });
 
 // Exercise canonical CLI with disposable state and simulated external transports.
