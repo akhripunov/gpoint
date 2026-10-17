@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import pathlib
+import re
 import unittest
 import urllib.error
 from unittest.mock import patch
@@ -18,24 +19,45 @@ CONTENT = "# Test AGENTS\n\nsource body\n"
 
 
 class SyncContractTests(unittest.TestCase):
-    def successful_call(self, content=CONTENT, *, update_id=DOC_ID):
+    def successful_call(self, content=None, *, update_id=DOC_ID):
         calls = []
+        existing_content = content if content is not None else "previous AGENTS content\n"
+        readback_content = content if content is not None else CONTENT
 
         def call(query, variables, key):
             calls.append((query, variables, key))
             if "documentUpdate" in query:
                 return {"documentUpdate": {"success": True, "document": {"id": update_id, "title": "AGENTS.md"}}}
-            return {"document": {"id": DOC_ID, "title": "AGENTS.md", "content": content}}
+            if any("documentUpdate" in previous_query for previous_query, _, _ in calls[:-1]):
+                document_content = readback_content
+            else:
+                document_content = existing_content
+            return {"document": {"id": DOC_ID, "title": "AGENTS.md", "content": document_content}}
 
         return call, calls
 
     def test_updates_existing_document_and_reads_back_exact_content(self):
         call, calls = self.successful_call()
-        SYNC.sync_document(CONTENT, DOC_ID, "test-key", call)
+        result = SYNC.sync_document(CONTENT, DOC_ID, "test-key", call)
+        self.assertTrue(result)
         self.assertEqual(len(calls), 3)
         self.assertIn("documentUpdate", calls[1][0])
         self.assertNotIn("documentCreate", " ".join(query for query, _, _ in calls))
         self.assertEqual(calls[1][1], {"id": DOC_ID, "input": {"content": CONTENT}})
+
+    def test_matching_document_is_not_rewritten(self):
+        call, calls = self.successful_call(content=CONTENT)
+        result = SYNC.sync_document(CONTENT, DOC_ID, "test-key", call)
+        self.assertFalse(result)
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(any("documentUpdate" in query for query, _, _ in calls))
+
+    def test_workflow_rechecks_main_pushes_after_stale_agents_event(self):
+        workflow = (ROOT / ".github" / "workflows" / "sync-agents-to-linear.yml").read_text()
+        push_trigger = re.search(r"(?ms)^on:\n(.*?)(?=^permissions:)", workflow)
+        self.assertIsNotNone(push_trigger)
+        self.assertIn("  push:\n    branches: [main]\n", push_trigger.group(1))
+        self.assertNotIn("paths:", push_trigger.group(1))
 
     def test_current_main_check_runs_immediately_before_linear_update(self):
         call, calls = self.successful_call()

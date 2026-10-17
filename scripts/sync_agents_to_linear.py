@@ -238,7 +238,7 @@ def sync_document(
     *,
     expected_title: str = "AGENTS.md",
     before_update: Callable[[], None] | None = None,
-) -> None:
+) -> bool:
     if not api_key.strip():
         raise SyncError("LINEAR_API_KEY is required")
     try:
@@ -261,6 +261,11 @@ def sync_document(
         raise SyncError("Linear returned a different document ID")
     if existing.get("title") != expected_title:
         raise SyncError("Linear document title does not match expected AGENTS.md")
+    existing_content = existing.get("content")
+    if not isinstance(existing_content, str):
+        raise SyncError("Linear document content is unavailable")
+    if _content_matches(source, existing_content):
+        return False
 
     if before_update is not None:
         before_update()
@@ -294,6 +299,7 @@ def sync_document(
     returned_content = readback.get("content")
     if not isinstance(returned_content, str) or not _content_matches(source, returned_content):
         raise SyncError("Linear document read-back content does not match AGENTS.md")
+    return True
 
 
 def main() -> int:
@@ -312,7 +318,9 @@ def main() -> int:
             verify_current_main_sha(source_sha, github_token)
 
         check_current_main()
-        sync_document(source, document_id, api_key, graphql_request, before_update=check_current_main)
+        updated = sync_document(
+            source, document_id, api_key, graphql_request, before_update=check_current_main
+        )
     except (OSError, UnicodeError) as exc:
         raise SyncError("AGENTS.md could not be read as UTF-8") from exc
     except SyncError as exc:
@@ -320,7 +328,8 @@ def main() -> int:
         return 1
     print(
         f"AGENTS_LINEAR_SYNC=PASS DOCUMENT_ID={document_id} "
-        f"SOURCE_SHA={source_sha or 'UNAVAILABLE'} CONTENT_MATCH=YES"
+        f"SOURCE_SHA={source_sha or 'UNAVAILABLE'} CONTENT_MATCH=YES "
+        f"CONTENT_UPDATED={'YES' if updated else 'NO'}"
     )
     return 0
 
