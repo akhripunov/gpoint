@@ -245,15 +245,17 @@ def migrate_image(image, inventory, guard):
                 process.wait(timeout=10)
 
 
-def complete_backup(sha, *, directory=None):
+def complete_backup(sha, *, directory=None, purpose='pre-release'):
     # This container administrator channel creates only the GPoint logical
     # backup; application migration credentials use a separate protected file.
+    if purpose not in ('pre-release', 'recovery-current'):
+        raise RuntimeError('complete backup purpose is invalid')
     census = authoritative_census()
     if census.get('database') != 'gpoint' or census.get('authoritative') is not True:
         raise RuntimeError('complete backup identity could not be established')
     directory = directory if directory is not None else Path('/opt/gpoint/backups'); directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     directory.chmod(0o700)
-    target = directory / f'gpoint-pre-release-{sha}-{time.time_ns()}.dump'
+    target = directory / f'gpoint-{purpose}-{sha}-{time.time_ns()}.dump'
     try:
         schemas = ['public', 'agata']
         for schema in ('gsales', 'gsales_meta', 'agata_identity'):
@@ -292,6 +294,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('mode', choices=['preflight', 'backup', 'migrate'])
     parser.add_argument('--sha', required=True)
+    parser.add_argument('--backup-purpose', choices=['pre-release', 'recovery-current'], default='pre-release')
     args = parser.parse_args()
     if not re.fullmatch('[0-9a-f]{40}', args.sha): raise RuntimeError('exact SHA required')
     # Host configuration is consulted for source identity only; never echo values.
@@ -308,7 +311,7 @@ def main():
         proof = validate_readiness(effective_probe('gpoint-agata-runtime:' + live_sha), authoritative_census())
         print('AGATA_MIGRATION_READINESS=' + json.dumps(dict(public_facts(proof), candidate_sha=args.sha, checked_at=datetime.now(timezone.utc).isoformat(), inventory_source='verified_postgres_administrator_readonly'), sort_keys=True))
     elif args.mode == 'backup':
-        print('GPOINT_COMPLETE_BACKUP=' + json.dumps(dict(complete_backup(args.sha), candidate_sha=args.sha), sort_keys=True))
+        print('GPOINT_COMPLETE_BACKUP=' + json.dumps(dict(complete_backup(args.sha, purpose=args.backup_purpose), candidate_sha=args.sha), sort_keys=True))
     else:
         image = 'gpoint-agata-runtime:' + args.sha
         proof = effective_probe(image)

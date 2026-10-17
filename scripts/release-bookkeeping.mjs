@@ -16,6 +16,36 @@ function ledgerHead(git) {
   return sha;
 }
 
+function stableJson(value) {
+  if (Array.isArray(value)) return value.map(stableJson);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key => [key, stableJson(value[key])]));
+  return value;
+}
+
+/** Read back an exact published ledger state and verify every local manifest blob. */
+export function verifyReleaseBookkeeping({ git, stateFile, manifestDir, expectedState }) {
+  if (!stateFile || !manifestDir) throw new Error('External release evidence paths are required');
+  const headSha = ledgerHead(git);
+  if (!headSha) throw new Error('Release ledger missing after publication');
+  const remoteState = JSON.parse(git(['show', `${headSha}:docs/release/state/production.json`]));
+  const localState = expectedState ?? JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  if (JSON.stringify(stableJson(remoteState)) !== JSON.stringify(stableJson(localState)))
+    throw new Error('Release ledger state read-back differs from the expected state');
+  const remoteFiles = new Map();
+  for (const line of git(['ls-tree', '-r', headSha, 'docs/release/manifests']).split('\n').filter(Boolean)) {
+    const match = /^100644 blob ([0-9a-f]{40})\t(docs\/release\/manifests\/(.+))$/.exec(line);
+    if (!match || !MANIFEST.test(match[3])) throw new Error('Invalid release manifest in ledger read-back');
+    remoteFiles.set(match[3], match[1]);
+  }
+  const localNames = fs.readdirSync(manifestDir).filter(name => MANIFEST.test(name));
+  for (const name of localNames) {
+    const localBlob = git(['hash-object', '--stdin'], fs.readFileSync(path.join(manifestDir, name), 'utf8'));
+    if (remoteFiles.get(name) !== localBlob) throw new Error(`Release manifest read-back mismatch: ${name}`);
+  }
+  if (remoteFiles.size !== localNames.length) throw new Error('Release ledger read-back omitted or added manifests');
+  return {headSha};
+}
+
 export function loadReleaseBookkeeping({ root, git, allowMissing = false, destination = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-ledger-')) }) {
   const stateFile = path.join(destination, 'state/production.json');
   const manifestDir = path.join(destination, 'manifests');
@@ -37,18 +67,21 @@ export function loadReleaseBookkeeping({ root, git, allowMissing = false, destin
       if (!MANIFEST.test(name) || file !== `docs/release/manifests/${name}`) throw new Error('Invalid ledger manifest path');
       const content = git(['show', `${ledgerSha}:${file}`]);
       JSON.parse(content);
-      fs.writeFileSync(path.join(manifestDir, name), content + '\n');
+      // Preserve the exact historical blob so later ledger commits can prove
+      // manifests are append-only instead of silently normalizing their bytes.
+      fs.writeFileSync(path.join(manifestDir, name), content);
     }
   }
   return { stateFile, manifestDir, ledgerSha, destination };
 }
 
-export function persistReleaseBookkeeping({ mode, records, evidence, git, stateFile, manifestDir }) {
+export function persistReleaseBookkeeping({ mode, records, evidence, git, stateFile, manifestDir, ledgerSha: expectedParentSha }) {
   if (!['production', 'task-scoped-auto'].includes(mode) || !records.length) return 'NOT_REQUIRED';
   if (['BLOCKED', 'FAILED_PRE_SWITCH'].includes(evidence.status)) return 'ARTIFACT_AND_LINEAR_ONLY';
   if (!stateFile || !manifestDir) throw new Error('External release evidence paths are required');
   if (!SHA.test(evidence.candidateSha ?? '') || records.some(r => !MANIFEST.test(r.name))) throw new Error('Invalid release ledger evidence');
   const parent = ledgerHead(git);
+  if (parent !== expectedParentSha) throw new Error('Release ledger changed since its verified read; refusing stale-state publication');
   const entries = new Map();
   if (parent) {
     for (const line of git(['ls-tree', `${parent}:docs/release/manifests`]).split('\n').filter(Boolean)) {
@@ -59,7 +92,9 @@ export function persistReleaseBookkeeping({ mode, records, evidence, git, stateF
   }
   // Retain every historical record, including recovery evidence, outside main.
   for (const name of fs.readdirSync(manifestDir).filter(n => MANIFEST.test(n))) {
-    entries.set(name, git(['hash-object', '-w', '--stdin'], fs.readFileSync(path.join(manifestDir, name), 'utf8')));
+    const blob = git(['hash-object', '-w', '--stdin'], fs.readFileSync(path.join(manifestDir, name), 'utf8'));
+    if (entries.has(name) && entries.get(name) !== blob) throw new Error(`Existing release manifest is immutable: ${name}`);
+    entries.set(name, blob);
   }
   const tree = lines => git(['mktree'], lines.join('\n') + '\n');
   const manifests = tree([...entries].sort().map(([name, sha]) => `100644 blob ${sha}\t${name}`));
@@ -72,5 +107,7 @@ export function persistReleaseBookkeeping({ mode, records, evidence, git, stateF
     'commit-tree', ledgerTree, ...(parent ? ['-p', parent] : []), '-m', `Record GPoint release ${evidence.candidateSha}`]);
   // No force push: a concurrent writer or publication failure stays visible.
   git(['push', 'origin', `${commit}:${LEDGER_REF}`]);
+  const published = verifyReleaseBookkeeping({git, stateFile, manifestDir});
+  if (published.headSha !== commit) throw new Error('Release ledger moved after publication; outcome requires reconciliation');
   return 'PERSISTED_TO_LEDGER';
 }

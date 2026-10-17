@@ -89,6 +89,30 @@ test('a conflicting writer cannot overwrite remote ledger', t => {
   assert.equal(f.git(['ls-remote', 'origin', 'refs/heads/main']).split(/\s/)[0], f.candidateSha);
 });
 
+test('ledger compare-and-swap rejects a head that moved after the verified read', t => {
+  const f = fixture(t), ledger = loadReleaseBookkeeping({...f, allowMissing: true,
+    destination: path.join(f.base, 'expected-head')});
+  const name = 'gpoint-release-cas.json';
+  fs.writeFileSync(path.join(ledger.manifestDir, name), '{}');
+  const other = f.git(['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+    'commit-tree', f.git(['rev-parse', 'HEAD^{tree}']), '-p', f.candidateSha, '-m', 'concurrent ledger update']);
+  f.git(['push', 'origin', `${other}:${LEDGER_REF}`]);
+  assert.throws(() => persistReleaseBookkeeping({mode: 'production', records: [{name}],
+    evidence: {status: 'COMPLETE', candidateSha: f.candidateSha}, ...f, ...ledger}), /changed since its verified read/);
+});
+
+test('persisting evidence cannot replace a manifest already in immutable history', t => {
+  const f = fixture(t), first = loadReleaseBookkeeping({...f, allowMissing: true,
+    destination: path.join(f.base, 'immutable-first')});
+  const name = 'gpoint-release-immutable.json';
+  fs.writeFileSync(path.join(first.manifestDir, name), JSON.stringify({candidateSha: f.candidateSha, status: 'COMPLETE'}));
+  persistReleaseBookkeeping({mode: 'production', records: [{name}], evidence: {status: 'COMPLETE', candidateSha: f.candidateSha}, ...f, ...first});
+  const second = loadReleaseBookkeeping({...f, destination: path.join(f.base, 'immutable-second')});
+  fs.writeFileSync(path.join(second.manifestDir, name), JSON.stringify({candidateSha: f.candidateSha, status: 'BLOCKED'}));
+  assert.throws(() => persistReleaseBookkeeping({mode: 'production', records: [{name}],
+    evidence: {status: 'COMPLETE', candidateSha: f.candidateSha}, ...f, ...second}), /manifest is immutable/);
+});
+
 test('ledger load recovers from one transient fetch timeout before reading the canonical ref', t => {
   const f = fixture(t);
   const first = loadReleaseBookkeeping({ ...f, allowMissing: true, destination: path.join(f.base, 'initial') });

@@ -148,6 +148,17 @@ test('Deploy workflow uses its scoped GITHUB_TOKEN for GHCR and keeps checkout c
   assert.match(workflow, /GHCR_READ_TOKEN: \$\{\{ github\.token \}\}/);
   assert.doesNotMatch(workflow, /GHCR_READ_TOKEN: \$\{\{ secrets\.GHCR_READ_TOKEN \}\}/);
   assert.match(workflow, /persist-credentials: false/);
+  assert.match(workflow, /inputs\.mode == 'recovery-finalization' && github\.sha \|\| needs\.validate\.outputs\.candidate/);
+  assert.match(workflow, /GPOINT_RECOVERY_EXECUTOR_SHA: \$\{\{ github\.sha \}\}/);
+  assert.match(workflow, /GPOINT_RECOVERY_DB_RISK_BASELINE_SHA: \$\{\{ inputs\.recovery_db_risk_baseline_sha \}\}/);
+  assert.match(workflow, /GPOINT_RECOVERY_CREATE_BACKUP: \$\{\{ inputs\.create_recovery_backup \}\}/);
+  assert.match(fs.readFileSync(new URL('./automated-release.mjs', import.meta.url), 'utf8'),
+    /release:gpoint', '--finalize-recovery'/);
+  const automatedRelease = fs.readFileSync(new URL('./automated-release.mjs', import.meta.url), 'utf8');
+  const recoveryBranch = automatedRelease.match(/if \(mode === 'recovery-finalization'\) \{([\s\S]*?)\n\s*\} else \{/);
+  assert.ok(recoveryBranch, 'recovery finalization must have a distinct execution branch');
+  assert.match(recoveryBranch[1], /release:gpoint', '--finalize-recovery'/);
+  assert.doesNotMatch(recoveryBranch[1], /release:gpoint', '--apply'/);
 });
 
 test('temporary worktree cleanup uses git metadata removal when available', () => {

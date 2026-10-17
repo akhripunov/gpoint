@@ -523,11 +523,14 @@ export function exactCheckout(sha) {
   }
 }
 
-export function agataProductionMigrationCommand(sha, mode, checkout = ROOT) {
+export function agataProductionMigrationCommand(sha, mode, checkout = ROOT, backupPurpose = 'pre-release') {
   if (!/^[0-9a-f]{40}$/.test(sha ?? '') || !['preflight', 'backup', 'migrate'].includes(mode)) throw new Error('exact SHA and supported migration mode required');
+  if (mode !== 'backup' && backupPurpose !== 'pre-release') throw new Error('backup purpose only applies to backup mode');
+  if (!['pre-release', 'recovery-current'].includes(backupPurpose)) throw new Error('backup purpose is invalid');
   const source = fs.readFileSync(path.join(checkout, 'scripts/agata-production-migration.py'), 'utf8');
   const encoded = Buffer.from(source).toString('base64');
-  return `python3 -c "import base64,sys;sys.argv=['agata-production-migration.py','${mode}','--sha','${sha}'];exec(base64.b64decode('${encoded}'))"`;
+  const purposeArg = mode === 'backup' ? `,'--backup-purpose','${backupPurpose}'` : '';
+  return `python3 -c "import base64,sys;sys.argv=['agata-production-migration.py','${mode}','--sha','${sha}'${purposeArg}];exec(base64.b64decode('${encoded}'))"`;
 }
 
 export const agata0010Command = agataProductionMigrationCommand;

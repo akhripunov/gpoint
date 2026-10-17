@@ -46,3 +46,26 @@ export function collectWorkerDependencies(probes) {
     catch(error) { return [lane,{probeFailure:error?.code==='ETIMEDOUT'||error?.killed===true?'TIMEOUT':'NOT_VERIFIED'}]; }
   }));
 }
+
+/** Recovery requires fresh authoritative empty snapshots for both production lanes. */
+export function validateRecoveryQueueSnapshots(status, {nowMs = Date.now(), maxAgeMs = 90_000} = {}) {
+  const failures = [];
+  for (const lane of ['GPOINT', 'GSALES']) {
+    const snapshot = status?.lanes?.[lane];
+    const expectedSource = `agata-worker-queue-status-v1:${lane.toLowerCase()}`;
+    if (!snapshot || snapshot.queue_snapshot_state !== 'VERIFIED'
+        || snapshot.queue_snapshot_source_id !== expectedSource) {
+      failures.push(`${lane}_QUEUE_SNAPSHOT_IDENTITY_INVALID`);
+      continue;
+    }
+    const timestamp = Date.parse(snapshot.queue_snapshot_at ?? '');
+    if (!Number.isFinite(timestamp) || timestamp > nowMs + 5_000 || nowMs - timestamp > maxAgeMs)
+      failures.push(`${lane}_QUEUE_SNAPSHOT_STALE`);
+    for (const field of ['pending_inference_jobs', 'running_inference_jobs']) {
+      const count = snapshot[field];
+      if (!Number.isSafeInteger(count) || count < 0) failures.push(`${lane}_QUEUE_SNAPSHOT_COUNTS_INVALID`);
+      else if (count !== 0) failures.push(`${lane}_QUEUE_NOT_EMPTY`);
+    }
+  }
+  return failures;
+}

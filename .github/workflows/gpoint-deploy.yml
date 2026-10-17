@@ -9,11 +9,11 @@ on:
         required: true
         type: string
       mode:
-        description: 'preflight is optional read-only diagnostics; production uses exact-SHA approval; task-scoped-auto reuses active task authorization for in-scope retries and runs preflight before apply'
+        description: 'preflight; exact-SHA production; task-scoped-auto; recovery-finalization verifies an already-switched runtime, creates an explicitly authorized current backup, reconciles one exact tag and appends ledger evidence without Apply or migrations'
         required: true
         default: preflight
         type: choice
-        options: [preflight, production, task-scoped-auto]
+        options: [preflight, production, task-scoped-auto, recovery-finalization]
       approve_production:
         description: 'I authorize this exact candidate on GPoint production'
         required: true
@@ -41,6 +41,34 @@ on:
         default: prepared
         type: choice
         options: [prepared, ghcr-oci, archive]
+      recovery_failure_run_id:
+        description: 'Original immutable post-switch failure run; ME-38 only'
+        required: false
+        default: '39010750184'
+        type: string
+      recovery_failure_run_attempt:
+        description: 'Original immutable post-switch failure attempt; ME-38 only'
+        required: false
+        default: '1'
+        type: string
+      recovery_db_risk_accepted:
+        description: 'I accept the unresolved historical database outcome for this exact candidate and baseline'
+        required: false
+        default: false
+        type: boolean
+      recovery_db_risk_baseline_sha:
+        description: 'Exact historical production baseline covered by the separate DB-risk decision'
+        required: false
+        type: string
+      recovery_db_risk_decision_id:
+        description: 'Owner decision reference for accepting historical DB uncertainty'
+        required: false
+        type: string
+      create_recovery_backup:
+        description: 'Authorize a current protected GPoint backup before recovery metadata writes'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -84,6 +112,12 @@ jobs:
           PREPARE_RUN_ATTEMPT: ${{ inputs.prepare_run_attempt }}
           ORCHESTRATOR_RUN_ID: ${{ inputs.orchestrator_run_id }}
           TASK_AUTHORIZATION_ID: ${{ inputs.task_authorization_id }}
+          RECOVERY_FAILURE_RUN_ID: ${{ inputs.recovery_failure_run_id }}
+          RECOVERY_FAILURE_RUN_ATTEMPT: ${{ inputs.recovery_failure_run_attempt }}
+          RECOVERY_DB_RISK_ACCEPTED: ${{ inputs.recovery_db_risk_accepted }}
+          RECOVERY_DB_RISK_BASELINE_SHA: ${{ inputs.recovery_db_risk_baseline_sha }}
+          RECOVERY_DB_RISK_DECISION_ID: ${{ inputs.recovery_db_risk_decision_id }}
+          CREATE_RECOVERY_BACKUP: ${{ inputs.create_recovery_backup }}
         run: python scripts/select-release-run.py
 
   deploy:
@@ -121,7 +155,9 @@ jobs:
           printf '%s\n' '${{ needs.validate.outputs.network_retry_budget_used_seconds }}' > "$RUNNER_TEMP/gpoint-network-retry-budget-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.validate.outputs.candidate }}
+          # Recovery code must execute from the already integrated main SHA;
+          # the production candidate remains pinned to the original incident.
+          ref: ${{ inputs.mode == 'recovery-finalization' && github.sha || needs.validate.outputs.candidate }}
           fetch-depth: 0
           persist-credentials: false
       - name: Verify assigned runner before bundle or production checks
@@ -137,9 +173,25 @@ jobs:
         id: cache
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_MODE: ${{ inputs.mode }}
+          GPOINT_RECOVERY_EXECUTOR_SHA: ${{ github.sha }}
           ARTIFACT_DESTINATION: ${{ env.GPOINT_RELEASE_BUNDLE }}
           IMAGE_TRANSPORT: ${{ inputs.image_transport }}
         run: python3 scripts/prepared_artifact_cache.py
+      - name: Import original immutable post-switch failure evidence
+        if: inputs.mode == 'recovery-finalization'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
+          RECOVERY_FAILURE_RUN_ID: ${{ inputs.recovery_failure_run_id }}
+          RECOVERY_FAILURE_RUN_ATTEMPT: ${{ inputs.recovery_failure_run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/gpoint-recovery-failure-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          python3 scripts/release_assets.py read-recovery-failure "$CANDIDATE_SHA" "$RECOVERY_FAILURE_RUN_ID" "$RECOVERY_FAILURE_RUN_ATTEMPT" "$evidence"
+          chmod 600 "$evidence"
+          echo "GPOINT_RECOVERY_FAILURE_EVIDENCE=$evidence" >> "$GITHUB_ENV"
       - name: Verify receipt, canonical preflight, apply and persist evidence
         id: execute
         env:
@@ -150,6 +202,16 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GHCR_READ_USERNAME: ${{ github.actor }}
           GHCR_READ_TOKEN: ${{ github.token }}
+          GPOINT_RECOVERY_FAILURE_RUN_ID: ${{ inputs.recovery_failure_run_id }}
+          GPOINT_RECOVERY_FAILURE_RUN_ATTEMPT: ${{ inputs.recovery_failure_run_attempt }}
+          GPOINT_RECOVERY_DB_RISK_ACCEPTED: ${{ inputs.recovery_db_risk_accepted }}
+          GPOINT_RECOVERY_DB_RISK_BASELINE_SHA: ${{ inputs.recovery_db_risk_baseline_sha }}
+          GPOINT_RECOVERY_DB_RISK_DECISION_ID: ${{ inputs.recovery_db_risk_decision_id }}
+          GPOINT_RECOVERY_DB_RISK_CANDIDATE_SHA: ${{ inputs.candidate }}
+          GPOINT_RECOVERY_DB_RISK_ALLOWED_OPERATIONS: create_current_backup,backup_verify,production_tag_reconcile,append_recovery_manifest,ledger_state_write,read_only_verify
+          GPOINT_RECOVERY_DB_RISK_FORBIDDEN_OPERATIONS: runtime_apply,database_migration,runtime_switch,rollback
+          GPOINT_RECOVERY_CREATE_BACKUP: ${{ inputs.create_recovery_backup }}
+          GPOINT_RECOVERY_EXECUTOR_SHA: ${{ github.sha }}
         run: node scripts/automated-release.mjs
       - name: Preserve release result and canonical manifests as immutable evidence
         if: always()
@@ -208,7 +270,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/release_assets.py read-result
       - name: Publish preflight result to GPoint Linear
-        if: always()
+        if: always() && inputs.mode != 'recovery-finalization'
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -216,7 +278,7 @@ jobs:
           RELEASE_STATUS: ${{ inputs.mode == 'preflight' && needs.deploy.outputs.preflight == 'PLANNED' && 'READY_FOR_OWNER' || (needs.deploy.outputs.preflight == 'PLANNED' && 'PASS' || needs.deploy.outputs.preflight || 'BLOCKED') }}
         run: python3 scripts/publish-release-linear.py
       - name: Publish production result to GPoint Linear
-        if: always() && (inputs.mode == 'production' || inputs.mode == 'task-scoped-auto') && needs.deploy.outputs.status != ''
+        if: always() && (inputs.mode == 'production' || inputs.mode == 'task-scoped-auto' || inputs.mode == 'recovery-finalization') && needs.deploy.outputs.status != ''
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}

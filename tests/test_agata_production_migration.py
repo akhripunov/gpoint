@@ -2,6 +2,8 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location('migration', ROOT / 'scripts/agata-production-migration.py')
@@ -73,6 +75,24 @@ class ProductionMigrationTests(unittest.TestCase):
         self.assertNotIn('tenants', result)
         self.assertEqual(result['tenant_count'], 2)
         self.assertEqual(len(result['inventory_sha256']), 64)
+
+    def test_backup_purpose_is_bounded_and_recovery_backup_is_not_mislabeled_pre_release(self):
+        with self.assertRaisesRegex(RuntimeError, 'purpose is invalid'):
+            self.m.complete_backup('a' * 40, purpose='candidate-time')
+        def docker_checked(args, *, input=None):
+            return 'f' if 'information_schema.schemata' in input else ''
+        def docker_run(args, **kwargs):
+            if any('pg_dump' in str(value) for value in args):
+                kwargs['stdout'].write(b'disposable verified backup bytes')
+                return SimpleNamespace(returncode=0, stdout=b'')
+            return SimpleNamespace(returncode=0, stdout=b'TABLE DATA agata messages')
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(self.m, 'authoritative_census', return_value=self.census()), \
+                patch.object(self.m, 'docker_checked', side_effect=docker_checked), \
+                patch.object(self.m.subprocess, 'run', side_effect=docker_run):
+            result = self.m.complete_backup('a' * 40, directory=Path(directory), purpose='recovery-current')
+        self.assertTrue(Path(result['path']).name.startswith('gpoint-recovery-current-' + 'a' * 40 + '-'))
+        self.assertEqual(result['status'], 'COMPLETE_PROTECTED')
 
     def test_guard_precedes_census_and_is_held_through_migration(self):
         events = []
