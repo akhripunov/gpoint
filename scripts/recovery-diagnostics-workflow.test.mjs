@@ -25,6 +25,16 @@ test('recovery diagnostics workflow is read-only and artifacts are uploaded with
   assert.match(canonicalRelease, /if \(recoveryReadOnlyDiagnostics\) return recoveryDiagnostics\(candidateSha\(args\)\);/);
 });
 
+test('recovery diagnostics selector receives the pinned incident run identity', () => {
+  const selectorStep = diagnosticJob
+    .split('      - name: Verify original candidate and Prepare provenance\n', 2)[1]
+    ?.split('      - name:', 1)[0];
+  assert.ok(selectorStep, 'recovery diagnostics must retain the provenance selector step');
+  assert.match(selectorStep, /RECOVERY_FAILURE_RUN_ID: \$\{\{ inputs\.recovery_failure_run_id \}\}/);
+  assert.match(selectorStep, /RECOVERY_FAILURE_RUN_ATTEMPT: \$\{\{ inputs\.recovery_failure_run_attempt \}\}/);
+  assert.match(selectorStep, /run: python3 scripts\/select-release-run\.py/);
+});
+
 test('recovery VPS probe is valid Python and contains only inspection/read-only DB operations', () => {
   const source = recoveryProductionInspectionSource('d367c2ec24242a733dbb2c4145c91d2d4682ba2c');
   const compiled = spawnSync('python3', ['-c', 'import sys; compile(sys.stdin.read(), "recovery_probe.py", "exec")'],
