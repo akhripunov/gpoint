@@ -1,4 +1,9 @@
-# GPoint durable production release flow
+# GPoint release gate and historical state files
+
+> **Current operations:** The canonical workflow is [GPoint release automation](automation.md), subject to [release authorization](../RELEASE_AUTHORIZATION.md) and the current [GPoint release policy in Linear](https://linear.app/bestuzhev/document/pravila-reliza-gpoint-183dba239394). Successful `main` Prepare automatically invokes the trusted controller and read-only preflight. `READY_FOR_OWNER` is not permission to apply production. This document describes the lower-level fail-closed release gate, not a competing manual workflow.
+
+> **Production bookkeeping:** The authoritative latest production pointer and release manifests are maintained on the separate `gpoint-release-ledger` ref. `docs/release/state/production.json` and `docs/release/manifests/` on `main` are historical checkout snapshots, **not** the authoritative current production state. Automated release execution supplies canonical ledger paths to the release gate. Never infer the current production SHA/DB head from `main` snapshots or replace ledger state with them; verify ledger, immutable evidence and live runtime as the task requires.
+
 
 `scripts/release-gpoint.mjs` is the canonical release gate. It accepts only a
 40-character candidate commit SHA and is fail-closed by default.
@@ -29,6 +34,9 @@ rollback are separate decisions; migrations are not automatically reversed.
 
 ## State
 
-`docs/release/state/production.json` is the current adoption/release pointer.
-`docs/release/manifests/` is append-only release history. A future release must
-read the actual live runtime and DB head and block on drift from this state.
+For current production state use the separate `gpoint-release-ledger` ref at
+`docs/release/state/production.json`, its matching manifest and verified immutable
+deployment evidence, plus fresh live readback where required. The copies at those
+paths on `main` are **historical**, not valid as current-state evidence.
+The canonical release workflow sets the ledger-backed state/manifest locations
+for its gate. Any mismatch or unknown state must block protected mutation.

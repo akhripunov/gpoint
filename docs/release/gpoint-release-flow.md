@@ -1,4 +1,7 @@
-# GPoint Durable Release Flow V1
+# GPoint Durable Release Flow V1 — HISTORICAL DESIGN BASELINE
+
+> **Historical reference only:** This describes the original safety requirements and is not the current dispatch procedure. For active GPoint Release Orchestrator V2 use [docs/release/automation.md](automation.md), [docs/RELEASE_AUTHORIZATION.md](../RELEASE_AUTHORIZATION.md), and the current canonical block of [Правила релиза GPoint](https://linear.app/bestuzhev/document/pravila-reliza-gpoint-183dba239394). The active chain is `push main → coalesced Prepare → immutable candidate → automatic controller → read-only preflight → READY_FOR_OWNER → valid OWNER authorization → protected apply → evidence/Linear/ledger`. The `main` checkout's `docs/release/state/production.json` is a historical snapshot; current production bookkeeping lives in the separate `gpoint-release-ledger` ref. This file does not grant deployment approval.
+
 
 Every release is fail-closed and starts from a known Git commit. `latest` is never a source of truth.
 
