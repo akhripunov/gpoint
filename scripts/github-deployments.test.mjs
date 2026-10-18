@@ -1,22 +1,33 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createGitHubDeploymentsClient, deploymentPayload, assertDeploymentMatchesLive} from './github-deployments.mjs';
+import './reconcile-deployment.test.mjs';
 
 const sha = 'a'.repeat(40);
 const assetSha = `sha256:${'b'.repeat(64)}`;
 const identity = {candidateSha: sha, runId: '42', runAttempt: '2', prepareRunId: '41',
-  prepareRunAttempt: '1', prepareReleaseId: 91, prepareReleaseTag: `gpoint-prepare-${sha}-41-1`,
-  prepareAssetId: 92, prepareAssetSha256: assetSha, authorizationMode: 'EXACT_SHA',
+  prepareRunAttempt: '1', prepareReceiptDigest: assetSha, prepareReceiptSha256: 'c'.repeat(64),
+  imageDigests: {app: assetSha, agata: `sha256:${'d'.repeat(64)}`, gsales: `sha256:${'e'.repeat(64)}`}, authorizationMode: 'EXACT_SHA',
   logUrl: 'https://github.com/akhripunov/gpoint/actions/runs/42/attempts/2'};
 const response = (status, body) => ({status, ok: status >= 200 && status < 300,
   text: async () => body === null ? '' : JSON.stringify(body)});
 
-test('Deployment provenance binds exact candidate, Prepare Release, asset and attempt', () => {
+test('Deployment provenance binds exact candidate, Prepare OCI receipt digest and attempt', () => {
   const payload = deploymentPayload(identity);
   assert.equal(payload.candidateSha, sha);
   assert.deepEqual(payload.workflow, {runId: '42', attempt: '2', url: identity.logUrl});
-  assert.equal(payload.prepare.releaseId, 91);
-  assert.equal(payload.prepare.assetId, 92);
+  assert.equal(payload.prepare.receiptDigest, identity.prepareReceiptDigest);
+  assert.deepEqual(payload.prepare.imageDigests, identity.imageDigests);
+});
+
+test('STATIC_UI_ONLY Deployment binds a separate Mini App OCI artifact and inherited image identities', () => {
+  const staticIdentity = {...identity, route: 'STATIC_UI_ONLY',
+    staticArtifactDigest: `sha256:${'f'.repeat(64)}`, staticArtifactContentSha256: 'a'.repeat(64)};
+  const payload = deploymentPayload(staticIdentity);
+  assert.equal(payload.route, 'STATIC_UI_ONLY');
+  assert.deepEqual(payload.prepare.staticArtifact, {digest: staticIdentity.staticArtifactDigest,
+    contentSha256: staticIdentity.staticArtifactContentSha256});
+  assert.deepEqual(payload.prepare.imageDigests, identity.imageDigests);
 });
 
 test('empty required_contexts is rejected before any API request', async () => {
@@ -69,6 +80,141 @@ test('rerunning a workflow cannot create a second Deployment on a new run attemp
   await assert.rejects(client.beginProductionDeployment(rerun, {requiredContexts: ['GPoint — Prepare / prepare']}),
     /workflow run already has a Deployment/);
 });
+
+test('first Deployment history is optional and returns an explicit empty baseline', async () => {
+  const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async () => response(200, [])});
+  assert.deepEqual(await client.readProductionBaseline(), {
+    historyExists: false, baselineSha: null, deploymentId: null, status: null, preApplyFailure: false,
+  });
+});
+
+test('a second release uses the latest successful Deployment as baseline', async () => {
+  const earlier = {...validDeployment(1, 'b'.repeat(40), identity, '2026-10-16T00:00:00Z')};
+  const latest = {...validDeployment(2, sha, identity, '2026-10-17T00:00:00Z')};
+  const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async url => {
+    if (url.includes('/deployments?')) return response(200, [earlier, latest]);
+    if (url.includes('/deployments/1/statuses')) return response(200, [status('success', '2026-10-16T00:05:00Z')]);
+    if (url.includes('/deployments/2/statuses')) return response(200, [status('success', '2026-10-17T00:05:00Z')]);
+    throw new Error(`unexpected ${url}`);
+  }});
+  const baseline = await client.readProductionBaseline();
+  assert.equal(baseline.historyExists, true);
+  assert.equal(baseline.baselineSha, sha);
+  assert.equal(baseline.deploymentId, 2);
+});
+
+test('conflicting equal-time latest statuses block production baseline selection', async () => {
+  const deployment = validDeployment(9, sha, identity, '2026-10-18T00:00:00Z');
+  const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async url => {
+    if (url.includes('/deployments?')) return response(200, [deployment]);
+    if (url.includes('/statuses?')) return response(200, [
+      status('success', '2026-10-18T00:05:00Z', 'stage=complete'),
+      status('error', '2026-10-18T00:05:00Z', 'stage=post_apply'),
+    ]);
+    throw new Error(`unexpected ${url}`);
+  }});
+  await assert.rejects(client.readProductionBaseline(), /conflicting statuses at the latest timestamp/);
+});
+
+test('active and post-Apply failed Deployments block another baseline selection', async () => {
+  for (const state of ['in_progress', 'error', 'failure']) {
+    const deployment = validDeployment(3, sha, identity, '2026-10-18T00:00:00Z');
+    const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async url => {
+      if (url.includes('/deployments?')) return response(200, [deployment]);
+      if (url.includes('/statuses')) return response(200, [status(state, '2026-10-18T00:05:00Z',
+        state === 'failure' ? 'stage=post_apply sha=aaaaaaaaaaaa' : undefined)]);
+      throw new Error(`unexpected ${url}`);
+    }});
+    await assert.rejects(client.readProductionBaseline(), /in_progress|error|outside the verified pre-Apply stage/);
+  }
+});
+
+test('a verified pre-Apply failure may fall back to the preceding successful install', async () => {
+  const failed = validDeployment(2, sha, identity, '2026-10-18T00:00:00Z');
+  const success = validDeployment(1, 'b'.repeat(40), identity, '2026-10-17T00:00:00Z');
+  const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async url => {
+    if (url.includes('/deployments?')) return response(200, [failed, success]);
+    if (url.includes('/deployments/2/statuses')) return response(200, [status('failure', '2026-10-18T00:05:00Z', 'stage=pre_apply')]);
+    if (url.includes('/deployments/1/statuses')) return response(200, [status('success', '2026-10-17T00:05:00Z')]);
+    throw new Error(`unexpected ${url}`);
+  }});
+  const baseline = await client.readProductionBaseline();
+  assert.equal(baseline.baselineSha, 'b'.repeat(40));
+  assert.equal(baseline.failedDeploymentId, 2);
+  assert.equal(baseline.preApplyFailure, true);
+});
+
+test('Deployment POST sends exact production flags, SHA and required Prepare context', async () => {
+  let createBody;
+  const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async (url, init) => {
+    if (url.includes('/deployments?')) return response(200, []);
+    if (url.endsWith('/deployments') && init.method === 'POST') {
+      createBody = JSON.parse(init.body);
+      return response(201, validDeployment(9, sha, identity, '2026-10-18T00:00:00Z'));
+    }
+    if (url.endsWith('/statuses') && init.method === 'POST') return response(201, {state: 'in_progress'});
+    throw new Error(`unexpected ${url}`);
+  }});
+  await client.beginProductionDeployment(identity, {requiredContexts: ['GPoint — Prepare / prepare']});
+  assert.equal(createBody.ref, sha);
+  assert.equal(createBody.environment, 'production');
+  assert.equal(createBody.auto_merge, false);
+  assert.equal(createBody.production_environment, true);
+  assert.equal(createBody.transient_environment, false);
+  assert.deepEqual(createBody.required_contexts, ['GPoint — Prepare / prepare']);
+});
+
+test('an absent ambiguous-create readback never triggers a second create POST', async () => {
+  let creates = 0;
+  const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async (url, init) => {
+    if (url.includes('/deployments?')) return response(200, []);
+    if (url.endsWith('/deployments') && init.method === 'POST') { creates += 1; throw new Error('timed out'); }
+    throw new Error(`unexpected ${url}`);
+  }});
+  await assert.rejects(client.beginProductionDeployment(identity, {requiredContexts: ['GPoint — Prepare / prepare']}), /POST request failed/);
+  assert.equal(creates, 1);
+});
+
+test('a missing status after ambiguous write retries only that same Deployment status', async () => {
+  const deployment = validDeployment(7, sha, identity, '2026-10-18T00:00:00Z');
+  const posts = [];
+  const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', sleep: async () => {}, fetchImpl: async (url, init) => {
+    if (url.includes('/statuses?')) return response(200, []);
+    if (url.endsWith('/statuses') && init.method === 'POST') {
+      posts.push(url);
+      if (posts.length === 1) throw new Error('timeout before write');
+      return response(201, {state: 'success'});
+    }
+    throw new Error(`unexpected ${url}`);
+  }});
+  const result = await client.publishStatus(deployment, identity, {state: 'success', description: 'installed', logUrl: identity.logUrl});
+  assert.equal(result.state, 'success');
+  assert.deepEqual(posts, ['https://mock/repos/akhripunov/gpoint/deployments/7/statuses',
+    'https://mock/repos/akhripunov/gpoint/deployments/7/statuses']);
+});
+
+test('tampered Prepare asset provenance returned by the API is rejected', async () => {
+  const tampered = validDeployment(8, sha, identity, '2026-10-18T00:00:00Z');
+  const payload = JSON.parse(tampered.payload);
+  payload.prepare.receiptSha256 = 'd'.repeat(64);
+  tampered.payload = JSON.stringify(payload);
+  const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async (url, init) => {
+    if (url.includes('/deployments?')) return response(200, []);
+    if (url.endsWith('/deployments') && init.method === 'POST') return response(201, tampered);
+    throw new Error(`unexpected ${url}`);
+  }});
+  await assert.rejects(client.beginProductionDeployment(identity, {requiredContexts: ['GPoint — Prepare / prepare']}), /payload read-back does not match/);
+});
+
+function validDeployment(id, candidate, deploymentIdentityValue, createdAt) {
+  return {id, environment: 'production', production_environment: true, transient_environment: false,
+    task: 'gpoint-production-deploy', sha: candidate, ref: candidate, created_at: createdAt,
+    payload: JSON.stringify(deploymentPayload({...deploymentIdentityValue, candidateSha: candidate}))};
+}
+
+function status(state, createdAt, description = `stage=${state}`) {
+  return {state, description, log_url: identity.logUrl, environment_url: 'https://gpoint.one', created_at: createdAt};
+}
 
 test('a newer success supersedes a terminal older failure as the Deploy baseline', async () => {
   const record = (id, valueSha, created, runId) => ({id, environment: 'production',

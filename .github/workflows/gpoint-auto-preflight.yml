@@ -9,6 +9,7 @@ on:
 permissions:
   contents: read
   actions: read
+  packages: read
 
 concurrency:
   group: gpoint-auto-release-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
@@ -26,6 +27,7 @@ jobs:
     permissions:
       contents: write
       actions: write
+      packages: read
     steps:
       - name: Checkout trusted current main controller code
         uses: actions/checkout@v4

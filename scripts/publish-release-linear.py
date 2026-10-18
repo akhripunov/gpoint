@@ -6,17 +6,16 @@ from pathlib import Path
 import re
 import sys
 import base64
-import io
 import socket
 import ssl
+import io
 import urllib.error
 import urllib.request
-from urllib.parse import urlparse
+import urllib.parse
 import zipfile
 import hashlib
 from datetime import datetime, timezone
 
-from release_assets import resolve_asset, validate_result, find_deploy_evidence
 from sync_agents_to_linear import graphql_request, sync_document, SyncError
 
 DOCUMENTS = {
@@ -70,73 +69,179 @@ def github_json(path, token=None):
         raise error from exc
 
 
-def _optional_github(route):
-    try:
-        return github_json(f'repos/{REPOSITORY}/{route}')
-    except SyncError as exc:
-        if getattr(exc, 'http_status', None) == 404 and route.startswith('releases/tags/'):
-            return None
-        raise
+DEPLOY_EVIDENCE_REPOSITORY = 'akhripunov/gpoint-deploy-evidence'
+DEPLOY_EVIDENCE_TYPE = 'application/vnd.gpoint.deploy.evidence.v1'
+DEPLOY_EVIDENCE_LAYER = 'application/vnd.gpoint.deploy.evidence.v1+json'
+OCI_MANIFEST_TYPE = 'application/vnd.oci.image.manifest.v1+json'
+MAX_DEPLOY_EVIDENCE_BYTES = 16 * 1024**2
 
 
-def artifact_json(run_id, prefix):
-    release_run = None
-    data = github_json(f'repos/{REPOSITORY}/actions/runs/{run_id}/artifacts')
-    matches = [a for a in data.get('artifacts', []) if a.get('name', '').startswith(prefix) and not a.get('expired')]
-    if not matches:
-        run = github_json(f'repos/{REPOSITORY}/actions/runs/{run_id}')
-        if (run.get('path') != '.github/workflows/gpoint-deploy.yml'
-                or run.get('head_branch') != 'main' or run.get('event') != 'workflow_dispatch'):
-            raise SyncError('Unverified Deploy result provenance')
+def ghcr_get(url, username, password, accept, limit):
+    """Read one GHCR object. Credentials are sent only to ghcr.io / its fixed token service."""
+    def request(headers):
+        req = urllib.request.Request(url, headers=headers)
         try:
-            source_attempt, asset = find_deploy_evidence(
-                run['head_sha'], str(run_id), str(run['run_attempt']),
-                lambda route: _optional_github(route))
-        except SyncError as exc:
-            if getattr(exc, 'http_status', None) == 404:
-                raise SyncError(f'Expected one canonical result artifact for run {run_id}; found 0') from exc
-            raise
-        except (RuntimeError, KeyError) as exc:
-            if str(exc).startswith('No immutable evidence'):
-                raise SyncError(f'Expected one canonical result artifact for run {run_id}; found 0') from exc
-            raise SyncError(f'Immutable result validation failed: {type(exc).__name__}') from exc
-        release_run = run
-        matches = [dict(asset, archive_download_url=f'https://api.github.com/repos/{REPOSITORY}/releases/assets/{asset["id"]}')]
+            response = urllib.request.urlopen(req, timeout=30)
+        except urllib.error.HTTPError as exc:
+            if exc.code != 401:
+                raise
+            challenge = exc.headers.get('WWW-Authenticate', '')
+            match = re.fullmatch(r'Bearer realm="(https://ghcr\.io/token)",service="ghcr\.io",scope="repository:([A-Za-z0-9._/-]+):pull"', challenge)
+            expected = url.split('/v2/', 1)[1].split('/manifests/', 1)[0].split('/blobs/', 1)[0]
+            if not match or match.group(2) != expected:
+                raise SyncError('GHCR returned an unexpected authentication challenge') from None
+            token_url = match.group(1) + '?service=ghcr.io&scope=' + urllib.parse.quote(f'repository:{expected}:pull', safe=':')
+            auth = base64.b64encode(f'{username}:{password}'.encode()).decode()
+            token_req = urllib.request.Request(token_url, headers={'Authorization': f'Basic {auth}', 'Accept': 'application/json'})
+            with urllib.request.urlopen(token_req, timeout=30) as token_response:
+                token_payload = json.loads(token_response.read(65537))
+            bearer = token_payload.get('token') or token_payload.get('access_token')
+            if not isinstance(bearer, str) or not re.fullmatch(r'[^\s\r\n]{1,16384}', bearer):
+                raise SyncError('GHCR returned an invalid pull token')
+            response = urllib.request.urlopen(urllib.request.Request(url, headers={**headers, 'Authorization': f'Bearer {bearer}'}), timeout=30)
+        with response:
+            payload = response.read(limit + 1)
+            if len(payload) > limit:
+                raise SyncError('GHCR Deploy evidence exceeds size limit')
+            return payload, response.headers
+    try:
+        return request({'Accept': accept})
+    except SyncError:
+        raise
+    except Exception as exc:
+        raise SyncError(f'GHCR Deploy evidence read failed: {type(exc).__name__}') from exc
+
+
+DEPLOY_EVIDENCE_STEP = 'Publish deployment result as a GHCR OCI artifact'
+MAX_DEPLOY_LOG_BYTES = 32 * 1024**2
+
+
+def deploy_evidence_digest_from_logs(run_id, attempt, sha):
+    """Bind the OCI digest to this exact successful Deploy job and its published log step."""
+    route = f'repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100&page=1'
+    data = github_json(route)
+    jobs = data.get('jobs') if isinstance(data, dict) else None
+    if not isinstance(jobs, list) or data.get('total_count') != len(jobs):
+        raise SyncError('Deploy job inventory is incomplete for exact evidence lookup')
+    matches = [job for job in jobs if job.get('name') == 'deploy']
     if len(matches) != 1:
-        raise SyncError(f'Expected one canonical result artifact for run {run_id}; found {len(matches)}')
-    request = urllib.request.Request(matches[0]['archive_download_url'], headers={
-        'Accept': 'application/octet-stream' if release_run else 'application/vnd.github+json',
-        'Authorization': f"Bearer {os.environ.get('GITHUB_TOKEN', '')}",
-    })
+        raise SyncError('Expected one exact Deploy job in the selected workflow attempt')
+    job = matches[0]
+    if (job.get('status') != 'completed' or job.get('conclusion') not in ('success', 'failure')
+            or str(job.get('run_id')) != str(run_id) or str(job.get('run_attempt')) != str(attempt)
+            or job.get('head_sha') != sha):
+        raise SyncError('Deploy job identity is not a completed exact workflow attempt and source SHA')
+    steps = job.get('steps')
+    if not isinstance(steps, list):
+        raise SyncError('Deploy job step inventory is missing')
+    evidence_steps = [step for step in steps if step.get('name') == DEPLOY_EVIDENCE_STEP]
+    if (len(evidence_steps) != 1 or evidence_steps[0].get('status') != 'completed'
+            or evidence_steps[0].get('conclusion') != 'success'
+            or not isinstance(evidence_steps[0].get('number'), int)):
+        raise SyncError('Exact Deploy evidence publication step did not succeed')
+    payload = download_job_logs(job.get('id'))
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(payload))
+        entries = archive.infolist()
+        if len(entries) > 500 or sum(entry.file_size for entry in entries) > 64 * 1024**2:
+            raise SyncError('Deploy job logs exceed the bounded evidence limit')
+        step_number = evidence_steps[0]['number']
+        suffix = f'/{step_number}_{DEPLOY_EVIDENCE_STEP}.txt'
+        candidates = [entry for entry in entries if entry.filename.endswith(suffix)]
+        if len(candidates) != 1 or candidates[0].file_size > 2 * 1024**2:
+            raise SyncError('Exact Deploy evidence step log is missing or ambiguous')
+        log = archive.read(candidates[0]).decode('utf-8', errors='strict')
+    except SyncError:
+        raise
+    except Exception as exc:
+        raise SyncError(f'Deploy evidence step log is invalid: {type(exc).__name__}') from exc
+    digests = re.findall(r'(?m)(?:^|\s)DEPLOY_EVIDENCE_DIGEST=(sha256:[a-f0-9]{64})(?:\s|$)', log)
+    if len(digests) != 1:
+        raise SyncError('Exact Deploy evidence digest line is missing or ambiguous')
+    return digests[0]
+
+
+def download_job_logs(job_id):
+    if not isinstance(job_id, int) or isinstance(job_id, bool) or job_id < 1:
+        raise SyncError('Deploy job ID is invalid')
+    token = os.environ.get('GITHUB_TOKEN', '')
+    if not token:
+        raise SyncError('GITHUB_TOKEN is missing: cannot verify Deploy job logs')
+    base = os.environ.get('GITHUB_API_URL', 'https://api.github.com').rstrip('/')
+    request = urllib.request.Request(f'{base}/repos/{REPOSITORY}/actions/jobs/{job_id}/logs', headers={
+        'Accept': 'application/vnd.github+json', 'Authorization': f'Bearer {token}',
+        'X-GitHub-Api-Version': '2022-11-28'})
     class SafeRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
-            # Artifact endpoints redirect to signed object storage URLs. Never
-            # forward the GitHub bearer token to a different host.
-            if urlparse(newurl).scheme != 'https':
-                raise SyncError('Result redirect must use HTTPS')
-            if urlparse(newurl).netloc != urlparse(req.full_url).netloc:
+            if urllib.parse.urlparse(newurl).scheme != 'https':
+                raise SyncError('Deploy job log redirect must use HTTPS')
+            if urllib.parse.urlparse(newurl).netloc != urllib.parse.urlparse(req.full_url).netloc:
                 return urllib.request.Request(newurl, headers={'Accept': 'application/octet-stream'})
             return super().redirect_request(req, fp, code, msg, headers, newurl)
     try:
         with urllib.request.build_opener(SafeRedirect).open(request, timeout=30) as response:
-            payload = response.read(16 * 1024**2 + 1)
-            if len(payload) > 16 * 1024**2:
-                raise SyncError('Result evidence exceeds size limit')
-            digest = matches[0].get('digest', '')
-            if not re.fullmatch(r'sha256:[a-f0-9]{64}', digest) or hashlib.sha256(payload).hexdigest() != digest[7:]:
-                raise SyncError(f'Canonical result artifact checksum mismatch for run {run_id}')
-            archive = zipfile.ZipFile(io.BytesIO(payload))
-            files = [name for name in archive.namelist() if name.endswith('.json')]
-            if len(files) != 1 or len(archive.infolist()) != 1 or archive.infolist()[0].file_size > 16 * 1024**2:
-                raise SyncError(f'Expected one JSON result in run {run_id} artifact')
-            result = json.loads(archive.read(files[0]))
-            if release_run:
-                validate_result(result, release_run['head_sha'], run_id, source_attempt)
-            return result
+            if urllib.parse.urlparse(response.geturl()).scheme != 'https':
+                raise SyncError('Deploy job log URL must use HTTPS')
+            data = response.read(MAX_DEPLOY_LOG_BYTES + 1)
+            if len(data) > MAX_DEPLOY_LOG_BYTES:
+                raise SyncError('Deploy job logs exceed compressed size limit')
+            return data
     except SyncError:
         raise
     except Exception as exc:
-        raise SyncError(f'GitHub result artifact read failed for run {run_id}: {type(exc).__name__}') from exc
+        raise SyncError(f'GitHub Deploy job log read failed: {type(exc).__name__}') from exc
+
+
+def artifact_json(run_id, *, attempt=None, sha=None, deployment_id=None):
+    """Resolve Deploy evidence by run-bound digest from GitHub logs and verify OCI content."""
+    run_id = str(run_id)
+    run = github_json(f'repos/{REPOSITORY}/actions/runs/{run_id}')
+    attempt = str(attempt or run.get('run_attempt', ''))
+    sha = sha or run.get('head_sha', '')
+    if (run.get('path') != '.github/workflows/gpoint-deploy.yml' or run.get('head_branch') != 'main'
+            or run.get('event') != 'workflow_dispatch' or str(run.get('id')) != run_id
+            or str(run.get('run_attempt')) != attempt or run.get('head_sha') != sha
+            or not re.fullmatch(r'[a-f0-9]{40}', sha) or not attempt.isdigit()):
+        raise SyncError('Unverified Deploy result workflow identity')
+    digest = deploy_evidence_digest_from_logs(run_id, attempt, sha)
+    username = os.environ.get('GHCR_READ_USERNAME') or os.environ.get('GITHUB_ACTOR', '')
+    password = os.environ.get('GHCR_READ_TOKEN') or os.environ.get('GITHUB_TOKEN', '')
+    if not username or not password:
+        raise SyncError('GHCR read credentials are missing')
+    repository = DEPLOY_EVIDENCE_REPOSITORY
+    base = f'https://ghcr.io/v2/{repository}'
+    accept = f'{OCI_MANIFEST_TYPE}, application/vnd.oci.image.index.v1+json'
+    manifest_bytes, digest_headers = ghcr_get(f'{base}/manifests/{digest}', username, password, accept, 1024 * 1024)
+    if digest_headers.get('Docker-Content-Digest') != digest or hashlib.sha256(manifest_bytes).hexdigest() != digest[7:]:
+        raise SyncError('GHCR Deploy evidence manifest digest mismatch')
+    try:
+        manifest = json.loads(manifest_bytes)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise SyncError('GHCR Deploy evidence manifest is invalid JSON') from exc
+    layers = manifest.get('layers') if isinstance(manifest, dict) else None
+    if (not isinstance(manifest, dict) or manifest.get('mediaType') != OCI_MANIFEST_TYPE
+            or manifest.get('artifactType') != DEPLOY_EVIDENCE_TYPE
+            or not isinstance(layers, list) or len(layers) != 1):
+        raise SyncError('GHCR Deploy evidence OCI artifact type or layout is invalid')
+    layer = layers[0]
+    blob_digest, blob_size = layer.get('digest', ''), layer.get('size')
+    if (layer.get('mediaType') != DEPLOY_EVIDENCE_LAYER or not re.fullmatch(r'sha256:[a-f0-9]{64}', blob_digest)
+            or not isinstance(blob_size, int) or isinstance(blob_size, bool)
+            or blob_size < 1 or blob_size > MAX_DEPLOY_EVIDENCE_BYTES):
+        raise SyncError('GHCR Deploy evidence layer descriptor is invalid')
+    blob, _ = ghcr_get(f'{base}/blobs/{blob_digest}', username, password, 'application/octet-stream', MAX_DEPLOY_EVIDENCE_BYTES)
+    if len(blob) != blob_size or hashlib.sha256(blob).hexdigest() != blob_digest[7:]:
+        raise SyncError('GHCR Deploy evidence content digest or size mismatch')
+    try:
+        result = json.loads(blob)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise SyncError('GHCR Deploy evidence layer is invalid JSON') from exc
+    if (not isinstance(result, dict) or result.get('candidateSha') != sha
+            or str(result.get('automationRunId')) != run_id or str(result.get('automationRunAttempt')) != attempt
+            or str(result.get('deployRunId')) != run_id or str(result.get('deployRunAttempt')) != attempt
+            or (deployment_id is not None and str(result.get('deploymentId')) != str(deployment_id))):
+        raise SyncError('GHCR Deploy evidence does not match the exact Deployment and workflow identity')
+    return result
 
 
 def latest_run(workflow, sha=None, successful=False):
@@ -228,13 +333,15 @@ def production_evidence():
     expected_url = f'https://github.com/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}'
     if current.get('log_url') != expected_url:
         raise SyncError('GitHub Deployment status does not link to its exact workflow attempt')
+    result = artifact_json(run_id, attempt=attempt, sha=sha, deployment_id=deployment.get('id'))
     state = {'currentProductionSha': installed_sha, 'lastReleaseStatus': current['state'].upper(),
              'serverDeployStatus': current['state'].upper(), 'workerOperationalStatus': 'VERIFIED_BY_DEPLOY' if current['state'] == 'success' else 'NOT_VERIFIED',
              'overallServiceReadiness': 'READY' if current['state'] == 'success' else 'NOT_VERIFIED',
              'dependencyCheckedAt': current.get('created_at', 'unknown')}
     manifest = {'candidateSha': sha, 'productionShaAfter': installed_sha if current['state'] == 'success' else None,
                 'status': current['state'].upper(), 'prepare': payload.get('prepare'),
-                'description': current.get('description'), 'logUrl': current.get('log_url')}
+                'description': current.get('description'), 'logUrl': current.get('log_url'),
+                'resultStatus': result.get('status')}
     run = {'id': int(run_id), 'run_attempt': int(attempt), 'head_sha': sha,
            'status': 'completed' if current['state'] in {'success', 'failure', 'error'} else 'in_progress',
            'conclusion': current['state'], 'html_url': expected_url}

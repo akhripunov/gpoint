@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
-      contents: write
+      contents: read
       actions: read
       packages: write
     outputs:
@@ -146,22 +146,25 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish exact image digests and bind them to the Prepare receipt
+      - name: Set up pinned ORAS CLI
         if: github.ref == 'refs/heads/main' && needs.coalesce.outputs.result == 'WINNER'
+        uses: oras-project/setup-oras@677529b4e7c38e3295e0883a2ee8a536e3a860f4
+        with:
+          version: 1.2.0
+      - name: Publish and read back exact GHCR artifacts
+        if: github.ref == 'refs/heads/main' && needs.coalesce.outputs.result == 'WINNER'
+        id: ghcr-publish
         env:
           CANDIDATE_SHA: ${{ github.sha }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: python3 scripts/publish_ghcr_images.py
-      - name: Verify V3 baseline has not drifted before immutable publication
+      - name: Verify V3 baseline has not drifted after receipt publication
         if: github.ref == 'refs/heads/main' && needs.coalesce.outputs.result == 'WINNER'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ github.sha }}
         run: python3 scripts/release_impact_v3.py --candidate "$CANDIDATE_SHA" --verify-receipt "$RUNNER_TEMP/gpoint-bundle/receipt.json"
-      - name: Save exact candidate images and readiness receipt
-        if: github.ref == 'refs/heads/main' && needs.coalesce.outputs.result == 'WINNER'
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python3 scripts/release_assets.py publish prepare
       - name: Owner summary
         if: always() && github.ref == 'refs/heads/main' && needs.coalesce.outputs.result == 'WINNER'
         env:

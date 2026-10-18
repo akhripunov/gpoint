@@ -36,7 +36,11 @@ export function expectedStaticParent(state) {
 }
 
 export function staticReceiptAndImages(proof, state) {
-  if (proof?.schema !== 2 || proof?.route !== 'STATIC_UI_ONLY' ||
+  if (proof?.schema !== 3 || proof?.transport !== 'ghcr-oci' ||
+      proof?.staticArtifactRoute !== 'V4_FAST_STATIC' || proof?.route !== 'STATIC_UI_ONLY' ||
+      proof.staticArtifact?.sourceSha !== proof.candidateSha ||
+      String(proof.staticArtifact?.runId) !== String(proof.runId) ||
+      String(proof.staticArtifact?.runAttempt) !== String(proof.runAttempt) ||
       proof?.productionBaselineSha !== state?.currentProductionSha ||
       !SHA.test(proof.candidateSha ?? '') ||
       !SHA.test(proof.productionBaselineSha ?? '') ||

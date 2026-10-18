@@ -1,15 +1,23 @@
 # GPoint production release flow
 
-> **Current model (ME-42):** GitHub Releases are used only for immutable
-> Prepare bundles. Production status is recorded through the GitHub Deployments
-> API. Deployment records provide workflow provenance and status; the live VPS
-> is authoritative for runtime, database, and component state. No ledger branch,
-> production tag, checked-in production-state pointer, or recovery-finalization
-> workflow is an operational source of truth. See the current model at the top
-> of [automation.md](automation.md). The procedures below this notice describe
-> the earlier design and are retained as historical reference only.
+> **Current model (ME-42, OWNER addendum):** GHCR is the only build-artifact
+> store. Prepare publishes a small immutable OCI receipt artifact bound to exact
+> source SHA, trusted Prepare run/attempt, provenance and image digests. Deploy
+> verifies that artifact by digest, pulls images by immutable digest, and checks
+> labels, platform, image/config identities and effective configuration against
+> read-only VPS facts. A separately approved V3/V4 UI-only scope may use a
+> standalone Mini App OCI artifact without building all runtime images when the
+> change is independent. GitHub Releases and Actions Artifact Storage are not
+> operational transports. Production attempt status is tracked through the same
+> GitHub Deployment record; read-only VPS/database evidence is authoritative for
+> installed state. GHCR outage, missing/tampered receipt, bad digest, or mismatch
+> blocks before Apply. Never use arbitrary old VPS images or build replacement
+> images on the VPS. Do not put database backups, secrets or `.env` files in
+> GHCR. Provenance is bound to exact successful workflow job/step logs and the
+> digest-addressed OCI readback; it is not a GitHub Artifact Attestation. The procedures below are historical only; see the current model at the
+> top of [automation.md](automation.md).
 
-## Historical design (superseded by ME-42)
+## Historical design (superseded; do not run)
 
 `scripts/release-gpoint.mjs` is the canonical release gate. It accepts only a
 40-character candidate commit SHA and is fail-closed by default.

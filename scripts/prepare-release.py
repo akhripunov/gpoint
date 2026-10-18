@@ -2,13 +2,11 @@
 """Build and rehearse Linux artifacts; only explicitly disposable Docker DBs."""
 import base64
 from contextlib import contextmanager
-import gzip
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -159,140 +157,6 @@ def disposable_migration_tenant_inventory(postgres, database):
     return ','.join(tenants)
 
 
-def verify_saved_images(archive, images, sha, temp_root):
-    """Rehearse production import/capture/parity/reuse in a private containerd store."""
-    started = time.monotonic()
-    dockerd, docker, ctr, containerd = (shutil.which(name) for name in ('dockerd', 'docker', 'ctr', 'containerd'))
-    unshare = shutil.which('unshare')
-    if not all((dockerd, docker, ctr, containerd, unshare, shutil.which('sudo'))):
-        raise RuntimeError('isolated Docker daemon prerequisites are unavailable')
-    root = Path(tempfile.mkdtemp(prefix='gpoint-image-roundtrip-', dir=temp_root))
-    socket = root / 'docker.sock'
-    pidfile = root / 'dockerd.pid'
-    log_path = root / 'dockerd.log'
-    host = f'unix://{socket}'
-    log = log_path.open('wb')
-    daemon = None
-    daemon_pid = None
-    content_daemon = None
-    content_pidfile = root / 'containerd.pid'
-    content_socket = root / 'containerd.sock'
-    try:
-        config = root / 'daemon.json'
-        config.write_text(json.dumps({'features': {'containerd-snapshotter': True}}))
-        # Own both daemons explicitly; never attach to system containerd.
-        content_daemon = subprocess.Popen(
-            ['sudo', '-n', 'env', f'PATH={os.environ["PATH"]}', 'sh', '-c',
-             'echo $$ > "$1"; shift; exec "$@"', 'gpoint-containerd', str(content_pidfile),
-             containerd, '--root', str(root / 'content'), '--state', str(root / 'content-state'),
-             '--address', str(content_socket)],
-            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        for _ in range(30):
-            if content_daemon.poll() is not None:
-                break
-            probe = subprocess.run(['sudo', '-n', ctr, '--address', str(content_socket), 'version'],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
-            if probe.returncode == 0:
-                break
-            time.sleep(1)
-        else:
-            raise RuntimeError('private containerd did not become ready')
-        if content_daemon.poll() is not None:
-            raise RuntimeError('private containerd exited before rehearsal')
-        daemon = subprocess.Popen(
-            ['sudo', '-n', 'env', f'PATH={os.environ["PATH"]}', unshare, '--net', dockerd,
-             '--config-file', str(config), '--host', host, '--data-root', str(root / 'data'),
-             '--exec-root', str(root / 'exec'), '--pidfile', str(pidfile), '--storage-driver=overlayfs',
-             '--containerd', str(content_socket), '--containerd-namespace=moby',
-             '--bridge=none', '--iptables=false', '--ip-masq=false',
-             '--ip-forward=false'],
-            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        # Wrappers always address the private daemon, even if setup-docker-action
-        # exports a Docker context. ctr must address its private managed containerd.
-        wrappers = root / 'bin'
-        wrappers.mkdir()
-        for name, command in {
-                'docker': ['sudo', '-n', docker, '--host', host],
-                'ctr': ['sudo', '-n', ctr, '--address', str(content_socket)],
-        }.items():
-            wrapper = wrappers / name
-            wrapper.write_text('#!/bin/sh\nexec ' + shlex.join(command) + ' "$@"\n')
-            wrapper.chmod(0o700)
-        client_env = dict(os.environ, PATH=f'{wrappers}:{os.environ["PATH"]}', DOCKER_HOST=host)
-        for key in ('DOCKER_CONTEXT', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH', 'DOCKER_API_VERSION'):
-            client_env.pop(key, None)
-        ready = False
-        for _ in range(90):
-            if daemon.poll() is not None:
-                break
-            probe = subprocess.run(['docker', 'info', '--format', '{{.ServerVersion}}'], env=client_env,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
-            if probe.returncode == 0:
-                ready = True
-                break
-            time.sleep(1)
-        if not ready:
-            log.flush()
-            detail = log_path.read_text(errors='replace')[-4000:]
-            raise RuntimeError(f'isolated Docker daemon did not become ready: {detail}')
-
-        info = json.loads(run('docker', 'info', '--format', '{{json .}}', env=client_env, capture=True))
-        if info['ServerVersion'] != '29.1.3' or info['Driver'] != 'overlayfs' or \
-                ['driver-type', 'io.containerd.snapshotter.v1'] not in info.get('DriverStatus', []):
-            raise RuntimeError('rehearsal must use production Docker 29.1.3/containerd/overlayfs')
-        if info.get('Containerd', {}).get('Address') != str(content_socket):
-            raise RuntimeError('rehearsal Docker is not attached to its private containerd')
-        daemon_pid = int(pidfile.read_text().strip())
-        network_inode = int(run('sudo', '-n', 'stat', '-Lc', '%i',
-                                f'/proc/{daemon_pid}/ns/net', capture=True))
-        if network_inode == os.stat('/proc/self/ns/net').st_ino:
-            raise RuntimeError('rehearsal Docker must not share the build daemon network namespace')
-        copied = root / f'gpoint-images-{sha}.tar.gz'
-        shutil.copyfile(archive, copied)
-        with copied.open('rb') as source:
-            checksum = hashlib.file_digest(source, 'sha256').hexdigest()
-        proof = root / 'proof.json'
-        proof.write_text(json.dumps({'candidateSha': sha, 'images': images, 'archiveSha256': checksum}))
-        run('node', 'scripts/rehearse-release-bundle.mjs', str(proof), sha, str(root), env=client_env)
-        print('PREPARE_IMAGE_STORE=containerd DOCKER_VERSION=29.1.3')
-        print('PREPARE_IMAGE_ROUNDTRIP=PASS')
-        elapsed = round(time.monotonic() - started, 1)
-        print(f'PREPARE_DEPLOY_REHEARSAL_SECONDS={elapsed}')
-        return {'dockerVersion': '29.1.3', 'store': 'containerd', 'snapshotter': 'overlayfs',
-                'identityRegressionRejected': ['app', 'agata'], 'seconds': elapsed}
-    finally:
-        if pidfile.exists():
-            try:
-                daemon_pid = int(pidfile.read_text().strip())
-            except (OSError, ValueError):
-                pass
-        if daemon is not None and daemon.poll() is None:
-            if daemon_pid:
-                subprocess.run(['sudo', '-n', 'kill', '-TERM', str(daemon_pid)], check=False, timeout=10)
-            try:
-                daemon.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                if daemon_pid:
-                    subprocess.run(['sudo', '-n', 'kill', '-KILL', str(daemon_pid)], check=False, timeout=10)
-                daemon.kill()
-                daemon.wait(timeout=10)
-        if content_daemon is not None and content_daemon.poll() is None:
-            if content_pidfile.exists():
-                content_pid = int(content_pidfile.read_text().strip())
-                subprocess.run(['sudo', '-n', 'kill', '-TERM', str(content_pid)], check=False, timeout=10)
-            try:
-                content_daemon.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                if content_pidfile.exists():
-                    subprocess.run(['sudo', '-n', 'kill', '-KILL', str(content_pid)], check=False, timeout=10)
-                content_daemon.kill()
-                content_daemon.wait(timeout=10)
-        log.close()
-        # dockerd runs as root on hosted runners, so its isolated scratch tree
-        # needs narrowly scoped privileged cleanup.
-        subprocess.run(['sudo', '-n', 'rm', '-rf', '--', str(root)], check=False, timeout=30)
-
-
 def prepare(sha, output, *, postgres_only=False):
     if not re.fullmatch(r"[a-f0-9]{40}", sha) or run('git', 'rev-parse', 'HEAD', capture=True) != sha:
         raise RuntimeError('candidate must match the exact checkout')
@@ -330,7 +194,7 @@ def prepare(sha, output, *, postgres_only=False):
             ('gsales_provision_gate_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_gsales_provision.py')),
             ('gsales_mac_lane_gate_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_configure_gsales_mac_lane.py')),
             ('prepare_inventory_tests', (sys.executable, '-m', 'pytest', '-q', 'tests/test_prepare_release_migration_inventory.py')),
-            ('release_asset_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_release_assets.py')),
+            ('ghcr_receipt_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_publish_ghcr_receipt.py')),
             ('artifact_cache_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_prepared_artifact_cache.py')),
             ('gsales_compose_profile_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_release_gsales_compose.py')),
         )
@@ -524,27 +388,13 @@ def prepare(sha, output, *, postgres_only=False):
             if image['Config']['Labels'].get('org.opencontainers.image.revision') != sha or image['Architecture'] != 'amd64' or image['Os'] != 'linux':
                 raise RuntimeError('candidate image parity failed')
             images[role] = {'id': image['Id'], 'revision': sha, 'platform': 'linux/amd64'}
-        archive = output / 'images.tar.gz'
-        with measured_stage('image_archive_export', timings):
-            with gzip.open(archive, 'wb', compresslevel=1) as dest:
-                proc = subprocess.Popen(['docker', 'save', f'gpoint-runtime:{sha}', f'gpoint-agata-runtime:{sha}', f'gpoint-g-sales-runtime:{sha}'], stdout=subprocess.PIPE)
-                assert proc.stdout is not None
-                while chunk := proc.stdout.read(1024 * 1024):
-                    dest.write(chunk)
-                if proc.wait(timeout=600):
-                    raise RuntimeError('image export failed')
-        with measured_stage('deploy_artifact_roundtrip', timings):
-            rehearsal = verify_saved_images(archive, images, sha, output.parent)
-        with archive.open('rb') as source:
-            digest = hashlib.file_digest(source, 'sha256').hexdigest()
         proof = {'schema': 1, 'candidateSha': sha, 'status': 'READY', 'runId': int(os.environ['GITHUB_RUN_ID']),
                  'runAttempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
-                 'gates': {name: 'PASS' for name in ['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'botImageStartup', 'deployRehearsal']},
+                 'gates': {name: 'PASS' for name in ['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'botImageStartup']},
                  'impactV3': impact,
-                 'images': images, 'archiveSha256': digest, 'prismaHead': prisma, 'agataHead': heads,
+                 'images': images, 'prismaHead': prisma, 'agataHead': heads,
                  'gsalesMigrationHead': gsales_migration.stem, 'gsalesMigrationSha256': gsales_migration_sha,
                  'prepareStages': timings,
-                 'deployRehearsal': rehearsal,
                  'applicationSmoke': 'DISPOSABLE_DB_DETERMINISTIC_PROVIDER', 'productionUserSmoke': 'NOT_RUN'}
         if impact['classification'] == 'UI_ONLY':
             proof['gates']['postgres'] = 'COVERED_UNCHANGED'

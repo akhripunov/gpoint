@@ -35,12 +35,14 @@ on:
         description: 'Durable full-cycle TASK_SCOPED_AUTO authorization; optional in preflight and required for task-scoped-auto'
         required: false
         type: string
-      image_transport:
-        description: 'Use the Prepare transport, or explicitly select its verified archive fallback before deployment starts'
-        required: true
-        default: prepared
-        type: choice
-        options: [prepared, ghcr-oci, archive]
+      prepare_receipt_digest:
+        description: 'Controller-selected immutable Prepare OCI manifest digest'
+        required: false
+        type: string
+      prepare_receipt_sha256:
+        description: 'Controller-selected Prepare receipt layer checksum'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -58,7 +60,6 @@ jobs:
       run_id: ${{ steps.select.outputs.run_id }}
       candidate: ${{ steps.select.outputs.candidate }}
       run_attempt: ${{ steps.select.outputs.run_attempt }}
-      artifact_id: ${{ steps.select.outputs.artifact_id }}
       orchestrator_run_id: ${{ steps.select.outputs.orchestrator_run_id }}
       network_retry_budget_used_seconds: ${{ steps.select.outputs.network_retry_budget_used_seconds }}
       task_authorization_id: ${{ steps.select.outputs.task_authorization_id }}
@@ -84,6 +85,9 @@ jobs:
           PREPARE_RUN_ATTEMPT: ${{ inputs.prepare_run_attempt }}
           ORCHESTRATOR_RUN_ID: ${{ inputs.orchestrator_run_id }}
           TASK_AUTHORIZATION_ID: ${{ inputs.task_authorization_id }}
+          OWNER_APPROVAL_ACTOR: ${{ github.actor }}
+          OWNER_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          OWNER_REPOSITORY: ${{ github.repository_owner }}
         run: python scripts/select-release-run.py
 
   deploy:
@@ -95,24 +99,26 @@ jobs:
     permissions:
       contents: read
       actions: read
-      packages: read
+      packages: write
       deployments: write
     outputs:
       preflight: ${{ steps.execute.outputs.preflight }}
       status: ${{ steps.execute.outputs.status }}
       execute_outcome: ${{ steps.execute.outcome }}
+      evidence_digest: ${{ steps.evidence.outputs.digest }}
       cache_prevented_download: ${{ steps.cache.outputs.cache_prevented_download }}
       bundle_download_seconds: ${{ steps.cache.outputs.bundle_download_seconds }}
     env:
       CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
       PREPARE_RUN_ID: ${{ needs.validate.outputs.run_id }}
       PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.run_attempt }}
-      PREPARE_ASSET_ID: ${{ needs.validate.outputs.artifact_id }}
-      PREPARE_ARTIFACT_ID: ${{ needs.validate.outputs.artifact_id }}
       PYTHONDONTWRITEBYTECODE: "1"
       RELEASE_MODE: ${{ inputs.mode }}
       APPROVE_PRODUCTION: ${{ inputs.approve_production }}
       TASK_AUTHORIZATION_ID: ${{ needs.validate.outputs.task_authorization_id }}
+      OWNER_APPROVAL_ACTOR: ${{ github.actor }}
+      OWNER_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+      OWNER_REPOSITORY: ${{ github.repository_owner }}
     steps:
       - name: Set private temporary evidence paths
         shell: bash
@@ -135,38 +141,61 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/select-release-run.py
-      - name: Restore or download the verified immutable artifact
+      - name: Resolve and verify exact Prepare receipt from GHCR
         id: cache
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          GHCR_READ_USERNAME: ${{ github.actor }}
+          GHCR_READ_TOKEN: ${{ github.token }}
           RELEASE_MODE: ${{ inputs.mode }}
+          EXPECTED_PREPARE_RECEIPT_DIGEST: ${{ inputs.prepare_receipt_digest }}
+          EXPECTED_PREPARE_RECEIPT_SHA256: ${{ inputs.prepare_receipt_sha256 }}
           ARTIFACT_DESTINATION: ${{ env.GPOINT_RELEASE_BUNDLE }}
-          IMAGE_TRANSPORT: ${{ inputs.image_transport }}
         run: python3 scripts/prepared_artifact_cache.py
       - name: Verify receipt, canonical preflight, apply and persist evidence
         id: execute
         env:
           CACHE_PREVENTED_DOWNLOAD: ${{ steps.cache.outputs.cache_prevented_download }}
           BUNDLE_DOWNLOAD_SECONDS: ${{ steps.cache.outputs.bundle_download_seconds }}
-          IMAGE_TRANSPORT: ${{ inputs.image_transport }}
+          GHCR_RECEIPT_DIGEST: ${{ steps.cache.outputs.receipt_digest }}
+          GPOINT_PREPARE_RECEIPT_DIGEST: ${{ steps.cache.outputs.receipt_digest }}
+          GPOINT_PREPARE_RECEIPT_SHA256: ${{ steps.cache.outputs.receipt_sha256 }}
           TASK_AUTHORIZATION_ID: ${{ needs.validate.outputs.task_authorization_id }}
           GITHUB_TOKEN: ${{ github.token }}
           GHCR_READ_USERNAME: ${{ github.actor }}
           GHCR_READ_TOKEN: ${{ github.token }}
         run: node scripts/automated-release.mjs
-      - name: Retain this run's result for inspection
+      - name: Set up ORAS for immutable deployment evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1.0.0
         with:
-          name: gpoint-deploy-result-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.RELEASE_RESULT }}
-          if-no-files-found: ignore
-          retention-days: 30
-
+          version: 1.3.0
+      - name: Publish deployment result as a GHCR OCI artifact
+        id: evidence
+        if: always()
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if [ ! -f "$RELEASE_RESULT" ]; then
+            echo 'DEPLOY_EVIDENCE=NOT_AVAILABLE'
+            exit 0
+          fi
+          set +x
+          printf '%s' "$GHCR_TOKEN" | oras login ghcr.io --username "$GHCR_USERNAME" --password-stdin
+          ref="ghcr.io/akhripunov/gpoint-deploy-evidence:deploy-${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          output=$(oras push --artifact-type application/vnd.gpoint.deploy.evidence.v1 \
+            "$ref" "$RELEASE_RESULT:application/vnd.gpoint.deploy.evidence.v1+json" --format json)
+          digest=$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')
+          case "$digest" in sha256:????????????????????????????????????????????????????????????????) ;; *) echo 'Invalid GHCR evidence digest'; exit 1 ;; esac
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "DEPLOY_EVIDENCE_DIGEST=$digest"
   publish:
     permissions:
       contents: read
       actions: read
+      packages: read
     needs: [validate, deploy]
     if: always() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -213,6 +242,9 @@ jobs:
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          GHCR_READ_USERNAME: ${{ github.actor }}
+          GHCR_READ_TOKEN: ${{ github.token }}
           RELEASE_PHASE: preflight
           RELEASE_STATUS: ${{ inputs.mode == 'preflight' && needs.deploy.outputs.preflight == 'PLANNED' && 'READY_FOR_OWNER' || (needs.deploy.outputs.preflight == 'PLANNED' && 'PASS' || needs.deploy.outputs.preflight || 'BLOCKED') }}
         run: python3 scripts/publish-release-linear.py
@@ -221,6 +253,9 @@ jobs:
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          GHCR_READ_USERNAME: ${{ github.actor }}
+          GHCR_READ_TOKEN: ${{ github.token }}
           RELEASE_PHASE: production
-          RELEASE_STATUS: ${{ needs.deploy.outputs.execute_outcome == 'success' && needs.deploy.outputs.status || 'UNCONFIRMED' }}
+          RELEASE_STATUS: ${{ needs.deploy.outputs.execute_outcome == 'success' && needs.deploy.outputs.evidence_digest != '' && needs.deploy.outputs.status || 'UNCONFIRMED' }}
         run: python3 scripts/publish-release-linear.py

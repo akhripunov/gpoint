@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {runRemoteShaList, remoteProof, classifyReleaseFailure, evaluateSafetyGates,
-  checkArtifactParity, checkEffectiveConfig,
+  checkArtifactParity, checkEffectiveConfig, checkAgataArtifactParity, checkGsalesArtifactParity,
 } from './release-gpoint.mjs';
 import {validateAgataRuntimeIdentity, planReleaseRetention, validateRuntimeIdentity} from './release-gpoint-vps-adapter.mjs';
 
@@ -46,14 +46,39 @@ test('release safety gates remain exact-SHA and artifact-parity based without pr
     recordedProductionSha: sha, liveProductionSha: sha}).some(message => /remote candidate SHA/.test(message)));
 });
 
+test('release safety gates reject a dirty candidate and every mismatched component artifact', () => {
+  assert.ok(evaluateSafetyGates({candidateSha: sha, remoteSha: sha, clean: false, artifacts, config,
+    recordedProductionSha: sha, liveProductionSha: sha}).some(message => /dirty/.test(message)));
+  for (const role of ['api', 'worker', 'bot', 'miniapp']) {
+    const changed = {...artifacts, [role]: {sourceSha: '0'.repeat(40)}};
+    assert.ok(checkArtifactParity(sha, changed).length > 0, `${role} mismatch must block`);
+  }
+  for (const role of ['agataApi', 'agataWorker'])
+    assert.ok(checkAgataArtifactParity(sha, {...artifacts, [role]: {sourceSha: '0'.repeat(40)}}).length > 0,
+      `${role} mismatch must block`);
+  for (const role of ['gsalesApi', 'gsalesAgataApi', 'gsalesAgataWorker'])
+    assert.ok(checkGsalesArtifactParity(sha, {...artifacts, [role]: {sourceSha: '0'.repeat(40)}}).length > 0,
+      `${role} mismatch must block`);
+});
+
+test('post-switch failures remain installation-unconfirmed and are not pre-Apply failures', () => {
+  const switched = classifyReleaseFailure({switchStarted: true});
+  assert.equal(switched.failureStage, 'POST_SWITCH');
+  assert.equal(switched.releaseState, 'INSTALLATION_UNCONFIRMED');
+  const migration = classifyReleaseFailure({migrationStarted: true});
+  assert.equal(migration.failureStage, 'PRE_SWITCH_DB_OR_AGATA');
+  assert.equal(migration.releaseState, 'INSTALLATION_UNCONFIRMED');
+});
+
 test('operational Deploy workflow uses Deployments API and contains no Ledger, recovery finalizer or production tag path', () => {
   const workflow = fs.readFileSync(new URL('../.github/workflows/gpoint-deploy.yml', import.meta.url), 'utf8');
   const runner = fs.readFileSync(new URL('./automated-release.mjs', import.meta.url), 'utf8');
+  const execution = fs.readFileSync(new URL('./deployment-execution.mjs', import.meta.url), 'utf8');
   const release = fs.readFileSync(new URL('./release-gpoint.mjs', import.meta.url), 'utf8');
   assert.match(workflow, /deployments: write/);
   assert.match(runner, /createGitHubDeploymentsClient/);
   assert.match(runner, /beginProductionDeployment/);
-  assert.match(runner, /state: 'success'/);
+  assert.match(execution, /state: 'success'/);
   assert.doesNotMatch(workflow + runner + release, /gpoint-release-ledger|--finalize-recovery|gpoint-production-\d/);
   assert.doesNotMatch(workflow, /^\s+environment:\s*production\s*$/m);
 });

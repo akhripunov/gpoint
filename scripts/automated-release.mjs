@@ -16,6 +16,8 @@ import { AuthorizationError, authorizationRecordPath, candidateScopeDiff,
 import { createGitHubDeploymentsClient, assertDeploymentMatchesLive, deploymentIdentity } from './github-deployments.mjs';
 import { factsFromReadOnlyInspection, initializeRunScopedState, stateFromLiveVps } from './deployment-run-state.mjs';
 import { inspectProductionReadOnly } from './release-gpoint-vps-adapter.mjs';
+import { reconcileVerifiedDeployment, reconciledResultEvidence } from './reconcile-deployment.mjs';
+import { executeProductionDeployment, deploymentResultStatus } from './deployment-execution.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const sha = process.env.CANDIDATE_SHA;
@@ -27,7 +29,7 @@ if (!['preflight', 'task-scoped-auto'].includes(mode) && process.env.TASK_AUTHOR
 const proof = verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, sha);
 if (String(proof.runId) !== process.env.PREPARE_RUN_ID) throw new Error('Receipt does not belong to the approved GitHub run');
 const selectedImageTransport = selectImageTransport(proof, process.env.IMAGE_TRANSPORT || 'prepared');
-if (selectedImageTransport === 'ghcr-oci') {
+if (selectedImageTransport === 'ghcr-oci' && proof.staticOnly !== true) {
   await verifyOciReadAccess(proof, process.env.GHCR_READ_USERNAME, process.env.GHCR_READ_TOKEN);
 }
 const runGit = (args, input, timeout) => execFileSync('git', args, { cwd: root, encoding: 'utf8', input, timeout }).trim();
@@ -65,8 +67,9 @@ process.env.GPOINT_RELEASE_STATE_FILE = liveBaseline.stateFile;
 process.env.GPOINT_RELEASE_MANIFEST_DIR = liveBaseline.manifestDir;
 process.env.GPOINT_RELEASE_LIVE_BASELINE_FILE = liveBaseline.stateFile;
 const deploymentClient = createGitHubDeploymentsClient({token: process.env.GITHUB_TOKEN});
-const deploymentBaseline = await deploymentClient.readProductionBaseline();
-assertDeploymentMatchesLive(deploymentBaseline, {runtimeSha: liveBaseline.state.currentProductionSha,
+const priorDeployment = await deploymentClient.findDeploymentForRun(process.env.GITHUB_RUN_ID);
+const deploymentBaseline = priorDeployment ? null : await deploymentClient.readProductionBaseline();
+if (!priorDeployment) assertDeploymentMatchesLive(deploymentBaseline, {runtimeSha: liveBaseline.state.currentProductionSha,
   miniappSha: liveBaseline.state.miniappSourceSha, prismaHead: liveBaseline.state.currentProductionDbHead});
 const previous = new Set(fs.readdirSync(liveBaseline.manifestDir));
 let releaseCode = 1;
@@ -76,7 +79,35 @@ let deployment = null;
 let applyStarted = false;
 let installationVerified = false;
 let finalSuccessStatusStarted = false;
+let reconciliationEvidence = null;
+let metadataReconciliationStarted = false;
 try {
+  if (priorDeployment) {
+    metadataReconciliationStarted = true;
+    deployment = priorDeployment;
+    const original = deploymentIdentity(priorDeployment);
+    const result = await reconcileVerifiedDeployment({client: deploymentClient,
+      deploymentId: priorDeployment.id, runId: process.env.GITHUB_RUN_ID,
+      currentRunAttempt: process.env.GITHUB_RUN_ATTEMPT, candidateSha: sha,
+      prepareRunId: process.env.PREPARE_RUN_ID, prepareRunAttempt: process.env.PREPARE_RUN_ATTEMPT,
+      prepareReceiptDigest: process.env.GPOINT_PREPARE_RECEIPT_DIGEST, token: process.env.GITHUB_TOKEN,
+      prepareProof: proof,
+      inspectVps: inspectProductionReadOnly});
+    installationVerified = true;
+    finalSuccessStatusStarted = true;
+    authorizationConsumed = result.originalEvidence.authorizationConsumed === true;
+    releaseCode = 0;
+    preflightStatus = 'PLANNED';
+    reconciliationEvidence = reconciledResultEvidence(result.originalEvidence, {candidateSha: sha, status: 'COMPLETE', releaseState: 'COMPLETE',
+      deploymentId: priorDeployment.id, deployRunId: original.runId, deployRunAttempt: original.runAttempt,
+      prepareRunId: original.prepareRunId, prepareRunAttempt: original.prepareRunAttempt,
+      applicationVerification: 'VPS_READBACK_VERIFIED', dbHeadAfter: liveBaseline.state.currentProductionDbHead,
+      agataDbHeadAfter: liveBaseline.state.agataAlembicHead,
+      gsalesDbHeadAfter: liveBaseline.state.gsalesMigrationHead,
+      gsalesMigrationSha256: liveBaseline.state.gsalesMigrationSha256,
+      gsalesMigrationSha256After: liveBaseline.state.gsalesMigrationSha256,
+      reconciliation: {evidenceVerified: result.evidenceVerified, liveVerified: result.liveVerified}});
+  } else {
   const preflightEnv = { ...process.env, IMAGE_TRANSPORT: selectedImageTransport,
     GPOINT_RELEASE_SKIP_BUILD: '1' };
   delete preflightEnv.GHCR_READ_TOKEN;
@@ -122,13 +153,11 @@ try {
     if (immediateVps.currentProductionSha !== liveBaseline.state.currentProductionSha
         || immediateVps.currentProductionDbHead !== liveBaseline.state.currentProductionDbHead)
       throw new Error('VPS or database baseline changed after preflight; refusing production mutation');
-    const prepareTag = `gpoint-prepare-${sha}-${process.env.PREPARE_RUN_ID}-${process.env.PREPARE_RUN_ATTEMPT}`;
-    const prepareRelease = await github(`releases/tags/${prepareTag}`);
-    const prepareAssetId = Number(process.env.PREPARE_ASSET_ID);
-    const prepareAsset = prepareRelease?.assets?.find(asset => asset.id === prepareAssetId && asset.name === 'bundle.zip');
-    if (!prepareRelease || !Number.isSafeInteger(prepareAssetId) || !prepareAsset
-        || !/^sha256:[a-f0-9]{64}$/.test(prepareAsset.digest ?? ''))
-      throw new Error('Exact immutable Prepare Release and bundle asset identity are unavailable');
+    const prepareReceiptDigest = process.env.GPOINT_PREPARE_RECEIPT_DIGEST;
+    const prepareReceiptSha256 = process.env.GPOINT_PREPARE_RECEIPT_SHA256;
+    if (!/^sha256:[a-f0-9]{64}$/.test(prepareReceiptDigest ?? '')
+        || !/^[a-f0-9]{64}$/.test(prepareReceiptSha256 ?? ''))
+      throw new Error('Exact GHCR Prepare receipt and image digest identities are unavailable');
     const workflowUrl = `https://github.com/akhripunov/gpoint/actions/runs/${process.env.GITHUB_RUN_ID}/attempts/${process.env.GITHUB_RUN_ATTEMPT}`;
     const requiredContext = 'GPoint — Prepare / prepare';
     const checkRuns = [];
@@ -143,70 +172,97 @@ try {
     const prepareCheck = checkRuns.find(check => check.name === requiredContext
       && check.status === 'completed' && check.conclusion === 'success' && check.head_sha === sha);
     if (!prepareCheck) throw new Error('Required successful exact-SHA Prepare status context is unavailable');
-    deployment = (await deploymentClient.beginProductionDeployment({candidateSha: sha,
-      runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT,
-      prepareRunId: process.env.PREPARE_RUN_ID, prepareRunAttempt: process.env.PREPARE_RUN_ATTEMPT,
-      prepareReleaseId: prepareRelease.id, prepareReleaseTag: prepareTag, prepareAssetId,
-      prepareAssetSha256: prepareAsset.digest,
-      authorizationMode: mode === 'task-scoped-auto' ? 'TASK_SCOPED_AUTO' : 'EXACT_SHA',
-      authorizationId: process.env.TASK_AUTHORIZATION_ID, logUrl: workflowUrl},
-    {requiredContexts: [requiredContext]})).deployment;
-    applyStarted = true;
-    const result = spawnSync('pnpm', ['release:gpoint', '--apply', '--candidate', sha, '--confirm-production-apply'], {
-      cwd: root, stdio: 'inherit', timeout: 1_800_000,
-    });
-    releaseCode = result.status ?? 1;
-    if (releaseCode === 0) {
-      const installed = stateFromLiveVps(factsFromReadOnlyInspection(inspectProductionReadOnly()));
-      if (installed.currentProductionSha !== sha || installed.miniappSourceSha !== sha ||
-          installed.currentProductionDbHead !== proof.prismaHead ||
-          installed.agataAlembicHead !== proof.agataHead ||
-          installed.gsalesMigrationHead !== proof.gsalesMigrationHead ||
-          installed.gsalesMigrationSha256 !== proof.gsalesMigrationSha256)
-        throw new Error('Independent post-Apply VPS readback does not match the candidate source and migration identities');
-      const records = fs.readdirSync(liveBaseline.manifestDir).map(name => JSON.parse(fs.readFileSync(path.join(liveBaseline.manifestDir, name), 'utf8')));
-      const completed = records.findLast(item => item.candidateSha === sha && item.status === 'COMPLETE');
-      if (!completed || completed.productionShaAfter !== sha)
-        throw new Error('Apply returned success without complete local install evidence');
-      installationVerified = true;
+    const staticRoute = proof.staticOnly === true;
+    let deploymentImages = proof.images;
+    let plannedManifest = null;
+    if (staticRoute) {
+      if (proof.route !== 'STATIC_UI_ONLY' || proof.staticArtifactRoute !== 'V4_FAST_STATIC')
+        throw new Error('Only the attested V4_FAST_STATIC UI route is eligible');
+      plannedManifest = fs.readdirSync(liveBaseline.manifestDir)
+        .map(name => JSON.parse(fs.readFileSync(path.join(liveBaseline.manifestDir, name), 'utf8')))
+        .find(item => item.candidateSha === sha && item.status === 'PLANNED' && item.route === 'STATIC_UI_ONLY');
+      const inherited = plannedManifest?.componentImages;
+      if (!inherited || !['app', 'agata', 'gsales'].every(role => /^sha256:[a-f0-9]{64}$/.test(inherited[role]?.imageId ?? '')))
+        throw new Error('Static route has no verified inherited runtime image identity set');
+      deploymentImages = Object.fromEntries(Object.entries(inherited).map(([role, image]) => [role, {digest: image.imageId}]));
+    } else if (!deploymentImages || !['app', 'agata', 'gsales'].every(role => /^sha256:[a-f0-9]{64}$/.test(deploymentImages[role]?.digest ?? ''))) {
+      throw new Error('Exact GHCR candidate image digest identities are unavailable');
     }
-    if (mode === 'task-scoped-auto' && releaseCode === 0) {
-      try {
+    const outcome = await executeProductionDeployment({
+      createDeployment: async () => (await deploymentClient.beginProductionDeployment({candidateSha: sha,
+        runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+        prepareRunId: process.env.PREPARE_RUN_ID, prepareRunAttempt: process.env.PREPARE_RUN_ATTEMPT,
+        prepareReceiptDigest, prepareReceiptSha256,
+        imageDigests: Object.fromEntries(Object.entries(deploymentImages).map(([role, image]) => [role, image.digest])),
+        route: staticRoute ? 'STATIC_UI_ONLY' : 'FULL_RELEASE',
+        ...(staticRoute ? {staticArtifactDigest: proof.staticArtifactDigest,
+          staticArtifactContentSha256: proof.staticArtifactSha256} : {}),
+        authorizationMode: mode === 'task-scoped-auto' ? 'TASK_SCOPED_AUTO' : 'EXACT_SHA',
+        authorizationId: process.env.TASK_AUTHORIZATION_ID, logUrl: workflowUrl},
+      {requiredContexts: [requiredContext]})).deployment,
+      apply: () => spawnSync('pnpm', ['release:gpoint', '--apply', '--candidate', sha, '--confirm-production-apply'], {
+        cwd: root, stdio: 'inherit', timeout: 1_800_000,
+      }),
+      inspectVps: () => stateFromLiveVps(factsFromReadOnlyInspection(inspectProductionReadOnly())),
+      verifyInstalled: async installed => {
+        if (staticRoute) {
+          if (installed.currentProductionSha !== proof.productionBaselineSha || installed.miniappSourceSha !== sha ||
+              installed.currentProductionDbHead !== liveBaseline.state.currentProductionDbHead ||
+              installed.agataAlembicHead !== liveBaseline.state.agataAlembicHead ||
+              installed.gsalesMigrationHead !== liveBaseline.state.gsalesMigrationHead ||
+              installed.gsalesMigrationSha256 !== liveBaseline.state.gsalesMigrationSha256)
+            throw new Error('Static UI readback changed the runtime or database baseline');
+        } else if (installed.currentProductionSha !== sha || installed.miniappSourceSha !== sha ||
+            installed.currentProductionDbHead !== proof.prismaHead || installed.agataAlembicHead !== proof.agataHead ||
+            installed.gsalesMigrationHead !== proof.gsalesMigrationHead ||
+            installed.gsalesMigrationSha256 !== proof.gsalesMigrationSha256) {
+          throw new Error('Independent post-Apply VPS readback does not match the candidate source and migration identities');
+        }
+        const records = fs.readdirSync(liveBaseline.manifestDir).map(name => JSON.parse(fs.readFileSync(path.join(liveBaseline.manifestDir, name), 'utf8')));
+        const completed = records.findLast(item => item.candidateSha === sha && item.status === 'COMPLETE');
+        if (!completed || completed.productionShaAfter !== (staticRoute ? proof.productionBaselineSha : sha)
+            || (staticRoute && completed.miniappShaAfter !== sha))
+          throw new Error('Apply returned success without complete local install evidence');
+      },
+      afterVerified: async () => {
+        if (mode !== 'task-scoped-auto') return;
         await consumeTaskAuthorization({project: 'gpoint', authorizationId: process.env.TASK_AUTHORIZATION_ID,
           candidateSha: sha, token: process.env.GITHUB_TOKEN});
         authorizationConsumed = true;
         process.env.RELEASE_AUTHORIZATION_CONSUMED = 'true';
-      } catch (error) {
-        throw new AuthorizationError('TASK_SCOPED_AUTO consumption failed after Apply; deployment remains unconfirmed', {cause: error});
+      },
+      publishStatus: (target, targetIdentity, status) => deploymentClient.publishStatus(target, targetIdentity, status),
+      identity: {candidateSha: sha, runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT},
+      candidateSha: sha, logUrl: workflowUrl,
+    });
+    deployment = outcome.deployment;
+    applyStarted = outcome.applyStarted;
+    installationVerified = outcome.installationVerified;
+    finalSuccessStatusStarted = outcome.successStatusStarted;
+    releaseCode = outcome.releaseCode;
+    if (outcome.failure) {
+      if (outcome.applyStarted && outcome.applyResult?.status !== 0) {
+        executionFailure = outcome.live
+          ? {stage: 'POST_APPLY_READBACK', executionStatus: 'FAILED',
+            diagnostic: 'Apply failed; performed independent read-only VPS inspection before publishing error status',
+            observedRuntimeSha: outcome.live.currentProductionSha,
+            observedPrismaHead: outcome.live.currentProductionDbHead}
+          : {stage: 'POST_APPLY_READBACK', executionStatus: 'BLOCKED',
+            diagnostic: 'Apply failed and independent VPS inspection was unavailable'};
+      } else {
+        executionFailure = {...outcome.failure,
+          diagnostic: sanitizeReleaseOutput(outcome.failure.diagnostic)};
       }
     }
-    if (releaseCode === 0) {
-      finalSuccessStatusStarted = true;
-      await deploymentClient.publishStatus(deployment, deploymentIdentity(deployment), {state: 'success',
-        description: `stage=complete sha=${sha.slice(0, 12)} run=${process.env.GITHUB_RUN_ID}/${process.env.GITHUB_RUN_ATTEMPT}`,
-        logUrl: workflowUrl});
-    } else {
-      try {
-        const afterFailure = stateFromLiveVps(factsFromReadOnlyInspection(inspectProductionReadOnly()));
-        executionFailure = {stage: 'POST_APPLY_READBACK', executionStatus: 'FAILED',
-          diagnostic: 'Apply failed; performed independent read-only VPS inspection before publishing error status',
-          observedRuntimeSha: afterFailure.currentProductionSha,
-          observedPrismaHead: afterFailure.currentProductionDbHead};
-      } catch (readbackError) {
-        executionFailure = {stage: 'POST_APPLY_READBACK', executionStatus: 'BLOCKED',
-          diagnostic: `Apply failed and independent VPS inspection was unavailable: ${sanitizeReleaseOutput(readbackError?.message)}`};
-      }
-      await deploymentClient.publishStatus(deployment, deploymentIdentity(deployment), {state: 'error',
-        description: `stage=post_apply sha=${sha.slice(0, 12)} run=${process.env.GITHUB_RUN_ID}/${process.env.GITHUB_RUN_ATTEMPT}`,
-        logUrl: workflowUrl});
-    }
+  }
   }
 } catch (error) {
   deployment ??= error?.deployment ?? null;
   releaseCode = 1;
-  executionFailure = {stage: applyStarted ? 'POST_APPLY_READBACK_OR_STATUS' : 'PRE_APPLY',
+  executionFailure = {stage: metadataReconciliationStarted ? 'DEPLOYMENT_RECONCILIATION' :
+    (applyStarted ? 'POST_APPLY_READBACK_OR_STATUS' : 'PRE_APPLY'),
     executionStatus: 'FAILED', diagnostic: sanitizeReleaseOutput(error?.message)};
-  if (deployment && (!installationVerified || !finalSuccessStatusStarted)) {
+  if (!metadataReconciliationStarted && deployment && (!installationVerified || !finalSuccessStatusStarted)) {
     try {
       const logUrl = `https://github.com/akhripunov/gpoint/actions/runs/${process.env.GITHUB_RUN_ID}/attempts/${process.env.GITHUB_RUN_ATTEMPT}`;
       await deploymentClient.publishStatus(deployment, deploymentIdentity(deployment), {state: applyStarted ? 'error' : 'failure',
@@ -221,16 +277,16 @@ try {
   })).filter(record => record.data.candidateSha === sha);
   const setupStates = new Set(['CONFIG_PROVISION_BASELINE_RECORDED', 'GSales_CONFIG_PROVISIONED', 'WORKER_CONFIGURED']);
   const attempt = (mode === 'preflight' ? records : records.filter(r => r.data.status !== 'PLANNED' && !setupStates.has(r.data.status))).at(-1);
-  let evidence = attempt?.data ?? { candidateSha: sha, status: 'BLOCKED', productionRef: null };
-  const status = mode === 'task-scoped-auto' && evidence.status === 'COMPLETE' && !authorizationConsumed
-      ? 'INSTALLATION_UNCONFIRMED' : evidence.status;
+  let evidence = reconciliationEvidence ?? attempt?.data ?? { candidateSha: sha, status: 'BLOCKED', productionRef: null };
+  const status = deploymentResultStatus({evidenceStatus: evidence.status, mode, authorizationConsumed,
+    deploymentExists: Boolean(deployment), installationVerified,
+    successStatusConfirmed: releaseCode === 0 && finalSuccessStatusStarted && !executionFailure});
   fs.writeFileSync(process.env.RELEASE_RESULT, JSON.stringify({ ...withPreflightEvidence(evidence, preflightStatus, mode),
     mode,
     status,
     ...(executionFailure ? {executionFailure} : {}),
     releaseState: mode === 'preflight' && evidence.status === 'PLANNED' ? 'READY_FOR_OWNER' :
-      ['production', 'task-scoped-auto'].includes(mode) && evidence.status === 'COMPLETE' ?
-        (mode === 'task-scoped-auto' && !authorizationConsumed ? 'INSTALLATION_UNCONFIRMED' : 'COMPLETE') : evidence.status,
+      ['production', 'task-scoped-auto'].includes(mode) && evidence.status === 'COMPLETE' ? status : evidence.status,
     authorizationMode: mode === 'task-scoped-auto' ? 'TASK_SCOPED_AUTO' : 'EXACT_SHA',
     authorizationId: process.env.TASK_AUTHORIZATION_ID ?? null,
     authorizationSourceInstructionId: taskAuthorization?.sourceInstructionIdentifier ?? null,
@@ -248,6 +304,9 @@ try {
     operator: process.env.GITHUB_ACTOR, automationRunId: process.env.GITHUB_RUN_ID, automationRunAttempt: process.env.GITHUB_RUN_ATTEMPT,
     applicationVerification: mode === 'preflight' ? 'NOT_DEPLOYED' :
       installationVerified ? 'VPS_READBACK_VERIFIED' : 'NOT_VERIFIED',
+    deploymentId: deployment?.id ?? null,
+    deployRunId: deployment ? deploymentIdentity(deployment).runId : process.env.GITHUB_RUN_ID,
+    deployRunAttempt: deployment ? deploymentIdentity(deployment).runAttempt : process.env.GITHUB_RUN_ATTEMPT,
   }, null, 2) + '\n');
   if (process.env.GITHUB_OUTPUT) {
     fs.appendFileSync(process.env.GITHUB_OUTPUT,

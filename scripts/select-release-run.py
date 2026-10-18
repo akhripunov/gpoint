@@ -11,7 +11,6 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from release_assets import resolve_asset, find_prepare_evidence
 from network_retry import NetworkUnavailable, RetryBudget, retry_network_read
 
 REPO = 'akhripunov/gpoint'
@@ -68,6 +67,12 @@ def validate_request(sha, ref, mode, approval):
         raise RuntimeError('TASK_SCOPED_AUTO uses its durable authorization record, not the exact-SHA approval input')
 
 
+def validate_owner_approval(mode, actor, triggering_actor, repository_owner):
+    if mode == 'production' and (not repository_owner or actor != repository_owner
+                                 or triggering_actor != repository_owner):
+        raise RuntimeError('Exact-SHA production approval must be dispatched and triggered by the repository OWNER')
+
+
 def validate_expected_run(selected, expected_run, expected_attempt):
     expected_run, expected_attempt = (expected_run or '').strip(), (expected_attempt or '').strip()
     if bool(expected_run) != bool(expected_attempt):
@@ -90,6 +95,9 @@ def main():
     if orchestrator_run_id and not orchestrator_run_id.isdigit():
         raise RuntimeError('Automatic orchestrator run ID is invalid')
     validate_request(sha, os.environ.get('GITHUB_REF'), os.environ.get('RELEASE_MODE'), os.environ.get('APPROVE_PRODUCTION'))
+    validate_owner_approval(os.environ.get('RELEASE_MODE'), os.environ.get('OWNER_APPROVAL_ACTOR', ''),
+                            os.environ.get('OWNER_TRIGGERING_ACTOR', ''),
+                            os.environ.get('OWNER_REPOSITORY', ''))
     current_main_sha = github('git/ref/heads/main')['object']['sha']
     validate_current_main(sha, current_main_sha)
     authorization_id = os.environ.get('TASK_AUTHORIZATION_ID', '').strip()
@@ -108,18 +116,14 @@ def main():
         raise RuntimeError('Task authorization ID is only valid for task-scoped-auto or linked preflight mode')
     runs = github(f'actions/workflows/gpoint-prepare.yml/runs?branch=main&head_sha={sha}&per_page=100')['workflow_runs']
     selected = select_run(sha, runs)
-    executed_attempt, asset = find_prepare_evidence(
-        sha, str(selected['id']), str(selected.get('run_attempt', 1)), github)
-    # Preserve GitHub's actual workflow run attempt for audit while pinning
-    # the immutable bundle to the attempt which executed Prepare.
-    selected = {**selected, 'run_attempt': int(executed_attempt)}
     expected_run = os.environ.get('PREPARE_RUN_ID')
     expected_attempt = os.environ.get('PREPARE_RUN_ATTEMPT')
     validate_expected_run(selected, expected_run, expected_attempt)
     # Production/task-scoped Deploy performs the read-only preflight on the Mac
     # immediately before apply. A separate diagnostic preflight is optional.
     with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-        output.write(f"run_id={selected['id']}\nrun_attempt={selected.get('run_attempt', 1)}\nartifact_id={asset['id']}\ncandidate={sha}\n")
+        output.write(f"run_id={selected['id']}\nrun_attempt={selected.get('run_attempt', 1)}\ncandidate={sha}\n")
+        output.write(f"receipt_tag=prepare-{sha}-{selected['id']}-{selected.get('run_attempt', 1)}\n")
         output.write(f'orchestrator_run_id={orchestrator_run_id}\n')
         output.write(f'task_authorization_id={authorization_id}\n')
         state = os.environ.get('NETWORK_RETRY_BUDGET_STATE')

@@ -189,7 +189,7 @@ class ImmutableReleaseTests(unittest.TestCase):
         prepare = workflow.split('  prepare:\n', 1)[1].split('    steps:\n', 1)[0]
         self.assertIn("github.ref == 'refs/heads/main'", prepare)
         self.assertNotIn("github.ref != 'refs/heads/main'", prepare)
-        self.assertIn('permissions:\n      contents: write\n      actions: read\n      packages: write', prepare)
+        self.assertIn('permissions:\n      contents: read\n      actions: read\n      packages: write', prepare)
 
     def test_privileged_prepare_checkout_does_not_persist_write_credentials(self):
         workflow = (ROOT / '.github/workflows/gpoint-prepare.yml').read_text()
@@ -218,21 +218,13 @@ class ImmutableReleaseTests(unittest.TestCase):
         sha, _, _, github = self.fixture()
         self.assertEqual(ASSETS.resolve_asset('prepare', sha, '55', '2', 'bundle.zip', github)['id'], 99)
 
-    def test_oci_prepare_download_bundle_is_receipt_only_and_archive_is_separate_fallback(self):
-        import json
-        import tempfile
-        import zipfile
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source = root / 'source'
-            source.mkdir()
-            (source / 'receipt.json').write_text(json.dumps({'schema': 3, 'transport': 'ghcr-oci'}))
-            (source / 'images.tar.gz').write_bytes(b'fallback image archive')
-            primary, fallback = ASSETS.build_oci_prepare_assets(source, root)
-            with zipfile.ZipFile(primary) as archive:
-                self.assertEqual(archive.namelist(), ['receipt.json'])
-            with zipfile.ZipFile(fallback) as archive:
-                self.assertEqual(set(archive.namelist()), {'receipt.json', 'images.tar.gz'})
+    def test_operational_prepare_has_no_release_or_archive_transport(self):
+        workflow = (ROOT / '.github/workflows/gpoint-prepare.yml').read_text()
+        source = (ROOT / 'scripts/prepare-release.py').read_text()
+        publisher = (ROOT / 'scripts/publish_ghcr_images.py').read_text()
+        self.assertNotIn('release_assets.py publish', workflow)
+        self.assertNotIn('images.tar.gz', source + publisher)
+        self.assertNotIn('fallback-images.zip', source + publisher)
 
     def test_draft_mutable_tag_mismatch_and_moved_tag_are_rejected(self):
         for field, value in [('draft', True), ('immutable', False), ('tag_name', 'wrong')]:
@@ -270,13 +262,7 @@ class ImmutableReleaseTests(unittest.TestCase):
                 ASSETS.release_tag(*args)
 
     def test_read_result_passes_immutable_asset_size_to_range_downloader(self):
-        import prepared_artifact_cache as cache
-        asset = {'id': 72, 'size': 1234, 'digest': 'sha256:' + 'b' * 64}
-        with patch.object(ASSETS, 'find_deploy_evidence', return_value=('2', asset)), \
-             patch.object(cache, 'download', side_effect=RuntimeError('stop after downloader call')) as download:
-            with self.assertRaisesRegex(RuntimeError, 'stop after downloader call'):
-                ASSETS.read_result('a' * 40, '55', '2', result_path='/tmp/result.json', token='unused')
-        self.assertEqual(download.call_args.kwargs['expected_size'], 1234)
+        self.assertFalse(hasattr(ASSETS, 'read_result'))
 
     def test_stale_deploy_result_from_previous_attempt_cannot_be_republished(self):
         data = {'candidateSha': 'a'*40, 'automationRunId': '55', 'automationRunAttempt': '1'}
@@ -483,12 +469,11 @@ class ImmutableReleaseTests(unittest.TestCase):
     def test_ci_never_requires_repository_administration_permission(self):
         source = (ROOT / 'scripts/release_assets.py').read_text()
         self.assertNotIn("github('immutable-releases')", source)
-        self.assertIn('resolve_asset(kind, sha, run_id, attempt, archive.name, github)', source)
+        self.assertNotIn('gh(\'release\',', source)
 
     def test_github_release_publisher_rejects_every_non_prepare_release(self):
-        for kind in ('evidence', 'rehearsal'):
-            with self.subTest(kind=kind), self.assertRaisesRegex(RuntimeError, 'reserved for immutable Prepare'):
-                ASSETS.publish(kind, 'a' * 40, '1', '1')
+        self.assertFalse(hasattr(ASSETS, 'publish'))
+        self.assertFalse(hasattr(ASSETS, 'build_oci_prepare_assets'))
 
     def test_deploy_workflow_uses_deployments_statuses_without_release_catalog_or_environment_job(self):
         workflow = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()
@@ -496,7 +481,9 @@ class ImmutableReleaseTests(unittest.TestCase):
         self.assertIn('deployments: write', workflow)
         self.assertIn('createGitHubDeploymentsClient', runner)
         self.assertIn('beginProductionDeployment', runner)
-        self.assertIn("state: 'success'", runner)
+        execution = (ROOT / 'scripts/deployment-execution.mjs').read_text()
+        self.assertIn('executeProductionDeployment', runner)
+        self.assertIn("state: 'success'", execution)
         self.assertNotIn('release_assets.py publish evidence', workflow)
         self.assertNotIn('gpoint-release-ledger', workflow + runner)
         self.assertNotRegex(workflow, re.compile(r'^\s+environment:\s*production\s*$', re.M))

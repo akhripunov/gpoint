@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GPoint-only immutable Release assets, independent of Actions storage quota."""
+"""Read-only legacy Release evidence helpers; current releases use GHCR OCI artifacts."""
 import json
 import base64
 import hashlib
@@ -14,9 +14,7 @@ import socket
 import stat
 import subprocess
 import sys
-import tempfile
 import time
-import zipfile
 import urllib.request
 import urllib.error
 
@@ -418,30 +416,6 @@ def _write_evidence_with_readback(label, write, read, is_complete, is_conflict, 
 
 
 
-def write_zip(target, files):
-    with zipfile.ZipFile(target, 'w', compression=zipfile.ZIP_STORED) as archive:
-        for name, source in files:
-            if source.is_symlink() or not source.is_file():
-                raise RuntimeError('Release input must be a regular file')
-            archive.write(source, name)
-
-
-def build_oci_prepare_assets(bundle, output_dir):
-    """Keep the normal Deploy asset small; retain the verified archive separately for fallback."""
-    bundle, output_dir = Path(bundle), Path(output_dir)
-    receipt_path = bundle / 'receipt.json'
-    archive_path = bundle / 'images.tar.gz'
-    receipt = json.loads(receipt_path.read_text())
-    if (receipt.get('schema') != 3 or receipt.get('transport') != 'ghcr-oci'
-            or not archive_path.is_file() or archive_path.is_symlink()):
-        raise RuntimeError('OCI Prepare receipt or fallback archive is invalid')
-    primary = output_dir / 'bundle.zip'
-    fallback = output_dir / 'fallback-images.zip'
-    write_zip(primary, [('receipt.json', receipt_path)])
-    write_zip(fallback, [('images.tar.gz', archive_path), ('receipt.json', receipt_path)])
-    return primary, fallback
-
-
 def verified_optional_v4_static_asset(receipt, bundle, sha):
     """Only accept standalone static asset explicitly attested by V3 receipt."""
     if 'staticArtifactSha256' not in receipt:
@@ -449,7 +423,6 @@ def verified_optional_v4_static_asset(receipt, bundle, sha):
             raise RuntimeError('Partial V4 static artifact identity is prohibited')
         return None
     from release_ui_artifact_v4 import verify_bundle
-    from prepared_artifact_cache import checksum
     static = bundle / 'miniapp.zip'
     expected = receipt.get('staticArtifactSha256')
     expected_route = ('V4_FAST_STATIC' if receipt.get('schema') == 2 else 'V4_ADVISORY_ONLY')
@@ -459,103 +432,15 @@ def verified_optional_v4_static_asset(receipt, bundle, sha):
             receipt.get('staticArtifactRoute') != expected_route or
             not re.fullmatch(r'[a-f0-9]{64}', expected or '')):
         raise RuntimeError('V4 static candidate receipt scope or identity invalid')
-    if not static.is_file() or static.is_symlink() or checksum(static) != expected:
+    if (not static.is_file() or static.is_symlink() or
+            hashlib.sha256(static.read_bytes()).hexdigest() != expected):
         raise RuntimeError('V4 static candidate archive mismatch')
     verify_bundle(static, sha)
     return static
 
 
-def publish(kind, sha, run_id, attempt):
-    if kind != 'prepare':
-        raise RuntimeError('GitHub Releases are reserved for immutable Prepare artifacts')
-    checkout_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
-    if os.environ.get('GITHUB_REPOSITORY') != REPO or os.environ.get('GITHUB_SHA') != sha:
-        raise RuntimeError('Only exact GPoint workflow source may publish assets')
-    if checkout_sha != sha:
-        raise RuntimeError('Release publisher checkout differs from candidate')
-    tag = release_tag(kind, sha, run_id, attempt)
-    with tempfile.TemporaryDirectory(prefix='gpoint-release-assets-') as temporary:
-        root = Path(temporary)
-        bundle = Path(os.environ['RUNNER_TEMP']) / 'gpoint-bundle'
-        receipt = json.loads((bundle / 'receipt.json').read_text())
-        if (receipt.get('candidateSha') != sha or str(receipt.get('runId')) != run_id
-                or str(receipt.get('runAttempt')) != attempt or receipt.get('status') != 'READY'):
-            raise RuntimeError('Prepare receipt candidate mismatch')
-        archives = []
-        if receipt.get('schema') == 2:
-            if receipt.get('route') != 'STATIC_UI_ONLY':
-                raise RuntimeError('unknown V4 Prepare receipt route')
-            static = verified_optional_v4_static_asset(receipt, bundle, sha)
-            if static is None:
-                raise RuntimeError('V4 static bundle missing')
-            target = root / 'bundle.zip'
-            write_zip(target, [('miniapp.zip', bundle / 'miniapp.zip'), ('receipt.json', bundle / 'receipt.json')])
-            archives.append(target)
-        elif receipt.get('schema') == 3:
-            if receipt.get('transport') != 'ghcr-oci':
-                raise RuntimeError('unknown OCI Prepare receipt transport')
-            archives.extend(build_oci_prepare_assets(bundle, root))
-        else:
-            target = root / 'bundle.zip'
-            write_zip(target, [('images.tar.gz', bundle / 'images.tar.gz'), ('receipt.json', bundle / 'receipt.json')])
-            archives.append(target)
-            static = verified_optional_v4_static_asset(receipt, bundle, sha)
-            if static is not None:
-                archives.append(static)
-        # New tag and new draft only: never overwrite or silently reuse a release.
-        gh('api', '--method', 'POST', f'repos/{REPO}/git/refs',
-           '-f', f'ref=refs/tags/{tag}', '-f', f'sha={sha}')
-        gh('release', 'create', tag, '--repo', REPO, '--verify-tag', '--draft',
-           '--title', tag, '--notes', f'Exact SHA {sha}; workflow run {run_id}, attempt {attempt}.')
-        gh('release', 'upload', tag, '--repo', REPO, *map(str, archives))
-        gh('release', 'edit', tag, '--repo', REPO, '--draft=false', '--latest=false')
-        for archive in archives:
-            asset = resolve_asset(kind, sha, run_id, attempt, archive.name, github)
-            from prepared_artifact_cache import checksum
-            if asset['digest'] != 'sha256:' + checksum(archive):
-                raise RuntimeError('Published immutable asset checksum differs from local archive')
-        print(f'IMMUTABLE_RELEASE=PASS TAG={tag}')
-
-def read_result(sha, run_id, attempt, result_path=None, token=None):
-    from prepared_artifact_cache import download, extract, checksum
-    source_attempt, asset = find_deploy_evidence(sha, run_id, attempt)
-    result = Path(result_path or os.environ['RELEASE_RESULT'])
-    if result_path is None and os.environ.get('GITHUB_ENV'):
-        result = result.with_name(f'gpoint-release-result-{run_id}-{source_attempt}.json')
-    token = token or os.environ['GITHUB_TOKEN']
-    with tempfile.TemporaryDirectory(prefix='gpoint-result-') as temporary:
-        archive = Path(temporary) / 'result.zip'
-        download(REPO, asset['id'], token, archive, release_asset=True,
-                 expected_size=asset.get('size'))
-        if checksum(archive) != asset['digest'][7:]:
-            raise RuntimeError('Immutable result ZIP checksum mismatch')
-        name = f'gpoint-release-result-{run_id}-{source_attempt}.json'
-        extracted = Path(temporary) / 'result'
-        extract(archive, extracted, [name])
-        validate_result(json.loads((extracted / name).read_text()), sha, run_id, source_attempt)
-        result.parent.mkdir(parents=True, exist_ok=True)
-        if result.is_symlink():
-            raise RuntimeError('Result destination must not be a symlink')
-        result.write_bytes((extracted / name).read_bytes())
-        if result_path is None and os.environ.get('GITHUB_ENV'):
-            with open(os.environ['GITHUB_ENV'], 'a') as stream:
-                stream.write(f'RELEASE_RESULT={result}\n')
-                stream.write(f'RELEASE_EVIDENCE_ATTEMPT={source_attempt}\n')
-        print(f'RELEASE_EVIDENCE_ATTEMPT={source_attempt}')
-
-
-
 def main():
-    sha = os.environ.get('CANDIDATE_SHA', os.environ.get('GITHUB_SHA', ''))
-    run_id, attempt = os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT']
-    if sys.argv[1] == 'publish':
-        if len(sys.argv) != 3 or sys.argv[2] != 'prepare':
-            raise RuntimeError('Only immutable Prepare artifacts may be published as GitHub Releases')
-        publish('prepare', sha, run_id, attempt)
-    elif sys.argv[1] == 'read-result':
-        read_result(sha, run_id, attempt)
-    else:
-        raise RuntimeError('Unknown release asset command')
+    raise RuntimeError('GitHub Release asset operations are retired; use the GHCR-only GPoint workflow')
 
 
 if __name__ == '__main__':

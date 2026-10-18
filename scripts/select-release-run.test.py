@@ -11,10 +11,12 @@ SHA = 'a' * 40
 class PrepareSelectorTests(unittest.TestCase):
     def test_selects_newest_successful_prepare_for_exact_main_sha(self):
         runs = [
-            {'id': 1, 'head_sha': SHA, 'head_branch': 'main', 'event': 'push', 'path': '.github/workflows/gpoint-prepare.yml', 'status': 'completed', 'conclusion': 'success'},
-            {'id': 2, 'head_sha': SHA, 'head_branch': 'feature', 'event': 'push', 'status': 'completed', 'conclusion': 'success'},
+            {'id': 1, 'run_attempt': 1, 'head_sha': SHA, 'head_branch': 'main', 'event': 'push', 'path': '.github/workflows/gpoint-prepare.yml', 'status': 'completed', 'conclusion': 'success'},
+            {'id': 2, 'run_attempt': 1, 'head_sha': SHA, 'head_branch': 'feature', 'event': 'push', 'status': 'completed', 'conclusion': 'success'},
         ]
-        self.assertEqual(SELECTOR.select_run(SHA, runs)['id'], 1)
+        selected = SELECTOR.select_run(SHA, runs)
+        self.assertEqual(selected['id'], 1)
+        self.assertEqual(selected['run_attempt'], 1)
 
     def test_newer_failed_prepare_blocks_older_success(self):
         runs = [
@@ -25,7 +27,7 @@ class PrepareSelectorTests(unittest.TestCase):
             SELECTOR.select_run(SHA, runs)
 
     def test_foreign_sha_or_event_cannot_supply_prepare(self):
-        runs = [{'id': 1, 'head_sha': 'b' * 40, 'head_branch': 'main', 'event': 'push', 'status': 'completed', 'conclusion': 'success'}]
+        runs = [{'id': 1, 'head_sha': 'b' * 40, 'head_branch': 'main', 'event': 'schedule', 'status': 'completed', 'conclusion': 'success'}]
         with self.assertRaisesRegex(RuntimeError, 'No preparation'):
             SELECTOR.select_run(SHA, runs)
 
@@ -37,12 +39,9 @@ class PrepareSelectorTests(unittest.TestCase):
     def test_request_requires_exact_main_and_authorized_mode(self):
         SELECTOR.validate_request(SHA, 'refs/heads/main', 'preflight', 'false')
         SELECTOR.validate_request(SHA, 'refs/heads/main', 'production', 'true')
-        for args in [
-            ('bad', 'refs/heads/main', 'preflight', 'false'),
-            (SHA, 'refs/heads/feature', 'preflight', 'false'),
-            (SHA, 'refs/heads/main', 'production', 'false'),
-            (SHA, 'refs/heads/main', 'recovery-finalization', 'true'),
-        ]:
+        for args in [('bad', 'refs/heads/main', 'preflight', 'false'),
+                     (SHA, 'refs/heads/feature', 'preflight', 'false'),
+                     (SHA, 'refs/heads/main', 'production', 'false')]:
             with self.subTest(args=args), self.assertRaises(RuntimeError):
                 SELECTOR.validate_request(*args)
 
