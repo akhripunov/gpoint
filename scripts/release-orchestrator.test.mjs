@@ -4,10 +4,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
-import {dispatchPrepare, findTaskAuthorization, validateEvent, OrchestrationError, taskAutoClaimRef} from './release-orchestrator.mjs';
+import {dispatchPrepare as dispatchPrepareImpl, findTaskAuthorization, validateEvent, OrchestrationError, taskAutoClaimRef} from './release-orchestrator.mjs';
 import {ownerTaskCommitmentSha256, candidateScopeDiff, validateTaskAuthorization} from './release-authorization.mjs';
 
 const sha = 'a'.repeat(40);
+const fakeReceipt = async () => ({receiptDigest:`sha256:${'d'.repeat(64)}`, receiptSha256:'e'.repeat(64)});
+let receiptResolver = fakeReceipt;
+const dispatchPrepare = (...args) => dispatchPrepareImpl(...args, receiptResolver);
 const event = (change = {}) => ({repository:{full_name:'akhripunov/gpoint'}, workflow_run:{id:123,run_attempt:2,
   head_sha:sha,head_branch:'main',status:'completed',conclusion:'success',event:'push',path:'.github/workflows/gpoint-prepare.yml',...change}});
 
@@ -21,8 +24,6 @@ function apiFixture({candidateSha = sha, existingClaimSha = null} = {}) {
     if(path==='actions/runs/123/attempts/1') return {run_attempt:1,run_started_at:'2026-10-14T04:38:31Z'};
     if(path==='actions/runs/123/attempts/2/jobs?per_page=100') return {total_count:1,jobs:[{name:'prepare',status:'completed',conclusion:'success',head_sha:candidateSha,started_at:'2026-10-14T04:51:40Z',completed_at:'2026-10-14T04:52:20Z'}]};
     if(path==='actions/runs/123/attempts/1/jobs?per_page=100') return {total_count:1,jobs:[{name:'prepare',status:'completed',conclusion:'success',head_sha:candidateSha,started_at:'2026-10-14T04:38:34Z',completed_at:'2026-10-14T04:46:48Z'}]};
-    if(path.startsWith('releases/tags/')) return {tag_name:path.split('/').at(-1),draft:false,immutable:true,assets:[{id:456,name:'bundle.zip',state:'uploaded',size:100,digest:`sha256:${'b'.repeat(64)}`}]};
-    if(path.startsWith('git/ref/tags/gpoint-prepare-')) return {object:{type:'commit',sha:candidateSha}};
     if(path.includes('actions/workflows/gpoint-deploy.yml/runs')) return {workflow_runs:[]};
     if(path.startsWith('git/ref/tags/gpoint-task-auth/')) { if(claimed)return {object:{type:'commit',sha:existingClaimSha ?? candidateSha}}; const e=new OrchestrationError('missing');e.status=404;throw e; }
     if(path==='git/refs') {if(claimed){const e=new OrchestrationError('duplicate');e.status=422;throw e;} claimed=true;return {};}
@@ -44,8 +45,10 @@ test('Prepare without durable full-cycle authorization leaves exact-SHA path and
   const {api,calls}=apiFixture();
   const result=await dispatchPrepare(event(),api,'987');
   assert.equal(result.state,'OWNER_EXACT_SHA_APPROVAL_REQUIRED');
+  assert.equal(result.receiptDigest,`sha256:${'d'.repeat(64)}`);
   assert.equal(calls.some(item=>item.path==='git/refs'),false);
   assert.equal(calls.some(item=>item.path.endsWith('/dispatches')),false);
+  assert.equal(calls.some(item=>item.path.includes('releases/')),false);
 });
 test('ambiguous authorization never dispatches production',async()=>{
   const {api,calls}=apiFixture();
@@ -61,7 +64,8 @@ test('Prepare with one full-cycle authorization claims once and dispatches the e
   assert.equal(taskAutoClaimRef(authorizationId),`refs/tags/gpoint-task-auth/${authorizationId}/claimed`);
   const dispatch=calls.find(item=>item.path.endsWith('/dispatches'));
   assert.deepEqual(dispatch.body,{ref:'main',inputs:{candidate:sha,mode:'task-scoped-auto',approve_production:'false',
-    prepare_run_id:'123',prepare_run_attempt:'2',orchestrator_run_id:'987',task_authorization_id:authorizationId}});
+    prepare_run_id:'123',prepare_run_attempt:'2',prepare_receipt_digest:`sha256:${'d'.repeat(64)}`,
+    prepare_receipt_sha256:'e'.repeat(64),orchestrator_run_id:'987',task_authorization_id:authorizationId}});
 });
 test('an existing task claim allows a fresh exact-main Prepare candidate to retry within the same authorization',async()=>{
   const newSha='c'.repeat(40); const oldSha='b'.repeat(40);
@@ -104,68 +108,31 @@ test('duplicate Prepare event is blocked while a Deploy is active',async()=>{
   await assert.rejects(dispatchPrepare(event(),activeApi,'988',process.cwd(),lookup),/Deploy workflow is active/);
   assert.equal(calls.filter(item=>item.path.endsWith('/dispatches')).length,1);
 });
-test('publish-only rerun uses earlier real Prepare job and exact immutable bundle',async()=>{
+test('publish-only rerun selects the Prepare attempt that actually ran and uses its GHCR receipt',async()=>{
   const {api,calls}=apiFixture();
   const wrapped=async(method,path,body)=>{
-    if(path==='releases/tags/gpoint-prepare-'+sha+'-123-2'){
-      const e=new OrchestrationError('missing');e.status=404;throw e;
-    }
     if(path==='actions/runs/123/attempts/2/jobs?per_page=100')
       return {total_count:1,jobs:[{name:'prepare',status:'completed',conclusion:'success',head_sha:sha,
         started_at:'2026-10-14T04:38:34Z',completed_at:'2026-10-14T04:46:48Z'}]};
     return api(method,path,body);
   };
-  const result=await dispatchPrepare(event(),wrapped,'987');
+  const seen=[];
+  const result=await dispatchPrepareImpl(event(),wrapped,'987',process.cwd(),undefined,async (...args)=>{
+    seen.push(args); return fakeReceipt();
+  });
   assert.equal(result.prepareRunAttempt,'1');
-  assert.equal(result.tag,`gpoint-prepare-${sha}-123-1`);
-  assert.equal(calls.some(x=>x.path.endsWith('/dispatches')),false);
+  assert.equal(result.tag,`prepare-${sha}-123-1`);
+  assert.deepEqual(seen,[[sha,'123','1']]);
+  assert.equal(calls.some(x=>x.path.includes('releases/')),false);
 });
-test('new Prepare execution without immutable evidence blocks preflight',async()=>{
-  const {api}=apiFixture();
-  const wrapped=async(method,path,body)=>{
-    if(path==='releases/tags/gpoint-prepare-'+sha+'-123-2'){
-      const e=new OrchestrationError('missing');e.status=404;throw e;
-    }
-    return api(method,path,body);
-  };
-  await assert.rejects(dispatchPrepare(event(),wrapped),/Executed Prepare has no immutable bundle/);
-});
-test('immutable Prepare release accepts the exact bundle plus archive-fallback asset set',async()=>{
-  const {api}=apiFixture();
-  const wrapped=async(method,path,body)=>{
-    const result=await api(method,path,body);
-    if(path.startsWith('releases/tags/')) result.assets.push({id:457,name:'fallback-images.zip',state:'uploaded',
-      size:200,digest:`sha256:${'c'.repeat(64)}`});
-    return result;
-  };
-  const result=await dispatchPrepare(event(),wrapped);
-  assert.equal(result.state,'OWNER_EXACT_SHA_APPROVAL_REQUIRED');
-});
-test('immutable Prepare release rejects missing, duplicate, invalid or unexpected assets',async()=>{
-  const bundle={id:456,name:'bundle.zip',state:'uploaded',size:100,digest:`sha256:${'b'.repeat(64)}`};
-  const fallback={id:457,name:'fallback-images.zip',state:'uploaded',size:200,digest:`sha256:${'c'.repeat(64)}`};
-  const invalidSets=[
-    [fallback],
-    [bundle,bundle,fallback],
-    [bundle,fallback,fallback],
-    [bundle,{...fallback,name:'unexpected.zip'}],
-    [bundle,{...fallback,digest:'sha256:invalid'}],
-  ];
-  for (const assets of invalidSets) {
-    const {api}=apiFixture();
-    const wrapped=async(method,path,body)=>{
-      const result=await api(method,path,body);
-      if(path.startsWith('releases/tags/')) result.assets=assets;
-      return result;
-    };
-    await assert.rejects(dispatchPrepare(event(),wrapped),OrchestrationError);
-  }
-});
-test('mutable or draft releases fail closed',async()=>{
-  for(const patch of [{immutable:false},{draft:true}]) {
-    const {api}=apiFixture(); const original=api;
-    const wrapped=async(method,path,body)=>{const result=await original(method,path,body);if(path.startsWith('releases/tags/'))Object.assign(result,patch);return result;};
-    await assert.rejects(dispatchPrepare(event(),wrapped),/immutable and published/);
+test('missing or tampered GHCR receipt evidence blocks automatic Deploy',async()=>{
+  for (const resolver of [async()=>{throw new Error('GHCR outage');},
+    async()=>({receiptDigest:'latest',receiptSha256:'e'.repeat(64)}),
+    async()=>({receiptDigest:`sha256:${'d'.repeat(64)}`,receiptSha256:'bad'})]) {
+    const {api,calls}=apiFixture();
+    await assert.rejects(dispatchPrepareImpl(event(),api,'987',process.cwd(),undefined,resolver),OrchestrationError);
+    assert.equal(calls.some(item=>item.path.endsWith('/dispatches')),false);
+    assert.equal(calls.some(item=>item.path==='git/refs'),false);
   }
 });
 

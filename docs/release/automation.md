@@ -2,23 +2,44 @@
 
 ## Текущая модель выпуска и состояния (ME-42)
 
-Этот раздел является единственным актуальным описанием модели состояния после
-ME-42. Инструкции ниже сохранены как историческая документация прежней
-архитектуры; упоминания Ledger, production tags, production Release evidence,
-Recovery Diagnostics/Finalization и файлового production state не являются
-действующими процедурами и не должны запускаться или использоваться как источник
-операционного состояния.
+Этот раздел является единственным действующим описанием хранения артефактов и
+production state после OWNER addendum ME-42. Все разделы ниже него — исторические
+сведения о прежних процедурах; их команды и инструкции не запускать.
 
-- **Prepare:** успешный Prepare workflow публикует неизменяемый bundle в
-  отдельном GitHub Release, привязанном к точным commit SHA, run ID и attempt.
-  Это единственное назначение GitHub Releases. В Release допускаются только
-  Prepare assets и их проверяемые checksums/provenance.
+- **Единое хранилище build artifacts — GHCR.** GitHub Releases и Actions Artifact
+  Storage не используются в действующем Prepare/Deploy transport. Prepare
+  публикует малый OCI receipt artifact в GHCR. Доверенная цепочка provenance
+  состоит из exact GitHub run/attempt, успешного Prepare job и publisher step,
+  единственной записи digest в publisher logs, затем повторного чтения manifest
+  и layer по digest с проверкой hash/size. Это run-bound evidence, а не
+  криптографическая GitHub Artifact Attestation. Receipt связывает точный source SHA,
+  тесты и provenance,
+  digest-и runtime images, а также migration/static metadata. Deploy принимает
+  только OCI artifact по проверенному digest и проверяет всю цепочку provenance;
+  moving tags, подмена digest, неизвестный source/run/attempt или неполная
+  публикация блокируют Apply.
+- **Runtime images и Mini App:** Deploy получает проверенные GHCR images только
+  по immutable digest и сверяет receipt, labels, platform, image/config IDs и
+  эффективную конфигурацию с независимо прочитанным состоянием VPS. Для
+  отдельно одобренного V3/V4 UI-only scope допускается самостоятельный Mini App
+  OCI artifact; если UI изменение действительно независимо от runtime, Prepare
+  не собирает все три Docker images. GHCR outage/tampering блокирует до Apply.
+  Нельзя собирать новые application images на VPS или подменять недоступный
+  artifact произвольным старым образом. Сохранять только проверенные
+  production-compatible rollback images и действующие rollback safety gates.
+- **Состав receipt и запретные данные:** receipt содержит только необходимые
+  provenance/identity и безопасные metadata. Не загружать в GHCR backup БД,
+  secrets, `.env`, production payloads или private user data. `fallback-images.zip`
+  и `images.tar.gz` не являются действующим транспортом сборок.
 - **Production attempt:** один точный Apply связан с записью GitHub Deployment
   для среды `production`. Статусы этого же Deployment обновляются по GitHub
   Deployments REST API и содержат точный candidate SHA, Prepare provenance,
   workflow run/attempt, authorization identity, stage/result и ссылку на run.
   API timeout/неизвестный ответ требует read-back той же записи; он никогда не
   разрешает повторный Apply или создание второго Deployment для обхода ошибки.
+  Для повторного запуска того же workflow допустима только read-only проверка
+  исходного attempt и публикация исправленного статуса в ту же Deployment;
+  Apply не повторяется.
 - **Фактическое production состояние:** read-only инспекция VPS и БД является
   авторитетной для запущенного SHA, Mini App/Worker и остальных компонентов,
   image IDs, health, migration heads и сохранности данных. GitHub Deployment
@@ -33,7 +54,15 @@ Recovery Diagnostics/Finalization и файлового production state не я
 - **Recovery/failure:** ошибки и неопределённые исходы остаются в status того же
   Deployment с точным run URL и описанием. Разрешены read-only проверки и
   публикация статуса на том же Deployment. Новая Apply попытка возможна лишь
-  после доказанного VPS baseline и обычной авторизации/гейтов.
+  после доказанного VPS baseline и обычной авторизации/гейтов. При API
+  неоднозначности, двойном запуске, damaged/missing receipt, неверном digest,
+  незавершённой публикации или несовпадении readback действие fail-closed;
+  нельзя обходить ошибку fallback архивом или загружать образ с VPS.
+- **Экономия Prepare:** удалены экспорт `images.tar.gz`, архивная проверка и
+  публикация/чтение GitHub Release assets. Исторический run оценивал эти этапы
+  примерно в 90 секунд суммарно; это не замер новой схемы. Вместо них остаются
+  публикация/чтение OCI receipt и точные digest/hash проверки. Полный экономический
+  эффект не измерялся, поскольку Actions не запускались.
 - **Запрещённые operational state stores:** не читать и не записывать
   `gpoint-release-ledger`, production tags, `docs/release/state/production.json`
   или отдельный production Release catalog для выбора baseline, проверки
@@ -42,12 +71,14 @@ Recovery Diagnostics/Finalization и файлового production state не я
   оркестратор.
 
 Точные механизмы, разрешения и тестируемые контракты реализованы в текущих
-workflow/scripts и проверяются отдельно. Эта задача не даёт права на публикацию,
-GitHub Actions запуск, production API write или Deploy.
+workflow/scripts и проверяются отдельно. Эта документация не даёт права на
+публикацию, GitHub Actions запуск, GHCR write, production API write или Deploy.
 
 ## Исторические процедуры (заменены ME-42)
 
-Ниже — архивный текст прежнего дизайна; он не является инструкцией к запуску.
+Ниже — архивный текст прежнего дизайна, включая GitHub Releases, Actions
+artifacts, ledger и устаревшие команды; это не инструкция к запуску и не
+операционный fallback. При конфликте действует только текущий раздел выше.
 
 ## Два режима разрешения выпуска
 
@@ -127,7 +158,7 @@ linux/amd64, revision label и rootfs diff IDs. Неизвестный descripto
 
 GitHub credentials, VPS key и production env не входят в архив и не сохраняются в Linear. Логи публикации не содержат текст пользовательских сообщений и raw production environment. Secret `LINEAR_API_KEY` предоставляется только шагу публикации; его отсутствие явно ломает публикацию, а не выдаёт ложный READY.
 
-## Первичная настройка Dev/владельцем
+## Историческая настройка runner и release transport (не запускать)
 
 1. Убедиться, что GitHub Actions включён для приватного репозитория. Проверить Settings → Secrets and variables → Actions: repository secret `LINEAR_API_KEY` должен иметь доступ к двум существующим документам. Сам key в GitHub/чат/Linear не публиковать. Старый workflow AGENTS использует тот же secret, но его наличие и работоспособность нужно подтвердить успешной публикацией.
 2. На Mac в Settings → Actions → Runners → New self-hosted runner выбрать macOS и архитектуру `uname -m`. Скачать официальный runner, проверить SHA256 по команде GitHub. Установить вне репозитория, например `~/Library/Application Support/GPoint/release-runner`. При регистрации задать рабочую папку без пробелов: `--work "$HOME/.local/share/gpoint-release-work"`. Runner хранит временные shell scripts внутри рабочей папки; пробел в стандартном `Application Support/.../_work` ломает их запуск. На текущем Mac рабочая папка уже настроена в `~/.local/share/gpoint-release-work`.
@@ -136,7 +167,7 @@ GitHub credentials, VPS key и production env не входят в архив и
 5. PATH сервиса должен содержать рабочие `node`, `pnpm` и `python3`, а git — читать подтверждённые known_hosts. Проверить отдельные GPoint SSH/SCP runners, key/env, Mac worker status. Не менять Incy/DNS/hosts. Сравнить установленный `gpoint_mac_worker.py` с исходником кандидата; при изменении worker Dev обновляет его опубликованным исходником по штатному installer перед релизом. Автоматизация должна блокироваться при несовпадении.
 6. Первый запуск Prepare обязан быть зелёным, включая Linear. Выпуск нового application candidate разрешается владельцем отдельно; установка автоматизации не является разрешением произвольного production apply.
 
-## Команды для Dev
+## Исторические команды для Dev (не запускать без актуальной процедуры)
 
 Каноническая ручная диагностика сохраняется:
 
@@ -165,7 +196,7 @@ python3 scripts/release-preflight-benchmark.py --owner-start '<ISO timestamp wit
 после merge требуется успешный Prepare exact current main.
 
 
-## Бесплатное хранение сборок и evidence
+## Историческая схема хранения сборок (заменена GHCR; не запускать)
 
 Для сопоставимого benchmark отдельно фиксируйте commit/push, Prepare,
 automatic controller, Deploy preflight/apply/verify и публикацию результата в

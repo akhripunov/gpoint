@@ -37,14 +37,21 @@ function validateIdentity(identity) {
   for (const key of ['runId', 'runAttempt', 'prepareRunId', 'prepareRunAttempt']) {
     requireThat(POSITIVE_ID.test(String(identity?.[key] ?? '')), `exact ${key} is required for a production Deployment`);
   }
-  requireThat(typeof identity.prepareReleaseId === 'number' && Number.isSafeInteger(identity.prepareReleaseId)
-    && identity.prepareReleaseId > 0, 'immutable Prepare Release ID is required');
-  requireThat(typeof identity.prepareReleaseTag === 'string' && identity.prepareReleaseTag.length > 0,
-    'immutable Prepare Release tag is required');
-  requireThat(typeof identity.prepareAssetId === 'number' && Number.isSafeInteger(identity.prepareAssetId)
-    && identity.prepareAssetId > 0, 'immutable Prepare asset ID is required');
-  requireThat(typeof identity.prepareAssetSha256 === 'string' && /^sha256:[a-f0-9]{64}$/.test(identity.prepareAssetSha256),
-    'immutable Prepare asset SHA-256 is required');
+  requireThat(typeof identity.prepareReceiptDigest === 'string' && /^sha256:[a-f0-9]{64}$/.test(identity.prepareReceiptDigest),
+    'exact GHCR Prepare receipt digest is required');
+  requireThat(typeof identity.prepareReceiptSha256 === 'string' && /^[a-f0-9]{64}$/.test(identity.prepareReceiptSha256),
+    'GHCR Prepare receipt content checksum is required');
+  requireThat(identity.imageDigests && ['app', 'agata', 'gsales'].every(role =>
+    typeof identity.imageDigests[role] === 'string' && /^sha256:[a-f0-9]{64}$/.test(identity.imageDigests[role])),
+  'exact GHCR image digest set is required');
+  const route = identity.route ?? 'FULL_RELEASE';
+  if (route === 'STATIC_UI_ONLY') {
+    requireThat(/^sha256:[a-f0-9]{64}$/.test(identity.staticArtifactDigest ?? '')
+      && /^[a-f0-9]{64}$/.test(identity.staticArtifactContentSha256 ?? ''),
+    'STATIC_UI_ONLY Deployment requires its exact static OCI artifact identity');
+  } else {
+    requireThat(route === 'FULL_RELEASE', 'production Deployment route is invalid');
+  }
   requireThat(['EXACT_SHA', 'TASK_SCOPED_AUTO'].includes(identity.authorizationMode),
     'production Deployment authorization mode is invalid');
   if (identity.authorizationMode === 'TASK_SCOPED_AUTO')
@@ -55,15 +62,19 @@ function validateIdentity(identity) {
 
 export function deploymentPayload(identity) {
   validateIdentity(identity);
+  const route = identity.route ?? 'FULL_RELEASE';
   return {
     schema: DEPLOYMENT_SCHEMA,
     repository: REPOSITORY,
     candidateSha: identity.candidateSha,
     workflow: {runId: String(identity.runId), attempt: String(identity.runAttempt),
       url: identity.logUrl},
-    prepare: {releaseId: identity.prepareReleaseId, tag: identity.prepareReleaseTag,
-      runId: String(identity.prepareRunId), attempt: String(identity.prepareRunAttempt),
-      assetId: identity.prepareAssetId, assetSha256: identity.prepareAssetSha256 ?? null},
+    prepare: {runId: String(identity.prepareRunId), attempt: String(identity.prepareRunAttempt),
+      receiptDigest: identity.prepareReceiptDigest, receiptSha256: identity.prepareReceiptSha256,
+      imageDigests: identity.imageDigests,
+      ...(route === 'STATIC_UI_ONLY' ? {staticArtifact: {
+        digest: identity.staticArtifactDigest, contentSha256: identity.staticArtifactContentSha256}} : {})},
+    route,
     authorization: {mode: identity.authorizationMode, id: identity.authorizationId ?? null},
   };
 }
@@ -73,9 +84,11 @@ export function deploymentIdentity(deployment) {
   requireThat(payload?.schema === DEPLOYMENT_SCHEMA, 'Deployment identity payload is unavailable');
   return {candidateSha: deployment.sha, runId: String(payload.workflow.runId),
     runAttempt: String(payload.workflow.attempt), prepareRunId: String(payload.prepare.runId),
-    prepareRunAttempt: String(payload.prepare.attempt), prepareReleaseId: payload.prepare.releaseId,
-    prepareReleaseTag: payload.prepare.tag, prepareAssetId: payload.prepare.assetId,
-    prepareAssetSha256: payload.prepare.assetSha256,
+    prepareRunAttempt: String(payload.prepare.attempt), prepareReceiptDigest: payload.prepare.receiptDigest,
+    prepareReceiptSha256: payload.prepare.receiptSha256, imageDigests: payload.prepare.imageDigests,
+    route: payload.route,
+    staticArtifactDigest: payload.prepare.staticArtifact?.digest,
+    staticArtifactContentSha256: payload.prepare.staticArtifact?.contentSha256,
     authorizationMode: payload.authorization.mode, authorizationId: payload.authorization.id,
     logUrl: payload.workflow.url};
 }
@@ -88,7 +101,7 @@ function isSameAttempt(deployment, identity) {
     && String(payload.workflow?.attempt) === String(identity.runAttempt);
 }
 
-function validateDeploymentRecord(deployment, sha = null) {
+function validateDeploymentRecord(deployment, sha = null, {allowLegacyPayload = false} = {}) {
   requireThat(deployment && Number.isSafeInteger(deployment.id) && deployment.id > 0,
     'GitHub Deployment record has no valid ID');
   requireThat(deployment.environment === PRODUCTION_ENVIRONMENT
@@ -99,9 +112,13 @@ function validateDeploymentRecord(deployment, sha = null) {
   requireThat(SHA40.test(deployment.sha ?? '') && (!sha || deployment.sha === sha) && deployment.ref === deployment.sha,
     'GitHub Deployment does not point to its exact full candidate SHA');
   const payload = parsePayload(deployment.payload);
+  if (allowLegacyPayload && payload?.schema !== DEPLOYMENT_SCHEMA) return payload;
   requireThat(payload?.schema === DEPLOYMENT_SCHEMA && payload.repository === REPOSITORY
     && payload.candidateSha === deployment.sha && payload.workflow?.runId && payload.workflow?.attempt
-    && payload.prepare?.releaseId && payload.prepare?.tag,
+    && payload.prepare?.receiptDigest && payload.prepare?.receiptSha256 && payload.prepare?.imageDigests
+    && ['FULL_RELEASE', 'STATIC_UI_ONLY'].includes(payload.route)
+    && (payload.route !== 'STATIC_UI_ONLY' || /^sha256:[a-f0-9]{64}$/.test(payload.prepare?.staticArtifact?.digest ?? '')
+      && /^[a-f0-9]{64}$/.test(payload.prepare?.staticArtifact?.contentSha256 ?? '')),
   'GitHub Deployment provenance payload is incomplete or mismatched');
   return payload;
 }
@@ -165,23 +182,51 @@ export function createGitHubDeploymentsClient({token, fetchImpl = globalThis.fet
     throw new DeploymentApiError('GitHub Deployment status list exceeded its pagination limit');
   }
 
+  async function getDeployment(deploymentId) {
+    requireThat(Number.isSafeInteger(deploymentId) && deploymentId > 0, 'Deployment ID is invalid');
+    const deployment = await request('GET', `deployments/${deploymentId}`);
+    validateDeploymentRecord(deployment);
+    return deployment;
+  }
+
+  async function findDeploymentForRun(runId) {
+    requireThat(POSITIVE_ID.test(String(runId ?? '')), 'workflow run ID is invalid');
+    const matches = [];
+    for (const item of await listDeployments()) {
+      const payload = parsePayload(item.payload);
+      // Historical deployments predate the evidence schema. Ignore them while
+      // scanning; a record claiming this run must still validate completely.
+      if (String(payload?.workflow?.runId ?? '') !== String(runId)) continue;
+      validateDeploymentRecord(item);
+      matches.push(item);
+    }
+    if (matches.length > 1) throw new DeploymentApiError('Multiple production Deployments exist for this workflow run');
+    return matches[0] ?? null;
+  }
+
   async function latestStatus(deployment) {
     const statuses = await listStatuses(deployment.id);
     if (!statuses.length) throw new DeploymentApiError(`GitHub Deployment ${deployment.id} has no readable current status`);
-    return statuses.reduce((latest, status) => {
+    for (const status of statuses) {
       if (!status || !['queued', 'pending', 'in_progress', 'success', 'failure', 'error', 'inactive'].includes(status.state))
         throw new DeploymentApiError(`GitHub Deployment ${deployment.id} has an invalid status`);
       if (!status.created_at || !Number.isFinite(Date.parse(status.created_at)))
         throw new DeploymentApiError(`GitHub Deployment ${deployment.id} status timestamp is invalid`);
-      return Date.parse(status.created_at) > Date.parse(latest.created_at) ? status : latest;
-    });
+    }
+    const latestAt = Math.max(...statuses.map(status => Date.parse(status.created_at)));
+    const newest = statuses.filter(status => Date.parse(status.created_at) === latestAt);
+    const signature = status => JSON.stringify([status.state, status.description ?? null,
+      status.log_url ?? null, status.environment_url ?? null]);
+    if (new Set(newest.map(signature)).size !== 1)
+      throw new DeploymentApiError(`GitHub Deployment ${deployment.id} has conflicting statuses at the latest timestamp`);
+    return newest[0];
   }
 
   async function readProductionBaseline() {
     const deployments = await listDeployments();
     if (!deployments.length) return {historyExists: false, baselineSha: null, deploymentId: null,
       status: null, preApplyFailure: false};
-    for (const deployment of deployments) validateDeploymentRecord(deployment);
+    for (const deployment of deployments) validateDeploymentRecord(deployment, null, {allowLegacyPayload: true});
     const ordered = [...deployments].sort((a, b) => Date.parse(b.created_at ?? '') - Date.parse(a.created_at ?? ''));
     const observedStatuses = new Map();
     for (const deployment of ordered) {
@@ -305,7 +350,7 @@ export function createGitHubDeploymentsClient({token, fetchImpl = globalThis.fet
     return {deployment, baseline, inProgress};
   }
 
-  return {listDeployments, listStatuses, latestStatus, readProductionBaseline,
+  return {listDeployments, listStatuses, latestStatus, getDeployment, findDeploymentForRun, readProductionBaseline,
     beginProductionDeployment, publishStatus};
 }
 

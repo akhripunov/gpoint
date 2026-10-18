@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {join, resolve} from 'node:path';
 import {authorizationRecordPath, candidateScopeDiff, validateTaskAuthorization} from './release-authorization.mjs';
+import {spawnSync} from 'node:child_process';
+import {tmpdir} from 'node:os';
 
 export const REPOSITORY = 'akhripunov/gpoint';
 export const PREPARE_PATH = '.github/workflows/gpoint-prepare.yml';
@@ -83,7 +85,28 @@ export function makeApi(token, fetchImpl = fetch) {
   };
 }
 
-export async function executedPrepareBundle(api, run) {
+export function resolvePrepareReceipt(sha, runId, attempt, env = process.env) {
+  const directory = fs.mkdtempSync(join(tmpdir(), 'gpoint-auto-prepare-'));
+  try {
+    const result = spawnSync('python3', ['scripts/prepared_artifact_cache.py'], {
+      cwd: process.cwd(), encoding: 'utf8', timeout: 120_000,
+      env: {...env, CANDIDATE_SHA: sha, PREPARE_RUN_ID: runId, PREPARE_RUN_ATTEMPT: attempt,
+        ARTIFACT_DESTINATION: directory, RELEASE_MODE: 'preflight',
+        GHCR_READ_USERNAME: env.GITHUB_ACTOR ?? 'github-actions[bot]',
+        GHCR_READ_TOKEN: env.GITHUB_TOKEN ?? '', GITHUB_TOKEN: env.GITHUB_TOKEN ?? ''},
+    });
+    if (result.status !== 0) throw new OrchestrationError('Exact Prepare receipt GHCR readback or run-log provenance verification failed');
+    const evidence = JSON.parse(fs.readFileSync(join(directory, 'ghcr-evidence.json'), 'utf8'));
+    if (evidence.runLogProvenance !== 'PASS' ||
+        evidence.manifestDigest !== result.stdout.match(/GHCR_RECEIPT_DIGEST=(sha256:[a-f0-9]{64})/)?.[1])
+      throw new OrchestrationError('Exact Prepare receipt transport evidence is incomplete');
+    return {receiptDigest: evidence.manifestDigest, receiptSha256: evidence.receiptSha256};
+  } finally {
+    fs.rmSync(directory, {recursive: true, force: true});
+  }
+}
+
+export async function executedPrepareBundle(api, run, resolveReceipt = resolvePrepareReceipt) {
   const sha = run.head_sha;
   const runId = String(run.id);
   const attemptCount = Number(run.run_attempt);
@@ -97,7 +120,6 @@ export async function executedPrepareBundle(api, run) {
     return ms;
   };
   for (let number = attemptCount; number >= 1; number--) {
-    const tag = `gpoint-prepare-${sha}-${runId}-${number}`;
     const details = await api('GET', `actions/runs/${runId}/attempts/${number}`);
     const jobs = await api('GET', `actions/runs/${runId}/attempts/${number}/jobs?per_page=100`);
     if (String(details.run_attempt) !== String(number) || !Array.isArray(jobs.jobs) ||
@@ -112,56 +134,37 @@ export async function executedPrepareBundle(api, run) {
     const actualStart = epoch(job.started_at);
     const actualEnd = epoch(job.completed_at);
     if (actualEnd < actualStart) throw new OrchestrationError('Invalid Prepare job chronology');
-    let release;
-    try { release = await api('GET', `releases/tags/${tag}`); }
-    catch (error) { if (error.status !== 404) throw error; }
-    if (!release) {
-      if (actualStart < started && actualEnd <= started) continue;
-      throw new OrchestrationError('Executed Prepare has no immutable bundle');
-    }
-    if (actualStart < started) throw new OrchestrationError('Prepare artifact attempt does not match executed job');
-    if (release.tag_name !== tag || release.draft !== false || release.immutable !== true) {
-      throw new OrchestrationError('Prepare release is not immutable and published');
-    }
-    const ref = await api('GET', `git/ref/tags/${tag}`);
-    if (ref.object?.type !== 'commit' || ref.object?.sha !== sha) throw new OrchestrationError('Prepare tag source mismatch');
-    const assets = release.assets ?? [];
-    const bundleAssets = assets.filter(asset => asset.name === 'bundle.zip');
-    const fallbackAssets = assets.filter(asset => asset.name === 'fallback-images.zip');
-    const expectedAssetCount = fallbackAssets.length ? 2 : 1;
-    if (assets.length !== expectedAssetCount || bundleAssets.length !== 1 || fallbackAssets.length > 1) {
-      throw new OrchestrationError('Prepare release asset set is incomplete or unexpected');
-    }
-    for (const asset of assets) {
-      if (!/^\d+$/.test(String(asset.id ?? '')) || asset.state !== 'uploaded' || !Number.isSafeInteger(asset.size)
-          || asset.size <= 0 || !/^sha256:[a-f0-9]{64}$/.test(asset.digest ?? '')) {
-        throw new OrchestrationError('Prepare asset digest/provenance is invalid');
-      }
-    }
-    return {tag, asset: bundleAssets[0], fallbackAsset: fallbackAssets[0] ?? null, sourceAttempt: String(number)};
+    if (actualStart < started && actualEnd <= started) continue;
+    let receipt;
+    try { receipt = await resolveReceipt(sha, runId, String(number)); }
+    catch { throw new OrchestrationError('Executed Prepare has no trusted GHCR receipt and run-log provenance'); }
+    if (!/^sha256:[a-f0-9]{64}$/.test(receipt?.receiptDigest ?? '') ||
+        !/^[a-f0-9]{64}$/.test(receipt?.receiptSha256 ?? ''))
+      throw new OrchestrationError('Prepare GHCR receipt digest provenance is invalid');
+    return {tag: `prepare-${sha}-${runId}-${number}`, ...receipt, sourceAttempt: String(number)};
   }
-  throw new OrchestrationError('No executed immutable Prepare bundle');
+  throw new OrchestrationError('No executed trusted Prepare GHCR receipt');
 }
 
-async function verifiedPrepare(api, eventRun) {
+async function verifiedPrepare(api, eventRun, resolveReceipt = resolvePrepareReceipt) {
   const sha = eventRun.head_sha;
   if ((await api('GET', 'git/ref/heads/main')).object?.sha !== sha) throw new OrchestrationError('Prepare candidate is no longer current main');
   const run = await api('GET', `actions/runs/${eventRun.id}`);
   for (const key of ['head_sha', 'head_branch', 'status', 'conclusion', 'event', 'path', 'run_attempt']) {
     if (String(run[key]) !== String(eventRun[key])) throw new OrchestrationError('Prepare run metadata changed');
   }
-  const {tag, asset, sourceAttempt} = await executedPrepareBundle(api, eventRun);
+  const {tag, receiptDigest, receiptSha256, sourceAttempt} = await executedPrepareBundle(api, eventRun, resolveReceipt);
   const active = await api('GET', `actions/workflows/gpoint-deploy.yml/runs?branch=main&per_page=100`);
   if ((active.workflow_runs ?? []).some(item => ['queued', 'in_progress', 'waiting', 'pending'].includes(item.status))) {
     throw new OrchestrationError('A GPoint Deploy workflow is active');
   }
-  return {sha, tag, asset, sourceAttempt};
+  return {sha, tag, receiptDigest, receiptSha256, sourceAttempt};
 }
 
 export async function dispatchPrepare(payload, api, orchestratorRunId = process.env.GITHUB_RUN_ID ?? '',
-  repoRoot = process.cwd(), authorizationLookup = findTaskAuthorization) {
+  repoRoot = process.cwd(), authorizationLookup = findTaskAuthorization, resolveReceipt = resolvePrepareReceipt) {
   const run = validateEvent(payload);
-  const {sha, tag, asset, sourceAttempt} = await verifiedPrepare(api, run);
+  const {sha, tag, receiptDigest, receiptSha256, sourceAttempt} = await verifiedPrepare(api, run, resolveReceipt);
   const authorization = await authorizationLookup(repoRoot, sha, api);
   if (authorization.ambiguous) {
     return {state: 'TASK_AUTHORIZATION_AMBIGUOUS', candidateSha: sha,
@@ -170,7 +173,7 @@ export async function dispatchPrepare(payload, api, orchestratorRunId = process.
   if (!authorization.authorizationId) {
     return {state: 'OWNER_EXACT_SHA_APPROVAL_REQUIRED', candidateSha: sha,
       prepareRunId: String(run.id), prepareRunAttempt: sourceAttempt, tag,
-      assetId: String(asset.id), assetSha256: asset.digest.slice(7)};
+      receiptDigest, receiptSha256};
   }
   const active = await api('GET', `actions/workflows/${DEPLOY_PATH.split('/').at(-1)}/runs?branch=main&per_page=100`);
   if ((active.workflow_runs ?? []).some(item => ['queued', 'in_progress', 'waiting', 'pending'].includes(item.status))) {
@@ -194,6 +197,7 @@ export async function dispatchPrepare(payload, api, orchestratorRunId = process.
     await api('POST', `actions/workflows/${DEPLOY_PATH.split('/').at(-1)}/dispatches`, {ref: 'main', inputs: {
       candidate: sha, mode: 'task-scoped-auto', approve_production: 'false',
       prepare_run_id: String(run.id), prepare_run_attempt: String(sourceAttempt),
+      prepare_receipt_digest: receiptDigest, prepare_receipt_sha256: receiptSha256,
       orchestrator_run_id: orchestratorRunId, task_authorization_id: authorization.authorizationId,
     }});
   } catch {

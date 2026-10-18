@@ -74,14 +74,18 @@ class UnifiedReleaseV1ContractTests(unittest.TestCase):
         prepare = workflow.split("  prepare:\n", 1)[1].split("    steps:\n", 1)[0]
         self.assertIn("github.ref == 'refs/heads/main'", prepare)
         self.assertIn("needs.coalesce.result == 'success'", prepare)
-        self.assertIn("permissions:\n      contents: write\n      actions: read\n      packages: write", prepare)
+        self.assertIn("permissions:\n      contents: read\n      actions: read\n      packages: write", prepare)
         self.assertIn("docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9", workflow)
 
     def test_deploy_workflow_keeps_preflight_and_apply_in_project_executor(self):
         config = load_project_config(ROOT / "scripts" / "unified_release_v1" / "project.json")
         workflow = (ROOT / config["deploy_workflow"]).read_text()
         self.assertIn("gpoint-production", workflow)
-        self.assertIn("IMAGE_TRANSPORT", workflow)
+        self.assertIn("prepare_receipt_digest", workflow)
+        self.assertIn("packages: write", workflow)
+        self.assertNotIn("image_transport", workflow)
+        self.assertNotIn("actions/upload-artifact", workflow)
+        self.assertNotIn("actions/download-artifact", workflow)
         release = (ROOT / "scripts" / "release-gpoint.mjs").read_text()
         self.assertIn("--dry-run", release)
         self.assertIn("preflight", release.lower())

@@ -651,7 +651,7 @@ function runStaticDryRun(candidate, bundle) {
 function runDryRun(candidate) {
   const staticBundle = process.env.GPOINT_RELEASE_BUNDLE
     ? verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, candidate) : null;
-  if (staticBundle?.staticOnly) die('static-only Prepare artifacts are disabled until a full VPS and Deployment baseline is verified');
+  if (staticBundle?.staticOnly) return runStaticDryRun(candidate, staticBundle);
   const startedAt = isoNow();
   const releaseId = `gpoint-dry-run-${startedAt.replace(/[-:.]/g, '')}`;
   const unlock = acquireLock(releaseId);
@@ -680,6 +680,102 @@ function runDryRun(candidate) {
       gsalesMigrationSha256Before: baseline.facts.LIVE_GSALES_MIGRATION_SHA256 });
     const file = writeManifest(manifest);
     console.log(JSON.stringify({ status: 'PLANNED', releaseId, candidateSha: candidate, remoteMainSha: proof.mainSha, buildCheckoutSha: build.checkoutSha, buildCheckoutClean: build.clean, dbHead: liveDbHead, rollbackSha: current.currentProductionSha, manifest: path.relative(ROOT, file) }, null, 2));
+  } finally { unlock(); }
+}
+
+function runStaticApply(candidate, bundle) {
+  if (bundle.staticArtifactRoute !== 'V4_FAST_STATIC' || !bundle.staticOnly ||
+      !bundle.archive || !/^sha256:[a-f0-9]{64}$/.test(bundle.staticArtifactDigest ?? '') ||
+      !/^[a-f0-9]{64}$/.test(bundle.staticArtifactSha256 ?? ''))
+    die('V4 static Apply requires the exact GHCR-attested V4_FAST_STATIC artifact');
+  const current = state();
+  const releaseId = `gpoint-static-release-${isoNow().replace(/[-:.]/g, '')}`;
+  const unlock = acquireLock(releaseId);
+  let switchStarted = false;
+  let checked = null;
+  const startedAt = isoNow();
+  try {
+    const initial = assertLiveBaseline(current, readLiveFacts());
+    if (initial.liveSha !== bundle.productionBaselineSha)
+      die('V4 static baseline changed before Apply');
+    checked = requireV4StaticPreflight(candidate, bundle, current);
+    recheckTaskAuthorizationBeforeMutation(candidate, 'V4_STATIC_STAGE');
+    const outcome = applyStaticArtifactV4({
+      candidate, baseline: current.currentProductionSha, bundle,
+      images: checked.parent.images, sourceRoot: ROOT, upload,
+      runRemote: runRemoteCommand,
+      healthCheck: expectedSha => {
+        const page = execFileSync('curl', ['-fsS', 'https://gpoint.amiora.one/'], {encoding: 'utf8'});
+        if (!page.includes(`gpoint-build-sha" content="${expectedSha}`))
+          throw new Error('external Mini App SHA does not match the static transaction');
+        execFileSync('curl', ['-fsS', 'https://gpoint.amiora.one/api/health/live'], {stdio: 'ignore'});
+      },
+      nativeProof: images => {
+        const live = v4NativeProofOnVPS(images, runRemoteCommand);
+        if (Object.keys(live).length !== 3) throw new Error('V4 inherited native image proof is incomplete');
+      },
+      onSwitchStart: () => {
+        recheckTaskAuthorizationBeforeMutation(candidate, 'V4_STATIC_SWITCH');
+        switchStarted = true;
+      },
+    });
+    const afterFacts = readLiveFacts();
+    if (afterFacts.LIVE_RELEASE_ENV_SHA !== checked.parent.images.app.sourceSha ||
+        afterFacts.LIVE_MINIAPP_SHA !== candidate ||
+        afterFacts.LIVE_PRISMA_HEAD !== current.currentProductionDbHead ||
+        afterFacts.LIVE_AGATA_HEAD !== checked.facts.LIVE_AGATA_HEAD ||
+        afterFacts.LIVE_GSALES_HEAD !== checked.facts.LIVE_GSALES_HEAD ||
+        afterFacts.LIVE_GSALES_MIGRATION_SHA256 !== checked.facts.LIVE_GSALES_MIGRATION_SHA256)
+      throw new Error('V4 static post-Apply VPS readback differs from the attested UI and unchanged production baseline');
+    const finishedAt = isoNow();
+    const manifest = {
+      releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha,
+      productionShaAfter: current.currentProductionSha, miniappShaAfter: candidate,
+      status: 'COMPLETE', route: 'STATIC_UI_ONLY', startedAt, finishedAt,
+      productionChanged: true, runtimeSwitchOccurred: false, databaseMutationOccurred: false,
+      containersRestarted: false, staticTransaction: outcome,
+      staticArtifactDigest: bundle.staticArtifactDigest,
+      staticArtifactSha256: bundle.staticArtifactSha256,
+      prepareReceiptDigest: bundle.ghcrManifestDigest,
+      componentImages: checked.parent.images,
+      dbHeadBefore: current.currentProductionDbHead, dbHeadAfter: afterFacts.LIVE_PRISMA_HEAD,
+      agataDbHeadBefore: checked.facts.LIVE_AGATA_HEAD, agataDbHeadAfter: afterFacts.LIVE_AGATA_HEAD,
+      gsalesDbHeadBefore: checked.facts.LIVE_GSALES_HEAD, gsalesDbHeadAfter: afterFacts.LIVE_GSALES_HEAD,
+      workerCompatibility: checked.workerCompatibility,
+      rollbackSha: current.currentProductionSha, rollbackProven: false,
+      authorizationMode: process.env.RELEASE_AUTHORIZATION_MODE || 'EXACT_SHA',
+      authorizationId: process.env.RELEASE_AUTHORIZATION_ID || null,
+      ciReceipt: {...bundle, archive: undefined},
+    };
+    writeManifest(manifest);
+    fs.writeFileSync(STATE_FILE, `${JSON.stringify({...current,
+      miniappSourceSha: candidate, lastReleaseId: releaseId,
+      lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: finishedAt,
+      serverDeployStatus: 'COMPLETE', releaseOrigin: 'durable-production-release',
+      recoveryRequired: false}, null, 2)}\n`);
+    console.log(JSON.stringify({status: 'COMPLETE', releaseId, candidateSha: candidate,
+      previousProductionSha: current.currentProductionSha, miniappSourceSha: candidate,
+      route: 'STATIC_UI_ONLY', databaseMutationOccurred: false, containersRestarted: false}));
+  } catch (error) {
+    const finishedAt = isoNow();
+    const failed = {releaseId, candidateSha: candidate,
+      previousProductionSha: current.currentProductionSha,
+      productionShaAfter: current.currentProductionSha, miniappShaAfter: null,
+      status: switchStarted ? (error.rollbackProven ? 'ROLLED_BACK' : 'RECOVERY_REQUIRED') : 'FAILED',
+      route: 'STATIC_UI_ONLY', startedAt, finishedAt,
+      failureStage: switchStarted ? 'STATIC_SWITCH_OR_VERIFY' : 'STATIC_PREFLIGHT_OR_STAGE',
+      failureReason: error?.name ?? 'Error', rollbackSha: current.currentProductionSha,
+      rollbackProven: error.rollbackProven === true,
+      staticArtifactDigest: bundle.staticArtifactDigest,
+      staticArtifactSha256: bundle.staticArtifactSha256,
+      prepareReceiptDigest: bundle.ghcrManifestDigest,
+      databaseMutationOccurred: false, runtimeSwitchOccurred: false,
+      ciReceipt: {...bundle, archive: undefined}};
+    writeManifest(failed);
+    if (switchStarted && error.rollbackProven !== true)
+      fs.writeFileSync(STATE_FILE, `${JSON.stringify({...current, lastReleaseId: releaseId,
+        lastReleaseStatus: 'RECOVERY_REQUIRED', recoveryRequired: true}, null, 2)}\n`);
+    throw error;
   } finally { unlock(); }
 }
 
@@ -757,7 +853,7 @@ function configureGsalesWorker(candidate, approvedSha) {
 function runApply(candidate) {
   const staticBundle = process.env.GPOINT_RELEASE_BUNDLE
     ? verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, candidate) : null;
-  if (staticBundle?.staticOnly) die('static-only Prepare artifacts are not eligible for production Deploy');
+  if (staticBundle?.staticOnly) return runStaticApply(candidate, staticBundle);
   const startedAt = isoNow();
   const totalStarted = Date.now();
   const releaseId = `gpoint-release-${startedAt.replace(/[-:.]/g, '')}`;

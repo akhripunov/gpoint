@@ -1,5 +1,10 @@
 # GPoint component release V4 — local engineering groundwork
 
+> Historical design note. ME-42 superseded this implementation approach with
+> the GHCR-only model. Do not run its GitHub Release asset instructions or use
+> this document as current release authorization. The original details below
+> are retained as history.
+
 Status: LOCAL_ENGINEERING_READY / NOT_INTEGRATED / NOT_DEPLOYED.
 This is not an authorized partial-release workflow or a performance claim.
 Existing V3 remains the ONLY production release process.

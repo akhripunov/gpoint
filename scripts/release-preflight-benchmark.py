@@ -32,12 +32,18 @@ def wait_run(project,run_id,out,deadline):
  return {'id':run_id,'url':run['html_url'],'created_at':run['created_at'],'finished_at':run['updated_at'],'seconds':seconds(run['created_at'],run['updated_at']),'jobs':[{'name':j['name'],'seconds':seconds(j['started_at'],j['completed_at']),'steps':[{'name':s['name'],'seconds':seconds(s['started_at'],s['completed_at']) if s.get('started_at') and s.get('completed_at') else None,'conclusion':s['conclusion']} for s in j['steps']]} for j in jobs]}
 
 def fetch_gpoint_result(sha,run_id,destination):
- # GPoint evidence uses immutable Release assets; MaxiBot retains its existing path.
- import release_assets
- run=api(f'repos/akhripunov/gpoint/actions/runs/{run_id}')
+ # GPoint evidence is read from the exact GHCR OCI digest logged by this Deploy run.
+ import importlib.util
+ source=pathlib.Path(__file__).with_name('publish-release-linear.py')
+ spec=importlib.util.spec_from_file_location('gpoint_linear_evidence',source)
+ module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
  token=os.environ.get('GITHUB_TOKEN') or cli('auth','token').strip()
- release_assets.read_result(sha,str(run_id),str(run['run_attempt']),
-                            destination/f'gpoint-release-result-{run_id}.json',token)
+ os.environ.setdefault('GITHUB_TOKEN',token)
+ os.environ.setdefault('GHCR_READ_USERNAME',os.environ.get('GITHUB_ACTOR',''))
+ os.environ.setdefault('GHCR_READ_TOKEN',token)
+ result=module.artifact_json(str(run_id),sha=sha)
+ destination.mkdir(parents=True,exist_ok=True)
+ (destination/'receipt.json').write_text(json.dumps(result,indent=2)+'\n')
 
 def project_run(project,root,args):
  out=root/project;out.mkdir()

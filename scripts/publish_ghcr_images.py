@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 
 SHA40 = re.compile(r'^[a-f0-9]{40}$')
 DIGEST = re.compile(r'^sha256:[a-f0-9]{64}$')
@@ -17,6 +19,10 @@ IMAGES = {
     'agata': ('gpoint-agata-runtime', 'ghcr.io/akhripunov/gpoint-agata-runtime'),
     'gsales': ('gpoint-g-sales-runtime', 'ghcr.io/akhripunov/gpoint-g-sales-runtime'),
 }
+RECEIPT_REPOSITORY = 'ghcr.io/akhripunov/gpoint-prepare-receipts'
+RECEIPT_ARTIFACT_TYPE = 'application/vnd.gpoint.prepare.receipt.v1'
+STATIC_REPOSITORY = 'ghcr.io/akhripunov/gpoint-miniapp-artifacts'
+STATIC_ARTIFACT_TYPE = 'application/vnd.gpoint.miniapp.static.v1'
 
 
 def parse_push_digest(output: str) -> str:
@@ -60,27 +66,120 @@ def publish_images(sha: str, run_id: str, attempt: str) -> dict:
     for role, (local_name, repository) in IMAGES.items():
         local = f'{local_name}:{sha}'
         remote = f'{repository}:{tag}'
+        local_metadata = json.loads(run('docker', 'image', 'inspect', local, capture=True))[0]
+        local_identity = validate_image_metadata(
+            role, repository, local_metadata.get('Id', ''), local_metadata, sha)
         run('docker', 'tag', local, remote)
         output = run('docker', 'push', remote, capture=True)
         digest = parse_push_digest(output)
         reference = f'{repository}@{digest}'
         run('docker', 'pull', reference, capture=True)
         metadata = json.loads(run('docker', 'image', 'inspect', reference, capture=True))[0]
-        records[role] = validate_image_metadata(role, repository, digest, metadata, sha)
+        record = validate_image_metadata(role, repository, digest, metadata, sha)
+        if record['configDigest'] != local_identity['configDigest']:
+            raise ValueError(f'GHCR readback image config differs from built {role} image')
+        records[role] = record
     return records
 
 
-def augment_receipt(receipt: dict, records: dict, sha: str, run_id: str, attempt: str) -> dict:
-    if (receipt.get('schema') != 1 or receipt.get('status') != 'READY'
+def validate_prepare_identity(receipt: dict, sha: str, run_id: str, attempt: str) -> None:
+    if (receipt.get('schema') not in (1, 2) or receipt.get('status') != 'READY'
             or receipt.get('candidateSha') != sha or str(receipt.get('runId')) != run_id
             or str(receipt.get('runAttempt')) != attempt):
         raise ValueError('Prepare receipt identity changed before GHCR publication')
-    if set(records) != set(IMAGES):
+
+
+def augment_receipt(receipt: dict, records: dict, sha: str, run_id: str, attempt: str,
+                    static_artifact: dict | None = None) -> dict:
+    validate_prepare_identity(receipt, sha, run_id, attempt)
+    static_only = receipt.get('route') == 'STATIC_UI_ONLY'
+    if static_only:
+        if records or not static_artifact:
+            raise ValueError('static-only Prepare must publish only its verified Mini App artifact')
+    elif set(records) != set(IMAGES):
         raise ValueError('GHCR image records are incomplete')
     for role, record in records.items():
         if record.get('sourceSha') != sha or record.get('platform') != 'linux/amd64':
             raise ValueError(f'GHCR image proof is invalid for {role}')
-    return {**receipt, 'schema': 3, 'transport': 'ghcr-oci', 'images': records}
+    # The manifest digest and receipt blob checksum are transport metadata.
+    # Embedding either in this blob would be self-referential.
+    enriched = {**receipt, 'schema': 3, 'transport': 'ghcr-oci', 'images': records}
+    enriched.pop('archiveSha256', None)
+    enriched.pop('receiptDigest', None)
+    enriched.pop('receiptSha256', None)
+    if static_only:
+        enriched['gates'] = {**enriched['gates'], 'ghcrStaticReadback': 'PASS'}
+    else:
+        enriched['gates'] = {**enriched['gates'], 'ghcrImageReadback': 'PASS'}
+    if static_artifact:
+        enriched['staticArtifact'] = static_artifact
+    return enriched
+
+
+def publish_receipt(receipt_path: Path, sha: str, run_id: str, attempt: str) -> dict:
+    """Publish one canonical receipt OCI artifact, then verify it by digest."""
+    if not SHA40.fullmatch(sha) or not run_id.isdigit() or not attempt.isdigit():
+        raise ValueError('invalid exact Prepare identity')
+    raw = receipt_path.read_bytes()
+    receipt_sha256 = hashlib.sha256(raw).hexdigest()
+    receipt = json.loads(raw)
+    if (receipt.get('candidateSha') != sha or str(receipt.get('runId')) != run_id
+            or str(receipt.get('runAttempt')) != attempt or receipt.get('status') != 'READY'):
+        raise ValueError('OCI receipt does not bind exact Prepare identity')
+    tag = f'{RECEIPT_REPOSITORY}:prepare-{sha}-{run_id}-{attempt}'
+    output = run('oras', 'push', '--artifact-type', RECEIPT_ARTIFACT_TYPE,
+                 '--format', 'json', tag, f'{receipt_path}:application/vnd.gpoint.prepare.receipt.v1+json', capture=True)
+    try:
+        descriptor = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise ValueError('ORAS did not return a valid artifact descriptor') from error
+    digest = descriptor.get('digest')
+    if not isinstance(digest, str) or not DIGEST.fullmatch(digest):
+        raise ValueError('ORAS did not return one exact receipt manifest digest')
+    if descriptor.get('reference') not in (None, f'{RECEIPT_REPOSITORY}@{digest}'):
+        raise ValueError('ORAS returned an unexpected receipt repository')
+    with tempfile.TemporaryDirectory(prefix='gpoint-receipt-readback-') as directory:
+        run('oras', 'pull', f'{RECEIPT_REPOSITORY}@{digest}', '--output', directory)
+        readback = Path(directory) / receipt_path.name
+        if not readback.is_file():
+            raise ValueError('OCI receipt readback did not contain receipt.json')
+        content = readback.read_bytes()
+        if hashlib.sha256(content).hexdigest() != receipt_sha256 or content != raw:
+            raise ValueError('OCI receipt readback content mismatch')
+    return {'repository': RECEIPT_REPOSITORY, 'digest': digest,
+            'contentSha256': receipt_sha256, 'sourceSha': sha,
+            'runId': int(run_id), 'runAttempt': int(attempt)}
+
+
+def publish_static_artifact(bundle_path: Path, receipt: dict, sha: str,
+                            run_id: str, attempt: str) -> dict:
+    if (receipt.get('staticArtifactName') != 'miniapp.zip'
+            or receipt.get('staticArtifactRoute') not in ('V4_FAST_STATIC', 'V4_ADVISORY_ONLY')
+            or not bundle_path.is_file()):
+        raise ValueError('static Mini App artifact is missing or not approved by V4 scope')
+    content = bundle_path.read_bytes()
+    content_sha256 = hashlib.sha256(content).hexdigest()
+    if receipt.get('staticArtifactSha256') != content_sha256:
+        raise ValueError('static Mini App artifact checksum differs from Prepare receipt')
+    tag = f'{STATIC_REPOSITORY}:prepare-{sha}-{run_id}-{attempt}'
+    output = run('oras', 'push', '--artifact-type', STATIC_ARTIFACT_TYPE,
+                 '--format', 'json', tag,
+                 f'{bundle_path}:application/vnd.gpoint.miniapp.static.v1+zip', capture=True)
+    try:
+        descriptor = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise ValueError('ORAS did not return a valid static artifact descriptor') from error
+    digest = descriptor.get('digest')
+    if not isinstance(digest, str) or not DIGEST.fullmatch(digest):
+        raise ValueError('ORAS did not return one exact static artifact manifest digest')
+    with tempfile.TemporaryDirectory(prefix='gpoint-static-readback-') as directory:
+        run('oras', 'pull', f'{STATIC_REPOSITORY}@{digest}', '--output', directory)
+        readback = Path(directory) / bundle_path.name
+        if not readback.is_file() or hashlib.sha256(readback.read_bytes()).hexdigest() != content_sha256:
+            raise ValueError('OCI static artifact readback content mismatch')
+    return {'repository': STATIC_REPOSITORY, 'digest': digest,
+            'contentSha256': content_sha256, 'sourceSha': sha,
+            'runId': int(run_id), 'runAttempt': int(attempt)}
 
 
 def main() -> None:
@@ -94,12 +193,30 @@ def main() -> None:
     root = Path(os.environ.get('RUNNER_TEMP', '')) / 'gpoint-bundle'
     receipt_path = root / 'receipt.json'
     receipt = json.loads(receipt_path.read_text())
-    records = publish_images(sha, run_id, attempt)
-    updated = augment_receipt(receipt, records, sha, run_id, attempt)
+    validate_prepare_identity(receipt, sha, run_id, attempt)
+    if receipt.get('route') == 'STATIC_UI_ONLY':
+        records = {}
+    else:
+        records = publish_images(sha, run_id, attempt)
+    static_path = root / 'miniapp.zip'
+    if receipt.get('staticArtifactSha256') and not static_path.is_file():
+        raise ValueError('Prepare receipt requires a missing Mini App OCI artifact')
+    static_artifact = (publish_static_artifact(static_path, receipt, sha, run_id, attempt)
+                       if static_path.exists() else None)
+    updated = augment_receipt(receipt, records, sha, run_id, attempt, static_artifact)
     temporary = receipt_path.with_suffix('.json.pending')
-    temporary.write_text(json.dumps(updated, sort_keys=True) + '\n')
+    temporary.write_text(json.dumps(updated, sort_keys=True, separators=(',', ':')) + '\n')
     temporary.replace(receipt_path)
-    print('GHCR_IMAGE_PROVENANCE=PASS roles=3 platform=linux/amd64')
+    receipt_transport = publish_receipt(receipt_path, sha, run_id, attempt)
+    output_path = os.environ.get('GITHUB_OUTPUT')
+    if output_path:
+        with Path(output_path).open('a', encoding='utf-8') as output:
+            output.write(f"receipt_digest={receipt_transport['digest']}\n")
+            output.write(f"receipt_content_sha256={receipt_transport['contentSha256']}\n")
+    print('GHCR_IMAGE_PROVENANCE=PASS roles=' + str(len(records)) + ' platform=linux/amd64')
+    print('GHCR_RECEIPT_DIGEST=' + receipt_transport['digest'])
+    if static_artifact:
+        print('GHCR_STATIC_ARTIFACT_DIGEST=' + static_artifact['digest'])
 
 
 if __name__ == '__main__':

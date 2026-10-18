@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { verifyReleaseBundle, importBundleCommand, reuseBundleCommand, preparedImageCaptureCommand, preparedImageParityCommand, selectImageTransport } from './release-bundle.mjs';
+import { verifyReleaseBundle, preparedImageCaptureCommand, preparedImageParityCommand, selectImageTransport } from './release-bundle.mjs';
 import { createOciPullScript, createOciVerifyScript } from './release-oci.mjs';
 import { migrationHead } from './release-migrations.mjs';
 import { gsalesMigrationIdentity, gsalesReadinessCommand, parseGsalesReadiness, gsalesMigrationStateCommand, gsalesMigrationCommand, combinedComposeCommand, gsalesStartCommand, gsalesRuntimeCommand, parseGsalesRuntime, gsalesProductionInspectionCommand } from './release-gsales.mjs';
@@ -630,27 +630,13 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
     gsalesMigrations = gsalesMigrationIdentity(checkout, bundle);
     if (agataMigrations.head !== 'agata0011') throw new Error('GSales integration requires AGATA agata0011');
     stage(timings, 'PRODUCTION_PREFLIGHT', () => run(productionPreflightCommand()));
-    if (imageTransport === 'ghcr-oci') {
-      const registryUser = process.env.GHCR_READ_USERNAME || 'akhripunov';
-      if (!ghcrReadToken) throw new Error('read-only GHCR credential is unavailable');
-      const output = stage(timings, 'GHCR_IMAGE_PULL_AND_VERIFY', () =>
-        runRemoteCommandWithInput(createOciPullScript(bundle, sha, { username: registryUser }), ghcrReadToken));
-      if (!output.includes('GPOINT_GHCR_IMAGES_VERIFIED=YES'))
-        throw new Error('GHCR image pull/identity gate failed before production apply');
-      bundle.ghcrVerified = true;
-    } else if (bundle) {
-      if (!bundle.archive) throw new Error('verified archive fallback is unavailable before Apply');
-      stage(timings, 'CI_ARTIFACT_IMPORT', () => {
-      const reuse = stage(timings, 'CI_ARTIFACT_REUSE_CHECK', () => run(reuseBundleCommand(bundle, sha)));
-      if (reuse.includes('GPOINT_CI_IMAGES_REUSABLE')) {
-        console.error('CI_ARTIFACT_REUSED=YES');
-        return;
-      }
-      stage(timings, 'CI_ARTIFACT_UPLOAD', () => upload(bundle.archive, `/tmp/gpoint-images-${sha}.tar.gz`));
-      const output = stage(timings, 'CI_ARTIFACT_LOAD', () => run(importBundleCommand(bundle, sha)));
-      if (!output.includes('GPOINT_CI_IMAGES_VERIFIED')) throw new Error('CI image import failed');
-      });
-    }
+    const registryUser = process.env.GHCR_READ_USERNAME || 'akhripunov';
+    if (!ghcrReadToken) throw new Error('read-only GHCR credential is unavailable');
+    const output = stage(timings, 'GHCR_IMAGE_PULL_AND_VERIFY', () =>
+      runRemoteCommandWithInput(createOciPullScript(bundle, sha, { username: registryUser }), ghcrReadToken));
+    if (!output.includes('GPOINT_GHCR_IMAGES_VERIFIED=YES'))
+      throw new Error('GHCR image pull/identity gate failed before production apply');
+    bundle.ghcrVerified = true;
     createSourceArchive(checkout, archive);
     stage(timings, 'SOURCE_PREPARE', () => {
       upload(archive, `/tmp/gpoint-${sha}.tar.gz`);

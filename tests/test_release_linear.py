@@ -76,11 +76,13 @@ class ReleaseTests(unittest.TestCase):
 
     def test_prepare_success_can_only_publish_ready_after_artifact_step_job_success(self):
         workflow = (ROOT / '.github/workflows/gpoint-prepare.yml').read_text()
-        upload = workflow.index('scripts/release_assets.py publish prepare')
+        upload = workflow.index('id: ghcr-publish')
         publish = workflow.index('name: Publish candidate result to existing Linear documents')
         self.assertLess(upload, publish)
         self.assertIn('needs.prepare.result', workflow)
         self.assertIn('PREPARE_RESULT: ${{ needs.prepare.result }}', workflow)
+        self.assertIn('packages: write', workflow)
+        self.assertNotIn('release_assets.py publish', workflow)
         self.assertEqual([SYNC.candidate_status(x) for x in ('success', 'failure', 'cancelled', 'skipped')],
                          ['READY', 'FAILED', 'CANCELLED', 'SKIPPED'])
         publish_job = workflow.split('  publish:', 1)[1]
@@ -173,11 +175,15 @@ class ReleaseTests(unittest.TestCase):
             with patch.dict('os.environ', {
                 'CANDIDATE_SHA': sha, 'GITHUB_REF': 'refs/heads/main', 'RELEASE_MODE': 'production',
                 'APPROVE_PRODUCTION': 'true', 'GITHUB_TOKEN': 'test-token',
+                'OWNER_APPROVAL_ACTOR': 'akhripunov',
+                'OWNER_TRIGGERING_ACTOR': 'akhripunov',
+                'OWNER_REPOSITORY': 'akhripunov',
                 'GITHUB_OUTPUT': str(output),
             }), patch.object(SELECT, 'github', side_effect=github), \
-                    patch.object(SELECT, 'find_prepare_evidence', return_value=('2', {'id': 99})):
+                    patch.object(SELECT, 'validate_expected_run') as validate:
                 SELECT.main()
             rendered = output.read_text()
+        validate.assert_called_once_with(prepare, None, None)
         self.assertFalse(any('gpoint-deploy.yml/runs' in path for path in calls))
         self.assertIn('run_id=12', rendered)
         self.assertIn('run_attempt=2', rendered)
@@ -312,59 +318,98 @@ class ReleaseTests(unittest.TestCase):
 
 
 
-    def test_immutable_production_result_zip_checksum_is_required(self):
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, 'w') as archive:
-            archive.writestr('result.json', json.dumps({'status': 'COMPLETE'}))
-        payload = buffer.getvalue()
-        digest = hashlib.sha256(payload).hexdigest()
-        for expected in [digest, '0' * 64, '']:
-            with self.subTest(expected=expected):
-                metadata = {'artifacts': [{'name': 'gpoint-production-result-55-1',
-                    'expired': False, 'digest': 'sha256:' + expected,
-                    'archive_download_url': 'https://api.github.com/artifact'}]}
-                class Opener:
-                    def open(self, request, timeout=None):
-                        if request.get_header('Accept') != 'application/vnd.github+json':
-                            raise AssertionError('Legacy Actions ZIP requires its original media type')
-                        return io.BytesIO(payload)
-                with patch.object(SYNC, 'github_json', return_value=metadata), patch.object(SYNC.urllib.request, 'build_opener', return_value=Opener()):
-                    if expected == digest:
-                        self.assertEqual(SYNC.artifact_json(55, 'gpoint-production-result-')['status'], 'COMPLETE')
-                    else:
-                        with self.assertRaisesRegex(SYNC.SyncError, 'checksum mismatch'):
-                            SYNC.artifact_json(55, 'gpoint-production-result-')
+    def test_deploy_evidence_uses_exact_successful_job_log_digest(self):
+        sha, run_id, attempt = 'a' * 40, '55', '2'
+        result = {'candidateSha': sha, 'automationRunId': run_id, 'automationRunAttempt': attempt,
+                  'deployRunId': run_id, 'deployRunAttempt': attempt, 'deploymentId': 99, 'status': 'COMPLETE'}
+        blob = json.dumps(result).encode()
+        blob_digest = 'sha256:' + hashlib.sha256(blob).hexdigest()
+        manifest = {'schemaVersion': 2, 'mediaType': SYNC.OCI_MANIFEST_TYPE,
+                    'artifactType': SYNC.DEPLOY_EVIDENCE_TYPE,
+                    'layers': [{'mediaType': SYNC.DEPLOY_EVIDENCE_LAYER, 'digest': blob_digest, 'size': len(blob)}]}
+        manifest_bytes = json.dumps(manifest).encode()
+        digest = 'sha256:' + hashlib.sha256(manifest_bytes).hexdigest()
+        log_zip = io.BytesIO()
+        with zipfile.ZipFile(log_zip, 'w') as archive:
+            archive.writestr(f'deploy/10_{SYNC.DEPLOY_EVIDENCE_STEP}.txt', f'DEPLOY_EVIDENCE_DIGEST={digest}\n')
+        job = {'id': 700, 'name': 'deploy', 'run_id': 55, 'run_attempt': 2, 'head_sha': sha,
+               'status': 'completed', 'conclusion': 'success', 'steps': [
+                   {'number': 10, 'name': SYNC.DEPLOY_EVIDENCE_STEP, 'status': 'completed', 'conclusion': 'success'}]}
+        def github(path, token=None):
+            return {'jobs': [job], 'total_count': 1} if '/jobs?' in path else run
+        def get(url, username, password, accept, limit):
+            if '/blobs/' in url: return blob, {}
+            return manifest_bytes, {'Docker-Content-Digest': digest}
+        run = {'id': int(run_id), 'head_sha': sha, 'head_branch': 'main', 'event': 'workflow_dispatch',
+               'path': '.github/workflows/gpoint-deploy.yml', 'run_attempt': int(attempt)}
+        with patch.dict(SYNC.os.environ, {'GHCR_READ_USERNAME': 'owner', 'GHCR_READ_TOKEN': 'token', 'GITHUB_TOKEN': 'token'}), \
+             patch.object(SYNC, 'github_json', side_effect=github), patch.object(SYNC, 'download_job_logs', return_value=log_zip.getvalue()), \
+             patch.object(SYNC, 'ghcr_get', side_effect=get):
+            self.assertEqual(SYNC.artifact_json(run_id, attempt=attempt, sha=sha, deployment_id=99), result)
 
-    def test_new_immutable_release_result_is_checksum_verified_and_mutable_is_blocked(self):
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, 'w') as archive:
-            archive.writestr('result.json', json.dumps({'status': 'PLANNED', 'candidateSha': 'a'*40,
-                'automationRunId': '55', 'automationRunAttempt': '2'}))
-        payload = buffer.getvalue()
-        sha = 'a' * 40
-        tag = f'gpoint-evidence-{sha}-55-2'
-        for immutable, digest in [(True, hashlib.sha256(payload).hexdigest()), (False, '0'*64), (True, '0'*64)]:
-            def github(path, token=None):
-                if path.endswith('/artifacts'): return {'artifacts': []}
-                if path.endswith('/55'): return {'head_sha': sha, 'head_branch': 'main', 'event': 'workflow_dispatch',
-                                                 'path': '.github/workflows/gpoint-deploy.yml', 'run_attempt': 2}
-                if '/actions/runs/55/attempts/2/jobs' in path:
-                    return {'total_count': 1, 'jobs': [{'name': 'deploy', 'status': 'completed',
-                                                        'conclusion': 'success', 'head_sha': sha}]}
-                if '/git/ref/' in path: return {'object': {'type': 'commit', 'sha': sha}}
-                return {'tag_name': tag, 'draft': False, 'immutable': immutable, 'assets': [
-                    {'id': 99, 'name': 'result.zip', 'state': 'uploaded', 'size': len(payload), 'digest': 'sha256:'+digest}]}
-            class Opener:
-                def open(self, request, timeout=None):
-                    if request.get_header('Accept') != 'application/octet-stream':
-                        raise AssertionError('Release assets require binary media type')
-                    return io.BytesIO(payload)
-            with self.subTest(immutable=immutable, digest=digest), patch.object(SYNC, 'github_json', side_effect=github), \
-                 patch.object(SYNC.urllib.request, 'build_opener', return_value=Opener()):
-                if immutable and digest == hashlib.sha256(payload).hexdigest():
-                    self.assertEqual(SYNC.artifact_json(55, 'gpoint-production-result-')['status'], 'PLANNED')
-                else:
-                    with self.assertRaises(SYNC.SyncError): SYNC.artifact_json(55, 'gpoint-production-result-')
+    def test_deploy_evidence_rejects_wrong_workflow_identity_content_digest_and_deployment(self):
+        sha, run_id, attempt = 'b' * 40, '56', '1'
+        run = {'id': 56, 'head_sha': sha, 'head_branch': 'main', 'event': 'workflow_dispatch',
+               'path': '.github/workflows/gpoint-deploy.yml', 'run_attempt': 1}
+        with patch.object(SYNC, 'github_json', return_value={**run, 'head_branch': 'other'}), \
+             self.assertRaisesRegex(SYNC.SyncError, 'workflow identity'):
+            SYNC.artifact_json(run_id, attempt=attempt, sha=sha)
+        result = {'candidateSha': sha, 'automationRunId': run_id, 'automationRunAttempt': attempt,
+                  'deployRunId': run_id, 'deployRunAttempt': attempt, 'deploymentId': 7}
+        blob = json.dumps(result).encode()
+        manifest = {'mediaType': SYNC.OCI_MANIFEST_TYPE, 'artifactType': SYNC.DEPLOY_EVIDENCE_TYPE,
+                    'layers': [{'mediaType': SYNC.DEPLOY_EVIDENCE_LAYER,
+                                'digest': 'sha256:' + hashlib.sha256(blob).hexdigest(), 'size': len(blob)}]}
+        manifest_bytes = json.dumps(manifest).encode()
+        digest = 'sha256:' + hashlib.sha256(manifest_bytes).hexdigest()
+        log_zip = io.BytesIO()
+        with zipfile.ZipFile(log_zip, 'w') as archive:
+            archive.writestr(f'deploy/10_{SYNC.DEPLOY_EVIDENCE_STEP}.txt', f'DEPLOY_EVIDENCE_DIGEST={digest}\n')
+        job = {'id': 701, 'name': 'deploy', 'run_id': 56, 'run_attempt': 1, 'head_sha': sha,
+               'status': 'completed', 'conclusion': 'success', 'steps': [
+                   {'number': 10, 'name': SYNC.DEPLOY_EVIDENCE_STEP, 'status': 'completed', 'conclusion': 'success'}]}
+        def github(path, token=None):
+            return {'jobs': [job], 'total_count': 1} if '/jobs?' in path else run
+        def get(url, username, password, accept, limit):
+            return (blob, {}) if '/blobs/' in url else (manifest_bytes, {'Docker-Content-Digest': digest})
+        with patch.dict(SYNC.os.environ, {'GHCR_READ_USERNAME': 'owner', 'GHCR_READ_TOKEN': 'token'}), \
+             patch.object(SYNC, 'github_json', side_effect=github), patch.object(SYNC, 'download_job_logs', return_value=log_zip.getvalue()), \
+             patch.object(SYNC, 'ghcr_get', side_effect=get):
+            with self.assertRaisesRegex(SYNC.SyncError, 'exact Deployment'):
+                SYNC.artifact_json(run_id, attempt=attempt, sha=sha, deployment_id=8)
+            with patch.object(SYNC, 'ghcr_get', side_effect=lambda *args: (b'corrupt', {}) if '/blobs/' in args[0]
+                              else (manifest_bytes, {'Docker-Content-Digest': digest})):
+                with self.assertRaisesRegex(SYNC.SyncError, 'content digest'):
+                    SYNC.artifact_json(run_id, attempt=attempt, sha=sha)
+
+    def test_deploy_evidence_digest_accepts_failed_job_when_publisher_succeeds(self):
+        sha, run_id, attempt = 'c' * 40, '57', '1'
+        job = {'id': 702, 'name': 'deploy', 'run_id': 57, 'run_attempt': 1, 'head_sha': sha,
+               'status': 'completed', 'conclusion': 'failure', 'steps': [
+                   {'number': 4, 'name': SYNC.DEPLOY_EVIDENCE_STEP, 'status': 'completed', 'conclusion': 'success'}]}
+        repeated = io.BytesIO()
+        with zipfile.ZipFile(repeated, 'w') as archive:
+            archive.writestr(f'deploy/4_{SYNC.DEPLOY_EVIDENCE_STEP}.txt',
+                             'DEPLOY_EVIDENCE_DIGEST=sha256:' + 'd' * 64 + '\n')
+        with patch.object(SYNC, 'github_json', return_value={'jobs': [job], 'total_count': 1}), \
+             patch.object(SYNC, 'download_job_logs', return_value=repeated.getvalue()):
+            self.assertEqual(SYNC.deploy_evidence_digest_from_logs(run_id, attempt, sha), 'sha256:' + 'd' * 64)
+        with zipfile.ZipFile(repeated, 'w') as archive:
+            archive.writestr(f'deploy/4_{SYNC.DEPLOY_EVIDENCE_STEP}.txt',
+                             'DEPLOY_EVIDENCE_DIGEST=sha256:' + 'd' * 64 + '\nDEPLOY_EVIDENCE_DIGEST=sha256:' + 'd' * 64 + '\n')
+        with patch.object(SYNC, 'github_json', return_value={'jobs': [job], 'total_count': 1}), \
+             patch.object(SYNC, 'download_job_logs', return_value=repeated.getvalue()):
+            with self.assertRaisesRegex(SYNC.SyncError, 'missing or ambiguous'):
+                SYNC.deploy_evidence_digest_from_logs(run_id, attempt, sha)
+
+    def test_deploy_evidence_digest_requires_publisher_step_success(self):
+        sha, run_id, attempt = 'e' * 40, '58', '1'
+        job = {'id': 703, 'name': 'deploy', 'run_id': 58, 'run_attempt': 1, 'head_sha': sha,
+               'status': 'completed', 'conclusion': 'failure', 'steps': [
+                   {'number': 4, 'name': SYNC.DEPLOY_EVIDENCE_STEP, 'status': 'completed', 'conclusion': 'failure'}]}
+        with patch.object(SYNC, 'github_json', return_value={'jobs': [job], 'total_count': 1}):
+            with self.assertRaisesRegex(SYNC.SyncError, 'publication step did not succeed'):
+                SYNC.deploy_evidence_digest_from_logs(run_id, attempt, sha)
 
     def test_newer_failed_run_blocks_older_success(self):
         base = {'head_sha': 'a' * 40, 'head_branch': 'main', 'event': 'push', 'status': 'completed'}
@@ -398,6 +443,19 @@ class ReleaseTests(unittest.TestCase):
         for ref, mode in [('refs/heads/other', 'production'), ('refs/heads/main', 'anything')]:
             with self.assertRaises(RuntimeError):
                 SELECT.validate_request('a' * 40, ref, mode, 'true')
+
+    def test_exact_sha_production_requires_repository_owner_to_dispatch_and_trigger(self):
+        SELECT.validate_owner_approval('production', 'akhripunov', 'akhripunov', 'akhripunov')
+        for actor, triggering, owner in [
+            ('maintainer', 'maintainer', 'akhripunov'),
+            ('akhripunov', 'maintainer', 'akhripunov'),
+            ('akhripunov', 'akhripunov', 'other-repository-owner'),
+        ]:
+            with self.subTest(actor=actor, triggering=triggering, owner=owner), \
+                    self.assertRaisesRegex(RuntimeError, 'repository OWNER'):
+                SELECT.validate_owner_approval('production', actor, triggering, owner)
+        SELECT.validate_owner_approval('task-scoped-auto', 'github-actions[bot]',
+                                       'github-actions[bot]', 'akhripunov')
 
 
 
@@ -544,7 +602,7 @@ class DeploymentReleaseTests(unittest.TestCase):
             if '/deployments?' in route: return [item]
             if '/statuses?' in route: return [status('success', url, '2026-10-18T10:05:00Z')]
             raise AssertionError(route)
-        with patch.object(SYNC, 'github_json', side_effect=read):
+        with patch.object(SYNC, 'github_json', side_effect=read), patch.object(SYNC, 'artifact_json', return_value={'status': 'COMPLETE'}):
             state, manifest, run = SYNC.production_evidence()
         self.assertEqual(state['currentProductionSha'], SHA)
         self.assertEqual(state['lastReleaseStatus'], 'SUCCESS')
@@ -560,7 +618,7 @@ class DeploymentReleaseTests(unittest.TestCase):
             if '/deployments/101/statuses?' in route: return [status('error', failed_url, '2026-10-18T11:02:00Z')]
             if '/deployments/100/statuses?' in route: return [status('success', prior_url, '2026-10-17T10:05:00Z')]
             raise AssertionError(route)
-        with patch.object(SYNC, 'github_json', side_effect=read):
+        with patch.object(SYNC, 'github_json', side_effect=read), patch.object(SYNC, 'artifact_json', return_value={'status': 'FAILED'}):
             state, manifest, run = SYNC.production_evidence()
         self.assertIsNone(state['currentProductionSha'])
         self.assertEqual(state['lastReleaseStatus'], 'ERROR')
