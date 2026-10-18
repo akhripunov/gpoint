@@ -10,7 +10,8 @@ import {ownerTaskCommitmentSha256, candidateScopeDiff, validateTaskAuthorization
 const sha = 'a'.repeat(40);
 const fakeReceipt = async () => ({receiptDigest:`sha256:${'d'.repeat(64)}`, receiptSha256:'e'.repeat(64)});
 let receiptResolver = fakeReceipt;
-const dispatchPrepare = (...args) => dispatchPrepareImpl(...args, receiptResolver);
+const dispatchPrepare = (payload, api, orchestratorRunId, repoRoot = process.cwd(), authorizationLookup) =>
+  dispatchPrepareImpl(payload, api, orchestratorRunId, repoRoot, authorizationLookup, receiptResolver);
 const event = (change = {}) => ({repository:{full_name:'akhripunov/gpoint'}, workflow_run:{id:123,run_attempt:2,
   head_sha:sha,head_branch:'main',status:'completed',conclusion:'success',event:'push',path:'.github/workflows/gpoint-prepare.yml',...change}});
 
