@@ -21,19 +21,8 @@ import urllib.request
 import urllib.error
 
 REPO = 'akhripunov/gpoint'
-RECOVERY_IMAGE_REPOSITORIES = {
-    'app': 'ghcr.io/akhripunov/gpoint-runtime',
-    'agata': 'ghcr.io/akhripunov/gpoint-agata-runtime',
-    'gsales': 'ghcr.io/akhripunov/gpoint-g-sales-runtime',
-}
-MAX_FAILURE_MANIFEST_MEMBERS = 4096
-MAX_FAILURE_MANIFEST_MEMBER_BYTES = 32 * 1024**2
-MAX_FAILURE_MANIFEST_TOTAL_BYTES = 2 * 1024**3
 # Actions accounts workflow outputs approximately as UTF-16. Keep this below
 # half the 1 MiB per-job cap to leave room for output metadata.
-MAX_RECOVERY_DIAGNOSTIC_BUNDLE_BYTES = 192 * 1024
-MAX_RECOVERY_DIAGNOSTIC_OUTPUT_BYTES = 256 * 1024
-MAX_RECOVERY_DIAGNOSTIC_OUTPUT_UTF16_BYTES = 512 * 1024
 ME38_INCIDENT_CANDIDATE = 'd367c2ec24242a733dbb2c4145c91d2d4682ba2c'
 ME38_INCIDENT_BASELINE = 'a700198a843c12a84f2e537178de752e3eddd54d'
 EVIDENCE_API_TOTAL_BUDGET_SECONDS = 60
@@ -145,12 +134,6 @@ def release_tag(kind, sha, run_id, attempt):
     return f'gpoint-{kind}-{sha}-{run_id}-{attempt}'
 
 
-def recovery_diagnostics_tag(executor_sha, run_id, attempt):
-    if (not re.fullmatch(r'[a-f0-9]{40}', executor_sha or '')
-            or not re.fullmatch(r'[1-9][0-9]*', str(run_id))
-            or not re.fullmatch(r'[1-9][0-9]*', str(attempt))):
-        raise RuntimeError('Invalid recovery diagnostic Release identity')
-    return f'gpoint-recovery-diagnostics-{executor_sha}-{run_id}-{attempt}'
 
 
 def _stable_json_digest(value):
@@ -164,177 +147,12 @@ def _stable_json_digest(value):
     return hashlib.sha256(encoded).hexdigest()
 
 
-def recovery_snapshot_digest(snapshot):
-    body = dict(snapshot)
-    supplied = body.pop('snapshotSha256', None)
-    digest = _stable_json_digest(body)
-    if supplied != digest:
-        raise RuntimeError('Recovery snapshot SHA-256 verification failed')
-    return digest
 
 
-def _validate_recovery_snapshot_semantics(snapshot):
-    missing, blockers, checks = (snapshot.get('missingEvidence'), snapshot.get('blockers'),
-                                 snapshot.get('checks'))
-    if (snapshot.get('releaseState') != 'RECOVERY_DIAGNOSTICS_ONLY'
-            or not isinstance(missing, list)
-            or any(not isinstance(item, str) or not item for item in missing)
-            or len(set(missing)) != len(missing)
-            or not isinstance(blockers, list)
-            or any(not isinstance(item, str) or not item for item in blockers)
-            or not isinstance(checks, dict)):
-        raise RuntimeError('Recovery snapshot semantic fields are invalid')
-    allowed_missing = {'snapshot.observedAt', 'ledger.observedAt', 'ledger.headSha',
-        'ledger.productionSha', 'ledger.stateSha256', 'ledger.refTargetSha', 'runtime.observedAt',
-        'runtime.releaseEnvSha', 'runtime.miniappSha', 'runtime.databaseReadOnlyQueryExitCode',
-        *(f'runtime.services.{name}' for name in ('api', 'worker', 'bot', 'agata-api',
-            'agata-memory-worker', 'gsales-api')),
-        'runtime.migrationHeads.prisma', 'runtime.migrationHeads.agata',
-        'runtime.migrationHeads.gsales', 'runtime.migrationHeads.gsalesMigrationSha256',
-        'workers.observedAt', 'workers.lanes.GPOINT', 'workers.lanes.GSALES',
-        'backup.status', 'backup.integrity', 'locks', 'productionTag', 'incidentEvidence'}
-    allowed_blockers = {'RUNTIME_IMAGE_SOURCE_PARITY_FAILED', 'MINIAPP_SOURCE_PARITY_FAILED',
-        'PRODUCTION_SERVICE_NOT_HEALTHY', 'WORKER_LANES_NOT_VERIFIED_HEALTHY',
-        'PROTECTED_BACKUP_MISSING', 'PROTECTED_BACKUP_UNVERIFIED', 'RELEASE_LOCK_CONFLICT',
-        'PRODUCTION_TAG_BASELINE_NOT_VERIFIED', 'CANDIDATE_PRODUCTION_TAG_CONFLICT',
-        'READ_ONLY_SNAPSHOT_INCOMPLETE', 'FINALIZATION_REQUIRES_SEPARATE_OWNER_AUTHORIZATION'}
-    if not set(missing).issubset(allowed_missing) or not set(blockers).issubset(allowed_blockers):
-        raise RuntimeError('Recovery snapshot contains unknown evidence or blocker fields')
-    complete = snapshot.get('factsComplete')
-    if (complete is not (len(missing) == 0)
-            or snapshot.get('status') != ('FACTS_COMPLETE' if complete else 'INCOMPLETE')):
-        raise RuntimeError('Recovery snapshot completeness fields are inconsistent')
-    expected = {'incidentEvidence', 'ledger', 'runtime', 'database', 'workers', 'backup',
-                'locks', 'productionTag', 'mutationBoundary', 'finalization'}
-    states = {'PASS', 'BLOCKED', 'NOT_VERIFIED'}
-    if (set(checks) != expected
-            or any(not isinstance(value, str) or value not in states for value in checks.values())):
-        raise RuntimeError('Recovery snapshot check statuses are invalid')
-    def status(prefixes=(), blocker_codes=()):
-        if prefixes and any(item.startswith(prefixes) for item in missing):
-            return 'NOT_VERIFIED'
-        if any(item in blocker_codes for item in blockers):
-            return 'BLOCKED'
-        return 'PASS'
-    backup_status = snapshot.get('backup', {}).get('status')
-    expected_checks = {
-        'incidentEvidence': status(('incidentEvidence',)),
-        'ledger': status(('ledger.',)),
-        'runtime': status(('runtime.',), ('RUNTIME_IMAGE_SOURCE_PARITY_FAILED',
-            'MINIAPP_SOURCE_PARITY_FAILED', 'PRODUCTION_SERVICE_NOT_HEALTHY')),
-        'database': status(('runtime.database', 'runtime.migrationHeads.')),
-        'workers': status(('workers.',), ('WORKER_LANES_NOT_VERIFIED_HEALTHY',)),
-        'backup': ('NOT_VERIFIED' if backup_status not in ('VERIFIED', 'MISSING', 'UNVERIFIED')
-                   else status(('backup.',)) if backup_status == 'VERIFIED' else 'BLOCKED'),
-        'locks': status(('locks.',), ('RELEASE_LOCK_CONFLICT',)),
-        'productionTag': status(('productionTag.',), ('PRODUCTION_TAG_BASELINE_NOT_VERIFIED',
-            'CANDIDATE_PRODUCTION_TAG_CONFLICT')),
-        'mutationBoundary': 'PASS',
-        'finalization': 'BLOCKED',
-    }
-    blocker_checks = {
-        'RUNTIME_IMAGE_SOURCE_PARITY_FAILED': 'runtime',
-        'MINIAPP_SOURCE_PARITY_FAILED': 'runtime',
-        'PRODUCTION_SERVICE_NOT_HEALTHY': 'runtime',
-        'WORKER_LANES_NOT_VERIFIED_HEALTHY': 'workers',
-        'PROTECTED_BACKUP_MISSING': 'backup',
-        'PROTECTED_BACKUP_UNVERIFIED': 'backup',
-        'RELEASE_LOCK_CONFLICT': 'locks',
-        'PRODUCTION_TAG_BASELINE_NOT_VERIFIED': 'productionTag',
-        'CANDIDATE_PRODUCTION_TAG_CONFLICT': 'productionTag',
-    }
-    if (checks != expected_checks
-            or 'FINALIZATION_REQUIRES_SEPARATE_OWNER_AUTHORIZATION' not in blockers
-            or (bool(missing) != ('READ_ONLY_SNAPSHOT_INCOMPLETE' in blockers))
-            or any(checks[blocker_checks[item]] not in ('BLOCKED', 'NOT_VERIFIED')
-                   for item in blockers if item in blocker_checks)):
-        raise RuntimeError('Recovery snapshot check statuses contradict its evidence')
-    mutation = snapshot.get('mutationPolicy')
-    if (not isinstance(mutation, dict)
-            or mutation.get('allowed') != ['read_only_observation', 'write_diagnostic_snapshot_artifact']):
-        raise RuntimeError('Recovery diagnostic mutation policy is not read-only')
 
 
-def build_recovery_diagnostics_bundle(snapshot_path, result_path, executor_sha, run_id, attempt):
-    """Validate and prepare the small, provenance-bound handoff to the isolated publisher."""
-    tag = recovery_diagnostics_tag(executor_sha, run_id, attempt)
-    snapshot_path, result_path = Path(snapshot_path), Path(result_path)
-    if any(path.is_symlink() or not path.is_file() for path in (snapshot_path, result_path)):
-        raise RuntimeError('Recovery diagnostic inputs must be regular files')
-    snapshot_bytes, result_bytes = snapshot_path.read_bytes(), result_path.read_bytes()
-    if len(snapshot_bytes) + len(result_bytes) > MAX_RECOVERY_DIAGNOSTIC_BUNDLE_BYTES:
-        raise RuntimeError('Recovery diagnostic bundle exceeds the bounded workflow-output size')
-    snapshot, result = json.loads(snapshot_bytes), json.loads(result_bytes)
-    recovery_snapshot_digest(snapshot)
-    _validate_recovery_snapshot_semantics(snapshot)
-    incident = snapshot.get('incident', {})
-    forbidden = set(snapshot.get('mutationPolicy', {}).get('forbidden', []))
-    required_forbidden = {'apply', 'migration', 'rollback', 'runtime_switch', 'tag_write',
-                          'ledger_write', 'config_write', 'restart'}
-    if (snapshot.get('schema') != 'gpoint-recovery-read-only-snapshot-v1'
-            or snapshot.get('mode') != 'recovery-diagnostics-read-only'
-            or snapshot.get('status') not in ('FACTS_COMPLETE', 'INCOMPLETE')
-            or snapshot.get('finalizationReady') is not False
-            or not required_forbidden.issubset(forbidden)):
-        raise RuntimeError('Recovery snapshot schema, status or mutation policy is invalid')
-    candidate = snapshot.get('candidateSha')
-    original_run, original_attempt = '39010750184', '1'
-    if (candidate != ME38_INCIDENT_CANDIDATE or incident.get('baselineSha') != ME38_INCIDENT_BASELINE
-            or candidate == executor_sha
-            or incident.get('candidateSha') != candidate
-            or incident.get('runId') != original_run or str(incident.get('attempt')) != original_attempt
-            or not re.fullmatch(r'gpoint-release-\d{8}T\d{9}Z', incident.get('releaseId', ''))):
-        raise RuntimeError('Recovery snapshot incident or executor identity is inconsistent')
-    if (result.get('mode') != 'recovery-diagnostics' or result.get('status') != snapshot.get('status')
-            or result.get('candidateSha') != candidate
-            or str(result.get('automationRunId')) != str(run_id)
-            or str(result.get('automationRunAttempt')) != str(attempt)
-            or result.get('recoverySnapshot') != snapshot):
-        raise RuntimeError('Recovery diagnostic result does not match snapshot and workflow attempt')
-    manifest = {
-        'schema': 'gpoint-recovery-diagnostics-release-v1',
-        'releaseId': tag,
-        'eventType': 'RECOVERY_READ_ONLY_DIAGNOSTICS',
-        'status': snapshot['status'],
-        'executorSha': executor_sha,
-        'candidateSha': candidate,
-        'workflowRunId': str(run_id),
-        'workflowRunAttempt': str(attempt),
-        'originalIncidentRunId': original_run,
-        'originalIncidentRunAttempt': original_attempt,
-        'originalIncidentReleaseId': incident['releaseId'],
-        'snapshotSha256': snapshot['snapshotSha256'],
-        'resultSha256': hashlib.sha256(result_bytes).hexdigest(),
-        'productionMutationOccurred': False,
-        'finalizationReady': False,
-    }
-    return {
-        'snapshot.json': snapshot_bytes,
-        'result.json': result_bytes,
-        'diagnostic-manifest.json': (json.dumps(manifest, sort_keys=True, separators=(',', ':')) + '\n').encode(),
-    }
 
 
-def _read_diagnostic_bundle(bundle_b64):
-    if (not bundle_b64 or len(bundle_b64) > MAX_RECOVERY_DIAGNOSTIC_OUTPUT_BYTES
-            or len(bundle_b64.encode('utf-16-le')) > MAX_RECOVERY_DIAGNOSTIC_OUTPUT_UTF16_BYTES):
-        raise RuntimeError('Recovery diagnostic workflow output is missing or too large')
-    try:
-        payload = base64.b64decode(bundle_b64, validate=True)
-        if len(payload) > MAX_RECOVERY_DIAGNOSTIC_BUNDLE_BYTES:
-            raise ValueError('oversized')
-        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-            expected = {'snapshot.json', 'result.json', 'diagnostic-manifest.json'}
-            infos = archive.infolist()
-            if ({item.filename for item in infos} != expected or len(infos) != len(expected)
-                    or any(item.is_dir() or item.filename.startswith('/') or '..' in Path(item.filename).parts
-                           or stat.S_ISLNK(item.external_attr >> 16) or item.file_size > MAX_RECOVERY_DIAGNOSTIC_BUNDLE_BYTES
-                           for item in infos)
-                    or sum(item.file_size for item in infos) > MAX_RECOVERY_DIAGNOSTIC_BUNDLE_BYTES):
-                raise ValueError('unsafe member set')
-            return {item.filename: archive.read(item) for item in infos}
-    except (ValueError, OSError, zipfile.BadZipFile) as exc:
-        raise RuntimeError('Recovery diagnostic bundle is invalid') from exc
 
 
 def resolve_asset(kind, sha, run_id, attempt, name, github):
@@ -476,37 +294,6 @@ def find_prepare_evidence(sha, run_id, current_attempt, api=evidence_api):
     raise RuntimeError('No immutable successful executed Prepare attempt')
 
 
-def find_post_switch_failure_evidence(sha, run_id, attempt, api=evidence_api):
-    """Resolve only the immutable evidence for the named failed Deploy attempt."""
-    api = _api_for_operation(api)
-    release_tag('evidence', sha, run_id, attempt)
-    details = api(f'actions/runs/{run_id}/attempts/{attempt}')
-    jobs = api(f'actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100')
-    if (not isinstance(details, dict) or str(details.get('run_attempt')) != str(attempt)
-            or details.get('head_sha') != sha or details.get('event') != 'workflow_dispatch'
-            or details.get('path') != '.github/workflows/gpoint-deploy.yml'
-            or details.get('status') != 'completed' or details.get('conclusion') != 'failure'
-            or not isinstance(jobs, dict) or not isinstance(jobs.get('jobs'), list)
-            or jobs.get('total_count', len(jobs['jobs'])) != len(jobs['jobs'])):
-        raise RuntimeError('Failed Deploy attempt provenance is incomplete or mismatched')
-    validate = [job for job in jobs['jobs'] if job.get('name') == 'validate']
-    deploy = [job for job in jobs['jobs'] if job.get('name') == 'deploy']
-    if (len(validate) != 1 or len(deploy) != 1
-            or validate[0].get('status') != 'completed' or validate[0].get('conclusion') != 'success'
-            or validate[0].get('head_sha') != sha
-            or deploy[0].get('status') != 'completed' or deploy[0].get('conclusion') != 'failure'
-            or deploy[0].get('head_sha') != sha):
-        raise RuntimeError('Deploy attempt jobs do not prove validate PASS and deploy failure')
-    tag = release_tag('evidence', sha, run_id, attempt)
-    release = api(f'releases/tags/{tag}')
-    if release is None:
-        raise RuntimeError('Immutable failure evidence release is missing')
-    def exact_api(route):
-        return release if route == f'releases/tags/{tag}' else api(route)
-    result = resolve_asset('evidence', sha, run_id, attempt, 'result.zip', exact_api)
-    manifests = resolve_asset('evidence', sha, run_id, attempt, 'manifests.zip', exact_api)
-    return {'run': details, 'validateJob': validate[0], 'deployJob': deploy[0], 'tag': tag,
-            'resultAsset': result, 'manifestAsset': manifests}
 
 
 def _download_immutable_asset(asset, target, token):
@@ -516,159 +303,8 @@ def _download_immutable_asset(asset, target, token):
         raise RuntimeError('Immutable release asset checksum mismatch')
 
 
-def _read_failure_manifest_archive(archive_path, release_id):
-    """Read one manifest from the exact directory layout emitted by publish()."""
-    expected = f'manifests/{release_id}.json'
-    with zipfile.ZipFile(archive_path) as archive:
-        infos = archive.infolist()
-        names = [info.filename for info in infos]
-        if (not infos or len(infos) > MAX_FAILURE_MANIFEST_MEMBERS
-                or len(names) != len(set(names))):
-            raise RuntimeError('Failure manifest archive members are unsafe or incomplete')
-        selected = None
-        total_size = 0
-        for info in infos:
-            name = info.filename
-            parts = name.split('/')
-            mode = info.external_attr >> 16
-            file_type = stat.S_IFMT(mode)
-            canonical = (
-                len(parts) == 2 and parts[0] == 'manifests' and parts[1].endswith('.json')
-                and parts[1] not in ('', '.', '..')
-            ) or name == 'state/production.json'
-            if (not canonical or name.startswith('/') or '\\' in name
-                    or any(part in ('', '.', '..') for part in parts)
-                    or info.is_dir() or info.flag_bits & 0x41
-                    or info.compress_type != zipfile.ZIP_STORED
-                    or file_type not in (0, stat.S_IFREG)):
-                raise RuntimeError('Failure manifest archive members are unsafe or incomplete')
-            if info.file_size > MAX_FAILURE_MANIFEST_MEMBER_BYTES:
-                raise RuntimeError('Failure manifest archive member exceeds size limit')
-            total_size += info.file_size
-            if total_size > MAX_FAILURE_MANIFEST_TOTAL_BYTES:
-                raise RuntimeError('Failure manifest archive exceeds size limit')
-            if name == expected:
-                selected = info
-        if selected is None:
-            raise RuntimeError('Failure manifest archive members are unsafe or incomplete')
-        with archive.open(selected) as stream:
-            data = stream.read(MAX_FAILURE_MANIFEST_MEMBER_BYTES + 1)
-        if len(data) > MAX_FAILURE_MANIFEST_MEMBER_BYTES or len(data) != selected.file_size:
-            raise RuntimeError('Failure manifest archive member exceeds size limit')
-        return data
 
 
-def read_post_switch_failure(sha, run_id, attempt, output_path, token=None, api=evidence_api):
-    """Download and verify failed-run evidence without authorizing production mutation."""
-    from prepared_artifact_cache import extract
-    api = _api_for_operation(api)
-    token = token or os.environ['GITHUB_TOKEN']
-    identity = find_post_switch_failure_evidence(sha, run_id, attempt, api)
-    output = Path(output_path)
-    if output.is_symlink():
-        raise RuntimeError('Recovery evidence destination must not be a symlink')
-    with tempfile.TemporaryDirectory(prefix='gpoint-recovery-evidence-') as temporary:
-        root = Path(temporary)
-        result_zip, manifests_zip = root / 'result.zip', root / 'manifests.zip'
-        _download_immutable_asset(identity['resultAsset'], result_zip, token)
-        _download_immutable_asset(identity['manifestAsset'], manifests_zip, token)
-        result_name = f'gpoint-release-result-{run_id}-{attempt}.json'
-        result_dir = root / 'result'
-        extract(result_zip, result_dir, [result_name])
-        result = json.loads((result_dir / result_name).read_text())
-        validate_result(result, sha, run_id, attempt)
-        if (result.get('status') != 'RECOVERY_REQUIRED' or result.get('releaseState') != 'RECOVERY_REQUIRED'
-                or result.get('failureStage') != 'POST_SWITCH' or result.get('productionRef') is not None
-                or result.get('productionBaselineSha') != result.get('previousProductionSha')
-                or not re.search(r'GitHub production tag push failed on a non-transient error; refusing retry',
-                                 result.get('failureReason', ''))):
-            raise RuntimeError('Immutable result does not prove the expected post-switch tag failure')
-        release_id = result.get('releaseId')
-        if not isinstance(release_id, str) or not re.fullmatch(r'gpoint-release-\d{8}T\d{9}Z', release_id):
-            raise RuntimeError('Failed release identity is invalid')
-        member = f'{release_id}.json'
-        manifest_bytes = _read_failure_manifest_archive(manifests_zip, release_id)
-        manifest = json.loads(manifest_bytes)
-        if (manifest.get('candidateSha') != sha or manifest.get('releaseId') != release_id
-                or manifest.get('status') != 'RECOVERY_REQUIRED' or manifest.get('failureStage') != 'POST_SWITCH'
-                or manifest.get('previousProductionSha') != result.get('previousProductionSha')
-                or manifest.get('productionShaAfter') is not None
-                or manifest.get('productionRef') is not None
-                or manifest.get('failureReason') != result.get('failureReason')):
-            raise RuntimeError('Immutable failure manifest does not match result')
-        prepare_run, prepare_attempt = result.get('prepareRunId'), result.get('prepareRunAttempt')
-        if not re.fullmatch(r'[1-9][0-9]*', str(prepare_run)) or not re.fullmatch(r'[1-9][0-9]*', str(prepare_attempt)):
-            raise RuntimeError('Failed Deploy result has no exact Prepare identity')
-        selected_prepare_attempt, prepare_asset = find_prepare_evidence(
-            sha, str(prepare_run), str(prepare_attempt), api)
-        if str(selected_prepare_attempt) != str(prepare_attempt):
-            raise RuntimeError('Prepare evidence attempt differs from failed Deploy input identity')
-        prepare_dir = root / 'prepare'
-        prepare_dir.mkdir()
-        prepare_zip = prepare_dir / 'bundle.zip'
-        _download_immutable_asset(prepare_asset, prepare_zip, token)
-        prepare_contents = root / 'prepare-contents'
-        with zipfile.ZipFile(prepare_zip) as archive:
-            prepare_names = [info.filename for info in archive.infolist()]
-            if ('receipt.json' not in prepare_names or len(prepare_names) != len(set(prepare_names))
-                    or any(Path(name).name != name for name in prepare_names)):
-                raise RuntimeError('Prepare bundle members are unsafe or incomplete')
-        extract(prepare_zip, prepare_contents, [prepare_names])
-        receipt = json.loads((prepare_contents / 'receipt.json').read_text())
-        if (receipt.get('candidateSha') != sha or str(receipt.get('runId')) != str(prepare_run)
-                or str(receipt.get('runAttempt')) != str(prepare_attempt) or receipt.get('status') != 'READY'
-                or receipt.get('schema') != 3 or receipt.get('transport') != 'ghcr-oci'
-                or set(receipt.get('images', {})) != set(RECOVERY_IMAGE_REPOSITORIES)
-                or not re.fullmatch(r'[A-Za-z0-9_]{1,128}', receipt.get('prismaHead', ''))
-                or not re.fullmatch(r'[A-Za-z0-9_]{1,32}', receipt.get('agataHead', ''))
-                or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', receipt.get('gsalesMigrationHead', ''))
-                or not re.fullmatch(r'[a-f0-9]{64}', receipt.get('gsalesMigrationSha256', ''))):
-            raise RuntimeError('Immutable Prepare receipt does not match failure result')
-        for role, repository in RECOVERY_IMAGE_REPOSITORIES.items():
-            image = receipt['images'][role]
-            if (image.get('repository') != repository or image.get('sourceSha') != sha
-                    or image.get('platform') != 'linux/amd64'
-                    or not re.fullmatch(r'sha256:[a-f0-9]{64}', image.get('digest', ''))
-                    or not re.fullmatch(r'sha256:[a-f0-9]{64}', image.get('configDigest', ''))):
-                raise RuntimeError(f'Immutable Prepare image identity is invalid: {role}')
-        # Record verified asset identities and manifest bytes digest; callers must
-        # still supply independent, fresh production readback before reconciliation.
-        verified = {
-            'run': {'id': str(run_id), 'attempt': str(attempt), 'headSha': sha,
-                    'event': identity['run']['event'], 'path': identity['run']['path'],
-                    'conclusion': identity['run']['conclusion']},
-            'validateJob': {'status': identity['validateJob']['status'],
-                            'conclusion': identity['validateJob']['conclusion'], 'headSha': sha},
-            'deployJob': {'status': identity['deployJob']['status'],
-                          'conclusion': identity['deployJob']['conclusion'], 'headSha': sha},
-            'evidence': {'tag': identity['tag'], 'immutable': True,
-                         'resultDigest': identity['resultAsset']['digest'],
-                         'manifestDigest': identity['manifestAsset']['digest'],
-                         'resultChecksumVerified': True, 'manifestChecksumVerified': True},
-            'result': result,
-            'failureManifest': {**manifest, 'fileName': member},
-            'failureManifestSha256': __import__('hashlib').sha256(manifest_bytes).hexdigest(),
-            'failureManifestBytesBase64': base64.b64encode(manifest_bytes).decode('ascii'),
-            'prepare': {'runId': str(prepare_run), 'attempt': str(prepare_attempt),
-                        'candidateSha': sha, 'tag': f'gpoint-prepare-{sha}-{prepare_run}-{prepare_attempt}',
-                        'status': 'success', 'immutable': True, 'bundleDigest': prepare_asset['digest'],
-                        'receipt': receipt},
-        }
-        output.parent.mkdir(parents=True, exist_ok=True)
-        payload = (json.dumps(verified, sort_keys=True, indent=2) + '\n').encode()
-        descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
-        try:
-            with os.fdopen(descriptor, 'wb') as stream:
-                stream.write(payload)
-                stream.flush()
-                os.fsync(stream.fileno())
-        except BaseException:
-            try:
-                os.unlink(output)
-            except OSError:
-                pass
-            raise
-        return verified
 
 
 def validate_result(data, sha, run_id, attempt):
@@ -677,23 +313,6 @@ def validate_result(data, sha, run_id, attempt):
         raise RuntimeError('Immutable Deploy result provenance mismatch')
 
 
-def validate_recovery_finalization_result(data, sha, run_id, attempt):
-    validate_result(data, sha, run_id, attempt)
-    if (data.get('mode') != 'recovery-finalization'
-            or data.get('status') not in ('COMPLETE', 'RECOVERY_REQUIRED', 'BLOCKED')
-            or data.get('releaseState') != data.get('status')):
-        raise RuntimeError('Recovery finalization result status is missing or inconsistent')
-    failure = data.get('executionFailure')
-    if data['status'] == 'COMPLETE':
-        if failure is not None:
-            raise RuntimeError('Completed recovery finalization contains contradictory failure evidence')
-    elif (not isinstance(failure, dict)
-            or failure.get('stage') not in ('RECOVERY_FINALIZATION', 'RECOVERY_RESULT_READBACK')
-            or failure.get('executionStatus') not in ('FAILED', 'BLOCKED')
-            or not isinstance(failure.get('diagnostic'), str) or not failure['diagnostic'].strip()
-            or (failure.get('exitCode') is not None and not isinstance(failure.get('exitCode'), int))):
-        raise RuntimeError('Failed recovery finalization result lacks exact sanitized failure evidence')
-    return data
 
 
 class GitHubCliError(RuntimeError):
@@ -797,130 +416,6 @@ def _write_evidence_with_readback(label, write, read, is_complete, is_conflict, 
     raise RuntimeError(f'{label} retry limit exhausted')
 
 
-def publish_recovery_finalization_evidence(tag, sha, run_id, attempt, archives, *, api=None, writer=None,
-                                           sleep=None):
-    """Publish only the exact finalization result, reconciling ambiguous transient writes by read-back."""
-    api = api or _api_for_operation(evidence_api)
-    writer = writer or gh
-    expected_tag = release_tag('evidence', sha, run_id, attempt)
-    if tag != expected_tag:
-        raise RuntimeError('Recovery evidence tag does not match the candidate and workflow attempt')
-    body = f'Exact SHA {sha}; workflow run {run_id}, attempt {attempt}.'
-    expected_assets = {}
-    for archive in archives:
-        archive = Path(archive)
-        if archive.is_symlink() or not archive.is_file() or archive.name in expected_assets:
-            raise RuntimeError('Recovery evidence archive set is invalid')
-        payload = archive.read_bytes()
-        expected_assets[archive.name] = {'digest': 'sha256:' + hashlib.sha256(payload).hexdigest(),
-                                         'size': len(payload), 'path': archive}
-    if not expected_assets or 'result.zip' not in expected_assets:
-        raise RuntimeError('Recovery evidence result archive is required')
-
-    def read_ref():
-        return _optional_publish_read(api, f'git/ref/tags/{tag}')
-
-    def ref_exact(ref):
-        return isinstance(ref, dict) and ref.get('object', {}).get('type') == 'commit' \
-            and ref.get('object', {}).get('sha') == sha
-
-    def ref_conflict(ref):
-        return ref is not None and not ref_exact(ref)
-
-    _write_evidence_with_readback('recovery evidence tag',
-        lambda: writer('api', '--method', 'POST', f'repos/{REPO}/git/refs',
-                       '-f', f'ref=refs/tags/{tag}', '-f', f'sha={sha}'),
-        read_ref, ref_exact, ref_conflict, sleep=sleep)
-
-    def read_release():
-        return _optional_publish_read(api, f'releases/tags/{tag}')
-
-    def release_identity(release):
-        return isinstance(release, dict) and release.get('tag_name') == tag \
-            and release.get('name') == tag and release.get('body') == body
-
-    def asset_map(release):
-        assets = release.get('assets') if isinstance(release, dict) else None
-        if not isinstance(assets, list):
-            raise RuntimeError('Recovery evidence Release assets are malformed')
-        result = {}
-        for asset in assets:
-            name = asset.get('name') if isinstance(asset, dict) else None
-            if not isinstance(name, str) or not name or name in result:
-                raise RuntimeError('Recovery evidence Release contains duplicate or malformed assets')
-            result[name] = asset
-        if set(result) - set(expected_assets):
-            raise RuntimeError('Recovery evidence Release contains unexpected assets')
-        return result
-
-    def validate_assets(release, *, require_all):
-        found = asset_map(release)
-        for name, expected in expected_assets.items():
-            asset = found.get(name)
-            if asset is None:
-                if require_all:
-                    return False
-                continue
-            if (asset.get('state') != 'uploaded' or asset.get('digest') != expected['digest']
-                    or asset.get('size') != expected['size']):
-                raise RuntimeError('Recovery evidence asset conflicts with its local checksum')
-        return len(found) == len(expected_assets) if require_all else True
-
-    def draft_or_final_release(release):
-        if not release_identity(release) or not isinstance(release.get('draft'), bool):
-            return False
-        if release.get('draft'):
-            return release.get('immutable') in (False, None)
-        return release.get('immutable') is True and validate_assets(release, require_all=True)
-
-    def release_conflict(release):
-        return release is not None and not draft_or_final_release(release)
-
-    _write_evidence_with_readback('recovery evidence draft Release',
-        lambda: writer('release', 'create', tag, '--repo', REPO, '--verify-tag', '--draft',
-                       '--title', tag, '--notes', body),
-        read_release, draft_or_final_release, release_conflict, sleep=sleep)
-
-    for name, expected in expected_assets.items():
-        def asset_present(release, asset_name=name, expected_asset=expected):
-            if not draft_or_final_release(release):
-                return False
-            asset = asset_map(release).get(asset_name)
-            if asset is None:
-                return False
-            if (asset.get('state') != 'uploaded' or asset.get('digest') != expected_asset['digest']
-                    or asset.get('size') != expected_asset['size']):
-                raise RuntimeError('Recovery evidence asset conflicts with its local checksum')
-            return True
-
-        def asset_conflict(release):
-            if release is None:
-                return True
-            if release.get('draft') is False and release.get('immutable') is True:
-                return not asset_present(release)
-            return not release_identity(release) or release.get('draft') is not True
-
-        _write_evidence_with_readback(f'recovery evidence asset {name}',
-            lambda file=expected['path']: writer('release', 'upload', tag, '--repo', REPO, str(file)),
-            read_release, asset_present, asset_conflict, sleep=sleep)
-
-    def final_release(release):
-        return release_identity(release) and release.get('draft') is False \
-            and release.get('immutable') is True and validate_assets(release, require_all=True)
-
-    def finalization_conflict(release):
-        if release is None or not release_identity(release):
-            return True
-        if release.get('draft') is False:
-            return not final_release(release)
-        return release.get('draft') is not True or release.get('immutable') not in (False, None)
-
-    _write_evidence_with_readback('recovery evidence Release publication',
-        lambda: writer('release', 'edit', tag, '--repo', REPO, '--draft=false', '--latest=false'),
-        read_release, final_release, finalization_conflict, sleep=sleep)
-    if not ref_exact(read_ref()):
-        raise RuntimeError('Recovery evidence published tag failed exact-SHA read-back')
-    print(f'IMMUTABLE_RELEASE=PASS TAG={tag}')
 
 
 def write_zip(target, files):
@@ -971,83 +466,42 @@ def verified_optional_v4_static_asset(receipt, bundle, sha):
 
 
 def publish(kind, sha, run_id, attempt):
-    recovery_finalization = kind == 'evidence' and os.environ.get('RELEASE_MODE') == 'recovery-finalization'
+    if kind != 'prepare':
+        raise RuntimeError('GitHub Releases are reserved for immutable Prepare artifacts')
     checkout_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
-    if recovery_finalization:
-        executor_sha = os.environ.get('GITHUB_SHA', '')
-        workflow_ref = f'{REPO}/.github/workflows/gpoint-deploy.yml@refs/heads/main'
-        if (os.environ.get('GITHUB_REPOSITORY') != REPO
-                or os.environ.get('GITHUB_EVENT_NAME') != 'workflow_dispatch'
-                or os.environ.get('GITHUB_WORKFLOW_REF') != workflow_ref
-                or not re.fullmatch(r'[a-f0-9]{40}', executor_sha)
-                or checkout_sha != executor_sha
-                or os.environ.get('CANDIDATE_SHA') != sha):
-            raise RuntimeError('Recovery evidence publisher source or independent candidate identity mismatch')
-    elif os.environ.get('GITHUB_REPOSITORY') != REPO or os.environ.get('GITHUB_SHA') != sha:
+    if os.environ.get('GITHUB_REPOSITORY') != REPO or os.environ.get('GITHUB_SHA') != sha:
         raise RuntimeError('Only exact GPoint workflow source may publish assets')
-    elif checkout_sha != sha:
+    if checkout_sha != sha:
         raise RuntimeError('Release publisher checkout differs from candidate')
     tag = release_tag(kind, sha, run_id, attempt)
     with tempfile.TemporaryDirectory(prefix='gpoint-release-assets-') as temporary:
         root = Path(temporary)
+        bundle = Path(os.environ['RUNNER_TEMP']) / 'gpoint-bundle'
+        receipt = json.loads((bundle / 'receipt.json').read_text())
+        if (receipt.get('candidateSha') != sha or str(receipt.get('runId')) != run_id
+                or str(receipt.get('runAttempt')) != attempt or receipt.get('status') != 'READY'):
+            raise RuntimeError('Prepare receipt candidate mismatch')
         archives = []
-        if kind in ('prepare', 'rehearsal'):
-            bundle = Path(os.environ['RUNNER_TEMP']) / 'gpoint-bundle'
-            names = ['images.tar.gz', 'receipt.json'] if kind == 'prepare' else ['receipt.json']
-            receipt = json.loads((bundle / 'receipt.json').read_text())
-            # The consumer still verifies the complete receipt and image parity.
-            if (receipt.get('candidateSha') != sha or str(receipt.get('runId')) != run_id
-                    or str(receipt.get('runAttempt')) != attempt or receipt.get('status') != 'READY'):
-                raise RuntimeError('Prepare receipt candidate mismatch')
-            if kind == 'prepare' and receipt.get('schema') == 2:
-                if receipt.get('route') != 'STATIC_UI_ONLY':
-                    raise RuntimeError('unknown V4 Prepare receipt route')
-                static = verified_optional_v4_static_asset(receipt, bundle, sha)
-                if static is None:
-                    raise RuntimeError('V4 static bundle missing')
-                names = ['miniapp.zip', 'receipt.json']
-                target = root / 'bundle.zip'
-                write_zip(target, [(name, bundle / name) for name in names])
-                archives.append(target)
-            elif kind == 'prepare' and receipt.get('schema') == 3:
-                if receipt.get('transport') != 'ghcr-oci':
-                    raise RuntimeError('unknown OCI Prepare receipt transport')
-                archives.extend(build_oci_prepare_assets(bundle, root))
-            else:
-                target = root / ('bundle.zip' if kind == 'prepare' else 'receipt.zip')
-                write_zip(target, [(name, bundle / name) for name in names])
-                archives.append(target)
-                if kind == 'prepare':
-                    # Existing V3 advisory: an extra standalone static ZIP
-                    # that does NOT change the legacy complete Docker bundle.
-                    static = verified_optional_v4_static_asset(receipt, bundle, sha)
-                    if static is not None:
-                        archives.append(static)
-        else:
-            result = Path(os.environ['RELEASE_RESULT'])
-            if not result.is_file():
-                if recovery_finalization:
-                    raise RuntimeError('Recovery finalization result is missing; refusing to publish incomplete evidence')
-                print('RELEASE_EVIDENCE=NOT_CREATED (execution did not produce a result)')
-                return
-            data = json.loads(result.read_text())
-            if recovery_finalization:
-                validate_recovery_finalization_result(data, sha, run_id, attempt)
-            else:
-                validate_result(data, sha, run_id, attempt)
-            target = root / 'result.zip'
-            write_zip(target, [(result.name, result)])
+        if receipt.get('schema') == 2:
+            if receipt.get('route') != 'STATIC_UI_ONLY':
+                raise RuntimeError('unknown V4 Prepare receipt route')
+            static = verified_optional_v4_static_asset(receipt, bundle, sha)
+            if static is None:
+                raise RuntimeError('V4 static bundle missing')
+            target = root / 'bundle.zip'
+            write_zip(target, [('miniapp.zip', bundle / 'miniapp.zip'), ('receipt.json', bundle / 'receipt.json')])
             archives.append(target)
-            evidence = Path(os.environ['GPOINT_RELEASE_EVIDENCE'])
-            files = [(str(p.relative_to(evidence)), p) for p in sorted(evidence.rglob('*.json'))]
-            if files:
-                target = root / 'manifests.zip'
-                write_zip(target, files)
-                archives.append(target)
-        if recovery_finalization:
-            publish_recovery_finalization_evidence(tag, sha, run_id, attempt, archives,
-                api=_api_for_operation(evidence_api), writer=gh)
-            return
+        elif receipt.get('schema') == 3:
+            if receipt.get('transport') != 'ghcr-oci':
+                raise RuntimeError('unknown OCI Prepare receipt transport')
+            archives.extend(build_oci_prepare_assets(bundle, root))
+        else:
+            target = root / 'bundle.zip'
+            write_zip(target, [('images.tar.gz', bundle / 'images.tar.gz'), ('receipt.json', bundle / 'receipt.json')])
+            archives.append(target)
+            static = verified_optional_v4_static_asset(receipt, bundle, sha)
+            if static is not None:
+                archives.append(static)
         # New tag and new draft only: never overwrite or silently reuse a release.
         gh('api', '--method', 'POST', f'repos/{REPO}/git/refs',
            '-f', f'ref=refs/tags/{tag}', '-f', f'sha={sha}')
@@ -1061,144 +515,6 @@ def publish(kind, sha, run_id, attempt):
             if asset['digest'] != 'sha256:' + checksum(archive):
                 raise RuntimeError('Published immutable asset checksum differs from local archive')
         print(f'IMMUTABLE_RELEASE=PASS TAG={tag}')
-
-
-def package_recovery_diagnostics(snapshot_path=None, result_path=None, manifest_path=None,
-                                 executor_sha=None, run_id=None, attempt=None, output_path=None):
-    executor_sha = executor_sha or os.environ.get('GPOINT_RECOVERY_EXECUTOR_SHA', '')
-    run_id = str(run_id or os.environ.get('GITHUB_RUN_ID', ''))
-    attempt = str(attempt or os.environ.get('GITHUB_RUN_ATTEMPT', ''))
-    snapshot_path = snapshot_path or os.environ.get('GPOINT_RECOVERY_SNAPSHOT_PATH')
-    result_path = result_path or os.environ.get('RELEASE_RESULT')
-    manifest_path = manifest_path or os.environ.get('GPOINT_RECOVERY_DIAGNOSTIC_MANIFEST')
-    output_path = output_path or os.environ.get('GITHUB_OUTPUT')
-    if not output_path:
-        raise RuntimeError('Recovery diagnostic workflow output is unavailable')
-    files = build_recovery_diagnostics_bundle(snapshot_path, result_path, executor_sha, run_id, attempt)
-    diagnostic_manifest = json.loads(files['diagnostic-manifest.json'])
-    if not manifest_path:
-        raise RuntimeError('Recovery diagnostic local manifest path is unavailable')
-    source_manifest = Path(manifest_path)
-    if source_manifest.is_symlink() or not source_manifest.is_file():
-        raise RuntimeError('Recovery diagnostic local manifest is unavailable')
-    local_manifest = json.loads(source_manifest.read_text())
-    if (local_manifest.get('releaseId') != diagnostic_manifest['releaseId']
-            or local_manifest.get('recoverySnapshot') != json.loads(files['snapshot.json'])
-            or local_manifest.get('productionMutationOccurred') is not False
-            or local_manifest.get('databaseApplyOccurred') is not False
-            or local_manifest.get('runtimeSwitchOccurred') is not False):
-        raise RuntimeError('Recovery diagnostic local manifest conflicts with verified snapshot')
-    files['diagnostic-manifest.json'] = (json.dumps(diagnostic_manifest,
-        sort_keys=True, separators=(',', ':')) + '\n').encode()
-    payload = io.BytesIO()
-    with zipfile.ZipFile(payload, 'w', compression=zipfile.ZIP_STORED) as archive:
-        for name in ('snapshot.json', 'result.json', 'diagnostic-manifest.json'):
-            archive.writestr(name, files[name])
-    encoded = base64.b64encode(payload.getvalue()).decode('ascii')
-    if (len(encoded) > MAX_RECOVERY_DIAGNOSTIC_OUTPUT_BYTES
-            or len(encoded.encode('utf-16-le')) > MAX_RECOVERY_DIAGNOSTIC_OUTPUT_UTF16_BYTES):
-        raise RuntimeError('Recovery diagnostic bundle exceeds the bounded workflow-output size')
-    with open(output_path, 'a', encoding='utf-8') as output:
-        output.write(f'recovery_diagnostic_bundle={encoded}\n')
-    print(f'RECOVERY_DIAGNOSTIC_BUNDLE=READY bytes={len(payload.getvalue())} sha256={hashlib.sha256(payload.getvalue()).hexdigest()}')
-
-
-def _verify_diagnostic_release_metadata(release, tag, executor_sha, expected, *, draft, immutable):
-    if (not isinstance(release, dict) or release.get('tag_name') != tag
-            or release.get('draft') is not draft
-            or (immutable and release.get('immutable') is not True)
-            or (not immutable and release.get('immutable') is True)):
-        raise RuntimeError('Recovery diagnostic Release metadata identity/status mismatch')
-    assets = release.get('assets')
-    if not isinstance(assets, list) or {asset.get('name') for asset in assets} != set(expected) or len(assets) != len(expected):
-        raise RuntimeError('Recovery diagnostic Release asset set is incomplete or unexpected')
-    for asset in assets:
-        name = asset['name']
-        if (asset.get('state') != 'uploaded' or asset.get('digest') != 'sha256:' + expected[name][0]
-                or asset.get('size') != expected[name][1]
-                or not re.fullmatch(r'[1-9][0-9]*', str(asset.get('id', '')))):
-            raise RuntimeError('Recovery diagnostic Release asset checksum or identity mismatch')
-
-
-def publish_recovery_diagnostics(executor_sha=None, run_id=None, attempt=None, bundle_b64=None,
-                                 api=None, command=None, downloader=None):
-    """Publish only a new, provenance-bound diagnostic Release; never reuse a tag."""
-    executor_sha = executor_sha or os.environ.get('GITHUB_SHA', '')
-    run_id = str(run_id or os.environ.get('GITHUB_RUN_ID', ''))
-    attempt = str(attempt or os.environ.get('GITHUB_RUN_ATTEMPT', ''))
-    bundle_b64 = bundle_b64 if bundle_b64 is not None else os.environ.get('RECOVERY_DIAGNOSTICS_BUNDLE_B64', '')
-    token = os.environ.get('GITHUB_TOKEN') or os.environ.get('GH_TOKEN')
-    if not token:
-        raise RuntimeError('Recovery diagnostic publication authorization is unavailable')
-    if (os.environ.get('GITHUB_REPOSITORY') != REPO or os.environ.get('GITHUB_SHA') != executor_sha
-            or subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() != executor_sha):
-        raise RuntimeError('Recovery diagnostic publisher checkout differs from exact executor SHA')
-    files = _read_diagnostic_bundle(bundle_b64)
-    snapshot, result, manifest = (json.loads(files[name]) for name in
-                                  ('snapshot.json', 'result.json', 'diagnostic-manifest.json'))
-    verified_files = build_recovery_diagnostics_bundle_from_bytes(snapshot, result, manifest,
-        executor_sha, run_id, attempt, files['snapshot.json'], files['result.json'])
-    if json.loads(files['snapshot.json']) != snapshot or json.loads(files['result.json']) != result:
-        raise RuntimeError('Recovery diagnostic bundle contains altered evidence')
-    if files['diagnostic-manifest.json'] != verified_files['diagnostic-manifest.json']:
-        raise RuntimeError('Recovery diagnostic bundle manifest is not reproducible')
-    tag = recovery_diagnostics_tag(executor_sha, run_id, attempt)
-    reader = api or _EvidenceApiClient(token)
-    writer = command or gh
-    fetch_asset = downloader or _download_immutable_asset
-    if reader(f'releases/tags/{tag}') is not None or reader(f'git/ref/tags/{tag}') is not None:
-        raise RuntimeError('Recovery diagnostic immutable Release identity already exists')
-    expected = {name: (hashlib.sha256(data).hexdigest(), len(data)) for name, data in files.items()}
-    with tempfile.TemporaryDirectory(prefix='gpoint-recovery-diagnostics-publish-') as temporary:
-        root = Path(temporary)
-        local = {}
-        for name, data in files.items():
-            path = root / name
-            with path.open('xb') as stream:
-                stream.write(data)
-            local[name] = path
-        writer('api', '--method', 'POST', f'repos/{REPO}/git/refs',
-               '-f', f'ref=refs/tags/{tag}', '-f', f'sha={executor_sha}')
-        writer('release', 'create', tag, '--repo', REPO, '--verify-tag', '--draft',
-               '--title', tag, '--notes', f'Read-only recovery diagnostics; executor {executor_sha}, run {run_id}, attempt {attempt}.')
-        writer('release', 'upload', tag, '--repo', REPO, *map(str, local.values()))
-        draft = reader(f'releases/tags/{tag}')
-        ref = reader(f'git/ref/tags/{tag}')
-        if ref is None or ref.get('object', {}).get('type') != 'commit' or ref.get('object', {}).get('sha') != executor_sha:
-            raise RuntimeError('Recovery diagnostic draft tag does not target the exact executor SHA')
-        _verify_diagnostic_release_metadata(draft, tag, executor_sha, expected, draft=True, immutable=False)
-        writer('release', 'edit', tag, '--repo', REPO, '--draft=false', '--latest=false')
-        release = reader(f'releases/tags/{tag}')
-        ref = reader(f'git/ref/tags/{tag}')
-        if ref is None or ref.get('object', {}).get('type') != 'commit' or ref.get('object', {}).get('sha') != executor_sha:
-            raise RuntimeError('Published recovery diagnostic tag target changed')
-        _verify_diagnostic_release_metadata(release, tag, executor_sha, expected, draft=False, immutable=True)
-        assets = {asset['name']: asset for asset in release['assets']}
-        for name, path in local.items():
-            readback = root / f'readback-{name}'
-            fetch_asset(assets[name], readback, token)
-            if hashlib.sha256(readback.read_bytes()).hexdigest() != expected[name][0]:
-                raise RuntimeError('Recovery diagnostic immutable asset readback checksum mismatch')
-    print(f'RECOVERY_DIAGNOSTIC_RELEASE=IMMUTABLE tag={tag} snapshot_sha256={manifest["snapshotSha256"]}')
-
-
-def build_recovery_diagnostics_bundle_from_bytes(snapshot, result, manifest, executor_sha, run_id, attempt,
-                                                 snapshot_bytes, result_bytes):
-    """Revalidate the publisher input without trusting the producer job output."""
-    # Reuse the same identity, mutation-policy, snapshot digest and result checks.
-    with tempfile.TemporaryDirectory(prefix='gpoint-recovery-diagnostic-verify-') as temporary:
-        root = Path(temporary)
-        snapshot_path, result_path = root/'snapshot.json', root/'result.json'
-        snapshot_path.write_bytes(snapshot_bytes)
-        result_path.write_bytes(result_bytes)
-        if json.loads(snapshot_bytes) != snapshot or json.loads(result_bytes) != result:
-            raise RuntimeError('Recovery diagnostic JSON bytes do not match parsed evidence')
-        generated = build_recovery_diagnostics_bundle(snapshot_path, result_path, executor_sha, run_id, attempt)
-    if generated['diagnostic-manifest.json'] != json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode() + b'\n':
-        raise RuntimeError('Recovery diagnostic manifest identity or digest mismatch')
-    return {'snapshot.json': snapshot_bytes, 'result.json': result_bytes,
-            'diagnostic-manifest.json': (json.dumps(manifest, sort_keys=True, separators=(',', ':')) + '\n').encode()}
-
 
 def read_result(sha, run_id, attempt, result_path=None, token=None):
     from prepared_artifact_cache import download, extract, checksum
@@ -1231,18 +547,11 @@ def read_result(sha, run_id, attempt, result_path=None, token=None):
 
 def main():
     sha = os.environ.get('CANDIDATE_SHA', os.environ.get('GITHUB_SHA', ''))
-    if len(sys.argv) > 1 and sys.argv[1] == 'package-recovery-diagnostics':
-        package_recovery_diagnostics()
-        return
-    if len(sys.argv) > 1 and sys.argv[1] == 'publish-recovery-diagnostics':
-        publish_recovery_diagnostics()
-        return
-    if len(sys.argv) > 1 and sys.argv[1] == 'read-recovery-failure' and len(sys.argv) == 6:
-        read_post_switch_failure(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
-        return
     run_id, attempt = os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT']
     if sys.argv[1] == 'publish':
-        publish(sys.argv[2], sha, run_id, attempt)
+        if len(sys.argv) != 3 or sys.argv[2] != 'prepare':
+            raise RuntimeError('Only immutable Prepare artifacts may be published as GitHub Releases')
+        publish('prepare', sha, run_id, attempt)
     elif sys.argv[1] == 'read-result':
         read_result(sha, run_id, attempt)
     else:

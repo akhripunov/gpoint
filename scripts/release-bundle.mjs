@@ -10,7 +10,7 @@ export function verifyReleaseBundle(directory, candidate) {
   if (!/^[a-f0-9]{40}$/.test(candidate)) throw new Error('invalid candidate SHA');
   const root = fs.realpathSync(directory);
   const proof = JSON.parse(fs.readFileSync(path.join(root, 'receipt.json'), 'utf8'));
-  if (proof.schema === 2) return verifyV4StaticBundle(root, candidate, proof);
+  if (proof.schema === 2) throw new Error('static-only release receipts are disabled; Prepare must prove the full release gates');
   if (proof.schema === 3) return verifyOciReleaseBundle(root, candidate, proof);
   if (proof.schema !== 1 || proof.candidateSha !== candidate || proof.status !== 'READY') {
     throw new Error('release bundle is not READY for the exact candidate');
@@ -111,7 +111,7 @@ function validateV3CoveredUnchanged(proof, candidate, sourceGates, covered) {
   if (covered.length !== sourceGates.length ||
       impact?.version !== 1 || impact?.candidateSha !== candidate ||
       impact?.classification !== 'UI_ONLY' ||
-      impact?.baselineSource !== 'gpoint-release-ledger' ||
+      impact?.baselineSource !== 'github-deployment-vps-readback' ||
       impact?.reason !== 'narrow-unchanged-backend' ||
       !/^[a-f0-9]{40}$/.test(impact?.productionBaselineSha ?? '') ||
       impact.productionBaselineSha === candidate ||
@@ -146,7 +146,7 @@ export function verifyV4StaticBundle(root, candidate, proof) {
       impact?.productionBaselineSha !== proof.productionBaselineSha ||
       impact?.classification !== 'UI_ONLY' ||
       impact?.reason !== 'narrow-unchanged-backend' ||
-      impact?.baselineSource !== 'gpoint-release-ledger' ||
+      impact?.baselineSource !== 'github-deployment-vps-readback' ||
       impact?.checks?.agata_postgres_rehearsal !== false ||
       impact?.checks?.gsales_postgres_regression !== false ||
       !Array.isArray(impact.changedPaths) || !impact.changedPaths.length ||

@@ -1,5 +1,14 @@
 # Release authorization modes
 
+> **Current production-state evidence (ME-42):** authorization and operational
+> status are separate. Prepare artifact provenance comes from the exact
+> successful Prepare workflow and its immutable GitHub Prepare Release. A
+> production attempt is tracked by a GitHub Deployment and its statuses, but
+> that record does not prove the VPS outcome. Read-only VPS/runtime/database
+> facts are authoritative. The historical ledger-based recovery wording below
+> is superseded; do not use a ledger, production tag, or finalization workflow
+> to authorize, infer, or repair an operational result.
+
 Effective 2026-10-06 by explicit OWNER decision; applies to future releases.
 
 ## OWNER release task authorization (task-scoped)
@@ -105,9 +114,11 @@ the normal exact-SHA approval path remains.
 The authorization is consumed after successful runtime completion using a
 durable marker. A failed attempt does not consume it, so an in-scope candidate
 may be prepared and deployed again without another OWNER approval. The fresh
-preflight and ledger checks decide whether production is safe to continue; an
-uncertain or partial Apply is never repeated blindly and remains blocked when
-the ledger reports recovery required or the live baseline cannot be proven.
+preflight and read-only VPS checks decide whether production is safe to
+continue; an uncertain or partial Apply is never repeated blindly and remains
+blocked until inspection proves the actual state. Deployment API status is
+updated against the same Deployment record; API uncertainty never triggers a
+second Apply.
 
 Default eligibility is limited to bounded low-risk changes. A specifically
 pre-approved database migration can be task-scoped only when schema-v3

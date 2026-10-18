@@ -37,12 +37,6 @@ class ReleaseAssetError(RuntimeError):
 
 
 def validate_current_main_candidate(candidate_sha, release_mode, executor_sha, current_main_sha, is_ancestor):
-    if release_mode in ('recovery-finalization', 'recovery-diagnostics'):
-        if (not re.fullmatch(r'[a-f0-9]{40}', executor_sha or '')
-                or current_main_sha != executor_sha
-                or not is_ancestor(candidate_sha, executor_sha)):
-            raise RuntimeError('Recovery candidate is not an ancestor of the exact current-main executor')
-        return
     if current_main_sha != candidate_sha:
         raise RuntimeError('Candidate is no longer current main')
 

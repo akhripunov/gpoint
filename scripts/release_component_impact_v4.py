@@ -133,7 +133,7 @@ def main():
     v3 = load_verified_plan(args.v3_plan, args.candidate, root)
     baseline = v3.get("productionBaselineSha")
     proved = (
-        v3.get("baselineSource") == "gpoint-release-ledger" and
+        v3.get("baselineSource") == "github-deployment-vps-readback" and
         v3.get("reason") in ("narrow-unchanged-backend", "impact-not-proven") and
         isinstance(baseline, str)
     )

@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 """Release Orchestrator V3: fail-closed, provenance-bound CI impact selection."""
 import argparse
-import base64
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
-import urllib.request
 
 SHA_RE = re.compile(r"^[a-f0-9]{40}$")
-LEDGER_URL = "https://api.github.com/repos/akhripunov/gpoint/contents/docs/release/state/production.json?ref=gpoint-release-ledger"
 CHECKS = ("agata_postgres_rehearsal", "gsales_postgres_regression")
 VERSION = 1
 
@@ -40,19 +36,17 @@ def make_plan(candidate, baseline=None, changed_paths=None, reason="unknown"):
     if not SHA_RE.fullmatch(candidate or ""):
         raise ValueError("candidate requires exact SHA")
     paths = sorted(set(changed_paths or []))
-    verified = bool(SHA_RE.fullmatch(baseline or "") and baseline != candidate
-                    and paths and reason == "verified-production-ledger")
-    ui_only = verified and all(safe_ui_path(p) for p in paths)
     return {
         "version": VERSION,
         "candidateSha": candidate,
-        "productionBaselineSha": baseline if verified else None,
-        "baselineSource": "gpoint-release-ledger" if verified else None,
-        "classification": "UI_ONLY" if ui_only else "FULL",
-        "reason": "narrow-unchanged-backend" if ui_only else
-                  ("impact-not-proven" if verified else reason),
-        "changedPaths": paths if verified else [],
-        "checks": {k: not ui_only for k in CHECKS},
+        # Prepare has no trusted live VPS readback. A Git ref or historical
+        # release record is not enough to prove the production baseline.
+        "productionBaselineSha": None,
+        "baselineSource": None,
+        "classification": "FULL",
+        "reason": reason if reason != "unknown" else "verified-live-baseline-unavailable",
+        "changedPaths": [],
+        "checks": {k: True for k in CHECKS},
         "invariantChecks": [
             "workspace_build", "workspace_typecheck", "workspace_tests", "release_tests",
             "artifact_migrations", "docker_images_exact_sha", "artifact_parity",
@@ -62,42 +56,10 @@ def make_plan(candidate, baseline=None, changed_paths=None, reason="unknown"):
     }
 
 
-def read_ledger_baseline(token, opener=urllib.request.urlopen):
-    if not token:
-        raise ValueError("GitHub token unavailable")
-    req = urllib.request.Request(
-        LEDGER_URL, headers={"Authorization": "Bearer " + token,
-                             "Accept": "application/vnd.github+json",
-                             "X-GitHub-Api-Version": "2022-11-28"})
-    with opener(req, timeout=15) as resp:
-        payload = json.loads(resp.read())
-    if payload.get("encoding") != "base64" or not isinstance(payload.get("content"), str):
-        raise ValueError("invalid ledger response")
-    state = json.loads(base64.b64decode(payload["content"]))
-    sha = state.get("currentProductionSha")
-    if (not SHA_RE.fullmatch(sha or "") or
-        state.get("lastReleaseStatus") != "COMPLETE" or
-        state.get("serverDeployStatus") != "COMPLETE" or
-        state.get("releaseOrigin") != "durable-production-release" or
-        state.get("recoveryRequired") is not False):
-        raise ValueError("canonical production state is not reusable")
-    return sha
-
-
 def build_ci_plan(repo, candidate, token=None, ref=None):
     if ref != "refs/heads/main":
         return make_plan(candidate, reason="not-main")
-    try:
-        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
-        if head != candidate:
-            raise ValueError("checkout SHA mismatch")
-        if subprocess.check_output(["git", "status", "--porcelain"], cwd=repo).strip():
-            raise ValueError("dirty checkout")
-        baseline = read_ledger_baseline(token)
-        paths = changed_paths_between(repo, baseline, candidate)
-    except (OSError, ValueError, KeyError, subprocess.CalledProcessError, TimeoutError, json.JSONDecodeError):
-        return make_plan(candidate, reason="canonical-proof-unavailable")
-    return make_plan(candidate, baseline, paths, reason="verified-production-ledger")
+    return make_plan(candidate, reason="verified-live-baseline-unavailable")
 
 
 def load_verified_plan(path, candidate, repo):
@@ -107,32 +69,27 @@ def load_verified_plan(path, candidate, repo):
     plan = json.loads(Path(path).read_text())
     if plan.get("candidateSha") != candidate or plan.get("version") != VERSION:
         raise ValueError("impact plan candidate/version mismatch")
-    if plan.get("classification") == "UI_ONLY":
-        base = plan.get("productionBaselineSha")
-        try:
-            actual = changed_paths_between(repo, base, candidate)
-        except (subprocess.CalledProcessError, ValueError):
-            raise ValueError("impact evidence source tree could not be proved") from None
-        if plan != make_plan(candidate, base, actual, reason="verified-production-ledger"):
-            raise ValueError("impact evidence differs from exact source tree")
-    else:
-        if plan.get("checks") != {k: True for k in CHECKS}:
-            raise ValueError("FULL plan cannot skip gates")
+    if (plan.get("classification") != "FULL" or
+            plan.get("checks") != {k: True for k in CHECKS} or
+            plan.get("productionBaselineSha") is not None or
+            plan.get("baselineSource") is not None or
+            plan.get("changedPaths") != []):
+        raise ValueError("Prepare requires FULL gates until a verified live baseline is available")
     return plan
 
 
-def verify_receipt_baseline(receipt_path, candidate, token):
-    """Immediately before artifact publication, reject live baseline drift."""
+def verify_receipt_baseline(receipt_path, candidate, token=None):
+    """Immediately before publication, require the full source regression gates."""
     proof = json.loads(Path(receipt_path).read_text())
     if proof.get("candidateSha") != candidate or proof.get("status") != "READY":
         raise ValueError("receipt identity is not the exact candidate")
     impact = proof.get("impactV3") or {}
-    if impact.get("classification") == "UI_ONLY":
-        if read_ledger_baseline(token) != impact.get("productionBaselineSha"):
-            raise ValueError("production baseline changed after impact selection")
-    else:
-        if proof.get("gates", {}).get("postgres") != "PASS" or proof.get("gates", {}).get("gsalesPostgres") != "PASS":
-            raise ValueError("unproved FULL release source gates")
+    if (impact.get("classification") != "FULL" or impact.get("productionBaselineSha") is not None
+            or impact.get("baselineSource") is not None or impact.get("changedPaths") != []
+            or impact.get("checks") != {k: True for k in CHECKS}
+            or proof.get("gates", {}).get("postgres") != "PASS"
+            or proof.get("gates", {}).get("gsalesPostgres") != "PASS"):
+        raise ValueError("unproved FULL release source gates")
 
 
 def main():
@@ -143,7 +100,7 @@ def main():
     mode.add_argument("--verify-receipt")
     opts = parser.parse_args()
     if opts.verify_receipt:
-        verify_receipt_baseline(opts.verify_receipt, opts.candidate, os.environ.get("GITHUB_TOKEN"))
+        verify_receipt_baseline(opts.verify_receipt, opts.candidate)
         print("V3_BASELINE_RECHECK=PASS")
         return
     repo = Path(__file__).resolve().parents[1]

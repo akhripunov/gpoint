@@ -140,8 +140,21 @@ def artifact_json(run_id, prefix):
 
 
 def latest_run(workflow, sha=None, successful=False):
-    data = github_json(f'repos/{REPOSITORY}/actions/workflows/{workflow}/runs?branch=main&per_page=100')
-    runs = [r for r in data.get('workflow_runs', []) if (sha is None or r.get('head_sha') == sha)]
+    runs = []
+    expected_total = None
+    for page in range(1, 101):
+        data = github_json(f'repos/{REPOSITORY}/actions/workflows/{workflow}/runs?branch=main&per_page=100&page={page}')
+        rows = data.get('workflow_runs')
+        if not isinstance(rows, list) or not isinstance(data.get('total_count'), int):
+            raise SyncError('GitHub workflow run inventory is incomplete')
+        if expected_total is None: expected_total = data['total_count']
+        if expected_total != data['total_count']: raise SyncError('GitHub workflow run inventory changed during read')
+        runs.extend(rows)
+        if len(runs) >= expected_total: break
+        if len(rows) < 100: break
+    if expected_total is None or len(runs) != expected_total:
+        raise SyncError('GitHub workflow run inventory pagination is incomplete')
+    runs = [r for r in runs if (sha is None or r.get('head_sha') == sha)]
     if successful:
         runs = [r for r in runs if r.get('status') == 'completed' and r.get('conclusion') == 'success']
     return max(runs, key=lambda r: (r.get('created_at', ''), r.get('run_attempt', 0)), default=None)
@@ -159,88 +172,73 @@ def current_candidate_status(main_sha, current_main_run, event=None):
 
 
 def production_evidence():
-    path = 'repos/akhripunov/gpoint/contents/docs/release/state/production.json?ref=gpoint-release-ledger'
-    try:
-        state_response = github_json(path)
-        state = json.loads(base64.b64decode(state_response['content']).decode())
-        manifest_path = state['lastReleaseId']
-        manifest_response = github_json(f'repos/akhripunov/gpoint/contents/docs/release/manifests/{manifest_path}.json?ref=gpoint-release-ledger')
-        manifest = json.loads(base64.b64decode(manifest_response['content']).decode())
-    except (KeyError, ValueError, TypeError) as exc:
-        raise SyncError('GPoint canonical production ledger or manifest is invalid') from exc
-    sha = state.get('currentProductionSha')
-    if (state.get('lastReleaseStatus') != 'COMPLETE' or manifest.get('status') != 'COMPLETE' or
-            manifest.get('releaseId') != state.get('lastReleaseId') or
-            manifest.get('candidateSha') != sha or manifest.get('productionShaAfter') != sha):
-        raise SyncError('STATE_MISMATCH: GPoint canonical ledger and manifest SHA/release identity disagree')
-    runs = github_json(f'repos/{REPOSITORY}/actions/workflows/gpoint-deploy.yml/runs?branch=main&per_page=100').get('workflow_runs', [])
-    candidates = sorted((r for r in runs if r.get('head_sha') == state.get('currentProductionSha')),
-                        key=lambda r: r.get('created_at', ''), reverse=True)
-    deployment = None
-    for run in candidates:
-        # A reconciled manifest records factual server completion separately
-        # from the historical workflow conclusion. Accept only its exact run,
-        # unchanged failure record, canonical publication repair, and matching
-        # read-only runtime/database evidence; never reinterpret that run as a
-        # successful Deploy job.
-        server = manifest.get('serverReconciliation') or {}
-        repair = manifest.get('publicationRepair') or {}
-        original_failure = manifest.get('originalFailure') or {}
-        smoke = manifest.get('smoke') or {}
-        state_repair = state.get('publicationRepair') or {}
-        if (
-            manifest.get('eventType') == 'RECONCILED_PRODUCTION_RELEASE' and
-            state.get('releaseOrigin') == 'reconciled-production-release' and
-            manifest.get('serverDeployStatus') == 'COMPLETE' and
-            str(manifest.get('automationRunId')) == str(run.get('id')) and
-            str(state_repair.get('runId')) == str(run.get('id')) and
-            manifest.get('automationRunConclusion') == run.get('conclusion') and
-            original_failure.get('rewritten') is False and
-            bool(repair.get('completedAt')) and bool(repair.get('basis')) and
-            server.get('vpsSha') == sha and
-            server.get('externalMiniappSha') == sha and
-            server.get('prismaHead') == manifest.get('dbHeadAfter') and
-            server.get('agataHead') == manifest.get('agataDbHeadAfter') and
-            server.get('gsalesHead') == manifest.get('gsalesDbHeadAfter') and
-            server.get('gsalesRlsSecurity') == 'PASS' and
-            server.get('externalApiHealth') == 'PASS' and
-            (manifest.get('runtimeFacts') or {}).get('LIVE_RELEASE_ENV_SHA') == sha and
-            (manifest.get('runtimeFacts') or {}).get('LIVE_AGATA_API_SHA') == sha and
-            (manifest.get('runtimeFacts') or {}).get('LIVE_GSALES_API_SHA') == sha and
-            smoke.get('vpsHealth') == 'PASS' and
-            smoke.get('imageRuntimeParity') == 'PASS' and
-            smoke.get('gsalesRuntimeReconciliation') == 'PASS'
-        ):
-            deployment = run
-            break
-        try:
-            result = artifact_json(run['id'], 'gpoint-production-result-')
-        except SyncError as exc:
-            if 'found 0' in str(exc):
-                continue
-            raise
-        # Publish runs before the workflow concludes. A failed publisher also
-        # leaves the overall workflow red after a successful runtime release.
-        # Only the exact ledger release, its immutable result and a confirmed
-        # successful deploy job prove COMPLETE; never manufacture conclusion.
-        if (result.get('status') != 'COMPLETE' or
-                result.get('candidateSha') != state.get('currentProductionSha') or
-                result.get('productionShaAfter') != state.get('currentProductionSha') or
-                result.get('releaseId') != state.get('lastReleaseId') or
-                result.get('releaseId') != manifest.get('releaseId') or
-                result.get('productionRef') != manifest.get('productionRef') or
-                str(result.get('automationRunId')) != str(run['id'])):
-            continue
-        jobs = github_json(f'repos/{REPOSITORY}/actions/runs/{run["id"]}/jobs').get('jobs', [])
-        deploy_jobs = [job for job in jobs if job.get('name') == 'deploy']
-        if len(deploy_jobs) != 1 or deploy_jobs[0].get('status') != 'completed' or deploy_jobs[0].get('conclusion') != 'success':
-            continue
-        deployment = run
-        break
-    if deployment is None:
-        raise SyncError('No verified GPoint production result and successful deploy job match the canonical ledger')
-    return state, manifest, deployment
-
+    """Project current status from GitHub Deployments; VPS state is verified by the Deploy job."""
+    deployments = []
+    for page in range(1, 101):
+        rows = github_json(f'repos/{REPOSITORY}/deployments?environment=production&task=gpoint-production-deploy&per_page=100&page={page}')
+        if not isinstance(rows, list): raise SyncError('GitHub production Deployments response is invalid')
+        deployments.extend(rows)
+        if len(rows) < 100: break
+    else:
+        raise SyncError('GitHub production Deployments exceeded the pagination limit')
+    exact = []
+    for item in deployments:
+        payload = item.get('payload')
+        if isinstance(payload, str):
+            try: payload = json.loads(payload)
+            except ValueError as exc: raise SyncError('GitHub Deployment provenance payload is invalid') from exc
+        if item.get('environment') != 'production' or item.get('production_environment') is not True \
+                or item.get('transient_environment') is not False or item.get('task') != 'gpoint-production-deploy':
+            raise SyncError('GitHub production Deployment identity is invalid')
+        if (not isinstance(payload, dict) or payload.get('schema') != 'gpoint-deployment/v1'
+                or payload.get('repository') != REPOSITORY or payload.get('candidateSha') != item.get('sha')
+                or payload.get('workflow', {}).get('runId') is None
+                or payload.get('workflow', {}).get('attempt') is None):
+            raise SyncError('GitHub production Deployment provenance is incomplete')
+        exact.append((item, payload))
+    if not exact:
+        state = {'currentProductionSha': None, 'lastReleaseStatus': 'NOT_DEPLOYED',
+                 'serverDeployStatus': 'NOT_DEPLOYED', 'workerOperationalStatus': 'NOT_VERIFIED',
+                 'overallServiceReadiness': 'NOT_VERIFIED', 'dependencyCheckedAt': 'not checked'}
+        return state, {'status': 'NOT_DEPLOYED'}, None
+    exact.sort(key=lambda pair: (pair[0].get('created_at', ''), pair[0].get('id', 0)), reverse=True)
+    allowed = {'queued', 'pending', 'in_progress', 'success', 'failure', 'error', 'inactive'}
+    observed = []
+    for deployment, payload in exact:
+        statuses = []
+        for page in range(1, 101):
+            rows = github_json(f'repos/{REPOSITORY}/deployments/{deployment["id"]}/statuses?per_page=100&page={page}')
+            if not isinstance(rows, list): raise SyncError('GitHub Deployment statuses response is invalid')
+            statuses.extend(rows)
+            if len(rows) < 100: break
+        else: raise SyncError('GitHub Deployment statuses exceeded the pagination limit')
+        if not statuses: raise SyncError(f'GitHub Deployment {deployment["id"]} has no recorded status')
+        statuses.sort(key=lambda row: row.get('created_at', ''), reverse=True)
+        current = statuses[0]
+        if current.get('state') not in allowed: raise SyncError('GitHub Deployment current status is invalid')
+        observed.append((deployment, payload, current))
+    deployment, payload, current = observed[0]
+    # An unresolved newest attempt may already have changed the VPS. Older
+    # successful Deployments are history, not proof of the currently installed SHA.
+    installed = observed[0] if observed[0][2].get('state') == 'success' else None
+    installed_sha = installed[0].get('sha') if installed else None
+    sha = deployment.get('sha')
+    run_id = str(payload['workflow']['runId'])
+    attempt = str(payload['workflow']['attempt'])
+    expected_url = f'https://github.com/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}'
+    if current.get('log_url') != expected_url:
+        raise SyncError('GitHub Deployment status does not link to its exact workflow attempt')
+    state = {'currentProductionSha': installed_sha, 'lastReleaseStatus': current['state'].upper(),
+             'serverDeployStatus': current['state'].upper(), 'workerOperationalStatus': 'VERIFIED_BY_DEPLOY' if current['state'] == 'success' else 'NOT_VERIFIED',
+             'overallServiceReadiness': 'READY' if current['state'] == 'success' else 'NOT_VERIFIED',
+             'dependencyCheckedAt': current.get('created_at', 'unknown')}
+    manifest = {'candidateSha': sha, 'productionShaAfter': installed_sha if current['state'] == 'success' else None,
+                'status': current['state'].upper(), 'prepare': payload.get('prepare'),
+                'description': current.get('description'), 'logUrl': current.get('log_url')}
+    run = {'id': int(run_id), 'run_attempt': int(attempt), 'head_sha': sha,
+           'status': 'completed' if current['state'] in {'success', 'failure', 'error'} else 'in_progress',
+           'conclusion': current['state'], 'html_url': expected_url}
+    return state, manifest, run
 
 def current_state(event=None):
     commit = github_json(f'repos/{REPOSITORY}/commits/main')
@@ -256,8 +254,8 @@ def current_state(event=None):
     return {
         'synced_at': datetime.now(timezone.utc).isoformat(timespec='seconds'), 'main_sha': main_sha,
         'main_checked_at': commit.get('commit', {}).get('committer', {}).get('date', 'unknown'),
-        'production_sha': prod_sha, 'production_checked_at': production.get('lastReleaseCompletedAt', 'unknown'),
-        'production_ref': production.get('currentProductionRef', production.get('currentProductionRefName', '')),
+        'production_sha': prod_sha, 'production_checked_at': production.get('dependencyCheckedAt', 'unknown'),
+        'production_ref': '',
         'release_status': production.get('lastReleaseStatus', 'UNKNOWN'), 'in_sync': in_sync,
         'prepare': latest_prepare_success, 'candidate': candidate, 'latest_main_prepare': latest_for_main,
         'deploy': deployment, 'manifest': manifest,
@@ -276,14 +274,11 @@ def render_current_state(state):
     lines = [
         f"Синхронизировано: `{state['synced_at']}` UTC.",
         f"GitHub main: `{state['main_sha']}` (commit time `{state['main_checked_at']}`).",
-        f"Production: `{state['production_sha']}`; canonical `gpoint-release-ledger/docs/release/state/production.json` + manifest; completed `{state['production_checked_at']}`; `LEDGER VERIFIED` (отдельный свежий VPS readback не выполнялся).",
+        f"Production: `{state['production_sha']}`; latest GitHub Deployment status **{state['release_status']}** at `{state['production_checked_at']}`. VPS readback is required before success is recorded.",
         f"Сверка SHA: **{state_name}**.",
         f"Последний завершившийся успешный Prepare: `{(prep.get('head_sha') or 'unknown')}` / run `#{prep.get('id', 'unknown')}`; current-main run `#{(state['latest_main_prepare'] or {}).get('id', 'unknown')}`: **{state['candidate']}**.",
-        f"Последний production Deploy: `{m.get('productionShaAfter', 'unknown')}` / run `#{deploy.get('id', 'unknown')}` / canonical **{state['release_status']}**.",
-        (f"GitHub Deploy workflow: run `#{deploy.get('id', 'unknown')}` / conclusion **{deploy.get('conclusion') or 'pending'}** сохранён как есть; server completion подтверждён отдельно reconciled manifest и свежими read-only фактами."
-         if m.get('eventType') == 'RECONCILED_PRODUCTION_RELEASE' else
-         f"GitHub Deploy workflow: `{deploy.get('status', 'unknown')}` / conclusion `{deploy.get('conclusion') or 'pending'}`; deploy job **SUCCESS** подтверждён отдельно."),
-        f"Prisma head: `{m.get('dbHeadAfter', 'unconfirmed')}`; AGATA Alembic head: `{m.get('agataDbHeadAfter', 'unconfirmed')}` (manifest).",
+        f"Последний production Deploy: `{m.get('productionShaAfter') or m.get('candidateSha', 'unknown')}` / run `#{deploy.get('id', 'unknown')}` / **{state['release_status']}**. Prepare tag: `{(m.get('prepare') or {}).get('tag', 'unknown')}`.",
+        f"GitHub Deploy workflow: `{deploy.get('status', 'unknown')}` / status **{state['release_status']}**; latest status URL `{m.get('logUrl', 'unknown')}`.",
         f"Server deploy: **{state.get('server_deploy_status', state['release_status'])}**; Mac worker: **{state.get('worker_operational_status', 'NOT_VERIFIED')}**; service readiness: **{state.get('service_readiness', 'DEGRADED')}**; dependency checked `{state.get('dependency_checked_at', 'not checked')}`.",
         "Пользовательская приёмка: **OWNER_SMOKE_PENDING**; technical COMPLETE не является подтверждением Telegram-ответа.",
         "При degraded worker повторить dependency recheck без Deploy. Реальный Telegram/GSales inference smoke подтверждается отдельно; production ради dependency check повторно не запускать.",
@@ -392,7 +387,7 @@ def main():
     allowed_statuses = {
         'candidate': ('READY', 'FAILED', 'CANCELLED', 'SKIPPED'),
         'preflight': ('PASS', 'PLANNED', 'READY_FOR_OWNER', 'FAILED', 'BLOCKED'),
-        'production': ('FAILED', 'COMPLETE', 'RECOVERY_REQUIRED', 'FAILED_PRE_SWITCH', 'FAILED_MIGRATION', 'FAILED_AGATA_START', 'CANCELLED', 'BLOCKED'),
+        'production': ('FAILED', 'COMPLETE', 'INSTALLATION_UNCONFIRMED', 'FAILED_PRE_SWITCH', 'FAILED_MIGRATION', 'FAILED_AGATA_START', 'CANCELLED', 'BLOCKED'),
     }
     if phase not in allowed_statuses or status not in allowed_statuses[phase]:
         raise SyncError('Invalid release status')

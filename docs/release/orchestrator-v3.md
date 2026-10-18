@@ -1,4 +1,9 @@
-# Release Orchestrator V3 — Impact-Based CI
+# Historical: Release Orchestrator V3 — Impact-Based CI (superseded by ME-42)
+
+> Archived design note. Its ledger-based production baseline and rollout
+> instructions are obsolete. Do not run this procedure or treat its status and
+> evidence as current. The active model is documented in
+> [automation.md](automation.md#текущая-модель-выпуска-и-состояния-me-42).
 
 Status: **MAIN_INTEGRATION_CANDIDATE**. V3 adoption into main requires normal exact-SHA Prepare and read-only preflight, then separate owner approval for production. Branch rehearsal passed: https://github.com/akhripunov/gpoint/actions/runs/38221600063 . The main integration authorization does NOT authorize production Deploy or Mac Worker transition.
 

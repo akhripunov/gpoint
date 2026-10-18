@@ -142,7 +142,7 @@ test('GHCR schema preserves proven V3 COVERED_UNCHANGED gates', t => {
   f.receipt.gates.gsalesPostgres = 'COVERED_UNCHANGED';
   f.receipt.impactV3 = {
     version: 1, candidateSha: f.sha, productionBaselineSha: 'b'.repeat(40),
-    baselineSource: 'gpoint-release-ledger', classification: 'UI_ONLY',
+    baselineSource: 'github-deployment-vps-readback', classification: 'UI_ONLY',
     reason: 'narrow-unchanged-backend', changedPaths: ['apps/miniapp/src/ui.tsx'],
     checks: { agata_postgres_rehearsal: false, gsales_postgres_regression: false },
     invariantChecks: ['docker_images_exact_sha', 'artifact_migrations', 'deploy_rehearsal', 'canonical_preflight', 'production_approval'],
@@ -228,7 +228,7 @@ test('release cannot remove a lock whose ownership changed', t => {
 test('canonical CLI executes from a Mac runner path containing spaces', t => {
   const f = fixture(t), root = path.join(f.dir, 'Application Support', 'GPoint');
   fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
-  for (const name of ['release-readiness.mjs', 'release-gpoint.mjs', 'release-gsales.mjs', 'release-gsales-provision.mjs', 'release-bookkeeping.mjs', 'release-gpoint-vps-adapter.mjs', 'release-bundle.mjs', 'release-oci.mjs', 'release-component-bundle-v4.mjs', 'release-component-vps-proof-v4.mjs', 'release-static-v4.mjs', 'release-static-transfer-v4.mjs', 'release-evidence.mjs', 'recovery-finalization.mjs', 'recovery-diagnostics.mjs', 'recovery-active-deploys.mjs', 'verify-loaded-images.py', 'release-lock.mjs', 'release-migrations.mjs']) {
+  for (const name of ['release-readiness.mjs', 'release-gpoint.mjs', 'deployment-run-state.mjs', 'release-gsales.mjs', 'release-gsales-provision.mjs', 'release-gpoint-vps-adapter.mjs', 'release-bundle.mjs', 'release-oci.mjs', 'release-component-bundle-v4.mjs', 'release-component-vps-proof-v4.mjs', 'release-static-v4.mjs', 'release-static-transfer-v4.mjs', 'release-evidence.mjs', 'verify-loaded-images.py', 'release-lock.mjs', 'release-migrations.mjs']) {
     fs.copyFileSync(fileURLToPath(new URL(name, import.meta.url)), path.join(root, 'scripts', name));
   }
   fs.mkdirSync(path.join(root, 'docs/release/state'), { recursive: true });
@@ -243,7 +243,7 @@ test('V3 immutable receipt accepts precisely proven unchanged-source DB regressi
   const f = fixture(t);
   const impact = {
     version: 1, candidateSha: f.sha, productionBaselineSha: 'b'.repeat(40),
-    baselineSource: 'gpoint-release-ledger', classification: 'UI_ONLY',
+    baselineSource: 'github-deployment-vps-readback', classification: 'UI_ONLY',
     reason: 'narrow-unchanged-backend', changedPaths: ['apps/miniapp/src/ui.tsx'],
     checks: { agata_postgres_rehearsal: false, gsales_postgres_regression: false },
     invariantChecks: ['docker_images_exact_sha', 'artifact_migrations', 'deploy_rehearsal', 'canonical_preflight', 'production_approval'],

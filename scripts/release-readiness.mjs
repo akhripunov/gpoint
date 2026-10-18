@@ -34,7 +34,7 @@ export function observeDeploymentReadiness(serverDeployStatus, probe, options={}
     dependencyCheckedAt:new Date(options.nowMs??Date.now()).toISOString(),inferenceAcceptance:'NOT_VERIFIED'};
 }
 export function dependencyRecheckState(current,candidate,readiness) {
-  if(current.currentProductionSha!==candidate || current.lastReleaseStatus!=='COMPLETE' || readiness.serverDeployStatus!=='COMPLETE' || current.recoveryRequired===true) throw new Error('Dependency recheck requires the exact completed server release');
+  if(current.currentProductionSha!==candidate || current.lastReleaseStatus!=='COMPLETE' || readiness.serverDeployStatus!=='COMPLETE') throw new Error('Dependency recheck requires the exact completed server release');
   const {serverDeployStatus,workerOperationalStatus,workerDependencies,overallServiceReadiness,dependencyCheckedAt}=readiness;
   return {...current,serverDeployStatus,workerOperationalStatus,workerDependencies,overallServiceReadiness,dependencyCheckedAt};
 }
