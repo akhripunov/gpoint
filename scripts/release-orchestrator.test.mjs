@@ -75,6 +75,22 @@ test('prepared receipt structured diagnostics preserve safe GHCR category and st
     category:'PERMISSION',ghcrReadbackCompleted:false,candidateSha:sha,prepareRunId:'123',prepareRunAttempt:'2'});
   assert.doesNotMatch(JSON.stringify(controller),/private GHCR response body|"secret"|Bearer |Authorization:/);
 });
+test('GHCR artifact-layer diagnostics survive allowlisting for manifest and blob readback stages',()=>{
+  for (const stage of ['ghcr_artifact_digest','ghcr_artifact_blob']) {
+    const payload={schema:1,stage,errorType:'HTTPError',category:'PERMISSION',httpStatus:403,
+      candidateSha:sha,runId:'123',runAttempt:'2',ghcrReadbackCompleted:false};
+    const output=`ARTIFACT_CACHE_DIAGNOSTIC=${JSON.stringify(payload)}`;
+    const receipt=preparedReceiptFailureDiagnostic(output,{candidateSha:sha,runId:'123',runAttempt:'2'});
+    assert.deepEqual(receipt,{stage:'prepare_receipt_readback',substage:stage,resource:'ghcr_prepare_receipt',
+      code:'GHCR_READ_FAILED',ghcrReadbackCompleted:false,errorType:'HTTPError',category:'PERMISSION',httpStatus:403,
+      candidateSha:sha,runId:'123',runAttempt:'2'});
+    assert.deepEqual(controllerFailureDiagnostic(Object.assign(new OrchestrationError('private'),
+      {controllerDiagnostic:receipt}),{candidateSha:sha,prepareRunId:'123',prepareRunAttempt:'2'}),
+    {state:'BLOCKED',stage:'prepare_receipt_readback',substage:stage,code:'GHCR_READ_FAILED',
+      resource:'ghcr_prepare_receipt',errorType:'HTTPError',category:'PERMISSION',httpStatus:403,
+      ghcrReadbackCompleted:false,candidateSha:sha,prepareRunId:'123',prepareRunAttempt:'2'});
+  }
+});
 test('prepared receipt structured diagnostics reject mismatched identity and unsafe categories',()=>{
   const payload={schema:1,stage:'ghcr_receipt_tag_manifest_auth_token',errorType:'HTTPError',category:'SECRET_TOKEN',httpStatus:403,
     candidateSha:'b'.repeat(40),runId:'123',runAttempt:'2',ghcrReadbackCompleted:false};

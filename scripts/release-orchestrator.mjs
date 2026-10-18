@@ -27,7 +27,8 @@ const SAFE_RECEIPT_STAGES = new Set(['prepare_run_metadata', 'current_main_ref',
   'ghcr_receipt_tag_manifest_auth_token', 'ghcr_receipt_tag_manifest_authenticated_read',
   'ghcr_receipt_digest_readback_auth_challenge', 'ghcr_receipt_digest_readback_auth_token',
   'ghcr_receipt_digest_readback_authenticated_read', 'ghcr_receipt_layer_readback_auth_challenge',
-  'ghcr_receipt_layer_readback_auth_token', 'ghcr_receipt_layer_readback_authenticated_read']);
+  'ghcr_receipt_layer_readback_auth_token', 'ghcr_receipt_layer_readback_authenticated_read',
+  'ghcr_artifact_digest', 'ghcr_artifact_blob']);
 const SAFE_RECEIPT_CATEGORIES = new Set(['AUTH', 'PERMISSION', 'NETWORK', 'HTTP', 'INVALID_RESPONSE', 'LOCAL_IO', 'VALIDATION', 'INTERNAL']);
 const SAFE_SUBPROCESS_ERROR_CODES = new Set(['EACCES', 'EAGAIN', 'EBADF', 'EBUSY', 'EEXIST', 'EFBIG', 'EIO', 'EISDIR',
   'EMFILE', 'ENFILE', 'ENOENT', 'ENOMEM', 'ENOBUFS', 'ENOSPC', 'ENOTDIR', 'EPERM', 'EROFS', 'ETIMEDOUT', 'EPIPE', 'EINVAL']);
@@ -111,11 +112,13 @@ export function preparedReceiptFailureDiagnostic(stdout, expected = {}, subproce
           || (expected[expectedField] !== undefined && details[field] !== expected[expectedField]))
         return localSubprocessFailure(expected, subprocess, 'identity_mismatch');
     }
+    const isGhcrReceiptRead = details.stage === 'ghcr_receipt' || details.stage.startsWith('ghcr_receipt')
+      || details.stage === 'ghcr_artifact_digest' || details.stage === 'ghcr_artifact_blob';
     const result = {stage:'prepare_receipt_readback', substage:details.stage,
-      resource:details.stage.startsWith('ghcr_receipt') || details.stage === 'ghcr_receipt'
+      resource:isGhcrReceiptRead
         ? 'ghcr_prepare_receipt' : details.stage === 'static_artifact_readback' ? 'ghcr_static_artifact'
           : details.stage === 'receipt_validation' ? 'prepare_receipt' : 'prepare_evidence',
-      code:details.stage.startsWith('ghcr_receipt') || details.stage === 'ghcr_receipt' || details.stage === 'static_artifact_readback'
+      code:isGhcrReceiptRead || details.stage === 'static_artifact_readback'
         ? 'GHCR_READ_FAILED' : details.stage === 'receipt_validation' ? 'PREPARE_RECEIPT_INVALID' : 'PREPARE_EVIDENCE_FAILED',
       ghcrReadbackCompleted:details.ghcrReadbackCompleted};
     if (typeof details.errorType === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,47}$/.test(details.errorType)) result.errorType = details.errorType;
