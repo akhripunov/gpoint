@@ -267,28 +267,50 @@ class GhcrReceiptTests(unittest.TestCase):
         redirect = {'Location': 'https://productionresultssa0.blob.core.windows.net/job.txt'}
 
         class NoRedirectOpener:
-            def open(self, req, timeout=30):
-                self.api_request = req
-                raise urllib.error.HTTPError(req.full_url, 302, 'Found', redirect,
-                                             __import__('io').BytesIO())
+            def __init__(self):
+                self.requests = []
+            def open(self, req, data=None, timeout=30):
+                self.requests.append(req)
+                if len(self.requests) == 1:
+                    raise urllib.error.HTTPError(req.full_url, 302, 'Found', redirect,
+                                                 __import__('io').BytesIO())
+                return Response(f'GHCR_RECEIPT_DIGEST={self.digest}\n'.encode())
 
         opener = NoRedirectOpener()
-        storage_requests = []
-        def storage_open(req, timeout=30):
-            storage_requests.append(req)
-            return Response(f'GHCR_RECEIPT_DIGEST={self.digest}\n'.encode())
-
+        opener.digest = self.digest
         jobs = {'jobs': [{'id': 999, 'name': 'prepare', 'run_attempt': self.attempt,
             'status': 'completed', 'conclusion': 'success',
             'steps': [{'name': 'Publish and read back exact GHCR artifacts', 'conclusion': 'success'}]}]}
         with mock.patch.object(CACHE, 'github', return_value=jobs), \
-                mock.patch.object(urllib.request, 'build_opener', return_value=opener), \
-                mock.patch.object(CACHE, 'network_urlopen', side_effect=storage_open):
+                mock.patch.object(urllib.request, 'build_opener', return_value=opener):
             logs = CACHE.trusted_job_logs(self.run_id, self.attempt, 'fixture-github-token',
                 'prepare', 'Publish and read back exact GHCR artifacts')
-        self.assertIn('Bearer fixture-github-token', opener.api_request.get_header('Authorization'))
-        self.assertNotIn('Authorization', storage_requests[0].headers)
+        self.assertIn('Bearer fixture-github-token', opener.requests[0].get_header('Authorization'))
+        self.assertNotIn('Authorization', opener.requests[1].headers)
         self.assertEqual(logs, f'GHCR_RECEIPT_DIGEST={self.digest}\n')
+
+    def test_trusted_job_logs_reject_untrusted_second_redirect(self):
+        class NoRedirectOpener:
+            def __init__(self):
+                self.requests = []
+            def open(self, req, data=None, timeout=30):
+                self.requests.append(req)
+                location = ('https://productionresultssa0.blob.core.windows.net/job.txt'
+                    if len(self.requests) == 1 else 'https://attacker.example/collect')
+                raise urllib.error.HTTPError(req.full_url, 302, 'Found', {'Location': location},
+                                             __import__('io').BytesIO())
+
+        opener = NoRedirectOpener()
+        jobs = {'jobs': [{'id': 999, 'name': 'prepare', 'run_attempt': self.attempt,
+            'status': 'completed', 'conclusion': 'success',
+            'steps': [{'name': 'Publish and read back exact GHCR artifacts', 'conclusion': 'success'}]}]}
+        with mock.patch.object(CACHE, 'github', return_value=jobs), \
+                mock.patch.object(urllib.request, 'build_opener', return_value=opener):
+            with self.assertRaisesRegex(RuntimeError, 'redirect is invalid'):
+                CACHE.trusted_job_logs(self.run_id, self.attempt, 'fixture-github-token',
+                    'prepare', 'Publish and read back exact GHCR artifacts')
+        self.assertEqual(len(opener.requests), 2)
+        self.assertNotIn('Authorization', opener.requests[1].headers)
 
     def test_missing_credentials_or_wrong_candidate_block(self):
         with self.assertRaisesRegex(RuntimeError, 'Invalid exact Prepare identity'):

@@ -162,6 +162,31 @@ def network_urlopen(request, timeout=30):
     return urllib.request.urlopen(request, timeout=min(timeout, remaining))
 
 
+def open_without_redirect(request, timeout=30):
+    """Open one HTTP response without following a redirect automatically."""
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *_args, **_kwargs):
+            return None
+
+    if NETWORK_BUDGET is None:
+        bounded_timeout = timeout
+    else:
+        remaining = NETWORK_BUDGET.deadline - time.monotonic()
+        if remaining <= 0:
+            raise NetworkUnavailable('network_retry_budget')
+        bounded_timeout = min(timeout, remaining)
+    return urllib.request.build_opener(NoRedirect).open(request, timeout=bounded_timeout)
+
+
+def trusted_log_storage_url(value):
+    parsed = urllib.parse.urlparse(value)
+    return (parsed.scheme == 'https' and bool(parsed.hostname)
+            and not parsed.username and not parsed.password and not parsed.fragment
+            and parsed.hostname.endswith((
+                '.blob.core.windows.net', '.githubusercontent.com',
+                '.actions.githubusercontent.com')))
+
+
 def read_network_response(response, limit):
     """Read with a hard wait bound, interrupting a slow or trickling response."""
     if NETWORK_BUDGET is None:
@@ -372,29 +397,38 @@ def trusted_job_logs(run_id, attempt, token, job_name, step_name):
         'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json',
         'X-GitHub-Api-Version': '2022-11-28'})
     def read():
-        class NoRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, *_args, **_kwargs):
-                return None
-
         try:
-            response = urllib.request.build_opener(NoRedirect).open(req, timeout=30)
+            response = open_without_redirect(req, timeout=30)
         except urllib.error.HTTPError as redirect:
             if redirect.code != 302:
                 raise
             location = redirect.headers.get('Location', '')
             redirect.close()
-            parsed = urllib.parse.urlparse(location)
-            if (parsed.scheme != 'https' or not parsed.hostname or parsed.username
-                    or parsed.password or parsed.fragment
-                    or not parsed.hostname.endswith((
-                        '.blob.core.windows.net', '.githubusercontent.com',
-                        '.actions.githubusercontent.com'))):
+            location = urllib.parse.urljoin(req.full_url, location)
+            if not trusted_log_storage_url(location):
                 raise RuntimeError('Prepare publisher log redirect is invalid') from None
-            # GitHub returns a short-lived signed storage URL. Never forward the
-            # GITHUB_TOKEN from api.github.com to that external storage host.
-            log_request = urllib.request.Request(location, headers={'Accept': 'text/plain'})
-            with network_urlopen(log_request, timeout=30) as response:
-                raw = read_network_response(response, 25 * 1024 * 1024 + 1)
+            # GitHub returns a short-lived signed storage URL. Follow only a
+            # bounded chain on trusted HTTPS storage hosts; never forward the
+            # GITHUB_TOKEN from api.github.com to any redirect target.
+            for redirect_count in range(3):
+                log_request = urllib.request.Request(location, headers={'Accept': 'text/plain'})
+                try:
+                    response = open_without_redirect(log_request, timeout=30)
+                except urllib.error.HTTPError as storage_redirect:
+                    next_location = storage_redirect.headers.get('Location', '')
+                    code = storage_redirect.code
+                    storage_redirect.close()
+                    if code != 302 or redirect_count == 2:
+                        raise
+                    location = urllib.parse.urljoin(location, next_location)
+                    if not trusted_log_storage_url(location):
+                        raise RuntimeError('Prepare publisher log redirect is invalid') from None
+                    continue
+                with response:
+                    raw = read_network_response(response, 25 * 1024 * 1024 + 1)
+                break
+            else:
+                raise RuntimeError('Prepare publisher log redirect limit exceeded')
         else:
             with response:
                 raw = read_network_response(response, 25 * 1024 * 1024 + 1)
