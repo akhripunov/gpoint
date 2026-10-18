@@ -15,12 +15,12 @@ import { expectedStaticParent, staticReceiptAndImages, verifyStaticLiveBaseline,
   v4NativeProofOnVPS, verifyV4SourceAtCheckout } from './release-static-v4.mjs';
 import { applyStaticArtifactV4 } from './release-static-transfer-v4.mjs';
 import { recoveryFinalizationIdentity, recoveryFinalizationIdentityFromFailureEvidence, runRecoveryFinalization,
-  validateRecoveryFinalizationApproval, assertNoConcurrentRelease } from './recovery-finalization.mjs';
+  validateRecoveryFinalizationApproval, loadCompleteDeployInventory } from './recovery-finalization.mjs';
 
 import { acquireReleaseLock } from './release-lock.mjs';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { applyCandidate, cleanupTemporaryWorktree, inspectProductionReadOnly, inspectRecoveryProductionReadOnly, inspectAgataMigrationReadiness, inspectGsalesReadiness, planReleaseRetention, provisionAgataInternalConfigForBaseline, upload, runRemoteCommand, parseGuardedMigrationEvidence, validateAgataProviderMode, validateAgataProviderCompatibility } from './release-gpoint-vps-adapter.mjs';
+import { agataProductionMigrationCommand, applyCandidate, cleanupTemporaryWorktree, inspectProductionReadOnly, inspectRecoveryProductionReadOnly, inspectAgataMigrationReadiness, inspectGsalesReadiness, planReleaseRetention, provisionAgataInternalConfigForBaseline, upload, runRemoteCommand, parseGuardedMigrationEvidence, validateAgataProviderMode, validateAgataProviderCompatibility } from './release-gpoint-vps-adapter.mjs';
 import { buildRecoveryDiagnosticsSnapshot } from './recovery-diagnostics.mjs';
 import { readRecoveryActiveDeploysFile } from './recovery-active-deploys.mjs';
 
@@ -279,6 +279,7 @@ export function sanitizeReleaseOutput(value) {
     .replace(/((?:password|passwd|token|secret|api[_-]?key|private[_-]?key|database_url|dsn)\s*=\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1[REDACTED]')
     .replace(/(postgres(?:ql)?(?:\+[a-z0-9]+)?:\/\/[^:\s/@]+:)[^@\s/]+@/gi, '$1[REDACTED]@')
     .replace(/(\bBearer\s+)[^\s"'`]+/gi, '$1[REDACTED]')
+    .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, '[REDACTED]')
     .slice(-4000);
 }
 
@@ -293,6 +294,18 @@ export function failureEvidence(error, { stage, fallbackStage } = {}) {
     failureExitCode: Number.isInteger(error?.exitCode) ? error.exitCode : Number.isInteger(error?.status) ? error.status : null,
     failureStdout: sanitizeReleaseOutput(stdout),
     failureStderr: sanitizeReleaseOutput(stderr),
+  };
+}
+
+export function finalizationProcessFailure(result) {
+  if (result?.status === 0 && !result.error && !result.signal) return null;
+  const output = [result?.stderr, result?.stdout, result?.error?.message].filter(Boolean).join('\n').trim();
+  return {
+    stage: 'RECOVERY_FINALIZATION',
+    executionStatus: 'FAILED',
+    exitCode: Number.isInteger(result?.status) ? result.status : null,
+    signal: typeof result?.signal === 'string' ? result.signal : null,
+    diagnostic: sanitizeReleaseOutput(output) || 'Recovery finalizer exited without a diagnostic message',
   };
 }
 
@@ -1591,12 +1604,14 @@ export function validateRecoveryBackup(backup, candidate, baselineSha, {
   return {...backup, verified: true, baselineSha};
 }
 
-function createRecoveryBackup(candidate, baselineSha, beforeFacts) {
-  const output = runRemoteCommand(agataProductionMigrationCommand(candidate, 'backup', ROOT, 'recovery-current'));
+export function createRecoveryBackup(candidate, baselineSha, beforeFacts, {
+  remoteRun = runRemoteCommand, readFacts = readLiveFacts,
+} = {}) {
+  const output = remoteRun(agataProductionMigrationCommand(candidate, 'backup', ROOT, 'recovery-current'));
   const parsed = parseGuardedMigrationEvidence(output, candidate)?.backup;
   const backup = validateRecoveryBackup({...parsed, baselineSha,
-    createdAt: isoNow(), purpose: 'CURRENT_AFTER_CANDIDATE_DEPLOY'}, candidate, baselineSha);
-  const afterFacts = readLiveFacts();
+    createdAt: isoNow(), purpose: 'CURRENT_AFTER_CANDIDATE_DEPLOY'}, candidate, baselineSha, {remoteRun});
+  const afterFacts = readFacts();
   for (const field of ['LIVE_PRISMA_HEAD', 'LIVE_AGATA_HEAD', 'LIVE_GSALES_HEAD', 'LIVE_GSALES_MIGRATION_SHA256']) {
     if (afterFacts[field] !== beforeFacts[field]) die(`database identity changed while creating the current backup (${field})`);
   }
@@ -1649,12 +1664,10 @@ async function finalizeRecovery(candidate) {
       const workflowRunId = process.env.GITHUB_RUN_ID;
       const token = process.env.GITHUB_TOKEN;
       if (!/^\d+$/.test(workflowRunId ?? '') || !token) die('GitHub Deploy identity is unavailable for concurrency verification');
-      const runResponse = await fetch('https://api.github.com/repos/akhripunov/gpoint/actions/workflows/gpoint-deploy.yml/runs?branch=main&per_page=100', {
-        headers: {authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28'},
-        signal: AbortSignal.timeout(20_000)});
-      if (!runResponse.ok) die(`active Deploy inventory unavailable (HTTP ${runResponse.status})`);
-      const runList = await runResponse.json();
-      assertNoConcurrentRelease({runs: runList.workflow_runs, totalCount: runList.total_count, currentRunId: workflowRunId});
+      const runList = await loadCompleteDeployInventory({currentRunId: workflowRunId,
+        fetchPage: async (page, perPage) => fetch(`https://api.github.com/repos/akhripunov/gpoint/actions/workflows/gpoint-deploy.yml/runs?branch=main&per_page=${perPage}&page=${page}`, {
+          headers: {authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28'},
+          signal: AbortSignal.timeout(20_000)})});
       const ledgerState = state();
       const freshLedger = loadReleaseBookkeeping({root: ROOT, git: ledgerGit,
         destination: fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-recovery-ledger-read-'))});

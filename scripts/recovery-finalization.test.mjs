@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {decideRecoveryFinalizationStep, recoveryFinalizationIdentity, recoveryFinalizationIdentityFromFailureEvidence, runRecoveryFinalization,
-  validateRecoveryFinalizationApproval, assertNoConcurrentRelease} from './recovery-finalization.mjs';
+  validateRecoveryFinalizationApproval, assertNoConcurrentRelease, loadCompleteDeployInventory} from './recovery-finalization.mjs';
 
 const candidate = 'd'.repeat(40);
 const baseline = 'a'.repeat(40);
@@ -157,6 +157,272 @@ test('active Deploy inventory must be complete and contain no other queued or ru
   assert.throws(() => assertNoConcurrentRelease({runs: [current], totalCount: 1, currentRunId: ''}), /inventory is incomplete/);
 });
 
+function inventoryPage(runs, totalCount) {
+  return {ok: true, json: async () => ({total_count: totalCount, workflow_runs: runs})};
+}
+
+function fakeInventory(runs, {mutate = null, failAt = null, duplicateAt = null, shortAt = null} = {}) {
+  const calls = [];
+  return {
+    calls,
+    fetchPage: async page => {
+      calls.push(page);
+      if (page === failAt) throw new Error('network unavailable');
+      const snapshot = mutate?.(calls.length) ?? runs;
+      const total = snapshot.length;
+      const start = (page - 1) * 100;
+      let pageRuns = snapshot.slice(start, start + 100);
+      if (page === duplicateAt && page > 1) pageRuns = [snapshot[0], ...pageRuns.slice(1)];
+      if (page === shortAt) pageRuns = pageRuns.slice(0, Math.max(0, pageRuns.length - 1));
+      return inventoryPage(pageRuns, total);
+    },
+  };
+}
+
+function inventoryRuns(count) {
+  return Array.from({length: count}, (_, index) => ({
+    id: String(count - index), status: 'completed',
+    path: '.github/workflows/gpoint-deploy.yml@refs/heads/main',
+    head_sha: candidate, run_attempt: 1, event: 'workflow_dispatch',
+  }));
+}
+
+test('complete Deploy inventory pagination handles 100, 116, and 201 runs', async () => {
+  for (const count of [100, 116, 201]) {
+    const source = fakeInventory(inventoryRuns(count));
+    const inventory = await loadCompleteDeployInventory({fetchPage: source.fetchPage, currentRunId: String(count)});
+    assert.equal(inventory.total_count, count);
+    assert.equal(inventory.workflow_runs.length, count);
+    assert.equal(new Set(inventory.workflow_runs.map(run => String(run.id))).size, count);
+    assertNoConcurrentRelease({runs: inventory.workflow_runs, totalCount: inventory.total_count, currentRunId: String(count)});
+    assert.equal(source.calls.length, Math.ceil(count / 100) * 2, 'two stable full reads must be compared');
+  }
+});
+
+test('a queued Deploy on page two blocks recovery finalization', async () => {
+  const runs = inventoryRuns(116);
+  runs[110] = {...runs[110], status: 'queued'};
+  const source = fakeInventory(runs);
+  await assert.rejects(loadCompleteDeployInventory({fetchPage: source.fetchPage, currentRunId: '116'}), /another Deploy/);
+});
+
+test('Deploy inventory pagination rejects duplicate IDs across pages', async () => {
+  const source = fakeInventory(inventoryRuns(116), {duplicateAt: 2});
+  await assert.rejects(loadCompleteDeployInventory({fetchPage: source.fetchPage, currentRunId: '116'}), /duplicate run ID/);
+});
+
+test('Deploy inventory pagination rejects total-count drift between pages', async () => {
+  const runs = inventoryRuns(116);
+  const calls = [];
+  const source = async page => {
+    calls.push(page);
+    const pageRuns = runs.slice((page - 1) * 100, page * 100);
+    return inventoryPage(pageRuns, calls.length === 1 ? 116 : 117);
+  };
+  await assert.rejects(loadCompleteDeployInventory({fetchPage: source, currentRunId: '116'}), /total_count changed/);
+});
+
+test('Deploy inventory pagination rejects incomplete pages and network failures', async () => {
+  const incomplete = fakeInventory(inventoryRuns(116), {shortAt: 2});
+  await assert.rejects(loadCompleteDeployInventory({fetchPage: incomplete.fetchPage, currentRunId: '116'}), /page is incomplete/);
+  const network = fakeInventory(inventoryRuns(116), {failAt: 2});
+  await assert.rejects(loadCompleteDeployInventory({fetchPage: network.fetchPage, currentRunId: '116'}), /network unavailable/);
+});
+
+test('Deploy inventory pagination rejects same-count membership or status drift', async () => {
+  let reads = 0;
+  const runs = inventoryRuns(116);
+  const source = async page => {
+    if (page === 1) reads += 1;
+    const snapshot = reads === 1 ? runs : runs.map((run, index) => index === 110 ? {...run, status: 'in_progress'} : run);
+    return inventoryPage(snapshot.slice((page - 1) * 100, page * 100), snapshot.length);
+  };
+  await assert.rejects(loadCompleteDeployInventory({fetchPage: source, currentRunId: '116'}), /inventory changed during read/);
+});
+
+test('Deploy inventory pagination rejects same-count membership replacement', async () => {
+  let pass = 0;
+  const runs = inventoryRuns(116);
+  const source = async page => {
+    if (page === 1) pass += 1;
+    const current = pass === 1 ? runs : runs.map((run, index) => index === 115 ? {...run, id: '117'} : run);
+    return inventoryPage(current.slice((page - 1) * 100, page * 100), current.length);
+  };
+  await assert.rejects(loadCompleteDeployInventory({fetchPage: source, currentRunId: '116'}), /inventory changed during read/);
+});
+
+test('Deploy inventory pagination rejects malformed response and run structures', async () => {
+  await assert.rejects(loadCompleteDeployInventory({currentRunId: '22', fetchPage: async () => inventoryPage([], '1')}),
+    /invalid structure/);
+  await assert.rejects(loadCompleteDeployInventory({currentRunId: '22', fetchPage: async () => inventoryPage([
+    {id: 21, status: 'in_progress', path: '.github/workflows/gpoint-deploy.yml'}], 1)}),
+  /current workflow run/);
+  await assert.rejects(loadCompleteDeployInventory({currentRunId: '22', fetchPage: async () => inventoryPage([
+    {id: 22, status: 'in_progress', path: 'unknown-workflow'}], 1)}), /unknown workflow/);
+  await assert.rejects(loadCompleteDeployInventory({currentRunId: '22', fetchPage: async () => inventoryPage([
+    {id: 0, status: 'in_progress', path: '.github/workflows/gpoint-deploy.yml'}], 1)}), /malformed run/);
+});
+
+test('complete 116-run inventory is required before read-only failure can reach any recovery write', async () => {
+  const source = fakeInventory(inventoryRuns(116));
+  const writes = [];
+  await assert.rejects(runRecoveryFinalization({
+    readSnapshot: async () => {
+      const inventory = await loadCompleteDeployInventory({fetchPage: source.fetchPage, currentRunId: '116'});
+      assert.equal(inventory.total_count, 116);
+      return snapshot({vpsReachable: false});
+    },
+    persistRecoveryRequired: async () => writes.push('ledger'),
+    ensureProductionTag: async () => writes.push('tag'),
+    persistCompleteState: async () => writes.push('complete'),
+  }), /VPS or GitHub read-only verification/);
+  assert.deepEqual(writes, []);
+});
+
+test('isolated finalization rehearsal uses the verified incident evidence shape and completes backup, tag, and ledger stages', async () => {
+  const evidence = JSON.parse(fs.readFileSync(new URL('../tests/fixtures/me38-recovery-incident-evidence.json', import.meta.url), 'utf8'));
+  const incidentCandidate = evidence.incidentResult.candidateSha;
+  const incidentBaseline = evidence.incidentResult.previousProductionSha;
+  const incidentReleaseId = evidence.incidentResult.releaseId;
+  const incidentIdentity = recoveryFinalizationIdentity(incidentReleaseId, incidentCandidate);
+  assert.equal(evidence.source.repository, 'akhripunov/gpoint');
+  assert.equal(evidence.source.immutable, true);
+  assert.equal(evidence.source.tag,
+    'gpoint-evidence-d367c2ec24242a733dbb2c4145c91d2d4682ba2c-39010750184-1');
+  for (const asset of Object.values(evidence.source.assets)) {
+    assert.ok(Number.isSafeInteger(asset.id) && asset.id > 0);
+    assert.match(asset.sha256, /^[a-f0-9]{64}$/);
+    assert.ok(asset.size > 0);
+  }
+  assert.match(incidentCandidate, /^[a-f0-9]{40}$/);
+  assert.match(incidentBaseline, /^[a-f0-9]{40}$/);
+  assert.equal(evidence.incidentResult.status, 'RECOVERY_REQUIRED');
+  assert.equal(evidence.incidentResult.automationRunId, '39010750184');
+  assert.equal(evidence.incidentResult.automationRunAttempt, '1');
+  assert.equal(evidence.incidentResult.prepareRunId, '39009939478');
+  assert.equal(evidence.incidentManifest.releaseId, evidence.incidentResult.releaseId);
+  assert.equal(evidence.incidentManifest.failureStage, 'POST_SWITCH');
+  assert.equal(evidence.incidentManifest.productionShaAfter, null);
+
+  const events = [];
+  const deployInventory = fakeInventory(inventoryRuns(116));
+  const incident = {
+    ...snapshot().failedRelease,
+    releaseId: incidentReleaseId,
+    candidateSha: incidentCandidate,
+    previousProductionSha: incidentBaseline,
+    status: evidence.incidentResult.status,
+    failureStage: evidence.incidentResult.failureStage,
+    runId: evidence.incidentResult.automationRunId,
+    attempt: evidence.incidentResult.automationRunAttempt,
+    failureReason: evidence.incidentResult.failureReason,
+    failureManifestAssetDigest: `sha256:${evidence.source.assets['manifests.zip'].sha256}`,
+    failureManifestSha256: evidence.source.incidentManifestSha256,
+  };
+  let current = snapshot({candidateSha: incidentCandidate, failedRelease: incident, backup: undefined,
+    ledger: {headSha: 'b'.repeat(40), state: {currentProductionSha: incidentBaseline,
+      currentProductionRef: 'gpoint-production-baseline', lastReleaseId: 'older-release',
+      lastReleaseStatus: 'COMPLETE', recoveryRequired: false}},
+    productionRefTarget: incidentBaseline, productionTagTarget: null,
+    runtime: {...snapshot().runtime, sourceSha: incidentCandidate},
+    ownerAuthorization: {valid: true, candidateSha: incidentCandidate, baselineSha: incidentBaseline, operation: 'FINALIZATION_ONLY'},
+    databaseRiskDecision: {accepted: true, candidateSha: incidentCandidate, baselineSha: incidentBaseline,
+      instructionId: 'ME-38-DB-HISTORICAL-UNCERTAINTY-20261017-01'},
+    reconciliationManifest: null, finalizationManifest: null});
+
+  // This mirrors the production pre-backup read: all read-only identity and inventory gates pass first.
+  const beforeBackup = await loadCompleteDeployInventory({fetchPage: deployInventory.fetchPage, currentRunId: '116'});
+  assert.equal(beforeBackup.total_count, 116);
+  assert.equal(current.failedRelease.failureManifestAssetDigest,
+    `sha256:${evidence.source.assets['manifests.zip'].sha256}`);
+  events.push('readonly-preflight');
+
+  // Isolated backup adapter models create -> validate; a bad result stops before ledger/tag writes.
+  const backup = {verified: true, baselineSha: incidentBaseline, sha256, path: '/opt/gpoint/backups/gpoint-recovery-current-fixture.dump',
+    candidate_sha: incidentCandidate, database: 'gpoint', purpose: 'CURRENT_AFTER_CANDIDATE_DEPLOY',
+    createdAt: new Date().toISOString()};
+  events.push('backup-create');
+  assert.equal(backup.verified, true);
+  assert.match(backup.sha256, /^[a-f0-9]{64}$/);
+  assert.equal(backup.baselineSha, incidentBaseline);
+  events.push('backup-verify');
+  current = {...current, backup};
+  const incidentReconciliation = {...reconciliation, releaseId: incidentIdentity.reconciliationReleaseId,
+    candidateSha: incidentCandidate, failedReleaseId: incidentReleaseId,
+    previousProductionSha: incidentBaseline,
+    failedDeployRunId: incident.runId, failedDeployRunAttempt: incident.attempt,
+    failureManifestAssetDigest: incident.failureManifestAssetDigest,
+    failureManifestSha256: incident.failureManifestSha256, backup};
+  const incidentFinalManifest = {...finalManifest, releaseId: incidentIdentity.releaseId,
+    candidateSha: incidentCandidate, failedReleaseId: incidentReleaseId,
+    failedDeployRunId: incident.runId, failedDeployRunAttempt: incident.attempt,
+    failedDeployManifestDigest: incident.failureManifestAssetDigest,
+    failedDeployManifestSha256: incident.failureManifestSha256,
+    previousProductionSha: incidentBaseline, productionShaAfter: incidentCandidate,
+    productionRef: incidentIdentity.productionTag,
+    dbHeadAfter: current.runtime.prismaHead, agataDbHeadAfter: current.runtime.agataHead,
+    gsalesDbHeadAfter: current.runtime.gsalesHead, backup};
+  const incidentRecoveryState = {currentProductionSha: incidentBaseline,
+    currentProductionRef: 'gpoint-production-baseline', lastReleaseId: incidentReleaseId,
+    lastReleaseStatus: 'RECOVERY_REQUIRED', recoveryRequired: true,
+    lastReleaseFailureManifest: `docs/release/manifests/${incidentReleaseId}.json`,
+    recoveryReconciliationManifest: `docs/release/manifests/${incidentIdentity.reconciliationManifestName}`,
+    recoveryReconciliationManifestSha256: incidentReconciliation.contentSha256};
+
+  const persistRecoveryRequired = async ({snapshot: before, expectedLedgerHead}) => {
+    assert.equal(before.backup.sha256, backup.sha256);
+    assert.equal(before.failedRelease.failureManifestSha256, evidence.source.incidentManifestSha256);
+    assert.equal(expectedLedgerHead, current.ledger.headSha);
+    events.push('append-recovery-required');
+    current = {...current, ledger: {headSha: '1'.repeat(40), state: incidentRecoveryState},
+      reconciliationManifest: incidentReconciliation};
+  };
+  const ensureProductionTag = async ({snapshot: before, expectedLedgerHead}) => {
+    assert.equal(expectedLedgerHead, current.ledger.headSha);
+    assert.equal(before.productionRefTarget, incidentBaseline);
+    assert.equal(before.productionTagTarget, null);
+    assert.equal(current.reconciliationManifest.backup.sha256, backup.sha256);
+    events.push('write-exact-production-tag');
+    current = {...current, productionTagTarget: incidentCandidate};
+  };
+  const persistCompleteState = async ({snapshot: before, expectedLedgerHead}) => {
+    assert.equal(expectedLedgerHead, current.ledger.headSha);
+    assert.equal(before.productionTagTarget, incidentCandidate);
+    assert.equal(before.failedRelease.runId, '39010750184');
+    assert.equal(before.failedRelease.attempt, '1');
+    events.push('append-finalization-manifest');
+    events.push('write-complete-ledger');
+    current = {...current, ledger: {headSha: '2'.repeat(40), state: {
+      currentProductionSha: incidentCandidate, currentProductionRef: incidentIdentity.productionTag,
+      lastReleaseId: incidentReleaseId, lastReleaseStatus: 'COMPLETE', recoveryRequired: false,
+      recoveryFinalizationManifest: `docs/release/manifests/${incidentIdentity.manifestName}`,
+      recoveryReconciliationManifest: `docs/release/manifests/${incidentIdentity.reconciliationManifestName}`,
+      recoveryFinalizationManifestSha256: incidentFinalManifest.contentSha256,
+      recoveryReconciliationManifestSha256: incidentReconciliation.contentSha256}},
+      productionRefTarget: incidentCandidate, finalizationManifest: {...incidentFinalManifest, backup,
+        runtimeSwitchOccurred: false, databaseApplyOccurred: false}};
+  };
+
+  const result = await runRecoveryFinalization({
+    readSnapshot: async () => {
+      const inventory = await loadCompleteDeployInventory({fetchPage: deployInventory.fetchPage, currentRunId: '116'});
+      assert.equal(inventory.total_count, 116);
+      return current;
+    },
+    persistRecoveryRequired, ensureProductionTag, persistCompleteState,
+  });
+  assert.equal(result.status, 'COMPLETE');
+  assert.deepEqual(events, ['readonly-preflight', 'backup-create', 'backup-verify',
+    'append-recovery-required', 'write-exact-production-tag', 'append-finalization-manifest', 'write-complete-ledger']);
+  assert.equal(events.some(event => /apply|migration|runtime-switch|rollback/i.test(event)), false);
+  assert.equal(current.ledger.state.lastReleaseStatus, 'COMPLETE');
+  assert.equal(current.ledger.state.currentProductionSha, incidentCandidate);
+  assert.equal(current.productionTagTarget, incidentCandidate);
+  assert.equal(current.finalizationManifest.runtimeSwitchOccurred, false);
+  assert.equal(current.finalizationManifest.databaseApplyOccurred, false);
+  assert.equal(deployInventory.calls.length % 4, 0, 'each recovery snapshot must compare two complete inventory reads');
+});
+
 test('missing or invalid protected current backup blocks finalization', () => {
   for (const backup of [undefined, {verified: false}, {verified: true, baselineSha: baseline,
     sha256: 'bad', path: '/opt/gpoint/backups/current.sql.gz'}]) {
@@ -240,6 +506,8 @@ test('idempotent COMPLETE requires matching incident ID and ledger-bound manifes
 test('stale-ledger recovery persists durable state before tag and resumes idempotently', async () => {
   let current = snapshot();
   const counts = {state: 0, tag: 0, complete: 0};
+  const deployInventory = fakeInventory(inventoryRuns(116));
+  let completeInventoryReads = 0;
   const persistRecoveryRequired = async ({expectedLedgerHead}) => {
     counts.state += 1;
     assert.equal(expectedLedgerHead, current.ledger.headSha);
@@ -262,7 +530,12 @@ test('stale-ledger recovery persists durable state before tag and resumes idempo
       recoveryReconciliationManifestSha256: reconciliation.contentSha256}},
       productionRefTarget: candidate, finalizationManifest: finalManifest};
   };
-  const run = () => runRecoveryFinalization({readSnapshot: async () => current,
+  const run = () => runRecoveryFinalization({readSnapshot: async () => {
+    const inventory = await loadCompleteDeployInventory({fetchPage: deployInventory.fetchPage, currentRunId: '116'});
+    assert.equal(inventory.total_count, 116);
+    completeInventoryReads += 1;
+    return current;
+  },
     persistRecoveryRequired, ensureProductionTag, persistCompleteState});
   const result = await run();
   assert.equal(result.status, 'COMPLETE');
@@ -270,6 +543,7 @@ test('stale-ledger recovery persists durable state before tag and resumes idempo
   const retry = await run();
   assert.equal(retry.idempotent, true);
   assert.deepEqual(counts, {state: 1, tag: 1, complete: 1});
+  assert.ok(completeInventoryReads > 0, 'the complete recovery path must use the fully paginated Deploy inventory');
 });
 
 test('retry after tag push ambiguity reuses exact remote tag and does not push twice', async () => {

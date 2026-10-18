@@ -1,0 +1,59 @@
+{
+  "source": {
+    "repository": "akhripunov/gpoint",
+    "prepare": {
+      "releaseId": 415629977,
+      "tag": "gpoint-prepare-d367c2ec24242a733dbb2c4145c91d2d4682ba2c-39009939478-1",
+      "immutable": true,
+      "bundleAssetId": 649773946,
+      "bundleSha256": "6df1d8e116035a86bcd43f0261d888324223ba913ca365fcd2378520d5f47973",
+      "bundleSize": 6858,
+      "receiptSha256": "f37542a8b69950793490c8431e3c160b4cb8a34756212715ca89400192ca42d5"
+    },
+    "releaseId": 415632700,
+    "tag": "gpoint-evidence-d367c2ec24242a733dbb2c4145c91d2d4682ba2c-39010750184-1",
+    "immutable": true,
+    "assets": {
+      "manifests.zip": {
+        "id": 649785963,
+        "sha256": "f81ee060b9ba165816a76ac788906d8734873afb94d315a624c2f82932864229",
+        "size": 993772
+      },
+      "result.zip": {
+        "id": 649785964,
+        "sha256": "fa25245b609643e052aec10c72e3228516e210fa3bb3065c5e86dbeaeab21dc1",
+        "size": 3868
+      }
+    },
+    "incidentResultSha256": "892a864405f1135c5d89afa4e69915d330047eafab3a67f8db0b40fa43b36013",
+    "incidentManifestSha256": "0dae9b2418f60090e7c4193b97d660596554b77ed68ab07fb22d6daf1ef84f5a"
+  },
+  "incidentResult": {
+    "candidateSha": "d367c2ec24242a733dbb2c4145c91d2d4682ba2c",
+    "previousProductionSha": "a700198a843c12a84f2e537178de752e3eddd54d",
+    "productionBaselineSha": "a700198a843c12a84f2e537178de752e3eddd54d",
+    "automationRunId": "39010750184",
+    "automationRunAttempt": "1",
+    "prepareRunId": "39009939478",
+    "prepareRunAttempt": "1",
+    "releaseId": "gpoint-release-20261017T064101334Z",
+    "mode": "task-scoped-auto",
+    "status": "RECOVERY_REQUIRED",
+    "releaseState": "RECOVERY_REQUIRED",
+    "failureStage": "POST_SWITCH",
+    "failureReason": "BLOCKED: GitHub production tag push failed on a non-transient error; refusing retry"
+  },
+  "incidentManifest": {
+    "releaseId": "gpoint-release-20261017T064101334Z",
+    "candidateSha": "d367c2ec24242a733dbb2c4145c91d2d4682ba2c",
+    "previousProductionSha": "a700198a843c12a84f2e537178de752e3eddd54d",
+    "status": "RECOVERY_REQUIRED",
+    "failureStage": "POST_SWITCH",
+    "failureReason": "BLOCKED: GitHub production tag push failed on a non-transient error; refusing retry",
+    "dbHeadBefore": "20261015130000_codex_telegram_challenge",
+    "dbHeadAfter": null,
+    "productionShaAfter": null,
+    "rollbackSha": "a700198a843c12a84f2e537178de752e3eddd54d",
+    "productionRef": null
+  }
+}

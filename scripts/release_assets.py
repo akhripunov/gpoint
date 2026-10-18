@@ -95,7 +95,8 @@ class _EvidenceApiClient:
                 return json.loads(body)
             except urllib.error.HTTPError as exc:
                 if (exc.code == 404 and (route.startswith('releases/tags/')
-                        or route.startswith('git/ref/tags/gpoint-recovery-diagnostics-'))):
+                        or route.startswith('git/ref/tags/gpoint-recovery-diagnostics-')
+                        or route.startswith('git/ref/tags/gpoint-evidence-'))):
                     return None
                 raise
             except (urllib.error.URLError, OSError) as exc:
@@ -676,12 +677,250 @@ def validate_result(data, sha, run_id, attempt):
         raise RuntimeError('Immutable Deploy result provenance mismatch')
 
 
+def validate_recovery_finalization_result(data, sha, run_id, attempt):
+    validate_result(data, sha, run_id, attempt)
+    if (data.get('mode') != 'recovery-finalization'
+            or data.get('status') not in ('COMPLETE', 'RECOVERY_REQUIRED', 'BLOCKED')
+            or data.get('releaseState') != data.get('status')):
+        raise RuntimeError('Recovery finalization result status is missing or inconsistent')
+    failure = data.get('executionFailure')
+    if data['status'] == 'COMPLETE':
+        if failure is not None:
+            raise RuntimeError('Completed recovery finalization contains contradictory failure evidence')
+    elif (not isinstance(failure, dict)
+            or failure.get('stage') not in ('RECOVERY_FINALIZATION', 'RECOVERY_RESULT_READBACK')
+            or failure.get('executionStatus') not in ('FAILED', 'BLOCKED')
+            or not isinstance(failure.get('diagnostic'), str) or not failure['diagnostic'].strip()
+            or (failure.get('exitCode') is not None and not isinstance(failure.get('exitCode'), int))):
+        raise RuntimeError('Failed recovery finalization result lacks exact sanitized failure evidence')
+    return data
+
+
+class GitHubCliError(RuntimeError):
+    def __init__(self, category, *, transient=False, http_status=None):
+        self.category = category
+        self.transient = transient
+        self.http_status = http_status
+        suffix = f' HTTP {http_status}' if http_status is not None else ''
+        super().__init__(f'GitHub CLI request failed{suffix} ({category})')
+
+
+def _gh_failure(error):
+    detail = error.stderr.decode(errors='replace') if isinstance(error.stderr, bytes) else str(error.stderr or '')
+    status = re.search(r'\bHTTP\s+(401|403|404|409|422)\b', detail, re.IGNORECASE)
+    if status:
+        return GitHubCliError('non-retryable', http_status=int(status.group(1)))
+    lowered = detail.lower()
+    transient = any(marker in lowered for marker in (
+        'tls handshake timeout', 'i/o timeout', 'connection timed out',
+        'connection reset by peer', 'connection aborted', 'unexpected eof',
+        'eof occurred in violation of protocol'))
+    if transient:
+        category = 'tls_timeout' if 'tls handshake timeout' in lowered else 'temporary_network'
+        return GitHubCliError(category, transient=True)
+    return GitHubCliError('non-retryable')
+
+
 def gh(*args):
-    return subprocess.check_output(['gh', *args], text=True, timeout=600).strip()
+    try:
+        result = subprocess.run(['gh', *args], text=True, capture_output=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        raise GitHubCliError('timeout', transient=True) from None
+    if result.returncode != 0:
+        raise _gh_failure(subprocess.CalledProcessError(result.returncode, ['gh', *args],
+            output=result.stdout, stderr=result.stderr)) from None
+    return result.stdout.strip()
 
 
 def github(route):
     return json.loads(gh('api', f'repos/{REPO}/{route}'))
+
+
+GITHUB_EVIDENCE_WRITE_ATTEMPTS = 3
+
+
+def _optional_publish_read(api, route):
+    try:
+        return api(route)
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return None
+        raise RuntimeError('GitHub evidence read-back failed') from None
+    except GitHubCliError as error:
+        if error.http_status == 404:
+            return None
+        raise RuntimeError(f'GitHub evidence read-back failed ({error.category})') from None
+
+
+def _is_transient_publish_error(error):
+    if isinstance(error, GitHubCliError):
+        return error.transient
+    if isinstance(error, (TimeoutError, socket.timeout)):
+        return True
+    if isinstance(error, urllib.error.HTTPError):
+        return False
+    message = str(error).lower()
+    if re.search(r'\bhttp\s+(401|403|404|409|422)\b', message):
+        return False
+    return any(marker in message for marker in (
+        'tls handshake timeout', 'i/o timeout', 'connection timed out',
+        'connection reset by peer', 'connection aborted', 'unexpected eof',
+        'eof occurred in violation of protocol'))
+
+
+def _write_evidence_with_readback(label, write, read, is_complete, is_conflict, *, sleep=None):
+    sleep = sleep or time.sleep
+    for attempt in range(GITHUB_EVIDENCE_WRITE_ATTEMPTS):
+        before = read()
+        if is_complete(before):
+            return before
+        if is_conflict(before):
+            raise RuntimeError(f'{label} remote state conflicts')
+        error = None
+        try:
+            write()
+        except Exception as caught:
+            error = caught
+        after = read()
+        if is_complete(after):
+            return after
+        if is_conflict(after):
+            raise RuntimeError(f'{label} remote state conflicts') from None
+        if error is None:
+            raise RuntimeError(f'{label} write was not confirmed by remote read-back')
+        if not _is_transient_publish_error(error):
+            category = error.category if isinstance(error, GitHubCliError) else 'non-retryable'
+            raise RuntimeError(f'{label} failed ({category})') from None
+        if attempt + 1 == GITHUB_EVIDENCE_WRITE_ATTEMPTS:
+            raise RuntimeError(f'{label} retry limit exhausted') from None
+        sleep(min(2 ** attempt, 4))
+    raise RuntimeError(f'{label} retry limit exhausted')
+
+
+def publish_recovery_finalization_evidence(tag, sha, run_id, attempt, archives, *, api=None, writer=None,
+                                           sleep=None):
+    """Publish only the exact finalization result, reconciling ambiguous transient writes by read-back."""
+    api = api or _api_for_operation(evidence_api)
+    writer = writer or gh
+    expected_tag = release_tag('evidence', sha, run_id, attempt)
+    if tag != expected_tag:
+        raise RuntimeError('Recovery evidence tag does not match the candidate and workflow attempt')
+    body = f'Exact SHA {sha}; workflow run {run_id}, attempt {attempt}.'
+    expected_assets = {}
+    for archive in archives:
+        archive = Path(archive)
+        if archive.is_symlink() or not archive.is_file() or archive.name in expected_assets:
+            raise RuntimeError('Recovery evidence archive set is invalid')
+        payload = archive.read_bytes()
+        expected_assets[archive.name] = {'digest': 'sha256:' + hashlib.sha256(payload).hexdigest(),
+                                         'size': len(payload), 'path': archive}
+    if not expected_assets or 'result.zip' not in expected_assets:
+        raise RuntimeError('Recovery evidence result archive is required')
+
+    def read_ref():
+        return _optional_publish_read(api, f'git/ref/tags/{tag}')
+
+    def ref_exact(ref):
+        return isinstance(ref, dict) and ref.get('object', {}).get('type') == 'commit' \
+            and ref.get('object', {}).get('sha') == sha
+
+    def ref_conflict(ref):
+        return ref is not None and not ref_exact(ref)
+
+    _write_evidence_with_readback('recovery evidence tag',
+        lambda: writer('api', '--method', 'POST', f'repos/{REPO}/git/refs',
+                       '-f', f'ref=refs/tags/{tag}', '-f', f'sha={sha}'),
+        read_ref, ref_exact, ref_conflict, sleep=sleep)
+
+    def read_release():
+        return _optional_publish_read(api, f'releases/tags/{tag}')
+
+    def release_identity(release):
+        return isinstance(release, dict) and release.get('tag_name') == tag \
+            and release.get('name') == tag and release.get('body') == body
+
+    def asset_map(release):
+        assets = release.get('assets') if isinstance(release, dict) else None
+        if not isinstance(assets, list):
+            raise RuntimeError('Recovery evidence Release assets are malformed')
+        result = {}
+        for asset in assets:
+            name = asset.get('name') if isinstance(asset, dict) else None
+            if not isinstance(name, str) or not name or name in result:
+                raise RuntimeError('Recovery evidence Release contains duplicate or malformed assets')
+            result[name] = asset
+        if set(result) - set(expected_assets):
+            raise RuntimeError('Recovery evidence Release contains unexpected assets')
+        return result
+
+    def validate_assets(release, *, require_all):
+        found = asset_map(release)
+        for name, expected in expected_assets.items():
+            asset = found.get(name)
+            if asset is None:
+                if require_all:
+                    return False
+                continue
+            if (asset.get('state') != 'uploaded' or asset.get('digest') != expected['digest']
+                    or asset.get('size') != expected['size']):
+                raise RuntimeError('Recovery evidence asset conflicts with its local checksum')
+        return len(found) == len(expected_assets) if require_all else True
+
+    def draft_or_final_release(release):
+        if not release_identity(release) or not isinstance(release.get('draft'), bool):
+            return False
+        if release.get('draft'):
+            return release.get('immutable') in (False, None)
+        return release.get('immutable') is True and validate_assets(release, require_all=True)
+
+    def release_conflict(release):
+        return release is not None and not draft_or_final_release(release)
+
+    _write_evidence_with_readback('recovery evidence draft Release',
+        lambda: writer('release', 'create', tag, '--repo', REPO, '--verify-tag', '--draft',
+                       '--title', tag, '--notes', body),
+        read_release, draft_or_final_release, release_conflict, sleep=sleep)
+
+    for name, expected in expected_assets.items():
+        def asset_present(release, asset_name=name, expected_asset=expected):
+            if not draft_or_final_release(release):
+                return False
+            asset = asset_map(release).get(asset_name)
+            if asset is None:
+                return False
+            if (asset.get('state') != 'uploaded' or asset.get('digest') != expected_asset['digest']
+                    or asset.get('size') != expected_asset['size']):
+                raise RuntimeError('Recovery evidence asset conflicts with its local checksum')
+            return True
+
+        def asset_conflict(release):
+            if release is None:
+                return True
+            if release.get('draft') is False and release.get('immutable') is True:
+                return not asset_present(release)
+            return not release_identity(release) or release.get('draft') is not True
+
+        _write_evidence_with_readback(f'recovery evidence asset {name}',
+            lambda file=expected['path']: writer('release', 'upload', tag, '--repo', REPO, str(file)),
+            read_release, asset_present, asset_conflict, sleep=sleep)
+
+    def final_release(release):
+        return release_identity(release) and release.get('draft') is False \
+            and release.get('immutable') is True and validate_assets(release, require_all=True)
+
+    def finalization_conflict(release):
+        if release is None or not release_identity(release):
+            return True
+        if release.get('draft') is False:
+            return not final_release(release)
+        return release.get('draft') is not True or release.get('immutable') not in (False, None)
+
+    _write_evidence_with_readback('recovery evidence Release publication',
+        lambda: writer('release', 'edit', tag, '--repo', REPO, '--draft=false', '--latest=false'),
+        read_release, final_release, finalization_conflict, sleep=sleep)
+    if not ref_exact(read_ref()):
+        raise RuntimeError('Recovery evidence published tag failed exact-SHA read-back')
+    print(f'IMMUTABLE_RELEASE=PASS TAG={tag}')
 
 
 def write_zip(target, files):
@@ -787,10 +1026,15 @@ def publish(kind, sha, run_id, attempt):
         else:
             result = Path(os.environ['RELEASE_RESULT'])
             if not result.is_file():
+                if recovery_finalization:
+                    raise RuntimeError('Recovery finalization result is missing; refusing to publish incomplete evidence')
                 print('RELEASE_EVIDENCE=NOT_CREATED (execution did not produce a result)')
                 return
             data = json.loads(result.read_text())
-            validate_result(data, sha, run_id, attempt)
+            if recovery_finalization:
+                validate_recovery_finalization_result(data, sha, run_id, attempt)
+            else:
+                validate_result(data, sha, run_id, attempt)
             target = root / 'result.zip'
             write_zip(target, [(result.name, result)])
             archives.append(target)
@@ -800,6 +1044,10 @@ def publish(kind, sha, run_id, attempt):
                 target = root / 'manifests.zip'
                 write_zip(target, files)
                 archives.append(target)
+        if recovery_finalization:
+            publish_recovery_finalization_evidence(tag, sha, run_id, attempt, archives,
+                api=_api_for_operation(evidence_api), writer=gh)
+            return
         # New tag and new draft only: never overwrite or silently reuse a release.
         gh('api', '--method', 'POST', f'repos/{REPO}/git/refs',
            '-f', f'ref=refs/tags/{tag}', '-f', f'sha={sha}')

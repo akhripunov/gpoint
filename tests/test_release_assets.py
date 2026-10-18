@@ -284,6 +284,22 @@ class ImmutableReleaseTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 ASSETS.validate_result(data, sha, run_id, attempt)
 
+    def test_recovery_finalization_result_must_preserve_status_and_sanitized_failure_diagnostic(self):
+        base = {'candidateSha': 'd' * 40, 'automationRunId': '55', 'automationRunAttempt': '1',
+            'mode': 'recovery-finalization', 'status': 'BLOCKED', 'releaseState': 'BLOCKED',
+            'executionFailure': {'stage': 'RECOVERY_FINALIZATION', 'executionStatus': 'FAILED',
+                'exitCode': 1, 'signal': None, 'diagnostic': 'Deploy inventory was incomplete'}}
+        ASSETS.validate_recovery_finalization_result(base, 'd' * 40, '55', '1')
+        for invalid in [
+            {**base, 'releaseState': 'COMPLETE'},
+            {**base, 'executionFailure': None},
+            {**base, 'executionFailure': {**base['executionFailure'], 'diagnostic': ''}},
+            {**base, 'executionFailure': {**base['executionFailure'], 'stage': 'UNRELATED'}},
+            {**base, 'status': 'COMPLETE', 'releaseState': 'COMPLETE'},
+        ]:
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                ASSETS.validate_recovery_finalization_result(invalid, 'd' * 40, '55', '1')
+
     def test_publish_rerun_uses_actual_successful_deploy_attempt(self):
         sha = 'a' * 40
         tag = ASSETS.release_tag('evidence', sha, '55', '1')
@@ -318,24 +334,52 @@ class ImmutableReleaseTests(unittest.TestCase):
             evidence.mkdir()
             (evidence / 'recovery.json').write_text('{"eventType":"RECOVERY_FINALIZATION"}\n')
             result.write_text(json.dumps({'candidateSha': candidate, 'automationRunId': run_id,
-                                          'automationRunAttempt': attempt}))
+                                          'automationRunAttempt': attempt, 'mode': 'recovery-finalization',
+                                          'status': 'COMPLETE', 'releaseState': 'COMPLETE'}))
             env = {'GITHUB_REPOSITORY': ASSETS.REPO, 'GITHUB_SHA': executor,
                    'GITHUB_EVENT_NAME': 'workflow_dispatch',
                    'GITHUB_WORKFLOW_REF': f'{ASSETS.REPO}/.github/workflows/gpoint-deploy.yml@refs/heads/main',
                    'CANDIDATE_SHA': candidate, 'RELEASE_MODE': 'recovery-finalization',
                    'GITHUB_RUN_ID': run_id, 'GITHUB_RUN_ATTEMPT': attempt,
                    'RELEASE_RESULT': str(result), 'GPOINT_RELEASE_EVIDENCE': str(evidence)}
+            tag = ASSETS.release_tag('evidence', candidate, run_id, attempt)
+            state = {'ref': None, 'release': None}
             commands = []
+            def api(route):
+                if route == f'git/ref/tags/{tag}':
+                    return state['ref']
+                if route == f'releases/tags/{tag}':
+                    return state['release']
+                raise AssertionError(route)
+            def writer(*args):
+                commands.append(args)
+                if args[0:3] == ('api', '--method', 'POST'):
+                    state['ref'] = {'object': {'type': 'commit', 'sha': candidate}}
+                elif args[0:2] == ('release', 'create'):
+                    state['release'] = {'tag_name': tag, 'name': tag,
+                        'body': f'Exact SHA {candidate}; workflow run {run_id}, attempt {attempt}.',
+                        'draft': True, 'immutable': False, 'assets': []}
+                elif args[0:2] == ('release', 'upload'):
+                    asset_path = Path(args[-1])
+                    payload = asset_path.read_bytes()
+                    state['release']['assets'].append({'name': asset_path.name, 'state': 'uploaded',
+                        'size': len(payload), 'digest': 'sha256:' + hashlib.sha256(payload).hexdigest()})
+                elif args[0:2] == ('release', 'edit'):
+                    state['release'].update({'draft': False, 'immutable': True})
+                else:
+                    raise AssertionError(args)
             with patch.dict('os.environ', env, clear=True), \
                  patch.object(ASSETS.subprocess, 'check_output', return_value=executor), \
-                 patch.object(ASSETS, 'gh', side_effect=lambda *args: commands.append(args) or ''), \
-                 patch.object(ASSETS, 'github', return_value={}), \
-                 patch.object(ASSETS, 'resolve_asset', return_value={'digest': 'sha256:' + 'a' * 64}), \
-                 patch('prepared_artifact_cache.checksum', return_value='a' * 64):
+                 patch.object(ASSETS, 'gh', side_effect=writer), \
+                 patch.object(ASSETS, '_api_for_operation', return_value=api):
                 ASSETS.publish('evidence', candidate, run_id, attempt)
             self.assertEqual(commands[0][0:3], ('api', '--method', 'POST'))
-            self.assertIn(f'ref=refs/tags/{ASSETS.release_tag("evidence", candidate, run_id, attempt)}', commands[0])
+            self.assertIn(f'ref=refs/tags/{tag}', commands[0])
             self.assertIn(f'sha={candidate}', commands[0])
+            self.assertEqual(state['ref']['object']['sha'], candidate)
+            self.assertFalse(state['release']['draft'])
+            self.assertTrue(state['release']['immutable'])
+            self.assertEqual({asset['name'] for asset in state['release']['assets']}, {'result.zip', 'manifests.zip'})
 
             for changed in [
                 {'GITHUB_SHA': candidate},
@@ -351,6 +395,141 @@ class ImmutableReleaseTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, 'source or independent candidate identity'):
                         ASSETS.publish('evidence', candidate, run_id, attempt)
                 self.assertEqual(commands, [])
+
+    def test_recovery_evidence_write_retries_only_after_absence_readback_and_verifies_immutable_result(self):
+        candidate = 'd367c2ec24242a733dbb2c4145c91d2d4682ba2c'
+        run_id, attempt = '39061584041', '1'
+        tag = ASSETS.release_tag('evidence', candidate, run_id, attempt)
+        body = f'Exact SHA {candidate}; workflow run {run_id}, attempt {attempt}.'
+        with tempfile.TemporaryDirectory() as directory:
+            paths = []
+            for name, content in [('result.zip', b'failure-result'), ('manifests.zip', b'failure-manifests')]:
+                path = Path(directory) / name
+                path.write_bytes(content)
+                paths.append(path)
+            state = {'ref': None, 'release': None}
+            calls = []
+            delays = []
+            def api(route):
+                calls.append(('read', route))
+                if route == f'git/ref/tags/{tag}':
+                    return state['ref']
+                if route == f'releases/tags/{tag}':
+                    return state['release']
+                raise AssertionError(route)
+            lost = {'ref': True, 'create': True, 'upload': True, 'publish': True}
+            def writer(*args):
+                calls.append(('write', args))
+                if args[0:3] == ('api', '--method', 'POST'):
+                    if lost['ref']:
+                        lost['ref'] = False
+                        raise RuntimeError('TLS handshake timeout')
+                    state['ref'] = {'object': {'type': 'commit', 'sha': candidate}}
+                    return
+                if args[0:2] == ('release', 'create'):
+                    state['release'] = {'tag_name': tag, 'name': tag, 'body': body,
+                        'draft': True, 'immutable': False, 'assets': []}
+                    if lost['create']:
+                        lost['create'] = False
+                        raise RuntimeError('TLS handshake timeout')
+                    return
+                if args[0:2] == ('release', 'upload'):
+                    path = Path(args[-1])
+                    if lost['upload']:
+                        lost['upload'] = False
+                        content = path.read_bytes()
+                        state['release']['assets'].append({'name': path.name, 'state': 'uploaded',
+                            'size': len(content), 'digest': 'sha256:' + hashlib.sha256(content).hexdigest()})
+                        raise RuntimeError('TLS handshake timeout')
+                    content = path.read_bytes()
+                    state['release']['assets'].append({'name': path.name, 'state': 'uploaded',
+                        'size': len(content), 'digest': 'sha256:' + hashlib.sha256(content).hexdigest()})
+                    return
+                if args[0:2] == ('release', 'edit'):
+                    if lost['publish']:
+                        lost['publish'] = False
+                        state['release'].update({'draft': False, 'immutable': True})
+                        raise RuntimeError('TLS handshake timeout')
+                    state['release'].update({'draft': False, 'immutable': True})
+                    return
+                raise AssertionError(args)
+            ASSETS.publish_recovery_finalization_evidence(tag, candidate, run_id, attempt, paths,
+                api=api, writer=writer, sleep=delays.append)
+        writes = [entry[1] for entry in calls if entry[0] == 'write']
+        self.assertEqual(sum(args[0:3] == ('api', '--method', 'POST') for args in writes), 2)
+        self.assertEqual(sum(args[0:2] == ('release', 'create') for args in writes), 1)
+        self.assertEqual(sum(args[0:2] == ('release', 'upload') for args in writes), 2)
+        self.assertEqual(sum(args[0:2] == ('release', 'edit') for args in writes), 1)
+        self.assertEqual(len(delays), 1, 'only the tag ref whose read-back proved absent should retry')
+        self.assertEqual(state['release']['draft'], False)
+        self.assertEqual(state['release']['immutable'], True)
+        self.assertEqual({asset['name'] for asset in state['release']['assets']}, {'result.zip', 'manifests.zip'})
+
+    def test_recovery_evidence_nontransient_write_failure_is_not_retried_or_marked_published(self):
+        candidate = 'd367c2ec24242a733dbb2c4145c91d2d4682ba2c'
+        tag = ASSETS.release_tag('evidence', candidate, '39061584041', '1')
+        with tempfile.TemporaryDirectory() as directory:
+            payload = Path(directory) / 'result.zip'
+            payload.write_bytes(b'failure-result')
+            writes = []
+            def api(route): return None
+            def writer(*args):
+                writes.append(args)
+                raise RuntimeError('HTTP 403: forbidden')
+            with self.assertRaisesRegex(RuntimeError, 'non-retryable'):
+                ASSETS.publish_recovery_finalization_evidence(tag, candidate, '39061584041', '1', [payload],
+                    api=api, writer=writer, sleep=lambda _delay: self.fail('403 must not retry'))
+            self.assertEqual(len(writes), 1)
+
+    def test_failed_evidence_publication_preserves_exact_finalizer_result(self):
+        executor = 'e' * 40
+        candidate = 'd367c2ec24242a733dbb2c4145c91d2d4682ba2c'
+        run_id, attempt = '39061584041', '1'
+        tag = ASSETS.release_tag('evidence', candidate, run_id, attempt)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = root / 'result.json'
+            evidence = root / 'evidence'
+            evidence.mkdir()
+            original = json.dumps({'candidateSha': candidate, 'automationRunId': run_id,
+                'automationRunAttempt': attempt, 'mode': 'recovery-finalization',
+                'status': 'BLOCKED', 'releaseState': 'BLOCKED',
+                'executionFailure': {'stage': 'RECOVERY_FINALIZATION', 'executionStatus': 'FAILED',
+                    'exitCode': 1, 'diagnostic': 'active Deploy inventory is incomplete'}}).encode() + b'\n'
+            result.write_bytes(original)
+            env = {'GITHUB_REPOSITORY': ASSETS.REPO, 'GITHUB_SHA': executor,
+                   'GITHUB_EVENT_NAME': 'workflow_dispatch',
+                   'GITHUB_WORKFLOW_REF': f'{ASSETS.REPO}/.github/workflows/gpoint-deploy.yml@refs/heads/main',
+                   'CANDIDATE_SHA': candidate, 'RELEASE_MODE': 'recovery-finalization',
+                   'GITHUB_RUN_ID': run_id, 'GITHUB_RUN_ATTEMPT': attempt,
+                   'RELEASE_RESULT': str(result), 'GPOINT_RELEASE_EVIDENCE': str(evidence)}
+            def api(route):
+                if route in (f'git/ref/tags/{tag}', f'releases/tags/{tag}'):
+                    return None
+                raise AssertionError(route)
+            with patch.dict('os.environ', env, clear=True), \
+                 patch.object(ASSETS.subprocess, 'check_output', return_value=executor), \
+                 patch.object(ASSETS, '_api_for_operation', return_value=api), \
+                 patch.object(ASSETS, 'gh', side_effect=RuntimeError('TLS handshake timeout')), \
+                 patch('time.sleep'):
+                with self.assertRaisesRegex(RuntimeError, 'retry limit exhausted'):
+                    ASSETS.publish('evidence', candidate, run_id, attempt)
+            self.assertEqual(result.read_bytes(), original)
+
+    def test_recovery_evidence_conflicting_or_immutable_release_is_never_overwritten(self):
+        candidate = 'd367c2ec24242a733dbb2c4145c91d2d4682ba2c'
+        tag = ASSETS.release_tag('evidence', candidate, '39061584041', '1')
+        with tempfile.TemporaryDirectory() as directory:
+            payload = Path(directory) / 'result.zip'
+            payload.write_bytes(b'failure-result')
+            conflicting = {'tag_name': tag, 'name': tag, 'body': 'wrong', 'draft': True,
+                           'immutable': False, 'assets': []}
+            writes = []
+            def api(route): return conflicting if route == f'releases/tags/{tag}' else {'object': {'type': 'commit', 'sha': candidate}}
+            with self.assertRaisesRegex(RuntimeError, 'conflicts'):
+                ASSETS.publish_recovery_finalization_evidence(tag, candidate, '39061584041', '1', [payload],
+                    api=api, writer=lambda *args: writes.append(args))
+            self.assertEqual(writes, [])
 
     def test_ordinary_evidence_publisher_still_requires_exact_candidate_checkout(self):
         candidate = 'd' * 40
