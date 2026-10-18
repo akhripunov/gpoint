@@ -148,7 +148,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up pinned ORAS CLI
         if: github.ref == 'refs/heads/main' && needs.coalesce.outputs.result == 'WINNER'
-        uses: oras-project/setup-oras@677529b4e7c38e3295e0883a2ee8a536e3a860f4
+        uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6
         with:
           version: 1.2.0
       - name: Publish and read back exact GHCR artifacts
@@ -191,6 +191,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      deployments: read
     needs: [coalesce, prepare]
     if: >-
       always() && github.ref == 'refs/heads/main' &&
