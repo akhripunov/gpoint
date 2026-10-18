@@ -1,13 +1,10 @@
 """Fail-closed, network-free V3 impact selector regression tests."""
-import base64
 import importlib.util
-import io
 import json
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("impact_v3", ROOT / "scripts/release_impact_v3.py")
@@ -43,14 +40,15 @@ class ImpactV3Tests(unittest.TestCase):
         git(repo, "commit", "-qm", "next")
         return git(repo, "rev-parse", "HEAD")
 
-    def test_exact_ui_only_avoids_backend_source_regressions(self):
+    def test_ui_change_still_requires_full_build_without_live_baseline(self):
         repo, base = self.make_repo()
         sha = self.commit(repo, "apps/miniapp/src/ui.tsx", "after")
-        with patch.object(v3, "read_ledger_baseline", return_value=base):
-            plan = v3.build_ci_plan(repo, sha, "token", "refs/heads/main")
-        self.assertEqual(plan["classification"], "UI_ONLY")
-        self.assertEqual(plan["productionBaselineSha"], base)
-        self.assertEqual(plan["checks"], {k: False for k in v3.CHECKS})
+        plan = v3.build_ci_plan(repo, sha, "token", "refs/heads/main")
+        self.assertEqual(plan["classification"], "FULL")
+        self.assertIsNone(plan["productionBaselineSha"])
+        self.assertIsNone(plan["baselineSource"])
+        self.assertTrue(all(plan["checks"].values()))
+        self.assertEqual(plan["reason"], "verified-live-baseline-unavailable")
         file = repo.parent / (repo.name + "-plan.json")
         self.addCleanup(file.unlink, missing_ok=True)
         file.write_text(json.dumps(plan))
@@ -62,7 +60,7 @@ class ImpactV3Tests(unittest.TestCase):
         self.commit(repo, "services/agata/migrations/versions/new.py", "migration")
         sha = self.commit(repo, "apps/miniapp/src/ui.tsx", "label")
         paths = v3.changed_paths_between(repo, base, sha)
-        plan = v3.make_plan(sha, base, paths, reason="verified-production-ledger")
+        plan = v3.make_plan(sha, base, paths, reason="verified-live-baseline-unavailable")
         self.assertEqual(plan["classification"], "FULL")
         self.assertTrue(all(plan["checks"].values()))
 
@@ -73,23 +71,23 @@ class ImpactV3Tests(unittest.TestCase):
                      "packages/contracts/src/index.ts", "infra/production/Gpoint.Dockerfile",
                      "apps/miniapp/public/../unsafe", "docs/release/automation.md"):
             with self.subTest(path=path):
-                result = v3.make_plan(B, A, [path], reason="verified-production-ledger")
+                result = v3.make_plan(B, A, [path], reason="verified-live-baseline-unavailable")
                 self.assertEqual(result["classification"], "FULL")
 
-    def test_missing_ledger_token_bad_branch_and_dirty_repo_fall_back_full(self):
+    def test_branch_without_main_also_requires_full(self):
         repo, base = self.make_repo()
         sha = self.commit(repo, "apps/miniapp/src/ui.tsx", "new")
         self.assertEqual(v3.build_ci_plan(repo, sha, None, "refs/heads/main")["classification"], "FULL")
         self.assertEqual(v3.build_ci_plan(repo, sha, "token", "refs/heads/feature")["classification"], "FULL")
-        (repo / "untracked").write_text("dirty")
-        with patch.object(v3, "read_ledger_baseline", return_value=base):
-            self.assertEqual(v3.build_ci_plan(repo, sha, "token", "refs/heads/main")["classification"], "FULL")
 
-    def test_ui_plan_rejects_tampered_paths_candidate_and_broad_scope(self):
+    def test_ui_plan_is_rejected_until_live_baseline_proof_is_supported(self):
         repo, base = self.make_repo()
         sha = self.commit(repo, "apps/miniapp/src/ui.tsx", "new")
         plan = v3.make_plan(sha, base, ["apps/miniapp/src/ui.tsx"],
-                            reason="verified-production-ledger")
+                            reason="verified-live-baseline-unavailable")
+        plan["classification"] = "UI_ONLY"
+        plan["checks"] = {k: False for k in v3.CHECKS}
+        plan["productionBaselineSha"] = base
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         file = Path(tmp.name) / "plan.json"
@@ -101,6 +99,22 @@ class ImpactV3Tests(unittest.TestCase):
         ):
             bad = dict(plan, **edit)
             file.write_text(json.dumps(bad))
+            with self.subTest(edit=edit), self.assertRaises(ValueError):
+                v3.load_verified_plan(file, sha, repo)
+
+    def test_full_plan_rejects_injected_baseline_metadata(self):
+        repo, _ = self.make_repo()
+        sha = self.commit(repo, "apps/miniapp/src/ui.tsx", "new")
+        plan = v3.make_plan(sha, reason="verified-live-baseline-unavailable")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        file = Path(tmp.name) / "plan.json"
+        for edit in (
+            {"productionBaselineSha": A},
+            {"baselineSource": "github-deployment-vps-readback"},
+            {"changedPaths": ["apps/miniapp/src/ui.tsx"]},
+        ):
+            file.write_text(json.dumps(dict(plan, **edit)))
             with self.subTest(edit=edit), self.assertRaises(ValueError):
                 v3.load_verified_plan(file, sha, repo)
 
@@ -130,11 +144,8 @@ class ImpactV3Tests(unittest.TestCase):
             "impactV3": {"classification": "UI_ONLY", "productionBaselineSha": A},
             "gates": {"postgres": "COVERED_UNCHANGED", "gsalesPostgres": "COVERED_UNCHANGED"},
         }))
-        with patch.object(v3, "read_ledger_baseline", return_value=A):
-            v3.verify_receipt_baseline(receipt, B, "token")
-        with patch.object(v3, "read_ledger_baseline", return_value="c" * 40):
-            with self.assertRaisesRegex(ValueError, "baseline changed"):
-                v3.verify_receipt_baseline(receipt, B, "token")
+        with self.assertRaisesRegex(ValueError, "unproved FULL"):
+            v3.verify_receipt_baseline(receipt, B)
         with self.assertRaisesRegex(ValueError, "receipt identity"):
             v3.verify_receipt_baseline(receipt, A, "token")
         receipt.write_text(json.dumps({
@@ -143,30 +154,6 @@ class ImpactV3Tests(unittest.TestCase):
         }))
         with self.assertRaisesRegex(ValueError, "unproved FULL"):
             v3.verify_receipt_baseline(receipt, B, "token")
-
-    def test_canonical_ledger_requires_complete_safe_status(self):
-        def opener(data):
-            raw = json.dumps({"content": base64.b64encode(json.dumps(data).encode()).decode(),
-                              "encoding": "base64"}).encode()
-            class Response:
-                def __enter__(self): return io.BytesIO(raw)
-                def __exit__(self, *args): pass
-            return lambda request, timeout: Response()
-        valid = {"currentProductionSha": A, "lastReleaseStatus": "COMPLETE",
-                 "serverDeployStatus": "COMPLETE", "releaseOrigin": "durable-production-release",
-                 "recoveryRequired": False}
-        self.assertEqual(v3.read_ledger_baseline("token", opener(valid)), A)
-        for state in (
-            {"currentProductionSha": A, "lastReleaseStatus": "FAILED"},
-            {"currentProductionSha": A, "lastReleaseStatus": "COMPLETE", "recoveryRequired": True},
-            {"currentProductionSha": "bad", "lastReleaseStatus": "COMPLETE"},
-            {**valid, "serverDeployStatus": "FAILED"},
-            {**valid, "releaseOrigin": "unverified"},
-            {**valid, "recoveryRequired": True},
-        ):
-            with self.subTest(state=state), self.assertRaises(ValueError):
-                v3.read_ledger_baseline("token", opener(state))
-
 
 if __name__ == "__main__":
     unittest.main()

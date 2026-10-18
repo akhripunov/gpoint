@@ -1,5 +1,5 @@
 export function assertInstalledWorkerMatches(mode, assets) {
-  if (!['preflight', 'production', 'task-scoped-auto', 'recovery-finalization'].includes(mode)) {
+  if (!['preflight', 'production', 'task-scoped-auto'].includes(mode)) {
     throw new Error('Explicit release mode is required');
   }
   if (mode === 'preflight') return;

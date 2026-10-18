@@ -1,5 +1,54 @@
 # Как выпускать GPoint
 
+## Текущая модель выпуска и состояния (ME-42)
+
+Этот раздел является единственным актуальным описанием модели состояния после
+ME-42. Инструкции ниже сохранены как историческая документация прежней
+архитектуры; упоминания Ledger, production tags, production Release evidence,
+Recovery Diagnostics/Finalization и файлового production state не являются
+действующими процедурами и не должны запускаться или использоваться как источник
+операционного состояния.
+
+- **Prepare:** успешный Prepare workflow публикует неизменяемый bundle в
+  отдельном GitHub Release, привязанном к точным commit SHA, run ID и attempt.
+  Это единственное назначение GitHub Releases. В Release допускаются только
+  Prepare assets и их проверяемые checksums/provenance.
+- **Production attempt:** один точный Apply связан с записью GitHub Deployment
+  для среды `production`. Статусы этого же Deployment обновляются по GitHub
+  Deployments REST API и содержат точный candidate SHA, Prepare provenance,
+  workflow run/attempt, authorization identity, stage/result и ссылку на run.
+  API timeout/неизвестный ответ требует read-back той же записи; он никогда не
+  разрешает повторный Apply или создание второго Deployment для обхода ошибки.
+- **Фактическое production состояние:** read-only инспекция VPS и БД является
+  авторитетной для запущенного SHA, Mini App/Worker и остальных компонентов,
+  image IDs, health, migration heads и сохранности данных. GitHub Deployment
+  сообщает о ходе и provenance операции, но сам по себе не доказывает, что VPS
+  достиг этого состояния. Расхождение Deployment и VPS блокирует продолжение
+  до read-only reconciliation; неизвестный или частичный исход не финализируется
+  отдельным workflow.
+- **Первый Deploy:** перед изменением оператор обязан считать фактический
+  baseline с уже работающего VPS/БД и проверить его целостность, включая
+  обязательный защищённый backup при миграциях. Отсутствие GitHub Deployment не
+  означает пустой production и не разрешает усыновить/перезаписать данные.
+- **Recovery/failure:** ошибки и неопределённые исходы остаются в status того же
+  Deployment с точным run URL и описанием. Разрешены read-only проверки и
+  публикация статуса на том же Deployment. Новая Apply попытка возможна лишь
+  после доказанного VPS baseline и обычной авторизации/гейтов.
+- **Запрещённые operational state stores:** не читать и не записывать
+  `gpoint-release-ledger`, production tags, `docs/release/state/production.json`
+  или отдельный production Release catalog для выбора baseline, проверки
+  COMPLETE/recovery, подготовки к Deploy либо восстановления статуса. Не
+  создавать Recovery Finalization/Diagnostics pipeline как параллельный
+  оркестратор.
+
+Точные механизмы, разрешения и тестируемые контракты реализованы в текущих
+workflow/scripts и проверяются отдельно. Эта задача не даёт права на публикацию,
+GitHub Actions запуск, production API write или Deploy.
+
+## Исторические процедуры (заменены ME-42)
+
+Ниже — архивный текст прежнего дизайна; он не является инструкцией к запуску.
+
 ## Два режима разрешения выпуска
 
 Актуальные условия: [Release authorization modes](../RELEASE_AUTHORIZATION.md).

@@ -1,4 +1,15 @@
-# GPoint durable production release flow
+# GPoint production release flow
+
+> **Current model (ME-42):** GitHub Releases are used only for immutable
+> Prepare bundles. Production status is recorded through the GitHub Deployments
+> API. Deployment records provide workflow provenance and status; the live VPS
+> is authoritative for runtime, database, and component state. No ledger branch,
+> production tag, checked-in production-state pointer, or recovery-finalization
+> workflow is an operational source of truth. See the current model at the top
+> of [automation.md](automation.md). The procedures below this notice describe
+> the earlier design and are retained as historical reference only.
+
+## Historical design (superseded by ME-42)
 
 `scripts/release-gpoint.mjs` is the canonical release gate. It accepts only a
 40-character candidate commit SHA and is fail-closed by default.

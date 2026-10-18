@@ -169,7 +169,7 @@ export class RemoteCommandError extends Error {
 
 export function classifyPostSwitchState({ candidate, runtime, composeExitCode, health = true }) {
   const failures = validateRuntimeIdentity(candidate, runtime);
-  if (failures.length || !health) return { state: 'RECOVERY_REQUIRED', switched: true, failures: [...failures, ...(!health ? ['health check failed'] : [])] };
+  if (failures.length || !health) return { state: 'INSTALLATION_UNCONFIRMED', switched: true, failures: [...failures, ...(!health ? ['health check failed'] : [])] };
   if (composeExitCode !== 0) return { state: 'SWITCHED_UNVERIFIED', switched: true, failures: [`compose returned exit ${composeExitCode} after switch`] };
   return { state: 'VERIFIED', switched: true, failures: [] };
 }
@@ -493,7 +493,7 @@ export function runCleanupCommand(command, { remoteRun = run, remoteUpload = upl
 }
 
 export function inspectProductionReadOnly() {
-  const prerequisites = run("set -e; dockerVersion=$(docker version --format '{{.Server.Version}}'); composeVersion=$(docker compose version --short); buildxVersion=$(docker buildx version | awk 'NR==1 {print $2}'); docker buildx inspect --bootstrap >/dev/null; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n \"$freeKb\"; test \"$freeKb\" -ge 5242880; releaseSha=$(sed -n 's/^RELEASE_SHA=//p' /opt/gpoint/env/production.env | head -1); docker image inspect gpoint-runtime:$releaseSha >/dev/null; command -v caddy >/dev/null; printf 'LIVE_DOCKER_VERSION=%s\\nLIVE_COMPOSE_VERSION=%s\\nLIVE_BUILDX_VERSION=%s\\nLIVE_BUILDKIT=ready\\nLIVE_DISK_FREE_KB=%s\\nLIVE_ROLLBACK_IMAGE_AVAILABLE=YES\\n' \"$dockerVersion\" \"$composeVersion\" \"$buildxVersion\" \"$freeKb\"");
+  const prerequisites = run("set -e; dockerVersion=$(docker version --format '{{.Server.Version}}'); composeVersion=$(docker compose version --short); buildxVersion=$(docker buildx version | awk 'NR==1 {print $2}'); docker buildx inspect >/dev/null; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n \"$freeKb\"; test \"$freeKb\" -ge 5242880; releaseSha=$(sed -n 's/^RELEASE_SHA=//p' /opt/gpoint/env/production.env | head -1); docker image inspect gpoint-runtime:$releaseSha >/dev/null; command -v caddy >/dev/null; printf 'LIVE_DOCKER_VERSION=%s\\nLIVE_COMPOSE_VERSION=%s\\nLIVE_BUILDX_VERSION=%s\\nLIVE_BUILDKIT=ready\\nLIVE_DISK_FREE_KB=%s\\nLIVE_ROLLBACK_IMAGE_AVAILABLE=YES\\n' \"$dockerVersion\" \"$composeVersion\" \"$buildxVersion\" \"$freeKb\"");
   const dbScript = `const {PrismaClient}=require('@prisma/client'); const db=new PrismaClient(); (async()=>{try{const p=await db.$queryRawUnsafe('SELECT migration_name FROM "_prisma_migrations" WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY finished_at DESC LIMIT 1'); const a=await db.$queryRawUnsafe("SELECT to_regclass('agata.alembic_version')::text AS relation"); let head='ABSENT'; if(a[0].relation){const rows=await db.$queryRawUnsafe('SELECT version_num FROM agata.alembic_version'); if(rows.length!==1) throw Error('agata head is not singular'); head=rows[0].version_num;} console.log('LIVE_PRISMA_HEAD='+(p[0]?.migration_name||'NONE')); console.log('LIVE_AGATA_HEAD='+head);}catch(e){console.error('READ_ONLY_DB_INSPECTION_FAILED='+e.name); process.exitCode=1;}finally{await db.$disconnect();}})();`;
   const encodedDbScript = Buffer.from(dbScript).toString('base64');
   const command = `set -e; envFile=/opt/gpoint/env/production.env; test -r "$envFile"; releaseSha=$(sed -n 's/^RELEASE_SHA=//p' "$envFile" | head -1); printf 'LIVE_RELEASE_ENV_SHA=%s\\n' "$releaseSha"; for name in api worker bot; do container=compose-$name-1; image=$(docker inspect "$container" --format '{{.Image}}'); running=$(docker inspect "$container" --format '{{.State.Running}}'); health=$(docker inspect "$container" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'); restart=$(docker inspect "$container" --format '{{.RestartCount}}'); build=$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'); upper=$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]'); printf 'LIVE_%s_IMAGE=%s LIVE_%s_SHA=%s LIVE_%s_RUNNING=%s LIVE_%s_HEALTH=%s LIVE_%s_RESTARTS=%s\\n' "$upper" "$image" "$upper" "$build" "$upper" "$running" "$upper" "$health" "$upper" "$restart"; done; mini=$(grep -oE 'gpoint-build-sha" content="[0-9a-f]{40}' /opt/gpoint/app/miniapp/index.html | head -1 | cut -d'"' -f3); printf 'LIVE_MINIAPP_SHA=%s\\n' "$mini"; printf '%s' '${encodedDbScript}' | base64 -d | docker exec -i -w /app/apps/api compose-api-1 node; for name in AGATA_ENABLED AGATA_LLM_PROVIDER AGATA_DATABASE_URL AGATA_TENANT_ID AGATA_INTERNAL_API_TOKEN AGATA_MESSAGE_AEAD_KEY AGATA_REQUEST_FINGERPRINT_HMAC_KEY AGATA_RETRIEVAL_QUERY_HMAC_KEY AGATA_RESPONSE_FINGERPRINT_HMAC_KEY AGATA_SHADOW_CANDIDATE_HMAC_KEY; do if grep -Eq "^\${name}=.+$" "$envFile"; then present=YES; else present=NO; fi; printf 'LIVE_CONFIG_%s=%s\\n' "$name" "$present"; done; value=$(sed -n 's/^AGATA_ENABLED=//p' "$envFile" | head -1); printf 'LIVE_AGATA_ENABLED=%s\\n' "\${value:-unset}"; value=$(sed -n 's/^AGATA_LLM_PROVIDER=//p' "$envFile" | head -1); printf 'LIVE_AGATA_PROVIDER=%s\\n' "\${value:-unset}"`;
@@ -501,109 +501,6 @@ export function inspectProductionReadOnly() {
   const providerConfig = run("set -e; envFile=/opt/gpoint/env/production.env; for name in AGATA_CODEX_LOCAL_ENABLED GPOINT_AGATA_WORKER_TOKEN; do if grep -Eq \"^${name}=.+$\" \"$envFile\"; then present=YES; else present=NO; fi; printf 'LIVE_CONFIG_%s=%s\\n' \"$name\" \"$present\"; done; value=$(sed -n 's/^AGATA_CODEX_LOCAL_ENABLED=//p' \"$envFile\" | head -1); printf 'LIVE_AGATA_CODEX_LOCAL_ENABLED=%s\\n' \"${value:-unset}\"");
   const tenant = run("set -e; sed -n 's/^AGATA_TENANT_ID=/LIVE_AGATA_TENANT_ID=/p' /opt/gpoint/env/production.env");
   return `${tenant}\n${prerequisites}\n${run(command)}\n${agataRuntime}\n${providerConfig}\n${run(gsalesProductionInspectionCommand())}`;
-}
-
-/** Recovery-only VPS inspection. It performs observations only and deliberately
- * does not bootstrap Buildx or enforce the ledger/runtime SHA equality gate. */
-export function recoveryProductionInspectionSource(candidateSha) {
-  if (!/^[a-f0-9]{40}$/.test(candidateSha ?? '')) throw new Error('Exact recovery candidate SHA is required');
-  return `import glob,hashlib,json,os,re,stat,subprocess
-def run(args, data=None, timeout=20):
- p=subprocess.run(args,input=data,text=True,capture_output=True,timeout=timeout)
- return p
-facts={"candidateSha":"${candidateSha}"}
-postgres_container_id=None
-try:
- p=run(['docker','ps','-aq','--filter','label=com.docker.compose.project=shared','--filter','label=com.docker.compose.service=postgres'],timeout=15)
- ids=p.stdout.split()
- if p.returncode or len(ids)!=1 or not re.fullmatch(r'[0-9a-f]{12,64}',ids[0]): raise RuntimeError('not unique')
- inspected=run(['docker','inspect',ids[0]],timeout=10)
- if inspected.returncode: raise RuntimeError('inspect failed')
- item=json.loads(inspected.stdout)[0]
- labels=item.get('Config',{}).get('Labels') or {}
- if item.get('Name')!='/shared_postgres_1' or labels.get('com.docker.compose.project')!='shared' or labels.get('com.docker.compose.service')!='postgres' or item.get('State',{}).get('Running') is not True: raise RuntimeError('identity mismatch')
- postgres_container_id=ids[0]
- facts['postgresContainerIdentity']={"name":"/shared_postgres_1","project":"shared","service":"postgres","running":True,"containerId":postgres_container_id}
-except Exception: facts['postgresContainerIdentityError']='POSTGRES_CONTAINER_IDENTITY_INVALID'
-try:
- env={}
- for line in open('/opt/gpoint/env/production.env'):
-  if line.startswith('RELEASE_SHA='): env['releaseEnvSha']=line.rstrip().split('=',1)[1]; break
- facts['releaseEnvSha']=env.get('releaseEnvSha')
-except Exception: facts['releaseEnvSha']=None
-services={}
-try:
- ids=run(['docker','ps','-aq'],timeout=15).stdout.split()
- for cid in ids:
-  inspected=run(['docker','inspect',cid],timeout=10)
-  if inspected.returncode: continue
-  item=json.loads(inspected.stdout)[0]
-  labels=item.get('Config',{}).get('Labels') or {}
-  service=labels.get('com.docker.compose.service','')
-  project=labels.get('com.docker.compose.project','')
-  if project != 'compose' or service not in ('api','worker','bot','agata-api','agata-memory-worker') and not service.startswith('gsales'):
-   continue
-  name=service
-  image_id=item.get('Image')
-  image=run(['docker','image','inspect',image_id],timeout=10)
-  revision=None
-  if image.returncode == 0:
-   revision=(json.loads(image.stdout)[0].get('Config',{}).get('Labels') or {}).get('org.opencontainers.image.revision')
-  services[name]={"running":bool(item.get('State',{}).get('Running')),
-   "health":(item.get('State',{}).get('Health') or {}).get('Status','none'),
-   "restartCount":item.get('RestartCount'),"sourceSha":revision,"imageId":image_id,
-   "configuredImage":item.get('Config',{}).get('Image')}
- facts['services']=services
-except Exception: facts['servicesError']='CONTAINER_INSPECTION_FAILED'
-try:
- html=open('/opt/gpoint/app/miniapp/index.html').read()
- match=re.search(r'gpoint-build-sha" content="([0-9a-f]{40})',html)
- facts['miniappSha']=match.group(1) if match else None
-except Exception: facts['miniappSha']=None
-sql=\"\"\"BEGIN READ ONLY; SET LOCAL statement_timeout='5000';
-SELECT 'LIVE_PRISMA_HEAD='||COALESCE((SELECT migration_name FROM public._prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY finished_at DESC LIMIT 1),'NONE');
-DO $$ DECLARE v text; BEGIN IF to_regclass('agata.alembic_version') IS NULL THEN v='ABSENT'; ELSE EXECUTE 'SELECT version_num FROM agata.alembic_version' INTO v; END IF; RAISE NOTICE 'LIVE_AGATA_HEAD=%',v; END $$;
-DO $$ DECLARE v text; BEGIN IF to_regclass('gsales_meta.migrations') IS NULL THEN v='ABSENT'; ELSE EXECUTE 'SELECT version || ''|'' || sha256 FROM gsales_meta.migrations ORDER BY version DESC LIMIT 1' INTO v; END IF; RAISE NOTICE 'LIVE_GSALES_IDENTITY=%',v; END $$;
-COMMIT;\"\"\"
-db=run(['docker','exec','-i','-u','postgres',postgres_container_id,'psql','-XAt','-v','ON_ERROR_STOP=1','-d','gpoint'],sql,timeout=15) if postgres_container_id else subprocess.CompletedProcess([],1,'','POSTGRES_CONTAINER_IDENTITY_INVALID')
-facts['databaseReadOnlyQueryExitCode']=db.returncode
-dbtext=db.stdout+'\\n'+db.stderr
-for key,pattern in [('prismaHead',r'LIVE_PRISMA_HEAD=([A-Za-z0-9_-]+)'),('agataHead',r'LIVE_AGATA_HEAD=([A-Za-z0-9_-]+)'),('gsalesIdentity',r'LIVE_GSALES_IDENTITY=([A-Za-z0-9_|-]+)')]:
- m=re.search(pattern,dbtext); facts[key]=m.group(1) if m else None
-if facts.get('gsalesIdentity') and '|' in facts['gsalesIdentity']:
- facts['gsalesHead'],facts['gsalesMigrationSha256']=facts.pop('gsalesIdentity').split('|',1)
-else: facts['gsalesHead']=facts.pop('gsalesIdentity',None); facts['gsalesMigrationSha256']=None
-backup_path=None
-matches=sorted(glob.glob('/opt/gpoint/backups/gpoint-recovery-current-${candidateSha}-*.dump'))
-if matches:
- backup_path=matches[-1]
-if backup_path:
- try:
-  if not postgres_container_id: raise RuntimeError('PostgreSQL identity unavailable')
-  descriptor=os.open(backup_path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
-  file_stat=os.fstat(descriptor)
-  if not stat.S_ISREG(file_stat.st_mode): raise OSError('backup is not a regular file')
-  mode=oct(stat.S_IMODE(file_stat.st_mode))[2:]
-  hasher=hashlib.sha256()
-  with os.fdopen(descriptor,'rb') as backup_file:
-   descriptor=-1
-   for chunk in iter(lambda: backup_file.read(1024*1024),b''): hasher.update(chunk)
-   backup_file.seek(0)
-   restore=subprocess.run(['docker','exec','-i',postgres_container_id,'pg_restore','--list'],stdin=backup_file,capture_output=True,timeout=20)
-  ok=restore.returncode==0 and b'TABLE DATA agata messages' in restore.stdout
-  facts['backup']={"status":"VERIFIED" if mode=='600' and ok else 'UNVERIFIED',"path":backup_path,"sha256":hasher.hexdigest(),"mode":mode,"readback":"PASS" if ok else 'FAIL'}
- except Exception:
-  if 'descriptor' in locals() and descriptor >= 0: os.close(descriptor)
-  facts['backup']={"status":"UNVERIFIED","path":backup_path}
-else: facts['backup']={"status":"MISSING"}
-print('RECOVERY_RUNTIME_FACTS='+json.dumps(facts,sort_keys=True,separators=(',',':')))`;
-}
-
-export function inspectRecoveryProductionReadOnly(candidateSha) {
-  const source = recoveryProductionInspectionSource(candidateSha);
-  const encoded = Buffer.from(source).toString('base64');
-  const command = `python3 -c "import base64;exec(base64.b64decode('${encoded}'))"`;
-  return run(command);
 }
 
 export function inspectGsalesReadiness(candidate, baselineSha, execute = run) {
@@ -693,7 +590,7 @@ export function runAuthorizedMutationPlan({preflightCommand, mutations, onBefore
 }
 
 export function productionPreflightCommand() {
-  return `set -e; command -v docker >/dev/null; docker version --format 'DOCKER_VERSION={{.Server.Version}}'; docker compose version; docker buildx version; docker buildx inspect --bootstrap >/dev/null; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n "$freeKb"; test "$freeKb" -ge 5242880; test -r /opt/gpoint/env/production.env; currentSha=$(sed -n 's/^RELEASE_SHA=//p' /opt/gpoint/env/production.env | head -1); printf '%s\\n' "$currentSha" | grep -Eq '^[0-9a-f]{40}$'; currentImage=$(docker inspect compose-api-1 --format '{{.Config.Image}}'); dbStatus=$(docker run --rm ${databaseNetworkArgs('gpoint-preflight')} --env-file /opt/gpoint/env/production.env "$currentImage" pnpm --filter @gpoint/db exec prisma migrate status 2>&1); test -n "$dbStatus"; printf '%s\\n' "$dbStatus" | tail -5; for name in AGATA_ENABLED AGATA_LLM_PROVIDER AGATA_DATABASE_URL AGATA_TENANT_ID AGATA_INTERNAL_API_TOKEN AGATA_MESSAGE_AEAD_KEY AGATA_REQUEST_FINGERPRINT_HMAC_KEY AGATA_RETRIEVAL_QUERY_HMAC_KEY AGATA_RESPONSE_FINGERPRINT_HMAC_KEY AGATA_SHADOW_CANDIDATE_HMAC_KEY; do grep -Eq "^$name=.+\\$" /opt/gpoint/env/production.env || { echo AGATA_CONFIG_MISSING=$name; exit 32; }; done; grep -qx 'AGATA_ENABLED=true' /opt/gpoint/env/production.env; provider=$(sed -n 's/^AGATA_LLM_PROVIDER=//p' /opt/gpoint/env/production.env | head -1); case "$provider" in disabled) grep -qx 'AGATA_CODEX_LOCAL_ENABLED=false' /opt/gpoint/env/production.env && ! grep -Eq '^AGATA_LLM_API_KEY=.+$' /opt/gpoint/env/production.env ;; mac_worker) grep -qx 'AGATA_CODEX_LOCAL_ENABLED=true' /opt/gpoint/env/production.env && grep -Eq '^GPOINT_AGATA_WORKER_TOKEN=.+$' /opt/gpoint/env/production.env ;; *) echo AGATA_PROVIDER_UNSUPPORTED; exit 32 ;; esac; printf 'GPOINT_PREFLIGHT_OK\\n'`;
+  return `set -e; command -v docker >/dev/null; docker version --format 'DOCKER_VERSION={{.Server.Version}}'; docker compose version; docker buildx version; docker buildx inspect >/dev/null; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n "$freeKb"; test "$freeKb" -ge 5242880; test -r /opt/gpoint/env/production.env; currentSha=$(sed -n 's/^RELEASE_SHA=//p' /opt/gpoint/env/production.env | head -1); printf '%s\\n' "$currentSha" | grep -Eq '^[0-9a-f]{40}$'; currentImage=$(docker inspect compose-api-1 --format '{{.Config.Image}}'); dbStatus=$(docker run --rm ${databaseNetworkArgs('gpoint-preflight')} --env-file /opt/gpoint/env/production.env "$currentImage" pnpm --filter @gpoint/db exec prisma migrate status 2>&1); test -n "$dbStatus"; printf '%s\\n' "$dbStatus" | tail -5; for name in AGATA_ENABLED AGATA_LLM_PROVIDER AGATA_DATABASE_URL AGATA_TENANT_ID AGATA_INTERNAL_API_TOKEN AGATA_MESSAGE_AEAD_KEY AGATA_REQUEST_FINGERPRINT_HMAC_KEY AGATA_RETRIEVAL_QUERY_HMAC_KEY AGATA_RESPONSE_FINGERPRINT_HMAC_KEY AGATA_SHADOW_CANDIDATE_HMAC_KEY; do grep -Eq "^$name=.+\\$" /opt/gpoint/env/production.env || { echo AGATA_CONFIG_MISSING=$name; exit 32; }; done; grep -qx 'AGATA_ENABLED=true' /opt/gpoint/env/production.env; provider=$(sed -n 's/^AGATA_LLM_PROVIDER=//p' /opt/gpoint/env/production.env | head -1); case "$provider" in disabled) grep -qx 'AGATA_CODEX_LOCAL_ENABLED=false' /opt/gpoint/env/production.env && ! grep -Eq '^AGATA_LLM_API_KEY=.+$' /opt/gpoint/env/production.env ;; mac_worker) grep -qx 'AGATA_CODEX_LOCAL_ENABLED=true' /opt/gpoint/env/production.env && grep -Eq '^GPOINT_AGATA_WORKER_TOKEN=.+$' /opt/gpoint/env/production.env ;; *) echo AGATA_PROVIDER_UNSUPPORTED; exit 32 ;; esac; printf 'GPOINT_PREFLIGHT_OK\\n'`;
 }
 
 export function agataPreSwitchReadinessCommand(sha, provider) {

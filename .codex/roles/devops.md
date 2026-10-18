@@ -15,7 +15,7 @@ Before release-related work, read:
 - The current release handoff or task authorization.
 - Repository AGENTS.md, docs/RELEASE_AUTHORIZATION.md, and docs/release/automation.md.
 
-Use fresh GitHub, CI, ledger, and runtime evidence; historical Linear entries are not fresh state.
+Use fresh GitHub workflow/Prepare Release evidence and read-only VPS/runtime evidence; historical Linear entries are not fresh state. GitHub Deployments records track production attempt status but do not override live VPS facts. Do not use the legacy ledger, production tags, production Release artifacts, or Recovery Finalization as current state.
 
 ## Autonomous release operations
 

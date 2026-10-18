@@ -87,28 +87,6 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn('runs-on: ubuntu-latest', publish_job)
         self.assertIn('persist-credentials: false', publish_job)
 
-    def test_diagnostic_preflight_and_internal_preflight_publish_distinct_statuses(self):
-        workflow = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()
-        publisher = workflow.split('  publish:', 1)[1]
-        self.assertIn("if: always() && github.ref == 'refs/heads/main'", publisher)
-        self.assertIn('needs.validate.outputs.candidate || inputs.candidate || github.sha', publisher)
-        self.assertIn("inputs.mode == 'production' || inputs.mode == 'task-scoped-auto'", workflow)
-        self.assertIn("inputs.mode == 'recovery-finalization')", workflow)
-        self.assertIn("inputs.mode != 'recovery-finalization'", workflow)
-        self.assertIn("needs.deploy.outputs.status != ''", workflow)
-        self.assertIn('RELEASE_PHASE: preflight', workflow)
-        self.assertIn("inputs.mode == 'preflight' && needs.deploy.outputs.preflight == 'PLANNED' && 'READY_FOR_OWNER'", workflow)
-        self.assertIn("needs.deploy.outputs.preflight == 'PLANNED' && 'PASS'", workflow)
-        self.assertIn("needs.deploy.outputs.status == 'COMPLETE' && 'RECOVERY_REQUIRED'", workflow)
-        release_entrypoint = (ROOT / 'scripts/automated-release.mjs').read_text()
-        self.assertIn("preflight=${['recovery-finalization', 'recovery-diagnostics'].includes(mode) ? 'NOT_APPLICABLE' : preflightStatus}",
-                      release_entrypoint)
-        self.assertIn("if (mode === 'recovery-diagnostics')", release_entrypoint)
-        self.assertIn("preflightStatus = 'NOT_APPLICABLE'", release_entrypoint)
-        self.assertIn('status=${status}', (ROOT / 'scripts/automated-release.mjs').read_text())
-        publisher = (ROOT / 'scripts/publish-release-linear.py').read_text()
-        self.assertIn("'preflight': ('PASS', 'PLANNED', 'READY_FOR_OWNER', 'FAILED', 'BLOCKED')", publisher)
-        self.assertIn('READY_FOR_OWNER не публикуется для уже выполняемого production цикла', publisher)
 
     def test_deploy_validation_stays_hosted_while_publication_moves_to_mac(self):
         workflow = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()
@@ -121,34 +99,6 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn('actions: read', workflow)
         self.assertIn('persist-credentials: false', publish)
 
-    def test_both_deploy_selectors_receive_every_recovery_authorization_input(self):
-        workflow = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()
-        selector_steps = {
-            'Verify operator confirmation, current main and successful preparation': 'validate',
-            'Recheck current main and Prepare provenance on the Mac': 'deploy',
-        }
-        required_inputs = {
-            'RECOVERY_FAILURE_RUN_ID': 'recovery_failure_run_id',
-            'RECOVERY_FAILURE_RUN_ATTEMPT': 'recovery_failure_run_attempt',
-            'RECOVERY_DB_RISK_ACCEPTED': 'recovery_db_risk_accepted',
-            'RECOVERY_DB_RISK_BASELINE_SHA': 'recovery_db_risk_baseline_sha',
-            'RECOVERY_DB_RISK_DECISION_ID': 'recovery_db_risk_decision_id',
-            'CREATE_RECOVERY_BACKUP': 'create_recovery_backup',
-        }
-
-        for step_name, job_name in selector_steps.items():
-            with self.subTest(step=step_name):
-                start = workflow.index(f'      - name: {step_name}\n')
-                next_step = workflow.find('\n      - name:', start + 1)
-                block = workflow[start:next_step if next_step >= 0 else None]
-                self.assertIn('run: python' + ('3' if job_name == 'deploy' else '') + ' scripts/select-release-run.py', block)
-                environment = block.split('\n        env:\n', 1)[1].split('\n        run:', 1)[0]
-                for variable, input_name in required_inputs.items():
-                    self.assertIn(
-                        f'          {variable}: ${{{{ inputs.{input_name} }}}}',
-                        environment,
-                        f'{job_name} selector is missing {variable} from canonical input {input_name}',
-                    )
 
     def test_linear_maintenance_jobs_run_on_mac_with_source_provenance(self):
         reconcile = (ROOT / '.github/workflows/gpoint-linear-reconcile.yml').read_text()
@@ -202,33 +152,6 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn(first, journal)
         self.assertIn(second, journal)
 
-    def test_diagnostic_preflight_evidence_can_still_be_validated_for_ready(self):
-        sha = 'a' * 40
-        prepare = {'id': 12, 'run_attempt': 2}
-        ready = {'id': 50, 'run_number': 8, 'run_attempt': 1, 'head_sha': sha,
-                 'head_branch': 'main', 'event': 'workflow_dispatch',
-                 'display_title': f'GPoint preflight {sha} by owner',
-                 'status': 'completed', 'conclusion': 'success'}
-        result = {'candidateSha': sha, 'automationRunId': '50',
-                  'automationRunAttempt': '1', 'mode': 'preflight',
-                  'releaseState': 'READY_FOR_OWNER', 'status': 'PLANNED',
-                  'preflight': 'PASS', 'productionChanged': False,
-                  'dryRun': True, 'applicationVerification': 'NOT_DEPLOYED',
-                  'authorizationMode': 'EXACT_SHA', 'authorizationConsumed': False,
-                  'prepareRunId': '12', 'prepareRunAttempt': '2'}
-        selected = SELECT.validate_ready_preflight(sha, prepare, [ready],
-                                                    lambda *_args: result)
-        self.assertEqual(selected['id'], 50)
-        with self.assertRaisesRegex(RuntimeError, 'successful READY_FOR_OWNER'):
-            SELECT.validate_ready_preflight(sha, prepare, [], lambda *_args: result)
-        failed = {**ready, 'id': 51, 'run_number': 9, 'conclusion': 'failure'}
-        with self.assertRaisesRegex(RuntimeError, 'Latest exact-SHA'):
-            SELECT.validate_ready_preflight(sha, prepare, [ready, failed],
-                                            lambda *_args: result)
-        wrong_prepare = {**result, 'prepareRunAttempt': '1'}
-        with self.assertRaisesRegex(RuntimeError, 'does not prove READY_FOR_OWNER'):
-            SELECT.validate_ready_preflight(sha, prepare, [ready],
-                                            lambda *_args: wrong_prepare)
 
     def test_production_selector_accepts_exact_prepare_without_separate_preflight(self):
         sha = 'a' * 40
@@ -325,7 +248,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn('keep this', updated)
 
     def test_latest_current_sha_failure_does_not_reuse_older_success(self):
-        runs = {'workflow_runs': [
+        runs = {'total_count': 2, 'workflow_runs': [
             {'id':1,'head_sha':'a'*40,'created_at':'2026-10-03T06:00:00Z','conclusion':'success','status':'completed'},
             {'id':2,'head_sha':'a'*40,'created_at':'2026-10-03T07:00:00Z','conclusion':'failure','status':'completed'},
         ]}
@@ -383,111 +306,11 @@ class ReleaseTests(unittest.TestCase):
             return {'workflow_runs': [run]}
         return github, run, result
 
-    def test_production_self_run_in_progress_requires_completed_successful_deploy_job(self):
-        github, run, result = self.production_fixture()
-        with patch.object(SYNC, 'github_json', side_effect=github), patch.object(SYNC, 'artifact_json', return_value=result):
-            self.assertEqual(SYNC.production_evidence()[2], run)
-        self.assertEqual(run['status'], 'in_progress')
-        self.assertIsNone(run['conclusion'])
-        github, _, result = self.production_fixture(deploy_conclusion='failure')
-        with patch.object(SYNC, 'github_json', side_effect=github), patch.object(SYNC, 'artifact_json', return_value=result):
-            with self.assertRaises(SYNC.SyncError):
-                SYNC.production_evidence()
 
-    def test_complete_runtime_reconciles_after_publication_failure_without_faking_workflow_success(self):
-        github, run, result = self.production_fixture('completed', 'failure')
-        with patch.object(SYNC, 'github_json', side_effect=github), patch.object(SYNC, 'artifact_json', return_value=result):
-            self.assertEqual(SYNC.production_evidence()[2]['conclusion'], 'failure')
-        github, _, result = self.production_fixture('completed', 'success')
-        with patch.object(SYNC, 'github_json', side_effect=github), patch.object(SYNC, 'artifact_json', return_value=result):
-            self.assertEqual(SYNC.production_evidence()[2]['conclusion'], 'success')
 
-    def test_reconciled_ledger_can_sync_without_rewriting_failed_historical_deploy(self):
-        github, run, _result = self.production_fixture('completed', 'failure')
-        original = github
-        def reconciled(path, token=None):
-            data = original(path, token)
-            if 'production.json?' in path:
-                state = json.loads(base64.b64decode(data['content']))
-                state['publicationRepair'] = {'runId': 55}
-                state['releaseOrigin'] = 'reconciled-production-release'
-                return {'content': base64.b64encode(json.dumps(state).encode()).decode()}
-            if '/manifests/' in path:
-                manifest = json.loads(base64.b64decode(data['content']))
-                manifest.update({
-                    'eventType': 'RECONCILED_PRODUCTION_RELEASE', 'automationRunId': 55,
-                    'automationRunConclusion': 'failure', 'serverDeployStatus': 'COMPLETE',
-                    'originalFailure': {'rewritten': False},
-                    'publicationRepair': {'completedAt': '2026-10-05T04:36:09Z', 'basis': 'fresh read-only VPS reconciliation'},
-                    'dbHeadAfter': 'prisma-head', 'agataDbHeadAfter': 'agata0011',
-                    'gsalesDbHeadAfter': '001_gsales',
-                    'serverReconciliation': {'vpsSha': 'a' * 40, 'prismaHead': 'prisma-head',
-                        'agataHead': 'agata0011', 'gsalesHead': '001_gsales',
-                        'gsalesRlsSecurity': 'PASS', 'externalMiniappSha': 'a' * 40,
-                        'externalApiHealth': 'PASS'},
-                    'smoke': {'vpsHealth': 'PASS', 'imageRuntimeParity': 'PASS',
-                        'gsalesRuntimeReconciliation': 'PASS'},
-                    'runtimeFacts': {'LIVE_RELEASE_ENV_SHA': 'a' * 40,
-                        'LIVE_AGATA_API_SHA': 'a' * 40, 'LIVE_GSALES_API_SHA': 'a' * 40},
-                })
-                return {'content': base64.b64encode(json.dumps(manifest).encode()).decode()}
-            return data
-        with (patch.object(SYNC, 'github_json', side_effect=reconciled),
-              patch.object(SYNC, 'artifact_json', side_effect=AssertionError('reconciled manifest is the publication evidence'))):
-            state, manifest, deployment = SYNC.production_evidence()
-        self.assertEqual(state['publicationRepair']['runId'], 55)
-        self.assertEqual(manifest['eventType'], 'RECONCILED_PRODUCTION_RELEASE')
-        self.assertEqual(deployment['conclusion'], 'failure')
-        rendered = SYNC.render_current_state({
-            'synced_at': 'now', 'main_sha': 'b' * 40, 'main_checked_at': 'then',
-            'production_sha': 'a' * 40, 'production_checked_at': 'then',
-            'production_ref': 'prod-new', 'release_status': 'COMPLETE', 'in_sync': False,
-            'prepare': {}, 'candidate': 'NOT_PREPARED_FOR_CURRENT_MAIN',
-            'latest_main_prepare': {}, 'deploy': deployment, 'manifest': manifest,
-            'server_deploy_status': 'COMPLETE', 'worker_operational_status': 'NOT_VERIFIED',
-            'service_readiness': 'DEGRADED', 'dependency_checked_at': 'not checked',
-        })
-        self.assertIn('conclusion **failure** сохранён как есть', rendered)
-        self.assertNotIn('deploy job **SUCCESS**', rendered)
 
-    def test_reconciled_ledger_requires_matching_server_and_historical_run_evidence(self):
-        github, _run, _result = self.production_fixture('completed', 'failure')
-        original = github
-        def mismatch(path, token=None):
-            data = original(path, token)
-            if '/manifests/' in path:
-                manifest = json.loads(base64.b64decode(data['content']))
-                manifest.update({'eventType': 'RECONCILED_PRODUCTION_RELEASE', 'automationRunId': 55,
-                    'automationRunConclusion': 'failure', 'serverDeployStatus': 'COMPLETE',
-                    'serverReconciliation': {'vpsSha': 'b' * 40}})
-                return {'content': base64.b64encode(json.dumps(manifest).encode()).decode()}
-            return data
-        with patch.object(SYNC, 'github_json', side_effect=mismatch), patch.object(SYNC, 'artifact_json', return_value={}):
-            with self.assertRaises(SYNC.SyncError):
-                SYNC.production_evidence()
 
-    def test_production_artifact_cannot_replace_newer_ledger_release_or_use_other_run(self):
-        for field, value in [('releaseId', 'release-old'), ('automationRunId', '54'),
-                             ('productionShaAfter', 'b' * 40), ('productionRef', 'prod-old'),
-                             ('status', 'RECOVERY_REQUIRED')]:
-            with self.subTest(field=field):
-                github, _, result = self.production_fixture(result_overrides={field: value})
-                with patch.object(SYNC, 'github_json', side_effect=github), patch.object(SYNC, 'artifact_json', return_value=result):
-                    with self.assertRaises(SYNC.SyncError):
-                        SYNC.production_evidence()
 
-    def test_production_ledger_manifest_sha_mismatch_is_not_reported_complete(self):
-        github, _, result = self.production_fixture('completed', 'failure')
-        def mismatch(path, token=None):
-            data = github(path, token)
-            if '/manifests/' in path:
-                manifest = json.loads(base64.b64decode(data['content']))
-                manifest['productionShaAfter'] = 'b' * 40
-                return {'content': base64.b64encode(json.dumps(manifest).encode()).decode()}
-            return data
-        with patch.object(SYNC, 'github_json', side_effect=mismatch), patch.object(SYNC, 'artifact_json', return_value=result):
-            with self.assertRaisesRegex(SYNC.SyncError, 'STATE_MISMATCH'):
-                SYNC.production_evidence()
 
     def test_immutable_production_result_zip_checksum_is_required(self):
         buffer = io.BytesIO()
@@ -674,6 +497,105 @@ class WorkerCompatibilityTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     self.contract.verify_contract({**self.values,**change},self.point,self.sales)
 
+
+if __name__ == '__main__':
+    unittest.main()
+import importlib.util
+from pathlib import Path
+import sys
+import unittest
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'scripts'))
+
+def load(name, file):
+    spec = importlib.util.spec_from_file_location(name, ROOT / 'scripts' / file)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+SYNC = load('release_linear', 'publish-release-linear.py')
+SELECT = load('select_release', 'select-release-run.py')
+
+SHA = 'a' * 40
+OLD = 'b' * 40
+REPOSITORY = 'akhripunov/gpoint'
+
+def deployment(identity, candidate, run_id, attempt, created_at):
+    url = f'https://github.com/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}'
+    payload = {'schema': 'gpoint-deployment/v1', 'repository': REPOSITORY, 'candidateSha': candidate,
+        'workflow': {'runId': str(run_id), 'attempt': str(attempt), 'url': url},
+        'prepare': {'releaseId': 41, 'tag': f'gpoint-prepare-{candidate}-10-1', 'runId': '10', 'attempt': '1',
+                    'assetId': 42, 'assetSha256': 'sha256:' + 'c' * 64},
+        'authorization': {'mode': 'EXACT_SHA', 'id': None}}
+    return {'id': identity, 'environment': 'production', 'production_environment': True,
+        'transient_environment': False, 'task': 'gpoint-production-deploy', 'sha': candidate,
+        'ref': candidate, 'created_at': created_at, 'payload': payload}, url
+
+def status(state, url, created_at):
+    return {'state': state, 'description': f'stage={state}', 'log_url': url,
+            'environment_url': 'https://gpoint.one', 'created_at': created_at}
+
+class DeploymentReleaseTests(unittest.TestCase):
+    def test_successful_deployment_is_reported_from_deployment_status_and_exact_prepare_link(self):
+        item, url = deployment(100, SHA, 501, 2, '2026-10-18T10:00:00Z')
+        def read(route):
+            if '/deployments?' in route: return [item]
+            if '/statuses?' in route: return [status('success', url, '2026-10-18T10:05:00Z')]
+            raise AssertionError(route)
+        with patch.object(SYNC, 'github_json', side_effect=read):
+            state, manifest, run = SYNC.production_evidence()
+        self.assertEqual(state['currentProductionSha'], SHA)
+        self.assertEqual(state['lastReleaseStatus'], 'SUCCESS')
+        self.assertEqual(manifest['prepare']['tag'], f'gpoint-prepare-{SHA}-10-1')
+        self.assertEqual(run['id'], 501)
+        self.assertEqual(manifest['logUrl'], url)
+
+    def test_failed_attempt_makes_current_installed_sha_unknown(self):
+        failed, failed_url = deployment(101, SHA, 502, 1, '2026-10-18T11:00:00Z')
+        prior, prior_url = deployment(100, OLD, 501, 2, '2026-10-17T10:00:00Z')
+        def read(route):
+            if '/deployments?' in route: return [failed, prior]
+            if '/deployments/101/statuses?' in route: return [status('error', failed_url, '2026-10-18T11:02:00Z')]
+            if '/deployments/100/statuses?' in route: return [status('success', prior_url, '2026-10-17T10:05:00Z')]
+            raise AssertionError(route)
+        with patch.object(SYNC, 'github_json', side_effect=read):
+            state, manifest, run = SYNC.production_evidence()
+        self.assertIsNone(state['currentProductionSha'])
+        self.assertEqual(state['lastReleaseStatus'], 'ERROR')
+        self.assertIsNone(manifest['productionShaAfter'])
+        self.assertEqual(manifest['candidateSha'], SHA)
+        self.assertEqual(run['conclusion'], 'error')
+
+    def test_invalid_environment_or_run_link_fails_closed(self):
+        item, url = deployment(100, SHA, 501, 2, '2026-10-18T10:00:00Z')
+        item['environment'] = 'staging'
+        with patch.object(SYNC, 'github_json', return_value=[item]):
+            with self.assertRaisesRegex(SYNC.SyncError, 'Deployment identity'):
+                SYNC.production_evidence()
+        item['environment'] = 'production'
+        with patch.object(SYNC, 'github_json', side_effect=[[item], [status('success', 'https://example.com', '2026-10-18T10:05:00Z')]]):
+            with self.assertRaisesRegex(SYNC.SyncError, 'exact workflow attempt'):
+                SYNC.production_evidence()
+
+    def test_latest_prepare_run_inventory_is_paginated_and_complete(self):
+        runs = [{'id': 1, 'head_sha': SHA, 'status': 'completed', 'conclusion': 'success', 'created_at': '2026-10-16'}]
+        calls = []
+        def read(route):
+            calls.append(route)
+            return {'total_count': 101, 'workflow_runs': [{'id': index} for index in range(100)]} if route.endswith('page=1') else {
+                'total_count': 101, 'workflow_runs': runs}
+        with patch.object(SYNC, 'github_json', side_effect=read):
+            result = SYNC.latest_run('gpoint-prepare.yml', sha=SHA, successful=True)
+        self.assertEqual(result['id'], 1)
+        self.assertEqual(len(calls), 2)
+
+    def test_selector_accepts_only_current_deploy_modes(self):
+        for mode, approval in [('preflight', 'false'), ('production', 'true'), ('task-scoped-auto', 'false')]:
+            SELECT.validate_request(SHA, 'refs/heads/main', mode, approval)
+        with self.assertRaisesRegex(RuntimeError, 'valid release mode'):
+            SELECT.validate_request(SHA, 'refs/heads/main', 'recovery-finalization', 'true')
 
 if __name__ == '__main__':
     unittest.main()

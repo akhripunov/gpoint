@@ -32,7 +32,7 @@ def prepare_static(sha, output, impact):
     if (impact.get("candidateSha") != sha or
             impact.get("version") != 1 or
             impact.get("classification") != "UI_ONLY" or
-            impact.get("baselineSource") != "gpoint-release-ledger" or
+            impact.get("baselineSource") != "github-deployment-vps-readback" or
             impact.get("reason") != "narrow-unchanged-backend" or
             not SHA.fullmatch(baseline or "") or baseline == sha or
             impact.get("checks") != {"agata_postgres_rehearsal": False,
