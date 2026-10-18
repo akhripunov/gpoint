@@ -54,12 +54,18 @@ def validate_image_metadata(role: str, repository: str, digest: str, metadata: d
             'sourceSha': sha, 'platform': 'linux/amd64'}
 
 
+def diagnostic_message_text(output: str) -> str:
+    # A Python/Node traceback can print timeout=30 or timeout: 900_000 from
+    # source code even when the child failed immediately for another reason.
+    return re.sub(r'\btimeout\s*[=:]\s*[0-9_]+', '', output, flags=re.IGNORECASE)
+
+
 def safe_runtime_diagnostic_fields(output: str | bytes, category: str) -> dict:
     """Extract allowlisted runtime markers; never return subprocess output."""
     if isinstance(output, bytes):
         output = output.decode('utf-8', 'replace')
     raw_output = str(output)
-    output = raw_output.lower()
+    output = diagnostic_message_text(raw_output).lower()
     diagnostic = {}
     markers = re.findall(r'GHCR_REHEARSAL_SUBSTAGE=(capture_loaded_images|parity_loaded_images|'
                          r'native_image_inspect_(?:app|agata|gsales)|negative_identity_(?:app|agata|gsales)|'
@@ -67,6 +73,21 @@ def safe_runtime_diagnostic_fields(output: str | bytes, category: str) -> dict:
                          r'runtime_remove_(?:app|agata|gsales)|parity_loaded_images_final)', raw_output)
     if markers:
         diagnostic['substage'] = markers[-1]
+    child_commands = re.findall(r"Command ['\"]?\[['\"](docker|ctr|python3)['\"]", raw_output)
+    if child_commands:
+        diagnostic['childCommand'] = child_commands[-1]
+    child_failures = re.findall(r'subprocess\.(CalledProcessError|TimeoutExpired)', raw_output)
+    if child_failures:
+        diagnostic['childFailure'] = {
+            'CalledProcessError': 'CHILD_EXIT', 'TimeoutExpired': 'CHILD_TIMEOUT',
+        }[child_failures[-1]]
+    elif 'error while loading shared libraries:' in output and 'libpython' in output:
+        diagnostic['childFailure'] = 'PYTHON_LIBRARY_LOAD'
+    if 'ctr:' in output and ('failed to dial' in output or 'dial unix' in output):
+        diagnostic['localReason'] = 'CONTAINERD_SOCKET_CONNECT'
+    elif 'loaded image' in output and any(value in output for value in (
+            'mismatch', 'checksum', 'differs', 'invalid')):
+        diagnostic['localReason'] = 'IMAGE_IDENTITY_VERIFICATION'
     reason_markers = (
         (('econnreset', 'connection reset'), 'CONNECTION_RESET'),
         (('econnrefused', 'connection refused'), 'CONNECTION_REFUSED'),
@@ -105,7 +126,7 @@ def safe_process_failure(stage: str, operation: str, role: str | None,
         role = None
     output = safe_output_text(error.stderr, error.stdout)
     raw_output = str(output)
-    output = raw_output.lower()
+    output = diagnostic_message_text(raw_output).lower()
     if any(marker in output for marker in ('unauthorized', 'authentication required', 'invalid username or password')):
         category = 'AUTH'
     elif any(marker in output for marker in ('denied', 'forbidden', 'insufficient_scope', 'permission denied')):
@@ -114,6 +135,8 @@ def safe_process_failure(stage: str, operation: str, role: str | None,
         category = 'OCI_NOT_FOUND'
     elif any(marker in output for marker in ('unsupported media type', 'manifest invalid', 'media type')):
         category = 'OCI_MEDIA_TYPE'
+    elif 'error while loading shared libraries:' in output or 'filenotfounderror:' in output:
+        category = 'TOOLING'
     elif any(marker in output for marker in ('tls', 'x509', 'certificate', 'timed out', 'timeout',
                                               'connection reset', 'econnreset', 'connection refused',
                                               'econnrefused', 'no such host', 'enotfound', 'eai_again')):
@@ -631,8 +654,11 @@ if __name__ == '__main__':
         role = f" role={diagnostic['role']}" if diagnostic['role'] else ''
         substage = f" substage={diagnostic['substage']}" if diagnostic.get('substage') else ''
         reason = f" reason={diagnostic['reasonCode']}" if diagnostic.get('reasonCode') else ''
+        child = f" child={diagnostic['childCommand']}" if diagnostic.get('childCommand') else ''
+        failure = f" childFailure={diagnostic['childFailure']}" if diagnostic.get('childFailure') else ''
+        local_reason = f" localReason={diagnostic['localReason']}" if diagnostic.get('localReason') else ''
         print(f"GHCR_IMAGE_PROVENANCE=BLOCKED stage={diagnostic['stage']} "
-              f"operation={diagnostic['operation']}{role}{substage} category={diagnostic['category']}{reason} "
+              f"operation={diagnostic['operation']}{role}{substage} category={diagnostic['category']}{reason}{child}{failure}{local_reason} "
               f"exit={diagnostic['exitCode']}", file=sys.stderr)
         raise SystemExit(1)
     except Exception as error:

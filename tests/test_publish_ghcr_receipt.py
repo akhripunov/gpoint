@@ -34,6 +34,56 @@ def ready_receipt():
 
 
 class GhcrReceiptPublisherTests(unittest.TestCase):
+    def test_traceback_timeout_argument_is_not_a_network_timeout(self):
+        failure = subprocess.CalledProcessError(1, ['node', 'helper.mjs'], stderr=(
+            'GHCR_REHEARSAL_SUBSTAGE=capture_loaded_images\n'
+            '  return subprocess.check_output(args, timeout=30)\n'
+            "subprocess.CalledProcessError: Command '['ctr', '-n', 'moby', 'content', 'get', 'private-digest']' returned non-zero exit status 1.\n"
+            'private-token=secret-value\n'))
+        diagnostic = PUBLISHER.safe_process_failure(
+            'ghcr_rehearsal_runtime_parity', 'rehearse', None, failure)
+        self.assertEqual(diagnostic['category'], 'PROCESS_EXIT')
+        self.assertEqual(diagnostic['childCommand'], 'ctr')
+        self.assertEqual(diagnostic['childFailure'], 'CHILD_EXIT')
+        self.assertNotIn('reasonCode', diagnostic)
+        self.assertNotIn('private-digest', json.dumps(diagnostic))
+        self.assertNotIn('secret-value', json.dumps(diagnostic))
+
+    def test_real_child_timeout_is_retained_despite_traceback_source(self):
+        failure = subprocess.CalledProcessError(1, ['node', 'helper.mjs'], stderr=(
+            'GHCR_REHEARSAL_SUBSTAGE=capture_loaded_images\n'
+            '  return subprocess.check_output(args, timeout=30)\n'
+            "subprocess.TimeoutExpired: Command '['docker', 'image', 'inspect', 'private-tag']' timed out after 30 seconds\n"))
+        diagnostic = PUBLISHER.safe_process_failure(
+            'ghcr_rehearsal_runtime_parity', 'rehearse', None, failure)
+        self.assertEqual(diagnostic['category'], 'NETWORK')
+        self.assertEqual(diagnostic['reasonCode'], 'TIMEOUT')
+        self.assertEqual(diagnostic['childCommand'], 'docker')
+        self.assertEqual(diagnostic['childFailure'], 'CHILD_TIMEOUT')
+
+    def test_missing_runtime_library_is_tooling_without_private_output(self):
+        failure = subprocess.CalledProcessError(1, ['node', 'helper.mjs'], stderr=(
+            'GHCR_REHEARSAL_SUBSTAGE=capture_loaded_images\n'
+            'python3: error while loading shared libraries: libpython3.12.so.1.0: '
+            'cannot open shared object file: private-path secret-value\n'))
+        diagnostic = PUBLISHER.safe_process_failure(
+            'ghcr_rehearsal_runtime_parity', 'rehearse', None, failure)
+        self.assertEqual(diagnostic['category'], 'TOOLING')
+        self.assertEqual(diagnostic['childFailure'], 'PYTHON_LIBRARY_LOAD')
+        self.assertNotIn('secret-value', json.dumps(diagnostic))
+
+    def test_local_containerd_connection_is_named_without_socket_or_digest(self):
+        failure = subprocess.CalledProcessError(1, ['node', 'helper.mjs'], stderr=(
+            'GHCR_REHEARSAL_SUBSTAGE=capture_loaded_images\n'
+            'ctr: failed to dial /private/socket: context deadline exceeded\n'
+            "subprocess.CalledProcessError: Command '['ctr', 'content', 'get', 'private-digest']' returned non-zero exit status 1.\n"))
+        diagnostic = PUBLISHER.safe_process_failure(
+            'ghcr_rehearsal_runtime_parity', 'rehearse', None, failure)
+        self.assertEqual(diagnostic['localReason'], 'CONTAINERD_SOCKET_CONNECT')
+        self.assertEqual(diagnostic['childCommand'], 'ctr')
+        self.assertNotIn('/private/socket', json.dumps(diagnostic))
+        self.assertNotIn('private-digest', json.dumps(diagnostic))
+
     def test_subprocess_failure_diagnostic_names_operation_without_raw_registry_details(self):
         failure = subprocess.CalledProcessError(
             1, ['docker', 'pull', 'ghcr.io/akhripunov/private-package@sha256:' + 'a' * 64],
