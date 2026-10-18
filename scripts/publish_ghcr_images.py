@@ -55,9 +55,10 @@ def validate_image_metadata(role: str, repository: str, digest: str, metadata: d
 
 
 def diagnostic_message_text(output: str) -> str:
-    # A Python/Node traceback can print timeout=30 or timeout: 900_000 from
+    # A Python/Node traceback can print timeout=30, timeout=timeout or timeout: 900_000 from
     # source code even when the child failed immediately for another reason.
-    return re.sub(r'\btimeout\s*[=:]\s*[0-9_]+', '', output, flags=re.IGNORECASE)
+    return re.sub(r'\btimeout\s*[=:]\s*(?:[0-9_]+|[A-Za-z_][A-Za-z0-9_.]*)',
+                  '', output, flags=re.IGNORECASE)
 
 
 def safe_runtime_diagnostic_fields(output: str | bytes, category: str) -> dict:
@@ -73,7 +74,7 @@ def safe_runtime_diagnostic_fields(output: str | bytes, category: str) -> dict:
                          r'runtime_remove_(?:app|agata|gsales)|parity_loaded_images_final)', raw_output)
     if markers:
         diagnostic['substage'] = markers[-1]
-    child_commands = re.findall(r"Command ['\"]?\[['\"](docker|ctr|python3)['\"]", raw_output)
+    child_commands = re.findall(r"Command ['\"]?[\[(]['\"](docker|ctr|python3)['\"]", raw_output)
     if child_commands:
         diagnostic['childCommand'] = child_commands[-1]
     child_failures = re.findall(r'subprocess\.(CalledProcessError|TimeoutExpired)', raw_output)
@@ -85,6 +86,8 @@ def safe_runtime_diagnostic_fields(output: str | bytes, category: str) -> dict:
         diagnostic['childFailure'] = 'PYTHON_LIBRARY_LOAD'
     if 'ctr:' in output and ('failed to dial' in output or 'dial unix' in output):
         diagnostic['localReason'] = 'CONTAINERD_SOCKET_CONNECT'
+    elif diagnostic.get('childCommand') == 'ctr' and 'context deadline exceeded' in output:
+        diagnostic['localReason'] = 'CONTAINERD_RPC_TIMEOUT'
     elif 'loaded image' in output and any(value in output for value in (
             'mismatch', 'checksum', 'differs', 'invalid')):
         diagnostic['localReason'] = 'IMAGE_IDENTITY_VERIFICATION'
@@ -314,6 +317,18 @@ def attest_deploy_rehearsal(receipt: dict, rehearsal: dict, records: dict, sha: 
     return enriched
 
 
+def private_containerd_endpoint_diagnostics(info: dict, root: Path) -> tuple[str, str]:
+    """Compare the private daemon's reported endpoint without exposing paths/namespaces."""
+    containerd = info.get('Containerd')
+    containerd = containerd if isinstance(containerd, dict) else {}
+    address = containerd.get('Address')
+    namespaces = containerd.get('Namespaces')
+    namespace = namespaces.get('Containers') if isinstance(namespaces, dict) else None
+    def compare(actual, expected):
+        return 'UNAVAILABLE' if not isinstance(actual, str) or not actual else 'MATCH' if actual == expected else 'MISMATCH'
+    return compare(address, str(root / 'exec/containerd/containerd.sock')), compare(namespace, 'moby')
+
+
 def rehearse_ghcr_images(records: dict, sha: str, username: str, token: str) -> dict:
     """Pull exact GHCR manifest digests into a private containerd Docker store and verify reuse."""
     if (not SHA40.fullmatch(sha) or set(records) != set(IMAGES)
@@ -382,6 +397,8 @@ def rehearse_ghcr_images(records: dict, sha: str, username: str, token: str) -> 
         if (info.get('ServerVersion') != '29.1.3' or info.get('Driver') != 'overlayfs'
                 or ['driver-type', 'io.containerd.snapshotter.v1'] not in driver_status):
             raise RuntimeError('private rehearsal store is not Docker 29.1.3 containerd/overlayfs')
+        endpoint, namespace = private_containerd_endpoint_diagnostics(info, root)
+        print(f'GHCR_REHEARSAL_CONTAINERD_ENDPOINT={endpoint} NAMESPACE={namespace}', flush=True)
         run('docker', 'login', 'ghcr.io', '--username', username, '--password-stdin',
             capture=True, env=client_env, input=token + '\n', timeout=30,
             stage='ghcr_rehearsal_auth', operation='login')

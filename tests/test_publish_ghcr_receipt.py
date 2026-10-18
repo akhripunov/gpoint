@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -34,6 +35,20 @@ def ready_receipt():
 
 
 class GhcrReceiptPublisherTests(unittest.TestCase):
+    def test_real_python_child_exit_traceback_is_not_a_network_timeout(self):
+        script = 'import subprocess; subprocess.check_output(("python3", "-c", "raise SystemExit(7)"), timeout=30)'
+        child = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(child.returncode, 0)
+        self.assertIn('subprocess.CalledProcessError:', child.stderr)
+        failure = subprocess.CalledProcessError(1, ['node', 'helper.mjs'], stderr=(
+            'GHCR_REHEARSAL_SUBSTAGE=capture_loaded_images\n' + child.stderr))
+        diagnostic = PUBLISHER.safe_process_failure(
+            'ghcr_rehearsal_runtime_parity', 'rehearse', None, failure)
+        self.assertEqual(diagnostic['category'], 'PROCESS_EXIT')
+        self.assertEqual(diagnostic['childCommand'], 'python3')
+        self.assertEqual(diagnostic['childFailure'], 'CHILD_EXIT')
+        self.assertNotIn('reasonCode', diagnostic)
+
     def test_traceback_timeout_argument_is_not_a_network_timeout(self):
         failure = subprocess.CalledProcessError(1, ['node', 'helper.mjs'], stderr=(
             'GHCR_REHEARSAL_SUBSTAGE=capture_loaded_images\n'
@@ -83,6 +98,30 @@ class GhcrReceiptPublisherTests(unittest.TestCase):
         self.assertEqual(diagnostic['childCommand'], 'ctr')
         self.assertNotIn('/private/socket', json.dumps(diagnostic))
         self.assertNotIn('private-digest', json.dumps(diagnostic))
+
+    def test_containerd_rpc_timeout_tuple_is_named_without_private_output(self):
+        failure = subprocess.CalledProcessError(1, ['node', 'helper.mjs'], stderr=(
+            'GHCR_REHEARSAL_SUBSTAGE=capture_loaded_images\n'
+            'ctr: context deadline exceeded\n'
+            "subprocess.CalledProcessError: Command '('ctr', 'content', 'get', 'private-digest')' returned non-zero exit status 1.\n"))
+        diagnostic = PUBLISHER.safe_process_failure(
+            'ghcr_rehearsal_runtime_parity', 'rehearse', None, failure)
+        self.assertEqual(diagnostic['childCommand'], 'ctr')
+        self.assertEqual(diagnostic['localReason'], 'CONTAINERD_RPC_TIMEOUT')
+        self.assertNotIn('private-digest', json.dumps(diagnostic))
+
+    def test_private_containerd_endpoint_diagnostics_are_fixed_values_only(self):
+        root = Path('/tmp/private-rehearsal')
+        for info, expected in [
+            ({'Containerd': {'Address': str(root / 'exec/containerd/containerd.sock'),
+                            'Namespaces': {'Containers': 'moby'}}}, ('MATCH', 'MATCH')),
+            ({'Containerd': {'Address': '/private/socket-secret',
+                            'Namespaces': {'Containers': 'private-namespace-secret'}}}, ('MISMATCH', 'MISMATCH')),
+            ({}, ('UNAVAILABLE', 'UNAVAILABLE')),
+            ({'Containerd': 'malformed'}, ('UNAVAILABLE', 'UNAVAILABLE')),
+        ]:
+            with self.subTest(info=info):
+                self.assertEqual(PUBLISHER.private_containerd_endpoint_diagnostics(info, root), expected)
 
     def test_subprocess_failure_diagnostic_names_operation_without_raw_registry_details(self):
         failure = subprocess.CalledProcessError(
