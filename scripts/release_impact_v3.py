@@ -2,6 +2,7 @@
 """Release Orchestrator V3: fail-closed, provenance-bound CI impact selection."""
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import subprocess

@@ -1,8 +1,10 @@
 """Fail-closed, network-free V3 impact selector regression tests."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -18,6 +20,27 @@ def git(repo, *args):
 
 
 class ImpactV3Tests(unittest.TestCase):
+    def test_real_cli_entrypoint_builds_full_plan_for_exact_local_candidate(self):
+        candidate = git(ROOT, "rev-parse", "HEAD")
+        with tempfile.TemporaryDirectory(prefix="gpoint-impact-v3-cli-") as output_dir:
+            output = Path(output_dir) / "impact.json"
+            env = dict(os.environ, GITHUB_REF="refs/heads/main")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/release_impact_v3.py"),
+                 "--candidate", candidate, "--output", str(output)],
+                cwd=ROOT, env=env, text=True, capture_output=True, check=False,
+            )
+            plan_text = output.read_text() if output.exists() else ""
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("V3_IMPACT=FULL REASON=verified-live-baseline-unavailable", result.stdout)
+        plan = json.loads(plan_text)
+        self.assertEqual(plan["candidateSha"], candidate)
+        self.assertEqual(plan["classification"], "FULL")
+        self.assertIsNone(plan["productionBaselineSha"])
+        self.assertIsNone(plan["baselineSource"])
+        self.assertTrue(all(plan["checks"].values()))
+
     def make_repo(self):
         temp = tempfile.TemporaryDirectory(prefix="gpoint-impact-v3-test-")
         self.addCleanup(temp.cleanup)
