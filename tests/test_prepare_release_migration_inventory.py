@@ -141,3 +141,83 @@ def test_gpoint_build_sha_does_not_invalidate_unrelated_build_layers():
             'RUN pnpm --filter @gpoint/worker build',
             'RUN pnpm --filter @gpoint/bot build'):
         assert dockerfile.index(unrelated_build) < sha_env
+
+
+def test_bounded_build_stages_start_next_work_when_a_slot_frees(tmp_path, monkeypatch):
+    code = (
+        "import pathlib,sys,time\n"
+        "root=pathlib.Path(sys.argv[1]); name=sys.argv[2]; delay=float(sys.argv[3])\n"
+        "(root/f'{name}.started').write_text(str(time.monotonic()))\n"
+        "time.sleep(delay)\n"
+        "(root/f'{name}.done').write_text(str(time.monotonic()))\n"
+    )
+    stages = [
+        (name, (prepare_release.sys.executable, '-c', code, str(tmp_path), name, delay))
+        for name, delay in (('slow', '0.8'), ('short', '0.1'), ('third', '0.1'))
+    ]
+    timings = {}
+    processes = []
+    peak_active = 0
+    start_stage = prepare_release.start_background_stage
+
+    def track_active_builds(name, args, stage_timings):
+        nonlocal peak_active
+        active = sum(process.poll() is None for process in processes)
+        assert active < 2
+        stage = start_stage(name, args, stage_timings)
+        processes.append(stage['process'])
+        peak_active = max(peak_active, active + 1)
+        return stage
+
+    monkeypatch.setattr(prepare_release, 'start_background_stage', track_active_builds)
+
+    prepare_release.run_bounded_stages(stages, timings, max_concurrent=2)
+
+    assert float((tmp_path / 'third.started').read_text()) < float((tmp_path / 'slow.done').read_text())
+    assert peak_active == 2
+    assert set(timings) == {'slow', 'short', 'third'}
+    assert all(stage['status'] == 'PASS' for stage in timings.values())
+
+
+def test_bounded_build_stages_cancel_remaining_work_after_failure(tmp_path):
+    slow = (
+        "import pathlib,sys,time\n"
+        "root=pathlib.Path(sys.argv[1]); (root/'slow.started').write_text('yes')\n"
+        "time.sleep(5); (root/'slow.done').write_text('yes')\n"
+    )
+    fail = "import pathlib,sys,time; pathlib.Path(sys.argv[1], 'fail.started').write_text('yes'); time.sleep(0.1); raise SystemExit(7)"
+    stages = [
+        ('slow', (prepare_release.sys.executable, '-c', slow, str(tmp_path))),
+        ('fail', (prepare_release.sys.executable, '-c', fail, str(tmp_path))),
+    ]
+    timings = {}
+
+    with pytest.raises(prepare_release.subprocess.CalledProcessError) as error:
+        prepare_release.run_bounded_stages(stages, timings, max_concurrent=2)
+
+    assert error.value.returncode == 7
+    assert (tmp_path / 'slow.started').exists()
+    assert not (tmp_path / 'slow.done').exists()
+    assert timings['fail']['status'] == 'FAIL'
+
+
+def test_bounded_build_stages_enforce_timeout_and_reap_process(tmp_path, monkeypatch):
+    code = (
+        "import pathlib,sys,time\n"
+        "root=pathlib.Path(sys.argv[1]); (root/'started').write_text('yes')\n"
+        "time.sleep(5)\n"
+        "(root/'done').write_text('yes')\n"
+    )
+    monkeypatch.setattr(prepare_release, 'BACKGROUND_STAGE_TIMEOUT_SECONDS', 1.5)
+    timings = {}
+
+    with pytest.raises(TimeoutError, match='timed out: slow'):
+        prepare_release.run_bounded_stages(
+            [('slow', (prepare_release.sys.executable, '-c', code, str(tmp_path)))],
+            timings,
+            max_concurrent=1,
+        )
+
+    assert (tmp_path / 'started').exists()
+    assert not (tmp_path / 'done').exists()
+    assert timings['slow']['status'] == 'FAIL'

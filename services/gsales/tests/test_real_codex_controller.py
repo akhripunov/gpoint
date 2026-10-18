@@ -3,6 +3,7 @@ import importlib.util
 import plistlib
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,19 @@ SCRIPT = ROOT / "scripts/run-gsales-one-shot-real-codex.py"
 spec = importlib.util.spec_from_file_location("real_codex_controller", SCRIPT)
 controller = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(controller)
+
+
+def import_postgres_runner(monkeypatch):
+    try:
+        import psycopg  # noqa: F401
+    except ModuleNotFoundError:
+        psycopg_stub = types.ModuleType("psycopg")
+        psycopg_stub.sql = types.ModuleType("psycopg.sql")
+        monkeypatch.setitem(sys.modules, "psycopg", psycopg_stub)
+    spec = importlib.util.spec_from_file_location("run_postgres", ROOT / "services/gsales/tests/run_postgres.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def authoritative_snapshot(**overrides):
@@ -467,9 +481,7 @@ def test_controller_installs_sigint_and_sigterm_cleanup_handlers(monkeypatch):
 
 
 def test_disposable_postgres_runner_converts_termination_to_cleanup(monkeypatch):
-    spec = importlib.util.spec_from_file_location("run_postgres", ROOT / "services/gsales/tests/run_postgres.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = import_postgres_runner(monkeypatch)
     installed = {}
     monkeypatch.setattr(module.signal, "signal", lambda signum, handler: installed.__setitem__(signum, handler))
     module.install_cleanup_signal_handlers()
@@ -479,9 +491,7 @@ def test_disposable_postgres_runner_converts_termination_to_cleanup(monkeypatch)
 
 
 def test_postgres_container_start_keeps_password_out_of_argv_and_errors(monkeypatch):
-    spec = importlib.util.spec_from_file_location("run_postgres", ROOT / "services/gsales/tests/run_postgres.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = import_postgres_runner(monkeypatch)
     password = "synthetic-disposable-password"
     observed = {}
     def failed_docker(args, **kwargs):
@@ -498,3 +508,26 @@ def test_postgres_container_start_keeps_password_out_of_argv_and_errors(monkeypa
     assert observed["mode"] == 0o600
     assert observed["contents"] == "POSTGRES_PASSWORD=" + password + "\n"
     assert not Path(observed["args"][observed["args"].index("--env-file") + 1]).exists()
+
+
+def test_postgres_runner_timing_phase_reports_pass_and_failure(monkeypatch, capsys):
+    module = import_postgres_runner(monkeypatch)
+    ticks = iter((10.0, 12.5, 20.0, 23.0, 26.0, 29.0))
+    monkeypatch.setattr(module, "monotonic_seconds", lambda: next(ticks))
+
+    with module.timed_phase("database_setup"):
+        pass
+    with pytest.raises(RuntimeError, match="safe_failure"):
+        with module.timed_phase("migration_replay"):
+            raise RuntimeError("safe_failure")
+
+    nonzero = subprocess.CompletedProcess(["pytest"], 17)
+    monkeypatch.setattr(module, "run_process", lambda *_args, **_kwargs: nonzero)
+    result = module.timed_process("failing_pytest", ["pytest"])
+    assert result.returncode == 17
+
+    assert capsys.readouterr().out.splitlines() == [
+        "GS_POSTGRES_PHASE=database_setup STATUS=PASS SECONDS=2.500",
+        "GS_POSTGRES_PHASE=migration_replay STATUS=FAIL SECONDS=3.000",
+        "GS_POSTGRES_PHASE=failing_pytest STATUS=FAIL SECONDS=3.000",
+    ]
