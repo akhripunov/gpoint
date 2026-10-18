@@ -1,7 +1,16 @@
 import importlib.util
+import contextlib
+import io
+import json
+import os
+import errno
 from pathlib import Path
+import socket
+import ssl
+import tempfile
 import urllib.error
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +22,195 @@ SPEC.loader.exec_module(COALESCING)
 
 
 class PrepareCoalescingTests(unittest.TestCase):
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({"object": {"sha": self.payload}}).encode()
+
+    def test_final_read_timeout_gets_one_transport_retry_and_can_win(self):
+        sha = "a" * 40
+        events = [self.Response(sha), TimeoutError("private transport detail"), self.Response(sha)]
+        calls, sleeps = [], []
+
+        def opener(request, timeout):
+            calls.append((request.full_url, timeout))
+            event = events.pop(0)
+            if isinstance(event, Exception):
+                raise event
+            return event
+
+        def read():
+            return COALESCING.read_current_main_sha("secret-token", opener=opener, retry_sleep=sleeps.append)
+
+        self.assertEqual(COALESCING.wait_for_quiet_main(sha, read, sleep=lambda _: None), "WINNER")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleeps, [0.25])
+
+    def test_final_read_timeout_retry_that_sees_new_main_supersedes_candidate(self):
+        old, new = "a" * 40, "b" * 40
+        events = [self.Response(old), socket.timeout("private detail"), self.Response(new)]
+        calls = []
+
+        def opener(request, timeout):
+            calls.append(timeout)
+            event = events.pop(0)
+            if isinstance(event, Exception):
+                raise event
+            return event
+
+        read = lambda: COALESCING.read_current_main_sha(
+            "secret-token", opener=opener, retry_sleep=lambda _: None
+        )
+        self.assertEqual(COALESCING.wait_for_quiet_main(old, read, sleep=lambda _: None), "SUPERSEDED")
+        self.assertEqual(len(calls), 3)
+
+    def test_second_transient_failure_blocks_after_exactly_one_retry(self):
+        calls, sleeps = [], []
+
+        def opener(*_args, **_kwargs):
+            calls.append(1)
+            raise urllib.error.URLError(ConnectionResetError("private reset detail"))
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(COALESCING.CoalescingError) as raised:
+            COALESCING.read_current_main_sha(
+                "secret-token", opener=opener, retry_sleep=sleeps.append
+            )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(sleeps, [0.25])
+        self.assertNotIn("private reset detail", str(raised.exception))
+        self.assertNotIn("private reset detail", stderr.getvalue())
+
+    def test_transport_eof_gets_one_retry_without_relying_on_shared_core_wrapping(self):
+        sha = "d" * 40
+        for failure in (EOFError("private EOF detail"), ssl.SSLEOFError("private TLS EOF detail"),
+                        OSError(errno.ETIMEDOUT, "private timeout detail")):
+            with self.subTest(failure=type(failure).__name__):
+                calls = []
+
+                def opener(*_args, **_kwargs):
+                    calls.append(1)
+                    if len(calls) == 1:
+                        raise failure
+                    return self.Response(sha)
+
+                self.assertEqual(
+                    COALESCING.read_current_main_sha(
+                        "secret-token", opener=opener, retry_sleep=lambda _: None
+                    ),
+                    sha,
+                )
+                self.assertEqual(len(calls), 2)
+
+    def test_http_errors_are_never_retried(self):
+        for status in (401, 403, 503):
+            calls = []
+
+            def opener(*_args, **_kwargs):
+                calls.append(1)
+                raise urllib.error.HTTPError("https://api.github.com/private", status, "private body", {}, None)
+
+            with self.subTest(status=status), self.assertRaises(COALESCING.CoalescingError):
+                COALESCING.read_current_main_sha("secret-token", opener=opener, retry_sleep=lambda _: None)
+            self.assertEqual(len(calls), 1)
+
+    def test_certificate_verification_failure_is_never_retried(self):
+        calls = []
+
+        def opener(*_args, **_kwargs):
+            calls.append(1)
+            raise urllib.error.URLError(ssl.SSLCertVerificationError("private cert detail"))
+
+        with self.assertRaises(COALESCING.CoalescingError):
+            COALESCING.read_current_main_sha("secret-token", opener=opener, retry_sleep=lambda _: None)
+        self.assertEqual(len(calls), 1)
+
+    def test_malformed_json_and_invalid_sha_are_never_retried(self):
+        class BadResponse(self.Response):
+            def __init__(self, body):
+                self.body = body
+
+            def read(self):
+                return self.body
+
+        for response in (BadResponse(b"{"), BadResponse(b'{"object":{"sha":"bad"}}')):
+            calls = []
+
+            def opener(*_args, **_kwargs):
+                calls.append(1)
+                return response
+
+            with self.subTest(response=response.body), self.assertRaises(COALESCING.CoalescingError):
+                COALESCING.read_current_main_sha("secret-token", opener=opener, retry_sleep=lambda _: None)
+            self.assertEqual(len(calls), 1)
+
+    def test_unknown_errors_and_missing_token_are_never_retried(self):
+        calls = []
+
+        def opener(*_args, **_kwargs):
+            calls.append(1)
+            raise RuntimeError("private unknown detail")
+
+        with self.assertRaises(RuntimeError):
+            COALESCING.read_current_main_sha("secret-token", opener=opener, retry_sleep=lambda _: None)
+        with self.assertRaises(COALESCING.CoalescingError):
+            COALESCING.read_current_main_sha("", opener=opener, retry_sleep=lambda _: None)
+        self.assertEqual(len(calls), 1)
+
+    def test_retry_diagnostic_uses_fixed_category_and_hides_private_details(self):
+        sha = "a" * 40
+        events = [TimeoutError("secret-token private host"), self.Response(sha)]
+
+        def opener(*_args, **_kwargs):
+            event = events.pop(0)
+            if isinstance(event, Exception):
+                raise event
+            return event
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result = COALESCING.read_current_main_sha(
+                "secret-token", opener=opener, retry_sleep=lambda _: None
+            )
+        self.assertEqual(result, sha)
+        self.assertIn("category=TIMEOUT", stderr.getvalue())
+        self.assertNotIn("secret-token", stderr.getvalue())
+        self.assertNotIn("private host", stderr.getvalue())
+
+    def test_main_orchestrates_through_adapter_reader_and_preserves_outputs(self):
+        sha = "c" * 40
+        reads = []
+
+        def reader(token):
+            reads.append(token)
+            return sha
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {
+            "CANDIDATE_SHA": sha,
+            "GITHUB_TOKEN": "redacted-token",
+            "GITHUB_OUTPUT": str(Path(directory) / "output"),
+            "GITHUB_STEP_SUMMARY": str(Path(directory) / "summary"),
+        }), mock.patch.object(COALESCING.core, "load_project_config", side_effect=[{}, {"repository": "akhripunov/gpoint", "project": "GPoint"}]), \
+             mock.patch.object(COALESCING.core, "validate_standard_contract"), \
+             mock.patch.object(COALESCING.core, "validate_project_config"), \
+             mock.patch.object(COALESCING.core.time, "sleep"), \
+             mock.patch.object(COALESCING, "read_current_main_sha", side_effect=reader):
+            result = COALESCING.main()
+            output = Path(os.environ["GITHUB_OUTPUT"]).read_text()
+            summary = Path(os.environ["GITHUB_STEP_SUMMARY"]).read_text()
+        self.assertEqual(result, 0)
+        self.assertEqual(reads, ["redacted-token"] * 2)
+        self.assertIn("result=WINNER", output)
+        self.assertIn("Candidate SHA: " + sha, summary)
+
     def test_single_current_sha_waits_for_bounded_window_then_wins(self):
         sha = "a" * 40
         reads = iter([sha, sha])

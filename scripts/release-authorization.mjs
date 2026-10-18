@@ -25,6 +25,13 @@ const GPOINT_ME38_SCOPE_ADDENDUM = Object.freeze({
     '.github/workflows/sync-agents-to-linear.yml', 'scripts/sync_agents_to_linear.py',
     'tests/test_sync_agents_to_linear.py']),
 });
+const GPOINT_ME42_COALESCING_SCOPE_ADDENDUM = Object.freeze({
+  authorizationId: 'gpoint-me42-final-v5-integration-20261018-010',
+  amendmentId: 'gpoint-me42-coalescing-transport-20261018-011',
+  sourceInstructionIdentifier: 'OWNER_SCOPE_ADDENDUM_GPOINT_ME42_V5_COMPLETION_20261018',
+  ownerDecision: "Complete the planned GPoint ME-42 automatic V5 release system under OWNER's current full-cycle instruction; authorize only the bounded read-only coalescing transport correction in scripts/prepare_coalescing.py and scripts/test_prepare_coalescing.py, with the existing production baseline and every V5 safety gate. Keep Incy/VPN and MAXIBOT untouched.",
+  paths: Object.freeze(['scripts/prepare_coalescing.py', 'scripts/test_prepare_coalescing.py']),
+});
 const VERIFIED_CANDIDATE_AMENDMENTS = new WeakMap();
 const OWNER_ONLY_PREFIXES = [
   '.github/', 'packages/db/', 'migrations/', 'db/', 'deploy/', 'docker/',
@@ -173,7 +180,8 @@ export function candidateScopeAmendments(repoRoot, authorizationId, baselineSha,
         || !Array.isArray(value.scope_additions)) {
       throw new AuthorizationError('Scope amendment identity or commitment is invalid');
     }
-    const approvedAddendum = [GPOINT_RELEASE_SCOPE_ADDENDUM, GPOINT_ME38_SCOPE_ADDENDUM].find(item =>
+    const approvedAddendum = [GPOINT_RELEASE_SCOPE_ADDENDUM, GPOINT_ME38_SCOPE_ADDENDUM,
+      GPOINT_ME42_COALESCING_SCOPE_ADDENDUM].find(item =>
       item.authorizationId === authorizationId && item.amendmentId === value.amendment_id
         && item.sourceInstructionIdentifier === value.source_instruction_identifier);
     if (!approvedAddendum) {

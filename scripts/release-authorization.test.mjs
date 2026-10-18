@@ -455,14 +455,23 @@ test('legacy test-only addendum cannot authorize modification of a pre-existing 
   fs.rmSync(root, {recursive: true, force: true});
 });
 
-test('ME-38 owner addendum binds four exact sync paths and release infrastructure risk contract', () => {
+for (const scenario of [
+  {name: 'ME-38 owner addendum', authorizationId: 'gpoint-unified-release-v1-recovery-20261017',
+    amendmentId: 'gpoint-me38-sync-release-infrastructure-20261017',
+    sourceInstructionIdentifier: 'OWNER_SCOPE_ADDENDUM_GPOINT_ME38_20261017',
+    paths: ['.github/workflows/gpoint-linear-reconcile.yml', '.github/workflows/sync-agents-to-linear.yml',
+      'scripts/sync_agents_to_linear.py', 'tests/test_sync_agents_to_linear.py'],
+    ownerDecision: 'Continue ME-38 by preparing an append-only authorization for exactly the four named paths and their complete release-infrastructure risk contract; GitHub publication requires the specified separate one-Prepare approval.'},
+  {name: 'ME-42 bounded coalescing completion addendum', authorizationId: 'gpoint-me42-final-v5-integration-20261018-010',
+    amendmentId: 'gpoint-me42-coalescing-transport-20261018-011',
+    sourceInstructionIdentifier: 'OWNER_SCOPE_ADDENDUM_GPOINT_ME42_V5_COMPLETION_20261018',
+    paths: ['scripts/prepare_coalescing.py', 'scripts/test_prepare_coalescing.py'],
+    ownerDecision: "Complete the planned GPoint ME-42 automatic V5 release system under OWNER's current full-cycle instruction; authorize only the bounded read-only coalescing transport correction in scripts/prepare_coalescing.py and scripts/test_prepare_coalescing.py, with the existing production baseline and every V5 safety gate. Keep Incy/VPN and MAXIBOT untouched."},
+]) {
+test(`${scenario.name} binds only exact source files and a complete infrastructure risk contract`, () => {
   const {root, git, baseline: repoBaseline} = makeGitRepo();
-  const authorizationId = 'gpoint-unified-release-v1-recovery-20261017';
-  const amendmentId = 'gpoint-me38-sync-release-infrastructure-20261017';
-  const sourceInstructionIdentifier = 'OWNER_SCOPE_ADDENDUM_GPOINT_ME38_20261017';
-  const paths = ['.github/workflows/gpoint-linear-reconcile.yml',
-    '.github/workflows/sync-agents-to-linear.yml', 'scripts/sync_agents_to_linear.py',
-    'tests/test_sync_agents_to_linear.py'];
+  const {authorizationId, amendmentId, sourceInstructionIdentifier} = scenario;
+  const paths = [...scenario.paths];
   for (const [index, scopedPath] of paths.entries()) {
     fs.mkdirSync(path.dirname(path.join(root, scopedPath)), {recursive: true});
     fs.writeFileSync(path.join(root, scopedPath), `baseline ${index}\n`);
@@ -496,19 +505,19 @@ test('ME-38 owner addendum binds four exact sync paths and release infrastructur
   const riskContract = {
     allowed_paths: paths,
     baseline_sha: measuredBaseline,
-    risk_description: 'Change only the four named GPoint release publication and Linear synchronization paths.',
+    risk_description: 'Change only the exact named GPoint release infrastructure source files under the owner completion task.',
     allowed_operations: ['integrate', 'coalesce', 'prepare', 'preflight', 'deploy', 'verify', 'rollback', 'publish_evidence'],
     required_gates: ['exact_candidate', 'complete_scope', 'prepare_provenance', 'immutable_artifact',
       'security_review', 'preflight', 'rollback_readiness', 'worker_compatibility',
       'postdeploy_health', 'reconciliation'],
-    backup_plan: 'Retain current production ledger and immutable release artifacts before any apply.',
-    rollback_plan: 'Restore the previous immutable manifest and reconcile any uncertain apply before retry.',
+    backup_plan: 'Preserve protected GPoint-only backups and all required backup gates before pending migrations.',
+    rollback_plan: 'Preserve verified production-compatible images and inspect any uncertain Apply before retry.',
     stop_conditions: ['Stop on candidate, scope, or production baseline drift.',
       'Stop if provenance, backup, rollback, or health evidence is incomplete.'],
   };
   const amendment = {schema_version: 1, amendment_id: amendmentId, project: 'gpoint',
     authorization_id: authorizationId, source_instruction_identifier: sourceInstructionIdentifier,
-    owner_decision: 'Continue ME-38 by preparing an append-only authorization for exactly the four named paths and their complete release-infrastructure risk contract; GitHub publication requires the specified separate one-Prepare approval.',
+    owner_decision: scenario.ownerDecision,
     original_authorization_record_blob_sha: originalRecordBlob,
     scope_additions: additions, release_infrastructure_risk_contract: riskContract};
   amendment.amendment_commitment_sha256 = scopeAmendmentCommitmentSha256(amendment);
@@ -518,7 +527,9 @@ test('ME-38 owner addendum binds four exact sync paths and release infrastructur
   git('add', amendmentsPath); git('commit', '-m', 'record ME-38 exact owner scope addendum');
   const candidateSha = git('rev-parse', 'HEAD');
 
-  const approvedPaths = candidateScopeDiff(root, authorizationId, measuredBaseline, candidateSha);
+  let approvedPaths;
+  assert.doesNotThrow(() => { approvedPaths = candidateScopeDiff(root, authorizationId, measuredBaseline, candidateSha); },
+    'the exact owner-approved source scope must be accepted');
   assert.deepEqual(approvedPaths, paths.sort());
   assert.doesNotThrow(() => validateTaskAuthorization({record: originalAuth, project: 'gpoint',
     authorizationId, candidateSha, currentMainSha: candidateSha, productionSha: measuredBaseline,
@@ -527,6 +538,16 @@ test('ME-38 owner addendum binds four exact sync paths and release infrastructur
     'the original immutable owner authorization must remain unchanged');
 
   const addendumBlobPath = path.join(root, amendmentsPath);
+  git('switch', '-c', 'invalid-owner-decision', `${candidateSha}^`);
+  fs.mkdirSync(path.dirname(addendumBlobPath), {recursive: true});
+  const invalidDecision = JSON.parse(execFileSync('git', ['show', `${candidateSha}:${amendmentsPath}`], {cwd: root, encoding: 'utf8'}));
+  invalidDecision.owner_decision += ' Allow additional scope.';
+  invalidDecision.amendment_commitment_sha256 = scopeAmendmentCommitmentSha256(invalidDecision);
+  fs.writeFileSync(addendumBlobPath, `${JSON.stringify(invalidDecision)}\n`);
+  git('add', amendmentsPath); git('commit', '-m', 'attempt changed owner decision');
+  assert.throws(() => candidateScopeDiff(root, authorizationId, measuredBaseline, git('rev-parse', 'HEAD')),
+    /owner decision/);
+
   git('switch', '-c', 'invalid-risk-contract', `${candidateSha}^`);
   fs.mkdirSync(path.dirname(addendumBlobPath), {recursive: true});
   fs.writeFileSync(addendumBlobPath, execFileSync('git', ['show', `${candidateSha}:${amendmentsPath}`], {cwd: root}));
@@ -562,6 +583,7 @@ test('ME-38 owner addendum binds four exact sync paths and release infrastructur
     /blob changed after its immutable source commit/);
   fs.rmSync(root, {recursive: true, force: true});
 });
+}
 
 test('authorization state check observes revoked, consumed and claimed markers', async () => {
   const paths = [];
