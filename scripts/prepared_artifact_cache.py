@@ -180,11 +180,16 @@ def open_without_redirect(request, timeout=30):
 
 def trusted_log_storage_url(value):
     parsed = urllib.parse.urlparse(value)
-    return (parsed.scheme == 'https' and bool(parsed.hostname)
-            and not parsed.username and not parsed.password and not parsed.fragment
-            and parsed.hostname.endswith((
-                '.blob.core.windows.net', '.githubusercontent.com',
-                '.actions.githubusercontent.com')))
+    hostname = parsed.hostname or ''
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    trusted_host = (re.fullmatch(r'productionresultssa[0-9]+\.blob\.core\.windows\.net', hostname)
+                    or hostname.endswith(('.githubusercontent.com', '.actions.githubusercontent.com')))
+    return (parsed.scheme == 'https' and bool(hostname) and trusted_host
+            and port in (None, 443) and not parsed.username
+            and not parsed.password and not parsed.fragment)
 
 
 def read_network_response(response, limit):
