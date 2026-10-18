@@ -33,6 +33,42 @@ def ready_receipt():
 
 
 class GhcrReceiptPublisherTests(unittest.TestCase):
+    def test_subprocess_failure_diagnostic_names_operation_without_raw_registry_details(self):
+        failure = subprocess.CalledProcessError(
+            1, ['docker', 'pull', 'ghcr.io/akhripunov/private-package@sha256:' + 'a' * 64],
+            stderr='unauthorized: bearer token secret-value https://ghcr.io/v2/private-package',
+        )
+
+        with patch.object(PUBLISHER.subprocess, 'run', side_effect=failure):
+            with self.assertRaises(PUBLISHER.SafeProcessFailure) as caught:
+                PUBLISHER.run('docker', 'pull', 'ghcr.io/private-package@sha256:' + 'a' * 64,
+                              stage='ghcr_image_readback', operation='pull', role='app')
+
+        self.assertEqual(caught.exception.diagnostic, {
+            'stage': 'ghcr_image_readback', 'operation': 'pull', 'role': 'app',
+            'category': 'AUTH', 'exitCode': 1,
+        })
+        self.assertNotIn('secret-value', str(caught.exception))
+        self.assertNotIn('private-package', str(caught.exception))
+
+    def test_subprocess_timeout_diagnostic_preserves_stage_without_command_or_output(self):
+        failure = subprocess.TimeoutExpired(
+            ['docker', 'pull', 'ghcr.io/akhripunov/private-package@sha256:' + 'a' * 64],
+            timeout=900, stderr='request timed out with token secret-value',
+        )
+
+        with patch.object(PUBLISHER.subprocess, 'run', side_effect=failure):
+            with self.assertRaises(PUBLISHER.SafeProcessFailure) as caught:
+                PUBLISHER.run('docker', 'pull', 'ghcr.io/private-package@sha256:' + 'a' * 64,
+                              stage='ghcr_image_readback', operation='pull', role='app')
+
+        self.assertEqual(caught.exception.diagnostic, {
+            'stage': 'ghcr_image_readback', 'operation': 'pull', 'role': 'app',
+            'category': 'TIMEOUT', 'exitCode': None,
+        })
+        self.assertNotIn('secret-value', str(caught.exception))
+        self.assertNotIn('private-package', str(caught.exception))
+
     def test_canonical_prepare_exposes_only_job_scoped_token_to_digest_rehearsal(self):
         workflow = yaml.safe_load((SCRIPT.parents[1] / '.github/workflows/gpoint-prepare.yml').read_text())
         job = workflow['jobs']['prepare']

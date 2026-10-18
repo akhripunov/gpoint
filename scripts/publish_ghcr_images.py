@@ -54,13 +54,76 @@ def validate_image_metadata(role: str, repository: str, digest: str, metadata: d
             'sourceSha': sha, 'platform': 'linux/amd64'}
 
 
+def safe_process_failure(stage: str, operation: str, role: str | None,
+                         error: subprocess.CalledProcessError) -> dict:
+    """Return fixed diagnostic fields only; never expose refs, URLs or command output."""
+    allowed_stages = {
+        'prepare_image_inspect', 'prepare_image_tag', 'ghcr_image_push',
+        'ghcr_image_readback', 'ghcr_image_inspect', 'ghcr_rehearsal_info',
+        'ghcr_rehearsal_auth', 'ghcr_rehearsal_readback',
+        'ghcr_rehearsal_identity', 'ghcr_rehearsal_tag',
+        'ghcr_rehearsal_runtime_parity', 'ghcr_receipt_push',
+        'ghcr_receipt_readback', 'ghcr_static_push', 'ghcr_static_readback',
+    }
+    if stage not in allowed_stages or operation not in {'inspect', 'tag', 'push', 'pull', 'login', 'rehearse'}:
+        stage, operation, role = 'unknown', 'unknown', None
+    if role not in {*IMAGES.keys(), None}:
+        role = None
+    output = error.stderr or error.stdout or ''
+    if isinstance(output, bytes):
+        output = output.decode('utf-8', 'replace')
+    output = str(output).lower()
+    if any(marker in output for marker in ('unauthorized', 'authentication required', 'invalid username or password')):
+        category = 'AUTH'
+    elif any(marker in output for marker in ('denied', 'forbidden', 'insufficient_scope', 'permission denied')):
+        category = 'PERMISSION'
+    elif any(marker in output for marker in ('manifest unknown', 'not found', 'no such image', 'unknown blob')):
+        category = 'OCI_NOT_FOUND'
+    elif any(marker in output for marker in ('unsupported media type', 'manifest invalid', 'media type')):
+        category = 'OCI_MEDIA_TYPE'
+    elif any(marker in output for marker in ('tls', 'x509', 'certificate', 'timed out', 'timeout', 'connection reset', 'connection refused', 'no such host')):
+        category = 'NETWORK'
+    elif any(marker in output for marker in ('daemon is not running', 'cannot connect to the docker daemon', 'failed to connect')):
+        category = 'TOOLING'
+    else:
+        category = 'PROCESS_EXIT'
+    return {'stage': stage, 'operation': operation, 'role': role,
+            'category': category, 'exitCode': error.returncode}
+
+
+class SafeProcessFailure(RuntimeError):
+    def __init__(self, diagnostic: dict):
+        super().__init__('release subprocess failed')
+        self.diagnostic = diagnostic
+
+
 def run(*args: str, capture: bool = False, cwd: Path | None = None,
-        env: dict | None = None, input: str | None = None, timeout: int = 900) -> str:
-    result = subprocess.run(args, check=True, text=True,
-                            stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
-                            stderr=subprocess.PIPE if capture else subprocess.DEVNULL,
-                            timeout=timeout, cwd=cwd, env=env, input=input)
-    return (result.stdout or '') + (result.stderr or '')
+        env: dict | None = None, input: str | None = None, timeout: int = 900,
+        stage: str | None = None, operation: str | None = None,
+        role: str | None = None) -> str:
+    try:
+        result = subprocess.run(args, check=True, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                timeout=timeout, cwd=cwd, env=env, input=input)
+    except subprocess.CalledProcessError as error:
+        if stage and operation:
+            raise SafeProcessFailure(safe_process_failure(stage, operation, role, error)) from None
+        raise
+    except subprocess.TimeoutExpired:
+        if stage and operation:
+            diagnostic = {'stage': stage, 'operation': operation,
+                          'role': role if role in IMAGES else None,
+                          'category': 'TIMEOUT', 'exitCode': None}
+            raise SafeProcessFailure(diagnostic) from None
+        raise
+    except OSError:
+        if stage and operation:
+            diagnostic = {'stage': stage, 'operation': operation,
+                          'role': role if role in IMAGES else None,
+                          'category': 'TOOLING', 'exitCode': None}
+            raise SafeProcessFailure(diagnostic) from None
+        raise
+    return ((result.stdout or '') + (result.stderr or '')) if capture else ''
 
 
 def rehearsal_child_environment(source: dict | None = None) -> dict[str, str]:
@@ -223,13 +286,14 @@ def rehearse_ghcr_images(records: dict, sha: str, username: str, token: str) -> 
             raise RuntimeError('private containerd Docker daemon did not become ready')
 
         info = json.loads(run('docker', 'info', '--format', '{{json .}}', capture=True,
-                              env=client_env, timeout=10))
+                              env=client_env, timeout=10, stage='ghcr_rehearsal_info', operation='inspect'))
         driver_status = info.get('DriverStatus') or []
         if (info.get('ServerVersion') != '29.1.3' or info.get('Driver') != 'overlayfs'
                 or ['driver-type', 'io.containerd.snapshotter.v1'] not in driver_status):
             raise RuntimeError('private rehearsal store is not Docker 29.1.3 containerd/overlayfs')
         run('docker', 'login', 'ghcr.io', '--username', username, '--password-stdin',
-            capture=True, env=client_env, input=token + '\n', timeout=30)
+            capture=True, env=client_env, input=token + '\n', timeout=30,
+            stage='ghcr_rehearsal_auth', operation='login')
 
         observed_images = {}
         proof_images = {}
@@ -241,9 +305,11 @@ def rehearse_ghcr_images(records: dict, sha: str, username: str, token: str) -> 
                     or not DIGEST.fullmatch(record.get('configDigest', ''))):
                 raise ValueError(f'invalid exact GHCR Prepare image identity for {role}')
             reference = f'{repository}@{record["digest"]}'
-            run('docker', 'pull', reference, capture=True, env=client_env, timeout=900)
+            run('docker', 'pull', reference, capture=True, env=client_env, timeout=900,
+                stage='ghcr_rehearsal_readback', operation='pull', role=role)
             metadata = json.loads(run('docker', 'image', 'inspect', reference,
-                                      capture=True, env=client_env, timeout=30))[0]
+                                      capture=True, env=client_env, timeout=30,
+                                      stage='ghcr_rehearsal_identity', operation='inspect', role=role))[0]
             descriptor = metadata.get('Descriptor') or {}
             native_id = metadata.get('Id', '')
             if (metadata.get('Os') != 'linux' or metadata.get('Architecture') != 'amd64'
@@ -260,7 +326,8 @@ def rehearse_ghcr_images(records: dict, sha: str, username: str, token: str) -> 
                         'org.opencontainers.image.source') != SOURCE_URL):
                 raise ValueError(f'private containerd GHCR manifest/config identity mismatch for {role}')
             local_tag = f'{local_name}:{sha}'
-            run('docker', 'tag', reference, local_tag, env=client_env, timeout=30)
+            run('docker', 'tag', reference, local_tag, env=client_env, timeout=30,
+                stage='ghcr_rehearsal_tag', operation='tag', role=role)
             proof_images[role] = {'id': record['configDigest']}
             observed_images[role] = {
                 'repository': repository, 'digest': record['digest'],
@@ -271,7 +338,8 @@ def rehearse_ghcr_images(records: dict, sha: str, username: str, token: str) -> 
         proof_path = root / 'proof.json'
         proof_path.write_text(json.dumps({'candidateSha': sha, 'images': proof_images}))
         helper = Path(__file__).with_name('rehearse-release-bundle.mjs')
-        run(node, str(helper), str(proof_path), sha, str(root), env=client_env, timeout=900)
+        run(node, str(helper), str(proof_path), sha, str(root), env=client_env, timeout=900,
+            stage='ghcr_rehearsal_runtime_parity', operation='rehearse')
         elapsed = round(time.monotonic() - started, 1)
         return {'status': 'PASS', 'dockerVersion': '29.1.3', 'store': 'containerd',
                 'snapshotter': 'overlayfs', 'seconds': elapsed, 'images': observed_images}
@@ -300,15 +368,19 @@ def publish_images(sha: str, run_id: str, attempt: str) -> dict:
     for role, (local_name, repository) in IMAGES.items():
         local = f'{local_name}:{sha}'
         remote = f'{repository}:{tag}'
-        local_metadata = json.loads(run('docker', 'image', 'inspect', local, capture=True))[0]
+        local_metadata = json.loads(run('docker', 'image', 'inspect', local, capture=True,
+                                        stage='prepare_image_inspect', operation='inspect', role=role))[0]
         local_identity = validate_image_metadata(
             role, repository, local_metadata.get('Id', ''), local_metadata, sha)
-        run('docker', 'tag', local, remote)
-        output = run('docker', 'push', remote, capture=True)
+        run('docker', 'tag', local, remote, stage='prepare_image_tag', operation='tag', role=role)
+        output = run('docker', 'push', remote, capture=True,
+                     stage='ghcr_image_push', operation='push', role=role)
         digest = parse_push_digest(output)
         reference = f'{repository}@{digest}'
-        run('docker', 'pull', reference, capture=True)
-        metadata = json.loads(run('docker', 'image', 'inspect', reference, capture=True))[0]
+        run('docker', 'pull', reference, capture=True,
+            stage='ghcr_image_readback', operation='pull', role=role)
+        metadata = json.loads(run('docker', 'image', 'inspect', reference, capture=True,
+                                  stage='ghcr_image_inspect', operation='inspect', role=role))[0]
         record = validate_image_metadata(role, repository, digest, metadata, sha)
         if record['configDigest'] != local_identity['configDigest']:
             raise ValueError(f'GHCR readback image config differs from built {role} image')
@@ -366,7 +438,8 @@ def publish_receipt(receipt_path: Path, sha: str, run_id: str, attempt: str) -> 
         raise ValueError('OCI receipt is missing the deploy rehearsal gate')
     tag = f'{RECEIPT_REPOSITORY}:prepare-{sha}-{run_id}-{attempt}'
     output = run('oras', 'push', '--artifact-type', RECEIPT_ARTIFACT_TYPE,
-                 '--format', 'json', tag, file_reference, capture=True, cwd=working_dir)
+                 '--format', 'json', tag, file_reference, capture=True, cwd=working_dir,
+                 stage='ghcr_receipt_push', operation='push')
     try:
         descriptor = json.loads(output)
     except json.JSONDecodeError as error:
@@ -377,7 +450,8 @@ def publish_receipt(receipt_path: Path, sha: str, run_id: str, attempt: str) -> 
     if descriptor.get('reference') not in (None, f'{RECEIPT_REPOSITORY}@{digest}'):
         raise ValueError('ORAS returned an unexpected receipt repository')
     with tempfile.TemporaryDirectory(prefix='gpoint-receipt-readback-') as directory:
-        run('oras', 'pull', f'{RECEIPT_REPOSITORY}@{digest}', '--output', directory)
+        run('oras', 'pull', f'{RECEIPT_REPOSITORY}@{digest}', '--output', directory,
+            stage='ghcr_receipt_readback', operation='pull')
         readback = Path(directory) / receipt_path.name
         if not readback.is_file():
             raise ValueError('OCI receipt readback did not contain receipt.json')
@@ -404,7 +478,8 @@ def publish_static_artifact(bundle_path: Path, receipt: dict, sha: str,
     tag = f'{STATIC_REPOSITORY}:prepare-{sha}-{run_id}-{attempt}'
     output = run('oras', 'push', '--artifact-type', STATIC_ARTIFACT_TYPE,
                  '--format', 'json', tag,
-                 file_reference, capture=True, cwd=working_dir)
+                 file_reference, capture=True, cwd=working_dir,
+                 stage='ghcr_static_push', operation='push')
     try:
         descriptor = json.loads(output)
     except json.JSONDecodeError as error:
@@ -413,7 +488,8 @@ def publish_static_artifact(bundle_path: Path, receipt: dict, sha: str,
     if not isinstance(digest, str) or not DIGEST.fullmatch(digest):
         raise ValueError('ORAS did not return one exact static artifact manifest digest')
     with tempfile.TemporaryDirectory(prefix='gpoint-static-readback-') as directory:
-        run('oras', 'pull', f'{STATIC_REPOSITORY}@{digest}', '--output', directory)
+        run('oras', 'pull', f'{STATIC_REPOSITORY}@{digest}', '--output', directory,
+            stage='ghcr_static_readback', operation='pull')
         readback = Path(directory) / bundle_path.name
         if not readback.is_file():
             raise ValueError('OCI static artifact readback content mismatch')
@@ -483,6 +559,13 @@ def main() -> None:
 if __name__ == '__main__':
     try:
         main()
+    except SafeProcessFailure as error:
+        diagnostic = error.diagnostic
+        role = f" role={diagnostic['role']}" if diagnostic['role'] else ''
+        print(f"GHCR_IMAGE_PROVENANCE=BLOCKED stage={diagnostic['stage']} "
+              f"operation={diagnostic['operation']}{role} category={diagnostic['category']} "
+              f"exit={diagnostic['exitCode']}", file=sys.stderr)
+        raise SystemExit(1)
     except Exception as error:
         # Do not print Docker transport errors, which can include registry metadata.
         print(f'GHCR_IMAGE_PROVENANCE=BLOCKED error={type(error).__name__}', file=sys.stderr)
