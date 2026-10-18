@@ -158,6 +158,8 @@ jobs:
           CANDIDATE_SHA: ${{ github.sha }}
           GITHUB_RUN_ID: ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          GHCR_REHEARSAL_USERNAME: ${{ github.actor }}
+          GHCR_REHEARSAL_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 scripts/publish_ghcr_images.py
       - name: Verify V3 baseline has not drifted after receipt publication
         if: github.ref == 'refs/heads/main' && needs.coalesce.outputs.result == 'WINNER'

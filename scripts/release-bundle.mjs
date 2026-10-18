@@ -185,7 +185,14 @@ export function preparedImageCaptureCommand(proof, candidate, scratch = '/tmp') 
 
 export function preparedImageParityCommand(proof, candidate, scratch = '/tmp') {
   const verification = loadedImageVerificationCommand(proof, candidate);
+  const identityChecks = [
+    ['app', 'gpoint-runtime'], ['agata', 'gpoint-agata-runtime'], ['gsales', 'gpoint-g-sales-runtime'],
+  ].map(([role, repository]) => {
+    const prefix = repository === 'gpoint-runtime' ? 'gpoint' : repository === 'gpoint-agata-runtime' ? 'gpoint-agata' : 'gpoint-g-sales';
+    const imageIdFile = temporaryPath(scratch, `${prefix}-image-id-${candidate}`);
+    return `actual="$(docker image inspect ${repository}:${candidate} --format '{{.Id}}')" || { echo GPOINT_CI_PARITY_INSPECT_FAILED=${role}; exit 43; }; recorded="$(cat ${imageIdFile})" || { echo GPOINT_CI_PARITY_RECORD_READ_FAILED=${role}; exit 44; }; [[ "$actual" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo GPOINT_CI_PARITY_INSPECT_INVALID=${role}; exit 45; }; [[ "$recorded" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo GPOINT_CI_PARITY_RECORD_INVALID=${role}; exit 46; }; test "$recorded" = "$actual" || { echo GPOINT_CI_PARITY_IDENTITY_MISMATCH=${role}; exit 42; }`;
+  }).join('; ');
   // Recorded runtime proofs use the VPS store's native IDs. Re-prove their
   // exact config identity and then compare native IDs within that same store.
-  return `set -e; ${verification}; test "$(cat ${temporaryPath(scratch, `gpoint-image-id-${candidate}`)})" = "$(docker image inspect gpoint-runtime:${candidate} --format '{{.Id}}')"; test "$(cat ${temporaryPath(scratch, `gpoint-agata-image-id-${candidate}`)})" = "$(docker image inspect gpoint-agata-runtime:${candidate} --format '{{.Id}}')"; test "$(cat ${temporaryPath(scratch, `gpoint-g-sales-image-id-${candidate}`)})" = "$(docker image inspect gpoint-g-sales-runtime:${candidate} --format '{{.Id}}')"; echo GPOINT_CI_PARITY_OK`;
+  return `set -e; ${verification}; ${identityChecks}; echo GPOINT_CI_PARITY_OK`;
 }

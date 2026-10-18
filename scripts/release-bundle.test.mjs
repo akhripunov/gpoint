@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import {execFileSync} from 'node:child_process';
+import {execFileSync, spawnSync} from 'node:child_process';
 import {verifyReleaseBundle, selectImageTransport, preparedImageParityCommand} from './release-bundle.mjs';
 
 const sha = 'a'.repeat(40);
@@ -57,8 +57,30 @@ test('OCI candidate image parity command is digest-only and archive transport is
   const f = fixture(t), proof = verifyReleaseBundle(f.dir, sha);
   const command = preparedImageParityCommand(proof, sha);
   assert.match(command, /docker image inspect/);
+  assert.match(command, /GPOINT_CI_PARITY_IDENTITY_MISMATCH=app/);
+  assert.match(command, /exit 42/);
   assert.doesNotMatch(command, /images\.tar\.gz|unzip|docker load/);
   assert.throws(() => selectImageTransport({...proof, transport: 'actions-artifact'}, 'prepared'), /verified GHCR OCI/);
+});
+
+test('OCI parity inspection failure cannot masquerade as expected identity rejection', t => {
+  const f = fixture(t), proof = verifyReleaseBundle(f.dir, sha);
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-parity-probe-'));
+  t.after(() => fs.rmSync(scratch, {recursive: true, force: true}));
+  for (const filename of ['gpoint-image-id-', 'gpoint-agata-image-id-', 'gpoint-g-sales-image-id-'])
+    fs.writeFileSync(path.join(scratch, filename + sha), `sha256:${'f'.repeat(64)}\n`);
+  const bin = path.join(scratch, 'bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'python3'), '#!/bin/sh\nexit 0\n', {mode: 0o700});
+  fs.writeFileSync(path.join(bin, 'docker'), '#!/bin/sh\nexit 7\n', {mode: 0o700});
+
+  const result = spawnSync('bash', ['-c', preparedImageParityCommand(proof, sha, scratch)], {
+    encoding: 'utf8', env: {...process.env, PATH: `${bin}:${process.env.PATH}`},
+  });
+
+  assert.equal(result.status, 43);
+  assert.match(result.stdout, /GPOINT_CI_PARITY_INSPECT_FAILED=app/);
+  assert.doesNotMatch(result.stdout, /GPOINT_CI_PARITY_IDENTITY_MISMATCH/);
 });
 
 test('unsupported and advisory static routes fail closed before any artifact use', t => {
