@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "amendment_id": "gpoint-me42-coalescing-transport-20261018-011",
+  "project": "gpoint",
+  "authorization_id": "gpoint-me42-final-v5-integration-20261018-010",
+  "source_instruction_identifier": "OWNER_SCOPE_ADDENDUM_GPOINT_ME42_V5_COMPLETION_20261018",
+  "owner_decision": "Complete the planned GPoint ME-42 automatic V5 release system under OWNER's current full-cycle instruction; authorize only the bounded read-only coalescing transport correction in scripts/prepare_coalescing.py and scripts/test_prepare_coalescing.py, with the existing production baseline and every V5 safety gate. Keep Incy/VPN and MAXIBOT untouched.",
+  "original_authorization_record_blob_sha": "9258616e92d72d2855a2b113f5ba52547c6974aa",
+  "scope_additions": [
+    {
+      "path": "scripts/prepare_coalescing.py",
+      "source_commit_sha": "fef01177625ded1cafb252d7034409a5277f8738",
+      "patch_sha256": "6b1600a896f1a3cd7d0a238b8b7bfa8da858b787b3df7428adc103e669ba8288",
+      "result_file_sha256": "b8a489f8879201d9c1c74b49306c822d6d4140568aeb5ea62158be64dbf85df9",
+      "result_blob_sha": "8de8baa3488d0931509ada4197d9b789b21fa9f9"
+    },
+    {
+      "path": "scripts/test_prepare_coalescing.py",
+      "source_commit_sha": "fef01177625ded1cafb252d7034409a5277f8738",
+      "patch_sha256": "a594fd9be111cb4c1663ece41f19b146ff9931e8033d1e5ea510f6bb59a77e99",
+      "result_file_sha256": "26e74bd118593b5cabc99ac03d2ae55ce8a02b1a2bd948f09d75209d1dd6bd13",
+      "result_blob_sha": "cb10d88130234ad94ffff19f432c7eb5b394ba95"
+    }
+  ],
+  "release_infrastructure_risk_contract": {
+    "allowed_paths": [
+      "scripts/prepare_coalescing.py",
+      "scripts/test_prepare_coalescing.py"
+    ],
+    "allowed_operations": [
+      "integrate",
+      "coalesce",
+      "prepare",
+      "preflight",
+      "deploy",
+      "verify",
+      "rollback",
+      "publish_evidence"
+    ],
+    "baseline_sha": "d367c2ec24242a733dbb2c4145c91d2d4682ba2c",
+    "risk_description": "Bounded one-retry correction of read-only GitHub current-main transport timeouts during GPoint coalescing, with regression tests and exact source proofs. All existing release safety and production gates remain required; no VPN, DNS, routing, proxy, database or MAXIBOT changes.",
+    "required_gates": [
+      "exact_candidate",
+      "complete_scope",
+      "prepare_provenance",
+      "immutable_artifact",
+      "security_review",
+      "preflight",
+      "rollback_readiness",
+      "worker_compatibility",
+      "postdeploy_health",
+      "reconciliation"
+    ],
+    "backup_plan": "Before pending database changes, the canonical Deploy must create and verify the protected GPoint-only backup, its exact identity, mode, digest and restore/readback evidence; never publish backups or remove existing copies.",
+    "rollback_plan": "Require the current exact production image identities and canonical verified rollback runtime before Apply; preserve current database compatibility and all retained images, and reconcile partial/uncertain Apply by read-only inspection without blind retry.",
+    "stop_conditions": [
+      "Stop before publication or Apply if current main, live production baseline, exact scope or authorization differs.",
+      "Stop before Apply if Prepare provenance, GHCR digest/readback, package permission, security, migration, backup, rollback, Worker, lock, health or recovery gate is absent or inconsistent.",
+      "Stop without retry on active/conflicting release, ambiguous Apply, changed baseline, failed check, RECOVERY_REQUIRED or uncertain Deployment/API result."
+    ]
+  },
+  "amendment_commitment_sha256": "1227189b67f347b765911d44c4e07abbc55b40c23f55dc7930f143c54efcec45"
+}
