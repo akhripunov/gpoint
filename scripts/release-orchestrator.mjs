@@ -18,10 +18,9 @@ const DIAGNOSTIC_STAGES = new Set(['event_payload', 'prepare_event_validation', 
   'authorization_state_read', 'deploy_inventory_before_claim', 'atomic_claim_create',
   'atomic_claim_readback', 'deploy_workflow_dispatch', 'controller_result_summary']);
 const DIAGNOSTIC_RESOURCES = new Set(['prepare_run', 'prepare_receipt', 'deploy_workflow_runs',
-  'ghcr_prepare_receipt', 'authorization_state_ref', 'task_authorization_claim', 'deploy_workflow',
-  'controller_step_summary']);
-const SAFE_RECEIPT_STAGES = new Set(['prepare_run_metadata', 'current_main_ref', 'ghcr_receipt', 'ghcr_receipt_manifest',
-  'ghcr_receipt_digest', 'ghcr_artifact_digest', 'ghcr_artifact_blob', 'prepare_job_identity',
+  'ghcr_prepare_receipt', 'main_ref', 'prepare_publisher_logs', 'ghcr_static_artifact',
+  'authorization_state_ref', 'task_authorization_claim', 'deploy_workflow', 'controller_step_summary']);
+const SAFE_RECEIPT_STAGES = new Set(['prepare_run_metadata', 'current_main_ref', 'ghcr_receipt',
   'prepare_publisher_logs', 'static_artifact_readback', 'receipt_validation']);
 
 export class OrchestrationError extends Error {
@@ -38,11 +37,13 @@ export function controllerFailureDiagnostic(error, {stage = 'event_payload', res
   const status = Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599
     ? error.status : Number.isInteger(nested.httpStatus) && nested.httpStatus >= 400 && nested.httpStatus <= 599
       ? nested.httpStatus : undefined;
-  const code = ['GHCR_READ_FAILED', 'LOCAL_SUBPROCESS_FAILED', 'SUMMARY_WRITE_FAILED'].includes(nested.code) ? nested.code :
+  const code = ['GHCR_READ_FAILED', 'PREPARE_EVIDENCE_READ_FAILED', 'PREPARE_RECEIPT_INVALID',
+    'LOCAL_SUBPROCESS_FAILED', 'SUMMARY_WRITE_FAILED'].includes(nested.code) ? nested.code :
     status ? 'GITHUB_HTTP_ERROR' : error instanceof OrchestrationError ? 'ORCHESTRATION_BLOCKED' : 'UNEXPECTED_ERROR';
   const result = {state: 'BLOCKED', stage: safeStage, code};
   if (status) result.httpStatus = status;
   if (safeResource) result.resource = safeResource;
+  if (SAFE_RECEIPT_STAGES.has(nested.substage)) result.substage = nested.substage;
   if (SHA.test(candidateSha)) result.candidateSha = candidateSha;
   if (/^\d{1,20}$/.test(prepareRunId)) result.prepareRunId = prepareRunId;
   if (/^\d{1,6}$/.test(prepareRunAttempt)) result.prepareRunAttempt = prepareRunAttempt;
@@ -54,9 +55,17 @@ export function preparedReceiptFailureDiagnostic(stdout) {
   const details = String(stdout ?? '').split(/\r?\n/).map(line =>
     line.match(/^ARTIFACT_CACHE=BLOCKED STAGE=([a-z0-9_]{1,48}) ERROR_TYPE=([A-Za-z0-9_]{1,48})$/))
     .find(Boolean);
-  return details && SAFE_RECEIPT_STAGES.has(details[1])
-    ? {stage: 'prepare_receipt_readback', resource: 'prepare_receipt', code: 'GHCR_READ_FAILED'}
-    : {stage: 'prepare_receipt_readback', resource: 'prepare_receipt', code: 'LOCAL_SUBPROCESS_FAILED'};
+  if (!details || !SAFE_RECEIPT_STAGES.has(details[1]))
+    return {stage: 'prepare_receipt_readback', resource: 'prepare_receipt', code: 'LOCAL_SUBPROCESS_FAILED'};
+  const resourceByStage = {prepare_run_metadata: 'prepare_run', current_main_ref: 'main_ref',
+    ghcr_receipt: 'ghcr_prepare_receipt', prepare_publisher_logs: 'prepare_publisher_logs',
+    static_artifact_readback: 'ghcr_static_artifact', receipt_validation: 'prepare_receipt'};
+  const codeByStage = {prepare_run_metadata: 'PREPARE_EVIDENCE_READ_FAILED',
+    current_main_ref: 'PREPARE_EVIDENCE_READ_FAILED', ghcr_receipt: 'GHCR_READ_FAILED',
+    prepare_publisher_logs: 'PREPARE_EVIDENCE_READ_FAILED', static_artifact_readback: 'GHCR_READ_FAILED',
+    receipt_validation: 'PREPARE_RECEIPT_INVALID'};
+  return {stage: 'prepare_receipt_readback', substage: details[1],
+    resource: resourceByStage[details[1]], code: codeByStage[details[1]]};
 }
 
 export function appendControllerResultSummary(writeSummary, result, elapsed) {
