@@ -434,7 +434,10 @@ urllib.request.urlopen=urlopen
                 result.stdout], cwd=SCRIPT.parents[1], text=True, capture_output=True, timeout=15)
             self.assertEqual(mapped.returncode, 0, mapped.stderr)
             self.assertEqual(json.loads(mapped.stdout), {'stage':'prepare_receipt_readback',
-                'substage':'ghcr_receipt','resource':'ghcr_prepare_receipt','code':'GHCR_READ_FAILED'})
+                'substage':'ghcr_receipt_tag_manifest','resource':'ghcr_prepare_receipt',
+                'code':'GHCR_READ_FAILED','candidateSha':self.sha,'runId':self.run_id,
+                'runAttempt':self.attempt,'category':'PERMISSION','errorType':'HTTPError',
+                'httpStatus':403,'ghcrReadbackCompleted':False})
 
 
 if __name__ == '__main__':
