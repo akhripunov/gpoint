@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {dispatchPrepare as dispatchPrepareImpl, findTaskAuthorization, validateEvent, OrchestrationError, taskAutoClaimRef,
-  controllerFailureDiagnostic, preparedReceiptFailureDiagnostic} from './release-orchestrator.mjs';
+  controllerFailureDiagnostic, preparedReceiptFailureDiagnostic, appendControllerResultSummary} from './release-orchestrator.mjs';
 import {ownerTaskCommitmentSha256, candidateScopeDiff, validateTaskAuthorization} from './release-authorization.mjs';
 
 const sha = 'a'.repeat(40);
@@ -51,6 +51,15 @@ test('prepared receipt diagnostics classify only an allowlisted sanitized stage'
   assert.deepEqual(preparedReceiptFailureDiagnostic('ARTIFACT_CACHE=BLOCKED STAGE=untrusted ERROR_TYPE=SecretError'),
     {stage:'prepare_receipt_readback',resource:'prepare_receipt',code:'LOCAL_SUBPROCESS_FAILED'});
   assert.doesNotMatch(JSON.stringify(preparedReceiptFailureDiagnostic('ARTIFACT_CACHE=BLOCKED STAGE=ghcr_receipt ERROR_TYPE=AuthorizationHeader')),/AuthorizationHeader/);
+});
+test('summary failure after a successful dispatch is reported as uncertain post-dispatch state',()=>{
+  assert.throws(()=>appendControllerResultSummary(()=>{throw new Error('sensitive filesystem detail');},
+    {state:'TASK_SCOPED_AUTO_DISPATCHED',candidateSha:sha,authorizationId:'gpoint-task-2026-10-16-001'},1),error=>{
+      assert.deepEqual(controllerFailureDiagnostic(error),{state:'BLOCKED',stage:'controller_result_summary',
+        code:'SUMMARY_WRITE_FAILED',resource:'controller_step_summary',deployDispatched:true});
+      assert.doesNotMatch(JSON.stringify(controllerFailureDiagnostic(error)),/sensitive filesystem detail/);
+      return true;
+    });
 });
 test('controller records the failing read-only stage and never claims or dispatches after an API error',async()=>{
   const {api,calls}=apiFixture();

@@ -16,9 +16,10 @@ const DIAGNOSTIC_STAGES = new Set(['event_payload', 'prepare_event_validation', 
   'prepare_run_metadata', 'prepare_attempt_metadata', 'prepare_attempt_jobs', 'prepare_job_identity',
   'prepare_job_chronology', 'prepare_receipt_readback', 'deploy_inventory', 'authorization_lookup',
   'authorization_state_read', 'deploy_inventory_before_claim', 'atomic_claim_create',
-  'atomic_claim_readback', 'deploy_workflow_dispatch']);
+  'atomic_claim_readback', 'deploy_workflow_dispatch', 'controller_result_summary']);
 const DIAGNOSTIC_RESOURCES = new Set(['prepare_run', 'prepare_receipt', 'deploy_workflow_runs',
-  'ghcr_prepare_receipt', 'authorization_state_ref', 'task_authorization_claim', 'deploy_workflow']);
+  'ghcr_prepare_receipt', 'authorization_state_ref', 'task_authorization_claim', 'deploy_workflow',
+  'controller_step_summary']);
 const SAFE_RECEIPT_STAGES = new Set(['prepare_run_metadata', 'current_main_ref', 'ghcr_receipt', 'ghcr_receipt_manifest',
   'ghcr_receipt_digest', 'ghcr_artifact_digest', 'ghcr_artifact_blob', 'prepare_job_identity',
   'prepare_publisher_logs', 'static_artifact_readback', 'receipt_validation']);
@@ -37,7 +38,7 @@ export function controllerFailureDiagnostic(error, {stage = 'event_payload', res
   const status = Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599
     ? error.status : Number.isInteger(nested.httpStatus) && nested.httpStatus >= 400 && nested.httpStatus <= 599
       ? nested.httpStatus : undefined;
-  const code = ['GHCR_READ_FAILED', 'LOCAL_SUBPROCESS_FAILED'].includes(nested.code) ? nested.code :
+  const code = ['GHCR_READ_FAILED', 'LOCAL_SUBPROCESS_FAILED', 'SUMMARY_WRITE_FAILED'].includes(nested.code) ? nested.code :
     status ? 'GITHUB_HTTP_ERROR' : error instanceof OrchestrationError ? 'ORCHESTRATION_BLOCKED' : 'UNEXPECTED_ERROR';
   const result = {state: 'BLOCKED', stage: safeStage, code};
   if (status) result.httpStatus = status;
@@ -45,6 +46,7 @@ export function controllerFailureDiagnostic(error, {stage = 'event_payload', res
   if (SHA.test(candidateSha)) result.candidateSha = candidateSha;
   if (/^\d{1,20}$/.test(prepareRunId)) result.prepareRunId = prepareRunId;
   if (/^\d{1,6}$/.test(prepareRunAttempt)) result.prepareRunAttempt = prepareRunAttempt;
+  if (nested.deployDispatched === true) result.deployDispatched = true;
   return result;
 }
 
@@ -55,6 +57,18 @@ export function preparedReceiptFailureDiagnostic(stdout) {
   return details && SAFE_RECEIPT_STAGES.has(details[1])
     ? {stage: 'prepare_receipt_readback', resource: 'prepare_receipt', code: 'GHCR_READ_FAILED'}
     : {stage: 'prepare_receipt_readback', resource: 'prepare_receipt', code: 'LOCAL_SUBPROCESS_FAILED'};
+}
+
+export function appendControllerResultSummary(writeSummary, result, elapsed) {
+  const deployDispatched = ['TASK_SCOPED_AUTO_DISPATCHED', 'TASK_SCOPED_AUTO_RETRY_DISPATCHED'].includes(result.state);
+  const summary = `## GPoint automatic release orchestration\n\n- State: \`${result.state}\`\n- Candidate: \`${result.candidateSha}\`\n- Previous authorization claim SHA: \`${result.previousClaimSha ?? 'NONE'}\`\n- Authorization: \`${result.authorizationId ?? result.taskAuthorizationId ?? 'EXACT_SHA_REQUIRED'}\`\n- Controller job: \`SELF_HOSTED_REQUIRED\`, trusted project runner; measured controller seconds: \`${elapsed}\`\n- \`SELF_HOSTED_JOB_COUNT=1\`; \`SELF_HOSTED_RUNNER_SECONDS=${elapsed}\` (controller only)\n`;
+  try { writeSummary(summary); }
+  catch {
+    const error = new OrchestrationError('Controller result summary could not be persisted');
+    error.controllerDiagnostic = {stage: 'controller_result_summary', resource: 'controller_step_summary',
+      code: 'SUMMARY_WRITE_FAILED', deployDispatched};
+    throw error;
+  }
 }
 
 function notifyStage(onStage, stage) {
@@ -297,7 +311,8 @@ async function main() {
     const result = await dispatchPrepare(payload, api, process.env.GITHUB_RUN_ID ?? '', process.cwd(),
       findTaskAuthorization, resolvePrepareReceipt, onStage);
     const elapsed = Math.round((performance.now() - started) / 1000);
-    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## GPoint automatic release orchestration\n\n- State: \`${result.state}\`\n- Candidate: \`${result.candidateSha}\`\n- Previous authorization claim SHA: \`${result.previousClaimSha ?? 'NONE'}\`\n- Authorization: \`${result.authorizationId ?? result.taskAuthorizationId ?? 'EXACT_SHA_REQUIRED'}\`\n- Controller job: \`SELF_HOSTED_REQUIRED\`, trusted project runner; measured controller seconds: \`${elapsed}\`\n- \`SELF_HOSTED_JOB_COUNT=1\`; \`SELF_HOSTED_RUNNER_SECONDS=${elapsed}\` (controller only)\n`);
+    stage = 'controller_result_summary';
+    appendControllerResultSummary(content => fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, content), result, elapsed);
     console.log(JSON.stringify(result));
   } catch (error) {
     const run = payload.workflow_run ?? {};
