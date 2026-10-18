@@ -49,9 +49,9 @@ test('prepared receipt diagnostics classify only an allowlisted sanitized stage'
   assert.deepEqual(preparedReceiptFailureDiagnostic('noise\nARTIFACT_CACHE=BLOCKED STAGE=ghcr_receipt ERROR_TYPE=RegistryError\n'),
     {stage:'prepare_receipt_readback',substage:'ghcr_receipt',resource:'ghcr_prepare_receipt',code:'GHCR_READ_FAILED'});
   assert.deepEqual(preparedReceiptFailureDiagnostic('ARTIFACT_CACHE=BLOCKED STAGE=prepare_run_metadata ERROR_TYPE=GitHubError'),
-    {stage:'prepare_receipt_readback',substage:'prepare_run_metadata',resource:'prepare_run',code:'PREPARE_EVIDENCE_READ_FAILED'});
+    {stage:'prepare_receipt_readback',substage:'prepare_run_metadata',resource:'prepare_evidence',code:'PREPARE_EVIDENCE_FAILED'});
   assert.deepEqual(preparedReceiptFailureDiagnostic('ARTIFACT_CACHE=BLOCKED STAGE=prepare_publisher_logs ERROR_TYPE=GitHubError'),
-    {stage:'prepare_receipt_readback',substage:'prepare_publisher_logs',resource:'prepare_publisher_logs',code:'PREPARE_EVIDENCE_READ_FAILED'});
+    {stage:'prepare_receipt_readback',substage:'prepare_publisher_logs',resource:'prepare_evidence',code:'PREPARE_EVIDENCE_FAILED'});
   assert.deepEqual(preparedReceiptFailureDiagnostic('ARTIFACT_CACHE=BLOCKED STAGE=receipt_validation ERROR_TYPE=ValueError'),
     {stage:'prepare_receipt_readback',substage:'receipt_validation',resource:'prepare_receipt',code:'PREPARE_RECEIPT_INVALID'});
   assert.deepEqual(preparedReceiptFailureDiagnostic('ARTIFACT_CACHE=BLOCKED STAGE=untrusted ERROR_TYPE=SecretError'),
