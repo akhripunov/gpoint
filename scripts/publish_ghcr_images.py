@@ -50,12 +50,25 @@ def validate_image_metadata(role: str, repository: str, digest: str, metadata: d
             'sourceSha': sha, 'platform': 'linux/amd64'}
 
 
-def run(*args: str, capture: bool = False) -> str:
+def run(*args: str, capture: bool = False, cwd: Path | None = None) -> str:
     result = subprocess.run(args, check=True, text=True,
                             stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
                             stderr=subprocess.PIPE if capture else subprocess.DEVNULL,
-                            timeout=900)
+                            timeout=900, cwd=cwd)
     return (result.stdout or '') + (result.stderr or '')
+
+
+def safe_oci_file(path: Path, expected_name: str, media_type: str) -> tuple[str, Path]:
+    """Return an ORAS-safe relative file reference and its resolved working directory."""
+    path = Path(path)
+    if (not path.is_absolute() or '..' in path.parts or path.name != expected_name
+            or path.is_symlink() or not path.is_file()):
+        raise ValueError('unsafe OCI artifact path')
+    working_dir = path.parent.resolve(strict=True)
+    resolved = path.resolve(strict=True)
+    if resolved.parent != working_dir or resolved.name != expected_name or not resolved.is_file():
+        raise ValueError('unsafe OCI artifact path')
+    return f'{expected_name}:{media_type}', working_dir
 
 
 def publish_images(sha: str, run_id: str, attempt: str) -> dict:
@@ -120,6 +133,8 @@ def publish_receipt(receipt_path: Path, sha: str, run_id: str, attempt: str) -> 
     """Publish one canonical receipt OCI artifact, then verify it by digest."""
     if not SHA40.fullmatch(sha) or not run_id.isdigit() or not attempt.isdigit():
         raise ValueError('invalid exact Prepare identity')
+    file_reference, working_dir = safe_oci_file(
+        receipt_path, 'receipt.json', 'application/vnd.gpoint.prepare.receipt.v1+json')
     raw = receipt_path.read_bytes()
     receipt_sha256 = hashlib.sha256(raw).hexdigest()
     receipt = json.loads(raw)
@@ -128,7 +143,7 @@ def publish_receipt(receipt_path: Path, sha: str, run_id: str, attempt: str) -> 
         raise ValueError('OCI receipt does not bind exact Prepare identity')
     tag = f'{RECEIPT_REPOSITORY}:prepare-{sha}-{run_id}-{attempt}'
     output = run('oras', 'push', '--artifact-type', RECEIPT_ARTIFACT_TYPE,
-                 '--format', 'json', tag, f'{receipt_path}:application/vnd.gpoint.prepare.receipt.v1+json', capture=True)
+                 '--format', 'json', tag, file_reference, capture=True, cwd=working_dir)
     try:
         descriptor = json.loads(output)
     except json.JSONDecodeError as error:
@@ -155,8 +170,10 @@ def publish_static_artifact(bundle_path: Path, receipt: dict, sha: str,
                             run_id: str, attempt: str) -> dict:
     if (receipt.get('staticArtifactName') != 'miniapp.zip'
             or receipt.get('staticArtifactRoute') not in ('V4_FAST_STATIC', 'V4_ADVISORY_ONLY')
-            or not bundle_path.is_file()):
+            or not Path(bundle_path).is_file()):
         raise ValueError('static Mini App artifact is missing or not approved by V4 scope')
+    file_reference, working_dir = safe_oci_file(
+        bundle_path, 'miniapp.zip', 'application/vnd.gpoint.miniapp.static.v1+zip')
     content = bundle_path.read_bytes()
     content_sha256 = hashlib.sha256(content).hexdigest()
     if receipt.get('staticArtifactSha256') != content_sha256:
@@ -164,7 +181,7 @@ def publish_static_artifact(bundle_path: Path, receipt: dict, sha: str,
     tag = f'{STATIC_REPOSITORY}:prepare-{sha}-{run_id}-{attempt}'
     output = run('oras', 'push', '--artifact-type', STATIC_ARTIFACT_TYPE,
                  '--format', 'json', tag,
-                 f'{bundle_path}:application/vnd.gpoint.miniapp.static.v1+zip', capture=True)
+                 file_reference, capture=True, cwd=working_dir)
     try:
         descriptor = json.loads(output)
     except json.JSONDecodeError as error:
@@ -175,7 +192,10 @@ def publish_static_artifact(bundle_path: Path, receipt: dict, sha: str,
     with tempfile.TemporaryDirectory(prefix='gpoint-static-readback-') as directory:
         run('oras', 'pull', f'{STATIC_REPOSITORY}@{digest}', '--output', directory)
         readback = Path(directory) / bundle_path.name
-        if not readback.is_file() or hashlib.sha256(readback.read_bytes()).hexdigest() != content_sha256:
+        if not readback.is_file():
+            raise ValueError('OCI static artifact readback content mismatch')
+        readback_content = readback.read_bytes()
+        if hashlib.sha256(readback_content).hexdigest() != content_sha256 or readback_content != content:
             raise ValueError('OCI static artifact readback content mismatch')
     return {'repository': STATIC_REPOSITORY, 'digest': digest,
             'contentSha256': content_sha256, 'sourceSha': sha,

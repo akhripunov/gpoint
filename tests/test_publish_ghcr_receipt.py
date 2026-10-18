@@ -2,7 +2,9 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -93,16 +95,22 @@ class GhcrReceiptPublisherTests(unittest.TestCase):
             path = Path(folder) / 'receipt.json'
             raw = (json.dumps(ready_receipt(), sort_keys=True) + '\n').encode()
             path.write_bytes(raw)
+            process_cwd = os.getcwd()
 
             def fake_run(*args, **kwargs):
                 if args[:2] == ('oras', 'push'):
+                    self.assertTrue(path.is_absolute())
+                    self.assertEqual(kwargs.get('cwd'), path.parent.resolve())
                     self.assertIn(f'{PUBLISHER.RECEIPT_REPOSITORY}:prepare-{SHA}-{RUN}-{ATTEMPT}', args)
                     self.assertIn('--artifact-type', args)
+                    self.assertIn('receipt.json:application/vnd.gpoint.prepare.receipt.v1+json', args)
+                    self.assertNotIn(str(path), args)
+                    self.assertNotIn('--disable-path-validation', args)
                     return json.dumps({'digest': DIGEST,
                                        'reference': f'{PUBLISHER.RECEIPT_REPOSITORY}@{DIGEST}'})
-                self.assertEqual(args, ('oras', 'pull',
-                                        f'{PUBLISHER.RECEIPT_REPOSITORY}@{DIGEST}',
-                                        '--output', args[-1]))
+                self.assertEqual(args[:4], ('oras', 'pull',
+                                            f'{PUBLISHER.RECEIPT_REPOSITORY}@{DIGEST}',
+                                            '--output'))
                 output = Path(args[-1])
                 (output / path.name).write_bytes(raw)
                 return ''
@@ -115,6 +123,43 @@ class GhcrReceiptPublisherTests(unittest.TestCase):
         self.assertEqual(result['runId'], int(RUN))
         self.assertEqual(result['runAttempt'], int(ATTEMPT))
         self.assertEqual(result['contentSha256'], hashlib.sha256(raw).hexdigest())
+        self.assertEqual(os.getcwd(), process_cwd)
+
+    def test_run_passes_cwd_to_subprocess_without_changing_process_directory(self):
+        with tempfile.TemporaryDirectory() as folder:
+            process_cwd = os.getcwd()
+            with patch.object(PUBLISHER.subprocess, 'run') as execute:
+                execute.return_value.stdout = 'ok'
+                execute.return_value.stderr = ''
+                self.assertEqual(PUBLISHER.run('oras', 'version', capture=True, cwd=Path(folder)), 'ok')
+                self.assertEqual(execute.call_args.kwargs['cwd'], Path(folder))
+            self.assertEqual(os.getcwd(), process_cwd)
+
+    def test_receipt_rejects_relative_traversal_and_symlink_paths_before_oras(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            outside = root / 'outside'
+            outside.mkdir()
+            receipt = outside / 'receipt.json'
+            receipt.write_text(json.dumps(ready_receipt()) + '\n')
+            traversal = root / 'nested' / '..' / 'outside' / 'receipt.json'
+            symlink = root / 'alias' / 'receipt.json'
+            symlink.parent.mkdir()
+            symlink.symlink_to(receipt)
+            with patch.object(PUBLISHER, 'run') as runner:
+                for unsafe in (Path('receipt.json'), traversal, symlink):
+                    with self.subTest(path=unsafe), self.assertRaisesRegex(ValueError, 'unsafe OCI artifact path'):
+                        PUBLISHER.publish_receipt(unsafe, SHA, RUN, ATTEMPT)
+                runner.assert_not_called()
+
+    def test_receipt_oras_push_failure_stops_before_digest_readback(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'receipt.json'
+            path.write_text(json.dumps(ready_receipt()) + '\n')
+            with patch.object(PUBLISHER, 'run', side_effect=subprocess.CalledProcessError(1, 'oras')) as runner:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    PUBLISHER.publish_receipt(path, SHA, RUN, ATTEMPT)
+            runner.assert_called_once()
 
     def test_readback_tampering_or_bad_descriptor_fails_closed(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -149,16 +194,22 @@ class GhcrReceiptPublisherTests(unittest.TestCase):
             path = Path(folder) / 'miniapp.zip'
             raw = b'bounded static package'
             path.write_bytes(raw)
+            process_cwd = os.getcwd()
             receipt = {'staticArtifactName': 'miniapp.zip',
                        'staticArtifactRoute': 'V4_FAST_STATIC',
                        'staticArtifactSha256': hashlib.sha256(raw).hexdigest()}
 
             def fake_run(*args, **kwargs):
                 if args[:2] == ('oras', 'push'):
+                    self.assertTrue(path.is_absolute())
+                    self.assertEqual(kwargs.get('cwd'), path.parent.resolve())
                     self.assertTrue(any(str(item).startswith(PUBLISHER.STATIC_REPOSITORY + ':')
                                         for item in args))
+                    self.assertIn('miniapp.zip:application/vnd.gpoint.miniapp.static.v1+zip', args)
+                    self.assertNotIn(str(path), args)
+                    self.assertNotIn('--disable-path-validation', args)
                     return json.dumps({'digest': DIGEST})
-                self.assertEqual(args[2], f'{PUBLISHER.STATIC_REPOSITORY}@{DIGEST}')
+                self.assertEqual(args[:3], ('oras', 'pull', f'{PUBLISHER.STATIC_REPOSITORY}@{DIGEST}'))
                 Path(args[-1], path.name).write_bytes(raw)
                 return ''
 
@@ -166,6 +217,48 @@ class GhcrReceiptPublisherTests(unittest.TestCase):
                 result = PUBLISHER.publish_static_artifact(path, receipt, SHA, RUN, ATTEMPT)
             self.assertEqual(result['digest'], DIGEST)
             self.assertEqual(result['contentSha256'], hashlib.sha256(raw).hexdigest())
+            self.assertEqual(os.getcwd(), process_cwd)
+
+    def test_static_artifact_rejects_unsafe_paths_and_readback_tampering(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            expected = root / 'miniapp.zip'
+            raw = b'miniapp bytes'
+            expected.write_bytes(raw)
+            process_cwd = os.getcwd()
+            receipt = {'staticArtifactName': 'miniapp.zip',
+                       'staticArtifactRoute': 'V4_FAST_STATIC',
+                       'staticArtifactSha256': hashlib.sha256(raw).hexdigest()}
+            with patch.object(PUBLISHER, 'run') as runner:
+                with self.assertRaisesRegex(ValueError, 'unsafe OCI artifact path'):
+                    PUBLISHER.publish_static_artifact(root / '..' / root.name / 'miniapp.zip', receipt, SHA, RUN, ATTEMPT)
+                runner.assert_not_called()
+
+            def tampered(*args, **kwargs):
+                if args[:2] == ('oras', 'push'):
+                    self.assertEqual(kwargs.get('cwd'), root.resolve())
+                    return json.dumps({'digest': DIGEST})
+                Path(args[-1], 'miniapp.zip').write_bytes(b'changed bytes')
+                return ''
+
+            with patch.object(PUBLISHER, 'run', side_effect=tampered):
+                with self.assertRaisesRegex(ValueError, 'readback content mismatch'):
+                    PUBLISHER.publish_static_artifact(expected, receipt, SHA, RUN, ATTEMPT)
+            self.assertEqual(os.getcwd(), process_cwd)
+
+    def test_static_artifact_oras_failure_stops_without_readback(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'miniapp.zip'
+            raw = b'miniapp bytes'
+            path.write_bytes(raw)
+            receipt = {'staticArtifactName': 'miniapp.zip',
+                       'staticArtifactRoute': 'V4_FAST_STATIC',
+                       'staticArtifactSha256': hashlib.sha256(raw).hexdigest()}
+            error = subprocess.CalledProcessError(1, 'oras')
+            with patch.object(PUBLISHER, 'run', side_effect=error) as runner:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    PUBLISHER.publish_static_artifact(path, receipt, SHA, RUN, ATTEMPT)
+            runner.assert_called_once()
 
     def test_static_receipt_requires_static_artifact_and_no_docker_images(self):
         receipt = {'schema': 2, 'route': 'STATIC_UI_ONLY', 'status': 'READY',
