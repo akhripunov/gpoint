@@ -9,13 +9,19 @@ import tempfile
 import unittest
 from unittest import mock
 import socket
+import ssl
+import re
+import threading
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'prepared_artifact_cache.py'
 spec = importlib.util.spec_from_file_location('prepared_artifact_cache', SCRIPT)
 CACHE = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(CACHE)
+import network_retry
 
 
 class GhcrReceiptTests(unittest.TestCase):
@@ -37,6 +43,162 @@ class GhcrReceiptTests(unittest.TestCase):
         self.digest_url = f'https://ghcr.io/v2/{CACHE.RECEIPT_REPOSITORY}/manifests/{self.digest}'
         self.blob_url = f'https://ghcr.io/v2/{CACHE.RECEIPT_REPOSITORY}/blobs/{layer_digest}'
         self.manifest_header = {'Docker-Content-Digest': self.digest}
+
+    def _ghcr_token_request(self, token_error=None, status=None, observed_token_calls=None):
+        """Exercise ghcr_request through the real bounded retry implementation."""
+        token_calls = observed_token_calls if observed_token_calls is not None else []
+        challenge = (f'Bearer realm="https://ghcr.io/token",service="ghcr.io",'
+                     f'scope="repository:{CACHE.RECEIPT_REPOSITORY}:pull"')
+
+        class Response:
+            def __init__(self, body, headers=None):
+                self.body, self.headers = body, headers or {}
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def read(self, _limit=-1): return self.body
+
+        def urlopen(req, timeout=30):
+            path = urllib.parse.urlparse(req.full_url).path
+            if path.startswith('/v2/') and 'Authorization' not in req.headers:
+                raise urllib.error.HTTPError(req.full_url, 401, 'Unauthorized',
+                    {'WWW-Authenticate': challenge}, __import__('io').BytesIO())
+            if path == '/token':
+                token_calls.append(req)
+                if status:
+                    raise urllib.error.HTTPError(req.full_url, status, 'private response detail', {},
+                                                 __import__('io').BytesIO())
+                if token_error and len(token_calls) <= len(token_error):
+                    raise token_error[len(token_calls) - 1]
+                return Response(b'{"token":"fixture-bearer"}')
+            if path.startswith('/v2/') and req.headers.get('Authorization') == 'Bearer fixture-bearer':
+                return Response(b'fixture-artifact', {'Docker-Content-Digest': self.digest})
+            raise AssertionError(f'unexpected GHCR request path: {path}')
+
+        clock_value = [0.0]
+        def clock(): return clock_value[0]
+        def sleep(seconds): clock_value[0] += max(seconds, 0.01)
+        def run_retry(operation, stage, is_retryable, *, budget=None):
+            bounded = network_retry.RetryBudget(seconds=0.1, clock=clock)
+            return network_retry.retry_network_read(operation, stage, is_retryable,
+                budget=bounded, clock=clock, sleep=sleep, jitter=lambda *_: 0.01, emit=lambda *_: None)
+
+        with mock.patch.object(urllib.request, 'urlopen', side_effect=urlopen), \
+                mock.patch.object(CACHE, 'retry_network_read', side_effect=run_retry):
+            result = CACHE.ghcr_request(self.tag_url, 'reader', 'fixture-secret', CACHE.OCI_MANIFEST,
+                                        'ghcr_receipt_tag_manifest')
+        return result, token_calls
+
+    def test_transient_tls_eof_during_token_request_retries_then_reads(self):
+        result, token_calls = self._ghcr_token_request(
+            token_error=[ssl.SSLEOFError(8, 'unexpected EOF')])
+        self.assertEqual(len(token_calls), 2)
+        self.assertEqual(result[0], b'fixture-artifact')
+
+    def test_connection_reset_during_token_request_retries_then_reads(self):
+        result, token_calls = self._ghcr_token_request(
+            token_error=[ConnectionResetError('connection reset')])
+        self.assertEqual(len(token_calls), 2)
+        self.assertEqual(result[0], b'fixture-artifact')
+
+    def test_persistent_tls_eof_stops_within_shared_retry_budget(self):
+        token_calls = []
+        try:
+            self._ghcr_token_request(token_error=[ssl.SSLEOFError(8, 'unexpected EOF')] * 50,
+                                     observed_token_calls=token_calls)
+        except CACHE.NetworkStageError as error:
+            self.assertEqual(error.stage, 'ghcr_receipt_tag_manifest_auth_token')
+            self.assertEqual(error.error_type, 'NETWORK_UNAVAILABLE')
+            self.assertGreater(len(token_calls), 1)
+            self.assertNotRegex(str(error), r'fixture-secret|fixture-bearer|https?://|Authorization')
+        else:
+            self.fail('persistent TLS EOF should exhaust the shared retry budget')
+
+    def test_token_http_401_and_403_are_not_retried(self):
+        for status, category in ((401, 'AUTH'), (403, 'PERMISSION')):
+            with self.subTest(status=status):
+                token_calls = []
+                with self.assertRaises(CACHE.NetworkStageError) as raised:
+                    self._ghcr_token_request(status=status, observed_token_calls=token_calls)
+                self.assertEqual(raised.exception.category, category)
+                self.assertEqual(raised.exception.http_status, status)
+                self.assertEqual(len(token_calls), 1)
+
+    def test_certificate_verification_failure_is_not_retried(self):
+        token_calls = []
+        with self.assertRaises(CACHE.NetworkStageError) as raised:
+            self._ghcr_token_request(token_error=[ssl.SSLCertVerificationError(1, 'certificate verify failed')],
+                                     observed_token_calls=token_calls)
+        self.assertEqual(raised.exception.error_type, 'SSLCertVerificationError')
+        self.assertEqual(raised.exception.category, 'NETWORK')
+        self.assertEqual(len(token_calls), 1)
+
+    def test_ghcr_retry_budget_stays_below_controller_subprocess_timeout(self):
+        controller = (SCRIPT.parents[1] / 'scripts/release-orchestrator.mjs').read_text()
+        timeout = re.search(r"spawnSync\('python3', \['scripts/prepared_artifact_cache\.py'\], \{.*?timeout:\s*(\d+)_000",
+                            controller, re.DOTALL)
+        self.assertIsNotNone(timeout)
+        self.assertEqual(int(timeout.group(1)), 120)
+        self.assertEqual(CACHE.GHCR_READ_RETRY_BUDGET_SECONDS, 60)
+        self.assertLess(CACHE.GHCR_READ_RETRY_BUDGET_SECONDS, int(timeout.group(1)))
+
+    def test_urllib_timeout_is_clamped_to_absolute_shared_deadline(self):
+        class Budget:
+            deadline = 108.0
+        with mock.patch.object(CACHE, 'NETWORK_BUDGET', Budget()), \
+                mock.patch.object(CACHE.time, 'monotonic', return_value=100.0), \
+                mock.patch.object(urllib.request, 'urlopen', return_value='response') as urlopen:
+            self.assertEqual(CACHE.network_urlopen('request', timeout=30), 'response')
+        self.assertEqual(urlopen.call_args.kwargs['timeout'], 8.0)
+        with mock.patch.object(CACHE, 'NETWORK_BUDGET', Budget()), \
+                mock.patch.object(CACHE.time, 'monotonic', return_value=108.0), \
+                mock.patch.object(urllib.request, 'urlopen') as urlopen:
+            with self.assertRaises(network_retry.NetworkUnavailable):
+                CACHE.network_urlopen('request', timeout=30)
+        urlopen.assert_not_called()
+
+    def test_response_finishing_after_shared_deadline_is_rejected(self):
+        class Budget:
+            deadline = 108.0
+        class SlowResponse:
+            def read(self, _limit):
+                return b'late response'
+        with mock.patch.object(CACHE, 'NETWORK_BUDGET', Budget()), \
+                mock.patch.object(CACHE.time, 'monotonic', return_value=108.01):
+            with self.assertRaises(network_retry.NetworkUnavailable):
+                CACHE.read_network_response(SlowResponse(), 1024)
+
+    def test_blocked_response_read_is_interrupted_at_shared_deadline(self):
+        started = threading.Event()
+        released = threading.Event()
+        class Budget:
+            deadline = time.monotonic() + 0.05
+        class SlowResponse:
+            closed = False
+            def read(self, _limit):
+                started.set()
+                released.wait(1)
+                return b'late response'
+            def close(self):
+                self.closed = True
+                released.set()
+        response = SlowResponse()
+        began = time.monotonic()
+        with mock.patch.object(CACHE, 'NETWORK_BUDGET', Budget()):
+            with self.assertRaises(network_retry.NetworkUnavailable):
+                CACHE.read_network_response(response, 1024)
+        self.assertTrue(started.is_set())
+        self.assertTrue(response.closed)
+        self.assertLess(time.monotonic() - began, 0.5)
+
+    def test_ghcr_budget_reuses_prior_shared_budget_spend(self):
+        with tempfile.TemporaryDirectory(prefix='prepared-cache-budget-') as directory:
+            state = Path(directory) / 'spent-seconds'
+            state.write_text('50\n')
+            with mock.patch.dict(os.environ, {'NETWORK_RETRY_BUDGET_STATE': str(state)}):
+                budget = CACHE.new_network_budget()
+        self.assertEqual(budget.seconds, 60)
+        self.assertEqual(budget.spent, 50.0)
+        self.assertLessEqual(budget.deadline - budget.started, 10.0)
 
     def fetch(self, tamper=None):
         def fake(url, username, token, accept, stage, **kwargs):

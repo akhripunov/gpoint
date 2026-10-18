@@ -597,6 +597,22 @@ def status(state, url, created_at):
             'environment_url': 'https://gpoint.one', 'created_at': created_at}
 
 class DeploymentReleaseTests(unittest.TestCase):
+    def test_deploy_publish_job_has_minimal_deployments_read_permission(self):
+        workflow = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()
+        publish = re.search(r'^  publish:\n(?P<job>.*?)(?=^  [a-z][a-z0-9_-]*:\n|\Z)',
+                            workflow, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(publish)
+        permission_block = re.search(
+            r'^    permissions:\n((?:      [a-z_]+: [a-z]+\n)+)', publish.group('job'), re.MULTILINE)
+        self.assertIsNotNone(permission_block)
+        permissions = dict(line.strip().split(': ', 1) for line in permission_block.group(1).splitlines())
+        self.assertEqual(permissions, {
+            'contents': 'read', 'actions': 'read', 'packages': 'read', 'deployments': 'read'})
+        self.assertNotRegex(permission_block.group(1), r': write\b')
+        publisher = (ROOT / 'scripts/publish-release-linear.py').read_text()
+        self.assertIn("/deployments?environment=production&task=gpoint-production-deploy", publisher)
+        self.assertIn("/deployments/{deployment[\"id\"]}/statuses?", publisher)
+
     def test_reconcile_workflow_has_minimal_deployment_read_permission(self):
         workflow = (ROOT / '.github/workflows/gpoint-linear-reconcile.yml').read_text()
         match = re.search(r'^permissions:\n((?:[ \t]+[a-z_]+: [a-z]+\n)+)', workflow, re.MULTILINE)

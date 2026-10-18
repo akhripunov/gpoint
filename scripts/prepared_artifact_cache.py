@@ -10,6 +10,7 @@ import re
 import socket
 import ssl
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -17,7 +18,8 @@ import urllib.request
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from network_retry import NetworkUnavailable, RetryBudget, retry_network_read
+from network_retry import (NETWORK_RETRY_BUDGET_SECONDS, NetworkUnavailable,
+                           RetryBudget, retry_network_read)
 
 REPO = 'akhripunov/gpoint'
 RECEIPT_REPOSITORY = 'akhripunov/gpoint-prepare-receipts'
@@ -28,14 +30,16 @@ OCI_MANIFEST = 'application/vnd.oci.image.manifest.v1+json'
 OCI_INDEX = 'application/vnd.oci.image.index.v1+json'
 MAX_RECEIPT_BYTES = 1024 * 1024
 MAX_STATIC_BYTES = 512 * 1024 * 1024
+GHCR_READ_RETRY_BUDGET_SECONDS = 60
 NETWORK_BUDGET = None
 
 
 class NetworkStageError(RuntimeError):
-    def __init__(self, stage, error_type, category='NETWORK', http_status=None):
+    def __init__(self, stage, error_type, category='NETWORK', http_status=None, retryable=False):
         super().__init__(stage, error_type, category, http_status)
         self.stage, self.error_type = stage, error_type
         self.category, self.http_status = category, http_status
+        self.is_retryable = retryable
 
 
 ACTIVE_DIAGNOSTIC_STAGE = 'initialization'
@@ -115,6 +119,8 @@ def emit_blocked_diagnostic(error):
 
 
 def retryable(error):
+    if isinstance(error, NetworkStageError):
+        return error.is_retryable
     if isinstance(error, urllib.error.HTTPError):
         return error.code in (408, 425, 429, 500, 502, 503, 504)
     reason = error.reason if isinstance(error, urllib.error.URLError) else error
@@ -124,6 +130,63 @@ def retryable(error):
         return not any(marker in str(reason).lower() for marker in (
             'certificate_verify_failed', 'wrong_version_number', 'protocol_version'))
     return isinstance(reason, (TimeoutError, socket.timeout, socket.gaierror, ConnectionError))
+
+
+def new_network_budget():
+    """Leave diagnostic headroom inside the controller's 120-second subprocess limit."""
+    return RetryBudget(seconds=min(NETWORK_RETRY_BUDGET_SECONDS,
+                                   GHCR_READ_RETRY_BUDGET_SECONDS))
+
+
+def network_urlopen(request, timeout=30):
+    """Bound each urllib call by the same absolute budget used for safe retries."""
+    if NETWORK_BUDGET is None:
+        return urllib.request.urlopen(request, timeout=timeout)
+    remaining = NETWORK_BUDGET.deadline - time.monotonic()
+    if remaining <= 0:
+        raise NetworkUnavailable('network_retry_budget')
+    return urllib.request.urlopen(request, timeout=min(timeout, remaining))
+
+
+def read_network_response(response, limit):
+    """Read with a hard wait bound, interrupting a slow or trickling response."""
+    if NETWORK_BUDGET is None:
+        return response.read(limit)
+    remaining = NETWORK_BUDGET.deadline - time.monotonic()
+    if remaining <= 0:
+        raise NetworkUnavailable('network_retry_budget')
+
+    completed = threading.Event()
+    result = []
+    failure = []
+
+    def read():
+        try:
+            result.append(response.read(limit))
+        except BaseException as error:
+            failure.append(error)
+        finally:
+            completed.set()
+
+    threading.Thread(target=read, name='gpoint-ghcr-response-read', daemon=True).start()
+    if not completed.wait(remaining):
+        # Shutdown interrupts a socket read; close is a fallback for wrappers
+        # whose response object does not expose urllib's underlying socket.
+        try:
+            sock = response.fp.raw._sock
+            sock.shutdown(socket.SHUT_RDWR)
+        except (AttributeError, OSError):
+            pass
+        try:
+            response.close()
+        except (AttributeError, OSError):
+            pass
+        raise NetworkUnavailable('network_retry_budget')
+    if time.monotonic() >= NETWORK_BUDGET.deadline:
+        raise NetworkUnavailable('network_retry_budget')
+    if failure:
+        raise failure[0]
+    return result[0]
 
 
 def request(operation, stage):
@@ -136,10 +199,12 @@ def request(operation, stage):
         raise NetworkStageError(failure_stage(), 'NETWORK_UNAVAILABLE', 'NETWORK') from None
     except urllib.error.HTTPError as error:
         category = exception_category(error)
-        raise NetworkStageError(failure_stage(), 'HTTPError', category, error.code) from None
+        raise NetworkStageError(failure_stage(), 'HTTPError', category, error.code,
+                                retryable=retryable(error)) from None
     except (urllib.error.URLError, TimeoutError, socket.timeout,
             ConnectionError, ssl.SSLError) as error:
-        raise NetworkStageError(failure_stage(), safe_exception_type(error), 'NETWORK') from None
+        raise NetworkStageError(failure_stage(), safe_exception_type(error), 'NETWORK',
+                                retryable=retryable(error)) from None
 
 
 def github(route, token, stage):
@@ -148,8 +213,8 @@ def github(route, token, stage):
         'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json',
         'X-GitHub-Api-Version': '2022-11-28'})
     def read():
-        with urllib.request.urlopen(req, timeout=30) as response:
-            payload = response.read(MAX_RECEIPT_BYTES + 1)
+        with network_urlopen(req, timeout=30) as response:
+            payload = read_network_response(response, MAX_RECEIPT_BYTES + 1)
             if len(payload) > MAX_RECEIPT_BYTES:
                 raise RuntimeError('GitHub response exceeds size limit')
             return json.loads(payload)
@@ -167,7 +232,7 @@ def ghcr_request(url, username, password, accept, stage, *, limit=MAX_RECEIPT_BY
     def get(extra_headers=None):
         req = urllib.request.Request(url, headers={**headers, **(extra_headers or {})})
         try:
-            response = urllib.request.urlopen(req, timeout=30)
+            response = network_urlopen(req, timeout=30)
         except urllib.error.HTTPError as error:
             if error.code != 401:
                 raise
@@ -188,23 +253,25 @@ def ghcr_request(url, username, password, accept, stage, *, limit=MAX_RECEIPT_BY
                 'Authorization': f'Basic {basic}', 'Accept': 'application/json'})
             set_diagnostic_stage(stage + '_auth_token')
             try:
-                with urllib.request.urlopen(token_req, timeout=30) as token_response:
-                    token_bytes = token_response.read(65537)
+                with network_urlopen(token_req, timeout=30) as token_response:
+                    token_bytes = read_network_response(token_response, 65537)
                     if len(token_bytes) > 65536:
                         raise RuntimeError('GHCR token response exceeds size limit')
                     bearer = json.loads(token_bytes).get('token')
             except urllib.error.HTTPError as token_error:
                 raise NetworkStageError(stage + '_auth_token', 'HTTPError',
-                                        exception_category(token_error), token_error.code) from None
+                                        exception_category(token_error), token_error.code,
+                                        retryable=retryable(token_error)) from None
             except (urllib.error.URLError, TimeoutError, socket.timeout, ConnectionError, ssl.SSLError) as token_error:
-                raise NetworkStageError(stage + '_auth_token', safe_exception_type(token_error), 'NETWORK') from None
+                raise NetworkStageError(stage + '_auth_token', safe_exception_type(token_error), 'NETWORK',
+                                        retryable=retryable(token_error)) from None
             if not isinstance(bearer, str) or not re.fullmatch(r'[^\s\r\n]{1,16384}', bearer):
                 raise RuntimeError('GHCR returned an invalid pull token')
             set_diagnostic_stage(stage + '_authenticated_read')
-            response = urllib.request.urlopen(urllib.request.Request(url, headers={
+            response = network_urlopen(urllib.request.Request(url, headers={
                 **headers, 'Authorization': f'Bearer {bearer}'}), timeout=30)
         with response:
-            data = response.read(limit + 1)
+            data = read_network_response(response, limit + 1)
             if len(data) > limit:
                 raise RuntimeError('GHCR receipt response exceeds size limit')
             return data, response.headers
@@ -291,8 +358,8 @@ def trusted_job_logs(run_id, attempt, token, job_name, step_name):
         'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json',
         'X-GitHub-Api-Version': '2022-11-28'})
     def read():
-        with urllib.request.urlopen(req, timeout=30) as response:
-            raw = response.read(25 * 1024 * 1024 + 1)
+        with network_urlopen(req, timeout=30) as response:
+            raw = read_network_response(response, 25 * 1024 * 1024 + 1)
             if len(raw) > 25 * 1024 * 1024:
                 raise RuntimeError('Prepare publisher logs exceed size limit')
             with zipfile.ZipFile(io.BytesIO(raw)) as archive:
@@ -311,7 +378,7 @@ def verify_logged_digest(logs, label, digest):
 
 def main():
     global NETWORK_BUDGET, DIAGNOSTIC_IDENTITY, GHCR_READBACK_COMPLETED
-    NETWORK_BUDGET = RetryBudget()
+    NETWORK_BUDGET = new_network_budget()
     started = time.monotonic()
     sha, run_id, attempt = (os.environ.get('CANDIDATE_SHA', ''), os.environ.get('PREPARE_RUN_ID', ''),
                             os.environ.get('PREPARE_RUN_ATTEMPT', ''))

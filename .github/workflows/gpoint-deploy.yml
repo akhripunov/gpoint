@@ -204,6 +204,7 @@ jobs:
       contents: read
       actions: read
       packages: read
+      deployments: read
     needs: [validate, deploy]
     if: always() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
