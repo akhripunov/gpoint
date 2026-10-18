@@ -9,6 +9,7 @@ on:
 permissions:
   contents: read
   actions: read
+  deployments: read
 
 concurrency:
   group: gpoint-linear-release

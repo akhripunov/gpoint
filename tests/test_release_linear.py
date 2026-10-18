@@ -5,6 +5,7 @@ import socket
 import ssl
 import unittest
 import tempfile
+import re
 import urllib.error
 from unittest.mock import patch
 import base64
@@ -596,6 +597,37 @@ def status(state, url, created_at):
             'environment_url': 'https://gpoint.one', 'created_at': created_at}
 
 class DeploymentReleaseTests(unittest.TestCase):
+    def test_reconcile_workflow_has_minimal_deployment_read_permission(self):
+        workflow = (ROOT / '.github/workflows/gpoint-linear-reconcile.yml').read_text()
+        match = re.search(r'^permissions:\n((?:[ \t]+[a-z_]+: [a-z]+\n)+)', workflow, re.MULTILINE)
+        self.assertIsNotNone(match)
+        permissions = dict(line.strip().split(': ', 1) for line in match.group(1).splitlines())
+        self.assertEqual(permissions, {'contents': 'read', 'actions': 'read', 'deployments': 'read'})
+        self.assertNotRegex(match.group(1), r': write\b')
+        source = (ROOT / 'scripts/publish-release-linear.py').read_text()
+        self.assertIn("/deployments?environment=production&task=gpoint-production-deploy", source)
+        self.assertIn("/deployments/{deployment[\"id\"]}/statuses?", source)
+
+    def test_empty_production_deployment_inventory_is_not_deployed(self):
+        routes = []
+        def read(route):
+            routes.append(route)
+            if '/deployments?' in route:
+                return []
+            raise AssertionError(f'unexpected GitHub read: {route}')
+        with patch.object(SYNC, 'github_json', side_effect=read), \
+                patch.object(SYNC, 'artifact_json') as artifact:
+            state, manifest, deployment_run = SYNC.production_evidence()
+        self.assertEqual(len(routes), 1)
+        self.assertIsNone(state['currentProductionSha'])
+        self.assertEqual(state['lastReleaseStatus'], 'NOT_DEPLOYED')
+        self.assertEqual(state['serverDeployStatus'], 'NOT_DEPLOYED')
+        self.assertEqual(state['workerOperationalStatus'], 'NOT_VERIFIED')
+        self.assertEqual(state['overallServiceReadiness'], 'NOT_VERIFIED')
+        self.assertEqual(manifest, {'status': 'NOT_DEPLOYED'})
+        self.assertIsNone(deployment_run)
+        artifact.assert_not_called()
+
     def test_successful_deployment_is_reported_from_deployment_status_and_exact_prepare_link(self):
         item, url = deployment(100, SHA, 501, 2, '2026-10-18T10:00:00Z')
         def read(route):
