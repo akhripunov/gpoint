@@ -29,6 +29,13 @@ const SAFE_RECEIPT_STAGES = new Set(['prepare_run_metadata', 'current_main_ref',
   'ghcr_receipt_digest_readback_authenticated_read', 'ghcr_receipt_layer_readback_auth_challenge',
   'ghcr_receipt_layer_readback_auth_token', 'ghcr_receipt_layer_readback_authenticated_read']);
 const SAFE_RECEIPT_CATEGORIES = new Set(['AUTH', 'PERMISSION', 'NETWORK', 'HTTP', 'INVALID_RESPONSE', 'LOCAL_IO', 'VALIDATION', 'INTERNAL']);
+const SAFE_SUBPROCESS_ERROR_CODES = new Set(['EACCES', 'EAGAIN', 'EBADF', 'EBUSY', 'EEXIST', 'EFBIG', 'EIO', 'EISDIR',
+  'EMFILE', 'ENFILE', 'ENOENT', 'ENOMEM', 'ENOBUFS', 'ENOSPC', 'ENOTDIR', 'EPERM', 'EROFS', 'ETIMEDOUT', 'EPIPE', 'EINVAL']);
+const SAFE_SUBPROCESS_SIGNALS = new Set(['SIGABRT', 'SIGALRM', 'SIGBUS', 'SIGFPE', 'SIGHUP', 'SIGILL', 'SIGINT',
+  'SIGKILL', 'SIGPIPE', 'SIGQUIT', 'SIGSEGV', 'SIGTERM', 'SIGUSR1', 'SIGUSR2']);
+const SAFE_PYTHON_ERROR_TYPES = new Set(['AssertionError', 'AttributeError', 'ConnectionError', 'FileNotFoundError',
+  'ImportError', 'IndentationError', 'KeyError', 'ModuleNotFoundError', 'NameError', 'OSError', 'PermissionError',
+  'RuntimeError', 'SyntaxError', 'SystemExit', 'TimeoutError', 'TypeError', 'UnicodeDecodeError', 'ValueError']);
 
 export class OrchestrationError extends Error {
   constructor(message) { super(message); this.name = 'OrchestrationError'; }
@@ -54,6 +61,15 @@ export function controllerFailureDiagnostic(error, {stage = 'event_payload', res
   if (typeof nested.errorType === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,47}$/.test(nested.errorType)) result.errorType = nested.errorType;
   if (SAFE_RECEIPT_CATEGORIES.has(nested.category)) result.category = nested.category;
   if (typeof nested.ghcrReadbackCompleted === 'boolean') result.ghcrReadbackCompleted = nested.ghcrReadbackCompleted;
+  if (Number.isInteger(nested.subprocessStatus) && nested.subprocessStatus >= 0 && nested.subprocessStatus <= 255)
+    result.subprocessStatus = nested.subprocessStatus;
+  if (SAFE_SUBPROCESS_ERROR_CODES.has(nested.subprocessErrorCode)) result.subprocessErrorCode = nested.subprocessErrorCode;
+  if (SAFE_SUBPROCESS_SIGNALS.has(nested.subprocessSignal)) result.subprocessSignal = nested.subprocessSignal;
+  if (SAFE_PYTHON_ERROR_TYPES.has(nested.subprocessStderrErrorType))
+    result.subprocessStderrErrorType = nested.subprocessStderrErrorType;
+  if (['missing_diagnostic', 'malformed_diagnostic', 'invalid_schema', 'unsafe_stage',
+    'invalid_completion_flag', 'identity_mismatch'].includes(nested.diagnosticRejection))
+    result.diagnosticRejection = nested.diagnosticRejection;
   if (SHA.test(candidateSha)) result.candidateSha = candidateSha;
   if (/^\d{1,20}$/.test(prepareRunId)) result.prepareRunId = prepareRunId;
   if (/^\d{1,6}$/.test(prepareRunAttempt)) result.prepareRunAttempt = prepareRunAttempt;
@@ -61,42 +77,58 @@ export function controllerFailureDiagnostic(error, {stage = 'event_payload', res
   return result;
 }
 
-export function preparedReceiptFailureDiagnostic(stdout, expected = {}) {
+function localSubprocessFailure(expected, subprocess, diagnosticRejection) {
+  const result = {stage:'prepare_receipt_readback',resource:'prepare_receipt',code:'LOCAL_SUBPROCESS_FAILED'};
+  if (diagnosticRejection) result.diagnosticRejection = diagnosticRejection;
+  if (SHA.test(expected.candidateSha ?? '')) result.candidateSha = expected.candidateSha;
+  if (/^\d{1,20}$/.test(String(expected.runId ?? ''))) result.runId = String(expected.runId);
+  if (/^\d{1,6}$/.test(String(expected.runAttempt ?? ''))) result.runAttempt = String(expected.runAttempt);
+  if (Number.isInteger(subprocess?.status) && subprocess.status >= 0 && subprocess.status <= 255)
+    result.subprocessStatus = subprocess.status;
+  if (SAFE_SUBPROCESS_SIGNALS.has(subprocess?.signal)) result.subprocessSignal = subprocess.signal;
+  if (SAFE_SUBPROCESS_ERROR_CODES.has(subprocess?.error?.code)) result.subprocessErrorCode = subprocess.error.code;
+  const stderrType = String(subprocess?.stderr ?? '').match(/(?:^|\n)([A-Za-z][A-Za-z0-9_]{0,47}):(?:\s|$)/)?.[1];
+  if (SAFE_PYTHON_ERROR_TYPES.has(stderrType)) result.subprocessStderrErrorType = stderrType;
+  return result;
+}
+
+export function preparedReceiptFailureDiagnostic(stdout, expected = {}, subprocess = {}) {
   const structured = String(stdout ?? '').split(/\r?\n/).map(line =>
     line.match(/^ARTIFACT_CACHE_DIAGNOSTIC=(\{.{1,4096}\})$/)?.[1]).find(Boolean);
   if (structured) {
+    let details;
     try {
-      const details = JSON.parse(structured);
-      const identities = [['candidateSha', 'candidateSha', SHA], ['runId', 'runId', /^\d{1,20}$/],
-        ['runAttempt', 'runAttempt', /^\d{1,6}$/]];
-      if (details.schema !== 1 || !SAFE_RECEIPT_STAGES.has(details.stage)
-          || typeof details.ghcrReadbackCompleted !== 'boolean') throw new Error('invalid safe diagnostic');
-      for (const [field, expectedField, pattern] of identities) {
-        if (typeof details[field] !== 'string' || !pattern.test(details[field])
-            || (expected[expectedField] !== undefined && details[field] !== expected[expectedField]))
-          throw new Error('diagnostic identity mismatch');
-      }
-      const result = {stage:'prepare_receipt_readback', substage:details.stage,
-        resource:details.stage.startsWith('ghcr_receipt') || details.stage === 'ghcr_receipt'
-          ? 'ghcr_prepare_receipt' : details.stage === 'static_artifact_readback' ? 'ghcr_static_artifact'
-            : details.stage === 'receipt_validation' ? 'prepare_receipt' : 'prepare_evidence',
-        code:details.stage.startsWith('ghcr_receipt') || details.stage === 'ghcr_receipt' || details.stage === 'static_artifact_readback'
-          ? 'GHCR_READ_FAILED' : details.stage === 'receipt_validation' ? 'PREPARE_RECEIPT_INVALID' : 'PREPARE_EVIDENCE_FAILED',
-        ghcrReadbackCompleted:details.ghcrReadbackCompleted};
-      if (typeof details.errorType === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,47}$/.test(details.errorType)) result.errorType = details.errorType;
-      if (SAFE_RECEIPT_CATEGORIES.has(details.category)) result.category = details.category;
-      if (Number.isInteger(details.httpStatus) && details.httpStatus >= 400 && details.httpStatus <= 599) result.httpStatus = details.httpStatus;
-      for (const [field] of identities) result[field] = details[field];
-      return result;
-    } catch {
-      return {stage:'prepare_receipt_readback',resource:'prepare_receipt',code:'LOCAL_SUBPROCESS_FAILED'};
+      details = JSON.parse(structured);
+    } catch { return localSubprocessFailure(expected, subprocess, 'malformed_diagnostic'); }
+    if (details.schema !== 1) return localSubprocessFailure(expected, subprocess, 'invalid_schema');
+    if (!SAFE_RECEIPT_STAGES.has(details.stage)) return localSubprocessFailure(expected, subprocess, 'unsafe_stage');
+    if (typeof details.ghcrReadbackCompleted !== 'boolean')
+      return localSubprocessFailure(expected, subprocess, 'invalid_completion_flag');
+    const identities = [['candidateSha', 'candidateSha', SHA], ['runId', 'runId', /^\d{1,20}$/],
+      ['runAttempt', 'runAttempt', /^\d{1,6}$/]];
+    for (const [field, expectedField, pattern] of identities) {
+      if (typeof details[field] !== 'string' || !pattern.test(details[field])
+          || (expected[expectedField] !== undefined && details[field] !== expected[expectedField]))
+        return localSubprocessFailure(expected, subprocess, 'identity_mismatch');
     }
+    const result = {stage:'prepare_receipt_readback', substage:details.stage,
+      resource:details.stage.startsWith('ghcr_receipt') || details.stage === 'ghcr_receipt'
+        ? 'ghcr_prepare_receipt' : details.stage === 'static_artifact_readback' ? 'ghcr_static_artifact'
+          : details.stage === 'receipt_validation' ? 'prepare_receipt' : 'prepare_evidence',
+      code:details.stage.startsWith('ghcr_receipt') || details.stage === 'ghcr_receipt' || details.stage === 'static_artifact_readback'
+        ? 'GHCR_READ_FAILED' : details.stage === 'receipt_validation' ? 'PREPARE_RECEIPT_INVALID' : 'PREPARE_EVIDENCE_FAILED',
+      ghcrReadbackCompleted:details.ghcrReadbackCompleted};
+    if (typeof details.errorType === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,47}$/.test(details.errorType)) result.errorType = details.errorType;
+    if (SAFE_RECEIPT_CATEGORIES.has(details.category)) result.category = details.category;
+    if (Number.isInteger(details.httpStatus) && details.httpStatus >= 400 && details.httpStatus <= 599) result.httpStatus = details.httpStatus;
+    for (const [field] of identities) result[field] = details[field];
+    return result;
   }
   const details = String(stdout ?? '').split(/\r?\n/).map(line =>
     line.match(/^ARTIFACT_CACHE=BLOCKED STAGE=([a-z0-9_]{1,48}) ERROR_TYPE=([A-Za-z0-9_]{1,48})$/))
     .find(Boolean);
-  if (!details || !SAFE_RECEIPT_STAGES.has(details[1]))
-    return {stage: 'prepare_receipt_readback', resource: 'prepare_receipt', code: 'LOCAL_SUBPROCESS_FAILED'};
+  if (!details) return localSubprocessFailure(expected, subprocess, 'missing_diagnostic');
+  if (!SAFE_RECEIPT_STAGES.has(details[1])) return localSubprocessFailure(expected, subprocess, 'unsafe_stage');
   const resourceByStage = {prepare_run_metadata: 'prepare_evidence', current_main_ref: 'prepare_evidence',
     ghcr_receipt: 'ghcr_prepare_receipt', prepare_publisher_logs: 'prepare_evidence',
     static_artifact_readback: 'ghcr_static_artifact', receipt_validation: 'prepare_receipt'};
@@ -213,7 +245,7 @@ export function resolvePrepareReceipt(sha, runId, attempt, env = process.env) {
     if (result.status !== 0) {
       const error = new OrchestrationError('Exact Prepare receipt GHCR readback or run-log provenance verification failed');
       error.controllerDiagnostic = preparedReceiptFailureDiagnostic(result.stdout,
-        {candidateSha:sha, runId:String(runId), runAttempt:String(attempt)});
+        {candidateSha:sha, runId:String(runId), runAttempt:String(attempt)}, result);
       throw error;
     }
     const evidence = JSON.parse(fs.readFileSync(join(directory, 'ghcr-evidence.json'), 'utf8'));

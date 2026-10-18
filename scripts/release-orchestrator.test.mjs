@@ -55,7 +55,7 @@ test('prepared receipt diagnostics classify only an allowlisted sanitized stage'
   assert.deepEqual(preparedReceiptFailureDiagnostic('ARTIFACT_CACHE=BLOCKED STAGE=receipt_validation ERROR_TYPE=ValueError'),
     {stage:'prepare_receipt_readback',substage:'receipt_validation',resource:'prepare_receipt',code:'PREPARE_RECEIPT_INVALID'});
   assert.deepEqual(preparedReceiptFailureDiagnostic('ARTIFACT_CACHE=BLOCKED STAGE=untrusted ERROR_TYPE=SecretError'),
-    {stage:'prepare_receipt_readback',resource:'prepare_receipt',code:'LOCAL_SUBPROCESS_FAILED'});
+    {stage:'prepare_receipt_readback',resource:'prepare_receipt',code:'LOCAL_SUBPROCESS_FAILED',diagnosticRejection:'unsafe_stage'});
   assert.doesNotMatch(JSON.stringify(preparedReceiptFailureDiagnostic('ARTIFACT_CACHE=BLOCKED STAGE=ghcr_receipt ERROR_TYPE=AuthorizationHeader')),/AuthorizationHeader/);
 });
 test('prepared receipt structured diagnostics preserve safe GHCR category and status for the exact run',()=>{
@@ -80,7 +80,26 @@ test('prepared receipt structured diagnostics reject mismatched identity and uns
     candidateSha:'b'.repeat(40),runId:'123',runAttempt:'2',ghcrReadbackCompleted:false};
   const output=`ARTIFACT_CACHE_DIAGNOSTIC=${JSON.stringify(payload)}`;
   assert.deepEqual(preparedReceiptFailureDiagnostic(output,{candidateSha:sha,runId:'123',runAttempt:'2'}),
-    {stage:'prepare_receipt_readback',resource:'prepare_receipt',code:'LOCAL_SUBPROCESS_FAILED'});
+    {stage:'prepare_receipt_readback',resource:'prepare_receipt',code:'LOCAL_SUBPROCESS_FAILED',
+      diagnosticRejection:'identity_mismatch',candidateSha:sha,runId:'123',runAttempt:'2'});
+});
+test('receipt subprocess failure reports only allowlisted execution metadata, never raw stderr',()=>{
+  const diagnostic=preparedReceiptFailureDiagnostic('',{candidateSha:sha,runId:'123',runAttempt:'2'},
+    {status:1,signal:null,error:null,stderr:'Traceback at /private/secret/path.py\nModuleNotFoundError: private-module-secret'});
+  assert.deepEqual(diagnostic,{stage:'prepare_receipt_readback',resource:'prepare_receipt',
+    code:'LOCAL_SUBPROCESS_FAILED',candidateSha:sha,runId:'123',runAttempt:'2',
+    subprocessStatus:1,subprocessStderrErrorType:'ModuleNotFoundError',diagnosticRejection:'missing_diagnostic'});
+  assert.doesNotMatch(JSON.stringify(diagnostic),/private|secret|path\.py/);
+  const error=new OrchestrationError('private subprocess detail');
+  error.controllerDiagnostic=diagnostic;
+  assert.deepEqual(controllerFailureDiagnostic(error,{candidateSha:sha,prepareRunId:'123',prepareRunAttempt:'2'}),
+    {state:'BLOCKED',stage:'prepare_receipt_readback',code:'LOCAL_SUBPROCESS_FAILED',resource:'prepare_receipt',
+      candidateSha:sha,prepareRunId:'123',prepareRunAttempt:'2',subprocessStatus:1,
+      subprocessStderrErrorType:'ModuleNotFoundError',diagnosticRejection:'missing_diagnostic'});
+  assert.deepEqual(preparedReceiptFailureDiagnostic('',{candidateSha:sha,runId:'123',runAttempt:'2'},
+    {status:null,signal:null,error:{name:'Error',code:'ENOENT'},stderr:''}),
+    {stage:'prepare_receipt_readback',resource:'prepare_receipt',code:'LOCAL_SUBPROCESS_FAILED',
+      candidateSha:sha,runId:'123',runAttempt:'2',subprocessErrorCode:'ENOENT',diagnosticRejection:'missing_diagnostic'});
 });
 test('summary failure after a successful dispatch is reported as uncertain post-dispatch state',()=>{
   assert.throws(()=>appendControllerResultSummary(()=>{throw new Error('sensitive filesystem detail');},
