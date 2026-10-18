@@ -1,12 +1,16 @@
 # GPoint Codex role initialization and verification
 
+## Mandatory GitHub access context
+
+For any task that may call GitHub or GHCR, the selected Codex role must first perform this обязательный preflight: read the current [PROSTOR «GitHub доступ» standard](https://linear.app/bestuzhev/document/github-dostup-7970682d1b80), in addition to that role's required project documents. The root `AGENTS.md` and selected role profile carry the same mandatory rule; do not infer that a model read the Linear document merely because it is linked. Before declaring a GitHub/GHCR blocker, identify the operation and diagnose именно проверенного execution context (Codex sandbox, separately authorized host Mac, connector/API, or hosted runner), штатные authentication methods, and operation permissions. Record `NETWORK`, `TOOLING`, `AUTH`, `PERMISSION`, and `OWNER_AUTHORIZATION` separately. DNS inside one sandbox is not proof of global service unavailability; report the error as scoped to the checked context and check штатные доступные способы before concluding.
+
 ## Initialize a role
 
 The root `AGENTS.md` is role-neutral. A chat has no specialized role until the user explicitly initializes exactly one role with one of these commands:
 
 - `ROLE=DEV` — ordinary GPoint development.
 - `ROLE=LAB` — AGATA Conversation Lab.
-- `ROLE=DEVOPS` — release preparation and operations.
+- `ROLE=DEVOPS` — release preparation and operations; load `.codex/roles/devops.md`.
 
 Send the selected command once at the beginning of a new GPoint Codex chat. The agent then reads only the matching `.codex/roles/` profile and its required current Linear context, and keeps that role for the chat. Without a selected role, ordinary research and auxiliary tasks remain allowed; role-specific processes and documents must not load automatically. A chat title alone never selects a role.
 

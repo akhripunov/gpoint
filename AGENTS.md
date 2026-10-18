@@ -9,6 +9,14 @@
 - For design work, use the repo-local [gpoint-design skill](.agents/skills/gpoint-design/SKILL.md).
 - For editable Pen work, use the canonical connected Pen MCP/CLI only; Computer Use/GUI may inspect but must not modify canvas, files, artboards, or properties. Validate render/read-back and preserve OWNER visual approval.
 
+## Обязательный preflight GitHub/GHCR
+
+При любой ошибке GitHub или GHCR сначала прочитать актуальный стандарт [«GitHub доступ» в Linear](https://linear.app/bestuzhev/document/github-dostup-7970682d1b80), затем проверить штатные доступные способы подключения до объявления BLOCKED. Уточнить конкретную операцию и OWNER scope; execution context (Codex sandbox, разрешённый host Mac, GitHub connector/API или GitHub-hosted runner); DNS/HTTPS доступность именно из этого context; нужные CLI и credential helpers; авторизацию и operation-specific permissions. Секреты и значения token/header не выводить.
+
+Разделять причины как `NETWORK`, `TOOLING`, `AUTH`, `PERMISSION`, `OWNER_AUTHORIZATION`. Сбой одного способа — например, недействительный `gh` login — не доказывает отказ других штатных способов. DNS внутри sandbox не доказывает глобальную недоступность: ошибка разрешения имени означает только `NETWORK` для проверенного context, пока допустимые контексты/способы подключения не диагностированы. HTTP 401/405 от GHCR `/v2/` подтверждает достижимость сервера, но сам по себе не подтверждает package read/write. Успешная host Mac проверка не доказывает сетевую доступность sandbox или permissions workflow `GITHUB_TOKEN`.
+
+Проверять только разрешённые контексты и безопасные read-only операции; не обходить sandbox/host approval, не подменять пользователя или token, не запускать дополнительный workflow и не расширять OWNER scope. Для уже разрешённой операции продолжать после восстановления конкретного доступа; если блокируется только один маршрут, останавливать только его. В отчёте указывать контекст, команду/результат без секретов, пять классификаций и одно минимальное действие OWNER, если оно действительно требуется.
+
 ## Safety & Release Invariants
 
 - Use only the canonical release flow, exact verified SHA, applicable `EXACT_SHA` or `TASK_SCOPED_AUTO` authorization, and all fail-closed gates. A push or Prepare alone is never production authorization.
