@@ -58,6 +58,30 @@ test('prepared receipt diagnostics classify only an allowlisted sanitized stage'
     {stage:'prepare_receipt_readback',resource:'prepare_receipt',code:'LOCAL_SUBPROCESS_FAILED'});
   assert.doesNotMatch(JSON.stringify(preparedReceiptFailureDiagnostic('ARTIFACT_CACHE=BLOCKED STAGE=ghcr_receipt ERROR_TYPE=AuthorizationHeader')),/AuthorizationHeader/);
 });
+test('prepared receipt structured diagnostics preserve safe GHCR category and status for the exact run',()=>{
+  const payload={schema:1,stage:'ghcr_receipt_tag_manifest_auth_token',errorType:'HTTPError',category:'PERMISSION',httpStatus:403,
+    candidateSha:sha,runId:'123',runAttempt:'2',ghcrReadbackCompleted:false};
+  const output=`ARTIFACT_CACHE_DIAGNOSTIC=${JSON.stringify(payload)}\nARTIFACT_CACHE=BLOCKED STAGE=ghcr_receipt ERROR_TYPE=NetworkStageError`;
+  assert.deepEqual(preparedReceiptFailureDiagnostic(output,{candidateSha:sha,runId:'123',runAttempt:'2'}),{
+    stage:'prepare_receipt_readback',substage:'ghcr_receipt_tag_manifest_auth_token',resource:'ghcr_prepare_receipt',
+    code:'GHCR_READ_FAILED',errorType:'HTTPError',category:'PERMISSION',httpStatus:403,
+    ghcrReadbackCompleted:false,candidateSha:sha,runId:'123',runAttempt:'2'});
+  const error=new OrchestrationError('private GHCR response body');
+  error.controllerDiagnostic=preparedReceiptFailureDiagnostic(output,{candidateSha:sha,runId:'123',runAttempt:'2'});
+  const controller=controllerFailureDiagnostic(error,{stage:'prepare_receipt_readback',candidateSha:sha,
+    prepareRunId:'123',prepareRunAttempt:'2'});
+  assert.deepEqual(controller,{state:'BLOCKED',stage:'prepare_receipt_readback',code:'GHCR_READ_FAILED',httpStatus:403,
+    resource:'ghcr_prepare_receipt',substage:'ghcr_receipt_tag_manifest_auth_token',errorType:'HTTPError',
+    category:'PERMISSION',ghcrReadbackCompleted:false,candidateSha:sha,prepareRunId:'123',prepareRunAttempt:'2'});
+  assert.doesNotMatch(JSON.stringify(controller),/private GHCR response body|"secret"|Bearer |Authorization:/);
+});
+test('prepared receipt structured diagnostics reject mismatched identity and unsafe categories',()=>{
+  const payload={schema:1,stage:'ghcr_receipt_tag_manifest_auth_token',errorType:'HTTPError',category:'SECRET_TOKEN',httpStatus:403,
+    candidateSha:'b'.repeat(40),runId:'123',runAttempt:'2',ghcrReadbackCompleted:false};
+  const output=`ARTIFACT_CACHE_DIAGNOSTIC=${JSON.stringify(payload)}`;
+  assert.deepEqual(preparedReceiptFailureDiagnostic(output,{candidateSha:sha,runId:'123',runAttempt:'2'}),
+    {stage:'prepare_receipt_readback',resource:'prepare_receipt',code:'LOCAL_SUBPROCESS_FAILED'});
+});
 test('summary failure after a successful dispatch is reported as uncertain post-dispatch state',()=>{
   assert.throws(()=>appendControllerResultSummary(()=>{throw new Error('sensitive filesystem detail');},
     {state:'TASK_SCOPED_AUTO_DISPATCHED',candidateSha:sha,authorizationId:'gpoint-task-2026-10-16-001'},1),error=>{
