@@ -94,6 +94,21 @@ test('GHCR artifact-layer diagnostics survive allowlisting for manifest and blob
       ghcrReadbackCompleted:false,candidateSha:sha,prepareRunId:'123',prepareRunAttempt:'2'});
   }
 });
+test('receipt diagnostic preserves only an allowlisted OCI validation reason code',()=>{
+  const payload={schema:1,stage:'ghcr_artifact_digest_authenticated_read',errorType:'RuntimeError',category:'VALIDATION',
+    reasonCode:'OCI_MANIFEST_DIGEST_MISMATCH',candidateSha:sha,runId:'123',runAttempt:'2',ghcrReadbackCompleted:false};
+  const output=`ARTIFACT_CACHE_DIAGNOSTIC=${JSON.stringify(payload)}`;
+  const diagnostic=preparedReceiptFailureDiagnostic(output,{candidateSha:sha,runId:'123',runAttempt:'2'});
+  assert.equal(diagnostic.reasonCode,'OCI_MANIFEST_DIGEST_MISMATCH');
+  const error=new OrchestrationError('untrusted detail'); error.controllerDiagnostic=diagnostic;
+  const controller=controllerFailureDiagnostic(error,{candidateSha:sha,prepareRunId:'123',prepareRunAttempt:'2'});
+  assert.equal(controller.reasonCode,'OCI_MANIFEST_DIGEST_MISMATCH');
+  payload.reasonCode='Bearer private-token';
+  const untrusted=preparedReceiptFailureDiagnostic(`ARTIFACT_CACHE_DIAGNOSTIC=${JSON.stringify(payload)}`,
+    {candidateSha:sha,runId:'123',runAttempt:'2'});
+  assert.equal(untrusted.reasonCode,undefined);
+  assert.doesNotMatch(JSON.stringify(untrusted),/private-token|Bearer/);
+});
 test('prepared receipt structured diagnostics reject mismatched identity and unsafe categories',()=>{
   const payload={schema:1,stage:'ghcr_receipt_tag_manifest_auth_token',errorType:'HTTPError',category:'SECRET_TOKEN',httpStatus:403,
     candidateSha:'b'.repeat(40),runId:'123',runAttempt:'2',ghcrReadbackCompleted:false};

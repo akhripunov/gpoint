@@ -32,6 +32,9 @@ const SAFE_RECEIPT_STAGES = new Set(['prepare_run_metadata', 'current_main_ref',
   'ghcr_artifact_digest_authenticated_read', 'ghcr_artifact_blob', 'ghcr_artifact_blob_auth_challenge',
   'ghcr_artifact_blob_auth_token', 'ghcr_artifact_blob_authenticated_read']);
 const SAFE_RECEIPT_CATEGORIES = new Set(['AUTH', 'PERMISSION', 'NETWORK', 'HTTP', 'INVALID_RESPONSE', 'LOCAL_IO', 'VALIDATION', 'INTERNAL']);
+const SAFE_RECEIPT_REASON_CODES = new Set(['GHCR_RESPONSE_TOO_LARGE', 'OCI_MANIFEST_DIGEST_MISMATCH',
+  'OCI_MANIFEST_TYPE_MISMATCH', 'OCI_MANIFEST_INVALID_JSON', 'OCI_LAYER_COUNT_INVALID',
+  'OCI_LAYER_DESCRIPTOR_INVALID', 'OCI_LAYER_CONTENT_MISMATCH']);
 const SAFE_SUBPROCESS_ERROR_CODES = new Set(['EACCES', 'EAGAIN', 'EBADF', 'EBUSY', 'EEXIST', 'EFBIG', 'EIO', 'EISDIR',
   'EMFILE', 'ENFILE', 'ENOENT', 'ENOMEM', 'ENOBUFS', 'ENOSPC', 'ENOTDIR', 'EPERM', 'EROFS', 'ETIMEDOUT', 'EPIPE', 'EINVAL']);
 const SAFE_SUBPROCESS_SIGNALS = new Set(['SIGABRT', 'SIGALRM', 'SIGBUS', 'SIGFPE', 'SIGHUP', 'SIGILL', 'SIGINT',
@@ -63,6 +66,7 @@ export function controllerFailureDiagnostic(error, {stage = 'event_payload', res
   if (SAFE_RECEIPT_STAGES.has(nested.substage)) result.substage = nested.substage;
   if (typeof nested.errorType === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,47}$/.test(nested.errorType)) result.errorType = nested.errorType;
   if (SAFE_RECEIPT_CATEGORIES.has(nested.category)) result.category = nested.category;
+  if (SAFE_RECEIPT_REASON_CODES.has(nested.reasonCode)) result.reasonCode = nested.reasonCode;
   if (typeof nested.ghcrReadbackCompleted === 'boolean') result.ghcrReadbackCompleted = nested.ghcrReadbackCompleted;
   if (Number.isInteger(nested.subprocessStatus) && nested.subprocessStatus >= 0 && nested.subprocessStatus <= 255)
     result.subprocessStatus = nested.subprocessStatus;
@@ -124,6 +128,7 @@ export function preparedReceiptFailureDiagnostic(stdout, expected = {}, subproce
       ghcrReadbackCompleted:details.ghcrReadbackCompleted};
     if (typeof details.errorType === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,47}$/.test(details.errorType)) result.errorType = details.errorType;
     if (SAFE_RECEIPT_CATEGORIES.has(details.category)) result.category = details.category;
+    if (SAFE_RECEIPT_REASON_CODES.has(details.reasonCode)) result.reasonCode = details.reasonCode;
     if (Number.isInteger(details.httpStatus) && details.httpStatus >= 400 && details.httpStatus <= 599) result.httpStatus = details.httpStatus;
     for (const [field] of identities) result[field] = details[field];
     return result;

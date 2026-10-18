@@ -32,6 +32,14 @@ MAX_RECEIPT_BYTES = 1024 * 1024
 MAX_STATIC_BYTES = 512 * 1024 * 1024
 GHCR_READ_RETRY_BUDGET_SECONDS = 60
 NETWORK_BUDGET = None
+SAFE_DIAGNOSTIC_REASON_CODES = {
+    'GHCR receipt response exceeds size limit': 'GHCR_RESPONSE_TOO_LARGE',
+    'GHCR artifact manifest digest mismatch': 'OCI_MANIFEST_DIGEST_MISMATCH',
+    'GHCR artifact type is invalid': 'OCI_MANIFEST_TYPE_MISMATCH',
+    'GHCR artifact must contain exactly one layer': 'OCI_LAYER_COUNT_INVALID',
+    'GHCR artifact layer descriptor is invalid': 'OCI_LAYER_DESCRIPTOR_INVALID',
+    'GHCR artifact layer digest or size mismatch': 'OCI_LAYER_CONTENT_MISMATCH',
+}
 
 
 class NetworkStageError(RuntimeError):
@@ -84,7 +92,7 @@ def exception_category(error):
 def diagnostic_payload(error):
     status = error.http_status if isinstance(error, NetworkStageError) else (
         error.code if isinstance(error, urllib.error.HTTPError) else None)
-    return {
+    diagnostic = {
         'schema': 1,
         'stage': error.stage if isinstance(error, NetworkStageError) else ACTIVE_DIAGNOSTIC_STAGE,
         'errorType': error.error_type if isinstance(error, NetworkStageError) else safe_exception_type(error),
@@ -93,6 +101,13 @@ def diagnostic_payload(error):
         **DIAGNOSTIC_IDENTITY,
         'ghcrReadbackCompleted': GHCR_READBACK_COMPLETED,
     }
+    if isinstance(error, json.JSONDecodeError) and ACTIVE_DIAGNOSTIC_STAGE.startswith('ghcr_artifact_digest'):
+        diagnostic['reasonCode'] = 'OCI_MANIFEST_INVALID_JSON'
+    else:
+        reason_code = SAFE_DIAGNOSTIC_REASON_CODES.get(str(error))
+        if reason_code:
+            diagnostic['reasonCode'] = reason_code
+    return diagnostic
 
 
 def emit_blocked_diagnostic(error):

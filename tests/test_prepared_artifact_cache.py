@@ -344,6 +344,15 @@ class GhcrReceiptTests(unittest.TestCase):
             generic_output = ''.join(call.args[0] for call in stdout.write.call_args_list)
         self.assertNotRegex(generic_output, r'user-token|user:pass|example\.invalid')
 
+    def test_diagnostic_maps_only_known_oci_validation_errors_to_safe_reason_codes(self):
+        CACHE.set_diagnostic_stage('ghcr_artifact_digest_authenticated_read')
+        known = CACHE.diagnostic_payload(RuntimeError('GHCR artifact manifest digest mismatch'))
+        self.assertEqual(known['reasonCode'], 'OCI_MANIFEST_DIGEST_MISMATCH')
+        self.assertNotIn('GHCR artifact manifest digest mismatch', json.dumps(known))
+        unknown = CACHE.diagnostic_payload(RuntimeError('Bearer private-token https://secret.example'))
+        self.assertNotIn('reasonCode', unknown)
+        self.assertNotIn('private-token', json.dumps(unknown))
+
     def test_real_cli_entrypoint_successfully_reads_fixture_receipt_and_writes_verified_evidence(self):
         # This exercises the actual CLI with a deterministic local HTTP fixture. It is
         # logic coverage only; it does not attest live GHCR access or production parity.
