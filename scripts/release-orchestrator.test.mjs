@@ -76,7 +76,10 @@ test('prepared receipt structured diagnostics preserve safe GHCR category and st
   assert.doesNotMatch(JSON.stringify(controller),/private GHCR response body|"secret"|Bearer |Authorization:/);
 });
 test('GHCR artifact-layer diagnostics survive allowlisting for manifest and blob readback stages',()=>{
-  for (const stage of ['ghcr_artifact_digest','ghcr_artifact_blob']) {
+  const stages=['ghcr_artifact_digest','ghcr_artifact_digest_auth_challenge','ghcr_artifact_digest_auth_token',
+    'ghcr_artifact_digest_authenticated_read','ghcr_artifact_blob','ghcr_artifact_blob_auth_challenge',
+    'ghcr_artifact_blob_auth_token','ghcr_artifact_blob_authenticated_read'];
+  for (const stage of stages) {
     const payload={schema:1,stage,errorType:'HTTPError',category:'PERMISSION',httpStatus:403,
       candidateSha:sha,runId:'123',runAttempt:'2',ghcrReadbackCompleted:false};
     const output=`ARTIFACT_CACHE_DIAGNOSTIC=${JSON.stringify(payload)}`;

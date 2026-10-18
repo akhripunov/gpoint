@@ -28,7 +28,9 @@ const SAFE_RECEIPT_STAGES = new Set(['prepare_run_metadata', 'current_main_ref',
   'ghcr_receipt_digest_readback_auth_challenge', 'ghcr_receipt_digest_readback_auth_token',
   'ghcr_receipt_digest_readback_authenticated_read', 'ghcr_receipt_layer_readback_auth_challenge',
   'ghcr_receipt_layer_readback_auth_token', 'ghcr_receipt_layer_readback_authenticated_read',
-  'ghcr_artifact_digest', 'ghcr_artifact_blob']);
+  'ghcr_artifact_digest', 'ghcr_artifact_digest_auth_challenge', 'ghcr_artifact_digest_auth_token',
+  'ghcr_artifact_digest_authenticated_read', 'ghcr_artifact_blob', 'ghcr_artifact_blob_auth_challenge',
+  'ghcr_artifact_blob_auth_token', 'ghcr_artifact_blob_authenticated_read']);
 const SAFE_RECEIPT_CATEGORIES = new Set(['AUTH', 'PERMISSION', 'NETWORK', 'HTTP', 'INVALID_RESPONSE', 'LOCAL_IO', 'VALIDATION', 'INTERNAL']);
 const SAFE_SUBPROCESS_ERROR_CODES = new Set(['EACCES', 'EAGAIN', 'EBADF', 'EBUSY', 'EEXIST', 'EFBIG', 'EIO', 'EISDIR',
   'EMFILE', 'ENFILE', 'ENOENT', 'ENOMEM', 'ENOBUFS', 'ENOSPC', 'ENOTDIR', 'EPERM', 'EROFS', 'ETIMEDOUT', 'EPIPE', 'EINVAL']);
@@ -112,8 +114,7 @@ export function preparedReceiptFailureDiagnostic(stdout, expected = {}, subproce
           || (expected[expectedField] !== undefined && details[field] !== expected[expectedField]))
         return localSubprocessFailure(expected, subprocess, 'identity_mismatch');
     }
-    const isGhcrReceiptRead = details.stage === 'ghcr_receipt' || details.stage.startsWith('ghcr_receipt')
-      || details.stage === 'ghcr_artifact_digest' || details.stage === 'ghcr_artifact_blob';
+    const isGhcrReceiptRead = details.stage.startsWith('ghcr_receipt') || details.stage.startsWith('ghcr_artifact_');
     const result = {stage:'prepare_receipt_readback', substage:details.stage,
       resource:isGhcrReceiptRead
         ? 'ghcr_prepare_receipt' : details.stage === 'static_artifact_readback' ? 'ghcr_static_artifact'
