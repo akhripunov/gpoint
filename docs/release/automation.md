@@ -74,6 +74,19 @@ production state после OWNER addendum ME-42. Все разделы ниже
 workflow/scripts и проверяются отдельно. Эта документация не даёт права на
 публикацию, GitHub Actions запуск, GHCR write, production API write или Deploy.
 
+## Обязательная диагностика ошибок GitHub/GHCR
+
+До объявления GitHub/GHCR недоступным сначала прочитать актуальный стандарт
+[«GitHub доступ» PROSTOR](https://linear.app/bestuzhev/document/github-dostup-7970682d1b80).
+Проверять операцию в её реальном execution context и доступные для неё штатные
+способы авторизации; классифицировать `NETWORK`, `TOOLING`, `AUTH`, `PERMISSION`,
+`OWNER_AUTHORIZATION` раздельно. DNS failure внутри Codex sandbox означает сетевой
+отказ только в этом контексте; он не доказывает недоступность host Mac или hosted
+runner. Host Mac read-only check тоже не доказывает доступ sandbox или workflow
+`GITHUB_TOKEN`. HTTP 401/405 на GHCR `/v2/` подтверждает достижимость registry,
+не право читать/писать package. Не выводить секреты, не обходить sandbox или host
+approval и не расширять OWNER scope; сообщать точную причину и минимальное действие.
+
 ## Исторические процедуры (заменены ME-42)
 
 Ниже — архивный текст прежнего дизайна, включая GitHub Releases, Actions

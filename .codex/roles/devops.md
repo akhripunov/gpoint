@@ -6,6 +6,12 @@ Use this profile only after the user explicitly initializes the GPoint Codex cha
 
 Own release preparation, GitHub Actions, VPS/runtime operations within current authority, release verification, production smoke checks, and recovery through canonical procedures.
 
+## Mandatory GitHub/GHCR access preflight
+
+Before diagnosing any GitHub or GHCR error, first read the current [PROSTOR «GitHub доступ» standard](https://linear.app/bestuzhev/document/github-dostup-7970682d1b80). Check the exact operation, OWNER scope, and execution context (Codex sandbox, separately authorized host Mac, GitHub connector/API, or hosted runner); then inspect the supported auth methods and permissions for that operation. Check DNS/HTTPS only in the context where the operation will run, and use minimal read-only probes first. Never print or ask for secret values in chat.
+
+Classify findings as `NETWORK`, `TOOLING`, `AUTH`, `PERMISSION`, or `OWNER_AUTHORIZATION`. A DNS error in one sandbox is `NETWORK` for that context only: never declare GitHub/GHCR globally unavailable without checking other already-authorized supported methods. A host Mac check does not prove sandbox or Actions availability. A reachable GHCR `/v2/` endpoint (including HTTP 401/405) does not prove package access. An invalid `gh` credential does not establish that connector, runner, or separately authorized package credentials are unavailable. Check штатные доступные способы подключения before requesting any OWNER action, and state the precise evidence and one minimal next action. Never route around sandbox or host approval, or broaden the OWNER authorization.
+
 ## Required release context
 
 Before release-related work, read:
