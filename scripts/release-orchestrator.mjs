@@ -19,7 +19,7 @@ const DIAGNOSTIC_STAGES = new Set(['event_payload', 'prepare_event_validation', 
   'atomic_claim_readback', 'deploy_workflow_dispatch']);
 const DIAGNOSTIC_RESOURCES = new Set(['prepare_run', 'prepare_receipt', 'deploy_workflow_runs',
   'ghcr_prepare_receipt', 'authorization_state_ref', 'task_authorization_claim', 'deploy_workflow']);
-const SAFE_RECEIPT_STAGES = new Set(['prepare_run_metadata', 'current_main_ref', 'ghcr_receipt_manifest',
+const SAFE_RECEIPT_STAGES = new Set(['prepare_run_metadata', 'current_main_ref', 'ghcr_receipt', 'ghcr_receipt_manifest',
   'ghcr_receipt_digest', 'ghcr_artifact_digest', 'ghcr_artifact_blob', 'prepare_job_identity',
   'prepare_publisher_logs', 'static_artifact_readback', 'receipt_validation']);
 
@@ -46,6 +46,15 @@ export function controllerFailureDiagnostic(error, {stage = 'event_payload', res
   if (/^\d{1,20}$/.test(prepareRunId)) result.prepareRunId = prepareRunId;
   if (/^\d{1,6}$/.test(prepareRunAttempt)) result.prepareRunAttempt = prepareRunAttempt;
   return result;
+}
+
+export function preparedReceiptFailureDiagnostic(stdout) {
+  const details = String(stdout ?? '').split(/\r?\n/).map(line =>
+    line.match(/^ARTIFACT_CACHE=BLOCKED STAGE=([a-z0-9_]{1,48}) ERROR_TYPE=([A-Za-z0-9_]{1,48})$/))
+    .find(Boolean);
+  return details && SAFE_RECEIPT_STAGES.has(details[1])
+    ? {stage: 'prepare_receipt_readback', resource: 'prepare_receipt', code: 'GHCR_READ_FAILED'}
+    : {stage: 'prepare_receipt_readback', resource: 'prepare_receipt', code: 'LOCAL_SUBPROCESS_FAILED'};
 }
 
 function notifyStage(onStage, stage) {
@@ -139,14 +148,8 @@ export function resolvePrepareReceipt(sha, runId, attempt, env = process.env) {
         GHCR_READ_TOKEN: env.GITHUB_TOKEN ?? '', GITHUB_TOKEN: env.GITHUB_TOKEN ?? ''},
     });
     if (result.status !== 0) {
-      const details = String(result.stdout ?? '').split(/\r?\n/).map(line =>
-        line.match(/^ARTIFACT_CACHE=BLOCKED STAGE=([a-z0-9_]{1,48}) ERROR_TYPE=([A-Za-z0-9_]{1,48})$/))
-        .find(Boolean);
-      const diagnostic = details && SAFE_RECEIPT_STAGES.has(details[1])
-        ? {stage: 'prepare_receipt_readback', resource: 'prepare_receipt', code: 'GHCR_READ_FAILED'}
-        : {stage: 'prepare_receipt_readback', resource: 'prepare_receipt', code: 'LOCAL_SUBPROCESS_FAILED'};
       const error = new OrchestrationError('Exact Prepare receipt GHCR readback or run-log provenance verification failed');
-      error.controllerDiagnostic = diagnostic;
+      error.controllerDiagnostic = preparedReceiptFailureDiagnostic(result.stdout);
       throw error;
     }
     const evidence = JSON.parse(fs.readFileSync(join(directory, 'ghcr-evidence.json'), 'utf8'));

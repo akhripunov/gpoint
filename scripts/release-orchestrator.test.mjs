@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
-import {dispatchPrepare as dispatchPrepareImpl, findTaskAuthorization, validateEvent, OrchestrationError, taskAutoClaimRef, controllerFailureDiagnostic} from './release-orchestrator.mjs';
+import {dispatchPrepare as dispatchPrepareImpl, findTaskAuthorization, validateEvent, OrchestrationError, taskAutoClaimRef,
+  controllerFailureDiagnostic, preparedReceiptFailureDiagnostic} from './release-orchestrator.mjs';
 import {ownerTaskCommitmentSha256, candidateScopeDiff, validateTaskAuthorization} from './release-authorization.mjs';
 
 const sha = 'a'.repeat(40);
@@ -43,6 +44,13 @@ test('controller failure diagnostics expose bounded stage metadata without leaki
   assert.deepEqual(diagnostic,{state:'BLOCKED',stage:'prepare_receipt_readback',code:'GITHUB_HTTP_ERROR',httpStatus:403,
     resource:'ghcr_prepare_receipt',candidateSha:sha,prepareRunId:'39119441234',prepareRunAttempt:'1'});
   assert.doesNotMatch(JSON.stringify(diagnostic),/private-token|Authorization|sig=private|example\.invalid/);
+});
+test('prepared receipt diagnostics classify only an allowlisted sanitized stage',()=>{
+  assert.deepEqual(preparedReceiptFailureDiagnostic('noise\nARTIFACT_CACHE=BLOCKED STAGE=ghcr_receipt ERROR_TYPE=RegistryError\n'),
+    {stage:'prepare_receipt_readback',resource:'prepare_receipt',code:'GHCR_READ_FAILED'});
+  assert.deepEqual(preparedReceiptFailureDiagnostic('ARTIFACT_CACHE=BLOCKED STAGE=untrusted ERROR_TYPE=SecretError'),
+    {stage:'prepare_receipt_readback',resource:'prepare_receipt',code:'LOCAL_SUBPROCESS_FAILED'});
+  assert.doesNotMatch(JSON.stringify(preparedReceiptFailureDiagnostic('ARTIFACT_CACHE=BLOCKED STAGE=ghcr_receipt ERROR_TYPE=AuthorizationHeader')),/AuthorizationHeader/);
 });
 test('controller records the failing read-only stage and never claims or dispatches after an API error',async()=>{
   const {api,calls}=apiFixture();
