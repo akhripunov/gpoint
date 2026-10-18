@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import {deploymentPayload} from './github-deployments.mjs';
-import {reconcileVerifiedDeployment, reconciledResultEvidence} from './reconcile-deployment.mjs';
+import {fetchOriginalDeployEvidence, reconcileVerifiedDeployment, reconciledResultEvidence} from './reconcile-deployment.mjs';
 
 const sha = 'a'.repeat(40);
 const identity = {candidateSha: sha, runId: '42', runAttempt: '1', prepareRunId: '41',
@@ -32,12 +33,13 @@ const facts = [
   `LIVE_GSALES_MIGRATION_SHA256=${'c'.repeat(64)}`,
 ].join('\n');
 
-function setup({deployEvidence = evidence, deployAttempt = '1', statusState = 'in_progress'} = {}) {
+function setup({deployEvidence = evidence, deployAttempt = '1', statusState = 'in_progress', deployConclusion = 'success'} = {}) {
   const writes = [];
   const client = {
     getDeployment: async id => { assert.equal(id, 7); return deployment; },
     listStatuses: async () => [{state: statusState,
       description: statusState === 'success' ? `stage=complete sha=${sha.slice(0, 12)} run=42/1` : 'stage=post_apply sha=aaaaaaaaaaaa',
+      log_url: identity.logUrl,
       created_at: '2026-10-18T00:01:00Z'}],
     publishStatus: async (target, targetIdentity, status) => {
       writes.push({target, targetIdentity, status}); return {state: status.state};
@@ -48,12 +50,67 @@ function setup({deployEvidence = evidence, deployAttempt = '1', statusState = 'i
       assets: [{id: 92, name: 'bundle.zip', digest: identity.prepareAssetSha256}]} :
       url.includes('/actions/runs/41/attempts/') ? {head_sha: sha, path: '.github/workflows/gpoint-prepare.yml',
         status: 'completed', conclusion: 'success'} :
-      {id: 42, run_attempt: Number(deployAttempt), head_sha: sha, path: '.github/workflows/gpoint-deploy.yml'};
+      {id: 42, run_attempt: Number(deployAttempt), head_sha: sha, path: '.github/workflows/gpoint-deploy.yml',
+        status: 'completed', conclusion: deployConclusion};
     return {ok: true, json: async () => data};
   };
   return {client, writes, fetchImpl, deployEvidence,
     inspectVps: () => facts};
 }
+
+test('durable Deploy evidence resolver verifies exact successful run and reads the OCI artifact by logged digest', async () => {
+  const deployDigest = `sha256:${'d'.repeat(64)}`;
+  const durable = {...evidence, schema: 1, deploymentId: 7, deployRunId: '42', deployRunAttempt: '2',
+    prepareRunId: '41', prepareRunAttempt: '1', ciReceipt: {ghcrManifestDigest: identity.prepareReceiptDigest,
+      prepareReceiptSha256: 'f'.repeat(64), prepareReceiptJson: '{"synthetic":true}'}};
+  const calls = [];
+  const fetchImpl = async url => {
+    if (url.endsWith('/actions/runs/42/attempts/2')) return {ok: true, json: async () => ({id: 42,
+      run_attempt: 2, head_sha: sha, path: '.github/workflows/gpoint-deploy.yml', status: 'completed',
+      conclusion: 'success', event: 'workflow_dispatch', head_branch: 'main'})};
+    if (url.endsWith('/actions/runs/42/attempts/2/jobs?per_page=100')) return {ok: true,
+      json: async () => ({jobs: [{id: 102, name: 'deploy', run_attempt: 2, status: 'completed',
+        conclusion: 'success', steps: [{name: 'Publish deployment result as a GHCR OCI artifact',
+          status: 'completed', conclusion: 'success'}]}]})};
+    if (url.endsWith('/actions/jobs/102/logs')) return {ok: true,
+      arrayBuffer: async () => Buffer.from('synthetic publisher logs')};
+    if (url.endsWith('/actions/runs/41/attempts/1')) return {ok: true, json: async () => ({id: 41,
+      run_attempt: 1, head_sha: sha, path: '.github/workflows/gpoint-prepare.yml', status: 'completed',
+      conclusion: 'success', event: 'push', head_branch: 'main'})};
+    throw new Error(`unexpected ${url}`);
+  };
+  const execFile = (args, options = {}) => {
+    calls.push(args);
+    if (args[0] === 'oras' && args[1] === 'resolve') return `${deployDigest}\n`;
+    if (args[0] === 'unzip' && args[1] === '-Z1') return 'publisher.log\n';
+    if (args[0] === 'unzip' && args[1] === '-p') return `DEPLOY_EVIDENCE_DIGEST=${deployDigest}\n`;
+    if (args[0] === 'oras' && args[1] === 'pull') {
+      assert.equal(args[2], `ghcr.io/akhripunov/gpoint-deploy-evidence@${deployDigest}`);
+      const output = args[args.indexOf('-o') + 1];
+      fs.writeFileSync(`${output}/gpoint-release-result-42-2.json`, JSON.stringify(durable));
+      return '';
+    }
+    assert.fail(`unexpected subprocess ${args.join(' ')}`);
+  };
+  const result = await fetchOriginalDeployEvidence({runId: '42', attempt: '2', candidateSha: sha,
+    deploymentId: 7, prepareRunId: '41', prepareRunAttempt: '1',
+    prepareReceiptDigest: identity.prepareReceiptDigest, token: 'test', fetchImpl, execFile});
+  assert.equal(result.evidenceManifestDigest, deployDigest);
+  assert.equal(result.evidenceContentSha256.length, 64);
+  assert.ok(calls.some(args => args[0] === 'oras' && args[1] === 'pull'
+    && args[2] === `ghcr.io/akhripunov/gpoint-deploy-evidence@${deployDigest}`));
+});
+
+test('durable Deploy evidence resolver rejects a success artifact with a failed Actions run', async () => {
+  let orasTouched = false;
+  await assert.rejects(fetchOriginalDeployEvidence({runId: '42', attempt: '2', candidateSha: sha,
+    deploymentId: 7, prepareRunId: '41', prepareRunAttempt: '1', prepareReceiptDigest: identity.prepareReceiptDigest,
+    token: 'test', fetchImpl: async () => ({ok: true, json: async () => ({id: 42, run_attempt: 2,
+      head_sha: sha, path: '.github/workflows/gpoint-deploy.yml', status: 'in_progress', conclusion: null,
+      event: 'workflow_dispatch', head_branch: 'main'})}), execFile: () => { orasTouched = true; return ''; }}),
+  /not completed successfully on main/);
+  assert.equal(orasTouched, false);
+});
 
 test('reconciles only the exact original Deployment after original and fresh VPS evidence agree', async () => {
   const ctx = setup();
@@ -76,11 +133,27 @@ test('refuses to reconcile when the original Deploy artifact does not prove a ve
   assert.equal(ctx.writes.length, 0);
 });
 
+test('refuses a successful Deployment status when its exact Deploy Actions attempt did not complete successfully', async () => {
+  const ctx = setup();
+  const fetchImpl = async (url, init) => {
+    const response = await ctx.fetchImpl(url, init);
+    const data = await response.json();
+    if (url.includes('/actions/runs/42/attempts/1')) data.conclusion = 'failure';
+    return {...response, json: async () => data};
+  };
+  await assert.rejects(reconcileVerifiedDeployment({client: ctx.client, deploymentId: 7,
+    runId: '42', currentRunAttempt: '2', candidateSha: sha, prepareRunId: '41',
+    prepareRunAttempt: '1', prepareReceiptDigest: `sha256:${'b'.repeat(64)}`, token: 'test', prepareProof,
+    fetchImpl, inspectVps: ctx.inspectVps, readDeployEvidence: async () => ctx.deployEvidence}),
+  /does not prove a verified COMPLETE installation/);
+  assert.equal(ctx.writes.length, 0);
+});
+
 test('accepts only exact verified installation with final-status uncertainty for later metadata reconciliation', async () => {
   const statusUnconfirmed = {...evidence, status: 'INSTALLATION_UNCONFIRMED',
     releaseState: 'INSTALLATION_UNCONFIRMED', executionFailure: {stage: 'STATUS_UNCONFIRMED'},
     applicationVerification: 'VPS_READBACK_VERIFIED'};
-  const ctx = setup({deployEvidence: statusUnconfirmed});
+  const ctx = setup({deployEvidence: statusUnconfirmed, deployConclusion: 'failure'});
   const result = await reconcileVerifiedDeployment({client: ctx.client, deploymentId: 7,
     runId: '42', currentRunAttempt: '2', candidateSha: sha, prepareRunId: '41',
     prepareRunAttempt: '1', prepareReceiptDigest: `sha256:${'b'.repeat(64)}`, token: 'test', prepareProof, fetchImpl: ctx.fetchImpl,

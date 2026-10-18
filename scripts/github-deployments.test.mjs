@@ -266,6 +266,27 @@ test('verified V5 parent lookup rejects absent or non-successful Deployments', a
   }
 });
 
+test('exact-SHA parent lookup fails closed when more than one successful Deployment matches', async () => {
+  const first = validDeployment(31, sha, {...identity, runId: '51'}, '2026-10-17T00:00:00Z');
+  const second = validDeployment(32, sha, {...identity, runId: '52'}, '2026-10-18T00:00:00Z');
+  const rows = [second, first];
+  const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async url => {
+    if (url.includes('/deployments?')) return response(200, rows);
+    const id = url.match(/deployments\/(31|32)/)?.[1];
+    if (url.endsWith(`/deployments/${id}`)) return response(200, rows.find(item => String(item.id) === id));
+    if (url.includes(`/deployments/${id}/statuses?`)) {
+      const deployment = rows.find(item => String(item.id) === id);
+      const provenance = JSON.parse(deployment.payload);
+      return response(200, [{state: 'success',
+        created_at: id === '31' ? '2026-10-17T00:01:00Z' : '2026-10-18T00:01:00Z',
+        description: `stage=complete sha=${sha.slice(0, 12)} run=${provenance.workflow.runId}/${provenance.workflow.attempt}`,
+        log_url: provenance.workflow.url}]);
+    }
+    throw new Error(`unexpected ${url}`);
+  }});
+  await assert.rejects(client.readSuccessfulProductionDeploymentForSha(sha, 'FULL_RELEASE'), /ambiguous/);
+});
+
 test('verified V5 parent lookup rejects incomplete durable authorization provenance', async () => {
   const deployment = validDeployment(24, sha, identity, '2026-10-18T00:00:00Z');
   const payload = JSON.parse(deployment.payload);

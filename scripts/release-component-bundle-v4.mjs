@@ -113,7 +113,8 @@ export function verifyV5ProductionParent(ledger, evidence) {
   const live = evidence.live;
   if (live?.source !== 'read-only-vps' || live.runtimeSha !== sha || live.miniappSha !== sha ||
       ledger.currentProductionDbHead !== prepare.prismaHead ||
-      ledger.agataAlembicHead !== prepare.agataHead || ledger.gsalesDbHead !== prepare.gsalesMigrationHead ||
+      ledger.agataAlembicHead !== prepare.agataHead ||
+      (ledger.gsalesDbHead ?? ledger.gsalesMigrationHead) !== prepare.gsalesMigrationHead ||
       live.prismaHead !== prepare.prismaHead || live.agataHead !== prepare.agataHead ||
       live.gsalesHead !== prepare.gsalesMigrationHead ||
       live.gsalesMigrationSha256 !== prepare.gsalesMigrationSha256 ||

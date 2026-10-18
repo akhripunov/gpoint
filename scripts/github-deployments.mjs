@@ -282,25 +282,47 @@ export function createGitHubDeploymentsClient({token, fetchImpl = globalThis.fet
   async function readSuccessfulProductionDeploymentForSha(candidateSha, route = 'FULL_RELEASE') {
     requireThat(SHA40.test(candidateSha ?? '') && ['FULL_RELEASE', 'STATIC_UI_ONLY'].includes(route),
       'exact SHA and production route are required for Deployment read-back');
-    const baseline = await readProductionBaseline();
-    if (!baseline.historyExists) throw new DeploymentApiError('Production Deployment history is unavailable');
-    const matches = (await listDeployments()).filter(item => {
-      const payload = validateDeploymentRecord(item, candidateSha);
-      return payload.route === route;
-    }).sort((a, b) => Date.parse(b.created_at ?? '') - Date.parse(a.created_at ?? ''));
-    for (const item of matches) {
+    const snapshot = baseline => JSON.stringify({historyExists: baseline.historyExists,
+      baselineSha: baseline.baselineSha, deploymentId: baseline.deploymentId,
+      state: baseline.status?.state ?? null, createdAt: baseline.status?.created_at ?? null,
+      description: baseline.status?.description ?? null, logUrl: baseline.status?.log_url ?? null});
+    const baselineBefore = await readProductionBaseline();
+    if (!baselineBefore.historyExists) throw new DeploymentApiError('Production Deployment history is unavailable');
+    const rowsBefore = await listDeployments();
+    const matchesBefore = rowsBefore.filter(item => validateDeploymentRecord(item, candidateSha).route === route);
+    const successful = [];
+    for (const item of matchesBefore) {
       const status = await latestStatus(item);
       if (status.state === 'success') {
-        const deployment = await getDeployment(item.id);
-        const currentStatus = await latestStatus(deployment);
-        if (deployment.sha !== candidateSha || currentStatus.state !== 'success')
-          throw new DeploymentApiError('Exact production Deployment changed during read-back');
-        return {deployment, status: currentStatus, identity: deploymentIdentity(deployment)};
+        const identity = deploymentIdentity(item);
+        const expectedDescription = `stage=complete sha=${candidateSha.slice(0, 12)} run=${identity.runId}/${identity.runAttempt}`;
+        if (status.description !== expectedDescription || status.log_url !== identity.logUrl)
+          throw new DeploymentApiError(`Exact production Deployment ${item.id} success status is not bound to its run attempt`);
+        successful.push({item, status});
+      } else if (['pending', 'queued', 'in_progress', 'error'].includes(status.state) ||
+          !isSafePreApplyFailure(status)) {
+        throw new DeploymentApiError(`Exact production Deployment ${item.id} is ${status.state} or unresolved`);
       }
-      if (['pending', 'queued', 'in_progress', 'error'].includes(status.state))
-        throw new DeploymentApiError(`Exact production Deployment ${item.id} is ${status.state}`);
     }
-    throw new DeploymentApiError(`No successful ${route} Deployment exists for the exact SHA`);
+    if (successful.length !== 1)
+      throw new DeploymentApiError(successful.length ? `Successful ${route} Deployments for the exact SHA are ambiguous`
+        : `No successful ${route} Deployment exists for the exact SHA`);
+    const {item, status} = successful[0];
+    const deployment = await getDeployment(item.id);
+    const currentStatus = await latestStatus(deployment);
+    if (deployment.sha !== candidateSha || deployment.created_at !== item.created_at ||
+        JSON.stringify(deploymentIdentity(deployment)) !== JSON.stringify(deploymentIdentity(item)) ||
+        JSON.stringify([currentStatus.state, currentStatus.description, currentStatus.log_url, currentStatus.created_at]) !==
+        JSON.stringify([status.state, status.description, status.log_url, status.created_at]))
+      throw new DeploymentApiError('Exact production Deployment changed during ID-bound read-back');
+    const baselineAfter = await readProductionBaseline();
+    const rowsAfter = await listDeployments();
+    const matchesAfter = rowsAfter.filter(value => validateDeploymentRecord(value, candidateSha).route === route);
+    if (snapshot(baselineBefore) !== snapshot(baselineAfter) ||
+        JSON.stringify(matchesBefore.map(value => value.id).sort((a, b) => a - b)) !==
+          JSON.stringify(matchesAfter.map(value => value.id).sort((a, b) => a - b)))
+      throw new DeploymentApiError('Production Deployment history changed during exact parent verification');
+    return {deployment, status: currentStatus, identity: deploymentIdentity(deployment)};
   }
 
   async function readBackCreate(identity) {

@@ -12,6 +12,9 @@ import { verifyReleaseBundle } from './release-bundle.mjs';
 import { validateOciReceipt } from './release-oci.mjs';
 import { buildV5ComponentImageInventory, deriveV3ProductionParent, verifyV5ProductionParent } from './release-component-bundle-v4.mjs';
 import { createGitHubDeploymentsClient } from './github-deployments.mjs';
+import { fetchOriginalDeployEvidence } from './reconcile-deployment.mjs';
+import { AuthorizationError, authorizationRecordPath, candidateScopeDiff,
+  checkTaskAuthorizationState, validateTaskAuthorization } from './release-authorization.mjs';
 import { expectedStaticParent, staticReceiptAndImages, verifyStaticLiveBaseline,
   v4NativeProofOnVPS, verifyV4SourceAtCheckout } from './release-static-v4.mjs';
 import { applyStaticArtifactV4 } from './release-static-transfer-v4.mjs';
@@ -20,7 +23,7 @@ import { acquireReleaseLock } from './release-lock.mjs';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { agataProductionMigrationCommand, applyCandidate, cleanupTemporaryWorktree, inspectProductionReadOnly, inspectAgataMigrationReadiness, inspectGsalesReadiness, planReleaseRetention, provisionAgataInternalConfigForBaseline, upload, runRemoteCommand, parseGuardedMigrationEvidence, validateAgataProviderMode, validateAgataProviderCompatibility } from './release-gpoint-vps-adapter.mjs';
-import { initializeRunScopedState } from './deployment-run-state.mjs';
+import { initializeRunScopedState, stateFromLiveVps } from './deployment-run-state.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 let STATE_FILE = process.env.GPOINT_RELEASE_STATE_FILE || path.join(ROOT, 'docs/release/state/production.json');
@@ -513,53 +516,103 @@ function readGitHubReadToken() {
 }
 
 async function verifiedV5ParentEvidence(current, facts) {
-  if (current?.releaseOrigin !== 'github-deployment') return null;
-  if (current.recoveryRequired === true || current.lastReleaseStatus !== 'COMPLETE' ||
-      current.serverDeployStatus !== 'COMPLETE')
-    die('V5 production parent is incomplete or requires recovery');
-  const releaseId = current.lastReleaseId;
-  if (!/^gpoint-release-[A-Za-z0-9_.-]+$/.test(releaseId ?? ''))
-    die('V5 completed release manifest identity is unavailable');
-  const manifestFile = path.join(MANIFEST_DIR, `${releaseId}.json`);
-  if (!fs.existsSync(manifestFile) || fs.realpathSync(manifestFile) !== manifestFile)
-    die('V5 completed release evidence is missing or outside the manifest directory');
-  const manifest = readJson(manifestFile);
-  const receipt = manifest.ciReceipt;
-  if (!current.componentImages || hasUnresolvedRecoveryForSha(current.currentProductionSha))
-    die('V5 parent image inventory is missing or an unresolved recovery record exists');
-  if (manifest.releaseId !== releaseId || manifest.candidateSha !== current.currentProductionSha ||
-      manifest.status !== 'COMPLETE' || manifest.serverDeployStatus === 'INSTALLATION_UNCONFIRMED' ||
-      manifest.recoveryRequired === true || receipt?.selectedTransport !== 'ghcr-oci' ||
-      receipt.ghcrVerified !== true || receipt.ghcrPostSwitchVerified !== true ||
+  if (!SHA_RE.test(current?.currentProductionSha ?? '') ||
+      facts.LIVE_RELEASE_ENV_SHA !== current.currentProductionSha ||
+      hasUnresolvedRecoveryForSha(current.currentProductionSha))
+    die('V5 production parent live SHA is mismatched or an unresolved recovery record exists');
+  const api = createGitHubDeploymentsClient({token: readGitHubReadToken()});
+  let verified;
+  try { verified = await api.readSuccessfulProductionDeploymentForSha(current.currentProductionSha, 'FULL_RELEASE'); }
+  catch (error) {
+    if (/^No successful FULL_RELEASE Deployment exists for the exact SHA$/.test(error?.message ?? '')) return null;
+    die('GitHub does not confirm one stable successful exact-SHA FULL_RELEASE Deployment');
+  }
+  const identity = verified.identity;
+  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || readGitHubReadToken();
+  let evidence;
+  try {
+    evidence = await fetchOriginalDeployEvidence({runId: identity.runId, attempt: identity.runAttempt,
+      candidateSha: current.currentProductionSha, deploymentId: verified.deployment.id,
+      prepareRunId: identity.prepareRunId, prepareRunAttempt: identity.prepareRunAttempt,
+      prepareReceiptDigest: identity.prepareReceiptDigest, token});
+  } catch { die('Exact Deploy OCI evidence, Actions provenance, or VPS verification evidence is unavailable'); }
+  const completeEvidence = evidence?.status === 'COMPLETE' && evidence.releaseState === 'COMPLETE' &&
+    evidence.deployRunConclusion === 'success';
+  const reconciliableEvidence = evidence?.status === 'INSTALLATION_UNCONFIRMED' &&
+    evidence.releaseState === 'INSTALLATION_UNCONFIRMED' && evidence.executionFailure?.stage === 'STATUS_UNCONFIRMED' &&
+    evidence.applicationVerification === 'VPS_READBACK_VERIFIED' && evidence.deployRunConclusion === 'failure' &&
+    verified.status.state === 'success';
+  if (identity.authorizationMode !== evidence.authorizationMode || identity.authorizationId !== evidence.authorizationId ||
+      evidence.candidateSha !== current.currentProductionSha || !(completeEvidence || reconciliableEvidence) ||
+      evidence.applicationVerification !== 'VPS_READBACK_VERIFIED' || evidence.recoveryRequired === true)
+    die('Durable Deploy result does not prove the exact completed production release');
+  const receipt = evidence.ciReceipt;
+  const componentImages = evidence.componentImages;
+  if (!componentImages || !['app', 'agata', 'gsales'].every(role => componentImages[role]) ||
+      receipt?.selectedTransport !== 'ghcr-oci' || receipt.ghcrVerified !== true || receipt.ghcrPostSwitchVerified !== true ||
+      receipt.ghcrManifestDigest !== identity.prepareReceiptDigest ||
+      receipt.prepareReceiptSha256 !== identity.prepareReceiptSha256 ||
       !/^sha256:[a-f0-9]{64}$/.test(receipt.ghcrManifestDigest ?? '') ||
       !/^[a-f0-9]{64}$/.test(receipt.prepareReceiptSha256 ?? ''))
-    die('V5 local release receipt does not contain verified immutable Prepare evidence');
+    die('Durable Deploy result lacks the exact verified Prepare receipt and image inventory');
   if (typeof receipt.prepareReceiptJson !== 'string' ||
       crypto.createHash('sha256').update(receipt.prepareReceiptJson).digest('hex') !== receipt.prepareReceiptSha256)
-    die('V5 retained Prepare receipt bytes do not match the Deployment receipt checksum');
+    die('Durable Prepare receipt bytes do not match the Deployment receipt checksum');
   let exactReceipt;
   try {
     const parsed = JSON.parse(receipt.prepareReceiptJson);
     exactReceipt = validateOciReceipt(parsed, current.currentProductionSha,
-      {runId: parsed.runId, runAttempt: parsed.runAttempt});
-  } catch { die('V5 retained Prepare receipt is invalid or does not match its exact candidate'); }
-  const api = createGitHubDeploymentsClient({token: readGitHubReadToken()});
-  let verified;
-  try { verified = await api.readLatestSuccessfulProductionDeployment(); }
-  catch { die('GitHub does not confirm an unambiguous successful production Deployment'); }
-  const identity = verified.identity;
+      {runId: identity.prepareRunId, runAttempt: identity.prepareRunAttempt});
+  } catch { die('Durable Prepare receipt is invalid or does not match its exact candidate and run'); }
   if (identity.candidateSha !== current.currentProductionSha ||
       identity.prepareReceiptDigest !== receipt.ghcrManifestDigest ||
       identity.prepareReceiptSha256 !== receipt.prepareReceiptSha256 ||
       String(identity.prepareRunId) !== String(receipt.runId) ||
       String(identity.prepareRunAttempt) !== String(receipt.runAttempt))
     die('GitHub Deployment SHA or Prepare provenance does not match the V5 receipt');
-  const native = v4NativeProofOnVPS(current.componentImages, runRemoteCommand);
+  if (identity.authorizationMode === 'TASK_SCOPED_AUTO') {
+    try {
+      const authFile = authorizationRecordPath(identity.authorizationId);
+      const record = JSON.parse(git(['show', `${current.currentProductionSha}:${authFile}`]));
+      const changedPaths = candidateScopeDiff(ROOT, identity.authorizationId,
+        record.production_baseline_sha, current.currentProductionSha);
+      const authorization = validateTaskAuthorization({record, project: 'gpoint', authorizationId: identity.authorizationId,
+        candidateSha: current.currentProductionSha, currentMainSha: current.currentProductionSha,
+        productionSha: record.production_baseline_sha, changedPaths});
+      if (authorization.recordSha256 !== evidence.authorizationRecordSha256 ||
+          evidence.authorizationConsumed !== true || evidence.authorizationScopeSha256 !== authorization.ownerTaskCommitmentSha256)
+        throw new AuthorizationError('Durable authorization identity differs from Deploy evidence');
+      await checkTaskAuthorizationState({project: 'gpoint', authorizationId: identity.authorizationId,
+        candidateSha: current.currentProductionSha, consumedCandidateSha: current.currentProductionSha, token});
+    } catch { die('TASK_SCOPED_AUTO owner record or exact consumed authorization state is not verified'); }
+  }
+  const native = v4NativeProofOnVPS(componentImages, runRemoteCommand);
   const nativeImages = Object.fromEntries(Object.entries(native).map(([role, value]) => [role, {
     imageId: value.nativeImageId, sourceSha: value.revisionLabel, platform: `${value.os}/${value.architecture}`,
   }]));
-  const unresolvedRecovery = hasUnresolvedRecoveryForSha(current.currentProductionSha);
+  const freshFacts = readLiveFacts();
+  let freshState;
+  try { freshState = stateFromLiveVps(freshFacts); }
+  catch { die('Fresh VPS baseline became incomplete while verifying the durable V5 parent'); }
+  const liveKeys = [...new Set([...Object.keys(facts), ...Object.keys(freshFacts)])]
+    .filter(key => key.startsWith('LIVE_') && key !== 'LIVE_DISK_FREE_KB').sort();
+  if (liveKeys.some(key => facts[key] !== freshFacts[key]) || Number(freshFacts.LIVE_DISK_FREE_KB) < 5242880 ||
+      freshState.currentProductionSha !== current.currentProductionSha ||
+      freshState.currentProductionDbHead !== exactReceipt.prismaHead ||
+      freshState.agataAlembicHead !== exactReceipt.agataHead ||
+      freshState.gsalesMigrationHead !== exactReceipt.gsalesMigrationHead ||
+      freshState.gsalesMigrationSha256 !== exactReceipt.gsalesMigrationSha256)
+    die('Fresh VPS health, image, migration, configuration, or rollback facts changed during V5 parent verification');
+  const roleFactImages = {app: ['LIVE_API_IMAGE', 'LIVE_WORKER_IMAGE', 'LIVE_BOT_IMAGE'],
+    agata: ['LIVE_AGATA_API_IMAGE_ID', 'LIVE_AGATA_WORKER_IMAGE_ID'],
+    gsales: ['LIVE_GSALES_API_IMAGE_ID', 'LIVE_GSALES_AGATA_API_IMAGE_ID', 'LIVE_GSALES_AGATA_MEMORY_WORKER_IMAGE_ID']};
+  for (const [role, keys] of Object.entries(roleFactImages)) {
+    if (keys.some(key => freshFacts[key] !== nativeImages[role].imageId))
+      die(`Fresh VPS runtime image identity differs from the exact V5 parent for ${role}`);
+  }
+  const unresolvedRecovery = hasUnresolvedRecoveryForSha(current.currentProductionSha) || evidence.recoveryRequired === true;
   const proof = {
+    componentImages,
     deployment: {source: 'github-api', sha: verified.deployment.sha, status: verified.status.state,
       environment: verified.deployment.environment, task: verified.deployment.task,
       productionEnvironment: verified.deployment.production_environment,
@@ -579,21 +632,25 @@ async function verifiedV5ParentEvidence(current, facts) {
         return [role, {manifestDigest: image?.digest, configDigest: image?.configDigest ?? image?.id,
           sourceSha: image?.sourceSha}];
       }))},
-    live: {source: 'read-only-vps', runtimeSha: facts.LIVE_RELEASE_ENV_SHA,
-      miniappSha: facts.LIVE_MINIAPP_SHA, prismaHead: facts.LIVE_PRISMA_HEAD,
-      agataHead: facts.LIVE_AGATA_HEAD, gsalesHead: facts.LIVE_GSALES_HEAD,
-      gsalesMigrationSha256: facts.LIVE_GSALES_MIGRATION_SHA256,
-      apiHealth: facts.LIVE_API_HEALTH, agataApiHealth: facts.LIVE_AGATA_API_HEALTH,
-      gsalesApiHealth: facts.LIVE_GSALES_API_HEALTH,
-      gsalesAgataApiHealth: facts.LIVE_GSALES_AGATA_API_HEALTH,
-      gsalesAgataWorkerHealth: facts.LIVE_GSALES_AGATA_MEMORY_WORKER_HEALTH,
-      workerRunning: facts.LIVE_WORKER_RUNNING === 'true', botRunning: facts.LIVE_BOT_RUNNING === 'true',
-      agataWorkerRunning: facts.LIVE_AGATA_WORKER_RUNNING === 'true',
-      gsalesAgataWorkerRunning: facts.LIVE_GSALES_AGATA_MEMORY_WORKER_RUNNING === 'true',
+    live: {source: 'read-only-vps', runtimeSha: freshFacts.LIVE_RELEASE_ENV_SHA,
+      miniappSha: freshFacts.LIVE_MINIAPP_SHA, prismaHead: freshFacts.LIVE_PRISMA_HEAD,
+      agataHead: freshFacts.LIVE_AGATA_HEAD, gsalesHead: freshFacts.LIVE_GSALES_HEAD,
+      gsalesMigrationSha256: freshFacts.LIVE_GSALES_MIGRATION_SHA256,
+      apiHealth: freshFacts.LIVE_API_HEALTH, agataApiHealth: freshFacts.LIVE_AGATA_API_HEALTH,
+      gsalesApiHealth: freshFacts.LIVE_GSALES_API_HEALTH,
+      gsalesAgataApiHealth: freshFacts.LIVE_GSALES_AGATA_API_HEALTH,
+      gsalesAgataWorkerHealth: freshFacts.LIVE_GSALES_AGATA_MEMORY_WORKER_HEALTH,
+      workerRunning: freshFacts.LIVE_WORKER_RUNNING === 'true', botRunning: freshFacts.LIVE_BOT_RUNNING === 'true',
+      agataWorkerRunning: freshFacts.LIVE_AGATA_WORKER_RUNNING === 'true',
+      gsalesAgataWorkerRunning: freshFacts.LIVE_GSALES_AGATA_MEMORY_WORKER_RUNNING === 'true',
       nativeImages},
     unresolvedRecovery,
   };
-  try { verifyV5ProductionParent(current, proof); }
+  const verifiedCurrent = {...current, releaseOrigin: 'github-deployment', recoveryRequired: false,
+    lastReleaseStatus: 'COMPLETE', serverDeployStatus: 'COMPLETE', activeRuntimeSha: current.currentProductionSha,
+    agataRuntimeSha: current.currentProductionSha, miniappSourceSha: current.currentProductionSha,
+    componentImages};
+  try { verifyV5ProductionParent(verifiedCurrent, proof); }
   catch (error) { die(`V5 parent evidence verification failed: ${error.message}`); }
   return proof;
 }
@@ -643,9 +700,13 @@ export function expectedV3LiveRevisions(current) {
 
 function assertLiveBaseline(current, facts, { requireAgataConfig = true, parentEvidence = null } = {}) {
   let baselineState = current;
-  if (current?.releaseOrigin === 'github-deployment') {
+  if (parentEvidence) {
     try {
-      const parent = verifyV5ProductionParent(current, parentEvidence);
+      const verifiedCurrent = {...current, releaseOrigin: 'github-deployment', recoveryRequired: false,
+        lastReleaseStatus: 'COMPLETE', serverDeployStatus: 'COMPLETE', activeRuntimeSha: current.currentProductionSha,
+        agataRuntimeSha: current.currentProductionSha, miniappSourceSha: current.currentProductionSha,
+        componentImages: parentEvidence.componentImages};
+      const parent = verifyV5ProductionParent(verifiedCurrent, parentEvidence);
       baselineState = {...current, ...parent, componentImages: parent.images,
         miniappSourceSha: parent.currentProductionSha,
         activeRuntimeSha: parent.images.app.sourceSha, agataRuntimeSha: parent.images.agata.sourceSha};

@@ -29,10 +29,17 @@ async function apiJson(route, token, fetchImpl) {
   return response.json();
 }
 
-export async function fetchOriginalDeployEvidence({runId, attempt, token, fetchImpl = globalThis.fetch,
+export async function fetchOriginalDeployEvidence({runId, attempt, candidateSha, deploymentId,
+  prepareRunId, prepareRunAttempt, prepareReceiptDigest, token, fetchImpl = globalThis.fetch,
   execFile = execFileSync}) {
-  const tag = `deploy-${process.env.CANDIDATE_SHA}-${runId}-${attempt}`;
-  requireThat(SHA40.test(process.env.CANDIDATE_SHA ?? ''), 'Exact candidate SHA is required to resolve Deploy evidence');
+  requireThat(SHA40.test(candidateSha ?? ''), 'Exact candidate SHA is required to resolve Deploy evidence');
+  const tag = `deploy-${candidateSha}-${runId}-${attempt}`;
+  const deployRun = await apiJson(`actions/runs/${runId}/attempts/${attempt}`, token, fetchImpl);
+  requireThat(String(deployRun.id) === String(runId) && String(deployRun.run_attempt) === String(attempt)
+    && deployRun.head_sha === candidateSha && deployRun.path === '.github/workflows/gpoint-deploy.yml'
+    && deployRun.status === 'completed' && ['success', 'failure'].includes(deployRun.conclusion)
+    && deployRun.event === 'workflow_dispatch' && deployRun.head_branch === 'main',
+  'Exact Deploy Actions run attempt is not completed successfully on main');
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'gpoint-deploy-reconcile-'));
   try {
     const reference = `ghcr.io/akhripunov/gpoint-deploy-evidence:${tag}`;
@@ -60,7 +67,7 @@ export async function fetchOriginalDeployEvidence({runId, attempt, token, fetchI
     'Original Deploy job log inventory is invalid');
     const publisherLogs = logFiles.map(name => execFile(['unzip', '-p', logZip, name], {
       encoding: 'utf8', maxBuffer: 25 * 1024 * 1024})).join('\n');
-    requireThat(new RegExp(`(?m)^DEPLOY_EVIDENCE_DIGEST=${digest.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`).test(publisherLogs),
+    requireThat(new RegExp(`^DEPLOY_EVIDENCE_DIGEST=${digest.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'm').test(publisherLogs),
       'Exact Deploy evidence digest is absent from its trusted publisher job logs');
     const subject = `ghcr.io/akhripunov/gpoint-deploy-evidence@${digest}`;
     const directoryArg = path.join(directory, 'artifact');
@@ -73,10 +80,33 @@ export async function fetchOriginalDeployEvidence({runId, attempt, token, fetchI
     requireThat(bytes.length <= 1024 * 1024, 'Deploy evidence exceeds its size limit');
     const contentSha256 = crypto.createHash('sha256').update(bytes).digest('hex');
     const evidence = JSON.parse(bytes.toString('utf8'));
+    const complete = evidence?.status === 'COMPLETE' && evidence.releaseState === 'COMPLETE'
+      && evidence.applicationVerification === 'VPS_READBACK_VERIFIED';
+    const statusUnconfirmed = evidence?.status === 'INSTALLATION_UNCONFIRMED'
+      && evidence.releaseState === 'INSTALLATION_UNCONFIRMED'
+      && evidence.executionFailure?.stage === 'STATUS_UNCONFIRMED'
+      && evidence.applicationVerification === 'VPS_READBACK_VERIFIED';
     requireThat(evidence?.schema === 1 && evidence.deployRunId === String(runId)
-      && evidence.deployRunAttempt === String(attempt) && evidence.candidateSha === process.env.CANDIDATE_SHA,
+      && evidence.deployRunAttempt === String(attempt) && evidence.candidateSha === candidateSha
+      && Number(evidence.deploymentId) === deploymentId
+      && ((deployRun.conclusion === 'success' && complete) || (deployRun.conclusion === 'failure' && statusUnconfirmed))
+      && (evidence.authorizationMode !== 'TASK_SCOPED_AUTO' || evidence.authorizationConsumed === true),
     'Deploy evidence payload does not bind its exact run and candidate');
-    return {...evidence, evidenceManifestDigest: digest, evidenceContentSha256: contentSha256};
+    requireThat(String(evidence.prepareRunId) === String(prepareRunId)
+      && String(evidence.prepareRunAttempt) === String(prepareRunAttempt)
+      && evidence.ciReceipt?.ghcrManifestDigest === prepareReceiptDigest
+      && /^[a-f0-9]{64}$/.test(evidence.ciReceipt?.prepareReceiptSha256 ?? '')
+      && typeof evidence.ciReceipt?.prepareReceiptJson === 'string',
+    'Deploy evidence does not retain the exact verified Prepare receipt identity');
+    const prepareRun = await apiJson(`actions/runs/${prepareRunId}/attempts/${prepareRunAttempt}`, token, fetchImpl);
+    requireThat(String(prepareRun.id) === String(prepareRunId)
+      && String(prepareRun.run_attempt) === String(prepareRunAttempt)
+      && prepareRun.head_sha === candidateSha && prepareRun.path === '.github/workflows/gpoint-prepare.yml'
+      && prepareRun.status === 'completed' && prepareRun.conclusion === 'success'
+      && prepareRun.event === 'push' && prepareRun.head_branch === 'main',
+    'Exact Prepare Actions run attempt is not completed successfully on main');
+    return {...evidence, deployRunConclusion: deployRun.conclusion,
+      evidenceManifestDigest: digest, evidenceContentSha256: contentSha256};
   } finally {
     fs.rmSync(directory, {recursive: true, force: true});
   }
@@ -117,10 +147,13 @@ export async function reconcileVerifiedDeployment({client, deploymentId, runId, 
 
   const deployRun = await apiJson(`actions/runs/${runId}/attempts/${identity.runAttempt}`, token, fetchImpl);
   requireThat(String(deployRun.id) === String(runId) && String(deployRun.run_attempt) === identity.runAttempt
-    && deployRun.head_sha === candidateSha && deployRun.path === '.github/workflows/gpoint-deploy.yml',
-  'Original Deploy run attempt identity is unavailable or mismatched');
+    && deployRun.head_sha === candidateSha && deployRun.path === '.github/workflows/gpoint-deploy.yml'
+    && deployRun.status === 'completed' && ['success', 'failure'].includes(deployRun.conclusion),
+  'Original Deploy is not a completed exact-SHA Deploy attempt');
 
-  const evidence = await readDeployEvidence({runId: identity.runId, attempt: identity.runAttempt, token, fetchImpl});
+  const evidence = await readDeployEvidence({runId: identity.runId, attempt: identity.runAttempt,
+    candidateSha, deploymentId: deployment.id, prepareRunId: identity.prepareRunId,
+    prepareRunAttempt: identity.prepareRunAttempt, prepareReceiptDigest, token, fetchImpl});
   const completeEvidence = evidence?.status === 'COMPLETE' && evidence.releaseState === 'COMPLETE';
   const statusUnconfirmedEvidence = evidence?.status === 'INSTALLATION_UNCONFIRMED'
     && evidence.releaseState === 'INSTALLATION_UNCONFIRMED'
@@ -130,7 +163,8 @@ export async function reconcileVerifiedDeployment({client, deploymentId, runId, 
     && String(evidence.deployRunId) === identity.runId
     && String(evidence.deployRunAttempt) === identity.runAttempt
     && evidence.applicationVerification === 'VPS_READBACK_VERIFIED'
-    && (completeEvidence || statusUnconfirmedEvidence),
+    && ((completeEvidence && deployRun.conclusion === 'success') ||
+      (statusUnconfirmedEvidence && deployRun.conclusion === 'failure')),
   'Original Deploy result does not prove a verified COMPLETE installation');
   if (identity.authorizationMode === 'TASK_SCOPED_AUTO')
     requireThat(evidence.authorizationConsumed === true, 'TASK_SCOPED_AUTO authorization was not consumed by the original Deploy');
@@ -147,6 +181,8 @@ export async function reconcileVerifiedDeployment({client, deploymentId, runId, 
   requireThat(new Set(tiedLatest.map(statusSignature)).size === 1,
     'Original Deployment has conflicting statuses at the latest timestamp');
   const current = statuses[0];
+  requireThat(current.log_url === identity.logUrl,
+    'Original Deployment status does not link to its exact Deploy run attempt');
   const alreadyComplete = current.state === 'success'
     && current.description === `stage=complete sha=${candidateSha.slice(0, 12)} run=${identity.runId}/${identity.runAttempt}`;
   requireThat(alreadyComplete || (['in_progress', 'error'].includes(current.state)

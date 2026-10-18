@@ -439,9 +439,13 @@ export function validateTaskAuthorization({record, project, authorizationId, can
     recordSha256: crypto.createHash('sha256').update(canonical).digest('hex'), changedPaths: [...new Set(changedPaths)].sort().join(',')};
 }
 
-export async function checkTaskAuthorizationState({project, authorizationId, candidateSha, token, fetchImpl = fetch}) {
+export async function checkTaskAuthorizationState({project, authorizationId, candidateSha,
+  consumedCandidateSha, token, fetchImpl = fetch}) {
   if (!token) throw new AuthorizationError('GitHub token is required to check task authorization state');
   if (candidateSha && !SHA.test(candidateSha)) throw new AuthorizationError('Invalid exact candidate SHA');
+  if (consumedCandidateSha && !SHA.test(consumedCandidateSha)) throw new AuthorizationError('Invalid exact consumed candidate SHA');
+  if (consumedCandidateSha && candidateSha && consumedCandidateSha !== candidateSha)
+    throw new AuthorizationError('Consumed marker candidate differs from the exact authorization candidate');
   const states = {};
   for (const state of ['revoked', 'consumed', 'claimed']) {
     const route = authorizationStateRef(project, authorizationId, state).replace(/^refs\/tags\//, 'git/ref/tags/');
@@ -452,14 +456,17 @@ export async function checkTaskAuthorizationState({project, authorizationId, can
     if (!response.ok) throw new AuthorizationError(`GitHub authorization state read failed (HTTP ${response.status})`);
     const data = await response.json();
     states[state] = true;
-    if (state === 'claimed') {
+    if (state === 'claimed' || state === 'consumed') {
       if (data.object?.type !== 'commit' || !SHA.test(data.object?.sha ?? '')) {
-        throw new AuthorizationError('Task authorization claim is not a valid commit reference');
+        throw new AuthorizationError(`Task authorization ${state} marker is not a valid commit reference`);
       }
-      states.claimedSha = data.object.sha;
+      states[`${state}Sha`] = data.object.sha;
     }
   }
-  if (states.revoked || states.consumed) throw new AuthorizationError('Task authorization is revoked or already consumed');
+  if (states.revoked || (states.consumed && !consumedCandidateSha))
+    throw new AuthorizationError('Task authorization is revoked or already consumed');
+  if (consumedCandidateSha && (!states.consumed || states.consumedSha !== consumedCandidateSha))
+    throw new AuthorizationError('Task authorization consumed state does not match the exact release candidate');
   if (candidateSha && !states.claimed) {
     throw new AuthorizationError('Task authorization has no active release claim');
   }

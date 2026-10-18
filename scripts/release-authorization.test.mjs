@@ -591,6 +591,27 @@ test('authorization state check observes revoked, consumed and claimed markers',
     fetchImpl: async () => assert.fail('must not query without token')}), /token is required/);
 });
 
+test('authorization evidence can verify an exact consumed candidate without treating it as reusable', async () => {
+  const state = await checkTaskAuthorizationState({project: 'gpoint', authorizationId: id,
+    candidateSha: candidate, consumedCandidateSha: candidate, token: 'test',
+    fetchImpl: async url => {
+      if (url.endsWith('/claimed')) return {status: 200, ok: true,
+        json: async () => ({object: {type: 'commit', sha: 'c'.repeat(40)}})};
+      if (url.endsWith('/consumed')) return {status: 200, ok: true,
+        json: async () => ({object: {type: 'commit', sha: candidate}})};
+      return {status: 404, ok: false};
+    }});
+  assert.equal(state.consumed, true);
+  assert.equal(state.consumedSha, candidate);
+  await assert.rejects(checkTaskAuthorizationState({project: 'gpoint', authorizationId: id,
+    candidateSha: candidate, consumedCandidateSha: 'd'.repeat(40), token: 'test',
+    fetchImpl: async url => url.endsWith('/claimed')
+      ? {status: 200, ok: true, json: async () => ({object: {type: 'commit', sha: 'c'.repeat(40)}})}
+      : url.endsWith('/consumed')
+        ? {status: 200, ok: true, json: async () => ({object: {type: 'commit', sha: candidate}})}
+        : {status: 404, ok: false}}), /Consumed marker candidate differs from the exact authorization candidate/);
+});
+
 test('a fresh mutation-boundary authorization read observes revocation after an earlier pass', async () => {
   let revoked = false;
   const fetchImpl = async url => {
@@ -618,7 +639,7 @@ test('a claimed task authorization can cover a new exact candidate while revoked
   await assert.rejects(checkTaskAuthorizationState({project: 'gpoint', authorizationId: id,
     candidateSha: candidate, token: 'test', fetchImpl: async url => url.endsWith('/consumed')
       ? {status: 200, ok: true, json: async () => ({object: {sha: earlierSha}})} : fetchImpl(url)}),
-  /revoked or already consumed/);
+  /consumed marker is not a valid commit reference|revoked or already consumed/);
 });
 
 test('authorization consumption creates an immutable candidate-bound Git ref', async () => {

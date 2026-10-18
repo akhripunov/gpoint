@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { stateFromLiveVps } from './deployment-run-state.mjs';
 import { deriveV3ProductionParent, verifyComponentReceiptV4, verifyVPSNativeImages, verifyV5ProductionParent, buildV5ComponentImageInventory } from './release-component-bundle-v4.mjs';
 
 const A = 'a'.repeat(40), B = 'b'.repeat(40);
@@ -104,7 +105,7 @@ test('V5 parent requires successful exact Deployment, Prepare digests, live iden
     lastReleaseStatus: 'COMPLETE', serverDeployStatus: 'COMPLETE',
     activeRuntimeSha: A, agataRuntimeSha: A, miniappSourceSha: A,
     currentProductionDbHead: 'prisma-1', agataAlembicHead: 'agata-1',
-    gsalesDbHead: 'gsales-1', gsalesMigrationSha256: 'c'.repeat(64),
+    gsalesMigrationHead: 'gsales-1', gsalesMigrationSha256: 'c'.repeat(64),
     artifactIdentities: {}, componentImages: Object.fromEntries(Object.entries(images).map(([role, image]) => [role,
       { ...image, registryDigest: id(role === 'app' ? '4' : role === 'agata' ? '5' : '6') }])),
   };
@@ -164,4 +165,46 @@ test('V5 inventory preserves manifest digest separately from Docker config ident
   assert.throws(() => buildV5ComponentImageInventory({ ...prepare, ghcrPostSwitchVerified: false }, runtime, A));
   assert.throws(() => buildV5ComponentImageInventory(prepare,
     { ...runtime, agata: { imageId: id('9'), buildSha: A } }, A));
+});
+
+test('fresh run-scoped VPS state maps GSales migration identity into the V5 parent verifier', () => {
+  const facts = {LIVE_RELEASE_ENV_SHA: A, LIVE_API_SHA: A, LIVE_WORKER_SHA: A, LIVE_BOT_SHA: A,
+    LIVE_MINIAPP_SHA: A, LIVE_AGATA_API_SHA: A, LIVE_AGATA_WORKER_SHA: A,
+    LIVE_API_RUNNING: 'true', LIVE_API_HEALTH: 'healthy', LIVE_WORKER_RUNNING: 'true', LIVE_BOT_RUNNING: 'true',
+    LIVE_API_IMAGE: id('1'), LIVE_WORKER_IMAGE: id('1'), LIVE_BOT_IMAGE: id('1'),
+    LIVE_AGATA_API_RUNNING: 'true', LIVE_AGATA_API_HEALTH: 'healthy', LIVE_AGATA_API_IMAGE_ID: id('2'),
+    LIVE_AGATA_WORKER_RUNNING: 'true', LIVE_AGATA_WORKER_HEALTH: 'healthy', LIVE_AGATA_WORKER_IMAGE_ID: id('2'),
+    LIVE_PRISMA_HEAD: 'prisma-1', LIVE_AGATA_HEAD: 'agata-1', LIVE_GSALES_HEAD: 'gsales-1',
+    LIVE_GSALES_MIGRATION_SHA256: 'c'.repeat(64)};
+  for (const role of ['API', 'AGATA_API', 'AGATA_MEMORY_WORKER']) Object.assign(facts, {
+    [`LIVE_GSALES_${role}_SHA`]: A, [`LIVE_GSALES_${role}_RUNNING`]: 'true',
+    [`LIVE_GSALES_${role}_HEALTH`]: 'healthy', [`LIVE_GSALES_${role}_IMAGE_ID`]: id('3'),
+  });
+  const fresh = stateFromLiveVps(facts);
+  const componentImages = Object.fromEntries(Object.entries(images).map(([role, image]) => [role,
+    {...image, registryDigest: id(role === 'app' ? '4' : role === 'agata' ? '5' : '6')}]));
+  const ledger = {...fresh, releaseOrigin: 'github-deployment', recoveryRequired: false,
+    lastReleaseStatus: 'COMPLETE', serverDeployStatus: 'COMPLETE', miniappSourceSha: A,
+    componentImages};
+  const evidence = {
+    deployment: {source: 'github-api', sha: A, status: 'success', environment: 'production',
+      task: 'gpoint-production-deploy', productionEnvironment: true, transientEnvironment: false,
+      runId: '10', runAttempt: '1', prepareRunId: '9', prepareRunAttempt: '1',
+      authorizationMode: 'EXACT_SHA', receiptDigest: id('7'),
+      imageDigests: {app: id('4'), agata: id('5'), gsales: id('6')}},
+    prepare: {source: 'verified-ghcr-receipt', candidateSha: A, runId: '9', runAttempt: '1',
+      receiptDigest: id('7'), prismaHead: 'prisma-1', agataHead: 'agata-1',
+      gsalesMigrationHead: 'gsales-1', gsalesMigrationSha256: 'c'.repeat(64),
+      images: Object.fromEntries(Object.entries(images).map(([role, image]) => [role, {
+        sourceSha: A, configDigest: image.imageId, manifestDigest: id(role === 'app' ? '4' : role === 'agata' ? '5' : '6')}]))},
+    live: {source: 'read-only-vps', runtimeSha: A, miniappSha: A, prismaHead: 'prisma-1',
+      agataHead: 'agata-1', gsalesHead: 'gsales-1', gsalesMigrationSha256: 'c'.repeat(64),
+      apiHealth: 'healthy', agataApiHealth: 'healthy', gsalesApiHealth: 'healthy',
+      gsalesAgataApiHealth: 'healthy', gsalesAgataWorkerHealth: 'healthy', workerRunning: true,
+      botRunning: true, agataWorkerRunning: true, gsalesAgataWorkerRunning: true,
+      nativeImages: Object.fromEntries(Object.entries(images).map(([role, image]) => [role,
+        {imageId: image.imageId, sourceSha: A, platform: 'linux/amd64'}]))},
+    unresolvedRecovery: false,
+  };
+  assert.equal(verifyV5ProductionParent(ledger, evidence).currentProductionSha, A);
 });
