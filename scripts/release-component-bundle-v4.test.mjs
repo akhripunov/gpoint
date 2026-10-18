@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { deriveV3ProductionParent, verifyComponentReceiptV4, verifyVPSNativeImages } from './release-component-bundle-v4.mjs';
+import { deriveV3ProductionParent, verifyComponentReceiptV4, verifyVPSNativeImages, verifyV5ProductionParent, buildV5ComponentImageInventory } from './release-component-bundle-v4.mjs';
 
 const A = 'a'.repeat(40), B = 'b'.repeat(40);
 const id = digit => 'sha256:' + digit.repeat(64);
@@ -96,4 +96,72 @@ test('V3 ledger bridge proves one role digest and shared GSales AGATA dependency
     artifactIdentities: { ...ledger.artifactIdentities, gsalesAgataApi: make(A, id('3'), id('9')) },
   }));
   assert.throws(() => deriveV3ProductionParent({ ...ledger, recoveryRequired: true }));
+});
+
+test('V5 parent requires successful exact Deployment, Prepare digests, live identities and clean recovery state', () => {
+  const v5 = {
+    currentProductionSha: A, releaseOrigin: 'github-deployment',
+    lastReleaseStatus: 'COMPLETE', serverDeployStatus: 'COMPLETE',
+    activeRuntimeSha: A, agataRuntimeSha: A, miniappSourceSha: A,
+    currentProductionDbHead: 'prisma-1', agataAlembicHead: 'agata-1',
+    gsalesDbHead: 'gsales-1', gsalesMigrationSha256: 'c'.repeat(64),
+    artifactIdentities: {}, componentImages: Object.fromEntries(Object.entries(images).map(([role, image]) => [role,
+      { ...image, registryDigest: id(role === 'app' ? '4' : role === 'agata' ? '5' : '6') }])),
+  };
+  const registryImages = Object.fromEntries(Object.entries(images).map(([role, image]) => [role, {
+    sourceSha: A, configDigest: image.imageId, manifestDigest: id(String(role === 'app' ? '4' : role === 'agata' ? '5' : '6')[0]),
+  }]));
+  const evidence = {
+    deployment: { source: 'github-api', sha: A, status: 'success', environment: 'production',
+      task: 'gpoint-production-deploy', productionEnvironment: true, transientEnvironment: false,
+      runId: '10', runAttempt: '1', prepareRunId: '9', prepareRunAttempt: '1',
+      authorizationMode: 'TASK_SCOPED_AUTO', authorizationId: 'me42-owner-cycle-1',
+      receiptDigest: id('7'), imageDigests: Object.fromEntries(Object.entries(registryImages).map(([role, item]) => [role, item.manifestDigest])) },
+    prepare: { source: 'verified-ghcr-receipt', candidateSha: A, runId: '9', runAttempt: '1',
+      receiptDigest: id('7'), prismaHead: 'prisma-1', agataHead: 'agata-1',
+      gsalesMigrationHead: 'gsales-1', gsalesMigrationSha256: 'c'.repeat(64), images: registryImages },
+    live: { source: 'read-only-vps', runtimeSha: A, miniappSha: A, prismaHead: 'prisma-1',
+      agataHead: 'agata-1', gsalesHead: 'gsales-1', gsalesMigrationSha256: 'c'.repeat(64),
+      apiHealth: 'healthy', agataApiHealth: 'healthy', gsalesApiHealth: 'healthy',
+      gsalesAgataApiHealth: 'healthy', gsalesAgataWorkerHealth: 'healthy',
+      workerRunning: true, botRunning: true, agataWorkerRunning: true, gsalesAgataWorkerRunning: true,
+      nativeImages: Object.fromEntries(Object.entries(images).map(([role, image]) => [role,
+        { imageId: image.imageId, sourceSha: A, platform: 'linux/amd64' }])) },
+    unresolvedRecovery: false,
+  };
+  const verifiedParent = verifyV5ProductionParent(v5, evidence);
+  assert.equal(verifiedParent.currentProductionSha, A);
+  assert.deepEqual(verifyComponentReceiptV4(proof, {candidate: B, baseline: A,
+    completeParent: verifiedParent, candidateArtifact: artifact}).inheritedRoles, ['app', 'gsales']);
+  assert.throws(() => verifyComponentReceiptV4(proof, {candidate: B, baseline: A,
+    completeParent: {...verifiedParent}, candidateArtifact: artifact}), /immutable COMPLETE/);
+  for (const changed of [
+    { ...evidence, deployment: { ...evidence.deployment, status: 'failure' } },
+    { ...evidence, deployment: { ...evidence.deployment, sha: B } },
+    { ...evidence, deployment: { ...evidence.deployment, imageDigests: { ...evidence.deployment.imageDigests, app: id('8') } } },
+    { ...evidence, prepare: { ...evidence.prepare, images: { ...registryImages, app: undefined } } },
+    { ...evidence, live: { ...evidence.live, nativeImages: { ...evidence.live.nativeImages, app: { imageId: id('9'), sourceSha: A, platform: 'linux/amd64' } } } },
+    { ...evidence, live: { ...evidence.live, prismaHead: 'wrong' } },
+    { ...evidence, live: { ...evidence.live, apiHealth: 'unhealthy' } },
+    { ...evidence, unresolvedRecovery: true },
+    { ...evidence, deployment: { ...evidence.deployment, runAttempt: '' } },
+    { ...evidence, deployment: { ...evidence.deployment, authorizationId: '' } },
+  ]) assert.throws(() => verifyV5ProductionParent(v5, changed));
+  assert.throws(() => verifyV5ProductionParent({ ...v5, recoveryRequired: true }, evidence));
+  assert.throws(() => verifyV5ProductionParent(v5, null));
+});
+
+test('V5 inventory preserves manifest digest separately from Docker config identity', () => {
+  const prepare = { candidateSha: A, selectedTransport: 'ghcr-oci', ghcrVerified: true,
+    ghcrPostSwitchVerified: true, images: Object.fromEntries(Object.entries(images).map(([role, image]) => [role,
+      { digest: id(role === 'app' ? '4' : role === 'agata' ? '5' : '6'),
+        configDigest: image.imageId, id: image.imageId, sourceSha: A, platform: 'linux/amd64' }])) };
+  const runtime = Object.fromEntries(Object.entries(images).map(([role, image]) => [role,
+    { imageId: image.imageId, buildSha: A }]));
+  const inventory = buildV5ComponentImageInventory(prepare, runtime, A);
+  assert.equal(inventory.app.imageId, id('1'));
+  assert.equal(inventory.app.registryDigest, id('4'));
+  assert.throws(() => buildV5ComponentImageInventory({ ...prepare, ghcrPostSwitchVerified: false }, runtime, A));
+  assert.throws(() => buildV5ComponentImageInventory(prepare,
+    { ...runtime, agata: { imageId: id('9'), buildSha: A } }, A));
 });

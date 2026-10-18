@@ -8,6 +8,7 @@ const routes = { FULL: roles, AGATA_CANDIDATE: ['agata'], STATIC_UI_CANDIDATE: [
 const names = { app: 'gpoint-runtime', agata: 'gpoint-agata-runtime', gsales: 'gpoint-g-sales-runtime' };
 const checkSHA = (v) => { if (!SHA.test(v ?? '')) throw new Error('invalid source SHA'); };
 const checkID = (v) => { if (!ID.test(v ?? '')) throw new Error('invalid image digest'); };
+const verifiedV5Parents = new WeakSet();
 
 // Bootstrap the current V3 ledger without guessing which GSales lane's
 // "imageId" represents AGATA. This must be supplied from authenticated,
@@ -56,6 +57,105 @@ export function deriveV3ProductionParent(ledger) {
   };
 }
 
+/** Construct a V3/V4 parent for V5 only from independently verified evidence.
+ * The caller must fetch the Deployment from GitHub, GHCR Prepare receipt and
+ * current VPS proof; a state-file origin/status flag is deliberately insufficient.
+ */
+export function verifyV5ProductionParent(ledger, evidence) {
+  const sha = ledger?.currentProductionSha;
+  checkSHA(sha);
+  if (ledger.releaseOrigin !== 'github-deployment' || ledger.recoveryRequired === true ||
+      ledger.lastReleaseStatus !== 'COMPLETE' || ledger.serverDeployStatus !== 'COMPLETE' ||
+      ledger.activeRuntimeSha !== sha || ledger.agataRuntimeSha !== sha || ledger.miniappSourceSha !== sha ||
+      !evidence || evidence.unresolvedRecovery !== false)
+    throw new Error('V5 parent lacks complete non-recovery deployment evidence');
+  const deployment = evidence.deployment;
+  if (deployment?.source !== 'github-api' || deployment.status !== 'success' ||
+      deployment.sha !== sha || deployment.environment !== 'production' ||
+      deployment.task !== 'gpoint-production-deploy' || deployment.productionEnvironment !== true ||
+      deployment.transientEnvironment !== false || !/^[1-9][0-9]*$/.test(String(deployment.runId ?? '')) ||
+      !/^[1-9][0-9]*$/.test(String(deployment.runAttempt ?? '')) ||
+      !/^[1-9][0-9]*$/.test(String(deployment.prepareRunId ?? '')) ||
+      !/^[1-9][0-9]*$/.test(String(deployment.prepareRunAttempt ?? '')) ||
+      !['EXACT_SHA', 'TASK_SCOPED_AUTO'].includes(deployment.authorizationMode) ||
+      (deployment.authorizationMode === 'TASK_SCOPED_AUTO' &&
+        !/^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$/.test(deployment.authorizationId ?? '')) ||
+      !ID.test(deployment.receiptDigest ?? ''))
+    throw new Error('V5 parent has no successful exact-SHA GitHub Deployment');
+  const prepare = evidence.prepare;
+  if (prepare?.source !== 'verified-ghcr-receipt' || prepare.candidateSha !== sha ||
+      String(prepare.runId) !== String(deployment.prepareRunId) ||
+      String(prepare.runAttempt) !== String(deployment.prepareRunAttempt) ||
+      prepare.receiptDigest !== deployment.receiptDigest ||
+      !ID.test(prepare.receiptDigest ?? ''))
+    throw new Error('V5 parent Prepare receipt provenance does not match the Deployment');
+  const stateImages = ledger.componentImages;
+  if (!stateImages || Object.keys(stateImages).sort().join(',') !== roles.slice().sort().join(','))
+    throw new Error('V5 parent component image inventory is incomplete');
+  const images = {};
+  for (const role of roles) {
+    const receiptImage = prepare.images?.[role];
+    const stateImage = stateImages[role];
+    checkID(receiptImage?.manifestDigest); checkID(receiptImage?.configDigest);
+    checkSHA(receiptImage?.sourceSha);
+    if (receiptImage.sourceSha !== sha || stateImage?.sourceSha !== sha ||
+        stateImage.imageId !== receiptImage.configDigest ||
+        stateImage.registryDigest !== receiptImage.manifestDigest ||
+        stateImage.platform !== 'linux/amd64' ||
+        deployment.imageDigests?.[role] !== receiptImage.manifestDigest)
+      throw new Error('V5 parent GHCR digest/config identity mismatch ' + role);
+    images[role] = { name: names[role], sourceSha: sha,
+      imageId: receiptImage.configDigest, registryDigest: receiptImage.manifestDigest,
+      platform: 'linux/amd64' };
+  }
+  if (Object.keys(deployment.imageDigests ?? {}).sort().join(',') !== roles.slice().sort().join(','))
+    throw new Error('V5 parent Deployment image digest set is incomplete');
+  const live = evidence.live;
+  if (live?.source !== 'read-only-vps' || live.runtimeSha !== sha || live.miniappSha !== sha ||
+      ledger.currentProductionDbHead !== prepare.prismaHead ||
+      ledger.agataAlembicHead !== prepare.agataHead || ledger.gsalesDbHead !== prepare.gsalesMigrationHead ||
+      live.prismaHead !== prepare.prismaHead || live.agataHead !== prepare.agataHead ||
+      live.gsalesHead !== prepare.gsalesMigrationHead ||
+      live.gsalesMigrationSha256 !== prepare.gsalesMigrationSha256 ||
+      !live.prismaHead || !live.agataHead || !live.gsalesHead ||
+      live.apiHealth !== 'healthy' || live.agataApiHealth !== 'healthy' ||
+      live.gsalesApiHealth !== 'healthy' || live.gsalesAgataApiHealth !== 'healthy' ||
+      live.gsalesAgataWorkerHealth !== 'healthy' || live.workerRunning !== true ||
+      live.botRunning !== true || live.agataWorkerRunning !== true ||
+      live.gsalesAgataWorkerRunning !== true)
+    throw new Error('V5 parent migration or service health proof is stale or mismatched');
+  for (const role of roles) {
+    const actual = live.nativeImages?.[role];
+    if (actual?.imageId !== images[role].imageId || actual?.sourceSha !== sha ||
+        actual?.platform !== 'linux/amd64')
+      throw new Error('V5 parent VPS native image identity mismatch ' + role);
+  }
+  const parent = { currentProductionSha: sha, lastReleaseStatus: 'COMPLETE',
+    serverDeployStatus: 'COMPLETE', releaseOrigin: 'verified-github-deployment',
+    recoveryRequired: false, images };
+  verifiedV5Parents.add(parent);
+  return parent;
+}
+
+export function buildV5ComponentImageInventory(prepare, runtimeIdentities, candidate) {
+  checkSHA(candidate);
+  if (prepare?.selectedTransport !== 'ghcr-oci' || prepare.ghcrVerified !== true ||
+      prepare.ghcrPostSwitchVerified !== true || prepare.candidateSha !== candidate ||
+      !prepare.images || !runtimeIdentities)
+    throw new Error('V5 Prepare and post-switch GHCR identity proof is incomplete');
+  return Object.fromEntries(roles.map(role => {
+    const image = prepare.images[role];
+    const runtime = runtimeIdentities[role];
+    checkID(image?.digest); checkID(image?.configDigest); checkSHA(image?.sourceSha);
+    if (image.sourceSha !== candidate || image.configDigest !== image.id ||
+        image.platform !== 'linux/amd64' || runtime?.imageId !== image.configDigest ||
+        runtime?.buildSha !== candidate)
+      throw new Error('V5 GHCR and post-switch Docker identity mismatch ' + role);
+    return [role, {name: names[role], sourceSha: candidate, imageId: image.configDigest,
+      registryDigest: image.digest, platform: 'linux/amd64'}];
+  }));
+}
+
 export function verifyComponentReceiptV4(manifest, {
   candidate, baseline, completeParent, candidateArtifact,
 } = {}) {
@@ -70,10 +170,12 @@ export function verifyComponentReceiptV4(manifest, {
     throw new Error('missing immutable V4 guards');
   const rebuilt = routes[manifest.route];
   if (!rebuilt) throw new Error('unknown V4 route');
+  const verifiedV5Parent = completeParent?.releaseOrigin === 'verified-github-deployment' &&
+    verifiedV5Parents.has(completeParent);
   if (completeParent?.currentProductionSha !== baseline ||
       completeParent?.lastReleaseStatus !== 'COMPLETE' ||
       completeParent?.serverDeployStatus !== 'COMPLETE' ||
-      completeParent?.releaseOrigin !== 'durable-production-release' ||
+      !(completeParent?.releaseOrigin === 'durable-production-release' || verifiedV5Parent) ||
       completeParent?.recoveryRequired !== false)
     throw new Error('parent release is not immutable COMPLETE');
   const parentImages = completeParent.images;

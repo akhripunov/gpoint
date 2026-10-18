@@ -3,14 +3,16 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { execFileSync } from 'node:child_process';
-import { deriveV3ProductionParent, verifyComponentReceiptV4 } from './release-component-bundle-v4.mjs';
+import { deriveV3ProductionParent, verifyComponentReceiptV4, verifyV5ProductionParent } from './release-component-bundle-v4.mjs';
 import { buildReadOnlyVPSProofCommand, parseReadOnlyVPSProof } from './release-component-vps-proof-v4.mjs';
 
 const SHA = /^[a-f0-9]{40}$/;
 const ROLES = ['app', 'agata', 'gsales'];
 
-export function expectedStaticParent(state) {
+export function expectedStaticParent(state, deploymentEvidence = null) {
   const sha = state?.currentProductionSha;
+  if (state?.releaseOrigin === 'github-deployment')
+    return verifyV5ProductionParent(state, deploymentEvidence);
   if (!SHA.test(sha ?? '') || state.lastReleaseStatus !== 'COMPLETE' ||
       state.serverDeployStatus !== 'COMPLETE' ||
       state.releaseOrigin !== 'durable-production-release' ||
@@ -35,7 +37,7 @@ export function expectedStaticParent(state) {
   };
 }
 
-export function staticReceiptAndImages(proof, state) {
+export function staticReceiptAndImages(proof, state, deploymentEvidence = null) {
   if (proof?.schema !== 3 || proof?.transport !== 'ghcr-oci' ||
       proof?.staticArtifactRoute !== 'V4_FAST_STATIC' || proof?.route !== 'STATIC_UI_ONLY' ||
       proof.staticArtifact?.sourceSha !== proof.candidateSha ||
@@ -46,7 +48,7 @@ export function staticReceiptAndImages(proof, state) {
       !SHA.test(proof.productionBaselineSha ?? '') ||
       proof.candidateSha === proof.productionBaselineSha)
     throw new Error('V4 static receipt not anchored to current production');
-  const parent = expectedStaticParent(state);
+  const parent = expectedStaticParent(state, deploymentEvidence);
   const images = Object.fromEntries(ROLES.map(role => [
     role,
     { name: { app: 'gpoint-runtime', agata: 'gpoint-agata-runtime',
@@ -73,8 +75,8 @@ export function staticReceiptAndImages(proof, state) {
   return manifest;
 }
 
-export function verifyStaticLiveBaseline(state, proof, facts, nativeProof) {
-  const manifest = staticReceiptAndImages(proof, state);
+export function verifyStaticLiveBaseline(state, proof, facts, nativeProof, deploymentEvidence = null) {
+  const manifest = staticReceiptAndImages(proof, state, deploymentEvidence);
   if (facts?.LIVE_RELEASE_ENV_SHA !== manifest.images.app.sourceSha ||
       facts?.LIVE_MINIAPP_SHA !== state.currentProductionSha ||
       facts?.LIVE_PRISMA_HEAD !== state.currentProductionDbHead ||

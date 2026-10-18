@@ -9,7 +9,9 @@ import crypto from 'node:crypto';
 import { migrationHead } from './release-migrations.mjs';
 import { gsalesProvisionCommand } from './release-gsales-provision.mjs';
 import { verifyReleaseBundle } from './release-bundle.mjs';
-import { deriveV3ProductionParent } from './release-component-bundle-v4.mjs';
+import { validateOciReceipt } from './release-oci.mjs';
+import { buildV5ComponentImageInventory, deriveV3ProductionParent, verifyV5ProductionParent } from './release-component-bundle-v4.mjs';
+import { createGitHubDeploymentsClient } from './github-deployments.mjs';
 import { expectedStaticParent, staticReceiptAndImages, verifyStaticLiveBaseline,
   v4NativeProofOnVPS, verifyV4SourceAtCheckout } from './release-static-v4.mjs';
 import { applyStaticArtifactV4 } from './release-static-transfer-v4.mjs';
@@ -160,6 +162,13 @@ function releaseRetentionCandidates() {
     .map(name => readJson(path.join(MANIFEST_DIR, name)))
     .filter(manifest => /^[0-9a-f]{40}$/.test(manifest.candidateSha ?? ''))
     .map(manifest => ({sha: manifest.candidateSha, status: manifest.status}));
+}
+
+function hasUnresolvedRecoveryForSha(sha) {
+  return fs.readdirSync(MANIFEST_DIR).filter(name => name.endsWith('.json')).some(name => {
+    const record = readJson(path.join(MANIFEST_DIR, name));
+    return record.candidateSha === sha && record.status === 'RECOVERY_REQUIRED';
+  });
 }
 
 export function sanitizeReleaseOutput(value) {
@@ -493,6 +502,122 @@ function readLiveFacts() {
   return facts;
 }
 
+function readGitHubReadToken() {
+  const supplied = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+  if (supplied) return supplied;
+  try {
+    return execFileSync('gh', ['auth', 'token'], {encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000}).trim();
+  } catch {
+    die('GitHub Deployment read authorization is unavailable for V5 parent verification');
+  }
+}
+
+async function verifiedV5ParentEvidence(current, facts) {
+  if (current?.releaseOrigin !== 'github-deployment') return null;
+  if (current.recoveryRequired === true || current.lastReleaseStatus !== 'COMPLETE' ||
+      current.serverDeployStatus !== 'COMPLETE')
+    die('V5 production parent is incomplete or requires recovery');
+  const releaseId = current.lastReleaseId;
+  if (!/^gpoint-release-[A-Za-z0-9_.-]+$/.test(releaseId ?? ''))
+    die('V5 completed release manifest identity is unavailable');
+  const manifestFile = path.join(MANIFEST_DIR, `${releaseId}.json`);
+  if (!fs.existsSync(manifestFile) || fs.realpathSync(manifestFile) !== manifestFile)
+    die('V5 completed release evidence is missing or outside the manifest directory');
+  const manifest = readJson(manifestFile);
+  const receipt = manifest.ciReceipt;
+  if (!current.componentImages || hasUnresolvedRecoveryForSha(current.currentProductionSha))
+    die('V5 parent image inventory is missing or an unresolved recovery record exists');
+  if (manifest.releaseId !== releaseId || manifest.candidateSha !== current.currentProductionSha ||
+      manifest.status !== 'COMPLETE' || manifest.serverDeployStatus === 'INSTALLATION_UNCONFIRMED' ||
+      manifest.recoveryRequired === true || receipt?.selectedTransport !== 'ghcr-oci' ||
+      receipt.ghcrVerified !== true || receipt.ghcrPostSwitchVerified !== true ||
+      !/^sha256:[a-f0-9]{64}$/.test(receipt.ghcrManifestDigest ?? '') ||
+      !/^[a-f0-9]{64}$/.test(receipt.prepareReceiptSha256 ?? ''))
+    die('V5 local release receipt does not contain verified immutable Prepare evidence');
+  if (typeof receipt.prepareReceiptJson !== 'string' ||
+      crypto.createHash('sha256').update(receipt.prepareReceiptJson).digest('hex') !== receipt.prepareReceiptSha256)
+    die('V5 retained Prepare receipt bytes do not match the Deployment receipt checksum');
+  let exactReceipt;
+  try {
+    const parsed = JSON.parse(receipt.prepareReceiptJson);
+    exactReceipt = validateOciReceipt(parsed, current.currentProductionSha,
+      {runId: parsed.runId, runAttempt: parsed.runAttempt});
+  } catch { die('V5 retained Prepare receipt is invalid or does not match its exact candidate'); }
+  const api = createGitHubDeploymentsClient({token: readGitHubReadToken()});
+  let verified;
+  try { verified = await api.readLatestSuccessfulProductionDeployment(); }
+  catch { die('GitHub does not confirm an unambiguous successful production Deployment'); }
+  const identity = verified.identity;
+  if (identity.candidateSha !== current.currentProductionSha ||
+      identity.prepareReceiptDigest !== receipt.ghcrManifestDigest ||
+      identity.prepareReceiptSha256 !== receipt.prepareReceiptSha256 ||
+      String(identity.prepareRunId) !== String(receipt.runId) ||
+      String(identity.prepareRunAttempt) !== String(receipt.runAttempt))
+    die('GitHub Deployment SHA or Prepare provenance does not match the V5 receipt');
+  const native = v4NativeProofOnVPS(current.componentImages, runRemoteCommand);
+  const nativeImages = Object.fromEntries(Object.entries(native).map(([role, value]) => [role, {
+    imageId: value.nativeImageId, sourceSha: value.revisionLabel, platform: `${value.os}/${value.architecture}`,
+  }]));
+  const unresolvedRecovery = hasUnresolvedRecoveryForSha(current.currentProductionSha);
+  const proof = {
+    deployment: {source: 'github-api', sha: verified.deployment.sha, status: verified.status.state,
+      environment: verified.deployment.environment, task: verified.deployment.task,
+      productionEnvironment: verified.deployment.production_environment,
+      transientEnvironment: verified.deployment.transient_environment,
+      runId: identity.runId, runAttempt: identity.runAttempt,
+      prepareRunId: identity.prepareRunId, prepareRunAttempt: identity.prepareRunAttempt,
+      authorizationMode: identity.authorizationMode, authorizationId: identity.authorizationId,
+      receiptDigest: identity.prepareReceiptDigest, imageDigests: identity.imageDigests},
+    prepare: {source: 'verified-ghcr-receipt', candidateSha: exactReceipt.candidateSha,
+      runId: exactReceipt.runId, runAttempt: exactReceipt.runAttempt,
+      receiptDigest: receipt.ghcrManifestDigest, receiptSha256: receipt.prepareReceiptSha256,
+      prismaHead: exactReceipt.prismaHead, agataHead: exactReceipt.agataHead,
+      gsalesMigrationHead: exactReceipt.gsalesMigrationHead,
+      gsalesMigrationSha256: exactReceipt.gsalesMigrationSha256,
+      images: Object.fromEntries(['app', 'agata', 'gsales'].map(role => {
+        const image = exactReceipt.images?.[role];
+        return [role, {manifestDigest: image?.digest, configDigest: image?.configDigest ?? image?.id,
+          sourceSha: image?.sourceSha}];
+      }))},
+    live: {source: 'read-only-vps', runtimeSha: facts.LIVE_RELEASE_ENV_SHA,
+      miniappSha: facts.LIVE_MINIAPP_SHA, prismaHead: facts.LIVE_PRISMA_HEAD,
+      agataHead: facts.LIVE_AGATA_HEAD, gsalesHead: facts.LIVE_GSALES_HEAD,
+      gsalesMigrationSha256: facts.LIVE_GSALES_MIGRATION_SHA256,
+      apiHealth: facts.LIVE_API_HEALTH, agataApiHealth: facts.LIVE_AGATA_API_HEALTH,
+      gsalesApiHealth: facts.LIVE_GSALES_API_HEALTH,
+      gsalesAgataApiHealth: facts.LIVE_GSALES_AGATA_API_HEALTH,
+      gsalesAgataWorkerHealth: facts.LIVE_GSALES_AGATA_MEMORY_WORKER_HEALTH,
+      workerRunning: facts.LIVE_WORKER_RUNNING === 'true', botRunning: facts.LIVE_BOT_RUNNING === 'true',
+      agataWorkerRunning: facts.LIVE_AGATA_WORKER_RUNNING === 'true',
+      gsalesAgataWorkerRunning: facts.LIVE_GSALES_AGATA_MEMORY_WORKER_RUNNING === 'true',
+      nativeImages},
+    unresolvedRecovery,
+  };
+  try { verifyV5ProductionParent(current, proof); }
+  catch (error) { die(`V5 parent evidence verification failed: ${error.message}`); }
+  return proof;
+}
+
+function readVerifiedPrepareReceiptJson(candidate) {
+  const directory = process.env.GPOINT_RELEASE_BUNDLE;
+  const expectedSha256 = process.env.GPOINT_PREPARE_RECEIPT_SHA256;
+  if (!directory || !/^[a-f0-9]{64}$/.test(expectedSha256 ?? ''))
+    die('exact Prepare receipt bytes or checksum are unavailable after Apply');
+  const root = fs.realpathSync(directory);
+  const file = path.join(root, 'receipt.json');
+  if (fs.realpathSync(file) !== file || !file.startsWith(`${root}${path.sep}`) ||
+      fs.lstatSync(file).isSymbolicLink() || !fs.statSync(file).isFile())
+    die('Prepare receipt path is not a regular in-bundle file');
+  const raw = fs.readFileSync(file, 'utf8');
+  if (crypto.createHash('sha256').update(raw).digest('hex') !== expectedSha256)
+    die('Prepare receipt bytes do not match the immutable Deploy provenance checksum');
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { die('Prepare receipt bytes are invalid JSON'); }
+  try { validateOciReceipt(parsed, candidate, {runId: parsed.runId, runAttempt: parsed.runAttempt}); }
+  catch { die('Prepare receipt does not validate for the exact production candidate'); }
+  return raw;
+}
+
 export function expectedV3LiveRevisions(current) {
   if (!current?.componentImages) {
     return { runtimeSha: current?.currentProductionSha,
@@ -502,7 +627,7 @@ export function expectedV3LiveRevisions(current) {
   const candidate = current.currentProductionSha;
   if (!SHA_RE.test(candidate ?? '') || current.miniappSourceSha !== candidate ||
       current.lastReleaseStatus !== 'COMPLETE' ||
-      current.serverDeployStatus !== 'COMPLETE')
+      current.serverDeployStatus !== 'COMPLETE' || current.recoveryRequired !== false)
     die('V4 component baseline not immutable COMPLETE');
   const roles = current.componentImages;
   const source = role => roles?.[role]?.sourceSha;
@@ -516,9 +641,19 @@ export function expectedV3LiveRevisions(current) {
            agataSha: source('agata'), mixed: source('app') !== candidate };
 }
 
-function assertLiveBaseline(current, facts, { requireAgataConfig = true } = {}) {
+function assertLiveBaseline(current, facts, { requireAgataConfig = true, parentEvidence = null } = {}) {
+  let baselineState = current;
+  if (current?.releaseOrigin === 'github-deployment') {
+    try {
+      const parent = verifyV5ProductionParent(current, parentEvidence);
+      baselineState = {...current, ...parent, componentImages: parent.images,
+        miniappSourceSha: parent.currentProductionSha,
+        activeRuntimeSha: parent.images.app.sourceSha, agataRuntimeSha: parent.images.agata.sourceSha};
+    }
+    catch (error) { die(`V5 production parent is not independently verified: ${error.message}`); }
+  }
   const liveSha = facts.LIVE_RELEASE_ENV_SHA;
-  const expected = expectedV3LiveRevisions(current);
+  const expected = expectedV3LiveRevisions(baselineState);
   if (!SHA_RE.test(liveSha ?? '') || liveSha !== expected.runtimeSha) die(`live production SHA drift: recorded=${current.currentProductionSha} live=${liveSha ?? 'unavailable'}`);
   if (!facts.LIVE_DOCKER_VERSION || !facts.LIVE_COMPOSE_VERSION || !facts.LIVE_BUILDX_VERSION || facts.LIVE_BUILDKIT !== 'ready') die('production Docker/Compose/Buildx/BuildKit preflight failed');
   if (Number(facts.LIVE_DISK_FREE_KB) < 5242880) die('production disk preflight requires at least 5 GiB free');
@@ -564,14 +699,16 @@ function isolatedBuild(candidate, shouldBuild) {
   } finally { cleanupTemporaryWorktree(worktree); }
 }
 
-function requireV4StaticPreflight(candidate, bundle, current) {
+async function requireV4StaticPreflight(candidate, bundle, current) {
   if (!bundle?.staticOnly || bundle.candidateSha !== candidate)
     die('V4 static release requires exact immutable typed receipt');
   const proof = remoteProof(candidate);
   if (proof.mainSha !== candidate) die('V4 candidate no longer matches remote main');
   if (current.currentProductionSha !== bundle.productionBaselineSha)
     die('V4 candidate production baseline differs from immutable receipt');
-  const parent = expectedStaticParent(current);
+  const facts = readLiveFacts();
+  const parentEvidence = await verifiedV5ParentEvidence(current, facts);
+  const parent = expectedStaticParent(current, parentEvidence);
   verifyV4SourceAtCheckout({ root: ROOT, candidate, baseline: current.currentProductionSha,
                             impact: bundle.impactV4 });
   const expectedPrisma = candidatePrismaMigrationHead(candidate);
@@ -583,7 +720,6 @@ function requireV4StaticPreflight(candidate, bundle, current) {
       bundle.gsalesMigrationSha256 !== expectedGsalesChecksum ||
       current.currentProductionDbHead !== expectedPrisma)
     die('V4 static release migration source/baseline drift');
-  const facts = readLiveFacts();
   if (facts.LIVE_DISK_FREE_KB == null || Number(facts.LIVE_DISK_FREE_KB) < 1048576 ||
       facts.LIVE_DOCKER_VERSION == null || facts.LIVE_AGATA_ENABLED !== 'true' ||
       facts.LIVE_GSALES_API_HEALTH !== 'healthy' ||
@@ -593,7 +729,7 @@ function requireV4StaticPreflight(candidate, bundle, current) {
   const providerFailures = validateAgataProviderCompatibility(providerConfigFromFacts(facts));
   if (providerFailures.length) die('V4 static provider incompatibility: ' + providerFailures.join('; '));
   const observed = v4NativeProofOnVPS(parent.images, runRemoteCommand);
-  const componentManifest = verifyStaticLiveBaseline(current, bundle, facts, observed);
+  const componentManifest = verifyStaticLiveBaseline(current, bundle, facts, observed, parentEvidence);
   // Current Docker Compose files must support distinct component source SHA.
   // Otherwise a future restart after RELEASE_SHA advances would pull missing images.
   const ready = runRemoteCommand(
@@ -614,13 +750,13 @@ function requireV4StaticPreflight(candidate, bundle, current) {
   return { parent, componentManifest, facts, workerCompatibility, remoteMainSha: proof.mainSha };
 }
 
-function runStaticDryRun(candidate, bundle) {
+async function runStaticDryRun(candidate, bundle) {
   const startedAt = isoNow();
   const releaseId = `gpoint-dry-run-${startedAt.replace(/[-:.]/g, '')}`;
   const unlock = acquireLock(releaseId);
   try {
     const current = state();
-    const checked = requireV4StaticPreflight(candidate, bundle, current);
+    const checked = await requireV4StaticPreflight(candidate, bundle, current);
     const manifest = {
       releaseId, candidateSha: candidate,
       previousProductionSha: current.currentProductionSha,
@@ -648,7 +784,7 @@ function runStaticDryRun(candidate, bundle) {
   } finally { unlock(); }
 }
 
-function runDryRun(candidate) {
+async function runDryRun(candidate) {
   const staticBundle = process.env.GPOINT_RELEASE_BUNDLE
     ? verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, candidate) : null;
   if (staticBundle?.staticOnly) return runStaticDryRun(candidate, staticBundle);
@@ -660,7 +796,9 @@ function runDryRun(candidate) {
     if (localHead !== candidate) die('candidate does not exist locally');
     const proof = remoteProof(candidate);
     const current = state();
-    const baseline = assertLiveBaseline(current, readLiveFacts());
+    const facts = readLiveFacts();
+    const parentEvidence = await verifiedV5ParentEvidence(current, facts);
+    const baseline = assertLiveBaseline(current, facts, {parentEvidence});
     const { liveSha, liveDbHead } = baseline;
     const gsalesReadiness = inspectGsalesReadiness(candidate, liveSha);
     const workerCompatibility = verifyWorkerCompatibility(candidate, baseline.facts, 'preflight');
@@ -683,7 +821,7 @@ function runDryRun(candidate) {
   } finally { unlock(); }
 }
 
-function runStaticApply(candidate, bundle) {
+async function runStaticApply(candidate, bundle) {
   if (bundle.staticArtifactRoute !== 'V4_FAST_STATIC' || !bundle.staticOnly ||
       !bundle.archive || !/^sha256:[a-f0-9]{64}$/.test(bundle.staticArtifactDigest ?? '') ||
       !/^[a-f0-9]{64}$/.test(bundle.staticArtifactSha256 ?? ''))
@@ -695,10 +833,12 @@ function runStaticApply(candidate, bundle) {
   let checked = null;
   const startedAt = isoNow();
   try {
-    const initial = assertLiveBaseline(current, readLiveFacts());
+    const initialFacts = readLiveFacts();
+    const parentEvidence = await verifiedV5ParentEvidence(current, initialFacts);
+    const initial = assertLiveBaseline(current, initialFacts, {parentEvidence});
     if (initial.liveSha !== bundle.productionBaselineSha)
       die('V4 static baseline changed before Apply');
-    checked = requireV4StaticPreflight(candidate, bundle, current);
+    checked = await requireV4StaticPreflight(candidate, bundle, current);
     recheckTaskAuthorizationBeforeMutation(candidate, 'V4_STATIC_STAGE');
     const outcome = applyStaticArtifactV4({
       candidate, baseline: current.currentProductionSha, bundle,
@@ -781,14 +921,16 @@ function runStaticApply(candidate, bundle) {
 
 function status() { console.log(JSON.stringify({ state: state(), activeLock: fs.existsSync(LOCK_FILE) ? readJson(LOCK_FILE) : null, manifests: fs.readdirSync(MANIFEST_DIR).filter(x => x.endsWith('.json')).sort() }, null, 2)); }
 
-function provisionAgataConfig(candidate) {
+async function provisionAgataConfig(candidate) {
   const localHead = git(['rev-parse', candidate]);
   if (localHead !== candidate) die('candidate does not exist locally');
   if (git(['status', '--porcelain'])) die('AGATA config provisioning requires a clean committed checkout');
   const proof = remoteProof(candidate);
   if (proof.mainSha !== candidate) die('candidate must exactly match GitHub origin/main before AGATA config provisioning');
   const current = state();
-  assertLiveBaseline(current, readLiveFacts(), { requireAgataConfig: false });
+  const facts = readLiveFacts();
+  const parentEvidence = await verifiedV5ParentEvidence(current, facts);
+  assertLiveBaseline(current, facts, { requireAgataConfig: false, parentEvidence });
   if (!SHA_RE.test(current.currentProductionSha ?? '')) die('recorded current production SHA is unavailable');
   const releaseId = `gpoint-agata-config-${isoNow().replace(/[-:.]/g, '')}`;
   const unlock = acquireLock(releaseId);
@@ -798,7 +940,7 @@ function provisionAgataConfig(candidate) {
   } finally { unlock(); }
 }
 
-function provisionGsalesConfig(candidate, approvedSha) {
+async function provisionGsalesConfig(candidate, approvedSha) {
   if (candidate !== approvedSha) die('GSales provisioning requires --owner-approved-sha equal to exact candidate');
   const releaseId = `gpoint-gsales-config-${isoNow().replace(/[-:.]/g, '')}`;
   const unlock = acquireLock(releaseId);
@@ -807,7 +949,9 @@ function provisionGsalesConfig(candidate, approvedSha) {
     if (remoteProof(candidate).mainSha !== candidate) die('candidate must exactly match GitHub origin/main');
     const bundle = verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, candidate);
     const current = state();
-    const baseline = assertLiveBaseline(current, readLiveFacts());
+    const facts = readLiveFacts();
+    const parentEvidence = await verifiedV5ParentEvidence(current, facts);
+    const baseline = assertLiveBaseline(current, facts, {parentEvidence});
     writeManifest({ releaseId: `${releaseId}-baseline`, candidateSha: candidate, previousProductionSha: baseline.liveSha,
       status: 'CONFIG_PROVISION_BASELINE_RECORDED', dbHeadBefore: baseline.liveDbHead,
       agataDbHeadBefore: baseline.agataDbHead, gsalesDbHeadBefore: baseline.facts.LIVE_GSALES_HEAD,
@@ -825,7 +969,7 @@ function provisionGsalesConfig(candidate, approvedSha) {
   } finally { unlock(); }
 }
 
-function configureGsalesWorker(candidate, approvedSha) {
+async function configureGsalesWorker(candidate, approvedSha) {
   if (candidate !== approvedSha) die('Mac lane configuration requires exact-SHA OWNER approval');
   const releaseId = `gpoint-gsales-worker-${isoNow().replace(/[-:.]/g, '')}`;
   const unlock = acquireLock(releaseId);
@@ -833,7 +977,10 @@ function configureGsalesWorker(candidate, approvedSha) {
     if (git(['rev-parse', 'HEAD']) !== candidate || git(['status', '--porcelain'])) die('Mac configuration requires a clean exact candidate');
     if (remoteProof(candidate).mainSha !== candidate) die('candidate must match GitHub current main');
     verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, candidate);
-    const baseline = assertLiveBaseline(state(), readLiveFacts());
+    const current = state();
+    const facts = readLiveFacts();
+    const parentEvidence = await verifiedV5ParentEvidence(current, facts);
+    const baseline = assertLiveBaseline(current, facts, {parentEvidence});
     inspectGsalesReadiness(candidate, baseline.liveSha);
     const source = `import json,pathlib\ne=dict(line.split('=',1) for line in pathlib.Path('/opt/gpoint/env/production.env').read_text().splitlines() if line and not line.startswith('#') and '=' in line)\nassert e['RELEASE_SHA']=='${baseline.liveSha}'\nprint(json.dumps({key:e[key] for key in ('GSALES_WORKER_TOKEN','GSALES_TENANT_ID')}))\n`;
     const credentials = runRemoteCommand(`set -e; printf '%s' '${Buffer.from(source).toString('base64')}' | base64 -d | python3 -`);
@@ -850,7 +997,7 @@ function configureGsalesWorker(candidate, approvedSha) {
   } finally { unlock(); }
 }
 
-function runApply(candidate) {
+async function runApply(candidate) {
   const staticBundle = process.env.GPOINT_RELEASE_BUNDLE
     ? verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, candidate) : null;
   if (staticBundle?.staticOnly) return runStaticApply(candidate, staticBundle);
@@ -866,7 +1013,9 @@ function runApply(candidate) {
   const stageTimings = {};
   try {
     const proof = remoteProof(candidate);
-    const baseline = assertLiveBaseline(current, readLiveFacts());
+    const facts = readLiveFacts();
+    const parentEvidence = await verifiedV5ParentEvidence(current, facts);
+    const baseline = assertLiveBaseline(current, facts, {parentEvidence});
     validatedProvider = baseline.provider;
     const { liveSha, liveDbHead } = baseline;
     const gsalesReadiness = inspectGsalesReadiness(candidate, liveSha);
@@ -928,25 +1077,27 @@ function runApply(candidate) {
     console.log(`RELEASE_STAGE_TIMING=${JSON.stringify(stageTimings)}`);
     const artifactIdentities = { api: { sourceSha: candidate, adapter: adapter.imageIdentity }, worker: { sourceSha: candidate, adapter: adapter.imageIdentity }, bot: { sourceSha: candidate, adapter: adapter.imageIdentity }, miniapp: { sourceSha: candidate, adapter: adapter.imageIdentity }, agataApi: { sourceSha: candidate, adapter: adapter.agataIdentity }, agataWorker: { sourceSha: candidate, adapter: adapter.agataIdentity } };
     for (const role of ['gsalesApi', 'gsalesAgataApi', 'gsalesAgataWorker']) artifactIdentities[role] = { sourceSha: candidate, adapter: adapter.gsalesIdentity };
-    // V4 metadata is additive: missing optional per-role evidence must NOT
-    // fail a completed, otherwise healthy, canonical V3 production Deploy.
-    // Future selective releases must fail closed if componentImages is absent.
+    // Preserve the exact GHCR manifest digests alongside Docker config IDs.
+    // The resulting inventory is not itself a production attestation; later
+    // selective paths must re-read the successful GitHub Deployment and VPS.
     let componentImages = null;
     try {
-      componentImages = deriveV3ProductionParent({
-        currentProductionSha: candidate, activeRuntimeSha: candidate,
-        agataRuntimeSha: candidate, lastReleaseStatus: 'COMPLETE',
-        serverDeployStatus: 'COMPLETE', releaseOrigin: 'github-deployment',
-        artifactIdentities,
-      }).images;
+      componentImages = buildV5ComponentImageInventory(adapter.ciReceipt, {
+        app: adapter.imageIdentity, agata: adapter.agataIdentity, gsales: adapter.gsalesIdentity,
+      }, candidate);
     } catch {
-      console.error('V4_COMPONENT_IDENTITIES=UNAVAILABLE (V3 remains authoritative)');
+      console.error('V5_SELECTIVE_PARENT_IMAGE_INVENTORY=UNAVAILABLE (selective V3/V4 remains fail-closed)');
     }
     const readiness = observeDeploymentReadiness('COMPLETE', readWorkerDependencies, { gsalesInferenceReady: adapter.gsalesIdentity.inferenceReady });
     const manifest = { releaseId, candidateSha: candidate, previousProductionSha: current.currentProductionSha, productionShaAfter: candidate, dbHeadBefore: liveDbHead, dbHeadAfter: deployedDbHead, agataDbHeadBefore: baseline.agataDbHead, agataDbHeadAfter: adapter.agataIdentity.head, agataRuntimeSha: candidate, agataProvider: adapter.agataIdentity.provider, artifactIdentities, startedAt, finishedAt: isoNow(), status: 'COMPLETE', failureStage: null, failureReason: null, rollbackSha: current.currentProductionSha, rollbackDbCompatibility: 'REQUIRES_FORWARD_FIX_ASSESSMENT', productionRef: null, remoteProof: { mainSha: proof.mainSha }, migrationOutput: adapter.migrationOutput, migrationProof: adapter.migrationProof, detectorSourceHash: adapter.detectorHash, stageTimings, releaseOrigin: 'github-deployment', agataMigrationReadiness };
     Object.assign(manifest, readiness);
     manifest.workerCompatibility = workerCompatibility;
-    manifest.ciReceipt = adapter.ciReceipt ?? null;
+    manifest.ciReceipt = adapter.ciReceipt ? {
+      ...adapter.ciReceipt,
+      ghcrManifestDigest: process.env.GPOINT_PREPARE_RECEIPT_DIGEST,
+      prepareReceiptSha256: process.env.GPOINT_PREPARE_RECEIPT_SHA256,
+      prepareReceiptJson: readVerifiedPrepareReceiptJson(candidate),
+    } : null;
     // Additive V4 component identity, not an authorization to reuse images.
     // Any future inherited image must still pass source/CI/native VPS proofs.
     if (componentImages) manifest.componentImages = componentImages;
@@ -1028,16 +1179,16 @@ async function main() {
   const args = process.argv.slice(2);
   if (args[0] === 'status' || args.includes('--status')) return status();
   if (!args.includes('--recheck-worker')) runLocalDiskPreflight();
-  if (args.includes('--provision-agata-config')) return provisionAgataConfig(candidateSha(args));
-  if (args.includes('--provision-gsales-config')) return provisionGsalesConfig(candidateSha(args), args[args.indexOf('--owner-approved-sha') + 1]);
-  if (args.includes('--configure-gsales-worker')) return configureGsalesWorker(candidateSha(args), args[args.indexOf('--owner-approved-sha') + 1]);
+  if (args.includes('--provision-agata-config')) return await provisionAgataConfig(candidateSha(args));
+  if (args.includes('--provision-gsales-config')) return await provisionGsalesConfig(candidateSha(args), args[args.indexOf('--owner-approved-sha') + 1]);
+  if (args.includes('--configure-gsales-worker')) return await configureGsalesWorker(candidateSha(args), args[args.indexOf('--owner-approved-sha') + 1]);
   if (args.includes('--recheck-worker')) return recheckWorkerDependency(candidateSha(args));
   const isDryRun = args.includes('--dry-run');
   const isApply = args.includes('--apply');
   if (!isDryRun && !isApply) die('choose --dry-run or --apply');
   if (isApply && !args.includes('--confirm-production-apply')) die('apply requires --confirm-production-apply');
-  if (isApply) return runApply(candidateSha(args));
-  runDryRun(candidateSha(args));
+  if (isApply) return await runApply(candidateSha(args));
+  await runDryRun(candidateSha(args));
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(process.argv[1])) {

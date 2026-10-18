@@ -238,6 +238,46 @@ test('a newer success supersedes a terminal older failure as the Deploy baseline
   assert.equal(baseline.deploymentId, 7);
 });
 
+test('verified V5 parent lookup returns the exact successful production Deployment and identity', async () => {
+  const deployment = validDeployment(22, sha, identity, '2026-10-18T00:00:00Z');
+  const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async url => {
+    if (url.includes('/deployments?')) return response(200, [deployment]);
+    if (url.endsWith('/deployments/22')) return response(200, deployment);
+    if (url.includes('/deployments/22/statuses')) return response(200, [status('success', '2026-10-18T00:05:00Z')]);
+    throw new Error(`unexpected ${url}`);
+  }});
+  const result = await client.readLatestSuccessfulProductionDeployment();
+  assert.equal(result.deployment.sha, sha);
+  assert.equal(result.status.state, 'success');
+  assert.equal(result.identity.prepareReceiptDigest, identity.prepareReceiptDigest);
+  assert.deepEqual(result.identity.imageDigests, identity.imageDigests);
+});
+
+test('verified V5 parent lookup rejects absent or non-successful Deployments', async () => {
+  for (const state of ['pending', 'failure']) {
+    const deployment = validDeployment(23, sha, identity, '2026-10-18T00:00:00Z');
+    const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async url => {
+      if (url.includes('/deployments?')) return response(200, [deployment]);
+      if (url.endsWith('/deployments/23')) return response(200, deployment);
+      if (url.includes('/deployments/23/statuses')) return response(200, [status(state, '2026-10-18T00:05:00Z')]);
+      throw new Error(`unexpected ${url}`);
+    }});
+    await assert.rejects(client.readLatestSuccessfulProductionDeployment(), /pending|failure|failed outside/);
+  }
+});
+
+test('verified V5 parent lookup rejects incomplete durable authorization provenance', async () => {
+  const deployment = validDeployment(24, sha, identity, '2026-10-18T00:00:00Z');
+  const payload = JSON.parse(deployment.payload);
+  payload.authorization = {mode: 'TASK_SCOPED_AUTO', id: null};
+  deployment.payload = JSON.stringify(payload);
+  const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async url => {
+    if (url.includes('/deployments?')) return response(200, [deployment]);
+    throw new Error(`unexpected ${url}`);
+  }});
+  await assert.rejects(client.readLatestSuccessfulProductionDeployment(), /provenance payload is incomplete/);
+});
+
 test('a created Deployment is exposed when its initial status cannot be confirmed', async () => {
   const created = {id: 8, environment: 'production', production_environment: true,
     transient_environment: false, task: 'gpoint-production-deploy', sha, ref: sha,

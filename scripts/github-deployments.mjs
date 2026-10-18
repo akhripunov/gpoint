@@ -116,6 +116,9 @@ function validateDeploymentRecord(deployment, sha = null, {allowLegacyPayload = 
   requireThat(payload?.schema === DEPLOYMENT_SCHEMA && payload.repository === REPOSITORY
     && payload.candidateSha === deployment.sha && payload.workflow?.runId && payload.workflow?.attempt
     && payload.prepare?.receiptDigest && payload.prepare?.receiptSha256 && payload.prepare?.imageDigests
+    && ['EXACT_SHA', 'TASK_SCOPED_AUTO'].includes(payload.authorization?.mode)
+    && (payload.authorization.mode !== 'TASK_SCOPED_AUTO' ||
+      /^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$/.test(payload.authorization.id ?? ''))
     && ['FULL_RELEASE', 'STATIC_UI_ONLY'].includes(payload.route)
     && (payload.route !== 'STATIC_UI_ONLY' || /^sha256:[a-f0-9]{64}$/.test(payload.prepare?.staticArtifact?.digest ?? '')
       && /^[a-f0-9]{64}$/.test(payload.prepare?.staticArtifact?.contentSha256 ?? '')),
@@ -264,6 +267,42 @@ export function createGitHubDeploymentsClient({token, fetchImpl = globalThis.fet
       failedDeploymentId: newest.id, preApplyFailure: true};
   }
 
+  async function readLatestSuccessfulProductionDeployment() {
+    const baseline = await readProductionBaseline();
+    if (!baseline.historyExists || baseline.status?.state !== 'success' ||
+        !Number.isSafeInteger(baseline.deploymentId) || !SHA40.test(baseline.baselineSha ?? ''))
+      throw new DeploymentApiError('No unambiguous successful production Deployment is available');
+    const deployment = await getDeployment(baseline.deploymentId);
+    const status = await latestStatus(deployment);
+    if (deployment.sha !== baseline.baselineSha || status.state !== 'success')
+      throw new DeploymentApiError('Latest production Deployment changed or is no longer successful');
+    return {deployment, status, identity: deploymentIdentity(deployment)};
+  }
+
+  async function readSuccessfulProductionDeploymentForSha(candidateSha, route = 'FULL_RELEASE') {
+    requireThat(SHA40.test(candidateSha ?? '') && ['FULL_RELEASE', 'STATIC_UI_ONLY'].includes(route),
+      'exact SHA and production route are required for Deployment read-back');
+    const baseline = await readProductionBaseline();
+    if (!baseline.historyExists) throw new DeploymentApiError('Production Deployment history is unavailable');
+    const matches = (await listDeployments()).filter(item => {
+      const payload = validateDeploymentRecord(item, candidateSha);
+      return payload.route === route;
+    }).sort((a, b) => Date.parse(b.created_at ?? '') - Date.parse(a.created_at ?? ''));
+    for (const item of matches) {
+      const status = await latestStatus(item);
+      if (status.state === 'success') {
+        const deployment = await getDeployment(item.id);
+        const currentStatus = await latestStatus(deployment);
+        if (deployment.sha !== candidateSha || currentStatus.state !== 'success')
+          throw new DeploymentApiError('Exact production Deployment changed during read-back');
+        return {deployment, status: currentStatus, identity: deploymentIdentity(deployment)};
+      }
+      if (['pending', 'queued', 'in_progress', 'error'].includes(status.state))
+        throw new DeploymentApiError(`Exact production Deployment ${item.id} is ${status.state}`);
+    }
+    throw new DeploymentApiError(`No successful ${route} Deployment exists for the exact SHA`);
+  }
+
   async function readBackCreate(identity) {
     const matches = (await listDeployments()).filter(item => isSameAttempt(item, identity));
     if (matches.length > 1) throw new DeploymentApiError('Duplicate GitHub Deployments exist for this workflow run attempt');
@@ -351,6 +390,8 @@ export function createGitHubDeploymentsClient({token, fetchImpl = globalThis.fet
   }
 
   return {listDeployments, listStatuses, latestStatus, getDeployment, findDeploymentForRun, readProductionBaseline,
+    readLatestSuccessfulProductionDeployment,
+    readSuccessfulProductionDeploymentForSha,
     beginProductionDeployment, publishStatus};
 }
 
