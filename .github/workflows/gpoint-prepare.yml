@@ -41,6 +41,63 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
+      - name: Verify GitHub API read with the job token
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import socket
+          import urllib.error
+          import urllib.request
+
+          token = os.environ.get("GITHUB_TOKEN", "")
+          repository = os.environ.get("GITHUB_REPOSITORY", "")
+          if not token or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+              print("GITHUB_API_PREFLIGHT=BLOCKED category=AUTH_OR_CONFIG", flush=True)
+              raise SystemExit(1)
+
+          request = urllib.request.Request(
+              f"https://api.github.com/repos/{repository}/git/ref/heads/main",
+              headers={
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=15) as response:
+                  payload = json.loads(response.read())
+          except urllib.error.HTTPError as error:
+              category = "AUTH" if error.code == 401 else "PERMISSION" if error.code == 403 else "HTTP"
+              print(f"GITHUB_API_PREFLIGHT=BLOCKED category={category} httpStatus={error.code}", flush=True)
+              raise SystemExit(1)
+          except (urllib.error.URLError, TimeoutError, OSError) as error:
+              reason = getattr(error, "reason", error)
+              if isinstance(reason, TimeoutError):
+                  reason_code = "TIMEOUT"
+              elif isinstance(reason, socket.gaierror):
+                  reason_code = "DNS"
+              elif isinstance(reason, OSError) and getattr(reason, "errno", None) in {
+                  socket.errno.ECONNRESET, socket.errno.ECONNREFUSED, socket.errno.ETIMEDOUT,
+              }:
+                  reason_code = "CONNECTION"
+              else:
+                  reason_code = "TRANSPORT"
+              print(f"GITHUB_API_PREFLIGHT=BLOCKED category=NETWORK reason={reason_code}", flush=True)
+              raise SystemExit(1)
+          except (ValueError, json.JSONDecodeError):
+              print("GITHUB_API_PREFLIGHT=BLOCKED category=INVALID_RESPONSE", flush=True)
+              raise SystemExit(1)
+
+          current_main_sha = payload.get("object", {}).get("sha") if isinstance(payload, dict) else None
+          if not isinstance(current_main_sha, str) or not re.fullmatch(r"[a-f0-9]{40}", current_main_sha):
+              print("GITHUB_API_PREFLIGHT=BLOCKED category=INVALID_RESPONSE", flush=True)
+              raise SystemExit(1)
+          print(f"GITHUB_API_PREFLIGHT=PASS currentMainSha={current_main_sha}", flush=True)
+          PY
       - name: Wait for a quiet main and verify the exact candidate
         id: coalesce
         env:

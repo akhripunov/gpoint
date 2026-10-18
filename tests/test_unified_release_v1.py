@@ -66,6 +66,14 @@ class UnifiedReleaseV1ContractTests(unittest.TestCase):
         self.assertTrue((ROOT / config["coalesce_workflow"]).is_file())
         self.assertTrue((ROOT / config["deploy_workflow"]).is_file())
         workflow = (ROOT / config["coalesce_workflow"]).read_text()
+        self.assertIn("name: Verify GitHub API read with the job token", workflow)
+        coalesce_job = workflow.split("  coalesce:\n", 1)[1].split("  prepare:\n", 1)[0]
+        self.assertIn("GITHUB_TOKEN: ${{ github.token }}", coalesce_job)
+        self.assertIn('https://api.github.com/repos/{repository}/git/ref/heads/main', coalesce_job)
+        self.assertIn('category={category} httpStatus={error.code}', coalesce_job)
+        self.assertIn('category=NETWORK reason={reason_code}', coalesce_job)
+        self.assertIn('isinstance(reason, socket.gaierror)', coalesce_job)
+        self.assertIn("GITHUB_API_PREFLIGHT=PASS", coalesce_job)
         self.assertIn("runs-on: [self-hosted, macOS, gpoint-production]", workflow)
         self.assertIn("needs.coalesce.outputs.result == 'WINNER'", workflow)
         trigger = workflow.split("\npermissions:", 1)[0]
