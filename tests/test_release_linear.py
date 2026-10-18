@@ -613,16 +613,25 @@ class DeploymentReleaseTests(unittest.TestCase):
         self.assertIn("/deployments?environment=production&task=gpoint-production-deploy", publisher)
         self.assertIn("/deployments/{deployment[\"id\"]}/statuses?", publisher)
 
-    def test_reconcile_workflow_has_minimal_deployment_read_permission(self):
+    def test_reconcile_workflow_has_minimal_private_ghcr_read_permission(self):
         workflow = (ROOT / '.github/workflows/gpoint-linear-reconcile.yml').read_text()
-        match = re.search(r'^permissions:\n((?:[ \t]+[a-z_]+: [a-z]+\n)+)', workflow, re.MULTILINE)
+        self.assertIsNone(re.search(r'^permissions:', workflow, re.MULTILINE))
+        job = re.search(r'^  reconcile:\n(?P<job>.*?)(?=^  [a-z][a-z0-9_-]*:\n|\Z)',
+                        workflow, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(job)
+        match = re.search(r'^    permissions:\n((?:      [a-z_]+: [a-z]+\n)+)',
+                          job.group('job'), re.MULTILINE)
         self.assertIsNotNone(match)
         permissions = dict(line.strip().split(': ', 1) for line in match.group(1).splitlines())
-        self.assertEqual(permissions, {'contents': 'read', 'actions': 'read', 'deployments': 'read'})
+        self.assertEqual(permissions, {
+            'contents': 'read', 'actions': 'read', 'deployments': 'read', 'packages': 'read'})
         self.assertNotRegex(match.group(1), r': write\b')
         source = (ROOT / 'scripts/publish-release-linear.py').read_text()
         self.assertIn("/deployments?environment=production&task=gpoint-production-deploy", source)
         self.assertIn("/deployments/{deployment[\"id\"]}/statuses?", source)
+        self.assertIn("ghcr.io/v2/{repository}", source)
+        self.assertIn("DEPLOY_EVIDENCE_REPOSITORY = 'akhripunov/gpoint-deploy-evidence'", source)
+        self.assertIn("os.environ.get('GITHUB_TOKEN', '')", source)
 
     def test_empty_production_deployment_inventory_is_not_deployed(self):
         routes = []

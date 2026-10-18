@@ -6,17 +6,17 @@ on:
     workflows: ["GPoint — Prepare", "GPoint — Deploy"]
     types: [completed]
 
-permissions:
-  contents: read
-  actions: read
-  deployments: read
-
 concurrency:
   group: gpoint-linear-release
   cancel-in-progress: false
 
 jobs:
   reconcile:
+    permissions:
+      contents: read
+      actions: read
+      deployments: read
+      packages: read
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.head_branch == 'main'
     runs-on: [self-hosted, macOS, gpoint-production]
     timeout-minutes: 5
