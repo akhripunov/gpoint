@@ -1,0 +1,206 @@
+name: ME-42 GHCR token canary
+run-name: ME-42 GHCR canary ${{ github.run_id }}.${{ github.run_attempt }}
+
+on:
+  push:
+    branches:
+      - codex/me42-ghcr-token-canary
+
+permissions: {}
+
+jobs:
+  publish:
+    if: github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      packages: write
+    outputs:
+      manifest_digest: ${{ steps.publish.outputs.manifest_digest }}
+      receipt_sha256: ${{ steps.publish.outputs.receipt_sha256 }}
+    steps:
+      - name: Confirm exact canary ref and source candidate
+        env:
+          EXPECTED_REF: refs/heads/codex/me42-ghcr-token-canary
+          EXPECTED_CANDIDATE: b1416f04acdb249b0b36de17364eb45a1319ee60
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "$EXPECTED_REF"
+          printf 'CANARY_SOURCE_CANDIDATE=%s\n' "$EXPECTED_CANDIDATE"
+          printf 'CANARY_WORKFLOW_SHA=%s\n' "$GITHUB_SHA"
+
+      - name: Install official ORAS 1.2.0 Linux amd64 with checksum verification
+        env:
+          ORAS_SHA256: 5b3f1cbb86d869eee68120b9b45b9be983f3738442f87ee5f06b00edd0bab336
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/oras_1.2.0_linux_amd64.tar.gz"
+          curl --fail --location --silent --show-error --max-time 60 \
+            --output "$archive" \
+            https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_linux_amd64.tar.gz
+          echo "$ORAS_SHA256  $archive" | sha256sum --check --status
+          tar -xzf "$archive" -C "$RUNNER_TEMP" oras
+          chmod 755 "$RUNNER_TEMP/oras"
+          "$RUNNER_TEMP/oras" version | grep -Eq '^Version:[[:space:]]+1\.2\.0$'
+          echo "ORAS=$RUNNER_TEMP/oras" >> "$GITHUB_ENV"
+          echo 'ORAS_VERSION=1.2.0 checksum=PASS'
+
+      - name: Create synthetic non-Prepare receipt
+        env:
+          EXPECTED_CANDIDATE: b1416f04acdb249b0b36de17364eb45a1319ee60
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/me42-canary"
+          cd "$RUNNER_TEMP/me42-canary"
+          python3 - <<'PY'
+          import json, os
+          receipt = {
+              "artifactKind": "synthetic-ghcr-compatibility-canary",
+              "canarySourceCandidateSha": os.environ["EXPECTED_CANDIDATE"],
+              "containsUserData": False,
+              "runId": int(os.environ["GITHUB_RUN_ID"]),
+              "runAttempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "schema": "me42-ghcr-canary.v1",
+              "status": "CANARY",
+              "workflowSha": os.environ["GITHUB_SHA"],
+          }
+          with open("receipt.json", "w", encoding="utf-8", newline="\n") as stream:
+              stream.write(json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n")
+          PY
+          echo 'SYNTHETIC_RECEIPT_CREATED=PASS'
+
+      - name: Publish one canary artifact with packages write token
+        id: publish
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PACKAGE: ghcr.io/akhripunov/gpoint-me42-canary
+          ARTIFACT_TYPE: application/vnd.gpoint.prepare.receipt.v1
+          LAYER_TYPE: application/vnd.gpoint.prepare.receipt.v1+json
+        run: |
+          set -euo pipefail
+          printf '%s' "$GITHUB_TOKEN" | "$ORAS" login ghcr.io --username "$GITHUB_ACTOR" --password-stdin >/dev/null
+          cd "$RUNNER_TEMP/me42-canary"
+          receipt_sha256="$(sha256sum receipt.json | awk '{print $1}')"
+          tag="me42-canary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          descriptor="$("$ORAS" push --artifact-type "$ARTIFACT_TYPE" \
+            --annotation "org.opencontainers.image.source=https://github.com/akhripunov/gpoint" \
+            --format json "$PACKAGE:$tag" "receipt.json:$LAYER_TYPE")"
+          digest="$(printf '%s' "$descriptor" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("digest", ""))')"
+          if ! printf '%s' "$digest" | grep -Eq '^sha256:[a-f0-9]{64}$'; then
+            echo 'CANARY_PUBLISH_BLOCKED=missing_manifest_digest'
+            exit 1
+          fi
+          printf 'manifest_digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+          printf 'receipt_sha256=%s\n' "$receipt_sha256" >> "$GITHUB_OUTPUT"
+          printf 'CANARY_PUBLISH=PASS package=%s digest=%s receipt_sha256=%s\n' "$PACKAGE" "$digest" "$receipt_sha256"
+
+  readback:
+    if: github.run_attempt == 1
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      packages: read
+    steps:
+      - name: Install official ORAS 1.2.0 Linux amd64 with checksum verification
+        env:
+          ORAS_SHA256: 5b3f1cbb86d869eee68120b9b45b9be983f3738442f87ee5f06b00edd0bab336
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/oras_1.2.0_linux_amd64.tar.gz"
+          curl --fail --location --silent --show-error --max-time 60 \
+            --output "$archive" \
+            https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_linux_amd64.tar.gz
+          echo "$ORAS_SHA256  $archive" | sha256sum --check --status
+          tar -xzf "$archive" -C "$RUNNER_TEMP" oras
+          chmod 755 "$RUNNER_TEMP/oras"
+          "$RUNNER_TEMP/oras" version | grep -Eq '^Version:[[:space:]]+1\.2\.0$'
+          echo "ORAS=$RUNNER_TEMP/oras" >> "$GITHUB_ENV"
+          echo 'ORAS_VERSION=1.2.0 checksum=PASS'
+
+      - name: Prove unauthenticated access is denied
+        env:
+          PACKAGE: ghcr.io/akhripunov/gpoint-me42-canary
+          MANIFEST_DIGEST: ${{ needs.publish.outputs.manifest_digest }}
+        run: |
+          set -euo pipefail
+          test -n "$MANIFEST_DIGEST"
+          config="$RUNNER_TEMP/me42-anonymous-docker-config"
+          mkdir -p "$config"
+          printf '{}\n' > "$config/config.json"
+          echo "DOCKER_CONFIG=$config" >> "$GITHUB_ENV"
+          set +e
+          "$RUNNER_TEMP/oras" manifest fetch --output /dev/null "$PACKAGE@$MANIFEST_DIGEST" \
+            >"$RUNNER_TEMP/anonymous.stdout" 2>"$RUNNER_TEMP/anonymous.stderr"
+          result=$?
+          set -e
+          if [ "$result" -eq 0 ]; then
+            echo 'PRIVATE_ACCESS=FAIL anonymous_pull_succeeded'
+            exit 1
+          fi
+          if ! grep -Eiq '401|unauthorized|denied' "$RUNNER_TEMP/anonymous.stderr"; then
+            echo 'PRIVATE_ACCESS=BLOCKED anonymous_failure_not_authorization'
+            exit 1
+          fi
+          echo 'PRIVATE_ACCESS=PASS anonymous_read_denied'
+
+      - name: Read exact digest using packages read token and verify bytes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PACKAGE: ghcr.io/akhripunov/gpoint-me42-canary
+          ARTIFACT_TYPE: application/vnd.gpoint.prepare.receipt.v1
+          LAYER_TYPE: application/vnd.gpoint.prepare.receipt.v1+json
+          MANIFEST_DIGEST: ${{ needs.publish.outputs.manifest_digest }}
+          EXPECTED_RECEIPT_SHA256: ${{ needs.publish.outputs.receipt_sha256 }}
+          EXPECTED_CANDIDATE: b1416f04acdb249b0b36de17364eb45a1319ee60
+        run: |
+          set -euo pipefail
+          printf '%s' "$GITHUB_TOKEN" | "$ORAS" login ghcr.io --username "$GITHUB_ACTOR" --password-stdin >/dev/null
+          [[ "$MANIFEST_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          test "${#EXPECTED_RECEIPT_SHA256}" -eq 64
+          manifest="$RUNNER_TEMP/canary-manifest.json"
+          "$ORAS" manifest fetch --output "$manifest" "$PACKAGE@$MANIFEST_DIGEST"
+          python3 - "$manifest" "$MANIFEST_DIGEST" "$ARTIFACT_TYPE" "$LAYER_TYPE" <<'PY'
+          import hashlib, json, re, sys
+          path, expected_digest, artifact_type, layer_type = sys.argv[1:]
+          raw = open(path, "rb").read()
+          assert "sha256:" + hashlib.sha256(raw).hexdigest() == expected_digest
+          manifest = json.loads(raw)
+          assert manifest.get("schemaVersion") == 2
+          assert manifest.get("mediaType") == "application/vnd.oci.image.manifest.v1+json"
+          assert manifest.get("artifactType") == artifact_type
+          config = manifest.get("config") or {}
+          assert config.get("mediaType") == "application/vnd.oci.empty.v1+json"
+          layers = manifest.get("layers")
+          assert isinstance(layers, list) and len(layers) == 1
+          layer = layers[0]
+          assert layer.get("mediaType") == layer_type
+          assert re.fullmatch(r"sha256:[a-f0-9]{64}", layer.get("digest", ""))
+          assert isinstance(layer.get("size"), int) and layer["size"] > 0
+          PY
+          mkdir -p "$RUNNER_TEMP/canary-readback"
+          "$ORAS" pull "$PACKAGE@$MANIFEST_DIGEST" --output "$RUNNER_TEMP/canary-readback"
+          python3 - "$RUNNER_TEMP/canary-readback/receipt.json" "$EXPECTED_RECEIPT_SHA256" "$EXPECTED_CANDIDATE" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" <<'PY'
+          import hashlib, json, os, sys
+          path, expected_sha, candidate_sha, workflow_sha, run_id, run_attempt = sys.argv[1:]
+          raw = open(path, "rb").read()
+          assert hashlib.sha256(raw).hexdigest() == expected_sha
+          receipt = json.loads(raw)
+          expected = {
+              "artifactKind": "synthetic-ghcr-compatibility-canary",
+              "canarySourceCandidateSha": candidate_sha,
+              "containsUserData": False,
+              "runId": int(run_id),
+              "runAttempt": int(run_attempt),
+              "schema": "me42-ghcr-canary.v1",
+              "status": "CANARY",
+              "workflowSha": workflow_sha,
+          }
+          assert receipt == expected
+          assert raw == (json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n").encode()
+          assert hashlib.sha256(raw).hexdigest() == expected_sha
+          assert len(raw) < 4096
+          PY
+          layer_digest="$(python3 -c 'import hashlib,sys; print("sha256:"+hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$RUNNER_TEMP/canary-readback/receipt.json")"
+          echo "CANARY_READBACK=PASS package=$PACKAGE digest=$MANIFEST_DIGEST layer_digest=$layer_digest receipt_sha256=$EXPECTED_RECEIPT_SHA256"
+          echo 'CANARY_NOT_PREPARE=PASS package_is_separate; schema_is_canary; status_is_CANARY; no_candidateSha_or_transport'
