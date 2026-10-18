@@ -256,6 +256,40 @@ class GhcrReceiptTests(unittest.TestCase):
             CACHE.verify_logged_digest(f'GHCR_RECEIPT_DIGEST=sha256:{"f" * 64}\n',
                                        'GHCR_RECEIPT_DIGEST', self.digest)
 
+    def test_trusted_job_logs_strip_github_token_on_redirect_and_read_plain_text(self):
+        class Response:
+            def __init__(self, body):
+                self.body = body
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def read(self, _limit=-1): return self.body
+
+        redirect = {'Location': 'https://productionresultssa0.blob.core.windows.net/job.txt'}
+
+        class NoRedirectOpener:
+            def open(self, req, timeout=30):
+                self.api_request = req
+                raise urllib.error.HTTPError(req.full_url, 302, 'Found', redirect,
+                                             __import__('io').BytesIO())
+
+        opener = NoRedirectOpener()
+        storage_requests = []
+        def storage_open(req, timeout=30):
+            storage_requests.append(req)
+            return Response(f'GHCR_RECEIPT_DIGEST={self.digest}\n'.encode())
+
+        jobs = {'jobs': [{'id': 999, 'name': 'prepare', 'run_attempt': self.attempt,
+            'status': 'completed', 'conclusion': 'success',
+            'steps': [{'name': 'Publish and read back exact GHCR artifacts', 'conclusion': 'success'}]}]}
+        with mock.patch.object(CACHE, 'github', return_value=jobs), \
+                mock.patch.object(urllib.request, 'build_opener', return_value=opener), \
+                mock.patch.object(CACHE, 'network_urlopen', side_effect=storage_open):
+            logs = CACHE.trusted_job_logs(self.run_id, self.attempt, 'fixture-github-token',
+                'prepare', 'Publish and read back exact GHCR artifacts')
+        self.assertIn('Bearer fixture-github-token', opener.api_request.get_header('Authorization'))
+        self.assertNotIn('Authorization', storage_requests[0].headers)
+        self.assertEqual(logs, f'GHCR_RECEIPT_DIGEST={self.digest}\n')
+
     def test_missing_credentials_or_wrong_candidate_block(self):
         with self.assertRaisesRegex(RuntimeError, 'Invalid exact Prepare identity'):
             CACHE.resolve_receipt(self.sha, self.run_id, self.attempt, '', 'token', self.fetch())
@@ -368,7 +402,7 @@ class GhcrReceiptTests(unittest.TestCase):
     def test_real_cli_entrypoint_successfully_reads_fixture_receipt_and_writes_verified_evidence(self):
         # This exercises the actual CLI with a deterministic local HTTP fixture. It is
         # logic coverage only; it does not attest live GHCR access or production parity.
-        sitecustomize = r'''import hashlib, io, json, os, urllib.parse, urllib.request, zipfile
+        sitecustomize = r'''import hashlib, io, json, os, urllib.parse, urllib.request
 from email.message import Message
 class Response(io.BytesIO):
  def __init__(self, body, headers=None):
@@ -379,11 +413,7 @@ sha=os.environ['CANDIDATE_SHA']; run=os.environ['PREPARE_RUN_ID']; attempt=os.en
 receipt={'schema':3,'transport':'ghcr-oci','status':'READY','candidateSha':sha,'runId':int(run),'runAttempt':int(attempt),'gates':{'unit':'PASS'}}
 blob=json.dumps(receipt,sort_keys=True,separators=(',',':')).encode()+b'\n'; layer='sha256:'+hashlib.sha256(blob).hexdigest()
 manifest=json.dumps({'schemaVersion':2,'mediaType':'application/vnd.oci.image.manifest.v1+json','artifactType':'application/vnd.gpoint.prepare.receipt.v1','layers':[{'mediaType':'application/vnd.gpoint.prepare.receipt.v1+json','digest':layer,'size':len(blob)}]},sort_keys=True,separators=(',',':')).encode(); digest='sha256:'+hashlib.sha256(manifest).hexdigest()
-def ziplogs():
- out=io.BytesIO()
- with zipfile.ZipFile(out,'w') as z: z.writestr('publish.log','GHCR_RECEIPT_DIGEST='+digest+'\n')
- return out.getvalue()
-logs=ziplogs()
+logs=('GHCR_RECEIPT_DIGEST='+digest+'\n').encode()
 def urlopen(req,timeout=30):
  url=req.full_url; path=urllib.parse.urlparse(url).path
  if path.endswith('/actions/runs/'+run): return Response(json.dumps({'status':'completed','conclusion':'success','head_sha':sha,'head_branch':'main','event':'push','path':'.github/workflows/gpoint-prepare.yml','run_attempt':int(attempt)}).encode())
@@ -396,6 +426,9 @@ def urlopen(req,timeout=30):
  if path.endswith('/blobs/'+layer): return Response(blob)
  raise AssertionError('unexpected fixture route '+path)
 urllib.request.urlopen=urlopen
+class FixtureOpener:
+ def open(self,req,timeout=30): return urlopen(req,timeout)
+urllib.request.build_opener=lambda *_args: FixtureOpener()
 '''
         with tempfile.TemporaryDirectory(prefix='prepared-cache-cli-') as directory:
             root = Path(directory)

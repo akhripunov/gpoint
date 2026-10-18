@@ -2,7 +2,6 @@
 """Resolve and verify the exact Prepare OCI receipt from GHCR."""
 import base64
 import hashlib
-import io
 import json
 import os
 from pathlib import Path
@@ -15,7 +14,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from network_retry import (NETWORK_RETRY_BUDGET_SECONDS, NetworkUnavailable,
@@ -81,7 +79,7 @@ def exception_category(error):
         return 'NETWORK'
     if isinstance(error, (TimeoutError, socket.timeout, socket.gaierror, ConnectionError, ssl.SSLError)):
         return 'NETWORK'
-    if isinstance(error, (json.JSONDecodeError, UnicodeDecodeError, zipfile.BadZipFile)):
+    if isinstance(error, (json.JSONDecodeError, UnicodeDecodeError)):
         return 'INVALID_RESPONSE'
     if isinstance(error, OSError):
         return 'LOCAL_IO'
@@ -374,15 +372,38 @@ def trusted_job_logs(run_id, attempt, token, job_name, step_name):
         'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json',
         'X-GitHub-Api-Version': '2022-11-28'})
     def read():
-        with network_urlopen(req, timeout=30) as response:
-            raw = read_network_response(response, 25 * 1024 * 1024 + 1)
-            if len(raw) > 25 * 1024 * 1024:
-                raise RuntimeError('Prepare publisher logs exceed size limit')
-            with zipfile.ZipFile(io.BytesIO(raw)) as archive:
-                if len(archive.namelist()) > 100:
-                    raise RuntimeError('Prepare publisher log inventory exceeds limit')
-                return '\n'.join(archive.read(name).decode('utf-8', errors='replace') for name in archive.namelist()
-                                 if not name.endswith('/'))
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *_args, **_kwargs):
+                return None
+
+        try:
+            response = urllib.request.build_opener(NoRedirect).open(req, timeout=30)
+        except urllib.error.HTTPError as redirect:
+            if redirect.code != 302:
+                raise
+            location = redirect.headers.get('Location', '')
+            redirect.close()
+            parsed = urllib.parse.urlparse(location)
+            if (parsed.scheme != 'https' or not parsed.hostname or parsed.username
+                    or parsed.password or parsed.fragment
+                    or not parsed.hostname.endswith((
+                        '.blob.core.windows.net', '.githubusercontent.com',
+                        '.actions.githubusercontent.com'))):
+                raise RuntimeError('Prepare publisher log redirect is invalid') from None
+            # GitHub returns a short-lived signed storage URL. Never forward the
+            # GITHUB_TOKEN from api.github.com to that external storage host.
+            log_request = urllib.request.Request(location, headers={'Accept': 'text/plain'})
+            with network_urlopen(log_request, timeout=30) as response:
+                raw = read_network_response(response, 25 * 1024 * 1024 + 1)
+        else:
+            with response:
+                raw = read_network_response(response, 25 * 1024 * 1024 + 1)
+        if len(raw) > 25 * 1024 * 1024:
+            raise RuntimeError('Prepare publisher logs exceed size limit')
+        try:
+            return raw.decode('utf-8')
+        except UnicodeDecodeError:
+            raise RuntimeError('Prepare publisher logs are not valid UTF-8') from None
     return request(read, 'prepare_publisher_logs')
 
 
