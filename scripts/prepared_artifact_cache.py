@@ -24,6 +24,7 @@ from network_retry import (NETWORK_RETRY_BUDGET_SECONDS, NetworkUnavailable,
 REPO = 'akhripunov/gpoint'
 RECEIPT_REPOSITORY = 'akhripunov/gpoint-prepare-receipts'
 RECEIPT_MEDIA_TYPE = 'application/vnd.gpoint.prepare.receipt.v1'
+RECEIPT_LAYER_MEDIA_TYPE = 'application/vnd.gpoint.prepare.receipt.v1+json'
 STATIC_ARTIFACT_TYPE = 'application/vnd.gpoint.miniapp.static.v1'
 STATIC_LAYER_TYPE = 'application/vnd.gpoint.miniapp.static.v1+zip'
 OCI_MANIFEST = 'application/vnd.oci.image.manifest.v1+json'
@@ -340,7 +341,7 @@ def resolve_receipt(sha, run_id, attempt, username, token, fetch=ghcr_request):
     if manifest_headers.get('Docker-Content-Digest') != digest or manifest_bytes != tag_bytes:
         raise RuntimeError('GHCR receipt changed between tag resolution and digest read')
     set_diagnostic_stage('ghcr_receipt_layer_readback')
-    blob = fetch_oci_layer(RECEIPT_REPOSITORY, digest, RECEIPT_MEDIA_TYPE, RECEIPT_MEDIA_TYPE,
+    blob = fetch_oci_layer(RECEIPT_REPOSITORY, digest, RECEIPT_MEDIA_TYPE, RECEIPT_LAYER_MEDIA_TYPE,
                            username, token, fetch=fetch)
     set_diagnostic_stage('ghcr_receipt_content_validation')
     try:

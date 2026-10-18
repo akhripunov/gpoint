@@ -36,7 +36,7 @@ class GhcrReceiptTests(unittest.TestCase):
         self.blob = json.dumps(receipt, sort_keys=True, separators=(',', ':')).encode() + b'\n'
         layer_digest = 'sha256:' + hashlib.sha256(self.blob).hexdigest()
         self.manifest = json.dumps({'schemaVersion': 2, 'mediaType': CACHE.OCI_MANIFEST,
-            'artifactType': CACHE.RECEIPT_MEDIA_TYPE, 'layers': [{'mediaType': CACHE.RECEIPT_MEDIA_TYPE,
+            'artifactType': CACHE.RECEIPT_MEDIA_TYPE, 'layers': [{'mediaType': CACHE.RECEIPT_LAYER_MEDIA_TYPE,
             'digest': layer_digest, 'size': len(self.blob)}]}, sort_keys=True, separators=(',', ':')).encode()
         self.digest = 'sha256:' + hashlib.sha256(self.manifest).hexdigest()
         self.tag_url = f'https://ghcr.io/v2/{CACHE.RECEIPT_REPOSITORY}/manifests/prepare-{self.sha}-{self.run_id}-{self.attempt}'
@@ -218,6 +218,18 @@ class GhcrReceiptTests(unittest.TestCase):
         self.assertEqual(receipt['candidateSha'], self.sha)
         self.assertEqual(hashlib.sha256(blob).hexdigest(), hashlib.sha256(self.blob).hexdigest())
 
+    def test_rejects_receipt_layer_with_wrong_media_type(self):
+        manifest = json.loads(self.manifest)
+        manifest['layers'][0]['mediaType'] = CACHE.RECEIPT_MEDIA_TYPE
+        raw = json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()
+        digest = 'sha256:' + hashlib.sha256(raw).hexdigest()
+        def fetch(url, *_args, **_kwargs):
+            self.assertEqual(url, f'https://ghcr.io/v2/{CACHE.RECEIPT_REPOSITORY}/manifests/{digest}')
+            return raw, {'Docker-Content-Digest': digest}
+        with self.assertRaisesRegex(RuntimeError, 'layer descriptor is invalid'):
+            CACHE.fetch_oci_layer(CACHE.RECEIPT_REPOSITORY, digest, CACHE.RECEIPT_MEDIA_TYPE,
+                CACHE.RECEIPT_LAYER_MEDIA_TYPE, 'reader', 'token', fetch=fetch)
+
     def test_tampered_digest_readback_blocks(self):
         with self.assertRaisesRegex(RuntimeError, 'changed between tag resolution'):
             CACHE.resolve_receipt(self.sha, self.run_id, self.attempt, 'reader', 'token', self.fetch('digest-readback'))
@@ -305,7 +317,7 @@ class GhcrReceiptTests(unittest.TestCase):
             blob = json.dumps(receipt, sort_keys=True, separators=(',', ':')).encode() + b'\n'
             layer = 'sha256:' + hashlib.sha256(blob).hexdigest()
             manifest = json.dumps({'schemaVersion':2,'mediaType':CACHE.OCI_MANIFEST,
-                'artifactType':CACHE.RECEIPT_MEDIA_TYPE,'layers':[{'mediaType':CACHE.RECEIPT_MEDIA_TYPE,
+                'artifactType':CACHE.RECEIPT_MEDIA_TYPE,'layers':[{'mediaType':CACHE.RECEIPT_LAYER_MEDIA_TYPE,
                 'digest':layer,'size':len(blob)}]},sort_keys=True,separators=(',',':')).encode()
             digest = 'sha256:' + hashlib.sha256(manifest).hexdigest()
             urls = {self.tag_url:(manifest,{'Docker-Content-Digest':digest}),
@@ -366,7 +378,7 @@ class Response(io.BytesIO):
 sha=os.environ['CANDIDATE_SHA']; run=os.environ['PREPARE_RUN_ID']; attempt=os.environ['PREPARE_RUN_ATTEMPT']
 receipt={'schema':3,'transport':'ghcr-oci','status':'READY','candidateSha':sha,'runId':int(run),'runAttempt':int(attempt),'gates':{'unit':'PASS'}}
 blob=json.dumps(receipt,sort_keys=True,separators=(',',':')).encode()+b'\n'; layer='sha256:'+hashlib.sha256(blob).hexdigest()
-manifest=json.dumps({'schemaVersion':2,'mediaType':'application/vnd.oci.image.manifest.v1+json','artifactType':'application/vnd.gpoint.prepare.receipt.v1','layers':[{'mediaType':'application/vnd.gpoint.prepare.receipt.v1','digest':layer,'size':len(blob)}]},sort_keys=True,separators=(',',':')).encode(); digest='sha256:'+hashlib.sha256(manifest).hexdigest()
+manifest=json.dumps({'schemaVersion':2,'mediaType':'application/vnd.oci.image.manifest.v1+json','artifactType':'application/vnd.gpoint.prepare.receipt.v1','layers':[{'mediaType':'application/vnd.gpoint.prepare.receipt.v1+json','digest':layer,'size':len(blob)}]},sort_keys=True,separators=(',',':')).encode(); digest='sha256:'+hashlib.sha256(manifest).hexdigest()
 def ziplogs():
  out=io.BytesIO()
  with zipfile.ZipFile(out,'w') as z: z.writestr('publish.log','GHCR_RECEIPT_DIGEST='+digest+'\n')
