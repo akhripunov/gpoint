@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
-import {dispatchPrepare as dispatchPrepareImpl, findTaskAuthorization, validateEvent, OrchestrationError, taskAutoClaimRef} from './release-orchestrator.mjs';
+import {dispatchPrepare as dispatchPrepareImpl, findTaskAuthorization, validateEvent, OrchestrationError, taskAutoClaimRef, controllerFailureDiagnostic} from './release-orchestrator.mjs';
 import {ownerTaskCommitmentSha256, candidateScopeDiff, validateTaskAuthorization} from './release-authorization.mjs';
 
 const sha = 'a'.repeat(40);
@@ -35,6 +35,57 @@ function apiFixture({candidateSha = sha, existingClaimSha = null} = {}) {
 }
 
 test('trusted success event is exact',()=>assert.equal(validateEvent(event()).id,123));
+test('controller failure diagnostics expose bounded stage metadata without leaking error details',()=>{
+  const error=new OrchestrationError('Authorization: Bearer private-token https://example.invalid/logs?sig=private');
+  error.status=403;
+  const diagnostic=controllerFailureDiagnostic(error,{stage:'prepare_receipt_readback',resource:'ghcr_prepare_receipt',
+    candidateSha:sha,prepareRunId:'39119441234',prepareRunAttempt:'1'});
+  assert.deepEqual(diagnostic,{state:'BLOCKED',stage:'prepare_receipt_readback',code:'GITHUB_HTTP_ERROR',httpStatus:403,
+    resource:'ghcr_prepare_receipt',candidateSha:sha,prepareRunId:'39119441234',prepareRunAttempt:'1'});
+  assert.doesNotMatch(JSON.stringify(diagnostic),/private-token|Authorization|sig=private|example\.invalid/);
+});
+test('controller records the failing read-only stage and never claims or dispatches after an API error',async()=>{
+  const {api,calls}=apiFixture();
+  const stages=[];
+  const failingApi=async(method,route,body)=>{
+    if(route==='git/ref/heads/main') {
+      const error=new OrchestrationError('private response body'); error.status=403; throw error;
+    }
+    return api(method,route,body);
+  };
+  await assert.rejects(dispatchPrepareImpl(event(),failingApi,'987',process.cwd(),undefined,undefined,
+    stage=>stages.push(stage)),error=>{
+      const diagnostic=controllerFailureDiagnostic(error,{stage:stages.at(-1),resource:'prepare_run',
+        candidateSha:sha,prepareRunId:'123',prepareRunAttempt:'2'});
+      assert.deepEqual(diagnostic,{state:'BLOCKED',stage:'current_main_ref',code:'GITHUB_HTTP_ERROR',httpStatus:403,
+        resource:'prepare_run',candidateSha:sha,prepareRunId:'123',prepareRunAttempt:'2'});
+      assert.doesNotMatch(JSON.stringify(diagnostic),/private response body/);
+      return true;
+    });
+  assert.deepEqual(stages,['prepare_event_validation','current_main_ref']);
+  assert.equal(calls.some(item=>item.path==='git/refs'),false);
+  assert.equal(calls.some(item=>item.path.endsWith('/dispatches')),false);
+});
+test('controller preserves only the HTTP status when atomic claim creation fails',async()=>{
+  const {api,calls}=apiFixture();
+  const stages=[];
+  const failingApi=async(method,route,body)=>{
+    if(route==='git/refs') {const error=new OrchestrationError('private API response');error.status=503;throw error;}
+    return api(method,route,body);
+  };
+  await assert.rejects(dispatchPrepareImpl(event(),failingApi,'987',process.cwd(),
+    async()=>({authorizationId:'gpoint-task-2026-10-16-001',ambiguous:false}),fakeReceipt,
+    stage=>stages.push(stage)),error=>{
+      assert.deepEqual(controllerFailureDiagnostic(error,{stage:stages.at(-1),resource:'task_authorization_claim',
+        candidateSha:sha,prepareRunId:'123',prepareRunAttempt:'2'}),
+      {state:'BLOCKED',stage:'atomic_claim_create',code:'GITHUB_HTTP_ERROR',httpStatus:503,
+        resource:'task_authorization_claim',candidateSha:sha,prepareRunId:'123',prepareRunAttempt:'2'});
+      assert.doesNotMatch(JSON.stringify(controllerFailureDiagnostic(error)),/private API response/);
+      return true;
+    });
+  assert.deepEqual(stages.at(-1),'atomic_claim_create');
+  assert.equal(calls.some(item=>item.path.endsWith('/dispatches')),false);
+});
 test('failed, stale or untrusted Prepare never reaches the API',async()=>{
   for(const change of [{conclusion:'failure'},{status:'in_progress'},{head_branch:'feature'},{head_sha:'c'.repeat(40)},{path:'.github/workflows/other.yml'}]) {
     const {api,calls}=apiFixture();

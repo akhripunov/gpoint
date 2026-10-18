@@ -12,8 +12,51 @@ export const PREPARE_PATH = '.github/workflows/gpoint-prepare.yml';
 export const DEPLOY_PATH = '.github/workflows/gpoint-deploy.yml';
 const TASK_AUTH_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$/;
 const SHA = /^[a-f0-9]{40}$/;
+const DIAGNOSTIC_STAGES = new Set(['event_payload', 'prepare_event_validation', 'current_main_ref',
+  'prepare_run_metadata', 'prepare_attempt_metadata', 'prepare_attempt_jobs', 'prepare_job_identity',
+  'prepare_job_chronology', 'prepare_receipt_readback', 'deploy_inventory', 'authorization_lookup',
+  'authorization_state_read', 'deploy_inventory_before_claim', 'atomic_claim_create',
+  'atomic_claim_readback', 'deploy_workflow_dispatch']);
+const DIAGNOSTIC_RESOURCES = new Set(['prepare_run', 'prepare_receipt', 'deploy_workflow_runs',
+  'ghcr_prepare_receipt', 'authorization_state_ref', 'task_authorization_claim', 'deploy_workflow']);
+const SAFE_RECEIPT_STAGES = new Set(['prepare_run_metadata', 'current_main_ref', 'ghcr_receipt_manifest',
+  'ghcr_receipt_digest', 'ghcr_artifact_digest', 'ghcr_artifact_blob', 'prepare_job_identity',
+  'prepare_publisher_logs', 'static_artifact_readback', 'receipt_validation']);
 
-export class OrchestrationError extends Error {}
+export class OrchestrationError extends Error {
+  constructor(message) { super(message); this.name = 'OrchestrationError'; }
+}
+
+export function controllerFailureDiagnostic(error, {stage = 'event_payload', resource = '', candidateSha = '',
+  prepareRunId = '', prepareRunAttempt = ''} = {}) {
+  const nested = error?.controllerDiagnostic ?? {};
+  const safeStage = DIAGNOSTIC_STAGES.has(nested.stage) ? nested.stage :
+    DIAGNOSTIC_STAGES.has(stage) ? stage : 'event_payload';
+  const safeResource = DIAGNOSTIC_RESOURCES.has(nested.resource) ? nested.resource :
+    DIAGNOSTIC_RESOURCES.has(resource) ? resource : '';
+  const status = Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599
+    ? error.status : Number.isInteger(nested.httpStatus) && nested.httpStatus >= 400 && nested.httpStatus <= 599
+      ? nested.httpStatus : undefined;
+  const code = ['GHCR_READ_FAILED', 'LOCAL_SUBPROCESS_FAILED'].includes(nested.code) ? nested.code :
+    status ? 'GITHUB_HTTP_ERROR' : error instanceof OrchestrationError ? 'ORCHESTRATION_BLOCKED' : 'UNEXPECTED_ERROR';
+  const result = {state: 'BLOCKED', stage: safeStage, code};
+  if (status) result.httpStatus = status;
+  if (safeResource) result.resource = safeResource;
+  if (SHA.test(candidateSha)) result.candidateSha = candidateSha;
+  if (/^\d{1,20}$/.test(prepareRunId)) result.prepareRunId = prepareRunId;
+  if (/^\d{1,6}$/.test(prepareRunAttempt)) result.prepareRunAttempt = prepareRunAttempt;
+  return result;
+}
+
+function notifyStage(onStage, stage) {
+  if (typeof onStage === 'function') onStage(stage);
+}
+
+function preserveHttpStatus(target, source) {
+  if (Number.isInteger(source?.status) && source.status >= 400 && source.status <= 599)
+    target.status = source.status;
+  return target;
+}
 
 export function validateEvent(payload) {
   if (payload.repository?.full_name?.toLowerCase() !== REPOSITORY) throw new OrchestrationError('Unexpected repository');
@@ -95,7 +138,17 @@ export function resolvePrepareReceipt(sha, runId, attempt, env = process.env) {
         GHCR_READ_USERNAME: env.GITHUB_ACTOR ?? 'github-actions[bot]',
         GHCR_READ_TOKEN: env.GITHUB_TOKEN ?? '', GITHUB_TOKEN: env.GITHUB_TOKEN ?? ''},
     });
-    if (result.status !== 0) throw new OrchestrationError('Exact Prepare receipt GHCR readback or run-log provenance verification failed');
+    if (result.status !== 0) {
+      const details = String(result.stdout ?? '').split(/\r?\n/).map(line =>
+        line.match(/^ARTIFACT_CACHE=BLOCKED STAGE=([a-z0-9_]{1,48}) ERROR_TYPE=([A-Za-z0-9_]{1,48})$/))
+        .find(Boolean);
+      const diagnostic = details && SAFE_RECEIPT_STAGES.has(details[1])
+        ? {stage: 'prepare_receipt_readback', resource: 'prepare_receipt', code: 'GHCR_READ_FAILED'}
+        : {stage: 'prepare_receipt_readback', resource: 'prepare_receipt', code: 'LOCAL_SUBPROCESS_FAILED'};
+      const error = new OrchestrationError('Exact Prepare receipt GHCR readback or run-log provenance verification failed');
+      error.controllerDiagnostic = diagnostic;
+      throw error;
+    }
     const evidence = JSON.parse(fs.readFileSync(join(directory, 'ghcr-evidence.json'), 'utf8'));
     if (evidence.runLogProvenance !== 'PASS' ||
         evidence.manifestDigest !== result.stdout.match(/GHCR_RECEIPT_DIGEST=(sha256:[a-f0-9]{64})/)?.[1])
@@ -106,7 +159,7 @@ export function resolvePrepareReceipt(sha, runId, attempt, env = process.env) {
   }
 }
 
-export async function executedPrepareBundle(api, run, resolveReceipt = resolvePrepareReceipt) {
+export async function executedPrepareBundle(api, run, resolveReceipt = resolvePrepareReceipt, onStage = () => {}) {
   const sha = run.head_sha;
   const runId = String(run.id);
   const attemptCount = Number(run.run_attempt);
@@ -120,24 +173,34 @@ export async function executedPrepareBundle(api, run, resolveReceipt = resolvePr
     return ms;
   };
   for (let number = attemptCount; number >= 1; number--) {
+    notifyStage(onStage, 'prepare_attempt_metadata');
     const details = await api('GET', `actions/runs/${runId}/attempts/${number}`);
+    notifyStage(onStage, 'prepare_attempt_jobs');
     const jobs = await api('GET', `actions/runs/${runId}/attempts/${number}/jobs?per_page=100`);
     if (String(details.run_attempt) !== String(number) || !Array.isArray(jobs.jobs) ||
         (jobs.total_count ?? jobs.jobs.length) > 100) throw new OrchestrationError('Prepare attempts are incomplete');
     const matched = jobs.jobs.filter(job => job.name === 'prepare');
     if (matched.length !== 1) throw new OrchestrationError('Ambiguous executed Prepare job');
     const job = matched[0];
+    notifyStage(onStage, 'prepare_job_identity');
     if (job.status !== 'completed' || job.conclusion !== 'success' || job.head_sha !== sha) {
       throw new OrchestrationError('Exact Prepare job did not succeed');
     }
     const started = epoch(details.run_started_at);
     const actualStart = epoch(job.started_at);
     const actualEnd = epoch(job.completed_at);
+    notifyStage(onStage, 'prepare_job_chronology');
     if (actualEnd < actualStart) throw new OrchestrationError('Invalid Prepare job chronology');
     if (actualStart < started && actualEnd <= started) continue;
     let receipt;
-    try { receipt = await resolveReceipt(sha, runId, String(number)); }
-    catch { throw new OrchestrationError('Executed Prepare has no trusted GHCR receipt and run-log provenance'); }
+    try {
+      notifyStage(onStage, 'prepare_receipt_readback');
+      receipt = await resolveReceipt(sha, runId, String(number));
+    } catch (cause) {
+      const error = new OrchestrationError('Executed Prepare has no trusted GHCR receipt and run-log provenance');
+      if (cause?.controllerDiagnostic) error.controllerDiagnostic = cause.controllerDiagnostic;
+      throw preserveHttpStatus(error, cause);
+    }
     if (!/^sha256:[a-f0-9]{64}$/.test(receipt?.receiptDigest ?? '') ||
         !/^[a-f0-9]{64}$/.test(receipt?.receiptSha256 ?? ''))
       throw new OrchestrationError('Prepare GHCR receipt digest provenance is invalid');
@@ -146,14 +209,17 @@ export async function executedPrepareBundle(api, run, resolveReceipt = resolvePr
   throw new OrchestrationError('No executed trusted Prepare GHCR receipt');
 }
 
-async function verifiedPrepare(api, eventRun, resolveReceipt = resolvePrepareReceipt) {
+async function verifiedPrepare(api, eventRun, resolveReceipt = resolvePrepareReceipt, onStage = () => {}) {
   const sha = eventRun.head_sha;
+  notifyStage(onStage, 'current_main_ref');
   if ((await api('GET', 'git/ref/heads/main')).object?.sha !== sha) throw new OrchestrationError('Prepare candidate is no longer current main');
+  notifyStage(onStage, 'prepare_run_metadata');
   const run = await api('GET', `actions/runs/${eventRun.id}`);
   for (const key of ['head_sha', 'head_branch', 'status', 'conclusion', 'event', 'path', 'run_attempt']) {
     if (String(run[key]) !== String(eventRun[key])) throw new OrchestrationError('Prepare run metadata changed');
   }
-  const {tag, receiptDigest, receiptSha256, sourceAttempt} = await executedPrepareBundle(api, eventRun, resolveReceipt);
+  const {tag, receiptDigest, receiptSha256, sourceAttempt} = await executedPrepareBundle(api, eventRun, resolveReceipt, onStage);
+  notifyStage(onStage, 'deploy_inventory');
   const active = await api('GET', `actions/workflows/gpoint-deploy.yml/runs?branch=main&per_page=100`);
   if ((active.workflow_runs ?? []).some(item => ['queued', 'in_progress', 'waiting', 'pending'].includes(item.status))) {
     throw new OrchestrationError('A GPoint Deploy workflow is active');
@@ -162,9 +228,12 @@ async function verifiedPrepare(api, eventRun, resolveReceipt = resolvePrepareRec
 }
 
 export async function dispatchPrepare(payload, api, orchestratorRunId = process.env.GITHUB_RUN_ID ?? '',
-  repoRoot = process.cwd(), authorizationLookup = findTaskAuthorization, resolveReceipt = resolvePrepareReceipt) {
+  repoRoot = process.cwd(), authorizationLookup = findTaskAuthorization, resolveReceipt = resolvePrepareReceipt,
+  onStage = () => {}) {
+  notifyStage(onStage, 'prepare_event_validation');
   const run = validateEvent(payload);
-  const {sha, tag, receiptDigest, receiptSha256, sourceAttempt} = await verifiedPrepare(api, run, resolveReceipt);
+  const {sha, tag, receiptDigest, receiptSha256, sourceAttempt} = await verifiedPrepare(api, run, resolveReceipt, onStage);
+  notifyStage(onStage, 'authorization_lookup');
   const authorization = await authorizationLookup(repoRoot, sha, api);
   if (authorization.ambiguous) {
     return {state: 'TASK_AUTHORIZATION_AMBIGUOUS', candidateSha: sha,
@@ -175,6 +244,7 @@ export async function dispatchPrepare(payload, api, orchestratorRunId = process.
       prepareRunId: String(run.id), prepareRunAttempt: sourceAttempt, tag,
       receiptDigest, receiptSha256};
   }
+  notifyStage(onStage, 'deploy_inventory_before_claim');
   const active = await api('GET', `actions/workflows/${DEPLOY_PATH.split('/').at(-1)}/runs?branch=main&per_page=100`);
   if ((active.workflow_runs ?? []).some(item => ['queued', 'in_progress', 'waiting', 'pending'].includes(item.status))) {
     throw new OrchestrationError('A GPoint Deploy workflow is active');
@@ -183,10 +253,13 @@ export async function dispatchPrepare(payload, api, orchestratorRunId = process.
   let claimCreated = false;
   let previousClaimSha = '';
   try {
+    notifyStage(onStage, 'atomic_claim_create');
     await api('POST', 'git/refs', {ref, sha});
     claimCreated = true;
   } catch (error) {
-    if (error.status !== 422) throw new OrchestrationError('Atomic task-scoped Deploy claim failed');
+    if (error.status !== 422)
+      throw preserveHttpStatus(new OrchestrationError('Atomic task-scoped Deploy claim failed'), error);
+    notifyStage(onStage, 'atomic_claim_readback');
     const existing = await api('GET', `git/ref/tags/${ref.replace('refs/tags/', '')}`);
     if (existing.object?.type !== 'commit' || !SHA.test(existing.object?.sha ?? '')) {
       throw new OrchestrationError('Existing task-scoped authorization claim is invalid');
@@ -194,6 +267,7 @@ export async function dispatchPrepare(payload, api, orchestratorRunId = process.
     previousClaimSha = existing.object.sha;
   }
   try {
+    notifyStage(onStage, 'deploy_workflow_dispatch');
     await api('POST', `actions/workflows/${DEPLOY_PATH.split('/').at(-1)}/dispatches`, {ref: 'main', inputs: {
       candidate: sha, mode: 'task-scoped-auto', approve_production: 'false',
       prepare_run_id: String(run.id), prepare_run_attempt: String(sourceAttempt),
@@ -211,14 +285,27 @@ export async function dispatchPrepare(payload, api, orchestratorRunId = process.
 
 async function main() {
   const started = performance.now();
-  const payload = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
-  const api = makeApi(process.env.GITHUB_TOKEN);
-  const result = await dispatchPrepare(payload, api);
-  const elapsed = Math.round((performance.now() - started) / 1000);
-  fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## GPoint automatic release orchestration\n\n- State: \`${result.state}\`\n- Candidate: \`${result.candidateSha}\`\n- Previous authorization claim SHA: \`${result.previousClaimSha ?? 'NONE'}\`\n- Authorization: \`${result.authorizationId ?? result.taskAuthorizationId ?? 'EXACT_SHA_REQUIRED'}\`\n- Controller job: \`SELF_HOSTED_REQUIRED\`, trusted project runner; measured controller seconds: \`${elapsed}\`\n- \`SELF_HOSTED_JOB_COUNT=1\`; \`SELF_HOSTED_RUNNER_SECONDS=${elapsed}\` (controller only)\n`);
-  console.log(JSON.stringify(result));
+  let stage = 'event_payload';
+  let payload = {};
+  try {
+    payload = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
+    const api = makeApi(process.env.GITHUB_TOKEN);
+    const onStage = value => { stage = value; };
+    const result = await dispatchPrepare(payload, api, process.env.GITHUB_RUN_ID ?? '', process.cwd(),
+      findTaskAuthorization, resolvePrepareReceipt, onStage);
+    const elapsed = Math.round((performance.now() - started) / 1000);
+    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## GPoint automatic release orchestration\n\n- State: \`${result.state}\`\n- Candidate: \`${result.candidateSha}\`\n- Previous authorization claim SHA: \`${result.previousClaimSha ?? 'NONE'}\`\n- Authorization: \`${result.authorizationId ?? result.taskAuthorizationId ?? 'EXACT_SHA_REQUIRED'}\`\n- Controller job: \`SELF_HOSTED_REQUIRED\`, trusted project runner; measured controller seconds: \`${elapsed}\`\n- \`SELF_HOSTED_JOB_COUNT=1\`; \`SELF_HOSTED_RUNNER_SECONDS=${elapsed}\` (controller only)\n`);
+    console.log(JSON.stringify(result));
+  } catch (error) {
+    const run = payload.workflow_run ?? {};
+    const diagnostic = controllerFailureDiagnostic(error, {stage, resource: 'prepare_run',
+      candidateSha: run.head_sha ?? '', prepareRunId: String(run.id ?? ''),
+      prepareRunAttempt: String(run.run_attempt ?? '')});
+    console.error(`AUTO_RELEASE_CONTROLLER=${JSON.stringify(diagnostic)}`);
+    process.exitCode = 1;
+  }
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
-    main().catch(error => { console.error(`AUTO_RELEASE_CONTROLLER=BLOCKED TYPE=${error?.name ?? 'Error'}`); process.exitCode = 1; });
+    main().catch(() => { console.error('AUTO_RELEASE_CONTROLLER={"state":"BLOCKED","stage":"event_payload","code":"UNEXPECTED_ERROR"}'); process.exitCode = 1; });
 }
