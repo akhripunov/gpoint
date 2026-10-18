@@ -1,6 +1,7 @@
 """Local-only tests for exact GHCR image and receipt publication metadata."""
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -69,6 +70,70 @@ class GhcrReceiptPublisherTests(unittest.TestCase):
         self.assertNotIn('secret-value', str(caught.exception))
         self.assertNotIn('private-package', str(caught.exception))
 
+    def test_runtime_parity_diagnostic_preserves_allowlisted_substage_and_network_reason(self):
+        failure = subprocess.CalledProcessError(
+            1, ['node', 'rehearse-release-bundle.mjs', 'private-proof.json'],
+            stderr='GHCR_REHEARSAL_SUBSTAGE=runtime_inspect_app\nconnect ECONNRESET token=secret-value',
+        )
+
+        with patch.object(PUBLISHER.subprocess, 'run', side_effect=failure):
+            with self.assertRaises(PUBLISHER.SafeProcessFailure) as caught:
+                PUBLISHER.run('node', 'rehearse-release-bundle.mjs', 'proof.json', SHA, '/tmp/private',
+                              stage='ghcr_rehearsal_runtime_parity', operation='rehearse')
+
+        self.assertEqual(caught.exception.diagnostic, {
+            'stage': 'ghcr_rehearsal_runtime_parity', 'operation': 'rehearse',
+            'role': None, 'category': 'NETWORK', 'exitCode': 1,
+            'substage': 'runtime_inspect_app', 'reasonCode': 'CONNECTION_RESET',
+        })
+
+    def test_runtime_parity_timeout_preserves_safe_substage_without_raw_output(self):
+        failure = subprocess.TimeoutExpired(
+            ['node', 'rehearse-release-bundle.mjs', 'private-proof.json'],
+            timeout=900, stderr=b'GHCR_REHEARSAL_SUBSTAGE=runtime_inspect_app\nrequest timed out token=secret-value',
+        )
+
+        with patch.object(PUBLISHER.subprocess, 'run', side_effect=failure):
+            with self.assertRaises(PUBLISHER.SafeProcessFailure) as caught:
+                PUBLISHER.run('node', 'rehearse-release-bundle.mjs', 'proof.json', SHA, '/tmp/private',
+                              stage='ghcr_rehearsal_runtime_parity', operation='rehearse')
+
+        self.assertEqual(caught.exception.diagnostic, {
+            'stage': 'ghcr_rehearsal_runtime_parity', 'operation': 'rehearse',
+            'role': None, 'category': 'TIMEOUT', 'exitCode': None,
+            'substage': 'runtime_inspect_app', 'reasonCode': 'TIMEOUT',
+        })
+        self.assertNotIn('secret-value', str(caught.exception))
+        self.assertNotIn('private-proof', str(caught.exception))
+
+    def test_runtime_parity_retries_once_only_for_network_failures(self):
+        transient = PUBLISHER.SafeProcessFailure({
+            'stage': 'ghcr_rehearsal_runtime_parity', 'operation': 'rehearse',
+            'role': None, 'category': 'NETWORK', 'exitCode': 1,
+            'substage': 'runtime_inspect_app', 'reasonCode': 'CONNECTION_RESET',
+        })
+        with patch.object(PUBLISHER, 'run', side_effect=[transient, 'ok']) as command, \
+                patch.object(PUBLISHER.sys, 'stderr', new_callable=io.StringIO) as diagnostic:
+            result = PUBLISHER.run_rehearsal_with_retry('node', 'helper.mjs', 'proof.json',
+                                                       SHA, '/tmp/rehearsal', {})
+
+        self.assertEqual(result, 'ok')
+        self.assertEqual(command.call_count, 2)
+        self.assertIn('GHCR_REHEARSAL_NETWORK_RETRY=1', diagnostic.getvalue())
+        self.assertNotIn('private-package', diagnostic.getvalue())
+
+    def test_runtime_parity_does_not_retry_non_network_failures(self):
+        permanent = PUBLISHER.SafeProcessFailure({
+            'stage': 'ghcr_rehearsal_runtime_parity', 'operation': 'rehearse',
+            'role': None, 'category': 'PROCESS_EXIT', 'exitCode': 1,
+        })
+        with patch.object(PUBLISHER, 'run', side_effect=permanent) as command:
+            with self.assertRaises(PUBLISHER.SafeProcessFailure):
+                PUBLISHER.run_rehearsal_with_retry('node', 'helper.mjs', 'proof.json',
+                                                   SHA, '/tmp/rehearsal', {})
+
+        self.assertEqual(command.call_count, 1)
+
     def test_canonical_prepare_exposes_only_job_scoped_token_to_digest_rehearsal(self):
         workflow = yaml.safe_load((SCRIPT.parents[1] / '.github/workflows/gpoint-prepare.yml').read_text())
         job = workflow['jobs']['prepare']
@@ -101,6 +166,7 @@ class GhcrReceiptPublisherTests(unittest.TestCase):
         self.assertIn("import { execFileSync, spawnSync } from 'node:child_process';", helper)
         self.assertIn("rejected.status !== 42", helper)
         self.assertIn('GPOINT_CI_PARITY_IDENTITY_MISMATCH=', helper)
+        self.assertIn('GHCR_REHEARSAL_SUBSTAGE=${name}', helper)
 
     def test_rehearsal_cleanup_failure_prevents_success_receipt(self):
         with tempfile.TemporaryDirectory() as folder:

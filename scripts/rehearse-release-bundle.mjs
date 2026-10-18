@@ -7,12 +7,20 @@ import { preparedImageCaptureCommand, preparedImageParityCommand } from './relea
 
 const [receipt, candidate, scratch] = process.argv.slice(2);
 const proof = JSON.parse(fs.readFileSync(receipt, 'utf8'));
-const run = command => execFileSync('bash', ['-o', 'pipefail', '-c', command], { stdio: 'inherit', timeout: 900_000 });
-run(preparedImageCaptureCommand(proof, candidate, scratch));
-run(preparedImageParityCommand(proof, candidate, scratch));
+const step = (name, operation) => {
+  console.error(`GHCR_REHEARSAL_SUBSTAGE=${name}`);
+  return operation();
+};
+const run = (name, command) => step(name, () => execFileSync(
+  'bash', ['-o', 'pipefail', '-c', command], { stdio: 'inherit', timeout: 900_000 },
+));
+run('capture_loaded_images', preparedImageCaptureCommand(proof, candidate, scratch));
+run('parity_loaded_images', preparedImageParityCommand(proof, candidate, scratch));
 for (const [role, repository] of [['app', 'gpoint-runtime'], ['agata', 'gpoint-agata-runtime'], ['gsales', 'gpoint-g-sales-runtime']]) {
   const tag = `${repository}:${candidate}`;
-  const native = execFileSync('docker', ['image', 'inspect', tag, '--format', '{{.Id}}'], { encoding: 'utf8' }).trim();
+  const native = step(`native_image_inspect_${role}`, () => execFileSync(
+    'docker', ['image', 'inspect', tag, '--format', '{{.Id}}'], { encoding: 'utf8' },
+  )).trim();
   const expectedConfig = proof.images?.[role]?.id;
   if (!/^sha256:[a-f0-9]{64}$/.test(native) || native === expectedConfig)
     throw new Error(`Containerd manifest/config identities were not distinguished: ${role}`);
@@ -22,8 +30,10 @@ for (const [role, repository] of [['app', 'gpoint-runtime'], ['agata', 'gpoint-a
   try {
     // A config digest must never be mistaken for the native containerd image ID.
     fs.writeFileSync(identityFile, expectedConfig + '\n');
-    const rejected = spawnSync('bash', ['-c', preparedImageParityCommand(proof, candidate, scratch)],
-      { encoding: 'utf8', timeout: 90_000 });
+    const rejected = step(`negative_identity_${role}`, () => spawnSync(
+      'bash', ['-c', preparedImageParityCommand(proof, candidate, scratch)],
+      { encoding: 'utf8', timeout: 90_000 },
+    ));
     const expectedRejection = `GPOINT_CI_PARITY_IDENTITY_MISMATCH=${role}`;
     if (rejected.status !== 42 || !`${rejected.stdout}\n${rejected.stderr}`.includes(expectedRejection))
       throw new Error(`Containerd parity did not report the expected identity mismatch: ${role}`);
@@ -31,11 +41,18 @@ for (const [role, repository] of [['app', 'gpoint-runtime'], ['agata', 'gpoint-a
   console.log(`PREPARE_IDENTITY_REGRESSION_REJECTED=${role}`);
   // Prove runtime identity without starting a poller, provider, or DB client.
   const name = `gpoint-rehearsal-${role}-${candidate.slice(0, 12)}`;
-  const id = execFileSync('docker', ['create', '--name', name, '--network', 'none', '--entrypoint', '/bin/true', tag], { encoding: 'utf8' }).trim();
+  const id = step(`runtime_create_${role}`, () => execFileSync(
+    'docker', ['create', '--name', name, '--network', 'none', '--entrypoint', '/bin/true', tag],
+    { encoding: 'utf8' },
+  )).trim();
   try {
-    const actual = execFileSync('docker', ['inspect', id, '--format', '{{.Image}}'], { encoding: 'utf8' }).trim();
+    const actual = step(`runtime_inspect_${role}`, () => execFileSync(
+      'docker', ['inspect', id, '--format', '{{.Image}}'], { encoding: 'utf8' },
+    )).trim();
     if (actual !== native) throw new Error(`Runtime image parity mismatch: ${role}`);
-  } finally { execFileSync('docker', ['rm', id], { stdio: 'ignore' }); }
+  } finally {
+    step(`runtime_remove_${role}`, () => execFileSync('docker', ['rm', id], { stdio: 'ignore' }));
+  }
 }
-run(preparedImageParityCommand(proof, candidate, scratch));
+run('parity_loaded_images_final', preparedImageParityCommand(proof, candidate, scratch));
 console.log('PREPARE_DEPLOY_REHEARSAL=PASS');

@@ -54,6 +54,40 @@ def validate_image_metadata(role: str, repository: str, digest: str, metadata: d
             'sourceSha': sha, 'platform': 'linux/amd64'}
 
 
+def safe_runtime_diagnostic_fields(output: str | bytes, category: str) -> dict:
+    """Extract allowlisted runtime markers; never return subprocess output."""
+    if isinstance(output, bytes):
+        output = output.decode('utf-8', 'replace')
+    raw_output = str(output)
+    output = raw_output.lower()
+    diagnostic = {}
+    markers = re.findall(r'GHCR_REHEARSAL_SUBSTAGE=(capture_loaded_images|parity_loaded_images|'
+                         r'native_image_inspect_(?:app|agata|gsales)|negative_identity_(?:app|agata|gsales)|'
+                         r'runtime_create_(?:app|agata|gsales)|runtime_inspect_(?:app|agata|gsales)|'
+                         r'runtime_remove_(?:app|agata|gsales)|parity_loaded_images_final)', raw_output)
+    if markers:
+        diagnostic['substage'] = markers[-1]
+    reason_markers = (
+        (('econnreset', 'connection reset'), 'CONNECTION_RESET'),
+        (('econnrefused', 'connection refused'), 'CONNECTION_REFUSED'),
+        (('eai_again', 'temporary failure in name resolution'), 'DNS_TEMPORARY'),
+        (('enotfound', 'no such host'), 'DNS_NOT_FOUND'),
+        (('etimedout', 'deadline exceeded', 'timed out', 'timeout'), 'TIMEOUT'),
+        (('tls', 'x509', 'certificate'), 'TLS'),
+    )
+    if category in {'NETWORK', 'TIMEOUT'}:
+        for needles, reason in reason_markers:
+            if any(needle in output for needle in needles):
+                diagnostic['reasonCode'] = reason
+                break
+    return diagnostic
+
+
+def safe_output_text(*values: str | bytes | None) -> str:
+    return '\n'.join(value.decode('utf-8', 'replace') if isinstance(value, bytes) else value
+                      for value in values if value)
+
+
 def safe_process_failure(stage: str, operation: str, role: str | None,
                          error: subprocess.CalledProcessError) -> dict:
     """Return fixed diagnostic fields only; never expose refs, URLs or command output."""
@@ -69,10 +103,9 @@ def safe_process_failure(stage: str, operation: str, role: str | None,
         stage, operation, role = 'unknown', 'unknown', None
     if role not in {*IMAGES.keys(), None}:
         role = None
-    output = error.stderr or error.stdout or ''
-    if isinstance(output, bytes):
-        output = output.decode('utf-8', 'replace')
-    output = str(output).lower()
+    output = safe_output_text(error.stderr, error.stdout)
+    raw_output = str(output)
+    output = raw_output.lower()
     if any(marker in output for marker in ('unauthorized', 'authentication required', 'invalid username or password')):
         category = 'AUTH'
     elif any(marker in output for marker in ('denied', 'forbidden', 'insufficient_scope', 'permission denied')):
@@ -81,14 +114,19 @@ def safe_process_failure(stage: str, operation: str, role: str | None,
         category = 'OCI_NOT_FOUND'
     elif any(marker in output for marker in ('unsupported media type', 'manifest invalid', 'media type')):
         category = 'OCI_MEDIA_TYPE'
-    elif any(marker in output for marker in ('tls', 'x509', 'certificate', 'timed out', 'timeout', 'connection reset', 'connection refused', 'no such host')):
+    elif any(marker in output for marker in ('tls', 'x509', 'certificate', 'timed out', 'timeout',
+                                              'connection reset', 'econnreset', 'connection refused',
+                                              'econnrefused', 'no such host', 'enotfound', 'eai_again')):
         category = 'NETWORK'
     elif any(marker in output for marker in ('daemon is not running', 'cannot connect to the docker daemon', 'failed to connect')):
         category = 'TOOLING'
     else:
         category = 'PROCESS_EXIT'
-    return {'stage': stage, 'operation': operation, 'role': role,
-            'category': category, 'exitCode': error.returncode}
+    diagnostic = {'stage': stage, 'operation': operation, 'role': role,
+                  'category': category, 'exitCode': error.returncode}
+    if stage == 'ghcr_rehearsal_runtime_parity':
+        diagnostic.update(safe_runtime_diagnostic_fields(raw_output, category))
+    return diagnostic
 
 
 class SafeProcessFailure(RuntimeError):
@@ -109,11 +147,14 @@ def run(*args: str, capture: bool = False, cwd: Path | None = None,
         if stage and operation:
             raise SafeProcessFailure(safe_process_failure(stage, operation, role, error)) from None
         raise
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as error:
         if stage and operation:
             diagnostic = {'stage': stage, 'operation': operation,
                           'role': role if role in IMAGES else None,
                           'category': 'TIMEOUT', 'exitCode': None}
+            if stage == 'ghcr_rehearsal_runtime_parity':
+                output = safe_output_text(error.stderr, error.stdout)
+                diagnostic.update(safe_runtime_diagnostic_fields(output, 'TIMEOUT'))
             raise SafeProcessFailure(diagnostic) from None
         raise
     except OSError:
@@ -124,6 +165,33 @@ def run(*args: str, capture: bool = False, cwd: Path | None = None,
             raise SafeProcessFailure(diagnostic) from None
         raise
     return ((result.stdout or '') + (result.stderr or '')) if capture else ''
+
+
+def run_rehearsal_with_retry(node: str, helper: Path | str, proof_path: Path | str,
+                             sha: str, root: Path | str, env: dict[str, str]) -> str:
+    """Retry one safe read-only runtime verification after a transient network failure."""
+    args = (node, str(helper), str(proof_path), sha, str(root))
+    try:
+        return run(*args, env=env, timeout=900, stage='ghcr_rehearsal_runtime_parity',
+                   operation='rehearse')
+    except SafeProcessFailure as error:
+        diagnostic = error.diagnostic
+        retryable_substages = {
+            'capture_loaded_images', 'parity_loaded_images',
+            'native_image_inspect_app', 'native_image_inspect_agata', 'native_image_inspect_gsales',
+            'negative_identity_app', 'negative_identity_agata', 'negative_identity_gsales',
+            'runtime_inspect_app', 'runtime_inspect_agata', 'runtime_inspect_gsales',
+            'parity_loaded_images_final',
+        }
+        if (diagnostic.get('stage') != 'ghcr_rehearsal_runtime_parity'
+                or diagnostic.get('category') != 'NETWORK'
+                or diagnostic.get('substage') not in retryable_substages):
+            raise
+        reason = diagnostic.get('reasonCode', 'NETWORK')
+        print(f"GHCR_REHEARSAL_NETWORK_RETRY=1 stage=ghcr_rehearsal_runtime_parity "
+              f"substage={diagnostic['substage']} reason={reason}", file=sys.stderr)
+        return run(*args, env=env, timeout=900, stage='ghcr_rehearsal_runtime_parity',
+                   operation='rehearse')
 
 
 def rehearsal_child_environment(source: dict | None = None) -> dict[str, str]:
@@ -338,8 +406,7 @@ def rehearse_ghcr_images(records: dict, sha: str, username: str, token: str) -> 
         proof_path = root / 'proof.json'
         proof_path.write_text(json.dumps({'candidateSha': sha, 'images': proof_images}))
         helper = Path(__file__).with_name('rehearse-release-bundle.mjs')
-        run(node, str(helper), str(proof_path), sha, str(root), env=client_env, timeout=900,
-            stage='ghcr_rehearsal_runtime_parity', operation='rehearse')
+        run_rehearsal_with_retry(node, helper, proof_path, sha, root, client_env)
         elapsed = round(time.monotonic() - started, 1)
         return {'status': 'PASS', 'dockerVersion': '29.1.3', 'store': 'containerd',
                 'snapshotter': 'overlayfs', 'seconds': elapsed, 'images': observed_images}
@@ -562,8 +629,10 @@ if __name__ == '__main__':
     except SafeProcessFailure as error:
         diagnostic = error.diagnostic
         role = f" role={diagnostic['role']}" if diagnostic['role'] else ''
+        substage = f" substage={diagnostic['substage']}" if diagnostic.get('substage') else ''
+        reason = f" reason={diagnostic['reasonCode']}" if diagnostic.get('reasonCode') else ''
         print(f"GHCR_IMAGE_PROVENANCE=BLOCKED stage={diagnostic['stage']} "
-              f"operation={diagnostic['operation']}{role} category={diagnostic['category']} "
+              f"operation={diagnostic['operation']}{role}{substage} category={diagnostic['category']}{reason} "
               f"exit={diagnostic['exitCode']}", file=sys.stderr)
         raise SystemExit(1)
     except Exception as error:
