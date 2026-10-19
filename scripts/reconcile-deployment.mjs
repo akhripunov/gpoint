@@ -548,6 +548,7 @@ export async function finalizeAuthorizationConsumption({client, deploymentId, ca
   const releaseId = `gpoint-auth-reconciliation-${deploymentId}-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`;
   const unlock = acquireProductionLock(PRODUCTION_LOCK_FILE, releaseId, path.join(root, '.gpoint-release.lock'));
   try {
+  console.log('AUTHORIZATION_RECONCILIATION_PHASE=verify_original_identity');
   const context = await verifyAuthorizationContext({client, deploymentId, candidateSha, token, env, root,
     fetchImpl, readDeployEvidence, verifyAuthorization, readAuthorizationState, currentMain, assertCheckout,
     allowAlreadyComplete: true});
@@ -563,38 +564,51 @@ export async function finalizeAuthorizationConsumption({client, deploymentId, ca
     prismaHead: evidence.ciReceipt?.prismaHead, agataHead: evidence.ciReceipt?.agataHead,
     gsalesMigrationHead: evidence.ciReceipt?.gsalesMigrationHead,
     gsalesMigrationSha256: evidence.ciReceipt?.gsalesMigrationSha256};
+  console.log('AUTHORIZATION_RECONCILIATION_PHASE=verify_receipt_and_images');
   const receipt = assertReceiptAndProductionEvidence({evidence, identity, deploymentId, candidateSha, prepareProof, receiptValidator});
+  console.log('AUTHORIZATION_RECONCILIATION_PHASE=inspect_original_vps');
   const factsBefore = inspectVps();
+  console.log('AUTHORIZATION_RECONCILIATION_PHASE=verify_original_vps');
   const liveBefore = verifyLiveProduction(factsBefore, evidence, receipt, candidateSha);
 
   // Re-read every mutable identity immediately before the only permitted writes.
+  console.log('AUTHORIZATION_RECONCILIATION_PHASE=reread_main');
   const latestMain = await currentMain({token, fetchImpl});
   requireThat(latestMain === executorSha, 'Current main changed before authorization reconciliation');
+  console.log('AUTHORIZATION_RECONCILIATION_PHASE=reread_existing_deployment');
   const currentDeployment = await client.getDeployment(deploymentId);
   requireThat(currentDeployment.id === deployment.id
     && JSON.stringify(deploymentIdentity(currentDeployment)) === JSON.stringify(identity),
     'Existing Deployment identity changed before authorization reconciliation');
+  console.log('AUTHORIZATION_RECONCILIATION_PHASE=reread_deployment_status');
   const currentStatus = readLatestDeploymentStatus(await client.listStatuses(deploymentId));
   requireThat(DEPLOYMENT_STATUS_ID(currentStatus) === DEPLOYMENT_STATUS_ID(initialStatus),
     'Existing Deployment status changed before authorization reconciliation');
+  console.log('AUTHORIZATION_RECONCILIATION_PHASE=reread_deployment_inventory');
   await assertNoConflictingProductionDeployments(client, deploymentId);
+  console.log('AUTHORIZATION_RECONCILIATION_PHASE=reread_authorization');
   const markers = await readAuthorizationState({authorizationId: identity.authorizationId,
     candidateSha, token, fetchImpl});
   requireThat(markers.claimed && !markers.revoked && (!markers.consumed || markers.consumedSha === candidateSha),
     'Authorization state changed before exact marker consumption');
+  console.log('AUTHORIZATION_RECONCILIATION_PHASE=consume_exact_authorization');
   if (!markers.consumed) {
     await consumeAuthorization({project: 'gpoint', authorizationId: identity.authorizationId,
       candidateSha, token, fetchImpl});
   }
+  console.log('AUTHORIZATION_RECONCILIATION_PHASE=verify_consumption');
   await checkAuthorization({project: 'gpoint', authorizationId: identity.authorizationId,
     candidateSha, consumedCandidateSha: candidateSha, token, fetchImpl});
+  console.log('AUTHORIZATION_RECONCILIATION_PHASE=reread_consumption_marker');
   const readbackMarkers = await readAuthorizationState({authorizationId: identity.authorizationId,
     candidateSha, token, fetchImpl});
   requireThat(readbackMarkers.claimed && !readbackMarkers.revoked && readbackMarkers.consumed
     && readbackMarkers.consumedSha === candidateSha,
   'Exact task authorization consumption marker readback failed');
 
+  console.log('AUTHORIZATION_RECONCILIATION_PHASE=inspect_final_vps');
   const factsAfter = inspectVps();
+  console.log('AUTHORIZATION_RECONCILIATION_PHASE=verify_final_vps');
   const liveAfter = verifyLiveProduction(factsAfter, evidence, receipt, candidateSha);
   requireThat(JSON.stringify(liveAfter.fingerprint) === JSON.stringify(liveBefore.fingerprint),
     'VPS readback changed during authorization reconciliation');
@@ -602,7 +616,9 @@ export async function finalizeAuthorizationConsumption({client, deploymentId, ca
   const runAttempt = env.GITHUB_RUN_ATTEMPT;
   const description = `stage=complete sha=${candidateSha.slice(0, 12)} run=${identity.runId}/${identity.runAttempt} reconciled=${runId}/${runAttempt}`;
   requireThat(description.length <= 140, 'Authorization reconciliation status description exceeds GitHub limits');
+  console.log('AUTHORIZATION_RECONCILIATION_PHASE=publish_same_deployment');
   await client.publishStatus(deployment, identity, {state: 'success', description, logUrl: identity.logUrl});
+  console.log('AUTHORIZATION_RECONCILIATION_PHASE=verify_same_deployment_status');
   const published = readLatestDeploymentStatus(await client.listStatuses(deploymentId));
   requireThat(published.state === 'success' && published.description === description
     && published.log_url === identity.logUrl,
@@ -627,6 +643,7 @@ export async function finalizeAuthorizationConsumption({client, deploymentId, ca
   if (writeResult) {
     const resultPath = env.RELEASE_RESULT;
     requireThat(typeof resultPath === 'string' && path.isAbsolute(resultPath), 'Private RELEASE_RESULT path is required');
+    console.log('AUTHORIZATION_RECONCILIATION_PHASE=write_reconciliation_evidence');
     fs.writeFileSync(resultPath, `${JSON.stringify(result, null, 2)}\n`, {flag: 'wx', mode: 0o600});
     if (env.GITHUB_OUTPUT) fs.appendFileSync(env.GITHUB_OUTPUT, 'status=COMPLETE\n');
   }
