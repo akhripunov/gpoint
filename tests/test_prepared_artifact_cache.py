@@ -198,7 +198,9 @@ class GhcrReceiptTests(unittest.TestCase):
                 budget = CACHE.new_network_budget()
         self.assertEqual(budget.seconds, 60)
         self.assertEqual(budget.spent, 50.0)
-        self.assertLessEqual(budget.deadline - budget.started, 10.0)
+        # Binary floating-point subtraction may differ by a few ulps at large
+        # monotonic-clock values; the permitted retry budget is still ten seconds.
+        self.assertAlmostEqual(budget.deadline - budget.started, 10.0, delta=1e-9)
 
     def fetch(self, tamper=None):
         def fake(url, username, token, accept, stage, **kwargs):
