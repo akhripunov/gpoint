@@ -13,7 +13,8 @@ import { withPreflightEvidence } from './release-evidence.mjs';
 import { AuthorizationError, authorizationRecordPath, candidateScopeDiff,
   checkTaskAuthorizationState, consumeTaskAuthorization, validateTaskAuthorization,
   assertNoTaskScopedMigrations } from './release-authorization.mjs';
-import { createGitHubDeploymentsClient, assertDeploymentMatchesLive, deploymentIdentity } from './github-deployments.mjs';
+import { createGitHubDeploymentsClient, assertDeploymentMatchesLive, deploymentIdentity,
+  selectTrustedPrepareCheck } from './github-deployments.mjs';
 import { factsFromReadOnlyInspection, initializeRunScopedState, stateFromLiveVps } from './deployment-run-state.mjs';
 import { inspectProductionReadOnly } from './release-gpoint-vps-adapter.mjs';
 import { reconcileVerifiedDeployment, reconciledResultEvidence } from './reconcile-deployment.mjs';
@@ -159,7 +160,7 @@ try {
         || !/^[a-f0-9]{64}$/.test(prepareReceiptSha256 ?? ''))
       throw new Error('Exact GHCR Prepare receipt and image digest identities are unavailable');
     const workflowUrl = `https://github.com/akhripunov/gpoint/actions/runs/${process.env.GITHUB_RUN_ID}/attempts/${process.env.GITHUB_RUN_ATTEMPT}`;
-    const requiredContext = 'GPoint — Prepare / prepare';
+    const requiredContext = 'prepare';
     const checkRuns = [];
     for (let page = 1; page <= 100; page += 1) {
       const checks = await github(`commits/${sha}/check-runs?per_page=100&page=${page}`);
@@ -169,9 +170,7 @@ try {
       if (checkRuns.length >= checks.total_count) break;
       if (page === 100) throw new Error('Exact-SHA check-run inventory exceeded the pagination limit');
     }
-    const prepareCheck = checkRuns.find(check => check.name === requiredContext
-      && check.status === 'completed' && check.conclusion === 'success' && check.head_sha === sha);
-    if (!prepareCheck) throw new Error('Required successful exact-SHA Prepare status context is unavailable');
+    selectTrustedPrepareCheck(checkRuns, {candidateSha: sha, prepareRunId: process.env.PREPARE_RUN_ID});
     const staticRoute = proof.staticOnly === true;
     let deploymentImages = proof.images;
     let plannedManifest = null;

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createGitHubDeploymentsClient, deploymentPayload, assertDeploymentMatchesLive} from './github-deployments.mjs';
+import {createGitHubDeploymentsClient, deploymentPayload, assertDeploymentMatchesLive,
+  selectTrustedPrepareCheck} from './github-deployments.mjs';
 import './reconcile-deployment.test.mjs';
 
 const sha = 'a'.repeat(40);
@@ -18,6 +19,38 @@ test('Deployment provenance binds exact candidate, Prepare OCI receipt digest an
   assert.deepEqual(payload.workflow, {runId: '42', attempt: '2', url: identity.logUrl});
   assert.equal(payload.prepare.receiptDigest, identity.prepareReceiptDigest);
   assert.deepEqual(payload.prepare.imageDigests, identity.imageDigests);
+});
+
+test('trusted Prepare check selects the completed github-actions check from the receipt-bound run', () => {
+  const check = {id: 117876296903, name: 'prepare', head_sha: sha, status: 'completed', conclusion: 'success',
+    app: {slug: 'github-actions'},
+    details_url: 'https://github.com/akhripunov/gpoint/actions/runs/39195064296/job/117876296903'};
+  assert.equal(selectTrustedPrepareCheck([check], {candidateSha: sha, prepareRunId: '39195064296'}), check);
+});
+
+test('trusted Prepare check rejects a wrong run, application, SHA, state, conclusion, or URL', () => {
+  const valid = {id: 100, name: 'prepare', head_sha: sha, status: 'completed', conclusion: 'success',
+    app: {slug: 'github-actions'}, details_url: 'https://github.com/akhripunov/gpoint/actions/runs/39195064296/job/100'};
+  const invalid = [
+    {...valid, details_url: 'https://github.com/akhripunov/gpoint/actions/runs/39195064295/job/100'},
+    {...valid, app: {slug: 'untrusted-app'}},
+    {...valid, head_sha: 'b'.repeat(40)},
+    {...valid, status: 'in_progress'},
+    {...valid, conclusion: 'failure'},
+    {...valid, details_url: 'https://github.com.evil/akhripunov/gpoint/actions/runs/39195064296/job/100'},
+    {...valid, details_url: 'malformed'},
+  ];
+  for (const check of invalid) {
+    assert.throws(() => selectTrustedPrepareCheck([check], {candidateSha: sha, prepareRunId: '39195064296'}));
+  }
+});
+
+test('trusted Prepare check rejects absent and ambiguous named contexts', () => {
+  const check = {id: 100, name: 'prepare', head_sha: sha, status: 'completed', conclusion: 'success',
+    app: {slug: 'github-actions'}, details_url: 'https://github.com/akhripunov/gpoint/actions/runs/39195064296/job/100'};
+  assert.throws(() => selectTrustedPrepareCheck([], {candidateSha: sha, prepareRunId: '39195064296'}));
+  assert.throws(() => selectTrustedPrepareCheck([check, {...check, id: 101}],
+    {candidateSha: sha, prepareRunId: '39195064296'}));
 });
 
 test('STATIC_UI_ONLY Deployment binds a separate Mini App OCI artifact and inherited image identities', () => {
@@ -50,7 +83,7 @@ test('ambiguous Deployment create is read back by exact workflow attempt without
     if (url.endsWith('/deployments/7/statuses')) return response(201, {state: 'in_progress'});
     throw new Error(`unexpected ${url}`);
   }});
-  const result = await readbackClient.beginProductionDeployment(identity, {requiredContexts: ['GPoint — Prepare / prepare']});
+  const result = await readbackClient.beginProductionDeployment(identity, {requiredContexts: ['prepare']});
   assert.equal(result.deployment.id, 7);
   assert.equal(listCount, 3);
 });
@@ -77,7 +110,7 @@ test('rerunning a workflow cannot create a second Deployment on a new run attemp
     payload: JSON.stringify(deploymentPayload(identity))};
   const rerun = {...identity, runAttempt: '3'};
   const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async () => response(200, [prior])});
-  await assert.rejects(client.beginProductionDeployment(rerun, {requiredContexts: ['GPoint — Prepare / prepare']}),
+  await assert.rejects(client.beginProductionDeployment(rerun, {requiredContexts: ['prepare']}),
     /workflow run already has a Deployment/);
 });
 
@@ -155,13 +188,13 @@ test('Deployment POST sends exact production flags, SHA and required Prepare con
     if (url.endsWith('/statuses') && init.method === 'POST') return response(201, {state: 'in_progress'});
     throw new Error(`unexpected ${url}`);
   }});
-  await client.beginProductionDeployment(identity, {requiredContexts: ['GPoint — Prepare / prepare']});
+  await client.beginProductionDeployment(identity, {requiredContexts: ['prepare']});
   assert.equal(createBody.ref, sha);
   assert.equal(createBody.environment, 'production');
   assert.equal(createBody.auto_merge, false);
   assert.equal(createBody.production_environment, true);
   assert.equal(createBody.transient_environment, false);
-  assert.deepEqual(createBody.required_contexts, ['GPoint — Prepare / prepare']);
+  assert.deepEqual(createBody.required_contexts, ['prepare']);
 });
 
 test('an absent ambiguous-create readback never triggers a second create POST', async () => {
@@ -171,7 +204,7 @@ test('an absent ambiguous-create readback never triggers a second create POST', 
     if (url.endsWith('/deployments') && init.method === 'POST') { creates += 1; throw new Error('timed out'); }
     throw new Error(`unexpected ${url}`);
   }});
-  await assert.rejects(client.beginProductionDeployment(identity, {requiredContexts: ['GPoint — Prepare / prepare']}), /POST request failed/);
+  await assert.rejects(client.beginProductionDeployment(identity, {requiredContexts: ['prepare']}), /POST request failed/);
   assert.equal(creates, 1);
 });
 
@@ -203,7 +236,7 @@ test('tampered Prepare asset provenance returned by the API is rejected', async 
     if (url.endsWith('/deployments') && init.method === 'POST') return response(201, tampered);
     throw new Error(`unexpected ${url}`);
   }});
-  await assert.rejects(client.beginProductionDeployment(identity, {requiredContexts: ['GPoint — Prepare / prepare']}), /payload read-back does not match/);
+  await assert.rejects(client.beginProductionDeployment(identity, {requiredContexts: ['prepare']}), /payload read-back does not match/);
 });
 
 function validDeployment(id, candidate, deploymentIdentityValue, createdAt) {
@@ -369,7 +402,7 @@ test('a created Deployment is exposed when its initial status cannot be confirme
       throw new Error(`unexpected ${url}`);
     }});
   await assert.rejects(client.beginProductionDeployment(identity,
-    {requiredContexts: ['GPoint — Prepare / prepare']}), error => error.deployment?.id === 8);
+    {requiredContexts: ['prepare']}), error => error.deployment?.id === 8);
   assert.equal(calls, 2);
 });
 
@@ -382,7 +415,7 @@ test('an unavailable Deployments API fails closed before creating a Deployment',
       throw new Error(`unexpected ${url}`);
     }});
   await assert.rejects(client.beginProductionDeployment(identity,
-    {requiredContexts: ['GPoint — Prepare / prepare']}), /GET request failed/);
+    {requiredContexts: ['prepare']}), /GET request failed/);
   assert.equal(creates, 0);
 });
 
@@ -395,7 +428,7 @@ test('missing deployments write permission blocks the create without a retry', a
       throw new Error(`unexpected ${url}`);
     }});
   await assert.rejects(client.beginProductionDeployment(identity,
-    {requiredContexts: ['GPoint — Prepare / prepare']}), /HTTP 403/);
+    {requiredContexts: ['prepare']}), /HTTP 403/);
   assert.equal(creates, 1);
 });
 
@@ -421,5 +454,5 @@ test('an active conflicting Deployment blocks a new candidate', async () => {
       throw new Error(`unexpected ${url}`);
     }});
   await assert.rejects(client.beginProductionDeployment(identity,
-    {requiredContexts: ['GPoint — Prepare / prepare']}), /is in_progress/);
+    {requiredContexts: ['prepare']}), /is in_progress/);
 });

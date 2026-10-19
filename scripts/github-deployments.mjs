@@ -15,6 +15,27 @@ export class DeploymentApiError extends Error {
   }
 }
 
+export function selectTrustedPrepareCheck(checkRuns, {candidateSha, prepareRunId} = {}) {
+  requireThat(Array.isArray(checkRuns) && SHA40.test(candidateSha ?? '') && POSITIVE_ID.test(String(prepareRunId ?? '')),
+    'exact candidate SHA, trusted Prepare run ID, and check-run inventory are required');
+  const named = checkRuns.filter(check => check?.name === 'prepare');
+  requireThat(named.length === 1, named.length ? 'Prepare check context is ambiguous' : 'Prepare check context is unavailable');
+  const check = named[0];
+  requireThat(check.head_sha === candidateSha && check.status === 'completed' && check.conclusion === 'success'
+    && check.app?.slug === 'github-actions',
+  'Prepare check context is not successful, exact-SHA, or from GitHub Actions');
+  let details;
+  try { details = new URL(check.details_url); }
+  catch { throw new DeploymentApiError('Prepare check run details URL is invalid'); }
+  const route = /^\/akhripunov\/gpoint\/actions\/runs\/([1-9][0-9]*)\/job\/([1-9][0-9]*)$/;
+  const match = route.exec(details.pathname);
+  requireThat(details.protocol === 'https:' && details.hostname === 'github.com' && !details.port
+    && !details.username && !details.password && !details.search && !details.hash
+    && match?.[1] === String(prepareRunId),
+  'Prepare check is not bound to the trusted GitHub Actions run');
+  return check;
+}
+
 function requireThat(condition, message) {
   if (!condition) throw new DeploymentApiError(message);
 }
