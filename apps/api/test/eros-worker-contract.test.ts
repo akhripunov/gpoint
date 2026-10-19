@@ -89,6 +89,12 @@ test('streaming completion emits standard OpenAI SSE deltas and one terminal mar
   assert.ok(chunks.every((chunk) => chunk.id === 'job-safe-id' && chunk.model === 'gpoint-codex'));
 });
 
+test('chat request rejects sampling temperatures the Mac Worker cannot honor', async () => {
+  await assert.rejects(parseBridgeRequest({
+    model: 'gpoint-codex', messages: [{ role: 'user', content: 'hello' }], temperature: 0.4,
+  }, secret, now), /eros_chat_request_invalid/);
+});
+
 test('embedding proxy contract requires exact Qwen model and native 512-dimensional vectors', () => {
   const request = parseErosEmbeddingRequest({
     model: 'qwen3-embedding:0.6b', input: ['Привет', 'память'], dimensions: 512,

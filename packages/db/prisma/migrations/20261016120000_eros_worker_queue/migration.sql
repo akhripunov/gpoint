@@ -38,7 +38,6 @@ DO $$ BEGIN
       CHECK (job_type = 'SYSTEM_COMPLETION' OR creator_id IS NOT NULL) NOT VALID;
   END IF;
 END $$;
-
 CREATE INDEX IF NOT EXISTS eros_inference_jobs_claim_idx
   ON engine.eros_inference_jobs (tenant_id, created_at, id) WHERE status = 'PENDING';
 CREATE INDEX IF NOT EXISTS eros_inference_jobs_deadline_idx

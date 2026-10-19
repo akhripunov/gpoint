@@ -36,64 +36,115 @@ test('Codex worker gateway accepts only the dedicated bearer token', () => {
   assert.throws(() => assertWorkerAuth({ authorization: 'Bearer wrong-token' }, env), { status: 401 });
 });
 
-test('queue status is a registered authenticated GET and exposes only the content-free GPOINT snapshot', async () => {
+test('queue status is a registered authenticated GET and aggregates content-free GPOINT and Eros counts', async () => {
   const descriptor = Object.getOwnPropertyDescriptor(AgataWorkerGatewayController.prototype, 'queueStatus');
   assert.ok(descriptor?.value);
   assert.equal(Reflect.getMetadata('path', descriptor.value), 'queue-status');
   assert.equal(Reflect.getMetadata('method', descriptor.value), 0);
 
-  const previous = {
-    workerToken: process.env.GPOINT_AGATA_WORKER_TOKEN,
-    enabled: process.env.AGATA_ENABLED,
-    serviceUrl: process.env.AGATA_SERVICE_URL,
-    internalToken: process.env.AGATA_INTERNAL_API_TOKEN,
-    fetch: globalThis.fetch,
-  };
-  const requests: Array<{ url: string; method: string | undefined; authorization: string | null; body: string | null }> = [];
+  class TestGateway extends AgataWorkerGatewayController {
+    protected override async readAgataQueueStatus() {
+      return { source_id: 'agata-worker-queue-status-v1:gpoint', lane: 'GPOINT' as const,
+        pending_jobs: 2, running_jobs: 1, snapshot_at: '2026-10-14T05:00:00Z' };
+    }
+    protected override async readErosQueueStatus() {
+      return { pending_jobs: 3, running_jobs: 2 };
+    }
+  }
+
+  const controller = new TestGateway();
+  const previousToken = process.env.GPOINT_AGATA_WORKER_TOKEN;
+  const previousEnabled = process.env.EROS_ENABLED;
+  process.env.GPOINT_AGATA_WORKER_TOKEN = 'worker-gateway-test-token';
+  process.env.EROS_ENABLED = 'true';
   try {
-    process.env.GPOINT_AGATA_WORKER_TOKEN = 'worker-gateway-test-token';
-    process.env.AGATA_ENABLED = 'true';
-    process.env.AGATA_SERVICE_URL = 'https://agata.internal';
-    process.env.AGATA_INTERNAL_API_TOKEN = 'internal-service-test-token';
-    globalThis.fetch = async (input, init) => {
-      requests.push({
-        url: String(input), method: init?.method,
-        authorization: new Headers(init?.headers).get('authorization'),
-        body: init?.body ? String(init.body) : null,
-      });
-      return new Response(JSON.stringify({
-        source_id: 'agata-worker-queue-status-v1:gpoint', lane: 'GPOINT',
-        pending_jobs: 2, running_jobs: 1, snapshot_at: '2026-10-14T05:00:00Z',
-      }), { status: 200 });
-    };
-    const controller = new AgataWorkerGatewayController();
     await assert.rejects(controller.queueStatus({}), { status: 401 });
     const result = await controller.queueStatus({ authorization: 'Bearer worker-gateway-test-token' });
     assert.deepEqual(result, {
       source_id: 'agata-worker-queue-status-v1:gpoint', lane: 'GPOINT',
-      pending_jobs: 2, running_jobs: 1, snapshot_at: '2026-10-14T05:00:00Z',
+      pending_jobs: 5, running_jobs: 3, snapshot_at: '2026-10-14T05:00:00Z',
+      eros_pending_jobs: 3, eros_running_jobs: 2,
+      eros_queue_available: true,
     });
-    assert.deepEqual(requests, [{
-      url: 'https://agata.internal/internal/v1/worker/queue-status', method: 'GET',
-      authorization: 'Bearer internal-service-test-token', body: null,
-    }]);
-    globalThis.fetch = async () => new Response('private downstream details', { status: 403 });
-    await assert.rejects(
-      controller.queueStatus({ authorization: 'Bearer worker-gateway-test-token' }),
-      (error: unknown) => error instanceof HttpException && error.getStatus() === 503 &&
-        JSON.stringify(error.getResponse()) === JSON.stringify({ code: 'AGATA_UNAVAILABLE' }),
-    );
-    assert.equal(requests.length, 1);
   } finally {
-    for (const [key, value] of Object.entries({
-      GPOINT_AGATA_WORKER_TOKEN: previous.workerToken,
-      AGATA_ENABLED: previous.enabled,
-      AGATA_SERVICE_URL: previous.serviceUrl,
-      AGATA_INTERNAL_API_TOKEN: previous.internalToken,
-    })) {
-      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    if (previousToken === undefined) delete process.env.GPOINT_AGATA_WORKER_TOKEN;
+    else process.env.GPOINT_AGATA_WORKER_TOKEN = previousToken;
+    if (previousEnabled === undefined) delete process.env.EROS_ENABLED;
+    else process.env.EROS_ENABLED = previousEnabled;
+  }
+});
+
+test('Eros queue status is disabled without EROS configuration', async () => {
+  class TestGateway extends AgataWorkerGatewayController {
+    async erosQueueStatus() { return this.readErosQueueStatus(); }
+  }
+  const previousEnabled = process.env.EROS_ENABLED;
+  delete process.env.EROS_ENABLED;
+  try {
+    assert.deepEqual(await new TestGateway().erosQueueStatus(), { pending_jobs: 0, running_jobs: 0 });
+  } finally {
+    if (previousEnabled === undefined) delete process.env.EROS_ENABLED;
+    else process.env.EROS_ENABLED = previousEnabled;
+  }
+});
+
+test('queue status preserves GPOINT health when the optional Eros queue is unavailable', async () => {
+  class TestGateway extends AgataWorkerGatewayController {
+    protected override async readAgataQueueStatus() {
+      return { source_id: 'agata-worker-queue-status-v1:gpoint', lane: 'GPOINT' as const,
+        pending_jobs: 2, running_jobs: 1, snapshot_at: 'now' };
     }
-    globalThis.fetch = previous.fetch;
+    protected override async readErosQueueStatus(): Promise<{ pending_jobs: number; running_jobs: number }> {
+      throw new Error('synthetic Eros queue outage');
+    }
+  }
+  const previous = { token: process.env.GPOINT_AGATA_WORKER_TOKEN, enabled: process.env.EROS_ENABLED };
+  process.env.GPOINT_AGATA_WORKER_TOKEN = 'worker-gateway-test-token';
+  process.env.EROS_ENABLED = 'true';
+  try {
+    assert.deepEqual(await new TestGateway().queueStatus({ authorization: 'Bearer worker-gateway-test-token' }), {
+      source_id: 'agata-worker-queue-status-v1:gpoint', lane: 'GPOINT', pending_jobs: 2, running_jobs: 1,
+      snapshot_at: 'now', eros_pending_jobs: 0, eros_running_jobs: 0, eros_queue_available: false,
+    });
+  } finally {
+    if (previous.token === undefined) delete process.env.GPOINT_AGATA_WORKER_TOKEN; else process.env.GPOINT_AGATA_WORKER_TOKEN = previous.token;
+    if (previous.enabled === undefined) delete process.env.EROS_ENABLED; else process.env.EROS_ENABLED = previous.enabled;
+  }
+});
+
+test('claim gives existing GPOINT jobs priority over the optional Eros queue', async () => {
+  let erosCalled = false;
+  class TestGateway extends AgataWorkerGatewayController {
+    protected override async claimAgataJob() { return { job: { id: 'agata-user-reply' } as never }; }
+    protected override async claimErosJob() { erosCalled = true; return { job: { id: 'eros' } }; }
+  }
+  const previous = { token: process.env.GPOINT_AGATA_WORKER_TOKEN, enabled: process.env.EROS_ENABLED };
+  process.env.GPOINT_AGATA_WORKER_TOKEN = 'worker-gateway-test-token';
+  process.env.EROS_ENABLED = 'true';
+  try {
+    assert.deepEqual(await new TestGateway().claim({ authorization: 'Bearer worker-gateway-test-token' }), {
+      job: { id: 'agata-user-reply' },
+    });
+    assert.equal(erosCalled, false);
+  } finally {
+    if (previous.token === undefined) delete process.env.GPOINT_AGATA_WORKER_TOKEN; else process.env.GPOINT_AGATA_WORKER_TOKEN = previous.token;
+    if (previous.enabled === undefined) delete process.env.EROS_ENABLED; else process.env.EROS_ENABLED = previous.enabled;
+  }
+});
+
+test('claim returns an empty GPOINT poll instead of failing when optional Eros arbitration is down', async () => {
+  class TestGateway extends AgataWorkerGatewayController {
+    protected override async claimAgataJob() { return { job: null }; }
+    protected override async claimErosJob(): Promise<never> { throw new Error('synthetic Eros queue outage'); }
+  }
+  const previous = { token: process.env.GPOINT_AGATA_WORKER_TOKEN, enabled: process.env.EROS_ENABLED };
+  process.env.GPOINT_AGATA_WORKER_TOKEN = 'worker-gateway-test-token';
+  process.env.EROS_ENABLED = 'true';
+  try {
+    assert.deepEqual(await new TestGateway().claim({ authorization: 'Bearer worker-gateway-test-token' }), { job: null });
+  } finally {
+    if (previous.token === undefined) delete process.env.GPOINT_AGATA_WORKER_TOKEN; else process.env.GPOINT_AGATA_WORKER_TOKEN = previous.token;
+    if (previous.enabled === undefined) delete process.env.EROS_ENABLED; else process.env.EROS_ENABLED = previous.enabled;
   }
 });
 

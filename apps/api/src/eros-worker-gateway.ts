@@ -1,4 +1,4 @@
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { BadRequestException, Body, Controller, Get, Headers, Header, HttpException, OnModuleDestroy, OnModuleInit, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { PrismaClient, type Prisma } from '@prisma/client';
@@ -13,10 +13,13 @@ const MAX_RETAINED_JOBS = 272;
 const IDEMPOTENCY_RETENTION = '10 minutes';
 type WorkerTx = Prisma.TransactionClient;
 type JobRow = {
-  id: string; request_id: string; request_hash: string; tenant_id: string; user_id: string; creator_id: string;
+  id: string; request_id: string; request_hash: string; tenant_id: string; user_id: string; creator_id: string | null;
   session_id: string; instance_id: string; job_type: string; request: Record<string, unknown>; status: string;
   lease_token: string | null; deadline_at: Date; response_text: string | null; error_code: string | null;
 };
+
+type ErosQueueIdentity = Pick<JobRow, 'id' | 'request_id' | 'tenant_id' | 'user_id' | 'creator_id' | 'session_id' | 'instance_id'>;
+type EncryptedQueueRequest = { v: 1; alg: 'A256GCM'; nonce: string; ciphertext: string; tag: string };
 
 function bearer(headers: Record<string, string | string[] | undefined>, key: string, env = process.env): void {
   const configured = env[key];
@@ -35,10 +38,97 @@ function signingSecret(env = process.env): Uint8Array {
 
 function workerTenant(env = process.env): string {
   const value = env.EROS_WORKER_TENANT_ID ?? '';
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+  const gpointTenant = env.AGATA_TENANT_ID ?? '';
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (!uuid.test(value) || !uuid.test(gpointTenant) || value !== gpointTenant) {
     throw new HttpException({ code: 'EROS_BRIDGE_UNAVAILABLE' }, 503);
   }
   return value;
+}
+
+function queueEncryptionKey(env = process.env): Buffer {
+  const secret = signingSecret(env);
+  return Buffer.from(hkdfSync('sha256', secret, Buffer.from('gpoint-eros-queue-v1'), Buffer.from('request-payload-aead'), 32));
+}
+
+function queueAad(identity: ErosQueueIdentity, purpose: 'request' | 'response' = 'request'): Buffer {
+  return Buffer.from([
+    identity.tenant_id, identity.id, identity.request_id, identity.user_id,
+    identity.creator_id ?? '', identity.session_id, identity.instance_id, purpose,
+  ].join('\0'));
+}
+
+function encryptQueueRequest(request: ParsedErosBridgeRequest, identity: ErosQueueIdentity): EncryptedQueueRequest {
+  const nonce = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', queueEncryptionKey(), nonce);
+  cipher.setAAD(queueAad(identity));
+  const ciphertext = Buffer.concat([
+    cipher.update(JSON.stringify({ model: request.model, messages: request.messages, max_tokens: request.maxTokens, temperature: request.temperature }), 'utf8'),
+    cipher.final(),
+  ]);
+  return { v: 1, alg: 'A256GCM', nonce: nonce.toString('base64url'), ciphertext: ciphertext.toString('base64url'), tag: cipher.getAuthTag().toString('base64url') };
+}
+
+function decryptQueueRequest(value: unknown, identity: ErosQueueIdentity): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new HttpException({ code: 'EROS_QUEUE_PAYLOAD_INVALID' }, 503);
+  const envelope = value as Partial<EncryptedQueueRequest>;
+  if (envelope.v !== 1 || envelope.alg !== 'A256GCM' || typeof envelope.nonce !== 'string' ||
+      typeof envelope.ciphertext !== 'string' || typeof envelope.tag !== 'string') {
+    throw new HttpException({ code: 'EROS_QUEUE_PAYLOAD_INVALID' }, 503);
+  }
+  try {
+    const nonce = Buffer.from(envelope.nonce, 'base64url');
+    const ciphertext = Buffer.from(envelope.ciphertext, 'base64url');
+    const tag = Buffer.from(envelope.tag, 'base64url');
+    if (nonce.length !== 12 || tag.length !== 16 || ciphertext.length > 96_000) throw new Error('invalid_envelope');
+    const decipher = createDecipheriv('aes-256-gcm', queueEncryptionKey(), nonce);
+    decipher.setAAD(queueAad(identity));
+    decipher.setAuthTag(tag);
+    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+    const request = JSON.parse(plaintext);
+    if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('invalid_payload');
+    return request as Record<string, unknown>;
+  } catch {
+    throw new HttpException({ code: 'EROS_QUEUE_PAYLOAD_INVALID' }, 503);
+  }
+}
+
+function encryptQueueResponse(text: string, identity: ErosQueueIdentity): string {
+  const nonce = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', queueEncryptionKey(), nonce);
+  cipher.setAAD(queueAad(identity, 'response'));
+  const ciphertext = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
+  return JSON.stringify({
+    v: 1, alg: 'A256GCM', nonce: nonce.toString('base64url'),
+    ciphertext: ciphertext.toString('base64url'), tag: cipher.getAuthTag().toString('base64url'),
+  } satisfies EncryptedQueueRequest);
+}
+
+function decryptQueueResponse(value: string, identity: ErosQueueIdentity): string {
+  try {
+    const envelope = JSON.parse(value) as Partial<EncryptedQueueRequest>;
+    if (envelope.v !== 1 || envelope.alg !== 'A256GCM' || typeof envelope.nonce !== 'string' ||
+        typeof envelope.ciphertext !== 'string' || typeof envelope.tag !== 'string') throw new Error('invalid_envelope');
+    const nonce = Buffer.from(envelope.nonce, 'base64url');
+    const ciphertext = Buffer.from(envelope.ciphertext, 'base64url');
+    const tag = Buffer.from(envelope.tag, 'base64url');
+    if (nonce.length !== 12 || tag.length !== 16 || ciphertext.length > REPLY_LIMIT * 4) throw new Error('invalid_envelope');
+    const decipher = createDecipheriv('aes-256-gcm', queueEncryptionKey(), nonce);
+    decipher.setAAD(queueAad(identity, 'response'));
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+  } catch {
+    throw new HttpException({ code: 'EROS_QUEUE_PAYLOAD_INVALID' }, 503);
+  }
+}
+
+function decodeJobResponse(row: JobRow): JobRow {
+  if (row.response_text === null) return row;
+  const identity: ErosQueueIdentity = {
+    id: row.id, request_id: row.request_id, tenant_id: row.tenant_id, user_id: row.user_id,
+    creator_id: row.creator_id, session_id: row.session_id, instance_id: row.instance_id,
+  };
+  return { ...row, response_text: decryptQueueResponse(row.response_text, identity) };
 }
 
 async function withWorkerTenant<T>(operation: (tx: WorkerTx) => Promise<T>): Promise<T> {
@@ -50,7 +140,7 @@ async function withWorkerTenant<T>(operation: (tx: WorkerTx) => Promise<T>): Pro
 }
 
 function requestFingerprint(request: ParsedErosBridgeRequest): string {
-  return createHash('sha256').update(JSON.stringify({
+  return createHmac('sha256', queueEncryptionKey()).update(JSON.stringify({
     model: request.model, messages: request.messages, max_tokens: request.maxTokens, temperature: request.temperature,
   })).digest('hex');
 }
@@ -75,6 +165,123 @@ function safeErrorFrame(code: string): string {
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** Claim Eros bridge work on the existing authenticated GPOINT Product Worker contract. */
+export async function claimErosForGpointWorker(): Promise<{ job: Record<string, unknown> } | null> {
+  const tenantId = workerTenant();
+  const row = await withWorkerTenant(async (tx) => {
+    await tx.$queryRawUnsafe(
+      'SELECT pg_advisory_xact_lock(hashtextextended($1, 0)) IS NULL AS locked', tenantId,
+    );
+    await tx.$executeRawUnsafe(
+      `UPDATE engine.eros_inference_jobs SET status = 'EXPIRED', error_code = 'lease_expired',
+         lease_token = NULL, lease_expires_at = NULL, updated_at = now()
+       WHERE tenant_id = $1 AND status = 'RUNNING' AND lease_expires_at <= now()`, tenantId,
+    );
+    await tx.$executeRawUnsafe(
+      `UPDATE engine.eros_inference_jobs SET status = 'EXPIRED', error_code = 'deadline_expired', updated_at = now()
+       WHERE tenant_id = $1 AND status = 'PENDING' AND deadline_at <= now()`, tenantId,
+    );
+    const lease = randomUUID();
+    const rows = await tx.$queryRawUnsafe<JobRow[]>(
+      `WITH candidate AS (
+         SELECT id FROM engine.eros_inference_jobs
+         WHERE tenant_id = $1 AND status = 'PENDING' AND deadline_at > now()
+           AND NOT EXISTS (SELECT 1 FROM engine.eros_inference_jobs WHERE tenant_id = $1 AND status = 'RUNNING')
+         ORDER BY created_at, id FOR UPDATE SKIP LOCKED LIMIT 1
+       )
+       UPDATE engine.eros_inference_jobs AS job SET status = 'RUNNING', lease_token = $2::uuid,
+         lease_expires_at = job.deadline_at, attempts = attempts + 1, updated_at = now()
+       FROM candidate WHERE job.id = candidate.id
+       RETURNING job.id::text, job.request_id::text, job.request_hash, job.tenant_id,
+         job.user_id::text, job.creator_id::text, job.session_id::text, job.instance_id::text, job.job_type, job.request,
+         job.status, job.lease_token::text, job.deadline_at, job.response_text, job.error_code`, tenantId, lease,
+    );
+    return rows[0];
+  });
+  if (!row) return null;
+  const identity: ErosQueueIdentity = {
+    id: row.id, request_id: row.request_id, tenant_id: row.tenant_id, user_id: row.user_id,
+    creator_id: row.creator_id, session_id: row.session_id, instance_id: row.instance_id,
+  };
+  return { job: {
+    id: row.id, leaseToken: row.lease_token, attempt: 1, target: 'GPOINT', tenant_id: tenantId,
+    request: decryptQueueRequest(row.request, identity), purpose: 'eros_chat_completion',
+  } };
+}
+
+export async function completeErosForGpointWorker(input: {
+  job_id: string; lease_token: string; text: string; model: string;
+}): Promise<{ handled: boolean }> {
+  const tenantId = workerTenant();
+  return withWorkerTenant(async (tx) => {
+    const existing = await tx.$queryRawUnsafe<ErosQueueIdentity[]>(
+      `SELECT id::text, request_id::text, tenant_id, user_id::text, creator_id::text,
+              session_id::text, instance_id::text
+       FROM engine.eros_inference_jobs WHERE id = $1::uuid AND tenant_id = $2`, input.job_id, tenantId,
+    );
+    if (!existing[0]) return { handled: false };
+    const responseIdentity: ErosQueueIdentity = existing[0];
+    const count = await tx.$executeRawUnsafe(
+      `UPDATE engine.eros_inference_jobs SET status = 'COMPLETED', response_text = $3,
+         lease_token = NULL, lease_expires_at = NULL, updated_at = now()
+      WHERE id = $1::uuid AND lease_token = $2::uuid AND tenant_id = $4 AND status = 'RUNNING'
+         AND deadline_at > now()`, input.job_id, input.lease_token,
+      encryptQueueResponse(input.text, responseIdentity), tenantId,
+    );
+    if (count !== 1) throw new HttpException({ code: 'WORKER_LEASE_REJECTED' }, 409);
+    return { handled: true };
+  });
+}
+
+export async function failErosForGpointWorker(input: {
+  job_id: string; lease_token: string; error_code: string;
+}): Promise<{ handled: boolean }> {
+  const tenantId = workerTenant();
+  return withWorkerTenant(async (tx) => {
+    const existing = await tx.$queryRawUnsafe<Array<{ id: string }>>(
+      `SELECT id::text FROM engine.eros_inference_jobs WHERE id = $1::uuid AND tenant_id = $2`, input.job_id, tenantId,
+    );
+    if (!existing[0]) return { handled: false };
+    const count = await tx.$executeRawUnsafe(
+      `UPDATE engine.eros_inference_jobs SET status = 'FAILED', error_code = $3,
+         lease_token = NULL, lease_expires_at = NULL, updated_at = now()
+       WHERE id = $1::uuid AND lease_token = $2::uuid AND tenant_id = $4 AND status = 'RUNNING'`,
+      input.job_id, input.lease_token, input.error_code, tenantId,
+    );
+    if (count !== 1) throw new HttpException({ code: 'WORKER_LEASE_REJECTED' }, 409);
+    return { handled: true };
+  });
+}
+
+export async function checkErosForGpointWorker(input: {
+  job_id: string; lease_token: string;
+}): Promise<{ active: boolean; terminal_status: string | null }> {
+  const tenantId = workerTenant();
+  return withWorkerTenant(async (tx) => {
+    await tx.$executeRawUnsafe(
+      `UPDATE engine.eros_inference_jobs SET status = 'EXPIRED', lease_token = NULL,
+         lease_expires_at = NULL, error_code = 'deadline_expired', updated_at = now()
+       WHERE id = $1::uuid AND tenant_id = $2 AND status = 'RUNNING' AND deadline_at <= now()`, input.job_id, tenantId,
+    );
+    const rows = await tx.$queryRawUnsafe<Array<{ active: boolean; status: string }>>(
+      `SELECT (status = 'RUNNING' AND lease_token = $2::uuid AND deadline_at > now()) AS active, status
+       FROM engine.eros_inference_jobs WHERE id = $1::uuid AND tenant_id = $3`, input.job_id, input.lease_token, tenantId,
+    );
+    const row = rows[0];
+    return { active: row?.active === true, terminal_status: row && ['CANCELLED', 'EXPIRED'].includes(row.status) ? row.status : null };
+  });
+}
+
+export async function erosQueueStatusForGpointWorker(): Promise<{ pending_jobs: number; running_jobs: number }> {
+  const tenantId = workerTenant();
+  const rows = await withWorkerTenant((tx) => tx.$queryRawUnsafe<Array<{ pending: bigint; running: bigint }>>(
+    `SELECT count(*) FILTER (WHERE status = 'PENDING')::bigint AS pending,
+            count(*) FILTER (WHERE status = 'RUNNING')::bigint AS running
+     FROM engine.eros_inference_jobs WHERE tenant_id = $1`, tenantId,
+  ));
+  return { pending_jobs: Number(rows[0]?.pending ?? 0), running_jobs: Number(rows[0]?.running ?? 0) };
+}
 
 @Controller('eros-worker')
 export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestroy {
@@ -147,13 +354,17 @@ export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestro
         throw new HttpException({ code: 'EROS_QUEUE_RETENTION_FULL' }, 429);
       }
       const jobType = request.identity ? 'CHAT_COMPLETION' : 'SYSTEM_COMPLETION';
+      const queueIdentity: ErosQueueIdentity = {
+        id, request_id: identity.requestId, tenant_id: tenantId, user_id: identity.userId,
+        creator_id: identity.creatorId, session_id: identity.sessionId, instance_id: identity.instanceId,
+      };
       await tx.$executeRawUnsafe(
         `INSERT INTO engine.eros_inference_jobs
           (id, request_id, request_hash, tenant_id, user_id, creator_id, session_id, instance_id, job_type, request, deadline_at)
          VALUES ($1::uuid, $2::uuid, $3, $4, $5::uuid, $6::uuid, $7::uuid, $8::uuid, $9, $10::jsonb, $11::timestamptz)`,
         id, identity.requestId, fingerprint, tenantId, identity.userId, identity.creatorId,
         identity.sessionId, identity.instanceId, jobType,
-        JSON.stringify({ model: request.model, messages: request.messages, max_tokens: request.maxTokens, temperature: request.temperature }), deadline,
+        JSON.stringify(encryptQueueRequest(request, queueIdentity)), deadline,
       );
       const rows = await tx.$queryRawUnsafe<JobRow[]>(
         `SELECT id::text, request_id::text, request_hash, tenant_id, user_id::text, creator_id::text, session_id::uuid::text,
@@ -167,7 +378,7 @@ export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestro
         row.session_id !== identity.sessionId || row.instance_id !== identity.instanceId ||
         row.job_type !== (request.identity ? 'CHAT_COMPLETION' : 'SYSTEM_COMPLETION') ||
         row.tenant_id !== tenantId) throw new HttpException({ code: 'EROS_IDEMPOTENCY_CONFLICT' }, 409);
-    return row;
+    return decodeJobResponse(row);
   }
 
   private async expireJob(id: string): Promise<void> {
@@ -186,13 +397,13 @@ export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestro
     ));
   }
 
-  private async readJob(id: string): Promise<JobRow | undefined> {
+  protected async readJob(id: string): Promise<JobRow | undefined> {
     const rows = await withWorkerTenant((tx) => tx.$queryRawUnsafe<JobRow[]>(
       `SELECT id::text, request_id::text, request_hash, tenant_id, user_id::text, creator_id::text, session_id::text,
               instance_id::text, job_type, request, status, lease_token::text, deadline_at, response_text, error_code
        FROM engine.eros_inference_jobs WHERE id = $1::uuid AND tenant_id = $2`, id, workerTenant(),
     ));
-    return rows[0];
+    return rows[0] ? decodeJobResponse(rows[0]) : undefined;
   }
 
   private async waitForJob(id: string, disconnected: () => boolean, keepAlive: () => void): Promise<JobRow> {
@@ -314,123 +525,4 @@ export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestro
     catch { throw new HttpException({ code: 'EROS_EMBEDDING_RESPONSE_INVALID' }, 502); }
   }
 
-  @Post('health')
-  @Header('Cache-Control', 'no-store')
-  health(@Headers() headers: Record<string, string | string[] | undefined>) {
-    bearer(headers, 'EROS_WORKER_TOKEN');
-    return { status: 'ready', lane: 'EROS', source_id: 'gpoint-eros-worker-v1' };
-  }
-
-  @Get('queue-status')
-  @Header('Cache-Control', 'no-store')
-  async queueStatus(@Headers() headers: Record<string, string | string[] | undefined>) {
-    bearer(headers, 'EROS_WORKER_TOKEN');
-    const rows = await withWorkerTenant((tx) => tx.$queryRawUnsafe<Array<{ pending: bigint; running: bigint; snapshot: Date }>>(
-      `SELECT count(*) FILTER (WHERE status = 'PENDING')::bigint AS pending,
-              count(*) FILTER (WHERE status = 'RUNNING')::bigint AS running, now() AS snapshot
-       FROM engine.eros_inference_jobs WHERE tenant_id = $1`, workerTenant(),
-    ));
-    return {
-      source_id: 'eros-worker-queue-status-v1:eros', lane: 'EROS',
-      pending_jobs: Number(rows[0]?.pending ?? 0), running_jobs: Number(rows[0]?.running ?? 0),
-      snapshot_at: rows[0]?.snapshot.toISOString() ?? new Date().toISOString(),
-    };
-  }
-
-  @Post('claim')
-  async claim(@Headers() headers: Record<string, string | string[] | undefined>) {
-    bearer(headers, 'EROS_WORKER_TOKEN');
-    const tenantId = workerTenant();
-    const job = await withWorkerTenant(async (tx) => {
-    await tx.$executeRawUnsafe(
-      `UPDATE engine.eros_inference_jobs SET status = 'EXPIRED', error_code = 'lease_expired',
-         lease_token = NULL, lease_expires_at = NULL, updated_at = now()
-       WHERE tenant_id = $1 AND status = 'RUNNING' AND lease_expires_at <= now()`, tenantId,
-    );
-    await tx.$executeRawUnsafe(
-      `UPDATE engine.eros_inference_jobs SET status = 'EXPIRED', error_code = 'deadline_expired', updated_at = now()
-       WHERE tenant_id = $1 AND status = 'PENDING' AND deadline_at <= now()`, tenantId,
-    );
-    const lease = randomUUID();
-    const rows = await tx.$queryRawUnsafe<JobRow[]>(
-      `WITH candidate AS (
-         SELECT id FROM engine.eros_inference_jobs
-         WHERE tenant_id = $1 AND status = 'PENDING' AND deadline_at > now()
-         ORDER BY created_at, id FOR UPDATE SKIP LOCKED LIMIT 1
-       )
-       UPDATE engine.eros_inference_jobs AS job SET status = 'RUNNING', lease_token = $2::uuid,
-         lease_expires_at = job.deadline_at, attempts = attempts + 1, updated_at = now()
-       FROM candidate WHERE job.id = candidate.id
-       RETURNING job.id::text, job.request_id::text, job.request_hash, job.tenant_id,
-         job.user_id::text, job.creator_id::text, job.session_id::text, job.instance_id::text, job.job_type, job.request,
-         job.status, job.lease_token::text, job.deadline_at, job.response_text, job.error_code`,
-      tenantId, lease,
-    );
-    return rows[0];
-    });
-    if (!job) return { job: null };
-    return { job: {
-      id: job.id, leaseToken: job.lease_token, target: 'EROS', tenant_id: job.tenant_id,
-      creator_id: job.creator_id, job_type: job.job_type,
-      request: job.request, purpose: 'response',
-    } };
-  }
-
-  @Post('cancel-check')
-  async cancelCheck(@Headers() headers: Record<string, string | string[] | undefined>, @Body() body: { job_id?: unknown; lease_token?: unknown }) {
-    bearer(headers, 'EROS_WORKER_TOKEN');
-    if (typeof body?.job_id !== 'string' || typeof body.lease_token !== 'string') throw new HttpException({ code: 'INVALID_WORKER_REQUEST' }, 400);
-    const row = await withWorkerTenant(async (tx) => {
-      const tenantId = workerTenant();
-      await tx.$executeRawUnsafe(
-        `UPDATE engine.eros_inference_jobs SET status = 'EXPIRED', lease_token = NULL,
-           lease_expires_at = NULL, error_code = 'deadline_expired', updated_at = now()
-         WHERE id = $1::uuid AND lease_token = $2::uuid AND tenant_id = $3
-           AND status = 'RUNNING' AND deadline_at <= now()`, body.job_id, body.lease_token, tenantId,
-      );
-      const rows = await tx.$queryRawUnsafe<Array<{ active: boolean; status: string }>>(
-        `SELECT (status = 'RUNNING' AND lease_token = $2::uuid AND deadline_at > now()) AS active, status
-         FROM engine.eros_inference_jobs WHERE id = $1::uuid AND tenant_id = $3`, body.job_id, body.lease_token, tenantId,
-      );
-      return rows[0];
-    });
-    return {
-      active: row?.active === true,
-      terminal_status: row && ['CANCELLED', 'EXPIRED'].includes(row.status) ? row.status : null,
-    };
-  }
-
-  @Post('complete')
-  async completeJob(@Headers() headers: Record<string, string | string[] | undefined>, @Body() body: { job_id?: unknown; lease_token?: unknown; text?: unknown; model?: unknown }) {
-    bearer(headers, 'EROS_WORKER_TOKEN');
-    if (typeof body?.job_id !== 'string' || typeof body.lease_token !== 'string' || typeof body.text !== 'string' ||
-        !body.text.trim() || body.text.length > REPLY_LIMIT || typeof body.model !== 'string' || body.model.length > 128) {
-      throw new HttpException({ code: 'INVALID_WORKER_RESULT' }, 400);
-    }
-    const count = await withWorkerTenant((tx) => tx.$executeRawUnsafe(
-      `UPDATE engine.eros_inference_jobs SET status = 'COMPLETED', response_text = $3, lease_token = NULL,
-         lease_expires_at = NULL, updated_at = now()
-       WHERE id = $1::uuid AND lease_token = $2::uuid AND tenant_id = $4 AND status = 'RUNNING'
-         AND deadline_at > now()`, body.job_id, body.lease_token, body.text, workerTenant(),
-    ));
-    if (count !== 1) throw new HttpException({ code: 'WORKER_LEASE_REJECTED' }, 409);
-    return { completed: true };
-  }
-
-  @Post('fail')
-  async failJob(@Headers() headers: Record<string, string | string[] | undefined>, @Body() body: { job_id?: unknown; lease_token?: unknown; error_code?: unknown }) {
-    bearer(headers, 'EROS_WORKER_TOKEN');
-    if (typeof body?.job_id !== 'string' || typeof body.lease_token !== 'string' ||
-        typeof body.error_code !== 'string' || !/^[a-z0-9_]{1,64}$/.test(body.error_code)) {
-      throw new HttpException({ code: 'INVALID_WORKER_FAILURE' }, 400);
-    }
-    const count = await withWorkerTenant((tx) => tx.$executeRawUnsafe(
-      `UPDATE engine.eros_inference_jobs SET status = 'FAILED', error_code = $3, lease_token = NULL,
-         lease_expires_at = NULL, updated_at = now()
-       WHERE id = $1::uuid AND lease_token = $2::uuid AND tenant_id = $4 AND status = 'RUNNING'`,
-      body.job_id, body.lease_token, body.error_code, workerTenant(),
-    ));
-    if (count !== 1) throw new HttpException({ code: 'WORKER_LEASE_REJECTED' }, 409);
-    return { failed: true };
-  }
 }

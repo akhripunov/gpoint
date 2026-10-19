@@ -58,15 +58,18 @@ checkout so rebasing Eros is explicit and reviewable.
 
 ## Current local boundary
 
-The GPoint API has a distinct Eros-only OpenAI-compatible bridge and
-`engine.eros_inference_jobs` queue. It uses separate credentials, signed
-identity claims, tenant-scoped queue queries, a bounded queue, one-attempt
-leases, deadlines, cancellation checks and no prompt logging. The Mac Worker
-uses a distinct `EROS` target and `slot-04`; local test mode requires the exact
-target set `{EROS}` and cannot poll GPOINT, GSALES or LAB. The shared supervisor
-still enforces one global inference slot at `N=1`. An EROS poll failure marks
-only its own lane degraded; it does not degrade GPOINT/GSales readiness.
-Production installation/configuration is unchanged and not authorized here.
+The GPoint API has an Eros-only OpenAI-compatible bridge and the
+`engine.eros_inference_jobs` queue. Eros chat jobs use the existing authenticated
+GPOINT Product Worker gateway and its single GPOINT lane; there is no EROS
+Worker target or `slot-04`. The GPOINT gateway checks the AGATA queue first and
+only claims Eros work when there is no AGATA job, preserving user-response
+priority; Eros may wait under sustained AGATA load. Disabled Eros adds no queue
+dependency to the existing GPOINT path. Queue state and payloads remain
+tenant-scoped, requests and responses are encrypted at rest, leases are limited
+to one claim, and deadlines and cancellation checks are enforced without prompt
+logging.
+The same global Worker supervisor keeps concurrency at `N=1`. Production
+installation/configuration remains unchanged and is not authorized here.
 
 The signed `creator_id` is read from the active `(instance_id, owner_uid)` row
 in Eros PostgreSQL, then carried through the short-lived bridge identity and
@@ -77,14 +80,16 @@ check stops the Worker before it submits a result; deadlines remain the bounded
 fallback if the Worker is unreachable.
 
 Local chat configuration is in `test-model-config.toml`. Eros's provider key
-`GPOINT_API_KEY`, the API's `EROS_BRIDGE_API_KEY`, and the Mac Worker's
-`EROS_WORKER_TOKEN` are supplied through private local environment files.
+`GPOINT_API_KEY` and the API's `EROS_BRIDGE_API_KEY` are supplied through
+private local environment files. The Mac Worker authenticates with the existing
+GPOINT worker credential; do not create an Eros-specific Mac Worker token.
 The same secret bytes must be configured under `GPOINT_WORKER_BRIDGE_SIGNING_SECRET`
 for Eros and `EROS_WORKER_SIGNING_SECRET` for the GPoint API. The names differ
 because each process owns its own configuration namespace. The secret must be at
 least 32 bytes. Never put it in logs or handoff records.
-`EROS_WORKER_TENANT_ID` must match the server-owned tenant. Do not put secrets
-in the committed test configuration.
+`EROS_WORKER_TENANT_ID` must equal the server's `AGATA_TENANT_ID` and the
+existing Mac Worker's pinned `GPOINT_AGATA_TENANT_ID`; the API rejects a mismatch
+before touching the queue. Do not put secrets in the committed test configuration.
 
 The local embedding candidate is Qwen3-Embedding-0.6B through Ollama's
 `/api/embed` endpoint. The official model supports 100+
@@ -98,8 +103,10 @@ NOT_VERIFIED: two bounded pulls of the official `ollama/ollama:0.40.5` image
 failed with TLS EOF at the registry/auth endpoint. TLS verification was not
 disabled; no model weights or fabricated embeddings are committed.
 
-One synthetic chat request was verified through GPoint bridge -> isolated
-EROS-only test Worker -> authenticated Codex CLI -> OpenAI-compatible response.
+Before the GPOINT-lane consolidation, one synthetic chat request was verified
+through GPoint bridge -> isolated EROS-only test Worker -> authenticated Codex
+CLI -> OpenAI-compatible response. That smoke does not verify the current shared
+GPOINT queue path.
 It completed one real Codex generation, returned a Russian response, and wrote
 a completed row to the disposable PostgreSQL queue. A preceding test claim was
 cancelled before inference after the temporary runtime slot pointer was
