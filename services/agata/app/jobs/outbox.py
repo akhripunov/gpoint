@@ -2,7 +2,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import case, select, update
+from sqlalchemy import case, literal, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +24,49 @@ JOB_TYPES = frozenset(
         "sales_draft_inference",
     }
 )
+MEMORY_WORKER_JOB_TYPES = frozenset(
+    {
+        "conversation_summary",
+        "relationship_note_refresh",
+        "snapshot_refresh",
+        "memory_extract",
+        "memory_promote",
+        "memory_embed",
+        "memory_graph_sync",
+    }
+)
+INFERENCE_JOB_TYPES = frozenset({"inference", "sales_draft_inference"})
+BACKGROUND_INFERENCE_PURPOSES = frozenset({"memory_extract", "conversation_summary"})
+DEFAULT_MAX_ATTEMPTS = 5
+MEMORY_MAX_ATTEMPTS = 3
+BACKGROUND_INFERENCE_MAX_ATTEMPTS = 1
+REGULAR_INFERENCE_MAX_ATTEMPTS = 2
+
+
+def retry_budget_for_job(job_type: str, payload: dict) -> int:
+    """Return the existing retry policy for a claimed job identity."""
+    if job_type in MEMORY_WORKER_JOB_TYPES:
+        return MEMORY_MAX_ATTEMPTS
+    if job_type in INFERENCE_JOB_TYPES:
+        if payload.get("purpose", "response") in BACKGROUND_INFERENCE_PURPOSES:
+            return BACKGROUND_INFERENCE_MAX_ATTEMPTS
+        return REGULAR_INFERENCE_MAX_ATTEMPTS
+    return DEFAULT_MAX_ATTEMPTS
+
+
+def _retry_budget_expression():
+    inference_budget = case(
+        (
+            OutboxJob.payload["purpose"].astext.in_(BACKGROUND_INFERENCE_PURPOSES),
+            BACKGROUND_INFERENCE_MAX_ATTEMPTS,
+        ),
+        else_=REGULAR_INFERENCE_MAX_ATTEMPTS,
+    )
+    return case(
+        (OutboxJob.job_type.in_(MEMORY_WORKER_JOB_TYPES), MEMORY_MAX_ATTEMPTS),
+        (OutboxJob.job_type.in_(INFERENCE_JOB_TYPES), inference_budget),
+        else_=DEFAULT_MAX_ATTEMPTS,
+    )
 
 
 class StaleCreationEpoch(Exception):
@@ -348,7 +391,9 @@ class OutboxRepository:
         await self.session.flush()
         return control.deletion_epoch
 
-    async def fail(self, job: OutboxJob, error: str, *, max_attempts: int = 5) -> None:
+    async def fail(
+        self, job: OutboxJob, error: str, *, max_attempts: int | None = None
+    ) -> None:
         locked = await self.session.scalar(
             select(OutboxJob).where(OutboxJob.id == job.id).with_for_update()
         )
@@ -359,6 +404,8 @@ class OutboxRepository:
         if not in_memory and (locked is None or locked.state != JobState.running):
             raise StaleCreationEpoch("job is not running")
         assert isinstance(locked, OutboxJob)
+        if max_attempts is None:
+            max_attempts = retry_budget_for_job(locked.job_type, locked.payload)
         locked.last_error = error[:2000]
         locked.lease_expires_at = None
         locked.claim_token = None
@@ -385,6 +432,7 @@ class OutboxRepository:
         worker from taking ownership of another worker's lifecycle.
         """
         now = datetime.now(UTC)
+        retry_budget_exhausted = OutboxJob.attempts >= _retry_budget_expression()
         stmt = (
             update(OutboxJob)
             .where(
@@ -392,7 +440,19 @@ class OutboxRepository:
                 OutboxJob.state == JobState.running,
                 OutboxJob.lease_expires_at < now,
             )
-            .values(state=JobState.pending, claimed_at=None, lease_expires_at=None, claim_token=None)
+            .values(
+                state=case(
+                    (retry_budget_exhausted, literal(JobState.dead, type_=OutboxJob.state.type)),
+                    else_=literal(JobState.pending, type_=OutboxJob.state.type),
+                ),
+                last_error=case(
+                    (retry_budget_exhausted, "lease_retry_budget_exhausted"),
+                    else_=OutboxJob.last_error,
+                ),
+                claimed_at=None,
+                lease_expires_at=None,
+                claim_token=None,
+            )
         )
         if job_types is not None:
             stmt = stmt.where(OutboxJob.job_type.in_(job_types))

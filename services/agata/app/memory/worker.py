@@ -171,7 +171,7 @@ class MemoryWorker:
                         await self._defer_claimed(job)
                         deferred += 1
                     except StaleCreationEpoch:
-                        await self._fail_claimed(job, "summary_stale")
+                        await self._fail_claimed(job, "summary_stale", max_attempts=3)
                         failed += 1
                     except SummaryProcessingError as exc:
                         await self._fail_claimed(job, str(exc), max_attempts=3)

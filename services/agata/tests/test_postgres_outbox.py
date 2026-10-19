@@ -127,6 +127,7 @@ async def test_outbox_postgres_dedupe_skip_locked_lease_recovery_and_bounded_ret
             assert job is not None and job.state == JobState.running and job.attempts == 1
             job.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
             assert await OutboxRepository(session).requeue_expired(tenant_id=tenant_id) == 1
+            await session.refresh(job)
             await session.flush()
             assert job.state == JobState.pending and job.attempts == 1
 
@@ -165,6 +166,134 @@ async def test_outbox_postgres_dedupe_skip_locked_lease_recovery_and_bounded_ret
                 )
             )
             assert count == 1
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_expired_outbox_leases_stop_at_the_job_retry_budget():
+    tenant_id = uuid4()
+    other_tenant_id = uuid4()
+    suffix = uuid4().hex
+    now = datetime.now(UTC)
+    expired = now - timedelta(seconds=1)
+    at_budget = (
+        ("relationship_note_refresh", {"relationship_id": str(uuid4()), "creation_epoch": "0"}, 3),
+        ("inference", {"purpose": "memory_extract", "parent_job_id": str(uuid4())}, 1),
+        ("inference", {"purpose": "conversation_summary", "parent_job_id": str(uuid4())}, 1),
+        ("inference", {"purpose": "response"}, 2),
+        ("generic", {"code": "synthetic"}, 5),
+    )
+    job_ids = []
+    async with SessionFactory() as session:
+        async with session.begin():
+            session.add_all([Tenant(id=tenant_id), Tenant(id=other_tenant_id)])
+            await session.flush()
+            await set_tenant_context(session, str(tenant_id))
+            for index, (job_type, payload, attempts) in enumerate(at_budget):
+                job = await OutboxRepository(session).enqueue(
+                    tenant_id=tenant_id,
+                    job_type=job_type,
+                    dedupe_key=f"expired-budget:{suffix}:{index}",
+                    payload=payload,
+                )
+                job.state = JobState.running
+                job.attempts = attempts
+                job.claimed_at = expired - timedelta(minutes=1)
+                job.lease_expires_at = expired
+                job.claim_token = uuid4().hex
+                job_ids.append(job.id)
+            below_budget = await OutboxRepository(session).enqueue(
+                tenant_id=tenant_id,
+                job_type="inference",
+                dedupe_key=f"expired-budget:{suffix}:below",
+                payload={"purpose": "response"},
+            )
+            below_budget.state = JobState.running
+            below_budget.attempts = 1
+            below_budget.claimed_at = expired - timedelta(minutes=1)
+            below_budget.lease_expires_at = expired
+            below_budget.claim_token = uuid4().hex
+            below_budget_id = below_budget.id
+
+    async with SessionFactory() as session:
+        async with session.begin():
+            await set_tenant_context(session, str(tenant_id))
+            repository = OutboxRepository(session)
+            assert await repository.requeue_expired(tenant_id=tenant_id) == len(at_budget) + 1
+            for job_id, (_, _, attempts) in zip(job_ids, at_budget, strict=True):
+                job = await session.get(OutboxJob, job_id)
+                assert job is not None
+                assert job.state == JobState.dead
+                assert job.attempts == attempts
+                assert job.last_error == "lease_retry_budget_exhausted"
+                assert job.claimed_at is None
+                assert job.lease_expires_at is None
+                assert job.claim_token is None
+            below_budget = await session.get(OutboxJob, below_budget_id)
+            assert below_budget is not None
+            assert below_budget.state == JobState.pending
+            assert below_budget.attempts == 1
+            assert below_budget.last_error is None
+            claimed = await repository.claim(
+                tenant_id=tenant_id, job_types=frozenset({"inference"})
+            )
+            assert [job.id for job in claimed] == [below_budget_id]
+            assert claimed[0].attempts == 2
+
+    async with SessionFactory() as session:
+        async with session.begin():
+            await set_tenant_context(session, str(other_tenant_id))
+            other = await OutboxRepository(session).enqueue(
+                tenant_id=other_tenant_id,
+                job_type="generic",
+                dedupe_key=f"expired-budget:{suffix}:other-tenant",
+                payload={"code": "synthetic"},
+            )
+            other.state = JobState.running
+            other.attempts = 5
+            other.claimed_at = expired - timedelta(minutes=1)
+            other.lease_expires_at = expired
+            other.claim_token = uuid4().hex
+            other_id = other.id
+
+    async with SessionFactory() as session:
+        async with session.begin():
+            await set_tenant_context(session, str(tenant_id))
+            assert await OutboxRepository(session).requeue_expired(tenant_id=tenant_id) == 0
+    async with SessionFactory() as session:
+        await set_tenant_context(session, str(other_tenant_id))
+        other = await session.get(OutboxJob, other_id)
+        assert other is not None and other.state == JobState.running
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_concurrent_expired_lease_recovery_updates_a_job_once():
+    tenant_id = uuid4()
+    suffix = uuid4().hex
+    expired = datetime.now(UTC) - timedelta(seconds=1)
+    async with SessionFactory() as session:
+        async with session.begin():
+            session.add(Tenant(id=tenant_id))
+            await session.flush()
+            await set_tenant_context(session, str(tenant_id))
+            job = await OutboxRepository(session).enqueue(
+                tenant_id=tenant_id,
+                job_type="generic",
+                dedupe_key=f"expired-concurrent:{suffix}",
+                payload={"code": "synthetic"},
+            )
+            job.state = JobState.running
+            job.attempts = 1
+            job.claimed_at = expired - timedelta(minutes=1)
+            job.lease_expires_at = expired
+            job.claim_token = uuid4().hex
+
+    async def recover() -> int:
+        async with SessionFactory() as session:
+            async with session.begin():
+                await set_tenant_context(session, str(tenant_id))
+                return await OutboxRepository(session).requeue_expired(tenant_id=tenant_id)
+
+    assert sorted(await asyncio.gather(recover(), recover())) == [0, 1]
 
 
 @pytest.mark.asyncio(loop_scope="module")

@@ -44,7 +44,7 @@ from app.domain.relationships import (
     record_accepted_interaction,
     resolve_relationship,
 )
-from app.jobs.outbox import OutboxRepository
+from app.jobs.outbox import OutboxRepository, retry_budget_for_job
 from app.memory.embedding import HuggingFaceFreeEmbeddingProvider
 from app.memory.retrieval import EmbeddingProvider, HybridRetrievalService
 from app.messages.crypto import AeadCrypto, RequestFingerprinter
@@ -1050,8 +1050,11 @@ async def fail_inference_job(
             or not hmac.compare_digest(job.claim_token, payload.lease_token)
         ):
             raise HTTPException(status_code=409, detail={"code": "inference_lease_stale"})
-        max_attempts = 1 if job.payload.get("purpose") in {"memory_extract", "conversation_summary"} else 2
-        await OutboxRepository(session).fail(job, payload.error_code, max_attempts=max_attempts)
+        await OutboxRepository(session).fail(
+            job,
+            payload.error_code,
+            max_attempts=retry_budget_for_job(job.job_type, job.payload),
+        )
         return {"accepted": True, "state": job.state.value}
 
 
