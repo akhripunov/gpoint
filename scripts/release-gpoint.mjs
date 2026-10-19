@@ -519,9 +519,13 @@ export async function loadV5ParentDeployEvidence(verified, candidateSha, token,
   {fetchOriginal = fetchOriginalDeployEvidence, fetchReconciled = fetchAuthorizationReconciliationEvidence} = {}) {
   const identity = verified.identity;
   const tuple = verified.authorizationReconciliation;
+  // GHCR_READ_TOKEN is intentionally stripped from the dry-run child environment.
+  // Reuse the existing job-scoped GitHub token only for reading the exact parent
+  // OCI artifact, without passing an additional registry secret to subprocesses.
   const common = {candidateSha, deploymentId: verified.deployment.id,
     prepareRunId: identity.prepareRunId, prepareRunAttempt: identity.prepareRunAttempt,
-    prepareReceiptDigest: identity.prepareReceiptDigest, token};
+    prepareReceiptDigest: identity.prepareReceiptDigest, token,
+    registryUsername: process.env.GHCR_READ_USERNAME, registryToken: token};
   let evidence;
   try {
     evidence = tuple

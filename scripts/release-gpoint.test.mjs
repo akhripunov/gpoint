@@ -207,7 +207,7 @@ test('reconciled V5 parent resolves its separate immutable attestation with the 
   assert.deepEqual(argumentsSeen, {runId: '55', attempt: '3', candidateSha: sha, deploymentId: 7,
     originalRunId: '42', originalRunAttempt: '2', prepareRunId: '41', prepareRunAttempt: '1',
     prepareReceiptDigest: identity.prepareReceiptDigest, prepareReceiptSha256: identity.prepareReceiptSha256,
-    token: 'test-token'});
+    token: 'test-token', registryUsername: process.env.GHCR_READ_USERNAME, registryToken: 'test-token'});
   for (const patch of [{authorizationReconciliationVerified: false}, {reconciliationRunConclusion: 'failure'},
     {deployRunConclusion: 'success'}, {candidateSha: 'd'.repeat(40)}, {recoveryRequired: true},
     {authorizationId: 'other'}, {applicationVerification: 'UNKNOWN'}]) {
@@ -216,6 +216,33 @@ test('reconciled V5 parent resolves its separate immutable attestation with the 
   }
   await assert.rejects(loadV5ParentDeployEvidence({...verified, status: {state: 'error'}}, sha,
     'test-token', readers), /does not prove/);
+});
+
+test('V5 parent OCI reader uses the existing GitHub job token after registry secret is scrubbed', async () => {
+  const identity={candidateSha:sha,runId:'42',runAttempt:'2',prepareRunId:'41',prepareRunAttempt:'1',
+    prepareReceiptDigest:'sha256:'+'b'.repeat(64),prepareReceiptSha256:'c'.repeat(64),
+    authorizationMode:'TASK_SCOPED_AUTO',authorizationId:'gpoint-test-001'};
+  const verified={identity,deployment:{id:7},status:{state:'success'},
+    authorizationReconciliation:{runId:'55',runAttempt:'3'}};
+  const before=process.env.GHCR_READ_TOKEN;
+  delete process.env.GHCR_READ_TOKEN;
+  try {
+    let observed;
+    await loadV5ParentDeployEvidence(verified,sha,'scoped-job-token',{
+      fetchReconciled:async args=>{
+        observed=args;
+        return {candidateSha:sha,status:'COMPLETE',releaseState:'COMPLETE',
+          authorizationMode:identity.authorizationMode,authorizationId:identity.authorizationId,
+          applicationVerification:'VPS_READBACK_VERIFIED',deployRunConclusion:'failure',
+          reconciliationRunConclusion:'success',authorizationReconciliationVerified:true};
+      },
+    });
+    assert.equal(observed.registryToken,'scoped-job-token');
+    assert.equal(observed.registryUsername,process.env.GHCR_READ_USERNAME);
+  } finally {
+    if (before===undefined) delete process.env.GHCR_READ_TOKEN;
+    else process.env.GHCR_READ_TOKEN=before;
+  }
 });
 
 test('V5 parent evidence failures disclose bounded gate class without leaking upstream API content', async () => {
