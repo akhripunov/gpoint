@@ -116,8 +116,7 @@ function readPublisherJobLogs(bytes, directory, run) {
   return files.join('\n');
 }
 
-function verifyLoggedDigest(logs, digest) {
-  const key = 'DEPLOY_EVIDENCE_DIGEST=';
+function verifyLoggedDigest(logs, digest, key = 'DEPLOY_EVIDENCE_DIGEST=') {
   const lines = logs.split(/\r?\n/).map(line => {
     const stamped = line.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s+(.*)$/);
     if (!stamped) return line;
@@ -146,15 +145,19 @@ async function apiJson(route, token, fetchImpl) {
 
 async function readBoundDeploymentArtifact({runId, attempt, candidateSha, token, fetchImpl = globalThis.fetch,
   publisherJob = 'deploy', publisherStep = 'Publish deployment result as a GHCR OCI artifact', requireCandidateHead = true,
-  publisherConclusions = ['success', 'failure'],
+  publisherConclusions = ['success', 'failure'], recoveryDeploymentId = null,
   execFile = execFileSync, registryUsername = process.env.GHCR_READ_USERNAME,
   registryToken = process.env.GHCR_READ_TOKEN}) {
   requireThat(SHA40.test(candidateSha ?? ''), 'Exact candidate SHA is required to resolve Deploy evidence');
-  const tag = `deploy-${candidateSha}-${runId}-${attempt}`;
+  const recovering = recoveryDeploymentId !== null;
+  requireThat(!recovering || (Number.isSafeInteger(recoveryDeploymentId) && recoveryDeploymentId > 0),
+    'Recovery evidence requires an exact existing Deployment ID');
+  const tag = recovering ? `recover-${candidateSha}-${recoveryDeploymentId}-${runId}-${attempt}`
+    : `deploy-${candidateSha}-${runId}-${attempt}`;
   console.log('V5_PARENT_EVIDENCE_PHASE=read_workflow_run');
   const deployRun = await apiJson(`actions/runs/${runId}/attempts/${attempt}`, token, fetchImpl);
   requireThat(String(deployRun.id) === String(runId) && String(deployRun.run_attempt) === String(attempt)
-    && SHA40.test(deployRun.head_sha ?? '') && (!requireCandidateHead || deployRun.head_sha === candidateSha) && deployRun.path === '.github/workflows/gpoint-deploy.yml'
+    && SHA40.test(deployRun.head_sha ?? '') && (!requireCandidateHead || deployRun.head_sha === candidateSha) && deployRun.path === (recovering ? '.github/workflows/gpoint-recover-interrupted.yml' : '.github/workflows/gpoint-deploy.yml')
     && deployRun.status === 'completed' && ['success', 'failure'].includes(deployRun.conclusion)
     && deployRun.event === 'workflow_dispatch' && deployRun.head_branch === 'main',
   'Exact Deploy Actions run attempt is not completed successfully on main');
@@ -193,15 +196,28 @@ async function readBoundDeploymentArtifact({runId, attempt, candidateSha, token,
     const logBytes = await readBoundedBody(logsResponse, MAX_DEPLOY_LOG_BYTES);
     const publisherLogs = readPublisherJobLogs(logBytes, directory, run);
   console.log('V5_PARENT_EVIDENCE_PHASE=verify_publisher_logs');
-    verifyLoggedDigest(publisherLogs, digest);
+    verifyLoggedDigest(publisherLogs, digest, recovering ? 'RECOVERY_EVIDENCE_DIGEST=' : 'DEPLOY_EVIDENCE_DIGEST=');
     const subject = `ghcr.io/akhripunov/gpoint-deploy-evidence@${digest}`;
+    if (recovering) {
+      const rawManifest=run('oras',['manifest','fetch','--registry-config',registryConfig,subject],
+        {encoding:'utf8',timeout:30000});
+      requireThat(rawManifest.length<=32768,'Recovery OCI manifest is unbounded');
+      const manifest=JSON.parse(rawManifest);
+      requireThat(manifest.artifactType==='application/vnd.gpoint.recovery.evidence.v1'
+        && Array.isArray(manifest.layers)&&manifest.layers.length===1
+        && manifest.layers[0].mediaType==='application/vnd.gpoint.recovery.evidence.v1+json'
+        && manifest.layers[0].size>0&&manifest.layers[0].size<=1024*1024,
+        'Recovery OCI manifest must have the exact independent artifact type and bounded JSON layer');
+    }
     const directoryArg = path.join(directory, 'artifact');
     fs.mkdirSync(directoryArg, {mode: 0o700});
   console.log('V5_PARENT_EVIDENCE_PHASE=pull_evidence_oci');
     run('oras', ['pull', '--registry-config', registryConfig, subject, '-o', directoryArg],
       {encoding: 'utf8', timeout: 60_000});
     const names = fs.readdirSync(directoryArg);
-    requireThat(names.length === 1 && names[0] === `gpoint-release-result-${runId}-${attempt}.json`,
+    const expectedFile = recovering ? `gpoint-recovery-${recoveryDeploymentId}-${runId}-${attempt}.json`
+      : `gpoint-release-result-${runId}-${attempt}.json`;
+    requireThat(names.length === 1 && names[0] === expectedFile,
       'Deploy evidence OCI artifact must contain the exact run result JSON');
     const bytes = fs.readFileSync(path.join(directoryArg, names[0]));
     requireThat(bytes.length <= 1024 * 1024, 'Deploy evidence exceeds its size limit');
@@ -212,6 +228,99 @@ async function readBoundDeploymentArtifact({runId, attempt, candidateSha, token,
   } finally {
     fs.rmSync(directory, {recursive: true, force: true});
   }
+}
+
+export function verifyInterruptedRecoveryProof(proof, {candidateSha, deploymentId, originalRunId,
+  originalRunAttempt, prepareRunId, prepareRunAttempt, prepareReceiptDigest, prepareReceiptSha256,
+  recoveryRunId, recoveryRunAttempt}) {
+  requireThat(proof?.schema === 1 && proof.operation === 'INTERRUPTED_APPLY_INDEPENDENT_RECOVERY'
+    && proof.status === 'COMPLETE' && proof.releaseState === 'COMPLETE'
+    && proof.recoveryRequired === false && proof.applicationVerification === 'VPS_READBACK_VERIFIED'
+    && proof.serverDeployStatus === 'COMPLETE' && proof.candidateSha === candidateSha
+    && proof.deploymentId === deploymentId && proof.originalRunId === String(originalRunId)
+    && proof.originalRunAttempt === String(originalRunAttempt)
+    && proof.recoveryRunId === String(recoveryRunId) && proof.recoveryRunAttempt === String(recoveryRunAttempt)
+    && proof.prepareRunId === String(prepareRunId) && proof.prepareRunAttempt === String(prepareRunAttempt)
+    && proof.authorizationMode === 'EXACT_SHA' && proof.authorizationId === null
+    && proof.deployRunConclusion === 'failure'
+    && proof.originalDeployEvidence === 'UNAVAILABLE_AFTER_RUNNER_INTERRUPTION'
+    && proof.attestationSource === 'NEW_TRUSTED_RECOVERY_RUN_NOT_ORIGINAL_DEPLOY_RUN'
+    && proof.originalFailure?.deploymentId === deploymentId
+    && Number.isSafeInteger(proof.originalFailure?.statusId) && proof.originalFailure.statusId > 0
+    && proof.originalFailure?.status === 'error'
+    && proof.originalFailure?.description === `stage=post_apply sha=${candidateSha.slice(0,12)} run=${originalRunId}/${originalRunAttempt}`
+    && proof.originalFailure?.originalRunConclusion === 'failure'
+    && proof.originalFailure?.originalDeployJobConclusion === 'failure',
+  'Recovery attestation cannot replace or rewrite original failed Deploy evidence');
+  const ci = proof.ciReceipt;
+  requireThat(ci?.ghcrVerified === true && ci.ghcrPostSwitchVerified === true
+    && ci.selectedTransport === 'ghcr-oci' && ci.ghcrManifestDigest === prepareReceiptDigest
+    && ci.prepareReceiptSha256 === prepareReceiptSha256
+    && typeof ci.prepareReceiptJson === 'string'
+    && crypto.createHash('sha256').update(ci.prepareReceiptJson).digest('hex') === prepareReceiptSha256,
+  'Recovery attestation has no exact immutable Prepare proof');
+  const receipt = validateOciReceipt(JSON.parse(ci.prepareReceiptJson),candidateSha,
+    {runId:String(prepareRunId),runAttempt:String(prepareRunAttempt)});
+  const f = proof.readbackFingerprint;
+  requireThat(f?.sourceSha === candidateSha && f.miniappSha === candidateSha
+    && f.prismaHead === receipt.prismaHead && f.agataHead === receipt.agataHead
+    && f.gsalesHead === receipt.gsalesMigrationHead
+    && f.gsalesMigrationSha256 === receipt.gsalesMigrationSha256
+    && Object.keys(f.images ?? {}).sort().join(',') === 'agata,app,gsales'
+    && Object.keys(f.running ?? {}).sort().join(',') ===
+      'AGATA_API,AGATA_WORKER,API,BOT,GSALES_AGATA_API,GSALES_AGATA_MEMORY_WORKER,GSALES_API,WORKER'
+    && Object.values(f.running).every(x=>x==='true')
+    && Object.keys(f.healthy ?? {}).sort().join(',') ===
+      'AGATA_API,AGATA_WORKER,API,GSALES_AGATA_API,GSALES_AGATA_MEMORY_WORKER,GSALES_API'
+    && Object.values(f.healthy).every(x=>x==='healthy'),
+  'Recovery attestation has incomplete fresh server identity or health');
+  for(const role of ['app','agata','gsales']){
+    const image=receipt.images[role], rehearsal=receipt.deployRehearsal?.images?.[role], attested=proof.componentImages?.[role];
+    requireThat(/^sha256:[a-f0-9]{64}$/.test(rehearsal?.nativeId??'')
+      && rehearsal.nativeId !== image.configDigest
+      && rehearsal.configDigest === image.configDigest && rehearsal.digest === image.digest
+      && rehearsal.sourceSha === candidateSha && f.images[role] === rehearsal.nativeId
+      && attested?.imageId === image.configDigest
+      && attested.registryDigest === image.digest
+      && attested.sourceSha === candidateSha && attested.platform === 'linux/amd64',
+    'Recovery attestation Docker native and GHCR identities diverge for '+role);
+  }
+  return proof;
+}
+export async function fetchInterruptedApplyRecoveryEvidence({runId, attempt, candidateSha, deploymentId,
+  originalRunId, originalRunAttempt, prepareRunId, prepareRunAttempt,
+  prepareReceiptDigest, prepareReceiptSha256, token, fetchImpl=globalThis.fetch,
+  execFile=execFileSync, registryUsername=process.env.GHCR_READ_USERNAME,
+  registryToken=process.env.GHCR_READ_TOKEN, readArtifact=readBoundDeploymentArtifact}) {
+  const {evidence, deployRun, digest, contentSha256}=await readArtifact({
+    runId,attempt,candidateSha,token,fetchImpl,execFile,registryUsername,registryToken,
+    recoveryDeploymentId:deploymentId,requireCandidateHead:false,publisherJob:'recover',
+    publisherStep:'Publish independently verified recovery evidence',publisherConclusions:['success']});
+  requireThat(deployRun.conclusion==='success'&&deployRun.head_sha===evidence.executorSha&&deployRun.event==='workflow_dispatch'
+    &&deployRun.actor?.login === 'akhripunov'
+    &&deployRun.triggering_actor?.login === 'akhripunov',
+  'Recovery evidence was not created by an independently successful owner-approved trusted run');
+  const original=await apiJson(`actions/runs/${originalRunId}/attempts/${originalRunAttempt}`,token,fetchImpl);
+  requireThat(original.status==='completed'&&original.conclusion==='failure'
+    &&original.head_sha===candidateSha &&original.path==='.github/workflows/gpoint-deploy.yml',
+  'Recovery evidence original failed Deploy provenance is unavailable');
+  const [originalDeployment,statuses]=await Promise.all([
+    apiJson(`deployments/${deploymentId}`,token,fetchImpl),
+    apiJson(`deployments/${deploymentId}/statuses?per_page=100`,token,fetchImpl)]);
+  requireThat(originalDeployment.id===deploymentId&&originalDeployment.sha===candidateSha,
+    'Recovered same-ID Deployment identity was replaced');
+  requireThat(Array.isArray(statuses)&&statuses.length>=3
+    &&statuses[0].state==='success'
+    &&statuses[0].description===`stage=complete sha=${candidateSha.slice(0,12)} run=${originalRunId}/${originalRunAttempt} recovered=${runId}/${attempt}`
+    &&statuses[0].log_url===`https://github.com/akhripunov/gpoint/actions/runs/${originalRunId}/attempts/${originalRunAttempt}`
+    &&statuses.some(s=>s.id===evidence.originalFailure?.statusId
+      &&s.state==='error'&&s.description===evidence.originalFailure.description),
+    'Recovered Deployment lacks original error and exact successful recovery status history');
+  verifyInterruptedRecoveryProof(evidence,{candidateSha,deploymentId,originalRunId,originalRunAttempt,
+    prepareRunId,prepareRunAttempt,prepareReceiptDigest,prepareReceiptSha256,
+    recoveryRunId:runId,recoveryRunAttempt:attempt});
+  return {...evidence,deployRunConclusion:'failure',recoveryRunConclusion:'success',
+    recoveryAttestationVerified:true,evidenceManifestDigest:digest,evidenceContentSha256:contentSha256};
 }
 
 export function isAuthorizationConsumptionFailure(evidence) {

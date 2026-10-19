@@ -12,7 +12,7 @@ import { verifyReleaseBundle } from './release-bundle.mjs';
 import { validateOciReceipt } from './release-oci.mjs';
 import { buildV5ComponentImageInventory, deriveV3ProductionParent, verifyV5ProductionParent } from './release-component-bundle-v4.mjs';
 import { createGitHubDeploymentsClient } from './github-deployments.mjs';
-import { fetchOriginalDeployEvidence, fetchAuthorizationReconciliationEvidence, safeReconciliationFailure } from './reconcile-deployment.mjs';
+import { fetchOriginalDeployEvidence, fetchAuthorizationReconciliationEvidence, fetchInterruptedApplyRecoveryEvidence, safeReconciliationFailure } from './reconcile-deployment.mjs';
 import { AuthorizationError, authorizationRecordPath, candidateScopeDiff,
   checkTaskAuthorizationState, validateTaskAuthorization } from './release-authorization.mjs';
 import { expectedStaticParent, staticReceiptAndImages, verifyStaticLiveBaseline,
@@ -516,9 +516,11 @@ function readGitHubReadToken() {
 }
 
 export async function loadV5ParentDeployEvidence(verified, candidateSha, token,
-  {fetchOriginal = fetchOriginalDeployEvidence, fetchReconciled = fetchAuthorizationReconciliationEvidence} = {}) {
+  {fetchOriginal = fetchOriginalDeployEvidence, fetchReconciled = fetchAuthorizationReconciliationEvidence, fetchRecovered = fetchInterruptedApplyRecoveryEvidence} = {}) {
   const identity = verified.identity;
   const tuple = verified.authorizationReconciliation;
+  const recovery = verified.recoveryAttestation;
+  if (tuple && recovery) die('Conflicting completed Deployment attestation paths');
   // GHCR_READ_TOKEN is intentionally stripped from the dry-run child environment.
   // Reuse the existing job-scoped GitHub token only for reading the exact parent
   // OCI artifact, without passing an additional registry secret to subprocesses.
@@ -528,18 +530,24 @@ export async function loadV5ParentDeployEvidence(verified, candidateSha, token,
     registryUsername: process.env.GHCR_READ_USERNAME, registryToken: token};
   let evidence;
   try {
-    evidence = tuple
-      ? await fetchReconciled({...common, runId: tuple.runId, attempt: tuple.runAttempt,
-          originalRunId: identity.runId, originalRunAttempt: identity.runAttempt,
-          prepareReceiptSha256: identity.prepareReceiptSha256})
-      : await fetchOriginal({...common, runId: identity.runId, attempt: identity.runAttempt});
+    evidence = recovery
+      ? await fetchRecovered({...common,runId:recovery.runId,attempt:recovery.runAttempt,
+          originalRunId:identity.runId,originalRunAttempt:identity.runAttempt,
+          prepareReceiptSha256:identity.prepareReceiptSha256})
+      : tuple
+        ? await fetchReconciled({...common, runId: tuple.runId, attempt: tuple.runAttempt,
+            originalRunId: identity.runId, originalRunAttempt: identity.runAttempt,
+            prepareReceiptSha256: identity.prepareReceiptSha256})
+        : await fetchOriginal({...common, runId: identity.runId, attempt: identity.runAttempt});
   } catch (error) {
     die('Exact Deploy OCI evidence, Actions provenance, or VPS verification evidence is unavailable ' +
       safeReconciliationFailure(error));
   }
   const completeEvidence = evidence?.status === 'COMPLETE' && evidence.releaseState === 'COMPLETE' &&
-    (tuple ? evidence.deployRunConclusion === 'failure' && evidence.reconciliationRunConclusion === 'success' &&
-      evidence.authorizationReconciliationVerified === true : evidence.deployRunConclusion === 'success');
+    (recovery ? evidence.deployRunConclusion === 'failure' && evidence.recoveryRunConclusion === 'success' &&
+      evidence.recoveryAttestationVerified === true
+      : tuple ? evidence.deployRunConclusion === 'failure' && evidence.reconciliationRunConclusion === 'success' &&
+        evidence.authorizationReconciliationVerified === true : evidence.deployRunConclusion === 'success');
   const reconciliableEvidence = !tuple && evidence?.status === 'INSTALLATION_UNCONFIRMED' &&
     evidence.releaseState === 'INSTALLATION_UNCONFIRMED' && evidence.executionFailure?.stage === 'STATUS_UNCONFIRMED' &&
     evidence.applicationVerification === 'VPS_READBACK_VERIFIED' && evidence.deployRunConclusion === 'failure' &&

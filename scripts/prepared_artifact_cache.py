@@ -266,6 +266,13 @@ def github(route, token, stage):
 
 
 def validate_current_main_candidate(candidate_sha, release_mode, executor_sha, current_main_sha, is_ancestor):
+    if release_mode == 'interrupted-recovery':
+        if not re.fullmatch(r'[a-f0-9]{40}', candidate_sha) or (
+                not re.fullmatch(r'[a-f0-9]{40}', executor_sha)
+                or current_main_sha != executor_sha or candidate_sha == executor_sha
+                or not is_ancestor(candidate_sha, executor_sha)):
+            raise RuntimeError('Recovery executor is not current main with exact ancestral candidate')
+        return
     if not re.fullmatch(r'[a-f0-9]{40}', candidate_sha) or current_main_sha != candidate_sha:
         raise RuntimeError('Candidate is no longer current main')
 
@@ -477,7 +484,13 @@ def main():
     stage = 'current_main_ref'
     set_diagnostic_stage(stage)
     current = github('git/ref/heads/main', token, stage)['object']['sha']
-    validate_current_main_candidate(sha, os.environ.get('RELEASE_MODE', ''), '', current, lambda *_: False)
+    from subprocess import run as run_process
+    def ancestor(candidate, executor):
+        result = run_process(['git', 'merge-base', '--is-ancestor', candidate, executor],
+                             cwd=Path(__file__).resolve().parent.parent, capture_output=True, timeout=10)
+        return result.returncode == 0
+    validate_current_main_candidate(sha, os.environ.get('RELEASE_MODE', ''),
+                                    os.environ.get('GITHUB_SHA', ''), current, ancestor)
     stage = 'ghcr_receipt'
     set_diagnostic_stage(stage)
     receipt, digest, blob = resolve_receipt(sha, run_id, attempt, username, ghcr_token)

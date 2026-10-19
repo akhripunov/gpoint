@@ -36,6 +36,20 @@ export function selectTrustedPrepareCheck(checkRuns, {candidateSha, prepareRunId
   return check;
 }
 
+export function interruptedRecoveryForStatus(status, identity) {
+  validateIdentity(identity);
+  const prefix='stage=complete sha='+identity.candidateSha.slice(0,12)
+    +' run='+identity.runId+'/'+identity.runAttempt+' recovered=';
+  if (typeof status?.description!=='string' || !status.description.startsWith(prefix)) return null;
+  const match=/^([1-9][0-9]*)\/([1-9][0-9]*)$/.exec(status.description.slice(prefix.length));
+  requireThat(status.state==='success'&&status.log_url===identity.logUrl
+    &&identity.logUrl==='https://github.com/akhripunov/gpoint/actions/runs/'+identity.runId+'/attempts/'+identity.runAttempt
+    &&identity.authorizationMode==='EXACT_SHA' && (identity.route??'FULL_RELEASE')==='FULL_RELEASE'
+    &&match && match[1]!==String(identity.runId),
+    'Interrupted Apply recovery must have a distinct trusted workflow run and intact original identity');
+  return {runId:match[1],runAttempt:match[2]};
+}
+
 export function authorizationReconciliationForStatus(status, identity) {
   validateIdentity(identity);
   const prefix = 'stage=complete sha=' + identity.candidateSha.slice(0, 12)
@@ -45,7 +59,7 @@ export function authorizationReconciliationForStatus(status, identity) {
   requireThat(status?.state === 'success' && status.log_url === identity.logUrl
     && identity.logUrl === expectedUrl,
   'Exact production Deployment success status is not bound to its run attempt');
-  if (status.description === prefix) return null;
+  if (status.description === prefix || interruptedRecoveryForStatus(status,identity)) return null;
   requireThat(identity.authorizationMode === 'TASK_SCOPED_AUTO' && identity.route !== 'STATIC_UI_ONLY'
     && typeof status.description === 'string' && status.description.startsWith(prefix + ' reconciled='),
   'Exact production Deployment success description is invalid');
@@ -130,7 +144,7 @@ export function deploymentIdentity(deployment) {
     route: payload.route,
     staticArtifactDigest: payload.prepare.staticArtifact?.digest,
     staticArtifactContentSha256: payload.prepare.staticArtifact?.contentSha256,
-    authorizationMode: payload.authorization.mode, authorizationId: payload.authorization.id,
+    authorizationMode: payload.authorization.mode, authorizationId: payload.authorization.mode === 'TASK_SCOPED_AUTO' ? payload.authorization.id : null,
     logUrl: payload.workflow.url};
 }
 
@@ -445,8 +459,10 @@ export function createGitHubDeploymentsClient({token, fetchImpl = globalThis.fet
       throw new DeploymentApiError('Production Deployment history changed during exact parent verification');
     const identity = deploymentIdentity(deployment);
     const authorizationReconciliation = authorizationReconciliationForStatus(currentStatus, identity);
+    const recoveryAttestation = interruptedRecoveryForStatus(currentStatus,identity);
     return {deployment, status: currentStatus, identity,
-      ...(authorizationReconciliation ? {authorizationReconciliation} : {})};
+      ...(authorizationReconciliation ? {authorizationReconciliation} : {}),
+      ...(recoveryAttestation ? {recoveryAttestation} : {})};
   }
 
   async function readBackCreate(identity) {

@@ -1,0 +1,161 @@
+name: GPoint — Interrupted Apply recovery
+run-name: GPoint metadata-only recovery ${{ inputs.candidate }} of ${{ inputs.deployment_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate:
+        required: true
+        description: 'Exact SHA already installed on VPS; no Apply permitted'
+        type: string
+      deployment_id:
+        required: true
+        description: 'Existing failed post-Apply GitHub Deployment'
+        type: string
+      original_run_id:
+        required: true
+        description: 'Exact original interrupted Deploy run'
+        type: string
+      prepare_run_id:
+        required: true
+        description: 'Exact successful Prepare run'
+        type: string
+      prepare_run_attempt:
+        required: true
+        description: 'Exact successful Prepare attempt'
+        type: string
+      approve_recovery:
+        required: true
+        default: false
+        description: 'Owner approves read-only verification and same-ID metadata recovery; no Apply'
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: gpoint-production-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Require owner-approved exact-SHA metadata recovery
+        env:
+          RECOVERY_APPROVED: ${{ inputs.approve_recovery }}
+          EXPECTED_SHA: ${{ inputs.candidate }}
+          EXISTING_DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+          ORIGINAL_DEPLOY_RUN_ID: ${{ inputs.original_run_id }}
+          PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
+          PREPARE_RUN_ATTEMPT: ${{ inputs.prepare_run_attempt }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_ACTOR" = "akhripunov" ]
+          [ "$GITHUB_TRIGGERING_ACTOR" = "akhripunov" ]
+          [ "$GITHUB_REPOSITORY" = "akhripunov/gpoint" ]
+          [ "$GITHUB_REF" = "refs/heads/main" ]
+          [ "$RECOVERY_APPROVED" = "true" ]
+          [[ "$EXPECTED_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$EXISTING_DEPLOYMENT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$ORIGINAL_DEPLOY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$PREPARE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$PREPARE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [ "$(gh api repos/akhripunov/gpoint/git/ref/heads/main --jq .object.sha)" = "$GITHUB_SHA" ]
+          echo "INTERRUPTED_APPLY_RECOVERY_OWNER=PASS"
+
+  recover:
+    needs: validate
+    runs-on: [self-hosted, macOS, gpoint-production]
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+      deployments: write
+    env:
+      CANDIDATE_SHA: ${{ inputs.candidate }}
+      RECOVERY_DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+      ORIGINAL_DEPLOY_RUN_ID: ${{ inputs.original_run_id }}
+      PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
+      PREPARE_RUN_ATTEMPT: ${{ inputs.prepare_run_attempt }}
+      RELEASE_MODE: interrupted-recovery
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Allocate private recovery evidence paths
+        shell: bash
+        run: |
+          echo "GPOINT_RELEASE_BUNDLE=$RUNNER_TEMP/gpoint-recovery-bundle-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          echo "RECOVERY_RESULT=$RUNNER_TEMP/gpoint-recovery-$RECOVERY_DEPLOYMENT_ID-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify authorized Mac release runner
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: node scripts/release-runner-readiness.mjs
+      - name: Retrieve immutable original Prepare receipt and verify GitHub logs
+        id: cache
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GHCR_READ_USERNAME: ${{ github.actor }}
+          GHCR_READ_TOKEN: ${{ github.token }}
+          ARTIFACT_DESTINATION: ${{ env.GPOINT_RELEASE_BUNDLE }}
+        run: python3 scripts/prepared_artifact_cache.py
+      - name: Independently attest installed Docker images, healthy services and migrations
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GHCR_RECEIPT_DIGEST: ${{ steps.cache.outputs.receipt_digest }}
+        run: node scripts/recover-interrupted-apply.mjs --verify
+      - name: Set up ORAS for immutable recovery evidence
+        uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1.0.0
+        with:
+          version: 1.3.0
+      - name: Publish independently verified recovery evidence
+        id: publish
+        shell: bash
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [ "$RECOVERY_RESULT" = "$RUNNER_TEMP/gpoint-recovery-$RECOVERY_DEPLOYMENT_ID-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json" ]
+          [ -f "$RECOVERY_RESULT" ] && [ ! -L "$RECOVERY_RESULT" ]
+          config_dir=$(mktemp -d "$RUNNER_TEMP/gpoint-recovery-oras.XXXXXX")
+          chmod 700 "$config_dir"
+          config="$config_dir/config.json"
+          (umask 077; printf '{}\n' > "$config")
+          chmod 600 "$config"
+          printf '%s' "$GHCR_TOKEN" | oras login --registry-config "$config" ghcr.io --username "$GHCR_USERNAME" --password-stdin
+          cd "$RUNNER_TEMP"
+          name=$(basename "$RECOVERY_RESULT")
+          ref="ghcr.io/akhripunov/gpoint-deploy-evidence:recover-$CANDIDATE_SHA-$RECOVERY_DEPLOYMENT_ID-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          output=$(oras push --registry-config "$config" --artifact-type application/vnd.gpoint.recovery.evidence.v1 "$ref" "$name:application/vnd.gpoint.recovery.evidence.v1+json" --format json)
+          digest=$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [ "$(oras resolve --registry-config "$config" "$ref")" = "$digest" ]
+          echo "RECOVERY_REGISTRY_CONFIG=$config" >> "$GITHUB_ENV"
+          echo "RECOVERY_EVIDENCE_DIGEST=$digest" >> "$GITHUB_ENV"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "RECOVERY_EVIDENCE_DIGEST=$digest"
+      - name: Verify published recovery artifact and finalize same Deployment
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/recover-interrupted-apply.mjs --finalize
+      - name: Remove private recovery registry credentials
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "${RECOVERY_REGISTRY_CONFIG:-}" ] && [[ "$RECOVERY_REGISTRY_CONFIG" == "$RUNNER_TEMP"/gpoint-recovery-oras.*/config.json ]]; then
+            rm -rf -- "$(dirname "$RECOVERY_REGISTRY_CONFIG")"
+          fi
