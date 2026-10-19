@@ -7,7 +7,7 @@ const sha='a'.repeat(40), executor='b'.repeat(40), native=['4','5','6'].map(x=>'
 const identity={candidateSha:sha,runId:'1234',runAttempt:'1',prepareRunId:'1000',
  prepareRunAttempt:'1',prepareReceiptDigest:'sha256:'+'e'.repeat(64),prepareReceiptSha256:'f'.repeat(64),
  imageDigests:{app:'sha256:'+'7'.repeat(64),agata:'sha256:'+'8'.repeat(64),gsales:'sha256:'+'9'.repeat(64)},
- authorizationMode:'EXACT_SHA',authorizationId:null,
+ authorizationMode:'EXACT_SHA',authorizationId:null,route:'FULL_RELEASE',
  logUrl:'https://github.com/akhripunov/gpoint/actions/runs/1234/attempts/1'};
 const deployment={id:75,sha,environment:'production',task:'gpoint-production-deploy',ref:sha,
  created_at:'2026-10-19T00:00:00Z',payload:JSON.stringify(deploymentPayload(identity))};
@@ -20,7 +20,7 @@ const run={id:1234,head_sha:sha,path:'.github/workflows/gpoint-deploy.yml',
 const jobs={jobs:[{name:'deploy',conclusion:'failure',run_attempt:1,steps:[{name:'Verify receipt, canonical preflight, apply and persist evidence',conclusion:'failure'}]}]};
 const args={deployment,statuses,run,jobs,mainSha:executor,executorSha:executor,candidateSha:sha,deploymentId:75,originalRunId:'1234',prepareRunId:'1000',prepareRunAttempt:'1'};
 const roles=['app','agata','gsales'];
-const receipt={schema:3,candidateSha:sha,route:'FULL_RELEASE',
+const receipt={schema:3,transport:'ghcr-oci',status:'READY',candidateSha:sha,
  prismaHead:'prisma_v1',agataHead:'agata_v1',gsalesMigrationHead:'gsales_v1',gsalesMigrationSha256:'c'.repeat(64),
  images:Object.fromEntries(roles.map((r,i)=>[r,{repository:{
   app:'ghcr.io/akhripunov/gpoint-runtime',
@@ -60,6 +60,12 @@ test('recovery eligibility binds failed original attempt and same unmodified Dep
 });
 test('recovery enforces native ID, OCI config, running containers, health, db and revision',()=>{
  assert.equal(recoveryInventory(receipt,identity,sha).agata.nativeId,native[1]);
+ for(const invalid of [
+  {...receipt,route:'STATIC_UI_ONLY'},
+  {...receipt,staticOnly:true},
+  {...receipt,transport:'legacy'},
+  {...receipt,status:'FAILED'},
+ ])assert.throws(()=>recoveryInventory(invalid,identity,sha));
  const verified=verifyRecoveredVps({receipt,identity,candidateSha:sha,facts,nativeOutput});
  assert.equal(verified.fingerprint.sourceSha,sha);
  assert.throws(()=>recoveryInventory({...receipt,deployRehearsal:{images:{...receipt.deployRehearsal.images,app:{

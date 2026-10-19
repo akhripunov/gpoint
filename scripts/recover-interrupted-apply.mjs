@@ -62,7 +62,12 @@ export function assertRecoveryEligibility({deployment,statuses,run,jobs,mainSha,
  return identity;
 }
 export function recoveryInventory(receipt,identity,candidateSha){
- ensure(receipt?.candidateSha===candidateSha && receipt.route==='FULL_RELEASE' && receipt.schema===3,'RECEIPT_ROUTE');
+ // Schema-3 GHCR receipts may omit route for a full Deploy; the Deployment
+ // itself carries the canonical FULL_RELEASE route. Never infer a static route.
+ ensure(receipt?.candidateSha===candidateSha && receipt.schema===3
+  && receipt.transport==='ghcr-oci' && receipt.status==='READY'
+  && receipt.route!=='STATIC_UI_ONLY' && receipt.staticOnly!==true
+  && identity.route==='FULL_RELEASE','RECEIPT_ROUTE');
  const inventory={};
  for(const role of ROLES){
   const image=receipt.images?.[role], rehearsal=receipt.deployRehearsal?.images?.[role];
