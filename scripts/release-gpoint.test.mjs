@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {runRemoteShaList, remoteProof, classifyReleaseFailure, evaluateSafetyGates,
   checkArtifactParity, checkEffectiveConfig, checkAgataArtifactParity, checkGsalesArtifactParity,
-  currentApplyDeploymentContext,
+  currentApplyDeploymentContext, loadV5ParentDeployEvidence,
 } from './release-gpoint.mjs';
 import {validateAgataRuntimeIdentity, planReleaseRetention, validateRuntimeIdentity} from './release-gpoint-vps-adapter.mjs';
 
@@ -186,4 +186,49 @@ test('retention and cleanup never remove production data volumes', () => {
     imageTags: [`gpoint-runtime:${sha}`, `gpoint-runtime:${current}`], volumes: ['postgres-data']});
   assert.deepEqual(plan.removableShas, []);
   assert.deepEqual(plan.volumesToRemove, []);
+});
+
+
+test('reconciled V5 parent resolves its separate immutable attestation with the exact original tuple', async () => {
+  const identity = {candidateSha: sha, runId: '42', runAttempt: '2', prepareRunId: '41', prepareRunAttempt: '1',
+    prepareReceiptDigest: `sha256:${'b'.repeat(64)}`, prepareReceiptSha256: 'c'.repeat(64),
+    authorizationMode: 'TASK_SCOPED_AUTO', authorizationId: 'gpoint-test-001'};
+  const verified = {identity, deployment: {id: 7}, status: {state: 'success'},
+    authorizationReconciliation: {runId: '55', runAttempt: '3'}};
+  const evidence = {candidateSha: sha, status: 'COMPLETE', releaseState: 'COMPLETE',
+    authorizationMode: identity.authorizationMode, authorizationId: identity.authorizationId,
+    applicationVerification: 'VPS_READBACK_VERIFIED', deployRunConclusion: 'failure',
+    reconciliationRunConclusion: 'success', authorizationReconciliationVerified: true};
+  let argumentsSeen;
+  const readers = {fetchOriginal: async () => { throw Error('must not read ordinary evidence'); },
+    fetchReconciled: async args => { argumentsSeen = args; return evidence; }};
+  assert.equal(await loadV5ParentDeployEvidence(verified, sha, 'test-token', readers), evidence);
+  assert.deepEqual(argumentsSeen, {runId: '55', attempt: '3', candidateSha: sha, deploymentId: 7,
+    originalRunId: '42', originalRunAttempt: '2', prepareRunId: '41', prepareRunAttempt: '1',
+    prepareReceiptDigest: identity.prepareReceiptDigest, prepareReceiptSha256: identity.prepareReceiptSha256,
+    token: 'test-token'});
+  for (const patch of [{authorizationReconciliationVerified: false}, {reconciliationRunConclusion: 'failure'},
+    {deployRunConclusion: 'success'}, {candidateSha: 'd'.repeat(40)}, {recoveryRequired: true},
+    {authorizationId: 'other'}, {applicationVerification: 'UNKNOWN'}]) {
+    await assert.rejects(loadV5ParentDeployEvidence(verified, sha, 'test-token', {
+      ...readers, fetchReconciled: async () => ({...evidence, ...patch})}), /does not prove/);
+  }
+  await assert.rejects(loadV5ParentDeployEvidence({...verified, status: {state: 'error'}}, sha,
+    'test-token', readers), /does not prove/);
+});
+
+test('ordinary V5 parent cannot treat an authorization failure as completion', async () => {
+  const identity = {runId: '42', runAttempt: '2', authorizationMode: 'TASK_SCOPED_AUTO',
+    authorizationId: 'gpoint-test-001'};
+  const verified = {identity, deployment: {id: 7}, status: {state: 'success'}};
+  const evidence = {candidateSha: sha, status: 'INSTALLATION_UNCONFIRMED', releaseState: 'INSTALLATION_UNCONFIRMED',
+    authorizationMode: identity.authorizationMode, authorizationId: identity.authorizationId,
+    applicationVerification: 'VPS_READBACK_VERIFIED', deployRunConclusion: 'failure',
+    executionFailure: {stage: 'POST_APPLY_READBACK'}};
+  const readers = {fetchOriginal: async () => evidence,
+    fetchReconciled: async () => { throw Error('no attestation tuple'); }};
+  await assert.rejects(loadV5ParentDeployEvidence(verified, sha, 'test-token', readers), /does not prove/);
+  assert.equal((await loadV5ParentDeployEvidence(verified, sha, 'test-token', {
+    ...readers, fetchOriginal: async () => ({...evidence, status: 'COMPLETE', releaseState: 'COMPLETE',
+      deployRunConclusion: 'success'})})).status, 'COMPLETE');
 });

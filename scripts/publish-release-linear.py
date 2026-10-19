@@ -113,17 +113,19 @@ def ghcr_get(url, username, password, accept, limit):
 
 
 DEPLOY_EVIDENCE_STEP = 'Publish deployment result as a GHCR OCI artifact'
+RECONCILIATION_EVIDENCE_STEP = 'Publish reconciliation attestation as a GHCR OCI artifact'
+AUTHORIZATION_RECONCILIATION_OPERATION = 'AUTHORIZATION_CONSUMPTION_RECONCILIATION'
 MAX_DEPLOY_LOG_BYTES = 32 * 1024**2
 
 
-def deploy_evidence_digest_from_logs(run_id, attempt, sha):
-    """Bind the OCI digest to this exact successful Deploy job and its published log step."""
+def deploy_evidence_digest_from_logs(run_id, attempt, sha, *, job_name='deploy', step_name=DEPLOY_EVIDENCE_STEP):
+    """Bind an OCI digest to an exact workflow attempt, job and successful publisher step."""
     route = f'repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100&page=1'
     data = github_json(route)
     jobs = data.get('jobs') if isinstance(data, dict) else None
     if not isinstance(jobs, list) or data.get('total_count') != len(jobs):
         raise SyncError('Deploy job inventory is incomplete for exact evidence lookup')
-    matches = [job for job in jobs if job.get('name') == 'deploy']
+    matches = [job for job in jobs if job.get('name') == job_name]
     if len(matches) != 1:
         raise SyncError('Expected one exact Deploy job in the selected workflow attempt')
     job = matches[0]
@@ -131,34 +133,54 @@ def deploy_evidence_digest_from_logs(run_id, attempt, sha):
             or str(job.get('run_id')) != str(run_id) or str(job.get('run_attempt')) != str(attempt)
             or job.get('head_sha') != sha):
         raise SyncError('Deploy job identity is not a completed exact workflow attempt and source SHA')
+    if job_name == 'reconcile-authorization' and job.get('conclusion') != 'success':
+        raise SyncError('Authorization reconciliation job did not complete successfully')
     steps = job.get('steps')
     if not isinstance(steps, list):
         raise SyncError('Deploy job step inventory is missing')
-    evidence_steps = [step for step in steps if step.get('name') == DEPLOY_EVIDENCE_STEP]
+    evidence_steps = [step for step in steps if step.get('name') == step_name]
     if (len(evidence_steps) != 1 or evidence_steps[0].get('status') != 'completed'
             or evidence_steps[0].get('conclusion') != 'success'
             or not isinstance(evidence_steps[0].get('number'), int)):
         raise SyncError('Exact Deploy evidence publication step did not succeed')
     payload = download_job_logs(job.get('id'))
+    step_number = evidence_steps[0]['number']
+    marker = re.compile(r'DEPLOY_EVIDENCE_DIGEST=(sha256:[a-f0-9]{64})')
     try:
-        archive = zipfile.ZipFile(io.BytesIO(payload))
-        entries = archive.infolist()
-        if len(entries) > 500 or sum(entry.file_size for entry in entries) > 64 * 1024**2:
-            raise SyncError('Deploy job logs exceed the bounded evidence limit')
-        step_number = evidence_steps[0]['number']
-        suffix = f'/{step_number}_{DEPLOY_EVIDENCE_STEP}.txt'
-        candidates = [entry for entry in entries if entry.filename.endswith(suffix)]
-        if len(candidates) != 1 or candidates[0].file_size > 2 * 1024**2:
-            raise SyncError('Exact Deploy evidence step log is missing or ambiguous')
-        log = archive.read(candidates[0]).decode('utf-8', errors='strict')
+        if not payload or len(payload) > MAX_DEPLOY_LOG_BYTES:
+            raise SyncError('Deploy job logs are empty or exceed the bounded evidence limit')
+        if payload.startswith(b'PK\x03\x04'):
+            archive = zipfile.ZipFile(io.BytesIO(payload))
+            entries = archive.infolist()
+            if (len(entries) > 500 or sum(entry.file_size for entry in entries) > MAX_DEPLOY_LOG_BYTES
+                    or any(entry.file_size > 2 * 1024**2 for entry in entries)):
+                raise SyncError('Deploy job logs exceed the bounded evidence limit')
+            suffix = f'/{step_number}_{step_name}.txt'
+            candidates = [entry for entry in entries if entry.filename.endswith(suffix)]
+            if len(candidates) != 1:
+                raise SyncError('Exact Deploy evidence step log is missing or ambiguous')
+            log = archive.read(candidates[0]).decode('utf-8', errors='strict')
+        elif payload.startswith(b'PK'):
+            raise SyncError('Deploy job log archive signature is invalid')
+        else:
+            log = payload.decode('utf-8', errors='strict')
+        matches = []
+        for line in log.splitlines():
+            # GitHub's plain log endpoint prefixes lines with an ISO UTC timestamp.
+            line = re.sub(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+', '', line)
+            line = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', line).lstrip()
+            if line.startswith('DEPLOY_EVIDENCE_DIGEST='):
+                found = marker.findall(line)
+                if len(found) != 1 or line != f'DEPLOY_EVIDENCE_DIGEST={found[0]}':
+                    raise SyncError('Exact Deploy evidence digest line is malformed or ambiguous')
+                matches.extend(found)
     except SyncError:
         raise
     except Exception as exc:
         raise SyncError(f'Deploy evidence step log is invalid: {type(exc).__name__}') from exc
-    digests = re.findall(r'(?m)(?:^|\s)DEPLOY_EVIDENCE_DIGEST=(sha256:[a-f0-9]{64})(?:\s|$)', log)
-    if len(digests) != 1:
+    if len(matches) != 1:
         raise SyncError('Exact Deploy evidence digest line is missing or ambiguous')
-    return digests[0]
+    return matches[0]
 
 
 def download_job_logs(job_id):
@@ -184,7 +206,7 @@ def download_job_logs(job_id):
                 raise SyncError('Deploy job log URL must use HTTPS')
             data = response.read(MAX_DEPLOY_LOG_BYTES + 1)
             if len(data) > MAX_DEPLOY_LOG_BYTES:
-                raise SyncError('Deploy job logs exceed compressed size limit')
+                raise SyncError('Deploy job logs exceed size limit')
             return data
     except SyncError:
         raise
@@ -192,10 +214,14 @@ def download_job_logs(job_id):
         raise SyncError(f'GitHub Deploy job log read failed: {type(exc).__name__}') from exc
 
 
-def artifact_json(run_id, *, attempt=None, sha=None, deployment_id=None):
+def artifact_json(run_id, *, attempt=None, sha=None, deployment_id=None, job_name='deploy',
+                  step_name=DEPLOY_EVIDENCE_STEP, evidence_candidate_sha=None,
+                  expected_operation=None, return_integrity=False):
     """Resolve Deploy evidence by run-bound digest from GitHub logs and verify OCI content."""
     run_id = str(run_id)
-    run = github_json(f'repos/{REPOSITORY}/actions/runs/{run_id}')
+    run_route = (f'repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}'
+                 if attempt is not None else f'repos/{REPOSITORY}/actions/runs/{run_id}')
+    run = github_json(run_route)
     attempt = str(attempt or run.get('run_attempt', ''))
     sha = sha or run.get('head_sha', '')
     if (run.get('path') != '.github/workflows/gpoint-deploy.yml' or run.get('head_branch') != 'main'
@@ -203,7 +229,7 @@ def artifact_json(run_id, *, attempt=None, sha=None, deployment_id=None):
             or str(run.get('run_attempt')) != attempt or run.get('head_sha') != sha
             or not re.fullmatch(r'[a-f0-9]{40}', sha) or not attempt.isdigit()):
         raise SyncError('Unverified Deploy result workflow identity')
-    digest = deploy_evidence_digest_from_logs(run_id, attempt, sha)
+    digest = deploy_evidence_digest_from_logs(run_id, attempt, sha, job_name=job_name, step_name=step_name)
     username = os.environ.get('GHCR_READ_USERNAME') or os.environ.get('GITHUB_ACTOR', '')
     password = os.environ.get('GHCR_READ_TOKEN') or os.environ.get('GITHUB_TOKEN', '')
     if not username or not password:
@@ -236,12 +262,96 @@ def artifact_json(run_id, *, attempt=None, sha=None, deployment_id=None):
         result = json.loads(blob)
     except (ValueError, UnicodeDecodeError) as exc:
         raise SyncError('GHCR Deploy evidence layer is invalid JSON') from exc
-    if (not isinstance(result, dict) or result.get('candidateSha') != sha
+    expected_candidate = evidence_candidate_sha or sha
+    if (not isinstance(result, dict) or result.get('candidateSha') != expected_candidate
             or str(result.get('automationRunId')) != run_id or str(result.get('automationRunAttempt')) != attempt
-            or str(result.get('deployRunId')) != run_id or str(result.get('deployRunAttempt')) != attempt
+            or (expected_operation is None and (str(result.get('deployRunId')) != run_id
+                or str(result.get('deployRunAttempt')) != attempt))
+            or (expected_operation is not None and (result.get('operation') != expected_operation
+                or result.get('executorSha') != sha))
             or (deployment_id is not None and str(result.get('deploymentId')) != str(deployment_id))):
         raise SyncError('GHCR Deploy evidence does not match the exact Deployment and workflow identity')
+    if return_integrity:
+        return result, digest, hashlib.sha256(blob).hexdigest()
     return result
+
+
+def authorization_reconciliation_evidence(automation_run_id, automation_attempt, candidate_sha,
+                                          deployment_id, original_run_id, original_attempt):
+    """Accept COMPLETE only when a new trusted run attests exact auth consumption and VPS readback."""
+    original_run_id, original_attempt = str(original_run_id), str(original_attempt)
+    original_run = github_json(f'repos/{REPOSITORY}/actions/runs/{original_run_id}/attempts/{original_attempt}')
+    if (original_run.get('path') != '.github/workflows/gpoint-deploy.yml'
+            or original_run.get('head_branch') != 'main' or original_run.get('event') != 'workflow_dispatch'
+            or str(original_run.get('id')) != original_run_id
+            or str(original_run.get('run_attempt')) != original_attempt
+            or original_run.get('head_sha') != candidate_sha or original_run.get('status') != 'completed'
+            or original_run.get('conclusion') != 'failure'):
+        raise SyncError('Original Deploy attempt is not the exact completed failed workflow')
+    original, original_digest, original_content_sha = artifact_json(
+        original_run_id, attempt=original_attempt, sha=candidate_sha, deployment_id=deployment_id,
+        return_integrity=True)
+    if (original.get('status') != 'INSTALLATION_UNCONFIRMED'
+            or original.get('releaseState') != 'INSTALLATION_UNCONFIRMED'
+            or original.get('authorizationMode') != 'TASK_SCOPED_AUTO'
+            or original.get('authorizationConsumed') is not False
+            or original.get('applicationVerification') != 'VPS_READBACK_VERIFIED'
+            or original.get('serverDeployStatus') != 'COMPLETE'
+            or not isinstance(original.get('authorizationId'), str) or not original.get('authorizationId')
+            or original.get('executionFailure') != {
+                'stage': 'POST_APPLY_READBACK', 'executionStatus': 'FAILED',
+                'diagnostic': 'Task authorization consumption failed (HTTP 403)'}):
+        raise SyncError('Original Deploy evidence is not an unconsumed task-scoped failure')
+
+    run_id, attempt = str(automation_run_id), str(automation_attempt)
+    run = github_json(f'repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}')
+    executor_sha = run.get('head_sha', '')
+    current_main = github_json(f'repos/{REPOSITORY}/commits/main').get('sha')
+    current_publisher_attempt = (os.environ.get('GITHUB_ACTIONS') == 'true'
+        and os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
+        and str(os.environ.get('GITHUB_RUN_ID', '')) == run_id
+        and str(os.environ.get('GITHUB_RUN_ATTEMPT', '')) == attempt)
+    run_status_verified = ((run.get('status') == 'completed' and run.get('conclusion') == 'success')
+        or (current_publisher_attempt and run.get('status') == 'in_progress'
+            and run.get('conclusion') in (None, '')))
+    if (run.get('path') != '.github/workflows/gpoint-deploy.yml' or run.get('head_branch') != 'main'
+            or run.get('event') != 'workflow_dispatch' or str(run.get('id')) != run_id
+            or str(run.get('run_attempt')) != attempt or not run_status_verified
+            or not re.fullmatch(r'[a-f0-9]{40}', executor_sha)
+            or (current_publisher_attempt and executor_sha != current_main)):
+        raise SyncError('Authorization reconciliation workflow is not the exact successful current-main attempt')
+    attestation = artifact_json(run_id, attempt=attempt, sha=executor_sha,
+        deployment_id=deployment_id, job_name='reconcile-authorization',
+        step_name=RECONCILIATION_EVIDENCE_STEP, evidence_candidate_sha=candidate_sha,
+        expected_operation=AUTHORIZATION_RECONCILIATION_OPERATION)
+    expected_original = {'manifestDigest': original_digest, 'contentSha256': original_content_sha,
+                         'runId': original_run_id, 'runAttempt': original_attempt}
+    required = {
+        'schema': 1, 'operation': AUTHORIZATION_RECONCILIATION_OPERATION,
+        'status': 'COMPLETE', 'releaseState': 'COMPLETE', 'candidateSha': candidate_sha,
+        'executorSha': executor_sha, 'deployRunId': original_run_id,
+        'deployRunAttempt': original_attempt, 'automationRunId': run_id,
+        'automationRunAttempt': attempt, 'deploymentId': deployment_id,
+        'prepareRunId': str(original.get('prepareRunId')),
+        'prepareRunAttempt': str(original.get('prepareRunAttempt')),
+        'authorizationMode': 'TASK_SCOPED_AUTO', 'authorizationId': original['authorizationId'],
+        'authorizationConsumed': True, 'applicationVerification': 'VPS_READBACK_VERIFIED',
+        'originalEvidence': expected_original,
+        'reconciledFrom': {'status': original.get('status'), 'releaseState': original.get('releaseState'),
+                           'executionFailure': original.get('executionFailure')},
+        'reconciliation': {'operation': AUTHORIZATION_RECONCILIATION_OPERATION,
+                           'originalDeploymentId': deployment_id, 'consumedCandidateSha': candidate_sha,
+                           'statusVerified': True, 'liveVerified': True},
+    }
+    for key, value in required.items():
+        if attestation.get(key) != value:
+            raise SyncError(f'Authorization reconciliation attestation field is invalid: {key}')
+    for key in ('ciReceipt', 'componentImages', 'dbHeadAfter', 'agataDbHeadAfter',
+                'gsalesDbHeadAfter', 'gsalesMigrationSha256After', 'workerOperationalStatus',
+                'serverDeployStatus', 'applicationVerification'):
+        if key in original and attestation.get(key) != original.get(key):
+            raise SyncError(f'Authorization reconciliation changed original production evidence: {key}')
+    return attestation
 
 
 def latest_run(workflow, sha=None, successful=False):
@@ -333,7 +443,22 @@ def production_evidence():
     expected_url = f'https://github.com/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}'
     if current.get('log_url') != expected_url:
         raise SyncError('GitHub Deployment status does not link to its exact workflow attempt')
-    result = artifact_json(run_id, attempt=attempt, sha=sha, deployment_id=deployment.get('id'))
+    reconciliation_match = re.fullmatch(
+        rf'stage=complete sha=([a-f0-9]{{12}}) run={re.escape(run_id)}/{re.escape(attempt)} '
+        r'reconciled=(\d+)/(\d+)', current.get('description') or '')
+    if reconciliation_match:
+        if current.get('state') != 'success' or reconciliation_match.group(1) != sha[:12]:
+            raise SyncError('Authorization reconciliation status does not match the installed Deployment')
+        result = authorization_reconciliation_evidence(
+            reconciliation_match.group(2), reconciliation_match.group(3), sha,
+            deployment.get('id'), run_id, attempt)
+    else:
+        result = artifact_json(run_id, attempt=attempt, sha=sha, deployment_id=deployment.get('id'))
+    if current.get('state') == 'success' and (result.get('status') != 'COMPLETE'
+            or result.get('applicationVerification') != 'VPS_READBACK_VERIFIED'
+            or str(result.get('deploymentId')) != str(deployment.get('id'))
+            or result.get('candidateSha') != sha):
+        raise SyncError('Successful GitHub Deployment is not backed by complete exact-run VPS evidence')
     state = {'currentProductionSha': installed_sha, 'lastReleaseStatus': current['state'].upper(),
              'serverDeployStatus': current['state'].upper(), 'workerOperationalStatus': 'VERIFIED_BY_DEPLOY' if current['state'] == 'success' else 'NOT_VERIFIED',
              'overallServiceReadiness': 'READY' if current['state'] == 'success' else 'NOT_VERIFIED',
@@ -341,7 +466,9 @@ def production_evidence():
     manifest = {'candidateSha': sha, 'productionShaAfter': installed_sha if current['state'] == 'success' else None,
                 'status': current['state'].upper(), 'prepare': payload.get('prepare'),
                 'description': current.get('description'), 'logUrl': current.get('log_url'),
-                'resultStatus': result.get('status')}
+                'resultStatus': result.get('status'),
+                'authorizationReconciliationRunId': result.get('automationRunId') if reconciliation_match else None,
+                'authorizationReconciliationRunAttempt': result.get('automationRunAttempt') if reconciliation_match else None}
     run = {'id': int(run_id), 'run_attempt': int(attempt), 'head_sha': sha,
            'status': 'completed' if current['state'] in {'success', 'failure', 'error'} else 'in_progress',
            'conclusion': current['state'], 'html_url': expected_url}

@@ -25,6 +25,14 @@ def publisher_script():
     return step["run"]
 
 
+def reconciliation_publisher_script():
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    steps = workflow["jobs"]["reconcile-authorization"]["steps"]
+    step = next(step for step in steps
+                if step.get("name") == "Publish reconciliation attestation as a GHCR OCI artifact")
+    return step["run"]
+
+
 def linear_production_publish_script():
     workflow = yaml.safe_load(WORKFLOW.read_text())
     steps = workflow["jobs"]["publish"]["steps"]
@@ -34,6 +42,71 @@ def linear_production_publish_script():
 
 
 class DeployEvidenceWorkflowTests(unittest.TestCase):
+    def test_authorization_reconciliation_is_a_separate_owner_bound_metadata_only_job(self):
+        workflow = yaml.safe_load(WORKFLOW.read_text())
+        dispatch = workflow.get("on", workflow.get(True))["workflow_dispatch"]["inputs"]
+        self.assertIn("reconcile-authorization", dispatch["mode"]["options"])
+        self.assertIn("deployment_id", dispatch)
+        validate = workflow["jobs"]["validate"]
+        validate_names = {step.get("name"): step for step in validate["steps"]}
+        owner_guard = validate_names["Require repository owner for authorization reconciliation"]
+        self.assertEqual(validate["steps"][0], owner_guard)
+        self.assertIn("OWNER_APPROVAL_ACTOR", owner_guard["run"])
+        self.assertIn("OWNER_TRIGGERING_ACTOR", owner_guard["run"])
+        self.assertIn("OWNER_REPOSITORY", owner_guard["run"])
+        self.assertEqual(validate_names["Verify operator confirmation, current main and successful preparation"]["if"],
+                         "inputs.mode != 'reconcile-authorization'")
+        validation = validate_names["Validate existing Deployment authorization reconciliation"]
+        self.assertIn("--validate-authorization", validation["run"])
+        self.assertIn("--deployment-id", validation["run"])
+        self.assertIn("OWNER_APPROVAL_ACTOR", validation["env"])
+        self.assertIn("OWNER_TRIGGERING_ACTOR", validation["env"])
+        self.assertIn("OWNER_REPOSITORY", validation["env"])
+        self.assertIn("original_run_id", validate["outputs"]["original_run_id"])
+
+        self.assertEqual(workflow["jobs"]["deploy"]["if"], "inputs.mode != 'reconcile-authorization'")
+        reconcile = workflow["jobs"]["reconcile-authorization"]
+        self.assertEqual(reconcile["if"], "inputs.mode == 'reconcile-authorization'")
+        self.assertEqual(reconcile["runs-on"], ["self-hosted", "macOS", "gpoint-production"])
+        self.assertEqual(reconcile["permissions"], {"contents": "write", "actions": "read",
+                                                     "packages": "write", "deployments": "write"})
+        reconcile_steps = {step.get("name"): step for step in reconcile["steps"]}
+        finalize = reconcile_steps["Finalize authorization on the existing Deployment"]
+        self.assertIn("--finalize-authorization", finalize["run"])
+        self.assertIn("--deployment-id", finalize["run"])
+        self.assertIn("GITHUB_TOKEN", finalize["env"])
+        self.assertIn("GHCR_READ_TOKEN", finalize["env"])
+        self.assertIn("OWNER_APPROVAL_ACTOR", finalize["env"])
+        self.assertIn("OWNER_TRIGGERING_ACTOR", finalize["env"])
+        readiness = reconcile_steps["Verify assigned runner before authorization reconciliation"]
+        self.assertEqual(readiness["env"]["CANDIDATE_SHA"], "${{ github.sha }}")
+        self.assertNotIn("automated-release.mjs", "\n".join(step.get("run", "") for step in reconcile["steps"]))
+        self.assertNotIn("release:gpoint", "\n".join(step.get("run", "") for step in reconcile["steps"]))
+        self.assertNotIn("--apply", finalize["run"])
+        self.assertNotIn("--confirm-production-apply", finalize["run"])
+        self.assertEqual(reconcile_steps["Set up ORAS for immutable reconciliation evidence"]["with"]["version"], "1.3.0")
+        self.assertIn("Publish reconciliation attestation as a GHCR OCI artifact", reconcile_steps)
+
+        publish = workflow["jobs"]["publish"]
+        self.assertIn("reconcile-authorization", publish["needs"])
+        publish_steps = {step.get("name"): step for step in publish["steps"]}
+        self.assertEqual(publish_steps["Publish preflight result to GPoint Linear"]["if"],
+                         "always() && inputs.mode != 'reconcile-authorization'")
+        self.assertIn("reconcile-authorization", publish_steps["Publish production result to GPoint Linear"]["if"])
+
+    def test_only_trusted_mac_production_jobs_have_contents_write_for_authorization_consumption(self):
+        workflow = yaml.safe_load(WORKFLOW.read_text())
+        deploy = workflow["jobs"]["deploy"]
+        self.assertEqual(deploy["runs-on"], ["self-hosted", "macOS", "gpoint-production"])
+        self.assertEqual(deploy["permissions"].get("contents"), "write")
+        self.assertEqual(workflow["jobs"]["reconcile-authorization"]["permissions"].get("contents"), "write")
+        self.assertEqual(workflow["jobs"]["validate"].get("permissions", workflow["permissions"]).get("contents"), "read")
+        self.assertEqual(workflow["jobs"]["publish"]["permissions"].get("contents", "read"), "read")
+        for name, job in workflow["jobs"].items():
+            if job.get("permissions", workflow["permissions"]).get("contents") == "write":
+                self.assertEqual(job["runs-on"], ["self-hosted", "macOS", "gpoint-production"], name)
+        self.assertIn("consumeTaskAuthorization", (ROOT / "scripts/automated-release.mjs").read_text())
+
     def test_linear_status_selector_preserves_evidenced_failures_and_gates_complete(self):
         script = linear_production_publish_script()
         with tempfile.TemporaryDirectory(prefix="gpoint-deploy-linear-status-") as tmp:
@@ -139,6 +212,35 @@ if os.environ.get('ORAS_FAIL_COMMAND') == command:
                 calls = [json.loads(line) for line in trace.read_text().splitlines()]
                 self.assertEqual(calls[-1]["command"], failed_command)
                 self.assertFalse(Path(calls[-1]["config"]).exists())
+
+    def test_reconciliation_publishes_attestation_under_new_run_attempt_tag(self):
+        script = reconciliation_publisher_script()
+        with tempfile.TemporaryDirectory(prefix="gpoint-reconcile-evidence-") as tmp:
+            root = Path(tmp)
+            release_dir = root / "evidence"
+            release_dir.mkdir()
+            filename = "gpoint-release-result-202-2.json"
+            (release_dir / filename).write_text('{"schema":1,"reconciliation":true}\n')
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            trace = root / "oras.log"
+            fake_oras = fake_bin / "oras"
+            fake_oras.write_text("#!/bin/sh\nif [ \"$1\" = login ]; then cat >/dev/null; elif [ \"$1\" = push ]; then printf '{\\\"digest\\\":\\\"sha256:%064d\\\"}\\n' 0; else exit 9; fi\nprintf '%s\\n' \"$*\" >> \"$ORAS_TRACE\"\n")
+            fake_oras.chmod(0o755)
+            output = root / "github-output"
+            env = os.environ.copy()
+            env.update({"RELEASE_RESULT": str(release_dir / filename), "RUNNER_TEMP": str(release_dir),
+                        "GITHUB_RUN_ID": "202", "GITHUB_RUN_ATTEMPT": "2", "CANDIDATE_SHA": "a" * 40,
+                        "GHCR_USERNAME": "owner", "GHCR_TOKEN": "synthetic-secret", "GITHUB_OUTPUT": str(output),
+                        "ORAS_TRACE": str(trace), "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"})
+            result = subprocess.run(["bash", "-euo", "pipefail", "-c", script], cwd=root, env=env,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            trace_text = trace.read_text()
+            self.assertIn("deploy-" + "a" * 40 + "-202-2", trace_text)
+            self.assertIn(filename + ":" + LAYER_TYPE, trace_text)
+            self.assertNotIn("synthetic-secret", result.stdout + result.stderr + trace_text)
+            self.assertEqual(output.read_text(), "digest=sha256:" + "0" * 64 + "\n")
 
     def test_real_workflow_push_uses_a_validated_relative_file_ref(self):
         script = publisher_script()

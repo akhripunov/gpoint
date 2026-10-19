@@ -36,6 +36,26 @@ export function selectTrustedPrepareCheck(checkRuns, {candidateSha, prepareRunId
   return check;
 }
 
+export function authorizationReconciliationForStatus(status, identity) {
+  validateIdentity(identity);
+  const prefix = 'stage=complete sha=' + identity.candidateSha.slice(0, 12)
+    + ' run=' + identity.runId + '/' + identity.runAttempt;
+  const expectedUrl = 'https://github.com/akhripunov/gpoint/actions/runs/'
+    + identity.runId + '/attempts/' + identity.runAttempt;
+  requireThat(status?.state === 'success' && status.log_url === identity.logUrl
+    && identity.logUrl === expectedUrl,
+  'Exact production Deployment success status is not bound to its run attempt');
+  if (status.description === prefix) return null;
+  requireThat(identity.authorizationMode === 'TASK_SCOPED_AUTO' && identity.route !== 'STATIC_UI_ONLY'
+    && typeof status.description === 'string' && status.description.startsWith(prefix + ' reconciled='),
+  'Exact production Deployment success description is invalid');
+  const suffix = status.description.slice((prefix + ' reconciled=').length);
+  const match = /^([1-9][0-9]*)\/([1-9][0-9]*)$/.exec(suffix);
+  requireThat(match && match[1] !== String(identity.runId),
+    'Authorization reconciliation must identify a distinct metadata-only workflow run');
+  return {runId: match[1], runAttempt: match[2]};
+}
+
 function requireThat(condition, message) {
   if (!condition) throw new DeploymentApiError(message);
 }
@@ -373,9 +393,7 @@ export function createGitHubDeploymentsClient({token, fetchImpl = globalThis.fet
         log_url: status.log_url ?? null, created_at: status.created_at});
       if (status.state === 'success') {
         const identity = deploymentIdentity(item);
-        const expectedDescription = `stage=complete sha=${candidateSha.slice(0, 12)} run=${identity.runId}/${identity.runAttempt}`;
-        if (status.description !== expectedDescription || status.log_url !== identity.logUrl)
-          throw new DeploymentApiError(`Exact production Deployment ${item.id} success status is not bound to its run attempt`);
+        authorizationReconciliationForStatus(status, identity);
         successful.push({item, status});
       } else if (['pending', 'queued', 'in_progress', 'error'].includes(status.state) ||
           !isSafePreApplyFailure(status)) {
@@ -425,7 +443,10 @@ export function createGitHubDeploymentsClient({token, fetchImpl = globalThis.fet
           JSON.stringify(matchesAfter.map(value => value.id).sort((a, b) => a - b)) ||
         stableIdentity(statusesBefore) !== stableIdentity(statusesAfter))
       throw new DeploymentApiError('Production Deployment history changed during exact parent verification');
-    return {deployment, status: currentStatus, identity: deploymentIdentity(deployment)};
+    const identity = deploymentIdentity(deployment);
+    const authorizationReconciliation = authorizationReconciliationForStatus(currentStatus, identity);
+    return {deployment, status: currentStatus, identity,
+      ...(authorizationReconciliation ? {authorizationReconciliation} : {})};
   }
 
   async function readBackCreate(identity) {

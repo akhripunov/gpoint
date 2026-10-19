@@ -330,13 +330,13 @@ class ReleaseTests(unittest.TestCase):
                     'layers': [{'mediaType': SYNC.DEPLOY_EVIDENCE_LAYER, 'digest': blob_digest, 'size': len(blob)}]}
         manifest_bytes = json.dumps(manifest).encode()
         digest = 'sha256:' + hashlib.sha256(manifest_bytes).hexdigest()
-        log_zip = io.BytesIO()
-        with zipfile.ZipFile(log_zip, 'w') as archive:
-            archive.writestr(f'deploy/10_{SYNC.DEPLOY_EVIDENCE_STEP}.txt', f'DEPLOY_EVIDENCE_DIGEST={digest}\n')
+        plain_logs = f'2026-10-19T01:23:45.123Z DEPLOY_EVIDENCE_DIGEST={digest}\n'.encode()
         job = {'id': 700, 'name': 'deploy', 'run_id': 55, 'run_attempt': 2, 'head_sha': sha,
                'status': 'completed', 'conclusion': 'success', 'steps': [
                    {'number': 10, 'name': SYNC.DEPLOY_EVIDENCE_STEP, 'status': 'completed', 'conclusion': 'success'}]}
+        routes = []
         def github(path, token=None):
+            routes.append(path)
             return {'jobs': [job], 'total_count': 1} if '/jobs?' in path else run
         def get(url, username, password, accept, limit):
             if '/blobs/' in url: return blob, {}
@@ -344,9 +344,11 @@ class ReleaseTests(unittest.TestCase):
         run = {'id': int(run_id), 'head_sha': sha, 'head_branch': 'main', 'event': 'workflow_dispatch',
                'path': '.github/workflows/gpoint-deploy.yml', 'run_attempt': int(attempt)}
         with patch.dict(SYNC.os.environ, {'GHCR_READ_USERNAME': 'owner', 'GHCR_READ_TOKEN': 'token', 'GITHUB_TOKEN': 'token'}), \
-             patch.object(SYNC, 'github_json', side_effect=github), patch.object(SYNC, 'download_job_logs', return_value=log_zip.getvalue()), \
+             patch.object(SYNC, 'github_json', side_effect=github), patch.object(SYNC, 'download_job_logs', return_value=plain_logs), \
              patch.object(SYNC, 'ghcr_get', side_effect=get):
             self.assertEqual(SYNC.artifact_json(run_id, attempt=attempt, sha=sha, deployment_id=99), result)
+        self.assertIn(f'repos/{SYNC.REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}', routes)
+        self.assertNotIn(f'repos/{SYNC.REPOSITORY}/actions/runs/{run_id}', routes)
 
     def test_deploy_evidence_rejects_wrong_workflow_identity_content_digest_and_deployment(self):
         sha, run_id, attempt = 'b' * 40, '56', '1'
@@ -363,9 +365,6 @@ class ReleaseTests(unittest.TestCase):
                                 'digest': 'sha256:' + hashlib.sha256(blob).hexdigest(), 'size': len(blob)}]}
         manifest_bytes = json.dumps(manifest).encode()
         digest = 'sha256:' + hashlib.sha256(manifest_bytes).hexdigest()
-        log_zip = io.BytesIO()
-        with zipfile.ZipFile(log_zip, 'w') as archive:
-            archive.writestr(f'deploy/10_{SYNC.DEPLOY_EVIDENCE_STEP}.txt', f'DEPLOY_EVIDENCE_DIGEST={digest}\n')
         job = {'id': 701, 'name': 'deploy', 'run_id': 56, 'run_attempt': 1, 'head_sha': sha,
                'status': 'completed', 'conclusion': 'success', 'steps': [
                    {'number': 10, 'name': SYNC.DEPLOY_EVIDENCE_STEP, 'status': 'completed', 'conclusion': 'success'}]}
@@ -374,7 +373,7 @@ class ReleaseTests(unittest.TestCase):
         def get(url, username, password, accept, limit):
             return (blob, {}) if '/blobs/' in url else (manifest_bytes, {'Docker-Content-Digest': digest})
         with patch.dict(SYNC.os.environ, {'GHCR_READ_USERNAME': 'owner', 'GHCR_READ_TOKEN': 'token'}), \
-             patch.object(SYNC, 'github_json', side_effect=github), patch.object(SYNC, 'download_job_logs', return_value=log_zip.getvalue()), \
+             patch.object(SYNC, 'github_json', side_effect=github), patch.object(SYNC, 'download_job_logs', return_value=f'DEPLOY_EVIDENCE_DIGEST={digest}\n'.encode()), \
              patch.object(SYNC, 'ghcr_get', side_effect=get):
             with self.assertRaisesRegex(SYNC.SyncError, 'exact Deployment'):
                 SYNC.artifact_json(run_id, attempt=attempt, sha=sha, deployment_id=8)
@@ -402,6 +401,144 @@ class ReleaseTests(unittest.TestCase):
              patch.object(SYNC, 'download_job_logs', return_value=repeated.getvalue()):
             with self.assertRaisesRegex(SYNC.SyncError, 'missing or ambiguous'):
                 SYNC.deploy_evidence_digest_from_logs(run_id, attempt, sha)
+
+    def test_deploy_evidence_plain_logs_reject_malformed_duplicate_and_oversized_markers(self):
+        sha, run_id, attempt = 'f' * 40, '59', '1'
+        digest = 'sha256:' + 'd' * 64
+        job = {'id': 704, 'name': 'deploy', 'run_id': 59, 'run_attempt': 1, 'head_sha': sha,
+               'status': 'completed', 'conclusion': 'failure', 'steps': [
+                   {'number': 4, 'name': SYNC.DEPLOY_EVIDENCE_STEP, 'status': 'completed', 'conclusion': 'success'}]}
+        cases = [
+            (f'2026-10-19T01:23:45Z DEPLOY_EVIDENCE_DIGEST={digest}\n'.encode(), digest),
+            (f'2026-10-19T01:23:45Z \x1b[36;1mecho "DEPLOY_EVIDENCE_DIGEST=$digest"\x1b[0m\n'
+             f'2026-10-19T01:23:46Z DEPLOY_EVIDENCE_DIGEST={digest}\n'.encode(), digest),
+            (f'2026-10-19T01:23:45Z DEPLOY_EVIDENCE_DIGEST={digest}\nDEPLOY_EVIDENCE_DIGEST={digest}\n'.encode(), 'ambiguous'),
+            (f'2026-10-19T01:23:45Z DEPLOY_EVIDENCE_DIGEST={digest} extra\n'.encode(), 'malformed'),
+            (b'PK\x03\x04truncated', 'BadZipFile'),
+            (b'x' * (SYNC.MAX_DEPLOY_LOG_BYTES + 1), 'bounded evidence limit'),
+        ]
+        for payload, expected in cases:
+            with self.subTest(expected=expected), \
+                 patch.object(SYNC, 'github_json', return_value={'jobs': [job], 'total_count': 1}), \
+                 patch.object(SYNC, 'download_job_logs', return_value=payload):
+                if expected == digest:
+                    self.assertEqual(SYNC.deploy_evidence_digest_from_logs(run_id, attempt, sha), digest)
+                else:
+                    with self.assertRaisesRegex(SYNC.SyncError, expected):
+                        SYNC.deploy_evidence_digest_from_logs(run_id, attempt, sha)
+
+    def test_reconciliation_digest_uses_its_own_publisher_step_name(self):
+        sha, run_id, attempt = 'e' * 40, '61', '2'
+        step_name = SYNC.RECONCILIATION_EVIDENCE_STEP
+        job = {'id': 706, 'name': 'reconcile-authorization', 'run_id': 61, 'run_attempt': 2,
+               'head_sha': sha, 'status': 'completed', 'conclusion': 'success', 'steps': [
+                   {'number': 9, 'name': step_name, 'status': 'completed', 'conclusion': 'success'}]}
+        digest = 'sha256:' + 'b' * 64
+        zipped = io.BytesIO()
+        with zipfile.ZipFile(zipped, 'w') as archive:
+            archive.writestr(f'reconcile-authorization/9_{step_name}.txt', f'DEPLOY_EVIDENCE_DIGEST={digest}\n')
+        with patch.object(SYNC, 'github_json', return_value={'jobs': [job], 'total_count': 1}), \
+             patch.object(SYNC, 'download_job_logs', return_value=zipped.getvalue()):
+            self.assertEqual(SYNC.deploy_evidence_digest_from_logs(run_id, attempt, sha,
+                job_name='reconcile-authorization', step_name=step_name), digest)
+        failed_job = {**job, 'conclusion': 'failure'}
+        with patch.object(SYNC, 'github_json', return_value={'jobs': [failed_job], 'total_count': 1}), \
+             patch.object(SYNC, 'download_job_logs') as download:
+            with self.assertRaisesRegex(SYNC.SyncError, 'reconciliation job did not complete successfully'):
+                SYNC.deploy_evidence_digest_from_logs(run_id, attempt, sha,
+                    job_name='reconcile-authorization', step_name=step_name)
+            download.assert_not_called()
+
+    def test_authorization_reconciliation_attestation_requires_original_failure_and_exact_current_main(self):
+        candidate, executor, deployment_id = 'a' * 40, 'b' * 40, 77
+        original = {'status': 'INSTALLATION_UNCONFIRMED', 'releaseState': 'INSTALLATION_UNCONFIRMED',
+                    'candidateSha': candidate, 'deploymentId': deployment_id, 'authorizationMode': 'TASK_SCOPED_AUTO',
+                    'authorizationId': 'ME-42', 'authorizationConsumed': False,
+                    'executionFailure': {'stage': 'POST_APPLY_READBACK', 'executionStatus': 'FAILED',
+                                         'diagnostic': 'Task authorization consumption failed (HTTP 403)'},
+                    'applicationVerification': 'VPS_READBACK_VERIFIED', 'serverDeployStatus': 'COMPLETE',
+                    'prepareRunId': '400', 'prepareRunAttempt': '1',
+                    'ciReceipt': {'ghcrManifestDigest': 'sha256:' + '1' * 64},
+                    'componentImages': {'app': {'imageId': 'sha256:' + '2' * 64}},
+                    'dbHeadAfter': 'prisma_001', 'agataDbHeadAfter': 'agata0010',
+                    'gsalesDbHeadAfter': '001_gsales', 'gsalesMigrationSha256After': '3' * 64,
+                    'workerOperationalStatus': 'HEALTHY'}
+        integrity = {'manifestDigest': 'sha256:' + '4' * 64, 'contentSha256': '5' * 64,
+                     'runId': '500', 'runAttempt': '2'}
+        automation = {'id': 600, 'run_attempt': 3, 'head_sha': executor,
+                      'path': '.github/workflows/gpoint-deploy.yml', 'head_branch': 'main',
+                      'event': 'workflow_dispatch', 'status': 'completed', 'conclusion': 'success'}
+
+        def evidence(original_value=original, overrides=None):
+            value = {
+                'schema': 1, 'operation': SYNC.AUTHORIZATION_RECONCILIATION_OPERATION,
+                'status': 'COMPLETE', 'releaseState': 'COMPLETE', 'candidateSha': candidate,
+                'executorSha': executor, 'deployRunId': '500', 'deployRunAttempt': '2',
+                'automationRunId': '600', 'automationRunAttempt': '3', 'deploymentId': deployment_id,
+                'prepareRunId': '400', 'prepareRunAttempt': '1',
+                'authorizationMode': 'TASK_SCOPED_AUTO', 'authorizationId': 'ME-42',
+                'authorizationConsumed': True, 'applicationVerification': 'VPS_READBACK_VERIFIED',
+                'serverDeployStatus': 'COMPLETE',
+                'originalEvidence': integrity,
+                'reconciledFrom': {'status': original_value['status'], 'releaseState': original_value['releaseState'],
+                                   'executionFailure': original_value['executionFailure']},
+                'reconciliation': {'operation': SYNC.AUTHORIZATION_RECONCILIATION_OPERATION,
+                                   'originalDeploymentId': deployment_id, 'consumedCandidateSha': candidate,
+                                   'statusVerified': True, 'liveVerified': True},
+                **{key: original_value[key] for key in ('ciReceipt', 'componentImages', 'dbHeadAfter',
+                    'agataDbHeadAfter', 'gsalesDbHeadAfter', 'gsalesMigrationSha256After', 'workerOperationalStatus')},
+            }
+            value.update(overrides or {})
+            return value
+
+        def call(original_value=original, attestation=None, current_main=executor, run=automation):
+            def github(route):
+                if route.endswith('/commits/main'):
+                    return {'sha': current_main}
+                if '/actions/runs/500/attempts/2' in route:
+                    return {'id': 500, 'run_attempt': 2, 'head_sha': candidate,
+                            'path': '.github/workflows/gpoint-deploy.yml', 'head_branch': 'main',
+                            'event': 'workflow_dispatch', 'status': 'completed', 'conclusion': 'failure'}
+                if '/actions/runs/600/attempts/3' in route:
+                    return run
+                raise AssertionError(route)
+            with patch.object(SYNC, 'github_json', side_effect=github), \
+                 patch.object(SYNC, 'artifact_json', side_effect=[(original_value, integrity['manifestDigest'], integrity['contentSha256']),
+                                                                    attestation or evidence(original_value)]):
+                return SYNC.authorization_reconciliation_evidence('600', '3', candidate, deployment_id, '500', '2')
+
+        self.assertEqual(call()['status'], 'COMPLETE')
+        active = {**automation, 'status': 'in_progress', 'conclusion': None}
+        with patch.dict(SYNC.os.environ, {'GITHUB_ACTIONS': 'true', 'GITHUB_EVENT_NAME': 'workflow_dispatch',
+                                         'GITHUB_RUN_ID': '600', 'GITHUB_RUN_ATTEMPT': '3'}):
+            self.assertEqual(call(run=active)['status'], 'COMPLETE')
+        with patch.dict(SYNC.os.environ, {'GITHUB_ACTIONS': 'true', 'GITHUB_EVENT_NAME': 'workflow_dispatch',
+                                         'GITHUB_RUN_ID': '601', 'GITHUB_RUN_ATTEMPT': '3'}):
+            with self.assertRaisesRegex(SYNC.SyncError, 'current-main'):
+                call(run=active)
+        with patch.dict(SYNC.os.environ, {'GITHUB_ACTIONS': 'true', 'GITHUB_EVENT_NAME': 'workflow_dispatch',
+                                         'GITHUB_RUN_ID': '600', 'GITHUB_RUN_ATTEMPT': '3'}):
+            with self.assertRaisesRegex(SYNC.SyncError, 'current-main'):
+                call(current_main='c' * 40, run=active)
+        with patch.dict(SYNC.os.environ, {'GITHUB_ACTIONS': 'false', 'GITHUB_EVENT_NAME': 'workflow_dispatch',
+                                         'GITHUB_RUN_ID': '999', 'GITHUB_RUN_ATTEMPT': '1'}):
+            self.assertEqual(call(current_main='c' * 40)['status'], 'COMPLETE')
+        for overrides in ({'executorSha': 'c' * 40}, {'deploymentId': 78},
+                          {'authorizationConsumed': False}, {'applicationVerification': 'NOT_VERIFIED'},
+                          {'originalEvidence': {**integrity, 'contentSha256': '0' * 64}},
+                          {'reconciliation': {'operation': SYNC.AUTHORIZATION_RECONCILIATION_OPERATION,
+                           'originalDeploymentId': deployment_id, 'consumedCandidateSha': candidate,
+                           'statusVerified': False, 'liveVerified': True}},
+                          {'componentImages': {'app': {'imageId': 'sha256:tampered'}}}):
+            with self.subTest(overrides=overrides), self.assertRaises(SYNC.SyncError):
+                call(attestation=evidence(overrides=overrides))
+        with self.assertRaisesRegex(SYNC.SyncError, 'unconsumed task-scoped failure'):
+            call(original_value={**original, 'authorizationConsumed': True})
+        with self.assertRaisesRegex(SYNC.SyncError, 'unconsumed task-scoped failure'):
+            call(original_value={**original, 'executionFailure': {
+                'stage': 'POST_APPLY_READBACK', 'executionStatus': 'FAILED', 'diagnostic': 'HTTP 500'}})
+        with self.assertRaisesRegex(SYNC.SyncError, 'unconsumed task-scoped failure'):
+            call(original_value={**original, 'applicationVerification': 'NOT_VERIFIED'})
 
     def test_deploy_evidence_digest_requires_publisher_step_success(self):
         sha, run_id, attempt = 'e' * 40, '58', '1'
@@ -659,13 +796,54 @@ class DeploymentReleaseTests(unittest.TestCase):
             if '/deployments?' in route: return [item]
             if '/statuses?' in route: return [status('success', url, '2026-10-18T10:05:00Z')]
             raise AssertionError(route)
-        with patch.object(SYNC, 'github_json', side_effect=read), patch.object(SYNC, 'artifact_json', return_value={'status': 'COMPLETE'}):
+        with patch.object(SYNC, 'github_json', side_effect=read), patch.object(SYNC, 'artifact_json', return_value={
+                'status': 'COMPLETE', 'candidateSha': SHA, 'deploymentId': 100,
+                'applicationVerification': 'VPS_READBACK_VERIFIED'}):
             state, manifest, run = SYNC.production_evidence()
         self.assertEqual(state['currentProductionSha'], SHA)
         self.assertEqual(state['lastReleaseStatus'], 'SUCCESS')
         self.assertEqual(manifest['prepare']['tag'], f'gpoint-prepare-{SHA}-10-1')
         self.assertEqual(run['id'], 501)
         self.assertEqual(manifest['logUrl'], url)
+
+    def test_metadata_reconciliation_is_discovered_only_from_exact_success_status_tuple(self):
+        item, url = deployment(102, SHA, 503, 1, '2026-10-19T10:00:00Z')
+        status_row = status('success', url, '2026-10-19T10:05:00Z')
+        status_row['description'] = f'stage=complete sha={SHA[:12]} run=503/1 reconciled=600/3'
+        attestation = {'status': 'COMPLETE', 'candidateSha': SHA, 'deploymentId': 102,
+                       'automationRunId': '600', 'automationRunAttempt': '3'}
+        def read(route):
+            if '/deployments?' in route: return [item]
+            if '/statuses?' in route: return [status_row]
+            raise AssertionError(route)
+        with patch.object(SYNC, 'github_json', side_effect=read), \
+             patch.object(SYNC, 'artifact_json') as artifact, \
+             patch.object(SYNC, 'authorization_reconciliation_evidence', return_value=attestation) as reconcile:
+            # The patched verifier isolates projection routing; complete-evidence
+            # field validation remains exercised by the verifier's unit tests.
+            reconcile.return_value.update({'applicationVerification': 'VPS_READBACK_VERIFIED'})
+            state, manifest, run = SYNC.production_evidence()
+        reconcile.assert_called_once_with('600', '3', SHA, 102, '503', '1')
+        artifact.assert_not_called()
+        self.assertEqual(state['currentProductionSha'], SHA)
+        self.assertEqual(manifest['authorizationReconciliationRunId'], '600')
+        self.assertEqual(manifest['authorizationReconciliationRunAttempt'], '3')
+        self.assertEqual(run['id'], 503)
+
+    def test_success_status_with_failed_or_unverified_evidence_is_rejected(self):
+        item, url = deployment(103, SHA, 504, 1, '2026-10-19T11:00:00Z')
+        def read(route):
+            if '/deployments?' in route: return [item]
+            if '/statuses?' in route: return [status('success', url, '2026-10-19T11:05:00Z')]
+            raise AssertionError(route)
+        for result in ({'status': 'INSTALLATION_UNCONFIRMED', 'candidateSha': SHA, 'deploymentId': 103,
+                        'applicationVerification': 'VPS_READBACK_VERIFIED'},
+                       {'status': 'COMPLETE', 'candidateSha': SHA, 'deploymentId': 103,
+                        'applicationVerification': 'NOT_VERIFIED'}):
+            with self.subTest(result=result), patch.object(SYNC, 'github_json', side_effect=read), \
+                 patch.object(SYNC, 'artifact_json', return_value=result):
+                with self.assertRaisesRegex(SYNC.SyncError, 'not backed by complete exact-run VPS evidence'):
+                    SYNC.production_evidence()
 
     def test_failed_attempt_makes_current_installed_sha_unknown(self):
         failed, failed_url = deployment(101, SHA, 502, 1, '2026-10-18T11:00:00Z')

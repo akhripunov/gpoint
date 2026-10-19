@@ -9,11 +9,15 @@ on:
         required: true
         type: string
       mode:
-        description: 'Preflight, exact-SHA production Deploy, or approved task-scoped Deploy'
+        description: 'Preflight, exact-SHA Deploy, task-scoped Deploy, or metadata-only authorization reconciliation'
         required: true
         default: preflight
         type: choice
-        options: [preflight, production, task-scoped-auto]
+        options: [preflight, production, task-scoped-auto, reconcile-authorization]
+      deployment_id:
+        description: 'Existing production Deployment ID to reconcile without applying again'
+        required: false
+        type: string
       approve_production:
         description: 'I authorize this exact candidate on GPoint production'
         required: true
@@ -57,13 +61,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     outputs:
-      run_id: ${{ steps.select.outputs.run_id }}
-      candidate: ${{ steps.select.outputs.candidate }}
-      run_attempt: ${{ steps.select.outputs.run_attempt }}
+      run_id: ${{ steps.select.outputs.run_id || steps.reconcile_validate.outputs.run_id }}
+      candidate: ${{ steps.select.outputs.candidate || steps.reconcile_validate.outputs.candidate }}
+      run_attempt: ${{ steps.select.outputs.run_attempt || steps.reconcile_validate.outputs.run_attempt }}
       orchestrator_run_id: ${{ steps.select.outputs.orchestrator_run_id }}
       network_retry_budget_used_seconds: ${{ steps.select.outputs.network_retry_budget_used_seconds }}
-      task_authorization_id: ${{ steps.select.outputs.task_authorization_id }}
+      task_authorization_id: ${{ steps.select.outputs.task_authorization_id || steps.reconcile_validate.outputs.task_authorization_id }}
+      original_run_id: ${{ steps.reconcile_validate.outputs.original_run_id }}
+      original_run_attempt: ${{ steps.reconcile_validate.outputs.original_run_attempt }}
     steps:
+      - name: Require repository owner for authorization reconciliation
+        if: inputs.mode == 'reconcile-authorization'
+        env:
+          OWNER_APPROVAL_ACTOR: ${{ github.actor }}
+          OWNER_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          OWNER_REPOSITORY: ${{ github.repository_owner }}
+        shell: bash
+        run: |
+          if [[ "$OWNER_APPROVAL_ACTOR" != "$OWNER_REPOSITORY" || "$OWNER_TRIGGERING_ACTOR" != "$OWNER_REPOSITORY" ]]; then
+            echo 'Authorization reconciliation requires an explicit repository-owner dispatch'
+            exit 1
+          fi
       - name: Initialize shared retry budget
         shell: bash
         run: |
@@ -75,6 +93,7 @@ jobs:
           fetch-depth: 0
       - name: Verify operator confirmation, current main and successful preparation
         id: select
+        if: inputs.mode != 'reconcile-authorization'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
@@ -89,15 +108,27 @@ jobs:
           OWNER_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           OWNER_REPOSITORY: ${{ github.repository_owner }}
         run: python scripts/select-release-run.py
+      - name: Validate existing Deployment authorization reconciliation
+        id: reconcile_validate
+        if: inputs.mode == 'reconcile-authorization'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ inputs.candidate }}
+          EXISTING_DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+          OWNER_APPROVAL_ACTOR: ${{ github.actor }}
+          OWNER_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          OWNER_REPOSITORY: ${{ github.repository_owner }}
+        run: node scripts/reconcile-deployment.mjs --validate-authorization --deployment-id "$EXISTING_DEPLOYMENT_ID" --candidate "$CANDIDATE_SHA"
 
   deploy:
     needs: validate
-    if: true
+    if: inputs.mode != 'reconcile-authorization'
     # Only a repository-scoped runner on the owner's Mac may receive this job.
     runs-on: [self-hosted, macOS, gpoint-production]
     timeout-minutes: 40
     permissions:
-      contents: read
+      contents: write
       actions: read
       packages: write
       deployments: write
@@ -205,13 +236,103 @@ jobs:
           case "$digest" in sha256:????????????????????????????????????????????????????????????????) ;; *) echo 'Invalid GHCR evidence digest'; exit 1 ;; esac
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "DEPLOY_EVIDENCE_DIGEST=$digest"
+  reconcile-authorization:
+    needs: validate
+    if: inputs.mode == 'reconcile-authorization'
+    # Metadata-only recovery runs on the same trusted production runner.
+    runs-on: [self-hosted, macOS, gpoint-production]
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+      packages: write
+      deployments: write
+    outputs:
+      status: ${{ steps.finalize.outcome == 'success' && 'COMPLETE' || 'INSTALLATION_UNCONFIRMED' }}
+      execute_outcome: ${{ steps.finalize.outcome }}
+      evidence_digest: ${{ steps.evidence.outputs.digest }}
+    env:
+      CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
+      EXISTING_DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+      PREPARE_RUN_ID: ${{ needs.validate.outputs.run_id }}
+      PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.run_attempt }}
+      ORIGINAL_DEPLOY_RUN_ID: ${{ needs.validate.outputs.original_run_id }}
+      ORIGINAL_DEPLOY_RUN_ATTEMPT: ${{ needs.validate.outputs.original_run_attempt }}
+      TASK_AUTHORIZATION_ID: ${{ needs.validate.outputs.task_authorization_id }}
+      OWNER_APPROVAL_ACTOR: ${{ github.actor }}
+      OWNER_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+      OWNER_REPOSITORY: ${{ github.repository_owner }}
+    steps:
+      - name: Set private reconciliation evidence path
+        shell: bash
+        run: echo "RELEASE_RESULT=$RUNNER_TEMP/gpoint-release-result-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify assigned runner before authorization reconciliation
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: node scripts/release-runner-readiness.mjs
+      - name: Set up ORAS for immutable reconciliation evidence
+        uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1.0.0
+        with:
+          version: 1.3.0
+      - name: Finalize authorization on the existing Deployment
+        id: finalize
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GHCR_READ_USERNAME: ${{ github.actor }}
+          GHCR_READ_TOKEN: ${{ github.token }}
+          OWNER_APPROVAL_ACTOR: ${{ github.actor }}
+          OWNER_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          OWNER_REPOSITORY: ${{ github.repository_owner }}
+        run: node scripts/reconcile-deployment.mjs --finalize-authorization --deployment-id "$EXISTING_DEPLOYMENT_ID" --candidate "$CANDIDATE_SHA"
+      - name: Publish reconciliation attestation as a GHCR OCI artifact
+        id: evidence
+        if: always()
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if [ ! -f "$RELEASE_RESULT" ]; then
+            echo 'DEPLOY_EVIDENCE=NOT_AVAILABLE'
+            exit 0
+          fi
+          expected_result="$RUNNER_TEMP/gpoint-release-result-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          if [ "$RELEASE_RESULT" != "$expected_result" ] || [ -L "$RELEASE_RESULT" ]; then
+            echo 'Unsafe reconciliation evidence path'
+            exit 1
+          fi
+          result_dir=$(dirname -- "$RELEASE_RESULT")
+          result_file=$(basename -- "$RELEASE_RESULT")
+          cd -- "$result_dir"
+          set +x
+          oras_config_dir=$(mktemp -d "$RUNNER_TEMP/gpoint-oras-registry-config.XXXXXX")
+          trap 'rm -rf -- "$oras_config_dir"' EXIT
+          chmod 700 "$oras_config_dir"
+          oras_config="$oras_config_dir/config.json"
+          (umask 077; printf '{}\n' > "$oras_config")
+          chmod 600 "$oras_config"
+          printf '%s' "$GHCR_TOKEN" | oras login --registry-config "$oras_config" ghcr.io --username "$GHCR_USERNAME" --password-stdin
+          ref="ghcr.io/akhripunov/gpoint-deploy-evidence:deploy-${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          output=$(oras push --registry-config "$oras_config" --artifact-type application/vnd.gpoint.deploy.evidence.v1 \
+            "$ref" "$result_file:application/vnd.gpoint.deploy.evidence.v1+json" --format json)
+          digest=$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')
+          case "$digest" in sha256:????????????????????????????????????????????????????????????????) ;; *) echo 'Invalid GHCR evidence digest'; exit 1 ;; esac
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "DEPLOY_EVIDENCE_DIGEST=$digest"
+
   publish:
     permissions:
       contents: read
       actions: read
       packages: read
       deployments: read
-    needs: [validate, deploy]
+    needs: [validate, deploy, reconcile-authorization]
     if: always() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -253,7 +374,7 @@ jobs:
             echo 'CACHE_PREVENTED_DOWNLOAD=UNKNOWN'
           } >> "$GITHUB_ENV"
       - name: Publish preflight result to GPoint Linear
-        if: always()
+        if: always() && inputs.mode != 'reconcile-authorization'
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -264,7 +385,7 @@ jobs:
           RELEASE_STATUS: ${{ inputs.mode == 'preflight' && needs.deploy.outputs.preflight == 'PLANNED' && 'READY_FOR_OWNER' || (needs.deploy.outputs.preflight == 'PLANNED' && 'PASS' || needs.deploy.outputs.preflight || 'BLOCKED') }}
         run: python3 scripts/publish-release-linear.py
       - name: Publish production result to GPoint Linear
-        if: always() && (inputs.mode == 'production' || inputs.mode == 'task-scoped-auto') && needs.deploy.outputs.status != ''
+        if: always() && (inputs.mode == 'production' || inputs.mode == 'task-scoped-auto' || inputs.mode == 'reconcile-authorization') && (needs.deploy.outputs.status != '' || needs.reconcile-authorization.outputs.status != '')
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -272,9 +393,9 @@ jobs:
           GHCR_READ_USERNAME: ${{ github.actor }}
           GHCR_READ_TOKEN: ${{ github.token }}
           RELEASE_PHASE: production
-          DEPLOY_STATUS: ${{ needs.deploy.outputs.status }}
-          DEPLOY_EXECUTE_OUTCOME: ${{ needs.deploy.outputs.execute_outcome }}
-          DEPLOY_EVIDENCE_DIGEST: ${{ needs.deploy.outputs.evidence_digest }}
+          DEPLOY_STATUS: ${{ inputs.mode == 'reconcile-authorization' && needs.reconcile-authorization.outputs.status || needs.deploy.outputs.status }}
+          DEPLOY_EXECUTE_OUTCOME: ${{ inputs.mode == 'reconcile-authorization' && needs.reconcile-authorization.outputs.execute_outcome || needs.deploy.outputs.execute_outcome }}
+          DEPLOY_EVIDENCE_DIGEST: ${{ inputs.mode == 'reconcile-authorization' && needs.reconcile-authorization.outputs.evidence_digest || needs.deploy.outputs.evidence_digest }}
         run: |
           release_status=INSTALLATION_UNCONFIRMED
           if [[ "$DEPLOY_EVIDENCE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then

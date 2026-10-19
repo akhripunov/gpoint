@@ -12,7 +12,7 @@ import { verifyReleaseBundle } from './release-bundle.mjs';
 import { validateOciReceipt } from './release-oci.mjs';
 import { buildV5ComponentImageInventory, deriveV3ProductionParent, verifyV5ProductionParent } from './release-component-bundle-v4.mjs';
 import { createGitHubDeploymentsClient } from './github-deployments.mjs';
-import { fetchOriginalDeployEvidence } from './reconcile-deployment.mjs';
+import { fetchOriginalDeployEvidence, fetchAuthorizationReconciliationEvidence } from './reconcile-deployment.mjs';
 import { AuthorizationError, authorizationRecordPath, candidateScopeDiff,
   checkTaskAuthorizationState, validateTaskAuthorization } from './release-authorization.mjs';
 import { expectedStaticParent, staticReceiptAndImages, verifyStaticLiveBaseline,
@@ -515,6 +515,36 @@ function readGitHubReadToken() {
   }
 }
 
+export async function loadV5ParentDeployEvidence(verified, candidateSha, token,
+  {fetchOriginal = fetchOriginalDeployEvidence, fetchReconciled = fetchAuthorizationReconciliationEvidence} = {}) {
+  const identity = verified.identity;
+  const tuple = verified.authorizationReconciliation;
+  const common = {candidateSha, deploymentId: verified.deployment.id,
+    prepareRunId: identity.prepareRunId, prepareRunAttempt: identity.prepareRunAttempt,
+    prepareReceiptDigest: identity.prepareReceiptDigest, token};
+  let evidence;
+  try {
+    evidence = tuple
+      ? await fetchReconciled({...common, runId: tuple.runId, attempt: tuple.runAttempt,
+          originalRunId: identity.runId, originalRunAttempt: identity.runAttempt,
+          prepareReceiptSha256: identity.prepareReceiptSha256})
+      : await fetchOriginal({...common, runId: identity.runId, attempt: identity.runAttempt});
+  } catch { die('Exact Deploy OCI evidence, Actions provenance, or VPS verification evidence is unavailable'); }
+  const completeEvidence = evidence?.status === 'COMPLETE' && evidence.releaseState === 'COMPLETE' &&
+    (tuple ? evidence.deployRunConclusion === 'failure' && evidence.reconciliationRunConclusion === 'success' &&
+      evidence.authorizationReconciliationVerified === true : evidence.deployRunConclusion === 'success');
+  const reconciliableEvidence = !tuple && evidence?.status === 'INSTALLATION_UNCONFIRMED' &&
+    evidence.releaseState === 'INSTALLATION_UNCONFIRMED' && evidence.executionFailure?.stage === 'STATUS_UNCONFIRMED' &&
+    evidence.applicationVerification === 'VPS_READBACK_VERIFIED' && evidence.deployRunConclusion === 'failure' &&
+    verified.status.state === 'success';
+  if (verified.status.state !== 'success' || identity.authorizationMode !== evidence?.authorizationMode ||
+      identity.authorizationId !== evidence?.authorizationId || evidence?.candidateSha !== candidateSha ||
+      !(completeEvidence || reconciliableEvidence) || evidence.applicationVerification !== 'VPS_READBACK_VERIFIED' ||
+      evidence.recoveryRequired === true)
+    die('Durable Deploy result does not prove the exact completed production release');
+  return evidence;
+}
+
 async function verifiedV5ParentEvidence(current, facts, currentAttempt = null) {
   if (!SHA_RE.test(current?.currentProductionSha ?? '') ||
       facts.LIVE_RELEASE_ENV_SHA !== current.currentProductionSha ||
@@ -529,23 +559,7 @@ async function verifiedV5ParentEvidence(current, facts, currentAttempt = null) {
   }
   const identity = verified.identity;
   const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || readGitHubReadToken();
-  let evidence;
-  try {
-    evidence = await fetchOriginalDeployEvidence({runId: identity.runId, attempt: identity.runAttempt,
-      candidateSha: current.currentProductionSha, deploymentId: verified.deployment.id,
-      prepareRunId: identity.prepareRunId, prepareRunAttempt: identity.prepareRunAttempt,
-      prepareReceiptDigest: identity.prepareReceiptDigest, token});
-  } catch { die('Exact Deploy OCI evidence, Actions provenance, or VPS verification evidence is unavailable'); }
-  const completeEvidence = evidence?.status === 'COMPLETE' && evidence.releaseState === 'COMPLETE' &&
-    evidence.deployRunConclusion === 'success';
-  const reconciliableEvidence = evidence?.status === 'INSTALLATION_UNCONFIRMED' &&
-    evidence.releaseState === 'INSTALLATION_UNCONFIRMED' && evidence.executionFailure?.stage === 'STATUS_UNCONFIRMED' &&
-    evidence.applicationVerification === 'VPS_READBACK_VERIFIED' && evidence.deployRunConclusion === 'failure' &&
-    verified.status.state === 'success';
-  if (identity.authorizationMode !== evidence.authorizationMode || identity.authorizationId !== evidence.authorizationId ||
-      evidence.candidateSha !== current.currentProductionSha || !(completeEvidence || reconciliableEvidence) ||
-      evidence.applicationVerification !== 'VPS_READBACK_VERIFIED' || evidence.recoveryRequired === true)
-    die('Durable Deploy result does not prove the exact completed production release');
+  const evidence = await loadV5ParentDeployEvidence(verified, current.currentProductionSha, token);
   const receipt = evidence.ciReceipt;
   const componentImages = evidence.componentImages;
   if (!componentImages || !['app', 'agata', 'gsales'].every(role => componentImages[role]) ||

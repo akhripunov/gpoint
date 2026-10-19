@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createGitHubDeploymentsClient, deploymentPayload, assertDeploymentMatchesLive,
-  selectTrustedPrepareCheck} from './github-deployments.mjs';
+  selectTrustedPrepareCheck, authorizationReconciliationForStatus} from './github-deployments.mjs';
 import './reconcile-deployment.test.mjs';
 
 const sha = 'a'.repeat(40);
@@ -300,8 +300,8 @@ test('verified V5 parent lookup rejects absent or non-successful Deployments', a
 });
 
 test('exact-SHA parent lookup fails closed when more than one successful Deployment matches', async () => {
-  const first = validDeployment(31, sha, {...identity, runId: '51'}, '2026-10-17T00:00:00Z');
-  const second = validDeployment(32, sha, {...identity, runId: '52'}, '2026-10-18T00:00:00Z');
+  const first = validDeployment(31, sha, {...identity, runId: '51', logUrl: 'https://github.com/akhripunov/gpoint/actions/runs/51/attempts/2'}, '2026-10-17T00:00:00Z');
+  const second = validDeployment(32, sha, {...identity, runId: '52', logUrl: 'https://github.com/akhripunov/gpoint/actions/runs/52/attempts/2'}, '2026-10-18T00:00:00Z');
   const rows = [second, first];
   const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async url => {
     if (url.includes('/deployments?')) return response(200, rows);
@@ -561,4 +561,23 @@ test('an active conflicting Deployment blocks a new candidate', async () => {
     }});
   await assert.rejects(client.beginProductionDeployment(identity,
     {requiredContexts: ['prepare']}), /is in_progress/);
+});
+
+
+test('authorization reconciliation status binds the original attempt and a distinct metadata-only run', () => {
+  const task = {...identity, authorizationMode: 'TASK_SCOPED_AUTO', authorizationId: 'gpoint-reconcile-test-001'};
+  const description = 'stage=complete sha=' + sha.slice(0, 12) + ' run=42/2';
+  const ordinary = {state: 'success', description, log_url: identity.logUrl};
+  assert.equal(authorizationReconciliationForStatus(ordinary, task), null);
+  assert.deepEqual(authorizationReconciliationForStatus({...ordinary,
+    description: description + ' reconciled=90/1'}, task), {runId: '90', runAttempt: '1'});
+  for (const status of [
+    {...ordinary, state: 'error'},
+    {...ordinary, description: description + ' reconciled=90/0'},
+    {...ordinary, description: description + ' reconciled=42/3'},
+    {...ordinary, description: description + ' reconciled=90/1 extra'},
+    {...ordinary, description: description + ' reconciled=90/1', log_url: 'https://github.com/attacker/run'},
+  ]) assert.throws(() => authorizationReconciliationForStatus(status, task));
+  assert.throws(() => authorizationReconciliationForStatus({...ordinary,
+    description: description + ' reconciled=90/1'}, identity));
 });
