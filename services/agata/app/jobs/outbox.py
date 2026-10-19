@@ -35,7 +35,7 @@ MEMORY_WORKER_JOB_TYPES = frozenset(
         "memory_graph_sync",
     }
 )
-INFERENCE_JOB_TYPES = frozenset({"inference"})
+INFERENCE_JOB_TYPES = frozenset({"inference", "sales_draft_inference"})
 BACKGROUND_INFERENCE_PURPOSES = frozenset({"memory_extract", "conversation_summary"})
 DEFAULT_MAX_ATTEMPTS = 5
 MEMORY_MAX_ATTEMPTS = 3

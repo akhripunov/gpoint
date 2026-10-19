@@ -17,7 +17,7 @@ from app.jobs.outbox import retry_budget_for_job
         ("inference", {"purpose": "conversation_summary"}, 1),
         ("inference", {"purpose": "response"}, 2),
         ("inference", {}, 2),
-        ("sales_draft_inference", {"purpose": "response"}, 5),
+        ("sales_draft_inference", {"purpose": "response"}, 2),
         ("generic", {}, 5),
         ("response_retry", {}, 5),
     ],

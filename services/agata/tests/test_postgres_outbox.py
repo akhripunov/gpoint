@@ -180,6 +180,7 @@ async def test_expired_outbox_leases_stop_at_the_job_retry_budget():
         ("inference", {"purpose": "memory_extract", "parent_job_id": str(uuid4())}, 1),
         ("inference", {"purpose": "conversation_summary", "parent_job_id": str(uuid4())}, 1),
         ("inference", {"purpose": "response"}, 2),
+        ("sales_draft_inference", {}, 2),
         ("generic", {"code": "synthetic"}, 5),
     )
     job_ids = []
@@ -188,18 +189,38 @@ async def test_expired_outbox_leases_stop_at_the_job_retry_budget():
             session.add_all([Tenant(id=tenant_id), Tenant(id=other_tenant_id)])
             await session.flush()
             await set_tenant_context(session, str(tenant_id))
+            repository = OutboxRepository(session)
             for index, (job_type, payload, attempts) in enumerate(at_budget):
-                job = await OutboxRepository(session).enqueue(
-                    tenant_id=tenant_id,
-                    job_type=job_type,
-                    dedupe_key=f"expired-budget:{suffix}:{index}",
-                    payload=payload,
-                )
-                job.state = JobState.running
-                job.attempts = attempts
-                job.claimed_at = expired - timedelta(minutes=1)
-                job.lease_expires_at = expired
-                job.claim_token = uuid4().hex
+                dedupe_key = f"expired-budget:{suffix}:{index}"
+                if job_type == "sales_draft_inference":
+                    # The Sales API inserts this protected empty row directly,
+                    # then writes its encrypted payload before committing.
+                    job = OutboxJob(
+                        tenant_id=tenant_id,
+                        job_type=job_type,
+                        aggregate_id=uuid4(),
+                        dedupe_key=dedupe_key,
+                        payload=payload,
+                        state=JobState.running,
+                        attempts=attempts,
+                        claimed_at=expired - timedelta(minutes=1),
+                        lease_expires_at=expired,
+                        claim_token=uuid4().hex,
+                    )
+                    session.add(job)
+                    await session.flush()
+                else:
+                    job = await repository.enqueue(
+                        tenant_id=tenant_id,
+                        job_type=job_type,
+                        dedupe_key=dedupe_key,
+                        payload=payload,
+                    )
+                    job.state = JobState.running
+                    job.attempts = attempts
+                    job.claimed_at = expired - timedelta(minutes=1)
+                    job.lease_expires_at = expired
+                    job.claim_token = uuid4().hex
                 job_ids.append(job.id)
             below_budget = await OutboxRepository(session).enqueue(
                 tenant_id=tenant_id,
@@ -213,25 +234,12 @@ async def test_expired_outbox_leases_stop_at_the_job_retry_budget():
             below_budget.lease_expires_at = expired
             below_budget.claim_token = uuid4().hex
             below_budget_id = below_budget.id
-            sales_below_budget = await OutboxRepository(session).enqueue(
-                tenant_id=tenant_id,
-                job_type="sales_draft_inference",
-                dedupe_key=f"expired-budget:{suffix}:sales-below",
-                payload={"purpose": "response"},
-            )
-            sales_below_budget.state = JobState.running
-            sales_below_budget.attempts = 4
-            sales_below_budget.last_error = "synthetic_previous_failure"
-            sales_below_budget.claimed_at = expired - timedelta(minutes=1)
-            sales_below_budget.lease_expires_at = expired
-            sales_below_budget.claim_token = uuid4().hex
-            sales_below_budget_id = sales_below_budget.id
 
     async with SessionFactory() as session:
         async with session.begin():
             await set_tenant_context(session, str(tenant_id))
             repository = OutboxRepository(session)
-            assert await repository.requeue_expired(tenant_id=tenant_id) == len(at_budget) + 2
+            assert await repository.requeue_expired(tenant_id=tenant_id) == len(at_budget) + 1
             for job_id, (_, _, attempts) in zip(job_ids, at_budget, strict=True):
                 job = await session.get(OutboxJob, job_id)
                 assert job is not None
@@ -246,14 +254,6 @@ async def test_expired_outbox_leases_stop_at_the_job_retry_budget():
             assert below_budget.state == JobState.pending
             assert below_budget.attempts == 1
             assert below_budget.last_error is None
-            sales_below_budget = await session.get(OutboxJob, sales_below_budget_id)
-            assert sales_below_budget is not None
-            assert sales_below_budget.state == JobState.pending
-            assert sales_below_budget.attempts == 4
-            assert sales_below_budget.last_error == "synthetic_previous_failure"
-            assert sales_below_budget.claimed_at is None
-            assert sales_below_budget.lease_expires_at is None
-            assert sales_below_budget.claim_token is None
             claimed = await repository.claim(
                 tenant_id=tenant_id, job_types=frozenset({"inference"})
             )
