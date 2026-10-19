@@ -111,6 +111,7 @@ test('V5 parent requires successful exact Deployment, Prepare digests, live iden
   };
   const registryImages = Object.fromEntries(Object.entries(images).map(([role, image]) => [role, {
     sourceSha: A, configDigest: image.imageId, manifestDigest: id(String(role === 'app' ? '4' : role === 'agata' ? '5' : '6')[0]),
+    nativeId: id(role === 'app' ? '4' : role === 'agata' ? '5' : '6'),
   }]));
   const evidence = {
     deployment: { source: 'github-api', sha: A, status: 'success', environment: 'production',
@@ -127,11 +128,13 @@ test('V5 parent requires successful exact Deployment, Prepare digests, live iden
       gsalesAgataApiHealth: 'healthy', gsalesAgataWorkerHealth: 'healthy',
       workerRunning: true, botRunning: true, agataWorkerRunning: true, gsalesAgataWorkerRunning: true,
       nativeImages: Object.fromEntries(Object.entries(images).map(([role, image]) => [role,
-        { imageId: image.imageId, sourceSha: A, platform: 'linux/amd64' }])) },
+        { imageId: registryImages[role].nativeId, sourceSha: A, platform: 'linux/amd64' }])) },
     unresolvedRecovery: false,
   };
   const verifiedParent = verifyV5ProductionParent(v5, evidence);
   assert.equal(verifiedParent.currentProductionSha, A);
+  assert.equal(verifiedParent.images.app.imageId, id('1'));
+  assert.equal(verifiedParent.images.app.nativeId, id('4'));
   assert.deepEqual(verifyComponentReceiptV4(proof, {candidate: B, baseline: A,
     completeParent: verifiedParent, candidateArtifact: artifact}).inheritedRoles, ['app', 'gsales']);
   assert.throws(() => verifyComponentReceiptV4(proof, {candidate: B, baseline: A,
@@ -141,6 +144,7 @@ test('V5 parent requires successful exact Deployment, Prepare digests, live iden
     { ...evidence, deployment: { ...evidence.deployment, sha: B } },
     { ...evidence, deployment: { ...evidence.deployment, imageDigests: { ...evidence.deployment.imageDigests, app: id('8') } } },
     { ...evidence, prepare: { ...evidence.prepare, images: { ...registryImages, app: undefined } } },
+    { ...evidence, prepare: { ...evidence.prepare, images: { ...registryImages, app: { ...registryImages.app, nativeId: images.app.imageId } } } },
     { ...evidence, live: { ...evidence.live, nativeImages: { ...evidence.live.nativeImages, app: { imageId: id('9'), sourceSha: A, platform: 'linux/amd64' } } } },
     { ...evidence, live: { ...evidence.live, prismaHead: 'wrong' } },
     { ...evidence, live: { ...evidence.live, apiHealth: 'unhealthy' } },
@@ -196,14 +200,15 @@ test('fresh run-scoped VPS state maps GSales migration identity into the V5 pare
       receiptDigest: id('7'), prismaHead: 'prisma-1', agataHead: 'agata-1',
       gsalesMigrationHead: 'gsales-1', gsalesMigrationSha256: 'c'.repeat(64),
       images: Object.fromEntries(Object.entries(images).map(([role, image]) => [role, {
-        sourceSha: A, configDigest: image.imageId, manifestDigest: id(role === 'app' ? '4' : role === 'agata' ? '5' : '6')}]))},
+        sourceSha: A, configDigest: image.imageId, manifestDigest: id(role === 'app' ? '4' : role === 'agata' ? '5' : '6'),
+        nativeId: id(role === 'app' ? '4' : role === 'agata' ? '5' : '6')}]))},
     live: {source: 'read-only-vps', runtimeSha: A, miniappSha: A, prismaHead: 'prisma-1',
       agataHead: 'agata-1', gsalesHead: 'gsales-1', gsalesMigrationSha256: 'c'.repeat(64),
       apiHealth: 'healthy', agataApiHealth: 'healthy', gsalesApiHealth: 'healthy',
       gsalesAgataApiHealth: 'healthy', gsalesAgataWorkerHealth: 'healthy', workerRunning: true,
       botRunning: true, agataWorkerRunning: true, gsalesAgataWorkerRunning: true,
       nativeImages: Object.fromEntries(Object.entries(images).map(([role, image]) => [role,
-        {imageId: image.imageId, sourceSha: A, platform: 'linux/amd64'}]))},
+        {imageId: id(role === 'app' ? '4' : role === 'agata' ? '5' : '6'), sourceSha: A, platform: 'linux/amd64'}]))},
     unresolvedRecovery: false,
   };
   assert.equal(verifyV5ProductionParent(ledger, evidence).currentProductionSha, A);

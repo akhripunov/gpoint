@@ -34,6 +34,23 @@ test('native VPS facts are checked exactly', () => {
   assert.equal(result.agata.nativeImageId, images.agata.imageId);
   assert.equal(Object.keys(result).length,3);
 });
+test('V5 matches attested containerd native digest without confusing it with OCI config digest', () => {
+  const v5 = Object.fromEntries(Object.entries(images).map(([role, item], index) => [
+    role, {...item, nativeId: 'sha256:' + String(index + 5).repeat(64)},
+  ]));
+  const lines = [];
+  for (const [role, image] of Object.entries(v5)) {
+    lines.push('COMPONENT_V4_IMAGE=' + [role,image.nativeId,'linux','amd64',sha].join('|'));
+    for (const name of containers[role])
+      lines.push('COMPONENT_V4_CONTAINER=' + [role,name,image.nativeId,'true'].join('|'));
+  }
+  const output = lines.join('\n');
+  assert.equal(parseReadOnlyVPSProof(output,v5).app.nativeImageId,v5.app.nativeId);
+  assert.throws(() => parseReadOnlyVPSProof(output,images));
+  assert.throws(() => parseReadOnlyVPSProof(output.replace(v5.app.nativeId,'sha256:' + 'f'.repeat(64)),v5));
+  assert.throws(() => buildReadOnlyVPSProofCommand({...v5, app: {...v5.app, nativeId:v5.app.imageId}}));
+});
+
 test('missing or mismatched Docker container fails closed', () => {
   assert.throws(() => parseReadOnlyVPSProof(facts().replace('COMPONENT_V4_CONTAINER=agata|compose-gsales-agata-api-1', 'OMITTED=agata|compose-gsales-agata-api-1'), images));
   assert.throws(() => parseReadOnlyVPSProof(facts().replace('compose-bot-1|' + images.app.imageId, 'compose-bot-1|sha256:' + '9'.repeat(64)),images));

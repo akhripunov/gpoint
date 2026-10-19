@@ -14,6 +14,7 @@ export function buildReadOnlyVPSProofCommand(inventory) {
   for (const role of Object.keys(roles)) {
     const r = inventory?.[role];
     if (!SHA.test(r?.sourceSha ?? '') || !IMAGE.test(r?.imageId ?? '') ||
+        (r.nativeId !== undefined && (!IMAGE.test(r.nativeId) || r.nativeId === r.imageId)) ||
         r?.platform !== 'linux/amd64')
       throw new Error('untrusted native image verification input');
   }
@@ -36,13 +37,16 @@ export function buildReadOnlyVPSProofCommand(inventory) {
 export function parseReadOnlyVPSProof(output, inventory) {
   if (typeof output !== 'string') throw new Error('no VPS proof');
   const result = {}, checkedContainers = new Set();
+  // Legacy V3/V4 imageId is native. V5 keeps OCI config and containerd native
+  // digests distinct; the latter is verified against the attested rehearsal.
+  const expectedNative = role => inventory?.[role]?.nativeId ?? inventory?.[role]?.imageId;
   for (const line of output.split(/\r?\n/)) {
     if (line.startsWith('COMPONENT_V4_IMAGE=')) {
       const [role, id, os, arch, revision, ...extra] = line.slice(19).split('|');
       if (extra.length || !roles[role] || result[role] ||
           !IMAGE.test(id) || os !== 'linux' || arch !== 'amd64' ||
           revision !== inventory?.[role]?.sourceSha ||
-          id !== inventory?.[role]?.imageId)
+          id !== expectedNative(role))
         throw new Error('unexpected native Docker role image proof');
       result[role] = { nativeImageId: id, revisionLabel: revision,
         os, architecture: arch,
@@ -51,7 +55,7 @@ export function parseReadOnlyVPSProof(output, inventory) {
       const [role, container, id, running, ...extra] = line.slice(23).split('|');
       const key = role + ':' + container;
       if (extra.length || !roles[role]?.containers.includes(container) ||
-          checkedContainers.has(key) || id !== inventory?.[role]?.imageId ||
+          checkedContainers.has(key) || id !== expectedNative(role) ||
           running !== 'true')
         throw new Error('unexpected native Docker container proof');
       checkedContainers.add(key);

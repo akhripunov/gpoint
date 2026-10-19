@@ -607,7 +607,23 @@ async function verifiedV5ParentEvidence(current, facts, currentAttempt = null) {
         candidateSha: current.currentProductionSha, consumedCandidateSha: current.currentProductionSha, token});
     } catch { die('TASK_SCOPED_AUTO owner record or exact consumed authorization state is not verified'); }
   }
-  const native = v4NativeProofOnVPS(componentImages, runRemoteCommand);
+  // The hash-bound Prepare receipt separately attests OCI configDigest and the
+  // containerd nativeId established by the exact disposable deploy rehearsal.
+  // Runtime Docker image .Id is nativeId, NOT the OCI config digest.
+  const nativeInventory = Object.fromEntries(['app', 'agata', 'gsales'].map(role => {
+    const image = exactReceipt.images?.[role];
+    const rehearsal = exactReceipt.deployRehearsal?.images?.[role];
+    if (!/^sha256:[a-f0-9]{64}$/.test(rehearsal?.nativeId ?? '') ||
+        rehearsal.nativeId === image?.configDigest ||
+        rehearsal.configDigest !== image?.configDigest ||
+        rehearsal.digest !== image?.digest ||
+        rehearsal.sourceSha !== current.currentProductionSha ||
+        componentImages[role].imageId !== image?.configDigest ||
+        componentImages[role].registryDigest !== image?.digest)
+      die('Immutable V5 rehearsal-native-image identity mismatch ' + role);
+    return [role, {...componentImages[role], nativeId: rehearsal.nativeId}];
+  }));
+  const native = v4NativeProofOnVPS(nativeInventory, runRemoteCommand);
   const nativeImages = Object.fromEntries(Object.entries(native).map(([role, value]) => [role, {
     imageId: value.nativeImageId, sourceSha: value.revisionLabel, platform: `${value.os}/${value.architecture}`,
   }]));
@@ -625,8 +641,9 @@ async function verifiedV5ParentEvidence(current, facts, currentAttempt = null) {
       freshState.gsalesMigrationSha256 !== exactReceipt.gsalesMigrationSha256)
     die('Fresh VPS health, image, migration, configuration, or rollback facts changed during V5 parent verification');
   const roleFactImages = {app: ['LIVE_API_IMAGE', 'LIVE_WORKER_IMAGE', 'LIVE_BOT_IMAGE'],
-    agata: ['LIVE_AGATA_API_IMAGE_ID', 'LIVE_AGATA_WORKER_IMAGE_ID'],
-    gsales: ['LIVE_GSALES_API_IMAGE_ID', 'LIVE_GSALES_AGATA_API_IMAGE_ID', 'LIVE_GSALES_AGATA_MEMORY_WORKER_IMAGE_ID']};
+    agata: ['LIVE_AGATA_API_IMAGE_ID', 'LIVE_AGATA_WORKER_IMAGE_ID',
+      'LIVE_GSALES_AGATA_API_IMAGE_ID', 'LIVE_GSALES_AGATA_MEMORY_WORKER_IMAGE_ID'],
+    gsales: ['LIVE_GSALES_API_IMAGE_ID']};
   for (const [role, keys] of Object.entries(roleFactImages)) {
     if (keys.some(key => freshFacts[key] !== nativeImages[role].imageId))
       die(`Fresh VPS runtime image identity differs from the exact V5 parent for ${role}`);
@@ -651,6 +668,7 @@ async function verifiedV5ParentEvidence(current, facts, currentAttempt = null) {
       images: Object.fromEntries(['app', 'agata', 'gsales'].map(role => {
         const image = exactReceipt.images?.[role];
         return [role, {manifestDigest: image?.digest, configDigest: image?.configDigest ?? image?.id,
+          nativeId: exactReceipt.deployRehearsal?.images?.[role]?.nativeId,
           sourceSha: image?.sourceSha}];
       }))},
     live: {source: 'read-only-vps', runtimeSha: freshFacts.LIVE_RELEASE_ENV_SHA,

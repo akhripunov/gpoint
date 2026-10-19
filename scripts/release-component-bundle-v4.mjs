@@ -96,17 +96,18 @@ export function verifyV5ProductionParent(ledger, evidence) {
   for (const role of roles) {
     const receiptImage = prepare.images?.[role];
     const stateImage = stateImages[role];
-    checkID(receiptImage?.manifestDigest); checkID(receiptImage?.configDigest);
+    checkID(receiptImage?.manifestDigest); checkID(receiptImage?.configDigest); checkID(receiptImage?.nativeId);
     checkSHA(receiptImage?.sourceSha);
-    if (receiptImage.sourceSha !== sha || stateImage?.sourceSha !== sha ||
+    if (receiptImage.sourceSha !== sha || receiptImage.nativeId === receiptImage.configDigest ||
+        stateImage?.sourceSha !== sha ||
         stateImage.imageId !== receiptImage.configDigest ||
         stateImage.registryDigest !== receiptImage.manifestDigest ||
         stateImage.platform !== 'linux/amd64' ||
         deployment.imageDigests?.[role] !== receiptImage.manifestDigest)
       throw new Error('V5 parent GHCR digest/config identity mismatch ' + role);
     images[role] = { name: names[role], sourceSha: sha,
-      imageId: receiptImage.configDigest, registryDigest: receiptImage.manifestDigest,
-      platform: 'linux/amd64' };
+      imageId: receiptImage.configDigest, nativeId: receiptImage.nativeId,
+      registryDigest: receiptImage.manifestDigest, platform: 'linux/amd64' };
   }
   if (Object.keys(deployment.imageDigests ?? {}).sort().join(',') !== roles.slice().sort().join(','))
     throw new Error('V5 parent Deployment image digest set is incomplete');
@@ -127,7 +128,7 @@ export function verifyV5ProductionParent(ledger, evidence) {
     throw new Error('V5 parent migration or service health proof is stale or mismatched');
   for (const role of roles) {
     const actual = live.nativeImages?.[role];
-    if (actual?.imageId !== images[role].imageId || actual?.sourceSha !== sha ||
+    if (actual?.imageId !== images[role].nativeId || actual?.sourceSha !== sha ||
         actual?.platform !== 'linux/amd64')
       throw new Error('V5 parent VPS native image identity mismatch ' + role);
   }
@@ -225,7 +226,7 @@ export function verifyVPSNativeImages(manifest, observed, { candidate, baseline 
     const expected = manifest.images?.[role];
     const actual = observed?.[role];
     checkID(expected?.imageId);
-    if (actual?.nativeImageId !== expected.imageId ||
+    if (actual?.nativeImageId !== (expected.nativeId ?? expected.imageId) ||
         actual?.revisionLabel !== expected.sourceSha ||
         actual?.name !== expected.name + ':' + expected.sourceSha ||
         actual?.os !== 'linux' || actual?.architecture !== 'amd64' ||

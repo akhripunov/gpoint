@@ -55,16 +55,16 @@ test('V5 full deployment is a V4 UI-only parent only after exact GitHub, GHCR an
    imageDigests:{app:D('4'),agata:D('5'),gsales:D('6')}},
   prepare:{source:'verified-ghcr-receipt',candidateSha:A,runId:'9',runAttempt:'1',receiptDigest,
    prismaHead:'prisma-1',agataHead:'agata0011',gsalesMigrationHead:'001_gsales',gsalesMigrationSha256:'c'.repeat(64),
-   images:{app:{manifestDigest:D('4'),configDigest:D('1'),sourceSha:A},
-    agata:{manifestDigest:D('5'),configDigest:D('2'),sourceSha:A},
-    gsales:{manifestDigest:D('6'),configDigest:D('3'),sourceSha:A}}},
+   images:{app:{manifestDigest:D('4'),configDigest:D('1'),nativeId:D('4'),sourceSha:A},
+    agata:{manifestDigest:D('5'),configDigest:D('2'),nativeId:D('5'),sourceSha:A},
+    gsales:{manifestDigest:D('6'),configDigest:D('3'),nativeId:D('6'),sourceSha:A}}},
   live:{source:'read-only-vps',runtimeSha:A,miniappSha:A,prismaHead:'prisma-1',agataHead:'agata0011',
    gsalesHead:'001_gsales',gsalesMigrationSha256:'c'.repeat(64),apiHealth:'healthy',agataApiHealth:'healthy',
    gsalesApiHealth:'healthy',gsalesAgataApiHealth:'healthy',gsalesAgataWorkerHealth:'healthy',
    workerRunning:true,botRunning:true,agataWorkerRunning:true,gsalesAgataWorkerRunning:true,
-   nativeImages:{app:{imageId:D('1'),sourceSha:A,platform:'linux/amd64'},
-    agata:{imageId:D('2'),sourceSha:A,platform:'linux/amd64'},
-    gsales:{imageId:D('3'),sourceSha:A,platform:'linux/amd64'}}},
+   nativeImages:{app:{imageId:D('4'),sourceSha:A,platform:'linux/amd64'},
+    agata:{imageId:D('5'),sourceSha:A,platform:'linux/amd64'},
+    gsales:{imageId:D('6'),sourceSha:A,platform:'linux/amd64'}}},
   unresolvedRecovery:false,
  };
  const manifest=staticReceiptAndImages(receipt,v5,evidence);
@@ -72,5 +72,7 @@ test('V5 full deployment is a V4 UI-only parent only after exact GitHub, GHCR an
  assert.equal(manifest.images.app.registryDigest,D('4'));
  const v5Facts={...facts,LIVE_PRISMA_HEAD:'prisma-1',LIVE_AGATA_HEAD:'agata0011',
   LIVE_GSALES_HEAD:'001_gsales',LIVE_GSALES_MIGRATION_SHA256:'c'.repeat(64)};
- assert.equal(verifyStaticLiveBaseline(v5,receipt,v5Facts,native,evidence).route,'STATIC_UI_CANDIDATE');
+ const v5Native=Object.fromEntries(Object.entries(v5.componentImages).map(([role,image],i)=>[
+   role,{nativeImageId:D(String(i+4)),revisionLabel:image.sourceSha}]));
+ assert.equal(verifyStaticLiveBaseline(v5,receipt,v5Facts,v5Native,evidence).route,'STATIC_UI_CANDIDATE');
 });

@@ -98,7 +98,7 @@ export function verifyStaticLiveBaseline(state, proof, facts, nativeProof, deplo
   }
   if (!nativeProof || Object.keys(nativeProof).length !== 3) throw new Error('missing live native images');
   for (const role of ROLES) {
-    if (nativeProof[role].nativeImageId !== manifest.images[role].imageId ||
+    if (nativeProof[role].nativeImageId !== (manifest.images[role].nativeId ?? manifest.images[role].imageId) ||
         nativeProof[role].revisionLabel !== manifest.images[role].sourceSha)
       throw new Error('live image differs from immutable ledger');
   }
