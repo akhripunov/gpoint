@@ -181,6 +181,7 @@ jobs:
           python3 scripts/test_prepare_coalescing.py
           python3 -m unittest tests.test_prepare_workflow_summary
           python3 -m unittest tests.test_unified_release_v1
+          python3 -m unittest tests.test_interrupted_recovery_workflow
           python3 -m unittest discover -s tests -p test_release_impact_v3.py
           python3 -m unittest discover -s tests -p 'test_release_*v4.py'
           python3 -m unittest discover -s tests -p test_gpoint_docker_cache_v3.py

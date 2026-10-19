@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
 import {deploymentPayload} from './github-deployments.mjs';
 import {assertRecoveryEligibility,recoveryInventory,verifyRecoveredVps,recoveryReference} from './recover-interrupted-apply.mjs';
 
@@ -60,8 +61,13 @@ test('recovery eligibility binds failed original attempt and same unmodified Dep
 });
 test('recovery enforces native ID, OCI config, running containers, health, db and revision',()=>{
  assert.equal(recoveryInventory(receipt,identity,sha).agata.nativeId,native[1]);
+ assert.equal(recoveryInventory({...receipt,route:'FULL_RELEASE',staticOnly:false},identity,sha).agata.nativeId,native[1]);
+ assert.throws(()=>recoveryInventory(receipt,{...identity,route:'STATIC_UI_ONLY'},sha));
  for(const invalid of [
   {...receipt,route:'STATIC_UI_ONLY'},
+  {...receipt,route:'UNKNOWN'},
+  {...receipt,route:null},
+  {...receipt,staticOnly:'true'},
   {...receipt,staticOnly:true},
   {...receipt,transport:'legacy'},
   {...receipt,status:'FAILED'},
@@ -148,6 +154,16 @@ test('immutable recovery proof must not erase original failed Deploy or alter na
   recoveryRunId:'9988',recoveryRunAttempt:'1',prepareRunId:'1000',prepareRunAttempt:'1',
   prepareReceiptDigest:identity.prepareReceiptDigest,prepareReceiptSha256:sha256};
  assert.equal(verifyInterruptedRecoveryProof(source,expected),source);
+ const bridge = new URL('./verify-interrupted-recovery-proof.mjs',import.meta.url);
+ const invoke = proof => spawnSync(process.execPath,[bridge.pathname],{
+  input:JSON.stringify({proof,expected}),encoding:'utf8',timeout:30000});
+ const accepted=invoke(source);
+ assert.equal(accepted.status,0,accepted.stderr);
+ assert.deepEqual(JSON.parse(accepted.stdout),{verified:true});
+ const rejected=invoke({...source,deployRunConclusion:'success'});
+ assert.equal(rejected.status,1);
+ assert.equal(rejected.stdout,'');
+ assert.match(rejected.stderr,/INTERRUPTED_RECOVERY_PROOF=BLOCKED/);
  for(const wrong of [
   {...source,deployRunConclusion:'success'},
   {...source,ciReceipt:{...source.ciReceipt,prepareReceiptJson:json+' '}},

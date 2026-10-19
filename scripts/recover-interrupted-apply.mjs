@@ -66,7 +66,8 @@ export function recoveryInventory(receipt,identity,candidateSha){
  // itself carries the canonical FULL_RELEASE route. Never infer a static route.
  ensure(receipt?.candidateSha===candidateSha && receipt.schema===3
   && receipt.transport==='ghcr-oci' && receipt.status==='READY'
-  && receipt.route!=='STATIC_UI_ONLY' && receipt.staticOnly!==true
+  && (receipt.route===undefined || receipt.route==='FULL_RELEASE')
+  && (receipt.staticOnly===undefined || receipt.staticOnly===false)
   && identity.route==='FULL_RELEASE','RECEIPT_ROUTE');
  const inventory={};
  for(const role of ROLES){

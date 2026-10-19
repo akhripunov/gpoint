@@ -14,6 +14,7 @@ import urllib.request
 import urllib.parse
 import zipfile
 import hashlib
+import subprocess
 from datetime import datetime, timezone
 
 from sync_agents_to_linear import graphql_request, sync_document, SyncError
@@ -118,7 +119,8 @@ AUTHORIZATION_RECONCILIATION_OPERATION = 'AUTHORIZATION_CONSUMPTION_RECONCILIATI
 MAX_DEPLOY_LOG_BYTES = 32 * 1024**2
 
 
-def deploy_evidence_digest_from_logs(run_id, attempt, sha, *, job_name='deploy', step_name=DEPLOY_EVIDENCE_STEP):
+def deploy_evidence_digest_from_logs(run_id, attempt, sha, *, job_name='deploy', step_name=DEPLOY_EVIDENCE_STEP,
+                                    digest_label='DEPLOY_EVIDENCE_DIGEST'):
     """Bind an OCI digest to an exact workflow attempt, job and successful publisher step."""
     route = f'repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100&page=1'
     data = github_json(route)
@@ -135,6 +137,8 @@ def deploy_evidence_digest_from_logs(run_id, attempt, sha, *, job_name='deploy',
         raise SyncError('Deploy job identity is not a completed exact workflow attempt and source SHA')
     if job_name == 'reconcile-authorization' and job.get('conclusion') != 'success':
         raise SyncError('Authorization reconciliation job did not complete successfully')
+    if job_name == 'recover' and job.get('conclusion') != 'success':
+        raise SyncError('Interrupted Apply recovery job did not complete successfully')
     steps = job.get('steps')
     if not isinstance(steps, list):
         raise SyncError('Deploy job step inventory is missing')
@@ -145,7 +149,7 @@ def deploy_evidence_digest_from_logs(run_id, attempt, sha, *, job_name='deploy',
         raise SyncError('Exact Deploy evidence publication step did not succeed')
     payload = download_job_logs(job.get('id'))
     step_number = evidence_steps[0]['number']
-    marker = re.compile(r'DEPLOY_EVIDENCE_DIGEST=(sha256:[a-f0-9]{64})')
+    marker = re.compile(re.escape(digest_label) + r'=(sha256:[a-f0-9]{64})')
     try:
         if not payload or len(payload) > MAX_DEPLOY_LOG_BYTES:
             raise SyncError('Deploy job logs are empty or exceed the bounded evidence limit')
@@ -169,9 +173,9 @@ def deploy_evidence_digest_from_logs(run_id, attempt, sha, *, job_name='deploy',
             # GitHub's plain log endpoint prefixes lines with an ISO UTC timestamp.
             line = re.sub(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+', '', line)
             line = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', line).lstrip()
-            if line.startswith('DEPLOY_EVIDENCE_DIGEST='):
+            if line.startswith(digest_label + '='):
                 found = marker.findall(line)
-                if len(found) != 1 or line != f'DEPLOY_EVIDENCE_DIGEST={found[0]}':
+                if len(found) != 1 or line != f'{digest_label}={found[0]}':
                     raise SyncError('Exact Deploy evidence digest line is malformed or ambiguous')
                 matches.extend(found)
     except SyncError:
@@ -216,7 +220,7 @@ def download_job_logs(job_id):
 
 def artifact_json(run_id, *, attempt=None, sha=None, deployment_id=None, job_name='deploy',
                   step_name=DEPLOY_EVIDENCE_STEP, evidence_candidate_sha=None,
-                  expected_operation=None, return_integrity=False):
+                  expected_operation=None, return_integrity=False, recovery_deployment_id=None):
     """Resolve Deploy evidence by run-bound digest from GitHub logs and verify OCI content."""
     run_id = str(run_id)
     run_route = (f'repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}'
@@ -224,18 +228,22 @@ def artifact_json(run_id, *, attempt=None, sha=None, deployment_id=None, job_nam
     run = github_json(run_route)
     attempt = str(attempt or run.get('run_attempt', ''))
     sha = sha or run.get('head_sha', '')
-    if (run.get('path') != '.github/workflows/gpoint-deploy.yml' or run.get('head_branch') != 'main'
+    recovering = recovery_deployment_id is not None
+    if (run.get('path') != ('.github/workflows/gpoint-recover-interrupted.yml' if recovering else '.github/workflows/gpoint-deploy.yml') or run.get('head_branch') != 'main'
             or run.get('event') != 'workflow_dispatch' or str(run.get('id')) != run_id
             or str(run.get('run_attempt')) != attempt or run.get('head_sha') != sha
             or not re.fullmatch(r'[a-f0-9]{40}', sha) or not attempt.isdigit()):
         raise SyncError('Unverified Deploy result workflow identity')
-    digest = deploy_evidence_digest_from_logs(run_id, attempt, sha, job_name=job_name, step_name=step_name)
+    digest = deploy_evidence_digest_from_logs(run_id, attempt, sha, job_name=job_name, step_name=step_name,
+        digest_label='RECOVERY_EVIDENCE_DIGEST' if recovering else 'DEPLOY_EVIDENCE_DIGEST')
     username = os.environ.get('GHCR_READ_USERNAME') or os.environ.get('GITHUB_ACTOR', '')
     password = os.environ.get('GHCR_READ_TOKEN') or os.environ.get('GITHUB_TOKEN', '')
     if not username or not password:
         raise SyncError('GHCR read credentials are missing')
     repository = DEPLOY_EVIDENCE_REPOSITORY
     base = f'https://ghcr.io/v2/{repository}'
+    evidence_type = 'application/vnd.gpoint.recovery.evidence.v1' if recovering else DEPLOY_EVIDENCE_TYPE
+    evidence_layer = 'application/vnd.gpoint.recovery.evidence.v1+json' if recovering else DEPLOY_EVIDENCE_LAYER
     accept = f'{OCI_MANIFEST_TYPE}, application/vnd.oci.image.index.v1+json'
     manifest_bytes, digest_headers = ghcr_get(f'{base}/manifests/{digest}', username, password, accept, 1024 * 1024)
     if digest_headers.get('Docker-Content-Digest') != digest or hashlib.sha256(manifest_bytes).hexdigest() != digest[7:]:
@@ -246,12 +254,12 @@ def artifact_json(run_id, *, attempt=None, sha=None, deployment_id=None, job_nam
         raise SyncError('GHCR Deploy evidence manifest is invalid JSON') from exc
     layers = manifest.get('layers') if isinstance(manifest, dict) else None
     if (not isinstance(manifest, dict) or manifest.get('mediaType') != OCI_MANIFEST_TYPE
-            or manifest.get('artifactType') != DEPLOY_EVIDENCE_TYPE
+            or manifest.get('artifactType') != evidence_type
             or not isinstance(layers, list) or len(layers) != 1):
         raise SyncError('GHCR Deploy evidence OCI artifact type or layout is invalid')
     layer = layers[0]
     blob_digest, blob_size = layer.get('digest', ''), layer.get('size')
-    if (layer.get('mediaType') != DEPLOY_EVIDENCE_LAYER or not re.fullmatch(r'sha256:[a-f0-9]{64}', blob_digest)
+    if (layer.get('mediaType') != evidence_layer or not re.fullmatch(r'sha256:[a-f0-9]{64}', blob_digest)
             or not isinstance(blob_size, int) or isinstance(blob_size, bool)
             or blob_size < 1 or blob_size > MAX_DEPLOY_EVIDENCE_BYTES):
         raise SyncError('GHCR Deploy evidence layer descriptor is invalid')
@@ -264,7 +272,8 @@ def artifact_json(run_id, *, attempt=None, sha=None, deployment_id=None, job_nam
         raise SyncError('GHCR Deploy evidence layer is invalid JSON') from exc
     expected_candidate = evidence_candidate_sha or sha
     if (not isinstance(result, dict) or result.get('candidateSha') != expected_candidate
-            or str(result.get('automationRunId')) != run_id or str(result.get('automationRunAttempt')) != attempt
+            or str(result.get('recoveryRunId' if recovering else 'automationRunId')) != run_id
+            or str(result.get('recoveryRunAttempt' if recovering else 'automationRunAttempt')) != attempt
             or (expected_operation is None and (str(result.get('deployRunId')) != run_id
                 or str(result.get('deployRunAttempt')) != attempt))
             or (expected_operation is not None and (result.get('operation') != expected_operation
@@ -274,6 +283,99 @@ def artifact_json(run_id, *, attempt=None, sha=None, deployment_id=None, job_nam
     if return_integrity:
         return result, digest, hashlib.sha256(blob).hexdigest()
     return result
+
+
+def fetch_interrupted_recovery_evidence(recovery_run_id, recovery_attempt, candidate_sha,
+                                        deployment_id, original_run_id, original_attempt, prepare,
+                                        deployment, statuses):
+    """Verify recovery OCI bytes in Python and its receipt/live proof in the shared Node verifier."""
+    recovery_run_id, recovery_attempt = str(recovery_run_id), str(recovery_attempt)
+    original_run_id, original_attempt = str(original_run_id), str(original_attempt)
+    run = github_json(f'repos/{REPOSITORY}/actions/runs/{recovery_run_id}/attempts/{recovery_attempt}')
+    if (run.get('path') != '.github/workflows/gpoint-recover-interrupted.yml'
+            or run.get('head_branch') != 'main' or run.get('event') != 'workflow_dispatch'
+            or str(run.get('id')) != recovery_run_id or str(run.get('run_attempt')) != recovery_attempt
+            or run.get('status') != 'completed' or run.get('conclusion') != 'success'
+            or not re.fullmatch(r'[a-f0-9]{40}', run.get('head_sha', ''))
+            or (run.get('actor') or {}).get('login') != 'akhripunov'
+            or (run.get('triggering_actor') or {}).get('login') != 'akhripunov'):
+        raise SyncError('Recovery evidence was not created by an exact successful owner workflow')
+    original = github_json(f'repos/{REPOSITORY}/actions/runs/{original_run_id}/attempts/{original_attempt}')
+    if (original.get('path') != '.github/workflows/gpoint-deploy.yml'
+            or original.get('head_branch') != 'main' or original.get('event') != 'workflow_dispatch'
+            or str(original.get('id')) != original_run_id or str(original.get('run_attempt')) != original_attempt
+            or original.get('head_sha') != candidate_sha or original.get('status') != 'completed'
+            or original.get('conclusion') != 'failure'):
+        raise SyncError('Recovery evidence original failed Deploy provenance is unavailable')
+    if (not isinstance(prepare, dict) or not re.fullmatch(r'[1-9][0-9]*', str(prepare.get('runId', '')))
+            or not re.fullmatch(r'[1-9][0-9]*', str(prepare.get('attempt', '')))
+            or not re.fullmatch(r'sha256:[a-f0-9]{64}', prepare.get('receiptDigest', ''))
+            or not re.fullmatch(r'[a-f0-9]{64}', prepare.get('receiptSha256', ''))):
+        raise SyncError('Original Deployment Prepare receipt identity is incomplete')
+    deployment_payload = deployment.get('payload')
+    if isinstance(deployment_payload, str):
+        try:
+            deployment_payload = json.loads(deployment_payload)
+        except ValueError as error:
+            raise SyncError('Original Deployment provenance payload is invalid') from error
+    if not isinstance(deployment_payload, dict):
+        raise SyncError('Original Deployment provenance payload is unavailable')
+    authorization = deployment_payload.get('authorization')
+    image_digests = prepare.get('imageDigests')
+    if (deployment_payload.get('route') != 'FULL_RELEASE'
+            or not isinstance(authorization, dict) or authorization.get('mode') != 'EXACT_SHA'
+            or authorization.get('id') not in (None, '')
+            or not isinstance(image_digests, dict)
+            or set(image_digests) != {'app', 'agata', 'gsales'}
+            or any(not re.fullmatch(r'sha256:[a-f0-9]{64}', str(image_digests[role])) for role in ('app', 'agata', 'gsales'))):
+        raise SyncError('Recovery is limited to an exact-SHA full-release Deployment with exact OCI identities')
+    proof = artifact_json(recovery_run_id, attempt=recovery_attempt, sha=run['head_sha'],
+        deployment_id=deployment_id, job_name='recover',
+        step_name='Publish independently verified recovery evidence',
+        evidence_candidate_sha=candidate_sha, expected_operation='INTERRUPTED_APPLY_INDEPENDENT_RECOVERY',
+        recovery_deployment_id=deployment_id)
+    if (proof.get('originalRunId') != original_run_id or proof.get('originalRunAttempt') != original_attempt
+            or str(proof.get('prepareRunId')) != str(prepare['runId'])
+            or str(proof.get('prepareRunAttempt')) != str(prepare['attempt'])):
+        raise SyncError('Recovery evidence does not bind the original Deployment and Prepare')
+    components = proof.get('componentImages')
+    if (not isinstance(components, dict) or set(components) != {'app', 'agata', 'gsales'}
+            or any(components[role].get('registryDigest') != image_digests[role]
+                   for role in ('app', 'agata', 'gsales'))):
+        raise SyncError('Recovery image inventory differs from the original Deployment OCI identities')
+    expected_error = f'stage=post_apply sha={candidate_sha[:12]} run={original_run_id}/{original_attempt}'
+    status_url = f'https://github.com/{REPOSITORY}/actions/runs/{original_run_id}/attempts/{original_attempt}'
+    if (not isinstance(statuses, list) or len(statuses) < 3
+            or statuses[0].get('id') == proof.get('originalFailure', {}).get('statusId')
+            or statuses[0].get('state') != 'success'
+            or statuses[0].get('description') != f'stage=complete sha={candidate_sha[:12]} run={original_run_id}/{original_attempt} recovered={recovery_run_id}/{recovery_attempt}'
+            or statuses[0].get('log_url') != status_url
+            or not any(s.get('id') == proof.get('originalFailure', {}).get('statusId')
+                and s.get('state') == 'error' and s.get('description') == expected_error and s.get('log_url') == status_url
+                for s in statuses[1:])):
+        raise SyncError('Recovered Deployment lacks its original error and exact recovery status history')
+    bridge = Path(__file__).resolve().parent / 'verify-interrupted-recovery-proof.mjs'
+    try:
+        verified = subprocess.run(['node', str(bridge)], input=json.dumps({'proof': proof, 'expected': {
+            'candidateSha': candidate_sha, 'deploymentId': deployment_id,
+            'originalRunId': original_run_id, 'originalRunAttempt': original_attempt,
+            'prepareRunId': str(prepare['runId']), 'prepareRunAttempt': str(prepare['attempt']),
+            'prepareReceiptDigest': prepare['receiptDigest'], 'prepareReceiptSha256': prepare['receiptSha256'],
+            'recoveryRunId': recovery_run_id, 'recoveryRunAttempt': recovery_attempt}}),
+            text=True, capture_output=True, timeout=30, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SyncError('Recovery proof verifier could not run') from error
+    if verified.returncode != 0:
+        raise SyncError('Recovery proof failed independent Node verification')
+    try:
+        summary = json.loads(verified.stdout)
+    except (ValueError, TypeError) as error:
+        raise SyncError('Recovery proof verifier returned invalid output') from error
+    if summary != {'verified': True}:
+        raise SyncError('Recovery proof verifier did not confirm the evidence')
+    return {'status': proof['status'], 'candidateSha': candidate_sha, 'deploymentId': deployment_id,
+        'applicationVerification': proof['applicationVerification'], 'recoveryRunId': recovery_run_id,
+        'recoveryRunAttempt': recovery_attempt, 'recoveryAttestationVerified': True}
 
 
 def authorization_reconciliation_evidence(automation_run_id, automation_attempt, candidate_sha,
@@ -432,8 +534,8 @@ def production_evidence():
         statuses.sort(key=lambda row: row.get('created_at', ''), reverse=True)
         current = statuses[0]
         if current.get('state') not in allowed: raise SyncError('GitHub Deployment current status is invalid')
-        observed.append((deployment, payload, current))
-    deployment, payload, current = observed[0]
+        observed.append((deployment, payload, current, statuses))
+    deployment, payload, current, statuses = observed[0]
     # An unresolved newest attempt may already have changed the VPS. Older
     # successful Deployments are history, not proof of the currently installed SHA.
     installed = observed[0] if observed[0][2].get('state') == 'success' else None
@@ -447,12 +549,20 @@ def production_evidence():
     reconciliation_match = re.fullmatch(
         rf'stage=complete sha=([a-f0-9]{{12}}) run={re.escape(run_id)}/{re.escape(attempt)} '
         r'reconciled=(\d+)/(\d+)', current.get('description') or '')
+    recovery_match = re.fullmatch(
+        rf'stage=complete sha=([a-f0-9]{{12}}) run={re.escape(run_id)}/{re.escape(attempt)} '
+        r'recovered=(\d+)/(\d+)', current.get('description') or '')
     if reconciliation_match:
         if current.get('state') != 'success' or reconciliation_match.group(1) != sha[:12]:
             raise SyncError('Authorization reconciliation status does not match the installed Deployment')
         result = authorization_reconciliation_evidence(
             reconciliation_match.group(2), reconciliation_match.group(3), sha,
             deployment.get('id'), run_id, attempt)
+    elif recovery_match:
+        if current.get('state') != 'success' or recovery_match.group(1) != sha[:12]:
+            raise SyncError('Interrupted Apply recovery status does not match the installed Deployment')
+        result = fetch_interrupted_recovery_evidence(recovery_match.group(2), recovery_match.group(3), sha,
+            deployment.get('id'), run_id, attempt, payload.get('prepare'), deployment, statuses)
     else:
         result = artifact_json(run_id, attempt=attempt, sha=sha, deployment_id=deployment.get('id'))
     if current.get('state') == 'success' and (result.get('status') != 'COMPLETE'
@@ -469,7 +579,9 @@ def production_evidence():
                 'description': current.get('description'), 'logUrl': current.get('log_url'),
                 'resultStatus': result.get('status'),
                 'authorizationReconciliationRunId': result.get('automationRunId') if reconciliation_match else None,
-                'authorizationReconciliationRunAttempt': result.get('automationRunAttempt') if reconciliation_match else None}
+                'authorizationReconciliationRunAttempt': result.get('automationRunAttempt') if reconciliation_match else None,
+                'recoveryRunId': result.get('recoveryRunId') if recovery_match else None,
+                'recoveryRunAttempt': result.get('recoveryRunAttempt') if recovery_match else None}
     run = {'id': int(run_id), 'run_attempt': int(attempt), 'head_sha': sha,
            'status': 'completed' if current['state'] in {'success', 'failure', 'error'} else 'in_progress',
            'conclusion': current['state'], 'html_url': expected_url}

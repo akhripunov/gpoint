@@ -13,6 +13,7 @@ import json
 import io
 import zipfile
 import hashlib
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -835,6 +836,94 @@ class DeploymentReleaseTests(unittest.TestCase):
         self.assertEqual(manifest['authorizationReconciliationRunId'], '600')
         self.assertEqual(manifest['authorizationReconciliationRunAttempt'], '3')
         self.assertEqual(run['id'], 503)
+
+    def test_interrupted_apply_recovery_is_read_from_recovery_attestation_not_missing_original_oci(self):
+        item, url = deployment(104, SHA, 505, 1, '2026-10-19T12:00:00Z')
+        item['payload']['route'] = 'FULL_RELEASE'
+        item['payload']['prepare'].update({'receiptDigest': 'sha256:' + 'd' * 64,
+            'receiptSha256': 'e' * 64, 'imageDigests': {role: 'sha256:' + char * 64
+                for role, char in (('app', '1'), ('agata', '2'), ('gsales', '3'))}})
+        recovered = status('success', url, '2026-10-19T12:05:00Z')
+        recovered['description'] = f'stage=complete sha={SHA[:12]} run=505/1 recovered=600/2'
+        history = [recovered, {**status('error', url, '2026-10-19T12:01:00Z'), 'id': 700},
+                   {**status('in_progress', url, '2026-10-19T12:00:30Z'), 'id': 699}]
+        attestation = {'status': 'COMPLETE', 'candidateSha': SHA, 'deploymentId': 104,
+                       'applicationVerification': 'VPS_READBACK_VERIFIED', 'recoveryRunId': '600',
+                       'recoveryRunAttempt': '2', 'recoveryAttestationVerified': True}
+        def read(route):
+            if '/deployments?' in route: return [item]
+            if '/statuses?' in route: return history
+            raise AssertionError(route)
+        with patch.object(SYNC, 'github_json', side_effect=read), \
+             patch.object(SYNC, 'fetch_interrupted_recovery_evidence', return_value=attestation) as recover, \
+             patch.object(SYNC, 'artifact_json') as original_artifact:
+            state, manifest, run = SYNC.production_evidence()
+        recover.assert_called_once_with('600', '2', SHA, 104, '505', '1', item['payload']['prepare'], item, history)
+        original_artifact.assert_not_called()
+        self.assertEqual(state['currentProductionSha'], SHA)
+        self.assertEqual(manifest['resultStatus'], 'COMPLETE')
+        self.assertEqual(manifest['recoveryRunId'], '600')
+        self.assertEqual(run['id'], 505)
+
+    def test_recovery_reader_requires_owner_workflow_and_passes_bound_proof_to_node_verifier(self):
+        prepare = {'runId': '10', 'attempt': '1', 'receiptDigest': 'sha256:' + 'd' * 64,
+                   'receiptSha256': 'e' * 64,
+                   'imageDigests': {role: 'sha256:' + char * 64
+                       for role, char in (('app', '1'), ('agata', '2'), ('gsales', '3'))}}
+        item, url = deployment(105, SHA, 506, 1, '2026-10-19T13:00:00Z')
+        item['payload']['route'] = 'FULL_RELEASE'
+        item['payload']['prepare'] = dict(prepare)
+        item['payload']['authorization'] = {'mode': 'EXACT_SHA', 'id': ''}
+        item['payload'] = json.dumps(item['payload'])
+        statuses = [
+            {'id': 800, 'state': 'success', 'description': f'stage=complete sha={SHA[:12]} run=506/1 recovered=601/2', 'log_url': url},
+            {'id': 799, 'state': 'error', 'description': f'stage=post_apply sha={SHA[:12]} run=506/1', 'log_url': url},
+            {'id': 798, 'state': 'in_progress', 'description': f'stage=pre_apply sha={SHA[:12]} run=506/1', 'log_url': url},
+        ]
+        proof = {'status': 'COMPLETE', 'candidateSha': SHA, 'deploymentId': 105,
+                 'applicationVerification': 'VPS_READBACK_VERIFIED',
+                 'originalRunId': '506', 'originalRunAttempt': '1', 'prepareRunId': '10',
+                 'prepareRunAttempt': '1', 'originalFailure': {'statusId': 799},
+                 'componentImages': {role: {'registryDigest': value}
+                    for role, value in prepare['imageDigests'].items()}}
+        owner_run = {'path': '.github/workflows/gpoint-recover-interrupted.yml', 'head_branch': 'main',
+            'event': 'workflow_dispatch', 'id': 601, 'run_attempt': 2, 'status': 'completed',
+            'conclusion': 'success', 'head_sha': 'f' * 40,
+            'actor': {'login': 'akhripunov'}, 'triggering_actor': {'login': 'akhripunov'}}
+        original_run = {'path': '.github/workflows/gpoint-deploy.yml', 'head_branch': 'main',
+            'event': 'workflow_dispatch', 'id': 506, 'run_attempt': 1, 'status': 'completed',
+            'conclusion': 'failure', 'head_sha': SHA}
+        def read(route):
+            if route.endswith('/actions/runs/601/attempts/2'): return owner_run
+            if route.endswith('/actions/runs/506/attempts/1'): return original_run
+            raise AssertionError(route)
+        completed = subprocess.CompletedProcess(['node'], 0, stdout='{"verified":true}\n', stderr='')
+        with patch.object(SYNC, 'github_json', side_effect=read), \
+             patch.object(SYNC, 'artifact_json', return_value=proof) as artifact, \
+             patch.object(SYNC.subprocess, 'run', return_value=completed) as bridge:
+            result = SYNC.fetch_interrupted_recovery_evidence('601', '2', SHA, 105,
+                '506', '1', prepare, item, statuses)
+        artifact.assert_called_once_with('601', attempt='2', sha='f' * 40, deployment_id=105,
+            job_name='recover', step_name='Publish independently verified recovery evidence',
+            evidence_candidate_sha=SHA, expected_operation='INTERRUPTED_APPLY_INDEPENDENT_RECOVERY',
+            recovery_deployment_id=105)
+        bridge_input = json.loads(bridge.call_args.kwargs['input'])
+        self.assertEqual(bridge_input['proof'], proof)
+        self.assertEqual(bridge_input['expected']['prepareReceiptDigest'], prepare['receiptDigest'])
+        self.assertTrue(result['recoveryAttestationVerified'])
+
+    def test_recovery_reader_rejects_nonowner_before_reading_recovery_artifact(self):
+        run = {'path': '.github/workflows/gpoint-recover-interrupted.yml', 'head_branch': 'main',
+            'event': 'workflow_dispatch', 'id': 602, 'run_attempt': 1, 'status': 'completed',
+            'conclusion': 'success', 'head_sha': 'f' * 40,
+            'actor': {'login': 'other'}, 'triggering_actor': {'login': 'akhripunov'}}
+        with patch.object(SYNC, 'github_json', return_value=run), \
+             patch.object(SYNC, 'artifact_json') as artifact:
+            with self.assertRaisesRegex(SYNC.SyncError, 'exact successful owner workflow'):
+                SYNC.fetch_interrupted_recovery_evidence('602', '1', SHA, 106, '507', '1',
+                    {'runId': '10', 'attempt': '1', 'receiptDigest': 'sha256:' + 'd' * 64,
+                     'receiptSha256': 'e' * 64}, {}, [])
+        artifact.assert_not_called()
 
     def test_success_status_with_failed_or_unverified_evidence_is_rejected(self):
         item, url = deployment(103, SHA, 504, 1, '2026-10-19T11:00:00Z')

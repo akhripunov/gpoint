@@ -48,6 +48,17 @@ class InterruptedRecoveryWorkflowTests(unittest.TestCase):
         self.assertNotIn('docker compose up', WORKFLOW.read_text())
         self.assertNotIn('deploy:gpoint', WORKFLOW.read_text())
 
+    def test_prepare_runs_recovery_contract_regressions(self):
+        self.assertIn('scripts/recover-interrupted-apply.test.mjs', (ROOT / 'package.json').read_text())
+        self.assertIn('python3 -m unittest tests.test_interrupted_recovery_workflow',
+                      (ROOT / '.github/workflows/gpoint-prepare.yml').read_text())
+
+    def test_successful_recovery_triggers_canonical_linear_reconciliation(self):
+        workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-linear-reconcile.yml').read_text())
+        events = workflow.get('on', workflow.get(True))
+        self.assertIn('GPoint — Interrupted Apply recovery', events['workflow_run']['workflows'])
+        self.assertEqual(events['workflow_run']['types'], ['completed'])
+
     def test_recovery_executor_is_distinct_from_prepared_candidate_and_stays_on_main(self):
         from scripts.prepared_artifact_cache import validate_current_main_candidate as validate
         candidate, executor = 'a' * 40, 'b' * 40
