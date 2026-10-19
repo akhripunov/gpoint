@@ -151,6 +151,7 @@ async function readBoundDeploymentArtifact({runId, attempt, candidateSha, token,
   registryToken = process.env.GHCR_READ_TOKEN}) {
   requireThat(SHA40.test(candidateSha ?? ''), 'Exact candidate SHA is required to resolve Deploy evidence');
   const tag = `deploy-${candidateSha}-${runId}-${attempt}`;
+  console.log('V5_PARENT_EVIDENCE_PHASE=read_workflow_run');
   const deployRun = await apiJson(`actions/runs/${runId}/attempts/${attempt}`, token, fetchImpl);
   requireThat(String(deployRun.id) === String(runId) && String(deployRun.run_attempt) === String(attempt)
     && SHA40.test(deployRun.head_sha ?? '') && (!requireCandidateHead || deployRun.head_sha === candidateSha) && deployRun.path === '.github/workflows/gpoint-deploy.yml'
@@ -170,9 +171,11 @@ async function readBoundDeploymentArtifact({runId, attempt, candidateSha, token,
     fs.chmodSync(registryConfig, 0o600);
     const run = (file, args, options = {}) => execFile(file, args, options);
     const reference = `ghcr.io/akhripunov/gpoint-deploy-evidence:${tag}`;
+  console.log('V5_PARENT_EVIDENCE_PHASE=resolve_evidence_oci');
     const digest = run('oras', ['resolve', '--registry-config', registryConfig, reference],
       {encoding: 'utf8', timeout: 30_000}).trim();
     requireThat(/^sha256:[a-f0-9]{64}$/.test(digest), 'Deploy evidence tag did not resolve to an immutable digest');
+  console.log('V5_PARENT_EVIDENCE_PHASE=read_publisher_jobs');
     const jobs = await apiJson(`actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100`, token, fetchImpl);
     const publishers = (jobs.jobs ?? []).filter(job => job.name === publisherJob
       && String(job.run_id) === String(runId) && job.head_sha === deployRun.head_sha
@@ -182,16 +185,19 @@ async function readBoundDeploymentArtifact({runId, attempt, candidateSha, token,
         && step.status === 'completed' && step.conclusion === 'success'));
     requireThat(publishers.length === 1 && Number.isSafeInteger(publishers[0].id),
       'Exact original Deploy evidence publisher job is missing or ambiguous');
+  console.log('V5_PARENT_EVIDENCE_PHASE=fetch_publisher_logs');
     const logsResponse = await fetchImpl(`${API}/repos/${REPOSITORY}/actions/jobs/${publishers[0].id}/logs`, {
       headers: {Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json',
         'X-GitHub-Api-Version': '2022-11-28'}, signal: AbortSignal.timeout(60_000)});
     requireThat(logsResponse.ok, 'Original Deploy publisher logs are unavailable');
     const logBytes = await readBoundedBody(logsResponse, MAX_DEPLOY_LOG_BYTES);
     const publisherLogs = readPublisherJobLogs(logBytes, directory, run);
+  console.log('V5_PARENT_EVIDENCE_PHASE=verify_publisher_logs');
     verifyLoggedDigest(publisherLogs, digest);
     const subject = `ghcr.io/akhripunov/gpoint-deploy-evidence@${digest}`;
     const directoryArg = path.join(directory, 'artifact');
     fs.mkdirSync(directoryArg, {mode: 0o700});
+  console.log('V5_PARENT_EVIDENCE_PHASE=pull_evidence_oci');
     run('oras', ['pull', '--registry-config', registryConfig, subject, '-o', directoryArg],
       {encoding: 'utf8', timeout: 60_000});
     const names = fs.readdirSync(directoryArg);
@@ -200,6 +206,7 @@ async function readBoundDeploymentArtifact({runId, attempt, candidateSha, token,
     const bytes = fs.readFileSync(path.join(directoryArg, names[0]));
     requireThat(bytes.length <= 1024 * 1024, 'Deploy evidence exceeds its size limit');
     const contentSha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+  console.log('V5_PARENT_EVIDENCE_PHASE=decode_evidence_json');
     const evidence = JSON.parse(bytes.toString('utf8'));
     return {evidence, deployRun, digest, contentSha256};
   } finally {

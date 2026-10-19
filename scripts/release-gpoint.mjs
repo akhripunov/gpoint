@@ -12,7 +12,7 @@ import { verifyReleaseBundle } from './release-bundle.mjs';
 import { validateOciReceipt } from './release-oci.mjs';
 import { buildV5ComponentImageInventory, deriveV3ProductionParent, verifyV5ProductionParent } from './release-component-bundle-v4.mjs';
 import { createGitHubDeploymentsClient } from './github-deployments.mjs';
-import { fetchOriginalDeployEvidence, fetchAuthorizationReconciliationEvidence } from './reconcile-deployment.mjs';
+import { fetchOriginalDeployEvidence, fetchAuthorizationReconciliationEvidence, safeReconciliationFailure } from './reconcile-deployment.mjs';
 import { AuthorizationError, authorizationRecordPath, candidateScopeDiff,
   checkTaskAuthorizationState, validateTaskAuthorization } from './release-authorization.mjs';
 import { expectedStaticParent, staticReceiptAndImages, verifyStaticLiveBaseline,
@@ -529,7 +529,10 @@ export async function loadV5ParentDeployEvidence(verified, candidateSha, token,
           originalRunId: identity.runId, originalRunAttempt: identity.runAttempt,
           prepareReceiptSha256: identity.prepareReceiptSha256})
       : await fetchOriginal({...common, runId: identity.runId, attempt: identity.runAttempt});
-  } catch { die('Exact Deploy OCI evidence, Actions provenance, or VPS verification evidence is unavailable'); }
+  } catch (error) {
+    die('Exact Deploy OCI evidence, Actions provenance, or VPS verification evidence is unavailable ' +
+      safeReconciliationFailure(error));
+  }
   const completeEvidence = evidence?.status === 'COMPLETE' && evidence.releaseState === 'COMPLETE' &&
     (tuple ? evidence.deployRunConclusion === 'failure' && evidence.reconciliationRunConclusion === 'success' &&
       evidence.authorizationReconciliationVerified === true : evidence.deployRunConclusion === 'success');

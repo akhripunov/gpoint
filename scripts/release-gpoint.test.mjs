@@ -6,6 +6,7 @@ import {runRemoteShaList, remoteProof, classifyReleaseFailure, evaluateSafetyGat
   currentApplyDeploymentContext, loadV5ParentDeployEvidence,
 } from './release-gpoint.mjs';
 import {validateAgataRuntimeIdentity, planReleaseRetention, validateRuntimeIdentity} from './release-gpoint-vps-adapter.mjs';
+import {ReconciliationGateError} from './reconcile-deployment.mjs';
 
 const sha = 'a'.repeat(40);
 const artifacts = Object.fromEntries(['api', 'worker', 'bot', 'miniapp', 'agataApi', 'agataWorker', 'gsalesApi']
@@ -215,6 +216,20 @@ test('reconciled V5 parent resolves its separate immutable attestation with the 
   }
   await assert.rejects(loadV5ParentDeployEvidence({...verified, status: {state: 'error'}}, sha,
     'test-token', readers), /does not prove/);
+});
+
+test('V5 parent evidence failures disclose bounded gate class without leaking upstream API content', async () => {
+  const identity={runId:'42',runAttempt:'2',prepareRunId:'41',prepareRunAttempt:'1',
+    prepareReceiptDigest:'sha256:'+'b'.repeat(64),prepareReceiptSha256:'c'.repeat(64),
+    authorizationMode:'TASK_SCOPED_AUTO',authorizationId:'gpoint-test-001'};
+  const verified={identity,deployment:{id:7},status:{state:'success'},
+    authorizationReconciliation:{runId:'55',runAttempt:'3'}};
+  await assert.rejects(loadV5ParentDeployEvidence(verified,sha,'test-token',{
+    fetchReconciled: async()=>{throw new ReconciliationGateError('Original Deploy publisher logs are unavailable');},
+  }), /GATE=Original Deploy publisher logs are unavailable/);
+  await assert.rejects(loadV5ParentDeployEvidence(verified,sha,'test-token',{
+    fetchReconciled: async()=>{throw Error('private-token=secret');},
+  }), error=>/TYPE=Error/.test(error.message)&&!error.message.includes('secret'));
 });
 
 test('ordinary V5 parent cannot treat an authorization failure as completion', async () => {
