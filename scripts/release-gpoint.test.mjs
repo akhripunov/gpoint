@@ -26,6 +26,14 @@ test('current Apply context binds child log URL, full image digests, receipt, an
   const bundle = {staticOnly: false, images: {app: {digest: `sha256:${'d'.repeat(64)}`},
     agata: {digest: `sha256:${'e'.repeat(64)}`}, gsales: {digest: `sha256:${'f'.repeat(64)}`}}};
   assert.equal(currentApplyDeploymentContext(sha, bundle, env).deploymentId, 7);
+  // The GitHub Deployment API preserves an empty authorization ID for owner
+  // EXACT_SHA, whereas the executor treats absent ID as null.
+  const exactWithEmptyId = structuredClone(env);
+  const ownerContext = JSON.parse(exactWithEmptyId.GPOINT_CURRENT_DEPLOYMENT_CONTEXT);
+  ownerContext.identity.authorizationId = '';
+  exactWithEmptyId.GPOINT_CURRENT_DEPLOYMENT_CONTEXT = JSON.stringify(ownerContext);
+  assert.equal(currentApplyDeploymentContext(sha, bundle, exactWithEmptyId).deploymentId, 7);
+
   assert.equal(currentApplyDeploymentContext(sha, bundle, {}), null);
   const taskEnv = {...env, TASK_AUTHORIZATION_ID: 'gpoint-current-task-001'};
   const taskContext = JSON.parse(taskEnv.GPOINT_CURRENT_DEPLOYMENT_CONTEXT);

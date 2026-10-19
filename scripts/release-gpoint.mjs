@@ -713,7 +713,8 @@ export function currentApplyDeploymentContext(candidate, bundle, env = process.e
       identity.prepareRunAttempt !== String(env.PREPARE_RUN_ATTEMPT) ||
       identity.prepareReceiptDigest !== env.GPOINT_PREPARE_RECEIPT_DIGEST ||
       identity.prepareReceiptSha256 !== env.GPOINT_PREPARE_RECEIPT_SHA256 ||
-      identity.authorizationMode !== expectedAuthorizationMode || identity.authorizationId !== expectedAuthorizationId ||
+      identity.authorizationMode !== expectedAuthorizationMode ||
+      (identity.authorizationId || null) !== expectedAuthorizationId ||
       identity.route !== expectedRoute ||
       (expectedRoute === 'STATIC_UI_ONLY' && (identity.staticArtifactDigest !== bundle.staticArtifactDigest ||
         identity.staticArtifactContentSha256 !== bundle.staticArtifactSha256)))
