@@ -213,12 +213,25 @@ async def test_expired_outbox_leases_stop_at_the_job_retry_budget():
             below_budget.lease_expires_at = expired
             below_budget.claim_token = uuid4().hex
             below_budget_id = below_budget.id
+            sales_below_budget = await OutboxRepository(session).enqueue(
+                tenant_id=tenant_id,
+                job_type="sales_draft_inference",
+                dedupe_key=f"expired-budget:{suffix}:sales-below",
+                payload={"purpose": "response"},
+            )
+            sales_below_budget.state = JobState.running
+            sales_below_budget.attempts = 4
+            sales_below_budget.last_error = "synthetic_previous_failure"
+            sales_below_budget.claimed_at = expired - timedelta(minutes=1)
+            sales_below_budget.lease_expires_at = expired
+            sales_below_budget.claim_token = uuid4().hex
+            sales_below_budget_id = sales_below_budget.id
 
     async with SessionFactory() as session:
         async with session.begin():
             await set_tenant_context(session, str(tenant_id))
             repository = OutboxRepository(session)
-            assert await repository.requeue_expired(tenant_id=tenant_id) == len(at_budget) + 1
+            assert await repository.requeue_expired(tenant_id=tenant_id) == len(at_budget) + 2
             for job_id, (_, _, attempts) in zip(job_ids, at_budget, strict=True):
                 job = await session.get(OutboxJob, job_id)
                 assert job is not None
@@ -233,6 +246,14 @@ async def test_expired_outbox_leases_stop_at_the_job_retry_budget():
             assert below_budget.state == JobState.pending
             assert below_budget.attempts == 1
             assert below_budget.last_error is None
+            sales_below_budget = await session.get(OutboxJob, sales_below_budget_id)
+            assert sales_below_budget is not None
+            assert sales_below_budget.state == JobState.pending
+            assert sales_below_budget.attempts == 4
+            assert sales_below_budget.last_error == "synthetic_previous_failure"
+            assert sales_below_budget.claimed_at is None
+            assert sales_below_budget.lease_expires_at is None
+            assert sales_below_budget.claim_token is None
             claimed = await repository.claim(
                 tenant_id=tenant_id, job_types=frozenset({"inference"})
             )
