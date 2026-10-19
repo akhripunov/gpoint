@@ -287,9 +287,17 @@ export function createGitHubDeploymentsClient({token, fetchImpl = globalThis.fet
       state: baseline.status?.state ?? null, createdAt: baseline.status?.created_at ?? null,
       description: baseline.status?.description ?? null, logUrl: baseline.status?.log_url ?? null});
     const baselineBefore = await readProductionBaseline();
-    if (!baselineBefore.historyExists) throw new DeploymentApiError('Production Deployment history is unavailable');
     const rowsBefore = await listDeployments();
-    const matchesBefore = rowsBefore.filter(item => validateDeploymentRecord(item, candidateSha).route === route);
+    const matchingRoute = rows => {
+      const matches = [];
+      for (const item of rows) {
+        validateDeploymentRecord(item, null, {allowLegacyPayload: true});
+        if (item.sha !== candidateSha) continue;
+        if (validateDeploymentRecord(item, candidateSha).route === route) matches.push(item);
+      }
+      return matches;
+    };
+    const matchesBefore = matchingRoute(rowsBefore);
     const successful = [];
     for (const item of matchesBefore) {
       const status = await latestStatus(item);
@@ -317,7 +325,7 @@ export function createGitHubDeploymentsClient({token, fetchImpl = globalThis.fet
       throw new DeploymentApiError('Exact production Deployment changed during ID-bound read-back');
     const baselineAfter = await readProductionBaseline();
     const rowsAfter = await listDeployments();
-    const matchesAfter = rowsAfter.filter(value => validateDeploymentRecord(value, candidateSha).route === route);
+    const matchesAfter = matchingRoute(rowsAfter);
     if (snapshot(baselineBefore) !== snapshot(baselineAfter) ||
         JSON.stringify(matchesBefore.map(value => value.id).sort((a, b) => a - b)) !==
           JSON.stringify(matchesAfter.map(value => value.id).sort((a, b) => a - b)))

@@ -191,9 +191,15 @@ jobs:
           result_file=$(basename -- "$RELEASE_RESULT")
           cd -- "$result_dir"
           set +x
-          printf '%s' "$GHCR_TOKEN" | oras login ghcr.io --username "$GHCR_USERNAME" --password-stdin
+          oras_config_dir=$(mktemp -d "$RUNNER_TEMP/gpoint-oras-registry-config.XXXXXX")
+          trap 'rm -rf -- "$oras_config_dir"' EXIT
+          chmod 700 "$oras_config_dir"
+          oras_config="$oras_config_dir/config.json"
+          (umask 077; printf '{}\n' > "$oras_config")
+          chmod 600 "$oras_config"
+          printf '%s' "$GHCR_TOKEN" | oras login --registry-config "$oras_config" ghcr.io --username "$GHCR_USERNAME" --password-stdin
           ref="ghcr.io/akhripunov/gpoint-deploy-evidence:deploy-${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          output=$(oras push --artifact-type application/vnd.gpoint.deploy.evidence.v1 \
+          output=$(oras push --registry-config "$oras_config" --artifact-type application/vnd.gpoint.deploy.evidence.v1 \
             "$ref" "$result_file:application/vnd.gpoint.deploy.evidence.v1+json" --format json)
           digest=$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')
           case "$digest" in sha256:????????????????????????????????????????????????????????????????) ;; *) echo 'Invalid GHCR evidence digest'; exit 1 ;; esac

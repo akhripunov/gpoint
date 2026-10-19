@@ -287,6 +287,62 @@ test('exact-SHA parent lookup fails closed when more than one successful Deploym
   await assert.rejects(client.readSuccessfulProductionDeploymentForSha(sha, 'FULL_RELEASE'), /ambiguous/);
 });
 
+test('exact-SHA parent lookup treats an accessible empty task history as no successful exact Deployment', async () => {
+  const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async url => {
+    if (url.includes('/deployments?')) return response(200, []);
+    throw new Error(`unexpected ${url}`);
+  }});
+  await assert.rejects(client.readSuccessfulProductionDeploymentForSha(sha, 'FULL_RELEASE'),
+    /^DeploymentApiError: No successful FULL_RELEASE Deployment exists for the exact SHA$/);
+});
+
+test('exact-SHA parent lookup skips safe historical records for other SHAs and strictly verifies the match', async () => {
+  const oldOne = {...validDeployment(61, 'b'.repeat(40), identity, '2026-10-16T00:00:00Z'), payload: '{legacy-one}'};
+  const oldTwo = {...validDeployment(62, 'c'.repeat(40), identity, '2026-10-17T00:00:00Z'), payload: '{legacy-two}'};
+  const current = validDeployment(63, sha, identity, '2026-10-18T00:00:00Z');
+  const rows = [current, oldTwo, oldOne];
+  const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async url => {
+    if (url.includes('/deployments?')) return response(200, rows);
+    const id = url.match(/deployments\/(61|62|63)/)?.[1];
+    const deployment = rows.find(item => String(item.id) === id);
+    if (url.endsWith(`/deployments/${id}`)) return response(200, deployment);
+    if (url.includes(`/deployments/${id}/statuses?`)) {
+      return response(200, [status('success', `${deployment.created_at.slice(0, 10)}T00:05:00Z`,
+        `stage=complete sha=${sha.slice(0, 12)} run=42/2`)]);
+    }
+    throw new Error(`unexpected ${url}`);
+  }});
+  const verified = await client.readSuccessfulProductionDeploymentForSha(sha, 'FULL_RELEASE');
+  assert.equal(verified.deployment.id, 63);
+  assert.equal(verified.identity.candidateSha, sha);
+});
+
+test('exact-SHA parent lookup still rejects legacy provenance on the candidate record', async () => {
+  const current = {...validDeployment(64, sha, identity, '2026-10-18T00:00:00Z'), payload: '{legacy-current}'};
+  const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async url => {
+    if (url.includes('/deployments?')) return response(200, [current]);
+    if (url.includes('/deployments/64/statuses?')) return response(200, [status('success', '2026-10-18T00:05:00Z')]);
+    throw new Error(`unexpected ${url}`);
+  }});
+  await assert.rejects(client.readSuccessfulProductionDeploymentForSha(sha, 'FULL_RELEASE'),
+    /provenance payload is incomplete or mismatched/);
+});
+
+test('exact-SHA parent lookup keeps API and unresolved Deployment failures blocking', async () => {
+  const unavailable = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async () =>
+    response(403, {message: 'forbidden'})});
+  await assert.rejects(unavailable.readSuccessfulProductionDeploymentForSha(sha, 'FULL_RELEASE'),
+    error => error.status === 403);
+
+  const active = validDeployment(65, sha, identity, '2026-10-18T00:00:00Z');
+  const unresolved = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async url => {
+    if (url.includes('/deployments?')) return response(200, [active]);
+    if (url.includes('/deployments/65/statuses?')) return response(200, [status('in_progress', '2026-10-18T00:05:00Z')]);
+    throw new Error(`unexpected ${url}`);
+  }});
+  await assert.rejects(unresolved.readSuccessfulProductionDeploymentForSha(sha, 'FULL_RELEASE'), /in_progress/);
+});
+
 test('verified V5 parent lookup rejects incomplete durable authorization provenance', async () => {
   const deployment = validDeployment(24, sha, identity, '2026-10-18T00:00:00Z');
   const payload = JSON.parse(deployment.payload);
