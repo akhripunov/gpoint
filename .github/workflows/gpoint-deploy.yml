@@ -272,5 +272,19 @@ jobs:
           GHCR_READ_USERNAME: ${{ github.actor }}
           GHCR_READ_TOKEN: ${{ github.token }}
           RELEASE_PHASE: production
-          RELEASE_STATUS: ${{ needs.deploy.outputs.execute_outcome == 'success' && needs.deploy.outputs.evidence_digest != '' && needs.deploy.outputs.status || 'UNCONFIRMED' }}
-        run: python3 scripts/publish-release-linear.py
+          DEPLOY_STATUS: ${{ needs.deploy.outputs.status }}
+          DEPLOY_EXECUTE_OUTCOME: ${{ needs.deploy.outputs.execute_outcome }}
+          DEPLOY_EVIDENCE_DIGEST: ${{ needs.deploy.outputs.evidence_digest }}
+        run: |
+          release_status=INSTALLATION_UNCONFIRMED
+          if [[ "$DEPLOY_EVIDENCE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            case "$DEPLOY_STATUS" in
+              COMPLETE)
+                if [[ "$DEPLOY_EXECUTE_OUTCOME" == success ]]; then release_status=COMPLETE; fi
+                ;;
+              FAILED|INSTALLATION_UNCONFIRMED|FAILED_PRE_SWITCH|FAILED_MIGRATION|FAILED_AGATA_START|CANCELLED|BLOCKED)
+                release_status="$DEPLOY_STATUS"
+                ;;
+            esac
+          fi
+          RELEASE_STATUS="$release_status" python3 scripts/publish-release-linear.py

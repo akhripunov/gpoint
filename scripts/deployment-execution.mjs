@@ -28,7 +28,7 @@ export async function executeProductionDeployment({createDeployment, apply, insp
     const created = await createDeployment();
     deployment = created?.deployment ?? created;
     applyStarted = true;
-    applyResult = await apply();
+    applyResult = await apply(deployment);
     if (applyResult?.status !== 0) {
       failure = {stage: 'POST_APPLY_READBACK', executionStatus: 'FAILED',
         diagnostic: 'Apply returned a nonzero status'};

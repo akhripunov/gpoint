@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {runRemoteShaList, remoteProof, classifyReleaseFailure, evaluateSafetyGates,
   checkArtifactParity, checkEffectiveConfig, checkAgataArtifactParity, checkGsalesArtifactParity,
+  currentApplyDeploymentContext,
 } from './release-gpoint.mjs';
 import {validateAgataRuntimeIdentity, planReleaseRetention, validateRuntimeIdentity} from './release-gpoint-vps-adapter.mjs';
 
@@ -11,6 +12,50 @@ const artifacts = Object.fromEntries(['api', 'worker', 'bot', 'miniapp', 'agataA
   .map(key => [key, {sourceSha: sha}]));
 const config = {api: sha, worker: sha, bot: sha, miniapp: sha, agataApi: sha, agataWorker: sha,
   agataProvider: 'disabled', enabled: true};
+
+test('current Apply context binds child log URL, full image digests, receipt, and exact attempt', () => {
+  const env = {GPOINT_CURRENT_DEPLOYMENT_CONTEXT: JSON.stringify({deploymentId: 7, identity: {
+    candidateSha: sha, runId: '42', runAttempt: '2', prepareRunId: '41', prepareRunAttempt: '1',
+    prepareReceiptDigest: `sha256:${'b'.repeat(64)}`, prepareReceiptSha256: 'c'.repeat(64),
+    imageDigests: {app: `sha256:${'d'.repeat(64)}`, agata: `sha256:${'e'.repeat(64)}`,
+      gsales: `sha256:${'f'.repeat(64)}`}, authorizationMode: 'EXACT_SHA', authorizationId: null,
+    route: 'FULL_RELEASE', logUrl: 'https://github.com/akhripunov/gpoint/actions/runs/42/attempts/2',
+  }}), GITHUB_RUN_ID: '42', GITHUB_RUN_ATTEMPT: '2', PREPARE_RUN_ID: '41', PREPARE_RUN_ATTEMPT: '1',
+    GPOINT_PREPARE_RECEIPT_DIGEST: `sha256:${'b'.repeat(64)}`, GPOINT_PREPARE_RECEIPT_SHA256: 'c'.repeat(64)};
+  const bundle = {staticOnly: false, images: {app: {digest: `sha256:${'d'.repeat(64)}`},
+    agata: {digest: `sha256:${'e'.repeat(64)}`}, gsales: {digest: `sha256:${'f'.repeat(64)}`}}};
+  assert.equal(currentApplyDeploymentContext(sha, bundle, env).deploymentId, 7);
+  assert.equal(currentApplyDeploymentContext(sha, bundle, {}), null);
+  const taskEnv = {...env, TASK_AUTHORIZATION_ID: 'gpoint-current-task-001'};
+  const taskContext = JSON.parse(taskEnv.GPOINT_CURRENT_DEPLOYMENT_CONTEXT);
+  taskContext.identity.authorizationMode = 'TASK_SCOPED_AUTO';
+  taskContext.identity.authorizationId = taskEnv.TASK_AUTHORIZATION_ID;
+  taskEnv.GPOINT_CURRENT_DEPLOYMENT_CONTEXT = JSON.stringify(taskContext);
+  assert.equal(currentApplyDeploymentContext(sha, bundle, taskEnv).deploymentId, 7);
+  assert.throws(() => currentApplyDeploymentContext(sha, bundle,
+    {...env, GPOINT_CURRENT_DEPLOYMENT_CONTEXT: '{'}), /malformed/);
+  for (const mutation of [
+    context => { context.identity.candidateSha = 'f'.repeat(40); },
+    context => { context.identity.runId = '43'; },
+    context => { context.identity.runAttempt = '3'; },
+    context => { context.identity.prepareRunId = '40'; },
+    context => { context.identity.prepareRunAttempt = '2'; },
+    context => { context.identity.prepareReceiptDigest = `sha256:${'0'.repeat(64)}`; },
+    context => { context.identity.prepareReceiptSha256 = '0'.repeat(64); },
+    context => { context.identity.authorizationMode = 'TASK_SCOPED_AUTO'; },
+    context => { context.identity.authorizationId = 'gpoint-other-task-002'; },
+    context => { context.identity.route = 'STATIC_UI_ONLY'; },
+    context => { context.identity.logUrl = 'https://github.com/attacker/gpoint/actions/runs/42/attempts/2'; },
+    context => { context.identity.imageDigests.app = `sha256:${'0'.repeat(64)}`; },
+    context => { context.identity.imageDigests.gsales = undefined; },
+  ]) {
+    const changed = structuredClone(env);
+    const context = JSON.parse(changed.GPOINT_CURRENT_DEPLOYMENT_CONTEXT);
+    mutation(context);
+    changed.GPOINT_CURRENT_DEPLOYMENT_CONTEXT = JSON.stringify(context);
+    assert.throws(() => currentApplyDeploymentContext(sha, bundle, changed), /does not match/);
+  }
+});
 
 test('source verification requests only exact current main and never production tags', () => {
   let called;

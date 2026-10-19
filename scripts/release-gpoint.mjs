@@ -515,14 +515,14 @@ function readGitHubReadToken() {
   }
 }
 
-async function verifiedV5ParentEvidence(current, facts) {
+async function verifiedV5ParentEvidence(current, facts, currentAttempt = null) {
   if (!SHA_RE.test(current?.currentProductionSha ?? '') ||
       facts.LIVE_RELEASE_ENV_SHA !== current.currentProductionSha ||
       hasUnresolvedRecoveryForSha(current.currentProductionSha))
     die('V5 production parent live SHA is mismatched or an unresolved recovery record exists');
   const api = createGitHubDeploymentsClient({token: readGitHubReadToken()});
   let verified;
-  try { verified = await api.readSuccessfulProductionDeploymentForSha(current.currentProductionSha, 'FULL_RELEASE'); }
+  try { verified = await api.readSuccessfulProductionDeploymentForSha(current.currentProductionSha, 'FULL_RELEASE', currentAttempt); }
   catch (error) {
     if (/^No successful FULL_RELEASE Deployment exists for the exact SHA$/.test(error?.message ?? '')) return null;
     die('GitHub does not confirm one stable successful exact-SHA FULL_RELEASE Deployment');
@@ -653,6 +653,36 @@ async function verifiedV5ParentEvidence(current, facts) {
   try { verifyV5ProductionParent(verifiedCurrent, proof); }
   catch (error) { die(`V5 parent evidence verification failed: ${error.message}`); }
   return proof;
+}
+
+export function currentApplyDeploymentContext(candidate, bundle, env = process.env) {
+  const raw = env.GPOINT_CURRENT_DEPLOYMENT_CONTEXT;
+  if (!raw) return null;
+  let context;
+  try { context = JSON.parse(raw); }
+  catch { die('Current Apply Deployment context is malformed'); }
+  const identity = context?.identity;
+  const expectedRoute = bundle?.staticOnly === true ? 'STATIC_UI_ONLY' : 'FULL_RELEASE';
+  const expectedAuthorizationMode = env.TASK_AUTHORIZATION_ID ? 'TASK_SCOPED_AUTO' : 'EXACT_SHA';
+  const expectedAuthorizationId = expectedAuthorizationMode === 'TASK_SCOPED_AUTO'
+    ? env.TASK_AUTHORIZATION_ID : null;
+  const expectedLogUrl = `https://github.com/akhripunov/gpoint/actions/runs/${env.GITHUB_RUN_ID}/attempts/${env.GITHUB_RUN_ATTEMPT}`;
+  if (!Number.isSafeInteger(context?.deploymentId) || context.deploymentId < 1 || !identity ||
+      identity.candidateSha !== candidate || identity.runId !== String(env.GITHUB_RUN_ID) ||
+      identity.runAttempt !== String(env.GITHUB_RUN_ATTEMPT) || identity.logUrl !== expectedLogUrl ||
+      identity.prepareRunId !== String(env.PREPARE_RUN_ID) ||
+      identity.prepareRunAttempt !== String(env.PREPARE_RUN_ATTEMPT) ||
+      identity.prepareReceiptDigest !== env.GPOINT_PREPARE_RECEIPT_DIGEST ||
+      identity.prepareReceiptSha256 !== env.GPOINT_PREPARE_RECEIPT_SHA256 ||
+      identity.authorizationMode !== expectedAuthorizationMode || identity.authorizationId !== expectedAuthorizationId ||
+      identity.route !== expectedRoute ||
+      (expectedRoute === 'STATIC_UI_ONLY' && (identity.staticArtifactDigest !== bundle.staticArtifactDigest ||
+        identity.staticArtifactContentSha256 !== bundle.staticArtifactSha256)))
+    die('Current Apply Deployment context does not match this exact workflow attempt and receipt');
+  if (expectedRoute === 'FULL_RELEASE' && !['app', 'agata', 'gsales'].every(role =>
+    identity.imageDigests?.[role] === bundle?.images?.[role]?.digest))
+    die('Current Apply Deployment image identity does not match the exact Prepare receipt');
+  return context;
 }
 
 function readVerifiedPrepareReceiptJson(candidate) {
@@ -882,7 +912,7 @@ async function runDryRun(candidate) {
   } finally { unlock(); }
 }
 
-async function runStaticApply(candidate, bundle) {
+async function runStaticApply(candidate, bundle, currentAttempt = null) {
   if (bundle.staticArtifactRoute !== 'V4_FAST_STATIC' || !bundle.staticOnly ||
       !bundle.archive || !/^sha256:[a-f0-9]{64}$/.test(bundle.staticArtifactDigest ?? '') ||
       !/^[a-f0-9]{64}$/.test(bundle.staticArtifactSha256 ?? ''))
@@ -895,7 +925,7 @@ async function runStaticApply(candidate, bundle) {
   const startedAt = isoNow();
   try {
     const initialFacts = readLiveFacts();
-    const parentEvidence = await verifiedV5ParentEvidence(current, initialFacts);
+    const parentEvidence = await verifiedV5ParentEvidence(current, initialFacts, currentAttempt);
     const initial = assertLiveBaseline(current, initialFacts, {parentEvidence});
     if (initial.liveSha !== bundle.productionBaselineSha)
       die('V4 static baseline changed before Apply');
@@ -1061,7 +1091,8 @@ async function configureGsalesWorker(candidate, approvedSha) {
 async function runApply(candidate) {
   const staticBundle = process.env.GPOINT_RELEASE_BUNDLE
     ? verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, candidate) : null;
-  if (staticBundle?.staticOnly) return runStaticApply(candidate, staticBundle);
+  const currentAttempt = currentApplyDeploymentContext(candidate, staticBundle);
+  if (staticBundle?.staticOnly) return runStaticApply(candidate, staticBundle, currentAttempt);
   const startedAt = isoNow();
   const totalStarted = Date.now();
   const releaseId = `gpoint-release-${startedAt.replace(/[-:.]/g, '')}`;
@@ -1075,7 +1106,7 @@ async function runApply(candidate) {
   try {
     const proof = remoteProof(candidate);
     const facts = readLiveFacts();
-    const parentEvidence = await verifiedV5ParentEvidence(current, facts);
+    const parentEvidence = await verifiedV5ParentEvidence(current, facts, currentAttempt);
     const baseline = assertLiveBaseline(current, facts, {parentEvidence});
     validatedProvider = baseline.provider;
     const { liveSha, liveDbHead } = baseline;

@@ -187,8 +187,10 @@ try {
     } else if (!deploymentImages || !['app', 'agata', 'gsales'].every(role => /^sha256:[a-f0-9]{64}$/.test(deploymentImages[role]?.digest ?? ''))) {
       throw new Error('Exact GHCR candidate image digest identities are unavailable');
     }
+    let ownDeploymentContext = null;
     const outcome = await executeProductionDeployment({
-      createDeployment: async () => (await deploymentClient.beginProductionDeployment({candidateSha: sha,
+      createDeployment: async () => {
+        const created = await deploymentClient.beginProductionDeployment({candidateSha: sha,
         runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT,
         prepareRunId: process.env.PREPARE_RUN_ID, prepareRunAttempt: process.env.PREPARE_RUN_ATTEMPT,
         prepareReceiptDigest, prepareReceiptSha256,
@@ -198,10 +200,19 @@ try {
           staticArtifactContentSha256: proof.staticArtifactSha256} : {}),
         authorizationMode: mode === 'task-scoped-auto' ? 'TASK_SCOPED_AUTO' : 'EXACT_SHA',
         authorizationId: process.env.TASK_AUTHORIZATION_ID, logUrl: workflowUrl},
-      {requiredContexts: [requiredContext]})).deployment,
-      apply: () => spawnSync('pnpm', ['release:gpoint', '--apply', '--candidate', sha, '--confirm-production-apply'], {
-        cwd: root, stdio: 'inherit', timeout: 1_800_000,
-      }),
+      {requiredContexts: [requiredContext]});
+        ownDeploymentContext = {deploymentId: created.deployment.id,
+          identity: deploymentIdentity(created.deployment)};
+        return created;
+      },
+      apply: deployment => {
+        if (!ownDeploymentContext || deployment.id !== ownDeploymentContext.deploymentId)
+          throw new Error('Exact current-attempt Deployment context is unavailable');
+        return spawnSync('pnpm', ['release:gpoint', '--apply', '--candidate', sha, '--confirm-production-apply'], {
+          cwd: root, stdio: 'inherit', timeout: 1_800_000,
+          env: {...process.env, GPOINT_CURRENT_DEPLOYMENT_CONTEXT: JSON.stringify(ownDeploymentContext)},
+        });
+      },
       inspectVps: () => stateFromLiveVps(factsFromReadOnlyInspection(inspectProductionReadOnly())),
       verifyInstalled: async installed => {
         if (staticRoute) {

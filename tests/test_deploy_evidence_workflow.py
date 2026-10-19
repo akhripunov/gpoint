@@ -25,7 +25,46 @@ def publisher_script():
     return step["run"]
 
 
+def linear_production_publish_script():
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    steps = workflow["jobs"]["publish"]["steps"]
+    step = next(step for step in steps
+                if step.get("name") == "Publish production result to GPoint Linear")
+    return step["run"]
+
+
 class DeployEvidenceWorkflowTests(unittest.TestCase):
+    def test_linear_status_selector_preserves_evidenced_failures_and_gates_complete(self):
+        script = linear_production_publish_script()
+        with tempfile.TemporaryDirectory(prefix="gpoint-deploy-linear-status-") as tmp:
+            root = Path(tmp)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            python = fake_bin / "python3"
+            python.write_text("#!/bin/sh\nprintf '%s' \"$RELEASE_STATUS\" > \"$STATUS_CAPTURE\"\n")
+            python.chmod(0o755)
+            capture = root / "status"
+            valid_digest = "sha256:" + "a" * 64
+            cases = [
+                ("COMPLETE", "success", valid_digest, "COMPLETE"),
+                ("COMPLETE", "failure", valid_digest, "INSTALLATION_UNCONFIRMED"),
+                ("COMPLETE", "success", "", "INSTALLATION_UNCONFIRMED"),
+                ("COMPLETE", "success", "sha256:bad", "INSTALLATION_UNCONFIRMED"),
+                ("FAILED", "failure", valid_digest, "FAILED"),
+                ("BLOCKED", "failure", valid_digest, "BLOCKED"),
+                ("FAILED", "failure", "", "INSTALLATION_UNCONFIRMED"),
+                ("UNCONFIRMED", "failure", valid_digest, "INSTALLATION_UNCONFIRMED"),
+            ]
+            for raw_status, outcome, digest, expected in cases:
+                env = os.environ.copy()
+                env.update({"DEPLOY_STATUS": raw_status, "DEPLOY_EXECUTE_OUTCOME": outcome,
+                            "DEPLOY_EVIDENCE_DIGEST": digest, "STATUS_CAPTURE": str(capture),
+                            "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"})
+                result = subprocess.run(["bash", "-euo", "pipefail", "-c", script], cwd=root,
+                                        env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(capture.read_text(), expected, (raw_status, outcome, digest))
+
     def test_evidence_publisher_uses_and_cleans_private_oras_registry_config(self):
         script = publisher_script()
         with tempfile.TemporaryDirectory(prefix="gpoint-deploy-evidence-config-") as tmp:

@@ -376,6 +376,112 @@ test('exact-SHA parent lookup keeps API and unresolved Deployment failures block
   await assert.rejects(unresolved.readSuccessfulProductionDeploymentForSha(sha, 'FULL_RELEASE'), /in_progress/);
 });
 
+test('parent lookup ignores only its exactly verified in-progress Apply Deployment and read-backs no-success', async () => {
+  const ownIdentity = {...identity, candidateSha: 'd'.repeat(40), runId: '88', runAttempt: '3',
+    prepareRunId: '80', prepareRunAttempt: '1', route: 'FULL_RELEASE', authorizationId: null,
+    logUrl: 'https://github.com/akhripunov/gpoint/actions/runs/88/attempts/3'};
+  const own = validDeployment(71, ownIdentity.candidateSha, ownIdentity, '2026-10-19T00:00:00Z');
+  const rows = [own];
+  let listCalls = 0;
+  let statusCalls = 0;
+  const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async url => {
+    if (url.includes('/deployments?')) { listCalls += 1; return response(200, rows); }
+    if (url.endsWith('/deployments/71')) return response(200, own);
+    if (url.includes('/deployments/71/statuses?')) { statusCalls += 1; return response(200, [{state: 'in_progress',
+      description: `stage=pre_apply sha=${ownIdentity.candidateSha.slice(0, 12)} run=88/3`,
+      log_url: ownIdentity.logUrl, created_at: '2026-10-19T00:01:00Z'}]); }
+    throw new Error(`unexpected ${url}`);
+  }});
+  await assert.rejects(client.readSuccessfulProductionDeploymentForSha(sha, 'FULL_RELEASE'), /in_progress/);
+  listCalls = 0;
+  statusCalls = 0;
+  await assert.rejects(client.readSuccessfulProductionDeploymentForSha(sha, 'FULL_RELEASE',
+    {deploymentId: own.id, identity: ownIdentity}),
+  /No successful FULL_RELEASE Deployment exists for the exact SHA/);
+  assert.equal(listCalls, 2);
+  assert.equal(statusCalls, 2);
+  await assert.rejects(client.readProductionBaseline(), /in_progress/);
+});
+
+test('parent lookup verifies a full or static current-attempt identity before excluding it', async () => {
+  const staticIdentity = {...identity, candidateSha: 'f'.repeat(40), runId: '90', runAttempt: '4',
+    prepareRunId: '80', prepareRunAttempt: '1', route: 'STATIC_UI_ONLY', authorizationId: null,
+    logUrl: 'https://github.com/akhripunov/gpoint/actions/runs/90/attempts/4',
+    staticArtifactDigest: `sha256:${'6'.repeat(64)}`, staticArtifactContentSha256: '7'.repeat(64)};
+  const own = validDeployment(74, staticIdentity.candidateSha, staticIdentity, '2026-10-19T00:00:00Z');
+  const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async url => {
+    if (url.includes('/deployments?')) return response(200, [own]);
+    if (url.endsWith('/deployments/74')) return response(200, own);
+    if (url.includes('/deployments/74/statuses?')) return response(200, [{state: 'in_progress',
+      description: `stage=pre_apply sha=${staticIdentity.candidateSha.slice(0, 12)} run=90/4`,
+      log_url: staticIdentity.logUrl, created_at: '2026-10-19T00:01:00Z'}]);
+    throw new Error(`unexpected ${url}`);
+  }});
+  await assert.rejects(client.readSuccessfulProductionDeploymentForSha(sha, 'FULL_RELEASE',
+    {deploymentId: own.id, identity: staticIdentity}), /No successful FULL_RELEASE Deployment exists/);
+});
+
+test('parent lookup rejects forged current-attempt identity and unrelated active Deployments', async () => {
+  const ownIdentity = {...identity, candidateSha: 'd'.repeat(40), runId: '88', runAttempt: '3',
+    prepareRunId: '80', prepareRunAttempt: '1', route: 'FULL_RELEASE', authorizationId: null,
+    logUrl: 'https://github.com/akhripunov/gpoint/actions/runs/88/attempts/3'};
+  const own = validDeployment(72, ownIdentity.candidateSha, ownIdentity, '2026-10-19T00:00:00Z');
+  const otherIdentity = {...identity, candidateSha: 'e'.repeat(40), runId: '89', runAttempt: '1',
+    logUrl: 'https://github.com/akhripunov/gpoint/actions/runs/89/attempts/1'};
+  const other = validDeployment(73, otherIdentity.candidateSha, otherIdentity, '2026-10-19T00:02:00Z');
+  let rows = [own];
+  let ownDescription = `stage=pre_apply sha=${ownIdentity.candidateSha.slice(0, 12)} run=88/3`;
+  let ownLogUrl = ownIdentity.logUrl;
+  let ownReadback = own;
+  const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async url => {
+    if (url.includes('/deployments?')) return response(200, rows);
+    const deploymentId = url.match(/\/deployments\/(72|73)$/)?.[1];
+    if (deploymentId) return response(200, deploymentId === '72' ? ownReadback : other);
+    const id = url.match(/deployments\/(72|73)\/statuses/)?.[1];
+    if (id) {
+      const value = id === '72' ? ownIdentity : otherIdentity;
+      const state = id === '72' ? 'in_progress' : 'queued';
+      return response(200, [{state, description: id === '72' ? ownDescription :
+        `stage=pre_apply sha=${value.candidateSha.slice(0, 12)} run=${value.runId}/${value.runAttempt}`,
+      log_url: id === '72' ? ownLogUrl : value.logUrl, created_at: '2026-10-19T00:03:00Z'}]);
+    }
+    throw new Error(`unexpected ${url}`);
+  }});
+  await assert.rejects(client.readSuccessfulProductionDeploymentForSha(sha, 'FULL_RELEASE',
+    {deploymentId: own.id, identity: {...ownIdentity, prepareReceiptSha256: 'f'.repeat(64)}}), /identity changed/);
+  await assert.rejects(client.readSuccessfulProductionDeploymentForSha(sha, 'FULL_RELEASE',
+    {deploymentId: 999, identity: ownIdentity}), /missing or ambiguous/);
+  ownDescription = `stage=post_apply sha=${ownIdentity.candidateSha.slice(0, 12)} run=88/3`;
+  await assert.rejects(client.readSuccessfulProductionDeploymentForSha(sha, 'FULL_RELEASE',
+    {deploymentId: own.id, identity: ownIdentity}), /exact pre-Apply in-progress state/);
+  ownDescription = `stage=pre_apply sha=${ownIdentity.candidateSha.slice(0, 12)} run=88/3`;
+  ownLogUrl = 'https://github.com/attacker/gpoint/actions/runs/88/attempts/3';
+  await assert.rejects(client.readSuccessfulProductionDeploymentForSha(sha, 'FULL_RELEASE',
+    {deploymentId: own.id, identity: ownIdentity}), /exact pre-Apply in-progress state/);
+  ownLogUrl = ownIdentity.logUrl;
+  rows = [own];
+  ownReadback = {...own, created_at: '2026-10-19T00:04:00Z'};
+  await assert.rejects(client.readSuccessfulProductionDeploymentForSha(sha, 'FULL_RELEASE',
+    {deploymentId: own.id, identity: ownIdentity}), /ID read-back does not match/);
+  ownReadback = own;
+  let getFailure = true;
+  const unavailableOwnReadback = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async url => {
+    if (url.includes('/deployments?')) return response(200, [own]);
+    if (url.endsWith('/deployments/72')) return response(getFailure ? 503 : 404, {message: 'unavailable'});
+    if (url.includes('/deployments/72/statuses?')) return response(200, [{state: 'in_progress',
+      description: ownDescription, log_url: ownLogUrl, created_at: '2026-10-19T00:03:00Z'}]);
+    throw new Error(`unexpected ${url}`);
+  }});
+  await assert.rejects(unavailableOwnReadback.readSuccessfulProductionDeploymentForSha(sha, 'FULL_RELEASE',
+    {deploymentId: own.id, identity: ownIdentity}), error => error.status === 503);
+  getFailure = false;
+  await assert.rejects(unavailableOwnReadback.readSuccessfulProductionDeploymentForSha(sha, 'FULL_RELEASE',
+    {deploymentId: own.id, identity: ownIdentity}), error => error.status === 404);
+  rows = [own, other];
+  await assert.rejects(client.readSuccessfulProductionDeploymentForSha(sha, 'FULL_RELEASE',
+    {deploymentId: own.id, identity: ownIdentity}), /queued/);
+});
+
 test('verified V5 parent lookup rejects incomplete durable authorization provenance', async () => {
   const deployment = validDeployment(24, sha, identity, '2026-10-18T00:00:00Z');
   const payload = JSON.parse(deployment.payload);

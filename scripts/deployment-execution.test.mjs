@@ -60,6 +60,16 @@ test('calls Apply once and publishes success only after fresh VPS verification',
   assert.ok(ctx.events.indexOf('verify') < ctx.events.indexOf('status:success'));
 });
 
+test('passes the exact created Deployment to the Apply callback', async () => {
+  const ctx = harness();
+  let received;
+  await executeProductionDeployment({...ctx.dependencies, apply: async deployment => {
+    received = deployment;
+    return {status: 0};
+  }});
+  assert.equal(received, ctx.deployment);
+});
+
 test('pre-Apply Deployment failure records failure and never invokes Apply', async () => {
   const ctx = harness({createError: 'initial status could not be confirmed'});
   const result = await executeProductionDeployment(ctx.dependencies);

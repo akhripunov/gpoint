@@ -246,8 +246,7 @@ export function createGitHubDeploymentsClient({token, fetchImpl = globalThis.fet
     return newest[0];
   }
 
-  async function readProductionBaseline() {
-    const deployments = await listDeployments();
+  async function readProductionBaselineFrom(deployments) {
     if (!deployments.length) return {historyExists: false, baselineSha: null, deploymentId: null,
       status: null, preApplyFailure: false};
     for (const deployment of deployments) validateDeploymentRecord(deployment, null, {allowLegacyPayload: true});
@@ -288,6 +287,10 @@ export function createGitHubDeploymentsClient({token, fetchImpl = globalThis.fet
       failedDeploymentId: newest.id, preApplyFailure: true};
   }
 
+  async function readProductionBaseline() {
+    return readProductionBaselineFrom(await listDeployments());
+  }
+
   async function readLatestSuccessfulProductionDeployment() {
     const baseline = await readProductionBaseline();
     if (!baseline.historyExists || baseline.status?.state !== 'success' ||
@@ -300,28 +303,74 @@ export function createGitHubDeploymentsClient({token, fetchImpl = globalThis.fet
     return {deployment, status, identity: deploymentIdentity(deployment)};
   }
 
-  async function readSuccessfulProductionDeploymentForSha(candidateSha, route = 'FULL_RELEASE') {
+  async function readSuccessfulProductionDeploymentForSha(candidateSha, route = 'FULL_RELEASE', currentAttempt = null) {
     requireThat(SHA40.test(candidateSha ?? '') && ['FULL_RELEASE', 'STATIC_UI_ONLY'].includes(route),
       'exact SHA and production route are required for Deployment read-back');
     const snapshot = baseline => JSON.stringify({historyExists: baseline.historyExists,
       baselineSha: baseline.baselineSha, deploymentId: baseline.deploymentId,
       state: baseline.status?.state ?? null, createdAt: baseline.status?.created_at ?? null,
       description: baseline.status?.description ?? null, logUrl: baseline.status?.log_url ?? null});
-    const baselineBefore = await readProductionBaseline();
-    const rowsBefore = await listDeployments();
+    const normalize = value => Array.isArray(value) ? value.map(normalize)
+      : value && typeof value === 'object'
+        ? Object.fromEntries(Object.keys(value).sort().map(key => [key, normalize(value[key])])) : value;
+    const stableIdentity = value => JSON.stringify(normalize(value));
+    const parentSnapshot = async () => {
+      const rows = await listDeployments();
+      let baselineRows = rows;
+      let own = null;
+      let ownStatus = null;
+      if (currentAttempt !== null) {
+        requireThat(currentAttempt && Number.isSafeInteger(currentAttempt.deploymentId)
+          && currentAttempt.deploymentId > 0 && currentAttempt.identity && typeof currentAttempt.identity === 'object',
+        'current Apply Deployment context is invalid');
+        deploymentPayload(currentAttempt.identity);
+        const ownRows = rows.filter(item => item?.id === currentAttempt.deploymentId);
+        requireThat(ownRows.length === 1, 'current Apply Deployment is missing or ambiguous');
+        const listedOwn = ownRows[0];
+        validateDeploymentRecord(listedOwn, currentAttempt.identity.candidateSha);
+        const readBackOwn = await getDeployment(currentAttempt.deploymentId);
+        requireThat(readBackOwn.id === currentAttempt.deploymentId && readBackOwn.created_at === listedOwn.created_at
+          && readBackOwn.sha === listedOwn.sha
+          && stableIdentity(deploymentIdentity(readBackOwn)) === stableIdentity(deploymentIdentity(listedOwn)),
+        'current Apply Deployment ID read-back does not match its listed record');
+        own = readBackOwn;
+        requireThat(stableIdentity(deploymentIdentity(own)) === stableIdentity(currentAttempt.identity),
+          'current Apply Deployment identity changed');
+        ownStatus = await latestStatus(own);
+        const expectedDescription = `stage=pre_apply sha=${currentAttempt.identity.candidateSha.slice(0, 12)} ` +
+          `run=${currentAttempt.identity.runId}/${currentAttempt.identity.runAttempt}`;
+        requireThat(ownStatus.state === 'in_progress' && ownStatus.description === expectedDescription
+          && ownStatus.log_url === currentAttempt.identity.logUrl,
+        'current Apply Deployment is not in the exact pre-Apply in-progress state');
+        baselineRows = rows.filter(item => item?.id !== currentAttempt.deploymentId);
+      }
+      const baseline = await readProductionBaselineFrom(baselineRows);
+      const ownSnapshot = own ? stableIdentity({id: own.id, sha: own.sha, created_at: own.created_at,
+        identity: deploymentIdentity(own), state: ownStatus.state, description: ownStatus.description,
+        log_url: ownStatus.log_url, created_at_status: ownStatus.created_at}) : null;
+      const rowsSnapshot = currentAttempt ? stableIdentity(rows.map(item => ({id: item.id,
+        sha: item.sha, ref: item.ref, task: item.task, created_at: item.created_at, payload: item.payload}))
+        .sort((left, right) => left.id - right.id)) : null;
+      return {baseline, rows, ownSnapshot, rowsSnapshot};
+    };
+    const before = await parentSnapshot();
     const matchingRoute = rows => {
       const matches = [];
       for (const item of rows) {
         validateDeploymentRecord(item, null, {allowLegacyPayload: true});
+        if (currentAttempt && item.id === currentAttempt.deploymentId) continue;
         if (item.sha !== candidateSha) continue;
         if (validateDeploymentRecord(item, candidateSha).route === route) matches.push(item);
       }
       return matches;
     };
-    const matchesBefore = matchingRoute(rowsBefore);
+    const matchesBefore = matchingRoute(before.rows);
     const successful = [];
+    const statusesBefore = [];
     for (const item of matchesBefore) {
       const status = await latestStatus(item);
+      statusesBefore.push({id: item.id, state: status.state, description: status.description ?? null,
+        log_url: status.log_url ?? null, created_at: status.created_at});
       if (status.state === 'success') {
         const identity = deploymentIdentity(item);
         const expectedDescription = `stage=complete sha=${candidateSha.slice(0, 12)} run=${identity.runId}/${identity.runAttempt}`;
@@ -333,9 +382,27 @@ export function createGitHubDeploymentsClient({token, fetchImpl = globalThis.fet
         throw new DeploymentApiError(`Exact production Deployment ${item.id} is ${status.state} or unresolved`);
       }
     }
-    if (successful.length !== 1)
-      throw new DeploymentApiError(successful.length ? `Successful ${route} Deployments for the exact SHA are ambiguous`
-        : `No successful ${route} Deployment exists for the exact SHA`);
+    if (successful.length > 1)
+      throw new DeploymentApiError(`Successful ${route} Deployments for the exact SHA are ambiguous`);
+    if (successful.length === 0) {
+      if (currentAttempt) {
+        const after = await parentSnapshot();
+        const matchesAfter = matchingRoute(after.rows);
+        const statusesAfter = [];
+        for (const item of matchesAfter) {
+          const status = await latestStatus(item);
+          statusesAfter.push({id: item.id, state: status.state, description: status.description ?? null,
+            log_url: status.log_url ?? null, created_at: status.created_at});
+        }
+        if (snapshot(before.baseline) !== snapshot(after.baseline) || before.ownSnapshot !== after.ownSnapshot ||
+            before.rowsSnapshot !== after.rowsSnapshot ||
+            JSON.stringify(matchesBefore.map(value => value.id).sort((a, b) => a - b)) !==
+              JSON.stringify(matchesAfter.map(value => value.id).sort((a, b) => a - b)) ||
+            stableIdentity(statusesBefore) !== stableIdentity(statusesAfter))
+          throw new DeploymentApiError('Production Deployment history changed during exact parent verification');
+      }
+      throw new DeploymentApiError(`No successful ${route} Deployment exists for the exact SHA`);
+    }
     const {item, status} = successful[0];
     const deployment = await getDeployment(item.id);
     const currentStatus = await latestStatus(deployment);
@@ -344,12 +411,19 @@ export function createGitHubDeploymentsClient({token, fetchImpl = globalThis.fet
         JSON.stringify([currentStatus.state, currentStatus.description, currentStatus.log_url, currentStatus.created_at]) !==
         JSON.stringify([status.state, status.description, status.log_url, status.created_at]))
       throw new DeploymentApiError('Exact production Deployment changed during ID-bound read-back');
-    const baselineAfter = await readProductionBaseline();
-    const rowsAfter = await listDeployments();
-    const matchesAfter = matchingRoute(rowsAfter);
-    if (snapshot(baselineBefore) !== snapshot(baselineAfter) ||
+    const after = await parentSnapshot();
+    const matchesAfter = matchingRoute(after.rows);
+    const statusesAfter = [];
+    for (const matched of matchesAfter) {
+      const matchedStatus = await latestStatus(matched);
+      statusesAfter.push({id: matched.id, state: matchedStatus.state, description: matchedStatus.description ?? null,
+        log_url: matchedStatus.log_url ?? null, created_at: matchedStatus.created_at});
+    }
+    if (snapshot(before.baseline) !== snapshot(after.baseline) || before.ownSnapshot !== after.ownSnapshot ||
+        before.rowsSnapshot !== after.rowsSnapshot ||
         JSON.stringify(matchesBefore.map(value => value.id).sort((a, b) => a - b)) !==
-          JSON.stringify(matchesAfter.map(value => value.id).sort((a, b) => a - b)))
+          JSON.stringify(matchesAfter.map(value => value.id).sort((a, b) => a - b)) ||
+        stableIdentity(statusesBefore) !== stableIdentity(statusesAfter))
       throw new DeploymentApiError('Production Deployment history changed during exact parent verification');
     return {deployment, status: currentStatus, identity: deploymentIdentity(deployment)};
   }
