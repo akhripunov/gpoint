@@ -346,7 +346,8 @@ def authorization_reconciliation_evidence(automation_run_id, automation_attempt,
     for key, value in required.items():
         if attestation.get(key) != value:
             raise SyncError(f'Authorization reconciliation attestation field is invalid: {key}')
-    for key in ('ciReceipt', 'componentImages', 'dbHeadAfter', 'agataDbHeadAfter',
+    for key in ('artifactIdentities', 'productionShaAfter', 'agataRuntimeSha', 'miniappSourceSha',
+                'gsalesRuntime', 'ciReceipt', 'componentImages', 'dbHeadAfter', 'agataDbHeadAfter',
                 'gsalesDbHeadAfter', 'gsalesMigrationSha256After', 'workerOperationalStatus',
                 'serverDeployStatus', 'applicationVerification'):
         if key in original and attestation.get(key) != original.get(key):

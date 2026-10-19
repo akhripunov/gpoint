@@ -462,7 +462,10 @@ class ReleaseTests(unittest.TestCase):
                     'componentImages': {'app': {'imageId': 'sha256:' + '2' * 64}},
                     'dbHeadAfter': 'prisma_001', 'agataDbHeadAfter': 'agata0010',
                     'gsalesDbHeadAfter': '001_gsales', 'gsalesMigrationSha256After': '3' * 64,
-                    'workerOperationalStatus': 'HEALTHY'}
+                    'workerOperationalStatus': 'HEALTHY',
+                    'artifactIdentities': {'api': {'sourceSha': candidate}},
+                    'productionShaAfter': candidate, 'agataRuntimeSha': candidate, 'miniappSourceSha': candidate,
+                    'gsalesRuntime': {'migrationSha256': '3' * 64}}
         integrity = {'manifestDigest': 'sha256:' + '4' * 64, 'contentSha256': '5' * 64,
                      'runId': '500', 'runAttempt': '2'}
         automation = {'id': 600, 'run_attempt': 3, 'head_sha': executor,
@@ -486,7 +489,8 @@ class ReleaseTests(unittest.TestCase):
                                    'originalDeploymentId': deployment_id, 'consumedCandidateSha': candidate,
                                    'statusVerified': True, 'liveVerified': True},
                 **{key: original_value[key] for key in ('ciReceipt', 'componentImages', 'dbHeadAfter',
-                    'agataDbHeadAfter', 'gsalesDbHeadAfter', 'gsalesMigrationSha256After', 'workerOperationalStatus')},
+                    'agataDbHeadAfter', 'gsalesDbHeadAfter', 'gsalesMigrationSha256After', 'workerOperationalStatus',
+                    'artifactIdentities', 'productionShaAfter', 'agataRuntimeSha', 'miniappSourceSha', 'gsalesRuntime')},
             }
             value.update(overrides or {})
             return value
@@ -529,7 +533,9 @@ class ReleaseTests(unittest.TestCase):
                           {'reconciliation': {'operation': SYNC.AUTHORIZATION_RECONCILIATION_OPERATION,
                            'originalDeploymentId': deployment_id, 'consumedCandidateSha': candidate,
                            'statusVerified': False, 'liveVerified': True}},
-                          {'componentImages': {'app': {'imageId': 'sha256:tampered'}}}):
+                          {'componentImages': {'app': {'imageId': 'sha256:tampered'}}},
+                          {'artifactIdentities': {'api': {'sourceSha': 'c' * 40}}},
+                          {'gsalesRuntime': {'migrationSha256': '0' * 64}}):
             with self.subTest(overrides=overrides), self.assertRaises(SYNC.SyncError):
                 call(attestation=evidence(overrides=overrides))
         with self.assertRaisesRegex(SYNC.SyncError, 'unconsumed task-scoped failure'):

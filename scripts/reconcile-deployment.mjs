@@ -210,6 +210,49 @@ export function isAuthorizationConsumptionFailure(evidence) {
     && evidence.executionFailure.diagnostic === 'Task authorization consumption failed (HTTP 403)';
 }
 
+// The canonical coordinator originally emitted an unversioned manifest. Resolve its
+// observed per-service identities only from the hash-bound Prepare receipt and raw
+// post-switch artifact proofs; never confuse an OCI config digest with a native ID.
+function normalizeCanonicalDeployEvidence(evidence, candidateSha) {
+  if (evidence?.schema === 1) return evidence;
+  requireThat(evidence?.schema === undefined && evidence?.componentImages === undefined
+    && evidence?.serverDeployStatus === 'COMPLETE'
+    && evidence.applicationVerification === 'VPS_READBACK_VERIFIED'
+    && evidence.productionShaAfter === candidateSha && evidence.agataRuntimeSha === candidateSha
+    && evidence.miniappSourceSha === candidateSha
+    && ['production', 'task-scoped-auto'].includes(evidence.mode),
+  'Original Deploy evidence has an unsupported canonical result format');
+  const ci = evidence.ciReceipt;
+  requireThat(typeof ci?.prepareReceiptJson === 'string'
+    && crypto.createHash('sha256').update(ci.prepareReceiptJson).digest('hex') === ci.prepareReceiptSha256,
+  'Canonical original Prepare receipt content hash differs from its recorded identity');
+  const receipt = JSON.parse(ci.prepareReceiptJson);
+  validateOciReceipt(receipt, candidateSha, {runId: String(evidence.prepareRunId),
+    runAttempt: String(evidence.prepareRunAttempt)});
+  const groups = {app: ['api', 'worker', 'bot', 'miniapp'], agata: ['agataApi', 'agataWorker'],
+    gsales: ['gsalesApi', 'gsalesAgataApi', 'gsalesAgataWorker']};
+  const componentImages = {};
+  for (const [role, names] of Object.entries(groups)) {
+    const image = receipt.images[role];
+    const nativeId = receipt.deployRehearsal.images[role].nativeId;
+    for (const name of names) {
+      const observed = evidence.artifactIdentities?.[name];
+      requireThat(observed?.sourceSha === candidateSha && observed.adapter?.buildSha === candidateSha
+        && observed.adapter.imageId === nativeId,
+      `Canonical original service identity differs from its rehearsed native image: ${name}`);
+      if (role === 'agata') requireThat(observed.adapter.apiImage === nativeId
+        && observed.adapter.workerImage === nativeId,
+      'Canonical original AGATA API/worker image identity differs');
+      if (role === 'gsales') requireThat(['agataImageId', 'coreApiImage', 'coreWorkerImage']
+        .every(key => observed.adapter[key] === receipt.deployRehearsal.images.agata.nativeId),
+      'Canonical original GSales dependency image differs from rehearsed AGATA');
+    }
+    componentImages[role] = {name: role, sourceSha: candidateSha, imageId: image.configDigest,
+      registryDigest: image.digest, platform: image.platform};
+  }
+  return {...evidence, schema: 1, componentImages};
+}
+
 const METADATA_RECONCILIATION_OPERATION = 'AUTHORIZATION_CONSUMPTION_RECONCILIATION';
 const DEPLOYMENT_STATUS_ID = status => JSON.stringify([status?.state, status?.description ?? null,
   status?.log_url ?? null, status?.environment_url ?? null]);
@@ -401,7 +444,8 @@ function assertReceiptAndProductionEvidence({evidence, identity, deploymentId, c
 function verifyLiveProduction(output, evidence, receipt, candidateSha) {
   const facts = factsFromReadOnlyInspection(output);
   const live = stateFromLiveVps(facts);
-  const expectedImages = evidence.componentImages;
+  // Component inventory imageId is the OCI config digest; Docker containerd reports nativeId.
+  const expectedImages = receipt.deployRehearsal.images;
   requireThat(live.currentProductionSha === candidateSha && live.miniappSourceSha === candidateSha
     && live.currentProductionDbHead === evidence.dbHeadAfter
     && live.agataAlembicHead === evidence.agataDbHeadAfter
@@ -421,12 +465,12 @@ function verifyLiveProduction(output, evidence, receipt, candidateSha) {
   requireThat(runningHealthy.every(key => facts[key] === 'true') && healthy.every(key => facts[key] === 'healthy'),
     'Fresh VPS API, worker, bot, AGATA or GSales health is not verified');
   const imageChecks = [
-    ['LIVE_API_IMAGE', expectedImages.app.imageId], ['LIVE_WORKER_IMAGE', expectedImages.app.imageId],
-    ['LIVE_BOT_IMAGE', expectedImages.app.imageId], ['LIVE_AGATA_API_IMAGE_ID', expectedImages.agata.imageId],
-    ['LIVE_AGATA_WORKER_IMAGE_ID', expectedImages.agata.imageId],
-    ['LIVE_GSALES_API_IMAGE_ID', expectedImages.gsales.imageId],
-    ['LIVE_GSALES_AGATA_API_IMAGE_ID', expectedImages.gsales.imageId],
-    ['LIVE_GSALES_AGATA_MEMORY_WORKER_IMAGE_ID', expectedImages.gsales.imageId],
+    ['LIVE_API_IMAGE', expectedImages.app.nativeId], ['LIVE_WORKER_IMAGE', expectedImages.app.nativeId],
+    ['LIVE_BOT_IMAGE', expectedImages.app.nativeId], ['LIVE_AGATA_API_IMAGE_ID', expectedImages.agata.nativeId],
+    ['LIVE_AGATA_WORKER_IMAGE_ID', expectedImages.agata.nativeId],
+    ['LIVE_GSALES_API_IMAGE_ID', expectedImages.gsales.nativeId],
+    ['LIVE_GSALES_AGATA_API_IMAGE_ID', expectedImages.gsales.nativeId],
+    ['LIVE_GSALES_AGATA_MEMORY_WORKER_IMAGE_ID', expectedImages.gsales.nativeId],
   ];
   requireThat(imageChecks.every(([key, value]) => facts[key] === value),
     'Fresh VPS native image IDs differ from the original production component images');
@@ -596,8 +640,9 @@ export async function fetchOriginalDeployEvidence({runId, attempt, candidateSha,
   prepareRunId, prepareRunAttempt, prepareReceiptDigest, prepareReceiptSha256, token, fetchImpl = globalThis.fetch,
   execFile = execFileSync, registryUsername = process.env.GHCR_READ_USERNAME,
   registryToken = process.env.GHCR_READ_TOKEN, allowAuthorizationFailure = false}) {
-  const {evidence, deployRun, digest, contentSha256} = await readBoundDeploymentArtifact({
+  const {evidence: storedEvidence, deployRun, digest, contentSha256} = await readBoundDeploymentArtifact({
     runId, attempt, candidateSha, token, fetchImpl, execFile, registryUsername, registryToken});
+  const evidence = normalizeCanonicalDeployEvidence(storedEvidence, candidateSha);
     const complete = evidence?.status === 'COMPLETE' && evidence.releaseState === 'COMPLETE'
       && evidence.applicationVerification === 'VPS_READBACK_VERIFIED';
     const statusUnconfirmed = evidence?.status === 'INSTALLATION_UNCONFIRMED'

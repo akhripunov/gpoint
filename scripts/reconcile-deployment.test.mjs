@@ -389,14 +389,14 @@ function authorizationFinalizerFixture({statusState = 'error', statusDescription
   };
   const factValues = facts.split('\n').map(line => {
     const replacements = {
-      LIVE_API_IMAGE: componentImages.app.imageId,
-      LIVE_WORKER_IMAGE: componentImages.app.imageId,
-      LIVE_BOT_IMAGE: componentImages.app.imageId,
-      LIVE_AGATA_API_IMAGE_ID: componentImages.agata.imageId,
-      LIVE_AGATA_WORKER_IMAGE_ID: componentImages.agata.imageId,
-      LIVE_GSALES_API_IMAGE_ID: componentImages.gsales.imageId,
-      LIVE_GSALES_AGATA_API_IMAGE_ID: componentImages.gsales.imageId,
-      LIVE_GSALES_AGATA_MEMORY_WORKER_IMAGE_ID: componentImages.gsales.imageId,
+      LIVE_API_IMAGE: receipt.deployRehearsal.images.app.nativeId,
+      LIVE_WORKER_IMAGE: receipt.deployRehearsal.images.app.nativeId,
+      LIVE_BOT_IMAGE: receipt.deployRehearsal.images.app.nativeId,
+      LIVE_AGATA_API_IMAGE_ID: receipt.deployRehearsal.images.agata.nativeId,
+      LIVE_AGATA_WORKER_IMAGE_ID: receipt.deployRehearsal.images.agata.nativeId,
+      LIVE_GSALES_API_IMAGE_ID: receipt.deployRehearsal.images.gsales.nativeId,
+      LIVE_GSALES_AGATA_API_IMAGE_ID: receipt.deployRehearsal.images.gsales.nativeId,
+      LIVE_GSALES_AGATA_MEMORY_WORKER_IMAGE_ID: receipt.deployRehearsal.images.gsales.nativeId,
     };
     const [key] = line.split('=');
     return key in replacements ? `${key}=${replacements[key]}` : line;
@@ -653,4 +653,249 @@ test('authorization attestation resolver binds successful metadata run to origin
         digest: `sha256:${'c'.repeat(64)}`, contentSha256: 'd'.repeat(64)}),
       receiptValidator: () => fixture.receipt}), label);
   }
+});
+
+
+// Structural reproduction of the real 39198400153/1 result. Private tenant/config fields removed.
+const historicalDeployEvidence = {
+  "status": "INSTALLATION_UNCONFIRMED",
+  "releaseState": "INSTALLATION_UNCONFIRMED",
+  "serverDeployStatus": "COMPLETE",
+  "candidateSha": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+  "productionShaAfter": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+  "agataRuntimeSha": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+  "miniappSourceSha": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+  "deploymentId": 7165552725,
+  "deployRunId": "39198400153",
+  "deployRunAttempt": "1",
+  "prepareRunId": "39197663489",
+  "prepareRunAttempt": "1",
+  "authorizationMode": "TASK_SCOPED_AUTO",
+  "authorizationId": "gpoint-me42-final-v5-integration-20261018-010",
+  "authorizationConsumed": false,
+  "applicationVerification": "VPS_READBACK_VERIFIED",
+  "executionFailure": {
+    "stage": "POST_APPLY_READBACK",
+    "executionStatus": "FAILED",
+    "diagnostic": "Task authorization consumption failed (HTTP 403)"
+  },
+  "ciReceipt": {
+    "ghcrManifestDigest": "sha256:859b4d045459aec561b1aeeef68d1417215e9e716da3552d6f1ffc4cd65f64d2",
+    "prepareReceiptSha256": "56c463491248a7ca7e85a381e534c099b949ade7bce06a050b52c295811883e6",
+    "prepareReceiptJson": "{\"agataHead\":\"agata0011\",\"applicationSmoke\":\"DISPOSABLE_DB_DETERMINISTIC_PROVIDER\",\"candidateSha\":\"1f13e88f4648ba22fc11063532c1280cdf6df2da\",\"deployRehearsal\":{\"dockerVersion\":\"29.1.3\",\"images\":{\"agata\":{\"configDigest\":\"sha256:c58f1df171b959f3f92fc02d588ee92af6b41f82b0473cceb046e12b0f8a208b\",\"digest\":\"sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614\",\"nativeId\":\"sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614\",\"repository\":\"ghcr.io/akhripunov/gpoint-agata-runtime\",\"sourceSha\":\"1f13e88f4648ba22fc11063532c1280cdf6df2da\"},\"app\":{\"configDigest\":\"sha256:7e102cc8905a7e5fb848ba89da0b57d2e528e2a81cd7bdf1c709feb8ca4da7a1\",\"digest\":\"sha256:62f97e7291f71b0c4dc9328648d4e707771473a24d827574f395b97494ae6197\",\"nativeId\":\"sha256:62f97e7291f71b0c4dc9328648d4e707771473a24d827574f395b97494ae6197\",\"repository\":\"ghcr.io/akhripunov/gpoint-runtime\",\"sourceSha\":\"1f13e88f4648ba22fc11063532c1280cdf6df2da\"},\"gsales\":{\"configDigest\":\"sha256:5ef1bf19004f9688a62dfd5d9122977692ea13aaeab211d9593910243f99bf58\",\"digest\":\"sha256:ccad34b6891fb7eebfe49117b92319e3a4d63b0b6e01e1923663e4421ca21873\",\"nativeId\":\"sha256:ccad34b6891fb7eebfe49117b92319e3a4d63b0b6e01e1923663e4421ca21873\",\"repository\":\"ghcr.io/akhripunov/gpoint-g-sales-runtime\",\"sourceSha\":\"1f13e88f4648ba22fc11063532c1280cdf6df2da\"}},\"seconds\":23.6,\"snapshotter\":\"overlayfs\",\"status\":\"PASS\",\"store\":\"containerd\"},\"gates\":{\"agataHealth\":\"PASS\",\"botImageStartup\":\"PASS\",\"deployRehearsal\":\"PASS\",\"docker\":\"PASS\",\"ghcrImageReadback\":\"PASS\",\"gsalesImage\":\"PASS\",\"gsalesMigrationChecksum\":\"PASS\",\"gsalesPostgres\":\"PASS\",\"migration\":\"PASS\",\"miniapp\":\"PASS\",\"postgres\":\"PASS\",\"unit\":\"PASS\"},\"gsalesMigrationHead\":\"001_gsales\",\"gsalesMigrationSha256\":\"8de19ec2efd81848010379645d51243ac3f4a4cd37af0be211d71cdf36bcd111\",\"images\":{\"agata\":{\"configDigest\":\"sha256:c58f1df171b959f3f92fc02d588ee92af6b41f82b0473cceb046e12b0f8a208b\",\"digest\":\"sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614\",\"platform\":\"linux/amd64\",\"repository\":\"ghcr.io/akhripunov/gpoint-agata-runtime\",\"sourceSha\":\"1f13e88f4648ba22fc11063532c1280cdf6df2da\"},\"app\":{\"configDigest\":\"sha256:7e102cc8905a7e5fb848ba89da0b57d2e528e2a81cd7bdf1c709feb8ca4da7a1\",\"digest\":\"sha256:62f97e7291f71b0c4dc9328648d4e707771473a24d827574f395b97494ae6197\",\"platform\":\"linux/amd64\",\"repository\":\"ghcr.io/akhripunov/gpoint-runtime\",\"sourceSha\":\"1f13e88f4648ba22fc11063532c1280cdf6df2da\"},\"gsales\":{\"configDigest\":\"sha256:5ef1bf19004f9688a62dfd5d9122977692ea13aaeab211d9593910243f99bf58\",\"digest\":\"sha256:ccad34b6891fb7eebfe49117b92319e3a4d63b0b6e01e1923663e4421ca21873\",\"platform\":\"linux/amd64\",\"repository\":\"ghcr.io/akhripunov/gpoint-g-sales-runtime\",\"sourceSha\":\"1f13e88f4648ba22fc11063532c1280cdf6df2da\"}},\"impactV3\":{\"baselineSource\":null,\"candidateSha\":\"1f13e88f4648ba22fc11063532c1280cdf6df2da\",\"changedPaths\":[],\"checks\":{\"agata_postgres_rehearsal\":true,\"gsales_postgres_regression\":true},\"classification\":\"FULL\",\"invariantChecks\":[\"workspace_build\",\"workspace_typecheck\",\"workspace_tests\",\"release_tests\",\"artifact_migrations\",\"docker_images_exact_sha\",\"artifact_parity\",\"immutable_receipt\",\"deploy_rehearsal\",\"canonical_preflight\",\"production_approval\"],\"productionBaselineSha\":null,\"reason\":\"verified-live-baseline-unavailable\",\"version\":1},\"prepareStages\":{\"agata_api_e2e_tests\":{\"seconds\":3.58,\"status\":\"PASS\"},\"agata_artifact_migration_and_health\":{\"seconds\":7.024,\"status\":\"PASS\"},\"agata_baseline_migration_tests\":{\"seconds\":6.343,\"status\":\"PASS\"},\"agata_guarded_production_migration_rehearsal\":{\"seconds\":9.839,\"status\":\"PASS\"},\"agata_postgres_integration_tests\":{\"seconds\":41.666,\"status\":\"PASS\"},\"artifact_cache_tests\":{\"seconds\":0.364,\"status\":\"PASS\"},\"bot_production_image_startup\":{\"seconds\":0.566,\"status\":\"PASS\"},\"disposable_postgres_setup\":{\"seconds\":7.928,\"status\":\"PASS\"},\"docker_build_gpoint_agata_runtime\":{\"seconds\":35.762,\"status\":\"PASS\"},\"docker_build_gpoint_g_sales_runtime\":{\"seconds\":21.373,\"status\":\"PASS\"},\"docker_build_gpoint_runtime\":{\"seconds\":42.586,\"status\":\"PASS\"},\"ghcr_receipt_tests\":{\"seconds\":0.365,\"status\":\"PASS\"},\"gsales_compose_profile_tests\":{\"seconds\":0.866,\"status\":\"PASS\"},\"gsales_image_live_health\":{\"seconds\":1.809,\"status\":\"PASS\"},\"gsales_mac_lane_gate_tests\":{\"seconds\":0.164,\"status\":\"PASS\"},\"gsales_migration_backup_restore\":{\"seconds\":7.383,\"status\":\"PASS\"},\"gsales_postgres_regression\":{\"seconds\":213.831,\"status\":\"PASS\"},\"gsales_protected_provision_rehearsal\":{\"seconds\":22.622,\"status\":\"PASS\"},\"gsales_provision_gate_tests\":{\"seconds\":0.114,\"status\":\"PASS\"},\"linear_tests\":{\"seconds\":0.164,\"status\":\"PASS\"},\"pnpm_install\":{\"seconds\":1.774,\"status\":\"PASS\"},\"prepare_inventory_tests\":{\"seconds\":0.565,\"status\":\"PASS\"},\"prisma_generate\":{\"seconds\":1.769,\"status\":\"PASS\"},\"production_migration_gate_tests\":{\"seconds\":0.114,\"status\":\"PASS\"},\"release_tests\":{\"seconds\":3.023,\"status\":\"PASS\"},\"runtime_artifact_migration_check\":{\"seconds\":3.286,\"status\":\"PASS\"},\"workspace_build\":{\"seconds\":13.83,\"status\":\"PASS\"},\"workspace_tests\":{\"seconds\":5.151,\"status\":\"PASS\"},\"workspace_typecheck\":{\"seconds\":11.305,\"status\":\"PASS\"}},\"prismaHead\":\"20261015130000_codex_telegram_challenge\",\"productionUserSmoke\":\"NOT_RUN\",\"runAttempt\":1,\"runId\":39197663489,\"schema\":3,\"status\":\"READY\",\"transport\":\"ghcr-oci\"}\n",
+    "prismaHead": "20261015130000_codex_telegram_challenge",
+    "agataHead": "agata0011",
+    "gsalesMigrationHead": "001_gsales",
+    "gsalesMigrationSha256": "8de19ec2efd81848010379645d51243ac3f4a4cd37af0be211d71cdf36bcd111"
+  },
+  "dbHeadAfter": "20261015130000_codex_telegram_challenge",
+  "agataDbHeadAfter": "agata0011",
+  "gsalesDbHeadAfter": "001_gsales",
+  "workerOperationalStatus": "HEALTHY",
+  "mode": "task-scoped-auto",
+  "gsalesRuntime": {
+    "migrationSha256": "8de19ec2efd81848010379645d51243ac3f4a4cd37af0be211d71cdf36bcd111"
+  },
+  "artifactIdentities": {
+    "api": {
+      "sourceSha": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+      "adapter": {
+        "imageId": "sha256:62f97e7291f71b0c4dc9328648d4e707771473a24d827574f395b97494ae6197",
+        "buildSha": "1f13e88f4648ba22fc11063532c1280cdf6df2da"
+      }
+    },
+    "worker": {
+      "sourceSha": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+      "adapter": {
+        "imageId": "sha256:62f97e7291f71b0c4dc9328648d4e707771473a24d827574f395b97494ae6197",
+        "buildSha": "1f13e88f4648ba22fc11063532c1280cdf6df2da"
+      }
+    },
+    "bot": {
+      "sourceSha": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+      "adapter": {
+        "imageId": "sha256:62f97e7291f71b0c4dc9328648d4e707771473a24d827574f395b97494ae6197",
+        "buildSha": "1f13e88f4648ba22fc11063532c1280cdf6df2da"
+      }
+    },
+    "miniapp": {
+      "sourceSha": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+      "adapter": {
+        "imageId": "sha256:62f97e7291f71b0c4dc9328648d4e707771473a24d827574f395b97494ae6197",
+        "buildSha": "1f13e88f4648ba22fc11063532c1280cdf6df2da"
+      }
+    },
+    "agataApi": {
+      "sourceSha": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+      "adapter": {
+        "imageId": "sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614",
+        "buildSha": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+        "apiImage": "sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614",
+        "workerImage": "sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614"
+      }
+    },
+    "agataWorker": {
+      "sourceSha": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+      "adapter": {
+        "imageId": "sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614",
+        "buildSha": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+        "apiImage": "sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614",
+        "workerImage": "sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614"
+      }
+    },
+    "gsalesApi": {
+      "sourceSha": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+      "adapter": {
+        "agataImageId": "sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614",
+        "apiImage": "sha256:ccad34b6891fb7eebfe49117b92319e3a4d63b0b6e01e1923663e4421ca21873",
+        "buildSha": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+        "coreApiImage": "sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614",
+        "coreWorkerImage": "sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614",
+        "imageId": "sha256:ccad34b6891fb7eebfe49117b92319e3a4d63b0b6e01e1923663e4421ca21873"
+      }
+    },
+    "gsalesAgataApi": {
+      "sourceSha": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+      "adapter": {
+        "agataImageId": "sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614",
+        "apiImage": "sha256:ccad34b6891fb7eebfe49117b92319e3a4d63b0b6e01e1923663e4421ca21873",
+        "buildSha": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+        "coreApiImage": "sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614",
+        "coreWorkerImage": "sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614",
+        "imageId": "sha256:ccad34b6891fb7eebfe49117b92319e3a4d63b0b6e01e1923663e4421ca21873"
+      }
+    },
+    "gsalesAgataWorker": {
+      "sourceSha": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+      "adapter": {
+        "agataImageId": "sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614",
+        "apiImage": "sha256:ccad34b6891fb7eebfe49117b92319e3a4d63b0b6e01e1923663e4421ca21873",
+        "buildSha": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+        "coreApiImage": "sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614",
+        "coreWorkerImage": "sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614",
+        "imageId": "sha256:ccad34b6891fb7eebfe49117b92319e3a4d63b0b6e01e1923663e4421ca21873"
+      }
+    }
+  }
+};
+
+async function resolveHistoricalEvidence(value = structuredClone(historicalDeployEvidence)) {
+  const digest = 'sha256:' + 'e'.repeat(64);
+  const fetchImpl = async url => {
+    if (url.endsWith('/actions/runs/39198400153/attempts/1')) return {ok: true, json: async () => ({
+      id: 39198400153, run_attempt: 1, head_sha: value.candidateSha,
+      path: '.github/workflows/gpoint-deploy.yml', status: 'completed', conclusion: 'failure',
+      event: 'workflow_dispatch', head_branch: 'main'})};
+    if (url.endsWith('/actions/runs/39198400153/attempts/1/jobs?per_page=100')) return {ok: true, json: async () => ({jobs: [{
+      id: 117886097477, name: 'deploy', run_id: 39198400153, run_attempt: 1, head_sha: value.candidateSha,
+      status: 'completed', conclusion: 'failure', steps: [{name: 'Publish deployment result as a GHCR OCI artifact',
+        status: 'completed', conclusion: 'success'}]}]})};
+    if (url.endsWith('/actions/jobs/117886097477/logs')) return {ok: true,
+      arrayBuffer: async () => Buffer.from('DEPLOY_EVIDENCE_DIGEST=' + digest + '\n')};
+    if (url.endsWith('/actions/runs/39197663489/attempts/1')) return {ok: true, json: async () => ({
+      id: 39197663489, run_attempt: 1, head_sha: value.candidateSha,
+      path: '.github/workflows/gpoint-prepare.yml', status: 'completed', conclusion: 'success', event: 'push', head_branch: 'main'})};
+    throw new Error('Unexpected route: ' + url);
+  };
+  const execFile = (file, args) => {
+    assert.equal(file, 'oras');
+    if (args[0] === 'resolve') return digest;
+    assert.equal(args[0], 'pull');
+    fs.writeFileSync(path.join(args[args.indexOf('-o') + 1], 'gpoint-release-result-39198400153-1.json'), JSON.stringify(value));
+    return '';
+  };
+  return fetchOriginalDeployEvidence({runId: '39198400153', attempt: '1', candidateSha: value.candidateSha,
+    deploymentId: 7165552725, prepareRunId: '39197663489', prepareRunAttempt: '1',
+    prepareReceiptDigest: value.ciReceipt.ghcrManifestDigest,
+    prepareReceiptSha256: historicalDeployEvidence.ciReceipt.prepareReceiptSha256,
+    token: 'test', fetchImpl, execFile, registryUsername: 'test', registryToken: 'test', allowAuthorizationFailure: true});
+}
+
+test('resolves canonical unversioned original output and preserves raw hash while binding native image identities', async () => {
+  const value = structuredClone(historicalDeployEvidence);
+  const result = await resolveHistoricalEvidence(value);
+  assert.equal(result.schema, 1);
+  assert.equal(result.evidenceContentSha256, createHash('sha256').update(JSON.stringify(value)).digest('hex'));
+  const receipt = JSON.parse(value.ciReceipt.prepareReceiptJson);
+  for (const role of ['app', 'agata', 'gsales']) {
+    assert.equal(result.componentImages[role].imageId, receipt.images[role].configDigest);
+    assert.notEqual(result.componentImages[role].imageId, receipt.deployRehearsal.images[role].nativeId);
+    assert.equal(result.componentImages[role].registryDigest, receipt.images[role].digest);
+  }
+  assert.equal(Object.hasOwn(value, 'schema'), false);
+  assert.equal(Object.hasOwn(value, 'componentImages'), false);
+});
+
+test('canonical original format rejects receipt tampering, unknown versions and inconsistent observed runtime groups', async () => {
+  for (const change of [
+    v => { v.schema = 2; },
+    v => { v.schema = null; },
+    v => { v.ciReceipt.prepareReceiptJson += ' '; },
+    v => { delete v.artifactIdentities.worker; },
+    v => { v.artifactIdentities.bot.sourceSha = 'b'.repeat(40); },
+    v => { v.artifactIdentities.agataWorker.adapter.imageId = 'sha256:' + 'c'.repeat(64); },
+    v => { v.artifactIdentities.gsalesApi.adapter.coreApiImage = 'sha256:' + 'c'.repeat(64); },
+    v => { v.artifactIdentities.gsalesAgataWorker.adapter.imageId = 'sha256:' + 'c'.repeat(64); },
+  ]) {
+    const value = structuredClone(historicalDeployEvidence);
+    change(value);
+    await assert.rejects(resolveHistoricalEvidence(value));
+  }
+});
+
+
+test('real canonical result reaches same-ID finalization and subsequent parent attestation verification with native IDs', async () => {
+  const original = await resolveHistoricalEvidence();
+  const candidateSha = original.candidateSha;
+  Object.assign(original, {authorizationRecordSha256: '8'.repeat(64), authorizationScopeSha256: '9'.repeat(64),
+    authorizationSourceInstructionId: 'offline-original-owner-instruction', authorizationChangedPaths: 'scripts/reconcile-deployment.mjs'});
+  const fixture = authorizationFinalizerFixture();
+  const originalIdentity = {...identity, candidateSha, runId: original.deployRunId, runAttempt: original.deployRunAttempt,
+    prepareRunId: original.prepareRunId, prepareRunAttempt: original.prepareRunAttempt,
+    prepareReceiptDigest: original.ciReceipt.ghcrManifestDigest, prepareReceiptSha256: original.ciReceipt.prepareReceiptSha256,
+    authorizationMode: 'TASK_SCOPED_AUTO', authorizationId: original.authorizationId, route: 'FULL_RELEASE',
+    logUrl: 'https://github.com/akhripunov/gpoint/actions/runs/39198400153/attempts/1'};
+  const target = {id: 7165552725, environment: 'production', production_environment: true, transient_environment: false,
+    task: 'gpoint-production-deploy', created_at: '2026-10-19T04:15:00Z', sha: candidateSha,
+    payload: JSON.stringify(deploymentPayload(originalIdentity))};
+  let status = {state: 'error', description: 'stage=post_apply sha=' + candidateSha.slice(0,12) + ' run=39198400153/1',
+    log_url: originalIdentity.logUrl, created_at: '2026-10-19T04:18:21Z'};
+  let writes = 0, consumed = false;
+  const client = {getDeployment: async () => target, listDeployments: async () => [target], listStatuses: async () => [status],
+    publishStatus: async (deployment, boundIdentity, value) => {
+      assert.equal(deployment.id, target.id); assert.equal(boundIdentity.candidateSha, candidateSha); writes++;
+      status = {...value, log_url: value.logUrl, created_at: '2026-10-19T06:00:00Z'};
+    }};
+  const values = {};
+  const originalReceipt = JSON.parse(original.ciReceipt.prepareReceiptJson);
+  for (const name of ['RELEASE_ENV', 'API', 'WORKER', 'BOT', 'MINIAPP', 'AGATA_API', 'AGATA_WORKER',
+    'GSALES_API', 'GSALES_AGATA_API', 'GSALES_AGATA_MEMORY_WORKER']) values['LIVE_' + name + '_SHA'] = candidateSha;
+  for (const [role,names] of Object.entries({app:['API','WORKER','BOT'],agata:['AGATA_API','AGATA_WORKER'],
+    gsales:['GSALES_API','GSALES_AGATA_API','GSALES_AGATA_MEMORY_WORKER']})) {
+    for (const name of names) {
+      values['LIVE_' + name + (['API','WORKER','BOT'].includes(name) ? '_IMAGE' : '_IMAGE_ID')] = originalReceipt.deployRehearsal.images[role].nativeId;
+      values['LIVE_' + name + '_RUNNING'] = 'true'; values['LIVE_' + name + '_HEALTH'] = 'healthy';
+    }
+  }
+  Object.assign(values,{LIVE_PRISMA_HEAD:original.dbHeadAfter,LIVE_AGATA_HEAD:original.agataDbHeadAfter,
+    LIVE_GSALES_HEAD:original.gsalesDbHeadAfter,LIVE_GSALES_MIGRATION_SHA256:original.gsalesRuntime.migrationSha256});
+  const result = await finalizeAuthorizationConsumption({client, deploymentId:target.id,candidateSha,env:fixture.env,
+    token:'test',root:'/offline',assertCheckout:()=>{},currentMain:fixture.currentMain,
+    readDeployEvidence:async()=>original,
+    verifyAuthorization:async()=>({proof:{recordSha256:original.authorizationRecordSha256,
+      ownerTaskCommitmentSha256:original.authorizationScopeSha256,sourceInstructionIdentifier:original.authorizationSourceInstructionId}}),
+    readAuthorizationState:async()=>({claimed:true,revoked:false,consumed,...(consumed?{consumedSha:candidateSha}:{})}),
+    consumeAuthorization:async()=>{consumed=true;},checkAuthorization:async()=>{},
+    inspectVps:()=>Object.entries(values).map(([k,v])=>k+'='+v).join('\n'),writeResult:false,
+    acquireProductionLock:fixture.acquireProductionLock});
+  assert.equal(result.status,'COMPLETE');assert.equal(writes,1);
+  assert.deepEqual(result.artifactIdentities,original.artifactIdentities);
+  const verified = await fetchAuthorizationReconciliationEvidence({runId:'600',attempt:'3',candidateSha,
+    deploymentId:target.id,originalRunId:original.deployRunId,originalRunAttempt:original.deployRunAttempt,
+    prepareRunId:original.prepareRunId,prepareRunAttempt:original.prepareRunAttempt,
+    prepareReceiptDigest:original.ciReceipt.ghcrManifestDigest,prepareReceiptSha256:original.ciReceipt.prepareReceiptSha256,
+    readOriginal:async()=>original,readArtifact:async()=>({evidence:result,deployRun:{head_sha:executorSha,conclusion:'success'},
+      digest:'sha256:'+'d'.repeat(64),contentSha256:'e'.repeat(64)})});
+  assert.equal(verified.authorizationReconciliationVerified,true);
+  assert.equal(verified.originalEvidenceContentSha256,original.evidenceContentSha256);
 });
