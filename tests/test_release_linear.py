@@ -864,6 +864,25 @@ class DeploymentReleaseTests(unittest.TestCase):
         self.assertEqual(manifest['resultStatus'], 'COMPLETE')
         self.assertEqual(manifest['recoveryRunId'], '600')
         self.assertEqual(run['id'], 505)
+        self.assertEqual(run['conclusion'], 'failure')
+        self.assertEqual(run['recoveryRunConclusion'], 'success')
+        self.assertEqual(state['serverDeployStatus'], 'SUCCESS')
+        self.assertEqual(state['workerOperationalStatus'], 'NOT_VERIFIED')
+        self.assertEqual(state['overallServiceReadiness'], 'NOT_VERIFIED')
+        rendered = SYNC.render_current_state({
+            'synced_at': 'now', 'main_sha': SHA, 'main_checked_at': 'then',
+            'production_sha': SHA, 'production_checked_at': 'then', 'production_ref': '',
+            'release_status': state['lastReleaseStatus'], 'in_sync': True,
+            'prepare': item['payload']['prepare'], 'candidate': 'READY', 'latest_main_prepare': None,
+            'deploy': run, 'manifest': manifest, 'server_deploy_status': state['serverDeployStatus'],
+            'worker_operational_status': state['workerOperationalStatus'],
+            'service_readiness': state['overallServiceReadiness'],
+            'dependency_checked_at': state['dependencyCheckedAt'],
+        })
+        self.assertIn('Original GitHub Deploy workflow: `completed` / **FAILURE**', rendered)
+        self.assertIn('recovery workflow `#600` attempt `2`: **SUCCESS** for the same Deployment', rendered)
+        self.assertIn('Mac worker: **NOT_VERIFIED**', rendered)
+        self.assertIn('service readiness: **NOT_VERIFIED**', rendered)
 
     def test_recovery_reader_requires_owner_workflow_and_passes_bound_proof_to_node_verifier(self):
         prepare = {'runId': '10', 'attempt': '1', 'receiptDigest': 'sha256:' + 'd' * 64,

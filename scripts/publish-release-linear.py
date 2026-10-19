@@ -570,9 +570,10 @@ def production_evidence():
             or str(result.get('deploymentId')) != str(deployment.get('id'))
             or result.get('candidateSha') != sha):
         raise SyncError('Successful GitHub Deployment is not backed by complete exact-run VPS evidence')
+    recovered = recovery_match is not None
     state = {'currentProductionSha': installed_sha, 'lastReleaseStatus': current['state'].upper(),
-             'serverDeployStatus': current['state'].upper(), 'workerOperationalStatus': 'VERIFIED_BY_DEPLOY' if current['state'] == 'success' else 'NOT_VERIFIED',
-             'overallServiceReadiness': 'READY' if current['state'] == 'success' else 'NOT_VERIFIED',
+             'serverDeployStatus': current['state'].upper(), 'workerOperationalStatus': 'NOT_VERIFIED' if recovered or current['state'] != 'success' else 'VERIFIED_BY_DEPLOY',
+             'overallServiceReadiness': 'NOT_VERIFIED' if recovered or current['state'] != 'success' else 'READY',
              'dependencyCheckedAt': current.get('created_at', 'unknown')}
     manifest = {'candidateSha': sha, 'productionShaAfter': installed_sha if current['state'] == 'success' else None,
                 'status': current['state'].upper(), 'prepare': payload.get('prepare'),
@@ -584,7 +585,11 @@ def production_evidence():
                 'recoveryRunAttempt': result.get('recoveryRunAttempt') if recovery_match else None}
     run = {'id': int(run_id), 'run_attempt': int(attempt), 'head_sha': sha,
            'status': 'completed' if current['state'] in {'success', 'failure', 'error'} else 'in_progress',
-           'conclusion': current['state'], 'html_url': expected_url}
+           'conclusion': 'failure' if recovered else current['state'], 'html_url': expected_url}
+    if recovered:
+        run.update({'recoveryRunId': result.get('recoveryRunId'),
+                    'recoveryRunAttempt': result.get('recoveryRunAttempt'),
+                    'recoveryRunConclusion': 'success'})
     return state, manifest, run
 
 def current_state(event=None):
@@ -624,8 +629,12 @@ def render_current_state(state):
         f"Production: `{state['production_sha']}`; latest GitHub Deployment status **{state['release_status']}** at `{state['production_checked_at']}`. VPS readback is required before success is recorded.",
         f"Сверка SHA: **{state_name}**.",
         f"Последний завершившийся успешный Prepare: `{(prep.get('head_sha') or 'unknown')}` / run `#{prep.get('id', 'unknown')}`; current-main run `#{(state['latest_main_prepare'] or {}).get('id', 'unknown')}`: **{state['candidate']}**.",
-        f"Последний production Deploy: `{m.get('productionShaAfter') or m.get('candidateSha', 'unknown')}` / run `#{deploy.get('id', 'unknown')}` / **{state['release_status']}**. Prepare tag: `{(m.get('prepare') or {}).get('tag', 'unknown')}`.",
-        f"GitHub Deploy workflow: `{deploy.get('status', 'unknown')}` / status **{state['release_status']}**; latest status URL `{m.get('logUrl', 'unknown')}`.",
+        (f"Production Deployment: `{m.get('productionShaAfter') or m.get('candidateSha', 'unknown')}` / **{state['release_status']}**; original Deploy run `#{deploy.get('id', 'unknown')}`; Prepare run `#{(m.get('prepare') or {}).get('runId', 'unknown')}` attempt `{(m.get('prepare') or {}).get('attempt', 'unknown')}`."
+         if deploy.get('recoveryRunConclusion') == 'success' else
+         f"Последний production Deploy: `{m.get('productionShaAfter') or m.get('candidateSha', 'unknown')}` / run `#{deploy.get('id', 'unknown')}` / **{state['release_status']}**. Prepare tag: `{(m.get('prepare') or {}).get('tag', 'unknown')}`."),
+        (f"Original GitHub Deploy workflow: `{deploy.get('status', 'unknown')}` / **FAILURE**; recovery workflow `#{deploy.get('recoveryRunId', 'unknown')}` attempt `{deploy.get('recoveryRunAttempt', 'unknown')}`: **SUCCESS** for the same Deployment; latest status URL `{m.get('logUrl', 'unknown')}`."
+         if deploy.get('recoveryRunConclusion') == 'success' else
+         f"GitHub Deploy workflow: `{deploy.get('status', 'unknown')}` / status **{state['release_status']}**; latest status URL `{m.get('logUrl', 'unknown')}`."),
         f"Server deploy: **{state.get('server_deploy_status', state['release_status'])}**; Mac worker: **{state.get('worker_operational_status', 'NOT_VERIFIED')}**; service readiness: **{state.get('service_readiness', 'DEGRADED')}**; dependency checked `{state.get('dependency_checked_at', 'not checked')}`.",
         "Пользовательская приёмка: **OWNER_SMOKE_PENDING**; technical COMPLETE не является подтверждением Telegram-ответа.",
         "При degraded worker повторить dependency recheck без Deploy. Реальный Telegram/GSales inference smoke подтверждается отдельно; production ради dependency check повторно не запускать.",
