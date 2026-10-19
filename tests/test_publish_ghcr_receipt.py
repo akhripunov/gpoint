@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import yaml
 
@@ -301,6 +301,25 @@ class GhcrReceiptPublisherTests(unittest.TestCase):
             self.assertFalse(root.exists())
 
     def test_rehearsal_passes_ghcr_token_only_as_login_stdin(self):
+        self._exercise_private_rehearsal()
+
+    def test_rehearsal_rejects_external_containerd_before_credentials_or_pulls(self):
+        self._exercise_private_rehearsal('external')
+
+    def test_rehearsal_rejects_missing_containerd_identity(self):
+        self._exercise_private_rehearsal('missing')
+
+    def test_rehearsal_rejects_other_namespace_before_credentials(self):
+        self._exercise_private_rehearsal('other_namespace')
+
+    def test_private_containerd_readiness_recovers_a_bounded_probe_timeout(self):
+        self._exercise_private_rehearsal(probe_timeout=True)
+
+    def test_docker_start_failure_cleans_up_already_started_containerd(self):
+        self._exercise_private_rehearsal(docker_start_failure=True)
+
+    def _exercise_private_rehearsal(self, endpoint='private', *, probe_timeout=False,
+                                    docker_start_failure=False):
         records = {role: {'repository': repository, 'digest': DIGEST,
                           'configDigest': 'sha256:' + 'c' * 64,
                           'sourceSha': SHA, 'platform': 'linux/amd64'}
@@ -320,14 +339,25 @@ class GhcrReceiptPublisherTests(unittest.TestCase):
         def fake_run(*args, **kwargs):
             run_calls.append((args, kwargs))
             if args[:3] == ('docker', 'info', '--format'):
-                return json.dumps(docker_info)
+                root = Path(kwargs['env']['DOCKER_CONFIG']).parent
+                info = dict(docker_info)
+                if endpoint != 'missing':
+                    info['Containerd'] = {'Address': '/run/containerd/containerd.sock'
+                        if endpoint == 'external' else str(root / 'exec/containerd/containerd.sock'),
+                        'Namespaces': {'Containers': 'other' if endpoint == 'other_namespace' else 'moby'}}
+                return json.dumps(info)
             if args[:3] == ('docker', 'image', 'inspect'):
                 return json.dumps(metadata)
             if Path(args[0]).name == 'node':
                 docker_wrapper.append((Path(args[-1]) / 'bin/docker').read_text())
             return ''
 
+        probes = {'count': 0}
         def fake_subprocess_run(args, **kwargs):
+            if args[-1] == 'version':
+                probes['count'] += 1
+                if probe_timeout and probes['count'] == 1:
+                    raise subprocess.TimeoutExpired(args, 3)
             if len(args) > 2 and args[2] == 'rm':
                 PUBLISHER.shutil.rmtree(args[-1])
             return type('Result', (), {'returncode': 0})()
@@ -339,15 +369,34 @@ class GhcrReceiptPublisherTests(unittest.TestCase):
         }, clear=True), \
              patch.object(PUBLISHER.shutil, 'which', side_effect=lambda name: f'/safe/bin/{name}'), \
              patch.object(PUBLISHER.subprocess, 'Popen') as popen, \
+             patch.object(PUBLISHER.time, 'sleep'), \
              patch.object(PUBLISHER.subprocess, 'run', side_effect=fake_subprocess_run) as subprocess_run, \
              patch.object(PUBLISHER, 'run', side_effect=fake_run):
-            popen.return_value.pid = 987654321
-            popen.return_value.poll.side_effect = [None, 0, 0]
-            popen.return_value.wait.return_value = 0
-            result = PUBLISHER.rehearse_ghcr_images(records, SHA, 'actor', 'secret-ghcr')
+            processes = [MagicMock(pid=987654321), MagicMock(pid=987654322)]
+            for index, process in enumerate(processes):
+                process.poll.side_effect = [None, None, 0, 0] if index == 0 and probe_timeout else [None, 0, 0]
+                process.wait.return_value = 0
+            popen.side_effect = [processes[0], OSError('synthetic startup failure')] if docker_start_failure else processes
+            if docker_start_failure:
+                with self.assertRaisesRegex(OSError, 'synthetic startup'):
+                    PUBLISHER.rehearse_ghcr_images(records, SHA, 'actor', 'secret-ghcr')
+            elif endpoint == 'private':
+                result = PUBLISHER.rehearse_ghcr_images(records, SHA, 'actor', 'secret-ghcr')
+                self.assertEqual(result['status'], 'PASS')
+            else:
+                with self.assertRaisesRegex(RuntimeError, 'private containerd endpoint'):
+                    PUBLISHER.rehearse_ghcr_images(records, SHA, 'actor', 'secret-ghcr')
 
-        self.assertEqual(result['status'], 'PASS')
-        child_envs = [popen.call_args.kwargs['env']]
+        self.assertEqual(popen.call_count, 2)
+        containerd_args, docker_args = [call.args[0] for call in popen.call_args_list]
+        self.assertIn('/safe/bin/containerd', containerd_args)
+        private_socket = containerd_args[containerd_args.index('--address') + 1]
+        private_root = containerd_args[containerd_args.index('--root') + 1]
+        self.assertTrue(private_socket.startswith(private_root.rsplit('/containerd-data', 1)[0] + '/'))
+        self.assertEqual(docker_args[docker_args.index('--containerd') + 1], private_socket)
+        self.assertFalse(Path(private_root).parent.exists())
+        self.assertTrue(all(call.kwargs['start_new_session'] for call in popen.call_args_list))
+        child_envs = [call.kwargs['env'] for call in popen.call_args_list]
         child_envs.extend(kwargs['env'] for _, kwargs in run_calls if 'env' in kwargs)
         child_envs.extend(call.kwargs['env'] for call in subprocess_run.call_args_list
                           if 'env' in call.kwargs)
@@ -358,10 +407,51 @@ class GhcrReceiptPublisherTests(unittest.TestCase):
             self.assertNotEqual(env.get('DOCKER_CONFIG'), '/untrusted/docker-config')
             if 'DOCKER_CONFIG' in env:
                 self.assertIn('gpoint-ghcr-containerd-rehearsal-', env['DOCKER_CONFIG'])
+        if endpoint != 'private' or docker_start_failure:
+            self.assertFalse(any(args[:2] == ('docker', 'login') for args, _ in run_calls))
+            self.assertFalse(any(args[:2] == ('docker', 'pull') for args, _ in run_calls))
+            return
         login = next(kwargs for args, kwargs in run_calls if args[:2] == ('docker', 'login'))
         self.assertEqual(login['input'], 'secret-ghcr\n')
         self.assertEqual(len(docker_wrapper), 1)
         self.assertIn('DOCKER_CONFIG=', docker_wrapper[0])
+
+    def test_cleanup_stops_both_owned_groups_before_removing_state(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / 'scratch'
+            root.mkdir()
+            log = tempfile.TemporaryFile()
+            daemons = [MagicMock(pid=87654321), MagicMock(pid=87654322)]
+            for daemon in daemons:
+                daemon.poll.return_value = 0
+            stopped = set()
+            def kill_group(pid, signum):
+                if signum == PUBLISHER.signal.SIGTERM:
+                    stopped.add(pid)
+                elif signum == 0:
+                    raise ProcessLookupError
+            def remove_root(args, **_kwargs):
+                self.assertEqual(stopped, {87654321, 87654322})
+                PUBLISHER.shutil.rmtree(args[-1])
+            with patch.object(PUBLISHER.os, 'killpg', side_effect=kill_group), \
+                 patch.object(PUBLISHER.subprocess, 'run', side_effect=remove_root):
+                PUBLISHER.cleanup_rehearsal(root, daemons[0], log, 'sudo', {}, containerd=daemons[1])
+            self.assertFalse(root.exists())
+
+    def test_cleanup_keeps_state_if_owned_group_cannot_be_stopped(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / 'scratch'
+            root.mkdir()
+            log = tempfile.TemporaryFile()
+            daemon = MagicMock(pid=87654321)
+            daemon.poll.return_value = 0
+            with patch.object(PUBLISHER.os, 'killpg'), \
+                 patch.object(PUBLISHER.time, 'sleep'), \
+                 patch.object(PUBLISHER.subprocess, 'run') as remove:
+                with self.assertRaisesRegex(RuntimeError, 'cleanup failed'):
+                    PUBLISHER.cleanup_rehearsal(root, daemon, log, 'sudo', {})
+            remove.assert_not_called()
+            self.assertTrue(root.exists())
 
     def test_deploy_rehearsal_attestation_binds_all_ghcr_digests_and_native_ids(self):
         records = {

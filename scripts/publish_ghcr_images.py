@@ -227,10 +227,13 @@ def rehearsal_child_environment(source: dict | None = None) -> dict[str, str]:
     return {key: source[key] for key in allowed if source.get(key)}
 
 
-def cleanup_rehearsal(root: Path, daemon, log, sudo: str, env: dict[str, str]) -> None:
+def cleanup_rehearsal(root: Path, daemon, log, sudo: str, env: dict[str, str], *, containerd=None) -> None:
     """Stop the isolated daemon and verify its credential-bearing scratch root is removed."""
     cleanup_error = None
-    if daemon is not None:
+    for owned_daemon in (daemon, containerd):
+        if owned_daemon is None:
+            continue
+        daemon = owned_daemon
         try:
             os.killpg(daemon.pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -279,6 +282,9 @@ def cleanup_rehearsal(root: Path, daemon, log, sudo: str, env: dict[str, str]) -
         log.close()
     except Exception as error:
         cleanup_error = cleanup_error or error
+    if cleanup_error is not None:
+        # Never delete state/config beneath an owned process group still alive.
+        raise RuntimeError('private rehearsal cleanup failed') from cleanup_error
     try:
         subprocess.run([sudo, '-n', 'rm', '-rf', '--', str(root)], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
@@ -335,9 +341,10 @@ def rehearse_ghcr_images(records: dict, sha: str, username: str, token: str) -> 
             or not isinstance(username, str) or not username.strip()
             or not isinstance(token, str) or not token):
         raise ValueError('exact GHCR image identities and scoped read credentials are required')
-    dockerd, docker, ctr, sudo = (shutil.which(name) for name in ('dockerd', 'docker', 'ctr', 'sudo'))
+    dockerd, docker, ctr, sudo, containerd_binary = (
+        shutil.which(name) for name in ('dockerd', 'docker', 'ctr', 'sudo', 'containerd'))
     node = shutil.which('node')
-    if not all((dockerd, docker, ctr, sudo, node)):
+    if not all((dockerd, docker, ctr, sudo, node, containerd_binary)):
         raise RuntimeError('private containerd rehearsal tooling is unavailable')
 
     root = Path(tempfile.mkdtemp(prefix='gpoint-ghcr-containerd-rehearsal-'))
@@ -349,15 +356,47 @@ def rehearse_ghcr_images(records: dict, sha: str, username: str, token: str) -> 
     docker_config.mkdir(mode=0o700)
     config = root / 'daemon.json'
     config.write_text(json.dumps({'features': {'containerd-snapshotter': True}}))
+    containerd_socket = root / 'exec/containerd/containerd.sock'
+    containerd_socket.parent.mkdir(mode=0o700, parents=True)
+    containerd_config = root / 'containerd.toml'
+    containerd_config.write_text(
+        'version = 2\n'
+        'disabled_plugins = ["io.containerd.grpc.v1.cri", '
+        '"io.containerd.cri.v1.images", "io.containerd.cri.v1.runtime"]\n')
     log = log_path.open('wb')
     daemon = None
+    containerd_process = None
     started = time.monotonic()
     daemon_env = rehearsal_child_environment()
     try:
+        # An explicit private server prevents dockerd from selecting a host
+        # containerd endpoint that differs from the verifier's ctr wrapper.
+        containerd_process = subprocess.Popen(
+            [sudo, '-n', 'env', f'PATH={os.environ.get("PATH", "")}', containerd_binary,
+             '--config', str(containerd_config), '--address', str(containerd_socket),
+             '--root', str(root / 'containerd-data'), '--state', str(root / 'containerd-state')],
+            stdout=log, stderr=subprocess.STDOUT, start_new_session=True, env=daemon_env)
+        containerd_ready = False
+        for _ in range(90):
+            if containerd_process.poll() is not None:
+                break
+            try:
+                probe = subprocess.run([sudo, '-n', ctr, '--address', str(containerd_socket), 'version'],
+                                       env=daemon_env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                       text=True, timeout=3)
+            except subprocess.TimeoutExpired:
+                probe = None
+            if probe is not None and probe.returncode == 0:
+                containerd_ready = True
+                break
+            time.sleep(1)
+        if not containerd_ready:
+            raise RuntimeError('private rehearsal containerd did not become ready')
         daemon = subprocess.Popen(
             [sudo, '-n', 'env', f'PATH={os.environ.get("PATH", "")}', dockerd,
              '--config-file', str(config), '--host', host,
              '--data-root', str(root / 'data'), '--exec-root', str(root / 'exec'),
+             '--containerd', str(containerd_socket),
              '--pidfile', str(pidfile), '--storage-driver=overlayfs',
              '--containerd-namespace=moby', '--bridge=none', '--iptables=false',
              '--ip-masq=false', '--ip-forward=false'],
@@ -367,7 +406,7 @@ def rehearse_ghcr_images(records: dict, sha: str, username: str, token: str) -> 
         wrappers.mkdir(mode=0o700)
         for name, command in {
             'docker': [sudo, '-n', 'env', f'DOCKER_CONFIG={docker_config}', docker, '--host', host],
-            'ctr': [sudo, '-n', ctr, '--address', str(root / 'exec/containerd/containerd.sock')],
+            'ctr': [sudo, '-n', ctr, '--address', str(containerd_socket)],
         }.items():
             wrapper = wrappers / name
             wrapper.write_text('#!/bin/sh\nexec ' + shlex.join(command) + ' "$@"\n')
@@ -399,6 +438,8 @@ def rehearse_ghcr_images(records: dict, sha: str, username: str, token: str) -> 
             raise RuntimeError('private rehearsal store is not Docker 29.1.3 containerd/overlayfs')
         endpoint, namespace = private_containerd_endpoint_diagnostics(info, root)
         print(f'GHCR_REHEARSAL_CONTAINERD_ENDPOINT={endpoint} NAMESPACE={namespace}', flush=True)
+        if endpoint != 'MATCH' or namespace != 'MATCH':
+            raise RuntimeError('private containerd endpoint or namespace does not match isolated rehearsal')
         run('docker', 'login', 'ghcr.io', '--username', username, '--password-stdin',
             capture=True, env=client_env, input=token + '\n', timeout=30,
             stage='ghcr_rehearsal_auth', operation='login')
@@ -451,7 +492,7 @@ def rehearse_ghcr_images(records: dict, sha: str, username: str, token: str) -> 
         return {'status': 'PASS', 'dockerVersion': '29.1.3', 'store': 'containerd',
                 'snapshotter': 'overlayfs', 'seconds': elapsed, 'images': observed_images}
     finally:
-        cleanup_rehearsal(root, daemon, log, sudo, daemon_env)
+        cleanup_rehearsal(root, daemon, log, sudo, daemon_env, containerd=containerd_process)
 
 
 def safe_oci_file(path: Path, expected_name: str, media_type: str) -> tuple[str, Path]:
