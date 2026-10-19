@@ -469,11 +469,11 @@ function verifyLiveProduction(output, evidence, receipt, candidateSha) {
     ['LIVE_BOT_IMAGE', expectedImages.app.nativeId], ['LIVE_AGATA_API_IMAGE_ID', expectedImages.agata.nativeId],
     ['LIVE_AGATA_WORKER_IMAGE_ID', expectedImages.agata.nativeId],
     ['LIVE_GSALES_API_IMAGE_ID', expectedImages.gsales.nativeId],
-    ['LIVE_GSALES_AGATA_API_IMAGE_ID', expectedImages.gsales.nativeId],
-    ['LIVE_GSALES_AGATA_MEMORY_WORKER_IMAGE_ID', expectedImages.gsales.nativeId],
+    ['LIVE_GSALES_AGATA_API_IMAGE_ID', expectedImages.agata.nativeId],
+    ['LIVE_GSALES_AGATA_MEMORY_WORKER_IMAGE_ID', expectedImages.agata.nativeId],
   ];
-  requireThat(imageChecks.every(([key, value]) => facts[key] === value),
-    'Fresh VPS native image IDs differ from the original production component images');
+  const mismatchedImage = imageChecks.find(([key, value]) => facts[key] !== value)?.[0];
+  requireThat(!mismatchedImage, `Fresh VPS native image IDs differ at ${mismatchedImage}`);
   requireThat(receipt.deployRehearsal.images.app.nativeId !== receipt.deployRehearsal.images.agata.nativeId
     && receipt.deployRehearsal.images.app.nativeId !== receipt.deployRehearsal.images.gsales.nativeId
     && receipt.deployRehearsal.images.agata.nativeId !== receipt.deployRehearsal.images.gsales.nativeId,

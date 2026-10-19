@@ -395,8 +395,8 @@ function authorizationFinalizerFixture({statusState = 'error', statusDescription
       LIVE_AGATA_API_IMAGE_ID: receipt.deployRehearsal.images.agata.nativeId,
       LIVE_AGATA_WORKER_IMAGE_ID: receipt.deployRehearsal.images.agata.nativeId,
       LIVE_GSALES_API_IMAGE_ID: receipt.deployRehearsal.images.gsales.nativeId,
-      LIVE_GSALES_AGATA_API_IMAGE_ID: receipt.deployRehearsal.images.gsales.nativeId,
-      LIVE_GSALES_AGATA_MEMORY_WORKER_IMAGE_ID: receipt.deployRehearsal.images.gsales.nativeId,
+      LIVE_GSALES_AGATA_API_IMAGE_ID: receipt.deployRehearsal.images.agata.nativeId,
+      LIVE_GSALES_AGATA_MEMORY_WORKER_IMAGE_ID: receipt.deployRehearsal.images.agata.nativeId,
     };
     const [key] = line.split('=');
     return key in replacements ? `${key}=${replacements[key]}` : line;
@@ -466,6 +466,8 @@ test('authorization validation is read-only and emits original identities only a
 
 test('pre-mutation authorization, identity, scope, receipt, status and VPS failures produce no Deployment writes', async () => {
   const cases = [
+    ['GSales AGATA cannot use the GSales API image', {inspectVpsOutput: (count, output) => output.replace(
+      /LIVE_GSALES_AGATA_API_IMAGE_ID=sha256:[a-f0-9]+/, 'LIVE_GSALES_AGATA_API_IMAGE_ID=sha256:' + '9'.repeat(64))}],
     ['wrong authorization marker', {marker: {claimed: true, revoked: false, consumed: true, consumedSha: 'c'.repeat(40)}}],
     ['revoked authorization', {marker: {claimed: true, revoked: true, consumed: false}}],
     ['wrong original HTTP failure', {evidenceOverrides: {executionFailure: {stage: 'POST_APPLY_READBACK',
@@ -866,19 +868,49 @@ test('real canonical result reaches same-ID finalization and subsequent parent a
       assert.equal(deployment.id, target.id); assert.equal(boundIdentity.candidateSha, candidateSha); writes++;
       status = {...value, log_url: value.logUrl, created_at: '2026-10-19T06:00:00Z'};
     }};
-  const values = {};
-  const originalReceipt = JSON.parse(original.ciReceipt.prepareReceiptJson);
-  for (const name of ['RELEASE_ENV', 'API', 'WORKER', 'BOT', 'MINIAPP', 'AGATA_API', 'AGATA_WORKER',
-    'GSALES_API', 'GSALES_AGATA_API', 'GSALES_AGATA_MEMORY_WORKER']) values['LIVE_' + name + '_SHA'] = candidateSha;
-  for (const [role,names] of Object.entries({app:['API','WORKER','BOT'],agata:['AGATA_API','AGATA_WORKER'],
-    gsales:['GSALES_API','GSALES_AGATA_API','GSALES_AGATA_MEMORY_WORKER']})) {
-    for (const name of names) {
-      values['LIVE_' + name + (['API','WORKER','BOT'].includes(name) ? '_IMAGE' : '_IMAGE_ID')] = originalReceipt.deployRehearsal.images[role].nativeId;
-      values['LIVE_' + name + '_RUNNING'] = 'true'; values['LIVE_' + name + '_HEALTH'] = 'healthy';
-    }
-  }
-  Object.assign(values,{LIVE_PRISMA_HEAD:original.dbHeadAfter,LIVE_AGATA_HEAD:original.agataDbHeadAfter,
-    LIVE_GSALES_HEAD:original.gsalesDbHeadAfter,LIVE_GSALES_MIGRATION_SHA256:original.gsalesRuntime.migrationSha256});
+  // Canonical read-only VPS inspector snapshot; tenant/config/private fields excluded.
+  const values = {
+  "LIVE_RELEASE_ENV_SHA": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+  "LIVE_API_IMAGE": "sha256:62f97e7291f71b0c4dc9328648d4e707771473a24d827574f395b97494ae6197",
+  "LIVE_API_SHA": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+  "LIVE_API_RUNNING": "true",
+  "LIVE_API_HEALTH": "healthy",
+  "LIVE_WORKER_IMAGE": "sha256:62f97e7291f71b0c4dc9328648d4e707771473a24d827574f395b97494ae6197",
+  "LIVE_WORKER_SHA": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+  "LIVE_WORKER_RUNNING": "true",
+  "LIVE_WORKER_HEALTH": "none",
+  "LIVE_BOT_IMAGE": "sha256:62f97e7291f71b0c4dc9328648d4e707771473a24d827574f395b97494ae6197",
+  "LIVE_BOT_SHA": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+  "LIVE_BOT_RUNNING": "true",
+  "LIVE_BOT_HEALTH": "none",
+  "LIVE_MINIAPP_SHA": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+  "LIVE_PRISMA_HEAD": "20261015130000_codex_telegram_challenge",
+  "LIVE_AGATA_HEAD": "agata0011",
+  "LIVE_AGATA_API_IMAGE": "gpoint-agata-runtime:1f13e88f4648ba22fc11063532c1280cdf6df2da",
+  "LIVE_AGATA_API_IMAGE_ID": "sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614",
+  "LIVE_AGATA_API_SHA": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+  "LIVE_AGATA_API_RUNNING": "true",
+  "LIVE_AGATA_API_HEALTH": "healthy",
+  "LIVE_AGATA_WORKER_IMAGE": "gpoint-agata-runtime:1f13e88f4648ba22fc11063532c1280cdf6df2da",
+  "LIVE_AGATA_WORKER_IMAGE_ID": "sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614",
+  "LIVE_AGATA_WORKER_SHA": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+  "LIVE_AGATA_WORKER_RUNNING": "true",
+  "LIVE_AGATA_WORKER_HEALTH": "healthy",
+  "LIVE_GSALES_HEAD": "001_gsales",
+  "LIVE_GSALES_MIGRATION_SHA256": "8de19ec2efd81848010379645d51243ac3f4a4cd37af0be211d71cdf36bcd111",
+  "LIVE_GSALES_API_IMAGE_ID": "sha256:ccad34b6891fb7eebfe49117b92319e3a4d63b0b6e01e1923663e4421ca21873",
+  "LIVE_GSALES_API_RUNNING": "true",
+  "LIVE_GSALES_API_HEALTH": "healthy",
+  "LIVE_GSALES_API_SHA": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+  "LIVE_GSALES_AGATA_API_IMAGE_ID": "sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614",
+  "LIVE_GSALES_AGATA_API_RUNNING": "true",
+  "LIVE_GSALES_AGATA_API_HEALTH": "healthy",
+  "LIVE_GSALES_AGATA_API_SHA": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
+  "LIVE_GSALES_AGATA_MEMORY_WORKER_IMAGE_ID": "sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614",
+  "LIVE_GSALES_AGATA_MEMORY_WORKER_RUNNING": "true",
+  "LIVE_GSALES_AGATA_MEMORY_WORKER_HEALTH": "healthy",
+  "LIVE_GSALES_AGATA_MEMORY_WORKER_SHA": "1f13e88f4648ba22fc11063532c1280cdf6df2da"
+};
   const result = await finalizeAuthorizationConsumption({client, deploymentId:target.id,candidateSha,env:fixture.env,
     token:'test',root:'/offline',assertCheckout:()=>{},currentMain:fixture.currentMain,
     readDeployEvidence:async()=>original,
