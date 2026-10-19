@@ -94,6 +94,23 @@ class DeployEvidenceWorkflowTests(unittest.TestCase):
                          "always() && inputs.mode != 'reconcile-authorization'")
         self.assertIn("reconcile-authorization", publish_steps["Publish production result to GPoint Linear"]["if"])
 
+    def test_oras_is_available_before_production_parent_oci_verification(self):
+        workflow = yaml.safe_load(WORKFLOW.read_text())
+        steps = workflow["jobs"]["deploy"]["steps"]
+        names = [step.get("name") for step in steps]
+        installer = "Set up ORAS for immutable deployment evidence"
+        verifier = "Verify receipt, canonical preflight, apply and persist evidence"
+        publisher = "Publish deployment result as a GHCR OCI artifact"
+        self.assertEqual(names.count(installer), 1)
+        self.assertLess(names.index("Resolve and verify exact Prepare receipt from GHCR"),
+                        names.index(installer))
+        self.assertLess(names.index(installer), names.index(verifier))
+        self.assertLess(names.index(installer), names.index(publisher))
+        self.assertEqual(steps[names.index(installer)]["with"]["version"], "1.3.0")
+        reconcile_steps = workflow["jobs"]["reconcile-authorization"]["steps"]
+        self.assertEqual(next(step for step in reconcile_steps
+                              if step.get("name") == "Set up ORAS for immutable reconciliation evidence")["with"]["version"], "1.3.0")
+
     def test_only_trusted_mac_production_jobs_have_contents_write_for_authorization_consumption(self):
         workflow = yaml.safe_load(WORKFLOW.read_text())
         deploy = workflow["jobs"]["deploy"]

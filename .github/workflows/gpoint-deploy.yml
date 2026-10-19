@@ -183,6 +183,11 @@ jobs:
           EXPECTED_PREPARE_RECEIPT_SHA256: ${{ inputs.prepare_receipt_sha256 }}
           ARTIFACT_DESTINATION: ${{ env.GPOINT_RELEASE_BUNDLE }}
         run: python3 scripts/prepared_artifact_cache.py
+      - name: Set up ORAS for immutable deployment evidence
+        if: always()
+        uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1.0.0
+        with:
+          version: 1.3.0
       - name: Verify receipt, canonical preflight, apply and persist evidence
         id: execute
         env:
@@ -196,11 +201,6 @@ jobs:
           GHCR_READ_USERNAME: ${{ github.actor }}
           GHCR_READ_TOKEN: ${{ github.token }}
         run: node scripts/automated-release.mjs
-      - name: Set up ORAS for immutable deployment evidence
-        if: always()
-        uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1.0.0
-        with:
-          version: 1.3.0
       - name: Publish deployment result as a GHCR OCI artifact
         id: evidence
         if: always()
