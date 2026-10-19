@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {deploymentPayload} from './github-deployments.mjs';
+import {AuthorizationError} from './release-authorization.mjs';
 import {assertCandidateExecutionScope, fetchAuthorizationReconciliationEvidence, fetchOriginalDeployEvidence,
   finalizeAuthorizationConsumption, reconcileVerifiedDeployment, reconciledResultEvidence,
   ReconciliationGateError, safeReconciliationFailure,
@@ -591,6 +592,11 @@ test('reconciliation diagnostics expose only bounded trusted gate failures', () 
   assert.doesNotMatch(gate, /[\r\n]/);
   assert.equal(safeReconciliationFailure(Object.assign(new Error('private API response token=secret'),
     {name: 'FetchError'})), 'TYPE=FetchError');
+  assert.equal(safeReconciliationFailure(new AuthorizationError('Task authorization consumption failed (HTTP 403)')),
+    'GATE=Task authorization consumption failed (HTTP 403)');
+  assert.equal(safeReconciliationFailure(new AuthorizationError('Task authorization consumption response was lost and exact marker is absent')),
+    'GATE=Task authorization consumption response lost with exact marker absent');
+  assert.equal(safeReconciliationFailure(new AuthorizationError('token=secret')), 'TYPE=AuthorizationError');
 });
 
 test('candidate-to-executor scope rejects any path outside immutable authorization paths', () => {

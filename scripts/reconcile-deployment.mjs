@@ -7,7 +7,7 @@ import {execFileSync} from 'node:child_process';
 import {deploymentIdentity} from './github-deployments.mjs';
 import {factsFromReadOnlyInspection, stateFromLiveVps} from './deployment-run-state.mjs';
 import {createGitHubDeploymentsClient} from './github-deployments.mjs';
-import {authorizationRecordPath, authorizationStateRef, candidateScopeDiff, consumeTaskAuthorization,
+import {AuthorizationError, authorizationRecordPath, authorizationStateRef, candidateScopeDiff, consumeTaskAuthorization,
   validateTaskAuthorization, checkTaskAuthorizationState} from './release-authorization.mjs';
 import {validateOciReceipt} from './release-oci.mjs';
 import {inspectProductionReadOnly} from './release-gpoint-vps-adapter.mjs';
@@ -34,6 +34,14 @@ export function safeReconciliationFailure(error) {
   if (error instanceof ReconciliationGateError) {
     const message = String(error.message).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 240);
     return `GATE=${message}`;
+  }
+  if (error instanceof AuthorizationError) {
+    const message = String(error.message);
+    const http = /^Task authorization consumption failed \(HTTP ([345]\d\d)\)$/.exec(message);
+    if (http) return `GATE=Task authorization consumption failed (HTTP ${http[1]})`;
+    if (message === 'Task authorization consumption response was lost and exact marker is absent')
+      return 'GATE=Task authorization consumption response lost with exact marker absent';
+    return 'TYPE=AuthorizationError';
   }
   const name = /^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(String(error?.name ?? '')) ? error.name : 'Error';
   return `TYPE=${name}`;
