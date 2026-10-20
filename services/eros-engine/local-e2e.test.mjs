@@ -166,6 +166,18 @@ test('restart-history assertions cover all turns and initial temporal facts', ()
   assert.equal((e2e.match(/LOCAL_E2E_RESTART_HISTORY=PASS/g) ?? []).length, 1);
 });
 
+test('stock Eros API E2E exercises owner-bound session listing and foreign-session denial', () => {
+  const e2e = readFileSync(new URL('local-test-e2e.mjs', directory), 'utf8');
+  const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
+  assert.match(e2e, /LOCAL_E2E_STOCK_API_USER_ISOLATION=PASS/);
+  assert.match(e2e, /foreignUserId/);
+  assert.match(e2e, /client\.sessions\(foreignUserId\)/);
+  assert.match(e2e, /client\.history\(foreignUserId, ownSession\.sessionId/);
+  assert.match(e2e, /error\.status === 403/);
+  assert.match(runner, /exec -w \/workspace\/apps\/api -T gpoint-api node --import tsx \/workspace\/services\/eros-engine\/local-test-e2e\.mjs/);
+  assert.match(runner, /LOCAL_E2E_RLS_TENANT_ISOLATION=NOT_TESTED/);
+});
+
 test('provider context evidence reports PASS when one context contains every recall fact', () => {
   const log = JSON.stringify({
     event: 'LOCAL_TEST_PROVIDER_CONTEXT',

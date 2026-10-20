@@ -216,7 +216,7 @@ api_image=$(compose images -q gpoint-api)
   --entrypoint pnpm "$api_image" --filter @gpoint/api exec node --import tsx --test \
   test/eros-worker-contract.test.ts test/eros-worker-cancel.integration.test.ts
 compose --profile worker up -d --no-deps gpoint-worker
-if ! compose exec -T gpoint-api node services/eros-engine/local-test-e2e.mjs >"$tmp/e2e.out" 2>&1; then tail -40 "$tmp/e2e.out" >&2; exit 1; fi
+if ! compose exec -w /workspace/apps/api -T gpoint-api node --import tsx /workspace/services/eros-engine/local-test-e2e.mjs >"$tmp/e2e.out" 2>&1; then tail -40 "$tmp/e2e.out" >&2; exit 1; fi
 cat "$tmp/e2e.out"
 session_count=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT count(*) FROM engine.chat_sessions WHERE channel <> 'group';")
 [ "$session_count" = 1 ] || { echo "LOCAL_E2E_MEMORY_FIXTURE_SESSIONS=FAIL count=$session_count" >&2; exit 1; }
@@ -246,7 +246,7 @@ if [ "$memory_state" != "true:2" ]; then
 fi
 echo LOCAL_E2E_MEMORY_EXTRACTION=PASS candidates=2
 echo LOCAL_E2E_DURABLE_MEMORY=PASS candidates=2
-if ! compose exec -T gpoint-api node services/eros-engine/local-test-e2e.mjs --recall-only >"$tmp/recall.out" 2>&1; then tail -40 "$tmp/recall.out" >&2; exit 1; fi
+if ! compose exec -w /workspace/apps/api -T gpoint-api node --import tsx /workspace/services/eros-engine/local-test-e2e.mjs --recall-only >"$tmp/recall.out" 2>&1; then tail -40 "$tmp/recall.out" >&2; exit 1; fi
 cat "$tmp/recall.out"
 worker_id=$(compose --profile worker ps -a -q gpoint-worker)
 [ -n "$worker_id" ] || { echo LOCAL_E2E_WORKER_CONTAINER_MISSING=FAIL >&2; exit 1; }
@@ -268,7 +268,7 @@ echo LOCAL_E2E_EXISTING_GPOINT_WORKER_QUEUE=PASS
 docker_local rm "$worker_id" >/dev/null; worker_id=
 compose restart eros
 compose up -d --wait --wait-timeout 90 eros
-compose exec -T gpoint-api node services/eros-engine/local-test-e2e.mjs --history-only
+compose exec -w /workspace/apps/api -T gpoint-api node --import tsx /workspace/services/eros-engine/local-test-e2e.mjs --history-only
 compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT 'EROS_CHAT_MESSAGES=' || count(*) FROM engine.chat_messages; SELECT 'EROS_DURABLE_MEMORY_ROWS=' || count(*) FROM engine.companion_memories WHERE category IS NOT NULL AND content LIKE 'SYNTH_%';"
 compose exec -T postgres psql -U eros_test_admin -d gpoint_test -Atc "SELECT 'GPOINT_EROS_QUEUE_JOBS=' || count(*) FROM engine.eros_inference_jobs;"
 if [ "$memory_recall_status" = PASS ]; then

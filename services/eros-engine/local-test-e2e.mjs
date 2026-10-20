@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { createErosEngineClient, ErosAdapterError, erosIdentityFor } from '../../apps/api/src/eros-adapter.ts';
 
 const api = 'http://127.0.0.1:3000';
 const creator = 'eros_test_creator';
@@ -40,6 +41,25 @@ async function authenticate() {
 
 async function readHistory(token) {
   return request(`${api}/messages/creator/${creator}?limit=100`, { token });
+}
+
+async function assertStockApiUserIsolation() {
+  const client = createErosEngineClient(process.env);
+  assert.ok(client, 'Eros client is configured in the isolated API container');
+  const ownerIdentity = erosIdentityFor({ userId: 'eros_test_user', creatorId: creator });
+  const ownerSessions = await client.sessions(ownerIdentity.userId);
+  const ownSession = ownerSessions.find((session) => session.channel === 'text');
+  assert.ok(ownSession, 'the first synthetic user owns the expected Eros session');
+
+  const foreignUserId = randomUUID();
+  const foreignSessions = await client.sessions(foreignUserId);
+  assert.equal(foreignSessions.length, 0, 'a second JWT subject sees no first-user sessions');
+  await assert.rejects(
+    client.history(foreignUserId, ownSession.sessionId, 1),
+    (error) => error instanceof ErosAdapterError && error.status === 403,
+    'a second JWT subject cannot read the first user’s session',
+  );
+  console.log('LOCAL_E2E_STOCK_API_USER_ISOLATION=PASS distinct_jwt_subjects=2');
 }
 
 async function assertCompleteHistory(token, stage, expectedTurns = 17) {
@@ -113,6 +133,7 @@ const noConsent = await request(`${api}/messages/creator/${creator}`, {
 assert.equal(noConsent.status, 201, JSON.stringify(noConsent.data));
 assert.equal(noConsent.data?.response?.text, 'DETERMINISTIC_LOCAL_E2E_REPLY',
   'the deprecated optional memory flag must not block Eros after required disclosure is current');
+await assertStockApiUserIsolation();
 
 await setFixtureState({ ageAssuranceRequired: false, longTermMemory: true });
 const dialogue = [
