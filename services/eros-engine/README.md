@@ -39,10 +39,13 @@ built-in OpenRouter keep their previous audit behavior.
 `patches/0004-fence-delayed-dreaming-memory-writes.patch` makes the background
 memory classifier use the same session-row lock as relationship archival.
 When archive wins while model extraction or embedding is in flight, the
-classifier now completes as a no-op instead of recreating the deleted profile
-memory. Its regression test pauses a synthetic mocked extraction, archives the
-relationship, then verifies that no memory row reappears. The patchset digest
-is SHA-256 over the ordered `shasum -a 256` records for patches `0001`–`0004`.
+classifier completes as a no-op instead of writing profile memory after
+archival. Its regression test holds a synthetic provider response behind an
+explicit barrier, archives the relationship, releases extraction, then
+verifies that no new memory row is written. This does not purge existing
+profile memory; deletion and consent revocation remain separate unverified
+lifecycle gates. The patchset digest is SHA-256 over the ordered
+`shasum -a 256` records for patches `0001`–`0004`.
 
 Migration coexistence was tested in a disposable PostgreSQL database after all
 18 current GPoint Prisma migrations and all 11 AGATA Alembic revisions. Eros

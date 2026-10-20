@@ -1,23 +1,14 @@
 diff --git a/crates/eros-engine-server/src/pipeline/dreaming.rs b/crates/eros-engine-server/src/pipeline/dreaming.rs
-index 2e0de44..2aa4345 100644
+index 2e0de44..81a78ee 100644
 --- a/crates/eros-engine-server/src/pipeline/dreaming.rs
 +++ b/crates/eros-engine-server/src/pipeline/dreaming.rs
-@@ -288,8 +288,9 @@ async fn classify_session(
-         let metadata = candidate_metadata(cand);
-         match state.embed.embed_document(trimmed).await {
-             Ok(embedding) => {
+@@ -291,2 +291,3 @@ async fn classify_session(
 -                if let Err(e) = repo
 -                    .upsert(
 +                match repo
 +                    .upsert_if_live(
 +                        session_id,
-                         MemoryLayer::Profile,
-                         session_id,
-                         user_id,
-@@ -301,9 +302,13 @@ async fn classify_session(
-                     )
-                     .await
-                 {
+@@ -304,3 +305,7 @@ async fn classify_session(
 -                    tracing::warn!(%session_id, "dreaming: insert failed: {e}");
 -                } else {
 -                    written += 1;
@@ -28,46 +19,69 @@ index 2e0de44..2aa4345 100644
 +                    // successful no-op, not a retryable failure.
 +                    Ok(None) => {}
 +                    Err(e) => tracing::warn!(%session_id, "dreaming: insert failed: {e}"),
-                 }
-             }
-             Err(e) => {
-@@ -322,7 +327,10 @@ async fn classify_session(
- }
- 
- async fn mark_classified(pool: &sqlx::PgPool, session_id: Uuid) -> Result<(), sqlx::Error> {
+@@ -325,4 +330,7 @@ async fn mark_classified(pool: &sqlx::PgPool, session_id: Uuid) -> Result<(), sq
 -    sqlx::query("UPDATE engine.chat_sessions SET classified_at = now() WHERE id = $1")
+-        .bind(session_id)
+-        .execute(pool)
+-        .await?;
 +    sqlx::query(
 +        "UPDATE engine.chat_sessions SET classified_at = now() \
 +         WHERE id = $1 AND NOT archived",
 +    )
-         .bind(session_id)
-         .execute(pool)
-         .await?;
-@@ -1111,4 +1119,86 @@ mod tests {
-                 .unwrap();
-         assert!(live_stamp.is_none(), "live call must not be swept mid-call");
-     }
++    .bind(session_id)
++    .execute(pool)
++    .await?;
+@@ -1113,0 +1122,114 @@ mod tests {
 +
 +    #[sqlx::test(migrations = "../eros-engine-store/migrations")]
-+    async fn delayed_dreaming_completion_cannot_restore_memory_after_archive(
-+        pool: sqlx::PgPool,
-+    ) {
-+        use wiremock::matchers::path as wm_path;
-+        use wiremock::{Mock, MockServer, ResponseTemplate};
++    async fn delayed_dreaming_completion_cannot_restore_memory_after_archive(pool: sqlx::PgPool) {
++        let llm_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let llm_addr = llm_listener.local_addr().unwrap();
++        let (request_seen_tx, request_seen_rx) = tokio::sync::oneshot::channel();
++        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
++        let llm_response = serde_json::json!({
++            "choices": [{ "message": { "content":
++                "{\"memories\":[{\"content\":\"synthetic delayed fact\",\"category\":\"fact\"}]}" } }],
++            "id": "gen-delayed", "model": "primary"
++        })
++        .to_string();
++        tokio::spawn(async move {
++            use tokio::io::{AsyncReadExt, AsyncWriteExt};
 +
-+        let llm = MockServer::start().await;
-+        Mock::given(wm_path("/api/v1/chat/completions"))
-+            .respond_with(
-+                ResponseTemplate::new(200)
-+                    .set_body_json(serde_json::json!({
-+                        "choices": [{ "message": { "content":
-+                            "{\"memories\":[{\"content\":\"synthetic delayed fact\",\"category\":\"fact\"}]}" } }],
-+                        "id": "gen-delayed", "model": "primary"
-+                    }))
-+                    .set_delay(std::time::Duration::from_millis(500)),
-+            )
-+            .mount(&llm)
-+            .await;
++            let (mut stream, _) = llm_listener.accept().await.unwrap();
++            let mut request = Vec::new();
++            let mut buffer = [0_u8; 4096];
++            let header_end = loop {
++                let count = stream.read(&mut buffer).await.unwrap();
++                assert!(count > 0, "client closed before sending request headers");
++                request.extend_from_slice(&buffer[..count]);
++                if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
++                    break index + 4;
++                }
++            };
++            let headers = String::from_utf8_lossy(&request[..header_end]);
++            let content_length = headers
++                .lines()
++                .find_map(|line| {
++                    let (name, value) = line.split_once(':')?;
++                    name.eq_ignore_ascii_case("content-length")
++                        .then(|| value.trim().parse::<usize>().unwrap())
++                })
++                .unwrap_or(0);
++            while request.len() < header_end + content_length {
++                let count = stream.read(&mut buffer).await.unwrap();
++                assert!(count > 0, "client closed before sending request body");
++                request.extend_from_slice(&buffer[..count]);
++            }
++            let _ = request_seen_tx.send(());
++            let _ = release_rx.await;
++            let response = format!(
++                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
++                llm_response.len(),
++                llm_response
++            );
++            stream.write_all(response.as_bytes()).await.unwrap();
++        });
 +        let (_embed_server, embed) = embed_router_mock().await;
 +
 +        let mut state = crate::routes::companion::test_state(pool.clone());
@@ -80,7 +94,7 @@ index 2e0de44..2aa4345 100644
 +        state.openrouter = std::sync::Arc::new(
 +            eros_engine_llm::openrouter::OpenRouterClient::with_base_url(
 +                "test-key".into(),
-+                format!("{}/api/v1/chat/completions", llm.uri()),
++                format!("http://{llm_addr}/api/v1/chat/completions"),
 +            ),
 +        );
 +        state.embed = std::sync::Arc::new(embed);
@@ -106,27 +120,29 @@ index 2e0de44..2aa4345 100644
 +        let classify = tokio::spawn(async move {
 +            classify_session(&state, session_id, user_id, Some(instance_id)).await
 +        });
-+        for _ in 0..100 {
-+            if llm.received_requests().await.unwrap_or_default().len() == 1 {
-+                break;
-+            }
-+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-+        }
-+        assert_eq!(llm.received_requests().await.unwrap().len(), 1);
++        tokio::time::timeout(std::time::Duration::from_secs(5), request_seen_rx)
++            .await
++            .expect("classifier reaches provider barrier")
++            .expect("provider barrier receiver remains connected");
 +
 +        eros_engine_store::session_archive::SessionArchiveRepo { pool: &pool }
 +            .archive_relationship(user_id, instance_id)
 +            .await
 +            .unwrap();
-+        classify.await.unwrap().expect("delayed classifier completes");
++        release_tx
++            .send(())
++            .expect("mock provider is waiting to release its response");
++        tokio::time::timeout(std::time::Duration::from_secs(5), classify)
++            .await
++            .expect("classifier completes after provider response is released")
++            .unwrap()
++            .expect("delayed classifier completes");
 +
-+        let count: i64 = sqlx::query_scalar(
-+            "SELECT count(*) FROM engine.companion_memories WHERE user_id = $1",
-+        )
-+        .bind(user_id)
-+        .fetch_one(&pool)
-+        .await
-+        .unwrap();
++        let count: i64 =
++            sqlx::query_scalar("SELECT count(*) FROM engine.companion_memories WHERE user_id = $1")
++                .bind(user_id)
++                .fetch_one(&pool)
++                .await
++                .unwrap();
 +        assert_eq!(count, 0, "archived session must fence stale memory writes");
 +    }
- }

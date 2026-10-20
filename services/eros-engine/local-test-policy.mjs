@@ -3,9 +3,9 @@ import { homedir } from 'node:os';
 import { join, normalize } from 'node:path';
 import { statSync } from 'node:fs';
 
-export const PINNED_EROS_REFERENCE = 'gpoint-eros:d1a140083321687212fb7b17c09cc0c3c9639f5e-ceadc44ee07b-linux-amd64';
+export const PINNED_EROS_REFERENCE = 'gpoint-eros:d1a140083321687212fb7b17c09cc0c3c9639f5e-9dd93ad75f72-linux-amd64';
 const PINNED_UPSTREAM = 'd1a140083321687212fb7b17c09cc0c3c9639f5e';
-const PINNED_PATCHSET = 'ceadc44ee07b1cc81d22b87f84c2736b70644e51e53b142914309df7664af71c';
+const PINNED_PATCHSET = '9dd93ad75f7272403d1c6a64c88372278199f26eb4e0fe1981e548dcc09377b8';
 const PINNED_SOURCE = 'https://github.com/akhripunov/gpoint';
 
 export function validateDockerEndpoint(endpoint, {
