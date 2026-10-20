@@ -1,0 +1,148 @@
+services:
+  postgres:
+    profiles: [test]
+    image: pgvector/pgvector:0.8.6-pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+    restart: "no"
+    environment:
+      POSTGRES_DB: eros_test
+      POSTGRES_USER: eros_test_admin
+      POSTGRES_PASSWORD: ${EROS_TEST_ADMIN_PASSWORD:?set synthetic disposable-admin password}
+    volumes:
+      - ./local-test-init.sql:/docker-entrypoint-initdb.d/10-test-roles.sql:ro
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eros_test_admin -d eros_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    networks: [eros_test]
+
+  eros-migrate:
+    profiles: [test]
+    image: ${EROS_IMAGE:?build local Eros image first}
+    restart: "no"
+    command: ["migrate"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      DATABASE_URL: postgresql://eros_migrator:local-only-eros-migrator@postgres:5432/eros_test
+    networks: [eros_test]
+
+  gpoint-api-migrate:
+    profiles: [test]
+    build:
+      context: ../..
+      dockerfile: services/eros-engine/Dockerfile.api-local-test
+    restart: "no"
+    entrypoint: ["pnpm"]
+    command: ["--filter", "@gpoint/db", "exec", "prisma", "migrate", "deploy", "--schema", "prisma/schema.prisma"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      eros-migrate: {condition: service_completed_successfully}
+    environment:
+      DATABASE_URL: postgresql://eros_test_admin:${EROS_TEST_ADMIN_PASSWORD:?set synthetic disposable-admin password}@postgres:5432/eros_test?schema=public
+    networks: [eros_test]
+
+  gpoint-api:
+    profiles: [test]
+    build:
+      context: ../..
+      dockerfile: services/eros-engine/Dockerfile.api-local-test
+    restart: "no"
+    depends_on:
+      postgres: {condition: service_healthy}
+      eros-migrate: {condition: service_completed_successfully}
+      gpoint-api-migrate: {condition: service_completed_successfully}
+    environment:
+      NODE_ENV: development
+      API_HOST: 0.0.0.0
+      API_PORT: "3000"
+      DATABASE_URL: postgresql://gpoint_api_test:local-only-gpoint-api-test@postgres:5432/eros_test?schema=public
+      EROS_ADAPTER_DATABASE_URL: postgresql://gpoint_api_test:local-only-gpoint-api-test@postgres:5432/eros_test?schema=engine
+      EROS_ENABLED: "true"
+      EROS_DATA_MODE: synthetic
+      EROS_TEST_USER_IDS: eros_test_user
+      EROS_TEST_CREATOR_IDS: eros_test_creator
+      EROS_SERVICE_URL: http://eros:8080
+      EROS_JWT_SECRET: ${EROS_TEST_SUPABASE_JWT_SECRET:?set synthetic JWT secret}
+      EROS_REQUEST_TIMEOUT_MS: "45000"
+      EROS_WORKER_SIGNING_SECRET: ${EROS_TEST_BRIDGE_SIGNING_SECRET:?set synthetic signing key}
+      EROS_WORKER_TENANT_ID: ${EROS_TEST_TENANT_ID:?set synthetic tenant UUID}
+      AGATA_TENANT_ID: ${EROS_TEST_TENANT_ID:?set synthetic tenant UUID}
+      EROS_BRIDGE_API_KEY: ${EROS_TEST_GPOINT_API_KEY:?set synthetic provider key}
+      EROS_OLLAMA_EMBEDDING_URL: http://127.0.0.1:11434/api/embed
+      GPOINT_API_KEY: ${EROS_TEST_GPOINT_API_KEY:?set synthetic provider key}
+      GPOINT_AGATA_WORKER_TOKEN: ${EROS_TEST_WORKER_TOKEN:?set synthetic Worker token}
+      AGATA_ENABLED: "true"
+      AGATA_SERVICE_URL: http://127.0.0.1:18080
+      AGATA_INTERNAL_API_TOKEN: ${EROS_TEST_AGATA_TOKEN:?set synthetic local fixture token}
+      EROS_TEST_AGATA_TOKEN: ${EROS_TEST_AGATA_TOKEN:?set synthetic local fixture token}
+      DEV_AUTH_MODE: "true"
+      DEV_AUTH_TELEGRAM_ID: "900000001"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health/live').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 3s
+      timeout: 2s
+      start_period: 20s
+      retries: 20
+    networks: [eros_test]
+
+  gpoint-worker:
+    profiles: [worker]
+    build:
+      context: ../..
+      dockerfile: services/eros-engine/Dockerfile.worker-local-test
+    restart: "no"
+    depends_on:
+      gpoint-api: {condition: service_healthy}
+    environment:
+      GPOINT_AGATA_WORKER_LOCAL_TEST: "true"
+      GPOINT_AGATA_WORKER_URL: http://127.0.0.1:3000/agata-worker
+      GPOINT_AGATA_WORKER_TOKEN: ${EROS_TEST_WORKER_TOKEN:?set synthetic Worker token}
+      GPOINT_AGATA_TENANT_ID: ${EROS_TEST_TENANT_ID:?set synthetic tenant UUID}
+      GPOINT_AGATA_WORKER_SUPPORT: /tmp/worker-support
+      EROS_TEST_WORKER_IDLE_SECONDS: "5"
+    volumes:
+      - ../..:/workspace:ro
+    tmpfs: [/tmp]
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    network_mode: service:gpoint-api
+
+  eros:
+    profiles: [test]
+    image: ${EROS_IMAGE:?build local Eros image first}
+    restart: "no"
+    depends_on:
+      postgres: {condition: service_healthy}
+      eros-migrate: {condition: service_completed_successfully}
+    environment:
+      DATABASE_URL: postgresql://eros_runtime:local-only-eros-runtime@postgres:5432/eros_test
+      GPOINT_API_KEY: ${EROS_TEST_GPOINT_API_KEY:?set synthetic provider key}
+      GPOINT_WORKER_BRIDGE_SIGNING_SECRET: ${EROS_TEST_BRIDGE_SIGNING_SECRET:?set synthetic signing key}
+      GPOINT_WORKER_TENANT_ID: ${EROS_TEST_TENANT_ID:?set synthetic tenant UUID}
+      SUPABASE_JWT_SECRET: ${EROS_TEST_SUPABASE_JWT_SECRET:?set synthetic JWT secret}
+      MODEL_CONFIG_PATH: /etc/eros-engine/model_config.toml
+      RUST_LOG: info
+    volumes:
+      - ./test-model-config.toml:/etc/eros-engine/model_config.toml:ro
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    user: "65532:65532"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      start_period: 30s
+      retries: 10
+    networks: [eros_test]
+
+networks:
+  eros_test:
+    internal: true

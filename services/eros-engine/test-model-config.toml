@@ -1,14 +1,16 @@
 # Local synthetic acceptance only. No hosted providers are configured.
+# Memory extraction and insight extraction are intentionally disabled; this fixture tests transport, queueing and persistence only.
 [defaults]
 fallback_model = "gpoint-codex@gpoint"
+fallback_temperature = 1.0
 
 [tasks.chat_companion]
 model = "gpoint-codex@gpoint"
 retry_depth = 0
 
 [providers.gpoint]
-chat = "http://host.docker.internal:3000/eros-worker/v1/chat/completions"
-embeddings = "http://host.docker.internal:3000/eros-worker/v1/embeddings"
+chat = "http://gpoint-api:3000/eros-worker/v1/chat/completions"
+embeddings = "http://gpoint-api:3000/eros-worker/v1/embeddings"
 
 [tasks.embedding]
 model = "qwen3-embedding:0.6b@gpoint"
