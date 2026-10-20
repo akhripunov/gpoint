@@ -97,14 +97,14 @@ test('Docker endpoint must be the local Mac Unix socket', () => {
 });
 
 test('Eros image reference, immutable ID and upstream patch provenance are pinned', () => {
-  const reference = 'gpoint-eros:d1a140083321687212fb7b17c09cc0c3c9639f5e-d738ff7b7be7-linux-amd64';
+  const reference = 'gpoint-eros:d1a140083321687212fb7b17c09cc0c3c9639f5e-ceadc44ee07b-linux-amd64';
   const metadata = {
     id: `sha256:${'a'.repeat(64)}`,
     os: 'linux',
     architecture: 'amd64',
     source: 'https://github.com/akhripunov/gpoint',
     upstreamRevision: 'd1a140083321687212fb7b17c09cc0c3c9639f5e',
-    patchSha256: 'd738ff7b7be77e961e126fa49c36fc84f23c9006b3caae51ec24974882626414',
+    patchSha256: 'ceadc44ee07b1cc81d22b87f84c2736b70644e51e53b142914309df7664af71c',
     buildRevision: 'e'.repeat(40),
   };
   assert.equal(validateErosImageInspection(reference, metadata), metadata.id);

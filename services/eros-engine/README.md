@@ -36,6 +36,14 @@ issuer, audience, signature, lifetime and UUID claims, then checks the signed
 tenant against its server-configured Eros tenant. Other custom providers and
 built-in OpenRouter keep their previous audit behavior.
 
+`patches/0004-fence-delayed-dreaming-memory-writes.patch` makes the background
+memory classifier use the same session-row lock as relationship archival.
+When archive wins while model extraction or embedding is in flight, the
+classifier now completes as a no-op instead of recreating the deleted profile
+memory. Its regression test pauses a synthetic mocked extraction, archives the
+relationship, then verifies that no memory row reappears. The patchset digest
+is SHA-256 over the ordered `shasum -a 256` records for patches `0001`–`0004`.
+
 Migration coexistence was tested in a disposable PostgreSQL database after all
 18 current GPoint Prisma migrations and all 11 AGATA Alembic revisions. Eros
 then recorded 72 revisions (`0..71`) in `engine._sqlx_migrations`; the public
