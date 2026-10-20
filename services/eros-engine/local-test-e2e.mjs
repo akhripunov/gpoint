@@ -42,24 +42,50 @@ async function readHistory(token) {
   return request(`${api}/messages/creator/${creator}?limit=100`, { token });
 }
 
-async function assertCompleteHistory(token, stage) {
+async function assertCompleteHistory(token, stage, expectedTurns = 16) {
   const response = await readHistory(token);
   assert.equal(response.status, 200, `${stage}: history read`);
   const users = response.data.items.filter((item) => item.role === 'user');
   const assistants = response.data.items.filter((item) => item.role === 'assistant');
-  assert.equal(users.length, 16, `${stage}: user message count`);
-  assert.equal(assistants.length, 16, `${stage}: assistant message count`);
+  assert.equal(users.length, expectedTurns, `${stage}: user message count`);
+  assert.equal(assistants.length, expectedTurns, `${stage}: assistant message count`);
   assert.ok(users.some((item) => item.text.includes('SYNTH_CITY_ZEPHYRBAY')), `${stage}: city fact`);
   assert.ok(users.some((item) => item.text.includes('SYNTH_OLD_2026-10-22_18:40')), `${stage}: historical meeting`);
   assert.ok(users.some((item) => item.text.includes('SYNTH_CURRENT_2026-10-23_19:15')), `${stage}: current meeting`);
-  assert.ok(users.some((item) => item.text.includes('SYNTH_RECALL_PROBE')), `${stage}: final recall probe`);
-  assert.ok(assistants.every((item) => item.text === 'DETERMINISTIC_LOCAL_E2E_REPLY'), `${stage}: assistant response pairs`);
+  if (expectedTurns === 16) assert.ok(users.some((item) => item.text.includes('SYNTH_RECALL_PROBE')), `${stage}: final recall probe`);
+  assert.ok(assistants.slice(0, -1).every((item) => item.text === 'DETERMINISTIC_LOCAL_E2E_REPLY'), `${stage}: assistant response pairs`);
+  if (expectedTurns === 16) assert.ok(assistants.at(-1)?.text.startsWith('SYNTH_RECALL_CONFIRMED'), `${stage}: recall response`);
+  return users;
 }
 
 if (process.argv.includes('--history-only')) {
   const token = await authenticate();
   await assertCompleteHistory(token, 'post-restart');
   console.log('LOCAL_E2E_RESTART_HISTORY=PASS');
+  process.exit(0);
+}
+
+if (process.argv.includes('--recall-only')) {
+  const token = await authenticate();
+  const priorUsers = await assertCompleteHistory(token, 'pre-recall', 15);
+  const sourceTurn = priorUsers.findIndex((item) => item.text.includes('SYNTH_CITY_ZEPHYRBAY'));
+  assert.equal(sourceTurn, 0, 'recall source must be the first user turn');
+  assert.equal(priorUsers.length - sourceTurn - 1, 14, 'source fact must be outside the latest 12 user messages');
+  console.log('LOCAL_E2E_RECALL_GAP=PASS intermediate_user_messages=14');
+  const response = await request(`${api}/messages/creator/${creator}`, {
+    method: 'POST',
+    token,
+    body: {
+      clientMessageId: randomUUID(),
+      text: 'SYNTH_RECALL_PROBE: Return to our first topic. What city did I mention, and what is the current meeting date and time? The older date should be treated as historical.',
+    },
+  });
+  assert.equal(response.status, 201, JSON.stringify(response.data));
+  assert.equal(response.data?.status, 'completed');
+  assert.equal(response.data?.response?.text,
+    'SYNTH_RECALL_CONFIRMED city=ZephyrBay meeting=2026-10-23_19:15 history=2026-10-22_18:40');
+  await assertCompleteHistory(token, 'post-recall', 16);
+  console.log('LOCAL_E2E_MEMORY_RECALL_RESPONSE=PASS');
   process.exit(0);
 }
 
@@ -104,7 +130,6 @@ const dialogue = [
   'Topic switch 11: compare two fictional board games.',
   'Topic switch 12: share a small tip for learning a language.',
   'Topic switch 13: I am choosing a playlist for focused work.',
-  'SYNTH_RECALL_PROBE: Return to our first topic. What city did I mention, and what is the current meeting date and time? The older date should be treated as historical.',
 ];
 
 for (const [index, text] of dialogue.entries()) {
@@ -117,8 +142,8 @@ for (const [index, text] of dialogue.entries()) {
   assert.equal(response.data?.status, 'completed', `turn ${index + 1}`);
   assert.equal(response.data?.response?.text, 'DETERMINISTIC_LOCAL_E2E_REPLY', `turn ${index + 1}`);
 }
-console.log('LOCAL_E2E_16_TURN_DIALOGUE=PASS');
+console.log('LOCAL_E2E_15_TURN_DIALOGUE=PASS');
 
-await assertCompleteHistory(token, 'pre-restart');
+await assertCompleteHistory(token, 'pre-recall', 15);
 console.log('LOCAL_E2E_AUTH_AGE_CONSENT_AND_WORKER_ROUTE=PASS');
 console.log('LOCAL_E2E_GPOINT_API_EROS_HISTORY=PASS');

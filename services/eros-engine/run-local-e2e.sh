@@ -13,7 +13,7 @@ printf 'LOCAL_E2E_DOCKER_CONTEXT=LOCAL_UNIX:%s\n' "$local_context"
 printf 'LOCAL_E2E_EROS_IMAGE_ID=%s\n' "$image_id"
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/me36-local-e2e.XXXXXX"); chmod 700 "$tmp"
-project="me36_$(python3.11 -c 'import secrets;print(secrets.token_hex(5))')"
+project="me36_$(python3.11 -c 'import secrets;print(secrets.token_hex(10))')"
 integration_container="${project}-worker-integration"
 admin=$(python3.11 -c 'import secrets;print(secrets.token_urlsafe(32))')
 provider=$(python3.11 -c 'import secrets;print(secrets.token_urlsafe(32))')
@@ -25,6 +25,7 @@ agata=$(python3.11 -c 'import secrets;print(secrets.token_urlsafe(32))')
 umask 077; envfile="$tmp/compose.env"
 cat > "$envfile" <<EOF
 EROS_IMAGE=$image_id
+EROS_TEST_PROJECT=$project
 EROS_TEST_ADMIN_PASSWORD=$admin
 EROS_TEST_GPOINT_API_KEY=$provider
 EROS_TEST_BRIDGE_SIGNING_SECRET=$signing
@@ -35,8 +36,12 @@ EROS_TEST_AGATA_TOKEN=$agata
 EOF
 unset admin provider signing jwt agata
 compose(){ env -i PATH="$PATH" HOME="$HOME" DOCKER_CONFIG="$docker_config" DOCKER_CONTEXT="$local_context" docker compose --env-file "$envfile" -p "$project" -f "$repo/services/eros-engine/compose.local-test.yml" --profile test "$@"; }
+. "$repo/services/eros-engine/local-e2e-image-tools.sh"
+run_manifest="$tmp/resources.manifest"
+printf 'project=%s\n' "$project" >"$run_manifest"
 worker_id=
 compose_started=0
+run_owned=0
 cleanup(){
   rc=$?
   trap - EXIT HUP INT TERM
@@ -47,30 +52,147 @@ cleanup(){
   if [ "$compose_started" -eq 1 ]; then
     compose down --volumes --remove-orphans >/dev/null 2>&1 || cleanup_failed=1
   fi
-  if docker_local inspect "$integration_container" >/dev/null 2>&1; then
-    integration_owner=$(docker_local inspect "$integration_container" --format '{{index .Config.Labels "com.docker.compose.project"}}') || cleanup_failed=1
-    if [ "$integration_owner" = "$project" ]; then
-      docker_local rm -f "$integration_container" >/dev/null || cleanup_failed=1
+  if [ "$run_owned" -eq 1 ]; then
+    if integration_identity=$(inspect_run_container "$integration_container"); then
+      integration_owner=${integration_identity#*|}
+      if [ "$integration_owner" = "$project" ]; then
+        docker_local rm -f "$integration_container" >/dev/null || cleanup_failed=1
+      else
+        cleanup_failed=1
+      fi
     else
-      cleanup_failed=1
+      inspect_status=$?
+      [ "$inspect_status" -eq 2 ] || cleanup_failed=1
     fi
+    containers=$(docker_local ps -aq --filter "label=com.docker.compose.project=$project") || cleanup_failed=1
+    for container in ${containers:-}; do
+      container_owner=$(docker_local inspect "$container" --format '{{index .Config.Labels "com.docker.compose.project"}}') || cleanup_failed=1
+      if [ "$container_owner" = "$project" ]; then
+        docker_local rm -f "$container" >/dev/null || cleanup_failed=1
+      else
+        cleanup_failed=1
+      fi
+    done
+    containers=$(docker_local ps -aq --filter "label=com.docker.compose.project=$project") || cleanup_failed=1
+    networks=$(docker_local network ls -q --filter "label=com.docker.compose.project=$project") || cleanup_failed=1
+    for network in ${networks:-}; do
+      network_owner=$(docker_local network inspect "$network" --format '{{index .Labels "com.docker.compose.project"}}') || cleanup_failed=1
+      network_name=$(docker_local network inspect "$network" --format '{{.Name}}') || cleanup_failed=1
+      network_containers=$(docker_local network inspect "$network" --format '{{len .Containers}}') || cleanup_failed=1
+      if [ "$network_owner" = "$project" ] && [ "$network_name" = "${project}_eros_test" ] && [ "$network_containers" = 0 ]; then
+        docker_local network rm "$network" >/dev/null || cleanup_failed=1
+      else
+        cleanup_failed=1
+      fi
+    done
+    volumes=$(docker_local volume ls -q --filter "label=com.docker.compose.project=$project") || cleanup_failed=1
+    if [ -n "${containers:-}${networks:-}${volumes:-}" ]; then cleanup_failed=1; fi
   fi
-  containers=$(docker_local ps -aq --filter "label=com.docker.compose.project=$project") || cleanup_failed=1
-  networks=$(docker_local network ls -q --filter "label=com.docker.compose.project=$project") || cleanup_failed=1
-  volumes=$(docker_local volume ls -q --filter "label=com.docker.compose.project=$project") || cleanup_failed=1
-  if [ -n "${containers:-}${networks:-}${volumes:-}" ]; then cleanup_failed=1; fi
+  if [ -f "$run_manifest" ]; then
+    for service in gpoint-api gpoint-api-migrate gpoint-worker; do
+      image_ref="${project}-${service}:latest"
+      manifest_entry=$(awk -F'|' -v ref="$image_ref" '$1 == ref { print; exit }' "$run_manifest")
+      if [ -z "$manifest_entry" ]; then
+        # A tag left behind after a failed build/inspection has no verified
+        # identity. Preserve it and make cleanup visibly fail closed.
+        if image_identity=$(inspect_run_image "$image_ref"); then
+          cleanup_failed=1
+          echo "LOCAL_E2E_IMAGE_OWNERSHIP=UNVERIFIED tag=$image_ref reason=not_in_manifest" >&2
+        else
+          inspect_status=$?
+          if [ "$inspect_status" -ne 2 ]; then cleanup_failed=1; fi
+        fi
+        continue
+      fi
+      IFS='|' read -r manifest_ref expected_image_id image_owner expected_service <<EOF
+$manifest_entry
+EOF
+      case "$image_ref" in
+        "${project}-gpoint-api:latest"|"${project}-gpoint-api-migrate:latest"|"${project}-gpoint-worker:latest") ;;
+        *) cleanup_failed=1; echo "LOCAL_E2E_IMAGE_OWNERSHIP=FAIL" >&2; continue ;;
+      esac
+      if image_identity=$(inspect_run_image "$image_ref"); then
+        :
+      else
+        inspect_status=$?
+        if [ "$inspect_status" -eq 2 ]; then
+          cleanup_failed=1
+          echo "LOCAL_E2E_IMAGE_INSPECT=FAIL tag=$image_ref reason=manifest_image_missing" >&2
+        else
+          cleanup_failed=1
+        fi
+        continue
+      fi
+      current_image_id=${image_identity%%|*}
+      image_labels=${image_identity#*|}
+      if [ "$manifest_ref" != "$image_ref" ] || [ "$current_image_id" != "$expected_image_id" ] || [ "$image_labels" != "$project|$expected_service" ] || [ "$image_owner" != "$project" ] || [ "$expected_service" != "$service" ]; then
+        cleanup_failed=1
+        echo "LOCAL_E2E_IMAGE_OWNERSHIP=FAIL tag=$image_ref reason=identity_changed" >&2
+        continue
+      fi
+      image_users=$(docker_local ps -aq --filter "ancestor=$expected_image_id") || { cleanup_failed=1; continue; }
+      if [ -n "$image_users" ]; then
+        echo "LOCAL_E2E_IMAGE_RETAINED=IN_USE service_tag=$image_ref" >&2
+        cleanup_failed=1
+      elif ! docker_local image rm "$image_ref" >/dev/null; then
+        cleanup_failed=1
+      else
+        echo "LOCAL_E2E_IMAGE_CLEANUP=PASS tag=$image_ref"
+      fi
+    done
+  fi
   rm -rf "$tmp" || cleanup_failed=1
   if [ "$cleanup_failed" -ne 0 ]; then
     echo "LOCAL_E2E_CLEANUP=FAIL project=$project" >&2
     [ "$rc" -ne 0 ] || rc=1
+  else
+    echo "LOCAL_E2E_CLEANUP=PASS project=$project"
   fi
   exit "$rc"
 }
 trap cleanup EXIT HUP INT TERM
+for service in gpoint-api gpoint-api-migrate gpoint-worker; do
+  image_ref="${project}-${service}:latest"
+  if image_identity=$(inspect_run_image "$image_ref"); then
+    echo "LOCAL_E2E_RESOURCE_COLLISION=FAIL image=$image_ref" >&2
+    exit 2
+  else
+    inspect_status=$?
+    [ "$inspect_status" -eq 2 ] || { echo "LOCAL_E2E_IMAGE_INSPECT=FAIL tag=$image_ref phase=preflight" >&2; exit 2; }
+  fi
+done
+for resource_kind in container network volume; do
+  case "$resource_kind" in
+    container) existing=$(docker_local ps -aq --filter "label=com.docker.compose.project=$project") ;;
+    network) existing=$(docker_local network ls -q --filter "label=com.docker.compose.project=$project") ;;
+    volume) existing=$(docker_local volume ls -q --filter "label=com.docker.compose.project=$project") ;;
+  esac
+  [ -z "$existing" ] || { echo "LOCAL_E2E_RESOURCE_COLLISION=FAIL type=$resource_kind" >&2; exit 2; }
+done
+if integration_identity=$(inspect_run_container "$integration_container"); then
+  echo LOCAL_E2E_RESOURCE_COLLISION=FAIL type=integration_container >&2
+  exit 2
+else
+  inspect_status=$?
+  [ "$inspect_status" -eq 2 ] || { echo LOCAL_E2E_CONTAINER_INSPECT=FAIL phase=preflight >&2; exit 2; }
+fi
+run_owned=1
 mkdir -m 700 "$tmp/home"
+for service in gpoint-api gpoint-api-migrate gpoint-worker; do
+  image_ref="${project}-${service}:latest"
+  echo "LOCAL_E2E_IMAGE_BUILD=BEGIN service=$service"
+  compose --profile worker build "$service"
+  image_identity=$(docker_local image inspect "$image_ref" --format '{{.Id}}|{{index .Config.Labels "com.gpoint.me36.run"}}|{{index .Config.Labels "com.gpoint.me36.service"}}')
+  expected_identity="$project|$service"
+  [ "${image_identity#*|}" = "$expected_identity" ] || { echo "LOCAL_E2E_IMAGE_OWNERSHIP=FAIL tag=$image_ref reason=build_label_mismatch" >&2; exit 1; }
+  # Record each image immediately after its own build and ownership validation,
+  # so a later service build failure cannot orphan earlier verified images.
+  printf '%s|%s|%s|%s\n' "$image_ref" "${image_identity%%|*}" "$project" "$service" >>"$run_manifest"
+  echo "LOCAL_E2E_IMAGE_BUILD=PASS service=$service"
+done
 echo LOCAL_E2E_COMPOSE_START=BEGIN
 compose_started=1
-compose up -d --build --wait --wait-timeout 240
+compose up -d --wait --wait-timeout 240
 echo LOCAL_E2E_COMPOSE_START=PASS
 compose exec -T postgres psql -U eros_test_admin -d eros_test -v ON_ERROR_STOP=1 <<'SQL'
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA engine TO gpoint_worker_test;
@@ -88,25 +210,68 @@ api_image=$(compose images -q gpoint-api)
   -e EROS_WORKER_DISPOSABLE_TEST_DB=1 \
   -v "$repo/apps/api/test:/workspace/apps/api/test:ro" \
   -v "$repo/packages/db/prisma/migrations:/workspace/packages/db/prisma/migrations:ro" \
-  --entrypoint pnpm "$api_image" --filter @gpoint/api exec node --import tsx --test test/eros-worker-cancel.integration.test.ts
+  --entrypoint pnpm "$api_image" --filter @gpoint/api exec node --import tsx --test \
+  test/eros-worker-contract.test.ts test/eros-worker-cancel.integration.test.ts
 compose --profile worker up -d --no-deps gpoint-worker
 if ! compose exec -T gpoint-api node services/eros-engine/local-test-e2e.mjs >"$tmp/e2e.out" 2>&1; then tail -40 "$tmp/e2e.out" >&2; exit 1; fi
 cat "$tmp/e2e.out"
+session_count=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT count(*) FROM engine.chat_sessions WHERE channel <> 'group';")
+[ "$session_count" = 1 ] || { echo "LOCAL_E2E_MEMORY_FIXTURE_SESSIONS=FAIL count=$session_count" >&2; exit 1; }
+session_id=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT id FROM engine.chat_sessions WHERE channel <> 'group' ORDER BY created_at DESC LIMIT 1;")
+[ -n "$session_id" ] || { echo LOCAL_E2E_MEMORY_FIXTURE_SESSION=FAIL >&2; exit 1; }
+session_id=$(python3.11 -c 'import sys,uuid; print(uuid.UUID(sys.argv[1]))' "$session_id") || { echo LOCAL_E2E_MEMORY_FIXTURE_SESSION=FAIL >&2; exit 1; }
+compose exec -T postgres psql -U eros_test_admin -d eros_test -v ON_ERROR_STOP=1 -Atc \
+  "UPDATE engine.chat_sessions SET last_active_at = now() - interval '2 minutes' WHERE id = '$session_id'::uuid;" >/dev/null
+memory_state=
+for attempt in $(seq 1 60); do
+  memory_state=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc \
+    "SELECT (SELECT classified_at IS NOT NULL FROM engine.chat_sessions WHERE id = '$session_id'::uuid)::text || ':' || (SELECT count(*) FROM engine.companion_memories WHERE session_id = '$session_id'::uuid AND category IS NOT NULL AND content LIKE 'SYNTH_%');")
+  [ "$memory_state" = "true:2" ] && break
+  sleep 1
+done
+if [ "$memory_state" != "true:2" ]; then
+  echo "LOCAL_E2E_DURABLE_MEMORY=FAIL state=$memory_state" >&2
+  compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc \
+    "SELECT 'EROS_QUEUE_DIAGNOSTIC=' || job_type || ':' || status || ':' || coalesce(error_code, 'none') || ':attempts=' || attempts FROM engine.eros_inference_jobs ORDER BY created_at;" >&2 || true
+  diagnostic_worker=$(compose --profile worker ps -a -q gpoint-worker)
+  if [ -n "$diagnostic_worker" ]; then
+    echo LOCAL_E2E_WORKER_DIAGNOSTIC_BEGIN >&2
+    docker_local logs --tail 80 "$diagnostic_worker" >&2 || true
+    echo LOCAL_E2E_WORKER_DIAGNOSTIC_END >&2
+  fi
+  exit 1
+fi
+echo LOCAL_E2E_MEMORY_EXTRACTION=PASS candidates=2
+echo LOCAL_E2E_DURABLE_MEMORY=PASS candidates=2
+if ! compose exec -T gpoint-api node services/eros-engine/local-test-e2e.mjs --recall-only >"$tmp/recall.out" 2>&1; then tail -40 "$tmp/recall.out" >&2; exit 1; fi
+cat "$tmp/recall.out"
 worker_id=$(compose --profile worker ps -a -q gpoint-worker)
 [ -n "$worker_id" ] || { echo LOCAL_E2E_WORKER_CONTAINER_MISSING=FAIL >&2; exit 1; }
+docker_local kill --signal TERM "$worker_id" >/dev/null 2>&1 || true
 worker_status=$(docker_local wait "$worker_id")
 [ "$worker_status" = 0 ] || { echo LOCAL_E2E_WORKER_EXIT=FAIL >&2; docker_local logs "$worker_id" >&2; exit 1; }
 worker_log=$(docker_local logs "$worker_id")
 completed_jobs=$(printf '%s\n' "$worker_log" | rg -c 'LOCAL_TEST_WORKER_COMPLETED=1' || true)
 [ "$completed_jobs" -ge 16 ] || { echo "LOCAL_E2E_WORKER_JOBS=FAIL count=$completed_jobs" >&2; printf '%s\n' "$worker_log" >&2; exit 1; }
+context_result=$(printf '%s\n' "$worker_log" | node "$repo/services/eros-engine/provider-context-check.mjs")
+printf '%s\n' "$context_result"
+if printf '%s\n' "$context_result" | rg -q '^LOCAL_E2E_PROVIDER_CONTEXT=PASS '; then
+  memory_recall_status=PASS
+else
+  memory_recall_status=BLOCKED
+fi
 printf '%s\n' "$worker_log" | rg 'LOCAL_TEST_PROVIDER_CONTEXT|LOCAL_TEST_WORKER_COMPLETED='
 echo LOCAL_E2E_EXISTING_GPOINT_WORKER_QUEUE=PASS
 docker_local rm "$worker_id" >/dev/null; worker_id=
 compose restart eros
 compose up -d --wait --wait-timeout 90 eros
 compose exec -T gpoint-api node services/eros-engine/local-test-e2e.mjs --history-only
-compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT 'EROS_CHAT_MESSAGES=' || count(*) FROM engine.chat_messages; SELECT 'EROS_QUEUE_JOBS=' || count(*) FROM engine.eros_inference_jobs;"
-echo LOCAL_E2E_MEMORY_EXTRACTION=NOT_CONFIGURED
+compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT 'EROS_CHAT_MESSAGES=' || count(*) FROM engine.chat_messages; SELECT 'EROS_QUEUE_JOBS=' || count(*) FROM engine.eros_inference_jobs; SELECT 'EROS_DURABLE_MEMORY_ROWS=' || count(*) FROM engine.companion_memories WHERE category IS NOT NULL AND content LIKE 'SYNTH_%';"
+if [ "$memory_recall_status" = PASS ]; then
+  echo LOCAL_E2E_MEMORY_RECALL=PASS
+else
+  echo LOCAL_E2E_MEMORY_RECALL=BLOCKED reason=provider_context_missing
+fi
 echo LOCAL_E2E_REAL_INFERENCE=NOT_RUN
 echo LOCAL_E2E_RLS_TENANT_ISOLATION=NOT_TESTED
 echo LOCAL_E2E_DISPOSABLE_STACK_CLEANUP=ARMED

@@ -71,7 +71,10 @@ export async function parseBridgeRequest(value: unknown, secret: Uint8Array, now
   const rawMessages = value.messages;
   const maxTokens = value.max_tokens ?? 1024;
   const temperature = value.temperature ?? 1;
-  const stream = value.stream ?? true;
+  // OpenAI chat-completions defaults to non-streaming. Eros's non-stream
+  // requests omit this false-valued field on the wire; defaulting to true
+  // makes the bridge return SSE where callers expect a JSON completion.
+  const stream = value.stream ?? false;
   if (typeof model !== 'string' || !/^[A-Za-z0-9._:@/-]{1,128}$/.test(model) ||
       !Array.isArray(rawMessages) || rawMessages.length < 1 || rawMessages.length > MAX_MESSAGES ||
       typeof maxTokens !== 'number' || !Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > MAX_REPLY_CHARS ||

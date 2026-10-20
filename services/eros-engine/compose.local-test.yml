@@ -33,6 +33,9 @@ services:
     build:
       context: ../..
       dockerfile: services/eros-engine/Dockerfile.api-local-test
+      labels:
+        com.gpoint.me36.run: ${EROS_TEST_PROJECT:?set synthetic test project}
+        com.gpoint.me36.service: gpoint-api-migrate
     restart: "no"
     entrypoint: ["pnpm"]
     command: ["--filter", "@gpoint/db", "exec", "prisma", "migrate", "deploy", "--schema", "prisma/schema.prisma"]
@@ -48,6 +51,9 @@ services:
     build:
       context: ../..
       dockerfile: services/eros-engine/Dockerfile.api-local-test
+      labels:
+        com.gpoint.me36.run: ${EROS_TEST_PROJECT:?set synthetic test project}
+        com.gpoint.me36.service: gpoint-api
     restart: "no"
     depends_on:
       postgres: {condition: service_healthy}
@@ -77,6 +83,7 @@ services:
       AGATA_SERVICE_URL: http://127.0.0.1:18080
       AGATA_INTERNAL_API_TOKEN: ${EROS_TEST_AGATA_TOKEN:?set synthetic local fixture token}
       EROS_TEST_AGATA_TOKEN: ${EROS_TEST_AGATA_TOKEN:?set synthetic local fixture token}
+      EROS_WORKER_LOCAL_TEST: "true"
       DEV_AUTH_MODE: "true"
       DEV_AUTH_TELEGRAM_ID: "900000001"
     healthcheck:
@@ -92,6 +99,9 @@ services:
     build:
       context: ../..
       dockerfile: services/eros-engine/Dockerfile.worker-local-test
+      labels:
+        com.gpoint.me36.run: ${EROS_TEST_PROJECT:?set synthetic test project}
+        com.gpoint.me36.service: gpoint-worker
     restart: "no"
     depends_on:
       gpoint-api: {condition: service_healthy}
@@ -101,7 +111,7 @@ services:
       GPOINT_AGATA_WORKER_TOKEN: ${EROS_TEST_WORKER_TOKEN:?set synthetic Worker token}
       GPOINT_AGATA_TENANT_ID: ${EROS_TEST_TENANT_ID:?set synthetic tenant UUID}
       GPOINT_AGATA_WORKER_SUPPORT: /tmp/worker-support
-      EROS_TEST_WORKER_IDLE_SECONDS: "5"
+      EROS_TEST_WORKER_IDLE_SECONDS: "60"
     volumes:
       - ../..:/workspace:ro
     tmpfs: [/tmp]
@@ -127,6 +137,9 @@ services:
       SUPABASE_JWT_SECRET: ${EROS_TEST_SUPABASE_JWT_SECRET:?set synthetic JWT secret}
       MODEL_CONFIG_PATH: /etc/eros-engine/model_config.toml
       RUST_LOG: info
+      DREAMING_TICK_SECS: "2"
+      DREAMING_IDLE_SECS: "60"
+      DREAMING_CLAIM_STALE_SECS: "30"
     volumes:
       - ./test-model-config.toml:/etc/eros-engine/model_config.toml:ro
     read_only: true

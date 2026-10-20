@@ -1,5 +1,6 @@
 # Local synthetic acceptance only. No hosted providers are configured.
-# Memory extraction and insight extraction are intentionally disabled; this fixture tests transport, queueing and persistence only.
+# Memory extraction uses a deterministic synthetic response from the isolated
+# test Worker. No real model or hosted provider is contacted.
 [defaults]
 fallback_model = "gpoint-codex@gpoint"
 fallback_temperature = 1.0
@@ -14,3 +15,8 @@ embeddings = "http://gpoint-api:3000/eros-worker/v1/embeddings"
 
 [tasks.embedding]
 model = "qwen3-embedding:0.6b@gpoint"
+
+[tasks.memory_extraction]
+model = "gpoint-codex@gpoint"
+filter_prompt = "SYNTHETIC_MEMORY_EXTRACTION_RESULT. Extract the marked synthetic test facts only; return JSON with a memories array."
+max_tokens = 512

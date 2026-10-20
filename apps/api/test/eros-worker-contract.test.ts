@@ -63,6 +63,7 @@ test('chat request validation uses signed identity and bounds the OpenAI-compati
     model: 'gpoint-codex', messages: [{ role: 'system', content: 'Extract a fact.' }, { role: 'user', content: 'Синтетический факт.' }],
   }, secret, now);
   assert.equal(internal.identity, undefined);
+  assert.equal(internal.stream, false, 'omitted stream uses the OpenAI non-streaming default');
   await assert.rejects(parseBridgeRequest({
     model: 'gpoint-codex', user: token,
     user_id: 'victim', creator_id: 'another-character',
