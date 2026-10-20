@@ -1,6 +1,7 @@
 -- LOCAL TEST ONLY. Synthetic disposable database roles. Never reuse passwords.
 CREATE ROLE eros_ddl NOLOGIN NOSUPERUSER NOCREATEDB NOBYPASSRLS;
 CREATE ROLE eros_migrator LOGIN PASSWORD 'local-only-eros-migrator' NOSUPERUSER NOCREATEDB NOBYPASSRLS;
+GRANT CONNECT, CREATE ON DATABASE eros_test TO eros_migrator;
 CREATE ROLE eros_runtime LOGIN PASSWORD 'local-only-eros-runtime' NOSUPERUSER NOCREATEDB BYPASSRLS;
 CREATE ROLE gpoint_api_test LOGIN PASSWORD 'local-only-gpoint-api-test' NOSUPERUSER NOCREATEDB BYPASSRLS;
 CREATE ROLE gpoint_worker_test LOGIN PASSWORD 'local-only-gpoint-worker-test' NOSUPERUSER NOCREATEDB NOBYPASSRLS;

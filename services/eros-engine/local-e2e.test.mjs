@@ -23,6 +23,13 @@ test('local E2E topology has API, Eros, Worker and isolated PostgreSQL', () => {
   assert.doesNotMatch(compose, /ports:|host\.docker\.internal|external:\s*true/i);
 });
 
+test('only the disposable Eros migrator receives database CREATE privilege', () => {
+  const init = readFileSync(new URL('local-test-init.sql', directory), 'utf8');
+  assert.match(init, /GRANT CONNECT, CREATE ON DATABASE eros_test TO eros_migrator;/);
+  assert.match(init, /CREATE ROLE eros_migrator LOGIN[\s\S]*?NOSUPERUSER NOCREATEDB NOBYPASSRLS;/);
+  assert.doesNotMatch(init, /GRANT [^;]* ON DATABASE eros_test TO (?!eros_migrator\b)[a-z_]+;/);
+});
+
 test('model config routes to internal GPOINT bridge without paid fallback', () => {
   const config = readFileSync(new URL('test-model-config.toml', directory), 'utf8');
   const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
