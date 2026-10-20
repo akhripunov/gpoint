@@ -84,7 +84,7 @@ test('Compose exposes no test service outside the internal Docker network', (con
     EROS_TEST_SUPABASE_JWT_SECRET: 'synthetic-only-jwt-secret-at-least-32-bytes',
     EROS_TEST_WORKER_TOKEN: 'synthetic-only-worker',
     EROS_TEST_AGATA_TOKEN: 'synthetic-only-agata',
-    EROS_TEST_OPENROUTER_STARTUP_SENTINEL: 'non-credential-no-egress-test-sentinel',
+    EROS_TEST_OPENROUTER_API_KEY: '',
   };
   const result = spawnSync(
     'docker',
@@ -97,6 +97,8 @@ test('Compose exposes no test service outside the internal Docker network', (con
   const compose = JSON.parse(result.stdout);
   assert.equal(compose.services['gpoint-api'].ports, undefined);
   assert.equal(compose.services['gpoint-worker'].ports, undefined);
+  assert.equal(compose.services.eros.environment.OPENROUTER_API_KEY, '');
+  assert.equal(Object.hasOwn(compose.services.eros.environment, 'EROS_TEST_OPENROUTER_STARTUP_SENTINEL'), false);
   assert.equal(compose.networks.eros_test.internal, true);
 });
 

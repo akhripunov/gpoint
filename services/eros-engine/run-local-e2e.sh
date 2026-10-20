@@ -23,7 +23,6 @@ tenant=$(python3 -c 'import uuid;print(uuid.uuid4())')
 jwt=$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')
 worker_token=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
 agata=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
-openrouter_sentinel=$(python3 -c 'import secrets;print("NO_EGRESS_TEST_SENTINEL_"+secrets.token_hex(16))')
 umask 077; envfile="$tmp/compose.env"
 cat > "$envfile" <<EOF
 EROS_IMAGE=$image_id
@@ -35,9 +34,9 @@ EROS_TEST_TENANT_ID=$tenant
 EROS_TEST_SUPABASE_JWT_SECRET=$jwt
 EROS_TEST_WORKER_TOKEN=$worker_token
 EROS_TEST_AGATA_TOKEN=$agata
-EROS_TEST_OPENROUTER_STARTUP_SENTINEL=$openrouter_sentinel
+EROS_TEST_OPENROUTER_API_KEY=
 EOF
-unset admin provider signing jwt agata openrouter_sentinel
+unset admin provider signing jwt agata
 compose(){ env -i PATH="$PATH" HOME="$HOME" DOCKER_CONFIG="$docker_config" DOCKER_CONTEXT="$local_context" docker compose --env-file "$envfile" -p "$project" -f "$repo/services/eros-engine/compose.local-test.yml" --profile test "$@"; }
 . "$repo/services/eros-engine/local-e2e-image-tools.sh"
 run_manifest="$tmp/resources.manifest"

@@ -134,10 +134,10 @@ services:
       GPOINT_API_KEY: ${EROS_TEST_GPOINT_API_KEY:?set synthetic provider key}
       GPOINT_WORKER_BRIDGE_SIGNING_SECRET: ${EROS_TEST_BRIDGE_SIGNING_SECRET:?set synthetic signing key}
       GPOINT_WORKER_TENANT_ID: ${EROS_TEST_TENANT_ID:?set synthetic tenant UUID}
-      # Stock upstream currently requires this variable even for custom-only
-      # provider configs. This is an unusable sentinel; the test network is
-      # Docker-internal with no external egress and no OpenRouter route.
-      OPENROUTER_API_KEY: ${EROS_TEST_OPENROUTER_STARTUP_SENTINEL:?set local no-egress sentinel}
+      # Upstream currently requires the variable to exist at startup. All
+      # configured tasks use the local GPOINT endpoint; an empty value is not
+      # a credential and Docker has no external egress.
+      OPENROUTER_API_KEY: ${EROS_TEST_OPENROUTER_API_KEY-}
       SUPABASE_JWT_SECRET: ${EROS_TEST_SUPABASE_JWT_SECRET:?set synthetic JWT secret}
       MODEL_CONFIG_PATH: /etc/eros-engine/model_config.toml
       RUST_LOG: info
