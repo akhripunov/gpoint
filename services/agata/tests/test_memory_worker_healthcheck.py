@@ -55,7 +55,7 @@ class WorkerHealthcheckTests(unittest.IsolatedAsyncioTestCase):
             worker.set_tenant_context = original_tenant_context
 
     async def test_current_agata_head_is_healthy(self):
-        await self.assert_healthcheck("agata0011", 0)
+        await self.assert_healthcheck("agata0012", 0)
 
     async def test_previous_agata_head_is_not_healthy(self):
         await self.assert_healthcheck("agata0008", 1)

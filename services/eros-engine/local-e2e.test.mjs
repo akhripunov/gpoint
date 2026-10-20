@@ -18,6 +18,10 @@ test('local E2E topology has API, Eros, Worker and isolated PostgreSQL', () => {
   assert.match(compose, /profiles:\s*\[test\]/);
   assert.match(compose, /eros:/);
   assert.match(compose, /postgres:/);
+  assert.match(compose, /DATABASE_URL:[^\n]*@postgres:5432\/gpoint_test\?schema=public/);
+  assert.match(compose, /EROS_ADAPTER_DATABASE_URL:[^\n]*@postgres:5432\/eros_test\?schema=engine/);
+  assert.match(compose, /eros-migrate:[\s\S]*?postgres:5432\/eros_test/);
+  assert.match(compose, /eros:[\s\S]*?postgres:5432\/eros_test/);
   assert.match(compose, /internal:\s*true/);
   assert.match(compose, /network_mode:\s*service:gpoint-api/);
   assert.match(compose, /gpoint-worker:[\s\S]*?profiles:\s*\[worker\]/);
@@ -28,6 +32,8 @@ test('local E2E topology has API, Eros, Worker and isolated PostgreSQL', () => {
 test('only the disposable Eros migrator receives database CREATE privilege', () => {
   const init = readFileSync(new URL('local-test-init.sql', directory), 'utf8');
   assert.match(init, /GRANT CONNECT, CREATE ON DATABASE eros_test TO eros_migrator;/);
+  assert.match(init, /GRANT USAGE, CREATE ON SCHEMA public TO eros_migrator;/);
+  assert.match(init, /CREATE DATABASE gpoint_test OWNER eros_test_admin;/);
   assert.match(init, /CREATE ROLE eros_migrator LOGIN[\s\S]*?NOSUPERUSER NOCREATEDB NOBYPASSRLS;/);
   assert.doesNotMatch(init, /GRANT [^;]* ON DATABASE eros_test TO (?!eros_migrator\b)[a-z_]+;/);
 });
@@ -39,6 +45,7 @@ test('model config routes chat, embeddings and synthetic memory extraction to th
   assert.match(config, /fallback_temperature\s*=\s*1(?:\.0)?/);
   assert.match(config, /http:\/\/gpoint-api:3000\/eros-worker\/v1\/chat\/completions/);
   assert.match(config, /http:\/\/gpoint-api:3000\/eros-worker\/v1\/embeddings/);
+  assert.match(compose, /GPOINT_API_KEY: \$\{EROS_TEST_GPOINT_API_KEY/);
   assert.doesNotMatch(config, /openrouter|openai\.com|anthropic\.com|gemini\.googleapis\.com/i);
   assert.match(config, /^\[tasks\.memory_extraction\]/m);
   assert.match(config, /filter_prompt\s*=\s*".*synthetic/i);
@@ -77,6 +84,7 @@ test('Compose exposes no test service outside the internal Docker network', (con
     EROS_TEST_SUPABASE_JWT_SECRET: 'synthetic-only-jwt-secret-at-least-32-bytes',
     EROS_TEST_WORKER_TOKEN: 'synthetic-only-worker',
     EROS_TEST_AGATA_TOKEN: 'synthetic-only-agata',
+    EROS_TEST_OPENROUTER_STARTUP_SENTINEL: 'non-credential-no-egress-test-sentinel',
   };
   const result = spawnSync(
     'docker',
@@ -118,21 +126,31 @@ test('Docker endpoint must be the local Mac Unix socket', () => {
   );
 });
 
-test('Eros image reference, immutable ID and upstream patch provenance are pinned', () => {
-  const reference = 'gpoint-eros:d1a140083321687212fb7b17c09cc0c3c9639f5e-9dd93ad75f72-linux-amd64';
+test('Eros image requires stock upstream provenance and rejects downstream patches', () => {
+  const reference = 'gpoint-eros:stock-d1a140083321687212fb7b17c09cc0c3c9639f5e';
   const metadata = {
     id: `sha256:${'a'.repeat(64)}`,
     os: 'linux',
     architecture: 'amd64',
-    source: 'https://github.com/akhripunov/gpoint',
+    source: 'https://github.com/etherfunlab/eros-engine',
     upstreamRevision: 'd1a140083321687212fb7b17c09cc0c3c9639f5e',
-    patchSha256: '9dd93ad75f7272403d1c6a64c88372278199f26eb4e0fe1981e548dcc09377b8',
-    buildRevision: 'e'.repeat(40),
+    patchSha256: 'none',
+    buildRevision: 'd1a140083321687212fb7b17c09cc0c3c9639f5e',
   };
   assert.equal(validateErosImageInspection(reference, metadata), metadata.id);
-  assert.throws(() => validateErosImageInspection('gpoint-eros:latest', metadata), /pinned_eros_reference_required/);
-  assert.throws(() => validateErosImageInspection(reference, { ...metadata, patchSha256: '0'.repeat(64) }), /eros_patch_provenance_mismatch/);
+  assert.throws(() => validateErosImageInspection('gpoint-eros:latest', metadata), /stock_eros_image_tag_required/);
+  assert.throws(() => validateErosImageInspection(reference, { ...metadata, patchSha256: 'sha256-of-a-patch' }), /eros_downstream_patch_forbidden/);
   assert.throws(() => validateErosImageInspection(reference, { ...metadata, id: 'mutable-tag' }), /immutable_image_id_required/);
+});
+
+test('the Eros patch applier is disabled and the stock builder pins a clean source', () => {
+  const applier = readFileSync(new URL('apply-patches.sh', directory), 'utf8');
+  const builder = readFileSync(new URL('build-stock-image.sh', directory), 'utf8');
+  assert.match(applier, /fails closed|patches_disabled/i);
+  assert.doesNotMatch(applier, /git .* apply/);
+  assert.match(builder, /eros_source_not_clean/);
+  assert.match(builder, /d1a140083321687212fb7b17c09cc0c3c9639f5e/);
+  assert.match(builder, /patch-set\.sha256=none/);
 });
 
 test('restart-history assertions cover all turns and initial temporal facts', () => {

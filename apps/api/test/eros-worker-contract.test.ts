@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { SignJWT } from 'jose';
-import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, parseBridgeRequest, parseErosEmbeddingRequest, verifyBridgeIdentity } from '../src/eros-worker-contract.js';
+import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, deriveBridgeInferenceIdentity, parseBridgeRequest, parseErosEmbeddingRequest, signBridgeIdentity, verifyBridgeIdentity } from '../src/eros-worker-contract.js';
 
 const secret = new TextEncoder().encode('local-test-bridge-signing-secret-at-least-32-bytes');
 const now = Math.floor(Date.now() / 1000);
@@ -16,25 +15,20 @@ test('Eros queue migration forces tenant RLS and binds access to transaction-loc
 });
 
 async function identity(overrides: Record<string, unknown> = {}) {
-  return new SignJWT({
-    tenant_id: '81a4ba28-6de5-4b03-8332-0661ba4d46f4',
-    creator_id: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc4',
-    session_id: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1',
-    instance_id: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc9',
+  return signBridgeIdentity({
+    tenantId: '81a4ba28-6de5-4b03-8332-0661ba4d46f4',
+    creatorId: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc4',
+    sessionId: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1',
+    instanceId: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc9',
+    userId: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc2',
+    requestId: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc3',
     ...overrides,
-  })
-    .setProtectedHeader({ alg: 'HS256' })
-    .setIssuer('eros-engine')
-    .setAudience('gpoint-worker-gateway')
-    .setSubject('7f43ff08-7bf9-5647-9dc2-bb4a46f8edc2')
-    .setJti('7f43ff08-7bf9-5647-9dc2-bb4a46f8edc3')
-    .setIssuedAt(now)
-    .setExpirationTime(now + 60)
-    .sign(secret);
+  } as Parameters<typeof signBridgeIdentity>[0], secret, now);
 }
 
 test('bridge accepts only a signed, short-lived Eros identity bound to its chat request', async () => {
   const token = await identity();
+  assert.ok(token.length <= 256, 'stock Eros rejects audit.user values longer than 256 characters');
   const claims = await verifyBridgeIdentity(token, secret, now);
   assert.equal(claims.tenantId, '81a4ba28-6de5-4b03-8332-0661ba4d46f4');
   assert.equal(claims.userId, '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc2');
@@ -44,8 +38,26 @@ test('bridge accepts only a signed, short-lived Eros identity bound to its chat 
   assert.equal(claims.requestId, '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc3');
   await assert.rejects(verifyBridgeIdentity(`${token.slice(0, -1)}x`, secret, now));
   await assert.rejects(verifyBridgeIdentity(token, new TextEncoder().encode('wrong-secret-wrong-secret-wrong-secret'), now));
-  await assert.rejects(verifyBridgeIdentity(await identity({ session_id: 'not-a-uuid' }), secret, now));
-  await assert.rejects(verifyBridgeIdentity(await identity({ creator_id: 'not-a-uuid' }), secret, now));
+  assert.throws(() => signBridgeIdentity({
+    tenantId: claims.tenantId, userId: claims.userId, creatorId: 'not-a-uuid',
+    sessionId: claims.sessionId, instanceId: claims.instanceId, requestId: claims.requestId,
+  }, secret, now), /eros_bridge_identity_invalid/);
+  await assert.rejects(verifyBridgeIdentity(token, secret, now + 121), /eros_bridge_identity_invalid/);
+});
+
+test('one signed chat turn derives stable per-inference IDs for Eros internal calls', async () => {
+  const claims = await verifyBridgeIdentity(await identity(), secret, now);
+  const chat = deriveBridgeInferenceIdentity(claims, 'chat-fingerprint');
+  const extraction = deriveBridgeInferenceIdentity(claims, 'memory-extraction-fingerprint');
+  const retry = deriveBridgeInferenceIdentity(claims, 'chat-fingerprint');
+
+  assert.match(chat.requestId, /^[0-9a-f-]{36}$/i);
+  assert.notEqual(chat.requestId, claims.requestId);
+  assert.notEqual(extraction.requestId, chat.requestId);
+  assert.equal(retry.requestId, chat.requestId);
+  assert.equal(chat.userId, claims.userId);
+  assert.equal(chat.sessionId, claims.sessionId);
+  assert.equal(chat.instanceId, claims.instanceId);
 });
 
 test('chat request validation uses signed identity and bounds the OpenAI-compatible payload', async () => {
@@ -64,6 +76,11 @@ test('chat request validation uses signed identity and bounds the OpenAI-compati
   }, secret, now);
   assert.equal(internal.identity, undefined);
   assert.equal(internal.stream, false, 'omitted stream uses the OpenAI non-streaming default');
+  const systemTask = await parseBridgeRequest({
+    model: 'gpoint-codex', user: '11111111-1111-1111-1111-111111111111',
+    messages: [{ role: 'system', content: 'Extract a synthetic memory fact.' }],
+  }, secret, now);
+  assert.equal(systemTask.identity, undefined, 'stock Eros system audit marker does not claim a user identity');
   await assert.rejects(parseBridgeRequest({
     model: 'gpoint-codex', user: token,
     user_id: 'victim', creator_id: 'another-character',

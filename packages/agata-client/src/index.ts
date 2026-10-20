@@ -16,6 +16,7 @@ export interface AgataConsentSnapshot {
   verified_at?: string | null;
   expires_at?: string | null;
   disclosure_accepted: boolean;
+  disclosure_version?: number;
   disclosure_receipt_id: string;
 }
 

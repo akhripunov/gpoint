@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { jwtVerify } from 'jose';
-import { createErosEngineClient, decodeErosCursor, encodeErosCursor, ErosAdapterError, ErosEngineClient, buildErosPersonaPrompt, erosIdentityFor, erosTestCreatorIds, isErosChatAllowed, isSyntheticErosPair, markErosAssistantMessagesRead, mergeErosInboxItems, erosInboxLastMessageSummary, prepareErosRelationship, resolveErosRelationshipInstanceId, shouldUseErosChat, syncErosPersona, syncErosRelationship, unreadErosAssistantCounts, uuidV5 } from '../src/eros-adapter.js';
+import { verifyBridgeIdentity } from '../src/eros-worker-contract.js';
+import { createErosEngineClient, decodeErosCursor, encodeErosCursor, ErosAdapterError, ErosEngineClient, buildErosPersonaPrompt, erosIdentityFor, erosTestCreatorIds, isErosChatAllowed, isSyntheticErosPair, markErosAssistantMessagesRead, mergeErosInboxItems, erosInboxLastMessageSummary, prepareErosRelationship, resolveErosRelationshipInstanceId, syncErosPersona, syncErosRelationship, unreadErosAssistantCounts, uuidV5 } from '../src/eros-adapter.js';
 
 test('Eros client uses the configured bounded request timeout', async () => {
   let observedTimeout: number | undefined;
@@ -68,7 +69,6 @@ test('production Eros routing is limited to explicitly enabled synthetic pilot i
   assert.equal(isErosChatAllowed('pilot-user-1', 'pilot-creator-1', { ...production, EROS_DATA_MODE: 'shared' }), false);
   assert.equal(isErosChatAllowed('pilot-user-1', 'pilot-creator-1', { ...production, EROS_PRODUCTION_TEST_USER_IDS: '' }), false);
   assert.equal(isErosChatAllowed('pilot-user-1', 'pilot-creator-1', { ...production, EROS_PRODUCTION_TEST_CREATOR_IDS: '' }), false);
-  assert.equal(shouldUseErosChat('pilot-user-1', 'pilot-creator-1', false, production), false);
   assert.deepEqual(erosTestCreatorIds(production), ['pilot-creator-1']);
   assert.equal(isSyntheticErosPair(
     { telegramUsername: 'eros_test_pilot' },
@@ -237,8 +237,6 @@ test('local Eros routing requires a non-production process and exact synthetic a
   assert.equal(isErosChatAllowed('test-user-1', 'test-creator-1', { ...enabled, DATABASE_URL: 'postgresql://host/gpoint_test' }), false);
   assert.equal(isErosChatAllowed('test-user-1', 'test-creator-1', { ...enabled, EROS_ADAPTER_DATABASE_URL: 'postgresql://127.0.0.1:5432/gpoint' }), false);
   assert.equal(isErosChatAllowed('test-user-1', 'test-creator-1', { ...enabled, NODE_ENV: undefined }), false);
-  assert.equal(shouldUseErosChat('test-user-1', 'test-creator-1', true, enabled), true);
-  assert.equal(shouldUseErosChat('test-user-1', 'test-creator-1', false, enabled), false);
 });
 
 test('Eros routing requires test markers on the actual allowlisted user and approved creator rows', () => {
@@ -276,21 +274,41 @@ test('Eros client uses mapped JWT identity and reuses GPoint clientMessageId as 
       `data: ${JSON.stringify({ type: 'final' })}`,
     ].join('\n\n') + '\n\n', { headers: { 'content-type': 'text/event-stream' } });
   };
-  const client = new ErosEngineClient({ baseUrl: 'http://eros:8080', jwtSecret: secret, fetchImpl });
+  const workerSecret = 'unit-test-worker-signing-secret-at-least-32-bytes';
+  const workerTenantId = '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc5';
+  const client = new ErosEngineClient({
+    baseUrl: 'http://eros:8080', jwtSecret: secret, workerSigningSecret: workerSecret,
+    workerTenantId, fetchImpl,
+  });
 
   const relationshipId = '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc4';
   const session = await client.startSession(userId, genomeId, relationshipId);
-  const reply = await client.sendMessage(userId, session.sessionId, messageId, 'Привет');
+  const reply = await client.sendMessage(userId, session.sessionId, messageId, 'Привет', {
+    creatorId: genomeId, instanceId: relationshipId,
+  });
 
   assert.deepEqual(session, { sessionId, instanceId: genomeId });
   assert.deepEqual(reply, { id: messageId, text: 'Привет!' });
   assert.equal(calls.length, 2);
   assert.equal(calls[1].body.client_msg_id, messageId);
   assert.equal(calls[1].body.memory_scope, 'neutral_and_relationship');
+  const audit = calls[1].body.audit as { user?: string };
+  assert.equal(typeof audit?.user, 'string');
+  assert.ok(audit.user!.length <= 256, 'stock Eros caps audit.user at 256 characters');
+  const bridge = await verifyBridgeIdentity(audit.user!, new TextEncoder().encode(workerSecret));
+  assert.equal(bridge.userId, userId);
+  assert.equal(bridge.tenantId, workerTenantId);
+  assert.equal(bridge.creatorId, genomeId);
+  assert.equal(bridge.sessionId, session.sessionId);
+  assert.equal(bridge.instanceId, relationshipId);
+  assert.equal(bridge.requestId, messageId);
   assert.equal(calls[0].body.instance_id, relationshipId);
   assert.equal(calls[1].body.content, 'Привет');
   assert.equal(calls[1].init.redirect, 'error');
 });
+
+const bridgeTestIdentity = { creatorId: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc3', instanceId: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc4' };
+const bridgeTestOptions = { workerSigningSecret: 'unit-test-worker-signing-secret-at-least-32-bytes', workerTenantId: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc5' };
 
 test('Eros client fails closed on an upstream ghost fallback', async () => {
   const fetchImpl: typeof fetch = async () => new Response([
@@ -298,9 +316,9 @@ test('Eros client fails closed on an upstream ghost fallback', async () => {
     `data: ${JSON.stringify({ type: 'delta', content: 'fallback' })}`,
     `data: ${JSON.stringify({ type: 'done', ghost_fallback: true })}`,
   ].join('\n\n') + '\n\n', { headers: { 'content-type': 'text/event-stream' } });
-  const client = new ErosEngineClient({ baseUrl: 'http://eros:8080', jwtSecret: 'unit-test-eros-jwt-secret-at-least-32-bytes', fetchImpl });
+  const client = new ErosEngineClient({ baseUrl: 'http://eros:8080', jwtSecret: 'unit-test-eros-jwt-secret-at-least-32-bytes', ...bridgeTestOptions, fetchImpl });
   await assert.rejects(
-    client.sendMessage('7f43ff08-7bf9-5647-9dc2-bb4a46f8edc0', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc2', 'hello'),
+    client.sendMessage('7f43ff08-7bf9-5647-9dc2-bb4a46f8edc0', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc2', 'hello', bridgeTestIdentity),
     (error: unknown) => error instanceof ErosAdapterError && error.code === 'eros_fallback_response',
   );
 });
@@ -318,8 +336,8 @@ test('Eros stream discards truncated attempt text and only returns a complete fi
   const fetchImpl: typeof fetch = async () => new Response(frames.map(event => `data: ${JSON.stringify(event)}\n\n`).join(''), {
     headers: { 'content-type': 'text/event-stream' },
   });
-  const client = new ErosEngineClient({ baseUrl: 'http://eros:8080', jwtSecret: 'unit-test-eros-jwt-secret-at-least-32-bytes', fetchImpl });
-  const reply = await client.sendMessage('7f43ff08-7bf9-5647-9dc2-bb4a46f8edc0', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc2', 'hello');
+  const client = new ErosEngineClient({ baseUrl: 'http://eros:8080', jwtSecret: 'unit-test-eros-jwt-secret-at-least-32-bytes', ...bridgeTestOptions, fetchImpl });
+  const reply = await client.sendMessage('7f43ff08-7bf9-5647-9dc2-bb4a46f8edc0', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc2', 'hello', bridgeTestIdentity);
   assert.deepEqual(reply, { id: '01JBCDEF0123456789ABCDEFGH1', text: 'complete answer' });
 });
 
@@ -328,9 +346,9 @@ test('Eros stream rejects a partial reply without protocol terminal frames', asy
     `data: ${JSON.stringify({ type: 'meta', message_id: '01JABCDEF0123456789ABCDEFGH', action_type: 'reply' })}`,
     `data: ${JSON.stringify({ type: 'delta', content: 'partial' })}`,
   ].join('\n\n') + '\n\n', { headers: { 'content-type': 'text/event-stream' } });
-  const client = new ErosEngineClient({ baseUrl: 'http://eros:8080', jwtSecret: 'unit-test-eros-jwt-secret-at-least-32-bytes', fetchImpl });
+  const client = new ErosEngineClient({ baseUrl: 'http://eros:8080', jwtSecret: 'unit-test-eros-jwt-secret-at-least-32-bytes', ...bridgeTestOptions, fetchImpl });
   await assert.rejects(
-    client.sendMessage('7f43ff08-7bf9-5647-9dc2-bb4a46f8edc0', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc2', 'hello'),
+    client.sendMessage('7f43ff08-7bf9-5647-9dc2-bb4a46f8edc0', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc2', 'hello', bridgeTestIdentity),
     (error: unknown) => error instanceof ErosAdapterError && error.code === 'eros_response_invalid',
   );
 });
@@ -344,10 +362,10 @@ test('Eros cancels the upstream stream after a protocol error', async () => {
     cancel() { cancelled = true; },
   });
   const fetchImpl: typeof fetch = async () => new Response(stream, { headers: { 'content-type': 'text/event-stream' } });
-  const client = new ErosEngineClient({ baseUrl: 'http://eros:8080', jwtSecret: 'unit-test-eros-jwt-secret-at-least-32-bytes', fetchImpl });
+  const client = new ErosEngineClient({ baseUrl: 'http://eros:8080', jwtSecret: 'unit-test-eros-jwt-secret-at-least-32-bytes', ...bridgeTestOptions, fetchImpl });
 
   await assert.rejects(
-    client.sendMessage('7f43ff08-7bf9-5647-9dc2-bb4a46f8edc0', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc2', 'hello'),
+    client.sendMessage('7f43ff08-7bf9-5647-9dc2-bb4a46f8edc0', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc2', 'hello', bridgeTestIdentity),
     (error: unknown) => error instanceof ErosAdapterError && error.code === 'eros_provider_unavailable',
   );
   assert.equal(cancelled, true);

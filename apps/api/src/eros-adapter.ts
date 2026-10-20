@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { SignJWT } from 'jose';
+import { signBridgeIdentity } from './eros-worker-contract.js';
 
 const USER_NAMESPACE = 'b92c2772-7534-5a7c-8eed-ec08e0a9c45b';
 const CREATOR_NAMESPACE = 'c9568a43-7e99-58a2-a41e-50e031eac7bc';
@@ -68,10 +69,6 @@ export function isSyntheticErosPair(
 export function erosTestCreatorIds(env: NodeJS.ProcessEnv = process.env): string[] {
   const allowlist = env.NODE_ENV === 'production' ? env.EROS_PRODUCTION_TEST_CREATOR_IDS : env.EROS_TEST_CREATOR_IDS;
   return [...csvIds(allowlist)].slice(0, 20);
-}
-
-export function shouldUseErosChat(userId: string, creatorId: string, longTermMemoryConsent: boolean, env: NodeJS.ProcessEnv = process.env): boolean {
-  return longTermMemoryConsent && isErosChatAllowed(userId, creatorId, env);
 }
 
 function isLocalSandboxDatabaseUrl(value: string | undefined): boolean {
@@ -206,6 +203,8 @@ export class ErosAdapterError extends Error {
 interface ErosClientOptions {
   baseUrl: string;
   jwtSecret: string;
+  workerSigningSecret?: string;
+  workerTenantId?: string;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
 }
@@ -359,6 +358,8 @@ export class ErosEngineClient {
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
   private readonly secret: Uint8Array;
+  private readonly workerSecret?: Uint8Array;
+  private readonly workerTenantId?: string;
 
   constructor(options: ErosClientOptions) {
     const url = new URL(options.baseUrl);
@@ -371,6 +372,14 @@ export class ErosEngineClient {
     this.timeoutMs = Math.max(1_000, Math.min(options.timeoutMs ?? 15_000, MAX_EROS_REQUEST_TIMEOUT_MS));
     this.secret = new TextEncoder().encode(options.jwtSecret);
     if (this.secret.byteLength < 32) throw new Error('eros_jwt_secret_too_short');
+    if (options.workerSigningSecret !== undefined) {
+      this.workerSecret = new TextEncoder().encode(options.workerSigningSecret);
+      if (this.workerSecret.byteLength < 32) throw new Error('eros_worker_signing_secret_too_short');
+    }
+    if (options.workerTenantId !== undefined) {
+      if (!UUID_PATTERN.test(options.workerTenantId)) throw new Error('eros_worker_tenant_invalid');
+      this.workerTenantId = options.workerTenantId;
+    }
   }
 
   private async bearer(userId: string): Promise<string> {
@@ -452,12 +461,30 @@ export class ErosEngineClient {
     });
   }
 
-  async sendMessage(userId: string, sessionId: string, clientMessageId: string, content: string): Promise<{ id: string; text: string }> {
+  async sendMessage(
+    userId: string,
+    sessionId: string,
+    clientMessageId: string,
+    content: string,
+    identity?: { creatorId: string; instanceId: string },
+  ): Promise<{ id: string; text: string }> {
     if (!UUID_PATTERN.test(userId) || !UUID_PATTERN.test(sessionId) || !UUID_PATTERN.test(clientMessageId) || !content.trim() || content.length > 4_000) {
       throw new ErosAdapterError('eros_request_invalid', 400);
     }
+    if (!identity || !UUID_PATTERN.test(identity.creatorId) || !UUID_PATTERN.test(identity.instanceId) ||
+        !this.workerSecret || !this.workerTenantId) {
+      throw new ErosAdapterError('eros_worker_identity_unavailable');
+    }
+    const bridgeIdentity = signBridgeIdentity({
+      tenantId: this.workerTenantId,
+      userId,
+      creatorId: identity.creatorId,
+      sessionId,
+      instanceId: identity.instanceId,
+      requestId: clientMessageId,
+    }, this.workerSecret);
     const response = await this.request(`/comp/chat/${encodeURIComponent(sessionId)}/message/stream`, userId,
-      { content, client_msg_id: clientMessageId, memory_scope: 'neutral_and_relationship' }, 'text/event-stream');
+      { content, client_msg_id: clientMessageId, memory_scope: 'neutral_and_relationship', audit: { user: bridgeIdentity } }, 'text/event-stream');
     if (!response.body) throw new ErosAdapterError('eros_response_invalid');
 
     const reader = response.body.getReader();
@@ -581,5 +608,12 @@ export function createErosEngineClient(env: NodeJS.ProcessEnv = process.env, fet
       throw new ErosAdapterError('eros_timeout_invalid', 500);
     }
   }
-  return new ErosEngineClient({ baseUrl: env.EROS_SERVICE_URL, jwtSecret: env.EROS_JWT_SECRET, timeoutMs, fetchImpl });
+  return new ErosEngineClient({
+    baseUrl: env.EROS_SERVICE_URL,
+    jwtSecret: env.EROS_JWT_SECRET,
+    workerSigningSecret: env.EROS_WORKER_SIGNING_SECRET,
+    workerTenantId: env.EROS_WORKER_TENANT_ID,
+    timeoutMs,
+    fetchImpl,
+  });
 }

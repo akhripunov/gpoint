@@ -2,7 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, ran
 import { BadRequestException, Body, Controller, Get, Headers, Header, HttpException, OnModuleDestroy, OnModuleInit, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { PrismaClient, type Prisma } from '@prisma/client';
-import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, parseBridgeRequest, parseErosEmbeddingRequest, type ParsedErosBridgeRequest } from './eros-worker-contract.js';
+import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, deriveBridgeInferenceIdentity, parseBridgeRequest, parseErosEmbeddingRequest, type ParsedErosBridgeRequest } from './eros-worker-contract.js';
 import { isAllowedOllamaEmbeddingEndpoint } from './eros-network-policy.js';
 
 const prisma = new PrismaClient();
@@ -314,13 +314,15 @@ export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestro
 
   private async createOrReadJob(request: ParsedErosBridgeRequest): Promise<JobRow> {
     const tenantId = workerTenant();
-    const identity = request.identity ?? systemTaskIdentity(request, tenantId);
+    const fingerprint = requestFingerprint(request);
+    const identity = request.identity
+      ? deriveBridgeInferenceIdentity(request.identity, fingerprint)
+      : systemTaskIdentity(request, tenantId);
     if (identity.tenantId !== tenantId) throw new HttpException({ code: 'EROS_IDENTITY_MISMATCH' }, 403);
     const id = randomUUID();
     const timeoutRaw = Number(process.env.EROS_BRIDGE_TIMEOUT_SECONDS ?? '210');
     if (!Number.isInteger(timeoutRaw) || timeoutRaw < 30 || timeoutRaw > 240) throw new HttpException({ code: 'EROS_BRIDGE_UNAVAILABLE' }, 503);
     const deadline = new Date(Date.now() + timeoutRaw * 1000);
-    const fingerprint = requestFingerprint(request);
     const row = await withWorkerTenant(async (tx) => {
       // Serialize admission for this tenant so both the pending and retained
       // bounds remain true under concurrent Eros requests.

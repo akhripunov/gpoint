@@ -589,11 +589,6 @@ body:has(.creator-workspace) { background: #050b16; }
 .messages-gate{max-width:440px;min-height:62vh;margin:0 auto;padding:28px 20px}
 .messages-gate>svg{color:var(--gpoint-accent-primary)}
 .messages-gate .eyebrow{margin-top:18px}
-.messages-memory-choice{width:100%;display:flex;align-items:flex-start;gap:10px;margin:10px 0 20px;padding:13px;border:1px solid var(--gpoint-border-subtle);border-radius:13px;background:var(--gpoint-background-elevated);text-align:left}
-.messages-memory-choice input{width:17px;height:17px;flex:none;margin:1px 0 0;accent-color:var(--gpoint-accent-primary)}
-.messages-memory-choice span{display:grid;gap:4px}
-.messages-memory-choice strong{font-size:12px;color:var(--gpoint-text-primary)}
-.messages-memory-choice small{font-size:11px;line-height:1.4;color:var(--gpoint-text-muted)}
 .messages-error,.chat-send-error{color:var(--gpoint-danger,#e49b9b);font-size:12px}
 .chat-screen{height:100dvh;min-height:100dvh;max-height:100dvh;overflow:hidden;padding-bottom:0}
 .chat-screen .messages-page{height:100%;min-height:0;display:flex;flex-direction:column;padding:0;overflow:hidden}

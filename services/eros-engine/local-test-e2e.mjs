@@ -42,7 +42,7 @@ async function readHistory(token) {
   return request(`${api}/messages/creator/${creator}?limit=100`, { token });
 }
 
-async function assertCompleteHistory(token, stage, expectedTurns = 16) {
+async function assertCompleteHistory(token, stage, expectedTurns = 17) {
   const response = await readHistory(token);
   assert.equal(response.status, 200, `${stage}: history read`);
   const users = response.data.items.filter((item) => item.role === 'user');
@@ -52,9 +52,9 @@ async function assertCompleteHistory(token, stage, expectedTurns = 16) {
   assert.ok(users.some((item) => item.text.includes('SYNTH_CITY_ZEPHYRBAY')), `${stage}: city fact`);
   assert.ok(users.some((item) => item.text.includes('SYNTH_OLD_2026-10-22_18:40')), `${stage}: historical meeting`);
   assert.ok(users.some((item) => item.text.includes('SYNTH_CURRENT_2026-10-23_19:15')), `${stage}: current meeting`);
-  if (expectedTurns === 16) assert.ok(users.some((item) => item.text.includes('SYNTH_RECALL_PROBE')), `${stage}: final recall probe`);
+  if (expectedTurns === 17) assert.ok(users.some((item) => item.text.includes('SYNTH_RECALL_PROBE')), `${stage}: final recall probe`);
   assert.ok(assistants.slice(0, -1).every((item) => item.text === 'DETERMINISTIC_LOCAL_E2E_REPLY'), `${stage}: assistant response pairs`);
-  if (expectedTurns === 16) assert.ok(assistants.at(-1)?.text.startsWith('SYNTH_RECALL_CONFIRMED'), `${stage}: recall response`);
+  if (expectedTurns === 17) assert.ok(assistants.at(-1)?.text.startsWith('SYNTH_RECALL_CONFIRMED'), `${stage}: recall response`);
   return users;
 }
 
@@ -67,9 +67,9 @@ if (process.argv.includes('--history-only')) {
 
 if (process.argv.includes('--recall-only')) {
   const token = await authenticate();
-  const priorUsers = await assertCompleteHistory(token, 'pre-recall', 15);
+  const priorUsers = await assertCompleteHistory(token, 'pre-recall', 16);
   const sourceTurn = priorUsers.findIndex((item) => item.text.includes('SYNTH_CITY_ZEPHYRBAY'));
-  assert.equal(sourceTurn, 0, 'recall source must be the first user turn');
+  assert.equal(sourceTurn, 1, 'the memory source follows the synthetic safety-gate checks');
   assert.equal(priorUsers.length - sourceTurn - 1, 14, 'source fact must be outside the latest 12 user messages');
   console.log('LOCAL_E2E_RECALL_GAP=PASS intermediate_user_messages=14');
   const response = await request(`${api}/messages/creator/${creator}`, {
@@ -84,7 +84,7 @@ if (process.argv.includes('--recall-only')) {
   assert.equal(response.data?.status, 'completed');
   assert.equal(response.data?.response?.text,
     'SYNTH_RECALL_CONFIRMED city=ZephyrBay meeting=2026-10-23_19:15 history=2026-10-22_18:40');
-  await assertCompleteHistory(token, 'post-recall', 16);
+  await assertCompleteHistory(token, 'post-recall', 17);
   console.log('LOCAL_E2E_MEMORY_RECALL_RESPONSE=PASS');
   process.exit(0);
 }
@@ -111,7 +111,8 @@ const noConsent = await request(`${api}/messages/creator/${creator}`, {
   body: { clientMessageId: randomUUID(), text: 'synthetic no-memory-consent check' },
 });
 assert.equal(noConsent.status, 201, JSON.stringify(noConsent.data));
-assert.equal(noConsent.data?.response?.text, 'SYNTHETIC_AGATA_FALLBACK_REPLY');
+assert.equal(noConsent.data?.response?.text, 'DETERMINISTIC_LOCAL_E2E_REPLY',
+  'the deprecated optional memory flag must not block Eros after required disclosure is current');
 
 await setFixtureState({ ageAssuranceRequired: false, longTermMemory: true });
 const dialogue = [
@@ -144,6 +145,6 @@ for (const [index, text] of dialogue.entries()) {
 }
 console.log('LOCAL_E2E_15_TURN_DIALOGUE=PASS');
 
-await assertCompleteHistory(token, 'pre-recall', 15);
+await assertCompleteHistory(token, 'pre-recall', 16);
 console.log('LOCAL_E2E_AUTH_AGE_CONSENT_AND_WORKER_ROUTE=PASS');
 console.log('LOCAL_E2E_GPOINT_API_EROS_HISTORY=PASS');

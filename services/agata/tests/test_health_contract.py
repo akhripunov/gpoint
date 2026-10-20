@@ -26,7 +26,7 @@ async def test_readiness_accepts_expected_provider_schema_head_and_pgvector(monk
         health, "get_settings", lambda: SimpleNamespace(llm_provider="local_fake", llm_api_key="fake")
     )
 
-    result = await health.ready(ScalarSession([1, 1, "agata0011", 1]))
+    result = await health.ready(ScalarSession([1, 1, "agata0012", 1]))
 
     assert result == {"status": "ready"}
 
@@ -39,7 +39,7 @@ async def test_readiness_accepts_disabled_provider_without_api_key(monkeypatch):
         lambda: SimpleNamespace(llm_provider="disabled", llm_api_key=None),
     )
 
-    result = await health.ready(ScalarSession([1, 1, "agata0011", 1]))
+    result = await health.ready(ScalarSession([1, 1, "agata0012", 1]))
 
     assert result == {"status": "ready"}
 
@@ -64,7 +64,7 @@ async def test_readiness_fails_closed_without_provider_configuration(monkeypatch
     [
         [1, 1, "agata0005", 1],
         [1, 1, "agata0008", 1],
-        [1, 1, "agata0011", None],
+        [1, 1, "agata0012", None],
         [RuntimeError("disposable database unavailable")],
     ],
     ids=["wrong-head", "wrong-head", "missing-pgvector", "database-unavailable"],

@@ -1,10 +1,13 @@
-import { jwtVerify } from 'jose';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_MESSAGES = 64;
 const MAX_MESSAGE_CHARS = 16_000;
 const MAX_TOTAL_CHARS = 48_000;
 const MAX_REPLY_CHARS = 4_096;
+const BRIDGE_TOKEN_PREFIX = 'g1';
+const BRIDGE_TOKEN_DOMAIN = 'gpoint-eros-provider-identity-v1';
+const EROS_SYSTEM_AUDIT_USER = '11111111-1111-1111-1111-111111111111';
 
 export interface ErosBridgeIdentity {
   tenantId: string;
@@ -13,6 +16,23 @@ export interface ErosBridgeIdentity {
   sessionId: string;
   instanceId: string;
   requestId: string;
+}
+
+/** Preserve the signed chat-turn scope while giving each stock Eros provider call its own idempotency key. */
+export function deriveBridgeInferenceIdentity(identity: ErosBridgeIdentity, requestFingerprint: string): ErosBridgeIdentity {
+  const bytes = createHash('sha256')
+    .update(identity.requestId)
+    .update('\0')
+    .update(requestFingerprint)
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x80;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return {
+    ...identity,
+    requestId: `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`,
+  };
 }
 
 export interface ErosBridgeMessage {
@@ -35,32 +55,50 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+function uuidToBytes(value: string): Buffer {
+  if (!UUID.test(value)) throw new Error('eros_bridge_identity_invalid');
+  return Buffer.from(value.replaceAll('-', ''), 'hex');
+}
+
+function bytesToUuid(value: Buffer): string {
+  const hex = value.toString('hex');
+  const uuid = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  if (!UUID.test(uuid)) throw new Error('eros_bridge_identity_invalid');
+  return uuid;
+}
+
+/** Compact signed provider metadata for stock Eros's 256-character audit.user cap. */
+export function signBridgeIdentity(identity: ErosBridgeIdentity, secret: Uint8Array, nowSeconds = Math.floor(Date.now() / 1000)): string {
+  if (secret.byteLength < 32 || !Number.isInteger(nowSeconds) || nowSeconds < 0) throw new Error('eros_bridge_identity_invalid');
+  const payload = Buffer.concat([
+    uuidToBytes(identity.tenantId), uuidToBytes(identity.userId), uuidToBytes(identity.creatorId),
+    uuidToBytes(identity.sessionId), uuidToBytes(identity.instanceId), uuidToBytes(identity.requestId),
+    Buffer.from([(nowSeconds >>> 24) & 0xff, (nowSeconds >>> 16) & 0xff, (nowSeconds >>> 8) & 0xff, nowSeconds & 0xff]),
+  ]).toString('base64url');
+  const signed = `${BRIDGE_TOKEN_PREFIX}.${payload}`;
+  const signature = createHmac('sha256', secret).update(BRIDGE_TOKEN_DOMAIN).update('\0').update(signed).digest('base64url');
+  const token = `${signed}.${signature}`;
+  if (token.length > 256) throw new Error('eros_bridge_identity_invalid');
+  return token;
+}
+
 export async function verifyBridgeIdentity(token: string, secret: Uint8Array, nowSeconds = Math.floor(Date.now() / 1000)): Promise<ErosBridgeIdentity> {
-  if (typeof token !== 'string' || token.length > 2_048 || secret.byteLength < 32) throw new Error('eros_bridge_identity_invalid');
-  let payload: Record<string, unknown>;
-  try {
-    const verified = await jwtVerify(token, secret, {
-      algorithms: ['HS256'], issuer: 'eros-engine', audience: 'gpoint-worker-gateway',
-      currentDate: new Date(nowSeconds * 1000), clockTolerance: 3,
-    });
-    payload = verified.payload as Record<string, unknown>;
-  } catch {
-    throw new Error('eros_bridge_identity_invalid');
-  }
-  const userId = payload.sub;
-  const tenantId = payload.tenant_id;
-  const creatorId = payload.creator_id;
-  const sessionId = payload.session_id;
-  const instanceId = payload.instance_id;
-  const requestId = payload.jti;
-  const issuedAt = payload.iat;
-  const expiresAt = payload.exp;
-  if (![tenantId, userId, creatorId, sessionId, instanceId, requestId].every((value) => typeof value === 'string' && UUID.test(value)) ||
-      typeof issuedAt !== 'number' || typeof expiresAt !== 'number' || expiresAt <= issuedAt ||
-      expiresAt - issuedAt > 120 || issuedAt > nowSeconds + 3 || nowSeconds - issuedAt > 120) {
-    throw new Error('eros_bridge_identity_invalid');
-  }
-  return { tenantId: tenantId as string, userId: userId as string, creatorId: creatorId as string, sessionId: sessionId as string, instanceId: instanceId as string, requestId: requestId as string };
+  if (typeof token !== 'string' || token.length > 256 || secret.byteLength < 32) throw new Error('eros_bridge_identity_invalid');
+  const match = /^g1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/.exec(token);
+  if (!match) throw new Error('eros_bridge_identity_invalid');
+  const signed = `${BRIDGE_TOKEN_PREFIX}.${match[1]}`;
+  const expected = createHmac('sha256', secret).update(BRIDGE_TOKEN_DOMAIN).update('\0').update(signed).digest();
+  const supplied = Buffer.from(match[2], 'base64url');
+  if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw new Error('eros_bridge_identity_invalid');
+  const payload = Buffer.from(match[1], 'base64url');
+  if (payload.length !== 100 || payload.toString('base64url') !== match[1]) throw new Error('eros_bridge_identity_invalid');
+  const issuedAt = payload.readUInt32BE(96);
+  if (issuedAt > nowSeconds + 3 || nowSeconds - issuedAt > 120) throw new Error('eros_bridge_identity_invalid');
+  return {
+    tenantId: bytesToUuid(payload.subarray(0, 16)), userId: bytesToUuid(payload.subarray(16, 32)),
+    creatorId: bytesToUuid(payload.subarray(32, 48)), sessionId: bytesToUuid(payload.subarray(48, 64)),
+    instanceId: bytesToUuid(payload.subarray(64, 80)), requestId: bytesToUuid(payload.subarray(80, 96)),
+  };
 }
 
 export async function parseBridgeRequest(value: unknown, secret: Uint8Array, nowSeconds = Math.floor(Date.now() / 1000)): Promise<ParsedErosBridgeRequest> {
@@ -93,7 +131,9 @@ export async function parseBridgeRequest(value: unknown, secret: Uint8Array, now
     if (total > MAX_TOTAL_CHARS) throw new Error('eros_chat_request_invalid');
     return { role: message.role as ErosBridgeMessage['role'], content: message.content };
   });
-  const identity = typeof value.user === 'string' ? await verifyBridgeIdentity(value.user, secret, nowSeconds) : undefined;
+  const identity = typeof value.user === 'string' && value.user !== EROS_SYSTEM_AUDIT_USER
+    ? await verifyBridgeIdentity(value.user, secret, nowSeconds)
+    : undefined;
   return { identity, model, messages, maxTokens, temperature, stream };
 }
 

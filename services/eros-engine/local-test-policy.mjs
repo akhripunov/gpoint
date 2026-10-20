@@ -3,10 +3,8 @@ import { homedir } from 'node:os';
 import { join, normalize } from 'node:path';
 import { statSync } from 'node:fs';
 
-export const PINNED_EROS_REFERENCE = 'gpoint-eros:d1a140083321687212fb7b17c09cc0c3c9639f5e-9dd93ad75f72-linux-amd64';
 const PINNED_UPSTREAM = 'd1a140083321687212fb7b17c09cc0c3c9639f5e';
-const PINNED_PATCHSET = '9dd93ad75f7272403d1c6a64c88372278199f26eb4e0fe1981e548dcc09377b8';
-const PINNED_SOURCE = 'https://github.com/akhripunov/gpoint';
+const PINNED_SOURCE = 'https://github.com/etherfunlab/eros-engine';
 
 export function validateDockerEndpoint(endpoint, {
   home = homedir(),
@@ -29,17 +27,15 @@ export function validateDockerEndpoint(endpoint, {
 }
 
 export function validateErosImageInspection(reference, metadata) {
-  if (reference !== PINNED_EROS_REFERENCE) throw new Error('pinned_eros_reference_required');
+  if (!/^gpoint-eros:stock-[a-zA-Z0-9._-]+$/.test(reference ?? '')) throw new Error('stock_eros_image_tag_required');
   if (!metadata || !/^sha256:[0-9a-f]{64}$/.test(metadata.id ?? '')) {
     throw new Error('immutable_image_id_required');
   }
-  if (metadata.os !== 'linux' || metadata.architecture !== 'amd64') {
-    throw new Error('eros_platform_mismatch');
-  }
+  if (metadata.os !== 'linux' || !['amd64', 'arm64'].includes(metadata.architecture)) throw new Error('eros_platform_mismatch');
   if (metadata.source !== PINNED_SOURCE || metadata.upstreamRevision !== PINNED_UPSTREAM) {
     throw new Error('eros_upstream_provenance_mismatch');
   }
-  if (metadata.patchSha256 !== PINNED_PATCHSET) throw new Error('eros_patch_provenance_mismatch');
+  if (metadata.patchSha256 !== 'none') throw new Error('eros_downstream_patch_forbidden');
   if (!/^[0-9a-f]{40}$/.test(metadata.buildRevision ?? '')) {
     throw new Error('eros_build_revision_missing');
   }

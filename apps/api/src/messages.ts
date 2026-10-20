@@ -13,7 +13,7 @@ import { FixedWindowRateLimiter } from './rate-limit.js';
 import { resolveSession } from './session.js';
 import { connectedTelegramChannelAvatarUrls } from './telegram-channel-avatars.js';
 import { isAllowedCodexMessageRequest, isCodexOwnerAllowed, parseCodexOwnerUserIds, resolveCodexMessageSession } from './codex-chat-auth.js';
-import { decodeErosCursor, encodeErosCursor, ErosAdapterError, createErosEngineClient, erosIdentityFor, erosTestCreatorIds, isErosChatAllowed, isSyntheticErosPair, prepareErosRelationship, shouldUseErosChat, markErosAssistantMessagesRead, mergeErosInboxItems, erosInboxLastMessageSummary, unreadErosAssistantCounts, resolveErosRelationshipInstanceId } from './eros-adapter.js';
+import { decodeErosCursor, encodeErosCursor, ErosAdapterError, createErosEngineClient, erosIdentityFor, erosTestCreatorIds, isErosChatAllowed, isSyntheticErosPair, prepareErosRelationship, markErosAssistantMessagesRead, mergeErosInboxItems, erosInboxLastMessageSummary, unreadErosAssistantCounts, resolveErosRelationshipInstanceId } from './eros-adapter.js';
 
 const prisma = new PrismaClient();
 const sendLimiter = new FixedWindowRateLimiter(30, 60_000);
@@ -72,7 +72,8 @@ async function localErosConversations(userId: string, agata: ReturnType<typeof a
   const user = await prisma.user.findUnique({ where: { id: userId }, select: { telegramUsername: true } });
   if (!user) return [];
   const consent = await agata.chatState(userId);
-  if (!consent.chatHistory || consent.disclosureRequired || !consent.longTermMemory) return [];
+  assertMessageAgeAssurance(consent);
+  if (!consent.chatHistory || consent.disclosureRequired) return [];
   const client = createErosEngineClient();
   if (!client) return [];
   const mappedUser = erosIdentityFor({ userId, creatorId: creatorIds[0] }).userId;
@@ -127,11 +128,10 @@ function mapErosError(error: unknown): HttpException {
   return new HttpException({ code: 'EROS_UNAVAILABLE' }, 503);
 }
 
-async function requireErosConsent(agata: ReturnType<typeof agataOrUnavailable>, userId: string): Promise<boolean> {
+async function requireErosConsent(agata: ReturnType<typeof agataOrUnavailable>, userId: string): Promise<void> {
   const current = await agata.chatState(userId);
   assertMessageAgeAssurance(current);
   if (!current.chatHistory || current.disclosureRequired) throw new HttpException({ code: 'CHAT_CONSENT_REQUIRED' }, 403);
-  return current.longTermMemory;
 }
 
 export function messageThreadCreatorDto(creator: { id: string; slug: string; displayName: string; verified: boolean; avatarUrl?: string | null }, channelAvatarUrl: string | null = null) {
@@ -287,8 +287,8 @@ export class MessagesController {
       const creator = await findApprovedCreator(creatorId);
       const agata = agataOrUnavailable();
       if (isErosChatAllowed(userId, creatorId)) {
-        const memoryConsent = await requireErosConsent(agata, userId);
-        if (shouldUseErosChat(userId, creatorId, memoryConsent) && await canRouteErosChat(userId, creator, agata)) {
+        await requireErosConsent(agata, userId);
+        if (await canRouteErosChat(userId, creator, agata)) {
           const session = await findErosSession(userId, creatorId);
           if (!session) return { acknowledgedMessageIds: [] };
           const acknowledgedMessageIds = await markErosAssistantMessagesRead(erosAdapterDatabase(), session.userId, session.sessionId, ids);
@@ -314,15 +314,22 @@ export class MessagesController {
   }
 
   @Post('consent')
-  async consent(@Headers() headers: Record<string, string | undefined>, @Body() body: { longTermMemory?: unknown }) {
+  async consent(@Headers() headers: Record<string, string | undefined>, @Body() body: { longTermMemory?: unknown; disclosureVersion?: unknown }) {
     const userId = authenticatedUser(headers);
-    if (typeof body?.longTermMemory !== 'boolean') throw new BadRequestException({ code: 'invalid_consent' });
+    if (body?.longTermMemory !== undefined && typeof body.longTermMemory !== 'boolean') throw new BadRequestException({ code: 'invalid_consent' });
+    if (body?.disclosureVersion !== undefined && (!Number.isSafeInteger(body.disclosureVersion) || Number(body.disclosureVersion) < 1)) {
+      throw new BadRequestException({ code: 'invalid_disclosure_version' });
+    }
     const agata = agataOrUnavailable();
     try {
       const current = await agata.chatState(userId);
+      if (current.disclosureRequired && body.disclosureVersion !== current.disclosureVersion) {
+        throw new HttpException({ code: 'CHAT_DISCLOSURE_UPDATE_REQUIRED' }, 409);
+      }
       const consent: AgataConsentSnapshot = {
         chat_history: true,
-        long_term_memory: body.longTermMemory,
+        long_term_memory: true,
+        disclosure_version: typeof body.disclosureVersion === 'number' ? body.disclosureVersion : undefined,
         age_band: current.ageBand,
         age_status: current.ageStatus,
         age_method: current.ageMethod,
@@ -374,8 +381,8 @@ export class MessagesController {
     const [creator, agata] = [await findApprovedCreator(creatorId), agataOrUnavailable()];
     try {
       if (isErosChatAllowed(userId, creatorId)) {
-        const memoryConsent = await requireErosConsent(agata, userId);
-        if (shouldUseErosChat(userId, creatorId, memoryConsent) && await canRouteErosChat(userId, creator, agata)) {
+        await requireErosConsent(agata, userId);
+        if (await canRouteErosChat(userId, creator, agata)) {
           const session = await findErosSession(userId, creatorId);
           const dto = await publicCreator(creator);
           if (!session) return { creator: dto, items: [], nextCursor: null };
@@ -425,11 +432,14 @@ export class MessagesController {
       const current = await agata.chatState(userId);
       assertMessageAgeAssurance(current);
       if (!current.chatHistory || current.disclosureRequired) throw new HttpException({ code: 'CHAT_CONSENT_REQUIRED' }, 403);
-      if (current.longTermMemory && await canRouteErosChat(userId, creator, agata)) {
+      if (await canRouteErosChat(userId, creator, agata)) {
         const { identity, session } = await prepareErosChat(userId, creator);
         const eros = createErosEngineClient();
         if (!eros) throw new ErosAdapterError('eros_disabled');
-        const response = await eros.sendMessage(identity.userId, session.sessionId, body.clientMessageId, text);
+        const response = await eros.sendMessage(identity.userId, session.sessionId, body.clientMessageId, text, {
+          creatorId: identity.creatorId,
+          instanceId: identity.relationshipId,
+        });
         return {
           status: 'completed' as const,
           userMessageId: body.clientMessageId,

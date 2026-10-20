@@ -4,24 +4,26 @@ set -eu
 [ "$#" -eq 1 ] || { echo 'usage: run-local-e2e.sh <exact-built-eros-image-tag>' >&2; exit 2; }
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 image=$1
-for cmd in docker python3.11 node; do command -v "$cmd" >/dev/null || { echo "required_tool_missing=$cmd" >&2; exit 2; }; done
+for cmd in docker python3 node; do command -v "$cmd" >/dev/null || { echo "required_tool_missing=$cmd" >&2; exit 2; }; done
 local_context=$(node "$repo/services/eros-engine/local-test-policy.mjs" context) || exit 2
 docker_config=${DOCKER_CONFIG:-$HOME/.docker}
 docker_local(){ env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH DOCKER_CONFIG="$docker_config" DOCKER_CONTEXT="$local_context" docker "$@"; }
 image_id=$(node "$repo/services/eros-engine/local-test-policy.mjs" image "$image") || exit 2
 printf 'LOCAL_E2E_DOCKER_CONTEXT=LOCAL_UNIX:%s\n' "$local_context"
 printf 'LOCAL_E2E_EROS_IMAGE_ID=%s\n' "$image_id"
+printf 'LOCAL_E2E_STOCK_EROS_IMAGE=PASS source_sha=d1a140083321687212fb7b17c09cc0c3c9639f5e\n'
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/me36-local-e2e.XXXXXX"); chmod 700 "$tmp"
-project="me36_$(python3.11 -c 'import secrets;print(secrets.token_hex(10))')"
+project="me36_$(python3 -c 'import secrets;print(secrets.token_hex(10))')"
 integration_container="${project}-worker-integration"
-admin=$(python3.11 -c 'import secrets;print(secrets.token_urlsafe(32))')
-provider=$(python3.11 -c 'import secrets;print(secrets.token_urlsafe(32))')
-signing=$(python3.11 -c 'import secrets;print(secrets.token_urlsafe(48))')
-tenant=$(python3.11 -c 'import uuid;print(uuid.uuid4())')
-jwt=$(python3.11 -c 'import secrets;print(secrets.token_urlsafe(48))')
-worker_token=$(python3.11 -c 'import secrets;print(secrets.token_urlsafe(32))')
-agata=$(python3.11 -c 'import secrets;print(secrets.token_urlsafe(32))')
+admin=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
+provider=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
+signing=$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')
+tenant=$(python3 -c 'import uuid;print(uuid.uuid4())')
+jwt=$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')
+worker_token=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
+agata=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
+openrouter_sentinel=$(python3 -c 'import secrets;print("NO_EGRESS_TEST_SENTINEL_"+secrets.token_hex(16))')
 umask 077; envfile="$tmp/compose.env"
 cat > "$envfile" <<EOF
 EROS_IMAGE=$image_id
@@ -33,8 +35,9 @@ EROS_TEST_TENANT_ID=$tenant
 EROS_TEST_SUPABASE_JWT_SECRET=$jwt
 EROS_TEST_WORKER_TOKEN=$worker_token
 EROS_TEST_AGATA_TOKEN=$agata
+EROS_TEST_OPENROUTER_STARTUP_SENTINEL=$openrouter_sentinel
 EOF
-unset admin provider signing jwt agata
+unset admin provider signing jwt agata openrouter_sentinel
 compose(){ env -i PATH="$PATH" HOME="$HOME" DOCKER_CONFIG="$docker_config" DOCKER_CONTEXT="$local_context" docker compose --env-file "$envfile" -p "$project" -f "$repo/services/eros-engine/compose.local-test.yml" --profile test "$@"; }
 . "$repo/services/eros-engine/local-e2e-image-tools.sh"
 run_manifest="$tmp/resources.manifest"
@@ -194,11 +197,11 @@ echo LOCAL_E2E_COMPOSE_START=BEGIN
 compose_started=1
 compose up -d --wait --wait-timeout 240
 echo LOCAL_E2E_COMPOSE_START=PASS
-compose exec -T postgres psql -U eros_test_admin -d eros_test -v ON_ERROR_STOP=1 <<'SQL'
+compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 <<'SQL'
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA engine TO gpoint_worker_test;
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA engine TO gpoint_worker_test;
 SQL
-compose exec -T postgres psql -U eros_test_admin -d eros_test -v ON_ERROR_STOP=1 <<'SQL'
+compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 <<'SQL'
 INSERT INTO "User" (id,"telegramUserId","telegramUsername","firstName","createdAt","updatedAt") VALUES ('eros_test_user',900000001,'eros_test_dialogue','Synthetic',now(),now());
 INSERT INTO "Creator" (id,"displayName",slug,"createdAt") VALUES ('eros_test_creator','Synthetic Eros Persona','eros-test-persona',now());
 INSERT INTO "CreatorProfile" (id,"creatorId",status,bio,"tagsJson") VALUES ('eros_test_profile','eros_test_creator','APPROVED','Local synthetic test persona','[]');
@@ -206,7 +209,7 @@ SQL
 postgres_id=$(compose ps -q postgres)
 api_image=$(compose images -q gpoint-api)
   docker_local run --name "$integration_container" --label "com.docker.compose.project=$project" --network "container:$postgres_id" \
-  -e DATABASE_URL='postgresql://gpoint_worker_test:local-only-gpoint-worker-test@127.0.0.1:5432/eros_test?schema=public' \
+  -e DATABASE_URL='postgresql://gpoint_worker_test:local-only-gpoint-worker-test@127.0.0.1:5432/gpoint_test?schema=public' \
   -e EROS_WORKER_DISPOSABLE_TEST_DB=1 \
   -v "$repo/apps/api/test:/workspace/apps/api/test:ro" \
   -v "$repo/packages/db/prisma/migrations:/workspace/packages/db/prisma/migrations:ro" \
@@ -219,7 +222,7 @@ session_count=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -A
 [ "$session_count" = 1 ] || { echo "LOCAL_E2E_MEMORY_FIXTURE_SESSIONS=FAIL count=$session_count" >&2; exit 1; }
 session_id=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT id FROM engine.chat_sessions WHERE channel <> 'group' ORDER BY created_at DESC LIMIT 1;")
 [ -n "$session_id" ] || { echo LOCAL_E2E_MEMORY_FIXTURE_SESSION=FAIL >&2; exit 1; }
-session_id=$(python3.11 -c 'import sys,uuid; print(uuid.UUID(sys.argv[1]))' "$session_id") || { echo LOCAL_E2E_MEMORY_FIXTURE_SESSION=FAIL >&2; exit 1; }
+session_id=$(python3 -c 'import sys,uuid; print(uuid.UUID(sys.argv[1]))' "$session_id") || { echo LOCAL_E2E_MEMORY_FIXTURE_SESSION=FAIL >&2; exit 1; }
 compose exec -T postgres psql -U eros_test_admin -d eros_test -v ON_ERROR_STOP=1 -Atc \
   "UPDATE engine.chat_sessions SET last_active_at = now() - interval '2 minutes' WHERE id = '$session_id'::uuid;" >/dev/null
 memory_state=
@@ -231,7 +234,7 @@ for attempt in $(seq 1 60); do
 done
 if [ "$memory_state" != "true:2" ]; then
   echo "LOCAL_E2E_DURABLE_MEMORY=FAIL state=$memory_state" >&2
-  compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc \
+  compose exec -T postgres psql -U eros_test_admin -d gpoint_test -Atc \
     "SELECT 'EROS_QUEUE_DIAGNOSTIC=' || job_type || ':' || status || ':' || coalesce(error_code, 'none') || ':attempts=' || attempts FROM engine.eros_inference_jobs ORDER BY created_at;" >&2 || true
   diagnostic_worker=$(compose --profile worker ps -a -q gpoint-worker)
   if [ -n "$diagnostic_worker" ]; then
@@ -266,7 +269,8 @@ docker_local rm "$worker_id" >/dev/null; worker_id=
 compose restart eros
 compose up -d --wait --wait-timeout 90 eros
 compose exec -T gpoint-api node services/eros-engine/local-test-e2e.mjs --history-only
-compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT 'EROS_CHAT_MESSAGES=' || count(*) FROM engine.chat_messages; SELECT 'EROS_QUEUE_JOBS=' || count(*) FROM engine.eros_inference_jobs; SELECT 'EROS_DURABLE_MEMORY_ROWS=' || count(*) FROM engine.companion_memories WHERE category IS NOT NULL AND content LIKE 'SYNTH_%';"
+compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT 'EROS_CHAT_MESSAGES=' || count(*) FROM engine.chat_messages; SELECT 'EROS_DURABLE_MEMORY_ROWS=' || count(*) FROM engine.companion_memories WHERE category IS NOT NULL AND content LIKE 'SYNTH_%';"
+compose exec -T postgres psql -U eros_test_admin -d gpoint_test -Atc "SELECT 'GPOINT_EROS_QUEUE_JOBS=' || count(*) FROM engine.eros_inference_jobs;"
 if [ "$memory_recall_status" = PASS ]; then
   echo LOCAL_E2E_MEMORY_RECALL=PASS
 else

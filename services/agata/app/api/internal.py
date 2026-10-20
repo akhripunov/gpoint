@@ -554,6 +554,7 @@ class UserConsentRequest(BaseModel):
     verified_at: datetime | None = None
     expires_at: datetime | None = None
     disclosure_accepted: bool
+    disclosure_version: int | None = Field(default=None, ge=1)
     disclosure_receipt_id: str = Field(min_length=1, max_length=128)
 
 
@@ -1191,6 +1192,8 @@ async def sync_user_consent(
         raise HTTPException(status_code=422, detail={"code": "invalid_user_id"})
     if payload.long_term_memory and not payload.chat_history:
         raise HTTPException(status_code=422, detail={"code": "memory_requires_chat_history"})
+    if payload.disclosure_accepted and not payload.chat_history:
+        raise HTTPException(status_code=422, detail={"code": "disclosure_requires_chat_history"})
     if payload.age_status == "verified" and (
         payload.age_band != "adult" or payload.verified_at is None
     ):
@@ -1213,6 +1216,7 @@ async def sync_user_consent(
             user = User(tenant_id=tenant_id, source_system=get_settings().source_system, external_id=gpoint_user_id)
             session.add(user)
             await session.flush()
+        effective_memory_grant = payload.long_term_memory or payload.disclosure_accepted
         # Keep consent changes ordered with background-task authority checks:
         # User → MemoryControlState → OutboxJob/Consent.
         await session.scalars(
@@ -1227,7 +1231,7 @@ async def sync_user_consent(
         revoked_purposes: set[str] = set()
         for purpose, granted in (
             ("chat_history", payload.chat_history),
-            ("long_term_memory", payload.long_term_memory),
+            ("long_term_memory", effective_memory_grant),
         ):
             existing = await session.scalar(
                 select(Consent)
@@ -1346,6 +1350,8 @@ async def sync_user_consent(
                 raise HTTPException(status_code=503, detail={"code": "policy_unavailable"})
             if not policy.rules.get("ai_disclosure_required", False):
                 raise HTTPException(status_code=503, detail={"code": "disclosure_policy_invalid"})
+            if payload.disclosure_version != policy.version:
+                raise HTTPException(status_code=409, detail={"code": "disclosure_version_mismatch"})
             receipt_digest = hashlib.sha256(
                 f"gpoint:{gpoint_user_id}:{payload.disclosure_receipt_id}".encode()
             ).hexdigest()
@@ -1368,7 +1374,7 @@ async def sync_user_consent(
                         channel="gpoint_internal",
                         receipt_key=receipt_key,
                         displayed_at=now,
-                        memory_opt_in=payload.long_term_memory,
+                        memory_opt_in=effective_memory_grant,
                         memory_opt_in_at=now,
                     )
                 )

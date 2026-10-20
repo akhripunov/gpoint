@@ -127,6 +127,22 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
             character_id = profile.json()["character_id"]
 
             no_age_user = f"test-no-age-{uuid4()}"
+            stale_client_consent = await client.put(
+                f"/internal/v1/users/{no_age_user}/consent",
+                headers=headers,
+                json={
+                    "chat_history": True,
+                    "long_term_memory": False,
+                    "age_band": "unknown",
+                    "age_status": "pending",
+                    "age_method": "unknown",
+                    "jurisdiction": "GLOBAL",
+                    "disclosure_accepted": True,
+                    "disclosure_receipt_id": str(uuid4()),
+                },
+            )
+            assert stale_client_consent.status_code == 409
+            assert stale_client_consent.json()["detail"]["code"] == "disclosure_version_mismatch"
             no_age_consent = await client.put(
                 f"/internal/v1/users/{no_age_user}/consent",
                 headers=headers,
@@ -140,6 +156,7 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
                     "verified_at": None,
                     "expires_at": None,
                     "disclosure_accepted": True,
+                    "disclosure_version": initial_state.json()["disclosureVersion"],
                     "disclosure_receipt_id": str(uuid4()),
                 },
             )
@@ -149,8 +166,8 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
             )
             assert no_age_state.status_code == 200, no_age_state.text
             assert no_age_state.json()["onboardingCompleted"] is True
-            assert no_age_state.json()["longTermMemory"] is False
-            assert no_age_state.json()["memoryOptIn"] is False
+            assert no_age_state.json()["longTermMemory"] is True
+            assert no_age_state.json()["memoryOptIn"] is True
             assert no_age_state.json()["memoryOptInAt"]
             async with SessionFactory() as session:
                 await set_tenant_context(session, tenant_id)
@@ -164,7 +181,7 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
                     AIDisclosureReceipt.user_id == no_age_persisted_user.id,
                 ))).all())
                 assert len(no_age_receipts) == 1
-            assert no_age_receipts[0].memory_opt_in is False
+            assert no_age_receipts[0].memory_opt_in is True
             assert no_age_receipts[0].memory_opt_in_at is not None
             repeated_opt_out = await client.put(
                 f"/internal/v1/users/{no_age_user}/consent",
@@ -179,6 +196,7 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
                     "verified_at": None,
                     "expires_at": None,
                     "disclosure_accepted": True,
+                    "disclosure_version": no_age_state.json()["disclosureVersion"],
                     "disclosure_receipt_id": str(uuid4()),
                 },
             )
@@ -235,6 +253,7 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
                     "jurisdiction": "GLOBAL",
                     "verified_at": None,
                     "disclosure_accepted": True,
+                    "disclosure_version": initial_state.json()["disclosureVersion"],
                     "disclosure_receipt_id": str(uuid4()),
                 },
             )
@@ -281,6 +300,7 @@ async def test_internal_api_is_channel_neutral_and_respond_is_idempotent(monkeyp
                     "jurisdiction": "GLOBAL",
                     "verified_at": None,
                     "disclosure_accepted": True,
+                    "disclosure_version": state.json()["disclosureVersion"],
                     "disclosure_receipt_id": str(uuid4()),
                 },
             )
