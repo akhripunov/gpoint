@@ -208,6 +208,18 @@ genome_id=$(printf '%s\n' "$seed_output" | grep 'Synthetic Eros Persona' | grep 
   exit 1
 }
 echo LOCAL_E2E_STOCK_PERSONA_SEED=PASS
+eros_rls_stats=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT count(*) || '|' || count(*) FILTER (WHERE c.relrowsecurity) || '|' || count(*) FILTER (WHERE c.relforcerowsecurity) || '|' || (SELECT count(*) FROM pg_policies WHERE schemaname='engine') FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='engine' AND c.relkind IN ('r','p');")
+IFS='|' read -r eros_tables eros_rls_enabled eros_rls_forced eros_policy_count <<EOF
+$eros_rls_stats
+EOF
+eros_runtime_bypass=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT rolbypassrls FROM pg_roles WHERE rolname='eros_runtime';")
+eros_admin_personas=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -qAtc 'SET ROLE eros_runtime; SELECT count(*) FROM engine.persona_genomes;')
+eros_strict_personas=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -qAtc 'SET ROLE eros_runtime_nobypass; SELECT count(*) FROM engine.persona_genomes;')
+[ "$eros_runtime_bypass" = t ] && [ "$eros_admin_personas" -gt 0 ] && [ "$eros_strict_personas" = 0 ] && [ "$eros_tables" -gt 0 ] && [ "$eros_rls_enabled" = "$eros_tables" ] && [ "$eros_rls_forced" = 0 ] && [ "$eros_policy_count" = 0 ] || {
+  echo "LOCAL_E2E_EROS_DATABASE_RLS_LIMITATION=UNEXPECTED tables=$eros_tables enabled=$eros_rls_enabled forced=$eros_rls_forced runtime_role_rows=$eros_admin_personas strict_role_rows=$eros_strict_personas policies=$eros_policy_count runtime_bypass=$eros_runtime_bypass" >&2
+  exit 1
+}
+echo "LOCAL_E2E_EROS_DATABASE_RLS_LIMITATION=CONFIRMED tables=$eros_tables enabled=$eros_rls_enabled forced=$eros_rls_forced runtime_role_rows=$eros_admin_personas strict_role_rows=$eros_strict_personas policies=$eros_policy_count runtime_bypass=$eros_runtime_bypass"
 compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 <<'SQL'
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA engine TO gpoint_worker_test;
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA engine TO gpoint_worker_test;

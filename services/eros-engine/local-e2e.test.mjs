@@ -49,6 +49,9 @@ test('only the disposable Eros migrator receives database CREATE privilege', () 
   assert.match(init, /GRANT USAGE, CREATE ON SCHEMA public TO eros_migrator;/);
   assert.match(init, /CREATE DATABASE gpoint_test OWNER eros_test_admin;/);
   assert.match(init, /CREATE ROLE eros_migrator LOGIN[\s\S]*?NOSUPERUSER NOCREATEDB NOBYPASSRLS;/);
+  assert.match(init, /CREATE ROLE eros_runtime LOGIN[^;]*NOSUPERUSER NOCREATEDB BYPASSRLS;/);
+  assert.match(init, /CREATE ROLE eros_runtime_nobypass LOGIN[^;]*NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;/);
+  assert.match(init, /ALTER DEFAULT PRIVILEGES FOR ROLE eros_migrator IN SCHEMA engine GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO eros_runtime_nobypass;/);
   assert.doesNotMatch(init, /GRANT [^;]* ON DATABASE eros_test TO (?!eros_migrator\b)[a-z_]+;/);
 });
 
@@ -90,6 +93,9 @@ test('model config routes chat, embeddings and synthetic memory extraction to th
   assert.match(runner, /LOCAL_E2E_MEMORY_EXTRACTION=PASS/);
   assert.match(runner, /LOCAL_E2E_REAL_INFERENCE=NOT_RUN/);
   assert.match(runner, /LOCAL_E2E_GPOINT_QUEUE_RLS_TENANT_ISOLATION=PASS fixture_role=gpoint_worker_test/);
+  assert.match(runner, /c\.relkind IN \('r','p'\)/);
+  assert.match(runner, /\[ "\$eros_rls_enabled" = "\$eros_tables" \]/);
+  assert.match(runner, /LOCAL_E2E_EROS_DATABASE_RLS_LIMITATION=CONFIRMED tables=\$eros_tables.*runtime_role_rows=\$eros_admin_personas strict_role_rows=\$eros_strict_personas policies=\$eros_policy_count/);
   assert.match(runner, /LOCAL_E2E_EROS_DATABASE_USER_RLS=NOT_AVAILABLE stock_api_ownership_test=PASS/);
 });
 

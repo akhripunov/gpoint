@@ -87,6 +87,16 @@ not with Eros database RLS. The E2E uses an API fixture role with `BYPASSRLS`
 for the remaining cross-database receipt SQL; that grant does not prove
 production-safe access and must not be carried to a pilot. The post-restart
 recall check passed.
+
+A separate disposable-catalog probe against the pinned stock image found all 34
+ordinary and partitioned `engine` tables with RLS enabled, none with `FORCE ROW
+LEVEL SECURITY`, and no policies. The actual `eros_runtime` role has
+`BYPASSRLS` and can see the seeded persona; a role with equivalent table grants
+but `NOBYPASSRLS` sees zero seeded persona rows, while `/healthz` still returns
+`ok`. This is not per-user isolation: it is an RLS configuration that requires
+the runtime role to bypass policy enforcement. The runner now checks every
+ordinary and partitioned table, confirms the runtime-visible row count, and
+reports this result explicitly. It remains a hard VPS-pilot security blocker.
 This is a stock-engine integration E2E with a fixture provider, not real Codex
 inference. It does not prove Mac Product Worker availability, VPS resource
 needs, or production performance.
