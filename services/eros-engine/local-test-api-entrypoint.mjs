@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
+import { isAgataMessageHistoryPath } from './local-test-api-routes.mjs';
 
 const state = {
   chatHistory: true,
@@ -100,7 +101,7 @@ const agata = createServer(async (request, response) => {
     if (/^\/internal\/v1\/users\/[^/]+\/chat-state$/.test(url.pathname) && request.method === 'GET') {
       return send(response, 200, state);
     }
-    if (/^\/internal\/v1\/users\/[^/]+\/characters\/[^/]+\/messages$/.test(url.pathname) && request.method === 'GET') {
+    if (isAgataMessageHistoryPath(request.url ?? '/') && request.method === 'GET') {
       return send(response, 200, { items: [], nextCursor: null });
     }
     if (/^\/internal\/v1\/users\/[^/]+\/consent$/.test(url.pathname) && request.method === 'PUT') {

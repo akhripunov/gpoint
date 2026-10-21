@@ -9,6 +9,7 @@ RUN pnpm install --frozen-lockfile --filter @gpoint/api... --filter @gpoint/db..
     && pnpm --filter @gpoint/agata-client build \
     && pnpm --filter @gpoint/db exec prisma generate --schema prisma/schema.prisma
 COPY apps/api ./apps/api
+COPY services/eros-engine/local-test-api-routes.mjs services/eros-engine/local-test-api-routes.mjs
 COPY services/eros-engine/local-test-api-entrypoint.mjs services/eros-engine/local-test-api-entrypoint.mjs
 COPY services/eros-engine/local-test-e2e.mjs services/eros-engine/local-test-e2e.mjs
 ENV NODE_ENV=development

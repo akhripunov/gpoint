@@ -8,8 +8,21 @@ import {
   validateErosImageInspection,
 } from './local-test-policy.mjs';
 import { readProviderContextEvidence } from './provider-context-check.mjs';
+import { isAgataMessageHistoryPath } from './local-test-api-routes.mjs';
 
 const directory = new URL('.', import.meta.url);
+
+
+test('local API test image copies the AGATA route helper used by its entrypoint', () => {
+  const dockerfile = readFileSync(new URL('Dockerfile.api-local-test', directory), 'utf8');
+  assert.match(dockerfile, /COPY services\/eros-engine\/local-test-api-routes\.mjs services\/eros-engine\/local-test-api-routes\.mjs/);
+});
+
+test('local AGATA fixture recognizes history requests with query parameters', () => {
+  assert.equal(isAgataMessageHistoryPath('/internal/v1/users/synthetic-user/characters/synthetic-creator/messages'), true);
+  assert.equal(isAgataMessageHistoryPath('/internal/v1/users/synthetic-user/characters/synthetic-creator/messages?limit=1'), true);
+  assert.equal(isAgataMessageHistoryPath('/internal/v1/users/synthetic-user/characters/synthetic-creator/other?limit=1'), false);
+});
 
 test('local E2E topology has API, Eros, Worker and isolated PostgreSQL', () => {
   const compose = readFileSync(new URL('compose.local-test.yml', directory), 'utf8');
@@ -37,6 +50,16 @@ test('only the disposable Eros migrator receives database CREATE privilege', () 
   assert.match(init, /CREATE DATABASE gpoint_test OWNER eros_test_admin;/);
   assert.match(init, /CREATE ROLE eros_migrator LOGIN[\s\S]*?NOSUPERUSER NOCREATEDB NOBYPASSRLS;/);
   assert.doesNotMatch(init, /GRANT [^;]* ON DATABASE eros_test TO (?!eros_migrator\b)[a-z_]+;/);
+});
+
+test('creator erasure fixture removes dependent profile before asserting relationship mapping guard', () => {
+  const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
+  const profileDelete = runner.indexOf('DELETE FROM \"CreatorProfile\"');
+  const creatorDelete = runner.indexOf('DELETE FROM \"Creator\"');
+  assert.match(runner, /DELETE FROM \"CreatorProfile\"[^\n]*eros_test_profile/);
+  const historyCheck = runner.indexOf('--history-only');
+  assert.ok(historyCheck >= 0 && profileDelete > historyCheck && creatorDelete > profileDelete);
+  assert.match(runner, /ErosRelationshipMapping_creatorId_fkey/);
 });
 
 test('GPoint mapping deletion is blocked until Eros has a supported data-erasure lifecycle', () => {

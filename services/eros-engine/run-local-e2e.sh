@@ -234,17 +234,6 @@ cat "$tmp/e2e.out"
 relationship_mapping_count=$(compose exec -T postgres psql -U eros_test_admin -d gpoint_test -Atc 'SELECT count(*) FROM "ErosRelationshipMapping";')
 [ "$relationship_mapping_count" = 1 ] || { echo "LOCAL_E2E_GPOINT_RELATIONSHIP_MAPPING=FAIL count=$relationship_mapping_count" >&2; exit 1; }
 echo LOCAL_E2E_GPOINT_RELATIONSHIP_MAPPING=PASS
-if compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c 'DELETE FROM "User" WHERE id = '\''eros_test_user'\''' >"$tmp/user-delete.out" 2>&1; then
-  echo LOCAL_E2E_MAPPING_ERASURE_GUARD=FAIL user_delete_unexpectedly_succeeded >&2
-  exit 1
-fi
-grep -q 'ErosRelationshipMapping_userId_fkey' "$tmp/user-delete.out" || { echo LOCAL_E2E_MAPPING_ERASURE_GUARD=FAIL user_delete_block_reason_unexpected >&2; exit 1; }
-if compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c 'DELETE FROM "Creator" WHERE id = '\''eros_test_creator'\''' >"$tmp/creator-delete.out" 2>&1; then
-  echo LOCAL_E2E_MAPPING_ERASURE_GUARD=FAIL creator_delete_unexpectedly_succeeded >&2
-  exit 1
-fi
-grep -q 'ErosRelationshipMapping_creatorId_fkey' "$tmp/creator-delete.out" || { echo LOCAL_E2E_MAPPING_ERASURE_GUARD=FAIL creator_delete_block_reason_unexpected >&2; exit 1; }
-echo LOCAL_E2E_MAPPING_ERASURE_GUARD=PASS gpoint_delete_blocked_without_stock_eros_erase
 session_count=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT count(*) FROM engine.chat_sessions WHERE channel <> 'group';")
 [ "$session_count" = 1 ] || { echo "LOCAL_E2E_MEMORY_FIXTURE_SESSIONS=FAIL count=$session_count" >&2; exit 1; }
 session_id=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT id FROM engine.chat_sessions WHERE channel <> 'group' ORDER BY created_at DESC LIMIT 1;")
@@ -297,6 +286,18 @@ compose restart eros
 compose up -d --wait --wait-timeout 90 eros
 compose exec -w /workspace/apps/api -T gpoint-api node --import tsx /workspace/services/eros-engine/local-test-e2e.mjs --history-only
 compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT 'EROS_CHAT_MESSAGES=' || count(*) FROM engine.chat_messages; SELECT 'EROS_DURABLE_MEMORY_ROWS=' || count(*) FROM engine.companion_memories WHERE category IS NOT NULL AND content LIKE 'SYNTH_%';"
+if compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c 'DELETE FROM "User" WHERE id = '\''eros_test_user'\''' >"$tmp/user-delete.out" 2>&1; then
+  echo LOCAL_E2E_MAPPING_ERASURE_GUARD=FAIL user_delete_unexpectedly_succeeded >&2
+  exit 1
+fi
+grep -q 'ErosRelationshipMapping_userId_fkey' "$tmp/user-delete.out" || { echo LOCAL_E2E_MAPPING_ERASURE_GUARD=FAIL user_delete_block_reason_unexpected >&2; exit 1; }
+compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c 'DELETE FROM "CreatorProfile" WHERE id = '\''eros_test_profile'\''' >/dev/null
+if compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c 'DELETE FROM "Creator" WHERE id = '\''eros_test_creator'\''' >"$tmp/creator-delete.out" 2>&1; then
+  echo LOCAL_E2E_MAPPING_ERASURE_GUARD=FAIL creator_delete_unexpectedly_succeeded >&2
+  exit 1
+fi
+grep -q 'ErosRelationshipMapping_creatorId_fkey' "$tmp/creator-delete.out" || { echo LOCAL_E2E_MAPPING_ERASURE_GUARD=FAIL creator_delete_block_reason_unexpected >&2; exit 1; }
+echo LOCAL_E2E_MAPPING_ERASURE_GUARD=PASS gpoint_delete_blocked_without_stock_eros_erase
 compose exec -T postgres psql -U eros_test_admin -d gpoint_test -Atc "SELECT 'GPOINT_EROS_QUEUE_JOBS=' || count(*) FROM engine.eros_inference_jobs;"
 if [ "$memory_recall_status" = PASS ]; then
   echo LOCAL_E2E_MEMORY_RECALL=PASS
