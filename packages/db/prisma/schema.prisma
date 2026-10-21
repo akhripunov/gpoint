@@ -28,6 +28,7 @@ model User {
   channelInstallAttempts CreatorChannelInstallAttempt[]
   codexChatConnections CodexChatConnection[]
   codexDeviceAuthorizations CodexDeviceAuthorization[]
+  erosRelationships ErosRelationshipMapping[]
 }
 model UserPreference {
   id String @id @default(cuid())
@@ -58,6 +59,7 @@ model Creator {
   telegramChannel TelegramChannel?
   codexChatConnections CodexChatConnection[]
   codexDeviceAuthorizations CodexDeviceAuthorization[]
+  erosRelationships ErosRelationshipMapping[]
 }
 
 // Contains only revocable, hashed Codex capability tokens. Conversation data remains in AGATA.
@@ -98,12 +100,28 @@ model CreatorProfile {
   status String @default("DRAFT")
   bio String?
   tagsJson String @default("[]")
+  erosGenomeId String? @unique @db.Uuid
   avatarMediaId String?
   coverMediaId String?
   moderationReason String?
   moderatedByUserId String?
   moderatedAt DateTime?
   creator Creator @relation(fields: [creatorId], references: [id])
+}
+
+// Maps a GPoint user/persona relationship to the instance created by stock Eros.
+// Eros remains the source of truth for relationship state and conversation data.
+model ErosRelationshipMapping {
+  userId String
+  creatorId String
+  instanceId String @unique @db.Uuid
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  // Keep the Eros instance pointer until a supported Eros erasure lifecycle exists.
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  creator Creator @relation(fields: [creatorId], references: [id], onDelete: Restrict)
+  @@id([userId, creatorId])
+  @@index([creatorId])
 }
 model CreatorOwner {
   id String @id @default(cuid())

@@ -196,6 +196,18 @@ echo LOCAL_E2E_COMPOSE_START=BEGIN
 compose_started=1
 compose up -d --wait --wait-timeout 240
 echo LOCAL_E2E_COMPOSE_START=PASS
+seed_output=$(compose exec -T eros /usr/local/bin/eros-engine seed-personas /etc/eros-engine/test-personas 2>&1) || {
+  printf '%s\n' "$seed_output" >&2
+  echo LOCAL_E2E_STOCK_PERSONA_SEED=FAIL >&2
+  exit 1
+}
+printf '%s\n' "$seed_output"
+genome_id=$(printf '%s\n' "$seed_output" | grep 'Synthetic Eros Persona' | grep -Eo '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | tail -1)
+[[ "$genome_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || {
+  echo LOCAL_E2E_STOCK_PERSONA_SEED=FAIL reason=genome_id_missing >&2
+  exit 1
+}
+echo LOCAL_E2E_STOCK_PERSONA_SEED=PASS
 compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 <<'SQL'
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA engine TO gpoint_worker_test;
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA engine TO gpoint_worker_test;
@@ -203,8 +215,9 @@ SQL
 compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 <<'SQL'
 INSERT INTO "User" (id,"telegramUserId","telegramUsername","firstName","createdAt","updatedAt") VALUES ('eros_test_user',900000001,'eros_test_dialogue','Synthetic',now(),now());
 INSERT INTO "Creator" (id,"displayName",slug,"createdAt") VALUES ('eros_test_creator','Synthetic Eros Persona','eros-test-persona',now());
-INSERT INTO "CreatorProfile" (id,"creatorId",status,bio,"tagsJson") VALUES ('eros_test_profile','eros_test_creator','APPROVED','Local synthetic test persona','[]');
 SQL
+compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c \
+  "INSERT INTO \"CreatorProfile\" (id,\"creatorId\",status,bio,\"tagsJson\",\"erosGenomeId\") VALUES ('eros_test_profile','eros_test_creator','APPROVED','Local synthetic test persona','[]','$genome_id'::uuid);"
 postgres_id=$(compose ps -q postgres)
 api_image=$(compose images -q gpoint-api)
   docker_local run --name "$integration_container" --label "com.docker.compose.project=$project" --network "container:$postgres_id" \
@@ -214,9 +227,24 @@ api_image=$(compose images -q gpoint-api)
   -v "$repo/packages/db/prisma/migrations:/workspace/packages/db/prisma/migrations:ro" \
   --entrypoint pnpm "$api_image" --filter @gpoint/api exec node --import tsx --test \
   test/eros-worker-contract.test.ts test/eros-worker-cancel.integration.test.ts
+echo LOCAL_E2E_GPOINT_QUEUE_RLS_TENANT_ISOLATION=PASS fixture_role=gpoint_worker_test
 compose --profile worker up -d --no-deps gpoint-worker
 if ! compose exec -w /workspace/apps/api -T gpoint-api node --import tsx /workspace/services/eros-engine/local-test-e2e.mjs >"$tmp/e2e.out" 2>&1; then tail -40 "$tmp/e2e.out" >&2; exit 1; fi
 cat "$tmp/e2e.out"
+relationship_mapping_count=$(compose exec -T postgres psql -U eros_test_admin -d gpoint_test -Atc 'SELECT count(*) FROM "ErosRelationshipMapping";')
+[ "$relationship_mapping_count" = 1 ] || { echo "LOCAL_E2E_GPOINT_RELATIONSHIP_MAPPING=FAIL count=$relationship_mapping_count" >&2; exit 1; }
+echo LOCAL_E2E_GPOINT_RELATIONSHIP_MAPPING=PASS
+if compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c 'DELETE FROM "User" WHERE id = '\''eros_test_user'\''' >"$tmp/user-delete.out" 2>&1; then
+  echo LOCAL_E2E_MAPPING_ERASURE_GUARD=FAIL user_delete_unexpectedly_succeeded >&2
+  exit 1
+fi
+grep -q 'ErosRelationshipMapping_userId_fkey' "$tmp/user-delete.out" || { echo LOCAL_E2E_MAPPING_ERASURE_GUARD=FAIL user_delete_block_reason_unexpected >&2; exit 1; }
+if compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c 'DELETE FROM "Creator" WHERE id = '\''eros_test_creator'\''' >"$tmp/creator-delete.out" 2>&1; then
+  echo LOCAL_E2E_MAPPING_ERASURE_GUARD=FAIL creator_delete_unexpectedly_succeeded >&2
+  exit 1
+fi
+grep -q 'ErosRelationshipMapping_creatorId_fkey' "$tmp/creator-delete.out" || { echo LOCAL_E2E_MAPPING_ERASURE_GUARD=FAIL creator_delete_block_reason_unexpected >&2; exit 1; }
+echo LOCAL_E2E_MAPPING_ERASURE_GUARD=PASS gpoint_delete_blocked_without_stock_eros_erase
 session_count=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT count(*) FROM engine.chat_sessions WHERE channel <> 'group';")
 [ "$session_count" = 1 ] || { echo "LOCAL_E2E_MEMORY_FIXTURE_SESSIONS=FAIL count=$session_count" >&2; exit 1; }
 session_id=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT id FROM engine.chat_sessions WHERE channel <> 'group' ORDER BY created_at DESC LIMIT 1;")
@@ -276,5 +304,5 @@ else
   echo LOCAL_E2E_MEMORY_RECALL=BLOCKED reason=provider_context_missing
 fi
 echo LOCAL_E2E_REAL_INFERENCE=NOT_RUN
-echo LOCAL_E2E_RLS_TENANT_ISOLATION=NOT_TESTED
+echo LOCAL_E2E_EROS_DATABASE_USER_RLS=NOT_AVAILABLE stock_api_ownership_test=PASS
 echo LOCAL_E2E_DISPOSABLE_STACK_CLEANUP=ARMED

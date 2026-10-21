@@ -55,9 +55,13 @@ alter its installed configuration.
   patches is used in the pinned stock image.
 - Stock Eros's relationship archive endpoint soft-deletes sessions and removes
   some relationship memory, but deliberately retains transcript history.
-  GPoint currently has no Eros user-data erasure path. A release pilot is
-  blocked until a tested deletion adapter covers transcript, memory, summaries,
-  embeddings and queued/background writes without changing Eros source.
+  GPoint currently has no Eros user-data erasure path. The new GPoint
+  relationship mapping uses restrictive user/creator foreign keys so deleting
+  either parent cannot silently discard the only Eros instance pointer. This
+  intentionally blocks GPoint deletion while a mapping exists; it does not
+  erase Eros data. A release pilot is blocked until a tested deletion adapter
+  covers transcript, memory, summaries, embeddings and queued/background writes
+  without changing Eros source.
 - Stock `classify_session` performs model/extraction and embedding before an
   unconditional memory upsert; archive deletes relationship memory. A delayed
   write crossing archive is a plausible data-resurrection risk, not a proven
@@ -76,7 +80,13 @@ history, stock Eros extraction and durable recall, a 14-message gap, provider
 context, existing GPOINT queue routing, and persistence of history and durable
 memory rows after Eros restart. It also verified that a second JWT subject sees
 no first-user sessions and receives HTTP 403 for a foreign session. The
-post-restart recall check passed.
+GPoint inference queue's tenant RLS integration test also passes using the
+`NOBYPASSRLS` `gpoint_worker_test` role. Eros itself has no per-user database
+RLS policies, so its user isolation is verified at the stock HTTP API boundary,
+not with Eros database RLS. The E2E uses an API fixture role with `BYPASSRLS`
+for the remaining cross-database receipt SQL; that grant does not prove
+production-safe access and must not be carried to a pilot. The post-restart
+recall check passed.
 This is a stock-engine integration E2E with a fixture provider, not real Codex
 inference. It does not prove Mac Product Worker availability, VPS resource
 needs, or production performance.
@@ -87,25 +97,43 @@ offline `print-openapi` command and full local Compose E2E passed. Evidence:
 `LOCAL_E2E_MEMORY_EXTRACTION=PASS`, `LOCAL_E2E_DURABLE_MEMORY=PASS`,
 `LOCAL_E2E_MEMORY_RECALL_RESPONSE=PASS`,
 `LOCAL_E2E_PROVIDER_CONTEXT=PASS`, `LOCAL_E2E_RESTART_HISTORY=PASS`,
-`LOCAL_E2E_STOCK_API_USER_ISOLATION=PASS`, `LOCAL_E2E_MEMORY_RECALL=PASS`, and
-`LOCAL_E2E_CLEANUP=PASS`. `OPENROUTER_API_KEY` was empty, with no credential;
-the internal test network had no egress. Real inference was not run. RLS
-tenant-isolation integration was not tested: the disposable Eros fixture grants
-`BYPASSRLS` to its API/runtime roles to exercise the current direct database
-adapter. That fixture is not evidence of acceptable production privileges.
+`LOCAL_E2E_STOCK_API_USER_ISOLATION=PASS`,
+`LOCAL_E2E_GPOINT_QUEUE_RLS_TENANT_ISOLATION=PASS`,
+`LOCAL_E2E_MEMORY_RECALL=PASS`, and `LOCAL_E2E_CLEANUP=PASS`.
+`OPENROUTER_API_KEY` was empty, with no credential; the inference test network
+had no egress. Real inference was not run. The GPoint queue tenant RLS test
+passed with a non-bypass worker role; Eros has no per-user RLS, and the API
+fixture's `BYPASSRLS` receipt access is not a production isolation check.
 
-The current GPoint adapter still performs direct SQL against
-`persona_genomes`, `persona_instances` and `chat_messages`. Stock
-`POST /comp/chat/start` can create/resume a user instance from a genome, and
-`GET /comp/chat/{user_id}/sessions` can list that user's sessions. There is no
-stock persona-genome provisioning HTTP endpoint; the supported path is the
-`seed-personas` CLI. Session listing omits genome identity, so GPoint needs an
-external creator-to-genome/instance mapping to remove relationship SQL.
-`POST /comp/chat/{session_id}/read` marks the whole session; selected-message
-read receipts and unread counts are not public API operations. These semantics
-must be adapted in GPoint or supplied upstream before direct message SQL can be
-removed. Upstream RLS has no per-user policies; isolation is enforced by the
-stock HTTP API, not by direct cross-service DB access.
+The adapter provisions the persona with stock `seed-personas` and uses stock
+`POST /comp/chat/start` to create or resume a user instance. GPoint stores the
+creator-to-genome and user/creator-to-instance mappings in its own database;
+runtime persona and relationship operations no longer query Eros tables. The
+synthetic E2E follows the same path. A stored instance mapping is passed back
+as `instance_id`; upstream requires that instance to still be active and does
+not reactivate it. A missing mapping uses `genome_id`, which can create or
+reactivate an archived instance. Since stock session listing omits archived
+sessions and genome IDs, an initial rollout must use a fresh, dedicated Eros
+database with no historical instances. Existing Eros history cannot be safely
+mapped through the public API alone. Each enabled creator profile also needs
+its `erosGenomeId` provisioned by `seed-personas` before routing is enabled;
+there is no stock genome-provisioning HTTP endpoint or safe runtime fallback.
+
+One direct Eros database dependency remains for selected assistant-message
+read receipts and unread counts. Stock `POST /comp/chat/{session_id}/read`
+marks the whole session; there is no public API operation for selected-message
+receipts or unread counts. Removing this dependency without changing behavior
+requires either an upstream API or a GPoint-owned receipt store and
+history-based counting. The local fixture still grants its adapter role
+`BYPASSRLS` to exercise this legacy path. That is test-only, is not evidence of
+production-safe privileges, and must not be used for a VPS pilot.
+
+Stock Eros has no per-user database RLS policies. Its public HTTP handlers
+scope session and message operations to the authenticated Eros user, which the
+adapter maps deterministically from the GPoint account. The local API-isolation
+test verifies that HTTP boundary. Direct cross-service SQL does not inherit it,
+so receipt SQL and the test-only `BYPASSRLS` grant remain blockers for a
+shared-database pilot.
 
 Before any pilot, independently verify stock image SHA/provenance, dedicated
 database ownership and backups, Eros runtime privileges, exact provider route,

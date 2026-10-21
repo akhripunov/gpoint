@@ -1,0 +1,4 @@
+name = "Synthetic Eros Persona"
+system_prompt = "You are a synthetic test persona. Answer only with the deterministic test response requested by the local integration fixture."
+tip_personality = "synthetic-test-only"
+art_metadata = { gpoint_fixture = "me36-local-e2e" }

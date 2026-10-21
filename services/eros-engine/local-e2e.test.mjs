@@ -22,6 +22,7 @@ test('local E2E topology has API, Eros, Worker and isolated PostgreSQL', () => {
   assert.match(compose, /EROS_ADAPTER_DATABASE_URL:[^\n]*@postgres:5432\/eros_test\?schema=engine/);
   assert.match(compose, /eros-migrate:[\s\S]*?postgres:5432\/eros_test/);
   assert.match(compose, /eros:[\s\S]*?postgres:5432\/eros_test/);
+  assert.match(compose, /test-personas:\/etc\/eros-engine\/test-personas:ro/);
   assert.match(compose, /internal:\s*true/);
   assert.match(compose, /network_mode:\s*service:gpoint-api/);
   assert.match(compose, /gpoint-worker:[\s\S]*?profiles:\s*\[worker\]/);
@@ -36,6 +37,17 @@ test('only the disposable Eros migrator receives database CREATE privilege', () 
   assert.match(init, /CREATE DATABASE gpoint_test OWNER eros_test_admin;/);
   assert.match(init, /CREATE ROLE eros_migrator LOGIN[\s\S]*?NOSUPERUSER NOCREATEDB NOBYPASSRLS;/);
   assert.doesNotMatch(init, /GRANT [^;]* ON DATABASE eros_test TO (?!eros_migrator\b)[a-z_]+;/);
+});
+
+test('GPoint mapping deletion is blocked until Eros has a supported data-erasure lifecycle', () => {
+  const schema = readFileSync(new URL('../../packages/db/prisma/schema.prisma', directory), 'utf8');
+  const migration = readFileSync(new URL('../../packages/db/prisma/migrations/20261020153000_eros_external_relationship_mapping/migration.sql', directory), 'utf8');
+  const model = schema.match(/model ErosRelationshipMapping \{[\s\S]*?\n\}/)?.[0] ?? '';
+  assert.match(model, /user User @relation\(fields: \[userId\], references: \[id\], onDelete: Restrict\)/);
+  assert.match(model, /creator Creator @relation\(fields: \[creatorId\], references: \[id\], onDelete: Restrict\)/);
+  assert.match(migration, /ErosRelationshipMapping_userId_fkey[\s\S]*?ON DELETE RESTRICT/);
+  assert.match(migration, /ErosRelationshipMapping_creatorId_fkey[\s\S]*?ON DELETE RESTRICT/);
+  assert.doesNotMatch(migration, /ErosRelationshipMapping_(?:userId|creatorId)_fkey[^;]*ON DELETE CASCADE/);
 });
 
 test('model config routes chat, embeddings and synthetic memory extraction to the internal GPOINT bridge', () => {
@@ -54,7 +66,8 @@ test('model config routes chat, embeddings and synthetic memory extraction to th
   assert.match(compose, /DREAMING_IDLE_SECS/);
   assert.match(runner, /LOCAL_E2E_MEMORY_EXTRACTION=PASS/);
   assert.match(runner, /LOCAL_E2E_REAL_INFERENCE=NOT_RUN/);
-  assert.match(runner, /LOCAL_E2E_RLS_TENANT_ISOLATION=NOT_TESTED/);
+  assert.match(runner, /LOCAL_E2E_GPOINT_QUEUE_RLS_TENANT_ISOLATION=PASS fixture_role=gpoint_worker_test/);
+  assert.match(runner, /LOCAL_E2E_EROS_DATABASE_USER_RLS=NOT_AVAILABLE stock_api_ownership_test=PASS/);
 });
 
 test('local Worker fixture refuses non-isolated or non-local mode', () => {
@@ -155,6 +168,19 @@ test('the Eros patch applier is disabled and the stock builder pins a clean sour
   assert.match(builder, /patch-set\.sha256=none/);
 });
 
+test('the local fixture provisions stock persona data with the official seed CLI and maps it in GPoint', () => {
+  const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
+  const persona = readFileSync(new URL('test-personas/synthetic-eros-persona.toml', directory), 'utf8');
+  const schema = readFileSync(new URL('../../packages/db/prisma/schema.prisma', directory), 'utf8');
+  assert.match(runner, /eros-engine seed-personas \/etc\/eros-engine\/test-personas/);
+  assert.match(runner, /LOCAL_E2E_STOCK_PERSONA_SEED=PASS/);
+  assert.match(runner, /grep 'Synthetic Eros Persona'/);
+  assert.match(runner, /CreatorProfile.*erosGenomeId/s);
+  assert.match(persona, /name = "Synthetic Eros Persona"/);
+  assert.match(schema, /model ErosRelationshipMapping/);
+  assert.match(schema, /erosGenomeId String\? @unique @db\.Uuid/);
+});
+
 test('restart-history assertions cover all turns and initial temporal facts', () => {
   const e2e = readFileSync(new URL('local-test-e2e.mjs', directory), 'utf8');
   assert.match(e2e, /assertCompleteHistory/);
@@ -177,7 +203,8 @@ test('stock Eros API E2E exercises owner-bound session listing and foreign-sessi
   assert.match(e2e, /client\.history\(foreignUserId, ownSession\.sessionId/);
   assert.match(e2e, /error\.status === 403/);
   assert.match(runner, /exec -w \/workspace\/apps\/api -T gpoint-api node --import tsx \/workspace\/services\/eros-engine\/local-test-e2e\.mjs/);
-  assert.match(runner, /LOCAL_E2E_RLS_TENANT_ISOLATION=NOT_TESTED/);
+  assert.match(runner, /LOCAL_E2E_GPOINT_QUEUE_RLS_TENANT_ISOLATION=PASS fixture_role=gpoint_worker_test/);
+  assert.match(runner, /LOCAL_E2E_EROS_DATABASE_USER_RLS=NOT_AVAILABLE stock_api_ownership_test=PASS/);
 });
 
 test('provider context evidence reports PASS when one context contains every recall fact', () => {

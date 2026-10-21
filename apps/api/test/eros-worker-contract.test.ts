@@ -36,7 +36,10 @@ test('bridge accepts only a signed, short-lived Eros identity bound to its chat 
   assert.equal(claims.sessionId, '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1');
   assert.equal(claims.instanceId, '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc9');
   assert.equal(claims.requestId, '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc3');
-  await assert.rejects(verifyBridgeIdentity(`${token.slice(0, -1)}x`, secret, now));
+  const [header, payload, signature] = token.split('.');
+  assert.ok(signature?.length);
+  const corruptedSignature = `${signature[0] === 'A' ? 'B' : 'A'}${signature.slice(1)}`;
+  await assert.rejects(verifyBridgeIdentity(`${header}.${payload}.${corruptedSignature}`, secret, now));
   await assert.rejects(verifyBridgeIdentity(token, new TextEncoder().encode('wrong-secret-wrong-secret-wrong-secret'), now));
   assert.throws(() => signBridgeIdentity({
     tenantId: claims.tenantId, userId: claims.userId, creatorId: 'not-a-uuid',

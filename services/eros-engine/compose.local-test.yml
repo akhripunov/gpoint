@@ -146,6 +146,7 @@ services:
       DREAMING_CLAIM_STALE_SECS: "30"
     volumes:
       - ./test-model-config.toml:/etc/eros-engine/model_config.toml:ro
+      - ./test-personas:/etc/eros-engine/test-personas:ro
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]

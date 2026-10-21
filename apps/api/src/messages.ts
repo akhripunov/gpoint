@@ -28,20 +28,29 @@ function erosAdapterDatabase(): PrismaClient {
   return erosAdapterPrisma;
 }
 
-function erosTags(tagsJson: string | null | undefined): string[] {
-  if (!tagsJson) return [];
-  try {
-    const tags: unknown = JSON.parse(tagsJson);
-    return Array.isArray(tags) ? tags.filter((tag): tag is string => typeof tag === 'string').slice(0, 20) : [];
-  } catch { return []; }
-}
+const erosRelationshipStore = {
+  async getInstanceId(userId: string, creatorId: string): Promise<string | null> {
+    const row = await prisma.erosRelationshipMapping.findUnique({
+      where: { userId_creatorId: { userId, creatorId } },
+      select: { instanceId: true },
+    });
+    return row?.instanceId ?? null;
+  },
+  async saveInstanceId(userId: string, creatorId: string, instanceId: string): Promise<void> {
+    await prisma.erosRelationshipMapping.upsert({
+      where: { userId_creatorId: { userId, creatorId } },
+      create: { userId, creatorId, instanceId },
+      update: { instanceId },
+    });
+  },
+};
 
-async function prepareErosChat(userId: string, creator: { id: string; displayName: string; profile?: { bio?: string | null; tagsJson?: string | null } | null }) {
+async function prepareErosChat(userId: string, creator: { id: string; displayName: string; profile?: { bio?: string | null; tagsJson?: string | null; erosGenomeId?: string | null } | null }) {
   const client = createErosEngineClient();
   if (!client) throw new ErosAdapterError('eros_disabled');
-  return prepareErosRelationship(erosAdapterDatabase(), client, {
+  return prepareErosRelationship(client, erosRelationshipStore, {
     userId,
-    creator: { id: creator.id, displayName: creator.displayName, bio: creator.profile?.bio, tags: erosTags(creator.profile?.tagsJson) },
+    creator: { id: creator.id, displayName: creator.displayName, genomeId: creator.profile?.erosGenomeId },
   });
 }
 
@@ -57,7 +66,7 @@ async function findErosSession(userId: string, creatorId: string): Promise<{ use
   const identity = erosIdentityFor({ userId, creatorId });
   const client = createErosEngineClient();
   if (!client) return null;
-  const instanceId = await resolveErosRelationshipInstanceId(erosAdapterDatabase(), userId, creatorId);
+  const instanceId = await resolveErosRelationshipInstanceId(erosRelationshipStore, userId, creatorId);
   if (!instanceId) return null;
   const sessions = await client.sessions(identity.userId);
   const session = sessions
@@ -85,11 +94,15 @@ async function localErosConversations(userId: string, agata: ReturnType<typeof a
     return history.items.length === 0 ? creator : null;
   }));
   const routedCreators = noPriorAgataHistory.filter((creator) => creator !== null);
-  const creatorInstancePairs = await Promise.all(routedCreators.map(async (creator) => {
-    const instanceId = await resolveErosRelationshipInstanceId(erosAdapterDatabase(), userId, creator.id);
-    return instanceId ? [instanceId, creator] as const : null;
+  const relationshipMappings = await prisma.erosRelationshipMapping.findMany({
+    where: { userId, creatorId: { in: routedCreators.map((creator) => creator.id) } },
+    select: { creatorId: true, instanceId: true },
+  });
+  const routedCreatorById = new Map(routedCreators.map((creator) => [creator.id, creator]));
+  const creatorByInstance = new Map(relationshipMappings.flatMap((mapping) => {
+    const creator = routedCreatorById.get(mapping.creatorId);
+    return creator ? [[mapping.instanceId, creator] as const] : [];
   }));
-  const creatorByInstance = new Map(creatorInstancePairs.filter((pair) => pair !== null));
   const matchingSessions = sessions.filter((session) => session.channel === 'text' && session.instanceId !== null && creatorByInstance.has(session.instanceId));
   const newestByCreator = new Map<string, { sessionId: string; lastActiveAt: string }>();
   for (const session of matchingSessions) {
