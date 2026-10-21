@@ -30,7 +30,7 @@ jobs:
       packages: read
     steps:
       - name: Checkout trusted current main controller code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: refs/heads/main
           # Authorization scope proof walks ancestry from the production baseline and source commits.
