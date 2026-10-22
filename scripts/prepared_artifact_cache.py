@@ -30,6 +30,7 @@ OCI_INDEX = 'application/vnd.oci.image.index.v1+json'
 MAX_RECEIPT_BYTES = 1024 * 1024
 MAX_STATIC_BYTES = 512 * 1024 * 1024
 GHCR_READ_RETRY_BUDGET_SECONDS = 60
+GHCR_SOCKET_TIMEOUT_SECONDS = 10
 NETWORK_BUDGET = None
 SAFE_DIAGNOSTIC_REASON_CODES = {
     'GHCR receipt response exceeds size limit': 'GHCR_RESPONSE_TOO_LARGE',
@@ -147,9 +148,16 @@ def retryable(error):
 
 
 def new_network_budget():
-    """Leave diagnostic headroom inside the controller's 120-second subprocess limit."""
-    return RetryBudget(seconds=min(NETWORK_RETRY_BUDGET_SECONDS,
-                                   GHCR_READ_RETRY_BUDGET_SECONDS))
+    """Give this verifier its own window within the workflow-wide retry budget."""
+    budget = RetryBudget(seconds=NETWORK_RETRY_BUDGET_SECONDS)
+    remaining_shared = max(0.0, NETWORK_RETRY_BUDGET_SECONDS - budget.spent)
+    local_window = min(GHCR_READ_RETRY_BUDGET_SECONDS, remaining_shared)
+    # RetryBudget subtracts already-persisted spend from seconds when building
+    # its deadline. Include that spend here so earlier workflow reads do not
+    # consume this verifier's local window, while the shared ceiling stays fixed.
+    budget.seconds = budget.spent + local_window
+    budget.deadline = budget.started + local_window
+    return budget
 
 
 def network_urlopen(request, timeout=30):
@@ -159,7 +167,8 @@ def network_urlopen(request, timeout=30):
     remaining = NETWORK_BUDGET.deadline - time.monotonic()
     if remaining <= 0:
         raise NetworkUnavailable('network_retry_budget')
-    return urllib.request.urlopen(request, timeout=min(timeout, remaining))
+    bounded_timeout = min(timeout, GHCR_SOCKET_TIMEOUT_SECONDS, remaining)
+    return urllib.request.urlopen(request, timeout=bounded_timeout)
 
 
 def open_without_redirect(request, timeout=30):
@@ -174,7 +183,7 @@ def open_without_redirect(request, timeout=30):
         remaining = NETWORK_BUDGET.deadline - time.monotonic()
         if remaining <= 0:
             raise NetworkUnavailable('network_retry_budget')
-        bounded_timeout = min(timeout, remaining)
+        bounded_timeout = min(timeout, GHCR_SOCKET_TIMEOUT_SECONDS, remaining)
     return urllib.request.build_opener(NoRedirect).open(request, timeout=bounded_timeout)
 
 

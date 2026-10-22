@@ -143,11 +143,17 @@ class GhcrReceiptTests(unittest.TestCase):
 
     def test_urllib_timeout_is_clamped_to_absolute_shared_deadline(self):
         class Budget:
-            deadline = 108.0
+            deadline = 120.0
         with mock.patch.object(CACHE, 'NETWORK_BUDGET', Budget()), \
                 mock.patch.object(CACHE.time, 'monotonic', return_value=100.0), \
                 mock.patch.object(urllib.request, 'urlopen', return_value='response') as urlopen:
             self.assertEqual(CACHE.network_urlopen('request', timeout=30), 'response')
+        self.assertEqual(urlopen.call_args.kwargs['timeout'], 10.0)
+        Budget.deadline = 108.0
+        with mock.patch.object(CACHE, 'NETWORK_BUDGET', Budget()), \
+                mock.patch.object(CACHE.time, 'monotonic', return_value=100.0), \
+                mock.patch.object(urllib.request, 'urlopen', return_value='response') as urlopen:
+            CACHE.network_urlopen('request', timeout=30)
         self.assertEqual(urlopen.call_args.kwargs['timeout'], 8.0)
         with mock.patch.object(CACHE, 'NETWORK_BUDGET', Budget()), \
                 mock.patch.object(CACHE.time, 'monotonic', return_value=108.0), \
@@ -155,6 +161,17 @@ class GhcrReceiptTests(unittest.TestCase):
             with self.assertRaises(network_retry.NetworkUnavailable):
                 CACHE.network_urlopen('request', timeout=30)
         urlopen.assert_not_called()
+
+    def test_redirect_blocked_reads_also_cap_socket_timeout(self):
+        class Budget:
+            deadline = 120.0
+        opener = mock.Mock()
+        opener.open.return_value = 'response'
+        with mock.patch.object(CACHE, 'NETWORK_BUDGET', Budget()), \
+                mock.patch.object(CACHE.time, 'monotonic', return_value=100.0), \
+                mock.patch.object(urllib.request, 'build_opener', return_value=opener):
+            self.assertEqual(CACHE.open_without_redirect('request', timeout=30), 'response')
+        self.assertEqual(opener.open.call_args.kwargs['timeout'], 10.0)
 
     def test_response_finishing_after_shared_deadline_is_rejected(self):
         class Budget:
@@ -190,17 +207,34 @@ class GhcrReceiptTests(unittest.TestCase):
         self.assertTrue(response.closed)
         self.assertLess(time.monotonic() - began, 0.5)
 
-    def test_ghcr_budget_reuses_prior_shared_budget_spend(self):
+    def test_ghcr_budget_gets_local_window_after_prior_shared_spend(self):
         with tempfile.TemporaryDirectory(prefix='prepared-cache-budget-') as directory:
             state = Path(directory) / 'spent-seconds'
             state.write_text('50\n')
             with mock.patch.dict(os.environ, {'NETWORK_RETRY_BUDGET_STATE': str(state)}):
                 budget = CACHE.new_network_budget()
-        self.assertEqual(budget.seconds, 60)
+        self.assertEqual(budget.seconds, 110)
         self.assertEqual(budget.spent, 50.0)
-        # Binary floating-point subtraction may differ by a few ulps at large
-        # monotonic-clock values; the permitted retry budget is still ten seconds.
+        self.assertAlmostEqual(budget.deadline - budget.started, 60.0, delta=1e-9)
+
+    def test_ghcr_budget_stays_within_remaining_shared_budget(self):
+        with tempfile.TemporaryDirectory(prefix='prepared-cache-budget-') as directory:
+            state = Path(directory) / 'spent-seconds'
+            state.write_text('1790\n')
+            with mock.patch.dict(os.environ, {'NETWORK_RETRY_BUDGET_STATE': str(state)}):
+                budget = CACHE.new_network_budget()
+        self.assertEqual(budget.seconds, network_retry.NETWORK_RETRY_BUDGET_SECONDS)
+        self.assertEqual(budget.spent, 1790.0)
         self.assertAlmostEqual(budget.deadline - budget.started, 10.0, delta=1e-9)
+
+    def test_ghcr_budget_is_expired_when_shared_budget_is_exhausted(self):
+        with tempfile.TemporaryDirectory(prefix='prepared-cache-budget-') as directory:
+            state = Path(directory) / 'spent-seconds'
+            state.write_text(f'{network_retry.NETWORK_RETRY_BUDGET_SECONDS}\n')
+            with mock.patch.dict(os.environ, {'NETWORK_RETRY_BUDGET_STATE': str(state)}):
+                budget = CACHE.new_network_budget()
+        self.assertEqual(budget.spent, network_retry.NETWORK_RETRY_BUDGET_SECONDS)
+        self.assertAlmostEqual(budget.deadline, budget.started, delta=1e-9)
 
     def fetch(self, tamper=None):
         def fake(url, username, token, accept, stage, **kwargs):
