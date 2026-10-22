@@ -174,10 +174,13 @@ jobs:
           cleanup: false
       - name: Install AGATA test dependencies
         if: github.ref == 'refs/heads/main' && needs.coalesce.outputs.result == 'WINNER'
-        run: python -m pip install './services/agata[test]' './services/gsales[test]'
+        run: |
+          python -m pip install --no-cache-dir pip==26.2.2
+          python -m pip install './services/agata[test]' './services/gsales[test]'
       - name: Test release preflight coordinator
         if: github.ref == 'refs/heads/main' && needs.coalesce.outputs.result == 'WINNER'
         run: |
+          python3 -m pytest -q tests/test_public_workflow_security.py
           python3 scripts/test_prepare_coalescing.py
           python3 -m unittest tests.test_prepare_workflow_summary
           python3 -m unittest tests.test_unified_release_v1

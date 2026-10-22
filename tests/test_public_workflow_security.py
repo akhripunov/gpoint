@@ -8,6 +8,19 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_prepare_runs_public_security_checks_after_pip_bootstrap():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-prepare.yml").read_text())
+    steps = next(
+        job["steps"] for job in workflow["jobs"].values()
+        if any(step.get("name") == "Install AGATA test dependencies" for step in job.get("steps", []))
+    )
+    install = next(step["run"] for step in steps if step.get("name") == "Install AGATA test dependencies")
+    assert "python -m pip install --no-cache-dir pip==26.2.2" in install
+    assert install.index("pip==26.2.2") < install.index("'./services/agata[test]'")
+    checks = next(step["run"] for step in steps if step.get("name") == "Test release preflight coordinator")
+    assert "python3 -m pytest -q tests/test_public_workflow_security.py" in checks
+
+
 def test_python_images_upgrade_pip_before_installing_project():
     for service in ("agata", "gsales"):
         dockerfile = (ROOT / "services" / service / "Dockerfile").read_text()
