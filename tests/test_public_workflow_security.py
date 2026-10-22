@@ -41,3 +41,23 @@ def test_public_workflow_actions_are_pinned_to_full_commit_shas():
                 assert len(reference) == 40 and all(c in "0123456789abcdef" for c in reference), (
                     f"{path.name}:{job_name} uses mutable/non-SHA action ref {action}"
                 )
+
+
+def test_host_ssh_policy_preserves_keys_and_disables_password_login():
+    policy = ROOT / "deploy/security/sshd-key-only.conf"
+    settings = {}
+    for line in policy.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            name, value = line.split(maxsplit=1)
+            assert name.lower() not in settings
+            settings[name.lower()] = value
+    assert settings == {
+        "pubkeyauthentication": "yes",
+        "passwordauthentication": "no",
+        "kbdinteractiveauthentication": "no",
+        "permitrootlogin": "prohibit-password",
+        "permitemptypasswords": "no",
+        "permituserenvironment": "no",
+        "x11forwarding": "no",
+    }
