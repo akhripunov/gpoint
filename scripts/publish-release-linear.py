@@ -457,20 +457,50 @@ def authorization_reconciliation_evidence(automation_run_id, automation_attempt,
     return attestation
 
 
+class _RunInventoryDrift(Exception):
+    pass
+
+
 def latest_run(workflow, sha=None, successful=False):
-    runs = []
-    expected_total = None
-    for page in range(1, 101):
-        data = github_json(f'repos/{REPOSITORY}/actions/workflows/{workflow}/runs?branch=main&per_page=100&page={page}')
-        rows = data.get('workflow_runs')
-        if not isinstance(rows, list) or not isinstance(data.get('total_count'), int):
-            raise SyncError('GitHub workflow run inventory is incomplete')
-        if expected_total is None: expected_total = data['total_count']
-        if expected_total != data['total_count']: raise SyncError('GitHub workflow run inventory changed during read')
-        runs.extend(rows)
-        if len(runs) >= expected_total: break
-        if len(rows) < 100: break
-    if expected_total is None or len(runs) != expected_total:
+    runs = None
+    for snapshot_attempt in range(3):
+        snapshot = []
+        seen_ids = set()
+        expected_total = None
+        try:
+            for page in range(1, 101):
+                data = github_json(f'repos/{REPOSITORY}/actions/workflows/{workflow}/runs?branch=main&per_page=100&page={page}')
+                if not isinstance(data, dict):
+                    raise SyncError('GitHub workflow run inventory is invalid')
+                rows = data.get('workflow_runs')
+                total = data.get('total_count')
+                if not isinstance(rows, list) or type(total) is not int or total < 0:
+                    raise SyncError('GitHub workflow run inventory is invalid')
+                if expected_total is None:
+                    expected_total = total
+                elif expected_total != total:
+                    raise _RunInventoryDrift('GitHub workflow run inventory changed during read')
+                for row in rows:
+                    if not isinstance(row, dict) or type(row.get('id')) is not int or row['id'] <= 0:
+                        raise SyncError('GitHub workflow run inventory contains an invalid run')
+                    if row['id'] in seen_ids:
+                        raise _RunInventoryDrift('GitHub workflow run inventory changed during read')
+                    seen_ids.add(row['id'])
+                snapshot.extend(rows)
+                if len(snapshot) > expected_total:
+                    raise _RunInventoryDrift('GitHub workflow run inventory changed during read')
+                if len(snapshot) == expected_total:
+                    break
+                if len(rows) < 100:
+                    raise _RunInventoryDrift('GitHub workflow run inventory changed during read')
+            if expected_total is None or len(snapshot) != expected_total:
+                raise _RunInventoryDrift('GitHub workflow run inventory pagination is incomplete')
+            runs = snapshot
+            break
+        except _RunInventoryDrift as error:
+            if snapshot_attempt == 2:
+                raise SyncError(str(error)) from None
+    if runs is None:
         raise SyncError('GitHub workflow run inventory pagination is incomplete')
     runs = [r for r in runs if (sha is None or r.get('head_sha') == sha)]
     if successful:
