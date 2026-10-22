@@ -292,7 +292,13 @@ class PrepareCoalescingTests(unittest.TestCase):
 
     def test_release_controller_checks_full_history_for_durable_authorization(self):
         controller = (ROOT / ".github" / "workflows" / "gpoint-auto-preflight.yml").read_text()
-        checkout = controller.split("uses: actions/checkout@v4", 1)[1].split("      - name:", 1)[0]
+        checkout_ref = "uses: actions/checkout@"
+        self.assertIn(checkout_ref, controller)
+        checkout_start = controller.index(checkout_ref)
+        checkout = controller[checkout_start:controller.index("      - name:", checkout_start)]
+        action_version = checkout.split(checkout_ref, 1)[1].splitlines()[0]
+        self.assertRegex(action_version, r"^[0-9a-f]{40}$",
+                         "release controller actions must remain pinned to a full commit SHA")
         self.assertIn("fetch-depth: 0", checkout,
                       "authorization scope validation needs the production-baseline and source commit ancestry")
 
