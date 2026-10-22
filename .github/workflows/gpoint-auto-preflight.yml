@@ -23,7 +23,7 @@ jobs:
       github.event.workflow_run.head_sha == github.sha &&
       github.event.workflow_run.path == '.github/workflows/gpoint-prepare.yml'
     runs-on: [self-hosted, macOS, gpoint-production]
-    timeout-minutes: 3
+    timeout-minutes: 35
     permissions:
       contents: write
       actions: write

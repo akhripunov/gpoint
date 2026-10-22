@@ -245,7 +245,9 @@ export function resolvePrepareReceipt(sha, runId, attempt, env = process.env) {
   const directory = fs.mkdtempSync(join(tmpdir(), 'gpoint-auto-prepare-'));
   try {
     const result = spawnSync('python3', ['scripts/prepared_artifact_cache.py'], {
-      cwd: process.cwd(), encoding: 'utf8', timeout: 120_000,
+      // Let the verifier exhaust its bounded 30-minute shared network budget
+      // and emit a classified failure before the parent terminates it.
+      cwd: process.cwd(), encoding: 'utf8', timeout: 1_860_000,
       env: {...env, CANDIDATE_SHA: sha, PREPARE_RUN_ID: runId, PREPARE_RUN_ATTEMPT: attempt,
         ARTIFACT_DESTINATION: directory, RELEASE_MODE: 'preflight',
         GHCR_READ_USERNAME: env.GITHUB_ACTOR ?? 'github-actions[bot]',

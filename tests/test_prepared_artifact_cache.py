@@ -134,12 +134,14 @@ class GhcrReceiptTests(unittest.TestCase):
 
     def test_ghcr_retry_budget_stays_below_controller_subprocess_timeout(self):
         controller = (SCRIPT.parents[1] / 'scripts/release-orchestrator.mjs').read_text()
-        timeout = re.search(r"spawnSync\('python3', \['scripts/prepared_artifact_cache\.py'\], \{.*?timeout:\s*(\d+)_000",
+        timeout = re.search(r"spawnSync\('python3', \['scripts/prepared_artifact_cache\.py'\], \{.*?timeout:\s*([\d_]+)",
                             controller, re.DOTALL)
         self.assertIsNotNone(timeout)
-        self.assertEqual(int(timeout.group(1)), 120)
-        self.assertEqual(CACHE.GHCR_READ_RETRY_BUDGET_SECONDS, 60)
-        self.assertLess(CACHE.GHCR_READ_RETRY_BUDGET_SECONDS, int(timeout.group(1)))
+        subprocess_seconds = int(timeout.group(1).replace('_', '')) / 1000
+        self.assertGreater(subprocess_seconds, network_retry.NETWORK_RETRY_BUDGET_SECONDS)
+        workflow = (SCRIPT.parents[1] / '.github/workflows/gpoint-auto-preflight.yml').read_text()
+        job_minutes = int(re.search(r'timeout-minutes:\s*(\d+)', workflow).group(1))
+        self.assertGreater(job_minutes * 60, subprocess_seconds)
 
     def test_urllib_timeout_is_clamped_to_absolute_shared_deadline(self):
         class Budget:
@@ -207,15 +209,39 @@ class GhcrReceiptTests(unittest.TestCase):
         self.assertTrue(response.closed)
         self.assertLess(time.monotonic() - began, 0.5)
 
-    def test_ghcr_budget_gets_local_window_after_prior_shared_spend(self):
+    def test_receipt_read_can_recover_after_sixty_seconds_with_shared_budget_remaining(self):
+        now = [0.0]
+        attempts = []
+        with tempfile.TemporaryDirectory(prefix='prepared-cache-budget-') as directory:
+            state = Path(directory) / 'spent-seconds'
+            state.write_text('95\n')
+            def make_budget(seconds):
+                return network_retry.RetryBudget(seconds, clock=lambda: now[0], state_path=state)
+            with mock.patch.object(CACHE, 'RetryBudget', side_effect=make_budget):
+                budget = CACHE.new_network_budget()
+            def read():
+                attempts.append(True)
+                now[0] += 35
+                if len(attempts) < 3:
+                    raise TimeoutError()
+                return b'verified-by-caller'
+            result = network_retry.retry_network_read(
+                read, 'ghcr_artifact_digest', CACHE.retryable, budget=budget,
+                clock=lambda: now[0], sleep=lambda _: None, jitter=lambda *_: 0, emit=lambda _: None)
+            self.assertEqual(result, b'verified-by-caller')
+            self.assertEqual(len(attempts), 3)
+            self.assertEqual(float(state.read_text()), 200.0)
+            self.assertLess(now[0], budget.deadline)
+
+    def test_ghcr_budget_preserves_all_remaining_shared_window_after_prior_spend(self):
         with tempfile.TemporaryDirectory(prefix='prepared-cache-budget-') as directory:
             state = Path(directory) / 'spent-seconds'
             state.write_text('50\n')
             with mock.patch.dict(os.environ, {'NETWORK_RETRY_BUDGET_STATE': str(state)}):
                 budget = CACHE.new_network_budget()
-        self.assertEqual(budget.seconds, 110)
+        self.assertEqual(budget.seconds, network_retry.NETWORK_RETRY_BUDGET_SECONDS)
         self.assertEqual(budget.spent, 50.0)
-        self.assertAlmostEqual(budget.deadline - budget.started, 60.0, delta=1e-9)
+        self.assertAlmostEqual(budget.deadline - budget.started, 1750.0, delta=1e-9)
 
     def test_ghcr_budget_stays_within_remaining_shared_budget(self):
         with tempfile.TemporaryDirectory(prefix='prepared-cache-budget-') as directory:
