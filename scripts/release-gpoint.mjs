@@ -552,8 +552,16 @@ export async function loadV5ParentDeployEvidence(verified, candidateSha, token,
     evidence.releaseState === 'INSTALLATION_UNCONFIRMED' && evidence.executionFailure?.stage === 'STATUS_UNCONFIRMED' &&
     evidence.applicationVerification === 'VPS_READBACK_VERIFIED' && evidence.deployRunConclusion === 'failure' &&
     verified.status.state === 'success';
+  // Historical owner-approved evidence used an empty string; the Deployment
+  // reader represents the same absent EXACT_SHA task ID as null. Task IDs must
+  // still be present and identical, and EXACT_SHA must never carry a task ID.
+  const emptyAuthorizationId = value => value === null || value === undefined || value === '';
+  const authorizationIdMatches = identity.authorizationMode === 'EXACT_SHA'
+    ? emptyAuthorizationId(identity.authorizationId) && emptyAuthorizationId(evidence?.authorizationId)
+    : identity.authorizationMode === 'TASK_SCOPED_AUTO' && typeof identity.authorizationId === 'string'
+      && identity.authorizationId.length > 0 && identity.authorizationId === evidence?.authorizationId;
   if (verified.status.state !== 'success' || identity.authorizationMode !== evidence?.authorizationMode ||
-      identity.authorizationId !== evidence?.authorizationId || evidence?.candidateSha !== candidateSha ||
+      !authorizationIdMatches || evidence?.candidateSha !== candidateSha ||
       !(completeEvidence || reconciliableEvidence) || evidence.applicationVerification !== 'VPS_READBACK_VERIFIED' ||
       evidence.recoveryRequired === true)
     die('Durable Deploy result does not prove the exact completed production release');
