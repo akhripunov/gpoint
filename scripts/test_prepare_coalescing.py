@@ -19,6 +19,12 @@ SPEC = importlib.util.spec_from_file_location(
 )
 COALESCING = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(COALESCING)
+from network_retry import RetryBudget
+PREFLIGHT_SPEC = importlib.util.spec_from_file_location(
+    "github_api_preflight", ROOT / "scripts" / "github_api_preflight.py"
+)
+PREFLIGHT = importlib.util.module_from_spec(PREFLIGHT_SPEC)
+PREFLIGHT_SPEC.loader.exec_module(PREFLIGHT)
 
 
 class PrepareCoalescingTests(unittest.TestCase):
@@ -185,11 +191,129 @@ class PrepareCoalescingTests(unittest.TestCase):
         self.assertNotIn("secret-token", stderr.getvalue())
         self.assertNotIn("private host", stderr.getvalue())
 
+    def test_shared_budget_recovers_after_multiple_timeouts_over_old_preflight_limit(self):
+        sha = "e" * 40
+        now = [0.0]
+        calls = []
+
+        def opener(*_args, **_kwargs):
+            calls.append(1)
+            if len(calls) <= 3:
+                now[0] += 6.0
+                raise TimeoutError("private timeout detail")
+            return self.Response(sha)
+
+        budget = RetryBudget(seconds=60, clock=lambda: now[0])
+        with contextlib.redirect_stderr(io.StringIO()):
+            result = COALESCING.read_current_main_sha(
+                "redacted-token", opener=opener, budget=budget,
+                retry_sleep=lambda delay: now.__setitem__(0, now[0] + delay),
+            )
+        self.assertEqual(result, sha)
+        self.assertEqual(len(calls), 4)
+        self.assertGreaterEqual(now[0], 18.0)
+
+    def test_shared_budget_never_retries_auth_certificate_or_invalid_responses(self):
+        class BadResponse(self.Response):
+            def read(self):
+                return b"not-json"
+
+        failures = (
+            urllib.error.HTTPError("https://api.github.com", 401, "private body", {}, None),
+            urllib.error.HTTPError("https://api.github.com", 403, "private body", {}, None),
+            urllib.error.URLError(ssl.SSLCertVerificationError("private certificate")),
+        )
+        for failure in failures:
+            calls = []
+
+            def opener(*_args, **_kwargs):
+                calls.append(1)
+                raise failure
+
+            with self.subTest(failure=type(failure).__name__), \
+                    self.assertRaises(COALESCING.CoalescingError), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                COALESCING.read_current_main_sha(
+                    "redacted-token", opener=opener,
+                    budget=RetryBudget(seconds=60), retry_sleep=lambda _: None,
+                )
+            self.assertEqual(len(calls), 1)
+
+        calls = []
+        with self.assertRaises(COALESCING.CoalescingError), contextlib.redirect_stderr(io.StringIO()):
+            COALESCING.read_current_main_sha(
+                "redacted-token", opener=lambda *_a, **_k: (calls.append(1) or BadResponse("a" * 40)),
+                budget=RetryBudget(seconds=60), retry_sleep=lambda _: None,
+            )
+        self.assertEqual(len(calls), 1)
+
+    def test_shared_retry_budget_exhaustion_fails_closed(self):
+        now = [0.0]
+        calls = []
+
+        def opener(*_args, **_kwargs):
+            calls.append(1)
+            now[0] += 6.0
+            raise TimeoutError("private timeout detail")
+
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(COALESCING.CoalescingError):
+            COALESCING.read_current_main_sha(
+                "redacted-token", opener=opener,
+                budget=RetryBudget(seconds=10, clock=lambda: now[0]),
+                retry_sleep=lambda _: None,
+            )
+        self.assertEqual(len(calls), 2)
+        self.assertGreaterEqual(now[0], 10.0)
+
+    def test_retry_budget_state_is_shared_between_preflight_and_coalescing_reads(self):
+        sha = "f" * 40
+        now = [100.0]
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "run-attempt.state"
+            budget = RetryBudget(seconds=60, clock=lambda: now[0], state_path=state)
+            calls = []
+
+            def opener(*_args, **_kwargs):
+                calls.append(1)
+                if len(calls) == 1:
+                    now[0] += 9.0
+                    raise TimeoutError("private timeout")
+                return self.Response(sha)
+
+            with contextlib.redirect_stderr(io.StringIO()):
+                COALESCING.read_current_main_sha(
+                    "redacted-token", opener=opener, budget=budget,
+                    retry_sleep=lambda delay: now.__setitem__(0, now[0] + delay),
+                )
+            subsequent_budget = RetryBudget(seconds=60, clock=lambda: now[0], state_path=state)
+            self.assertEqual(subsequent_budget.spent, float(state.read_text().strip()))
+            self.assertGreaterEqual(subsequent_budget.spent, 9.0)
+
+    def test_preflight_loads_the_run_scoped_shared_budget_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "run-attempt.state"
+            state.write_text("17.000000\n")
+            observed = []
+
+            def reader(token, *, budget):
+                self.assertEqual(token, "redacted-token")
+                observed.append(budget.spent)
+                return "a" * 40
+
+            with mock.patch.dict(os.environ, {
+                "GITHUB_TOKEN": "redacted-token",
+                "GITHUB_REPOSITORY": "akhripunov/gpoint",
+                "NETWORK_RETRY_BUDGET_STATE": str(state),
+            }), mock.patch.object(PREFLIGHT, "read_current_main_sha", side_effect=reader), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(PREFLIGHT.main(), 0)
+            self.assertEqual(observed, [17.0])
+
     def test_main_orchestrates_through_adapter_reader_and_preserves_outputs(self):
         sha = "c" * 40
         reads = []
 
-        def reader(token):
+        def reader(token, *, budget=None):
             reads.append(token)
             return sha
 
