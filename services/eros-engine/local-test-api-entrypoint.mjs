@@ -101,6 +101,9 @@ const agata = createServer(async (request, response) => {
     if (/^\/internal\/v1\/users\/[^/]+\/chat-state$/.test(url.pathname) && request.method === 'GET') {
       return send(response, 200, state);
     }
+    if (/^\/internal\/v1\/users\/[^/]+\/unread$/.test(url.pathname) && request.method === 'GET') {
+      return send(response, 200, { items: [] });
+    }
     if (isAgataMessageHistoryPath(request.url ?? '/') && request.method === 'GET') {
       return send(response, 200, { items: [], nextCursor: null });
     }

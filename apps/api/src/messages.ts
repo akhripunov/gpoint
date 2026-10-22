@@ -13,21 +13,13 @@ import { FixedWindowRateLimiter } from './rate-limit.js';
 import { resolveSession } from './session.js';
 import { connectedTelegramChannelAvatarUrls } from './telegram-channel-avatars.js';
 import { isAllowedCodexMessageRequest, isCodexOwnerAllowed, parseCodexOwnerUserIds, resolveCodexMessageSession } from './codex-chat-auth.js';
-import { decodeErosCursor, encodeErosCursor, ErosAdapterError, createErosEngineClient, erosIdentityFor, erosTestCreatorIds, isErosChatAllowed, isSyntheticErosPair, prepareErosRelationship, markErosAssistantMessagesRead, mergeErosInboxItems, erosInboxLastMessageSummary, unreadErosAssistantCounts, resolveErosRelationshipInstanceId } from './eros-adapter.js';
+import { decodeErosCursor, encodeErosCursor, ErosAdapterError, createErosEngineClient, erosIdentityFor, erosTestCreatorIds, isErosChatAllowed, isSyntheticErosPair, prepareErosRelationship, markErosAssistantMessagesRead, mergeErosInboxItems, erosInboxLastMessageSummary, unreadErosAssistantCounts, resolveErosRelationshipInstanceId, recordErosAssistantMessage, syncErosAssistantMessageStates, erosAssistantReadAtById } from './eros-adapter.js';
 
 const prisma = new PrismaClient();
 const sendLimiter = new FixedWindowRateLimiter(30, 60_000);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const EROS_MESSAGE_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const CREATOR_INCLUDE = { profile: true, vipOffers: { where: { status: 'ACTIVE' }, take: 1 } } as const;
-let erosAdapterPrisma: PrismaClient | undefined;
-
-function erosAdapterDatabase(): PrismaClient {
-  const url = process.env.EROS_ADAPTER_DATABASE_URL;
-  if (!url) throw new ErosAdapterError('eros_adapter_database_unconfigured');
-  if (!erosAdapterPrisma) erosAdapterPrisma = new PrismaClient({ datasources: { db: { url } } });
-  return erosAdapterPrisma;
-}
-
 const erosRelationshipStore = {
   async getInstanceId(userId: string, creatorId: string): Promise<string | null> {
     const row = await prisma.erosRelationshipMapping.findUnique({
@@ -116,10 +108,14 @@ async function localErosConversations(userId: string, agata: ReturnType<typeof a
   const selected = routedCreators.filter((creator) => newestByCreator.has(creator.id));
   const avatars = await connectedTelegramChannelAvatarUrls(selected.map((creator) => creator.id), prisma);
   const selectedSessions = selected.map((creator) => ({ creator, ...newestByCreator.get(creator.id)! }));
-  const unreadCounts = await unreadErosAssistantCounts(erosAdapterDatabase(), mappedUser, selectedSessions.map((session) => session.sessionId));
-  return Promise.all(selectedSessions.map(async ({ creator, sessionId, lastActiveAt }) => {
+  const histories = await Promise.all(selectedSessions.map(async ({ creator, sessionId }) => {
     const identity = erosIdentityFor({ userId, creatorId: creator.id });
     const history = await client.history(identity.userId, sessionId, 50);
+    await syncErosAssistantMessageStates(prisma, userId, creator.id, sessionId, history.messages);
+    return { creator, sessionId, history };
+  }));
+  const unreadCounts = await unreadErosAssistantCounts(prisma, userId, selectedSessions.map(({ creator, sessionId }) => ({ creatorId: creator.id, sessionId })));
+  return Promise.all(histories.map(async ({ creator, sessionId, history }) => {
     const latest = history.messages.at(-1);
     if (!latest) return null;
     const dto = await publicCreator(creator);
@@ -194,11 +190,12 @@ function publicMessagesState(state: AgataChatState) {
   };
 }
 
-export function validateReadBatch(body: unknown): string[] {
+export function validateReadBatch(body: unknown, allowErosMessageIds = false): string[] {
   if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => key !== 'messageIds')) throw new BadRequestException({ code: 'invalid_read_batch' });
   const ids = (body as { messageIds?: unknown }).messageIds;
-  if (!Array.isArray(ids) || ids.length < 1 || ids.length > 100 || ids.some(id => typeof id !== 'string' || !UUID_PATTERN.test(id))) throw new BadRequestException({ code: 'invalid_read_batch' });
-  return [...new Set(ids.map((id: string) => id.toLowerCase()))];
+  if (!Array.isArray(ids) || ids.length < 1 || ids.length > 100 || ids.some(id => typeof id !== 'string' ||
+      (!UUID_PATTERN.test(id) && !(allowErosMessageIds && EROS_MESSAGE_ID_PATTERN.test(id))))) throw new BadRequestException({ code: 'invalid_read_batch' });
+  return [...new Set(ids.map((id: string) => UUID_PATTERN.test(id) ? id.toLowerCase() : id))];
 }
 
 export function publicUnreadSummary(rows: Array<{ gpointCharacterId: string; unreadCount: number }>, eligible: ReadonlySet<string>) {
@@ -295,7 +292,7 @@ export class MessagesController {
   @Post('creator/:creatorId/read')
   async read(@Param('creatorId') creatorId: string, @Headers() headers: Record<string, string | undefined>, @Body() body: unknown) {
     const userId = authenticatedUser(headers);
-    const ids = validateReadBatch(body);
+    const ids = validateReadBatch(body, true);
     try {
       const creator = await findApprovedCreator(creatorId);
       const agata = agataOrUnavailable();
@@ -304,12 +301,13 @@ export class MessagesController {
         if (await canRouteErosChat(userId, creator, agata)) {
           const session = await findErosSession(userId, creatorId);
           if (!session) return { acknowledgedMessageIds: [] };
-          const acknowledgedMessageIds = await markErosAssistantMessagesRead(erosAdapterDatabase(), session.userId, session.sessionId, ids);
+          const acknowledgedMessageIds = await markErosAssistantMessagesRead(prisma, userId, creatorId, session.sessionId, ids);
           return { acknowledgedMessageIds };
         }
       }
-      return await agataOrUnavailable().markMessagesRead(userId, creatorId, ids);
+      return await agataOrUnavailable().markMessagesRead(userId, creatorId, validateReadBatch(body));
     } catch (error) {
+      if (error instanceof HttpException) throw error;
       if (error instanceof ErosAdapterError) throw mapErosError(error);
       throw mapAgataError(error);
     }
@@ -401,6 +399,8 @@ export class MessagesController {
           if (!session) return { creator: dto, items: [], nextCursor: null };
           const before = decodeErosCursor(cursor);
           const history = await createErosEngineClient()!.history(session.userId, session.sessionId, limit, before);
+          await syncErosAssistantMessageStates(prisma, userId, creatorId, session.sessionId, history.messages);
+          const readAtById = await erosAssistantReadAtById(prisma, userId, creatorId, session.sessionId, history.messages.filter((item) => item.role === 'assistant').map((item) => item.id));
           const pageSize = Math.min(limit, 50);
           return {
             creator: dto,
@@ -410,7 +410,7 @@ export class MessagesController {
               text: item.role === 'system_error' ? 'Сообщение не удалось обработать. Попробуйте ещё раз.' : item.content,
               ...(item.role === 'user' && item.client_msg_id ? { clientMessageId: item.client_msg_id } : {}),
               occurredAt: item.sent_at,
-              incomingReadAt: item.read_at ?? null,
+              incomingReadAt: item.role === 'assistant' ? readAtById.get(item.id) ?? null : null,
             })),
             nextCursor: history.messages.length === pageSize
               ? encodeErosCursor(history.messages[0].id)
@@ -453,6 +453,7 @@ export class MessagesController {
           creatorId: identity.creatorId,
           instanceId: identity.relationshipId,
         });
+        await recordErosAssistantMessage(prisma, userId, creatorId, session.sessionId, response.id);
         return {
           status: 'completed' as const,
           userMessageId: body.clientMessageId,

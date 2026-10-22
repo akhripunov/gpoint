@@ -47,19 +47,25 @@ async function assertStockApiUserIsolation() {
   const client = createErosEngineClient(process.env);
   assert.ok(client, 'Eros client is configured in the isolated API container');
   const ownerIdentity = erosIdentityFor({ userId: 'eros_test_user', creatorId: creator });
-  const ownerSessions = await client.sessions(ownerIdentity.userId);
+  const foreignUserId = randomUUID();
+  const [ownerSessions, foreignSessions] = await Promise.all([
+    client.sessions(ownerIdentity.userId),
+    client.sessions(foreignUserId),
+  ]);
   const ownSession = ownerSessions.find((session) => session.channel === 'text');
   assert.ok(ownSession, 'the first synthetic user owns the expected Eros session');
 
-  const foreignUserId = randomUUID();
-  const foreignSessions = await client.sessions(foreignUserId);
   assert.equal(foreignSessions.length, 0, 'a second JWT subject sees no first-user sessions');
-  await assert.rejects(
+  const foreignReads = await Promise.allSettled([
     client.history(foreignUserId, ownSession.sessionId, 1),
-    (error) => error instanceof ErosAdapterError && error.status === 403,
-    'a second JWT subject cannot read the first user’s session',
-  );
-  console.log('LOCAL_E2E_STOCK_API_USER_ISOLATION=PASS distinct_jwt_subjects=2');
+    client.history(foreignUserId, ownSession.sessionId, 1),
+  ]);
+  assert.equal(foreignReads.length, 2);
+  assert.ok(foreignReads.every((result) => result.status === 'rejected' && result.reason instanceof ErosAdapterError && result.reason.status === 403),
+    'concurrent repeated foreign reads remain denied');
+  const ownerHistory = await client.history(ownerIdentity.userId, ownSession.sessionId, 1);
+  assert.equal(ownerHistory.messages.length, 1, 'the owner still reads their own session');
+  console.log('LOCAL_E2E_STOCK_API_USER_ISOLATION=PASS distinct_jwt_subjects=2 concurrent_denials=2 owner_read=PASS');
 }
 
 async function assertCompleteHistory(token, stage, expectedTurns = 17) {
@@ -81,6 +87,11 @@ async function assertCompleteHistory(token, stage, expectedTurns = 17) {
 if (process.argv.includes('--history-only')) {
   const token = await authenticate();
   await assertCompleteHistory(token, 'post-restart');
+  const restartedHistory = await readHistory(token);
+  assert.equal(restartedHistory.status, 200);
+  assert.ok(restartedHistory.data.items.some((item) => item.role === 'assistant' && item.incomingReadAt),
+    'GPoint-owned receipt metadata survives an Eros-only restart');
+  console.log('LOCAL_E2E_GPOINT_READ_RECEIPT_RESTART=PASS');
   console.log('LOCAL_E2E_RESTART_HISTORY=PASS');
   process.exit(0);
 }
@@ -167,5 +178,25 @@ for (const [index, text] of dialogue.entries()) {
 console.log('LOCAL_E2E_15_TURN_DIALOGUE=PASS');
 
 await assertCompleteHistory(token, 'pre-recall', 16);
+  const initialUnread = await request(`${api}/messages/unread`, { token });
+  assert.equal(initialUnread.status, 200, 'GPoint-owned unread count is available');
+  const unreadBefore = initialUnread.data.items.find((item) => item.creatorId === creator)?.unreadCount;
+  assert.ok(Number.isInteger(unreadBefore) && unreadBefore > 0, 'history sync indexes assistant IDs as unread');
+  const assistantMessageId = (await readHistory(token)).data.items.find((item) => item.role === 'assistant')?.id;
+  assert.match(assistantMessageId ?? '', /^[A-Za-z0-9_-]{1,64}$/);
+  const ack = await request(`${api}/messages/creator/${creator}/read`, {
+    method: 'POST', token, body: { messageIds: [assistantMessageId] },
+  });
+  assert.equal(ack.status, 201, JSON.stringify(ack.data));
+  assert.deepEqual(ack.data.acknowledgedMessageIds, [assistantMessageId]);
+  const unreadAfter = await request(`${api}/messages/unread`, { token });
+  assert.equal(unreadAfter.status, 200);
+  assert.equal(unreadAfter.data.items.find((item) => item.creatorId === creator)?.unreadCount, unreadBefore - 1,
+    'marking one visible assistant ID read decrements only that user’s unread count');
+  const foreignAck = await request(`${api}/messages/creator/${creator}/read`, {
+    method: 'POST', token, body: { messageIds: [randomUUID()] },
+  });
+  assert.equal(foreignAck.status, 404, 'an unobserved message ID cannot be acknowledged');
+  console.log('LOCAL_E2E_GPOINT_OWNED_READ_RECEIPTS=PASS bodies_stored=0 foreign_id=404 unread_decrement=1');
 console.log('LOCAL_E2E_AUTH_AGE_CONSENT_AND_WORKER_ROUTE=PASS');
 console.log('LOCAL_E2E_GPOINT_API_EROS_HISTORY=PASS');

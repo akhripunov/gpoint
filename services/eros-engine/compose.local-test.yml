@@ -64,7 +64,6 @@ services:
       API_HOST: 0.0.0.0
       API_PORT: "3000"
       DATABASE_URL: postgresql://gpoint_api_test:local-only-gpoint-api-test@postgres:5432/gpoint_test?schema=public
-      EROS_ADAPTER_DATABASE_URL: postgresql://gpoint_api_test:local-only-gpoint-api-test@postgres:5432/eros_test?schema=engine
       EROS_ENABLED: "true"
       EROS_DATA_MODE: synthetic
       EROS_TEST_USER_IDS: eros_test_user

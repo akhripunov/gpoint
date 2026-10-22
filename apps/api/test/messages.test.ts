@@ -58,6 +58,14 @@ test('read batch validation rejects malformed, empty, oversized and client-selec
   for(const body of [null,{}, {messageIds:[]},{messageIds:['invalid']},{messageIds:Array(101).fill(id)},{messageIds:[id],userId:'foreign'}]) assert.throws(()=>validateReadBatch(body),HttpException);
 });
 
+test('Eros read batch accepts bounded stock message IDs while AGATA remains UUID-only', async () => {
+  const { validateReadBatch }=await import('../src/messages.js');
+  const stockErosId='01a1630d-4127-0726-2b87-9b2624548592';
+  assert.throws(()=>validateReadBatch({messageIds:[stockErosId]}),HttpException);
+  assert.deepEqual(validateReadBatch({messageIds:[stockErosId]}, true),[stockErosId]);
+  assert.throws(()=>validateReadBatch({messageIds:['../../etc/passwd']}, true),HttpException);
+});
+
 test('unread and acknowledgement require a GPoint session before touching upstream state', async () => {
   const { MessagesController }=await import('../src/messages.js');
   const controller=new MessagesController();

@@ -24,6 +24,12 @@ test('local AGATA fixture recognizes history requests with query parameters', ()
   assert.equal(isAgataMessageHistoryPath('/internal/v1/users/synthetic-user/characters/synthetic-creator/other?limit=1'), false);
 });
 
+test('local AGATA fixture provides an empty unread page so Eros unread counters are exercised', () => {
+  const entrypoint = readFileSync(new URL('local-test-api-entrypoint.mjs', directory), 'utf8');
+  assert.match(entrypoint, /\/internal\\\/v1\\\/users\\\/\[\^\/\]\+\\\/unread/);
+  assert.match(entrypoint, /return send\(response, 200, \{ items: \[\] \}\)/);
+});
+
 test('local E2E topology has API, Eros, Worker and isolated PostgreSQL', () => {
   const compose = readFileSync(new URL('compose.local-test.yml', directory), 'utf8');
   assert.match(compose, /gpoint-api:/);
@@ -32,7 +38,7 @@ test('local E2E topology has API, Eros, Worker and isolated PostgreSQL', () => {
   assert.match(compose, /eros:/);
   assert.match(compose, /postgres:/);
   assert.match(compose, /DATABASE_URL:[^\n]*@postgres:5432\/gpoint_test\?schema=public/);
-  assert.match(compose, /EROS_ADAPTER_DATABASE_URL:[^\n]*@postgres:5432\/eros_test\?schema=engine/);
+  assert.doesNotMatch(compose, /EROS_ADAPTER_DATABASE_URL/);
   assert.match(compose, /eros-migrate:[\s\S]*?postgres:5432\/eros_test/);
   assert.match(compose, /eros:[\s\S]*?postgres:5432\/eros_test/);
   assert.match(compose, /test-personas:\/etc\/eros-engine\/test-personas:ro/);
@@ -55,20 +61,34 @@ test('only the disposable Eros migrator receives database CREATE privilege', () 
   assert.doesNotMatch(init, /GRANT [^;]* ON DATABASE eros_test TO (?!eros_migrator\b)[a-z_]+;/);
 });
 
-test('GPoint test API receives only Eros receipt columns, not blanket Eros table access', () => {
+test('GPoint test API has no connection or data grants to the Eros database', () => {
   const init = readFileSync(new URL('local-test-init.sql', directory), 'utf8');
   const erosInit = init.split('\\connect gpoint_test')[0];
   const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
+  assert.doesNotMatch(erosInit, /GRANT [^;]* ON SCHEMA engine TO [^;]*gpoint_api_test/);
+  assert.match(erosInit, /REVOKE CONNECT ON DATABASE eros_test FROM PUBLIC/);
+  assert.doesNotMatch(erosInit, /(?:GRANT|ALTER DEFAULT PRIVILEGES)[^;]*TO gpoint_worker_test/);
   assert.doesNotMatch(erosInit, /ALTER DEFAULT PRIVILEGES[^;]*TO gpoint_api_test/);
   assert.doesNotMatch(erosInit, /GRANT [^;]* ON ALL TABLES IN SCHEMA [^;]* TO gpoint_api_test/);
   assert.doesNotMatch(erosInit, /GRANT [^;]* ON ALL SEQUENCES IN SCHEMA [^;]* TO gpoint_api_test/);
-  assert.match(runner, /GRANT SELECT \(id, user_id, channel\) ON TABLE engine\.chat_sessions TO gpoint_api_test;/);
-  assert.match(runner, /GRANT SELECT \(id, session_id, role, read_at\) ON TABLE engine\.chat_messages TO gpoint_api_test;/);
-  assert.match(runner, /GRANT UPDATE \(read_at\) ON TABLE engine\.chat_messages TO gpoint_api_test;/);
+  assert.doesNotMatch(readFileSync(new URL('compose.local-test.yml', directory), 'utf8'), /EROS_ADAPTER_DATABASE_URL/);
   assert.match(runner, /has_column_privilege\('gpoint_api_test', c\.oid, a\.attnum, p\.privilege\)/);
   assert.match(runner, /has_table_privilege\('gpoint_api_test', c\.oid, p\.privilege\)/);
-  assert.match(runner, /\[ "\$eros_adapter_privileges" = '0\|0\|0' \]/);
-  assert.match(runner, /LOCAL_E2E_EROS_ADAPTER_MINIMAL_PRIVILEGES=PASS effective_columns=exact expected=8 extra_table_privileges=0 schemas=engine,public role_bypassrls=true/);
+  assert.match(runner, /has_sequence_privilege\('gpoint_api_test', c\.oid, p\.privilege\)/);
+  assert.match(runner, /has_database_privilege\('gpoint_api_test', 'eros_test', 'CONNECT'\)/);
+  assert.match(runner, /LOCAL_E2E_EROS_DB_API_ISOLATION=PASS api_role_connect=false schema_usage=false table_privileges=0 column_privileges=0 sequence_privileges=0/);
+});
+
+test('GPoint-owned read receipts preserve selected-message semantics and survive Eros restart', () => {
+  const e2e = readFileSync(new URL('local-test-e2e.mjs', directory), 'utf8');
+  assert.match(e2e, /LOCAL_E2E_GPOINT_OWNED_READ_RECEIPTS=PASS/);
+  assert.match(e2e, /foreignAck\.status, 404/);
+  assert.match(e2e, /LOCAL_E2E_GPOINT_READ_RECEIPT_RESTART=PASS/);
+  const schema = readFileSync(new URL('../../packages/db/prisma/schema.prisma', import.meta.url), 'utf8');
+  const stateModel = schema.split('model ErosAssistantMessageState {')[1]?.split('\n}')[0] ?? '';
+  assert.match(stateModel, /messageId String/);
+  assert.match(stateModel, /readAt DateTime\?/);
+  assert.doesNotMatch(stateModel, /content|text|memory|summary/i);
 });
 
 test('creator erasure fixture removes dependent profile before asserting relationship mapping guard', () => {
@@ -246,7 +266,7 @@ test('stock Eros API E2E exercises owner-bound session listing and foreign-sessi
   assert.match(e2e, /foreignUserId/);
   assert.match(e2e, /client\.sessions\(foreignUserId\)/);
   assert.match(e2e, /client\.history\(foreignUserId, ownSession\.sessionId/);
-  assert.match(e2e, /error\.status === 403/);
+  assert.match(e2e, /result\.reason\.status === 403/);
   assert.match(runner, /exec -w \/workspace\/apps\/api -T gpoint-api node --import tsx \/workspace\/services\/eros-engine\/local-test-e2e\.mjs/);
   assert.match(runner, /LOCAL_E2E_GPOINT_QUEUE_RLS_TENANT_ISOLATION=PASS fixture_role=gpoint_worker_test/);
   assert.match(runner, /LOCAL_E2E_EROS_DATABASE_USER_RLS=NOT_AVAILABLE stock_api_ownership_test=PASS/);

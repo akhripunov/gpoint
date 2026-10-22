@@ -83,12 +83,10 @@ no first-user sessions and receives HTTP 403 for a foreign session. The
 GPoint inference queue's tenant RLS integration test also passes using the
 `NOBYPASSRLS` `gpoint_worker_test` role. Eros itself has no per-user database
 RLS policies, so its user isolation is verified at the stock HTTP API boundary,
-not with Eros database RLS. The E2E API fixture role still has `BYPASSRLS` for
-the receipt SQL, but is granted only selected identity/read-state columns on
-`chat_sessions` and `chat_messages`; it cannot read message content or persona
-tables. This limits the test role's access but does not provide per-user
-database isolation or establish production-safe credentials. The post-restart
-recall check passed.
+not with Eros database RLS. The GPoint API has no connection or SQL grants to
+the Eros database; product read receipts live in the GPoint database and store
+only user/creator/session/message IDs plus `readAt`, never message bodies. The
+post-restart recall check passed.
 
 A separate disposable-catalog probe against the pinned stock image found all 34
 ordinary and partitioned `engine` tables with RLS enabled, none with `FORCE ROW
@@ -131,21 +129,24 @@ mapped through the public API alone. Each enabled creator profile also needs
 its `erosGenomeId` provisioned by `seed-personas` before routing is enabled;
 there is no stock genome-provisioning HTTP endpoint or safe runtime fallback.
 
-One direct Eros database dependency remains for selected assistant-message
-read receipts and unread counts. Stock `POST /comp/chat/{session_id}/read`
-marks the whole session; there is no public API operation for selected-message
-receipts or unread counts. Removing this dependency without changing behavior
-requires either an upstream API or a GPoint-owned receipt store and
-history-based counting. The local fixture still grants its adapter role
-`BYPASSRLS` to exercise this legacy path. That is test-only, is not evidence of
-production-safe privileges, and must not be used for a VPS pilot.
+The stock API has no operation for selected-message read receipts or unread
+counts, and `POST /comp/chat/{session_id}/read` marks the whole session. The
+GPoint adapter therefore indexes assistant message IDs returned by the stock
+history API and stores UI read timestamps in GPoint-owned metadata. The send
+route records each returned assistant ID; history and inbox reads reconcile
+IDs from the latest history page. Read acknowledgement checks that every
+requested ID was previously observed for the authenticated GPoint user,
+creator, and Eros session. This preserves visible-message-level semantics
+without direct Eros SQL or a broad Eros DB role. Reconciliation is bounded to
+the pages the UI/inbox reads; historical sessions or messages outside those
+pages are not backfilled and are not claimed to have exact unread counts.
 
 Stock Eros has no per-user database RLS policies. Its public HTTP handlers
 scope session and message operations to the authenticated Eros user, which the
 adapter maps deterministically from the GPoint account. The local API-isolation
-test verifies that HTTP boundary. Direct cross-service SQL does not inherit it,
-so receipt SQL and the test-only `BYPASSRLS` grant remain blockers for a
-shared-database pilot.
+test verifies that HTTP boundary. Removing receipt SQL closes the direct
+cross-service database bypass, but it does not fix Eros runtime `BYPASSRLS` or
+provide per-user database isolation; that remains a hard pilot security gate.
 
 Before any pilot, independently verify stock image SHA/provenance, dedicated
 database ownership and backups, Eros runtime privileges, exact provider route,

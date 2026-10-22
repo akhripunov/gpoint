@@ -53,7 +53,6 @@ export function isErosChatAllowed(userId: string, creatorId: string, env: NodeJS
     csvIds(env.EROS_PRODUCTION_TEST_CREATOR_IDS).has(creatorId);
   const localSynthetic = ['development', 'test'].includes(env.NODE_ENV ?? '') && env.EROS_ENABLED === 'true' &&
     env.EROS_DATA_MODE === 'synthetic' && isLocalSandboxDatabaseUrl(env.DATABASE_URL) &&
-    isLocalSandboxDatabaseUrl(env.EROS_ADAPTER_DATABASE_URL) &&
     csvIds(env.EROS_TEST_USER_IDS).has(userId) && csvIds(env.EROS_TEST_CREATOR_IDS).has(creatorId);
   return productionPilot || localSynthetic;
 }
@@ -169,81 +168,124 @@ export interface ErosSession {
   channel: 'text' | 'voice' | 'group';
 }
 
-export interface ErosReadReceiptDatabase {
-  $queryRawUnsafe<T = unknown>(query: string, ...values: unknown[]): Promise<T>;
+export interface ErosAssistantMessageStateStore {
+  createMany(args: { data: Array<{ userId: string; creatorId: string; sessionId: string; messageId: string; readAt: Date | null }>; skipDuplicates: boolean }): Promise<{ count: number }>;
+  findMany(args: { where: { userId: string; creatorId: string; sessionId: string; messageId?: { in: string[] } }; select?: { messageId?: boolean; readAt?: boolean } }): Promise<Array<{ messageId: string; readAt?: Date | null }>>;
+  updateMany(args: { where: { userId: string; creatorId: string; sessionId: string; messageId: { in: string[] }; readAt: null }; data: { readAt: Date } }): Promise<{ count: number }>;
+  groupBy(args: { by: ['creatorId', 'sessionId']; where: { userId: string; readAt: null; OR: Array<{ creatorId: string; sessionId: string }> }; _count: { _all: true } }): Promise<Array<{ creatorId: string; sessionId: string; _count: { _all: number } }>>;
+}
+
+export interface ErosAssistantMessageStateDatabase {
+  erosAssistantMessageState: ErosAssistantMessageStateStore;
+}
+
+function assertMessageStateIdentity(userId: string, creatorId: string, sessionId: string): void {
+  if (!userId || !creatorId || !UUID_PATTERN.test(sessionId)) throw new ErosAdapterError('eros_identity_invalid', 400);
+}
+
+/** Persist only Eros message identifiers/read timestamps in GPoint; never copy message content. */
+export async function recordErosAssistantMessage(
+  db: ErosAssistantMessageStateDatabase,
+  userId: string,
+  creatorId: string,
+  sessionId: string,
+  messageId: string,
+): Promise<void> {
+  assertMessageStateIdentity(userId, creatorId, sessionId);
+  if (!MESSAGE_ID_PATTERN.test(messageId)) throw new ErosAdapterError('eros_response_invalid');
+  await db.erosAssistantMessageState.createMany({
+    data: [{ userId, creatorId, sessionId, messageId, readAt: null }],
+    skipDuplicates: true,
+  });
+}
+
+/** Index assistant IDs observed through stock Eros history; bodies remain in Eros only. */
+export async function syncErosAssistantMessageStates(
+  db: ErosAssistantMessageStateDatabase,
+  userId: string,
+  creatorId: string,
+  sessionId: string,
+  messages: ErosHistoryMessage[],
+): Promise<void> {
+  assertMessageStateIdentity(userId, creatorId, sessionId);
+  const data = messages.filter((message) => message.role === 'assistant').map((message) => {
+    if (!MESSAGE_ID_PATTERN.test(message.id) || !Number.isFinite(Date.parse(message.sent_at))) throw new ErosAdapterError('eros_response_invalid');
+    const readAt = message.read_at === undefined ? null : new Date(message.read_at);
+    if (readAt !== null && !Number.isFinite(readAt.getTime())) throw new ErosAdapterError('eros_response_invalid');
+    return { userId, creatorId, sessionId, messageId: message.id, readAt };
+  });
+  if (!data.length) return;
+  await db.erosAssistantMessageState.createMany({ data, skipDuplicates: true });
 }
 
 export async function markErosAssistantMessagesRead(
-  db: ErosReadReceiptDatabase,
+  db: ErosAssistantMessageStateDatabase,
   userId: string,
+  creatorId: string,
   sessionId: string,
   messageIds: string[],
 ): Promise<string[]> {
-  if (!UUID_PATTERN.test(userId) || !UUID_PATTERN.test(sessionId) || !Array.isArray(messageIds) ||
+  assertMessageStateIdentity(userId, creatorId, sessionId);
+  if (!Array.isArray(messageIds) ||
       messageIds.length < 1 || messageIds.length > 100 || new Set(messageIds).size !== messageIds.length ||
-      !messageIds.every((id) => UUID_PATTERN.test(id))) {
+      !messageIds.every((id) => MESSAGE_ID_PATTERN.test(id))) {
     throw new ErosAdapterError('eros_read_request_invalid', 400);
   }
-  const rows = await db.$queryRawUnsafe<Array<{ id: string }>>(
-    `WITH requested AS (
-       SELECT unnest($3::uuid[]) AS id
-     ), authorized AS (
-       SELECT m.id
-       FROM engine.chat_messages m
-       JOIN engine.chat_sessions s ON s.id = m.session_id
-       JOIN requested r ON r.id = m.id
-       WHERE s.id = $2::uuid AND s.user_id = $1::uuid AND s.channel = 'text'
-         AND m.role = 'assistant'
-     ), updated AS (
-       UPDATE engine.chat_messages m
-       SET read_at = COALESCE(m.read_at, now())
-       WHERE m.id IN (SELECT id FROM authorized)
-         AND (SELECT count(*) FROM authorized) = cardinality($3::uuid[])
-       RETURNING m.id
-     )
-     SELECT id::text AS id FROM updated`,
-    userId,
-    sessionId,
-    messageIds,
-  );
-  if (!Array.isArray(rows) || rows.length !== messageIds.length || rows.some((row) => !messageIds.includes(row.id))) {
+  const rows = await db.erosAssistantMessageState.findMany({
+    where: { userId, creatorId, sessionId, messageId: { in: messageIds } },
+    select: { messageId: true },
+  });
+  if (rows.length !== messageIds.length || rows.some((row) => !messageIds.includes(row.messageId))) {
     throw new ErosAdapterError('eros_read_messages_not_owned', 404);
   }
+  await db.erosAssistantMessageState.updateMany({
+    where: { userId, creatorId, sessionId, messageId: { in: messageIds }, readAt: null },
+    data: { readAt: new Date() },
+  });
   return messageIds;
 }
 
-export interface ErosUnreadCountDatabase {
-  $queryRawUnsafe<T = unknown>(query: string, ...values: unknown[]): Promise<T>;
-}
-
 export async function unreadErosAssistantCounts(
-  db: ErosUnreadCountDatabase,
+  db: ErosAssistantMessageStateDatabase,
   userId: string,
-  sessionIds: string[],
+  sessions: Array<{ creatorId: string; sessionId: string }>,
 ): Promise<Map<string, number>> {
-  if (!UUID_PATTERN.test(userId) || !Array.isArray(sessionIds) || sessionIds.length > 100 ||
-      new Set(sessionIds).size !== sessionIds.length || !sessionIds.every((id) => UUID_PATTERN.test(id))) {
+  if (!userId || !Array.isArray(sessions) || sessions.length > 100 ||
+      new Set(sessions.map((item) => item.sessionId)).size !== sessions.length ||
+      !sessions.every((item) => !!item.creatorId && UUID_PATTERN.test(item.sessionId))) {
     throw new ErosAdapterError('eros_unread_request_invalid', 400);
   }
-  if (!sessionIds.length) return new Map();
-  const rows = await db.$queryRawUnsafe<Array<{ session_id: string; unread_count: number }>>(
-    `SELECT s.id::text AS session_id, COUNT(m.id)::int AS unread_count
-     FROM engine.chat_sessions s
-     LEFT JOIN engine.chat_messages m
-       ON m.session_id = s.id AND m.role = 'assistant' AND m.read_at IS NULL
-     WHERE s.user_id = $1::uuid AND s.channel = 'text' AND s.id = ANY($2::uuid[])
-     GROUP BY s.id`,
-    userId,
-    sessionIds,
-  );
+  if (!sessions.length) return new Map();
   const counts = new Map<string, number>();
+  for (const item of sessions) counts.set(item.sessionId, 0);
+  const rows = await db.erosAssistantMessageState.groupBy({
+    by: ['creatorId', 'sessionId'],
+    where: { userId, readAt: null, OR: sessions.map(({ creatorId, sessionId }) => ({ creatorId, sessionId })) },
+    _count: { _all: true },
+  });
   for (const row of rows) {
-    if (!sessionIds.includes(row.session_id) || !Number.isSafeInteger(row.unread_count) || row.unread_count < 0) {
+    if (!sessions.some((item) => item.creatorId === row.creatorId && item.sessionId === row.sessionId) || !Number.isSafeInteger(row._count._all) || row._count._all < 0) {
       throw new ErosAdapterError('eros_response_invalid');
     }
-    counts.set(row.session_id, row.unread_count);
+    counts.set(row.sessionId, row._count._all);
   }
   return counts;
+}
+
+export async function erosAssistantReadAtById(
+  db: ErosAssistantMessageStateDatabase,
+  userId: string,
+  creatorId: string,
+  sessionId: string,
+  messageIds: string[],
+): Promise<Map<string, string | null>> {
+  assertMessageStateIdentity(userId, creatorId, sessionId);
+  if (!messageIds.length || messageIds.length > 100 || !messageIds.every((id) => MESSAGE_ID_PATTERN.test(id))) return new Map();
+  const rows = await db.erosAssistantMessageState.findMany({
+    where: { userId, creatorId, sessionId, messageId: { in: messageIds } },
+    select: { messageId: true, readAt: true },
+  });
+  return new Map(rows.map((row) => [row.messageId, row.readAt instanceof Date ? row.readAt.toISOString() : null]));
 }
 
 export function mergeErosInboxItems<T extends { creator: { id: string } }>(agataItems: T[], erosItems: T[], isFirstPage: boolean): T[] {
@@ -270,14 +312,14 @@ const EROS_HISTORY_PAGE_SIZE = 50;
 const EROS_CURSOR_PREFIX = 'eros-before:';
 
 export function encodeErosCursor(messageId: string): string {
-  if (!UUID_PATTERN.test(messageId)) throw new ErosAdapterError('eros_request_invalid', 400);
+  if (!MESSAGE_ID_PATTERN.test(messageId)) throw new ErosAdapterError('eros_request_invalid', 400);
   return `${EROS_CURSOR_PREFIX}${messageId}`;
 }
 
 export function decodeErosCursor(cursor: string | undefined): string | undefined {
   if (!cursor) return undefined;
-  const match = /^eros-before:([0-9a-f-]{36})$/i.exec(cursor);
-  if (!match || !UUID_PATTERN.test(match[1])) throw new ErosAdapterError('eros_cursor_invalid', 400);
+  const match = /^eros-before:([A-Za-z0-9_-]{1,64})$/.exec(cursor);
+  if (!match || !MESSAGE_ID_PATTERN.test(match[1])) throw new ErosAdapterError('eros_cursor_invalid', 400);
   return match[1];
 }
 
@@ -485,7 +527,7 @@ export class ErosEngineClient {
   }
 
   async history(userId: string, sessionId: string, limit = 50, before?: string): Promise<ErosHistoryPage> {
-    if (!UUID_PATTERN.test(userId) || !UUID_PATTERN.test(sessionId) || !Number.isInteger(limit) || limit < 1 || limit > 100 || (before !== undefined && !UUID_PATTERN.test(before))) {
+    if (!UUID_PATTERN.test(userId) || !UUID_PATTERN.test(sessionId) || !Number.isInteger(limit) || limit < 1 || limit > 100 || (before !== undefined && !MESSAGE_ID_PATTERN.test(before))) {
       throw new ErosAdapterError('eros_request_invalid', 400);
     }
     const pageSize = Math.min(limit, EROS_HISTORY_PAGE_SIZE);

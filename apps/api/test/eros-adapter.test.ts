@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { jwtVerify } from 'jose';
 import { verifyBridgeIdentity } from '../src/eros-worker-contract.js';
-import { createErosEngineClient, decodeErosCursor, encodeErosCursor, ErosAdapterError, ErosEngineClient, erosIdentityFor, erosTestCreatorIds, isErosChatAllowed, isSyntheticErosPair, markErosAssistantMessagesRead, mergeErosInboxItems, erosInboxLastMessageSummary, prepareErosRelationship, resolveErosRelationshipInstanceId, unreadErosAssistantCounts, uuidV5 } from '../src/eros-adapter.js';
+import { createErosEngineClient, decodeErosCursor, encodeErosCursor, ErosAdapterError, ErosEngineClient, erosIdentityFor, erosTestCreatorIds, isErosChatAllowed, isSyntheticErosPair, markErosAssistantMessagesRead, mergeErosInboxItems, erosInboxLastMessageSummary, prepareErosRelationship, recordErosAssistantMessage, resolveErosRelationshipInstanceId, syncErosAssistantMessageStates, unreadErosAssistantCounts, uuidV5 } from '../src/eros-adapter.js';
 
 test('Eros client uses the configured bounded request timeout', async () => {
   let observedTimeout: number | undefined;
@@ -215,7 +215,6 @@ test('local Eros routing requires a non-production process and exact synthetic a
     EROS_TEST_USER_IDS: 'test-user-1,test-user-2',
     EROS_TEST_CREATOR_IDS: 'test-creator-1',
     DATABASE_URL: 'postgresql://local:test@127.0.0.1:5432/gpoint_test',
-    EROS_ADAPTER_DATABASE_URL: 'postgresql://local:test@localhost:5432/gpoint_eros',
   };
 
   assert.equal(isErosChatAllowed('test-user-1', 'test-creator-1', enabled), true);
@@ -225,7 +224,8 @@ test('local Eros routing requires a non-production process and exact synthetic a
   assert.equal(isErosChatAllowed('test-user-1', 'test-creator-1', { ...enabled, EROS_ENABLED: 'false' }), false);
   assert.equal(isErosChatAllowed('test-user-1', 'test-creator-1', { ...enabled, EROS_DATA_MODE: 'shared' }), false);
   assert.equal(isErosChatAllowed('test-user-1', 'test-creator-1', { ...enabled, DATABASE_URL: 'postgresql://host/gpoint_test' }), false);
-  assert.equal(isErosChatAllowed('test-user-1', 'test-creator-1', { ...enabled, EROS_ADAPTER_DATABASE_URL: 'postgresql://127.0.0.1:5432/gpoint' }), false);
+  assert.equal(isErosChatAllowed('test-user-1', 'test-creator-1', { ...enabled, EROS_ADAPTER_DATABASE_URL: 'postgresql://untrusted.example/eros' }), true,
+    'the GPoint API no longer opens a separate connection to the Eros database');
   assert.equal(isErosChatAllowed('test-user-1', 'test-creator-1', { ...enabled, NODE_ENV: undefined }), false);
 });
 
@@ -383,7 +383,7 @@ test('Eros history preserves user client message ids for timeout reconciliation 
 });
 
 test('Eros history clamps pages to the upstream 50-message cap and uses a stable keyset cursor', async () => {
-  const before = '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc3';
+  const before = '01a1630d-4127-0726-2b87-9b2624548592';
   const fetchImpl: typeof fetch = async (input) => {
     assert.ok(String(input).endsWith(`history?limit=50&before=${before}`));
     return Response.json({ total: 50, messages: Array.from({ length: 50 }, (_, i) => ({
@@ -421,32 +421,81 @@ test('Eros session listing is user-scoped, validates sessions, and preserves cha
   assert.equal(calls.length, 1, 'message-level acknowledgements must not call the session-wide Eros read endpoint');
 });
 
-test('message-level read acknowledgement is limited to exact assistant IDs in the owned text session', async () => {
-  const calls: unknown[][] = [];
-  const db = { async $queryRawUnsafe<T>(...args: unknown[]): Promise<T> {
-    calls.push(args);
-    return [{ id: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc4' }] as T;
-  } };
-  const ids = ['7f43ff08-7bf9-5647-9dc2-bb4a46f8edc4'];
-  const marked = await markErosAssistantMessagesRead(db, '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc0', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1', ids);
-  assert.deepEqual(marked, ids);
-  assert.match(String(calls[0][0]), /UPDATE engine\.chat_messages/);
-  assert.match(String(calls[0][0]), /s\.channel = 'text'/);
-  assert.match(String(calls[0][0]), /m\.role = 'assistant'/);
-  assert.deepEqual(calls[0].slice(1), ['7f43ff08-7bf9-5647-9dc2-bb4a46f8edc0', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1', ids]);
+function mockErosMessageStateStore(initial: Array<{ userId: string; creatorId: string; sessionId: string; messageId: string; readAt: Date | null }> = []) {
+  const records = [...initial];
+  const key = (row: { userId: string; sessionId: string; messageId: string }) => `${row.userId}/${row.sessionId}/${row.messageId}`;
+  return {
+    records,
+    erosAssistantMessageState: {
+      async createMany({ data }: { data: typeof records; skipDuplicates: boolean }) {
+        let count = 0;
+        for (const row of data) {
+          if (records.some(existing => key(existing) === key(row))) continue;
+          records.push({ ...row }); count++;
+        }
+        return { count };
+      },
+      async findMany({ where }: { where: { userId: string; creatorId: string; sessionId: string; messageId?: { in: string[] }; readAt?: null } }) {
+        return records.filter(row => row.userId === where.userId && row.creatorId === where.creatorId && row.sessionId === where.sessionId &&
+          (!where.messageId || where.messageId.in.includes(row.messageId)) && (where.readAt !== null || row.readAt === null))
+          .map(({ messageId, readAt }) => ({ messageId, readAt }));
+      },
+      async updateMany({ where, data }: { where: { userId: string; creatorId: string; sessionId: string; messageId: { in: string[] }; readAt: null }; data: { readAt: Date } }) {
+        let count = 0;
+        for (const row of records) if (row.userId === where.userId && row.creatorId === where.creatorId && row.sessionId === where.sessionId && where.messageId.in.includes(row.messageId) && row.readAt === null) { row.readAt = data.readAt; count++; }
+        return { count };
+      },
+      async groupBy({ where }: { where: { userId: string; readAt: null; OR: Array<{ creatorId: string; sessionId: string }> } }) {
+        const counts = new Map<string, number>();
+        for (const row of records) if (row.userId === where.userId && where.OR.some((scope) => scope.creatorId === row.creatorId && scope.sessionId === row.sessionId) && row.readAt === null) counts.set(row.sessionId, (counts.get(row.sessionId) ?? 0) + 1);
+        return [...counts].map(([sessionId, count]) => ({ creatorId: where.OR.find((scope) => scope.sessionId === sessionId)!.creatorId, sessionId, _count: { _all: count } }));
+      },
+    },
+  };
+}
+
+test('assistant message state stores only IDs and read timestamps in GPoint-owned storage', async () => {
+  const db = mockErosMessageStateStore();
+  const userId = 'user_a'; const creatorId = 'creator_a'; const sessionId = '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1';
+  await recordErosAssistantMessage(db, userId, creatorId, sessionId, 'reply_01');
+  await syncErosAssistantMessageStates(db, userId, creatorId, sessionId, [
+    { id: 'reply_02', role: 'assistant', content: 'must not be stored', sent_at: '2026-10-22T08:00:00.000Z' },
+    { id: 'user_01', role: 'user', content: 'must not be indexed', sent_at: '2026-10-22T08:00:00.000Z' },
+  ]);
+  assert.deepEqual(db.records.map(({ messageId }) => messageId).sort(), ['reply_01', 'reply_02']);
+  assert.equal(JSON.stringify(db.records).includes('must not be stored'), false);
+  assert.equal(JSON.stringify(db.records).includes('must not be indexed'), false);
 });
 
-test('unread counts cover all assistant messages and remain session-owner/text-channel scoped', async () => {
-  const calls: unknown[][] = [];
-  const db = { async $queryRawUnsafe<T>(...args: unknown[]): Promise<T> {
-    calls.push(args);
-    return [{ session_id: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1', unread_count: 73 }] as T;
-  } };
-  const counts = await unreadErosAssistantCounts(db, '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc0', ['7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1']);
-  assert.equal(counts.get('7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1'), 73);
-  assert.match(String(calls[0][0]), /s\.user_id = \$1::uuid AND s\.channel = 'text'/);
-  assert.match(String(calls[0][0]), /m\.read_at IS NULL/);
-  assert.deepEqual(calls[0].slice(1), ['7f43ff08-7bf9-5647-9dc2-bb4a46f8edc0', ['7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1']]);
+test('message-level read acknowledgement requires exact IDs previously observed for that user, creator and session', async () => {
+  const db = mockErosMessageStateStore([
+    { userId: 'user_a', creatorId: 'creator_a', sessionId: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1', messageId: 'reply_a', readAt: null },
+    { userId: 'user_b', creatorId: 'creator_a', sessionId: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1', messageId: 'reply_b', readAt: null },
+  ]);
+  const ids = ['reply_a'];
+  assert.deepEqual(await markErosAssistantMessagesRead(db, 'user_a', 'creator_a', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1', ids), ids);
+  await assert.rejects(markErosAssistantMessagesRead(db, 'user_a', 'creator_a', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1', ['reply_b']), (error: unknown) => error instanceof ErosAdapterError && error.code === 'eros_read_messages_not_owned');
+  assert.equal(db.records[0].readAt instanceof Date, true);
+  assert.equal(db.records[1].readAt, null);
+});
+
+test('unread counts include only unacknowledged assistant IDs scoped by GPoint ownership', async () => {
+  const db = mockErosMessageStateStore([
+    { userId: 'user_a', creatorId: 'creator_a', sessionId: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1', messageId: 'reply_a', readAt: null },
+    { userId: 'user_a', creatorId: 'creator_a', sessionId: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1', messageId: 'reply_b', readAt: new Date() },
+    { userId: 'user_b', creatorId: 'creator_a', sessionId: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1', messageId: 'reply_c', readAt: null },
+    { userId: 'user_a', creatorId: 'creator_b', sessionId: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc2', messageId: 'reply_d', readAt: null },
+  ]);
+  const counts = await unreadErosAssistantCounts(db, 'user_a', [
+    { creatorId: 'creator_a', sessionId: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1' },
+    { creatorId: 'creator_b', sessionId: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc2' },
+    { creatorId: 'creator_c', sessionId: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc3' },
+  ]);
+  assert.deepEqual([...counts], [
+    ['7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1', 1],
+    ['7f43ff08-7bf9-5647-9dc2-bb4a46f8edc2', 1],
+    ['7f43ff08-7bf9-5647-9dc2-bb4a46f8edc3', 0],
+  ]);
 });
 
 test('Eros inbox replaces a routed creator only on the first page and filters it from later AGATA pages', () => {
@@ -463,12 +512,14 @@ test('system_error previews are normalized and never exposed as assistant-author
   });
 });
 
-test('Eros chat cursors are opaque message IDs and reject malformed values', () => {
-  const id = '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1';
+test('Eros chat cursors preserve stock opaque message IDs and reject malformed values', () => {
+  const id = '01a1630d-4127-0726-2b87-9b2624548592';
   assert.equal(encodeErosCursor(id), `eros-before:${id}`);
   assert.equal(decodeErosCursor(`eros-before:${id}`), id);
+  assert.equal(encodeErosCursor('reply_01'), 'eros-before:reply_01');
+  assert.equal(decodeErosCursor('eros-before:reply_01'), 'reply_01');
   assert.equal(decodeErosCursor(undefined), undefined);
-  for (const value of ['50', 'eros-offset:50', 'eros-before:nope', 'other:50']) {
+  for (const value of ['50', 'eros-offset:50', 'eros-before:', 'eros-before:bad%2Fid', 'other:50']) {
     assert.throws(() => decodeErosCursor(value), (error: unknown) => error instanceof ErosAdapterError && error.code === 'eros_cursor_invalid');
   }
 });

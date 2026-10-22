@@ -29,6 +29,7 @@ model User {
   codexChatConnections CodexChatConnection[]
   codexDeviceAuthorizations CodexDeviceAuthorization[]
   erosRelationships ErosRelationshipMapping[]
+  erosAssistantMessageStates ErosAssistantMessageState[]
 }
 model UserPreference {
   id String @id @default(cuid())
@@ -60,6 +61,7 @@ model Creator {
   codexChatConnections CodexChatConnection[]
   codexDeviceAuthorizations CodexDeviceAuthorization[]
   erosRelationships ErosRelationshipMapping[]
+  erosAssistantMessageStates ErosAssistantMessageState[]
 }
 
 // Contains only revocable, hashed Codex capability tokens. Conversation data remains in AGATA.
@@ -123,6 +125,20 @@ model ErosRelationshipMapping {
   @@id([userId, creatorId])
   @@index([creatorId])
 }
+
+// Product read state only; conversation bodies remain owned by stock Eros.
+model ErosAssistantMessageState {
+  userId String
+  creatorId String
+  sessionId String @db.Uuid
+  messageId String @db.VarChar(64)
+  readAt DateTime?
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  creator Creator @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  @@id([userId, creatorId, sessionId, messageId])
+  @@index([userId, creatorId, sessionId, readAt])
+}
+
 model CreatorOwner {
   id String @id @default(cuid())
   creatorId String
