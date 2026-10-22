@@ -5,6 +5,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /srv/agata
 RUN addgroup --system agata && adduser --system --ingroup agata agata
 COPY pyproject.toml ./
+RUN python -m pip install --no-cache-dir pip==26.2.2
 RUN pip install --no-cache-dir .
 COPY app ./app
 COPY migrations ./migrations
