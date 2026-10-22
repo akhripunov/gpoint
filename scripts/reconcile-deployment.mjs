@@ -12,6 +12,7 @@ import {AuthorizationError, authorizationRecordPath, authorizationStateRef, cand
 import {validateOciReceipt} from './release-oci.mjs';
 import {inspectProductionReadOnly} from './release-gpoint-vps-adapter.mjs';
 import {acquireReleaseLock} from './release-lock.mjs';
+import {retryNetworkRead} from './release-network-read.mjs';
 
 const REPOSITORY = 'akhripunov/gpoint';
 const API = 'https://api.github.com';
@@ -136,11 +137,13 @@ export function reconciledResultEvidence(originalEvidence, verifiedFields) {
 }
 
 async function apiJson(route, token, fetchImpl) {
-  const response = await fetchImpl(`${API}/repos/${REPOSITORY}/${route}`, {headers: {
-    Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json',
-    'X-GitHub-Api-Version': '2022-11-28'}, signal: AbortSignal.timeout(30_000)});
-  if (!response.ok) throw new Error(`Reconciliation evidence GET failed (HTTP ${response.status})`);
-  return response.json();
+  return retryNetworkRead('reconciliation_api_get', async remainingMs => {
+    const response = await fetchImpl(`${API}/repos/${REPOSITORY}/${route}`, {headers: {
+      Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28'}, signal: AbortSignal.timeout(Math.min(30_000, remainingMs))});
+    if (!response.ok) throw new Error(`Reconciliation evidence GET failed (HTTP ${response.status})`);
+    return response.json();
+  });
 }
 
 async function readBoundDeploymentArtifact({runId, attempt, candidateSha, token, fetchImpl = globalThis.fetch,
@@ -189,11 +192,13 @@ async function readBoundDeploymentArtifact({runId, attempt, candidateSha, token,
     requireThat(publishers.length === 1 && Number.isSafeInteger(publishers[0].id),
       'Exact original Deploy evidence publisher job is missing or ambiguous');
   console.log('V5_PARENT_EVIDENCE_PHASE=fetch_publisher_logs');
-    const logsResponse = await fetchImpl(`${API}/repos/${REPOSITORY}/actions/jobs/${publishers[0].id}/logs`, {
-      headers: {Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28'}, signal: AbortSignal.timeout(60_000)});
-    requireThat(logsResponse.ok, 'Original Deploy publisher logs are unavailable');
-    const logBytes = await readBoundedBody(logsResponse, MAX_DEPLOY_LOG_BYTES);
+    const logBytes = await retryNetworkRead('publisher_logs_get', async remainingMs => {
+      const logsResponse = await fetchImpl(`${API}/repos/${REPOSITORY}/actions/jobs/${publishers[0].id}/logs`, {
+        headers: {Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28'}, signal: AbortSignal.timeout(Math.min(60_000, remainingMs))});
+      requireThat(logsResponse.ok, 'Original Deploy publisher logs are unavailable');
+      return readBoundedBody(logsResponse, MAX_DEPLOY_LOG_BYTES);
+    });
     const publisherLogs = readPublisherJobLogs(logBytes, directory, run);
   console.log('V5_PARENT_EVIDENCE_PHASE=verify_publisher_logs');
     verifyLoggedDigest(publisherLogs, digest, recovering ? 'RECOVERY_EVIDENCE_DIGEST=' : 'DEPLOY_EVIDENCE_DIGEST=');
