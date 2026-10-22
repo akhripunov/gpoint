@@ -20,5 +20,13 @@
   "devDependencies": {
     "@playwright/test": "^1.63.0",
     "typescript": "^5.7.2"
+  },
+  "pnpm": {
+    "overrides": {
+      "fast-uri@3": "3.1.9",
+      "fast-uri@4": "4.2.3",
+      "source-map-js": "1.2.2",
+      "fastify@5": "5.12.7"
+    }
   }
 }
