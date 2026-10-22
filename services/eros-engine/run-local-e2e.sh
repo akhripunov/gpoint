@@ -196,6 +196,57 @@ echo LOCAL_E2E_COMPOSE_START=BEGIN
 compose_started=1
 compose up -d --wait --wait-timeout 240
 echo LOCAL_E2E_COMPOSE_START=PASS
+compose exec -T postgres psql -U eros_test_admin -d eros_test -v ON_ERROR_STOP=1 <<'SQL'
+GRANT SELECT (id, user_id, channel) ON TABLE engine.chat_sessions TO gpoint_api_test;
+GRANT SELECT (id, session_id, role, read_at) ON TABLE engine.chat_messages TO gpoint_api_test;
+GRANT UPDATE (read_at) ON TABLE engine.chat_messages TO gpoint_api_test;
+SQL
+eros_adapter_privileges=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -At <<'SQL'
+WITH expected(schema_name, table_name, column_name, privilege) AS (
+  VALUES
+    ('engine', 'chat_sessions', 'id', 'SELECT'),
+    ('engine', 'chat_sessions', 'user_id', 'SELECT'),
+    ('engine', 'chat_sessions', 'channel', 'SELECT'),
+    ('engine', 'chat_messages', 'id', 'SELECT'),
+    ('engine', 'chat_messages', 'session_id', 'SELECT'),
+    ('engine', 'chat_messages', 'role', 'SELECT'),
+    ('engine', 'chat_messages', 'read_at', 'SELECT'),
+    ('engine', 'chat_messages', 'read_at', 'UPDATE')
+), actual AS (
+  SELECT n.nspname, c.relname, a.attname, p.privilege
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+  CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('REFERENCES')) AS p(privilege)
+  WHERE n.nspname IN ('engine', 'public') AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+    AND has_column_privilege('gpoint_api_test', c.oid, a.attnum, p.privilege)
+), unexpected_column_privileges AS (
+  SELECT count(*) AS count
+  FROM actual a
+  FULL JOIN expected e
+    ON (a.nspname, a.relname, a.attname, a.privilege) = (e.schema_name, e.table_name, e.column_name, e.privilege)
+  WHERE a.nspname IS NULL OR e.schema_name IS NULL
+), unexpected_table_privileges AS (
+  SELECT count(*) AS count
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE'), ('REFERENCES'), ('TRIGGER')) AS p(privilege)
+  WHERE n.nspname IN ('engine', 'public') AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+    AND has_table_privilege('gpoint_api_test', c.oid, p.privilege)
+)
+SELECT
+  (SELECT count(*) FROM expected e LEFT JOIN actual a
+    ON (a.nspname, a.relname, a.attname, a.privilege) = (e.schema_name, e.table_name, e.column_name, e.privilege)
+    WHERE a.nspname IS NULL)::text || '|' ||
+  (SELECT count FROM unexpected_column_privileges)::text || '|' ||
+  (SELECT count FROM unexpected_table_privileges)::text;
+SQL
+)
+[ "$eros_adapter_privileges" = '0|0|0' ] || {
+  echo "LOCAL_E2E_EROS_ADAPTER_MINIMAL_PRIVILEGES=FAIL missing_extra_table=$eros_adapter_privileges expected=0|0|0" >&2
+  exit 1
+}
+echo "LOCAL_E2E_EROS_ADAPTER_MINIMAL_PRIVILEGES=PASS effective_columns=exact expected=8 extra_table_privileges=0 schemas=engine,public role_bypassrls=true"
 seed_output=$(compose exec -T eros /usr/local/bin/eros-engine seed-personas /etc/eros-engine/test-personas 2>&1) || {
   printf '%s\n' "$seed_output" >&2
   echo LOCAL_E2E_STOCK_PERSONA_SEED=FAIL >&2

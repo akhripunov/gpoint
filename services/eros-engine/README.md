@@ -83,9 +83,11 @@ no first-user sessions and receives HTTP 403 for a foreign session. The
 GPoint inference queue's tenant RLS integration test also passes using the
 `NOBYPASSRLS` `gpoint_worker_test` role. Eros itself has no per-user database
 RLS policies, so its user isolation is verified at the stock HTTP API boundary,
-not with Eros database RLS. The E2E uses an API fixture role with `BYPASSRLS`
-for the remaining cross-database receipt SQL; that grant does not prove
-production-safe access and must not be carried to a pilot. The post-restart
+not with Eros database RLS. The E2E API fixture role still has `BYPASSRLS` for
+the receipt SQL, but is granted only selected identity/read-state columns on
+`chat_sessions` and `chat_messages`; it cannot read message content or persona
+tables. This limits the test role's access but does not provide per-user
+database isolation or establish production-safe credentials. The post-restart
 recall check passed.
 
 A separate disposable-catalog probe against the pinned stock image found all 34

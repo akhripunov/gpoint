@@ -55,6 +55,22 @@ test('only the disposable Eros migrator receives database CREATE privilege', () 
   assert.doesNotMatch(init, /GRANT [^;]* ON DATABASE eros_test TO (?!eros_migrator\b)[a-z_]+;/);
 });
 
+test('GPoint test API receives only Eros receipt columns, not blanket Eros table access', () => {
+  const init = readFileSync(new URL('local-test-init.sql', directory), 'utf8');
+  const erosInit = init.split('\\connect gpoint_test')[0];
+  const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
+  assert.doesNotMatch(erosInit, /ALTER DEFAULT PRIVILEGES[^;]*TO gpoint_api_test/);
+  assert.doesNotMatch(erosInit, /GRANT [^;]* ON ALL TABLES IN SCHEMA [^;]* TO gpoint_api_test/);
+  assert.doesNotMatch(erosInit, /GRANT [^;]* ON ALL SEQUENCES IN SCHEMA [^;]* TO gpoint_api_test/);
+  assert.match(runner, /GRANT SELECT \(id, user_id, channel\) ON TABLE engine\.chat_sessions TO gpoint_api_test;/);
+  assert.match(runner, /GRANT SELECT \(id, session_id, role, read_at\) ON TABLE engine\.chat_messages TO gpoint_api_test;/);
+  assert.match(runner, /GRANT UPDATE \(read_at\) ON TABLE engine\.chat_messages TO gpoint_api_test;/);
+  assert.match(runner, /has_column_privilege\('gpoint_api_test', c\.oid, a\.attnum, p\.privilege\)/);
+  assert.match(runner, /has_table_privilege\('gpoint_api_test', c\.oid, p\.privilege\)/);
+  assert.match(runner, /\[ "\$eros_adapter_privileges" = '0\|0\|0' \]/);
+  assert.match(runner, /LOCAL_E2E_EROS_ADAPTER_MINIMAL_PRIVILEGES=PASS effective_columns=exact expected=8 extra_table_privileges=0 schemas=engine,public role_bypassrls=true/);
+});
+
 test('creator erasure fixture removes dependent profile before asserting relationship mapping guard', () => {
   const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
   const profileDelete = runner.indexOf('DELETE FROM \"CreatorProfile\"');
