@@ -206,7 +206,7 @@ class ProvisionDockerTests(unittest.TestCase):
                 docker('run', '--rm', '--network', network, '--env-file', str(env_file),
                        '--env-file', str(migration_file), '-e', 'AGATA_MIGRATION_TENANT_IDS=' + inventory,
                        IMAGE, 'alembic', 'upgrade', 'head')
-                self.assertEqual(query('SELECT version_num FROM agata.alembic_version'), 'agata0011')
+                self.assertEqual(query('SELECT version_num FROM agata.alembic_version'), 'agata0012')
                 backup_spec = importlib.util.spec_from_file_location('head_backup', ROOT / 'scripts/agata-production-migration.py')
                 backup_gate = importlib.util.module_from_spec(backup_spec); backup_spec.loader.exec_module(backup_gate)
                 backup_gate.DB_CONTAINER = postgres
@@ -217,7 +217,7 @@ class ProvisionDockerTests(unittest.TestCase):
                     restored_head = subprocess.run(['docker','exec','-i',postgres,'pg_restore','-U','postgres',
                         '-d','gpoint_provision_head_backup','--clean','--if-exists','--no-owner'], stdin=stream, capture_output=True, timeout=120)
                 self.assertEqual(restored_head.returncode, 0, 'complete AGATA head backup restore failed; details withheld')
-                self.assertEqual(query('SELECT version_num FROM agata.alembic_version', 'gpoint_provision_head_backup'), 'agata0011')
+                self.assertEqual(query('SELECT version_num FROM agata.alembic_version', 'gpoint_provision_head_backup'), 'agata0012')
                 self.assertEqual(query('SELECT count(*) FROM agata.tenants', 'gpoint_provision_head_backup'), '2')
                 self.assertEqual(query('SELECT count(*) FROM agata.memories', 'gpoint_provision_head_backup'), '0')
             finally:
