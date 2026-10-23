@@ -105,17 +105,21 @@ async def test_sales_runtime_http_persona_drafts_response_and_ownership(monkeypa
                 },
             )
             assert generated.status_code == 200, generated.text
+            chat_state = await client.get(f"/internal/v1/users/{lead}/chat-state")
+            assert chat_state.status_code == 200, chat_state.text
+            disclosure_version = chat_state.json()["disclosureVersion"]
             consent = await client.put(
                 f"/internal/v1/users/{lead}/consent",
                 json={
                     "chat_history": True,
-                    "long_term_memory": False,
+                    "long_term_memory": True,
                     "age_band": "adult",
                     "age_status": "verified",
                     "age_method": "test-fixture-only",
                     "verified_at": "2026-10-03T12:00:00Z",
                     "jurisdiction": "GLOBAL",
                     "disclosure_accepted": True,
+                    "disclosure_version": disclosure_version,
                     "disclosure_receipt_id": uuid4().hex,
                 },
             )

@@ -28,5 +28,5 @@ def test_former_core_owner_cannot_remove_rls_or_replace_identity_helpers():
             assert conn.execute('SELECT count(*) FROM agata.users').fetchone()[0]==0
             conn.execute("SELECT set_config('app.tenant_id',%s,true)",(own,))
             assert conn.execute('SELECT count(*) FROM agata.users').fetchone()[0]>=1
-            assert conn.execute('SELECT version_num FROM agata.alembic_version').fetchone()[0]=='agata0011'
+            assert conn.execute('SELECT version_num FROM agata.alembic_version').fetchone()[0]=='agata0012'
             assert not conn.execute("SELECT has_schema_privilege(session_user,'agata','CREATE')").fetchone()[0]

@@ -1,12 +1,15 @@
 """Only new updates in explicitly managed private Sales dialogs enter Core."""
 
+import re
 from uuid import UUID, uuid4
 
 from app.db.session import GateError
 from app.workflow import Workflow, approval_binding, content_hash
 
 OPT_OUT = {"стоп", "не пишите", "не пиши", "stop", "unsubscribe", "/stop", "/optout"}
-CONSENT_COMMAND = "/gsales_consent 18+ history memory_off"
+CONSENT_COMMAND = re.compile(
+    r"^/gsales_consent 18\+ history disclosure=([1-9]\d{0,8})$", re.IGNORECASE
+)
 
 
 class EventRouter:
@@ -15,6 +18,9 @@ class EventRouter:
         self.w = Workflow(db, core, transport)
 
     async def handle(self, account_id, peer_user_id, message_id, text, outgoing=False):
+        normalized_text = text.strip()
+        consent_match = CONSENT_COMMAND.fullmatch(normalized_text)
+        consent_attempt = normalized_text.casefold().startswith("/gsales_consent")
         async with self.db.transaction() as c:
             row = await (
                 await c.execute(
@@ -65,7 +71,7 @@ class EventRouter:
                 return {"status": "opted_out"}
             if row["current_stage"] in ("opted_out", "declined"):
                 return {"status": "contact_blocked"}
-            if text.strip() != CONSENT_COMMAND:
+            if not consent_attempt:
                 if row["last_inbound_message_id"] and message_id <= row["last_inbound_message_id"]:
                     return {"status": "duplicate_ignored"}
                 if (
@@ -81,18 +87,27 @@ class EventRouter:
                     "UPDATE gsales.dialog_controls SET pending_inbound_message_id=%s,last_inbound_message_id=%s WHERE lead_id=%s",
                     (message_id, message_id, row["lead_id"]),
                 )
-        if text.strip() == CONSENT_COMMAND:
+        if consent_attempt:
+            if consent_match is None:
+                return {"status": "disclosure_version_required"}
+            disclosure_version = int(consent_match.group(1))
+            chat_state = await self.core.request(
+                "GET", f"/internal/v1/users/{row['lead_id']}/chat-state"
+            )
+            if chat_state.get("disclosureVersion") != disclosure_version:
+                return {"status": "disclosure_version_mismatch"}
             await self.core.request(
                 "PUT",
                 f"/internal/v1/users/{row['lead_id']}/consent",
                 json={
                     "chat_history": True,
-                    "long_term_memory": False,
+                    "long_term_memory": True,
                     "age_band": "adult",
                     "age_status": "self_attested",
                     "age_method": "self_attested",
                     "jurisdiction": "GLOBAL",
                     "disclosure_accepted": True,
+                    "disclosure_version": disclosure_version,
                     "disclosure_receipt_id": f"telegram:{peer_user_id}:{message_id}",
                 },
             )

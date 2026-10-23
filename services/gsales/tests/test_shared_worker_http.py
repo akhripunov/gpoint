@@ -88,7 +88,8 @@ def test_two_targets_route_through_shared_worker_without_context_mix(tmp_path, m
         with httpx.Client(base_url=point_url, headers={"Authorization": "Bearer disposable-point-core"}) as c:
             user, character, mid = [uuid4().hex for _ in range(3)]
             assert c.put("/internal/v1/characters/" + character, json={"name": "GPoint QA Anna", "personality": {"traits": ["GPOINT-CONTEXT-ONLY"]}}).status_code == 200
-            consent = {"chat_history": True, "long_term_memory": False, "age_band": "adult", "age_status": "self_attested", "age_method": "self_attested", "disclosure_receipt_id": "synthetic-qa", "jurisdiction": "GLOBAL", "disclosure_accepted": True}
+            chat_state = c.get("/internal/v1/users/" + user + "/chat-state").json()
+            consent = {"chat_history": True, "long_term_memory": False, "age_band": "adult", "age_status": "self_attested", "age_method": "self_attested", "disclosure_receipt_id": "synthetic-qa", "jurisdiction": "GLOBAL", "disclosure_accepted": True, "disclosure_version": chat_state["disclosureVersion"]}
             consent_response = c.put("/internal/v1/users/" + user + "/consent", json=consent)
             assert consent_response.status_code == 200, consent_response.text
             assert c.post("/internal/v1/users/" + user + "/age-assurance/self-attest", json={"confirmed_18_plus": True}).status_code == 200

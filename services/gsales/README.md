@@ -87,11 +87,17 @@ for explicit Sales dialog controls. It verifies the selected personal account,
 ignores known AI echoes, and treats unknown outgoing messages as human takeover.
 Unmanaged dialogs are ignored. No full account history import occurs.
 
-Recipient opt-out commands stop the dialog even during a pause. A recipient can
-explicitly send `/gsales_consent 18+ history memory_off` after being given the AI
-and history disclosure; this records self-attestation and history consent through
-Core. Core must have an OWNER-approved policy permitting that attestation.
-Long-term memory stays OFF. Owner approval to contact is never recipient consent.
+Recipient opt-out commands stop the dialog even during a pause. Before a recipient
+consents, show the current GPoint AI disclosure: the conversation history is saved
+and Eros Engine may create and use persistent memories to personalize future
+replies. Obtain the current `disclosureVersion` from the authenticated Core
+`/internal/v1/users/{lead_id}/chat-state` response, then ask the recipient to send
+`/gsales_consent 18+ history disclosure=<version>` themselves. Core verifies that
+version again while recording the disclosure receipt, chat-history consent,
+long-term-memory consent and age self-attestation. The command without a version
+is rejected; an outdated version cannot accept a newer notice. This consent does
+not enable automated sending. Core must have an OWNER-approved policy permitting
+age self-attestation. Owner approval to contact is never recipient consent.
 Missing consent blocks generation but does not prevent subsequent explicit consent.
 
 Pending replies retain only the inbound ID in dialog controls. Listener polling

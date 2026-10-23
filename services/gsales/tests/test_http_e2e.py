@@ -222,7 +222,13 @@ async def test_real_http_pending_worker_restart_delivery_and_context(core_server
         ).status_code == 200
         assert (await client.post(f"/v1/attempts/{aid}/send")).json()["status"] == "sent"
         router = EventRouter(app.state.db, app.state.core, telegram)
-        assert (await router.handle(account, uid, 101, "/gsales_consent 18+ history memory_off"))[
+        async with httpx.AsyncClient(
+            base_url=core_server, headers={"Authorization": "Bearer disposable-e2e-core"}
+        ) as diagnostic:
+            consent_state = await diagnostic.get(f"/internal/v1/users/{lid}/chat-state")
+            assert consent_state.status_code == 200, consent_state.text
+            disclosure_version = consent_state.json()["disclosureVersion"]
+        assert (await router.handle(account, uid, 101, f"/gsales_consent 18+ history disclosure={disclosure_version}"))[
             "status"
         ] == "explicit_consent_received"
         assert (

@@ -206,7 +206,7 @@ async def test_pending_reply_recovers_and_sends_once(crash_after_commit):
 
 @pytest.mark.asyncio
 async def test_explicit_consent_accepted_while_paused_without_enabling_sends():
-    from app.telegram.events import CONSENT_COMMAND, EventRouter
+    from app.telegram.events import EventRouter
 
     w, ids = await fixture()
     await w.pause(lead_id=ids[2])
@@ -216,16 +216,53 @@ async def test_explicit_consent_accepted_while_paused_without_enabling_sends():
         ).fetchone()
 
     class ConsentCore(Core):
-        calls = []
+        def __init__(self):
+            self.calls = []
 
-        async def request(self, *args, **kwargs):
-            self.calls.append(kwargs["json"])
+        async def request(self, method, path, **kwargs):
+            self.calls.append((method, path, kwargs.get("json")))
+            if method == "GET":
+                return {"disclosureVersion": 7, "disclosureRequired": True}
+            return {"ok": True}
 
     core = ConsentCore()
     router = EventRouter(w.db, core, w.transport)
-    assert await router.handle(ids[0], lead["telegram_user_id"], 100, CONSENT_COMMAND) == {
+    assert await router.handle(ids[0], lead["telegram_user_id"], 100, "/gsales_consent 18+ history disclosure=6") == {
+        "status": "disclosure_version_mismatch"
+    }
+    assert not any(method == "PUT" for method, _, _ in core.calls)
+    assert await router.handle(ids[0], lead["telegram_user_id"], 101, "/gsales_consent 18+ history disclosure=7") == {
         "status": "explicit_consent_received"
     }
-    assert core.calls[0]["long_term_memory"] is False
-    assert core.calls[0]["disclosure_receipt_id"].endswith(":100")
+    consent = next(payload for method, path, payload in core.calls if method == "PUT")
+    assert consent["long_term_memory"] is True
+    assert consent["disclosure_version"] == 7
+    assert consent["disclosure_receipt_id"].endswith(":101")
+    assert w.transport.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_legacy_consent_command_without_disclosure_version_fails_closed():
+    from app.telegram.events import EventRouter
+
+    w, ids = await fixture()
+    async with w.db.transaction() as c:
+        lead = await (
+            await c.execute("SELECT telegram_user_id FROM gsales.leads WHERE id=%s", (ids[2],))
+        ).fetchone()
+
+    class UnusedCore(Core):
+        calls = 0
+
+        async def request(self, *args, **kwargs):
+            self.calls += 1
+            raise AssertionError("stale disclosure command must not reach Core")
+
+    core = UnusedCore()
+    router = EventRouter(w.db, core, w.transport)
+    result = await router.handle(
+        ids[0], lead["telegram_user_id"], 101, "/gsales_consent 18+ history memory_off"
+    )
+    assert result == {"status": "disclosure_version_required"}
+    assert core.calls == 0
     assert w.transport.calls == 0
