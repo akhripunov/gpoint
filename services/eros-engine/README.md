@@ -115,6 +115,19 @@ had no egress. Real inference was not run. The GPoint queue tenant RLS test
 passed with a non-bypass worker role; Eros has no per-user RLS, and the API
 fixture's `BYPASSRLS` receipt access is not a production isolation check.
 
+The deterministic fixture run is not a real Codex Local E2E. A later bounded
+attempt made one Codex CLI invocation and stopped on its first network error;
+no model response was received and no follow-up inference was sent. On
+2026-10-23, read-only host diagnostics found `chatgpt.com` resolving to
+`240.0.0.48` and `api.openai.com` to `240.0.2.128`, both in the non-public
+240.0.0.0/4 range. The configured resolver was classified as private and the
+route used a `utun` interface. An unauthenticated HEAD to `chatgpt.com` returned
+403; the request to `api.openai.com` timed out during connection/TLS. This
+identifies a current network-path blocker but not the specific resolver,
+tunnel, or policy responsible. No DNS, VPN, route, or Worker settings were
+changed. A new limited OWNER grant is required after the network path is
+confirmed healthy.
+
 The adapter provisions the persona with stock `seed-personas` and uses stock
 `POST /comp/chat/start` to create or resume a user instance. GPoint stores the
 creator-to-genome and user/creator-to-instance mappings in its own database;
