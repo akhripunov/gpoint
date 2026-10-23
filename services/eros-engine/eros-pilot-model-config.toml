@@ -1,0 +1,20 @@
+# Exact pilot routes only. Chat and extraction use the existing GPOINT API and
+# Worker; embeddings use the internal GPoint API proxy to VPS Ollama.
+[defaults]
+fallback_model = "gpoint-codex@gpoint"
+fallback_temperature = 1.0
+
+[tasks.chat_companion]
+model = "gpoint-codex@gpoint"
+retry_depth = 0
+
+[providers.gpoint]
+chat = "http://eros-pilot-api:3000/eros-worker/v1/chat/completions"
+embeddings = "http://eros-pilot-api:3000/eros-worker/v1/embeddings"
+
+[tasks.embedding]
+model = "qwen3-embedding:0.6b@gpoint"
+
+[tasks.memory_extraction]
+model = "gpoint-codex@gpoint"
+max_tokens = 512

@@ -1,0 +1,6 @@
+{
+  "model": "qwen3-embedding:0.6b",
+  "digest": "ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d",
+  "sizeBytes": 639150858,
+  "source": "Ollama local model manifest readback"
+}

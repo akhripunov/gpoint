@@ -59,17 +59,20 @@ alter its installed configuration.
   relationship mapping uses restrictive user/creator foreign keys so deleting
   either parent cannot silently discard the only Eros instance pointer. This
   intentionally blocks GPoint deletion while a mapping exists; it does not
-  erase Eros data. A release pilot is blocked until a tested deletion adapter
-  covers transcript, memory, summaries, embeddings and queued/background writes
-  without changing Eros source.
+  erase Eros data. OWNER has accepted a strictly synthetic, single-user VPS
+  pilot in a dedicated disposable Eros database. The missing complete erasure
+  adapter is a hard gate before any real-user access; the pilot must contain no
+  real user data and must be removable by deleting the isolated database and
+  its dedicated Ollama model volume.
 - Stock `classify_session` performs model/extraction and embedding before an
   unconditional memory upsert; archive deletes relationship memory. A delayed
   write crossing archive is a plausible data-resurrection risk, not a proven
   failure. It needs a synthetic reproduction and an upstream-compatible
   lifecycle solution before data deletion can be relied on. Transcript
   retention after archive itself is expected behavior.
-- The test allowlist remains synthetic and local. No broad production routing
-  or AutoWrite/memory-policy change is made here.
+- The pilot allowlist is synthetic and contains exactly one test user and one
+  test creator. No normal user is routed to Eros, and no AutoWrite/memory-policy
+  change is made here.
 
 ## Local verification boundary
 
@@ -159,10 +162,162 @@ scope session and message operations to the authenticated Eros user, which the
 adapter maps deterministically from the GPoint account. The local API-isolation
 test verifies that HTTP boundary. Removing receipt SQL closes the direct
 cross-service database bypass, but it does not fix Eros runtime `BYPASSRLS` or
-provide per-user database isolation; that remains a hard pilot security gate.
+provide per-user database isolation. This is accepted only for the isolated
+single-synthetic-user pilot; it remains a hard gate before any real-user
+access.
 
-Before any pilot, independently verify stock image SHA/provenance, dedicated
-database ownership and backups, Eros runtime privileges, exact provider route,
-GPOINT Worker compatibility, deletion behavior, resource use on the target
-VPS, and AGPL-3.0 obligations for the network service. Mac resource measurements
-cannot be represented as VPS capacity evidence.
+Before the synthetic pilot, independently verify stock image SHA/provenance,
+dedicated database ownership and backup/restore, isolated network boundaries,
+the exact provider route, GPOINT Worker compatibility, current VPS resource
+headroom, and AGPL-3.0 distribution/source obligations. Real-user access also
+requires a tested deletion path. Mac resource measurements are directional
+evidence and cannot replace a VPS load measurement.
+
+## Isolated VPS pilot profile
+
+`infra/production/docker-compose.eros-pilot.yml` is an opt-in overlay for the
+existing V5 Compose project. It adds a second instance of the existing GPoint
+API image for the synthetic scope so that the running API container is not
+recreated. The pilot API uses the existing GPoint database and queue, with an
+exact one-user/one-creator allowlist; Eros gets a separate `eros_pilot`
+PostgreSQL instance and volume. The pilot API is the only service connected to
+both GPoint's existing internal networks and the pilot networks. Eros can reach
+the pilot API and its own database, but cannot reach Ollama directly. The API
+reaches Ollama over an internal-only network. Caddy returns 404 for the public
+embeddings proxy route. None of these services publishes a host port.
+
+The profile pins the official Linux/amd64 Ollama image by registry manifest
+digest. A one-shot initializer pulls `qwen3-embedding:0.6b` into its dedicated
+volume; a separate Node verifier checks the model's exact full digest through
+Ollama's internal tags API before Eros starts. Only the initializer has
+outbound Docker bridge access; the serving Ollama, Eros, PostgreSQL and Eros
+database networks are internal. Chat and extraction use the GPoint API and
+existing GPOINT Worker route. The stock Eros image remains the candidate-bound
+V5 GHCR image with `patch-set=none`.
+
+The Compose profile sets caps of 1.5 GiB RAM/1 CPU for Ollama, 384 MiB/0.5 CPU
+for Eros and 256 MiB/0.5 CPU for its PostgreSQL. These are pilot ceilings, not
+evidence that a 2 GiB VPS can safely host them alongside the existing services.
+See ME-36 for the measured resource decision and deployment approval gate.
+
+### Pilot backup and rollback
+
+Back up only the dedicated pilot database. Keep the archive and a mode-0600
+copy of `/opt/gpoint/env/eros-pilot.env` under the mode-0700
+`/opt/gpoint/backups/eros-pilot` directory. The env copy preserves the exact
+pilot image digest and credentials; do not put it in Git, CI artifacts or
+Linear. From the VPS, set `PILOT_SHA` to the deployed source SHA and use this
+Compose command for every operation (run the snippets in Bash):
+
+```bash
+set -euo pipefail
+: "${PILOT_SHA:?set the exact deployed profile source SHA}"
+profile_sha=$(sed -n 's/^EROS_PILOT_SOURCE_SHA=//p' /opt/gpoint/env/eros-pilot.env | head -1)
+test "$PILOT_SHA" = "$profile_sha"
+printf '%s\n' "$PILOT_SHA" | grep -Eq '^[a-f0-9]{40}$'
+compose=(docker compose -p compose
+  --env-file /opt/gpoint/env/production.env
+  --env-file /opt/gpoint/env/eros-pilot.env
+  -f /opt/gpoint/compose/docker-compose.yml
+  -f "/opt/gpoint/releases/${PILOT_SHA}/source/infra/production/docker-compose.eros-pilot.yml"
+  --profile eros-pilot)
+```
+
+Create and validate a custom-format snapshot before changing the pilot image or
+schema:
+
+```bash
+set -euo pipefail
+umask 077
+install -d -m 700 /opt/gpoint/backups/eros-pilot
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+backup="/opt/gpoint/backups/eros-pilot/eros-pilot-${stamp}.dump"
+env_snapshot="/opt/gpoint/backups/eros-pilot/eros-pilot-env-${stamp}.env"
+install -m 600 /opt/gpoint/env/eros-pilot.env "$env_snapshot"
+"${compose[@]}" exec -T postgres pg_dump -U eros_pilot_admin -d eros_pilot -Fc > "$backup"
+"${compose[@]}" exec -T postgres pg_restore --list - < "$backup" > /dev/null
+sha256sum "$backup" > "${backup}.sha256"
+chmod 600 "$backup" "${backup}.sha256"
+```
+
+For rollback, explicitly select a saved archive and its matching mode-0600
+environment snapshot. Verify the archive checksum before restoring. The saved
+`EROS_PILOT_SOURCE_SHA` binds the profile to the matching source bundle, and
+`EROS_PILOT_IMAGE` preserves the immutable Eros image. The commands below
+assume the standard pilot roles from `eros-pilot-init.sh` already exist in
+this PostgreSQL cluster. Restore names are timestamped, so remnants from a
+failed earlier attempt remain untouched:
+
+```bash
+set -euo pipefail
+: "${PILOT_BACKUP:?set an explicit backup path}"
+: "${PILOT_ENV_SNAPSHOT:?set the matching saved pilot env path}"
+case "$PILOT_BACKUP" in /opt/gpoint/backups/eros-pilot/*.dump) ;; *) exit 2 ;; esac
+case "$PILOT_ENV_SNAPSHOT" in /opt/gpoint/backups/eros-pilot/eros-pilot-env-*.env) ;; *) exit 2 ;; esac
+backup_stamp=${PILOT_BACKUP##*/eros-pilot-}
+backup_stamp=${backup_stamp%.dump}
+env_stamp=${PILOT_ENV_SNAPSHOT##*/eros-pilot-env-}
+env_stamp=${env_stamp%.env}
+test -n "$backup_stamp" && test "$backup_stamp" = "$env_stamp"
+test "$(stat -c '%a' "$PILOT_ENV_SNAPSHOT")" = 600
+sha256sum -c "${PILOT_BACKUP}.sha256"
+PILOT_SHA=$(sed -n 's/^EROS_PILOT_SOURCE_SHA=//p' "$PILOT_ENV_SNAPSHOT" | head -1)
+printf '%s\n' "$PILOT_SHA" | grep -Eq '^[a-f0-9]{40}$'
+rollback_compose=(docker compose -p compose
+  --env-file /opt/gpoint/env/production.env
+  --env-file "$PILOT_ENV_SNAPSHOT"
+  -f /opt/gpoint/compose/docker-compose.yml
+  -f "/opt/gpoint/releases/${PILOT_SHA}/source/infra/production/docker-compose.eros-pilot.yml"
+  --profile eros-pilot)
+backup="$PILOT_BACKUP"
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+restore_db="eros_pilot_restore_${stamp}"
+failed_db="eros_pilot_failed_${stamp}"
+
+# Create a clean target and restore the archive with its original object owners.
+"${rollback_compose[@]}" exec -T postgres psql -U eros_pilot_admin -d postgres \
+  -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${restore_db} OWNER eros_pilot_admin"
+"${rollback_compose[@]}" exec -T postgres psql -U eros_pilot_admin -d postgres \
+  -v ON_ERROR_STOP=1 -c "GRANT CONNECT, CREATE ON DATABASE ${restore_db} TO eros_migrator"
+"${rollback_compose[@]}" exec -T postgres psql -U eros_pilot_admin -d postgres \
+  -v ON_ERROR_STOP=1 -c "GRANT CONNECT ON DATABASE ${restore_db} TO eros_runtime"
+"${rollback_compose[@]}" exec -T postgres pg_restore -U eros_pilot_admin \
+  -d "${restore_db}" < "$backup"
+
+# Confirm the restore has a populated stock migration ledger before cutover.
+"${rollback_compose[@]}" exec -T postgres psql -U eros_pilot_admin -d "${restore_db}" \
+  -v ON_ERROR_STOP=1 -Atc \
+  'SELECT count(*) FROM public._sqlx_migrations' | grep -Eq '^[1-9][0-9]*$'
+# Keep the current Eros database active until the restore ledger check passes.
+
+# Cut over by renaming databases; Eros remains stopped if any step fails.
+"${rollback_compose[@]}" stop eros
+"${rollback_compose[@]}" exec -T postgres psql -U eros_pilot_admin -d postgres \
+  -v ON_ERROR_STOP=1 -c \
+  "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname IN ('eros_pilot', '${restore_db}') AND pid <> pg_backend_pid()"
+"${rollback_compose[@]}" exec -T postgres psql -U eros_pilot_admin -d postgres \
+  -v ON_ERROR_STOP=1 -c "ALTER DATABASE eros_pilot RENAME TO ${failed_db}"
+"${rollback_compose[@]}" exec -T postgres psql -U eros_pilot_admin -d postgres \
+  -v ON_ERROR_STOP=1 -c "ALTER DATABASE ${restore_db} RENAME TO eros_pilot"
+"${rollback_compose[@]}" up -d --no-deps eros
+"${rollback_compose[@]}" ps eros
+# After health is green, verify synthetic history and recall through the pilot
+# API. If that check fails, stop Eros and rename the failed restored DB aside;
+# rename ${failed_db} back to eros_pilot and restore the prior env snapshot.
+```
+
+The `stamp` contains only UTC digits and `T`/`Z`, so generated database
+identifiers are safe to interpolate in these SQL statements. Confirm Eros
+health and perform a synthetic history/recall check before considering rollback
+complete. Keep the failed database and snapshot until that check passes. Do not
+use `down -v`, delete the Ollama volume, or touch the GPoint database. A restore
+or cutover failure leaves Eros stopped and both database copies available for
+diagnosis.
+
+The local rehearsal used the exact stock image and disposable PostgreSQL on an
+internal-only Docker network: it applied the stock migrations, created a
+synthetic marker, ran `pg_dump -Fc`, restored into a second database, verified
+the original row and `eros_migrator` ownership, then swapped database names and
+verified the restored row again. Both databases, container and network were
+removed afterward. This validates database snapshot/restore/name-swap logic;
+the full VPS Compose/image rollback is still a pre-deploy gate.

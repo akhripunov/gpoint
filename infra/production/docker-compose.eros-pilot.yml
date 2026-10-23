@@ -1,0 +1,213 @@
+services:
+  eros-pilot-api:
+    profiles: [eros-pilot]
+    image: gpoint-runtime:${GPOINT_APP_IMAGE_SHA:-${RELEASE_SHA:?exact GPoint release SHA is required}}
+    restart: unless-stopped
+    command: ["node", "apps/api/dist/apps/api/src/main.js"]
+    env_file:
+      - /opt/gpoint/env/production.env
+      - /opt/gpoint/env/eros-pilot.env
+    environment:
+      EROS_ENABLED: "true"
+      EROS_PRODUCTION_TEST_MODE: "true"
+      EROS_DATA_MODE: synthetic
+      EROS_SERVICE_URL: http://eros:8080
+      EROS_OLLAMA_EMBEDDING_URL: http://ollama:11434/api/embed
+      GPOINT_API_KEY: ${EROS_PILOT_GPOINT_API_KEY:?pilot API key required}
+      EROS_WORKER_SIGNING_SECRET: ${EROS_PILOT_BRIDGE_SIGNING_SECRET:?pilot bridge signing secret required}
+      EROS_WORKER_TENANT_ID: ${EROS_PILOT_TENANT_ID:?synthetic tenant ID required}
+      AGATA_TENANT_ID: ${EROS_PILOT_TENANT_ID:?synthetic tenant ID required}
+      EROS_PRODUCTION_TEST_USER_IDS: ${EROS_PILOT_TEST_USER_ID:?synthetic test user ID is required}
+      EROS_PRODUCTION_TEST_CREATOR_IDS: ${EROS_PILOT_TEST_CREATOR_ID:?synthetic test creator ID is required}
+    networks:
+      - gpoint_app
+      - shared_internal
+      - eros_pilot_app
+      - eros_pilot_embeddings
+    expose: ["3000"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+    mem_limit: 256m
+    cpus: 0.50
+
+  postgres:
+    profiles: [eros-pilot]
+    image: ${EROS_PILOT_POSTGRES_IMAGE:-pgvector/pgvector:0.8.6-pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: eros_pilot
+      POSTGRES_USER: eros_pilot_admin
+      POSTGRES_PASSWORD: ${EROS_PILOT_POSTGRES_ADMIN_PASSWORD:?pilot-only database admin password is required}
+      EROS_PILOT_MIGRATOR_PASSWORD: ${EROS_PILOT_MIGRATOR_PASSWORD:?pilot-only migration password is required}
+      EROS_PILOT_RUNTIME_PASSWORD: ${EROS_PILOT_RUNTIME_PASSWORD:?pilot-only runtime password is required}
+    volumes:
+      - eros_pilot_pgdata:/var/lib/postgresql/data
+      - "/opt/gpoint/releases/${EROS_PILOT_SOURCE_SHA:?exact pilot source SHA is required}/source/infra/production/eros-pilot-init.sh:/docker-entrypoint-initdb.d/10-eros-pilot-roles.sh:ro"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eros_pilot_admin -d eros_pilot"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+    networks: [eros_pilot_data]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    mem_limit: 256m
+    cpus: 0.50
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  eros-migrate:
+    profiles: [eros-pilot]
+    image: ${EROS_PILOT_IMAGE:?exact stock Eros image digest is required}
+    restart: "no"
+    command: ["migrate"]
+    environment:
+      DATABASE_URL: postgresql://eros_migrator:${EROS_PILOT_MIGRATOR_PASSWORD:?migration password required}@postgres:5432/eros_pilot
+    depends_on:
+      postgres: {condition: service_healthy}
+    networks: [eros_pilot_data]
+    read_only: true
+    tmpfs: [/tmp]
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.50
+
+  ollama:
+    profiles: [eros-pilot]
+    image: ${EROS_PILOT_OLLAMA_IMAGE:-ollama/ollama@sha256:352e045b937ac29d3d9550c22fb85525f60a89e064df34c26579bee5a93b3a16}
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    depends_on:
+      ollama-model-pull: {condition: service_completed_successfully}
+    volumes:
+      - eros_pilot_ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 12
+    networks: [eros_pilot_embeddings]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    pids_limit: 256
+    mem_limit: 1536m
+    cpus: 1.0
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  ollama-model-pull:
+    profiles: [eros-pilot]
+    image: ${EROS_PILOT_OLLAMA_IMAGE:-ollama/ollama@sha256:352e045b937ac29d3d9550c22fb85525f60a89e064df34c26579bee5a93b3a16}
+    restart: "no"
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["/usr/local/bin/pull-eros-pilot-model.sh"]
+    volumes:
+      - eros_pilot_ollama:/root/.ollama
+      - "/opt/gpoint/releases/${EROS_PILOT_SOURCE_SHA:?exact pilot source SHA is required}/source/infra/production/pull-eros-pilot-model.sh:/usr/local/bin/pull-eros-pilot-model.sh:ro"
+    networks: [eros_pilot_fetch]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    pids_limit: 128
+    read_only: true
+    tmpfs: [/tmp]
+    mem_limit: 1536m
+    cpus: 1.0
+
+  ollama-model-verify:
+    profiles: [eros-pilot]
+    image: gpoint-runtime:${GPOINT_APP_IMAGE_SHA:-${RELEASE_SHA:?exact GPoint release SHA is required}}
+    restart: "no"
+    command: ["node", "/opt/gpoint/verify-eros-pilot-model.mjs"]
+    environment:
+      EROS_PILOT_OLLAMA_MODEL_DIGEST: ${EROS_PILOT_OLLAMA_MODEL_DIGEST:-ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d}
+    volumes:
+      - "/opt/gpoint/releases/${EROS_PILOT_SOURCE_SHA:?exact pilot source SHA is required}/source/services/eros-engine/verify-eros-pilot-model.mjs:/opt/gpoint/verify-eros-pilot-model.mjs:ro"
+    depends_on:
+      ollama: {condition: service_healthy}
+    networks: [eros_pilot_embeddings]
+    read_only: true
+    tmpfs: [/tmp]
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.25
+
+  eros:
+    profiles: [eros-pilot]
+    image: ${EROS_PILOT_IMAGE:?exact stock Eros image digest is required}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://eros_runtime:${EROS_PILOT_RUNTIME_PASSWORD:?runtime password required}@postgres:5432/eros_pilot
+      GPOINT_API_KEY: ${EROS_PILOT_GPOINT_API_KEY:?pilot API key required}
+      GPOINT_WORKER_BRIDGE_SIGNING_SECRET: ${EROS_PILOT_BRIDGE_SIGNING_SECRET:?pilot bridge signing secret required}
+      GPOINT_WORKER_TENANT_ID: ${EROS_PILOT_TENANT_ID:?synthetic tenant ID required}
+      OPENROUTER_API_KEY: ""
+      SUPABASE_JWT_SECRET: ${EROS_PILOT_SUPABASE_JWT_SECRET:?pilot JWT secret required}
+      MODEL_CONFIG_PATH: /etc/eros-engine/model_config.toml
+      RUST_LOG: info
+    volumes:
+      - "/opt/gpoint/releases/${EROS_PILOT_SOURCE_SHA:?exact pilot source SHA is required}/source/services/eros-engine/eros-pilot-model-config.toml:/etc/eros-engine/model_config.toml:ro"
+    depends_on:
+      postgres: {condition: service_healthy}
+      eros-migrate: {condition: service_completed_successfully}
+      ollama-model-pull: {condition: service_completed_successfully}
+      ollama-model-verify: {condition: service_completed_successfully}
+      ollama: {condition: service_healthy}
+      eros-pilot-api: {condition: service_healthy}
+    expose: ["8080"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 8
+    networks: [eros_pilot_app, eros_pilot_data]
+    read_only: true
+    tmpfs: [/tmp]
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 384m
+    cpus: 0.50
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+networks:
+  gpoint_app:
+    external: true
+    name: gpoint_app
+  shared_internal:
+    external: true
+    name: shared_internal
+  eros_pilot_app:
+    name: gpoint_eros_pilot_app
+    internal: true
+  eros_pilot_data:
+    name: gpoint_eros_pilot_data
+    internal: true
+  eros_pilot_embeddings:
+    name: gpoint_eros_pilot_embeddings
+    internal: true
+  eros_pilot_fetch:
+    name: gpoint_eros_pilot_fetch
+
+volumes:
+  eros_pilot_pgdata:
+    name: gpoint_eros_pilot_pgdata
+  eros_pilot_ollama:
+    name: gpoint_eros_pilot_ollama

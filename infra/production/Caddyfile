@@ -14,6 +14,8 @@ gpoint.amiora.one {
     uri strip_prefix /gsales
     reverse_proxy 127.0.0.1:8010
   }
+  @eros_worker_embeddings path /api/eros-worker/v1/embeddings*
+  respond @eros_worker_embeddings 404
   @api path /api/*
   handle @api {
     uri strip_prefix /api
