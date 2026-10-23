@@ -161,7 +161,7 @@ class DockerMigrationProtocol(unittest.TestCase):
                     'SELECT count(*) FROM agata.messages WHERE incoming_read_at IS NOT NULL').stdout.strip()
                 self.assertEqual(marked, '2')
                 preserved = docker('exec', postgres, 'psql', '-U', 'postgres', '-d', 'gpoint', '-Atc',
-                    f"SELECT version || ':' || status || ':' || rules->>'policy_marker' "
+                    f"SELECT version || ':' || status || ':' || (rules->>'policy_marker') "
                     f"FROM agata.regional_policy_profiles WHERE tenant_id='{tenant1}' "
                     "ORDER BY version").stdout.strip().splitlines()
                 self.assertEqual(preserved, [
