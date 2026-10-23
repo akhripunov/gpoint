@@ -1,3 +1,5 @@
+import {retryNetworkRead} from './release-network-read.mjs';
+
 const SHA40 = /^[a-f0-9]{40}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const GHCR_USERNAME = /^[A-Za-z0-9-]{1,39}(?:\[bot\])?$/;
@@ -58,63 +60,90 @@ export function validateOciReceipt(receipt, candidate, { runId, runAttempt } = {
   return { ...receipt, images };
 }
 
-export async function verifyOciReadAccess(receipt, username, token, fetcher = fetch) {
+export async function verifyOciReadAccess(receipt, username, token, fetcher = fetch, retryOptions = {}) {
   if (!GHCR_USERNAME.test(username ?? '') || typeof token !== 'string' || !token.trim()) {
     fail('GHCR exact-digest read check failed');
   }
   if (receipt?.schema !== 3 || receipt?.transport !== 'ghcr-oci') fail('GHCR exact-digest read check failed');
-  try {
-    for (const [role, expectedRepository] of Object.entries(IMAGE_REPOSITORIES)) {
-      const image = receipt.images?.[role];
-      if (!image || image.repository !== expectedRepository || !DIGEST.test(image.digest ?? '')) {
-        fail('GHCR exact-digest read check failed');
-      }
-      const url = `https://ghcr.io/v2/${expectedRepository.slice('ghcr.io/'.length)}/manifests/${image.digest}`;
-      const headers = {
-        Accept: [
-          'application/vnd.oci.image.index.v1+json',
-          'application/vnd.oci.image.manifest.v1+json',
-          'application/vnd.docker.distribution.manifest.list.v2+json',
-          'application/vnd.docker.distribution.manifest.v2+json',
-        ].join(', '),
-      };
-      const request = (requestHeaders = headers) => fetcher(url, {
-        method: 'GET',
-        redirect: 'error',
-        headers: requestHeaders,
-      });
-      let response = await request();
-      if (response.status === 401) {
-        const challenge = response.headers.get('www-authenticate') ?? '';
-        if (!challenge.startsWith('Bearer ')) fail('GHCR exact-digest read check failed');
-        const attributes = Object.fromEntries([...challenge.slice(7).matchAll(/([A-Za-z][A-Za-z0-9_-]*)="([^"]*)"/g)]
-          .map((match) => [match[1], match[2]]));
-        const scope = `repository:${expectedRepository.slice('ghcr.io/'.length)}:pull`;
-        if (attributes.realm !== 'https://ghcr.io/token' || attributes.service !== 'ghcr.io' || attributes.scope !== scope) {
+  for (const [role, expectedRepository] of Object.entries(IMAGE_REPOSITORIES)) {
+    let phase = 'manifest';
+    try {
+      await retryNetworkRead(`ghcr_${role}_read`, async remainingMs => {
+        phase = 'manifest';
+        const signal = AbortSignal.timeout(Math.min(30_000, remainingMs));
+        const image = receipt.images?.[role];
+        if (!image || image.repository !== expectedRepository || !DIGEST.test(image.digest ?? '')) {
           fail('GHCR exact-digest read check failed');
         }
-        const tokenUrl = new URL(attributes.realm);
-        tokenUrl.searchParams.set('service', attributes.service);
-        tokenUrl.searchParams.set('scope', scope);
-        const basic = Buffer.from(`${username}:${token.trim()}`, 'utf8').toString('base64');
-        const tokenResponse = await fetcher(tokenUrl.toString(), {
-          method: 'GET', redirect: 'error',
-          headers: { Authorization: `Basic ${basic}`, Accept: 'application/json' },
+        const url = `https://ghcr.io/v2/${expectedRepository.slice('ghcr.io/'.length)}/manifests/${image.digest}`;
+        const headers = {
+          Accept: [
+            'application/vnd.oci.image.index.v1+json',
+            'application/vnd.oci.image.manifest.v1+json',
+            'application/vnd.docker.distribution.manifest.list.v2+json',
+            'application/vnd.docker.distribution.manifest.v2+json',
+          ].join(', '),
+        };
+        const request = (requestHeaders = headers) => fetcher(url, {
+          method: 'GET',
+          redirect: 'error',
+          headers: requestHeaders, signal,
         });
-        if (!tokenResponse.ok || tokenResponse.url !== tokenUrl.toString()) fail('GHCR exact-digest read check failed');
-        const body = new Uint8Array(await tokenResponse.arrayBuffer());
-        if (body.byteLength > 65536) fail('GHCR exact-digest read check failed');
-        const payload = JSON.parse(new TextDecoder().decode(body));
-        const bearer = payload?.token ?? payload?.access_token;
-        if (typeof bearer !== 'string' || !/^[^\s\r\n]{1,16384}$/.test(bearer)) fail('GHCR exact-digest read check failed');
-        response = await request({ ...headers, Authorization: `Bearer ${bearer}` });
+        let response = await request();
+        if (response.status === 401) {
+          const challenge = response.headers.get('www-authenticate') ?? '';
+          if (!challenge.startsWith('Bearer ')) fail('GHCR exact-digest read check failed');
+          const attributes = Object.fromEntries([...challenge.slice(7).matchAll(/([A-Za-z][A-Za-z0-9_-]*)="([^"]*)"/g)]
+            .map((match) => [match[1], match[2]]));
+          const scope = `repository:${expectedRepository.slice('ghcr.io/'.length)}:pull`;
+          if (attributes.realm !== 'https://ghcr.io/token' || attributes.service !== 'ghcr.io' || attributes.scope !== scope) {
+            fail('GHCR exact-digest read check failed');
+          }
+          const tokenUrl = new URL(attributes.realm);
+          tokenUrl.searchParams.set('service', attributes.service);
+          tokenUrl.searchParams.set('scope', scope);
+          const basic = Buffer.from(`${username}:${token.trim()}`, 'utf8').toString('base64');
+          phase = 'token';
+          const tokenResponse = await fetcher(tokenUrl.toString(), {
+            method: 'GET', redirect: 'error', signal,
+            headers: { Authorization: `Basic ${basic}`, Accept: 'application/json' },
+          });
+          if (!tokenResponse.ok) throw Object.assign(new Error('GHCR token HTTP failure'), {status: tokenResponse.status});
+          if (tokenResponse.url !== tokenUrl.toString()) fail('GHCR token endpoint mismatch');
+          phase = 'token_body';
+          const body = new Uint8Array(await tokenResponse.arrayBuffer());
+          if (body.byteLength > 65536) fail('GHCR exact-digest read check failed');
+          const payload = JSON.parse(new TextDecoder().decode(body));
+          const bearer = payload?.token ?? payload?.access_token;
+          if (typeof bearer !== 'string' || !/^[^\s\r\n]{1,16384}$/.test(bearer)) fail('GHCR exact-digest read check failed');
+          phase = 'bearer_manifest';
+          response = await request({ ...headers, Authorization: `Bearer ${bearer}` });
+        }
+        if (!response.ok) throw Object.assign(new Error('GHCR manifest HTTP failure'), {status: response.status});
+        if (response.url !== url) fail('GHCR manifest endpoint mismatch');
+        if (response.headers.get('docker-content-digest') !== image.digest) {
+          throw Object.assign(new Error('GHCR digest mismatch'), {code: 'DIGEST_MISMATCH'});
+        }
+      }, retryOptions);
+    } catch (error) {
+      // Never expose fetch messages, URLs, headers, token bodies or causes.
+      const allowedCodes = new Set(['UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT',
+        'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET', 'ETIMEDOUT', 'ECONNRESET', 'ECONNABORTED',
+        'EPIPE', 'ERR_STREAM_PREMATURE_CLOSE', 'ERR_SOCKET_CONNECTION_TIMEOUT',
+        'ERR_SSL_UNEXPECTED_EOF_WHILE_READING', 'ERR_TLS_HANDSHAKE_TIMEOUT',
+        'CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+        'ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_SIGNATURE_FAILURE',
+        'ERR_TLS_CERT_SIGNATURE_ALGORITHM_UNSUPPORTED', 'DIGEST_MISMATCH']);
+      let code = 'READ_OR_VALIDATION_FAILURE';
+      if (Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599) code = `HTTP_${error.status}`;
+      else if (error?.name === 'NetworkReadBudgetError') code = 'NETWORK_BUDGET_EXHAUSTED';
+      else if (error?.name === 'TimeoutError') code = 'REQUEST_TIMEOUT';
+      else if (error instanceof SyntaxError) code = 'INVALID_JSON';
+      else for (const value of [error?.code, error?.cause?.code]) {
+        if (allowedCodes.has(value)) { code = value; break; }
       }
-      if (!response.ok || response.url !== url || response.headers.get('docker-content-digest') !== image.digest) {
-        fail('GHCR exact-digest read check failed');
-      }
+      fail(`GHCR exact-digest read check failed role=${role} phase=${phase} code=${code}`);
     }
-  } catch {
-    fail('GHCR exact-digest read check failed');
   }
   return 'PASS';
 }
