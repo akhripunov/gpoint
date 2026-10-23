@@ -198,6 +198,30 @@ test('retention and cleanup never remove production data volumes', () => {
 });
 
 
+test('V5 parent exact-SHA accepts only empty historical authorization IDs', async () => {
+  const identity = {candidateSha: sha, runId: '42', runAttempt: '1', prepareRunId: '41',
+    prepareRunAttempt: '1', authorizationMode: 'EXACT_SHA', authorizationId: null};
+  const verified = {identity, deployment: {id: 7}, status: {state: 'success'}};
+  const evidence = {candidateSha: sha, status: 'COMPLETE', releaseState: 'COMPLETE',
+    authorizationMode: 'EXACT_SHA', authorizationId: '',
+    applicationVerification: 'VPS_READBACK_VERIFIED', deployRunConclusion: 'success'};
+  for (const id of ['', null, undefined]) {
+    const original = {...evidence, authorizationId: id};
+    assert.equal(await loadV5ParentDeployEvidence(verified, sha, 'test-token', {
+      fetchOriginal: async () => original,
+    }), original);
+  }
+  for (const id of ['gpoint-other-task', ' ', 0, false]) {
+    await assert.rejects(loadV5ParentDeployEvidence(verified, sha, 'test-token', {
+      fetchOriginal: async () => ({...evidence, authorizationId: id}),
+    }), /does not prove/);
+  }
+  await assert.rejects(loadV5ParentDeployEvidence({...verified,
+    identity: {...identity, authorizationId: 'unexpected-task'}}, sha, 'test-token', {
+    fetchOriginal: async () => ({...evidence, authorizationId: 'unexpected-task'}),
+  }), /does not prove/);
+});
+
 test('reconciled V5 parent resolves its separate immutable attestation with the exact original tuple', async () => {
   const identity = {candidateSha: sha, runId: '42', runAttempt: '2', prepareRunId: '41', prepareRunAttempt: '1',
     prepareReceiptDigest: `sha256:${'b'.repeat(64)}`, prepareReceiptSha256: 'c'.repeat(64),

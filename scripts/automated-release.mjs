@@ -298,7 +298,7 @@ try {
     releaseState: mode === 'preflight' && evidence.status === 'PLANNED' ? 'READY_FOR_OWNER' :
       ['production', 'task-scoped-auto'].includes(mode) && evidence.status === 'COMPLETE' ? status : evidence.status,
     authorizationMode: mode === 'task-scoped-auto' ? 'TASK_SCOPED_AUTO' : 'EXACT_SHA',
-    authorizationId: process.env.TASK_AUTHORIZATION_ID ?? null,
+    authorizationId: process.env.TASK_AUTHORIZATION_ID || null,
     authorizationSourceInstructionId: taskAuthorization?.sourceInstructionIdentifier ?? null,
     authorizationScopeSha256: taskAuthorization?.ownerTaskCommitmentSha256 ?? null,
     authorizationRecordSha256: taskAuthorization?.recordSha256 ?? null,

@@ -66,15 +66,28 @@ function setup({deployEvidence = evidence, deployAttempt = '1', statusState = 'i
     inspectVps: () => facts};
 }
 
-test('durable Deploy evidence resolver verifies exact successful run and reads the OCI artifact by logged digest', async () => {
+test('durable Deploy evidence resolver verifies exact successful run and reads the OCI artifact by logged digest', async t => {
+  const timeoutValues = [];
+  t.mock.method(AbortSignal, 'timeout', milliseconds => {
+    timeoutValues.push(milliseconds);
+    return new AbortController().signal;
+  });
   const deployDigest = `sha256:${'d'.repeat(64)}`;
   const durable = {...evidence, schema: 1, deploymentId: 7, deployRunId: '42', deployRunAttempt: '2',
     prepareRunId: '41', prepareRunAttempt: '1', ciReceipt: {ghcrManifestDigest: identity.prepareReceiptDigest,
       prepareReceiptSha256: 'f'.repeat(64), prepareReceiptJson: '{"synthetic":true}'}};
   let publisherLogBytes = Buffer.from(`2026-10-19T04:18:11.1234567Z DEPLOY_EVIDENCE_DIGEST=${deployDigest}\n`);
   let publisherBody = null;
+  let apiFetchFailures = 1;
+  let logFetchAttempts = 0;
+  let publisherBodyFailures = 1;
   const calls = [];
   const fetchImpl = async url => {
+    if (url.endsWith('/actions/runs/42/attempts/2') && apiFetchFailures > 0) {
+      apiFetchFailures--;
+      throw Object.assign(new TypeError('fetch failed with private diagnostic'),
+        {cause: Object.assign(new Error('private transport detail'), {code: 'UND_ERR_CONNECT_TIMEOUT'})});
+    }
     if (url.endsWith('/actions/runs/42/attempts/2')) return {ok: true, json: async () => ({id: 42,
       run_attempt: 2, head_sha: sha, path: '.github/workflows/gpoint-deploy.yml', status: 'completed',
       conclusion: 'success', event: 'workflow_dispatch', head_branch: 'main'})};
@@ -83,9 +96,16 @@ test('durable Deploy evidence resolver verifies exact successful run and reads t
         run_attempt: 2, status: 'completed',
         conclusion: 'success', steps: [{name: 'Publish deployment result as a GHCR OCI artifact',
           status: 'completed', conclusion: 'success'}]}]})};
-    if (url.endsWith('/actions/jobs/102/logs')) return publisherBody
-      ? {ok: true, body: publisherBody}
-      : {ok: true, arrayBuffer: async () => publisherLogBytes};
+    if (url.endsWith('/actions/jobs/102/logs')) {
+      logFetchAttempts++;
+      if (publisherBody) return {ok: true, body: publisherBody};
+      if (publisherBodyFailures-- > 0) return {ok: true, body: {getReader: () => ({
+        read: async () => { throw Object.assign(new TypeError('body read failed'),
+          {cause: Object.assign(new Error('private EOF detail'), {code: 'UND_ERR_SOCKET'})}); },
+        cancel: async () => {},
+      })}};
+      return {ok: true, arrayBuffer: async () => publisherLogBytes};
+    }
     if (url.endsWith('/actions/runs/41/attempts/1')) return {ok: true, json: async () => ({id: 41,
       run_attempt: 1, head_sha: sha, path: '.github/workflows/gpoint-prepare.yml', status: 'completed',
       conclusion: 'success', event: 'push', head_branch: 'main'})};
@@ -124,6 +144,10 @@ test('durable Deploy evidence resolver verifies exact successful run and reads t
     prepareReceiptDigest: identity.prepareReceiptDigest, token: 'test', fetchImpl, execFile,
     registryUsername, registryToken});
   assert.equal(result.evidenceManifestDigest, deployDigest);
+  assert.equal(apiFetchFailures, 0);
+  assert.equal(logFetchAttempts, 2);
+  assert.ok(timeoutValues.filter(value => value <= 30_000).length >= 3);
+  assert.ok(timeoutValues.some(value => value === 60_000));
   assert.equal(result.evidenceContentSha256.length, 64);
   assert.ok(calls.some(args => args[0] === 'oras' && args[1] === 'pull'
     && args.includes(`ghcr.io/akhripunov/gpoint-deploy-evidence@${deployDigest}`)));

@@ -1,3 +1,5 @@
+import {retryNetworkRead, NetworkReadBudgetError} from './release-network-read.mjs';
+
 const REPOSITORY = 'akhripunov/gpoint';
 const API = 'https://api.github.com';
 export const PRODUCTION_ENVIRONMENT = 'production';
@@ -198,23 +200,33 @@ export function createGitHubDeploymentsClient({token, fetchImpl = globalThis.fet
   const base = apiBase.replace(/\/$/, '');
 
   async function request(method, route, body = undefined) {
-    let response;
+    const perform = async requestTimeoutMs => {
+      let response;
+      try {
+        response = await fetchImpl(`${base}/repos/${REPOSITORY}/${route}`, {
+          method,
+          headers: {Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28', ...(body === undefined ? {} : {'Content-Type': 'application/json'})},
+          ...(body === undefined ? {} : {body: JSON.stringify(body)}),
+          signal: AbortSignal.timeout(requestTimeoutMs),
+        });
+      } catch (error) {
+        throw new DeploymentApiError(`GitHub Deployments ${method} request failed`, {cause: error});
+      }
+      const text = response.status === 204 ? '' : await response.text();
+      const data = safeJson(response, text);
+      if (!response.ok) throw new DeploymentApiError(`GitHub Deployments ${method} failed (HTTP ${response.status})`,
+        {status: response.status});
+      return data;
+    };
+    if (method !== 'GET') return perform(timeoutMs);
     try {
-      response = await fetchImpl(`${base}/repos/${REPOSITORY}/${route}`, {
-        method,
-        headers: {Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json',
-          'X-GitHub-Api-Version': '2022-11-28', ...(body === undefined ? {} : {'Content-Type': 'application/json'})},
-        ...(body === undefined ? {} : {body: JSON.stringify(body)}),
-        signal: AbortSignal.timeout(timeoutMs),
-      });
+      return await retryNetworkRead('deployments_api_get', remainingMs => perform(Math.min(timeoutMs, remainingMs)));
     } catch (error) {
-      throw new DeploymentApiError(`GitHub Deployments ${method} request failed`, {cause: error});
+      if (error instanceof NetworkReadBudgetError)
+        throw new DeploymentApiError('GitHub Deployments GET request failed', {cause: error});
+      throw error;
     }
-    const text = response.status === 204 ? '' : await response.text();
-    const data = safeJson(response, text);
-    if (!response.ok) throw new DeploymentApiError(`GitHub Deployments ${method} failed (HTTP ${response.status})`,
-      {status: response.status});
-    return data;
   }
 
   async function listDeployments() {

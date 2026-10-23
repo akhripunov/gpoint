@@ -29,7 +29,7 @@ OCI_MANIFEST = 'application/vnd.oci.image.manifest.v1+json'
 OCI_INDEX = 'application/vnd.oci.image.index.v1+json'
 MAX_RECEIPT_BYTES = 1024 * 1024
 MAX_STATIC_BYTES = 512 * 1024 * 1024
-GHCR_READ_RETRY_BUDGET_SECONDS = 60
+GHCR_SOCKET_TIMEOUT_SECONDS = 10
 NETWORK_BUDGET = None
 SAFE_DIAGNOSTIC_REASON_CODES = {
     'GHCR receipt response exceeds size limit': 'GHCR_RESPONSE_TOO_LARGE',
@@ -147,9 +147,13 @@ def retryable(error):
 
 
 def new_network_budget():
-    """Leave diagnostic headroom inside the controller's 120-second subprocess limit."""
-    return RetryBudget(seconds=min(NETWORK_RETRY_BUDGET_SECONDS,
-                                   GHCR_READ_RETRY_BUDGET_SECONDS))
+    """Use the remaining workflow budget for all idempotent receipt reads.
+
+    Provenance, authentication, manifest and layer reads share one deadline.
+    A shorter verifier-wide cap would reject recovered reads while the existing
+    bounded network-recovery budget still has time remaining.
+    """
+    return RetryBudget(seconds=NETWORK_RETRY_BUDGET_SECONDS)
 
 
 def network_urlopen(request, timeout=30):
@@ -159,7 +163,8 @@ def network_urlopen(request, timeout=30):
     remaining = NETWORK_BUDGET.deadline - time.monotonic()
     if remaining <= 0:
         raise NetworkUnavailable('network_retry_budget')
-    return urllib.request.urlopen(request, timeout=min(timeout, remaining))
+    bounded_timeout = min(timeout, GHCR_SOCKET_TIMEOUT_SECONDS, remaining)
+    return urllib.request.urlopen(request, timeout=bounded_timeout)
 
 
 def open_without_redirect(request, timeout=30):
@@ -174,7 +179,7 @@ def open_without_redirect(request, timeout=30):
         remaining = NETWORK_BUDGET.deadline - time.monotonic()
         if remaining <= 0:
             raise NetworkUnavailable('network_retry_budget')
-        bounded_timeout = min(timeout, remaining)
+        bounded_timeout = min(timeout, GHCR_SOCKET_TIMEOUT_SECONDS, remaining)
     return urllib.request.build_opener(NoRedirect).open(request, timeout=bounded_timeout)
 
 

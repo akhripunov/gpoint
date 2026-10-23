@@ -6,6 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /srv/g-sales
 COPY pyproject.toml ./
 COPY app ./app
+RUN python -m pip install --no-cache-dir pip==26.2.2
 RUN pip install --no-cache-dir . && addgroup --system gsales && adduser --system --ingroup gsales gsales
 COPY migrations ./migrations
 USER gsales

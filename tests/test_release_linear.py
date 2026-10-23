@@ -991,12 +991,96 @@ class DeploymentReleaseTests(unittest.TestCase):
         calls = []
         def read(route):
             calls.append(route)
-            return {'total_count': 101, 'workflow_runs': [{'id': index} for index in range(100)]} if route.endswith('page=1') else {
+            return {'total_count': 101, 'workflow_runs': [{'id': index} for index in range(2, 102)]} if route.endswith('page=1') else {
                 'total_count': 101, 'workflow_runs': runs}
         with patch.object(SYNC, 'github_json', side_effect=read):
             result = SYNC.latest_run('gpoint-prepare.yml', sha=SHA, successful=True)
         self.assertEqual(result['id'], 1)
         self.assertEqual(len(calls), 2)
+
+    def test_latest_run_restarts_full_snapshot_after_count_drift_and_discards_old_rows(self):
+        calls = []
+        selected = {'id': 202, 'head_sha': SHA, 'status': 'completed', 'conclusion': 'success',
+                    'created_at': '2026-10-22'}
+
+        def read(route):
+            calls.append(route)
+            page = int(route.rsplit('page=', 1)[1])
+            if len(calls) <= 2:
+                return {'total_count': 101 if page == 1 else 102,
+                        'workflow_runs': [{'id': value} for value in range(1, 101)] if page == 1 else [{'id': 101}]}
+            return {'total_count': 1, 'workflow_runs': [selected]}
+
+        with patch.object(SYNC, 'github_json', side_effect=read):
+            result = SYNC.latest_run('gpoint-prepare.yml', sha=SHA, successful=True)
+        self.assertEqual(result, selected)
+        self.assertEqual(len(calls), 3)
+
+    def test_latest_run_retries_duplicate_ids_even_when_count_matches(self):
+        calls = []
+        selected = {'id': 202, 'head_sha': SHA, 'status': 'completed', 'conclusion': 'success',
+                    'created_at': '2026-10-22'}
+
+        def read(route):
+            calls.append(route)
+            if len(calls) == 1:
+                return {'total_count': 101, 'workflow_runs': [{'id': value} for value in range(1, 101)]}
+            if len(calls) == 2:
+                return {'total_count': 101, 'workflow_runs': [{'id': 100}]}
+            return {'total_count': 1, 'workflow_runs': [selected]}
+
+        with patch.object(SYNC, 'github_json', side_effect=read):
+            result = SYNC.latest_run('gpoint-prepare.yml', sha=SHA, successful=True)
+        self.assertEqual(result, selected)
+        self.assertEqual(len(calls), 3)
+
+    def test_latest_run_persistent_inventory_drift_fails_after_three_snapshots(self):
+        calls = []
+
+        def read(route):
+            calls.append(route)
+            page = int(route.rsplit('page=', 1)[1])
+            return {'total_count': 101 if page == 1 else 102,
+                    'workflow_runs': [{'id': value} for value in range(1, 101)] if page == 1 else [{'id': 101}]}
+
+        with patch.object(SYNC, 'github_json', side_effect=read):
+            with self.assertRaisesRegex(SYNC.SyncError, 'inventory changed'):
+                SYNC.latest_run('gpoint-prepare.yml')
+        self.assertEqual(len(calls), 6)
+
+    def test_latest_run_retries_incomplete_page_snapshot_but_fails_closed_after_three(self):
+        calls = []
+
+        def read(route):
+            calls.append(route)
+            page = int(route.rsplit('page=', 1)[1])
+            return {'total_count': 101,
+                    'workflow_runs': [{'id': value} for value in range(1, 101)] if page == 1 else []}
+
+        with patch.object(SYNC, 'github_json', side_effect=read):
+            with self.assertRaisesRegex(SYNC.SyncError, 'inventory changed'):
+                SYNC.latest_run('gpoint-prepare.yml')
+        self.assertEqual(len(calls), 6)
+
+    def test_latest_run_does_not_retry_invalid_schema_or_github_errors(self):
+        failures = [
+            {'total_count': True, 'workflow_runs': []},
+            {'total_count': 1, 'workflow_runs': [{'id': True}]},
+            SYNC.SyncError('GitHub current-state read failed: http_status_403'),
+        ]
+        for failure in failures:
+            calls = []
+
+            def read(_route):
+                calls.append(1)
+                if isinstance(failure, Exception):
+                    raise failure
+                return failure
+
+            with self.subTest(failure=failure), patch.object(SYNC, 'github_json', side_effect=read):
+                with self.assertRaises(SYNC.SyncError):
+                    SYNC.latest_run('gpoint-prepare.yml')
+            self.assertEqual(len(calls), 1)
 
     def test_selector_accepts_only_current_deploy_modes(self):
         for mode, approval in [('preflight', 'false'), ('production', 'true'), ('task-scoped-auto', 'false')]:

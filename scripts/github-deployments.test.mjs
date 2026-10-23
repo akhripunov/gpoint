@@ -70,6 +70,18 @@ test('empty required_contexts is rejected before any API request', async () => {
   assert.equal(calls, 0);
 });
 
+test('GET retry keeps the configured per-request timeout cap', async t => {
+  const timeoutValues = [];
+  t.mock.method(AbortSignal, 'timeout', milliseconds => {
+    timeoutValues.push(milliseconds);
+    return new AbortController().signal;
+  });
+  const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', timeoutMs: 1234,
+    fetchImpl: async () => response(200, [])});
+  await client.listDeployments();
+  assert.deepEqual(timeoutValues, [1234]);
+});
+
 test('ambiguous Deployment create is read back by exact workflow attempt without duplicate POST', async () => {
   const created = {id: 7, environment: 'production', production_environment: true, transient_environment: false,
     task: 'gpoint-production-deploy', sha, ref: sha, created_at: '2026-10-18T00:00:00Z',
@@ -201,11 +213,27 @@ test('an absent ambiguous-create readback never triggers a second create POST', 
   let creates = 0;
   const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async (url, init) => {
     if (url.includes('/deployments?')) return response(200, []);
-    if (url.endsWith('/deployments') && init.method === 'POST') { creates += 1; throw new Error('timed out'); }
+    if (url.endsWith('/deployments') && init.method === 'POST') {
+      creates += 1;
+      throw new TypeError('fetch failed', {cause: Object.assign(new Error('timeout'), {code: 'ETIMEDOUT'})});
+    }
     throw new Error(`unexpected ${url}`);
   }});
   await assert.rejects(client.beginProductionDeployment(identity, {requiredContexts: ['prepare']}), /POST request failed/);
   assert.equal(creates, 1);
+});
+
+test('Deployment API retries transient GET transport failures with a fresh request', async () => {
+  let reads = 0;
+  const client = createGitHubDeploymentsClient({token: 'mock', apiBase: 'https://mock', fetchImpl: async (_url, init) => {
+    assert.equal(init.method, 'GET');
+    assert.ok(init.signal);
+    if (reads++ === 0)
+      throw new TypeError('fetch failed', {cause: Object.assign(new Error('private detail'), {code: 'UND_ERR_CONNECT_TIMEOUT'})});
+    return response(200, []);
+  }});
+  assert.deepEqual(await client.listDeployments(), []);
+  assert.equal(reads, 2);
 });
 
 test('a missing status after ambiguous write retries only that same Deployment status', async () => {

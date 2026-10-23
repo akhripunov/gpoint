@@ -23,14 +23,14 @@ jobs:
       github.event.workflow_run.head_sha == github.sha &&
       github.event.workflow_run.path == '.github/workflows/gpoint-prepare.yml'
     runs-on: [self-hosted, macOS, gpoint-production]
-    timeout-minutes: 3
+    timeout-minutes: 35
     permissions:
       contents: write
       actions: write
       packages: read
     steps:
       - name: Checkout trusted current main controller code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: refs/heads/main
           # Authorization scope proof walks ancestry from the production baseline and source commits.

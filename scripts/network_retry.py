@@ -40,7 +40,7 @@ def retry_network_read(operation, stage, is_retryable, *, budget=None,
                        budget_seconds=NETWORK_RETRY_BUDGET_SECONDS, clock=None,
                        sleep=None, jitter=None, emit=print):
     """Retry a caller-supplied read only, against one bounded monotonic deadline."""
-    clock = clock or time.monotonic
+    clock = clock or (budget.clock if budget is not None else time.monotonic)
     sleep = sleep or time.sleep
     jitter = jitter or random.uniform
     budget = budget or RetryBudget(budget_seconds, clock)

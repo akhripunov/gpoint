@@ -323,3 +323,98 @@ test('preflight blocks bad credentials or digest response without exposing crede
     (error) => error.message.includes('GHCR exact-digest read check failed') && !error.message.includes('secret'),
   );
 });
+
+function instantRetry() {
+  let time = 0;
+  const events = [];
+  return { events, options: { now: () => time, sleep: async ms => { time += ms; },
+    jitter: () => 1, emit: message => events.push(message), statePath: null, budgetSeconds: 1 } };
+}
+
+for (const point of ['manifest', 'token', 'token_body', 'bearer_manifest']) {
+  test(`GHCR read recovers a transient ${point} failure with the exact digest still required`, async () => {
+    const retry = instantRetry();
+    let failed = false;
+    const requests = [];
+    const fetcher = async (url, options) => {
+      requests.push({ url, options });
+      assert.ok(options.signal instanceof AbortSignal);
+      const isToken = url.includes('/token?');
+      const current = isToken ? 'token' : options.headers.Authorization ? 'bearer_manifest' : 'manifest';
+      const interrupt = () => { failed = true; throw Object.assign(new TypeError('secret-url token=secret'),
+        { cause: Object.assign(new Error('secret'), { code: 'UND_ERR_CONNECT_TIMEOUT' }) }); };
+      if (!failed && current === point) interrupt();
+      if (isToken) return { ok: true, status: 200, url, arrayBuffer: async () => {
+        if (!failed && point === 'token_body') interrupt();
+        return new TextEncoder().encode('{"token":"bearer-secret"}').buffer;
+      } };
+      if (!options.headers.Authorization) return { ok: false, status: 401, url,
+        headers: new Headers({ 'WWW-Authenticate': `Bearer realm="https://ghcr.io/token",service="ghcr.io",scope="repository:${url.split('/v2/')[1].split('/manifests/')[0]}:pull"` }) };
+      return { ok: true, status: 200, url, headers: new Headers({ 'Docker-Content-Digest': digest }) };
+    };
+    assert.equal(await verifyOciReadAccess(receipt(), 'akhripunov', 'secret', fetcher, retry.options), 'PASS');
+    assert.equal(failed, true);
+    assert.ok(retry.events.some(value => value.includes('NETWORK_RESTORED')));
+    assert.doesNotMatch(retry.events.join('\n'), /secret|https:/);
+    assert.ok(requests.every(({ options }) => options.method === 'GET' && options.redirect === 'error'));
+  });
+}
+
+for (const failure of ['http', 'certificate', 'digest']) {
+  test(`GHCR ${failure} failure is not retried and reports only safe diagnostics`, async () => {
+    const retry = instantRetry();
+    let calls = 0;
+    const fetcher = async url => {
+      calls++;
+      if (failure === 'certificate') throw Object.assign(new Error('secret'), { code: 'CERT_HAS_EXPIRED' });
+      return { ok: failure !== 'http', status: failure === 'http' ? 403 : 200, url,
+        headers: new Headers({ 'Docker-Content-Digest': 'sha256:' + 'f'.repeat(64) }) };
+    };
+    await assert.rejects(verifyOciReadAccess(receipt(), 'akhripunov', 'secret', fetcher, retry.options), error => {
+      assert.match(error.message, /GHCR exact-digest read check failed.*role=app/);
+      assert.match(error.message, failure === 'http' ? /HTTP_403/ : failure === 'certificate' ? /CERT_HAS_EXPIRED/ : /DIGEST_MISMATCH/);
+      assert.doesNotMatch(error.stack, /secret|https:/);
+      assert.equal(error.cause, undefined);
+      return true;
+    });
+    assert.equal(calls, 1);
+    assert.ok(!retry.events.some(value => value.includes('NETWORK_RETRYING')));
+  });
+}
+
+test('GHCR image roles consume one persisted retry budget and stop before another request', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ghcr-read-budget-'));
+  const statePath = path.join(directory, 'budget');
+  fs.writeFileSync(statePath, '0.99\n');
+  let time = 0;
+  let calls = 0;
+  const options = { statePath, budgetSeconds: 1, now: () => time,
+    sleep: async ms => { time += ms; }, jitter: () => 1, emit: () => {} };
+  try {
+    await assert.rejects(verifyOciReadAccess(receipt(), 'akhripunov', 'secret', async url => {
+      if (++calls === 1) {
+        time += 8;
+        throw Object.assign(new Error('secret'), {code: 'ECONNRESET'});
+      }
+      time += 1;
+      return {ok: true, status: 200, url, headers: new Headers({'Docker-Content-Digest': digest})};
+    }, options), /NETWORK_BUDGET_EXHAUSTED/);
+    assert.equal(calls, 2);
+    assert.ok(Number(fs.readFileSync(statePath, 'utf8')) >= 1);
+  } finally { fs.rmSync(directory, {recursive: true, force: true}); }
+});
+
+test('GHCR read timeout is capped and reduced to remaining budget', async () => {
+  const original = AbortSignal.timeout;
+  const caps = [];
+  AbortSignal.timeout = milliseconds => { caps.push(milliseconds); return original(milliseconds); };
+  const fetcher = async url => ({ok: true, status: 200, url,
+    headers: new Headers({'Docker-Content-Digest': digest})});
+  try {
+    await verifyOciReadAccess(receipt(), 'akhripunov', 'secret', fetcher, {...instantRetry().options, budgetSeconds: 100});
+    assert.deepEqual(caps, [30_000, 30_000, 30_000]);
+    caps.length = 0;
+    await verifyOciReadAccess(receipt(), 'akhripunov', 'secret', fetcher, {...instantRetry().options, budgetSeconds: 0.05});
+    assert.deepEqual(caps, [50, 50, 50]);
+  } finally { AbortSignal.timeout = original; }
+});
