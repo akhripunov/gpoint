@@ -27,6 +27,29 @@ RECEIPT_REPOSITORY = 'ghcr.io/akhripunov/gpoint-prepare-receipts'
 RECEIPT_ARTIFACT_TYPE = 'application/vnd.gpoint.prepare.receipt.v1'
 STATIC_REPOSITORY = 'ghcr.io/akhripunov/gpoint-miniapp-artifacts'
 STATIC_ARTIFACT_TYPE = 'application/vnd.gpoint.miniapp.static.v1'
+EROS_PILOT_REPOSITORY = 'ghcr.io/akhripunov/gpoint-eros-pilot'
+EROS_UPSTREAM_SHA = 'd1a140083321687212fb7b17c09cc0c3c9639f5e'
+EROS_UPSTREAM_URL = 'https://github.com/etherfunlab/eros-engine'
+
+
+def validate_eros_pilot_image_metadata(digest: str, metadata: dict, sha: str) -> dict:
+    """Bind stock Eros to one exact GPoint candidate and upstream source revision."""
+    image_id = metadata.get('Id', '')
+    if (not SHA40.fullmatch(sha) or not DIGEST.fullmatch(digest)
+            or not DIGEST.fullmatch(image_id) or metadata.get('Os') != 'linux'
+            or metadata.get('Architecture') != 'amd64'):
+        raise ValueError('Eros pilot image digest/config/platform mismatch')
+    labels = (metadata.get('Config') or {}).get('Labels') or {}
+    if (labels.get('org.opencontainers.image.revision') != EROS_UPSTREAM_SHA
+            or labels.get('org.opencontainers.image.source') != EROS_UPSTREAM_URL
+            or labels.get('com.gpoint.integration.revision') != sha
+            or labels.get('com.gpoint.eros.upstream-revision') != EROS_UPSTREAM_SHA
+            or labels.get('com.gpoint.eros.patch-set.sha256') != 'none'):
+        raise ValueError('Eros pilot image source identity mismatch')
+    return {'repository': EROS_PILOT_REPOSITORY, 'digest': digest,
+            'configDigest': image_id, 'sourceSha': sha,
+            'upstreamSha': EROS_UPSTREAM_SHA, 'patchSetSha256': 'none',
+            'platform': 'linux/amd64'}
 
 
 def parse_push_digest(output: str) -> str:
@@ -125,7 +148,7 @@ def safe_process_failure(stage: str, operation: str, role: str | None,
     }
     if stage not in allowed_stages or operation not in {'inspect', 'tag', 'push', 'pull', 'login', 'rehearse'}:
         stage, operation, role = 'unknown', 'unknown', None
-    if role not in {*IMAGES.keys(), None}:
+    if role not in {*IMAGES.keys(), 'eros', None}:
         role = None
     output = safe_output_text(error.stderr, error.stdout)
     raw_output = str(output)
@@ -176,7 +199,7 @@ def run(*args: str, capture: bool = False, cwd: Path | None = None,
     except subprocess.TimeoutExpired as error:
         if stage and operation:
             diagnostic = {'stage': stage, 'operation': operation,
-                          'role': role if role in IMAGES else None,
+                          'role': role if role in {*IMAGES, 'eros'} else None,
                           'category': 'TIMEOUT', 'exitCode': None}
             if stage == 'ghcr_rehearsal_runtime_parity':
                 output = safe_output_text(error.stderr, error.stdout)
@@ -536,6 +559,34 @@ def publish_images(sha: str, run_id: str, attempt: str) -> dict:
     return records
 
 
+def publish_eros_pilot_image(sha: str, run_id: str, attempt: str) -> dict:
+    """Publish only the already-smoke-checked stock pilot image, by immutable digest."""
+    if not SHA40.fullmatch(sha) or not run_id.isdigit() or not attempt.isdigit():
+        raise ValueError('invalid exact Prepare identity')
+    local = f'gpoint-eros-pilot:{sha}'
+    local_metadata = json.loads(run('docker', 'image', 'inspect', local, capture=True,
+                                    stage='prepare_image_inspect', operation='inspect', role='eros'))[0]
+    # Local Prepare receipt records the image config ID; the remote publisher
+    # independently checks all labels before any GHCR write.
+    validate_eros_pilot_image_metadata(local_metadata.get('Id', ''), local_metadata, sha)
+    tag = f'prepare-{sha}-{run_id}-{attempt}'
+    remote = f'{EROS_PILOT_REPOSITORY}:{tag}'
+    run('docker', 'tag', local, remote,
+        stage='prepare_image_tag', operation='tag', role='eros')
+    output = run('docker', 'push', remote, capture=True,
+                 stage='ghcr_image_push', operation='push', role='eros')
+    digest = parse_push_digest(output)
+    reference = f'{EROS_PILOT_REPOSITORY}@{digest}'
+    run('docker', 'pull', reference, capture=True,
+        stage='ghcr_image_readback', operation='pull', role='eros')
+    metadata = json.loads(run('docker', 'image', 'inspect', reference, capture=True,
+                              stage='ghcr_image_inspect', operation='inspect', role='eros'))[0]
+    record = validate_eros_pilot_image_metadata(digest, metadata, sha)
+    if record['configDigest'] != local_metadata['Id']:
+        raise ValueError('GHCR readback Eros image config differs from Prepare image')
+    return record
+
+
 def validate_prepare_identity(receipt: dict, sha: str, run_id: str, attempt: str) -> None:
     if (receipt.get('schema') not in (1, 2) or receipt.get('status') != 'READY'
             or receipt.get('candidateSha') != sha or str(receipt.get('runId')) != run_id
@@ -544,7 +595,8 @@ def validate_prepare_identity(receipt: dict, sha: str, run_id: str, attempt: str
 
 
 def augment_receipt(receipt: dict, records: dict, sha: str, run_id: str, attempt: str,
-                    static_artifact: dict | None = None) -> dict:
+                    static_artifact: dict | None = None,
+                    eros_pilot: dict | None = None) -> dict:
     validate_prepare_identity(receipt, sha, run_id, attempt)
     static_only = receipt.get('route') == 'STATIC_UI_ONLY'
     if static_only:
@@ -558,6 +610,18 @@ def augment_receipt(receipt: dict, records: dict, sha: str, run_id: str, attempt
     # The manifest digest and receipt blob checksum are transport metadata.
     # Embedding either in this blob would be self-referential.
     enriched = {**receipt, 'schema': 3, 'transport': 'ghcr-oci', 'images': records}
+    if receipt.get('pilotImage') is not None:
+        if not eros_pilot or eros_pilot.get('sourceSha') != sha:
+            raise ValueError('Prepare receipt requires a verified Eros pilot image')
+        if (eros_pilot.get('repository') != EROS_PILOT_REPOSITORY
+                or eros_pilot.get('platform') != 'linux/amd64'
+                or eros_pilot.get('upstreamSha') != EROS_UPSTREAM_SHA
+                or eros_pilot.get('patchSetSha256') != 'none'):
+            raise ValueError('Eros pilot GHCR image proof is invalid')
+        enriched['pilotImages'] = {'eros': eros_pilot}
+        enriched['gates'] = {**enriched['gates'], 'erosPilotGhcrReadback': 'PASS'}
+    elif eros_pilot:
+        raise ValueError('unexpected Eros pilot image for a Prepare receipt without pilot scope')
     enriched.pop('archiveSha256', None)
     enriched.pop('receiptDigest', None)
     enriched.pop('receiptSha256', None)
@@ -651,7 +715,8 @@ def publish_static_artifact(bundle_path: Path, receipt: dict, sha: str,
 
 def publish_prepare_receipt(receipt_path: Path, receipt: dict, records: dict,
                             sha: str, run_id: str, attempt: str,
-                            static_artifact: dict | None = None, *,
+                            static_artifact: dict | None = None,
+                            eros_pilot: dict | None = None, *,
                             rehearsal_fn=rehearse_ghcr_images,
                             receipt_publisher=publish_receipt,
                             username: str | None = None, token: str | None = None) -> tuple[dict, dict]:
@@ -662,7 +727,7 @@ def publish_prepare_receipt(receipt_path: Path, receipt: dict, records: dict,
                                  token if token is not None else os.environ.get('GHCR_REHEARSAL_TOKEN', ''))
         receipt = attest_deploy_rehearsal(receipt, rehearsal, records, sha)
         print(f"PREPARE_DEPLOY_REHEARSAL=PASS docker={rehearsal['dockerVersion']} store={rehearsal['store']} seconds={rehearsal['seconds']}")
-    updated = augment_receipt(receipt, records, sha, run_id, attempt, static_artifact)
+    updated = augment_receipt(receipt, records, sha, run_id, attempt, static_artifact, eros_pilot)
     temporary = receipt_path.with_suffix('.json.pending')
     temporary.write_text(json.dumps(updated, sort_keys=True, separators=(',', ':')) + '\n')
     temporary.replace(receipt_path)
@@ -686,19 +751,23 @@ def main() -> None:
         records = {}
     else:
         records = publish_images(sha, run_id, attempt)
+    eros_pilot = (publish_eros_pilot_image(sha, run_id, attempt)
+                  if receipt.get('pilotImage') is not None else None)
     static_path = root / 'miniapp.zip'
     if receipt.get('staticArtifactSha256') and not static_path.is_file():
         raise ValueError('Prepare receipt requires a missing Mini App OCI artifact')
     static_artifact = (publish_static_artifact(static_path, receipt, sha, run_id, attempt)
                        if static_path.exists() else None)
     updated, receipt_transport = publish_prepare_receipt(
-        receipt_path, receipt, records, sha, run_id, attempt, static_artifact)
+        receipt_path, receipt, records, sha, run_id, attempt, static_artifact, eros_pilot)
     output_path = os.environ.get('GITHUB_OUTPUT')
     if output_path:
         with Path(output_path).open('a', encoding='utf-8') as output:
             output.write(f"receipt_digest={receipt_transport['digest']}\n")
             output.write(f"receipt_content_sha256={receipt_transport['contentSha256']}\n")
     print('GHCR_IMAGE_PROVENANCE=PASS roles=' + str(len(records)) + ' platform=linux/amd64')
+    if eros_pilot:
+        print('GHCR_ERO_PILOT_PROVENANCE=PASS platform=linux/amd64 patch_set=none')
     print('GHCR_RECEIPT_DIGEST=' + receipt_transport['digest'])
     if static_artifact:
         print('GHCR_STATIC_ARTIFACT_DIGEST=' + static_artifact['digest'])

@@ -6,6 +6,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {execFileSync, spawnSync} from 'node:child_process';
 import {verifyReleaseBundle, selectImageTransport, preparedImageParityCommand} from './release-bundle.mjs';
+import {verifyOciReadAccess} from './release-oci.mjs';
 
 const sha = 'a'.repeat(40);
 const manifestDigest = `sha256:${'b'.repeat(64)}`;
@@ -37,6 +38,36 @@ test('GHCR-only receipt requires exact Prepare manifest digest, run, attempt and
   assert.equal(selectImageTransport(proof, 'prepared'), 'ghcr-oci');
   assert.throws(() => selectImageTransport(proof, 'archive'), /GHCR OCI transport/);
   assert.throws(() => verifyReleaseBundle(f.dir, 'f'.repeat(40)), /not bound/);
+});
+
+test('optional stock Eros pilot is verified in the receipt but excluded from default production images', async t => {
+  const f = fixture(t);
+  const pilot = {repository: 'ghcr.io/akhripunov/gpoint-eros-pilot',
+    digest: `sha256:${'e'.repeat(64)}`, configDigest: `sha256:${'f'.repeat(64)}`,
+    sourceSha: sha, upstreamSha: 'd1a140083321687212fb7b17c09cc0c3c9639f5e',
+    patchSetSha256: 'none', platform: 'linux/amd64'};
+  f.receipt.pilotImage = {id: pilot.configDigest, sourceSha: sha,
+    upstreamSha: pilot.upstreamSha, patchSetSha256: 'none', platform: 'linux/amd64'};
+  f.receipt.pilotImages = {eros: pilot};
+  f.receipt.gates.erosPilotImage = 'PASS';
+  f.receipt.gates.erosPilotGhcrReadback = 'PASS';
+  fs.writeFileSync(path.join(f.dir, 'receipt.json'), JSON.stringify(f.receipt));
+  const proof = verifyReleaseBundle(f.dir, sha);
+  assert.equal(proof.pilotImages.eros.reference,
+    `${pilot.repository}@${pilot.digest}`);
+  assert.equal(Object.keys(proof.images).join(','), 'app,agata,gsales');
+  const requests = [];
+  await verifyOciReadAccess(proof, 'akhripunov', 'read-token', async (url) => {
+    requests.push(url);
+    const digest = url.split('/manifests/')[1];
+    return {ok: true, status: 200, url,
+      headers: new Headers({'Docker-Content-Digest': digest})};
+  });
+  assert.equal(requests.length, 4);
+  assert.ok(requests.some(url => url.includes('/gpoint-eros-pilot/manifests/')));
+  f.receipt.pilotImages.eros.upstreamSha = 'f'.repeat(40);
+  fs.writeFileSync(path.join(f.dir, 'receipt.json'), JSON.stringify(f.receipt));
+  assert.throws(() => verifyReleaseBundle(f.dir, sha), /Eros pilot image proof/);
 });
 
 test('legacy receipt, absent evidence, digest mismatch and untrusted provenance block', t => {

@@ -35,6 +35,56 @@ def ready_receipt():
 
 
 class GhcrReceiptPublisherTests(unittest.TestCase):
+    def test_eros_pilot_receipt_requires_exact_stock_identity_and_records_registry_digest(self):
+        metadata = {'Id': 'sha256:' + 'c' * 64, 'Os': 'linux', 'Architecture': 'amd64',
+            'Config': {'Labels': {
+                'org.opencontainers.image.revision': PUBLISHER.EROS_UPSTREAM_SHA,
+                'org.opencontainers.image.source': PUBLISHER.EROS_UPSTREAM_URL,
+                'com.gpoint.integration.revision': SHA,
+                'com.gpoint.eros.upstream-revision': PUBLISHER.EROS_UPSTREAM_SHA,
+                'com.gpoint.eros.patch-set.sha256': 'none'}}}
+        pilot = PUBLISHER.validate_eros_pilot_image_metadata(DIGEST, metadata, SHA)
+        self.assertEqual(pilot['repository'], PUBLISHER.EROS_PILOT_REPOSITORY)
+        self.assertEqual(pilot['digest'], DIGEST)
+        self.assertEqual(pilot['patchSetSha256'], 'none')
+        records = {role: {'sourceSha': SHA, 'platform': 'linux/amd64'} for role in PUBLISHER.IMAGES}
+        receipt = ready_receipt()
+        receipt['pilotImage'] = {'id': metadata['Id'], 'sourceSha': SHA,
+            'upstreamSha': PUBLISHER.EROS_UPSTREAM_SHA, 'patchSetSha256': 'none',
+            'platform': 'linux/amd64'}
+        updated = PUBLISHER.augment_receipt(receipt, records, SHA, RUN, ATTEMPT,
+                                            eros_pilot=pilot)
+        self.assertEqual(updated['pilotImages']['eros'], pilot)
+        self.assertEqual(updated['gates']['erosPilotGhcrReadback'], 'PASS')
+        with self.assertRaisesRegex(ValueError, 'requires a verified Eros'):
+            PUBLISHER.augment_receipt(receipt, records, SHA, RUN, ATTEMPT)
+
+    def test_eros_pilot_publish_uses_candidate_tag_and_exact_digest_readback(self):
+        config_digest = 'sha256:' + 'c' * 64
+        manifest_digest = 'sha256:' + 'd' * 64
+        metadata = {'Id': config_digest, 'Os': 'linux', 'Architecture': 'amd64',
+            'Config': {'Labels': {
+                'org.opencontainers.image.revision': PUBLISHER.EROS_UPSTREAM_SHA,
+                'org.opencontainers.image.source': PUBLISHER.EROS_UPSTREAM_URL,
+                'com.gpoint.integration.revision': SHA,
+                'com.gpoint.eros.upstream-revision': PUBLISHER.EROS_UPSTREAM_SHA,
+                'com.gpoint.eros.patch-set.sha256': 'none'}}}
+        calls = []
+        def fake_run(*args, **kwargs):
+            calls.append(args)
+            if args[:3] == ('docker', 'image', 'inspect'):
+                return json.dumps([metadata])
+            if args[:2] == ('docker', 'push'):
+                return 'pushed digest: ' + manifest_digest
+            return ''
+        with patch.object(PUBLISHER, 'run', side_effect=fake_run):
+            record = PUBLISHER.publish_eros_pilot_image(SHA, RUN, ATTEMPT)
+        self.assertEqual(record['digest'], manifest_digest)
+        self.assertEqual(record['configDigest'], config_digest)
+        self.assertIn(('docker', 'tag', f'gpoint-eros-pilot:{SHA}',
+                       f'{PUBLISHER.EROS_PILOT_REPOSITORY}:prepare-{SHA}-{RUN}-{ATTEMPT}'), calls)
+        self.assertIn(('docker', 'pull', f'{PUBLISHER.EROS_PILOT_REPOSITORY}@{manifest_digest}'), calls)
+
     def test_real_python_child_exit_traceback_is_not_a_network_timeout(self):
         script = 'import subprocess; subprocess.check_output(("python3", "-c", "raise SystemExit(7)"), timeout=30)'
         child = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=10)

@@ -8,6 +8,8 @@ const IMAGE_REPOSITORIES = Object.freeze({
   agata: 'ghcr.io/akhripunov/gpoint-agata-runtime',
   gsales: 'ghcr.io/akhripunov/gpoint-g-sales-runtime',
 });
+const EROS_PILOT_REPOSITORY = 'ghcr.io/akhripunov/gpoint-eros-pilot';
+const EROS_UPSTREAM_SHA = 'd1a140083321687212fb7b17c09cc0c3c9639f5e';
 
 function fail(message) { throw new Error(message); }
 
@@ -57,7 +59,23 @@ export function validateOciReceipt(receipt, candidate, { runId, runAttempt } = {
     if (image.platform !== 'linux/amd64') fail(`OCI image platform mismatch: ${role}`);
     images[role] = { ...image, reference: `${expectedRepository}@${image.digest}` };
   }
-  return { ...receipt, images };
+  let pilotImages;
+  if (receipt.pilotImage !== undefined || receipt.pilotImages !== undefined) {
+    if (receipt.gates?.erosPilotImage !== 'PASS' || receipt.gates?.erosPilotGhcrReadback !== 'PASS')
+      fail('Eros pilot image is missing its Prepare or GHCR readback gate');
+    const pilot = receipt.pilotImages?.eros;
+    const preparedPilot = receipt.pilotImage;
+    if (!pilot || Object.keys(receipt.pilotImages).join(',') !== 'eros' ||
+        pilot.repository !== EROS_PILOT_REPOSITORY || !DIGEST.test(pilot.digest ?? '') ||
+        !DIGEST.test(pilot.configDigest ?? '') || pilot.sourceSha !== candidate ||
+        pilot.upstreamSha !== EROS_UPSTREAM_SHA || pilot.patchSetSha256 !== 'none' ||
+        pilot.platform !== 'linux/amd64' || preparedPilot?.id !== pilot.configDigest ||
+        preparedPilot?.sourceSha !== candidate || preparedPilot?.upstreamSha !== EROS_UPSTREAM_SHA ||
+        preparedPilot?.patchSetSha256 !== 'none' || preparedPilot?.platform !== 'linux/amd64')
+      fail('Eros pilot image proof is invalid');
+    pilotImages = { eros: { ...pilot, reference: `${EROS_PILOT_REPOSITORY}@${pilot.digest}` } };
+  }
+  return { ...receipt, images, ...(pilotImages ? { pilotImages } : {}) };
 }
 
 export async function verifyOciReadAccess(receipt, username, token, fetcher = fetch, retryOptions = {}) {
@@ -65,13 +83,15 @@ export async function verifyOciReadAccess(receipt, username, token, fetcher = fe
     fail('GHCR exact-digest read check failed');
   }
   if (receipt?.schema !== 3 || receipt?.transport !== 'ghcr-oci') fail('GHCR exact-digest read check failed');
-  for (const [role, expectedRepository] of Object.entries(IMAGE_REPOSITORIES)) {
+  const repositories = { ...IMAGE_REPOSITORIES };
+  if (receipt.pilotImages?.eros) repositories.eros = EROS_PILOT_REPOSITORY;
+  for (const [role, expectedRepository] of Object.entries(repositories)) {
     let phase = 'manifest';
     try {
       await retryNetworkRead(`ghcr_${role}_read`, async remainingMs => {
         phase = 'manifest';
         const signal = AbortSignal.timeout(Math.min(30_000, remainingMs));
-        const image = receipt.images?.[role];
+        const image = role === 'eros' ? receipt.pilotImages?.eros : receipt.images?.[role];
         if (!image || image.repository !== expectedRepository || !DIGEST.test(image.digest ?? '')) {
           fail('GHCR exact-digest read check failed');
         }

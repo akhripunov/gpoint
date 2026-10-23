@@ -27,6 +27,8 @@ _impact_spec.loader.exec_module(_impact_module)
 load_verified_plan = _impact_module.load_verified_plan
 
 ROOT = Path(__file__).resolve().parents[1]
+EROS_UPSTREAM_SHA = 'd1a140083321687212fb7b17c09cc0c3c9639f5e'
+EROS_UPSTREAM_URL = 'https://github.com/etherfunlab/eros-engine'
 
 
 @contextmanager
@@ -138,6 +140,61 @@ def docker_build_command(tag, dockerfile, context, sha, *, dependency_manifest_c
                     '--cache-to', f'type=gha,scope={cache_scope},mode=max,ignore-error=true',
                     '-f', dockerfile, '-t', f'{tag}:{sha}', context])
     return command
+
+
+def stock_eros_build_command(source_dir, candidate_sha):
+    """Build the exact stock upstream tree as a candidate-bound pilot image."""
+    if not re.fullmatch(r'[a-f0-9]{40}', candidate_sha):
+        raise ValueError('stock Eros build requires an exact GPoint candidate SHA')
+    source_dir = Path(source_dir).resolve()
+    command = ['docker', 'buildx', 'build', '--platform', 'linux/amd64', '--load']
+    if os.environ.get('GITHUB_ACTIONS') == 'true':
+        command.extend(['--cache-from', 'type=gha,scope=gpoint-eros-stock',
+                        '--cache-to', 'type=gha,scope=gpoint-eros-stock,mode=max,ignore-error=true'])
+    command.extend([
+        '--label', f'org.opencontainers.image.revision={EROS_UPSTREAM_SHA}',
+        '--label', f'org.opencontainers.image.source={EROS_UPSTREAM_URL}',
+        '--label', f'com.gpoint.integration.revision={candidate_sha}',
+        '--label', f'com.gpoint.eros.upstream-revision={EROS_UPSTREAM_SHA}',
+        '--label', 'com.gpoint.eros.patch-set.sha256=none',
+        '--file', str(source_dir / 'docker/Dockerfile'),
+        '--tag', f'gpoint-eros-pilot:{candidate_sha}',
+        str(source_dir),
+    ])
+    return command
+
+
+def build_stock_eros_image(candidate_sha, timings):
+    """Fetch, verify, build and smoke-check the pinned upstream without editing it."""
+    with tempfile.TemporaryDirectory(prefix='gpoint-stock-eros-') as temporary:
+        source_dir = Path(temporary) / 'source'
+        with measured_stage('eros_pilot_source_checkout', timings):
+            run('git', 'clone', '--quiet', '--no-checkout', EROS_UPSTREAM_URL, str(source_dir))
+            run('git', 'checkout', '--quiet', '--detach', EROS_UPSTREAM_SHA, cwd=source_dir)
+            if run('git', 'rev-parse', 'HEAD', cwd=source_dir, capture=True) != EROS_UPSTREAM_SHA:
+                raise RuntimeError('stock Eros upstream revision mismatch')
+            if run('git', 'status', '--porcelain', cwd=source_dir, capture=True):
+                raise RuntimeError('stock Eros source checkout is dirty')
+        with measured_stage('docker_build_eros_pilot_stock', timings):
+            run(*stock_eros_build_command(source_dir, candidate_sha))
+        tag = f'gpoint-eros-pilot:{candidate_sha}'
+        with measured_stage('eros_pilot_image_smoke', timings):
+            openapi = run('docker', 'run', '--rm', '--network', 'none', '--entrypoint',
+                          '/usr/local/bin/eros-engine', tag, 'print-openapi', capture=True)
+            if not openapi.startswith('{') or 'openapi' not in openapi[:256].lower():
+                raise RuntimeError('stock Eros offline OpenAPI smoke failed')
+        image = json.loads(run('docker', 'image', 'inspect', tag, capture=True))[0]
+        labels = image.get('Config', {}).get('Labels') or {}
+        if (image.get('Os') != 'linux' or image.get('Architecture') != 'amd64'
+                or labels.get('org.opencontainers.image.revision') != EROS_UPSTREAM_SHA
+                or labels.get('org.opencontainers.image.source') != EROS_UPSTREAM_URL
+                or labels.get('com.gpoint.integration.revision') != candidate_sha
+                or labels.get('com.gpoint.eros.upstream-revision') != EROS_UPSTREAM_SHA
+                or labels.get('com.gpoint.eros.patch-set.sha256') != 'none'):
+            raise RuntimeError('stock Eros pilot image identity verification failed')
+        return {'id': image['Id'], 'sourceSha': candidate_sha,
+                'upstreamSha': EROS_UPSTREAM_SHA, 'patchSetSha256': 'none',
+                'platform': 'linux/amd64'}
 
 
 def disposable_migration_tenant_inventory(postgres, database):
@@ -380,6 +437,7 @@ def prepare(sha, output, *, postgres_only=False):
         expected_agata = run('docker', 'run', '--rm', f'gpoint-agata-runtime:{sha}', 'alembic', 'heads', capture=True)
         if '\n' in expected_agata or not expected_agata or heads != expected_agata.split()[0] or prisma != expected_prisma:
             raise RuntimeError('runtime artifact migration heads do not match candidate source')
+        pilot_image = build_stock_eros_image(sha, timings)
         if gsales_regression is not None:
             finish_background_stage(gsales_regression)
         images = {}
@@ -390,10 +448,11 @@ def prepare(sha, output, *, postgres_only=False):
             images[role] = {'id': image['Id'], 'revision': sha, 'platform': 'linux/amd64'}
         proof = {'schema': 1, 'candidateSha': sha, 'status': 'READY', 'runId': int(os.environ['GITHUB_RUN_ID']),
                  'runAttempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
-                 'gates': {name: 'PASS' for name in ['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'botImageStartup']},
+                 'gates': {name: 'PASS' for name in ['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'botImageStartup', 'erosPilotImage']},
                  'impactV3': impact,
                  'images': images, 'prismaHead': prisma, 'agataHead': heads,
                  'gsalesMigrationHead': gsales_migration.stem, 'gsalesMigrationSha256': gsales_migration_sha,
+                 'pilotImage': pilot_image,
                  'prepareStages': timings,
                  'applicationSmoke': 'DISPOSABLE_DB_DETERMINISTIC_PROVIDER', 'productionUserSmoke': 'NOT_RUN'}
         if impact['classification'] == 'UI_ONLY':
