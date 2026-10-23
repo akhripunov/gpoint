@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GPoint-only guarded migrations agata0009 -> agata0010 -> agata0011.
+"""GPoint-only guarded migrations through agata0012.
 
 The administrator channel proves census/backup completeness. Alembic continues
 to use its existing effective production identity and FORCE RLS remains enabled.
@@ -67,8 +67,8 @@ def validate_readiness(proof, census):
         raise RuntimeError('GPoint database identity mismatch')
     if proof.get('server_address') not in census.get('cluster_addresses', []) or not proof.get('database_oid') or proof['database_oid'] != census.get('database_oid'):
         raise RuntimeError('authoritative database instance identity mismatch')
-    if proof.get('head') not in ('agata0009', 'agata0010'):
-        raise RuntimeError('guard only supports agata0009 -> agata0010 or agata0010 -> agata0011')
+    if proof.get('head') not in ('agata0009', 'agata0010', 'agata0011'):
+        raise RuntimeError('guard only supports production baselines agata0009, agata0010, or agata0011')
     if not all(proof.get(key) is True for key in ('owner', 'schema_create', 'schema_usage', 'permissions', 'rls', 'force_rls')):
         raise RuntimeError('effective migrator lacks required ownership/privileges')
     if census.get('authoritative') is not True:
@@ -82,11 +82,11 @@ def validate_readiness(proof, census):
     if census.get('baseline', 10001) > 10000 or proof.get('total_bytes', 67108865) > 64 * 1024 * 1024:
         raise RuntimeError('baseline volume exceeds bounded migration rehearsal envelope')
     inventory = ','.join(tenants)
-    # This release candidate carries both agata0010 and agata0011. Expect its
-    # actual image head after upgrade for either supported production baseline.
-    target_head = 'agata0011'
-    if target_head == 'agata0011' and proof.get('privileged') is not True:
-        raise RuntimeError('agata0011 requires a verified privileged migration identity')
+    # This candidate also applies agata0012, which enumerates every tenant to
+    # preserve disclosure receipts. Require the verified privileged migrator.
+    target_head = 'agata0012'
+    if proof.get('privileged') is not True:
+        raise RuntimeError('agata0012 requires a verified privileged migration identity')
     return dict(proof, target_head=target_head, tenant_count=len(tenants), inventory=inventory,
                 inventory_sha256=hashlib.sha256(inventory.encode()).hexdigest(),
                 messages=census['messages'], baseline=census['baseline'],

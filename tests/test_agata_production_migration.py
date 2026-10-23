@@ -27,20 +27,28 @@ class ProductionMigrationTests(unittest.TestCase):
                              '11111111-1111-4111-8111-111111111111'],
                     messages=12, baseline=5)
 
-    def test_agata0009_candidate_applies_through_agata0011_only_with_privileged_migrator(self):
+    def test_agata0009_candidate_applies_through_agata0012_only_with_privileged_migrator(self):
         proof = self.proof(); proof['privileged'] = True
         result = self.m.validate_readiness(proof, self.census())
         self.assertEqual(result['tenant_count'], 2)
         self.assertEqual(result['inventory'], ','.join(sorted(self.census()['tenants'])))
         self.assertEqual(result['lock_risk'], 'BOUNDED_MIGRATION_LOCK_REQUIRED')
-        self.assertEqual(result['target_head'], 'agata0011')
+        self.assertEqual(result['target_head'], 'agata0012')
         with self.assertRaisesRegex(RuntimeError, 'privileged migration identity'):
             self.m.validate_readiness(self.proof(), self.census())
 
-    def test_agata0010_to_agata0011_requires_verified_privileged_migrator(self):
+    def test_agata0010_to_agata0012_requires_verified_privileged_migrator(self):
         proof = self.proof(); proof.update(head='agata0010', privileged=True)
         result = self.m.validate_readiness(proof, self.census())
-        self.assertEqual(result['target_head'], 'agata0011')
+        self.assertEqual(result['target_head'], 'agata0012')
+        proof['privileged'] = False
+        with self.assertRaisesRegex(RuntimeError, 'privileged migration identity'):
+            self.m.validate_readiness(proof, self.census())
+
+    def test_agata0011_to_agata0012_requires_verified_privileged_migrator(self):
+        proof = self.proof(); proof.update(head='agata0011', privileged=True)
+        result = self.m.validate_readiness(proof, self.census())
+        self.assertEqual(result['target_head'], 'agata0012')
         proof['privileged'] = False
         with self.assertRaisesRegex(RuntimeError, 'privileged migration identity'):
             self.m.validate_readiness(proof, self.census())
@@ -204,7 +212,7 @@ class ProductionMigrationTests(unittest.TestCase):
             self.assertEqual(len(inventory.split(',')), 2)
         proof = self.proof(); proof['privileged'] = True
         self.m.guarded_migration(proof, Guard(), migrate)
-        self.assertEqual(events, ['lock', 'census', 'migrate', ('verify', 'agata0011'), 'unlock'])
+        self.assertEqual(events, ['lock', 'census', 'migrate', ('verify', 'agata0012'), 'unlock'])
 
     def test_guard_loss_or_incomplete_baseline_is_not_success(self):
         for alive, verified in [(False, True), (True, False)]:

@@ -5,7 +5,8 @@ import {runRemoteShaList, remoteProof, classifyReleaseFailure, evaluateSafetyGat
   checkArtifactParity, checkEffectiveConfig, checkAgataArtifactParity, checkGsalesArtifactParity,
   currentApplyDeploymentContext, loadV5ParentDeployEvidence,
 } from './release-gpoint.mjs';
-import {validateAgataRuntimeIdentity, planReleaseRetention, validateRuntimeIdentity} from './release-gpoint-vps-adapter.mjs';
+import {validateAgataRuntimeIdentity, planReleaseRetention, validateRuntimeIdentity,
+  inspectAgataMigrationReadiness, parseGuardedMigrationEvidence} from './release-gpoint-vps-adapter.mjs';
 import {ReconciliationGateError} from './reconcile-deployment.mjs';
 
 const sha = 'a'.repeat(40);
@@ -162,6 +163,26 @@ test('backup and migration failures block before runtime mutation', () => {
     recordedProductionSha: sha, liveProductionSha: sha};
   assert.ok(evaluateSafetyGates({...common, backupReady: false}).includes('backup gate failed'));
   assert.ok(evaluateSafetyGates({...common, migrationOk: false}).includes('migration gate failed'));
+});
+
+test('V5 guards agata0012 from agata0011 and accepts exact guarded migration evidence', () => {
+  const calls = [];
+  const ready = inspectAgataMigrationReadiness(sha, 'agata0011', 'agata0012', command => {
+    calls.push(command);
+    return 'AGATA_MIGRATION_READINESS=' + JSON.stringify({readiness: 'PASS', database: 'gpoint',
+      head: 'agata0011', tenant_count: 2, inventory_sha256: 'b'.repeat(64)});
+  });
+  assert.equal(ready.head, 'agata0011');
+  assert.equal(calls.length, 1);
+  assert.match(calls[0], /agata-production-migration\.py/);
+  assert.throws(() => inspectAgataMigrationReadiness(sha, 'agata0010', 'agata0012', () => ''), /requires agata0011 baseline/);
+  const backup = {status: 'COMPLETE_PROTECTED', database: 'gpoint', schemas: ['public', 'agata'],
+    sha256: 'c'.repeat(64), path: '/opt/gpoint/backups/exact.dump', candidate_sha: sha, extensions: ['vector']};
+  const baseline = {candidate_sha: sha, readiness: 'PASS', head_after: 'agata0012', tenant_count: 2,
+    inventory_sha256: 'd'.repeat(64)};
+  const evidence = parseGuardedMigrationEvidence(
+    'GPOINT_COMPLETE_BACKUP=' + JSON.stringify(backup) + '\nAGATA_MIGRATION_VERIFIED=' + JSON.stringify(baseline), sha);
+  assert.equal(evidence.baseline.head_after, 'agata0012');
 });
 
 test('active release lock and GitHub/VPS baseline drift block', () => {

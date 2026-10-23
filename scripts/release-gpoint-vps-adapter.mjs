@@ -537,7 +537,7 @@ export const agata0010Command = agataProductionMigrationCommand;
 
 export function inspectAgataMigrationReadiness(sha, beforeHead, candidateHead, execute = run) {
   if (beforeHead === candidateHead) return null;
-  const expectedBaseline = { agata0010: 'agata0009', agata0011: 'agata0010' }[candidateHead];
+  const expectedBaseline = { agata0010: 'agata0009', agata0011: 'agata0010', agata0012: 'agata0011' }[candidateHead];
   if (!expectedBaseline) return null;
   if (beforeHead !== expectedBaseline) throw new Error(`${candidateHead} production guard requires ${expectedBaseline} baseline`);
   const output = execute(agataProductionMigrationCommand(sha, 'preflight'));
@@ -565,7 +565,7 @@ export function parseGuardedMigrationEvidence(output, sha) {
   if (!Array.isArray(backupExtensions) || backupExtensions.some(name => typeof name !== 'string' || !/^[a-z][a-z0-9_-]*$/.test(name)) || new Set(backupExtensions).size !== backupExtensions.length) throw new Error('complete GPoint backup extension evidence invalid');
   if (!backup || backup.status !== 'COMPLETE_PROTECTED' || backup.database !== 'gpoint' || !schemaListValid || !/^[0-9a-f]{64}$/.test(backup.sha256 ?? '') || !backup.path?.startsWith('/opt/gpoint/backups/')) throw new Error('complete GPoint backup proof missing or invalid');
   if (backup.candidate_sha !== sha || (baseline && baseline.candidate_sha !== sha)) throw new Error('guarded migration evidence exact SHA mismatch');
-  if (baseline && (baseline.readiness !== 'PASS' || !['agata0010', 'agata0011'].includes(baseline.head_after) || !Number.isInteger(baseline.tenant_count) || baseline.tenant_count < 1 || !/^[0-9a-f]{64}$/.test(baseline.inventory_sha256 ?? ''))) throw new Error('guarded baseline proof invalid');
+  if (baseline && (baseline.readiness !== 'PASS' || !['agata0010', 'agata0011', 'agata0012'].includes(baseline.head_after) || !Number.isInteger(baseline.tenant_count) || baseline.tenant_count < 1 || !/^[0-9a-f]{64}$/.test(baseline.inventory_sha256 ?? ''))) throw new Error('guarded baseline proof invalid');
   return { backup, baseline };
 }
 
@@ -628,7 +628,7 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
     agataMigrations = migrationHead(fs.readdirSync(migrationDirectory).filter(name => name.endsWith('.py')).map(name => fs.readFileSync(path.join(migrationDirectory, name), 'utf8')));
     if (bundle && bundle.agataHead !== agataMigrations.head) throw new Error('CI migration head does not match candidate source');
     gsalesMigrations = gsalesMigrationIdentity(checkout, bundle);
-    if (agataMigrations.head !== 'agata0011') throw new Error('GSales integration requires AGATA agata0011');
+    if (agataMigrations.head !== 'agata0012') throw new Error('GSales/Eros integration requires AGATA agata0012');
     stage(timings, 'PRODUCTION_PREFLIGHT', () => run(productionPreflightCommand()));
     const registryUser = process.env.GHCR_READ_USERNAME || 'akhripunov';
     if (!ghcrReadToken) throw new Error('read-only GHCR credential is unavailable');
@@ -675,11 +675,11 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
         `printf '%s\\n' "$agataBefore"`,
         `agataPending=0; if printf '%s' "$agataBefore" | grep -qx 'AGATA_SCHEMA_ABSENT'; then agataPending=1; elif printf '%s' "$agataBefore" | grep -Eq '^AGATA_HEAD=(${agataMigrations.revisions.join('|')})$'; then if ! printf '%s' "$agataBefore" | grep -qx 'AGATA_HEAD=${agataMigrations.head}'; then agataPending=1; fi; else echo AGATA_HEAD_UNRECOGNIZED; exit 34; fi; if [ "$agataPending" = 1 ]; then echo AGATA_PENDING_MIGRATIONS; else echo AGATA_NO_PENDING_MIGRATIONS; fi`,
         `gsalesState=$( ${gsalesMigrationStateCommand(gsalesMigrations)} ); printf '%s\\n' "$gsalesState"; gsalesPending=$(printf '%s' "$gsalesState" | sed -n 's/^GSALES_PENDING=//p'); test "$gsalesPending" = 0 || test "$gsalesPending" = 1`,
-        `if [ "$prismaPending" = 1 ] || [ "$agataPending" = 1 ] || [ "$gsalesPending" = 1 ]; then ${['agata0010', 'agata0011'].includes(agataMigrations.head) ? agataProductionMigrationCommand(sha, 'backup', checkout) : `backupName=gpoint-pre-release-${sha}-$(date -u +%Y%m%dT%H%M%SZ).dump; mkdir -p /opt/gpoint/backups; chmod 700 /opt/gpoint/backups; docker image inspect postgres:16 >/dev/null 2>&1 || docker pull postgres:16; docker run --rm ${databaseNetworkArgs()} --env-file /opt/gpoint/env/production.env -e GPOINT_BACKUP_NAME="$backupName" -v /opt/gpoint/backups:/backups postgres:16 sh -ec 'dburl=$(printf "%s" "$DATABASE_URL" | sed -E "s/([?&])(schema|connection_limit|pool_timeout|pgbouncer|sslaccept)=[^&]*//g; s/[?&]$//; s/\\?&/?/g"); schemas="--schema=public"; if psql "$dburl" -Atc "SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name='\''agata'\'')" | grep -qx t; then schemas="$schemas --schema=agata"; fi; pg_dump --format=custom --no-owner $schemas --dbname "$dburl" --file "/backups/$GPOINT_BACKUP_NAME"'; chmod 600 "/opt/gpoint/backups/$backupName"; test -s "/opt/gpoint/backups/$backupName"; docker run --rm -v /opt/gpoint/backups:/backups postgres:16 pg_restore --list "/backups/$backupName" >/dev/null; echo GPOINT_BACKUP_PATH=/opt/gpoint/backups/$backupName; echo GPOINT_BACKUP_STATUS=NONEMPTY_PROTECTED`}; fi`,
+      `if [ "$prismaPending" = 1 ] || [ "$agataPending" = 1 ] || [ "$gsalesPending" = 1 ]; then ${['agata0010', 'agata0011', 'agata0012'].includes(agataMigrations.head) ? agataProductionMigrationCommand(sha, 'backup', checkout) : `backupName=gpoint-pre-release-${sha}-$(date -u +%Y%m%dT%H%M%SZ).dump; mkdir -p /opt/gpoint/backups; chmod 700 /opt/gpoint/backups; docker image inspect postgres:16 >/dev/null 2>&1 || docker pull postgres:16; docker run --rm ${databaseNetworkArgs()} --env-file /opt/gpoint/env/production.env -e GPOINT_BACKUP_NAME="$backupName" -v /opt/gpoint/backups:/backups postgres:16 sh -ec 'dburl=$(printf "%s" "$DATABASE_URL" | sed -E "s/([?&])(schema|connection_limit|pool_timeout|pgbouncer|sslaccept)=[^&]*//g; s/[?&]$//; s/\\?&/?/g"); schemas="--schema=public"; if psql "$dburl" -Atc "SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name='\''agata'\'')" | grep -qx t; then schemas="$schemas --schema=agata"; fi; pg_dump --format=custom --no-owner $schemas --dbname "$dburl" --file "/backups/$GPOINT_BACKUP_NAME"'; chmod 600 "/opt/gpoint/backups/$backupName"; test -s "/opt/gpoint/backups/$backupName"; docker run --rm -v /opt/gpoint/backups:/backups postgres:16 pg_restore --list "/backups/$backupName" >/dev/null; echo GPOINT_BACKUP_PATH=/opt/gpoint/backups/$backupName; echo GPOINT_BACKUP_STATUS=NONEMPTY_PROTECTED`}; fi`,
       ];
       const migrationPreflight = steps.slice(0, 9).join('; ');
       const prismaMigration = `docker run --rm ${databaseNetworkArgs('gpoint-migration')} --env-file /opt/gpoint/env/production.env gpoint-runtime:${sha} pnpm --filter @gpoint/db exec prisma migrate deploy`;
-      const agataMigration = ['agata0010', 'agata0011'].includes(agataMigrations.head)
+      const agataMigration = ['agata0010', 'agata0011', 'agata0012'].includes(agataMigrations.head)
         ? agataProductionMigrationCommand(sha, 'migrate', checkout)
         : `docker run --rm ${databaseNetworkArgs('gpoint-agata-migration')} --env-file /opt/gpoint/env/production.env gpoint-agata-runtime:${sha} alembic upgrade head`;
       const agataVerification = `agataAfter=$(printf '%s' '${agataStatusB64}' | base64 -d | docker run --rm -i ${databaseNetworkArgs('gpoint-agata-verify')} --env-file /opt/gpoint/env/production.env --env-file /opt/gpoint/env/migration.env gpoint-agata-runtime:${sha} python -); printf '%s\\n' "$agataAfter"; printf '%s' "$agataAfter" | grep -qx 'AGATA_HEAD=${agataMigrations.head}'`;

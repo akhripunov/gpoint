@@ -62,14 +62,22 @@ class DockerMigrationProtocol(unittest.TestCase):
                   conversation_id uuid,scope text,role text,scenario_id uuid,deleted_at timestamptz);
                 CREATE TABLE agata.outbox_jobs(id uuid PRIMARY KEY,tenant_id uuid NOT NULL,job_type text NOT NULL,
                   CONSTRAINT ck_outbox_job_type_allowlist CHECK (job_type IN ('generic','conversation_summary','relationship_note_refresh','snapshot_refresh','memory_extract','memory_promote','memory_embed','memory_graph_sync','response_retry')));
-                CREATE TABLE agata.regional_policy_profiles(id uuid PRIMARY KEY,tenant_id uuid NOT NULL,policy_data text NOT NULL);
+                CREATE TABLE agata.regional_policy_profiles(
+                  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),tenant_id uuid NOT NULL,
+                  jurisdiction text NOT NULL,market text NOT NULL,
+                  version integer NOT NULL,status text NOT NULL,effective_from timestamptz NOT NULL,
+                  effective_to timestamptz,rules jsonb NOT NULL,
+                  UNIQUE(tenant_id,jurisdiction,market,version));
                 CREATE TABLE agata.alembic_version(version_num varchar(32) PRIMARY KEY);
                 INSERT INTO agata.alembic_version VALUES('agata0009');
                 CREATE TABLE public.backup_fixture(id integer); INSERT INTO public.backup_fixture VALUES(42);
                 INSERT INTO agata.tenants VALUES('{tenant1}'),('{tenant2}');
                 INSERT INTO agata.conversations SELECT id,id,'gpoint' FROM agata.tenants;
                 INSERT INTO agata.messages SELECT id,id,id,id,id,'real_world','assistant',NULL,NULL FROM agata.tenants;
-                INSERT INTO agata.regional_policy_profiles VALUES('{uuid4()}','{tenant1}','existing GPOINT policy');
+                INSERT INTO agata.regional_policy_profiles
+                  (id,tenant_id,jurisdiction,market,version,status,effective_from,rules)
+                VALUES('{uuid4()}','{tenant1}','GLOBAL','GPOINT',1,'active',now(),
+                  '{{"ai_disclosure_required":true,"policy_marker":"existing GPOINT policy"}}');
                 """
                 for table in ('tenants', 'conversations', 'messages', 'outbox_jobs', 'regional_policy_profiles', 'alembic_version'):
                     sql += f'ALTER TABLE agata.{table} OWNER TO gpoint;'
@@ -119,7 +127,7 @@ class DockerMigrationProtocol(unittest.TestCase):
                     self.assertFalse(guard.alive(), 'released advisory lock must fail closed')
                 def migrate(inventory, guard):
                     # The snapshot's relation lock is closed before DDL; a
-                    # transient insert can run, while agata0011 re-censuses
+                    # transient insert can run, while the migration re-censuses
                     # under ACCESS EXCLUSIVE inside the migration transaction.
                     transient = docker('exec', postgres, 'psql', '-U','postgres','-d','gpoint','-v','ON_ERROR_STOP=1','-c',
                         f"BEGIN; SET LOCAL lock_timeout='100ms'; INSERT INTO agata.tenants VALUES('{uuid4()}'); ROLLBACK", check=False)
@@ -138,7 +146,7 @@ class DockerMigrationProtocol(unittest.TestCase):
                 facts = gate.guarded_migration(proof, gate.TenantGuard(), migrate)
                 self.assertEqual(facts['tenant_count'], 2)
                 self.assertNotIn('inventory', facts)
-                self.assertEqual(gate.effective_probe(IMAGE)['head'], 'agata0011')
+                self.assertEqual(gate.effective_probe(IMAGE)['head'], 'agata0012')
                 owners = docker('exec', postgres, 'psql', '-U', 'postgres', '-d', 'gpoint', '-Atc',
                     "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_roles r ON r.oid=c.relowner WHERE n.nspname='agata' AND r.rolname IN ('gpoint','gpoint_runtime','gsales_runtime')").stdout.strip()
                 self.assertEqual(owners, '0', 'tenant runtime still owns protected AGATA objects')
@@ -153,8 +161,13 @@ class DockerMigrationProtocol(unittest.TestCase):
                     'SELECT count(*) FROM agata.messages WHERE incoming_read_at IS NOT NULL').stdout.strip()
                 self.assertEqual(marked, '2')
                 preserved = docker('exec', postgres, 'psql', '-U', 'postgres', '-d', 'gpoint', '-Atc',
-                    f"SELECT policy_data FROM agata.regional_policy_profiles WHERE tenant_id='{tenant1}'").stdout.strip()
-                self.assertEqual(preserved, 'existing GPOINT policy')
+                    f"SELECT version || ':' || status || ':' || rules->>'policy_marker' "
+                    f"FROM agata.regional_policy_profiles WHERE tenant_id='{tenant1}' "
+                    "ORDER BY version").stdout.strip().splitlines()
+                self.assertEqual(preserved, [
+                    '1:retired:existing GPOINT policy',
+                    '2:active:existing GPOINT policy',
+                ])
                 docker('exec', postgres, 'psql', '-U', 'postgres', '-d', 'gpoint', '-v', 'ON_ERROR_STOP=1', '-c',
                     'GRANT USAGE ON SCHEMA agata TO gpoint_runtime,gsales_runtime; '
                     'GRANT EXECUTE ON FUNCTION agata.runtime_tenant_id() TO gpoint_runtime,gsales_runtime; '

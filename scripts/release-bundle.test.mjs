@@ -22,7 +22,7 @@ function fixture(t) {
     sourceSha: sha, platform: 'linux/amd64',
   }]));
   const receipt = {schema: 3, transport: 'ghcr-oci', candidateSha: sha, status: 'READY',
-    runId: 123, runAttempt: 2, agataHead: 'agata0011', prismaHead: '20261001000000_candidate',
+    runId: 123, runAttempt: 2, agataHead: 'agata0012', prismaHead: '20261001000000_candidate',
     gsalesMigrationHead: '001_gsales', gsalesMigrationSha256: 'c'.repeat(64), gates, images};
   fs.writeFileSync(path.join(dir, 'receipt.json'), JSON.stringify(receipt));
   fs.writeFileSync(path.join(dir, 'ghcr-evidence.json'), JSON.stringify({schema: 1,
