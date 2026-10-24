@@ -38,9 +38,8 @@ function signingSecret(env = process.env): Uint8Array {
 
 function workerTenant(env = process.env): string {
   const value = env.EROS_WORKER_TENANT_ID ?? '';
-  const gpointTenant = env.AGATA_TENANT_ID ?? '';
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-  if (!uuid.test(value) || !uuid.test(gpointTenant) || value !== gpointTenant) {
+  if (!uuid.test(value)) {
     throw new HttpException({ code: 'EROS_BRIDGE_UNAVAILABLE' }, 503);
   }
   return value;

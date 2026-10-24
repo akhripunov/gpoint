@@ -28,6 +28,8 @@ test('GS migrator consumes separate privileged env and exact immutable SHA',()=>
 test('combined compose preserves runtime env references and saves protected effective configuration',()=>{
   const command=combinedComposeCommand(sha);
   assert.match(command,/docker-compose.gsales.yml/);
+  assert.match(command,/docker-compose.eros.yml/);
+  assert.match(command,/--env-file \/opt\/gpoint\/env\/eros.env/);
   assert.match(command,/--no-interpolate --no-env-resolution/);
   assert.match(command,/umask 077/);
   assert.match(command,/effective-compose.json/);
@@ -56,7 +58,7 @@ test('Docker Compose can persist a merged lane without embedding runtime credent
   const scratch=fs.mkdtempSync(path.join(os.tmpdir(),'gsales-compose-contract-'));
   try {
     const envFile=path.join(scratch,'production.env'); fs.writeFileSync(envFile,'');
-    const files=['docker-compose.yml','docker-compose.gsales.yml'].map(name=>{
+    const files=['docker-compose.yml','docker-compose.gsales.yml','docker-compose.eros.yml'].map(name=>{
       const target=path.join(scratch,name);
       fs.writeFileSync(target,fs.readFileSync(new URL('../infra/production/'+name,import.meta.url),'utf8').replaceAll('/opt/gpoint/env/production.env',envFile));
       return target;
@@ -72,6 +74,11 @@ test('Docker Compose can persist a merged lane without embedding runtime credent
     assert.equal(config.services['gsales-api'].environment.GSALES_TELEGRAM_LISTENER_ENABLED,'false');
     assert.ok(JSON.stringify(config.services['gsales-api'].env_file).includes(envFile));
     assert.equal(config.services['gsales-api'].ports[0].host_ip,'127.0.0.1');
+    assert.ok(config.services.eros);
+    assert.ok(config.services.api.networks.eros_api);
+    assert.equal(config.services.eros.environment.DATABASE_URL,'${EROS_RUNTIME_DATABASE_URL:?Eros runtime database URL is required}');
+    assert.match(JSON.stringify(config.services.eros.networks),/gpoint_eros_api|eros_api/);
+    assert.ok(!config.services.postgres);
   } finally {fs.rmSync(scratch,{recursive:true,force:true});}
 });
 

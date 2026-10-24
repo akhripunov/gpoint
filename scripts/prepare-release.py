@@ -164,6 +164,12 @@ def stock_eros_build_command(source_dir, candidate_sha):
     return command
 
 
+def stock_eros_migration_e2e_command(candidate_sha):
+    if not re.fullmatch(r'[a-f0-9]{40}', candidate_sha or ''):
+        raise ValueError('stock Eros migration E2E requires an exact GPoint candidate SHA')
+    return ('bash', 'services/eros-engine/run-local-e2e.sh', f'gpoint-eros-pilot:{candidate_sha}')
+
+
 def build_stock_eros_image(candidate_sha, timings):
     """Fetch, verify, build and smoke-check the pinned upstream without editing it."""
     with tempfile.TemporaryDirectory(prefix='gpoint-stock-eros-') as temporary:
@@ -443,6 +449,8 @@ def prepare(sha, output, *, postgres_only=False):
         if '\n' in expected_agata or not expected_agata or heads != expected_agata.split()[0] or prisma != expected_prisma:
             raise RuntimeError('runtime artifact migration heads do not match candidate source')
         pilot_image = build_stock_eros_image(sha, timings)
+        with measured_stage('eros_stock_migration_api_e2e', timings):
+            run(*stock_eros_migration_e2e_command(sha))
         if gsales_regression is not None:
             finish_background_stage(gsales_regression)
         images = {}
@@ -453,7 +461,7 @@ def prepare(sha, output, *, postgres_only=False):
             images[role] = {'id': image['Id'], 'revision': sha, 'platform': 'linux/amd64'}
         proof = {'schema': 1, 'candidateSha': sha, 'status': 'READY', 'runId': int(os.environ['GITHUB_RUN_ID']),
                  'runAttempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
-                 'gates': {name: 'PASS' for name in ['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'botImageStartup', 'erosPilotImage']},
+                 'gates': {name: 'PASS' for name in ['unit', 'postgres', 'gsalesPostgres', 'gsalesImage', 'gsalesMigrationChecksum', 'docker', 'migration', 'miniapp', 'agataHealth', 'botImageStartup', 'erosPilotImage', 'erosStockMigrationApiE2E']},
                  'impactV3': impact,
                  'images': images, 'prismaHead': prisma, 'agataHead': heads,
                  'gsalesMigrationHead': gsales_migration.stem, 'gsalesMigrationSha256': gsales_migration_sha,

@@ -14,6 +14,7 @@ PREPARE_SPEC = importlib.util.spec_from_file_location("prepare_release", ROOT / 
 PREPARE = importlib.util.module_from_spec(PREPARE_SPEC)
 PREPARE_SPEC.loader.exec_module(PREPARE)
 stock_eros_build_command = PREPARE.stock_eros_build_command
+stock_eros_migration_e2e_command = PREPARE.stock_eros_migration_e2e_command
 
 
 SHA = "a" * 40
@@ -38,6 +39,12 @@ class ErosPilotArtifactTests(unittest.TestCase):
     def test_stock_build_rejects_non_exact_candidate(self):
         with self.assertRaisesRegex(ValueError, "exact"):
             stock_eros_build_command(Path("/tmp/clean-eros"), "not-a-sha")
+
+    def test_prepare_runs_stock_eros_migration_and_api_e2e_for_candidate_image(self):
+        self.assertEqual(stock_eros_migration_e2e_command(SHA),
+                         ("bash", "services/eros-engine/run-local-e2e.sh", f"gpoint-eros-pilot:{SHA}"))
+        with self.assertRaisesRegex(ValueError, "exact"):
+            stock_eros_migration_e2e_command("main")
 
     def test_build_cache_is_used_only_inside_github_actions(self):
         with patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}, clear=False):

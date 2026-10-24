@@ -83,13 +83,30 @@ test('pull plan addresses exact digests, verifies labels, and never embeds crede
   assert.throws(() => createOciPullScript(validated, 'd'.repeat(40)), /candidate/i);
 });
 
+test('standard V5 image pull includes stock Eros only with its exact Prepare receipt', () => {
+  const raw={...receipt(),gates:{erosPilotImage:'PASS',erosPilotGhcrReadback:'PASS',erosStockMigrationApiE2E:'PASS'},
+    pilotImage:{id:configDigest,sourceSha:sha,upstreamSha:'d1a140083321687212fb7b17c09cc0c3c9639f5e',patchSetSha256:'none',platform:'linux/amd64'},
+    pilotImages:{eros:{repository:'ghcr.io/akhripunov/gpoint-eros-pilot',digest,configDigest,sourceSha:sha,
+      upstreamSha:'d1a140083321687212fb7b17c09cc0c3c9639f5e',patchSetSha256:'none',platform:'linux/amd64'}}};
+  const validated=validateOciReceipt(raw,sha,{runId:123,runAttempt:1});
+  const script=createOciPullScript(validated,sha);
+  assert.equal((script.match(/docker pull /g)||[]).length,4);
+  assert.match(script,/docker pull 'ghcr\.io\/akhripunov\/gpoint-eros-pilot@sha256:/);
+  assert.match(script,/GHCR_MANIFEST_DIGEST_MISMATCH role=eros/);
+  const invalid=structuredClone(validated); invalid.gates.erosStockMigrationApiE2E='FAIL';
+  assert.throws(()=>createOciPullScript(invalid,sha),/proof is invalid/);
+});
+
 test('Eros Pilot pull consumes only the exact stock image receipt and proves upstream provenance', () => {
-  const pilot = validateOciReceipt({...receipt(), gates: {erosPilotImage: 'PASS', erosPilotGhcrReadback: 'PASS'},
+  const pilot = validateOciReceipt({...receipt(), gates: {erosPilotImage: 'PASS', erosPilotGhcrReadback: 'PASS', erosStockMigrationApiE2E: 'PASS'},
     pilotImage: {id: configDigest, sourceSha: sha, upstreamSha: 'd1a140083321687212fb7b17c09cc0c3c9639f5e', patchSetSha256: 'none', platform: 'linux/amd64'},
     pilotImages: {eros: {repository: 'ghcr.io/akhripunov/gpoint-eros-pilot', digest,
       configDigest, sourceSha: sha, upstreamSha: 'd1a140083321687212fb7b17c09cc0c3c9639f5e',
       patchSetSha256: 'none', platform: 'linux/amd64'}}}, sha, {runId: 123, runAttempt: 1});
   const script = createErosPilotOciPullScript(pilot, sha);
+  assert.throws(() => validateOciReceipt({...receipt(), gates: {erosPilotImage: 'PASS', erosPilotGhcrReadback: 'PASS'},
+    pilotImage: {id: configDigest, sourceSha: sha, upstreamSha: 'd1a140083321687212fb7b17c09cc0c3c9639f5e', patchSetSha256: 'none', platform: 'linux/amd64'},
+    pilotImages: pilot.pilotImages}, sha, {runId: 123, runAttempt: 1}), /migration\/API E2E gate/);
   assert.equal((script.match(/docker pull /g) || []).length, 2);
   assert.match(script, /gpoint-eros-pilot@sha256:/);
   assert.match(script, /gpoint-runtime@sha256:/);

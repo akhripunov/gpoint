@@ -9,7 +9,7 @@ services:
       EROS_JWT_SECRET: ${EROS_JWT_SECRET:?Eros JWT secret is required}
       EROS_WORKER_SIGNING_SECRET: ${EROS_WORKER_SIGNING_SECRET:?Eros worker signing secret is required}
       EROS_BRIDGE_API_KEY: ${EROS_BRIDGE_API_KEY:?Eros bridge API key is required}
-      EROS_WORKER_TENANT_ID: ${AGATA_TENANT_ID:?GPoint worker tenant binding is required}
+      EROS_WORKER_TENANT_ID: ${EROS_TENANT_ID:?GPoint tenant identity is required}
       EROS_PRODUCTION_TEST_USER_IDS: ${EROS_TEST_USER_IDS:-}
       EROS_PRODUCTION_TEST_CREATOR_IDS: ${EROS_TEST_CREATOR_IDS:-}
       EROS_EMBEDDING_API_KEY: ${EROS_EMBEDDING_API_KEY:?Eros embedding API key is required}
@@ -67,7 +67,8 @@ services:
     restart: "no"
     command: ["node", "/opt/gpoint/verify-eros-model.mjs"]
     environment:
-      EROS_OLLAMA_MODEL_DIGEST: ${EROS_OLLAMA_MODEL_DIGEST:-ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d}
+      EROS_PILOT_OLLAMA_MODEL_DIGEST: ${EROS_PILOT_OLLAMA_MODEL_DIGEST:-ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d}
+      EROS_PILOT_OLLAMA_URL: http://172.31.254.1:11434
     volumes:
       - "/opt/gpoint/releases/${EROS_SOURCE_SHA:?exact Eros source SHA is required}/source/services/eros-engine/verify-eros-pilot-model.mjs:/opt/gpoint/verify-eros-model.mjs:ro"
     depends_on:
@@ -91,7 +92,7 @@ services:
       DATABASE_URL: ${EROS_RUNTIME_DATABASE_URL:?Eros runtime database URL is required}
       GPOINT_API_KEY: ${EROS_EMBEDDING_API_KEY:?Eros embedding API key is required}
       GPOINT_WORKER_BRIDGE_SIGNING_SECRET: ${EROS_WORKER_SIGNING_SECRET:?Eros worker signing secret is required}
-      GPOINT_WORKER_TENANT_ID: ${AGATA_TENANT_ID:?GPoint worker tenant binding is required}
+      GPOINT_WORKER_TENANT_ID: ${EROS_TENANT_ID:?GPoint tenant identity is required}
       EROS_BRIDGE_API_KEY: ${EROS_BRIDGE_API_KEY:?Eros bridge API key is required}
       OPENROUTER_API_KEY: ""
       SUPABASE_JWT_SECRET: ${EROS_JWT_SECRET:?Eros JWT secret is required}

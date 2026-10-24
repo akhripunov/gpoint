@@ -51,6 +51,7 @@ test('optional stock Eros pilot is verified in the receipt but excluded from def
   f.receipt.pilotImages = {eros: pilot};
   f.receipt.gates.erosPilotImage = 'PASS';
   f.receipt.gates.erosPilotGhcrReadback = 'PASS';
+  f.receipt.gates.erosStockMigrationApiE2E = 'PASS';
   fs.writeFileSync(path.join(f.dir, 'receipt.json'), JSON.stringify(f.receipt));
   const proof = verifyReleaseBundle(f.dir, sha);
   assert.equal(proof.pilotImages.eros.reference,
@@ -68,6 +69,19 @@ test('optional stock Eros pilot is verified in the receipt but excluded from def
   f.receipt.pilotImages.eros.upstreamSha = 'f'.repeat(40);
   fs.writeFileSync(path.join(f.dir, 'receipt.json'), JSON.stringify(f.receipt));
   assert.throws(() => verifyReleaseBundle(f.dir, sha), /Eros pilot image proof/);
+});
+
+test('Eros image receipt is rejected unless Prepare ran the stock migration/API E2E gate', t => {
+  const f = fixture(t);
+  f.receipt.pilotImage = {id: `sha256:${'f'.repeat(64)}`, sourceSha: sha,
+    upstreamSha: 'd1a140083321687212fb7b17c09cc0c3c9639f5e', patchSetSha256: 'none', platform: 'linux/amd64'};
+  f.receipt.pilotImages = {eros: {repository: 'ghcr.io/akhripunov/gpoint-eros-pilot',
+    digest: `sha256:${'e'.repeat(64)}`, configDigest: `sha256:${'f'.repeat(64)}`, sourceSha: sha,
+    upstreamSha: 'd1a140083321687212fb7b17c09cc0c3c9639f5e', patchSetSha256: 'none', platform: 'linux/amd64'}};
+  f.receipt.gates.erosPilotImage = 'PASS';
+  f.receipt.gates.erosPilotGhcrReadback = 'PASS';
+  fs.writeFileSync(path.join(f.dir, 'receipt.json'), JSON.stringify(f.receipt));
+  assert.throws(() => verifyReleaseBundle(f.dir, sha), /stock Eros migration\/API E2E gate/);
 });
 
 test('legacy receipt, absent evidence, digest mismatch and untrusted provenance block', t => {

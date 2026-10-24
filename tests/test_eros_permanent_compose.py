@@ -24,7 +24,11 @@ class PermanentErosComposeTests(unittest.TestCase):
         self.assertIn("EROS_PRODUCTION_TEST_CREATOR_IDS", api["environment"])
         self.assertIn("EROS_BRIDGE_API_KEY", api["environment"])
         self.assertIn("EROS_EMBEDDING_API_KEY", api["environment"])
+        self.assertIn("${EROS_TENANT_ID:?GPoint tenant identity is required}", api["environment"]["EROS_WORKER_TENANT_ID"])
+        self.assertNotIn("AGATA_TENANT_ID", str(api["environment"]))
+        self.assertNotIn("AGATA_TENANT_ID", str(self.overlay["services"]["eros"]["environment"]))
         gateway = (ROOT / "apps/api/src/eros-worker-gateway.ts").read_text()
+        self.assertNotIn("AGATA_TENANT_ID", gateway)
         self.assertIn("bearer(headers, 'EROS_EMBEDDING_API_KEY')", gateway)
         self.assertNotIn("bearer(headers, 'GPOINT_API_KEY')", gateway)
         self.assertNotIn("command", api)
@@ -47,6 +51,15 @@ class PermanentErosComposeTests(unittest.TestCase):
         self.assertIn("EROS_MIGRATOR_DATABASE_URL", self.overlay["services"]["eros-migrate"]["environment"]["DATABASE_URL"])
         self.assertNotIn("build", eros)
 
+    def test_persistent_eros_uses_the_existing_postgres_network_alias_and_no_second_database(self):
+        self.assertNotIn("postgres", self.overlay["services"])
+        self.assertEqual(self.overlay["networks"]["eros_data"]["name"], "gpoint_eros_data")
+        self.assertTrue(self.overlay["networks"]["eros_data"]["external"])
+        provisioning = (ROOT / "scripts/eros-production-secrets.py").read_text()
+        self.assertIn("gpoint-eros-db", provisioning)
+        self.assertIn("'network', 'connect'", provisioning)
+        self.assertIn("'--alias', 'gpoint-eros-db'", provisioning)
+
     def test_eros_uses_private_data_and_embedding_networks_and_existing_postgres(self):
         eros = self.overlay["services"]["eros"]
         networks = eros["networks"]
@@ -62,6 +75,11 @@ class PermanentErosComposeTests(unittest.TestCase):
         self.assertTrue(self.overlay["networks"]["eros_api"]["internal"])
         self.assertNotIn("ports", api)
         self.assertEqual(self.base["services"]["api"]["command"], api.get("command", self.base["services"]["api"]["command"]))
+
+    def test_stock_model_verifier_targets_the_private_mac_relay_contract(self):
+        verifier = self.overlay["services"]["eros-model-verify"]["environment"]
+        self.assertIn("EROS_PILOT_OLLAMA_MODEL_DIGEST", verifier)
+        self.assertEqual(verifier["EROS_PILOT_OLLAMA_URL"], "http://172.31.254.1:11434")
 
 
 if __name__ == "__main__":

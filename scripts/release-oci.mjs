@@ -63,6 +63,8 @@ export function validateOciReceipt(receipt, candidate, { runId, runAttempt } = {
   if (receipt.pilotImage !== undefined || receipt.pilotImages !== undefined) {
     if (receipt.gates?.erosPilotImage !== 'PASS' || receipt.gates?.erosPilotGhcrReadback !== 'PASS')
       fail('Eros pilot image is missing its Prepare or GHCR readback gate');
+    if (receipt.gates?.erosStockMigrationApiE2E !== 'PASS')
+      fail('Eros image receipt is missing the stock Eros migration/API E2E gate');
     const pilot = receipt.pilotImages?.eros;
     const preparedPilot = receipt.pilotImage;
     if (!pilot || Object.keys(receipt.pilotImages).join(',') !== 'eros' ||
@@ -204,6 +206,21 @@ export function createOciPullScript(receipt, candidate, { username = 'akhripunov
     lines.push(`if ! docker image inspect '${reference}' --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null | grep -Fxq '${reference}'; then echo 'GHCR_MANIFEST_DIGEST_MISMATCH role=${role}'; exit 1; fi`);
     lines.push(`docker image tag '${reference}' '${target}'`);
     appendDockerImageIdentityCheck(lines, target, image, role, 'tagged');
+  }
+  if (receipt.pilotImages?.eros) {
+    const image = receipt.pilotImages.eros;
+    const reference = `${EROS_PILOT_REPOSITORY}@${image.digest}`;
+    if (receipt.gates?.erosPilotImage !== 'PASS' || receipt.gates?.erosPilotGhcrReadback !== 'PASS' ||
+        receipt.gates?.erosStockMigrationApiE2E !== 'PASS' || image.repository !== EROS_PILOT_REPOSITORY ||
+        image.sourceSha !== candidate || image.platform !== 'linux/amd64' ||
+        !DIGEST.test(image.digest ?? '') || !DIGEST.test(image.configDigest ?? ''))
+      fail('permanent Eros OCI proof is invalid');
+    lines.push(`docker pull '${reference}' >/dev/null 2>&1 || { echo 'GHCR_PULL_FAILED role=eros'; exit 1; }`);
+    lines.push(`test "$(docker image inspect '${reference}' --format '{{.Os}}/{{.Architecture}}' 2>/dev/null)" = 'linux/amd64' || { echo 'GHCR_PLATFORM_MISMATCH role=eros'; exit 1; }`);
+    appendOciManifestConfigCheck(lines, image, reference, 'eros');
+    appendDockerImageIdentityCheck(lines, reference, image, 'eros', 'pulled');
+    lines.push(`test "$(docker image inspect '${reference}' --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null)" = '${candidate}' || { echo 'GHCR_REVISION_LABEL_MISMATCH role=eros'; exit 1; }`);
+    lines.push(`if ! docker image inspect '${reference}' --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null | grep -Fxq '${reference}'; then echo 'GHCR_MANIFEST_DIGEST_MISMATCH role=eros'; exit 1; fi`);
   }
   lines.push('echo GPOINT_GHCR_IMAGES_VERIFIED=YES');
   return lines.join('\n');
