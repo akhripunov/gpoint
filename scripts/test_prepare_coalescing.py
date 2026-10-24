@@ -560,7 +560,7 @@ class PrepareCoalescingTests(unittest.TestCase):
 
     def test_eros_pilot_has_a_separate_v5_deploy_job(self):
         workflow = (ROOT / ".github" / "workflows" / "gpoint-deploy.yml").read_text()
-        self.assertIn("options: [preflight, production, task-scoped-auto, reconcile-authorization, eros-pilot]", workflow)
+        self.assertIn("options: [preflight, production, task-scoped-auto, reconcile-authorization, eros-pilot, eros-acl-plan, eros-acl-apply, eros-acl-rollback, eros-acl-reopen]", workflow)
         self.assertIn("approve_eros_pilot:", workflow)
         self.assertIn("group: gpoint-production-release", workflow)
         production = workflow[workflow.index("  deploy:"):workflow.index("  deploy-eros-pilot:")]
