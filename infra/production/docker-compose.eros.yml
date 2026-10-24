@@ -96,7 +96,8 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: ${EROS_RUNTIME_DATABASE_URL:?Eros runtime database URL is required}
-      GPOINT_API_KEY: ${EROS_EMBEDDING_API_KEY:?Eros embedding API key is required}
+      GPOINT_API_KEY: ${EROS_BRIDGE_API_KEY:?Eros bridge API key is required}
+      GPOINT_EMBEDDINGS_API_KEY: ${EROS_EMBEDDING_API_KEY:?Eros embedding API key is required}
       GPOINT_WORKER_BRIDGE_SIGNING_SECRET: ${EROS_WORKER_SIGNING_SECRET:?Eros worker signing secret is required}
       GPOINT_WORKER_TENANT_ID: ${EROS_TENANT_ID:?GPoint tenant identity is required}
       EROS_BRIDGE_API_KEY: ${EROS_BRIDGE_API_KEY:?Eros bridge API key is required}
@@ -106,7 +107,7 @@ services:
       RUST_LOG: info
     volumes:
       - type: bind
-        source: "/opt/gpoint/releases/${EROS_SOURCE_SHA:?exact Eros source SHA is required}/source/services/eros-engine/eros-pilot-model-config.toml"
+        source: "/opt/gpoint/releases/${EROS_SOURCE_SHA:?exact Eros source SHA is required}/source/services/eros-engine/eros-production-model-config.toml"
         target: /etc/eros-engine/model_config.toml
         read_only: true
     depends_on:

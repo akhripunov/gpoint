@@ -1,4 +1,10 @@
 import unittest
+import re
+try:
+    import tomllib
+except ImportError:  # Python 3.9 on the owner Mac; hosted Prepare uses 3.12.
+    import tomli as tomllib
+from urllib.parse import urlsplit
 from pathlib import Path
 
 import yaml
@@ -80,6 +86,41 @@ class PermanentErosComposeTests(unittest.TestCase):
         verifier = self.overlay["services"]["eros-model-verify"]["environment"]
         self.assertIn("EROS_PILOT_OLLAMA_MODEL_DIGEST", verifier)
         self.assertEqual(verifier["EROS_PILOT_OLLAMA_URL"], "http://172.31.254.1:11434")
+
+
+    def permanent_model_config(self):
+        mounts = self.overlay['services']['eros']['volumes']
+        mount = next(x for x in mounts if x['target'] == '/etc/eros-engine/model_config.toml')
+        relative = mount['source'].split('/source/', 1)[1]
+        return tomllib.loads((ROOT / relative).read_text())
+
+    def test_every_permanent_provider_reaches_the_existing_api(self):
+        config = self.permanent_model_config()
+        for provider in config['providers'].values():
+            for endpoint in ('chat', 'embeddings'):
+                if endpoint not in provider:
+                    continue
+                url = urlsplit(provider[endpoint])
+                self.assertEqual(url.hostname, 'api')
+                self.assertEqual(url.port, 3000)
+                self.assertEqual(url.path, '/eros-worker/v1/' + ('chat/completions' if endpoint == 'chat' else 'embeddings'))
+                api_networks = set(self.overlay['services']['api']['networks'])
+                eros_networks = set(self.overlay['services']['eros']['networks'])
+                self.assertTrue(api_networks & eros_networks)
+
+    def test_permanent_chat_and_embedding_use_their_independent_gateway_keys(self):
+        config = self.permanent_model_config()
+        chat_provider = config['defaults']['fallback_model'].rsplit('@', 1)[1]
+        embedding_provider = config['tasks']['embedding']['model'].rsplit('@', 1)[1]
+        self.assertNotEqual(chat_provider, embedding_provider)
+        api_env = self.overlay['services']['api']['environment']
+        eros_env = self.overlay['services']['eros']['environment']
+        for provider, expected_key in ((chat_provider, 'EROS_BRIDGE_API_KEY'), (embedding_provider, 'EROS_EMBEDDING_API_KEY')):
+            provider_key = provider.upper() + '_API_KEY'  # pinned stock Eros provider env contract
+            bound = re.match(r'\$\{([A-Z_]+)(?::[^}]*)?\}', eros_env[provider_key])
+            self.assertIsNotNone(bound)
+            self.assertEqual(bound.group(1), expected_key)
+            self.assertIn('${' + expected_key + ':', api_env[expected_key])
 
 
 if __name__ == "__main__":
