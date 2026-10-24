@@ -56,10 +56,10 @@ def select_run(sha, runs):
     return latest
 
 
-def validate_request(sha, ref, mode, approval, eros_pilot_approval='false'):
+def validate_request(sha, ref, mode, approval, eros_pilot_approval='false', eros_acl_approval='false'):
     if not re.fullmatch('[a-f0-9]{40}', sha):
         raise RuntimeError('Enter the complete 40-character candidate SHA')
-    if ref != 'refs/heads/main' or mode not in ('preflight', 'production', 'task-scoped-auto', 'eros-pilot'):
+    if ref != 'refs/heads/main' or mode not in ('preflight', 'production', 'task-scoped-auto', 'eros-pilot', 'eros-acl-plan', 'eros-acl-apply', 'eros-acl-rollback'):
         raise RuntimeError('Select main and a valid release mode')
     if mode == 'production' and approval != 'true':
         raise RuntimeError('Explicit exact-candidate production approval is required')
@@ -67,10 +67,14 @@ def validate_request(sha, ref, mode, approval, eros_pilot_approval='false'):
         raise RuntimeError('Eros Pilot requires its separate exact-candidate approval and cannot use production approval')
     if mode == 'task-scoped-auto' and approval != 'false':
         raise RuntimeError('TASK_SCOPED_AUTO uses its durable authorization record, not the exact-SHA approval input')
+    if mode == 'eros-acl-plan' and eros_acl_approval != 'false':
+        raise RuntimeError('Eros ACL plan is read-only and does not accept Apply approval')
+    if mode in ('eros-acl-apply', 'eros-acl-rollback') and eros_acl_approval != 'true':
+        raise RuntimeError('Eros ACL mutation requires its separate exact-SHA approval')
 
 
 def validate_owner_approval(mode, actor, triggering_actor, repository_owner):
-    if mode in ('production', 'eros-pilot') and (not repository_owner or actor != repository_owner
+    if mode in ('production', 'eros-pilot', 'eros-acl-apply', 'eros-acl-rollback') and (not repository_owner or actor != repository_owner
                                  or triggering_actor != repository_owner):
         raise RuntimeError('Exact-SHA protected Deploy must be dispatched and triggered by the repository OWNER')
 
@@ -97,7 +101,8 @@ def main():
     if orchestrator_run_id and not orchestrator_run_id.isdigit():
         raise RuntimeError('Automatic orchestrator run ID is invalid')
     validate_request(sha, os.environ.get('GITHUB_REF'), os.environ.get('RELEASE_MODE'),
-                     os.environ.get('APPROVE_PRODUCTION'), os.environ.get('APPROVE_EROS_PILOT', 'false'))
+                     os.environ.get('APPROVE_PRODUCTION'), os.environ.get('APPROVE_EROS_PILOT', 'false'),
+                     os.environ.get('APPROVE_EROS_ACL', 'false'))
     validate_owner_approval(os.environ.get('RELEASE_MODE'), os.environ.get('OWNER_APPROVAL_ACTOR', ''),
                             os.environ.get('OWNER_TRIGGERING_ACTOR', ''),
                             os.environ.get('OWNER_REPOSITORY', ''))

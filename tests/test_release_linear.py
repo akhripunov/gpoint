@@ -1085,8 +1085,17 @@ class DeploymentReleaseTests(unittest.TestCase):
     def test_selector_accepts_only_current_deploy_modes(self):
         for mode, approval in [('preflight', 'false'), ('production', 'true'), ('task-scoped-auto', 'false')]:
             SELECT.validate_request(SHA, 'refs/heads/main', mode, approval)
+        SELECT.validate_request('a' * 40, 'refs/heads/main', 'eros-acl-plan', 'false', eros_acl_approval='false')
+        SELECT.validate_request('a' * 40, 'refs/heads/main', 'eros-acl-apply', 'false', eros_acl_approval='true')
+        SELECT.validate_request('a' * 40, 'refs/heads/main', 'eros-acl-rollback', 'false', eros_acl_approval='true')
+        SELECT.validate_owner_approval('eros-acl-apply', 'owner', 'owner', 'owner')
+        SELECT.validate_owner_approval('eros-acl-rollback', 'owner', 'owner', 'owner')
+        with self.assertRaisesRegex(RuntimeError, 'separate exact-SHA approval'):
+            SELECT.validate_request('a' * 40, 'refs/heads/main', 'eros-acl-apply', 'false', eros_acl_approval='false')
+        with self.assertRaisesRegex(RuntimeError, 'repository OWNER'):
+            SELECT.validate_owner_approval('eros-acl-apply', 'collaborator', 'owner', 'owner')
         with self.assertRaisesRegex(RuntimeError, 'valid release mode'):
-            SELECT.validate_request(SHA, 'refs/heads/main', 'recovery-finalization', 'true')
+            SELECT.validate_request('a' * 40, 'refs/heads/main', 'recovery-finalization', 'true')
 
 if __name__ == '__main__':
     unittest.main()
