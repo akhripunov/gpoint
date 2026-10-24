@@ -318,6 +318,8 @@ test('Prepare selects the pinned Docker action context without exporting DOCKER_
 });
 
 test('Eros image requires stock upstream provenance and rejects downstream patches', () => {
+  const policy = readFileSync(new URL('local-test-policy.mjs', directory), 'utf8');
+  assert.match(policy, /com\.gpoint\.integration\.revision/);
   const reference = 'gpoint-eros:stock-d1a140083321687212fb7b17c09cc0c3c9639f5e';
   const metadata = {
     id: `sha256:${'a'.repeat(64)}`,
@@ -332,12 +334,13 @@ test('Eros image requires stock upstream provenance and rejects downstream patch
   const candidateSha = 'b'.repeat(40);
   assert.equal(validateErosImageInspection(`gpoint-eros-pilot:${candidateSha}`, {
     ...metadata,
-    buildRevision: candidateSha,
+    integrationRevision: candidateSha,
   }), metadata.id);
   assert.throws(() => validateErosImageInspection(`gpoint-eros-pilot:${candidateSha}`, {
     ...metadata,
-    buildRevision: 'c'.repeat(40),
-  }), /eros_build_revision_mismatch/);
+    integrationRevision: 'c'.repeat(40),
+  }), /eros_integration_revision_mismatch/);
+  assert.throws(() => validateErosImageInspection(`gpoint-eros-pilot:${candidateSha}`, metadata), /eros_integration_revision_missing/);
   assert.throws(() => validateErosImageInspection('gpoint-eros:latest', metadata), /stock_eros_image_tag_required/);
   assert.throws(() => validateErosImageInspection(reference, { ...metadata, patchSha256: 'sha256-of-a-patch' }), /eros_downstream_patch_forbidden/);
   assert.throws(() => validateErosImageInspection(reference, { ...metadata, id: 'mutable-tag' }), /immutable_image_id_required/);

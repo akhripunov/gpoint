@@ -55,8 +55,14 @@ export function validateErosImageInspection(reference, metadata) {
   if (stockSourceTag && stockSourceTag[1] !== metadata.upstreamRevision) {
     throw new Error('eros_upstream_tag_mismatch');
   }
-  if (pilotCandidateTag && pilotCandidateTag[1] !== metadata.buildRevision) {
+  if (stockSourceTag && metadata.buildRevision !== metadata.upstreamRevision) {
     throw new Error('eros_build_revision_mismatch');
+  }
+  if (pilotCandidateTag && !/^[0-9a-f]{40}$/.test(metadata.integrationRevision ?? '')) {
+    throw new Error('eros_integration_revision_missing');
+  }
+  if (pilotCandidateTag && pilotCandidateTag[1] !== metadata.integrationRevision) {
+    throw new Error('eros_integration_revision_mismatch');
   }
   return metadata.id;
 }
@@ -99,14 +105,15 @@ function inspectImage(reference) {
     '{{index .Config.Labels "com.gpoint.eros.upstream-revision"}}',
     '{{index .Config.Labels "com.gpoint.eros.patch-set.sha256"}}',
     '{{index .Config.Labels "org.opencontainers.image.revision"}}',
+    '{{index .Config.Labels "com.gpoint.integration.revision"}}',
   ].join('\t');
   const output = execFileSync('docker', ['image', 'inspect', reference, '--format', format], {
     env: cleanDockerEnvironment(context),
     encoding: 'utf8',
   }).trim();
-  const [id, os, architecture, source, upstreamRevision, patchSha256, buildRevision] = output.split('\t');
+  const [id, os, architecture, source, upstreamRevision, patchSha256, buildRevision, integrationRevision] = output.split('\t');
   return validateErosImageInspection(reference, {
-    id, os, architecture, source, upstreamRevision, patchSha256, buildRevision,
+    id, os, architecture, source, upstreamRevision, patchSha256, buildRevision, integrationRevision,
   });
 }
 
