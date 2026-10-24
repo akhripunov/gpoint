@@ -42,6 +42,14 @@ test('guarded rollback has its own exact owner-confirmed dispatch mode', () => {
   assert.throws(() => validateAclDeployRequest({...env, GITHUB_TRIGGERING_ACTOR: 'collaborator'}), /repository owner/);
 });
 
+test('fenced admission recovery is a distinct owner-approved V5 operation', () => {
+  const env = {...ownerEnv, RELEASE_MODE: 'eros-acl-reopen'};
+  assert.deepEqual(validateAclDeployRequest(env), {candidate: sha, mode: 'eros-acl-reopen'});
+  assert.match(remoteHelperArgs({candidate: sha, mode: env.RELEASE_MODE}, 'akhripunov'), /python3 - reopen/);
+  assert.throws(() => validateAclDeployRequest({...env, APPROVE_EROS_ACL: 'false'}), /explicit approval/);
+  assert.throws(() => validateAclDeployRequest({...env, GITHUB_ACTOR: 'collaborator'}), /repository owner/);
+});
+
 test('an ambiguous or blocked remote response is not retried by the ACL driver', () => {
   let attempts = 0;
   assert.throws(() => runAclDeploy({env: ownerEnv, home: '/private/tmp/home',

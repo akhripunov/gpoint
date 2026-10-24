@@ -22,6 +22,7 @@ SCHEMA = 'gpoint-eros-postgres-acl/v1'
 TARGETS = ('postgres', 'template1')
 PLAN_DIR = Path('/opt/gpoint/backups/eros-acl')
 CONTAINER = 'shared_postgres_1'
+CONTROL_DATABASE = 'gpoint'
 POSTGRES_IMAGE = 'pgvector/pgvector:0.8.6-pg16-bookworm@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b'
 WINDOW_SCOPE = 'ME-36 shared_postgres_1:REVOKE PUBLIC CONNECT on postgres,template1'
 SHA = re.compile(r'^[a-f0-9]{40}$')
@@ -147,11 +148,11 @@ def _verify_inventory(plan, minimum_remaining_seconds=120):
     return inventory
 
 
-def _psql(sql, database='postgres'):
+def _psql(sql, database=CONTROL_DATABASE, container=CONTAINER):
     # SQL and identifiers are constants in this file. No output from psql errors
     # is forwarded because drivers can echo SQL or environment details.
     result = subprocess.run(
-        ['docker', 'exec', '-i', '-e', 'PGCONNECT_TIMEOUT=5', CONTAINER, 'sh', '-ec',
+        ['docker', 'exec', '-i', '-e', 'PGCONNECT_TIMEOUT=5', container, 'sh', '-ec',
          'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d ' + database],
         input=sql, text=True, capture_output=True, timeout=45)
     if result.returncode:
@@ -166,7 +167,7 @@ SNAPSHOT_SQL = r"""SELECT json_build_object(
     AND d.datname NOT IN ('postgres','template1') AND EXISTS
     (SELECT 1 FROM aclexplode(coalesce(d.datacl,acldefault('d',d.datdba))) x WHERE x.grantee=0 AND x.privilege_type='CONNECT')),
  'databases', (SELECT json_agg(json_build_object(
-   'name', d.datname, 'oid', d.oid, 'owner', pg_get_userbyid(d.datdba),
+   'name', d.datname, 'oid', d.oid::integer, 'owner', pg_get_userbyid(d.datdba),
    'acl', (SELECT coalesce(json_agg(json_build_object('grantee', CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x.grantee) END,
       'privilege', x.privilege_type, 'grantor', pg_get_userbyid(x.grantor), 'grantable', x.is_grantable)
       ORDER BY x.grantee,x.privilege_type,x.grantor,x.is_grantable), '[]'::json)
@@ -401,17 +402,20 @@ def authorize_apply(candidate, owner_sha):
         raise RuntimeError('Eros ACL Apply must run from the trusted main Deploy workflow')
 
 
-def _acl_guard_sql(plan, expected_key):
+def _acl_guard_sql(plan, expected_key, allow_connect=True):
     expected = {db['name']: db for db in plan['databases']}
     assertions = []
     for name in TARGETS:
         db = expected[name]
         owner = db['owner'].replace("'", "''")
-        acl_json = canonical(db[expected_key]).replace("'", "''")
-        assertions.append(f"""IF (SELECT oid FROM pg_database WHERE datname='{name}') IS DISTINCT FROM {db['oid']}
- OR (SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname='{name}') IS DISTINCT FROM '{owner}'
- OR NOT EXISTS (SELECT 1 FROM pg_database WHERE datname='{name}' AND datallowconn)
- OR (SELECT coalesce(jsonb_agg(jsonb_build_object(
+        acl_json = canonical(normalized_acl(db[expected_key])).replace("'", "''")
+        fence_guard = (f"IF (SELECT datallowconn FROM pg_database WHERE datname='{name}') IS DISTINCT FROM {'TRUE' if allow_connect else 'FALSE'} THEN\n RAISE EXCEPTION 'database connection fence drift on {name}'; END IF;" if allow_connect is not None else '')
+        assertions.append(f"""IF (SELECT oid FROM pg_database WHERE datname='{name}') IS DISTINCT FROM {db['oid']} THEN
+ RAISE EXCEPTION 'database OID drift on {name}'; END IF;
+IF (SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname='{name}') IS DISTINCT FROM '{owner}' THEN
+ RAISE EXCEPTION 'database owner drift on {name}'; END IF;
+{fence_guard}
+IF (SELECT coalesce(jsonb_agg(jsonb_build_object(
       'grantee',CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x.grantee) END,
       'privilege',x.privilege_type,'grantor',pg_get_userbyid(x.grantor),'grantable',x.is_grantable)
       ORDER BY CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x.grantee) END,
@@ -419,7 +423,14 @@ def _acl_guard_sql(plan, expected_key):
      FROM aclexplode(coalesce((SELECT datacl FROM pg_database WHERE datname='{name}'),
        acldefault('d',(SELECT datdba FROM pg_database WHERE datname='{name}')))) x)
     IS DISTINCT FROM '{acl_json}'::jsonb THEN
- RAISE EXCEPTION 'ACL baseline drift on {name}'; END IF;""")
+ RAISE EXCEPTION 'ACL drift on {name}: actual %, expected {acl_json}',
+    (SELECT coalesce(jsonb_agg(jsonb_build_object(
+      'grantee',CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x.grantee) END,
+      'privilege',x.privilege_type,'grantor',pg_get_userbyid(x.grantor),'grantable',x.is_grantable)
+      ORDER BY CASE WHEN x.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x.grantee) END,
+       x.privilege_type,pg_get_userbyid(x.grantor),x.is_grantable),'[]'::jsonb)
+     FROM aclexplode(coalesce((SELECT datacl FROM pg_database WHERE datname='{name}'),
+       acldefault('d',(SELECT datdba FROM pg_database WHERE datname='{name}')))) x); END IF;""")
     return '\n'.join(assertions)
 
 
@@ -450,10 +461,34 @@ def _connection_guard_sql(plan):
 END $$;"""
 
 
-def build_apply_sql(plan):
-    return f"""BEGIN;
+def _catalog_serialization_locks():
+    # SHARE conflicts with catalog RowExclusive locks used by ACL, database,
+    # role and membership changes. These transaction locks are observable in
+    # pg_locks and affect no application ACL or existing database sessions.
+    return """LOCK TABLE pg_catalog.pg_database IN SHARE MODE;
+LOCK TABLE pg_catalog.pg_authid IN SHARE MODE;
+LOCK TABLE pg_catalog.pg_auth_members IN SHARE MODE;"""
+
+
+def _maintenance_role_guard_sql(plan):
+    role_names = sorted({client['role'] for client in plan['maintenanceInventory']['knownClients']})
+    names_sql = ','.join(_sql_literal(name) for name in role_names) or "''"
+    expected = canonical(plan['maintenanceRoleState']).replace("'", "''")
+    return f"""IF (SELECT coalesce(jsonb_agg(jsonb_build_object(
+  'name',r.rolname,'login',r.rolcanlogin,'superuser',r.rolsuper,
+  'createDatabase',r.rolcreatedb,'createRole',r.rolcreaterole,'inherit',r.rolinherit,
+  'bypassRls',r.rolbypassrls,'memberships',(SELECT coalesce(jsonb_agg(pg_get_userbyid(m.roleid)
+    ORDER BY pg_get_userbyid(m.roleid)),'[]'::jsonb) FROM pg_auth_members m WHERE m.member=r.oid))
+  ORDER BY r.rolname),'[]'::jsonb)
+  FROM pg_roles r WHERE r.rolname IN ({names_sql})) IS DISTINCT FROM '{expected}'::jsonb THEN
+ RAISE EXCEPTION 'maintenance role attributes or memberships drifted'; END IF;"""
+
+
+def build_apply_phases(plan):
+    close = f"""BEGIN;
 SET LOCAL lock_timeout = '3s';
 SET LOCAL statement_timeout = '10s';
+{_catalog_serialization_locks()}
 DO $$ BEGIN
  IF (SELECT system_identifier::text FROM pg_control_system()) IS DISTINCT FROM '{plan['clusterSystemIdentifier']}' THEN
    RAISE EXCEPTION 'PostgreSQL cluster identity changed';
@@ -462,12 +497,40 @@ DO $$ BEGIN
     EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('eros_ddl','eros_runtime','eros_migrator')) THEN
    RAISE EXCEPTION 'Eros state appeared after planning';
  END IF;
+ {_maintenance_role_guard_sql(plan)}
  {_acl_guard_sql(plan, 'acl')}
 END $$;
 REVOKE CONNECT ON DATABASE postgres FROM PUBLIC RESTRICT;
 REVOKE CONNECT ON DATABASE template1 FROM PUBLIC RESTRICT;
 {_connection_guard_sql(plan)}
+ALTER DATABASE postgres WITH ALLOW_CONNECTIONS false;
+ALTER DATABASE template1 WITH ALLOW_CONNECTIONS false;
 COMMIT;"""
+    reopen = f"""BEGIN;
+SET LOCAL lock_timeout = '3s';
+SET LOCAL statement_timeout = '10s';
+{_catalog_serialization_locks()}
+DO $$ BEGIN
+ IF EXISTS (SELECT 1 FROM pg_database WHERE datname='eros') OR
+    EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('eros_ddl','eros_runtime','eros_migrator')) THEN
+   RAISE EXCEPTION 'Eros state appeared during the ACL connection fence';
+ END IF;
+ {_maintenance_role_guard_sql(plan)}
+ {_acl_guard_sql(plan, 'afterAcl', allow_connect=False)}
+END $$;
+{_connection_guard_sql(plan)}
+ALTER DATABASE postgres WITH ALLOW_CONNECTIONS true;
+ALTER DATABASE template1 WITH ALLOW_CONNECTIONS true;
+COMMIT;"""
+    return close, reopen
+
+
+def build_apply_sql(plan):
+    close, reopen = build_apply_phases(plan)
+    # ACL hardening and connection fencing commit together. Existing sessions
+    # survive. A second locked transaction verifies and reopens only the two
+    # targets. If that verification fails, they remain closed fail-safe.
+    return close + '\n' + reopen
 
 
 def build_rollback_sql(plan):
@@ -475,14 +538,46 @@ def build_rollback_sql(plan):
     return f"""BEGIN;
 SET LOCAL lock_timeout = '3s';
 SET LOCAL statement_timeout = '10s';
+{_catalog_serialization_locks()}
 DO $$ BEGIN
  IF EXISTS (SELECT 1 FROM pg_database WHERE datname='eros') OR
     EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('eros_ddl','eros_runtime','eros_migrator')) THEN
    RAISE EXCEPTION 'Eros state exists; PUBLIC CONNECT rollback is forbidden';
  END IF;
+ {_maintenance_role_guard_sql(plan)}
  {_acl_guard_sql(plan, 'afterAcl')}
 END $$;
 {grants}
+COMMIT;"""
+
+
+def build_admission_recovery_sql(plan):
+    # Repairs an ambiguous post-commit fence outcome. It is safe only when the
+    # exact hardened ACL remains and no Eros role has effective CONNECT on
+    # either maintenance database. Catalog locks keep these checks stable.
+    return f"""BEGIN;
+SET LOCAL lock_timeout = '3s';
+SET LOCAL statement_timeout = '10s';
+{_catalog_serialization_locks()}
+DO $$ BEGIN
+ IF (SELECT system_identifier::text FROM pg_control_system()) IS DISTINCT FROM '{plan['clusterSystemIdentifier']}' THEN
+   RAISE EXCEPTION 'PostgreSQL cluster identity changed';
+ END IF;
+ IF (SELECT count(*) FROM pg_database WHERE datname IN ('postgres','template1')) <> 2 OR
+    (SELECT count(*) FROM pg_database WHERE datname IN ('postgres','template1') AND NOT datallowconn) <> 2 THEN
+   RAISE EXCEPTION 'admission recovery requires both planned targets to remain fenced';
+ END IF;
+ {_maintenance_role_guard_sql(plan)}
+ {_acl_guard_sql(plan, 'afterAcl', allow_connect=None)}
+ IF EXISTS (SELECT 1 FROM pg_roles r CROSS JOIN pg_database d
+   WHERE r.rolname IN ('eros_ddl','eros_runtime','eros_migrator')
+     AND d.datname IN ('postgres','template1')
+     AND has_database_privilege(r.oid,d.oid,'CONNECT')) THEN
+   RAISE EXCEPTION 'an Eros role has effective CONNECT on a fenced database';
+ END IF;
+END $$;
+ALTER DATABASE postgres WITH ALLOW_CONNECTIONS true;
+ALTER DATABASE template1 WITH ALLOW_CONNECTIONS true;
 COMMIT;"""
 
 
@@ -492,9 +587,9 @@ def apply(plan_path, candidate, owner_sha):
     if plan['candidateSha'] != candidate:
         raise RuntimeError('ACL plan candidate SHA changed')
     verify_live(plan)
-    # One bounded transaction; never retry an ambiguous transport result.
+    # One bounded connection fence; never retry an ambiguous transport result.
     sql = build_apply_sql(plan)
-    _psql(sql)
+    _psql(sql, database=CONTROL_DATABASE)
     verify_live(plan, after=True, minimum_window_seconds=0)
     _verify_inventory(plan, minimum_remaining_seconds=0)
     print(json.dumps({'status': 'ACL_APPLIED', 'planSha256': plan['planSha256'],
@@ -507,10 +602,40 @@ def rollback(plan_path, candidate, owner_sha):
     if plan['candidateSha'] != candidate:
         raise RuntimeError('ACL plan candidate SHA changed')
     verify_live(plan, after=True)
-    _psql(build_rollback_sql(plan))
+    _psql(build_rollback_sql(plan), database=CONTROL_DATABASE)
     verify_live(plan, minimum_window_seconds=0)
     _verify_inventory(plan, minimum_remaining_seconds=0)
     print(json.dumps({'status': 'ACL_ROLLED_BACK', 'planSha256': plan['planSha256'],
+                      'candidateSha': candidate, 'databases': list(TARGETS)}))
+
+
+def reopen(plan_path, candidate, owner_sha):
+    authorize_apply(candidate, owner_sha)
+    plan = load_plan(plan_path)
+    if plan['candidateSha'] != candidate:
+        raise RuntimeError('ACL plan candidate SHA changed')
+    _verify_inventory(plan, minimum_remaining_seconds=0)
+    if container_identity() != {'containerId': plan['containerId'], 'containerImage': plan['containerImage'],
+                                'containerImageId': plan['containerImageId']}:
+        raise RuntimeError('PostgreSQL runtime container identity changed before admission recovery')
+    if snapshot()['serverVersionNum'] != plan['serverVersionNum']:
+        raise RuntimeError('PostgreSQL server version changed before admission recovery')
+    _psql(build_admission_recovery_sql(plan), database=CONTROL_DATABASE, container=plan['containerId'])
+    live = snapshot()
+    if live['serverVersionNum'] != plan['serverVersionNum'] or live['clusterSystemIdentifier'] != plan['clusterSystemIdentifier']:
+        raise RuntimeError('PostgreSQL runtime or cluster identity changed during admission recovery')
+    if container_identity() != {'containerId': plan['containerId'], 'containerImage': plan['containerImage'],
+                                'containerImageId': plan['containerImageId']}:
+        raise RuntimeError('PostgreSQL runtime container identity changed during admission recovery')
+    expected = {db['name']: db for db in plan['databases']}
+    observed = {db['name']: db for db in live['databases']}
+    for name in TARGETS:
+        if (observed[name]['oid'] != expected[name]['oid'] or observed[name]['owner'] != expected[name]['owner']
+                or not observed[name]['allowConnect']
+                or normalized_acl(observed[name]['acl']) != normalized_acl(expected[name]['afterAcl'])):
+            raise RuntimeError('database admission or hardened ACL readback failed')
+    _verify_inventory(plan, minimum_remaining_seconds=0)
+    print(json.dumps({'status': 'ACL_ADMISSION_RESTORED', 'planSha256': plan['planSha256'],
                       'candidateSha': candidate, 'databases': list(TARGETS)}))
 
 
@@ -526,6 +651,8 @@ def main(argv=None):
     a.add_argument('--plan', required=True); a.add_argument('--candidate', required=True); a.add_argument('--owner-approved-sha', required=True)
     r = sub.add_parser('rollback')
     r.add_argument('--plan', required=True); r.add_argument('--candidate', required=True); r.add_argument('--owner-approved-sha', required=True)
+    x = sub.add_parser('reopen')
+    x.add_argument('--plan', required=True); x.add_argument('--candidate', required=True); x.add_argument('--owner-approved-sha', required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == 'plan': write_plan(args.candidate, args.production, args.maintenance_inventory, args.output)
@@ -534,7 +661,8 @@ def main(argv=None):
             print(json.dumps({'status': 'BASELINE_MATCH', 'planSha256': plan['planSha256'],
                               'candidateSha': plan['candidateSha'], 'connectionRows': len(live['connections'] or [])}))
         elif args.command == 'apply': apply(args.plan, args.candidate, args.owner_approved_sha)
-        else: rollback(args.plan, args.candidate, args.owner_approved_sha)
+        elif args.command == 'rollback': rollback(args.plan, args.candidate, args.owner_approved_sha)
+        else: reopen(args.plan, args.candidate, args.owner_approved_sha)
     except Exception as exc:
         print(f'BLOCKED: {exc}', file=sys.stderr)
         return 1

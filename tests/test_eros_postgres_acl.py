@@ -46,6 +46,14 @@ class ErosPostgresAclTests(unittest.TestCase):
         rows = [grant('postgres', 'CONNECT'), grant('PUBLIC', 'CONNECT')]
         self.assertEqual(ACL.normalized_acl(rows), ACL.normalized_acl(list(reversed(rows))))
 
+    def test_psql_can_pin_docker_exec_to_verified_container_identity(self):
+        identity = 'a' * 64
+        with patch.object(ACL.subprocess, 'run', return_value=type('Result', (), {
+                'returncode': 0, 'stdout': 'ok\n'})()) as run:
+            self.assertEqual(ACL._psql('SELECT 1', database='gpoint', container=identity), 'ok')
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index('exec') + 4], identity)
+
     def test_plan_allows_only_public_connect_removal_on_exact_targets(self):
         value = plan()
         ACL.validate_plan(value)
@@ -102,12 +110,14 @@ class ErosPostgresAclTests(unittest.TestCase):
         calls = []
         with patch.object(ACL, 'load_plan', return_value=value), patch.object(ACL, 'verify_live'), \
              patch.object(ACL, '_verify_inventory'), \
-             patch.object(ACL, '_psql', side_effect=lambda sql: calls.append(sql)), \
+             patch.object(ACL, '_psql', side_effect=lambda sql, database='postgres': calls.append((sql, database))), \
              patch.dict(os.environ, {'EROS_ACL_APPLY_APPROVED': 'true', 'GITHUB_REPOSITORY_OWNER': 'owner',
                  'GITHUB_ACTOR': 'owner', 'GITHUB_TRIGGERING_ACTOR': 'owner',
                  'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_REF': 'refs/heads/main'}, clear=False):
             ACL.apply('/protected/plan', 'a' * 40, 'a' * 40)
-        sql = calls[0]
+        sql, database = calls[0]
+        self.assertEqual(database, ACL.CONTROL_DATABASE)
+        self.assertEqual(len(calls), 1)
         self.assertEqual(sql.count('REVOKE CONNECT ON DATABASE'), 2)
         self.assertIn('FROM PUBLIC RESTRICT', sql)
         self.assertNotIn('CASCADE', sql)
@@ -115,18 +125,44 @@ class ErosPostgresAclTests(unittest.TestCase):
         self.assertIn("rolname IN ('eros_ddl','eros_runtime','eros_migrator')", sql)
         self.assertIn('pg_stat_activity', sql)
         self.assertIn('has_database_privilege', sql)
+        self.assertIn('LOCK TABLE pg_catalog.pg_database IN SHARE MODE', sql)
+        self.assertIn('LOCK TABLE pg_catalog.pg_authid IN SHARE MODE', sql)
+        self.assertIn('LOCK TABLE pg_catalog.pg_auth_members IN SHARE MODE', sql)
+        self.assertIn('ALTER DATABASE postgres WITH ALLOW_CONNECTIONS false', sql)
+        self.assertIn('ALTER DATABASE template1 WITH ALLOW_CONNECTIONS false', sql)
+        self.assertIn('ALTER DATABASE postgres WITH ALLOW_CONNECTIONS true', sql)
+        self.assertIn('ALTER DATABASE template1 WITH ALLOW_CONNECTIONS true', sql)
+        self.assertEqual(sql.count('LOCK TABLE pg_catalog.pg_database IN SHARE MODE'), 2)
+        self.assertIn('maintenance role attributes or memberships drifted', sql)
+        self.assertIn('FROM pg_auth_members m WHERE m.member=r.oid', sql)
+
+    def test_admission_recovery_is_exact_acl_guarded_and_owner_approved(self):
+        value = plan()
+        recovery = ACL.build_admission_recovery_sql(value)
+        self.assertEqual(recovery.count('ALTER DATABASE'), 2)
+        self.assertIn('IS DISTINCT FROM', recovery)
+        self.assertIn("has_database_privilege(r.oid,d.oid,'CONNECT')", recovery)
+        self.assertIn('admission recovery requires both planned targets to remain fenced', recovery)
+        self.assertIn("rolname IN ('eros_ddl','eros_runtime','eros_migrator')", recovery)
+        self.assertIn('LOCK TABLE pg_catalog.pg_database IN SHARE MODE', recovery)
+        self.assertIn('LOCK TABLE pg_catalog.pg_authid IN SHARE MODE', recovery)
+        self.assertIn('LOCK TABLE pg_catalog.pg_auth_members IN SHARE MODE', recovery)
+        self.assertNotIn('REVOKE ', recovery)
+        self.assertNotIn('GRANT ', recovery)
+        self.assertNotIn('ALTER DATABASE gpoint', recovery)
 
     def test_rollback_restores_only_before_eros_state(self):
         value = plan(); value['planSha256'] = ACL.plan_digest(value)
         calls = []
         with patch.object(ACL, 'load_plan', return_value=value), patch.object(ACL, 'verify_live'), \
              patch.object(ACL, '_verify_inventory'), \
-             patch.object(ACL, '_psql', side_effect=lambda sql: calls.append(sql)), \
+             patch.object(ACL, '_psql', side_effect=lambda sql, database='postgres': calls.append((sql, database))), \
              patch.dict(os.environ, {'EROS_ACL_APPLY_APPROVED': 'true', 'GITHUB_REPOSITORY_OWNER': 'owner',
                  'GITHUB_ACTOR': 'owner', 'GITHUB_TRIGGERING_ACTOR': 'owner',
                  'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_REF': 'refs/heads/main'}, clear=False):
             ACL.rollback('/protected/plan', 'a' * 40, 'a' * 40)
-        sql = calls[0]
+        sql, database = calls[0]
+        self.assertEqual(database, ACL.CONTROL_DATABASE)
         self.assertIn('GRANT CONNECT ON DATABASE postgres TO PUBLIC', sql)
         self.assertIn('GRANT CONNECT ON DATABASE template1 TO PUBLIC', sql)
         self.assertIn("datname='eros'", sql)

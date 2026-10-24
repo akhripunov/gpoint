@@ -1088,8 +1088,10 @@ class DeploymentReleaseTests(unittest.TestCase):
         SELECT.validate_request('a' * 40, 'refs/heads/main', 'eros-acl-plan', 'false', eros_acl_approval='false')
         SELECT.validate_request('a' * 40, 'refs/heads/main', 'eros-acl-apply', 'false', eros_acl_approval='true')
         SELECT.validate_request('a' * 40, 'refs/heads/main', 'eros-acl-rollback', 'false', eros_acl_approval='true')
+        SELECT.validate_request('a' * 40, 'refs/heads/main', 'eros-acl-reopen', 'false', eros_acl_approval='true')
         SELECT.validate_owner_approval('eros-acl-apply', 'owner', 'owner', 'owner')
         SELECT.validate_owner_approval('eros-acl-rollback', 'owner', 'owner', 'owner')
+        SELECT.validate_owner_approval('eros-acl-reopen', 'owner', 'owner', 'owner')
         with self.assertRaisesRegex(RuntimeError, 'separate exact-SHA approval'):
             SELECT.validate_request('a' * 40, 'refs/heads/main', 'eros-acl-apply', 'false', eros_acl_approval='false')
         with self.assertRaisesRegex(RuntimeError, 'repository OWNER'):

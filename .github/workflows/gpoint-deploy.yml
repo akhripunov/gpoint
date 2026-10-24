@@ -13,7 +13,7 @@ on:
         required: true
         default: preflight
         type: choice
-        options: [preflight, production, task-scoped-auto, reconcile-authorization, eros-pilot, eros-acl-plan, eros-acl-apply, eros-acl-rollback]
+        options: [preflight, production, task-scoped-auto, reconcile-authorization, eros-pilot, eros-acl-plan, eros-acl-apply, eros-acl-rollback, eros-acl-reopen]
       deployment_id:
         description: 'Existing production Deployment ID to reconcile without applying again'
         required: false
@@ -29,7 +29,7 @@ on:
         default: false
         type: boolean
       approve_eros_acl:
-        description: 'I authorize the exact two-database Eros ACL Apply or guarded pre-provisioning rollback for this candidate'
+        description: 'I authorize the exact-candidate Eros ACL Apply, guarded rollback, or fenced-admission recovery'
         required: true
         default: false
         type: boolean
@@ -135,7 +135,7 @@ jobs:
 
   deploy:
     needs: validate
-    if: inputs.mode != 'reconcile-authorization' && inputs.mode != 'eros-pilot' && inputs.mode != 'eros-acl-plan' && inputs.mode != 'eros-acl-apply' && inputs.mode != 'eros-acl-rollback'
+    if: inputs.mode != 'reconcile-authorization' && inputs.mode != 'eros-pilot' && inputs.mode != 'eros-acl-plan' && inputs.mode != 'eros-acl-apply' && inputs.mode != 'eros-acl-rollback' && inputs.mode != 'eros-acl-reopen'
     # Only a repository-scoped runner on the owner's Mac may receive this job.
     runs-on: [self-hosted, macOS, gpoint-production]
     timeout-minutes: 40
@@ -359,7 +359,7 @@ jobs:
 
   deploy-eros-acl:
     needs: validate
-    if: inputs.mode == 'eros-acl-plan' || inputs.mode == 'eros-acl-apply' || inputs.mode == 'eros-acl-rollback'
+    if: inputs.mode == 'eros-acl-plan' || inputs.mode == 'eros-acl-apply' || inputs.mode == 'eros-acl-rollback' || inputs.mode == 'eros-acl-reopen'
     # ACL work uses the same owner Mac runner and production lock as V5.
     runs-on: [self-hosted, macOS, gpoint-production]
     timeout-minutes: 20
@@ -403,7 +403,7 @@ jobs:
           RELEASE_MODE: ${{ inputs.mode }}
           ARTIFACT_DESTINATION: ${{ runner.temp }}/gpoint-acl-bundle-${{ github.run_id }}-${{ github.run_attempt }}
         run: python3 scripts/prepared_artifact_cache.py
-      - name: Run owner-approved ACL plan or Apply through the V5 Mac runner
+      - name: Run owner-approved ACL plan, Apply, rollback, or guarded recovery through the V5 Mac runner
         env:
           CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
           RELEASE_MODE: ${{ inputs.mode }}
@@ -510,7 +510,7 @@ jobs:
       packages: read
       deployments: read
     needs: [validate, deploy, deploy-eros-pilot, deploy-eros-acl, reconcile-authorization]
-    if: always() && github.ref == 'refs/heads/main' && inputs.mode != 'eros-acl-plan' && inputs.mode != 'eros-acl-apply' && inputs.mode != 'eros-acl-rollback'
+    if: always() && github.ref == 'refs/heads/main' && inputs.mode != 'eros-acl-plan' && inputs.mode != 'eros-acl-apply' && inputs.mode != 'eros-acl-rollback' && inputs.mode != 'eros-acl-reopen'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     concurrency:
@@ -551,7 +551,7 @@ jobs:
             echo 'CACHE_PREVENTED_DOWNLOAD=UNKNOWN'
           } >> "$GITHUB_ENV"
       - name: Publish preflight result to GPoint Linear
-        if: always() && inputs.mode != 'reconcile-authorization' && inputs.mode != 'eros-pilot' && inputs.mode != 'eros-acl-plan' && inputs.mode != 'eros-acl-apply' && inputs.mode != 'eros-acl-rollback'
+        if: always() && inputs.mode != 'reconcile-authorization' && inputs.mode != 'eros-pilot' && inputs.mode != 'eros-acl-plan' && inputs.mode != 'eros-acl-apply' && inputs.mode != 'eros-acl-rollback' && inputs.mode != 'eros-acl-reopen'
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
