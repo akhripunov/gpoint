@@ -3,6 +3,9 @@ import { authorizeRelayRequest, isValidEmbeddingRequest, normalizePeerAddress } 
 
 assert.equal(normalizePeerAddress("::ffff:172.31.254.2"), "172.31.254.2");
 assert.equal(authorizeRelayRequest({ address: "172.31.254.2", method: "POST", path: "/api/embed" }), true);
+assert.equal(authorizeRelayRequest({ address: "172.31.254.1", method: "GET", path: "/healthz" }), true);
+assert.equal(authorizeRelayRequest({ address: "172.31.254.2", method: "GET", path: "/healthz" }), false);
+assert.equal(authorizeRelayRequest({ address: "172.31.254.1", method: "POST", path: "/healthz" }), false);
 assert.equal(authorizeRelayRequest({ address: "172.31.254.3", method: "GET", path: "/api/tags" }), true);
 assert.equal(authorizeRelayRequest({ address: "172.31.254.3", method: "POST", path: "/api/embed" }), true);
 assert.equal(authorizeRelayRequest({ address: "172.31.254.2", method: "GET", path: "/api/tags" }), false);
@@ -15,4 +18,4 @@ assert.equal(isValidEmbeddingRequest({ model: "other", dimensions: 512, input: "
 assert.equal(isValidEmbeddingRequest({ model: "qwen3-embedding:0.6b", dimensions: 384, input: "synthetic probe" }), false);
 assert.equal(isValidEmbeddingRequest({ model: "qwen3-embedding:0.6b", dimensions: 512, input: new Array(33).fill("x") }), false);
 
-console.log("EROS_PILOT_RELAY_POLICY_TESTS=PASS cases=13");
+console.log("EROS_PILOT_RELAY_POLICY_TESTS=PASS cases=16");

@@ -103,6 +103,11 @@ services:
     pids_limit: 64
     mem_limit: 64m
     cpus: 0.25
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://172.31.254.1:11434/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}

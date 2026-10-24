@@ -18,6 +18,7 @@ export function normalizePeerAddress(address = "") {
 
 export function authorizeRelayRequest({ address, method, path }) {
   const peer = normalizePeerAddress(address);
+  if (path === "/healthz") return peer === "172.31.254.1" && method === "GET";
   if (path === "/api/tags") return peer === VERIFY_CLIENT && method === "GET";
   if (path === "/api/embed") {
     return (peer === API_CLIENT || peer === VERIFY_CLIENT) && method === "POST";
@@ -125,6 +126,14 @@ async function proxyRequest(request, response) {
 
 export function createRelayServer() {
   return http.createServer((request, response) => {
+    if (request.url === "/healthz" && authorizeRelayRequest({
+      address: request.socket.remoteAddress,
+      method: request.method,
+      path: request.url,
+    })) {
+      sendJson(response, 200, { status: "ok" });
+      return;
+    }
     void proxyRequest(request, response);
   });
 }

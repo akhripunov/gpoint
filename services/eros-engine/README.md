@@ -202,12 +202,27 @@ Q8_0 Qwen3 Embedding 0.6B artifact. A one-shot verifier checks the digest and
 through the GPoint API and existing GPOINT Worker route. The stock Eros image
 remains the candidate-bound V5 GHCR image with `patch-set=none`.
 
-The Compose profile sets caps of 384 MiB/0.5 CPU for Eros and 256 MiB/0.5 CPU
-for its PostgreSQL. These are ceilings, not actual consumption or proof of
-capacity. The latest read-only VPS snapshot recorded about 766 MiB available
-RAM with AGATA/GSales and current GPoint services healthy; Eros plus PostgreSQL
-must be measured on that host after a separately authorized pilot Deploy. Mac
-Ollama memory is outside the VPS budget. See ME-36 for the V5 gate and approval.
+The Compose profile caps Eros at 384 MiB, PostgreSQL at 256 MiB, the duplicate
+synthetic-scope GPoint API at 256 MiB, and startup helpers/relay at another
+448 MiB. These are ceilings, not actual consumption. The isolated V5 pilot
+target requires at least 1,408 MiB of fresh `MemAvailable` before starting and
+5 GiB free disk; this conservative startup bound is intentionally above the
+historical VPS snapshot of about 766 MiB available RAM. A fresh measurement
+must pass before Apply. After Apply, the target records actual Eros,
+PostgreSQL, API and relay memory from `docker stats`. Mac Ollama memory is
+outside the VPS budget. See ME-36 for the V5 gate and approval.
+
+The V5 `eros-pilot` mode is a separate workflow job and protected GitHub
+Environment. It uses the exact successful Prepare receipt and digest-pulls only
+the candidate GPoint API image needed for synthetic routing and the stock Eros
+image. Pilot IDs and credentials come from the protected
+`EROS_PILOT_ENV_B64` Environment secret; it accepts only `EROS_PILOT_*` keys,
+requires one synthetic tenant/user/creator identity, and writes the file to the
+VPS with mode 0600. Missing parameters block before Apply. The job uses the
+unique Compose project `gpoint-eros-pilot` and an explicit six-service allowlist.
+It cannot enter the normal GPoint production executor or its Prisma/AGATA/GSales
+migration path. A failed first install stops only those pilot services and
+retains the separate PostgreSQL volume for recovery.
 
 ### Pilot backup and rollback
 
@@ -224,7 +239,7 @@ set -euo pipefail
 profile_sha=$(sed -n 's/^EROS_PILOT_SOURCE_SHA=//p' /opt/gpoint/env/eros-pilot.env | head -1)
 test "$PILOT_SHA" = "$profile_sha"
 printf '%s\n' "$PILOT_SHA" | grep -Eq '^[a-f0-9]{40}$'
-compose=(docker compose -p compose
+compose=(docker compose -p gpoint-eros-pilot
   --env-file /opt/gpoint/env/production.env
   --env-file /opt/gpoint/env/eros-pilot.env
   -f /opt/gpoint/compose/docker-compose.yml
@@ -272,7 +287,7 @@ test "$(stat -c '%a' "$PILOT_ENV_SNAPSHOT")" = 600
 sha256sum -c "${PILOT_BACKUP}.sha256"
 PILOT_SHA=$(sed -n 's/^EROS_PILOT_SOURCE_SHA=//p' "$PILOT_ENV_SNAPSHOT" | head -1)
 printf '%s\n' "$PILOT_SHA" | grep -Eq '^[a-f0-9]{40}$'
-rollback_compose=(docker compose -p compose
+rollback_compose=(docker compose -p gpoint-eros-pilot
   --env-file /opt/gpoint/env/production.env
   --env-file "$PILOT_ENV_SNAPSHOT"
   -f /opt/gpoint/compose/docker-compose.yml

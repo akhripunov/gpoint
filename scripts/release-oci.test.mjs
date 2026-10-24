@@ -6,7 +6,7 @@ import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import { validateOciReceipt, createOciPullScript, createOciVerifyScript,
+import { validateOciReceipt, createOciPullScript, createErosPilotOciPullScript, createOciVerifyScript,
   verifyOciReadAccess } from './release-oci.mjs';
 
 const sha = 'a'.repeat(40);
@@ -81,6 +81,23 @@ test('pull plan addresses exact digests, verifies labels, and never embeds crede
   assert.doesNotMatch(script, new RegExp(secret));
   assert.doesNotMatch(script, /Bearer\s/i);
   assert.throws(() => createOciPullScript(validated, 'd'.repeat(40)), /candidate/i);
+});
+
+test('Eros Pilot pull consumes only the exact stock image receipt and proves upstream provenance', () => {
+  const pilot = validateOciReceipt({...receipt(), gates: {erosPilotImage: 'PASS', erosPilotGhcrReadback: 'PASS'},
+    pilotImage: {id: configDigest, sourceSha: sha, upstreamSha: 'd1a140083321687212fb7b17c09cc0c3c9639f5e', patchSetSha256: 'none', platform: 'linux/amd64'},
+    pilotImages: {eros: {repository: 'ghcr.io/akhripunov/gpoint-eros-pilot', digest,
+      configDigest, sourceSha: sha, upstreamSha: 'd1a140083321687212fb7b17c09cc0c3c9639f5e',
+      patchSetSha256: 'none', platform: 'linux/amd64'}}}, sha, {runId: 123, runAttempt: 1});
+  const script = createErosPilotOciPullScript(pilot, sha);
+  assert.equal((script.match(/docker pull /g) || []).length, 2);
+  assert.match(script, /gpoint-eros-pilot@sha256:/);
+  assert.match(script, /gpoint-runtime@sha256:/);
+  assert.match(script, /etherfunlab\/eros-engine/);
+  assert.match(script, /com\.gpoint\.eros\.patch-set\.sha256/);
+  assert.doesNotMatch(script, /gpoint-agata-runtime|gpoint-g-sales-runtime/);
+  const invalid = structuredClone(pilot); invalid.pilotImages.eros.patchSetSha256 = 'f'.repeat(64);
+  assert.throws(() => createErosPilotOciPullScript(invalid, sha), /proof is invalid/);
 });
 
 test('GHCR pull verifies the manifest config descriptor before accepting Docker image-store identity', () => {

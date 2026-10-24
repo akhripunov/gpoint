@@ -45,6 +45,27 @@ class PrepareSelectorTests(unittest.TestCase):
             with self.subTest(args=args), self.assertRaises(RuntimeError):
                 SELECTOR.validate_request(*args)
 
+    def test_eros_pilot_requires_its_own_exact_sha_approval(self):
+        SELECTOR.validate_request(SHA, 'refs/heads/main', 'eros-pilot', 'false', 'true')
+        for args in [
+                (SHA, 'refs/heads/main', 'eros-pilot', 'true', 'true'),
+                (SHA, 'refs/heads/main', 'eros-pilot', 'false', 'false'),
+                (SHA, 'refs/heads/feature', 'eros-pilot', 'false', 'true'),
+                ('bad', 'refs/heads/main', 'eros-pilot', 'false', 'true')]:
+            with self.subTest(args=args), self.assertRaises(RuntimeError):
+                SELECTOR.validate_request(*args)
+
+    def test_eros_pilot_dispatch_requires_repository_owner(self):
+        SELECTOR.validate_owner_approval('eros-pilot', 'owner', 'owner', 'owner')
+        with self.assertRaisesRegex(RuntimeError, 'repository OWNER'):
+            SELECTOR.validate_owner_approval('eros-pilot', 'other', 'other', 'owner')
+
+    def test_pilot_mode_cannot_reuse_task_authorization_or_production_approval(self):
+        with self.assertRaisesRegex(RuntimeError, 'separate exact-candidate approval'):
+            SELECTOR.validate_request(SHA, 'refs/heads/main', 'eros-pilot', 'false', 'false')
+        with self.assertRaisesRegex(RuntimeError, 'exact-candidate approval'):
+            SELECTOR.validate_request(SHA, 'refs/heads/main', 'eros-pilot', 'true', 'true')
+
     def test_expected_prepare_run_and_attempt_are_bound_together(self):
         selected = {'id': 42, 'run_attempt': 3}
         SELECTOR.validate_expected_run(selected, '42', '3')

@@ -66,6 +66,7 @@ class ErosVpsPilotComposeTests(unittest.TestCase):
         self.assertEqual(self.services["eros-pilot-embedding-relay"]["network_mode"], "host")
         self.assertNotIn("ports", self.services["eros-pilot-embedding-relay"])
         self.assertEqual(self.services["eros-pilot-embedding-relay"]["environment"]["EROS_PILOT_RELAY_BIND"], "172.31.254.1:11434")
+        self.assertIn("/healthz", self.services["eros-pilot-embedding-relay"]["healthcheck"]["test"][-1])
 
     def test_pilot_network_is_internal_and_only_api_bridges_to_gpoint(self):
         networks = self.compose["networks"]

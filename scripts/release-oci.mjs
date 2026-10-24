@@ -209,6 +209,53 @@ export function createOciPullScript(receipt, candidate, { username = 'akhripunov
   return lines.join('\n');
 }
 
+export function createErosPilotOciPullScript(receipt, candidate, { username = 'akhripunov' } = {}) {
+  const image = receipt?.pilotImages?.eros;
+  const reference = image && `${EROS_PILOT_REPOSITORY}@${image.digest}`;
+  const app = receipt?.images?.app;
+  const appReference = app && `${IMAGE_REPOSITORIES.app}@${app.digest}`;
+  if (!SHA40.test(candidate ?? '') || receipt?.candidateSha !== candidate || receipt?.schema !== 3 ||
+      receipt?.gates?.erosPilotImage !== 'PASS' || receipt?.gates?.erosPilotGhcrReadback !== 'PASS' ||
+      !image || image.repository !== EROS_PILOT_REPOSITORY || image.sourceSha !== candidate ||
+      image.upstreamSha !== EROS_UPSTREAM_SHA || image.patchSetSha256 !== 'none' ||
+      image.platform !== 'linux/amd64' || !DIGEST.test(image.digest ?? '') ||
+      !DIGEST.test(image.configDigest ?? '') || !GHCR_USERNAME.test(username) ||
+      !app || app.repository !== IMAGE_REPOSITORIES.app || app.sourceSha !== candidate ||
+      app.platform !== 'linux/amd64' || !DIGEST.test(app.digest ?? '') || !DIGEST.test(app.configDigest ?? '')) {
+    fail('Eros Pilot OCI pull proof is invalid');
+  }
+  const lines = [
+    'set -eu', 'set +x',
+    'docker_config=$(mktemp -d /tmp/gpoint-eros-pilot-ghcr-auth.XXXXXX)',
+    'chmod 700 "$docker_config"',
+    'oci_tempdir=$(mktemp -d /tmp/gpoint-eros-pilot-ghcr-manifests.XXXXXX)',
+    'chmod 700 "$oci_tempdir"',
+    'export DOCKER_CONFIG="$docker_config"',
+    'trap \'docker logout ghcr.io >/dev/null 2>&1 || true; rm -rf "$docker_config" "$oci_tempdir"\' EXIT',
+    `docker login ghcr.io --username '${username}' --password-stdin`,
+    `docker pull '${appReference}' >/dev/null 2>&1 || { echo 'GHCR_PULL_FAILED role=app'; exit 1; }`,
+    `test "$(docker image inspect '${appReference}' --format '{{.Os}}/{{.Architecture}}' 2>/dev/null)" = 'linux/amd64' || { echo 'GHCR_PLATFORM_MISMATCH role=app'; exit 1; }`,
+  ];
+  appendOciManifestConfigCheck(lines, app, appReference, 'pilot-app');
+  appendDockerImageIdentityCheck(lines, appReference, app, 'pilot-app', 'pulled');
+  lines.push(`test "$(docker image inspect '${appReference}' --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null)" = '${candidate}' || { echo 'GPOINT_APP_REVISION_MISMATCH'; exit 1; }`);
+  lines.push(`docker image tag '${appReference}' 'gpoint-runtime:${candidate}'`);
+  appendDockerImageIdentityCheck(lines, `gpoint-runtime:${candidate}`, app, 'pilot-app', 'tagged');
+  lines.push(
+    `docker pull '${reference}' >/dev/null 2>&1 || { echo 'GHCR_PULL_FAILED role=eros'; exit 1; }`,
+    `test "$(docker image inspect '${reference}' --format '{{.Os}}/{{.Architecture}}' 2>/dev/null)" = 'linux/amd64' || { echo 'GHCR_PLATFORM_MISMATCH role=eros'; exit 1; }`,
+  );
+  appendOciManifestConfigCheck(lines, image, reference, 'eros');
+  appendDockerImageIdentityCheck(lines, reference, image, 'eros', 'pulled');
+  lines.push(`test "$(docker image inspect '${reference}' --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null)" = '${EROS_UPSTREAM_SHA}' || { echo 'EROS_UPSTREAM_REVISION_MISMATCH'; exit 1; }`);
+  lines.push(`test "$(docker image inspect '${reference}' --format '{{index .Config.Labels "org.opencontainers.image.source"}}' 2>/dev/null)" = 'https://github.com/etherfunlab/eros-engine' || { echo 'EROS_UPSTREAM_SOURCE_MISMATCH'; exit 1; }`);
+  lines.push(`test "$(docker image inspect '${reference}' --format '{{index .Config.Labels "com.gpoint.integration.revision"}}' 2>/dev/null)" = '${candidate}' || { echo 'EROS_CANDIDATE_REVISION_MISMATCH'; exit 1; }`);
+  lines.push(`test "$(docker image inspect '${reference}' --format '{{index .Config.Labels "com.gpoint.eros.patch-set.sha256"}}' 2>/dev/null)" = 'none' || { echo 'EROS_SOURCE_PATCH_DETECTED'; exit 1; }`);
+  lines.push(`if ! docker image inspect '${reference}' --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null | grep -Fxq '${reference}'; then echo 'GHCR_MANIFEST_DIGEST_MISMATCH role=eros'; exit 1; fi`);
+  lines.push('echo EROS_PILOT_GHCR_IMAGE_VERIFIED=YES GPOINT_PILOT_API_IMAGE_VERIFIED=YES');
+  return lines.join('\n');
+}
+
 export function createOciVerifyScript(receipt, candidate) {
   if (!SHA40.test(candidate ?? '') || receipt?.candidateSha !== candidate || receipt?.schema !== 3) {
     fail('OCI verification candidate mismatch');

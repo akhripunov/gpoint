@@ -558,6 +558,30 @@ class PrepareCoalescingTests(unittest.TestCase):
         self.assertIn("runs-on: ubuntu-latest", deploy_publish)
         self.assertIn("persist-credentials: false", deploy_publish)
 
+    def test_eros_pilot_has_a_separate_v5_deploy_job(self):
+        workflow = (ROOT / ".github" / "workflows" / "gpoint-deploy.yml").read_text()
+        self.assertIn("options: [preflight, production, task-scoped-auto, reconcile-authorization, eros-pilot]", workflow)
+        self.assertIn("approve_eros_pilot:", workflow)
+        self.assertIn("group: gpoint-production-release", workflow)
+        production = workflow[workflow.index("  deploy:"):workflow.index("  deploy-eros-pilot:")]
+        self.assertIn("inputs.mode != 'eros-pilot'", production)
+        self.assertNotIn("eros-pilot", production[production.index("run: node scripts/automated-release.mjs"):])
+        self.assertIn("  deploy-eros-pilot:", workflow)
+        pilot = workflow[workflow.index("  deploy-eros-pilot:"):]
+        self.assertIn("if: inputs.mode == 'eros-pilot'", pilot)
+        self.assertIn("environment: gpoint-eros-pilot", pilot)
+        self.assertIn("node scripts/automated-eros-pilot-release.mjs", pilot)
+        self.assertNotIn("node scripts/automated-release.mjs", pilot)
+        self.assertNotIn("release:gpoint --apply", pilot)
+        self.assertNotIn("--force-recreate", pilot)
+        executor = (ROOT / "scripts" / "automated-eros-pilot-release.mjs").read_text()
+        self.assertIn("PILOT_SERVICES", executor)
+        self.assertIn("createErosPilotOciPullScript", executor)
+        pilot_job = workflow[workflow.index("  deploy-eros-pilot:"):workflow.index("  reconcile-authorization:")]
+        job_env = pilot_job[pilot_job.index("    env:"):pilot_job.index("    steps:")]
+        self.assertNotIn("EROS_PILOT_ENV_B64", job_env)
+        self.assertIn("EROS_PILOT_ENV_B64:", pilot_job[pilot_job.index("id: execute"):])
+
 
 if __name__ == "__main__":
     unittest.main()
