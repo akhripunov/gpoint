@@ -50,3 +50,44 @@ test('permanent lifecycle backs up the existing eros database and gates stock mi
   assert.equal(compile.status,0,compile.stderr);
   assert.match(code,/EROS_PRODUCTION_TEST_USER_IDS/);
 });
+
+// Run the emitted shell gate with Docker as the only external boundary.
+// Stock Eros carries an upstream revision and a separate GPoint integration revision.
+function runStockImageRevisionGate(upstream, integration) {
+  const command = erosStartCommand(sha);
+  const start = command.indexOf('revision=$(docker image inspect');
+  const end = command.indexOf('echo EROS_IMAGE_IDENTITY=PASS', start);
+  assert.ok(start >= 0 && end > start, 'runtime identity gate must be present');
+  const gate = command.slice(start, end + 'echo EROS_IMAGE_IDENTITY=PASS'.length);
+  return spawnSync('bash', ['-eu', '-c', `
+    imageId='sha256:${'e'.repeat(64)}'
+    docker() {
+      case "$*" in
+        *org.opencontainers.image.revision*) printf '%s\\n' "$TEST_UPSTREAM_REVISION" ;;
+        *com.gpoint.integration.revision*) printf '%s\\n' "$TEST_INTEGRATION_REVISION" ;;
+        *) echo 'unexpected Docker inspection' >&2; return 97 ;;
+      esac
+    }
+    ${gate}
+  `], {encoding: 'utf8', env: {...process.env,
+    TEST_UPSTREAM_REVISION: upstream, TEST_INTEGRATION_REVISION: integration}});
+}
+
+test('runtime stock image gate accepts distinct upstream and GPoint revisions', () => {
+  const result = runStockImageRevisionGate('d1a140083321687212fb7b17c09cc0c3c9639f5e', sha);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /EROS_IMAGE_IDENTITY=PASS/);
+});
+
+for (const [name, upstream, integration] of [
+  ['foreign integration', 'd1a140083321687212fb7b17c09cc0c3c9639f5e', 'f'.repeat(40)],
+  ['missing integration', 'd1a140083321687212fb7b17c09cc0c3c9639f5e', ''],
+  ['foreign upstream', 'f'.repeat(40), sha],
+  ['integration SHA substituted for upstream', sha, sha],
+]) {
+  test(`runtime stock image gate rejects ${name}`, () => {
+    const result = runStockImageRevisionGate(upstream, integration);
+    assert.notEqual(result.status, 0);
+    assert.doesNotMatch(result.stdout, /EROS_IMAGE_IDENTITY=PASS/);
+  });
+}
