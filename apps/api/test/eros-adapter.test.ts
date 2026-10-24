@@ -361,6 +361,22 @@ test('Eros cancels the upstream stream after a protocol error', async () => {
   assert.equal(cancelled, true);
 });
 
+test('Eros maps a timeout while reading a response stream to a gateway timeout', async () => {
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: 'meta', message_id: '01JABCDEF0123456789ABCDEFGH', action_type: 'reply' })}\\n\\n`));
+      controller.error(new DOMException('synthetic stream deadline', 'TimeoutError'));
+    },
+  });
+  const fetchImpl: typeof fetch = async () => new Response(stream, { headers: { 'content-type': 'text/event-stream' } });
+  const client = new ErosEngineClient({ baseUrl: 'http://eros:8080', jwtSecret: 'unit-test-eros-jwt-secret-at-least-32-bytes', ...bridgeTestOptions, fetchImpl });
+
+  await assert.rejects(
+    client.sendMessage('7f43ff08-7bf9-5647-9dc2-bb4a46f8edc0', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1', '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc2', 'hello', bridgeTestIdentity),
+    (error: unknown) => error instanceof ErosAdapterError && error.code === 'eros_timeout' && error.status === 504,
+  );
+});
+
 test('Eros refuses to send bearer JWTs to non-local HTTP endpoints', () => {
   for (const baseUrl of ['http://evil.example', 'https://eros.example', 'http://user:pass@eros:8080']) {
     assert.throws(() => new ErosEngineClient({ baseUrl, jwtSecret: 'unit-test-eros-jwt-secret-at-least-32-bytes' }), /eros_service_url_invalid/);

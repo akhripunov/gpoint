@@ -516,6 +516,9 @@ export class ErosEngineClient {
       if (buffer.trim()) acceptFrame(buffer);
     } catch (error) {
       if (!done) await reader.cancel().catch(() => undefined);
+      if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+        throw new ErosAdapterError('eros_timeout', 504);
+      }
       throw error;
     } finally {
       reader.releaseLock();

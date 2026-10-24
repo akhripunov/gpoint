@@ -18,3 +18,4 @@ model = "qwen3-embedding:0.6b@gpoint"
 [tasks.memory_extraction]
 model = "gpoint-codex@gpoint"
 max_tokens = 512
+filter_prompt = "Extract only explicit, durable facts the user intentionally shares for future conversations. Do not infer facts or retain secrets, credentials, health, financial, or other sensitive data."

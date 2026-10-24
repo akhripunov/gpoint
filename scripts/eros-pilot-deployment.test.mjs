@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {assertPilotCapacity, parsePilotEnvironment, pilotEnvironmentText, pilotStartCommand,
+import {assertPilotCapacity, MINIMUM_PILOT_AVAILABLE_MEMORY_KIB, parsePilotEnvironment, pilotEnvironmentText, pilotStartCommand,
   pilotBackupCommand, pilotStateFingerprintCommand, validatePilotServiceSelection, executePilotApply, PILOT_SERVICES} from './eros-pilot-deployment.mjs';
 
 const sha = 'a'.repeat(40);
@@ -32,7 +32,10 @@ test('pilot environment binds exact SHA and immutable stock Eros digest', () => 
 test('pilot compose has a dedicated project and can only start the pilot service allowlist', () => {
   const command = pilotStartCommand(sha);
   assert.match(command, /docker compose -p gpoint-eros-pilot/);
-  assert.match(command, /up -d eros-pilot-api postgres eros-migrate eros-pilot-embedding-relay ollama-model-verify eros$/);
+  assert.ok(command.indexOf('up -d postgres eros-pilot-embedding-relay eros-pilot-api') < command.indexOf('up eros-migrate'));
+  assert.ok(command.indexOf('up eros-migrate') < command.indexOf('up ollama-model-verify'));
+  assert.ok(command.indexOf('up ollama-model-verify') < command.indexOf('up -d eros'));
+  assert.doesNotMatch(command, /up -d[^;]*eros-migrate[^;]*ollama-model-verify/);
   assert.doesNotMatch(command, /--force-recreate|prisma migrate deploy|compose-api-1|worker bot/);
   assert.throws(() => pilotStartCommand('latest'), /exact source SHA/);
   assert.equal(validatePilotServiceSelection(PILOT_SERVICES), true);
@@ -50,9 +53,19 @@ test('pilot backup is confined to its own named project, database and protected 
 
 test('fresh RAM and disk are mandatory and production fingerprint covers the existing Compose project', () => {
   assert.equal(assertPilotCapacity({availableMemoryKiB: 1_500_000, freeDiskKiB: 7_000_000}).status, 'PASS');
+  assert.equal(MINIMUM_PILOT_AVAILABLE_MEMORY_KIB, 1024 * 1024);
+  assert.equal(assertPilotCapacity({availableMemoryKiB: 1024 * 1024, freeDiskKiB: 7_000_000}).status, 'PASS');
+  assert.throws(() => assertPilotCapacity({availableMemoryKiB: 1024 * 1024 - 1, freeDiskKiB: 7_000_000}), /memory headroom/);
   assert.throws(() => assertPilotCapacity({availableMemoryKiB: 300_000, freeDiskKiB: 7_000_000}), /memory headroom/);
   assert.throws(() => assertPilotCapacity({availableMemoryKiB: 1_500_000, freeDiskKiB: 4_000_000}), /free disk/);
-  assert.match(pilotStateFingerprintCommand(), /label=com\.docker\.compose\.project=compose/);
+  const fingerprint = pilotStateFingerprintCommand();
+  assert.match(fingerprint, /label=com\.docker\.compose\.project=compose/);
+  assert.match(fingerprint, /compose-gsales-api-1 compose-gsales-agata-api-1 compose-gsales-agata-memory-worker-1/);
+  assert.match(fingerprint, /GPOINT_PRODUCTION_SERVICE_NOT_INTENTIONALLY_STOPPED/);
+  assert.match(fingerprint, /compose-api-1 compose-gpoint-sensitive-detector-1 compose-agata-api-1 compose-agata-memory-worker-1/);
+  assert.match(fingerprint, /shared_postgres_1 shared_redis_1/);
+  assert.match(fingerprint, /GPOINT_PRODUCTION_SERVICE_UNHEALTHY/);
+  assert.match(fingerprint, /compose-worker-1 compose-bot-1/);
 });
 
 test('isolated Apply stops only pilot services after a health gate fails and retains the data volume', () => {
@@ -67,7 +80,8 @@ test('isolated Apply stops only pilot services after a health gate fails and ret
     assert.equal(error.pilotApplyStarted, true);
     return /synthetic health failure/.test(error.message);
   });
-  assert.equal(commands.some(command => command.includes('up -d eros-pilot-api postgres eros-migrate eros-pilot-embedding-relay ollama-model-verify eros')), true);
+  assert.equal(commands.some(command => command.includes('up -d --wait postgres eros-pilot-embedding-relay eros-pilot-api')),
+    true);
   const rollback = commands.at(-1);
   assert.match(rollback, /stop eros-pilot-api postgres eros-migrate eros-pilot-embedding-relay ollama-model-verify eros$/);
   assert.doesNotMatch(rollback, /down -v|--force-recreate|compose-api-1|worker bot/);

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import {
@@ -133,6 +135,70 @@ test('model config routes chat, embeddings and synthetic memory extraction to th
   assert.match(runner, /\[ "\$eros_rls_enabled" = "\$eros_tables" \]/);
   assert.match(runner, /LOCAL_E2E_EROS_DATABASE_RLS_LIMITATION=CONFIRMED tables=\$eros_tables.*runtime_role_rows=\$eros_admin_personas strict_role_rows=\$eros_strict_personas policies=\$eros_policy_count/);
   assert.match(runner, /LOCAL_E2E_EROS_DATABASE_USER_RLS=NOT_AVAILABLE stock_api_ownership_test=PASS/);
+});
+
+test('production stock Eros model config includes the required memory extraction filter prompt', () => {
+  const config = readFileSync(new URL('eros-pilot-model-config.toml', directory), 'utf8');
+  const memoryExtraction = config.split('[tasks.memory_extraction]')[1] ?? '';
+  assert.match(memoryExtraction, /filter_prompt\s*=\s*"[^"]+"/);
+});
+
+test('Mac Ollama tunnel preserves its reverse forward and reconnects after SSH exits', () => {
+  const tunnel = readFileSync(new URL('open-mac-ollama-tunnel.sh', directory), 'utf8');
+  assert.doesNotMatch(tunnel, /ClearAllForwardings=yes/);
+  assert.match(tunnel, /-R 127\.0\.0\.1:11435:127\.0\.0\.1:11434/);
+  assert.match(tunnel, /while[\s\S]*ssh[\s\S]*sleep/);
+  assert.match(tunnel, /ServerAliveInterval=30/);
+  assert.match(tunnel, /ServerAliveCountMax=3/);
+  assert.match(tunnel, /GPOINT_SSH_IDENTITY_FILE/);
+  assert.match(tunnel, /-o IdentitiesOnly=yes/);
+});
+
+test('Mac Ollama tunnel retries SSH after a disconnect and stops cleanly on TERM', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'eros-tunnel-test-'));
+  const bin = join(directory, 'bin');
+  mkdirSync(bin);
+  const calls = join(directory, 'ssh-calls');
+  const identity = join(directory, 'synthetic-ssh-identity');
+  writeFileSync(identity, 'synthetic identity marker\n', { mode: 0o600 });
+  const script = fileURLToPath(new URL('open-mac-ollama-tunnel.sh', import.meta.url));
+  const node = join(bin, 'node');
+  const ssh = join(bin, 'ssh');
+  writeFileSync(node, '#!/bin/sh\nexit 0\n');
+  writeFileSync(ssh, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$EROS_TEST_SSH_CALLS"\nif [ "$(wc -l < "$EROS_TEST_SSH_CALLS")" -eq 1 ]; then exit 255; fi\nexec /bin/sleep 30\n');
+  chmodSync(node, 0o700);
+  chmodSync(ssh, 0o700);
+  const tunnel = spawn('/bin/sh', [script], {
+    env: {
+      PATH: `${bin}:/usr/bin:/bin`,
+      EROS_PILOT_VPS_SSH_TARGET: 'synthetic@vps.invalid',
+      GPOINT_SSH_IDENTITY_FILE: identity,
+      EROS_TEST_SSH_CALLS: calls,
+    },
+    stdio: 'ignore',
+  });
+  const exit = new Promise((resolve) => tunnel.once('exit', resolve));
+  try {
+    const deadline = Date.now() + 10_000;
+    let lines = [];
+    while (Date.now() < deadline) {
+      if (existsSync(calls)) lines = readFileSync(calls, 'utf8').trim().split('\n');
+      if (lines.length >= 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.equal(lines.length, 2, 'tunnel should retry the SSH reverse forward after a disconnect');
+    assert.ok(lines.every((line) => line.includes('-R 127.0.0.1:11435:127.0.0.1:11434')));
+    assert.ok(lines.every((line) => line.includes(`-i ${identity}`) && line.includes('-o IdentitiesOnly=yes')));
+    assert.ok(lines.every((line) => !line.includes('ClearAllForwardings=yes')));
+    tunnel.kill('SIGTERM');
+    await exit;
+  } finally {
+    if (tunnel.exitCode === null) {
+      tunnel.kill('SIGTERM');
+      await exit;
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('local Worker fixture refuses non-isolated or non-local mode', () => {

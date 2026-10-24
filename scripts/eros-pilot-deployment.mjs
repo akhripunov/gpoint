@@ -15,6 +15,12 @@ export const REQUIRED_PILOT_ENV = Object.freeze([
   'EROS_PILOT_SUPABASE_JWT_SECRET',
 ]);
 
+// Pilot startup is deliberately phased: persistent containers peak at the Eros
+// cap total (960 MiB); while migrations run, Eros is still stopped and the
+// phase cap total is 832 MiB. Keep 64 MiB of host headroom beyond the largest
+// phase. The post-Apply readback separately requires at least 256 MiB available.
+export const MINIMUM_PILOT_AVAILABLE_MEMORY_KIB = (960 + 64) * 1024;
+
 export function parsePilotEnvironment(encoded) {
   if (typeof encoded !== 'string' || !encoded) throw new Error('Protected Eros Pilot environment secret is missing');
   const canonical = encoded.replace(/\s/g, '');
@@ -51,7 +57,7 @@ export function pilotEnvironmentText(environment, {sourceSha, erosImage, runtime
   return `${Object.keys(entries).sort().map(key => `${key}=${entries[key]}`).join('\n')}\n`;
 }
 
-export function assertPilotCapacity({availableMemoryKiB, freeDiskKiB, minimumAvailableMemoryKiB = 1408 * 1024,
+export function assertPilotCapacity({availableMemoryKiB, freeDiskKiB, minimumAvailableMemoryKiB = MINIMUM_PILOT_AVAILABLE_MEMORY_KIB,
   minimumFreeDiskKiB = 5120 * 1024}) {
   if (!Number.isSafeInteger(availableMemoryKiB) || availableMemoryKiB < minimumAvailableMemoryKiB)
     throw new Error('Fresh VPS memory headroom is below the Eros Pilot minimum');
@@ -68,7 +74,7 @@ export function pilotComposeArguments(sourceSha, envPath = PILOT_ENV_FILE) {
 
 export function pilotStartCommand(sourceSha) {
   const compose = pilotComposeArguments(sourceSha);
-  return `set -euo pipefail; ${compose} config --quiet; ${compose} up -d ${PILOT_SERVICES.join(' ')}`;
+  return `set -euo pipefail; ${compose} config --quiet; ${compose} up -d --wait postgres eros-pilot-embedding-relay eros-pilot-api; ${compose} up eros-migrate; ${compose} up ollama-model-verify; ${compose} up -d eros`;
 }
 
 export function executePilotApply({run, sourceSha, beforeSnapshot, healthCommand, preApplySnapshotCommand = pilotStateFingerprintCommand(),
@@ -128,7 +134,7 @@ export function pilotBackupCommand(sourceSha) {
 }
 
 export function pilotStateFingerprintCommand() {
-  return `set -euo pipefail; containers=$(docker ps -aq --filter label=com.docker.compose.project=compose | sort); test -n "$containers"; for name in compose-api-1 compose-worker-1 compose-bot-1 compose-agata-api-1 compose-agata-memory-worker-1 compose-gsales-api-1 compose-gsales-agata-api-1 compose-gsales-agata-memory-worker-1; do state=$(docker inspect "$name" --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null) || { echo GPOINT_PRODUCTION_SERVICE_MISSING=$name; exit 42; }; test "$state" = 'true healthy' || { echo GPOINT_PRODUCTION_SERVICE_UNHEALTHY=$name; exit 42; }; done; records=$(docker inspect $containers --format '{{.Id}} {{.Image}} {{.State.Running}} {{.RestartCount}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' | sort); printf 'EROS_PILOT_PRODUCTION_CONTAINER_SNAPSHOT_SHA256=%s\\n' "$(printf '%s\\n' "$records" | sha256sum | awk '{print $1}')"; printf 'EROS_PILOT_AVAILABLE_MEMORY_KIB=%s\\n' "$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)"; printf 'EROS_PILOT_FREE_DISK_KIB=%s\\n' "$(df -Pk /opt/gpoint | awk 'NR==2 {print $4}')"`;
+  return `set -euo pipefail; containers=$( { docker ps -aq --filter label=com.docker.compose.project=compose; docker inspect --format '{{.Id}}' shared_postgres_1 shared_redis_1; } | sort -u); test -n "$containers"; for name in compose-api-1 compose-gpoint-sensitive-detector-1 compose-agata-api-1 compose-agata-memory-worker-1 shared_postgres_1 shared_redis_1; do state=$(docker inspect "$name" | python3 -c 'import json,sys; s=json.load(sys.stdin)[0]["State"]; print(str(s["Running"]).lower()+" "+s.get("Health",{}).get("Status","none"))') || { echo GPOINT_PRODUCTION_SERVICE_MISSING=$name; exit 42; }; test "$state" = 'true healthy' || { echo GPOINT_PRODUCTION_SERVICE_UNHEALTHY=$name:$state; exit 42; }; done; for name in compose-worker-1 compose-bot-1; do state=$(docker inspect "$name" | python3 -c 'import json,sys; s=json.load(sys.stdin)[0]["State"]; print(str(s["Running"]).lower()+" "+s.get("Health",{}).get("Status","none"))') || { echo GPOINT_PRODUCTION_SERVICE_MISSING=$name; exit 42; }; case "$state" in 'true healthy'|'true none') ;; *) echo GPOINT_PRODUCTION_SERVICE_UNHEALTHY=$name:$state; exit 42;; esac; done; for name in compose-gsales-api-1 compose-gsales-agata-api-1 compose-gsales-agata-memory-worker-1; do state=$(docker inspect "$name" --format '{{.State.Running}}' 2>/dev/null) || { echo GPOINT_PRODUCTION_SERVICE_MISSING=$name; exit 42; }; test "$state" = 'false' || { echo GPOINT_PRODUCTION_SERVICE_NOT_INTENTIONALLY_STOPPED=$name; exit 42; }; done; fingerprint=$(docker inspect $containers | python3 -c 'import hashlib,json,sys; xs=json.load(sys.stdin); rows=sorted("{} {} {} {} {}".format(x["Id"],x["Image"],str(x["State"]["Running"]).lower(),x["RestartCount"],x["State"].get("Health",{}).get("Status","none")) for x in xs); print(hashlib.sha256((chr(10).join(rows)+chr(10)).encode()).hexdigest())'); echo EROS_PILOT_PRODUCTION_CONTAINER_SNAPSHOT_SHA256=$fingerprint; echo EROS_PILOT_AVAILABLE_MEMORY_KIB=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo); echo EROS_PILOT_FREE_DISK_KIB=$(df -Pk /opt/gpoint | awk 'NR==2 {print $4}')`;
 }
 
 export function validatePilotServiceSelection(services) {
