@@ -58,6 +58,18 @@ class ErosProductionSecretTests(unittest.TestCase):
                                  image='ghcr.io/akhripunov/eros@sha256:' + 'b' * 64)
             self.assertEqual(target.read_text(), 'preserve-me\n')
 
+    def test_rejects_symlinked_secret_directory_before_creating_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / 'real'
+            target.mkdir()
+            linked = root / 'linked'
+            linked.symlink_to(target, target_is_directory=True)
+            with self.assertRaisesRegex(RuntimeError, 'directory cannot be a symlink'):
+                MODULE.provision(linked / 'eros.env', source_sha='a' * 40,
+                                 image='ghcr.io/akhripunov/eros@sha256:' + 'b' * 64)
+            self.assertEqual(list(target.iterdir()), [])
+
     def test_rejects_unknown_or_incomplete_existing_entries_without_rotation(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'eros.env'

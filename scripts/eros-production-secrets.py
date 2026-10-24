@@ -75,8 +75,10 @@ def _validate_release_identity(source_sha, image):
 def provision(path=ENV_PATH, *, source_sha, image):
     _validate_release_identity(source_sha, image)
     path = Path(path)
+    if path.parent.is_symlink():
+        raise RuntimeError('Eros protected environment directory cannot be a symlink')
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if path.parent.is_symlink() or (path.exists() and path.is_symlink()):
+    if path.is_symlink():
         raise RuntimeError('Eros protected environment path cannot be a symlink')
     if path.exists() and not stat.S_ISREG(path.stat().st_mode):
         raise RuntimeError('Eros protected environment must be a regular file')
