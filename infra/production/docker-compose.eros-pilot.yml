@@ -20,10 +20,15 @@ services:
       EROS_PRODUCTION_TEST_USER_IDS: ${EROS_PILOT_TEST_USER_ID:?synthetic test user ID is required}
       EROS_PRODUCTION_TEST_CREATOR_IDS: ${EROS_PILOT_TEST_CREATOR_ID:?synthetic test creator ID is required}
     networks:
-      - gpoint_app
-      - shared_internal
-      - eros_pilot_app
-      - eros_pilot_embeddings
+      gpoint_app: {}
+      shared_internal: {}
+      eros_pilot_app: {}
+      eros_pilot_embeddings:
+        ipv4_address: 172.31.254.2
+    extra_hosts:
+      - "ollama:172.31.254.1"
+    depends_on:
+      eros-pilot-embedding-relay: {condition: service_started}
     expose: ["3000"]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
@@ -80,49 +85,27 @@ services:
     mem_limit: 256m
     cpus: 0.50
 
-  ollama:
+  eros-pilot-embedding-relay:
     profiles: [eros-pilot]
-    image: ${EROS_PILOT_OLLAMA_IMAGE:-ollama/ollama@sha256:352e045b937ac29d3d9550c22fb85525f60a89e064df34c26579bee5a93b3a16}
+    image: gpoint-runtime:${GPOINT_APP_IMAGE_SHA:-${RELEASE_SHA:?exact GPoint release SHA is required}}
     restart: unless-stopped
+    command: ["node", "/opt/gpoint/eros-pilot-embedding-relay.mjs"]
+    environment:
+      EROS_PILOT_RELAY_BIND: "172.31.254.1:11434"
+    volumes:
+      - "/opt/gpoint/releases/${EROS_PILOT_SOURCE_SHA:?exact pilot source SHA is required}/source/services/eros-engine/eros-pilot-embedding-relay.mjs:/opt/gpoint/eros-pilot-embedding-relay.mjs:ro"
+    network_mode: host
     read_only: true
     tmpfs: [/tmp]
-    depends_on:
-      ollama-model-pull: {condition: service_completed_successfully}
-    volumes:
-      - eros_pilot_ollama:/root/.ollama
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 10s
-      timeout: 5s
-      start_period: 20s
-      retries: 12
-    networks: [eros_pilot_embeddings]
-    security_opt: [no-new-privileges:true]
+    user: "65532:65532"
     cap_drop: [ALL]
-    pids_limit: 256
-    mem_limit: 1536m
-    cpus: 1.0
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 64m
+    cpus: 0.25
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
-
-  ollama-model-pull:
-    profiles: [eros-pilot]
-    image: ${EROS_PILOT_OLLAMA_IMAGE:-ollama/ollama@sha256:352e045b937ac29d3d9550c22fb85525f60a89e064df34c26579bee5a93b3a16}
-    restart: "no"
-    entrypoint: ["/bin/sh", "-ec"]
-    command: ["/usr/local/bin/pull-eros-pilot-model.sh"]
-    volumes:
-      - eros_pilot_ollama:/root/.ollama
-      - "/opt/gpoint/releases/${EROS_PILOT_SOURCE_SHA:?exact pilot source SHA is required}/source/infra/production/pull-eros-pilot-model.sh:/usr/local/bin/pull-eros-pilot-model.sh:ro"
-    networks: [eros_pilot_fetch]
-    security_opt: [no-new-privileges:true]
-    cap_drop: [ALL]
-    pids_limit: 128
-    read_only: true
-    tmpfs: [/tmp]
-    mem_limit: 1536m
-    cpus: 1.0
 
   ollama-model-verify:
     profiles: [eros-pilot]
@@ -134,8 +117,10 @@ services:
     volumes:
       - "/opt/gpoint/releases/${EROS_PILOT_SOURCE_SHA:?exact pilot source SHA is required}/source/services/eros-engine/verify-eros-pilot-model.mjs:/opt/gpoint/verify-eros-pilot-model.mjs:ro"
     depends_on:
-      ollama: {condition: service_healthy}
-    networks: [eros_pilot_embeddings]
+      eros-pilot-embedding-relay: {condition: service_started}
+    networks:
+      eros_pilot_embeddings:
+        ipv4_address: 172.31.254.3
     read_only: true
     tmpfs: [/tmp]
     user: "65532:65532"
@@ -163,9 +148,7 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
       eros-migrate: {condition: service_completed_successfully}
-      ollama-model-pull: {condition: service_completed_successfully}
       ollama-model-verify: {condition: service_completed_successfully}
-      ollama: {condition: service_healthy}
       eros-pilot-api: {condition: service_healthy}
     expose: ["8080"]
     healthcheck:
@@ -203,11 +186,11 @@ networks:
   eros_pilot_embeddings:
     name: gpoint_eros_pilot_embeddings
     internal: true
-  eros_pilot_fetch:
-    name: gpoint_eros_pilot_fetch
+    ipam:
+      config:
+        - subnet: 172.31.254.0/29
+          gateway: 172.31.254.1
 
 volumes:
   eros_pilot_pgdata:
     name: gpoint_eros_pilot_pgdata
-  eros_pilot_ollama:
-    name: gpoint_eros_pilot_ollama

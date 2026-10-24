@@ -15,7 +15,7 @@ class ErosVpsPilotComposeTests(unittest.TestCase):
         self.services = self.compose["services"]
 
     def test_pilot_services_are_opt_in_and_not_publicly_published(self):
-        for name in ("eros-pilot-api", "eros", "eros-migrate", "postgres", "ollama", "ollama-model-pull", "ollama-model-verify"):
+        for name in ("eros-pilot-api", "eros", "eros-migrate", "postgres", "ollama-model-verify", "eros-pilot-embedding-relay"):
             with self.subTest(service=name):
                 service = self.services[name]
                 self.assertIn("eros-pilot", service.get("profiles", []))
@@ -37,8 +37,8 @@ class ErosVpsPilotComposeTests(unittest.TestCase):
         self.assertNotIn("--set=eros_migrator_password", init_text)
         self.assertEqual(self.services["eros"]["depends_on"]["eros-migrate"]["condition"],
                          "service_completed_successfully")
-        self.assertEqual(self.services["eros"]["depends_on"]["ollama"]["condition"],
-                         "service_healthy")
+        self.assertEqual(self.services["eros"]["depends_on"]["ollama-model-verify"]["condition"],
+                         "service_completed_successfully")
 
     def test_postgres_keeps_only_capabilities_needed_by_upstream_entrypoint(self):
         postgres = self.services["postgres"]
@@ -54,42 +54,55 @@ class ErosVpsPilotComposeTests(unittest.TestCase):
         self.assertIn("http://eros-pilot-api:3000/eros-worker/v1/chat/completions", model_config)
         self.assertIn("http://eros-pilot-api:3000/eros-worker/v1/embeddings", model_config)
         self.assertEqual(self.services["eros-pilot-api"]["environment"]["EROS_OLLAMA_EMBEDDING_URL"], "http://ollama:11434/api/embed")
+        self.assertEqual(self.services["eros-pilot-api"]["extra_hosts"], ["ollama:172.31.254.1"])
         self.assertIn("EROS_PRODUCTION_TEST_USER_IDS", self.services["eros-pilot-api"]["environment"])
         self.assertIn("EROS_PRODUCTION_TEST_CREATOR_IDS", self.services["eros-pilot-api"]["environment"])
         self.assertIn("EROS_PILOT_OLLAMA_MODEL_DIGEST", self.services["ollama-model-verify"]["environment"])
-        self.assertEqual(self.services["ollama"]["mem_limit"], "1536m")
-        self.assertIn("@sha256:352e045b937ac29d3d9550c22fb85525f60a89e064df34c26579bee5a93b3a16",
-                      self.services["ollama"]["image"])
+        self.assertEqual(self.services["eros-pilot-api"]["extra_hosts"], ["ollama:172.31.254.1"])
+        self.assertIn("ollama-model-verify", self.services["eros"]["depends_on"])
+        self.assertNotIn("ollama", self.services)
+        self.assertNotIn("ollama-model-pull", self.services)
+        self.assertNotIn("EROS_PILOT_OLLAMA_IMAGE", (COMPOSE.read_text()))
+        self.assertEqual(self.services["eros-pilot-embedding-relay"]["network_mode"], "host")
+        self.assertNotIn("ports", self.services["eros-pilot-embedding-relay"])
+        self.assertEqual(self.services["eros-pilot-embedding-relay"]["environment"]["EROS_PILOT_RELAY_BIND"], "172.31.254.1:11434")
 
     def test_pilot_network_is_internal_and_only_api_bridges_to_gpoint(self):
         networks = self.compose["networks"]
         self.assertTrue(networks["eros_pilot_app"]["internal"])
         self.assertTrue(networks["eros_pilot_data"]["internal"])
-        self.assertEqual(self.services["eros-pilot-api"]["networks"], ["gpoint_app", "shared_internal", "eros_pilot_app", "eros_pilot_embeddings"])
+        self.assertEqual(set(self.services["eros-pilot-api"]["networks"]), {"gpoint_app", "shared_internal", "eros_pilot_app", "eros_pilot_embeddings"})
         self.assertNotIn("gpoint_app", self.services["eros"]["networks"])
-        self.assertNotIn("eros_pilot_fetch", self.services["eros-pilot-api"]["networks"])
-        self.assertNotIn("eros_pilot_fetch", self.services["ollama"]["networks"])
-        self.assertEqual(self.services["ollama-model-pull"]["networks"], ["eros_pilot_fetch"])
-        self.assertEqual(self.services["ollama-model-verify"]["networks"], ["eros_pilot_embeddings"])
-        self.assertIsNone(self.services["ollama-model-pull"].get("depends_on"))
-        self.assertEqual(self.services["ollama"].get("depends_on", {}).get("ollama-model-pull", {}).get("condition"),
-                         "service_completed_successfully")
+        self.assertNotIn("eros_pilot_fetch", networks)
+        self.assertNotIn("gpoint_app", self.services["eros"].get("networks", []))
+        self.assertEqual(networks["eros_pilot_embeddings"]["ipam"]["config"][0]["subnet"], "172.31.254.0/29")
+        self.assertEqual(self.services["eros-pilot-api"]["networks"]["eros_pilot_embeddings"]["ipv4_address"], "172.31.254.2")
+        self.assertEqual(self.services["ollama-model-verify"]["networks"]["eros_pilot_embeddings"]["ipv4_address"], "172.31.254.3")
+        self.assertNotIn("eros_pilot_embeddings", self.services["eros"]["networks"])
 
     def test_model_runtime_and_weights_are_digest_pinned(self):
         lock = json.loads((ROOT / "services/eros-engine/ollama-model.lock.json").read_text())
         self.assertEqual(lock["model"], "qwen3-embedding:0.6b")
         self.assertRegex(lock["digest"], r"^[a-f0-9]{64}$")
         self.assertIn(lock["digest"], (ROOT / "infra/production/docker-compose.eros-pilot.yml").read_text())
-        puller = (ROOT / "infra/production/pull-eros-pilot-model.sh").read_text()
         verifier = (ROOT / "services/eros-engine/verify-eros-pilot-model.mjs").read_text()
-        self.assertIn("ollama pull", puller)
-        self.assertNotIn("curl", puller)
         self.assertIn("EROS_PILOT_OLLAMA_MODEL_DIGEST", verifier)
         self.assertIn("/api/tags", verifier)
         self.assertNotIn("console.log(JSON.stringify", verifier)
+        relay = (ROOT / "services/eros-engine/eros-pilot-embedding-relay.mjs").read_text()
+        self.assertIn('const UPSTREAM_HOST = "127.0.0.1"', relay)
+        self.assertIn("const UPSTREAM_PORT = 11435", relay)
+        self.assertIn("172.31.254.2", relay)
+        self.assertIn("172.31.254.3", relay)
+        self.assertIn(lock["digest"], relay)
+        tunnel = (ROOT / "services/eros-engine/open-mac-ollama-tunnel.sh").read_text()
+        self.assertIn("-R 127.0.0.1:11435:127.0.0.1:11434", tunnel)
+        self.assertIn("GatewayPorts=no", tunnel)
+        self.assertIn("StrictHostKeyChecking=yes", tunnel)
+        self.assertNotIn("0.0.0.0", tunnel)
 
     def test_host_bind_mounts_are_bound_to_the_exact_v5_source_release(self):
-        for name in ("postgres", "ollama-model-pull", "ollama-model-verify", "eros"):
+        for name in ("postgres", "ollama-model-verify", "eros-pilot-embedding-relay", "eros"):
             service = self.services[name]
             mounts = service.get("volumes", [])
             for mount in mounts:

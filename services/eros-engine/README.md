@@ -62,8 +62,8 @@ alter its installed configuration.
   erase Eros data. OWNER has accepted a strictly synthetic, single-user VPS
   pilot in a dedicated disposable Eros database. The missing complete erasure
   adapter is a hard gate before any real-user access; the pilot must contain no
-  real user data and must be removable by deleting the isolated database and
-  its dedicated Ollama model volume.
+  real user data and must be removable by deleting the isolated database.
+  The Mac-hosted Ollama model stays on the Mac.
 - Stock `classify_session` performs model/extraction and embedding before an
   unconditional memory upsert; archive deletes relationship memory. A delayed
   write crossing archive is a plausible data-resurrection risk, not a proven
@@ -183,22 +183,31 @@ exact one-user/one-creator allowlist; Eros gets a separate `eros_pilot`
 PostgreSQL instance and volume. The pilot API is the only service connected to
 both GPoint's existing internal networks and the pilot networks. Eros can reach
 the pilot API and its own database, but cannot reach Ollama directly. The API
-reaches Ollama over an internal-only network. Caddy returns 404 for the public
-embeddings proxy route. None of these services publishes a host port.
+keeps the existing `EROS_OLLAMA_EMBEDDING_URL=http://ollama:11434/api/embed`
+contract. A static `/29` internal Docker network maps `ollama` only inside the
+pilot API container to a relay bound on the Docker bridge gateway. The relay
+accepts only the pilot API's embedding POST and the verifier's read-only model
+metadata request, checks the pinned Qwen3 digest, and forwards to VPS loopback
+port 11435. It does not publish a host port. Caddy continues to return 404 for
+the public embeddings proxy route.
 
-The profile pins the official Linux/amd64 Ollama image by registry manifest
-digest. A one-shot initializer pulls `qwen3-embedding:0.6b` into its dedicated
-volume; a separate Node verifier checks the model's exact full digest through
-Ollama's internal tags API before Eros starts. Only the initializer has
-outbound Docker bridge access; the serving Ollama, Eros, PostgreSQL and Eros
-database networks are internal. Chat and extraction use the GPoint API and
-existing GPOINT Worker route. The stock Eros image remains the candidate-bound
-V5 GHCR image with `patch-set=none`.
+On the Mac, Ollama remains loopback-only. The operator starts
+`open-mac-ollama-tunnel.sh`, which requires an existing pinned SSH host identity
+and opens a Mac-initiated reverse forward from VPS `127.0.0.1:11435` to Mac
+`127.0.0.1:11434`; `GatewayPorts=no` is required. No Worker or sshd setting is
+changed. The exact model digest is
+`ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d`, the
+Q8_0 Qwen3 Embedding 0.6B artifact. A one-shot verifier checks the digest and
+512-dimensional response before Eros starts. Chat and extraction continue
+through the GPoint API and existing GPOINT Worker route. The stock Eros image
+remains the candidate-bound V5 GHCR image with `patch-set=none`.
 
-The Compose profile sets caps of 1.5 GiB RAM/1 CPU for Ollama, 384 MiB/0.5 CPU
-for Eros and 256 MiB/0.5 CPU for its PostgreSQL. These are pilot ceilings, not
-evidence that a 2 GiB VPS can safely host them alongside the existing services.
-See ME-36 for the measured resource decision and deployment approval gate.
+The Compose profile sets caps of 384 MiB/0.5 CPU for Eros and 256 MiB/0.5 CPU
+for its PostgreSQL. These are ceilings, not actual consumption or proof of
+capacity. The latest read-only VPS snapshot recorded about 766 MiB available
+RAM with AGATA/GSales and current GPoint services healthy; Eros plus PostgreSQL
+must be measured on that host after a separately authorized pilot Deploy. Mac
+Ollama memory is outside the VPS budget. See ME-36 for the V5 gate and approval.
 
 ### Pilot backup and rollback
 
@@ -310,7 +319,8 @@ The `stamp` contains only UTC digits and `T`/`Z`, so generated database
 identifiers are safe to interpolate in these SQL statements. Confirm Eros
 health and perform a synthetic history/recall check before considering rollback
 complete. Keep the failed database and snapshot until that check passes. Do not
-use `down -v`, delete the Ollama volume, or touch the GPoint database. A restore
+use `down -v`, stop the Mac tunnel as a substitute for database rollback, or
+touch the GPoint database. A restore
 or cutover failure leaves Eros stopped and both database copies available for
 diagnosis.
 
