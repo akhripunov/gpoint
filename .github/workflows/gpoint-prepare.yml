@@ -105,9 +105,16 @@ jobs:
         uses: docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70 # v5
         with:
           version: v29.1.3
-          set-host: true
+          context: gpoint-setup-docker
+          runtime-basedir: ${{ runner.temp }}/gpoint-setup-docker
+          set-host: false
           daemon-config: |
             {"features":{"containerd-snapshotter":false}}
+      - name: Select the pinned local Docker context
+        if: github.ref == 'refs/heads/main' && needs.coalesce.outputs.result == 'WINNER'
+        run: |
+          printf 'DOCKER_CONTEXT=gpoint-setup-docker\n' >> "$GITHUB_ENV"
+          printf 'GPOINT_DOCKER_RUNTIME_BASEDIR=%s/gpoint-setup-docker\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Expose scoped GitHub Actions cache runtime to BuildKit
         if: github.ref == 'refs/heads/main' && needs.coalesce.outputs.result == 'WINNER'
         uses: crazy-max/ghaction-github-runtime@a1014fef88934970651c7916e89aaf51bc58f38b

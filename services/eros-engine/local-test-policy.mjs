@@ -8,6 +8,10 @@ const PINNED_SOURCE = 'https://github.com/etherfunlab/eros-engine';
 
 export function validateDockerEndpoint(endpoint, {
   home = homedir(),
+  githubActions = false,
+  dockerContext,
+  runnerTemp,
+  runtimeBasedir,
   socketExists = (path) => {
     try { return statSync(path).isSocket(); } catch { return false; }
   },
@@ -21,7 +25,14 @@ export function validateDockerEndpoint(endpoint, {
     join(home, '.docker/desktop/docker.sock'),
     '/var/run/docker.sock',
   ]);
-  if (!allowed.has(socket)) throw new Error('unapproved_docker_socket');
+  const expectedRuntime = runnerTemp ? join(runnerTemp, 'gpoint-setup-docker') : null;
+  const runnerSocket = githubActions
+    && dockerContext === 'gpoint-setup-docker'
+    && expectedRuntime !== null
+    && runtimeBasedir === expectedRuntime
+    && socket.startsWith(`${expectedRuntime}/`)
+    && /^run-[a-f0-9]{8}\/docker\.sock$/i.test(socket.slice(expectedRuntime.length + 1));
+  if (!allowed.has(socket) && !runnerSocket) throw new Error('unapproved_docker_socket');
   if (!socketExists(socket)) throw new Error('docker_socket_unavailable');
   return socket;
 }
@@ -63,7 +74,12 @@ function getLocalContext() {
     'context', 'inspect', selected,
     '--format', '{{(index .Endpoints "docker").Host}}',
   ], { env: cleanDockerEnvironment(selected), encoding: 'utf8' }).trim();
-  validateDockerEndpoint(endpoint);
+  validateDockerEndpoint(endpoint, {
+    githubActions: process.env.GITHUB_ACTIONS === 'true',
+    dockerContext: selected,
+    runnerTemp: process.env.RUNNER_TEMP,
+    runtimeBasedir: process.env.GPOINT_DOCKER_RUNTIME_BASEDIR,
+  });
   return selected;
 }
 

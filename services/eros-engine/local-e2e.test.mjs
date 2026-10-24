@@ -272,6 +272,51 @@ test('Docker endpoint must be the local Mac Unix socket', () => {
   );
 });
 
+test('GitHub Prepare accepts only its pinned setup-docker Unix socket context', () => {
+  const runnerBase = '/home/runner/_temp/gpoint-setup-docker';
+  const socket = `${runnerBase}/run-12345678/docker.sock`;
+  const socketExists = (path) => path === socket;
+  assert.equal(validateDockerEndpoint(`unix://${socket}`, {
+    home: '/home/runner',
+    socketExists,
+    githubActions: true,
+    dockerContext: 'gpoint-setup-docker',
+    runnerTemp: '/home/runner/_temp',
+    runtimeBasedir: runnerBase,
+  }), socket);
+  assert.throws(() => validateDockerEndpoint(`unix://${socket}`, {
+    home: '/home/runner', socketExists, githubActions: false,
+    dockerContext: 'gpoint-setup-docker', runtimeBasedir: runnerBase,
+  }), /unapproved_docker_socket/);
+  assert.throws(() => validateDockerEndpoint('tcp://192.0.2.7:2376', {
+    home: '/home/runner', socketExists, githubActions: true,
+    dockerContext: 'gpoint-setup-docker', runtimeBasedir: runnerBase,
+  }), /local_unix_socket_required/);
+  assert.throws(() => validateDockerEndpoint('unix:///tmp/forwarded-docker.sock', {
+    home: '/home/runner', socketExists, githubActions: true,
+    dockerContext: 'gpoint-setup-docker', runtimeBasedir: runnerBase,
+  }), /unapproved_docker_socket/);
+  assert.throws(() => validateDockerEndpoint(`unix://${socket}`, {
+    home: '/home/runner', socketExists, githubActions: true,
+    dockerContext: 'other', runtimeBasedir: runnerBase,
+  }), /unapproved_docker_socket/);
+  assert.throws(() => validateDockerEndpoint(`unix://${runnerBase}/forwarded.sock`, {
+    home: '/home/runner', socketExists, githubActions: true,
+    dockerContext: 'gpoint-setup-docker', runtimeBasedir: runnerBase,
+    runnerTemp: '/home/runner/_temp',
+  }), /unapproved_docker_socket/);
+});
+
+test('Prepare selects the pinned Docker action context without exporting DOCKER_HOST', () => {
+  const workflow = readFileSync(new URL('../../.github/workflows/gpoint-prepare.yml', directory), 'utf8');
+  const setup = workflow.slice(workflow.indexOf('uses: docker/setup-docker-action@'), workflow.indexOf('uses: crazy-max/ghaction-github-runtime@'));
+  assert.match(setup, /context: gpoint-setup-docker/);
+  assert.match(setup, /runtime-basedir: \$\{\{ runner\.temp \}\}\/gpoint-setup-docker/);
+  assert.match(setup, /set-host: false/);
+  assert.match(setup, /DOCKER_CONTEXT=gpoint-setup-docker/);
+  assert.match(setup, /GPOINT_DOCKER_RUNTIME_BASEDIR=.*gpoint-setup-docker/);
+});
+
 test('Eros image requires stock upstream provenance and rejects downstream patches', () => {
   const reference = 'gpoint-eros:stock-d1a140083321687212fb7b17c09cc0c3c9639f5e';
   const metadata = {
