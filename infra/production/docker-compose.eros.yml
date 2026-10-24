@@ -43,7 +43,10 @@ services:
     environment:
       EROS_RELAY_BIND: "172.31.254.1:11434"
     volumes:
-      - "/opt/gpoint/releases/${EROS_SOURCE_SHA:?exact Eros source SHA is required}/source/services/eros-engine/eros-pilot-embedding-relay.mjs:/opt/gpoint/eros-embedding-relay.mjs:ro"
+      - type: bind
+        source: "/opt/gpoint/releases/${EROS_SOURCE_SHA:?exact Eros source SHA is required}/source/services/eros-engine/eros-pilot-embedding-relay.mjs"
+        target: /opt/gpoint/eros-embedding-relay.mjs
+        read_only: true
     network_mode: host
     read_only: true
     tmpfs: [/tmp]
@@ -70,7 +73,10 @@ services:
       EROS_PILOT_OLLAMA_MODEL_DIGEST: ${EROS_PILOT_OLLAMA_MODEL_DIGEST:-ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d}
       EROS_PILOT_OLLAMA_URL: http://172.31.254.1:11434
     volumes:
-      - "/opt/gpoint/releases/${EROS_SOURCE_SHA:?exact Eros source SHA is required}/source/services/eros-engine/verify-eros-pilot-model.mjs:/opt/gpoint/verify-eros-model.mjs:ro"
+      - type: bind
+        source: "/opt/gpoint/releases/${EROS_SOURCE_SHA:?exact Eros source SHA is required}/source/services/eros-engine/verify-eros-pilot-model.mjs"
+        target: /opt/gpoint/verify-eros-model.mjs
+        read_only: true
     depends_on:
       eros-embedding-relay: {condition: service_started}
     networks:
@@ -99,7 +105,10 @@ services:
       MODEL_CONFIG_PATH: /etc/eros-engine/model_config.toml
       RUST_LOG: info
     volumes:
-      - "/opt/gpoint/releases/${EROS_SOURCE_SHA:?exact Eros source SHA is required}/source/services/eros-engine/eros-pilot-model-config.toml:/etc/eros-engine/model_config.toml:ro"
+      - type: bind
+        source: "/opt/gpoint/releases/${EROS_SOURCE_SHA:?exact Eros source SHA is required}/source/services/eros-engine/eros-pilot-model-config.toml"
+        target: /etc/eros-engine/model_config.toml
+        read_only: true
     depends_on:
       eros-migrate: {condition: service_completed_successfully}
       eros-model-verify: {condition: service_completed_successfully}
