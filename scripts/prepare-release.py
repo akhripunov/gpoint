@@ -247,6 +247,8 @@ def prepare(sha, output, *, postgres_only=False):
             ('workspace_tests', ('pnpm', 'test')),
             ('release_tests', ('pnpm', 'test:release')),
             ('eros_pilot_compose_tests', (sys.executable, '-m', 'unittest', 'tests.test_eros_vps_pilot_compose')),
+            ('eros_permanent_compose_tests', (sys.executable, '-m', 'unittest', 'tests.test_eros_permanent_compose')),
+            ('eros_production_secret_tests', (sys.executable, '-m', 'unittest', 'tests.test_eros_secret_provision')),
             ('eros_pilot_model_verifier_tests', ('node', 'services/eros-engine/verify-eros-pilot-model.test.mjs')),
             ('eros_pilot_embedding_relay_tests', ('node', 'services/eros-engine/eros-pilot-embedding-relay.test.mjs')),
             ('linear_tests', (sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_*linear*.py')),

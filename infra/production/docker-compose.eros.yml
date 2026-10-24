@@ -1,0 +1,138 @@
+services:
+  api:
+    environment:
+      EROS_ENABLED: "true"
+      EROS_PRODUCTION_TEST_MODE: "true"
+      EROS_DATA_MODE: synthetic
+      EROS_SERVICE_URL: http://eros:8080
+      EROS_OLLAMA_EMBEDDING_URL: http://ollama:11434/api/embed
+      EROS_JWT_SECRET: ${EROS_JWT_SECRET:?Eros JWT secret is required}
+      EROS_WORKER_SIGNING_SECRET: ${EROS_WORKER_SIGNING_SECRET:?Eros worker signing secret is required}
+      EROS_BRIDGE_API_KEY: ${EROS_BRIDGE_API_KEY:?Eros bridge API key is required}
+      EROS_WORKER_TENANT_ID: ${AGATA_TENANT_ID:?GPoint worker tenant binding is required}
+      EROS_PRODUCTION_TEST_USER_IDS: ${EROS_TEST_USER_IDS:-}
+      EROS_PRODUCTION_TEST_CREATOR_IDS: ${EROS_TEST_CREATOR_IDS:-}
+      EROS_EMBEDDING_API_KEY: ${EROS_EMBEDDING_API_KEY:?Eros embedding API key is required}
+    networks:
+      eros_api: {}
+      eros_embeddings:
+        ipv4_address: 172.31.254.2
+    extra_hosts:
+      - "ollama:172.31.254.1"
+
+  eros-migrate:
+    image: ${EROS_IMAGE:?immutable stock Eros image is required}
+    restart: "no"
+    command: ["migrate"]
+    environment:
+      DATABASE_URL: ${EROS_MIGRATOR_DATABASE_URL:?Eros migrator database URL is required}
+    networks: [eros_data]
+    read_only: true
+    tmpfs: [/tmp]
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.50
+
+  eros-embedding-relay:
+    image: gpoint-runtime:${GPOINT_APP_IMAGE_SHA:-${RELEASE_SHA:?exact GPoint release SHA is required}}
+    restart: unless-stopped
+    command: ["node", "/opt/gpoint/eros-embedding-relay.mjs"]
+    environment:
+      EROS_RELAY_BIND: "172.31.254.1:11434"
+    volumes:
+      - "/opt/gpoint/releases/${EROS_SOURCE_SHA:?exact Eros source SHA is required}/source/services/eros-engine/eros-pilot-embedding-relay.mjs:/opt/gpoint/eros-embedding-relay.mjs:ro"
+    network_mode: host
+    read_only: true
+    tmpfs: [/tmp]
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 64m
+    cpus: 0.25
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://172.31.254.1:11434/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  eros-model-verify:
+    image: gpoint-runtime:${GPOINT_APP_IMAGE_SHA:-${RELEASE_SHA:?exact GPoint release SHA is required}}
+    restart: "no"
+    command: ["node", "/opt/gpoint/verify-eros-model.mjs"]
+    environment:
+      EROS_OLLAMA_MODEL_DIGEST: ${EROS_OLLAMA_MODEL_DIGEST:-ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d}
+    volumes:
+      - "/opt/gpoint/releases/${EROS_SOURCE_SHA:?exact Eros source SHA is required}/source/services/eros-engine/verify-eros-pilot-model.mjs:/opt/gpoint/verify-eros-model.mjs:ro"
+    depends_on:
+      eros-embedding-relay: {condition: service_started}
+    networks:
+      eros_embeddings:
+        ipv4_address: 172.31.254.3
+    read_only: true
+    tmpfs: [/tmp]
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.25
+
+  eros:
+    image: ${EROS_IMAGE:?immutable stock Eros image is required}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${EROS_RUNTIME_DATABASE_URL:?Eros runtime database URL is required}
+      GPOINT_API_KEY: ${EROS_EMBEDDING_API_KEY:?Eros embedding API key is required}
+      GPOINT_WORKER_BRIDGE_SIGNING_SECRET: ${EROS_WORKER_SIGNING_SECRET:?Eros worker signing secret is required}
+      GPOINT_WORKER_TENANT_ID: ${AGATA_TENANT_ID:?GPoint worker tenant binding is required}
+      EROS_BRIDGE_API_KEY: ${EROS_BRIDGE_API_KEY:?Eros bridge API key is required}
+      OPENROUTER_API_KEY: ""
+      SUPABASE_JWT_SECRET: ${EROS_JWT_SECRET:?Eros JWT secret is required}
+      MODEL_CONFIG_PATH: /etc/eros-engine/model_config.toml
+      RUST_LOG: info
+    volumes:
+      - "/opt/gpoint/releases/${EROS_SOURCE_SHA:?exact Eros source SHA is required}/source/services/eros-engine/eros-pilot-model-config.toml:/etc/eros-engine/model_config.toml:ro"
+    depends_on:
+      eros-migrate: {condition: service_completed_successfully}
+      eros-model-verify: {condition: service_completed_successfully}
+    expose: ["8080"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 8
+    networks: [eros_api, eros_data]
+    read_only: true
+    tmpfs: [/tmp]
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 384m
+    cpus: 0.50
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+networks:
+  eros_api:
+    name: gpoint_eros_api
+    internal: true
+  eros_data:
+    name: gpoint_eros_data
+    external: true
+  eros_embeddings:
+    name: gpoint_eros_embeddings
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.31.254.0/29

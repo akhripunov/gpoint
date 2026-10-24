@@ -500,7 +500,7 @@ export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestro
     @Headers() headers: Record<string, string | string[] | undefined>,
     @Body() body: unknown,
   ) {
-    bearer(headers, 'GPOINT_API_KEY');
+    bearer(headers, 'EROS_EMBEDDING_API_KEY');
     let parsed;
     try { parsed = parseErosEmbeddingRequest(body); }
     catch { throw new BadRequestException({ code: 'EROS_EMBEDDING_REQUEST_INVALID' }); }

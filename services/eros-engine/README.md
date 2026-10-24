@@ -175,6 +175,19 @@ evidence and cannot replace a VPS load measurement.
 
 ## Isolated VPS pilot profile
 
+## Permanent V5 secret storage
+
+The permanent Eros service is designed not to use the historical
+`EROS_PILOT_ENV_B64` GitHub Environment secret. Its V5 release runner will
+generate independent cryptographic credentials on the VPS and store them in
+`/opt/gpoint/env/eros.env` with mode `0600`, and keeps that file outside the
+repository, workflow artifacts, and Linear. The database URLs in that file
+contain the dedicated Eros roles only. V5 reuses those credentials across
+updates and refuses to rotate or repair an incomplete file automatically.
+Base64 is not used as a protection mechanism. Loss or corruption of the
+protected file is a recovery blocker requiring database credential recovery;
+an update must not overwrite the only copy of working credentials.
+
 `infra/production/docker-compose.eros-pilot.yml` is an opt-in overlay for the
 existing V5 Compose project. It adds a second instance of the existing GPoint
 API image for the synthetic scope so that the running API container is not

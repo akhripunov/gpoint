@@ -75,6 +75,7 @@ services:
       EROS_WORKER_TENANT_ID: ${EROS_TEST_TENANT_ID:?set synthetic tenant UUID}
       AGATA_TENANT_ID: ${EROS_TEST_TENANT_ID:?set synthetic tenant UUID}
       EROS_BRIDGE_API_KEY: ${EROS_TEST_GPOINT_API_KEY:?set synthetic provider key}
+      EROS_EMBEDDING_API_KEY: ${EROS_TEST_GPOINT_API_KEY:?set synthetic provider key}
       EROS_OLLAMA_EMBEDDING_URL: http://127.0.0.1:11434/api/embed
       GPOINT_API_KEY: ${EROS_TEST_GPOINT_API_KEY:?set synthetic provider key}
       GPOINT_AGATA_WORKER_TOKEN: ${EROS_TEST_WORKER_TOKEN:?set synthetic Worker token}
