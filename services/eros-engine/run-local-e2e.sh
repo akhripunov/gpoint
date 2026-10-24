@@ -49,7 +49,7 @@ cleanup(){
   trap - EXIT HUP INT TERM
   cleanup_failed=0
   if [ "$rc" -ne 0 ] && [ "$compose_started" -eq 1 ]; then
-    compose logs --no-color postgres gpoint-api-migrate gpoint-api eros gpoint-worker 2>/dev/null | rg -i -C 2 "error|exception|failed|fatal|panic|denied|not found|refused" | tail -100 >&2 || true
+    compose logs --no-color postgres gpoint-api-migrate gpoint-api eros gpoint-worker 2>/dev/null | grep -Ei -C 2 "error|exception|failed|fatal|panic|denied|not found|refused" | tail -100 >&2 || true
   fi
   if [ "$compose_started" -eq 1 ]; then
     compose down --volumes --remove-orphans >/dev/null 2>&1 || cleanup_failed=1
@@ -321,16 +321,16 @@ docker_local kill --signal TERM "$worker_id" >/dev/null 2>&1 || true
 worker_status=$(docker_local wait "$worker_id")
 [ "$worker_status" = 0 ] || { echo LOCAL_E2E_WORKER_EXIT=FAIL >&2; docker_local logs "$worker_id" >&2; exit 1; }
 worker_log=$(docker_local logs "$worker_id")
-completed_jobs=$(printf '%s\n' "$worker_log" | rg -c 'LOCAL_TEST_WORKER_COMPLETED=1' || true)
+    completed_jobs=$(printf '%s\n' "$worker_log" | grep -c 'LOCAL_TEST_WORKER_COMPLETED=1' || true)
 [ "$completed_jobs" -ge 16 ] || { echo "LOCAL_E2E_WORKER_JOBS=FAIL count=$completed_jobs" >&2; printf '%s\n' "$worker_log" >&2; exit 1; }
 context_result=$(printf '%s\n' "$worker_log" | node "$repo/services/eros-engine/provider-context-check.mjs")
 printf '%s\n' "$context_result"
-if printf '%s\n' "$context_result" | rg -q '^LOCAL_E2E_PROVIDER_CONTEXT=PASS '; then
+    if printf '%s\n' "$context_result" | grep -q '^LOCAL_E2E_PROVIDER_CONTEXT=PASS '; then
   memory_recall_status=PASS
 else
   memory_recall_status=BLOCKED
 fi
-printf '%s\n' "$worker_log" | rg 'LOCAL_TEST_PROVIDER_CONTEXT|LOCAL_TEST_WORKER_COMPLETED='
+    printf '%s\n' "$worker_log" | grep -E 'LOCAL_TEST_PROVIDER_CONTEXT|LOCAL_TEST_WORKER_COMPLETED='
 echo LOCAL_E2E_EXISTING_GPOINT_WORKER_QUEUE=PASS
 docker_local rm "$worker_id" >/dev/null; worker_id=
 compose restart eros

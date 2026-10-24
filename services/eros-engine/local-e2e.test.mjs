@@ -546,6 +546,8 @@ test('runner records each verified image immediately and fails closed on unmanif
   assert.match(runner, /not_in_manifest/);
   assert.match(runner, /local-e2e-image-tools\.sh/);
   assert.match(imageTools, /No such image: \$1/);
+  assert.match(imageTools, /grep -Fiq/);
+  assert.doesNotMatch(imageTools, /\brg\b/);
   assert.match(imageTools, /reason=daemon_or_cli_error/);
   assert.match(imageTools, /No such object: \$1/);
   assert.match(imageTools, /LOCAL_E2E_CONTAINER_INSPECT=FAIL/);
@@ -553,6 +555,8 @@ test('runner records each verified image immediately and fails closed on unmanif
   assert.match(runner, /phase=preflight/);
   assert.match(runner, /image_identity=\$\(inspect_run_image "\$image_ref"\)/);
   assert.match(runner, /Record each image immediately/);
+  assert.match(runner, /grep -Ei -C 2/);
+  assert.doesNotMatch(runner, /\brg\b/);
   assert.doesNotMatch(runner, /image_tags_eligible/);
   assert.match(runner, /image_id=/);
   assert.match(runner, /com\.gpoint\.me36\.run/);
@@ -582,7 +586,7 @@ printf 'status=%s output=%s\\n' "$status" "$output"
 `;
   const inspect = (mode) => spawnSync('sh', ['-c', script, 'sh', helperPath], {
     encoding: 'utf8',
-    env: { ...process.env, MOCK_MODE: mode, MOCK_TAG: 'me36_test-gpoint-api:latest' },
+    env: { ...process.env, PATH: '/usr/bin:/bin', MOCK_MODE: mode, MOCK_TAG: 'me36_test-gpoint-api:latest' },
   });
   const found = inspect('found');
   assert.equal(found.status, 0);
@@ -619,7 +623,7 @@ printf 'status=%s output=%s\\n' "$status" "$output"
 `;
   const inspect = (mode) => spawnSync('sh', ['-c', script, 'sh', helperPath], {
     encoding: 'utf8',
-    env: { ...process.env, MOCK_MODE: mode, MOCK_TAG: 'me36_test-worker-integration' },
+    env: { ...process.env, PATH: '/usr/bin:/bin', MOCK_MODE: mode, MOCK_TAG: 'me36_test-worker-integration' },
   });
   const found = inspect('found');
   assert.equal(found.status, 0);
