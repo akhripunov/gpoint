@@ -329,6 +329,15 @@ test('Eros image requires stock upstream provenance and rejects downstream patch
     buildRevision: 'd1a140083321687212fb7b17c09cc0c3c9639f5e',
   };
   assert.equal(validateErosImageInspection(reference, metadata), metadata.id);
+  const candidateSha = 'b'.repeat(40);
+  assert.equal(validateErosImageInspection(`gpoint-eros-pilot:${candidateSha}`, {
+    ...metadata,
+    buildRevision: candidateSha,
+  }), metadata.id);
+  assert.throws(() => validateErosImageInspection(`gpoint-eros-pilot:${candidateSha}`, {
+    ...metadata,
+    buildRevision: 'c'.repeat(40),
+  }), /eros_build_revision_mismatch/);
   assert.throws(() => validateErosImageInspection('gpoint-eros:latest', metadata), /stock_eros_image_tag_required/);
   assert.throws(() => validateErosImageInspection(reference, { ...metadata, patchSha256: 'sha256-of-a-patch' }), /eros_downstream_patch_forbidden/);
   assert.throws(() => validateErosImageInspection(reference, { ...metadata, id: 'mutable-tag' }), /immutable_image_id_required/);

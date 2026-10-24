@@ -38,7 +38,9 @@ export function validateDockerEndpoint(endpoint, {
 }
 
 export function validateErosImageInspection(reference, metadata) {
-  if (!/^gpoint-eros:stock-[a-zA-Z0-9._-]+$/.test(reference ?? '')) throw new Error('stock_eros_image_tag_required');
+  const stockSourceTag = /^gpoint-eros:stock-([a-f0-9]{40})$/i.exec(reference ?? '');
+  const pilotCandidateTag = /^gpoint-eros-pilot:([a-f0-9]{40})$/i.exec(reference ?? '');
+  if (!stockSourceTag && !pilotCandidateTag) throw new Error('stock_eros_image_tag_required');
   if (!metadata || !/^sha256:[0-9a-f]{64}$/.test(metadata.id ?? '')) {
     throw new Error('immutable_image_id_required');
   }
@@ -49,6 +51,12 @@ export function validateErosImageInspection(reference, metadata) {
   if (metadata.patchSha256 !== 'none') throw new Error('eros_downstream_patch_forbidden');
   if (!/^[0-9a-f]{40}$/.test(metadata.buildRevision ?? '')) {
     throw new Error('eros_build_revision_missing');
+  }
+  if (stockSourceTag && stockSourceTag[1] !== metadata.upstreamRevision) {
+    throw new Error('eros_upstream_tag_mismatch');
+  }
+  if (pilotCandidateTag && pilotCandidateTag[1] !== metadata.buildRevision) {
+    throw new Error('eros_build_revision_mismatch');
   }
   return metadata.id;
 }
