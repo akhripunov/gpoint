@@ -25,6 +25,13 @@ path available until the Kamal production Verify has passed.
       version, database names, migration heads, and pending migration set.
       Confirm that Kamal does not own or recreate PostgreSQL, Redis, Eros, or
       the isolated Worker services.
+- [ ] The workflow's read-only migration parity gate must prove that every
+      candidate Prisma migration is already applied and that the live AGATA
+      Alembic head equals the candidate's sole head. A mismatch blocks before
+      the GitHub Deployment is created and before any Compose service is
+      stopped. This cutover does not apply database migrations; pending or
+      forward-only AGATA migrations require a separately scoped, authorized
+      migration operation and a later fresh cutover baseline.
 - [ ] Inventory named and bind-mounted volumes, especially media, PostgreSQL,
       and any application state. Match every persistent mount to its intended
       Kamal role. Do not remove or rename volumes during this cutover.
@@ -113,12 +120,14 @@ with the exact candidate and the last-known-good application version before
 choosing recovery.
 
 Use Kamal's normal previous-version rollback only after confirming the old
-application image is still available and compatible with the current database
-schema. If migration compatibility is uncertain, keep consumers paused and
-restore only through the separately tested database recovery procedure. Never
-drop, recreate, or roll back PostgreSQL data by assumption. Re-run the full
-production Verify after recovery and record whether recovery or rollback
-completed.
+application image is still available. The cutover migration parity gate proves
+the database schema was unchanged by this workflow, so rollback does not depend
+on reversing candidate migrations. If a separate migration operation occurred
+after the baseline or migration compatibility is otherwise uncertain, keep
+consumers paused and restore only through the separately tested database
+recovery procedure. Never drop, recreate, or roll back PostgreSQL data by
+assumption. Re-run the full production Verify after recovery and record whether
+recovery or rollback completed.
 
 ## Legacy removal gate
 

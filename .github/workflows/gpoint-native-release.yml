@@ -477,10 +477,11 @@ jobs:
           [[ "$postgres_system_identifier" =~ ^[0-9]+$ && "$postgres_server_version_num" =~ ^[0-9]+$ ]]
           postgres_acl_fingerprint="$(printf '%s' "$database_facts" | sha256sum | awk '{print $1}')"
           network_fingerprint="$(docker network inspect gpoint_eros_api gpoint_eros_data gpoint_eros_embeddings | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(json.dumps(sorted(({"name":r["Name"],"id":r["Id"],"internal":r["Internal"],"ipam":r.get("IPAM",{}).get("Config",[])} for r in rows),key=lambda r:r["name"]),sort_keys=True,separators=(",",":"))' | sha256sum | awk '{print $1}')"
-          migration_facts="$(docker run --rm --network shared_internal --env-file /opt/gpoint/env/production.env "$api_image" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const p=await db.$queryRawUnsafe("SELECT migration_name FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY finished_at DESC LIMIT 1");const a=await db.$queryRawUnsafe("SELECT to_regclass('\''agata.alembic_version'\'')::text AS relation");let head="ABSENT";if(a[0].relation){const rows=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(rows.length!==1)throw Error("AGATA head is not singular");head=rows[0].version_num}console.log("PRISMA_HEAD="+(p[0]?.migration_name||"NONE"));console.log("AGATA_HEAD="+head)}catch(e){console.error("READ_ONLY_DATABASE_BASELINE_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
+          migration_facts="$(docker run --rm --network shared_internal --env-file /opt/gpoint/env/production.env "$api_image" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const p=await db.$queryRawUnsafe("SELECT migration_name FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY finished_at DESC LIMIT 1");const all=await db.$queryRawUnsafe("SELECT migration_name FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const a=await db.$queryRawUnsafe("SELECT to_regclass('\''agata.alembic_version'\'')::text AS relation");let head="ABSENT";if(a[0].relation){const rows=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(rows.length!==1)throw Error("AGATA head is not singular");head=rows[0].version_num}console.log("PRISMA_HEAD="+(p[0]?.migration_name||"NONE"));console.log("PRISMA_MIGRATIONS="+all.map(x=>x.migration_name).join(","));console.log("AGATA_HEAD="+head)}catch(e){console.error("READ_ONLY_DATABASE_BASELINE_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
           prisma_head="$(sed -n 's/^PRISMA_HEAD=//p' <<< "$migration_facts")"
+          prisma_migrations="$(sed -n 's/^PRISMA_MIGRATIONS=//p' <<< "$migration_facts")"
           agata_head="$(sed -n 's/^AGATA_HEAD=//p' <<< "$migration_facts")"
-          test -n "$prisma_head" && test -n "$agata_head"
+          test -n "$prisma_head" && test -n "$prisma_migrations" && test -n "$agata_head"
           free_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
           memory_kb="$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)"
           [[ "$free_kb" =~ ^[0-9]+$ && "$memory_kb" =~ ^[0-9]+$ ]]
@@ -509,6 +510,7 @@ jobs:
           POSTGRES_ACL_FINGERPRINT=$postgres_acl_fingerprint
           PRISMA_HEAD=$prisma_head
           AGATA_HEAD=$agata_head
+          PRISMA_MIGRATIONS=$prisma_migrations
           EROS_CONTAINER_ID=$eros_id
           EROS_IMAGE_ID=$eros_image_id
           EROS_RELAY_CONTAINER_ID=$eros_relay_id
@@ -522,20 +524,35 @@ jobs:
           EOF
           chmod 600 "$baseline_file"
           baseline_sha="$(sha256sum "$baseline_file" | awk '{print $1}')"
-          printf 'baseline_path=%s\nbaseline_sha=%s\ninventory_sha=%s\ncurrent_sha=%s\nprisma_head=%s\nagata_head=%s\npostgres_system_identifier=%s\n' \
-            "$baseline_file" "$baseline_sha" "$inventory_sha" "$current_sha" "$prisma_head" "$agata_head" "$postgres_system_identifier"
+          printf 'baseline_path=%s\nbaseline_sha=%s\ninventory_sha=%s\ncurrent_sha=%s\nprisma_head=%s\nprisma_migrations=%s\nagata_head=%s\npostgres_system_identifier=%s\n' \
+            "$baseline_file" "$baseline_sha" "$inventory_sha" "$current_sha" "$prisma_head" "$prisma_migrations" "$agata_head" "$postgres_system_identifier"
           rm -f "$inventory_script"
           rmdir "$(dirname "$inventory_script")"
           REMOTE
           )"
           while IFS='=' read -r key value; do
             case "$key" in
-              baseline_path|baseline_sha|inventory_sha|current_sha|prisma_head|agata_head|postgres_system_identifier)
+              baseline_path|baseline_sha|inventory_sha|current_sha|prisma_head|prisma_migrations|agata_head|postgres_system_identifier)
                 printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"
                 printf -- '- %s: `%s`\n' "$key" "$value" >> "$GITHUB_STEP_SUMMARY"
                 ;;
             esac
           done <<< "$facts"
+      - name: Verify candidate migrations match the live database
+        if: inputs.mode == 'production'
+        env:
+          PRISMA_HEAD: ${{ steps.baseline.outputs.prisma_head }}
+          PRISMA_MIGRATIONS: ${{ steps.baseline.outputs.prisma_migrations }}
+          AGATA_HEAD: ${{ steps.baseline.outputs.agata_head }}
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-kamal-migration-parity.py \
+            --prisma-directory packages/db/prisma/migrations \
+            --prisma-current-migrations "$PRISMA_MIGRATIONS" \
+            --prisma-current-head "$PRISMA_HEAD" \
+            --agata-directory services/agata/migrations/versions \
+            --agata-current-head "$AGATA_HEAD"
+          echo 'Verified no candidate database migrations are pending; cutover uses an unchanged schema.' >> "$GITHUB_STEP_SUMMARY"
       - name: Verify fresh PostgreSQL backup with isolated restore
         if: inputs.mode == 'production'
         id: backuprestore

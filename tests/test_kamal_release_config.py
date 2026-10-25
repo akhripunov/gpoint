@@ -355,6 +355,62 @@ def test_cutover_backup_cli_can_write_plaintext_into_explicit_tmpfs_directory():
     assert "--backup-directory" in result.stdout
 
 
+def test_kamal_cutover_requires_candidate_and_live_migration_heads_to_match(tmp_path):
+    prisma_dir = tmp_path / "prisma"
+    prisma_dir.mkdir()
+    (prisma_dir / "20261015130000_codex_telegram_challenge").mkdir()
+    (prisma_dir / "20261015130000_codex_telegram_challenge" / "migration.sql").write_text("SELECT 1;\n")
+    agata_dir = tmp_path / "agata"
+    agata_dir.mkdir()
+    (agata_dir / "0010.py").write_text("revision = 'agata0010'\ndown_revision = None\n")
+    (agata_dir / "0011.py").write_text("revision = 'agata0011'\ndown_revision = 'agata0010'\n")
+    result = subprocess.run(
+        ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
+         "--prisma-directory", str(prisma_dir), "--prisma-current-head", "20261015130000_codex_telegram_challenge",
+         "--prisma-current-migrations", "20261015130000_codex_telegram_challenge",
+         "--agata-directory", str(agata_dir), "--agata-current-head", "agata0011"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "GPOINT_KAMAL_MIGRATION_PARITY=PASS" in result.stdout
+    assert "GPOINT_KAMAL_DB_MIGRATION_REQUIRED=NO" in result.stdout
+
+
+def test_kamal_migration_parity_fails_closed_for_pending_candidate_revision(tmp_path):
+    prisma_dir = tmp_path / "prisma"
+    prisma_dir.mkdir()
+    (prisma_dir / "20261015130000_codex_telegram_challenge").mkdir()
+    (prisma_dir / "20261015130000_codex_telegram_challenge" / "migration.sql").write_text("SELECT 1;\n")
+    (prisma_dir / "20261022110000_eros_gpoint_message_state").mkdir()
+    (prisma_dir / "20261022110000_eros_gpoint_message_state" / "migration.sql").write_text("SELECT 1;\n")
+    agata_dir = tmp_path / "agata"
+    agata_dir.mkdir()
+    (agata_dir / "0010.py").write_text("revision = 'agata0010'\ndown_revision = None\n")
+    (agata_dir / "0011.py").write_text("revision = 'agata0011'\ndown_revision = 'agata0010'\n")
+    (agata_dir / "0012.py").write_text("revision = 'agata0012'\ndown_revision = 'agata0011'\n")
+    result = subprocess.run(
+        ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
+         "--prisma-directory", str(prisma_dir), "--prisma-current-head", "20261015130000_codex_telegram_challenge",
+         "--prisma-current-migrations", "20261015130000_codex_telegram_challenge",
+         "--agata-directory", str(agata_dir), "--agata-current-head", "agata0011"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "PENDING" in result.stderr
+
+
+def test_native_workflow_runs_migration_parity_before_deployment_or_pause():
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    deploy = workflow.split("  deploy:\n", 1)[1]
+    parity = deploy.index("name: Verify candidate migrations match the live database")
+    deployment = deploy.index("name: Create exact-SHA in-progress GitHub Deployment")
+    pause = deploy.index("name: Pause legacy GPoint services")
+    assert parity < deployment < pause
+    assert "scripts/verify-kamal-migration-parity.py" in deploy
+    assert "PRISMA_MIGRATIONS=" in deploy
+    assert "prisma_migrations|agata_head" in deploy
+
+
 def test_kamal_inventory_sanitizer_keeps_runtime_facts_and_drops_environment_and_commands():
     inspect = [{
         "Id": "a" * 64,
