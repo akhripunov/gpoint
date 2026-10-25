@@ -442,6 +442,9 @@ jobs:
         if: inputs.mode == 'production'
         env:
           GH_TOKEN: ${{ github.token }}
+          APP_DIGEST: ${{ needs.build.outputs.app_digest }}
+          AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
+          MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
         run: |
           set -euo pipefail
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"
@@ -455,22 +458,22 @@ jobs:
               --workdir /workdir \
               --env GPOINT_COMMIT_SHA --env GPOINT_SSH_KEY \
               --env GPOINT_KNOWN_HOSTS_FILE --env KAMAL_REGISTRY_PASSWORD \
-              --env GPOINT_KAMAL_SERVICE --env KAMAL_ROLES \
+              --env GPOINT_KAMAL_SERVICE --env GPOINT_KAMAL_EXPECTED_DIGEST --env KAMAL_ROLES \
               ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 \
               "$@"
           }
           kamal config --config-file config/deploy.yml >/dev/null
           kamal config --config-file config/deploy.agata.yml >/dev/null
           kamal config --config-file config/deploy.miniapp.yml >/dev/null
-          GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
+          GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.yml
-          GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api \
+          GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.agata.yml
-          GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
+          GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.miniapp.yml
-          GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker,bot \
+          GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker,bot \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker,bot --config-file config/deploy.yml
-          GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker \
+          GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles memory-worker --config-file config/deploy.agata.yml
       - name: Verify public routes and exact running services
         if: inputs.mode == 'production'

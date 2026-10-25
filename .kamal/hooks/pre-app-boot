@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+service="${GPOINT_KAMAL_SERVICE:?GPOINT_KAMAL_SERVICE is required}"
+version="${KAMAL_VERSION:?KAMAL_VERSION is required}"
+candidate="${GPOINT_COMMIT_SHA:?GPOINT_COMMIT_SHA is required}"
+expected_digest="${GPOINT_KAMAL_EXPECTED_DIGEST:?GPOINT_KAMAL_EXPECTED_DIGEST is required}"
+hosts="${KAMAL_HOSTS:?KAMAL_HOSTS is required}"
+ssh_key="${GPOINT_SSH_KEY:?GPOINT_SSH_KEY is required}"
+known_hosts="${GPOINT_KNOWN_HOSTS_FILE:?GPOINT_KNOWN_HOSTS_FILE is required}"
+
+[[ "$candidate" =~ ^[0-9a-f]{40}$ ]]
+[[ "$version" == "$candidate-"* && "$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
+[[ "$expected_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+[[ -r "$ssh_key" && -r "$known_hosts" ]]
+
+case "$service" in
+  gpoint-core) repository=ghcr.io/akhripuniov/gpoint-runtime ;;
+  gpoint-agata) repository=ghcr.io/akhripuniov/gpoint-agata-runtime ;;
+  gpoint-miniapp) repository=ghcr.io/akhripuniov/gpoint-miniapp ;;
+  *) echo 'Unrecognized GPoint Kamal service' >&2; exit 1 ;;
+esac
+
+IFS=',' read -r -a host_list <<< "$hosts"
+((${#host_list[@]} > 0))
+
+for host in "${host_list[@]}"; do
+  [[ "$host" =~ ^[A-Za-z0-9.-]+$ ]]
+  ssh -T -i "$ssh_key" \
+    -o BatchMode=yes \
+    -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=yes \
+    -o UserKnownHostsFile="$known_hosts" \
+    "root@$host" bash -s -- "$repository" "$version" "$candidate" "$expected_digest" <<'REMOTE'
+set -euo pipefail
+repository="$1"; version="$2"; candidate="$3"; expected_digest="$4"
+image="$repository:$version"
+[[ "$version" == "$candidate-"* && "$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
+[[ "$expected_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+repo_digests="$(docker image inspect --format '{{json .RepoDigests}}' "$image")"
+source_sha="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")"
+platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")"
+EXPECTED_REF="$repository@$expected_digest" python3 - "$repo_digests" <<'PY'
+import json, os, sys
+try:
+    refs = json.loads(sys.argv[1]) or []
+except (TypeError, json.JSONDecodeError):
+    raise SystemExit('Pulled Kamal image has invalid repository digest metadata')
+if os.environ['EXPECTED_REF'] not in refs:
+    raise SystemExit('Pulled Kamal image does not match the BuildKit-verified OCI digest')
+PY
+test "$source_sha" = "$candidate"
+test "$platform" = linux/amd64
+REMOTE
+done

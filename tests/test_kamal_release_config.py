@@ -39,12 +39,8 @@ def test_kamal_agata_and_miniapp_are_separate_services():
     assert set(agata["servers"]) == {"api", "memory-worker"}
     assert miniapp["service"] == "gpoint-miniapp"
     assert miniapp["image"] == "akhripunov/gpoint-miniapp"
-    assert miniapp["proxy"]["run"] == {
-        "http_port": 3003,
-        "https_port": 3004,
-        "bind_ips": ["127.0.0.1"],
-        "version": "v0.9.2",
-    }
+    core = yaml.safe_load((ROOT / "config/deploy.yml").read_text())
+    assert miniapp["proxy"]["run"] == core["proxy"]["run"]
     assert set(miniapp["servers"]) == {"web"}
     assert miniapp["servers"]["web"]["proxy"]["host"] == "gpoint.amiora.one"
     dockerfile = (ROOT / "infra/production/Gpoint.Dockerfile").read_text()
@@ -111,13 +107,13 @@ def test_kamal_deploy_uses_native_verified_images_and_preserves_first_cutover_gu
     assert 'index .NetworkSettings.Networks "shared_internal").Aliases' in kamal
 
 
-def test_caddy_keeps_tls_and_routes_api_and_miniapp_through_kamal_proxy():
+def test_caddy_keeps_tls_and_routes_api_and_miniapp_through_one_kamal_proxy():
     caddy = (ROOT / "infra/production/Caddyfile").read_text()
     assert "uri strip_prefix /api" not in caddy
     assert "reverse_proxy 127.0.0.1:3001" in caddy
-    assert "reverse_proxy 127.0.0.1:3003" in caddy
+    assert "reverse_proxy 127.0.0.1:3003" not in caddy
     assert "rewrite * /api{uri}" in caddy
-    assert caddy.count("reverse_proxy 127.0.0.1:3001") == 2
+    assert caddy.count("reverse_proxy 127.0.0.1:3001") == 3
     assert "root * /opt/gpoint/app/miniapp" not in caddy
     assert "compose-gsales-api-1" not in caddy
 
@@ -145,3 +141,16 @@ def test_ssh_heredoc_commands_keep_stdin_available():
     assert "ssh -n -T root@38.180.110.92 bash -s <<'REMOTE'" not in workflow
     assert "ssh -n -T root@38.180.110.92 bash -s --" not in workflow
     assert 'ssh -n -T -i "$ssh_key"' not in hook
+
+
+def test_kamal_pre_app_boot_checks_the_pulled_digest_before_boot():
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    hook = (ROOT / ".kamal/hooks/pre-app-boot").read_text()
+    assert 'expected_digest="${GPOINT_KAMAL_EXPECTED_DIGEST:?GPOINT_KAMAL_EXPECTED_DIGEST is required}"' in hook
+    assert 'docker image inspect --format' in hook and '"$image"' in hook
+    assert 'org.opencontainers.image.revision' in hook
+    assert 'test "$platform" = linux/amd64' in hook
+    assert "--env GPOINT_KAMAL_EXPECTED_DIGEST" in workflow
+    assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core' in workflow
+    assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata' in workflow
+    assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp' in workflow
