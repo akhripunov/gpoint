@@ -435,14 +435,18 @@ def test_kamal_production_verify_persists_attempt_bound_manifest():
     verify = deploy.split("name: Verify public routes and exact running services", 1)[1].split(
         "name: Record GitHub Deployment result against the same attempt", 1
     )[0]
-    assert "gpoint-kamal-production-manifest/v1" in verify
+    manifest_writer = (ROOT / "scripts/write-kamal-production-manifest.py").read_text()
+    assert "scripts/write-kamal-production-manifest.py" in verify
+    assert "scp scripts/write-kamal-production-manifest.py" in verify
+    assert 'trap \'rm -f -- "$manifest_writer"\' EXIT' in verify
+    assert "gpoint-kamal-production-manifest/v1" in manifest_writer
     assert "kamal-production-${run_id}-${attempt}.json" in verify
     assert "CANDIDATE_SHA" in verify and "APP_DIGEST" in verify
     assert "INVENTORY_SHA256" in verify and "BACKUP_SHA256" in verify
     assert "ISOLATED_RESTORE=PASS" in verify
     assert "GPOINT_KAMAL_MANIFEST_SHA256=" in verify
-    assert '"runtimeServices"' in verify
-    assert '"containerId"' in verify and '"repositoryDigest"' in verify
+    assert '"runtimeServices"' in manifest_writer
+    assert '"containerId"' in manifest_writer and '"repositoryDigest"' in manifest_writer
 
 
 def test_kamal_inventory_sanitizer_keeps_runtime_facts_and_drops_environment_and_commands(tmp_path):
