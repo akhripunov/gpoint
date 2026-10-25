@@ -52,3 +52,8 @@ RUN mkdir -p /app/apps/miniapp/node_modules/.vite-temp
 COPY . /app
 # Only the small Mini App distribution depends on the exact candidate SHA.
 COPY --from=miniapp-build /workspace/apps/miniapp/dist /app/apps/miniapp/dist
+
+FROM nginx:1.27-alpine AS miniapp-runtime
+ARG GPOINT_BUILD_SHA
+LABEL org.opencontainers.image.revision=${GPOINT_BUILD_SHA} org.opencontainers.image.source="https://github.com/akhripunov/gpoint"
+COPY --from=miniapp-build /workspace/apps/miniapp/dist/ /usr/share/nginx/html/

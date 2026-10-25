@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+service="${GPOINT_KAMAL_SERVICE:?GPOINT_KAMAL_SERVICE is required}"
+version="${KAMAL_VERSION:?KAMAL_VERSION is required}"
+candidate="${GPOINT_COMMIT_SHA:?GPOINT_COMMIT_SHA is required}"
+hosts="${KAMAL_HOSTS:?KAMAL_HOSTS is required}"
+roles="${KAMAL_ROLES:-}"
+ssh_key="${GPOINT_SSH_KEY:?GPOINT_SSH_KEY is required}"
+known_hosts="${GPOINT_KNOWN_HOSTS_FILE:?GPOINT_KNOWN_HOSTS_FILE is required}"
+
+[[ "$candidate" =~ ^[0-9a-f]{40}$ ]]
+[[ "$version" == "$candidate-"* && "$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
+[[ -r "$ssh_key" && -r "$known_hosts" ]]
+
+case "$service" in
+  gpoint-core)
+    default_roles='api,worker,bot'
+    ;;
+  gpoint-agata)
+    default_roles='api,memory-worker'
+    ;;
+  gpoint-miniapp)
+    exit 0
+    ;;
+  *)
+    echo 'Unrecognized GPoint Kamal service' >&2
+    exit 1
+    ;;
+esac
+
+roles="${roles:-$default_roles}"
+IFS=',' read -r -a role_list <<< "$roles"
+IFS=',' read -r -a host_list <<< "$hosts"
+((${#role_list[@]} > 0 && ${#host_list[@]} > 0))
+
+for role in "${role_list[@]}"; do
+  case "$service:$role" in
+    gpoint-core:api) networks='gpoint_app:api,shared_internal:' ;;
+    gpoint-core:worker|gpoint-core:bot) networks='gpoint_app:,shared_internal:' ;;
+    gpoint-agata:api) networks='gpoint_app:agata-api,shared_internal:agata-api' ;;
+    gpoint-agata:memory-worker) networks='gpoint_app:,shared_internal:' ;;
+    *)
+      echo 'Unrecognized GPoint Kamal role' >&2
+      exit 1
+      ;;
+  esac
+
+  for host in "${host_list[@]}"; do
+    [[ "$host" =~ ^[A-Za-z0-9.-]+$ ]]
+    ssh -n -T -i "$ssh_key" \
+      -o BatchMode=yes \
+      -o IdentitiesOnly=yes \
+      -o StrictHostKeyChecking=yes \
+      -o UserKnownHostsFile="$known_hosts" \
+      "root@$host" bash -s -- "$service" "$role" "$version" "$networks" <<'REMOTE'
+set -euo pipefail
+service="$1"; role="$2"; version="$3"; networks="$4"
+container="${service}-${role}-${version}"
+[[ "$container" =~ ^[A-Za-z0-9._-]+$ && "$version" =~ ^[0-9a-f]{40}$ ]]
+id="$(docker inspect --format '{{.Id}}' "$container")"
+test "$(docker inspect --format '{{.State.Running}}' "$id")" = true
+
+IFS=',' read -r -a network_entries <<< "$networks"
+for entry in "${network_entries[@]}"; do
+  network="${entry%%:*}"
+  alias="${entry#*:}"
+  docker network inspect "$network" >/dev/null
+  network_state="$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$id")"
+  if python3 - "$network_state" "$network" "$alias" <<'PY'
+import json, sys
+networks = json.loads(sys.argv[1]) or {}
+network, alias = sys.argv[2:]
+if network not in networks:
+    raise SystemExit(1)
+aliases = networks[network].get("Aliases") or []
+raise SystemExit(0 if not alias or alias in aliases else 2)
+PY
+  then
+    continue
+  else
+    status=$?
+    test "$status" -eq 1 || { echo "Existing network alias differs: $network/$alias" >&2; exit 1; }
+  fi
+
+  if [[ -n "$alias" ]]; then
+    while IFS= read -r other_id; do
+      [[ -n "$other_id" && "$other_id" != "$id" ]] || continue
+      other_state="$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$other_id")"
+      if python3 - "$other_state" "$network" "$alias" <<'PY'
+import json, sys
+networks = json.loads(sys.argv[1]) or {}
+network, alias = sys.argv[2:]
+raise SystemExit(0 if alias in ((networks.get(network) or {}).get("Aliases") or []) else 1)
+PY
+      then
+        echo "Network alias is already owned by another container: $network/$alias" >&2
+        exit 1
+      fi
+    done < <(docker network inspect --format '{{range $id, $container := .Containers}}{{println $id}}{{end}}' "$network")
+    docker network connect --alias "$alias" "$network" "$id"
+  else
+    docker network connect "$network" "$id"
+  fi
+done
+
+if [[ "$service:$role" == "gpoint-agata:memory-worker" ]]; then
+  healthy=0
+  for attempt in {1..24}; do
+    if docker exec "$id" python -m app.memory.worker --healthcheck >/dev/null 2>&1; then
+      healthy=1
+      break
+    fi
+    sleep 5
+  done
+  test "$healthy" -eq 1 || { echo 'AGATA memory worker did not become healthy after network attachment' >&2; exit 1; }
+fi
+REMOTE
+  done
+done

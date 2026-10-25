@@ -11,11 +11,17 @@ on:
         required: true
         type: string
       mode:
-        description: Select a read-only preflight; production apply is outside this workflow's current authorization
+        description: Select a read-only preflight or exact-SHA production Deploy
         required: true
         type: choice
         options:
           - preflight
+          - production
+      approve_production:
+        description: I authorize this exact candidate SHA on GPoint production
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -119,6 +125,7 @@ jobs:
       app_digest: ${{ steps.app.outputs.digest }}
       agata_digest: ${{ steps.agata.outputs.digest }}
       gsales_digest: ${{ steps.gsales.outputs.digest }}
+      miniapp_digest: ${{ steps.miniapp.outputs.digest }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -149,6 +156,22 @@ jobs:
             org.opencontainers.image.source=https://github.com/akhripunov/gpoint
           cache-from: type=gha,scope=gpoint-runtime
           cache-to: type=gha,scope=gpoint-runtime,mode=max
+          sbom: true
+          provenance: mode=max
+      - name: Build and publish immutable Mini App image
+        id: miniapp
+        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
+        with:
+          context: https://github.com/akhripunov/gpoint.git#${{ github.sha }}
+          file: infra/production/Gpoint.Dockerfile
+          target: miniapp-runtime
+          build-contexts: dependency-manifests=${{ runner.temp }}/dependency-manifests
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/akhripunov/gpoint-miniapp:${{ github.sha }}
+          build-args: GPOINT_BUILD_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=gpoint-runtime
+          cache-to: type=gha,scope=gpoint-miniapp,mode=max
           sbom: true
           provenance: mode=max
       - name: Build and publish immutable AGATA image
@@ -189,13 +212,14 @@ jobs:
           APP_DIGEST: ${{ steps.app.outputs.digest }}
           AGATA_DIGEST: ${{ steps.agata.outputs.digest }}
           GSALES_DIGEST: ${{ steps.gsales.outputs.digest }}
+          MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}
         run: |
           python3 - <<'PY'
           import os, re
           sha = os.environ['CANDIDATE_SHA']
           if not re.fullmatch(r'[0-9a-f]{40}', sha):
               raise SystemExit('candidate SHA is not exact')
-          for name in ('APP_DIGEST', 'AGATA_DIGEST', 'GSALES_DIGEST'):
+          for name in ('APP_DIGEST', 'AGATA_DIGEST', 'GSALES_DIGEST', 'MINIAPP_DIGEST'):
               if not re.fullmatch(r'sha256:[0-9a-f]{64}', os.environ[name]):
                   raise SystemExit(f'{name} is not an immutable OCI digest')
           PY
@@ -205,13 +229,15 @@ jobs:
           APP_DIGEST: ${{ steps.app.outputs.digest }}
           AGATA_DIGEST: ${{ steps.agata.outputs.digest }}
           GSALES_DIGEST: ${{ steps.gsales.outputs.digest }}
+          MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}
         run: |
           set -euo pipefail
-          for role in app agata gsales; do
+          for role in app agata gsales miniapp; do
             case "$role" in
               app) image=ghcr.io/akhripunov/gpoint-runtime; digest="$APP_DIGEST" ;;
               agata) image=ghcr.io/akhripunov/gpoint-agata-runtime; digest="$AGATA_DIGEST" ;;
               gsales) image=ghcr.io/akhripunov/gpoint-g-sales-runtime; digest="$GSALES_DIGEST" ;;
+              miniapp) image=ghcr.io/akhripunov/gpoint-miniapp; digest="$MINIAPP_DIGEST" ;;
             esac
             docker pull --platform linux/amd64 "$image@$digest"
             docker image inspect --format '{{json .}}' "$image@$digest" > "$RUNNER_TEMP/$role-image.json"
@@ -227,14 +253,31 @@ jobs:
           done
 
   deploy:
-    name: Production preflight (apply not enabled in this candidate)
+    name: Kamal production Deploy and Verify
     needs: build
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    environment: production
+    concurrency:
+      group: gpoint-production-release
+      cancel-in-progress: false
+    timeout-minutes: 60
     permissions:
       contents: read
+      packages: read
+      deployments: write
+    env:
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      IMAGE_VERSION: ${{ inputs.candidate_sha }}
+      GPOINT_COMMIT_SHA: ${{ inputs.candidate_sha }}
+      KAMAL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      GPOINT_SSH_KEY: /root/.ssh/id_ed25519
+      GPOINT_KNOWN_HOSTS_FILE: /root/.ssh/known_hosts
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
       - name: Reject a candidate that differs from the requested exact SHA
         env:
           REQUESTED_SHA: ${{ inputs.candidate_sha }}
@@ -242,22 +285,216 @@ jobs:
         run: |
           test "$REQUESTED_SHA" = "$WORKFLOW_SHA"
           printf '%s\n' "$WORKFLOW_SHA" | grep -Eq '^[0-9a-f]{40}$'
+      - name: Recheck owner authorization and current main for production mode
+        if: inputs.mode == 'production'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APPROVE_PRODUCTION: ${{ inputs.approve_production }}
+          OWNER_APPROVAL_ACTOR: ${{ github.actor }}
+          OWNER_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          OWNER_REPOSITORY: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          test "$APPROVE_PRODUCTION" = true
+          test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY"
+          test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"
       - name: Verify immutable image outputs for the requested candidate
         env:
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
           GSALES_DIGEST: ${{ needs.build.outputs.gsales_digest }}
+          MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
         run: |
           python3 - <<'PY'
           import os, re
-          for name in ('APP_DIGEST', 'AGATA_DIGEST', 'GSALES_DIGEST'):
+          for name in ('APP_DIGEST', 'AGATA_DIGEST', 'GSALES_DIGEST', 'MINIAPP_DIGEST'):
               if not re.fullmatch(r'sha256:[0-9a-f]{64}', os.environ[name]):
                   raise SystemExit(f'{name} is not an immutable digest')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
-              for name in ('APP_DIGEST', 'AGATA_DIGEST', 'GSALES_DIGEST'):
+              for name in ('APP_DIGEST', 'AGATA_DIGEST', 'GSALES_DIGEST', 'MINIAPP_DIGEST'):
                   summary.write(f"- {name}: `{os.environ[name]}`\n")
           PY
-      - name: State that this workflow is preflight-only
+      - name: State that production Apply is not authorized in preflight mode
+        if: inputs.mode == 'preflight'
         run: |
           test "${{ inputs.mode }}" = preflight
           echo 'PRODUCTION_APPLY=NOT_AUTHORIZED' >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify GHCR candidate tags resolve to the exact digests
+        if: inputs.mode == 'production'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APP_DIGEST: ${{ needs.build.outputs.app_digest }}
+          AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
+          MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          for item in \
+            "ghcr.io/akhripunov/gpoint-runtime|$APP_DIGEST" \
+            "ghcr.io/akhripunov/gpoint-agata-runtime|$AGATA_DIGEST" \
+            "ghcr.io/akhripunov/gpoint-miniapp|$MINIAPP_DIGEST"; do
+            IFS='|' read -r repository digest <<< "$item"
+            docker pull --platform linux/amd64 "$repository@$digest"
+            docker pull --platform linux/amd64 "$repository:$CANDIDATE_SHA"
+            actual="$(docker image inspect "$repository:$CANDIDATE_SHA" --format '{{index .RepoDigests 0}}')"
+            test "$actual" = "$repository@$digest"
+            source_sha="$(docker image inspect "$repository:$CANDIDATE_SHA" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+            test "$source_sha" = "$CANDIDATE_SHA"
+          done
+      - name: Install verified Kamal SSH credentials
+        if: inputs.mode == 'production'
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.GPOINT_KAMAL_SSH_PRIVATE_KEY }}
+          VERIFIED_KNOWN_HOSTS: ${{ secrets.GPOINT_KAMAL_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$SSH_PRIVATE_KEY" && test -n "$VERIFIED_KNOWN_HOSTS"
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$VERIFIED_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
+          cat > "$HOME/.ssh/config" <<EOF
+          Host 38.180.110.92
+            User root
+            IdentityFile $HOME/.ssh/id_ed25519
+            IdentitiesOnly yes
+            BatchMode yes
+            StrictHostKeyChecking yes
+            UserKnownHostsFile $HOME/.ssh/known_hosts
+          EOF
+          chmod 600 "$HOME/.ssh/config"
+      - name: Block unsafe first cutover and preserve stopped GSales
+        if: inputs.mode == 'production'
+        run: |
+          set -euo pipefail
+          ssh -n -T root@38.180.110.92 bash -s <<'REMOTE'
+          set -euo pipefail
+          for service in api worker bot agata-api agata-memory-worker; do
+            while IFS= read -r id; do
+              [[ -n "$id" ]] || continue
+              name="$(docker inspect --format '{{.Name}}' "$id" | sed 's#^/##')"
+              running="$(docker inspect --format '{{.State.Running}}' "$id")"
+              if [[ "$running" == true ]]; then
+                echo "Active legacy GPoint service $name requires the approved first-cutover inventory, backup/restore and migration procedure." >&2
+                exit 1
+              fi
+            done < <(docker ps -aq --filter "label=com.docker.compose.service=$service")
+          done
+          for service in gsales-api gsales-agata-api gsales-agata-memory-worker; do
+            ids="$(docker ps -aq --filter "label=com.docker.compose.service=$service")"
+            test -n "$ids" || { echo "Expected stopped GSales service is missing: $service" >&2; exit 1; }
+            while IFS= read -r id; do
+              test "$(docker inspect --format '{{.State.Running}}' "$id")" = false
+            done <<< "$ids"
+          done
+          REMOTE
+      - name: Create exact-SHA in-progress GitHub Deployment
+        if: inputs.mode == 'production'
+        id: deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          payload="$(jq -nc --arg ref "$CANDIDATE_SHA" '{ref:$ref, task:"deploy", environment:"production", auto_merge:false, required_contexts:[]}')"
+          deployment_id="$(gh api "repos/$GITHUB_REPOSITORY/deployments" --input - <<<"$payload" --jq .id)"
+          test "$deployment_id" -gt 0
+          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$deployment_id/statuses" \
+            -f state=in_progress -f environment=production \
+            -f description="Kamal Deploy started after Native First CI/Build PASS" >/dev/null
+          echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
+      - name: Deploy API and web roles, then consumers with pinned Kamal 2.12
+        if: inputs.mode == 'production'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          kamal() {
+            docker run --rm \
+              --volume "$GITHUB_WORKSPACE:/workdir" \
+              --volume /var/run/docker.sock:/var/run/docker.sock \
+              --volume "$HOME/.ssh:/root/.ssh:ro" \
+              --volume "$HOME/.docker:/root/.docker:ro" \
+              --workdir /workdir \
+              --env GPOINT_COMMIT_SHA --env GPOINT_SSH_KEY \
+              --env GPOINT_KNOWN_HOSTS_FILE --env KAMAL_REGISTRY_PASSWORD \
+              ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 \
+              "$@"
+          }
+          kamal config --config-file config/deploy.yml >/dev/null
+          kamal config --config-file config/deploy.agata.yml >/dev/null
+          kamal config --config-file config/deploy.miniapp.yml >/dev/null
+          kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.yml
+          kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.agata.yml
+          kamal deploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.miniapp.yml
+          kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker,bot --config-file config/deploy.yml
+          kamal deploy --skip-push --version "$IMAGE_VERSION" --roles memory-worker --config-file config/deploy.agata.yml
+      - name: Verify public routes and exact running services
+        if: inputs.mode == 'production'
+        id: verify
+        env:
+          APP_DIGEST: ${{ needs.build.outputs.app_digest }}
+          AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
+          MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
+        run: |
+          set -euo pipefail
+          curl --retry 12 --retry-connrefused --retry-delay 5 --fail --silent --show-error https://gpoint.amiora.one/api/health/live | grep -Fq '"status":"ok"'
+          for path in / /creators; do
+            curl --retry 6 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.amiora.one$path" | grep -Fq '<div id="root">'
+          done
+          ssh -n -T root@38.180.110.92 bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" <<'REMOTE'
+          set -euo pipefail
+          sha="$1"; version="$2"; app="$3"; agata="$4"; miniapp="$5"
+          for item in \
+            "gpoint-core|api|ghcr.io/akhripunov/gpoint-runtime|$app" \
+            "gpoint-core|worker|ghcr.io/akhripunov/gpoint-runtime|$app" \
+            "gpoint-core|bot|ghcr.io/akhripunov/gpoint-runtime|$app" \
+            "gpoint-agata|api|ghcr.io/akhripunov/gpoint-agata-runtime|$agata" \
+            "gpoint-agata|memory-worker|ghcr.io/akhripunov/gpoint-agata-runtime|$agata" \
+            "gpoint-miniapp|web|ghcr.io/akhripunov/gpoint-miniapp|$miniapp"; do
+            IFS='|' read -r service role repository digest <<< "$item"
+            container="$service-$role-$version"
+            docker inspect "$container" >/dev/null
+            test "$(docker inspect --format '{{.State.Running}}' "$container")" = true
+            test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$container")" = "$sha"
+            image_id="$(docker inspect --format '{{.Image}}' "$container")"
+            docker image inspect "$image_id" --format '{{json .RepoDigests}}' | grep -Fq "$repository@$digest"
+            case "$service:$role" in
+              gpoint-core:api)
+                mounts="$(docker inspect --format '{{json .Mounts}}' "$container")"
+                grep -Fq '/opt/gpoint/media' <<< "$mounts"
+                echo 'GPOINT_KAMAL_MOUNT_CHECK=PASS'
+                api_aliases="$(docker inspect --format '{{json (index .NetworkSettings.Networks "gpoint_app").Aliases}}' "$container")"
+                networks="$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$container")"
+                grep -Fq 'shared_internal' <<< "$networks"
+                grep -Eq '"api"' <<< "$api_aliases"
+                echo 'GPOINT_KAMAL_NETWORK_ALIAS_CHECK=PASS'
+                docker exec "$container" node -e "fetch('http://127.0.0.1:3000/health/live').then(async r => { if (!r.ok || (await r.json()).status !== 'ok') process.exit(1) }).catch(() => process.exit(1))" ;;
+              gpoint-core:worker) docker top "$container" | grep -Fq 'apps/worker/dist/main.js' ;;
+              gpoint-core:bot) docker top "$container" | grep -Fq 'apps/bot/dist/main.js' ;;
+              gpoint-agata:api)
+                aliases="$(docker inspect --format '{{json (index .NetworkSettings.Networks "shared_internal").Aliases}}' "$container")"
+                grep -Eq '"agata-api"' <<< "$aliases"
+                docker exec "$container" python -c "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/health/ready',timeout=3); assert r.status == 200" ;;
+              gpoint-agata:memory-worker) docker exec "$container" python -m app.memory.worker --healthcheck ;;
+              gpoint-miniapp:web) docker exec "$container" wget --spider --quiet http://127.0.0.1/ ;;
+            esac
+          done
+          REMOTE
+          echo "GPOINT_KAMAL_VERIFY=PASS SHA=$CANDIDATE_SHA"
+      - name: Record GitHub Deployment result against the same attempt
+        if: always() && inputs.mode == 'production' && steps.deployment.outputs.id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
+          DEPLOY_JOB_STATUS: ${{ job.status }}
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+        run: |
+          set -euo pipefail
+          state=failure
+          if [[ "$DEPLOY_JOB_STATUS" == success && "$VERIFY_OUTCOME" == success ]]; then state=success; fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+            -f state="$state" -f environment=production \
+            -f description="Kamal $state for exact SHA $CANDIDATE_SHA" >/dev/null

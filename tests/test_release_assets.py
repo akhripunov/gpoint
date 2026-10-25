@@ -10,6 +10,7 @@ import json
 import tempfile
 import zipfile
 import re
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -216,16 +217,20 @@ class ImmutableReleaseTests(unittest.TestCase):
         self.assertIn('permissions:\n      contents: read\n      actions: read\n      packages: write', prepare)
 
     def test_privileged_prepare_checkout_does_not_persist_write_credentials(self):
-        workflow = (ROOT / '.github/workflows/gpoint-prepare.yml').read_text()
-        prepare_job = workflow.split('  prepare:\n', 1)[1].split('\n  publish:\n', 1)[0]
-        checkout = prepare_job.split('- uses: actions/checkout@v4', 1)[1].split('\n      - ', 1)[0]
-        self.assertIn('persist-credentials: false', checkout)
+        workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-prepare.yml').read_text())
+        checkouts = [step for job in workflow['jobs'].values() for step in job.get('steps', [])
+                     if step.get('uses', '').startswith('actions/checkout@')]
+        self.assertTrue(checkouts)
+        self.assertTrue(all(step.get('with', {}).get('persist-credentials') is False
+                            for step in checkouts))
 
     def test_privileged_deploy_checkout_does_not_persist_write_credentials(self):
-        workflow = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()
-        deploy_job = workflow.split('  deploy:\n', 1)[1].split('\n  publish:\n', 1)[0]
-        checkout = deploy_job.split('- uses: actions/checkout@v4', 1)[1].split('\n      - ', 1)[0]
-        self.assertIn('persist-credentials: false', checkout)
+        workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-deploy.yml').read_text())
+        checkouts = [step for step in workflow['jobs']['deploy'].get('steps', [])
+                     if step.get('uses', '').startswith('actions/checkout@')]
+        self.assertTrue(checkouts)
+        self.assertTrue(all(step.get('with', {}).get('persist-credentials') is False
+                            for step in checkouts))
 
     def fixture(self):
         sha = 'a' * 40

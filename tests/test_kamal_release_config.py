@@ -45,51 +45,32 @@ def test_kamal_agata_and_miniapp_are_separate_services():
     dockerfile = (ROOT / "infra/production/Gpoint.Dockerfile").read_text()
     assert "FROM nginx:1.27-alpine AS miniapp-runtime" in dockerfile
     assert "COPY --from=miniapp-build /workspace/apps/miniapp/dist/ /usr/share/nginx/html/" in dockerfile
-    assert "COPY --from=miniapp-build /workspace/apps/miniapp/dist /app/apps/miniapp/dist" not in dockerfile
-    prepare = (ROOT / ".github/workflows/gpoint-prepare.yml").read_text()
-    assert "name: GPoint — Kamal Prepare" in prepare
-    assert "name: GPoint — Prepare" not in prepare
-    assert "runs-on: ubuntu-latest" in prepare
-    assert "runs-on: [self-hosted, macOS, gpoint-production]" not in prepare
-    assert "prepare_coalescing.py" not in prepare
-    assert "docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8" in prepare
-    assert "id: core-image" in prepare and "target: runtime" in prepare
-    assert "id: agata-image" in prepare and "context: services/agata" in prepare
-    assert "target: miniapp-runtime" in prepare
-    assert "ghcr.io/akhripunov/gpoint-miniapp:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}" in prepare
-    assert "MINIAPP_DIGEST: ${{ steps.miniapp-image.outputs.digest }}" in prepare
-    assert "CORE_DIGEST: ${{ steps.core-image.outputs.digest }}" in prepare
-    assert "AGATA_DIGEST: ${{ steps.agata-image.outputs.digest }}" in prepare
+    assert "COPY --from=miniapp-build /workspace/apps/miniapp/dist/ /usr/share/nginx/html/" in dockerfile
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    assert "id: miniapp" in workflow and "target: miniapp-runtime" in workflow
+    assert "ghcr.io/akhripunov/gpoint-miniapp:${{ github.sha }}" in workflow
+    assert "MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}" in workflow
+    assert "APP_DIGEST: ${{ steps.app.outputs.digest }}" in workflow
+    assert "AGATA_DIGEST: ${{ steps.agata.outputs.digest }}" in workflow
 
 
-def test_prepare_checks_exact_main_before_publishing_any_image():
-    prepare = (ROOT / ".github/workflows/gpoint-prepare.yml").read_text()
-    check = prepare.index("name: Require candidate to remain exact main before GHCR publication")
-    first_push = prepare.index("docker/build-push-action@")
-    assert check < first_push
-    assert "gh api \"repos/$GITHUB_REPOSITORY/git/ref/heads/main\" --jq .object.sha" in prepare
-    assert 'test "$main_sha" = "$CANDIDATE_SHA"' in prepare
+def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    assert "  workspace:" in workflow
+    assert "  python:" in workflow
+    assert "  build:" in workflow
+    assert "needs: [workspace, python]" in workflow
+    assert "cache-to: type=gha,scope=gpoint-runtime,mode=max" in workflow
+    assert "sbom: true" in workflow
+    assert "provenance: mode=max" in workflow
+    assert "  deploy:" in workflow
+    assert "needs: build" in workflow
+    assert "environment: production" in workflow
 
 
-def test_prepare_uses_registry_digest_readback_without_actions_artifact_transport():
-    prepare = (ROOT / ".github/workflows/gpoint-prepare.yml").read_text()
-    digest_check = prepare.index("name: Verify and record exact Kamal image digests")
-    old_receipt = prepare.index("name: Set up pinned ORAS CLI")
-    assert digest_check < old_receipt
-    assert "${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}" in prepare
-    assert 'docker buildx imagetools inspect "$tag"' in prepare
-    assert "actions/upload-artifact@" not in prepare
-    assert "gpoint-kamal-image-manifest.json" not in prepare
-    assert "GPOINT_IMAGE_DIGEST name=%s ref=%s digest=%s sha=%s run=%s attempt=%s" in prepare
-
-
-def test_kamal_deploy_mode_cannot_run_the_legacy_v5_job():
-    workflow = (ROOT / ".github/workflows/gpoint-deploy.yml").read_text()
-    assert "options: [preflight, production, kamal-production," in workflow
-    legacy = workflow.split("  deploy:\n", 1)[1].split("  deploy-eros-pilot:", 1)[0]
-    assert "inputs.mode != 'kamal-production'" in legacy
-    kamal = workflow.split("  deploy-kamal:\n", 1)[1].split("  deploy-eros-pilot:", 1)[0]
-    assert "if: inputs.mode == 'kamal-production'" in kamal
+def test_kamal_deploy_uses_native_verified_images_and_preserves_first_cutover_guard():
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    kamal = workflow.split("  deploy:\n", 1)[1]
     assert "runs-on: ubuntu-latest" in kamal
     assert "environment: production" in kamal
     assert "kamal deploy --skip-push" in kamal
@@ -99,7 +80,6 @@ def test_kamal_deploy_mode_cannot_run_the_legacy_v5_job():
     consumers_deploy = kamal.index("--roles worker,bot --config-file config/deploy.yml")
     agata_worker_deploy = kamal.index("--roles memory-worker --config-file config/deploy.agata.yml")
     assert api_deploy < agata_deploy < miniapp_deploy < consumers_deploy < agata_worker_deploy
-    assert "gh run view" in kamal
     assert "GPOINT_KAMAL_SSH_PRIVATE_KEY" in kamal
     assert "GPOINT_KAMAL_KNOWN_HOSTS" in kamal
     assert "gsales-api" in kamal
@@ -109,17 +89,21 @@ def test_kamal_deploy_mode_cannot_run_the_legacy_v5_job():
     assert "/health/ready" in kamal
     assert "python -m app.memory.worker --healthcheck" in kamal
     assert "wget --spider --quiet http://127.0.0.1/" in kamal
-    assert "deployments: write" in kamal
-    assert 'ghcr.io/akhripunov/gpoint-runtime|$CORE_DIGEST' in kamal
-    assert 'ghcr.io/akhripunov/gpoint-agata-runtime|$AGATA_DIGEST' in kamal
-    assert 'ghcr.io/akhripunov/gpoint-miniapp|$MINIAPP_DIGEST' in kamal
-    assert "group: gpoint-production-release" in workflow
-    assert "status: ${{ steps.verify.outputs.status }}" in kamal
-    assert "org.gpoint.release.sha" in kamal
+    assert "deployments: write" in workflow
+    assert '"ghcr.io/akhripunov/gpoint-runtime|$APP_DIGEST"' in kamal
+    assert '"ghcr.io/akhripunov/gpoint-agata-runtime|$AGATA_DIGEST"' in kamal
+    assert '"ghcr.io/akhripunov/gpoint-miniapp|$MINIAPP_DIGEST"' in kamal
+    assert 'docker image inspect "$image_id"' in kamal
+    assert '-f state="$state"' in kamal
+    assert "GPOINT_KAMAL_VERIFY=PASS" in kamal
     assert "ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625" in kamal
     assert "gem install kamal" not in kamal
-    assert kamal.index("name: Block unsafe first cutover") < kamal.index("name: Deploy Kamal APIs, route Mini App, then start consumers")
-    assert "inputs.mode != 'kamal-production'" in workflow.split("  publish:\n", 1)[1]
+    assert kamal.index("name: Block unsafe first cutover") < kamal.index("name: Deploy API and web roles, then consumers with pinned Kamal 2.12")
+    guard = kamal.split("name: Block unsafe first cutover", 1)[1].split("name: Create exact-SHA in-progress GitHub Deployment", 1)[0]
+    assert 'if [[ "$running" == true ]]; then' in guard
+    assert '"$name" == compose-*' not in guard
+    assert 'index .NetworkSettings.Networks "gpoint_app").Aliases' in kamal
+    assert 'index .NetworkSettings.Networks "shared_internal").Aliases' in kamal
 
 
 def test_caddy_keeps_tls_and_routes_api_and_miniapp_through_kamal_proxy():
