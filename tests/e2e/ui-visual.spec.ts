@@ -1,4 +1,4 @@
-import { test, expect } from './test';
+import { test, expect, useDefaultAgeAssuranceState } from './test';
 import fs from 'node:fs';
 import path from 'node:path';
 import { creatorPage } from './helpers';
@@ -36,6 +36,7 @@ test('captures the reusable GPoint UI foundation surfaces', async ({ page, brows
   if (test.info().project.name === 'chromium-mobile') {
     const phone390 = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const page390 = await phone390.newPage();
+    await useDefaultAgeAssuranceState(page390);
     const shot390 = (name: string) => page390.screenshot({ path: path.join(outputDir, `chromium-mobile-390-${name}.png`), fullPage: true });
     await page390.goto('/');
     await expect(page390.locator('.app-shell')).toBeVisible();
@@ -59,6 +60,7 @@ test('captures the reusable GPoint UI foundation surfaces', async ({ page, brows
     for (const viewport of [{ width: 393, height: 852 }, { width: 430, height: 932 }, { width: 360, height: 800 }]) {
       const phone = await browser.newContext({ viewport });
       const phonePage = await phone.newPage();
+      await useDefaultAgeAssuranceState(phonePage);
       await creatorPage(phonePage, `visual-dashboard-${viewport.width}`);
       await phonePage.screenshot({ path: path.join(outputDir, `chromium-mobile-${viewport.width}-creator-overview.png`), fullPage: true });
       await phone.close();
