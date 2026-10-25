@@ -100,6 +100,8 @@ jobs:
           cache-dependency-path: services/agata/pyproject.toml
       - name: Install Python test dependencies
         run: python -m pip install './services/agata[test]' './services/gsales[test]'
+      - name: Test Native image read-back validation
+        run: python tests/test_native_image_readback.py
       - name: Run isolated PostgreSQL 16 migration and integration suites
         run: python services/gsales/tests/run_postgres.py
 
@@ -215,20 +217,8 @@ jobs:
               "$image@$digest" > "$RUNNER_TEMP/$role-sbom.json"
             docker buildx imagetools inspect --format '{{json .Provenance}}' \
               "$image@$digest" > "$RUNNER_TEMP/$role-provenance.json"
-            python3 - "$RUNNER_TEMP/$role-image.json" "$image" "$digest" "$CANDIDATE_SHA" <<'PY'
-          import json, sys
-          path, image, digest, sha = sys.argv[1:]
-          item = json.load(open(path, encoding='utf-8'))[0]
-          expected = image + '@' + digest
-          labels = item.get('Config', {}).get('Labels') or {}
-          if expected not in item.get('RepoDigests', []):
-              raise SystemExit('pulled image does not resolve to the published digest')
-          if (item.get('Os') != 'linux' or item.get('Architecture') != 'amd64'
-                  or labels.get('org.opencontainers.image.revision') != sha
-                  or labels.get('org.opencontainers.image.source') != 'https://github.com/akhripunov/gpoint'):
-              raise SystemExit('published image platform/source identity mismatch')
-          print('IMAGE_READBACK=PASS ' + image + '@' + digest)
-          PY
+            python3 scripts/verify_native_image_readback.py \
+              "$RUNNER_TEMP/$role-image.json" "$image" "$digest" "$CANDIDATE_SHA"
             python3 - "$RUNNER_TEMP/$role-sbom.json" "$RUNNER_TEMP/$role-provenance.json" "$CANDIDATE_SHA" <<'PY'
           import json, sys
           sbom = json.load(open(sys.argv[1], encoding='utf-8'))
