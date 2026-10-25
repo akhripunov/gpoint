@@ -435,6 +435,7 @@ def test_kamal_production_verify_persists_attempt_bound_manifest():
     verify = deploy.split("name: Verify public routes and exact running services", 1)[1].split(
         "name: Record GitHub Deployment result against the same attempt", 1
     )[0]
+    record = deploy.split("name: Record GitHub Deployment result against the same attempt", 1)[1]
     manifest_writer = (ROOT / "scripts/write-kamal-production-manifest.py").read_text()
     assert "scripts/write-kamal-production-manifest.py" in verify
     assert "scp scripts/write-kamal-production-manifest.py" in verify
@@ -445,6 +446,9 @@ def test_kamal_production_verify_persists_attempt_bound_manifest():
     assert "INVENTORY_SHA256" in verify and "BACKUP_SHA256" in verify
     assert "ISOLATED_RESTORE=PASS" in verify
     assert "GPOINT_KAMAL_MANIFEST_SHA256=" in verify
+    assert '"$GITHUB_OUTPUT"' in verify and "manifest_sha" in verify
+    assert "MANIFEST_SHA: ${{ steps.verify.outputs.manifest_sha }}" in record
+    assert 'description="Kamal $state SHA $CANDIDATE_SHA manifest $MANIFEST_SHA"' in record
     assert '"runtimeServices"' in manifest_writer
     assert '"containerId"' in manifest_writer and '"repositoryDigest"' in manifest_writer
 

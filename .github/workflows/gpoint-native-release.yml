@@ -867,7 +867,8 @@ jobs:
           test ! -e "$1"
           REMOTE_CHECK
           scp scripts/write-kamal-production-manifest.py "root@${GPOINT_PRODUCTION_HOST}:${remote_manifest_writer}"
-          ssh -T root@${GPOINT_PRODUCTION_HOST} bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$BASELINE_PATH" "$BASELINE_SHA" "$BACKUP_PATH" "$BACKUP_SHA" "$RESTORE_EVIDENCE_PATH" "$RESTORE_EVIDENCE_SHA" "$DEPLOYMENT_ID" "$remote_manifest_writer" "$remote_manifest_writer_sha" <<'REMOTE'
+          verify_log="$RUNNER_TEMP/kamal-verify-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
+          ssh -T root@${GPOINT_PRODUCTION_HOST} bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$BASELINE_PATH" "$BASELINE_SHA" "$BACKUP_PATH" "$BACKUP_SHA" "$RESTORE_EVIDENCE_PATH" "$RESTORE_EVIDENCE_SHA" "$DEPLOYMENT_ID" "$remote_manifest_writer" "$remote_manifest_writer_sha" <<'REMOTE' | tee "$verify_log"
           set -euo pipefail
           sha="$1"; version="$2"; app="$3"; agata="$4"; miniapp="$5"; run_id="$6"; attempt="$7"; baseline_file="$8"; expected_baseline_sha="$9"; backup_file="${10}"; expected_backup_sha="${11}"; restore_file="${12}"; expected_restore_sha="${13}"
           manifest_writer="${15}"; expected_manifest_writer_sha="${16}"
@@ -1046,18 +1047,31 @@ jobs:
           [[ "$manifest_sha" =~ ^[0-9a-f]{64}$ ]]
           echo "GPOINT_KAMAL_MANIFEST_SHA256=$manifest_sha PATH=$manifest_file"
           REMOTE
+          mapfile -t manifest_sha_rows < <(sed -n 's/^GPOINT_KAMAL_MANIFEST_SHA256=\([0-9a-f]*\) PATH=.*/\1/p' "$verify_log")
+          test "${#manifest_sha_rows[@]}" -eq 1
+          manifest_sha="${manifest_sha_rows[0]}"
+          [[ "$manifest_sha" =~ ^[0-9a-f]{64}$ ]]
+          echo "manifest_sha=$manifest_sha" >> "$GITHUB_OUTPUT"
+          echo "Verified production manifest SHA-256: \`$manifest_sha\`" >> "$GITHUB_STEP_SUMMARY"
           echo "GPOINT_KAMAL_VERIFY=PASS SHA=$CANDIDATE_SHA BASELINE_SHA=$BASELINE_SHA INVENTORY_SHA=$inventory_sha BACKUP_SHA=$BACKUP_SHA RESTORE_EVIDENCE_SHA=$RESTORE_EVIDENCE_SHA"
       - name: Record GitHub Deployment result against the same attempt
         if: always() && inputs.mode == 'production' && steps.deployment.outputs.id != ''
         env:
           GH_TOKEN: ${{ github.token }}
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
+          MANIFEST_SHA: ${{ steps.verify.outputs.manifest_sha }}
           DEPLOY_JOB_STATUS: ${{ job.status }}
           VERIFY_OUTCOME: ${{ steps.verify.outcome }}
         run: |
           set -euo pipefail
           state=failure
           if [[ "$DEPLOY_JOB_STATUS" == success && "$VERIFY_OUTCOME" == success ]]; then state=success; fi
+          description="Kamal $state SHA $CANDIDATE_SHA"
+          if [[ "$state" == success ]]; then
+            [[ "$MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]]
+            description="Kamal $state SHA $CANDIDATE_SHA manifest $MANIFEST_SHA"
+          fi
+          echo "GITHUB_DEPLOYMENT_STATUS=$state SHA=$CANDIDATE_SHA MANIFEST_SHA=$MANIFEST_SHA" >> "$GITHUB_STEP_SUMMARY"
           gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
             -f state="$state" -f environment=production \
-            -f description="Kamal $state for exact SHA $CANDIDATE_SHA" >/dev/null
+            -f description="$description" >/dev/null
