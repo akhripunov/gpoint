@@ -38,9 +38,9 @@ else: raise SystemExit(2)
     return docker
 
 
-def args_for(output: Path):
+def args_for(output: Path, *, version=VERSION):
     return [
-        "--output", str(output), "--sha", SHA, "--version", VERSION,
+        "--output", str(output), "--sha", SHA, "--version", version,
         "--app-digest", APP, "--agata-digest", AGATA, "--miniapp-digest", MINIAPP,
         "--run-id", "42", "--attempt", "2", "--deployment-id", "987",
         "--baseline-path", "/opt/gpoint/baseline", "--baseline-sha", "4" * 64,
@@ -52,13 +52,13 @@ def args_for(output: Path):
     ]
 
 
-def run_writer(tmp_path: Path, *, wrong_digest: bool = False, revision: str = SHA):
+def run_writer(tmp_path: Path, *, wrong_digest: bool = False, revision: str = SHA, version=VERSION):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     install_docker_stub(bin_dir, revision=revision, wrong_digest=wrong_digest)
     output = tmp_path / "kamal-production-42-2.json"
     env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
-    return subprocess.run([sys.executable, str(WRITER), *args_for(output)], capture_output=True,
+    return subprocess.run([sys.executable, str(WRITER), *args_for(output, version=version)], capture_output=True,
                           text=True, env=env), output
 
 
@@ -90,6 +90,13 @@ def test_manifest_refuses_container_revision_mismatch_without_creating_output(tm
     result, output = run_writer(tmp_path, revision="b" * 40)
     assert result.returncode != 0
     assert "identity changed" in result.stderr
+    assert not output.exists()
+
+
+def test_manifest_rejects_attempt_tag_that_does_not_bind_candidate_run_and_attempt(tmp_path):
+    result, output = run_writer(tmp_path, version=f"{SHA}-41-1")
+    assert result.returncode != 0
+    assert "attempt tag does not match" in result.stderr
     assert not output.exists()
 
 

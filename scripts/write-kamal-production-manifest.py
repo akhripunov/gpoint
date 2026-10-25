@@ -16,6 +16,7 @@ from pathlib import Path
 
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+OCI_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def docker_json(*args: str) -> object:
@@ -44,6 +45,11 @@ def main() -> int:
     for field in ("run_id", "attempt", "deployment_id"):
         if not getattr(args, field).isdigit() or int(getattr(args, field)) <= 0:
             raise SystemExit(f"{field.replace('_', ' ')} must be a positive integer")
+    if args.version != f"{args.sha}-{args.run_id}-{args.attempt}":
+        raise SystemExit("attempt tag does not match the exact candidate SHA and workflow attempt")
+    for field in ("app_digest", "agata_digest", "miniapp_digest"):
+        if not OCI_DIGEST.fullmatch(getattr(args, field)):
+            raise SystemExit(f"{field.replace('_', ' ')} must be an immutable OCI digest")
 
     expected_services = [
         ("gpoint-core-api", "ghcr.io/akhripunov/gpoint-runtime", args.app_digest),
