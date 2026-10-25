@@ -60,8 +60,13 @@ test('V5 full deployment is a V4 UI-only parent only after exact GitHub, GHCR an
     gsales:{manifestDigest:D('6'),configDigest:D('3'),nativeId:D('6'),sourceSha:A}}},
   live:{source:'read-only-vps',runtimeSha:A,miniappSha:A,prismaHead:'prisma-1',agataHead:'agata0011',
    gsalesHead:'001_gsales',gsalesMigrationSha256:'c'.repeat(64),apiHealth:'healthy',agataApiHealth:'healthy',
-   gsalesApiHealth:'healthy',gsalesAgataApiHealth:'healthy',gsalesAgataWorkerHealth:'healthy',
-   workerRunning:true,botRunning:true,agataWorkerRunning:true,gsalesAgataWorkerRunning:true,
+   gsalesRuntimeState:'stopped',
+   gsalesFacts:Object.fromEntries(['API','AGATA_API','AGATA_MEMORY_WORKER'].flatMap(role=>{
+    const prefix=`LIVE_GSALES_${role}`;
+    return [[`${prefix}_STATUS`,'exited'],[`${prefix}_RUNNING`,'false'],[`${prefix}_HEALTH`,'none'],
+     [`${prefix}_EXIT_CODE`,'0'],[`${prefix}_OOM_KILLED`,'false']];
+   })),
+   workerRunning:true,botRunning:true,agataWorkerRunning:true,
    nativeImages:{app:{imageId:D('4'),sourceSha:A,platform:'linux/amd64'},
     agata:{imageId:D('5'),sourceSha:A,platform:'linux/amd64'},
     gsales:{imageId:D('6'),sourceSha:A,platform:'linux/amd64'}}},
