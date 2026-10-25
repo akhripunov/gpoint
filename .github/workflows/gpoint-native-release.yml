@@ -101,7 +101,9 @@ jobs:
       - name: Install Python test dependencies
         run: python -m pip install './services/agata[test]' './services/gsales[test]'
       - name: Test Native image read-back validation
-        run: python tests/test_native_image_readback.py
+        run: |
+          python tests/test_native_image_readback.py
+          python tests/test_native_image_attestation.py
       - name: Run isolated PostgreSQL 16 migration and integration suites
         run: python services/gsales/tests/run_postgres.py
 
@@ -219,23 +221,9 @@ jobs:
               "$image@$digest" > "$RUNNER_TEMP/$role-provenance.json"
             python3 scripts/verify_native_image_readback.py \
               "$RUNNER_TEMP/$role-image.json" "$image" "$digest" "$CANDIDATE_SHA"
-            python3 - "$RUNNER_TEMP/$role-sbom.json" "$RUNNER_TEMP/$role-provenance.json" "$CANDIDATE_SHA" <<'PY'
-          import json, sys
-          sbom = json.load(open(sys.argv[1], encoding='utf-8'))
-          provenance = json.load(open(sys.argv[2], encoding='utf-8'))
-          sha = sys.argv[3]
-          if not isinstance(sbom, dict) or not sbom.get('packages'):
-              raise SystemExit('published image SBOM is missing or empty')
-          slsa = provenance.get('SLSA') if isinstance(provenance, dict) else None
-          vcs = ((slsa or {}).get('metadata') or {}).get(
-              'https://mobyproject.org/buildkit@v1#metadata', {}).get('vcs') or {}
-          if not slsa or vcs.get('revision') != sha:
-              raise SystemExit('published provenance does not bind the exact candidate SHA')
-          if not any(host in vcs.get('source', '') for host in (
-                  'github.com/akhripunov/gpoint', 'github.com:akhripunov/gpoint')):
-              raise SystemExit('published image provenance is missing')
-          print('IMAGE_ATTESTATIONS=PASS exact-source-revision=' + sha)
-          PY
+            python3 scripts/verify_native_image_attestation.py \
+              "$RUNNER_TEMP/$role-sbom.json" "$RUNNER_TEMP/$role-provenance.json" \
+              "$CANDIDATE_SHA" https://github.com/akhripunov/gpoint.git
           done
 
   deploy:
