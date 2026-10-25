@@ -15,9 +15,9 @@ known_hosts="${GPOINT_KNOWN_HOSTS_FILE:?GPOINT_KNOWN_HOSTS_FILE is required}"
 [[ -r "$ssh_key" && -r "$known_hosts" ]]
 
 case "$service" in
-  gpoint-core) repository=ghcr.io/akhripuniov/gpoint-runtime ;;
-  gpoint-agata) repository=ghcr.io/akhripuniov/gpoint-agata-runtime ;;
-  gpoint-miniapp) repository=ghcr.io/akhripuniov/gpoint-miniapp ;;
+  gpoint-core) repository=ghcr.io/akhripunov/gpoint-runtime ;;
+  gpoint-agata) repository=ghcr.io/akhripunov/gpoint-agata-runtime ;;
+  gpoint-miniapp) repository=ghcr.io/akhripunov/gpoint-miniapp ;;
   *) echo 'Unrecognized GPoint Kamal service' >&2; exit 1 ;;
 esac
 
