@@ -1,4 +1,4 @@
-import { test, expect, useDefaultAgeAssuranceState } from './test';
+import { test, expect, useDefaultAgeAssuranceState, useDeterministicTelegramSdk } from './test';
 import { adminPage } from './helpers';
 
 test('Mini App loads in Chromium without horizontal overflow', async ({ page }) => {
@@ -12,6 +12,7 @@ test('Telegram mobile shell fills common phone viewports without scaling', async
   for (const viewport of [{ width: 390, height: 844 }, { width: 393, height: 852 }, { width: 430, height: 932 }, { width: 360, height: 800 }]) {
     const context = await browser.newContext({ viewport });
     const page = await context.newPage();
+    await useDeterministicTelegramSdk(page);
     await useDefaultAgeAssuranceState(page);
     await page.goto('/');
     await expect(page.locator('.app-shell')).toBeVisible();

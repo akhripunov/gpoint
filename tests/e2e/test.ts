@@ -2,6 +2,17 @@ import { test as base, expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
 const ageAssurancePages = new WeakSet<Page>();
+const telegramSdkPages = new WeakSet<Page>();
+
+export async function useDeterministicTelegramSdk(page: Page): Promise<void> {
+  if (telegramSdkPages.has(page)) return;
+  telegramSdkPages.add(page);
+  await page.route('https://telegram.org/js/telegram-web-app.js', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/javascript',
+    body: 'window.Telegram = { WebApp: { initData: "", initDataUnsafe: {}, ready() {} } };',
+  }));
+}
 
 export async function useDefaultAgeAssuranceState(page: Page): Promise<void> {
   if (ageAssurancePages.has(page)) return;
@@ -30,6 +41,7 @@ export async function useDefaultAgeAssuranceState(page: Page): Promise<void> {
  */
 export const test = base.extend({
   page: async ({ page }, use) => {
+    await useDeterministicTelegramSdk(page);
     await useDefaultAgeAssuranceState(page);
     await use(page);
   },

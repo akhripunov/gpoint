@@ -1,4 +1,4 @@
-import { expect, type Page, useDefaultAgeAssuranceState } from './test';
+import { expect, type Page, useDefaultAgeAssuranceState, useDeterministicTelegramSdk } from './test';
 import { PrismaClient } from '@prisma/client';
 
 const readOnlyPrisma = new PrismaClient();
@@ -73,6 +73,7 @@ export async function creatorPage(page: Page, scenario = `run-${Date.now()}`) {
 }
 
 export async function adminPage(page: Page) {
+  await useDeterministicTelegramSdk(page);
   await useDefaultAgeAssuranceState(page);
   const profile = page.getByRole('button', { name: 'Profile', exact: true });
   for (let attempt = 0; attempt < 3; attempt++) {
