@@ -60,6 +60,30 @@ jobs:
           go-version: '1.24.3'
       - name: Validate GitHub Actions workflow
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/gpoint-native-release.yml
+      - name: Validate pinned Kamal configs and shared proxy routing
+        env:
+          KAMAL_IMAGE: ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625
+        run: |
+          set -euo pipefail
+          docker run --rm --volume "$GITHUB_WORKSPACE:/workdir" --workdir /workdir \
+            --env GPOINT_COMMIT_SHA="$GITHUB_SHA" \
+            --env GPOINT_SSH_KEY=/tmp/not-used-by-config-check \
+            --env GPOINT_KNOWN_HOSTS_FILE=/dev/null \
+            --env KAMAL_REGISTRY_PASSWORD=config-validation-placeholder \
+            "$KAMAL_IMAGE" config --config-file config/deploy.yml >/dev/null
+          docker run --rm --volume "$GITHUB_WORKSPACE:/workdir" --workdir /workdir \
+            --env GPOINT_COMMIT_SHA="$GITHUB_SHA" \
+            --env GPOINT_SSH_KEY=/tmp/not-used-by-config-check \
+            --env GPOINT_KNOWN_HOSTS_FILE=/dev/null \
+            --env KAMAL_REGISTRY_PASSWORD=config-validation-placeholder \
+            "$KAMAL_IMAGE" config --config-file config/deploy.agata.yml >/dev/null
+          docker run --rm --volume "$GITHUB_WORKSPACE:/workdir" --workdir /workdir \
+            --env GPOINT_COMMIT_SHA="$GITHUB_SHA" \
+            --env GPOINT_SSH_KEY=/tmp/not-used-by-config-check \
+            --env GPOINT_KNOWN_HOSTS_FILE=/dev/null \
+            --env KAMAL_REGISTRY_PASSWORD=config-validation-placeholder \
+            "$KAMAL_IMAGE" config --config-file config/deploy.miniapp.yml >/dev/null
+          ./scripts/test-kamal-proxy-integration.sh
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
         with:
           version: 9.15.0

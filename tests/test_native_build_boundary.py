@@ -124,6 +124,18 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         hook = (ROOT / ".kamal/hooks/post-app-boot").read_text()
         self.assertIn('[[ "$version" == "$candidate-"* && "$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]', hook)
 
+    def test_workspace_ci_runs_real_kamal_config_and_proxy_integration_checks(self):
+        steps = self.workflow["jobs"]["workspace"]["steps"]
+        runs = "\n".join(step.get("run", "") for step in steps)
+        self.assertIn('config --config-file config/deploy.yml', runs)
+        self.assertIn('config --config-file config/deploy.agata.yml', runs)
+        self.assertIn('config --config-file config/deploy.miniapp.yml', runs)
+        self.assertIn("./scripts/test-kamal-proxy-integration.sh", runs)
+        self.assertTrue(any(
+            step.get("env", {}).get("KAMAL_IMAGE") == "ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625"
+            for step in steps
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()
