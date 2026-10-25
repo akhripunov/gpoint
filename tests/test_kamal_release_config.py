@@ -429,6 +429,20 @@ def test_kamal_cutover_checks_candidate_image_disk_headroom_before_deployment():
     assert "KAMAL_CUTOVER_DISK_HEADROOM=PASS" in deploy
 
 
+def test_kamal_production_verify_persists_attempt_bound_manifest():
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    deploy = workflow.split("  deploy:\n", 1)[1]
+    verify = deploy.split("name: Verify public routes and exact running services", 1)[1].split(
+        "name: Record GitHub Deployment result against the same attempt", 1
+    )[0]
+    assert "gpoint-kamal-production-manifest/v1" in verify
+    assert "kamal-production-${run_id}-${attempt}.json" in verify
+    assert "CANDIDATE_SHA" in verify and "APP_DIGEST" in verify
+    assert "INVENTORY_SHA256" in verify and "BACKUP_SHA256" in verify
+    assert "ISOLATED_RESTORE=PASS" in verify
+    assert "GPOINT_KAMAL_MANIFEST_SHA256=" in verify
+
+
 def test_kamal_inventory_sanitizer_keeps_runtime_facts_and_drops_environment_and_commands(tmp_path):
     import json
 
