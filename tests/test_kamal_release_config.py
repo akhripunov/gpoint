@@ -449,6 +449,12 @@ def test_kamal_production_verify_persists_attempt_bound_manifest():
     assert '"containerId"' in manifest_writer and '"repositoryDigest"' in manifest_writer
 
 
+def test_manifest_writer_behavior_tests_run_in_python_ci():
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    python_job = workflow.split("  python:\n", 1)[1].split("  build:\n", 1)[0]
+    assert "tests/test_kamal_production_manifest.py" in python_job
+
+
 def test_kamal_inventory_sanitizer_keeps_runtime_facts_and_drops_environment_and_commands(tmp_path):
     import json
 

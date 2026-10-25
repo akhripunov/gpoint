@@ -147,6 +147,7 @@ jobs:
           tests/test_deploy_evidence_workflow.py
           tests/test_native_build_boundary.py
           tests/test_kamal_release_config.py
+          tests/test_kamal_production_manifest.py
           tests/test_release_assets.py
       - name: Run isolated PostgreSQL 16 migration and integration suites
         run: python services/gsales/tests/run_postgres.py
