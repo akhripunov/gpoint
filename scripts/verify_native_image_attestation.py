@@ -9,8 +9,14 @@ from urllib.parse import urlsplit
 
 
 def verify_sbom(sbom: Any) -> None:
-    if not isinstance(sbom, dict) or not isinstance(sbom.get('packages'), list) or not sbom['packages']:
+    packages = sbom.get('packages') if isinstance(sbom, dict) else None
+    if not isinstance(packages, list) or not packages:
         raise ValueError('published image SBOM is missing or empty')
+    if any(not isinstance(package, dict)
+           or not isinstance(package.get('name'), str) or not package['name'].strip()
+           or not isinstance(package.get('SPDXID'), str) or not package['SPDXID'].strip()
+           for package in packages):
+        raise ValueError('published image SBOM contains a malformed SPDX package')
 
 
 def _source_configurations(slsa: dict[str, Any]) -> list[dict[str, Any]]:
@@ -33,18 +39,22 @@ def verify_provenance_identity(provenance: Any, sha: str, expected_repo: str) ->
     if len(sha) != 40 or any(char not in '0123456789abcdef' for char in sha):
         raise ValueError('candidate SHA is not an exact lowercase Git SHA')
     expected = urlsplit(expected_repo)
-    matches = []
-    for config in _source_configurations(provenance['SLSA']):
+    configurations = _source_configurations(provenance['SLSA'])
+    if len(configurations) != 1:
+        raise ValueError('published provenance must contain exactly one Git source configuration')
+    for config in configurations:
         source = urlsplit(str(config.get('uri', '')))
         digest = config.get('digest')
-        if (source.scheme == expected.scheme == 'https'
+        if (source.scheme in {'https', 'git+https'}
+                and expected.scheme == 'https'
+                and source.netloc.lower() == expected.netloc.lower()
                 and source.hostname == expected.hostname
                 and source.path == expected.path
+                and not source.query
                 and isinstance(digest, dict)
                 and digest.get('sha1') == sha):
-            matches.append(config)
-    if len(matches) != 1:
-        raise ValueError('published provenance must bind the exact SHA to the expected remote Git repository')
+            return
+    raise ValueError('published provenance must bind the exact SHA to the expected remote Git repository')
 
 
 def main(argv: list[str]) -> int:

@@ -19,6 +19,14 @@ class NativeImageAttestationTests(unittest.TestCase):
         }}}}}
         MODULE.verify_provenance_identity(provenance, sha, 'https://github.com/akhripunov/gpoint.git')
 
+    def test_accepts_git_plus_https_source_uri(self):
+        sha = 'f' * 40
+        provenance = {'SLSA': {'buildDefinition': {'externalParameters': {'configSource': {
+            'uri': 'git+https://github.com/akhripunov/gpoint.git#refs/heads/main',
+            'digest': {'sha1': sha},
+        }}}}}
+        MODULE.verify_provenance_identity(provenance, sha, 'https://github.com/akhripunov/gpoint.git')
+
     def test_accepts_verified_remote_git_config_source_slsa_v02(self):
         sha = 'b' * 40
         provenance = {'SLSA': {'invocation': {'configSource': {
@@ -46,12 +54,44 @@ class NativeImageAttestationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             MODULE.verify_provenance_identity(provenance, sha, 'https://github.com/akhripunov/gpoint.git')
 
+    def test_rejects_nonstandard_port(self):
+        sha = 'a' * 40
+        provenance = {'SLSA': {'buildDefinition': {'externalParameters': {'configSource': {
+            'uri': 'https://github.com:8443/akhripunov/gpoint.git#refs/heads/main',
+            'digest': {'sha1': sha},
+        }}}}}
+        with self.assertRaises(ValueError):
+            MODULE.verify_provenance_identity(provenance, sha, 'https://github.com/akhripunov/gpoint.git')
+
+    def test_rejects_ambiguous_source_configurations(self):
+        sha = 'b' * 40
+        expected = {
+            'uri': 'https://github.com/akhripunov/gpoint.git#refs/heads/main',
+            'digest': {'sha1': sha},
+        }
+        alternate = {
+            'uri': 'https://github.com/attacker/gpoint.git#refs/heads/main',
+            'digest': {'sha1': sha},
+        }
+        provenance = {'SLSA': {
+            'buildDefinition': {'externalParameters': {'configSource': expected}},
+            'invocation': {'configSource': alternate},
+        }}
+        with self.assertRaises(ValueError):
+            MODULE.verify_provenance_identity(provenance, sha, 'https://github.com/akhripunov/gpoint.git')
+
     def test_rejects_empty_sbom(self):
         with self.assertRaises(ValueError):
             MODULE.verify_sbom({'SPDXID': 'SPDXRef-DOCUMENT', 'packages': []})
 
+    def test_rejects_malformed_sbom_package(self):
+        with self.assertRaises(ValueError):
+            MODULE.verify_sbom({'SPDXID': 'SPDXRef-DOCUMENT', 'packages': [{}]})
+
     def test_accepts_nonempty_sbom(self):
-        MODULE.verify_sbom({'SPDXID': 'SPDXRef-DOCUMENT', 'packages': [{'name': 'gpoint'}]})
+        MODULE.verify_sbom({'SPDXID': 'SPDXRef-DOCUMENT', 'packages': [
+            {'name': 'gpoint', 'SPDXID': 'SPDXRef-Package-gpoint'}
+        ]})
 
 
 if __name__ == '__main__':
