@@ -33,9 +33,9 @@ path available until the Kamal production Verify has passed.
       candidate migration or if restore evidence is incomplete.
 - [ ] Confirm `kamal-proxy` 0.9.2 can bind the configured loopback listener and
       that Caddy routes `/api/*`, rewritten `/media/*`, and Mini App paths to
-      that one listener. Verify the existing TLS certificate and Caddy reload
-      procedure before changing routes.
-- [ ] Confirm the current Worker and Bot consumer counts and their shutdown
+      that one listener. Verify the existing TLS certificate and that the
+      production Caddy service can validate and reload its config.
+- [ ] Confirm the current Worker, Bot, and AGATA Memory Worker consumer counts and their shutdown
       behavior. Plan a short consumer pause so old Compose consumers are stopped
       and verified stopped before Kamal starts their replacements. Do not allow
       overlapping consumers. GSales must remain stopped.
@@ -64,16 +64,16 @@ at preparation time; never fill it from a previous release record.
    start Bot, Worker, or AGATA Memory Worker yet.
    Verify their exact SHA, immutable image digest, health checks, media volume,
    and required private network aliases.
-4. Apply the candidate Caddyfile through the already-approved host
-   configuration procedure, validate it with Caddy, reload Caddy, and verify
-   that its existing TLS certificate remains active. If no approved Caddy
-   configuration procedure exists, stop here and obtain one; the Kamal Deploy
-   workflow does not currently synchronize Caddy configuration to the VPS.
-5. Deploy Mini App through the same Kamal Proxy instance and verify the root,
-   deep links, `/api`, and `/media` routes through the production HTTPS host.
-6. Start the Kamal Worker and Bot roles. Verify the old Compose consumers remain
-   stopped and the new Worker/Bot each have exactly the expected running
-   instance count. Resume traffic only after health and queue checks pass.
+4. Deploy Mini App through the same Kamal Proxy instance.
+5. The gated Kamal workflow backs up `/etc/caddy/Caddyfile`, records its
+   checksum, validates the candidate Caddyfile, atomically installs it, and
+   reloads Caddy after the request-serving Kamal roles are deployed. Verify
+   HTTPS API and Mini App routes before starting consumers. If the Apply step
+   fails or its result is unclear, stop automation and reconcile the live Caddy
+   and container state; do not rerun Deploy blindly.
+6. Start the Kamal Worker, Bot, and AGATA Memory Worker roles. Verify the old
+   Compose consumers remain stopped and each new consumer has exactly the
+   expected running instance count.
 7. Run the complete production Verify: service SHA and image digest, API and
    AGATA health, Worker/Bot health, Mini App routes, media read/write, Caddy TLS,
    PostgreSQL/migration heads, network aliases, absence of duplicate

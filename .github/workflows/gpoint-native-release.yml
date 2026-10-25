@@ -438,7 +438,7 @@ jobs:
             -f state=in_progress -f environment=production \
             -f description="Kamal Deploy started after Native First CI/Build PASS" >/dev/null
           echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
-      - name: Deploy API and web roles, then consumers with pinned Kamal 2.12
+      - name: Deploy request-serving Kamal roles
         if: inputs.mode == 'production'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -471,6 +471,49 @@ jobs:
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.agata.yml
           GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.miniapp.yml
+      - name: Apply candidate Caddyfile after request-serving roles are deployed
+        if: inputs.mode == 'production'
+        run: |
+          set -euo pipefail
+          caddy_sha="$(sha256sum infra/production/Caddyfile | awk '{print $1}')"
+          remote_file="/tmp/gpoint-caddy-${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          remote_script="${remote_file}.apply.sh"
+          ssh_opts=(-i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
+          scp "${ssh_opts[@]}" scripts/apply-kamal-caddy.sh "root@38.180.110.92:$remote_script"
+          scp "${ssh_opts[@]}" infra/production/Caddyfile "root@38.180.110.92:$remote_file"
+          ssh -T "${ssh_opts[@]}" root@38.180.110.92 bash "$remote_script" \
+            "$CANDIDATE_SHA" "$caddy_sha" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$remote_file"
+      - name: Verify request-serving routes before starting consumers
+        if: inputs.mode == 'production'
+        run: |
+          set -euo pipefail
+          curl --retry 12 --retry-connrefused --retry-delay 5 --fail --silent --show-error \
+            https://gpoint.amiora.one/api/health/live | grep -Fq '"status":"ok"'
+          for path in / /creators; do
+            curl --retry 6 --retry-connrefused --retry-delay 2 --fail --silent --show-error \
+              "https://gpoint.amiora.one$path" | grep -Fq '<div id="root">'
+          done
+      - name: Start Kamal consumers after request-serving verification
+        if: inputs.mode == 'production'
+        env:
+          APP_DIGEST: ${{ needs.build.outputs.app_digest }}
+          AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
+        run: |
+          set -euo pipefail
+          kamal() {
+            docker run --rm \
+              --volume "$GITHUB_WORKSPACE:/workdir" \
+              --volume /var/run/docker.sock:/var/run/docker.sock \
+              --volume "$HOME/.ssh:/root/.ssh:ro" \
+              --volume "$HOME/.docker:/root/.docker:ro" \
+              --workdir /workdir \
+              --env GPOINT_COMMIT_SHA --env GPOINT_SSH_KEY \
+              --env GPOINT_KNOWN_HOSTS_FILE --env KAMAL_REGISTRY_PASSWORD \
+              --env GPOINT_KAMAL_SERVICE --env GPOINT_KAMAL_EXPECTED_DIGEST --env KAMAL_ROLES \
+              ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 \
+              "$@"
+          }
           GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker,bot \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker,bot --config-file config/deploy.yml
           GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker \
