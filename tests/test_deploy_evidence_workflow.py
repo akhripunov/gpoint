@@ -42,6 +42,22 @@ def linear_production_publish_script():
 
 
 class DeployEvidenceWorkflowTests(unittest.TestCase):
+    def test_integrated_native_ci_runs_release_and_kamal_boundary_suites(self):
+        native = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+        workspace_steps = native['jobs']['workspace']['steps']
+        python_steps = native['jobs']['python']['steps']
+        workspace_scripts = '\n'.join(step.get('run', '') for step in workspace_steps)
+        python_scripts = '\n'.join(step.get('run', '') for step in python_steps)
+        self.assertIn('pnpm test:release', workspace_scripts)
+        self.assertIn('scripts/release-component-bundle-v4.test.mjs', workspace_scripts)
+        self.assertIn('scripts/release-static-v4.test.mjs', workspace_scripts)
+        self.assertIn('tests/test_deploy_evidence_workflow.py', python_scripts)
+        self.assertIn('tests/test_native_build_boundary.py', python_scripts)
+        self.assertIn('tests/test_kamal_release_config.py', python_scripts)
+        self.assertIn('tests/test_release_assets.py', python_scripts)
+        self.assertIn("python -m pip install './services/agata[test]' './services/gsales[test]' pyyaml",
+                      python_scripts)
+
     def test_native_deploy_job_requires_exact_sha_and_production_authorization_gates(self):
         native = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
         triggers = native.get('on', native.get(True))
