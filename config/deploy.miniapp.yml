@@ -13,7 +13,7 @@ proxy:
 servers:
   web:
     hosts:
-      - 38.180.110.92
+      - <%= ENV.fetch("GPOINT_PRODUCTION_HOST") %>
     proxy:
       host: gpoint.amiora.one
       app_port: 80

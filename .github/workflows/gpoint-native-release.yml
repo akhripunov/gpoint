@@ -69,18 +69,21 @@ jobs:
             --env GPOINT_COMMIT_SHA="$GITHUB_SHA" \
             --env GPOINT_SSH_KEY=/tmp/not-used-by-config-check \
             --env GPOINT_KNOWN_HOSTS_FILE=/dev/null \
+            --env GPOINT_PRODUCTION_HOST=192.0.2.10 \
             --env KAMAL_REGISTRY_PASSWORD=config-validation-placeholder \
             "$KAMAL_IMAGE" config --config-file config/deploy.yml >/dev/null
           docker run --rm --volume "$GITHUB_WORKSPACE:/workdir" --workdir /workdir \
             --env GPOINT_COMMIT_SHA="$GITHUB_SHA" \
             --env GPOINT_SSH_KEY=/tmp/not-used-by-config-check \
             --env GPOINT_KNOWN_HOSTS_FILE=/dev/null \
+            --env GPOINT_PRODUCTION_HOST=192.0.2.10 \
             --env KAMAL_REGISTRY_PASSWORD=config-validation-placeholder \
             "$KAMAL_IMAGE" config --config-file config/deploy.agata.yml >/dev/null
           docker run --rm --volume "$GITHUB_WORKSPACE:/workdir" --workdir /workdir \
             --env GPOINT_COMMIT_SHA="$GITHUB_SHA" \
             --env GPOINT_SSH_KEY=/tmp/not-used-by-config-check \
             --env GPOINT_KNOWN_HOSTS_FILE=/dev/null \
+            --env GPOINT_PRODUCTION_HOST=192.0.2.10 \
             --env KAMAL_REGISTRY_PASSWORD=config-validation-placeholder \
             "$KAMAL_IMAGE" config --config-file config/deploy.miniapp.yml >/dev/null
           ./scripts/test-kamal-proxy-integration.sh
@@ -305,6 +308,7 @@ jobs:
       CANDIDATE_SHA: ${{ inputs.candidate_sha }}
       IMAGE_VERSION: ${{ inputs.candidate_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
       GPOINT_COMMIT_SHA: ${{ inputs.candidate_sha }}
+      GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}
       KAMAL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
       GPOINT_SSH_KEY: /root/.ssh/id_ed25519
       GPOINT_KNOWN_HOSTS_FILE: /root/.ssh/known_hosts
@@ -385,12 +389,14 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$SSH_PRIVATE_KEY" && test -n "$VERIFIED_KNOWN_HOSTS"
+          [[ "$GPOINT_PRODUCTION_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
           install -d -m 700 "$HOME/.ssh"
           printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
           printf '%s\n' "$VERIFIED_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          ssh-keygen -F "$GPOINT_PRODUCTION_HOST" -f "$HOME/.ssh/known_hosts" >/dev/null
           chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
           cat > "$HOME/.ssh/config" <<EOF
-          Host 38.180.110.92
+          Host ${GPOINT_PRODUCTION_HOST}
             User root
             IdentityFile $HOME/.ssh/id_ed25519
             IdentitiesOnly yes
@@ -408,7 +414,7 @@ jobs:
           remote_inventory_script="${remote_script_dir}/inventory.py"
           ssh -T -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
-            root@38.180.110.92 bash -s -- "$remote_script_dir" <<'REMOTE_SETUP'
+            root@${GPOINT_PRODUCTION_HOST} bash -s -- "$remote_script_dir" <<'REMOTE_SETUP'
           set -euo pipefail
           [[ "$1" =~ ^/run/gpoint-kamal/[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
           test ! -e "$1"
@@ -417,10 +423,10 @@ jobs:
           REMOTE_SETUP
           scp -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
-            scripts/sanitize-kamal-inventory.py "root@38.180.110.92:$remote_inventory_script"
+            scripts/sanitize-kamal-inventory.py "root@${GPOINT_PRODUCTION_HOST}:$remote_inventory_script"
           facts="$(ssh -T -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
-            root@38.180.110.92 bash -s -- "$CANDIDATE_SHA" "$GITHUB_RUN_ID" \
+            root@${GPOINT_PRODUCTION_HOST} bash -s -- "$CANDIDATE_SHA" "$GITHUB_RUN_ID" \
             "$GITHUB_RUN_ATTEMPT" "$remote_inventory_script" <<'REMOTE'
           set -euo pipefail
           candidate="$1"; run_id="$2"; attempt="$3"; inventory_script="$4"
@@ -532,7 +538,7 @@ jobs:
           remote_restore_script="${remote_script_dir}/restore.sh"
           ssh -T -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
-            root@38.180.110.92 bash -s -- "$remote_script_dir" <<'REMOTE_SETUP'
+            root@${GPOINT_PRODUCTION_HOST} bash -s -- "$remote_script_dir" <<'REMOTE_SETUP'
           set -euo pipefail
           [[ "$1" =~ ^/run/gpoint-kamal/[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
           test ! -e "$1"
@@ -541,13 +547,13 @@ jobs:
           REMOTE_SETUP
           scp -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
-            scripts/agata-production-migration.py "root@38.180.110.92:$remote_backup_helper"
+            scripts/agata-production-migration.py "root@${GPOINT_PRODUCTION_HOST}:$remote_backup_helper"
           scp -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
-            scripts/verify-gpoint-backup-restore.sh "root@38.180.110.92:$remote_restore_script"
+            scripts/verify-gpoint-backup-restore.sh "root@${GPOINT_PRODUCTION_HOST}:$remote_restore_script"
           facts="$(ssh -T -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
-            root@38.180.110.92 bash "$remote_restore_script" \
+            root@${GPOINT_PRODUCTION_HOST} bash "$remote_restore_script" \
             "$CANDIDATE_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
             "$BASELINE_PATH" "$BASELINE_SHA" "$remote_backup_helper")"
           grep -qx 'GPOINT_ISOLATED_RESTORE=PASS' <<< "$facts"
@@ -565,7 +571,7 @@ jobs:
         if: inputs.mode == 'production'
         run: |
           set -euo pipefail
-          ssh -T root@38.180.110.92 bash -s <<'REMOTE'
+          ssh -T root@${GPOINT_PRODUCTION_HOST} bash -s <<'REMOTE'
           set -euo pipefail
           for service in api worker bot agata-api agata-memory-worker; do
             while IFS= read -r id; do
@@ -618,7 +624,7 @@ jobs:
               --volume "$HOME/.ssh:/root/.ssh:ro" \
               --volume "$HOME/.docker:/root/.docker:ro" \
               --workdir /workdir \
-              --env GPOINT_COMMIT_SHA --env GPOINT_SSH_KEY \
+              --env GPOINT_COMMIT_SHA --env GPOINT_PRODUCTION_HOST --env GPOINT_SSH_KEY \
               --env GPOINT_KNOWN_HOSTS_FILE --env KAMAL_REGISTRY_PASSWORD \
               --env GPOINT_KAMAL_SERVICE --env GPOINT_KAMAL_EXPECTED_DIGEST --env KAMAL_ROLES \
               ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 \
@@ -642,9 +648,9 @@ jobs:
           remote_script="${remote_file}.apply.sh"
           ssh_opts=(-i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
-          scp "${ssh_opts[@]}" scripts/apply-kamal-caddy.sh "root@38.180.110.92:$remote_script"
-          scp "${ssh_opts[@]}" infra/production/Caddyfile "root@38.180.110.92:$remote_file"
-          ssh -T "${ssh_opts[@]}" root@38.180.110.92 bash "$remote_script" \
+          scp "${ssh_opts[@]}" scripts/apply-kamal-caddy.sh "root@${GPOINT_PRODUCTION_HOST}:$remote_script"
+          scp "${ssh_opts[@]}" infra/production/Caddyfile "root@${GPOINT_PRODUCTION_HOST}:$remote_file"
+          ssh -T "${ssh_opts[@]}" root@${GPOINT_PRODUCTION_HOST} bash "$remote_script" \
             "$CANDIDATE_SHA" "$caddy_sha" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$remote_file"
       - name: Verify request-serving routes before starting consumers
         if: inputs.mode == 'production'
@@ -670,7 +676,7 @@ jobs:
               --volume "$HOME/.ssh:/root/.ssh:ro" \
               --volume "$HOME/.docker:/root/.docker:ro" \
               --workdir /workdir \
-              --env GPOINT_COMMIT_SHA --env GPOINT_SSH_KEY \
+              --env GPOINT_COMMIT_SHA --env GPOINT_PRODUCTION_HOST --env GPOINT_SSH_KEY \
               --env GPOINT_KNOWN_HOSTS_FILE --env KAMAL_REGISTRY_PASSWORD \
               --env GPOINT_KAMAL_SERVICE --env GPOINT_KAMAL_EXPECTED_DIGEST --env KAMAL_ROLES \
               ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 \
@@ -699,7 +705,7 @@ jobs:
           for path in / /creators; do
             curl --retry 6 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.amiora.one$path" | grep -Fq '<div id="root">'
           done
-          ssh -T root@38.180.110.92 bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$BASELINE_PATH" "$BASELINE_SHA" "$BACKUP_PATH" "$BACKUP_SHA" "$RESTORE_EVIDENCE_PATH" "$RESTORE_EVIDENCE_SHA" <<'REMOTE'
+          ssh -T root@${GPOINT_PRODUCTION_HOST} bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$BASELINE_PATH" "$BASELINE_SHA" "$BACKUP_PATH" "$BACKUP_SHA" "$RESTORE_EVIDENCE_PATH" "$RESTORE_EVIDENCE_SHA" <<'REMOTE'
           set -euo pipefail
           sha="$1"; version="$2"; app="$3"; agata="$4"; miniapp="$5"; run_id="$6"; attempt="$7"; baseline_file="$8"; expected_baseline_sha="$9"; backup_file="${10}"; expected_backup_sha="${11}"; restore_file="${12}"; expected_restore_sha="${13}"
           [[ "$sha" =~ ^[0-9a-f]{40}$ && "$expected_baseline_sha" =~ ^[0-9a-f]{64}$ && "$expected_backup_sha" =~ ^[0-9a-f]{64}$ && "$expected_restore_sha" =~ ^[0-9a-f]{64}$ ]]

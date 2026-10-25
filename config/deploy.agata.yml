@@ -5,7 +5,7 @@ primary_role: api
 servers:
   api:
     hosts:
-      - 38.180.110.92
+      - <%= ENV.fetch("GPOINT_PRODUCTION_HOST") %>
     cmd: uvicorn app.main:app --host 0.0.0.0 --port 8000
     proxy: false
     env:
@@ -17,7 +17,7 @@ servers:
 
   memory-worker:
     hosts:
-      - 38.180.110.92
+      - <%= ENV.fetch("GPOINT_PRODUCTION_HOST") %>
     cmd: python -m app.memory.worker
     proxy: false
     env:

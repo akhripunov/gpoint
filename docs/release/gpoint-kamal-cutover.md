@@ -13,6 +13,10 @@ path available until the Kamal production Verify has passed.
 
 - [ ] Confirm the owner-approved candidate SHA and its successful CI/BuildKit
       results. Record the immutable GHCR digest for Core, AGATA, and Mini App.
+- [ ] Resolve `GPOINT_KAMAL_HOST` from the protected GitHub secret and verify
+      that the pinned `GPOINT_KAMAL_KNOWN_HOSTS` entry matches that exact host.
+      The repository must not treat a historical IP address as current target
+      evidence.
 - [ ] Capture a fresh VPS inventory: every container, image ID/digest, Compose
       project/service label, health state, restart policy, network, published
       port, mount, and owner. Include Caddy, PostgreSQL, Redis, Eros, and the

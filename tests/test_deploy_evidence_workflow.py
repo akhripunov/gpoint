@@ -42,7 +42,7 @@ def linear_production_publish_script():
 
 
 class DeployEvidenceWorkflowTests(unittest.TestCase):
-    def test_native_deploy_job_is_exact_sha_read_only_preflight_until_separately_authorized(self):
+    def test_native_deploy_job_requires_exact_sha_and_production_authorization_gates(self):
         native = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
         triggers = native.get('on', native.get(True))
         self.assertIn('workflow_dispatch', triggers)
@@ -52,10 +52,19 @@ class DeployEvidenceWorkflowTests(unittest.TestCase):
                          "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'")
         script = '\n'.join(step.get('run', '') for step in deploy['steps'])
         self.assertIn('REQUESTED_SHA', script)
-        self.assertIn('PRODUCTION_APPLY=NOT_AUTHORIZED', script)
-        self.assertNotIn('deployments', deploy.get('permissions', {}))
-        self.assertNotRegex(script, re.compile(r'docker\s+compose\s+(up|down|pull|restart)'))
-        self.assertNotIn('--apply', script)
+        owner_gate = next(step for step in deploy['steps']
+                          if step.get('name') == 'Recheck owner authorization and current main for production mode')
+        self.assertEqual(owner_gate['env']['APPROVE_PRODUCTION'], '${{ inputs.approve_production }}')
+        self.assertIn('OWNER_APPROVAL_ACTOR', owner_gate['env'])
+        self.assertIn('OWNER_TRIGGERING_ACTOR', owner_gate['env'])
+        self.assertIn('OWNER_REPOSITORY', owner_gate['env'])
+        self.assertEqual(deploy['environment'], 'production')
+        self.assertEqual(deploy['concurrency']['group'], 'gpoint-production-release')
+        self.assertIn('deployments', deploy.get('permissions', {}))
+        self.assertIn('Create exact-SHA in-progress GitHub Deployment', [step.get('name') for step in deploy['steps']])
+        names = [step.get('name') for step in deploy['steps']]
+        self.assertLess(names.index('Verify public routes and exact running services'),
+                        names.index('Record GitHub Deployment result against the same attempt'))
 
     def test_authorization_reconciliation_is_a_separate_owner_bound_metadata_only_job(self):
         workflow = yaml.safe_load(WORKFLOW.read_text())
@@ -79,7 +88,10 @@ class DeployEvidenceWorkflowTests(unittest.TestCase):
         self.assertIn("OWNER_REPOSITORY", validation["env"])
         self.assertIn("original_run_id", validate["outputs"]["original_run_id"])
 
-        self.assertEqual(workflow["jobs"]["deploy"]["if"], "inputs.mode != 'reconcile-authorization'")
+        self.assertEqual(workflow["jobs"]["deploy"]["if"],
+                         "inputs.mode != 'reconcile-authorization' && inputs.mode != 'eros-pilot' && "
+                         "inputs.mode != 'eros-acl-plan' && inputs.mode != 'eros-acl-apply' && "
+                         "inputs.mode != 'eros-acl-rollback' && inputs.mode != 'eros-acl-reopen'")
         reconcile = workflow["jobs"]["reconcile-authorization"]
         self.assertEqual(reconcile["if"], "inputs.mode == 'reconcile-authorization'")
         self.assertEqual(reconcile["runs-on"], ["self-hosted", "macOS", "gpoint-production"])
@@ -106,7 +118,9 @@ class DeployEvidenceWorkflowTests(unittest.TestCase):
         self.assertIn("reconcile-authorization", publish["needs"])
         publish_steps = {step.get("name"): step for step in publish["steps"]}
         self.assertEqual(publish_steps["Publish preflight result to GPoint Linear"]["if"],
-                         "always() && inputs.mode != 'reconcile-authorization'")
+                         "always() && inputs.mode != 'reconcile-authorization' && inputs.mode != 'eros-pilot' && "
+                         "inputs.mode != 'eros-acl-plan' && inputs.mode != 'eros-acl-apply' && "
+                         "inputs.mode != 'eros-acl-rollback' && inputs.mode != 'eros-acl-reopen'")
         self.assertIn("reconcile-authorization", publish_steps["Publish production result to GPoint Linear"]["if"])
 
     def test_oras_is_available_before_production_parent_oci_verification(self):

@@ -169,9 +169,20 @@ def test_kamal_network_hook_joins_only_allowed_core_and_agata_roles():
 def test_ssh_heredoc_commands_keep_stdin_available():
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
     hook = (ROOT / ".kamal/hooks/post-app-boot").read_text()
-    assert "ssh -n -T root@38.180.110.92 bash -s <<'REMOTE'" not in workflow
-    assert "ssh -n -T root@38.180.110.92 bash -s --" not in workflow
+    assert 'ssh -n -T root@${GPOINT_PRODUCTION_HOST} bash -s <<\'REMOTE\'' not in workflow
+    assert 'ssh -n -T root@${GPOINT_PRODUCTION_HOST} bash -s --' not in workflow
     assert 'ssh -n -T -i "$ssh_key"' not in hook
+
+
+def test_production_host_comes_from_exact_environment_and_known_hosts():
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    configs = "\n".join((ROOT / f"config/{name}").read_text()
+                         for name in ("deploy.yml", "deploy.agata.yml", "deploy.miniapp.yml"))
+    assert "38.180.110.92" not in workflow + configs
+    assert "GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}" in workflow
+    assert 'ssh-keygen -F "$GPOINT_PRODUCTION_HOST" -f "$HOME/.ssh/known_hosts"' in workflow
+    assert 'ENV.fetch("GPOINT_PRODUCTION_HOST")' in configs
+    assert "--env GPOINT_PRODUCTION_HOST" in workflow
 
 
 def test_kamal_pre_app_boot_checks_the_pulled_digest_before_boot():

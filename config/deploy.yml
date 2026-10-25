@@ -5,7 +5,7 @@ primary_role: api
 servers:
   api:
     hosts:
-      - 38.180.110.92
+      - <%= ENV.fetch("GPOINT_PRODUCTION_HOST") %>
     cmd: node apps/api/dist/apps/api/src/main.js
     env:
       clear:
@@ -26,7 +26,7 @@ servers:
 
   worker:
     hosts:
-      - 38.180.110.92
+      - <%= ENV.fetch("GPOINT_PRODUCTION_HOST") %>
     cmd: node apps/worker/dist/main.js
     proxy: false
     env:
@@ -38,7 +38,7 @@ servers:
 
   bot:
     hosts:
-      - 38.180.110.92
+      - <%= ENV.fetch("GPOINT_PRODUCTION_HOST") %>
     cmd: node apps/bot/dist/main.js
     proxy: false
     env:
