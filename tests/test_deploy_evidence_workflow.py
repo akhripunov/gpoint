@@ -287,7 +287,14 @@ if os.environ.get('ORAS_FAIL_COMMAND') == command:
             fake_bin.mkdir()
             trace = root / "oras.log"
             fake_oras = fake_bin / "oras"
-            fake_oras.write_text("#!/bin/sh\nif [ \"$1\" = login ]; then cat >/dev/null; elif [ \"$1\" = push ]; then printf '{\\\"digest\\\":\\\"sha256:%064d\\\"}\\n' 0; else exit 9; fi\nprintf '%s\\n' \"$*\" >> \"$ORAS_TRACE\"\n")
+            fake_oras.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = login ]; then cat >/dev/null; "
+                "elif [ \"$1\" = push ]; then "
+                "printf '%s\\n' '{\"digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\"}'; "
+                "else exit 9; fi\n"
+                "printf '%s\\n' \"$*\" >> \"$ORAS_TRACE\"\n"
+            )
             fake_oras.chmod(0o755)
             output = root / "github-output"
             env = os.environ.copy()

@@ -227,6 +227,13 @@ def test_kamal_workflow_applies_candidate_caddyfile_before_production_verify():
     assert "if: always()" not in consumer_step
 
 
+def test_native_workflow_quotes_production_host_in_direct_ssh_targets():
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    deploy = workflow.split("  deploy:\n", 1)[1]
+    assert 'ssh -T "${ssh_opts[@]}" "root@${GPOINT_PRODUCTION_HOST}" bash "$remote_script"' in deploy
+    assert 'ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$remote_manifest_writer"' in deploy
+
+
 def test_kamal_success_requires_database_media_consumer_and_eros_readback():
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]

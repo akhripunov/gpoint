@@ -678,7 +678,7 @@ jobs:
           set -euo pipefail
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"
           [[ "$CANDIDATE_IMAGE_BYTES" =~ ^[0-9]+$ && "$CANDIDATE_IMAGE_BYTES" -gt 0 ]]
-          facts="$(ssh -T root@${GPOINT_PRODUCTION_HOST} bash -s -- "$CANDIDATE_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$CANDIDATE_IMAGE_BYTES" <<'REMOTE'
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$CANDIDATE_IMAGE_BYTES" <<'REMOTE'
           set -euo pipefail
           sha="$1"; run_id="$2"; attempt="$3"; image_bytes="$4"
           [[ "$sha" =~ ^[0-9a-f]{40}$ && "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ && "$image_bytes" =~ ^[0-9]+$ ]]
@@ -803,7 +803,7 @@ jobs:
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
           scp "${ssh_opts[@]}" scripts/apply-kamal-caddy.sh "root@${GPOINT_PRODUCTION_HOST}:$remote_script"
           scp "${ssh_opts[@]}" infra/production/Caddyfile "root@${GPOINT_PRODUCTION_HOST}:$remote_file"
-          ssh -T "${ssh_opts[@]}" root@${GPOINT_PRODUCTION_HOST} bash "$remote_script" \
+          ssh -T "${ssh_opts[@]}" "root@${GPOINT_PRODUCTION_HOST}" bash "$remote_script" \
             "$CANDIDATE_SHA" "$caddy_sha" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$remote_file"
       - name: Verify request-serving routes before starting consumers
         if: inputs.mode == 'production'
@@ -861,14 +861,14 @@ jobs:
           done
           remote_manifest_writer="/run/gpoint-kamal-manifest-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.py"
           remote_manifest_writer_sha="$(sha256sum scripts/write-kamal-production-manifest.py | awk '{print $1}')"
-          ssh -T root@${GPOINT_PRODUCTION_HOST} bash -s -- "$remote_manifest_writer" <<'REMOTE_CHECK'
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$remote_manifest_writer" <<'REMOTE_CHECK'
           set -euo pipefail
           [[ "$1" =~ ^/run/gpoint-kamal-manifest-[0-9]+-[0-9]+\.py$ ]]
           test ! -e "$1"
           REMOTE_CHECK
           scp scripts/write-kamal-production-manifest.py "root@${GPOINT_PRODUCTION_HOST}:${remote_manifest_writer}"
           verify_log="$RUNNER_TEMP/kamal-verify-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
-          ssh -T root@${GPOINT_PRODUCTION_HOST} bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$BASELINE_PATH" "$BASELINE_SHA" "$BACKUP_PATH" "$BACKUP_SHA" "$RESTORE_EVIDENCE_PATH" "$RESTORE_EVIDENCE_SHA" "$DEPLOYMENT_ID" "$remote_manifest_writer" "$remote_manifest_writer_sha" <<'REMOTE' | tee "$verify_log"
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$BASELINE_PATH" "$BASELINE_SHA" "$BACKUP_PATH" "$BACKUP_SHA" "$RESTORE_EVIDENCE_PATH" "$RESTORE_EVIDENCE_SHA" "$DEPLOYMENT_ID" "$remote_manifest_writer" "$remote_manifest_writer_sha" <<'REMOTE' | tee "$verify_log"
           set -euo pipefail
           sha="$1"; version="$2"; app="$3"; agata="$4"; miniapp="$5"; run_id="$6"; attempt="$7"; baseline_file="$8"; expected_baseline_sha="$9"; backup_file="${10}"; expected_backup_sha="${11}"; restore_file="${12}"; expected_restore_sha="${13}"
           manifest_writer="${15}"; expected_manifest_writer_sha="${16}"
