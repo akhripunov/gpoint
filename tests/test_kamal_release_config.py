@@ -216,6 +216,43 @@ def test_kamal_success_requires_database_media_consumer_and_eros_readback():
     assert "gsales-api" in verify and "State.Running" in verify
 
 
+def test_first_cutover_requires_a_fresh_backup_and_isolated_restore_before_apply():
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    deploy = workflow.split("  deploy:\n", 1)[1]
+    assert "name: Verify fresh PostgreSQL backup with isolated restore" in deploy
+    assert deploy.index("name: Capture PostgreSQL and Eros cutover baseline") < deploy.index(
+        "name: Verify fresh PostgreSQL backup with isolated restore"
+    ) < deploy.index("name: Block unsafe first cutover and preserve stopped GSales")
+    backup_step = deploy.split("name: Verify fresh PostgreSQL backup with isolated restore", 1)[1].split(
+        "name: Block unsafe first cutover", 1
+    )[0]
+    assert "scripts/verify-gpoint-backup-restore.sh" in backup_step
+    assert "backup_sha256" in backup_step
+    assert "GPOINT_ISOLATED_RESTORE=PASS" in backup_step
+    verify = deploy.split("name: Verify public routes and exact running services", 1)[1].split(
+        "name: Record GitHub Deployment result", 1
+    )[0]
+    assert "BACKUP_PATH: ${{ steps.backuprestore.outputs.backup_path }}" in verify
+    assert "BACKUP_SHA: ${{ steps.backuprestore.outputs.backup_sha256 }}" in verify
+    assert "ISOLATED_RESTORE=PASS" in verify
+    helper = (ROOT / "scripts/verify-gpoint-backup-restore.sh").read_text()
+    assert "--network none" in helper
+    assert "pg_restore --exit-on-error" in helper
+    assert "pg_dumpall --roles-only --no-role-passwords" in helper
+    assert "POSTGRES_SYSTEM_IDENTIFIER" in helper
+    assert "pre_backup_capacity_check" in helper
+    assert helper.index("pre_backup_capacity_check") < helper.index('python3 "$backup_helper" backup')
+    assert "pre_restore_capacity_check" in helper
+    assert helper.index("pre_restore_capacity_check") < helper.index('docker run -d --name "$restore_name"')
+    assert "BACKUP_SHA256" in helper
+    assert 'test "$restored_tables" = "$source_tables"' in helper
+    assert 'docker rm -f "$restore_container_id"' in helper
+    assert 'restore_container_id="$(docker run -d' in helper
+    assert "/run/gpoint-kamal/" in helper
+    assert "GPOINT_ISOLATED_RESTORE=PASS" in helper
+    subprocess.run(["bash", "-n", str(ROOT / "scripts/verify-gpoint-backup-restore.sh")], check=True)
+
+
 def test_kamal_inventory_sanitizer_keeps_runtime_facts_and_drops_environment_and_commands():
     inspect = [{
         "Id": "a" * 64,

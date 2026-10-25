@@ -404,7 +404,17 @@ jobs:
         id: baseline
         run: |
           set -euo pipefail
-          remote_inventory_script="/tmp/gpoint-inventory-${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.py"
+          remote_script_dir="/run/gpoint-kamal/${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          remote_inventory_script="${remote_script_dir}/inventory.py"
+          ssh -T -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            root@38.180.110.92 bash -s -- "$remote_script_dir" <<'REMOTE_SETUP'
+          set -euo pipefail
+          [[ "$1" =~ ^/run/gpoint-kamal/[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
+          test ! -e "$1"
+          install -d -m 700 /run/gpoint-kamal
+          install -d -m 700 "$1"
+          REMOTE_SETUP
           scp -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             scripts/sanitize-kamal-inventory.py "root@38.180.110.92:$remote_inventory_script"
@@ -415,7 +425,7 @@ jobs:
           set -euo pipefail
           candidate="$1"; run_id="$2"; attempt="$3"; inventory_script="$4"
           [[ "$candidate" =~ ^[0-9a-f]{40}$ && "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
-          [[ "$inventory_script" == "/tmp/gpoint-inventory-${candidate}-${run_id}-${attempt}.py" ]]
+          [[ "$inventory_script" == "/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/inventory.py" ]]
           test -s "$inventory_script"
           current_sha="$(sed -n 's/^RELEASE_SHA=//p' /opt/gpoint/env/production.env | head -1)"
           [[ "$current_sha" =~ ^[0-9a-f]{40}$ ]]
@@ -498,6 +508,7 @@ jobs:
           printf 'baseline_path=%s\nbaseline_sha=%s\ninventory_sha=%s\ncurrent_sha=%s\nprisma_head=%s\nagata_head=%s\npostgres_system_identifier=%s\n' \
             "$baseline_file" "$baseline_sha" "$inventory_sha" "$current_sha" "$prisma_head" "$agata_head" "$postgres_system_identifier"
           rm -f "$inventory_script"
+          rmdir "$(dirname "$inventory_script")"
           REMOTE
           )"
           while IFS='=' read -r key value; do
@@ -506,6 +517,48 @@ jobs:
                 printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"
                 printf -- '- %s: `%s`\n' "$key" "$value" >> "$GITHUB_STEP_SUMMARY"
                 ;;
+            esac
+          done <<< "$facts"
+      - name: Verify fresh PostgreSQL backup with isolated restore
+        if: inputs.mode == 'production'
+        id: backuprestore
+        env:
+          BASELINE_PATH: ${{ steps.baseline.outputs.baseline_path }}
+          BASELINE_SHA: ${{ steps.baseline.outputs.baseline_sha }}
+        run: |
+          set -euo pipefail
+          remote_script_dir="/run/gpoint-kamal/${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          remote_backup_helper="${remote_script_dir}/backup.py"
+          remote_restore_script="${remote_script_dir}/restore.sh"
+          ssh -T -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            root@38.180.110.92 bash -s -- "$remote_script_dir" <<'REMOTE_SETUP'
+          set -euo pipefail
+          [[ "$1" =~ ^/run/gpoint-kamal/[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
+          test ! -e "$1"
+          install -d -m 700 /run/gpoint-kamal
+          install -d -m 700 "$1"
+          REMOTE_SETUP
+          scp -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            scripts/agata-production-migration.py "root@38.180.110.92:$remote_backup_helper"
+          scp -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            scripts/verify-gpoint-backup-restore.sh "root@38.180.110.92:$remote_restore_script"
+          facts="$(ssh -T -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            root@38.180.110.92 bash "$remote_restore_script" \
+            "$CANDIDATE_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            "$BASELINE_PATH" "$BASELINE_SHA" "$remote_backup_helper")"
+          grep -qx 'GPOINT_ISOLATED_RESTORE=PASS' <<< "$facts"
+          while IFS='=' read -r key value; do
+            case "$key" in
+              backup_path|backup_sha256|backup_bytes|restore_evidence_path|restore_evidence_sha|restored_table_count)
+                printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"
+                printf -- '- %s: `%s`\n' "$key" "$value" >> "$GITHUB_STEP_SUMMARY"
+                ;;
+              GPOINT_ISOLATED_RESTORE) ;;
+              *) echo "Unexpected backup/restore result field: $key" >&2; exit 1 ;;
             esac
           done <<< "$facts"
       - name: Block unsafe first cutover and preserve stopped GSales
@@ -636,20 +689,35 @@ jobs:
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
           BASELINE_PATH: ${{ steps.baseline.outputs.baseline_path }}
           BASELINE_SHA: ${{ steps.baseline.outputs.baseline_sha }}
+          BACKUP_PATH: ${{ steps.backuprestore.outputs.backup_path }}
+          BACKUP_SHA: ${{ steps.backuprestore.outputs.backup_sha256 }}
+          RESTORE_EVIDENCE_PATH: ${{ steps.backuprestore.outputs.restore_evidence_path }}
+          RESTORE_EVIDENCE_SHA: ${{ steps.backuprestore.outputs.restore_evidence_sha }}
         run: |
           set -euo pipefail
           curl --retry 12 --retry-connrefused --retry-delay 5 --fail --silent --show-error https://gpoint.amiora.one/api/health/live | grep -Fq '"status":"ok"'
           for path in / /creators; do
             curl --retry 6 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.amiora.one$path" | grep -Fq '<div id="root">'
           done
-          ssh -T root@38.180.110.92 bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$BASELINE_PATH" "$BASELINE_SHA" <<'REMOTE'
+          ssh -T root@38.180.110.92 bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$BASELINE_PATH" "$BASELINE_SHA" "$BACKUP_PATH" "$BACKUP_SHA" "$RESTORE_EVIDENCE_PATH" "$RESTORE_EVIDENCE_SHA" <<'REMOTE'
           set -euo pipefail
-          sha="$1"; version="$2"; app="$3"; agata="$4"; miniapp="$5"; run_id="$6"; attempt="$7"; baseline_file="$8"; expected_baseline_sha="$9"
-          [[ "$sha" =~ ^[0-9a-f]{40}$ && "$expected_baseline_sha" =~ ^[0-9a-f]{64}$ ]]
+          sha="$1"; version="$2"; app="$3"; agata="$4"; miniapp="$5"; run_id="$6"; attempt="$7"; baseline_file="$8"; expected_baseline_sha="$9"; backup_file="${10}"; expected_backup_sha="${11}"; restore_file="${12}"; expected_restore_sha="${13}"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ && "$expected_baseline_sha" =~ ^[0-9a-f]{64}$ && "$expected_backup_sha" =~ ^[0-9a-f]{64}$ && "$expected_restore_sha" =~ ^[0-9a-f]{64}$ ]]
           [[ "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
           [[ "$baseline_file" == "/opt/gpoint/release-logs/${sha}/kamal-cutover-baseline-${run_id}-${attempt}.txt" ]]
           test -s "$baseline_file"
           test "$(sha256sum "$baseline_file" | awk '{print $1}')" = "$expected_baseline_sha"
+          [[ "$backup_file" == /opt/gpoint/backups/gpoint-pre-release-${sha}-*.dump ]]
+          [[ "$restore_file" == "/opt/gpoint/release-logs/${sha}/kamal-backup-restore-${run_id}-${attempt}.txt" ]]
+          test -s "$backup_file" && test -s "$restore_file"
+          test "$(sha256sum "$backup_file" | awk '{print $1}')" = "$expected_backup_sha"
+          test "$(sha256sum "$restore_file" | awk '{print $1}')" = "$expected_restore_sha"
+          grep -qx "CANDIDATE_SHA=$sha" "$restore_file"
+          grep -qx "RUN_ID=$run_id" "$restore_file"
+          grep -qx "ATTEMPT=$attempt" "$restore_file"
+          grep -qx "BACKUP_PATH=$backup_file" "$restore_file"
+          grep -qx "BACKUP_SHA256=$expected_backup_sha" "$restore_file"
+          grep -qx 'ISOLATED_RESTORE=PASS' "$restore_file"
           baseline_value() {
             local result
             result="$(sed -n "s/^$1=//p" "$baseline_file")"
@@ -773,7 +841,7 @@ jobs:
           echo 'GPOINT_POSTGRES_MIGRATIONS=PASS'
           echo 'GPOINT_GSALES_STOPPED=PASS'
           REMOTE
-          echo "GPOINT_KAMAL_VERIFY=PASS SHA=$CANDIDATE_SHA BASELINE_SHA=$BASELINE_SHA INVENTORY_SHA=$inventory_sha"
+          echo "GPOINT_KAMAL_VERIFY=PASS SHA=$CANDIDATE_SHA BASELINE_SHA=$BASELINE_SHA INVENTORY_SHA=$inventory_sha BACKUP_SHA=$BACKUP_SHA RESTORE_EVIDENCE_SHA=$RESTORE_EVIDENCE_SHA"
       - name: Record GitHub Deployment result against the same attempt
         if: always() && inputs.mode == 'production' && steps.deployment.outputs.id != ''
         env:
