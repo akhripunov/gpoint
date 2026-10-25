@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './test';
 import { adminPage } from './helpers';
 
 test('Mini App loads in Chromium without horizontal overflow', async ({ page }) => {

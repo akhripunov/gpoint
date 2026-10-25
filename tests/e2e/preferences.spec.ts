@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './test';
 import { apiRead, apiRequest, createPendingImagePost, creatorPage, tinyMp4, waitForApi } from './helpers';
 
 test('recommendation controls work from For You and Reels; Profile retains Creator tools', async ({ page }) => {

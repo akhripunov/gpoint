@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './test';
 import { adminPage, creatorPage } from './helpers';
 
 test('creator dashboard exposes the canonical workspace surface', async ({ page }) => {

@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './test';
 
 test('consumer My Profile matches the approved UserProfile structure and uses real user data', async ({ page }) => {
   await page.goto('/?e2eUserId=991234567');

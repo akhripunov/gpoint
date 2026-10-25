@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './test';
 import { adminPage, apiRead, createPendingImagePost, creatorPage, moderationActions, waitForApi } from './helpers';
 
 test('admin rejection keeps imported content out of publication and discovery', async ({ page, browser }) => {

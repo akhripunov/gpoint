@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './test';
 import { adminPage, apiRead, creatorPage, moderationActions, waitForApi } from './helpers';
 
 test('admin approval publishes the creator profile with an audit trail', async ({ page, browser }) => {

@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './test';
 import { creatorPage } from './helpers';
 
 test('default creator dashboard route renders live metrics and never exposes preview fixtures', async ({ page }) => {

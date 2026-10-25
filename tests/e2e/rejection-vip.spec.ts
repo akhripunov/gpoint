@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './test';
 import { adminPage, apiRead, apiRequest, creatorPage, moderationActions, waitForApi } from './helpers';
 
 test('VIP moderation rejects, preserves history, then supports API resubmission and approval', async ({ page, browser }) => {
