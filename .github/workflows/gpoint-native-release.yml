@@ -372,6 +372,7 @@ jobs:
           echo 'PRODUCTION_APPLY=NOT_AUTHORIZED' >> "$GITHUB_STEP_SUMMARY"
       - name: Verify GHCR candidate tags resolve to the exact digests
         if: inputs.mode == 'production'
+        id: imageverify
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
@@ -380,6 +381,7 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          candidate_image_bytes=0
           for item in \
             "ghcr.io/akhripunov/gpoint-runtime|$APP_DIGEST" \
             "ghcr.io/akhripunov/gpoint-agata-runtime|$AGATA_DIGEST" \
@@ -391,7 +393,12 @@ jobs:
             test "$actual" = "$repository@$digest"
             source_sha="$(docker image inspect "$repository:$IMAGE_VERSION" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
             test "$source_sha" = "$CANDIDATE_SHA"
+            image_bytes="$(docker image inspect "$repository@$digest" --format '{{.Size}}')"
+            [[ "$image_bytes" =~ ^[0-9]+$ && "$image_bytes" -gt 0 ]]
+            candidate_image_bytes=$((candidate_image_bytes + image_bytes))
           done
+          echo "candidate_image_bytes=$candidate_image_bytes" >> "$GITHUB_OUTPUT"
+          echo "Candidate image size upper bound (sum of uncompressed images): $candidate_image_bytes bytes" >> "$GITHUB_STEP_SUMMARY"
       - name: Install verified Kamal SSH credentials
         if: inputs.mode == 'production'
         env:
@@ -419,6 +426,8 @@ jobs:
       - name: Capture PostgreSQL and Eros cutover baseline
         if: inputs.mode == 'production'
         id: baseline
+        env:
+          CANDIDATE_IMAGE_BYTES: ${{ steps.imageverify.outputs.candidate_image_bytes }}
         run: |
           set -euo pipefail
           remote_script_dir="/run/gpoint-kamal/${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -442,10 +451,11 @@ jobs:
           facts="$(ssh -T -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             root@${GPOINT_PRODUCTION_HOST} bash -s -- "$CANDIDATE_SHA" "$GITHUB_RUN_ID" \
-            "$GITHUB_RUN_ATTEMPT" "$remote_inventory_script" "$remote_resource_script" <<'REMOTE'
+            "$GITHUB_RUN_ATTEMPT" "$remote_inventory_script" "$remote_resource_script" "$CANDIDATE_IMAGE_BYTES" <<'REMOTE'
           set -euo pipefail
-          candidate="$1"; run_id="$2"; attempt="$3"; inventory_script="$4"; resource_script="$5"
+          candidate="$1"; run_id="$2"; attempt="$3"; inventory_script="$4"; resource_script="$5"; candidate_image_bytes="$6"
           [[ "$candidate" =~ ^[0-9a-f]{40}$ && "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
+          [[ "$candidate_image_bytes" =~ ^[0-9]+$ && "$candidate_image_bytes" -gt 0 ]]
           [[ "$inventory_script" == "/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/inventory.py" ]]
           [[ "$resource_script" == "/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/resources.py" ]]
           test -s "$inventory_script" && test -s "$resource_script"
@@ -551,6 +561,7 @@ jobs:
           DOCKER_FREE_DISK_KB=$docker_free_kb
           MEMORY_AVAILABLE_KB=$memory_kb
           MEMORY_TOTAL_KB=$memory_total_kb
+          CANDIDATE_IMAGE_BYTES=$candidate_image_bytes
           RUNNING_RESOURCE_SAMPLES=$resource_containers
           CONTAINER_MEMORY_USED_BYTES=$resource_memory_bytes
           CONTAINER_CPU_PERCENT_SUM=$resource_cpu_percent
@@ -558,16 +569,16 @@ jobs:
           EOF
           chmod 600 "$baseline_file"
           baseline_sha="$(sha256sum "$baseline_file" | awk '{print $1}')"
-          printf 'baseline_path=%s\nbaseline_sha=%s\ninventory_sha=%s\ncurrent_sha=%s\nprisma_head=%s\nprisma_migrations=%s\nagata_head=%s\npostgres_system_identifier=%s\ndocker_free_kb=%s\nmemory_available_kb=%s\nmemory_total_kb=%s\nrunning_resource_samples=%s\ncontainer_memory_used_bytes=%s\ncontainer_cpu_percent_sum=%s\nmax_container_memory_percent=%s\n' \
+          printf 'baseline_path=%s\nbaseline_sha=%s\ninventory_sha=%s\ncurrent_sha=%s\nprisma_head=%s\nprisma_migrations=%s\nagata_head=%s\npostgres_system_identifier=%s\ndocker_free_kb=%s\nmemory_available_kb=%s\nmemory_total_kb=%s\nrunning_resource_samples=%s\ncontainer_memory_used_bytes=%s\ncontainer_cpu_percent_sum=%s\nmax_container_memory_percent=%s\ncandidate_image_bytes=%s\n' \
             "$baseline_file" "$baseline_sha" "$inventory_sha" "$current_sha" "$prisma_head" "$prisma_migrations" "$agata_head" "$postgres_system_identifier" \
-            "$docker_free_kb" "$memory_kb" "$memory_total_kb" "$resource_containers" "$resource_memory_bytes" "$resource_cpu_percent" "$resource_max_memory_percent"
+            "$docker_free_kb" "$memory_kb" "$memory_total_kb" "$resource_containers" "$resource_memory_bytes" "$resource_cpu_percent" "$resource_max_memory_percent" "$candidate_image_bytes"
           rm -f "$inventory_script" "$resource_script"
           rmdir "$(dirname "$inventory_script")"
           REMOTE
           )"
           while IFS='=' read -r key value; do
             case "$key" in
-              baseline_path|baseline_sha|inventory_sha|current_sha|prisma_head|prisma_migrations|agata_head|postgres_system_identifier|docker_free_kb|memory_available_kb|memory_total_kb|running_resource_samples|container_memory_used_bytes|container_cpu_percent_sum|max_container_memory_percent)
+              baseline_path|baseline_sha|inventory_sha|current_sha|prisma_head|prisma_migrations|agata_head|postgres_system_identifier|docker_free_kb|memory_available_kb|memory_total_kb|running_resource_samples|container_memory_used_bytes|container_cpu_percent_sum|max_container_memory_percent|candidate_image_bytes)
                 printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"
                 printf -- '- %s: `%s`\n' "$key" "$value" >> "$GITHUB_STEP_SUMMARY"
                 ;;
@@ -639,6 +650,59 @@ jobs:
                 ;;
               GPOINT_ISOLATED_RESTORE) ;;
               *) echo "Unexpected backup/restore result field: $key" >&2; exit 1 ;;
+            esac
+          done <<< "$facts"
+      - name: Check VPS disk headroom for the exact candidate images
+        if: inputs.mode == 'production'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_IMAGE_BYTES: ${{ steps.imageverify.outputs.candidate_image_bytes }}
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"
+          [[ "$CANDIDATE_IMAGE_BYTES" =~ ^[0-9]+$ && "$CANDIDATE_IMAGE_BYTES" -gt 0 ]]
+          facts="$(ssh -T root@${GPOINT_PRODUCTION_HOST} bash -s -- "$CANDIDATE_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$CANDIDATE_IMAGE_BYTES" <<'REMOTE'
+          set -euo pipefail
+          sha="$1"; run_id="$2"; attempt="$3"; image_bytes="$4"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ && "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ && "$image_bytes" =~ ^[0-9]+$ ]]
+          docker_root="$(docker info --format '{{.DockerRootDir}}')"
+          [[ "$docker_root" == /* && -d "$docker_root" ]]
+          free_kb="$(df -Pk "$docker_root" | awk 'NR==2 {print $4}')"
+          [[ "$free_kb" =~ ^[0-9]+$ ]]
+          free_bytes=$((free_kb * 1024))
+          reserve_bytes=$((1024 * 1024 * 1024))
+          required_bytes=$((image_bytes + reserve_bytes))
+          if (( free_bytes < required_bytes )); then
+            echo "insufficient Docker-root free space for candidate images plus 1 GiB reserve" >&2
+            exit 1
+          fi
+          evidence="/opt/gpoint/release-logs/${sha}/kamal-disk-headroom-${run_id}-${attempt}.txt"
+          umask 077
+          cat > "$evidence" <<EOF
+          DISK_HEADROOM_SCHEMA=gpoint-kamal-disk-headroom/v1
+          CANDIDATE_SHA=$sha
+          RUN_ID=$run_id
+          ATTEMPT=$attempt
+          DOCKER_ROOT=$docker_root
+          DOCKER_FREE_BYTES=$free_bytes
+          CANDIDATE_IMAGE_BYTES=$image_bytes
+          RESERVE_BYTES=$reserve_bytes
+          REQUIRED_BYTES=$required_bytes
+          KAMAL_CUTOVER_DISK_HEADROOM=PASS
+          EOF
+          chmod 600 "$evidence"
+          printf 'docker_free_bytes=%s\ncandidate_image_bytes=%s\nreserve_bytes=%s\nevidence_path=%s\nevidence_sha=%s\nKAMAL_CUTOVER_DISK_HEADROOM=PASS\n' \
+            "$free_bytes" "$image_bytes" "$reserve_bytes" "$evidence" "$(sha256sum "$evidence" | awk '{print $1}')"
+          REMOTE
+          )"
+          grep -qx 'KAMAL_CUTOVER_DISK_HEADROOM=PASS' <<< "$facts"
+          while IFS='=' read -r key value; do
+            case "$key" in
+              docker_free_bytes|candidate_image_bytes|reserve_bytes|evidence_path|evidence_sha)
+                printf -- '- %s: `%s`\n' "$key" "$value" >> "$GITHUB_STEP_SUMMARY"
+                ;;
+              KAMAL_CUTOVER_DISK_HEADROOM) ;;
+              *) echo "Unexpected disk headroom result field: $key" >&2; exit 1 ;;
             esac
           done <<< "$facts"
       - name: Create exact-SHA in-progress GitHub Deployment

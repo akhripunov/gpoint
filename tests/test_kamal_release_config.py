@@ -417,6 +417,18 @@ def test_native_workflow_runs_migration_parity_before_deployment_or_pause():
     assert "prisma_migrations|agata_head" in deploy
 
 
+def test_kamal_cutover_checks_candidate_image_disk_headroom_before_deployment():
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    deploy = workflow.split("  deploy:\n", 1)[1]
+    check = deploy.index("name: Check VPS disk headroom for the exact candidate images")
+    deployment = deploy.index("name: Create exact-SHA in-progress GitHub Deployment")
+    pause = deploy.index("name: Pause legacy GPoint services after restore gates")
+    assert check < deployment < pause
+    assert "candidate_image_bytes" in deploy
+    assert "1024 * 1024 * 1024" in deploy
+    assert "KAMAL_CUTOVER_DISK_HEADROOM=PASS" in deploy
+
+
 def test_kamal_inventory_sanitizer_keeps_runtime_facts_and_drops_environment_and_commands(tmp_path):
     import json
 

@@ -27,6 +27,11 @@ path available until the Kamal production Verify has passed.
       disk, total RAM, and available RAM. This is a point-in-time sample, not a
       historical peak; assess it against the current host workload and planned
       candidate images before authorizing cutover.
+- [ ] After the fresh encrypted backup and isolated restore, the workflow
+      compares current Docker-root free space with the exact candidate image
+      size upper bound (sum of their uncompressed sizes) plus a 1 GiB reserve.
+      A failed capacity check blocks before creating the GitHub Deployment or
+      stopping any Compose service.
 - [ ] Record the live Core and AGATA application SHAs, PostgreSQL server
       version, database names, migration heads, and pending migration set.
       Confirm that Kamal does not own or recreate PostgreSQL, Redis, Eros, or
