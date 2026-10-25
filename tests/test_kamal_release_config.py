@@ -39,7 +39,12 @@ def test_kamal_agata_and_miniapp_are_separate_services():
     assert set(agata["servers"]) == {"api", "memory-worker"}
     assert miniapp["service"] == "gpoint-miniapp"
     assert miniapp["image"] == "akhripunov/gpoint-miniapp"
-    assert "run" not in miniapp.get("proxy", {})
+    assert miniapp["proxy"]["run"] == {
+        "http_port": 3003,
+        "https_port": 3004,
+        "bind_ips": ["127.0.0.1"],
+        "version": "v0.9.2",
+    }
     assert set(miniapp["servers"]) == {"web"}
     assert miniapp["servers"]["web"]["proxy"]["host"] == "gpoint.amiora.one"
     dockerfile = (ROOT / "infra/production/Gpoint.Dockerfile").read_text()
@@ -110,9 +115,9 @@ def test_caddy_keeps_tls_and_routes_api_and_miniapp_through_kamal_proxy():
     caddy = (ROOT / "infra/production/Caddyfile").read_text()
     assert "uri strip_prefix /api" not in caddy
     assert "reverse_proxy 127.0.0.1:3001" in caddy
+    assert "reverse_proxy 127.0.0.1:3003" in caddy
     assert "rewrite * /api{uri}" in caddy
-    assert caddy.count("reverse_proxy 127.0.0.1:3001") == 3
-    assert "reverse_proxy 127.0.0.1:3003" not in caddy
+    assert caddy.count("reverse_proxy 127.0.0.1:3001") == 2
     assert "root * /opt/gpoint/app/miniapp" not in caddy
     assert "compose-gsales-api-1" not in caddy
 

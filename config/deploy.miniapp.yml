@@ -2,6 +2,14 @@ service: gpoint-miniapp
 image: akhripunov/gpoint-miniapp
 primary_role: web
 
+proxy:
+  run:
+    http_port: 3003
+    https_port: 3004
+    bind_ips:
+      - 127.0.0.1
+    version: v0.9.2
+
 servers:
   web:
     hosts:

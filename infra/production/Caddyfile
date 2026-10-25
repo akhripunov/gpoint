@@ -28,6 +28,6 @@ gpoint.amiora.one {
   @app_entry path / /index.html
   header @app_entry Cache-Control "no-store, max-age=0"
   handle {
-    reverse_proxy 127.0.0.1:3001
+    reverse_proxy 127.0.0.1:3003
   }
 }

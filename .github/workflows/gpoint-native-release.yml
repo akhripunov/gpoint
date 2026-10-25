@@ -3,7 +3,7 @@ name: GPoint Native Release
 on:
   push:
     branches:
-      - codex/me52-native-first-reconstruction
+      - main
   workflow_dispatch:
     inputs:
       candidate_sha:
@@ -149,7 +149,9 @@ jobs:
           build-contexts: dependency-manifests=${{ runner.temp }}/dependency-manifests
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/akhripunov/gpoint-runtime:${{ github.sha }}
+          tags: |
+            ghcr.io/akhripunov/gpoint-runtime:${{ github.sha }}
+            ghcr.io/akhripunov/gpoint-runtime:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           build-args: GPOINT_BUILD_SHA=${{ github.sha }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
@@ -168,7 +170,9 @@ jobs:
           build-contexts: dependency-manifests=${{ runner.temp }}/dependency-manifests
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/akhripunov/gpoint-miniapp:${{ github.sha }}
+          tags: |
+            ghcr.io/akhripunov/gpoint-miniapp:${{ github.sha }}
+            ghcr.io/akhripunov/gpoint-miniapp:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           build-args: GPOINT_BUILD_SHA=${{ github.sha }}
           cache-from: type=gha,scope=gpoint-runtime
           cache-to: type=gha,scope=gpoint-miniapp,mode=max
@@ -181,7 +185,9 @@ jobs:
           context: https://github.com/akhripunov/gpoint.git#${{ github.sha }}:services/agata
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/akhripunov/gpoint-agata-runtime:${{ github.sha }}
+          tags: |
+            ghcr.io/akhripunov/gpoint-agata-runtime:${{ github.sha }}
+            ghcr.io/akhripunov/gpoint-agata-runtime:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           build-args: GPOINT_BUILD_SHA=${{ github.sha }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
@@ -197,7 +203,9 @@ jobs:
           context: https://github.com/akhripunov/gpoint.git#${{ github.sha }}:services/gsales
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/akhripunov/gpoint-g-sales-runtime:${{ github.sha }}
+          tags: |
+            ghcr.io/akhripunov/gpoint-g-sales-runtime:${{ github.sha }}
+            ghcr.io/akhripunov/gpoint-g-sales-runtime:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           build-args: GPOINT_BUILD_SHA=${{ github.sha }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
@@ -226,6 +234,7 @@ jobs:
       - name: Read back exact published images and verify candidate identity
         env:
           CANDIDATE_SHA: ${{ github.sha }}
+          IMAGE_VERSION: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           APP_DIGEST: ${{ steps.app.outputs.digest }}
           AGATA_DIGEST: ${{ steps.agata.outputs.digest }}
           GSALES_DIGEST: ${{ steps.gsales.outputs.digest }}
@@ -240,6 +249,8 @@ jobs:
               miniapp) image=ghcr.io/akhripunov/gpoint-miniapp; digest="$MINIAPP_DIGEST" ;;
             esac
             docker pull --platform linux/amd64 "$image@$digest"
+            docker pull --platform linux/amd64 "$image:$IMAGE_VERSION"
+            docker image inspect "$image:$IMAGE_VERSION" --format '{{json .RepoDigests}}' | grep -Fq "$image@$digest"
             docker image inspect --format '{{json .}}' "$image@$digest" > "$RUNNER_TEMP/$role-image.json"
             docker buildx imagetools inspect --format '{{json .SBOM.SPDX}}' \
               "$image@$digest" > "$RUNNER_TEMP/$role-sbom.json"
@@ -268,7 +279,7 @@ jobs:
       deployments: write
     env:
       CANDIDATE_SHA: ${{ inputs.candidate_sha }}
-      IMAGE_VERSION: ${{ inputs.candidate_sha }}
+      IMAGE_VERSION: ${{ inputs.candidate_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
       GPOINT_COMMIT_SHA: ${{ inputs.candidate_sha }}
       KAMAL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
       GPOINT_SSH_KEY: /root/.ssh/id_ed25519
@@ -336,10 +347,10 @@ jobs:
             "ghcr.io/akhripunov/gpoint-miniapp|$MINIAPP_DIGEST"; do
             IFS='|' read -r repository digest <<< "$item"
             docker pull --platform linux/amd64 "$repository@$digest"
-            docker pull --platform linux/amd64 "$repository:$CANDIDATE_SHA"
-            actual="$(docker image inspect "$repository:$CANDIDATE_SHA" --format '{{index .RepoDigests 0}}')"
+            docker pull --platform linux/amd64 "$repository:$IMAGE_VERSION"
+            actual="$(docker image inspect "$repository:$IMAGE_VERSION" --format '{{index .RepoDigests 0}}')"
             test "$actual" = "$repository@$digest"
-            source_sha="$(docker image inspect "$repository:$CANDIDATE_SHA" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+            source_sha="$(docker image inspect "$repository:$IMAGE_VERSION" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
             test "$source_sha" = "$CANDIDATE_SHA"
           done
       - name: Install verified Kamal SSH credentials
@@ -420,17 +431,23 @@ jobs:
               --workdir /workdir \
               --env GPOINT_COMMIT_SHA --env GPOINT_SSH_KEY \
               --env GPOINT_KNOWN_HOSTS_FILE --env KAMAL_REGISTRY_PASSWORD \
+              --env GPOINT_KAMAL_SERVICE --env KAMAL_ROLES \
               ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 \
               "$@"
           }
           kamal config --config-file config/deploy.yml >/dev/null
           kamal config --config-file config/deploy.agata.yml >/dev/null
           kamal config --config-file config/deploy.miniapp.yml >/dev/null
-          kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.yml
-          kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.agata.yml
-          kamal deploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.miniapp.yml
-          kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker,bot --config-file config/deploy.yml
-          kamal deploy --skip-push --version "$IMAGE_VERSION" --roles memory-worker --config-file config/deploy.agata.yml
+          GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
+            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.yml
+          GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api \
+            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.agata.yml
+          GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
+            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.miniapp.yml
+          GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker,bot \
+            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker,bot --config-file config/deploy.yml
+          GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker \
+            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles memory-worker --config-file config/deploy.agata.yml
       - name: Verify public routes and exact running services
         if: inputs.mode == 'production'
         id: verify

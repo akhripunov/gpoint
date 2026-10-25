@@ -19,10 +19,10 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(set(jobs["build"]["needs"]), {"workspace", "python"})
         self.assertIn("build", jobs["deploy"]["needs"])
 
-    def test_candidate_push_runs_nonproduction_jobs_only(self):
+    def test_main_push_runs_nonproduction_jobs_only(self):
         triggers = self.workflow.get("on", self.workflow.get(True))
         self.assertIn("push", triggers)
-        self.assertEqual(triggers["push"]["branches"], ["codex/me52-native-first-reconstruction"])
+        self.assertEqual(triggers["push"]["branches"], ["main"])
         deploy = self.workflow["jobs"]["deploy"]
         self.assertEqual(deploy["if"], "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'")
 
@@ -110,6 +110,19 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertNotIn("[self-hosted, macOS, gpoint-production]", text)
         self.assertNotIn("self-hosted", text)
         self.assertNotIn("release:gpoint", text)
+
+    def test_native_kamal_uses_attempt_scoped_image_version_and_hook_context(self):
+        workflow = self.workflow
+        deploy = workflow["jobs"]["deploy"]
+        combined = WORKFLOW.read_text()
+        deploy_script = "\n".join(step.get("run", "") for step in deploy["steps"])
+        self.assertIn("${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}", combined)
+        self.assertIn("--env GPOINT_KAMAL_SERVICE", deploy_script)
+        self.assertIn("--env KAMAL_ROLES", deploy_script)
+        self.assertIn("GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api", deploy_script)
+        self.assertIn("GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api", deploy_script)
+        hook = (ROOT / ".kamal/hooks/post-app-boot").read_text()
+        self.assertIn('[[ "$version" == "$candidate-"* && "$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]', hook)
 
 
 if __name__ == "__main__":
