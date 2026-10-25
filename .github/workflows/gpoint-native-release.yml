@@ -423,6 +423,7 @@ jobs:
           set -euo pipefail
           remote_script_dir="/run/gpoint-kamal/${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           remote_inventory_script="${remote_script_dir}/inventory.py"
+          remote_resource_script="${remote_script_dir}/resources.py"
           ssh -T -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             root@${GPOINT_PRODUCTION_HOST} bash -s -- "$remote_script_dir" <<'REMOTE_SETUP'
@@ -435,15 +436,19 @@ jobs:
           scp -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             scripts/sanitize-kamal-inventory.py "root@${GPOINT_PRODUCTION_HOST}:$remote_inventory_script"
+          scp -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            scripts/sanitize-kamal-resources.py "root@${GPOINT_PRODUCTION_HOST}:$remote_resource_script"
           facts="$(ssh -T -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             root@${GPOINT_PRODUCTION_HOST} bash -s -- "$CANDIDATE_SHA" "$GITHUB_RUN_ID" \
-            "$GITHUB_RUN_ATTEMPT" "$remote_inventory_script" <<'REMOTE'
+            "$GITHUB_RUN_ATTEMPT" "$remote_inventory_script" "$remote_resource_script" <<'REMOTE'
           set -euo pipefail
-          candidate="$1"; run_id="$2"; attempt="$3"; inventory_script="$4"
+          candidate="$1"; run_id="$2"; attempt="$3"; inventory_script="$4"; resource_script="$5"
           [[ "$candidate" =~ ^[0-9a-f]{40}$ && "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
           [[ "$inventory_script" == "/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/inventory.py" ]]
-          test -s "$inventory_script"
+          [[ "$resource_script" == "/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/resources.py" ]]
+          test -s "$inventory_script" && test -s "$resource_script"
           current_sha="$(sed -n 's/^RELEASE_SHA=//p' /opt/gpoint/env/production.env | head -1)"
           [[ "$current_sha" =~ ^[0-9a-f]{40}$ ]]
           api_image="$(docker inspect --format '{{.Config.Image}}' compose-api-1)"
@@ -483,16 +488,38 @@ jobs:
           agata_head="$(sed -n 's/^AGATA_HEAD=//p' <<< "$migration_facts")"
           test -n "$prisma_head" && test -n "$prisma_migrations" && test -n "$agata_head"
           free_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
+          docker_root="$(docker info --format '{{.DockerRootDir}}')"
+          [[ "$docker_root" == /* && -d "$docker_root" ]]
+          docker_free_kb="$(df -Pk "$docker_root" | awk 'NR==2 {print $4}')"
           memory_kb="$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)"
-          [[ "$free_kb" =~ ^[0-9]+$ && "$memory_kb" =~ ^[0-9]+$ ]]
+          memory_total_kb="$(awk '/MemTotal:/ {print $2}' /proc/meminfo)"
+          [[ "$free_kb" =~ ^[0-9]+$ && "$docker_free_kb" =~ ^[0-9]+$ && "$memory_kb" =~ ^[0-9]+$ && "$memory_total_kb" =~ ^[0-9]+$ ]]
           log_dir="/opt/gpoint/release-logs/${candidate}"
           mkdir -p "$log_dir" && chmod 700 "$log_dir"
           inventory_file="${log_dir}/kamal-vps-inventory-${run_id}-${attempt}.json"
           ids=( $(docker ps -aq) )
           ((${#ids[@]} > 0))
-          docker inspect "${ids[@]}" | python3 "$inventory_script" > "$inventory_file"
+          resource_file="/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/resources.json"
+          docker stats --no-stream --format '{{json .}}' | python3 "$resource_script" > "$resource_file"
+          docker inspect "${ids[@]}" | python3 "$inventory_script" --resource-facts "$resource_file" > "$inventory_file"
+          rm -f "$resource_file"
           chmod 600 "$inventory_file"
           inventory_sha="$(sha256sum "$inventory_file" | awk '{print $1}')"
+          readarray -t resource_metrics < <(python3 - "$inventory_file" <<'PY'
+          import json, sys
+          with open(sys.argv[1], encoding='utf-8') as f:
+              rows=json.load(f)['resourceUsage']
+          print(len(rows))
+          print(sum(row['memoryUsedBytes'] for row in rows))
+          print(sum(row['cpuPercent'] for row in rows))
+          print(max(row['memoryPercent'] for row in rows))
+          PY
+          )
+          resource_containers="${resource_metrics[0]}"
+          resource_memory_bytes="${resource_metrics[1]}"
+          resource_cpu_percent="${resource_metrics[2]}"
+          resource_max_memory_percent="${resource_metrics[3]}"
+          [[ "$resource_containers" =~ ^[0-9]+$ && "$resource_memory_bytes" =~ ^[0-9]+$ ]]
           baseline_file="${log_dir}/kamal-cutover-baseline-${run_id}-${attempt}.txt"
           umask 077
           cat > "$baseline_file" <<EOF
@@ -520,19 +547,27 @@ jobs:
           INVENTORY_FILE=$inventory_file
           INVENTORY_SHA256=$inventory_sha
           FREE_DISK_KB=$free_kb
+          DOCKER_ROOT=$docker_root
+          DOCKER_FREE_DISK_KB=$docker_free_kb
           MEMORY_AVAILABLE_KB=$memory_kb
+          MEMORY_TOTAL_KB=$memory_total_kb
+          RUNNING_RESOURCE_SAMPLES=$resource_containers
+          CONTAINER_MEMORY_USED_BYTES=$resource_memory_bytes
+          CONTAINER_CPU_PERCENT_SUM=$resource_cpu_percent
+          MAX_CONTAINER_MEMORY_PERCENT=$resource_max_memory_percent
           EOF
           chmod 600 "$baseline_file"
           baseline_sha="$(sha256sum "$baseline_file" | awk '{print $1}')"
-          printf 'baseline_path=%s\nbaseline_sha=%s\ninventory_sha=%s\ncurrent_sha=%s\nprisma_head=%s\nprisma_migrations=%s\nagata_head=%s\npostgres_system_identifier=%s\n' \
-            "$baseline_file" "$baseline_sha" "$inventory_sha" "$current_sha" "$prisma_head" "$prisma_migrations" "$agata_head" "$postgres_system_identifier"
-          rm -f "$inventory_script"
+          printf 'baseline_path=%s\nbaseline_sha=%s\ninventory_sha=%s\ncurrent_sha=%s\nprisma_head=%s\nprisma_migrations=%s\nagata_head=%s\npostgres_system_identifier=%s\ndocker_free_kb=%s\nmemory_available_kb=%s\nmemory_total_kb=%s\nrunning_resource_samples=%s\ncontainer_memory_used_bytes=%s\ncontainer_cpu_percent_sum=%s\nmax_container_memory_percent=%s\n' \
+            "$baseline_file" "$baseline_sha" "$inventory_sha" "$current_sha" "$prisma_head" "$prisma_migrations" "$agata_head" "$postgres_system_identifier" \
+            "$docker_free_kb" "$memory_kb" "$memory_total_kb" "$resource_containers" "$resource_memory_bytes" "$resource_cpu_percent" "$resource_max_memory_percent"
+          rm -f "$inventory_script" "$resource_script"
           rmdir "$(dirname "$inventory_script")"
           REMOTE
           )"
           while IFS='=' read -r key value; do
             case "$key" in
-              baseline_path|baseline_sha|inventory_sha|current_sha|prisma_head|prisma_migrations|agata_head|postgres_system_identifier)
+              baseline_path|baseline_sha|inventory_sha|current_sha|prisma_head|prisma_migrations|agata_head|postgres_system_identifier|docker_free_kb|memory_available_kb|memory_total_kb|running_resource_samples|container_memory_used_bytes|container_cpu_percent_sum|max_container_memory_percent)
                 printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"
                 printf -- '- %s: `%s`\n' "$key" "$value" >> "$GITHUB_STEP_SUMMARY"
                 ;;
@@ -782,6 +817,17 @@ jobs:
               inventory = json.load(source)
           if inventory.get('schema') != 'gpoint-vps-inventory/v1' or not inventory.get('containers'):
               raise SystemExit('fresh sanitized VPS inventory is missing or invalid')
+          running = {row['name'] for row in inventory['containers'] if row['running']}
+          resource_rows = inventory.get('resourceUsage')
+          if not isinstance(resource_rows, list) or not resource_rows:
+              raise SystemExit('fresh per-container resource sample is missing')
+          sampled = {row.get('containerName') for row in resource_rows}
+          if sampled != running or len(sampled) != len(resource_rows):
+              raise SystemExit('resource sample does not match the fresh running-container inventory')
+          for row in resource_rows:
+              if any(not isinstance(row.get(key), (int, float)) or row[key] < 0 for key in
+                     ('cpuPercent', 'memoryUsedBytes', 'memoryLimitBytes', 'memoryPercent', 'pids')):
+                  raise SystemExit('resource sample contains invalid CPU or memory facts')
           PY
           test "$(docker inspect --format '{{.Id}}' shared_postgres_1)" = "$(baseline_value POSTGRES_CONTAINER_ID)"
           test "$(docker inspect --format '{{.Image}}' shared_postgres_1)" = "$(baseline_value POSTGRES_IMAGE_ID)"

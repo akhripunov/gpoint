@@ -232,9 +232,14 @@ def test_kamal_success_requires_database_media_consumer_and_eros_readback():
     deploy = workflow.split("  deploy:\n", 1)[1]
     assert "name: Capture PostgreSQL and Eros cutover baseline" in deploy
     assert "sanitize-kamal-inventory.py" in deploy
+    assert "sanitize-kamal-resources.py" in deploy
+    assert "docker stats --no-stream --format '{{json .}}'" in deploy
     assert "POSTGRES_SYSTEM_IDENTIFIER" in deploy
     assert "POSTGRES_ACL_FINGERPRINT" in deploy
     assert "EROS_CONTAINER_ID" in deploy
+    assert "DOCKER_FREE_DISK_KB" in deploy
+    assert "MEMORY_AVAILABLE_KB" in deploy and "MEMORY_TOTAL_KB" in deploy
+    assert "CONTAINER_MEMORY_USED_BYTES" in deploy and "CONTAINER_CPU_PERCENT_SUM" in deploy
     verify = deploy.split("name: Verify public routes and exact running services", 1)[1].split(
         "name: Record GitHub Deployment result", 1
     )[0]
@@ -246,6 +251,7 @@ def test_kamal_success_requires_database_media_consumer_and_eros_readback():
     assert "POSTGRES_ACL_FINGERPRINT" in verify
     assert "EROS_CONTAINER_ID" in verify
     assert "gsales-api" in verify and "State.Running" in verify
+    assert "resource sample does not match the fresh running-container inventory" in verify
 
 
 def test_first_cutover_stops_only_freshly_inventoried_legacy_services_after_restore():
@@ -411,7 +417,9 @@ def test_native_workflow_runs_migration_parity_before_deployment_or_pause():
     assert "prisma_migrations|agata_head" in deploy
 
 
-def test_kamal_inventory_sanitizer_keeps_runtime_facts_and_drops_environment_and_commands():
+def test_kamal_inventory_sanitizer_keeps_runtime_facts_and_drops_environment_and_commands(tmp_path):
+    import json
+
     inspect = [{
         "Id": "a" * 64,
         "Name": "/compose-api-1",
@@ -431,8 +439,14 @@ def test_kamal_inventory_sanitizer_keeps_runtime_facts_and_drops_environment_and
         },
         "Mounts": [{"Type": "bind", "Source": "/opt/gpoint/media", "Destination": "/data/media", "RW": True}],
     }]
+    resources = tmp_path / "resources.json"
+    resources.write_text(json.dumps([{
+        "containerId": "a" * 12, "containerName": "compose-api-1", "cpuPercent": 2.5,
+        "memoryUsedBytes": 268435456, "memoryLimitBytes": 8589934592,
+        "memoryPercent": 3.12, "pids": 14,
+    }]))
     result = subprocess.run(
-        ["python3", str(ROOT / "scripts/sanitize-kamal-inventory.py")],
+        ["python3", str(ROOT / "scripts/sanitize-kamal-inventory.py"), "--resource-facts", str(resources)],
         input=__import__("json").dumps(inspect), text=True, capture_output=True, check=True,
     )
     inventory = __import__("json").loads(result.stdout)
@@ -445,8 +459,40 @@ def test_kamal_inventory_sanitizer_keeps_runtime_facts_and_drops_environment_and
     assert container["state"] == "running" and container["health"] == "healthy"
     assert container["networks"]["gpoint_app"]["aliases"] == ["api"]
     assert container["mounts"][0]["destination"] == "/data/media"
+    assert inventory["resourceUsage"][0]["containerName"] == "compose-api-1"
     assert "DATABASE_URL" not in serialized and "postgres://private" not in serialized
     assert "TOKEN=private" not in serialized and "--token" not in serialized
+    resources.write_text("[]")
+    incomplete = subprocess.run(
+        ["python3", str(ROOT / "scripts/sanitize-kamal-inventory.py"), "--resource-facts", str(resources)],
+        input=json.dumps(inspect), text=True, capture_output=True,
+    )
+    assert incomplete.returncode != 0
+    assert "resource sample is empty" in incomplete.stderr
+
+
+def test_kamal_inventory_includes_sanitized_per_container_resource_sample(tmp_path):
+    import json
+
+    resource_script = ROOT / "scripts/sanitize-kamal-resources.py"
+    stats = [{
+        "Container": "compose-api-1", "ID": "b" * 12, "Name": "compose-api-1",
+        "CPUPerc": "2.50%", "MemUsage": "256MiB / 8GiB", "MemPerc": "3.12%", "PIDs": "14",
+        "BlockIO": "private", "NetIO": "private",
+    }]
+    raw_stats = tmp_path / "docker-stats.jsonl"
+    raw_stats.write_text("\n".join(json.dumps(row) for row in stats) + "\n")
+    result = subprocess.run(
+        ["python3", str(resource_script)], input=raw_stats.read_text(), text=True,
+        capture_output=True, check=True,
+    )
+    resources = json.loads(result.stdout)
+    assert resources[0] == {
+        "containerId": "b" * 12, "containerName": "compose-api-1", "cpuPercent": 2.5,
+        "memoryUsedBytes": 256 * 1024**2, "memoryLimitBytes": 8 * 1024**3,
+        "memoryPercent": 3.12, "pids": 14,
+    }
+    assert "private" not in result.stdout
 
 
 def test_caddy_apply_script_backs_up_and_reloads_only_a_verified_candidate():

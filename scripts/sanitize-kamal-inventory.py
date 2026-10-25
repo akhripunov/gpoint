@@ -6,6 +6,8 @@ projection deliberately keeps only operational identity, state, ports,
 networks, mounts, restart policy, and Compose ownership labels.
 """
 import json
+import argparse
+from pathlib import Path
 import sys
 
 
@@ -62,6 +64,9 @@ def sanitize(container):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--resource-facts", type=Path, required=True)
+    args = parser.parse_args()
     try:
         raw = json.load(sys.stdin)
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -70,9 +75,27 @@ def main():
         raise SystemExit("Docker inspection must contain at least one container")
     if any(not isinstance(item, dict) or not item.get("Id") or not item.get("Config") for item in raw):
         raise SystemExit("Docker inspection container identity is incomplete")
+    try:
+        resources = json.loads(args.resource_facts.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        raise SystemExit("sanitized Docker resource sample is missing or invalid") from None
+    if not isinstance(resources, list) or not resources:
+        raise SystemExit("sanitized Docker resource sample is empty")
+    by_name = {str((item.get("Name") or "").lstrip("/")): item for item in raw}
+    running_names = {name for name, item in by_name.items() if bool((item.get("State") or {}).get("Running"))}
+    resource_names = [row.get("containerName") for row in resources if isinstance(row, dict)]
+    if len(resource_names) != len(resources) or len(set(resource_names)) != len(resource_names):
+        raise SystemExit("sanitized Docker resource identities are invalid")
+    if set(resource_names) != running_names:
+        raise SystemExit("Docker resource sample does not cover the exact running inventory")
+    for row in resources:
+        item = by_name.get(row["containerName"])
+        if not item or not str(item.get("Id", "")).startswith(row.get("containerId", "")):
+            raise SystemExit("Docker resource sample container identity does not match inventory")
     print(json.dumps({
         "schema": "gpoint-vps-inventory/v1",
         "containers": sorted((sanitize(item) for item in raw), key=lambda item: item["name"]),
+        "resourceUsage": resources,
     }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 

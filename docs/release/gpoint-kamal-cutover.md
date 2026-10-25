@@ -21,6 +21,12 @@ path available until the Kamal production Verify has passed.
       project/service label, health state, restart policy, network, published
       port, mount, and owner. Include Caddy, PostgreSQL, Redis, Eros, and the
       stopped GSales containers. Do not infer this from an old manifest.
+- [ ] Review the same-run resource sample in the sanitized inventory: each
+      running container's instantaneous CPU percentage, memory use/limit,
+      memory percentage, and PID count, plus host free disk, Docker-root free
+      disk, total RAM, and available RAM. This is a point-in-time sample, not a
+      historical peak; assess it against the current host workload and planned
+      candidate images before authorizing cutover.
 - [ ] Record the live Core and AGATA application SHAs, PostgreSQL server
       version, database names, migration heads, and pending migration set.
       Confirm that Kamal does not own or recreate PostgreSQL, Redis, Eros, or
