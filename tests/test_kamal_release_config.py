@@ -337,6 +337,11 @@ def test_caddy_apply_script_backs_up_and_reloads_only_a_verified_candidate():
             import os, sys
             with open(os.environ['TEST_CALL_LOG'], 'a') as log:
                 log.write('systemctl ' + ' '.join(sys.argv[1:]) + '\\n')
+            if sys.argv[1:] == ['reload', 'caddy'] and os.environ.get('TEST_FAIL_FIRST_RELOAD') == '1':
+                marker = os.environ['TEST_RELOAD_MARKER']
+                if not os.path.exists(marker):
+                    open(marker, 'w').close()
+                    raise SystemExit(1)
             raise SystemExit(int(os.environ.get('TEST_SYSTEMCTL_EXIT', '0')))
         """))
         for executable in bin_dir.iterdir():
@@ -407,7 +412,8 @@ def test_caddy_apply_script_backs_up_and_reloads_only_a_verified_candidate():
             "GPOINT_CADDY_CONFIG_PATH": str(reload_current),
             "GPOINT_CADDY_BACKUP_DIR": str(root / "reload/backups"),
             "TEST_CADDY_EXIT": "0",
-            "TEST_SYSTEMCTL_EXIT": "1",
+            "TEST_FAIL_FIRST_RELOAD": "1",
+            "TEST_RELOAD_MARKER": str(root / "reload-first-failure"),
         }
         reload = subprocess.run(
             ["bash", str(ROOT / "scripts/apply-kamal-caddy.sh"), candidate_sha,
@@ -415,9 +421,14 @@ def test_caddy_apply_script_backs_up_and_reloads_only_a_verified_candidate():
             env=reload_env, capture_output=True, text=True,
         )
         assert reload.returncode != 0
-        assert reload_current.read_text() == candidate
+        assert reload_current.read_text() == previous
         reload_calls = call_log.read_text().splitlines()
-        assert reload_calls[-1] == "systemctl reload caddy"
+        assert reload_calls[-3:] == [
+            "caddy validate --config " + str(reload_current) + " --adapter caddyfile",
+            "systemctl reload caddy",
+            "systemctl is-active --quiet caddy",
+        ]
+        assert "GPOINT_CADDY_ROLLBACK=PASS" in reload.stdout
         reload_staged.unlink(missing_ok=True)
 
 
