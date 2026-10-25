@@ -42,6 +42,21 @@ def linear_production_publish_script():
 
 
 class DeployEvidenceWorkflowTests(unittest.TestCase):
+    def test_native_deploy_job_is_exact_sha_read_only_preflight_until_separately_authorized(self):
+        native = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+        triggers = native.get('on', native.get(True))
+        self.assertIn('workflow_dispatch', triggers)
+        self.assertIn('candidate_sha', triggers['workflow_dispatch']['inputs'])
+        deploy = native['jobs']['deploy']
+        self.assertEqual(deploy['if'],
+                         "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'")
+        script = '\n'.join(step.get('run', '') for step in deploy['steps'])
+        self.assertIn('REQUESTED_SHA', script)
+        self.assertIn('PRODUCTION_APPLY=NOT_AUTHORIZED', script)
+        self.assertNotIn('deployments', deploy.get('permissions', {}))
+        self.assertNotRegex(script, re.compile(r'docker\s+compose\s+(up|down|pull|restart)'))
+        self.assertNotIn('--apply', script)
+
     def test_authorization_reconciliation_is_a_separate_owner_bound_metadata_only_job(self):
         workflow = yaml.safe_load(WORKFLOW.read_text())
         dispatch = workflow.get("on", workflow.get(True))["workflow_dispatch"]["inputs"]

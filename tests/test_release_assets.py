@@ -14,6 +14,7 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import release_assets as ASSETS  # noqa: E402
+import publish_ghcr_images as GHCR  # noqa: E402
 
 
 class GitHubEvidenceApiRetryTests(unittest.TestCase):
@@ -180,6 +181,29 @@ class GitHubEvidenceApiRetryTests(unittest.TestCase):
 
 
 class ImmutableReleaseTests(unittest.TestCase):
+    def test_native_image_roles_are_candidate_bound_immutable_linux_amd64_digests(self):
+        sha = 'a' * 40
+        digest = 'sha256:' + 'b' * 64
+        config = 'sha256:' + 'c' * 64
+        for role, (_local, repository) in GHCR.IMAGES.items():
+            with self.subTest(role=role):
+                metadata = {
+                    'Id': config,
+                    'Os': 'linux',
+                    'Architecture': 'amd64',
+                    'Config': {'Labels': {
+                        'org.opencontainers.image.revision': sha,
+                        'org.opencontainers.image.source': GHCR.SOURCE_URL,
+                    }},
+                }
+                evidence = GHCR.validate_image_metadata(role, repository, digest, metadata, sha)
+                self.assertEqual(evidence['repository'], repository)
+                self.assertEqual(evidence['digest'], digest)
+                self.assertEqual(evidence['sourceSha'], sha)
+                self.assertEqual(evidence['platform'], 'linux/amd64')
+                with self.assertRaisesRegex(ValueError, 'repository mismatch'):
+                    GHCR.validate_image_metadata(role, 'ghcr.io/attacker/image', digest, metadata, sha)
+
     def test_privileged_prepare_is_main_push_only_and_branch_jobs_are_not_dispatchable(self):
         workflow = (ROOT / '.github/workflows/gpoint-prepare.yml').read_text()
         trigger = workflow.split('\npermissions:', 1)[0]
