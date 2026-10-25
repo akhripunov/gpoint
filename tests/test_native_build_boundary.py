@@ -30,14 +30,23 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         job = self.workflow["jobs"]["python"]
         run_steps = "\n".join(step.get("run", "") for step in job["steps"])
         self.assertIn("services/gsales/tests/run_postgres.py", run_steps)
+        checkout = next(step for step in job["steps"]
+                        if step.get("uses", "").startswith("actions/checkout@"))
+        self.assertEqual(checkout["with"]["fetch-depth"], 0)
         harness = (ROOT / "services/gsales/tests/run_postgres.py").read_text()
         self.assertIn("pgvector/pgvector:0.8.6-pg16", harness)
 
     def test_native_workflow_runs_actionlint_before_build(self):
         steps = self.workflow["jobs"]["workspace"]["steps"]
         lint = next(step for step in steps if step.get("name") == "Validate GitHub Actions workflow")
+        pnpm_setup = next(i for i, step in enumerate(steps)
+                          if step.get("uses", "").startswith("pnpm/action-setup@"))
+        node_setup = next(i for i, step in enumerate(steps)
+                          if step.get("uses", "").startswith("actions/setup-node@"))
         build = self.workflow["jobs"]["build"]
         self.assertIn("actionlint@v1.7.7", lint["run"])
+        self.assertLess(pnpm_setup, node_setup)
+        self.assertEqual(steps[pnpm_setup]["with"]["version"], "9.15.0")
         self.assertEqual(set(build["needs"]), {"workspace", "python"})
 
     def test_build_uses_immutable_candidate_identity_and_attestation(self):
