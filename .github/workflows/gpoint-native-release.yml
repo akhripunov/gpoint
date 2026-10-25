@@ -542,8 +542,18 @@ jobs:
         env:
           BASELINE_PATH: ${{ steps.baseline.outputs.baseline_path }}
           BASELINE_SHA: ${{ steps.baseline.outputs.baseline_sha }}
+          GPOINT_KAMAL_BACKUP_AGE_RECIPIENT: ${{ secrets.GPOINT_KAMAL_BACKUP_AGE_RECIPIENT }}
+          GPOINT_KAMAL_BACKUP_OFFSITE_REMOTE: ${{ secrets.GPOINT_KAMAL_BACKUP_OFFSITE_REMOTE }}
         run: |
           set -euo pipefail
+          python3 - <<'PY'
+          import os, re
+          if not re.fullmatch(r'age1[0-9a-z]{58}', os.environ['GPOINT_KAMAL_BACKUP_AGE_RECIPIENT']):
+              raise SystemExit('protected age recipient is missing or malformed')
+          remote = os.environ['GPOINT_KAMAL_BACKUP_OFFSITE_REMOTE']
+          if not re.fullmatch(r'[A-Za-z0-9_-]+:[A-Za-z0-9_./-]+', remote) or '..' in remote:
+              raise SystemExit('protected offsite backup destination is missing or malformed')
+          PY
           remote_script_dir="/run/gpoint-kamal/${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           remote_backup_helper="${remote_script_dir}/backup.py"
           remote_restore_script="${remote_script_dir}/restore.sh"
@@ -566,7 +576,8 @@ jobs:
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             root@${GPOINT_PRODUCTION_HOST} bash "$remote_restore_script" \
             "$CANDIDATE_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
-            "$BASELINE_PATH" "$BASELINE_SHA" "$remote_backup_helper")"
+            "$BASELINE_PATH" "$BASELINE_SHA" "$remote_backup_helper" \
+            "$GPOINT_KAMAL_BACKUP_AGE_RECIPIENT" "$GPOINT_KAMAL_BACKUP_OFFSITE_REMOTE")"
           grep -qx 'GPOINT_ISOLATED_RESTORE=PASS' <<< "$facts"
           while IFS='=' read -r key value; do
             case "$key" in
@@ -722,7 +733,7 @@ jobs:
           [[ "$baseline_file" == "/opt/gpoint/release-logs/${sha}/kamal-cutover-baseline-${run_id}-${attempt}.txt" ]]
           test -s "$baseline_file"
           test "$(sha256sum "$baseline_file" | awk '{print $1}')" = "$expected_baseline_sha"
-          [[ "$backup_file" == /opt/gpoint/backups/gpoint-pre-release-${sha}-*.dump ]]
+          [[ "$backup_file" == "/opt/gpoint/backups/gpoint-pre-release-${sha}-${run_id}-${attempt}.dump.age" ]]
           [[ "$restore_file" == "/opt/gpoint/release-logs/${sha}/kamal-backup-restore-${run_id}-${attempt}.txt" ]]
           test -s "$backup_file" && test -s "$restore_file"
           test "$(sha256sum "$backup_file" | awk '{print $1}')" = "$expected_backup_sha"
@@ -733,6 +744,8 @@ jobs:
           grep -qx "BACKUP_PATH=$backup_file" "$restore_file"
           grep -qx "BACKUP_SHA256=$expected_backup_sha" "$restore_file"
           grep -qx 'ISOLATED_RESTORE=PASS' "$restore_file"
+          grep -qx 'BACKUP_ENCRYPTION=AGE_X25519' "$restore_file"
+          grep -qx 'OFFSITE_RESTORE=PASS' "$restore_file"
           baseline_value() {
             local result
             result="$(sed -n "s/^$1=//p" "$baseline_file")"

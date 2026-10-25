@@ -326,6 +326,35 @@ def test_cutover_helper_uses_snapshot_bound_graceful_stop_and_pre_deploy_recover
     assert "gsales-api" in helper
 
 
+def test_cutover_backup_is_encrypted_offsite_and_restore_reads_ciphertext_only():
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    deploy = workflow.split("  deploy:\n", 1)[1]
+    backup_step = deploy.split("name: Verify fresh PostgreSQL backup with isolated restore", 1)[1].split(
+        "name: Create exact-SHA in-progress GitHub Deployment", 1
+    )[0]
+    assert "GPOINT_KAMAL_BACKUP_AGE_RECIPIENT" in backup_step
+    assert "GPOINT_KAMAL_BACKUP_OFFSITE_REMOTE" in backup_step
+    helper = (ROOT / "scripts/verify-gpoint-backup-restore.sh").read_text()
+    assert 'test "$(stat -f -c %T /run)" = tmpfs' in helper
+    assert 'age-keygen -y -i "$age_identity"' in helper
+    assert 'age --recipient "$age_recipient"' in helper
+    assert "rclone copyto --immutable" in helper
+    assert "rclone check --download" in helper
+    assert 'age -d -i "$age_identity" "$offsite_copy"' in helper
+    assert ".dump.age" in helper
+    assert 'pg_restore --exit-on-error --no-owner -U gpoint_restore_admin -d gpoint \\\n  < "$backup_file"' not in helper
+
+
+def test_cutover_backup_cli_can_write_plaintext_into_explicit_tmpfs_directory():
+    result = subprocess.run(
+        ["python3", str(ROOT / "scripts/agata-production-migration.py"), "backup", "--sha", "a" * 40, "--help"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "--backup-directory" in result.stdout
+
+
 def test_kamal_inventory_sanitizer_keeps_runtime_facts_and_drops_environment_and_commands():
     inspect = [{
         "Id": "a" * 64,

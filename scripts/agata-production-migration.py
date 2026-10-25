@@ -330,6 +330,8 @@ def main():
     parser.add_argument('mode', choices=['preflight', 'backup', 'migrate'])
     parser.add_argument('--sha', required=True)
     parser.add_argument('--backup-purpose', choices=['pre-release', 'recovery-current'], default='pre-release')
+    parser.add_argument('--backup-directory', type=Path,
+                        help='write the temporary plaintext archive in a caller-provided protected directory')
     args = parser.parse_args()
     if not re.fullmatch('[0-9a-f]{40}', args.sha): raise RuntimeError('exact SHA required')
     # Host configuration is consulted for source identity only; never echo values.
@@ -346,7 +348,8 @@ def main():
         proof = validate_readiness(effective_probe('gpoint-agata-runtime:' + live_sha), authoritative_census())
         print('AGATA_MIGRATION_READINESS=' + json.dumps(dict(public_facts(proof), candidate_sha=args.sha, checked_at=datetime.now(timezone.utc).isoformat(), inventory_source='verified_postgres_administrator_readonly'), sort_keys=True))
     elif args.mode == 'backup':
-        print('GPOINT_COMPLETE_BACKUP=' + json.dumps(dict(complete_backup(args.sha, purpose=args.backup_purpose), candidate_sha=args.sha), sort_keys=True))
+        print('GPOINT_COMPLETE_BACKUP=' + json.dumps(dict(complete_backup(
+            args.sha, directory=args.backup_directory, purpose=args.backup_purpose), candidate_sha=args.sha), sort_keys=True))
     else:
         image = 'gpoint-agata-runtime:' + args.sha
         proof = effective_probe(image)

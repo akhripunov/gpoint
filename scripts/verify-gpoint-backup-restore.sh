@@ -7,6 +7,8 @@ attempt="${3:?GitHub run attempt required}"
 baseline_file="${4:?baseline file required}"
 baseline_sha="${5:?baseline SHA-256 required}"
 backup_helper="${6:?GPoint backup helper required}"
+age_recipient="${7:?protected age recipient required}"
+offsite_remote="${8:?protected rclone destination required}"
 
 [[ "$candidate" =~ ^[0-9a-f]{40}$ ]]
 [[ "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
@@ -16,6 +18,17 @@ backup_helper="${6:?GPoint backup helper required}"
 [[ "${BASH_SOURCE[0]}" == "/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/restore.sh" ]]
 test -s "$baseline_file" && test -s "$backup_helper"
 test "$(sha256sum "$baseline_file" | awk '{print $1}')" = "$baseline_sha"
+[[ "$age_recipient" =~ ^age1[0-9a-z]{58}$ ]]
+[[ "$offsite_remote" =~ ^[A-Za-z0-9_-]+:[A-Za-z0-9_./-]+$ && "$offsite_remote" != *..* ]]
+age_identity=/opt/gpoint/env/gpoint-backup.agekey
+rclone_config=/root/.config/rclone/rclone.conf
+test -f "$age_identity" && test ! -L "$age_identity" && test "$(stat -c '%a:%u' "$age_identity")" = 600:0
+test -f "$rclone_config" && test ! -L "$rclone_config" && test "$(stat -c '%a:%u' "$rclone_config")" = 600:0
+command -v age >/dev/null && command -v age-keygen >/dev/null && command -v rclone >/dev/null
+test "$(age-keygen -y -i "$age_identity")" = "$age_recipient"
+test "$(stat -f -c %T /run)" = tmpfs
+plaintext_dir="/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/plaintext"
+install -d -m 700 "$plaintext_dir"
 roles_file=""
 restore_dir=""
 restore_name="gpoint-restore-${candidate:0:12}-${run_id}-${attempt}"
@@ -24,6 +37,7 @@ cleanup() {
   if [[ -n "$restore_container_id" ]]; then docker rm -f "$restore_container_id" >/dev/null 2>&1 || true; fi
   if [[ -n "$restore_dir" ]]; then rm -rf -- "$restore_dir"; fi
   if [[ -n "$roles_file" ]]; then rm -f -- "$roles_file"; fi
+  if [[ -n "${plaintext_dir:-}" ]]; then rm -rf -- "$plaintext_dir"; fi
   rm -f -- "$backup_helper" "${BASH_SOURCE[0]}"
   rmdir "$(dirname "$backup_helper")" 2>/dev/null || true
 }
@@ -86,7 +100,7 @@ pre_backup_capacity_check
 echo GPOINT_PRE_BACKUP_CAPACITY=PASS
 
 # Reuse GPoint's established complete logical-backup and archive-integrity gate.
-backup_output="$(python3 "$backup_helper" backup --sha "$candidate")"
+backup_output="$(python3 "$backup_helper" backup --sha "$candidate" --backup-directory "$plaintext_dir")"
 backup_json="$(sed -n 's/^GPOINT_COMPLETE_BACKUP=//p' <<< "$backup_output")"
 test -n "$backup_json"
 readarray -t backup_facts < <(python3 - "$backup_json" "$candidate" <<'PY'
@@ -99,8 +113,8 @@ if proof['database']!='gpoint' or proof['status']!='COMPLETE_PROTECTED':
     raise SystemExit('backup proof does not identify a complete GPoint backup')
 if proof.get('candidate_sha') != sys.argv[2]:
     raise SystemExit('backup proof candidate SHA mismatch')
-if not re.fullmatch(r'/opt/gpoint/backups/gpoint-pre-release-' + sys.argv[2] + r'-[0-9]+\.dump', proof['path']):
-    raise SystemExit('backup path is outside the exact candidate backup namespace')
+if not proof['path'].startswith('/run/gpoint-kamal/' + sys.argv[2] + '-') or not proof['path'].endswith('.dump'):
+    raise SystemExit('backup path is outside the protected temporary namespace')
 if not re.fullmatch(r'[0-9a-f]{64}',proof['sha256']):
     raise SystemExit('backup checksum is invalid')
 if not {'public','agata'}.issubset(set(proof['schemas'])):
@@ -110,12 +124,29 @@ print(proof['sha256'])
 PY
 )
 backup_file="${backup_facts[0]}"
-backup_sha="${backup_facts[1]}"
+plaintext_sha="${backup_facts[1]}"
+[[ "$backup_file" == "$plaintext_dir/"* ]]
 test -f "$backup_file" && test ! -L "$backup_file" && test -s "$backup_file"
 chmod 600 "$backup_file"
-test "$(sha256sum "$backup_file" | awk '{print $1}')" = "$backup_sha"
+test "$(sha256sum "$backup_file" | awk '{print $1}')" = "$plaintext_sha"
+encrypted_name="gpoint-pre-release-${candidate}-${run_id}-${attempt}.dump.age"
+backup_file="/opt/gpoint/backups/$encrypted_name"
+backup_work="$(mktemp -d /opt/gpoint/backups/.gpoint-age-${run_id}-${attempt}.XXXXXX)"
+chmod 700 "$backup_work"
+age --recipient "$age_recipient" -o "$backup_work/$encrypted_name" "$plaintext_dir/$(basename "${backup_facts[0]}")"
+chmod 600 "$backup_work/$encrypted_name"
+ln "$backup_work/$encrypted_name" "$backup_file"
+rm -rf "$backup_work"
+backup_sha="$(sha256sum "$backup_file" | awk '{print $1}')"
 backup_bytes="$(stat -c '%s' "$backup_file")"
 [[ "$backup_bytes" =~ ^[0-9]+$ && "$backup_bytes" -gt 0 ]]
+
+offsite_object="${offsite_remote%/}/${candidate}/${run_id}-${attempt}/$encrypted_name"
+rclone copyto --immutable --config "$rclone_config" "$backup_file" "$offsite_object"
+rclone check --download --config "$rclone_config" "$backup_file" "${offsite_remote%/}/${candidate}/${run_id}-${attempt}"
+offsite_copy="$plaintext_dir/offsite.dump.age"
+rclone copyto --config "$rclone_config" "$offsite_object" "$offsite_copy"
+test "$(sha256sum "$offsite_copy" | awk '{print $1}')" = "$backup_sha"
 
 backup_fs="$(stat -c '%d' "$backup_file")"
 docker_fs="$(stat -c '%d' "$docker_root")"
@@ -161,8 +192,8 @@ done
 test "$ready" = 1
 docker exec -i "$restore_name" psql -Xq -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
   < "$roles_file" >/dev/null
-docker exec -i "$restore_name" pg_restore --exit-on-error --no-owner -U gpoint_restore_admin -d gpoint \
-  < "$backup_file" >/dev/null
+age -d -i "$age_identity" "$offsite_copy" | \
+  docker exec -i "$restore_name" pg_restore --exit-on-error --no-owner -U gpoint_restore_admin -d gpoint >/dev/null
 restored_tables="$(docker exec "$restore_name" psql -XqAt -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
   -c "SELECT count(*) FROM pg_tables WHERE schemaname IN ('public','agata','gsales','gsales_meta','agata_identity')")"
 test "$restored_tables" = "$source_tables"
@@ -196,6 +227,9 @@ RESTORED_DATABASE_BYTES=$restored_bytes
 RESTORED_PRISMA_HEAD=$restored_prisma
 RESTORED_AGATA_HEAD=$restored_agata
 ISOLATED_RESTORE=PASS
+BACKUP_ENCRYPTION=AGE_X25519
+OFFSITE_COPY_SHA256=$backup_sha
+OFFSITE_RESTORE=PASS
 EOF
 chmod 600 "$evidence"
 evidence_sha="$(sha256sum "$evidence" | awk '{print $1}')"

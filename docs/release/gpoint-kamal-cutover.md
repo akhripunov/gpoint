@@ -32,6 +32,18 @@ path available until the Kamal production Verify has passed.
       persistent data. Record checksums and retention location outside the
       repository. Restore it into an isolated disposable environment and run
       schema, migration-head, application-read, and media checks there.
+
+  The automated GPoint database gate requires the protected GitHub Actions
+  secrets `GPOINT_KAMAL_BACKUP_AGE_RECIPIENT` (the public age recipient) and
+  `GPOINT_KAMAL_BACKUP_OFFSITE_REMOTE` (an attempt-scoped rclone remote path).
+  On the production host, provision `age`/`age-keygen`, `rclone`, the matching
+  root-owned mode-0600 identity at `/opt/gpoint/env/gpoint-backup.agekey`, and
+  a root-owned mode-0600 rclone config at `/root/.config/rclone/rclone.conf`.
+  The identity is checked against the public recipient before backup. The
+  plaintext custom archive and downloaded offsite copy live only in the
+  `/run` tmpfs attempt directory and are removed after the isolated restore;
+  `/opt/gpoint/backups` retains only the encrypted `.dump.age` object. Missing
+  configuration or failed upload/readback/restore stops the cutover.
 - [ ] Compare the candidate migrations with the live migration heads and the
       isolated restore. Stop if an old application cannot read data after the
       candidate migration or if restore evidence is incomplete.
