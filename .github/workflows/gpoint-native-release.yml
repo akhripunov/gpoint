@@ -1003,12 +1003,37 @@ jobs:
           install -d -o root -g root -m 0700 "$manifest_dir"
           test ! -e "$manifest_file"
           python3 - "$manifest_file" "$sha" "$version" "$app" "$agata" "$miniapp" "$run_id" "$attempt" "$deployment_id" "$baseline_file" "$expected_baseline_sha" "$inventory_file" "$inventory_sha" "$backup_file" "$expected_backup_sha" "$restore_file" "$expected_restore_sha" "$expected_agata_head" "$actual_agata_head" "$postgres_system_identifier" "$network_fingerprint" <<'PY'
-          import json, os, sys, tempfile
+          import json, os, subprocess, sys, tempfile
           from datetime import datetime, timezone
           (path, sha, version, app, agata, miniapp, run_id, attempt, deployment_id,
            baseline_path, baseline_sha, inventory_path, inventory_sha, backup_path,
            backup_sha, restore_path, restore_sha, agata_candidate_head,
            agata_live_head, postgres_system_identifier, network_fingerprint) = sys.argv[1:]
+          expected_services = [
+              ("gpoint-core-api", "ghcr.io/akhripunov/gpoint-runtime", app),
+              ("gpoint-core-worker", "ghcr.io/akhripunov/gpoint-runtime", app),
+              ("gpoint-core-bot", "ghcr.io/akhripunov/gpoint-runtime", app),
+              ("gpoint-agata-api", "ghcr.io/akhripunov/gpoint-agata-runtime", agata),
+              ("gpoint-agata-memory-worker", "ghcr.io/akhripunov/gpoint-agata-runtime", agata),
+              ("gpoint-miniapp-web", "ghcr.io/akhripunov/gpoint-miniapp", miniapp),
+          ]
+          runtime_services = []
+          for prefix, repository, digest in expected_services:
+              name = f"{prefix}-{version}"
+              raw = subprocess.run(["docker", "inspect", name], check=True, capture_output=True, text=True).stdout
+              container = json.loads(raw)[0]
+              image_id = container["Image"]
+              image = json.loads(subprocess.run(["docker", "image", "inspect", image_id], check=True,
+                  capture_output=True, text=True).stdout)[0]
+              repo_digest = f"{repository}@{digest}"
+              if not container["State"]["Running"] or container["Config"]["Labels"].get("org.opencontainers.image.revision") != sha:
+                  raise SystemExit(f"final runtime identity changed before manifest: {name}")
+              if repo_digest not in image.get("RepoDigests", []):
+                  raise SystemExit(f"final runtime digest changed before manifest: {name}")
+              runtime_services.append({"name": name, "containerId": container["Id"],
+                  "imageId": image_id, "repositoryDigest": repo_digest, "revision": sha,
+                  "running": True, "healthStatus": container["State"].get("Health", {}).get("Status", "none"),
+                  "restartCount": container["RestartCount"]})
           manifest = {
               "schema": "gpoint-kamal-production-manifest/v1",
               "result": "PASS",
@@ -1017,6 +1042,7 @@ jobs:
                   "images": {"core": f"ghcr.io/akhripunov/gpoint-runtime@{app}",
                       "agata": f"ghcr.io/akhripunov/gpoint-agata-runtime@{agata}",
                       "miniapp": f"ghcr.io/akhripunov/gpoint-miniapp@{miniapp}"}},
+              "runtimeServices": runtime_services,
               "attempt": {"runId": run_id, "runAttempt": attempt,
                   "githubDeploymentId": deployment_id},
               "evidence": {

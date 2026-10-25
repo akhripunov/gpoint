@@ -441,6 +441,8 @@ def test_kamal_production_verify_persists_attempt_bound_manifest():
     assert "INVENTORY_SHA256" in verify and "BACKUP_SHA256" in verify
     assert "ISOLATED_RESTORE=PASS" in verify
     assert "GPOINT_KAMAL_MANIFEST_SHA256=" in verify
+    assert '"runtimeServices"' in verify
+    assert '"containerId"' in verify and '"repositoryDigest"' in verify
 
 
 def test_kamal_inventory_sanitizer_keeps_runtime_facts_and_drops_environment_and_commands(tmp_path):
