@@ -1,0 +1,47 @@
+service: gpoint-agata
+image: akhripunov/gpoint-agata-runtime
+primary_role: api
+
+servers:
+  api:
+    hosts:
+      - 38.180.110.92
+    cmd: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    proxy: false
+    env:
+      clear:
+        RELEASE_SHA: <%= ENV.fetch("GPOINT_COMMIT_SHA") %>
+    options:
+      env-file:
+        - /opt/gpoint/env/production.env
+
+  memory-worker:
+    hosts:
+      - 38.180.110.92
+    cmd: python -m app.memory.worker
+    proxy: false
+    env:
+      clear:
+        RELEASE_SHA: <%= ENV.fetch("GPOINT_COMMIT_SHA") %>
+    options:
+      env-file:
+        - /opt/gpoint/env/production.env
+
+registry:
+  server: ghcr.io
+  username: akhripunov
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+ssh:
+  user: root
+  keys:
+    - <%= ENV.fetch("GPOINT_SSH_KEY") %>
+  keys_only: true
+  config: true
+
+builder:
+  arch: amd64
+
+retain_containers: 2
+minimum_version: 2.12.0

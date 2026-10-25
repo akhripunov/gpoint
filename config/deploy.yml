@@ -1,0 +1,76 @@
+service: gpoint-core
+image: akhripunov/gpoint-runtime
+primary_role: api
+
+servers:
+  api:
+    hosts:
+      - 38.180.110.92
+    cmd: node apps/api/dist/apps/api/src/main.js
+    env:
+      clear:
+        RELEASE_SHA: <%= ENV.fetch("GPOINT_COMMIT_SHA") %>
+        AGATA_SERVICE_URL: http://agata-api:8000
+    options:
+      env-file:
+        - /opt/gpoint/env/production.env
+      volume: /opt/gpoint/media:/data/media
+    proxy:
+      host: gpoint.amiora.one
+      path_prefixes:
+        - /api
+      strip_path_prefix: true
+      app_port: 3000
+      healthcheck:
+        path: /health/live
+
+  worker:
+    hosts:
+      - 38.180.110.92
+    cmd: node apps/worker/dist/main.js
+    proxy: false
+    env:
+      clear:
+        RELEASE_SHA: <%= ENV.fetch("GPOINT_COMMIT_SHA") %>
+    options:
+      env-file:
+        - /opt/gpoint/env/production.env
+
+  bot:
+    hosts:
+      - 38.180.110.92
+    cmd: node apps/bot/dist/main.js
+    proxy: false
+    env:
+      clear:
+        RELEASE_SHA: <%= ENV.fetch("GPOINT_COMMIT_SHA") %>
+    options:
+      env-file:
+        - /opt/gpoint/env/production.env
+
+proxy:
+  run:
+    http_port: 3001
+    https_port: 3002
+    bind_ips:
+      - 127.0.0.1
+    version: v0.9.2
+
+registry:
+  server: ghcr.io
+  username: akhripunov
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+ssh:
+  user: root
+  keys:
+    - <%= ENV.fetch("GPOINT_SSH_KEY") %>
+  keys_only: true
+  config: true
+
+builder:
+  arch: amd64
+
+retain_containers: 2
+minimum_version: 2.12.0
