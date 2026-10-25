@@ -195,6 +195,65 @@ def test_kamal_workflow_applies_candidate_caddyfile_before_production_verify():
     assert "if: always()" not in consumer_step
 
 
+def test_kamal_success_requires_database_media_consumer_and_eros_readback():
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    deploy = workflow.split("  deploy:\n", 1)[1]
+    assert "name: Capture PostgreSQL and Eros cutover baseline" in deploy
+    assert "sanitize-kamal-inventory.py" in deploy
+    assert "POSTGRES_SYSTEM_IDENTIFIER" in deploy
+    assert "POSTGRES_ACL_FINGERPRINT" in deploy
+    assert "EROS_CONTAINER_ID" in deploy
+    verify = deploy.split("name: Verify public routes and exact running services", 1)[1].split(
+        "name: Record GitHub Deployment result", 1
+    )[0]
+    assert "prisma migrate status" in verify
+    assert "alembic heads" in verify
+    assert "SELECT version_num FROM agata.alembic_version" in verify
+    assert "GPOINT_MEDIA_READ_WRITE=PASS" in verify
+    assert "GPOINT_DUPLICATE_CONSUMER_CHECK=PASS" in verify
+    assert "POSTGRES_ACL_FINGERPRINT" in verify
+    assert "EROS_CONTAINER_ID" in verify
+    assert "gsales-api" in verify and "State.Running" in verify
+
+
+def test_kamal_inventory_sanitizer_keeps_runtime_facts_and_drops_environment_and_commands():
+    inspect = [{
+        "Id": "a" * 64,
+        "Name": "/compose-api-1",
+        "Created": "2026-10-25T00:00:00Z",
+        "Config": {
+            "Image": "gpoint-runtime:oldsha",
+            "Env": ["DATABASE_URL=postgres://private", "TOKEN=private"],
+            "Cmd": ["node", "--token", "private"],
+            "Labels": {"com.docker.compose.project": "compose", "com.docker.compose.service": "api"},
+        },
+        "Image": "sha256:" + "b" * 64,
+        "State": {"Status": "running", "Running": True, "Health": {"Status": "healthy"}},
+        "HostConfig": {"RestartPolicy": {"Name": "unless-stopped"}},
+        "NetworkSettings": {
+            "Ports": {"3000/tcp": [{"HostIp": "127.0.0.1", "HostPort": "3000"}]},
+            "Networks": {"gpoint_app": {"Aliases": ["api"], "IPAddress": "172.20.0.2"}},
+        },
+        "Mounts": [{"Type": "bind", "Source": "/opt/gpoint/media", "Destination": "/data/media", "RW": True}],
+    }]
+    result = subprocess.run(
+        ["python3", str(ROOT / "scripts/sanitize-kamal-inventory.py")],
+        input=__import__("json").dumps(inspect), text=True, capture_output=True, check=True,
+    )
+    inventory = __import__("json").loads(result.stdout)
+    serialized = result.stdout
+    assert inventory["schema"] == "gpoint-vps-inventory/v1"
+    container = inventory["containers"][0]
+    assert container["name"] == "compose-api-1"
+    assert container["composeProject"] == "compose"
+    assert container["composeService"] == "api"
+    assert container["state"] == "running" and container["health"] == "healthy"
+    assert container["networks"]["gpoint_app"]["aliases"] == ["api"]
+    assert container["mounts"][0]["destination"] == "/data/media"
+    assert "DATABASE_URL" not in serialized and "postgres://private" not in serialized
+    assert "TOKEN=private" not in serialized and "--token" not in serialized
+
+
 def test_caddy_apply_script_backs_up_and_reloads_only_a_verified_candidate():
     candidate_sha = "a" * 40
     candidate = "gpoint.amiora.one {\n  respond /health 200\n}\n"

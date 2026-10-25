@@ -399,6 +399,115 @@ jobs:
             UserKnownHostsFile $HOME/.ssh/known_hosts
           EOF
           chmod 600 "$HOME/.ssh/config"
+      - name: Capture PostgreSQL and Eros cutover baseline
+        if: inputs.mode == 'production'
+        id: baseline
+        run: |
+          set -euo pipefail
+          remote_inventory_script="/tmp/gpoint-inventory-${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.py"
+          scp -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            scripts/sanitize-kamal-inventory.py "root@38.180.110.92:$remote_inventory_script"
+          facts="$(ssh -T -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            root@38.180.110.92 bash -s -- "$CANDIDATE_SHA" "$GITHUB_RUN_ID" \
+            "$GITHUB_RUN_ATTEMPT" "$remote_inventory_script" <<'REMOTE'
+          set -euo pipefail
+          candidate="$1"; run_id="$2"; attempt="$3"; inventory_script="$4"
+          [[ "$candidate" =~ ^[0-9a-f]{40}$ && "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
+          [[ "$inventory_script" == "/tmp/gpoint-inventory-${candidate}-${run_id}-${attempt}.py" ]]
+          test -s "$inventory_script"
+          current_sha="$(sed -n 's/^RELEASE_SHA=//p' /opt/gpoint/env/production.env | head -1)"
+          [[ "$current_sha" =~ ^[0-9a-f]{40}$ ]]
+          api_image="$(docker inspect --format '{{.Config.Image}}' compose-api-1)"
+          docker image inspect "$api_image" >/dev/null
+          api_image_sha="$(docker image inspect "$api_image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+          test "$api_image_sha" = "$current_sha"
+          postgres_id="$(docker inspect --format '{{.Id}}' shared_postgres_1)"
+          postgres_image_id="$(docker inspect --format '{{.Image}}' shared_postgres_1)"
+          test "$(docker inspect --format '{{.State.Running}}' shared_postgres_1)" = true
+          eros_id="$(docker inspect --format '{{.Id}}' compose-eros-1)"
+          eros_image_id="$(docker inspect --format '{{.Image}}' compose-eros-1)"
+          test "$(docker inspect --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' compose-eros-1)" = 'true healthy'
+          eros_relay_id="$(docker inspect --format '{{.Id}}' compose-eros-embedding-relay-1)"
+          eros_relay_image_id="$(docker inspect --format '{{.Image}}' compose-eros-embedding-relay-1)"
+          test "$(docker inspect --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' compose-eros-embedding-relay-1)" = 'true healthy'
+          systemctl is-active --quiet caddy
+          caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          caddy_sha="$(sha256sum /etc/caddy/Caddyfile | awk '{print $1}')"
+          database_facts="$(docker exec -i shared_postgres_1 sh -ec 'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d gpoint' <<'SQL'
+          SELECT json_build_object(
+            'systemIdentifier',(SELECT system_identifier::text FROM pg_control_system()),
+            'serverVersionNum',current_setting('server_version_num')::integer,
+            'databases',(SELECT json_agg(json_build_object('name',datname,'owner',pg_get_userbyid(datdba),'allowConnections',datallowconn,'acl',datacl::text) ORDER BY datname) FROM pg_database WHERE datname IN ('gpoint','postgres','template1','eros')),
+            'erosRoles',(SELECT json_agg(json_build_object('name',rolname,'login',rolcanlogin,'superuser',rolsuper,'createDatabase',rolcreatedb,'createRole',rolcreaterole,'bypassRls',rolbypassrls) ORDER BY rolname) FROM pg_roles WHERE rolname IN ('eros_ddl','eros_runtime','eros_migrator')),
+            'erosMemberships',(SELECT json_agg(json_build_object('role',pg_get_userbyid(roleid),'member',pg_get_userbyid(member)) ORDER BY roleid,member) FROM pg_auth_members WHERE roleid IN (SELECT oid FROM pg_roles WHERE rolname IN ('eros_ddl','eros_runtime','eros_migrator')) OR member IN (SELECT oid FROM pg_roles WHERE rolname IN ('eros_ddl','eros_runtime','eros_migrator')))
+          )::text;
+          SQL
+          )"
+          postgres_system_identifier="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["systemIdentifier"])' "$database_facts")"
+          postgres_server_version_num="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["serverVersionNum"])' "$database_facts")"
+          [[ "$postgres_system_identifier" =~ ^[0-9]+$ && "$postgres_server_version_num" =~ ^[0-9]+$ ]]
+          postgres_acl_fingerprint="$(printf '%s' "$database_facts" | sha256sum | awk '{print $1}')"
+          network_fingerprint="$(docker network inspect gpoint_eros_api gpoint_eros_data gpoint_eros_embeddings | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(json.dumps(sorted(({"name":r["Name"],"id":r["Id"],"internal":r["Internal"],"ipam":r.get("IPAM",{}).get("Config",[])} for r in rows),key=lambda r:r["name"]),sort_keys=True,separators=(",",":"))' | sha256sum | awk '{print $1}')"
+          migration_facts="$(docker run --rm --network shared_internal --env-file /opt/gpoint/env/production.env "$api_image" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const p=await db.$queryRawUnsafe("SELECT migration_name FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY finished_at DESC LIMIT 1");const a=await db.$queryRawUnsafe("SELECT to_regclass('\''agata.alembic_version'\'')::text AS relation");let head="ABSENT";if(a[0].relation){const rows=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(rows.length!==1)throw Error("AGATA head is not singular");head=rows[0].version_num}console.log("PRISMA_HEAD="+(p[0]?.migration_name||"NONE"));console.log("AGATA_HEAD="+head)}catch(e){console.error("READ_ONLY_DATABASE_BASELINE_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
+          prisma_head="$(sed -n 's/^PRISMA_HEAD=//p' <<< "$migration_facts")"
+          agata_head="$(sed -n 's/^AGATA_HEAD=//p' <<< "$migration_facts")"
+          test -n "$prisma_head" && test -n "$agata_head"
+          free_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
+          memory_kb="$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)"
+          [[ "$free_kb" =~ ^[0-9]+$ && "$memory_kb" =~ ^[0-9]+$ ]]
+          log_dir="/opt/gpoint/release-logs/${candidate}"
+          mkdir -p "$log_dir" && chmod 700 "$log_dir"
+          inventory_file="${log_dir}/kamal-vps-inventory-${run_id}-${attempt}.json"
+          ids=( $(docker ps -aq) )
+          ((${#ids[@]} > 0))
+          docker inspect "${ids[@]}" | python3 "$inventory_script" > "$inventory_file"
+          chmod 600 "$inventory_file"
+          inventory_sha="$(sha256sum "$inventory_file" | awk '{print $1}')"
+          baseline_file="${log_dir}/kamal-cutover-baseline-${run_id}-${attempt}.txt"
+          umask 077
+          cat > "$baseline_file" <<EOF
+          BASELINE_SCHEMA=gpoint-kamal-cutover-baseline/v1
+          CANDIDATE_SHA=$candidate
+          RUN_ID=$run_id
+          ATTEMPT=$attempt
+          CURRENT_SHA=$current_sha
+          CURRENT_API_IMAGE=$api_image
+          CURRENT_API_IMAGE_SHA=$api_image_sha
+          POSTGRES_CONTAINER_ID=$postgres_id
+          POSTGRES_IMAGE_ID=$postgres_image_id
+          POSTGRES_SYSTEM_IDENTIFIER=$postgres_system_identifier
+          POSTGRES_SERVER_VERSION_NUM=$postgres_server_version_num
+          POSTGRES_ACL_FINGERPRINT=$postgres_acl_fingerprint
+          PRISMA_HEAD=$prisma_head
+          AGATA_HEAD=$agata_head
+          EROS_CONTAINER_ID=$eros_id
+          EROS_IMAGE_ID=$eros_image_id
+          EROS_RELAY_CONTAINER_ID=$eros_relay_id
+          EROS_RELAY_IMAGE_ID=$eros_relay_image_id
+          EROS_NETWORK_FINGERPRINT=$network_fingerprint
+          CADDYFILE_SHA256=$caddy_sha
+          INVENTORY_FILE=$inventory_file
+          INVENTORY_SHA256=$inventory_sha
+          FREE_DISK_KB=$free_kb
+          MEMORY_AVAILABLE_KB=$memory_kb
+          EOF
+          chmod 600 "$baseline_file"
+          baseline_sha="$(sha256sum "$baseline_file" | awk '{print $1}')"
+          printf 'baseline_path=%s\nbaseline_sha=%s\ninventory_sha=%s\ncurrent_sha=%s\nprisma_head=%s\nagata_head=%s\npostgres_system_identifier=%s\n' \
+            "$baseline_file" "$baseline_sha" "$inventory_sha" "$current_sha" "$prisma_head" "$agata_head" "$postgres_system_identifier"
+          rm -f "$inventory_script"
+          REMOTE
+          )"
+          while IFS='=' read -r key value; do
+            case "$key" in
+              baseline_path|baseline_sha|inventory_sha|current_sha|prisma_head|agata_head|postgres_system_identifier)
+                printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"
+                printf -- '- %s: `%s`\n' "$key" "$value" >> "$GITHUB_STEP_SUMMARY"
+                ;;
+            esac
+          done <<< "$facts"
       - name: Block unsafe first cutover and preserve stopped GSales
         if: inputs.mode == 'production'
         run: |
@@ -525,15 +634,72 @@ jobs:
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
+          BASELINE_PATH: ${{ steps.baseline.outputs.baseline_path }}
+          BASELINE_SHA: ${{ steps.baseline.outputs.baseline_sha }}
         run: |
           set -euo pipefail
           curl --retry 12 --retry-connrefused --retry-delay 5 --fail --silent --show-error https://gpoint.amiora.one/api/health/live | grep -Fq '"status":"ok"'
           for path in / /creators; do
             curl --retry 6 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.amiora.one$path" | grep -Fq '<div id="root">'
           done
-          ssh -T root@38.180.110.92 bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" <<'REMOTE'
+          ssh -T root@38.180.110.92 bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$BASELINE_PATH" "$BASELINE_SHA" <<'REMOTE'
           set -euo pipefail
-          sha="$1"; version="$2"; app="$3"; agata="$4"; miniapp="$5"
+          sha="$1"; version="$2"; app="$3"; agata="$4"; miniapp="$5"; run_id="$6"; attempt="$7"; baseline_file="$8"; expected_baseline_sha="$9"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ && "$expected_baseline_sha" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
+          [[ "$baseline_file" == "/opt/gpoint/release-logs/${sha}/kamal-cutover-baseline-${run_id}-${attempt}.txt" ]]
+          test -s "$baseline_file"
+          test "$(sha256sum "$baseline_file" | awk '{print $1}')" = "$expected_baseline_sha"
+          baseline_value() {
+            local result
+            result="$(sed -n "s/^$1=//p" "$baseline_file")"
+            test -n "$result"
+            printf '%s' "$result"
+          }
+          test "$(baseline_value BASELINE_SCHEMA)" = gpoint-kamal-cutover-baseline/v1
+          test "$(baseline_value CANDIDATE_SHA)" = "$sha"
+          test "$(baseline_value RUN_ID)" = "$run_id"
+          test "$(baseline_value ATTEMPT)" = "$attempt"
+          test "$(sha256sum "$(baseline_value INVENTORY_FILE)" | awk '{print $1}')" = "$(baseline_value INVENTORY_SHA256)"
+          inventory_sha="$(baseline_value INVENTORY_SHA256)"
+          inventory_file="$(baseline_value INVENTORY_FILE)"
+          python3 - "$inventory_file" <<'PY'
+          import json, sys
+          with open(sys.argv[1], encoding='utf-8') as source:
+              inventory = json.load(source)
+          if inventory.get('schema') != 'gpoint-vps-inventory/v1' or not inventory.get('containers'):
+              raise SystemExit('fresh sanitized VPS inventory is missing or invalid')
+          PY
+          test "$(docker inspect --format '{{.Id}}' shared_postgres_1)" = "$(baseline_value POSTGRES_CONTAINER_ID)"
+          test "$(docker inspect --format '{{.Image}}' shared_postgres_1)" = "$(baseline_value POSTGRES_IMAGE_ID)"
+          test "$(docker inspect --format '{{.State.Running}}' shared_postgres_1)" = true
+          test "$(docker inspect --format '{{.Id}}' compose-eros-1)" = "$(baseline_value EROS_CONTAINER_ID)"
+          test "$(docker inspect --format '{{.Image}}' compose-eros-1)" = "$(baseline_value EROS_IMAGE_ID)"
+          test "$(docker inspect --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' compose-eros-1)" = 'true healthy'
+          test "$(docker inspect --format '{{.Id}}' compose-eros-embedding-relay-1)" = "$(baseline_value EROS_RELAY_CONTAINER_ID)"
+          test "$(docker inspect --format '{{.Image}}' compose-eros-embedding-relay-1)" = "$(baseline_value EROS_RELAY_IMAGE_ID)"
+          test "$(docker inspect --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' compose-eros-embedding-relay-1)" = 'true healthy'
+          database_facts="$(docker exec -i shared_postgres_1 sh -ec 'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d gpoint' <<'SQL'
+          SELECT json_build_object(
+            'systemIdentifier',(SELECT system_identifier::text FROM pg_control_system()),
+            'serverVersionNum',current_setting('server_version_num')::integer,
+            'databases',(SELECT json_agg(json_build_object('name',datname,'owner',pg_get_userbyid(datdba),'allowConnections',datallowconn,'acl',datacl::text) ORDER BY datname) FROM pg_database WHERE datname IN ('gpoint','postgres','template1','eros')),
+            'erosRoles',(SELECT json_agg(json_build_object('name',rolname,'login',rolcanlogin,'superuser',rolsuper,'createDatabase',rolcreatedb,'createRole',rolcreaterole,'bypassRls',rolbypassrls) ORDER BY rolname) FROM pg_roles WHERE rolname IN ('eros_ddl','eros_runtime','eros_migrator')),
+            'erosMemberships',(SELECT json_agg(json_build_object('role',pg_get_userbyid(roleid),'member',pg_get_userbyid(member)) ORDER BY roleid,member) FROM pg_auth_members WHERE roleid IN (SELECT oid FROM pg_roles WHERE rolname IN ('eros_ddl','eros_runtime','eros_migrator')) OR member IN (SELECT oid FROM pg_roles WHERE rolname IN ('eros_ddl','eros_runtime','eros_migrator')))
+          )::text;
+          SQL
+          )"
+          postgres_system_identifier="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["systemIdentifier"])' "$database_facts")"
+          postgres_server_version_num="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["serverVersionNum"])' "$database_facts")"
+          test "$postgres_system_identifier" = "$(baseline_value POSTGRES_SYSTEM_IDENTIFIER)"
+          test "$postgres_server_version_num" = "$(baseline_value POSTGRES_SERVER_VERSION_NUM)"
+          test "$(printf '%s' "$database_facts" | sha256sum | awk '{print $1}')" = "$(baseline_value POSTGRES_ACL_FINGERPRINT)"
+          network_fingerprint="$(docker network inspect gpoint_eros_api gpoint_eros_data gpoint_eros_embeddings | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(json.dumps(sorted(({"name":r["Name"],"id":r["Id"],"internal":r["Internal"],"ipam":r.get("IPAM",{}).get("Config",[])} for r in rows),key=lambda r:r["name"]),sort_keys=True,separators=(",",":"))' | sha256sum | awk '{print $1}')"
+          test "$network_fingerprint" = "$(baseline_value EROS_NETWORK_FINGERPRINT)"
+          caddy_backup="/opt/gpoint/backups/caddy-before-${sha}-${run_id}-${attempt}"
+          sha256sum --check --status "${caddy_backup}.sha256"
+          test "$(awk '{print $1}' "${caddy_backup}.sha256")" = "$(baseline_value CADDYFILE_SHA256)"
+          echo 'GPOINT_POSTGRES_EROS_CADDY_PRESERVATION=PASS'
           for item in \
             "gpoint-core|api|ghcr.io/akhripunov/gpoint-runtime|$app" \
             "gpoint-core|worker|ghcr.io/akhripunov/gpoint-runtime|$app" \
@@ -558,7 +724,9 @@ jobs:
                 grep -Fq 'shared_internal' <<< "$networks"
                 grep -Eq '"api"' <<< "$api_aliases"
                 echo 'GPOINT_KAMAL_NETWORK_ALIAS_CHECK=PASS'
-                docker exec "$container" node -e "fetch('http://127.0.0.1:3000/health/live').then(async r => { if (!r.ok || (await r.json()).status !== 'ok') process.exit(1) }).catch(() => process.exit(1))" ;;
+                docker exec "$container" node -e "fetch('http://127.0.0.1:3000/health/live').then(async r => { if (!r.ok || (await r.json()).status !== 'ok') process.exit(1) }).catch(() => process.exit(1))"
+                docker exec "$container" node -e "const fs=require('node:fs');const p='/data/media/.gpoint-kamal-verify-'+process.argv[1];const value='gpoint-media-read-write-'+process.argv[1];try{fs.writeFileSync(p,value,{flag:'wx'});if(fs.readFileSync(p,'utf8')!==value)process.exitCode=1;else console.log('GPOINT_MEDIA_READ_WRITE=PASS')}finally{try{fs.unlinkSync(p)}catch{}}" "$sha-$run_id-$attempt"
+                ;;
               gpoint-core:worker) docker top "$container" | grep -Fq 'apps/worker/dist/main.js' ;;
               gpoint-core:bot) docker top "$container" | grep -Fq 'apps/bot/dist/main.js' ;;
               gpoint-agata:api)
@@ -569,8 +737,43 @@ jobs:
               gpoint-miniapp:web) docker exec "$container" wget --spider --quiet http://127.0.0.1/ ;;
             esac
           done
+          prisma_status="$(docker exec "gpoint-core-api-$version" pnpm --filter @gpoint/db exec prisma migrate status 2>&1)"
+          if printf '%s\n' "$prisma_status" | grep -Eiq 'Database schema is up to date|No pending migrations to apply'; then
+            ! printf '%s\n' "$prisma_status" | grep -Eiq 'Following migrations have not yet been applied|The following migration(s) have not yet been applied'
+          else
+            echo 'Prisma migration status is pending or unrecognized' >&2
+            exit 1
+          fi
+          echo 'GPOINT_PRISMA_MIGRATION_HEAD=PASS'
+          agata_container="gpoint-agata-api-$version"
+          agata_heads="$(docker exec "$agata_container" alembic heads)"
+          [[ "$(printf '%s\n' "$agata_heads" | awk 'NF { count++ } END { print count+0 }')" = 1 ]]
+          expected_agata_head="$(printf '%s\n' "$agata_heads" | awk 'NF { print $1 }')"
+          actual_agata_head="$(docker exec "$agata_container" python -c 'import os,psycopg; from sqlalchemy.engine import make_url; u=os.environ.get("AGATA_MIGRATOR_DATABASE_URL") or os.environ["AGATA_DATABASE_URL"]; u=u.replace("postgresql+asyncpg://","postgresql+psycopg://",1); url=make_url(u); url=url.set(query={k:v for k,v in url.query.items() if k in {"sslmode","sslrootcert","sslcert","sslkey","connect_timeout","application_name"}}); c=psycopg.connect(url.render_as_string(hide_password=False)); row=c.execute("SELECT version_num FROM agata.alembic_version").fetchall(); assert len(row)==1; print(row[0][0]); c.close()')"
+          test "$actual_agata_head" = "$expected_agata_head"
+          echo 'GPOINT_AGATA_MIGRATION_HEAD=PASS'
+          for role in worker bot memory-worker; do
+            case "$role" in
+              worker) prefix=gpoint-core-worker ;;
+              bot) prefix=gpoint-core-bot ;;
+              memory-worker) prefix=gpoint-agata-memory-worker ;;
+            esac
+            count="$(docker ps -q --filter "name=^/${prefix}-" | wc -l | tr -d ' ')"
+            test "$count" = 1 || { echo "Expected one running consumer for $role, found $count" >&2; exit 1; }
+          done
+          for service in gsales-api gsales-agata-api gsales-agata-memory-worker; do
+            ids="$(docker ps -aq --filter "label=com.docker.compose.service=$service")"
+            test -n "$ids" || { echo "Expected stopped GSales service is missing: $service" >&2; exit 1; }
+            while IFS= read -r id; do
+              [[ -n "$id" ]] || continue
+              test "$(docker inspect --format '{{.State.Running}}' "$id")" = false
+            done <<< "$ids"
+          done
+          echo 'GPOINT_DUPLICATE_CONSUMER_CHECK=PASS'
+          echo 'GPOINT_POSTGRES_MIGRATIONS=PASS'
+          echo 'GPOINT_GSALES_STOPPED=PASS'
           REMOTE
-          echo "GPOINT_KAMAL_VERIFY=PASS SHA=$CANDIDATE_SHA"
+          echo "GPOINT_KAMAL_VERIFY=PASS SHA=$CANDIDATE_SHA BASELINE_SHA=$BASELINE_SHA INVENTORY_SHA=$inventory_sha"
       - name: Record GitHub Deployment result against the same attempt
         if: always() && inputs.mode == 'production' && steps.deployment.outputs.id != ''
         env:
