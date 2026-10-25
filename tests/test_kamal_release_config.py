@@ -130,10 +130,14 @@ def test_kamal_deploy_uses_native_verified_images_and_preserves_first_cutover_gu
     assert "GPOINT_KAMAL_VERIFY=PASS" in kamal
     assert "ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625" in kamal
     assert "gem install kamal" not in kamal
-    assert kamal.index("name: Block unsafe first cutover") < kamal.index("name: Deploy request-serving Kamal roles")
-    guard = kamal.split("name: Block unsafe first cutover", 1)[1].split("name: Create exact-SHA in-progress GitHub Deployment", 1)[0]
-    assert 'if [[ "$running" == true ]]; then' in guard
-    assert '"$name" == compose-*' not in guard
+    assert kamal.index("name: Pause legacy GPoint services after restore gates") < kamal.index(
+        "name: Deploy request-serving Kamal roles"
+    )
+    cutover_helper = (ROOT / "scripts/pause-legacy-gpoint.sh").read_text()
+    assert "docker stop --time 120" in cutover_helper
+    assert "INVENTORY_SHA256" in cutover_helper
+    assert "restore_legacy_services" in cutover_helper
+    assert "gsales-api" in cutover_helper
     assert 'index .NetworkSettings.Networks "gpoint_app").Aliases' in kamal
     assert 'index .NetworkSettings.Networks "shared_internal").Aliases' in kamal
 
@@ -244,15 +248,15 @@ def test_kamal_success_requires_database_media_consumer_and_eros_readback():
     assert "gsales-api" in verify and "State.Running" in verify
 
 
-def test_first_cutover_requires_a_fresh_backup_and_isolated_restore_before_apply():
+def test_first_cutover_stops_only_freshly_inventoried_legacy_services_after_restore():
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
     assert "name: Verify fresh PostgreSQL backup with isolated restore" in deploy
     assert deploy.index("name: Capture PostgreSQL and Eros cutover baseline") < deploy.index(
         "name: Verify fresh PostgreSQL backup with isolated restore"
-    ) < deploy.index("name: Block unsafe first cutover and preserve stopped GSales")
+    ) < deploy.index("name: Pause legacy GPoint services after restore gates")
     backup_step = deploy.split("name: Verify fresh PostgreSQL backup with isolated restore", 1)[1].split(
-        "name: Block unsafe first cutover", 1
+        "name: Pause legacy GPoint services", 1
     )[0]
     assert "scripts/verify-gpoint-backup-restore.sh" in backup_step
     assert "backup_sha256" in backup_step
@@ -278,7 +282,48 @@ def test_first_cutover_requires_a_fresh_backup_and_isolated_restore_before_apply
     assert 'restore_container_id="$(docker run -d' in helper
     assert "/run/gpoint-kamal/" in helper
     assert "GPOINT_ISOLATED_RESTORE=PASS" in helper
+    cutover_step = deploy.split("name: Pause legacy GPoint services after restore gates", 1)[1].split(
+        "name: Deploy request-serving Kamal roles", 1
+    )[0]
+    assert "BASELINE_PATH: ${{ steps.baseline.outputs.baseline_path }}" in cutover_step
+    assert "BASELINE_SHA: ${{ steps.baseline.outputs.baseline_sha }}" in cutover_step
+    assert "scripts/pause-legacy-gpoint.sh" in cutover_step
     subprocess.run(["bash", "-n", str(ROOT / "scripts/verify-gpoint-backup-restore.sh")], check=True)
+
+
+def test_cutover_helper_uses_snapshot_bound_graceful_stop_and_pre_deploy_recovery():
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    deploy = workflow.split("  deploy:\n", 1)[1]
+    assert deploy.index("name: Verify fresh PostgreSQL backup with isolated restore") < deploy.index(
+        "name: Create exact-SHA in-progress GitHub Deployment"
+    ) < deploy.index("name: Pause legacy GPoint services after restore gates") < deploy.index(
+        "name: Deploy request-serving Kamal roles"
+    )
+    cutover = deploy.split("name: Pause legacy GPoint services after restore gates", 1)[1].split(
+        "name: Deploy request-serving Kamal roles", 1
+    )[0]
+    assert "scripts/pause-legacy-gpoint.sh" in cutover
+    assert 'test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"' in cutover
+    assert cutover.index("git/ref/heads/main") < cutover.index("scp \"${ssh_opts[@]}\" scripts/pause-legacy-gpoint.sh")
+    assert cutover.index('install -d -m 700 "$1"') < cutover.index(
+        "scp \"${ssh_opts[@]}\" scripts/pause-legacy-gpoint.sh"
+    ) < cutover.index("ssh -T \"${ssh_opts[@]}\" \"root@${GPOINT_PRODUCTION_HOST}\" bash \"$remote_script\"")
+    helper = (ROOT / "scripts/pause-legacy-gpoint.sh").read_text()
+    assert "INVENTORY_SHA256" in helper
+    assert "INVENTORY_FILE" in helper
+    assert "docker stop --time 120" in helper
+    assert 'service_rows_output="$(python3 - "$inventory_file"' in helper
+    assert 'mapfile -t service_rows <<< "$service_rows_output"' in helper
+    assert 'mapfile -t service_rows < <(python3' not in helper
+    assert "compose: {project}" not in helper
+    assert "restore_legacy_services" in helper
+    assert "stop_order=(worker bot agata-memory-worker api agata-api)" in helper
+    assert "restart_order=(agata-api api agata-memory-worker bot worker)" in helper
+    assert 'test "$live_running" = "$was_running"' in helper
+    assert 'stopped_by_service[$service]="$id"' in helper
+    assert "shared_postgres_1" in helper
+    assert "compose-eros-1" in helper
+    assert "gsales-api" in helper
 
 
 def test_kamal_inventory_sanitizer_keeps_runtime_facts_and_drops_environment_and_commands():

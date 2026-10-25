@@ -578,31 +578,6 @@ jobs:
               *) echo "Unexpected backup/restore result field: $key" >&2; exit 1 ;;
             esac
           done <<< "$facts"
-      - name: Block unsafe first cutover and preserve stopped GSales
-        if: inputs.mode == 'production'
-        run: |
-          set -euo pipefail
-          ssh -T root@${GPOINT_PRODUCTION_HOST} bash -s <<'REMOTE'
-          set -euo pipefail
-          for service in api worker bot agata-api agata-memory-worker; do
-            while IFS= read -r id; do
-              [[ -n "$id" ]] || continue
-              name="$(docker inspect --format '{{.Name}}' "$id" | sed 's#^/##')"
-              running="$(docker inspect --format '{{.State.Running}}' "$id")"
-              if [[ "$running" == true ]]; then
-                echo "Active legacy GPoint service $name requires the approved first-cutover inventory, backup/restore and migration procedure." >&2
-                exit 1
-              fi
-            done < <(docker ps -aq --filter "label=com.docker.compose.service=$service")
-          done
-          for service in gsales-api gsales-agata-api gsales-agata-memory-worker; do
-            ids="$(docker ps -aq --filter "label=com.docker.compose.service=$service")"
-            test -n "$ids" || { echo "Expected stopped GSales service is missing: $service" >&2; exit 1; }
-            while IFS= read -r id; do
-              test "$(docker inspect --format '{{.State.Running}}' "$id")" = false
-            done <<< "$ids"
-          done
-          REMOTE
       - name: Create exact-SHA in-progress GitHub Deployment
         if: inputs.mode == 'production'
         id: deployment
@@ -617,6 +592,29 @@ jobs:
             -f state=in_progress -f environment=production \
             -f description="Kamal Deploy started after Native First CI/Build PASS" >/dev/null
           echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
+      - name: Pause legacy GPoint services after restore gates
+        if: inputs.mode == 'production'
+        env:
+          BASELINE_PATH: ${{ steps.baseline.outputs.baseline_path }}
+          BASELINE_SHA: ${{ steps.baseline.outputs.baseline_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"
+          remote_script_dir="/run/gpoint-kamal/${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          remote_script="$remote_script_dir/pause-legacy-gpoint.sh"
+          ssh_opts=(-i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
+          ssh -T "${ssh_opts[@]}" "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$remote_script_dir" <<'REMOTE'
+          set -euo pipefail
+          [[ "$1" =~ ^/run/gpoint-kamal/[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
+          test ! -e "$1"
+          install -d -m 700 /run/gpoint-kamal
+          install -d -m 700 "$1"
+          REMOTE
+          scp "${ssh_opts[@]}" scripts/pause-legacy-gpoint.sh "root@${GPOINT_PRODUCTION_HOST}:$remote_script"
+          ssh -T "${ssh_opts[@]}" "root@${GPOINT_PRODUCTION_HOST}" bash "$remote_script" \
+            "$CANDIDATE_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$BASELINE_PATH" "$BASELINE_SHA"
       - name: Deploy request-serving Kamal roles
         if: inputs.mode == 'production'
         env:

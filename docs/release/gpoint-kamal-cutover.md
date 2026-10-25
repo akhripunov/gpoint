@@ -57,12 +57,14 @@ at preparation time; never fill it from a previous release record.
 1. Recheck the production SHA, migration heads, container inventory, and backup
    immediately before Apply. Abort if any observed value differs from the
    approved record.
-2. Pause new Bot/Worker consumption using the existing operational mechanism.
-   Stop the old Compose Core API, Worker, Bot, AGATA API, and AGATA Memory Worker
-   containers. Verify their exact container IDs are stopped. This avoids
-   duplicate consumers and network-alias ownership conflicts while keeping the
-   downtime explicit. Keep PostgreSQL, Redis, Caddy, Eros, AGATA data, and all
-   volumes running.
+2. After the exact-SHA Deployment is marked `in_progress`, the workflow runs
+   `scripts/pause-legacy-gpoint.sh` against the same-run baseline and inventory.
+   It verifies both checksums, the live PostgreSQL/Eros/Caddy identities, and
+   the GSales stopped state, then gracefully stops only the five exact
+   inventoried Compose app container IDs with a 120-second timeout. If that
+   step fails before Kamal starts, it attempts to restart only the containers
+   it stopped and fails the job. PostgreSQL, Redis, Caddy, Eros, AGATA data,
+   GSales, and all volumes remain running or stopped as inventoried.
 3. Deploy only the Core API and AGATA API roles with Kamal while consumers
    remain paused. The deploy job must use role-scoped Kamal deploys and must not
    start Bot, Worker, or AGATA Memory Worker yet.
@@ -71,7 +73,9 @@ at preparation time; never fill it from a previous release record.
 4. Deploy Mini App through the same Kamal Proxy instance.
 5. The gated Kamal workflow backs up `/etc/caddy/Caddyfile`, records its
    checksum, validates the candidate Caddyfile, atomically installs it, and
-   reloads Caddy after the request-serving Kamal roles are deployed. Verify
+   reloads Caddy after the request-serving Kamal roles are deployed. A later
+   job failure does not automatically restart legacy Compose services; treat
+   that as an unconfirmed Apply and reconcile before any retry. Verify
    HTTPS API and Mini App routes before starting consumers. If the Apply step
    fails or its result is unclear, stop automation and reconcile the live Caddy
    and container state; do not rerun Deploy blindly.
