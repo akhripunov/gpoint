@@ -74,6 +74,23 @@ def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
     assert "environment: production" in workflow
 
 
+def test_kamal_uses_attempt_scoped_tag_with_buildkit_digest_verification():
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    deploy = workflow.split("  deploy:\n", 1)[1]
+    version = "${{ inputs.candidate_sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+    assert f"IMAGE_VERSION: {version}" in deploy
+    assert "ghcr.io/akhripunov/gpoint-runtime:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}" in workflow
+    assert "name: Verify GHCR candidate tags resolve to the exact digests" in deploy
+    assert 'docker pull --platform linux/amd64 "$repository:$IMAGE_VERSION"' in deploy
+    assert 'test "$actual" = "$repository@$digest"' in deploy
+    assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST"' in deploy
+    assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST"' in deploy
+    assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST"' in deploy
+    hook = (ROOT / ".kamal/hooks/pre-app-boot").read_text()
+    assert '"$version" == "$candidate-"*' in hook
+    assert 'EXPECTED_REF="$repository@$expected_digest"' in hook
+
+
 def test_kamal_deploy_uses_native_verified_images_and_preserves_first_cutover_guard():
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
     kamal = workflow.split("  deploy:\n", 1)[1]
