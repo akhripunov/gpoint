@@ -93,11 +93,22 @@ def test_kamal_deploy_mode_cannot_run_the_legacy_v5_job():
     assert "runs-on: ubuntu-latest" in kamal
     assert "environment: production" in kamal
     assert "kamal deploy --skip-push" in kamal
+    api_deploy = kamal.index("--roles api --config-file config/deploy.yml")
+    agata_deploy = kamal.index("--roles api --config-file config/deploy.agata.yml")
+    miniapp_deploy = kamal.index("--roles web --config-file config/deploy.miniapp.yml")
+    consumers_deploy = kamal.index("--roles worker,bot --config-file config/deploy.yml")
+    agata_worker_deploy = kamal.index("--roles memory-worker --config-file config/deploy.agata.yml")
+    assert api_deploy < agata_deploy < miniapp_deploy < consumers_deploy < agata_worker_deploy
     assert "gh run view" in kamal
     assert "GPOINT_KAMAL_SSH_PRIVATE_KEY" in kamal
     assert "GPOINT_KAMAL_KNOWN_HOSTS" in kamal
     assert "gsales-api" in kamal
     assert "docker inspect" in kamal
+    assert "apps/worker/dist/main.js" in kamal
+    assert "apps/bot/dist/main.js" in kamal
+    assert "/health/ready" in kamal
+    assert "python -m app.memory.worker --healthcheck" in kamal
+    assert "wget --spider --quiet http://127.0.0.1/" in kamal
     assert "deployments: write" in kamal
     assert 'ghcr.io/akhripunov/gpoint-runtime|$CORE_DIGEST' in kamal
     assert 'ghcr.io/akhripunov/gpoint-agata-runtime|$AGATA_DIGEST' in kamal
@@ -107,7 +118,7 @@ def test_kamal_deploy_mode_cannot_run_the_legacy_v5_job():
     assert "org.gpoint.release.sha" in kamal
     assert "ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625" in kamal
     assert "gem install kamal" not in kamal
-    assert kamal.index("name: Block unsafe first cutover") < kamal.index("name: Deploy Core, AGATA and Mini App with Kamal")
+    assert kamal.index("name: Block unsafe first cutover") < kamal.index("name: Deploy Kamal APIs, route Mini App, then start consumers")
     assert "inputs.mode != 'kamal-production'" in workflow.split("  publish:\n", 1)[1]
 
 
@@ -116,7 +127,8 @@ def test_caddy_keeps_tls_and_routes_api_and_miniapp_through_kamal_proxy():
     assert "uri strip_prefix /api" not in caddy
     assert "reverse_proxy 127.0.0.1:3001" in caddy
     assert "rewrite * /api{uri}" in caddy
-    assert "reverse_proxy 127.0.0.1:3003" in caddy
+    assert caddy.count("reverse_proxy 127.0.0.1:3001") == 3
+    assert "reverse_proxy 127.0.0.1:3003" not in caddy
     assert "root * /opt/gpoint/app/miniapp" not in caddy
     assert "compose-gsales-api-1" not in caddy
 

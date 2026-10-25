@@ -18,18 +18,16 @@ gpoint.amiora.one {
   respond @eros_worker_embeddings 404
   @api path /api/*
   handle @api {
-    uri strip_prefix /api
-    reverse_proxy 127.0.0.1:3000
+    reverse_proxy 127.0.0.1:3001
   }
   @media path /media/*
   handle @media {
-    reverse_proxy 127.0.0.1:3000
+    rewrite * /api{uri}
+    reverse_proxy 127.0.0.1:3001
   }
   @app_entry path / /index.html
   header @app_entry Cache-Control "no-store, max-age=0"
   handle {
-    root * /opt/gpoint/app/miniapp
-    try_files {path} /index.html
-    file_server
+    reverse_proxy 127.0.0.1:3001
   }
 }
