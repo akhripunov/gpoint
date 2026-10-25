@@ -403,7 +403,7 @@ jobs:
         if: inputs.mode == 'production'
         run: |
           set -euo pipefail
-          ssh -n -T root@38.180.110.92 bash -s <<'REMOTE'
+          ssh -T root@38.180.110.92 bash -s <<'REMOTE'
           set -euo pipefail
           for service in api worker bot agata-api agata-memory-worker; do
             while IFS= read -r id; do
@@ -485,7 +485,7 @@ jobs:
           for path in / /creators; do
             curl --retry 6 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.amiora.one$path" | grep -Fq '<div id="root">'
           done
-          ssh -n -T root@38.180.110.92 bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" <<'REMOTE'
+          ssh -T root@38.180.110.92 bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" <<'REMOTE'
           set -euo pipefail
           sha="$1"; version="$2"; app="$3"; agata="$4"; miniapp="$5"
           for item in \

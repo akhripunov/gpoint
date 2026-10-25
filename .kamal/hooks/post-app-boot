@@ -48,18 +48,20 @@ for role in "${role_list[@]}"; do
 
   for host in "${host_list[@]}"; do
     [[ "$host" =~ ^[A-Za-z0-9.-]+$ ]]
-    ssh -n -T -i "$ssh_key" \
+    ssh -T -i "$ssh_key" \
       -o BatchMode=yes \
       -o IdentitiesOnly=yes \
       -o StrictHostKeyChecking=yes \
       -o UserKnownHostsFile="$known_hosts" \
-      "root@$host" bash -s -- "$service" "$role" "$version" "$networks" <<'REMOTE'
+      "root@$host" bash -s -- "$service" "$role" "$version" "$networks" "$candidate" <<'REMOTE'
 set -euo pipefail
-service="$1"; role="$2"; version="$3"; networks="$4"
+service="$1"; role="$2"; version="$3"; networks="$4"; candidate="$5"
 container="${service}-${role}-${version}"
-[[ "$container" =~ ^[A-Za-z0-9._-]+$ && "$version" =~ ^[0-9a-f]{40}$ ]]
+[[ "$container" =~ ^[A-Za-z0-9._-]+$ && "$candidate" =~ ^[0-9a-f]{40}$ ]]
+[[ "$version" == "$candidate-"* && "$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
 id="$(docker inspect --format '{{.Id}}' "$container")"
 test "$(docker inspect --format '{{.State.Running}}' "$id")" = true
+test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$id")" = "$candidate"
 
 IFS=',' read -r -a network_entries <<< "$networks"
 for entry in "${network_entries[@]}"; do

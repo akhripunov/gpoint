@@ -126,6 +126,8 @@ def test_kamal_network_hook_joins_only_allowed_core_and_agata_roles():
     hook = (ROOT / ".kamal/hooks/post-app-boot").read_text()
     assert 'candidate="${GPOINT_COMMIT_SHA:?GPOINT_COMMIT_SHA is required}"' in hook
     assert '[[ "$version" == "$candidate-"* && "$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]' in hook
+    assert '"$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$' in hook
+    assert '"$version" =~ ^[0-9a-f]{40}$' not in hook
     assert '[[ "$candidate" =~ ^[0-9a-f]{40}$ ]]' in hook
     assert "gpoint-core:api) networks='gpoint_app:api,shared_internal:'" in hook
     assert "gpoint-agata:api) networks='gpoint_app:agata-api,shared_internal:agata-api'" in hook
@@ -135,3 +137,11 @@ def test_kamal_network_hook_joins_only_allowed_core_and_agata_roles():
     assert "gpoint-miniapp)" in hook and "exit 0" in hook
     assert 'if [[ "$service:$role" == "gpoint-agata:memory-worker" ]]' in hook
     assert "python -m app.memory.worker --healthcheck" in hook
+
+
+def test_ssh_heredoc_commands_keep_stdin_available():
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    hook = (ROOT / ".kamal/hooks/post-app-boot").read_text()
+    assert "ssh -n -T root@38.180.110.92 bash -s <<'REMOTE'" not in workflow
+    assert "ssh -n -T root@38.180.110.92 bash -s --" not in workflow
+    assert 'ssh -n -T -i "$ssh_key"' not in hook
