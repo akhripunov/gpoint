@@ -453,6 +453,12 @@ def test_manifest_writer_behavior_tests_run_in_python_ci():
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
     python_job = workflow.split("  python:\n", 1)[1].split("  build:\n", 1)[0]
     assert "tests/test_kamal_production_manifest.py" in python_job
+    oras_setup = python_job.index("name: Install pinned ORAS for release evidence round-trip test")
+    evidence_tests = python_job.index("tests/test_deploy_evidence_workflow.py")
+    assert oras_setup < evidence_tests
+    assert "oras_1.3.0_linux_amd64.tar.gz" in python_job
+    assert "6cdc692f929100feb08aa8de584d02f7bcc30ec7d88bc2adc2054d782db57c64" in python_job
+    assert '"$GITHUB_ENV"' in python_job
 
 
 def test_kamal_inventory_sanitizer_keeps_runtime_facts_and_drops_environment_and_commands(tmp_path):
