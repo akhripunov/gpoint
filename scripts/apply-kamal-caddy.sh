@@ -36,11 +36,13 @@ test ! -e "$backup" && test ! -e "${backup}.sha256" || {
 mkdir -p "$backup_dir"
 chmod 700 "$backup_dir"
 install -m 600 "$current_caddy" "$backup"
-sha256sum "$current_caddy" > "${backup}.sha256"
+sha256sum "$backup" > "${backup}.sha256"
+sha256sum --check --status "${backup}.sha256"
 
 current_dir="$(dirname "$current_caddy")"
+candidate_install=""
+trap '[[ -z "${candidate_install:-}" ]] || rm -f "$candidate_install"' EXIT
 candidate_install="$(mktemp "${current_dir}/.Caddyfile-${candidate_sha}.XXXXXX")"
-trap 'rm -f "$candidate_install"' EXIT
 install -m 644 "$candidate_file" "$candidate_install"
 mv -f "$candidate_install" "$current_caddy"
 caddy validate --config "$current_caddy" --adapter caddyfile

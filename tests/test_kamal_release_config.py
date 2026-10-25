@@ -189,6 +189,10 @@ def test_kamal_workflow_applies_candidate_caddyfile_before_production_verify():
     assert deploy.index("name: Verify request-serving routes before starting consumers") < deploy.index(
         "name: Start Kamal consumers after request-serving verification"
     ) < deploy.index("name: Verify public routes and exact running services")
+    consumer_step = deploy.split("name: Start Kamal consumers after request-serving verification", 1)[1].split(
+        "name: Verify public routes and exact running services", 1
+    )[0]
+    assert "if: always()" not in consumer_step
 
 
 def test_caddy_apply_script_backs_up_and_reloads_only_a_verified_candidate():
@@ -241,7 +245,9 @@ def test_caddy_apply_script_backs_up_and_reloads_only_a_verified_candidate():
         assert current.read_text() == candidate
         backup = root / "backups" / f"caddy-before-{candidate_sha}-12345-2"
         assert backup.read_text() == previous
-        assert (backup.parent / f"{backup.name}.sha256").read_text().split()[0] == hashlib.sha256(previous.encode()).hexdigest()
+        sidecar = backup.parent / f"{backup.name}.sha256"
+        assert sidecar.read_text().split()[0] == hashlib.sha256(previous.encode()).hexdigest()
+        assert sidecar.read_text().split()[1] == str(backup)
         calls = call_log.read_text().splitlines()
         assert len([line for line in calls if line.startswith("caddy validate")]) == 2
         assert calls.index("systemctl reload caddy") < calls.index("systemctl is-active --quiet caddy")
@@ -252,6 +258,54 @@ def test_caddy_apply_script_backs_up_and_reloads_only_a_verified_candidate():
         )
         assert mismatch.returncode != 0
         assert current.read_text() == candidate
+        staged.unlink(missing_ok=True)
+
+        validation_current = root / "validation/etc/caddy/Caddyfile"
+        validation_current.parent.mkdir(parents=True)
+        validation_current.write_text(previous)
+        validation_staged = Path("/tmp") / f"gpoint-caddy-{candidate_sha}-12346-1"
+        validation_staged.write_text(candidate)
+        validation_env = environment | {
+            "GPOINT_CADDY_CONFIG_PATH": str(validation_current),
+            "GPOINT_CADDY_BACKUP_DIR": str(root / "validation/backups"),
+            "TEST_CADDY_EXIT": "1",
+        }
+        calls_before_validation = len(call_log.read_text().splitlines())
+        validation = subprocess.run(
+            ["bash", str(ROOT / "scripts/apply-kamal-caddy.sh"), candidate_sha,
+             candidate_digest, "12346", "1", str(validation_staged)],
+            env=validation_env, capture_output=True, text=True,
+        )
+        assert validation.returncode != 0
+        assert validation_current.read_text() == previous
+        assert not (root / "validation/backups").exists()
+        assert not any(
+            line.startswith("systemctl ")
+            for line in call_log.read_text().splitlines()[calls_before_validation:]
+        )
+        validation_staged.unlink(missing_ok=True)
+
+        reload_current = root / "reload/etc/caddy/Caddyfile"
+        reload_current.parent.mkdir(parents=True)
+        reload_current.write_text(previous)
+        reload_staged = Path("/tmp") / f"gpoint-caddy-{candidate_sha}-12347-1"
+        reload_staged.write_text(candidate)
+        reload_env = environment | {
+            "GPOINT_CADDY_CONFIG_PATH": str(reload_current),
+            "GPOINT_CADDY_BACKUP_DIR": str(root / "reload/backups"),
+            "TEST_CADDY_EXIT": "0",
+            "TEST_SYSTEMCTL_EXIT": "1",
+        }
+        reload = subprocess.run(
+            ["bash", str(ROOT / "scripts/apply-kamal-caddy.sh"), candidate_sha,
+             candidate_digest, "12347", "1", str(reload_staged)],
+            env=reload_env, capture_output=True, text=True,
+        )
+        assert reload.returncode != 0
+        assert reload_current.read_text() == candidate
+        reload_calls = call_log.read_text().splitlines()
+        assert reload_calls[-1] == "systemctl reload caddy"
+        reload_staged.unlink(missing_ok=True)
 
 
 def test_pre_app_boot_reads_the_ssh_heredoc_and_fails_closed_on_digest_mismatch():
