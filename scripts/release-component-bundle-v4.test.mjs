@@ -125,7 +125,12 @@ test('V5 parent requires successful exact Deployment, Prepare digests, live iden
     live: { source: 'read-only-vps', runtimeSha: A, miniappSha: A, prismaHead: 'prisma-1',
       agataHead: 'agata-1', gsalesHead: 'gsales-1', gsalesMigrationSha256: 'c'.repeat(64),
       apiHealth: 'healthy', agataApiHealth: 'healthy', gsalesApiHealth: 'healthy',
-      gsalesAgataApiHealth: 'healthy', gsalesAgataWorkerHealth: 'healthy',
+      gsalesAgataApiHealth: 'healthy', gsalesAgataWorkerHealth: 'healthy', gsalesRuntimeState: 'running',
+      gsalesFacts: Object.fromEntries(['API', 'AGATA_API', 'AGATA_MEMORY_WORKER'].flatMap(role => {
+        const p = `LIVE_GSALES_${role}`;
+        return [[`${p}_STATUS`, 'running'], [`${p}_RUNNING`, 'true'], [`${p}_HEALTH`, 'healthy'],
+          [`${p}_EXIT_CODE`, '0'], [`${p}_OOM_KILLED`, 'false']];
+      })),
       workerRunning: true, botRunning: true, agataWorkerRunning: true, gsalesAgataWorkerRunning: true,
       nativeImages: Object.fromEntries(Object.entries(images).map(([role, image]) => [role,
         { imageId: registryImages[role].nativeId, sourceSha: A, platform: 'linux/amd64' }])) },
@@ -137,6 +142,19 @@ test('V5 parent requires successful exact Deployment, Prepare digests, live iden
   assert.equal(verifiedParent.images.app.nativeId, id('4'));
   assert.deepEqual(verifyComponentReceiptV4(proof, {candidate: B, baseline: A,
     completeParent: verifiedParent, candidateArtifact: artifact}).inheritedRoles, ['app', 'gsales']);
+  const stoppedGsales = structuredClone(evidence);
+  stoppedGsales.live.gsalesRuntimeState = 'stopped';
+  for (const role of ['API', 'AGATA_API', 'AGATA_MEMORY_WORKER']) {
+    const p = `LIVE_GSALES_${role}`;
+    stoppedGsales.live.gsalesFacts[`${p}_STATUS`] = 'exited';
+    stoppedGsales.live.gsalesFacts[`${p}_RUNNING`] = 'false';
+    stoppedGsales.live.gsalesFacts[`${p}_HEALTH`] = 'none';
+    stoppedGsales.live.gsalesFacts[`${p}_EXIT_CODE`] = '0';
+    stoppedGsales.live.gsalesFacts[`${p}_OOM_KILLED`] = 'false';
+  }
+  assert.equal(verifyV5ProductionParent(v5, stoppedGsales).currentProductionSha, A);
+  stoppedGsales.live.gsalesFacts.LIVE_GSALES_API_EXIT_CODE = '137';
+  assert.throws(() => verifyV5ProductionParent(v5, stoppedGsales), /unknown, damaged, or mixed/);
   assert.throws(() => verifyComponentReceiptV4(proof, {candidate: B, baseline: A,
     completeParent: {...verifiedParent}, candidateArtifact: artifact}), /immutable COMPLETE/);
   for (const changed of [
@@ -182,7 +200,9 @@ test('fresh run-scoped VPS state maps GSales migration identity into the V5 pare
     LIVE_GSALES_MIGRATION_SHA256: 'c'.repeat(64)};
   for (const role of ['API', 'AGATA_API', 'AGATA_MEMORY_WORKER']) Object.assign(facts, {
     [`LIVE_GSALES_${role}_SHA`]: A, [`LIVE_GSALES_${role}_RUNNING`]: 'true',
-    [`LIVE_GSALES_${role}_HEALTH`]: 'healthy', [`LIVE_GSALES_${role}_IMAGE_ID`]: id('3'),
+    [`LIVE_GSALES_${role}_STATUS`]: 'running', [`LIVE_GSALES_${role}_HEALTH`]: 'healthy',
+    [`LIVE_GSALES_${role}_EXIT_CODE`]: '0', [`LIVE_GSALES_${role}_OOM_KILLED`]: 'false',
+    [`LIVE_GSALES_${role}_IMAGE_ID`]: id('3'),
   });
   const fresh = stateFromLiveVps(facts);
   const componentImages = Object.fromEntries(Object.entries(images).map(([role, image]) => [role,
@@ -206,6 +226,11 @@ test('fresh run-scoped VPS state maps GSales migration identity into the V5 pare
       agataHead: 'agata-1', gsalesHead: 'gsales-1', gsalesMigrationSha256: 'c'.repeat(64),
       apiHealth: 'healthy', agataApiHealth: 'healthy', gsalesApiHealth: 'healthy',
       gsalesAgataApiHealth: 'healthy', gsalesAgataWorkerHealth: 'healthy', workerRunning: true,
+      gsalesRuntimeState: 'running', gsalesFacts: Object.fromEntries(['API', 'AGATA_API', 'AGATA_MEMORY_WORKER'].flatMap(role => {
+        const p = `LIVE_GSALES_${role}`;
+        return [[`${p}_STATUS`, 'running'], [`${p}_RUNNING`, 'true'], [`${p}_HEALTH`, 'healthy'],
+          [`${p}_EXIT_CODE`, '0'], [`${p}_OOM_KILLED`, 'false']];
+      })),
       botRunning: true, agataWorkerRunning: true, gsalesAgataWorkerRunning: true,
       nativeImages: Object.fromEntries(Object.entries(images).map(([role, image]) => [role,
         {imageId: id(role === 'app' ? '4' : role === 'agata' ? '5' : '6'), sourceSha: A, platform: 'linux/amd64'}]))},

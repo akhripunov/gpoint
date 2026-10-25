@@ -23,7 +23,7 @@ import { acquireReleaseLock } from './release-lock.mjs';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { agataProductionMigrationCommand, applyCandidate, cleanupTemporaryWorktree, inspectProductionReadOnly, inspectAgataMigrationReadiness, inspectGsalesReadiness, planReleaseRetention, provisionAgataInternalConfigForBaseline, upload, runRemoteCommand, parseGuardedMigrationEvidence, validateAgataProviderMode, validateAgataProviderCompatibility } from './release-gpoint-vps-adapter.mjs';
-import { initializeRunScopedState, stateFromLiveVps } from './deployment-run-state.mjs';
+import { assertGsalesRuntimeState, gsalesRuntimeFingerprint, initializeRunScopedState, stateFromLiveVps } from './deployment-run-state.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 let STATE_FILE = process.env.GPOINT_RELEASE_STATE_FILE || path.join(ROOT, 'docs/release/state/production.json');
@@ -695,6 +695,8 @@ async function verifiedV5ParentEvidence(current, facts, currentAttempt = null) {
       gsalesApiHealth: freshFacts.LIVE_GSALES_API_HEALTH,
       gsalesAgataApiHealth: freshFacts.LIVE_GSALES_AGATA_API_HEALTH,
       gsalesAgataWorkerHealth: freshFacts.LIVE_GSALES_AGATA_MEMORY_WORKER_HEALTH,
+      gsalesRuntimeState: assertGsalesRuntimeState(freshFacts),
+      gsalesFacts: Object.fromEntries(Object.entries(freshFacts).filter(([key]) => key.startsWith('LIVE_GSALES_'))),
       workerRunning: freshFacts.LIVE_WORKER_RUNNING === 'true', botRunning: freshFacts.LIVE_BOT_RUNNING === 'true',
       agataWorkerRunning: freshFacts.LIVE_AGATA_WORKER_RUNNING === 'true',
       gsalesAgataWorkerRunning: freshFacts.LIVE_GSALES_AGATA_MEMORY_WORKER_RUNNING === 'true',
@@ -868,11 +870,10 @@ async function requireV4StaticPreflight(candidate, bundle, current) {
       current.currentProductionDbHead !== expectedPrisma)
     die('V4 static release migration source/baseline drift');
   if (facts.LIVE_DISK_FREE_KB == null || Number(facts.LIVE_DISK_FREE_KB) < 1048576 ||
-      facts.LIVE_DOCKER_VERSION == null || facts.LIVE_AGATA_ENABLED !== 'true' ||
-      facts.LIVE_GSALES_API_HEALTH !== 'healthy' ||
-      facts.LIVE_GSALES_AGATA_API_HEALTH !== 'healthy' ||
-      facts.LIVE_GSALES_AGATA_MEMORY_WORKER_HEALTH !== 'healthy')
+      facts.LIVE_DOCKER_VERSION == null || facts.LIVE_AGATA_ENABLED !== 'true')
     die('V4 static release cannot prove live baseline readiness');
+  try { assertGsalesRuntimeState(facts); }
+  catch { die('V4 static release cannot prove a consistent GSales runtime state'); }
   const providerFailures = validateAgataProviderCompatibility(providerConfigFromFacts(facts));
   if (providerFailures.length) die('V4 static provider incompatibility: ' + providerFailures.join('; '));
   const observed = v4NativeProofOnVPS(parent.images, runRemoteCommand);
@@ -1192,6 +1193,8 @@ async function runApply(candidate) {
       provider: baseline.provider,
       imageTransport: process.env.IMAGE_TRANSPORT || 'prepared',
       ghcrReadToken,
+      gsalesBaselineFacts: baseline.facts,
+      gsalesReadiness,
       onBeforeMutation: boundary => recheckTaskAuthorizationBeforeMutation(candidate, boundary),
       onMigrationStart: () => { migrationStarted = true; },
       onAgataStart: () => { agataStartStarted = true; },
@@ -1218,13 +1221,22 @@ async function runApply(candidate) {
     const candidateDbHead = prismaPaths.map(name => name.split('/').at(-2)).sort().at(-1);
     if (deployedDbHead !== candidateDbHead || (adapter.ciReceipt && deployedDbHead !== adapter.ciReceipt.prismaHead)) die('post-release Prisma head does not match candidate');
     if (afterFacts.LIVE_AGATA_HEAD !== adapter.agataIdentity.head) die('post-release Alembic head mismatch');
-    if (!adapter.gsalesIdentity || afterFacts.LIVE_GSALES_HEAD !== adapter.gsalesIdentity.migrationHead ||
+    const gsalesAfterFingerprint = gsalesRuntimeFingerprint(afterFacts);
+    if (!adapter.gsalesIdentity || JSON.stringify(gsalesAfterFingerprint) !== JSON.stringify(gsalesRuntimeFingerprint(baseline.facts)) ||
+        afterFacts.LIVE_GSALES_HEAD !== adapter.gsalesIdentity.migrationHead ||
         afterFacts.LIVE_GSALES_MIGRATION_SHA256 !== adapter.gsalesIdentity.migrationSha256 ||
-        adapter.gsalesIdentity.buildSha !== candidate || adapter.gsalesIdentity.ready !== true) die('post-release GSales head/checksum/readiness mismatch');
+        adapter.gsalesIdentity.sourceSha !== baseline.gsalesRuntimeSha || adapter.gsalesIdentity.ready !== true ||
+        adapter.gsalesIdentity.runtimeState !== 'stopped') die('post-release GSales stopped baseline/source/checksum mismatch');
     Object.assign(stageTimings, adapter.timings ?? {}, { TOTAL_RELEASE: Number(((Date.now() - totalStarted) / 1000).toFixed(1)) });
     console.log(`RELEASE_STAGE_TIMING=${JSON.stringify(stageTimings)}`);
     const artifactIdentities = { api: { sourceSha: candidate, adapter: adapter.imageIdentity }, worker: { sourceSha: candidate, adapter: adapter.imageIdentity }, bot: { sourceSha: candidate, adapter: adapter.imageIdentity }, miniapp: { sourceSha: candidate, adapter: adapter.imageIdentity }, agataApi: { sourceSha: candidate, adapter: adapter.agataIdentity }, agataWorker: { sourceSha: candidate, adapter: adapter.agataIdentity } };
-    for (const role of ['gsalesApi', 'gsalesAgataApi', 'gsalesAgataWorker']) artifactIdentities[role] = { sourceSha: candidate, adapter: adapter.gsalesIdentity };
+    const gsalesArtifact = adapter.ciReceipt?.images?.gsales;
+    const gsalesAgataArtifact = adapter.ciReceipt?.images?.agata;
+    if (!gsalesArtifact || !gsalesAgataArtifact || gsalesArtifact.sourceSha !== candidate || gsalesAgataArtifact.sourceSha !== candidate)
+      die('candidate GSales/AGATA immutable artifacts are missing');
+    artifactIdentities.gsalesApi = {sourceSha: candidate, image: gsalesArtifact};
+    artifactIdentities.gsalesAgataApi = {sourceSha: candidate, image: gsalesAgataArtifact};
+    artifactIdentities.gsalesAgataWorker = {sourceSha: candidate, image: gsalesAgataArtifact};
     // Preserve the exact GHCR manifest digests alongside Docker config IDs.
     // The resulting inventory is not itself a production attestation; later
     // selective paths must re-read the successful GitHub Deployment and VPS.
@@ -1252,6 +1264,7 @@ async function runApply(candidate) {
     manifest.miniappSourceSha = candidate;
     Object.assign(manifest, { workerCompatibility, gsalesReadiness, gsalesDbHeadBefore: baseline.facts.LIVE_GSALES_HEAD,
       gsalesDbHeadAfter: adapter.gsalesIdentity.migrationHead, gsalesRuntime: adapter.gsalesIdentity,
+      gsalesRuntimeBefore: gsalesRuntimeFingerprint(baseline.facts), gsalesRuntimeAfter: gsalesAfterFingerprint,
       effectiveConfigSha256: adapter.effectiveConfigSha256,
       authorizationMode: process.env.RELEASE_AUTHORIZATION_MODE || 'EXACT_SHA',
       authorizationId: process.env.RELEASE_AUTHORIZATION_ID || null,

@@ -152,8 +152,11 @@ for name in ('gsales-api','gsales-agata-api','gsales-agata-memory-worker'):
     if p.returncode: continue
     v=json.loads(p.stdout)[0]; prefix='LIVE_'+name.upper().replace('-','_')
     print(prefix+'_IMAGE_ID='+v['Image'])
+    print(prefix+'_STATUS='+v['State'].get('Status','unknown'))
     print(prefix+'_RUNNING='+str(v['State']['Running']).lower())
     print(prefix+'_HEALTH='+v['State'].get('Health',{}).get('Status','none'))
+    print(prefix+'_EXIT_CODE='+str(v['State'].get('ExitCode','unknown')))
+    print(prefix+'_OOM_KILLED='+str(v['State'].get('OOMKilled','unknown')).lower())
     p=subprocess.run(['docker','image','inspect',v['Image'],'--format','{{index .Config.Labels "org.opencontainers.image.revision"}}'],text=True,capture_output=True,timeout=15)
     if p.returncode: raise RuntimeError('GSales runtime revision missing')
     print(prefix+'_SHA='+p.stdout.strip())

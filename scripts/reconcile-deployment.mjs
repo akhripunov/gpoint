@@ -5,7 +5,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {execFileSync} from 'node:child_process';
 import {deploymentIdentity} from './github-deployments.mjs';
-import {factsFromReadOnlyInspection, stateFromLiveVps} from './deployment-run-state.mjs';
+import {assertGsalesRuntimeState, factsFromReadOnlyInspection, gsalesRuntimeFingerprint, stateFromLiveVps} from './deployment-run-state.mjs';
 import {createGitHubDeploymentsClient} from './github-deployments.mjs';
 import {AuthorizationError, authorizationRecordPath, authorizationStateRef, candidateScopeDiff, consumeTaskAuthorization,
   validateTaskAuthorization, checkTaskAuthorizationState} from './release-authorization.mjs';
@@ -267,17 +267,23 @@ export function verifyInterruptedRecoveryProof(proof, {candidateSha, deploymentI
   const receipt = validateOciReceipt(JSON.parse(ci.prepareReceiptJson),candidateSha,
     {runId:String(prepareRunId),runAttempt:String(prepareRunAttempt)});
   const f = proof.readbackFingerprint;
+  const gsalesRuntime = f?.gsalesRuntime;
+  const gsalesStates = ['API','AGATA_API','AGATA_MEMORY_WORKER'].map(role => gsalesRuntime?.[role]);
+  const gsalesModes = gsalesStates.map(state => state?.status === 'running' && state?.running === 'true'
+    && state?.health === 'healthy' && state?.exit_code === '0' && state?.oom_killed === 'false'
+    ? 'running' : state?.status === 'exited' && state?.running === 'false'
+      && ['healthy','none'].includes(state?.health) && state?.exit_code === '0' && state?.oom_killed === 'false'
+      ? 'stopped' : 'invalid');
   requireThat(f?.sourceSha === candidateSha && f.miniappSha === candidateSha
     && f.prismaHead === receipt.prismaHead && f.agataHead === receipt.agataHead
     && f.gsalesHead === receipt.gsalesMigrationHead
     && f.gsalesMigrationSha256 === receipt.gsalesMigrationSha256
     && Object.keys(f.images ?? {}).sort().join(',') === 'agata,app,gsales'
-    && Object.keys(f.running ?? {}).sort().join(',') ===
-      'AGATA_API,AGATA_WORKER,API,BOT,GSALES_AGATA_API,GSALES_AGATA_MEMORY_WORKER,GSALES_API,WORKER'
+    && Object.keys(f.running ?? {}).sort().join(',') === 'AGATA_API,AGATA_WORKER,API,BOT,WORKER'
     && Object.values(f.running).every(x=>x==='true')
-    && Object.keys(f.healthy ?? {}).sort().join(',') ===
-      'AGATA_API,AGATA_WORKER,API,GSALES_AGATA_API,GSALES_AGATA_MEMORY_WORKER,GSALES_API'
-    && Object.values(f.healthy).every(x=>x==='healthy'),
+    && Object.keys(f.healthy ?? {}).sort().join(',') === 'AGATA_API,AGATA_WORKER,API'
+    && Object.values(f.healthy).every(x=>x==='healthy')
+    && gsalesModes.every(mode=>mode===gsalesModes[0] && mode!=='invalid'),
   'Recovery attestation has incomplete fresh server identity or health');
   for(const role of ['app','agata','gsales']){
     const image=receipt.images[role], rehearsal=receipt.deployRehearsal?.images?.[role], attested=proof.componentImages?.[role];
@@ -572,7 +578,15 @@ function assertReceiptAndProductionEvidence({evidence, identity, deploymentId, c
 
 function verifyLiveProduction(output, evidence, receipt, candidateSha) {
   const facts = factsFromReadOnlyInspection(output);
-  const live = stateFromLiveVps(facts);
+  const gsalesBaseline = evidence.gsalesRuntimeBefore;
+  requireThat(gsalesBaseline?.mode === 'stopped' && /^[a-f0-9]{40}$/.test(gsalesBaseline.containers?.API?.sourceSha ?? '')
+    && /^[a-f0-9]{64}$/.test(gsalesBaseline.migrationSha256 ?? '')
+    && gsalesBaseline.migrationHead === evidence.gsalesDbHeadBefore,
+  'Original Deploy evidence has no exact stopped GSales baseline');
+  const live = stateFromLiveVps(facts, {gsalesBaselineSha: gsalesBaseline.containers.API.sourceSha});
+  assertGsalesRuntimeState(facts);
+  requireThat(JSON.stringify(gsalesRuntimeFingerprint(facts)) === JSON.stringify(gsalesBaseline),
+    'Fresh VPS GSales runtime, image, or database differs from its exact pre-Deploy baseline');
   // Component inventory imageId is the OCI config digest; Docker containerd reports nativeId.
   const expectedImages = receipt.deployRehearsal.images;
   requireThat(live.currentProductionSha === candidateSha && live.miniappSourceSha === candidateSha
@@ -582,24 +596,18 @@ function verifyLiveProduction(output, evidence, receipt, candidateSha) {
     && live.gsalesMigrationSha256 === (evidence.gsalesMigrationSha256After ?? evidence.gsalesRuntime?.migrationSha256),
   'Fresh VPS source or database identity differs from original Deploy evidence');
   const requiredSource = ['LIVE_RELEASE_ENV_SHA', 'LIVE_API_SHA', 'LIVE_WORKER_SHA', 'LIVE_BOT_SHA',
-    'LIVE_MINIAPP_SHA', 'LIVE_AGATA_API_SHA', 'LIVE_AGATA_WORKER_SHA',
-    'LIVE_GSALES_API_SHA', 'LIVE_GSALES_AGATA_API_SHA', 'LIVE_GSALES_AGATA_MEMORY_WORKER_SHA'];
+    'LIVE_MINIAPP_SHA', 'LIVE_AGATA_API_SHA', 'LIVE_AGATA_WORKER_SHA'];
   requireThat(requiredSource.every(key => facts[key] === candidateSha),
     'Fresh VPS service source identity differs from the installed candidate');
   const runningHealthy = ['LIVE_API_RUNNING', 'LIVE_WORKER_RUNNING', 'LIVE_BOT_RUNNING',
-    'LIVE_AGATA_API_RUNNING', 'LIVE_AGATA_WORKER_RUNNING', 'LIVE_GSALES_API_RUNNING',
-    'LIVE_GSALES_AGATA_API_RUNNING', 'LIVE_GSALES_AGATA_MEMORY_WORKER_RUNNING'];
-  const healthy = ['LIVE_API_HEALTH', 'LIVE_AGATA_API_HEALTH', 'LIVE_AGATA_WORKER_HEALTH',
-    'LIVE_GSALES_API_HEALTH', 'LIVE_GSALES_AGATA_API_HEALTH', 'LIVE_GSALES_AGATA_MEMORY_WORKER_HEALTH'];
+    'LIVE_AGATA_API_RUNNING', 'LIVE_AGATA_WORKER_RUNNING'];
+  const healthy = ['LIVE_API_HEALTH', 'LIVE_AGATA_API_HEALTH', 'LIVE_AGATA_WORKER_HEALTH'];
   requireThat(runningHealthy.every(key => facts[key] === 'true') && healthy.every(key => facts[key] === 'healthy'),
     'Fresh VPS API, worker, bot, AGATA or GSales health is not verified');
   const imageChecks = [
     ['LIVE_API_IMAGE', expectedImages.app.nativeId], ['LIVE_WORKER_IMAGE', expectedImages.app.nativeId],
     ['LIVE_BOT_IMAGE', expectedImages.app.nativeId], ['LIVE_AGATA_API_IMAGE_ID', expectedImages.agata.nativeId],
     ['LIVE_AGATA_WORKER_IMAGE_ID', expectedImages.agata.nativeId],
-    ['LIVE_GSALES_API_IMAGE_ID', expectedImages.gsales.nativeId],
-    ['LIVE_GSALES_AGATA_API_IMAGE_ID', expectedImages.agata.nativeId],
-    ['LIVE_GSALES_AGATA_MEMORY_WORKER_IMAGE_ID', expectedImages.agata.nativeId],
   ];
   const mismatchedImage = imageChecks.find(([key, value]) => facts[key] !== value)?.[0];
   requireThat(!mismatchedImage, `Fresh VPS native image IDs differ at ${mismatchedImage}`);
@@ -609,6 +617,11 @@ function verifyLiveProduction(output, evidence, receipt, candidateSha) {
   'Private containerd rehearsal native IDs are not role-distinct');
   const relevantKeys = [...requiredSource, ...runningHealthy, ...healthy, ...imageChecks.map(([key]) => key),
     'LIVE_PRISMA_HEAD', 'LIVE_AGATA_HEAD', 'LIVE_GSALES_HEAD', 'LIVE_GSALES_MIGRATION_SHA256'];
+  for (const role of ['API','AGATA_API','AGATA_MEMORY_WORKER']) {
+    const prefix = `LIVE_GSALES_${role}`;
+    relevantKeys.push(`${prefix}_SHA`, `${prefix}_STATUS`, `${prefix}_RUNNING`, `${prefix}_HEALTH`,
+      `${prefix}_EXIT_CODE`, `${prefix}_OOM_KILLED`);
+  }
   return {live, fingerprint: Object.fromEntries(relevantKeys.map(key => [key, facts[key]]))};
 }
 

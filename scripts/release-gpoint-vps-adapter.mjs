@@ -8,7 +8,8 @@ import { createOciPullScript, createOciVerifyScript } from './release-oci.mjs';
 import {validateErosProductionImage, erosProvisionCommand, erosStartCommand, erosSyntheticRouteReadbackCommand,
   erosSyntheticComposeConfigCheckCommand} from './eros-production-deployment.mjs';
 import { migrationHead } from './release-migrations.mjs';
-import { gsalesMigrationIdentity, gsalesReadinessCommand, parseGsalesReadiness, gsalesMigrationStateCommand, gsalesMigrationCommand, combinedComposeCommand, gsalesStartCommand, gsalesRuntimeCommand, parseGsalesRuntime, gsalesProductionInspectionCommand } from './release-gsales.mjs';
+import { gsalesMigrationIdentity, gsalesReadinessCommand, parseGsalesReadiness, gsalesMigrationStateCommand, combinedComposeCommand, gsalesProductionInspectionCommand } from './release-gsales.mjs';
+import { assertGsalesRuntimeState, factsFromReadOnlyInspection, gsalesRuntimeFingerprint } from './deployment-run-state.mjs';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -608,10 +609,14 @@ export function agataProviderRuntimeCommand(provider) {
   return `set -e; actualProvider=$(docker exec compose-agata-api-1 python -c "from app.config import get_settings; print(get_settings().llm_provider)"); localEnabled=$(docker exec compose-agata-api-1 python -c "from app.config import get_settings; print(str(get_settings().codex_local_enabled).lower())"); tokenPresent=$(docker exec compose-agata-api-1 sh -c 'test -n "$GPOINT_AGATA_WORKER_TOKEN" && printf YES || printf NO'); printf 'AGATA_PROVIDER=%s AGATA_CODEX_LOCAL_ENABLED=%s AGATA_WORKER_TOKEN_PRESENT=%s\\n' "$actualProvider" "$localEnabled" "$tokenPresent"`;
 }
 
-export function applyCandidate(sha, { retentionPlan = { removableShas: [], removableCacheIds: [] }, provider = 'disabled', imageTransport: requestedImageTransport = process.env.IMAGE_TRANSPORT || 'prepared', ghcrReadToken = '', onBeforeMutation = () => {}, onMigrationStart = () => {}, onAgataStart = () => {}, onSwitchStart = () => {} } = {}) {
+export function applyCandidate(sha, { retentionPlan = { removableShas: [], removableCacheIds: [] }, provider = 'disabled', imageTransport: requestedImageTransport = process.env.IMAGE_TRANSPORT || 'prepared', ghcrReadToken = '', gsalesBaselineFacts, gsalesReadiness, onBeforeMutation = () => {}, onMigrationStart = () => {}, onAgataStart = () => {}, onSwitchStart = () => {} } = {}) {
   if (!['disabled', 'mac_worker'].includes(provider)) throw new Error(`unsupported AGATA provider: ${provider}`);
   const bundle = process.env.GPOINT_RELEASE_BUNDLE ? verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, sha) : null;
   if (!bundle) throw new Error('verified immutable CI release bundle is required; application images are never rebuilt during apply');
+  if (!gsalesBaselineFacts || assertGsalesRuntimeState(gsalesBaselineFacts) !== 'stopped')
+    throw new Error('Deploy requires a verified cleanly stopped GSales baseline');
+  if (gsalesReadiness?.readiness !== 'PASS') throw new Error('Deploy requires exact GSales configuration and database readiness proof');
+  const gsalesBaseline = gsalesRuntimeFingerprint(gsalesBaselineFacts);
   const imageTransport = selectImageTransport(bundle, requestedImageTransport);
   const checkout = exactCheckout(sha);
   let agataMigrations;
@@ -633,6 +638,10 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
     const erosImage = validateErosProductionImage(bundle, sha);
     if (agataMigrations.head !== 'agata0012') throw new Error('GSales/Eros integration requires AGATA agata0012');
     stage(timings, 'PRODUCTION_PREFLIGHT', () => run(productionPreflightCommand()));
+    const liveBeforeApply = factsFromReadOnlyInspection(stage(timings, 'READ_ONLY_RUNTIME_BASELINE', () => inspectProductionReadOnly()));
+    if (assertGsalesRuntimeState(liveBeforeApply) !== 'stopped' ||
+        JSON.stringify(gsalesRuntimeFingerprint(liveBeforeApply)) !== JSON.stringify(gsalesBaseline))
+      throw new Error('GSales stopped baseline drifted before Apply');
     stage(timings, 'EROS_MEMORY_PREFLIGHT', () => {
       const output = run("set -e; available=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo); test -n \"$available\"; printf 'EROS_PRE_APPLY_MEMAVAILABLE_KIB=%s\\n' \"$available\"; test \"$available\" -ge 1048576");
       if (!output.includes('EROS_PRE_APPLY_MEMAVAILABLE_KIB=')) throw new Error('fresh Eros VPS memory evidence is absent');
@@ -684,7 +693,7 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
         `agataBefore=$(printf '%s' '${agataStatusB64}' | base64 -d | docker run --rm -i ${databaseNetworkArgs('gpoint-agata-preflight')} --env-file /opt/gpoint/env/production.env --env-file /opt/gpoint/env/migration.env gpoint-agata-runtime:${sha} python -)`,
         `printf '%s\\n' "$agataBefore"`,
         `agataPending=0; if printf '%s' "$agataBefore" | grep -qx 'AGATA_SCHEMA_ABSENT'; then agataPending=1; elif printf '%s' "$agataBefore" | grep -Eq '^AGATA_HEAD=(${agataMigrations.revisions.join('|')})$'; then if ! printf '%s' "$agataBefore" | grep -qx 'AGATA_HEAD=${agataMigrations.head}'; then agataPending=1; fi; else echo AGATA_HEAD_UNRECOGNIZED; exit 34; fi; if [ "$agataPending" = 1 ]; then echo AGATA_PENDING_MIGRATIONS; else echo AGATA_NO_PENDING_MIGRATIONS; fi`,
-        `gsalesState=$( ${gsalesMigrationStateCommand(gsalesMigrations)} ); printf '%s\\n' "$gsalesState"; gsalesPending=$(printf '%s' "$gsalesState" | sed -n 's/^GSALES_PENDING=//p'); test "$gsalesPending" = 0 || test "$gsalesPending" = 1`,
+        `gsalesState=$( ${gsalesMigrationStateCommand(gsalesMigrations)} ); printf '%s\\n' "$gsalesState"; gsalesPending=$(printf '%s' "$gsalesState" | sed -n 's/^GSALES_PENDING=//p'); test "$gsalesPending" = 0 || { echo GSALES_DB_MUTATION_FORBIDDEN; exit 35; }`,
       `if [ "$prismaPending" = 1 ] || [ "$agataPending" = 1 ] || [ "$gsalesPending" = 1 ]; then ${['agata0010', 'agata0011', 'agata0012'].includes(agataMigrations.head) ? agataProductionMigrationCommand(sha, 'backup', checkout) : `backupName=gpoint-pre-release-${sha}-$(date -u +%Y%m%dT%H%M%SZ).dump; mkdir -p /opt/gpoint/backups; chmod 700 /opt/gpoint/backups; docker image inspect postgres:16 >/dev/null 2>&1 || docker pull postgres:16; docker run --rm ${databaseNetworkArgs()} --env-file /opt/gpoint/env/production.env -e GPOINT_BACKUP_NAME="$backupName" -v /opt/gpoint/backups:/backups postgres:16 sh -ec 'dburl=$(printf "%s" "$DATABASE_URL" | sed -E "s/([?&])(schema|connection_limit|pool_timeout|pgbouncer|sslaccept)=[^&]*//g; s/[?&]$//; s/\\?&/?/g"); schemas="--schema=public"; if psql "$dburl" -Atc "SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name='\''agata'\'')" | grep -qx t; then schemas="$schemas --schema=agata"; fi; pg_dump --format=custom --no-owner $schemas --dbname "$dburl" --file "/backups/$GPOINT_BACKUP_NAME"'; chmod 600 "/opt/gpoint/backups/$backupName"; test -s "/opt/gpoint/backups/$backupName"; docker run --rm -v /opt/gpoint/backups:/backups postgres:16 pg_restore --list "/backups/$backupName" >/dev/null; echo GPOINT_BACKUP_PATH=/opt/gpoint/backups/$backupName; echo GPOINT_BACKUP_STATUS=NONEMPTY_PROTECTED`}; fi`,
       ];
       const migrationPreflight = steps.slice(0, 9).join('; ');
@@ -702,9 +711,6 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
           {boundary: 'agata-migration', command: `${agataMigration}; ${agataVerification}`,
             shouldRun: output => migrationPendingFromPreflight(output, 'AGATA'),
             skippedOutput: 'AGATA_NO_PENDING_MIGRATIONS', afterAuthorization: onMigrationStart},
-          {boundary: 'gsales-migration', command: gsalesMigrationCommand(sha, gsalesMigrations),
-            shouldRun: output => migrationPendingFromPreflight(output, 'GSALES'),
-            skippedOutput: 'GSALES_NO_PENDING_MIGRATIONS', afterAuthorization: onMigrationStart},
         ],
         onBeforeMutation,
         run,
@@ -750,9 +756,10 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
     onAgataStart();
     const agataReady = stage(timings, 'AGATA_PRE_SWITCH_READINESS', () => run(agataPreSwitchReadinessCommand(sha, provider)));
     if (!agataReady.includes('AGATA_PRE_SWITCH_READY') || !agataReady.includes(`AGATA_PROVIDER_VERIFIED=${provider}`) || !agataReady.includes('GPOINT_AGATA_INTERNAL_AUTH_OK')) throw new Error('AGATA pre-switch readiness/auth gate failed');
-    onBeforeMutation('gsales-start');
-    const gsalesStarted = stage(timings, 'GSALES_PRE_SWITCH_START', () => run(gsalesStartCommand(sha)));
-    if (!gsalesStarted.includes('GSALES_STARTED')) throw new Error('GSales lane start failed');
+    const gsalesPreSwitch = factsFromReadOnlyInspection(stage(timings, 'GSALES_PRESWITCH_STATE', () => run(gsalesProductionInspectionCommand())));
+    if (assertGsalesRuntimeState(gsalesPreSwitch) !== 'stopped' ||
+        JSON.stringify(gsalesRuntimeFingerprint(gsalesPreSwitch)) !== JSON.stringify(gsalesBaseline))
+      throw new Error('GSales changed before runtime switch');
     const erosStarted = stage(timings, 'EROS_PERMANENT_START', () => run(erosStartCommand(sha)));
     if (!erosStarted.includes('EROS_PERMANENT_HEALTH=PASS')) throw new Error('permanent stock Eros readiness failed');
     const activeSwitchMarker = `mv \"$envStage\" /opt/gpoint/env/production.env;`;
@@ -795,7 +802,17 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
     agataRuntime.provider = providerRuntime.PROVIDER;
     agataRuntime.codexLocalEnabled = providerRuntime.CODEX_LOCAL_ENABLED;
     agataRuntime.workerTokenPresent = providerRuntime.WORKER_TOKEN_PRESENT === 'YES';
-    const gsalesIdentity = stage(timings, 'GSALES_POST_SWITCH_RECONCILIATION', () => parseGsalesRuntime(run(gsalesRuntimeCommand(sha, gsalesMigrations)), sha, gsalesMigrations));
+    const gsalesAfter = factsFromReadOnlyInspection(stage(timings, 'GSALES_POST_SWITCH_RECONCILIATION', () => run(gsalesProductionInspectionCommand())));
+    const gsalesAfterFingerprint = gsalesRuntimeFingerprint(gsalesAfter);
+    if (JSON.stringify(gsalesAfterFingerprint) !== JSON.stringify(gsalesBaseline))
+      throw new Error('GSales containers, images, source, or database changed during Deploy');
+    const gsalesIdentity = {...gsalesAfterFingerprint,
+      runtimeState: gsalesAfterFingerprint.mode.toUpperCase(),
+      sourceSha: gsalesBaseline.containers.API.sourceSha,
+      migrationHead: gsalesBaseline.migrationHead,
+      migrationSha256: gsalesBaseline.migrationSha256,
+      ready: gsalesReadiness.readiness === 'PASS', inferenceReady: false,
+      provider: 'mac_worker', codexLocalEnabled: true};
     if (imageTransport === 'ghcr-oci') {
       const parity = stage(timings, 'GHCR_POST_SWITCH_PARITY', () => run(createOciVerifyScript(bundle, sha)));
       if (!parity.includes('GPOINT_GHCR_POST_SWITCH_PARITY=YES'))

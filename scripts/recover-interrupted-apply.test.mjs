@@ -43,10 +43,13 @@ const facts={LIVE_RELEASE_ENV_SHA:sha,LIVE_MINIAPP_SHA:sha,LIVE_PRISMA_HEAD:rece
  LIVE_GSALES_MIGRATION_SHA256:receipt.gsalesMigrationSha256};
 for(const role of services){facts['LIVE_'+role+'_SHA']=sha;facts['LIVE_'+role+'_RUNNING']='true'}
 for(const role of healthy)facts['LIVE_'+role+'_HEALTH']='healthy';
+for(const role of ['GSALES_API','GSALES_AGATA_API','GSALES_AGATA_MEMORY_WORKER']) {
+ facts['LIVE_'+role+'_STATUS']='running';facts['LIVE_'+role+'_EXIT_CODE']='0';facts['LIVE_'+role+'_OOM_KILLED']='false';
+}
 for(const [role,keys] of Object.entries(fields))for(const key of keys)facts[key]=native[roles.indexOf(role)];
 const nativeOutput=roles.flatMap((r,i)=>[
  'COMPONENT_V4_IMAGE='+[r,native[i],'linux','amd64',sha].join('|'),
- ...containers[r].map(c=>'COMPONENT_V4_CONTAINER='+[r,c,native[i],'true'].join('|'))]).join('\n');
+ ...containers[r].map(c=>'COMPONENT_V4_CONTAINER='+[r,c,native[i],'running','true','healthy','0','false'].join('|'))]).join('\n');
 
 test('recovery eligibility binds failed original attempt and same unmodified Deployment',()=>{
  assert.equal(assertRecoveryEligibility(args).candidateSha,sha);
@@ -81,8 +84,23 @@ test('recovery enforces native ID, OCI config, running containers, health, db an
   {facts:{...facts,LIVE_GSALES_AGATA_API_IMAGE_ID:native[2]}},
   {facts:{...facts,LIVE_BOT_RUNNING:'false'}},
   {facts:{...facts,LIVE_AGATA_WORKER_HEALTH:'unhealthy'}},
-  {nativeOutput:nativeOutput.replace('compose-gsales-api-1|'+native[2]+'|true','compose-gsales-api-1|'+native[1]+'|true')},
+  {nativeOutput:nativeOutput.replace('compose-gsales-api-1|'+native[2]+'|running|true|healthy|0|false','compose-gsales-api-1|'+native[1]+'|running|true|healthy|0|false')},
  ])assert.throws(()=>verifyRecoveredVps({receipt,identity,candidateSha:sha,facts,nativeOutput,...altered}));
+});
+test('recovery accepts the uniform cleanly stopped GSales state and rejects damaged stop facts',()=>{
+ const stoppedFacts={...facts};
+ for(const role of ['GSALES_API','GSALES_AGATA_API','GSALES_AGATA_MEMORY_WORKER']) {
+  stoppedFacts['LIVE_'+role+'_STATUS']='exited';stoppedFacts['LIVE_'+role+'_RUNNING']='false';
+  stoppedFacts['LIVE_'+role+'_HEALTH']='none';stoppedFacts['LIVE_'+role+'_EXIT_CODE']='0';
+ }
+ const stoppedOutput=nativeOutput.split('\n').map(line=>line.includes('COMPONENT_V4_CONTAINER=')&&line.includes('|compose-gsales-')
+  ? line.replace('|running|true|healthy|0|false','|exited|false|none|0|false') : line).join('\n');
+ assert.equal(verifyRecoveredVps({receipt,identity,candidateSha:sha,facts:stoppedFacts,nativeOutput:stoppedOutput}).fingerprint.gsalesRuntime.API.status,'exited');
+ for(const damaged of [
+  {...stoppedFacts,LIVE_GSALES_API_EXIT_CODE:'137'},
+  {...stoppedFacts,LIVE_GSALES_AGATA_API_RUNNING:'true'},
+  {...stoppedFacts,LIVE_GSALES_AGATA_MEMORY_WORKER_OOM_KILLED:'true'},
+ ]) assert.throws(()=>verifyRecoveredVps({receipt,identity,candidateSha:sha,facts:damaged,nativeOutput:stoppedOutput}));
 });
 test('recovery OCI reference is unique to exact deployment, run and attempt',()=>{
  const a={CANDIDATE_SHA:sha,RECOVERY_DEPLOYMENT_ID:'75',GITHUB_RUN_ID:'12345',GITHUB_RUN_ATTEMPT:'1'};
@@ -154,6 +172,9 @@ test('immutable recovery proof must not erase original failed Deploy or alter na
   recoveryRunId:'9988',recoveryRunAttempt:'1',prepareRunId:'1000',prepareRunAttempt:'1',
   prepareReceiptDigest:identity.prepareReceiptDigest,prepareReceiptSha256:sha256};
  assert.equal(verifyInterruptedRecoveryProof(source,expected),source);
+ const damagedRunning=structuredClone(source);
+ damagedRunning.readbackFingerprint.gsalesRuntime.API.oom_killed='true';
+ assert.throws(()=>verifyInterruptedRecoveryProof(damagedRunning,expected));
  const bridge = new URL('./verify-interrupted-recovery-proof.mjs',import.meta.url);
  const invoke = proof => spawnSync(process.execPath,[bridge.pathname],{
   input:JSON.stringify({proof,expected}),encoding:'utf8',timeout:30000});

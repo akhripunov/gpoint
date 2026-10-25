@@ -12,9 +12,9 @@ function facts(overrides = {}) {
     LIVE_AGATA_API_RUNNING: 'true', LIVE_AGATA_WORKER_RUNNING: 'true',
     LIVE_AGATA_API_HEALTH: 'healthy', LIVE_AGATA_WORKER_HEALTH: 'healthy',
     LIVE_AGATA_API_IMAGE_ID: image, LIVE_AGATA_WORKER_IMAGE_ID: image,
-    LIVE_GSALES_API_IMAGE_ID: image, LIVE_GSALES_API_RUNNING: 'true', LIVE_GSALES_API_HEALTH: 'healthy', LIVE_GSALES_API_SHA: sha,
-    LIVE_GSALES_AGATA_API_IMAGE_ID: image, LIVE_GSALES_AGATA_API_RUNNING: 'true', LIVE_GSALES_AGATA_API_HEALTH: 'healthy', LIVE_GSALES_AGATA_API_SHA: sha,
-    LIVE_GSALES_AGATA_MEMORY_WORKER_IMAGE_ID: image, LIVE_GSALES_AGATA_MEMORY_WORKER_RUNNING: 'true', LIVE_GSALES_AGATA_MEMORY_WORKER_HEALTH: 'healthy', LIVE_GSALES_AGATA_MEMORY_WORKER_SHA: sha,
+    LIVE_GSALES_API_IMAGE_ID: image, LIVE_GSALES_API_STATUS: 'running', LIVE_GSALES_API_EXIT_CODE: '0', LIVE_GSALES_API_OOM_KILLED: 'false', LIVE_GSALES_API_RUNNING: 'true', LIVE_GSALES_API_HEALTH: 'healthy', LIVE_GSALES_API_SHA: sha,
+    LIVE_GSALES_AGATA_API_IMAGE_ID: image, LIVE_GSALES_AGATA_API_STATUS: 'running', LIVE_GSALES_AGATA_API_EXIT_CODE: '0', LIVE_GSALES_AGATA_API_OOM_KILLED: 'false', LIVE_GSALES_AGATA_API_RUNNING: 'true', LIVE_GSALES_AGATA_API_HEALTH: 'healthy', LIVE_GSALES_AGATA_API_SHA: sha,
+    LIVE_GSALES_AGATA_MEMORY_WORKER_IMAGE_ID: image, LIVE_GSALES_AGATA_MEMORY_WORKER_STATUS: 'running', LIVE_GSALES_AGATA_MEMORY_WORKER_EXIT_CODE: '0', LIVE_GSALES_AGATA_MEMORY_WORKER_OOM_KILLED: 'false', LIVE_GSALES_AGATA_MEMORY_WORKER_RUNNING: 'true', LIVE_GSALES_AGATA_MEMORY_WORKER_HEALTH: 'healthy', LIVE_GSALES_AGATA_MEMORY_WORKER_SHA: sha,
     LIVE_PRISMA_HEAD: '20260922090000_example', LIVE_AGATA_HEAD: 'agata0008',
     LIVE_GSALES_HEAD: '001_example', LIVE_GSALES_MIGRATION_SHA256: 'c'.repeat(64), ...overrides};
 }
@@ -30,5 +30,31 @@ test('first Deploy baseline accepts a populated VPS and existing database withou
 test('first Deploy baseline rejects unknown or mixed installed runtime identities', () => {
   assert.throws(() => stateFromLiveVps(facts({LIVE_MINIAPP_SHA: 'c'.repeat(40)})), /mixed or unverified/);
   assert.throws(() => stateFromLiveVps(facts({LIVE_PRISMA_HEAD: 'NONE'})), /Prisma migration head/);
-  assert.throws(() => stateFromLiveVps(facts({LIVE_GSALES_API_IMAGE_ID: 'unknown'})), /GSales API image identity/);
+  assert.throws(() => stateFromLiveVps(facts({LIVE_GSALES_API_IMAGE_ID: 'unknown'})), /GSales API .*image identity/);
+});
+
+test('V5 baseline accepts all three GSales containers intentionally stopped with exact identities', () => {
+  const stopped = Object.fromEntries(['API', 'AGATA_API', 'AGATA_MEMORY_WORKER'].flatMap(role => [
+    [`LIVE_GSALES_${role}_STATUS`, 'exited'], [`LIVE_GSALES_${role}_RUNNING`, 'false'],
+    [`LIVE_GSALES_${role}_HEALTH`, 'none'], [`LIVE_GSALES_${role}_EXIT_CODE`, '0'],
+    [`LIVE_GSALES_${role}_OOM_KILLED`, 'false'],
+  ]));
+  const state = stateFromLiveVps(facts(stopped));
+  assert.equal(state.currentProductionSha, sha);
+  assert.equal(state.gsalesRuntimeState, 'stopped');
+});
+
+test('V5 baseline rejects partial, dead, or unidentified GSales stopped state', () => {
+  assert.throws(() => stateFromLiveVps(facts({LIVE_GSALES_API_STATUS: 'exited', LIVE_GSALES_API_RUNNING: 'false', LIVE_GSALES_API_HEALTH: 'none'})), /GSales.*state/);
+  assert.throws(() => stateFromLiveVps(facts({LIVE_GSALES_API_STATUS: 'dead'})), /GSales.*state/);
+  assert.throws(() => stateFromLiveVps(facts({LIVE_GSALES_API_STATUS: undefined})), /GSales.*state/);
+  assert.throws(() => stateFromLiveVps(facts({LIVE_GSALES_API_RUNNING: 'false'})), /GSales.*state/);
+  assert.throws(() => stateFromLiveVps(facts({LIVE_GSALES_API_STATUS: 'exited', LIVE_GSALES_API_RUNNING: 'false', LIVE_GSALES_API_HEALTH: 'none', LIVE_GSALES_API_SHA: 'c'.repeat(40)})), /GSales.*state/);
+  assert.throws(() => stateFromLiveVps(facts({LIVE_GSALES_API_STATUS: 'exited', LIVE_GSALES_API_RUNNING: 'false', LIVE_GSALES_API_HEALTH: 'none', LIVE_GSALES_API_EXIT_CODE: '137'})), /GSales.*state/);
+  assert.throws(() => stateFromLiveVps(facts({LIVE_GSALES_API_STATUS: 'exited', LIVE_GSALES_API_RUNNING: 'false', LIVE_GSALES_API_HEALTH: 'none', LIVE_GSALES_API_OOM_KILLED: 'true'})), /GSales.*state/);
+});
+
+test('V5 baseline rejects damaged running GSales state', () => {
+  assert.throws(() => stateFromLiveVps(facts({LIVE_GSALES_API_EXIT_CODE: '137'})), /GSales.*state/);
+  assert.throws(() => stateFromLiveVps(facts({LIVE_GSALES_API_OOM_KILLED: 'true'})), /GSales.*state/);
 });

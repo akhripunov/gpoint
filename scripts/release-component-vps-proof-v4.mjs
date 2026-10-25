@@ -28,7 +28,7 @@ export function buildReadOnlyVPSProofCommand(inventory) {
       "|{{.Id}}|{{.Os}}|{{.Architecture}}|{{index .Config.Labels \"org.opencontainers.image.revision\"}}'");
     for (const container of info.containers) {
       steps.push('docker inspect ' + container + ' --format ' +
-        "'COMPONENT_V4_CONTAINER=" + role + '|' + container + "|{{.Image}}|{{.State.Running}}'");
+        "'COMPONENT_V4_CONTAINER=" + role + '|' + container + "|{{.Image}}|{{.State.Status}}|{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.State.ExitCode}}|{{.State.OOMKilled}}'");
     }
   }
   return steps.join('; ');
@@ -36,7 +36,7 @@ export function buildReadOnlyVPSProofCommand(inventory) {
 
 export function parseReadOnlyVPSProof(output, inventory) {
   if (typeof output !== 'string') throw new Error('no VPS proof');
-  const result = {}, checkedContainers = new Set();
+  const result = {}, checkedContainers = new Set(), gsalesModes = new Set();
   // Legacy V3/V4 imageId is native. V5 keeps OCI config and containerd native
   // digests distinct; the latter is verified against the attested rehearsal.
   const expectedNative = role => inventory?.[role]?.nativeId ?? inventory?.[role]?.imageId;
@@ -52,17 +52,24 @@ export function parseReadOnlyVPSProof(output, inventory) {
         os, architecture: arch,
         name: roles[role].tag + ':' + inventory[role].sourceSha };
     } else if (line.startsWith('COMPONENT_V4_CONTAINER=')) {
-      const [role, container, id, running, ...extra] = line.slice(23).split('|');
+      const [role, container, id, status, running, health, exitCode, oomKilled, ...extra] = line.slice(23).split('|');
       const key = role + ':' + container;
+      const gsalesConsumer = container?.startsWith('compose-gsales-');
+      const runtimeValid = gsalesConsumer
+        ? (status === 'running' && running === 'true' && health === 'healthy') ||
+          (status === 'exited' && running === 'false' && ['healthy', 'none'].includes(health) && exitCode === '0' && oomKilled === 'false')
+        : status === 'running' && running === 'true' && health === 'healthy';
       if (extra.length || !roles[role]?.containers.includes(container) ||
           checkedContainers.has(key) || id !== expectedNative(role) ||
-          running !== 'true')
+          !runtimeValid)
         throw new Error('unexpected native Docker container proof');
+      if (gsalesConsumer) gsalesModes.add(status);
       checkedContainers.add(key);
     }
   }
   if (Object.keys(result).length !== Object.keys(roles).length ||
-      checkedContainers.size !== Object.values(roles).reduce((n, x) => n + x.containers.length, 0))
+      checkedContainers.size !== Object.values(roles).reduce((n, x) => n + x.containers.length, 0) ||
+      gsalesModes.size !== 1)
     throw new Error('missing VPS image or container proof');
   return result;
 }

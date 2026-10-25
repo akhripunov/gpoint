@@ -19,7 +19,7 @@ function facts() {
   for (const [role, data] of Object.entries(images)) {
     lines.push('COMPONENT_V4_IMAGE=' + [role,data.imageId,'linux','amd64',sha].join('|'));
     for (const name of containers[role])
-      lines.push('COMPONENT_V4_CONTAINER=' + [role,name,data.imageId,'true'].join('|'));
+      lines.push('COMPONENT_V4_CONTAINER=' + [role,name,data.imageId,'running','true','healthy','0','false'].join('|'));
   }
   return lines.join('\n');
 }
@@ -42,7 +42,7 @@ test('V5 matches attested containerd native digest without confusing it with OCI
   for (const [role, image] of Object.entries(v5)) {
     lines.push('COMPONENT_V4_IMAGE=' + [role,image.nativeId,'linux','amd64',sha].join('|'));
     for (const name of containers[role])
-      lines.push('COMPONENT_V4_CONTAINER=' + [role,name,image.nativeId,'true'].join('|'));
+      lines.push('COMPONENT_V4_CONTAINER=' + [role,name,image.nativeId,'running','true','healthy','0','false'].join('|'));
   }
   const output = lines.join('\n');
   assert.equal(parseReadOnlyVPSProof(output,v5).app.nativeImageId,v5.app.nativeId);
@@ -54,7 +54,16 @@ test('V5 matches attested containerd native digest without confusing it with OCI
 test('missing or mismatched Docker container fails closed', () => {
   assert.throws(() => parseReadOnlyVPSProof(facts().replace('COMPONENT_V4_CONTAINER=agata|compose-gsales-agata-api-1', 'OMITTED=agata|compose-gsales-agata-api-1'), images));
   assert.throws(() => parseReadOnlyVPSProof(facts().replace('compose-bot-1|' + images.app.imageId, 'compose-bot-1|sha256:' + '9'.repeat(64)),images));
-  assert.throws(() => parseReadOnlyVPSProof(facts().replace('compose-gsales-api-1|' + images.gsales.imageId + '|true','compose-gsales-api-1|' + images.gsales.imageId + '|false'),images));
+  assert.throws(() => parseReadOnlyVPSProof(facts().replace('compose-gsales-api-1|' + images.gsales.imageId + '|running|true|healthy|0|false','compose-gsales-api-1|' + images.gsales.imageId + '|exited|false|none|137|false'),images));
+});
+
+test('all GSales consumers may be cleanly stopped while image parity remains exact', () => {
+  const stopped = facts().split('\n').map(line => line.includes('COMPONENT_V4_CONTAINER=') && line.includes('|compose-gsales-')
+    ? line.replace('|running|true|healthy|0|false', '|exited|false|none|0|false') : line).join('\n');
+  assert.equal(parseReadOnlyVPSProof(stopped, images).gsales.nativeImageId, images.gsales.imageId);
+  const partial = stopped.replace('compose-gsales-agata-api-1|' + images.agata.imageId + '|exited|false|none|0|false',
+    'compose-gsales-agata-api-1|' + images.agata.imageId + '|running|true|healthy|0|false');
+  assert.throws(() => parseReadOnlyVPSProof(partial, images));
 });
 test('unknown duplicate or malformed proof fails closed', () => {
   assert.throws(() => parseReadOnlyVPSProof(facts()+'\nCOMPONENT_V4_IMAGE=app|bad|linux|amd64|'+sha,images));

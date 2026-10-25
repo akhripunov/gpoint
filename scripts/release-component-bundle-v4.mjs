@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import {assertGsalesRuntimeState} from './deployment-run-state.mjs';
 
 const SHA = /^[0-9a-f]{40}$/;
 const ID = /^sha256:[0-9a-f]{64}$/;
@@ -112,6 +113,9 @@ export function verifyV5ProductionParent(ledger, evidence) {
   if (Object.keys(deployment.imageDigests ?? {}).sort().join(',') !== roles.slice().sort().join(','))
     throw new Error('V5 parent Deployment image digest set is incomplete');
   const live = evidence.live;
+  let gsalesMode;
+  try { gsalesMode = assertGsalesRuntimeState(live?.gsalesFacts ?? {}); }
+  catch { throw new Error('V5 parent GSales runtime state is unknown, damaged, or mixed'); }
   if (live?.source !== 'read-only-vps' || live.runtimeSha !== sha || live.miniappSha !== sha ||
       ledger.currentProductionDbHead !== prepare.prismaHead ||
       ledger.agataAlembicHead !== prepare.agataHead ||
@@ -121,10 +125,9 @@ export function verifyV5ProductionParent(ledger, evidence) {
       live.gsalesMigrationSha256 !== prepare.gsalesMigrationSha256 ||
       !live.prismaHead || !live.agataHead || !live.gsalesHead ||
       live.apiHealth !== 'healthy' || live.agataApiHealth !== 'healthy' ||
-      live.gsalesApiHealth !== 'healthy' || live.gsalesAgataApiHealth !== 'healthy' ||
-      live.gsalesAgataWorkerHealth !== 'healthy' || live.workerRunning !== true ||
+      live.workerRunning !== true ||
       live.botRunning !== true || live.agataWorkerRunning !== true ||
-      live.gsalesAgataWorkerRunning !== true)
+      live.gsalesRuntimeState !== gsalesMode)
     throw new Error('V5 parent migration or service health proof is stale or mismatched');
   for (const role of roles) {
     const actual = live.nativeImages?.[role];

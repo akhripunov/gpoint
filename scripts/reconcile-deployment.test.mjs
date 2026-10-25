@@ -7,6 +7,7 @@ import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {deploymentPayload} from './github-deployments.mjs';
 import {AuthorizationError} from './release-authorization.mjs';
+import {factsFromReadOnlyInspection, gsalesRuntimeFingerprint} from './deployment-run-state.mjs';
 import {assertCandidateExecutionScope, fetchAuthorizationReconciliationEvidence, fetchOriginalDeployEvidence,
   finalizeAuthorizationConsumption, reconcileVerifiedDeployment, reconciledResultEvidence,
   ReconciliationGateError, safeReconciliationFailure,
@@ -35,11 +36,15 @@ const facts = [
   `LIVE_AGATA_API_IMAGE_ID=sha256:${'4'.repeat(64)}`, 'LIVE_AGATA_WORKER_RUNNING=true',
   'LIVE_AGATA_WORKER_HEALTH=healthy', `LIVE_AGATA_WORKER_IMAGE_ID=sha256:${'5'.repeat(64)}`,
   ...['API', 'AGATA_API', 'AGATA_MEMORY_WORKER'].flatMap(role => [
-    `LIVE_GSALES_${role}_SHA=${sha}`, `LIVE_GSALES_${role}_RUNNING=true`,
-    `LIVE_GSALES_${role}_HEALTH=healthy`, `LIVE_GSALES_${role}_IMAGE_ID=sha256:${'6'.repeat(64)}`]),
+    `LIVE_GSALES_${role}_SHA=${sha}`, `LIVE_GSALES_${role}_STATUS=exited`,
+    `LIVE_GSALES_${role}_EXIT_CODE=0`, `LIVE_GSALES_${role}_OOM_KILLED=false`,
+    `LIVE_GSALES_${role}_RUNNING=false`,
+    `LIVE_GSALES_${role}_HEALTH=none`, `LIVE_GSALES_${role}_IMAGE_ID=sha256:${'6'.repeat(64)}`]),
   'LIVE_PRISMA_HEAD=prisma_001', 'LIVE_AGATA_HEAD=agata0010', 'LIVE_GSALES_HEAD=001_gsales',
   `LIVE_GSALES_MIGRATION_SHA256=${'c'.repeat(64)}`,
 ].join('\n');
+evidence.gsalesRuntimeBefore = gsalesRuntimeFingerprint(factsFromReadOnlyInspection(facts));
+evidence.gsalesDbHeadBefore = evidence.gsalesRuntimeBefore.migrationHead;
 
 function setup({deployEvidence = evidence, deployAttempt = '1', statusState = 'in_progress', deployConclusion = 'success'} = {}) {
   const writes = [];
@@ -376,6 +381,8 @@ function authorizationFinalizerFixture({statusState = 'error', statusDescription
     authorizationScopeSha256: proof.ownerTaskCommitmentSha256,
     authorizationSourceInstructionId: proof.sourceInstructionIdentifier,
     authorizationChangedPaths: proof.changedPaths, productionBaselineSha: 'd'.repeat(40),
+    gsalesRuntimeBefore: evidence.gsalesRuntimeBefore,
+    gsalesDbHeadBefore: evidence.gsalesRuntimeBefore.migrationHead,
     applicationVerification: 'VPS_READBACK_VERIFIED', serverDeployStatus: 'COMPLETE',
     ciReceipt: {ghcrManifestDigest: identity.prepareReceiptDigest, prepareReceiptSha256: receiptSha256,
       prepareReceiptJson: receiptJson, prismaHead: receipt.prismaHead, agataHead: receipt.agataHead,
@@ -426,6 +433,8 @@ function authorizationFinalizerFixture({statusState = 'error', statusDescription
     const [key] = line.split('=');
     return key in replacements ? `${key}=${replacements[key]}` : line;
   });
+  originalEvidence.gsalesRuntimeBefore = gsalesRuntimeFingerprint(factsFromReadOnlyInspection(factValues.join('\n')));
+  originalEvidence.gsalesDbHeadBefore = originalEvidence.gsalesRuntimeBefore.migrationHead;
   let inspection = 0;
   return {client, taskDeployment, originalEvidence, receipt, proof, writes, getStatus: () => latestStatus,
     acquireProductionLock: () => () => {},
@@ -929,18 +938,30 @@ test('real canonical result reaches same-ID finalization and subsequent parent a
   "LIVE_GSALES_HEAD": "001_gsales",
   "LIVE_GSALES_MIGRATION_SHA256": "8de19ec2efd81848010379645d51243ac3f4a4cd37af0be211d71cdf36bcd111",
   "LIVE_GSALES_API_IMAGE_ID": "sha256:ccad34b6891fb7eebfe49117b92319e3a4d63b0b6e01e1923663e4421ca21873",
-  "LIVE_GSALES_API_RUNNING": "true",
-  "LIVE_GSALES_API_HEALTH": "healthy",
+  "LIVE_GSALES_API_STATUS": "exited",
+  "LIVE_GSALES_API_EXIT_CODE": "0",
+  "LIVE_GSALES_API_OOM_KILLED": "false",
+  "LIVE_GSALES_API_RUNNING": "false",
+  "LIVE_GSALES_API_HEALTH": "none",
   "LIVE_GSALES_API_SHA": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
   "LIVE_GSALES_AGATA_API_IMAGE_ID": "sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614",
-  "LIVE_GSALES_AGATA_API_RUNNING": "true",
-  "LIVE_GSALES_AGATA_API_HEALTH": "healthy",
+  "LIVE_GSALES_AGATA_API_STATUS": "exited",
+  "LIVE_GSALES_AGATA_API_EXIT_CODE": "0",
+  "LIVE_GSALES_AGATA_API_OOM_KILLED": "false",
+  "LIVE_GSALES_AGATA_API_RUNNING": "false",
+  "LIVE_GSALES_AGATA_API_HEALTH": "none",
   "LIVE_GSALES_AGATA_API_SHA": "1f13e88f4648ba22fc11063532c1280cdf6df2da",
   "LIVE_GSALES_AGATA_MEMORY_WORKER_IMAGE_ID": "sha256:f4adad45c4a1a479bb4f7480730c2b7dfd978e4f6ac48ca5e71d1b5e46376614",
-  "LIVE_GSALES_AGATA_MEMORY_WORKER_RUNNING": "true",
-  "LIVE_GSALES_AGATA_MEMORY_WORKER_HEALTH": "healthy",
+  "LIVE_GSALES_AGATA_MEMORY_WORKER_STATUS": "exited",
+  "LIVE_GSALES_AGATA_MEMORY_WORKER_EXIT_CODE": "0",
+  "LIVE_GSALES_AGATA_MEMORY_WORKER_OOM_KILLED": "false",
+  "LIVE_GSALES_AGATA_MEMORY_WORKER_RUNNING": "false",
+  "LIVE_GSALES_AGATA_MEMORY_WORKER_HEALTH": "none",
   "LIVE_GSALES_AGATA_MEMORY_WORKER_SHA": "1f13e88f4648ba22fc11063532c1280cdf6df2da"
 };
+  original.gsalesRuntimeBefore = gsalesRuntimeFingerprint(factsFromReadOnlyInspection(
+    Object.entries(values).map(([key,value])=>`${key}=${value}`).join('\n')));
+  original.gsalesDbHeadBefore = original.gsalesRuntimeBefore.migrationHead;
   const result = await finalizeAuthorizationConsumption({client, deploymentId:target.id,candidateSha,env:fixture.env,
     token:'test',root:'/offline',assertCheckout:()=>{},currentMain:fixture.currentMain,
     readDeployEvidence:async()=>original,

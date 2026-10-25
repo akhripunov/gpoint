@@ -10,7 +10,7 @@ import {verifyReleaseBundle} from './release-bundle.mjs';
 import {validateOciReceipt} from './release-oci.mjs';
 import {createGitHubDeploymentsClient, deploymentIdentity} from './github-deployments.mjs';
 import {inspectProductionReadOnly,runRemoteCommand} from './release-gpoint-vps-adapter.mjs';
-import {factsFromReadOnlyInspection,stateFromLiveVps} from './deployment-run-state.mjs';
+import {assertGsalesRuntimeState,factsFromReadOnlyInspection,stateFromLiveVps} from './deployment-run-state.mjs';
 import {buildReadOnlyVPSProofCommand,parseReadOnlyVPSProof} from './release-component-vps-proof-v4.mjs';
 
 const ROOT=fileURLToPath(new URL('..',import.meta.url));
@@ -22,8 +22,8 @@ const IMAGE_FIELDS={
  agata:['LIVE_AGATA_API_IMAGE_ID','LIVE_AGATA_WORKER_IMAGE_ID','LIVE_GSALES_AGATA_API_IMAGE_ID','LIVE_GSALES_AGATA_MEMORY_WORKER_IMAGE_ID'],
  gsales:['LIVE_GSALES_API_IMAGE_ID'],
 };
-const RUNNING=['API','WORKER','BOT','AGATA_API','AGATA_WORKER','GSALES_API','GSALES_AGATA_API','GSALES_AGATA_MEMORY_WORKER'];
-const HEALTH=['API','AGATA_API','AGATA_WORKER','GSALES_API','GSALES_AGATA_API','GSALES_AGATA_MEMORY_WORKER'];
+const RUNNING=['API','WORKER','BOT','AGATA_API','AGATA_WORKER'];
+const HEALTH=['API','AGATA_API','AGATA_WORKER'];
 const fatal=(name)=>{throw new Error('RECOVERY_GATE='+name);};
 const ensure=(truth,name)=>{if(!truth)fatal(name);};
 const hash=value=>crypto.createHash('sha256').update(value).digest('hex');
@@ -87,6 +87,7 @@ export function recoveryInventory(receipt,identity,candidateSha){
 export function verifyRecoveredVps({receipt,identity,candidateSha,facts,nativeOutput}){
  const inventory=recoveryInventory(receipt,identity,candidateSha);
  const state=stateFromLiveVps(facts);
+ assertGsalesRuntimeState(facts);
  ensure(state.currentProductionSha===candidateSha&&state.miniappSourceSha===candidateSha
   &&state.currentProductionDbHead===receipt.prismaHead&&state.agataAlembicHead===receipt.agataHead
   &&state.gsalesMigrationHead===receipt.gsalesMigrationHead
@@ -102,7 +103,10 @@ export function verifyRecoveredVps({receipt,identity,candidateSha,facts,nativeOu
   gsalesHead:state.gsalesMigrationHead,gsalesMigrationSha256:state.gsalesMigrationSha256,
   images:Object.fromEntries(ROLES.map(r=>[r,inventory[r].nativeId])),
   running:Object.fromEntries(RUNNING.map(r=>[r,facts['LIVE_'+r+'_RUNNING']])),
-  healthy:Object.fromEntries(HEALTH.map(r=>[r,facts['LIVE_'+r+'_HEALTH']]))};
+  healthy:Object.fromEntries(HEALTH.map(r=>[r,facts['LIVE_'+r+'_HEALTH']])),
+  gsalesRuntime:Object.fromEntries(['API','AGATA_API','AGATA_MEMORY_WORKER'].map(role=>[role,Object.fromEntries(
+   ['STATUS','RUNNING','HEALTH','EXIT_CODE','OOM_KILLED'].map(field=>[field.toLowerCase(),facts[`LIVE_GSALES_${role}_${field}`]])
+  )]))};
  return {inventory,fingerprint};
 }
 function inspect({receipt,identity,candidateSha}){
