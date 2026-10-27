@@ -162,6 +162,7 @@ jobs:
           tests/test_kamal_production_manifest.py
           tests/test_kamal_ordinary_manifest.py
           tests/test_release_assets.py
+          tests/test_gpoint_release_trigger_graph.py
       - name: Run isolated PostgreSQL 16 migration and integration suites
         run: python services/gsales/tests/run_postgres.py
 

@@ -132,15 +132,16 @@ class GhcrReceiptTests(unittest.TestCase):
         self.assertEqual(raised.exception.category, 'NETWORK')
         self.assertEqual(len(token_calls), 1)
 
-    def test_ghcr_retry_budget_stays_below_controller_subprocess_timeout(self):
+    def test_ghcr_retry_budget_stays_below_manual_deploy_subprocess_timeout(self):
         controller = (SCRIPT.parents[1] / 'scripts/release-orchestrator.mjs').read_text()
         timeout = re.search(r"spawnSync\('python3', \['scripts/prepared_artifact_cache\.py'\], \{.*?timeout:\s*([\d_]+)",
                             controller, re.DOTALL)
         self.assertIsNotNone(timeout)
         subprocess_seconds = int(timeout.group(1).replace('_', '')) / 1000
         self.assertGreater(subprocess_seconds, network_retry.NETWORK_RETRY_BUDGET_SECONDS)
-        workflow = (SCRIPT.parents[1] / '.github/workflows/gpoint-auto-preflight.yml').read_text()
-        job_minutes = int(re.search(r'timeout-minutes:\s*(\d+)', workflow).group(1))
+        workflow = (SCRIPT.parents[1] / '.github/workflows/gpoint-deploy.yml').read_text()
+        deploy_job = workflow.split('\n  deploy:\n', 1)[1].split('\n  deploy-eros-pilot:', 1)[0]
+        job_minutes = int(re.search(r'timeout-minutes:\s*(\d+)', deploy_job).group(1))
         self.assertGreater(job_minutes * 60, subprocess_seconds)
 
     def test_urllib_timeout_is_clamped_to_absolute_shared_deadline(self):

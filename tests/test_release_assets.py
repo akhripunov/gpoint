@@ -205,11 +205,11 @@ class ImmutableReleaseTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'repository mismatch'):
                     GHCR.validate_image_metadata(role, 'ghcr.io/attacker/image', digest, metadata, sha)
 
-    def test_privileged_prepare_is_main_push_only_and_branch_jobs_are_not_dispatchable(self):
+    def test_legacy_prepare_is_manual_main_only_for_recovery(self):
         workflow = (ROOT / '.github/workflows/gpoint-prepare.yml').read_text()
-        trigger = workflow.split('\npermissions:', 1)[0]
-        self.assertIn('push:', trigger)
-        self.assertNotIn('workflow_dispatch:', trigger)
+        parsed = yaml.safe_load(workflow)
+        trigger = parsed.get('on', parsed.get(True, {}))
+        self.assertEqual(set(trigger), {'workflow_dispatch'})
         self.assertIn('permissions:\n  contents: read\n  actions: read', workflow)
         prepare = workflow.split('  prepare:\n', 1)[1].split('    steps:\n', 1)[0]
         self.assertIn("github.ref == 'refs/heads/main'", prepare)

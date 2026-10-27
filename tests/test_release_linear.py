@@ -118,15 +118,15 @@ class ReleaseTests(unittest.TestCase):
     def test_gpoint_deploy_runs_read_only_preflight_before_any_setup_or_apply(self):
         source = (ROOT / 'scripts/automated-release.mjs').read_text()
         workflow = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()
-        controller = (ROOT / '.github/workflows/gpoint-auto-preflight.yml').read_text()
         self.assertNotIn('--provision-gsales-config', source)
         self.assertNotIn('--configure-gsales-worker', source)
         self.assertLess(source.index("['release:gpoint', '--dry-run'"),
                         source.index("['release:gpoint', '--apply'"))
         self.assertIn("inputs.mode == 'production' || inputs.mode == 'task-scoped-auto'", workflow)
         self.assertIn('GPOINT_RELEASE_SKIP_BUILD', source)
-        self.assertIn('workflows: ["GPoint — Prepare"]', controller)
-        self.assertNotIn('workflows: ["GPoint — Prepare", "GPoint — Deploy"]', controller)
+        trigger = workflow.split('\npermissions:', 1)[0]
+        self.assertIn('workflow_dispatch:', trigger)
+        self.assertNotIn('push:', trigger)
 
     def test_release_workflow_keeps_publishable_when_telemetry_fails(self):
         workflow = (ROOT / '.github/workflows/gpoint-deploy.yml').read_text()

@@ -400,49 +400,46 @@ class PrepareCoalescingTests(unittest.TestCase):
             )
         self.assertEqual(COALESCING.QUIET_WINDOW_SECONDS, 60)
 
-    def test_new_sha_during_expensive_prepare_cancels_run_and_cannot_publish(self):
+    def test_legacy_prepare_is_manual_and_concurrent_recovery_is_not_cancelled(self):
         workflow = (ROOT / ".github" / "workflows" / "gpoint-prepare.yml").read_text()
         concurrency = workflow[workflow.index("concurrency:"):workflow.index("jobs:")]
-        self.assertIn("cancel-in-progress: ${{ github.event_name == 'push' }}", concurrency)
+        trigger = workflow.split("\npermissions:", 1)[0]
+        self.assertIn("workflow_dispatch:", trigger)
+        self.assertNotIn("push:", trigger)
+        self.assertIn("cancel-in-progress: false", concurrency)
         publish = workflow[workflow.index("  publish:"):]
         self.assertIn("needs.prepare.result != 'cancelled'", publish)
 
-    def test_new_sha_after_artifact_exists_blocks_stale_controller_preflight(self):
-        controller = (ROOT / ".github" / "workflows" / "gpoint-auto-preflight.yml").read_text()
-        self.assertIn("github.event.workflow_run.head_sha == github.sha", controller)
+    def test_automatic_legacy_release_controller_is_retired(self):
+        self.assertFalse((ROOT / ".github" / "workflows" / "gpoint-auto-preflight.yml").exists())
         orchestrator = (ROOT / "scripts" / "release-orchestrator.mjs").read_text()
         self.assertIn("current main", orchestrator)
         self.assertIn("!== sha", orchestrator)
 
-    def test_release_controller_checks_full_history_for_durable_authorization(self):
-        controller = (ROOT / ".github" / "workflows" / "gpoint-auto-preflight.yml").read_text()
+    def test_manual_legacy_deploy_keeps_full_history_for_durable_authorization(self):
+        controller = (ROOT / ".github" / "workflows" / "gpoint-deploy.yml").read_text()
         checkout_ref = "uses: actions/checkout@"
         self.assertIn(checkout_ref, controller)
         checkout_start = controller.index(checkout_ref)
         checkout = controller[checkout_start:controller.index("      - name:", checkout_start)]
         action_version = checkout.split(checkout_ref, 1)[1].splitlines()[0]
         self.assertRegex(action_version, r"^[0-9a-f]{40}$",
-                         "release controller actions must remain pinned to a full commit SHA")
+                         "legacy recovery actions must remain pinned to a full commit SHA")
         self.assertIn("fetch-depth: 0", checkout,
                       "authorization scope validation needs the production-baseline and source commit ancestry")
 
-    def test_mixed_ui_and_backend_changes_still_run_full_prepare(self):
+    def test_manual_legacy_prepare_runs_full_recovery_gates(self):
         workflow = (ROOT / ".github" / "workflows" / "gpoint-prepare.yml").read_text()
         triggers = workflow[workflow.index("on:"):workflow.index("permissions:")]
-        self.assertIn("  push:", triggers)
-        self.assertIn("branches: [main]", triggers)
-        self.assertIn("paths-ignore:", triggers)
-        self.assertNotIn("paths:", triggers)
-        self.assertNotIn("workflow_dispatch:", triggers)
+        self.assertIn("workflow_dispatch:", triggers)
+        self.assertNotIn("push:", triggers)
         self.assertIn("Tests, disposable database rehearsal and immutable Docker build", workflow)
 
-    def test_worker_only_skip_policy_remains_scoped_to_existing_paths(self):
+    def test_manual_legacy_prepare_does_not_use_push_path_filters(self):
         workflow = (ROOT / ".github" / "workflows" / "gpoint-prepare.yml").read_text()
         triggers = workflow[workflow.index("on:"):workflow.index("permissions:")]
-        self.assertIn("services/agata/worker/**", triggers)
-        self.assertIn("services/agata/conversation-lab/**", triggers)
-        self.assertIn("services/agata/tests/test_worker_*.py", triggers)
-        self.assertNotIn("apps/", triggers)
+        self.assertNotIn("paths:", triggers)
+        self.assertNotIn("paths-ignore:", triggers)
 
     def test_stale_retry_is_rejected_before_wait_or_expensive_work(self):
         old, current = "a" * 40, "b" * 40
@@ -524,7 +521,7 @@ class PrepareCoalescingTests(unittest.TestCase):
         self.assertNotIn("needs.coalesce.result == 'failure'", prepare)
         self.assertIn("needs.coalesce.result == 'success'", prepare)
         self.assertNotIn("Fail closed when main coalescing did not complete", prepare)
-        self.assertIn("cancel-in-progress: ${{ github.event_name == 'push' }}", workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
         self.assertLess(workflow.index("id: coalesce"), workflow.index("actions/setup-node"))
         self.assertLess(workflow.index("id: coalesce"), workflow.index("prepare-release.py"))
         for expensive in (
@@ -537,9 +534,9 @@ class PrepareCoalescingTests(unittest.TestCase):
             if "if:" not in segment[:500]:
                 self.fail(f"{expensive} must be gated on the coalescing winner")
             self.assertIn(gate, segment[:500], expensive)
-        self.assertIn("github.event.workflow_run.head_sha == github.sha", (
-            ROOT / ".github" / "workflows" / "gpoint-auto-preflight.yml"
-        ).read_text())
+        trigger = workflow.split("\npermissions:", 1)[0]
+        self.assertIn("workflow_dispatch:", trigger)
+        self.assertNotIn("push:", trigger)
         publish_job = workflow[workflow.index("  publish:"):]
         self.assertIn("runs-on: ubuntu-latest", publish_job)
         self.assertIn("persist-credentials: false", publish_job)

@@ -1,20 +1,7 @@
 name: GPoint — Prepare
 
 on:
-  push:
-    branches: [main]
-    # AGATA Worker / Conversation Lab run and test locally on the owner's Mac.
-    # A pure Worker/Lab/docs change must not consume GitHub-hosted Actions minutes.
-    # Mixed changes to production paths still run the normal GPoint Prepare.
-    paths-ignore:
-      - 'services/agata/worker/**'
-      - 'services/agata/conversation-lab/**'
-      - 'services/agata/tests/test_worker_*.py'
-      - 'services/agata/tests/test_mac_worker*.py'
-      - 'services/agata/tests/test_*conversation_lab*.py'
-      - 'docs/superpowers/plans/*agata*.md'
-      - 'docs/superpowers/plans/*worker*.md'
-      - 'docs/superpowers/plans/*conversation-lab*.md'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -22,7 +9,7 @@ permissions:
 
 concurrency:
   group: gpoint-prepare-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'push' }}
+  cancel-in-progress: false
 
 jobs:
   coalesce:
@@ -55,7 +42,7 @@ jobs:
         run: python3 scripts/prepare_coalescing.py
 
   prepare:
-    # This privileged publish job is limited to trusted main pushes.
+    # Legacy recovery Prepare is manually dispatched from main only.
     if: >-
       github.ref == 'refs/heads/main' &&
       needs.coalesce.result == 'success' &&
@@ -137,6 +124,7 @@ jobs:
         if: github.ref == 'refs/heads/main' && needs.coalesce.outputs.result == 'WINNER'
         run: |
           python3 -m pytest -q tests/test_public_workflow_security.py
+          python3 -m unittest tests.test_gpoint_release_trigger_graph
           python3 scripts/test_prepare_coalescing.py
           python3 -m unittest tests.test_prepare_workflow_summary
           python3 -m unittest tests.test_unified_release_v1
@@ -203,7 +191,7 @@ jobs:
                           summary.write(f"| {name} | {result['status']} | {result['seconds']:.3f} |\n")
           PY
           if [ "$GITHUB_REF" = refs/heads/main ]; then
-            echo 'Next: the trusted controller checks durable full-cycle authorization. If valid, the existing Deploy runs its read-only preflight before Apply; otherwise exact-SHA approval remains required.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Legacy recovery artifacts are prepared for this exact main SHA. No Deploy follows automatically; any legacy recovery Deploy remains a separate explicit workflow dispatch.' >> "$GITHUB_STEP_SUMMARY"
           fi
 
   publish:

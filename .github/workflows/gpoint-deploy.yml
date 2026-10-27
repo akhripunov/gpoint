@@ -34,7 +34,7 @@ on:
         default: false
         type: boolean
       prepare_run_id:
-        description: 'Exact Prepare run dispatched by trusted automatic controller'
+        description: 'Exact legacy Prepare run used for this manual recovery Deploy, when available'
         required: false
         type: string
       prepare_run_attempt:
@@ -42,7 +42,7 @@ on:
         required: false
         type: string
       orchestrator_run_id:
-        description: 'Automatic release controller run; telemetry only'
+        description: 'Historical release controller run ID for telemetry only; normally unset'
         required: false
         type: string
       task_authorization_id:
@@ -50,7 +50,7 @@ on:
         required: false
         type: string
       prepare_receipt_digest:
-        description: 'Controller-selected immutable Prepare OCI manifest digest'
+        description: 'Previously selected immutable Prepare OCI manifest digest, when available'
         required: false
         type: string
       prepare_receipt_sha256:

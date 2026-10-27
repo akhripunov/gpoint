@@ -80,8 +80,8 @@ class UnifiedReleaseV1ContractTests(unittest.TestCase):
         self.assertIn("runs-on: [self-hosted, macOS, gpoint-production]", workflow)
         self.assertIn("needs.coalesce.outputs.result == 'WINNER'", workflow)
         trigger = workflow.split("\npermissions:", 1)[0]
-        self.assertNotIn("workflow_dispatch:", trigger)
-        self.assertIn("branches: [main]", trigger)
+        self.assertIn("workflow_dispatch:", trigger)
+        self.assertNotIn("push:", trigger)
         prepare = workflow.split("  prepare:\n", 1)[1].split("    steps:\n", 1)[0]
         self.assertIn("github.ref == 'refs/heads/main'", prepare)
         self.assertIn("needs.coalesce.result == 'success'", prepare)
