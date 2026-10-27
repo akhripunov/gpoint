@@ -10,6 +10,18 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_shared_proxy_hosts_are_not_redeclared_by_kamal_roles():
+    core = yaml.safe_load((ROOT / "config/deploy.yml").read_text())
+    miniapp = yaml.safe_load((ROOT / "config/deploy.miniapp.yml").read_text())
+
+    assert core["proxy"]["hosts"] == ["gpoint.amiora.one"]
+    assert "host" not in core["servers"]["api"]["proxy"]
+    assert "hosts" not in core["servers"]["api"]["proxy"]
+    assert miniapp["proxy"]["hosts"] == ["gpoint.amiora.one"]
+    assert "host" not in miniapp["servers"]["web"]["proxy"]
+    assert "hosts" not in miniapp["servers"]["web"]["proxy"]
+
+
 def test_kamal_core_config_uses_public_tls_proxy_and_only_core_roles():
     config = yaml.safe_load((ROOT / "config/deploy.yml").read_text())
     assert not (ROOT / "Gemfile.kamal").exists()
@@ -20,7 +32,7 @@ def test_kamal_core_config_uses_public_tls_proxy_and_only_core_roles():
     assert config["proxy"]["run"]["version"] == "v0.9.2"
     assert set(config["servers"]) == {"api", "worker", "bot"}
     api = config["servers"]["api"]
-    assert api["proxy"]["host"] == "gpoint.amiora.one"
+    assert "host" not in api["proxy"]
     assert api["proxy"]["path_prefixes"] == ["/api", "/media"]
     assert api["options"]["volume"] == "/opt/gpoint/media:/data/media"
     assert config["proxy"]["hosts"] == ["gpoint.amiora.one"]
@@ -54,7 +66,7 @@ def test_kamal_agata_and_miniapp_are_separate_services():
     assert miniapp["proxy"]["ssl_redirect"] is True
     assert miniapp["proxy"]["run"] == core["proxy"]["run"]
     assert set(miniapp["servers"]) == {"web"}
-    assert miniapp["servers"]["web"]["proxy"]["host"] == "gpoint.amiora.one"
+    assert "host" not in miniapp["servers"]["web"]["proxy"]
     dockerfile = (ROOT / "infra/production/Gpoint.Dockerfile").read_text()
     assert "FROM nginx:1.27-alpine AS miniapp-runtime" in dockerfile
     assert "COPY --from=miniapp-build /workspace/apps/miniapp/dist/ /usr/share/nginx/html/" in dockerfile

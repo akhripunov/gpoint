@@ -15,7 +15,6 @@ servers:
     hosts:
       - <%= ENV.fetch("GPOINT_PRODUCTION_HOST") %>
     proxy:
-      host: gpoint.amiora.one
       app_port: 80
       healthcheck:
         path: /

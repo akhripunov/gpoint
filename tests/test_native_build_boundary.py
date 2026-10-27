@@ -178,14 +178,20 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
     def test_workspace_ci_runs_real_kamal_config_and_proxy_integration_checks(self):
         steps = self.workflow["jobs"]["workspace"]["steps"]
         runs = "\n".join(step.get("run", "") for step in steps)
-        self.assertIn('config --config-file config/deploy.yml', runs)
-        self.assertIn('config --config-file config/deploy.agata.yml', runs)
-        self.assertIn('config --config-file config/deploy.miniapp.yml', runs)
+        self.assertIn("./scripts/check-kamal-configs.sh", runs)
         self.assertIn("./scripts/test-kamal-proxy-integration.sh", runs)
+        self.assertLess(runs.index("./scripts/check-kamal-configs.sh"),
+                        runs.index("./scripts/test-kamal-proxy-integration.sh"))
         self.assertTrue(any(
             step.get("env", {}).get("KAMAL_IMAGE") == "ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625"
             for step in steps
         ))
+
+        config_check = (ROOT / "scripts/check-kamal-configs.sh").read_text()
+        for config in ("deploy.yml", "deploy.agata.yml", "deploy.miniapp.yml"):
+            self.assertIn(f"config/{config}", config_check)
+        self.assertIn("config-validation-placeholder", config_check)
+        self.assertIn("Kamal config validation failed", config_check)
 
 
 class FirstCutoverWorkflowTests(unittest.TestCase):

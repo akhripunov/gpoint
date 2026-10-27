@@ -16,7 +16,6 @@ servers:
         - /opt/gpoint/env/production.env
       volume: /opt/gpoint/media:/data/media
     proxy:
-      host: gpoint.amiora.one
       path_prefixes:
         - /api
         - /media
