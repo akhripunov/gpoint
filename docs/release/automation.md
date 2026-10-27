@@ -1,5 +1,26 @@
 # Как выпускать GPoint
 
+## ME-52: локальный Kamal candidate (2026-10-27)
+
+Эта реализация остаётся локальной и не описывает уже переключённое production:
+до отдельно разрешённого и успешно проверенного cutover действующая Compose/V5
+операция и recovery остаются актуальными. Обычные будущие релизы используют
+`.github/workflows/gpoint-native-release.yml` (Workspace CI + Python CI →
+immutable Core/AGATA/Mini App images → exact-SHA protected Kamal Deploy/Verify).
+Разовый переход обслуживает `.github/workflows/gpoint-first-kamal-cutover.yml`
+и требует свежий inventory, encrypted backup/isolated restore, migration
+parity, паузу старых consumers и полную runtime Verify.
+
+Публичный TLS/HTTP вход после перехода обслуживает Kamal Proxy на портах 80 и
+443: `/api` и `/media` идут в Core, `/` и Mini App paths — в Mini App. Caddy
+останавливается в cutover и сохраняется только вместе с checksum как recovery
+material. GSales не собирается и не стартует в обычных релизах; Eros,
+Sensitive Detector и ACL/pilot остаются вне обычного release scope.
+
+Это локальное описание не разрешает публикацию, Actions, GHCR build, production
+Apply, изменение БД/инфраструктуры или retirement Compose/V5. Удалять legacy
+путь можно только после отдельной авторизации и успешной production Verify.
+
 ## Текущая модель выпуска и состояния (ME-42)
 
 Этот раздел является единственным действующим описанием хранения артефактов и

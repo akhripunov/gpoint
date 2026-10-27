@@ -49,6 +49,9 @@ docker exec "$proxy" kamal-proxy deploy gpoint-miniapp \
 docker exec "$proxy" kamal-proxy deploy gpoint-core \
   --host gpoint.example.test --target gpoint-core-api:80 --path-prefix=/api \
   --strip-path-prefix --health-check-path=/ >/dev/null
+docker exec "$proxy" kamal-proxy deploy gpoint-core-media \
+  --host gpoint.example.test --target gpoint-core-api:80 --path-prefix=/media \
+  --strip-path-prefix --health-check-path=/ >/dev/null
 
 expect() {
   local path="$1" expected="$2" actual
@@ -62,6 +65,5 @@ expect() {
 expect / 'miniapp:/'
 expect /settings 'miniapp:/settings'
 expect /api/health/live 'core:/health/live'
-# Caddy rewrites /media/... to /api/media/... before it reaches Kamal Proxy.
-expect /api/media/image.png 'core:/media/image.png'
+expect /media/assets/image.png 'core:/assets/image.png'
 echo 'KAMAL_PROXY_SHARED_ROUTING=PASS'

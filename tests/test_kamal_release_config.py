@@ -10,7 +10,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_kamal_core_config_preserves_caddy_entry_and_only_core_roles():
+def test_kamal_core_config_uses_public_tls_proxy_and_only_core_roles():
     config = yaml.safe_load((ROOT / "config/deploy.yml").read_text())
     assert not (ROOT / "Gemfile.kamal").exists()
     assert not (ROOT / "Gemfile.kamal.lock").exists()
@@ -21,10 +21,14 @@ def test_kamal_core_config_preserves_caddy_entry_and_only_core_roles():
     assert set(config["servers"]) == {"api", "worker", "bot"}
     api = config["servers"]["api"]
     assert api["proxy"]["host"] == "gpoint.amiora.one"
-    assert api["proxy"]["path_prefixes"] == ["/api"]
+    assert api["proxy"]["path_prefixes"] == ["/api", "/media"]
     assert api["options"]["volume"] == "/opt/gpoint/media:/data/media"
-    assert config["proxy"]["run"]["http_port"] == 3001
-    assert config["proxy"]["run"]["bind_ips"] == ["127.0.0.1"]
+    assert config["proxy"]["hosts"] == ["gpoint.amiora.one"]
+    assert config["proxy"]["ssl"] is True
+    assert config["proxy"]["ssl_redirect"] is True
+    assert set(config["proxy"]["run"]) == {"version"}
+    assert api["proxy"]["path_prefixes"] == ["/api", "/media"]
+    assert api["proxy"]["strip_path_prefix"] is True
     assert config["ssh"]["keys"] == ["<%= ENV.fetch(\"GPOINT_SSH_KEY\") %>"]
     assert config["ssh"]["config"] is True
     assert config["ssh"]["keys_only"] is True
@@ -45,6 +49,9 @@ def test_kamal_agata_and_miniapp_are_separate_services():
     assert miniapp["service"] == "gpoint-miniapp"
     assert miniapp["image"] == "akhripunov/gpoint-miniapp"
     core = yaml.safe_load((ROOT / "config/deploy.yml").read_text())
+    assert miniapp["proxy"]["hosts"] == ["gpoint.amiora.one"]
+    assert miniapp["proxy"]["ssl"] is True
+    assert miniapp["proxy"]["ssl_redirect"] is True
     assert miniapp["proxy"]["run"] == core["proxy"]["run"]
     assert set(miniapp["servers"]) == {"web"}
     assert miniapp["servers"]["web"]["proxy"]["host"] == "gpoint.amiora.one"
@@ -80,7 +87,7 @@ def test_kamal_uses_attempt_scoped_tag_with_buildkit_digest_verification():
     version = "${{ inputs.candidate_sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
     assert f"IMAGE_VERSION: {version}" in deploy
     assert "ghcr.io/akhripunov/gpoint-runtime:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}" in workflow
-    assert "name: Verify GHCR candidate tags resolve to the exact digests" in deploy
+    assert "name: Verify GHCR candidate tags resolve to exact amd64 digests" in deploy
     assert 'docker pull --platform linux/amd64 "$repository:$IMAGE_VERSION"' in deploy
     assert 'test "$actual" = "$repository@$digest"' in deploy
     assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST"' in deploy
@@ -92,7 +99,7 @@ def test_kamal_uses_attempt_scoped_tag_with_buildkit_digest_verification():
 
 
 def test_kamal_deploy_uses_native_verified_images_and_preserves_first_cutover_guard():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
     kamal = workflow.split("  deploy:\n", 1)[1]
     assert "runs-on: ubuntu-latest" in kamal
     assert "environment: production" in kamal
@@ -100,7 +107,7 @@ def test_kamal_deploy_uses_native_verified_images_and_preserves_first_cutover_gu
     assert "name: Deploy request-serving Kamal roles" in kamal
     assert "name: Start Kamal consumers after request-serving verification" in kamal
     deploy = kamal.split("name: Deploy request-serving Kamal roles", 1)[1].split(
-        "name: Apply candidate Caddyfile", 1
+        "name: Verify request-serving routes before starting consumers", 1
     )[0]
     assert "--roles api --config-file config/deploy.yml" in deploy
     assert "--roles api --config-file config/deploy.agata.yml" in deploy
@@ -142,15 +149,23 @@ def test_kamal_deploy_uses_native_verified_images_and_preserves_first_cutover_gu
     assert 'index .NetworkSettings.Networks "shared_internal").Aliases' in kamal
 
 
-def test_caddy_keeps_tls_and_routes_api_and_miniapp_through_one_kamal_proxy():
-    caddy = (ROOT / "infra/production/Caddyfile").read_text()
-    assert "uri strip_prefix /api" not in caddy
-    assert "reverse_proxy 127.0.0.1:3001" in caddy
-    assert "reverse_proxy 127.0.0.1:3003" not in caddy
-    assert "rewrite * /api{uri}" in caddy
-    assert caddy.count("reverse_proxy 127.0.0.1:3001") == 3
-    assert "root * /opt/gpoint/app/miniapp" not in caddy
-    assert "compose-gsales-api-1" not in caddy
+def test_kamal_proxy_owns_public_tls_and_routes_api_media_and_miniapp():
+    core = yaml.safe_load((ROOT / "config/deploy.yml").read_text())
+    miniapp = yaml.safe_load((ROOT / "config/deploy.miniapp.yml").read_text())
+    for config in (core, miniapp):
+        assert config["proxy"]["hosts"] == ["gpoint.amiora.one"]
+        assert config["proxy"]["ssl"] is True
+        assert config["proxy"]["ssl_redirect"] is True
+        assert "http_port" not in config["proxy"]["run"]
+        assert "https_port" not in config["proxy"]["run"]
+        assert "bind_ips" not in config["proxy"]["run"]
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
+    assert "scripts/retire-gpoint-caddy.sh" in workflow
+    assert "KAMAL_PROXY_TLS_VERIFY=PASS" in workflow
+    assert "systemctl reload caddy" not in workflow
+    media_route = (ROOT / "apps/api/src/media-read.ts").read_text()
+    assert "@Controller()" in media_route
+    assert "@Get(['media/assets/:id', 'assets/:id'])" in media_route
 
 
 def test_kamal_network_hook_joins_only_allowed_core_and_agata_roles():
@@ -202,22 +217,17 @@ def test_kamal_pre_app_boot_checks_the_pulled_digest_before_boot():
     assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp' in workflow
 
 
-def test_kamal_workflow_applies_candidate_caddyfile_before_production_verify():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+def test_first_cutover_stops_caddy_before_binding_public_kamal_proxy():
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
-    apply_script = (ROOT / "scripts/apply-kamal-caddy.sh").read_text()
-    assert "name: Apply candidate Caddyfile after request-serving roles are deployed" in deploy
-    assert "if: inputs.mode == 'production'" in deploy
-    assert "scp" in deploy
-    assert "scripts/apply-kamal-caddy.sh" in deploy
-    assert "/etc/caddy/Caddyfile" in apply_script
-    assert "/opt/gpoint/backups" in apply_script
-    assert "caddy validate" in apply_script
-    assert "systemctl reload caddy" in apply_script
-    assert "sha256sum" in apply_script
-    assert deploy.index("name: Deploy request-serving Kamal roles") < deploy.index(
-        "name: Apply candidate Caddyfile after request-serving roles are deployed"
+    assert "name: Stop Caddy for Kamal Proxy public bind" in deploy
+    assert "scripts/retire-gpoint-caddy.sh" in deploy
+    assert "CADDYFILE_SHA256" in deploy
+    assert deploy.index("name: Stop Caddy for Kamal Proxy public bind") < deploy.index(
+        "name: Deploy request-serving Kamal roles"
     ) < deploy.index("name: Verify request-serving routes before starting consumers")
+    assert "systemctl stop caddy" in (ROOT / "scripts/retire-gpoint-caddy.sh").read_text()
+    assert "kamal-proxy" in deploy
     assert deploy.index("name: Verify request-serving routes before starting consumers") < deploy.index(
         "name: Start Kamal consumers after request-serving verification"
     ) < deploy.index("name: Verify public routes and exact running services")
@@ -227,15 +237,69 @@ def test_kamal_workflow_applies_candidate_caddyfile_before_production_verify():
     assert "if: always()" not in consumer_step
 
 
+def test_retire_caddy_script_checksums_recovery_copy_before_stopping_service(tmp_path):
+    candidate_sha = "a" * 40
+    config = tmp_path / "Caddyfile"
+    config.write_text("gpoint.amiora.one { respond /health 200 }\n")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls"
+    stopped = tmp_path / "caddy-stopped"
+    (bin_dir / "systemctl").write_text(textwrap.dedent("""\
+        #!/usr/bin/env python3
+        import os, sys
+        with open(os.environ['TEST_CALLS'], 'a') as output:
+            output.write(' '.join(sys.argv[1:]) + '\\n')
+        marker = os.environ['TEST_STOPPED']
+        if sys.argv[1:] == ['stop', 'caddy']:
+            open(marker, 'w').close()
+        elif sys.argv[1:] == ['start', 'caddy']:
+            if os.path.exists(marker): os.unlink(marker)
+        if sys.argv[1:] == ['is-active', '--quiet', 'caddy']:
+            raise SystemExit(3 if os.path.exists(marker) else 0)
+    """))
+    (bin_dir / "systemctl").chmod(0o755)
+    environment = os.environ.copy()
+    environment.update({
+        "PATH": f"{bin_dir}:{environment['PATH']}",
+        "GPOINT_CADDY_CONFIG_PATH": str(config),
+        "GPOINT_CADDY_BACKUP_DIR": str(tmp_path / "backups"),
+        "TEST_CALLS": str(calls),
+        "TEST_STOPPED": str(stopped),
+    })
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts/retire-gpoint-caddy.sh"), candidate_sha, "12345", "2",
+         hashlib.sha256(config.read_bytes()).hexdigest()],
+        env=environment, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    backup = tmp_path / "backups" / f"caddy-before-kamal-{candidate_sha}-12345-2"
+    assert backup.read_text() == config.read_text()
+    assert hashlib.sha256(backup.read_bytes()).hexdigest() == Path(f"{backup}.sha256").read_text().split()[0]
+    assert calls.read_text().splitlines() == ["is-active --quiet caddy", "stop caddy", "is-active --quiet caddy"]
+    assert "GPOINT_CADDY_RETIRED=PASS" in result.stdout
+
+
 def test_native_workflow_quotes_production_host_in_direct_ssh_targets():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
-    deploy = workflow.split("  deploy:\n", 1)[1]
-    assert 'ssh -T "${ssh_opts[@]}" "root@${GPOINT_PRODUCTION_HOST}" bash "$remote_script"' in deploy
-    assert 'ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$remote_manifest_writer"' in deploy
+    for workflow_name in (
+        "gpoint-native-release.yml",
+        "gpoint-first-kamal-cutover.yml",
+    ):
+        workflow = (ROOT / ".github/workflows" / workflow_name).read_text()
+        for line in workflow.splitlines():
+            if ("root@${GPOINT_PRODUCTION_HOST}" in line
+                    and ("ssh " in line or "scp " in line)):
+                assert '"root@${GPOINT_PRODUCTION_HOST}' in line, (workflow_name, line)
+
+
+def test_cutover_summary_printf_avoids_shellcheck_single_quote_interpolation_warning():
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
+    assert "printf -- '- %s: %s\\n'" in workflow
+    assert "printf -- '- %s: `%s`\\n'" not in workflow
 
 
 def test_kamal_success_requires_database_media_consumer_and_eros_readback():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
     assert "name: Capture PostgreSQL and Eros cutover baseline" in deploy
     assert "sanitize-kamal-inventory.py" in deploy
@@ -262,7 +326,7 @@ def test_kamal_success_requires_database_media_consumer_and_eros_readback():
 
 
 def test_first_cutover_stops_only_freshly_inventoried_legacy_services_after_restore():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
     assert "name: Verify fresh PostgreSQL backup with isolated restore" in deploy
     assert deploy.index("name: Capture PostgreSQL and Eros cutover baseline") < deploy.index(
@@ -305,7 +369,7 @@ def test_first_cutover_stops_only_freshly_inventoried_legacy_services_after_rest
 
 
 def test_cutover_helper_uses_snapshot_bound_graceful_stop_and_pre_deploy_recovery():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
     assert deploy.index("name: Verify fresh PostgreSQL backup with isolated restore") < deploy.index(
         "name: Create exact-SHA in-progress GitHub Deployment"
@@ -340,7 +404,7 @@ def test_cutover_helper_uses_snapshot_bound_graceful_stop_and_pre_deploy_recover
 
 
 def test_cutover_backup_is_encrypted_offsite_and_restore_reads_ciphertext_only():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
     backup_step = deploy.split("name: Verify fresh PostgreSQL backup with isolated restore", 1)[1].split(
         "name: Create exact-SHA in-progress GitHub Deployment", 1
@@ -413,7 +477,7 @@ def test_kamal_migration_parity_fails_closed_for_pending_candidate_revision(tmp_
 
 
 def test_native_workflow_runs_migration_parity_before_deployment_or_pause():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
     parity = deploy.index("name: Verify candidate migrations match the live database")
     deployment = deploy.index("name: Create exact-SHA in-progress GitHub Deployment")
@@ -425,7 +489,7 @@ def test_native_workflow_runs_migration_parity_before_deployment_or_pause():
 
 
 def test_kamal_cutover_checks_candidate_image_disk_headroom_before_deployment():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
     check = deploy.index("name: Check VPS disk headroom for the exact candidate images")
     deployment = deploy.index("name: Create exact-SHA in-progress GitHub Deployment")
@@ -437,7 +501,7 @@ def test_kamal_cutover_checks_candidate_image_disk_headroom_before_deployment():
 
 
 def test_kamal_production_verify_persists_attempt_bound_manifest():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
     verify = deploy.split("name: Verify public routes and exact running services", 1)[1].split(
         "name: Record GitHub Deployment result against the same attempt", 1
@@ -548,130 +612,6 @@ def test_kamal_inventory_includes_sanitized_per_container_resource_sample(tmp_pa
         "memoryPercent": 3.12, "pids": 14,
     }
     assert "private" not in result.stdout
-
-
-def test_caddy_apply_script_backs_up_and_reloads_only_a_verified_candidate():
-    candidate_sha = "a" * 40
-    candidate = "gpoint.amiora.one {\n  respond /health 200\n}\n"
-    previous = "gpoint.amiora.one {\n  respond /old 200\n}\n"
-    candidate_digest = hashlib.sha256(candidate.encode()).hexdigest()
-
-    with tempfile.TemporaryDirectory() as temporary:
-        root = Path(temporary)
-        bin_dir = root / "bin"
-        bin_dir.mkdir()
-        current = root / "etc/caddy/Caddyfile"
-        current.parent.mkdir(parents=True)
-        current.write_text(previous)
-        staged = Path("/tmp") / f"gpoint-caddy-{candidate_sha}-12345-2"
-        staged.unlink(missing_ok=True)
-        staged.write_text(candidate)
-        call_log = root / "calls"
-        (bin_dir / "caddy").write_text(textwrap.dedent("""\
-            #!/usr/bin/env python3
-            import os, sys
-            with open(os.environ['TEST_CALL_LOG'], 'a') as log:
-                log.write('caddy ' + ' '.join(sys.argv[1:]) + '\\n')
-            raise SystemExit(int(os.environ.get('TEST_CADDY_EXIT', '0')))
-        """))
-        (bin_dir / "systemctl").write_text(textwrap.dedent("""\
-            #!/usr/bin/env python3
-            import os, sys
-            with open(os.environ['TEST_CALL_LOG'], 'a') as log:
-                log.write('systemctl ' + ' '.join(sys.argv[1:]) + '\\n')
-            if sys.argv[1:] == ['reload', 'caddy'] and os.environ.get('TEST_FAIL_FIRST_RELOAD') == '1':
-                marker = os.environ['TEST_RELOAD_MARKER']
-                if not os.path.exists(marker):
-                    open(marker, 'w').close()
-                    raise SystemExit(1)
-            raise SystemExit(int(os.environ.get('TEST_SYSTEMCTL_EXIT', '0')))
-        """))
-        for executable in bin_dir.iterdir():
-            executable.chmod(0o755)
-        environment = os.environ.copy()
-        environment.update({
-            "PATH": f"{bin_dir}:{environment['PATH']}",
-            "GPOINT_CADDY_CONFIG_PATH": str(current),
-            "GPOINT_CADDY_BACKUP_DIR": str(root / "backups"),
-            "TEST_CALL_LOG": str(call_log),
-        })
-        command = [
-            "bash", str(ROOT / "scripts/apply-kamal-caddy.sh"), candidate_sha,
-            candidate_digest, "12345", "2", str(staged),
-        ]
-        result = subprocess.run(command, env=environment, capture_output=True, text=True)
-
-        assert result.returncode == 0, result.stderr
-        assert current.read_text() == candidate
-        backup = root / "backups" / f"caddy-before-{candidate_sha}-12345-2"
-        assert backup.read_text() == previous
-        sidecar = backup.parent / f"{backup.name}.sha256"
-        assert sidecar.read_text().split()[0] == hashlib.sha256(previous.encode()).hexdigest()
-        assert sidecar.read_text().split()[1] == str(backup)
-        calls = call_log.read_text().splitlines()
-        assert len([line for line in calls if line.startswith("caddy validate")]) == 2
-        assert calls.index("systemctl reload caddy") < calls.index("systemctl is-active --quiet caddy")
-
-        staged.write_text(candidate)
-        mismatch = subprocess.run(
-            [*command[:3], "0" * 64, *command[4:]], env=environment, capture_output=True, text=True
-        )
-        assert mismatch.returncode != 0
-        assert current.read_text() == candidate
-        staged.unlink(missing_ok=True)
-
-        validation_current = root / "validation/etc/caddy/Caddyfile"
-        validation_current.parent.mkdir(parents=True)
-        validation_current.write_text(previous)
-        validation_staged = Path("/tmp") / f"gpoint-caddy-{candidate_sha}-12346-1"
-        validation_staged.write_text(candidate)
-        validation_env = environment | {
-            "GPOINT_CADDY_CONFIG_PATH": str(validation_current),
-            "GPOINT_CADDY_BACKUP_DIR": str(root / "validation/backups"),
-            "TEST_CADDY_EXIT": "1",
-        }
-        calls_before_validation = len(call_log.read_text().splitlines())
-        validation = subprocess.run(
-            ["bash", str(ROOT / "scripts/apply-kamal-caddy.sh"), candidate_sha,
-             candidate_digest, "12346", "1", str(validation_staged)],
-            env=validation_env, capture_output=True, text=True,
-        )
-        assert validation.returncode != 0
-        assert validation_current.read_text() == previous
-        assert not (root / "validation/backups").exists()
-        assert not any(
-            line.startswith("systemctl ")
-            for line in call_log.read_text().splitlines()[calls_before_validation:]
-        )
-        validation_staged.unlink(missing_ok=True)
-
-        reload_current = root / "reload/etc/caddy/Caddyfile"
-        reload_current.parent.mkdir(parents=True)
-        reload_current.write_text(previous)
-        reload_staged = Path("/tmp") / f"gpoint-caddy-{candidate_sha}-12347-1"
-        reload_staged.write_text(candidate)
-        reload_env = environment | {
-            "GPOINT_CADDY_CONFIG_PATH": str(reload_current),
-            "GPOINT_CADDY_BACKUP_DIR": str(root / "reload/backups"),
-            "TEST_CADDY_EXIT": "0",
-            "TEST_FAIL_FIRST_RELOAD": "1",
-            "TEST_RELOAD_MARKER": str(root / "reload-first-failure"),
-        }
-        reload = subprocess.run(
-            ["bash", str(ROOT / "scripts/apply-kamal-caddy.sh"), candidate_sha,
-             candidate_digest, "12347", "1", str(reload_staged)],
-            env=reload_env, capture_output=True, text=True,
-        )
-        assert reload.returncode != 0
-        assert reload_current.read_text() == previous
-        reload_calls = call_log.read_text().splitlines()
-        assert reload_calls[-3:] == [
-            "caddy validate --config " + str(reload_current) + " --adapter caddyfile",
-            "systemctl reload caddy",
-            "systemctl is-active --quiet caddy",
-        ]
-        assert "GPOINT_CADDY_ROLLBACK=PASS" in reload.stdout
-        reload_staged.unlink(missing_ok=True)
 
 
 def test_pre_app_boot_reads_the_ssh_heredoc_and_fails_closed_on_digest_mismatch():

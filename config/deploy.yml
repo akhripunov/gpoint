@@ -19,6 +19,7 @@ servers:
       host: gpoint.amiora.one
       path_prefixes:
         - /api
+        - /media
       strip_path_prefix: true
       app_port: 3000
       healthcheck:
@@ -49,11 +50,11 @@ servers:
         - /opt/gpoint/env/production.env
 
 proxy:
+  hosts:
+    - gpoint.amiora.one
+  ssl: true
+  ssl_redirect: true
   run:
-    http_port: 3001
-    https_port: 3002
-    bind_ips:
-      - 127.0.0.1
     version: v0.9.2
 
 registry:

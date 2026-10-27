@@ -65,10 +65,12 @@ path available until the Kamal production Verify has passed.
 - [ ] Compare the candidate migrations with the live migration heads and the
       isolated restore. Stop if an old application cannot read data after the
       candidate migration or if restore evidence is incomplete.
-- [ ] Confirm `kamal-proxy` 0.9.2 can bind the configured loopback listener and
-      that Caddy routes `/api/*`, rewritten `/media/*`, and Mini App paths to
-      that one listener. Verify the existing TLS certificate and that the
-      production Caddy service can validate and reload its config.
+- [ ] Confirm Kamal Proxy 0.9.2 can own the public HTTP/HTTPS listeners on
+      ports 80 and 443 with TLS for `gpoint.amiora.one`. Verify `/api/*` and
+      `/media/*` route to Core, while `/` and Mini App paths route to Mini App.
+      Record the current Caddyfile and its checksum for recovery; Caddy must be
+      stopped before Kamal Proxy binds public ports and remain inactive after
+      successful cutover.
 - [ ] Confirm the current Worker, Bot, and AGATA Memory Worker consumer counts and their shutdown
       behavior. Plan a short consumer pause so old Compose consumers are stopped
       and verified stopped before Kamal starts their replacements. Do not allow
@@ -94,26 +96,29 @@ at preparation time; never fill it from a previous release record.
    inventoried Compose app container IDs with a 120-second timeout. If that
    step fails before Kamal starts, it attempts to restart only the containers
    it stopped and fails the job. PostgreSQL, Redis, Caddy, Eros, AGATA data,
-   GSales, and all volumes remain running or stopped as inventoried.
-3. Deploy only the Core API and AGATA API roles with Kamal while consumers
+   GSales, and all volumes remain as inventoried.
+3. Before starting Kamal Proxy on public ports, copy `/etc/caddy/Caddyfile` to
+   the attempt-scoped recovery path under `/opt/gpoint/backups`, verify its
+   checksum against the fresh baseline, then stop Caddy. The cutover helper
+   fails closed if Caddy changed or remains active. Do not rewrite or reload
+   Caddy.
+4. Deploy only the Core API and AGATA API roles with Kamal while consumers
    remain paused. The deploy job must use role-scoped Kamal deploys and must not
    start Bot, Worker, or AGATA Memory Worker yet.
    Verify their exact SHA, immutable image digest, health checks, media volume,
    and required private network aliases.
-4. Deploy Mini App through the same Kamal Proxy instance.
-5. The gated Kamal workflow backs up `/etc/caddy/Caddyfile`, records its
-   checksum, validates the candidate Caddyfile, atomically installs it, and
-   reloads Caddy after the request-serving Kamal roles are deployed. A later
-   job failure does not automatically restart legacy Compose services; treat
-   that as an unconfirmed Apply and reconcile before any retry. Verify
-   HTTPS API and Mini App routes before starting consumers. If the Apply step
-   fails or its result is unclear, stop automation and reconcile the live Caddy
-   and container state; do not rerun Deploy blindly.
+5. Deploy Mini App through the same Kamal Proxy instance. Verify its public
+   TLS listener on 443, API and media paths, and Mini App root before starting
+   consumers. Caddy remains stopped. A later job failure does not automatically
+   restart legacy Compose services; treat it as an unconfirmed Apply and
+   reconcile the live Kamal Proxy, Caddy, and container state before any retry.
+   Do not rerun Deploy blindly.
 6. Start the Kamal Worker, Bot, and AGATA Memory Worker roles. Verify the old
    Compose consumers remain stopped and each new consumer has exactly the
    expected running instance count.
 7. Run the complete production Verify: service SHA and image digest, API and
-   AGATA health, Worker/Bot health, Mini App routes, media read/write, Caddy TLS,
+   AGATA health, Worker/Bot health, Mini App routes, media read/write, Kamal
+   Proxy TLS and public ports, inactive Caddy,
    PostgreSQL/migration heads, network aliases, absence of duplicate
    consumers, stopped GSales, and preserved Eros ACL/private services.
 8. Record `GitHub Deployment SUCCESS` only after every Verify assertion passes.
@@ -125,7 +130,8 @@ at preparation time; never fill it from a previous release record.
 
 If Apply times out, is interrupted, or returns an unclear result, do not retry
 Deploy. Freeze further automated changes and inspect the live container
-inventory, image digests, running consumer count, Caddy routes, networks,
+inventory, image digests, running consumer count, Kamal Proxy routes, Caddy
+service state, networks,
 volumes, database heads, and Kamal Proxy service list. Reconcile observed state
 with the exact candidate and the last-known-good application version before
 choosing recovery.

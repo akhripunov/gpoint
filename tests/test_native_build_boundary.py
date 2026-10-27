@@ -6,6 +6,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/gpoint-native-release.yml"
+CUTOVER_WORKFLOW = ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml"
 
 
 class NativeReleaseBoundaryTests(unittest.TestCase):
@@ -80,9 +81,58 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(miniapp["with"]["target"], "miniapp-runtime")
         self.assertEqual(miniapp["with"]["sbom"], True)
         self.assertEqual(miniapp["with"]["provenance"], "mode=max")
-        for role in ("agata", "gsales", "miniapp"):
+        for role in ("agata", "miniapp"):
             image_step = next(step for step in steps if step.get("id") == role)
             self.assertIn("GPOINT_BUILD_SHA=${{ github.sha }}", image_step["with"]["build-args"])
+
+    def test_ordinary_release_does_not_contain_first_cutover_mutations(self):
+        deploy = self.workflow["jobs"]["deploy"]
+        steps = deploy["steps"]
+        forbidden = (
+            "Capture PostgreSQL and Eros cutover baseline",
+            "Verify fresh PostgreSQL backup with isolated restore",
+            "Pause legacy GPoint services after restore gates",
+            "Apply candidate Caddyfile after request-serving roles are deployed",
+        )
+        names = {step.get("name") for step in steps}
+        self.assertTrue(names.isdisjoint(forbidden))
+
+    def test_ordinary_build_does_not_publish_gsales_image(self):
+        build = self.workflow["jobs"]["build"]
+        self.assertNotIn("gsales_digest", build["outputs"])
+        build_text = yaml.safe_dump(build)
+        self.assertNotIn("gpoint-g-sales-runtime", build_text)
+        self.assertNotIn("id: gsales", build_text)
+
+    def test_ordinary_release_rejects_compose_topology_before_deploy(self):
+        deploy = self.workflow["jobs"]["deploy"]
+        steps = deploy["steps"]
+        names = [step.get("name", "") for step in steps]
+        preflight = next(i for i, name in enumerate(names) if name == "Verify installed Kamal topology before ordinary release")
+        deploy_roles = next(i for i, name in enumerate(names) if name == "Deploy exact immutable images with stock Kamal")
+        self.assertLess(preflight, deploy_roles)
+        self.assertIn("for service in api worker bot agata-api agata-memory-worker", steps[preflight]["run"])
+        self.assertIn("shared_postgres_1", steps[preflight]["run"])
+        self.assertIn("compose.service=$service", steps[preflight]["run"])
+        self.assertIn("agata-memory-worker", steps[preflight]["run"])
+
+    def test_ordinary_deployment_success_requires_verified_manifest(self):
+        deploy = self.workflow["jobs"]["deploy"]
+        steps = deploy["steps"]
+        verify = next(i for i, step in enumerate(steps) if step.get("name") == "Verify public routes and exact running services")
+        record = next(i for i, step in enumerate(steps) if step.get("name") == "Record GitHub Deployment result against the same attempt")
+        self.assertLess(verify, record)
+        self.assertIn("manifest_sha", steps[verify]["run"])
+        self.assertIn("steps.verify.outputs.manifest_sha", yaml.safe_dump(steps[record]))
+        verify_run = steps[verify]["run"]
+        self.assertIn("scp -p scripts/write-kamal-production-manifest.py", verify_run)
+        self.assertIn("--mode ordinary", verify_run)
+        self.assertIn("--db-container-id", verify_run)
+        self.assertIn("--public-routes-verified --migration-parity-verified", verify_run)
+        self.assertIn("GPOINT_KAMAL_MANIFEST_SHA256", verify_run)
+        self.assertIn("/media/assets/kamal-route-verification-missing", verify_run)
+        self.assertIn('"message":"media not found"', verify_run)
+
 
     def test_deploy_is_exact_sha_owner_gated_kamal_and_keeps_gsales_stopped(self):
         deploy = self.workflow["jobs"]["deploy"]
@@ -93,11 +143,12 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("OWNER_APPROVAL_ACTOR", script)
         self.assertEqual(deploy["needs"], "build")
         self.assertTrue(all(name in self.workflow["jobs"]["build"]["outputs"]
-                            for name in ("app_digest", "agata_digest", "gsales_digest")))
+                            for name in ("app_digest", "agata_digest", "miniapp_digest")))
+        self.assertNotIn("gsales_digest", self.workflow["jobs"]["build"]["outputs"])
         deploy_text = yaml.safe_dump(deploy)
         self.assertIn("needs.build.outputs.app_digest", deploy_text)
         self.assertIn("needs.build.outputs.agata_digest", deploy_text)
-        self.assertIn("needs.build.outputs.gsales_digest", deploy_text)
+        self.assertNotIn("needs.build.outputs.gsales_digest", deploy_text)
         self.assertIn("needs.build.outputs.miniapp_digest", deploy_text)
         self.assertNotRegex(script, r"docker\s+compose\s+(up|down|pull|restart)")
         self.assertIn("Expected stopped GSales service is missing", script)
@@ -135,6 +186,29 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
             step.get("env", {}).get("KAMAL_IMAGE") == "ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625"
             for step in steps
         ))
+
+
+class FirstCutoverWorkflowTests(unittest.TestCase):
+    def load_cutover(self):
+        self.assertTrue(CUTOVER_WORKFLOW.exists(), "first-cutover workflow must remain available")
+        return yaml.safe_load(CUTOVER_WORKFLOW.read_text())
+
+    def test_cutover_workflow_keeps_fresh_inventory_backup_and_restore_gates(self):
+        workflow = self.load_cutover()
+        names = {step.get("name") for step in workflow["jobs"]["deploy"]["steps"]}
+        self.assertIn("Capture PostgreSQL and Eros cutover baseline", names)
+        self.assertIn("Verify candidate migrations match the live database", names)
+        self.assertIn("Verify fresh PostgreSQL backup with isolated restore", names)
+        self.assertIn("Pause legacy GPoint services after restore gates", names)
+        self.assertIn("Stop Caddy for Kamal Proxy public bind", names)
+
+    def test_cutover_still_verifies_gsales_stopped_and_uses_stock_kamal(self):
+        workflow = self.load_cutover()
+        deploy = workflow["jobs"]["deploy"]
+        script = "\n".join(step.get("run", "") for step in deploy["steps"])
+        self.assertIn("Expected stopped GSales service is missing", script)
+        self.assertIn("kamal deploy --skip-push", script)
+        self.assertIn("StrictHostKeyChecking=yes", script)
 
 
 if __name__ == "__main__":

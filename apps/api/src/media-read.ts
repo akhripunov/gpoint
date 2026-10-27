@@ -10,9 +10,9 @@ const prisma = new PrismaClient();
 const storage = mediaStorageFromEnv();
 const mediaRoot = process.env.GPOINT_MEDIA_ROOT ?? '/tmp/gpoint-media';
 
-@Controller('media')
+@Controller()
 export class MediaReadController {
-  @Get('assets/:id')
+  @Get(['media/assets/:id', 'assets/:id'])
   async read(@Param('id') id: string, @Req() req: any, @Res({ passthrough: true }) res: any) {
     const asset = await prisma.mediaAsset.findUnique({ where: { id }, include: { postMedia: { include: { post: { include: { creator: { include: { profile: true, owners: true } } } } } } } });
     if (!asset) throw new NotFoundException('media not found');
