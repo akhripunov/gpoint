@@ -290,6 +290,7 @@ def test_native_workflow_quotes_production_host_in_direct_ssh_targets():
             if ("root@${GPOINT_PRODUCTION_HOST}" in line
                     and ("ssh " in line or "scp " in line)):
                 assert '"root@${GPOINT_PRODUCTION_HOST}' in line, (workflow_name, line)
+                assert line.count('"root@${GPOINT_PRODUCTION_HOST}') == 1, (workflow_name, line)
 
 
 def test_cutover_summary_printf_avoids_shellcheck_single_quote_interpolation_warning():

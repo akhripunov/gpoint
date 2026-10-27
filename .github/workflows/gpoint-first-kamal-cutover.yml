@@ -426,7 +426,7 @@ jobs:
           remote_resource_script="${remote_script_dir}/resources.py"
           ssh -T -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
-            root@${GPOINT_PRODUCTION_HOST} bash -s -- "$remote_script_dir" <<'REMOTE_SETUP'
+            "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$remote_script_dir" <<'REMOTE_SETUP'
           set -euo pipefail
           [[ "$1" =~ ^/run/gpoint-kamal/[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
           test ! -e "$1"
@@ -441,7 +441,7 @@ jobs:
             scripts/sanitize-kamal-resources.py "root@${GPOINT_PRODUCTION_HOST}:$remote_resource_script"
           facts="$(ssh -T -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
-            root@${GPOINT_PRODUCTION_HOST} bash -s -- "$CANDIDATE_SHA" "$GITHUB_RUN_ID" \
+            "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$GITHUB_RUN_ID" \
             "$GITHUB_RUN_ATTEMPT" "$remote_inventory_script" "$remote_resource_script" "$CANDIDATE_IMAGE_BYTES" <<'REMOTE'
           set -euo pipefail
           candidate="$1"; run_id="$2"; attempt="$3"; inventory_script="$4"; resource_script="$5"; candidate_image_bytes="$6"
@@ -613,7 +613,7 @@ jobs:
           remote_restore_script="${remote_script_dir}/restore.sh"
           ssh -T -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
-            root@${GPOINT_PRODUCTION_HOST} bash -s -- "$remote_script_dir" <<'REMOTE_SETUP'
+            "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$remote_script_dir" <<'REMOTE_SETUP'
           set -euo pipefail
           [[ "$1" =~ ^/run/gpoint-kamal/[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
           test ! -e "$1"
@@ -628,7 +628,7 @@ jobs:
             scripts/verify-gpoint-backup-restore.sh "root@${GPOINT_PRODUCTION_HOST}:$remote_restore_script"
           facts="$(ssh -T -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
-            root@${GPOINT_PRODUCTION_HOST} bash "$remote_restore_script" \
+            "root@${GPOINT_PRODUCTION_HOST}" bash "$remote_restore_script" \
             "$CANDIDATE_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
             "$BASELINE_PATH" "$BASELINE_SHA" "$remote_backup_helper" \
             "$GPOINT_KAMAL_BACKUP_AGE_RECIPIENT" "$GPOINT_KAMAL_BACKUP_OFFSITE_REMOTE")"
