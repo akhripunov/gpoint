@@ -42,6 +42,7 @@ fi
 run_config() {
   local config_file="$1"
   local status
+  shift
 
   if docker run --rm --platform linux/amd64 --network none \
     "${docker_mount_args[@]}" \
@@ -52,7 +53,7 @@ run_config() {
     --env GPOINT_KNOWN_HOSTS_FILE=/dev/null \
     --env GPOINT_PRODUCTION_HOST=192.0.2.10 \
     --env "KAMAL_REGISTRY_PASSWORD=$synthetic_registry_password" \
-    "$KAMAL_IMAGE" config --config-file "$config_file" >"$output_file" 2>&1; then
+    "$KAMAL_IMAGE" "$@" --config-file "$config_file" >"$output_file" 2>&1; then
     return 0
   else
     status=$?
@@ -71,5 +72,10 @@ for config_file in \
   config/deploy.yml \
   config/deploy.agata.yml \
   config/deploy.miniapp.yml; do
-  run_config "$config_file"
+  run_config "$config_file" config
+  run_config "$config_file" secrets print
+  grep -Fq "KAMAL_REGISTRY_PASSWORD=$synthetic_registry_password" "$output_file" || {
+    echo "Kamal registry credential did not resolve from the synthetic environment" >&2
+    exit 1
+  }
 done
