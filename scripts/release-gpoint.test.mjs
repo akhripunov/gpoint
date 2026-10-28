@@ -30,9 +30,10 @@ test('GPoint migration plan pauses the old runtime after backup and before eithe
     onBeforeMutation: boundary => calls.push(boundary),
     run: command => { calls.push(command); return 'PRISMA_PENDING_MIGRATIONS\nAGATA_PENDING_MIGRATIONS'; }});
   const pause = mutations[0].command;
+  const agataCommand = mutations.find(step => step.boundary === 'agata-migration').command;
   assert.ok(calls.indexOf('backup-and-readiness') < calls.indexOf(pause));
   assert.ok(calls.indexOf(pause) < calls.indexOf('prisma-deploy'));
-  assert.ok(calls.indexOf('prisma-deploy') < calls.indexOf('agata-upgrade-and-verify'));
+  assert.ok(calls.indexOf('prisma-deploy') < calls.indexOf(agataCommand));
   assert.ok(calls.indexOf('gpoint-runtime-pause') < calls.indexOf('pause-started'));
   assert.ok(calls.indexOf('pause-started') < calls.indexOf(pause));
   assert.doesNotMatch(pause, /gsales|shared_postgres|shared_redis|caddy/);
@@ -52,7 +53,7 @@ for (const failureAt of ['backup-and-readiness', 'pause', 'authorization']) {
         throw Error('boundary failure');
       }}));
     assert.ok(!calls.includes('prisma-deploy'));
-    assert.ok(!calls.includes('agata-upgrade-and-verify'));
+    assert.ok(!calls.includes(mutations.find(step => step.boundary === 'agata-migration').command));
     if (failureAt !== 'pause') assert.equal(calls.length, 1);
   });
 }
@@ -66,6 +67,15 @@ test('old Core and AGATA are paused even when database heads already match', () 
       calls.push(command); return 'PRISMA_NO_PENDING_MIGRATIONS\nAGATA_NO_PENDING_MIGRATIONS';
     }});
   assert.deepEqual(calls, ['backup-and-readiness', mutations[0].command]);
+});
+
+test('a failed AGATA migration guard cannot be masked by a successful head readback', () => {
+  const mutations = gpointMigrationMutationSteps({prismaMigration: 'true',
+    agataMigration: "false; printf 'AGATA_HEAD=agata0012\\n'; true"});
+  const command = mutations.find(step => step.boundary === 'agata-migration').command;
+  const result = spawnSync('bash', ['-c', command], {encoding: 'utf8'});
+  assert.notEqual(result.status, 0);
+  assert.doesNotMatch(result.stdout, /AGATA_HEAD=agata0012/);
 });
 
 test('runtime pause verifies every old GPoint container stopped and rejects a still-running service', () => {

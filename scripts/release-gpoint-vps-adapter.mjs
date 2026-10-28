@@ -605,7 +605,7 @@ export function gpointMigrationMutationSteps({prismaMigration, agataMigration,
     {boundary: 'prisma-migration', command: prismaMigration,
       shouldRun: output => migrationPendingFromPreflight(output, 'PRISMA'),
       skippedOutput: 'PRISMA_NO_PENDING_MIGRATIONS', afterAuthorization: onMigrationStart},
-    {boundary: 'agata-migration', command: agataMigration,
+    {boundary: 'agata-migration', command: `set -e; ${agataMigration}`,
       shouldRun: output => migrationPendingFromPreflight(output, 'AGATA'),
       skippedOutput: 'AGATA_NO_PENDING_MIGRATIONS', afterAuthorization: onMigrationStart},
   ];
