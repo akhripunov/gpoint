@@ -127,6 +127,19 @@ def test_gpoint_docker_build_rejects_missing_or_misapplied_dependency_context():
             dependency_manifest_context='/tmp/dependency-manifests')
 
 
+def test_prepare_builds_node_runtime_even_when_dockerfile_ends_with_miniapp():
+    dockerfile = SCRIPT.parent.parent / 'infra/production/Gpoint.Dockerfile'
+    assert dockerfile.read_text().rfind('AS miniapp-runtime') > dockerfile.read_text().rfind('AS runtime')
+    command = prepare_release.docker_build_command(
+        'gpoint-runtime', str(dockerfile), '.', 'a' * 40,
+        dependency_manifest_context='/tmp/dependency-manifests')
+    assert '--target' in command
+    assert command[command.index('--target') + 1] == 'runtime'
+    agata = prepare_release.docker_build_command(
+        'gpoint-agata-runtime', 'services/agata/Dockerfile', 'services/agata', 'a' * 40)
+    assert '--target' not in agata
+
+
 def test_gpoint_build_sha_does_not_invalidate_unrelated_build_layers():
     dockerfile = (SCRIPT.parent.parent / 'infra/production/Gpoint.Dockerfile').read_text()
     sha_env = dockerfile.index('ENV GPOINT_BUILD_SHA=${GPOINT_BUILD_SHA}')

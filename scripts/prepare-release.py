@@ -131,6 +131,9 @@ def docker_build_command(tag, dockerfile, context, sha, *, dependency_manifest_c
             raise ValueError('GPoint build requires dependency manifest context')
         command.extend(['--build-context',
                         f'dependency-manifests={dependency_manifest_context}'])
+        # The final Dockerfile stage serves Mini App assets with nginx. Core
+        # also runs Bot, Worker and Prisma, so select its Node runtime explicitly.
+        command.extend(['--target', 'runtime'])
     elif dependency_manifest_context:
         raise ValueError('dependency manifest context is only valid for GPoint runtime')
     command.extend(['--build-arg', f'GPOINT_BUILD_SHA={sha}',
