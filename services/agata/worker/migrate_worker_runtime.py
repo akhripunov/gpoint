@@ -26,6 +26,7 @@ import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NamedTuple
 from uuid import UUID
 
 LABEL = "one.gpoint.agata-codex-worker"
@@ -565,7 +566,13 @@ def validate_fresh_production_queue_snapshots(status: dict, *, now: datetime | N
         raise PreflightFailure("queue_snapshot_stale", stage="queue_validation",
                                safe_fields={"snapshot_age_seconds": int(pool_age)},
                                legacy_error="production_queue_snapshot_stale")
-    lanes = status.get("lanes")
+    evidence = _validate_production_queue_lanes(status.get("lanes"), current=current)
+    return {"checked_at": current.isoformat(), "pool_snapshot_at": pool_captured.isoformat(),
+            "pool_authority": pool_authority, "busy_slots": busy, "lanes": evidence}
+
+
+def _validate_production_queue_lanes(lanes: dict, *, current: datetime) -> dict:
+    """Validate real lane evidence at one instant, independently of local pool state."""
     if not isinstance(lanes, dict):
         raise PreflightFailure("worker_status_schema_invalid", stage="queue_validation",
                                legacy_error="production_queue_snapshot_invalid")
@@ -621,9 +628,7 @@ def validate_fresh_production_queue_snapshots(status: dict, *, now: datetime | N
             "pending_jobs": counts[0],
             "running_jobs": counts[1],
         }
-    return {"checked_at": current.isoformat(), "pool_snapshot_at": pool_captured.isoformat(),
-            "pool_authority": pool_authority,
-            "busy_slots": busy, "lanes": evidence}
+    return evidence
 
 
 def require_fresh_empty_production_queues(status: dict, *, now: datetime | None = None) -> dict:
@@ -2723,7 +2728,7 @@ def _verify_runtime_assets(runtime: Path, manifest: dict) -> None:
             raise RuntimeError("worker_runtime_asset_content_mismatch")
 
 
-def _migrate_tenant_binding(manifest: dict, queue_status: dict | None = None) -> None:
+def _binding_for_migration(manifest: dict) -> dict | None:
     destination = ROOT / "config/tenant-bindings.json"
     if destination.is_symlink():
         raise RuntimeError("worker_tenant_binding_invalid")
@@ -2734,12 +2739,13 @@ def _migrate_tenant_binding(manifest: dict, queue_status: dict | None = None) ->
     else:
         binding = _validated_legacy_tenant_binding(manifest)
         if binding is None:
-            return
-    if queue_status is None:
-        raise RuntimeError("authoritative_queue_snapshot_unavailable")
-    require_fresh_empty_production_queues(queue_status)
-    snapshot = _read_live_runtime_queue_snapshot("GPOINT", binding["tenant_id"])
-    source_id = _validate_binding_migration_snapshot(binding["tenant_id"], snapshot)
+            return None
+    return binding
+
+
+def _write_migrated_tenant_binding(manifest: dict, binding: dict, snapshot: dict, *,
+                                   now: datetime | None = None) -> None:
+    source_id = _validate_binding_migration_snapshot(binding["tenant_id"], snapshot, now=now)
     if (not re.fullmatch(r"[0-9a-f]{40}", manifest.get("source_sha", ""))
             or not re.fullmatch(r"[0-9a-f]{64}", manifest.get("assets", {}).get("gpoint_mac_worker.py", ""))):
         raise RuntimeError("worker_tenant_binding_invalid")
@@ -2748,7 +2754,142 @@ def _migrate_tenant_binding(manifest: dict, queue_status: dict | None = None) ->
     binding["worker_sha256"] = manifest["assets"]["gpoint_mac_worker.py"]
     binding["source_id"] = source_id
     binding["snapshot_at"] = snapshot["queue_snapshot_at"]
-    _atomic_json(destination, binding)
+    _atomic_json(ROOT / "config/tenant-bindings.json", binding)
+
+
+def _migrate_tenant_binding(manifest: dict, queue_status: dict | None = None) -> None:
+    binding = _binding_for_migration(manifest)
+    if binding is None:
+        return
+    if queue_status is None:
+        raise RuntimeError("authoritative_queue_snapshot_unavailable")
+    require_fresh_empty_production_queues(queue_status)
+    snapshot = _read_live_runtime_queue_snapshot("GPOINT", binding["tenant_id"])
+    _write_migrated_tenant_binding(manifest, binding, snapshot)
+
+
+class _ApplyPausedQueueProof(NamedTuple):
+    """Historical evidence captured by apply while the old worker is paused."""
+    binding: dict | None
+    queue_evidence: dict
+    lanes: dict
+    runtime_pin: tuple
+
+
+def _apply_runtime_pin() -> tuple:
+    current = ROOT / "runtime/current"
+    if current.is_symlink():
+        runtime = current.resolve(strict=True)
+        manifest = _read_installed_runtime_manifest(runtime)
+        return (os.readlink(current), str(runtime), manifest)
+    if current.exists():
+        raise RuntimeError("worker_runtime_identity_changed")
+    # The first transition can still run the legacy flat runtime.
+    assets = []
+    for name in ASSETS:
+        path = LEGACY / name
+        if path.exists() or path.is_symlink():
+            content, _ = _read_owned_regular_file(path, forbidden_mode_bits=0o022)
+            assets.append((name, hashlib.sha256(content).hexdigest()))
+    if not assets:
+        raise RuntimeError("worker_runtime_identity_unavailable")
+    return (None, str(LEGACY), tuple(assets))
+
+
+def _capture_apply_paused_queue_proof(manifest: dict, status: dict) -> _ApplyPausedQueueProof:
+    binding = _binding_for_migration(manifest)
+    budget = QueueSnapshotRetryBudget()
+    lanes = {}
+    for lane in ("GPOINT", "GSALES"):
+        tenant = _configured_tenant_id(lane, manifest)
+        if lane == "GPOINT" and binding is not None and binding["tenant_id"] != tenant:
+            raise RuntimeError("worker_tenant_binding_invalid")
+        value = status["lanes"][lane]
+        if value.get("queue_snapshot_source_id") != f"{LIVE_QUEUE_SOURCE}:{lane.lower()}":
+            value = _read_live_runtime_queue_snapshot(lane, tenant, retry_budget=budget)
+        provenance = _validate_live_queue_snapshot_provenance(value, lane)
+        if provenance["tenant_id"] != tenant:
+            raise RuntimeError("worker_tenant_binding_invalid")
+        if value.get("health") != status["lanes"][lane].get("health"):
+            raise RuntimeError("apply_queue_snapshot_identity_changed")
+        lanes[lane] = value
+    now = datetime.now(UTC)
+    evidence = require_fresh_empty_production_queues(status, now=now)
+    lane_evidence = _validate_production_queue_lanes(lanes, current=now)
+    if any(item["pending_jobs"] or item["running_jobs"] for item in lane_evidence.values()):
+        raise RuntimeError("production_queue_not_empty")
+    return _ApplyPausedQueueProof(binding, evidence, lanes, _apply_runtime_pin())
+
+
+def _assert_apply_stopped_worker(lock_fd: int, runtime_pin: tuple) -> None:
+    """Prove apply still holds the private transition and the worker cannot claim."""
+    try:
+        _, lock_stat = _read_owned_regular_file(TRANSITION_LOCK, expected_mode=0o600)
+        held = os.fstat(lock_fd)
+        if ((held.st_dev, held.st_ino) != (lock_stat.st_dev, lock_stat.st_ino)
+                or not _transition_lock_is_busy()):
+            raise ValueError("transition_lock_not_held")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("apply_transition_lock_not_held") from exc
+    try:
+        _read_owned_regular_file(ROOT / "state/maintenance-stop", expected_mode=0o600)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("apply_maintenance_marker_invalid") from exc
+    # A loaded launchd job can be exited and therefore report not running.
+    # Require the actual label to be absent, including a successful process read.
+    _wait_launchagent_unloaded(None, deadline=0)
+    if launchctl_loaded():
+        raise RuntimeError("apply_launchagent_not_unloaded")
+    if _running_inference_pids() or inventory().get("active_inference") is not False:
+        raise RuntimeError("active_inference_blocks_transition")
+    if _apply_runtime_pin() != runtime_pin:
+        raise RuntimeError("worker_runtime_identity_changed")
+
+
+def _migrate_tenant_binding_after_stopped_copy(manifest: dict, proof: _ApplyPausedQueueProof,
+                                               *, lock_fd: int) -> dict:
+    """Apply-only proof: fresh remote queues under a continuously stopped local worker."""
+    if not isinstance(proof, _ApplyPausedQueueProof):
+        raise RuntimeError("apply_paused_queue_proof_invalid")
+    _assert_apply_stopped_worker(lock_fd, proof.runtime_pin)
+    budget = QueueSnapshotRetryBudget()
+    lanes = {}
+    for lane in ("GPOINT", "GSALES"):
+        pin = _validate_live_queue_snapshot_provenance(proof.lanes[lane], lane)
+        lanes[lane] = _read_live_runtime_queue_snapshot(lane, pin["tenant_id"], retry_budget=budget)
+    _assert_apply_stopped_worker(lock_fd, proof.runtime_pin)
+    if _binding_for_migration(manifest) != proof.binding:
+        raise RuntimeError("worker_tenant_binding_invalid")
+    now = datetime.now(UTC)
+    evidence = _validate_production_queue_lanes(lanes, current=now)
+    pinned_identities = {}
+    for lane in ("GPOINT", "GSALES"):
+        actual = lanes[lane]
+        expected = proof.lanes[lane]
+        provenance = _validate_live_queue_snapshot_provenance(actual, lane)
+        if (actual["queue_snapshot_source_id"] != f"{LIVE_QUEUE_SOURCE}:{lane.lower()}"
+                or provenance != expected["queue_snapshot_provenance"]
+                or actual.get("health") != expected.get("health")
+                or actual.get("queue_snapshot_authority") != expected.get("queue_snapshot_authority")):
+            raise RuntimeError("apply_queue_snapshot_identity_changed")
+        if evidence[lane]["pending_jobs"] or evidence[lane]["running_jobs"]:
+            raise RuntimeError("production_queue_not_empty")
+        # Keep content-free runtime pins auditable, without database names or payloads.
+        pinned_identities[lane] = {
+            key: provenance[key] for key in (
+                "source_id", "release_sha", "api_image_id", "core_image_id", "tenant_id",
+                "transaction_read_only", "tenant_identity_verified", "stopped_runtime_fingerprint",
+            ) if key in provenance
+        } | {"health": actual["health"], "authority": actual["queue_snapshot_authority"]}
+    # No intervening snapshot read: persist the exact GPOINT proof checked above.
+    if proof.binding is not None:
+        _write_migrated_tenant_binding(manifest, proof.binding, lanes["GPOINT"], now=now)
+    return {"authority": "apply_stopped_worker_postcopy_v1", "checked_at": now.isoformat(),
+            "paused_preboot_queue_evidence": proof.queue_evidence,
+            "preboot_pins_matched": pinned_identities, "lanes": evidence,
+            "launchagent_unloaded": True, "active_inference_absent": True,
+            "maintenance_marker_verified": True, "transition_lock_held": True}
 
 
 def _render_plist(runtime: Path, diagnostics_directory: Path | None = None) -> bytes:
@@ -3123,6 +3264,7 @@ def apply(*, preserve_stopped_gsales: bool = False) -> dict:
         stopped_snapshot_verified = False
         restart_evidence = None
         paused_queue_status = None
+        paused_proof = None
         try:
             # Freeze the verified LaunchAgent and repeat the idle check while
             # it cannot claim another job. This closes the preflight/bootout race.
@@ -3145,6 +3287,7 @@ def apply(*, preserve_stopped_gsales: bool = False) -> dict:
                     paused_proof = _stopped_gsales_proof(paused_queue_status)
                     if paused_proof != stopped_gsales_baseline:
                         raise RuntimeError("stopped_gsales_preboot_fingerprint_changed")
+                paused_apply_proof = _capture_apply_paused_queue_proof(manifest, paused_queue_status)
             except Exception:
                 try:
                     os.kill(paused_pid, signal.SIGCONT)
@@ -3181,7 +3324,6 @@ def apply(*, preserve_stopped_gsales: bool = False) -> dict:
                 directory.chmod(0o700)
             _ensure_pool_config()
             release = _install_staged_runtime(staged_release, manifest)
-            _switch_all_lane_runtime_pointers(ROOT, manifest["source_sha"])
             # Migrate only queue/status state. Secret credentials stay in their
             # existing external mode-600 config; the LAB approval is rechecked
             # against the new bundle and remains fail-closed if stale.
@@ -3192,7 +3334,10 @@ def apply(*, preserve_stopped_gsales: bool = False) -> dict:
                 source = LEGACY / source_name
                 if source.exists() and not destination.exists():
                     shutil.copytree(source, destination, dirs_exist_ok=True) if source.is_dir() else shutil.copy2(source, destination)
-            _migrate_tenant_binding(manifest, paused_queue_status)
+            queue_evidence = _migrate_tenant_binding_after_stopped_copy(
+                manifest, paused_apply_proof, lock_fd=fd,
+            )
+            _switch_all_lane_runtime_pointers(ROOT, manifest["source_sha"])
             poll_baseline = safe_worker_status(ROOT / "status/worker-status.json")
             switch_started = True
             next_link = ROOT / "runtime/.current-next"
@@ -3283,10 +3428,7 @@ def apply(*, preserve_stopped_gsales: bool = False) -> dict:
                     "INTENTIONALLY_STOPPED" if stopped_gsales_baseline is not None else "HEALTHY"
                 ),
                 "gsales_stopped_proof_before": stopped_gsales_baseline,
-                "gsales_stopped_proof_paused_preboot": (
-                    _stopped_gsales_proof(paused_queue_status)
-                    if stopped_gsales_baseline is not None and paused_queue_status else None
-                ),
+                "gsales_stopped_proof_paused_preboot": paused_proof,
                 "gsales_stopped_proof_after_restart": stopped_gsales_evidence.get("restart")
                     if stopped_gsales_evidence else None,
                 "gsales_stopped_proof_after_poll": poll_evidence.get("stopped_gsales_proof"),

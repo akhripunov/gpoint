@@ -1057,7 +1057,10 @@ def test_apply_with_absent_rollback_tree_saves_snapshot_and_restart_evidence(tmp
     monkeypatch.setattr(migration, "_ensure_pool_config", lambda: None)
     monkeypatch.setattr(migration, "_pause_idle_launchagent", lambda: 99999999)
     monkeypatch.setattr(migration, "_running_inference_pids", lambda: [])
-    monkeypatch.setattr(migration, "_migrate_tenant_binding", lambda _manifest, _queue_status: None)
+    # This test owns restart rollback; real binding/queue proof is exercised by
+    # the in-place transition regressions below.
+    monkeypatch.setattr(migration, "_capture_apply_paused_queue_proof", lambda *_args: None)
+    monkeypatch.setattr(migration, "_migrate_tenant_binding_after_stopped_copy", lambda *_args, **_kwargs: {})
     healthy_status = {"configured_concurrency": 1, "lanes": {
         "GPOINT": {"health": "HEALTHY"}, "GSALES": {"health": "HEALTHY"},
     }}
@@ -2497,7 +2500,8 @@ def _fresh_empty_queue_status(now):
     (True, False, "absent"), (True, False, "stale"),
 ])
 def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(
-        tmp_path, monkeypatch, preserve_stopped_gsales, paused_fingerprint_drift, snapshot_failure):
+        tmp_path, monkeypatch, preserve_stopped_gsales, paused_fingerprint_drift, snapshot_failure,
+        slow_copy=False, postcopy_failure=None, local_failure=None):
     root = tmp_path / "Library/Application Support/GPoint/agata-codex-worker"
     root.mkdir(parents=True)
     (root / "gpoint_mac_worker.py").write_text("existing V3 worker")
@@ -2518,17 +2522,30 @@ def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(
     monkeypatch.setattr(migration, "LEGACY", root)
     monkeypatch.setattr(migration, "PLIST", plist)
     monkeypatch.setattr(migration, "TRANSITION_LOCK", tmp_path / "transition.lock")
-    manifest = {"source_sha": "f" * 40, "bundle_sha256": "a" * 64, "assets": {}}
+    manifest = {"source_sha": "f" * 40, "bundle_sha256": "a" * 64,
+                "assets": {"gpoint_mac_worker.py": "b" * 64}}
     monkeypatch.setattr(migration, "candidate", lambda: manifest)
     monkeypatch.setattr(migration, "inventory", lambda: {"production_release_lock_busy": False,
                                                             "launchagent_loaded": True,
                                                             "active_inference": False})
+    clock = [datetime.now(UTC)]
+    class TransitionClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0]
+    monkeypatch.setattr(migration, "datetime", TransitionClock)
     queue_status_calls = []
     def queue_status(*_args, **_kwargs):
         queue_status_calls.append(None)
-        value = _fresh_empty_queue_status(datetime.now(UTC))
+        value = _fresh_empty_queue_status(clock[0])
+        value["lanes"] = {
+            lane: migration.normalize_live_runtime_queue_snapshot(
+                _live_runtime_queue_snapshot(lane, clock[0]), lane,
+                _live_runtime_queue_snapshot(lane, clock[0])["tenant_id"],
+            ) for lane in ("GPOINT", "GSALES")
+        }
         if preserve_stopped_gsales:
-            value["lanes"]["GSALES"] = _stopped_gsales_status()["lanes"]["GSALES"]
+            value["lanes"]["GSALES"] = _stopped_gsales_status(clock[0])["lanes"]["GSALES"]
             if paused_fingerprint_drift and len(queue_status_calls) > 1:
                 value["lanes"]["GSALES"]["queue_snapshot_provenance"]["stopped_runtime_fingerprint"] = "b" * 64
         return value
@@ -2545,13 +2562,58 @@ def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(
         release.mkdir(parents=True, mode=0o700)
         release.parent.chmod(0o700)
         release.chmod(0o700)
+        if local_failure:
+            local_failure(root, service_loaded)
         return release
     monkeypatch.setattr(migration, "_install_staged_runtime", install)
     monkeypatch.setattr(migration, "_ensure_pool_config", lambda: None)
     monkeypatch.setattr(migration, "_pause_idle_launchagent", lambda: 1234)
     monkeypatch.setattr(migration, "_running_inference_pids", lambda: [])
     monkeypatch.setattr(migration.os, "kill", lambda *_args: None)
-    monkeypatch.setattr(migration, "_migrate_tenant_binding", lambda _manifest, _queue_status: None)
+    tenant = _live_runtime_queue_snapshot("GPOINT", clock[0])["tenant_id"]
+    legacy_binding = {"version": 1, "candidate_sha": "a" * 40, "worker_sha256": "c" * 64,
+                      "tenant_id": tenant, "source_id": "old", "snapshot_at": clock[0].isoformat()}
+    monkeypatch.setattr(migration, "_validated_legacy_tenant_binding", lambda _manifest: dict(legacy_binding))
+    monkeypatch.setattr(migration, "_configured_tenant_id", lambda lane, _manifest:
+                        _live_runtime_queue_snapshot(lane, clock[0])["tenant_id"])
+    binding_writes = []
+    pointer_switches = []
+    original_atomic = migration._atomic_json
+    def atomic_json(path, value, *args, **kwargs):
+        if path == root / "config/tenant-bindings.json":
+            binding_writes.append(value)
+        return original_atomic(path, value, *args, **kwargs)
+    monkeypatch.setattr(migration, "_atomic_json", atomic_json)
+    original_switch = migration._switch_all_lane_runtime_pointers
+    def switch_lanes(*args, **kwargs):
+        pointer_switches.append(True)
+        return original_switch(*args, **kwargs)
+    monkeypatch.setattr(migration, "_switch_all_lane_runtime_pointers", switch_lanes)
+    copy_complete = [False]
+    capture = migration._prepare_legacy_snapshot
+    def slow_snapshot(backup):
+        result = capture(backup)
+        if slow_copy:
+            from datetime import timedelta
+            clock[0] += timedelta(seconds=45)
+        copy_complete[0] = True
+        return result
+    monkeypatch.setattr(migration, "_prepare_legacy_snapshot", slow_snapshot)
+    fresh_reads = []
+    def live_snapshot(lane, expected_tenant, **_kwargs):
+        assert copy_complete[0], "post-copy snapshots must be collected after verified rollback copy"
+        assert not (root / "runtime/current").exists()
+        assert not (root / "runtime/slots/GPOINT/current").exists()
+        raw = _live_runtime_queue_snapshot(lane, clock[0])
+        if preserve_stopped_gsales and lane == "GSALES":
+            raw.update(collector_mode="stopped_runtime_ephemeral_v1",
+                       stopped_runtime_state="INTENTIONALLY_STOPPED", stopped_runtime_fingerprint="a" * 64)
+        snapshot = migration.normalize_live_runtime_queue_snapshot(raw, lane, expected_tenant)
+        fresh_reads.append(lane)
+        if postcopy_failure:
+            postcopy_failure(lane, snapshot, root, clock)
+        return snapshot
+    monkeypatch.setattr(migration, "_read_live_runtime_queue_snapshot", live_snapshot)
     status = {"configured_concurrency": 1, "lanes": {
         "GPOINT": {"health": "HEALTHY"},
         "GSALES": {"health": "DEGRADED" if preserve_stopped_gsales else "HEALTHY"},
@@ -2583,14 +2645,18 @@ def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(
                                      "poll_status": "NOT_REQUIRED_INTENTIONALLY_STOPPED",
                                      "stopped_proof_verified": True}}}
     monkeypatch.setattr(migration, "_wait_for_successful_polls", wait_for_polls)
-    monkeypatch.setattr(migration, "launchctl_loaded", lambda: True)
+    service_loaded = [True]
+    monkeypatch.setattr(migration, "launchctl_loaded", lambda: service_loaded[0])
     transition_events = []
     monkeypatch.setattr(migration, "_wait_launchagent_unloaded",
-                        lambda pid, **_kwargs: transition_events.append(("unloaded", pid)), raising=False)
+                        lambda pid, **_kwargs: transition_events.append(("unloaded", pid)) if pid is not None else True,
+                        raising=False)
     def run(command, **kwargs):
         if command[:2] == ["launchctl", "bootout"]:
+            service_loaded[0] = False
             transition_events.append(("bootout", None))
         elif command[:2] == ["launchctl", "bootstrap"]:
+            service_loaded[0] = True
             transition_events.append(("bootstrap", None))
         return subprocess.CompletedProcess(command, 0)
     monkeypatch.setattr(migration.subprocess, "run", run)
@@ -2627,8 +2693,32 @@ def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(
         assert not (root / "state/maintenance-stop").exists()
         return
 
+    if postcopy_failure or local_failure:
+        with pytest.raises(RuntimeError):
+            migration.apply(preserve_stopped_gsales=preserve_stopped_gsales)
+        assert not (root / "runtime/current").exists()
+        assert not (root / "runtime/slots/GPOINT/current").exists()
+        assert not (root / "config/tenant-bindings.json").exists()
+        assert binding_writes == []
+        assert pointer_switches == []
+        assert plist.read_bytes() == old_plist
+        assert service_loaded[0] is True
+        receipt = json.loads((root / "receipts/runtime-migration-rollback.json").read_text())
+        assert receipt["state"] == "ROLLED_BACK"
+        return
     result = migration.apply(preserve_stopped_gsales=preserve_stopped_gsales)
-
+    binding = json.loads((root / "config/tenant-bindings.json").read_text())
+    assert binding["candidate_sha"] == "f" * 40
+    assert binding["snapshot_at"] == clock[0].isoformat()
+    assert fresh_reads == ["GPOINT", "GSALES"]
+    postcopy = result["production_queue_snapshot"]
+    assert postcopy["authority"] == "apply_stopped_worker_postcopy_v1"
+    assert "pool_snapshot_at" not in postcopy
+    assert postcopy["preboot_pins_matched"]["GPOINT"]["tenant_id"] == tenant
+    assert postcopy["preboot_pins_matched"]["GPOINT"]["release_sha"] == "a" * 40
+    assert postcopy["paused_preboot_queue_evidence"]["pool_snapshot_at"] == legacy_binding["snapshot_at"]
+    if slow_copy:
+        assert postcopy["checked_at"] != postcopy["paused_preboot_queue_evidence"]["pool_snapshot_at"]
     assert result["state"] == "COMPLETE"
     assert [event[0] for event in transition_events] == ["bootout", "unloaded", "bootstrap"]
     assert transition_events[1][1] == 1234
@@ -3424,3 +3514,161 @@ def test_install_staged_runtime_rejects_dangling_release_symlink(tmp_path, monke
         migration._install_staged_runtime(staged_release, manifest)
 
     assert target.is_symlink()
+
+
+@pytest.mark.parametrize("preserve_stopped_gsales", [False, True])
+def test_apply_refreshes_real_queue_proof_after_copy_ages_preboot_pool(tmp_path, monkeypatch, preserve_stopped_gsales):
+    test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(
+        tmp_path, monkeypatch, preserve_stopped_gsales, False, None, slow_copy=True)
+
+
+@pytest.mark.parametrize("target_lane", ["GPOINT", "GSALES"])
+@pytest.mark.parametrize("failure", [
+    "stale", "pending", "running", "boolean_count", "health", "source", "provenance",
+    "tenant", "release", "build", "image", "database",
+    "valid_release_drift", "valid_image_drift", "valid_tenant_drift",
+])
+def test_apply_postcopy_invalid_lane_proof_restores_service_before_any_binding_or_pointer_write(
+        tmp_path, monkeypatch, target_lane, failure):
+    def corrupt(lane, snapshot, root, clock):
+        if lane != target_lane:
+            return
+        provenance = snapshot["queue_snapshot_provenance"]
+        if failure == "stale":
+            from datetime import timedelta
+            snapshot["queue_snapshot_at"] = (clock[0] - timedelta(seconds=31)).isoformat()
+        elif failure in {"pending", "running", "boolean_count"}:
+            key = "running_inference_jobs" if failure == "running" else "pending_inference_jobs"
+            snapshot[key] = True if failure == "boolean_count" else 1
+        elif failure == "health":
+            snapshot["health"] = "DEGRADED"
+        elif failure == "source":
+            snapshot["queue_snapshot_source_id"] = "agata-worker-queue-status-v1:" + lane.lower()
+        elif failure == "provenance":
+            provenance["transaction_read_only"] = False
+        elif failure == "tenant":
+            provenance["tenant_id"] = "00000000-0000-4000-8000-000000000007"
+        elif failure == "release":
+            provenance["release_sha"] = "f" * 40
+        elif failure == "build":
+            provenance["api_build_sha"] = "f" * 40
+        elif failure == "image":
+            provenance["api_image_id"] = "sha256:" + "f" * 64
+        elif failure == "database":
+            provenance["database_name"] = "changed_database"
+        elif failure.startswith("valid_"):
+            # Keep the new snapshot internally authentic; the captured preboot
+            # identity pins must reject a genuine identity change independently.
+            if failure == "valid_release_drift":
+                provenance.update(release_sha="f" * 40, api_build_sha="f" * 40, core_build_sha="f" * 40)
+                snapshot["queue_snapshot_runtime_release_sha"] = "f" * 40
+            elif failure == "valid_image_drift":
+                provenance["api_image_id"] = "sha256:" + "f" * 64
+            else:
+                provenance["tenant_id"] = "00000000-0000-4000-8000-000000000007"
+                snapshot["queue_snapshot_tenant_id"] = provenance["tenant_id"]
+            provenance["source_id"] = (
+                f"{migration.LIVE_QUEUE_SOURCE}:{lane.lower()}:release={provenance['release_sha']}"
+                f":api={provenance['api_image_id']}:core={provenance['core_image_id']}"
+                f":tenant={provenance['tenant_id']}"
+            )
+    test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(
+        tmp_path, monkeypatch, True, False, None, slow_copy=True, postcopy_failure=corrupt)
+
+
+def test_apply_postcopy_stopped_fingerprint_drift_restores_old_service(tmp_path, monkeypatch):
+    def corrupt(lane, snapshot, *_args):
+        if lane == "GSALES":
+            snapshot["queue_snapshot_provenance"]["stopped_runtime_fingerprint"] = "b" * 64
+    test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(
+        tmp_path, monkeypatch, True, False, None, slow_copy=True, postcopy_failure=corrupt)
+
+
+@pytest.mark.parametrize("when", ["before", "after"])
+@pytest.mark.parametrize("failure", ["loaded_agent", "inference", "marker_missing", "marker_public", "lock_missing", "lock_unheld", "runtime_changed"])
+def test_apply_postcopy_requires_stopped_private_locked_worker_before_and_after_reads(
+        tmp_path, monkeypatch, when, failure):
+    original_flock = migration.fcntl.flock
+    transition_fd = []
+    def track_flock(fd, operation):
+        if not transition_fd and operation == migration.fcntl.LOCK_EX | migration.fcntl.LOCK_NB:
+            transition_fd.append(fd)
+        return original_flock(fd, operation)
+    monkeypatch.setattr(migration.fcntl, "flock", track_flock)
+    def disrupt(root, loaded):
+        if failure == "loaded_agent":
+            loaded[0] = True
+        elif failure == "inference":
+            monkeypatch.setattr(migration, "_running_inference_pids", lambda: [789])
+        elif failure == "marker_missing":
+            (root / "state/maintenance-stop").unlink()
+        elif failure == "marker_public":
+            (root / "state/maintenance-stop").chmod(0o644)
+        elif failure == "lock_missing":
+            migration.TRANSITION_LOCK.unlink()
+        elif failure == "lock_unheld":
+            original_flock(transition_fd[0], migration.fcntl.LOCK_UN)
+        elif failure == "runtime_changed":
+            (root / "gpoint_mac_worker.py").write_text("unexpected runtime replacement")
+    if when == "before":
+        kwargs = {"local_failure": disrupt}
+    else:
+        def corrupt(lane, snapshot, root, _clock):
+            if lane == "GSALES":
+                # Production launchctl remains the external boundary.
+                disrupt(root, [False])
+                if failure == "loaded_agent":
+                    original_loaded = migration.launchctl_loaded
+                    calls = [0]
+                    def loaded_once():
+                        calls[0] += 1
+                        return True if calls[0] == 1 else original_loaded()
+                    monkeypatch.setattr(migration, "launchctl_loaded", loaded_once)
+        kwargs = {"postcopy_failure": corrupt}
+    test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(
+        tmp_path, monkeypatch, True, False, None, slow_copy=True, **kwargs)
+
+
+def test_stopped_copy_guard_requires_label_absent_even_when_loaded_predicate_is_false(tmp_path, monkeypatch):
+    root = tmp_path / "worker"
+    (root / "state").mkdir(parents=True, mode=0o700)
+    marker = root / "state/maintenance-stop"
+    marker.write_text("")
+    marker.chmod(0o600)
+    lock = tmp_path / "transition.lock"
+    lock.write_text("")
+    lock.chmod(0o600)
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "TRANSITION_LOCK", lock)
+    monkeypatch.setattr(migration, "launchctl_loaded", lambda: False)
+    monkeypatch.setattr(migration, "_running_inference_pids", lambda: [])
+    monkeypatch.setattr(migration, "inventory", lambda: {"active_inference": False})
+    monkeypatch.setattr(migration, "_apply_runtime_pin", lambda: ("old-runtime",))
+    def readonly(command, _timeout):
+        output = f"{migration.LABEL} = {{\n state = exited\n}}" if command[0] == "launchctl" else ""
+        return subprocess.CompletedProcess(command, 0, output, ""), None
+    monkeypatch.setattr(migration, "_run_readonly_command", readonly)
+    fd = os.open(lock, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(RuntimeError, match="worker_launchagent_unload_timeout"):
+            migration._assert_apply_stopped_worker(fd, ("old-runtime",))
+    finally:
+        os.close(fd)
+
+
+
+def test_generic_binding_migration_still_rejects_old_pool_even_with_fresh_lane_snapshots(tmp_path, monkeypatch):
+    root = tmp_path / "worker"
+    (root / "config").mkdir(parents=True)
+    tenant = "81a4ba28-6de5-4b03-8332-0661ba4d46f4"
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "_validated_legacy_tenant_binding", lambda _manifest: {"tenant_id": tenant})
+    now = datetime.now(UTC)
+    status = _fresh_empty_queue_status(now)
+    status["pool_snapshot_at"] = (now - timedelta(seconds=31)).isoformat()
+    monkeypatch.setattr(migration, "_read_live_runtime_queue_snapshot",
+                        lambda *_args, **_kwargs: pytest.fail("generic gate must reject stale local pool first"))
+    with pytest.raises(migration.PreflightFailure, match="production_queue_snapshot_stale"):
+        migration._migrate_tenant_binding({}, status)
+    assert not (root / "config/tenant-bindings.json").exists()
