@@ -575,7 +575,12 @@ def validate_fresh_production_queue_snapshots(status: dict, *, now: datetime | N
         if not isinstance(value, dict):
             raise PreflightFailure("worker_status_schema_invalid", stage="queue_validation", lane=lane,
                                    legacy_error="production_queue_snapshot_invalid")
-        if value.get("health") != "HEALTHY":
+        stopped_gsales = (
+            lane == "GSALES"
+            and value.get("health") == "INTENTIONALLY_STOPPED"
+            and value.get("queue_snapshot_authority") == "stopped_runtime_ephemeral_readonly_v1"
+        )
+        if value.get("health") != "HEALTHY" and not stopped_gsales:
             raise PreflightFailure("lane_health_invalid", stage="lane_health_validation", lane=lane,
                                    legacy_error="production_queue_snapshot_invalid")
         if value.get("queue_snapshot_state") != "VERIFIED":
@@ -634,6 +639,59 @@ def require_fresh_empty_production_queues(status: dict, *, now: datetime | None 
     return evidence
 
 
+def _stopped_gsales_proof(status: dict) -> dict:
+    """Project the verified stopped-runtime collector result into a safe proof."""
+    lanes = status.get("lanes") if isinstance(status, dict) else None
+    lane = lanes.get("GSALES") if isinstance(lanes, dict) else None
+    if not isinstance(lane, dict):
+        raise RuntimeError("stopped_gsales_proof_invalid")
+    try:
+        provenance = _validate_live_queue_snapshot_provenance(lane, "GSALES")
+    except RuntimeError as exc:
+        raise RuntimeError("stopped_gsales_proof_invalid") from exc
+    counts = (lane.get("pending_inference_jobs"), lane.get("running_inference_jobs"))
+    try:
+        captured = datetime.fromisoformat(lane.get("queue_snapshot_at", "").replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise RuntimeError("stopped_gsales_proof_invalid") from exc
+    age = (datetime.now(UTC) - captured).total_seconds() if captured.tzinfo else None
+    if (lane.get("health") != "INTENTIONALLY_STOPPED"
+            or lane.get("queue_snapshot_authority") != "stopped_runtime_ephemeral_readonly_v1"
+            or lane.get("queue_snapshot_state") != "VERIFIED"
+            or age is None or age > QUEUE_SNAPSHOT_MAX_AGE_SECONDS
+            or age < -QUEUE_SNAPSHOT_FUTURE_SKEW_SECONDS
+            or any(isinstance(count, bool) or not isinstance(count, int) for count in counts)
+            or counts != (0, 0)):
+        raise RuntimeError("stopped_gsales_proof_invalid")
+    return {
+        "state": "INTENTIONALLY_STOPPED",
+        "source_id": provenance["source_id"],
+        "stopped_runtime_fingerprint": provenance["stopped_runtime_fingerprint"],
+        "release_sha": provenance["release_sha"],
+        "api_image_id": provenance["api_image_id"],
+        "core_image_id": provenance["core_image_id"],
+        "tenant_id": provenance["tenant_id"],
+        "pending_jobs": counts[0],
+        "running_jobs": counts[1],
+    }
+
+
+def _read_stopped_gsales_proof(expected: dict) -> dict:
+    """Obtain a new, source-authenticated proof for the deliberately stopped lane."""
+    tenant_id = expected.get("tenant_id") if isinstance(expected, dict) else None
+    if not isinstance(tenant_id, str):
+        raise RuntimeError("stopped_gsales_proof_invalid")
+    snapshot = _read_live_runtime_queue_snapshot("GSALES", tenant_id)
+    return _stopped_gsales_proof({"lanes": {"GSALES": snapshot}})
+
+
+def _assert_stopped_gsales_proof_matches(expected: dict) -> dict:
+    actual = _read_stopped_gsales_proof(expected)
+    if actual != expected:
+        raise RuntimeError("stopped_gsales_fingerprint_changed")
+    return actual
+
+
 def _validate_live_queue_snapshot_provenance(value: dict, lane: str) -> dict:
     provenance = value.get("queue_snapshot_provenance")
     if not isinstance(provenance, dict):
@@ -670,6 +728,16 @@ def _validate_live_queue_snapshot_provenance(value: dict, lane: str) -> dict:
             or not provenance.get("database_name")
             or value.get("queue_snapshot_runtime_release_sha") != match.group(2)
             or value.get("queue_snapshot_tenant_id") != tenant_id):
+        raise PreflightFailure("queue_snapshot_provenance_invalid", stage="queue_provenance", lane=lane,
+                               legacy_error="production_queue_snapshot_invalid")
+    if value.get("queue_snapshot_authority") == "stopped_runtime_ephemeral_readonly_v1":
+        if (lane != "GSALES" or value.get("health") != "INTENTIONALLY_STOPPED"
+                or provenance.get("collector_mode") != "stopped_runtime_ephemeral_v1"
+                or provenance.get("stopped_runtime_state") != "INTENTIONALLY_STOPPED"
+                or not re.fullmatch(r"[0-9a-f]{64}", provenance.get("stopped_runtime_fingerprint", ""))):
+            raise PreflightFailure("queue_snapshot_provenance_invalid", stage="queue_provenance", lane=lane,
+                                   legacy_error="production_queue_snapshot_invalid")
+    elif value.get("queue_snapshot_authority") != "live_runtime_readonly_snapshot_v1":
         raise PreflightFailure("queue_snapshot_provenance_invalid", stage="queue_provenance", lane=lane,
                                legacy_error="production_queue_snapshot_invalid")
     return provenance
@@ -739,6 +807,24 @@ def normalize_live_runtime_queue_snapshot(snapshot: dict, lane: str, expected_te
         "queue_snapshot_tenant_id": snapshot.get("tenant_id"),
         "queue_snapshot_provenance": provenance,
     }
+    collector_mode = snapshot.get("collector_mode")
+    if collector_mode is not None:
+        fingerprint = snapshot.get("stopped_runtime_fingerprint")
+        if (lane != "GSALES" or collector_mode != "stopped_runtime_ephemeral_v1"
+                or snapshot.get("stopped_runtime_state") != "INTENTIONALLY_STOPPED"
+                or not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint)):
+            raise RuntimeError("production_queue_snapshot_invalid")
+        result.update({
+            "health": "INTENTIONALLY_STOPPED",
+            "queue_snapshot_authority": "stopped_runtime_ephemeral_readonly_v1",
+            "queue_snapshot_provenance": provenance | {
+                "collector_mode": collector_mode,
+                "stopped_runtime_state": "INTENTIONALLY_STOPPED",
+                "stopped_runtime_fingerprint": fingerprint,
+            },
+        })
+    else:
+        result["queue_snapshot_authority"] = "live_runtime_readonly_snapshot_v1"
     _validate_live_queue_snapshot_provenance(result, lane)
     return result
 
@@ -950,6 +1036,168 @@ def _read_installed_runtime_manifest(runtime: Path) -> dict:
         raise RuntimeError("worker_tenant_binding_invalid") from exc
 
 
+def _remote_stopped_gsales_queue_snapshot_command(script: str) -> str:
+    """Use the live database with an explicitly stopped-runtime observer; never claim GSales health."""
+    encoded_script = base64.b64encode(script.encode()).decode("ascii")
+    return """set -eu
+SNAPSHOT_EXPECTED_RELEASE_SHA="$release_sha" SNAPSHOT_EXPECTED_TENANT_ID="$tenant" python3 - <<'PY'
+import base64, hashlib, json, os, pathlib, re, signal, subprocess, tempfile, uuid
+
+names = ("compose-gsales-api-1", "compose-gsales-agata-api-1", "compose-gsales-agata-memory-worker-1")
+services = ("gsales-api", "gsales-agata-api", "gsales-agata-memory-worker")
+release = os.environ["SNAPSHOT_EXPECTED_RELEASE_SHA"]
+tenant = os.environ["SNAPSHOT_EXPECTED_TENANT_ID"]
+script = base64.b64decode("__SNAPSHOT_SCRIPT_BASE64__")
+required = ("AGATA_DATABASE_URL", "AGATA_TENANT_ID", "AGATA_INTERNAL_API_TOKEN",
+    "AGATA_MESSAGE_AEAD_KEY",
+    "AGATA_REQUEST_FINGERPRINT_HMAC_KEY", "AGATA_RETRIEVAL_QUERY_HMAC_KEY",
+    "AGATA_SHADOW_CANDIDATE_HMAC_KEY", "AGATA_RESPONSE_FINGERPRINT_HMAC_KEY",
+    "AGATA_SOURCE_SYSTEM", "AGATA_SALES_DRAFTS_ENABLED")
+def run(args, *, input=None, timeout=30):
+    result = subprocess.run(args, input=input, capture_output=True, timeout=timeout, check=False)
+    if result.returncode:
+        raise RuntimeError("authoritative_queue_snapshot_unavailable")
+    return result.stdout
+def inspect(name):
+    rows = json.loads(run(["docker", "inspect", name]))
+    if len(rows) != 1:
+        raise RuntimeError("stopped_gsales_identity_invalid")
+    return rows[0]
+def inspect_image(image):
+    rows = json.loads(run(["docker", "image", "inspect", image]))
+    if len(rows) != 1 or rows[0].get("Id") != image:
+        raise RuntimeError("stopped_gsales_image_invalid")
+    return rows[0].get("Config", {}).get("Labels", {}).get("org.opencontainers.image.revision", "")
+def capture():
+    rows, details = [], []
+    for name, service in zip(names, services):
+        row = inspect(name)
+        labels = row.get("Config", {}).get("Labels", {})
+        image = row.get("Image", "")
+        container_id = row.get("Id", "")
+        config_image = row.get("Config", {}).get("Image", "")
+        restart_policy = row.get("HostConfig", {}).get("RestartPolicy")
+        revision = inspect_image(image)
+        state = row.get("State", {})
+        if (row.get("Name", "").lstrip("/") != name
+                or labels.get("com.docker.compose.project") != "compose"
+                or labels.get("com.docker.compose.service") != service):
+            raise RuntimeError("stopped_gsales_identity_invalid")
+        if (not re.fullmatch(r"[0-9a-f]{64}", container_id)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", image)
+                or not isinstance(config_image, str) or not config_image
+                or not isinstance(restart_policy, dict)
+                or restart_policy.get("Name") != "unless-stopped"
+                or restart_policy.get("MaximumRetryCount") != 0
+                or isinstance(row.get("RestartCount"), bool)
+                or not isinstance(row.get("RestartCount"), int)
+                or row.get("RestartCount") < 0
+                or revision != release):
+            raise RuntimeError("stopped_gsales_release_identity_invalid")
+        rows.append({"name": name, "id": row.get("Id"), "image": image,
+            "config_image": config_image, "revision": revision,
+            "status": state.get("Status"), "running": state.get("Running"),
+            "health": state.get("Health", {}).get("Status"),
+            "restart_policy": row.get("HostConfig", {}).get("RestartPolicy"),
+            "restart_count": row.get("RestartCount"), "started_at": state.get("StartedAt"),
+            "finished_at": state.get("FinishedAt")})
+        details.append(row)
+    fingerprint = hashlib.sha256(json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return rows, details, fingerprint
+if len(release) != 40 or any(c not in "0123456789abcdef" for c in release):
+    raise SystemExit("stopped_gsales_release_identity_invalid")
+def production_identity():
+    values = {}
+    for line in pathlib.Path("/opt/gpoint/env/production.env").read_text().splitlines():
+        if not line or line.lstrip().startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key in {"RELEASE_SHA", "GSALES_AGATA_TENANT_ID"}:
+            values[key] = value
+    return values.get("RELEASE_SHA"), values.get("GSALES_AGATA_TENANT_ID")
+if production_identity() != (release, tenant):
+    raise SystemExit("stopped_gsales_release_identity_invalid")
+rows, details, before = capture()
+running = [r["running"] is True and r["status"] == "running" for r in rows]
+stopped = [r["running"] is False and r["status"] in ("exited", "created") for r in rows]
+healthy = [details[i].get("State", {}).get("Health", {}).get("Status") == "healthy"
+    for i in range(len(details))]
+if all(stopped):
+    values = {}
+    for item in details[1].get("Config", {}).get("Env", []):
+        if isinstance(item, str) and "=" in item:
+            key, value = item.split("=", 1)
+            if key in required:
+                if key in values:
+                    raise SystemExit("stopped_gsales_runtime_config_invalid")
+                values[key] = value
+    if (set(required) - set(values) or values.get("AGATA_TENANT_ID") != tenant
+            or values.get("AGATA_SOURCE_SYSTEM") != "gsales"
+            or values.get("AGATA_SALES_DRAFTS_ENABLED", "").lower() != "true"):
+        raise SystemExit("stopped_gsales_runtime_config_invalid")
+    values.update({"SNAPSHOT_LANE": "GSALES", "SNAPSHOT_EXPECTED_TENANT_ID": tenant,
+        "SNAPSHOT_RELEASE_SHA": release, "SNAPSHOT_API_BUILD_SHA": release,
+        "SNAPSHOT_CORE_BUILD_SHA": release, "SNAPSHOT_API_IMAGE_ID": rows[0]["image"],
+        "SNAPSHOT_CORE_IMAGE_ID": rows[1]["image"], "AGATA_LLM_PROVIDER": "disabled",
+        "AGATA_LLM_API_KEY": "", "AGATA_EMBEDDING_API_KEY": "",
+        "AGATA_SALES_PRODUCTION_MODE": "false", "AGATA_CODEX_LOCAL_ENABLED": "false"})
+    if any(chr(10) in value or chr(13) in value for value in values.values()):
+        raise SystemExit("stopped_gsales_runtime_config_invalid")
+    directory = pathlib.Path(tempfile.mkdtemp(prefix="gpoint-gsales-snapshot-", dir="/run"))
+    os.chmod(directory, 0o700)
+    env_file = directory / "runtime.env"
+    try:
+        fd = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            for key in sorted(values):
+                stream.write(key + "=" + values[key] + chr(10))
+        client_name = "gpoint-gsales-queue-snapshot-" + uuid.uuid4().hex[:12]
+        def interrupted(_signum, _frame):
+            raise SystemExit("authoritative_queue_snapshot_interrupted")
+        signal.signal(signal.SIGTERM, interrupted)
+        signal.signal(signal.SIGINT, interrupted)
+        output = run(["docker", "run", "-i", "--rm", "--name", client_name, "--pull=never", "--network", "shared_internal",
+            "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m", "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges", "--pids-limit", "64", "--memory", "256m",
+            "--cpus", "0.5", "--env-file", str(env_file), "--entrypoint", "python",
+            rows[1]["image"], "-"], input=script, timeout=20)
+    finally:
+        try:
+            if "client_name" in locals():
+                try:
+                    subprocess.run(["docker", "rm", "-f", client_name], capture_output=True,
+                        timeout=4, check=False)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+                remaining = subprocess.run(["docker", "ps", "-a", "--filter",
+                    "name=^/" + client_name + "$", "--format", "{{.Names}}"],
+                    capture_output=True, timeout=4, check=False)
+                if remaining.returncode != 0 or remaining.stdout.strip():
+                    raise RuntimeError("stopped_gsales_client_cleanup_failed")
+        finally:
+            env_file.unlink(missing_ok=True)
+            directory.rmdir()
+    _, _, after = capture()
+    if before != after or production_identity() != (release, tenant):
+        raise SystemExit("STOPPED_GSALES_FINGERPRINT_MISMATCH")
+    result = json.loads(output)
+    if not isinstance(result, dict) or "preflight_error" in result:
+        raise SystemExit("queue_snapshot_trust_boundary_invalid")
+    result.update({"collector_mode": "stopped_runtime_ephemeral_v1",
+        "stopped_runtime_state": "INTENTIONALLY_STOPPED", "stopped_runtime_fingerprint": before})
+    print(json.dumps(result, separators=(",", ":")))
+elif all(running) and all(healthy):
+    output = run(["docker", "exec", "-i", "-w", "/srv/agata",
+        "-e", "SNAPSHOT_LANE=GSALES", "-e", "SNAPSHOT_EXPECTED_TENANT_ID=" + tenant,
+        "-e", "SNAPSHOT_RELEASE_SHA=" + release, "-e", "SNAPSHOT_API_BUILD_SHA=" + release,
+        "-e", "SNAPSHOT_CORE_BUILD_SHA=" + release, "-e", "SNAPSHOT_API_IMAGE_ID=" + rows[0]["image"],
+        "-e", "SNAPSHOT_CORE_IMAGE_ID=" + rows[1]["image"], names[1], "python", "-"], input=script)
+    print(output.decode())
+else:
+    raise SystemExit("stopped_gsales_mixed_state")
+PY
+""".replace("__SNAPSHOT_SCRIPT_BASE64__", encoded_script)
+
 def _remote_queue_snapshot_command(lane: str) -> str:
     targets = {
         "GPOINT": ("compose-api-1", "compose-agata-api-1", "AGATA_TENANT_ID"),
@@ -959,6 +1207,15 @@ def _remote_queue_snapshot_command(lane: str) -> str:
         raise RuntimeError("authoritative_queue_snapshot_unavailable")
     api, core, tenant_key = targets[lane]
     script = base64.b64encode(QUEUE_SNAPSHOT_SCRIPT.read_bytes()).decode("ascii")
+    if lane == "GSALES":
+        header = f'''set -eu
+env_file=/opt/gpoint/env/production.env
+release_sha=$(sed -n 's/^RELEASE_SHA=//p' "$env_file" | head -1)
+tenant=$(sed -n 's/^{tenant_key}=//p' "$env_file" | head -1)
+'''
+        return header + _remote_stopped_gsales_queue_snapshot_command(
+            base64.b64decode(script).decode("utf-8"),
+        )
     return f"""set -eu
 env_file=/opt/gpoint/env/production.env
 release_sha=$(sed -n 's/^RELEASE_SHA=//p' "$env_file" | head -1)
@@ -1190,7 +1447,7 @@ def _safe_lane_error_fields(lane_status: dict) -> dict[str, str]:
     return safe
 
 
-def _refresh_local_pool_evidence(status: dict) -> None:
+def _refresh_local_pool_evidence(status: dict, *, revalidate_stopped_gsales: bool = False) -> None:
     """Record local idle inventory separately from health and production queue state."""
     pool = status.get("pool")
     slots = status.get("slots")
@@ -1236,6 +1493,11 @@ def _refresh_local_pool_evidence(status: dict) -> None:
             raise PreflightFailure("worker_status_schema_invalid", stage="local_pool_validation", lane=lane,
                                    legacy_error="production_queue_status_unavailable")
         if not value.get("configured", True):
+            continue
+        if lane == "GSALES" and revalidate_stopped_gsales:
+            # Do not convert stopped service state into HEALTHY. The caller
+            # must replace this provisional status with a fresh collector
+            # result that proves all three containers are stopped or healthy.
             continue
         if value.get("health") not in {"HEALTHY", "DEGRADED"}:
             raise PreflightFailure("lane_health_invalid", stage="lane_health_validation", lane=lane,
@@ -1338,14 +1600,24 @@ def _read_production_queue_status(manifest: dict | None = None, *,
                         if isinstance(lanes.get(lane), dict) and lanes[lane].get("configured", True)]
     if not configured_lanes:
         raise PreflightFailure("no_configured_production_lanes", stage="worker_status")
-    if all(lanes[lane].get("queue_snapshot_state") == "VERIFIED" for lane in configured_lanes):
+    if (all(lanes[lane].get("queue_snapshot_state") == "VERIFIED" for lane in configured_lanes)
+            and "GSALES" not in configured_lanes):
         return status
     unresolved_lanes = [lane for lane in configured_lanes
                         if lanes[lane].get("queue_snapshot_state") != "VERIFIED"]
-    if not unresolved_lanes:
+    snapshot_lanes = list(unresolved_lanes)
+    # GSALES is always refreshed independently: a recent worker poll is not
+    # authoritative after its consumer/API stack has been intentionally stopped.
+    if "GSALES" in configured_lanes and "GSALES" not in snapshot_lanes:
+        snapshot_lanes.append("GSALES")
+    if not snapshot_lanes:
         raise PreflightFailure("authoritative_queue_snapshot_unavailable", stage="queue_snapshot")
     for lane in unresolved_lanes:
         lane_status = lanes[lane]
+        if lane == "GSALES":
+            # The collector itself proves either the complete healthy runtime
+            # or the exact all-stopped state. Mixed states fail remotely.
+            continue
         health = lane_status.get("health")
         queue_error = lane_status.get("queue_snapshot_error_code")
         if health not in {"HEALTHY", "DEGRADED"}:
@@ -1367,18 +1639,26 @@ def _read_production_queue_status(manifest: dict | None = None, *,
                                    safe_fields=_safe_lane_error_fields(lane_status),
                                    legacy_error="production_queue_status_unavailable",
                                    error_category="queue", exit_class="unknown")
-    _refresh_local_pool_evidence(status)
+    _refresh_local_pool_evidence(status, revalidate_stopped_gsales="GSALES" in configured_lanes)
     try:
         candidate_manifest = manifest or candidate()
     except Exception as exc:
         raise PreflightFailure("candidate_verification_failed", stage="origin_verification") from exc
     budget = retry_budget or QueueSnapshotRetryBudget()
-    for lane in configured_lanes:
+    for lane in snapshot_lanes:
         try:
             expected_tenant = _configured_tenant_id(lane, candidate_manifest)
         except Exception as exc:
             raise PreflightFailure("tenant_binding_invalid", stage="tenant_validation", lane=lane) from exc
         snapshot = _read_live_runtime_queue_snapshot(lane, expected_tenant, retry_budget=budget)
+        if (lane == "GSALES" and lanes[lane].get("health") != "HEALTHY"
+                and snapshot.get("health") != "INTENTIONALLY_STOPPED"):
+            lane_status = lanes[lane]
+            if not _live_snapshot_fallback_allowed(lane_status):
+                raise PreflightFailure("lane_health_queue_error_combination_disallowed",
+                                       stage="lane_health_validation", lane=lane,
+                                       safe_fields=_safe_lane_error_fields(lane_status),
+                                       legacy_error="production_queue_status_unavailable")
         lanes[lane].update(snapshot)
     return status
 
@@ -1851,7 +2131,8 @@ def _runtime_candidate_identity(expected_source_sha: str) -> dict:
                 "bundle_sha256": None, "manifest_source_sha": None, "asset_parity": False}
 
 
-def _restart_state_snapshot(expected_source_sha: str, command_timeout: float = 8.0) -> dict:
+def _restart_state_snapshot(expected_source_sha: str, command_timeout: float = 8.0,
+                            stopped_gsales_baseline: dict | None = None) -> dict:
     """Capture one read-only snapshot of service, process, and lane readiness."""
     service_id = f"gui/{os.getuid()}/{LABEL}"
     command_errors = {}
@@ -1891,6 +2172,13 @@ def _restart_state_snapshot(expected_source_sha: str, command_timeout: float = 8
         status = {}
     lanes = status.get("lanes", {}) if isinstance(status.get("lanes"), dict) else {}
     lane_status = {lane: value for lane, value in lanes.items() if isinstance(value, dict)}
+    stopped_gsales_proof = None
+    stopped_gsales_proof_error = None
+    if stopped_gsales_baseline is not None:
+        try:
+            stopped_gsales_proof = _assert_stopped_gsales_proof_matches(stopped_gsales_baseline)
+        except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
+            stopped_gsales_proof_error = type(exc).__name__
     lab_approval = ROOT / "config/lab-execution-approval.json"
     lab_state = lane_status.get("LAB", {})
     lab_gate = lab_state.get("inference_gate")
@@ -1932,12 +2220,18 @@ def _restart_state_snapshot(expected_source_sha: str, command_timeout: float = 8
         "status": status_result.returncode == 0 and isinstance(status, dict),
         "concurrency": status.get("configured_concurrency") == 1,
         "gpoint": lane_status.get("GPOINT", {}).get("health") == "HEALTHY",
-        "gsales": lane_status.get("GSALES", {}).get("health") == "HEALTHY",
         "lab_lane": "LAB" in lanes,
         "lab_approval_fail_closed": lab_gate_closed,
         "no_active_inference": not active_pids and no_current_job,
         "no_duplicate_worker": len(worker_processes) == 1 and worker_processes[0]["pid"] == pid,
     }
+    if stopped_gsales_baseline is not None:
+        checks["gsales_intentionally_stopped"] = (
+            lane_status.get("GSALES", {}).get("health") != "HEALTHY"
+            and stopped_gsales_proof == stopped_gsales_baseline
+        )
+    else:
+        checks["gsales"] = lane_status.get("GSALES", {}).get("health") == "HEALTHY"
     safe_status = {
         "configured_concurrency": status.get("configured_concurrency"),
         "pool": status.get("pool"),
@@ -1957,17 +2251,23 @@ def _restart_state_snapshot(expected_source_sha: str, command_timeout: float = 8
         "worker_status": safe_status,
         "runtime_identity": runtime_identity,
         "runtime_source_sha": runtime_identity.get("runtime_source_sha"),
+        "stopped_gsales_proof": stopped_gsales_proof,
+        "stopped_gsales_proof_error": stopped_gsales_proof_error,
     }
 
 
-def _adjudicate_restart_state(expected_source_sha: str, deadline: float = 30.0) -> dict:
+def _adjudicate_restart_state(expected_source_sha: str, deadline: float = 30.0,
+                              stopped_gsales_baseline: dict | None = None) -> dict:
     """Boundedly recheck factual runtime state after an ambiguous restart command."""
     until = time.monotonic() + deadline
     attempts = []
     while time.monotonic() < until:
         remaining = max(1.0, until - time.monotonic())
         try:
-            snapshot = _restart_state_snapshot(expected_source_sha, command_timeout=min(8.0, remaining))
+            snapshot = _restart_state_snapshot(
+                expected_source_sha, command_timeout=min(8.0, remaining),
+                stopped_gsales_baseline=stopped_gsales_baseline,
+            )
         except (OSError, subprocess.SubprocessError, ValueError, RuntimeError) as exc:
             snapshot = {"passed": False, "error": type(exc).__name__}
         attempts.append(snapshot)
@@ -1978,7 +2278,8 @@ def _adjudicate_restart_state(expected_source_sha: str, deadline: float = 30.0) 
             "attempts": attempts}
 
 
-def _kickstart_and_verify(expected_source_sha: str) -> dict:
+def _kickstart_and_verify(expected_source_sha: str,
+                          stopped_gsales_baseline: dict | None = None) -> dict:
     """Run restart and decide from bounded factual evidence, not CLI timing."""
     command = ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{LABEL}"]
     try:
@@ -1997,13 +2298,36 @@ def _kickstart_and_verify(expected_source_sha: str) -> dict:
     except OSError as exc:
         command_evidence = {"outcome": "COMMAND_LAUNCH_ERROR", "timeout_seconds": 20,
                             "error": type(exc).__name__}
-    adjudication = _adjudicate_restart_state(expected_source_sha)
+    if stopped_gsales_baseline is None:
+        adjudication = _adjudicate_restart_state(expected_source_sha)
+    else:
+        adjudication = _adjudicate_restart_state(
+            expected_source_sha, stopped_gsales_baseline=stopped_gsales_baseline,
+        )
     return {"verification": "PASS" if adjudication.get("passed") else "ROLLBACK",
             "command": command_evidence, "adjudication": adjudication}
 
 
-def _remove_legacy_after_verification(*, health_passed: bool, restart_evidence: dict) -> None:
-    if not health_passed or restart_evidence.get("verification") != "PASS":
+def _remove_legacy_after_verification(*, health_passed: bool, restart_evidence: dict,
+                                      stopped_gsales_evidence: dict | None = None) -> None:
+    stopped_gsales_verified = False
+    if isinstance(stopped_gsales_evidence, dict):
+        baseline = stopped_gsales_evidence.get("baseline")
+        proofs = [stopped_gsales_evidence.get(key) for key in ("restart", "poll", "completion")]
+        stopped_gsales_verified = (
+            isinstance(baseline, dict)
+            and all(proof == baseline for proof in proofs)
+            and all(baseline.get(key) is not None for key in (
+                "source_id", "stopped_runtime_fingerprint", "release_sha",
+                "api_image_id", "core_image_id", "tenant_id",
+            ))
+            and baseline.get("state") == "INTENTIONALLY_STOPPED"
+            and baseline.get("pending_jobs") == 0
+            and baseline.get("running_jobs") == 0
+        )
+    health_contract_passed = (health_passed and stopped_gsales_verified
+                              if stopped_gsales_evidence is not None else health_passed)
+    if (not health_contract_passed or restart_evidence.get("verification") != "PASS"):
         raise RuntimeError("legacy_cleanup_requires_full_verification")
     # The old flat worker files share the canonical Application Support root
     # with pool state. Keep them in place; LaunchAgent now uses runtime/current.
@@ -2552,7 +2876,8 @@ def _health_check(deadline: float = 60.0) -> dict:
     raise RuntimeError("new_worker_health_check_failed")
 
 
-def _wait_for_successful_polls(baseline: dict, deadline: float = 90.0) -> dict:
+def _wait_for_successful_polls(baseline: dict, deadline: float = 90.0,
+                               stopped_gsales_baseline: dict | None = None) -> dict:
     status_path = ROOT / "status/worker-status.json"
     previous = baseline.get("targets", {}) if isinstance(baseline.get("targets"), dict) else {}
     until = time.monotonic() + deadline
@@ -2561,7 +2886,8 @@ def _wait_for_successful_polls(baseline: dict, deadline: float = 90.0) -> dict:
         latest = safe_worker_status(status_path)
         targets = latest.get("targets", {}) if isinstance(latest.get("targets"), dict) else {}
         checks = {}
-        for lane in ("GPOINT", "GSALES"):
+        lanes_to_check = ("GPOINT",) if stopped_gsales_baseline is not None else ("GPOINT", "GSALES")
+        for lane in lanes_to_check:
             before = previous.get(lane, {}) if isinstance(previous.get(lane), dict) else {}
             after = targets.get(lane, {}) if isinstance(targets.get(lane), dict) else {}
             old_poll = before.get("last_poll_at")
@@ -2575,6 +2901,24 @@ def _wait_for_successful_polls(baseline: dict, deadline: float = 90.0) -> dict:
             checks[lane] = {"poll_advanced": progressed,
                             "stale_error_cleared": after.get("last_error_code") in (None, "")}
         if all(value["poll_advanced"] and value["stale_error_cleared"] for value in checks.values()):
+            if stopped_gsales_baseline is not None:
+                try:
+                    stopped_proof = _assert_stopped_gsales_proof_matches(stopped_gsales_baseline)
+                except (OSError, RuntimeError, subprocess.SubprocessError, ValueError):
+                    return {"passed": False, "lanes": checks,
+                            "stopped_gsales_proof_verified": False}
+                return {
+                    "passed": True,
+                    "lanes": {
+                        **checks,
+                        "GSALES": {
+                            "poll_required": False,
+                            "poll_status": "NOT_REQUIRED_INTENTIONALLY_STOPPED",
+                            "stopped_proof_verified": True,
+                        },
+                    },
+                    "stopped_gsales_proof": stopped_proof,
+                }
             return {"passed": True, "lanes": checks}
         time.sleep(min(2.0, max(0.0, until - time.monotonic())))
     return {"passed": False, "lanes": checks if "checks" in locals() else {},
@@ -2668,8 +3012,17 @@ def _run_safety_preflight(stage: str, *, manifest: dict | None = None,
             "locks_free": True,
             "queue_snapshots_verified": True,
             "queues_empty": True,
-            "lane_health_healthy": True,
+            "lane_health_healthy": all(
+                status.get("lanes", {}).get(lane, {}).get("health") == "HEALTHY"
+                for lane in ("GPOINT", "GSALES")
+            ),
+            "lane_states": {
+                lane: status.get("lanes", {}).get(lane, {}).get("health")
+                for lane in ("GPOINT", "GSALES")
+            },
         }
+        if status.get("lanes", {}).get("GSALES", {}).get("health") == "INTENTIONALLY_STOPPED":
+            summary["stopped_gsales_proof"] = _stopped_gsales_proof(status)
         _record_preflight(stage, summary=summary, attempts=retry_budget.attempts, started_at=started_at)
         return {"manifest": candidate_manifest, "inventory": before, "status": status, "queue_evidence": evidence}
     except PreflightFailure as exc:
@@ -2721,7 +3074,7 @@ def read_only_preflight() -> dict:
     }
 
 
-def apply() -> dict:
+def apply(*, preserve_stopped_gsales: bool = False) -> dict:
     TRANSITION_LOCK.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(TRANSITION_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
     try:
@@ -2737,6 +3090,14 @@ def apply() -> dict:
         preflight = _run_safety_preflight("APPLY_INITIAL", transition_lock_already_held=True)
         manifest = preflight["manifest"]
         queue_evidence = preflight["queue_evidence"]
+        stopped_gsales_baseline = None
+        initial_gsales = preflight["status"].get("lanes", {}).get("GSALES", {})
+        if initial_gsales.get("queue_snapshot_authority") == "stopped_runtime_ephemeral_readonly_v1":
+            if not preserve_stopped_gsales:
+                raise RuntimeError("preserve_stopped_gsales_opt_in_required")
+            stopped_gsales_baseline = _stopped_gsales_proof(preflight["status"])
+        elif preserve_stopped_gsales:
+            raise RuntimeError("stopped_gsales_state_not_proven")
         network_before = _network_state_sha256()
         if not ROOT.is_dir() or ROOT.is_symlink() or ROOT.stat().st_uid != os.getuid():
             raise RuntimeError("worker_runtime_root_owner_invalid")
@@ -2779,6 +3140,10 @@ def apply() -> dict:
                 )
                 queue_evidence = paused_preflight["queue_evidence"]
                 paused_queue_status = paused_preflight["status"]
+                if stopped_gsales_baseline is not None:
+                    paused_proof = _stopped_gsales_proof(paused_queue_status)
+                    if paused_proof != stopped_gsales_baseline:
+                        raise RuntimeError("stopped_gsales_preboot_fingerprint_changed")
             except Exception:
                 try:
                     os.kill(paused_pid, signal.SIGCONT)
@@ -2840,7 +3205,12 @@ def apply() -> dict:
             subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(PLIST)], check=True, timeout=20)
             # One bounded restart command owns both success and timeout
             # adjudication. Do not fail on CLI timing before checking the live PID.
-            restart_evidence = _kickstart_and_verify(manifest["source_sha"])
+            if stopped_gsales_baseline is None:
+                restart_evidence = _kickstart_and_verify(manifest["source_sha"])
+            else:
+                restart_evidence = _kickstart_and_verify(
+                    manifest["source_sha"], stopped_gsales_baseline=stopped_gsales_baseline,
+                )
             if restart_evidence["verification"] != "PASS":
                 raise RuntimeError("restart_verification_failed")
             restarted = restart_evidence["adjudication"].get("status", {})
@@ -2849,7 +3219,12 @@ def apply() -> dict:
                 raise RuntimeError("restart_verification_failed")
             if any(not isinstance(restarted.get("lanes", {}).get(lane), dict) for lane in ("GPOINT", "GSALES", "LAB")):
                 raise RuntimeError("lane_status_missing")
-            poll_evidence = _wait_for_successful_polls(poll_baseline)
+            if stopped_gsales_baseline is None:
+                poll_evidence = _wait_for_successful_polls(poll_baseline)
+            else:
+                poll_evidence = _wait_for_successful_polls(
+                    poll_baseline, stopped_gsales_baseline=stopped_gsales_baseline,
+                )
             if not poll_evidence["passed"]:
                 raise RuntimeError("successful_worker_polls_not_verified")
             network_after = _network_state_sha256()
@@ -2862,11 +3237,33 @@ def apply() -> dict:
                 process_evidence=attempts[-1], command_evidence=restart_evidence.get("command", {}),
                 started_at=attempt_started_at,
             )
+            stopped_gsales_completion_proof = None
+            if stopped_gsales_baseline is not None:
+                stopped_gsales_completion_proof = _assert_stopped_gsales_proof_matches(
+                    stopped_gsales_baseline,
+                )
             # Legacy runtime is removed only after health and restart pass.
-            _remove_legacy_after_verification(health_passed=bool(status.get("lanes"))
-                                              and all(status.get("lanes", {}).get(lane, {}).get("health") == "HEALTHY"
-                                                      for lane in ("GPOINT", "GSALES")),
-                                              restart_evidence=restart_evidence)
+            if stopped_gsales_baseline is None:
+                health_passed = bool(status.get("lanes")) and all(
+                    status.get("lanes", {}).get(lane, {}).get("health") == "HEALTHY"
+                    for lane in ("GPOINT", "GSALES")
+                )
+                stopped_gsales_evidence = None
+            else:
+                health_passed = status.get("lanes", {}).get("GPOINT", {}).get("health") == "HEALTHY"
+                restart_attempts = restart_evidence.get("adjudication", {}).get("attempts") or []
+                stopped_gsales_restart_proof = restart_attempts[-1].get("stopped_gsales_proof") if restart_attempts else None
+                stopped_gsales_evidence = {
+                    "baseline": stopped_gsales_baseline,
+                    "restart": stopped_gsales_restart_proof,
+                    "poll": poll_evidence.get("stopped_gsales_proof"),
+                    "completion": stopped_gsales_completion_proof,
+                }
+            _remove_legacy_after_verification(
+                health_passed=health_passed,
+                restart_evidence=restart_evidence,
+                stopped_gsales_evidence=stopped_gsales_evidence,
+            )
             evidence = {
                 "state": "COMPLETE", "at": datetime.now(UTC).isoformat(), "label": LABEL,
                 "source_sha": manifest["source_sha"], "bundle_sha256": manifest["bundle_sha256"],
@@ -2880,6 +3277,18 @@ def apply() -> dict:
                 "network_state_sha256_after": network_after,
                 "network_configuration_writes_performed": False,
                 "production_queue_snapshot": queue_evidence,
+                "gsales_runtime_mode": (
+                    "INTENTIONALLY_STOPPED" if stopped_gsales_baseline is not None else "HEALTHY"
+                ),
+                "gsales_stopped_proof_before": stopped_gsales_baseline,
+                "gsales_stopped_proof_paused_preboot": (
+                    _stopped_gsales_proof(paused_queue_status)
+                    if stopped_gsales_baseline is not None and paused_queue_status else None
+                ),
+                "gsales_stopped_proof_after_restart": stopped_gsales_evidence.get("restart")
+                    if stopped_gsales_evidence else None,
+                "gsales_stopped_proof_after_poll": poll_evidence.get("stopped_gsales_proof"),
+                "gsales_stopped_proof_at_completion": stopped_gsales_completion_proof,
                 "rollback_snapshot": str(backup),
                 "startup_check": startup_check,
                 "diagnostics": str(diagnostic_receipt),
@@ -3037,7 +3446,10 @@ def main() -> int:
     parser.add_argument("action", choices=("plan", "preflight", "prepare", "apply", "rollback",
                                             "install-lab-slot", "install-lane-slot"))
     parser.add_argument("--lane", choices=("GPOINT", "GSALES", "LAB"))
+    parser.add_argument("--preserve-stopped-gsales", action="store_true")
     args = parser.parse_args()
+    if args.preserve_stopped_gsales and args.action != "apply":
+        raise RuntimeError("preserve_stopped_gsales_apply_only")
     if args.action == "install-lane-slot" and not args.lane:
         raise RuntimeError("worker_lane_required")
     result = (read_only_plan() if args.action == "plan" else read_only_preflight() if args.action == "preflight"
@@ -3045,7 +3457,7 @@ def main() -> int:
               else rollback() if args.action == "rollback" else
               install_lab_slot() if args.action == "install-lab-slot" else
               install_lane_slot(args.lane) if args.action == "install-lane-slot" and args.lane else
-              apply())
+              apply(preserve_stopped_gsales=args.preserve_stopped_gsales))
     print(json.dumps(result, sort_keys=True, indent=2))
     return 0
 

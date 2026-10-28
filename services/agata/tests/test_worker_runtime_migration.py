@@ -319,6 +319,24 @@ def test_install_lane_cli_requires_lane_before_any_apply(monkeypatch):
         migration.main()
 
 
+def test_cli_stopped_gsales_mode_is_explicit_and_apply_only(monkeypatch, capsys):
+    monkeypatch.setattr(migration.sys, "argv", [
+        "migrate_worker_runtime.py", "apply", "--preserve-stopped-gsales",
+    ])
+    calls = []
+    monkeypatch.setattr(migration, "apply", lambda **kwargs: calls.append(kwargs) or {"state": "TEST"})
+
+    assert migration.main() == 0
+    assert calls == [{"preserve_stopped_gsales": True}]
+    assert json.loads(capsys.readouterr().out) == {"state": "TEST"}
+
+    monkeypatch.setattr(migration.sys, "argv", [
+        "migrate_worker_runtime.py", "preflight", "--preserve-stopped-gsales",
+    ])
+    with pytest.raises(RuntimeError, match="preserve_stopped_gsales_apply_only"):
+        migration.main()
+
+
 def test_gsales_slot_install_switches_only_gsales_after_fresh_queue_gate(tmp_path, monkeypatch):
     root = tmp_path / "worker"
     runtime = root / "runtime"
@@ -1255,6 +1273,294 @@ def test_live_runtime_readonly_snapshot_rejects_untrusted_or_mismatched_identity
             )
 
 
+def test_remote_gsales_snapshot_uses_pinned_readonly_ephemeral_client_when_service_set_stopped():
+    command = migration._remote_queue_snapshot_command("GSALES")
+    collector = command.split("python3 - <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    compile(collector, "<remote-gsales-queue-collector>", "exec")
+
+    for container in (
+        "compose-gsales-api-1",
+        "compose-gsales-agata-api-1",
+        "compose-gsales-agata-memory-worker-1",
+    ):
+        assert container in command
+    assert '"docker", "run"' in command
+    assert '"--pull=never"' in command
+    assert '"shared_internal"' in command
+    assert '"--read-only"' in command
+    assert '"--cap-drop", "ALL"' in command
+    assert '"--security-opt", "no-new-privileges"' in command
+    assert '"--env-file", str(env_file)' in command
+    assert '"--entrypoint", "python"' in command
+    assert '"-i"' in command
+    assert '"docker", "exec"' in command  # the existing healthy-GSales path remains supported
+    assert '"docker", "start"' not in command and "compose up" not in command
+    assert "stopped_gsales_mixed_state" in command
+    assert "SNAPSHOT_EXPECTED_RELEASE_SHA" in command
+    assert "org.opencontainers.image.revision" in command
+
+
+def test_remote_gsales_snapshot_fails_closed_on_stopped_fingerprint_drift_or_readonly_identity_failure():
+    command = migration._remote_queue_snapshot_command("GSALES")
+
+    assert command.count("capture()") >= 2  # pre-run and post-run
+    assert command.count("production_identity()") >= 2
+    assert "if before != after" in command
+    assert "STOPPED_GSALES_FINGERPRINT_MISMATCH" in command
+    assert "AGATA_DATABASE_URL" in command
+    assert "AGATA_TENANT_ID" in command
+    snapshot_script = migration.QUEUE_SNAPSHOT_SCRIPT.read_text()
+    assert "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY" in snapshot_script
+    assert "transaction_read_only" in snapshot_script
+    assert "role_bypassrls" in snapshot_script
+    assert "same_login" in snapshot_script
+    assert "queue_snapshot_trust_boundary_invalid" in snapshot_script
+    assert '"docker", "rm", "-f", client_name' in command
+    assert '"docker", "ps", "-a"' in command
+    assert "stopped_gsales_client_cleanup_failed" in command
+    assert "env_file.unlink(missing_ok=True)" in command
+    assert '"stopped_runtime_fingerprint": before' in command
+
+
+def test_stopped_gsales_ephemeral_collector_uses_private_allowlisted_env_and_cleans_up(tmp_path):
+    command = migration._remote_queue_snapshot_command("GSALES")
+    collector = command.split("python3 - <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    release = "a" * 40
+    tenant = "c4d67889-877e-4d1b-a8d8-597c479d638f"
+    api_image, core_image = "sha256:" + "1" * 64, "sha256:" + "2" * 64
+    raw_snapshot = _live_runtime_queue_snapshot("GSALES", datetime.now(UTC))
+    containers = {}
+    for name, service, image, index in (
+        ("compose-gsales-api-1", "gsales-api", api_image, 1),
+        ("compose-gsales-agata-api-1", "gsales-agata-api", core_image, 2),
+        ("compose-gsales-agata-memory-worker-1", "gsales-agata-memory-worker", core_image, 3),
+    ):
+        env = []
+        if index == 2:
+            env = [
+                "AGATA_DATABASE_URL=postgresql+asyncpg://reader:db-secret-marker@postgres:5432/gsales",
+                f"AGATA_TENANT_ID={tenant}", "AGATA_INTERNAL_API_TOKEN=synthetic-token",
+                "AGATA_MESSAGE_AEAD_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                "AGATA_REQUEST_FINGERPRINT_HMAC_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                "AGATA_RETRIEVAL_QUERY_HMAC_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                "AGATA_SHADOW_CANDIDATE_HMAC_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                "AGATA_RESPONSE_FINGERPRINT_HMAC_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                "AGATA_SOURCE_SYSTEM=gsales", "AGATA_SALES_DRAFTS_ENABLED=true",
+                "AGATA_LLM_API_KEY=must-not-copy",
+            ]
+        containers[name] = [{
+            "Name": "/" + name, "Id": f"{index:064x}", "Image": image, "RestartCount": 0,
+            "Config": {"Image": f"immutable:{index}", "Labels": {
+                "com.docker.compose.project": "compose", "com.docker.compose.service": service,
+            }, "Env": env},
+            "State": {"Status": "exited", "Running": False, "RestartCount": 0,
+                      "StartedAt": "2026-10-01T00:00:00Z", "FinishedAt": "2026-10-02T00:00:00Z"},
+            "HostConfig": {"RestartPolicy": {"Name": "unless-stopped", "MaximumRetryCount": 0}},
+        }]
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "docker-argv.log"
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text("""#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+with open(os.environ['FAKE_DOCKER_LOG'], 'a') as stream:
+    stream.write(' '.join(args) + '\\n')
+if args[0] == 'inspect':
+    rows = json.loads(os.environ['FAKE_CONTAINERS'])[args[1]]
+    marker = pathlib.Path(os.environ.get('FAKE_DRIFT_MARKER', '/nonexistent-marker'))
+    if os.environ.get('FAKE_CONTAINER_DRIFT') == '1' and marker.exists() and args[1] == 'compose-gsales-agata-memory-worker-1':
+        rows[0]['RestartCount'] += 1
+    print(json.dumps(rows))
+elif args[:2] == ['image', 'inspect']:
+    image = args[2]
+    print(json.dumps([{'Id': image, 'Config': {'Labels': {'org.opencontainers.image.revision': os.environ['FAKE_RELEASE']}}}]))
+elif args[0] == 'run':
+    assert '-i' in args, 'snapshot stdin must be attached to the exact-image client'
+    env_path = pathlib.Path(args[args.index('--env-file') + 1])
+    env_text = env_path.read_text()
+    assert 'AGATA_SALES_DRAFTS_ENABLED=true' in env_text
+    assert 'AGATA_LLM_PROVIDER=disabled' in env_text
+    assert 'AGATA_SALES_PRODUCTION_MODE=false' in env_text
+    assert 'AGATA_LLM_API_KEY=' in env_text
+    assert 'must-not-copy' not in env_text
+    assert 'db-secret-marker' not in ' '.join(args)
+    sys.stdin.buffer.read()
+    if os.environ.get('FAKE_CONTAINER_DRIFT') == '1':
+        pathlib.Path(os.environ['FAKE_DRIFT_MARKER']).write_text('client ran')
+    if os.environ.get('FAKE_PRODUCTION_DRIFT') == '1':
+        pathlib.Path(os.environ['FAKE_PRODUCTION_ENV']).write_text(
+            'RELEASE_SHA=' + 'b' * 40 + '\\nGSALES_AGATA_TENANT_ID=' + os.environ['FAKE_TENANT'] + '\\n')
+    print(os.environ['FAKE_SNAPSHOT'])
+elif args[:2] == ['rm', '-f']:
+    pass
+elif args[:2] == ['ps', '-a']:
+    if os.environ.get('FAKE_CLIENT_REMAINS') == '1':
+        print(args[args.index('--filter') + 1].removeprefix('name=^/').rstrip('$'))
+else:
+    raise SystemExit(9)
+""")
+    fake_docker.chmod(0o700)
+    production = tmp_path / "production.env"
+    production.write_text(f"RELEASE_SHA={release}\nGSALES_AGATA_TENANT_ID={tenant}\n")
+    collector = collector.replace("/opt/gpoint/env/production.env", str(production))
+    collector = collector.replace('dir="/run"', f'dir={str(tmp_path)!r}')
+    env = os.environ | {
+        "PATH": str(fake_bin) + ":" + os.environ["PATH"],
+        "FAKE_DOCKER_LOG": str(log), "FAKE_CONTAINERS": json.dumps(containers),
+        "FAKE_RELEASE": release, "FAKE_SNAPSHOT": json.dumps(raw_snapshot),
+        "FAKE_PRODUCTION_ENV": str(production), "FAKE_TENANT": tenant,
+        "SNAPSHOT_EXPECTED_RELEASE_SHA": release, "SNAPSHOT_EXPECTED_TENANT_ID": tenant,
+    }
+
+    result = subprocess.run([os.sys.executable, "-c", collector], capture_output=True, text=True, env=env)
+
+    assert result.returncode == 0, result.stderr
+    snapshot = json.loads(result.stdout)
+    assert snapshot["collector_mode"] == "stopped_runtime_ephemeral_v1"
+    assert snapshot["stopped_runtime_state"] == "INTENTIONALLY_STOPPED"
+    assert snapshot["stopped_runtime_fingerprint"]
+    args_logged = log.read_text()
+    assert "db-secret-marker" not in args_logged
+    assert "must-not-copy" not in args_logged
+    assert not list(tmp_path.glob("gpoint-gsales-snapshot-*"))
+
+    # The fake query response is 0/0; without the trusted runtime flag, the
+    # SQL would omit sales_draft_inference rows, so that zero must not pass.
+    drafts_disabled = json.loads(json.dumps(containers))
+    core_env = drafts_disabled["compose-gsales-agata-api-1"][0]["Config"]["Env"]
+    core_env[core_env.index("AGATA_SALES_DRAFTS_ENABLED=true")] = "AGATA_SALES_DRAFTS_ENABLED=false"
+    env["FAKE_CONTAINERS"] = json.dumps(drafts_disabled)
+    log.write_text("")
+    rejected_zero = subprocess.run([os.sys.executable, "-c", collector], capture_output=True, text=True, env=env)
+    assert rejected_zero.returncode != 0
+    assert "stopped_gsales_runtime_config_invalid" in rejected_zero.stderr
+    assert '"run"' not in log.read_text()
+
+    mixed = json.loads(json.dumps(containers))
+    mixed["compose-gsales-api-1"][0]["State"].update({"Status": "running", "Running": True})
+    env["FAKE_CONTAINERS"] = json.dumps(mixed)
+    log.write_text("")
+    failed = subprocess.run([os.sys.executable, "-c", collector], capture_output=True, text=True, env=env)
+    assert failed.returncode != 0
+    assert "stopped_gsales_mixed_state" in failed.stderr
+    assert '"run"' not in log.read_text()
+
+    production.write_text(f"RELEASE_SHA={release}\nGSALES_AGATA_TENANT_ID={tenant}\n")
+    env["FAKE_CONTAINERS"] = json.dumps(containers)
+    env["FAKE_PRODUCTION_DRIFT"] = "1"
+    log.write_text("")
+    drifted = subprocess.run([os.sys.executable, "-c", collector], capture_output=True, text=True, env=env)
+    assert drifted.returncode != 0
+    assert "STOPPED_GSALES_FINGERPRINT_MISMATCH" in drifted.stderr
+
+    production.write_text(f"RELEASE_SHA={release}\nGSALES_AGATA_TENANT_ID={tenant}\n")
+    env.pop("FAKE_PRODUCTION_DRIFT", None)
+    marker = tmp_path / "post-client-container-change"
+    marker.unlink(missing_ok=True)
+    env["FAKE_CONTAINER_DRIFT"] = "1"
+    env["FAKE_DRIFT_MARKER"] = str(marker)
+    log.write_text("")
+    changed_container = subprocess.run([os.sys.executable, "-c", collector], capture_output=True, text=True, env=env)
+    assert changed_container.returncode != 0
+    assert "STOPPED_GSALES_FINGERPRINT_MISMATCH" in changed_container.stderr
+    assert not list(tmp_path.glob("gpoint-gsales-snapshot-*"))
+    marker.unlink(missing_ok=True)
+
+    production.write_text(f"RELEASE_SHA={release}\nGSALES_AGATA_TENANT_ID={tenant}\n")
+    env.pop("FAKE_CONTAINER_DRIFT", None)
+    env["FAKE_CLIENT_REMAINS"] = "1"
+    log.write_text("")
+    leftover = subprocess.run([os.sys.executable, "-c", collector], capture_output=True, text=True, env=env)
+    assert leftover.returncode != 0
+    assert "stopped_gsales_client_cleanup_failed" in leftover.stderr
+    assert not list(tmp_path.glob("gpoint-gsales-snapshot-*"))
+
+
+def test_stopped_gsales_snapshot_is_explicitly_inactive_and_requires_container_fingerprint():
+    now = datetime.now(UTC)
+    snapshot = _live_runtime_queue_snapshot("GSALES", now) | {
+        "collector_mode": "stopped_runtime_ephemeral_v1",
+        "stopped_runtime_state": "INTENTIONALLY_STOPPED",
+        "stopped_runtime_fingerprint": "c" * 64,
+    }
+
+    normalized = migration.normalize_live_runtime_queue_snapshot(
+        snapshot, "GSALES", snapshot["tenant_id"],
+    )
+    assert normalized["health"] == "INTENTIONALLY_STOPPED"
+    assert normalized["queue_snapshot_authority"] == "stopped_runtime_ephemeral_readonly_v1"
+    status = _fresh_empty_queue_status(now)
+    status["lanes"]["GSALES"] = normalized
+    migration.require_fresh_empty_production_queues(status, now=now)
+
+    for invalid in (
+        snapshot | {"stopped_runtime_fingerprint": "bad"},
+        snapshot | {"stopped_runtime_state": "HEALTHY"},
+        snapshot | {"transaction_read_only": False},
+        snapshot | {"tenant_identity_verified": False},
+        snapshot | {"same_login": False},
+        snapshot | {"role_superuser": True},
+        snapshot | {"role_bypassrls": True},
+        snapshot | {"visible_tenant_rows": 2},
+    ):
+        with pytest.raises(RuntimeError, match="production_queue_snapshot_invalid"):
+            migration.normalize_live_runtime_queue_snapshot(
+                invalid, "GSALES", snapshot["tenant_id"],
+            )
+    with pytest.raises(RuntimeError, match="production_queue_snapshot_invalid"):
+        migration.normalize_live_runtime_queue_snapshot(snapshot, "GPOINT", snapshot["tenant_id"])
+
+
+def test_queue_status_preserves_live_gpoint_and_accepts_only_explicit_stopped_gsales_evidence(tmp_path, monkeypatch):
+    now = datetime.now(UTC)
+    tenant = "c4d67889-877e-4d1b-a8d8-597c479d638f"
+    status = _fresh_empty_queue_status(now)
+    status["lanes"]["GSALES"] = {
+        "health": "DEGRADED", "health_error_code": "worker_gateway_network_error",
+        "queue_snapshot_state": "UNAVAILABLE", "queue_snapshot_error_code": "worker_gateway_http_404",
+    }
+    root = tmp_path / "runtime"
+    runtime = root / "runtime" / ("a" * 40)
+    runtime.mkdir(parents=True)
+    (runtime / ".venv/bin").mkdir(parents=True)
+    python = runtime / ".venv/bin/python3.12"
+    python.touch()
+    python.chmod(0o700)
+    worker_dir = tmp_path / "candidate-worker"
+    worker_dir.mkdir()
+    worker = worker_dir / "gpoint_mac_worker.py"
+    worker.touch()
+    (root / "runtime/current").symlink_to(runtime)
+    config = tmp_path / "worker.env"
+    config.write_text(f"GSALES_AGATA_TENANT_ID={tenant}\n")
+    config.chmod(0o600)
+    stopped = _live_runtime_queue_snapshot("GSALES", now) | {
+        "collector_mode": "stopped_runtime_ephemeral_v1",
+        "stopped_runtime_state": "INTENTIONALLY_STOPPED",
+        "stopped_runtime_fingerprint": "d" * 64,
+    }
+    normalized = migration.normalize_live_runtime_queue_snapshot(stopped, "GSALES", tenant)
+    monkeypatch.setattr(migration, "ROOT", root)
+    monkeypatch.setattr(migration, "WORKER_DIR", worker_dir)
+    monkeypatch.setattr(migration, "CONFIG", config)
+    monkeypatch.setattr(migration, "inventory", lambda: {
+        "launchagent_loaded": True, "production_release_lock_busy": False, "active_inference": False,
+    })
+    monkeypatch.setattr(migration, "_launchagent_pid", lambda: (123, "gpoint_mac_worker.py watch"))
+    monkeypatch.setattr(migration, "_read_live_runtime_queue_snapshot", lambda *_args, **_kwargs: normalized)
+    monkeypatch.setattr(migration.subprocess, "run", lambda command, **_kwargs:
+                        subprocess.CompletedProcess(command, 0, json.dumps(status), ""))
+
+    result = migration._read_production_queue_status({"source_sha": "a" * 40})
+    evidence = migration.require_fresh_empty_production_queues(result, now=now)
+
+    assert result["lanes"]["GPOINT"]["health"] == "HEALTHY"
+    assert result["lanes"]["GSALES"]["health"] == "INTENTIONALLY_STOPPED"
+    assert evidence["lanes"]["GSALES"]["pending_jobs"] == 0
+
+
 def test_queue_status_404_and_gateway_network_error_use_live_readonly_snapshots(tmp_path, monkeypatch):
     now = datetime.now(UTC)
     unavailable_status = _fresh_empty_queue_status(now)
@@ -1339,12 +1645,22 @@ def test_queue_status_uses_installed_runtime_python_not_orchestrator_python(tmp_
                         lambda: "/codex/runtime/python-without-worker-dependencies")
     status = _fresh_empty_queue_status(datetime.now(UTC))
     observed = {}
+    tenant = "c4d67889-877e-4d1b-a8d8-597c479d638f"
+    config = tmp_path / "worker.env"
+    config.write_text(f"GSALES_AGATA_TENANT_ID={tenant}\n")
+    config.chmod(0o600)
+    fresh_snapshot = migration.normalize_live_runtime_queue_snapshot(
+        _live_runtime_queue_snapshot("GSALES", datetime.now(UTC)), "GSALES", tenant,
+    )
 
     def run(command, **_kwargs):
         observed["command"] = command
         return subprocess.CompletedProcess(command, 0, json.dumps(status), "")
 
     monkeypatch.setattr(migration.subprocess, "run", run)
+    monkeypatch.setattr(migration, "CONFIG", config)
+    monkeypatch.setattr(migration, "_refresh_local_pool_evidence", lambda _status, **_kwargs: None)
+    monkeypatch.setattr(migration, "_read_live_runtime_queue_snapshot", lambda *_args, **_kwargs: fresh_snapshot)
     result = migration._read_production_queue_status({"source_sha": "a" * 40})
 
     assert observed["command"][0] == str(python)
@@ -1591,10 +1907,23 @@ def test_gsales_unavailable_error_is_not_misclassified_as_gpoint_transport_failu
         "queue_snapshot_state": "UNAVAILABLE",
         "queue_snapshot_error_code": "authoritative_queue_snapshot_unavailable",
     })
+    tenant = "c4d67889-877e-4d1b-a8d8-597c479d638f"
+    config = tmp_path / "worker.env"
+    config.write_text(f"GSALES_AGATA_TENANT_ID={tenant}\n")
+    config.chmod(0o600)
+    live_snapshot = migration.normalize_live_runtime_queue_snapshot(
+        _live_runtime_queue_snapshot("GSALES", datetime.now(UTC)), "GSALES", tenant,
+    )
     monkeypatch.setattr(migration.subprocess, "run", lambda command, **_kwargs:
                         subprocess.CompletedProcess(command, 0, json.dumps(status), ""))
+    monkeypatch.setattr(migration, "CONFIG", config)
+    monkeypatch.setattr(migration, "candidate", lambda: {"source_sha": "a" * 40})
+    monkeypatch.setattr(migration, "inventory", lambda: {
+        "launchagent_loaded": True, "production_release_lock_busy": False, "active_inference": False,
+    })
+    monkeypatch.setattr(migration, "_launchagent_pid", lambda: (123, "gpoint_mac_worker.py watch"))
     monkeypatch.setattr(migration, "_read_live_runtime_queue_snapshot",
-                        lambda *_args, **_kwargs: pytest.fail("unconfirmed GSALES failure must fail closed"))
+                        lambda *_args, **_kwargs: live_snapshot)
 
     with pytest.raises(migration.PreflightFailure) as raised:
         migration._read_production_queue_status()
@@ -2163,7 +2492,11 @@ def _fresh_empty_queue_status(now):
     }
 
 
-def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("preserve_stopped_gsales", "paused_fingerprint_drift"), [
+    (False, False), (True, False), (True, True),
+])
+def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(
+        tmp_path, monkeypatch, preserve_stopped_gsales, paused_fingerprint_drift):
     root = tmp_path / "Library/Application Support/GPoint/agata-codex-worker"
     root.mkdir(parents=True)
     (root / "gpoint_mac_worker.py").write_text("existing V3 worker")
@@ -2189,8 +2522,16 @@ def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(t
     monkeypatch.setattr(migration, "inventory", lambda: {"production_release_lock_busy": False,
                                                             "launchagent_loaded": True,
                                                             "active_inference": False})
-    monkeypatch.setattr(migration, "_read_production_queue_status",
-                        lambda *_args, **_kwargs: _fresh_empty_queue_status(datetime.now(UTC)))
+    queue_status_calls = []
+    def queue_status(*_args, **_kwargs):
+        queue_status_calls.append(None)
+        value = _fresh_empty_queue_status(datetime.now(UTC))
+        if preserve_stopped_gsales:
+            value["lanes"]["GSALES"] = _stopped_gsales_status()["lanes"]["GSALES"]
+            if paused_fingerprint_drift and len(queue_status_calls) > 1:
+                value["lanes"]["GSALES"]["queue_snapshot_provenance"]["stopped_runtime_fingerprint"] = "b" * 64
+        return value
+    monkeypatch.setattr(migration, "_read_production_queue_status", queue_status)
     monkeypatch.setattr(migration, "_network_state_sha256", lambda: "unchanged")
     def stage(_manifest):
         release = tmp_path / "candidate-stage" / manifest["source_sha"]
@@ -2211,10 +2552,12 @@ def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(t
     monkeypatch.setattr(migration.os, "kill", lambda *_args: None)
     monkeypatch.setattr(migration, "_migrate_tenant_binding", lambda _manifest, _queue_status: None)
     status = {"configured_concurrency": 1, "lanes": {
-        "GPOINT": {"health": "HEALTHY"}, "GSALES": {"health": "HEALTHY"}, "LAB": {"state": "AVAILABLE"}}}
+        "GPOINT": {"health": "HEALTHY"},
+        "GSALES": {"health": "DEGRADED" if preserve_stopped_gsales else "HEALTHY"},
+        "LAB": {"state": "AVAILABLE"}}}
     monkeypatch.setattr(migration, "_health_check", lambda: status)
     restart = {"verification": "PASS", "adjudication": {"status": status}}
-    def kickstart(_sha):
+    def kickstart(_sha, stopped_gsales_baseline=None):
         worker_status = root / "status/worker-status.json"
         value = json.loads(worker_status.read_text())
         value["targets"] = {
@@ -2222,12 +2565,22 @@ def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(t
             "GSALES": {"last_poll_at": "after", "last_error_code": None},
         }
         worker_status.write_text(json.dumps(value))
-        return restart
+        result = json.loads(json.dumps(restart))
+        if stopped_gsales_baseline is not None:
+            result["adjudication"]["attempts"] = [{"stopped_gsales_proof": stopped_gsales_baseline}]
+        return result
     monkeypatch.setattr(migration, "_kickstart_and_verify", kickstart)
+    monkeypatch.setattr(migration, "_assert_stopped_gsales_proof_matches", lambda expected: expected)
     poll_baselines = []
-    def wait_for_polls(baseline):
+    def wait_for_polls(baseline, stopped_gsales_baseline=None):
         poll_baselines.append(baseline)
-        return {"passed": True}
+        if stopped_gsales_baseline is None:
+            return {"passed": True}
+        return {"passed": True, "stopped_gsales_proof": stopped_gsales_baseline,
+                "lanes": {"GPOINT": {"poll_advanced": True, "stale_error_cleared": True},
+                          "GSALES": {"poll_required": False,
+                                     "poll_status": "NOT_REQUIRED_INTENTIONALLY_STOPPED",
+                                     "stopped_proof_verified": True}}}
     monkeypatch.setattr(migration, "_wait_for_successful_polls", wait_for_polls)
     monkeypatch.setattr(migration, "launchctl_loaded", lambda: True)
     transition_events = []
@@ -2241,7 +2594,14 @@ def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(t
         return subprocess.CompletedProcess(command, 0)
     monkeypatch.setattr(migration.subprocess, "run", run)
 
-    result = migration.apply()
+    if paused_fingerprint_drift:
+        with pytest.raises(RuntimeError, match="stopped_gsales_preboot_fingerprint_changed"):
+            migration.apply(preserve_stopped_gsales=True)
+        assert not any(event[0] == "bootout" for event in transition_events)
+        assert not (root / "state/maintenance-stop").exists()
+        return
+
+    result = migration.apply(preserve_stopped_gsales=preserve_stopped_gsales)
 
     assert result["state"] == "COMPLETE"
     assert [event[0] for event in transition_events] == ["bootout", "unloaded", "bootstrap"]
@@ -2262,6 +2622,10 @@ def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(t
     assert (snapshot / "original-launchagent.plist").read_bytes() == old_plist
     assert plistlib.loads(plist.read_bytes())["ProgramArguments"] == [
         str(root / "runtime/current/run_codex_worker.sh"), "watch"]
+    if preserve_stopped_gsales:
+        assert result["gsales_runtime_mode"] == "INTENTIONALLY_STOPPED"
+        assert result["gsales_stopped_proof_before"]["stopped_runtime_fingerprint"] == "a" * 64
+        assert result["fresh_poll_check"]["lanes"]["GSALES"]["poll_required"] is False
 
 
 def test_prepare_stages_and_snapshots_without_stopping_or_switching_live_worker(tmp_path, monkeypatch):
@@ -2323,7 +2687,9 @@ def test_prepare_stages_and_snapshots_without_stopping_or_switching_live_worker(
      "inference_gate": "APPROVAL_REQUIRED"},
     {"state": "DISABLED", "inference_gate": "CLOSED_DISABLED"},
 ])
-def test_restart_snapshot_requires_exact_runtime_identity_and_all_lanes(tmp_path, monkeypatch, lab_status):
+@pytest.mark.parametrize("preserve_stopped_gsales", [False, True])
+def test_restart_snapshot_requires_exact_runtime_identity_and_all_lanes(
+        tmp_path, monkeypatch, lab_status, preserve_stopped_gsales):
     root = tmp_path / "AGATA Workers"
     source_sha = "c" * 40
     release = root / "runtime" / source_sha
@@ -2339,7 +2705,8 @@ def test_restart_snapshot_requires_exact_runtime_identity_and_all_lanes(tmp_path
         "configured_concurrency": 1, "current_job_present": False,
         "pool": {"state": "running"},
         "lanes": {"GPOINT": {"health": "HEALTHY", "current_job_present": False},
-                  "GSALES": {"health": "HEALTHY", "current_job_present": False},
+                  "GSALES": {"health": "DEGRADED" if preserve_stopped_gsales else "HEALTHY",
+                             "current_job_present": False},
                   "LAB": lab_status},
     }
 
@@ -2358,14 +2725,28 @@ def test_restart_snapshot_requires_exact_runtime_identity_and_all_lanes(tmp_path
     monkeypatch.setattr(migration.subprocess, "run", run)
     monkeypatch.setattr(migration.os, "kill", lambda _pid, _signal: None)
     monkeypatch.setattr(migration, "_running_inference_pids", lambda: [])
+    stopped_baseline = {
+        "state": "INTENTIONALLY_STOPPED", "source_id": "source",
+        "stopped_runtime_fingerprint": "a" * 64, "release_sha": "b" * 40,
+        "api_image_id": "sha256:" + "1" * 64, "core_image_id": "sha256:" + "2" * 64,
+        "tenant_id": "c4d67889-877e-4d1b-a8d8-597c479d638f",
+        "pending_jobs": 0, "running_jobs": 0,
+    }
+    if preserve_stopped_gsales:
+        monkeypatch.setattr(migration, "_assert_stopped_gsales_proof_matches",
+                            lambda expected: expected)
 
-    evidence = migration._restart_state_snapshot(expected_source_sha=source_sha)
+    evidence = migration._restart_state_snapshot(
+        expected_source_sha=source_sha,
+        stopped_gsales_baseline=stopped_baseline if preserve_stopped_gsales else None,
+    )
 
     assert evidence["passed"] is True
     assert all(evidence["checks"].values())
     assert evidence["pid"] == 4312
     assert evidence["runtime_source_sha"] == source_sha
     assert evidence["checks"]["lab_approval_fail_closed"] is True
+    assert ("gsales_intentionally_stopped" in evidence["checks"]) is preserve_stopped_gsales
     assert evidence["worker_status"]["configured_concurrency"] == 1
     assert set(evidence["worker_status"]["lanes"]) == {"GPOINT", "GSALES", "LAB"}
     if lab_status.get("presence"):
@@ -2685,6 +3066,128 @@ def test_successful_poll_gate_fails_closed_while_stale_lane_error_remains(tmp_pa
 
     assert result["passed"] is False
     assert result["lanes"]["GSALES"]["stale_error_cleared"] is False
+
+
+def test_stopped_gsales_apply_mode_requires_fresh_gpoint_poll_and_fresh_matching_stopped_proof(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(migration, "ROOT", tmp_path / "AGATA Workers")
+    status = migration.ROOT / "status/worker-status.json"
+    status.parent.mkdir(parents=True)
+    status.write_text(json.dumps({"targets": {
+        "GPOINT": {"last_poll_at": "2026-10-05T07:00:00+00:00", "last_error_code": None},
+        "GSALES": {"last_poll_at": "before", "last_error_code": "worker_target_unavailable"},
+    }}))
+    baseline = {"targets": {
+        "GPOINT": {"last_poll_at": "2026-10-05T06:59:00+00:00", "last_error_code": "worker_target_unavailable"},
+        "GSALES": {"last_poll_at": "before", "last_error_code": "worker_target_unavailable"},
+    }}
+    stopped = {"source_id": "live:gSales", "stopped_runtime_fingerprint": "a" * 64,
+               "release_sha": "b" * 40, "tenant_id": "c4d67889-877e-4d1b-a8d8-597c479d638f",
+               "api_image_id": "sha256:" + "1" * 64, "core_image_id": "sha256:" + "2" * 64,
+               "pending_jobs": 0, "running_jobs": 0, "state": "INTENTIONALLY_STOPPED"}
+    monkeypatch.setattr(migration, "_read_stopped_gsales_proof", lambda _expected: stopped)
+
+    result = migration._wait_for_successful_polls(baseline, deadline=0.01,
+                                                   stopped_gsales_baseline=stopped)
+
+    assert result["passed"] is True
+    assert result["lanes"]["GPOINT"]["poll_advanced"] is True
+    assert result["lanes"]["GSALES"] == {
+        "poll_required": False,
+        "poll_status": "NOT_REQUIRED_INTENTIONALLY_STOPPED",
+        "stopped_proof_verified": True,
+    }
+    assert result["stopped_gsales_proof"] == stopped
+
+
+def test_stopped_gsales_apply_mode_fails_when_gpoint_poll_does_not_advance(tmp_path, monkeypatch):
+    monkeypatch.setattr(migration, "ROOT", tmp_path / "AGATA Workers")
+    status = migration.ROOT / "status/worker-status.json"
+    status.parent.mkdir(parents=True)
+    status.write_text(json.dumps({"targets": {
+        "GPOINT": {"last_poll_at": "same", "last_error_code": None},
+        "GSALES": {"last_poll_at": "same", "last_error_code": "worker_target_unavailable"},
+    }}))
+    stopped = {"stopped_runtime_fingerprint": "a" * 64}
+    monkeypatch.setattr(migration, "_read_stopped_gsales_proof", lambda _expected: stopped)
+
+    result = migration._wait_for_successful_polls(
+        {"targets": {"GPOINT": {"last_poll_at": "same"}}}, deadline=0,
+        stopped_gsales_baseline=stopped)
+
+    assert result["passed"] is False
+
+
+def test_stopped_gsales_apply_mode_fails_on_post_restart_fingerprint_drift(monkeypatch):
+    expected = {"stopped_runtime_fingerprint": "a" * 64}
+    monkeypatch.setattr(migration, "_read_stopped_gsales_proof",
+                        lambda _expected: {"stopped_runtime_fingerprint": "b" * 64})
+
+    with pytest.raises(RuntimeError, match="stopped_gsales_fingerprint_changed"):
+        migration._assert_stopped_gsales_proof_matches(expected)
+
+
+def _stopped_gsales_status(now=None):
+    captured = now or datetime.now(UTC)
+    tenant_id = "c4d67889-877e-4d1b-a8d8-597c479d638f"
+    snapshot = _live_runtime_queue_snapshot("GSALES", captured)
+    snapshot.update({
+        "collector_mode": "stopped_runtime_ephemeral_v1",
+        "stopped_runtime_state": "INTENTIONALLY_STOPPED",
+        "stopped_runtime_fingerprint": "a" * 64,
+    })
+    normalized = migration.normalize_live_runtime_queue_snapshot(snapshot, "GSALES", tenant_id)
+    return {"lanes": {"GSALES": normalized}}
+
+
+def test_stopped_gsales_proof_binds_runtime_identity_and_readonly_queue_provenance():
+    proof = migration._stopped_gsales_proof(_stopped_gsales_status())
+
+    assert proof["state"] == "INTENTIONALLY_STOPPED"
+    assert proof["stopped_runtime_fingerprint"] == "a" * 64
+    assert proof["release_sha"] == "a" * 40
+    assert proof["tenant_id"] == "c4d67889-877e-4d1b-a8d8-597c479d638f"
+    assert proof["pending_jobs"] == proof["running_jobs"] == 0
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda lane: lane.update(health="HEALTHY"),
+    lambda lane: lane["queue_snapshot_provenance"].update(transaction_read_only=False),
+    lambda lane: lane["queue_snapshot_provenance"].update(role_bypassrls=True),
+    lambda lane: lane["queue_snapshot_provenance"].update(release_sha="d" * 40),
+    lambda lane: lane["queue_snapshot_provenance"].update(stopped_runtime_fingerprint="invalid"),
+    lambda lane: lane.update(pending_inference_jobs=1),
+])
+def test_stopped_gsales_proof_rejects_invalid_state_or_provenance(mutation):
+    status = _stopped_gsales_status()
+    mutation(status["lanes"]["GSALES"])
+
+    with pytest.raises(RuntimeError, match="stopped_gsales_proof_invalid"):
+        migration._stopped_gsales_proof(status)
+
+
+def test_stopped_gsales_proof_rejects_stale_snapshot():
+    stale = datetime.now(UTC) - timedelta(seconds=migration.QUEUE_SNAPSHOT_MAX_AGE_SECONDS + 1)
+
+    with pytest.raises(RuntimeError, match="stopped_gsales_proof_invalid"):
+        migration._stopped_gsales_proof(_stopped_gsales_status(stale))
+
+
+def test_full_apply_requires_explicit_stopped_gsales_optin_before_pause(tmp_path, monkeypatch):
+    monkeypatch.setattr(migration, "TRANSITION_LOCK", tmp_path / "transition.lock")
+    preflight = {
+        "manifest": {"source_sha": "a" * 40},
+        "queue_evidence": {},
+        "status": {"lanes": {"GSALES": {
+            "queue_snapshot_authority": "stopped_runtime_ephemeral_readonly_v1",
+        }}},
+    }
+    monkeypatch.setattr(migration, "_run_safety_preflight", lambda *_args, **_kwargs: preflight)
+    monkeypatch.setattr(migration, "_pause_idle_launchagent",
+                        lambda: pytest.fail("opt-in must be checked before pausing"))
+
+    with pytest.raises(RuntimeError, match="preserve_stopped_gsales_opt_in_required"):
+        migration.apply()
 
 
 def test_stage_runtime_uses_running_python312_when_missing_from_path(tmp_path, monkeypatch):
