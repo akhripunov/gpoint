@@ -320,16 +320,16 @@ export function releaseStateAfterError({ switched, runtimeVerified = false }) {
   return runtimeVerified ? 'INSTALLATION_UNCONFIRMED' : 'INSTALLATION_UNCONFIRMED';
 }
 
-export function classifyReleaseFailure({ switchStarted = false, migrationStarted = false, agataStartStarted = false }) {
+export function classifyReleaseFailure({ switchStarted = false, migrationStarted = false, agataStartStarted = false, runtimePauseStarted = false }) {
   const switched = switchStarted;
-  const partiallyMutated = migrationStarted || agataStartStarted;
+  const partiallyMutated = migrationStarted || agataStartStarted || runtimePauseStarted;
   return {
     switched,
     partiallyMutated,
     releaseState: switched || partiallyMutated
       ? 'INSTALLATION_UNCONFIRMED'
       : releaseStateAfterError({ switched, runtimeVerified: false }),
-    failureStage: switched ? 'POST_SWITCH' : partiallyMutated ? 'PRE_SWITCH_DB_OR_AGATA' : 'PRE_SWITCH',
+    failureStage: switched ? 'POST_SWITCH' : runtimePauseStarted ? 'PRE_SWITCH_RUNTIME_PAUSED' : partiallyMutated ? 'PRE_SWITCH_DB_OR_AGATA' : 'PRE_SWITCH',
   };
 }
 
@@ -1157,6 +1157,7 @@ async function runApply(candidate) {
   const current = state();
   let switchStarted = false;
   let migrationStarted = false;
+  let runtimePauseStarted = false;
   let agataStartStarted = false;
   let validatedProvider = null;
   const stageTimings = {};
@@ -1197,6 +1198,7 @@ async function runApply(candidate) {
       gsalesReadiness,
       onBeforeMutation: boundary => recheckTaskAuthorizationBeforeMutation(candidate, boundary),
       onMigrationStart: () => { migrationStarted = true; },
+      onRuntimePauseStart: () => { runtimePauseStarted = true; },
       onAgataStart: () => { agataStartStarted = true; },
       onSwitchStart: () => { switchStarted = true; },
     });
@@ -1276,7 +1278,7 @@ async function runApply(candidate) {
     fs.writeFileSync(STATE_FILE, `${JSON.stringify({ ...verifiedState, currentProductionRef: null, previousProductionSha: current.currentProductionSha, lastReleaseId: releaseId, lastReleaseStatus: 'COMPLETE', lastReleaseCompletedAt: manifest.finishedAt, ...readiness, gsalesDbHead: adapter.gsalesIdentity.migrationHead, gsalesMigrationSha256: adapter.gsalesIdentity.migrationSha256, releaseOrigin: 'github-deployment', agataRuntimeSha: candidate, agataAlembicHead: adapter.agataIdentity.head, agataProvider: adapter.agataIdentity.provider, artifactIdentities: manifest.artifactIdentities, ...(componentImages ? { componentImages } : {}), miniappSourceSha: candidate }, null, 2)}\n`);
     console.log(JSON.stringify({ status: 'COMPLETE', ...readiness, releaseId, candidateSha: candidate, productionRef: null, manifest: path.relative(ROOT, file) }, null, 2));
   } catch (error) {
-    const failure = classifyReleaseFailure({ switchStarted, migrationStarted, agataStartStarted });
+    const failure = classifyReleaseFailure({ switchStarted, migrationStarted, agataStartStarted, runtimePauseStarted });
     const { switched, partiallyMutated, releaseState } = failure;
     const failureManifest = {
       releaseId,

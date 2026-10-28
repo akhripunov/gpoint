@@ -592,6 +592,25 @@ export function runAuthorizedMutationPlan({preflightCommand, mutations, onBefore
   return outputs.join('\n');
 }
 
+export function gpointMigrationMutationSteps({prismaMigration, agataMigration,
+  onMigrationStart = () => {}, onRuntimePauseStart = () => {}}) {
+  // agata0012 is forward-only, and the new AGATA consent protocol cannot
+  // safely serve the old Core. Keep all old consumers and request handlers
+  // stopped from before migration until the existing candidate startup steps.
+  const containers = 'compose-bot-1 compose-api-1 compose-worker-1 compose-agata-memory-worker-1 compose-agata-api-1';
+  const pause = `set -e; docker stop --time 30 ${containers}; for container in ${containers}; do test "$(docker inspect "$container" --format '{{.State.Running}}')" = false; done; echo GPOINT_MIGRATION_RUNTIME_PAUSED=PASS`;
+  return [
+    {boundary: 'gpoint-runtime-pause', command: pause, shouldRun: () => true,
+      afterAuthorization: onRuntimePauseStart},
+    {boundary: 'prisma-migration', command: prismaMigration,
+      shouldRun: output => migrationPendingFromPreflight(output, 'PRISMA'),
+      skippedOutput: 'PRISMA_NO_PENDING_MIGRATIONS', afterAuthorization: onMigrationStart},
+    {boundary: 'agata-migration', command: agataMigration,
+      shouldRun: output => migrationPendingFromPreflight(output, 'AGATA'),
+      skippedOutput: 'AGATA_NO_PENDING_MIGRATIONS', afterAuthorization: onMigrationStart},
+  ];
+}
+
 export function productionPreflightCommand() {
   return `set -e; command -v docker >/dev/null; docker version --format 'DOCKER_VERSION={{.Server.Version}}'; docker compose version; docker buildx version; docker buildx inspect >/dev/null; freeKb=$(df -Pk / | awk 'NR==2 {print $4}'); test -n "$freeKb"; test "$freeKb" -ge 5242880; test -r /opt/gpoint/env/production.env; currentSha=$(sed -n 's/^RELEASE_SHA=//p' /opt/gpoint/env/production.env | head -1); printf '%s\\n' "$currentSha" | grep -Eq '^[0-9a-f]{40}$'; currentImage=$(docker inspect compose-api-1 --format '{{.Config.Image}}'); dbStatus=$(docker run --rm ${databaseNetworkArgs('gpoint-preflight')} --env-file /opt/gpoint/env/production.env "$currentImage" pnpm --filter @gpoint/db exec prisma migrate status 2>&1); test -n "$dbStatus"; printf '%s\\n' "$dbStatus" | tail -5; for name in AGATA_ENABLED AGATA_LLM_PROVIDER AGATA_DATABASE_URL AGATA_TENANT_ID AGATA_INTERNAL_API_TOKEN AGATA_MESSAGE_AEAD_KEY AGATA_REQUEST_FINGERPRINT_HMAC_KEY AGATA_RETRIEVAL_QUERY_HMAC_KEY AGATA_RESPONSE_FINGERPRINT_HMAC_KEY AGATA_SHADOW_CANDIDATE_HMAC_KEY; do grep -Eq "^$name=.+\\$" /opt/gpoint/env/production.env || { echo AGATA_CONFIG_MISSING=$name; exit 32; }; done; grep -qx 'AGATA_ENABLED=true' /opt/gpoint/env/production.env; provider=$(sed -n 's/^AGATA_LLM_PROVIDER=//p' /opt/gpoint/env/production.env | head -1); case "$provider" in disabled) grep -qx 'AGATA_CODEX_LOCAL_ENABLED=false' /opt/gpoint/env/production.env && ! grep -Eq '^AGATA_LLM_API_KEY=.+$' /opt/gpoint/env/production.env ;; mac_worker) grep -qx 'AGATA_CODEX_LOCAL_ENABLED=true' /opt/gpoint/env/production.env && grep -Eq '^GPOINT_AGATA_WORKER_TOKEN=.+$' /opt/gpoint/env/production.env ;; *) echo AGATA_PROVIDER_UNSUPPORTED; exit 32 ;; esac; printf 'GPOINT_PREFLIGHT_OK\\n'`;
 }
@@ -609,7 +628,7 @@ export function agataProviderRuntimeCommand(provider) {
   return `set -e; actualProvider=$(docker exec compose-agata-api-1 python -c "from app.config import get_settings; print(get_settings().llm_provider)"); localEnabled=$(docker exec compose-agata-api-1 python -c "from app.config import get_settings; print(str(get_settings().codex_local_enabled).lower())"); tokenPresent=$(docker exec compose-agata-api-1 sh -c 'test -n "$GPOINT_AGATA_WORKER_TOKEN" && printf YES || printf NO'); printf 'AGATA_PROVIDER=%s AGATA_CODEX_LOCAL_ENABLED=%s AGATA_WORKER_TOKEN_PRESENT=%s\\n' "$actualProvider" "$localEnabled" "$tokenPresent"`;
 }
 
-export function applyCandidate(sha, { retentionPlan = { removableShas: [], removableCacheIds: [] }, provider = 'disabled', imageTransport: requestedImageTransport = process.env.IMAGE_TRANSPORT || 'prepared', ghcrReadToken = '', gsalesBaselineFacts, gsalesReadiness, onBeforeMutation = () => {}, onMigrationStart = () => {}, onAgataStart = () => {}, onSwitchStart = () => {} } = {}) {
+export function applyCandidate(sha, { retentionPlan = { removableShas: [], removableCacheIds: [] }, provider = 'disabled', imageTransport: requestedImageTransport = process.env.IMAGE_TRANSPORT || 'prepared', ghcrReadToken = '', gsalesBaselineFacts, gsalesReadiness, onBeforeMutation = () => {}, onMigrationStart = () => {}, onRuntimePauseStart = () => {}, onAgataStart = () => {}, onSwitchStart = () => {} } = {}) {
   if (!['disabled', 'mac_worker'].includes(provider)) throw new Error(`unsupported AGATA provider: ${provider}`);
   const bundle = process.env.GPOINT_RELEASE_BUNDLE ? verifyReleaseBundle(process.env.GPOINT_RELEASE_BUNDLE, sha) : null;
   if (!bundle) throw new Error('verified immutable CI release bundle is required; application images are never rebuilt during apply');
@@ -704,14 +723,9 @@ export function applyCandidate(sha, { retentionPlan = { removableShas: [], remov
       const agataVerification = `agataAfter=$(printf '%s' '${agataStatusB64}' | base64 -d | docker run --rm -i ${databaseNetworkArgs('gpoint-agata-verify')} --env-file /opt/gpoint/env/production.env --env-file /opt/gpoint/env/migration.env gpoint-agata-runtime:${sha} python -); printf '%s\\n' "$agataAfter"; printf '%s' "$agataAfter" | grep -qx 'AGATA_HEAD=${agataMigrations.head}'`;
       const migrationOutput = runAuthorizedMutationPlan({
         preflightCommand: migrationPreflight,
-        mutations: [
-          {boundary: 'prisma-migration', command: prismaMigration,
-            shouldRun: output => migrationPendingFromPreflight(output, 'PRISMA'),
-            skippedOutput: 'PRISMA_NO_PENDING_MIGRATIONS', afterAuthorization: onMigrationStart},
-          {boundary: 'agata-migration', command: `${agataMigration}; ${agataVerification}`,
-            shouldRun: output => migrationPendingFromPreflight(output, 'AGATA'),
-            skippedOutput: 'AGATA_NO_PENDING_MIGRATIONS', afterAuthorization: onMigrationStart},
-        ],
+        mutations: gpointMigrationMutationSteps({prismaMigration,
+          agataMigration: `${agataMigration}; ${agataVerification}`,
+          onMigrationStart, onRuntimePauseStart}),
         onBeforeMutation,
         run,
       });

@@ -51,6 +51,26 @@ test('permanent lifecycle backs up the existing eros database and gates stock mi
   assert.match(code,/EROS_PRODUCTION_TEST_USER_IDS/);
 });
 
+test('one-shot model verifier and Eros migrator failures stop the permanent start sequence', () => {
+  const command = erosStartCommand(sha);
+  const oneShotCommands = [...command.matchAll(
+    /((?:RELEASE_SHA=[a-f0-9]{40} )?[^;]*docker compose[^;]* up --no-deps(?: --exit-code-from [a-z0-9-]+)? (eros-model-verify|eros-migrate));/g,
+  )];
+  assert.deepEqual(oneShotCommands.map(([, , service]) => service), ['eros-model-verify', 'eros-migrate']);
+
+  for (const [, composeCommand, service] of oneShotCommands) {
+    // Models the observed Compose v5.6.0 contract: without --exit-code-from,
+    // `up` reports success for a failing one-shot container.
+    const script = `set -eu\n` +
+      `docker() { case " $* " in *" --exit-code-from ${service} "*) return 23 ;; *) return 0 ;; esac; }\n` +
+      `${composeCommand}\n` +
+      `printf 'FOLLOWING_STAGE_REACHED service=${service}\\n'\n`;
+    const result = spawnSync('bash', ['-c', script], {encoding: 'utf8'});
+    assert.equal(result.status, 23, `${service} failure must reach the shell: ${result.stderr}`);
+    assert.doesNotMatch(result.stdout, /FOLLOWING_STAGE_REACHED/);
+  }
+});
+
 // Run the emitted shell gate with Docker as the only external boundary.
 // Stock Eros carries an upstream revision and a separate GPoint integration revision.
 function runStockImageRevisionGate(upstream, integration) {

@@ -1,15 +1,94 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import {spawnSync} from 'node:child_process';
 import {runRemoteShaList, remoteProof, classifyReleaseFailure, evaluateSafetyGates,
   checkArtifactParity, checkEffectiveConfig, checkAgataArtifactParity, checkGsalesArtifactParity,
   currentApplyDeploymentContext, loadV5ParentDeployEvidence,
 } from './release-gpoint.mjs';
 import {validateAgataRuntimeIdentity, planReleaseRetention, validateRuntimeIdentity,
-  inspectAgataMigrationReadiness, parseGuardedMigrationEvidence} from './release-gpoint-vps-adapter.mjs';
+  inspectAgataMigrationReadiness, parseGuardedMigrationEvidence,
+  gpointMigrationMutationSteps, runAuthorizedMutationPlan} from './release-gpoint-vps-adapter.mjs';
 import {ReconciliationGateError} from './reconcile-deployment.mjs';
 
 const sha = 'a'.repeat(40);
+
+test('failed runtime pause is a partial Apply requiring reconciliation', () => {
+  const failure = classifyReleaseFailure({runtimePauseStarted: true});
+  assert.equal(failure.releaseState, 'INSTALLATION_UNCONFIRMED');
+  assert.equal(failure.switched, false);
+  assert.equal(failure.partiallyMutated, true);
+});
+
+test('GPoint migration plan pauses the old runtime after backup and before either migration', () => {
+  const calls = [];
+  const mutations = gpointMigrationMutationSteps({prismaMigration: 'prisma-deploy',
+    agataMigration: 'agata-upgrade-and-verify',
+    onRuntimePauseStart: () => calls.push('pause-started'),
+    onMigrationStart: () => calls.push('migration-started')});
+  runAuthorizedMutationPlan({preflightCommand: 'backup-and-readiness', mutations,
+    onBeforeMutation: boundary => calls.push(boundary),
+    run: command => { calls.push(command); return 'PRISMA_PENDING_MIGRATIONS\nAGATA_PENDING_MIGRATIONS'; }});
+  const pause = mutations[0].command;
+  assert.ok(calls.indexOf('backup-and-readiness') < calls.indexOf(pause));
+  assert.ok(calls.indexOf(pause) < calls.indexOf('prisma-deploy'));
+  assert.ok(calls.indexOf('prisma-deploy') < calls.indexOf('agata-upgrade-and-verify'));
+  assert.ok(calls.indexOf('gpoint-runtime-pause') < calls.indexOf('pause-started'));
+  assert.ok(calls.indexOf('pause-started') < calls.indexOf(pause));
+  assert.doesNotMatch(pause, /gsales|shared_postgres|shared_redis|caddy/);
+});
+
+for (const failureAt of ['backup-and-readiness', 'pause', 'authorization']) {
+  test(`migration plan performs no migrations after ${failureAt} failure`, () => {
+    const calls = [];
+    const mutations = gpointMigrationMutationSteps({prismaMigration: 'prisma-deploy',
+      agataMigration: 'agata-upgrade-and-verify'});
+    assert.throws(() => runAuthorizedMutationPlan({preflightCommand: 'backup-and-readiness', mutations,
+      onBeforeMutation: () => { if (failureAt === 'authorization') throw Error('denied'); },
+      run: command => {
+        calls.push(command);
+        if (command === 'backup-and-readiness' && failureAt !== 'backup-and-readiness')
+          return 'PRISMA_PENDING_MIGRATIONS\nAGATA_PENDING_MIGRATIONS';
+        throw Error('boundary failure');
+      }}));
+    assert.ok(!calls.includes('prisma-deploy'));
+    assert.ok(!calls.includes('agata-upgrade-and-verify'));
+    if (failureAt !== 'pause') assert.equal(calls.length, 1);
+  });
+}
+
+test('old Core and AGATA are paused even when database heads already match', () => {
+  const mutations = gpointMigrationMutationSteps({prismaMigration: 'prisma-deploy',
+    agataMigration: 'agata-upgrade-and-verify'});
+  const calls = [];
+  runAuthorizedMutationPlan({preflightCommand: 'backup-and-readiness', mutations,
+    onBeforeMutation: () => {}, run: command => {
+      calls.push(command); return 'PRISMA_NO_PENDING_MIGRATIONS\nAGATA_NO_PENDING_MIGRATIONS';
+    }});
+  assert.deepEqual(calls, ['backup-and-readiness', mutations[0].command]);
+});
+
+test('runtime pause verifies every old GPoint container stopped and rejects a still-running service', () => {
+  const command = gpointMigrationMutationSteps({prismaMigration: 'prisma', agataMigration: 'agata'})[0].command;
+  for (const stillRunning of ['false', 'true']) {
+    const result = spawnSync('bash', ['-eu', '-c', `
+      docker() {
+        case "$1" in
+          stop) printf 'STOPPED=%s\\n' "$*" ;;
+          inspect) printf '%s\\n' "$TEST_STILL_RUNNING" ;;
+          *) return 97 ;;
+        esac
+      }
+      ${command}
+    `], {encoding: 'utf8', env: {...process.env, TEST_STILL_RUNNING: stillRunning}});
+    assert.equal(result.status === 0, stillRunning === 'false', result.stderr);
+    if (stillRunning === 'false') {
+      assert.match(result.stdout, /GPOINT_MIGRATION_RUNTIME_PAUSED=PASS/);
+      for (const name of ['api', 'worker', 'bot', 'agata-api', 'agata-memory-worker'])
+        assert.ok(result.stdout.includes(`compose-${name}-1`));
+    } else assert.doesNotMatch(result.stdout, /GPOINT_MIGRATION_RUNTIME_PAUSED=PASS/);
+  }
+});
 const artifacts = Object.fromEntries(['api', 'worker', 'bot', 'miniapp', 'agataApi', 'agataWorker', 'gsalesApi']
   .map(key => [key, {sourceSha: sha}]));
 const config = {api: sha, worker: sha, bot: sha, miniapp: sha, agataApi: sha, agataWorker: sha,
