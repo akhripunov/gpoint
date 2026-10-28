@@ -47,11 +47,16 @@ path available until the Kamal production Verify has passed.
       and any application state. Match every persistent mount to its intended
       Kamal role. Do not remove or rename volumes during this cutover.
 - [ ] Take a new encrypted backup of every affected database and required
-      persistent data. Record checksums and retention location outside the
-      repository. Restore it into an isolated disposable environment and run
-      schema, migration-head, application-read, and media checks there.
+      persistent data, including the complete `/opt/gpoint/media` bind mount.
+      Record checksums and retention location outside the repository. Restore
+      database and media separately into isolated disposable environments.
+      Verify the restored database's schema/table inventory and Prisma/AGATA
+      migration heads; compare the media path, file content, mode, UID/GID, and
+      directory entries against the source manifest. Candidate application
+      API reads and media read/write probes remain part of post-deploy Verify,
+      before consumers start.
 
-  The automated GPoint database gate requires the protected GitHub Actions
+  The automated GPoint database and media gate requires the protected GitHub Actions
   secrets `GPOINT_KAMAL_BACKUP_AGE_RECIPIENT` (the public age recipient) and
   `GPOINT_KAMAL_BACKUP_OFFSITE_REMOTE` (an attempt-scoped rclone remote path).
   On the production host, provision `age`/`age-keygen`, `rclone`, the matching
@@ -60,8 +65,18 @@ path available until the Kamal production Verify has passed.
   The identity is checked against the public recipient before backup. The
   plaintext custom archive and downloaded offsite copy live only in the
   `/run` tmpfs attempt directory and are removed after the isolated restore;
-  `/opt/gpoint/backups` retains only the encrypted `.dump.age` object. Missing
-  configuration or failed upload/readback/restore stops the cutover.
+  `/opt/gpoint/backups` retains only encrypted `.dump.age` and `.media.tar.age`
+  objects for the exact attempt. Missing
+  configuration or failed upload/readback/restore stops the cutover. The
+  media tree is streamed directly through `age` into a separate encrypted
+  attempt-scoped archive (no persistent plaintext media archive); `rclone
+  check --download` and a streamed offsite checksum verify readback. Restore
+  occurs into a private disposable Docker-root directory and compares every
+  file's SHA-256, size, mode, UID/GID, and directory entry to a private source
+  manifest. Symlinks and special files fail closed. The source tree is checked
+  again after restore and immediately after the inventoried application
+  consumers stop; any content change triggers the existing pre-deploy Compose
+  recovery trap before Caddy stops.
 - [ ] Compare the candidate migrations with the live migration heads and the
       isolated restore. Stop if an old application cannot read data after the
       candidate migration or if restore evidence is incomplete.

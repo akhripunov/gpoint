@@ -36,6 +36,10 @@ def parser() -> argparse.ArgumentParser:
                  "restore-sha", "agata-candidate-head", "agata-live-head", "postgres-system-identifier",
                  "network-fingerprint", "db-container-id", "redis-container-id"):
         result.add_argument(f"--{name}")
+    for name in ("media-backup-path", "media-backup-sha", "media-source-manifest-sha",
+                 "media-restore-manifest-sha", "media-file-count", "media-directory-count",
+                 "media-total-bytes", "media-backup-bytes"):
+        result.add_argument(f"--{name}")
     result.add_argument("--public-routes-verified", action="store_true")
     result.add_argument("--migration-parity-verified", action="store_true")
     return result
@@ -47,11 +51,14 @@ def main() -> int:
         raise SystemExit("candidate SHA must be 40 lowercase hex characters")
     if args.mode == "cutover":
         required = ("baseline_path", "inventory_path", "backup_path", "restore_path",
-                    "agata_candidate_head", "agata_live_head", "postgres_system_identifier")
+                    "agata_candidate_head", "agata_live_head", "postgres_system_identifier",
+                    "media_backup_path", "media_file_count", "media_directory_count", "media_total_bytes",
+                    "media_backup_bytes")
         missing = [field.replace("_", " ") for field in required if not getattr(args, field)]
         if missing:
             raise SystemExit("cutover manifest is missing: " + ", ".join(missing))
-        for field in ("baseline_sha", "inventory_sha", "backup_sha", "restore_sha", "network_fingerprint"):
+        for field in ("baseline_sha", "inventory_sha", "backup_sha", "restore_sha", "network_fingerprint",
+                      "media_backup_sha", "media_source_manifest_sha", "media_restore_manifest_sha"):
             if not SHA256.fullmatch(getattr(args, field) or ""):
                 raise SystemExit(f"{field.replace('_', ' ')} must be a SHA-256 hex digest")
     else:
@@ -64,6 +71,19 @@ def main() -> int:
             raise SystemExit(f"{field.replace('_', ' ')} must be a positive integer")
     if args.version != f"{args.sha}-{args.run_id}-{args.attempt}":
         raise SystemExit("attempt tag does not match the exact candidate SHA and workflow attempt")
+    if args.mode == "cutover":
+        expected_media_path = (f"/opt/gpoint/backups/gpoint-pre-release-{args.sha}-"
+                               f"{args.run_id}-{args.attempt}.media.tar.age")
+        if args.media_backup_path != expected_media_path:
+            raise SystemExit("media backup path does not match the exact cutover attempt")
+        if args.media_source_manifest_sha != args.media_restore_manifest_sha:
+            raise SystemExit("restored media manifest does not match the source tree")
+        for field in ("media_file_count", "media_directory_count", "media_total_bytes", "media_backup_bytes"):
+            value = getattr(args, field)
+            if not value.isdigit():
+                raise SystemExit(f"{field.replace('_', ' ')} must be a nonnegative integer")
+        if int(args.media_backup_bytes) <= 0:
+            raise SystemExit("media backup bytes must be positive")
     for field in ("app_digest", "agata_digest", "miniapp_digest"):
         if not OCI_DIGEST.fullmatch(getattr(args, field)):
             raise SystemExit(f"{field.replace('_', ' ')} must be an immutable OCI digest")
@@ -188,12 +208,21 @@ def main() -> int:
                                 "encryption": "age-x25519", "offsiteRestore": "PASS"},
             "isolatedRestore": {"path": args.restore_path, "sha256": args.restore_sha,
                                 "result": "PASS"},
+            "mediaBackup": {"path": args.media_backup_path, "sha256": args.media_backup_sha,
+                            "bytes": int(args.media_backup_bytes), "encryption": "age-x25519", "offsiteRestore": "PASS",
+                            "fileCount": int(args.media_file_count),
+                            "directoryCount": int(args.media_directory_count),
+                            "totalBytes": int(args.media_total_bytes),
+                            "sourceManifestSha256": args.media_source_manifest_sha,
+                            "restoredManifestSha256": args.media_restore_manifest_sha},
+            "mediaRestore": {"result": "PASS", "manifestSha256": args.media_restore_manifest_sha},
         } if args.mode == "cutover" else {
             "publicRoutes": "PASS", "migrationParity": "PASS",
         }),
         "preservation": ({
             "postgresSystemIdentifier": args.postgres_system_identifier,
             "erosNetworkFingerprint": args.network_fingerprint,
+            "persistentMediaBackupAndRestore": "PASS",
             "gsales": "STOPPED",
             "databaseMigrationsAppliedByCutover": False,
         } if args.mode == "cutover" else ordinary_preservation),
@@ -206,6 +235,7 @@ def main() -> int:
         "verified": ([
             "public-api-health", "public-miniapp-routes", "exact-image-digests-and-git-sha",
             "service-health", "media-read-write", "worker-bot-singletons",
+            "media-backup-offsite-readback-and-isolated-restore",
             "postgres-eros-caddy-preservation", "migration-heads", "gsales-stopped",
         ] if args.mode == "cutover" else [
             "public-api-health", "public-media-route", "public-miniapp-routes",

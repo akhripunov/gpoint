@@ -341,22 +341,27 @@ def test_kamal_success_requires_database_media_consumer_and_eros_readback():
 def test_first_cutover_stops_only_freshly_inventoried_legacy_services_after_restore():
     workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
-    assert "name: Verify fresh PostgreSQL backup with isolated restore" in deploy
+    assert "name: Verify fresh PostgreSQL and media backup with isolated restore" in deploy
     assert deploy.index("name: Capture PostgreSQL and Eros cutover baseline") < deploy.index(
-        "name: Verify fresh PostgreSQL backup with isolated restore"
+        "name: Verify fresh PostgreSQL and media backup with isolated restore"
     ) < deploy.index("name: Pause legacy GPoint services after restore gates")
-    backup_step = deploy.split("name: Verify fresh PostgreSQL backup with isolated restore", 1)[1].split(
+    backup_step = deploy.split("name: Verify fresh PostgreSQL and media backup with isolated restore", 1)[1].split(
         "name: Pause legacy GPoint services", 1
     )[0]
     assert "scripts/verify-gpoint-backup-restore.sh" in backup_step
     assert "backup_sha256" in backup_step
     assert "GPOINT_ISOLATED_RESTORE=PASS" in backup_step
+    assert "GPOINT_MEDIA_BACKUP=PASS" in backup_step
+    assert "GPOINT_MEDIA_ISOLATED_RESTORE=PASS" in backup_step
     verify = deploy.split("name: Verify public routes and exact running services", 1)[1].split(
         "name: Record GitHub Deployment result", 1
     )[0]
     assert "BACKUP_PATH: ${{ steps.backuprestore.outputs.backup_path }}" in verify
     assert "BACKUP_SHA: ${{ steps.backuprestore.outputs.backup_sha256 }}" in verify
     assert "ISOLATED_RESTORE=PASS" in verify
+    assert "MEDIA_BACKUP_SHA" in verify and "MEDIA_SOURCE_MANIFEST_SHA" in verify
+    assert "MEDIA_RESTORE_MANIFEST_SHA" in verify
+    assert "MEDIA_ISOLATED_RESTORE=PASS" in verify
     helper = (ROOT / "scripts/verify-gpoint-backup-restore.sh").read_text()
     assert "--network none" in helper
     assert "pg_restore --exit-on-error" in helper
@@ -384,7 +389,7 @@ def test_first_cutover_stops_only_freshly_inventoried_legacy_services_after_rest
 def test_cutover_helper_uses_snapshot_bound_graceful_stop_and_pre_deploy_recovery():
     workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
-    assert deploy.index("name: Verify fresh PostgreSQL backup with isolated restore") < deploy.index(
+    assert deploy.index("name: Verify fresh PostgreSQL and media backup with isolated restore") < deploy.index(
         "name: Create exact-SHA in-progress GitHub Deployment"
     ) < deploy.index("name: Pause legacy GPoint services after restore gates") < deploy.index(
         "name: Deploy request-serving Kamal roles"
@@ -419,7 +424,7 @@ def test_cutover_helper_uses_snapshot_bound_graceful_stop_and_pre_deploy_recover
 def test_cutover_backup_is_encrypted_offsite_and_restore_reads_ciphertext_only():
     workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
-    backup_step = deploy.split("name: Verify fresh PostgreSQL backup with isolated restore", 1)[1].split(
+    backup_step = deploy.split("name: Verify fresh PostgreSQL and media backup with isolated restore", 1)[1].split(
         "name: Create exact-SHA in-progress GitHub Deployment", 1
     )[0]
     assert "GPOINT_KAMAL_BACKUP_AGE_RECIPIENT" in backup_step
@@ -433,6 +438,17 @@ def test_cutover_backup_is_encrypted_offsite_and_restore_reads_ciphertext_only()
     assert 'age -d -i "$age_identity" "$offsite_copy"' in helper
     assert ".dump.age" in helper
     assert 'pg_restore --exit-on-error --no-owner -U gpoint_restore_admin -d gpoint \\\n  < "$backup_file"' not in helper
+
+
+def test_legacy_pause_rechecks_media_after_stopping_consumers_and_recovers_on_mismatch():
+    pause = (ROOT / "scripts/pause-legacy-gpoint.sh").read_text()
+    stop_loop = pause.index('for service in "${stop_order[@]}"; do')
+    media_recheck = pause.index('media_manifest_output="$(python3 "$media_tree_helper" manifest')
+    complete = pause.index("cutover_complete=1")
+    assert stop_loop < media_recheck < complete
+    assert 'test "$(sed -n \'s/^GPOINT_MEDIA_MANIFEST_SHA256=//p\' <<< "$media_manifest_output")" = "$media_manifest_sha"' in pause
+    assert 'if [[ "$status" -ne 0 && "$cutover_complete" -ne 1 ]]; then' in pause
+    assert "restore_legacy_services" in pause
 
 
 def test_cutover_backup_cli_can_write_plaintext_into_explicit_tmpfs_directory():
@@ -535,6 +551,7 @@ def test_kamal_production_verify_persists_attempt_bound_manifest():
     assert 'description="Kamal $state SHA $CANDIDATE_SHA manifest $MANIFEST_SHA"' in record
     assert '"runtimeServices"' in manifest_writer
     assert '"containerId"' in manifest_writer and '"repositoryDigest"' in manifest_writer
+    assert '"mediaBackup"' in manifest_writer and '"mediaRestore"' in manifest_writer
 
 
 def test_manifest_writer_behavior_tests_run_in_python_ci():

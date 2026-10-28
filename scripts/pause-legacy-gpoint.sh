@@ -6,12 +6,17 @@ run_id="${2:?GitHub run id required}"
 attempt="${3:?GitHub run attempt required}"
 baseline_file="${4:?cutover baseline required}"
 baseline_sha="${5:?baseline checksum required}"
+media_manifest_sha="${6:?source media manifest SHA-256 required}"
+media_tree_helper="${7:?media tree manifest helper required}"
 
 [[ "$candidate" =~ ^[0-9a-f]{40}$ ]]
 [[ "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
 [[ "$baseline_sha" =~ ^[0-9a-f]{64}$ ]]
+[[ "$media_manifest_sha" =~ ^[0-9a-f]{64}$ ]]
 [[ "$baseline_file" == "/opt/gpoint/release-logs/${candidate}/kamal-cutover-baseline-${run_id}-${attempt}.txt" ]]
+[[ "$media_tree_helper" == "/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/media-tree.py" ]]
 test -s "$baseline_file"
+test -s "$media_tree_helper"
 test "$(sha256sum "$baseline_file" | awk '{print $1}')" = "$baseline_sha"
 
 baseline_value() {
@@ -100,6 +105,7 @@ for row in "${service_rows[@]}"; do
 done
 
 cutover_complete=0
+media_manifest_file=""
 restore_legacy_services() {
   local service id
   for service in "${restart_order[@]}"; do
@@ -111,6 +117,8 @@ restore_legacy_services() {
 on_exit() {
   local status=$?
   trap - EXIT
+  if [[ -n "$media_manifest_file" ]]; then rm -f -- "$media_manifest_file"; fi
+  rm -f -- "$media_tree_helper"
   if [[ "$status" -ne 0 && "$cutover_complete" -ne 1 ]]; then
     restore_legacy_services
   fi
@@ -136,6 +144,16 @@ for service in gsales-api gsales-agata-api gsales-agata-memory-worker; do
     test "$(docker inspect --format '{{.State.Running}}' "$id")" = false
   done <<< "$ids"
 done
+
+# Recheck the backed-up tree after legacy API consumers are quiesced. If media
+# changed during the offsite backup/restore window, the EXIT trap restarts every
+# legacy consumer this helper stopped and the cutover fails before Caddy stops.
+media_manifest_file="/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/media-quiesced.json"
+test ! -e "$media_manifest_file"
+media_manifest_output="$(python3 "$media_tree_helper" manifest --root /opt/gpoint/media --output "$media_manifest_file")"
+grep -qx 'GPOINT_MEDIA_MANIFEST=PASS' <<< "$media_manifest_output"
+test "$(sed -n 's/^GPOINT_MEDIA_MANIFEST_SHA256=//p' <<< "$media_manifest_output")" = "$media_manifest_sha"
+echo 'GPOINT_MEDIA_QUIESCED_TREE_MATCH=PASS'
 
 cutover_complete=1
 echo 'GPOINT_LEGACY_CONSUMERS_PAUSED=PASS'

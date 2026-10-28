@@ -591,7 +591,7 @@ jobs:
             --agata-directory services/agata/migrations/versions \
             --agata-current-head "$AGATA_HEAD"
           echo 'Verified no candidate database migrations are pending; cutover uses an unchanged schema.' >> "$GITHUB_STEP_SUMMARY"
-      - name: Verify fresh PostgreSQL backup with isolated restore
+      - name: Verify fresh PostgreSQL and media backup with isolated restore
         if: inputs.mode == 'cutover'
         id: backuprestore
         env:
@@ -612,6 +612,7 @@ jobs:
           remote_script_dir="/run/gpoint-kamal/${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           remote_backup_helper="${remote_script_dir}/backup.py"
           remote_restore_script="${remote_script_dir}/restore.sh"
+          remote_media_tree_helper="${remote_script_dir}/media-tree.py"
           ssh -T -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$remote_script_dir" <<'REMOTE_SETUP'
@@ -627,20 +628,26 @@ jobs:
           scp -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             scripts/verify-gpoint-backup-restore.sh "root@${GPOINT_PRODUCTION_HOST}:$remote_restore_script"
+          scp -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            scripts/gpoint-media-tree.py "root@${GPOINT_PRODUCTION_HOST}:$remote_media_tree_helper"
           facts="$(ssh -T -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             "root@${GPOINT_PRODUCTION_HOST}" bash "$remote_restore_script" \
             "$CANDIDATE_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
             "$BASELINE_PATH" "$BASELINE_SHA" "$remote_backup_helper" \
-            "$GPOINT_KAMAL_BACKUP_AGE_RECIPIENT" "$GPOINT_KAMAL_BACKUP_OFFSITE_REMOTE")"
+            "$GPOINT_KAMAL_BACKUP_AGE_RECIPIENT" "$GPOINT_KAMAL_BACKUP_OFFSITE_REMOTE" \
+            "$remote_media_tree_helper")"
           grep -qx 'GPOINT_ISOLATED_RESTORE=PASS' <<< "$facts"
+          grep -qx 'GPOINT_MEDIA_BACKUP=PASS' <<< "$facts"
+          grep -qx 'GPOINT_MEDIA_ISOLATED_RESTORE=PASS' <<< "$facts"
           while IFS='=' read -r key value; do
             case "$key" in
-              backup_path|backup_sha256|backup_bytes|restore_evidence_path|restore_evidence_sha|restored_table_count)
+              backup_path|backup_sha256|backup_bytes|restore_evidence_path|restore_evidence_sha|restored_table_count|media_backup_path|media_backup_sha256|media_backup_bytes|media_file_count|media_directory_count|media_total_bytes|media_source_manifest_sha256|media_restore_manifest_sha256)
                 printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"
                 printf -- '- %s: %s\n' "$key" "$value" >> "$GITHUB_STEP_SUMMARY"
                 ;;
-              GPOINT_ISOLATED_RESTORE) ;;
+              GPOINT_ISOLATED_RESTORE|GPOINT_MEDIA_BACKUP|GPOINT_MEDIA_ISOLATED_RESTORE|GPOINT_MEDIA_OFFSITE_READBACK) ;;
               *) echo "Unexpected backup/restore result field: $key" >&2; exit 1 ;;
             esac
           done <<< "$facts"
@@ -716,12 +723,14 @@ jobs:
         env:
           BASELINE_PATH: ${{ steps.baseline.outputs.baseline_path }}
           BASELINE_SHA: ${{ steps.baseline.outputs.baseline_sha }}
+          MEDIA_SOURCE_MANIFEST_SHA: ${{ steps.backuprestore.outputs.media_source_manifest_sha256 }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"
           remote_script_dir="/run/gpoint-kamal/${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           remote_script="$remote_script_dir/pause-legacy-gpoint.sh"
+          remote_media_tree_helper="$remote_script_dir/media-tree.py"
           ssh_opts=(-i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
           ssh -T "${ssh_opts[@]}" "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$remote_script_dir" <<'REMOTE'
@@ -732,8 +741,10 @@ jobs:
           install -d -m 700 "$1"
           REMOTE
           scp "${ssh_opts[@]}" scripts/pause-legacy-gpoint.sh "root@${GPOINT_PRODUCTION_HOST}:$remote_script"
+          scp "${ssh_opts[@]}" scripts/gpoint-media-tree.py "root@${GPOINT_PRODUCTION_HOST}:$remote_media_tree_helper"
           ssh -T "${ssh_opts[@]}" "root@${GPOINT_PRODUCTION_HOST}" bash "$remote_script" \
-            "$CANDIDATE_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$BASELINE_PATH" "$BASELINE_SHA"
+            "$CANDIDATE_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$BASELINE_PATH" "$BASELINE_SHA" \
+            "$MEDIA_SOURCE_MANIFEST_SHA" "$remote_media_tree_helper"
       - name: Stop Caddy for Kamal Proxy public bind
         if: inputs.mode == 'cutover'
         env:
@@ -833,6 +844,14 @@ jobs:
           BACKUP_SHA: ${{ steps.backuprestore.outputs.backup_sha256 }}
           RESTORE_EVIDENCE_PATH: ${{ steps.backuprestore.outputs.restore_evidence_path }}
           RESTORE_EVIDENCE_SHA: ${{ steps.backuprestore.outputs.restore_evidence_sha }}
+          MEDIA_BACKUP_PATH: ${{ steps.backuprestore.outputs.media_backup_path }}
+          MEDIA_BACKUP_SHA: ${{ steps.backuprestore.outputs.media_backup_sha256 }}
+          MEDIA_BACKUP_BYTES: ${{ steps.backuprestore.outputs.media_backup_bytes }}
+          MEDIA_FILE_COUNT: ${{ steps.backuprestore.outputs.media_file_count }}
+          MEDIA_DIRECTORY_COUNT: ${{ steps.backuprestore.outputs.media_directory_count }}
+          MEDIA_TOTAL_BYTES: ${{ steps.backuprestore.outputs.media_total_bytes }}
+          MEDIA_SOURCE_MANIFEST_SHA: ${{ steps.backuprestore.outputs.media_source_manifest_sha256 }}
+          MEDIA_RESTORE_MANIFEST_SHA: ${{ steps.backuprestore.outputs.media_restore_manifest_sha256 }}
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
         run: |
           set -euo pipefail
@@ -849,23 +868,30 @@ jobs:
           REMOTE_CHECK
           scp scripts/write-kamal-production-manifest.py "root@${GPOINT_PRODUCTION_HOST}:${remote_manifest_writer}"
           verify_log="$RUNNER_TEMP/kamal-verify-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
-          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$BASELINE_PATH" "$BASELINE_SHA" "$BACKUP_PATH" "$BACKUP_SHA" "$RESTORE_EVIDENCE_PATH" "$RESTORE_EVIDENCE_SHA" "$DEPLOYMENT_ID" "$remote_manifest_writer" "$remote_manifest_writer_sha" <<'REMOTE' | tee "$verify_log"
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$BASELINE_PATH" "$BASELINE_SHA" "$BACKUP_PATH" "$BACKUP_SHA" "$RESTORE_EVIDENCE_PATH" "$RESTORE_EVIDENCE_SHA" "$DEPLOYMENT_ID" "$remote_manifest_writer" "$remote_manifest_writer_sha" "$MEDIA_BACKUP_PATH" "$MEDIA_BACKUP_SHA" "$MEDIA_SOURCE_MANIFEST_SHA" "$MEDIA_RESTORE_MANIFEST_SHA" "$MEDIA_FILE_COUNT" "$MEDIA_DIRECTORY_COUNT" "$MEDIA_TOTAL_BYTES" "$MEDIA_BACKUP_BYTES" <<'REMOTE' | tee "$verify_log"
           set -euo pipefail
           sha="$1"; version="$2"; app="$3"; agata="$4"; miniapp="$5"; run_id="$6"; attempt="$7"; baseline_file="$8"; expected_baseline_sha="$9"; backup_file="${10}"; expected_backup_sha="${11}"; restore_file="${12}"; expected_restore_sha="${13}"
           manifest_writer="${15}"; expected_manifest_writer_sha="${16}"
+          media_backup_file="${17}"; expected_media_backup_sha="${18}"; media_source_manifest_sha="${19}"; media_restore_manifest_sha="${20}"
+          media_file_count="${21}"; media_directory_count="${22}"; media_total_bytes="${23}"; media_backup_bytes="${24}"
           [[ "$manifest_writer" =~ ^/run/gpoint-kamal-manifest-[0-9]+-[0-9]+\.py$ && "$expected_manifest_writer_sha" =~ ^[0-9a-f]{64}$ ]]
           trap 'rm -f -- "$manifest_writer"' EXIT
           test "$(sha256sum "$manifest_writer" | awk '{print $1}')" = "$expected_manifest_writer_sha"
           chmod 0700 "$manifest_writer"
           [[ "$sha" =~ ^[0-9a-f]{40}$ && "$expected_baseline_sha" =~ ^[0-9a-f]{64}$ && "$expected_backup_sha" =~ ^[0-9a-f]{64}$ && "$expected_restore_sha" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$expected_media_backup_sha" =~ ^[0-9a-f]{64}$ && "$media_source_manifest_sha" =~ ^[0-9a-f]{64}$ && "$media_restore_manifest_sha" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$media_file_count" =~ ^[0-9]+$ && "$media_directory_count" =~ ^[0-9]+$ && "$media_total_bytes" =~ ^[0-9]+$ && "$media_backup_bytes" =~ ^[0-9]+$ && "$media_backup_bytes" -gt 0 ]]
           [[ "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
           [[ "$baseline_file" == "/opt/gpoint/release-logs/${sha}/kamal-cutover-baseline-${run_id}-${attempt}.txt" ]]
           test -s "$baseline_file"
           test "$(sha256sum "$baseline_file" | awk '{print $1}')" = "$expected_baseline_sha"
           [[ "$backup_file" == "/opt/gpoint/backups/gpoint-pre-release-${sha}-${run_id}-${attempt}.dump.age" ]]
+          [[ "$media_backup_file" == "/opt/gpoint/backups/gpoint-pre-release-${sha}-${run_id}-${attempt}.media.tar.age" ]]
           [[ "$restore_file" == "/opt/gpoint/release-logs/${sha}/kamal-backup-restore-${run_id}-${attempt}.txt" ]]
-          test -s "$backup_file" && test -s "$restore_file"
+          test -s "$backup_file" && test -s "$media_backup_file" && test -s "$restore_file"
           test "$(sha256sum "$backup_file" | awk '{print $1}')" = "$expected_backup_sha"
+          test "$(sha256sum "$media_backup_file" | awk '{print $1}')" = "$expected_media_backup_sha"
+          test "$(stat -c '%s' "$media_backup_file")" = "$media_backup_bytes"
           test "$(sha256sum "$restore_file" | awk '{print $1}')" = "$expected_restore_sha"
           grep -qx "CANDIDATE_SHA=$sha" "$restore_file"
           grep -qx "RUN_ID=$run_id" "$restore_file"
@@ -875,6 +901,18 @@ jobs:
           grep -qx 'ISOLATED_RESTORE=PASS' "$restore_file"
           grep -qx 'BACKUP_ENCRYPTION=AGE_X25519' "$restore_file"
           grep -qx 'OFFSITE_RESTORE=PASS' "$restore_file"
+          grep -qx "MEDIA_BACKUP_PATH=$media_backup_file" "$restore_file"
+          grep -qx "MEDIA_BACKUP_SHA256=$expected_media_backup_sha" "$restore_file"
+          grep -qx "MEDIA_BACKUP_BYTES=$media_backup_bytes" "$restore_file"
+          grep -qx "MEDIA_FILE_COUNT=$media_file_count" "$restore_file"
+          grep -qx "MEDIA_DIRECTORY_COUNT=$media_directory_count" "$restore_file"
+          grep -qx "MEDIA_TOTAL_BYTES=$media_total_bytes" "$restore_file"
+          grep -qx "MEDIA_SOURCE_MANIFEST_SHA256=$media_source_manifest_sha" "$restore_file"
+          grep -qx "MEDIA_RESTORE_MANIFEST_SHA256=$media_restore_manifest_sha" "$restore_file"
+          grep -qx 'MEDIA_BACKUP_ENCRYPTION=AGE_X25519' "$restore_file"
+          grep -qx "MEDIA_OFFSITE_COPY_SHA256=$expected_media_backup_sha" "$restore_file"
+          grep -qx 'MEDIA_OFFSITE_RESTORE=PASS' "$restore_file"
+          grep -qx 'MEDIA_ISOLATED_RESTORE=PASS' "$restore_file"
           baseline_value() {
             local result
             result="$(sed -n "s/^$1=//p" "$baseline_file")"
@@ -1027,6 +1065,11 @@ jobs:
             --inventory-path "$inventory_file" --inventory-sha "$inventory_sha" \
             --backup-path "$backup_file" --backup-sha "$expected_backup_sha" \
             --restore-path "$restore_file" --restore-sha "$expected_restore_sha" \
+            --media-backup-path "$media_backup_file" --media-backup-sha "$expected_media_backup_sha" \
+            --media-source-manifest-sha "$media_source_manifest_sha" \
+            --media-restore-manifest-sha "$media_restore_manifest_sha" \
+            --media-file-count "$media_file_count" --media-directory-count "$media_directory_count" \
+            --media-total-bytes "$media_total_bytes" --media-backup-bytes "$media_backup_bytes" \
             --agata-candidate-head "$expected_agata_head" --agata-live-head "$actual_agata_head" \
             --postgres-system-identifier "$postgres_system_identifier" --network-fingerprint "$network_fingerprint"
           manifest_sha="$(sha256sum "$manifest_file" | awk '{print $1}')"

@@ -13,6 +13,8 @@ APP = "sha256:" + "1" * 64
 AGATA = "sha256:" + "2" * 64
 MINIAPP = "sha256:" + "3" * 64
 VERSION = f"{SHA}-42-2"
+MEDIA_BACKUP = "/opt/gpoint/backups/gpoint-pre-release-" + SHA + "-42-2.media.tar.age"
+MEDIA_SHA = "9" * 64
 
 
 def install_docker_stub(directory: Path, *, revision: str = SHA, wrong_digest: bool = False):
@@ -49,6 +51,10 @@ def args_for(output: Path, *, version=VERSION):
         "--restore-path", "/opt/gpoint/restore-evidence", "--restore-sha", "7" * 64,
         "--agata-candidate-head", "agata0012", "--agata-live-head", "agata0012",
         "--postgres-system-identifier", "123456", "--network-fingerprint", "8" * 64,
+        "--media-backup-path", MEDIA_BACKUP, "--media-backup-sha", MEDIA_SHA,
+        "--media-source-manifest-sha", "a" * 64, "--media-restore-manifest-sha", "a" * 64,
+        "--media-file-count", "2", "--media-directory-count", "1",
+        "--media-total-bytes", "4096", "--media-backup-bytes", "4200",
     ]
 
 
@@ -75,6 +81,14 @@ def test_manifest_binds_exact_attempt_evidence_and_six_running_containers(tmp_pa
                for row in manifest["runtimeServices"])
     assert manifest["runtimeServices"][0]["repositoryDigest"].endswith(APP)
     assert manifest["preservation"]["databaseMigrationsAppliedByCutover"] is False
+    assert manifest["preservation"]["persistentMediaBackupAndRestore"] == "PASS"
+    assert manifest["evidence"]["mediaBackup"] == {
+        "path": MEDIA_BACKUP, "sha256": MEDIA_SHA, "bytes": 4200,
+        "encryption": "age-x25519", "offsiteRestore": "PASS",
+        "fileCount": 2, "directoryCount": 1, "totalBytes": 4096,
+        "sourceManifestSha256": "a" * 64, "restoredManifestSha256": "a" * 64,
+    }
+    assert manifest["evidence"]["mediaRestore"]["result"] == "PASS"
     assert f"GPOINT_KAMAL_MANIFEST_SHA256={hashlib.sha256(manifest_bytes).hexdigest()}" in result.stdout
     assert output.stat().st_mode & 0o777 == 0o600
 
@@ -97,6 +111,20 @@ def test_manifest_rejects_attempt_tag_that_does_not_bind_candidate_run_and_attem
     result, output = run_writer(tmp_path, version=f"{SHA}-41-1")
     assert result.returncode != 0
     assert "attempt tag does not match" in result.stderr
+    assert not output.exists()
+
+
+def test_manifest_refuses_media_restore_manifest_mismatch(tmp_path):
+    args = args_for(tmp_path / "kamal-production-42-2.json")
+    args[args.index("--media-restore-manifest-sha") + 1] = "b" * 64
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    install_docker_stub(bin_dir)
+    output = tmp_path / "kamal-production-42-2.json"
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    result = subprocess.run([sys.executable, str(WRITER), *args], capture_output=True, text=True, env=env)
+    assert result.returncode != 0
+    assert "restored media manifest does not match" in result.stderr
     assert not output.exists()
 
 
