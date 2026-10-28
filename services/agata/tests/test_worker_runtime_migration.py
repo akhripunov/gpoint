@@ -2492,11 +2492,12 @@ def _fresh_empty_queue_status(now):
     }
 
 
-@pytest.mark.parametrize(("preserve_stopped_gsales", "paused_fingerprint_drift"), [
-    (False, False), (True, False), (True, True),
+@pytest.mark.parametrize(("preserve_stopped_gsales", "paused_fingerprint_drift", "snapshot_failure"), [
+    (False, False, None), (True, False, None), (True, True, None),
+    (True, False, "absent"), (True, False, "stale"),
 ])
 def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(
-        tmp_path, monkeypatch, preserve_stopped_gsales, paused_fingerprint_drift):
+        tmp_path, monkeypatch, preserve_stopped_gsales, paused_fingerprint_drift, snapshot_failure):
     root = tmp_path / "Library/Application Support/GPoint/agata-codex-worker"
     root.mkdir(parents=True)
     (root / "gpoint_mac_worker.py").write_text("existing V3 worker")
@@ -2593,6 +2594,31 @@ def test_in_place_upgrade_keeps_application_support_root_and_verified_rollback(
             transition_events.append(("bootstrap", None))
         return subprocess.CompletedProcess(command, 0)
     monkeypatch.setattr(migration.subprocess, "run", run)
+
+    if snapshot_failure:
+        live_job = root / "queues/durable-job.json"
+        live_job.parent.mkdir()
+        live_job.write_text('{"state":"queued-after-prepare"}')
+        prior_snapshot = rollback_base / manifest["source_sha"] / "legacy-runtime"
+        if snapshot_failure == "stale":
+            shutil.copytree(root, prior_snapshot)
+            prior_snapshot.parent.chmod(0o700)
+            (prior_snapshot / "queues/durable-job.json").unlink()
+        def failed_snapshot(_backup):
+            raise RuntimeError("rollback_snapshot_refresh_mismatch")
+        monkeypatch.setattr(migration, "_prepare_legacy_snapshot", failed_snapshot)
+
+        with pytest.raises(RuntimeError, match="rollback_snapshot_refresh_mismatch"):
+            migration.apply(preserve_stopped_gsales=True)
+
+        assert live_job.read_text() == '{"state":"queued-after-prepare"}'
+        assert plist.read_bytes() == old_plist
+        assert not (root / "runtime/current").exists()
+        assert not (root / "state/maintenance-stop").exists()
+        receipt = json.loads((root / "receipts/runtime-migration-rollback.json").read_text())
+        assert receipt["state"] == "ROLLED_BACK"
+        assert receipt["launchagent_restored"] is True
+        return
 
     if paused_fingerprint_drift:
         with pytest.raises(RuntimeError, match="stopped_gsales_preboot_fingerprint_changed"):

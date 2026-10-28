@@ -3120,6 +3120,7 @@ def apply(*, preserve_stopped_gsales: bool = False) -> dict:
         maintenance_marker = ROOT / "state/maintenance-stop"
         next_plist = _render_plist(target_link, diagnostics_directory)
         switch_started = False
+        stopped_snapshot_verified = False
         restart_evidence = None
         paused_queue_status = None
         try:
@@ -3168,6 +3169,7 @@ def apply(*, preserve_stopped_gsales: bool = False) -> dict:
             # state cannot change between rollback capture and the switch.
             maintenance_marker.unlink(missing_ok=True)
             backup = _prepare_legacy_snapshot(backup)
+            stopped_snapshot_verified = True
             marker_fd = os.open(maintenance_marker, os.O_CREAT | os.O_WRONLY, 0o600)
             os.close(marker_fd)
             maintenance_marker.chmod(0o600)
@@ -3325,7 +3327,10 @@ def apply(*, preserve_stopped_gsales: bool = False) -> dict:
                 subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], timeout=15, check=False,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 _wait_launchagent_unloaded(None)
-                if backup.exists():
+                # Before the stopped snapshot passes, the live tree has not
+                # been switched. Preserve it instead of restoring an older
+                # prepare-time copy over newly durable queue/state files.
+                if stopped_snapshot_verified:
                     _restore_legacy_snapshot(backup)
                 elif not LEGACY.exists():
                     raise RuntimeError("rollback_snapshot_missing")
