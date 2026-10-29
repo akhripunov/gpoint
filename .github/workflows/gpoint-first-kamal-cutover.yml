@@ -1113,8 +1113,6 @@ jobs:
           remote_manifest_writer="/run/gpoint-kamal-manifest-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.py"
           remote_manifest_writer_sha="$(sha256sum scripts/write-kamal-production-manifest.py | awk '{print $1}')"
           remote_eros_dir="/run/gpoint-kamal/${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          remote_eros_collector="$remote_eros_dir/eros-state-collector.py"
-          remote_eros_state="$remote_eros_dir/kamal_eros_state.py"
           eros_collector_sha="$(sha256sum scripts/collect_kamal_eros_state.py | awk '{print $1}')"
           eros_state_helper_sha="$(sha256sum scripts/kamal_eros_state.py | awk '{print $1}')"
           eros_inventory_sanitizer_sha="$(sha256sum scripts/sanitize-kamal-inventory.py | awk '{print $1}')"

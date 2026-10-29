@@ -33,7 +33,7 @@ elif args[0] == "inspect" and name.startswith(("gsales-", "legacy-")):
  print(json.dumps([{{"Id":name,"State":{{"Running":running}}}}]))
 elif args[0] == "inspect" and name.startswith("gpoint-"):
  print(json.dumps([{{"Id":"container-"+name,"Image":"image-"+name,
-  "Config":{{"Labels":{{"org.opencontainers.image.revision":"{SHA}"}}}},
+  "Config":{{"Labels":{{"org.opencontainers.image.revision":"{SHA}"}},"Env":["RELEASE_SHA={SHA}"]}},
   "State":{{"Running":True,"Health":{{"Status":"healthy"}}}},"RestartCount":0}}]))
 elif args[0:2] == ["image", "inspect"]:
  name=args[2].removeprefix("image-")
@@ -58,7 +58,8 @@ else: raise SystemExit(2)
 
 def ordinary_args(output: Path):
     return [
-        "--mode", "ordinary", "--output", str(output), "--sha", SHA, "--version", VERSION,
+        "--mode", "ordinary", "--output", str(output), "--sha", SHA,
+        "--app-source-sha", SHA, "--version", VERSION,
         "--app-digest", APP, "--agata-digest", AGATA, "--miniapp-digest", MINIAPP,
         "--run-id", "42", "--attempt", "2", "--deployment-id", "987",
         "--db-container-id", DB_ID, "--redis-container-id", REDIS_ID,
@@ -83,7 +84,10 @@ def test_ordinary_manifest_binds_services_database_proxy_tls_and_routes(tmp_path
     raw = output.read_bytes()
     manifest = json.loads(raw)
     assert manifest["operationMode"] == "ordinary"
+    assert manifest["candidate"]["gitSha"] == SHA
+    assert manifest["candidate"]["appSourceSha"] == SHA
     assert len(manifest["runtimeServices"]) == 6
+    assert {service["revision"] for service in manifest["runtimeServices"]} == {SHA}
     assert manifest["preservation"]["postgresContainerId"] == DB_ID
     assert manifest["preservation"]["redisContainerId"] == REDIS_ID
     assert manifest["preservation"]["caddy"] == "INACTIVE"

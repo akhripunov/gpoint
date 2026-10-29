@@ -558,7 +558,8 @@ jobs:
           manifest="$remote_manifest_dir/kamal-production-${run_id}-${attempt}.json"
           test ! -e "$manifest"
           writer_output="$(python3 "$writer" --mode ordinary --output "$manifest" \
-            --sha "$sha" --version "$version" --app-digest "$app" --agata-digest "$agata" \
+            --sha "$sha" --app-source-sha "$sha" --version "$version" \
+            --app-digest "$app" --agata-digest "$agata" \
             --miniapp-digest "$miniapp" --run-id "$run_id" --attempt "$attempt" \
             --deployment-id "$deployment_id" --db-container-id "$db_id" \
             --redis-container-id "$redis_id" --public-routes-verified --migration-parity-verified)"
