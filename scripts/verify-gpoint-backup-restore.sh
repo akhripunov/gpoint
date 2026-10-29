@@ -27,7 +27,7 @@ rclone_config=/root/.config/rclone/rclone.conf
 test -f "$age_identity" && test ! -L "$age_identity" && test "$(stat -c '%a:%u' "$age_identity")" = 600:0
 test -f "$rclone_config" && test ! -L "$rclone_config" && test "$(stat -c '%a:%u' "$rclone_config")" = 600:0
 command -v age >/dev/null && command -v age-keygen >/dev/null && command -v rclone >/dev/null
-test "$(age-keygen -y -i "$age_identity")" = "$age_recipient"
+test "$(age-keygen -y "$age_identity")" = "$age_recipient"
 test "$(stat -f -c %T /run)" = tmpfs
 plaintext_dir="/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/plaintext"
 install -d -m 700 "$plaintext_dir"

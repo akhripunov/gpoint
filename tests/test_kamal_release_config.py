@@ -431,7 +431,7 @@ def test_cutover_backup_is_encrypted_offsite_and_restore_reads_ciphertext_only()
     assert "GPOINT_KAMAL_BACKUP_OFFSITE_REMOTE" in backup_step
     helper = (ROOT / "scripts/verify-gpoint-backup-restore.sh").read_text()
     assert 'test "$(stat -f -c %T /run)" = tmpfs' in helper
-    assert 'age-keygen -y -i "$age_identity"' in helper
+    assert 'age-keygen -y "$age_identity"' in helper
     assert 'age --recipient "$age_recipient"' in helper
     assert "rclone copyto --immutable" in helper
     assert "rclone check --download" in helper
