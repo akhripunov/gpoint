@@ -349,4 +349,3 @@ def test_failure_stages_attempt_safe_legacy_recovery_and_preserve_gsales(tmp_pat
     assert all(row["id"] not in stopped for name, row in legacy.items() if name.startswith("gsales"))
     if failure_stage == "route_remove":
         assert ("systemctl", "start", "caddy") in mutations
-
