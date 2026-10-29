@@ -118,9 +118,9 @@ def main() -> int:
     networks: list[str] = []
     owned_image_refs: list[str] = []
     fixture_tags: list[str] = []
-    if docker("network", "inspect", "kamal", check=False):
+    if "kamal" in docker("network", "ls", "--format", "{{.Name}}").splitlines():
         raise SystemExit("refusing to touch an existing Kamal network")
-    if docker("ps", "-aq", "--filter", "name=^/kamal-proxy$", check=False):
+    if docker("ps", "-aq", "--filter", "name=^/kamal-proxy$"):
         raise SystemExit("refusing to touch an existing kamal-proxy container")
     proxy_tag = f"{PROXY_REPO}:v0.9.2"
     proxy_digest_ref = f"{PROXY_REPO}@{proxy_digest}"

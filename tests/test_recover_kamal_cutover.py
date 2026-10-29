@@ -143,6 +143,57 @@ def test_integration_accepts_built_digests_before_docker_check(monkeypatch):
     assert list(integration.DIGESTS.values()) == values[:3]
 
 
+def test_integration_allows_absent_kamal_network_without_removing_existing(monkeypatch):
+    integration_path = ROOT / "tests/integration/kamal-cutover-recovery-docker.py"
+    spec = importlib.util.spec_from_file_location("kamal_cutover_recovery_docker", integration_path)
+    integration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(integration)
+    values = ["sha256:" + char * 64 for char in "abcd"]
+    monkeypatch.setattr(sys, "argv", ["integration", "--app-digest", values[0],
+                                     "--agata-digest", values[1], "--miniapp-digest", values[2],
+                                     "--proxy-digest", values[3]])
+    monkeypatch.setattr(integration.shutil, "which", lambda _: "/usr/bin/docker")
+
+    def fake_docker(*args, **kwargs):
+        if args == ("info",):
+            return ""
+        if args[:2] == ("network", "ls"):
+            return ""
+        if args[0] == "ps":
+            raise RuntimeError("reached container guard")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(integration, "docker", fake_docker)
+    with pytest.raises(RuntimeError, match="reached container guard"):
+        integration.main()
+
+
+def test_integration_refuses_existing_kamal_network(monkeypatch):
+    integration_path = ROOT / "tests/integration/kamal-cutover-recovery-docker.py"
+    spec = importlib.util.spec_from_file_location("kamal_cutover_recovery_docker", integration_path)
+    integration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(integration)
+    value = "sha256:" + "a" * 64
+    monkeypatch.setattr(sys, "argv", ["integration", "--app-digest", value,
+                                     "--agata-digest", value, "--miniapp-digest", value,
+                                     "--proxy-digest", value])
+    monkeypatch.setattr(integration.shutil, "which", lambda _: "/usr/bin/docker")
+    monkeypatch.setattr(integration, "docker", lambda *args, **kwargs: "kamal\n" if args[:2] == ("network", "ls") else "")
+    with pytest.raises(SystemExit, match="refusing to touch an existing Kamal network"):
+        integration.main()
+
+
+def test_integration_docker_network_listing_failure_is_fatal(monkeypatch):
+    integration_path = ROOT / "tests/integration/kamal-cutover-recovery-docker.py"
+    spec = importlib.util.spec_from_file_location("kamal_cutover_recovery_docker", integration_path)
+    integration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(integration)
+    monkeypatch.setattr(integration.subprocess, "run", lambda argv, **kwargs:
+                        subprocess.CompletedProcess(argv, 1, stdout="", stderr="daemon unavailable"))
+    with pytest.raises(RuntimeError, match="daemon unavailable"):
+        integration.docker("network", "ls", "--format", "{{.Name}}")
+
+
 def test_python_c_probe_argv_offsets_and_host_resolution_without_docker(monkeypatch, capsys):
     integration_path = ROOT / "tests/integration/kamal-cutover-recovery-docker.py"
     integration_spec = importlib.util.spec_from_file_location("kamal_cutover_recovery_docker", integration_path)
