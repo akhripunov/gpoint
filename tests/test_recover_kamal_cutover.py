@@ -202,8 +202,18 @@ def test_wrong_proxy_image_stops_before_any_recovery_mutation(tmp_path, monkeypa
     real_read_text = Path.read_text
     real_read_bytes = Path.read_bytes
     monkeypatch.setattr(RECOVER.Path, "is_file", lambda self: str(self) in {str(recovery), str(checksum)})
-    monkeypatch.setattr(RECOVER.Path, "stat", lambda self: SimpleNamespace(st_uid=os.getuid(), st_mode=stat.S_IFREG | 0o600)
-                        if str(self) in {str(recovery), str(checksum)} else real_stat(self))
+    def fake_stat(self, *, follow_symlinks=True):
+        if str(self) in {str(recovery), str(checksum)}:
+            return SimpleNamespace(st_uid=os.getuid(), st_mode=stat.S_IFREG | 0o600)
+        try:
+            return real_stat(self, follow_symlinks=follow_symlinks)
+        except TypeError as exc:
+            # Python < 3.10 does not expose Path.stat(follow_symlinks=...).
+            if "follow_symlinks" not in str(exc):
+                raise
+            return real_stat(self)
+
+    monkeypatch.setattr(RECOVER.Path, "stat", fake_stat)
     monkeypatch.setattr(RECOVER.Path, "read_text", lambda self, **kwargs: f"{caddy_sha}  {recovery}\n"
                         if self == checksum else real_read_text(self, **kwargs))
     monkeypatch.setattr(RECOVER.Path, "read_bytes", lambda self: caddy_content if self == recovery else real_read_bytes(self))
@@ -265,8 +275,18 @@ def test_failure_stages_attempt_safe_legacy_recovery_and_preserve_gsales(tmp_pat
     checksum = RECOVER.Path(str(recovery) + ".sha256")
     real_stat, real_read_text, real_read_bytes = Path.stat, Path.read_text, Path.read_bytes
     monkeypatch.setattr(RECOVER.Path, "is_file", lambda self: str(self) in {str(recovery), str(checksum)})
-    monkeypatch.setattr(RECOVER.Path, "stat", lambda self: SimpleNamespace(st_uid=os.getuid(), st_mode=stat.S_IFREG | 0o600)
-                        if str(self) in {str(recovery), str(checksum)} else real_stat(self))
+    def fake_stat(self, *, follow_symlinks=True):
+        if str(self) in {str(recovery), str(checksum)}:
+            return SimpleNamespace(st_uid=os.getuid(), st_mode=stat.S_IFREG | 0o600)
+        try:
+            return real_stat(self, follow_symlinks=follow_symlinks)
+        except TypeError as exc:
+            # Python < 3.10 does not expose Path.stat(follow_symlinks=...).
+            if "follow_symlinks" not in str(exc):
+                raise
+            return real_stat(self)
+
+    monkeypatch.setattr(RECOVER.Path, "stat", fake_stat)
     monkeypatch.setattr(RECOVER.Path, "read_text", lambda self, **kwargs: f"{caddy_sha}  {recovery}\n"
                         if self == checksum else real_read_text(self, **kwargs))
     monkeypatch.setattr(RECOVER.Path, "read_bytes", lambda self: caddy_content if self == recovery else real_read_bytes(self))
