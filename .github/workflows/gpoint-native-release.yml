@@ -292,6 +292,7 @@ jobs:
       CANDIDATE_SHA: ${{ inputs.candidate_sha }}
       IMAGE_VERSION: ${{ inputs.candidate_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
       GPOINT_COMMIT_SHA: ${{ inputs.candidate_sha }}
+      GPOINT_APP_SOURCE_SHA: ${{ inputs.candidate_sha }}
       GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}
       KAMAL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
       GPOINT_SSH_KEY: /root/.ssh/id_ed25519
@@ -463,7 +464,7 @@ jobs:
           set -euo pipefail
           kamal() {
             docker run --rm --volume "$GITHUB_WORKSPACE:/workdir" --volume "$HOME/.ssh:/root/.ssh:ro" \
-              --workdir /workdir --env GPOINT_COMMIT_SHA --env GPOINT_PRODUCTION_HOST \
+              --workdir /workdir --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA --env GPOINT_PRODUCTION_HOST \
               --env GPOINT_SSH_KEY --env GPOINT_KNOWN_HOSTS_FILE --env KAMAL_REGISTRY_PASSWORD \
               --env GPOINT_KAMAL_EXPECTED_DIGEST --env GPOINT_KAMAL_SERVICE --env KAMAL_ROLES \
               ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 "$@"

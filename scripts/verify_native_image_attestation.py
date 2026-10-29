@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Validate BuildKit SPDX and exact remote-Git source provenance."""
 
+from __future__ import annotations
+
 import json
 import sys
 from pathlib import Path
@@ -33,38 +35,69 @@ def _source_configurations(slsa: dict[str, Any]) -> list[dict[str, Any]]:
     return candidates
 
 
-def verify_provenance_identity(provenance: Any, sha: str, expected_repo: str) -> None:
+def _source_materials(slsa: dict[str, Any]) -> list[dict[str, Any]]:
+    payload = slsa.get('predicate') if isinstance(slsa.get('predicate'), dict) else slsa
+    if not isinstance(payload, dict):
+        return []
+    materials = payload.get('materials')
+    build_definition = payload.get('buildDefinition')
+    if isinstance(build_definition, dict):
+        resolved = build_definition.get('resolvedDependencies')
+        if isinstance(resolved, list):
+            materials = (materials if isinstance(materials, list) else []) + resolved
+    return [item for item in materials if isinstance(item, dict)] if isinstance(materials, list) else []
+
+
+def _matches_git_source(item: dict[str, Any], sha: str, expected_repo: str) -> bool:
+    source = urlsplit(str(item.get('uri', '')))
+    digest = item.get('digest')
+    expected = urlsplit(expected_repo)
+    return (source.scheme in {'https', 'git+https'}
+            and expected.scheme == 'https'
+            and source.netloc.lower() == expected.netloc.lower()
+            and source.hostname == expected.hostname
+            and source.path == expected.path
+            and not source.query
+            and isinstance(digest, dict)
+            and digest.get('sha1') == sha)
+
+
+def verify_provenance_material(provenance: Any, sha: str, expected_repo: str) -> None:
+    if not isinstance(provenance, dict) or not isinstance(provenance.get('SLSA'), dict):
+        raise ValueError('published image provenance has no SLSA statement')
+    if len(sha) != 40 or any(char not in '0123456789abcdef' for char in sha):
+        raise ValueError('required source material SHA is not an exact lowercase Git SHA')
+    materials = _source_materials(provenance['SLSA'])
+    if not any(_matches_git_source(material, sha, expected_repo) for material in materials):
+        raise ValueError('published provenance must bind the required remote Git material to its exact SHA')
+
+
+def verify_provenance_identity(provenance: Any, sha: str, expected_repo: str,
+                               required_material_sha: str | None = None) -> None:
     if not isinstance(provenance, dict) or not isinstance(provenance.get('SLSA'), dict):
         raise ValueError('published image provenance has no SLSA statement')
     if len(sha) != 40 or any(char not in '0123456789abcdef' for char in sha):
         raise ValueError('candidate SHA is not an exact lowercase Git SHA')
-    expected = urlsplit(expected_repo)
     configurations = _source_configurations(provenance['SLSA'])
     if len(configurations) != 1:
         raise ValueError('published provenance must contain exactly one Git source configuration')
     for config in configurations:
-        source = urlsplit(str(config.get('uri', '')))
-        digest = config.get('digest')
-        if (source.scheme in {'https', 'git+https'}
-                and expected.scheme == 'https'
-                and source.netloc.lower() == expected.netloc.lower()
-                and source.hostname == expected.hostname
-                and source.path == expected.path
-                and not source.query
-                and isinstance(digest, dict)
-                and digest.get('sha1') == sha):
+        if _matches_git_source(config, sha, expected_repo):
+            if required_material_sha is not None:
+                verify_provenance_material(provenance, required_material_sha, expected_repo)
             return
     raise ValueError('published provenance must bind the exact SHA to the expected remote Git repository')
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 5:
-        raise SystemExit('usage: verify_native_image_attestation.py SBOM_JSON PROVENANCE_JSON SHA REPOSITORY_URL')
-    sbom_path, provenance_path, sha, repository = argv[1:]
+    if len(argv) not in (5, 7) or (len(argv) == 7 and argv[5] != '--required-material-sha'):
+        raise SystemExit('usage: verify_native_image_attestation.py SBOM_JSON PROVENANCE_JSON SHA REPOSITORY_URL [--required-material-sha SHA]')
+    sbom_path, provenance_path, sha, repository = argv[1:5]
+    required_material_sha = argv[6] if len(argv) == 7 else None
     sbom = json.loads(Path(sbom_path).read_text(encoding='utf-8'))
     provenance = json.loads(Path(provenance_path).read_text(encoding='utf-8'))
     verify_sbom(sbom)
-    verify_provenance_identity(provenance, sha, repository)
+    verify_provenance_identity(provenance, sha, repository, required_material_sha)
     print('IMAGE_ATTESTATIONS=PASS exact-source-revision=' + sha)
     return 0
 

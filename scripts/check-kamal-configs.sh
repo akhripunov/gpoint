@@ -49,6 +49,7 @@ run_config() {
     --workdir /workdir \
     --volume "$ssh_key:/tmp/gpoint-kamal-config-test-key:ro" \
     --env "GPOINT_COMMIT_SHA=$GITHUB_SHA" \
+    --env "GPOINT_APP_SOURCE_SHA=$GITHUB_SHA" \
     --env GPOINT_SSH_KEY=/tmp/gpoint-kamal-config-test-key \
     --env GPOINT_KNOWN_HOSTS_FILE=/dev/null \
     --env GPOINT_PRODUCTION_HOST=192.0.2.10 \

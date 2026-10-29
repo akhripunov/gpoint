@@ -88,6 +88,7 @@ def test_kamal_config_checker_runs_all_services_with_synthetic_credentials_and_s
     assert all(call["env"]["KAMAL_REGISTRY_PASSWORD"] == REGISTRY_PASSWORD for call in calls)
     assert all(call["env"]["GPOINT_PRODUCTION_HOST"] == "192.0.2.10" for call in calls)
     assert all(call["env"]["GPOINT_SSH_KEY"] == "/tmp/gpoint-kamal-config-test-key" for call in calls)
+    assert all(call["env"]["GPOINT_APP_SOURCE_SHA"] == call["env"]["GPOINT_COMMIT_SHA"] for call in calls)
     assert all("never-pass-this-value" not in json.dumps(call) for call in calls)
     assert not list(tmp_path.glob("gpoint-kamal-config.*"))
 

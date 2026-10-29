@@ -89,7 +89,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         deploy = self.workflow["jobs"]["deploy"]
         steps = deploy["steps"]
         forbidden = (
-            "Capture PostgreSQL and Eros cutover baseline",
+            "Capture PostgreSQL and no-Eros cutover baseline",
             "Verify fresh PostgreSQL and media backup with isolated restore",
             "Pause legacy GPoint services after restore gates",
             "Apply candidate Caddyfile after request-serving roles are deployed",
@@ -202,8 +202,8 @@ class FirstCutoverWorkflowTests(unittest.TestCase):
     def test_cutover_workflow_keeps_fresh_inventory_backup_and_restore_gates(self):
         workflow = self.load_cutover()
         names = {step.get("name") for step in workflow["jobs"]["deploy"]["steps"]}
-        self.assertIn("Capture PostgreSQL and Eros cutover baseline", names)
-        self.assertIn("Verify candidate migrations match the live database", names)
+        self.assertIn("Capture PostgreSQL and no-Eros cutover baseline", names)
+        self.assertIn("Verify application source migrations match the live database", names)
         self.assertIn("Verify fresh PostgreSQL and media backup with isolated restore", names)
         self.assertIn("Pause legacy GPoint services after restore gates", names)
         self.assertIn("Stop Caddy for Kamal Proxy public bind", names)

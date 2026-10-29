@@ -35,6 +35,59 @@ class NativeImageAttestationTests(unittest.TestCase):
         }}}}
         MODULE.verify_provenance_identity(provenance, sha, 'https://github.com/akhripunov/gpoint.git')
 
+    def test_accepts_workflow_config_source_and_separately_pinned_git_material(self):
+        workflow_sha = 'a' * 40
+        app_sha = 'b' * 40
+        provenance = {'SLSA': {'predicate': {'buildDefinition': {
+            'externalParameters': {'configSource': {
+                'uri': f'https://github.com/akhripunov/gpoint.git#{workflow_sha}',
+                'digest': {'sha1': workflow_sha},
+            }},
+            'resolvedDependencies': [
+                {'uri': f'https://github.com/akhripunov/gpoint.git#{app_sha}',
+                 'digest': {'sha1': app_sha}},
+            ],
+        }}}}
+        MODULE.verify_provenance_identity(
+            provenance, workflow_sha, 'https://github.com/akhripunov/gpoint.git', app_sha
+        )
+
+    def test_requires_exact_app_source_git_material_for_dual_context_build(self):
+        workflow_sha = 'c' * 40
+        app_sha = 'd' * 40
+        wrong_sha = 'e' * 40
+        provenance = {'SLSA': {'predicate': {'buildDefinition': {
+            'externalParameters': {'configSource': {
+                'uri': f'https://github.com/akhripunov/gpoint.git#{workflow_sha}',
+                'digest': {'sha1': workflow_sha},
+            }},
+            'resolvedDependencies': [
+                {'uri': f'https://github.com/akhripunov/gpoint.git#{wrong_sha}',
+                 'digest': {'sha1': wrong_sha}},
+            ],
+        }}}}
+        with self.assertRaisesRegex(ValueError, 'required remote Git material'):
+            MODULE.verify_provenance_identity(
+                provenance, workflow_sha, 'https://github.com/akhripunov/gpoint.git', app_sha
+            )
+
+    def test_accepts_exact_source_material_in_slsa_v02_materials(self):
+        workflow_sha = 'f' * 40
+        app_sha = '1' * 40
+        provenance = {'SLSA': {
+            'invocation': {'configSource': {
+                'uri': f'https://github.com/akhripunov/gpoint.git#{workflow_sha}',
+                'digest': {'sha1': workflow_sha},
+            }},
+            'materials': [{
+                'uri': f'git+https://github.com/akhripunov/gpoint.git#{app_sha}',
+                'digest': {'sha1': app_sha},
+            }],
+        }}
+        MODULE.verify_provenance_identity(
+            provenance, workflow_sha, 'https://github.com/akhripunov/gpoint.git', app_sha
+        )
+
     def test_rejects_missing_or_mismatched_commit_digest(self):
         sha = 'c' * 40
         for digest in ({}, {'sha1': 'd' * 40}):

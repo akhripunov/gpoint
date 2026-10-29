@@ -8,15 +8,33 @@ baseline_file="${4:?cutover baseline required}"
 baseline_sha="${5:?baseline checksum required}"
 media_manifest_sha="${6:?source media manifest SHA-256 required}"
 media_tree_helper="${7:?media tree manifest helper required}"
+eros_collector="${8:?no-Eros state collector required}"
+eros_state_helper="${9:?no-Eros snapshot validator required}"
+eros_collector_sha="${10:?no-Eros collector SHA-256 required}"
+eros_state_helper_sha="${11:?no-Eros validator SHA-256 required}"
+eros_inventory_sanitizer_sha="${12:?inventory sanitizer SHA-256 required}"
+eros_resource_sanitizer_sha="${13:?resource sanitizer SHA-256 required}"
 
 [[ "$candidate" =~ ^[0-9a-f]{40}$ ]]
 [[ "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
 [[ "$baseline_sha" =~ ^[0-9a-f]{64}$ ]]
 [[ "$media_manifest_sha" =~ ^[0-9a-f]{64}$ ]]
+[[ "$eros_collector_sha" =~ ^[0-9a-f]{64}$ && "$eros_state_helper_sha" =~ ^[0-9a-f]{64}$ ]]
+[[ "$eros_inventory_sanitizer_sha" =~ ^[0-9a-f]{64}$ && "$eros_resource_sanitizer_sha" =~ ^[0-9a-f]{64}$ ]]
 [[ "$baseline_file" == "/opt/gpoint/release-logs/${candidate}/kamal-cutover-baseline-${run_id}-${attempt}.txt" ]]
 [[ "$media_tree_helper" == "/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/media-tree.py" ]]
+[[ "$eros_collector" == "/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/eros-state-collector.py" ]]
+[[ "$eros_state_helper" == "/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/kamal_eros_state.py" ]]
 test -s "$baseline_file"
-test -s "$media_tree_helper"
+test -s "$media_tree_helper" && test -s "$eros_collector" && test -s "$eros_state_helper"
+test -s "$(dirname "$eros_collector")/sanitize-kamal-inventory.py"
+test -s "$(dirname "$eros_collector")/sanitize-kamal-resources.py"
+test ! -L "$(dirname "$eros_collector")"
+test ! -L "$eros_collector" && test ! -L "$eros_state_helper"
+test "$(sha256sum "$eros_collector" | awk '{print $1}')" = "$eros_collector_sha"
+test "$(sha256sum "$eros_state_helper" | awk '{print $1}')" = "$eros_state_helper_sha"
+test "$(sha256sum "$(dirname "$eros_collector")/sanitize-kamal-inventory.py" | awk '{print $1}')" = "$eros_inventory_sanitizer_sha"
+test "$(sha256sum "$(dirname "$eros_collector")/sanitize-kamal-resources.py" | awk '{print $1}')" = "$eros_resource_sanitizer_sha"
 test "$(sha256sum "$baseline_file" | awk '{print $1}')" = "$baseline_sha"
 
 baseline_value() {
@@ -30,6 +48,19 @@ test "$(baseline_value BASELINE_SCHEMA)" = gpoint-kamal-cutover-baseline/v1
 test "$(baseline_value CANDIDATE_SHA)" = "$candidate"
 test "$(baseline_value RUN_ID)" = "$run_id"
 test "$(baseline_value ATTEMPT)" = "$attempt"
+eros_state_baseline="$(baseline_value NO_EROS_STATE_FILE)"
+eros_state_baseline_sha="$(baseline_value NO_EROS_STATE_SHA256)"
+[[ "$eros_state_baseline" == "/opt/gpoint/release-logs/${candidate}/kamal-no-eros-state-${run_id}-${attempt}.json" ]]
+[[ "$eros_state_baseline_sha" =~ ^[0-9a-f]{64}$ ]]
+test -s "$eros_state_baseline"
+test "$(sha256sum "$eros_state_baseline" | awk '{print $1}')" = "$eros_state_baseline_sha"
+eros_state_pause="/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/pause-no-eros-state.json"
+test ! -e "$eros_state_pause"
+eros_state_collect_result="$(python3 "$eros_collector" --output "$eros_state_pause")"
+grep -qx 'EROS_STATE_COLLECT=PASS' <<< "$eros_state_collect_result"
+eros_state_pause_sha="$(sed -n 's/^EROS_STATE_SHA256=//p' <<< "$eros_state_collect_result")"
+[[ "$eros_state_pause_sha" =~ ^[0-9a-f]{64}$ ]]
+python3 "$eros_state_helper" compare --before "$eros_state_baseline" --after "$eros_state_pause"
 
 inventory_file="$(baseline_value INVENTORY_FILE)"
 inventory_sha="$(baseline_value INVENTORY_SHA256)"
@@ -41,12 +72,6 @@ test "$(sha256sum "$inventory_file" | awk '{print $1}')" = "$inventory_sha"
 test "$(docker inspect --format '{{.Id}}' shared_postgres_1)" = "$(baseline_value POSTGRES_CONTAINER_ID)"
 test "$(docker inspect --format '{{.Image}}' shared_postgres_1)" = "$(baseline_value POSTGRES_IMAGE_ID)"
 test "$(docker inspect --format '{{.State.Running}}' shared_postgres_1)" = true
-test "$(docker inspect --format '{{.Id}}' compose-eros-1)" = "$(baseline_value EROS_CONTAINER_ID)"
-test "$(docker inspect --format '{{.Image}}' compose-eros-1)" = "$(baseline_value EROS_IMAGE_ID)"
-test "$(docker inspect --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' compose-eros-1)" = 'true healthy'
-test "$(docker inspect --format '{{.Id}}' compose-eros-embedding-relay-1)" = "$(baseline_value EROS_RELAY_CONTAINER_ID)"
-test "$(docker inspect --format '{{.Image}}' compose-eros-embedding-relay-1)" = "$(baseline_value EROS_RELAY_IMAGE_ID)"
-test "$(docker inspect --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' compose-eros-embedding-relay-1)" = 'true healthy'
 test "$(sha256sum /etc/caddy/Caddyfile | awk '{print $1}')" = "$(baseline_value CADDYFILE_SHA256)"
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 systemctl is-active --quiet caddy
@@ -119,6 +144,9 @@ on_exit() {
   trap - EXIT
   if [[ -n "$media_manifest_file" ]]; then rm -f -- "$media_manifest_file"; fi
   rm -f -- "$media_tree_helper"
+  if [[ "$status" -ne 0 || "$cutover_complete" -ne 1 ]]; then
+    rm -f -- "$eros_state_pause"
+  fi
   if [[ "$status" -ne 0 && "$cutover_complete" -ne 1 ]]; then
     restore_legacy_services
   fi

@@ -9,7 +9,7 @@ servers:
     cmd: node apps/api/dist/apps/api/src/main.js
     env:
       clear:
-        RELEASE_SHA: <%= ENV.fetch("GPOINT_COMMIT_SHA") %>
+        RELEASE_SHA: <%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>
         AGATA_SERVICE_URL: http://agata-api:8000
     options:
       env-file:
@@ -18,7 +18,6 @@ servers:
     proxy:
       path_prefixes:
         - /api
-        - /media
       strip_path_prefix: true
       app_port: 3000
       healthcheck:
@@ -31,7 +30,7 @@ servers:
     proxy: false
     env:
       clear:
-        RELEASE_SHA: <%= ENV.fetch("GPOINT_COMMIT_SHA") %>
+        RELEASE_SHA: <%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>
     options:
       env-file:
         - /opt/gpoint/env/production.env
@@ -43,7 +42,7 @@ servers:
     proxy: false
     env:
       clear:
-        RELEASE_SHA: <%= ENV.fetch("GPOINT_COMMIT_SHA") %>
+        RELEASE_SHA: <%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>
     options:
       env-file:
         - /opt/gpoint/env/production.env

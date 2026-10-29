@@ -7,6 +7,10 @@ on:
         description: Exact 40-character candidate SHA
         required: true
         type: string
+      app_source_sha:
+        description: Exact production application source SHA whose migrations must match the live database
+        required: true
+        type: string
       mode:
         description: Select a read-only preflight or the guarded first cutover
         required: true
@@ -64,6 +68,7 @@ jobs:
           set -euo pipefail
           docker run --rm --volume "$GITHUB_WORKSPACE:/workdir" --workdir /workdir \
             --env GPOINT_COMMIT_SHA="$GITHUB_SHA" \
+            --env GPOINT_APP_SOURCE_SHA="$GITHUB_SHA" \
             --env GPOINT_SSH_KEY=/tmp/not-used-by-config-check \
             --env GPOINT_KNOWN_HOSTS_FILE=/dev/null \
             --env GPOINT_PRODUCTION_HOST=192.0.2.10 \
@@ -71,6 +76,7 @@ jobs:
             "$KAMAL_IMAGE" config --config-file config/deploy.yml >/dev/null
           docker run --rm --volume "$GITHUB_WORKSPACE:/workdir" --workdir /workdir \
             --env GPOINT_COMMIT_SHA="$GITHUB_SHA" \
+            --env GPOINT_APP_SOURCE_SHA="$GITHUB_SHA" \
             --env GPOINT_SSH_KEY=/tmp/not-used-by-config-check \
             --env GPOINT_KNOWN_HOSTS_FILE=/dev/null \
             --env GPOINT_PRODUCTION_HOST=192.0.2.10 \
@@ -78,6 +84,7 @@ jobs:
             "$KAMAL_IMAGE" config --config-file config/deploy.agata.yml >/dev/null
           docker run --rm --volume "$GITHUB_WORKSPACE:/workdir" --workdir /workdir \
             --env GPOINT_COMMIT_SHA="$GITHUB_SHA" \
+            --env GPOINT_APP_SOURCE_SHA="$GITHUB_SHA" \
             --env GPOINT_SSH_KEY=/tmp/not-used-by-config-check \
             --env GPOINT_KNOWN_HOSTS_FILE=/dev/null \
             --env GPOINT_PRODUCTION_HOST=192.0.2.10 \
@@ -182,6 +189,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.app_source_sha }}
+          path: app-source
+          persist-credentials: false
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
         with:
           platforms: linux/amd64
@@ -190,13 +202,19 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Create dependency-manifest build context
-        run: python3 scripts/docker_dependency_manifests.py "$RUNNER_TEMP/dependency-manifests"
+      - name: Verify exact application source checkout and create its dependency manifests
+        env:
+          APP_SOURCE_SHA: ${{ inputs.app_source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$APP_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git -C app-source rev-parse HEAD)" = "$APP_SOURCE_SHA"
+          python3 app-source/scripts/docker_dependency_manifests.py "$RUNNER_TEMP/dependency-manifests"
       - name: Build and publish immutable runtime image
         id: app
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
-          context: https://github.com/akhripunov/gpoint.git#${{ github.sha }}
+          context: https://github.com/akhripunov/gpoint.git#${{ inputs.app_source_sha }}
           file: infra/production/Gpoint.Dockerfile
           build-contexts: dependency-manifests=${{ runner.temp }}/dependency-manifests
           platforms: linux/amd64
@@ -204,9 +222,9 @@ jobs:
           tags: |
             ghcr.io/akhripunov/gpoint-runtime:${{ github.sha }}
             ghcr.io/akhripunov/gpoint-runtime:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          build-args: GPOINT_BUILD_SHA=${{ github.sha }}
+          build-args: GPOINT_BUILD_SHA=${{ inputs.app_source_sha }}
           labels: |
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ inputs.app_source_sha }}
             org.opencontainers.image.source=https://github.com/akhripunov/gpoint
           cache-from: type=gha,scope=gpoint-runtime
           cache-to: type=gha,scope=gpoint-runtime,mode=max
@@ -217,15 +235,23 @@ jobs:
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
           context: https://github.com/akhripunov/gpoint.git#${{ github.sha }}
-          file: infra/production/Gpoint.Dockerfile
+          file: infra/production/Gpoint.Miniapp.Dockerfile
           target: miniapp-runtime
-          build-contexts: dependency-manifests=${{ runner.temp }}/dependency-manifests
+          build-contexts: |
+            dependency-manifests=${{ runner.temp }}/dependency-manifests
+            app-source=https://github.com/akhripunov/gpoint.git#${{ inputs.app_source_sha }}
           platforms: linux/amd64
           push: true
           tags: |
             ghcr.io/akhripunov/gpoint-miniapp:${{ github.sha }}
             ghcr.io/akhripunov/gpoint-miniapp:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          build-args: GPOINT_BUILD_SHA=${{ github.sha }}
+          build-args: |
+            GPOINT_BUILD_SHA=${{ inputs.app_source_sha }}
+            GPOINT_WORKFLOW_SHA=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ inputs.app_source_sha }}
+            org.opencontainers.image.source=https://github.com/akhripunov/gpoint
+            org.gpoint.workflow.revision=${{ github.sha }}
           cache-from: type=gha,scope=gpoint-runtime
           cache-to: type=gha,scope=gpoint-miniapp,mode=max
           sbom: true
@@ -234,15 +260,15 @@ jobs:
         id: agata
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
-          context: https://github.com/akhripunov/gpoint.git#${{ github.sha }}:services/agata
+          context: https://github.com/akhripunov/gpoint.git#${{ inputs.app_source_sha }}:services/agata
           platforms: linux/amd64
           push: true
           tags: |
             ghcr.io/akhripunov/gpoint-agata-runtime:${{ github.sha }}
             ghcr.io/akhripunov/gpoint-agata-runtime:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          build-args: GPOINT_BUILD_SHA=${{ github.sha }}
+          build-args: GPOINT_BUILD_SHA=${{ inputs.app_source_sha }}
           labels: |
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ inputs.app_source_sha }}
             org.opencontainers.image.source=https://github.com/akhripunov/gpoint
           cache-from: type=gha,scope=gpoint-agata-runtime
           cache-to: type=gha,scope=gpoint-agata-runtime,mode=max
@@ -251,6 +277,7 @@ jobs:
       - name: Validate immutable image identity and expose digests
         env:
           CANDIDATE_SHA: ${{ github.sha }}
+          APP_SOURCE_SHA: ${{ inputs.app_source_sha }}
           APP_DIGEST: ${{ steps.app.outputs.digest }}
           AGATA_DIGEST: ${{ steps.agata.outputs.digest }}
           MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}
@@ -260,6 +287,9 @@ jobs:
           sha = os.environ['CANDIDATE_SHA']
           if not re.fullmatch(r'[0-9a-f]{40}', sha):
               raise SystemExit('candidate SHA is not exact')
+          app_source_sha = os.environ['APP_SOURCE_SHA']
+          if not re.fullmatch(r'[0-9a-f]{40}', app_source_sha):
+              raise SystemExit('application source SHA is not exact')
           for name in ('APP_DIGEST', 'AGATA_DIGEST', 'MINIAPP_DIGEST'):
               if not re.fullmatch(r'sha256:[0-9a-f]{64}', os.environ[name]):
                   raise SystemExit(f'{name} is not an immutable OCI digest')
@@ -267,6 +297,7 @@ jobs:
       - name: Read back exact published images and verify candidate identity
         env:
           CANDIDATE_SHA: ${{ github.sha }}
+          APP_SOURCE_SHA: ${{ inputs.app_source_sha }}
           IMAGE_VERSION: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           APP_DIGEST: ${{ steps.app.outputs.digest }}
           AGATA_DIGEST: ${{ steps.agata.outputs.digest }}
@@ -279,6 +310,7 @@ jobs:
               agata) image=ghcr.io/akhripunov/gpoint-agata-runtime; digest="$AGATA_DIGEST" ;;
               miniapp) image=ghcr.io/akhripunov/gpoint-miniapp; digest="$MINIAPP_DIGEST" ;;
             esac
+            source_sha="$APP_SOURCE_SHA"
             docker pull --platform linux/amd64 "$image@$digest"
             docker pull --platform linux/amd64 "$image:$IMAGE_VERSION"
             docker image inspect "$image:$IMAGE_VERSION" --format '{{json .RepoDigests}}' | grep -Fq "$image@$digest"
@@ -288,10 +320,17 @@ jobs:
             docker buildx imagetools inspect --format '{{json .Provenance}}' \
               "$image@$digest" > "$RUNNER_TEMP/$role-provenance.json"
             python3 scripts/verify_native_image_readback.py \
-              "$RUNNER_TEMP/$role-image.json" "$image" "$digest" "$CANDIDATE_SHA"
-            python3 scripts/verify_native_image_attestation.py \
-              "$RUNNER_TEMP/$role-sbom.json" "$RUNNER_TEMP/$role-provenance.json" \
-              "$CANDIDATE_SHA" https://github.com/akhripunov/gpoint.git
+              "$RUNNER_TEMP/$role-image.json" "$image" "$digest" "$source_sha"
+            if [[ "$role" == miniapp ]]; then
+              python3 scripts/verify_native_image_attestation.py \
+                "$RUNNER_TEMP/$role-sbom.json" "$RUNNER_TEMP/$role-provenance.json" \
+                "$CANDIDATE_SHA" https://github.com/akhripunov/gpoint.git \
+                --required-material-sha "$APP_SOURCE_SHA"
+            else
+              python3 scripts/verify_native_image_attestation.py \
+                "$RUNNER_TEMP/$role-sbom.json" "$RUNNER_TEMP/$role-provenance.json" \
+                "$source_sha" https://github.com/akhripunov/gpoint.git
+            fi
           done
 
   deploy:
@@ -310,8 +349,10 @@ jobs:
       deployments: write
     env:
       CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      APP_SOURCE_SHA: ${{ inputs.app_source_sha }}
       IMAGE_VERSION: ${{ inputs.candidate_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
       GPOINT_COMMIT_SHA: ${{ inputs.candidate_sha }}
+      GPOINT_APP_SOURCE_SHA: ${{ inputs.app_source_sha }}
       GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}
       KAMAL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
       GPOINT_SSH_KEY: /root/.ssh/id_ed25519
@@ -321,13 +362,29 @@ jobs:
         with:
           ref: ${{ inputs.candidate_sha }}
           persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.app_source_sha }}
+          path: app-source
+          persist-credentials: false
       - name: Reject a candidate that differs from the requested exact SHA
         env:
           REQUESTED_SHA: ${{ inputs.candidate_sha }}
           WORKFLOW_SHA: ${{ github.sha }}
+          APP_SOURCE_SHA: ${{ inputs.app_source_sha }}
         run: |
           test "$REQUESTED_SHA" = "$WORKFLOW_SHA"
           printf '%s\n' "$WORKFLOW_SHA" | grep -Eq '^[0-9a-f]{40}$'
+          printf '%s\n' "$APP_SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'
+          test "$(git -C app-source rev-parse HEAD)" = "$APP_SOURCE_SHA"
+      - name: Block production until Kamal runtime honors separate application source SHA
+        if: inputs.mode == 'cutover'
+        run: |
+          set -euo pipefail
+          if [[ "$CANDIDATE_SHA" != "$APP_SOURCE_SHA" ]]; then
+            echo 'PRODUCTION_APPLY=BLOCKED dual-SHA runtime identity is not yet wired through Kamal hooks and manifest.' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
       - name: Recheck owner authorization and current main for production mode
         if: inputs.mode == 'cutover'
         env:
@@ -367,6 +424,7 @@ jobs:
         id: imageverify
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APP_SOURCE_SHA: ${{ inputs.app_source_sha }}
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
@@ -384,7 +442,7 @@ jobs:
             actual="$(docker image inspect "$repository:$IMAGE_VERSION" --format '{{index .RepoDigests 0}}')"
             test "$actual" = "$repository@$digest"
             source_sha="$(docker image inspect "$repository:$IMAGE_VERSION" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
-            test "$source_sha" = "$CANDIDATE_SHA"
+            test "$source_sha" = "$APP_SOURCE_SHA"
             image_bytes="$(docker image inspect "$repository@$digest" --format '{{.Size}}')"
             [[ "$image_bytes" =~ ^[0-9]+$ && "$image_bytes" -gt 0 ]]
             candidate_image_bytes=$((candidate_image_bytes + image_bytes))
@@ -415,7 +473,79 @@ jobs:
             UserKnownHostsFile $HOME/.ssh/known_hosts
           EOF
           chmod 600 "$HOME/.ssh/config"
-      - name: Capture PostgreSQL and Eros cutover baseline
+      - name: Compare built Mini App static files with live production before mutation
+        if: inputs.mode == 'cutover'
+        env:
+          MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
+        run: |
+          set -euo pipefail
+          repository=ghcr.io/akhripunov/gpoint-miniapp
+          temp_dir="$(mktemp -d "$RUNNER_TEMP/gpoint-miniapp-static.XXXXXX")"
+          container_name="gpoint-miniapp-static-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          container_id=""
+          remote_helper="/run/gpoint-kamal-static-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.py"
+          cleanup() {
+            if [[ -n "$container_id" ]]; then
+              docker rm -f "$container_id" >/dev/null 2>&1 || true
+            fi
+            rm -rf -- "$temp_dir"
+          }
+          trap cleanup EXIT
+          [[ "$MINIAPP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          container_id="$(docker create --name "$container_name" "$repository@$MINIAPP_DIGEST")"
+          [[ "$container_id" =~ ^[0-9a-f]{64}$ ]]
+          install -d -m 700 "$temp_dir/image"
+          docker cp "$container_id:/usr/share/nginx/html/." "$temp_dir/image" >/dev/null
+          image_manifest="$(python3 scripts/gpoint-miniapp-static-manifest.py "$temp_dir/image")"
+          readarray -t expected_manifest < <(python3 - "$image_manifest" <<'PY'
+          import json, sys
+          value = json.loads(sys.argv[1])
+          if value.get('schema') != 'gpoint-miniapp-static/v1':
+              raise SystemExit('built Mini App static manifest schema is invalid')
+          print(value['sha256'])
+          print(value['fileCount'])
+          PY
+          )
+          expected_sha="${expected_manifest[0]}"
+          expected_count="${expected_manifest[1]}"
+          [[ "$expected_sha" =~ ^[0-9a-f]{64}$ && "$expected_count" =~ ^[0-9]+$ ]]
+          helper_sha="$(sha256sum scripts/gpoint-miniapp-static-manifest.py | awk '{print $1}')"
+          ssh_opts=(-i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
+          ssh -T "${ssh_opts[@]}" "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$remote_helper" <<'REMOTE_SETUP'
+          set -euo pipefail
+          [[ "$1" =~ ^/run/gpoint-kamal-static-[0-9]+-[0-9]+\.py$ ]]
+          test ! -e "$1"
+          REMOTE_SETUP
+          scp "${ssh_opts[@]}" scripts/gpoint-miniapp-static-manifest.py \
+            "root@${GPOINT_PRODUCTION_HOST}:$remote_helper"
+          static_result="$(ssh -T "${ssh_opts[@]}" "root@${GPOINT_PRODUCTION_HOST}" bash -s -- \
+            "$remote_helper" "$helper_sha" "$expected_sha" "$expected_count" <<'REMOTE_COMPARE'
+          set -euo pipefail
+          helper="$1"; helper_sha="$2"; expected_sha="$3"; expected_count="$4"
+          [[ "$helper" =~ ^/run/gpoint-kamal-static-[0-9]+-[0-9]+\.py$ ]]
+          [[ "$helper_sha" =~ ^[0-9a-f]{64}$ && "$expected_sha" =~ ^[0-9a-f]{64}$ && "$expected_count" =~ ^[0-9]+$ ]]
+          test "$(sha256sum "$helper" | awk '{print $1}')" = "$helper_sha"
+          trap 'rm -f -- "$helper"' EXIT
+          live_manifest="$(python3 "$helper" --reject-symlink-ancestors /opt/gpoint/app/miniapp)"
+          python3 - "$live_manifest" "$expected_sha" "$expected_count" <<'PY'
+          import json, sys
+          actual = json.loads(sys.argv[1])
+          if (actual.get('schema') != 'gpoint-miniapp-static/v1'
+                  or actual.get('sha256') != sys.argv[2]
+                  or str(actual.get('fileCount')) != sys.argv[3]):
+              raise SystemExit('live Mini App static files differ from the exact built image')
+          print('GPOINT_MINIAPP_LIVE_STATIC_PARITY=PASS')
+          print('MINIAPP_STATIC_MANIFEST_SHA256=' + actual['sha256'])
+          print('MINIAPP_STATIC_FILE_COUNT=' + str(actual['fileCount']))
+          PY
+          REMOTE_COMPARE
+          )"
+          grep -qx 'GPOINT_MINIAPP_LIVE_STATIC_PARITY=PASS' <<< "$static_result"
+          grep -qx "MINIAPP_STATIC_MANIFEST_SHA256=$expected_sha" <<< "$static_result"
+          grep -qx "MINIAPP_STATIC_FILE_COUNT=$expected_count" <<< "$static_result"
+          echo "$static_result" >> "$GITHUB_STEP_SUMMARY"
+      - name: Capture PostgreSQL and no-Eros cutover baseline
         if: inputs.mode == 'cutover'
         id: baseline
         env:
@@ -425,6 +555,14 @@ jobs:
           remote_script_dir="/run/gpoint-kamal/${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           remote_inventory_script="${remote_script_dir}/inventory.py"
           remote_resource_script="${remote_script_dir}/resources.py"
+          remote_eros_collector="${remote_script_dir}/eros-state-collector.py"
+          remote_eros_state="${remote_script_dir}/kamal_eros_state.py"
+          remote_eros_inventory_sanitizer="${remote_script_dir}/sanitize-kamal-inventory.py"
+          remote_eros_resource_sanitizer="${remote_script_dir}/sanitize-kamal-resources.py"
+          eros_collector_sha="$(sha256sum scripts/collect_kamal_eros_state.py | awk '{print $1}')"
+          eros_state_sha="$(sha256sum scripts/kamal_eros_state.py | awk '{print $1}')"
+          eros_inventory_sanitizer_sha="$(sha256sum scripts/sanitize-kamal-inventory.py | awk '{print $1}')"
+          eros_resource_sanitizer_sha="$(sha256sum scripts/sanitize-kamal-resources.py | awk '{print $1}')"
           ssh -T -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$remote_script_dir" <<'REMOTE_SETUP'
@@ -440,17 +578,42 @@ jobs:
           scp -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             scripts/sanitize-kamal-resources.py "root@${GPOINT_PRODUCTION_HOST}:$remote_resource_script"
+          scp -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            scripts/collect_kamal_eros_state.py "root@${GPOINT_PRODUCTION_HOST}:$remote_eros_collector"
+          scp -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            scripts/kamal_eros_state.py "root@${GPOINT_PRODUCTION_HOST}:$remote_eros_state"
+          scp -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            scripts/sanitize-kamal-inventory.py "root@${GPOINT_PRODUCTION_HOST}:$remote_eros_inventory_sanitizer"
+          scp -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            scripts/sanitize-kamal-resources.py "root@${GPOINT_PRODUCTION_HOST}:$remote_eros_resource_sanitizer"
           facts="$(ssh -T -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$GITHUB_RUN_ID" \
-            "$GITHUB_RUN_ATTEMPT" "$remote_inventory_script" "$remote_resource_script" "$CANDIDATE_IMAGE_BYTES" <<'REMOTE'
+            "$GITHUB_RUN_ATTEMPT" "$remote_inventory_script" "$remote_resource_script" "$CANDIDATE_IMAGE_BYTES" \
+            "$remote_eros_collector" "$remote_eros_state" "$eros_collector_sha" "$eros_state_sha" \
+            "$eros_inventory_sanitizer_sha" "$eros_resource_sanitizer_sha" <<'REMOTE'
           set -euo pipefail
-          candidate="$1"; run_id="$2"; attempt="$3"; inventory_script="$4"; resource_script="$5"; candidate_image_bytes="$6"
+          candidate="$1"; run_id="$2"; attempt="$3"; inventory_script="$4"; resource_script="$5"; candidate_image_bytes="$6"; eros_collector="$7"; eros_state_script="$8"
+          eros_collector_sha="$9"; eros_state_sha="${10}"; eros_inventory_sanitizer_sha="${11}"; eros_resource_sanitizer_sha="${12}"
           [[ "$candidate" =~ ^[0-9a-f]{40}$ && "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
           [[ "$candidate_image_bytes" =~ ^[0-9]+$ && "$candidate_image_bytes" -gt 0 ]]
           [[ "$inventory_script" == "/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/inventory.py" ]]
           [[ "$resource_script" == "/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/resources.py" ]]
+          [[ "$eros_collector" == "/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/eros-state-collector.py" ]]
+          [[ "$eros_state_script" == "/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/kamal_eros_state.py" ]]
           test -s "$inventory_script" && test -s "$resource_script"
+          test -s "$eros_collector" && test -s "$eros_state_script"
+          test ! -L "$(dirname "$eros_collector")"
+          test ! -L "$eros_collector" && test ! -L "$eros_state_script"
+          [[ "$eros_collector_sha" =~ ^[0-9a-f]{64}$ && "$eros_state_sha" =~ ^[0-9a-f]{64}$ && "$eros_inventory_sanitizer_sha" =~ ^[0-9a-f]{64}$ && "$eros_resource_sanitizer_sha" =~ ^[0-9a-f]{64}$ ]]
+          test "$(sha256sum "$eros_collector" | awk '{print $1}')" = "$eros_collector_sha"
+          test "$(sha256sum "$eros_state_script" | awk '{print $1}')" = "$eros_state_sha"
+          test "$(sha256sum "$(dirname "$eros_collector")/sanitize-kamal-inventory.py" | awk '{print $1}')" = "$eros_inventory_sanitizer_sha"
+          test "$(sha256sum "$(dirname "$eros_collector")/sanitize-kamal-resources.py" | awk '{print $1}')" = "$eros_resource_sanitizer_sha"
           current_sha="$(sed -n 's/^RELEASE_SHA=//p' /opt/gpoint/env/production.env | head -1)"
           [[ "$current_sha" =~ ^[0-9a-f]{40}$ ]]
           api_image="$(docker inspect --format '{{.Config.Image}}' compose-api-1)"
@@ -460,12 +623,6 @@ jobs:
           postgres_id="$(docker inspect --format '{{.Id}}' shared_postgres_1)"
           postgres_image_id="$(docker inspect --format '{{.Image}}' shared_postgres_1)"
           test "$(docker inspect --format '{{.State.Running}}' shared_postgres_1)" = true
-          eros_id="$(docker inspect --format '{{.Id}}' compose-eros-1)"
-          eros_image_id="$(docker inspect --format '{{.Image}}' compose-eros-1)"
-          test "$(docker inspect --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' compose-eros-1)" = 'true healthy'
-          eros_relay_id="$(docker inspect --format '{{.Id}}' compose-eros-embedding-relay-1)"
-          eros_relay_image_id="$(docker inspect --format '{{.Image}}' compose-eros-embedding-relay-1)"
-          test "$(docker inspect --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' compose-eros-embedding-relay-1)" = 'true healthy'
           systemctl is-active --quiet caddy
           caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
           caddy_sha="$(sha256sum /etc/caddy/Caddyfile | awk '{print $1}')"
@@ -483,7 +640,6 @@ jobs:
           postgres_server_version_num="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["serverVersionNum"])' "$database_facts")"
           [[ "$postgres_system_identifier" =~ ^[0-9]+$ && "$postgres_server_version_num" =~ ^[0-9]+$ ]]
           postgres_acl_fingerprint="$(printf '%s' "$database_facts" | sha256sum | awk '{print $1}')"
-          network_fingerprint="$(docker network inspect gpoint_eros_api gpoint_eros_data gpoint_eros_embeddings | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(json.dumps(sorted(({"name":r["Name"],"id":r["Id"],"internal":r["Internal"],"ipam":r.get("IPAM",{}).get("Config",[])} for r in rows),key=lambda r:r["name"]),sort_keys=True,separators=(",",":"))' | sha256sum | awk '{print $1}')"
           migration_facts="$(docker run --rm --network shared_internal --env-file /opt/gpoint/env/production.env "$api_image" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const p=await db.$queryRawUnsafe("SELECT migration_name FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY finished_at DESC LIMIT 1");const all=await db.$queryRawUnsafe("SELECT migration_name FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const a=await db.$queryRawUnsafe("SELECT to_regclass('\''agata.alembic_version'\'')::text AS relation");let head="ABSENT";if(a[0].relation){const rows=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(rows.length!==1)throw Error("AGATA head is not singular");head=rows[0].version_num}console.log("PRISMA_HEAD="+(p[0]?.migration_name||"NONE"));console.log("PRISMA_MIGRATIONS="+all.map(x=>x.migration_name).join(","));console.log("AGATA_HEAD="+head)}catch(e){console.error("READ_ONLY_DATABASE_BASELINE_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
           prisma_head="$(sed -n 's/^PRISMA_HEAD=//p' <<< "$migration_facts")"
           prisma_migrations="$(sed -n 's/^PRISMA_MIGRATIONS=//p' <<< "$migration_facts")"
@@ -498,6 +654,14 @@ jobs:
           [[ "$free_kb" =~ ^[0-9]+$ && "$docker_free_kb" =~ ^[0-9]+$ && "$memory_kb" =~ ^[0-9]+$ && "$memory_total_kb" =~ ^[0-9]+$ ]]
           log_dir="/opt/gpoint/release-logs/${candidate}"
           mkdir -p "$log_dir" && chmod 700 "$log_dir"
+          eros_state_file="${log_dir}/kamal-no-eros-state-${run_id}-${attempt}.json"
+          test ! -e "$eros_state_file"
+          eros_state_result="$(python3 "$eros_collector" --output "$eros_state_file")"
+          grep -qx 'EROS_STATE_COLLECT=PASS' <<< "$eros_state_result"
+          eros_state_content_sha="$(sed -n 's/^EROS_STATE_SHA256=//p' <<< "$eros_state_result")"
+          [[ "$eros_state_content_sha" =~ ^[0-9a-f]{64}$ ]]
+          eros_state_sha="$(sha256sum "$eros_state_file" | awk '{print $1}')"
+          [[ "$eros_state_sha" =~ ^[0-9a-f]{64}$ ]]
           inventory_file="${log_dir}/kamal-vps-inventory-${run_id}-${attempt}.json"
           ids=( $(docker ps -aq) )
           ((${#ids[@]} > 0))
@@ -540,11 +704,9 @@ jobs:
           PRISMA_HEAD=$prisma_head
           AGATA_HEAD=$agata_head
           PRISMA_MIGRATIONS=$prisma_migrations
-          EROS_CONTAINER_ID=$eros_id
-          EROS_IMAGE_ID=$eros_image_id
-          EROS_RELAY_CONTAINER_ID=$eros_relay_id
-          EROS_RELAY_IMAGE_ID=$eros_relay_image_id
-          EROS_NETWORK_FINGERPRINT=$network_fingerprint
+          NO_EROS_STATE_FILE=$eros_state_file
+          NO_EROS_STATE_SHA256=$eros_state_sha
+          NO_EROS_STATE_CONTENT_SHA256=$eros_state_content_sha
           CADDYFILE_SHA256=$caddy_sha
           INVENTORY_FILE=$inventory_file
           INVENTORY_SHA256=$inventory_sha
@@ -561,22 +723,32 @@ jobs:
           EOF
           chmod 600 "$baseline_file"
           baseline_sha="$(sha256sum "$baseline_file" | awk '{print $1}')"
-          printf 'baseline_path=%s\nbaseline_sha=%s\ninventory_sha=%s\ncurrent_sha=%s\nprisma_head=%s\nprisma_migrations=%s\nagata_head=%s\npostgres_system_identifier=%s\ndocker_free_kb=%s\nmemory_available_kb=%s\nmemory_total_kb=%s\nrunning_resource_samples=%s\ncontainer_memory_used_bytes=%s\ncontainer_cpu_percent_sum=%s\nmax_container_memory_percent=%s\ncandidate_image_bytes=%s\n' \
+          printf 'baseline_path=%s\nbaseline_sha=%s\ninventory_sha=%s\ncurrent_sha=%s\nprisma_head=%s\nprisma_migrations=%s\nagata_head=%s\npostgres_system_identifier=%s\ndocker_free_kb=%s\nmemory_available_kb=%s\nmemory_total_kb=%s\nrunning_resource_samples=%s\ncontainer_memory_used_bytes=%s\ncontainer_cpu_percent_sum=%s\nmax_container_memory_percent=%s\ncandidate_image_bytes=%s\nno_eros_state_path=%s\nno_eros_state_sha=%s\n' \
             "$baseline_file" "$baseline_sha" "$inventory_sha" "$current_sha" "$prisma_head" "$prisma_migrations" "$agata_head" "$postgres_system_identifier" \
-            "$docker_free_kb" "$memory_kb" "$memory_total_kb" "$resource_containers" "$resource_memory_bytes" "$resource_cpu_percent" "$resource_max_memory_percent" "$candidate_image_bytes"
-          rm -f "$inventory_script" "$resource_script"
+            "$docker_free_kb" "$memory_kb" "$memory_total_kb" "$resource_containers" "$resource_memory_bytes" "$resource_cpu_percent" "$resource_max_memory_percent" "$candidate_image_bytes" "$eros_state_file" "$eros_state_sha"
+          rm -f "$inventory_script" "$resource_script" "$eros_collector" "$eros_state_script" "$(dirname "$eros_collector")/sanitize-kamal-inventory.py" "$(dirname "$eros_collector")/sanitize-kamal-resources.py"
           rmdir "$(dirname "$inventory_script")"
           REMOTE
           )"
           while IFS='=' read -r key value; do
             case "$key" in
-              baseline_path|baseline_sha|inventory_sha|current_sha|prisma_head|prisma_migrations|agata_head|postgres_system_identifier|docker_free_kb|memory_available_kb|memory_total_kb|running_resource_samples|container_memory_used_bytes|container_cpu_percent_sum|max_container_memory_percent|candidate_image_bytes)
+              baseline_path|baseline_sha|inventory_sha|current_sha|prisma_head|prisma_migrations|agata_head|postgres_system_identifier|docker_free_kb|memory_available_kb|memory_total_kb|running_resource_samples|container_memory_used_bytes|container_cpu_percent_sum|max_container_memory_percent|candidate_image_bytes|no_eros_state_path|no_eros_state_sha)
                 printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"
                 printf -- '- %s: %s\n' "$key" "$value" >> "$GITHUB_STEP_SUMMARY"
                 ;;
             esac
           done <<< "$facts"
-      - name: Verify candidate migrations match the live database
+      - name: Verify application source matches the live production SHA
+        if: inputs.mode == 'cutover'
+        env:
+          APP_SOURCE_SHA: ${{ inputs.app_source_sha }}
+          LIVE_SOURCE_SHA: ${{ steps.baseline.outputs.current_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$APP_SOURCE_SHA" =~ ^[0-9a-f]{40}$ && "$LIVE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$APP_SOURCE_SHA" = "$LIVE_SOURCE_SHA"
+          echo "Verified APP_SOURCE_SHA=$APP_SOURCE_SHA matches current production RELEASE_SHA." >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify application source migrations match the live database
         if: inputs.mode == 'cutover'
         env:
           PRISMA_HEAD: ${{ steps.baseline.outputs.prisma_head }}
@@ -585,12 +757,12 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/verify-kamal-migration-parity.py \
-            --prisma-directory packages/db/prisma/migrations \
+            --prisma-directory app-source/packages/db/prisma/migrations \
             --prisma-current-migrations "$PRISMA_MIGRATIONS" \
             --prisma-current-head "$PRISMA_HEAD" \
-            --agata-directory services/agata/migrations/versions \
+            --agata-directory app-source/services/agata/migrations/versions \
             --agata-current-head "$AGATA_HEAD"
-          echo 'Verified no candidate database migrations are pending; cutover uses an unchanged schema.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Verified no migrations are pending for the selected production application source.' >> "$GITHUB_STEP_SUMMARY"
       - name: Verify fresh PostgreSQL and media backup with isolated restore
         if: inputs.mode == 'cutover'
         id: backuprestore
@@ -723,6 +895,8 @@ jobs:
         env:
           BASELINE_PATH: ${{ steps.baseline.outputs.baseline_path }}
           BASELINE_SHA: ${{ steps.baseline.outputs.baseline_sha }}
+          NO_EROS_STATE_PATH: ${{ steps.baseline.outputs.no_eros_state_path }}
+          NO_EROS_STATE_SHA: ${{ steps.baseline.outputs.no_eros_state_sha }}
           MEDIA_SOURCE_MANIFEST_SHA: ${{ steps.backuprestore.outputs.media_source_manifest_sha256 }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -731,6 +905,8 @@ jobs:
           remote_script_dir="/run/gpoint-kamal/${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           remote_script="$remote_script_dir/pause-legacy-gpoint.sh"
           remote_media_tree_helper="$remote_script_dir/media-tree.py"
+          remote_eros_collector="$remote_script_dir/eros-state-collector.py"
+          remote_eros_state="$remote_script_dir/kamal_eros_state.py"
           ssh_opts=(-i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
           ssh -T "${ssh_opts[@]}" "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$remote_script_dir" <<'REMOTE'
@@ -742,9 +918,19 @@ jobs:
           REMOTE
           scp "${ssh_opts[@]}" scripts/pause-legacy-gpoint.sh "root@${GPOINT_PRODUCTION_HOST}:$remote_script"
           scp "${ssh_opts[@]}" scripts/gpoint-media-tree.py "root@${GPOINT_PRODUCTION_HOST}:$remote_media_tree_helper"
+          scp "${ssh_opts[@]}" scripts/collect_kamal_eros_state.py "root@${GPOINT_PRODUCTION_HOST}:$remote_eros_collector"
+          scp "${ssh_opts[@]}" scripts/kamal_eros_state.py "root@${GPOINT_PRODUCTION_HOST}:$remote_eros_state"
+          scp "${ssh_opts[@]}" scripts/sanitize-kamal-inventory.py "root@${GPOINT_PRODUCTION_HOST}:$remote_script_dir/sanitize-kamal-inventory.py"
+          scp "${ssh_opts[@]}" scripts/sanitize-kamal-resources.py "root@${GPOINT_PRODUCTION_HOST}:$remote_script_dir/sanitize-kamal-resources.py"
+          eros_collector_sha="$(sha256sum scripts/collect_kamal_eros_state.py | awk '{print $1}')"
+          eros_state_sha="$(sha256sum scripts/kamal_eros_state.py | awk '{print $1}')"
+          eros_inventory_sanitizer_sha="$(sha256sum scripts/sanitize-kamal-inventory.py | awk '{print $1}')"
+          eros_resource_sanitizer_sha="$(sha256sum scripts/sanitize-kamal-resources.py | awk '{print $1}')"
           ssh -T "${ssh_opts[@]}" "root@${GPOINT_PRODUCTION_HOST}" bash "$remote_script" \
             "$CANDIDATE_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$BASELINE_PATH" "$BASELINE_SHA" \
-            "$MEDIA_SOURCE_MANIFEST_SHA" "$remote_media_tree_helper"
+            "$MEDIA_SOURCE_MANIFEST_SHA" "$remote_media_tree_helper" "$remote_eros_collector" \
+            "$remote_eros_state" "$eros_collector_sha" "$eros_state_sha" \
+            "$eros_inventory_sanitizer_sha" "$eros_resource_sanitizer_sha"
       - name: Stop Caddy for Kamal Proxy public bind
         if: inputs.mode == 'cutover'
         env:
@@ -778,7 +964,7 @@ jobs:
               --volume "$HOME/.ssh:/root/.ssh:ro" \
               --volume "$HOME/.docker:/root/.docker:ro" \
               --workdir /workdir \
-              --env GPOINT_COMMIT_SHA --env GPOINT_PRODUCTION_HOST --env GPOINT_SSH_KEY \
+              --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA --env GPOINT_PRODUCTION_HOST --env GPOINT_SSH_KEY \
               --env GPOINT_KNOWN_HOSTS_FILE --env KAMAL_REGISTRY_PASSWORD \
               --env GPOINT_KAMAL_SERVICE --env GPOINT_KAMAL_EXPECTED_DIGEST --env KAMAL_ROLES \
               ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 \
@@ -821,7 +1007,7 @@ jobs:
               --volume "$HOME/.ssh:/root/.ssh:ro" \
               --volume "$HOME/.docker:/root/.docker:ro" \
               --workdir /workdir \
-              --env GPOINT_COMMIT_SHA --env GPOINT_PRODUCTION_HOST --env GPOINT_SSH_KEY \
+              --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA --env GPOINT_PRODUCTION_HOST --env GPOINT_SSH_KEY \
               --env GPOINT_KNOWN_HOSTS_FILE --env KAMAL_REGISTRY_PASSWORD \
               --env GPOINT_KAMAL_SERVICE --env GPOINT_KAMAL_EXPECTED_DIGEST --env KAMAL_ROLES \
               ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 \
@@ -840,6 +1026,8 @@ jobs:
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
           BASELINE_PATH: ${{ steps.baseline.outputs.baseline_path }}
           BASELINE_SHA: ${{ steps.baseline.outputs.baseline_sha }}
+          NO_EROS_STATE_PATH: ${{ steps.baseline.outputs.no_eros_state_path }}
+          NO_EROS_STATE_SHA: ${{ steps.baseline.outputs.no_eros_state_sha }}
           BACKUP_PATH: ${{ steps.backuprestore.outputs.backup_path }}
           BACKUP_SHA: ${{ steps.backuprestore.outputs.backup_sha256 }}
           RESTORE_EVIDENCE_PATH: ${{ steps.backuprestore.outputs.restore_evidence_path }}
@@ -861,6 +1049,29 @@ jobs:
           done
           remote_manifest_writer="/run/gpoint-kamal-manifest-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.py"
           remote_manifest_writer_sha="$(sha256sum scripts/write-kamal-production-manifest.py | awk '{print $1}')"
+          remote_eros_dir="/run/gpoint-kamal/${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          remote_eros_collector="$remote_eros_dir/eros-state-collector.py"
+          remote_eros_state="$remote_eros_dir/kamal_eros_state.py"
+          eros_collector_sha="$(sha256sum scripts/collect_kamal_eros_state.py | awk '{print $1}')"
+          eros_state_helper_sha="$(sha256sum scripts/kamal_eros_state.py | awk '{print $1}')"
+          eros_inventory_sanitizer_sha="$(sha256sum scripts/sanitize-kamal-inventory.py | awk '{print $1}')"
+          eros_resource_sanitizer_sha="$(sha256sum scripts/sanitize-kamal-resources.py | awk '{print $1}')"
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$remote_eros_dir" "$eros_collector_sha" "$eros_state_helper_sha" "$eros_inventory_sanitizer_sha" "$eros_resource_sanitizer_sha" <<'REMOTE_EROS_HELPERS'
+          set -euo pipefail
+          dir="$1"
+          [[ "$dir" =~ ^/run/gpoint-kamal/[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
+          [[ "$2" =~ ^[0-9a-f]{64}$ && "$3" =~ ^[0-9a-f]{64}$ && "$4" =~ ^[0-9a-f]{64}$ && "$5" =~ ^[0-9a-f]{64}$ ]]
+          test -d "$dir" && test ! -L "$dir"
+          for pair in \
+            "$dir/eros-state-collector.py:$2" \
+            "$dir/kamal_eros_state.py:$3" \
+            "$dir/sanitize-kamal-inventory.py:$4" \
+            "$dir/sanitize-kamal-resources.py:$5"; do
+            file="${pair%%:*}"; expected="${pair#*:}"
+            test -f "$file" && test ! -L "$file"
+            test "$(sha256sum "$file" | awk '{print $1}')" = "$expected"
+          done
+          REMOTE_EROS_HELPERS
           ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$remote_manifest_writer" <<'REMOTE_CHECK'
           set -euo pipefail
           [[ "$1" =~ ^/run/gpoint-kamal-manifest-[0-9]+-[0-9]+\.py$ ]]
@@ -868,20 +1079,24 @@ jobs:
           REMOTE_CHECK
           scp scripts/write-kamal-production-manifest.py "root@${GPOINT_PRODUCTION_HOST}:${remote_manifest_writer}"
           verify_log="$RUNNER_TEMP/kamal-verify-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
-          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$BASELINE_PATH" "$BASELINE_SHA" "$BACKUP_PATH" "$BACKUP_SHA" "$RESTORE_EVIDENCE_PATH" "$RESTORE_EVIDENCE_SHA" "$DEPLOYMENT_ID" "$remote_manifest_writer" "$remote_manifest_writer_sha" "$MEDIA_BACKUP_PATH" "$MEDIA_BACKUP_SHA" "$MEDIA_SOURCE_MANIFEST_SHA" "$MEDIA_RESTORE_MANIFEST_SHA" "$MEDIA_FILE_COUNT" "$MEDIA_DIRECTORY_COUNT" "$MEDIA_TOTAL_BYTES" "$MEDIA_BACKUP_BYTES" <<'REMOTE' | tee "$verify_log"
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$BASELINE_PATH" "$BASELINE_SHA" "$BACKUP_PATH" "$BACKUP_SHA" "$RESTORE_EVIDENCE_PATH" "$RESTORE_EVIDENCE_SHA" "$DEPLOYMENT_ID" "$remote_manifest_writer" "$remote_manifest_writer_sha" "$MEDIA_BACKUP_PATH" "$MEDIA_BACKUP_SHA" "$MEDIA_SOURCE_MANIFEST_SHA" "$MEDIA_RESTORE_MANIFEST_SHA" "$MEDIA_FILE_COUNT" "$MEDIA_DIRECTORY_COUNT" "$MEDIA_TOTAL_BYTES" "$MEDIA_BACKUP_BYTES" "$APP_SOURCE_SHA" "$eros_collector_sha" "$eros_state_helper_sha" "$NO_EROS_STATE_PATH" "$NO_EROS_STATE_SHA" "$eros_inventory_sanitizer_sha" "$eros_resource_sanitizer_sha" <<'REMOTE' | tee "$verify_log"
           set -euo pipefail
           sha="$1"; version="$2"; app="$3"; agata="$4"; miniapp="$5"; run_id="$6"; attempt="$7"; baseline_file="$8"; expected_baseline_sha="$9"; backup_file="${10}"; expected_backup_sha="${11}"; restore_file="${12}"; expected_restore_sha="${13}"
           manifest_writer="${15}"; expected_manifest_writer_sha="${16}"
           media_backup_file="${17}"; expected_media_backup_sha="${18}"; media_source_manifest_sha="${19}"; media_restore_manifest_sha="${20}"
-          media_file_count="${21}"; media_directory_count="${22}"; media_total_bytes="${23}"; media_backup_bytes="${24}"
+          media_file_count="${21}"; media_directory_count="${22}"; media_total_bytes="${23}"; media_backup_bytes="${24}"; app_source_sha="${25}"
+          eros_collector_sha="${26}"; eros_state_helper_sha="${27}"; expected_no_eros_file="${28}"; expected_no_eros_file_sha="${29}"
+          eros_inventory_sanitizer_sha="${30}"; eros_resource_sanitizer_sha="${31}"
           [[ "$manifest_writer" =~ ^/run/gpoint-kamal-manifest-[0-9]+-[0-9]+\.py$ && "$expected_manifest_writer_sha" =~ ^[0-9a-f]{64}$ ]]
           trap 'rm -f -- "$manifest_writer"' EXIT
           test "$(sha256sum "$manifest_writer" | awk '{print $1}')" = "$expected_manifest_writer_sha"
           chmod 0700 "$manifest_writer"
-          [[ "$sha" =~ ^[0-9a-f]{40}$ && "$expected_baseline_sha" =~ ^[0-9a-f]{64}$ && "$expected_backup_sha" =~ ^[0-9a-f]{64}$ && "$expected_restore_sha" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$sha" =~ ^[0-9a-f]{40}$ && "$app_source_sha" =~ ^[0-9a-f]{40}$ && "$expected_baseline_sha" =~ ^[0-9a-f]{64}$ && "$expected_backup_sha" =~ ^[0-9a-f]{64}$ && "$expected_restore_sha" =~ ^[0-9a-f]{64}$ ]]
           [[ "$expected_media_backup_sha" =~ ^[0-9a-f]{64}$ && "$media_source_manifest_sha" =~ ^[0-9a-f]{64}$ && "$media_restore_manifest_sha" =~ ^[0-9a-f]{64}$ ]]
           [[ "$media_file_count" =~ ^[0-9]+$ && "$media_directory_count" =~ ^[0-9]+$ && "$media_total_bytes" =~ ^[0-9]+$ && "$media_backup_bytes" =~ ^[0-9]+$ && "$media_backup_bytes" -gt 0 ]]
           [[ "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
+          [[ "$eros_collector_sha" =~ ^[0-9a-f]{64}$ && "$eros_state_helper_sha" =~ ^[0-9a-f]{64}$ && "$expected_no_eros_file_sha" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$eros_inventory_sanitizer_sha" =~ ^[0-9a-f]{64}$ && "$eros_resource_sanitizer_sha" =~ ^[0-9a-f]{64}$ ]]
           [[ "$baseline_file" == "/opt/gpoint/release-logs/${sha}/kamal-cutover-baseline-${run_id}-${attempt}.txt" ]]
           test -s "$baseline_file"
           test "$(sha256sum "$baseline_file" | awk '{print $1}')" = "$expected_baseline_sha"
@@ -947,12 +1162,6 @@ jobs:
           test "$(docker inspect --format '{{.Id}}' shared_postgres_1)" = "$(baseline_value POSTGRES_CONTAINER_ID)"
           test "$(docker inspect --format '{{.Image}}' shared_postgres_1)" = "$(baseline_value POSTGRES_IMAGE_ID)"
           test "$(docker inspect --format '{{.State.Running}}' shared_postgres_1)" = true
-          test "$(docker inspect --format '{{.Id}}' compose-eros-1)" = "$(baseline_value EROS_CONTAINER_ID)"
-          test "$(docker inspect --format '{{.Image}}' compose-eros-1)" = "$(baseline_value EROS_IMAGE_ID)"
-          test "$(docker inspect --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' compose-eros-1)" = 'true healthy'
-          test "$(docker inspect --format '{{.Id}}' compose-eros-embedding-relay-1)" = "$(baseline_value EROS_RELAY_CONTAINER_ID)"
-          test "$(docker inspect --format '{{.Image}}' compose-eros-embedding-relay-1)" = "$(baseline_value EROS_RELAY_IMAGE_ID)"
-          test "$(docker inspect --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' compose-eros-embedding-relay-1)" = 'true healthy'
           database_facts="$(docker exec -i shared_postgres_1 sh -ec 'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d gpoint' <<'SQL'
           SELECT json_build_object(
             'systemIdentifier',(SELECT system_identifier::text FROM pg_control_system()),
@@ -968,8 +1177,31 @@ jobs:
           test "$postgres_system_identifier" = "$(baseline_value POSTGRES_SYSTEM_IDENTIFIER)"
           test "$postgres_server_version_num" = "$(baseline_value POSTGRES_SERVER_VERSION_NUM)"
           test "$(printf '%s' "$database_facts" | sha256sum | awk '{print $1}')" = "$(baseline_value POSTGRES_ACL_FINGERPRINT)"
-          network_fingerprint="$(docker network inspect gpoint_eros_api gpoint_eros_data gpoint_eros_embeddings | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(json.dumps(sorted(({"name":r["Name"],"id":r["Id"],"internal":r["Internal"],"ipam":r.get("IPAM",{}).get("Config",[])} for r in rows),key=lambda r:r["name"]),sort_keys=True,separators=(",",":"))' | sha256sum | awk '{print $1}')"
-          test "$network_fingerprint" = "$(baseline_value EROS_NETWORK_FINGERPRINT)"
+          no_eros_baseline_file="$(baseline_value NO_EROS_STATE_FILE)"
+          no_eros_baseline_sha="$(baseline_value NO_EROS_STATE_SHA256)"
+          [[ "$expected_no_eros_file" == "/opt/gpoint/release-logs/${sha}/kamal-no-eros-state-${run_id}-${attempt}.json" ]]
+          [[ "$no_eros_baseline_file" == "$expected_no_eros_file" && "$no_eros_baseline_sha" == "$expected_no_eros_file_sha" ]]
+          test "$(sha256sum "$no_eros_baseline_file" | awk '{print $1}')" = "$no_eros_baseline_sha"
+          no_eros_dir="/run/gpoint-kamal/${sha}-${run_id}-${attempt}"
+          eros_collector="$no_eros_dir/eros-state-collector.py"
+          eros_state_helper="$no_eros_dir/kamal_eros_state.py"
+          [[ "$eros_collector" == "/run/gpoint-kamal/${sha}-${run_id}-${attempt}/eros-state-collector.py" ]]
+          [[ "$eros_state_helper" == "/run/gpoint-kamal/${sha}-${run_id}-${attempt}/kamal_eros_state.py" ]]
+          test -s "$eros_collector" && test -s "$eros_state_helper"
+          test "$(sha256sum "$eros_collector" | awk '{print $1}')" = "$eros_collector_sha"
+          test "$(sha256sum "$eros_state_helper" | awk '{print $1}')" = "$eros_state_helper_sha"
+          test "$(sha256sum "$no_eros_dir/sanitize-kamal-inventory.py" | awk '{print $1}')" = "$eros_inventory_sanitizer_sha"
+          test "$(sha256sum "$no_eros_dir/sanitize-kamal-resources.py" | awk '{print $1}')" = "$eros_resource_sanitizer_sha"
+          no_eros_postflight_file="/opt/gpoint/release-logs/${sha}/kamal-no-eros-state-${run_id}-${attempt}-postflight.json"
+          test ! -e "$no_eros_postflight_file"
+          no_eros_collect_result="$(python3 "$eros_collector" --output "$no_eros_postflight_file")"
+          grep -qx 'EROS_STATE_COLLECT=PASS' <<< "$no_eros_collect_result"
+          no_eros_postflight_content_sha="$(sed -n 's/^EROS_STATE_SHA256=//p' <<< "$no_eros_collect_result")"
+          [[ "$no_eros_postflight_content_sha" =~ ^[0-9a-f]{64}$ ]]
+          no_eros_postflight_sha="$(sha256sum "$no_eros_postflight_file" | awk '{print $1}')"
+          [[ "$no_eros_postflight_sha" =~ ^[0-9a-f]{64}$ ]]
+          python3 "$eros_state_helper" compare --before "$no_eros_baseline_file" --after "$no_eros_postflight_file"
+          echo 'GPOINT_NO_EROS_BASELINE_POSTFLIGHT=PASS'
           caddy_backup="/opt/gpoint/backups/caddy-before-kamal-${sha}-${run_id}-${attempt}"
           sha256sum --check --status "${caddy_backup}.sha256"
           test "$(awk '{print $1}' "${caddy_backup}.sha256")" = "$(baseline_value CADDYFILE_SHA256)"
@@ -990,7 +1222,7 @@ jobs:
             container="$service-$role-$version"
             docker inspect "$container" >/dev/null
             test "$(docker inspect --format '{{.State.Running}}' "$container")" = true
-            test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$container")" = "$sha"
+            test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$container")" = "$app_source_sha"
             image_id="$(docker inspect --format '{{.Image}}' "$container")"
             docker image inspect "$image_id" --format '{{json .RepoDigests}}' | grep -Fq "$repository@$digest"
             case "$service:$role" in
@@ -1058,7 +1290,9 @@ jobs:
           install -d -o root -g root -m 0700 "$manifest_dir"
           test ! -e "$manifest_file"
           python3 "$manifest_writer" \
-            --output "$manifest_file" --sha "$sha" --version "$version" \
+            --output "$manifest_file" --sha "$sha" --app-source-sha "$app_source_sha" --version "$version" \
+            --no-eros-baseline-path "$no_eros_baseline_file" --no-eros-baseline-sha "$no_eros_baseline_sha" \
+            --no-eros-postflight-path "$no_eros_postflight_file" --no-eros-postflight-sha "$no_eros_postflight_sha" \
             --app-digest "$app" --agata-digest "$agata" --miniapp-digest "$miniapp" \
             --run-id "$run_id" --attempt "$attempt" --deployment-id "$deployment_id" \
             --baseline-path "$baseline_file" --baseline-sha "$expected_baseline_sha" \
@@ -1071,10 +1305,15 @@ jobs:
             --media-file-count "$media_file_count" --media-directory-count "$media_directory_count" \
             --media-total-bytes "$media_total_bytes" --media-backup-bytes "$media_backup_bytes" \
             --agata-candidate-head "$expected_agata_head" --agata-live-head "$actual_agata_head" \
-            --postgres-system-identifier "$postgres_system_identifier" --network-fingerprint "$network_fingerprint"
+            --postgres-system-identifier "$postgres_system_identifier" \
+            --postgres-acl-fingerprint "$(baseline_value POSTGRES_ACL_FINGERPRINT)"
           manifest_sha="$(sha256sum "$manifest_file" | awk '{print $1}')"
           [[ "$manifest_sha" =~ ^[0-9a-f]{64}$ ]]
           echo "GPOINT_KAMAL_MANIFEST_SHA256=$manifest_sha PATH=$manifest_file"
+          rm -f -- "$eros_collector" "$eros_state_helper" \
+            "$no_eros_dir/sanitize-kamal-inventory.py" "$no_eros_dir/sanitize-kamal-resources.py" \
+            "$no_eros_dir/pause-no-eros-state.json" "$no_eros_dir/pause-legacy-gpoint.sh"
+          rmdir "$no_eros_dir"
           REMOTE
           mapfile -t manifest_sha_rows < <(sed -n 's/^GPOINT_KAMAL_MANIFEST_SHA256=\([0-9a-f]*\) PATH=.*/\1/p' "$verify_log")
           test "${#manifest_sha_rows[@]}" -eq 1
@@ -1095,10 +1334,10 @@ jobs:
           set -euo pipefail
           state=failure
           if [[ "$DEPLOY_JOB_STATUS" == success && "$VERIFY_OUTCOME" == success ]]; then state=success; fi
-          description="Kamal $state SHA $CANDIDATE_SHA"
+          description="Kamal $state workflow $CANDIDATE_SHA app-source $APP_SOURCE_SHA"
           if [[ "$state" == success ]]; then
             [[ "$MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]]
-            description="Kamal $state SHA $CANDIDATE_SHA manifest $MANIFEST_SHA"
+            description="Kamal $state workflow $CANDIDATE_SHA app-source $APP_SOURCE_SHA manifest $MANIFEST_SHA"
           fi
           echo "GITHUB_DEPLOYMENT_STATUS=$state SHA=$CANDIDATE_SHA MANIFEST_SHA=$MANIFEST_SHA" >> "$GITHUB_STEP_SUMMARY"
           gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \

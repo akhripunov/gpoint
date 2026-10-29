@@ -10,7 +10,7 @@ servers:
     proxy: false
     env:
       clear:
-        RELEASE_SHA: <%= ENV.fetch("GPOINT_COMMIT_SHA") %>
+        RELEASE_SHA: <%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>
     options:
       env-file:
         - /opt/gpoint/env/production.env
@@ -22,7 +22,7 @@ servers:
     proxy: false
     env:
       clear:
-        RELEASE_SHA: <%= ENV.fetch("GPOINT_COMMIT_SHA") %>
+        RELEASE_SHA: <%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>
     options:
       env-file:
         - /opt/gpoint/env/production.env

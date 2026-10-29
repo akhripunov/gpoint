@@ -249,32 +249,88 @@ restore_container_id="$(docker run -d --name "$restore_name" --label "gpoint.kam
   --network none --env POSTGRES_USER=gpoint_restore_admin \
   --env POSTGRES_PASSWORD="$restore_password" --env POSTGRES_DB=gpoint \
   --volume "$restore_dir:$pgdata" "$postgres_image")"
-test -n "$restore_container_id"
+[[ "$restore_container_id" =~ ^[0-9a-f]{64}$ ]]
+[[ "$(docker inspect --format '{{.Id}} {{.Image}} {{.HostConfig.NetworkMode}}' "$restore_container_id")" == "$restore_container_id $postgres_image none" ]]
 
 ready=0
 for _ in $(seq 1 60); do
-  if docker exec "$restore_name" pg_isready -q -U gpoint_restore_admin -d gpoint; then ready=1; break; fi
+  if docker exec "$restore_container_id" pg_isready -q -U gpoint_restore_admin -d gpoint; then ready=1; break; fi
   sleep 2
 done
 test "$ready" = 1
-docker exec -i "$restore_name" psql -Xq -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
+docker exec -i "$restore_container_id" psql -Xq -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
   < "$roles_file" >/dev/null
+
+# The isolated PostgreSQL image creates an empty `public` schema during
+# initdb, while this archive contains its own CREATE SCHEMA entry. Remove only
+# the stock empty schema so pg_restore can recreate the archived schema ACL and
+# ownership. Never cascade: any unexpected object or customized schema state
+# fails closed before the restore continues.
+public_schema_state="$(docker exec -i "$restore_container_id" psql -XqAt -v ON_ERROR_STOP=1 \
+  -U gpoint_restore_admin -d gpoint <<'SQL'
+WITH public_schema AS (
+  SELECT oid, nspowner, nspacl
+  FROM pg_namespace
+  WHERE nspname = 'public'
+), schema_objects AS (
+  SELECT
+    EXISTS (SELECT 1 FROM pg_class WHERE relnamespace = p.oid)
+    OR EXISTS (SELECT 1 FROM pg_proc WHERE pronamespace = p.oid)
+    OR EXISTS (SELECT 1 FROM pg_type WHERE typnamespace = p.oid)
+    OR EXISTS (SELECT 1 FROM pg_collation WHERE collnamespace = p.oid)
+    OR EXISTS (SELECT 1 FROM pg_conversion WHERE connamespace = p.oid)
+    OR EXISTS (SELECT 1 FROM pg_operator WHERE oprnamespace = p.oid)
+    OR EXISTS (SELECT 1 FROM pg_opclass WHERE opcnamespace = p.oid)
+    OR EXISTS (SELECT 1 FROM pg_opfamily WHERE opfnamespace = p.oid)
+    OR EXISTS (SELECT 1 FROM pg_ts_config WHERE cfgnamespace = p.oid)
+    OR EXISTS (SELECT 1 FROM pg_ts_dict WHERE dictnamespace = p.oid)
+    OR EXISTS (SELECT 1 FROM pg_ts_parser WHERE prsnamespace = p.oid)
+    OR EXISTS (SELECT 1 FROM pg_ts_template WHERE tmplnamespace = p.oid)
+    OR EXISTS (SELECT 1 FROM pg_extension WHERE extnamespace = p.oid)
+    OR EXISTS (SELECT 1 FROM pg_statistic_ext WHERE stxnamespace = p.oid)
+    AS has_objects
+  FROM public_schema p
+), schema_acl AS (
+  SELECT
+    count(*) = 3
+    AND bool_and(
+      (grantee = p.nspowner AND privilege_type IN ('USAGE', 'CREATE'))
+      OR (grantee = 0 AND privilege_type = 'USAGE')
+    ) AS is_default
+  FROM public_schema p
+  CROSS JOIN LATERAL aclexplode(COALESCE(p.nspacl, acldefault('n', p.nspowner)))
+)
+SELECT CASE
+  WHEN NOT EXISTS (SELECT 1 FROM public_schema) THEN 'PUBLIC_SCHEMA_MISSING'
+  WHEN (SELECT pg_get_userbyid(nspowner) FROM public_schema) <> 'pg_database_owner' THEN 'PUBLIC_SCHEMA_OWNER_CHANGED'
+  WHEN COALESCE((SELECT has_objects FROM schema_objects), true) THEN 'PUBLIC_SCHEMA_NOT_EMPTY'
+  WHEN COALESCE((SELECT is_default FROM schema_acl), false) IS NOT TRUE THEN 'PUBLIC_SCHEMA_ACL_CHANGED'
+  ELSE 'PUBLIC_SCHEMA_PRISTINE'
+END;
+SQL
+)"
+test "$public_schema_state" = PUBLIC_SCHEMA_PRISTINE
+docker exec "$restore_container_id" psql -Xq -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
+  -c 'DROP SCHEMA public RESTRICT' >/dev/null
+test "$(docker exec "$restore_container_id" psql -XqAt -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
+  -c "SELECT to_regnamespace('public') IS NULL")" = t
+
 age -d -i "$age_identity" "$offsite_copy" | \
-  docker exec -i "$restore_name" pg_restore --exit-on-error --no-owner -U gpoint_restore_admin -d gpoint >/dev/null
-restored_tables="$(docker exec "$restore_name" psql -XqAt -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
+  docker exec -i "$restore_container_id" pg_restore --exit-on-error --no-owner -U gpoint_restore_admin -d gpoint >/dev/null
+restored_tables="$(docker exec "$restore_container_id" psql -XqAt -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
   -c "SELECT count(*) FROM pg_tables WHERE schemaname IN ('public','agata','gsales','gsales_meta','agata_identity')")"
 test "$restored_tables" = "$source_tables"
-restored_bytes="$(docker exec "$restore_name" psql -XqAt -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
+restored_bytes="$(docker exec "$restore_container_id" psql -XqAt -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
   -c "SELECT pg_database_size('gpoint')")"
 [[ "$restored_bytes" =~ ^[0-9]+$ && "$restored_bytes" -gt 0 ]]
 restored_prisma=NONE
 if [[ "$(baseline_value PRISMA_HEAD)" != NONE ]]; then
-  restored_prisma="$(docker exec "$restore_name" psql -XqAt -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
+  restored_prisma="$(docker exec "$restore_container_id" psql -XqAt -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
     -c "SELECT migration_name FROM public._prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY finished_at DESC LIMIT 1")"
 fi
 restored_agata=ABSENT
 if [[ "$(baseline_value AGATA_HEAD)" != ABSENT ]]; then
-  restored_agata="$(docker exec "$restore_name" psql -XqAt -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
+  restored_agata="$(docker exec "$restore_container_id" psql -XqAt -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
     -c "SELECT version_num FROM agata.alembic_version")"
 fi
 test "$restored_prisma" = "$(baseline_value PRISMA_HEAD)"

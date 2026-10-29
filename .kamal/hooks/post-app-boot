@@ -4,12 +4,14 @@ set -euo pipefail
 service="${GPOINT_KAMAL_SERVICE:?GPOINT_KAMAL_SERVICE is required}"
 version="${KAMAL_VERSION:?KAMAL_VERSION is required}"
 candidate="${GPOINT_COMMIT_SHA:?GPOINT_COMMIT_SHA is required}"
+app_source_sha="${GPOINT_APP_SOURCE_SHA:?GPOINT_APP_SOURCE_SHA is required}"
 hosts="${KAMAL_HOSTS:?KAMAL_HOSTS is required}"
 roles="${KAMAL_ROLES:-}"
 ssh_key="${GPOINT_SSH_KEY:?GPOINT_SSH_KEY is required}"
 known_hosts="${GPOINT_KNOWN_HOSTS_FILE:?GPOINT_KNOWN_HOSTS_FILE is required}"
 
 [[ "$candidate" =~ ^[0-9a-f]{40}$ ]]
+[[ "$app_source_sha" =~ ^[0-9a-f]{40}$ ]]
 [[ "$version" == "$candidate-"* && "$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
 [[ -r "$ssh_key" && -r "$known_hosts" ]]
 
@@ -21,7 +23,7 @@ case "$service" in
     default_roles='api,memory-worker'
     ;;
   gpoint-miniapp)
-    exit 0
+    default_roles='web'
     ;;
   *)
     echo 'Unrecognized GPoint Kamal service' >&2
@@ -40,6 +42,7 @@ for role in "${role_list[@]}"; do
     gpoint-core:worker|gpoint-core:bot) networks='gpoint_app:,shared_internal:' ;;
     gpoint-agata:api) networks='gpoint_app:agata-api,shared_internal:agata-api' ;;
     gpoint-agata:memory-worker) networks='gpoint_app:,shared_internal:' ;;
+    gpoint-miniapp:web) networks='gpoint_app:' ;;
     *)
       echo 'Unrecognized GPoint Kamal role' >&2
       exit 1
@@ -53,15 +56,15 @@ for role in "${role_list[@]}"; do
       -o IdentitiesOnly=yes \
       -o StrictHostKeyChecking=yes \
       -o UserKnownHostsFile="$known_hosts" \
-      "root@$host" bash -s -- "$service" "$role" "$version" "$networks" "$candidate" <<'REMOTE'
+      "root@$host" bash -s -- "$service" "$role" "$version" "$networks" "$candidate" "$app_source_sha" <<'REMOTE'
 set -euo pipefail
-service="$1"; role="$2"; version="$3"; networks="$4"; candidate="$5"
+service="$1"; role="$2"; version="$3"; networks="$4"; candidate="$5"; app_source_sha="$6"
 container="${service}-${role}-${version}"
-[[ "$container" =~ ^[A-Za-z0-9._-]+$ && "$candidate" =~ ^[0-9a-f]{40}$ ]]
+[[ "$container" =~ ^[A-Za-z0-9._-]+$ && "$candidate" =~ ^[0-9a-f]{40}$ && "$app_source_sha" =~ ^[0-9a-f]{40}$ ]]
 [[ "$version" == "$candidate-"* && "$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
 id="$(docker inspect --format '{{.Id}}' "$container")"
 test "$(docker inspect --format '{{.State.Running}}' "$id")" = true
-test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$id")" = "$candidate"
+test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$id")" = "$app_source_sha"
 
 IFS=',' read -r -a network_entries <<< "$networks"
 for entry in "${network_entries[@]}"; do
@@ -118,5 +121,29 @@ if [[ "$service:$role" == "gpoint-agata:memory-worker" ]]; then
   test "$healthy" -eq 1 || { echo 'AGATA memory worker did not become healthy after network attachment' >&2; exit 1; }
 fi
 REMOTE
+
+  if [[ "$service:$role" == "gpoint-miniapp:web" ]]; then
+    ssh -T -i "$ssh_key" \
+      -o BatchMode=yes \
+      -o IdentitiesOnly=yes \
+      -o StrictHostKeyChecking=yes \
+      -o UserKnownHostsFile="$known_hosts" \
+      "root@$host" bash -s -- "$service" "$role" "$version" "$candidate" "$app_source_sha" <<'REMOTE_MINIAPP'
+set -euo pipefail
+service="$1"; role="$2"; version="$3"; candidate="$4"; app_source_sha="$5"
+container="${service}-${role}-${version}"
+api_container="gpoint-core-api-${version}"
+[[ "$container" =~ ^[A-Za-z0-9._-]+$ && "$candidate" =~ ^[0-9a-f]{40}$ && "$app_source_sha" =~ ^[0-9a-f]{40}$ ]]
+id="$(docker inspect --format '{{.Id}}' "$container")"
+docker exec "$id" nginx -t >/dev/null
+test "$(docker inspect --format '{{.State.Running}}' "$api_container")" = true
+test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$api_container")" = "$app_source_sha"
+api_ip="$(docker inspect --format '{{with index .NetworkSettings.Networks "gpoint_app"}}{{.IPAddress}}{{end}}' "$api_container")"
+test -n "$api_ip"
+resolved_ip="$(docker exec "$id" sh -ec 'getent hosts api' | awk 'NR == 1 {print $1}')"
+test "$resolved_ip" = "$api_ip"
+echo 'GPOINT_MINIAPP_API_NETWORK=PASS'
+REMOTE_MINIAPP
+  fi
   done
 done
