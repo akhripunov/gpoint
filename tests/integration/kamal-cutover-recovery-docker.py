@@ -61,14 +61,14 @@ def ensure_image(image: str) -> None:
 
 
 PROBE_CODE = ("import socket,ssl,sys,urllib.request; "
-              "old=socket.getaddrinfo; socket.getaddrinfo=lambda h,p,*a,**k: old(sys.argv[3] if h=='gpoint.amiora.one' and sys.argv[3] else h,p,*a,**k); "
+              "old=socket.getaddrinfo; socket.getaddrinfo=lambda h,p,*a,**k: old(sys.argv[4] if h=='gpoint.amiora.one' and sys.argv[4] else h,p,*a,**k); "
               "ctx=ssl._create_unverified_context(); "
-              "r=urllib.request.Request(sys.argv[0],headers={'Host':sys.argv[2]} if sys.argv[2] else {}); "
+              "r=urllib.request.Request(sys.argv[1],headers={'Host':sys.argv[3]} if sys.argv[3] else {}); "
               "print(urllib.request.urlopen(r,context=ctx,timeout=4).read().decode())")
 
 
 def python_probe_args(url: str, expected: str, host: str, resolve_ip: str) -> list[str]:
-    """Return a Python -c command and its argv values after the code string."""
+    """Return the executable arguments for `python -c CODE URL EXPECTED HOST IP`."""
     return ["-c", PROBE_CODE, url, expected, host, resolve_ip]
 
 

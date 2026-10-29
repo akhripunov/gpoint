@@ -233,7 +233,7 @@ def test_python_c_probe_argv_offsets_and_host_resolution_without_docker(monkeypa
     url = "https://gpoint.amiora.one/api/health/live"
     expected = "probe-body"
     args = integration.python_probe_args(url, expected, "gpoint.amiora.one", "127.0.0.1")
-    monkeypatch.setattr(sys, "argv", args[2:])
+    monkeypatch.setattr(sys, "argv", ["-c", *args[2:]])
     exec(integration.PROBE_CODE, {})
     assert capsys.readouterr().out.strip() == expected
     assert calls["request"] == (url, {"Host": "gpoint.amiora.one"})
