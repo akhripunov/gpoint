@@ -11,9 +11,25 @@ MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
 SPEC.loader.exec_module(MODULE)
 DOCKERFILE = Path(__file__).resolve().parents[1] / 'infra' / 'production' / 'Gpoint.Miniapp.Dockerfile'
+WORKFLOW = Path(__file__).resolve().parents[1] / '.github' / 'workflows' / 'gpoint-first-kamal-cutover.yml'
 
 
 class MiniappStaticManifestTests(unittest.TestCase):
+    def test_runtime_bases_are_immutable_and_nginx_digest_is_hosted_build_input(self):
+        dockerfile = DOCKERFILE.read_text(encoding='utf-8')
+        workflow = WORKFLOW.read_text(encoding='utf-8')
+        self.assertIn(
+            'FROM docker.io/library/node:22-bookworm-slim@sha256:'
+            'de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d',
+            dockerfile,
+        )
+        self.assertIn('ARG NGINX_BASE_DIGEST', dockerfile)
+        self.assertIn('FROM nginx:1.27-alpine@${NGINX_BASE_DIGEST}', dockerfile)
+        self.assertIn('Resolve pinned Nginx linux/amd64 base digest', workflow)
+        self.assertIn('nginx_base_digest: ${{ steps.nginx.outputs.digest }}', workflow)
+        self.assertIn('NGINX_BASE_DIGEST=${{ steps.nginx.outputs.digest }}', workflow)
+        self.assertIn('provenance: mode=max,version=v1', workflow)
+
     def test_production_timestamp_patch_is_validated_and_recorded(self):
         dockerfile = DOCKERFILE.read_text(encoding='utf-8')
         self.assertIn('ARG GPOINT_BUILD_TIME', dockerfile)

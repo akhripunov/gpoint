@@ -89,15 +89,37 @@ def verify_provenance_identity(provenance: Any, sha: str, expected_repo: str,
     raise ValueError('published provenance must bind the exact SHA to the expected remote Git repository')
 
 
+def verify_build_args(provenance: Any, expected: dict[str, str]) -> None:
+    """Require selected BuildKit args to be present in max-level SLSA v1 provenance."""
+    if not isinstance(provenance, dict) or not isinstance(provenance.get('SLSA'), dict):
+        raise ValueError('published image provenance has no SLSA statement')
+    slsa = provenance['SLSA']
+    payload = slsa.get('predicate') if isinstance(slsa.get('predicate'), dict) else slsa
+    build_definition = payload.get('buildDefinition') if isinstance(payload, dict) else None
+    external = build_definition.get('externalParameters') if isinstance(build_definition, dict) else None
+    request = external.get('request') if isinstance(external, dict) else None
+    args = request.get('args') if isinstance(request, dict) else None
+    if not isinstance(args, dict):
+        raise ValueError('published provenance is missing SLSA v1 build arguments')
+    for name, value in expected.items():
+        if args.get('build-arg:' + name) != value:
+            raise ValueError(f'published provenance build argument {name} does not match the expected value')
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) not in (5, 7) or (len(argv) == 7 and argv[5] != '--required-material-sha'):
-        raise SystemExit('usage: verify_native_image_attestation.py SBOM_JSON PROVENANCE_JSON SHA REPOSITORY_URL [--required-material-sha SHA]')
+    if len(argv) not in (5, 7, 9) or (len(argv) >= 7 and argv[5] != '--required-material-sha') or (len(argv) == 9 and argv[7] != '--required-build-arg'):
+        raise SystemExit('usage: verify_native_image_attestation.py SBOM_JSON PROVENANCE_JSON SHA REPOSITORY_URL [--required-material-sha SHA [--required-build-arg NAME=VALUE]]')
     sbom_path, provenance_path, sha, repository = argv[1:5]
-    required_material_sha = argv[6] if len(argv) == 7 else None
+    required_material_sha = argv[6] if len(argv) in (7, 9) else None
     sbom = json.loads(Path(sbom_path).read_text(encoding='utf-8'))
     provenance = json.loads(Path(provenance_path).read_text(encoding='utf-8'))
     verify_sbom(sbom)
     verify_provenance_identity(provenance, sha, repository, required_material_sha)
+    if len(argv) == 9:
+        name, separator, value = argv[8].partition('=')
+        if not separator or not name:
+            raise SystemExit('--required-build-arg must be NAME=VALUE')
+        verify_build_args(provenance, {name: value})
     print('IMAGE_ATTESTATIONS=PASS exact-source-revision=' + sha)
     return 0
 

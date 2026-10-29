@@ -608,11 +608,11 @@ def test_first_cutover_keeps_workflow_and_application_source_identities_separate
     assert "--required-material-sha \"$APP_SOURCE_SHA\"" in build
     assert '"$source_sha" https://github.com/akhripunov/gpoint.git' in build
     deploy = workflow.split("  deploy:\n", 1)[1]
-    dual_sha_block = deploy.index("name: Block production until Kamal runtime honors separate application source SHA")
     owner_gate = deploy.index("name: Recheck owner authorization and current main for production mode")
     ssh_credentials = deploy.index("name: Install verified Kamal SSH credentials")
-    assert dual_sha_block < owner_gate < ssh_credentials
-    assert '[[ "$CANDIDATE_SHA" != "$APP_SOURCE_SHA" ]]' in deploy
+    assert owner_gate < ssh_credentials
+    assert "Block production until Kamal runtime honors separate application source SHA" not in deploy
+    assert '[[ "$CANDIDATE_SHA" != "$APP_SOURCE_SHA" ]]' not in deploy
     source_gate = deploy.index('test "$APP_SOURCE_SHA" = "$LIVE_SOURCE_SHA"')
     migration_gate = deploy.index("name: Verify application source migrations match the live database")
     assert source_gate < migration_gate

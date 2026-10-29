@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from types import ModuleType
 
 import pytest
 
@@ -107,6 +108,71 @@ def test_recovery_step_runs_only_after_successful_pause_and_failed_verify():
     assert 'remote_route_helper="$remote_dir/kamal_proxy_routes.py"' in workflow
     assert "chmod 0700 \"$1\"" in workflow and "test \"$(stat -c '%u:%a' \"$dir\")\" = '0:700'" in workflow
     assert "trap 'rm -rf -- \"$dir\"' EXIT" in workflow
+
+
+def test_hosted_docker_recovery_integration_is_wired_after_immutable_build():
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
+    build = workflow.split("  deploy:\n", 1)[0]
+    step = "Exercise isolated Kamal cutover and exact late-failure recovery"
+    assert step in build
+    assert build.index("Read back exact published images") < build.index(step)
+    assert "tests/integration/kamal-cutover-recovery-docker.py" in build
+    assert "--proxy-digest \"$PROXY_DIGEST\"" in build
+    integration = ROOT / "tests/integration/kamal-cutover-recovery-docker.py"
+    source = integration.read_text()
+    assert "RECOVER.recover(args)" in source
+    assert "KAMAL_CUTOVER_LATE_FAILURE_RECOVERY=PASS" in source
+    assert '"--tls", "--tls-certificate-path=/tmp/gpoint-proxy.crt"' in source
+    assert '"--tls-private-key-path=/tmp/gpoint-proxy.key"' in source
+    assert "https://gpoint.amiora.one/api/health/live" in source
+    assert '"-p"' not in source and '"--publish"' not in source
+
+
+def test_python_c_probe_argv_offsets_and_host_resolution_without_docker(monkeypatch, capsys):
+    integration_path = ROOT / "tests/integration/kamal-cutover-recovery-docker.py"
+    integration_spec = importlib.util.spec_from_file_location("kamal_cutover_recovery_docker", integration_path)
+    integration = importlib.util.module_from_spec(integration_spec)
+    integration_spec.loader.exec_module(integration)
+
+    calls = {}
+    fake_socket = ModuleType("socket")
+    fake_socket.getaddrinfo = lambda host, port, *args, **kwargs: calls.update(resolved=(host, port)) or []
+    fake_ssl = ModuleType("ssl")
+    fake_ssl._create_unverified_context = lambda: object()
+    fake_request = ModuleType("urllib.request")
+
+    class Request:
+        def __init__(self, url, headers=None):
+            calls["request"] = (url, headers)
+
+    class Response:
+        def read(self):
+            return b"probe-body"
+
+    def urlopen(request, context, timeout):
+        fake_socket.getaddrinfo("gpoint.amiora.one", 443)
+        calls["context"] = context
+        calls["timeout"] = timeout
+        return Response()
+
+    fake_request.Request = Request
+    fake_request.urlopen = urlopen
+    fake_urllib = ModuleType("urllib")
+    fake_urllib.request = fake_request
+    monkeypatch.setitem(sys.modules, "socket", fake_socket)
+    monkeypatch.setitem(sys.modules, "ssl", fake_ssl)
+    monkeypatch.setitem(sys.modules, "urllib", fake_urllib)
+    monkeypatch.setitem(sys.modules, "urllib.request", fake_request)
+
+    url = "https://gpoint.amiora.one/api/health/live"
+    expected = "probe-body"
+    args = integration.python_probe_args(url, expected, "gpoint.amiora.one", "127.0.0.1")
+    monkeypatch.setattr(sys, "argv", ["-c", *args[2:]])
+    exec(integration.PROBE_CODE, {})
+    assert capsys.readouterr().out.strip() == expected
+    assert calls["request"] == (url, {"Host": "gpoint.amiora.one"})
+    assert calls["resolved"] == ("127.0.0.1", 443)
+    assert calls["timeout"] == 4
 
 
 def test_staged_remote_layout_imports_sibling_route_module(tmp_path):

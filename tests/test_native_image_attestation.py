@@ -1,4 +1,6 @@
 import importlib.util
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -145,6 +147,56 @@ class NativeImageAttestationTests(unittest.TestCase):
         MODULE.verify_sbom({'SPDXID': 'SPDXRef-DOCUMENT', 'packages': [
             {'name': 'gpoint', 'SPDXID': 'SPDXRef-Package-gpoint'}
         ]})
+
+    def test_requires_expected_build_arg_in_slsa_v1_provenance(self):
+        digest = 'sha256:' + 'a' * 64
+        provenance = {'SLSA': {'predicate': {'buildDefinition': {
+            'externalParameters': {'request': {'args': {
+                'build-arg:NGINX_BASE_DIGEST': digest,
+            }}}
+        }}}}
+        MODULE.verify_build_args(provenance, {'NGINX_BASE_DIGEST': digest})
+        with self.assertRaisesRegex(ValueError, 'NGINX_BASE_DIGEST'):
+            MODULE.verify_build_args(provenance, {'NGINX_BASE_DIGEST': 'sha256:' + 'b' * 64})
+        with self.assertRaisesRegex(ValueError, 'missing SLSA v1 build arguments'):
+            MODULE.verify_build_args({'SLSA': {}}, {'NGINX_BASE_DIGEST': digest})
+
+    def test_cli_checks_both_required_source_material_and_build_arg(self):
+        workflow_sha = 'a' * 40
+        app_sha = 'b' * 40
+        digest = 'sha256:' + 'c' * 64
+        sbom = {'SPDXID': 'SPDXRef-DOCUMENT', 'packages': [
+            {'name': 'miniapp', 'SPDXID': 'SPDXRef-Package-miniapp'}
+        ]}
+        provenance = {'SLSA': {'predicate': {'buildDefinition': {
+            'externalParameters': {
+                'configSource': {
+                    'uri': f'https://github.com/akhripunov/gpoint.git#{workflow_sha}',
+                    'digest': {'sha1': workflow_sha},
+                },
+                'request': {'args': {'build-arg:NGINX_BASE_DIGEST': digest}},
+            },
+            'resolvedDependencies': [{
+                'uri': f'https://github.com/akhripunov/gpoint.git#{app_sha}',
+                'digest': {'sha1': app_sha},
+            }],
+        }}}}
+        with tempfile.TemporaryDirectory() as temp:
+            sbom_path = Path(temp) / 'sbom.json'
+            provenance_path = Path(temp) / 'provenance.json'
+            sbom_path.write_text(json.dumps(sbom), encoding='utf-8')
+            provenance_path.write_text(json.dumps(provenance), encoding='utf-8')
+            argv = [
+                'verify_native_image_attestation.py', str(sbom_path), str(provenance_path),
+                workflow_sha, 'https://github.com/akhripunov/gpoint.git',
+                '--required-material-sha', app_sha,
+                '--required-build-arg', f'NGINX_BASE_DIGEST={digest}',
+            ]
+            self.assertEqual(MODULE.main(argv), 0)
+            provenance['SLSA']['predicate']['buildDefinition']['resolvedDependencies'][0]['digest']['sha1'] = 'd' * 40
+            provenance_path.write_text(json.dumps(provenance), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'required remote Git material'):
+                MODULE.main(argv)
 
 
 if __name__ == '__main__':

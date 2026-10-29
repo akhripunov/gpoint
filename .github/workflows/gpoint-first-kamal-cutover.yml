@@ -187,6 +187,7 @@ jobs:
       agata_digest: ${{ steps.agata.outputs.digest }}
       miniapp_digest: ${{ steps.miniapp.outputs.digest }}
       proxy_digest: ${{ steps.proxy.outputs.digest }}
+      nginx_base_digest: ${{ steps.nginx.outputs.digest }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -212,6 +213,16 @@ jobs:
           digest="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["digest"])' "$manifest")"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           resolved="$(docker buildx imagetools inspect "basecamp/kamal-proxy@$digest" --format '{{json .Manifest}}')"
+          test "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["digest"])' "$resolved")" = "$digest"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Resolve pinned Nginx linux/amd64 base digest
+        id: nginx
+        run: |
+          set -euo pipefail
+          index="$(docker buildx imagetools inspect --raw docker.io/library/nginx:1.27-alpine)"
+          digest="$(python3 -c 'import json,sys; rows=[m["digest"] for m in json.loads(sys.argv[1]).get("manifests",[]) if m.get("platform",{}).get("os")=="linux" and m.get("platform",{}).get("architecture")=="amd64"]; assert len(rows)==1; print(rows[0])' "$index")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          resolved="$(docker buildx imagetools inspect "docker.io/library/nginx@$digest" --format '{{json .Manifest}}')"
           test "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["digest"])' "$resolved")" = "$digest"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Verify exact application source checkout and create its dependency manifests
@@ -261,6 +272,7 @@ jobs:
             GPOINT_BUILD_SHA=${{ inputs.app_source_sha }}
             GPOINT_WORKFLOW_SHA=${{ github.sha }}
             GPOINT_BUILD_TIME=2026-10-23T02:10:09.328Z
+            NGINX_BASE_DIGEST=${{ steps.nginx.outputs.digest }}
           labels: |
             org.opencontainers.image.revision=${{ inputs.app_source_sha }}
             org.opencontainers.image.source=https://github.com/akhripunov/gpoint
@@ -268,7 +280,7 @@ jobs:
           cache-from: type=gha,scope=gpoint-runtime
           cache-to: type=gha,scope=gpoint-miniapp,mode=max
           sbom: true
-          provenance: mode=max
+          provenance: mode=max,version=v1
       - name: Build and publish immutable AGATA image
         id: agata
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
@@ -338,13 +350,27 @@ jobs:
               python3 scripts/verify_native_image_attestation.py \
                 "$RUNNER_TEMP/$role-sbom.json" "$RUNNER_TEMP/$role-provenance.json" \
                 "$CANDIDATE_SHA" https://github.com/akhripunov/gpoint.git \
-                --required-material-sha "$APP_SOURCE_SHA"
+                --required-material-sha "$APP_SOURCE_SHA" \
+                --required-build-arg "NGINX_BASE_DIGEST=${{ steps.nginx.outputs.digest }}"
             else
               python3 scripts/verify_native_image_attestation.py \
                 "$RUNNER_TEMP/$role-sbom.json" "$RUNNER_TEMP/$role-provenance.json" \
                 "$source_sha" https://github.com/akhripunov/gpoint.git
             fi
           done
+      - name: Exercise isolated Kamal cutover and exact late-failure recovery
+        env:
+          APP_DIGEST: ${{ steps.app.outputs.digest }}
+          AGATA_DIGEST: ${{ steps.agata.outputs.digest }}
+          MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}
+          PROXY_DIGEST: ${{ steps.proxy.outputs.digest }}
+        run: |
+          set -euo pipefail
+          python3 tests/integration/kamal-cutover-recovery-docker.py \
+            --app-digest "$APP_DIGEST" \
+            --agata-digest "$AGATA_DIGEST" \
+            --miniapp-digest "$MINIAPP_DIGEST" \
+            --proxy-digest "$PROXY_DIGEST"
 
   deploy:
     name: Kamal production Deploy and Verify
@@ -390,14 +416,6 @@ jobs:
           printf '%s\n' "$WORKFLOW_SHA" | grep -Eq '^[0-9a-f]{40}$'
           printf '%s\n' "$APP_SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'
           test "$(git -C app-source rev-parse HEAD)" = "$APP_SOURCE_SHA"
-      - name: Block production until Kamal runtime honors separate application source SHA
-        if: inputs.mode == 'cutover'
-        run: |
-          set -euo pipefail
-          if [[ "$CANDIDATE_SHA" != "$APP_SOURCE_SHA" ]]; then
-            echo 'PRODUCTION_APPLY=BLOCKED dual-SHA runtime identity is not yet wired through Kamal hooks and manifest.' >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
       - name: Recheck owner authorization and current main for production mode
         if: inputs.mode == 'cutover'
         env:

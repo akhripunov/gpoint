@@ -25,6 +25,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kamal_proxy_routes import parse_routes, validate_gpoint_routes
 
 
+# Fixed production locations. Tests may replace these module constants while
+# importing recover(); the command line never accepts alternate paths.
+RELEASE_ROOT = Path("/opt/gpoint/release-logs")
+BACKUP_ROOT = Path("/opt/gpoint/backups")
+CADDYFILE = Path("/etc/caddy/Caddyfile")
+
+
 class RecoveryBlocked(RuntimeError):
     pass
 
@@ -150,19 +157,19 @@ def recover(args: argparse.Namespace) -> None:
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", args.proxy_digest):
         raise RecoveryBlocked("Kamal Proxy digest is invalid")
 
-    expected_baseline_path = f"/opt/gpoint/release-logs/{sha}/kamal-cutover-baseline-{args.run_id}-{args.attempt}.txt"
+    expected_baseline_path = str(RELEASE_ROOT / sha / f"kamal-cutover-baseline-{args.run_id}-{args.attempt}.txt")
     if args.baseline != expected_baseline_path:
         raise RecoveryBlocked("baseline path is not bound to this workflow attempt")
     baseline, legacy = read_baseline(Path(args.baseline), args.baseline_sha, sha, args.run_id,
-                                     args.attempt, Path("/opt/gpoint/release-logs"), os.getuid())
+                                     args.attempt, RELEASE_ROOT, os.getuid())
     if baseline.get("CURRENT_SHA") != app_sha:
         raise RecoveryBlocked("production app source differs from the recovery baseline")
     caddy_sha = baseline.get("CADDYFILE_SHA256", "")
     if not re.fullmatch(r"[0-9a-f]{64}", caddy_sha):
         raise RecoveryBlocked("Caddy baseline checksum is invalid")
-    if command(["sha256sum", "/etc/caddy/Caddyfile"]).split()[0] != caddy_sha:
+    if command(["sha256sum", str(CADDYFILE)]).split()[0] != caddy_sha:
         raise RecoveryBlocked("Caddy configuration changed after baseline")
-    caddy_backup = Path(f"/opt/gpoint/backups/caddy-before-kamal-{sha}-{args.run_id}-{args.attempt}")
+    caddy_backup = BACKUP_ROOT / f"caddy-before-kamal-{sha}-{args.run_id}-{args.attempt}"
     checksum_file = Path(str(caddy_backup) + ".sha256")
     if (caddy_backup.is_symlink() or checksum_file.is_symlink()
             or not caddy_backup.is_file() or not checksum_file.is_file()
@@ -381,12 +388,12 @@ def recover(args: argparse.Namespace) -> None:
     try:
         caddy_active = subprocess.run(["systemctl", "is-active", "--quiet", "caddy"], check=False).returncode == 0
         if not caddy_active:
-            command(["caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"])
+            command(["caddy", "validate", "--config", str(CADDYFILE), "--adapter", "caddyfile"])
             command(["systemctl", "start", "caddy"])
         caddy_ready = subprocess.run(["systemctl", "is-active", "--quiet", "caddy"], check=False).returncode == 0
         if not caddy_ready:
             recovery_errors.append("Caddy did not become active")
-        if command(["sha256sum", "/etc/caddy/Caddyfile"]).split()[0] != caddy_sha:
+        if command(["sha256sum", str(CADDYFILE)]).split()[0] != caddy_sha:
             recovery_errors.append("Caddy configuration changed during recovery")
     except (RecoveryBlocked, OSError, subprocess.SubprocessError):
         recovery_errors.append("Caddy validation or start failed")

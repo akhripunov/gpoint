@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1.7
-FROM node:22-bookworm-slim AS miniapp-build
+ARG NGINX_BASE_DIGEST
+FROM docker.io/library/node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS miniapp-build
 WORKDIR /workspace
 ENV PNPM_HOME=/pnpm
 ENV PATH=${PNPM_HOME}:${PATH}
@@ -38,7 +39,7 @@ RUN node -e 'const value=process.env.GPOINT_BUILD_TIME; if (!value || new Date(v
        apps/miniapp/vite.config.ts
 RUN pnpm --filter @gpoint/miniapp build
 
-FROM nginx:1.27-alpine AS miniapp-runtime
+FROM nginx:1.27-alpine@${NGINX_BASE_DIGEST} AS miniapp-runtime
 ARG GPOINT_BUILD_SHA
 ARG GPOINT_WORKFLOW_SHA
 LABEL org.opencontainers.image.revision=${GPOINT_BUILD_SHA} \
