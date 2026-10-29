@@ -665,6 +665,10 @@ jobs:
           inventory_file="${log_dir}/kamal-vps-inventory-${run_id}-${attempt}.json"
           ids=( $(docker ps -aq) )
           ((${#ids[@]} > 0))
+          test -z "$(docker ps -aq --filter 'name=^/kamal-proxy$')"
+          ! docker network inspect kamal >/dev/null 2>&1
+          ! docker volume inspect kamal-proxy-config >/dev/null 2>&1
+          kamal_proxy_baseline=ABSENT
           resource_file="/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/resources.json"
           docker stats --no-stream --format '{{json .}}' | python3 "$resource_script" > "$resource_file"
           docker inspect "${ids[@]}" | python3 "$inventory_script" --resource-facts "$resource_file" > "$inventory_file"
@@ -708,6 +712,7 @@ jobs:
           NO_EROS_STATE_SHA256=$eros_state_sha
           NO_EROS_STATE_CONTENT_SHA256=$eros_state_content_sha
           CADDYFILE_SHA256=$caddy_sha
+          KAMAL_PROXY_BASELINE=$kamal_proxy_baseline
           INVENTORY_FILE=$inventory_file
           INVENTORY_SHA256=$inventory_sha
           FREE_DISK_KB=$free_kb

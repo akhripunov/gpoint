@@ -66,4 +66,44 @@ expect / 'miniapp:/'
 expect /settings 'miniapp:/settings'
 expect /api/health/live 'core:/health/live'
 expect /media/assets/image.png 'core:/assets/image.png'
+route_table="$(docker exec "$proxy" kamal-proxy list)"
+python3 - "$route_table" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("kamal_proxy_routes", "scripts/kamal_proxy_routes.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+routes = module.parse_routes(sys.argv[1])
+expected = {
+    ("gpoint-miniapp", "gpoint.example.test", "/", "yes"),
+    ("gpoint-core", "gpoint.example.test", "/api", "yes"),
+    ("gpoint-core-media", "gpoint.example.test", "/media", "yes"),
+}
+actual = {(row["Service"], row["Host"], row["Path"], row["TLS"]) for row in routes}
+if actual != expected or len(routes) != len(expected):
+    raise SystemExit("pinned Kamal Proxy route-list contract changed")
+PY
+docker exec "$proxy" kamal-proxy remove gpoint-core-media >/dev/null
+expect /media/assets/image.png 'miniapp:/media/assets/image.png'
+route_table="$(docker exec "$proxy" kamal-proxy list)"
+python3 - "$route_table" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("kamal_proxy_routes", "scripts/kamal_proxy_routes.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+routes = module.parse_routes(sys.argv[1])
+if {row["Service"] for row in routes} != {"gpoint-core", "gpoint-miniapp"}:
+    raise SystemExit("kamal-proxy remove did not remove exactly the requested media route")
+PY
+docker exec "$proxy" kamal-proxy remove gpoint-core >/dev/null
+docker exec "$proxy" kamal-proxy remove gpoint-miniapp >/dev/null
+route_table="$(docker exec "$proxy" kamal-proxy list)"
+python3 - "$route_table" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("kamal_proxy_routes", "scripts/kamal_proxy_routes.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+if module.parse_routes(sys.argv[1]):
+    raise SystemExit("proxy route removal did not leave an empty route table")
+PY
+echo 'KAMAL_PROXY_ROUTE_REMOVE=PASS'
 echo 'KAMAL_PROXY_SHARED_ROUTING=PASS'

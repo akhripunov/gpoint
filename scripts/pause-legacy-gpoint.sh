@@ -48,6 +48,10 @@ test "$(baseline_value BASELINE_SCHEMA)" = gpoint-kamal-cutover-baseline/v1
 test "$(baseline_value CANDIDATE_SHA)" = "$candidate"
 test "$(baseline_value RUN_ID)" = "$run_id"
 test "$(baseline_value ATTEMPT)" = "$attempt"
+test "$(baseline_value KAMAL_PROXY_BASELINE)" = ABSENT
+test -z "$(docker ps -aq --filter 'name=^/kamal-proxy$')"
+! docker network inspect kamal >/dev/null 2>&1
+! docker volume inspect kamal-proxy-config >/dev/null 2>&1
 eros_state_baseline="$(baseline_value NO_EROS_STATE_FILE)"
 eros_state_baseline_sha="$(baseline_value NO_EROS_STATE_SHA256)"
 [[ "$eros_state_baseline" == "/opt/gpoint/release-logs/${candidate}/kamal-no-eros-state-${run_id}-${attempt}.json" ]]
