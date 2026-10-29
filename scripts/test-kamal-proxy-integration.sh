@@ -74,9 +74,10 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 routes = module.parse_routes(sys.argv[1])
 expected = {
-    ("gpoint-miniapp", "gpoint.example.test", "/", "yes"),
-    ("gpoint-core", "gpoint.example.test", "/api", "yes"),
-    ("gpoint-core-media", "gpoint.example.test", "/media", "yes"),
+    # This fixture uses HTTP only: it deliberately omits --tls on deploy.
+    ("gpoint-miniapp", "gpoint.example.test", "/", "no"),
+    ("gpoint-core", "gpoint.example.test", "/api", "no"),
+    ("gpoint-core-media", "gpoint.example.test", "/media", "no"),
 }
 actual = {(row["Service"], row["Host"], row["Path"], row["TLS"]) for row in routes}
 if actual != expected or len(routes) != len(expected):
