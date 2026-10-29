@@ -128,6 +128,21 @@ def test_hosted_docker_recovery_integration_is_wired_after_immutable_build():
     assert '"-p"' not in source and '"--publish"' not in source
 
 
+def test_integration_accepts_built_digests_before_docker_check(monkeypatch):
+    integration_path = ROOT / "tests/integration/kamal-cutover-recovery-docker.py"
+    spec = importlib.util.spec_from_file_location("kamal_cutover_recovery_docker", integration_path)
+    integration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(integration)
+    values = ["sha256:" + char * 64 for char in "abcd"]
+    monkeypatch.setattr(sys, "argv", ["integration", "--app-digest", values[0],
+                                     "--agata-digest", values[1], "--miniapp-digest", values[2],
+                                     "--proxy-digest", values[3]])
+    monkeypatch.setattr(integration.shutil, "which", lambda _: None)
+    with pytest.raises(SystemExit, match="Docker CLI is required"):
+        integration.main()
+    assert list(integration.DIGESTS.values()) == values[:3]
+
+
 def test_python_c_probe_argv_offsets_and_host_resolution_without_docker(monkeypatch, capsys):
     integration_path = ROOT / "tests/integration/kamal-cutover-recovery-docker.py"
     integration_spec = importlib.util.spec_from_file_location("kamal_cutover_recovery_docker", integration_path)

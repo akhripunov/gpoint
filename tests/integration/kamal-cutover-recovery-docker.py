@@ -103,9 +103,9 @@ def main() -> int:
     digest_values = (inputs.app_digest, inputs.agata_digest, inputs.miniapp_digest, inputs.proxy_digest)
     if any(not re.fullmatch(r"sha256:[0-9a-f]{64}", value) for value in digest_values):
         raise SystemExit("all image digests must be immutable sha256 values")
-    digests["gpoint-core"] = inputs.app_digest
-    digests["gpoint-agata"] = inputs.agata_digest
-    digests["gpoint-miniapp"] = inputs.miniapp_digest
+    DIGESTS["gpoint-core"] = inputs.app_digest
+    DIGESTS["gpoint-agata"] = inputs.agata_digest
+    DIGESTS["gpoint-miniapp"] = inputs.miniapp_digest
     proxy_digest = inputs.proxy_digest
     if not shutil.which("docker"):
         raise SystemExit("Docker CLI is required")
