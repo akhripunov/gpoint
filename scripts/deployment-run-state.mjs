@@ -13,7 +13,8 @@ export function assertGsalesRuntimeState(facts) {
     const health = facts[`${prefix}_HEALTH`];
     if (status === 'running' && running === 'true' && health === 'healthy'
         && facts[`${prefix}_EXIT_CODE`] === '0' && facts[`${prefix}_OOM_KILLED`] === 'false') return 'running';
-    if (status === 'exited' && running === 'false' && ['healthy', 'none'].includes(health)
+    // Docker retains the last health result after a clean stop; preserve it in the fingerprint.
+    if (status === 'exited' && running === 'false' && ['healthy', 'unhealthy', 'none'].includes(health)
         && facts[`${prefix}_EXIT_CODE`] === '0' && facts[`${prefix}_OOM_KILLED`] === 'false') return 'stopped';
     throw new Error(`VPS GSales ${role} state is unknown or damaged`);
   });

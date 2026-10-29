@@ -44,6 +44,17 @@ test('V5 baseline accepts all three GSales containers intentionally stopped with
   assert.equal(state.gsalesRuntimeState, 'stopped');
 });
 
+test('stopped GSales retains its last unhealthy Docker health without claiming health', () => {
+  const stopped = Object.fromEntries(['API', 'AGATA_API', 'AGATA_MEMORY_WORKER'].flatMap(role => [
+    [`LIVE_GSALES_${role}_STATUS`, 'exited'], [`LIVE_GSALES_${role}_RUNNING`, 'false'],
+    [`LIVE_GSALES_${role}_HEALTH`, 'unhealthy'], [`LIVE_GSALES_${role}_EXIT_CODE`, '0'],
+    [`LIVE_GSALES_${role}_OOM_KILLED`, 'false'],
+  ]));
+  const state = stateFromLiveVps(facts(stopped));
+  assert.equal(state.gsalesRuntimeState, 'stopped');
+  assert.equal(state.gsalesRuntime.containers.API.health, 'unhealthy');
+});
+
 test('V5 baseline rejects partial, dead, or unidentified GSales stopped state', () => {
   assert.throws(() => stateFromLiveVps(facts({LIVE_GSALES_API_STATUS: 'exited', LIVE_GSALES_API_RUNNING: 'false', LIVE_GSALES_API_HEALTH: 'none'})), /GSales.*state/);
   assert.throws(() => stateFromLiveVps(facts({LIVE_GSALES_API_STATUS: 'dead'})), /GSales.*state/);
