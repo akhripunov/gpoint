@@ -168,6 +168,7 @@ jobs:
           tests/test_native_build_boundary.py
           tests/test_kamal_release_config.py
           tests/test_kamal_production_manifest.py
+          tests/test_recover_kamal_cutover.py
           tests/test_release_assets.py
           tests/test_gpoint_release_trigger_graph.py
       - name: Run isolated PostgreSQL 16 migration and integration suites
@@ -185,6 +186,7 @@ jobs:
       app_digest: ${{ steps.app.outputs.digest }}
       agata_digest: ${{ steps.agata.outputs.digest }}
       miniapp_digest: ${{ steps.miniapp.outputs.digest }}
+      proxy_digest: ${{ steps.proxy.outputs.digest }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -202,6 +204,16 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve pinned Kamal Proxy image digest
+        id: proxy
+        run: |
+          set -euo pipefail
+          manifest="$(docker buildx imagetools inspect basecamp/kamal-proxy:v0.9.2 --format '{{json .Manifest}}')"
+          digest="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["digest"])' "$manifest")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          resolved="$(docker buildx imagetools inspect "basecamp/kamal-proxy@$digest" --format '{{json .Manifest}}')"
+          test "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["digest"])' "$resolved")" = "$digest"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Verify exact application source checkout and create its dependency manifests
         env:
           APP_SOURCE_SHA: ${{ inputs.app_source_sha }}
@@ -248,6 +260,7 @@ jobs:
           build-args: |
             GPOINT_BUILD_SHA=${{ inputs.app_source_sha }}
             GPOINT_WORKFLOW_SHA=${{ github.sha }}
+            GPOINT_BUILD_TIME=2026-10-23T02:10:09.328Z
           labels: |
             org.opencontainers.image.revision=${{ inputs.app_source_sha }}
             org.opencontainers.image.source=https://github.com/akhripunov/gpoint
@@ -404,10 +417,11 @@ jobs:
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
+          PROXY_DIGEST: ${{ needs.build.outputs.proxy_digest }}
         run: |
           python3 - <<'PY'
           import os, re
-          for name in ('APP_DIGEST', 'AGATA_DIGEST', 'MINIAPP_DIGEST'):
+          for name in ('APP_DIGEST', 'AGATA_DIGEST', 'MINIAPP_DIGEST', 'PROXY_DIGEST'):
               if not re.fullmatch(r'sha256:[0-9a-f]{64}', os.environ[name]):
                   raise SystemExit(f'{name} is not an immutable digest')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
@@ -691,12 +705,15 @@ jobs:
           resource_max_memory_percent="${resource_metrics[3]}"
           [[ "$resource_containers" =~ ^[0-9]+$ && "$resource_memory_bytes" =~ ^[0-9]+$ ]]
           baseline_file="${log_dir}/kamal-cutover-baseline-${run_id}-${attempt}.txt"
+          baseline_captured_at_epoch="$(date -u +%s)"
+          [[ "$baseline_captured_at_epoch" =~ ^[0-9]+$ ]]
           umask 077
           cat > "$baseline_file" <<EOF
           BASELINE_SCHEMA=gpoint-kamal-cutover-baseline/v1
           CANDIDATE_SHA=$candidate
           RUN_ID=$run_id
           ATTEMPT=$attempt
+          BASELINE_CAPTURED_AT_EPOCH=$baseline_captured_at_epoch
           CURRENT_SHA=$current_sha
           CURRENT_API_IMAGE=$api_image
           CURRENT_API_IMAGE_SHA=$api_image_sha
@@ -897,6 +914,7 @@ jobs:
           echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
       - name: Pause legacy GPoint services after restore gates
         if: inputs.mode == 'cutover'
+        id: pause
         env:
           BASELINE_PATH: ${{ steps.baseline.outputs.baseline_path }}
           BASELINE_SHA: ${{ steps.baseline.outputs.baseline_sha }}
@@ -958,6 +976,7 @@ jobs:
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
+          PROXY_DIGEST: ${{ needs.build.outputs.proxy_digest }}
         run: |
           set -euo pipefail
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"
@@ -978,8 +997,28 @@ jobs:
           kamal config --config-file config/deploy.yml >/dev/null
           kamal config --config-file config/deploy.agata.yml >/dev/null
           kamal config --config-file config/deploy.miniapp.yml >/dev/null
+          [[ "$PROXY_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          ssh_opts=(-i "$GPOINT_SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$GPOINT_KNOWN_HOSTS_FILE")
+          ssh -T "${ssh_opts[@]}" "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$PROXY_DIGEST" <<'PIN_PROXY'
+          set -euo pipefail
+          digest="$1"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker pull "basecamp/kamal-proxy@$digest"
+          image_id="$(docker image inspect "basecamp/kamal-proxy@$digest" --format '{{.Id}}')"
+          docker image inspect "$image_id" --format '{{json .RepoDigests}}' | grep -Fq "basecamp/kamal-proxy@$digest"
+          docker image tag "$image_id" basecamp/kamal-proxy:v0.9.2
+          test "$(docker image inspect basecamp/kamal-proxy:v0.9.2 --format '{{.Id}}')" = "$image_id"
+          PIN_PROXY
           GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.yml
+          ssh -T "${ssh_opts[@]}" "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$PROXY_DIGEST" <<'VERIFY_PROXY'
+          set -euo pipefail
+          digest="$1"
+          container_image="$(docker inspect kamal-proxy --format '{{.Image}}')"
+          test "$(docker inspect kamal-proxy --format '{{.Config.Image}}')" = basecamp/kamal-proxy:v0.9.2
+          docker image inspect "$container_image" --format '{{json .RepoDigests}}' | grep -Fq "basecamp/kamal-proxy@$digest"
+          VERIFY_PROXY
           GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.agata.yml
           GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
@@ -1029,6 +1068,7 @@ jobs:
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
+          PROXY_DIGEST: ${{ needs.build.outputs.proxy_digest }}
           BASELINE_PATH: ${{ steps.baseline.outputs.baseline_path }}
           BASELINE_SHA: ${{ steps.baseline.outputs.baseline_sha }}
           NO_EROS_STATE_PATH: ${{ steps.baseline.outputs.no_eros_state_path }}
@@ -1084,7 +1124,7 @@ jobs:
           REMOTE_CHECK
           scp scripts/write-kamal-production-manifest.py "root@${GPOINT_PRODUCTION_HOST}:${remote_manifest_writer}"
           verify_log="$RUNNER_TEMP/kamal-verify-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
-          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$BASELINE_PATH" "$BASELINE_SHA" "$BACKUP_PATH" "$BACKUP_SHA" "$RESTORE_EVIDENCE_PATH" "$RESTORE_EVIDENCE_SHA" "$DEPLOYMENT_ID" "$remote_manifest_writer" "$remote_manifest_writer_sha" "$MEDIA_BACKUP_PATH" "$MEDIA_BACKUP_SHA" "$MEDIA_SOURCE_MANIFEST_SHA" "$MEDIA_RESTORE_MANIFEST_SHA" "$MEDIA_FILE_COUNT" "$MEDIA_DIRECTORY_COUNT" "$MEDIA_TOTAL_BYTES" "$MEDIA_BACKUP_BYTES" "$APP_SOURCE_SHA" "$eros_collector_sha" "$eros_state_helper_sha" "$NO_EROS_STATE_PATH" "$NO_EROS_STATE_SHA" "$eros_inventory_sanitizer_sha" "$eros_resource_sanitizer_sha" <<'REMOTE' | tee "$verify_log"
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$BASELINE_PATH" "$BASELINE_SHA" "$BACKUP_PATH" "$BACKUP_SHA" "$RESTORE_EVIDENCE_PATH" "$RESTORE_EVIDENCE_SHA" "$DEPLOYMENT_ID" "$remote_manifest_writer" "$remote_manifest_writer_sha" "$MEDIA_BACKUP_PATH" "$MEDIA_BACKUP_SHA" "$MEDIA_SOURCE_MANIFEST_SHA" "$MEDIA_RESTORE_MANIFEST_SHA" "$MEDIA_FILE_COUNT" "$MEDIA_DIRECTORY_COUNT" "$MEDIA_TOTAL_BYTES" "$MEDIA_BACKUP_BYTES" "$APP_SOURCE_SHA" "$eros_collector_sha" "$eros_state_helper_sha" "$NO_EROS_STATE_PATH" "$NO_EROS_STATE_SHA" "$eros_inventory_sanitizer_sha" "$eros_resource_sanitizer_sha" "$PROXY_DIGEST" <<'REMOTE' | tee "$verify_log"
           set -euo pipefail
           sha="$1"; version="$2"; app="$3"; agata="$4"; miniapp="$5"; run_id="$6"; attempt="$7"; baseline_file="$8"; expected_baseline_sha="$9"; backup_file="${10}"; expected_backup_sha="${11}"; restore_file="${12}"; expected_restore_sha="${13}"
           manifest_writer="${15}"; expected_manifest_writer_sha="${16}"
@@ -1092,11 +1132,12 @@ jobs:
           media_file_count="${21}"; media_directory_count="${22}"; media_total_bytes="${23}"; media_backup_bytes="${24}"; app_source_sha="${25}"
           eros_collector_sha="${26}"; eros_state_helper_sha="${27}"; expected_no_eros_file="${28}"; expected_no_eros_file_sha="${29}"
           eros_inventory_sanitizer_sha="${30}"; eros_resource_sanitizer_sha="${31}"
+          proxy_digest="${32}"
           [[ "$manifest_writer" =~ ^/run/gpoint-kamal-manifest-[0-9]+-[0-9]+\.py$ && "$expected_manifest_writer_sha" =~ ^[0-9a-f]{64}$ ]]
           trap 'rm -f -- "$manifest_writer"' EXIT
           test "$(sha256sum "$manifest_writer" | awk '{print $1}')" = "$expected_manifest_writer_sha"
           chmod 0700 "$manifest_writer"
-          [[ "$sha" =~ ^[0-9a-f]{40}$ && "$app_source_sha" =~ ^[0-9a-f]{40}$ && "$expected_baseline_sha" =~ ^[0-9a-f]{64}$ && "$expected_backup_sha" =~ ^[0-9a-f]{64}$ && "$expected_restore_sha" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$sha" =~ ^[0-9a-f]{40}$ && "$app_source_sha" =~ ^[0-9a-f]{40}$ && "$expected_baseline_sha" =~ ^[0-9a-f]{64}$ && "$expected_backup_sha" =~ ^[0-9a-f]{64}$ && "$expected_restore_sha" =~ ^[0-9a-f]{64}$ && "$proxy_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$expected_media_backup_sha" =~ ^[0-9a-f]{64}$ && "$media_source_manifest_sha" =~ ^[0-9a-f]{64}$ && "$media_restore_manifest_sha" =~ ^[0-9a-f]{64}$ ]]
           [[ "$media_file_count" =~ ^[0-9]+$ && "$media_directory_count" =~ ^[0-9]+$ && "$media_total_bytes" =~ ^[0-9]+$ && "$media_backup_bytes" =~ ^[0-9]+$ && "$media_backup_bytes" -gt 0 ]]
           [[ "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
@@ -1212,6 +1253,8 @@ jobs:
           test "$(awk '{print $1}' "${caddy_backup}.sha256")" = "$(baseline_value CADDYFILE_SHA256)"
           ! systemctl is-active --quiet caddy
           test "$(docker inspect --format '{{.State.Running}}' kamal-proxy)" = true
+          proxy_image_id="$(docker inspect kamal-proxy --format '{{.Image}}')"
+          docker image inspect "$proxy_image_id" --format '{{json .RepoDigests}}' | grep -Fq "basecamp/kamal-proxy@$proxy_digest"
           proxy_ports="$(docker inspect --format '{{json .NetworkSettings.Ports}}' kamal-proxy)"
           grep -Fq '"HostPort":"80"' <<< "$proxy_ports"
           grep -Fq '"HostPort":"443"' <<< "$proxy_ports"
@@ -1327,6 +1370,87 @@ jobs:
           echo "manifest_sha=$manifest_sha" >> "$GITHUB_OUTPUT"
           echo "Verified production manifest SHA-256: \`$manifest_sha\`" >> "$GITHUB_STEP_SUMMARY"
           echo "GPOINT_KAMAL_VERIFY=PASS SHA=$CANDIDATE_SHA BASELINE_SHA=$BASELINE_SHA INVENTORY_SHA=$inventory_sha BACKUP_SHA=$BACKUP_SHA RESTORE_EVIDENCE_SHA=$RESTORE_EVIDENCE_SHA"
+      - name: Recover legacy GPoint if cutover Verify fails
+        if: always() && inputs.mode == 'cutover' && steps.pause.outcome == 'success' && steps.verify.outcome != 'success'
+        env:
+          APP_DIGEST: ${{ needs.build.outputs.app_digest }}
+          AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
+          MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
+          PROXY_DIGEST: ${{ needs.build.outputs.proxy_digest }}
+          BASELINE_PATH: ${{ steps.baseline.outputs.baseline_path }}
+          BASELINE_SHA: ${{ steps.baseline.outputs.baseline_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$BASELINE_PATH" == "/opt/gpoint/release-logs/${CANDIDATE_SHA}/kamal-cutover-baseline-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt" ]]
+          [[ "$BASELINE_SHA" =~ ^[0-9a-f]{64}$ ]]
+          for digest in "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$PROXY_DIGEST"; do
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          done
+          helper=scripts/recover-kamal-cutover.py
+          helper_sha="$(sha256sum "$helper" | awk '{print $1}')"
+          [[ "$helper_sha" =~ ^[0-9a-f]{64}$ ]]
+          remote_dir="/run/gpoint-kamal-recovery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          remote_helper="$remote_dir/recover-kamal-cutover.py"
+          route_helper=scripts/kamal_proxy_routes.py
+          route_helper_sha="$(sha256sum "$route_helper" | awk '{print $1}')"
+          [[ "$route_helper_sha" =~ ^[0-9a-f]{64}$ ]]
+          remote_route_helper="$remote_dir/kamal_proxy_routes.py"
+          ssh_opts=(-i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
+          recovery_cleanup() {
+            ssh -T "${ssh_opts[@]}" "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$remote_dir" <<'REMOTE_CLEANUP' || true
+          set -euo pipefail
+          [[ "$1" =~ ^/run/gpoint-kamal-recovery-[0-9]+-[0-9]+$ ]]
+          if [[ -e "$1" ]]; then
+            test "$(stat -c '%u:%a' "$1")" = '0:700'
+            rm -rf -- "$1"
+          fi
+          REMOTE_CLEANUP
+          }
+          trap recovery_cleanup EXIT
+          ssh -T "${ssh_opts[@]}" "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$remote_dir" <<'REMOTE_SETUP'
+          set -euo pipefail
+          [[ "$1" =~ ^/run/gpoint-kamal-recovery-[0-9]+-[0-9]+$ ]]
+          test ! -e "$1"
+          umask 077
+          mkdir -- "$1"
+          chmod 0700 "$1"
+          test "$(stat -c '%u:%a' "$1")" = '0:700'
+          REMOTE_SETUP
+          scp "${ssh_opts[@]}" "$helper" "root@${GPOINT_PRODUCTION_HOST}:$remote_helper"
+          scp "${ssh_opts[@]}" "$route_helper" "root@${GPOINT_PRODUCTION_HOST}:$remote_route_helper"
+          set +e
+          recovery_output="$(ssh -T "${ssh_opts[@]}" "root@${GPOINT_PRODUCTION_HOST}" bash -s -- \
+            "$remote_dir" "$helper_sha" "$route_helper_sha" \
+            "$CANDIDATE_SHA" "$APP_SOURCE_SHA" "$IMAGE_VERSION" \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$BASELINE_PATH" "$BASELINE_SHA" \
+            "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$PROXY_DIGEST" <<'REMOTE_RUN'
+          set -euo pipefail
+          dir="$1"; expected_sha="$2"; expected_route_sha="$3"; shift 3
+          [[ "$dir" =~ ^/run/gpoint-kamal-recovery-[0-9]+-[0-9]+$ ]]
+          helper="$dir/recover-kamal-cutover.py"; route_helper="$dir/kamal_proxy_routes.py"
+          [[ "$expected_sha" =~ ^[0-9a-f]{64}$ && "$expected_route_sha" =~ ^[0-9a-f]{64}$ ]]
+          test "$(stat -c '%u:%a' "$dir")" = '0:700'
+          test "$(sha256sum "$helper" | awk '{print $1}')" = "$expected_sha"
+          test "$(sha256sum "$route_helper" | awk '{print $1}')" = "$expected_route_sha"
+          chmod 0600 "$helper" "$route_helper"
+          test "$(stat -c '%u:%a' "$helper")" = '0:600'
+          test "$(stat -c '%u:%a' "$route_helper")" = '0:600'
+          trap 'rm -rf -- "$dir"' EXIT
+          python3 -B "$helper" \
+            --candidate-sha "$1" --app-source-sha "$2" --version "$3" \
+            --run-id "$4" --attempt "$5" --baseline "$6" --baseline-sha "$7" \
+            --app-digest "$8" --agata-digest "$9" --miniapp-digest "${10}" --proxy-digest "${11}"
+          REMOTE_RUN
+          )"
+          recovery_status=$?
+          set -e
+          printf '%s\n' "$recovery_output"
+          echo "$recovery_output" >> "$GITHUB_STEP_SUMMARY"
+          if (( recovery_status != 0 )); then
+            exit "$recovery_status"
+          fi
+          grep -qx 'GPOINT_CUTOVER_RECOVERY=PASS' <<< "$recovery_output"
       - name: Record GitHub Deployment result against the same attempt
         if: always() && inputs.mode == 'cutover' && steps.deployment.outputs.id != ''
         env:

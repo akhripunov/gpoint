@@ -10,9 +10,18 @@ SPEC = importlib.util.spec_from_file_location('gpoint_miniapp_static_manifest', 
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
 SPEC.loader.exec_module(MODULE)
+DOCKERFILE = Path(__file__).resolve().parents[1] / 'infra' / 'production' / 'Gpoint.Miniapp.Dockerfile'
 
 
 class MiniappStaticManifestTests(unittest.TestCase):
+    def test_production_timestamp_patch_is_validated_and_recorded(self):
+        dockerfile = DOCKERFILE.read_text(encoding='utf-8')
+        self.assertIn('ARG GPOINT_BUILD_TIME', dockerfile)
+        self.assertIn('new Date(value).toISOString() !== value', dockerfile)
+        self.assertIn("grep -Fc 'const buildTime = new Date().toISOString();'", dockerfile)
+        self.assertIn('process.env.GPOINT_BUILD_TIME ?? new Date().toISOString()', dockerfile)
+        self.assertIn('org.gpoint.source.patch="miniapp-build-time-from-production-metadata-v1"', dockerfile)
+
     def test_same_static_tree_has_same_manifest_independent_of_root(self):
         with tempfile.TemporaryDirectory() as temp:
             source = Path(temp) / 'source'
