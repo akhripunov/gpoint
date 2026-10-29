@@ -1,5 +1,7 @@
 import importlib.util
+import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 import unittest
@@ -15,6 +17,36 @@ WORKFLOW = Path(__file__).resolve().parents[1] / '.github' / 'workflows' / 'gpoi
 
 
 class MiniappStaticManifestTests(unittest.TestCase):
+    def test_only_app_source_contracts_are_staged_as_miniapp_workspace_source(self):
+        repository = DOCKERFILE.parents[2]
+        dockerfile = DOCKERFILE.read_text(encoding='utf-8')
+        imports = []
+        for source in (repository / 'apps' / 'miniapp').rglob('*'):
+            if source.suffix not in {'.ts', '.tsx', '.js', '.jsx'}:
+                continue
+            for specifier in re.findall(
+                r'''(?:from\s*|import\s*\()\s*["']([^"']+)["']''',
+                source.read_text(encoding='utf-8'),
+            ):
+                if not specifier.startswith('.'):
+                    continue
+                resolved = os.path.normpath(
+                    os.path.join(source.parent.relative_to(repository), specifier)
+                )
+                if resolved.startswith('packages/'):
+                    imports.append(resolved)
+
+        package_sources = {path.split('/src/', 1)[0] + '/src' for path in imports}
+        self.assertEqual(package_sources, {'packages/contracts/src'})
+        self.assertIn(
+            'COPY --from=app-source /packages/contracts/src ./packages/contracts/src',
+            dockerfile,
+        )
+        copied_workspace_sources = re.findall(
+            r'^COPY --from=app-source /(packages/[^ ]+) ', dockerfile, re.MULTILINE
+        )
+        self.assertEqual(copied_workspace_sources, ['packages/contracts/src'])
+
     def test_runtime_bases_are_immutable_and_nginx_digest_is_hosted_build_input(self):
         dockerfile = DOCKERFILE.read_text(encoding='utf-8')
         workflow = WORKFLOW.read_text(encoding='utf-8')

@@ -26,6 +26,9 @@ RUN --mount=type=cache,id=gpoint-miniapp-pnpm-store,target=/pnpm/store \
 
 COPY --from=app-source /tsconfig.base.json ./tsconfig.base.json
 COPY --from=app-source /apps/miniapp ./apps/miniapp
+# Mini App source imports its DTO types directly from this package. Keep the
+# dependency source pinned to APP_SOURCE_SHA just like the application files.
+COPY --from=app-source /packages/contracts/src ./packages/contracts/src
 ARG GPOINT_BUILD_SHA
 ARG GPOINT_BUILD_TIME
 ENV GPOINT_BUILD_SHA=${GPOINT_BUILD_SHA}
