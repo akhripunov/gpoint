@@ -767,7 +767,14 @@ jobs:
             "$baseline_file" "$baseline_sha" "$inventory_sha" "$current_sha" "$prisma_head" "$prisma_migrations" "$agata_head" "$postgres_system_identifier" \
             "$docker_free_kb" "$memory_kb" "$memory_total_kb" "$resource_containers" "$resource_memory_bytes" "$resource_cpu_percent" "$resource_max_memory_percent" "$candidate_image_bytes" "$eros_state_file" "$eros_state_sha"
           rm -f "$inventory_script" "$resource_script" "$eros_collector" "$eros_state_script" "$(dirname "$eros_collector")/sanitize-kamal-inventory.py" "$(dirname "$eros_collector")/sanitize-kamal-resources.py"
-          rmdir "$(dirname "$inventory_script")"
+          # Keep the attempt-scoped evidence directory: other verification artifacts
+          # may legitimately remain. Its removal is not a readiness gate.
+          test -s "$baseline_file"
+          test -s "$inventory_file"
+          test -s "$eros_state_file"
+          test "$(sha256sum "$baseline_file" | awk '{print $1}')" = "$baseline_sha"
+          test "$(sha256sum "$inventory_file" | awk '{print $1}')" = "$inventory_sha"
+          test "$(sha256sum "$eros_state_file" | awk '{print $1}')" = "$eros_state_sha"
           REMOTE
           )"
           while IFS='=' read -r key value; do
@@ -1377,7 +1384,11 @@ jobs:
           rm -f -- "$eros_collector" "$eros_state_helper" \
             "$no_eros_dir/sanitize-kamal-inventory.py" "$no_eros_dir/sanitize-kamal-resources.py" \
             "$no_eros_dir/pause-no-eros-state.json" "$no_eros_dir/pause-legacy-gpoint.sh"
-          rmdir "$no_eros_dir"
+          # The attempt-scoped directory can also hold verified backup and
+          # deployment helpers. Cleanup must not turn successful Runtime Verify
+          # into a false failure after the live traffic switch.
+          test -s "$manifest_file"
+          test "$(sha256sum "$manifest_file" | awk '{print $1}')" = "$manifest_sha"
           REMOTE
           mapfile -t manifest_sha_rows < <(sed -n 's/^GPOINT_KAMAL_MANIFEST_SHA256=\([0-9a-f]*\) PATH=.*/\1/p' "$verify_log")
           test "${#manifest_sha_rows[@]}" -eq 1

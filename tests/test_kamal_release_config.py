@@ -569,6 +569,30 @@ def test_kamal_migration_parity_fails_closed_for_pending_candidate_revision(tmp_
     assert "PENDING" in result.stderr
 
 
+def test_baseline_capture_keeps_attempt_evidence_and_does_not_rmdir_nonempty_directory():
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
+    section = workflow.split("name: Capture PostgreSQL and no-Eros cutover baseline", 1)[1].split(
+        "name: Verify application source matches the live production SHA", 1
+    )[0]
+    assert 'rm -f "$inventory_script" "$resource_script" "$eros_collector"' in section
+    assert 'rmdir "$(dirname "$inventory_script")"' not in section
+    assert 'test -s "$baseline_file"' in section
+    assert 'test -s "$inventory_file"' in section
+    assert 'test -s "$eros_state_file"' in section
+    assert 'test "$(sha256sum "$baseline_file"' in section
+
+
+def test_successful_runtime_verify_does_not_require_empty_attempt_helper_dir():
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
+    section = workflow.split("name: Verify public routes and exact running services", 1)[1].split(
+        "name: Record GitHub Deployment result against the same attempt", 1
+    )[0]
+    assert 'rm -f -- "$eros_collector" "$eros_state_helper"' in section
+    assert 'rmdir "$no_eros_dir"' not in section
+    assert 'test -s "$manifest_file"' in section
+    assert 'test "$(sha256sum "$manifest_file"' in section
+
+
 def test_first_cutover_readonly_prisma_baseline_runs_from_api_workspace():
     workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
     baseline = workflow.split("name: Capture PostgreSQL and no-Eros cutover baseline", 1)[1].split(
