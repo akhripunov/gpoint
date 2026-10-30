@@ -194,69 +194,75 @@ def test_integration_docker_network_listing_failure_is_fatal(monkeypatch):
         integration.docker("network", "ls", "--format", "{{.Name}}")
 
 
-def test_python_c_probe_argv_offsets_and_host_resolution_without_docker(monkeypatch, capsys):
-    integration_path = ROOT / "tests/integration/kamal-cutover-recovery-docker.py"
-    integration_spec = importlib.util.spec_from_file_location("kamal_cutover_recovery_docker", integration_path)
-    integration = importlib.util.module_from_spec(integration_spec)
-    integration_spec.loader.exec_module(integration)
+def test_python_c_probe_argv_offsets_and_exact_container_address(monkeypatch, capsys):
+    import http.client
+    import socket
+    import ssl
 
-    calls = {}
-    fake_socket = ModuleType("socket")
-    fake_socket.getaddrinfo = lambda host, port, *args, **kwargs: calls.update(resolved=(host, port)) or []
-    fake_ssl = ModuleType("ssl")
-    fake_ssl._create_unverified_context = lambda: object()
-    fake_request = ModuleType("urllib.request")
-
-    class Request:
-        def __init__(self, url, headers=None):
-            calls["request"] = (url, headers)
-
-    class Response:
-        def read(self):
-            return b"probe-body"
-
-    def open_request(request, timeout):
-        fake_socket.getaddrinfo("gpoint.amiora.one", 443)
-        calls["timeout"] = timeout
-        return Response()
-
-    fake_request.Request = Request
-    fake_request.ProxyHandler = lambda proxies: proxies
-    fake_request.HTTPSHandler = lambda context: context
-    fake_request.build_opener = lambda *handlers: SimpleNamespace(open=open_request)
-    fake_urllib = ModuleType("urllib")
-    fake_urllib.request = fake_request
-    monkeypatch.setitem(sys.modules, "socket", fake_socket)
-    monkeypatch.setitem(sys.modules, "ssl", fake_ssl)
-    monkeypatch.setitem(sys.modules, "urllib", fake_urllib)
-    monkeypatch.setitem(sys.modules, "urllib.request", fake_request)
-
-    url = "https://gpoint.amiora.one/api/health/live"
-    expected = "probe-body"
-    args = integration.python_probe_args(url, expected, "gpoint.amiora.one", "127.0.0.1")
-    monkeypatch.setattr(sys, "argv", ["-c", *args[2:]])
-    exec(integration.PROBE_CODE, {})
-    assert capsys.readouterr().out.strip() == expected
-    assert calls["request"] == (url, {"Host": "gpoint.amiora.one"})
-    assert calls["resolved"] == ("127.0.0.1", 443)
-    assert calls["timeout"] == 4
-
-
-def test_probe_does_not_route_fixture_requests_through_environment_proxy():
-    integration_path = ROOT / "tests/integration/kamal-cutover-recovery-docker.py"
-    spec = importlib.util.spec_from_file_location("cutover_proxy_probe", integration_path)
+    path = ROOT / "tests/integration/kamal-cutover-recovery-docker.py"
+    spec = importlib.util.spec_from_file_location("cutover_direct_probe", path)
     integration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(integration)
-    code = """import http.client, sys
+    calls = {}
+
+    def capture_connection(address, timeout=None, source_address=None):
+        calls["destination"] = address
+        calls["socket_timeout"] = timeout
+        return object()
+
+    class Response:
+        status = 200
+
+        def read(self):
+            return b"legacy:/health/live"
+
+    class Connection:
+        def __init__(self, hostname, port, timeout, context):
+            calls["host"] = hostname
+            calls["port"] = port
+            calls["timeout"] = timeout
+            self._create_connection = None
+
+        def request(self, method, path, headers):
+            calls["request"] = (method, path, headers)
+            self._create_connection((calls["host"], calls["port"]), timeout=4)
+
+        def getresponse(self):
+            return Response()
+
+        def close(self):
+            calls["closed"] = True
+
+    monkeypatch.setattr(socket, "create_connection", capture_connection)
+    monkeypatch.setattr(http.client, "HTTPSConnection", Connection)
+    monkeypatch.setattr(ssl, "_create_unverified_context", lambda: object())
+    args = integration.python_probe_args("https://gpoint.amiora.one/api/health/live?q=1",
+                                         "legacy:/health/live", "gpoint.amiora.one", "172.25.0.7")
+    monkeypatch.setattr(sys, "argv", ["-c", *args[2:]])
+    exec(integration.PROBE_CODE, {})
+    assert capsys.readouterr().out.strip() == "legacy:/health/live"
+    assert calls["destination"] == ("172.25.0.7", 443)
+    assert calls["host"] == "gpoint.amiora.one"
+    assert calls["request"] == ("GET", "/api/health/live?q=1", {"Host": "gpoint.amiora.one"})
+    assert calls["timeout"] == calls["socket_timeout"] == 4
+    assert calls["closed"]
+
+
+def test_probe_ignores_ambient_https_proxy_and_requires_literal_container_ip():
+    path = ROOT / "tests/integration/kamal-cutover-recovery-docker.py"
+    spec = importlib.util.spec_from_file_location("cutover_proxy_probe", path)
+    integration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(integration)
+    code = """import socket, sys
 class Destination(Exception): pass
-def request(self, *args, **kwargs): raise Destination(self.host)
-http.client.HTTPConnection.request = request
+def capture(address, timeout=None, source_address=None): raise Destination(address)
+socket.create_connection = capture
 probe_code = sys.argv[1]
 sys.argv = ['-c', *sys.argv[2:]]
 try:
     exec(probe_code, {'__name__': '__main__'})
 except Destination as e:
-    print('destination=' + str(e))
+    print('destination=' + repr(e.args[0]))
 """
     env = {**os.environ, "https_proxy": "http://proxy.test:8123", "no_proxy": ""}
     env.pop("HTTP_PROXY", None)
@@ -265,7 +271,16 @@ except Destination as e:
                              "https://gpoint.amiora.one/test", "fixture", "gpoint.amiora.one", "127.0.0.1"],
                             env=env, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "destination=gpoint.amiora.one"
+    assert result.stdout.strip() == "destination=('127.0.0.1', 443)"
+    for url, host, address in [
+        ("https://gpoint.amiora.one/test", "unrelated.example", "127.0.0.1"),
+        ("http://gpoint.amiora.one/test", "gpoint.amiora.one", "127.0.0.1"),
+        ("https://gpoint.amiora.one/test", "gpoint.amiora.one", "not-an-ip"),
+    ]:
+        bad = subprocess.run([sys.executable, "-c", integration.PROBE_CODE,
+                              url, "fixture", host, address],
+                             env=env, text=True, capture_output=True, timeout=10)
+        assert bad.returncode != 0
 
 
 def test_staged_remote_layout_imports_sibling_route_module(tmp_path):

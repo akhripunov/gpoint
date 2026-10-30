@@ -60,13 +60,39 @@ def ensure_image(image: str) -> None:
         docker("pull", image)
 
 
-PROBE_CODE = ("import socket,ssl,sys,urllib.request; "
-              "old=socket.getaddrinfo; socket.getaddrinfo=lambda h,p,*a,**k: old(sys.argv[4] if h=='gpoint.amiora.one' and sys.argv[4] else h,p,*a,**k); "
-              "ctx=ssl._create_unverified_context(); "
-              "r=urllib.request.Request(sys.argv[1],headers={'Host':sys.argv[3]} if sys.argv[3] else {}); "
-              "opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),urllib.request.HTTPSHandler(context=ctx)); "
-              "print(opener.open(r,timeout=4).read().decode())")
+PROBE_CODE = """import http.client
+import ipaddress
+import socket
+import ssl
+import sys
+from urllib.parse import urlsplit
 
+url = urlsplit(sys.argv[1])
+hostname = sys.argv[3]
+destination = ipaddress.ip_address(sys.argv[4]).compressed
+if url.scheme != "https" or url.hostname != hostname:
+    raise ValueError("fixture HTTPS hostname is invalid")
+connection = http.client.HTTPSConnection(
+    hostname, url.port or 443, timeout=4, context=ssl._create_unverified_context()
+)
+original_connection = socket.create_connection
+# Bypass ambient proxies and DNS: connect to Docker-inspected IP directly,
+# while keeping the intended hostname for TLS SNI and HTTP Host.
+connection._create_connection = lambda address, timeout=None, source_address=None: original_connection(
+    (destination, address[1]), timeout, source_address
+)
+path = url.path or "/"
+if url.query:
+    path += "?" + url.query
+try:
+    connection.request("GET", path, headers={"Host": hostname})
+    response = connection.getresponse()
+    if response.status != 200:
+        raise RuntimeError(f"fixture HTTP status {response.status}")
+    print(response.read().decode())
+finally:
+    connection.close()
+"""
 
 def python_probe_args(url: str, expected: str, host: str, resolve_ip: str) -> list[str]:
     """Return the executable arguments for `python -c CODE URL EXPECTED HOST IP`."""
