@@ -112,6 +112,26 @@ def test_duplicate_container_id_blocks_even_when_one_is_running():
         policy.planned_legacy_rescue(guard, containers)
 
 
+@pytest.mark.parametrize("bad_value", ["false", "true", 1, None])
+def test_guard_facts_must_be_literal_booleans(bad_value):
+    guard, containers = evidence()
+    with pytest.raises(policy.PauseRecoveryBlocked):
+        policy.planned_legacy_rescue(replace(guard, baseline_verified=bad_value), containers)
+
+
+@pytest.mark.parametrize("attribute,bad_value", [
+    ("baseline_running", "true"),
+    ("live_running", "false"),
+    ("live_running", 0),
+    ("live_running", None),
+])
+def test_container_states_must_be_literal_booleans(attribute, bad_value):
+    guard, containers = evidence()
+    containers["worker"] = replace(containers["worker"], **{attribute: bad_value})
+    with pytest.raises(policy.PauseRecoveryBlocked):
+        policy.planned_legacy_rescue(guard, containers)
+
+
 def test_no_recovery_in_post_caddy_or_kamal_activated_state():
     guard, containers = evidence()
     containers["worker"] = replace(containers["worker"], live_running=False)

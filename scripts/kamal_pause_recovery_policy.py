@@ -54,7 +54,7 @@ def planned_legacy_rescue(
     The tuple is an inspection/planning result, not authorization to bypass
     the production runbook or a substitute for independent watchdog testing.
     """
-    if not all((
+    if not all(flag is True for flag in (
         guards.baseline_verified,
         guards.exact_run_attempt_verified,
         guards.caddy_active,
@@ -75,7 +75,8 @@ def planned_legacy_rescue(
         item = containers[service]
         if (item.compose_project != "compose"
                 or item.compose_service != service
-                or not item.baseline_running
+                or item.baseline_running is not True
+                or type(item.live_running) is not bool
                 or not _HEX64.fullmatch(item.container_id)
                 or not _IMAGE_ID.fullmatch(item.image_id)
                 or item.live_container_id != item.container_id
