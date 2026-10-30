@@ -168,7 +168,9 @@ for service in "${stop_order[@]}"; do
     test "$(docker inspect --format '{{.State.Running}}' "$id")" = true
     # A failed or interrupted stop may already have stopped this exact ID.
     stopped_by_service[$service]="$id"
+    printf 'GPOINT_LEGACY_STOP_BEGIN=%s\n' "$service"
     docker stop --time 120 "$id" >/dev/null
+    printf 'GPOINT_LEGACY_STOP_DONE=%s\n' "$service"
   fi
   test "$(docker inspect --format '{{.State.Running}}' "$id")" = false
 done

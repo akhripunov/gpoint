@@ -544,7 +544,11 @@ def test_first_cutover_pause_protects_inflight_stop_and_ssh_idle():
     pause = workflow.split("name: Pause legacy GPoint services after restore gates", 1)[1].split(
         "name: Stop Caddy for Kamal Proxy public bind", 1
     )[0]
-    assert script.index('stopped_by_service[$service]="$id"') < script.index('docker stop --time 120 "$id"')
+    id_index = script.index('stopped_by_service[$service]="$id"')
+    begin_index = script.index("GPOINT_LEGACY_STOP_BEGIN=")
+    stop_index = script.index('docker stop --time 120 "$id"')
+    end_index = script.index("GPOINT_LEGACY_STOP_DONE=")
+    assert id_index < begin_index < stop_index < end_index
     assert "trap 'exit 129' HUP" in script
     assert "trap 'exit 130' INT" in script
     assert "trap 'exit 143' TERM" in script
