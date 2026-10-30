@@ -70,6 +70,16 @@ class MiniappStaticManifestTests(unittest.TestCase):
         self.assertIn('process.env.GPOINT_BUILD_TIME ?? new Date().toISOString()', dockerfile)
         self.assertIn('org.gpoint.source.patch="miniapp-build-time-from-production-metadata-v1"', dockerfile)
 
+    def test_nginx_runtime_clears_inherited_default_pages_before_app_copy(self):
+        dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+        nginx_stage = dockerfile.split("FROM nginx:1.27-alpine@", 1)[1]
+        purge = "RUN rm -rf /usr/share/nginx/html/*"
+        app_copy = "COPY --from=miniapp-build /workspace/apps/miniapp/dist/ /usr/share/nginx/html/"
+        self.assertIn(purge, nginx_stage)
+        self.assertIn(app_copy, nginx_stage)
+        self.assertLess(nginx_stage.index(purge), nginx_stage.index(app_copy))
+        self.assertNotIn("COPY --from=miniapp-build", nginx_stage.split(purge)[0])
+
     def test_same_static_tree_has_same_manifest_independent_of_root(self):
         with tempfile.TemporaryDirectory() as temp:
             source = Path(temp) / 'source'

@@ -49,5 +49,9 @@ LABEL org.opencontainers.image.revision=${GPOINT_BUILD_SHA} \
       org.opencontainers.image.source="https://github.com/akhripunov/gpoint" \
       org.gpoint.workflow.revision=${GPOINT_WORKFLOW_SHA} \
       org.gpoint.source.patch="miniapp-build-time-from-production-metadata-v1"
+# The pinned nginx base includes its own 50x.html. Start with an empty
+# webroot so the digest-addressed image contains only the APP_SOURCE_SHA
+# Mini App build assets, matching the existing production static tree.
+RUN rm -rf /usr/share/nginx/html/*
 COPY --from=miniapp-build /workspace/apps/miniapp/dist/ /usr/share/nginx/html/
 COPY infra/production/nginx-miniapp.conf /etc/nginx/conf.d/default.conf
