@@ -966,6 +966,7 @@ jobs:
           remote_eros_collector="$remote_script_dir/eros-state-collector.py"
           remote_eros_state="$remote_script_dir/kamal_eros_state.py"
           ssh_opts=(-i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=6 -o TCPKeepAlive=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
           ssh -T "${ssh_opts[@]}" "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$remote_script_dir" <<'REMOTE'
           set -euo pipefail

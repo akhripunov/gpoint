@@ -521,6 +521,24 @@ def test_cutover_helper_uses_snapshot_bound_graceful_stop_and_pre_deploy_recover
     assert "gsales-api" in helper
 
 
+def test_first_cutover_pause_protects_inflight_stop_and_ssh_idle():
+    script = (ROOT / "scripts/pause-legacy-gpoint.sh").read_text()
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
+    pause = workflow.split("name: Pause legacy GPoint services after restore gates", 1)[1].split(
+        "name: Stop Caddy for Kamal Proxy public bind", 1
+    )[0]
+    assert script.index('stopped_by_service[$service]="$id"') < script.index('docker stop --time 120 "$id"')
+    assert "trap 'exit 129' HUP" in script
+    assert "trap 'exit 130' INT" in script
+    assert "trap 'exit 143' TERM" in script
+    assert "trap on_exit EXIT" in script
+    assert "restore_legacy_services" in script
+    assert "-o ServerAliveInterval=15" in pause
+    assert "-o ServerAliveCountMax=6" in pause
+    assert "-o TCPKeepAlive=yes" in pause
+    subprocess.run(["bash", "-n", str(ROOT / "scripts/pause-legacy-gpoint.sh")], check=True)
+
+
 def test_cutover_backup_is_encrypted_offsite_and_restore_reads_ciphertext_only():
     workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]

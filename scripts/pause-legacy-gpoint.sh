@@ -157,14 +157,18 @@ on_exit() {
   exit "$status"
 }
 trap on_exit EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 for service in "${stop_order[@]}"; do
   id="${id_by_service[$service]}"
   was_running="${running_by_service[$service]}"
   if [[ "$was_running" == true ]]; then
     test "$(docker inspect --format '{{.State.Running}}' "$id")" = true
-    docker stop --time 120 "$id" >/dev/null
+    # A failed or interrupted stop may already have stopped this exact ID.
     stopped_by_service[$service]="$id"
+    docker stop --time 120 "$id" >/dev/null
   fi
   test "$(docker inspect --format '{{.State.Running}}' "$id")" = false
 done
