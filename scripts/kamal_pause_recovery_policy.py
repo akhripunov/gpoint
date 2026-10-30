@@ -7,6 +7,7 @@ live Docker identities, and status immediately before any recovery action.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 import re
 from typing import Mapping
 
@@ -88,3 +89,73 @@ def planned_legacy_rescue(
         if not item.live_running:
             selected[service] = item.container_id
     return tuple(selected[service] for service in RECOVERY_ORDER if service in selected)
+
+
+class RecoveryPhase(str, Enum):
+    """Durably recorded ownership of the rollback responsibility."""
+
+    PRE_CADDY = "pre_caddy"
+    HANDOFF_PENDING = "handoff_pending"
+    POST_CADDY = "post_caddy"
+    VERIFIED = "verified"
+
+
+class RescueDecision(str, Enum):
+    NO_ACTION = "no_action"
+    INSPECT_AND_PLAN_LEGACY = "inspect_and_plan_legacy"
+    POST_CADDY_OWNER = "post_caddy_owner"
+    BLOCKED = "blocked"
+
+
+@dataclass(frozen=True)
+class WatchdogEvidence:
+    """Evidence gathered independently, never accepted from the SSH caller alone."""
+
+    exact_attempt_matches: bool
+    independent_watchdog_armed: bool
+    controller_alive: bool
+    deadline_exceeded: bool
+    caddy_active: bool
+    kamal_resources_absent: bool
+    caddy_backup_verified: bool
+    post_caddy_guard_ready: bool
+
+
+def decide_watchdog_owner(
+    phase: RecoveryPhase, facts: WatchdogEvidence
+) -> RescueDecision:
+    """Pure routing decision. No health claim or Docker action follows from it.
+
+    A post-Caddy handoff must not fall back to pre-Caddy Compose recovery,
+    even if Caddy is active again. Recovery code must re-read exact identities.
+    """
+    if not isinstance(phase, RecoveryPhase):
+        return RescueDecision.BLOCKED
+    if not all(type(getattr(facts, key)) is bool for key in (
+        "exact_attempt_matches", "independent_watchdog_armed",
+        "controller_alive", "deadline_exceeded", "caddy_active",
+        "kamal_resources_absent", "caddy_backup_verified",
+        "post_caddy_guard_ready",
+    )):
+        return RescueDecision.BLOCKED
+    if not facts.exact_attempt_matches or not facts.independent_watchdog_armed:
+        return RescueDecision.BLOCKED
+    if phase is RecoveryPhase.VERIFIED:
+        return RescueDecision.NO_ACTION
+    if facts.controller_alive and not facts.deadline_exceeded:
+        return RescueDecision.NO_ACTION
+    if phase is RecoveryPhase.PRE_CADDY:
+        if facts.caddy_active and facts.kamal_resources_absent:
+            return RescueDecision.INSPECT_AND_PLAN_LEGACY
+        return RescueDecision.BLOCKED
+    if phase is RecoveryPhase.HANDOFF_PENDING:
+        # The same-run Caddy backup and new recovery owner must be ready
+        # BEFORE either old Caddy or the old consumers may be handed over.
+        if not (facts.caddy_backup_verified and facts.post_caddy_guard_ready):
+            return RescueDecision.BLOCKED
+        return RescueDecision.POST_CADDY_OWNER
+    if phase is RecoveryPhase.POST_CADDY:
+        if facts.caddy_backup_verified and facts.post_caddy_guard_ready:
+            return RescueDecision.POST_CADDY_OWNER
+        return RescueDecision.BLOCKED
+    return RescueDecision.BLOCKED
