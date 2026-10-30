@@ -569,6 +569,20 @@ def test_kamal_migration_parity_fails_closed_for_pending_candidate_revision(tmp_
     assert "PENDING" in result.stderr
 
 
+def test_first_cutover_readonly_prisma_baseline_runs_from_api_workspace():
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
+    baseline = workflow.split("name: Capture PostgreSQL and no-Eros cutover baseline", 1)[1].split(
+        "name: Verify application source matches the live production SHA", 1
+    )[0]
+    # The Node runtime image is a pnpm workspace. The root /app cannot resolve
+    # @prisma/client, whereas /app/apps/api declares it as a dependency.
+    api = (ROOT / "apps/api/package.json").read_text()
+    assert '"@prisma/client"' in api
+    assert 'docker run --rm --network shared_internal --env-file /opt/gpoint/env/production.env --workdir /app/apps/api "$api_image" node -e' in baseline
+    assert 'READ_ONLY_DATABASE_BASELINE_FAILED=' in baseline
+    assert 'PRISMA_MIGRATIONS=' in baseline
+
+
 def test_native_workflow_runs_migration_parity_before_deployment_or_pause():
     workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
