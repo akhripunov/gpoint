@@ -52,6 +52,10 @@ def run(argv: list[str], *, capture: bool = True, check: bool = True) -> str:
 
 
 def docker(*args: str, check: bool = True) -> str:
+    if len(args) == 2 and args[0] == "stop":
+        # The isolated fixtures sleep as PID 1 and ignore SIGTERM.
+        # Do not spend Docker's default ten-second grace on test-only services.
+        args = ("stop", "--time", "1", args[1])
     return run(["docker", *args], check=check)
 
 
@@ -241,8 +245,12 @@ def main() -> int:
 }
 https://gpoint.amiora.one {
   tls internal
-  handle_path /api/* { reverse_proxy legacy-api:80 }
-  handle { reverse_proxy legacy-api:80 }
+  handle_path /api/* {
+    reverse_proxy legacy-api:80
+  }
+  handle {
+    reverse_proxy legacy-api:80
+  }
 }
 """
         caddyfile.write_text(caddy_text)
@@ -379,10 +387,14 @@ https://gpoint.amiora.one {
             if argv[0] == "systemctl":
                 if argv[1] == "is-active":
                     active = docker("inspect", "--format", "{{.State.Running}}", caddy_container, check=False) == "true"
-                    return subprocess.CompletedProcess(argv, 0 if active else 3)
+                    return subprocess.CompletedProcess(argv, 0 if active else 3, stdout="", stderr="")
                 if argv[1] == "start":
                     docker("start", caddy_container)
-                    return subprocess.CompletedProcess(argv, 0)
+                    return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+            if argv[:4] == ["docker", "stop", "--time", "30"]:
+                # Fixture sleeps ignore TERM as PID 1. Keep the recovery command
+                # identity/order, but shorten *isolated* test-only stop grace.
+                return original_run([*argv[:3], "1", *argv[4:]], **kwargs)
             return original_run(argv, **kwargs)
         RECOVER.subprocess.run = bridged_run
         args = SimpleNamespace(candidate_sha=SHA, app_source_sha=APP_SHA, version=VERSION, run_id=RUN_ID,
