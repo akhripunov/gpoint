@@ -448,6 +448,41 @@ def test_first_cutover_stops_only_freshly_inventoried_legacy_services_after_rest
     subprocess.run(["bash", "-n", str(ROOT / "scripts/verify-gpoint-backup-restore.sh")], check=True)
 
 
+def test_first_cutover_backup_result_parser_accepts_capacity_proofs_and_rejects_unknown(tmp_path):
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
+    step = workflow.split("name: Verify fresh PostgreSQL and media backup with isolated restore", 1)[1].split(
+        "name: Check VPS disk headroom for the exact candidate images", 1
+    )[0]
+    helper = (ROOT / "scripts/verify-gpoint-backup-restore.sh").read_text()
+    required = (
+        "GPOINT_PRE_BACKUP_CAPACITY",
+        "GPOINT_PRE_RESTORE_CAPACITY",
+        "GPOINT_ISOLATED_RESTORE",
+        "GPOINT_MEDIA_BACKUP",
+        "GPOINT_MEDIA_ISOLATED_RESTORE",
+        "GPOINT_MEDIA_OFFSITE_READBACK",
+    )
+    for key in required:
+        assert f"{key}=PASS" in helper
+        assert f"grep -qx '{key}=PASS'" in step if key != "GPOINT_MEDIA_OFFSITE_READBACK" else key in step
+    beginning = "while IFS='=' read -r key value; do"
+    ending = 'done <<< "$facts"'
+    parser = beginning + step.split(beginning, 1)[1].split(ending, 1)[0] + ending
+    valid = "\n".join([*(f"{key}=PASS" for key in required), "backup_sha256=" + "a" * 64])
+    out = tmp_path / "github-output"
+    summary = tmp_path / "github-summary"
+    env = os.environ | {"GITHUB_OUTPUT": str(out), "GITHUB_STEP_SUMMARY": str(summary), "FACTS": valid}
+    shell = "set -euo pipefail\nfacts=$FACTS\n" + parser
+    result = subprocess.run(["bash", "-c", shell], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert out.read_text() == "backup_sha256=" + "a" * 64 + "\n"
+    assert "GPOINT_PRE_BACKUP_CAPACITY" not in out.read_text()
+    env["FACTS"] = valid + "\nUNEXPECTED_FIELD=PASS"
+    rejected = subprocess.run(["bash", "-c", shell], env=env, capture_output=True, text=True)
+    assert rejected.returncode != 0
+    assert "Unexpected backup/restore result field: UNEXPECTED_FIELD" in rejected.stderr
+
+
 def test_cutover_helper_uses_snapshot_bound_graceful_stop_and_pre_deploy_recovery():
     workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
@@ -569,6 +604,42 @@ def test_kamal_migration_parity_fails_closed_for_pending_candidate_revision(tmp_
     )
     assert result.returncode != 0
     assert "PENDING" in result.stderr
+
+
+def test_first_cutover_backup_output_contract_accepts_all_proven_statuses_and_rejects_extra_fields(tmp_path):
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
+    helper = (ROOT / "scripts/verify-gpoint-backup-restore.sh").read_text()
+    step = workflow.split("name: Verify fresh PostgreSQL and media backup with isolated restore", 1)[1].split(
+        "name: Check VPS disk headroom for the exact candidate images", 1
+    )[0]
+    statuses = (
+        "GPOINT_PRE_BACKUP_CAPACITY", "GPOINT_MEDIA_OFFSITE_READBACK",
+        "GPOINT_PRE_RESTORE_CAPACITY", "GPOINT_MEDIA_BACKUP",
+        "GPOINT_MEDIA_ISOLATED_RESTORE", "GPOINT_ISOLATED_RESTORE",
+    )
+    for status in statuses:
+        assert f"echo {status}=PASS" in helper
+        assert f"grep -qx '{status}=PASS'" in step
+        assert status in step.split('case "$key" in', 1)[1]
+    parser = step.split("while IFS='=' read -r key value; do", 1)[1].split('done <<< "$facts"', 1)[0]
+    parser = "while IFS='=' read -r key value; do" + parser + 'done <<< "$facts"'
+    output = tmp_path / "output"
+    summary = tmp_path / "summary"
+    fields = [f"{status}=PASS" for status in statuses] + [
+        "backup_path=/opt/gpoint/backups/actual.dump.age",
+        "backup_sha256=" + "a" * 64,
+    ]
+    env = {**os.environ, "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": str(summary)}
+    def invoke(lines):
+        return subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", 'facts="$1"\n' + parser, "bash", "\n".join(lines)],
+            env=env, text=True, capture_output=True,
+        )
+    ok = invoke(fields)
+    assert ok.returncode == 0, ok.stderr
+    assert "backup_path=/opt/gpoint/backups/actual.dump.age" in output.read_text()
+    assert invoke(fields + ["UNEXPECTED=PASS"]).returncode != 0
+    assert invoke(["GPOINT_PRE_RESTORE_CAPACITY=FAIL"] + fields).returncode != 0
 
 
 def test_attempt_helper_dir_is_created_once_and_reused_by_backup_and_pause():

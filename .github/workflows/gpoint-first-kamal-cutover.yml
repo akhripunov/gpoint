@@ -862,6 +862,9 @@ jobs:
             "$BASELINE_PATH" "$BASELINE_SHA" "$remote_backup_helper" \
             "$GPOINT_KAMAL_BACKUP_AGE_RECIPIENT" "$GPOINT_KAMAL_BACKUP_OFFSITE_REMOTE" \
             "$remote_media_tree_helper")"
+          grep -qx 'GPOINT_PRE_BACKUP_CAPACITY=PASS' <<< "$facts"
+          grep -qx 'GPOINT_MEDIA_OFFSITE_READBACK=PASS' <<< "$facts"
+          grep -qx 'GPOINT_PRE_RESTORE_CAPACITY=PASS' <<< "$facts"
           grep -qx 'GPOINT_ISOLATED_RESTORE=PASS' <<< "$facts"
           grep -qx 'GPOINT_MEDIA_BACKUP=PASS' <<< "$facts"
           grep -qx 'GPOINT_MEDIA_ISOLATED_RESTORE=PASS' <<< "$facts"
@@ -871,7 +874,9 @@ jobs:
                 printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"
                 printf -- '- %s: %s\n' "$key" "$value" >> "$GITHUB_STEP_SUMMARY"
                 ;;
-              GPOINT_ISOLATED_RESTORE|GPOINT_MEDIA_BACKUP|GPOINT_MEDIA_ISOLATED_RESTORE|GPOINT_MEDIA_OFFSITE_READBACK) ;;
+              GPOINT_PRE_BACKUP_CAPACITY|GPOINT_MEDIA_OFFSITE_READBACK|GPOINT_PRE_RESTORE_CAPACITY|GPOINT_ISOLATED_RESTORE|GPOINT_MEDIA_BACKUP|GPOINT_MEDIA_ISOLATED_RESTORE)
+                test "$value" = 'PASS' || { echo "Backup/restore status $key is not PASS" >&2; exit 1; }
+                ;;
               *) echo "Unexpected backup/restore result field: $key" >&2; exit 1 ;;
             esac
           done <<< "$facts"
