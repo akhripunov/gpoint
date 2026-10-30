@@ -462,9 +462,11 @@ def test_cutover_helper_uses_snapshot_bound_graceful_stop_and_pre_deploy_recover
     assert "scripts/pause-legacy-gpoint.sh" in cutover
     assert 'test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"' in cutover
     assert cutover.index("git/ref/heads/main") < cutover.index("scp \"${ssh_opts[@]}\" scripts/pause-legacy-gpoint.sh")
-    assert cutover.index('install -d -m 700 "$1"') < cutover.index(
+    assert cutover.index('test -d "$1"') < cutover.index(
         "scp \"${ssh_opts[@]}\" scripts/pause-legacy-gpoint.sh"
     ) < cutover.index("ssh -T \"${ssh_opts[@]}\" \"root@${GPOINT_PRODUCTION_HOST}\" bash \"$remote_script\"")
+    assert 'test ! -L "$1"' in cutover
+    assert "stat -c" in cutover and "0:700" in cutover
     helper = (ROOT / "scripts/pause-legacy-gpoint.sh").read_text()
     assert "INVENTORY_SHA256" in helper
     assert "INVENTORY_FILE" in helper
@@ -567,6 +569,28 @@ def test_kamal_migration_parity_fails_closed_for_pending_candidate_revision(tmp_
     )
     assert result.returncode != 0
     assert "PENDING" in result.stderr
+
+
+def test_attempt_helper_dir_is_created_once_and_reused_by_backup_and_pause():
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
+    baseline = workflow.split("name: Capture PostgreSQL and no-Eros cutover baseline", 1)[1].split(
+        "name: Verify application source matches the live production SHA", 1
+    )[0]
+    backup = workflow.split("name: Verify fresh PostgreSQL and media backup with isolated restore", 1)[1].split(
+        "name: Create exact-SHA in-progress GitHub Deployment", 1
+    )[0]
+    pause = workflow.split("name: Pause legacy GPoint services after restore gates", 1)[1].split(
+        "name: Stop Caddy for Kamal Proxy public bind", 1
+    )[0]
+    assert 'test ! -e "$1"' in baseline
+    for stage in (backup, pause):
+        assert 'test ! -e "$1"' not in stage
+        assert 'test -d "$1"' in stage
+        assert 'test ! -L "$1"' in stage
+        assert "stat -c" in stage and "0:700" in stage
+    assert 'test ! -e "$1/backup.py"' in backup
+    assert 'test ! -e "$1/restore.sh"' in backup
+    assert 'test ! -e "$1/pause-legacy-gpoint.sh"' in pause
 
 
 def test_baseline_capture_keeps_attempt_evidence_and_does_not_rmdir_nonempty_directory():

@@ -837,9 +837,14 @@ jobs:
             "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$remote_script_dir" <<'REMOTE_SETUP'
           set -euo pipefail
           [[ "$1" =~ ^/run/gpoint-kamal/[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
-          test ! -e "$1"
-          install -d -m 700 /run/gpoint-kamal
-          install -d -m 700 "$1"
+          # The baseline step created this exact attempt-scoped directory.
+          # Fail closed if it is absent, symlinked, or not root-owned/private.
+          test -d "$1"
+          test ! -L "$1"
+          test "$(stat -c '%u:%a' "$1")" = '0:700'
+          test ! -e "$1/backup.py"
+          test ! -e "$1/restore.sh"
+          test ! -e "$1/media-tree.py"
           REMOTE_SETUP
           scp -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
@@ -960,9 +965,12 @@ jobs:
           ssh -T "${ssh_opts[@]}" "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$remote_script_dir" <<'REMOTE'
           set -euo pipefail
           [[ "$1" =~ ^/run/gpoint-kamal/[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
-          test ! -e "$1"
-          install -d -m 700 /run/gpoint-kamal
-          install -d -m 700 "$1"
+          # Reuse the same protected directory after successful backup/restore.
+          # A second creation guard would always fail before pausing services.
+          test -d "$1"
+          test ! -L "$1"
+          test "$(stat -c '%u:%a' "$1")" = '0:700'
+          test ! -e "$1/pause-legacy-gpoint.sh"
           REMOTE
           scp "${ssh_opts[@]}" scripts/pause-legacy-gpoint.sh "root@${GPOINT_PRODUCTION_HOST}:$remote_script"
           scp "${ssh_opts[@]}" scripts/gpoint-media-tree.py "root@${GPOINT_PRODUCTION_HOST}:$remote_media_tree_helper"
