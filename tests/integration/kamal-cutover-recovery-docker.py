@@ -64,7 +64,8 @@ PROBE_CODE = ("import socket,ssl,sys,urllib.request; "
               "old=socket.getaddrinfo; socket.getaddrinfo=lambda h,p,*a,**k: old(sys.argv[4] if h=='gpoint.amiora.one' and sys.argv[4] else h,p,*a,**k); "
               "ctx=ssl._create_unverified_context(); "
               "r=urllib.request.Request(sys.argv[1],headers={'Host':sys.argv[3]} if sys.argv[3] else {}); "
-              "print(urllib.request.urlopen(r,context=ctx,timeout=4).read().decode())")
+              "opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),urllib.request.HTTPSHandler(context=ctx)); "
+              "print(opener.open(r,timeout=4).read().decode())")
 
 
 def python_probe_args(url: str, expected: str, host: str, resolve_ip: str) -> list[str]:

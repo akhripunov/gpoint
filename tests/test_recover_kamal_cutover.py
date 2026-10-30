@@ -215,14 +215,15 @@ def test_python_c_probe_argv_offsets_and_host_resolution_without_docker(monkeypa
         def read(self):
             return b"probe-body"
 
-    def urlopen(request, context, timeout):
+    def open_request(request, timeout):
         fake_socket.getaddrinfo("gpoint.amiora.one", 443)
-        calls["context"] = context
         calls["timeout"] = timeout
         return Response()
 
     fake_request.Request = Request
-    fake_request.urlopen = urlopen
+    fake_request.ProxyHandler = lambda proxies: proxies
+    fake_request.HTTPSHandler = lambda context: context
+    fake_request.build_opener = lambda *handlers: SimpleNamespace(open=open_request)
     fake_urllib = ModuleType("urllib")
     fake_urllib.request = fake_request
     monkeypatch.setitem(sys.modules, "socket", fake_socket)
@@ -239,6 +240,32 @@ def test_python_c_probe_argv_offsets_and_host_resolution_without_docker(monkeypa
     assert calls["request"] == (url, {"Host": "gpoint.amiora.one"})
     assert calls["resolved"] == ("127.0.0.1", 443)
     assert calls["timeout"] == 4
+
+
+def test_probe_does_not_route_fixture_requests_through_environment_proxy():
+    integration_path = ROOT / "tests/integration/kamal-cutover-recovery-docker.py"
+    spec = importlib.util.spec_from_file_location("cutover_proxy_probe", integration_path)
+    integration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(integration)
+    code = """import http.client, sys
+class Destination(Exception): pass
+def request(self, *args, **kwargs): raise Destination(self.host)
+http.client.HTTPConnection.request = request
+probe_code = sys.argv[1]
+sys.argv = ['-c', *sys.argv[2:]]
+try:
+    exec(probe_code, {'__name__': '__main__'})
+except Destination as e:
+    print('destination=' + str(e))
+"""
+    env = {**os.environ, "https_proxy": "http://proxy.test:8123", "no_proxy": ""}
+    env.pop("HTTP_PROXY", None)
+    env.pop("HTTPS_PROXY", None)
+    result = subprocess.run([sys.executable, "-c", code, integration.PROBE_CODE,
+                             "https://gpoint.amiora.one/test", "fixture", "gpoint.amiora.one", "127.0.0.1"],
+                            env=env, text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "destination=gpoint.amiora.one"
 
 
 def test_staged_remote_layout_imports_sibling_route_module(tmp_path):
