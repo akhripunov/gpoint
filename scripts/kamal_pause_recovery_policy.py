@@ -159,3 +159,63 @@ def decide_watchdog_owner(
             return RescueDecision.POST_CADDY_OWNER
         return RescueDecision.BLOCKED
     return RescueDecision.BLOCKED
+
+
+@dataclass(frozen=True)
+class HandoffProof:
+    """Live facts for one proposed irreversible cutover phase transition."""
+
+    exact_attempt: bool
+    independent_guard_ready: bool
+    legacy_consumers_stopped: bool
+    original_caddy_active: bool
+    caddy_retires_confirmed: bool
+    caddy_backup_verified: bool
+    post_caddy_recovery_ready: bool
+    kamal_proxy_active: bool
+    replacement_consumers_healthy: bool
+    full_runtime_verify_passed: bool
+
+
+def validate_phase_transition(
+    current: RecoveryPhase, proposed: RecoveryPhase, proof: HandoffProof
+) -> RecoveryPhase:
+    """Admit strictly forward-only ownership transitions; never execute them.
+
+    The caller must persist each authorized phase atomically with fencing,
+    and cannot treat these facts as proof that a real watchdog exists.
+    """
+    if not isinstance(current, RecoveryPhase) or not isinstance(proposed, RecoveryPhase):
+        raise PauseRecoveryBlocked("invalid recovery ownership phase")
+    if not all(type(getattr(proof, name)) is bool for name in (
+        "exact_attempt", "independent_guard_ready", "legacy_consumers_stopped",
+        "original_caddy_active", "caddy_retires_confirmed",
+        "caddy_backup_verified", "post_caddy_recovery_ready",
+        "kamal_proxy_active", "replacement_consumers_healthy",
+        "full_runtime_verify_passed",
+    )):
+        raise PauseRecoveryBlocked("invalid typed ownership evidence")
+    if not proof.exact_attempt or not proof.independent_guard_ready:
+        raise PauseRecoveryBlocked("unarmed or mismatched recovery owner")
+    if current is proposed:
+        return current
+    if current is RecoveryPhase.PRE_CADDY and proposed is RecoveryPhase.HANDOFF_PENDING:
+        if all((
+            proof.legacy_consumers_stopped, proof.original_caddy_active,
+            proof.caddy_backup_verified, proof.post_caddy_recovery_ready,
+        )) and not proof.caddy_retires_confirmed and not proof.kamal_proxy_active:
+            return proposed
+    if current is RecoveryPhase.HANDOFF_PENDING and proposed is RecoveryPhase.POST_CADDY:
+        if all((
+            proof.legacy_consumers_stopped, proof.caddy_retires_confirmed,
+            proof.caddy_backup_verified, proof.post_caddy_recovery_ready,
+        )) and not proof.original_caddy_active:
+            return proposed
+    if current is RecoveryPhase.POST_CADDY and proposed is RecoveryPhase.VERIFIED:
+        if all((
+            proof.legacy_consumers_stopped, proof.caddy_retires_confirmed,
+            proof.kamal_proxy_active, proof.replacement_consumers_healthy,
+            proof.full_runtime_verify_passed,
+        )) and not proof.original_caddy_active:
+            return proposed
+    raise PauseRecoveryBlocked("unsafe or skipped recovery handoff")

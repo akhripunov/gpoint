@@ -250,3 +250,135 @@ def test_no_recovery_in_post_caddy_or_kamal_activated_state():
     ):
         with pytest.raises(policy.PauseRecoveryBlocked):
             policy.planned_legacy_rescue(wrong, containers)
+
+
+def handoff_proof():
+    return policy.HandoffProof(
+        exact_attempt=True,
+        independent_guard_ready=True,
+        legacy_consumers_stopped=False,
+        original_caddy_active=True,
+        caddy_retires_confirmed=False,
+        caddy_backup_verified=False,
+        post_caddy_recovery_ready=False,
+        kamal_proxy_active=False,
+        replacement_consumers_healthy=False,
+        full_runtime_verify_passed=False,
+    )
+
+
+def safe_handoff_chain():
+    """Proofs from distinct observed stages, not one stale snapshot."""
+    early = replace(
+        handoff_proof(),
+        legacy_consumers_stopped=True,
+        caddy_backup_verified=True,
+        post_caddy_recovery_ready=True,
+    )
+    retired = replace(
+        early, original_caddy_active=False, caddy_retires_confirmed=True
+    )
+    verified = replace(
+        retired, kamal_proxy_active=True,
+        replacement_consumers_healthy=True, full_runtime_verify_passed=True
+    )
+    return early, retired, verified
+
+
+def test_handoff_requires_three_ordered_phase_proofs():
+    early, retired, verified = safe_handoff_chain()
+    assert policy.validate_phase_transition(
+        policy.RecoveryPhase.PRE_CADDY, policy.RecoveryPhase.HANDOFF_PENDING, early
+    ) is policy.RecoveryPhase.HANDOFF_PENDING
+    assert policy.validate_phase_transition(
+        policy.RecoveryPhase.HANDOFF_PENDING, policy.RecoveryPhase.POST_CADDY, retired
+    ) is policy.RecoveryPhase.POST_CADDY
+    assert policy.validate_phase_transition(
+        policy.RecoveryPhase.POST_CADDY, policy.RecoveryPhase.VERIFIED, verified
+    ) is policy.RecoveryPhase.VERIFIED
+
+
+@pytest.mark.parametrize("missing", [
+    "legacy_consumers_stopped", "original_caddy_active",
+    "caddy_backup_verified", "post_caddy_recovery_ready",
+    "exact_attempt", "independent_guard_ready",
+])
+def test_no_pre_caddy_handoff_without_all_proofs(missing):
+    early, _, _ = safe_handoff_chain()
+    with pytest.raises(policy.PauseRecoveryBlocked):
+        policy.validate_phase_transition(
+            policy.RecoveryPhase.PRE_CADDY, policy.RecoveryPhase.HANDOFF_PENDING,
+            replace(early, **{missing: False})
+        )
+
+
+@pytest.mark.parametrize("missing", [
+    "legacy_consumers_stopped", "caddy_retires_confirmed",
+    "caddy_backup_verified", "post_caddy_recovery_ready",
+    "exact_attempt", "independent_guard_ready",
+])
+def test_no_post_caddy_ownership_without_all_proofs(missing):
+    _, retired, _ = safe_handoff_chain()
+    with pytest.raises(policy.PauseRecoveryBlocked):
+        policy.validate_phase_transition(
+            policy.RecoveryPhase.HANDOFF_PENDING, policy.RecoveryPhase.POST_CADDY,
+            replace(retired, **{missing: False})
+        )
+
+
+@pytest.mark.parametrize("missing", [
+    "legacy_consumers_stopped", "caddy_retires_confirmed",
+    "kamal_proxy_active", "replacement_consumers_healthy",
+    "full_runtime_verify_passed", "exact_attempt", "independent_guard_ready",
+])
+def test_no_verified_state_without_all_proofs(missing):
+    _, _, verified = safe_handoff_chain()
+    with pytest.raises(policy.PauseRecoveryBlocked):
+        policy.validate_phase_transition(
+            policy.RecoveryPhase.POST_CADDY, policy.RecoveryPhase.VERIFIED,
+            replace(verified, **{missing: False})
+        )
+
+
+@pytest.mark.parametrize("from_phase,to_phase", [
+    (policy.RecoveryPhase.PRE_CADDY, policy.RecoveryPhase.VERIFIED),
+    (policy.RecoveryPhase.PRE_CADDY, policy.RecoveryPhase.POST_CADDY),
+    (policy.RecoveryPhase.HANDOFF_PENDING, policy.RecoveryPhase.VERIFIED),
+    (policy.RecoveryPhase.VERIFIED, policy.RecoveryPhase.PRE_CADDY),
+    (policy.RecoveryPhase.VERIFIED, policy.RecoveryPhase.POST_CADDY),
+    (policy.RecoveryPhase.POST_CADDY, policy.RecoveryPhase.HANDOFF_PENDING),
+    (policy.RecoveryPhase.HANDOFF_PENDING, policy.RecoveryPhase.PRE_CADDY),
+])
+def test_no_skipped_or_backward_handoff(from_phase, to_phase):
+    _, _, verified = safe_handoff_chain()
+    with pytest.raises(policy.PauseRecoveryBlocked):
+        policy.validate_phase_transition(from_phase, to_phase, verified)
+
+
+@pytest.mark.parametrize("bad", [None, 1, "true", "false"])
+def test_untyped_or_missing_handoff_proof_rejected(bad):
+    early, _, _ = safe_handoff_chain()
+    with pytest.raises(policy.PauseRecoveryBlocked):
+        policy.validate_phase_transition(
+            policy.RecoveryPhase.PRE_CADDY, policy.RecoveryPhase.HANDOFF_PENDING,
+            replace(early, post_caddy_recovery_ready=bad)
+        )
+
+
+def test_caddy_drift_or_early_kamal_proxy_blocks_handoff():
+    early, retired, verified = safe_handoff_chain()
+    with pytest.raises(policy.PauseRecoveryBlocked):
+        policy.validate_phase_transition(
+            policy.RecoveryPhase.PRE_CADDY, policy.RecoveryPhase.HANDOFF_PENDING,
+            replace(early, kamal_proxy_active=True)
+        )
+    with pytest.raises(policy.PauseRecoveryBlocked):
+        policy.validate_phase_transition(
+            policy.RecoveryPhase.HANDOFF_PENDING, policy.RecoveryPhase.POST_CADDY,
+            replace(retired, original_caddy_active=True)
+        )
+    with pytest.raises(policy.PauseRecoveryBlocked):
+        policy.validate_phase_transition(
+            policy.RecoveryPhase.POST_CADDY, policy.RecoveryPhase.VERIFIED,
+            replace(verified, original_caddy_active=True)
+        )
