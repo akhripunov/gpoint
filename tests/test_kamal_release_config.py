@@ -521,6 +521,23 @@ def test_cutover_helper_uses_snapshot_bound_graceful_stop_and_pre_deploy_recover
     assert "gsales-api" in helper
 
 
+def test_first_cutover_is_fail_closed_until_independent_rollback_is_proven():
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
+    deploy = workflow.split("  deploy:\n", 1)[1]
+    gate = "name: Block first cutover until an independently tested pre-Caddy rollback is installed"
+    deployment = "name: Create exact-SHA in-progress GitHub Deployment"
+    pause = "name: Pause legacy GPoint services after restore gates"
+    assert deploy.index("name: Check VPS disk headroom") < deploy.index(gate) < deploy.index(deployment) < deploy.index(pause)
+    section = deploy.split(gate, 1)[1].split(deployment, 1)[0]
+    assert "if: inputs.mode == 'cutover'" in section
+    assert "ME-54: VPS-side rollback on SSH loss is not yet implemented or proven" in section
+    assert "exit 1" in section
+    shell_body = textwrap.dedent(section.split("run: |", 1)[1])
+    result = subprocess.run(["bash", "-e", "-c", shell_body], text=True, capture_output=True)
+    assert result.returncode != 0
+    assert "ME-54" in result.stdout
+
+
 def test_first_cutover_pause_protects_inflight_stop_and_ssh_idle():
     script = (ROOT / "scripts/pause-legacy-gpoint.sh").read_text()
     workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()

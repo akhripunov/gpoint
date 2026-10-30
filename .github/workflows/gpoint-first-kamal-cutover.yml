@@ -933,6 +933,12 @@ jobs:
               *) echo "Unexpected disk headroom result field: $key" >&2; exit 1 ;;
             esac
           done <<< "$facts"
+      - name: Block first cutover until an independently tested pre-Caddy rollback is installed
+        if: inputs.mode == 'cutover'
+        run: |
+          set -euo pipefail
+          echo '::error::ME-54: VPS-side rollback on SSH loss is not yet implemented or proven. Refusing to pause Compose.'
+          exit 1
       - name: Create exact-SHA in-progress GitHub Deployment
         if: inputs.mode == 'cutover'
         id: deployment
