@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 service="${GPOINT_KAMAL_SERVICE:?GPOINT_KAMAL_SERVICE is required}"
 version="${KAMAL_VERSION:?KAMAL_VERSION is required}"
@@ -10,10 +10,14 @@ roles="${KAMAL_ROLES:-}"
 ssh_key="${GPOINT_SSH_KEY:?GPOINT_SSH_KEY is required}"
 known_hosts="${GPOINT_KNOWN_HOSTS_FILE:?GPOINT_KNOWN_HOSTS_FILE is required}"
 
-[[ "$candidate" =~ ^[0-9a-f]{40}$ ]]
-[[ "$app_source_sha" =~ ^[0-9a-f]{40}$ ]]
-[[ "$version" == "$candidate-"* && "$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
-[[ -r "$ssh_key" && -r "$known_hosts" ]]
+printf '%s\n' "$candidate" | grep -Eq '^[0-9a-f]{40}$'
+printf '%s\n' "$app_source_sha" | grep -Eq '^[0-9a-f]{40}$'
+case "$version" in "$candidate"-*) ;; *) echo 'Kamal version is not bound to the candidate SHA' >&2; exit 1 ;; esac
+printf '%s\n' "$version" | grep -Eq '^[0-9a-f]{40}-[0-9]+-[0-9]+$'
+test -r "$ssh_key" && test -r "$known_hosts"
+case "$hosts" in ''|,*|*,|*,,*) echo 'KAMAL_HOSTS is empty or malformed' >&2; exit 1 ;; esac
+case "$hosts" in *[!A-Za-z0-9.,-]*) echo 'KAMAL_HOSTS contains an invalid host character' >&2; exit 1 ;; esac
+set -f
 
 case "$service" in
   gpoint-core)
@@ -32,11 +36,10 @@ case "$service" in
 esac
 
 roles="${roles:-$default_roles}"
-IFS=',' read -r -a role_list <<< "$roles"
-IFS=',' read -r -a host_list <<< "$hosts"
-((${#role_list[@]} > 0 && ${#host_list[@]} > 0))
+case "$roles" in ''|,*|*,|*,,*) echo 'KAMAL_ROLES is empty or malformed' >&2; exit 1 ;; esac
+case "$roles" in *[!A-Za-z0-9,_-]*) echo 'KAMAL_ROLES contains an invalid role character' >&2; exit 1 ;; esac
 
-for role in "${role_list[@]}"; do
+for role in $(printf '%s' "$roles" | tr ',' ' '); do
   case "$service:$role" in
     gpoint-core:api) networks='gpoint_app:api,shared_internal:' ;;
     gpoint-core:worker|gpoint-core:bot) networks='gpoint_app:,shared_internal:' ;;
@@ -49,8 +52,8 @@ for role in "${role_list[@]}"; do
       ;;
   esac
 
-  for host in "${host_list[@]}"; do
-    [[ "$host" =~ ^[A-Za-z0-9.-]+$ ]]
+  for host in $(printf '%s' "$hosts" | tr ',' ' '); do
+    printf '%s\n' "$host" | grep -Eq '^[A-Za-z0-9.-]+$'
     ssh -T -i "$ssh_key" \
       -o BatchMode=yes \
       -o IdentitiesOnly=yes \
@@ -122,7 +125,7 @@ if [[ "$service:$role" == "gpoint-agata:memory-worker" ]]; then
 fi
 REMOTE
 
-  if [[ "$service:$role" == "gpoint-miniapp:web" ]]; then
+  if [ "$service:$role" = "gpoint-miniapp:web" ]; then
     ssh -T -i "$ssh_key" \
       -o BatchMode=yes \
       -o IdentitiesOnly=yes \

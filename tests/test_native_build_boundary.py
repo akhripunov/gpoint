@@ -176,7 +176,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api", deploy_script)
         self.assertIn("GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api", deploy_script)
         hook = (ROOT / ".kamal/hooks/post-app-boot").read_text()
-        self.assertIn('[[ "$version" == "$candidate-"* && "$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]', hook)
+        self.assertTrue(hook.startswith("#!/bin/sh\n"))
+        self.assertIn('case "$version" in "$candidate"-*)', hook)
 
     def test_workspace_ci_runs_real_kamal_config_and_proxy_integration_checks(self):
         steps = self.workflow["jobs"]["workspace"]["steps"]

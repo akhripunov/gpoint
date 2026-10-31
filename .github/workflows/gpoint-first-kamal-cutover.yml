@@ -95,6 +95,12 @@ jobs:
             --env GPOINT_PRODUCTION_HOST=192.0.2.10 \
             --env KAMAL_REGISTRY_PASSWORD=config-validation-placeholder \
             "$KAMAL_IMAGE" config --config-file config/deploy.miniapp.yml >/dev/null
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE/.kamal/hooks:/hooks:ro" \
+            --entrypoint /bin/sh "$KAMAL_IMAGE" -ec '
+              /bin/sh -n /hooks/pre-app-boot
+              /bin/sh -n /hooks/post-app-boot
+            '
           ./scripts/test-kamal-proxy-integration.sh
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
         with:

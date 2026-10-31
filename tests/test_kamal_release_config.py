@@ -143,7 +143,8 @@ def test_kamal_uses_attempt_scoped_tag_with_buildkit_digest_verification():
     assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST"' in deploy
     assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST"' in deploy
     hook = (ROOT / ".kamal/hooks/pre-app-boot").read_text()
-    assert '"$version" == "$candidate-"*' in hook
+    assert hook.startswith("#!/bin/sh\n")
+    assert 'case "$version" in "$candidate"-*)' in hook
     assert 'EXPECTED_REF="$repository@$expected_digest"' in hook
 
 
@@ -255,12 +256,14 @@ def test_isolated_restore_drops_only_verified_pristine_public_schema_before_pg_r
 
 def test_kamal_network_hook_joins_only_allowed_core_and_agata_roles():
     hook = (ROOT / ".kamal/hooks/post-app-boot").read_text()
+    assert hook.startswith("#!/bin/sh\n")
+    assert 'case "$version" in "$candidate"-*)' in hook
     assert 'candidate="${GPOINT_COMMIT_SHA:?GPOINT_COMMIT_SHA is required}"' in hook
     assert 'app_source_sha="${GPOINT_APP_SOURCE_SHA:?GPOINT_APP_SOURCE_SHA is required}"' in hook
     assert '[[ "$version" == "$candidate-"* && "$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]' in hook
     assert '"$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$' in hook
     assert '"$version" =~ ^[0-9a-f]{40}$' not in hook
-    assert '[[ "$candidate" =~ ^[0-9a-f]{40}$ ]]' in hook
+    assert "printf '%s\\n' \"$candidate\" | grep -Eq '^[0-9a-f]{40}$'" in hook
     assert 'test "$(docker inspect --format' in hook and '"$app_source_sha"' in hook
     assert "gpoint-core:api) networks='gpoint_app:api,shared_internal:'" in hook
     assert "gpoint-agata:api) networks='gpoint_app:agata-api,shared_internal:agata-api'" in hook
@@ -274,6 +277,14 @@ def test_kamal_network_hook_joins_only_allowed_core_and_agata_roles():
     assert "nginx -t" in hook
     assert 'if [[ "$service:$role" == "gpoint-agata:memory-worker" ]]' in hook
     assert "python -m app.memory.worker --healthcheck" in hook
+
+
+@pytest.mark.parametrize("name", ["pre-app-boot", "post-app-boot"])
+def test_kamal_hooks_parse_with_the_shell_available_in_the_pinned_cli(name):
+    hook = ROOT / ".kamal/hooks" / name
+    assert hook.read_text().startswith("#!/bin/sh\n")
+    result = subprocess.run(["sh", "-n", str(hook)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
 
 
 def test_ssh_heredoc_commands_keep_stdin_available():
@@ -1054,7 +1065,7 @@ def test_pre_app_boot_reads_the_ssh_heredoc_and_fails_closed_on_digest_mismatch(
                 "TEST_DOCKER_LOG": str(docker_log),
             })
             result = subprocess.run(
-                ["bash", str(ROOT / ".kamal/hooks/pre-app-boot")],
+                ["sh", str(ROOT / ".kamal/hooks/pre-app-boot")],
                 cwd=ROOT, env=environment, capture_output=True, text=True,
             )
             calls = docker_log.read_text().splitlines() if docker_log.exists() else []
