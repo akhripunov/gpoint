@@ -76,6 +76,66 @@ def ensure_image(image: str) -> None:
         docker("pull", image)
 
 
+def wait_for_postgres(container: str, *, timeout_seconds: int = 60, stable_probes: int = 2,
+                      probe_interval_seconds: float = 1) -> str:
+    """Wait for stable SQL on the final TCP listener, not initdb's socket-only server."""
+    deadline = time.monotonic() + timeout_seconds
+    stable_identity = None
+    consecutive_successes = 0
+    last_error = "no TCP SQL probe completed"
+    query = "SELECT current_database() || chr(124) || pg_postmaster_start_time()::text"
+    command = (
+        'exec env PGPASSWORD="$POSTGRES_PASSWORD" psql -XqAt -v ON_ERROR_STOP=1 '
+        '-h 127.0.0.1 -p "${PGPORT:-5432}" -U "$POSTGRES_USER" -d gpoint '
+        f'-c "{query}"'
+    )
+
+    while time.monotonic() < deadline:
+        try:
+            result = subprocess.run(
+                ["docker", "exec", container, "sh", "-ec", command],
+                text=True, capture_output=True, check=False,
+                timeout=min(5, max(0.1, deadline - time.monotonic())),
+            )
+            identity = result.stdout.strip()
+            if result.returncode == 0 and identity.startswith("gpoint|"):
+                if identity == stable_identity:
+                    consecutive_successes += 1
+                else:
+                    stable_identity = identity
+                    consecutive_successes = 1
+                if consecutive_successes >= stable_probes:
+                    return identity
+                last_error = f"SQL probe succeeded; waiting for {stable_probes} consecutive probes"
+            else:
+                consecutive_successes = 0
+                stable_identity = None
+                last_error = (result.stderr or result.stdout or
+                              f"psql exited {result.returncode}").strip()[-1000:]
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            consecutive_successes = 0
+            stable_identity = None
+            last_error = str(exc)[-1000:]
+
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(probe_interval_seconds, remaining))
+
+    try:
+        container_state = docker("inspect", "--format", "{{.State.Status}} exit={{.State.ExitCode}}",
+                                 container, check=False) or "unavailable"
+    except Exception as exc:
+        container_state = f"unavailable ({exc})"
+    try:
+        logs = docker("logs", "--tail", "20", container, check=False)[-2000:] or "no container logs"
+    except Exception as exc:
+        logs = f"unavailable ({exc})"
+    raise RuntimeError(
+        f"isolated PostgreSQL fixture did not become SQL-ready via TCP within {timeout_seconds}s; "
+        f"last probe: {last_error}; container: {container_state}; recent logs: {logs}"
+    )
+
+
 PROBE_CODE = """import http.client
 import ipaddress
 import socket
@@ -248,13 +308,7 @@ def main() -> int:
                               "POSTGRES_DB=gpoint"),
                          labels={"com.docker.compose.project": "compose",
                                  "com.docker.compose.service": "postgres"})
-        for _ in range(60):
-            if subprocess.run(["docker", "exec", postgres, "pg_isready", "-U", "gpoint", "-d", "gpoint"],
-                              capture_output=True).returncode == 0:
-                break
-            time.sleep(1)
-        else:
-            raise RuntimeError("isolated PostgreSQL fixture did not become ready")
+        wait_for_postgres(postgres)
         docker("exec", "-i", postgres, "psql", "-XqAt", "-v", "ON_ERROR_STOP=1", "-U", "gpoint", "-d", "gpoint",
                input_text="""CREATE TABLE public._prisma_migrations (
   migration_name text PRIMARY KEY,

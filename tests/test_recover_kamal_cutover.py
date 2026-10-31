@@ -230,6 +230,59 @@ def test_integration_allows_absent_kamal_network_without_removing_existing(monke
         integration.main()
 
 
+def _load_cutover_integration():
+    path = ROOT / "tests/integration/kamal-cutover-recovery-docker.py"
+    spec = importlib.util.spec_from_file_location("kamal_cutover_readiness", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_postgres_readiness_requires_stable_tcp_sql_on_primary_server(monkeypatch):
+    integration = _load_cutover_integration()
+    responses = [
+        subprocess.CompletedProcess([], 2, "", "the database system is shutting down"),
+        subprocess.CompletedProcess([], 0, "gpoint|2026-10-31 07:00:00+00\n", ""),
+        subprocess.CompletedProcess([], 0, "gpoint|2026-10-31 07:00:00+00\n", ""),
+    ]
+    calls = []
+    monkeypatch.setattr(integration.subprocess, "run", lambda argv, **kwargs: (calls.append((argv, kwargs)) or responses.pop(0)))
+    clock = [0.0]
+    def monotonic():
+        value = clock[0]
+        clock[0] += 0.1
+        return value
+    monkeypatch.setattr(integration.time, "monotonic", monotonic)
+    monkeypatch.setattr(integration.time, "sleep", lambda _: None)
+
+    assert integration.wait_for_postgres("fixture-postgres", timeout_seconds=10, stable_probes=2) == "gpoint|2026-10-31 07:00:00+00"
+    assert len(calls) == 3
+    command = calls[-1][0]
+    assert command[:4] == ["docker", "exec", "fixture-postgres", "sh"]
+    assert "-h 127.0.0.1" in command[-1]
+    assert "pg_postmaster_start_time()" in command[-1]
+    assert "pg_isready" not in command[-1]
+
+
+def test_postgres_readiness_times_out_with_container_diagnostics(monkeypatch):
+    integration = _load_cutover_integration()
+    monkeypatch.setattr(integration.subprocess, "run", lambda argv, **kwargs:
+                        subprocess.CompletedProcess(argv, 2, "", "connection refused"))
+    clock = [0.0]
+    monkeypatch.setattr(integration.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(integration.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    diagnostics = []
+    monkeypatch.setattr(integration, "docker", lambda *args, **kwargs:
+                        (diagnostics.append(args) or ("running exit=0" if args[0] == "inspect" else "PostgreSQL is starting")))
+
+    with pytest.raises(RuntimeError, match="isolated PostgreSQL fixture did not become SQL-ready.*connection refused.*PostgreSQL is starting"):
+        integration.wait_for_postgres("fixture-postgres", timeout_seconds=2, stable_probes=2, probe_interval_seconds=1)
+    assert diagnostics == [
+        ("inspect", "--format", "{{.State.Status}} exit={{.State.ExitCode}}", "fixture-postgres"),
+        ("logs", "--tail", "20", "fixture-postgres"),
+    ]
+
+
 def test_integration_refuses_existing_kamal_network(monkeypatch):
     integration_path = ROOT / "tests/integration/kamal-cutover-recovery-docker.py"
     spec = importlib.util.spec_from_file_location("kamal_cutover_recovery_docker", integration_path)
