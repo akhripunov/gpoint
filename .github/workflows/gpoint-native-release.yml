@@ -287,7 +287,7 @@ jobs:
   deploy:
     name: Kamal production Deploy and Verify
     needs: build
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     environment: production
     concurrency:
@@ -299,10 +299,10 @@ jobs:
       packages: read
       deployments: write
     env:
-      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
-      IMAGE_VERSION: ${{ inputs.candidate_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-      GPOINT_COMMIT_SHA: ${{ inputs.candidate_sha }}
-      GPOINT_APP_SOURCE_SHA: ${{ inputs.candidate_sha }}
+      CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+      IMAGE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+      GPOINT_COMMIT_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+      GPOINT_APP_SOURCE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
       GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}
       KAMAL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
       GPOINT_SSH_KEY: /root/.ssh/id_ed25519
@@ -310,22 +310,26 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ inputs.candidate_sha }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
           persist-credentials: false
       - name: Recheck exact SHA, current main and owner approval
         env:
           GH_TOKEN: ${{ github.token }}
-          APPROVE_PRODUCTION: ${{ inputs.approve_production }}
+          APPROVE_PRODUCTION: ${{ inputs.approve_production || false }}
           OWNER_APPROVAL_ACTOR: ${{ github.actor }}
           OWNER_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           OWNER_REPOSITORY: ${{ github.repository_owner }}
-          REQUESTED_SHA: ${{ inputs.candidate_sha }}
+          REQUESTED_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
           WORKFLOW_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          test "$APPROVE_PRODUCTION" = true
-          test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY"
-          test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY"
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            test "$APPROVE_PRODUCTION" = true
+            test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY"
+            test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY"
+          elif [[ "$GITHUB_EVENT_NAME" != push ]]; then
+            echo 'unsupported production release event' >&2; exit 1
+          fi
           test "$REQUESTED_SHA" = "$WORKFLOW_SHA"
           [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$REQUESTED_SHA"

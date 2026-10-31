@@ -2,14 +2,15 @@
 
 ## ME-52: локальный Kamal candidate (2026-10-27)
 
-Эта реализация остаётся локальной и не описывает уже переключённое production:
-до отдельно разрешённого и успешно проверенного cutover действующая Compose/V5
-операция и recovery остаются актуальными. Обычные будущие релизы используют
-`.github/workflows/gpoint-native-release.yml` (Workspace CI + Python CI →
-immutable Core/AGATA/Mini App images → exact-SHA protected Kamal Deploy/Verify).
-Разовый переход обслуживает `.github/workflows/gpoint-first-kamal-cutover.yml`
-и требует свежий inventory, encrypted backup/isolated restore, migration
-parity, паузу старых consumers и полную runtime Verify.
+Production переводится на Kamal отдельным workflow
+`.github/workflows/gpoint-first-kamal-cutover.yml`; он требует свежий inventory,
+encrypted backup/isolated restore, migration parity, паузу старых consumers и
+полную runtime Verify. После cutover обычный workflow
+`.github/workflows/gpoint-native-release.yml` выполняет `main push → Workspace
+CI + Python CI → immutable Core/AGATA/Mini App images → Kamal Deploy → Verify`.
+Ручной dispatch остаётся доступен для exact-SHA production выпуска с явным
+подтверждением владельца. Разовый переход обслуживает
+`.github/workflows/gpoint-first-kamal-cutover.yml`
 
 У workflow есть обязательный `allow_source_update`, по умолчанию `false`.
 Его включают только для отдельно OWNER-approved exact candidate, если при
@@ -25,9 +26,10 @@ restore, recovery, consumer и runtime Verify gates.
 material. GSales не собирается и не стартует в обычных релизах; Eros,
 Sensitive Detector и ACL/pilot остаются вне обычного release scope.
 
-Это локальное описание не разрешает публикацию, Actions, GHCR build, production
-Apply, изменение БД/инфраструктуры или retirement Compose/V5. Удалять legacy
-путь можно только после отдельной авторизации и успешной production Verify.
+Production Deploy обычного релиза выполняется только после успешных CI и Build
+на `main`; `production` Environment, секреты, exact SHA/digest, runtime Verify и
+остальные release gates остаются обязательными. Удалять recovery/legacy путь
+можно только после отдельной авторизации и успешной production Verify.
 
 ## Текущая модель выпуска и состояния (ME-42)
 

@@ -133,7 +133,7 @@ def test_first_cutover_build_images_include_the_kamal_service_labels():
 def test_kamal_uses_attempt_scoped_tag_with_buildkit_digest_verification():
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
-    version = "${{ inputs.candidate_sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+    version = "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
     assert f"IMAGE_VERSION: {version}" in deploy
     assert "ghcr.io/akhripunov/gpoint-runtime:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}" in workflow
     assert "name: Verify GHCR candidate tags resolve to exact amd64 digests" in deploy
@@ -314,7 +314,7 @@ def test_production_host_comes_from_exact_environment_and_known_hosts():
     assert 'ENV.fetch("GPOINT_PRODUCTION_HOST")' in configs
     assert "--env GPOINT_PRODUCTION_HOST" in workflow
     native_workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
-    assert "GPOINT_APP_SOURCE_SHA: ${{ inputs.candidate_sha }}" in native_workflow
+    assert "GPOINT_APP_SOURCE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}" in native_workflow
     assert "--env GPOINT_APP_SOURCE_SHA" in native_workflow
 
 
@@ -934,6 +934,16 @@ def test_manifest_writer_behavior_tests_run_in_python_ci():
     assert "oras_1.3.0_linux_amd64.tar.gz" in python_job
     assert "6cdc692f929100feb08aa8de584d02f7bcc30ec7d88bc2adc2054d782db57c64" in python_job
     assert '"$GITHUB_ENV"' in python_job
+
+
+def test_native_release_runs_kamal_after_successful_main_push():
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    deploy = workflow.split("  deploy:\n", 1)[1]
+    assert "if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')" in deploy
+    assert "CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}" in deploy
+    assert "test \"$APPROVE_PRODUCTION\" = true" in deploy
+    assert "if [[ \"$GITHUB_EVENT_NAME\" == workflow_dispatch ]]; then" in deploy
+    assert "environment: production" in deploy
 
 
 def test_kamal_inventory_sanitizer_keeps_runtime_facts_and_drops_environment_and_commands(tmp_path):

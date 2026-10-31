@@ -155,9 +155,16 @@ def main() -> int:
                 or container["Config"]["Labels"].get("org.opencontainers.image.revision") != args.app_source_sha):
             raise SystemExit(f"final runtime identity changed before manifest: {name}")
         if prefix != "gpoint-miniapp-web":
-            release_shas = [value.partition("=")[2] for value in container["Config"].get("Env", [])
-                            if value.startswith("RELEASE_SHA=")]
-            if release_shas != [args.app_source_sha]:
+            if prefix.startswith("gpoint-agata-"):
+                process_sha = subprocess.run(
+                    ["docker", "exec", name, "python", "-c",
+                     "import os; print(os.environ.get('RELEASE_SHA', ''))"],
+                    check=True, capture_output=True, text=True).stdout.strip()
+            else:
+                process_sha = subprocess.run(
+                    ["docker", "exec", name, "node", "-p", "process.env.RELEASE_SHA || ''"],
+                    check=True, capture_output=True, text=True).stdout.strip()
+            if process_sha != args.app_source_sha:
                 raise SystemExit(f"runtime RELEASE_SHA does not match application source: {name}")
         if repo_digest not in image.get("RepoDigests", []):
             raise SystemExit(f"final runtime digest changed before manifest: {name}")

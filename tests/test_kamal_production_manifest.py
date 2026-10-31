@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from typing import Optional
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,7 +20,11 @@ MEDIA_SHA = "9" * 64
 
 
 def install_docker_stub(directory: Path, *, revision: str = APP_SOURCE_SHA,
-                        release_sha: str = APP_SOURCE_SHA, wrong_digest: bool = False):
+                        release_sha: str = APP_SOURCE_SHA, wrong_digest: bool = False,
+                        duplicate_release_sha: Optional[str] = None):
+    release_env = f'"RELEASE_SHA={release_sha}"'
+    if duplicate_release_sha is not None:
+        release_env = f'"RELEASE_SHA={duplicate_release_sha}","RELEASE_SHA={release_sha}"'
     docker = directory / "docker"
     docker.write_text(f'''#!/usr/bin/env python3
 import json, sys
@@ -27,8 +32,10 @@ args=sys.argv[1:]
 if args[0] == "inspect":
  name=args[1]
  print(json.dumps([{{"Id":"container-"+name,"Image":"image-"+name,
-  "Config":{{"Labels":{{"org.opencontainers.image.revision":"{revision}"}},"Env":["RELEASE_SHA={release_sha}"]}},
+  "Config":{{"Labels":{{"org.opencontainers.image.revision":"{revision}"}},"Env":[{release_env}]}},
   "State":{{"Running":True,"Health":{{"Status":"healthy"}}}},"RestartCount":0}}]))
+elif args[0] == "exec":
+ print("{release_sha}")
 elif args[0:2] == ["image", "inspect"]:
  name=args[2].removeprefix("image-")
  if name.startswith("gpoint-core-"): repo="ghcr.io/akhripunov/gpoint-runtime@{APP}"
@@ -139,6 +146,17 @@ def test_manifest_refuses_runtime_release_sha_mismatch_without_creating_output(t
     assert result.returncode != 0
     assert "runtime RELEASE_SHA does not match application source" in result.stderr
     assert not output.exists()
+
+
+def test_manifest_uses_effective_process_release_sha_not_duplicate_docker_env_entries(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    install_docker_stub(bin_dir, release_sha=APP_SOURCE_SHA, duplicate_release_sha="stale")
+    output = tmp_path / "kamal-production-42-2.json"
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    result = subprocess.run([sys.executable, str(WRITER), *args_for(output)], capture_output=True,
+                            text=True, env=env)
+    assert result.returncode == 0, result.stderr
 
 
 def test_manifest_rejects_a_postflight_snapshot_that_does_not_prove_eros_absence(tmp_path):
