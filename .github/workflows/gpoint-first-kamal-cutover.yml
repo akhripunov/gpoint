@@ -11,6 +11,11 @@ on:
         description: Exact production application source SHA whose migrations must match the live database
         required: true
         type: string
+      allow_source_update:
+        description: Allow this explicitly approved first cutover to advance app source beyond live RELEASE_SHA
+        required: true
+        default: false
+        type: boolean
       mode:
         description: Select a read-only preflight or the guarded first cutover
         required: true
@@ -523,6 +528,8 @@ jobs:
         if: inputs.mode == 'cutover'
         env:
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
+          ALLOW_SOURCE_UPDATE: ${{ inputs.allow_source_update }}
+          APP_SOURCE_SHA: ${{ inputs.app_source_sha }}
         run: |
           set -euo pipefail
           repository=ghcr.io/akhripunov/gpoint-miniapp
@@ -566,30 +573,57 @@ jobs:
           scp "${ssh_opts[@]}" scripts/gpoint-miniapp-static-manifest.py \
             "root@${GPOINT_PRODUCTION_HOST}:$remote_helper"
           static_result="$(ssh -T "${ssh_opts[@]}" "root@${GPOINT_PRODUCTION_HOST}" bash -s -- \
-            "$remote_helper" "$helper_sha" "$expected_sha" "$expected_count" <<'REMOTE_COMPARE'
+            "$remote_helper" "$helper_sha" "$expected_sha" "$expected_count" "$ALLOW_SOURCE_UPDATE" "$APP_SOURCE_SHA" <<'REMOTE_COMPARE'
           set -euo pipefail
-          helper="$1"; helper_sha="$2"; expected_sha="$3"; expected_count="$4"
+          helper="$1"; helper_sha="$2"; expected_sha="$3"; expected_count="$4"; allow_source_update="$5"; app_source_sha="$6"
           [[ "$helper" =~ ^/run/gpoint-kamal-static-[0-9]+-[0-9]+\.py$ ]]
           [[ "$helper_sha" =~ ^[0-9a-f]{64}$ && "$expected_sha" =~ ^[0-9a-f]{64}$ && "$expected_count" =~ ^[0-9]+$ ]]
+          [[ "$allow_source_update" == true || "$allow_source_update" == false ]]
+          [[ "$app_source_sha" =~ ^[0-9a-f]{40}$ ]]
+          live_source_sha="$(python3 - <<'PY'
+          from pathlib import Path
+          import re
+          env_path = Path('/opt/gpoint/env/production.env')
+          values = [line.split('=', 1)[1] for line in env_path.read_text().splitlines()
+                    if line.startswith('RELEASE_SHA=')]
+          if len(values) != 1 or not re.fullmatch(r'[0-9a-f]{40}', values[0]):
+              raise SystemExit('live RELEASE_SHA is missing or invalid')
+          print(values[0])
+          PY
+          )"
+          [[ "$live_source_sha" =~ ^[0-9a-f]{40}$ ]]
+          source_update=false
+          if [[ "$app_source_sha" != "$live_source_sha" ]]; then
+            test "$allow_source_update" = true
+            source_update=true
+          fi
           test "$(sha256sum "$helper" | awk '{print $1}')" = "$helper_sha"
           trap 'rm -f -- "$helper"' EXIT
           live_manifest="$(python3 "$helper" --reject-symlink-ancestors /opt/gpoint/app/miniapp)"
-          python3 - "$live_manifest" "$expected_sha" "$expected_count" <<'PY'
+          python3 - "$live_manifest" "$expected_sha" "$expected_count" "$source_update" <<'PY'
           import json, sys
           actual = json.loads(sys.argv[1])
-          if (actual.get('schema') != 'gpoint-miniapp-static/v1'
-                  or actual.get('sha256') != sys.argv[2]
-                  or str(actual.get('fileCount')) != sys.argv[3]):
-              raise SystemExit('live Mini App static files differ from the exact built image')
-          print('GPOINT_MINIAPP_LIVE_STATIC_PARITY=PASS')
+          if actual.get('schema') != 'gpoint-miniapp-static/v1' or not isinstance(actual.get('fileCount'), int) or actual['fileCount'] < 1:
+              raise SystemExit('live Mini App static tree is missing or invalid')
+          same_image = actual.get('sha256') == sys.argv[2] and str(actual.get('fileCount')) == sys.argv[3]
+          if not same_image:
+              if sys.argv[4] != 'true':
+                  raise SystemExit('live Mini App static files differ from the exact built image')
+              print('GPOINT_MINIAPP_LIVE_STATIC_SOURCE_UPDATE=PASS')
+          else:
+              print('GPOINT_MINIAPP_LIVE_STATIC_PARITY=PASS')
           print('MINIAPP_STATIC_MANIFEST_SHA256=' + actual['sha256'])
           print('MINIAPP_STATIC_FILE_COUNT=' + str(actual['fileCount']))
           PY
           REMOTE_COMPARE
           )"
-          grep -qx 'GPOINT_MINIAPP_LIVE_STATIC_PARITY=PASS' <<< "$static_result"
-          grep -qx "MINIAPP_STATIC_MANIFEST_SHA256=$expected_sha" <<< "$static_result"
-          grep -qx "MINIAPP_STATIC_FILE_COUNT=$expected_count" <<< "$static_result"
+          if [[ "$ALLOW_SOURCE_UPDATE" == true ]]; then
+            grep -qxE 'GPOINT_MINIAPP_LIVE_STATIC_(PARITY|SOURCE_UPDATE)=PASS' <<< "$static_result"
+          else
+            grep -qx 'GPOINT_MINIAPP_LIVE_STATIC_PARITY=PASS' <<< "$static_result"
+          fi
+          grep -qxE 'MINIAPP_STATIC_MANIFEST_SHA256=[0-9a-f]{64}' <<< "$static_result"
+          grep -qxE 'MINIAPP_STATIC_FILE_COUNT=[1-9][0-9]*' <<< "$static_result"
           echo "$static_result" >> "$GITHUB_STEP_SUMMARY"
       - name: Capture PostgreSQL and no-Eros cutover baseline
         if: inputs.mode == 'cutover'
@@ -804,11 +838,17 @@ jobs:
         env:
           APP_SOURCE_SHA: ${{ inputs.app_source_sha }}
           LIVE_SOURCE_SHA: ${{ steps.baseline.outputs.current_sha }}
+          ALLOW_SOURCE_UPDATE: ${{ inputs.allow_source_update }}
         run: |
           set -euo pipefail
           [[ "$APP_SOURCE_SHA" =~ ^[0-9a-f]{40}$ && "$LIVE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          test "$APP_SOURCE_SHA" = "$LIVE_SOURCE_SHA"
-          echo "Verified APP_SOURCE_SHA=$APP_SOURCE_SHA matches current production RELEASE_SHA." >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$APP_SOURCE_SHA" == "$LIVE_SOURCE_SHA" ]]; then
+            echo "Verified APP_SOURCE_SHA=$APP_SOURCE_SHA matches current production RELEASE_SHA." >> "$GITHUB_STEP_SUMMARY"
+          else
+            test "$ALLOW_SOURCE_UPDATE" = "true"
+            echo "SOURCE_UPDATE_AUTHORIZED=PASS" >> "$GITHUB_STEP_SUMMARY"
+            echo "Verified one-time app source update: live RELEASE_SHA=$LIVE_SOURCE_SHA, exact app source=$APP_SOURCE_SHA." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Verify application source migrations match the live database
         if: inputs.mode == 'cutover'
         env:

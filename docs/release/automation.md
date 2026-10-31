@@ -11,6 +11,14 @@ immutable Core/AGATA/Mini App images → exact-SHA protected Kamal Deploy/Verify
 и требует свежий inventory, encrypted backup/isolated restore, migration
 parity, паузу старых consumers и полную runtime Verify.
 
+У workflow есть обязательный `allow_source_update`, по умолчанию `false`.
+Его включают только для отдельно OWNER-approved exact candidate, если при
+первоначальном переходе Kamal application source должен продвинуться дальше
+live Compose `RELEASE_SHA`. Тогда проверяется корректный непустой текущий
+Mini App static tree, а новый immutable image независимо проверяется по exact
+digest/provenance. Это не отменяет migration parity, backup/offsite/isolated
+restore, recovery, consumer и runtime Verify gates.
+
 Публичный TLS/HTTP вход после перехода обслуживает Kamal Proxy на портах 80 и
 443: `/api` и `/media` идут в Core, `/` и Mini App paths — в Mini App. Caddy
 останавливается в cutover и сохраняется только вместе с checksum как recovery

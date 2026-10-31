@@ -799,7 +799,7 @@ def test_first_cutover_keeps_workflow_and_application_source_identities_separate
     assert owner_gate < ssh_credentials
     assert "Block production until Kamal runtime honors separate application source SHA" not in deploy
     assert '[[ "$CANDIDATE_SHA" != "$APP_SOURCE_SHA" ]]' not in deploy
-    source_gate = deploy.index('test "$APP_SOURCE_SHA" = "$LIVE_SOURCE_SHA"')
+    source_gate = deploy.index('if [[ "$APP_SOURCE_SHA" == "$LIVE_SOURCE_SHA" ]]; then')
     migration_gate = deploy.index("name: Verify application source migrations match the live database")
     assert source_gate < migration_gate
     parity_step = deploy[migration_gate:deploy.index("name: Verify fresh PostgreSQL and media backup", migration_gate)]
@@ -827,6 +827,42 @@ def test_first_cutover_keeps_workflow_and_application_source_identities_separate
     assert "scripts/verify-kamal-migration-parity.py" in deploy
     assert "PRISMA_MIGRATIONS=" in deploy
     assert "prisma_migrations|agata_head" in deploy
+
+
+def test_first_cutover_source_update_is_explicit_and_keeps_artifact_and_migration_gates():
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
+    inputs = workflow.split("permissions:", 1)[0]
+    assert "allow_source_update:" in inputs
+    assert "default: false" in inputs
+    deploy = workflow.split("  deploy:\n", 1)[1]
+    source_gate = deploy.split("name: Verify application source matches the live production SHA", 1)[1].split(
+        "name: Verify application source migrations match the live database", 1
+    )[0]
+    assert "ALLOW_SOURCE_UPDATE: ${{ inputs.allow_source_update }}" in source_gate
+    assert 'if [[ "$APP_SOURCE_SHA" == "$LIVE_SOURCE_SHA" ]]; then' in source_gate
+    assert 'test "$ALLOW_SOURCE_UPDATE" = "true"' in source_gate
+    assert "SOURCE_UPDATE_AUTHORIZED=PASS" in source_gate
+    assert 'test "$source_sha" = "$APP_SOURCE_SHA"' in deploy
+    assert "scripts/verify-kamal-migration-parity.py" in deploy
+    assert "Verify fresh PostgreSQL and media backup" in deploy
+    assert "ISOLATED_RESTORE=PASS" in workflow
+
+
+def test_first_cutover_source_update_checks_live_static_tree_without_false_candidate_parity():
+    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
+    deploy = workflow.split("  deploy:\n", 1)[1]
+    parity_check = deploy.split("name: Compare built Mini App static files with live production before mutation", 1)[1].split(
+        "name: Capture PostgreSQL and no-Eros cutover baseline", 1
+    )[0]
+    assert "ALLOW_SOURCE_UPDATE: ${{ inputs.allow_source_update }}" in parity_check
+    assert "GPOINT_MINIAPP_LIVE_STATIC_PARITY=PASS" in parity_check
+    assert "GPOINT_MINIAPP_LIVE_STATIC_SOURCE_UPDATE=PASS" in parity_check
+    assert "actual.get('schema') != 'gpoint-miniapp-static/v1'" in parity_check
+    assert "actual['fileCount'] < 1" in parity_check
+    assert "live Mini App static files differ from the exact built image" in parity_check
+    assert "RELEASE_SHA=" in parity_check
+    assert 'if [[ "$app_source_sha" != "$live_source_sha" ]]; then' in parity_check
+    assert 'test "$allow_source_update" = true' in parity_check
 
 
 def test_kamal_cutover_checks_candidate_image_disk_headroom_before_deployment():

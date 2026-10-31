@@ -11,6 +11,16 @@ Environment.
 Record the evidence against the exact candidate SHA and keep the legacy release
 path available until the Kamal production Verify has passed.
 
+For the one-time Compose-to-Kamal transition, `allow_source_update` defaults to
+false. Set it to true only when the separately OWNER-approved exact app source
+SHA intentionally advances beyond the live `RELEASE_SHA`. This permits that
+source mismatch and the expected old-vs-new Mini App static manifest mismatch;
+the live static tree must still have a valid non-empty manifest, while the new
+Mini App image must still pass exact GHCR digest/provenance checks. Candidate
+Prisma/AGATA migration parity, encrypted backup, offsite read-back, isolated
+restore, recovery, and runtime Verify are unchanged and mandatory. Do not use
+this flag to bypass any other gate.
+
 - [ ] Confirm the owner-approved candidate SHA and its successful CI/BuildKit
       results. Record the immutable GHCR digest for Core, AGATA, and Mini App.
 - [ ] Resolve `GPOINT_KAMAL_HOST` from the protected GitHub secret and verify
