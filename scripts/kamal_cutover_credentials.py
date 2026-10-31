@@ -221,7 +221,10 @@ def _create_client(stage: Path, owner_uid: int, host_key: tuple[str, str, str]) 
 
 
 def _expiry() -> str:
-    return (datetime.now(timezone.utc) + timedelta(minutes=90)).strftime("%Y%m%d%H%M%SZ")
+    # Ubuntu 22.04's OpenSSH 8.9 rejects the trailing Z on authorized_keys
+    # expiry-time values. Generate a local-time value without a suffix; sshd
+    # interprets it in the same host timezone.
+    return (datetime.now().astimezone() + timedelta(minutes=90)).strftime("%Y%m%d%H%M%S")
 
 
 def _make_authorized_line(public_key: bytes, stage: Path) -> bytes:

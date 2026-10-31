@@ -1,6 +1,7 @@
 import importlib.util
 import os
 from pathlib import Path
+import re
 
 import pytest
 
@@ -35,6 +36,8 @@ def test_temporary_key_is_loopback_restricted_expiring_and_cleanup_preserves_oth
     added = (stage / 'localhost-key.line').read_text()
     assert 'from="127.0.0.1,::1"' in added
     assert 'restrict,expiry-time="' in added
+    expiry = re.search(r'expiry-time="([^"]+)"', added)
+    assert expiry and re.fullmatch(r"[0-9]{14}", expiry.group(1))
     assert 'gpoint-cutover-' + stage.name in added
     assert auth.read_bytes() == original + added.encode()
     key = stage / 'home/.ssh/id_ed25519'
