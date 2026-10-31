@@ -175,9 +175,10 @@ def test_manifest_and_environment_must_be_private_0600(tmp_path):
 
 def test_owner_crash_leaves_live_child_and_blocks_sibling_attempt(tmp_path):
     stage, digest, log = bundle(tmp_path)
+    started = tmp_path / "child-started.marker"
     marker = tmp_path / "child-finished.marker"
     pause = stage / "phases/pause.sh"
-    pause.write_text("#!/bin/bash\nsleep 1\ntouch '" + str(marker) + "'\n")
+    pause.write_text("#!/bin/bash\ntouch '" + str(started) + "'\nsleep 1\ntouch '" + str(marker) + "'\n")
     pause.chmod(0o700)
     manifest = json.loads((stage / "manifest.json").read_text())
     manifest["files"]["phases/pause.sh"] = hashlib.sha256(pause.read_bytes()).hexdigest()
@@ -192,9 +193,9 @@ def test_owner_crash_leaves_live_child_and_blocks_sibling_attempt(tmp_path):
     )
     owner = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     deadline = time.monotonic() + 3
-    while not (stage / "owner-status.json").exists() and time.monotonic() < deadline:
+    while not started.exists() and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert (stage / "owner-status.json").exists()
+    assert started.exists(), "owner must start the phase child before it is terminated"
     owner.kill()
     owner.wait(timeout=3)
     sibling, sibling_digest, _ = bundle(tmp_path, attempt="2")
