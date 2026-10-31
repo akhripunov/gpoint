@@ -946,6 +946,13 @@ def test_native_release_runs_kamal_after_successful_main_push():
     assert "environment: production" in deploy
 
 
+def test_native_migration_parity_runs_prisma_from_api_workspace():
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    step = workflow.split("name: Verify candidate migrations match the live database", 1)[1].split(
+        "name: Create exact-SHA in-progress GitHub Deployment", 1)[0]
+    assert "--workdir /app/apps/api" in step
+
+
 def test_kamal_inventory_sanitizer_keeps_runtime_facts_and_drops_environment_and_commands(tmp_path):
     import json
 
