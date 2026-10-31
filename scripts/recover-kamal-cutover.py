@@ -231,6 +231,20 @@ def wait_container_ready(identifier: str, *, timeout: int = 90) -> None:
     raise RecoveryBlocked("restored GPoint container did not become ready")
 
 
+def probe_restored_ingress() -> bool:
+    # Recovery restores the checksum-verified original Caddyfile. During a
+    # domain cutover it may still serve the previous GPoint hostname.
+    for host in ("gpoint.one", "gpoint.amiora.one"):
+        try:
+            for path in ("/api/health/live", "/"):
+                command(["curl", "--fail", "--silent", "--show-error", "--connect-timeout", "5", "--resolve",
+                         f"{host}:443:127.0.0.1", f"https://{host}{path}"])
+            return True
+        except (RecoveryBlocked, OSError, subprocess.SubprocessError):
+            continue
+    return False
+
+
 def recover(args: argparse.Namespace) -> None:
     sha = args.candidate_sha
     app_sha = args.app_source_sha
@@ -252,8 +266,11 @@ def recover(args: argparse.Namespace) -> None:
         raise RecoveryBlocked("baseline path is not bound to this workflow attempt")
     baseline, legacy = read_baseline(Path(args.baseline), args.baseline_sha, sha, args.run_id,
                                      args.attempt, RELEASE_ROOT, os.getuid())
-    if baseline.get("CURRENT_SHA") != app_sha:
-        raise RecoveryBlocked("production app source differs from the recovery baseline")
+    # The candidate source may advance during an explicitly admitted first
+    # cutover. Restore the old immutable IDs from the checksummed
+    # baseline; validate candidate containers against app_sha separately.
+    if not re.fullmatch(r"[0-9a-f]{40}", baseline.get("CURRENT_SHA", "")):
+        raise RecoveryBlocked("previous production app source identity is invalid")
     caddy_sha = baseline.get("CADDYFILE_SHA256", "")
     if not re.fullmatch(r"[0-9a-f]{64}", caddy_sha):
         raise RecoveryBlocked("Caddy baseline checksum is invalid")
@@ -502,15 +519,9 @@ def recover(args: argparse.Namespace) -> None:
             recovery_errors.append("Caddy configuration changed during recovery")
     except (RecoveryBlocked, OSError, subprocess.SubprocessError):
         recovery_errors.append("Caddy validation or start failed")
-    ingress_ready = caddy_ready
-    if caddy_ready:
-        for path in ("https://gpoint.one/api/health/live", "https://gpoint.one/"):
-            try:
-                command(["curl", "--fail", "--silent", "--show-error", "--connect-timeout", "5", "--resolve",
-                         "gpoint.one:443:127.0.0.1", path])
-            except (RecoveryBlocked, OSError, subprocess.SubprocessError):
-                ingress_ready = False
-                recovery_errors.append("restored Caddy ingress probe failed")
+    ingress_ready = caddy_ready and probe_restored_ingress()
+    if caddy_ready and not ingress_ready:
+        recovery_errors.append("restored Caddy ingress probe failed")
     if recovery_errors:
         restored = proxy_safely_stopped and ingress_ready and not any("did not become ready" in e for e in recovery_errors)
         print("GPOINT_CUTOVER_RECOVERY=RESTORED_WITH_ERRORS" if restored else "GPOINT_CUTOVER_RECOVERY=PARTIAL")

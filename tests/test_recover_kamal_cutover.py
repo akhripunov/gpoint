@@ -515,7 +515,7 @@ def test_wrong_proxy_image_stops_before_any_recovery_mutation(tmp_path, monkeypa
     assert mutations == []
 
 
-@pytest.mark.parametrize("failure_stage", ["route_remove", "route_remove_timeout", "route_list", "route_list_post", "proxy_stop", "first_legacy_readiness", "foreign_attempt", "postgres_identity", "detector_identity", "acl_changed", "prisma_head_changed", "prisma_inventory_changed", "agata_head_changed", "precaddy_no_kamal"])
+@pytest.mark.parametrize("failure_stage", ["route_remove", "route_remove_timeout", "route_list", "route_list_post", "proxy_stop", "first_legacy_readiness", "foreign_attempt", "postgres_identity", "detector_identity", "acl_changed", "prisma_head_changed", "prisma_inventory_changed", "agata_head_changed", "precaddy_no_kamal", "source_update"])
 def test_failure_stages_attempt_safe_legacy_recovery_and_preserve_gsales(tmp_path, monkeypatch, failure_stage):
     candidate = "a" * 40
     app_source = "b" * 40
@@ -555,7 +555,7 @@ def test_failure_stages_attempt_safe_legacy_recovery_and_preserve_gsales(tmp_pat
         "image": "gpoint-sensitive-detector:baseline", "running": True,
     }
     monkeypatch.setattr(RECOVER, "read_baseline", lambda *args, **kwargs: (
-        {"CURRENT_SHA": app_source, "CADDYFILE_SHA256": caddy_sha, "BASELINE_CAPTURED_AT_EPOCH": "1793260800",
+        {"CURRENT_SHA": "c" * 40 if failure_stage == "source_update" else app_source, "CADDYFILE_SHA256": caddy_sha, "BASELINE_CAPTURED_AT_EPOCH": "1793260800",
          "POSTGRES_CONTAINER_ID": postgres_id, "POSTGRES_IMAGE_ID": postgres_image,
          "POSTGRES_SYSTEM_IDENTIFIER": "7654321", "POSTGRES_SERVER_VERSION_NUM": "160004",
          "POSTGRES_ACL_FINGERPRINT": POSTGRES_DATABASE_FACTS_SHA,
@@ -726,12 +726,16 @@ def test_failure_stages_attempt_safe_legacy_recovery_and_preserve_gsales(tmp_pat
         "prisma_inventory_changed": "PostgreSQL Prisma migration inventory differs from recovery baseline",
         "agata_head_changed": "PostgreSQL AGATA migration head differs from recovery baseline",
         "precaddy_no_kamal": None,
+        "source_update": None,
     }[failure_stage]
     if expected_error is None:
         RECOVER.recover(args)
         assert all(any(item[:2] == ("docker", "start") and item[-1] == legacy[service]["id"] for item in mutations)
                    for service in ("api", "worker", "bot", "agata-api", "agata-memory-worker"))
-        assert not any(item[:2] in {("docker", "stop"), ("docker", "kill")} for item in mutations)
+        if failure_stage == "precaddy_no_kamal":
+            assert not any(item[:2] in {("docker", "stop"), ("docker", "kill")} for item in mutations)
+        else:
+            assert ("docker", "stop", "--time", "30", proxy_id) in mutations
         assert not any(item[:2] == ("docker", "start") and item[-1] in {row["id"] for name, row in legacy.items() if name.startswith("gsales")} for item in mutations)
         return
     with pytest.raises(RECOVER.RecoveryBlocked, match=expected_error):
@@ -753,3 +757,20 @@ def test_failure_stages_attempt_safe_legacy_recovery_and_preserve_gsales(tmp_pat
     assert all(row["id"] not in stopped for name, row in legacy.items() if name.startswith("gsales"))
     if failure_stage == "route_remove":
         assert ("systemctl", "start", "caddy") in mutations
+
+
+@pytest.mark.parametrize("available_host,expected", [("gpoint.one", True), ("gpoint.amiora.one", True), (None, False)])
+def test_restored_ingress_supports_the_verified_legacy_caddy_hostname(monkeypatch, available_host, expected):
+    calls = []
+    def probe(argv):
+        calls.append(argv)
+        assert "--resolve" in argv
+        assert argv[-2] in {"gpoint.one:443:127.0.0.1", "gpoint.amiora.one:443:127.0.0.1"}
+        if available_host is None or not argv[-1].startswith("https://" + available_host + "/"):
+            raise RECOVER.RecoveryBlocked("TLS hostname does not match restored Caddy")
+        return "ok"
+    monkeypatch.setattr(RECOVER, "command", probe)
+    assert RECOVER.probe_restored_ingress() is expected
+    if expected:
+        assert calls[-1][-1] == "https://" + available_host + "/"
+    assert all("--insecure" not in c and "-k" not in c for c in calls)

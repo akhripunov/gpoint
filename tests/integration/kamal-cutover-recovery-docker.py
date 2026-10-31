@@ -470,7 +470,7 @@ https://gpoint.one {
             raise RuntimeError("isolated PostgreSQL AGATA fixture head is not singular")
         values = {"BASELINE_SCHEMA": "gpoint-kamal-cutover-baseline/v1", "CANDIDATE_SHA": SHA,
                   "RUN_ID": RUN_ID, "ATTEMPT": ATTEMPT, "BASELINE_CAPTURED_AT_EPOCH": str(baseline_epoch),
-                  "CURRENT_SHA": APP_SHA, "KAMAL_PROXY_BASELINE": "ABSENT", "CADDYFILE_SHA256": caddy_sha,
+                  "CURRENT_SHA": "c" * 40, "KAMAL_PROXY_BASELINE": "ABSENT", "CADDYFILE_SHA256": caddy_sha,
                   "POSTGRES_CONTAINER_ID": postgres_inspect["Id"], "POSTGRES_IMAGE_ID": postgres_inspect["Image"],
                   "POSTGRES_SYSTEM_IDENTIFIER": str(database_value["systemIdentifier"]),
                   "POSTGRES_SERVER_VERSION_NUM": str(database_value["serverVersionNum"]),
