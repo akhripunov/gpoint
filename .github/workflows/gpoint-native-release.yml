@@ -192,6 +192,7 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/akhripunov/gpoint
+            service=gpoint-core
           cache-from: type=gha,scope=gpoint-runtime
           cache-to: type=gha,scope=gpoint-runtime,mode=max
           sbom: true
@@ -210,6 +211,10 @@ jobs:
             ghcr.io/akhripunov/gpoint-miniapp:${{ github.sha }}
             ghcr.io/akhripunov/gpoint-miniapp:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           build-args: GPOINT_BUILD_SHA=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/akhripunov/gpoint
+            service=gpoint-miniapp
           cache-from: type=gha,scope=gpoint-runtime
           cache-to: type=gha,scope=gpoint-miniapp,mode=max
           sbom: true
@@ -228,6 +233,7 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/akhripunov/gpoint
+            service=gpoint-agata
           cache-from: type=gha,scope=gpoint-agata-runtime
           cache-to: type=gha,scope=gpoint-agata-runtime,mode=max
           sbom: true

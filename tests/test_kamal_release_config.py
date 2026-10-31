@@ -108,6 +108,21 @@ def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
     assert "environment: production" in workflow
 
 
+def test_first_cutover_build_images_include_the_kamal_service_labels():
+    expected = {
+        "Build and publish immutable runtime image": "gpoint-core",
+        "Build and publish immutable Mini App image": "gpoint-miniapp",
+        "Build and publish immutable AGATA image": "gpoint-agata",
+    }
+    for workflow_name in ("gpoint-first-kamal-cutover.yml", "gpoint-native-release.yml"):
+        workflow = yaml.safe_load((ROOT / ".github/workflows" / workflow_name).read_text())
+        build = workflow["jobs"]["build"]["steps"]
+        for step_name, service in expected.items():
+            step = next(step for step in build if step.get("name") == step_name)
+            labels = step["with"]["labels"].splitlines()
+            assert f"service={service}" in labels, f"{workflow_name}: {step_name} lacks service={service}"
+
+
 def test_kamal_uses_attempt_scoped_tag_with_buildkit_digest_verification():
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
