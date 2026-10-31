@@ -380,6 +380,8 @@ def test_kamal_success_requires_database_media_consumer_and_no_eros_readback():
     assert "docker stats --no-stream --format '{{json .}}'" in deploy
     assert "POSTGRES_SYSTEM_IDENTIFIER" in deploy
     assert "POSTGRES_ACL_FINGERPRINT" in deploy
+    assert "CADDYFILE_SHA256=$caddy_sha" in deploy
+    assert "no_eros_state_sha|caddy_sha)" in deploy
     assert "NO_EROS_STATE_SHA256" in deploy
     assert "EROS_CONTAINER_ID" not in deploy and "EROS_NETWORK_FINGERPRINT" not in deploy
     assert 'python3 "$eros_collector" --output "$eros_state_file"' in deploy

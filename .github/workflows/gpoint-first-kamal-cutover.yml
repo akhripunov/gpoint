@@ -774,9 +774,9 @@ jobs:
           EOF
           chmod 600 "$baseline_file"
           baseline_sha="$(sha256sum "$baseline_file" | awk '{print $1}')"
-          printf 'baseline_path=%s\nbaseline_sha=%s\ninventory_sha=%s\ncurrent_sha=%s\nprisma_head=%s\nprisma_migrations=%s\nagata_head=%s\npostgres_system_identifier=%s\ndocker_free_kb=%s\nmemory_available_kb=%s\nmemory_total_kb=%s\nrunning_resource_samples=%s\ncontainer_memory_used_bytes=%s\ncontainer_cpu_percent_sum=%s\nmax_container_memory_percent=%s\ncandidate_image_bytes=%s\nno_eros_state_path=%s\nno_eros_state_sha=%s\n' \
+          printf 'baseline_path=%s\nbaseline_sha=%s\ninventory_sha=%s\ncurrent_sha=%s\nprisma_head=%s\nprisma_migrations=%s\nagata_head=%s\npostgres_system_identifier=%s\ndocker_free_kb=%s\nmemory_available_kb=%s\nmemory_total_kb=%s\nrunning_resource_samples=%s\ncontainer_memory_used_bytes=%s\ncontainer_cpu_percent_sum=%s\nmax_container_memory_percent=%s\ncandidate_image_bytes=%s\nno_eros_state_path=%s\nno_eros_state_sha=%s\ncaddy_sha=%s\n' \
             "$baseline_file" "$baseline_sha" "$inventory_sha" "$current_sha" "$prisma_head" "$prisma_migrations" "$agata_head" "$postgres_system_identifier" \
-            "$docker_free_kb" "$memory_kb" "$memory_total_kb" "$resource_containers" "$resource_memory_bytes" "$resource_cpu_percent" "$resource_max_memory_percent" "$candidate_image_bytes" "$eros_state_file" "$eros_state_sha"
+            "$docker_free_kb" "$memory_kb" "$memory_total_kb" "$resource_containers" "$resource_memory_bytes" "$resource_cpu_percent" "$resource_max_memory_percent" "$candidate_image_bytes" "$eros_state_file" "$eros_state_sha" "$caddy_sha"
           rm -f "$inventory_script" "$resource_script" "$eros_collector" "$eros_state_script" "$(dirname "$eros_collector")/sanitize-kamal-inventory.py" "$(dirname "$eros_collector")/sanitize-kamal-resources.py"
           # Keep the attempt-scoped evidence directory: other verification artifacts
           # may legitimately remain. Its removal is not a readiness gate.
@@ -790,7 +790,7 @@ jobs:
           )"
           while IFS='=' read -r key value; do
             case "$key" in
-              baseline_path|baseline_sha|inventory_sha|current_sha|prisma_head|prisma_migrations|agata_head|postgres_system_identifier|docker_free_kb|memory_available_kb|memory_total_kb|running_resource_samples|container_memory_used_bytes|container_cpu_percent_sum|max_container_memory_percent|candidate_image_bytes|no_eros_state_path|no_eros_state_sha)
+              baseline_path|baseline_sha|inventory_sha|current_sha|prisma_head|prisma_migrations|agata_head|postgres_system_identifier|docker_free_kb|memory_available_kb|memory_total_kb|running_resource_samples|container_memory_used_bytes|container_cpu_percent_sum|max_container_memory_percent|candidate_image_bytes|no_eros_state_path|no_eros_state_sha|caddy_sha)
                 printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"
                 printf -- '- %s: %s\n' "$key" "$value" >> "$GITHUB_STEP_SUMMARY"
                 ;;
