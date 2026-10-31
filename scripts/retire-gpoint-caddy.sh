@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "$#" -ne 4 ]]; then
+if [[ "$#" -ne 4 && !( "$#" -eq 5 && "$5" == --prepare-only ) ]]; then
   echo "usage: retire-gpoint-caddy.sh <candidate-sha> <run-id> <attempt> <expected-caddy-sha256>" >&2
   exit 2
 fi
@@ -26,15 +26,34 @@ test "$actual_caddy_sha" = "$expected_caddy_sha" || {
 }
 
 backup="$backup_dir/caddy-before-kamal-${candidate_sha}-${run_id}-${attempt}"
-test ! -e "$backup" && test ! -e "${backup}.sha256" || {
-  echo 'Caddy recovery copy already exists for this exact workflow attempt' >&2
-  exit 1
-}
 install -d -m 0700 "$backup_dir"
-install -m 0600 "$current_caddy" "$backup"
-sha256sum "$backup" > "${backup}.sha256"
+if [[ -e "$backup" || -e "${backup}.sha256" || -L "$backup" || -L "${backup}.sha256" ]]; then
+  # The server owner prepares this immutable recovery material BEFORE pause.
+  # Reuse is permitted only for the exact protected copy, never overwrite it.
+  python3 - "$backup" "${backup}.sha256" "$expected_caddy_sha" <<'PY'
+import hashlib, os, stat, sys
+from pathlib import Path
+backup, checksum = map(Path, sys.argv[1:3])
+for path in (backup, checksum):
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+        raise SystemExit('unsafe Caddy recovery material')
+if hashlib.sha256(backup.read_bytes()).hexdigest() != sys.argv[3]:
+    raise SystemExit('Caddy backup differs from baseline')
+if checksum.read_text() != f'{sys.argv[3]}  {backup}\n':
+    raise SystemExit('Caddy checksum identity differs')
+PY
+else
+  install -m 0600 "$current_caddy" "$backup"
+  (umask 077; sha256sum "$backup" > "${backup}.sha256")
+fi
 sha256sum --check --status "${backup}.sha256"
 test "$(awk '{print $1}' "${backup}.sha256")" = "$expected_caddy_sha"
+
+if [[ "${5:-}" == --prepare-only ]]; then
+  echo 'GPOINT_CADDY_BACKUP_READY=PASS'
+  exit 0
+fi
 
 if ! systemctl stop caddy; then
   systemctl start caddy || true

@@ -119,7 +119,6 @@ mapfile -t service_rows <<< "$service_rows_output"
 test "${#service_rows[@]}" -eq 5
 
 stop_order=(worker bot agata-memory-worker api agata-api)
-restart_order=(agata-api api agata-memory-worker bot worker)
 declare -A id_by_service=()
 declare -A running_by_service=()
 declare -A stopped_by_service=()
@@ -135,14 +134,6 @@ done
 
 cutover_complete=0
 media_manifest_file=""
-restore_legacy_services() {
-  local service id
-  for service in "${restart_order[@]}"; do
-    id="${stopped_by_service[$service]:-}"
-    [[ -n "$id" ]] || continue
-    docker start "$id" >/dev/null || echo "Could not restart legacy container $id during pre-deploy recovery." >&2
-  done
-}
 on_exit() {
   local status=$?
   trap - EXIT
@@ -151,9 +142,8 @@ on_exit() {
   if [[ "$status" -ne 0 || "$cutover_complete" -ne 1 ]]; then
     rm -f -- "$eros_state_pause"
   fi
-  if [[ "$status" -ne 0 && "$cutover_complete" -ne 1 ]]; then
-    restore_legacy_services
-  fi
+  # The server owner alone invokes identity/DB-checked recovery after this
+  # phase returns. A shell trap must not bypass that owner or its safety gates.
   exit "$status"
 }
 trap on_exit EXIT
@@ -184,8 +174,8 @@ for service in gsales-api gsales-agata-api gsales-agata-memory-worker; do
 done
 
 # Recheck the backed-up tree after legacy API consumers are quiesced. If media
-# changed during the offsite backup/restore window, the EXIT trap restarts every
-# legacy consumer this helper stopped and the cutover fails before Caddy stops.
+# changed during the offsite backup/restore window, fail before Caddy stops.
+# The server owner then performs independently validated exact-ID recovery.
 media_manifest_file="/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/media-quiesced.json"
 test ! -e "$media_manifest_file"
 media_manifest_output="$(python3 "$media_tree_helper" manifest --root /opt/gpoint/media --output "$media_manifest_file")"

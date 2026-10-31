@@ -105,7 +105,7 @@ def test_first_cutover_backs_up_and_restores_media_before_production_mutation():
     backup_step = "name: Verify fresh PostgreSQL and media backup with isolated restore"
     assert backup_step in workflow
     assert workflow.index(backup_step) < workflow.index("name: Create exact-SHA in-progress GitHub Deployment")
-    assert workflow.index(backup_step) < workflow.index("name: Pause legacy GPoint services after restore gates")
+    assert workflow.index(backup_step) < workflow.index("name: Run one server-owned Kamal cutover transaction")
     assert "/opt/gpoint/media" in helper
     assert "tar --create" in helper and "tar --extract" in helper
     assert "--acls" in helper and "--xattrs" in helper

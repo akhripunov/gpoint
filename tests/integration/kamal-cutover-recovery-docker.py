@@ -34,29 +34,41 @@ RUN_ID = str(os.getpid() + 10000)
 ATTEMPT = "1"
 VERSION = f"{SHA}-{RUN_ID}-{ATTEMPT}"
 PROXY_REPO = "basecamp/kamal-proxy"
-PYTHON_IMAGE = "python:3.12.8-alpine"
-CADDY_IMAGE = "caddy:2.9.1-alpine"
+PYTHON_IMAGE = os.environ.get("GPOINT_CUTOVER_TEST_PYTHON_IMAGE", "python:3.12.8-alpine")
+CADDY_IMAGE = os.environ.get("GPOINT_CUTOVER_TEST_CADDY_IMAGE", "caddy:2.9.1-alpine")
+POSTGRES_IMAGE = os.environ.get("GPOINT_CUTOVER_TEST_POSTGRES_IMAGE", "postgres:16-alpine")
 CORE_REPO = "ghcr.io/akhripunov/gpoint-runtime"
 MINI_REPO = "ghcr.io/akhripunov/gpoint-miniapp"
 AGATA_REPO = "ghcr.io/akhripunov/gpoint-agata-runtime"
 DIGESTS = {"gpoint-core": "sha256:" + "1" * 64,
            "gpoint-agata": "sha256:" + "2" * 64,
            "gpoint-miniapp": "sha256:" + "3" * 64}
+POSTGRES_DATABASE_SQL = """SELECT json_build_object(
+  'systemIdentifier',(SELECT system_identifier::text FROM pg_control_system()),
+  'serverVersionNum',current_setting('server_version_num')::integer,
+  'databases',(SELECT json_agg(json_build_object('name',datname,'owner',pg_get_userbyid(datdba),'allowConnections',datallowconn,'acl',datacl::text) ORDER BY datname) FROM pg_database WHERE datname IN ('gpoint','postgres','template1','eros')),
+  'erosRoles',(SELECT json_agg(json_build_object('name',rolname,'login',rolcanlogin,'superuser',rolsuper,'createDatabase',rolcreatedb,'createRole',rolcreaterole,'bypassRls',rolbypassrls) ORDER BY rolname) FROM pg_roles WHERE rolname IN ('eros_ddl','eros_runtime','eros_migrator')),
+  'erosMemberships',(SELECT json_agg(json_build_object('role',pg_get_userbyid(roleid),'member',pg_get_userbyid(member)) ORDER BY roleid,member) FROM pg_auth_members WHERE roleid IN (SELECT oid FROM pg_roles WHERE rolname IN ('eros_ddl','eros_runtime','eros_migrator')) OR member IN (SELECT oid FROM pg_roles WHERE rolname IN ('eros_ddl','eros_runtime','eros_migrator')))
+)::text;"""
+POSTGRES_MIGRATION_SQL = """SELECT json_build_object(
+  'prismaHead',COALESCE((SELECT migration_name FROM public._prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY finished_at DESC LIMIT 1),'NONE'),
+  'prismaMigrations',COALESCE((SELECT json_agg(migration_name ORDER BY migration_name) FROM public._prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL),'[]'::json)
+)::text;"""
 
 
-def run(argv: list[str], *, capture: bool = True, check: bool = True) -> str:
-    p = subprocess.run(argv, text=True, capture_output=capture, check=False, timeout=90)
+def run(argv: list[str], *, capture: bool = True, check: bool = True, input_text: str | None = None) -> str:
+    p = subprocess.run(argv, input=input_text, text=True, capture_output=capture, check=False, timeout=90)
     if check and p.returncode:
         raise RuntimeError(f"command failed ({p.returncode}): {' '.join(argv[:3])}: {p.stderr[-1000:] if p.stderr else ''}")
     return p.stdout.strip() if capture else ""
 
 
-def docker(*args: str, check: bool = True) -> str:
+def docker(*args: str, check: bool = True, input_text: str | None = None) -> str:
     if len(args) == 2 and args[0] == "stop":
         # The isolated fixtures sleep as PID 1 and ignore SIGTERM.
         # Do not spend Docker's default ten-second grace on test-only services.
         args = ("stop", "--time", "1", args[1])
-    return run(["docker", *args], check=check)
+    return run(["docker", *args], check=check, input_text=input_text)
 
 
 def ensure_image(image: str) -> None:
@@ -153,6 +165,8 @@ def main() -> int:
         raise SystemExit("refusing to touch an existing Kamal network")
     if docker("ps", "-aq", "--filter", "name=^/kamal-proxy$"):
         raise SystemExit("refusing to touch an existing kamal-proxy container")
+    if docker("ps", "-aq", "--filter", "name=^/shared_postgres_1$"):
+        raise SystemExit("refusing to touch an existing shared_postgres_1 container")
     proxy_tag = f"{PROXY_REPO}:v0.9.2"
     proxy_digest_ref = f"{PROXY_REPO}@{proxy_digest}"
 
@@ -163,12 +177,15 @@ def main() -> int:
 
     def start(name: str, image: str, net: str, *, command: list[str] | None = None,
               aliases: tuple[str, ...] = (), labels: dict[str, str] | None = None,
-              entrypoint: str | None = None, mounts: tuple[tuple[Path, str], ...] = ()) -> str:
+              entrypoint: str | None = None, mounts: tuple[tuple[Path, str], ...] = (),
+              env: tuple[str, ...] = ()) -> str:
         args = ["run", "-d", "--name", name, "--network", net]
         for alias in aliases:
             args += ["--network-alias", alias]
         for key, value in (labels or {}).items():
             args += ["--label", f"{key}={value}"]
+        for value in env:
+            args += ["--env", value]
         for source, target in mounts:
             args += ["--mount", f"type=bind,src={source},dst={target},readonly"]
         if entrypoint:
@@ -181,13 +198,14 @@ def main() -> int:
         return cid
 
     try:
-        if subprocess.run(["docker", "image", "inspect", proxy_tag], capture_output=True).returncode == 0:
-            raise SystemExit("refusing to overwrite an existing Kamal Proxy v0.9.2 tag")
+        proxy_tag_exists = subprocess.run(["docker", "image", "inspect", proxy_tag], capture_output=True).returncode == 0
         ensure_owned_image(PYTHON_IMAGE)
         ensure_owned_image(CADDY_IMAGE)
-        ensure_owned_image(proxy_digest_ref)
-        docker("image", "tag", docker("image", "inspect", "--format", "{{.Id}}", proxy_digest_ref), proxy_tag)
-        owned_image_refs.append(proxy_tag)
+        ensure_owned_image(POSTGRES_IMAGE)
+        if not proxy_tag_exists:
+            ensure_owned_image(proxy_digest_ref)
+            docker("image", "tag", docker("image", "inspect", "--format", "{{.Id}}", proxy_digest_ref), proxy_tag)
+            owned_image_refs.append(proxy_tag)
         docker("network", "create", "kamal")
         networks.append("kamal")
         docker("network", "create", test_net)
@@ -212,6 +230,48 @@ def main() -> int:
             baseline_rows.append({"id": cid, "name": name, "imageId": inspect["Image"],
                                   "composeProject": "compose", "composeService": service,
                                   "running": not service.startswith("gsales-")})
+
+        detector_name = f"test-compose-gpoint-sensitive-detector-{suffix}"
+        detector = start(detector_name, PYTHON_IMAGE, test_net, command=["sleep", "infinity"],
+                         labels={"com.docker.compose.project": "compose",
+                                 "com.docker.compose.service": "gpoint-sensitive-detector"})
+        detector_inspect = json.loads(docker("inspect", detector))[0]
+        baseline_rows.append({"id": detector, "name": detector_name, "imageId": detector_inspect["Image"],
+                              "image": detector_inspect["Config"]["Image"],
+                              "composeProject": "compose", "composeService": "gpoint-sensitive-detector",
+                              "running": True})
+
+        # Recovery reads the exact pre-cutover database facts directly through
+        # psql. Build a disposable GPoint database with real migration tables.
+        postgres = start("shared_postgres_1", POSTGRES_IMAGE, test_net,
+                         env=("POSTGRES_USER=gpoint", "POSTGRES_PASSWORD=gpoint-fixture-only",
+                              "POSTGRES_DB=gpoint"),
+                         labels={"com.docker.compose.project": "compose",
+                                 "com.docker.compose.service": "postgres"})
+        for _ in range(60):
+            if subprocess.run(["docker", "exec", postgres, "pg_isready", "-U", "gpoint", "-d", "gpoint"],
+                              capture_output=True).returncode == 0:
+                break
+            time.sleep(1)
+        else:
+            raise RuntimeError("isolated PostgreSQL fixture did not become ready")
+        docker("exec", "-i", postgres, "psql", "-XqAt", "-v", "ON_ERROR_STOP=1", "-U", "gpoint", "-d", "gpoint",
+               input_text="""CREATE TABLE public._prisma_migrations (
+  migration_name text PRIMARY KEY,
+  finished_at timestamptz,
+  rolled_back_at timestamptz
+);
+INSERT INTO public._prisma_migrations VALUES
+  ('20260901090000_previous', '2026-09-01T09:00:00Z', NULL),
+  ('20261001090000_baseline', '2026-10-01T09:00:00Z', NULL);
+CREATE SCHEMA agata;
+CREATE TABLE agata.alembic_version (version_num text NOT NULL);
+INSERT INTO agata.alembic_version VALUES ('agata0012');
+""")
+        postgres_inspect = json.loads(docker("inspect", postgres))[0]
+        baseline_rows.append({"id": postgres, "name": "shared_postgres_1", "imageId": postgres_inspect["Image"],
+                              "image": postgres_inspect["Config"]["Image"], "composeProject": "compose",
+                              "composeService": "postgres", "running": True})
 
         # Real Caddy TLS fronts the legacy backend before switching.
         tmp = Path(tempfile.mkdtemp(prefix="gpoint-kamal-recovery-"))
@@ -255,12 +315,17 @@ https://gpoint.amiora.one {
 """
         caddyfile.write_text(caddy_text)
         caddy_sha = hashlib.sha256(caddy_text.encode()).hexdigest()
-        caddy_name = f"gpoint-test-caddy-{suffix}"
-        caddy_container = run(["docker", "run", "-d", "--name", caddy_name, "--network", test_net,
-                               "--network-alias", "legacy-caddy", "-v", f"{caddyfile}:/etc/caddy/Caddyfile:ro",
-                               CADDY_IMAGE, "caddy", "run", "--config", "/etc/caddy/Caddyfile"])
+        caddy_name = f"test-kamal-caddy-{suffix}"
+        # The hosted job may run Docker-in-Docker, where a Mac/runner temp path
+        # is not visible to the inner daemon. Copy the exact generated config
+        # into the stopped container instead of asking Docker to bind-mount it.
+        caddy_container = docker("create", "--name", caddy_name, "--network", test_net,
+                                 "--network-alias", "legacy-caddy", CADDY_IMAGE,
+                                 "caddy", "run", "--config", "/etc/caddy/Caddyfile")
         container_ids.append(caddy_container)
-        client = start(f"gpoint-test-client-{suffix}", PYTHON_IMAGE, test_net, command=["sleep", "infinity"])
+        docker("cp", str(caddyfile), f"{caddy_container}:/etc/caddy/Caddyfile")
+        docker("start", caddy_container)
+        client = start(f"test-kamal-client-{suffix}", PYTHON_IMAGE, test_net, command=["sleep", "infinity"])
         caddy_ip = docker("inspect", "--format", "{{(index .NetworkSettings.Networks \"" + test_net + "\").IPAddress}}", caddy_container)
         wait_http(client, "https://gpoint.amiora.one/api/health/live", "legacy:/health/live", host="gpoint.amiora.one", resolve_ip=caddy_ip)
         wait_http(client, "https://gpoint.amiora.one/", "legacy:/", host="gpoint.amiora.one", resolve_ip=caddy_ip)
@@ -291,11 +356,19 @@ https://gpoint.amiora.one {
         # In-process inspect shim below binds fixture image IDs to the exact
         # digests emitted by the hosted build; no registry artifact is written.
 
-        baseline_epoch = int(time.time())
+        # Leave a small clock-granularity margin between the baseline epoch
+        # and Docker's independently timestamped container creation record.
+        baseline_epoch = int(time.time()) - 5
         proxy_name = "kamal-proxy"
-        proxy = start(proxy_name, proxy_tag, "kamal", command=["run", "--http-port", "80", "--https-port", "443"],
-                      entrypoint="kamal-proxy", mounts=((proxy_cert, "/tmp/gpoint-proxy.crt"),
-                                                         (proxy_key, "/tmp/gpoint-proxy.key")))
+        # Use daemon-local files for the same reason as Caddyfile above: an
+        # inner Docker daemon cannot bind-mount the outer runner's temp paths.
+        proxy = docker("create", "--name", proxy_name, "--network", "kamal",
+                       "--entrypoint", "kamal-proxy", proxy_tag,
+                       "run", "--http-port", "80", "--https-port", "443")
+        container_ids.append(proxy)
+        docker("cp", str(proxy_cert), f"{proxy}:/tmp/gpoint-proxy.crt")
+        docker("cp", str(proxy_key), f"{proxy}:/tmp/gpoint-proxy.key")
+        docker("start", proxy)
         # Add proxy to the private network for internal probes.
         docker("network", "connect", test_net, proxy)
         for _ in range(45):
@@ -329,9 +402,28 @@ https://gpoint.amiora.one {
         inventory_path.write_bytes(inventory_raw)
         inventory_path.chmod(0o600)
         baseline_path = release_root / SHA / f"kamal-cutover-baseline-{RUN_ID}-{ATTEMPT}.txt"
+
+        def postgres_psql(sql: str) -> str:
+            return docker("exec", "-i", postgres, "sh", "-ec",
+                          'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d gpoint',
+                          input_text=f"BEGIN READ ONLY;\n{sql}\nCOMMIT;")
+
+        database_facts = postgres_psql(POSTGRES_DATABASE_SQL)
+        database_value = json.loads(database_facts)
+        migration_value = json.loads(postgres_psql(POSTGRES_MIGRATION_SQL))
+        agata_head = postgres_psql("SELECT version_num FROM agata.alembic_version ORDER BY version_num;").splitlines()
+        if len(agata_head) != 1:
+            raise RuntimeError("isolated PostgreSQL AGATA fixture head is not singular")
         values = {"BASELINE_SCHEMA": "gpoint-kamal-cutover-baseline/v1", "CANDIDATE_SHA": SHA,
                   "RUN_ID": RUN_ID, "ATTEMPT": ATTEMPT, "BASELINE_CAPTURED_AT_EPOCH": str(baseline_epoch),
                   "CURRENT_SHA": APP_SHA, "KAMAL_PROXY_BASELINE": "ABSENT", "CADDYFILE_SHA256": caddy_sha,
+                  "POSTGRES_CONTAINER_ID": postgres_inspect["Id"], "POSTGRES_IMAGE_ID": postgres_inspect["Image"],
+                  "POSTGRES_SYSTEM_IDENTIFIER": str(database_value["systemIdentifier"]),
+                  "POSTGRES_SERVER_VERSION_NUM": str(database_value["serverVersionNum"]),
+                  "POSTGRES_ACL_FINGERPRINT": hashlib.sha256(database_facts.encode()).hexdigest(),
+                  "PRISMA_HEAD": migration_value["prismaHead"],
+                  "PRISMA_MIGRATIONS": ",".join(migration_value["prismaMigrations"]),
+                  "AGATA_HEAD": agata_head[0],
                   "INVENTORY_FILE": str(inventory_path), "INVENTORY_SHA256": hashlib.sha256(inventory_raw).hexdigest()}
         baseline_raw = "".join(f"{k}={v}\n" for k, v in values.items()).encode()
         baseline_path.write_bytes(baseline_raw)

@@ -1,3 +1,5 @@
+import pytest
+
 from pathlib import Path
 import os
 import hashlib
@@ -9,6 +11,19 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
+
+def phase(name):
+    return (ROOT / 'scripts/kamal-first-cutover' / (name + '.sh')).read_text()
+
+
+def server_step(workflow):
+    return workflow.split('name: Run one server-owned Kamal cutover transaction', 1)[1].split(
+        'name: Record GitHub Deployment result', 1)[0]
+
+
+def all_phases():
+    return '\n'.join(phase(name) for name in ('pause','retire','requests','routes','consumers','verify'))
 
 def test_shared_proxy_hosts_are_not_redeclared_by_kamal_roles():
     core = yaml.safe_load((ROOT / "config/deploy.yml").read_text())
@@ -112,23 +127,19 @@ def test_kamal_uses_attempt_scoped_tag_with_buildkit_digest_verification():
 
 def test_kamal_deploy_uses_native_verified_images_and_preserves_first_cutover_guard():
     workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
-    kamal = workflow.split("  deploy:\n", 1)[1]
+    kamal = workflow.split("  deploy:\n", 1)[1] + all_phases()
     assert "runs-on: ubuntu-latest" in kamal
     assert "environment: production" in kamal
     assert "kamal deploy --skip-push" in kamal
-    assert "name: Deploy request-serving Kamal roles" in kamal
-    assert "name: Start Kamal consumers after request-serving verification" in kamal
-    deploy = kamal.split("name: Deploy request-serving Kamal roles", 1)[1].split(
-        "name: Verify request-serving routes before starting consumers", 1
-    )[0]
+    assert "name: Run one server-owned Kamal cutover transaction" in kamal
+    assert "bash scripts/run-kamal-cutover-owner.sh" in kamal
+    deploy = phase("requests")
     assert "--roles api --config-file config/deploy.yml" in deploy
     assert "--roles api --config-file config/deploy.agata.yml" in deploy
     assert "--roles web --config-file config/deploy.miniapp.yml" in deploy
     assert "--roles worker,bot" not in deploy
     assert "--roles memory-worker" not in deploy
-    consumers = kamal.split("name: Start Kamal consumers after request-serving verification", 1)[1].split(
-        "name: Verify public routes", 1
-    )[0]
+    consumers = phase("consumers")
     assert "--roles worker,bot --config-file config/deploy.yml" in consumers
     assert "--roles memory-worker --config-file config/deploy.agata.yml" in consumers
     assert "GPOINT_KAMAL_SSH_PRIVATE_KEY" in kamal
@@ -149,13 +160,11 @@ def test_kamal_deploy_uses_native_verified_images_and_preserves_first_cutover_gu
     assert "GPOINT_KAMAL_VERIFY=PASS" in kamal
     assert "ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625" in kamal
     assert "gem install kamal" not in kamal
-    assert kamal.index("name: Pause legacy GPoint services after restore gates") < kamal.index(
-        "name: Deploy request-serving Kamal roles"
-    )
+    assert "PHASES = (\"pause\", \"retire\", \"requests\", \"routes\", \"consumers\", \"verify\")" in (ROOT / "scripts/kamal_cutover_owner.py").read_text()
     cutover_helper = (ROOT / "scripts/pause-legacy-gpoint.sh").read_text()
     assert "docker stop --time 120" in cutover_helper
     assert "INVENTORY_SHA256" in cutover_helper
-    assert "restore_legacy_services" in cutover_helper
+    assert "restore_legacy_services" not in cutover_helper
     assert "gsales-api" in cutover_helper
     assert 'index .NetworkSettings.Networks "gpoint_app").Aliases' in kamal
     assert 'index .NetworkSettings.Networks "shared_internal").Aliases' in kamal
@@ -172,8 +181,8 @@ def test_kamal_proxy_owns_public_tls_and_routes_api_media_and_miniapp():
         assert "https_port" not in config["proxy"]["run"]
         assert "bind_ips" not in config["proxy"]["run"]
     workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
-    assert "scripts/retire-gpoint-caddy.sh" in workflow
-    assert "KAMAL_PROXY_TLS_VERIFY=PASS" in workflow
+    assert "scripts/retire-gpoint-caddy.sh" in phase("retire")
+    assert "KAMAL_PROXY_TLS_VERIFY=PASS" in phase("routes")
     assert "systemctl reload caddy" not in workflow
     media_route = (ROOT / "apps/api/src/media-read.ts").read_text()
     assert "@Controller()" in media_route
@@ -283,26 +292,15 @@ def test_kamal_pre_app_boot_checks_the_pulled_digest_before_boot():
 
 
 def test_first_cutover_stops_caddy_before_binding_public_kamal_proxy():
-    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
-    deploy = workflow.split("  deploy:\n", 1)[1]
-    assert "name: Stop Caddy for Kamal Proxy public bind" in deploy
-    assert "scripts/retire-gpoint-caddy.sh" in deploy
-    assert "CADDYFILE_SHA256" in deploy
-    assert deploy.index("name: Stop Caddy for Kamal Proxy public bind") < deploy.index(
-        "name: Deploy request-serving Kamal roles"
-    ) < deploy.index("name: Verify request-serving routes before starting consumers")
-    assert "systemctl stop caddy" in (ROOT / "scripts/retire-gpoint-caddy.sh").read_text()
-    assert "kamal-proxy" in deploy
-    assert deploy.index("name: Verify request-serving routes before starting consumers") < deploy.index(
-        "name: Start Kamal consumers after request-serving verification"
-    ) < deploy.index("name: Verify public routes and exact running services")
-    consumer_step = deploy.split("name: Start Kamal consumers after request-serving verification", 1)[1].split(
-        "name: Verify public routes and exact running services", 1
-    )[0]
-    assert "if: always()" not in consumer_step
+    assert "scripts/retire-gpoint-caddy.sh" in phase("retire")
+    assert "kamal deploy --skip-push" in phase("requests")
+    owner = (ROOT / 'scripts/kamal_cutover_owner.py').read_text()
+    assert 'PHASES = ("pause", "retire", "requests", "routes", "consumers", "verify")' in owner
+    assert 'systemctl stop caddy' in (ROOT / 'scripts/retire-gpoint-caddy.sh').read_text()
 
 
-def test_retire_caddy_script_checksums_recovery_copy_before_stopping_service(tmp_path):
+@pytest.mark.parametrize("prepare_first", [False, True])
+def test_retire_caddy_script_checksums_recovery_copy_before_stopping_service(tmp_path, prepare_first):
     candidate_sha = "a" * 40
     config = tmp_path / "Caddyfile"
     config.write_text("gpoint.amiora.one { respond /health 200 }\n")
@@ -332,6 +330,15 @@ def test_retire_caddy_script_checksums_recovery_copy_before_stopping_service(tmp
         "TEST_CALLS": str(calls),
         "TEST_STOPPED": str(stopped),
     })
+    if prepare_first:
+        prepared = subprocess.run(
+            ["bash", str(ROOT / "scripts/retire-gpoint-caddy.sh"), candidate_sha, "12345", "2",
+             hashlib.sha256(config.read_bytes()).hexdigest(), "--prepare-only"],
+            env=environment, capture_output=True, text=True)
+        assert prepared.returncode == 0, prepared.stderr
+        assert not stopped.exists()
+        assert "GPOINT_CADDY_BACKUP_READY=PASS" in prepared.stdout
+        calls.write_text("")
     result = subprocess.run(
         ["bash", str(ROOT / "scripts/retire-gpoint-caddy.sh"), candidate_sha, "12345", "2",
          hashlib.sha256(config.read_bytes()).hexdigest()],
@@ -376,13 +383,11 @@ def test_kamal_success_requires_database_media_consumer_and_no_eros_readback():
     assert "NO_EROS_STATE_SHA256" in deploy
     assert "EROS_CONTAINER_ID" not in deploy and "EROS_NETWORK_FINGERPRINT" not in deploy
     assert 'python3 "$eros_collector" --output "$eros_state_file"' in deploy
-    assert 'python3 "$eros_state_helper" compare --before "$no_eros_baseline_file" --after "$no_eros_postflight_file"' in deploy
+    assert 'python3 "$eros_state_helper" compare --before "$no_eros_baseline_file" --after "$no_eros_postflight_file"' in phase("verify")
     assert "DOCKER_FREE_DISK_KB" in deploy
     assert "MEMORY_AVAILABLE_KB" in deploy and "MEMORY_TOTAL_KB" in deploy
     assert "CONTAINER_MEMORY_USED_BYTES" in deploy and "CONTAINER_CPU_PERCENT_SUM" in deploy
-    verify = deploy.split("name: Verify public routes and exact running services", 1)[1].split(
-        "name: Record GitHub Deployment result", 1
-    )[0]
+    verify = phase("verify") + server_step(workflow)
     assert "prisma migrate status" in verify
     assert "alembic heads" in verify
     assert "SELECT version_num FROM agata.alembic_version" in verify
@@ -406,18 +411,16 @@ def test_first_cutover_stops_only_freshly_inventoried_legacy_services_after_rest
     assert "name: Verify fresh PostgreSQL and media backup with isolated restore" in deploy
     assert deploy.index("name: Capture PostgreSQL and no-Eros cutover baseline") < deploy.index(
         "name: Verify fresh PostgreSQL and media backup with isolated restore"
-    ) < deploy.index("name: Pause legacy GPoint services after restore gates")
+    ) < deploy.index("name: Run one server-owned Kamal cutover transaction")
     backup_step = deploy.split("name: Verify fresh PostgreSQL and media backup with isolated restore", 1)[1].split(
-        "name: Pause legacy GPoint services", 1
+        "name: Run one server-owned Kamal cutover transaction", 1
     )[0]
     assert "scripts/verify-gpoint-backup-restore.sh" in backup_step
     assert "backup_sha256" in backup_step
     assert "GPOINT_ISOLATED_RESTORE=PASS" in backup_step
     assert "GPOINT_MEDIA_BACKUP=PASS" in backup_step
     assert "GPOINT_MEDIA_ISOLATED_RESTORE=PASS" in backup_step
-    verify = deploy.split("name: Verify public routes and exact running services", 1)[1].split(
-        "name: Record GitHub Deployment result", 1
-    )[0]
+    verify = phase("verify") + server_step(workflow)
     assert "BACKUP_PATH: ${{ steps.backuprestore.outputs.backup_path }}" in verify
     assert "BACKUP_SHA: ${{ steps.backuprestore.outputs.backup_sha256 }}" in verify
     assert "ISOLATED_RESTORE=PASS" in verify
@@ -439,9 +442,7 @@ def test_first_cutover_stops_only_freshly_inventoried_legacy_services_after_rest
     assert 'restore_container_id="$(docker run -d' in helper
     assert "/run/gpoint-kamal/" in helper
     assert "GPOINT_ISOLATED_RESTORE=PASS" in helper
-    cutover_step = deploy.split("name: Pause legacy GPoint services after restore gates", 1)[1].split(
-        "name: Deploy request-serving Kamal roles", 1
-    )[0]
+    cutover_step = phase("pause") + server_step(workflow)
     assert "BASELINE_PATH: ${{ steps.baseline.outputs.baseline_path }}" in cutover_step
     assert "BASELINE_SHA: ${{ steps.baseline.outputs.baseline_sha }}" in cutover_step
     assert "scripts/pause-legacy-gpoint.sh" in cutover_step
@@ -484,24 +485,17 @@ def test_first_cutover_backup_result_parser_accepts_capacity_proofs_and_rejects_
 
 
 def test_cutover_helper_uses_snapshot_bound_graceful_stop_and_pre_deploy_recovery():
-    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
-    deploy = workflow.split("  deploy:\n", 1)[1]
-    assert deploy.index("name: Verify fresh PostgreSQL and media backup with isolated restore") < deploy.index(
-        "name: Create exact-SHA in-progress GitHub Deployment"
-    ) < deploy.index("name: Pause legacy GPoint services after restore gates") < deploy.index(
-        "name: Deploy request-serving Kamal roles"
-    )
-    cutover = deploy.split("name: Pause legacy GPoint services after restore gates", 1)[1].split(
-        "name: Deploy request-serving Kamal roles", 1
-    )[0]
-    assert "scripts/pause-legacy-gpoint.sh" in cutover
-    assert 'test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"' in cutover
-    assert cutover.index("git/ref/heads/main") < cutover.index("scp \"${ssh_opts[@]}\" scripts/pause-legacy-gpoint.sh")
-    assert cutover.index('test -d "$1"') < cutover.index(
-        "scp \"${ssh_opts[@]}\" scripts/pause-legacy-gpoint.sh"
-    ) < cutover.index("ssh -T \"${ssh_opts[@]}\" \"root@${GPOINT_PRODUCTION_HOST}\" bash \"$remote_script\"")
-    assert 'test ! -L "$1"' in cutover
-    assert "stat -c" in cutover and "0:700" in cutover
+    workflow = (ROOT / '.github/workflows/gpoint-first-kamal-cutover.yml').read_text()
+    deploy = workflow.split('  deploy:\n',1)[1]
+    assert deploy.index('name: Verify fresh PostgreSQL and media backup with isolated restore') < deploy.index(
+        'name: Create exact-SHA in-progress GitHub Deployment') < deploy.index(
+        'name: Run one server-owned Kamal cutover transaction')
+    observer=(ROOT/'scripts/run-kamal-cutover-owner.sh').read_text()
+    assert observer.index('git/ref/heads/main') < observer.index('SUBMIT')
+    cutover=phase('pause')
+    assert 'test -d "$1"' in cutover and 'test ! -L "$1"' in cutover
+    assert '--prepare-only' in cutover
+    assert 'scripts/pause-legacy-gpoint.sh' in cutover
     helper = (ROOT / "scripts/pause-legacy-gpoint.sh").read_text()
     assert "INVENTORY_SHA256" in helper
     assert "INVENTORY_FILE" in helper
@@ -510,9 +504,9 @@ def test_cutover_helper_uses_snapshot_bound_graceful_stop_and_pre_deploy_recover
     assert 'mapfile -t service_rows <<< "$service_rows_output"' in helper
     assert 'mapfile -t service_rows < <(python3' not in helper
     assert "compose: {project}" not in helper
-    assert "restore_legacy_services" in helper
+    assert "restore_legacy_services" not in helper
     assert "stop_order=(worker bot agata-memory-worker api agata-api)" in helper
-    assert "restart_order=(agata-api api agata-memory-worker bot worker)" in helper
+    assert "restart_order=" not in helper
     assert 'test "$live_running" = "$was_running"' in helper
     assert 'stopped_by_service[$service]="$id"' in helper
     assert "shared_postgres_1" in helper
@@ -521,29 +515,28 @@ def test_cutover_helper_uses_snapshot_bound_graceful_stop_and_pre_deploy_recover
     assert "gsales-api" in helper
 
 
-def test_first_cutover_is_fail_closed_until_independent_rollback_is_proven():
-    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
-    deploy = workflow.split("  deploy:\n", 1)[1]
-    gate = "name: Block first cutover until an independently tested pre-Caddy rollback is installed"
-    deployment = "name: Create exact-SHA in-progress GitHub Deployment"
-    pause = "name: Pause legacy GPoint services after restore gates"
-    assert deploy.index("name: Check VPS disk headroom") < deploy.index(gate) < deploy.index(deployment) < deploy.index(pause)
-    section = deploy.split(gate, 1)[1].split(deployment, 1)[0]
-    assert "if: inputs.mode == 'cutover'" in section
-    assert "ME-54: VPS-side rollback on SSH loss is not yet implemented or proven" in section
-    assert "exit 1" in section
-    shell_body = textwrap.dedent(section.split("run: |", 1)[1])
-    result = subprocess.run(["bash", "-e", "-c", shell_body], text=True, capture_output=True)
-    assert result.returncode != 0
-    assert "ME-54" in result.stdout
+def test_first_cutover_admits_only_the_tested_server_owned_transaction():
+    workflow = (ROOT / '.github/workflows/gpoint-first-kamal-cutover.yml').read_text()
+    deploy = workflow.split('  deploy:\n',1)[1]
+    assert 'VPS-side rollback on SSH loss is not yet implemented' not in deploy
+    assert deploy.index('name: Check VPS disk headroom') < deploy.index(
+        'name: Create exact-SHA in-progress GitHub Deployment') < deploy.index(
+        'name: Run one server-owned Kamal cutover transaction')
+    job=yaml.safe_load(workflow)['jobs']['deploy']
+    operations=[step for step in job['steps'] if step.get('run') == 'bash scripts/run-kamal-cutover-owner.sh']
+    assert len(operations) == 1 and operations[0]['if'] == "inputs.mode == 'cutover'"
+    assert 'tests/test_kamal_cutover_owner.py' in workflow
+    assert 'tests/test_start_kamal_cutover_owner.py' in workflow
+    assert 'Recover legacy GPoint if cutover Verify fails' not in deploy
+    observer=(ROOT/'scripts/run-kamal-cutover-owner.sh').read_text()
+    assert 'no resubmit or competing recovery' in observer
+    assert 'OBSERVATION_TIMEOUT' in observer
 
 
 def test_first_cutover_pause_protects_inflight_stop_and_ssh_idle():
     script = (ROOT / "scripts/pause-legacy-gpoint.sh").read_text()
     workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
-    pause = workflow.split("name: Pause legacy GPoint services after restore gates", 1)[1].split(
-        "name: Stop Caddy for Kamal Proxy public bind", 1
-    )[0]
+    pause = phase("pause")
     id_index = script.index('stopped_by_service[$service]="$id"')
     begin_index = script.index("GPOINT_LEGACY_STOP_BEGIN=")
     stop_index = script.index('docker stop --time 120 "$id"')
@@ -553,7 +546,7 @@ def test_first_cutover_pause_protects_inflight_stop_and_ssh_idle():
     assert "trap 'exit 130' INT" in script
     assert "trap 'exit 143' TERM" in script
     assert "trap on_exit EXIT" in script
-    assert "restore_legacy_services" in script
+    assert "restore_legacy_services" not in script
     assert "-o ServerAliveInterval=15" in pause
     assert "-o ServerAliveCountMax=6" in pause
     assert "-o TCPKeepAlive=yes" in pause
@@ -587,8 +580,9 @@ def test_legacy_pause_rechecks_media_after_stopping_consumers_and_recovers_on_mi
     complete = pause.index("cutover_complete=1")
     assert no_eros_recheck < stop_loop < media_recheck < complete
     assert 'test "$(sed -n \'s/^GPOINT_MEDIA_MANIFEST_SHA256=//p\' <<< "$media_manifest_output")" = "$media_manifest_sha"' in pause
-    assert 'if [[ "$status" -ne 0 && "$cutover_complete" -ne 1 ]]; then' in pause
-    assert "restore_legacy_services" in pause
+    assert "restore_legacy_services" not in pause
+    owner=(ROOT / 'scripts/kamal_cutover_owner.py').read_text()
+    assert 'PRE_RECOVERY if failed_phase == "pause" else POST_RECOVERY' in owner
 
 
 def test_cutover_backup_cli_can_write_plaintext_into_explicit_tmpfs_directory():
@@ -689,9 +683,7 @@ def test_attempt_helper_dir_is_created_once_and_reused_by_backup_and_pause():
     backup = workflow.split("name: Verify fresh PostgreSQL and media backup with isolated restore", 1)[1].split(
         "name: Create exact-SHA in-progress GitHub Deployment", 1
     )[0]
-    pause = workflow.split("name: Pause legacy GPoint services after restore gates", 1)[1].split(
-        "name: Stop Caddy for Kamal Proxy public bind", 1
-    )[0]
+    pause = phase("pause")
     assert 'test ! -e "$1"' in baseline
     for stage in (backup, pause):
         assert 'test ! -e "$1"' not in stage
@@ -718,9 +710,7 @@ def test_baseline_capture_keeps_attempt_evidence_and_does_not_rmdir_nonempty_dir
 
 def test_successful_runtime_verify_does_not_require_empty_attempt_helper_dir():
     workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
-    section = workflow.split("name: Verify public routes and exact running services", 1)[1].split(
-        "name: Record GitHub Deployment result against the same attempt", 1
-    )[0]
+    section = phase("verify")
     assert 'rm -f -- "$eros_collector" "$eros_state_helper"' in section
     assert 'rmdir "$no_eros_dir"' not in section
     assert 'test -s "$manifest_file"' in section
@@ -746,7 +736,7 @@ def test_native_workflow_runs_migration_parity_before_deployment_or_pause():
     deploy = workflow.split("  deploy:\n", 1)[1]
     parity = deploy.index("name: Verify application source migrations match the live database")
     deployment = deploy.index("name: Create exact-SHA in-progress GitHub Deployment")
-    pause = deploy.index("name: Pause legacy GPoint services")
+    pause = deploy.index("name: Run one server-owned Kamal cutover transaction")
     assert parity < deployment < pause
 
 
@@ -820,7 +810,7 @@ def test_kamal_cutover_checks_candidate_image_disk_headroom_before_deployment():
     deploy = workflow.split("  deploy:\n", 1)[1]
     check = deploy.index("name: Check VPS disk headroom for the exact candidate images")
     deployment = deploy.index("name: Create exact-SHA in-progress GitHub Deployment")
-    pause = deploy.index("name: Pause legacy GPoint services after restore gates")
+    pause = deploy.index("name: Run one server-owned Kamal cutover transaction")
     assert check < deployment < pause
     assert "candidate_image_bytes" in deploy
     assert "1024 * 1024 * 1024" in deploy
@@ -830,13 +820,11 @@ def test_kamal_cutover_checks_candidate_image_disk_headroom_before_deployment():
 def test_kamal_production_verify_persists_attempt_bound_manifest():
     workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
-    verify = deploy.split("name: Verify public routes and exact running services", 1)[1].split(
-        "name: Record GitHub Deployment result against the same attempt", 1
-    )[0]
+    verify = phase("verify") + server_step(workflow)
     record = deploy.split("name: Record GitHub Deployment result against the same attempt", 1)[1]
     manifest_writer = (ROOT / "scripts/write-kamal-production-manifest.py").read_text()
     assert "scripts/write-kamal-production-manifest.py" in verify
-    assert "scp scripts/write-kamal-production-manifest.py" in verify
+    assert 'scp -F "$HOME/.ssh/config" scripts/write-kamal-production-manifest.py' in verify
     assert 'trap \'rm -f -- "$manifest_writer"\' EXIT' in verify
     assert "gpoint-kamal-production-manifest/v2" in manifest_writer
     assert '"postgresAclFingerprint"' in manifest_writer
@@ -1020,3 +1008,11 @@ def test_pre_app_boot_reads_the_ssh_heredoc_and_fails_closed_on_digest_mismatch(
     assert mismatch.returncode != 0
     assert "does not match the BuildKit-verified OCI digest" in mismatch.stderr
     assert len(calls) == 3
+
+
+def test_pause_cannot_bypass_server_owned_recovery_on_exit():
+    helper = (ROOT / 'scripts/pause-legacy-gpoint.sh').read_text()
+    cleanup = helper.split('on_exit() {', 1)[1].split('trap on_exit EXIT', 1)[0]
+    assert 'restore_legacy_services' not in cleanup
+    assert 'docker start' not in cleanup
+    assert 'phases/recover-pre.sh' in (ROOT / 'scripts/kamal_cutover_owner.py').read_text() or 'PRE_RECOVERY = "recover-pre"' in (ROOT / 'scripts/kamal_cutover_owner.py').read_text()

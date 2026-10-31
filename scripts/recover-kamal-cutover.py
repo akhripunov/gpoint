@@ -36,6 +36,19 @@ class RecoveryBlocked(RuntimeError):
     pass
 
 
+def parse_docker_created(value: str) -> datetime:
+    """Parse Docker's RFC3339Nano timestamp with Python's microsecond limit."""
+    text = value.replace("Z", "+00:00")
+    fraction = re.search(r"\.(\d+)(?=[+-]\d{2}:\d{2}$)", text)
+    if fraction and len(fraction.group(1)) > 6:
+        text = (text[:fraction.start(1)] + fraction.group(1)[:6]
+                + text[fraction.end(1):])
+    created = datetime.fromisoformat(text)
+    if created.tzinfo is None:
+        raise ValueError("Docker Created timestamp must include a timezone")
+    return created
+
+
 def command(argv: list[str], *, input_text: str | None = None, check: bool = True) -> str:
     result = subprocess.run(argv, input=input_text, text=True, capture_output=True, check=False, timeout=60)
     if check and result.returncode:
@@ -110,6 +123,34 @@ def read_baseline(
             or any(not re.fullmatch(r"[0-9a-f]{64}", str(row.get("id", ""))) for row in gsales_rows)):
         raise RecoveryBlocked("baseline stopped GSales inventory is incomplete")
     legacy.update({row["composeService"]: row for row in gsales_rows})
+    detector_rows = [row for row in rows if row.get("composeProject") == "compose"
+                     and row.get("composeService") == "gpoint-sensitive-detector"]
+    if len(detector_rows) != 1:
+        raise RecoveryBlocked("baseline SensitiveDetector inventory is incomplete or ambiguous")
+    detector = detector_rows[0]
+    if (not re.fullmatch(r"[0-9a-f]{64}", str(detector.get("id", "")))
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(detector.get("imageId", "")))
+            or not isinstance(detector.get("image"), str) or not detector["image"]
+            or type(detector.get("running")) is not bool):
+        raise RecoveryBlocked("baseline SensitiveDetector identity is invalid")
+    legacy["gpoint-sensitive-detector"] = detector
+    if (not re.fullmatch(r"[0-9a-f]{64}", values.get("POSTGRES_CONTAINER_ID", ""))
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", values.get("POSTGRES_IMAGE_ID", ""))):
+        raise RecoveryBlocked("baseline PostgreSQL identity is incomplete")
+    if (not re.fullmatch(r"[0-9]+", values.get("POSTGRES_SYSTEM_IDENTIFIER", ""))
+            or not re.fullmatch(r"[0-9]+", values.get("POSTGRES_SERVER_VERSION_NUM", ""))
+            or not re.fullmatch(r"[0-9a-f]{64}", values.get("POSTGRES_ACL_FINGERPRINT", ""))):
+        raise RecoveryBlocked("baseline PostgreSQL database facts are incomplete")
+    prisma_head = values.get("PRISMA_HEAD", "")
+    prisma_migrations = values.get("PRISMA_MIGRATIONS", "")
+    agata_head = values.get("AGATA_HEAD", "")
+    if (not re.fullmatch(r"(?:NONE|[A-Za-z0-9_-]+)", prisma_head)
+            or not re.fullmatch(r"[A-Za-z0-9_-]+(?:,[A-Za-z0-9_-]+)*", prisma_migrations)
+            or not re.fullmatch(r"(?:ABSENT|[A-Za-z0-9_-]+)", agata_head)):
+        raise RecoveryBlocked("baseline migration facts are incomplete")
+    migration_names = prisma_migrations.split(",")
+    if migration_names != sorted(set(migration_names)) or (prisma_head != "NONE" and prisma_head not in migration_names):
+        raise RecoveryBlocked("baseline Prisma migration inventory is invalid")
     return values, legacy
 
 
@@ -122,6 +163,55 @@ def inspect_json(identifier: str) -> dict:
     if len(rows) != 1 or not isinstance(rows[0], dict):
         raise RecoveryBlocked("Docker inspection identity is ambiguous")
     return rows[0]
+
+
+def read_postgres(sql: str) -> str:
+    return command(["docker", "exec", "-i", "shared_postgres_1", "sh", "-ec",
+                    'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d gpoint'],
+                   input_text=f"BEGIN READ ONLY;\n{sql}\nCOMMIT;")
+
+
+def validate_postgres_database(baseline: dict[str, str]) -> None:
+    database_sql = """SELECT json_build_object(
+  'systemIdentifier',(SELECT system_identifier::text FROM pg_control_system()),
+  'serverVersionNum',current_setting('server_version_num')::integer,
+  'databases',(SELECT json_agg(json_build_object('name',datname,'owner',pg_get_userbyid(datdba),'allowConnections',datallowconn,'acl',datacl::text) ORDER BY datname) FROM pg_database WHERE datname IN ('gpoint','postgres','template1','eros')),
+  'erosRoles',(SELECT json_agg(json_build_object('name',rolname,'login',rolcanlogin,'superuser',rolsuper,'createDatabase',rolcreatedb,'createRole',rolcreaterole,'bypassRls',rolbypassrls) ORDER BY rolname) FROM pg_roles WHERE rolname IN ('eros_ddl','eros_runtime','eros_migrator')),
+  'erosMemberships',(SELECT json_agg(json_build_object('role',pg_get_userbyid(roleid),'member',pg_get_userbyid(member)) ORDER BY roleid,member) FROM pg_auth_members WHERE roleid IN (SELECT oid FROM pg_roles WHERE rolname IN ('eros_ddl','eros_runtime','eros_migrator')) OR member IN (SELECT oid FROM pg_roles WHERE rolname IN ('eros_ddl','eros_runtime','eros_migrator')))
+)::text;"""
+    database_facts = read_postgres(database_sql)
+    try:
+        parsed = json.loads(database_facts)
+    except json.JSONDecodeError as exc:
+        raise RecoveryBlocked("PostgreSQL database facts are invalid") from exc
+    if (not isinstance(parsed, dict)
+            or str(parsed.get("systemIdentifier", "")) != baseline["POSTGRES_SYSTEM_IDENTIFIER"]
+            or str(parsed.get("serverVersionNum", "")) != baseline["POSTGRES_SERVER_VERSION_NUM"]
+            or hashlib.sha256(database_facts.encode()).hexdigest() != baseline["POSTGRES_ACL_FINGERPRINT"]):
+        raise RecoveryBlocked("PostgreSQL ACL/database facts differ from recovery baseline")
+
+    migration_sql = """SELECT json_build_object(
+  'prismaHead',COALESCE((SELECT migration_name FROM public._prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY finished_at DESC LIMIT 1),'NONE'),
+  'prismaMigrations',COALESCE((SELECT json_agg(migration_name ORDER BY migration_name) FROM public._prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL),'[]'::json)
+)::text;"""
+    migration_facts = read_postgres(migration_sql)
+    try:
+        migrations = json.loads(migration_facts)
+    except json.JSONDecodeError as exc:
+        raise RecoveryBlocked("PostgreSQL Prisma migration facts are invalid") from exc
+    if (not isinstance(migrations, dict)
+            or migrations.get("prismaHead") != baseline["PRISMA_HEAD"]
+            or migrations.get("prismaMigrations") != baseline["PRISMA_MIGRATIONS"].split(",")):
+        raise RecoveryBlocked("PostgreSQL Prisma migration inventory differs from recovery baseline")
+
+    agata_head = baseline["AGATA_HEAD"]
+    if agata_head == "ABSENT":
+        if read_postgres("SELECT to_regclass('agata.alembic_version') IS NULL;") != "t":
+            raise RecoveryBlocked("PostgreSQL AGATA schema differs from recovery baseline")
+    else:
+        live_heads = read_postgres("SELECT version_num FROM agata.alembic_version ORDER BY version_num;").splitlines()
+        if live_heads != [agata_head]:
+            raise RecoveryBlocked("PostgreSQL AGATA migration head differs from recovery baseline")
 
 
 def wait_container_ready(identifier: str, *, timeout: int = 90) -> None:
@@ -186,60 +276,46 @@ def recover(args: argparse.Namespace) -> None:
     proxy_ids = [line for line in command(["docker", "ps", "-aq", "--no-trunc", "--filter", "name=^/kamal-proxy$"]).splitlines() if line]
     if len(proxy_ids) > 1:
         raise RecoveryBlocked("multiple Kamal Proxy containers are present")
-    candidate_targets: dict[str, tuple[str, int]] = {}
-    for service, role, port, repo_key in (
-        ("gpoint-core", "api", 3000, "gpoint-core"),
-        ("gpoint-miniapp", "web", 80, "gpoint-miniapp"),
-    ):
-        name = f"{service}-{role}-{version}"
-        ids = [line for line in command(["docker", "ps", "-aq", "--no-trunc", "--filter", f"name=^/{name}$"]).splitlines() if line]
-        if len(ids) > 1:
-            raise RecoveryBlocked("candidate request container identity is ambiguous")
-        if ids:
-            row = inspect_json(ids[0])
-            if row.get("Id") != ids[0] or row.get("Name", "").lstrip("/") != name:
-                raise RecoveryBlocked("candidate request container name differs")
-            config = row.get("Config") or {}
-            labels = config.get("Labels") or {}
-            if labels.get("org.opencontainers.image.revision") != app_sha:
-                raise RecoveryBlocked("candidate request container source SHA differs")
-            image_id = row.get("Image")
-            image = inspect_json(image_id)
-            expected_repo = {"gpoint-core": "ghcr.io/akhripunov/gpoint-runtime",
-                             "gpoint-miniapp": "ghcr.io/akhripunov/gpoint-miniapp"}[repo_key]
-            if (image.get("Id") != image_id or image.get("Config", {}).get("Labels", {}).get("org.opencontainers.image.revision") != app_sha
-                    or f"{expected_repo}@{digests[repo_key]}" not in (image.get("RepoDigests") or [])):
-                raise RecoveryBlocked("candidate request image digest differs")
-            candidate_targets[service] = (ids[0], port)
-
-    # Validate the complete runtime inventory before any mutation. A late
-    # identity mismatch must never strand ingress after the proxy was stopped.
+    # Enumerate every GPoint Kamal-named container so another attempt or an
+    # unexpected role cannot hide outside exact-name lookups.
     candidate_containers: list[str] = []
-    for service, roles in (("gpoint-core", ("worker", "bot", "api")),
-                           ("gpoint-agata", ("memory-worker", "api")),
-                           ("gpoint-miniapp", ("web",))):
+    candidate_targets: dict[str, tuple[str, int]] = {}
+    expected_roles = {"gpoint-core": {"worker", "bot", "api"},
+                      "gpoint-agata": {"memory-worker", "api"},
+                      "gpoint-miniapp": {"web"}}
+    expected_names = {f"{service}-{role}-{version}": (service, role)
+                      for service, roles in expected_roles.items() for role in roles}
+    all_container_ids = [line for line in command(["docker", "ps", "-aq", "--no-trunc"]).splitlines() if line]
+    seen_candidate_names: set[str] = set()
+    for cid in all_container_ids:
+        row = inspect_json(cid)
+        name = row.get("Name", "").lstrip("/")
+        if not name.startswith("gpoint-"):
+            continue
+        if name not in expected_names:
+            raise RecoveryBlocked("foreign or unknown GPoint Kamal container is present")
+        if name in seen_candidate_names:
+            raise RecoveryBlocked("candidate container identity is ambiguous")
+        seen_candidate_names.add(name)
+        service, role = expected_names[name]
         repo = {"gpoint-core": "ghcr.io/akhripunov/gpoint-runtime",
                 "gpoint-agata": "ghcr.io/akhripunov/gpoint-agata-runtime",
                 "gpoint-miniapp": "ghcr.io/akhripunov/gpoint-miniapp"}[service]
-        for role in roles:
-            name = f"{service}-{role}-{version}"
-            ids = [line for line in command(["docker", "ps", "-aq", "--no-trunc", "--filter", f"name=^/{name}$"]).splitlines() if line]
-            if len(ids) > 1:
-                raise RecoveryBlocked("candidate container identity is ambiguous")
-            if not ids:
-                continue
-            row = inspect_json(ids[0])
-            if row.get("Id") != ids[0] or row.get("Name", "").lstrip("/") != name:
-                raise RecoveryBlocked("candidate container name differs")
-            labels = (row.get("Config") or {}).get("Labels") or {}
-            if labels.get("org.opencontainers.image.revision") != app_sha:
-                raise RecoveryBlocked("candidate container source SHA differs")
-            image_id = row.get("Image")
-            image = inspect_json(image_id)
-            if (image.get("Id") != image_id or image.get("Config", {}).get("Labels", {}).get("org.opencontainers.image.revision") != app_sha
-                    or f"{repo}@{digests[service]}" not in (image.get("RepoDigests") or [])):
-                raise RecoveryBlocked("candidate container digest differs")
-            candidate_containers.append(ids[0])
+        if row.get("Id") != cid:
+            raise RecoveryBlocked("candidate container ID differs from full inventory")
+        labels = (row.get("Config") or {}).get("Labels") or {}
+        if labels.get("org.opencontainers.image.revision") != app_sha:
+            raise RecoveryBlocked("candidate container source SHA differs")
+        image_id = row.get("Image")
+        image = inspect_json(image_id)
+        if (image.get("Id") != image_id or image.get("Config", {}).get("Labels", {}).get("org.opencontainers.image.revision") != app_sha
+                or f"{repo}@{digests[service]}" not in (image.get("RepoDigests") or [])):
+            raise RecoveryBlocked("candidate container digest differs")
+        candidate_containers.append(cid)
+        if (service, role) == ("gpoint-core", "api"):
+            candidate_targets[service] = (cid, 3000)
+        elif (service, role) == ("gpoint-miniapp", "web"):
+            candidate_targets[service] = (cid, 80)
 
     for service in ("api", "worker", "bot", "agata-api", "agata-memory-worker"):
         baseline_row = legacy[service]
@@ -262,6 +338,26 @@ def recover(args: argparse.Namespace) -> None:
                     or (current.get("State") or {}).get("Running")):
                 raise RecoveryBlocked("stopped GSales service changed during recovery")
 
+    postgres = inspect_json("shared_postgres_1")
+    if (postgres.get("Id") != baseline.get("POSTGRES_CONTAINER_ID")
+            or postgres.get("Image") != baseline.get("POSTGRES_IMAGE_ID")
+            or not (postgres.get("State") or {}).get("Running")):
+        raise RecoveryBlocked("shared PostgreSQL identity or running state changed during recovery")
+    validate_postgres_database(baseline)
+    detector = legacy["gpoint-sensitive-detector"]
+    detector_live = inspect_json(detector["id"])
+    detector_config = detector_live.get("Config") or {}
+    detector_labels = detector_config.get("Labels") or {}
+    detector_state = detector_live.get("State") or {}
+    if (detector_live.get("Id") != detector["id"]
+            or detector_live.get("Image") != detector.get("imageId")
+            or detector_config.get("Image") != detector.get("image")
+            or detector_labels.get("com.docker.compose.project") != "compose"
+            or detector_labels.get("com.docker.compose.service") != "gpoint-sensitive-detector"
+            or type(detector_state.get("Running")) is not bool
+            or detector_state.get("Running") is not detector.get("running")):
+        raise RecoveryBlocked("SensitiveDetector identity or state changed during recovery")
+
     recovery_errors: list[str] = []
     route_removal_failed = False
     proxy_running = False
@@ -281,8 +377,8 @@ def recover(args: argparse.Namespace) -> None:
             if (proxy_image.get("Id") != proxy_image_id
                     or not any(item.endswith("@" + args.proxy_digest) for item in (proxy_image.get("RepoDigests") or []))):
                 raise RecoveryBlocked("Kamal Proxy immutable image digest differs from hosted build")
-            created = datetime.fromisoformat(proxy["Created"].replace("Z", "+00:00"))
-            if created.tzinfo is None or int(created.timestamp()) < int(baseline["BASELINE_CAPTURED_AT_EPOCH"]):
+            created = parse_docker_created(proxy["Created"])
+            if int(created.timestamp()) < int(baseline["BASELINE_CAPTURED_AT_EPOCH"]):
                 raise RecoveryBlocked("Kamal Proxy predates this cutover baseline")
         except (KeyError, ValueError, TypeError) as exc:
             recovery_errors.append("Kamal Proxy creation time or identity is invalid")
@@ -366,6 +462,15 @@ def recover(args: argparse.Namespace) -> None:
                 recovery_errors.append("candidate container stop failed")
     elif proxy_running:
         recovery_errors.append("candidate containers retained because Proxy ownership/routes were not proven safe")
+
+    # Recovery must never create a second set of consumers while Kamal
+    # ownership/termination remains uncertain. Errors above are evidence of
+    # uncertainty, not permission to bring the legacy application back.
+    if not proxy_safely_stopped:
+        raise RecoveryBlocked("; ".join(dict.fromkeys(recovery_errors)) or "Kamal Proxy stop is unproven")
+    for cid in candidate_containers:
+        if (inspect_json(cid).get("State") or {}).get("Running"):
+            raise RecoveryBlocked("candidate container termination is unproven")
 
     for service in ("agata-api", "api", "agata-memory-worker", "bot", "worker"):
         baseline_row = legacy[service]

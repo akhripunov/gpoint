@@ -151,6 +151,9 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertNotIn("needs.build.outputs.gsales_digest", deploy_text)
         self.assertIn("needs.build.outputs.miniapp_digest", deploy_text)
         self.assertNotRegex(script, r"docker\s+compose\s+(up|down|pull|restart)")
+        phases = "\n".join((ROOT / "scripts/kamal-first-cutover" / (name+".sh")).read_text()
+                           for name in ("requests", "consumers", "verify"))
+        script += phases
         self.assertIn("Expected stopped GSales service is missing", script)
         self.assertIn("test \"$(docker inspect --format '{{.State.Running}}' \"$id\")\" = false", script)
         self.assertIn("kamal deploy --skip-push", script)
@@ -205,13 +208,16 @@ class FirstCutoverWorkflowTests(unittest.TestCase):
         self.assertIn("Capture PostgreSQL and no-Eros cutover baseline", names)
         self.assertIn("Verify application source migrations match the live database", names)
         self.assertIn("Verify fresh PostgreSQL and media backup with isolated restore", names)
-        self.assertIn("Pause legacy GPoint services after restore gates", names)
-        self.assertIn("Stop Caddy for Kamal Proxy public bind", names)
+        self.assertIn("Run one server-owned Kamal cutover transaction", names)
+        self.assertIn("scripts/retire-gpoint-caddy.sh", (ROOT / "scripts/kamal-first-cutover/retire.sh").read_text())
 
     def test_cutover_still_verifies_gsales_stopped_and_uses_stock_kamal(self):
         workflow = self.load_cutover()
         deploy = workflow["jobs"]["deploy"]
         script = "\n".join(step.get("run", "") for step in deploy["steps"])
+        phases = "\n".join((ROOT / "scripts/kamal-first-cutover" / (name+".sh")).read_text()
+                           for name in ("requests", "consumers", "verify"))
+        script += phases
         self.assertIn("Expected stopped GSales service is missing", script)
         self.assertIn("kamal deploy --skip-push", script)
         self.assertIn("StrictHostKeyChecking=yes", script)
