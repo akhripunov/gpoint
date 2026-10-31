@@ -157,6 +157,8 @@ def test_kamal_deploy_uses_native_verified_images_and_preserves_first_cutover_gu
     assert "name: Run one server-owned Kamal cutover transaction" in kamal
     assert "bash scripts/run-kamal-cutover-owner.sh" in kamal
     deploy = phase("requests")
+    assert deploy.index('GPOINT_KAMAL_SERVICE=gpoint-miniapp') < deploy.index('GPOINT_KAMAL_SERVICE=gpoint-core')
+    assert 'root-path application first' in deploy
     assert "--roles api --config-file config/deploy.yml" in deploy
     assert "--roles api --config-file config/deploy.agata.yml" in deploy
     assert "--roles web --config-file config/deploy.miniapp.yml" in deploy

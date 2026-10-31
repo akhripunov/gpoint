@@ -42,8 +42,10 @@ docker image inspect "$image_id" --format '{{json .RepoDigests}}' | grep -Fq "ba
 docker image tag "$image_id" basecamp/kamal-proxy:v0.9.2
 test "$(docker image inspect basecamp/kamal-proxy:v0.9.2 --format '{{.Id}}')" = "$image_id"
 PIN_PROXY
-GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
-  kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.yml
+# Deploy the root-path application first so Kamal Proxy has the host's TLS
+# settings before the API is added under /api.
+GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
+  kamal deploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.miniapp.yml
 ssh -F "$HOME/.ssh/config" -T "${ssh_opts[@]}" "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$PROXY_DIGEST" <<'VERIFY_PROXY'
 set -euo pipefail
 digest="$1"
@@ -51,7 +53,7 @@ container_image="$(docker inspect kamal-proxy --format '{{.Image}}')"
 test "$(docker inspect kamal-proxy --format '{{.Config.Image}}')" = basecamp/kamal-proxy:v0.9.2
 docker image inspect "$container_image" --format '{{json .RepoDigests}}' | grep -Fq "basecamp/kamal-proxy@$digest"
 VERIFY_PROXY
+GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
+  kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.yml
 GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api \
   kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.agata.yml
-GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
-  kamal deploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.miniapp.yml
