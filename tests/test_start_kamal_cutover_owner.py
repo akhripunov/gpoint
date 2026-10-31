@@ -14,9 +14,13 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("start_kamal_cutover_owner", ROOT / "scripts/start_kamal_cutover_owner.py")
 STARTER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(STARTER)
+PACKAGE_SPEC = importlib.util.spec_from_file_location("package_kamal_cutover", ROOT / "scripts/package-kamal-cutover.py")
+PACKAGE = importlib.util.module_from_spec(PACKAGE_SPEC)
+assert PACKAGE_SPEC and PACKAGE_SPEC.loader
+PACKAGE_SPEC.loader.exec_module(PACKAGE)
 OWNER_BYTES = (ROOT / "scripts/kamal_cutover_owner.py").read_bytes()
 CREDENTIAL_BYTES = (ROOT / "scripts/kamal_cutover_credentials.py").read_bytes()
-SHA = "a" * 40
+SHA = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD^{commit}"], text=True).strip()
 RUN = "12345"
 ATTEMPT = "1"
 
@@ -41,6 +45,7 @@ def make_stage(tmp_path, *, extra=(), replace_owner=None, bootstrap=False):
         "environment.json": json.dumps(values, sort_keys=True).encode(),
         "repo/.kamal/secrets": b"private-config",
     }
+    entries.update({name: data for name, (data, _mode) in PACKAGE._git_workspace_entries(ROOT, SHA).items()})
     for phase in ("pause", "retire", "requests", "routes", "consumers", "verify", "recover-pre", "recover-post"):
         entries[f"phases/{phase}.sh"] = b"#!/bin/bash\nexit 0\n"
     entries.update(dict(extra))
