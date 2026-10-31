@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import secrets
 import selectors
@@ -26,6 +27,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 OWNER_SOURCE = ROOT / "scripts/kamal_cutover_owner.py"
+PACKAGE_SOURCE = ROOT / "scripts/package-kamal-cutover.py"
 FIXTURE = ROOT / "tests/fixtures/kamal-owner-ssh"
 DOCKERFILE = FIXTURE / "Dockerfile"
 PYTHON_IMAGE = "sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704"
@@ -33,6 +35,14 @@ DOCKER_CLI_IMAGE = "sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea
 PHASES = ("pause", "retire", "requests", "routes", "consumers", "verify")
 LEGACY = ("api", "worker", "bot", "agata-api", "agata-memory-worker")
 STAGE_ROOT = Path("/run/gpoint-kamal-owner")
+
+PACKAGE_SPEC = importlib.util.spec_from_file_location("package_kamal_cutover", PACKAGE_SOURCE)
+PACKAGE = importlib.util.module_from_spec(PACKAGE_SPEC)
+assert PACKAGE_SPEC and PACKAGE_SPEC.loader
+PACKAGE_SPEC.loader.exec_module(PACKAGE)
+REVISION = subprocess.check_output(
+    ["git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD^{commit}"], text=True
+).strip()
 
 
 class HarnessError(RuntimeError):
@@ -100,6 +110,16 @@ def write_bundle(root: Path, stage_name: str, token: str, ids: list[str],
     phase_dir, repo_dir = root / "phases", root / "repo"
     phase_dir.mkdir(parents=True)
     repo_dir.mkdir()
+    git_entries = PACKAGE._git_workspace_entries(ROOT, REVISION)
+    for relative, (contents, mode) in git_entries.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(contents)
+        path.chmod(mode)
+    for path in sorted((repo_dir / ".git").rglob("*"), reverse=True):
+        if path.is_dir():
+            path.chmod(0o700)
+    (repo_dir / ".git").chmod(0o700)
     qids = " ".join(shlex.quote(cid) for cid in ids)
     qpairs = " ".join(shlex.quote(f"{role}:{cid}") for role, cid in zip(LEGACY, ids))
     check = (
@@ -155,6 +175,8 @@ def write_bundle(root: Path, stage_name: str, token: str, ids: list[str],
     (root / "environment.json").chmod(0o600)
     file_hashes = {f"phases/{p.name}": hashlib.sha256(p.read_bytes()).hexdigest()
                    for p in sorted(phase_dir.iterdir())}
+    file_hashes.update({relative: hashlib.sha256(contents).hexdigest()
+                        for relative, (contents, _mode) in git_entries.items()})
     file_hashes["environment.json"] = hashlib.sha256(env_bytes).hexdigest()
     sha, run_id, attempt = stage_name.split("-")
     manifest = {"schema": "gpoint-kamal-owner/v1", "candidateSha": sha,
@@ -297,7 +319,7 @@ def run_case(server: str, key: Path, known: Path, port: int, number: int,
              *, stop_number: int | None = None, post_handoff: bool = False) -> None:
     token = secrets.token_hex(12)
     candidate_name = f"gpoint-test-owner-{token}-candidate"
-    stage_name = f"{secrets.token_hex(20)}-{1700000000 + number}-1"
+    stage_name = f"{REVISION}-{1700000000 + number}-1"
     app_ids: list[str] = []
     observer_process: subprocess.Popen[bytes] | None = None
     host_root: Path | None = None
@@ -311,12 +333,21 @@ def run_case(server: str, key: Path, known: Path, port: int, number: int,
                                   fail_stop=None if post_handoff else stop_number,
                                   post_handoff=post_handoff, candidate_name=candidate_name)
             stage = stage_in_container(server, host_root, stage_name)
+        validation = (
+            "import importlib.util,pathlib; "
+            "s=importlib.util.spec_from_file_location('owner','/opt/gpoint-test/kamal_cutover_owner.py'); "
+            "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+            f"m._load_bundle(pathlib.Path({stage!r}),{digest!r},0)"
+        )
+        checked = docker_exec(server, "python3", "-c", validation, check=False)
+        if checked.returncode:
+            raise HarnessError(f"disposable owner bundle validation failed: {checked.stderr.strip()}")
         owner_code = (
             "import importlib.util,pathlib,sys; "
             "s=importlib.util.spec_from_file_location('owner','/opt/gpoint-test/kamal_cutover_owner.py'); "
             "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
             f"sys.exit(m.run_owner(pathlib.Path({stage!r}),{digest!r},owner_uid=0,"
-            "lock_path=pathlib.Path('/run/gpoint-kamal-owner.lock')))"
+            "lock_path=pathlib.Path('/tmp/gpoint-kamal-owner.lock')))"
         )
         detach = "nohup setsid python3 -c " + shlex.quote(owner_code)
         detach += f" >/run/gpoint-kamal-owner/{stage_name}/owner-launch.log 2>&1 </dev/null & echo $!"

@@ -7,7 +7,10 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import tarfile
+import tempfile
+from typing import Optional
 
 REQUIRED_ENV = (
     'CANDIDATE_SHA', 'APP_SOURCE_SHA', 'IMAGE_VERSION', 'GITHUB_RUN_ID',
@@ -29,6 +32,74 @@ HELPERS = (
 )
 PHASES = ('pause', 'retire', 'requests', 'routes', 'consumers', 'verify',
           'recover-pre', 'recover-post')
+
+
+def _git_run(root: Path, *args: str, input: Optional[bytes] = None,
+             check: bool = True) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            ['git', '-C', str(root), *args], input=input, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=check,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ValueError('candidate Git workspace is unavailable or invalid') from exc
+
+
+def _git_workspace_entries(root: Path, candidate_sha: str) -> dict[str, tuple[bytes, int]]:
+    """Build a credential-free, shallow Git context with the real candidate commit and trees."""
+    git_dir = root / '.git'
+    try:
+        git_dir.lstat()
+    except OSError as exc:
+        raise ValueError('candidate Git workspace is missing .git') from exc
+    if git_dir.is_symlink() or not git_dir.is_dir():
+        raise ValueError('candidate Git workspace has unsafe .git')
+
+    top_level = Path(_git_run(root, 'rev-parse', '--show-toplevel').stdout.decode().strip()).resolve()
+    actual_head = _git_run(root, 'rev-parse', '--verify', 'HEAD^{commit}').stdout.decode().strip()
+    if top_level != root.resolve() or actual_head != candidate_sha:
+        raise ValueError('candidate Git HEAD does not match requested SHA')
+
+    with tempfile.TemporaryDirectory(prefix='gpoint-kamal-git-') as temporary:
+        minimal_git = Path(temporary) / 'gitdir'
+        subprocess.run(['git', 'init', '--quiet', '--bare', str(minimal_git)], check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        pack = _git_run(root, 'pack-objects', '--stdout', '--filter=blob:none', '--revs',
+                        input=(candidate_sha + '\n').encode())
+        indexed = subprocess.run(
+            ['git', '--git-dir', str(minimal_git), 'index-pack', '--stdin', '--promisor'],
+            input=pack.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+        )
+        pack_hash = indexed.stdout.decode().strip().split()[-1]
+        pack_index = minimal_git / 'objects' / 'pack' / f'pack-{pack_hash}.idx'
+        verified = subprocess.run(
+            ['git', '--git-dir', str(minimal_git), 'verify-pack', '-v', str(pack_index)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+        )
+        object_rows = [line.split() for line in verified.stdout.decode().splitlines()
+                       if len(line.split()) >= 2 and line.split()[1] in {'commit', 'tree', 'blob', 'tag'}]
+        if (not any(row[0] == candidate_sha and row[1] == 'commit' for row in object_rows)
+                or any(row[1] not in {'commit', 'tree'} for row in object_rows)):
+            raise ValueError('candidate Git pack is missing its commit or contains non-tree objects')
+
+        entries: dict[str, tuple[bytes, int]] = {
+            'repo/.git/HEAD': ((candidate_sha + '\n').encode(), 0o600),
+            'repo/.git/refs/heads/candidate': ((candidate_sha + '\n').encode(), 0o600),
+            'repo/.git/config': (
+                b'[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n', 0o600,
+            ),
+        }
+        parents = _git_run(root, 'rev-list', '--parents', '-n', '1', candidate_sha).stdout.decode().split()
+        if len(parents) > 1:
+            entries['repo/.git/shallow'] = ((candidate_sha + '\n').encode(), 0o600)
+        pack_dir = minimal_git / 'objects' / 'pack'
+        pack_stem = f'pack-{pack_hash}'
+        for suffix in ('.pack', '.idx', '.promisor'):
+            path = pack_dir / f'{pack_stem}{suffix}'
+            if not path.is_file() or path.is_symlink():
+                raise ValueError('candidate Git pack is incomplete')
+            entries[f'repo/.git/objects/pack/{pack_stem}{suffix}'] = (path.read_bytes(), 0o600)
+        return entries
 
 
 def package(root: Path, archive: Path, source_env: dict[str, str]) -> str:
@@ -54,6 +125,7 @@ def package(root: Path, archive: Path, source_env: dict[str, str]) -> str:
         'PYTHONDONTWRITEBYTECODE': '1',
     })
     entries: dict[str, tuple[bytes, int]] = {}
+    git_sources: list[Path] = []
 
     def source(path: Path, target: str, mode: int = 0o600):
         current = path
@@ -65,6 +137,7 @@ def package(root: Path, archive: Path, source_env: dict[str, str]) -> str:
             current = current.parent
         if not path.is_file():
             raise ValueError('required release helper missing')
+        git_sources.append(path)
         entries[target] = (path.read_bytes(), mode)
 
     for helper in HELPERS:
@@ -78,6 +151,14 @@ def package(root: Path, archive: Path, source_env: dict[str, str]) -> str:
     source(root/'.kamal/secrets', 'repo/.kamal/secrets')
     for path in sorted((root/'.kamal/hooks').iterdir()):
         source(path, 'repo/.kamal/hooks/'+path.name, 0o700)
+    for path in git_sources:
+        relative = path.relative_to(root).as_posix()
+        tracked = _git_run(root, 'ls-files', '--error-unmatch', '--', relative)
+        if tracked.stdout.decode().strip() != relative:
+            raise ValueError('release helper is not tracked by the candidate commit')
+        if _git_run(root, 'diff', '--quiet', 'HEAD', '--', relative, check=False).returncode != 0:
+            raise ValueError('release helper content differs from the candidate commit')
+    entries.update(_git_workspace_entries(root, sha))
     entries['environment.json'] = (json.dumps(values, sort_keys=True).encode(), 0o600)
     manifest = {'schema': 'gpoint-kamal-owner/v1', 'candidateSha': sha,
                 'runId': run, 'attempt': attempt, 'environmentFile': 'environment.json',

@@ -69,6 +69,31 @@ def _safe_path(root: Path, relative: str, owner_uid: int, *, private: bool = Fal
     return current
 
 
+def _verify_git_workspace(stage: Path, repo: Path, candidate_sha: str, owner_uid: int) -> None:
+    git_dir = repo / ".git"
+    try:
+        git_info = git_dir.lstat()
+    except OSError as exc:
+        raise OwnerError("Git workspace .git directory missing") from exc
+    if (stat.S_ISLNK(git_info.st_mode) or not stat.S_ISDIR(git_info.st_mode)
+            or git_info.st_uid != owner_uid or stat.S_IMODE(git_info.st_mode) & 0o077):
+        raise OwnerError("Git workspace .git directory unsafe")
+    head_path = _safe_path(stage, "repo/.git/HEAD", owner_uid, private=True)
+    if head_path.read_text(encoding="utf-8") != candidate_sha + "\n":
+        raise OwnerError("Git workspace HEAD does not match candidate")
+    env = {"PATH": CONTROLLED_PATH, "GIT_CONFIG_NOSYSTEM": "1",
+           "GIT_CONFIG_GLOBAL": os.devnull, "GIT_OPTIONAL_LOCKS": "0"}
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=repo, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True, timeout=5,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise OwnerError("Git workspace candidate commit is not verifiable") from exc
+    if result.stdout.strip() != candidate_sha:
+        raise OwnerError("Git workspace resolved HEAD does not match candidate")
+
+
 def _validate_parent_chain(stage: Path, owner_uid: int) -> None:
     # Production permits the shared /run mount (0755), but checks every
     # attempt-owner ancestor. Temporary tests use their private fixture root as
@@ -202,6 +227,7 @@ def _load_bundle(stage: Path, manifest_sha: str, owner_uid: int) -> tuple[dict[s
     if (stat.S_ISLNK(repo_info.st_mode) or not stat.S_ISDIR(repo_info.st_mode)
             or repo_info.st_uid != owner_uid or stat.S_IMODE(repo_info.st_mode) & 0o022):
         raise OwnerError("repository directory identity invalid")
+    _verify_git_workspace(stage, repo, sha, owner_uid)
     return manifest, checked, env
 
 

@@ -3,11 +3,12 @@ FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e
 
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 
-# This opt-in local fixture installs only the SSH daemon and setsid. Package
+# This opt-in local fixture installs the SSH daemon, setsid, and Git for
+# validating the candidate workspace. Package
 # lists and OpenSSH are fetched from Debian repositories when the test image is
 # built; the test script prints this fact before building.
 RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server util-linux \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git openssh-server util-linux \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /run/sshd /root/.ssh \
     && chmod 0700 /root/.ssh \

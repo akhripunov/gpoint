@@ -3,8 +3,10 @@ import importlib.util
 import json
 import os
 import subprocess
+import shutil
 import sys
 import threading
+import tempfile
 import time
 from pathlib import Path
 
@@ -15,16 +17,21 @@ sys.path.insert(0, str(ROOT / "scripts"))
 SPEC = importlib.util.spec_from_file_location("kamal_cutover_owner", ROOT / "scripts/kamal_cutover_owner.py")
 OWNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(OWNER)
+PACKAGE_SPEC = importlib.util.spec_from_file_location("package_kamal_cutover", ROOT / "scripts/package-kamal-cutover.py")
+PACKAGE = importlib.util.module_from_spec(PACKAGE_SPEC)
+PACKAGE_SPEC.loader.exec_module(PACKAGE)
 
-SHA = "a" * 40
+SHA = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD^{commit}"], text=True).strip()
+OTHER_SHA = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD^{commit}^"], text=True).strip()
 RUN = "12345"
 ATTEMPT = "1"
 PHASES = ["pause", "retire", "requests", "routes", "consumers", "verify"]
 
 
-def bundle(tmp_path, *, fail=None, slow=None, attempt=ATTEMPT, sha=SHA, run_id=RUN):
+def bundle(tmp_path, *, fail=None, slow=None, attempt=ATTEMPT, sha=SHA, git_sha=None, run_id=RUN):
     stage = tmp_path / "gpoint-kamal-owner" / f"{sha}-{run_id}-{attempt}"
-    (stage / "repo").mkdir(parents=True)
+    repo = stage / "repo"
+    repo.mkdir(parents=True)
     (stage / "phases").mkdir()
     log = stage / "events.log"
     files = {}
@@ -44,6 +51,25 @@ def bundle(tmp_path, *, fail=None, slow=None, attempt=ATTEMPT, sha=SHA, run_id=R
         script.write_text(f"#!/bin/bash\nset -eu\nprintf '%s\\n' '{name}' >> '{log}'\n")
         script.chmod(0o700)
         files[f"phases/{name}.sh"] = hashlib.sha256(script.read_bytes()).hexdigest()
+    source_sha = git_sha or sha
+    if source_sha == SHA:
+        git_entries = PACKAGE._git_workspace_entries(ROOT, source_sha)
+    else:
+        with tempfile.TemporaryDirectory(prefix="kamal-owner-git-fixture-") as temporary:
+            checkout = Path(temporary) / "source"
+            subprocess.run(["git", "clone", "--shared", "--quiet", "--no-checkout", str(ROOT), str(checkout)], check=True)
+            subprocess.run(["git", "checkout", "--quiet", "--detach", source_sha], cwd=checkout, check=True)
+            git_entries = PACKAGE._git_workspace_entries(checkout, source_sha)
+    for name, (data, mode) in git_entries.items():
+        path = stage / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        path.chmod(mode)
+        files[name] = hashlib.sha256(data).hexdigest()
+    for directory in sorted((repo / ".git").rglob("*"), reverse=True):
+        if directory.is_dir():
+            directory.chmod(0o700)
+    (repo / ".git").chmod(0o700)
     env_file = stage / "environment.json"
     env_file.write_text(json.dumps({"OWNER_TEST_VALUE": "private"}))
     env_file.chmod(0o600)
@@ -138,6 +164,19 @@ def test_terminal_attempt_cannot_be_replayed(tmp_path):
     assert len(log.read_text().splitlines()) == count
 
 
+def test_missing_git_workspace_is_rejected_before_pause_phase(tmp_path):
+    stage, digest, log = bundle(tmp_path)
+    shutil.rmtree(stage / "repo" / ".git")
+    assert run(stage, digest, tmp_path) == 2
+    assert not log.exists(), "Compose pause must not run without a verified Git workspace"
+
+
+def test_mismatched_git_head_is_rejected_before_pause_phase(tmp_path):
+    stage, digest, log = bundle(tmp_path, git_sha=OTHER_SHA)
+    assert run(stage, digest, tmp_path) == 2
+    assert not log.exists(), "Compose pause must not run when Git HEAD differs from candidate"
+
+
 def test_duplicate_owner_is_rejected_while_first_child_runs(tmp_path):
     stage, digest, log = bundle(tmp_path, slow="pause")
     lock = tmp_path / "owner.lock"
@@ -207,7 +246,7 @@ def test_owner_crash_leaves_live_child_and_blocks_sibling_attempt(tmp_path):
     assert json.loads((stage / "owner-status.json").read_text())["state"] == "RUNNING"
 
 
-@pytest.mark.parametrize("sha,run_id", [(SHA, "12346"), ("b" * 40, RUN)])
+@pytest.mark.parametrize("sha,run_id", [(SHA, "12346"), (OTHER_SHA, RUN)])
 def test_nonterminal_attempt_blocks_new_run_or_candidate(tmp_path, sha, run_id):
     prior, _, _ = bundle(tmp_path)
     (prior / "owner-status.json").write_text(json.dumps({
@@ -224,5 +263,5 @@ def test_nonterminal_attempt_blocks_new_run_or_candidate(tmp_path, sha, run_id):
 def test_terminal_attempt_is_safe_history_for_new_candidate(tmp_path):
     prior, prior_digest, _ = bundle(tmp_path)
     assert run(prior, prior_digest, tmp_path) == 0
-    sibling, sibling_digest, _ = bundle(tmp_path, sha="b" * 40)
+    sibling, sibling_digest, _ = bundle(tmp_path, sha=OTHER_SHA)
     assert run(sibling, sibling_digest, tmp_path) == 0

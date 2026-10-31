@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 # One-time server-owned phase; never invoke outside kamal_cutover_owner.
 set -euo pipefail
+verify_git_workspace() {
+  [[ -d "$GITHUB_WORKSPACE/.git" ]]
+  local actual_head
+  actual_head="$(git -C "$GITHUB_WORKSPACE" rev-parse --verify 'HEAD^{commit}')"
+  [[ "$actual_head" == "$GPOINT_COMMIT_SHA" ]] || {
+    echo 'Kamal Git workspace HEAD does not match candidate' >&2
+    return 1
+  }
+}
+verify_git_workspace
 kamal() {
   docker run --rm --network host --label gpoint.cutover.owner="$IMAGE_VERSION" \
     --volume "$GITHUB_WORKSPACE:/workdir" \
