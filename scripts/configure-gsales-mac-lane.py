@@ -27,7 +27,7 @@ RELEASE_LOCK = HOME / '.config/gpoint/release-production.lock'
 STATUS = SUPPORT / 'status/worker-status.json'
 INFERENCE = SUPPORT / 'state/inference-process.json'
 LABEL = 'one.gpoint.agata-codex-worker'
-URL = 'https://gpoint.amiora.one/gsales/agata-worker'
+URL = 'https://gpoint.one/gsales/agata-worker'
 ASSETS = ('gpoint_mac_worker.py', 'agata_worker_pool.py', 'lab_queue.py', 'lab_fixture_manifest.json', 'requirements.txt', 'run_codex_worker.sh')
 TEST_TENANTS = {'c4d67889-877e-4d1b-a8d8-597c479d638f', '7508f36f-774a-48aa-8c6b-42f6f160415d'}
 

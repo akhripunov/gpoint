@@ -348,8 +348,8 @@ INSERT INTO agata.alembic_version VALUES ('agata0012');
         proxy_cert = tmp / "proxy.crt"
         proxy_key = tmp / "proxy.key"
         run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", str(proxy_key),
-             "-out", str(proxy_cert), "-days", "1", "-subj", "/CN=gpoint.amiora.one",
-             "-addext", "subjectAltName=DNS:gpoint.amiora.one"])
+             "-out", str(proxy_cert), "-days", "1", "-subj", "/CN=gpoint.one",
+             "-addext", "subjectAltName=DNS:gpoint.one"])
         # This is a one-day, self-signed integration fixture key with no
         # production value; the pinned proxy runs as its unprivileged UID.
         proxy_key.chmod(0o644)
@@ -357,7 +357,7 @@ INSERT INTO agata.alembic_version VALUES ('agata0012');
         caddy_text = """{
   auto_https disable_redirects
 }
-https://gpoint.amiora.one {
+https://gpoint.one {
   tls internal
   handle_path /api/* {
     reverse_proxy legacy-api:80
@@ -381,8 +381,8 @@ https://gpoint.amiora.one {
         docker("start", caddy_container)
         client = start(f"test-kamal-client-{suffix}", PYTHON_IMAGE, test_net, command=["sleep", "infinity"])
         caddy_ip = docker("inspect", "--format", "{{(index .NetworkSettings.Networks \"" + test_net + "\").IPAddress}}", caddy_container)
-        wait_http(client, "https://gpoint.amiora.one/api/health/live", "legacy:/health/live", host="gpoint.amiora.one", resolve_ip=caddy_ip)
-        wait_http(client, "https://gpoint.amiora.one/", "legacy:/", host="gpoint.amiora.one", resolve_ip=caddy_ip)
+        wait_http(client, "https://gpoint.one/api/health/live", "legacy:/health/live", host="gpoint.one", resolve_ip=caddy_ip)
+        wait_http(client, "https://gpoint.one/", "legacy:/", host="gpoint.one", resolve_ip=caddy_ip)
 
         # Candidate app fixtures use real HTTP servers, Kamal Proxy and route
         # control; immutable registry metadata is read-back fixture data only.
@@ -431,8 +431,8 @@ https://gpoint.amiora.one {
             time.sleep(1)
         else:
             raise RuntimeError("Kamal Proxy did not become ready")
-        for service, host, target, prefix in (("gpoint-core", "gpoint.amiora.one", f"{core[:12]}:3000", "/api"),
-                                               ("gpoint-miniapp", "gpoint.amiora.one", f"{mini[:12]}:80", "")):
+        for service, host, target, prefix in (("gpoint-core", "gpoint.one", f"{core[:12]}:3000", "/api"),
+                                               ("gpoint-miniapp", "gpoint.one", f"{mini[:12]}:80", "")):
             args = ["docker", "exec", proxy, "kamal-proxy", "deploy", service, "--host", host,
                     "--target", target, "--health-check-path=/"]
             if prefix:
@@ -444,11 +444,11 @@ https://gpoint.amiora.one {
                          "--tls-private-key-path=/tmp/gpoint-proxy.key"]
             run(args)
         proxy_ip = docker("inspect", "--format", "{{(index .NetworkSettings.Networks \"" + test_net + "\").IPAddress}}", proxy)
-        wait_http(client, "https://gpoint.amiora.one/api/health/live", "candidate-core:/health/live",
-                  host="gpoint.amiora.one", resolve_ip=proxy_ip)
-        wait_http(client, "https://gpoint.amiora.one/", "candidate-mini:/", host="gpoint.amiora.one", resolve_ip=proxy_ip)
-        wait_http(client, "https://gpoint.amiora.one/media/test-object", "candidate-mini:/media/test-object",
-                  host="gpoint.amiora.one", resolve_ip=proxy_ip)
+        wait_http(client, "https://gpoint.one/api/health/live", "candidate-core:/health/live",
+                  host="gpoint.one", resolve_ip=proxy_ip)
+        wait_http(client, "https://gpoint.one/", "candidate-mini:/", host="gpoint.one", resolve_ip=proxy_ip)
+        wait_http(client, "https://gpoint.one/media/test-object", "candidate-mini:/media/test-object",
+                  host="gpoint.one", resolve_ip=proxy_ip)
 
         # Construct the exact on-disk format consumed by production recovery.
         inventory_path = release_root / SHA / f"kamal-vps-inventory-{RUN_ID}-{ATTEMPT}.json"
@@ -517,10 +517,10 @@ https://gpoint.amiora.one {
                 return "valid"
             if argv[0] == "curl":
                 # Match the production hostname inside this private Docker network.
-                path = argv[-1].split("gpoint.amiora.one", 1)[-1] or "/"
-                url = "https://gpoint.amiora.one" + path
+                path = argv[-1].split("gpoint.one", 1)[-1] or "/"
+                url = "https://gpoint.one" + path
                 return run(["docker", "exec", client, "python",
-                            *python_probe_args(f"https://gpoint.amiora.one{path}", "", "gpoint.amiora.one", caddy_ip)])
+                            *python_probe_args(f"https://gpoint.one{path}", "", "gpoint.one", caddy_ip)])
             return original_command(argv, **kw)
         RECOVER.command = command_bridge
         def inspect_fixture(identifier: str) -> dict:
@@ -552,8 +552,8 @@ https://gpoint.amiora.one {
         finally:
             RECOVER.command, RECOVER.inspect_json, RECOVER.subprocess.run = original_command, original_inspect, original_run
 
-        wait_http(client, "https://gpoint.amiora.one/api/health/live", "legacy:/health/live", host="gpoint.amiora.one", resolve_ip=caddy_ip)
-        wait_http(client, "https://gpoint.amiora.one/", "legacy:/", host="gpoint.amiora.one", resolve_ip=caddy_ip)
+        wait_http(client, "https://gpoint.one/api/health/live", "legacy:/health/live", host="gpoint.one", resolve_ip=caddy_ip)
+        wait_http(client, "https://gpoint.one/", "legacy:/", host="gpoint.one", resolve_ip=caddy_ip)
         if docker("inspect", "--format", "{{.State.Running}}", proxy) != "false":
             raise RuntimeError("recovery did not stop the current Kamal Proxy")
         for row in baseline_rows:

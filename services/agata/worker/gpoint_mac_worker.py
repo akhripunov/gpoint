@@ -135,7 +135,7 @@ _WORKER_INHERITED_LOCK_FDS: tuple[int, ...] = ()
 _ACTIVE_INFERENCE: subprocess.Popen | None = None
 TARGET_NAMES = ("GPOINT", "GSALES")
 LAB_TARGET = "LAB"
-LEGACY_GPOINT_GATEWAY_URL = "https://gpoint.amiora.one/api/agata-worker"
+LEGACY_GPOINT_GATEWAY_URL = "https://gpoint.one/api/agata-worker"
 STARTUP_LANES = ("GPOINT", "GSALES", "LAB")
 SAFE_STARTUP_ERROR_CODES = {
     "worker_config_permissions_invalid", "worker_gateway_or_auth_unconfigured",
@@ -1381,7 +1381,7 @@ def run_watch(
 
 def unauthenticated_health_probe() -> None:
     """Probe TLS/HTTP reachability without worker credentials or queue side effects."""
-    base = os.environ.get("GPOINT_AGATA_WORKER_URL", "https://gpoint.amiora.one/api/agata-worker").rstrip("/")
+    base = os.environ.get("GPOINT_AGATA_WORKER_URL", "https://gpoint.one/api/agata-worker").rstrip("/")
     if not base.startswith("https://"):
         raise FatalConfigurationError("worker_gateway_url_invalid")
 

@@ -993,10 +993,10 @@ async function runStaticApply(candidate, bundle, currentAttempt = null) {
       images: checked.parent.images, sourceRoot: ROOT, upload,
       runRemote: runRemoteCommand,
       healthCheck: expectedSha => {
-        const page = execFileSync('curl', ['-fsS', 'https://gpoint.amiora.one/'], {encoding: 'utf8'});
+        const page = execFileSync('curl', ['-fsS', 'https://gpoint.one/'], {encoding: 'utf8'});
         if (!page.includes(`gpoint-build-sha" content="${expectedSha}`))
           throw new Error('external Mini App SHA does not match the static transaction');
-        execFileSync('curl', ['-fsS', 'https://gpoint.amiora.one/api/health/live'], {stdio: 'ignore'});
+        execFileSync('curl', ['-fsS', 'https://gpoint.one/api/health/live'], {stdio: 'ignore'});
       },
       nativeProof: images => {
         const live = v4NativeProofOnVPS(images, runRemoteCommand);
@@ -1213,9 +1213,9 @@ async function runApply(candidate) {
     }
     if (adapter.agataIdentity.provider !== baseline.provider) die('post-switch AGATA provider does not match validated baseline');
     if (baseline.provider === 'mac_worker') assertProviderCompatibility(baseline.facts);
-    const root = measured(stageTimings, 'API_HEALTH', () => execFileSync('curl', ['-fsS', 'https://gpoint.amiora.one/'], { encoding: 'utf8' }));
+    const root = measured(stageTimings, 'API_HEALTH', () => execFileSync('curl', ['-fsS', 'https://gpoint.one/'], { encoding: 'utf8' }));
     if (!root.includes(`gpoint-build-sha" content="${candidate}`)) die('external Mini App build SHA mismatch after apply');
-    measured(stageTimings, 'WORKER_HEALTH', () => execFileSync('curl', ['-fsS', 'https://gpoint.amiora.one/api/health/live'], { stdio: 'ignore' }));
+    measured(stageTimings, 'WORKER_HEALTH', () => execFileSync('curl', ['-fsS', 'https://gpoint.one/api/health/live'], { stdio: 'ignore' }));
     const afterFacts = readLiveFacts();
     const deployedDbHead = afterFacts.LIVE_PRISMA_HEAD;
     if (!deployedDbHead || deployedDbHead === 'NONE') die('post-release Prisma head is missing');

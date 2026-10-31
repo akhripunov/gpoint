@@ -13,7 +13,7 @@ import gpoint_mac_worker as worker
 from agata_worker_pool import PoolConfig, PoolPaths, PoolSupervisor
 
 ENV = {
-    "GPOINT_AGATA_WORKER_URL": "https://gpoint.amiora.one/api/agata-worker",
+    "GPOINT_AGATA_WORKER_URL": "https://gpoint.one/api/agata-worker",
     "GPOINT_AGATA_WORKER_TOKEN": "point-private",
     "GPOINT_AGATA_TENANT_ID": "81a4ba28-6de5-4b03-8332-0661ba4d46f4",
     "GSALES_AGATA_WORKER_URL": "https://sales.example/worker",

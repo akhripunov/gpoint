@@ -1,4 +1,4 @@
-gpoint.amiora.one {
+gpoint.one {
   encode gzip
   header {
     Strict-Transport-Security "max-age=31536000; includeSubDomains"

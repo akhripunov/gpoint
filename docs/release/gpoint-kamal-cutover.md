@@ -81,7 +81,7 @@ path available until the Kamal production Verify has passed.
       isolated restore. Stop if an old application cannot read data after the
       candidate migration or if restore evidence is incomplete.
 - [ ] Confirm Kamal Proxy 0.9.2 can own the public HTTP/HTTPS listeners on
-      ports 80 and 443 with TLS for `gpoint.amiora.one`. Verify `/api/*` and
+      ports 80 and 443 with TLS for `gpoint.one`. Verify `/api/*` and
       `/media/*` route to Core, while `/` and Mini App paths route to Mini App.
       Record the current Caddyfile and its checksum for recovery; Caddy must be
       stopped before Kamal Proxy binds public ports and remain inactive after

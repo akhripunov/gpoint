@@ -57,7 +57,7 @@ class LaneControllerTests(unittest.TestCase):
         output = self.mod.render_config(self.mod.CONFIG.read_text(), self.payload)
         self.assertIn('GPOINT_AGATA_WORKER_TOKEN=point-secret\n', output)
         self.assertIn('AGATA_LAB_WORKER_ENABLED=true\n', output)
-        self.assertIn('GSALES_AGATA_WORKER_URL=https://gpoint.amiora.one/gsales/agata-worker\n', output)
+        self.assertIn('GSALES_AGATA_WORKER_URL=https://gpoint.one/gsales/agata-worker\n', output)
         self.assertIn('GSALES_AGATA_TENANT_ID=' + TENANT + '\n', output)
         self.assertEqual(output.count('GSALES_AGATA_WORKER_TOKEN='), 1)
 

@@ -25,14 +25,21 @@ def server_step(workflow):
 def all_phases():
     return '\n'.join(phase(name) for name in ('pause','retire','requests','routes','consumers','verify'))
 
+def test_public_routes_use_the_owner_confirmed_gpoint_domain():
+    assert "gpoint.one {" in (ROOT / "infra/production/Caddyfile").read_text()
+    assert "https://gpoint.one${modelProfilePath(handle)}" in (ROOT / "apps/miniapp/src/model-routing.js").read_text()
+    assert "gpoint.amiora.one" not in (ROOT / "config/deploy.yml").read_text()
+    assert "gpoint.amiora.one" not in (ROOT / "config/deploy.miniapp.yml").read_text()
+
+
 def test_shared_proxy_hosts_are_not_redeclared_by_kamal_roles():
     core = yaml.safe_load((ROOT / "config/deploy.yml").read_text())
     miniapp = yaml.safe_load((ROOT / "config/deploy.miniapp.yml").read_text())
 
-    assert core["proxy"]["hosts"] == ["gpoint.amiora.one"]
+    assert core["proxy"]["hosts"] == ["gpoint.one"]
     assert "host" not in core["servers"]["api"]["proxy"]
     assert "hosts" not in core["servers"]["api"]["proxy"]
-    assert miniapp["proxy"]["hosts"] == ["gpoint.amiora.one"]
+    assert miniapp["proxy"]["hosts"] == ["gpoint.one"]
     assert "host" not in miniapp["servers"]["web"]["proxy"]
     assert "hosts" not in miniapp["servers"]["web"]["proxy"]
 
@@ -50,7 +57,7 @@ def test_kamal_core_config_uses_public_tls_proxy_and_only_core_roles():
     assert "host" not in api["proxy"]
     assert api["proxy"]["path_prefixes"] == ["/api"]
     assert api["options"]["volume"] == "/opt/gpoint/media:/data/media"
-    assert config["proxy"]["hosts"] == ["gpoint.amiora.one"]
+    assert config["proxy"]["hosts"] == ["gpoint.one"]
     assert config["proxy"]["ssl"] is True
     assert config["proxy"]["ssl_redirect"] is True
     assert set(config["proxy"]["run"]) == {"version"}
@@ -76,7 +83,7 @@ def test_kamal_agata_and_miniapp_are_separate_services():
     assert miniapp["service"] == "gpoint-miniapp"
     assert miniapp["image"] == "akhripunov/gpoint-miniapp"
     core = yaml.safe_load((ROOT / "config/deploy.yml").read_text())
-    assert miniapp["proxy"]["hosts"] == ["gpoint.amiora.one"]
+    assert miniapp["proxy"]["hosts"] == ["gpoint.one"]
     assert miniapp["proxy"]["ssl"] is True
     assert miniapp["proxy"]["ssl_redirect"] is True
     assert miniapp["proxy"]["run"] == core["proxy"]["run"]
@@ -189,7 +196,7 @@ def test_kamal_proxy_owns_public_tls_and_routes_api_media_and_miniapp():
     core = yaml.safe_load((ROOT / "config/deploy.yml").read_text())
     miniapp = yaml.safe_load((ROOT / "config/deploy.miniapp.yml").read_text())
     for config in (core, miniapp):
-        assert config["proxy"]["hosts"] == ["gpoint.amiora.one"]
+        assert config["proxy"]["hosts"] == ["gpoint.one"]
         assert config["proxy"]["ssl"] is True
         assert config["proxy"]["ssl_redirect"] is True
         assert "http_port" not in config["proxy"]["run"]
@@ -318,7 +325,7 @@ def test_first_cutover_stops_caddy_before_binding_public_kamal_proxy():
 def test_retire_caddy_script_checksums_recovery_copy_before_stopping_service(tmp_path, prepare_first):
     candidate_sha = "a" * 40
     config = tmp_path / "Caddyfile"
-    config.write_text("gpoint.amiora.one { respond /health 200 }\n")
+    config.write_text("gpoint.one { respond /health 200 }\n")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     calls = tmp_path / "calls"

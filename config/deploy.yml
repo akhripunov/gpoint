@@ -49,7 +49,7 @@ servers:
 
 proxy:
   hosts:
-    - gpoint.amiora.one
+    - gpoint.one
   ssl: true
   ssl_redirect: true
   run:

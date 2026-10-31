@@ -51,7 +51,7 @@ class WorkerTransitionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             config = Path(temp) / "worker.env"
             config.write_text(
-                "GPOINT_AGATA_WORKER_URL=https://gpoint.amiora.one/api/agata-worker\n"
+                "GPOINT_AGATA_WORKER_URL=https://gpoint.one/api/agata-worker\n"
                 "GPOINT_AGATA_WORKER_TOKEN=withheld\n"
             )
             config.chmod(0o600)
@@ -73,7 +73,7 @@ class WorkerTransitionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             config = Path(temp) / "worker.env"
             config.write_text(
-                "GPOINT_AGATA_WORKER_URL=https://gpoint.amiora.one/api/agata-worker\n"
+                "GPOINT_AGATA_WORKER_URL=https://gpoint.one/api/agata-worker\n"
                 "GPOINT_AGATA_WORKER_TOKEN=withheld\n"
                 "GPOINT_AGATA_TENANT_ID=7508f36f-774a-48aa-8c6b-42f6f160415d\n"
             )

@@ -500,14 +500,14 @@ jobs:
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
         run: |
           set -euo pipefail
-          curl --retry 12 --retry-connrefused --retry-delay 5 --fail --silent --show-error https://gpoint.amiora.one/api/health/live | grep -Fq '"status":"ok"'
+          curl --retry 12 --retry-connrefused --retry-delay 5 --fail --silent --show-error https://gpoint.one/api/health/live | grep -Fq '"status":"ok"'
           for path in / /creators; do
-            curl --retry 6 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.amiora.one$path" | grep -Fq '<div id="root">'
+            curl --retry 6 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.one$path" | grep -Fq '<div id="root">'
           done
           media_body="$RUNNER_TEMP/gpoint-media-route-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
           media_status="$(curl --retry 6 --retry-connrefused --retry-delay 2 --silent --show-error \
             --output "$media_body" --write-out '%{http_code}' \
-            https://gpoint.amiora.one/media/assets/kamal-route-verification-missing)"
+            https://gpoint.one/media/assets/kamal-route-verification-missing)"
           test "$media_status" = 404
           grep -Fq '"message":"media not found"' "$media_body"
           writer_remote="/run/gpoint-ordinary-manifest-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.py"

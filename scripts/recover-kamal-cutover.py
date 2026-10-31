@@ -504,10 +504,10 @@ def recover(args: argparse.Namespace) -> None:
         recovery_errors.append("Caddy validation or start failed")
     ingress_ready = caddy_ready
     if caddy_ready:
-        for path in ("https://gpoint.amiora.one/api/health/live", "https://gpoint.amiora.one/"):
+        for path in ("https://gpoint.one/api/health/live", "https://gpoint.one/"):
             try:
                 command(["curl", "--fail", "--silent", "--show-error", "--connect-timeout", "5", "--resolve",
-                         "gpoint.amiora.one:443:127.0.0.1", path])
+                         "gpoint.one:443:127.0.0.1", path])
             except (RecoveryBlocked, OSError, subprocess.SubprocessError):
                 ingress_ready = False
                 recovery_errors.append("restored Caddy ingress probe failed")

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # One-time server-owned phase; never invoke outside kamal_cutover_owner.
 set -euo pipefail
-curl --retry 12 --retry-connrefused --retry-delay 5 --fail --silent --show-error https://gpoint.amiora.one/api/health/live | grep -Fq '"status":"ok"'
+curl --retry 12 --retry-connrefused --retry-delay 5 --fail --silent --show-error https://gpoint.one/api/health/live | grep -Fq '"status":"ok"'
 for path in / /creators; do
-  curl --retry 6 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.amiora.one$path" | grep -Fq '<div id="root">'
+  curl --retry 6 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.one$path" | grep -Fq '<div id="root">'
 done
 remote_manifest_writer="/run/gpoint-kamal-manifest-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.py"
 remote_manifest_writer_sha="$(sha256sum scripts/write-kamal-production-manifest.py | awk '{print $1}')"

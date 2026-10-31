@@ -5,7 +5,7 @@ export function modelProfilePath(handle) {
 }
 
 export function canonicalModelProfileUrl(handle) {
-  return `https://gpoint.amiora.one${modelProfilePath(handle)}`;
+  return `https://gpoint.one${modelProfilePath(handle)}`;
 }
 
 export function modelHandleFromStartParam(value) {

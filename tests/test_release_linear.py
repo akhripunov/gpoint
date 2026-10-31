@@ -611,7 +611,7 @@ class WorkerCompatibilityTests(unittest.TestCase):
         self.sales = '22222222-2222-4222-8222-222222222222'
         self.values = {'GPOINT_AGATA_WORKER_TOKEN':'point-test','GSALES_AGATA_WORKER_TOKEN':'sales-test',
           'GPOINT_AGATA_TENANT_ID':self.point,'GSALES_AGATA_TENANT_ID':self.sales,
-          'GSALES_AGATA_WORKER_URL':'https://gpoint.amiora.one/gsales/agata-worker'}
+          'GSALES_AGATA_WORKER_URL':'https://gpoint.one/gsales/agata-worker'}
 
     def test_launch_overrides_cannot_bypass_static_contract(self):
         canonical={'HOME':str(self.contract.lane.HOME),'GPOINT_AGATA_WORKER_CONFIG':str(self.contract.lane.CONFIG)}
@@ -684,8 +684,8 @@ class WorkerCompatibilityTests(unittest.TestCase):
         expected={'GPOINT_AGATA_WORKER_TOKEN':'point-test','GSALES_WORKER_TOKEN':'sales-test'}
         evidence=self.contract.contract_evidence(self.values,self.point,self.sales,expected)
         self.assertEqual(evidence['protocols'],{
-            'GPOINT':'https://gpoint.amiora.one/api/agata-worker',
-            'GSALES':'https://gpoint.amiora.one/gsales/agata-worker'})
+            'GPOINT':'https://gpoint.one/api/agata-worker',
+            'GSALES':'https://gpoint.one/gsales/agata-worker'})
         self.assertEqual(evidence['tenants'],{'GPOINT':self.point,'GSALES':self.sales})
         self.assertEqual(evidence['lanes'],{'GPOINT':'CONFIGURED','GSALES':'CONFIGURED'})
         self.assertEqual(evidence['credentialParity'],{'GPOINT':'MATCH','GSALES':'MATCH','distinct':'YES'})

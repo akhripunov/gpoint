@@ -48,7 +48,7 @@ TARGETS = {"worker": WORKER, "helper": HELPER, "fixture_manifest": FIXTURE_MANIF
 STATE_ROOT = SUPPORT / "v3-transition-recovery"
 TRANSITION_LOCK = HOME / ".config/gpoint/unified-worker-transition.lock"
 UTC = timezone.utc
-LEGACY_GPOINT_GATEWAY_URL = "https://gpoint.amiora.one/api/agata-worker"
+LEGACY_GPOINT_GATEWAY_URL = "https://gpoint.one/api/agata-worker"
 
 
 def digest(path: Path) -> str:

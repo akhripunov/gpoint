@@ -38,7 +38,7 @@ def parse_routes(output: str) -> list[dict[str, str]]:
 
 def validate_gpoint_routes(
     routes: list[dict[str, str]], candidate_targets: dict[str, tuple[str, int]],
-    host: str = "gpoint.amiora.one",
+    host: str = "gpoint.one",
 ) -> list[str]:
     """Authorize removal only for exact GPoint routes targeting this attempt."""
     expected = {

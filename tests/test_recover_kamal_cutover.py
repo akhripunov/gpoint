@@ -182,7 +182,7 @@ def test_hosted_docker_recovery_integration_is_wired_after_immutable_build():
     assert "KAMAL_CUTOVER_LATE_FAILURE_RECOVERY=PASS" in source
     assert '"--tls", "--tls-certificate-path=/tmp/gpoint-proxy.crt"' in source
     assert '"--tls-private-key-path=/tmp/gpoint-proxy.key"' in source
-    assert "https://gpoint.amiora.one/api/health/live" in source
+    assert "https://gpoint.one/api/health/live" in source
     assert '"-p"' not in source and '"--publish"' not in source
     assert "POSTGRES_DATABASE_SQL" in source and "POSTGRES_MIGRATION_SQL" in source
     assert "BEGIN READ ONLY;" in source and '"POSTGRES_ACL_FINGERPRINT"' in source
@@ -351,14 +351,14 @@ def test_python_c_probe_argv_offsets_and_exact_container_address(monkeypatch, ca
     monkeypatch.setattr(socket, "create_connection", capture_connection)
     monkeypatch.setattr(http.client, "HTTPSConnection", Connection)
     monkeypatch.setattr(ssl, "_create_unverified_context", lambda: object())
-    args = integration.python_probe_args("https://gpoint.amiora.one/api/health/live?q=1",
-                                         "legacy:/health/live", "gpoint.amiora.one", "172.25.0.7")
+    args = integration.python_probe_args("https://gpoint.one/api/health/live?q=1",
+                                         "legacy:/health/live", "gpoint.one", "172.25.0.7")
     monkeypatch.setattr(sys, "argv", ["-c", *args[2:]])
     exec(integration.PROBE_CODE, {})
     assert capsys.readouterr().out.strip() == "legacy:/health/live"
     assert calls["destination"] == ("172.25.0.7", 443)
-    assert calls["host"] == "gpoint.amiora.one"
-    assert calls["request"] == ("GET", "/api/health/live?q=1", {"Host": "gpoint.amiora.one"})
+    assert calls["host"] == "gpoint.one"
+    assert calls["request"] == ("GET", "/api/health/live?q=1", {"Host": "gpoint.one"})
     assert calls["timeout"] == calls["socket_timeout"] == 4
     assert calls["closed"]
 
@@ -383,14 +383,14 @@ except Destination as e:
     env.pop("HTTP_PROXY", None)
     env.pop("HTTPS_PROXY", None)
     result = subprocess.run([sys.executable, "-c", code, integration.PROBE_CODE,
-                             "https://gpoint.amiora.one/test", "fixture", "gpoint.amiora.one", "127.0.0.1"],
+                             "https://gpoint.one/test", "fixture", "gpoint.one", "127.0.0.1"],
                             env=env, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "destination=('127.0.0.1', 443)"
     for url, host, address in [
-        ("https://gpoint.amiora.one/test", "unrelated.example", "127.0.0.1"),
-        ("http://gpoint.amiora.one/test", "gpoint.amiora.one", "127.0.0.1"),
-        ("https://gpoint.amiora.one/test", "gpoint.amiora.one", "not-an-ip"),
+        ("https://gpoint.one/test", "unrelated.example", "127.0.0.1"),
+        ("http://gpoint.one/test", "gpoint.one", "127.0.0.1"),
+        ("https://gpoint.one/test", "gpoint.one", "not-an-ip"),
     ]:
         bad = subprocess.run([sys.executable, "-c", integration.PROBE_CODE,
                               url, "fixture", host, address],
@@ -565,7 +565,7 @@ def test_failure_stages_attempt_safe_legacy_recovery_and_preserve_gsales(tmp_pat
     proxy_id, api_id, app_id, proxy_image_id = "f" * 64, "1" * 64, "2" * 64, "4" * 64
     api_digest = "sha256:" + "3" * 64
     app_image = "ghcr.io/akhripunov/gpoint-runtime"
-    route_table = f"Service Host Path Target State TLS\ngpoint-core gpoint.amiora.one /api {api_id[:12]}:3000 running yes\n"
+    route_table = f"Service Host Path Target State TLS\ngpoint-core gpoint.one /api {api_id[:12]}:3000 running yes\n"
     mutations = []
     proxy_running = failure_stage != "precaddy_no_kamal"
     stopped = {row["id"] for name, row in legacy.items() if not name.startswith("gsales")}

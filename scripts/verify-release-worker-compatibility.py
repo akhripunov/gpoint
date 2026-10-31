@@ -30,7 +30,7 @@ def verify_contract(values, gpoint_tenant, gsales_tenant, legacy_tenant=None, ex
             raise RuntimeError('worker_lane_auth_config_mismatch')
     if values['GPOINT_AGATA_WORKER_TOKEN'] == values['GSALES_AGATA_WORKER_TOKEN']:
         raise RuntimeError('worker_lane_credentials_not_distinct')
-    if values.get('GPOINT_AGATA_WORKER_URL', 'https://gpoint.amiora.one/api/agata-worker').rstrip('/') != 'https://gpoint.amiora.one/api/agata-worker':
+    if values.get('GPOINT_AGATA_WORKER_URL', 'https://gpoint.one/api/agata-worker').rstrip('/') != 'https://gpoint.one/api/agata-worker':
         raise RuntimeError('worker_gpoint_protocol_contract_mismatch')
     if values.get('GSALES_AGATA_WORKER_URL', '').rstrip('/') != lane.URL:
         raise RuntimeError('worker_gsales_protocol_contract_mismatch')
@@ -45,7 +45,7 @@ def verify_contract(values, gpoint_tenant, gsales_tenant, legacy_tenant=None, ex
 
 
 def contract_evidence(values, gpoint_tenant, gsales_tenant, expected_credentials):
-    point_url = values.get('GPOINT_AGATA_WORKER_URL', 'https://gpoint.amiora.one/api/agata-worker').rstrip('/')
+    point_url = values.get('GPOINT_AGATA_WORKER_URL', 'https://gpoint.one/api/agata-worker').rstrip('/')
     sales_url = values.get('GSALES_AGATA_WORKER_URL', '').rstrip('/')
     return {
         'protocols': {'GPOINT': point_url, 'GSALES': sales_url},
