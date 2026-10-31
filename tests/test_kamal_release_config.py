@@ -910,6 +910,7 @@ def test_kamal_production_verify_persists_attempt_bound_manifest():
     assert '"postgresAclFingerprint"' in manifest_writer
     assert '"noErosPostflight"' in manifest_writer
     assert "kamal-production-${run_id}-${attempt}.json" in verify
+    assert 'url.set(drivername="postgresql"' in verify
     assert "CANDIDATE_SHA" in verify and "APP_DIGEST" in verify
     assert "INVENTORY_SHA256" in verify and "BACKUP_SHA256" in verify
     assert "ISOLATED_RESTORE=PASS" in verify

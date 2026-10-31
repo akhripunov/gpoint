@@ -219,7 +219,7 @@ agata_container="gpoint-agata-api-$version"
 agata_heads="$(docker exec "$agata_container" alembic heads)"
 [[ "$(printf '%s\n' "$agata_heads" | awk 'NF { count++ } END { print count+0 }')" = 1 ]]
 expected_agata_head="$(printf '%s\n' "$agata_heads" | awk 'NF { print $1 }')"
-actual_agata_head="$(docker exec "$agata_container" python -c 'import os,psycopg; from sqlalchemy.engine import make_url; u=os.environ.get("AGATA_MIGRATOR_DATABASE_URL") or os.environ["AGATA_DATABASE_URL"]; u=u.replace("postgresql+asyncpg://","postgresql+psycopg://",1); url=make_url(u); url=url.set(query={k:v for k,v in url.query.items() if k in {"sslmode","sslrootcert","sslcert","sslkey","connect_timeout","application_name"}}); c=psycopg.connect(url.render_as_string(hide_password=False)); row=c.execute("SELECT version_num FROM agata.alembic_version").fetchall(); assert len(row)==1; print(row[0][0]); c.close()')"
+actual_agata_head="$(docker exec "$agata_container" python -c 'import os,psycopg; from sqlalchemy.engine import make_url; u=os.environ.get("AGATA_MIGRATOR_DATABASE_URL") or os.environ["AGATA_DATABASE_URL"]; u=u.replace("postgresql+asyncpg://","postgresql+psycopg://",1); url=make_url(u); url=url.set(drivername="postgresql", query={k:v for k,v in url.query.items() if k in {"sslmode","sslrootcert","sslcert","sslkey","connect_timeout","application_name"}}); c=psycopg.connect(url.render_as_string(hide_password=False)); row=c.execute("SELECT version_num FROM agata.alembic_version").fetchall(); assert len(row)==1; print(row[0][0]); c.close()')"
 test "$actual_agata_head" = "$expected_agata_head"
 echo 'GPOINT_AGATA_MIGRATION_HEAD=PASS'
 for role in worker bot memory-worker; do
