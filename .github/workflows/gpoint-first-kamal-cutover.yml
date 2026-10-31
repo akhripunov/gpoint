@@ -746,8 +746,12 @@ jobs:
           ids=( $(docker ps -aq) )
           ((${#ids[@]} > 0))
           test -z "$(docker ps -aq --filter 'name=^/kamal-proxy$')"
-          ! docker network inspect kamal >/dev/null 2>&1
-          ! docker volume inspect kamal-proxy-config >/dev/null 2>&1
+          if docker network inspect kamal >/dev/null 2>&1; then
+            echo "Kamal network must be absent before the first cutover" >&2
+            exit 1
+          fi
+          # Preserve the proxy config volume retained by recovery. It is not
+          # a running proxy and must not be deleted to satisfy readiness.
           kamal_proxy_baseline=ABSENT
           resource_file="/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/resources.json"
           docker stats --no-stream --format '{{json .}}' | python3 "$resource_script" > "$resource_file"

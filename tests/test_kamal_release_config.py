@@ -1076,3 +1076,31 @@ def test_pause_cannot_bypass_server_owned_recovery_on_exit():
     assert 'restore_legacy_services' not in cleanup
     assert 'docker start' not in cleanup
     assert 'phases/recover-pre.sh' in (ROOT / 'scripts/kamal_cutover_owner.py').read_text() or 'PRE_RECOVERY = "recover-pre"' in (ROOT / 'scripts/kamal_cutover_owner.py').read_text()
+
+
+@pytest.mark.parametrize("source", ["baseline", "pause"])
+@pytest.mark.parametrize("proxy_present,network_present,expected", [
+    (False, False, 0), (True, False, 1), (False, True, 1),
+])
+def test_cutover_preserves_existing_proxy_volume(tmp_path, source, proxy_present, network_present, expected):
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text())
+    step = next(s for s in workflow["jobs"]["deploy"]["steps"]
+                if s.get("name") == "Capture PostgreSQL and no-Eros cutover baseline")
+    script = step["run"]
+    if source == "pause":
+        script = (ROOT / "scripts/pause-legacy-gpoint.sh").read_text()
+    start = script.index('test -z "$(docker ps -aq --filter')
+    end = script.index('kamal_proxy_baseline=ABSENT' if source == 'baseline' else 'eros_state_baseline=', start)
+    checks = script[start:end] + "\nprintf 'GATE_REACHED=PASS\\n'\n"
+    docker = tmp_path / "docker"
+    docker.write_text("#!/bin/bash\n" +
+        'case "$1 $2" in\n' +
+        ' "ps -aq") ' + ("echo stopped-proxy" if proxy_present else ":") + ";;\n" +
+        ' "network inspect") exit ' + ("0" if network_present else "1") + ";;\n" +
+        ' "volume inspect") exit 0;;\n' +
+        ' *) exit 99;;\nesac\n')
+    docker.chmod(0o700)
+    result = subprocess.run(["bash", "-ec", checks],
+                            env={**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"]},
+                            capture_output=True, text=True)
+    assert result.returncode == expected
