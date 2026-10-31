@@ -13,7 +13,7 @@ import {
 
 test("model paths and canonical share URLs use the public handle", () => {
   assert.equal(modelProfilePath("alina"), "/model/alina");
-  assert.equal(canonicalModelProfileUrl("alina"), "https://gpoint.amiora.one/model/alina");
+  assert.equal(canonicalModelProfileUrl("alina"), "https://gpoint.one/model/alina");
 });
 
 test("Telegram model start params resolve to the same profile route", () => {
