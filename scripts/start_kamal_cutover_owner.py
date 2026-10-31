@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from types import ModuleType
 from typing import Any, Callable
 
 RUN_ROOT = Path("/run/gpoint-kamal-owner")
+EXEC_WORKSPACE_ROOT = Path("/opt/gpoint/kamal-cutover-workspaces")
 OWNER_NAME = "kamal_cutover_owner.py"
 CREDENTIALS_NAME = "kamal_cutover_credentials.py"
 AUTHORIZED_KEYS = Path("/root/.ssh/authorized_keys")
@@ -188,10 +190,121 @@ def _private_file(path: Path, data: bytes, owner_uid: int) -> None:
         raise
 
 
-def _prepare_runtime(stage: Path, env: dict[str, str], owner_uid: int) -> None:
+def _prepare_execution_workspace(stage: Path, env: dict[str, str], owner_uid: int,
+                                 workspace_root: Path = EXEC_WORKSPACE_ROOT) -> Path:
+    """Copy the verified, credential-free Git workspace off /run before Apply.
+
+    /run is mounted noexec on the production VPS. Kamal executes its hooks
+    from the bind-mounted workspace, so that workspace must live on the normal
+    executable root filesystem. The one secret-bearing file stays in /run and
+    is mounted separately by the request and consumer phases.
+    """
+    workspace_root = Path(workspace_root)
+    expected = workspace_root / stage.name / "repo"
+    secret_file = stage / "repo/.kamal/secrets"
+    if (env.get("GITHUB_WORKSPACE") != str(expected)
+            or env.get("GPOINT_KAMAL_SECRET_FILE") != str(secret_file)):
+        raise OwnerStartError("execution workspace path mismatch")
+    if workspace_root == RUN_ROOT or str(workspace_root).startswith(str(RUN_ROOT) + "/"):
+        raise OwnerStartError("execution workspace must be outside /run")
+    for parent in (workspace_root.parent,):
+        try:
+            info = parent.lstat()
+        except OSError as exc:
+            raise OwnerStartError("execution workspace parent unavailable") from exc
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != owner_uid or stat.S_IMODE(info.st_mode) & 0o022):
+            raise OwnerStartError("execution workspace parent identity invalid")
+    if workspace_root.exists() or workspace_root.is_symlink():
+        info = workspace_root.lstat()
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != owner_uid or stat.S_IMODE(info.st_mode) != 0o700):
+            raise OwnerStartError("execution workspace root identity invalid")
+    else:
+        workspace_root.mkdir(mode=0o700)
+        os.chown(workspace_root, owner_uid, -1)
+        os.chmod(workspace_root, 0o700)
+    attempt_dir = workspace_root / stage.name
+    if attempt_dir.exists() or attempt_dir.is_symlink():
+        raise OwnerStartError("execution workspace already exists")
+    attempt_dir.mkdir(mode=0o700)
+    os.chown(attempt_dir, owner_uid, -1)
+    os.chmod(attempt_dir, 0o700)
+    source = stage / "repo"
+
+    def omit_secret_file(directory: str, names: list[str]) -> set[str]:
+        return {"secrets"} if Path(directory) == source / ".kamal" else set()
+
+    try:
+        shutil.copytree(source, expected, ignore=omit_secret_file, copy_function=shutil.copy2)
+        os.chown(expected, owner_uid, -1)
+        os.chmod(expected, 0o700)
+        for directory, subdirs, files in os.walk(expected, followlinks=False):
+            current = Path(directory)
+            os.chown(current, owner_uid, -1)
+            for name in subdirs:
+                child = current / name
+                info = child.lstat()
+                if not stat.S_ISDIR(info.st_mode):
+                    raise OwnerStartError("execution workspace contains a non-directory entry")
+                os.chown(child, owner_uid, -1)
+            for name in files:
+                child = current / name
+                info = child.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != owner_uid:
+                    raise OwnerStartError("execution workspace contains an unsafe file")
+                os.chown(child, owner_uid, -1)
+        placeholder = expected / ".kamal/secrets"
+        fd = os.open(placeholder, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        os.close(fd)
+        if secret_file.is_symlink() or not secret_file.is_file():
+            raise OwnerStartError("private Kamal secrets file is unavailable")
+        head = subprocess.run(["git", "-C", str(expected), "rev-parse", "--verify", "HEAD^{commit}"],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              text=True, check=False, env=BOOTSTRAP_ENV)
+        if head.returncode != 0 or head.stdout.strip() != stage.name.split("-")[0]:
+            raise OwnerStartError("execution Git workspace HEAD mismatch")
+        hook = expected / ".kamal/hooks/pre-app-boot"
+        if not hook.is_file() or hook.is_symlink() or not (hook.stat().st_mode & 0o111):
+            raise OwnerStartError("execution Git workspace hook is not executable")
+        probe = attempt_dir / ".exec-probe"
+        fd = os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o700)
+        try:
+            os.write(fd, b"#!/bin/sh\nexit 0\n")
+            os.fchown(fd, owner_uid, -1)
+            os.fchmod(fd, 0o700)
+        finally:
+            os.close(fd)
+        executed = subprocess.run([str(probe)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, check=False, env=BOOTSTRAP_ENV)
+        probe.unlink()
+        if executed.returncode != 0:
+            raise OwnerStartError("execution workspace filesystem is noexec")
+        return expected
+    except Exception:
+        shutil.rmtree(attempt_dir, ignore_errors=True)
+        raise
+
+
+def _cleanup_execution_workspace(stage: Path, workspace_root: Path, owner_uid: int) -> None:
+    attempt_dir = Path(workspace_root) / stage.name
+    try:
+        info = attempt_dir.lstat()
+    except FileNotFoundError:
+        return
+    if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != owner_uid or stat.S_IMODE(info.st_mode) != 0o700):
+        raise OwnerStartError("execution workspace cleanup path identity invalid")
+    shutil.rmtree(attempt_dir)
+
+
+def _prepare_runtime(stage: Path, env: dict[str, str], owner_uid: int,
+                     workspace_root: Path = EXEC_WORKSPACE_ROOT) -> None:
     expected = {
         "HOME": stage / "home", "RUNNER_TEMP": stage / "tmp",
-        "GITHUB_WORKSPACE": stage / "repo", "GITHUB_STEP_SUMMARY": stage / "github-summary",
+        "GITHUB_WORKSPACE": workspace_root / stage.name / "repo",
+        "GPOINT_KAMAL_SECRET_FILE": stage / "repo/.kamal/secrets",
+        "GITHUB_STEP_SUMMARY": stage / "github-summary",
         "GITHUB_OUTPUT": stage / "github-output",
     }
     for key, path in expected.items():
@@ -298,7 +411,8 @@ def start(stage: Path, archive: Path, archive_sha: str, manifest_sha: str,
           owner_sha: str, credentials_sha: str, *, runner: Callable[..., Any] = subprocess.run,
           systemd_run_path: str = "/usr/bin/systemd-run", systemctl_path: str = "/usr/bin/systemctl",
           owner_uid: int = 0, credential_install: Callable[..., Any] | None = None,
-          credential_cleanup: Callable[..., Any] | None = None) -> str:
+          credential_cleanup: Callable[..., Any] | None = None,
+          execution_workspace_root: Path = EXEC_WORKSPACE_ROOT) -> str:
     stage, archive = Path(stage), Path(archive)
     if not all(HEX_RE.fullmatch(value) for value in (archive_sha, manifest_sha, owner_sha, credentials_sha)):
         raise OwnerStartError("invalid trusted digest")
@@ -335,6 +449,7 @@ def start(stage: Path, archive: Path, archive_sha: str, manifest_sha: str,
         owner = _load_source(owner_path, "gpoint_kamal_cutover_owner")
         credentials = _load_source(credentials_path, "gpoint_kamal_cutover_credentials")
         _, _, env = owner._load_bundle(stage, manifest_sha, owner_uid)
+        _prepare_execution_workspace(stage, env, owner_uid, execution_workspace_root)
         probe = runner([systemctl_path, "show", unit, "--property=LoadState", "--value"],
                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                        text=True, check=False, env=BOOTSTRAP_ENV)
@@ -342,7 +457,7 @@ def start(stage: Path, archive: Path, archive_sha: str, manifest_sha: str,
             raise OwnerStartError("cannot verify existing systemd unit")
         if probe.stdout.strip() not in ("not-found", ""):
             raise OwnerStartError("attempt systemd unit already exists")
-        _prepare_runtime(stage, env, owner_uid)
+        _prepare_runtime(stage, env, owner_uid, execution_workspace_root)
         previous_environment = dict(os.environ)
         try:
             os.environ.clear()
@@ -376,6 +491,10 @@ def start(stage: Path, archive: Path, archive_sha: str, manifest_sha: str,
     except BaseException as exc:
         if not dispatched:
             _cleanup_before_dispatch(stage, credentials, owner_uid, credential_cleanup, installed)
+            try:
+                _cleanup_execution_workspace(stage, execution_workspace_root, owner_uid)
+            except OwnerStartError:
+                pass
             if isinstance(exc, OwnerStartError):
                 raise
             if isinstance(exc, Exception):

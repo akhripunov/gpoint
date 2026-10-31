@@ -14,6 +14,7 @@ verify_git_workspace
 kamal() {
   docker run --rm --network host --label gpoint.cutover.owner="$IMAGE_VERSION" \
     --volume "$GITHUB_WORKSPACE:/workdir" \
+    --volume "$GPOINT_KAMAL_SECRET_FILE:/workdir/.kamal/secrets:ro" \
     --volume /var/run/docker.sock:/var/run/docker.sock \
     --volume "$HOME/.ssh:/root/.ssh:ro" \
     --volume "$HOME/.ssh:$HOME/.ssh:ro" \

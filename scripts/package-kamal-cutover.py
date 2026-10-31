@@ -116,7 +116,9 @@ def package(root: Path, archive: Path, source_env: dict[str, str]) -> str:
     values = {key: source_env[key] for key in REQUIRED_ENV}
     values.update({
         'HOME': stage+'/home', 'RUNNER_TEMP': stage+'/tmp',
-        'GITHUB_WORKSPACE': stage+'/repo', 'GITHUB_STEP_SUMMARY': stage+'/github-summary',
+        'GITHUB_WORKSPACE': f'/opt/gpoint/kamal-cutover-workspaces/{sha}-{run}-{attempt}/repo',
+        'GPOINT_KAMAL_SECRET_FILE': stage+'/repo/.kamal/secrets',
+        'GITHUB_STEP_SUMMARY': stage+'/github-summary',
         'GITHUB_OUTPUT': stage+'/github-output',
         'GPOINT_COMMIT_SHA': sha, 'GPOINT_APP_SOURCE_SHA': source_env['APP_SOURCE_SHA'],
         'GPOINT_PRODUCTION_HOST': '127.0.0.1',

@@ -44,7 +44,10 @@ def test_bundle_binds_phases_config_and_private_env_to_exact_attempt(tmp_path):
         for path, sha in manifest['files'].items():
             assert hashlib.sha256(tar.extractfile(path).read()).hexdigest() == sha
         packaged_env = json.load(tar.extractfile('environment.json'))
+        attempt = f"{env['CANDIDATE_SHA']}-12345-1"
         assert packaged_env['GPOINT_PRODUCTION_HOST'] == '127.0.0.1'
+        assert packaged_env['GITHUB_WORKSPACE'] == f'/opt/gpoint/kamal-cutover-workspaces/{attempt}/repo'
+        assert packaged_env['GPOINT_KAMAL_SECRET_FILE'] == f'/run/gpoint-kamal-owner/{attempt}/repo/.kamal/secrets'
         assert packaged_env['KAMAL_REGISTRY_PASSWORD'] == 'private-test-token'
         assert 'GH_TOKEN' not in packaged_env
         assert tar.getmember('environment.json').mode == 0o600
@@ -55,6 +58,8 @@ def test_bundle_binds_phases_config_and_private_env_to_exact_attempt(tmp_path):
             assert 'kamal deploy --skip-push' in text
             assert "rev-parse --verify 'HEAD^{commit}'" in text
             assert 'Kamal Git workspace HEAD does not match candidate' in text
+            assert '--volume "$GITHUB_WORKSPACE:/workdir"' in text
+            assert '--volume "$GPOINT_KAMAL_SECRET_FILE:/workdir/.kamal/secrets:ro"' in text
         assert 'repo/.kamal/hooks/pre-app-boot' in names
         git_config = tar.extractfile('repo/.git/config').read().decode()
         assert '[core]' in git_config

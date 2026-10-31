@@ -27,6 +27,7 @@ ATTEMPT = "1"
 
 def make_stage(tmp_path, *, extra=(), replace_owner=None, bootstrap=False):
     stage = tmp_path / "gpoint-kamal-owner" / f"{SHA}-{RUN}-{ATTEMPT}"
+    workspace_root = tmp_path / "exec-workspaces"
     stage.mkdir(parents=True)
     stage.chmod(0o700)
     if bootstrap:
@@ -35,7 +36,9 @@ def make_stage(tmp_path, *, extra=(), replace_owner=None, bootstrap=False):
     values = {
         "GITHUB_ACTOR": "ci-user", "KAMAL_REGISTRY_PASSWORD": "super-secret",
         "HOME": str(stage / "home"), "RUNNER_TEMP": str(stage / "tmp"),
-        "GITHUB_WORKSPACE": str(stage / "repo"), "GITHUB_STEP_SUMMARY": str(stage / "github-summary"),
+        "GITHUB_WORKSPACE": str(workspace_root / stage.name / "repo"),
+        "GPOINT_KAMAL_SECRET_FILE": str(stage / "repo/.kamal/secrets"),
+        "GITHUB_STEP_SUMMARY": str(stage / "github-summary"),
         "GITHUB_OUTPUT": str(stage / "github-output"),
     }
     files = {}
@@ -44,6 +47,7 @@ def make_stage(tmp_path, *, extra=(), replace_owner=None, bootstrap=False):
         "kamal_cutover_credentials.py": CREDENTIAL_BYTES,
         "environment.json": json.dumps(values, sort_keys=True).encode(),
         "repo/.kamal/secrets": b"private-config",
+        "repo/.kamal/hooks/pre-app-boot": b"#!/bin/sh\nexit 0\n",
     }
     entries.update({name: data for name, (data, _mode) in PACKAGE._git_workspace_entries(ROOT, SHA).items()})
     for phase in ("pause", "retire", "requests", "routes", "consumers", "verify", "recover-pre", "recover-post"):
@@ -98,6 +102,12 @@ class Harness:
             return subprocess.CompletedProcess(argv, 0, stdout=self.active, stderr="")
         if "systemd-run" in argv[0]:
             assert self.credentials_ready
+            workspace = self.stage.parent.parent / "exec-workspaces" / self.stage.name / "repo"
+            assert workspace.is_dir()
+            assert subprocess.check_output(
+                ["git", "-C", str(workspace), "rev-parse", "HEAD^{commit}"], text=True
+            ).strip() == SHA
+            assert (workspace / ".kamal/secrets").read_bytes() == b""
             config = self.stage / "home/.docker/config.json"
             assert config.stat().st_mode & 0o777 == 0o600
             assert json.loads(config.read_text())["auths"]["ghcr.io"]["auth"]
@@ -118,7 +128,8 @@ def start(stage, archive, digest, owner_sha, credential_sha, harness):
                          owner_sha, credential_sha, runner=harness.runner,
                          systemd_run_path="/usr/bin/systemd-run", systemctl_path="/usr/bin/systemctl",
                          owner_uid=os.getuid(), credential_install=harness.install,
-                         credential_cleanup=harness.cleanup)
+                         credential_cleanup=harness.cleanup,
+                         execution_workspace_root=stage.parent.parent / "exec-workspaces")
 
 
 def test_verified_bundle_installs_credentials_before_single_exact_systemd_dispatch(tmp_path):
@@ -139,6 +150,30 @@ def test_verified_bundle_installs_credentials_before_single_exact_systemd_dispat
     assert len([argv for argv in harness.calls if argv[0].endswith("systemd-run")]) == 1
     assert not archive.exists()
     assert not any("super-secret" in arg for argv in harness.calls for arg in argv)
+    workspace = stage.parent.parent / "exec-workspaces" / stage.name / "repo"
+    assert subprocess.check_output(["git", "-C", str(workspace), "rev-parse", "HEAD^{commit}"], text=True).strip() == SHA
+    assert (workspace / ".kamal/hooks/pre-app-boot").stat().st_mode & 0o111
+    assert (workspace / ".kamal/secrets").read_bytes() == b""
+    assert (stage / "repo/.kamal/secrets").read_bytes() == b"private-config"
+
+
+def test_noexec_execution_workspace_fails_before_systemd_dispatch(tmp_path, monkeypatch):
+    stage, archive = make_stage(tmp_path)
+    digest, _, owner_sha, credential_sha = hashes(archive)
+    harness = Harness(stage)
+    original_run = STARTER.subprocess.run
+
+    def noexec_probe(argv, **kwargs):
+        if argv and str(argv[0]).endswith(".exec-probe"):
+            return subprocess.CompletedProcess(argv, 126, stdout="", stderr="Permission denied")
+        return original_run(argv, **kwargs)
+
+    monkeypatch.setattr(STARTER.subprocess, "run", noexec_probe)
+    with pytest.raises(STARTER.OwnerStartError, match="filesystem is noexec"):
+        start(stage, archive, digest, owner_sha, credential_sha, harness)
+    assert not harness.credentials_ready
+    assert not any(argv[0].endswith("systemd-run") for argv in harness.calls)
+    assert not (stage.parent.parent / "exec-workspaces" / stage.name).exists()
 
 
 def test_tar_digest_mismatch_fails_before_import_credentials_or_systemd(tmp_path):
@@ -248,7 +283,8 @@ def test_systemd_terminal_state_requires_attempt_bound_owner_status(tmp_path):
         return harness.runner(argv, **kwargs)
     result = STARTER.start(stage, archive, digest, manifest_sha_from_archive(archive),
                            owner_sha, credential_sha, runner=runner, owner_uid=os.getuid(),
-                           credential_install=harness.install, credential_cleanup=harness.cleanup)
+                           credential_install=harness.install, credential_cleanup=harness.cleanup,
+                           execution_workspace_root=stage.parent.parent / "exec-workspaces")
     assert result == "UNKNOWN"
     assert harness.credentials_ready
 
@@ -273,6 +309,7 @@ def test_pre_dispatch_setup_failure_cleans_installed_credentials(tmp_path, monke
     assert not any(argv[0].endswith("systemd-run") for argv in harness.calls)
     assert not (stage / "environment.json").exists()
     assert not (stage / ".registry-auth.pending").exists()
+    assert not (stage.parent.parent / "exec-workspaces" / stage.name).exists()
 
 
 def test_preverified_start_script_can_coexist_with_bundle_archive(tmp_path):
