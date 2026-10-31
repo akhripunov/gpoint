@@ -159,6 +159,8 @@ def test_kamal_deploy_uses_native_verified_images_and_preserves_first_cutover_gu
     deploy = phase("requests")
     assert deploy.index('GPOINT_KAMAL_SERVICE=gpoint-miniapp') < deploy.index('GPOINT_KAMAL_SERVICE=gpoint-core')
     assert 'root-path application first' in deploy
+    assert 'GPOINT_KAMAL_ROOT_ROUTE_BOOTSTRAP=true' in deploy
+    assert '--env GPOINT_KAMAL_ROOT_ROUTE_BOOTSTRAP' in deploy
     assert "--roles api --config-file config/deploy.yml" in deploy
     assert "--roles api --config-file config/deploy.agata.yml" in deploy
     assert "--roles web --config-file config/deploy.miniapp.yml" in deploy
@@ -274,6 +276,9 @@ def test_kamal_network_hook_joins_only_allowed_core_and_agata_roles():
     assert "gsales" not in hook.lower()
     assert "gpoint-miniapp:web) networks='gpoint_app:'" in hook
     assert "getent hosts api" in hook
+    assert 'GPOINT_KAMAL_ROOT_ROUTE_BOOTSTRAP' in hook
+    assert 'DEFERRED_FOR_FIRST_CUTOVER' in hook
+    assert hook.index('docker exec "$id" nginx -t') < hook.index('GPOINT_KAMAL_ROOT_ROUTE_BOOTSTRAP')
     assert 'api_container="gpoint-core-api-${version}"' in hook
     assert "resolved_ip" in hook and "test \"$resolved_ip\" = \"$api_ip\"" in hook
     assert "nginx -t" in hook

@@ -123,9 +123,16 @@ if [[ "$service:$role" == "gpoint-agata:memory-worker" ]]; then
   done
   test "$healthy" -eq 1 || { echo 'AGATA memory worker did not become healthy after network attachment' >&2; exit 1; }
 fi
+  if [[ "$service:$role" == "gpoint-miniapp:web" ]]; then
+    docker exec "$id" nginx -t >/dev/null
+  fi
 REMOTE
 
   if [ "$service:$role" = "gpoint-miniapp:web" ]; then
+    if [ "${GPOINT_KAMAL_ROOT_ROUTE_BOOTSTRAP:-false}" = true ]; then
+      echo 'GPOINT_MINIAPP_API_NETWORK=DEFERRED_FOR_FIRST_CUTOVER'
+      continue
+    fi
     ssh -T -i "$ssh_key" \
       -o BatchMode=yes \
       -o IdentitiesOnly=yes \
@@ -138,7 +145,6 @@ container="${service}-${role}-${version}"
 api_container="gpoint-core-api-${version}"
 [[ "$container" =~ ^[A-Za-z0-9._-]+$ && "$candidate" =~ ^[0-9a-f]{40}$ && "$app_source_sha" =~ ^[0-9a-f]{40}$ ]]
 id="$(docker inspect --format '{{.Id}}' "$container")"
-docker exec "$id" nginx -t >/dev/null
 test "$(docker inspect --format '{{.State.Running}}' "$api_container")" = true
 test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$api_container")" = "$app_source_sha"
 api_ip="$(docker inspect --format '{{with index .NetworkSettings.Networks "gpoint_app"}}{{.IPAddress}}{{end}}' "$api_container")"

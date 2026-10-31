@@ -23,6 +23,7 @@ kamal() {
     --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA --env GPOINT_PRODUCTION_HOST --env GPOINT_SSH_KEY=/root/.ssh/id_ed25519 \
     --env GPOINT_KNOWN_HOSTS_FILE=/root/.ssh/known_hosts --env KAMAL_REGISTRY_PASSWORD \
     --env GPOINT_KAMAL_SERVICE --env GPOINT_KAMAL_EXPECTED_DIGEST --env KAMAL_ROLES \
+    --env GPOINT_KAMAL_ROOT_ROUTE_BOOTSTRAP \
     ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 \
     "$@"
 }
@@ -44,7 +45,7 @@ test "$(docker image inspect basecamp/kamal-proxy:v0.9.2 --format '{{.Id}}')" = 
 PIN_PROXY
 # Deploy the root-path application first so Kamal Proxy has the host's TLS
 # settings before the API is added under /api.
-GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
+GPOINT_KAMAL_ROOT_ROUTE_BOOTSTRAP=true GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
   kamal deploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.miniapp.yml
 ssh -F "$HOME/.ssh/config" -T "${ssh_opts[@]}" "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$PROXY_DIGEST" <<'VERIFY_PROXY'
 set -euo pipefail
