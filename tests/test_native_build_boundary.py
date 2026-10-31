@@ -20,12 +20,13 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(set(jobs["build"]["needs"]), {"workspace", "python"})
         self.assertIn("build", jobs["deploy"]["needs"])
 
-    def test_main_push_runs_nonproduction_jobs_only(self):
+    def test_main_push_runs_ci_build_and_kamal_production_jobs(self):
         triggers = self.workflow.get("on", self.workflow.get(True))
         self.assertIn("push", triggers)
         self.assertEqual(triggers["push"]["branches"], ["main"])
         deploy = self.workflow["jobs"]["deploy"]
-        self.assertEqual(deploy["if"], "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'")
+        self.assertEqual(deploy["if"], "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')")
+        self.assertIn("github.event_name == 'push'", deploy["if"])
 
     def test_python_job_runs_the_disposable_postgres_migration_harness(self):
         job = self.workflow["jobs"]["python"]

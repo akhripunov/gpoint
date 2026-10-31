@@ -35,6 +35,8 @@ elif args[0] == "inspect" and name.startswith("gpoint-"):
  print(json.dumps([{{"Id":"container-"+name,"Image":"image-"+name,
   "Config":{{"Labels":{{"org.opencontainers.image.revision":"{SHA}"}},"Env":["RELEASE_SHA={SHA}"]}},
   "State":{{"Running":True,"Health":{{"Status":"healthy"}}}},"RestartCount":0}}]))
+elif args[0] == "exec":
+ print("{SHA}")
 elif args[0:2] == ["image", "inspect"]:
  name=args[2].removeprefix("image-")
  if name.startswith("gpoint-core-"): repo="ghcr.io/akhripunov/gpoint-runtime@{APP}"

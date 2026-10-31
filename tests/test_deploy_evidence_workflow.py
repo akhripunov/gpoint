@@ -65,17 +65,18 @@ class DeployEvidenceWorkflowTests(unittest.TestCase):
         self.assertIn('candidate_sha', triggers['workflow_dispatch']['inputs'])
         deploy = native['jobs']['deploy']
         self.assertEqual(deploy['if'],
-                         "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'")
+                         "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')")
         script = '\n'.join(step.get('run', '') for step in deploy['steps'])
         self.assertIn('REQUESTED_SHA', script)
         owner_gate = next(step for step in deploy['steps']
                           if step.get('name') == 'Recheck exact SHA, current main and owner approval')
-        self.assertEqual(owner_gate['env']['APPROVE_PRODUCTION'], '${{ inputs.approve_production }}')
+        self.assertEqual(owner_gate['env']['APPROVE_PRODUCTION'], '${{ inputs.approve_production || false }}')
         self.assertIn('OWNER_APPROVAL_ACTOR', owner_gate['env'])
         self.assertIn('OWNER_TRIGGERING_ACTOR', owner_gate['env'])
         self.assertIn('OWNER_REPOSITORY', owner_gate['env'])
         self.assertIn('test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY"', owner_gate['run'])
         self.assertIn('test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY"', owner_gate['run'])
+        self.assertIn('if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then', owner_gate['run'])
         self.assertEqual(deploy['environment'], 'production')
         self.assertEqual(deploy['concurrency']['group'], 'gpoint-production-release')
         self.assertIn('deployments', deploy.get('permissions', {}))

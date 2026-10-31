@@ -44,7 +44,7 @@ class GPointReleaseTriggerGraphTests(unittest.TestCase):
                 f"{name} must run the release trigger graph regression test",
             )
 
-    def test_main_push_cannot_reach_legacy_production_deploy(self):
+    def test_main_push_reaches_native_kamal_and_not_legacy_production_workflow(self):
         all_workflows = {
             path.name: yaml.safe_load(path.read_text())
             for path in WORKFLOWS.glob("*.yml")
@@ -55,10 +55,9 @@ class GPointReleaseTriggerGraphTests(unittest.TestCase):
         native_events = events(native)
         self.assertEqual(native_events["push"]["branches"], ["main"])
         self.assertIn("workflow_dispatch", native_events)
-        self.assertIn(
-            "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'",
-            native["jobs"]["deploy"]["if"],
-        )
+        self.assertIn("github.event_name == 'push'", native["jobs"]["deploy"]["if"])
+        self.assertIn("github.event_name == 'workflow_dispatch'", native["jobs"]["deploy"]["if"])
+        self.assertIn("Kamal production Deploy and Verify", native["jobs"]["deploy"]["name"])
 
         legacy_deploy = all_workflows["gpoint-deploy.yml"]
         self.assertEqual(set(events(legacy_deploy)), {"workflow_dispatch"})
