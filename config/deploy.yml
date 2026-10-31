@@ -50,8 +50,10 @@ servers:
 proxy:
   hosts:
     - gpoint.one
-  ssl: true
-  ssl_redirect: true
+  # TLS is configured by the root-path Mini App service. Kamal Proxy shares
+  # those settings with path-based API routes, which must not redeclare TLS.
+  ssl: false
+  ssl_redirect: false
   run:
     version: v0.9.2
 

@@ -31,6 +31,16 @@ def test_parser_accepts_empty_table_and_exact_candidate_routes():
     }) == ["gpoint-core", "gpoint-miniapp"]
 
 
+def test_validator_accepts_kamal_role_route_names_from_cutover():
+    routes = ROUTES.parse_routes(table(
+        ("gpoint-core-api", "gpoint.one", "/api", CORE[:12] + ":3000", "running", "yes"),
+        ("gpoint-miniapp-web", "gpoint.one", "/", MINIAPP[:12] + ":80", "running", "yes"),
+    ))
+    assert ROUTES.validate_gpoint_routes(routes, {
+        "gpoint-core": (CORE, 3000), "gpoint-miniapp": (MINIAPP, 80),
+    }) == ["gpoint-core-api", "gpoint-miniapp-web"]
+
+
 def test_validator_rejects_nonrunning_owned_routes():
     routes = ROUTES.parse_routes(table(
         ("gpoint-core", "gpoint.one", "/api", CORE[:12] + ":3000", "deploying", "yes"),

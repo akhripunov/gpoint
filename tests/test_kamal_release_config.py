@@ -58,8 +58,8 @@ def test_kamal_core_config_uses_public_tls_proxy_and_only_core_roles():
     assert api["proxy"]["path_prefixes"] == ["/api"]
     assert api["options"]["volume"] == "/opt/gpoint/media:/data/media"
     assert config["proxy"]["hosts"] == ["gpoint.one"]
-    assert config["proxy"]["ssl"] is True
-    assert config["proxy"]["ssl_redirect"] is True
+    assert config["proxy"]["ssl"] is False
+    assert config["proxy"]["ssl_redirect"] is False
     assert set(config["proxy"]["run"]) == {"version"}
     assert api["proxy"]["path_prefixes"] == ["/api"]
     assert api["proxy"]["strip_path_prefix"] is True
@@ -202,11 +202,13 @@ def test_kamal_proxy_owns_public_tls_and_routes_api_media_and_miniapp():
     miniapp = yaml.safe_load((ROOT / "config/deploy.miniapp.yml").read_text())
     for config in (core, miniapp):
         assert config["proxy"]["hosts"] == ["gpoint.one"]
-        assert config["proxy"]["ssl"] is True
-        assert config["proxy"]["ssl_redirect"] is True
         assert "http_port" not in config["proxy"]["run"]
         assert "https_port" not in config["proxy"]["run"]
         assert "bind_ips" not in config["proxy"]["run"]
+    assert core["proxy"]["ssl"] is False  # root Mini App route owns the host TLS settings
+    assert core["proxy"]["ssl_redirect"] is False
+    assert miniapp["proxy"]["ssl"] is True
+    assert miniapp["proxy"]["ssl_redirect"] is True
     workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
     assert "scripts/retire-gpoint-caddy.sh" in phase("retire")
     assert "KAMAL_PROXY_TLS_VERIFY=PASS" in phase("routes")

@@ -45,7 +45,7 @@ for _ in {1..30}; do
 done
 test "$ready" -eq 1 || { docker logs "$proxy" >&2; exit 1; }
 docker exec "$proxy" kamal-proxy deploy gpoint-miniapp \
-  --host gpoint.example.test --target gpoint-miniapp-web:80 --health-check-path=/ >/dev/null
+  --host gpoint.example.test --target gpoint-miniapp-web:80 --tls --health-check-path=/ >/dev/null
 docker exec "$proxy" kamal-proxy deploy gpoint-core \
   --host gpoint.example.test --target gpoint-core-api:80 --path-prefix=/api \
   --strip-path-prefix --health-check-path=/ >/dev/null
@@ -74,10 +74,9 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 routes = module.parse_routes(sys.argv[1])
 expected = {
-    # This fixture uses HTTP only: it deliberately omits --tls on deploy.
-    ("gpoint-miniapp", "gpoint.example.test", "/", "no"),
-    ("gpoint-core", "gpoint.example.test", "/api", "no"),
-    ("gpoint-core-media", "gpoint.example.test", "/media", "no"),
+    ("gpoint-miniapp", "gpoint.example.test", "/", "yes"),
+    ("gpoint-core", "gpoint.example.test", "/api", "yes"),
+    ("gpoint-core-media", "gpoint.example.test", "/media", "yes"),
 }
 actual = {(row["Service"], row["Host"], row["Path"], row["TLS"]) for row in routes}
 if actual != expected or len(routes) != len(expected):

@@ -41,26 +41,30 @@ def validate_gpoint_routes(
     host: str = "gpoint.one",
 ) -> list[str]:
     """Authorize removal only for exact GPoint routes targeting this attempt."""
-    expected = {
-        "gpoint-core": ("/api", 3000),
-        "gpoint-miniapp": ("/", 80),
+    aliases = {
+        "gpoint-core-api": "gpoint-core",
+        "gpoint-core": "gpoint-core",
+        "gpoint-miniapp-web": "gpoint-miniapp",
+        "gpoint-miniapp": "gpoint-miniapp",
     }
+    expected = {"gpoint-core": ("/api", 3000), "gpoint-miniapp": ("/", 80)}
     if not set(candidate_targets).issubset(expected):
         raise ValueError("unexpected candidate service identity")
     if not routes:
         return []
     allowed: dict[str, tuple[str, int]] = {}
     for service, (container_id, port) in candidate_targets.items():
-        if not re.fullmatch(r"[0-9a-f]{64}", container_id) or port != expected[service][1]:
+        if service not in expected or not re.fullmatch(r"[0-9a-f]{64}", container_id) or port != expected[service][1]:
             raise ValueError("candidate target identity is invalid")
         allowed[service] = (container_id[:12], port)
     services = []
     for route in routes:
         service = route["Service"]
-        if service not in expected or service not in allowed:
+        canonical = aliases.get(service)
+        if canonical is None or canonical not in allowed:
             raise ValueError("proxy contains a route outside the candidate attempt")
-        path, port = expected[service]
-        target_id, target_port = allowed[service]
+        path, port = expected[canonical]
+        target_id, target_port = allowed[canonical]
         if (route["Host"] != host or route["Path"] != path or route["TLS"] != "yes"
                 or route["State"] != "running"
                 or route["Target"] != f"{target_id}:{target_port}"):
