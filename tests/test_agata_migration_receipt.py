@@ -43,3 +43,25 @@ def test_receipt_rejects_unsafe_mode_and_symlinks(tmp_path):
     with pytest.raises(ValueError): MODULE.read_applied_agata_receipt(path, 'a' * 40, 'agata0012')
     path.chmod(0o600); link = tmp_path / 'link'; link.symlink_to(path)
     with pytest.raises(ValueError): MODULE.read_applied_agata_receipt(link, 'a' * 40, 'agata0012')
+
+
+def test_receipt_can_be_reused_only_from_supplied_git_ancestors(tmp_path):
+    path, _ = receipt(tmp_path)
+    parent = tmp_path / ('a' * 40); parent.mkdir()
+    path.rename(parent / 'agata-applied-migration.json')
+    assert MODULE.read_ancestor_agata_receipt(['d' * 40, 'a' * 40], 'agata0012', root=tmp_path) == 'a' * 40 + ':agata0012=' + 'b' * 64
+    assert MODULE.read_ancestor_agata_receipt(['d' * 40], 'agata0012', root=tmp_path) == ''
+
+
+@pytest.mark.parametrize('sources', [[], ['../bad'], ['a' * 40] * 65])
+def test_ancestor_receipt_search_is_bounded_and_sha_only(tmp_path, sources):
+    with pytest.raises(ValueError): MODULE.read_ancestor_agata_receipt(sources, 'agata0012', root=tmp_path)
+
+
+def test_ancestor_receipt_search_rejects_ambiguous_apply_proofs(tmp_path):
+    for source in ['a' * 40, 'd' * 40]:
+        directory = tmp_path / source; directory.mkdir()
+        path, value = receipt(directory); value['source_sha'] = source
+        path.write_text(json.dumps(value)); path.rename(directory / 'agata-applied-migration.json')
+    with pytest.raises(ValueError, match='multiple'):
+        MODULE.read_ancestor_agata_receipt(['a' * 40, 'd' * 40], 'agata0012', root=tmp_path)

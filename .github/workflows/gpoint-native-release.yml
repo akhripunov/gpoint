@@ -554,9 +554,16 @@ jobs:
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ && "$agata_head" =~ ^[A-Za-z0-9_]+$ ]]
           agata_checksums=""
           if [[ "$agata_head" == agata0012 ]] && ! git cat-file -e "$BASELINE_SOURCE_SHA:services/agata/migrations/versions/0012_eros_memory_disclosure.py" 2>/dev/null; then
-            agata_checksums="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - --read-agata-receipt \
-              "/opt/gpoint/release-logs/$CANDIDATE_SHA/agata-applied-migration.json" "$CANDIDATE_SHA" "$agata_head" \
+            mapfile -t receipt_sources < <(git rev-list --first-parent --max-count=64 "$CANDIDATE_SHA")
+            receipt_proof="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - --read-agata-ancestor-receipt \
+              "$agata_head" "${receipt_sources[@]}" \
               < "$GITHUB_WORKSPACE/scripts/verify-kamal-migration-parity.py")"
+            [[ "$receipt_proof" =~ ^([0-9a-f]{40}):(agata0012=([0-9a-f]{64}))$ ]]
+            receipt_source="${BASH_REMATCH[1]}"; agata_checksums="${BASH_REMATCH[2]}"; receipt_checksum="${BASH_REMATCH[3]}"
+            git merge-base --is-ancestor "$receipt_source" "$CANDIDATE_SHA"
+            migration_path=services/agata/migrations/versions/0012_eros_memory_disclosure.py
+            test "$(git show "$receipt_source:$migration_path" | sha256sum | cut -d' ' -f1)" = "$receipt_checksum"
+            test "$(sha256sum "$migration_path" | cut -d' ' -f1)" = "$receipt_checksum"
           fi
           python3 scripts/verify-kamal-migration-parity.py \
             --policy compatible \
@@ -597,7 +604,7 @@ jobs:
         run: |
           set -euo pipefail
           kamal() {
-            docker run --rm --volume "$GITHUB_WORKSPACE:/workdir" --volume "$HOME/.ssh:/root/.ssh:ro" \
+            docker run --rm --volume "$GITHUB_WORKSPACE:/workdir" --volume "$HOME/.ssh:/root/.ssh:ro" --volume "$HOME/.ssh:$HOME/.ssh:ro" \
               --workdir /workdir --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA --env GPOINT_PRODUCTION_HOST \
               --env GPOINT_SSH_KEY --env GPOINT_KNOWN_HOSTS_FILE --env KAMAL_REGISTRY_PASSWORD \
               --env GPOINT_KAMAL_EXPECTED_DIGEST --env GPOINT_KAMAL_SERVICE --env KAMAL_ROLES \
@@ -1072,7 +1079,7 @@ jobs:
         run: |
           set -euo pipefail
           kamal() {
-            docker run --rm --volume "$GITHUB_WORKSPACE/rollback-source:/workdir" --volume "$HOME/.ssh:/root/.ssh:ro" --workdir /workdir \
+            docker run --rm --volume "$GITHUB_WORKSPACE/rollback-source:/workdir" --volume "$HOME/.ssh:/root/.ssh:ro" --volume "$HOME/.ssh:$HOME/.ssh:ro" --workdir /workdir \
               --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA --env GPOINT_PRODUCTION_HOST --env GPOINT_SSH_KEY \
               --env GPOINT_KNOWN_HOSTS_FILE --env KAMAL_REGISTRY_PASSWORD --env GPOINT_KAMAL_EXPECTED_DIGEST \
               --env GPOINT_KAMAL_SERVICE --env KAMAL_ROLES \

@@ -1503,3 +1503,15 @@ def test_post_migration_head_requires_checksum_proof_when_old_runtime_lacks_revi
     renamed_checksum=hashlib.sha256((agata/"renamed.py").read_bytes()).hexdigest()
     renamed=subprocess.run(command+["--agata-current-checksums","agata0012="+renamed_checksum],capture_output=True,text=True)
     assert renamed.returncode != 0 and "APPLIED_ALEMBIC_MIGRATION_CHANGED:agata0012" in renamed.stderr
+
+
+def test_native_kamal_keeps_absolute_runner_ssh_config_paths_available():
+    workflow = (ROOT / '.github/workflows/gpoint-native-release.yml').read_text()
+    wrappers = workflow.split('kamal() {')[1:]
+    assert wrappers
+    for wrapper in wrappers:
+        command = wrapper.split('\n          }', 1)[0]
+        assert '--volume "$HOME/.ssh:/root/.ssh:ro"' in command
+        assert '--volume "$HOME/.ssh:$HOME/.ssh:ro"' in command
+    assert 'git rev-list --first-parent --max-count=64 "$CANDIDATE_SHA"' in workflow
+    assert '--read-agata-ancestor-receipt' in workflow

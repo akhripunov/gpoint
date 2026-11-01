@@ -45,6 +45,22 @@ def read_applied_agata_receipt(path, candidate_sha, current_head):
     return "agata0012=" + receipt["migration_sha256"]
 
 
+def read_ancestor_agata_receipt(sources, current_head, *, root=Path('/opt/gpoint/release-logs')):
+    """Use the original Apply proof only among caller-verified Git ancestors."""
+    if (not 1 <= len(sources) <= 64 or len(set(sources)) != len(sources)
+            or any(not SHA40.fullmatch(source) for source in sources)):
+        raise ValueError("migration receipt ancestors must be a bounded unique SHA inventory")
+    matches = []
+    for source in sources:
+        checksum = read_applied_agata_receipt(Path(root) / source / 'agata-applied-migration.json',
+                                             source, current_head)
+        if checksum:
+            matches.append(source + ':' + checksum)
+    if len(matches) > 1:
+        raise ValueError("multiple migration Apply receipts require reconciliation")
+    return matches[0] if matches else ''
+
+
 def parenthesized_sql(source, opening):
     """Return a balanced SQL parenthesized body, respecting quoted text."""
     depth, quote, index = 0, None, opening
@@ -452,7 +468,13 @@ def main():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 5 and sys.argv[1] == "--read-agata-receipt":
+    if len(sys.argv) >= 4 and sys.argv[1] == "--read-agata-ancestor-receipt":
+        try:
+            print(read_ancestor_agata_receipt(sys.argv[3:], sys.argv[2]))
+        except (OSError, ValueError) as exc:
+            print(f"AGATA_MIGRATION_RECEIPT=BLOCKED reason={exc}", file=sys.stderr)
+            raise SystemExit(1)
+    elif len(sys.argv) == 5 and sys.argv[1] == "--read-agata-receipt":
         try:
             print(read_applied_agata_receipt(sys.argv[2], sys.argv[3], sys.argv[4]))
         except (OSError, ValueError) as exc:
