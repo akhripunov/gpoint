@@ -103,6 +103,137 @@ def verify_freshness(
     return manifest
 
 
+def verify_release_backup_evidence(
+    path: Path | str,
+    *,
+    expected_sha256: str,
+    max_age_hours: int = 26,
+    now: datetime | None = None,
+    backup_root: Path = Path("/opt/gpoint/backups"),
+    release_logs_root: Path = Path("/opt/gpoint/release-logs"),
+) -> dict[str, Any]:
+    """Normalize a recent, hash-pinned release backup proof for a test restore."""
+    if not isinstance(max_age_hours, int) or max_age_hours < 1 or max_age_hours > 168:
+        raise BackupPolicyError("backup freshness limit is invalid")
+    if not SHA256.fullmatch(expected_sha256):
+        raise BackupPolicyError("release backup evidence checksum is invalid")
+    evidence_path = Path(path)
+    try:
+        evidence_info = evidence_path.lstat()
+        if (not stat.S_ISREG(evidence_info.st_mode) or evidence_info.st_uid != os.geteuid()
+                or stat.S_IMODE(evidence_info.st_mode) != 0o600):
+            raise BackupPolicyError("release backup evidence has unsafe identity")
+        evidence_bytes = evidence_path.read_bytes()
+    except BackupPolicyError:
+        raise
+    except OSError:
+        raise BackupPolicyError("release backup evidence is unavailable") from None
+    evidence_digest = hashlib.sha256(evidence_bytes).hexdigest()
+    if evidence_digest != expected_sha256:
+        raise BackupPolicyError("release backup evidence checksum mismatch")
+    evidence_match = re.fullmatch(r"kamal-backup-restore-([0-9]+)-([0-9]+)\.txt", evidence_path.name)
+    if not evidence_match:
+        raise BackupPolicyError("release backup evidence path is not a supported restore receipt")
+    release_sha = evidence_path.parent.name
+    if (not re.fullmatch(r"[0-9a-f]{40}", release_sha)
+            or evidence_path.parent.resolve() != Path(release_logs_root, release_sha).resolve()):
+        raise BackupPolicyError("release backup evidence is outside the exact release log scope")
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        raise BackupPolicyError("freshness comparison time must include a timezone")
+    age = current.astimezone(timezone.utc) - datetime.fromtimestamp(
+        evidence_info.st_mtime, timezone.utc)
+    if age < timedelta(minutes=-5) or age > timedelta(hours=max_age_hours):
+        raise BackupPolicyError("verified release backup is outside the freshness window")
+    try:
+        rows = evidence_bytes.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        raise BackupPolicyError("release backup evidence is not UTF-8") from None
+    values: dict[str, str] = {}
+    for row in rows:
+        key, separator, value = row.partition("=")
+        if separator and key in values:
+            raise BackupPolicyError("release backup evidence contains duplicate fields")
+        if separator:
+            values[key] = value
+    required = {
+        "BACKUP_RESTORE_SCHEMA": "gpoint-kamal-backup-restore/v1",
+        "BACKUP_ENCRYPTION": "AGE_X25519",
+        "ISOLATED_RESTORE": "PASS",
+        "OFFSITE_RESTORE": "PASS",
+        "MEDIA_BACKUP_ENCRYPTION": "AGE_X25519",
+        "MEDIA_ISOLATED_RESTORE": "PASS",
+        "MEDIA_OFFSITE_RESTORE": "PASS",
+        "RESTORED_PRISMA_HEAD": "20261015130000_codex_telegram_challenge",
+        "RESTORED_AGATA_HEAD": "agata0011",
+    }
+    if any(values.get(key) != expected for key, expected in required.items()):
+        raise BackupPolicyError("release backup restore proof is incomplete or has unexpected migration heads")
+    db_path = Path(values.get("BACKUP_PATH", ""))
+    match = re.fullmatch(r"gpoint-pre-release-([0-9a-f]{40})-([0-9]+)-([0-9]+)\.dump\.age",
+                         db_path.name)
+    if (not match or match.group(1) != release_sha
+            or match.group(2) != evidence_match.group(1)
+            or match.group(3) != evidence_match.group(2)):
+        raise BackupPolicyError("release backup path is not a supported GPoint release backup")
+    base = f"gpoint-pre-release-{match.group(1)}-{match.group(2)}-{match.group(3)}"
+    media_path = Path(values.get("MEDIA_BACKUP_PATH", ""))
+    backup_root = Path(backup_root)
+    if (db_path.parent.resolve() != backup_root.resolve()
+            or db_path != backup_root / f"{base}.dump.age"
+            or media_path != backup_root / f"{base}.media.tar.age"):
+        raise BackupPolicyError("release backup files are outside the expected VPS backup directory")
+
+    def verify_object(name: str, object_path: Path, sha_key: str, bytes_key: str) -> tuple[str, int]:
+        expected_digest = values.get(sha_key, "")
+        try:
+            expected_bytes = int(values.get(bytes_key, ""))
+            info = object_path.lstat()
+            if (object_path.parent != backup_root or not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600):
+                raise BackupPolicyError(f"{name} release backup has unsafe identity")
+            digest = hashlib.sha256(object_path.read_bytes()).hexdigest()
+        except BackupPolicyError:
+            raise
+        except (OSError, ValueError):
+            raise BackupPolicyError(f"{name} release backup is unavailable") from None
+        if (not SHA256.fullmatch(expected_digest) or digest != expected_digest
+                or info.st_size != expected_bytes):
+            raise BackupPolicyError(f"{name} release backup checksum mismatch")
+        return digest, info.st_size
+
+    db_digest, db_bytes = verify_object("database", db_path, "BACKUP_SHA256", "BACKUP_BYTES")
+    media_digest, media_bytes = verify_object(
+        "media", media_path, "MEDIA_BACKUP_SHA256", "MEDIA_BACKUP_BYTES")
+    for key in ("RESTORED_TABLE_COUNT", "RESTORED_DATABASE_BYTES", "MEDIA_FILE_COUNT",
+                "MEDIA_DIRECTORY_COUNT", "MEDIA_TOTAL_BYTES"):
+        if not values.get(key, "").isdigit():
+            raise BackupPolicyError("release backup metadata is incomplete")
+    if int(values["RESTORED_TABLE_COUNT"]) <= 0 or int(values["RESTORED_DATABASE_BYTES"]) <= 0:
+        raise BackupPolicyError("release database restore metadata is invalid")
+    manifest_sha = values.get("MEDIA_SOURCE_MANIFEST_SHA256", "")
+    if not SHA256.fullmatch(manifest_sha):
+        raise BackupPolicyError("release media manifest checksum is invalid")
+    completed_at = datetime.fromtimestamp(evidence_info.st_mtime, timezone.utc).isoformat()
+    return {
+        "schema": "gpoint-kamal-backup-restore/v1", "status": "PASS",
+        "completed_at": completed_at,
+        "database": {"path": str(db_path), "sha256": db_digest, "bytes": db_bytes,
+                     "encrypted": True, "integrity": "PASS", "isolated_restore": "PASS",
+                     "restored_tables": int(values["RESTORED_TABLE_COUNT"]),
+                     "restored_database_bytes": int(values["RESTORED_DATABASE_BYTES"]),
+                     "prisma_head": values["RESTORED_PRISMA_HEAD"],
+                     "agata_head": values["RESTORED_AGATA_HEAD"]},
+        "media": {"path": str(media_path), "sha256": media_digest, "bytes": media_bytes,
+                  "encrypted": True, "integrity": "PASS", "isolated_restore": "PASS",
+                  "file_count": int(values["MEDIA_FILE_COUNT"]),
+                  "directory_count": int(values["MEDIA_DIRECTORY_COUNT"]),
+                  "total_bytes": int(values["MEDIA_TOTAL_BYTES"]),
+                  "manifest_sha256": manifest_sha},
+        "restore_evidence": {"path": str(evidence_path), "sha256": evidence_digest},
+    }
+
+
 def main() -> int:
     import argparse
 
@@ -111,10 +242,34 @@ def main() -> int:
     freshness = subparsers.add_parser("freshness")
     freshness.add_argument("--manifest", type=Path, required=True)
     freshness.add_argument("--max-age-hours", type=int, default=26)
+    release_evidence = subparsers.add_parser("release-evidence")
+    release_evidence.add_argument("--evidence", type=Path, required=True)
+    release_evidence.add_argument("--sha256", required=True)
     args = parser.parse_args()
     try:
-        manifest = verify_freshness(args.manifest, max_age_hours=args.max_age_hours)
-        print("GPOINT_BACKUP_FRESHNESS=PASS COMPLETED_AT=" + manifest["completed_at"])
+        if args.command == "freshness":
+            manifest = verify_freshness(args.manifest, max_age_hours=args.max_age_hours)
+            print("GPOINT_BACKUP_FRESHNESS=PASS COMPLETED_AT=" + manifest["completed_at"])
+        else:
+            manifest = verify_release_backup_evidence(args.evidence, expected_sha256=args.sha256)
+            print("GPOINT_RELEASE_BACKUP_EVIDENCE=PASS")
+            for label, value in (
+                ("COMPLETED_AT", manifest["completed_at"]),
+                ("DATABASE_PATH", manifest["database"]["path"]),
+                ("DATABASE_SHA256", manifest["database"]["sha256"]),
+                ("DATABASE_BYTES", manifest["database"]["bytes"]),
+                ("PRISMA_HEAD", manifest["database"]["prisma_head"]),
+                ("AGATA_HEAD", manifest["database"]["agata_head"]),
+                ("RESTORED_TABLES", manifest["database"]["restored_tables"]),
+                ("MEDIA_PATH", manifest["media"]["path"]),
+                ("MEDIA_SHA256", manifest["media"]["sha256"]),
+                ("MEDIA_BYTES", manifest["media"]["bytes"]),
+                ("MEDIA_FILE_COUNT", manifest["media"]["file_count"]),
+                ("MEDIA_DIRECTORY_COUNT", manifest["media"]["directory_count"]),
+                ("MEDIA_TOTAL_BYTES", manifest["media"]["total_bytes"]),
+                ("MEDIA_MANIFEST_SHA256", manifest["media"]["manifest_sha256"]),
+            ):
+                print(f"GPOINT_RELEASE_BACKUP_{label}={value}")
     except (BackupPolicyError, OSError) as error:
         safe_error = str(error).replace("\n", " ")[:180]
         print(f"GPOINT_BACKUP_POLICY=BLOCKED reason={safe_error}")

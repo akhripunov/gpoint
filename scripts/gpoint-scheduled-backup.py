@@ -255,11 +255,20 @@ def run() -> None:
             # A rehearsal's source of truth is the verified encrypted backup.
             # Do not inspect the live Kamal API, PostgreSQL container, network,
             # production environment, or media bind mount in this path.
-            latest_path = SCHEDULED_ROOT / "latest.json"
-            try:
-                existing_manifest = policy.verify_freshness(latest_path, max_age_hours=26)
-            except Exception as error:
-                raise ScheduledBackupError("an existing fresh verified backup is required for migration rehearsal") from error
+            evidence_path = os.environ.get("GPOINT_MIGRATION_BACKUP_EVIDENCE", "").strip()
+            if evidence_path:
+                evidence_sha = os.environ.get("GPOINT_MIGRATION_BACKUP_EVIDENCE_SHA256", "")
+                try:
+                    existing_manifest = policy.verify_release_backup_evidence(
+                        Path(evidence_path), expected_sha256=evidence_sha, max_age_hours=26)
+                except Exception as error:
+                    raise ScheduledBackupError("an existing fresh hash-pinned release backup is required for migration rehearsal") from error
+            else:
+                latest_path = SCHEDULED_ROOT / "latest.json"
+                try:
+                    existing_manifest = policy.verify_freshness(latest_path, max_age_hours=26)
+                except Exception as error:
+                    raise ScheduledBackupError("an existing fresh verified backup is required for migration rehearsal") from error
             database = existing_manifest.get("database", {})
             candidate = os.environ["GPOINT_MIGRATION_CANDIDATE_SHA"]
             prisma_head = database.get("prisma_head")
@@ -339,6 +348,7 @@ def run() -> None:
         baseline_sha = hashlib.sha256(baseline_bytes).hexdigest()
         helper_sources = {
             run_dir / "backup.py": BIN_DIR / "agata-production-migration.py",
+            run_dir / "backup-policy.py": BIN_DIR / "gpoint-backup-policy.py",
             run_dir / "media-tree.py": BIN_DIR / "gpoint-media-tree.py",
             run_dir / "restore.sh": BIN_DIR / "verify-gpoint-scheduled-backup-restore.sh",
         }
@@ -353,7 +363,7 @@ def run() -> None:
             os.chmod(target, 0o700)
         command = ["bash", str(run_dir / "restore.sh"), candidate, run_id, attempt,
                    str(baseline_path), baseline_sha, str(run_dir / "backup.py"), recipient,
-                   str(run_dir / "media-tree.py")]
+                   str(run_dir / "media-tree.py"), str(run_dir / "backup-policy.py")]
         result = None
         try:
             result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

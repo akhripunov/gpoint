@@ -76,6 +76,78 @@ def test_migration_rehearsal_requires_existing_backup_and_never_refreshes_latest
     assert 'backup --sha "$candidate"' not in helper.split('if [[ "${GPOINT_USE_EXISTING_BACKUP:-0}" == "1" ]]', 1)[1].split("else", 1)[0]
 
 
+def test_migration_rehearsal_can_consume_recent_release_backup_with_pinned_evidence():
+    root = Path(__file__).resolve().parents[1]
+    policy = (root / "scripts/gpoint-backup-policy.py").read_text()
+    runner = (root / "scripts/gpoint-scheduled-backup.py").read_text()
+    helper = (root / "scripts/verify-gpoint-scheduled-backup-restore.sh").read_text()
+    assert "verify_release_backup_evidence" in policy
+    assert "GPOINT_MIGRATION_BACKUP_EVIDENCE" in runner
+    assert "GPOINT_MIGRATION_BACKUP_EVIDENCE_SHA256" in runner
+    rehearsal_branch = runner.split("if migration_rehearsal:", 1)[1].split("\n        else:", 1)[0]
+    assert "verify_release_backup_evidence" in rehearsal_branch
+    restore_branch = helper.split('if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" == "1" ]]', 1)[1].split("\nelse\n", 1)[0]
+    assert "GPOINT_MIGRATION_BACKUP_EVIDENCE" in restore_branch
+    assert "GPOINT_MIGRATION_BACKUP_EVIDENCE_SHA256" in restore_branch
+    assert 'release-evidence' in restore_branch
+
+
+def test_release_backup_evidence_checks_provenance_age_and_ciphertext_checksums(tmp_path):
+    import datetime as dt
+
+    backup_root = tmp_path / "backups"
+    backup_root.mkdir(mode=0o700)
+    base = backup_root / f"gpoint-pre-release-{'a' * 40}-41223019715-1"
+    db_path = base.with_suffix(".dump.age")
+    media_path = Path(str(base) + ".media.tar.age")
+    db_path.write_bytes(b"encrypted database")
+    media_path.write_bytes(b"encrypted media")
+    db_path.chmod(0o600)
+    media_path.chmod(0o600)
+    release_logs = tmp_path / "release-logs"
+    evidence_dir = release_logs / ("a" * 40)
+    evidence_dir.mkdir(mode=0o700, parents=True)
+    evidence = evidence_dir / "kamal-backup-restore-41223019715-1.txt"
+    evidence.write_text("\n".join((
+        "BACKUP_RESTORE_SCHEMA=gpoint-kamal-backup-restore/v1",
+        f"BACKUP_PATH={db_path}",
+        f"BACKUP_SHA256={hashlib.sha256(db_path.read_bytes()).hexdigest()}",
+        f"BACKUP_BYTES={db_path.stat().st_size}",
+        "RESTORED_TABLE_COUNT=74",
+        "RESTORED_DATABASE_BYTES=12345",
+        "RESTORED_PRISMA_HEAD=20261015130000_codex_telegram_challenge",
+        "RESTORED_AGATA_HEAD=agata0011",
+        "BACKUP_ENCRYPTION=AGE_X25519",
+        "ISOLATED_RESTORE=PASS",
+        "OFFSITE_RESTORE=PASS",
+        f"MEDIA_BACKUP_PATH={media_path}",
+        f"MEDIA_BACKUP_SHA256={hashlib.sha256(media_path.read_bytes()).hexdigest()}",
+        f"MEDIA_BACKUP_BYTES={media_path.stat().st_size}",
+        "MEDIA_FILE_COUNT=4",
+        "MEDIA_DIRECTORY_COUNT=8",
+        "MEDIA_TOTAL_BYTES=1024",
+        "MEDIA_SOURCE_MANIFEST_SHA256=" + "b" * 64,
+        "MEDIA_BACKUP_ENCRYPTION=AGE_X25519",
+        "MEDIA_ISOLATED_RESTORE=PASS",
+        "MEDIA_OFFSITE_RESTORE=PASS",
+    )) + "\n", encoding="utf-8")
+    evidence.chmod(0o600)
+    evidence_sha = hashlib.sha256(evidence.read_bytes()).hexdigest()
+    now = dt.datetime.now(dt.timezone.utc)
+    normalized = gpoint_backup_policy.verify_release_backup_evidence(
+        evidence, expected_sha256=evidence_sha, now=now, backup_root=backup_root,
+        release_logs_root=release_logs)
+    assert normalized["status"] == "PASS"
+    assert normalized["database"]["sha256"] == hashlib.sha256(db_path.read_bytes()).hexdigest()
+    assert normalized["media"]["manifest_sha256"] == "b" * 64
+
+    db_path.write_bytes(b"changed ciphertext")
+    with pytest.raises(gpoint_backup_policy.BackupPolicyError, match="checksum mismatch"):
+        gpoint_backup_policy.verify_release_backup_evidence(
+            evidence, expected_sha256=evidence_sha, now=now, backup_root=backup_root,
+            release_logs_root=release_logs)
+
+
 def test_migration_restore_path_never_reads_live_database_or_kamal_api():
     helper = (Path(__file__).resolve().parents[1] / "scripts/verify-gpoint-scheduled-backup-restore.sh").read_text()
     assert helper.count('if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" != "1" ]]') >= 2

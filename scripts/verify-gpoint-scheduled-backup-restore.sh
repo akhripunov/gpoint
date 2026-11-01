@@ -8,6 +8,7 @@ baseline_file="${4:?baseline file required}"
 baseline_sha="${5:?baseline SHA-256 required}"
 backup_helper="${6:?GPoint backup helper required}"
 age_recipient="${7:?protected age recipient required}"
+backup_policy="${9:?GPoint backup policy helper required}"
 media_tree_helper="${8:?media tree manifest helper required}"
 
 [[ "$candidate" =~ ^[0-9a-f]{40}$ ]]
@@ -16,8 +17,9 @@ media_tree_helper="${8:?media tree manifest helper required}"
 [[ "$baseline_file" == "/opt/gpoint/backups/scheduled/runs/${candidate}-${run_id}-${attempt}/baseline.txt" ]]
 [[ "$backup_helper" == "/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/backup.py" ]]
 [[ "$media_tree_helper" == "/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/media-tree.py" ]]
+[[ "$backup_policy" == "/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/backup-policy.py" ]]
 [[ "${BASH_SOURCE[0]}" == "/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/restore.sh" ]]
-test -s "$baseline_file" && test -s "$backup_helper" && test -s "$media_tree_helper"
+test -s "$baseline_file" && test -s "$backup_helper" && test -s "$media_tree_helper" && test -s "$backup_policy"
 test "$(sha256sum "$baseline_file" | awk '{print $1}')" = "$baseline_sha"
 [[ "$age_recipient" =~ ^age1[0-9a-z]{58}$ ]]
 age_identity=/opt/gpoint/env/gpoint-backup.agekey
@@ -42,7 +44,7 @@ cleanup() {
   if [[ -n "$media_backup_work" ]]; then rm -rf -- "$media_backup_work"; fi
   if [[ -n "$roles_file" ]]; then rm -f -- "$roles_file"; fi
   if [[ -n "${plaintext_dir:-}" ]]; then rm -rf -- "$plaintext_dir"; fi
-  rm -f -- "$backup_helper" "$media_tree_helper" "${BASH_SOURCE[0]}"
+  rm -f -- "$backup_helper" "$media_tree_helper" "$backup_policy" "${BASH_SOURCE[0]}"
   rmdir "$(dirname "$backup_helper")" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -62,9 +64,26 @@ if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" == "1" ]]; then
   test "$(baseline_value RUN_ID)" = "$run_id"
   test "$(baseline_value ATTEMPT)" = "$attempt"
   api_container_id=""
-  latest_manifest=/opt/gpoint/backups/scheduled/latest.json
-  test -f "$latest_manifest" && test ! -L "$latest_manifest"
-  readarray -t media_manifest_facts < <(python3 - "$latest_manifest" <<'PY'
+  if [[ -n "${GPOINT_MIGRATION_BACKUP_EVIDENCE:-}" ]]; then
+    evidence_sha="${GPOINT_MIGRATION_BACKUP_EVIDENCE_SHA256:-}"
+    [[ "$evidence_sha" =~ ^[0-9a-f]{64}$ ]]
+    release_backup_output="$(python3 "$backup_policy" release-evidence \
+      --evidence "$GPOINT_MIGRATION_BACKUP_EVIDENCE" --sha256 "$evidence_sha")"
+    grep -qx 'GPOINT_RELEASE_BACKUP_EVIDENCE=PASS' <<< "$release_backup_output"
+    release_value() { sed -n "s/^GPOINT_RELEASE_BACKUP_$1=//p" <<< "$release_backup_output"; }
+    media_file_count="$(release_value MEDIA_FILE_COUNT)"
+    media_directory_count="$(release_value MEDIA_DIRECTORY_COUNT)"
+    media_total_bytes="$(release_value MEDIA_TOTAL_BYTES)"
+    media_manifest_sha="$(release_value MEDIA_MANIFEST_SHA256)"
+    database_bytes="$(release_value DATABASE_BYTES)"
+    test "$(release_value PRISMA_HEAD)" = "$(baseline_value PRISMA_HEAD)"
+    test "$(release_value AGATA_HEAD)" = "$(baseline_value AGATA_HEAD)"
+    [[ "$(release_value DATABASE_PATH)" == /opt/gpoint/backups/gpoint-pre-release-*.dump.age ]]
+    [[ "$(release_value MEDIA_PATH)" == /opt/gpoint/backups/gpoint-pre-release-*.media.tar.age ]]
+  else
+    latest_manifest=/opt/gpoint/backups/scheduled/latest.json
+    test -f "$latest_manifest" && test ! -L "$latest_manifest"
+    readarray -t media_manifest_facts < <(python3 - "$latest_manifest" <<'PY'
 import json, re, sys
 from pathlib import Path
 m=json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
@@ -82,14 +101,13 @@ print(p['directory_count'])
 print(p['bytes'])
 print(p['manifest_sha256'])
 PY
-  )
-  test "${#media_manifest_facts[@]}" -eq 4
-  media_file_count="${media_manifest_facts[0]}"
-  media_directory_count="${media_manifest_facts[1]}"
-  media_total_bytes="${media_manifest_facts[2]}"
-  media_manifest_sha="${media_manifest_facts[3]}"
-  media_restore_manifest_sha="$media_manifest_sha"
-  database_bytes="$(python3 - "$latest_manifest" <<'PY'
+    )
+    test "${#media_manifest_facts[@]}" -eq 4
+    media_file_count="${media_manifest_facts[0]}"
+    media_directory_count="${media_manifest_facts[1]}"
+    media_total_bytes="${media_manifest_facts[2]}"
+    media_manifest_sha="${media_manifest_facts[3]}"
+    database_bytes="$(python3 - "$latest_manifest" <<'PY'
 import json, sys
 from pathlib import Path
 m=json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
@@ -98,7 +116,9 @@ if not isinstance(value,int) or value <= 0:
     raise SystemExit('existing database backup size is invalid')
 print(value)
 PY
-  )"
+    )"
+  fi
+  media_restore_manifest_sha="$media_manifest_sha"
   source_tables=0
   pgdata=/var/lib/postgresql/data
   postgres_image="$(baseline_value POSTGRES_IMAGE_ID)"
@@ -191,11 +211,23 @@ fi
 # Rehearsals consume the existing scheduled PASS backup. They never capture a
 # new dump from production or replace latest.json.
 if [[ "${GPOINT_USE_EXISTING_BACKUP:-0}" == "1" ]]; then
-  latest_manifest=/opt/gpoint/backups/scheduled/latest.json
-  test -f "$latest_manifest" && test ! -L "$latest_manifest"
-  test "$(stat -c '%a:%u' "$latest_manifest")" = 600:0
-  readarray -t existing_facts < <(python3 - "$latest_manifest" "$candidate" \
-    "$(baseline_value PRISMA_HEAD)" "$(baseline_value AGATA_HEAD)" <<'PY'
+  if [[ -n "${GPOINT_MIGRATION_BACKUP_EVIDENCE:-}" ]]; then
+    test "${GPOINT_MIGRATION_REHEARSAL:-0}" = 1
+    evidence_sha="${GPOINT_MIGRATION_BACKUP_EVIDENCE_SHA256:-}"
+    [[ "$evidence_sha" =~ ^[0-9a-f]{64}$ ]]
+    release_backup_output="$(python3 "$backup_policy" release-evidence \
+      --evidence "$GPOINT_MIGRATION_BACKUP_EVIDENCE" --sha256 "$evidence_sha")"
+    grep -qx 'GPOINT_RELEASE_BACKUP_EVIDENCE=PASS' <<< "$release_backup_output"
+    release_value() { sed -n "s/^GPOINT_RELEASE_BACKUP_$1=//p" <<< "$release_backup_output"; }
+    existing_facts=("$(release_value DATABASE_PATH)" "$(release_value DATABASE_SHA256)" \
+      "$(release_value DATABASE_BYTES)" "$(release_value MEDIA_PATH)" \
+      "$(release_value MEDIA_SHA256)" "$(release_value MEDIA_BYTES)")
+  else
+    latest_manifest=/opt/gpoint/backups/scheduled/latest.json
+    test -f "$latest_manifest" && test ! -L "$latest_manifest"
+    test "$(stat -c '%a:%u' "$latest_manifest")" = 600:0
+    readarray -t existing_facts < <(python3 - "$latest_manifest" "$candidate" \
+      "$(baseline_value PRISMA_HEAD)" "$(baseline_value AGATA_HEAD)" <<'PY'
 import hashlib, json, os, re, stat, sys
 from pathlib import Path
 manifest_path=Path(sys.argv[1])
@@ -226,7 +258,8 @@ for name, suffix in (('database','.dump.age'),('media','.media.tar.age')):
     print(digest)
     print(info.st_size)
 PY
-  )
+    )
+  fi
   test "${#existing_facts[@]}" -eq 6
   backup_file="${existing_facts[0]}"
   backup_sha="${existing_facts[1]}"
