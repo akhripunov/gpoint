@@ -5,7 +5,58 @@ import ast
 import hashlib
 from pathlib import Path
 import re
+import subprocess
 import sys
+
+SHA40 = re.compile(r"^[0-9a-f]{40}$")
+
+
+def parenthesized_sql(source, opening):
+    """Return a balanced SQL parenthesized body, respecting quoted text."""
+    depth, quote, index = 0, None, opening
+    while index < len(source):
+        char = source[index]
+        if quote:
+            if char == quote:
+                if quote == "'" and index + 1 < len(source) and source[index + 1] == "'":
+                    index += 2
+                    continue
+                quote = None
+        elif char in ("'", '"'):
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return source[opening + 1:index]
+        index += 1
+    raise ValueError("pending migration contains an unbalanced SQL definition")
+
+
+def sql_definition_items(body):
+    items, start, depth, quote = [], 0, 0, None
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if quote:
+            if char == quote:
+                if quote == "'" and index + 1 < len(body) and body[index + 1] == "'":
+                    index += 2
+                    continue
+                quote = None
+        elif char in ("'", '"'):
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "," and depth == 0:
+            items.append(body[start:index])
+            start = index + 1
+        index += 1
+    items.append(body[start:])
+    return items
 
 
 def prisma_names(directory):
@@ -33,7 +84,7 @@ def literal_assignments(path):
     return values
 
 
-def alembic_head(directory):
+def alembic_revisions(directory):
     revisions = {}
     for path in sorted(Path(directory).glob("*.py")):
         values = literal_assignments(path)
@@ -58,7 +109,164 @@ def alembic_head(directory):
     heads = sorted(set(revisions) - {parent for parents in revisions.values() for parent in parents})
     if len(heads) != 1:
         raise ValueError("candidate Alembic migration graph must have exactly one head")
-    return heads[0]
+    return revisions, heads[0]
+
+
+def alembic_head(directory):
+    return alembic_revisions(directory)[1]
+
+
+def migration_identifiers(path, *, prisma_directory):
+    """Identify tables and fields touched by a pending migration for code-diff checks."""
+    source = Path(path).read_text(encoding="utf-8")
+    identifiers, tables = set(), set()
+    for match in re.finditer(
+        r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([\w\".]+)\s*\(",
+        source, re.IGNORECASE,
+    ):
+        table = match.group(1).split(".")[-1].strip('"')
+        tables.add(table)
+        identifiers.add(table)
+        for definition in sql_definition_items(parenthesized_sql(source, match.end() - 1)):
+            column = re.match(r"\s*[\"']?([A-Za-z_][A-Za-z0-9_]*)[\"']?\s+", definition)
+            if column and column.group(1).upper() not in {"CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "FOREIGN"}:
+                identifiers.add(column.group(1))
+    for match in re.finditer(
+        r"\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?([\w\".]+)[^;]*?\bADD\s+(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(?!CONSTRAINT\b|PRIMARY\b|UNIQUE\b|CHECK\b|FOREIGN\b|EXCLUDE\b)[\"']?([A-Za-z_][A-Za-z0-9_]*)",
+        source, re.IGNORECASE,
+    ):
+        table = match.group(1).split(".")[-1].strip('"')
+        tables.add(table)
+        identifiers.update((table, match.group(2)))
+    # Destructive/renaming operations also define the schema surface. A changed
+    # runtime line that references the removed identifier is not compatible.
+    for match in re.finditer(
+        r"\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?([\w\".]+)[^;]*?\bDROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?[\"']?([A-Za-z_][A-Za-z0-9_]*)",
+        source, re.IGNORECASE,
+    ):
+        table = match.group(1).split(".")[-1].strip('"')
+        identifiers.update((table, match.group(2)))
+    for match in re.finditer(
+        r"\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?([\w\".]+)[^;]*?\bRENAME\s+COLUMN\s+[\"']?([A-Za-z_][A-Za-z0-9_]*)[\"']?\s+TO\s+[\"']?([A-Za-z_][A-Za-z0-9_]*)",
+        source, re.IGNORECASE,
+    ):
+        table = match.group(1).split(".")[-1].strip('"')
+        identifiers.update((table, match.group(2), match.group(3)))
+    for match in re.finditer(
+        r"\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?([\w\".]+)[^;]*?\bRENAME\s+TO\s+[\"']?([A-Za-z_][A-Za-z0-9_]*)",
+        source, re.IGNORECASE,
+    ):
+        identifiers.update((match.group(1).split(".")[-1].strip('"'), match.group(2)))
+    for match in re.finditer(r"\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([\w\".]+)", source, re.IGNORECASE):
+        table = match.group(1).split(".")[-1].strip('"')
+        identifiers.add(table)
+    # Data migrations can change semantics without adding a column, as AGATA 0012 does.
+    for match in re.finditer(r"->>\s*[\"']([a-z][a-z0-9_]+)[\"']", source):
+        identifiers.add(match.group(1))
+    for match in re.finditer(r"op\.(?:create_table|add_column)\(\s*[\"']([^\"']+)", source):
+        identifiers.add(match.group(1))
+        tables.add(match.group(1))
+    for match in re.finditer(r"sa\.Column\(\s*[\"']([^\"']+)", source):
+        identifiers.add(match.group(1))
+
+    # Prisma delegate names are not SQL table names; map new tables back to model names.
+    schema = Path(prisma_directory).parent / "schema.prisma"
+    if schema.is_file():
+        content = schema.read_text(encoding="utf-8")
+        for block in re.finditer(r"\bmodel\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{(.*?)\n\}", content, re.DOTALL):
+            model, body = block.group(1), block.group(2)
+            mapped = re.search(r"@@map\(\s*[\"']([^\"']+)", body)
+            table = mapped.group(1) if mapped else model
+            if table in tables:
+                identifiers.update((model, model[:1].lower() + model[1:]))
+    # Keep common names such as `status`, `key`, and `index` when a migration
+    # actually defines them. Filtering valid identifiers creates false PASS.
+    return {x for x in identifiers if x}
+
+
+def changed_application_lines(repo_root, baseline_sha, candidate_sha):
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), "diff", "--unified=0", baseline_sha, candidate_sha,
+         "--", "apps", "services/agata", "packages"],
+        check=True, capture_output=True, text=True,
+    )
+    path = ""
+    for line in result.stdout.splitlines():
+        if line.startswith("+++ b/"):
+            path = line[6:]
+            continue
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        parts = set(Path(path).parts)
+        if not path or parts.intersection({"test", "tests", "migrations", "migration"}):
+            continue
+        if Path(path).suffix in {".ts", ".tsx", ".js", ".jsx", ".py"}:
+            yield path, line[1:]
+
+
+def verify_compatible(args, live_prisma, recorded):
+    baseline, candidate = args.baseline_source_sha, args.candidate_source_sha
+    if not SHA40.fullmatch(baseline or "") or not SHA40.fullmatch(candidate or ""):
+        raise ValueError("compatible policy requires exact baseline and candidate source SHAs")
+    repo_root = Path(args.repo_root).resolve(strict=True)
+    for sha in (baseline, candidate):
+        actual = subprocess.run(["git", "-C", str(repo_root), "rev-parse", "--verify", sha + "^{commit}"],
+                                check=True, capture_output=True, text=True).stdout.strip()
+        if actual != sha:
+            raise ValueError("source commit identity is invalid")
+    ancestor = subprocess.run(["git", "-C", str(repo_root), "merge-base", "--is-ancestor", baseline, candidate], check=False)
+    if ancestor.returncode:
+        raise ValueError("live application source SHA is not an ancestor of the candidate")
+
+    pending_prisma = prisma_names(args.prisma_directory)[len(live_prisma):]
+    if prisma_names(args.prisma_directory)[:len(live_prisma)] != live_prisma:
+        raise ValueError("live Prisma migrations are not a prefix of candidate migration history")
+    if not live_prisma or args.prisma_current_head != live_prisma[-1]:
+        raise ValueError("live Prisma head does not match its applied migration inventory")
+    revisions, candidate_agata_head = alembic_revisions(args.agata_directory)
+    if args.agata_current_head not in revisions:
+        raise ValueError("live AGATA head is absent from candidate migration history")
+    def ancestors(revision):
+        seen, stack = set(), [revision]
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            stack.extend(revisions[current])
+        return seen
+    live_ancestors = ancestors(args.agata_current_head)
+    candidate_ancestors = ancestors(candidate_agata_head)
+    if args.agata_current_head not in candidate_ancestors:
+        raise ValueError("live AGATA head is not an ancestor of candidate history")
+    pending_agata = candidate_ancestors - live_ancestors
+    revision_files = {literal_assignments(path).get("revision"): path
+                      for path in Path(args.agata_directory).glob("*.py")}
+    for revision in live_ancestors:
+        path = revision_files[revision]
+        relative = path.resolve(strict=True).relative_to(repo_root)
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "diff", "--quiet", baseline, candidate, "--", str(relative)],
+            check=False,
+        )
+        if result.returncode == 1:
+            raise ValueError(f"APPLIED_ALEMBIC_MIGRATION_CHANGED:{revision}")
+        if result.returncode != 0:
+            raise ValueError(f"cannot compare applied Alembic revision with baseline: {revision}")
+    pending = [(name, Path(args.prisma_directory) / name / "migration.sql") for name in pending_prisma]
+    pending.extend((name, revision_files[name]) for name in pending_agata)
+    changed = list(changed_application_lines(repo_root, baseline, candidate))
+    for migration, path in pending:
+        identifiers = migration_identifiers(path, prisma_directory=args.prisma_directory)
+        if not identifiers:
+            raise ValueError(f"cannot identify dependencies in pending migration {migration}")
+        for source_path, line in changed:
+            for identifier in identifiers:
+                if re.search(rf"(?<![A-Za-z0-9_]){re.escape(identifier)}(?![A-Za-z0-9_])", line, re.IGNORECASE):
+                    raise ValueError(f"PENDING_SCHEMA_DEPENDENCY:{migration}:{identifier}:{source_path}")
+    if set(recorded) != set(live_prisma):
+        raise ValueError("live Prisma checksum inventory does not cover exactly applied migrations")
+    return live_prisma[-1], args.agata_current_head, bool(pending)
 
 
 def verify(args):
@@ -69,8 +277,8 @@ def verify(args):
     if len(live_prisma) != len(set(live_prisma)):
         raise ValueError("live Prisma migration inventory contains duplicates")
     checksums = args.prisma_current_checksums.split(",") if args.prisma_current_checksums else []
+    recorded = {}
     if checksums:
-        recorded = {}
         for value in checksums:
             name, separator, checksum = value.partition("=")
             if (not separator or name in recorded or not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", name)
@@ -83,6 +291,8 @@ def verify(args):
             expected = hashlib.sha256((Path(args.prisma_directory) / name / "migration.sql").read_bytes()).hexdigest()
             if checksum != expected:
                 raise ValueError(f"PRISMA_MIGRATION_CHECKSUM_MISMATCH:{name}")
+    if args.policy == "compatible":
+        return verify_compatible(args, live_prisma, recorded)
     if set(live_prisma) != set(candidate_prisma):
         raise ValueError("PENDING_OR_UNRECONCILED_PRISMA_MIGRATIONS")
     candidate_prisma_head = candidate_prisma[-1]
@@ -91,11 +301,15 @@ def verify(args):
     candidate_agata_head = alembic_head(args.agata_directory)
     if args.agata_current_head != candidate_agata_head:
         raise ValueError("PENDING_AGATA_HEAD_MISMATCH")
-    return candidate_prisma_head, candidate_agata_head
+    return candidate_prisma_head, candidate_agata_head, False
 
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--policy", choices=("exact", "compatible"), default="exact")
+    parser.add_argument("--repo-root", default=".")
+    parser.add_argument("--baseline-source-sha")
+    parser.add_argument("--candidate-source-sha")
     parser.add_argument("--prisma-directory", required=True)
     parser.add_argument("--prisma-current-migrations", required=True)
     parser.add_argument("--prisma-current-checksums", default="")
@@ -104,12 +318,16 @@ def main():
     parser.add_argument("--agata-current-head", required=True)
     args = parser.parse_args()
     try:
-        prisma_head, agata_head = verify(args)
-    except (OSError, SyntaxError, ValueError) as exc:
+        prisma_head, agata_head, pending = verify(args)
+    except (OSError, SyntaxError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"GPOINT_KAMAL_MIGRATION_PARITY=BLOCKED reason={exc}", file=sys.stderr)
         return 1
-    print(f"GPOINT_KAMAL_MIGRATION_PARITY=PASS PRISMA_HEAD={prisma_head} AGATA_HEAD={agata_head}")
-    print("GPOINT_KAMAL_DB_MIGRATION_REQUIRED=NO")
+    if args.policy == "compatible":
+        print(f"GPOINT_KAMAL_SCHEMA_COMPATIBILITY=PASS LIVE_PRISMA_HEAD={prisma_head} LIVE_AGATA_HEAD={agata_head}")
+        print(f"GPOINT_KAMAL_DB_MIGRATION_REQUIRED={'YES' if pending else 'NO'}")
+    else:
+        print(f"GPOINT_KAMAL_MIGRATION_PARITY=PASS PRISMA_HEAD={prisma_head} AGATA_HEAD={agata_head}")
+        print("GPOINT_KAMAL_DB_MIGRATION_REQUIRED=NO")
     return 0
 
 

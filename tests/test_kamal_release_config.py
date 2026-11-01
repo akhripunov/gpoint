@@ -707,6 +707,169 @@ def test_kamal_migration_parity_fails_closed_for_pending_candidate_revision(tmp_
     assert "PENDING" in result.stderr
 
 
+def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migrations(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
+    prisma = repo / "packages/db/prisma/migrations"
+    base_sql = "SELECT 1;\n"
+    base_name = "20261015130000_baseline"
+    (prisma / base_name).mkdir(parents=True)
+    (prisma / base_name / "migration.sql").write_text(base_sql, encoding="utf-8")
+    pending_name = "20261022110000_eros_worker_queue"
+    (prisma / pending_name).mkdir()
+    (prisma / pending_name / "migration.sql").write_text(
+        "CREATE TABLE engine.eros_inference_jobs (id UUID PRIMARY KEY, error_code VARCHAR(64), status TEXT);\n"
+        "ALTER TABLE engine.eros_inference_jobs RENAME COLUMN legacy_code TO normalized_code;\n", encoding="utf-8")
+    agata = repo / "services/agata/migrations/versions"
+    agata.mkdir(parents=True)
+    (agata / "0011.py").write_text("revision = 'agata0011'\ndown_revision = None\n", encoding="utf-8")
+    (agata / "0012.py").write_text(
+        "revision = 'agata0012'\ndown_revision = 'agata0011'\n"
+        "SQL = \"UPDATE agata.regional_policy_profiles SET status='retired' "
+        "WHERE rules->>'ai_disclosure_required'='true'\"\n", encoding="utf-8")
+    app_file = repo / "apps/api/src/health.ts"
+    app_file.parent.mkdir(parents=True)
+    app_file.write_text("export const health = true;\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "baseline"], check=True)
+    baseline_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+
+    app_file.write_text("export const health = true;\nexport const releaseCheck = true;\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "unrelated app update"], check=True)
+    candidate_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    result = subprocess.run(
+        ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
+         "--policy", "compatible", "--repo-root", str(repo),
+         "--baseline-source-sha", baseline_sha, "--candidate-source-sha", candidate_sha,
+         "--prisma-directory", str(prisma), "--prisma-current-head", base_name,
+         "--prisma-current-migrations", base_name,
+         "--prisma-current-checksums", base_name + "=" + hashlib.sha256(base_sql.encode()).hexdigest(),
+         "--agata-directory", str(agata), "--agata-current-head", "agata0011"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "GPOINT_KAMAL_SCHEMA_COMPATIBILITY=PASS" in result.stdout
+    assert "GPOINT_KAMAL_DB_MIGRATION_REQUIRED=YES" in result.stdout
+    app_file.write_text("export const errorCode = 'error_code';\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "app depends on pending varchar field"], check=True)
+    field_dependent_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    field_blocked = subprocess.run(
+        ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
+         "--policy", "compatible", "--repo-root", str(repo),
+         "--baseline-source-sha", baseline_sha, "--candidate-source-sha", field_dependent_sha,
+         "--prisma-directory", str(prisma), "--prisma-current-head", base_name,
+         "--prisma-current-migrations", base_name,
+         "--prisma-current-checksums", base_name + "=" + hashlib.sha256(base_sql.encode()).hexdigest(),
+         "--agata-directory", str(agata), "--agata-current-head", "agata0011"],
+        capture_output=True, text=True,
+    )
+    assert field_blocked.returncode != 0
+    assert "PENDING_SCHEMA_DEPENDENCY:20261022110000_eros_worker_queue:error_code" in field_blocked.stderr
+    app_file.write_text("export const state = 'status';\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "app depends on pending common status field"], check=True)
+    status_dependent_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    status_blocked = subprocess.run(
+        ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
+         "--policy", "compatible", "--repo-root", str(repo),
+         "--baseline-source-sha", baseline_sha, "--candidate-source-sha", status_dependent_sha,
+         "--prisma-directory", str(prisma), "--prisma-current-head", base_name,
+         "--prisma-current-migrations", base_name,
+         "--prisma-current-checksums", base_name + "=" + hashlib.sha256(base_sql.encode()).hexdigest(),
+         "--agata-directory", str(agata), "--agata-current-head", "agata0011"],
+        capture_output=True, text=True,
+    )
+    assert status_blocked.returncode != 0
+    assert "PENDING_SCHEMA_DEPENDENCY:20261022110000_eros_worker_queue:status" in status_blocked.stderr
+    app_file.write_text("export const code = 'normalized_code';\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "app depends on renamed pending field"], check=True)
+    renamed_field_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    renamed_field_blocked = subprocess.run(
+        ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
+         "--policy", "compatible", "--repo-root", str(repo),
+         "--baseline-source-sha", baseline_sha, "--candidate-source-sha", renamed_field_sha,
+         "--prisma-directory", str(prisma), "--prisma-current-head", base_name,
+         "--prisma-current-migrations", base_name,
+         "--prisma-current-checksums", base_name + "=" + hashlib.sha256(base_sql.encode()).hexdigest(),
+         "--agata-directory", str(agata), "--agata-current-head", "agata0011"],
+        capture_output=True, text=True,
+    )
+    assert renamed_field_blocked.returncode != 0
+    assert "PENDING_SCHEMA_DEPENDENCY:20261022110000_eros_worker_queue:normalized_code" in renamed_field_blocked.stderr
+    checksum_drift = subprocess.run(
+        ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
+         "--policy", "compatible", "--repo-root", str(repo),
+         "--baseline-source-sha", baseline_sha, "--candidate-source-sha", candidate_sha,
+         "--prisma-directory", str(prisma), "--prisma-current-head", base_name,
+         "--prisma-current-migrations", base_name, "--prisma-current-checksums", base_name + "=" + "0" * 64,
+         "--agata-directory", str(agata), "--agata-current-head", "agata0011"],
+        capture_output=True, text=True,
+    )
+    assert checksum_drift.returncode != 0
+    assert "PRISMA_MIGRATION_CHECKSUM_MISMATCH" in checksum_drift.stderr
+
+    (agata / "0011.py").write_text(
+        "revision = 'agata0011'\ndown_revision = None\n# altered after production apply\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "alter applied AGATA revision"], check=True)
+    changed_revision_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    changed_revision = subprocess.run(
+        ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
+         "--policy", "compatible", "--repo-root", str(repo),
+         "--baseline-source-sha", baseline_sha, "--candidate-source-sha", changed_revision_sha,
+         "--prisma-directory", str(prisma), "--prisma-current-head", base_name,
+         "--prisma-current-migrations", base_name,
+         "--prisma-current-checksums", base_name + "=" + hashlib.sha256(base_sql.encode()).hexdigest(),
+         "--agata-directory", str(agata), "--agata-current-head", "agata0011"],
+        capture_output=True, text=True,
+    )
+    assert changed_revision.returncode != 0
+    assert "APPLIED_ALEMBIC_MIGRATION_CHANGED:agata0011" in changed_revision.stderr
+
+    (agata / "0011.py").write_text("revision = 'agata0011'\ndown_revision = None\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "restore applied AGATA migration identity"], check=True)
+    app_file.write_text("export const disclosure = 'ai_disclosure_required';\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "app depends on pending AGATA policy key"], check=True)
+    agata_dependent_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    agata_blocked = subprocess.run(
+        ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
+         "--policy", "compatible", "--repo-root", str(repo),
+         "--baseline-source-sha", baseline_sha, "--candidate-source-sha", agata_dependent_sha,
+         "--prisma-directory", str(prisma), "--prisma-current-head", base_name,
+         "--prisma-current-migrations", base_name,
+         "--prisma-current-checksums", base_name + "=" + hashlib.sha256(base_sql.encode()).hexdigest(),
+         "--agata-directory", str(agata), "--agata-current-head", "agata0011"],
+        capture_output=True, text=True,
+    )
+    assert agata_blocked.returncode != 0
+    assert "PENDING_SCHEMA_DEPENDENCY:agata0012:ai_disclosure_required" in agata_blocked.stderr
+
+    app_file.write_text("export const health = true;\nexport const queue = 'engine.eros_inference_jobs';\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "app depends on pending queue"], check=True)
+    dependent_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    blocked = subprocess.run(
+        ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
+         "--policy", "compatible", "--repo-root", str(repo),
+         "--baseline-source-sha", baseline_sha, "--candidate-source-sha", dependent_sha,
+         "--prisma-directory", str(prisma), "--prisma-current-head", base_name,
+         "--prisma-current-migrations", base_name,
+         "--prisma-current-checksums", base_name + "=" + hashlib.sha256(base_sql.encode()).hexdigest(),
+         "--agata-directory", str(agata), "--agata-current-head", "agata0011"],
+        capture_output=True, text=True,
+    )
+    assert blocked.returncode != 0
+    assert "PENDING_SCHEMA_DEPENDENCY" in blocked.stderr
+
+
 def test_first_cutover_backup_output_contract_accepts_all_proven_statuses_and_rejects_extra_fields(tmp_path):
     workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
     helper = (ROOT / "scripts/verify-gpoint-backup-restore.sh").read_text()
@@ -973,9 +1136,28 @@ def test_native_release_runs_kamal_after_successful_main_push():
 
 def test_native_migration_parity_runs_prisma_from_api_workspace():
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
-    step = workflow.split("name: Verify candidate migrations match the live database", 1)[1].split(
+    step = workflow.split("name: Verify candidate compatibility with the live database baseline", 1)[1].split(
         "name: Create exact-SHA in-progress GitHub Deployment", 1)[0]
     assert "--workdir /app/apps/api" in step
+    assert "--policy compatible" in step
+    assert "--baseline-source-sha \"$BASELINE_SOURCE_SHA\"" in step
+    assert "--candidate-source-sha \"$CANDIDATE_SHA\"" in step
+    assert "prisma_migrations=$prisma_migrations" in step
+
+
+def test_native_runtime_verify_compares_live_database_to_its_predeploy_baseline():
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    deploy = workflow.split("  deploy:\n", 1)[1].split("  backup_maintenance:\n", 1)[0]
+    verify = deploy.split("name: Verify public routes and exact running services", 1)[1].split(
+        "name: Record GitHub Deployment result against the same attempt", 1
+    )[0]
+    assert "BASELINE_PRISMA_MIGRATIONS: ${{ steps.migration_baseline.outputs.prisma_migrations }}" in verify
+    assert "BASELINE_PRISMA_CHECKSUMS: ${{ steps.migration_baseline.outputs.prisma_checksums }}" in verify
+    assert 'test "$prisma_migrations" = "$expected_prisma_migrations"' in verify
+    assert 'test "$prisma_checksums" = "$expected_prisma_checksums"' in verify
+    assert 'test "$agata_head" = "$expected_agata_head"' in verify
+    assert "find packages/db/prisma/migrations" not in verify
+    assert "alembic_head('services/agata/migrations/versions')" not in verify
 
 
 def test_kamal_inventory_sanitizer_keeps_runtime_facts_and_drops_environment_and_commands(tmp_path):

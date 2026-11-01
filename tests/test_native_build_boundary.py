@@ -165,7 +165,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("scp -p scripts/write-kamal-production-manifest.py", verify_run)
         self.assertIn("--mode ordinary", verify_run)
         self.assertIn("--db-container-id", verify_run)
-        self.assertIn("--public-routes-verified --migration-parity-verified", verify_run)
+        self.assertIn("--public-routes-verified --migration-compatibility-verified", verify_run)
         self.assertIn("GPOINT_KAMAL_MANIFEST_SHA256", verify_run)
         self.assertIn("/media/assets/kamal-route-verification-missing", verify_run)
         self.assertIn('"message":"media not found"', verify_run)

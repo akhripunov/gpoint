@@ -397,6 +397,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Recheck exact SHA, current main and owner approval
         env:
@@ -538,11 +539,13 @@ jobs:
               *) echo 'unexpected topology fact' >&2; exit 1 ;;
             esac
           done <<< "$facts"
-      - name: Verify candidate migrations match the live database
+      - name: Verify candidate compatibility with the live database baseline
+        id: migration_baseline
         env:
           GH_TOKEN: ${{ github.token }}
           APP_IMAGE: ghcr.io/akhripunov/gpoint-runtime@${{ needs.build.outputs.app_digest }}
           AGATA_IMAGE: ghcr.io/akhripunov/gpoint-agata-runtime@${{ needs.build.outputs.agata_digest }}
+          BASELINE_SOURCE_SHA: ${{ steps.topology.outputs.GPOINT_BASELINE_ROLE_SOURCE_SHA }}
         run: |
           set -euo pipefail
           facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$APP_IMAGE" "$AGATA_IMAGE" <<'REMOTE'
@@ -550,7 +553,7 @@ jobs:
           app_image="$1"; agata_image="$2"
           api_image="$(docker inspect --format '{{.Config.Image}}' "$(docker ps -q --filter 'name=^/gpoint-core-api-' | head -1)")"
           test -n "$api_image"
-          current="$(docker run --rm --network shared_internal --env-file /opt/gpoint/env/production.env --workdir /app/apps/api "$api_image" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const rows=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const head=rows.length?rows[rows.length-1].migration_name:"NONE";const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head is not singular");console.log("PRISMA_HEAD="+head);console.log("PRISMA_MIGRATIONS="+rows.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+rows.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("READ_ONLY_DATABASE_BASELINE_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
+          current="$(docker run --rm --network shared_internal --env-file /opt/gpoint/env/production.env --workdir /app/apps/api "$api_image" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const failed=await db.$queryRawUnsafe("SELECT count(*)::int AS count FROM _prisma_migrations WHERE finished_at IS NULL AND rolled_back_at IS NULL");if(failed[0].count!==0)throw Error("unfinished Prisma migration exists");const rows=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const head=rows.length?rows[rows.length-1].migration_name:"NONE";const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head is not singular");console.log("PRISMA_HEAD="+head);console.log("PRISMA_MIGRATIONS="+rows.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+rows.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("READ_ONLY_DATABASE_BASELINE_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
           printf '%s\n' "$current"
           REMOTE
           )"
@@ -560,13 +563,24 @@ jobs:
           agata_head="$(sed -n 's/^AGATA_HEAD=//p' <<< "$facts")"
           test -n "$prisma_head" && test -n "$prisma_migrations" && test -n "$agata_head"
           test -n "$prisma_checksums"
+          [[ "$BASELINE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           python3 scripts/verify-kamal-migration-parity.py \
+            --policy compatible \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --baseline-source-sha "$BASELINE_SOURCE_SHA" \
+            --candidate-source-sha "$CANDIDATE_SHA" \
             --prisma-directory packages/db/prisma/migrations \
             --prisma-current-migrations "$prisma_migrations" \
             --prisma-current-checksums "$prisma_checksums" \
             --prisma-current-head "$prisma_head" \
             --agata-directory services/agata/migrations/versions \
             --agata-current-head "$agata_head"
+          {
+            echo "prisma_head=$prisma_head"
+            echo "prisma_migrations=$prisma_migrations"
+            echo "prisma_checksums=$prisma_checksums"
+            echo "agata_head=$agata_head"
+          } >> "$GITHUB_OUTPUT"
       - name: Create exact-SHA in-progress GitHub Deployment
         id: deployment
         env:
@@ -628,6 +642,10 @@ jobs:
           REDIS_MOUNTS_SHA256: ${{ steps.topology.outputs.REDIS_MOUNTS_SHA256 }}
           BASELINE_ROLE_VERSION: ${{ steps.topology.outputs.GPOINT_BASELINE_ROLE_VERSION }}
           BASELINE_ROLE_SOURCE_SHA: ${{ steps.topology.outputs.GPOINT_BASELINE_ROLE_SOURCE_SHA }}
+          BASELINE_PRISMA_HEAD: ${{ steps.migration_baseline.outputs.prisma_head }}
+          BASELINE_PRISMA_MIGRATIONS: ${{ steps.migration_baseline.outputs.prisma_migrations }}
+          BASELINE_PRISMA_CHECKSUMS: ${{ steps.migration_baseline.outputs.prisma_checksums }}
+          BASELINE_AGATA_HEAD: ${{ steps.migration_baseline.outputs.agata_head }}
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
         run: |
           set -euo pipefail
@@ -652,17 +670,8 @@ jobs:
           writer_sha="$(sha256sum scripts/write-kamal-production-manifest.py | awk '{print $1}')"
           remote_writer_sha="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" sha256sum "$writer_remote" | awk '{print $1}')"
           test "$writer_sha" = "$remote_writer_sha"
-          expected_prisma_migrations="$(find packages/db/prisma/migrations -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | paste -sd, -)"
-          expected_prisma_head="${expected_prisma_migrations##*,}"
-          expected_prisma_checksums="$(while IFS= read -r name; do printf '%s=%s\n' "$name" "$(sha256sum "packages/db/prisma/migrations/$name/migration.sql" | awk '{print $1}')"; done < <(find packages/db/prisma/migrations -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort) | paste -sd, -)"
-          expected_agata_head="$(python3 - <<'PY'
-          import importlib.util
-          spec=importlib.util.spec_from_file_location('parity', 'scripts/verify-kamal-migration-parity.py')
-          module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-          print(module.alembic_head('services/agata/migrations/versions'))
-          PY
-          )"
-          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$expected_prisma_migrations" "$expected_prisma_checksums" "$expected_prisma_head" "$expected_agata_head" <<'REMOTE'
+          test -n "$BASELINE_PRISMA_HEAD" && test -n "$BASELINE_PRISMA_MIGRATIONS" && test -n "$BASELINE_PRISMA_CHECKSUMS" && test -n "$BASELINE_AGATA_HEAD"
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$BASELINE_PRISMA_MIGRATIONS" "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "$BASELINE_AGATA_HEAD" <<'REMOTE'
           set -euo pipefail
           sha="$1"; version="$2"; app="$3"; agata="$4"; miniapp="$5"; db_id="$6"; redis_id="$7"; deployment_id="$8"; run_id="$9"; attempt="${10}"; writer="${11}"
           expected_prisma_migrations="${12}"; expected_prisma_checksums="${13}"; expected_prisma_head="${14}"; expected_agata_head="${15}"
@@ -741,16 +750,16 @@ jobs:
           if not proxy.intersection(core) or not proxy.intersection(miniapp):
               raise SystemExit('Kamal Proxy is not connected to both Core API and Mini App networks')
           PY
-          runtime_db="$(docker exec "gpoint-core-api-$version" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const rows=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const head=rows.length?rows[rows.length-1].migration_name:"NONE";const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head is not singular");console.log("PRISMA_HEAD="+head);console.log("PRISMA_MIGRATIONS="+rows.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+rows.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("POST_DEPLOY_DATABASE_VERIFY_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
+          runtime_db="$(docker exec "gpoint-core-api-$version" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const failed=await db.$queryRawUnsafe("SELECT count(*)::int AS count FROM _prisma_migrations WHERE finished_at IS NULL AND rolled_back_at IS NULL");if(failed[0].count!==0)throw Error("unfinished Prisma migration exists");const rows=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const head=rows.length?rows[rows.length-1].migration_name:"NONE";const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head is not singular");console.log("PRISMA_HEAD="+head);console.log("PRISMA_MIGRATIONS="+rows.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+rows.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("POST_DEPLOY_DATABASE_VERIFY_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
           prisma_head="$(sed -n 's/^PRISMA_HEAD=//p' <<< "$runtime_db")"
           prisma_migrations="$(sed -n 's/^PRISMA_MIGRATIONS=//p' <<< "$runtime_db")"
           prisma_checksums="$(sed -n 's/^PRISMA_CHECKSUMS=//p' <<< "$runtime_db")"
           agata_head="$(sed -n 's/^AGATA_HEAD=//p' <<< "$runtime_db")"
           test -n "$prisma_head" && test -n "$prisma_migrations" && test -n "$prisma_checksums" && test -n "$agata_head"
-          test "$prisma_migrations" = "$expected_prisma_migrations"
-          test "$prisma_checksums" = "$expected_prisma_checksums"
-          test "$prisma_head" = "$expected_prisma_head"
-          test "$agata_head" = "$expected_agata_head"
+          test "$prisma_migrations" = "$expected_prisma_migrations" || { echo 'Prisma applied migration inventory changed during ordinary deploy' >&2; exit 1; }
+          test "$prisma_checksums" = "$expected_prisma_checksums" || { echo 'Prisma applied checksums changed during ordinary deploy' >&2; exit 1; }
+          test "$prisma_head" = "$expected_prisma_head" || { echo 'Prisma head changed during ordinary deploy' >&2; exit 1; }
+          test "$agata_head" = "$expected_agata_head" || { echo 'AGATA head changed during ordinary deploy' >&2; exit 1; }
           echo "GPOINT_RUNTIME_PRISMA_HEAD=$prisma_head"
           echo "GPOINT_RUNTIME_AGATA_HEAD=$agata_head"
           for service in gsales-api gsales-agata-api gsales-agata-memory-worker; do
@@ -773,7 +782,10 @@ jobs:
             --miniapp-digest "$miniapp" --run-id "$run_id" --attempt "$attempt" \
             --deployment-id "$deployment_id" --db-container-id "$db_id" \
             --redis-container-id "$redis_id" --prisma-head "$prisma_head" --agata-head "$agata_head" \
-            --public-routes-verified --migration-parity-verified)"
+            --prisma-migrations "$prisma_migrations" --prisma-checksums "$prisma_checksums" \
+            --baseline-prisma-head "$expected_prisma_head" --baseline-prisma-migrations "$expected_prisma_migrations" \
+            --baseline-prisma-checksums "$expected_prisma_checksums" --baseline-agata-head "$expected_agata_head" \
+            --public-routes-verified --migration-compatibility-verified)"
           printf '%s\n' "$writer_output"
           manifest_sha="$(sed -n 's/^GPOINT_KAMAL_MANIFEST_SHA256=\([0-9a-f]*\).*/\1/p' <<< "$writer_output")"
           [[ "$manifest_sha" =~ ^[0-9a-f]{64}$ ]]

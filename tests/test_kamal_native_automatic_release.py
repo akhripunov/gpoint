@@ -76,7 +76,7 @@ def test_production_preflight_requires_one_consistent_running_version_and_persis
     workflow = WORKFLOW.read_text(encoding="utf-8")
     deploy = workflow.split("  deploy:\n", 1)[1].split("  backup_maintenance:\n", 1)[0]
     preflight = deploy.split("name: Verify installed Kamal topology before ordinary release", 1)[1].split(
-        "name: Verify candidate migrations match the live database", 1
+        "name: Verify candidate compatibility with the live database baseline", 1
     )[0]
     assert 'test "${#matches[@]}" = 1' in preflight
     assert '"$version" == "$source_sha"-*' in preflight
@@ -89,6 +89,10 @@ def test_production_preflight_requires_one_consistent_running_version_and_persis
     )[0]
     assert "DB_MOUNTS_SHA256" in verify and "REDIS_MOUNTS_SHA256" in verify
     assert "BASELINE_ROLE_VERSION" in verify
+    assert "BASELINE_PRISMA_HEAD" in verify and "BASELINE_AGATA_HEAD" in verify
+    assert 'test "$prisma_migrations" = "$expected_prisma_migrations"' in verify
+    assert 'test "$prisma_checksums" = "$expected_prisma_checksums"' in verify
+    assert "find packages/db/prisma/migrations" not in verify
 
 
 def test_core_consumers_are_updated_one_role_at_a_time_and_partial_failure_fails_closed():

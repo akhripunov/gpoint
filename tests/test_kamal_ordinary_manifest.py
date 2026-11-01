@@ -66,7 +66,13 @@ def ordinary_args(output: Path):
         "--run-id", "42", "--attempt", "2", "--deployment-id", "987",
         "--db-container-id", DB_ID, "--redis-container-id", REDIS_ID,
         "--prisma-head", "20261022110000_eros_gpoint_message_state", "--agata-head", "agata0012",
-        "--public-routes-verified", "--migration-parity-verified",
+        "--prisma-migrations", "20261015130000_baseline,20261022110000_eros_gpoint_message_state",
+        "--prisma-checksums", "20261015130000_baseline=" + "1" * 64 + ",20261022110000_eros_gpoint_message_state=" + "2" * 64,
+        "--baseline-prisma-head", "20261022110000_eros_gpoint_message_state",
+        "--baseline-prisma-migrations", "20261015130000_baseline,20261022110000_eros_gpoint_message_state",
+        "--baseline-prisma-checksums", "20261015130000_baseline=" + "1" * 64 + ",20261022110000_eros_gpoint_message_state=" + "2" * 64,
+        "--baseline-agata-head", "agata0012",
+        "--public-routes-verified", "--migration-compatibility-verified",
     ]
 
 
@@ -99,6 +105,10 @@ def test_ordinary_manifest_binds_services_database_proxy_tls_and_routes(tmp_path
     assert manifest["publicIngress"] == {"proxy": "kamal-proxy", "httpPort": 80, "httpsPort": 443,
                                          "tls": "PASS", "routes": "PASS"}
     assert manifest["preservation"]["gsales"] == "STOPPED"
+    assert manifest["migrationHeads"]["prismaHead"] == "20261022110000_eros_gpoint_message_state"
+    assert len(manifest["migrationHeads"]["prismaAppliedChecksums"]) == 2
+    assert manifest["migrationHeads"]["liveBaselineUnchanged"] is True
+    assert manifest["evidence"]["migrationCompatibility"] == "PASS"
     assert f"GPOINT_KAMAL_MANIFEST_SHA256={hashlib.sha256(raw).hexdigest()}" in result.stdout
     assert output.stat().st_mode & 0o777 == 0o600
 
@@ -121,4 +131,19 @@ def test_ordinary_manifest_refuses_running_legacy_compose_worker(tmp_path):
                             capture_output=True, text=True, env=env)
     assert result.returncode != 0
     assert "legacy Compose service must remain stopped: worker" in result.stderr
+    assert not output.exists()
+
+
+def test_ordinary_manifest_refuses_database_migration_baseline_drift(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    setup_host_stubs(bin_dir)
+    output = tmp_path / "ordinary-manifest.json"
+    args = ordinary_args(output)
+    index = args.index("--baseline-agata-head") + 1
+    args[index] = "agata0011"
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    result = subprocess.run([sys.executable, str(WRITER), *args], capture_output=True, text=True, env=env)
+    assert result.returncode != 0
+    assert "migration baseline changed" in result.stderr
     assert not output.exists()

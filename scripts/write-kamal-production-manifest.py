@@ -66,10 +66,12 @@ def parser() -> argparse.ArgumentParser:
         result.add_argument(f"--{name}")
     for name in ("media-backup-path", "media-backup-sha", "media-source-manifest-sha",
                  "media-restore-manifest-sha", "media-file-count", "media-directory-count",
-                 "media-total-bytes", "media-backup-bytes", "prisma-head", "agata-head"):
+                 "media-total-bytes", "media-backup-bytes", "prisma-head", "agata-head",
+                 "prisma-migrations", "prisma-checksums", "baseline-prisma-head",
+                 "baseline-prisma-migrations", "baseline-prisma-checksums", "baseline-agata-head"):
         result.add_argument(f"--{name}")
     result.add_argument("--public-routes-verified", action="store_true")
-    result.add_argument("--migration-parity-verified", action="store_true")
+    result.add_argument("--migration-compatibility-verified", action="store_true")
     result.add_argument("--postgres-acl-fingerprint")
     return result
 
@@ -103,8 +105,29 @@ def main() -> int:
         if (not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", args.prisma_head or "")
                 or not re.fullmatch(r"[A-Za-z0-9_]+", args.agata_head or "")):
             raise SystemExit("ordinary manifest needs verified Prisma and AGATA migration heads")
-        if not args.public_routes_verified or not args.migration_parity_verified:
-            raise SystemExit("ordinary manifest needs verified public routes and read-only migration parity")
+        migrations = (args.prisma_migrations or "").split(",")
+        checksums = (args.prisma_checksums or "").split(",")
+        if (not migrations or any(not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", value) for value in migrations)
+                or len(migrations) != len(set(migrations)) or migrations[-1] != args.prisma_head):
+            raise SystemExit("ordinary manifest needs the exact applied Prisma migration inventory")
+        checksum_rows = {}
+        for value in checksums:
+            name, separator, checksum = value.partition("=")
+            if (not separator or name in checksum_rows
+                    or not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", name)
+                    or not SHA256.fullmatch(checksum)):
+                raise SystemExit("ordinary manifest Prisma checksums are malformed")
+            checksum_rows[name] = checksum
+        if set(checksum_rows) != set(migrations):
+            raise SystemExit("ordinary manifest Prisma checksums do not match applied migrations")
+        baseline_migrations = (args.baseline_prisma_migrations or "").split(",")
+        baseline_checksums = (args.baseline_prisma_checksums or "").split(",")
+        if (args.baseline_prisma_head != args.prisma_head
+                or args.baseline_agata_head != args.agata_head
+                or baseline_migrations != migrations or baseline_checksums != checksums):
+            raise SystemExit("ordinary manifest live DB migration baseline changed during Deploy")
+        if not args.public_routes_verified or not args.migration_compatibility_verified:
+            raise SystemExit("ordinary manifest needs verified public routes and live-schema compatibility")
     for field in ("run_id", "attempt", "deployment_id"):
         if not getattr(args, field).isdigit() or int(getattr(args, field)) <= 0:
             raise SystemExit(f"{field.replace('_', ' ')} must be a positive integer")
@@ -242,7 +265,7 @@ def main() -> int:
             "gsales": "STOPPED",
             "gsalesContainers": stopped_gsales,
             "databaseMigrationsAppliedByRelease": False,
-            "migrationParity": "PASS",
+            "migrationCompatibility": "PASS",
         }
         public_ingress = {"proxy": "kamal-proxy", "httpPort": 80, "httpsPort": 443,
                           "tls": "PASS", "routes": "PASS"}
@@ -285,7 +308,7 @@ def main() -> int:
                             "restoredManifestSha256": args.media_restore_manifest_sha},
             "mediaRestore": {"result": "PASS", "manifestSha256": args.media_restore_manifest_sha},
         } if args.mode == "cutover" else {
-            "publicRoutes": "PASS", "migrationParity": "PASS",
+            "publicRoutes": "PASS", "migrationCompatibility": "PASS",
             "prismaHead": args.prisma_head, "agataHead": args.agata_head,
         }),
         "preservation": ({
@@ -302,7 +325,20 @@ def main() -> int:
             "agataCandidate": args.agata_candidate_head,
             "agataLive": args.agata_live_head, "agataParity": "PASS",
             "prismaStatus": "UP_TO_DATE",
-        } if args.mode == "cutover" else {"parity": "PASS", "databaseWrites": False}),
+        } if args.mode == "cutover" else {
+            "prismaHead": args.prisma_head,
+            "prismaAppliedMigrations": migrations,
+            "prismaAppliedChecksums": checksum_rows,
+            "agataHead": args.agata_head,
+            "baselineUnchanged": {
+                "prismaHead": args.baseline_prisma_head,
+                "prismaMigrations": baseline_migrations,
+                "prismaChecksums": dict(value.split("=", 1) for value in baseline_checksums),
+                "agataHead": args.baseline_agata_head,
+            },
+            "liveBaselineUnchanged": True,
+            "databaseWrites": False,
+        }),
         "verified": ([
             "public-api-health", "public-miniapp-routes", "exact-image-digests-and-git-sha",
             "service-health", "media-read-write", "worker-bot-singletons",
@@ -311,7 +347,7 @@ def main() -> int:
         ] if args.mode == "cutover" else [
             "public-api-health", "public-media-route", "public-miniapp-routes",
             "exact-image-digests-and-git-sha", "service-health", "kamal-proxy-public-tls",
-            "postgres-redis-preserved", "read-only-migration-parity", "gsales-stopped",
+            "postgres-redis-preserved", "live-schema-compatibility-and-baseline-unchanged", "gsales-stopped",
         ]),
     }
     output_path = Path(args.output)
