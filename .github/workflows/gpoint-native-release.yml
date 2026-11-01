@@ -168,8 +168,6 @@ jobs:
       app_digest: ${{ steps.app.outputs.digest }}
       agata_digest: ${{ steps.agata.outputs.digest }}
       miniapp_digest: ${{ steps.miniapp.outputs.digest }}
-      app_image_id: ${{ steps.image_readback.outputs.app_image_id }}
-      agata_image_id: ${{ steps.image_readback.outputs.agata_image_id }}
       app_image_bytes: ${{ steps.image_readback.outputs.app_image_bytes }}
       agata_image_bytes: ${{ steps.image_readback.outputs.agata_image_bytes }}
     steps:
@@ -299,10 +297,8 @@ jobs:
               app) image=ghcr.io/akhripunov/gpoint-runtime; digest="$APP_DIGEST" ;;
               agata) image=ghcr.io/akhripunov/gpoint-agata-runtime; digest="$AGATA_DIGEST" ;;
             esac
-            image_id="$(docker image inspect "$image@$digest" --format '{{.Id}}')"
             image_bytes="$(docker image inspect "$image@$digest" --format '{{.Size}}')"
-            [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ && "$image_bytes" =~ ^[0-9]+$ ]]
-            echo "${role}_image_id=$image_id" >> "$GITHUB_OUTPUT"
+            [[ "$image_bytes" =~ ^[0-9]+$ ]]
             echo "${role}_image_bytes=$image_bytes" >> "$GITHUB_OUTPUT"
           done
 
@@ -850,8 +846,6 @@ jobs:
         env:
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
-          APP_IMAGE_ID: ${{ needs.build.outputs.app_image_id }}
-          AGATA_IMAGE_ID: ${{ needs.build.outputs.agata_image_id }}
           APP_IMAGE_BYTES: ${{ needs.build.outputs.app_image_bytes }}
           AGATA_IMAGE_BYTES: ${{ needs.build.outputs.agata_image_bytes }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -859,7 +853,6 @@ jobs:
           set -euo pipefail
           [[ "$APP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$AGATA_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "$APP_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ && "$AGATA_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$APP_IMAGE_BYTES" =~ ^[0-9]+$ && "$AGATA_IMAGE_BYTES" =~ ^[0-9]+$ ]]
           app_image="ghcr.io/akhripunov/gpoint-runtime@$APP_DIGEST"
           agata_image="ghcr.io/akhripunov/gpoint-agata-runtime@$AGATA_DIGEST"
@@ -927,18 +920,17 @@ jobs:
           ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- \
             "$stage" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
             "$app_image" "$agata_image" "$queue_sha" "$mapping_sha" "$state_sha" "$agata_sha" \
-            "$APP_IMAGE_ID" "$AGATA_IMAGE_ID" "$APP_IMAGE_BYTES" "$AGATA_IMAGE_BYTES" \
+            "$APP_IMAGE_BYTES" "$AGATA_IMAGE_BYTES" \
             "$evidence_path" "$evidence_sha" "$db_backup_sha" "$media_backup_sha" <<'REMOTE_REHEARSAL'
           set -euo pipefail
           stage="$1"; candidate="$2"; run_id="$3"; attempt="$4"
           app_image="$5"; agata_image="$6"; queue_sha="$7"; mapping_sha="$8"; state_sha="$9"; agata_sha="${10}"
-          app_image_id="${11}"; agata_image_id="${12}"; app_image_bytes="${13}"; agata_image_bytes="${14}"
-          evidence_path="${15}"; evidence_sha="${16}"; expected_db_sha="${17}"; expected_media_sha="${18}"
+          app_image_bytes="${11}"; agata_image_bytes="${12}"
+          evidence_path="${13}"; evidence_sha="${14}"; expected_db_sha="${15}"; expected_media_sha="${16}"
           [[ "$stage" == "/run/gpoint-migration-rehearsal-${run_id}-${attempt}" ]]
           [[ "$candidate" =~ ^[0-9a-f]{40}$ && "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
           [[ "$app_image" =~ ^ghcr\.io/akhripunov/gpoint-runtime@sha256:[0-9a-f]{64}$ ]]
           [[ "$agata_image" =~ ^ghcr\.io/akhripunov/gpoint-agata-runtime@sha256:[0-9a-f]{64}$ ]]
-          [[ "$app_image_id" =~ ^sha256:[0-9a-f]{64}$ && "$agata_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$app_image_bytes" =~ ^[0-9]+$ && "$agata_image_bytes" =~ ^[0-9]+$ ]]
           [[ "$evidence_path" == /opt/gpoint/release-logs/7a1afde1d94c324828565a36cb7dd90f422dee3d/kamal-backup-restore-41223019715-1.txt ]]
           [[ "$evidence_sha" =~ ^[0-9a-f]{64}$ && "$expected_db_sha" =~ ^[0-9a-f]{64}$ && "$expected_media_sha" =~ ^[0-9a-f]{64}$ ]]
@@ -1022,15 +1014,6 @@ jobs:
           trap cleanup EXIT
           trap 'exit 130' INT
           trap 'exit 143' TERM
-          verify_image_id() {
-            local role="$1" image="$2" expected_id="$3" actual_id
-            actual_id="$(docker image inspect "$image" --format '{{.Id}}')"
-            if [[ "$actual_id" != "$expected_id" ]]; then
-              printf 'GPOINT_MIGRATION_IMAGE_ID_MISMATCH role=%s expected=%s actual=%s\n' \
-                "$role" "$expected_id" "$actual_id" >&2
-              return 1
-            fi
-          }
           docker ps -q | sort > "$stage/containers.before"
           docker volume ls -q | sort > "$stage/volumes.before"
           docker network ls -q | sort > "$stage/networks.before"
@@ -1043,8 +1026,6 @@ jobs:
           chmod 0600 "$stage/docker-config/config.json"
           current_step=ghcr-app-pull
           DOCKER_CONFIG="$stage/docker-config" docker pull --platform linux/amd64 "$app_image" >/dev/null
-          current_step=ghcr-app-image-id
-          verify_image_id app "$app_image" "$app_image_id"
           current_step=ghcr-app-image-size
           test "$(docker image inspect "$app_image" --format '{{.Size}}')" = "$app_image_bytes"
           current_step=ghcr-app-platform
@@ -1055,8 +1036,6 @@ jobs:
           docker image inspect "$app_image" --format '{{json .RepoDigests}}' | grep -Fq "$app_image"
           current_step=ghcr-agata-pull
           DOCKER_CONFIG="$stage/docker-config" docker pull --platform linux/amd64 "$agata_image" >/dev/null
-          current_step=ghcr-agata-image-id
-          verify_image_id agata "$agata_image" "$agata_image_id"
           current_step=ghcr-agata-image-size
           test "$(docker image inspect "$agata_image" --format '{{.Size}}')" = "$agata_image_bytes"
           current_step=ghcr-agata-platform

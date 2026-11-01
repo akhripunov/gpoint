@@ -77,7 +77,6 @@ def test_manual_migration_rehearsal_uses_existing_backup_without_deployment_or_k
     assert "GPOINT_MIGRATION_BACKUP_EVIDENCE" in body
     assert "GPOINT_MIGRATION_BACKUP_FRESHNESS=PASS" in body
     assert "docker_free" in body and "insufficient Docker storage" in body
-    assert 'actual_id="$(docker image inspect "$image" --format \'{{.Id}}\')"' in body
     assert 'docker pull --platform linux/amd64 "$app_image"' in body
     assert 'docker pull --platform linux/amd64 "$agata_image"' in body
     rehearsal_step = next(step for step in rehearsal["steps"]
@@ -87,15 +86,15 @@ def test_manual_migration_rehearsal_uses_existing_backup_without_deployment_or_k
     assert "GPOINT_MIGRATION_TEMP_CLEANUP=PASS" in body
     assert "cleanup_status=0" in body
     assert "GPOINT_MIGRATION_STAGE_FAILURE=$current_step" in body
-    assert "GPOINT_MIGRATION_IMAGE_ID_MISMATCH role=%s expected=%s actual=%s" in body
-    assert "verify_image_id app \"$app_image\" \"$app_image_id\"" in body
-    assert "verify_image_id agata \"$agata_image\" \"$agata_image_id\"" in body
+    assert "verify_image_id" not in body
+    assert ".Id}}'" not in body
+    assert "APP_IMAGE_ID" not in body and "AGATA_IMAGE_ID" not in body
     assert "exit \"$rehearsal_status\"" in body
     assert 'current_step=isolated-backup-restore-and-four-migrations' in body
     for image_stage in (
-        "ghcr-app-pull", "ghcr-app-image-id", "ghcr-app-image-size", "ghcr-app-platform",
+        "ghcr-app-pull", "ghcr-app-image-size", "ghcr-app-platform",
         "ghcr-app-source-revision", "ghcr-app-repository-digest", "ghcr-agata-pull",
-        "ghcr-agata-image-id", "ghcr-agata-image-size", "ghcr-agata-platform",
+        "ghcr-agata-image-size", "ghcr-agata-platform",
         "ghcr-agata-source-revision", "ghcr-agata-repository-digest",
     ):
         assert f"current_step={image_stage}" in body
@@ -106,6 +105,42 @@ def test_manual_migration_rehearsal_uses_existing_backup_without_deployment_or_k
     deploy = workflow["jobs"]["deploy"]
     assert "needs.release_intent.outputs.deploy == 'true'" in deploy["if"]
     assert "inputs.migration_rehearsal != true" in deploy["if"]
+
+
+def test_migration_rehearsal_uses_immutable_oci_identity_across_docker_hosts():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    rehearsal = workflow["jobs"]["migration_rehearsal"]
+    body = "\n".join(step.get("run", "") for step in rehearsal["steps"])
+    build = workflow["jobs"]["build"]
+    build_body = "\n".join(step.get("run", "") for step in build["steps"])
+
+    for role, repository in (
+        ("app", "ghcr.io/akhripunov/gpoint-runtime"),
+        ("agata", "ghcr.io/akhripunov/gpoint-agata-runtime"),
+    ):
+        image_var = f"{role}_image"
+        digest_var = "APP_DIGEST" if role == "app" else "AGATA_DIGEST"
+        assert f'[[ "${digest_var}" =~ ^sha256:[0-9a-f]{{64}}$ ]]' in body
+        assert f'{image_var}="{repository}@$' in body
+        assert f'[[ "${image_var}" =~ ^ghcr\\.io/akhripunov/' in body
+        assert f'@sha256:[0-9a-f]{{64}}$ ]]' in body
+        assert f'docker pull --platform linux/amd64 "${image_var}"' in body
+        assert 'test "$(docker image inspect "$app_image" --format \'{{.Os}} {{.Architecture}}\')" = \'linux amd64\'' in body
+        assert 'test "$(docker image inspect "$agata_image" --format \'{{.Os}} {{.Architecture}}\')" = \'linux amd64\'' in body
+        assert '"org.opencontainers.image.revision"' in body
+        assert 'test "$(docker image inspect "$app_image" --format \'{{index .Config.Labels "org.opencontainers.image.revision"}}\')" = "$candidate"' in body
+        assert 'test "$(docker image inspect "$agata_image" --format \'{{index .Config.Labels "org.opencontainers.image.revision"}}\')" = "$candidate"' in body
+        assert 'docker image inspect "$app_image" --format \'{{json .RepoDigests}}\' | grep -Fq "$app_image"' in body
+        assert 'docker image inspect "$agata_image" --format \'{{json .RepoDigests}}\' | grep -Fq "$agata_image"' in body
+        assert f'current_step=ghcr-{role}-repository-digest' in body
+
+    assert build["outputs"]["app_digest"] == "${{ steps.app.outputs.digest }}"
+    assert build["outputs"]["agata_digest"] == "${{ steps.agata.outputs.digest }}"
+    assert "app_image_id" not in build.get("outputs", {})
+    assert "agata_image_id" not in build.get("outputs", {})
+    assert "image inspect" in build_body and "{{.Id}}" not in build_body
+    assert "{{json .RepoDigests}}" in build_body
+    assert "GPOINT_MIGRATION_IMAGE_ID_MISMATCH" not in body
 
 
 def test_migration_rehearsal_distinguishes_synthetic_rls_from_production_grants():
