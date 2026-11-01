@@ -52,13 +52,20 @@ Worker/AGATA и накопленные Telegram updates переживают к�
 записывается как `RECOVERY_REQUIRED`; автоматический rollback и повторный Apply
 запрещены до read-only reconciliation.
 
+Проверки количества контейнеров и source revision для промежуточного перехода
+выполняются read-only helper `scripts/verify-kamal-role.sh`, переданным через
+проверенное SSH-соединение на `GPOINT_PRODUCTION_HOST`. Docker CLI GitHub runner
+не используется как источник состояния VPS.
+
 Защищённый rollback доступен только как ручной exact-main dispatch с явным
 OWNER approval, exact target SHA и ID предыдущего успешного Native Production
 Deployment. Проверяются последний статус SUCCESS, связанный успешный Native
 Release run/build, SHA-256-bound production manifest для всех шести ролей,
 GHCR immutable digests и provenance, retained target containers, совместимость
 текущих Prisma/Alembic heads и сохранность DB/Redis IDs и mounts. Kamal rollback
-выполняется по одной роли: consumers раньше API. Полный runtime Verify должен
+выполняется по одной роли: consumers раньше API. Закреплённый Kamal 2.12.0
+вызывается как `kamal rollback <version> --roles <role>`: версия — позиционный
+аргумент stock CLI. Полный runtime Verify должен
 завершиться до GitHub Deployment SUCCESS. Любая неоднозначность блокирует
 операцию; production DB migrations автоматически не откатываются. Пока нет
 предыдущего Native Release с подтверждённым successful manifest, rollback

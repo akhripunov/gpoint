@@ -600,14 +600,8 @@ jobs:
           GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.miniapp.yml
           verify_single_running_role() {
-            local prefix="$1" version="$2" expected_sha="$3"
-            local count container revision
-            count="$(docker ps -q --filter "name=^/${prefix}-" | wc -l | tr -d ' ')"
-            test "$count" = 1 || { echo "partial Kamal transition: expected one running role $prefix, found $count" >&2; return 1; }
-            container="$(docker ps -q --filter "name=^/${prefix}-${version}$")"
-            test -n "$container" || { echo "partial Kamal transition: candidate role is not running: $prefix" >&2; return 1; }
-            revision="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$container")"
-            test "$revision" = "$expected_sha" || { echo "partial Kamal transition: wrong source revision for $prefix" >&2; return 1; }
+            ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$@" \
+              < "$GITHUB_WORKSPACE/scripts/verify-kamal-role.sh"
           }
           GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker kamal app stop --roles worker --config-file config/deploy.yml
           GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker \
@@ -1076,21 +1070,24 @@ jobs:
               --env GPOINT_KAMAL_SERVICE --env KAMAL_ROLES \
               ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 "$@"
           }
-          verify_role() { local p="$1"; local c; c="$(docker ps -q --filter "name=^/${p}-")"; test "$(wc -l <<< "$c" | tr -d ' ')" = 1; test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$c")" = "$TARGET_SHA"; }
+          verify_role() {
+            ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$1" "$TARGET_VERSION" "$TARGET_SHA" \
+              < "$GITHUB_WORKSPACE/scripts/verify-kamal-role.sh"
+          }
           GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker kamal app stop --roles worker --config-file config/deploy.yml
-          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker kamal rollback --version "$TARGET_VERSION" --roles worker --config-file config/deploy.yml
+          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker kamal rollback "$TARGET_VERSION" --roles worker --config-file config/deploy.yml
           verify_role gpoint-core-worker
           GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot kamal app stop --roles bot --config-file config/deploy.yml
-          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot kamal rollback --version "$TARGET_VERSION" --roles bot --config-file config/deploy.yml
+          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot kamal rollback "$TARGET_VERSION" --roles bot --config-file config/deploy.yml
           verify_role gpoint-core-bot
           GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker kamal app stop --roles memory-worker --config-file config/deploy.agata.yml
-          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker kamal rollback --version "$TARGET_VERSION" --roles memory-worker --config-file config/deploy.agata.yml
+          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker kamal rollback "$TARGET_VERSION" --roles memory-worker --config-file config/deploy.agata.yml
           verify_role gpoint-agata-memory-worker
-          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web kamal rollback --version "$TARGET_VERSION" --roles web --config-file config/deploy.miniapp.yml
+          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web kamal rollback "$TARGET_VERSION" --roles web --config-file config/deploy.miniapp.yml
           verify_role gpoint-miniapp-web
-          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api kamal rollback --version "$TARGET_VERSION" --roles api --config-file config/deploy.agata.yml
+          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api kamal rollback "$TARGET_VERSION" --roles api --config-file config/deploy.agata.yml
           verify_role gpoint-agata-api
-          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api kamal rollback --version "$TARGET_VERSION" --roles api --config-file config/deploy.yml
+          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api kamal rollback "$TARGET_VERSION" --roles api --config-file config/deploy.yml
           verify_role gpoint-core-api
       - name: Verify rollback Runtime and preserve databases before SUCCESS
         id: verify
