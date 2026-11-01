@@ -60,6 +60,33 @@ def test_diagnostic_prep_push_requires_the_exact_four_file_scope():
         ) == "BLOCK"
 
 
+def test_oci_identity_prep_push_allows_only_the_workflow_and_its_regression_test():
+    exact_scope = {
+        ".github/workflows/gpoint-native-release.yml",
+        "tests/test_kamal_native_automatic_release.py",
+    }
+    assert exact_scope == MODULE.OCI_IDENTITY_PREP_ONLY_PATHS
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main",
+        commit_message="ME-52 OCI identity check\nGPOINT_MIGRATION_REHEARSAL_PREP=1",
+        changed_paths=exact_scope,
+    ) == "PREPARE_ONLY"
+    for invalid_scope in (
+        exact_scope | {"apps/api/src/main.ts"},
+        exact_scope - {"tests/test_kamal_native_automatic_release.py"},
+        exact_scope | {"scripts/native_release_intent.py"},
+    ):
+        assert MODULE.classify_push(
+            event_name="push", ref="refs/heads/main",
+            commit_message="ME-52 OCI identity check\nGPOINT_MIGRATION_REHEARSAL_PREP=1",
+            changed_paths=invalid_scope,
+        ) == "BLOCK"
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main",
+        commit_message="ME-52 OCI identity check", changed_paths=exact_scope,
+    ) == "DEPLOY"
+
+
 def test_repeated_diagnostic_prep_marker_blocks_instead_of_loosening_scope():
     assert MODULE.classify_push(
         event_name="push", ref="refs/heads/main",

@@ -17,6 +17,11 @@ PREP_ONLY_PATHS = frozenset({
     "tests/test_kamal_native_automatic_release.py",
     "tests/test_native_release_intent.py",
 })
+OCI_IDENTITY_PREP_ONLY_PATHS = frozenset({
+    ".github/workflows/gpoint-native-release.yml",
+    "tests/test_kamal_native_automatic_release.py",
+})
+PREP_ONLY_SCOPES = (PREP_ONLY_PATHS, OCI_IDENTITY_PREP_ONLY_PATHS)
 
 
 def classify_push(*, event_name: str, ref: str, commit_message: str,
@@ -30,7 +35,7 @@ def classify_push(*, event_name: str, ref: str, commit_message: str,
     message_lines = [line for line in commit_message.splitlines() if line.strip()]
     if marker_lines != [PREP_MARKER] or not message_lines or message_lines[-1] != PREP_MARKER:
         return "BLOCK"
-    if changed_paths != PREP_ONLY_PATHS:
+    if changed_paths not in PREP_ONLY_SCOPES:
         return "BLOCK"
     return "PREPARE_ONLY"
 
