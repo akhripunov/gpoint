@@ -1,8 +1,13 @@
 # GPoint scheduled VPS backups
 
-The Native Release workflow installs the backup runner on the GPoint VPS after
-Runtime Verify. It enables `gpoint-backup.timer`, runs one complete backup and
-isolated restore, and only then records the GitHub Deployment as successful.
+The Native Release workflow does not install or update the backup runner. A
+separate `backup_maintenance` dispatch installs the versioned runner and systemd
+units, enables `gpoint-backup.timer`, and performs one initial full backup plus
+isolated restore. It requires the exact current main SHA and explicit OWNER
+approval, uses the existing protected production environment, and creates no
+GitHub Deployment. Regular application releases only read the timer state and
+the freshness/integrity/restore evidence for the existing backup; they do not
+reinstall the timer or force a backup run.
 
 The timer runs daily at 03:00 UTC with a persistent catch-up and up to 20 minutes
 of scheduling jitter. It backs up the `gpoint` PostgreSQL database and the full
@@ -27,5 +32,6 @@ nonzero; inspect `journalctl -u gpoint-backup.service` before retrying.
 
 These scheduled copies are VPS-local recovery copies. They do not satisfy or
 replace the separately required offsite backup/read-back/isolated-restore gate
-in the first Kamal cutover workflow. Changing that policy requires an explicit
-OWNER amendment to the canonical GPoint release rules and cutover runbook.
+in the first Kamal cutover workflow. That gate remains unchanged. Changing the
+offsite policy requires an explicit OWNER amendment to the canonical GPoint
+release rules and cutover runbook.

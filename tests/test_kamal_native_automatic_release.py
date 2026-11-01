@@ -11,12 +11,39 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     events = workflow.get("on", workflow.get(True))
     assert events["push"]["branches"] == ["main"]
+    assert events["pull_request"]["branches"] == ["main"]
     deploy = workflow["jobs"]["deploy"]
     assert "build" in deploy["needs"]
     assert "push" in deploy.get("if", "")
     assert "refs/heads/main" in deploy.get("if", "")
     assert "workflow_dispatch" in deploy.get("if", "")
     assert deploy["environment"] == {"name": "production", "deployment": False}
+    build = workflow["jobs"]["build"]
+    assert "release_intent" in build["needs"]
+    assert "workspace" in build["needs"] and "python" in build["needs"]
+    assert "outputs.mode == 'DEPLOY'" in build["if"]
+    assert "outputs.mode == 'REHEARSAL'" in build["if"]
+    assert "environment" not in build
+    assert "packages: write" in WORKFLOW.read_text(encoding="utf-8")
+    assert {"workspace", "python", "build", "release_intent"}.issubset(deploy["needs"])
+
+
+def test_release_event_routing_is_fail_closed_and_does_not_give_prs_prod_access():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    intent = workflow["jobs"]["release_intent"]
+    assert "pull_request" in intent["if"]
+    assert intent["permissions"] == {"contents": "read"}
+    intent_script = next(step.get("run", "") for step in intent["steps"]
+                         if step.get("id") == "intent")
+    assert "--backup-maintenance" in intent_script
+    assert "GPOINT_MIGRATION_REHEARSAL_PREP" not in intent_script
+    assert 'return 2' in (ROOT / "scripts/native_release_intent.py").read_text()
+    deploy = workflow["jobs"]["deploy"]
+    assert "needs.release_intent.outputs.deploy == 'true'" in deploy["if"]
+    assert "pull_request" not in deploy["if"]
+    assert "production" not in workflow["jobs"]["workspace"].get("environment", {})
+    assert "production" not in workflow["jobs"]["python"].get("environment", {})
+    assert workflow["permissions"] == {"contents": "read"}
 
 
 def test_runtime_verify_rechecks_public_and_all_six_kamal_roles_after_deploy():
@@ -45,14 +72,40 @@ def test_runtime_verify_rechecks_public_and_all_six_kamal_roles_after_deploy():
         assert expected in verify
 
 
-def test_native_release_installs_vps_backup_timer_only_after_verify():
+def test_ordinary_release_only_reads_backup_state_and_never_installs_or_runs_timer():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     deploy = workflow.split("  deploy:\n", 1)[1]
     verify_step = deploy.index("name: Verify public routes and exact running services")
-    install_step = deploy.index("name: Install and enable scheduled VPS backups")
+    backup_step = deploy.index("name: Verify existing scheduled VPS backups")
     status_step = deploy.index("name: Record GitHub Deployment result against the same attempt")
-    assert verify_step < install_step < status_step
-    assert "systemctl enable --now gpoint-backup.timer" in deploy[install_step:status_step]
+    assert verify_step < backup_step < status_step
+    backup = deploy[backup_step:status_step]
+    assert "systemctl is-enabled gpoint-backup.timer" in backup
+    assert "systemctl is-active --quiet gpoint-backup.timer" in backup
+    assert "gpoint-backup-policy.py" in backup and "freshness" in backup
+    assert "systemctl enable" not in backup
+    assert "systemctl start gpoint-backup.service" not in backup
+    assert "systemctl daemon-reload" not in backup
+
+
+def test_backup_timer_setup_is_a_separate_exact_sha_owner_authorized_operation():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    events = workflow.get("on", workflow.get(True))
+    inputs = events["workflow_dispatch"]["inputs"]
+    assert inputs["backup_maintenance"]["type"] == "boolean"
+    job = workflow["jobs"]["backup_maintenance"]
+    assert "refs/heads/main" in job["if"]
+    assert "inputs.backup_maintenance == true" in job["if"]
+    assert "BACKUP_MAINTENANCE" in job["if"]
+    assert job["environment"] == {"name": "production", "deployment": False}
+    assert job["permissions"] == {"contents": "read"}
+    body = "\n".join(step.get("run", "") for step in job["steps"])
+    assert "systemctl enable --now gpoint-backup.timer" in body
+    assert "systemctl start gpoint-backup.service" in body
+    assert "github.event_name" in job["if"]
+    assert "APPROVE_PRODUCTION" in body
+    assert "GITHUB_SHA" in body
+    assert "repos/$GITHUB_REPOSITORY/deployments" not in body
 
 
 def test_first_cutover_offsite_restore_gate_is_not_removed():

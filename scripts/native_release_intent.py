@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed trigger classification for allowlisted ME-52 rehearsal setup pushes."""
+"""Fail-closed event and path routing for GPoint Native Release."""
 
 from __future__ import annotations
 
@@ -10,66 +10,97 @@ import sys
 from pathlib import Path
 
 
-PREP_MARKER = "GPOINT_MIGRATION_REHEARSAL_PREP=1"
-PREP_ONLY_PATHS = frozenset({
-    ".github/workflows/gpoint-native-release.yml",
-    "scripts/native_release_intent.py",
-    "tests/test_kamal_native_automatic_release.py",
-    "tests/test_native_release_intent.py",
-})
-OCI_IDENTITY_PREP_ONLY_PATHS = frozenset({
-    ".github/workflows/gpoint-native-release.yml",
-    "tests/test_kamal_native_automatic_release.py",
-})
-BACKUP_REHEARSAL_FIX_PREP_ONLY_PATHS = frozenset({
-    "scripts/native_release_intent.py",
-    "tests/test_native_release_intent.py",
-    "scripts/gpoint-scheduled-backup.py",
-    "tests/test_gpoint_scheduled_backup.py",
-})
-RESTORE_IMAGE_ID_PREP_ONLY_PATHS = frozenset({
-    "scripts/native_release_intent.py",
-    "tests/test_native_release_intent.py",
-    "scripts/verify-gpoint-scheduled-backup-restore.sh",
-    "tests/test_gpoint_scheduled_backup.py",
-})
-PREP_ONLY_SCOPES = (
-    PREP_ONLY_PATHS,
-    OCI_IDENTITY_PREP_ONLY_PATHS,
-    BACKUP_REHEARSAL_FIX_PREP_ONLY_PATHS,
-    RESTORE_IMAGE_ID_PREP_ONLY_PATHS,
+APP_PREFIXES = (
+    "apps/",
+    "services/agata/",
+    "packages/agata-client/",
+    "packages/contracts/",
+    "packages/db/",
 )
+APP_ROOT_FILES = frozenset({
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+})
+OPERATIONAL_PREFIXES = (
+    ".agents/",
+    ".codex/",
+    ".github/",
+    "config/",
+    "design/",
+    "docs/",
+    "infra/",
+    "scripts/",
+    "services/gsales/",
+    "services/eros-engine/",
+    "systemd/",
+    "tests/",
+    "tools/",
+)
+SCHEMA_FILENAMES = frozenset({"schema.prisma"})
+TEST_DIRECTORY_NAMES = frozenset({"test", "tests"})
 
 
-def classify_push(*, event_name: str, ref: str, commit_message: str,
+def _path_kind(path: str) -> str:
+    normalized = path.strip("/")
+    parts = normalized.split("/")
+    if not normalized or normalized.startswith("../") or "/../" in normalized:
+        return "unknown"
+    if "migrations" in parts or Path(normalized).name in SCHEMA_FILENAMES:
+        return "schema"
+    if any(part in TEST_DIRECTORY_NAMES for part in parts):
+        return "test"
+    if normalized.startswith("packages/gpoint-codex-mcp/"):
+        return "ops"
+    if normalized in APP_ROOT_FILES:
+        return "app"
+    if normalized.startswith(APP_PREFIXES):
+        return "app"
+    if normalized.startswith(OPERATIONAL_PREFIXES):
+        return "ops"
+    if normalized in {"AGENTS.md", "README.md", "pyproject.toml"}:
+        return "ops"
+    return "unknown"
+
+
+def classify_push(*, event_name: str, ref: str,
                   changed_paths: set[str] | frozenset[str]) -> str:
     if event_name != "push" or ref != "refs/heads/main":
         return "NO_DEPLOY"
-    marker_lines = [line for line in commit_message.splitlines()
-                    if line.startswith("GPOINT_MIGRATION_REHEARSAL_PREP=")]
-    if not marker_lines:
+    if not changed_paths:
+        return "BLOCK"
+    kinds = {_path_kind(path) for path in changed_paths}
+    if "schema" in kinds or "unknown" in kinds:
+        return "BLOCK"
+    has_app = "app" in kinds
+    has_ops = "ops" in kinds
+    if has_app and has_ops:
+        return "BLOCK"
+    if has_app:
         return "DEPLOY"
-    message_lines = [line for line in commit_message.splitlines() if line.strip()]
-    if marker_lines != [PREP_MARKER] or not message_lines or message_lines[-1] != PREP_MARKER:
-        return "BLOCK"
-    if changed_paths not in PREP_ONLY_SCOPES:
-        return "BLOCK"
     return "PREPARE_ONLY"
 
 
 def classify_dispatch(*, ref: str, candidate_sha: str, github_sha: str, actor: str,
                       repository_owner: str, migration_rehearsal: bool,
-                      approve_production: bool) -> tuple[str, bool]:
+                      approve_production: bool,
+                      backup_maintenance: bool = False) -> tuple[str, bool]:
+    exact = bool(re.fullmatch(r"[0-9a-f]{40}", candidate_sha)) and candidate_sha == github_sha
+    owner = bool(repository_owner) and actor.lower() == repository_owner.lower()
+    if migration_rehearsal and backup_maintenance:
+        return "INVALID_REHEARSAL", False
     if migration_rehearsal:
-        exact = bool(re.fullmatch(r"[0-9a-f]{40}", candidate_sha)) and candidate_sha == github_sha
-        owner = bool(repository_owner) and actor.lower() == repository_owner.lower()
         if (ref == "refs/heads/main" and exact and owner and not approve_production):
             return "REHEARSAL", False
         return "INVALID_REHEARSAL", False
-    if (ref == "refs/heads/main"
-            and re.fullmatch(r"[0-9a-f]{40}", candidate_sha)
-            and candidate_sha == github_sha):
+    if backup_maintenance:
+        if (ref == "refs/heads/main" and exact and owner and approve_production):
+            return "BACKUP_MAINTENANCE", False
+        return "INVALID_BACKUP_MAINTENANCE", False
+    if ref == "refs/heads/main" and exact and owner and approve_production:
         return "DEPLOY", True
+    if ref == "refs/heads/main":
+        return "INVALID_DEPLOY", False
     return "NO_DEPLOY", False
 
 
@@ -94,19 +125,18 @@ def main() -> int:
     parser.add_argument("--ref", required=True)
     parser.add_argument("--sha", required=True)
     parser.add_argument("--before", default="")
-    parser.add_argument("--message", default="")
     parser.add_argument("--candidate-sha", default="")
     parser.add_argument("--actor", default="")
     parser.add_argument("--repository-owner", default="")
     parser.add_argument("--migration-rehearsal", action="store_true")
+    parser.add_argument("--backup-maintenance", action="store_true")
     parser.add_argument("--approve-production", action="store_true")
     args = parser.parse_args()
 
     try:
         if args.event == "push":
             paths = changed_paths(args.before, args.sha)
-            mode = classify_push(event_name=args.event, ref=args.ref,
-                                 commit_message=args.message, changed_paths=paths)
+            mode = classify_push(event_name=args.event, ref=args.ref, changed_paths=paths)
             deploy = mode == "DEPLOY"
         elif args.event == "workflow_dispatch":
             mode, deploy = classify_dispatch(
@@ -114,6 +144,7 @@ def main() -> int:
                 actor=args.actor, repository_owner=args.repository_owner,
                 migration_rehearsal=args.migration_rehearsal,
                 approve_production=args.approve_production,
+                backup_maintenance=args.backup_maintenance,
             )
         else:
             mode, deploy = "NO_DEPLOY", False
@@ -124,6 +155,8 @@ def main() -> int:
 
     print(f"mode={mode}")
     print(f"deploy={'true' if deploy else 'false'}")
+    if mode == "BLOCK" or mode.startswith("INVALID_"):
+        return 2
     return 0
 
 

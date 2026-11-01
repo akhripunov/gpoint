@@ -6,11 +6,19 @@ Production переводится на Kamal отдельным workflow
 `.github/workflows/gpoint-first-kamal-cutover.yml`; он требует свежий inventory,
 encrypted backup/isolated restore, migration parity, паузу старых consumers и
 полную runtime Verify. После cutover обычный workflow
-`.github/workflows/gpoint-native-release.yml` выполняет `main push → Workspace
-CI + Python CI → immutable Core/AGATA/Mini App images → Kamal Deploy → Verify`.
-Ручной dispatch остаётся доступен для exact-SHA production выпуска с явным
-подтверждением владельца. Разовый переход обслуживает
-`.github/workflows/gpoint-first-kamal-cutover.yml`
+`.github/workflows/gpoint-native-release.yml` выполняет для чистых изменений
+приложения `main push → Workspace CI + Python CI → immutable Core/AGATA/Mini App
+images → stock Kamal Deploy → Runtime Verify` без ручного OWNER approval для
+обычного обновления. Exact SHA, immutable digest/provenance, platform/revision,
+production Environment и read-only database parity gates сохраняются.
+
+PR запускает только CI и не получает production Environment/secrets или GHCR
+write. На main push изменённые пути классифицируются: app-only (вместе с его
+тестами) допускает Build/Deploy; только tests/docs/scripts/workflow/operations
+проходит проверки без Build/Deploy; Prisma/Alembic schema/migrations, неизвестный
+scope и смешение приложения с release/infra изменениями блокируют релиз.
+Ручной exact-SHA dispatch остаётся отдельным контролируемым путём для явно
+авторизованных действий.
 
 У workflow есть обязательный `allow_source_update`, по умолчанию `false`.
 Его включают только для отдельно OWNER-approved exact candidate, если при
@@ -27,8 +35,12 @@ material. GSales не собирается и не стартует в обыч�
 Sensitive Detector и ACL/pilot остаются вне обычного release scope.
 
 Production Deploy обычного релиза выполняется только после успешных CI и Build
-на `main`; `production` Environment, секреты, exact SHA/digest, runtime Verify и
-остальные release gates остаются обязательными. Удалять recovery/legacy путь
+на `main`; pending schema changes останавливают его до Kamal и без DDL. После
+Runtime Verify workflow только читает состояние включённого backup timer и
+свежесть существующего проверенного backup/restore. Установка/обновление timer
+и один первичный backup выполняются отдельно через `backup_maintenance` с
+точным main SHA и явным OWNER approval. Offsite gate первого cutover и прочие
+действующие backup/offsite требования не меняются. Удалять recovery/legacy путь
 можно только после отдельной авторизации и успешной production Verify.
 
 ## Текущая модель выпуска и состояния (ME-42)

@@ -382,7 +382,7 @@ restore_dir="$(mktemp -d "${docker_root%/}/.gpoint-kamal-restore-${run_id}-${att
 chmod 700 "$restore_dir"
 restore_password="$(openssl rand -hex 32)"
 restore_container_id="$(docker run -d --name "$restore_name" --label "gpoint.kamal.restore-run=${run_id}-${attempt}" \
-  --network none --env POSTGRES_USER=gpoint_restore_admin \
+  --network none --env POSTGRES_USER=postgres \
   --env POSTGRES_PASSWORD="$restore_password" --env POSTGRES_DB=gpoint \
   --volume "$restore_dir:$pgdata" "$postgres_image")"
 [[ "$restore_container_id" =~ ^[0-9a-f]{64}$ ]]
@@ -390,10 +390,14 @@ restore_container_id="$(docker run -d --name "$restore_name" --label "gpoint.kam
 
 ready=0
 for _ in $(seq 1 60); do
-  if docker exec "$restore_container_id" pg_isready -q -U gpoint_restore_admin -d gpoint; then ready=1; break; fi
+  if docker exec "$restore_container_id" pg_isready -q -U postgres -d gpoint; then ready=1; break; fi
   sleep 2
 done
 test "$ready" = 1
+# The bootstrap `postgres` role is pinned by initdb and cannot be the source
+# of REASSIGN OWNED. Create an ordinary, isolated restore administrator instead.
+docker exec "$restore_container_id" psql -Xq -v ON_ERROR_STOP=1 -U postgres -d gpoint \
+  -c "CREATE ROLE gpoint_restore_admin LOGIN SUPERUSER PASSWORD '$restore_password'" >/dev/null
 if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" == "1" ]]; then
   docker exec "$restore_container_id" psql -Xq -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
     -c "CREATE ROLE gpoint LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD '$restore_password'; CREATE ROLE eros_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS; CREATE ROLE eros_migrator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS; CREATE ROLE eros_ddl NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS; CREATE ROLE gsales_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS; CREATE ROLE gsales_agata_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS" >/dev/null

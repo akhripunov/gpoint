@@ -11,6 +11,18 @@
 
 Effective 2026-10-06 by explicit OWNER decision; applies to future releases.
 
+## GPoint ordinary Native Release
+
+For ordinary GPoint application-only changes, the authorized push to `main` is
+the release trigger described in `docs/release/automation.md`: after exact-SHA
+CI and immutable Build succeed, Kamal Deploy and Runtime Verify run without a
+second `approve_production` dispatch or per-release OWNER approval. The existing
+LOCAL-FIRST publication authorization and main-only `production` Environment
+remain unchanged. This automatic path excludes database/schema migrations,
+release/infra changes, backup-service installation, mixed or unknown scopes;
+those remain separate controlled operations with their existing exact-SHA,
+backup, rehearsal, and OWNER-authorization gates.
+
 ## OWNER release task authorization (task-scoped)
 
 An OWNER task that explicitly requests release of prepared changes through

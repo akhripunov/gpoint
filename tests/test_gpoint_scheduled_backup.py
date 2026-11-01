@@ -168,6 +168,14 @@ def test_migration_restore_path_never_reads_live_database_or_kamal_api():
     assert '/opt/gpoint/media' not in rehearsal_baseline
 
 
+def test_isolated_restore_reassignment_uses_a_non_pinned_admin_role():
+    helper = (Path(__file__).resolve().parents[1] / "scripts/verify-gpoint-scheduled-backup-restore.sh").read_text()
+    assert "--env POSTGRES_USER=postgres" in helper
+    assert "CREATE ROLE gpoint_restore_admin LOGIN SUPERUSER" in helper
+    assert 'pg_isready -q -U postgres -d gpoint' in helper
+    assert 'REASSIGN OWNED BY gpoint_restore_admin TO gpoint' in helper
+
+
 def test_isolated_restore_compares_container_image_id_to_pinned_image_content_id():
     helper = (Path(__file__).resolve().parents[1] / "scripts/verify-gpoint-scheduled-backup-restore.sh").read_text()
     assert 'restore_image_id="$(docker image inspect "$postgres_image" --format \'{{.Id}}\')"' in helper
