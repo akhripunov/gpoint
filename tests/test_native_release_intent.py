@@ -19,6 +19,21 @@ def test_exact_prep_only_push_is_classified_without_deploy():
     ) == "PREPARE_ONLY"
 
 
+def test_exact_fail_closed_workflow_correction_push_remains_prepare_only():
+    correction_paths = {
+        ".github/workflows/gpoint-native-release.yml",
+        "scripts/native_release_intent.py",
+        "tests/test_native_release_intent.py",
+        "tests/test_native_build_boundary.py",
+    }
+    assert MODULE.classify_push(
+        event_name="push",
+        ref="refs/heads/main",
+        commit_message="Update actionlint schema support\n\nGPOINT_MIGRATION_REHEARSAL_PREP=1",
+        changed_paths=correction_paths,
+    ) == "PREPARE_ONLY"
+
+
 def test_prep_marker_with_unapproved_or_application_path_blocks_deploy():
     assert MODULE.classify_push(
         event_name="push",

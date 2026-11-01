@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed trigger classification for the one-time ME-52 setup push."""
+"""Fail-closed trigger classification for allowlisted ME-52 rehearsal setup pushes."""
 
 from __future__ import annotations
 

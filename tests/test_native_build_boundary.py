@@ -64,7 +64,10 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         node_setup = next(i for i, step in enumerate(steps)
                           if step.get("uses", "").startswith("actions/setup-node@"))
         build = self.workflow["jobs"]["build"]
-        self.assertIn("actionlint@v1.7.7", lint["run"])
+        self.assertIn("actionlint@v1.7.12", lint["run"])
+        go_setup = next(step for step in steps
+                        if step.get("uses", "").startswith("actions/setup-go@"))
+        self.assertEqual(go_setup["with"]["go-version"], "1.25.3")
         self.assertLess(pnpm_setup, node_setup)
         self.assertEqual(steps[pnpm_setup]["with"]["version"], "9.15.0")
         self.assertEqual(set(build["needs"]), {"workspace", "python"})
