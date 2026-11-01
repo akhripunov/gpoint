@@ -180,6 +180,7 @@ fi
 # Reserve enough space for both encrypted backups and disposable restores before
 # writing backup bytes. Account for database WAL/index overhead plus conservative
 # per-entry tar metadata overhead for the media tree.
+postgres_image="$(baseline_value POSTGRES_IMAGE_ID)"
 test -d /opt/gpoint/backups
 docker_root="$(docker info --format '{{.DockerRootDir}}')"
 [[ "$docker_root" == /* && -d "$docker_root" ]]
@@ -371,6 +372,12 @@ docker image inspect "$postgres_image" >/dev/null
 roles_file="$plaintext_dir/restore-roles-${run_id}-${attempt}.sql"
 umask 077
 
+# initdb already created its pinned postgres role. Replay its ALTER/GRANT
+# statements and every other role, while avoiding a duplicate CREATE failure.
+restore_role_dump() {
+  sed '/^CREATE ROLE postgres;$/d' "$1"
+}
+
 # Role names and grants are recreated without production password hashes. The
 # archive, role SQL and restored database stay on this host and in a private dir.
 if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" != "1" ]]; then
@@ -402,7 +409,8 @@ if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" == "1" ]]; then
   docker exec "$restore_container_id" psql -Xq -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
     -c "CREATE ROLE gpoint LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD '$restore_password'; CREATE ROLE eros_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS; CREATE ROLE eros_migrator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS; CREATE ROLE eros_ddl NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS; CREATE ROLE gsales_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS; CREATE ROLE gsales_agata_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS" >/dev/null
 else
-  docker exec -i "$restore_container_id" psql -Xq -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint < "$roles_file" >/dev/null
+  restore_role_dump "$roles_file" |
+    docker exec -i "$restore_container_id" psql -Xq -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint >/dev/null
 fi
 
 # The isolated PostgreSQL image creates an empty `public` schema during

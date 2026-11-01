@@ -188,3 +188,28 @@ def test_restore_evidence_records_verified_database_and_media_integrity():
     evidence = helper.split('cat > "$evidence" <<EOF', 1)[1].split("\nEOF", 1)[0]
     assert "BACKUP_INTEGRITY=PASS" in evidence
     assert "MEDIA_BACKUP_INTEGRITY=PASS" in evidence
+
+
+def test_normal_backup_initializes_postgres_image_before_capacity_or_restore():
+    helper = (Path(__file__).resolve().parents[1] / "scripts/verify-gpoint-scheduled-backup-restore.sh").read_text()
+    # Both normal and rehearsal paths must derive the exact image from their
+    # hash-verified baseline, before the shared capacity/restore code uses it.
+    shared = helper.split("# Reserve enough space", 1)[1]
+    assignment = shared.index('postgres_image="$(baseline_value POSTGRES_IMAGE_ID)"')
+    assert assignment < shared.index('docker image inspect "$postgres_image"')
+
+
+def test_restore_role_dump_preserves_grants_and_skips_only_existing_bootstrap_role(tmp_path):
+    import re
+    import subprocess
+
+    helper = (Path(__file__).resolve().parents[1] / "scripts/verify-gpoint-scheduled-backup-restore.sh").read_text()
+    match = re.search(r"(?ms)^restore_role_dump\(\) \{\n.*?^\}", helper)
+    assert match, "restore must handle the pinned postgres bootstrap role explicitly"
+    sql = "CREATE ROLE postgres;\nALTER ROLE postgres WITH SUPERUSER;\nCREATE ROLE gpoint;\nCREATE ROLE postgres_reader;\nGRANT postgres_reader TO gpoint;\n"
+    roles = tmp_path / "roles.sql"
+    roles.write_text(sql)
+    result = subprocess.run(["bash", "-euo", "pipefail", "-c", match.group() + '\nrestore_role_dump "$1"', "test", str(roles)], text=True, capture_output=True, check=True)
+    assert result.stdout == sql.replace("CREATE ROLE postgres;\n", "")
+    assert 'restore_role_dump "$roles_file" |' in helper
+    assert 'psql -Xq -v ON_ERROR_STOP=1 -U gpoint_restore_admin' in helper
