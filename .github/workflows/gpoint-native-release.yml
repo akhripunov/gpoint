@@ -1042,7 +1042,7 @@ jobs:
           chmod 0700 "$stage/docker-config"
           chmod 0600 "$stage/docker-config/config.json"
           current_step=ghcr-app-pull
-          DOCKER_CONFIG="$stage/docker-config" docker pull "$app_image" >/dev/null
+          DOCKER_CONFIG="$stage/docker-config" docker pull --platform linux/amd64 "$app_image" >/dev/null
           current_step=ghcr-app-image-id
           verify_image_id app "$app_image" "$app_image_id"
           current_step=ghcr-app-image-size
@@ -1054,7 +1054,7 @@ jobs:
           current_step=ghcr-app-repository-digest
           docker image inspect "$app_image" --format '{{json .RepoDigests}}' | grep -Fq "$app_image"
           current_step=ghcr-agata-pull
-          DOCKER_CONFIG="$stage/docker-config" docker pull "$agata_image" >/dev/null
+          DOCKER_CONFIG="$stage/docker-config" docker pull --platform linux/amd64 "$agata_image" >/dev/null
           current_step=ghcr-agata-image-id
           verify_image_id agata "$agata_image" "$agata_image_id"
           current_step=ghcr-agata-image-size

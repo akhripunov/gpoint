@@ -78,6 +78,8 @@ def test_manual_migration_rehearsal_uses_existing_backup_without_deployment_or_k
     assert "GPOINT_MIGRATION_BACKUP_FRESHNESS=PASS" in body
     assert "docker_free" in body and "insufficient Docker storage" in body
     assert 'actual_id="$(docker image inspect "$image" --format \'{{.Id}}\')"' in body
+    assert 'docker pull --platform linux/amd64 "$app_image"' in body
+    assert 'docker pull --platform linux/amd64 "$agata_image"' in body
     rehearsal_step = next(step for step in rehearsal["steps"]
                           if step.get("name") == "Rehearse migrations against existing encrypted VPS backup")
     assert rehearsal_step["env"]["GHCR_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"

@@ -27,7 +27,8 @@ def classify_push(*, event_name: str, ref: str, commit_message: str,
                     if line.startswith("GPOINT_MIGRATION_REHEARSAL_PREP=")]
     if not marker_lines:
         return "DEPLOY"
-    if marker_lines != [PREP_MARKER]:
+    message_lines = [line for line in commit_message.splitlines() if line.strip()]
+    if marker_lines != [PREP_MARKER] or not message_lines or message_lines[-1] != PREP_MARKER:
         return "BLOCK"
     if changed_paths != PREP_ONLY_PATHS:
         return "BLOCK"

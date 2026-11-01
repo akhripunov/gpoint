@@ -76,6 +76,14 @@ def test_malformed_diagnostic_prep_marker_blocks_instead_of_becoming_deploy():
     ) == "BLOCK"
 
 
+def test_diagnostic_prep_marker_must_be_the_final_commit_footer():
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main",
+        commit_message="ME-52 diagnostics\nGPOINT_MIGRATION_REHEARSAL_PREP=1\nadditional text",
+        changed_paths=MODULE.PREP_ONLY_PATHS,
+    ) == "BLOCK"
+
+
 def test_exact_prep_scope_without_marker_is_still_an_ordinary_release():
     assert MODULE.classify_push(
         event_name="push", ref="refs/heads/main", commit_message="ME-52 diagnostics",
