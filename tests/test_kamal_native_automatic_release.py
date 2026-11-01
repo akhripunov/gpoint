@@ -72,14 +72,16 @@ def test_runtime_verify_rechecks_public_and_all_six_kamal_roles_after_deploy():
         assert expected in verify
 
 
-def test_production_preflight_requires_one_consistent_running_version_and_persistent_identities():
+def test_production_preflight_accepts_historical_version_source_sha_split_but_checks_digest_identity():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     deploy = workflow.split("  deploy:\n", 1)[1].split("  backup_maintenance:\n", 1)[0]
     preflight = deploy.split("name: Verify installed Kamal topology before ordinary release", 1)[1].split(
         "name: Verify candidate compatibility with the live database baseline", 1
     )[0]
-    assert 'test "${#matches[@]}" = 1' in preflight
-    assert '"$version" == "$source_sha"-*' in preflight
+    assert "verify-kamal-production-baseline.py" in preflight
+    assert '"$version" == "$source_sha"-*' not in preflight
+    assert "RepoDigests" in (ROOT / "scripts/verify-kamal-production-baseline.py").read_text()
+    assert "org.opencontainers.image.revision" in (ROOT / "scripts/verify-kamal-production-baseline.py").read_text()
     assert "GPOINT_BASELINE_ROLE_VERSION" in preflight
     assert "GPOINT_BASELINE_ROLE_SOURCE_SHA" in preflight
     assert "DB_MOUNTS_SHA256" in preflight

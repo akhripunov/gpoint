@@ -481,8 +481,10 @@ jobs:
         id: topology
         run: |
           set -euo pipefail
-          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s <<'REMOTE'
+          role_inventory="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - < "$GITHUB_WORKSPACE/scripts/verify-kamal-production-baseline.py")"
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$role_inventory" <<'REMOTE'
           set -euo pipefail
+          role_inventory="$1"
           if systemctl is-active --quiet caddy; then
             echo 'Caddy must be inactive after the first Kamal cutover' >&2; exit 1
           fi
@@ -499,20 +501,10 @@ jobs:
               }
             done <<< "$ids"
           done
-          prefixes=(gpoint-core-api gpoint-agata-api gpoint-miniapp-web gpoint-core-worker gpoint-core-bot gpoint-agata-memory-worker)
-          baseline_version=""
-          baseline_source_sha=""
-          for prefix in "${prefixes[@]}"; do
-            mapfile -t matches < <(docker ps --format '{{.Names}}' | grep -E "^${prefix}-[0-9a-f]{40}-[0-9]+-[0-9]+$" || true)
-            test "${#matches[@]}" = 1 || { echo "expected exactly one running Kamal role: $prefix" >&2; exit 1; }
-            name="${matches[0]}"
-            version="${name#${prefix}-}"
-            source_sha="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$name")"
-            [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid running source revision: $prefix" >&2; exit 1; }
-            [[ "$version" == "$source_sha"-* ]] || { echo "running version does not match source revision: $prefix" >&2; exit 1; }
-            if [[ -z "$baseline_version" ]]; then baseline_version="$version"; else test "$version" = "$baseline_version" || { echo 'running Kamal roles have mixed release versions' >&2; exit 1; }; fi
-            if [[ -z "$baseline_source_sha" ]]; then baseline_source_sha="$source_sha"; else test "$source_sha" = "$baseline_source_sha" || { echo 'running Kamal roles have mixed source revisions' >&2; exit 1; }; fi
-          done
+          baseline_version="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["version"])' "$role_inventory")"
+          baseline_source_sha="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["source_sha"])' "$role_inventory")"
+          [[ "$baseline_version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
+          [[ "$baseline_source_sha" =~ ^[0-9a-f]{40}$ ]]
           db_id="$(docker inspect --format '{{.Id}}' shared_postgres_1)"
           redis_id="$(docker inspect --format '{{.Id}}' shared_redis_1)"
           db_mounts="$(docker inspect shared_postgres_1 --format '{{json .Mounts}}')"
@@ -523,6 +515,7 @@ jobs:
           echo "REDIS_CONTAINER_ID=$redis_id"
           echo "GPOINT_BASELINE_ROLE_VERSION=$baseline_version"
           echo "GPOINT_BASELINE_ROLE_SOURCE_SHA=$baseline_source_sha"
+          echo "GPOINT_BASELINE_ROLE_INVENTORY=$role_inventory"
           echo "DB_MOUNTS_SHA256=$db_mounts_sha"
           echo "REDIS_MOUNTS_SHA256=$redis_mounts_sha"
           REMOTE
@@ -533,9 +526,10 @@ jobs:
           grep -Eq '^GPOINT_BASELINE_ROLE_SOURCE_SHA=[0-9a-f]{40}$' <<< "$facts"
           grep -Eq '^DB_MOUNTS_SHA256=[0-9a-f]{64}$' <<< "$facts"
           grep -Eq '^REDIS_MOUNTS_SHA256=[0-9a-f]{64}$' <<< "$facts"
+          grep -Fq '"roles"' <<< "$facts"
           while IFS='=' read -r key value; do
             case "$key" in
-              DB_CONTAINER_ID|REDIS_CONTAINER_ID|GPOINT_BASELINE_ROLE_VERSION|GPOINT_BASELINE_ROLE_SOURCE_SHA|DB_MOUNTS_SHA256|REDIS_MOUNTS_SHA256) printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT" ;;
+              DB_CONTAINER_ID|REDIS_CONTAINER_ID|GPOINT_BASELINE_ROLE_VERSION|GPOINT_BASELINE_ROLE_SOURCE_SHA|GPOINT_BASELINE_ROLE_INVENTORY|DB_MOUNTS_SHA256|REDIS_MOUNTS_SHA256) printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT" ;;
               *) echo 'unexpected topology fact' >&2; exit 1 ;;
             esac
           done <<< "$facts"
