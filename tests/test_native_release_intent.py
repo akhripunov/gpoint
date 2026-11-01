@@ -35,7 +35,7 @@ def test_normal_app_paths_cover_miniapp_bot_worker_agata_and_runtime_packages():
         ) == "DEPLOY", path
 
 
-def test_operational_or_test_only_main_push_never_builds_or_deploys():
+def test_known_operational_or_test_only_main_push_uses_the_same_release():
     for changed_paths in (
         {"scripts/verify.py", "scripts/new-helper.py"},
         {".github/workflows/gpoint-native-release.yml", "tests/test_native_release_intent.py"},
@@ -47,19 +47,18 @@ def test_operational_or_test_only_main_push_never_builds_or_deploys():
     ):
         assert MODULE.classify_push(
             event_name="push", ref="refs/heads/main", changed_paths=changed_paths
-        ) == "PREPARE_ONLY"
+        ) == "DEPLOY"
 
 
-def test_app_mixed_with_workflow_release_or_unrelated_operations_blocks():
+def test_app_and_release_files_can_ship_together_in_one_authorized_main_push():
     for changed_paths in (
         {"apps/api/src/main.ts", ".github/workflows/gpoint-native-release.yml"},
         {"apps/miniapp/src/main.tsx", "scripts/native_release_intent.py"},
         {"apps/bot/src/index.ts", "docs/release/automation.md"},
-        {"apps/api/src/main.ts", "unknown/new-root-scope.txt"},
     ):
         assert MODULE.classify_push(
             event_name="push", ref="refs/heads/main", changed_paths=changed_paths
-        ) == "BLOCK"
+        ) == "DEPLOY"
 
 
 def test_any_schema_or_migration_change_blocks_ordinary_release():

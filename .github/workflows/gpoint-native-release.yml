@@ -52,6 +52,9 @@ concurrency:
 jobs:
   workspace:
     name: Workspace, Prisma and Playwright
+    outputs:
+      mode: ${{ steps.intent.outputs.mode }}
+      deploy: ${{ steps.intent.outputs.deploy }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -73,7 +76,33 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: Fail closed unless the event and complete path set allow a release
+        id: intent
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          EVENT_SHA: ${{ github.sha }}
+          EVENT_BEFORE: ${{ github.event.before || '' }}
+          REQUESTED_SHA: ${{ inputs.candidate_sha || github.sha }}
+          EVENT_ACTOR: ${{ github.actor }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          MIGRATION_REHEARSAL: ${{ inputs.migration_rehearsal || false }}
+          BACKUP_MAINTENANCE: ${{ inputs.backup_maintenance || false }}
+          ROLLBACK: ${{ inputs.rollback || false }}
+          APPROVE_PRODUCTION: ${{ inputs.approve_production || false }}
+        run: |
+          set -euo pipefail
+          args=(--event "$EVENT_NAME" --ref "$EVENT_REF" --sha "$EVENT_SHA"
+            --before "$EVENT_BEFORE"
+            --candidate-sha "$REQUESTED_SHA" --actor "$EVENT_ACTOR"
+            --repository-owner "$REPOSITORY_OWNER")
+          [[ "$MIGRATION_REHEARSAL" == true ]] && args+=(--migration-rehearsal)
+          [[ "$BACKUP_MAINTENANCE" == true ]] && args+=(--backup-maintenance)
+          [[ "$ROLLBACK" == true ]] && args+=(--rollback)
+          [[ "$APPROVE_PRODUCTION" == true ]] && args+=(--approve-production)
+          python3 scripts/native_release_intent.py "${args[@]}" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version: '1.25.3'
@@ -165,6 +194,8 @@ jobs:
           tests/test_deploy_evidence_workflow.py
           tests/test_native_build_boundary.py
           tests/test_native_release_intent.py
+          tests/test_kamal_native_automatic_release.py
+          tests/test_verify_kamal_production_baseline.py
           tests/test_native_rollback_evidence.py
           tests/test_kamal_release_config.py
           tests/test_kamal_cutover_owner.py
@@ -180,8 +211,8 @@ jobs:
 
   build:
     name: Build and publish immutable images
-    needs: [workspace, python, release_intent]
-    if: needs.release_intent.outputs.mode == 'DEPLOY' || needs.release_intent.outputs.mode == 'REHEARSAL'
+    needs: [workspace, python]
+    if: needs.workspace.outputs.mode == 'DEPLOY' || needs.workspace.outputs.mode == 'REHEARSAL'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -326,52 +357,10 @@ jobs:
             echo "${role}_image_bytes=$image_bytes" >> "$GITHUB_OUTPUT"
           done
 
-  release_intent:
-    name: Classify exact release intent
-    if: github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    outputs:
-      mode: ${{ steps.intent.outputs.mode }}
-      deploy: ${{ steps.intent.outputs.deploy }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Fail closed unless the event and complete path set allow a release
-        id: intent
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_REF: ${{ github.ref }}
-          EVENT_SHA: ${{ github.sha }}
-          EVENT_BEFORE: ${{ github.event.before || '' }}
-          REQUESTED_SHA: ${{ inputs.candidate_sha || github.sha }}
-          EVENT_ACTOR: ${{ github.actor }}
-          REPOSITORY_OWNER: ${{ github.repository_owner }}
-          MIGRATION_REHEARSAL: ${{ inputs.migration_rehearsal || false }}
-          BACKUP_MAINTENANCE: ${{ inputs.backup_maintenance || false }}
-          ROLLBACK: ${{ inputs.rollback || false }}
-          APPROVE_PRODUCTION: ${{ inputs.approve_production || false }}
-        run: |
-          set -euo pipefail
-          args=(--event "$EVENT_NAME" --ref "$EVENT_REF" --sha "$EVENT_SHA"
-            --before "$EVENT_BEFORE"
-            --candidate-sha "$REQUESTED_SHA" --actor "$EVENT_ACTOR"
-            --repository-owner "$REPOSITORY_OWNER")
-          [[ "$MIGRATION_REHEARSAL" == true ]] && args+=(--migration-rehearsal)
-          [[ "$BACKUP_MAINTENANCE" == true ]] && args+=(--backup-maintenance)
-          [[ "$ROLLBACK" == true ]] && args+=(--rollback)
-          [[ "$APPROVE_PRODUCTION" == true ]] && args+=(--approve-production)
-          python3 scripts/native_release_intent.py "${args[@]}" >> "$GITHUB_OUTPUT"
-
   deploy:
     name: Kamal production Deploy and Verify
-    needs: [workspace, python, build, release_intent]
-    if: needs.release_intent.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true))
+    needs: [workspace, python, build]
+    if: needs.workspace.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true))
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -818,8 +807,8 @@ jobs:
 
   rollback:
     name: Protected rollback to a verified Native release
-    needs: [workspace, python, release_intent]
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && needs.release_intent.outputs.mode == 'ROLLBACK' && inputs.rollback == true && inputs.migration_rehearsal != true && inputs.backup_maintenance != true
+    needs: [workspace, python]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && needs.workspace.outputs.mode == 'ROLLBACK' && inputs.rollback == true && inputs.migration_rehearsal != true && inputs.backup_maintenance != true
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -1190,8 +1179,8 @@ jobs:
 
   backup_maintenance:
     name: Install or update scheduled VPS backups
-    needs: [workspace, python, release_intent]
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.backup_maintenance == true && needs.release_intent.outputs.mode == 'BACKUP_MAINTENANCE'
+    needs: [workspace, python]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.backup_maintenance == true && needs.workspace.outputs.mode == 'BACKUP_MAINTENANCE'
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -1304,7 +1293,7 @@ jobs:
 
   migration_rehearsal:
     name: Isolated existing-backup migration rehearsal
-    needs: [workspace, python, build, release_intent]
+    needs: [workspace, python, build]
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.migration_rehearsal == true
     runs-on: ubuntu-latest
     environment:

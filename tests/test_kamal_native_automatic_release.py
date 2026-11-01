@@ -19,27 +19,27 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     assert "workflow_dispatch" in deploy.get("if", "")
     assert deploy["environment"] == {"name": "production", "deployment": False}
     build = workflow["jobs"]["build"]
-    assert "release_intent" in build["needs"]
+    assert "release_intent" not in workflow["jobs"]
     assert "workspace" in build["needs"] and "python" in build["needs"]
     assert "outputs.mode == 'DEPLOY'" in build["if"]
     assert "outputs.mode == 'REHEARSAL'" in build["if"]
     assert "environment" not in build
     assert "packages: write" in WORKFLOW.read_text(encoding="utf-8")
-    assert {"workspace", "python", "build", "release_intent"}.issubset(deploy["needs"])
+    assert {"workspace", "python", "build"}.issubset(deploy["needs"])
 
 
 def test_release_event_routing_is_fail_closed_and_does_not_give_prs_prod_access():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    intent = workflow["jobs"]["release_intent"]
-    assert "pull_request" in intent["if"]
-    assert intent["permissions"] == {"contents": "read"}
+    intent = workflow["jobs"]["workspace"]
+    assert "if" not in intent
+    assert "environment" not in intent
     intent_script = next(step.get("run", "") for step in intent["steps"]
                          if step.get("id") == "intent")
     assert "--backup-maintenance" in intent_script
     assert "GPOINT_MIGRATION_REHEARSAL_PREP" not in intent_script
     assert 'return 2' in (ROOT / "scripts/native_release_intent.py").read_text()
     deploy = workflow["jobs"]["deploy"]
-    assert "needs.release_intent.outputs.deploy == 'true'" in deploy["if"]
+    assert "needs.workspace.outputs.deploy == 'true'" in deploy["if"]
     assert "pull_request" not in deploy["if"]
     assert "production" not in workflow["jobs"]["workspace"].get("environment", {})
     assert "production" not in workflow["jobs"]["python"].get("environment", {})
@@ -226,7 +226,7 @@ def test_manual_migration_rehearsal_uses_existing_backup_without_deployment_or_k
     assert "repos/$GITHUB_REPOSITORY/deployments" not in body
     assert rehearsal["permissions"] == {"contents": "read", "packages": "read"}
     deploy = workflow["jobs"]["deploy"]
-    assert "needs.release_intent.outputs.deploy == 'true'" in deploy["if"]
+    assert "needs.workspace.outputs.deploy == 'true'" in deploy["if"]
     assert "inputs.migration_rehearsal != true" in deploy["if"]
 
 

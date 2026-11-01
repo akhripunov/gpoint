@@ -1,6 +1,6 @@
 # Как выпускать GPoint
 
-## ME-52: локальный Kamal candidate (2026-10-27)
+## ME-52: Native Kamal release (локальное упрощение 2026-11-01)
 
 Production переводится на Kamal отдельным workflow
 `.github/workflows/gpoint-first-kamal-cutover.yml`; он требует свежий inventory,
@@ -12,13 +12,26 @@ images → stock Kamal Deploy → Runtime Verify` без ручного OWNER ap
 обычного обновления. Exact SHA, immutable digest/provenance, platform/revision,
 production Environment и read-only database parity gates сохраняются.
 
-PR запускает только CI и не получает production Environment/secrets или GHCR
-write. На main push изменённые пути классифицируются: app-only (вместе с его
-тестами) допускает Build/Deploy; только tests/docs/scripts/workflow/operations
-проходит проверки без Build/Deploy; Prisma/Alembic schema/migrations, неизвестный
-scope и смешение приложения с release/infra изменениями блокируют релиз.
-Ручной exact-SHA dispatch остаётся отдельным контролируемым путём для явно
-авторизованных действий.
+Обычный путь содержит четыре jobs: независимые Workspace и Python tests,
+затем Build, затем Kamal Deploy + Runtime Verify. Проверка события и путей
+выполняется шагом Workspace, без отдельного runner/job. PR запускает только
+тесты и не получает production Environment/secrets или GHCR write.
+
+Разрешённый push в main с известными путями приложения, тестов, документации
+или release tooling сразу проходит ту же цепочку, включая смешанный code +
+release-fix commit. Режима PREPARE_ONLY для таких изменений больше нет: не
+нужно повторять тесты и Build отдельным ручным запуском. Публикация в main
+поэтому требует разрешения на production, даже для documentation-only commit.
+Prisma/Alembic schema/migrations и неизвестные пути по-прежнему блокируются;
+это не разрешение применять DDL. Совместимость с фактической БД проверяется
+до Kamal, без автоматических миграций и без ослабления Eros/Worker gates.
+
+Rollback, backup maintenance и isolated migration rehearsal остаются отдельными
+ручными операциями; обычный push их не запускает. Первый cutover и его recovery
+сохраняют свои допуски. Этот локальный commit не подтверждает production SUCCESS:
+последний Native run 41319291616 остановился до Apply на pending schema dependency.
+Перед первым успешным Native релизом нужны отдельно согласованные миграции и
+проверка фактического состояния; успешные Tests/Build не заменяют Runtime Verify.
 
 У отдельного First Cutover workflow есть `allow_source_update`, по умолчанию
 `false`. Его включают только для отдельно OWNER-approved exact candidate, если

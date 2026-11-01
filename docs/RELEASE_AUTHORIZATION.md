@@ -13,15 +13,20 @@ Effective 2026-10-06 by explicit OWNER decision; applies to future releases.
 
 ## GPoint ordinary Native Release
 
-For ordinary GPoint application-only changes, the authorized push to `main` is
-the release trigger described in `docs/release/automation.md`: after exact-SHA
-CI and immutable Build succeed, Kamal Deploy and Runtime Verify run without a
-second `approve_production` dispatch or per-release OWNER approval. The existing
-LOCAL-FIRST publication authorization and main-only `production` Environment
-remain unchanged. This automatic path excludes database/schema migrations,
-release/infra changes, backup-service installation, mixed or unknown scopes;
-those remain separate controlled operations with their existing exact-SHA,
-backup, rehearsal, and OWNER-authorization gates.
+An OWNER-authorized push to `main` is the release trigger described in
+`docs/release/automation.md`: Workspace and Python tests run once, followed by
+immutable Build, stock Kamal Deploy and Runtime Verify. Known application,
+test, documentation and release-tooling paths may ship together. A second
+manual deploy is not required just because the commit includes operational
+files. LOCAL-FIRST still requires explicit publication/production authority;
+this routing change does not authorize arbitrary pushes or protected operations.
+
+Database/schema migrations and unknown paths remain excluded from automatic
+admission. First cutover, Worker lifecycle, backup-service installation and
+rollback keep their separate existing authorization and technical gates.
+Release/infra changes still need the explicit risk contract below before an
+operator publishes them to main. Pending schema dependencies block before
+Kamal; this path never applies production DDL.
 
 ## OWNER release task authorization (task-scoped)
 
