@@ -2,6 +2,7 @@
 """Fail closed before cutover unless the candidate requires no DB migrations."""
 import argparse
 import ast
+import hashlib
 from pathlib import Path
 import re
 import sys
@@ -67,6 +68,21 @@ def verify(args):
         raise ValueError("live Prisma migration inventory is malformed")
     if len(live_prisma) != len(set(live_prisma)):
         raise ValueError("live Prisma migration inventory contains duplicates")
+    checksums = args.prisma_current_checksums.split(",") if args.prisma_current_checksums else []
+    if checksums:
+        recorded = {}
+        for value in checksums:
+            name, separator, checksum = value.partition("=")
+            if (not separator or name in recorded or not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", name)
+                    or not re.fullmatch(r"[0-9a-f]{64}", checksum)):
+                raise ValueError("live Prisma checksum inventory is malformed")
+            recorded[name] = checksum
+        if set(recorded) != set(live_prisma):
+            raise ValueError("live Prisma checksum inventory does not cover applied migrations")
+        for name, checksum in recorded.items():
+            expected = hashlib.sha256((Path(args.prisma_directory) / name / "migration.sql").read_bytes()).hexdigest()
+            if checksum != expected:
+                raise ValueError(f"PRISMA_MIGRATION_CHECKSUM_MISMATCH:{name}")
     if set(live_prisma) != set(candidate_prisma):
         raise ValueError("PENDING_OR_UNRECONCILED_PRISMA_MIGRATIONS")
     candidate_prisma_head = candidate_prisma[-1]
@@ -82,6 +98,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--prisma-directory", required=True)
     parser.add_argument("--prisma-current-migrations", required=True)
+    parser.add_argument("--prisma-current-checksums", default="")
     parser.add_argument("--prisma-current-head", required=True)
     parser.add_argument("--agata-directory", required=True)
     parser.add_argument("--agata-current-head", required=True)

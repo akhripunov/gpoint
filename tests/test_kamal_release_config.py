@@ -111,8 +111,9 @@ def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
     assert "sbom: true" in workflow
     assert "provenance: mode=max" in workflow
     assert "  deploy:" in workflow
-    assert "needs: build" in workflow
-    assert "environment: production" in workflow
+    assert "needs: [workspace, python, build]" in workflow
+    assert "name: production" in workflow
+    assert "deployment: false" in workflow
 
 
 def test_first_cutover_build_images_include_the_kamal_service_labels():
@@ -652,12 +653,34 @@ def test_kamal_cutover_requires_candidate_and_live_migration_heads_to_match(tmp_
         ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
          "--prisma-directory", str(prisma_dir), "--prisma-current-head", "20261015130000_codex_telegram_challenge",
          "--prisma-current-migrations", "20261015130000_codex_telegram_challenge",
+         "--prisma-current-checksums", "20261015130000_codex_telegram_challenge=" + hashlib.sha256(b"SELECT 1;\n").hexdigest(),
          "--agata-directory", str(agata_dir), "--agata-current-head", "agata0011"],
         capture_output=True, text=True,
     )
     assert result.returncode == 0, result.stderr
     assert "GPOINT_KAMAL_MIGRATION_PARITY=PASS" in result.stdout
     assert "GPOINT_KAMAL_DB_MIGRATION_REQUIRED=NO" in result.stdout
+
+
+def test_kamal_migration_parity_rejects_changed_applied_prisma_sql(tmp_path):
+    prisma_dir = tmp_path / "prisma"
+    migration = prisma_dir / "20261015130000_codex_telegram_challenge"
+    migration.mkdir(parents=True)
+    (migration / "migration.sql").write_text("SELECT 1;\n", encoding="utf-8")
+    agata_dir = tmp_path / "agata"
+    agata_dir.mkdir()
+    (agata_dir / "0010.py").write_text("revision = 'agata0010'\ndown_revision = None\n")
+    recorded = hashlib.sha256(b"SELECT 2;\n").hexdigest()
+    result = subprocess.run(
+        ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
+         "--prisma-directory", str(prisma_dir), "--prisma-current-head", "20261015130000_codex_telegram_challenge",
+         "--prisma-current-migrations", "20261015130000_codex_telegram_challenge",
+         "--prisma-current-checksums", "20261015130000_codex_telegram_challenge=" + recorded,
+         "--agata-directory", str(agata_dir), "--agata-current-head", "agata0010"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "PRISMA_MIGRATION_CHECKSUM_MISMATCH" in result.stderr
 
 
 def test_kamal_migration_parity_fails_closed_for_pending_candidate_revision(tmp_path):
@@ -943,7 +966,8 @@ def test_native_release_runs_kamal_after_successful_main_push():
     assert "CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}" in deploy
     assert "test \"$APPROVE_PRODUCTION\" = true" in deploy
     assert "if [[ \"$GITHUB_EVENT_NAME\" == workflow_dispatch ]]; then" in deploy
-    assert "environment: production" in deploy
+    assert "name: production" in deploy
+    assert "deployment: false" in deploy
 
 
 def test_native_migration_parity_runs_prisma_from_api_workspace():

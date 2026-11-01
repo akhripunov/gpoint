@@ -142,7 +142,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("WORKFLOW_SHA", script)
         self.assertIn("APPROVE_PRODUCTION", script)
         self.assertIn("OWNER_APPROVAL_ACTOR", script)
-        self.assertEqual(deploy["needs"], "build")
+        self.assertEqual(deploy["needs"], ["workspace", "python", "build"])
         self.assertTrue(all(name in self.workflow["jobs"]["build"]["outputs"]
                             for name in ("app_digest", "agata_digest", "miniapp_digest")))
         self.assertNotIn("gsales_digest", self.workflow["jobs"]["build"]["outputs"])

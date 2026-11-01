@@ -65,6 +65,7 @@ def ordinary_args(output: Path):
         "--app-digest", APP, "--agata-digest", AGATA, "--miniapp-digest", MINIAPP,
         "--run-id", "42", "--attempt", "2", "--deployment-id", "987",
         "--db-container-id", DB_ID, "--redis-container-id", REDIS_ID,
+        "--prisma-head", "20261022110000_eros_gpoint_message_state", "--agata-head", "agata0012",
         "--public-routes-verified", "--migration-parity-verified",
     ]
 

@@ -1,0 +1,25 @@
+[Unit]
+Description=GPoint encrypted PostgreSQL and media backup with isolated restore verification
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+RequiresMountsFor=/opt/gpoint/backups /opt/gpoint/media
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /opt/gpoint/gpoint-backup-current/scripts/gpoint-scheduled-backup.py
+TimeoutStartSec=6h
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+NoNewPrivileges=true
+RuntimeDirectory=gpoint-kamal
+RuntimeDirectoryMode=0700
+ReadWritePaths=/opt/gpoint/backups /opt/gpoint/release-logs /run/gpoint-kamal /run/lock
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gpoint-backup

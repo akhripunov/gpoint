@@ -66,7 +66,7 @@ def parser() -> argparse.ArgumentParser:
         result.add_argument(f"--{name}")
     for name in ("media-backup-path", "media-backup-sha", "media-source-manifest-sha",
                  "media-restore-manifest-sha", "media-file-count", "media-directory-count",
-                 "media-total-bytes", "media-backup-bytes"):
+                 "media-total-bytes", "media-backup-bytes", "prisma-head", "agata-head"):
         result.add_argument(f"--{name}")
     result.add_argument("--public-routes-verified", action="store_true")
     result.add_argument("--migration-parity-verified", action="store_true")
@@ -100,6 +100,9 @@ def main() -> int:
     else:
         if not SHA256.fullmatch(args.db_container_id or "") or not SHA256.fullmatch(args.redis_container_id or ""):
             raise SystemExit("ordinary manifest needs exact PostgreSQL and Redis container IDs")
+        if (not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", args.prisma_head or "")
+                or not re.fullmatch(r"[A-Za-z0-9_]+", args.agata_head or "")):
+            raise SystemExit("ordinary manifest needs verified Prisma and AGATA migration heads")
         if not args.public_routes_verified or not args.migration_parity_verified:
             raise SystemExit("ordinary manifest needs verified public routes and read-only migration parity")
     for field in ("run_id", "attempt", "deployment_id"):
@@ -283,6 +286,7 @@ def main() -> int:
             "mediaRestore": {"result": "PASS", "manifestSha256": args.media_restore_manifest_sha},
         } if args.mode == "cutover" else {
             "publicRoutes": "PASS", "migrationParity": "PASS",
+            "prismaHead": args.prisma_head, "agataHead": args.agata_head,
         }),
         "preservation": ({
             "postgresSystemIdentifier": args.postgres_system_identifier,
