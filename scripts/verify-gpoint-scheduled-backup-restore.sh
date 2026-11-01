@@ -539,15 +539,16 @@ SQL
     -U gpoint_restore_admin -d gpoint -c "SELECT migration_name,checksum FROM public._prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name")"
   test -n "$existing_prisma_rows"
   migration_baseline_checksums_sha="$(printf '%s\n' "$existing_prisma_rows" | sha256sum | awk '{print $1}')"
-  existing_prisma_count=0
-  while IFS='=' read -r migration_name recorded_checksum; do
-    [[ "$migration_name" =~ ^[0-9]{14}_[a-z0-9_]+$ && "$recorded_checksum" =~ ^[0-9a-f]{64}$ ]]
-    image_checksum="$(docker run --rm --network none --entrypoint sha256sum "$app_image" \
-      "/app/packages/db/prisma/migrations/$migration_name/migration.sql" | awk '{print $1}')"
-    test "$recorded_checksum" = "$image_checksum"
-    existing_prisma_count=$((existing_prisma_count + 1))
-  done <<< "$existing_prisma_rows"
-  test "$existing_prisma_count" -eq 18
+  : "${GPOINT_PRISMA_SOURCE_CHECKSUM_MANIFEST:?exact-SHA migration checksum manifest is required}"
+  : "${GPOINT_PRISMA_CHECKSUM_VERIFIER:?migration checksum verifier is required}"
+  test -f "$GPOINT_PRISMA_SOURCE_CHECKSUM_MANIFEST"
+  test -f "$GPOINT_PRISMA_CHECKSUM_VERIFIER"
+  applied_checksum_file="$plaintext_dir/applied-prisma-checksums.txt"
+  printf '%s\n' "$existing_prisma_rows" > "$applied_checksum_file"
+  chmod 0600 "$applied_checksum_file"
+  python3 "$GPOINT_PRISMA_CHECKSUM_VERIFIER" verify \
+    --manifest "$GPOINT_PRISMA_SOURCE_CHECKSUM_MANIFEST" \
+    --applied "$applied_checksum_file" --expected-count 18
   echo GPOINT_APPLIED_PRISMA_CHECKSUMS=PASS
 
   # The app and AGATA images are immutable outputs from this candidate's CI build.

@@ -1378,6 +1378,7 @@ jobs:
           stage="/run/gpoint-migration-rehearsal-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           docker_config="$RUNNER_TEMP/gpoint-rehearsal-docker-config"
           archive="$RUNNER_TEMP/gpoint-migration-rehearsal.tar.gz"
+          source_manifest="$RUNNER_TEMP/gpoint-prisma-migration-checksums.txt"
           remote_stage_created=false
           cleanup_local() {
             result=$?
@@ -1392,8 +1393,10 @@ jobs:
             fi
             rm -rf -- "$docker_config"
             rm -f -- "$archive"
+            rm -f -- "$source_manifest"
             test ! -e "$docker_config" || result=1
             test ! -e "$archive" || result=1
+            test ! -e "$source_manifest" || result=1
             exit "$result"
           }
           trap cleanup_local EXIT
@@ -1407,9 +1410,15 @@ jobs:
           install -d -o root -g root -m 0700 "$1" "$1/scripts" "$1/docker-config"
           REMOTE_STAGE
           remote_stage_created=true
+          python3 scripts/prisma_migration_checksums.py write \
+            --migrations-dir packages/db/prisma/migrations --output "$source_manifest"
+          source_manifest_sha="$(sha256sum "$source_manifest" | awk '{print $1}')"
+          [[ "$source_manifest_sha" =~ ^[0-9a-f]{64}$ ]]
           tar -czf "$archive" -C scripts \
             gpoint-scheduled-backup.py gpoint-backup-policy.py gpoint-media-tree.py \
-            agata-production-migration.py verify-gpoint-scheduled-backup-restore.sh
+            agata-production-migration.py verify-gpoint-scheduled-backup-restore.sh \
+            prisma_migration_checksums.py \
+            -C "$RUNNER_TEMP" gpoint-prisma-migration-checksums.txt
           archive_bytes="$(stat -c '%s' "$archive")"
           config_bytes="$(stat -c '%s' "$docker_config/config.json")"
           ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$stage" "$archive_bytes" "$config_bytes" <<'REMOTE_STAGE_CAPACITY'
@@ -1432,12 +1441,14 @@ jobs:
             "$stage" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
             "$app_image" "$agata_image" "$queue_sha" "$mapping_sha" "$state_sha" "$agata_sha" \
             "$APP_IMAGE_BYTES" "$AGATA_IMAGE_BYTES" \
-            "$evidence_path" "$evidence_sha" "$db_backup_sha" "$media_backup_sha" <<'REMOTE_REHEARSAL'
+            "$evidence_path" "$evidence_sha" "$db_backup_sha" "$media_backup_sha" \
+            "$source_manifest_sha" <<'REMOTE_REHEARSAL'
           set -euo pipefail
           stage="$1"; candidate="$2"; run_id="$3"; attempt="$4"
           app_image="$5"; agata_image="$6"; queue_sha="$7"; mapping_sha="$8"; state_sha="$9"; agata_sha="${10}"
           app_image_bytes="${11}"; agata_image_bytes="${12}"
           evidence_path="${13}"; evidence_sha="${14}"; expected_db_sha="${15}"; expected_media_sha="${16}"
+          source_manifest_sha="${17}"
           [[ "$stage" == "/run/gpoint-migration-rehearsal-${run_id}-${attempt}" ]]
           [[ "$candidate" =~ ^[0-9a-f]{40}$ && "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
           [[ "$app_image" =~ ^ghcr\.io/akhripunov/gpoint-runtime@sha256:[0-9a-f]{64}$ ]]
@@ -1445,6 +1456,7 @@ jobs:
           [[ "$app_image_bytes" =~ ^[0-9]+$ && "$agata_image_bytes" =~ ^[0-9]+$ ]]
           [[ "$evidence_path" == /opt/gpoint/release-logs/7a1afde1d94c324828565a36cb7dd90f422dee3d/kamal-backup-restore-41223019715-1.txt ]]
           [[ "$evidence_sha" =~ ^[0-9a-f]{64}$ && "$expected_db_sha" =~ ^[0-9a-f]{64}$ && "$expected_media_sha" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$source_manifest_sha" =~ ^[0-9a-f]{64}$ ]]
           for value in "$queue_sha" "$mapping_sha" "$state_sha" "$agata_sha"; do [[ "$value" =~ ^[0-9a-f]{64}$ ]]; done
           for image in "$app_image" "$agata_image"; do
             if docker image inspect "$image" >/dev/null 2>&1; then
@@ -1457,6 +1469,9 @@ jobs:
           docker_free="$(df -PB1 "$docker_root" | awk 'NR==2 {print $4}')"
           [[ "$docker_free" =~ ^[0-9]+$ ]]
           tar -xzf "$stage/payload.tar.gz" -C "$stage/scripts" --no-same-owner
+          source_manifest="$stage/scripts/gpoint-prisma-migration-checksums.txt"
+          test "$(sha256sum "$source_manifest" | awk '{print $1}')" = "$source_manifest_sha"
+          chmod 0600 "$source_manifest"
           chmod 0700 "$stage/scripts/gpoint-scheduled-backup.py" \
             "$stage/scripts/gpoint-backup-policy.py" "$stage/scripts/verify-gpoint-scheduled-backup-restore.sh"
           policy_output="$(python3 "$stage/scripts/gpoint-backup-policy.py" release-evidence \
@@ -1570,6 +1585,8 @@ jobs:
           export GPOINT_MIGRATION_REHEARSAL=1 GPOINT_USE_EXISTING_BACKUP=1
           export GPOINT_MIGRATION_CANDIDATE_SHA="$candidate"
           export GPOINT_APP_IMAGE="$app_image" GPOINT_AGATA_IMAGE="$agata_image"
+          export GPOINT_PRISMA_SOURCE_CHECKSUM_MANIFEST="$source_manifest"
+          export GPOINT_PRISMA_CHECKSUM_VERIFIER="$stage/scripts/prisma_migration_checksums.py"
           export GPOINT_MIGRATION_BACKUP_EVIDENCE="$evidence_path"
           export GPOINT_MIGRATION_BACKUP_EVIDENCE_SHA256="$evidence_sha"
           export GPOINT_PRISMA_EROS_QUEUE_SHA256="$queue_sha"
