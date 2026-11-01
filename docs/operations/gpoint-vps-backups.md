@@ -5,9 +5,10 @@ separate `backup_maintenance` dispatch installs the versioned runner and systemd
 units, enables `gpoint-backup.timer`, and performs one initial full backup plus
 isolated restore. It requires the exact current main SHA and explicit OWNER
 approval, uses the existing protected production environment, and creates no
-GitHub Deployment. Regular application releases only read the timer state and
-the freshness/integrity/restore evidence for the existing backup; they do not
-reinstall the timer or force a backup run.
+GitHub Deployment. Regular application releases do not depend on scheduled
+backup freshness. They do not reinstall the timer or force a backup run. Backup
+freshness and run failures must be monitored independently of application
+releases.
 
 The timer runs daily at 03:00 UTC with a persistent catch-up and up to 20 minutes
 of scheduling jitter. It backs up the `gpoint` PostgreSQL database and the full
@@ -29,6 +30,13 @@ The VPS must have a root-owned mode-0600 age identity at
 The private identity is provisioned outside GitHub Actions and is never copied
 to the runner. A failed run leaves the prior `latest.json` intact and exits
 nonzero; inspect `journalctl -u gpoint-backup.service` before retrying.
+
+**Monitoring gap:** repository inspection found no independent alert for a
+failed timer run or a stale `latest.json`. The timer/service records failures in
+systemd and the freshness policy can detect stale evidence, but neither sends
+an alert. Track independent alerting in [ME-56](https://linear.app/bestuzhev/issue/ME-56/gpoint-independent-scheduled-backup-failure-and-freshness-alert);
+do not restore a release-blocking freshness check to the ordinary application
+Deploy.
 
 These scheduled copies are VPS-local recovery copies. They do not satisfy or
 replace the separately required offsite backup/read-back/isolated-restore gate

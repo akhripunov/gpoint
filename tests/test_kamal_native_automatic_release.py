@@ -72,20 +72,27 @@ def test_runtime_verify_rechecks_public_and_all_six_kamal_roles_after_deploy():
         assert expected in verify
 
 
-def test_ordinary_release_only_reads_backup_state_and_never_installs_or_runs_timer():
+def test_ordinary_release_success_does_not_depend_on_scheduled_backup_freshness():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     deploy = workflow.split("  deploy:\n", 1)[1]
-    verify_step = deploy.index("name: Verify public routes and exact running services")
-    backup_step = deploy.index("name: Verify existing scheduled VPS backups")
     status_step = deploy.index("name: Record GitHub Deployment result against the same attempt")
-    assert verify_step < backup_step < status_step
-    backup = deploy[backup_step:status_step]
-    assert "systemctl is-enabled gpoint-backup.timer" in backup
-    assert "systemctl is-active --quiet gpoint-backup.timer" in backup
-    assert "gpoint-backup-policy.py" in backup and "freshness" in backup
-    assert "systemctl enable" not in backup
-    assert "systemctl start gpoint-backup.service" not in backup
-    assert "systemctl daemon-reload" not in backup
+    ordinary_deploy = deploy[:deploy.index("  backup_maintenance:")]
+    status = ordinary_deploy[status_step:]
+    assert "Verify public routes and exact running services" in ordinary_deploy
+    assert "Verify existing scheduled VPS backups" not in ordinary_deploy
+    assert "gpoint-backup.timer" not in ordinary_deploy
+    assert "gpoint-backup-policy.py" not in ordinary_deploy
+    assert "freshness" not in ordinary_deploy
+    assert "BACKUP_OUTCOME" not in status
+    assert '"$DEPLOY_JOB_STATUS" == success && "$VERIFY_OUTCOME" == success' in status
+
+
+def test_backup_maintenance_retains_timer_and_freshness_checks():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    maintenance = workflow.split("  backup_maintenance:\n", 1)[1]
+    assert "systemctl enable --now gpoint-backup.timer" in maintenance
+    assert "systemctl start gpoint-backup.service" in maintenance
+    assert "gpoint-backup-policy.py" in maintenance and "freshness" in maintenance
 
 
 def test_backup_timer_setup_is_a_separate_exact_sha_owner_authorized_operation():

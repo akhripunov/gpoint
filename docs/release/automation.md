@@ -34,14 +34,18 @@ restore, recovery, consumer и runtime Verify gates.
 material. GSales не собирается и не стартует в обычных релизах; Eros,
 Sensitive Detector и ACL/pilot остаются вне обычного release scope.
 
-Production Deploy обычного релиза выполняется только после успешных CI и Build
-на `main`; pending schema changes останавливают его до Kamal и без DDL. После
-Runtime Verify workflow только читает состояние включённого backup timer и
-свежесть существующего проверенного backup/restore. Установка/обновление timer
-и один первичный backup выполняются отдельно через `backup_maintenance` с
-точным main SHA и явным OWNER approval. Offsite gate первого cutover и прочие
-действующие backup/offsite требования не меняются. Удалять recovery/legacy путь
-можно только после отдельной авторизации и успешной production Verify.
+Production Deploy обычного app-only релиза выполняется после успешных CI,
+Build и read-only migration compatibility checks на `main`; pending schema
+changes останавливают его до Kamal и без DDL. Runtime Verify является
+единственным runtime gate для GitHub Deployment SUCCESS. Состояние и свежесть
+scheduled backup не являются условием обычного релиза и должны контролироваться
+отдельным мониторингом ([ME-56](https://linear.app/bestuzhev/issue/ME-56/gpoint-independent-scheduled-backup-failure-and-freshness-alert)).
+Установка/обновление timer и один первичный backup выполняются отдельно через
+`backup_maintenance` с точным main SHA и явным OWNER approval. Обязательные
+backup/restore проверки перед миграциями и опасными
+инфраструктурными операциями, offsite gate первого cutover и прочие действующие
+backup/offsite требования не меняются. Удалять recovery/legacy путь можно
+только после отдельной авторизации и успешной production Verify.
 
 ## Текущая модель выпуска и состояния (ME-42)
 

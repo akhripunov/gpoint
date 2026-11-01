@@ -722,21 +722,6 @@ jobs:
           [[ "$manifest_sha" =~ ^[0-9a-f]{64}$ ]]
           echo "manifest_sha=$manifest_sha" >> "$GITHUB_OUTPUT"
           echo "GPOINT_KAMAL_VERIFY=PASS SHA=$CANDIDATE_SHA MANIFEST_SHA=$manifest_sha" >> "$GITHUB_STEP_SUMMARY"
-      - name: Verify existing scheduled VPS backups
-        id: backup
-        run: |
-          set -euo pipefail
-          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s <<'REMOTE_BACKUP_READONLY'
-          set -euo pipefail
-          test "$(systemctl is-enabled gpoint-backup.timer)" = enabled
-          systemctl is-active --quiet gpoint-backup.timer
-          policy=/opt/gpoint/gpoint-backup-current/scripts/gpoint-backup-policy.py
-          test -x "$policy"
-          output="$(python3 "$policy" freshness --manifest /opt/gpoint/backups/scheduled/latest.json --max-age-hours 26)"
-          printf '%s\n' "$output"
-          grep -Eq '^GPOINT_BACKUP_FRESHNESS=PASS COMPLETED_AT=' <<< "$output"
-          echo GPOINT_BACKUP_READONLY=PASS
-          REMOTE_BACKUP_READONLY
       - name: Record GitHub Deployment result against the same attempt
         if: always() && steps.deployment.outputs.id != ''
         env:
@@ -745,11 +730,10 @@ jobs:
           MANIFEST_SHA: ${{ steps.verify.outputs.manifest_sha }}
           DEPLOY_JOB_STATUS: ${{ job.status }}
           VERIFY_OUTCOME: ${{ steps.verify.outcome }}
-          BACKUP_OUTCOME: ${{ steps.backup.outcome }}
         run: |
           set -euo pipefail
           state=failure
-          if [[ "$DEPLOY_JOB_STATUS" == success && "$VERIFY_OUTCOME" == success && "$BACKUP_OUTCOME" == success ]]; then state=success; fi
+          if [[ "$DEPLOY_JOB_STATUS" == success && "$VERIFY_OUTCOME" == success ]]; then state=success; fi
           description="Kamal $state SHA $CANDIDATE_SHA"
           if [[ "$state" == success ]]; then
             [[ "$MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]]
