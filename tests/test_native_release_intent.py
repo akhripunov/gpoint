@@ -38,6 +38,8 @@ def test_normal_app_paths_cover_miniapp_bot_worker_agata_and_runtime_packages():
 def test_known_operational_or_test_only_main_push_uses_the_same_release():
     for changed_paths in (
         {"scripts/verify.py", "scripts/new-helper.py"},
+        {".kamal/hooks/pre-app-boot", ".kamal/hooks/post-app-boot"},
+        {".kamal/secrets"},
         {".github/workflows/gpoint-native-release.yml", "tests/test_native_release_intent.py"},
         {"docs/release/automation.md"},
         {"systemd/gpoint-backup.timer"},

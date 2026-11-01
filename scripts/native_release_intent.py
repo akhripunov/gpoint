@@ -26,6 +26,7 @@ OPERATIONAL_PREFIXES = (
     ".agents/",
     ".codex/",
     ".github/",
+    ".kamal/",
     "config/",
     "design/",
     "docs/",
