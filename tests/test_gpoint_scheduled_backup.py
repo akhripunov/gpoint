@@ -69,6 +69,7 @@ def test_migration_rehearsal_requires_existing_backup_and_never_refreshes_latest
     assert "GPOINT_USE_EXISTING_BACKUP" in helper
     assert "GPOINT_MIGRATION_REHEARSAL=PASS" in helper
     assert "GPOINT_MIGRATION_REHEARSAL" in helper
+    assert '"BASELINE_SCHEMA": ("gpoint-migration-rehearsal-baseline/v1" if migration_rehearsal' in runner
     rehearsal_finish = runner.index('print("GPOINT_MIGRATION_REHEARSAL=PASS")')
     normal_manifest_publish = runner.index("os.replace(pending_manifest, latest_path)")
     assert "return" in runner[rehearsal_finish:normal_manifest_publish]
@@ -86,3 +87,10 @@ def test_migration_restore_path_never_reads_live_database_or_kamal_api():
     assert 'docker exec "$postgres"' not in rehearsal_baseline
     assert 'docker inspect "$api_container_id"' not in rehearsal_baseline
     assert '/opt/gpoint/media' not in rehearsal_baseline
+
+
+def test_restore_evidence_records_verified_database_and_media_integrity():
+    helper = (Path(__file__).resolve().parents[1] / "scripts/verify-gpoint-scheduled-backup-restore.sh").read_text()
+    evidence = helper.split('cat > "$evidence" <<EOF', 1)[1].split("\nEOF", 1)[0]
+    assert "BACKUP_INTEGRITY=PASS" in evidence
+    assert "MEDIA_BACKUP_INTEGRITY=PASS" in evidence

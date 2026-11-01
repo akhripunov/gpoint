@@ -324,7 +324,8 @@ def run() -> None:
         inventory_bytes = json.dumps(facts["inventory"], sort_keys=True, separators=(",", ":")).encode()
         _write_private(inventory_path, inventory_bytes)
         values = {
-            "BASELINE_SCHEMA": "gpoint-kamal-cutover-baseline/v1",
+            "BASELINE_SCHEMA": ("gpoint-migration-rehearsal-baseline/v1" if migration_rehearsal
+                                else "gpoint-kamal-cutover-baseline/v1"),
             "CANDIDATE_SHA": candidate, "RUN_ID": run_id, "ATTEMPT": attempt,
             "POSTGRES_CONTAINER_ID": postgres_id, "POSTGRES_IMAGE_ID": postgres_image,
             "POSTGRES_SYSTEM_IDENTIFIER": system_id,
