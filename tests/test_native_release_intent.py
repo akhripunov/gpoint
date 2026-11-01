@@ -87,6 +87,30 @@ def test_oci_identity_prep_push_allows_only_the_workflow_and_its_regression_test
     ) == "DEPLOY"
 
 
+def test_backup_rehearsal_fix_prep_push_has_a_separate_exact_scope():
+    exact_scope = {
+        "scripts/native_release_intent.py",
+        "tests/test_native_release_intent.py",
+        "scripts/gpoint-scheduled-backup.py",
+        "tests/test_gpoint_scheduled_backup.py",
+    }
+    assert exact_scope == MODULE.BACKUP_REHEARSAL_FIX_PREP_ONLY_PATHS
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main",
+        commit_message="ME-52 backup compatibility fix\nGPOINT_MIGRATION_REHEARSAL_PREP=1",
+        changed_paths=exact_scope,
+    ) == "PREPARE_ONLY"
+    for invalid_scope in (
+        exact_scope | {"apps/api/src/main.ts"},
+        exact_scope - {"tests/test_gpoint_scheduled_backup.py"},
+    ):
+        assert MODULE.classify_push(
+            event_name="push", ref="refs/heads/main",
+            commit_message="ME-52 backup compatibility fix\nGPOINT_MIGRATION_REHEARSAL_PREP=1",
+            changed_paths=invalid_scope,
+        ) == "BLOCK"
+
+
 def test_repeated_diagnostic_prep_marker_blocks_instead_of_loosening_scope():
     assert MODULE.classify_push(
         event_name="push", ref="refs/heads/main",

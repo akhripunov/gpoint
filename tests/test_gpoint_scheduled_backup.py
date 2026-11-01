@@ -57,6 +57,12 @@ def test_local_backup_freshness_rejects_tampered_backup_bytes(tmp_path, monkeypa
             manifest, now=gpoint_backup_policy.datetime.fromisoformat("2026-11-01T01:00:00+00:00"))
 
 
+def test_scheduled_backup_uses_age_keygen_positional_identity_input():
+    runner = (Path(__file__).resolve().parents[1] / "scripts/gpoint-scheduled-backup.py").read_text()
+    assert '_run(["age-keygen", "-y", str(AGE_IDENTITY)], stage="age key identity")' in runner
+    assert '"age-keygen", "-y", "-i"' not in runner
+
+
 def test_migration_rehearsal_requires_existing_backup_and_never_refreshes_latest():
     runner = (Path(__file__).resolve().parents[1] / "scripts/gpoint-scheduled-backup.py").read_text()
     helper = (Path(__file__).resolve().parents[1] / "scripts/verify-gpoint-scheduled-backup-restore.sh").read_text()

@@ -21,7 +21,17 @@ OCI_IDENTITY_PREP_ONLY_PATHS = frozenset({
     ".github/workflows/gpoint-native-release.yml",
     "tests/test_kamal_native_automatic_release.py",
 })
-PREP_ONLY_SCOPES = (PREP_ONLY_PATHS, OCI_IDENTITY_PREP_ONLY_PATHS)
+BACKUP_REHEARSAL_FIX_PREP_ONLY_PATHS = frozenset({
+    "scripts/native_release_intent.py",
+    "tests/test_native_release_intent.py",
+    "scripts/gpoint-scheduled-backup.py",
+    "tests/test_gpoint_scheduled_backup.py",
+})
+PREP_ONLY_SCOPES = (
+    PREP_ONLY_PATHS,
+    OCI_IDENTITY_PREP_ONLY_PATHS,
+    BACKUP_REHEARSAL_FIX_PREP_ONLY_PATHS,
+)
 
 
 def classify_push(*, event_name: str, ref: str, commit_message: str,

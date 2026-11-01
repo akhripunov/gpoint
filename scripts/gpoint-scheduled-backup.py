@@ -248,7 +248,7 @@ def run() -> None:
 
         policy = _import_policy()
         _private_file(AGE_IDENTITY)
-        recipient = _run(["age-keygen", "-y", "-i", str(AGE_IDENTITY)], stage="age key identity")
+        recipient = _run(["age-keygen", "-y", str(AGE_IDENTITY)], stage="age key identity")
         if not AGE_RECIPIENT.fullmatch(recipient):
             raise ScheduledBackupError("age identity recipient is invalid")
         if migration_rehearsal:
