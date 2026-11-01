@@ -12,11 +12,16 @@ SHA, SOURCE = "a" * 40, "b" * 40
 
 def records():
     rows = []
-    for i, (role, repo) in enumerate(BASELINE.ROLES.items(), 1):
+    group_values = {
+        "ghcr.io/akhripunov/gpoint-runtime": ("sha256:" + "1" * 64, "ghcr.io/akhripunov/gpoint-runtime@sha256:" + "a" * 64),
+        "ghcr.io/akhripunov/gpoint-agata-runtime": ("sha256:" + "2" * 64, "ghcr.io/akhripunov/gpoint-agata-runtime@sha256:" + "b" * 64),
+        "ghcr.io/akhripunov/gpoint-miniapp": ("sha256:" + "3" * 64, "ghcr.io/akhripunov/gpoint-miniapp@sha256:" + "c" * 64),
+    }
+    for role, repo in BASELINE.ROLES.items():
         version = f"{SHA}-41223019715-1"
         rows.append({"role": role, "name": f"{role}-{version}", "version": version,
-                     "revision": SOURCE, "image_id": f"sha256:{i:064x}",
-                     "repo_digests": [f"{repo}@sha256:{i:064x}"]})
+                     "revision": SOURCE, "image_id": group_values[repo][0],
+                     "repo_digests": [group_values[repo][1]]})
     return rows
 
 
@@ -35,6 +40,9 @@ def test_accepts_historical_release_version_sha_separate_from_common_app_source_
     (lambda r: r[0].update(image_id="sha256:bad"), "invalid OCI source SHA"),
     (lambda r: r[1].update(version="c" * 40 + "-1-1", name="gpoint-core-worker-" + "c" * 40 + "-1-1"), "mixed release versions"),
     (lambda r: r[1].update(revision="c" * 40), "mixed source revisions"),
+    (lambda r: r[1].update(repo_digests=["ghcr.io/akhripunov/gpoint-runtime@sha256:" + "d" * 64]), "roles for ghcr.io/akhripunov/gpoint-runtime have different image digests"),
+    (lambda r: r[1].update(image_id="sha256:" + "d" * 64), "roles for ghcr.io/akhripunov/gpoint-runtime have different Docker image IDs"),
+    (lambda r: r[0].update(version=None), "Kamal version is missing or malformed"),
 ])
 def test_rejects_tampered_or_inconsistent_baseline(mutate, message):
     rows = records()

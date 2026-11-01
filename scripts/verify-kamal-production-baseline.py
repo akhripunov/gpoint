@@ -25,13 +25,15 @@ REPO_DIGEST = re.compile(r"^ghcr\.io/akhripunov/[a-z0-9-]+@sha256:[0-9a-f]{64}$"
 def validate(records: list[dict]) -> dict:
     if len(records) != len(ROLES) or {r.get("role") for r in records} != set(ROLES):
         raise ValueError("running Kamal role set is incomplete or duplicated")
-    versions, sources, result = set(), set(), {}
+    versions, sources, result, images_by_repo = set(), set(), {}, {}
     for row in records:
         role = row["role"]
         name, version = row.get("name"), row.get("version")
         source, image_id = row.get("revision"), row.get("image_id")
         repo_digests = row.get("repo_digests")
-        if name != role + "-" + version or not VERSION.fullmatch(version or ""):
+        if not isinstance(version, str) or not VERSION.fullmatch(version):
+            raise ValueError(f"Kamal version is missing or malformed for {role}")
+        if name != role + "-" + version:
             raise ValueError(f"invalid Kamal version/name for {role}")
         if not SHA40.fullmatch(source or "") or not IMAGE_ID.fullmatch(image_id or ""):
             raise ValueError(f"invalid OCI source SHA or Docker image ID for {role}")
@@ -39,6 +41,12 @@ def validate(records: list[dict]) -> dict:
         matching = [x for x in (repo_digests or []) if REPO_DIGEST.fullmatch(x or "") and x.startswith(repo + "@sha256:")]
         if len(matching) != 1:
             raise ValueError(f"expected one immutable GHCR RepoDigest for {role}")
+        identity = (image_id, matching[0])
+        if repo in images_by_repo and images_by_repo[repo] != identity:
+            if images_by_repo[repo][0] != image_id:
+                raise ValueError(f"roles for {repo} have different Docker image IDs")
+            raise ValueError(f"roles for {repo} have different image digests")
+        images_by_repo[repo] = identity
         versions.add(version)
         sources.add(source)
         result[role] = {"name": name, "version": version, "source_sha": source,
