@@ -24,6 +24,8 @@ MIGRATION_ENV_FILE = '/opt/gpoint/env/migration.env'
 DB_NETWORK = 'shared_internal'
 PREDICATE = "c.source_system='gpoint' AND m.role='assistant' AND m.scope='real_world' AND m.scenario_id IS NULL"
 TENANT_GUARD_LOCK = (1196441417, 1314150988)
+# JSON access also supports older baselines before incoming_read_at existed.
+READ_STATE_SQL = "encode(sha256(convert_to(COALESCE(jsonb_agg(jsonb_build_array(m.id,to_jsonb(m)->'incoming_read_at') ORDER BY m.id),'[]'::jsonb)::text,'UTF8')),'hex')"
 CENSUS_SQL = f"""SELECT json_build_object(
  'database',current_database(),
  'database_oid',(SELECT oid::bigint FROM pg_database WHERE datname=current_database()),
@@ -32,6 +34,7 @@ CENSUS_SQL = f"""SELECT json_build_object(
  'messages',(SELECT count(*) FROM agata.messages),
  'baseline',(SELECT count(*) FROM agata.messages m JOIN agata.conversations c
  ON c.tenant_id=m.tenant_id AND c.id=m.conversation_id WHERE {PREDICATE}),
+ 'baseline_read_state_sha256',(SELECT {READ_STATE_SQL} FROM agata.messages m JOIN agata.conversations c ON c.tenant_id=m.tenant_id AND c.id=m.conversation_id WHERE {PREDICATE}),
  'baseline_ids',(SELECT coalesce(json_agg(id),'[]') FROM
  (SELECT m.id FROM agata.messages m JOIN agata.conversations c
  ON c.tenant_id=m.tenant_id AND c.id=m.conversation_id WHERE {PREDICATE} LIMIT 10001) s));"""
@@ -87,6 +90,8 @@ def validate_readiness(proof, census):
     target_head = 'agata0012'
     if proof.get('privileged') is not True:
         raise RuntimeError('agata0012 requires a verified privileged migration identity')
+    if proof.get('head') == 'agata0011' and not re.fullmatch(r'[0-9a-f]{64}', str(census.get('baseline_read_state_sha256', ''))):
+        raise RuntimeError('agata0012 requires a verified baseline read-state snapshot')
     return dict(proof, target_head=target_head, tenant_count=len(tenants), inventory=inventory,
                 inventory_sha256=hashlib.sha256(inventory.encode()).hexdigest(),
                 messages=census['messages'], baseline=census['baseline'],
@@ -99,6 +104,9 @@ def public_facts(proof):
 
 
 def guarded_migration(proof, guard, migrate):
+    # 0012 changes disclosure versions only. A baseline already at 0011 must
+    # retain every message receipt, including intentionally unread messages.
+    guard.preserve_read_state = proof.get('head') == 'agata0011'
     with guard:
         readiness = validate_readiness(proof, guard.census())
         if not guard.alive():
@@ -240,8 +248,13 @@ class TenantGuard:
         literals = ','.join("'" + value + "'::uuid" for value in ids)
         predicate = f'm.id IN ({literals})' if ids else 'false'
         result = self.query("SELECT json_build_object('head',(SELECT version_num FROM agata.alembic_version),"
-            f"'missing',(SELECT count(*) FROM agata.messages m WHERE {predicate} AND incoming_read_at IS NULL));")
+            f"'missing',(SELECT count(*) FROM agata.messages m WHERE {predicate} AND incoming_read_at IS NULL),"
+            f"'retained',(SELECT count(*) FROM agata.messages m WHERE {predicate}),"
+            f"'read_state_sha256',(SELECT {READ_STATE_SQL} FROM agata.messages m WHERE {predicate}));")
         self.verification = result
+        if getattr(self, 'preserve_read_state', False):
+            return (result['head'] == target_head and result['retained'] == self.snapshot['baseline']
+                    and result['read_state_sha256'] == self.snapshot['baseline_read_state_sha256'])
         return result['head'] == target_head and result['missing'] == 0
 
     def __exit__(self, *args):

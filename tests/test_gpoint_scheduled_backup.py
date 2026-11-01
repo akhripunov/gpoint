@@ -213,3 +213,42 @@ def test_restore_role_dump_preserves_grants_and_skips_only_existing_bootstrap_ro
     assert result.stdout == sql.replace("CREATE ROLE postgres;\n", "")
     assert 'restore_role_dump "$roles_file" |' in helper
     assert 'psql -Xq -v ON_ERROR_STOP=1 -U gpoint_restore_admin' in helper
+
+
+def test_scheduled_manifest_keeps_ciphertext_sizes_separate_from_restore_sizes(tmp_path):
+    import ast
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    runner = (root / "scripts/gpoint-scheduled-backup.py").read_text()
+    node = next(n for n in ast.walk(ast.parse(runner))
+                if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and n.target.id == "manifest")
+    evidence = {
+        "BACKUP_PATH": "db.age", "BACKUP_SHA256": "a" * 64, "BACKUP_BYTES": "100",
+        "RESTORED_TABLE_COUNT": "74", "RESTORED_DATABASE_BYTES": "900000",
+        "RESTORED_PRISMA_HEAD": "20261015130000_codex_telegram_challenge", "RESTORED_AGATA_HEAD": "agata0011",
+        "MEDIA_BACKUP_PATH": "media.age", "MEDIA_BACKUP_SHA256": "b" * 64, "MEDIA_BACKUP_BYTES": "7",
+        "MEDIA_FILE_COUNT": "4", "MEDIA_DIRECTORY_COUNT": "8", "MEDIA_TOTAL_BYTES": "4000",
+        "MEDIA_SOURCE_MANIFEST_SHA256": "c" * 64,
+    }
+    receipt = tmp_path / "restore.txt"
+    receipt.write_text("verified restore")
+    values = dict(evidence=evidence, completed_at="2026-11-01T15:00:00+00:00", candidate="d" * 40,
+                  run_id="42", attempt="1", evidence_path=receipt,
+                  _sha256=lambda path: hashlib.sha256(path.read_bytes()).hexdigest())
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "manifest", "exec"), values)
+    manifest = values["manifest"]
+    assert manifest["database"]["bytes"] == 100
+    assert manifest["database"]["restored_database_bytes"] == 900000
+    assert manifest["media"]["bytes"] == 7
+    assert manifest["media"]["total_bytes"] == 4000
+    path = tmp_path / "latest.json"
+    path.write_text(json.dumps(manifest))
+    helper = (root / "scripts/verify-gpoint-scheduled-backup-restore.sh").read_text()
+    media_code = "\n".join(helper.splitlines()[next(i for i,l in enumerate(helper.splitlines()) if "readarray -t media_manifest_facts" in l)+1:]).split("\nPY\n",1)[0]
+    result = subprocess.run([sys.executable, "-", str(path)], input=media_code, text=True, capture_output=True, check=True)
+    assert result.stdout.splitlines() == ["4", "8", "4000", "c" * 64]
+    db_code = "\n".join(helper.splitlines()[next(i for i,l in enumerate(helper.splitlines()) if 'database_bytes="$(python3 - "$latest_manifest"' in l)+1:]).split("\nPY\n",1)[0]
+    result = subprocess.run([sys.executable, "-", str(path)], input=db_code, text=True, capture_output=True, check=True)
+    assert result.stdout.strip() == "900000"

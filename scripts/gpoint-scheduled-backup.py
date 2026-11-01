@@ -437,6 +437,7 @@ def run() -> None:
                          "bytes": int(evidence["BACKUP_BYTES"]), "encrypted": True,
                          "integrity": "PASS", "isolated_restore": "PASS",
                          "restored_tables": int(evidence["RESTORED_TABLE_COUNT"]),
+                         "restored_database_bytes": int(evidence["RESTORED_DATABASE_BYTES"]),
                          "prisma_head": evidence["RESTORED_PRISMA_HEAD"],
                          "agata_head": evidence["RESTORED_AGATA_HEAD"]},
             "media": {"path": evidence["MEDIA_BACKUP_PATH"], "sha256": evidence["MEDIA_BACKUP_SHA256"],
@@ -444,6 +445,7 @@ def run() -> None:
                       "integrity": "PASS", "isolated_restore": "PASS",
                       "file_count": int(evidence["MEDIA_FILE_COUNT"]),
                       "directory_count": int(evidence["MEDIA_DIRECTORY_COUNT"]),
+                      "total_bytes": int(evidence["MEDIA_TOTAL_BYTES"]),
                       "manifest_sha256": evidence["MEDIA_SOURCE_MANIFEST_SHA256"]},
             "restore_evidence": {"path": str(evidence_path), "sha256": _sha256(evidence_path)},
         }

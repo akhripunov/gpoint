@@ -195,6 +195,7 @@ jobs:
           tests/test_native_build_boundary.py
           tests/test_native_release_intent.py
           tests/test_gpoint_scheduled_backup.py
+          tests/test_agata_production_migration.py
           tests/test_kamal_native_automatic_release.py
           tests/test_verify_kamal_production_baseline.py
           tests/test_native_rollback_evidence.py

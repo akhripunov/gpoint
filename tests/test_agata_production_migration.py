@@ -25,7 +25,27 @@ class ProductionMigrationTests(unittest.TestCase):
         return dict(database='gpoint', authoritative=True, cluster_addresses=['10.2.0.4'], database_oid=16385,
                     tenants=['22222222-2222-4222-8222-222222222222',
                              '11111111-1111-4111-8111-111111111111'],
-                    messages=12, baseline=5)
+                    messages=12, baseline=5, baseline_read_state_sha256="a" * 64)
+
+    def test_agata0012_preserves_existing_unread_receipts_after_agata0011(self):
+        guard = self.m.TenantGuard()
+        guard.preserve_read_state = True
+        guard.snapshot = dict(baseline=1, baseline_ids=['11111111-1111-4111-8111-111111111111'],
+                              baseline_read_state_sha256='a' * 64)
+        result = dict(head='agata0012', missing=1, retained=1, read_state_sha256='a' * 64)
+        guard.query = lambda sql: result
+        self.assertTrue(guard.verify('agata0012'), '0012 must preserve an unread receipt, not force it read')
+        result['read_state_sha256'] = 'b' * 64
+        self.assertFalse(guard.verify('agata0012'), 'changed receipt timestamp must fail')
+        result['read_state_sha256'] = 'a' * 64
+        result['retained'] = 0
+        self.assertFalse(guard.verify('agata0012'), 'deleted baseline message must fail')
+
+    def test_agata0011_readiness_requires_a_read_state_snapshot(self):
+        proof = self.proof(); proof.update(head='agata0011', privileged=True)
+        with self.assertRaisesRegex(RuntimeError, 'read.state snapshot'):
+            census = self.census(); census.pop('baseline_read_state_sha256')
+            self.m.validate_readiness(proof, census)
 
     def test_agata0009_candidate_applies_through_agata0012_only_with_privileged_migrator(self):
         proof = self.proof(); proof['privileged'] = True

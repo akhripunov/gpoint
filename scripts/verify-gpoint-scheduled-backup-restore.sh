@@ -75,7 +75,7 @@ if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" == "1" ]]; then
     media_directory_count="$(release_value MEDIA_DIRECTORY_COUNT)"
     media_total_bytes="$(release_value MEDIA_TOTAL_BYTES)"
     media_manifest_sha="$(release_value MEDIA_MANIFEST_SHA256)"
-    database_bytes="$(release_value DATABASE_BYTES)"
+    database_bytes="$(release_value RESTORED_DATABASE_BYTES)"
     test "$(release_value PRISMA_HEAD)" = "$(baseline_value PRISMA_HEAD)"
     test "$(release_value AGATA_HEAD)" = "$(baseline_value AGATA_HEAD)"
     [[ "$(release_value DATABASE_PATH)" == /opt/gpoint/backups/gpoint-pre-release-*.dump.age ]]
@@ -90,7 +90,7 @@ m=json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
 p=m.get('media', {})
 if p.get('encrypted') is not True or p.get('integrity') != 'PASS' or p.get('isolated_restore') != 'PASS':
     raise SystemExit('existing media backup proof is incomplete')
-for key in ('file_count','directory_count','bytes','manifest_sha256'):
+for key in ('file_count','directory_count','total_bytes','manifest_sha256'):
     value=p.get(key)
     if not isinstance(value,int) or value < 0:
         if key == 'manifest_sha256' and isinstance(value,str) and re.fullmatch(r'[0-9a-f]{64}',value):
@@ -98,7 +98,7 @@ for key in ('file_count','directory_count','bytes','manifest_sha256'):
         raise SystemExit('existing media backup metadata is incomplete')
 print(p['file_count'])
 print(p['directory_count'])
-print(p['bytes'])
+print(p['total_bytes'])
 print(p['manifest_sha256'])
 PY
     )
@@ -111,7 +111,7 @@ PY
 import json, sys
 from pathlib import Path
 m=json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-value=m.get('database',{}).get('bytes')
+value=m.get('database',{}).get('restored_database_bytes')
 if not isinstance(value,int) or value <= 0:
     raise SystemExit('existing database backup size is invalid')
 print(value)
