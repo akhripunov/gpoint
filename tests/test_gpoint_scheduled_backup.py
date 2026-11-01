@@ -168,6 +168,13 @@ def test_migration_restore_path_never_reads_live_database_or_kamal_api():
     assert '/opt/gpoint/media' not in rehearsal_baseline
 
 
+def test_isolated_restore_compares_container_image_id_to_pinned_image_content_id():
+    helper = (Path(__file__).resolve().parents[1] / "scripts/verify-gpoint-scheduled-backup-restore.sh").read_text()
+    assert 'restore_image_id="$(docker image inspect "$postgres_image" --format \'{{.Id}}\')"' in helper
+    assert '"$restore_container_id $restore_image_id none"' in helper
+    assert '"$restore_container_id $postgres_image none"' not in helper
+
+
 def test_restore_evidence_records_verified_database_and_media_integrity():
     helper = (Path(__file__).resolve().parents[1] / "scripts/verify-gpoint-scheduled-backup-restore.sh").read_text()
     evidence = helper.split('cat > "$evidence" <<EOF', 1)[1].split("\nEOF", 1)[0]

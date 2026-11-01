@@ -183,6 +183,8 @@ fi
 test -d /opt/gpoint/backups
 docker_root="$(docker info --format '{{.DockerRootDir}}')"
 [[ "$docker_root" == /* && -d "$docker_root" ]]
+restore_image_id="$(docker image inspect "$postgres_image" --format '{{.Id}}')"
+[[ "$restore_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
 backup_fs="$(stat -c '%d' /opt/gpoint/backups)"
 docker_fs="$(stat -c '%d' "$docker_root")"
 backup_free_before="$(df -PB1 /opt/gpoint/backups | awk 'NR==2 {print $4}')"
@@ -384,7 +386,7 @@ restore_container_id="$(docker run -d --name "$restore_name" --label "gpoint.kam
   --env POSTGRES_PASSWORD="$restore_password" --env POSTGRES_DB=gpoint \
   --volume "$restore_dir:$pgdata" "$postgres_image")"
 [[ "$restore_container_id" =~ ^[0-9a-f]{64}$ ]]
-[[ "$(docker inspect --format '{{.Id}} {{.Image}} {{.HostConfig.NetworkMode}}' "$restore_container_id")" == "$restore_container_id $postgres_image none" ]]
+[[ "$(docker inspect --format '{{.Id}} {{.Image}} {{.HostConfig.NetworkMode}}' "$restore_container_id")" == "$restore_container_id $restore_image_id none" ]]
 
 ready=0
 for _ in $(seq 1 60); do
