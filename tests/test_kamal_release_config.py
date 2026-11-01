@@ -1515,3 +1515,13 @@ def test_native_kamal_keeps_absolute_runner_ssh_config_paths_available():
         assert '--volume "$HOME/.ssh:$HOME/.ssh:ro"' in command
     assert 'git rev-list --first-parent --max-count=64 "$CANDIDATE_SHA"' in workflow
     assert '--read-agata-ancestor-receipt' in workflow
+
+
+@pytest.mark.parametrize('name', ['pre-app-boot', 'post-app-boot'])
+def test_kamal_hooks_use_only_the_explicit_pinned_ssh_configuration(name):
+    hook = (ROOT / '.kamal/hooks' / name).read_text()
+    ssh_calls = [line.strip() for line in hook.splitlines() if line.strip().startswith('ssh ')]
+    assert ssh_calls
+    assert all(call.startswith('ssh -F /dev/null -T -i "$ssh_key"') for call in ssh_calls)
+    assert '-o StrictHostKeyChecking=yes' in hook
+    assert '-o UserKnownHostsFile="$known_hosts"' in hook

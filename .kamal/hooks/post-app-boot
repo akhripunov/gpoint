@@ -54,7 +54,7 @@ for role in $(printf '%s' "$roles" | tr ',' ' '); do
 
   for host in $(printf '%s' "$hosts" | tr ',' ' '); do
     printf '%s\n' "$host" | grep -Eq '^[A-Za-z0-9.-]+$'
-    ssh -T -i "$ssh_key" \
+    ssh -F /dev/null -T -i "$ssh_key" \
       -o BatchMode=yes \
       -o IdentitiesOnly=yes \
       -o StrictHostKeyChecking=yes \
@@ -133,7 +133,7 @@ REMOTE
       echo 'GPOINT_MINIAPP_API_NETWORK=DEFERRED_FOR_FIRST_CUTOVER'
       continue
     fi
-    ssh -T -i "$ssh_key" \
+    ssh -F /dev/null -T -i "$ssh_key" \
       -o BatchMode=yes \
       -o IdentitiesOnly=yes \
       -o StrictHostKeyChecking=yes \
