@@ -221,6 +221,22 @@ def _remove_failed_attempt(candidate: str, run_id: str, attempt: str,
 
 
 def run() -> None:
+    migration_rehearsal = os.environ.get("GPOINT_MIGRATION_REHEARSAL") == "1"
+    if migration_rehearsal:
+        if not SHA40.fullmatch(os.environ.get("GPOINT_MIGRATION_CANDIDATE_SHA", "")):
+            raise ScheduledBackupError("migration rehearsal candidate SHA is invalid")
+        for name in ("GPOINT_APP_IMAGE", "GPOINT_AGATA_IMAGE"):
+            if not re.fullmatch(r"ghcr\.io/akhripunov/gpoint-(?:runtime|agata-runtime)@sha256:[0-9a-f]{64}",
+                                os.environ.get(name, "")):
+                raise ScheduledBackupError("migration rehearsal image identity is invalid")
+        for name in (
+            "GPOINT_PRISMA_EROS_QUEUE_SHA256",
+            "GPOINT_PRISMA_EROS_MAPPING_SHA256",
+            "GPOINT_PRISMA_MESSAGE_STATE_SHA256",
+            "GPOINT_AGATA_0012_SHA256",
+        ):
+            if not re.fullmatch(r"[0-9a-f]{64}", os.environ.get(name, "")):
+                raise ScheduledBackupError("migration rehearsal checksum input is invalid")
     lock_path = Path("/run/lock/gpoint-scheduled-backup.lock")
     lock_path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     with lock_path.open("a") as lock:
@@ -253,6 +269,15 @@ def run() -> None:
         if (not stat.S_ISDIR(scheduled_info.st_mode) or scheduled_info.st_uid != 0
                 or stat.S_IMODE(scheduled_info.st_mode) != 0o700):
             raise ScheduledBackupError("scheduled backup directory has unsafe identity")
+        latest_path = SCHEDULED_ROOT / "latest.json"
+        if migration_rehearsal:
+            try:
+                existing_manifest = policy.verify_freshness(latest_path, max_age_hours=26)
+            except Exception as error:
+                raise ScheduledBackupError("an existing fresh verified backup is required for migration rehearsal") from error
+            if (existing_manifest.get("database", {}).get("prisma_head") != facts["PRISMA_HEAD"]
+                    or existing_manifest.get("database", {}).get("agata_head") != facts["AGATA_HEAD"]):
+                raise ScheduledBackupError("existing backup migration heads do not match the live baseline")
         runs_root = SCHEDULED_ROOT / "runs"
         try:
             runs_root.mkdir(mode=0o700, exist_ok=True)
@@ -332,6 +357,41 @@ def run() -> None:
         if any(evidence.get(key) != value for key, value in required.items()):
             _remove_failed_attempt(candidate, run_id, attempt, run_dir, run_evidence_dir)
             raise ScheduledBackupError("isolated restore evidence is incomplete")
+        if migration_rehearsal:
+            migration_required = {
+                "MIGRATION_PARITY": "PASS",
+                "MIGRATION_DATA_PRESERVATION": "PASS",
+                "MIGRATION_GRANTS_RLS": "PASS",
+                "MIGRATION_PRISMA_HEAD": "20261022110000_eros_gpoint_message_state",
+                "MIGRATION_AGATA_HEAD": "agata0012",
+                "MIGRATION_CANDIDATE_SHA": os.environ["GPOINT_MIGRATION_CANDIDATE_SHA"],
+            }
+            migration_hashes = (
+                "MIGRATION_BASELINE_PRISMA_CHECKSUMS_SHA256",
+                "MIGRATION_NEW_PRISMA_CHECKSUMS_SHA256",
+                "MIGRATION_PRISMA_EROS_QUEUE_SHA256",
+                "MIGRATION_PRISMA_EROS_MAPPING_SHA256",
+                "MIGRATION_PRISMA_MESSAGE_STATE_SHA256",
+                "MIGRATION_AGATA_0012_SHA256",
+                "MIGRATION_TABLE_ROW_COUNTS_SHA256",
+                "MIGRATION_AGATA_PROFILE_SEMANTICS_SHA256",
+            )
+            if (any(evidence.get(key) != value for key, value in migration_required.items())
+                    or evidence.get("MIGRATION_BASELINE_PRISMA_COUNT") != "18"
+                    or any(not re.fullmatch(r"[0-9a-f]{64}", evidence.get(key, ""))
+                           for key in migration_hashes)):
+                _remove_failed_attempt(candidate, run_id, attempt, run_dir, run_evidence_dir)
+                raise ScheduledBackupError("migration rehearsal evidence is incomplete")
+            print("GPOINT_MIGRATION_REHEARSAL=PASS")
+            print("GPOINT_MIGRATION_CANDIDATE_SHA=" + evidence["MIGRATION_CANDIDATE_SHA"])
+            print("GPOINT_MIGRATION_EVIDENCE=" + str(evidence_path))
+            print("GPOINT_MIGRATION_EVIDENCE_SHA256=" + _sha256(evidence_path))
+            print("GPOINT_EXISTING_DATABASE_BACKUP_SHA256=" + existing_manifest["database"]["sha256"])
+            print("GPOINT_EXISTING_MEDIA_BACKUP_SHA256=" + existing_manifest["media"]["sha256"])
+            print("GPOINT_EXISTING_BACKUP_COMPLETED_AT=" + existing_manifest["completed_at"])
+            for key in migration_hashes:
+                print("GPOINT_" + key + "=" + evidence[key])
+            return
         completed_at = datetime.now(timezone.utc).isoformat()
         manifest: dict[str, object] = {
             "schema": "gpoint-scheduled-backup/v1", "status": "PASS",
@@ -351,7 +411,6 @@ def run() -> None:
                       "manifest_sha256": evidence["MEDIA_SOURCE_MANIFEST_SHA256"]},
             "restore_evidence": {"path": str(evidence_path), "sha256": _sha256(evidence_path)},
         }
-        latest_path = SCHEDULED_ROOT / "latest.json"
         pending_manifest = SCHEDULED_ROOT / f".latest-{run_id}-{attempt}.json"
         _atomic_manifest(pending_manifest, manifest)
         try:

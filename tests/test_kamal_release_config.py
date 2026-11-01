@@ -962,7 +962,7 @@ def test_manifest_writer_behavior_tests_run_in_python_ci():
 def test_native_release_runs_kamal_after_successful_main_push():
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
-    assert "if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')" in deploy
+    assert "if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true))" in deploy
     assert "CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}" in deploy
     assert "test \"$APPROVE_PRODUCTION\" = true" in deploy
     assert "if [[ \"$GITHUB_EVENT_NAME\" == workflow_dispatch ]]; then" in deploy

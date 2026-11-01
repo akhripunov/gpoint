@@ -55,3 +55,17 @@ def test_local_backup_freshness_rejects_tampered_backup_bytes(tmp_path, monkeypa
     with pytest.raises(gpoint_backup_policy.BackupPolicyError, match="checksum mismatch"):
         gpoint_backup_policy.verify_freshness(
             manifest, now=gpoint_backup_policy.datetime.fromisoformat("2026-11-01T01:00:00+00:00"))
+
+
+def test_migration_rehearsal_requires_existing_backup_and_never_refreshes_latest():
+    runner = (Path(__file__).resolve().parents[1] / "scripts/gpoint-scheduled-backup.py").read_text()
+    helper = (Path(__file__).resolve().parents[1] / "scripts/verify-gpoint-scheduled-backup-restore.sh").read_text()
+    assert "GPOINT_MIGRATION_REHEARSAL" in runner
+    assert "verify_freshness(latest_path" in runner
+    assert "GPOINT_USE_EXISTING_BACKUP" in helper
+    assert "GPOINT_MIGRATION_REHEARSAL=PASS" in helper
+    assert "GPOINT_MIGRATION_REHEARSAL" in helper
+    rehearsal_finish = runner.index('print("GPOINT_MIGRATION_REHEARSAL=PASS")')
+    normal_manifest_publish = runner.index("os.replace(pending_manifest, latest_path)")
+    assert "return" in runner[rehearsal_finish:normal_manifest_publish]
+    assert 'backup --sha "$candidate"' not in helper.split('if [[ "${GPOINT_USE_EXISTING_BACKUP:-0}" == "1" ]]', 1)[1].split("else", 1)[0]

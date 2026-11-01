@@ -61,6 +61,24 @@ def test_first_cutover_offsite_restore_gate_is_not_removed():
     assert "GPOINT_ISOLATED_RESTORE=PASS" in workflow
 
 
+def test_manual_migration_rehearsal_uses_existing_backup_without_deployment_or_kamal():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    events = workflow.get("on", workflow.get(True))
+    assert events["workflow_dispatch"]["inputs"]["migration_rehearsal"]["type"] == "boolean"
+    rehearsal = workflow["jobs"]["migration_rehearsal"]
+    assert "workflow_dispatch" in rehearsal["if"]
+    assert "inputs.migration_rehearsal" in rehearsal["if"]
+    assert rehearsal["environment"] == {"name": "production", "deployment": False}
+    body = "\n".join(step.get("run", "") for step in rehearsal["steps"])
+    assert "GPOINT_MIGRATION_REHEARSAL=1" in body
+    assert "latest.json" in body
+    assert "GPOINT_MIGRATION_REHEARSAL=PASS" in body
+    assert "kamal deploy" not in body
+    assert "repos/$GITHUB_REPOSITORY/deployments" not in body
+    deploy = workflow["jobs"]["deploy"]
+    assert "inputs.migration_rehearsal != true" in deploy["if"]
+
+
 def test_scheduled_vps_backup_is_local_encrypted_fresh_and_restored_without_remote_config():
     policy_path = ROOT / "scripts/gpoint-backup-policy.py"
     runner_path = ROOT / "scripts/gpoint-scheduled-backup.py"

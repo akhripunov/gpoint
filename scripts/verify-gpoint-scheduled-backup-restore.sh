@@ -135,14 +135,64 @@ else:
         raise SystemExit('insufficient free space for database/media backup or isolated restores and safety margin')
 PY
 }
-pre_backup_capacity_check
-echo GPOINT_PRE_BACKUP_CAPACITY=PASS
+if [[ "${GPOINT_USE_EXISTING_BACKUP:-0}" != "1" ]]; then
+  pre_backup_capacity_check
+  echo GPOINT_PRE_BACKUP_CAPACITY=PASS
+fi
 
-# Reuse GPoint's established complete logical-backup and archive-integrity gate.
-backup_output="$(python3 "$backup_helper" backup --sha "$candidate" --backup-directory "$plaintext_dir")"
-backup_json="$(sed -n 's/^GPOINT_COMPLETE_BACKUP=//p' <<< "$backup_output")"
-test -n "$backup_json"
-readarray -t backup_facts < <(python3 - "$backup_json" "$candidate" <<'PY'
+# Rehearsals consume the existing scheduled PASS backup. They never capture a
+# new dump from production or replace latest.json.
+if [[ "${GPOINT_USE_EXISTING_BACKUP:-0}" == "1" ]]; then
+  latest_manifest=/opt/gpoint/backups/scheduled/latest.json
+  test -f "$latest_manifest" && test ! -L "$latest_manifest"
+  test "$(stat -c '%a:%u' "$latest_manifest")" = 600:0
+  readarray -t existing_facts < <(python3 - "$latest_manifest" "$candidate" \
+    "$(baseline_value PRISMA_HEAD)" "$(baseline_value AGATA_HEAD)" <<'PY'
+import hashlib, json, os, re, stat, sys
+from pathlib import Path
+manifest_path=Path(sys.argv[1])
+try:
+    manifest=json.loads(manifest_path.read_text(encoding='utf-8'))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit('existing scheduled backup manifest is invalid')
+if manifest.get('schema')!='gpoint-scheduled-backup/v1' or manifest.get('status')!='PASS':
+    raise SystemExit('existing scheduled backup is not PASS')
+if manifest.get('database',{}).get('prisma_head')!=sys.argv[3] or manifest.get('database',{}).get('agata_head')!=sys.argv[4]:
+    raise SystemExit('existing scheduled backup migration heads do not match the source baseline')
+for name, suffix in (('database','.dump.age'),('media','.media.tar.age')):
+    proof=manifest.get(name)
+    if not isinstance(proof,dict) or proof.get('encrypted') is not True or proof.get('integrity')!='PASS' or proof.get('isolated_restore')!='PASS':
+        raise SystemExit(f'existing {name} backup proof is incomplete')
+    path=Path(str(proof.get('path','')))
+    try:
+        info=path.lstat()
+    except OSError:
+        raise SystemExit(f'existing {name} backup is unavailable') from None
+    if (path.parent != Path('/opt/gpoint/backups/scheduled') or not path.name.endswith(suffix)
+            or not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or stat.S_IMODE(info.st_mode)!=0o600):
+        raise SystemExit(f'existing {name} backup identity is invalid')
+    digest=hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest!=proof.get('sha256') or info.st_size!=proof.get('bytes'):
+        raise SystemExit(f'existing {name} backup checksum or size mismatch')
+    print(path)
+    print(digest)
+    print(info.st_size)
+PY
+  )
+  test "${#existing_facts[@]}" -eq 6
+  backup_file="${existing_facts[0]}"
+  backup_sha="${existing_facts[1]}"
+  backup_bytes="${existing_facts[2]}"
+  media_backup_file="${existing_facts[3]}"
+  media_backup_sha="${existing_facts[4]}"
+  media_backup_bytes="${existing_facts[5]}"
+  echo GPOINT_EXISTING_BACKUP=PASS
+else
+  # Reuse GPoint's established complete logical-backup and archive-integrity gate.
+  backup_output="$(python3 "$backup_helper" backup --sha "$candidate" --backup-directory "$plaintext_dir")"
+  backup_json="$(sed -n 's/^GPOINT_COMPLETE_BACKUP=//p' <<< "$backup_output")"
+  test -n "$backup_json"
+  readarray -t backup_facts < <(python3 - "$backup_json" "$candidate" <<'PY'
 import json, re, sys
 proof=json.loads(sys.argv[1])
 required=('path','sha256','database','schemas','status')
@@ -161,46 +211,50 @@ if not {'public','agata'}.issubset(set(proof['schemas'])):
 print(proof['path'])
 print(proof['sha256'])
 PY
-)
-backup_file="${backup_facts[0]}"
-plaintext_sha="${backup_facts[1]}"
-[[ "$backup_file" == "$plaintext_dir/"* ]]
-test -f "$backup_file" && test ! -L "$backup_file" && test -s "$backup_file"
-chmod 600 "$backup_file"
-test "$(sha256sum "$backup_file" | awk '{print $1}')" = "$plaintext_sha"
-encrypted_name="gpoint-scheduled-${candidate}-${run_id}-${attempt}.dump.age"
-backup_file="/opt/gpoint/backups/scheduled/$encrypted_name"
-backup_work="$(mktemp -d /opt/gpoint/backups/.gpoint-age-${run_id}-${attempt}.XXXXXX)"
-chmod 700 "$backup_work"
-age --recipient "$age_recipient" -o "$backup_work/$encrypted_name" "$plaintext_dir/$(basename "${backup_facts[0]}")"
-chmod 600 "$backup_work/$encrypted_name"
-ln "$backup_work/$encrypted_name" "$backup_file"
-rm -rf "$backup_work"
-backup_sha="$(sha256sum "$backup_file" | awk '{print $1}')"
-backup_bytes="$(stat -c '%s' "$backup_file")"
-[[ "$backup_bytes" =~ ^[0-9]+$ && "$backup_bytes" -gt 0 ]]
-
-test "$(sha256sum "$backup_file" | awk '{print $1}')" = "$backup_sha"
-echo GPOINT_BACKUP_INTEGRITY=PASS
+  )
+  backup_file="${backup_facts[0]}"
+  plaintext_sha="${backup_facts[1]}"
+  [[ "$backup_file" == "$plaintext_dir/"* ]]
+  test -f "$backup_file" && test ! -L "$backup_file" && test -s "$backup_file"
+  chmod 600 "$backup_file"
+  test "$(sha256sum "$backup_file" | awk '{print $1}')" = "$plaintext_sha"
+  encrypted_name="gpoint-scheduled-${candidate}-${run_id}-${attempt}.dump.age"
+  backup_file="/opt/gpoint/backups/scheduled/$encrypted_name"
+  backup_work="$(mktemp -d /opt/gpoint/backups/.gpoint-age-${run_id}-${attempt}.XXXXXX)"
+  chmod 700 "$backup_work"
+  age --recipient "$age_recipient" -o "$backup_work/$encrypted_name" "$plaintext_dir/$(basename "${backup_facts[0]}")"
+  chmod 600 "$backup_work/$encrypted_name"
+  ln "$backup_work/$encrypted_name" "$backup_file"
+  rm -rf "$backup_work"
+  backup_sha="$(sha256sum "$backup_file" | awk '{print $1}')"
+  backup_bytes="$(stat -c '%s' "$backup_file")"
+  [[ "$backup_bytes" =~ ^[0-9]+$ && "$backup_bytes" -gt 0 ]]
+  test "$(sha256sum "$backup_file" | awk '{print $1}')" = "$backup_sha"
+  echo GPOINT_BACKUP_INTEGRITY=PASS
+fi
 
 # Stream the media tree directly through age so no plaintext media archive is
 # written to persistent storage.
-media_encrypted_name="gpoint-scheduled-${candidate}-${run_id}-${attempt}.media.tar.age"
-media_backup_file="/opt/gpoint/backups/scheduled/$media_encrypted_name"
-test ! -e "$media_backup_file" && test ! -L "$media_backup_file"
-media_backup_work="$(mktemp -d /opt/gpoint/backups/.gpoint-media-age-${run_id}-${attempt}.XXXXXX)"
-chmod 700 "$media_backup_work"
-tar --create --file=- --directory="$media_root" --format=pax --numeric-owner \
-  --acls --xattrs --hard-dereference -- . | \
-  age --recipient "$age_recipient" -o "$media_backup_work/$media_encrypted_name"
-chmod 600 "$media_backup_work/$media_encrypted_name"
-ln "$media_backup_work/$media_encrypted_name" "$media_backup_file"
-rm -rf "$media_backup_work"
-media_backup_sha="$(sha256sum "$media_backup_file" | awk '{print $1}')"
-media_backup_bytes="$(stat -c '%s' "$media_backup_file")"
-[[ "$media_backup_sha" =~ ^[0-9a-f]{64}$ && "$media_backup_bytes" =~ ^[0-9]+$ && "$media_backup_bytes" -gt 0 ]]
-test "$(sha256sum "$media_backup_file" | awk '{print $1}')" = "$media_backup_sha"
-echo GPOINT_MEDIA_BACKUP_INTEGRITY=PASS
+if [[ "${GPOINT_USE_EXISTING_BACKUP:-0}" != "1" ]]; then
+  media_encrypted_name="gpoint-scheduled-${candidate}-${run_id}-${attempt}.media.tar.age"
+  media_backup_file="/opt/gpoint/backups/scheduled/$media_encrypted_name"
+  test ! -e "$media_backup_file" && test ! -L "$media_backup_file"
+  media_backup_work="$(mktemp -d /opt/gpoint/backups/.gpoint-media-age-${run_id}-${attempt}.XXXXXX)"
+  chmod 700 "$media_backup_work"
+  tar --create --file=- --directory="$media_root" --format=pax --numeric-owner \
+    --acls --xattrs --hard-dereference -- . | \
+    age --recipient "$age_recipient" -o "$media_backup_work/$media_encrypted_name"
+  chmod 600 "$media_backup_work/$media_encrypted_name"
+  ln "$media_backup_work/$media_encrypted_name" "$media_backup_file"
+  rm -rf "$media_backup_work"
+  media_backup_sha="$(sha256sum "$media_backup_file" | awk '{print $1}')"
+  media_backup_bytes="$(stat -c '%s' "$media_backup_file")"
+  [[ "$media_backup_sha" =~ ^[0-9a-f]{64}$ && "$media_backup_bytes" =~ ^[0-9]+$ && "$media_backup_bytes" -gt 0 ]]
+  test "$(sha256sum "$media_backup_file" | awk '{print $1}')" = "$media_backup_sha"
+  echo GPOINT_MEDIA_BACKUP_INTEGRITY=PASS
+else
+  echo GPOINT_EXISTING_MEDIA_BACKUP=PASS
+fi
 
 backup_fs="$(stat -c '%d' "$backup_file")"
 docker_fs="$(stat -c '%d' "$docker_root")"
@@ -222,7 +276,7 @@ echo GPOINT_PRE_RESTORE_CAPACITY=PASS
 
 postgres_image="$(baseline_value POSTGRES_IMAGE_ID)"
 docker image inspect "$postgres_image" >/dev/null
-roles_file="${backup_file}.restore-roles-${run_id}-${attempt}.sql"
+roles_file="$plaintext_dir/restore-roles-${run_id}-${attempt}.sql"
 umask 077
 
 # Role names and grants are recreated without production password hashes. The
@@ -324,6 +378,176 @@ fi
 test "$restored_prisma" = "$(baseline_value PRISMA_HEAD)"
 test "$restored_agata" = "$(baseline_value AGATA_HEAD)"
 
+migration_parity=NOT_REQUESTED
+migration_data=NOT_REQUESTED
+migration_access=NOT_REQUESTED
+migration_baseline_checksums_sha=NOT_RUN
+migration_table_counts_sha=NOT_RUN
+migration_profile_semantics_sha=NOT_RUN
+if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" == "1" ]]; then
+  [[ "${GPOINT_USE_EXISTING_BACKUP:-0}" == "1" ]]
+  migration_candidate="${GPOINT_MIGRATION_CANDIDATE_SHA:-}"
+  [[ "$migration_candidate" =~ ^[0-9a-f]{40}$ ]]
+  app_image="${GPOINT_APP_IMAGE:-}"
+  agata_image="${GPOINT_AGATA_IMAGE:-}"
+  [[ "$app_image" =~ ^ghcr\.io/akhripunov/gpoint-runtime@sha256:[0-9a-f]{64}$ ]]
+  [[ "$agata_image" =~ ^ghcr\.io/akhripunov/gpoint-agata-runtime@sha256:[0-9a-f]{64}$ ]]
+  test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$app_image")" = "$migration_candidate"
+  test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$agata_image")" = "$migration_candidate"
+  for name in GPOINT_PRISMA_EROS_QUEUE_SHA256 GPOINT_PRISMA_EROS_MAPPING_SHA256 \
+    GPOINT_PRISMA_MESSAGE_STATE_SHA256 GPOINT_AGATA_0012_SHA256; do
+    [[ "${!name:-}" =~ ^[0-9a-f]{64}$ ]]
+  done
+  [[ "$restored_prisma" == "$(baseline_value PRISMA_HEAD)" ]]
+  [[ "$restored_agata" == "$(baseline_value AGATA_HEAD)" ]]
+  [[ "$restored_prisma" == "20261015130000_codex_telegram_challenge" ]]
+  [[ "$restored_agata" == "agata0011" ]]
+
+  table_rowcounts() {
+    docker exec -i "$restore_container_id" psql -XqAt -v ON_ERROR_STOP=1 \
+      -U gpoint_restore_admin -d gpoint <<'SQL'
+SELECT format('SELECT %L || ''='' || count(*) FROM %I.%I', schemaname || '.' || tablename, schemaname, tablename)
+FROM pg_tables
+WHERE schemaname IN ('public','agata','engine','gsales','gsales_meta','agata_identity')
+  AND NOT (schemaname='public' AND tablename='_prisma_migrations')
+  AND NOT (schemaname='public' AND tablename IN ('ErosRelationshipMapping','ErosAssistantMessageState'))
+  AND NOT (schemaname='engine' AND tablename='eros_inference_jobs')
+  AND NOT (schemaname='agata' AND tablename IN ('alembic_version','regional_policy_profiles'))
+ORDER BY schemaname, tablename;
+\gexec
+SQL
+  }
+  profile_semantics() {
+    docker exec "$restore_container_id" psql -XqAt -v ON_ERROR_STOP=1 \
+      -U gpoint_restore_admin -d gpoint -c "SELECT coalesce(jsonb_agg(jsonb_build_array(tenant_id::text,jurisdiction,market,effective_from::text,effective_to::text,rules) ORDER BY tenant_id::text,jurisdiction,market,effective_from::text,effective_to::text,rules::text), '[]'::jsonb)::text FROM agata.regional_policy_profiles WHERE status='active' AND rules->>'ai_disclosure_required'='true'"
+  }
+  table_rowcounts > "$plaintext_dir/table-counts-before.txt"
+  profile_semantics > "$plaintext_dir/agata-profile-semantics-before.json"
+
+  existing_failed="$(docker exec "$restore_container_id" psql -XqAt -v ON_ERROR_STOP=1 \
+    -U gpoint_restore_admin -d gpoint -c "SELECT count(*) FROM public._prisma_migrations WHERE rolled_back_at IS NULL AND finished_at IS NULL")"
+  test "$existing_failed" = 0
+  existing_prisma_rows="$(docker exec "$restore_container_id" psql -XqAt -F '=' -v ON_ERROR_STOP=1 \
+    -U gpoint_restore_admin -d gpoint -c "SELECT migration_name,checksum FROM public._prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name")"
+  test -n "$existing_prisma_rows"
+  migration_baseline_checksums_sha="$(printf '%s\n' "$existing_prisma_rows" | sha256sum | awk '{print $1}')"
+  existing_prisma_count=0
+  while IFS='=' read -r migration_name recorded_checksum; do
+    [[ "$migration_name" =~ ^[0-9]{14}_[a-z0-9_]+$ && "$recorded_checksum" =~ ^[0-9a-f]{64}$ ]]
+    image_checksum="$(docker run --rm --entrypoint sha256sum "$app_image" \
+      "/app/packages/db/prisma/migrations/$migration_name/migration.sql" | awk '{print $1}')"
+    test "$recorded_checksum" = "$image_checksum"
+    existing_prisma_count=$((existing_prisma_count + 1))
+  done <<< "$existing_prisma_rows"
+  test "$existing_prisma_count" -eq 18
+  echo GPOINT_APPLIED_PRISMA_CHECKSUMS=PASS
+
+  # The app and AGATA images are immutable outputs from this candidate's CI build.
+  test "$(docker run --rm --entrypoint sha256sum "$app_image" \
+    /app/packages/db/prisma/migrations/20261016120000_eros_worker_queue/migration.sql \
+    /app/packages/db/prisma/migrations/20261020153000_eros_external_relationship_mapping/migration.sql \
+    /app/packages/db/prisma/migrations/20261022110000_eros_gpoint_message_state/migration.sql | awk 'NR==1 {print $1}')" = "$GPOINT_PRISMA_EROS_QUEUE_SHA256"
+  test "$(docker run --rm --entrypoint sha256sum "$app_image" \
+    /app/packages/db/prisma/migrations/20261020153000_eros_external_relationship_mapping/migration.sql | awk '{print $1}')" = "$GPOINT_PRISMA_EROS_MAPPING_SHA256"
+  test "$(docker run --rm --entrypoint sha256sum "$app_image" \
+    /app/packages/db/prisma/migrations/20261022110000_eros_gpoint_message_state/migration.sql | awk '{print $1}')" = "$GPOINT_PRISMA_MESSAGE_STATE_SHA256"
+  test "$(docker run --rm --entrypoint sha256sum "$agata_image" \
+    /srv/agata/migrations/versions/0012_eros_memory_disclosure.py | awk '{print $1}')" = "$GPOINT_AGATA_0012_SHA256"
+
+  migration_db_url="postgresql://gpoint_restore_admin:${restore_password}@127.0.0.1:5432/gpoint?schema=public"
+  docker run --rm --network "container:$restore_container_id" \
+    --env "DATABASE_URL=$migration_db_url" --workdir /app "$app_image" \
+    pnpm --filter @gpoint/db exec prisma migrate deploy
+  docker run --rm --network "container:$restore_container_id" \
+    --env "AGATA_MIGRATOR_DATABASE_URL=postgresql+psycopg://gpoint_restore_admin:${restore_password}@127.0.0.1:5432/gpoint" \
+    --workdir /srv/agata "$agata_image" python -m alembic upgrade agata0012
+
+  prisma_rows="$(docker exec "$restore_container_id" psql -XqAt -F '=' -v ON_ERROR_STOP=1 \
+    -U gpoint_restore_admin -d gpoint -c "SELECT migration_name,checksum FROM public._prisma_migrations WHERE migration_name IN ('20261016120000_eros_worker_queue','20261020153000_eros_external_relationship_mapping','20261022110000_eros_gpoint_message_state') AND finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name")"
+  expected_prisma="20261016120000_eros_worker_queue=$GPOINT_PRISMA_EROS_QUEUE_SHA256
+20261020153000_eros_external_relationship_mapping=$GPOINT_PRISMA_EROS_MAPPING_SHA256
+20261022110000_eros_gpoint_message_state=$GPOINT_PRISMA_MESSAGE_STATE_SHA256"
+  test "$prisma_rows" = "$expected_prisma"
+  test "$(docker exec "$restore_container_id" psql -XqAt -v ON_ERROR_STOP=1 \
+    -U gpoint_restore_admin -d gpoint -c 'SELECT version_num FROM agata.alembic_version')" = agata0012
+  migration_parity=PASS
+
+  table_rowcounts > "$plaintext_dir/table-counts-after.txt"
+  diff -u "$plaintext_dir/table-counts-before.txt" "$plaintext_dir/table-counts-after.txt"
+  profile_semantics > "$plaintext_dir/agata-profile-semantics-after.json"
+  cmp -s "$plaintext_dir/agata-profile-semantics-before.json" "$plaintext_dir/agata-profile-semantics-after.json"
+  migration_table_counts_sha="$(sha256sum "$plaintext_dir/table-counts-after.txt" | awk '{print $1}')"
+  migration_profile_semantics_sha="$(sha256sum "$plaintext_dir/agata-profile-semantics-after.json" | awk '{print $1}')"
+  migration_data=PASS
+
+  runtime_role="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$api_container_id" | \
+    python3 -c 'import sys,urllib.parse; rows=[x.strip().split("=",1)[1] for x in sys.stdin if x.startswith("DATABASE_URL=")]; print(urllib.parse.urlparse(rows[0]).username if len(rows)==1 else "")')"
+  [[ "$runtime_role" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]
+  tenant_a="me52-${run_id}-a"
+  tenant_b="me52-${run_id}-b"
+  access_result="$(docker exec -i "$restore_container_id" psql -XqAt -v ON_ERROR_STOP=1 \
+    -U gpoint_restore_admin -d gpoint -v role="$runtime_role" -v tenant_a="$tenant_a" -v tenant_b="$tenant_b" <<'SQL'
+SELECT CASE WHEN EXISTS (
+  SELECT 1 FROM pg_roles WHERE rolname=:'role' AND (rolsuper OR rolbypassrls)
+) THEN 'PRIVILEGED_RUNTIME_ROLE'
+WHEN NOT has_schema_privilege(:'role','engine','USAGE')
+  OR NOT has_table_privilege(:'role','engine.eros_inference_jobs','SELECT') THEN 'RUNTIME_GRANT_MISSING'
+WHEN NOT EXISTS (
+  SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+  WHERE n.nspname='engine' AND c.relname='eros_inference_jobs'
+    AND c.relrowsecurity AND c.relforcerowsecurity
+) THEN 'RLS_NOT_FORCED'
+WHEN NOT EXISTS (
+  SELECT 1 FROM pg_policies WHERE schemaname='engine' AND tablename='eros_inference_jobs'
+    AND policyname='eros_inference_jobs_tenant_isolation'
+    AND qual LIKE '%app.tenant_id%' AND with_check LIKE '%app.tenant_id%'
+) THEN 'TENANT_POLICY_MISSING'
+ELSE 'GRANTS_AND_RLS_PASS' END;
+BEGIN;
+INSERT INTO engine.eros_inference_jobs
+  (id,request_id,request_hash,tenant_id,user_id,session_id,instance_id,job_type,request,deadline_at)
+VALUES
+  (md5(:'tenant_a'||'-id')::uuid,md5(:'tenant_a'||'-request')::uuid,repeat('0',64),:'tenant_a',
+   md5(:'tenant_a'||'-user')::uuid,md5(:'tenant_a'||'-session')::uuid,md5(:'tenant_a'||'-instance')::uuid,
+   'SYSTEM_COMPLETION','{}'::jsonb,now()+interval '1 hour'),
+  (md5(:'tenant_b'||'-id')::uuid,md5(:'tenant_b'||'-request')::uuid,repeat('0',64),:'tenant_b',
+   md5(:'tenant_b'||'-user')::uuid,md5(:'tenant_b'||'-session')::uuid,md5(:'tenant_b'||'-instance')::uuid,
+   'SYSTEM_COMPLETION','{}'::jsonb,now()+interval '1 hour');
+SET ROLE :"role";
+SET app.tenant_id = :'tenant_a';
+SELECT (count(*)=1)::text AS tenant_a_visible FROM engine.eros_inference_jobs \gset
+\if :tenant_a_visible
+\echo TENANT_A_SCOPE_PASS
+\else
+\quit 1
+\endif
+SELECT (count(*)=0)::text AS tenant_b_hidden FROM engine.eros_inference_jobs WHERE tenant_id=:'tenant_b' \gset
+\if :tenant_b_hidden
+\echo TENANT_B_SCOPE_PASS
+\else
+\quit 1
+\endif
+SET app.tenant_id = :'tenant_b';
+SELECT (count(*)=1)::text AS tenant_b_visible FROM engine.eros_inference_jobs \gset
+\if :tenant_b_visible
+\echo TENANT_B_OWN_SCOPE_PASS
+\else
+\quit 1
+\endif
+RESET ROLE;
+ROLLBACK;
+SQL
+  )"
+  grep -qx 'GRANTS_AND_RLS_PASS' <<< "$access_result"
+  grep -qx 'TENANT_A_SCOPE_PASS' <<< "$access_result"
+  grep -qx 'TENANT_B_SCOPE_PASS' <<< "$access_result"
+  grep -qx 'TENANT_B_OWN_SCOPE_PASS' <<< "$access_result"
+  migration_access=PASS
+  echo GPOINT_MIGRATION_PARITY=PASS
+  echo GPOINT_MIGRATION_DATA_PRESERVATION=PASS
+  echo GPOINT_MIGRATION_GRANTS_RLS=PASS
+fi
+
 media_restore_dir="$(mktemp -d "${docker_root%/}/.gpoint-kamal-media-restore-${run_id}-${attempt}.XXXXXX")"
 chmod 700 "$media_restore_dir"
 age -d -i "$age_identity" "$media_backup_file" | \
@@ -366,6 +590,21 @@ MEDIA_SOURCE_MANIFEST_SHA256=$media_manifest_sha
 MEDIA_RESTORE_MANIFEST_SHA256=$media_restore_manifest_sha
 MEDIA_BACKUP_ENCRYPTION=AGE_X25519
 MEDIA_ISOLATED_RESTORE=PASS
+MIGRATION_PARITY=$migration_parity
+MIGRATION_DATA_PRESERVATION=$migration_data
+MIGRATION_GRANTS_RLS=$migration_access
+MIGRATION_CANDIDATE_SHA=${migration_candidate:-NOT_RUN}
+MIGRATION_PRISMA_HEAD=$([[ "$migration_parity" == PASS ]] && echo 20261022110000_eros_gpoint_message_state || echo NOT_RUN)
+MIGRATION_AGATA_HEAD=$([[ "$migration_parity" == PASS ]] && echo agata0012 || echo NOT_RUN)
+MIGRATION_BASELINE_PRISMA_COUNT=${existing_prisma_count:-0}
+MIGRATION_BASELINE_PRISMA_CHECKSUMS_SHA256=$migration_baseline_checksums_sha
+MIGRATION_NEW_PRISMA_CHECKSUMS_SHA256=$([[ "$migration_parity" == PASS ]] && printf '%s\n' "$expected_prisma" | sha256sum | awk '{print $1}' || echo NOT_RUN)
+MIGRATION_PRISMA_EROS_QUEUE_SHA256=${GPOINT_PRISMA_EROS_QUEUE_SHA256:-NOT_RUN}
+MIGRATION_PRISMA_EROS_MAPPING_SHA256=${GPOINT_PRISMA_EROS_MAPPING_SHA256:-NOT_RUN}
+MIGRATION_PRISMA_MESSAGE_STATE_SHA256=${GPOINT_PRISMA_MESSAGE_STATE_SHA256:-NOT_RUN}
+MIGRATION_AGATA_0012_SHA256=${GPOINT_AGATA_0012_SHA256:-NOT_RUN}
+MIGRATION_TABLE_ROW_COUNTS_SHA256=$migration_table_counts_sha
+MIGRATION_AGATA_PROFILE_SEMANTICS_SHA256=$migration_profile_semantics_sha
 EOF
 chmod 600 "$evidence"
 evidence_sha="$(sha256sum "$evidence" | awk '{print $1}')"
@@ -374,3 +613,6 @@ printf 'backup_path=%s\nbackup_sha256=%s\nbackup_bytes=%s\nrestore_evidence_path
   "$media_backup_file" "$media_backup_sha" "$media_backup_bytes" "$media_file_count" \
   "$media_directory_count" "$media_total_bytes" "$media_manifest_sha" "$media_restore_manifest_sha"
 echo GPOINT_ISOLATED_RESTORE=PASS
+if [[ "$migration_parity" == PASS && "$migration_data" == PASS && "$migration_access" == PASS ]]; then
+  echo GPOINT_MIGRATION_REHEARSAL=PASS
+fi

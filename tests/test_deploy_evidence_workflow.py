@@ -65,7 +65,7 @@ class DeployEvidenceWorkflowTests(unittest.TestCase):
         self.assertIn('candidate_sha', triggers['workflow_dispatch']['inputs'])
         deploy = native['jobs']['deploy']
         self.assertEqual(deploy['if'],
-                         "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')")
+                         "github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true))")
         script = '\n'.join(step.get('run', '') for step in deploy['steps'])
         self.assertIn('REQUESTED_SHA', script)
         owner_gate = next(step for step in deploy['steps']
@@ -77,7 +77,7 @@ class DeployEvidenceWorkflowTests(unittest.TestCase):
         self.assertIn('test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY"', owner_gate['run'])
         self.assertIn('test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY"', owner_gate['run'])
         self.assertIn('if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then', owner_gate['run'])
-        self.assertEqual(deploy['environment'], 'production')
+        self.assertEqual(deploy['environment'], {'name': 'production', 'deployment': False})
         self.assertEqual(deploy['concurrency']['group'], 'gpoint-production-release')
         self.assertIn('deployments', deploy.get('permissions', {}))
         self.assertIn('Create exact-SHA in-progress GitHub Deployment', [step.get('name') for step in deploy['steps']])
