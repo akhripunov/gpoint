@@ -232,6 +232,33 @@ def changed_application_lines(repo_root, baseline_sha, candidate_sha):
             yield path, line[1:]
 
 
+def require_live_source_tree_in_candidate(repo_root, baseline_sha, candidate_sha):
+    """Accept divergent history only when the candidate preserves every live-tree change."""
+    common = subprocess.run(
+        ["git", "-C", str(repo_root), "merge-base", baseline_sha, candidate_sha],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    if not SHA40.fullmatch(common):
+        raise ValueError("live source and candidate have no verified common ancestor")
+    paths = subprocess.run(
+        ["git", "-C", str(repo_root), "diff", "--name-only", "--no-renames", "-z",
+         common, baseline_sha, "--"],
+        check=True, capture_output=True,
+    ).stdout.split(b"\0")
+    for raw_path in filter(None, paths):
+        path = raw_path.decode("utf-8", errors="strict")
+        baseline_entry = subprocess.run(
+            ["git", "-C", str(repo_root), "ls-tree", "-z", baseline_sha, "--", path],
+            check=True, capture_output=True,
+        ).stdout
+        candidate_entry = subprocess.run(
+            ["git", "-C", str(repo_root), "ls-tree", "-z", candidate_sha, "--", path],
+            check=True, capture_output=True,
+        ).stdout
+        if baseline_entry != candidate_entry:
+            raise ValueError(f"LIVE_SOURCE_TREE_NOT_PRESERVED:{path}")
+
+
 def verify_compatible(args, live_prisma, recorded):
     baseline, candidate = args.baseline_source_sha, args.candidate_source_sha
     if not SHA40.fullmatch(baseline or "") or not SHA40.fullmatch(candidate or ""):
@@ -243,8 +270,10 @@ def verify_compatible(args, live_prisma, recorded):
         if actual != sha:
             raise ValueError("source commit identity is invalid")
     ancestor = subprocess.run(["git", "-C", str(repo_root), "merge-base", "--is-ancestor", baseline, candidate], check=False)
-    if ancestor.returncode:
-        raise ValueError("live application source SHA is not an ancestor of the candidate")
+    if ancestor.returncode == 1:
+        require_live_source_tree_in_candidate(repo_root, baseline, candidate)
+    elif ancestor.returncode != 0:
+        raise ValueError("cannot verify live source ancestry")
 
     pending_prisma = prisma_names(args.prisma_directory)[len(live_prisma):]
     if prisma_names(args.prisma_directory)[:len(live_prisma)] != live_prisma:

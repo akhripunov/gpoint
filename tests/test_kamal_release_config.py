@@ -906,6 +906,81 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
     assert "PENDING_SCHEMA_DEPENDENCY" in blocked.stderr
 
 
+def test_kamal_schema_compatibility_accepts_divergent_live_source_only_when_tree_changes_are_preserved(tmp_path):
+    repo = tmp_path / "divergent-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
+
+    prisma = repo / "packages/db/prisma/migrations"
+    base_name = "20261015130000_baseline"
+    base_sql = "SELECT 1;\n"
+    (prisma / base_name).mkdir(parents=True)
+    (prisma / base_name / "migration.sql").write_text(base_sql, encoding="utf-8")
+    pending_name = "20261022110000_pending_queue"
+    (prisma / pending_name).mkdir()
+    (prisma / pending_name / "migration.sql").write_text(
+        "CREATE TABLE engine.pending_queue (id UUID PRIMARY KEY);\n", encoding="utf-8")
+    agata = repo / "services/agata/migrations/versions"
+    agata.mkdir(parents=True)
+    (agata / "0011.py").write_text("revision = 'agata0011'\ndown_revision = None\n", encoding="utf-8")
+    (agata / "0012.py").write_text(
+        "revision = 'agata0012'\ndown_revision = 'agata0011'\n"
+        "op.add_column('regional_policy_profiles', sa.Column('new_field', sa.String()))\n", encoding="utf-8")
+    live_app = repo / "apps/miniapp/src/model-routing.js"
+    live_app.parent.mkdir(parents=True)
+    live_app.write_text("export const host = 'gpoint.one';\n", encoding="utf-8")
+    live_test = repo / "apps/miniapp/test/model-routing.test.js"
+    live_test.parent.mkdir(parents=True)
+    live_test.write_text("assert.equal(host, 'gpoint.one');\n", encoding="utf-8")
+    api_file = repo / "apps/api/src/health.ts"
+    api_file.parent.mkdir(parents=True)
+    api_file.write_text("export const healthy = true;\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "common production ancestor"], check=True)
+    common_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+
+    subprocess.run(["git", "-C", str(repo), "switch", "-qc", "live-source"], check=True)
+    live_app.write_text("export const host = 'gpoint.one';\nexport const routing = 'live';\n", encoding="utf-8")
+    live_test.write_text("assert.equal(host, 'gpoint.one');\nassert.equal(routing, 'live');\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "live source routing update"], check=True)
+    baseline_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+
+    subprocess.run(["git", "-C", str(repo), "switch", "-qc", "candidate", common_sha], check=True)
+    live_app.write_text("export const host = 'gpoint.one';\nexport const routing = 'live';\n", encoding="utf-8")
+    live_test.write_text("assert.equal(host, 'gpoint.one');\nassert.equal(routing, 'live');\n", encoding="utf-8")
+    api_file.write_text("export const healthy = true;\nexport const releaseCheck = true;\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "candidate includes live tree"], check=True)
+    candidate_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+
+    def run(candidate):
+        return subprocess.run(
+            ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
+             "--policy", "compatible", "--repo-root", str(repo),
+             "--baseline-source-sha", baseline_sha, "--candidate-source-sha", candidate,
+             "--prisma-directory", str(prisma), "--prisma-current-head", base_name,
+             "--prisma-current-migrations", base_name,
+             "--prisma-current-checksums", base_name + "=" + hashlib.sha256(base_sql.encode()).hexdigest(),
+             "--agata-directory", str(agata), "--agata-current-head", "agata0011"],
+            capture_output=True, text=True,
+        )
+
+    compatible = run(candidate_sha)
+    assert compatible.returncode == 0, compatible.stderr
+    assert "GPOINT_KAMAL_SCHEMA_COMPATIBILITY=PASS" in compatible.stdout
+    assert "GPOINT_KAMAL_DB_MIGRATION_REQUIRED=YES" in compatible.stdout
+
+    live_app.write_text("export const host = 'gpoint.one';\nexport const routing = 'candidate-only';\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "candidate drops live source change"], check=True)
+    missing_live_change = run(subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip())
+    assert missing_live_change.returncode != 0
+    assert "LIVE_SOURCE_TREE_NOT_PRESERVED" in missing_live_change.stderr
+
+
 def test_first_cutover_backup_output_contract_accepts_all_proven_statuses_and_rejects_extra_fields(tmp_path):
     workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
     helper = (ROOT / "scripts/verify-gpoint-backup-restore.sh").read_text()
