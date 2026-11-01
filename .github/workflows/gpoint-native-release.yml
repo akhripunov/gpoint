@@ -482,9 +482,13 @@ jobs:
         run: |
           set -euo pipefail
           role_inventory="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - < "$GITHUB_WORKSPACE/scripts/verify-kamal-production-baseline.py")"
-          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$role_inventory" <<'REMOTE'
+          baseline_values="$(python3 -c 'import json,re,sys; d=json.loads(sys.argv[1]); assert set(d["roles"]) == {"gpoint-core-api","gpoint-core-worker","gpoint-core-bot","gpoint-agata-api","gpoint-agata-memory-worker","gpoint-miniapp-web"}; v=d["version"]; s=d["source_sha"]; assert re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+",v); assert re.fullmatch(r"[0-9a-f]{40}",s); print(v+"\t"+s)' "$role_inventory")"
+          IFS=$'\t' read -r baseline_version baseline_source_sha <<< "$baseline_values"
+          test -n "$baseline_version" && test -n "$baseline_source_sha"
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$baseline_version" "$baseline_source_sha" <<'REMOTE'
           set -euo pipefail
-          role_inventory="$1"
+          baseline_version="$1"
+          baseline_source_sha="$2"
           if systemctl is-active --quiet caddy; then
             echo 'Caddy must be inactive after the first Kamal cutover' >&2; exit 1
           fi
@@ -501,8 +505,6 @@ jobs:
               }
             done <<< "$ids"
           done
-          baseline_version="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["version"])' "$role_inventory")"
-          baseline_source_sha="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["source_sha"])' "$role_inventory")"
           [[ "$baseline_version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
           [[ "$baseline_source_sha" =~ ^[0-9a-f]{40}$ ]]
           db_id="$(docker inspect --format '{{.Id}}' shared_postgres_1)"
@@ -515,7 +517,6 @@ jobs:
           echo "REDIS_CONTAINER_ID=$redis_id"
           echo "GPOINT_BASELINE_ROLE_VERSION=$baseline_version"
           echo "GPOINT_BASELINE_ROLE_SOURCE_SHA=$baseline_source_sha"
-          echo "GPOINT_BASELINE_ROLE_INVENTORY=$role_inventory"
           echo "DB_MOUNTS_SHA256=$db_mounts_sha"
           echo "REDIS_MOUNTS_SHA256=$redis_mounts_sha"
           REMOTE
@@ -526,10 +527,10 @@ jobs:
           grep -Eq '^GPOINT_BASELINE_ROLE_SOURCE_SHA=[0-9a-f]{40}$' <<< "$facts"
           grep -Eq '^DB_MOUNTS_SHA256=[0-9a-f]{64}$' <<< "$facts"
           grep -Eq '^REDIS_MOUNTS_SHA256=[0-9a-f]{64}$' <<< "$facts"
-          grep -Fq '"roles"' <<< "$facts"
+          printf 'GPOINT_BASELINE_ROLE_INVENTORY=%s\n' "$role_inventory" >> "$GITHUB_OUTPUT"
           while IFS='=' read -r key value; do
             case "$key" in
-              DB_CONTAINER_ID|REDIS_CONTAINER_ID|GPOINT_BASELINE_ROLE_VERSION|GPOINT_BASELINE_ROLE_SOURCE_SHA|GPOINT_BASELINE_ROLE_INVENTORY|DB_MOUNTS_SHA256|REDIS_MOUNTS_SHA256) printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT" ;;
+              DB_CONTAINER_ID|REDIS_CONTAINER_ID|GPOINT_BASELINE_ROLE_VERSION|GPOINT_BASELINE_ROLE_SOURCE_SHA|DB_MOUNTS_SHA256|REDIS_MOUNTS_SHA256) printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT" ;;
               *) echo 'unexpected topology fact' >&2; exit 1 ;;
             esac
           done <<< "$facts"

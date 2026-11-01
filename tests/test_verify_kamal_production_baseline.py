@@ -58,6 +58,11 @@ def test_workflow_uses_read_only_remote_baseline_and_its_source_sha_for_migratio
         "name: Verify candidate compatibility with the live database baseline", 1)[0]
     assert "verify-kamal-production-baseline.py" in preflight
     assert "GPOINT_BASELINE_ROLE_INVENTORY" in preflight
+    assert 'json.loads(sys.argv[1])' in preflight
+    assert 'bash -s -- "$baseline_version" "$baseline_source_sha"' in preflight
+    assert 'bash -s -- "$role_inventory"' not in preflight
+    assert 'printf \'GPOINT_BASELINE_ROLE_INVENTORY=%s\\n\' "$role_inventory" >> "$GITHUB_OUTPUT"' in preflight
+    assert preflight.index("baseline_values=") < preflight.index('bash -s -- "$baseline_version"')
     assert '"$version" == "$source_sha"-*' not in preflight
     compatibility = deploy.split("name: Verify candidate compatibility with the live database baseline", 1)[1].split(
         "name: Create exact-SHA in-progress GitHub Deployment", 1)[0]
