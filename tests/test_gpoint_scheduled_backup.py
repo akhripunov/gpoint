@@ -252,3 +252,12 @@ def test_scheduled_manifest_keeps_ciphertext_sizes_separate_from_restore_sizes(t
     db_code = "\n".join(helper.splitlines()[next(i for i,l in enumerate(helper.splitlines()) if 'database_bytes="$(python3 - "$latest_manifest"' in l)+1:]).split("\nPY\n",1)[0]
     result = subprocess.run([sys.executable, "-", str(path)], input=db_code, text=True, capture_output=True, check=True)
     assert result.stdout.strip() == "900000"
+
+
+def test_rehearsal_matches_verified_migration_privileges_without_runtime_bypass():
+    helper = (Path(__file__).resolve().parents[1] / "scripts/verify-gpoint-scheduled-backup-restore.sh").read_text()
+    assert 'GRANT CONNECT, CREATE ON DATABASE gpoint TO gpoint;' in helper
+    assert 'AGATA_MIGRATOR_DATABASE_URL=postgresql+psycopg://gpoint_restore_admin:' in helper
+    assert 'CREATE ROLE gpoint LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS' in helper
+    assert 'runtime_role=gpoint' in helper
+    assert 'GPOINT_MIGRATION_PRODUCTION_GRANTS_RLS=NOT_CHECKED' in (Path(__file__).resolve().parents[1] / "scripts/gpoint-scheduled-backup.py").read_text() or 'MIGRATION_PRODUCTION_GRANTS_RLS=NOT_CHECKED' in helper

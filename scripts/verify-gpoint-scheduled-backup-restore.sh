@@ -474,7 +474,7 @@ restored_tables="$(docker exec "$restore_container_id" psql -XqAt -v ON_ERROR_ST
 if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" == "1" ]]; then
   [[ "$restored_tables" =~ ^[0-9]+$ && "$restored_tables" -gt 0 ]]
   docker exec "$restore_container_id" psql -Xq -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
-    -c 'GRANT CONNECT ON DATABASE gpoint TO gpoint; REASSIGN OWNED BY gpoint_restore_admin TO gpoint' >/dev/null
+    -c 'GRANT CONNECT, CREATE ON DATABASE gpoint TO gpoint; REASSIGN OWNED BY gpoint_restore_admin TO gpoint' >/dev/null
 else
   test "$restored_tables" = "$source_tables"
 fi
@@ -580,7 +580,7 @@ SQL
   docker run --rm --network "container:$restore_container_id" --read-only --cap-drop ALL \
     --security-opt no-new-privileges --pids-limit 128 --memory 2g --cpus 2 \
     --tmpfs /tmp:rw,noexec,nosuid,size=256m \
-    --env "AGATA_MIGRATOR_DATABASE_URL=postgresql+psycopg://gpoint:${restore_password}@127.0.0.1:5432/gpoint" \
+    --env "AGATA_MIGRATOR_DATABASE_URL=postgresql+psycopg://gpoint_restore_admin:${restore_password}@127.0.0.1:5432/gpoint" \
     --workdir /srv/agata "$agata_image" python -m alembic upgrade agata0012
 
   prisma_rows="$(docker exec "$restore_container_id" psql -XqAt -F '=' -v ON_ERROR_STOP=1 \
