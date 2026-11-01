@@ -20,13 +20,14 @@ scope и смешение приложения с release/infra изменени
 Ручной exact-SHA dispatch остаётся отдельным контролируемым путём для явно
 авторизованных действий.
 
-У workflow есть обязательный `allow_source_update`, по умолчанию `false`.
-Его включают только для отдельно OWNER-approved exact candidate, если при
-первоначальном переходе Kamal application source должен продвинуться дальше
+У отдельного First Cutover workflow есть `allow_source_update`, по умолчанию
+`false`. Его включают только для отдельно OWNER-approved exact candidate, если
+при первоначальном переходе Kamal application source должен продвинуться дальше
 live Compose `RELEASE_SHA`. Тогда проверяется корректный непустой текущий
 Mini App static tree, а новый immutable image независимо проверяется по exact
-digest/provenance. Это не отменяет migration parity, backup/offsite/isolated
-restore, recovery, consumer и runtime Verify gates.
+digest/provenance. Этот First Cutover-only flag не меняет обычный Native Release
+и не отменяет migration parity, backup/offsite/isolated restore, recovery,
+consumer и runtime Verify gates.
 
 Публичный TLS/HTTP вход после перехода обслуживает Kamal Proxy на портах 80 и
 443: `/api` и `/media` идут в Core, `/` и Mini App paths — в Mini App. Caddy
@@ -37,7 +38,31 @@ Sensitive Detector и ACL/pilot остаются вне обычного release
 Production Deploy обычного app-only релиза выполняется после успешных CI,
 Build и read-only migration compatibility checks на `main`; pending schema
 changes останавливают его до Kamal и без DDL. Runtime Verify является
-единственным runtime gate для GitHub Deployment SUCCESS. Состояние и свежесть
+единственным runtime gate для GitHub Deployment SUCCESS.
+
+Обычный production preflight требует ровно по одной работающей версии каждой из
+шести Kamal-ролей, общего SHA/version baseline, активного Proxy, точных
+PostgreSQL/Redis container IDs и SHA-256 fingerprints их persistent mounts.
+После Deploy идентичность БД и Redis сверяется повторно. Core Worker, Bot и
+AGATA memory-worker обновляются отдельными stock Kamal вызовами. Перед этим
+`kamal app stop --roles ...` останавливает прежний consumer: grammY Bot использует
+long-polling, а stock Kamal обычно запускает новую версию до остановки старой.
+После каждого перехода проверяется ровно один процесс на candidate SHA. Очередь
+Worker/AGATA и накопленные Telegram updates переживают короткое окно остановки. Частичный отказ
+записывается как `RECOVERY_REQUIRED`; автоматический rollback и повторный Apply
+запрещены до read-only reconciliation.
+
+Защищённый rollback доступен только как ручной exact-main dispatch с явным
+OWNER approval, exact target SHA и ID предыдущего успешного Native Production
+Deployment. Проверяются последний статус SUCCESS, связанный успешный Native
+Release run/build, SHA-256-bound production manifest для всех шести ролей,
+GHCR immutable digests и provenance, retained target containers, совместимость
+текущих Prisma/Alembic heads и сохранность DB/Redis IDs и mounts. Kamal rollback
+выполняется по одной роли: consumers раньше API. Полный runtime Verify должен
+завершиться до GitHub Deployment SUCCESS. Любая неоднозначность блокирует
+операцию; production DB migrations автоматически не откатываются. Пока нет
+предыдущего Native Release с подтверждённым successful manifest, rollback
+цель отсутствует и workflow должен отказать до изменения runtime. Состояние и свежесть
 scheduled backup не являются условием обычного релиза и должны контролироваться
 отдельным мониторингом ([ME-56](https://linear.app/bestuzhev/issue/ME-56/gpoint-independent-scheduled-backup-failure-and-freshness-alert)).
 Установка/обновление timer и один первичный backup выполняются отдельно через

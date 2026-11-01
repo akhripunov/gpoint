@@ -84,11 +84,18 @@ def classify_push(*, event_name: str, ref: str,
 def classify_dispatch(*, ref: str, candidate_sha: str, github_sha: str, actor: str,
                       repository_owner: str, migration_rehearsal: bool,
                       approve_production: bool,
-                      backup_maintenance: bool = False) -> tuple[str, bool]:
+                      backup_maintenance: bool = False,
+                      rollback: bool = False) -> tuple[str, bool]:
     exact = bool(re.fullmatch(r"[0-9a-f]{40}", candidate_sha)) and candidate_sha == github_sha
     owner = bool(repository_owner) and actor.lower() == repository_owner.lower()
+    if rollback and (migration_rehearsal or backup_maintenance):
+        return "INVALID_ROLLBACK", False
     if migration_rehearsal and backup_maintenance:
         return "INVALID_REHEARSAL", False
+    if rollback:
+        if ref == "refs/heads/main" and exact and owner and approve_production:
+            return "ROLLBACK", False
+        return "INVALID_ROLLBACK", False
     if migration_rehearsal:
         if (ref == "refs/heads/main" and exact and owner and not approve_production):
             return "REHEARSAL", False
@@ -130,6 +137,7 @@ def main() -> int:
     parser.add_argument("--repository-owner", default="")
     parser.add_argument("--migration-rehearsal", action="store_true")
     parser.add_argument("--backup-maintenance", action="store_true")
+    parser.add_argument("--rollback", action="store_true")
     parser.add_argument("--approve-production", action="store_true")
     args = parser.parse_args()
 
@@ -145,6 +153,7 @@ def main() -> int:
                 migration_rehearsal=args.migration_rehearsal,
                 approve_production=args.approve_production,
                 backup_maintenance=args.backup_maintenance,
+                rollback=args.rollback,
             )
         else:
             mode, deploy = "NO_DEPLOY", False

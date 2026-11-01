@@ -16,7 +16,12 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
 
     def test_pipeline_has_release_gate_and_one_isolated_rehearsal_job(self):
         jobs = self.workflow["jobs"]
-        self.assertEqual(set(jobs), {"workspace", "python", "build", "release_intent", "deploy", "backup_maintenance", "migration_rehearsal"})
+        self.assertEqual(set(jobs), {"workspace", "python", "build", "release_intent", "deploy", "rollback", "backup_maintenance", "migration_rehearsal"})
+        rollback = jobs["rollback"]
+        self.assertIn("outputs.mode == 'ROLLBACK'", rollback["if"])
+        self.assertEqual(rollback["environment"], {"name": "production", "deployment": False})
+        self.assertEqual(rollback["concurrency"], {"group": "gpoint-production-release", "cancel-in-progress": False})
+        self.assertNotIn("build", rollback["needs"])
         self.assertEqual(jobs["migration_rehearsal"]["needs"], ["workspace", "python", "build", "release_intent"])
         self.assertIn("github.event_name == 'workflow_dispatch'", jobs["migration_rehearsal"]["if"])
         self.assertIn("github.ref == 'refs/heads/main'", jobs["migration_rehearsal"]["if"])

@@ -28,6 +28,19 @@ on:
         required: true
         default: false
         type: boolean
+      rollback:
+        description: Roll back to a previously verified successful Native production release
+        required: true
+        default: false
+        type: boolean
+      rollback_target_sha:
+        description: Exact target source SHA from a successful Native production deployment
+        required: false
+        type: string
+      rollback_deployment_id:
+        description: Exact successful GitHub production Deployment ID for the target SHA
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -152,6 +165,7 @@ jobs:
           tests/test_deploy_evidence_workflow.py
           tests/test_native_build_boundary.py
           tests/test_native_release_intent.py
+          tests/test_native_rollback_evidence.py
           tests/test_kamal_release_config.py
           tests/test_kamal_cutover_owner.py
           tests/test_kamal_cutover_credentials.py
@@ -339,6 +353,7 @@ jobs:
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           MIGRATION_REHEARSAL: ${{ inputs.migration_rehearsal || false }}
           BACKUP_MAINTENANCE: ${{ inputs.backup_maintenance || false }}
+          ROLLBACK: ${{ inputs.rollback || false }}
           APPROVE_PRODUCTION: ${{ inputs.approve_production || false }}
         run: |
           set -euo pipefail
@@ -348,6 +363,7 @@ jobs:
             --repository-owner "$REPOSITORY_OWNER")
           [[ "$MIGRATION_REHEARSAL" == true ]] && args+=(--migration-rehearsal)
           [[ "$BACKUP_MAINTENANCE" == true ]] && args+=(--backup-maintenance)
+          [[ "$ROLLBACK" == true ]] && args+=(--rollback)
           [[ "$APPROVE_PRODUCTION" == true ]] && args+=(--approve-production)
           python3 scripts/native_release_intent.py "${args[@]}" >> "$GITHUB_OUTPUT"
 
@@ -481,22 +497,43 @@ jobs:
               }
             done <<< "$ids"
           done
-          for prefix in gpoint-core-api gpoint-agata-api gpoint-miniapp-web gpoint-core-worker gpoint-core-bot gpoint-agata-memory-worker; do
-            docker ps --format '{{.Names}}' | grep -Eq "^${prefix}-[0-9a-f]{40}-[0-9]+-[0-9]+$" || {
-              echo "expected running Kamal role is missing: $prefix" >&2; exit 1;
-            }
+          prefixes=(gpoint-core-api gpoint-agata-api gpoint-miniapp-web gpoint-core-worker gpoint-core-bot gpoint-agata-memory-worker)
+          baseline_version=""
+          baseline_source_sha=""
+          for prefix in "${prefixes[@]}"; do
+            mapfile -t matches < <(docker ps --format '{{.Names}}' | grep -E "^${prefix}-[0-9a-f]{40}-[0-9]+-[0-9]+$" || true)
+            test "${#matches[@]}" = 1 || { echo "expected exactly one running Kamal role: $prefix" >&2; exit 1; }
+            name="${matches[0]}"
+            version="${name#${prefix}-}"
+            source_sha="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$name")"
+            [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid running source revision: $prefix" >&2; exit 1; }
+            [[ "$version" == "$source_sha"-* ]] || { echo "running version does not match source revision: $prefix" >&2; exit 1; }
+            if [[ -z "$baseline_version" ]]; then baseline_version="$version"; else test "$version" = "$baseline_version" || { echo 'running Kamal roles have mixed release versions' >&2; exit 1; }; fi
+            if [[ -z "$baseline_source_sha" ]]; then baseline_source_sha="$source_sha"; else test "$source_sha" = "$baseline_source_sha" || { echo 'running Kamal roles have mixed source revisions' >&2; exit 1; }; fi
           done
           db_id="$(docker inspect --format '{{.Id}}' shared_postgres_1)"
           redis_id="$(docker inspect --format '{{.Id}}' shared_redis_1)"
+          db_mounts="$(docker inspect shared_postgres_1 --format '{{json .Mounts}}')"
+          redis_mounts="$(docker inspect shared_redis_1 --format '{{json .Mounts}}')"
+          db_mounts_sha="$(python3 -c 'import hashlib,json,sys; a=json.loads(sys.argv[1]); rows=sorted(({k:m.get(k) for k in ("Type","Name","Source","Destination","RW")} for m in a), key=lambda x:(x["Destination"] or "",x["Source"] or "")); assert rows and all(x["Source"] and x["Destination"] for x in rows); print(hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(",",":")).encode()).hexdigest())' "$db_mounts")"
+          redis_mounts_sha="$(python3 -c 'import hashlib,json,sys; a=json.loads(sys.argv[1]); rows=sorted(({k:m.get(k) for k in ("Type","Name","Source","Destination","RW")} for m in a), key=lambda x:(x["Destination"] or "",x["Source"] or "")); assert rows and all(x["Source"] and x["Destination"] for x in rows); print(hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(",",":")).encode()).hexdigest())' "$redis_mounts")"
           echo "DB_CONTAINER_ID=$db_id"
           echo "REDIS_CONTAINER_ID=$redis_id"
+          echo "GPOINT_BASELINE_ROLE_VERSION=$baseline_version"
+          echo "GPOINT_BASELINE_ROLE_SOURCE_SHA=$baseline_source_sha"
+          echo "DB_MOUNTS_SHA256=$db_mounts_sha"
+          echo "REDIS_MOUNTS_SHA256=$redis_mounts_sha"
           REMOTE
           )"
           grep -Eq '^DB_CONTAINER_ID=[0-9a-f]{64}$' <<< "$facts"
           grep -Eq '^REDIS_CONTAINER_ID=[0-9a-f]{64}$' <<< "$facts"
+          grep -Eq '^GPOINT_BASELINE_ROLE_VERSION=[0-9a-f]{40}-[0-9]+-[0-9]+$' <<< "$facts"
+          grep -Eq '^GPOINT_BASELINE_ROLE_SOURCE_SHA=[0-9a-f]{40}$' <<< "$facts"
+          grep -Eq '^DB_MOUNTS_SHA256=[0-9a-f]{64}$' <<< "$facts"
+          grep -Eq '^REDIS_MOUNTS_SHA256=[0-9a-f]{64}$' <<< "$facts"
           while IFS='=' read -r key value; do
             case "$key" in
-              DB_CONTAINER_ID|REDIS_CONTAINER_ID) printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT" ;;
+              DB_CONTAINER_ID|REDIS_CONTAINER_ID|GPOINT_BASELINE_ROLE_VERSION|GPOINT_BASELINE_ROLE_SOURCE_SHA|DB_MOUNTS_SHA256|REDIS_MOUNTS_SHA256) printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT" ;;
               *) echo 'unexpected topology fact' >&2; exit 1 ;;
             esac
           done <<< "$facts"
@@ -542,6 +579,7 @@ jobs:
             -f state=in_progress -f environment=production -f description="Kamal deploy in progress for exact SHA $CANDIDATE_SHA" >/dev/null
           echo "id=$id" >> "$GITHUB_OUTPUT"
       - name: Deploy exact immutable images with stock Kamal
+        id: kamal_apply
         env:
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
@@ -561,10 +599,28 @@ jobs:
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.agata.yml
           GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.miniapp.yml
-          GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker,bot \
-            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker,bot --config-file config/deploy.yml
+          verify_single_running_role() {
+            local prefix="$1" version="$2" expected_sha="$3"
+            local count container revision
+            count="$(docker ps -q --filter "name=^/${prefix}-" | wc -l | tr -d ' ')"
+            test "$count" = 1 || { echo "partial Kamal transition: expected one running role $prefix, found $count" >&2; return 1; }
+            container="$(docker ps -q --filter "name=^/${prefix}-${version}$")"
+            test -n "$container" || { echo "partial Kamal transition: candidate role is not running: $prefix" >&2; return 1; }
+            revision="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$container")"
+            test "$revision" = "$expected_sha" || { echo "partial Kamal transition: wrong source revision for $prefix" >&2; return 1; }
+          }
+          GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker kamal app stop --roles worker --config-file config/deploy.yml
+          GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker \
+            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker --config-file config/deploy.yml
+          verify_single_running_role gpoint-core-worker "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
+          GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot kamal app stop --roles bot --config-file config/deploy.yml
+          GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot \
+            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles bot --config-file config/deploy.yml
+          verify_single_running_role gpoint-core-bot "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
+          GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker kamal app stop --roles memory-worker --config-file config/deploy.agata.yml
           GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles memory-worker --config-file config/deploy.agata.yml
+          verify_single_running_role gpoint-agata-memory-worker "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
       - name: Verify public routes and exact running services
         id: verify
         env:
@@ -573,6 +629,10 @@ jobs:
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
           DB_CONTAINER_ID: ${{ steps.topology.outputs.DB_CONTAINER_ID }}
           REDIS_CONTAINER_ID: ${{ steps.topology.outputs.REDIS_CONTAINER_ID }}
+          DB_MOUNTS_SHA256: ${{ steps.topology.outputs.DB_MOUNTS_SHA256 }}
+          REDIS_MOUNTS_SHA256: ${{ steps.topology.outputs.REDIS_MOUNTS_SHA256 }}
+          BASELINE_ROLE_VERSION: ${{ steps.topology.outputs.GPOINT_BASELINE_ROLE_VERSION }}
+          BASELINE_ROLE_SOURCE_SHA: ${{ steps.topology.outputs.GPOINT_BASELINE_ROLE_SOURCE_SHA }}
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
         run: |
           set -euo pipefail
@@ -618,6 +678,13 @@ jobs:
           test "$(docker inspect --format '{{.Id}}' shared_redis_1)" = "$redis_id"
           test "$(docker inspect --format '{{.State.Running}}' shared_postgres_1)" = true
           test "$(docker inspect --format '{{.State.Running}}' shared_redis_1)" = true
+          [[ "$BASELINE_ROLE_VERSION" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
+          [[ "$BASELINE_ROLE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$DB_MOUNTS_SHA256" =~ ^[0-9a-f]{64}$ && "$REDIS_MOUNTS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          db_mounts_sha="$(docker inspect shared_postgres_1 --format '{{json .Mounts}}' | python3 -c 'import hashlib,json,sys; a=json.load(sys.stdin); rows=sorted(({k:m.get(k) for k in ("Type","Name","Source","Destination","RW")} for m in a), key=lambda x:(x["Destination"] or "",x["Source"] or "")); assert rows and all(x["Source"] and x["Destination"] for x in rows); print(hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(",",":")).encode()).hexdigest())')"
+          redis_mounts_sha="$(docker inspect shared_redis_1 --format '{{json .Mounts}}' | python3 -c 'import hashlib,json,sys; a=json.load(sys.stdin); rows=sorted(({k:m.get(k) for k in ("Type","Name","Source","Destination","RW")} for m in a), key=lambda x:(x["Destination"] or "",x["Source"] or "")); assert rows and all(x["Source"] and x["Destination"] for x in rows); print(hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(",",":")).encode()).hexdigest())')"
+          test "$db_mounts_sha" = "$DB_MOUNTS_SHA256" || { echo 'PostgreSQL persistence identity changed during Kamal apply' >&2; exit 1; }
+          test "$redis_mounts_sha" = "$REDIS_MOUNTS_SHA256" || { echo 'Redis persistence identity changed during Kamal apply' >&2; exit 1; }
           test "$(docker inspect --format '{{.State.Running}}' kamal-proxy)" = true
           test "$(docker ps -q --filter 'name=^/kamal-proxy$' | wc -l | tr -d ' ')" = 1
           test "$(docker ps -q --filter label=com.docker.compose.project=shared --filter label=com.docker.compose.service=postgres | wc -l | tr -d ' ')" = 1
@@ -729,18 +796,392 @@ jobs:
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
           MANIFEST_SHA: ${{ steps.verify.outputs.manifest_sha }}
           DEPLOY_JOB_STATUS: ${{ job.status }}
+          KAMAL_APPLY_OUTCOME: ${{ steps.kamal_apply.outcome }}
           VERIFY_OUTCOME: ${{ steps.verify.outcome }}
         run: |
           set -euo pipefail
           state=failure
           if [[ "$DEPLOY_JOB_STATUS" == success && "$VERIFY_OUTCOME" == success ]]; then state=success; fi
           description="Kamal $state SHA $CANDIDATE_SHA"
+          if [[ "$KAMAL_APPLY_OUTCOME" != success || "$VERIFY_OUTCOME" != success ]]; then
+            echo "RECOVERY_REQUIRED: partial Kamal transition or Runtime Verify failure for $CANDIDATE_SHA; automatic rollback is prohibited. Confirm the live topology read-only before another production mutation." >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [[ "$state" == success ]]; then
             [[ "$MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]]
             description="Kamal $state SHA $CANDIDATE_SHA manifest $MANIFEST_SHA"
           fi
           gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
-            -f state="$state" -f environment=production -f description="$description" >/dev/null
+            -f state="$state" -f environment=production -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            -f description="$description" >/dev/null
+
+  rollback:
+    name: Protected rollback to a verified Native release
+    needs: [workspace, python, release_intent]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && needs.release_intent.outputs.mode == 'ROLLBACK' && inputs.rollback == true && inputs.migration_rehearsal != true && inputs.backup_maintenance != true
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      deployment: false
+    concurrency:
+      group: gpoint-production-release
+      cancel-in-progress: false
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: read
+      deployments: write
+    env:
+      GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}
+      KAMAL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      GPOINT_SSH_KEY: /root/.ssh/id_ed25519
+      GPOINT_KNOWN_HOSTS_FILE: /root/.ssh/known_hosts
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require exact current main and owner-selected previous deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          TARGET_SHA: ${{ inputs.rollback_target_sha }}
+          TARGET_DEPLOYMENT_ID: ${{ inputs.rollback_deployment_id }}
+          APPROVE_PRODUCTION: ${{ inputs.approve_production }}
+          OWNER_ACTOR: ${{ github.actor }}
+          OWNER_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REF" = refs/heads/main
+          test "$CANDIDATE_SHA" = "$GITHUB_SHA"
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ && "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TARGET_DEPLOYMENT_ID" =~ ^[1-9][0-9]*$ ]]
+          test "$TARGET_SHA" != "$CANDIDATE_SHA"
+          test "$APPROVE_PRODUCTION" = true
+          test "$OWNER_ACTOR" = "$REPOSITORY_OWNER"
+          test "$OWNER_TRIGGERING_ACTOR" = "$REPOSITORY_OWNER"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')" = "$GITHUB_SHA"
+          mkdir -p "$RUNNER_TEMP/gpoint-rollback"
+          gh api "repos/$GITHUB_REPOSITORY/deployments/$TARGET_DEPLOYMENT_ID" > "$RUNNER_TEMP/gpoint-rollback/deployment.json"
+          gh api "repos/$GITHUB_REPOSITORY/deployments/$TARGET_DEPLOYMENT_ID/statuses?per_page=100" > "$RUNNER_TEMP/gpoint-rollback/statuses.json"
+          python3 - "$RUNNER_TEMP/gpoint-rollback/deployment.json" "$RUNNER_TEMP/gpoint-rollback/statuses.json" "$TARGET_SHA" "$TARGET_DEPLOYMENT_ID" > "$RUNNER_TEMP/gpoint-rollback/run_id" <<'PY'
+          import json,re,sys
+          import os
+          deployment=json.load(open(sys.argv[1])); statuses=json.load(open(sys.argv[2]))
+          sha, deployment_id=sys.argv[3],int(sys.argv[4])
+          if deployment.get('sha') != sha or deployment.get('environment') != 'production' or deployment.get('task') != 'deploy' or deployment.get('id') != deployment_id:
+              raise SystemExit('selected target is not the requested production Deploy')
+          statuses.sort(key=lambda x:x.get('created_at',''), reverse=True)
+          if not statuses or statuses[0].get('state') != 'success': raise SystemExit('latest target Deployment status is not SUCCESS')
+          match=re.fullmatch(r'Kamal success SHA ([0-9a-f]{40}) manifest ([0-9a-f]{64})',statuses[0].get('description',''))
+          if not match or match.group(1) != sha: raise SystemExit('target Deployment lacks exact Runtime Verify manifest evidence')
+          url=statuses[0].get('log_url','')
+          run=re.fullmatch(r'https://github\.com/([^/]+/[^/]+)/actions/runs/([0-9]+)',url)
+          if not run or run.group(1).lower() != os.environ.get('GITHUB_REPOSITORY','').lower(): raise SystemExit('target Deployment lacks a trusted Native Release run link')
+          print(run.group(2))
+          PY
+          run_id="$(cat "$RUNNER_TEMP/gpoint-rollback/run_id")"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > "$RUNNER_TEMP/gpoint-rollback/run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" --jq '.jobs' > "$RUNNER_TEMP/gpoint-rollback/jobs.json"
+          echo "TARGET_RUN_ID=$run_id" >> "$GITHUB_ENV"
+      - name: Install verified VPS SSH credentials
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.GPOINT_KAMAL_SSH_PRIVATE_KEY }}
+          VERIFIED_KNOWN_HOSTS: ${{ secrets.GPOINT_KAMAL_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$SSH_PRIVATE_KEY" && test -n "$VERIFIED_KNOWN_HOSTS"
+          [[ "$GPOINT_PRODUCTION_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$VERIFIED_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          ssh-keygen -F "$GPOINT_PRODUCTION_HOST" -f "$HOME/.ssh/known_hosts" >/dev/null
+          chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
+          cat > "$HOME/.ssh/config" <<EOF
+          Host ${GPOINT_PRODUCTION_HOST}
+            User root
+            IdentityFile $HOME/.ssh/id_ed25519
+            IdentitiesOnly yes
+            BatchMode yes
+            StrictHostKeyChecking yes
+            UserKnownHostsFile $HOME/.ssh/known_hosts
+          EOF
+          chmod 600 "$HOME/.ssh/config"
+      - name: Retrieve only the manifest anchored by the prior successful status
+        id: manifest
+        env:
+          TARGET_SHA: ${{ inputs.rollback_target_sha }}
+        run: |
+          set -euo pipefail
+          manifest_sha="$(python3 - "$RUNNER_TEMP/gpoint-rollback/statuses.json" <<'PY'
+          import json,re,sys
+          statuses=sorted(json.load(open(sys.argv[1])),key=lambda x:x.get('created_at',''),reverse=True)
+          m=re.fullmatch(r'Kamal success SHA [0-9a-f]{40} manifest ([0-9a-f]{64})',statuses[0].get('description',''))
+          if not m: raise SystemExit('verified manifest identity is missing')
+          print(m.group(1))
+          PY
+          )"
+          encoded="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$TARGET_SHA" "$manifest_sha" <<'REMOTE'
+          set -euo pipefail
+          sha="$1"; expected="$2"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ && "$expected" =~ ^[0-9a-f]{64}$ ]]
+          root="/opt/gpoint/release-logs/$sha"
+          test -d "$root" && test ! -L "$root"
+          matches=0; selected=''
+          while IFS= read -r -d '' path; do
+            actual="$(sha256sum "$path" | awk '{print $1}')"
+            if [[ "$actual" == "$expected" ]]; then matches=$((matches+1)); selected="$path"; fi
+          done < <(find "$root" -maxdepth 1 -type f -name 'kamal-production-*.json' -print0)
+          test "$matches" = 1
+          base64 < "$selected" | tr -d '\n'
+          REMOTE
+          )"
+          printf '%s' "$encoded" | base64 --decode > "$RUNNER_TEMP/gpoint-rollback/manifest.json"
+          echo "manifest_sha=$manifest_sha" >> "$GITHUB_OUTPUT"
+      - name: Validate linked build, successful Runtime Verify and six-role manifest
+        id: evidence
+        env:
+          TARGET_SHA: ${{ inputs.rollback_target_sha }}
+          TARGET_DEPLOYMENT_ID: ${{ inputs.rollback_deployment_id }}
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_native_rollback_evidence.py \
+            --deployment "$RUNNER_TEMP/gpoint-rollback/deployment.json" \
+            --statuses "$RUNNER_TEMP/gpoint-rollback/statuses.json" \
+            --run "$RUNNER_TEMP/gpoint-rollback/run.json" \
+            --jobs "$RUNNER_TEMP/gpoint-rollback/jobs.json" \
+            --manifest "$RUNNER_TEMP/gpoint-rollback/manifest.json" \
+            --sha "$TARGET_SHA" --deployment-id "$TARGET_DEPLOYMENT_ID" \
+            --repository "$GITHUB_REPOSITORY" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          platforms: linux/amd64
+      - name: Authenticate to GHCR for read-only immutable image verification
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Verify target digests, platform, revision and provenance
+        env:
+          TARGET_SHA: ${{ inputs.rollback_target_sha }}
+          CORE_DIGEST: ${{ steps.evidence.outputs.core_digest }}
+          AGATA_DIGEST: ${{ steps.evidence.outputs.agata_digest }}
+          MINIAPP_DIGEST: ${{ steps.evidence.outputs.miniapp_digest }}
+        run: |
+          set -euo pipefail
+          for item in \
+            "core|ghcr.io/akhripunov/gpoint-runtime|$CORE_DIGEST" \
+            "agata|ghcr.io/akhripunov/gpoint-agata-runtime|$AGATA_DIGEST" \
+            "miniapp|ghcr.io/akhripunov/gpoint-miniapp|$MINIAPP_DIGEST"; do
+            IFS='|' read -r role repository digest <<< "$item"
+            docker pull --platform linux/amd64 "$repository@$digest"
+            docker image inspect "$repository@$digest" > "$RUNNER_TEMP/gpoint-rollback/$role-image.json"
+            docker buildx imagetools inspect --format '{{json .SBOM.SPDX}}' "$repository@$digest" > "$RUNNER_TEMP/gpoint-rollback/$role-sbom.json"
+            docker buildx imagetools inspect --format '{{json .Provenance}}' "$repository@$digest" > "$RUNNER_TEMP/gpoint-rollback/$role-provenance.json"
+            python3 scripts/verify_native_image_readback.py "$RUNNER_TEMP/gpoint-rollback/$role-image.json" "$repository" "$digest" "$TARGET_SHA"
+            python3 scripts/verify_native_image_attestation.py "$RUNNER_TEMP/gpoint-rollback/$role-sbom.json" "$RUNNER_TEMP/gpoint-rollback/$role-provenance.json" "$TARGET_SHA" https://github.com/akhripunov/gpoint.git
+          done
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.rollback_target_sha }}
+          path: rollback-source
+          persist-credentials: false
+      - name: Verify live DB compatibility and retained target containers before mutation
+        id: baseline
+        env:
+          TARGET_SHA: ${{ inputs.rollback_target_sha }}
+          TARGET_VERSION: ${{ steps.evidence.outputs.version }}
+          CORE_DIGEST: ${{ steps.evidence.outputs.core_digest }}
+          AGATA_DIGEST: ${{ steps.evidence.outputs.agata_digest }}
+          MINIAPP_DIGEST: ${{ steps.evidence.outputs.miniapp_digest }}
+        run: |
+          set -euo pipefail
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$TARGET_SHA" "$TARGET_VERSION" "$CORE_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" <<'REMOTE'
+          set -euo pipefail
+          sha="$1"; version="$2"; core="ghcr.io/akhripunov/gpoint-runtime@$3"; agata="ghcr.io/akhripunov/gpoint-agata-runtime@$4"; miniapp="ghcr.io/akhripunov/gpoint-miniapp@$5"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ && "$version" == "$sha"-* ]]
+          test "$(docker inspect --format '{{.State.Running}}' kamal-proxy)" = true
+          test "$(docker inspect --format '{{.State.Running}}' shared_postgres_1)" = true
+          test "$(docker inspect --format '{{.State.Running}}' shared_redis_1)" = true
+          echo "DB_CONTAINER_ID=$(docker inspect --format '{{.Id}}' shared_postgres_1)"
+          echo "REDIS_CONTAINER_ID=$(docker inspect --format '{{.Id}}' shared_redis_1)"
+          live_version=""; live_source_sha=""
+          for item in "gpoint-core-api|$core" "gpoint-core-worker|$core" "gpoint-core-bot|$core" "gpoint-agata-api|$agata" "gpoint-agata-memory-worker|$agata" "gpoint-miniapp-web|$miniapp"; do
+            IFS='|' read -r prefix expected_image <<< "$item"
+            current="$(docker ps -q --filter "name=^/${prefix}-")"
+            test "$(wc -l <<< "$current" | tr -d ' ')" = 1
+            live_name="$(docker inspect --format '{{.Name}}' "$current" | sed 's#^/##')"
+            current_version="${live_name#${prefix}-}"
+            current_sha="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$current")"
+            [[ "$current_sha" =~ ^[0-9a-f]{40}$ && "$current_version" == "$current_sha"-* ]]
+            if [[ -z "$live_version" ]]; then live_version="$current_version"; live_source_sha="$current_sha"; else test "$current_version" = "$live_version" && test "$current_sha" = "$live_source_sha"; fi
+            target="$(docker ps -aq --filter "name=^/${prefix}-${version}$")"
+            test "$(wc -l <<< "$target" | tr -d ' ')" = 1 || { echo "previous target container is not retained: $prefix" >&2; exit 1; }
+            test "$(docker inspect --format '{{.Config.Labels "org.opencontainers.image.revision"}}' "$target")" = "$sha"
+            image_id="$(docker inspect --format '{{.Image}}' "$target")"
+            docker image inspect "$image_id" --format '{{json .RepoDigests}}' | grep -Fq "$expected_image"
+          done
+          db_mounts="$(docker inspect shared_postgres_1 --format '{{json .Mounts}}' | python3 -c 'import hashlib,json,sys; a=json.load(sys.stdin); r=sorted(({k:m.get(k) for k in ("Type","Name","Source","Destination","RW")} for m in a),key=lambda x:(x["Destination"] or "",x["Source"] or "")); assert r and all(x["Source"] and x["Destination"] for x in r); print(hashlib.sha256(json.dumps(r,sort_keys=True,separators=(",",":")).encode()).hexdigest())')"
+          redis_mounts="$(docker inspect shared_redis_1 --format '{{json .Mounts}}' | python3 -c 'import hashlib,json,sys; a=json.load(sys.stdin); r=sorted(({k:m.get(k) for k in ("Type","Name","Source","Destination","RW")} for m in a),key=lambda x:(x["Destination"] or "",x["Source"] or "")); assert r and all(x["Source"] and x["Destination"] for x in r); print(hashlib.sha256(json.dumps(r,sort_keys=True,separators=(",",":")).encode()).hexdigest())')"
+          echo "DB_MOUNTS_SHA256=$db_mounts"
+          echo "REDIS_MOUNTS_SHA256=$redis_mounts"
+          echo "BASELINE_ROLE_VERSION=$live_version"
+          echo "BASELINE_ROLE_SOURCE_SHA=$live_source_sha"
+          current_api="$(docker ps -q --filter 'name=^/gpoint-core-api-')"
+          current_db="$(docker exec "$current_api" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const r=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head not singular");console.log("PRISMA_HEAD="+(r.length?r[r.length-1].migration_name:"NONE"));console.log("PRISMA_MIGRATIONS="+r.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+r.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("READ_ONLY_DB_CHECK_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
+          printf '%s\n' "$current_db"
+          REMOTE
+          )"
+          printf '%s\n' "$facts" > "$RUNNER_TEMP/gpoint-rollback/live-db.txt"
+          python3 "$GITHUB_WORKSPACE/scripts/verify-kamal-migration-parity.py" \
+            --prisma-directory "$GITHUB_WORKSPACE/rollback-source/packages/db/prisma/migrations" \
+            --prisma-current-migrations "$(sed -n 's/^PRISMA_MIGRATIONS=//p' <<< "$facts")" \
+            --prisma-current-checksums "$(sed -n 's/^PRISMA_CHECKSUMS=//p' <<< "$facts")" \
+            --prisma-current-head "$(sed -n 's/^PRISMA_HEAD=//p' <<< "$facts")" \
+            --agata-directory "$GITHUB_WORKSPACE/rollback-source/services/agata/migrations/versions" \
+            --agata-current-head "$(sed -n 's/^AGATA_HEAD=//p' <<< "$facts")"
+          grep -Eq '^BASELINE_ROLE_VERSION=[0-9a-f]{40}-[0-9]+-[0-9]+$' <<< "$facts"
+          grep -Eq '^BASELINE_ROLE_SOURCE_SHA=[0-9a-f]{40}$' <<< "$facts"
+          while IFS='=' read -r key value; do case "$key" in DB_CONTAINER_ID|REDIS_CONTAINER_ID|DB_MOUNTS_SHA256|REDIS_MOUNTS_SHA256|BASELINE_ROLE_VERSION|BASELINE_ROLE_SOURCE_SHA) echo "$key=$value" >> "$GITHUB_OUTPUT" ;; esac; done <<< "$facts"
+      - name: Create rollback Deployment only after all target evidence passes
+        id: deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ inputs.rollback_target_sha }}
+        run: |
+          set -euo pipefail
+          payload="$(jq -nc --arg ref "$TARGET_SHA" --arg run "$GITHUB_RUN_ID" '{ref:$ref,task:"rollback",environment:"production",auto_merge:false,required_contexts:[],payload:{workflow_run:$run}}')"
+          id="$(gh api --method POST "repos/$GITHUB_REPOSITORY/deployments" --input - <<<"$payload" --jq .id)"
+          test "$id" -gt 0
+          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$id/statuses" \
+            -f state=in_progress -f environment=production -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            -f description="Kamal rollback in progress to verified SHA $TARGET_SHA" >/dev/null
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+      - name: Roll back consumers and then APIs with stock Kamal
+        id: rollback_apply
+        env:
+          TARGET_SHA: ${{ inputs.rollback_target_sha }}
+          TARGET_VERSION: ${{ steps.evidence.outputs.version }}
+          CORE_DIGEST: ${{ steps.evidence.outputs.core_digest }}
+          AGATA_DIGEST: ${{ steps.evidence.outputs.agata_digest }}
+          MINIAPP_DIGEST: ${{ steps.evidence.outputs.miniapp_digest }}
+        run: |
+          set -euo pipefail
+          kamal() {
+            docker run --rm --volume "$GITHUB_WORKSPACE/rollback-source:/workdir" --volume "$HOME/.ssh:/root/.ssh:ro" --workdir /workdir \
+              --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA --env GPOINT_PRODUCTION_HOST --env GPOINT_SSH_KEY \
+              --env GPOINT_KNOWN_HOSTS_FILE --env KAMAL_REGISTRY_PASSWORD --env GPOINT_KAMAL_EXPECTED_DIGEST \
+              --env GPOINT_KAMAL_SERVICE --env KAMAL_ROLES \
+              ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 "$@"
+          }
+          verify_role() { local p="$1"; local c; c="$(docker ps -q --filter "name=^/${p}-")"; test "$(wc -l <<< "$c" | tr -d ' ')" = 1; test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$c")" = "$TARGET_SHA"; }
+          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker kamal app stop --roles worker --config-file config/deploy.yml
+          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker kamal rollback --version "$TARGET_VERSION" --roles worker --config-file config/deploy.yml
+          verify_role gpoint-core-worker
+          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot kamal app stop --roles bot --config-file config/deploy.yml
+          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot kamal rollback --version "$TARGET_VERSION" --roles bot --config-file config/deploy.yml
+          verify_role gpoint-core-bot
+          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker kamal app stop --roles memory-worker --config-file config/deploy.agata.yml
+          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker kamal rollback --version "$TARGET_VERSION" --roles memory-worker --config-file config/deploy.agata.yml
+          verify_role gpoint-agata-memory-worker
+          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web kamal rollback --version "$TARGET_VERSION" --roles web --config-file config/deploy.miniapp.yml
+          verify_role gpoint-miniapp-web
+          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api kamal rollback --version "$TARGET_VERSION" --roles api --config-file config/deploy.agata.yml
+          verify_role gpoint-agata-api
+          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api kamal rollback --version "$TARGET_VERSION" --roles api --config-file config/deploy.yml
+          verify_role gpoint-core-api
+      - name: Verify rollback Runtime and preserve databases before SUCCESS
+        id: verify
+        env:
+          TARGET_SHA: ${{ inputs.rollback_target_sha }}
+          TARGET_VERSION: ${{ steps.evidence.outputs.version }}
+          CORE_DIGEST: ${{ steps.evidence.outputs.core_digest }}
+          AGATA_DIGEST: ${{ steps.evidence.outputs.agata_digest }}
+          MINIAPP_DIGEST: ${{ steps.evidence.outputs.miniapp_digest }}
+          DB_CONTAINER_ID: ${{ steps.baseline.outputs.DB_CONTAINER_ID }}
+          REDIS_CONTAINER_ID: ${{ steps.baseline.outputs.REDIS_CONTAINER_ID }}
+          DB_MOUNTS_SHA256: ${{ steps.baseline.outputs.DB_MOUNTS_SHA256 }}
+          REDIS_MOUNTS_SHA256: ${{ steps.baseline.outputs.REDIS_MOUNTS_SHA256 }}
+          ROLLBACK_DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
+        run: |
+          set -euo pipefail
+          curl --retry 8 --retry-connrefused --retry-delay 3 --fail --silent --show-error https://gpoint.one/api/health/live | grep -Fq '"status":"ok"'
+          for path in / /creators; do curl --retry 5 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.one$path" | grep -Fq '<div id="root">'; done
+          media_body="$RUNNER_TEMP/gpoint-rollback/media-route.json"
+          media_status="$(curl --retry 5 --retry-connrefused --retry-delay 2 --silent --show-error --output "$media_body" --write-out '%{http_code}' https://gpoint.one/media/assets/kamal-route-verification-missing)"
+          test "$media_status" = 404 && grep -Fq '"message":"media not found"' "$media_body"
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$TARGET_SHA" "$TARGET_VERSION" "$CORE_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" <<'REMOTE'
+          set -euo pipefail
+          sha="$1"; version="$2"; dbid="$6"; redisid="$7"; dbmount="$8"; redismount="$9"
+          test "$(docker inspect --format '{{.Id}}' shared_postgres_1)" = "$dbid"
+          test "$(docker inspect --format '{{.Id}}' shared_redis_1)" = "$redisid"
+          test "$(docker inspect --format '{{.State.Running}}' shared_postgres_1)" = true
+          test "$(docker inspect --format '{{.State.Running}}' shared_redis_1)" = true
+          test "$(docker inspect --format '{{.State.Running}}' kamal-proxy)" = true
+          test "$(docker ps -q --filter 'name=^/kamal-proxy$' | wc -l | tr -d ' ')" = 1
+          for item in "gpoint-core-api|ghcr.io/akhripunov/gpoint-runtime@$3" "gpoint-core-worker|ghcr.io/akhripunov/gpoint-runtime@$3" "gpoint-core-bot|ghcr.io/akhripunov/gpoint-runtime@$3" "gpoint-agata-api|ghcr.io/akhripunov/gpoint-agata-runtime@$4" "gpoint-agata-memory-worker|ghcr.io/akhripunov/gpoint-agata-runtime@$4" "gpoint-miniapp-web|ghcr.io/akhripunov/gpoint-miniapp@$5"; do
+            IFS='|' read -r prefix expected <<< "$item"
+            name="$prefix-$version"
+            test "$(docker ps -q --filter "name=^/${prefix}-" | wc -l | tr -d ' ')" = 1
+            test "$(docker ps -q --filter "name=^/$name$" | wc -l | tr -d ' ')" = 1
+            test "$(docker inspect --format '{{.State.Running}}' "$name")" = true
+            test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$name")" = "$sha"
+            image="$(docker inspect --format '{{.Image}}' "$name")"; docker image inspect "$image" --format '{{json .RepoDigests}}' | grep -Fq "$expected"
+          done
+          fingerprint() { docker inspect "$1" --format '{{json .Mounts}}' | python3 -c 'import hashlib,json,sys; a=json.load(sys.stdin); r=sorted(({k:m.get(k) for k in ("Type","Name","Source","Destination","RW")} for m in a),key=lambda x:(x["Destination"] or "",x["Source"] or "")); assert r and all(x["Source"] and x["Destination"] for x in r); print(hashlib.sha256(json.dumps(r,sort_keys=True,separators=(",",":")).encode()).hexdigest())'; }
+          test "$(fingerprint shared_postgres_1)" = "$dbmount"
+          test "$(fingerprint shared_redis_1)" = "$redismount"
+          docker exec "gpoint-core-api-$version" node -e "fetch('http://127.0.0.1:3000/health/live').then(async r=>{if(!r.ok||(await r.json()).status!=='ok')process.exit(1)}).catch(()=>process.exit(1))"
+          test "$(docker exec "gpoint-core-api-$version" node -p 'process.env.RELEASE_SHA || ""')" = "$TARGET_SHA"
+          test "$(docker exec "gpoint-core-worker-$version" node -p 'process.env.RELEASE_SHA || ""')" = "$TARGET_SHA"
+          test "$(docker exec "gpoint-core-bot-$version" node -p 'process.env.RELEASE_SHA || ""')" = "$TARGET_SHA"
+          docker exec "gpoint-core-worker-$version" sh -ec 'ps aux | grep -F "apps/worker/dist/main.js" | grep -v grep'
+          docker exec "gpoint-core-bot-$version" sh -ec 'ps aux | grep -F "apps/bot/dist/main.js" | grep -v grep'
+          docker exec "gpoint-agata-api-$version" python -c "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8000/health/ready',timeout=3).status==200"
+          docker exec "gpoint-agata-memory-worker-$version" python -m app.memory.worker --healthcheck
+          test "$(docker exec "gpoint-agata-api-$version" python -c 'import os; print(os.environ.get("RELEASE_SHA", ""))')" = "$TARGET_SHA"
+          test "$(docker exec "gpoint-agata-memory-worker-$version" python -c 'import os; print(os.environ.get("RELEASE_SHA", ""))')" = "$TARGET_SHA"
+          docker exec "gpoint-miniapp-web-$version" wget --spider --quiet http://127.0.0.1/
+          docker exec "gpoint-core-api-$version" node -e 'const fs=require("node:fs");const p="/data/media/.gpoint-rollback-"+require("node:crypto").randomUUID();let created=false;try{fs.writeFileSync(p,"ok",{flag:"wx"});created=true;if(fs.readFileSync(p,"utf8")!=="ok")process.exit(1)}finally{if(created)fs.unlinkSync(p)}'
+          media_mounts="$(docker inspect "gpoint-core-api-$version" --format '{{json .Mounts}}')"
+          python3 - "$media_mounts" <<'PY'
+          import json,sys
+          rows=[m for m in json.loads(sys.argv[1]) if m.get('Destination') == '/data/media']
+          if len(rows)!=1 or rows[0].get('Type')!='bind' or rows[0].get('Source')!='/opt/gpoint/media' or rows[0].get('RW') is not True: raise SystemExit('media mount identity changed')
+          PY
+          docker exec kamal-proxy kamal-proxy list | grep -Fq 'gpoint-miniapp'
+          docker exec kamal-proxy kamal-proxy list | grep -Fq 'gpoint-core'
+          runtime_db="$(docker exec "gpoint-core-api-$version" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const r=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head not singular");console.log("PRISMA_HEAD="+(r.length?r[r.length-1].migration_name:"NONE"));console.log("PRISMA_MIGRATIONS="+r.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+r.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("POST_ROLLBACK_DB_VERIFY_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
+          printf '%s\n' "$runtime_db"
+          echo ROLLBACK_RUNTIME_VERIFY=PASS
+          REMOTE
+          )"
+          grep -Fq 'ROLLBACK_RUNTIME_VERIFY=PASS' <<< "$facts"
+          python3 "$GITHUB_WORKSPACE/scripts/verify-kamal-migration-parity.py" \
+            --prisma-directory "$GITHUB_WORKSPACE/rollback-source/packages/db/prisma/migrations" \
+            --prisma-current-migrations "$(sed -n 's/^PRISMA_MIGRATIONS=//p' <<< "$facts")" \
+            --prisma-current-checksums "$(sed -n 's/^PRISMA_CHECKSUMS=//p' <<< "$facts")" \
+            --prisma-current-head "$(sed -n 's/^PRISMA_HEAD=//p' <<< "$facts")" \
+            --agata-directory "$GITHUB_WORKSPACE/rollback-source/services/agata/migrations/versions" \
+            --agata-current-head "$(sed -n 's/^AGATA_HEAD=//p' <<< "$facts")"
+          id="$ROLLBACK_DEPLOYMENT_ID"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$id/statuses" -f state=success -f environment=production -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" -f description="Kamal rollback SUCCESS SHA $TARGET_SHA" >/dev/null
+          echo "GPOINT_ROLLBACK_VERIFY=PASS SHA=$TARGET_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - name: Mark failed partial rollback for read-only recovery
+        if: always() && steps.deployment.outputs.id != '' && steps.verify.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
+          APPLY_OUTCOME: ${{ steps.rollback_apply.outcome }}
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+        run: |
+          set -euo pipefail
+          echo "RECOVERY_REQUIRED: rollback apply/verify did not PASS; no automatic rollback or second Apply. Confirm live topology read-only before another production mutation." >> "$GITHUB_STEP_SUMMARY"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+            -f state=failure -f environment=production -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            -f description="Kamal rollback FAILED/RECOVERY_REQUIRED" >/dev/null
 
   backup_maintenance:
     name: Install or update scheduled VPS backups

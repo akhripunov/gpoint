@@ -72,6 +72,61 @@ def test_runtime_verify_rechecks_public_and_all_six_kamal_roles_after_deploy():
         assert expected in verify
 
 
+def test_production_preflight_requires_one_consistent_running_version_and_persistent_identities():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    deploy = workflow.split("  deploy:\n", 1)[1].split("  backup_maintenance:\n", 1)[0]
+    preflight = deploy.split("name: Verify installed Kamal topology before ordinary release", 1)[1].split(
+        "name: Verify candidate migrations match the live database", 1
+    )[0]
+    assert 'test "${#matches[@]}" = 1' in preflight
+    assert '"$version" == "$source_sha"-*' in preflight
+    assert "GPOINT_BASELINE_ROLE_VERSION" in preflight
+    assert "GPOINT_BASELINE_ROLE_SOURCE_SHA" in preflight
+    assert "DB_MOUNTS_SHA256" in preflight
+    assert "REDIS_MOUNTS_SHA256" in preflight
+    verify = deploy.split("name: Verify public routes and exact running services", 1)[1].split(
+        "name: Record GitHub Deployment result against the same attempt", 1
+    )[0]
+    assert "DB_MOUNTS_SHA256" in verify and "REDIS_MOUNTS_SHA256" in verify
+    assert "BASELINE_ROLE_VERSION" in verify
+
+
+def test_core_consumers_are_updated_one_role_at_a_time_and_partial_failure_fails_closed():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    deploy = workflow.split("  deploy:\n", 1)[1].split("  backup_maintenance:\n", 1)[0]
+    apply = deploy.split("name: Deploy exact immutable images with stock Kamal", 1)[1].split(
+        "name: Verify public routes and exact running services", 1
+    )[0]
+    worker = apply.index("KAMAL_ROLES=worker")
+    bot = apply.index("KAMAL_ROLES=bot")
+    memory_worker = apply.index("KAMAL_ROLES=memory-worker")
+    assert worker < bot < memory_worker
+    for role in ("worker", "bot", "memory-worker"):
+        stop = apply.index(f"kamal app stop --roles {role}")
+        deploy_call = apply.index(f"kamal deploy --skip-push --version \"$IMAGE_VERSION\" --roles {role}")
+        assert stop < deploy_call
+    assert "KAMAL_ROLES=worker,bot" not in apply
+    assert "verify_single_running_role gpoint-core-worker" in apply
+    assert "verify_single_running_role gpoint-core-bot" in apply
+    assert "verify_single_running_role gpoint-agata-memory-worker" in apply
+    status = deploy.split("name: Record GitHub Deployment result against the same attempt", 1)[1]
+    assert "RECOVERY_REQUIRED" in status
+    assert "automatic rollback is prohibited" in status
+
+
+def test_production_mutations_share_one_non_cancelling_lock():
+    native = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    first_cutover = yaml.safe_load((ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text())
+    legacy_deploy = yaml.safe_load((ROOT / ".github/workflows/gpoint-deploy.yml").read_text())
+    recovery = yaml.safe_load((ROOT / ".github/workflows/gpoint-recover-interrupted.yml").read_text())
+    expected = {"group": "gpoint-production-release", "cancel-in-progress": False}
+    for job in ("deploy", "backup_maintenance", "migration_rehearsal"):
+        assert native["jobs"][job]["concurrency"] == expected
+    assert first_cutover["jobs"]["deploy"]["concurrency"] == expected
+    assert legacy_deploy["concurrency"] == expected
+    assert recovery["concurrency"] == expected
+
+
 def test_ordinary_release_success_does_not_depend_on_scheduled_backup_freshness():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     deploy = workflow.split("  deploy:\n", 1)[1]
@@ -234,3 +289,34 @@ def test_scheduled_vps_backup_is_local_encrypted_fresh_and_restored_without_remo
     assert "rclone" not in runner and "rclone" not in helper
     assert "gpoint-backup.agekey" in runner and "age-keygen" in runner
     assert "/opt/gpoint/media" in runner and "media-tree" in runner
+
+
+def test_protected_rollback_uses_only_verified_prior_target_and_shared_lock():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    rollback = workflow["jobs"]["rollback"]
+    assert "outputs.mode == 'ROLLBACK'" in rollback["if"]
+    assert rollback["environment"] == {"name": "production", "deployment": False}
+    assert rollback["concurrency"] == {"group": "gpoint-production-release", "cancel-in-progress": False}
+    assert rollback["permissions"] == {"contents": "read", "packages": "read", "deployments": "write"}
+    body = yaml.safe_dump(rollback)
+    names = [step.get("name", step.get("uses", "")) for step in rollback["steps"]]
+    assert names.index("Validate linked build, successful Runtime Verify and six-role manifest") < names.index("Verify target digests, platform, revision and provenance")
+    assert names.index("Verify target digests, platform, revision and provenance") < names.index("Verify live DB compatibility and retained target containers before mutation")
+    assert names.index("Verify live DB compatibility and retained target containers before mutation") < names.index("Create rollback Deployment only after all target evidence passes")
+    assert names.index("Create rollback Deployment only after all target evidence passes") < names.index("Roll back consumers and then APIs with stock Kamal")
+    assert names.index("Roll back consumers and then APIs with stock Kamal") < names.index("Verify rollback Runtime and preserve databases before SUCCESS")
+    for gate in (
+        "rollback_target_sha", "rollback_deployment_id", "verify_native_rollback_evidence.py",
+        "verify_native_image_readback.py", "verify_native_image_attestation.py",
+        "verify-kamal-migration-parity.py", "BASELINE_ROLE_VERSION=$live_version",
+        "BASELINE_ROLE_SOURCE_SHA=$live_source_sha", "KAMAL_ROLES=worker", "KAMAL_ROLES=bot",
+        "KAMAL_ROLES=memory-worker", "kamal app stop --roles",
+        "RECOVERY_REQUIRED", "state=success",
+    ):
+        assert gate in body
+    events = workflow.get("on", workflow.get(True))
+    inputs = events["workflow_dispatch"]["inputs"]
+    assert "rollback" in inputs and inputs["rollback"]["default"] is False
+    assert "rollback_target_sha" in inputs
+    assert "rollback_deployment_id" in inputs
+    assert "outputs.deploy == 'true'" in workflow["jobs"]["deploy"]["if"]

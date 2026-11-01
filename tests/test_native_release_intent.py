@@ -175,3 +175,25 @@ def test_manual_production_dispatch_requires_exact_owner_approval_before_build()
             actor=actor, repository_owner="akhripunov",
             migration_rehearsal=False, approve_production=approved,
         ) == ("INVALID_DEPLOY", False)
+
+
+def test_rollback_dispatch_requires_main_exact_owner_explicit_approval_and_no_other_maintenance():
+    args = dict(
+        ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
+        actor="akhripunov", repository_owner="akhripunov",
+        migration_rehearsal=False, backup_maintenance=False,
+        rollback=True, approve_production=True,
+    )
+    assert MODULE.classify_dispatch(**args) == ("ROLLBACK", False)
+    for changes in (
+        {"ref": "refs/heads/feature"},
+        {"candidate_sha": "b" * 40},
+        {"actor": "other"},
+        {"approve_production": False},
+        {"migration_rehearsal": True},
+        {"backup_maintenance": True},
+    ):
+        invalid = dict(args)
+        invalid.update(changes)
+        assert MODULE.classify_dispatch(**invalid)[1] is False
+        assert MODULE.classify_dispatch(**invalid)[0] != "ROLLBACK"
