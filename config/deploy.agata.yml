@@ -24,6 +24,8 @@ servers:
       clear:
         RELEASE_SHA: <%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>
     options:
+      # The worker opens PostgreSQL before post-app-boot can attach networks.
+      network: shared_internal
       env-file:
         - /opt/gpoint/env/production.env
 

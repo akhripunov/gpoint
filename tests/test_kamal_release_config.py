@@ -1525,3 +1525,10 @@ def test_kamal_hooks_use_only_the_explicit_pinned_ssh_configuration(name):
     assert all(call.startswith('ssh -F /dev/null -T -i "$ssh_key"') for call in ssh_calls)
     assert '-o StrictHostKeyChecking=yes' in hook
     assert '-o UserKnownHostsFile="$known_hosts"' in hook
+
+
+def test_memory_worker_has_database_network_before_process_start():
+    agata = yaml.safe_load((ROOT / 'config/deploy.agata.yml').read_text())
+    assert agata['servers']['memory-worker']['options']['network'] == 'shared_internal'
+    # API aliases remain assigned by the existing post-boot hook.
+    assert 'network' not in agata['servers']['api']['options']
