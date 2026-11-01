@@ -77,6 +77,7 @@ def test_manual_migration_rehearsal_uses_existing_backup_without_deployment_or_k
     assert "GPOINT_MIGRATION_BACKUP_EVIDENCE" in body
     assert "GPOINT_MIGRATION_BACKUP_FRESHNESS=PASS" in body
     assert "docker_free" in body and "insufficient Docker storage" in body
+    assert "required = app_bytes + agata_bytes + db_bytes * 10 + 2 * 1024**3" in body
     assert 'docker pull --platform linux/amd64 "$app_image"' in body
     assert 'docker pull --platform linux/amd64 "$agata_image"' in body
     rehearsal_step = next(step for step in rehearsal["steps"]
@@ -92,10 +93,11 @@ def test_manual_migration_rehearsal_uses_existing_backup_without_deployment_or_k
     assert "exit \"$rehearsal_status\"" in body
     assert 'current_step=isolated-backup-restore-and-four-migrations' in body
     for image_stage in (
-        "ghcr-app-pull", "ghcr-app-image-size", "ghcr-app-platform",
+        "ghcr-app-pull", "ghcr-app-platform",
         "ghcr-app-source-revision", "ghcr-app-repository-digest", "ghcr-agata-pull",
-        "ghcr-agata-image-size", "ghcr-agata-platform",
+        "ghcr-agata-platform",
         "ghcr-agata-source-revision", "ghcr-agata-repository-digest",
+        "ghcr-post-pull-capacity",
     ):
         assert f"current_step={image_stage}" in body
     assert "GPOINT_MIGRATION_REHEARSAL=PASS" in body
@@ -141,6 +143,11 @@ def test_migration_rehearsal_uses_immutable_oci_identity_across_docker_hosts():
     assert "image inspect" in build_body and "{{.Id}}" not in build_body
     assert "{{json .RepoDigests}}" in build_body
     assert "GPOINT_MIGRATION_IMAGE_ID_MISMATCH" not in body
+    assert 'docker image inspect "$app_image" --format \'{{.Size}}\')" = "$app_image_bytes"' not in body
+    assert 'docker image inspect "$agata_image" --format \'{{.Size}}\')" = "$agata_image_bytes"' not in body
+    assert 'docker_free_after_pull="$(df -PB1 "$docker_root" | awk ' in body
+    assert "required_bytes = database_bytes * 10 + 2 * 1024**3" in body
+    assert "GPOINT_MIGRATION_POST_PULL_CAPACITY=PASS" in body
 
 
 def test_migration_rehearsal_distinguishes_synthetic_rls_from_production_grants():

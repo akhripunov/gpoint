@@ -1026,8 +1026,6 @@ jobs:
           chmod 0600 "$stage/docker-config/config.json"
           current_step=ghcr-app-pull
           DOCKER_CONFIG="$stage/docker-config" docker pull --platform linux/amd64 "$app_image" >/dev/null
-          current_step=ghcr-app-image-size
-          test "$(docker image inspect "$app_image" --format '{{.Size}}')" = "$app_image_bytes"
           current_step=ghcr-app-platform
           test "$(docker image inspect "$app_image" --format '{{.Os}} {{.Architecture}}')" = 'linux amd64'
           current_step=ghcr-app-source-revision
@@ -1036,14 +1034,23 @@ jobs:
           docker image inspect "$app_image" --format '{{json .RepoDigests}}' | grep -Fq "$app_image"
           current_step=ghcr-agata-pull
           DOCKER_CONFIG="$stage/docker-config" docker pull --platform linux/amd64 "$agata_image" >/dev/null
-          current_step=ghcr-agata-image-size
-          test "$(docker image inspect "$agata_image" --format '{{.Size}}')" = "$agata_image_bytes"
           current_step=ghcr-agata-platform
           test "$(docker image inspect "$agata_image" --format '{{.Os}} {{.Architecture}}')" = 'linux amd64'
           current_step=ghcr-agata-source-revision
           test "$(docker image inspect "$agata_image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$candidate"
           current_step=ghcr-agata-repository-digest
           docker image inspect "$agata_image" --format '{{json .RepoDigests}}' | grep -Fq "$agata_image"
+          current_step=ghcr-post-pull-capacity
+          docker_free_after_pull="$(df -PB1 "$docker_root" | awk 'NR==2 {print $4}')"
+          [[ "$docker_free_after_pull" =~ ^[0-9]+$ ]]
+          python3 - "$docker_free_after_pull" "$restored_db_bytes" <<'PY'
+          import sys
+          free_bytes, database_bytes = map(int, sys.argv[1:])
+          required_bytes = database_bytes * 10 + 2 * 1024**3
+          if free_bytes < required_bytes:
+              raise SystemExit('insufficient Docker storage after pinned image pulls for isolated restore')
+          PY
+          echo GPOINT_MIGRATION_POST_PULL_CAPACITY=PASS
           current_step=temporary-credential-cleanup
           rm -rf -- "$stage/docker-config"
           test ! -e "$stage/docker-config"
