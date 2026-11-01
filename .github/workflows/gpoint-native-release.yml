@@ -213,6 +213,7 @@ jobs:
         with:
           context: https://github.com/akhripunov/gpoint.git#${{ github.sha }}
           file: infra/production/Gpoint.Dockerfile
+          target: runtime
           build-contexts: dependency-manifests=${{ runner.temp }}/dependency-manifests
           platforms: linux/amd64
           push: true

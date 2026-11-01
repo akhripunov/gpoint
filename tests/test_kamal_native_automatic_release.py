@@ -274,6 +274,21 @@ def test_migration_rehearsal_distinguishes_synthetic_rls_from_production_grants(
     assert "MIGRATION_PRODUCTION_GRANTS_RLS" in runner
 
 
+def test_runtime_image_targets_stage_with_prisma_migration_history():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    build = workflow["jobs"]["build"]
+    app_build = next(step for step in build["steps"]
+                     if step.get("name") == "Build and publish immutable runtime image")
+    assert app_build["with"]["target"] == "runtime"
+    helper = (ROOT / "scripts/verify-gpoint-scheduled-backup-restore.sh").read_text()
+    for migration in (
+        "20261016120000_eros_worker_queue",
+        "20261020153000_eros_external_relationship_mapping",
+        "20261022110000_eros_gpoint_message_state",
+    ):
+        assert f"/app/packages/db/prisma/migrations/{migration}/migration.sql" in helper
+
+
 def test_scheduled_vps_backup_is_local_encrypted_fresh_and_restored_without_remote_config():
     policy_path = ROOT / "scripts/gpoint-backup-policy.py"
     runner_path = ROOT / "scripts/gpoint-scheduled-backup.py"
