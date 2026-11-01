@@ -979,39 +979,45 @@ jobs:
           echo "GPOINT_MIGRATION_BACKUP_DATABASE_SHA256=$expected_db_sha"
           echo "GPOINT_MIGRATION_BACKUP_MEDIA_SHA256=$expected_media_sha"
           echo GPOINT_MIGRATION_BACKUP_FRESHNESS=PASS
+          current_step=pre-migration-preflight
           cleanup() {
-            result=$?
+            rehearsal_status=$?
+            cleanup_status=0
             trap - EXIT
             set +e
             unset DOCKER_CONFIG
             temp_ids="$(docker ps -aq --filter "label=gpoint.kamal.restore-run=${run_id}-${attempt}")"
             if [[ -n "$temp_ids" ]]; then
               while IFS= read -r id; do
-                [[ "$id" =~ ^[0-9a-f]{64}$ ]] || { result=1; continue; }
-                docker rm -f "$id" >/dev/null || result=1
+                [[ "$id" =~ ^[0-9a-f]{64}$ ]] || { cleanup_status=1; continue; }
+                docker rm -f "$id" >/dev/null || cleanup_status=1
               done <<< "$temp_ids"
             fi
-            if docker image inspect "$app_image" >/dev/null 2>&1; then docker image rm "$app_image" >/dev/null || result=1; fi
-            if docker image inspect "$agata_image" >/dev/null 2>&1; then docker image rm "$agata_image" >/dev/null || result=1; fi
+            if docker image inspect "$app_image" >/dev/null 2>&1; then docker image rm "$app_image" >/dev/null || cleanup_status=1; fi
+            if docker image inspect "$agata_image" >/dev/null 2>&1; then docker image rm "$agata_image" >/dev/null || cleanup_status=1; fi
             if [[ -f "$stage/containers.before" ]]; then
               docker ps -q | sort > "$stage/containers.after"
-              cmp -s "$stage/containers.before" "$stage/containers.after" || result=1
+              cmp -s "$stage/containers.before" "$stage/containers.after" || cleanup_status=1
             fi
             if [[ -f "$stage/volumes.before" ]]; then
               docker volume ls -q | sort > "$stage/volumes.after"
-              cmp -s "$stage/volumes.before" "$stage/volumes.after" || result=1
+              cmp -s "$stage/volumes.before" "$stage/volumes.after" || cleanup_status=1
             fi
             if [[ -f "$stage/networks.before" ]]; then
               docker network ls -q | sort > "$stage/networks.after"
-              cmp -s "$stage/networks.before" "$stage/networks.after" || result=1
+              cmp -s "$stage/networks.before" "$stage/networks.after" || cleanup_status=1
             fi
-            rm -rf -- "$stage" || result=1
-            test ! -e "$stage" || result=1
-            if docker image inspect "$app_image" >/dev/null 2>&1; then result=1; fi
-            if docker image inspect "$agata_image" >/dev/null 2>&1; then result=1; fi
-            if [[ "$result" -ne 0 ]]; then echo GPOINT_MIGRATION_TEMP_CLEANUP=FAIL >&2; exit 1; fi
+            rm -rf -- "$stage" || cleanup_status=1
+            test ! -e "$stage" || cleanup_status=1
+            if docker image inspect "$app_image" >/dev/null 2>&1; then cleanup_status=1; fi
+            if docker image inspect "$agata_image" >/dev/null 2>&1; then cleanup_status=1; fi
+            if [[ "$cleanup_status" -ne 0 ]]; then echo GPOINT_MIGRATION_TEMP_CLEANUP=FAIL >&2; exit 1; fi
             echo GPOINT_MIGRATION_TEMP_CLEANUP=PASS
-            exit "$result"
+            if [[ "$rehearsal_status" -ne 0 ]]; then
+              echo "GPOINT_MIGRATION_STAGE_FAILURE=$current_step" >&2
+              exit "$rehearsal_status"
+            fi
+            exit 0
           }
           trap cleanup EXIT
           trap 'exit 130' INT
@@ -1019,6 +1025,7 @@ jobs:
           docker ps -q | sort > "$stage/containers.before"
           docker volume ls -q | sort > "$stage/volumes.before"
           docker network ls -q | sort > "$stage/networks.before"
+          current_step=ghcr-app-pull
           [[ "$candidate" =~ ^[0-9a-f]{40}$ && "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
           [[ "$app_image" =~ ^ghcr\.io/akhripunov/gpoint-runtime@sha256:[0-9a-f]{64}$ ]]
           [[ "$agata_image" =~ ^ghcr\.io/akhripunov/gpoint-agata-runtime@sha256:[0-9a-f]{64}$ ]]
@@ -1031,12 +1038,14 @@ jobs:
           test "$(docker image inspect "$app_image" --format '{{.Os}} {{.Architecture}}')" = 'linux amd64'
           test "$(docker image inspect "$app_image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$candidate"
           docker image inspect "$app_image" --format '{{json .RepoDigests}}' | grep -Fq "$app_image"
+          current_step=ghcr-agata-pull
           DOCKER_CONFIG="$stage/docker-config" docker pull "$agata_image" >/dev/null
           test "$(docker image inspect "$agata_image" --format '{{.Id}}')" = "$agata_image_id"
           test "$(docker image inspect "$agata_image" --format '{{.Size}}')" = "$agata_image_bytes"
           test "$(docker image inspect "$agata_image" --format '{{.Os}} {{.Architecture}}')" = 'linux amd64'
           test "$(docker image inspect "$agata_image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$candidate"
           docker image inspect "$agata_image" --format '{{json .RepoDigests}}' | grep -Fq "$agata_image"
+          current_step=temporary-credential-cleanup
           rm -rf -- "$stage/docker-config"
           test ! -e "$stage/docker-config"
           unset DOCKER_CONFIG
@@ -1050,7 +1059,9 @@ jobs:
           export GPOINT_PRISMA_EROS_MAPPING_SHA256="$mapping_sha"
           export GPOINT_PRISMA_MESSAGE_STATE_SHA256="$state_sha"
           export GPOINT_AGATA_0012_SHA256="$agata_sha"
+          current_step=isolated-backup-restore-and-four-migrations
           GPOINT_MIGRATION_REHEARSAL=1 python3 "$stage/scripts/gpoint-scheduled-backup.py"
+          current_step=final-backup-integrity-check
           test "$(sha256sum "$evidence_path" | awk '{print $1}')" = "$evidence_sha"
           test "$(sha256sum /opt/gpoint/backups/gpoint-pre-release-7a1afde1d94c324828565a36cb7dd90f422dee3d-41223019715-1.dump.age | awk '{print $1}')" = "$expected_db_sha"
           test "$(sha256sum /opt/gpoint/backups/gpoint-pre-release-7a1afde1d94c324828565a36cb7dd90f422dee3d-41223019715-1.media.tar.age | awk '{print $1}')" = "$expected_media_sha"

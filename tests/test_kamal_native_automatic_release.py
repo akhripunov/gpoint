@@ -84,6 +84,10 @@ def test_manual_migration_rehearsal_uses_existing_backup_without_deployment_or_k
     assert rehearsal_step["env"]["GHCR_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
     assert "rm -rf -- \"$stage/docker-config\"" in body
     assert "GPOINT_MIGRATION_TEMP_CLEANUP=PASS" in body
+    assert "cleanup_status=0" in body
+    assert "GPOINT_MIGRATION_STAGE_FAILURE=$current_step" in body
+    assert "exit \"$rehearsal_status\"" in body
+    assert 'current_step=isolated-backup-restore-and-four-migrations' in body
     assert "GPOINT_MIGRATION_REHEARSAL=PASS" in body
     assert "kamal deploy" not in body
     assert "repos/$GITHUB_REPOSITORY/deployments" not in body
