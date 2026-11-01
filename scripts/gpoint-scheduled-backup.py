@@ -251,10 +251,39 @@ def run() -> None:
         recipient = _run(["age-keygen", "-y", "-i", str(AGE_IDENTITY)], stage="age key identity")
         if not AGE_RECIPIENT.fullmatch(recipient):
             raise ScheduledBackupError("age identity recipient is invalid")
-        candidate, postgres_id, postgres_image, system_id, facts = _source_facts()
+        if migration_rehearsal:
+            # A rehearsal's source of truth is the verified encrypted backup.
+            # Do not inspect the live Kamal API, PostgreSQL container, network,
+            # production environment, or media bind mount in this path.
+            latest_path = SCHEDULED_ROOT / "latest.json"
+            try:
+                existing_manifest = policy.verify_freshness(latest_path, max_age_hours=26)
+            except Exception as error:
+                raise ScheduledBackupError("an existing fresh verified backup is required for migration rehearsal") from error
+            database = existing_manifest.get("database", {})
+            candidate = os.environ["GPOINT_MIGRATION_CANDIDATE_SHA"]
+            prisma_head = database.get("prisma_head")
+            agata_head = database.get("agata_head")
+            if (prisma_head != "20261015130000_codex_telegram_challenge"
+                    or agata_head != "agata0011"):
+                raise ScheduledBackupError("existing backup migration heads are not the expected rehearsal baseline")
+            postgres_id = "NOT_CONNECTED"
+            postgres_image = "pgvector/pgvector:0.8.6-pg16-bookworm@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b"
+            system_id = "NOT_CONNECTED"
+            facts = {
+                "PRISMA_HEAD": prisma_head,
+                "AGATA_HEAD": agata_head,
+                "inventory": {"schema": "gpoint-migration-rehearsal-inventory/v1", "containers": []},
+                "api_id": "NOT_CONNECTED",
+            }
+        else:
+            candidate, postgres_id, postgres_image, system_id, facts = _source_facts()
         run_id = str(time.time_ns())
         attempt = "1"
-        for directory in (Path("/run/gpoint-kamal"), BACKUP_ROOT, MEDIA_ROOT):
+        required_directories = (Path("/run/gpoint-kamal"), BACKUP_ROOT)
+        if not migration_rehearsal:
+            required_directories += (MEDIA_ROOT,)
+        for directory in required_directories:
             try:
                 info = directory.lstat()
             except OSError:
@@ -270,14 +299,9 @@ def run() -> None:
                 or stat.S_IMODE(scheduled_info.st_mode) != 0o700):
             raise ScheduledBackupError("scheduled backup directory has unsafe identity")
         latest_path = SCHEDULED_ROOT / "latest.json"
-        if migration_rehearsal:
-            try:
-                existing_manifest = policy.verify_freshness(latest_path, max_age_hours=26)
-            except Exception as error:
-                raise ScheduledBackupError("an existing fresh verified backup is required for migration rehearsal") from error
-            if (existing_manifest.get("database", {}).get("prisma_head") != facts["PRISMA_HEAD"]
-                    or existing_manifest.get("database", {}).get("agata_head") != facts["AGATA_HEAD"]):
-                raise ScheduledBackupError("existing backup migration heads do not match the live baseline")
+        if migration_rehearsal and (existing_manifest["database"].get("prisma_head") != facts["PRISMA_HEAD"]
+                                    or existing_manifest["database"].get("agata_head") != facts["AGATA_HEAD"]):
+            raise ScheduledBackupError("existing backup migration heads do not match the validated baseline")
         runs_root = SCHEDULED_ROOT / "runs"
         try:
             runs_root.mkdir(mode=0o700, exist_ok=True)

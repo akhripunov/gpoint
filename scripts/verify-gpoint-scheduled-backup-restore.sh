@@ -56,16 +56,63 @@ baseline_value() {
   printf '%s' "$result"
 }
 
-# Bind the backup to the fresh inventory's exact API media mount before reading
-# its contents. The candidate Kamal API reuses this persistent host bind mount.
-inventory_file="$(baseline_value INVENTORY_FILE)"
-inventory_sha="$(baseline_value INVENTORY_SHA256)"
-[[ "$inventory_file" == "/opt/gpoint/backups/scheduled/runs/${candidate}-${run_id}-${attempt}/inventory.json" ]]
-[[ "$inventory_sha" =~ ^[0-9a-f]{64}$ ]]
-test -s "$inventory_file"
-test "$(sha256sum "$inventory_file" | awk '{print $1}')" = "$inventory_sha"
-api_container_id="$(baseline_value API_CONTAINER_ID)"
-python3 - "$inventory_file" "$api_container_id" <<'PY'
+if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" == "1" ]]; then
+  test "$(baseline_value BASELINE_SCHEMA)" = gpoint-migration-rehearsal-baseline/v1
+  test "$(baseline_value CANDIDATE_SHA)" = "$candidate"
+  test "$(baseline_value RUN_ID)" = "$run_id"
+  test "$(baseline_value ATTEMPT)" = "$attempt"
+  api_container_id=""
+  latest_manifest=/opt/gpoint/backups/scheduled/latest.json
+  test -f "$latest_manifest" && test ! -L "$latest_manifest"
+  readarray -t media_manifest_facts < <(python3 - "$latest_manifest" <<'PY'
+import json, re, sys
+from pathlib import Path
+m=json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+p=m.get('media', {})
+if p.get('encrypted') is not True or p.get('integrity') != 'PASS' or p.get('isolated_restore') != 'PASS':
+    raise SystemExit('existing media backup proof is incomplete')
+for key in ('file_count','directory_count','bytes','manifest_sha256'):
+    value=p.get(key)
+    if not isinstance(value,int) or value < 0:
+        if key == 'manifest_sha256' and isinstance(value,str) and re.fullmatch(r'[0-9a-f]{64}',value):
+            continue
+        raise SystemExit('existing media backup metadata is incomplete')
+print(p['file_count'])
+print(p['directory_count'])
+print(p['bytes'])
+print(p['manifest_sha256'])
+PY
+  )
+  test "${#media_manifest_facts[@]}" -eq 4
+  media_file_count="${media_manifest_facts[0]}"
+  media_directory_count="${media_manifest_facts[1]}"
+  media_total_bytes="${media_manifest_facts[2]}"
+  media_manifest_sha="${media_manifest_facts[3]}"
+  media_restore_manifest_sha="$media_manifest_sha"
+  database_bytes="$(python3 - "$latest_manifest" <<'PY'
+import json, sys
+from pathlib import Path
+m=json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+value=m.get('database',{}).get('bytes')
+if not isinstance(value,int) or value <= 0:
+    raise SystemExit('existing database backup size is invalid')
+print(value)
+PY
+  )"
+  source_tables=0
+  pgdata=/var/lib/postgresql/data
+  postgres_image="$(baseline_value POSTGRES_IMAGE_ID)"
+  [[ "$postgres_image" == "pgvector/pgvector:0.8.6-pg16-bookworm@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b" ]]
+else
+  # Bind a normal scheduled backup to the fresh inventory's exact API media mount.
+  inventory_file="$(baseline_value INVENTORY_FILE)"
+  inventory_sha="$(baseline_value INVENTORY_SHA256)"
+  [[ "$inventory_file" == "/opt/gpoint/backups/scheduled/runs/${candidate}-${run_id}-${attempt}/inventory.json" ]]
+  [[ "$inventory_sha" =~ ^[0-9a-f]{64}$ ]]
+  test -s "$inventory_file"
+  test "$(sha256sum "$inventory_file" | awk '{print $1}')" = "$inventory_sha"
+  api_container_id="$(baseline_value API_CONTAINER_ID)"
+  python3 - "$inventory_file" "$api_container_id" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding='utf-8') as source:
     inventory=json.load(source)
@@ -77,37 +124,38 @@ mounts=[mount for mount in rows[0].get('mounts', []) if mount.get('destination')
 if len(mounts) != 1 or mounts[0].get('type') != 'bind' or mounts[0].get('source') != '/opt/gpoint/media' or mounts[0].get('readWrite') is not True:
     raise SystemExit('fresh inventory does not prove the required writable persistent media bind mount')
 PY
-media_root=/opt/gpoint/media
-test -d "$media_root" && test ! -L "$media_root"
-media_source_manifest="$plaintext_dir/media-source.json"
-media_manifest_output="$(python3 "$media_tree_helper" manifest --root "$media_root" --output "$media_source_manifest")"
-grep -qx 'GPOINT_MEDIA_MANIFEST=PASS' <<< "$media_manifest_output"
-media_file_count="$(sed -n 's/^GPOINT_MEDIA_FILE_COUNT=//p' <<< "$media_manifest_output")"
-media_directory_count="$(sed -n 's/^GPOINT_MEDIA_DIRECTORY_COUNT=//p' <<< "$media_manifest_output")"
-media_total_bytes="$(sed -n 's/^GPOINT_MEDIA_TOTAL_BYTES=//p' <<< "$media_manifest_output")"
-media_manifest_sha="$(sed -n 's/^GPOINT_MEDIA_MANIFEST_SHA256=//p' <<< "$media_manifest_output")"
-[[ "$media_file_count" =~ ^[0-9]+$ && "$media_directory_count" =~ ^[0-9]+$ ]]
-[[ "$media_total_bytes" =~ ^[0-9]+$ && "$media_manifest_sha" =~ ^[0-9a-f]{64}$ ]]
+  media_root=/opt/gpoint/media
+  test -d "$media_root" && test ! -L "$media_root"
+  media_source_manifest="$plaintext_dir/media-source.json"
+  media_manifest_output="$(python3 "$media_tree_helper" manifest --root "$media_root" --output "$media_source_manifest")"
+  grep -qx 'GPOINT_MEDIA_MANIFEST=PASS' <<< "$media_manifest_output"
+  media_file_count="$(sed -n 's/^GPOINT_MEDIA_FILE_COUNT=//p' <<< "$media_manifest_output")"
+  media_directory_count="$(sed -n 's/^GPOINT_MEDIA_DIRECTORY_COUNT=//p' <<< "$media_manifest_output")"
+  media_total_bytes="$(sed -n 's/^GPOINT_MEDIA_TOTAL_BYTES=//p' <<< "$media_manifest_output")"
+  media_manifest_sha="$(sed -n 's/^GPOINT_MEDIA_MANIFEST_SHA256=//p' <<< "$media_manifest_output")"
+  [[ "$media_file_count" =~ ^[0-9]+$ && "$media_directory_count" =~ ^[0-9]+$ ]]
+  [[ "$media_total_bytes" =~ ^[0-9]+$ && "$media_manifest_sha" =~ ^[0-9a-f]{64}$ ]]
 
-test "$(baseline_value BASELINE_SCHEMA)" = gpoint-kamal-cutover-baseline/v1
-test "$(baseline_value CANDIDATE_SHA)" = "$candidate"
-test "$(baseline_value RUN_ID)" = "$run_id"
-test "$(baseline_value ATTEMPT)" = "$attempt"
+  test "$(baseline_value BASELINE_SCHEMA)" = gpoint-kamal-cutover-baseline/v1
+  test "$(baseline_value CANDIDATE_SHA)" = "$candidate"
+  test "$(baseline_value RUN_ID)" = "$run_id"
+  test "$(baseline_value ATTEMPT)" = "$attempt"
 
-postgres=shared_postgres_1
-test "$(docker inspect --format '{{.Id}}' "$postgres")" = "$(baseline_value POSTGRES_CONTAINER_ID)"
-test "$(docker inspect --format '{{.Image}}' "$postgres")" = "$(baseline_value POSTGRES_IMAGE_ID)"
-test "$(docker inspect --format '{{.State.Running}}' "$postgres")" = true
-postgres_system_identifier="$(docker exec "$postgres" sh -ec 'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d gpoint -c "SELECT system_identifier::text FROM pg_control_system()"')"
-test "$postgres_system_identifier" = "$(baseline_value POSTGRES_SYSTEM_IDENTIFIER)"
-postgres_user="$(docker exec "$postgres" sh -ec 'printf %s "$POSTGRES_USER"')"
-pgdata="$(docker exec "$postgres" sh -ec 'printf %s "${PGDATA:-/var/lib/postgresql/data}"')"
-[[ "$postgres_user" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]
-[[ "$pgdata" == /* && "$pgdata" != / && "$pgdata" != *..* ]]
-database_bytes="$(docker exec "$postgres" sh -ec 'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d gpoint -c "SELECT pg_database_size('\''gpoint'\'')"')"
-[[ "$database_bytes" =~ ^[0-9]+$ && "$database_bytes" -gt 0 ]]
-source_tables="$(docker exec "$postgres" sh -ec 'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d gpoint -c "SELECT count(*) FROM pg_tables WHERE schemaname IN ('\''public'\'','\''agata'\'','\''gsales'\'','\''gsales_meta'\'','\''agata_identity'\'')"')"
-[[ "$source_tables" =~ ^[0-9]+$ && "$source_tables" -gt 0 ]]
+  postgres=shared_postgres_1
+  test "$(docker inspect --format '{{.Id}}' "$postgres")" = "$(baseline_value POSTGRES_CONTAINER_ID)"
+  test "$(docker inspect --format '{{.Image}}' "$postgres")" = "$(baseline_value POSTGRES_IMAGE_ID)"
+  test "$(docker inspect --format '{{.State.Running}}' "$postgres")" = true
+  postgres_system_identifier="$(docker exec "$postgres" sh -ec 'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d gpoint -c "SELECT system_identifier::text FROM pg_control_system()"')"
+  test "$postgres_system_identifier" = "$(baseline_value POSTGRES_SYSTEM_IDENTIFIER)"
+  postgres_user="$(docker exec "$postgres" sh -ec 'printf %s "$POSTGRES_USER"')"
+  pgdata="$(docker exec "$postgres" sh -ec 'printf %s "${PGDATA:-/var/lib/postgresql/data}"')"
+  [[ "$postgres_user" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]
+  [[ "$pgdata" == /* && "$pgdata" != / && "$pgdata" != *..* ]]
+  database_bytes="$(docker exec "$postgres" sh -ec 'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d gpoint -c "SELECT pg_database_size('\''gpoint'\'')"')"
+  [[ "$database_bytes" =~ ^[0-9]+$ && "$database_bytes" -gt 0 ]]
+  source_tables="$(docker exec "$postgres" sh -ec 'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d gpoint -c "SELECT count(*) FROM pg_tables WHERE schemaname IN ('\''public'\'','\''agata'\'','\''gsales'\'','\''gsales_meta'\'','\''agata_identity'\'')"')"
+  [[ "$source_tables" =~ ^[0-9]+$ && "$source_tables" -gt 0 ]]
+fi
 
 # Reserve enough space for both encrypted backups and disposable restores before
 # writing backup bytes. Account for database WAL/index overhead plus conservative
@@ -262,7 +310,16 @@ backup_free="$(df -PB1 "$(dirname "$backup_file")" | awk 'NR==2 {print $4}')"
 restore_free="$(df -PB1 "$docker_root" | awk 'NR==2 {print $4}')"
 [[ "$backup_free" =~ ^[0-9]+$ && "$restore_free" =~ ^[0-9]+$ ]]
 pre_restore_capacity_check() {
-  python3 - "$database_bytes" "$media_total_bytes" "$media_file_count" "$media_directory_count" "$restore_free" <<'PY'
+  if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" == "1" ]]; then
+    python3 - "$database_bytes" "$restore_free" <<'PY'
+import sys
+db_size, free = map(int, sys.argv[1:3])
+required = db_size * 10 + 2 * 1024**3
+if free < required:
+    raise SystemExit('insufficient Docker storage for isolated migration restore')
+PY
+  else
+    python3 - "$database_bytes" "$media_total_bytes" "$media_file_count" "$media_directory_count" "$restore_free" <<'PY'
 import sys
 db_size, media_size, media_files, media_dirs, free = map(int, sys.argv[1:6])
 metadata = (media_files + media_dirs) * 65536
@@ -270,20 +327,22 @@ required = db_size * 2 + media_size + metadata + 1024**3
 if free < required:
     raise SystemExit('insufficient Docker storage for database/media isolated restores and safety margin')
 PY
+  fi
 }
 pre_restore_capacity_check
 echo GPOINT_PRE_RESTORE_CAPACITY=PASS
 
-postgres_image="$(baseline_value POSTGRES_IMAGE_ID)"
 docker image inspect "$postgres_image" >/dev/null
 roles_file="$plaintext_dir/restore-roles-${run_id}-${attempt}.sql"
 umask 077
 
 # Role names and grants are recreated without production password hashes. The
 # archive, role SQL and restored database stay on this host and in a private dir.
-docker exec "$postgres" sh -ec 'exec pg_dumpall --roles-only --no-role-passwords -U "$POSTGRES_USER"' > "$roles_file"
-test -s "$roles_file"
-chmod 600 "$roles_file"
+if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" != "1" ]]; then
+  docker exec "$postgres" sh -ec 'exec pg_dumpall --roles-only --no-role-passwords -U "$POSTGRES_USER"' > "$roles_file"
+  test -s "$roles_file"
+  chmod 600 "$roles_file"
+fi
 restore_dir="$(mktemp -d "${docker_root%/}/.gpoint-kamal-restore-${run_id}-${attempt}.XXXXXX")"
 chmod 700 "$restore_dir"
 restore_password="$(openssl rand -hex 32)"
@@ -300,8 +359,12 @@ for _ in $(seq 1 60); do
   sleep 2
 done
 test "$ready" = 1
-docker exec -i "$restore_container_id" psql -Xq -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
-  < "$roles_file" >/dev/null
+if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" == "1" ]]; then
+  docker exec "$restore_container_id" psql -Xq -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
+    -c "CREATE ROLE gpoint LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD '$restore_password'; CREATE ROLE eros_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS; CREATE ROLE eros_migrator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS; CREATE ROLE eros_ddl NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS; CREATE ROLE gsales_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS; CREATE ROLE gsales_agata_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS" >/dev/null
+else
+  docker exec -i "$restore_container_id" psql -Xq -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint < "$roles_file" >/dev/null
+fi
 
 # The isolated PostgreSQL image creates an empty `public` schema during
 # initdb, while this archive contains its own CREATE SCHEMA entry. Remove only
@@ -361,7 +424,13 @@ age -d -i "$age_identity" "$backup_file" | \
   docker exec -i "$restore_container_id" pg_restore --exit-on-error --no-owner -U gpoint_restore_admin -d gpoint >/dev/null
 restored_tables="$(docker exec "$restore_container_id" psql -XqAt -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
   -c "SELECT count(*) FROM pg_tables WHERE schemaname IN ('public','agata','gsales','gsales_meta','agata_identity')")"
-test "$restored_tables" = "$source_tables"
+if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" == "1" ]]; then
+  [[ "$restored_tables" =~ ^[0-9]+$ && "$restored_tables" -gt 0 ]]
+  docker exec "$restore_container_id" psql -Xq -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
+    -c 'GRANT CONNECT ON DATABASE gpoint TO gpoint; REASSIGN OWNED BY gpoint_restore_admin TO gpoint' >/dev/null
+else
+  test "$restored_tables" = "$source_tables"
+fi
 restored_bytes="$(docker exec "$restore_container_id" psql -XqAt -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
   -c "SELECT pg_database_size('gpoint')")"
 [[ "$restored_bytes" =~ ^[0-9]+$ && "$restored_bytes" -gt 0 ]]
@@ -434,7 +503,7 @@ SQL
   existing_prisma_count=0
   while IFS='=' read -r migration_name recorded_checksum; do
     [[ "$migration_name" =~ ^[0-9]{14}_[a-z0-9_]+$ && "$recorded_checksum" =~ ^[0-9a-f]{64}$ ]]
-    image_checksum="$(docker run --rm --entrypoint sha256sum "$app_image" \
+    image_checksum="$(docker run --rm --network none --entrypoint sha256sum "$app_image" \
       "/app/packages/db/prisma/migrations/$migration_name/migration.sql" | awk '{print $1}')"
     test "$recorded_checksum" = "$image_checksum"
     existing_prisma_count=$((existing_prisma_count + 1))
@@ -443,23 +512,27 @@ SQL
   echo GPOINT_APPLIED_PRISMA_CHECKSUMS=PASS
 
   # The app and AGATA images are immutable outputs from this candidate's CI build.
-  test "$(docker run --rm --entrypoint sha256sum "$app_image" \
+  test "$(docker run --rm --network none --entrypoint sha256sum "$app_image" \
     /app/packages/db/prisma/migrations/20261016120000_eros_worker_queue/migration.sql \
     /app/packages/db/prisma/migrations/20261020153000_eros_external_relationship_mapping/migration.sql \
     /app/packages/db/prisma/migrations/20261022110000_eros_gpoint_message_state/migration.sql | awk 'NR==1 {print $1}')" = "$GPOINT_PRISMA_EROS_QUEUE_SHA256"
-  test "$(docker run --rm --entrypoint sha256sum "$app_image" \
+  test "$(docker run --rm --network none --entrypoint sha256sum "$app_image" \
     /app/packages/db/prisma/migrations/20261020153000_eros_external_relationship_mapping/migration.sql | awk '{print $1}')" = "$GPOINT_PRISMA_EROS_MAPPING_SHA256"
-  test "$(docker run --rm --entrypoint sha256sum "$app_image" \
+  test "$(docker run --rm --network none --entrypoint sha256sum "$app_image" \
     /app/packages/db/prisma/migrations/20261022110000_eros_gpoint_message_state/migration.sql | awk '{print $1}')" = "$GPOINT_PRISMA_MESSAGE_STATE_SHA256"
-  test "$(docker run --rm --entrypoint sha256sum "$agata_image" \
+  test "$(docker run --rm --network none --entrypoint sha256sum "$agata_image" \
     /srv/agata/migrations/versions/0012_eros_memory_disclosure.py | awk '{print $1}')" = "$GPOINT_AGATA_0012_SHA256"
 
-  migration_db_url="postgresql://gpoint_restore_admin:${restore_password}@127.0.0.1:5432/gpoint?schema=public"
-  docker run --rm --network "container:$restore_container_id" \
+  migration_db_url="postgresql://gpoint:${restore_password}@127.0.0.1:5432/gpoint?schema=public"
+  docker run --rm --network "container:$restore_container_id" --read-only --cap-drop ALL \
+    --security-opt no-new-privileges --pids-limit 128 --memory 2g --cpus 2 \
+    --tmpfs /tmp:rw,noexec,nosuid,size=256m \
     --env "DATABASE_URL=$migration_db_url" --workdir /app "$app_image" \
     pnpm --filter @gpoint/db exec prisma migrate deploy
-  docker run --rm --network "container:$restore_container_id" \
-    --env "AGATA_MIGRATOR_DATABASE_URL=postgresql+psycopg://gpoint_restore_admin:${restore_password}@127.0.0.1:5432/gpoint" \
+  docker run --rm --network "container:$restore_container_id" --read-only --cap-drop ALL \
+    --security-opt no-new-privileges --pids-limit 128 --memory 2g --cpus 2 \
+    --tmpfs /tmp:rw,noexec,nosuid,size=256m \
+    --env "AGATA_MIGRATOR_DATABASE_URL=postgresql+psycopg://gpoint:${restore_password}@127.0.0.1:5432/gpoint" \
     --workdir /srv/agata "$agata_image" python -m alembic upgrade agata0012
 
   prisma_rows="$(docker exec "$restore_container_id" psql -XqAt -F '=' -v ON_ERROR_STOP=1 \
@@ -480,8 +553,12 @@ SQL
   migration_profile_semantics_sha="$(sha256sum "$plaintext_dir/agata-profile-semantics-after.json" | awk '{print $1}')"
   migration_data=PASS
 
-  runtime_role="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$api_container_id" | \
-    python3 -c 'import sys,urllib.parse; rows=[x.strip().split("=",1)[1] for x in sys.stdin if x.startswith("DATABASE_URL=")]; print(urllib.parse.urlparse(rows[0]).username if len(rows)==1 else "")')"
+  if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" == "1" ]]; then
+    runtime_role=gpoint
+  else
+    runtime_role="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$api_container_id" | \
+      python3 -c 'import sys,urllib.parse; rows=[x.strip().split("=",1)[1] for x in sys.stdin if x.startswith("DATABASE_URL=")]; print(urllib.parse.urlparse(rows[0]).username if len(rows)==1 else "")')"
+  fi
   [[ "$runtime_role" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]
   tenant_a="me52-${run_id}-a"
   tenant_b="me52-${run_id}-b"
@@ -548,20 +625,22 @@ SQL
   echo GPOINT_MIGRATION_GRANTS_RLS=PASS
 fi
 
-media_restore_dir="$(mktemp -d "${docker_root%/}/.gpoint-kamal-media-restore-${run_id}-${attempt}.XXXXXX")"
-chmod 700 "$media_restore_dir"
-age -d -i "$age_identity" "$media_backup_file" | \
-  tar --extract --file=- --directory="$media_restore_dir" --numeric-owner \
-    --same-owner --same-permissions --acls --xattrs --delay-directory-restore
-media_restore_manifest="$plaintext_dir/media-restored.json"
-media_restore_output="$(python3 "$media_tree_helper" manifest --root "$media_restore_dir" --output "$media_restore_manifest")"
-grep -qx 'GPOINT_MEDIA_MANIFEST=PASS' <<< "$media_restore_output"
-media_restore_manifest_sha="$(sed -n 's/^GPOINT_MEDIA_MANIFEST_SHA256=//p' <<< "$media_restore_output")"
-[[ "$media_restore_manifest_sha" =~ ^[0-9a-f]{64}$ ]]
-test "$media_restore_manifest_sha" = "$media_manifest_sha"
-cmp -s "$media_source_manifest" "$media_restore_manifest"
-python3 "$media_tree_helper" compare --manifest "$media_source_manifest" --root "$media_root" | \
-  grep -qx 'GPOINT_MEDIA_TREE_MATCH=PASS'
+if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" != "1" ]]; then
+  media_restore_dir="$(mktemp -d "${docker_root%/}/.gpoint-kamal-media-restore-${run_id}-${attempt}.XXXXXX")"
+  chmod 700 "$media_restore_dir"
+  age -d -i "$age_identity" "$media_backup_file" | \
+    tar --extract --file=- --directory="$media_restore_dir" --numeric-owner \
+      --same-owner --same-permissions --acls --xattrs --delay-directory-restore
+  media_restore_manifest="$plaintext_dir/media-restored.json"
+  media_restore_output="$(python3 "$media_tree_helper" manifest --root "$media_restore_dir" --output "$media_restore_manifest")"
+  grep -qx 'GPOINT_MEDIA_MANIFEST=PASS' <<< "$media_restore_output"
+  media_restore_manifest_sha="$(sed -n 's/^GPOINT_MEDIA_MANIFEST_SHA256=//p' <<< "$media_restore_output")"
+  [[ "$media_restore_manifest_sha" =~ ^[0-9a-f]{64}$ ]]
+  test "$media_restore_manifest_sha" = "$media_manifest_sha"
+  cmp -s "$media_source_manifest" "$media_restore_manifest"
+  python3 "$media_tree_helper" compare --manifest "$media_source_manifest" --root "$media_root" | \
+    grep -qx 'GPOINT_MEDIA_TREE_MATCH=PASS'
+fi
 echo GPOINT_MEDIA_BACKUP=PASS
 echo GPOINT_MEDIA_ISOLATED_RESTORE=PASS
 

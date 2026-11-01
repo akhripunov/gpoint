@@ -62,6 +62,10 @@ def test_migration_rehearsal_requires_existing_backup_and_never_refreshes_latest
     helper = (Path(__file__).resolve().parents[1] / "scripts/verify-gpoint-scheduled-backup-restore.sh").read_text()
     assert "GPOINT_MIGRATION_REHEARSAL" in runner
     assert "verify_freshness(latest_path" in runner
+    rehearsal_branch = runner.split("if migration_rehearsal:", 1)[1].split("\n        else:", 1)[0]
+    assert "_source_facts()" not in rehearsal_branch
+    assert "existing_manifest" in rehearsal_branch
+    assert "MEDIA_ROOT" not in rehearsal_branch
     assert "GPOINT_USE_EXISTING_BACKUP" in helper
     assert "GPOINT_MIGRATION_REHEARSAL=PASS" in helper
     assert "GPOINT_MIGRATION_REHEARSAL" in helper
@@ -69,3 +73,16 @@ def test_migration_rehearsal_requires_existing_backup_and_never_refreshes_latest
     normal_manifest_publish = runner.index("os.replace(pending_manifest, latest_path)")
     assert "return" in runner[rehearsal_finish:normal_manifest_publish]
     assert 'backup --sha "$candidate"' not in helper.split('if [[ "${GPOINT_USE_EXISTING_BACKUP:-0}" == "1" ]]', 1)[1].split("else", 1)[0]
+
+
+def test_migration_restore_path_never_reads_live_database_or_kamal_api():
+    helper = (Path(__file__).resolve().parents[1] / "scripts/verify-gpoint-scheduled-backup-restore.sh").read_text()
+    assert helper.count('if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" != "1" ]]') >= 2
+    assert 'runtime_role=gpoint' in helper
+    assert 'REASSIGN OWNED BY gpoint_restore_admin TO gpoint' in helper
+    assert 'shared_internal' not in helper
+    assert 'production.env' not in helper
+    rehearsal_baseline = helper.split('if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" == "1" ]]', 1)[1].split('\nelse\n', 1)[0]
+    assert 'docker exec "$postgres"' not in rehearsal_baseline
+    assert 'docker inspect "$api_container_id"' not in rehearsal_baseline
+    assert '/opt/gpoint/media' not in rehearsal_baseline
