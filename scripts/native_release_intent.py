@@ -27,10 +27,17 @@ BACKUP_REHEARSAL_FIX_PREP_ONLY_PATHS = frozenset({
     "scripts/gpoint-scheduled-backup.py",
     "tests/test_gpoint_scheduled_backup.py",
 })
+RESTORE_IMAGE_ID_PREP_ONLY_PATHS = frozenset({
+    "scripts/native_release_intent.py",
+    "tests/test_native_release_intent.py",
+    "scripts/verify-gpoint-scheduled-backup-restore.sh",
+    "tests/test_gpoint_scheduled_backup.py",
+})
 PREP_ONLY_SCOPES = (
     PREP_ONLY_PATHS,
     OCI_IDENTITY_PREP_ONLY_PATHS,
     BACKUP_REHEARSAL_FIX_PREP_ONLY_PATHS,
+    RESTORE_IMAGE_ID_PREP_ONLY_PATHS,
 )
 
 

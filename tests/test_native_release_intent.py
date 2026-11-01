@@ -111,6 +111,29 @@ def test_backup_rehearsal_fix_prep_push_has_a_separate_exact_scope():
         ) == "BLOCK"
 
 
+def test_restore_image_id_fix_prep_push_has_a_separate_exact_scope():
+    exact_scope = {
+        "scripts/native_release_intent.py",
+        "tests/test_native_release_intent.py",
+        "scripts/verify-gpoint-scheduled-backup-restore.sh",
+        "tests/test_gpoint_scheduled_backup.py",
+    }
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main",
+        commit_message="ME-52 isolated restore content ID fix\nGPOINT_MIGRATION_REHEARSAL_PREP=1",
+        changed_paths=exact_scope,
+    ) == "PREPARE_ONLY"
+    for invalid_scope in (
+        exact_scope | {"apps/api/src/main.ts"},
+        exact_scope - {"tests/test_gpoint_scheduled_backup.py"},
+    ):
+        assert MODULE.classify_push(
+            event_name="push", ref="refs/heads/main",
+            commit_message="ME-52 isolated restore content ID fix\nGPOINT_MIGRATION_REHEARSAL_PREP=1",
+            changed_paths=invalid_scope,
+        ) == "BLOCK"
+
+
 def test_repeated_diagnostic_prep_marker_blocks_instead_of_loosening_scope():
     assert MODULE.classify_push(
         event_name="push", ref="refs/heads/main",
