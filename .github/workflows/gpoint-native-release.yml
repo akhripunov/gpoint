@@ -196,6 +196,7 @@ jobs:
           tests/test_native_release_intent.py
           tests/test_gpoint_scheduled_backup.py
           tests/test_agata_production_migration.py
+          tests/test_agata_migration_receipt.py
           tests/test_kamal_native_automatic_release.py
           tests/test_verify_kamal_production_baseline.py
           tests/test_native_rollback_evidence.py
@@ -550,6 +551,13 @@ jobs:
           test -n "$prisma_head" && test -n "$prisma_migrations" && test -n "$agata_head"
           test -n "$prisma_checksums"
           [[ "$BASELINE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ && "$agata_head" =~ ^[A-Za-z0-9_]+$ ]]
+          agata_checksums=""
+          if [[ "$agata_head" == agata0012 ]] && ! git cat-file -e "$BASELINE_SOURCE_SHA:services/agata/migrations/versions/0012_eros_memory_disclosure.py" 2>/dev/null; then
+            agata_checksums="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - --read-agata-receipt \
+              "/opt/gpoint/release-logs/$CANDIDATE_SHA/agata-applied-migration.json" "$CANDIDATE_SHA" "$agata_head" \
+              < "$GITHUB_WORKSPACE/scripts/verify-kamal-migration-parity.py")"
+          fi
           python3 scripts/verify-kamal-migration-parity.py \
             --policy compatible \
             --repo-root "$GITHUB_WORKSPACE" \
@@ -560,7 +568,8 @@ jobs:
             --prisma-current-checksums "$prisma_checksums" \
             --prisma-current-head "$prisma_head" \
             --agata-directory services/agata/migrations/versions \
-            --agata-current-head "$agata_head"
+            --agata-current-head "$agata_head" \
+            --agata-current-checksums "$agata_checksums"
           {
             echo "prisma_head=$prisma_head"
             echo "prisma_migrations=$prisma_migrations"

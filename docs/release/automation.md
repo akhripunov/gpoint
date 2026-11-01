@@ -53,6 +53,18 @@ Build и read-only migration compatibility checks на `main`; pending schema
 changes останавливают его до Kamal и без DDL. Runtime Verify является
 единственным runtime gate для GitHub Deployment SUCCESS.
 
+Для отдельно разрешённого перехода AGATA `agata0011 → agata0012` результат
+реального Apply фиксируется в приватном root-owned mode-0600 файле
+`/opt/gpoint/release-logs/<candidate>/agata-applied-migration.json`: source SHA,
+точные heads, immutable AGATA image и SHA-256 выполненной миграции. Этот proof
+создаёт существующий `agata-production-migration.py migrate` с `--image` по
+immutable digest, `--expected-migration-sha256` и `--record-receipt`, только после
+успешного guarded Apply и read-back. Уже существующий receipt блокирует повторный Apply для этого кандидата. Если ещё работающий
+старый source не содержит нового revision, Native проверяет этот proof и checksum.
+Изменение ранее существовавшего revision, включая rename с изменением кода,
+по-прежнему блокируется. После переключения приложения на новый source такой
+bootstrap proof больше не нужен; это evidence миграции, а не новый release controller.
+
 Обычный production preflight требует ровно по одной работающей версии каждой из
 шести Kamal-ролей, общего SHA/version baseline, активного Proxy, точных
 PostgreSQL/Redis container IDs и SHA-256 fingerprints их persistent mounts.

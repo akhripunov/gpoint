@@ -3,6 +3,9 @@
 import argparse
 import ast
 import hashlib
+import json
+import os
+import stat
 from pathlib import Path
 import re
 import subprocess
@@ -14,6 +17,32 @@ COMMON_SCHEMA_FIELDS = {
     "created_at", "updated_at", "createdAt", "updatedAt", "status", "version",
     "effective_from", "effective_to", "rules", "jurisdiction", "market",
 }
+
+
+
+def read_applied_agata_receipt(path, candidate_sha, current_head):
+    """Read a private proof for the separately authorized 0011 -> 0012 apply."""
+    if not SHA40.fullmatch(candidate_sha or ""):
+        raise ValueError("migration receipt candidate identity is invalid")
+    path = Path(path)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return ""
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 4096):
+        raise ValueError("migration receipt must be a private regular file owned by the reader")
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    if (not isinstance(receipt, dict)
+            or receipt.get("schema") != "gpoint-agata-applied-migration/v1"
+            or receipt.get("status") != "PASS" or receipt.get("source_sha") != candidate_sha
+            or receipt.get("head_before") != "agata0011"
+            or receipt.get("head_after") != current_head or current_head != "agata0012"
+            or not re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("migration_sha256", "")))
+            or not re.fullmatch(r"ghcr\.io/akhripunov/gpoint-agata-runtime@sha256:[0-9a-f]{64}",
+                                str(receipt.get("agata_image", "")))):
+        raise ValueError("migration receipt source, heads, result or image identity is invalid")
+    return "agata0012=" + receipt["migration_sha256"]
 
 
 def parenthesized_sql(source, opening):
@@ -299,6 +328,15 @@ def verify_compatible(args, live_prisma, recorded):
     pending_agata = candidate_ancestors - live_ancestors
     revision_files = {literal_assignments(path).get("revision"): path
                       for path in Path(args.agata_directory).glob("*.py")}
+    applied_agata = {}
+    for item in filter(None, getattr(args, "agata_current_checksums", "").split(",")):
+        revision, separator, checksum = item.partition("=")
+        if (not separator or revision in applied_agata or revision not in live_ancestors
+                or not re.fullmatch(r"[0-9a-f]{64}", checksum)):
+            raise ValueError("applied AGATA checksum inventory is malformed")
+        if hashlib.sha256(revision_files[revision].read_bytes()).hexdigest() != checksum:
+            raise ValueError(f"ALEMBIC_MIGRATION_CHECKSUM_MISMATCH:{revision}")
+        applied_agata[revision] = checksum
     for revision in live_ancestors:
         path = revision_files[revision]
         relative = path.resolve(strict=True).relative_to(repo_root)
@@ -307,8 +345,25 @@ def verify_compatible(args, live_prisma, recorded):
             check=False,
         )
         if result.returncode == 1:
-            raise ValueError(f"APPLIED_ALEMBIC_MIGRATION_CHANGED:{revision}")
-        if result.returncode != 0:
+            previous = subprocess.run(
+                ["git", "-C", str(repo_root), "ls-tree", "-z", baseline, "--", str(relative)],
+                check=True, capture_output=True,
+            ).stdout
+            # A separately applied new revision may precede the app switch.
+            # Never permit rewriting a revision already present in live source.
+            if previous or revision not in applied_agata:
+                raise ValueError(f"APPLIED_ALEMBIC_MIGRATION_CHANGED:{revision}")
+            directory = Path(args.agata_directory).resolve(strict=True).relative_to(repo_root)
+            pattern = r"^[[:space:]]*revision[[:space:]]*=[[:space:]]*['\"]" + re.escape(revision) + r"['\"]"
+            historical = subprocess.run(
+                ["git", "-C", str(repo_root), "grep", "-E", pattern, baseline, "--", str(directory / "*.py")],
+                capture_output=True, check=False,
+            )
+            if historical.returncode == 0:
+                raise ValueError(f"APPLIED_ALEMBIC_MIGRATION_CHANGED:{revision}")
+            if historical.returncode != 1:
+                raise ValueError("cannot verify baseline Alembic revision inventory")
+        elif result.returncode != 0:
             raise ValueError(f"cannot compare applied Alembic revision with baseline: {revision}")
     pending = [(name, Path(args.prisma_directory) / name / "migration.sql") for name in pending_prisma]
     pending.extend((name, revision_files[name]) for name in pending_agata)
@@ -380,6 +435,7 @@ def main():
     parser.add_argument("--prisma-current-head", required=True)
     parser.add_argument("--agata-directory", required=True)
     parser.add_argument("--agata-current-head", required=True)
+    parser.add_argument("--agata-current-checksums", default="")
     args = parser.parse_args()
     try:
         prisma_head, agata_head, pending = verify(args)
@@ -396,4 +452,11 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    if len(sys.argv) == 5 and sys.argv[1] == "--read-agata-receipt":
+        try:
+            print(read_applied_agata_receipt(sys.argv[2], sys.argv[3], sys.argv[4]))
+        except (OSError, ValueError) as exc:
+            print(f"AGATA_MIGRATION_RECEIPT=BLOCKED reason={exc}", file=sys.stderr)
+            raise SystemExit(1)
+    else:
+        raise SystemExit(main())

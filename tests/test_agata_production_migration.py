@@ -1,5 +1,6 @@
 import importlib.util
 import hashlib
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -46,6 +47,46 @@ class ProductionMigrationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'read.state snapshot'):
             census = self.census(); census.pop('baseline_read_state_sha256')
             self.m.validate_readiness(proof, census)
+
+    def test_verified_migration_writes_private_receipt_only_after_guard_success(self):
+        image = 'ghcr.io/akhripunov/gpoint-agata-runtime@sha256:' + 'b' * 64
+        sha, checksum = 'a' * 40, 'c' * 64
+        info = dict(Os='linux', Architecture='amd64', RepoDigests=[image],
+                    Config=dict(Labels={'org.opencontainers.image.revision': sha}))
+        def docker(args, **kwargs):
+            return json.dumps(info) if args[0] == 'image' else checksum + '  /srv/agata/migrations/versions/0012_eros_memory_disclosure.py'
+        with tempfile.TemporaryDirectory() as scratch, \
+             patch.object(self.m, 'RELEASE_LOG_ROOT', Path(scratch), create=True), \
+             patch.object(self.m, 'docker_checked', side_effect=docker), \
+             patch.object(self.m, 'effective_probe', return_value={'head':'agata0011'}), \
+             patch.object(self.m, 'guarded_migration', return_value={'target_head':'agata0012'}) as apply:
+            result = self.m.migrate_candidate(image, sha, record_receipt=True, expected_migration_sha256=checksum)
+            path = Path(scratch) / sha / 'agata-applied-migration.json'
+            receipt = json.loads(path.read_text())
+            self.assertEqual(receipt['source_sha'], sha)
+            self.assertEqual(receipt['migration_sha256'], checksum)
+            self.assertEqual(receipt['head_after'], 'agata0012')
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(result['receipt_sha256'], hashlib.sha256(path.read_bytes()).hexdigest())
+            reader_spec = importlib.util.spec_from_file_location('receipt_reader', ROOT / 'scripts/verify-kamal-migration-parity.py')
+            reader = importlib.util.module_from_spec(reader_spec); reader_spec.loader.exec_module(reader)
+            self.assertEqual(reader.read_applied_agata_receipt(path, sha, 'agata0012'), 'agata0012=' + checksum)
+            with self.assertRaisesRegex(RuntimeError, 'receipt.*exists'):
+                self.m.migrate_candidate(image, sha, record_receipt=True, expected_migration_sha256=checksum)
+            self.assertEqual(apply.call_count, 1, 'existing proof must block before a second Apply')
+
+    def test_failed_guard_cannot_create_a_success_receipt(self):
+        image = 'ghcr.io/akhripunov/gpoint-agata-runtime@sha256:' + 'b' * 64
+        info = dict(Os='linux', Architecture='amd64', RepoDigests=[image],
+                    Config=dict(Labels={'org.opencontainers.image.revision':'a'*40}))
+        with tempfile.TemporaryDirectory() as scratch, \
+             patch.object(self.m, 'RELEASE_LOG_ROOT', Path(scratch), create=True), \
+             patch.object(self.m, 'docker_checked', side_effect=[json.dumps(info), 'c'*64+'  /srv/agata/migrations/versions/0012_eros_memory_disclosure.py']), \
+             patch.object(self.m, 'effective_probe', return_value={'head':'agata0011'}), \
+             patch.object(self.m, 'guarded_migration', side_effect=RuntimeError('guard failed')):
+            with self.assertRaisesRegex(RuntimeError, 'guard failed'):
+                self.m.migrate_candidate(image, 'a'*40, record_receipt=True, expected_migration_sha256='c'*64)
+            self.assertFalse((Path(scratch)/('a'*40)/'agata-applied-migration.json').exists())
 
     def test_agata0009_candidate_applies_through_agata0012_only_with_privileged_migrator(self):
         proof = self.proof(); proof['privileged'] = True

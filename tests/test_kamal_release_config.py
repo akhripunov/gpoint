@@ -1460,3 +1460,46 @@ def test_cutover_preserves_existing_proxy_volume(tmp_path, source, proxy_present
                             env={**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"]},
                             capture_output=True, text=True)
     assert result.returncode == expected
+
+
+def test_post_migration_head_requires_checksum_proof_when_old_runtime_lacks_revision(tmp_path):
+    repo=tmp_path / "post-migration"; repo.mkdir()
+    for args in (("init","-q"),("config","user.name","Test"),("config","user.email","test@example.invalid")):
+        subprocess.run(["git","-C",str(repo),*args],check=True)
+    prisma=repo / "packages/db/prisma/migrations"; name="20261015130000_baseline"
+    (prisma/name).mkdir(parents=True); (prisma/name/"migration.sql").write_text("SELECT 1;\n")
+    agata=repo / "services/agata/migrations/versions"; agata.mkdir(parents=True)
+    (agata/"0011.py").write_text("revision='agata0011'\ndown_revision=None\n")
+    subprocess.run(["git","-C",str(repo),"add","."],check=True)
+    subprocess.run(["git","-C",str(repo),"commit","-qm","old runtime"],check=True)
+    baseline=subprocess.check_output(["git","-C",str(repo),"rev-parse","HEAD"],text=True).strip()
+    (agata/"0012.py").write_text("revision='agata0012'\ndown_revision='agata0011'\n")
+    subprocess.run(["git","-C",str(repo),"add","."],check=True)
+    subprocess.run(["git","-C",str(repo),"commit","-qm","approved migration"],check=True)
+    candidate=subprocess.check_output(["git","-C",str(repo),"rev-parse","HEAD"],text=True).strip()
+    command=["python3",str(ROOT/"scripts/verify-kamal-migration-parity.py"),"--policy","compatible",
+             "--repo-root",str(repo),"--baseline-source-sha",baseline,"--candidate-source-sha",candidate,
+             "--prisma-directory",str(prisma),"--prisma-current-head",name,"--prisma-current-migrations",name,
+             "--prisma-current-checksums",name+"="+hashlib.sha256((prisma/name/"migration.sql").read_bytes()).hexdigest(),
+             "--agata-directory",str(agata),"--agata-current-head","agata0012"]
+    checksum=hashlib.sha256((agata/"0012.py").read_bytes()).hexdigest()
+    assert subprocess.run(command,capture_output=True).returncode != 0
+    accepted=subprocess.run(command+["--agata-current-checksums","agata0012="+checksum],capture_output=True,text=True)
+    assert accepted.returncode == 0, accepted.stderr
+    assert subprocess.run(command+["--agata-current-checksums","agata0012="+"0"*64],capture_output=True).returncode != 0
+    (agata/"0011.py").write_text("revision='agata0011'\ndown_revision=None\n# changed old applied revision\n")
+    subprocess.run(["git","-C",str(repo),"add","."],check=True)
+    subprocess.run(["git","-C",str(repo),"commit","-qm","forbidden rewrite"],check=True)
+    command[command.index("--candidate-source-sha")+1]=subprocess.check_output(["git","-C",str(repo),"rev-parse","HEAD"],text=True).strip()
+    rejected=subprocess.run(command+["--agata-current-checksums","agata0012="+checksum],capture_output=True,text=True)
+    assert rejected.returncode != 0 and "APPLIED_ALEMBIC_MIGRATION_CHANGED:agata0011" in rejected.stderr
+    (agata/"0011.py").write_text("revision='agata0011'\ndown_revision=None\n")
+    (agata/"0012.py").rename(agata/"renamed.py")
+    (agata/"renamed.py").write_text("revision='agata0012'\ndown_revision='agata0011'\n# rewritten under another filename\n")
+    subprocess.run(["git","-C",str(repo),"add","-A"],check=True)
+    subprocess.run(["git","-C",str(repo),"commit","-qm","rename applied revision"],check=True)
+    command[command.index("--baseline-source-sha")+1]=candidate
+    command[command.index("--candidate-source-sha")+1]=subprocess.check_output(["git","-C",str(repo),"rev-parse","HEAD"],text=True).strip()
+    renamed_checksum=hashlib.sha256((agata/"renamed.py").read_bytes()).hexdigest()
+    renamed=subprocess.run(command+["--agata-current-checksums","agata0012="+renamed_checksum],capture_output=True,text=True)
+    assert renamed.returncode != 0 and "APPLIED_ALEMBIC_MIGRATION_CHANGED:agata0012" in renamed.stderr

@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import select
+import stat
 import subprocess
 import time
 from urllib.parse import urlsplit
@@ -22,6 +23,7 @@ DB_CONTAINER = 'shared_postgres_1'
 ENV_FILE = '/opt/gpoint/env/production.env'
 MIGRATION_ENV_FILE = '/opt/gpoint/env/migration.env'
 DB_NETWORK = 'shared_internal'
+RELEASE_LOG_ROOT = Path('/opt/gpoint/release-logs')
 PREDICATE = "c.source_system='gpoint' AND m.role='assistant' AND m.scope='real_world' AND m.scenario_id IS NULL"
 TENANT_GUARD_LOCK = (1196441417, 1314150988)
 # JSON access also supports older baselines before incoming_read_at existed.
@@ -288,6 +290,62 @@ def migrate_image(image, inventory, guard):
                 process.wait(timeout=10)
 
 
+
+def verify_migration_image(image, sha, expected_checksum=None):
+    if not re.fullmatch(r'ghcr\.io/akhripunov/gpoint-agata-runtime@sha256:[0-9a-f]{64}', image):
+        raise RuntimeError('an immutable GPoint AGATA image is required')
+    info = json.loads(docker_checked(['image', 'inspect', image, '--format', '{{json .}}']))
+    if (info.get('Os') != 'linux' or info.get('Architecture') != 'amd64'
+            or info.get('Config', {}).get('Labels', {}).get('org.opencontainers.image.revision') != sha
+            or image not in (info.get('RepoDigests') or [])):
+        raise RuntimeError('migration image source, platform or digest does not match candidate')
+    value = docker_checked(['run', '--rm', '--network', 'none', '--entrypoint', 'sha256sum', image,
+                            '/srv/agata/migrations/versions/0012_eros_memory_disclosure.py']).split()
+    if (len(value) != 2 or not re.fullmatch(r'[0-9a-f]{64}', value[0])
+            or value[1] != '/srv/agata/migrations/versions/0012_eros_memory_disclosure.py'
+            or (expected_checksum is not None and value[0] != expected_checksum)):
+        raise RuntimeError('migration image checksum does not match approved source')
+    return value[0]
+
+
+def migrate_candidate(image, sha, *, record_receipt=False, expected_migration_sha256=None):
+    if not re.fullmatch(r'[0-9a-f]{40}', sha):
+        raise RuntimeError('exact migration source SHA required')
+    receipt_path = None
+    if record_receipt:
+        if not re.fullmatch(r'[0-9a-f]{64}', expected_migration_sha256 or ''):
+            raise RuntimeError('approved migration checksum required before Apply')
+        receipt_path = RELEASE_LOG_ROOT / sha / 'agata-applied-migration.json'
+        receipt_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = receipt_path.parent.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o700):
+            raise RuntimeError('migration receipt directory is not private')
+        if receipt_path.exists() or receipt_path.is_symlink():
+            raise RuntimeError('migration receipt already exists; reconcile before another Apply')
+    checksum = verify_migration_image(image, sha, expected_migration_sha256)
+    proof = effective_probe(image)
+    if record_receipt and proof.get('head') != 'agata0011':
+        raise RuntimeError('migration receipt requires the approved agata0011 baseline')
+    result = guarded_migration(proof, TenantGuard(), lambda ids, guard: migrate_image(image, ids, guard))
+    if receipt_path is not None:
+        if result.get('target_head') != 'agata0012':
+            raise RuntimeError('verified migration target is not agata0012')
+        receipt = dict(schema='gpoint-agata-applied-migration/v1', status='PASS', source_sha=sha,
+                       head_before=proof['head'], head_after=result['target_head'],
+                       migration_sha256=checksum, agata_image=image,
+                       verified_at=datetime.now(timezone.utc).isoformat())
+        payload = (json.dumps(receipt, sort_keys=True, separators=(',', ':')) + '\n').encode()
+        fd = os.open(receipt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+        with os.fdopen(fd, 'wb') as output:
+            output.write(payload); output.flush(); os.fsync(output.fileno())
+        directory_fd = os.open(receipt_path.parent, os.O_RDONLY)
+        try: os.fsync(directory_fd)
+        finally: os.close(directory_fd)
+        result = dict(result, receipt_path=str(receipt_path), receipt_sha256=hashlib.sha256(payload).hexdigest())
+    return result
+
+
 def complete_backup(sha, *, directory=None, purpose='pre-release'):
     # This container administrator channel creates only the GPoint logical
     # backup; application migration credentials use a separate protected file.
@@ -342,11 +400,16 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('mode', choices=['preflight', 'backup', 'migrate'])
     parser.add_argument('--sha', required=True)
+    parser.add_argument('--image', help='immutable AGATA image for the selected source SHA')
+    parser.add_argument('--record-receipt', action='store_true')
+    parser.add_argument('--expected-migration-sha256')
     parser.add_argument('--backup-purpose', choices=['pre-release', 'recovery-current'], default='pre-release')
     parser.add_argument('--backup-directory', type=Path,
                         help='write the temporary plaintext archive in a caller-provided protected directory')
     args = parser.parse_args()
     if not re.fullmatch('[0-9a-f]{40}', args.sha): raise RuntimeError('exact SHA required')
+    if args.record_receipt and args.mode != 'migrate':
+        raise RuntimeError('migration receipt can only record an actual migrate operation')
     # Host configuration is consulted for source identity only; never echo values.
     env = {}
     for file in migration_env_files():
@@ -356,17 +419,26 @@ def main():
         if urlsplit(env.get(key, '').replace('postgresql+asyncpg:', 'postgresql:').replace('postgresql+psycopg:', 'postgresql:')).path != '/gpoint':
             raise RuntimeError('production database scope could not be verified')
     if args.mode == 'preflight':
-        live_sha = env.get('RELEASE_SHA', '')
-        if not re.fullmatch('[0-9a-f]{40}', live_sha): raise RuntimeError('current image identity unavailable')
-        proof = validate_readiness(effective_probe('gpoint-agata-runtime:' + live_sha), authoritative_census())
+        if args.image:
+            verify_migration_image(args.image, args.sha, args.expected_migration_sha256)
+            image = args.image
+        else:
+            live_sha = env.get('RELEASE_SHA', '')
+            if not re.fullmatch('[0-9a-f]{40}', live_sha): raise RuntimeError('current image identity unavailable')
+            image = 'gpoint-agata-runtime:' + live_sha
+        proof = validate_readiness(effective_probe(image), authoritative_census())
         print('AGATA_MIGRATION_READINESS=' + json.dumps(dict(public_facts(proof), candidate_sha=args.sha, checked_at=datetime.now(timezone.utc).isoformat(), inventory_source='verified_postgres_administrator_readonly'), sort_keys=True))
     elif args.mode == 'backup':
         print('GPOINT_COMPLETE_BACKUP=' + json.dumps(dict(complete_backup(
             args.sha, directory=args.backup_directory, purpose=args.backup_purpose), candidate_sha=args.sha), sort_keys=True))
     else:
-        image = 'gpoint-agata-runtime:' + args.sha
-        proof = effective_probe(image)
-        result = guarded_migration(proof, TenantGuard(), lambda ids, guard: migrate_image(image, ids, guard))
+        if args.image or args.record_receipt:
+            result = migrate_candidate(args.image or '', args.sha, record_receipt=args.record_receipt,
+                                       expected_migration_sha256=args.expected_migration_sha256)
+        else:
+            image = 'gpoint-agata-runtime:' + args.sha
+            proof = effective_probe(image)
+            result = guarded_migration(proof, TenantGuard(), lambda ids, guard: migrate_image(image, ids, guard))
         print('AGATA_MIGRATION_VERIFIED=' + json.dumps(dict(result, candidate_sha=args.sha, head_after=result['target_head'], checked_at=datetime.now(timezone.utc).isoformat(), inventory_source='administrator_share_locked_tenants'), sort_keys=True))
 
 
