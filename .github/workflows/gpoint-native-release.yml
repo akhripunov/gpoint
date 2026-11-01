@@ -1032,18 +1032,29 @@ jobs:
           for value in "$queue_sha" "$mapping_sha" "$state_sha" "$agata_sha"; do [[ "$value" =~ ^[0-9a-f]{64}$ ]]; done
           chmod 0700 "$stage/docker-config"
           chmod 0600 "$stage/docker-config/config.json"
+          current_step=ghcr-app-pull
           DOCKER_CONFIG="$stage/docker-config" docker pull "$app_image" >/dev/null
+          current_step=ghcr-app-image-id
           test "$(docker image inspect "$app_image" --format '{{.Id}}')" = "$app_image_id"
+          current_step=ghcr-app-image-size
           test "$(docker image inspect "$app_image" --format '{{.Size}}')" = "$app_image_bytes"
+          current_step=ghcr-app-platform
           test "$(docker image inspect "$app_image" --format '{{.Os}} {{.Architecture}}')" = 'linux amd64'
+          current_step=ghcr-app-source-revision
           test "$(docker image inspect "$app_image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$candidate"
+          current_step=ghcr-app-repository-digest
           docker image inspect "$app_image" --format '{{json .RepoDigests}}' | grep -Fq "$app_image"
           current_step=ghcr-agata-pull
           DOCKER_CONFIG="$stage/docker-config" docker pull "$agata_image" >/dev/null
+          current_step=ghcr-agata-image-id
           test "$(docker image inspect "$agata_image" --format '{{.Id}}')" = "$agata_image_id"
+          current_step=ghcr-agata-image-size
           test "$(docker image inspect "$agata_image" --format '{{.Size}}')" = "$agata_image_bytes"
+          current_step=ghcr-agata-platform
           test "$(docker image inspect "$agata_image" --format '{{.Os}} {{.Architecture}}')" = 'linux amd64'
+          current_step=ghcr-agata-source-revision
           test "$(docker image inspect "$agata_image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$candidate"
+          current_step=ghcr-agata-repository-digest
           docker image inspect "$agata_image" --format '{{json .RepoDigests}}' | grep -Fq "$agata_image"
           current_step=temporary-credential-cleanup
           rm -rf -- "$stage/docker-config"

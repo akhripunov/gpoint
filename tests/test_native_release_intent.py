@@ -60,6 +60,14 @@ def test_diagnostic_prep_push_requires_the_exact_four_file_scope():
         ) == "BLOCK"
 
 
+def test_repeated_diagnostic_prep_marker_blocks_instead_of_loosening_scope():
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main",
+        commit_message="ME-52 diagnostics\nGPOINT_MIGRATION_REHEARSAL_PREP=1\nGPOINT_MIGRATION_REHEARSAL_PREP=1",
+        changed_paths=MODULE.PREP_ONLY_PATHS,
+    ) == "BLOCK"
+
+
 def test_exact_prep_scope_without_marker_is_still_an_ordinary_release():
     assert MODULE.classify_push(
         event_name="push", ref="refs/heads/main", commit_message="ME-52 diagnostics",

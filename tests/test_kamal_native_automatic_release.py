@@ -88,6 +88,13 @@ def test_manual_migration_rehearsal_uses_existing_backup_without_deployment_or_k
     assert "GPOINT_MIGRATION_STAGE_FAILURE=$current_step" in body
     assert "exit \"$rehearsal_status\"" in body
     assert 'current_step=isolated-backup-restore-and-four-migrations' in body
+    for image_stage in (
+        "ghcr-app-pull", "ghcr-app-image-id", "ghcr-app-image-size", "ghcr-app-platform",
+        "ghcr-app-source-revision", "ghcr-app-repository-digest", "ghcr-agata-pull",
+        "ghcr-agata-image-id", "ghcr-agata-image-size", "ghcr-agata-platform",
+        "ghcr-agata-source-revision", "ghcr-agata-repository-digest",
+    ):
+        assert f"current_step={image_stage}" in body
     assert "GPOINT_MIGRATION_REHEARSAL=PASS" in body
     assert "kamal deploy" not in body
     assert "repos/$GITHUB_REPOSITORY/deployments" not in body
