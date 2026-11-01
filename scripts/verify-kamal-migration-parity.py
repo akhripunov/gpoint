@@ -9,6 +9,11 @@ import subprocess
 import sys
 
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
+COMMON_SCHEMA_FIELDS = {
+    "id", "userId", "creatorId", "tenant_id", "session_id", "instance_id",
+    "created_at", "updated_at", "createdAt", "updatedAt", "status", "version",
+    "effective_from", "effective_to", "rules", "jurisdiction", "market",
+}
 
 
 def parenthesized_sql(source, opening):
@@ -116,7 +121,7 @@ def alembic_head(directory):
     return alembic_revisions(directory)[1]
 
 
-def migration_identifiers(path, *, prisma_directory):
+def migration_identifiers(path, *, prisma_directory, repo_root):
     """Identify tables and fields touched by a pending migration for code-diff checks."""
     source = Path(path).read_text(encoding="utf-8")
     identifiers, tables = set(), set()
@@ -168,6 +173,29 @@ def migration_identifiers(path, *, prisma_directory):
         tables.add(match.group(1))
     for match in re.finditer(r"sa\.Column\(\s*[\"']([^\"']+)", source):
         identifiers.add(match.group(1))
+
+    if Path(path).suffix == ".py":
+        for match in re.finditer(r"\b(?:FROM|UPDATE|INTO)\s+([\w\".]+)", source, re.IGNORECASE):
+            table = match.group(1).split(".")[-1].strip('"')
+            if table not in {"SET", "ONLY"}:
+                tables.add(table)
+                identifiers.add(table)
+        # AGATA data migrations may change the meaning of existing fields. Map
+        # touched tables back to their SQLAlchemy model and model fields so a
+        # newly-added `RegionalPolicyProfile.status` use is treated as dependent.
+        models_path = Path(repo_root) / "services/agata/app/db/models.py"
+        if models_path.is_file():
+            models = models_path.read_text(encoding="utf-8")
+            for table in tables:
+                for block in re.finditer(
+                    r"class\s+([A-Za-z_][A-Za-z0-9_]*)\b[^:]*:\n(.*?)(?=\nclass\s|\Z)",
+                    models, re.DOTALL,
+                ):
+                    model, body = block.group(1), block.group(2)
+                    table_name = re.search(r"__tablename__\s*=\s*[\"']([^\"']+)", body)
+                    if table_name and table_name.group(1) == table:
+                        identifiers.add(model)
+                        identifiers.update(re.findall(r"^\s{4}([A-Za-z_][A-Za-z0-9_]*)\s*:\s*Mapped\[", body, re.MULTILINE))
 
     # Prisma delegate names are not SQL table names; map new tables back to model names.
     schema = Path(prisma_directory).parent / "schema.prisma"
@@ -257,11 +285,18 @@ def verify_compatible(args, live_prisma, recorded):
     pending.extend((name, revision_files[name]) for name in pending_agata)
     changed = list(changed_application_lines(repo_root, baseline, candidate))
     for migration, path in pending:
-        identifiers = migration_identifiers(path, prisma_directory=args.prisma_directory)
+        identifiers = migration_identifiers(path, prisma_directory=args.prisma_directory, repo_root=repo_root)
         if not identifiers:
             raise ValueError(f"cannot identify dependencies in pending migration {migration}")
         for source_path, line in changed:
+            if migration in pending_agata and not source_path.startswith("services/agata/"):
+                continue
             for identifier in identifiers:
+                if identifier in COMMON_SCHEMA_FIELDS:
+                    anchors = identifiers - COMMON_SCHEMA_FIELDS
+                    if not any(re.search(rf"(?<![A-Za-z0-9_]){re.escape(anchor)}(?![A-Za-z0-9_])", line, re.IGNORECASE)
+                               for anchor in anchors):
+                        continue
                 if re.search(rf"(?<![A-Za-z0-9_]){re.escape(identifier)}(?![A-Za-z0-9_])", line, re.IGNORECASE):
                     raise ValueError(f"PENDING_SCHEMA_DEPENDENCY:{migration}:{identifier}:{source_path}")
     if set(recorded) != set(live_prisma):

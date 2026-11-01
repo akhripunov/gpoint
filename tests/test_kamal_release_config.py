@@ -730,6 +730,16 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
         "revision = 'agata0012'\ndown_revision = 'agata0011'\n"
         "SQL = \"UPDATE agata.regional_policy_profiles SET status='retired' "
         "WHERE rules->>'ai_disclosure_required'='true'\"\n", encoding="utf-8")
+    agata_models = repo / "services/agata/app/db/models.py"
+    agata_models.parent.mkdir(parents=True)
+    agata_models.write_text(
+        "class RegionalPolicyProfile:\n"
+        "    __tablename__ = 'regional_policy_profiles'\n"
+        "    status: Mapped[str]\n"
+        "    rules: Mapped[dict]\n", encoding="utf-8")
+    agata_app_file = repo / "services/agata/app/compliance/policy.py"
+    agata_app_file.parent.mkdir(parents=True)
+    agata_app_file.write_text("policy_check = True\n", encoding="utf-8")
     app_file = repo / "apps/api/src/health.ts"
     app_file.parent.mkdir(parents=True)
     app_file.write_text("export const health = true;\n", encoding="utf-8")
@@ -770,7 +780,7 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
     )
     assert field_blocked.returncode != 0
     assert "PENDING_SCHEMA_DEPENDENCY:20261022110000_eros_worker_queue:error_code" in field_blocked.stderr
-    app_file.write_text("export const state = 'status';\n", encoding="utf-8")
+    app_file.write_text("export const state = 'engine.eros_inference_jobs.status';\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "app depends on pending common status field"], check=True)
     status_dependent_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
@@ -785,7 +795,8 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
         capture_output=True, text=True,
     )
     assert status_blocked.returncode != 0
-    assert "PENDING_SCHEMA_DEPENDENCY:20261022110000_eros_worker_queue:status" in status_blocked.stderr
+    assert "PENDING_SCHEMA_DEPENDENCY:20261022110000_eros_worker_queue:" in status_blocked.stderr
+    assert "apps/api/src/health.ts" in status_blocked.stderr
     app_file.write_text("export const code = 'normalized_code';\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "app depends on renamed pending field"], check=True)
@@ -835,7 +846,10 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
     (agata / "0011.py").write_text("revision = 'agata0011'\ndown_revision = None\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "restore applied AGATA migration identity"], check=True)
-    app_file.write_text("export const disclosure = 'ai_disclosure_required';\n", encoding="utf-8")
+    app_file.write_text("export const health = true;\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "restore unrelated Core application"], check=True)
+    agata_app_file.write_text("policy_check = RegionalPolicyProfile.rules['ai_disclosure_required']\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "app depends on pending AGATA policy key"], check=True)
     agata_dependent_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
@@ -850,8 +864,30 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
         capture_output=True, text=True,
     )
     assert agata_blocked.returncode != 0
-    assert "PENDING_SCHEMA_DEPENDENCY:agata0012:ai_disclosure_required" in agata_blocked.stderr
+    assert "PENDING_SCHEMA_DEPENDENCY:agata0012:" in agata_blocked.stderr
+    assert "services/agata/app/compliance/policy.py" in agata_blocked.stderr
 
+    agata_app_file.write_text("policy_state = RegionalPolicyProfile.status\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "app depends on pending AGATA policy state"], check=True)
+    agata_state_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    agata_state_blocked = subprocess.run(
+        ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
+         "--policy", "compatible", "--repo-root", str(repo),
+         "--baseline-source-sha", baseline_sha, "--candidate-source-sha", agata_state_sha,
+         "--prisma-directory", str(prisma), "--prisma-current-head", base_name,
+         "--prisma-current-migrations", base_name,
+         "--prisma-current-checksums", base_name + "=" + hashlib.sha256(base_sql.encode()).hexdigest(),
+         "--agata-directory", str(agata), "--agata-current-head", "agata0011"],
+        capture_output=True, text=True,
+    )
+    assert agata_state_blocked.returncode != 0
+    assert "PENDING_SCHEMA_DEPENDENCY:agata0012:" in agata_state_blocked.stderr
+    assert "services/agata/app/compliance/policy.py" in agata_state_blocked.stderr
+
+    agata_app_file.write_text("policy_check = True\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "restore unrelated AGATA application"], check=True)
     app_file.write_text("export const health = true;\nexport const queue = 'engine.eros_inference_jobs';\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "app depends on pending queue"], check=True)
