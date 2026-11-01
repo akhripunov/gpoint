@@ -23,10 +23,11 @@ def classify_push(*, event_name: str, ref: str, commit_message: str,
                   changed_paths: set[str] | frozenset[str]) -> str:
     if event_name != "push" or ref != "refs/heads/main":
         return "NO_DEPLOY"
-    marker_count = commit_message.splitlines().count(PREP_MARKER)
-    if marker_count == 0:
+    marker_lines = [line for line in commit_message.splitlines()
+                    if line.startswith("GPOINT_MIGRATION_REHEARSAL_PREP=")]
+    if not marker_lines:
         return "DEPLOY"
-    if marker_count != 1:
+    if marker_lines != [PREP_MARKER]:
         return "BLOCK"
     if changed_paths != PREP_ONLY_PATHS:
         return "BLOCK"

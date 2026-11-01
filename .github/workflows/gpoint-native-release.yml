@@ -1022,6 +1022,15 @@ jobs:
           trap cleanup EXIT
           trap 'exit 130' INT
           trap 'exit 143' TERM
+          verify_image_id() {
+            local role="$1" image="$2" expected_id="$3" actual_id
+            actual_id="$(docker image inspect "$image" --format '{{.Id}}')"
+            if [[ "$actual_id" != "$expected_id" ]]; then
+              printf 'GPOINT_MIGRATION_IMAGE_ID_MISMATCH role=%s expected=%s actual=%s\n' \
+                "$role" "$expected_id" "$actual_id" >&2
+              return 1
+            fi
+          }
           docker ps -q | sort > "$stage/containers.before"
           docker volume ls -q | sort > "$stage/volumes.before"
           docker network ls -q | sort > "$stage/networks.before"
@@ -1035,7 +1044,7 @@ jobs:
           current_step=ghcr-app-pull
           DOCKER_CONFIG="$stage/docker-config" docker pull "$app_image" >/dev/null
           current_step=ghcr-app-image-id
-          test "$(docker image inspect "$app_image" --format '{{.Id}}')" = "$app_image_id"
+          verify_image_id app "$app_image" "$app_image_id"
           current_step=ghcr-app-image-size
           test "$(docker image inspect "$app_image" --format '{{.Size}}')" = "$app_image_bytes"
           current_step=ghcr-app-platform
@@ -1047,7 +1056,7 @@ jobs:
           current_step=ghcr-agata-pull
           DOCKER_CONFIG="$stage/docker-config" docker pull "$agata_image" >/dev/null
           current_step=ghcr-agata-image-id
-          test "$(docker image inspect "$agata_image" --format '{{.Id}}')" = "$agata_image_id"
+          verify_image_id agata "$agata_image" "$agata_image_id"
           current_step=ghcr-agata-image-size
           test "$(docker image inspect "$agata_image" --format '{{.Size}}')" = "$agata_image_bytes"
           current_step=ghcr-agata-platform

@@ -77,8 +77,7 @@ def test_manual_migration_rehearsal_uses_existing_backup_without_deployment_or_k
     assert "GPOINT_MIGRATION_BACKUP_EVIDENCE" in body
     assert "GPOINT_MIGRATION_BACKUP_FRESHNESS=PASS" in body
     assert "docker_free" in body and "insufficient Docker storage" in body
-    assert "docker image inspect \"$app_image\" --format '{{.Id}}'" in body
-    assert "docker image inspect \"$agata_image\" --format '{{.Id}}'" in body
+    assert 'actual_id="$(docker image inspect "$image" --format \'{{.Id}}\')"' in body
     rehearsal_step = next(step for step in rehearsal["steps"]
                           if step.get("name") == "Rehearse migrations against existing encrypted VPS backup")
     assert rehearsal_step["env"]["GHCR_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
@@ -86,6 +85,9 @@ def test_manual_migration_rehearsal_uses_existing_backup_without_deployment_or_k
     assert "GPOINT_MIGRATION_TEMP_CLEANUP=PASS" in body
     assert "cleanup_status=0" in body
     assert "GPOINT_MIGRATION_STAGE_FAILURE=$current_step" in body
+    assert "GPOINT_MIGRATION_IMAGE_ID_MISMATCH role=%s expected=%s actual=%s" in body
+    assert "verify_image_id app \"$app_image\" \"$app_image_id\"" in body
+    assert "verify_image_id agata \"$agata_image\" \"$agata_image_id\"" in body
     assert "exit \"$rehearsal_status\"" in body
     assert 'current_step=isolated-backup-restore-and-four-migrations' in body
     for image_stage in (
