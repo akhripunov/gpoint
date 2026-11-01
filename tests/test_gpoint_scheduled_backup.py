@@ -82,6 +82,7 @@ def test_migration_rehearsal_can_consume_recent_release_backup_with_pinned_evide
     runner = (root / "scripts/gpoint-scheduled-backup.py").read_text()
     helper = (root / "scripts/verify-gpoint-scheduled-backup-restore.sh").read_text()
     assert "verify_release_backup_evidence" in policy
+    assert '"RESTORED_DATABASE_BYTES", manifest["database"]["restored_database_bytes"]' in policy
     assert "GPOINT_MIGRATION_BACKUP_EVIDENCE" in runner
     assert "GPOINT_MIGRATION_BACKUP_EVIDENCE_SHA256" in runner
     rehearsal_branch = runner.split("if migration_rehearsal:", 1)[1].split("\n        else:", 1)[0]

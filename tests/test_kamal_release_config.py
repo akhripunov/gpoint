@@ -111,7 +111,7 @@ def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
     assert "sbom: true" in workflow
     assert "provenance: mode=max" in workflow
     assert "  deploy:" in workflow
-    assert "needs: [workspace, python, build]" in workflow
+    assert "needs: [workspace, python, build, release_intent]" in workflow
     assert "name: production" in workflow
     assert "deployment: false" in workflow
 
@@ -962,7 +962,7 @@ def test_manifest_writer_behavior_tests_run_in_python_ci():
 def test_native_release_runs_kamal_after_successful_main_push():
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
-    assert "if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true))" in deploy
+    assert "if: needs.release_intent.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true))" in deploy
     assert "CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}" in deploy
     assert "test \"$APPROVE_PRODUCTION\" = true" in deploy
     assert "if [[ \"$GITHUB_EVENT_NAME\" == workflow_dispatch ]]; then" in deploy

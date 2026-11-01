@@ -14,11 +14,14 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
     def setUpClass(cls):
         cls.workflow = yaml.safe_load(WORKFLOW.read_text())
 
-    def test_pipeline_has_four_release_jobs_and_one_isolated_rehearsal_job(self):
+    def test_pipeline_has_release_gate_and_one_isolated_rehearsal_job(self):
         jobs = self.workflow["jobs"]
-        self.assertEqual(set(jobs), {"workspace", "python", "build", "deploy", "migration_rehearsal"})
-        self.assertEqual(jobs["migration_rehearsal"]["needs"], ["workspace", "python", "build"])
-        self.assertEqual(jobs["migration_rehearsal"]["if"], "github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' && inputs.migration_rehearsal == true")
+        self.assertEqual(set(jobs), {"workspace", "python", "build", "release_intent", "deploy", "migration_rehearsal"})
+        self.assertEqual(jobs["migration_rehearsal"]["needs"], ["workspace", "python", "build", "release_intent"])
+        self.assertIn("github.event_name == 'workflow_dispatch'", jobs["migration_rehearsal"]["if"])
+        self.assertIn("github.ref == 'refs/heads/main'", jobs["migration_rehearsal"]["if"])
+        self.assertIn("inputs.migration_rehearsal == true", jobs["migration_rehearsal"]["if"])
+        self.assertIn("release_intent", jobs["deploy"]["needs"])
         self.assertEqual(set(jobs["build"]["needs"]), {"workspace", "python"})
         self.assertIn("build", jobs["deploy"]["needs"])
 
@@ -27,8 +30,21 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("push", triggers)
         self.assertEqual(triggers["push"]["branches"], ["main"])
         deploy = self.workflow["jobs"]["deploy"]
-        self.assertEqual(deploy["if"], "github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true))")
+        self.assertEqual(deploy["if"], "needs.release_intent.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true))")
         self.assertIn("github.event_name == 'push'", deploy["if"])
+
+    def test_preparatory_push_is_exactly_allowlisted_and_deploy_fails_closed(self):
+        gate = self.workflow["jobs"]["release_intent"]
+        self.assertEqual(gate["outputs"]["deploy"], "${{ steps.intent.outputs.deploy }}")
+        self.assertIn("scripts/native_release_intent.py", "\n".join(step.get("run", "") for step in gate["steps"]))
+        deploy = self.workflow["jobs"]["deploy"]
+        self.assertIn("needs.release_intent.outputs.deploy == 'true'", deploy["if"])
+        rehearsal = self.workflow["jobs"]["migration_rehearsal"]
+        self.assertEqual(rehearsal["environment"], {"name": "production", "deployment": False})
+        self.assertNotIn("deployments", rehearsal["permissions"])
+        rehearsal_run = "\n".join(step.get("run", "") for step in rehearsal["steps"])
+        self.assertNotIn("repos/$GITHUB_REPOSITORY/deployments", rehearsal_run)
+        self.assertIn("--format '{{.Os}} {{.Architecture}}'", rehearsal_run)
 
     def test_python_job_runs_the_disposable_postgres_migration_harness(self):
         job = self.workflow["jobs"]["python"]
@@ -144,7 +160,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("WORKFLOW_SHA", script)
         self.assertIn("APPROVE_PRODUCTION", script)
         self.assertIn("OWNER_APPROVAL_ACTOR", script)
-        self.assertEqual(deploy["needs"], ["workspace", "python", "build"])
+        self.assertEqual(deploy["needs"], ["workspace", "python", "build", "release_intent"])
         self.assertTrue(all(name in self.workflow["jobs"]["build"]["outputs"]
                             for name in ("app_digest", "agata_digest", "miniapp_digest")))
         self.assertNotIn("gsales_digest", self.workflow["jobs"]["build"]["outputs"])

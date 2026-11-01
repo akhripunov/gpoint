@@ -374,7 +374,7 @@ def run() -> None:
         finally:
             shutil.rmtree(run_dir, ignore_errors=True)
         for line in result.stdout.splitlines():
-            if re.fullmatch(r"GPOINT_[A-Z0-9_]+=(?:PASS|[0-9]+)", line):
+            if re.fullmatch(r"GPOINT_[A-Z0-9_]+=(?:PASS|NOT_CHECKED|[0-9]+)", line):
                 print(line)
         if result.returncode:
             _remove_failed_attempt(candidate, run_id, attempt, run_dir, run_evidence_dir)
@@ -396,7 +396,8 @@ def run() -> None:
             migration_required = {
                 "MIGRATION_PARITY": "PASS",
                 "MIGRATION_DATA_PRESERVATION": "PASS",
-                "MIGRATION_GRANTS_RLS": "PASS",
+                "MIGRATION_SYNTHETIC_RLS": "PASS",
+                "MIGRATION_PRODUCTION_GRANTS_RLS": "NOT_CHECKED",
                 "MIGRATION_PRISMA_HEAD": "20261022110000_eros_gpoint_message_state",
                 "MIGRATION_AGATA_HEAD": "agata0012",
                 "MIGRATION_CANDIDATE_SHA": os.environ["GPOINT_MIGRATION_CANDIDATE_SHA"],

@@ -143,6 +143,7 @@ jobs:
           python -m pytest -q
           tests/test_deploy_evidence_workflow.py
           tests/test_native_build_boundary.py
+          tests/test_native_release_intent.py
           tests/test_kamal_release_config.py
           tests/test_kamal_cutover_owner.py
           tests/test_kamal_cutover_credentials.py
@@ -167,6 +168,10 @@ jobs:
       app_digest: ${{ steps.app.outputs.digest }}
       agata_digest: ${{ steps.agata.outputs.digest }}
       miniapp_digest: ${{ steps.miniapp.outputs.digest }}
+      app_image_id: ${{ steps.image_readback.outputs.app_image_id }}
+      agata_image_id: ${{ steps.image_readback.outputs.agata_image_id }}
+      app_image_bytes: ${{ steps.image_readback.outputs.app_image_bytes }}
+      agata_image_bytes: ${{ steps.image_readback.outputs.agata_image_bytes }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -260,6 +265,7 @@ jobs:
                   raise SystemExit(f'{name} is not an immutable OCI digest')
           PY
       - name: Read back exact published images and verify candidate identity
+        id: image_readback
         env:
           CANDIDATE_SHA: ${{ github.sha }}
           IMAGE_VERSION: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -288,11 +294,61 @@ jobs:
               "$RUNNER_TEMP/$role-sbom.json" "$RUNNER_TEMP/$role-provenance.json" \
               "$CANDIDATE_SHA" https://github.com/akhripunov/gpoint.git
           done
+          for role in app agata; do
+            case "$role" in
+              app) image=ghcr.io/akhripunov/gpoint-runtime; digest="$APP_DIGEST" ;;
+              agata) image=ghcr.io/akhripunov/gpoint-agata-runtime; digest="$AGATA_DIGEST" ;;
+            esac
+            image_id="$(docker image inspect "$image@$digest" --format '{{.Id}}')"
+            image_bytes="$(docker image inspect "$image@$digest" --format '{{.Size}}')"
+            [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ && "$image_bytes" =~ ^[0-9]+$ ]]
+            echo "${role}_image_id=$image_id" >> "$GITHUB_OUTPUT"
+            echo "${role}_image_bytes=$image_bytes" >> "$GITHUB_OUTPUT"
+          done
+
+  release_intent:
+    name: Classify exact main release intent
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      mode: ${{ steps.intent.outputs.mode }}
+      deploy: ${{ steps.intent.outputs.deploy }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fail closed unless this is an ordinary release or exact preparation push
+        id: intent
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          EVENT_SHA: ${{ github.sha }}
+          EVENT_BEFORE: ${{ github.event.before || '' }}
+          EVENT_MESSAGE: ${{ github.event.head_commit.message || '' }}
+          REQUESTED_SHA: ${{ inputs.candidate_sha || github.sha }}
+          EVENT_ACTOR: ${{ github.actor }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          MIGRATION_REHEARSAL: ${{ inputs.migration_rehearsal || false }}
+          APPROVE_PRODUCTION: ${{ inputs.approve_production || false }}
+        run: |
+          set -euo pipefail
+          args=(--event "$EVENT_NAME" --ref "$EVENT_REF" --sha "$EVENT_SHA"
+            --before "$EVENT_BEFORE" --message "$EVENT_MESSAGE"
+            --candidate-sha "$REQUESTED_SHA" --actor "$EVENT_ACTOR"
+            --repository-owner "$REPOSITORY_OWNER")
+          [[ "$MIGRATION_REHEARSAL" == true ]] && args+=(--migration-rehearsal)
+          [[ "$APPROVE_PRODUCTION" == true ]] && args+=(--approve-production)
+          python3 scripts/native_release_intent.py "${args[@]}" >> "$GITHUB_OUTPUT"
 
   deploy:
     name: Kamal production Deploy and Verify
-    needs: [workspace, python, build]
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true))
+    needs: [workspace, python, build, release_intent]
+    if: needs.release_intent.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true))
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -733,8 +789,8 @@ jobs:
 
   migration_rehearsal:
     name: Isolated existing-backup migration rehearsal
-    needs: [workspace, python, build]
-    if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' && inputs.migration_rehearsal == true
+    needs: [workspace, python, build, release_intent]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.migration_rehearsal == true
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -753,7 +809,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Require exact non-main owner initiated rehearsal
+      - name: Require exact main-only owner initiated rehearsal
         env:
           REQUESTED_SHA: ${{ inputs.candidate_sha }}
           APPROVE_PRODUCTION: ${{ inputs.approve_production }}
@@ -762,7 +818,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_EVENT_NAME" = workflow_dispatch
-          test "$GITHUB_REF" != refs/heads/main
+          test "$GITHUB_REF" = refs/heads/main
           test "$REQUESTED_SHA" = "$GITHUB_SHA"
           [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$APPROVE_PRODUCTION" = false
@@ -794,21 +850,48 @@ jobs:
         env:
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
+          APP_IMAGE_ID: ${{ needs.build.outputs.app_image_id }}
+          AGATA_IMAGE_ID: ${{ needs.build.outputs.agata_image_id }}
+          APP_IMAGE_BYTES: ${{ needs.build.outputs.app_image_bytes }}
+          AGATA_IMAGE_BYTES: ${{ needs.build.outputs.agata_image_bytes }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           [[ "$APP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$AGATA_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$APP_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ && "$AGATA_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$APP_IMAGE_BYTES" =~ ^[0-9]+$ && "$AGATA_IMAGE_BYTES" =~ ^[0-9]+$ ]]
           app_image="ghcr.io/akhripunov/gpoint-runtime@$APP_DIGEST"
           agata_image="ghcr.io/akhripunov/gpoint-agata-runtime@$AGATA_DIGEST"
           queue_sha="$(sha256sum packages/db/prisma/migrations/20261016120000_eros_worker_queue/migration.sql | awk '{print $1}')"
           mapping_sha="$(sha256sum packages/db/prisma/migrations/20261020153000_eros_external_relationship_mapping/migration.sql | awk '{print $1}')"
           state_sha="$(sha256sum packages/db/prisma/migrations/20261022110000_eros_gpoint_message_state/migration.sql | awk '{print $1}')"
           agata_sha="$(sha256sum services/agata/migrations/versions/0012_eros_memory_disclosure.py | awk '{print $1}')"
+          evidence_path=/opt/gpoint/release-logs/7a1afde1d94c324828565a36cb7dd90f422dee3d/kamal-backup-restore-41223019715-1.txt
+          evidence_sha=4a5dba7d43bd20ea1aea50cea6d0d04c6f47fb2fa667f0a28162db2490f4bef7
+          db_backup_sha=11c9f9b68f55fbcf0406105e8acfbd308dbd85ee8e95d1075cd4e011de55fb5e
+          media_backup_sha=74ae15886bf33791d442b148c679ec72e111bbcf79fe813fec54776dc8a5b4d4
           stage="/run/gpoint-migration-rehearsal-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           docker_config="$RUNNER_TEMP/gpoint-rehearsal-docker-config"
           archive="$RUNNER_TEMP/gpoint-migration-rehearsal.tar.gz"
-          cleanup_local() { rm -rf -- "$docker_config"; rm -f -- "$archive"; }
+          remote_stage_created=false
+          cleanup_local() {
+            result=$?
+            trap - EXIT
+            if [[ "$remote_stage_created" == true ]]; then
+              ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$stage" <<'REMOTE_LOCAL_CLEANUP' || result=1
+          set -euo pipefail
+          [[ "$1" =~ ^/run/gpoint-migration-rehearsal-[0-9]+-[0-9]+$ ]]
+          rm -rf -- "$1"
+          test ! -e "$1"
+          REMOTE_LOCAL_CLEANUP
+            fi
+            rm -rf -- "$docker_config"
+            rm -f -- "$archive"
+            test ! -e "$docker_config" || result=1
+            test ! -e "$archive" || result=1
+            exit "$result"
+          }
           trap cleanup_local EXIT
           install -d -m 700 "$docker_config"
           printf '%s' "$GHCR_TOKEN" | DOCKER_CONFIG="$docker_config" \
@@ -819,49 +902,159 @@ jobs:
           test ! -e "$1"
           install -d -o root -g root -m 0700 "$1" "$1/scripts" "$1/docker-config"
           REMOTE_STAGE
+          remote_stage_created=true
           tar -czf "$archive" -C scripts \
             gpoint-scheduled-backup.py gpoint-backup-policy.py gpoint-media-tree.py \
             agata-production-migration.py verify-gpoint-scheduled-backup-restore.sh
+          archive_bytes="$(stat -c '%s' "$archive")"
+          config_bytes="$(stat -c '%s' "$docker_config/config.json")"
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$stage" "$archive_bytes" "$config_bytes" <<'REMOTE_STAGE_CAPACITY'
+          set -euo pipefail
+          [[ "$1" =~ ^/run/gpoint-migration-rehearsal-[0-9]+-[0-9]+$ ]]
+          [[ "$2" =~ ^[0-9]+$ && "$3" =~ ^[0-9]+$ ]]
+          free="$(df -PB1 /run | awk 'NR==2 {print $4}')"
+          python3 - "$2" "$3" "$free" <<'PY'
+          import sys
+          archive_bytes, config_bytes, free = map(int, sys.argv[1:])
+          if free < archive_bytes + config_bytes + 1024 * 1024:
+              raise SystemExit('insufficient tmpfs space for rehearsal payload and temporary registry credentials')
+          PY
+          REMOTE_STAGE_CAPACITY
           scp -p "$archive" \
             "root@${GPOINT_PRODUCTION_HOST}:$stage/payload.tar.gz"
           scp -p "$docker_config/config.json" \
             "root@${GPOINT_PRODUCTION_HOST}:$stage/docker-config/config.json"
           ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- \
             "$stage" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
-            "$app_image" "$agata_image" "$queue_sha" "$mapping_sha" "$state_sha" "$agata_sha" <<'REMOTE_REHEARSAL'
+            "$app_image" "$agata_image" "$queue_sha" "$mapping_sha" "$state_sha" "$agata_sha" \
+            "$APP_IMAGE_ID" "$AGATA_IMAGE_ID" "$APP_IMAGE_BYTES" "$AGATA_IMAGE_BYTES" \
+            "$evidence_path" "$evidence_sha" "$db_backup_sha" "$media_backup_sha" <<'REMOTE_REHEARSAL'
           set -euo pipefail
           stage="$1"; candidate="$2"; run_id="$3"; attempt="$4"
           app_image="$5"; agata_image="$6"; queue_sha="$7"; mapping_sha="$8"; state_sha="$9"; agata_sha="${10}"
+          app_image_id="${11}"; agata_image_id="${12}"; app_image_bytes="${13}"; agata_image_bytes="${14}"
+          evidence_path="${15}"; evidence_sha="${16}"; expected_db_sha="${17}"; expected_media_sha="${18}"
           [[ "$stage" == "/run/gpoint-migration-rehearsal-${run_id}-${attempt}" ]]
+          [[ "$candidate" =~ ^[0-9a-f]{40}$ && "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
+          [[ "$app_image" =~ ^ghcr\.io/akhripunov/gpoint-runtime@sha256:[0-9a-f]{64}$ ]]
+          [[ "$agata_image" =~ ^ghcr\.io/akhripunov/gpoint-agata-runtime@sha256:[0-9a-f]{64}$ ]]
+          [[ "$app_image_id" =~ ^sha256:[0-9a-f]{64}$ && "$agata_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$app_image_bytes" =~ ^[0-9]+$ && "$agata_image_bytes" =~ ^[0-9]+$ ]]
+          [[ "$evidence_path" == /opt/gpoint/release-logs/7a1afde1d94c324828565a36cb7dd90f422dee3d/kamal-backup-restore-41223019715-1.txt ]]
+          [[ "$evidence_sha" =~ ^[0-9a-f]{64}$ && "$expected_db_sha" =~ ^[0-9a-f]{64}$ && "$expected_media_sha" =~ ^[0-9a-f]{64}$ ]]
+          for value in "$queue_sha" "$mapping_sha" "$state_sha" "$agata_sha"; do [[ "$value" =~ ^[0-9a-f]{64}$ ]]; done
+          for image in "$app_image" "$agata_image"; do
+            if docker image inspect "$image" >/dev/null 2>&1; then
+              echo 'exact rehearsal image already exists; refusing to remove pre-existing Docker state' >&2
+              exit 1
+            fi
+          done
+          docker_root="$(docker info --format '{{.DockerRootDir}}')"
+          [[ "$docker_root" == /* && -d "$docker_root" ]]
+          docker_free="$(df -PB1 "$docker_root" | awk 'NR==2 {print $4}')"
+          [[ "$docker_free" =~ ^[0-9]+$ ]]
+          tar -xzf "$stage/payload.tar.gz" -C "$stage/scripts" --no-same-owner
+          chmod 0700 "$stage/scripts/gpoint-scheduled-backup.py" \
+            "$stage/scripts/gpoint-backup-policy.py" "$stage/scripts/verify-gpoint-scheduled-backup-restore.sh"
+          policy_output="$(python3 "$stage/scripts/gpoint-backup-policy.py" release-evidence \
+            --evidence "$evidence_path" --sha256 "$evidence_sha")"
+          grep -qx 'GPOINT_RELEASE_BACKUP_EVIDENCE=PASS' <<< "$policy_output"
+          release_value() { sed -n "s/^GPOINT_RELEASE_BACKUP_$1=//p" <<< "$policy_output"; }
+          test "$(release_value DATABASE_SHA256)" = "$expected_db_sha"
+          test "$(release_value MEDIA_SHA256)" = "$expected_media_sha"
+          test "$(release_value PRISMA_HEAD)" = 20261015130000_codex_telegram_challenge
+          test "$(release_value AGATA_HEAD)" = agata0011
+          test "$(release_value RESTORED_TABLES)" = 74
+          restored_db_bytes="$(release_value RESTORED_DATABASE_BYTES)"
+          [[ "$restored_db_bytes" =~ ^[0-9]+$ && "$restored_db_bytes" -gt 0 ]]
+          python3 - "$docker_free" "$app_image_bytes" "$agata_image_bytes" "$restored_db_bytes" <<'PY'
+          import sys
+          free, app_bytes, agata_bytes, db_bytes = map(int, sys.argv[1:])
+          required = app_bytes + agata_bytes + db_bytes * 10 + 2 * 1024**3
+          if free < required:
+              raise SystemExit('insufficient Docker storage for exact images and isolated migration restore')
+          PY
+          echo GPOINT_MIGRATION_BACKUP_PROVENANCE=PASS
+          echo "GPOINT_MIGRATION_BACKUP_RECEIPT_SHA256=$evidence_sha"
+          echo "GPOINT_MIGRATION_BACKUP_DATABASE_SHA256=$expected_db_sha"
+          echo "GPOINT_MIGRATION_BACKUP_MEDIA_SHA256=$expected_media_sha"
+          echo GPOINT_MIGRATION_BACKUP_FRESHNESS=PASS
           cleanup() {
-            DOCKER_CONFIG="$stage/docker-config" docker image rm "$app_image" "$agata_image" >/dev/null 2>&1 || true
-            rm -rf -- "$stage"
+            result=$?
+            trap - EXIT
+            set +e
+            unset DOCKER_CONFIG
+            temp_ids="$(docker ps -aq --filter "label=gpoint.kamal.restore-run=${run_id}-${attempt}")"
+            if [[ -n "$temp_ids" ]]; then
+              while IFS= read -r id; do
+                [[ "$id" =~ ^[0-9a-f]{64}$ ]] || { result=1; continue; }
+                docker rm -f "$id" >/dev/null || result=1
+              done <<< "$temp_ids"
+            fi
+            if docker image inspect "$app_image" >/dev/null 2>&1; then docker image rm "$app_image" >/dev/null || result=1; fi
+            if docker image inspect "$agata_image" >/dev/null 2>&1; then docker image rm "$agata_image" >/dev/null || result=1; fi
+            if [[ -f "$stage/containers.before" ]]; then
+              docker ps -q | sort > "$stage/containers.after"
+              cmp -s "$stage/containers.before" "$stage/containers.after" || result=1
+            fi
+            if [[ -f "$stage/volumes.before" ]]; then
+              docker volume ls -q | sort > "$stage/volumes.after"
+              cmp -s "$stage/volumes.before" "$stage/volumes.after" || result=1
+            fi
+            if [[ -f "$stage/networks.before" ]]; then
+              docker network ls -q | sort > "$stage/networks.after"
+              cmp -s "$stage/networks.before" "$stage/networks.after" || result=1
+            fi
+            rm -rf -- "$stage" || result=1
+            test ! -e "$stage" || result=1
+            if docker image inspect "$app_image" >/dev/null 2>&1; then result=1; fi
+            if docker image inspect "$agata_image" >/dev/null 2>&1; then result=1; fi
+            if [[ "$result" -ne 0 ]]; then echo GPOINT_MIGRATION_TEMP_CLEANUP=FAIL >&2; exit 1; fi
+            echo GPOINT_MIGRATION_TEMP_CLEANUP=PASS
+            exit "$result"
           }
           trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          docker ps -q | sort > "$stage/containers.before"
+          docker volume ls -q | sort > "$stage/volumes.before"
+          docker network ls -q | sort > "$stage/networks.before"
           [[ "$candidate" =~ ^[0-9a-f]{40}$ && "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
           [[ "$app_image" =~ ^ghcr\.io/akhripunov/gpoint-runtime@sha256:[0-9a-f]{64}$ ]]
           [[ "$agata_image" =~ ^ghcr\.io/akhripunov/gpoint-agata-runtime@sha256:[0-9a-f]{64}$ ]]
           for value in "$queue_sha" "$mapping_sha" "$state_sha" "$agata_sha"; do [[ "$value" =~ ^[0-9a-f]{64}$ ]]; done
           chmod 0700 "$stage/docker-config"
           chmod 0600 "$stage/docker-config/config.json"
-          latest_manifest=/opt/gpoint/backups/scheduled/latest.json
-          test -f "$latest_manifest" && test ! -L "$latest_manifest"
-          latest_sha_before="$(sha256sum "$latest_manifest" | awk '{print $1}')"
-          [[ "$latest_sha_before" =~ ^[0-9a-f]{64}$ ]]
           DOCKER_CONFIG="$stage/docker-config" docker pull "$app_image" >/dev/null
+          test "$(docker image inspect "$app_image" --format '{{.Id}}')" = "$app_image_id"
+          test "$(docker image inspect "$app_image" --format '{{.Size}}')" = "$app_image_bytes"
+          test "$(docker image inspect "$app_image" --format '{{.Os}} {{.Architecture}}')" = 'linux amd64'
+          test "$(docker image inspect "$app_image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$candidate"
+          docker image inspect "$app_image" --format '{{json .RepoDigests}}' | grep -Fq "$app_image"
           DOCKER_CONFIG="$stage/docker-config" docker pull "$agata_image" >/dev/null
-          tar -xzf "$stage/payload.tar.gz" -C "$stage/scripts" --no-same-owner
+          test "$(docker image inspect "$agata_image" --format '{{.Id}}')" = "$agata_image_id"
+          test "$(docker image inspect "$agata_image" --format '{{.Size}}')" = "$agata_image_bytes"
+          test "$(docker image inspect "$agata_image" --format '{{.Os}} {{.Architecture}}')" = 'linux amd64'
+          test "$(docker image inspect "$agata_image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$candidate"
+          docker image inspect "$agata_image" --format '{{json .RepoDigests}}' | grep -Fq "$agata_image"
+          rm -rf -- "$stage/docker-config"
+          test ! -e "$stage/docker-config"
+          unset DOCKER_CONFIG
           chmod 0700 "$stage/scripts/gpoint-scheduled-backup.py" "$stage/scripts/verify-gpoint-scheduled-backup-restore.sh"
-          export DOCKER_CONFIG="$stage/docker-config"
           export GPOINT_MIGRATION_REHEARSAL=1 GPOINT_USE_EXISTING_BACKUP=1
           export GPOINT_MIGRATION_CANDIDATE_SHA="$candidate"
           export GPOINT_APP_IMAGE="$app_image" GPOINT_AGATA_IMAGE="$agata_image"
+          export GPOINT_MIGRATION_BACKUP_EVIDENCE="$evidence_path"
+          export GPOINT_MIGRATION_BACKUP_EVIDENCE_SHA256="$evidence_sha"
           export GPOINT_PRISMA_EROS_QUEUE_SHA256="$queue_sha"
           export GPOINT_PRISMA_EROS_MAPPING_SHA256="$mapping_sha"
           export GPOINT_PRISMA_MESSAGE_STATE_SHA256="$state_sha"
           export GPOINT_AGATA_0012_SHA256="$agata_sha"
           GPOINT_MIGRATION_REHEARSAL=1 python3 "$stage/scripts/gpoint-scheduled-backup.py"
-          test "$(sha256sum "$latest_manifest" | awk '{print $1}')" = "$latest_sha_before"
+          test "$(sha256sum "$evidence_path" | awk '{print $1}')" = "$evidence_sha"
+          test "$(sha256sum /opt/gpoint/backups/gpoint-pre-release-7a1afde1d94c324828565a36cb7dd90f422dee3d-41223019715-1.dump.age | awk '{print $1}')" = "$expected_db_sha"
+          test "$(sha256sum /opt/gpoint/backups/gpoint-pre-release-7a1afde1d94c324828565a36cb7dd90f422dee3d-41223019715-1.media.tar.age | awk '{print $1}')" = "$expected_media_sha"
+          test ! -e /opt/gpoint/backups/scheduled/latest.json
           echo GPOINT_MIGRATION_REHEARSAL=PASS
           REMOTE_REHEARSAL
           echo "GPOINT_MIGRATION_REHEARSAL=PASS SHA=$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"

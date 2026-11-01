@@ -68,15 +68,38 @@ def test_manual_migration_rehearsal_uses_existing_backup_without_deployment_or_k
     rehearsal = workflow["jobs"]["migration_rehearsal"]
     assert "workflow_dispatch" in rehearsal["if"]
     assert "inputs.migration_rehearsal" in rehearsal["if"]
+    assert "refs/heads/main" in rehearsal["if"]
     assert rehearsal["environment"] == {"name": "production", "deployment": False}
     body = "\n".join(step.get("run", "") for step in rehearsal["steps"])
     assert "GPOINT_MIGRATION_REHEARSAL=1" in body
-    assert "latest.json" in body
+    assert "/opt/gpoint/release-logs/7a1afde1d94c324828565a36cb7dd90f422dee3d/kamal-backup-restore-41223019715-1.txt" in body
+    assert "GPOINT_MIGRATION_BACKUP_EVIDENCE_SHA256" in body
+    assert "GPOINT_MIGRATION_BACKUP_EVIDENCE" in body
+    assert "GPOINT_MIGRATION_BACKUP_FRESHNESS=PASS" in body
+    assert "docker_free" in body and "insufficient Docker storage" in body
+    assert "docker image inspect \"$app_image\" --format '{{.Id}}'" in body
+    assert "docker image inspect \"$agata_image\" --format '{{.Id}}'" in body
+    rehearsal_step = next(step for step in rehearsal["steps"]
+                          if step.get("name") == "Rehearse migrations against existing encrypted VPS backup")
+    assert rehearsal_step["env"]["GHCR_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
+    assert "rm -rf -- \"$stage/docker-config\"" in body
+    assert "GPOINT_MIGRATION_TEMP_CLEANUP=PASS" in body
     assert "GPOINT_MIGRATION_REHEARSAL=PASS" in body
     assert "kamal deploy" not in body
     assert "repos/$GITHUB_REPOSITORY/deployments" not in body
+    assert rehearsal["permissions"] == {"contents": "read", "packages": "read"}
     deploy = workflow["jobs"]["deploy"]
+    assert "needs.release_intent.outputs.deploy == 'true'" in deploy["if"]
     assert "inputs.migration_rehearsal != true" in deploy["if"]
+
+
+def test_migration_rehearsal_distinguishes_synthetic_rls_from_production_grants():
+    helper = (ROOT / "scripts/verify-gpoint-scheduled-backup-restore.sh").read_text()
+    runner = (ROOT / "scripts/gpoint-scheduled-backup.py").read_text()
+    assert "MIGRATION_SYNTHETIC_RLS=PASS" in helper
+    assert "MIGRATION_PRODUCTION_GRANTS_RLS=NOT_CHECKED" in helper
+    assert "MIGRATION_SYNTHETIC_RLS" in runner
+    assert "MIGRATION_PRODUCTION_GRANTS_RLS" in runner
 
 
 def test_scheduled_vps_backup_is_local_encrypted_fresh_and_restored_without_remote_config():

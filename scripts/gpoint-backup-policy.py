@@ -261,6 +261,7 @@ def main() -> int:
                 ("PRISMA_HEAD", manifest["database"]["prisma_head"]),
                 ("AGATA_HEAD", manifest["database"]["agata_head"]),
                 ("RESTORED_TABLES", manifest["database"]["restored_tables"]),
+                ("RESTORED_DATABASE_BYTES", manifest["database"]["restored_database_bytes"]),
                 ("MEDIA_PATH", manifest["media"]["path"]),
                 ("MEDIA_SHA256", manifest["media"]["sha256"]),
                 ("MEDIA_BYTES", manifest["media"]["bytes"]),

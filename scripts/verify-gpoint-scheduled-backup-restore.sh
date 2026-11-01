@@ -655,7 +655,7 @@ SQL
   migration_access=PASS
   echo GPOINT_MIGRATION_PARITY=PASS
   echo GPOINT_MIGRATION_DATA_PRESERVATION=PASS
-  echo GPOINT_MIGRATION_GRANTS_RLS=PASS
+  echo GPOINT_MIGRATION_SYNTHETIC_RLS=PASS
 fi
 
 if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" != "1" ]]; then
@@ -706,7 +706,8 @@ MEDIA_BACKUP_ENCRYPTION=AGE_X25519
 MEDIA_ISOLATED_RESTORE=PASS
 MIGRATION_PARITY=$migration_parity
 MIGRATION_DATA_PRESERVATION=$migration_data
-MIGRATION_GRANTS_RLS=$migration_access
+MIGRATION_SYNTHETIC_RLS=$migration_access
+MIGRATION_PRODUCTION_GRANTS_RLS=NOT_CHECKED
 MIGRATION_CANDIDATE_SHA=${migration_candidate:-NOT_RUN}
 MIGRATION_PRISMA_HEAD=$([[ "$migration_parity" == PASS ]] && echo 20261022110000_eros_gpoint_message_state || echo NOT_RUN)
 MIGRATION_AGATA_HEAD=$([[ "$migration_parity" == PASS ]] && echo agata0012 || echo NOT_RUN)
@@ -728,5 +729,7 @@ printf 'backup_path=%s\nbackup_sha256=%s\nbackup_bytes=%s\nrestore_evidence_path
   "$media_directory_count" "$media_total_bytes" "$media_manifest_sha" "$media_restore_manifest_sha"
 echo GPOINT_ISOLATED_RESTORE=PASS
 if [[ "$migration_parity" == PASS && "$migration_data" == PASS && "$migration_access" == PASS ]]; then
+  echo GPOINT_MIGRATION_SYNTHETIC_RLS=PASS
+  echo GPOINT_MIGRATION_PRODUCTION_GRANTS_RLS=NOT_CHECKED
   echo GPOINT_MIGRATION_REHEARSAL=PASS
 fi
