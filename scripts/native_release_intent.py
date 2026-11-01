@@ -13,21 +13,8 @@ from pathlib import Path
 PREP_MARKER = "GPOINT_MIGRATION_REHEARSAL_PREP=1"
 PREP_ONLY_PATHS = frozenset({
     ".github/workflows/gpoint-native-release.yml",
-    "docs/operations/gpoint-vps-backups.md",
-    "scripts/gpoint-backup-policy.py",
-    "scripts/gpoint-scheduled-backup.py",
     "scripts/native_release_intent.py",
-    "scripts/verify-gpoint-scheduled-backup-restore.sh",
-    "scripts/verify-kamal-migration-parity.py",
-    "scripts/write-kamal-production-manifest.py",
-    "systemd/gpoint-backup.service",
-    "systemd/gpoint-backup.timer",
-    "tests/test_deploy_evidence_workflow.py",
-    "tests/test_gpoint_scheduled_backup.py",
     "tests/test_kamal_native_automatic_release.py",
-    "tests/test_kamal_ordinary_manifest.py",
-    "tests/test_kamal_release_config.py",
-    "tests/test_native_build_boundary.py",
     "tests/test_native_release_intent.py",
 })
 
@@ -38,14 +25,7 @@ def classify_push(*, event_name: str, ref: str, commit_message: str,
         return "NO_DEPLOY"
     if PREP_MARKER not in commit_message.splitlines():
         return "DEPLOY"
-    required = {
-        ".github/workflows/gpoint-native-release.yml",
-        "scripts/native_release_intent.py",
-        "tests/test_native_release_intent.py",
-    }
-    if not changed_paths or not required.issubset(changed_paths):
-        return "BLOCK"
-    if not changed_paths.issubset(PREP_ONLY_PATHS):
+    if changed_paths != PREP_ONLY_PATHS:
         return "BLOCK"
     return "PREPARE_ONLY"
 

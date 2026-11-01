@@ -19,21 +19,6 @@ def test_exact_prep_only_push_is_classified_without_deploy():
     ) == "PREPARE_ONLY"
 
 
-def test_exact_fail_closed_workflow_correction_push_remains_prepare_only():
-    correction_paths = {
-        ".github/workflows/gpoint-native-release.yml",
-        "scripts/native_release_intent.py",
-        "tests/test_native_release_intent.py",
-        "tests/test_native_build_boundary.py",
-    }
-    assert MODULE.classify_push(
-        event_name="push",
-        ref="refs/heads/main",
-        commit_message="Update actionlint schema support\n\nGPOINT_MIGRATION_REHEARSAL_PREP=1",
-        changed_paths=correction_paths,
-    ) == "PREPARE_ONLY"
-
-
 def test_prep_marker_with_unapproved_or_application_path_blocks_deploy():
     assert MODULE.classify_push(
         event_name="push",
@@ -53,6 +38,33 @@ def test_prep_only_push_requires_the_exact_marker_and_rehearsal_workflow():
         commit_message="GPOINT_MIGRATION_REHEARSAL_PREP=1",
         changed_paths=MODULE.PREP_ONLY_PATHS - {".github/workflows/gpoint-native-release.yml"},
     ) == "BLOCK"
+
+
+def test_diagnostic_prep_push_requires_the_exact_four_file_scope():
+    exact_scope = {
+        ".github/workflows/gpoint-native-release.yml",
+        "scripts/native_release_intent.py",
+        "tests/test_kamal_native_automatic_release.py",
+        "tests/test_native_release_intent.py",
+    }
+    assert exact_scope == MODULE.PREP_ONLY_PATHS
+    for invalid_scope in (
+        exact_scope - {"tests/test_kamal_native_automatic_release.py"},
+        exact_scope | {"docs/operations/gpoint-vps-backups.md"},
+        {".github/workflows/gpoint-native-release.yml", "tests/test_native_release_intent.py"},
+    ):
+        assert MODULE.classify_push(
+            event_name="push", ref="refs/heads/main",
+            commit_message="ME-52 diagnostics\nGPOINT_MIGRATION_REHEARSAL_PREP=1",
+            changed_paths=invalid_scope,
+        ) == "BLOCK"
+
+
+def test_exact_prep_scope_without_marker_is_still_an_ordinary_release():
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main", commit_message="ME-52 diagnostics",
+        changed_paths=MODULE.PREP_ONLY_PATHS,
+    ) == "DEPLOY"
 
 
 def test_rehearsal_dispatch_is_main_exact_sha_owner_and_never_deploys():
