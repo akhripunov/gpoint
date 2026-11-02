@@ -96,6 +96,22 @@ def test_native_ops_run_captures_stdout_for_readbacks(monkeypatch):
     assert calls[0][1]["stdout"] == MODULE.subprocess.PIPE
 
 
+def test_native_ops_run_classifies_permission_failures_without_exposing_output(monkeypatch):
+    def run(command, **kwargs):
+        return type("Result", (), {
+            "returncode": 1,
+            "stdout": b"",
+            "stderr": b"ERROR: permission denied for schema engine; postgresql://secret:password@example/eros",
+        })()
+
+    monkeypatch.setattr(MODULE.subprocess, "run", run)
+    with pytest.raises(MODULE.PilotGateError) as caught:
+        MODULE._run(["docker", "run", "stock-eros", "migrate"])
+    assert caught.value.diagnostic_code == "postgres_schema_permission"
+    assert "secret" not in str(caught.value)
+    assert "password" not in str(caught.value)
+
+
 def test_migrator_env_contains_only_sqlx_dsn_and_is_private(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
         monkeypatch.setenv("EROS_NATIVE_OPS_TEST", "1")

@@ -35,7 +35,34 @@ RESTORE_DB = re.compile(r"^eros_restore_probe_[0-9a-f]{16}$")
 
 
 class PilotGateError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, diagnostic_code: str | None = None):
+        super().__init__(message)
+        self.diagnostic_code = diagnostic_code
+
+
+def _safe_diagnostic_code(stderr: bytes | str | None) -> str | None:
+    if isinstance(stderr, bytes):
+        text = stderr.decode("utf-8", errors="replace").lower()
+    elif isinstance(stderr, str):
+        text = stderr.lower()
+    else:
+        return None
+    patterns = (
+        ("permission denied for schema", "postgres_schema_permission"),
+        ("permission denied for table", "postgres_object_permission"),
+        ("permission denied for relation", "postgres_object_permission"),
+        ("must be owner of", "postgres_object_owner"),
+        ("could not translate host name", "postgres_dns_failure"),
+        ("could not connect to server", "postgres_connection_failure"),
+        ("connection refused", "postgres_connection_failure"),
+        ("database \"eros\" does not exist", "postgres_database_missing"),
+        ("extension \"vector\" is not available", "postgres_vector_extension"),
+        ("already exists", "sqlx_migration_object_conflict"),
+    )
+    for marker, code in patterns:
+        if marker in text:
+            return code
+    return None
 
 
 def _valid_stock_image(image: str, candidate_sha: str) -> bool:
@@ -120,7 +147,8 @@ def _run(command: list[str], *, input_text: str | None = None, input_bytes: byte
     except (OSError, subprocess.TimeoutExpired):
         raise PilotGateError("Native Eros pilot operation failed to start or timed out") from None
     if result.returncode:
-        raise PilotGateError("Native Eros pilot operation failed; command output was withheld")
+        raise PilotGateError("Native Eros pilot operation failed; command output was withheld",
+                             diagnostic_code=_safe_diagnostic_code(result.stderr))
     return result
 
 

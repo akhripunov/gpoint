@@ -14,3 +14,16 @@ def test_failure_summary_reports_only_safe_stage_and_exception_type():
     line = MODULE.failure_summary("stock SQLx migration", RuntimeError("postgres password must stay hidden"))
     assert line == "EROS_NATIVE_POSTGRES_E2E=FAIL:stage=stock SQLx migration:type=RuntimeError"
     assert "postgres password" not in line
+
+
+def test_failure_summary_includes_only_allowlisted_diagnostic_code():
+    error = RuntimeError("postgres password must stay hidden")
+    error.diagnostic_code = "postgres_schema_permission"
+    line = MODULE.failure_summary("stock SQLx migration", error)
+    assert line == (
+        "EROS_NATIVE_POSTGRES_E2E=FAIL:stage=stock SQLx migration:"
+        "type=RuntimeError:diagnostic=postgres_schema_permission"
+    )
+    assert "postgres password" not in line
+    error.diagnostic_code = "postgresql://secret"
+    assert "diagnostic=" not in MODULE.failure_summary("stock SQLx migration", error)

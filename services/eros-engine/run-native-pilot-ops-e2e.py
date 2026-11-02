@@ -17,11 +17,20 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
 POSTGRES_IMAGE = "pgvector/pgvector:0.8.6-pg16"
+SAFE_DIAGNOSTICS = frozenset({
+    "postgres_schema_permission", "postgres_object_permission", "postgres_object_owner",
+    "postgres_dns_failure", "postgres_connection_failure", "postgres_database_missing",
+    "postgres_vector_extension", "sqlx_migration_object_conflict",
+})
 stage = "startup"
 
 
 def failure_summary(current_stage: str, error: Exception) -> str:
-    return f"EROS_NATIVE_POSTGRES_E2E=FAIL:stage={current_stage}:type={type(error).__name__}"
+    line = f"EROS_NATIVE_POSTGRES_E2E=FAIL:stage={current_stage}:type={type(error).__name__}"
+    diagnostic = getattr(error, "diagnostic_code", None)
+    if diagnostic in SAFE_DIAGNOSTICS:
+        line += f":diagnostic={diagnostic}"
+    return line
 
 
 def module(name: str, filename: str):
