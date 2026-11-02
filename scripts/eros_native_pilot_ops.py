@@ -142,7 +142,9 @@ def verify_stock_image(image: str, candidate_sha: str) -> dict:
             or labels.get("com.gpoint.eros.patch-set.sha256") != "none"
             or (not test_image and image not in digests)):
         raise PilotGateError("stock Eros image identity or immutable digest read-back failed")
-    return {"imageId": row.get("Id"), "digest": image.split("@", 1)[1], "platform": "linux/amd64"}
+    return {"imageId": row.get("Id"),
+            "digest": row.get("Id") if test_image else image.split("@", 1)[1],
+            "platform": "linux/amd64"}
 
 
 def run_stock_migration(image: str, candidate_sha: str, values: dict[str, str]) -> None:

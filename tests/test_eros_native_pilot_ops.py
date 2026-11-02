@@ -63,6 +63,26 @@ def test_local_image_alias_is_confined_to_exact_disposable_docker_e2e(monkeypatc
     assert not MODULE._valid_stock_image("gpoint-eros-pilot:latest", "a" * 40)
 
 
+def test_local_stock_image_readback_returns_docker_image_id(monkeypatch):
+    sha = "a" * 40
+    image = f"gpoint-eros-pilot:{sha}"
+    image_id = "sha256:" + "c" * 64
+    monkeypatch.setenv("EROS_NATIVE_OPS_TEST", "1")
+    monkeypatch.setenv("EROS_NATIVE_OPS_TEST_POSTGRES_CONTAINER", "eros-provision-test-0123456789ab")
+    row = {"Id": image_id, "Os": "linux", "Architecture": "amd64",
+           "Config": {"Labels": {
+               "org.opencontainers.image.revision": MODULE.UPSTREAM_SHA,
+               "com.gpoint.eros.upstream-revision": MODULE.UPSTREAM_SHA,
+               "com.gpoint.integration.revision": sha,
+               "com.gpoint.eros.patch-set.sha256": "none",
+           }}, "RepoDigests": []}
+    monkeypatch.setattr(MODULE, "_run", lambda *a, **k: type("Result", (), {
+        "stdout": json.dumps([row]).encode("utf-8")})())
+    assert MODULE.verify_stock_image(image, sha) == {
+        "imageId": image_id, "digest": image_id, "platform": "linux/amd64",
+    }
+
+
 def test_migrator_env_contains_only_sqlx_dsn_and_is_private(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
         monkeypatch.setenv("EROS_NATIVE_OPS_TEST", "1")
