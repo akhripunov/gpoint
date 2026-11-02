@@ -12,6 +12,20 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ErosProductionSecretTests(unittest.TestCase):
+    def test_local_stock_image_alias_is_available_only_in_the_exact_disposable_postgres_test(self):
+        sha = 'a' * 40
+        image = f'gpoint-eros-pilot:{sha}'
+        with patch.dict(MODULE.os.environ, {}, clear=False):
+            MODULE.os.environ.pop('EROS_PROVISION_TEST', None)
+            MODULE.os.environ.pop('EROS_PROVISION_TEST_POSTGRES_CONTAINER', None)
+            with self.assertRaisesRegex(ValueError, 'immutable'):
+                MODULE._validate_release_identity(sha, image)
+            MODULE.os.environ['EROS_PROVISION_TEST'] = '1'
+            with self.assertRaisesRegex(ValueError, 'immutable'):
+                MODULE._validate_release_identity(sha, image)
+            MODULE.os.environ['EROS_PROVISION_TEST_POSTGRES_CONTAINER'] = 'eros-provision-test-0123456789ab'
+            MODULE._validate_release_identity(sha, image)
+
     def test_generates_persistent_credentials_without_emitting_values(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'eros.env'

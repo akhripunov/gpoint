@@ -126,7 +126,11 @@ def _new_values(source_sha, image, tenant_id, pilot_test_user_id='', pilot_test_
 def _validate_release_identity(source_sha, image):
     if not re.fullmatch(r'[a-f0-9]{40}', source_sha or ''):
         raise ValueError('exact Eros source SHA is required')
-    if not re.fullmatch(r'ghcr\.io/[a-z0-9._/-]+@sha256:[a-f0-9]{64}', image or ''):
+    test_image = (os.environ.get('EROS_PROVISION_TEST') == '1'
+                  and re.fullmatch(r'eros-provision-test-[a-f0-9]{12}',
+                                   os.environ.get('EROS_PROVISION_TEST_POSTGRES_CONTAINER', ''))
+                  and image == f'gpoint-eros-pilot:{source_sha}')
+    if not test_image and not re.fullmatch(r'ghcr\.io/[a-z0-9._/-]+@sha256:[a-f0-9]{64}', image or ''):
         raise ValueError('immutable Eros GHCR image digest is required')
 
 

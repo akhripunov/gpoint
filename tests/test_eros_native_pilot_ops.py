@@ -52,6 +52,17 @@ def test_runtime_gate_requires_exact_single_uuid_pair_and_all_synthetic_flags():
         MODULE.validate_pilot_runtime(values, CREATOR_ID, USER_ID, "a" * 40)
 
 
+def test_local_image_alias_is_confined_to_exact_disposable_docker_e2e(monkeypatch):
+    image = "gpoint-eros-pilot:" + "a" * 40
+    assert not MODULE._valid_stock_image(image, "a" * 40)
+    monkeypatch.setenv("EROS_NATIVE_OPS_TEST", "1")
+    assert not MODULE._valid_stock_image(image, "a" * 40)
+    monkeypatch.setenv("EROS_NATIVE_OPS_TEST_POSTGRES_CONTAINER", "eros-provision-test-0123456789ab")
+    assert MODULE._valid_stock_image(image, "a" * 40)
+    assert not MODULE._valid_stock_image(image, "b" * 40)
+    assert not MODULE._valid_stock_image("gpoint-eros-pilot:latest", "a" * 40)
+
+
 def test_migrator_env_contains_only_sqlx_dsn_and_is_private(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
         monkeypatch.setenv("EROS_NATIVE_OPS_TEST", "1")

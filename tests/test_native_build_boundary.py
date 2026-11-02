@@ -205,6 +205,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(self.workflow["jobs"]["eros-pilot-apply"]["runs-on"], ["self-hosted", "macOS", "gpoint-production"])
         self.assertEqual(self.workflow["jobs"]["eros-pilot-cleanup"]["runs-on"], ["self-hosted", "macOS", "gpoint-production"])
         self.assertNotIn("release:gpoint", text)
+        actionlint_config = (ROOT / ".github/actionlint.yaml").read_text()
+        self.assertIn("- gpoint-production", actionlint_config)
 
     def test_native_kamal_uses_attempt_scoped_image_version_and_hook_context(self):
         workflow = self.workflow

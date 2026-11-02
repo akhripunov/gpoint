@@ -101,6 +101,10 @@ def main() -> int:
                 raise RuntimeError("Eros secret provisioning did not report readiness")
             secrets_module.provision_database(env_file)
             values = ops._load_env(env_file)
+            os.environ["EROS_NATIVE_OPS_TEST"] = "1"
+            os.environ["EROS_NATIVE_OPS_TEST_POSTGRES_CONTAINER"] = container
+            os.environ["EROS_NATIVE_OPS_TEST_RUN_DIR"] = str(run_dir)
+            os.environ["EROS_NATIVE_OPS_TEST_SOURCE_ROOT"] = str(ROOT)
             ops.validate_pilot_runtime(values, args.test_user_id, args.test_creator_id, args.candidate_sha)
             ops.verify_stock_image(args.image, args.candidate_sha)
             privilege_row = run("docker", "exec", container, "psql", "-XqAt", "-v", "ON_ERROR_STOP=1",
@@ -117,10 +121,6 @@ def main() -> int:
             network_facts = json.loads(run("docker", "network", "inspect", embedding_network).stdout)[0]
             if network_facts.get("Internal") is not True or network_facts.get("Containers"):
                 raise RuntimeError("embedding network is not isolated from the PostgreSQL test service")
-            os.environ["EROS_NATIVE_OPS_TEST"] = "1"
-            os.environ["EROS_NATIVE_OPS_TEST_POSTGRES_CONTAINER"] = container
-            os.environ["EROS_NATIVE_OPS_TEST_RUN_DIR"] = str(run_dir)
-            os.environ["EROS_NATIVE_OPS_TEST_SOURCE_ROOT"] = str(ROOT)
             backup = backup_root / f"eros-before-{args.candidate_sha}.dump"
             facts = ops.create_verified_backup(backup, args.candidate_sha,
                                                values["EROS_DATABASE_IDENTITY"], backup_root=backup_root)

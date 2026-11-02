@@ -38,6 +38,16 @@ class PilotGateError(RuntimeError):
     pass
 
 
+def _valid_stock_image(image: str, candidate_sha: str) -> bool:
+    if IMAGE.fullmatch(image or ""):
+        return True
+    return (os.environ.get("EROS_NATIVE_OPS_TEST") == "1"
+            and re.fullmatch(r"eros-provision-test-[a-f0-9]{12}",
+                             os.environ.get("EROS_NATIVE_OPS_TEST_POSTGRES_CONTAINER", ""))
+            and SHA40.fullmatch(candidate_sha or "")
+            and image == f"gpoint-eros-pilot:{candidate_sha}")
+
+
 def validate_pilot_runtime(values: dict[str, str], user_id: str, creator_id: str,
                            candidate_sha: str) -> bool:
     if not UUID.fullmatch(user_id or "") or not UUID.fullmatch(creator_id or ""):
@@ -51,7 +61,7 @@ def validate_pilot_runtime(values: dict[str, str], user_id: str, creator_id: str
     if values.get("EROS_TEST_USER_IDS") != user_id or values.get("EROS_TEST_CREATOR_IDS") != creator_id:
         raise PilotGateError("legacy synthetic allowlist aliases differ from the authorized pair")
     image = values.get("EROS_IMAGE", "")
-    if not IMAGE.fullmatch(image):
+    if not _valid_stock_image(image, candidate_sha):
         raise PilotGateError("stock Eros image must be pinned by immutable GHCR digest")
     for key in ("DATABASE_URL", "EROS_RUNTIME_DATABASE_URL", "EROS_MIGRATOR_DATABASE_URL"):
         if not values.get(key, "").startswith("postgresql://") or "@gpoint-eros-db:5432/eros" not in values[key]:
@@ -86,7 +96,7 @@ def write_migrator_env(path: Path, values: dict[str, str]) -> None:
 
 def stock_migrate_command(image: str, candidate_sha: str, env_file: str,
                           *, postgres_network: str = EROS_NETWORK) -> list[str]:
-    if not SHA40.fullmatch(candidate_sha or "") or not IMAGE.fullmatch(image or ""):
+    if not SHA40.fullmatch(candidate_sha or "") or not _valid_stock_image(image, candidate_sha):
         raise PilotGateError("exact candidate SHA and immutable stock Eros digest are required")
     if postgres_network != EROS_NETWORK:
         raise PilotGateError("stock SQLx migration is restricted to the private Eros data network")
@@ -114,7 +124,7 @@ def _run(command: list[str], *, input_text: str | None = None, input_bytes: byte
 
 
 def verify_stock_image(image: str, candidate_sha: str) -> dict:
-    if not IMAGE.fullmatch(image or "") or not SHA40.fullmatch(candidate_sha or ""):
+    if not _valid_stock_image(image, candidate_sha) or not SHA40.fullmatch(candidate_sha or ""):
         raise PilotGateError("exact Eros image digest and GPoint candidate SHA are required")
     result = _run(["docker", "image", "inspect", image], timeout=30)
     try:
@@ -124,12 +134,13 @@ def verify_stock_image(image: str, candidate_sha: str) -> dict:
         digests = row.get("RepoDigests") or []
     except (TypeError, KeyError, IndexError, json.JSONDecodeError):
         raise PilotGateError("stock Eros image inspection is incomplete") from None
+    test_image = _valid_stock_image(image, candidate_sha) and not IMAGE.fullmatch(image or "")
     if (row.get("Os") != "linux" or row.get("Architecture") != "amd64"
             or labels.get("org.opencontainers.image.revision") != UPSTREAM_SHA
             or labels.get("com.gpoint.eros.upstream-revision") != UPSTREAM_SHA
             or labels.get("com.gpoint.integration.revision") != candidate_sha
             or labels.get("com.gpoint.eros.patch-set.sha256") != "none"
-            or image not in digests):
+            or (not test_image and image not in digests)):
         raise PilotGateError("stock Eros image identity or immutable digest read-back failed")
     return {"imageId": row.get("Id"), "digest": image.split("@", 1)[1], "platform": "linux/amd64"}
 
@@ -155,7 +166,7 @@ def run_stock_migration(image: str, candidate_sha: str, values: dict[str, str]) 
 
 
 def stock_persona_seed_command(image: str, candidate_sha: str, env_file: str) -> list[str]:
-    if not SHA40.fullmatch(candidate_sha or "") or not IMAGE.fullmatch(image or ""):
+    if not SHA40.fullmatch(candidate_sha or "") or not _valid_stock_image(image, candidate_sha):
         raise PilotGateError("exact stock Eros image and source SHA are required for persona seed")
     test_root = os.environ.get("EROS_NATIVE_OPS_TEST_SOURCE_ROOT", "")
     source_root = Path(test_root) if os.environ.get("EROS_NATIVE_OPS_TEST") == "1" and test_root else Path("/opt/gpoint/releases") / candidate_sha / "source"

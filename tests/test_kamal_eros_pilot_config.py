@@ -65,6 +65,14 @@ def test_native_workflow_runs_pilot_in_disposable_environment_and_never_uses_ord
     steps = jobs["eros-pilot-integration"]["steps"]
     assert any("run-local-e2e.sh" in step.get("run", "") for step in steps)
     assert "needs.workspace.outputs.deploy == 'true'" in jobs["deploy"]["if"]
+    assert jobs["eros-pilot-integration"]["permissions"]["packages"] == "read"
+    assert jobs["eros-pilot-apply"]["permissions"]["packages"] == "write"
+    apply_publish = next(step for step in jobs["eros-pilot-apply"]["steps"]
+                         if "Build and publish the pinned stock Eros" in step.get("name", ""))
+    assert jobs["eros-pilot-apply"]["steps"].index(apply_publish) > next(
+        i for i, step in enumerate(jobs["eros-pilot-apply"]["steps"])
+        if step.get("name", "").startswith("Recheck exact owner-approved pilot intent"))
+    assert all("docker push" not in step.get("run", "") for step in jobs["eros-pilot-integration"]["steps"])
     assert "mode == 'SYNTHETIC_PILOT_READY'" not in jobs["deploy"]["if"]
 
 

@@ -260,9 +260,7 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
-      packages: write
-    outputs:
-      eros_digest: ${{ steps.stock_image.outputs.digest }}
+      packages: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -289,32 +287,15 @@ jobs:
               raise SystemExit('stock Eros image identity mismatch')
           print('EROS_STOCK_IMAGE_BUILD=PASS')
           PY
-      - name: Publish and read back the immutable stock Eros image for exact-SHA CI
-        id: stock_image
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CANDIDATE_SHA: ${{ github.sha }}
-          EROS_TAG: ghcr.io/akhripunov/gpoint-eros-pilot:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          set -euo pipefail
-          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          docker tag "gpoint-eros-pilot:$CANDIDATE_SHA" "$EROS_TAG"
-          docker push "$EROS_TAG"
-          docker pull --platform linux/amd64 "$EROS_TAG"
-          digest="$(docker image inspect "$EROS_TAG" --format '{{json .RepoDigests}}' | python3 -c 'import json,sys; rows=json.load(sys.stdin); matches=[x.split("@",1)[1] for x in rows if x.startswith("ghcr.io/akhripunov/gpoint-eros-pilot@")]; assert len(matches)==1; print(matches[0])')"
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          docker pull --platform linux/amd64 "ghcr.io/akhripunov/gpoint-eros-pilot@$digest"
-          test "$(docker image inspect "ghcr.io/akhripunov/gpoint-eros-pilot@$digest" --format '{{index .Config.Labels "com.gpoint.integration.revision"}}')" = "$CANDIDATE_SHA"
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Run isolated PostgreSQL, SQLx migrations, API, Worker, memory and 15-turn chat E2E
         run: bash services/eros-engine/run-local-e2e.sh "gpoint-eros-pilot:${{ github.sha }}"
       - name: Run Native PostgreSQL provisioning, SQLx, backup, restore and cleanup E2E
         env:
-          EROS_PILOT_IMAGE: ghcr.io/akhripunov/gpoint-eros-pilot@${{ steps.stock_image.outputs.digest }}
+          EROS_PILOT_IMAGE: gpoint-eros-pilot:${{ github.sha }}
           EROS_PILOT_TEST_USER_ID: ${{ inputs.eros_pilot_test_user_id }}
           EROS_PILOT_TEST_CREATOR_ID: ${{ inputs.eros_pilot_test_creator_id }}
         run: >-
-          python3 services/eros-engine/run-native-pilot-ops-e2e.py
+          EROS_PROVISION_TEST=1 python3 services/eros-engine/run-native-pilot-ops-e2e.py
           --image "$EROS_PILOT_IMAGE" --candidate-sha "$GITHUB_SHA"
           --test-user-id "$EROS_PILOT_TEST_USER_ID"
           --test-creator-id "$EROS_PILOT_TEST_CREATOR_ID"
@@ -481,14 +462,13 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
-      packages: read
+      packages: write
     env:
       CANDIDATE_SHA: ${{ inputs.candidate_sha }}
       IMAGE_VERSION: ${{ inputs.candidate_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
       GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}
       GPOINT_KAMAL_EXPECTED_DIGEST: ${{ needs.build.outputs.app_digest }}
       KAMAL_REGISTRY_PASSWORD: ${{ github.token }}
-      EROS_PILOT_IMAGE: ghcr.io/akhripunov/gpoint-eros-pilot@${{ needs.eros-pilot-integration.outputs.eros_digest }}
       EROS_PILOT_TEST_USER_ID: ${{ inputs.eros_pilot_test_user_id }}
       EROS_PILOT_TEST_CREATOR_ID: ${{ inputs.eros_pilot_test_creator_id }}
     steps:
@@ -518,6 +498,32 @@ jobs:
           grep -Fx 'mode=SYNTHETIC_PILOT_APPLY' "$RUNNER_TEMP/eros-pilot-intent.txt"
           grep -Fx 'pilot_apply=true' "$RUNNER_TEMP/eros-pilot-intent.txt"
           grep -Fx 'deploy=false' "$RUNNER_TEMP/eros-pilot-intent.txt"
+      - name: Build and publish the pinned stock Eros image after protected pilot approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          EROS_TAG: ghcr.io/akhripunov/gpoint-eros-pilot:${{ inputs.candidate_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import importlib.util, os
+          spec=importlib.util.spec_from_file_location('prepare_release','scripts/prepare-release.py')
+          module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+          image=module.build_stock_eros_image(os.environ['CANDIDATE_SHA'],{})
+          if image.get('upstreamSha') != module.EROS_UPSTREAM_SHA or image.get('patchSetSha256') != 'none':
+              raise SystemExit('stock Eros image identity mismatch')
+          print('EROS_STOCK_IMAGE_BUILD=PASS')
+          PY
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker tag "gpoint-eros-pilot:$CANDIDATE_SHA" "$EROS_TAG"
+          docker push "$EROS_TAG"
+          docker pull --platform linux/amd64 "$EROS_TAG"
+          digest="$(docker image inspect "$EROS_TAG" --format '{{json .RepoDigests}}' | python3 -c 'import json,sys; rows=json.load(sys.stdin); matches=[x.split("@",1)[1] for x in rows if x.startswith("ghcr.io/akhripunov/gpoint-eros-pilot@")]; assert len(matches)==1; print(matches[0])')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker pull --platform linux/amd64 "ghcr.io/akhripunov/gpoint-eros-pilot@$digest"
+          test "$(docker image inspect "ghcr.io/akhripunov/gpoint-eros-pilot@$digest" --format '{{index .Config.Labels "com.gpoint.integration.revision"}}')" = "$CANDIDATE_SHA"
+          echo "EROS_PILOT_IMAGE=ghcr.io/akhripunov/gpoint-eros-pilot@$digest" >> "$GITHUB_ENV"
+          echo "EROS_PILOT_IMAGE_DIGEST=$digest"
       - name: Install verified VPS SSH credentials
         env:
           SSH_PRIVATE_KEY: ${{ secrets.GPOINT_KAMAL_SSH_PRIVATE_KEY }}
