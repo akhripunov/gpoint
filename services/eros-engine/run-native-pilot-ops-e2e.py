@@ -17,6 +17,11 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
 POSTGRES_IMAGE = "pgvector/pgvector:0.8.6-pg16"
+stage = "startup"
+
+
+def failure_summary(current_stage: str, error: Exception) -> str:
+    return f"EROS_NATIVE_POSTGRES_E2E=FAIL:stage={current_stage}:type={type(error).__name__}"
 
 
 def module(name: str, filename: str):
@@ -36,6 +41,7 @@ def run(*args: str, check: bool = True, timeout: int = 120) -> subprocess.Comple
 
 
 def main() -> int:
+    global stage
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", required=True)
     parser.add_argument("--candidate-sha", required=True)
@@ -203,5 +209,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as error:
-        print(f"EROS_NATIVE_POSTGRES_E2E=FAIL:stage={stage}:type={type(error).__name__}", file=sys.stderr)
+        print(failure_summary(stage, error), file=sys.stderr)
         raise SystemExit(1)
