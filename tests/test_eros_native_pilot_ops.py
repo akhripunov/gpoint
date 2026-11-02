@@ -112,6 +112,21 @@ def test_native_ops_run_classifies_permission_failures_without_exposing_output(m
     assert "password" not in str(caught.value)
 
 
+@pytest.mark.parametrize(("stdout", "stderr", "expected"), [
+    (b"sqlx error: SQLSTATE 42501", b"", "postgres_sqlstate_42501"),
+    (b"vendor password mismatch", b"", "stock_eros_migration_failure"),
+])
+def test_native_ops_run_classifies_stdout_only_migration_errors(monkeypatch, stdout, stderr, expected):
+    def run(command, **kwargs):
+        return type("Result", (), {"returncode": 1, "stdout": stdout, "stderr": stderr})()
+
+    monkeypatch.setattr(MODULE.subprocess, "run", run)
+    with pytest.raises(MODULE.PilotGateError) as caught:
+        MODULE._run(["docker", "run", "stock-eros", "migrate"])
+    assert caught.value.diagnostic_code == expected
+    assert "vendor password" not in str(caught.value)
+
+
 def test_migrator_env_contains_only_sqlx_dsn_and_is_private(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
         monkeypatch.setenv("EROS_NATIVE_OPS_TEST", "1")

@@ -51,10 +51,14 @@ def _safe_diagnostic_code(stderr: bytes | str | None) -> str | None:
         ("permission denied for schema", "postgres_schema_permission"),
         ("permission denied for table", "postgres_object_permission"),
         ("permission denied for relation", "postgres_object_permission"),
+        ("permission denied", "postgres_permission"),
         ("must be owner of", "postgres_object_owner"),
+        ("password authentication failed", "postgres_authentication_failure"),
+        ("role \"eros_migrator\" does not exist", "postgres_migrator_role_missing"),
         ("could not translate host name", "postgres_dns_failure"),
         ("could not connect to server", "postgres_connection_failure"),
         ("connection refused", "postgres_connection_failure"),
+        ("connection timed out", "postgres_connection_failure"),
         ("database \"eros\" does not exist", "postgres_database_missing"),
         ("extension \"vector\" is not available", "postgres_vector_extension"),
         ("already exists", "sqlx_migration_object_conflict"),
@@ -62,6 +66,9 @@ def _safe_diagnostic_code(stderr: bytes | str | None) -> str | None:
     for marker, code in patterns:
         if marker in text:
             return code
+    sqlstate = re.search(r"sqlstate(?:\s*(?:code)?\s*[:=]?\s*)([0-9a-z]{5})", text)
+    if sqlstate:
+        return "postgres_sqlstate_" + sqlstate.group(1).upper()
     return None
 
 
@@ -147,8 +154,11 @@ def _run(command: list[str], *, input_text: str | None = None, input_bytes: byte
     except (OSError, subprocess.TimeoutExpired):
         raise PilotGateError("Native Eros pilot operation failed to start or timed out") from None
     if result.returncode:
+        diagnostic = _safe_diagnostic_code(result.stderr) or _safe_diagnostic_code(result.stdout)
+        if diagnostic is None and command and command[-1] == "migrate":
+            diagnostic = "stock_eros_migration_failure"
         raise PilotGateError("Native Eros pilot operation failed; command output was withheld",
-                             diagnostic_code=_safe_diagnostic_code(result.stderr))
+                             diagnostic_code=diagnostic)
     return result
 
 
