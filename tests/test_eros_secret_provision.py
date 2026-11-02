@@ -116,6 +116,73 @@ class ErosProductionSecretTests(unittest.TestCase):
             self.assertEqual(values['EROS_TEST_USER_IDS'], '')
             self.assertEqual(values['EROS_TEST_CREATOR_IDS'], '')
 
+    def test_pilot_provision_requires_and_persists_exactly_one_uuid_pair_and_stock_env_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'eros.env'
+            MODULE.provision(
+                path, source_sha='a' * 40,
+                image='ghcr.io/akhripunov/eros@sha256:' + 'b' * 64,
+                tenant_id='12345678-1234-4234-8234-123456789abc',
+                pilot_test_user_id='10000000-0000-4000-8000-000000000001',
+                pilot_test_creator_id='20000000-0000-4000-8000-000000000002',
+            )
+            values = MODULE.read_env(path)
+            self.assertEqual(values['EROS_PRODUCTION_TEST_USER_IDS'], '10000000-0000-4000-8000-000000000001')
+            self.assertEqual(values['EROS_PRODUCTION_TEST_CREATOR_IDS'], '20000000-0000-4000-8000-000000000002')
+            self.assertEqual(values['DATABASE_URL'], values['EROS_RUNTIME_DATABASE_URL'])
+            self.assertEqual(values['EROS_MIGRATOR_DATABASE_URL'], values['EROS_MIGRATOR_DATABASE_URL'])
+            self.assertEqual(values['GPOINT_API_KEY'], values['EROS_BRIDGE_API_KEY'])
+            self.assertEqual(values['GPOINT_EMBEDDINGS_API_KEY'], values['EROS_EMBEDDING_API_KEY'])
+            self.assertEqual(values['GPOINT_WORKER_BRIDGE_SIGNING_SECRET'], values['EROS_WORKER_SIGNING_SECRET'])
+            self.assertEqual(values['GPOINT_WORKER_TENANT_ID'], values['EROS_TENANT_ID'])
+            self.assertEqual(values['EROS_ENABLED'], 'true')
+            self.assertEqual(values['EROS_DATA_MODE'], 'synthetic')
+            self.assertEqual(values['EROS_PRODUCTION_TEST_MODE'], 'true')
+            self.assertEqual(values['EROS_OLLAMA_EMBEDDING_URL'], 'http://172.31.254.1:11434/api/embed')
+
+    def test_pilot_provision_rejects_empty_malformed_or_non_single_uuid_pairs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'eros.env'
+            base = dict(path=path, source_sha='a' * 40,
+                        image='ghcr.io/akhripunov/eros@sha256:' + 'b' * 64,
+                        tenant_id='12345678-1234-4234-8234-123456789abc')
+            for user, creator in (
+                ('', '20000000-0000-4000-8000-000000000002'),
+                ('not-a-uuid', '20000000-0000-4000-8000-000000000002'),
+                ('10000000-0000-4000-8000-000000000001,30000000-0000-4000-8000-000000000003', '20000000-0000-4000-8000-000000000002'),
+                ('10000000-0000-4000-8000-000000000001', ''),
+                ('10000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000002,30000000-0000-4000-8000-000000000003'),
+            ):
+                with self.subTest(user=user, creator=creator):
+                    with self.assertRaises(ValueError):
+                        MODULE.provision(**base, pilot_test_user_id=user, pilot_test_creator_id=creator)
+
+    def test_embeddings_network_is_internal_fixed_and_created_or_read_back(self):
+        network = [{"Name": "gpoint_eros_embeddings", "Driver": "bridge", "Internal": True,
+                    "IPAM": {"Config": [{"Subnet": "172.31.254.0/29", "Gateway": "172.31.254.1"}]},
+                    "Labels": {"com.gpoint.eros.managed": "true"}}]
+        responses = [
+            SimpleNamespace(returncode=1, stdout='', stderr='Error: network gpoint_eros_embeddings not found'),
+            SimpleNamespace(returncode=0, stdout='network-id', stderr=''),
+            SimpleNamespace(returncode=0, stdout=__import__('json').dumps(network), stderr=''),
+        ]
+        calls = []
+        def run(args, **kwargs):
+            calls.append(args)
+            return responses.pop(0)
+        with patch.object(MODULE.subprocess, 'run', side_effect=run):
+            self.assertEqual(MODULE.ensure_embeddings_network(), 'EROS_EMBEDDINGS_NETWORK=READY')
+        self.assertIn('--internal', calls[1])
+        self.assertIn('172.31.254.0/29', calls[1])
+
+    def test_embeddings_network_rejects_public_or_wrong_address_plan(self):
+        wrong = [{"Name": "gpoint_eros_embeddings", "Driver": "bridge", "Internal": False,
+                  "IPAM": {"Config": [{"Subnet": "0.0.0.0/0", "Gateway": "172.31.254.1"}]}, "Labels": {}}]
+        responses = [SimpleNamespace(returncode=0, stdout=__import__('json').dumps(wrong), stderr='')]
+        with patch.object(MODULE.subprocess, 'run', side_effect=lambda *a, **k: responses.pop(0)):
+            with self.assertRaisesRegex(RuntimeError, 'internal bridge'):
+                MODULE.ensure_embeddings_network()
+
     def test_database_provisioning_uses_a_dedicated_db_and_restricted_roles(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'eros.env'
@@ -200,7 +267,8 @@ class ErosProductionSecretTests(unittest.TestCase):
             self.assertNotIn(secret, str(error.exception))
 
     def test_existing_postgres_is_attached_once_to_private_eros_network_with_stable_alias(self):
-        network = [{"Driver": "bridge", "Internal": True}]
+        network = [{"Driver": "bridge", "Internal": True,
+                    "Labels": {"com.gpoint.eros.managed": "true"}}]
         unattached = [{"NetworkSettings": {"Networks": {"shared_internal": {"Aliases": ["shared_postgres_1"]}}}}]
         attached = [{"NetworkSettings": {"Networks": {"shared_internal": {"Aliases": ["shared_postgres_1"]},
                                                        "gpoint_eros_data": {"Aliases": ["shared_postgres_1", "gpoint-eros-db"]}}}}]

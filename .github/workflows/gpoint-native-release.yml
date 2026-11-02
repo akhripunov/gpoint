@@ -54,6 +54,11 @@ on:
         description: Exact UUID of the single synthetic pilot creator
         required: false
         type: string
+      approve_synthetic_eros_pilot_apply:
+        description: Request the protected Synthetic Pilot Apply environment for this exact candidate
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -68,6 +73,7 @@ jobs:
     outputs:
       mode: ${{ steps.intent.outputs.mode }}
       deploy: ${{ steps.intent.outputs.deploy }}
+      pilot_apply: ${{ steps.intent.outputs.pilot_apply }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -108,6 +114,7 @@ jobs:
           SYNTHETIC_EROS_PILOT: ${{ inputs.synthetic_eros_pilot || false }}
           EROS_PILOT_TEST_USER_ID: ${{ inputs.eros_pilot_test_user_id || '' }}
           EROS_PILOT_TEST_CREATOR_ID: ${{ inputs.eros_pilot_test_creator_id || '' }}
+          APPROVE_SYNTHETIC_EROS_PILOT_APPLY: ${{ inputs.approve_synthetic_eros_pilot_apply || false }}
         run: |
           set -euo pipefail
           args=(--event "$EVENT_NAME" --ref "$EVENT_REF" --sha "$EVENT_SHA"
@@ -119,6 +126,7 @@ jobs:
           [[ "$ROLLBACK" == true ]] && args+=(--rollback)
           [[ "$APPROVE_PRODUCTION" == true ]] && args+=(--approve-production)
           [[ "$SYNTHETIC_EROS_PILOT" == true ]] && args+=(--synthetic-eros-pilot)
+          [[ "$APPROVE_SYNTHETIC_EROS_PILOT_APPLY" == true ]] && args+=(--approve-synthetic-eros-pilot)
           python3 scripts/native_release_intent.py "${args[@]}" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
@@ -232,7 +240,7 @@ jobs:
   eros-pilot-integration:
     name: Isolated stock Eros migration and chat integration
     needs: [workspace, python]
-    if: needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_READY'
+    if: needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_READY' || needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_APPLY_REQUESTED'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -269,7 +277,7 @@ jobs:
   build:
     name: Build and publish immutable images
     needs: [workspace, python]
-    if: needs.workspace.outputs.mode == 'DEPLOY' || needs.workspace.outputs.mode == 'REHEARSAL'
+    if: needs.workspace.outputs.mode == 'DEPLOY' || needs.workspace.outputs.mode == 'REHEARSAL' || needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_APPLY_REQUESTED'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -527,6 +535,14 @@ jobs:
         id: topology
         run: |
           set -euo pipefail
+          # Preserve the ordinary no-Eros invariant before any release mutation.
+          remote_dir="/run/gpoint-eros-state-${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" mkdir -m 700 -- "$remote_dir"
+          for helper in collect_kamal_eros_state.py kamal_eros_state.py sanitize-kamal-inventory.py sanitize-kamal-resources.py; do
+            ssh -T "root@${GPOINT_PRODUCTION_HOST}" "cat > '$remote_dir/$helper' && chmod 600 '$remote_dir/$helper'" < "$GITHUB_WORKSPACE/scripts/$helper"
+          done
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 "$remote_dir/collect_kamal_eros_state.py" --output "$remote_dir/no-eros-state.json"
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" rm -rf -- "$remote_dir"
           role_inventory="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - < "$GITHUB_WORKSPACE/scripts/verify-kamal-production-baseline.py")"
           baseline_values="$(python3 -c 'import json,re,sys; d=json.loads(sys.argv[1]); assert set(d["roles"]) == {"gpoint-core-api","gpoint-core-worker","gpoint-core-bot","gpoint-agata-api","gpoint-agata-memory-worker","gpoint-miniapp-web"}; v=d["version"]; s=d["source_sha"]; assert re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+",v); assert re.fullmatch(r"[0-9a-f]{40}",s); print(v+"\t"+s)' "$role_inventory")"
           IFS=$'\t' read -r baseline_version baseline_source_sha <<< "$baseline_values"

@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_eros_kamal_services_are_private_and_use_exact_release_owned_inputs():
     engine = yaml.safe_load((ROOT / "config/deploy.eros.yml").read_text())
     relay = yaml.safe_load((ROOT / "config/deploy.eros-relay.yml").read_text())
+    api = yaml.safe_load((ROOT / "config/deploy.eros-api.yml").read_text())
 
     assert engine["service"] == "gpoint-eros-pilot"
     assert engine["image"] == "akhripunov/gpoint-eros-pilot"
@@ -29,6 +30,13 @@ def test_eros_kamal_services_are_private_and_use_exact_release_owned_inputs():
         "/source/services/eros-engine/eros-pilot-embedding-relay.mjs:/opt/gpoint/eros-pilot-embedding-relay.mjs:ro"
     )
     assert "proxy" not in engine and "proxy" not in relay
+    assert api["service"] == "gpoint-core"
+    assert api["servers"]["api"]["options"]["env-file"] == [
+        "/opt/gpoint/env/production.env", "/opt/gpoint/env/eros.env"
+    ]
+    assert api["servers"]["api"]["cmd"] == "node apps/api/dist/apps/api/src/main.js"
+    assert "gpoint_app" not in api["servers"]["api"]["options"].get("network", "")
+    assert "EROS_PRODUCTION_TEST_USER_IDS" not in (ROOT / "config/deploy.yml").read_text()
     assert engine["servers"]["engine"]["options"]["network"] == "gpoint_eros_data"
 
 
@@ -53,8 +61,23 @@ def test_native_workflow_runs_pilot_in_disposable_environment_and_never_uses_ord
     trigger = workflow.get("on", workflow.get(True))
     assert trigger["workflow_dispatch"]["inputs"]["synthetic_eros_pilot"]["default"] is False
     jobs = workflow["jobs"]
-    assert jobs["eros-pilot-integration"]["if"] == "needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_READY'"
+    assert jobs["eros-pilot-integration"]["if"] == "needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_READY' || needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_APPLY_REQUESTED'"
     steps = jobs["eros-pilot-integration"]["steps"]
     assert any("run-local-e2e.sh" in step.get("run", "") for step in steps)
     assert "needs.workspace.outputs.deploy == 'true'" in jobs["deploy"]["if"]
     assert "mode == 'SYNTHETIC_PILOT_READY'" not in jobs["deploy"]["if"]
+
+
+def test_native_pilot_apply_is_separately_gated_and_ordinary_release_fails_closed_after_pilot():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    trigger = workflow.get("on", workflow.get(True))
+    inputs = trigger["workflow_dispatch"]["inputs"]
+    assert inputs["approve_synthetic_eros_pilot_apply"]["default"] is False
+    jobs = workflow["jobs"]
+    apply = jobs["eros-pilot-apply"]
+    assert apply["environment"] == {"name": "gpoint-eros-pilot", "deployment": False}
+    assert "SYNTHETIC_PILOT_APPLY" in apply["if"]
+    assert "SYNTHETIC_PILOT_APPLY" not in jobs["deploy"]["if"]
+    topology = next(step for step in jobs["deploy"]["steps"] if step.get("id") == "topology")
+    assert "NO_EROS_STATE" in topology.get("run", "")
+    assert "collect_kamal_eros_state.py" in topology.get("run", "")

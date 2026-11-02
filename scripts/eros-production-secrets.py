@@ -30,7 +30,16 @@ SECRET_KEYS = (
 )
 MANAGED_KEYS = frozenset((*SECRET_KEYS, 'EROS_RUNTIME_DATABASE_URL',
                           'EROS_MIGRATOR_DATABASE_URL', 'EROS_SOURCE_SHA', 'EROS_IMAGE', 'EROS_TENANT_ID',
-                          'EROS_TEST_USER_IDS', 'EROS_TEST_CREATOR_IDS'))
+                          'EROS_TEST_USER_IDS', 'EROS_TEST_CREATOR_IDS',
+                          'DATABASE_URL', 'EROS_PRODUCTION_TEST_MODE', 'EROS_DATA_MODE',
+                          'EROS_ENABLED', 'EROS_SERVICE_URL', 'EROS_OLLAMA_EMBEDDING_URL',
+                          'EROS_PRODUCTION_TEST_USER_IDS', 'EROS_PRODUCTION_TEST_CREATOR_IDS',
+                          'EROS_WORKER_SIGNING_SECRET', 'EROS_WORKER_TENANT_ID',
+                          'EROS_BRIDGE_API_KEY', 'EROS_EMBEDDING_API_KEY',
+                          'EROS_JWT_SECRET', 'GPOINT_API_KEY', 'GPOINT_EMBEDDINGS_API_KEY',
+                          'GPOINT_WORKER_BRIDGE_SIGNING_SECRET', 'GPOINT_WORKER_TENANT_ID',
+                          'OPENROUTER_API_KEY', 'SUPABASE_JWT_SECRET', 'MODEL_CONFIG_PATH', 'RUST_LOG'))
+UUID_PATTERN = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$', re.I)
 
 
 def read_env(path):
@@ -51,7 +60,44 @@ def read_env(path):
     return values
 
 
-def _new_values(source_sha, image, tenant_id):
+def _pilot_pair(user_id, creator_id):
+    if not user_id and not creator_id:
+        return '', ''
+    if not UUID_PATTERN.fullmatch(user_id or '') or not UUID_PATTERN.fullmatch(creator_id or ''):
+        raise ValueError('exactly one synthetic pilot user and creator UUID are required')
+    return user_id.lower(), creator_id.lower()
+
+
+def _runtime_aliases(values, user_id, creator_id):
+    enabled = bool(user_id and creator_id)
+    values.update({
+        'DATABASE_URL': values['EROS_RUNTIME_DATABASE_URL'],
+        'EROS_ENABLED': 'true' if enabled else 'false',
+        'EROS_PRODUCTION_TEST_MODE': 'true' if enabled else 'false',
+        'EROS_DATA_MODE': 'synthetic' if enabled else 'disabled',
+        'EROS_SERVICE_URL': 'http://eros:8080',
+        'EROS_OLLAMA_EMBEDDING_URL': 'http://172.31.254.1:11434/api/embed',
+        'EROS_PRODUCTION_TEST_USER_IDS': user_id,
+        'EROS_PRODUCTION_TEST_CREATOR_IDS': creator_id,
+        'EROS_WORKER_SIGNING_SECRET': values['EROS_WORKER_SIGNING_SECRET'],
+        'EROS_WORKER_TENANT_ID': values['EROS_TENANT_ID'],
+        'EROS_BRIDGE_API_KEY': values['EROS_BRIDGE_API_KEY'],
+        'EROS_EMBEDDING_API_KEY': values['EROS_EMBEDDING_API_KEY'],
+        'EROS_JWT_SECRET': values['EROS_JWT_SECRET'],
+        'GPOINT_API_KEY': values['EROS_BRIDGE_API_KEY'],
+        'GPOINT_EMBEDDINGS_API_KEY': values['EROS_EMBEDDING_API_KEY'],
+        'GPOINT_WORKER_BRIDGE_SIGNING_SECRET': values['EROS_WORKER_SIGNING_SECRET'],
+        'GPOINT_WORKER_TENANT_ID': values['EROS_TENANT_ID'],
+        'OPENROUTER_API_KEY': '',
+        'SUPABASE_JWT_SECRET': values['EROS_JWT_SECRET'],
+        'MODEL_CONFIG_PATH': '/etc/eros-engine/model_config.toml',
+        'RUST_LOG': 'info',
+        'EROS_TEST_USER_IDS': user_id,
+        'EROS_TEST_CREATOR_IDS': creator_id,
+    })
+
+
+def _new_values(source_sha, image, tenant_id, pilot_test_user_id='', pilot_test_creator_id=''):
     if not re.fullmatch(r'[a-f0-9]{40}', source_sha or ''):
         raise ValueError('exact Eros source SHA is required')
     if not re.fullmatch(r'ghcr\.io/[a-z0-9._/-]+@sha256:[a-f0-9]{64}', image or ''):
@@ -65,15 +111,15 @@ def _new_values(source_sha, image, tenant_id):
     values = {key: secrets.token_urlsafe(48) for key in SECRET_KEYS}
     def dsn(role, password):
         return f'postgresql://{role}:{quote(password, safe="")}@gpoint-eros-db:5432/eros'
+    user_id, creator_id = _pilot_pair(pilot_test_user_id, pilot_test_creator_id)
     values.update({
         'EROS_RUNTIME_DATABASE_URL': dsn('eros_runtime', values['EROS_RUNTIME_PASSWORD']),
         'EROS_MIGRATOR_DATABASE_URL': dsn('eros_migrator', values['EROS_MIGRATOR_PASSWORD']),
         'EROS_SOURCE_SHA': source_sha,
         'EROS_IMAGE': image,
         'EROS_TENANT_ID': tenant_id,
-        'EROS_TEST_USER_IDS': '',
-        'EROS_TEST_CREATOR_IDS': '',
     })
+    _runtime_aliases(values, user_id, creator_id)
     return values
 
 
@@ -106,8 +152,10 @@ def _source_tenant(path):
     return tenant
 
 
-def provision(path=ENV_PATH, *, source_sha, image, tenant_id=None, source_env=SOURCE_ENV_PATH):
+def provision(path=ENV_PATH, *, source_sha, image, tenant_id=None, source_env=SOURCE_ENV_PATH,
+              pilot_test_user_id='', pilot_test_creator_id=''):
     _validate_release_identity(source_sha, image)
+    user_id, creator_id = _pilot_pair(pilot_test_user_id, pilot_test_creator_id)
     path = Path(path)
     if path.parent.is_symlink():
         raise RuntimeError('Eros protected environment directory cannot be a symlink')
@@ -127,21 +175,25 @@ def provision(path=ENV_PATH, *, source_sha, image, tenant_id=None, source_env=SO
         if path == ENV_PATH and metadata.st_uid != 0:
             raise RuntimeError('Eros protected environment file must be root-owned')
         values = read_env(path)
-        missing = set(MANAGED_KEYS) - set(values) - {'EROS_TENANT_ID', 'EROS_TEST_USER_IDS', 'EROS_TEST_CREATOR_IDS'}
+        required = set(SECRET_KEYS) | {'EROS_RUNTIME_DATABASE_URL', 'EROS_MIGRATOR_DATABASE_URL'}
+        missing = required - set(values)
         if missing and values:
             raise RuntimeError('Eros protected environment is incomplete; credential recovery is required')
     else:
         values = {}
 
     if not values:
-        values = _new_values(source_sha, image, tenant_id or _source_tenant(source_env))
+        values = _new_values(source_sha, image, tenant_id or _source_tenant(source_env), user_id, creator_id)
     else:
         if any(not values.get(key) for key in SECRET_KEYS):
             raise RuntimeError('Eros protected environment has an empty credential')
         values['EROS_SOURCE_SHA'] = source_sha
         values['EROS_IMAGE'] = image
-        values['EROS_TEST_USER_IDS'] = ''
-        values['EROS_TEST_CREATOR_IDS'] = ''
+        old_user = values.get('EROS_PRODUCTION_TEST_USER_IDS', values.get('EROS_TEST_USER_IDS', ''))
+        old_creator = values.get('EROS_PRODUCTION_TEST_CREATOR_IDS', values.get('EROS_TEST_CREATOR_IDS', ''))
+        if (user_id or creator_id) and (old_user or old_creator) and (old_user != user_id or old_creator != creator_id):
+            raise RuntimeError('protected synthetic pilot allowlist does not match the requested UUID pair')
+        _runtime_aliases(values, user_id, creator_id)
         existing_tenant = values.get('EROS_TENANT_ID')
         if not existing_tenant:
             values['EROS_TENANT_ID'] = tenant_id or _source_tenant(source_env)
@@ -323,7 +375,8 @@ def ensure_postgres_network():
         docker(['network', 'create', '--driver', 'bridge', '--internal',
                 '--label', 'com.gpoint.eros.managed=true', 'gpoint_eros_data'])
         network = json.loads(docker(['network', 'inspect', 'gpoint_eros_data']))[0]
-    if network.get('Driver') != 'bridge' or network.get('Internal') is not True:
+    if (network.get('Driver') != 'bridge' or network.get('Internal') is not True
+            or (network.get('Labels') or {}).get('com.gpoint.eros.managed') != 'true'):
         raise RuntimeError('existing Eros data network is not private bridge network')
     container = json.loads(docker(['inspect', 'shared_postgres_1']))[0]
     networks = container.get('NetworkSettings', {}).get('Networks', {})
@@ -340,23 +393,61 @@ def ensure_postgres_network():
     return 'EROS_POSTGRES_NETWORK=READY'
 
 
+def ensure_embeddings_network():
+    """Create/read back the fixed private Mac-Ollama relay network."""
+    def docker(args, *, allow_missing=False):
+        result = subprocess.run(['docker', *args], text=True, capture_output=True, timeout=30)
+        if result.returncode:
+            detail = (result.stderr + result.stdout).lower()
+            if allow_missing and ('no such network' in detail or 'network gpoint_eros_embeddings not found' in detail):
+                return None
+            raise RuntimeError('Eros embeddings network operation failed')
+        return result.stdout.strip()
+
+    inspected = docker(['network', 'inspect', 'gpoint_eros_embeddings'], allow_missing=True)
+    if inspected is None:
+        docker(['network', 'create', '--driver', 'bridge', '--internal',
+                '--subnet', '172.31.254.0/29', '--gateway', '172.31.254.1',
+                '--label', 'com.gpoint.eros.managed=true', 'gpoint_eros_embeddings'])
+        inspected = docker(['network', 'inspect', 'gpoint_eros_embeddings'])
+    try:
+        network = json.loads(inspected)[0]
+    except (TypeError, ValueError, IndexError):
+        raise RuntimeError('Eros embeddings network read-back is incomplete') from None
+    ipam = ((network.get('IPAM') or {}).get('Config') or [])
+    if (network.get('Name') != 'gpoint_eros_embeddings' or network.get('Driver') != 'bridge'
+            or network.get('Internal') is not True
+            or (network.get('Labels') or {}).get('com.gpoint.eros.managed') != 'true'
+            or not any(row.get('Subnet') == '172.31.254.0/29' and row.get('Gateway') == '172.31.254.1'
+                       for row in ipam)):
+        raise RuntimeError('Eros embeddings network is not the required internal bridge')
+    return 'EROS_EMBEDDINGS_NETWORK=READY'
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--path', default=str(ENV_PATH))
     parser.add_argument('--source-sha', required=True)
     parser.add_argument('--image', required=True)
     parser.add_argument('--tenant-id')
+    parser.add_argument('--pilot-test-user-id', default='')
+    parser.add_argument('--pilot-test-creator-id', default='')
     parser.add_argument('--source-env', default=str(SOURCE_ENV_PATH))
     parser.add_argument('--ensure-postgres-network', action='store_true')
+    parser.add_argument('--ensure-embeddings-network', action='store_true')
     parser.add_argument('--provision-database', action='store_true')
     args = parser.parse_args()
     try:
         if args.provision_database:
             assert_shared_database_acl_isolatable()
         print(provision(args.path, source_sha=args.source_sha, image=args.image,
-                        tenant_id=args.tenant_id, source_env=args.source_env))
+                        tenant_id=args.tenant_id, source_env=args.source_env,
+                        pilot_test_user_id=args.pilot_test_user_id,
+                        pilot_test_creator_id=args.pilot_test_creator_id))
         if args.ensure_postgres_network:
             print(ensure_postgres_network())
+        if args.ensure_embeddings_network:
+            print(ensure_embeddings_network())
         if args.provision_database:
             print(provision_database(args.path))
     except Exception as error:

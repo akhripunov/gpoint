@@ -144,7 +144,7 @@ def classify_eros_pilot_dispatch(*, event_name: str, ref: str, candidate_sha: st
         return "SYNTHETIC_PILOT_READY", False
     if not environment_approved:
         return "SYNTHETIC_PILOT_APPLY_REQUESTED", False
-    return "SYNTHETIC_PILOT_APPLY", True
+    return "SYNTHETIC_PILOT_APPLY", False
 
 
 def changed_paths(before: str, sha: str, *, repo: Path = Path.cwd()) -> set[str]:
@@ -180,6 +180,7 @@ def main() -> int:
     parser.add_argument("--pilot-environment-approved", action="store_true")
     args = parser.parse_args()
 
+    pilot_apply = False
     try:
         if args.event == "push":
             paths = changed_paths(args.before, args.sha)
@@ -201,6 +202,7 @@ def main() -> int:
                     test_user_ids=os.environ.get("EROS_PILOT_TEST_USER_ID", ""),
                     test_creator_ids=os.environ.get("EROS_PILOT_TEST_CREATOR_ID", ""),
                 )
+                pilot_apply = mode == "SYNTHETIC_PILOT_APPLY"
             else:
                 mode, deploy = classify_dispatch(
                     ref=args.ref, candidate_sha=args.candidate_sha, github_sha=args.sha,
@@ -219,6 +221,7 @@ def main() -> int:
 
     print(f"mode={mode}")
     print(f"deploy={'true' if deploy else 'false'}")
+    print(f"pilot_apply={'true' if pilot_apply else 'false'}")
     if mode == "BLOCK" or mode.startswith("INVALID_"):
         return 2
     return 0
