@@ -20,11 +20,22 @@ class ErosProductionSecretTests(unittest.TestCase):
             MODULE.os.environ.pop('EROS_PROVISION_TEST_POSTGRES_CONTAINER', None)
             with self.assertRaisesRegex(ValueError, 'immutable'):
                 MODULE._validate_release_identity(sha, image)
+            with self.assertRaisesRegex(ValueError, 'immutable'):
+                MODULE._new_values(sha, image, '12345678-1234-4234-8234-123456789abc')
             MODULE.os.environ['EROS_PROVISION_TEST'] = '1'
             with self.assertRaisesRegex(ValueError, 'immutable'):
                 MODULE._validate_release_identity(sha, image)
+            with self.assertRaisesRegex(ValueError, 'immutable'):
+                MODULE._new_values(sha, image, '12345678-1234-4234-8234-123456789abc')
             MODULE.os.environ['EROS_PROVISION_TEST_POSTGRES_CONTAINER'] = 'eros-provision-test-0123456789ab'
             MODULE._validate_release_identity(sha, image)
+            values = MODULE._new_values(sha, image, '12345678-1234-4234-8234-123456789abc',
+                                        '10000000-0000-4000-8000-000000000001',
+                                        '20000000-0000-4000-8000-000000000002')
+            self.assertEqual(values['EROS_IMAGE'], image)
+            MODULE.os.environ['EROS_PROVISION_TEST_POSTGRES_CONTAINER'] = 'wrong-container'
+            with self.assertRaisesRegex(ValueError, 'immutable'):
+                MODULE._new_values(sha, image, '12345678-1234-4234-8234-123456789abc')
 
     def test_generates_persistent_credentials_without_emitting_values(self):
         with tempfile.TemporaryDirectory() as tmp:
