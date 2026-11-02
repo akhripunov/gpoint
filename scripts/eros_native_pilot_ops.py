@@ -558,9 +558,11 @@ def restore_probe(backup: Path, probe_name: str, *, backup_root: Path = BACKUP_R
               f'exec dropdb --if-exists -U "$POSTGRES_USER" {probe_name}'], timeout=120)
 
 
-def restore_eros(backup: Path, *, expected_identity: str,
+def restore_eros(backup: Path, *, expected_identity: str, expected_source_sha: str,
                  backup_root: Path = BACKUP_ROOT) -> dict:
     facts = verify_backup(backup, backup_root)
+    if not SHA40.fullmatch(expected_source_sha or "") or facts.get("sourceSha") != expected_source_sha:
+        raise PilotGateError("Eros backup candidate SHA does not match the protected rollback dispatch")
     if (not expected_identity or hashlib.sha256(expected_identity.encode()).hexdigest()
             != facts.get("databaseIdentitySha256")):
         raise PilotGateError("Eros backup identity does not match the protected pilot environment")
@@ -670,6 +672,7 @@ def main() -> int:
             print("EROS_ISOLATED_RESTORE=PASS")
         elif args.operation == "restore":
             facts = restore_eros(Path(args.backup), expected_identity=values.get("EROS_DATABASE_IDENTITY", ""),
+                                 expected_source_sha=args.source_sha,
                                  backup_root=Path(args.backup_root))
             print(f"EROS_DATABASE_RESTORE=PASS sha256={facts['sha256']}")
         elif args.operation == "cleanup":

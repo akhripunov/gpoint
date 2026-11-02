@@ -199,7 +199,8 @@ def test_rollback_recreates_only_identity_matched_eros_database_before_restore(m
     restore_calls = []
     monkeypatch.setattr(MODULE, "_psql", psql)
     monkeypatch.setattr(MODULE, "_run", lambda command, **kwargs: restore_calls.append((command, kwargs)))
-    MODULE.restore_eros(backup, expected_identity="pilot-identity", backup_root=tmp_path)
+    MODULE.restore_eros(backup, expected_identity="pilot-identity", expected_source_sha="a" * 40,
+                        backup_root=tmp_path)
     assert [database for database, _ in psql_calls] == ["eros", "postgres", "postgres", "eros"]
     assert "DROP DATABASE eros" in psql_calls[2][1]
     assert "CREATE DATABASE eros OWNER eros_ddl" in psql_calls[2][1]
@@ -220,11 +221,17 @@ def test_rollback_refuses_identity_mismatch_or_active_eros_connections_before_dr
     monkeypatch.setattr(MODULE, "_run", lambda *a, **k: calls.append(a))
     monkeypatch.setattr(MODULE, "_psql", lambda sql, database="postgres": "eros_ddl|foreign" if database == "eros" else "0")
     with pytest.raises(MODULE.PilotGateError, match="database identity"):
-        MODULE.restore_eros(backup, expected_identity="pilot-identity", backup_root=tmp_path)
+        MODULE.restore_eros(backup, expected_identity="pilot-identity", expected_source_sha="a" * 40,
+                            backup_root=tmp_path)
     assert calls == []
+    monkeypatch.setattr(MODULE, "_psql", lambda *a, **k: pytest.fail("DB touched before candidate binding"))
+    with pytest.raises(MODULE.PilotGateError, match="candidate SHA"):
+        MODULE.restore_eros(backup, expected_identity="pilot-identity", expected_source_sha="b" * 40,
+                            backup_root=tmp_path)
     monkeypatch.setattr(MODULE, "_psql", lambda sql, database="postgres": "eros_ddl|pilot-identity" if database == "eros" else "1")
     with pytest.raises(MODULE.PilotGateError, match="active connections"):
-        MODULE.restore_eros(backup, expected_identity="pilot-identity", backup_root=tmp_path)
+        MODULE.restore_eros(backup, expected_identity="pilot-identity", expected_source_sha="a" * 40,
+                            backup_root=tmp_path)
     assert calls == []
 
 
