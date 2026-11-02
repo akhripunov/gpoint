@@ -253,8 +253,8 @@ def test_migration_rehearsal_uses_immutable_oci_identity_across_docker_hosts():
         assert '"org.opencontainers.image.revision"' in body
         assert 'test "$(docker image inspect "$app_image" --format \'{{index .Config.Labels "org.opencontainers.image.revision"}}\')" = "$candidate"' in body
         assert 'test "$(docker image inspect "$agata_image" --format \'{{index .Config.Labels "org.opencontainers.image.revision"}}\')" = "$candidate"' in body
-        assert 'docker image inspect "$app_image" --format \'{{json .RepoDigests}}\' | grep -Fq "$app_image"' in body
-        assert 'docker image inspect "$agata_image" --format \'{{json .RepoDigests}}\' | grep -Fq "$agata_image"' in body
+        assert 'docker image inspect "$app_image" --format \'{{json .RepoDigests}}\' | grep -F "$app_image" >/dev/null' in body
+        assert 'docker image inspect "$agata_image" --format \'{{json .RepoDigests}}\' | grep -F "$agata_image" >/dev/null' in body
         assert f'current_step=ghcr-{role}-repository-digest' in body
 
     assert build["outputs"]["app_digest"] == "${{ steps.app.outputs.digest }}"
