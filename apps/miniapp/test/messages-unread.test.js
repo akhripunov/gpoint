@@ -30,7 +30,8 @@ test('read queue acknowledges only visible messages in batches and deduplicates 
   await queue.flush();await queue.flush();assert.deepEqual(calls.map(ids=>ids.length),[1,100,5]);
   queue.dispose();queue.view('disposed',true);await queue.flush();assert.equal(calls.length,3);
 });
-test('failed acknowledgements retry only while the message remains visible',async()=>{
+test('failed acknowledgements retry only while the message remains visible',async(t)=>{
+  t.mock.method(Date,'now',()=>1000);
   assert.equal(typeof policy.createReadQueue,'function','visible read queue missing');
   let attempts=0;const timers=[];
   const queue=policy.createReadQueue({isActive:()=>true,setTimer:(fn,delay)=>{timers.push({fn,delay});return timers.length},clearTimer:()=>{},acknowledge:async ids=>{attempts++;if(attempts===1)throw Error('offline');return {acknowledgedMessageIds:ids}}});
