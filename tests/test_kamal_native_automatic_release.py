@@ -7,14 +7,16 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/gpoint-native-release.yml"
 
 
-def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
+def test_main_push_runs_exact_candidate_prepare_gates_without_kamal_apply():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     events = workflow.get("on", workflow.get(True))
     assert events["push"]["branches"] == ["main"]
     assert events["pull_request"]["branches"] == ["main"]
     deploy = workflow["jobs"]["deploy"]
     assert "build" in deploy["needs"]
-    assert "push" in deploy.get("if", "")
+    assert "push" not in deploy.get("if", "")
+    assert 'elif [[ "$GITHUB_EVENT_NAME" != push ]]' not in WORKFLOW.read_text()
+    assert 'test "$GITHUB_EVENT_NAME" = workflow_dispatch' in WORKFLOW.read_text()
     assert "refs/heads/main" in deploy.get("if", "")
     assert "workflow_dispatch" in deploy.get("if", "")
     assert deploy["environment"] == {"name": "production", "deployment": False}

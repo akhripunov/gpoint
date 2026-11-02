@@ -151,6 +151,7 @@ jobs:
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           .github/workflows/gpoint-native-release.yml
           .github/workflows/gpoint-first-kamal-cutover.yml
+          .github/workflows/gpoint-eros-pilot-tunnel-postcheck.yml
       - name: Validate pinned Kamal configs and shared proxy routing
         env:
           KAMAL_IMAGE: ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625
@@ -234,6 +235,9 @@ jobs:
           tests/test_deploy_evidence_workflow.py
           tests/test_native_build_boundary.py
           tests/test_native_release_intent.py
+          tests/test_eros_pilot_mac_tunnel_service.py
+          tests/test_eros_pilot_tunnel_post_workflow.py
+          tests/test_kamal_eros_pilot_config.py
           tests/test_gpoint_scheduled_backup.py
           tests/test_agata_production_migration.py
           tests/test_agata_migration_receipt.py
@@ -540,25 +544,14 @@ jobs:
           printf '%s\n' "$VERIFIED_KNOWN_HOSTS" > "$GPOINT_KNOWN_HOSTS_FILE"
           chmod 600 "$GPOINT_SSH_KEY" "$GPOINT_KNOWN_HOSTS_FILE"
           ssh-keygen -F "$GPOINT_PRODUCTION_HOST" -f "$GPOINT_KNOWN_HOSTS_FILE" >/dev/null
-      - name: Open loopback-only Mac Ollama reverse tunnel with the locked Qwen3 embedding model
+      - name: Install and verify persistent Mac Ollama tunnel
         env:
           EROS_PILOT_VPS_SSH_TARGET: root@${{ secrets.GPOINT_KAMAL_HOST }}
-          GPOINT_SSH_IDENTITY_FILE: ${{ runner.temp }}/gpoint-eros-pilot/id_ed25519
-          GPOINT_KNOWN_HOSTS_FILE: ${{ runner.temp }}/gpoint-eros-pilot/known_hosts
         run: |
           set -euo pipefail
-          bash services/eros-engine/open-mac-ollama-tunnel.sh > "$RUNNER_TEMP/eros-pilot-tunnel.log" 2>&1 &
-          echo "$!" > "$RUNNER_TEMP/eros-pilot-tunnel.pid"
-          ready=0
-          for _ in {1..30}; do
-            if ssh -F /dev/null -T -i "$GPOINT_SSH_IDENTITY_FILE" -o BatchMode=yes -o IdentitiesOnly=yes \
-              -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$GPOINT_KNOWN_HOSTS_FILE" \
-              "root@${GPOINT_PRODUCTION_HOST}" curl --fail --silent --show-error --max-time 3 http://127.0.0.1:11435/api/tags >/dev/null 2>&1; then
-              ready=1; break
-            fi
-            sleep 2
-          done
-          test "$ready" = 1 || { cat "$RUNNER_TEMP/eros-pilot-tunnel.log" >&2; exit 1; }
+          GPOINT_KNOWN_HOSTS_FILE="$RUNNER_TEMP/gpoint-eros-pilot/known_hosts" \
+            bash scripts/eros-pilot-mac-tunnel-service.sh install
+          bash scripts/eros-pilot-mac-tunnel-service.sh verify
       - name: Verify exact stock images and apply the isolated synthetic pilot through Kamal
         env:
           GH_TOKEN: ${{ github.token }}
@@ -566,14 +559,9 @@ jobs:
           AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
         run: bash scripts/eros-native-pilot-lifecycle.sh apply
-      - name: Stop Mac Ollama reverse tunnel
-        if: always()
-        run: |
-          if [[ -f "$RUNNER_TEMP/eros-pilot-tunnel.pid" ]]; then
-            pid="$(cat "$RUNNER_TEMP/eros-pilot-tunnel.pid")"
-            if [[ "$pid" =~ ^[0-9]+$ ]]; then kill "$pid" 2>/dev/null || true; fi
-            rm -f "$RUNNER_TEMP/eros-pilot-tunnel.pid"
-          fi
+      - name: Remove persistent Mac Ollama tunnel after failed Pilot Apply
+        if: failure() || cancelled()
+        run: bash scripts/eros-pilot-mac-tunnel-service.sh uninstall
 
   eros-pilot-cleanup:
     name: Protected Native Kamal synthetic Eros Pilot rollback and cleanup
@@ -641,11 +629,14 @@ jobs:
           ssh-keygen -F "$GPOINT_PRODUCTION_HOST" -f "$GPOINT_KNOWN_HOSTS_FILE" >/dev/null
       - name: Restore the pre-pilot database backup, stop only Eros pilot services and return API to baseline
         run: bash scripts/eros-native-pilot-lifecycle.sh cleanup
+      - name: Remove Mac Ollama tunnel after successful pilot cleanup
+        if: success()
+        run: bash scripts/eros-pilot-mac-tunnel-service.sh uninstall
 
   deploy:
     name: Kamal production Deploy and Verify
     needs: [workspace, python, build]
-    if: needs.workspace.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true))
+    if: needs.workspace.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -684,13 +675,10 @@ jobs:
           WORKFLOW_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
-            test "$APPROVE_PRODUCTION" = true
-            test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY"
-            test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY"
-          elif [[ "$GITHUB_EVENT_NAME" != push ]]; then
-            echo 'unsupported production release event' >&2; exit 1
-          fi
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$APPROVE_PRODUCTION" = true
+          test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY"
+          test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY"
           test "$REQUESTED_SHA" = "$WORKFLOW_SHA"
           [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$REQUESTED_SHA"

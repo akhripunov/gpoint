@@ -33,14 +33,14 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("outputs.mode == 'SYNTHETIC_PILOT_APPLY_REQUESTED'", jobs["build"]["if"])
         self.assertIn("build", jobs["deploy"]["needs"])
 
-    def test_main_push_runs_ci_build_and_kamal_production_jobs(self):
+    def test_main_push_runs_prepare_gates_and_never_runs_kamal_production_jobs(self):
         triggers = self.workflow.get("on", self.workflow.get(True))
         self.assertIn("push", triggers)
         self.assertIn("pull_request", triggers)
         self.assertEqual(triggers["push"]["branches"], ["main"])
         deploy = self.workflow["jobs"]["deploy"]
-        self.assertEqual(deploy["if"], "needs.workspace.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true))")
-        self.assertIn("github.event_name == 'push'", deploy["if"])
+        self.assertEqual(deploy["if"], "needs.workspace.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true")
+        self.assertNotIn("github.event_name == 'push'", deploy["if"])
 
     def test_operational_only_push_and_migration_rehearsal_fail_closed(self):
         gate = self.workflow["jobs"]["workspace"]
@@ -48,8 +48,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("scripts/native_release_intent.py", "\n".join(step.get("run", "") for step in gate["steps"]))
         self.assertIn("--backup-maintenance", "\n".join(step.get("run", "") for step in gate["steps"]))
         intent = (ROOT / "scripts/native_release_intent.py").read_text()
-        self.assertNotIn("PREP_ONLY_SCOPES", intent)
-        self.assertNotIn('return "PREPARE_ONLY"', intent)
+        self.assertIn('return "PREPARE_ONLY"', intent)
         self.assertIn('return "BLOCK"', intent)
         self.assertEqual(self.workflow["jobs"]["backup_maintenance"]["environment"],
                          {"name": "production", "deployment": False})

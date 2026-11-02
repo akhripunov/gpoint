@@ -90,6 +90,9 @@ def test_native_pilot_apply_is_separately_gated_and_ordinary_release_fails_close
     assert apply["concurrency"]["group"] == "gpoint-production-release"
     assert apply["runs-on"] == ["self-hosted", "macOS", "gpoint-production"]
     assert "runner.temp" not in str(apply.get("env", {}))
+    failure_cleanup = next(step for step in apply["steps"]
+                           if step.get("name") == "Remove persistent Mac Ollama tunnel after failed Pilot Apply")
+    assert failure_cleanup["if"] == "failure() || cancelled()"
     assert "GITHUB_ENV" in str(apply["steps"])
     assert any("eros-native-pilot-lifecycle.sh" in step.get("run", "") for step in apply["steps"])
     assert "approve_production" not in str(apply)
@@ -117,3 +120,18 @@ def test_mac_embedding_tunnel_uses_verified_known_hosts_and_loopback_reverse_for
     assert 'UserKnownHostsFile="$known_hosts"' in tunnel
     assert "GatewayPorts=no" in tunnel
     assert "-R 127.0.0.1:11435:127.0.0.1:11434" in tunnel
+    assert "ClearAllForwardings=yes" in tunnel
+    assert "EROS_PILOT_REMOTE_QWEN3=PASS" in tunnel
+
+
+def test_pilot_apply_uses_managed_tunnel_and_checks_it_after_apply_job():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    jobs = workflow["jobs"]
+    apply_steps = jobs["eros-pilot-apply"]["steps"]
+    names = [step.get("name", "") for step in apply_steps]
+    assert any(name == "Install and verify persistent Mac Ollama tunnel" for name in names)
+    assert not any(name == "Stop Mac Ollama reverse tunnel" for name in names)
+    cleanup = jobs["eros-pilot-cleanup"]["steps"]
+    cleanup_names = [step.get("name", "") for step in cleanup]
+    assert cleanup_names.index("Remove Mac Ollama tunnel after successful pilot cleanup") > next(
+        i for i, name in enumerate(cleanup_names) if "Restore the pre-pilot database backup" in name)

@@ -359,3 +359,34 @@ the original row and `eros_migrator` ownership, then swapped database names and
 verified the restored row again. Both databases, container and network were
 removed afterward. This validates database snapshot/restore/name-swap logic;
 the full VPS Compose/image rollback is still a pre-deploy gate.
+
+## Native Kamal pilot and ordinary GPoint updates
+
+A push to `main` is `PREPARE_ONLY`: it runs candidate checks but cannot publish
+production images or start Kamal Deploy. The ordinary production Deploy is a
+separate owner-triggered `workflow_dispatch` for the exact current `main` SHA
+with `approve_production=true`. The workflow's Deploy job also collects and
+requires `NO_EROS_STATE`; installed Eros containers, database/roles, managed
+networks, or pilot marker block it before mutation.
+
+To update GPoint while the synthetic pilot is installed, first dispatch the
+separately approved `SYNTHETIC_PILOT_CLEANUP` for the exact installed pilot SHA
+and exact synthetic UUID pair. It returns the API to its captured pre-pilot
+release, stops/removes only identity-verified pilot containers, restores and
+removes only the isolated `eros` database/roles/networks, removes the synthetic
+GPoint mapping/message-state rows, retains the verified pre-pilot backup, and
+uninstalls the persistent Mac tunnel. The GPoint database and its user data are
+outside this cleanup scope. Cleanup intentionally discards the synthetic Eros
+conversation; inspect/export its test result before cleanup if it must be kept.
+After cleanup, verify `NO_EROS_STATE`, then use the normal exact-SHA approved
+Native Deploy. Reinstall the synthetic pilot only after the GPoint update passes
+its full gates, using the updated exact SHA and the same approved test pair.
+
+The protected Pilot Apply installs a macOS system LaunchDaemon with `RunAtLoad`
+and `KeepAlive`, strict SSH host-key checking, and a reverse forward bound only
+to VPS loopback `127.0.0.1:11435`. The tunnel retries after disconnects. A
+separate workflow-run check executes after the Apply workflow completes; it
+requires the daemon's exact installed script to have a live PID and verifies
+the pinned Qwen3 tag locally and through the VPS loopback URL. This service is
+not installed by the hosted synthetic E2E; live reboot/reconnect and
+post-workflow reachability require the separately approved Pilot Apply.

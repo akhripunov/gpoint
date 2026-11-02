@@ -11,12 +11,12 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
-def test_app_only_main_push_deploys_including_its_regression_tests():
+def test_app_only_main_push_prepares_but_never_deploys_including_its_regression_tests():
     assert MODULE.classify_push(
         event_name="push",
         ref="refs/heads/main",
         changed_paths={"apps/api/src/main.ts", "apps/api/test/main.test.ts"},
-    ) == "DEPLOY"
+    ) == "PREPARE_ONLY"
 
 
 def test_normal_app_paths_cover_miniapp_bot_worker_agata_and_runtime_packages():
@@ -32,10 +32,10 @@ def test_normal_app_paths_cover_miniapp_bot_worker_agata_and_runtime_packages():
     ):
         assert MODULE.classify_push(
             event_name="push", ref="refs/heads/main", changed_paths={path}
-        ) == "DEPLOY", path
+        ) == "PREPARE_ONLY", path
 
 
-def test_known_operational_or_test_only_main_push_uses_the_same_release():
+def test_known_operational_or_test_only_main_push_is_prepare_only():
     for changed_paths in (
         {"scripts/verify.py", "scripts/new-helper.py"},
         {".kamal/hooks/pre-app-boot", ".kamal/hooks/post-app-boot"},
@@ -49,7 +49,7 @@ def test_known_operational_or_test_only_main_push_uses_the_same_release():
     ):
         assert MODULE.classify_push(
             event_name="push", ref="refs/heads/main", changed_paths=changed_paths
-        ) == "DEPLOY"
+        ) == "PREPARE_ONLY"
 
 
 def test_app_and_release_files_can_ship_together_in_one_authorized_main_push():
@@ -60,7 +60,7 @@ def test_app_and_release_files_can_ship_together_in_one_authorized_main_push():
     ):
         assert MODULE.classify_push(
             event_name="push", ref="refs/heads/main", changed_paths=changed_paths
-        ) == "DEPLOY"
+        ) == "PREPARE_ONLY"
 
 
 def test_any_schema_or_migration_change_blocks_ordinary_release():
@@ -158,15 +158,29 @@ def test_backup_maintenance_dispatch_is_separate_exact_and_explicitly_authorized
         assert MODULE.classify_dispatch(**args) == (expected, False)
 
 
-def test_ordinary_main_push_and_exact_sha_dispatch_remain_enabled():
+def test_ordinary_main_push_is_prepare_only_and_exact_sha_dispatch_remains_enabled():
     assert MODULE.classify_push(
         event_name="push", ref="refs/heads/main", changed_paths={"apps/api/src/main.ts"}
-    ) == "DEPLOY"
+    ) == "PREPARE_ONLY"
     assert MODULE.classify_dispatch(
         ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
         actor="akhripunov", repository_owner="akhripunov",
         migration_rehearsal=False, approve_production=True,
     ) == ("DEPLOY", True)
+
+
+def test_main_push_classifier_output_never_enables_deploy(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", [
+        "native_release_intent.py", "--event", "push", "--ref", "refs/heads/main",
+        "--sha", "a" * 40, "--before", "b" * 40,
+    ])
+    monkeypatch.setattr(MODULE, "changed_paths", lambda *_args, **_kwargs: {
+        "apps/api/src/main.ts", "scripts/native_release_intent.py",
+    })
+    assert MODULE.main() == 0
+    output = capsys.readouterr().out
+    assert "mode=PREPARE_ONLY" in output
+    assert "deploy=false" in output
 
 
 def test_manual_production_dispatch_requires_exact_owner_approval_before_build():
