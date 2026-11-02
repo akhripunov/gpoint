@@ -10,7 +10,7 @@ servers:
     options:
       network: gpoint_eros_data
       env-file:
-        - /opt/gpoint/env/eros.env
+        - /opt/gpoint/env/eros-engine.env
       volume: /opt/gpoint/releases/<%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>/source/services/eros-engine/eros-production-model-config.toml:/etc/eros-engine/model_config.toml:ro
       memory: 384m
       cpus: 0.50

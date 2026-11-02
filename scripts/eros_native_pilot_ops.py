@@ -444,15 +444,17 @@ def cleanup_managed_networks() -> list[str]:
 
 def remove_runtime_file(path: Path) -> None:
     path = Path(path)
+    allowed = {path, path.with_name("eros-engine.env"), path.with_name("eros-api.env")}
     if os.environ.get("EROS_NATIVE_OPS_TEST") != "1" and path != Path("/opt/gpoint/env/eros.env"):
         raise PilotGateError("runtime cleanup path is outside the dedicated Eros environment file")
-    if path.is_symlink():
-        raise PilotGateError("Eros runtime environment cannot be a symlink")
-    if path.exists():
-        info = path.stat()
-        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_nlink != 1:
-            raise PilotGateError("Eros runtime environment file has unsafe ownership mode")
-        path.unlink()
+    for target in allowed:
+        if target.is_symlink():
+            raise PilotGateError("Eros runtime environment cannot be a symlink")
+        if target.exists():
+            info = target.stat()
+            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_nlink != 1:
+                raise PilotGateError("Eros runtime environment file has unsafe ownership mode")
+            target.unlink()
 
 
 def detach_pilot_api_network(version: str, source_sha: str, repo_digest: str) -> None:

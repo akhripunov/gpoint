@@ -160,7 +160,9 @@ test('Mac Ollama tunnel retries SSH after a disconnect and stops cleanly on TERM
   mkdirSync(bin);
   const calls = join(directory, 'ssh-calls');
   const identity = join(directory, 'synthetic-ssh-identity');
+  const knownHosts = join(directory, 'synthetic-known-hosts');
   writeFileSync(identity, 'synthetic identity marker\n', { mode: 0o600 });
+  writeFileSync(knownHosts, 'vps.invalid ssh-ed25519 synthetic-test-host-key\n', { mode: 0o600 });
   const script = fileURLToPath(new URL('open-mac-ollama-tunnel.sh', import.meta.url));
   const node = join(bin, 'node');
   const ssh = join(bin, 'ssh');
@@ -173,6 +175,7 @@ test('Mac Ollama tunnel retries SSH after a disconnect and stops cleanly on TERM
       PATH: `${bin}:/usr/bin:/bin`,
       EROS_PILOT_VPS_SSH_TARGET: 'synthetic@vps.invalid',
       GPOINT_SSH_IDENTITY_FILE: identity,
+      GPOINT_KNOWN_HOSTS_FILE: knownHosts,
       EROS_TEST_SSH_CALLS: calls,
     },
     stdio: 'ignore',

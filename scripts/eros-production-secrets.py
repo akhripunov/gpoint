@@ -18,6 +18,8 @@ import uuid
 
 
 ENV_PATH = Path('/opt/gpoint/env/eros.env')
+ENGINE_ENV_PATH = Path('/opt/gpoint/env/eros-engine.env')
+API_ENV_PATH = Path('/opt/gpoint/env/eros-api.env')
 SOURCE_ENV_PATH = Path('/opt/gpoint/env/production.env')
 SECRET_KEYS = (
     'EROS_JWT_SECRET',
@@ -95,6 +97,58 @@ def _runtime_aliases(values, user_id, creator_id):
         'EROS_TEST_USER_IDS': user_id,
         'EROS_TEST_CREATOR_IDS': creator_id,
     })
+
+
+def _env_projections(values):
+    """Return least-privilege env sets for the stock engine and GPoint API."""
+    engine_keys = (
+        'DATABASE_URL', 'GPOINT_API_KEY', 'GPOINT_WORKER_BRIDGE_SIGNING_SECRET',
+        'GPOINT_WORKER_TENANT_ID', 'OPENROUTER_API_KEY', 'SUPABASE_JWT_SECRET',
+        'MODEL_CONFIG_PATH', 'RUST_LOG', 'EROS_DATA_MODE',
+    )
+    api_keys = (
+        'EROS_ENABLED', 'EROS_PRODUCTION_TEST_MODE', 'EROS_DATA_MODE',
+        'EROS_PRODUCTION_TEST_USER_IDS', 'EROS_PRODUCTION_TEST_CREATOR_IDS',
+        'EROS_SERVICE_URL', 'EROS_JWT_SECRET', 'EROS_WORKER_SIGNING_SECRET',
+        'EROS_WORKER_TENANT_ID', 'EROS_BRIDGE_API_KEY', 'EROS_EMBEDDING_API_KEY',
+    )
+    return ({key: values[key] for key in engine_keys},
+            {key: values[key] for key in api_keys})
+
+
+def _write_private_env(path, values):
+    path = Path(path)
+    if path.parent.is_symlink() or path.is_symlink():
+        raise RuntimeError('Eros protected environment path cannot be a symlink')
+    production_paths = {ENV_PATH, ENGINE_ENV_PATH, API_ENV_PATH}
+    if path in production_paths and path.parent.stat().st_uid != 0:
+        raise RuntimeError('Eros protected environment directory must be root-owned')
+    if path.exists():
+        metadata = path.stat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077 or metadata.st_nlink != 1:
+            raise RuntimeError('Eros protected environment file has unsafe permissions')
+        if path in production_paths and metadata.st_uid != 0:
+            raise RuntimeError('Eros protected environment file must be root-owned')
+    fd, staged = tempfile.mkstemp(prefix=f'.{path.name}.', dir=str(path.parent))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'w') as stream:
+            for key in sorted(values):
+                stream.write(f'{key}={values[key]}\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(staged, path)
+        os.chmod(path, 0o600)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        try:
+            os.unlink(staged)
+        except FileNotFoundError:
+            pass
 
 
 def _new_values(source_sha, image, tenant_id, pilot_test_user_id='', pilot_test_creator_id=''):
@@ -225,26 +279,10 @@ def provision(path=ENV_PATH, *, source_sha, image, tenant_id=None, source_env=SO
                     or unquote(dsn.password or '') != values[password_key]):
                 raise RuntimeError('Eros database URL and protected credential disagree')
 
-    fd, staged = tempfile.mkstemp(prefix='.eros.env.', dir=str(path.parent))
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, 'w') as stream:
-            for key in sorted(values):
-                stream.write(f'{key}={values[key]}\n')
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(staged, path)
-        os.chmod(path, 0o600)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        try:
-            os.unlink(staged)
-        except FileNotFoundError:
-            pass
+    _write_private_env(path, values)
+    engine_values, api_values = _env_projections(values)
+    _write_private_env(path.with_name('eros-engine.env'), engine_values)
+    _write_private_env(path.with_name('eros-api.env'), api_values)
     return 'EROS_SECRET_STORE=READY'
 
 

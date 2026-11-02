@@ -16,7 +16,7 @@ def test_eros_kamal_services_are_private_and_use_exact_release_owned_inputs():
     assert set(engine["servers"]) == {"engine"}
     assert engine["servers"]["engine"]["proxy"] is False
     assert engine["servers"]["engine"]["options"]["network"] == "gpoint_eros_data"
-    assert engine["servers"]["engine"]["options"]["env-file"] == ["/opt/gpoint/env/eros.env"]
+    assert engine["servers"]["engine"]["options"]["env-file"] == ["/opt/gpoint/env/eros-engine.env"]
     assert engine["servers"]["engine"]["options"]["volume"].endswith(
         "/source/services/eros-engine/eros-production-model-config.toml:/etc/eros-engine/model_config.toml:ro"
     )
@@ -32,7 +32,7 @@ def test_eros_kamal_services_are_private_and_use_exact_release_owned_inputs():
     assert "proxy" not in engine and "proxy" not in relay
     assert api["service"] == "gpoint-core"
     assert api["servers"]["api"]["options"]["env-file"] == [
-        "/opt/gpoint/env/production.env", "/opt/gpoint/env/eros.env"
+        "/opt/gpoint/env/production.env", "/opt/gpoint/env/eros-api.env"
     ]
     assert api["servers"]["api"]["cmd"] == "node apps/api/dist/apps/api/src/main.js"
     assert "gpoint_app" not in api["servers"]["api"]["options"].get("network", "")

@@ -14,7 +14,7 @@ servers:
     options:
       env-file:
         - /opt/gpoint/env/production.env
-        - /opt/gpoint/env/eros.env
+        - /opt/gpoint/env/eros-api.env
       volume: /opt/gpoint/media:/data/media
     proxy:
       path_prefixes:

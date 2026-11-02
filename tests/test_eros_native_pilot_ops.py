@@ -52,6 +52,20 @@ def test_runtime_gate_requires_exact_single_uuid_pair_and_all_synthetic_flags():
         MODULE.validate_pilot_runtime(values, CREATOR_ID, USER_ID, "a" * 40)
 
 
+def test_cleanup_removes_only_the_three_dedicated_eros_environment_files(monkeypatch, tmp_path):
+    monkeypatch.setenv("EROS_NATIVE_OPS_TEST", "1")
+    paths = [tmp_path / name for name in ("eros.env", "eros-engine.env", "eros-api.env")]
+    for path in paths:
+        path.write_text("synthetic-only\n")
+        path.chmod(0o600)
+    protected = tmp_path / "production.env"
+    protected.write_text("keep\n")
+    protected.chmod(0o600)
+    MODULE.remove_runtime_file(paths[0])
+    assert all(not path.exists() for path in paths)
+    assert protected.read_text() == "keep\n"
+
+
 def test_local_image_alias_is_confined_to_exact_disposable_docker_e2e(monkeypatch):
     image = "gpoint-eros-pilot:" + "a" * 40
     assert not MODULE._valid_stock_image(image, "a" * 40)

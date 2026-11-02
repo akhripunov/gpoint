@@ -51,6 +51,12 @@ def run(*args: str, check: bool = True, timeout: int = 120) -> subprocess.Comple
     return result
 
 
+def inspect_container_env(name: str) -> dict[str, str]:
+    raw = run("docker", "inspect", "--format", "{{json .Config.Env}}", name).stdout
+    entries = json.loads(raw)
+    return dict(item.split("=", 1) for item in entries if "=" in item)
+
+
 def main() -> int:
     global stage
     parser = argparse.ArgumentParser()
@@ -121,6 +127,33 @@ def main() -> int:
             stage = "database and role provisioning"
             secrets_module.provision_database(env_file)
             values = ops._load_env(env_file)
+            stage = "least-privilege container env projection"
+            production_env = root / "production-container.env"
+            production_env.write_text("DATABASE_URL=postgresql://gpoint_api@gpoint-db:5432/gpoint\n", encoding="utf-8")
+            production_env.chmod(0o600)
+            engine_env_file = env_file.with_name("eros-engine.env")
+            api_env_file = env_file.with_name("eros-api.env")
+            engine_probe = f"eros-engine-env-{suffix}"
+            api_probe = f"eros-api-env-{suffix}"
+            run("docker", "create", "--name", engine_probe, "--env-file", str(engine_env_file),
+                "--entrypoint", "/bin/true", args.image)
+            run("docker", "create", "--name", api_probe, "--env-file", str(production_env),
+                "--env-file", str(api_env_file), "--entrypoint", "/bin/true", args.image)
+            engine_container_env = inspect_container_env(engine_probe)
+            api_container_env = inspect_container_env(api_probe)
+            for probe in (engine_probe, api_probe):
+                run("docker", "rm", probe)
+            forbidden = {"EROS_MIGRATOR_PASSWORD", "EROS_MIGRATOR_DATABASE_URL"}
+            if forbidden.intersection(engine_container_env) or forbidden.intersection(api_container_env):
+                raise RuntimeError("migrator credentials crossed into an application container")
+            if engine_container_env.get("DATABASE_URL") != values["EROS_RUNTIME_DATABASE_URL"]:
+                raise RuntimeError("stock Eros engine did not receive the runtime database projection")
+            if api_container_env.get("DATABASE_URL") != "postgresql://gpoint_api@gpoint-db:5432/gpoint":
+                raise RuntimeError("Eros API projection replaced GPoint DATABASE_URL")
+            if api_container_env.get("EROS_PRODUCTION_TEST_USER_IDS") != args.test_user_id:
+                raise RuntimeError("exact user UUID was not projected into the API runtime")
+            if api_container_env.get("EROS_PRODUCTION_TEST_CREATOR_IDS") != args.test_creator_id:
+                raise RuntimeError("exact character UUID was not projected into the API runtime")
             os.environ["EROS_NATIVE_OPS_TEST"] = "1"
             os.environ["EROS_NATIVE_OPS_TEST_POSTGRES_CONTAINER"] = container
             os.environ["EROS_NATIVE_OPS_TEST_RUN_DIR"] = str(run_dir)
@@ -198,12 +231,15 @@ def main() -> int:
                 raise RuntimeError("cleanup modified the protected GPoint database")
             print(f"EROS_NATIVE_POSTGRES_E2E=PASS stock_migrations={migrations} backup_sha256={facts['sha256']}")
             print("EROS_NATIVE_POSTGRES_ACL=PASS Eros runtime can connect only to eros")
+            print("EROS_CONTAINER_ENV_PROJECTION=PASS migrator_hidden=true gpoint_database_preserved=true exact_allowlist=true")
             print("EROS_NATIVE_POSTGRES_RESTORE_ROLLBACK=PASS isolated_probe=PASS tamper_rejected=PASS")
             print("EROS_NATIVE_STOCK_PERSONA_SEED=PASS exact_single_genome=true")
             print("EROS_NATIVE_PILOT_CLEANUP=PASS identity_mismatch_rejected=PASS gpoint_database_preserved=PASS")
             print("EROS_PRIVATE_NETWORKS=PASS embeddings_internal=true ollama_public_port=none")
             print("EROS_POSTGRES_INGRESS=PASS published_ports=none")
         finally:
+            for probe in (f"eros-engine-env-{suffix}", f"eros-api-env-{suffix}"):
+                run("docker", "rm", "-f", probe, check=False)
             if started_container:
                 run("docker", "rm", "-f", container, check=False)
             for network in reversed((data_network, embedding_network)):
