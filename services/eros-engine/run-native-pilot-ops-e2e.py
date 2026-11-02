@@ -132,8 +132,8 @@ def main() -> int:
             stage = "ACL and private network readback"
             privilege_row = run("docker", "exec", container, "psql", "-XqAt", "-v", "ON_ERROR_STOP=1",
                 "-U", "postgres", "-d", "postgres", "-c",
-                "SELECT has_database_privilege('eros_runtime','eros','CONNECT')::text || '|' || has_database_privilege('eros_runtime','gpoint','CONNECT')::text || '|' || has_database_privilege('eros_migrator','gpoint','CONNECT')::text").stdout.strip()
-            if privilege_row != "true|false|false":
+                "SELECT has_database_privilege('eros_runtime','eros','CONNECT')::text || '|' || has_database_privilege('eros_runtime','eros','CREATE')::text || '|' || has_database_privilege('eros_migrator','eros','CREATE')::text || '|' || has_database_privilege('eros_runtime','gpoint','CONNECT')::text || '|' || has_database_privilege('eros_migrator','gpoint','CONNECT')::text").stdout.strip()
+            if privilege_row != "true|false|true|false|false":
                 raise RuntimeError("Eros runtime database ACL isolation read-back failed")
             db_networks = json.loads(run("docker", "inspect", container, "--format", "{{json .NetworkSettings.Networks}}").stdout)
             if set(db_networks) != {data_network} or db_networks[data_network]["Aliases"].count("gpoint-eros-db") != 1:

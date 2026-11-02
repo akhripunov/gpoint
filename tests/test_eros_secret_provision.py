@@ -224,6 +224,7 @@ class ErosProductionSecretTests(unittest.TestCase):
             self.assertEqual(len(calls), 7)
             sql = '\n'.join(call[1]['input'] for call in calls)
             self.assertIn('CREATE DATABASE eros OWNER eros_ddl', sql)
+            self.assertIn('GRANT CREATE ON DATABASE eros TO eros_migrator', sql)
             self.assertIn('eros_deployment_identity', sql)
             self.assertIn('REVOKE CONNECT ON DATABASE gpoint FROM eros_runtime, eros_migrator', sql)
             self.assertIn('NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS', sql)

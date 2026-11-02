@@ -354,6 +354,7 @@ DO $$ BEGIN
 END $$;
 REVOKE CONNECT ON DATABASE eros FROM PUBLIC;
 GRANT CONNECT ON DATABASE eros TO eros_runtime, eros_migrator;
+GRANT CREATE ON DATABASE eros TO eros_migrator;
 GRANT USAGE, CREATE ON SCHEMA public TO eros_migrator;
 GRANT USAGE, CREATE ON SCHEMA engine TO eros_migrator;
 GRANT USAGE ON SCHEMA public, engine TO eros_runtime;
