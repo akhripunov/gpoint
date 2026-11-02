@@ -81,6 +81,8 @@ def test_native_pilot_apply_is_separately_gated_and_ordinary_release_fails_close
     assert {"workspace", "python", "eros-pilot-integration", "build"}.issubset(set(apply["needs"]))
     assert apply["concurrency"]["group"] == "gpoint-production-release"
     assert apply["runs-on"] == ["self-hosted", "macOS", "gpoint-production"]
+    assert "runner.temp" not in str(apply.get("env", {}))
+    assert "GITHUB_ENV" in str(apply["steps"])
     assert any("eros-native-pilot-lifecycle.sh" in step.get("run", "") for step in apply["steps"])
     assert "approve_production" not in str(apply)
     lifecycle = (ROOT / "scripts/eros-native-pilot-lifecycle.sh").read_text()

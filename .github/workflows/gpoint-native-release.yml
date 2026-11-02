@@ -486,8 +486,6 @@ jobs:
       CANDIDATE_SHA: ${{ inputs.candidate_sha }}
       IMAGE_VERSION: ${{ inputs.candidate_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
       GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}
-      GPOINT_SSH_KEY: ${{ runner.temp }}/gpoint-eros-pilot/id_ed25519
-      GPOINT_KNOWN_HOSTS_FILE: ${{ runner.temp }}/gpoint-eros-pilot/known_hosts
       GPOINT_KAMAL_EXPECTED_DIGEST: ${{ needs.build.outputs.app_digest }}
       KAMAL_REGISTRY_PASSWORD: ${{ github.token }}
       EROS_PILOT_IMAGE: ghcr.io/akhripunov/gpoint-eros-pilot@${{ needs.eros-pilot-integration.outputs.eros_digest }}
@@ -528,6 +526,9 @@ jobs:
           set -euo pipefail
           test -n "$SSH_PRIVATE_KEY" && test -n "$VERIFIED_KNOWN_HOSTS"
           [[ "$GPOINT_PRODUCTION_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
+          GPOINT_SSH_KEY="$RUNNER_TEMP/gpoint-eros-pilot/id_ed25519"
+          GPOINT_KNOWN_HOSTS_FILE="$RUNNER_TEMP/gpoint-eros-pilot/known_hosts"
+          printf 'GPOINT_SSH_KEY=%s\nGPOINT_KNOWN_HOSTS_FILE=%s\n' "$GPOINT_SSH_KEY" "$GPOINT_KNOWN_HOSTS_FILE" >> "$GITHUB_ENV"
           install -d -m 700 "$(dirname "$GPOINT_SSH_KEY")"
           printf '%s\n' "$SSH_PRIVATE_KEY" > "$GPOINT_SSH_KEY"
           printf '%s\n' "$VERIFIED_KNOWN_HOSTS" > "$GPOINT_KNOWN_HOSTS_FILE"
@@ -586,8 +587,6 @@ jobs:
     env:
       CANDIDATE_SHA: ${{ inputs.candidate_sha }}
       GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}
-      GPOINT_SSH_KEY: ${{ runner.temp }}/gpoint-eros-pilot/id_ed25519
-      GPOINT_KNOWN_HOSTS_FILE: ${{ runner.temp }}/gpoint-eros-pilot/known_hosts
       KAMAL_REGISTRY_PASSWORD: ${{ github.token }}
       EROS_PILOT_TEST_USER_ID: ${{ inputs.eros_pilot_test_user_id }}
       EROS_PILOT_TEST_CREATOR_ID: ${{ inputs.eros_pilot_test_creator_id }}
@@ -626,6 +625,9 @@ jobs:
           set -euo pipefail
           test -n "$SSH_PRIVATE_KEY" && test -n "$VERIFIED_KNOWN_HOSTS"
           [[ "$GPOINT_PRODUCTION_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
+          GPOINT_SSH_KEY="$RUNNER_TEMP/gpoint-eros-pilot/id_ed25519"
+          GPOINT_KNOWN_HOSTS_FILE="$RUNNER_TEMP/gpoint-eros-pilot/known_hosts"
+          printf 'GPOINT_SSH_KEY=%s\nGPOINT_KNOWN_HOSTS_FILE=%s\n' "$GPOINT_SSH_KEY" "$GPOINT_KNOWN_HOSTS_FILE" >> "$GITHUB_ENV"
           install -d -m 700 "$(dirname "$GPOINT_SSH_KEY")"
           printf '%s\n' "$SSH_PRIVATE_KEY" > "$GPOINT_SSH_KEY"
           printf '%s\n' "$VERIFIED_KNOWN_HOSTS" > "$GPOINT_KNOWN_HOSTS_FILE"
