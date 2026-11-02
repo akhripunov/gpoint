@@ -9,3 +9,5 @@ pnpm test
 ```
 
 The first Explore vertical slice has been installed, migrated, seeded, built, tested, and browser-checked locally. No Telegram credentials are stored in this repository.
+
+Production release path: push to `main` → Tests → Build → Kamal Deploy → Runtime Verify.
