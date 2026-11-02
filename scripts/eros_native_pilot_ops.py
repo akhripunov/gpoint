@@ -115,7 +115,8 @@ def _run(command: list[str], *, input_text: str | None = None, input_bytes: byte
     try:
         input_data = input_bytes if input_bytes is not None else input_text.encode("utf-8") if input_text is not None else None
         result = subprocess.run(command, input=input_data,
-                                stdout=stdout, stderr=subprocess.PIPE, timeout=timeout, check=False)
+                                stdout=subprocess.PIPE if stdout is None else stdout,
+                                stderr=subprocess.PIPE, timeout=timeout, check=False)
     except (OSError, subprocess.TimeoutExpired):
         raise PilotGateError("Native Eros pilot operation failed to start or timed out") from None
     if result.returncode:

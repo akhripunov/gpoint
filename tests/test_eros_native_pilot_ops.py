@@ -83,6 +83,19 @@ def test_local_stock_image_readback_returns_docker_image_id(monkeypatch):
     }
 
 
+def test_native_ops_run_captures_stdout_for_readbacks(monkeypatch):
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return type("Result", (), {"returncode": 0, "stdout": b"verified"})()
+
+    monkeypatch.setattr(MODULE.subprocess, "run", run)
+    result = MODULE._run(["docker", "image", "inspect", "gpoint-eros-pilot:test"])
+    assert result.stdout == b"verified"
+    assert calls[0][1]["stdout"] == MODULE.subprocess.PIPE
+
+
 def test_migrator_env_contains_only_sqlx_dsn_and_is_private(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
         monkeypatch.setenv("EROS_NATIVE_OPS_TEST", "1")
