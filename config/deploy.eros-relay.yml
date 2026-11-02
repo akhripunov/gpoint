@@ -1,0 +1,44 @@
+service: gpoint-eros-relay
+image: akhripunov/gpoint-runtime
+primary_role: relay
+
+servers:
+  relay:
+    hosts:
+      - <%= ENV.fetch("GPOINT_PRODUCTION_HOST") %>
+    cmd: node /opt/gpoint/eros-pilot-embedding-relay.mjs
+    proxy: false
+    env:
+      clear:
+        EROS_PILOT_RELAY_BIND: 172.31.254.1:11434
+        EROS_PILOT_OLLAMA_MODEL_DIGEST: ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d
+        RELEASE_SHA: <%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>
+    options:
+      network: host
+      volume: /opt/gpoint/releases/<%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>/source/services/eros-engine/eros-pilot-embedding-relay.mjs:/opt/gpoint/eros-pilot-embedding-relay.mjs:ro
+      memory: 64m
+      cpus: 0.25
+      pids-limit: 64
+      read-only: true
+      tmpfs: /tmp
+      cap-drop: ALL
+      security-opt: no-new-privileges:true
+
+registry:
+  server: ghcr.io
+  username: akhripunov
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+ssh:
+  user: root
+  keys:
+    - <%= ENV.fetch("GPOINT_SSH_KEY") %>
+  keys_only: true
+  config: true
+
+builder:
+  arch: amd64
+
+retain_containers: 2
+minimum_version: 2.12.0

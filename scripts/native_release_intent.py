@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -40,6 +41,10 @@ OPERATIONAL_PREFIXES = (
 )
 SCHEMA_FILENAMES = frozenset({"schema.prisma"})
 TEST_DIRECTORY_NAMES = frozenset({"test", "tests"})
+SYNTHETIC_UUID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 
 
 def _path_kind(path: str) -> str:
@@ -109,6 +114,39 @@ def classify_dispatch(*, ref: str, candidate_sha: str, github_sha: str, actor: s
     return "NO_DEPLOY", False
 
 
+def _single_synthetic_id(value: str) -> bool:
+    values = [item.strip() for item in value.split(",") if item.strip()]
+    return len(values) == 1 and SYNTHETIC_UUID.fullmatch(values[0]) is not None
+
+
+def classify_eros_pilot_dispatch(*, event_name: str, ref: str, candidate_sha: str,
+                                 github_sha: str, actor: str, repository_owner: str,
+                                 opt_in: bool, approve_apply: bool,
+                                 environment_approved: bool, approve_production: bool,
+                                 migration_rehearsal: bool, backup_maintenance: bool,
+                                 rollback: bool, test_user_ids: str,
+                                 test_creator_ids: str) -> tuple[str, bool]:
+    """Route a single-pair synthetic pilot without opening ordinary Deploy."""
+    eligible = (
+        event_name == "workflow_dispatch" and ref == "refs/heads/main" and
+        bool(re.fullmatch(r"[0-9a-f]{40}", candidate_sha)) and
+        candidate_sha == github_sha and bool(repository_owner) and
+        actor.lower() == repository_owner.lower() and opt_in is True and
+        approve_production is False and migration_rehearsal is False and
+        backup_maintenance is False and rollback is False and
+        _single_synthetic_id(test_user_ids) and _single_synthetic_id(test_creator_ids)
+    )
+    if not eligible:
+        return "INVALID_SYNTHETIC_PILOT", False
+    if not approve_apply:
+        if environment_approved:
+            return "INVALID_SYNTHETIC_PILOT", False
+        return "SYNTHETIC_PILOT_READY", False
+    if not environment_approved:
+        return "SYNTHETIC_PILOT_APPLY_REQUESTED", False
+    return "SYNTHETIC_PILOT_APPLY", True
+
+
 def changed_paths(before: str, sha: str, *, repo: Path = Path.cwd()) -> set[str]:
     if (not re.fullmatch(r"[0-9a-f]{40}", before)
             or not re.fullmatch(r"[0-9a-f]{40}", sha)
@@ -137,6 +175,9 @@ def main() -> int:
     parser.add_argument("--backup-maintenance", action="store_true")
     parser.add_argument("--rollback", action="store_true")
     parser.add_argument("--approve-production", action="store_true")
+    parser.add_argument("--synthetic-eros-pilot", action="store_true")
+    parser.add_argument("--approve-synthetic-eros-pilot", action="store_true")
+    parser.add_argument("--pilot-environment-approved", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -145,14 +186,30 @@ def main() -> int:
             mode = classify_push(event_name=args.event, ref=args.ref, changed_paths=paths)
             deploy = mode == "DEPLOY"
         elif args.event == "workflow_dispatch":
-            mode, deploy = classify_dispatch(
-                ref=args.ref, candidate_sha=args.candidate_sha, github_sha=args.sha,
-                actor=args.actor, repository_owner=args.repository_owner,
-                migration_rehearsal=args.migration_rehearsal,
-                approve_production=args.approve_production,
-                backup_maintenance=args.backup_maintenance,
-                rollback=args.rollback,
-            )
+            if args.synthetic_eros_pilot or args.approve_synthetic_eros_pilot:
+                mode, deploy = classify_eros_pilot_dispatch(
+                    event_name=args.event, ref=args.ref,
+                    candidate_sha=args.candidate_sha, github_sha=args.sha,
+                    actor=args.actor, repository_owner=args.repository_owner,
+                    opt_in=args.synthetic_eros_pilot,
+                    approve_apply=args.approve_synthetic_eros_pilot,
+                    environment_approved=args.pilot_environment_approved,
+                    approve_production=args.approve_production,
+                    migration_rehearsal=args.migration_rehearsal,
+                    backup_maintenance=args.backup_maintenance,
+                    rollback=args.rollback,
+                    test_user_ids=os.environ.get("EROS_PILOT_TEST_USER_ID", ""),
+                    test_creator_ids=os.environ.get("EROS_PILOT_TEST_CREATOR_ID", ""),
+                )
+            else:
+                mode, deploy = classify_dispatch(
+                    ref=args.ref, candidate_sha=args.candidate_sha, github_sha=args.sha,
+                    actor=args.actor, repository_owner=args.repository_owner,
+                    migration_rehearsal=args.migration_rehearsal,
+                    approve_production=args.approve_production,
+                    backup_maintenance=args.backup_maintenance,
+                    rollback=args.rollback,
+                )
         else:
             mode, deploy = "NO_DEPLOY", False
     except (OSError, subprocess.CalledProcessError, ValueError) as error:

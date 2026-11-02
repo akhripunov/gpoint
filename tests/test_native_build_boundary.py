@@ -16,7 +16,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
 
     def test_pipeline_has_release_gate_and_one_isolated_rehearsal_job(self):
         jobs = self.workflow["jobs"]
-        self.assertEqual(set(jobs), {"workspace", "python", "build", "deploy", "rollback", "backup_maintenance", "migration_rehearsal"})
+        self.assertEqual(set(jobs), {"workspace", "python", "eros-pilot-integration", "build", "deploy", "rollback", "backup_maintenance", "migration_rehearsal"})
         rollback = jobs["rollback"]
         self.assertIn("outputs.mode == 'ROLLBACK'", rollback["if"])
         self.assertEqual(rollback["environment"], {"name": "production", "deployment": False})

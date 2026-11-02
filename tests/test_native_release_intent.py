@@ -198,3 +198,61 @@ def test_rollback_dispatch_requires_main_exact_owner_explicit_approval_and_no_ot
         invalid.update(changes)
         assert MODULE.classify_dispatch(**invalid)[1] is False
         assert MODULE.classify_dispatch(**invalid)[0] != "ROLLBACK"
+
+
+def test_synthetic_eros_pilot_is_a_separate_exact_sha_owner_opt_in():
+    result = MODULE.classify_eros_pilot_dispatch(
+        event_name="workflow_dispatch", ref="refs/heads/main",
+        candidate_sha="a" * 40, github_sha="a" * 40,
+        actor="akhripunov", repository_owner="akhripunov",
+        opt_in=True, approve_apply=False, environment_approved=False,
+        approve_production=False, migration_rehearsal=False,
+        backup_maintenance=False, rollback=False,
+        test_user_ids="10000000-0000-4000-8000-000000000001",
+        test_creator_ids="20000000-0000-4000-8000-000000000002",
+    )
+    assert result == ("SYNTHETIC_PILOT_READY", False)
+
+
+def test_synthetic_eros_apply_requires_its_own_approval_and_protected_environment():
+    args = dict(
+        event_name="workflow_dispatch", ref="refs/heads/main",
+        candidate_sha="a" * 40, github_sha="a" * 40,
+        actor="akhripunov", repository_owner="akhripunov",
+        opt_in=True, approve_apply=True, environment_approved=True,
+        approve_production=False, migration_rehearsal=False,
+        backup_maintenance=False, rollback=False,
+        test_user_ids="10000000-0000-4000-8000-000000000001",
+        test_creator_ids="20000000-0000-4000-8000-000000000002",
+    )
+    assert MODULE.classify_eros_pilot_dispatch(**args) == ("SYNTHETIC_PILOT_APPLY", True)
+    for changes in (
+        {"opt_in": False}, {"approve_apply": False}, {"environment_approved": False},
+        {"approve_production": True}, {"migration_rehearsal": True},
+        {"candidate_sha": "b" * 40}, {"actor": "other"},
+    ):
+        invalid = dict(args)
+        invalid.update(changes)
+        assert MODULE.classify_eros_pilot_dispatch(**invalid)[1] is False
+
+
+def test_synthetic_eros_pilot_rejects_non_synthetic_or_multiple_allowlist_ids():
+    args = dict(
+        event_name="workflow_dispatch", ref="refs/heads/main",
+        candidate_sha="a" * 40, github_sha="a" * 40,
+        actor="akhripunov", repository_owner="akhripunov",
+        opt_in=True, approve_apply=False, environment_approved=False,
+        approve_production=False, migration_rehearsal=False,
+        backup_maintenance=False, rollback=False,
+        test_user_ids="10000000-0000-4000-8000-000000000001",
+        test_creator_ids="20000000-0000-4000-8000-000000000002",
+    )
+    for changes in (
+        {"test_user_ids": ""},
+        {"test_user_ids": "10000000-0000-4000-8000-000000000001,30000000-0000-4000-8000-000000000003"},
+        {"test_creator_ids": "not-a-uuid"},
+        {"test_creator_ids": "20000000-0000-4000-8000-000000000002,30000000-0000-4000-8000-000000000003"},
+    ):
+        invalid = dict(args)
+        invalid.update(changes)
+        assert MODULE.classify_eros_pilot_dispatch(**invalid) == ("INVALID_SYNTHETIC_PILOT", False)

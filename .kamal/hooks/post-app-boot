@@ -29,6 +29,12 @@ case "$service" in
   gpoint-miniapp)
     default_roles='web'
     ;;
+  gpoint-eros-pilot)
+    default_roles='engine'
+    ;;
+  gpoint-eros-relay)
+    default_roles='relay'
+    ;;
   *)
     echo 'Unrecognized GPoint Kamal service' >&2
     exit 1
@@ -46,6 +52,8 @@ for role in $(printf '%s' "$roles" | tr ',' ' '); do
     gpoint-agata:api) networks='gpoint_app:agata-api,shared_internal:agata-api' ;;
     gpoint-agata:memory-worker) networks='gpoint_app:,shared_internal:' ;;
     gpoint-miniapp:web) networks='gpoint_app:' ;;
+    gpoint-eros-pilot:engine) networks='gpoint_app:eros' ;;
+    gpoint-eros-relay:relay) networks='' ;;
     *)
       echo 'Unrecognized GPoint Kamal role' >&2
       exit 1
@@ -69,8 +77,9 @@ id="$(docker inspect --format '{{.Id}}' "$container")"
 test "$(docker inspect --format '{{.State.Running}}' "$id")" = true
 test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$id")" = "$app_source_sha"
 
-IFS=',' read -r -a network_entries <<< "$networks"
-for entry in "${network_entries[@]}"; do
+  IFS=',' read -r -a network_entries <<< "$networks"
+  for entry in "${network_entries[@]}"; do
+    [[ -n "$entry" ]] || continue
   network="${entry%%:*}"
   alias="${entry#*:}"
   docker network inspect "$network" >/dev/null
@@ -121,10 +130,61 @@ if [[ "$service:$role" == "gpoint-agata:memory-worker" ]]; then
     fi
     sleep 5
   done
+
+  if [[ "$service:$role" == "gpoint-core:api" ]] && docker network inspect gpoint_eros_embeddings >/dev/null 2>&1; then
+    api_container="${service}-${role}-${version}"
+    api_id="$(docker inspect --format '{{.Id}}' "$api_container")"
+    network_json="$(docker network inspect gpoint_eros_embeddings)"
+    python3 - "$network_json" <<'PY'
+import json, sys
+net = json.loads(sys.argv[1])[0]
+if net.get("Internal") is not True or net.get("Driver") != "bridge":
+    raise SystemExit("Eros embeddings network must be an internal bridge")
+config = (net.get("IPAM") or {}).get("Config") or []
+if not any(x.get("Subnet") == "172.31.254.0/29" and x.get("Gateway") == "172.31.254.1" for x in config):
+    raise SystemExit("Eros embeddings network address plan differs")
+PY
+    current="$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$api_id")"
+    if ! python3 - "$current" <<'PY'
+import json, sys
+networks = json.loads(sys.argv[1]) or {}
+network = networks.get("gpoint_eros_embeddings") or {}
+raise SystemExit(0 if network.get("IPAddress") == "172.31.254.2" else 1)
+PY
+    then
+      if [[ -n "$(docker network inspect --format '{{range $id, $container := .Containers}}{{println $container.IPv4Address}}{{end}}' gpoint_eros_embeddings | grep '^172\.31\.254\.2/' || true)" ]]; then
+        echo 'Eros embeddings API address is already owned by another container' >&2
+        exit 1
+      fi
+      docker network connect --ip 172.31.254.2 gpoint_eros_embeddings "$api_id"
+    fi
+  fi
   test "$healthy" -eq 1 || { echo 'AGATA memory worker did not become healthy after network attachment' >&2; exit 1; }
 fi
   if [[ "$service:$role" == "gpoint-miniapp:web" ]]; then
     docker exec "$id" nginx -t >/dev/null
+  fi
+  if [[ "$service:$role" == "gpoint-eros-pilot:engine" ]]; then
+    healthy=0
+    for attempt in {1..30}; do
+      if docker exec "$id" curl -fsS --max-time 3 http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
+        healthy=1
+        break
+      fi
+      sleep 2
+    done
+    test "$healthy" -eq 1 || { echo 'stock Eros engine did not become healthy after Kamal boot' >&2; exit 1; }
+  fi
+  if [[ "$service:$role" == "gpoint-eros-relay:relay" ]]; then
+    healthy=0
+    for attempt in {1..20}; do
+      if docker exec "$id" node -e "fetch('http://172.31.254.1:11434/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" >/dev/null 2>&1; then
+        healthy=1
+        break
+      fi
+      sleep 2
+    done
+    test "$healthy" -eq 1 || { echo 'private Eros embedding relay did not become healthy after Kamal boot' >&2; exit 1; }
   fi
 REMOTE
 
