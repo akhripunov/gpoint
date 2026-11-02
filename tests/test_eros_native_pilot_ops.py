@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 
@@ -91,3 +92,109 @@ def test_restore_probe_database_name_is_strictly_scoped():
     for name in ("eros", "gpoint", "postgres", "eros_restore_probe_../../gpoint"):
         with pytest.raises(MODULE.PilotGateError):
             MODULE.validate_restore_probe_name(name)
+
+
+def test_pilot_cleanup_requires_exact_eros_database_owner_and_deployment_identity():
+    assert MODULE.validate_cleanup_identity(
+        database="eros", owner="eros_ddl", observed_identity="pilot-identity",
+        expected_identity="pilot-identity")
+    for database, owner, observed in (
+        ("gpoint", "gpoint", "pilot-identity"),
+        ("eros", "postgres", "pilot-identity"),
+        ("eros", "eros_ddl", "other-pilot"),
+    ):
+        with pytest.raises(MODULE.PilotGateError):
+            MODULE.validate_cleanup_identity(database=database, owner=owner,
+                observed_identity=observed, expected_identity="pilot-identity")
+
+
+def test_pilot_cleanup_never_targets_existing_gpoint_services_or_shared_networks():
+    assert MODULE.validate_cleanup_service("gpoint-eros-pilot")
+    assert MODULE.validate_cleanup_service("gpoint-eros-relay")
+    for service in ("gpoint-core", "gpoint-agata", "gpoint-miniapp", "shared_postgres_1"):
+        with pytest.raises(MODULE.PilotGateError):
+            MODULE.validate_cleanup_service(service)
+
+
+def test_cleanup_drops_only_identity_owned_database_and_exact_roles(monkeypatch):
+    calls = []
+    replies = iter(("eros_ddl", "pilot-identity", json.dumps({
+        "outsideOwners": 0, "memberships": 0, "connections": 0,
+    })))
+
+    def psql(sql, database="postgres"):
+        calls.append((database, sql))
+        try:
+            return next(replies)
+        except StopIteration:
+            return ""
+
+    monkeypatch.setattr(MODULE, "_psql", psql)
+    MODULE.cleanup_database("pilot-identity")
+    assert [sql for _, sql in calls if sql.startswith("DROP")] == [
+        "DROP DATABASE eros", "DROP ROLE eros_runtime; DROP ROLE eros_migrator; DROP ROLE eros_ddl;"
+    ]
+
+
+def test_cleanup_refuses_foreign_eros_database_identity_before_drop(monkeypatch):
+    calls = []
+
+    def psql(sql, database="postgres"):
+        calls.append(sql)
+        return "eros_ddl" if len(calls) == 1 else "not-this-pilot"
+
+    monkeypatch.setattr(MODULE, "_psql", psql)
+    with pytest.raises(MODULE.PilotGateError):
+        MODULE.cleanup_database("pilot-identity")
+    assert not any(sql.startswith("DROP") for sql in calls)
+
+
+def test_cleanup_refuses_network_with_foreign_container(monkeypatch):
+    row = {"Name": "gpoint_eros_data", "Driver": "bridge", "Internal": True,
+           "Labels": {"com.gpoint.eros.managed": "true"}, "IPAM": {"Config": []},
+           "Containers": {"abc": {"Name": "gpoint-core-api-foreign"}}}
+    monkeypatch.setattr(MODULE.subprocess, "run", lambda *a, **k: MODULE.subprocess.CompletedProcess(
+        a[0], 0, stdout=json.dumps([row]), stderr=""))
+    with pytest.raises(MODULE.PilotGateError, match="attached containers"):
+        MODULE.cleanup_managed_networks()
+
+
+def test_pilot_api_network_detach_requires_exact_release_source_and_digest():
+    with pytest.raises(MODULE.PilotGateError):
+        MODULE.detach_pilot_api_network("gpoint-core-api-latest", "a" * 40,
+            "ghcr.io/akhripunov/gpoint-runtime@sha256:" + "b" * 64)
+    with pytest.raises(MODULE.PilotGateError):
+        MODULE.detach_pilot_api_network("a" * 40 + "-1-1", "bad",
+            "ghcr.io/akhripunov/gpoint-runtime@sha256:" + "b" * 64)
+
+
+def test_stock_persona_seed_uses_exact_pinned_synthetic_fixture_and_private_database_network(monkeypatch):
+    monkeypatch.setenv("EROS_NATIVE_OPS_TEST", "1")
+    monkeypatch.setenv("EROS_NATIVE_OPS_TEST_SOURCE_ROOT", str(ROOT))
+    root = str(ROOT)
+    command = MODULE.stock_persona_seed_command(
+        "ghcr.io/akhripunov/gpoint-eros-pilot@sha256:" + "b" * 64,
+        "a" * 40, "/run/eros-migrator-" + "a" * 40 + ".env")
+    assert command == [
+        "docker", "run", "--rm", "--network", "gpoint_eros_data",
+        "--env-file", "/run/eros-migrator-" + "a" * 40 + ".env",
+        "--volume", root + "/services/eros-engine/test-personas:/etc/eros-engine/test-personas:ro",
+        "ghcr.io/akhripunov/gpoint-eros-pilot@sha256:" + "b" * 64,
+        "seed-personas", "/etc/eros-engine/test-personas",
+    ]
+    with pytest.raises(MODULE.PilotGateError):
+        MODULE.stock_persona_seed_command("ghcr.io/akhripunov/gpoint-eros-pilot:latest",
+            "a" * 40, "/run/eros-migrator-" + "a" * 40 + ".env")
+
+
+def test_stock_persona_seed_requires_one_genome_identity_and_keeps_result_private(tmp_path, monkeypatch):
+    monkeypatch.setenv("EROS_NATIVE_OPS_TEST", "1")
+    genome = "30000000-0000-4000-8000-000000000003"
+    assert MODULE.parse_seeded_genome_id(f"Synthetic Eros Persona: {genome}\n") == genome
+    for output in ("no persona output", f"Synthetic Eros Persona {genome}\nSynthetic Eros Persona {genome}"):
+        with pytest.raises(MODULE.PilotGateError):
+            MODULE.parse_seeded_genome_id(output)
+    result = tmp_path / "result.json"
+    MODULE.write_persona_seed_result(result, "a" * 40, genome)
+    assert result.stat().st_mode & 0o777 == 0o600
+    assert MODULE.json.loads(result.read_text())["genomeId"] == genome

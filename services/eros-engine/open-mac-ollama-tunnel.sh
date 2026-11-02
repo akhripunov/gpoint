@@ -7,6 +7,7 @@ if [ -z "${EROS_PILOT_VPS_SSH_TARGET:-}" ]; then
 fi
 
 ssh_identity=${GPOINT_SSH_IDENTITY_FILE:-}
+known_hosts=${GPOINT_KNOWN_HOSTS_FILE:-}
 if [ -z "$ssh_identity" ]; then
   config_file=${GPOINT_RELEASE_CONFIG:-${HOME:-}/.config/gpoint/release-tools.env}
   if [ -r "$config_file" ]; then
@@ -23,6 +24,11 @@ if [ -z "$ssh_identity" ]; then
 fi
 if [ -z "$ssh_identity" ] || [ ! -r "$ssh_identity" ]; then
   echo "GPOINT_SSH_IDENTITY_FILE_REQUIRED" >&2
+  exit 2
+fi
+if [ -z "$known_hosts" ]; then known_hosts=${HOME:-}/.ssh/known_hosts; fi
+if [ ! -r "$known_hosts" ]; then
+  echo "GPOINT_KNOWN_HOSTS_FILE_REQUIRED" >&2
   exit 2
 fi
 
@@ -56,6 +62,7 @@ while [ "$stopping" -eq 0 ]; do
   ssh -N -T \
   -o BatchMode=yes \
   -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile="$known_hosts" \
   -o IdentitiesOnly=yes \
   -i "$ssh_identity" \
   -o ExitOnForwardFailure=yes \

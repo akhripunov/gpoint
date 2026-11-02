@@ -61,7 +61,7 @@ def test_native_workflow_runs_pilot_in_disposable_environment_and_never_uses_ord
     trigger = workflow.get("on", workflow.get(True))
     assert trigger["workflow_dispatch"]["inputs"]["synthetic_eros_pilot"]["default"] is False
     jobs = workflow["jobs"]
-    assert jobs["eros-pilot-integration"]["if"] == "needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_READY' || needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_APPLY_REQUESTED'"
+    assert jobs["eros-pilot-integration"]["if"] == "needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_READY' || needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_APPLY_REQUESTED' || needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_VERIFY_ONLY'"
     steps = jobs["eros-pilot-integration"]["steps"]
     assert any("run-local-e2e.sh" in step.get("run", "") for step in steps)
     assert "needs.workspace.outputs.deploy == 'true'" in jobs["deploy"]["if"]
@@ -78,6 +78,22 @@ def test_native_pilot_apply_is_separately_gated_and_ordinary_release_fails_close
     assert apply["environment"] == {"name": "gpoint-eros-pilot", "deployment": False}
     assert "SYNTHETIC_PILOT_APPLY" in apply["if"]
     assert "SYNTHETIC_PILOT_APPLY" not in jobs["deploy"]["if"]
+    assert {"workspace", "python", "eros-pilot-integration", "build"}.issubset(set(apply["needs"]))
+    assert apply["concurrency"]["group"] == "gpoint-production-release"
+    assert apply["runs-on"] == ["self-hosted", "macOS", "gpoint-production"]
+    assert any("eros-native-pilot-lifecycle.sh" in step.get("run", "") for step in apply["steps"])
+    assert "approve_production" not in str(apply)
+    lifecycle = (ROOT / "scripts/eros-native-pilot-lifecycle.sh").read_text()
+    assert "--network gpoint_eros_embeddings --ip 172.31.254.3" in lifecycle
+    assert "EROS_QWEN3_RELAY=PASS" in lifecycle
+    assert "'/opt/gpoint/releases')/pilot_sha/'source/scripts/eros_native_pilot_ops.py'" in lifecycle
     topology = next(step for step in jobs["deploy"]["steps"] if step.get("id") == "topology")
     assert "NO_EROS_STATE" in topology.get("run", "")
     assert "collect_kamal_eros_state.py" in topology.get("run", "")
+
+
+def test_mac_embedding_tunnel_uses_verified_known_hosts_and_loopback_reverse_forward():
+    tunnel = (ROOT / "services/eros-engine/open-mac-ollama-tunnel.sh").read_text()
+    assert 'UserKnownHostsFile="$known_hosts"' in tunnel
+    assert "GatewayPorts=no" in tunnel
+    assert "-R 127.0.0.1:11435:127.0.0.1:11434" in tunnel

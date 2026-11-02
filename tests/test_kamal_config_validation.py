@@ -10,6 +10,9 @@ CONFIGS = [
     "config/deploy.yml",
     "config/deploy.agata.yml",
     "config/deploy.miniapp.yml",
+    "config/deploy.eros.yml",
+    "config/deploy.eros-relay.yml",
+    "config/deploy.eros-api.yml",
 ]
 REGISTRY_PASSWORD = "config-validation-placeholder"
 

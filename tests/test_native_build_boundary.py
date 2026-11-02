@@ -16,7 +16,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
 
     def test_pipeline_has_release_gate_and_one_isolated_rehearsal_job(self):
         jobs = self.workflow["jobs"]
-        self.assertEqual(set(jobs), {"workspace", "python", "eros-pilot-integration", "build", "deploy", "rollback", "backup_maintenance", "migration_rehearsal"})
+        self.assertEqual(set(jobs), {"workspace", "python", "eros-pilot-integration", "build", "eros-pilot-apply", "eros-pilot-cleanup", "deploy", "rollback", "backup_maintenance", "migration_rehearsal"})
         rollback = jobs["rollback"]
         self.assertIn("outputs.mode == 'ROLLBACK'", rollback["if"])
         self.assertEqual(rollback["environment"], {"name": "production", "deployment": False})
@@ -30,6 +30,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(set(jobs["build"]["needs"]), {"workspace", "python"})
         self.assertIn("outputs.mode == 'DEPLOY'", jobs["build"]["if"])
         self.assertIn("outputs.mode == 'REHEARSAL'", jobs["build"]["if"])
+        self.assertIn("outputs.mode == 'SYNTHETIC_PILOT_APPLY_REQUESTED'", jobs["build"]["if"])
         self.assertIn("build", jobs["deploy"]["needs"])
 
     def test_main_push_runs_ci_build_and_kamal_production_jobs(self):
@@ -198,8 +199,11 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
 
     def test_no_mac_runner_or_release_controller_is_used(self):
         text = WORKFLOW.read_text()
-        self.assertNotIn("[self-hosted, macOS, gpoint-production]", text)
-        self.assertNotIn("self-hosted", text)
+        self.assertEqual(text.count("runs-on: [self-hosted, macOS, gpoint-production]"), 2)
+        self.assertEqual(self.workflow["jobs"]["deploy"]["runs-on"], "ubuntu-latest")
+        self.assertEqual(self.workflow["jobs"]["rollback"]["runs-on"], "ubuntu-latest")
+        self.assertEqual(self.workflow["jobs"]["eros-pilot-apply"]["runs-on"], ["self-hosted", "macOS", "gpoint-production"])
+        self.assertEqual(self.workflow["jobs"]["eros-pilot-cleanup"]["runs-on"], ["self-hosted", "macOS", "gpoint-production"])
         self.assertNotIn("release:gpoint", text)
 
     def test_native_kamal_uses_attempt_scoped_image_version_and_hook_context(self):
@@ -229,7 +233,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         ))
 
         config_check = (ROOT / "scripts/check-kamal-configs.sh").read_text()
-        for config in ("deploy.yml", "deploy.agata.yml", "deploy.miniapp.yml"):
+        for config in ("deploy.yml", "deploy.agata.yml", "deploy.miniapp.yml",
+                       "deploy.eros.yml", "deploy.eros-relay.yml", "deploy.eros-api.yml"):
             self.assertIn(f"config/{config}", config_check)
         self.assertIn("config-validation-placeholder", config_check)
         self.assertIn("Kamal config validation failed", config_check)

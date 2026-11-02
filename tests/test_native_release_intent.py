@@ -252,6 +252,43 @@ def test_pilot_apply_intent_never_sets_the_ordinary_deploy_output():
     assert deploy is False
 
 
+def test_synthetic_pilot_cleanup_requires_a_separate_exact_sha_environment_gate():
+    base = dict(
+        event_name="workflow_dispatch", ref="refs/heads/main",
+        candidate_sha="a" * 40, github_sha="a" * 40,
+        actor="akhripunov", repository_owner="akhripunov",
+        opt_in=True, approve_apply=False, environment_approved=False,
+        approve_production=False, migration_rehearsal=False,
+        backup_maintenance=False, rollback=False,
+        test_user_ids="10000000-0000-4000-8000-000000000001",
+        test_creator_ids="20000000-0000-4000-8000-000000000002",
+        cleanup_pilot=True, approve_cleanup=False,
+    )
+    assert MODULE.classify_eros_pilot_dispatch(**base) == ("SYNTHETIC_PILOT_CLEANUP_REQUESTED", False)
+    approved = dict(base, approve_cleanup=True, environment_approved=True)
+    assert MODULE.classify_eros_pilot_dispatch(**approved) == ("SYNTHETIC_PILOT_CLEANUP", False)
+    assert MODULE.classify_eros_pilot_dispatch(**(approved | {"test_user_ids": ""}))[0] == "INVALID_SYNTHETIC_PILOT"
+    assert MODULE.classify_eros_pilot_dispatch(**(approved | {"approve_production": True}))[0] == "INVALID_SYNTHETIC_PILOT"
+    for changes in ({"approve_apply": True}, {"approve_cleanup": True, "environment_approved": False}):
+        assert MODULE.classify_eros_pilot_dispatch(**(approved | changes))[0] == "INVALID_SYNTHETIC_PILOT_CLEANUP"
+
+
+def test_non_main_exact_sha_synthetic_dispatch_is_verify_only_and_never_opens_apply():
+    args = dict(
+        event_name="workflow_dispatch", ref="refs/heads/codex/me36-eros-engine-v1",
+        candidate_sha="a" * 40, github_sha="a" * 40,
+        actor="akhripunov", repository_owner="akhripunov",
+        opt_in=True, approve_apply=False, environment_approved=False,
+        approve_production=False, migration_rehearsal=False,
+        backup_maintenance=False, rollback=False,
+        test_user_ids="10000000-0000-4000-8000-000000000001",
+        test_creator_ids="20000000-0000-4000-8000-000000000002",
+    )
+    assert MODULE.classify_eros_pilot_dispatch(**args) == ("SYNTHETIC_PILOT_VERIFY_ONLY", False)
+    for changes in ({"approve_apply": True}, {"environment_approved": True}, {"cleanup_pilot": True}):
+        assert MODULE.classify_eros_pilot_dispatch(**(args | changes))[0] == "INVALID_SYNTHETIC_PILOT"
+
+
 def test_synthetic_eros_pilot_rejects_non_synthetic_or_multiple_allowlist_ids():
     args = dict(
         event_name="workflow_dispatch", ref="refs/heads/main",

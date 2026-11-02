@@ -125,10 +125,12 @@ def classify_eros_pilot_dispatch(*, event_name: str, ref: str, candidate_sha: st
                                  environment_approved: bool, approve_production: bool,
                                  migration_rehearsal: bool, backup_maintenance: bool,
                                  rollback: bool, test_user_ids: str,
-                                 test_creator_ids: str) -> tuple[str, bool]:
+                                 test_creator_ids: str, cleanup_pilot: bool = False,
+                                 approve_cleanup: bool = False) -> tuple[str, bool]:
     """Route a single-pair synthetic pilot without opening ordinary Deploy."""
+    verify_branch = bool(re.fullmatch(r"refs/heads/codex/[A-Za-z0-9._/-]+", ref))
     eligible = (
-        event_name == "workflow_dispatch" and ref == "refs/heads/main" and
+        event_name == "workflow_dispatch" and (ref == "refs/heads/main" or verify_branch) and
         bool(re.fullmatch(r"[0-9a-f]{40}", candidate_sha)) and
         candidate_sha == github_sha and bool(repository_owner) and
         actor.lower() == repository_owner.lower() and opt_in is True and
@@ -138,6 +140,19 @@ def classify_eros_pilot_dispatch(*, event_name: str, ref: str, candidate_sha: st
     )
     if not eligible:
         return "INVALID_SYNTHETIC_PILOT", False
+    if verify_branch:
+        if approve_apply or environment_approved or cleanup_pilot or approve_cleanup:
+            return "INVALID_SYNTHETIC_PILOT", False
+        return "SYNTHETIC_PILOT_VERIFY_ONLY", False
+    if cleanup_pilot:
+        if approve_apply or (approve_cleanup and not environment_approved):
+            return "INVALID_SYNTHETIC_PILOT_CLEANUP", False
+        if not approve_cleanup:
+            return ("INVALID_SYNTHETIC_PILOT_CLEANUP" if environment_approved
+                    else "SYNTHETIC_PILOT_CLEANUP_REQUESTED"), False
+        return "SYNTHETIC_PILOT_CLEANUP", False
+    if approve_cleanup:
+        return "INVALID_SYNTHETIC_PILOT_CLEANUP", False
     if not approve_apply:
         if environment_approved:
             return "INVALID_SYNTHETIC_PILOT", False
@@ -177,17 +192,21 @@ def main() -> int:
     parser.add_argument("--approve-production", action="store_true")
     parser.add_argument("--synthetic-eros-pilot", action="store_true")
     parser.add_argument("--approve-synthetic-eros-pilot", action="store_true")
+    parser.add_argument("--synthetic-eros-pilot-cleanup", action="store_true")
+    parser.add_argument("--approve-synthetic-eros-pilot-cleanup", action="store_true")
     parser.add_argument("--pilot-environment-approved", action="store_true")
     args = parser.parse_args()
 
     pilot_apply = False
+    pilot_cleanup = False
     try:
         if args.event == "push":
             paths = changed_paths(args.before, args.sha)
             mode = classify_push(event_name=args.event, ref=args.ref, changed_paths=paths)
             deploy = mode == "DEPLOY"
         elif args.event == "workflow_dispatch":
-            if args.synthetic_eros_pilot or args.approve_synthetic_eros_pilot:
+            if (args.synthetic_eros_pilot or args.approve_synthetic_eros_pilot
+                    or args.synthetic_eros_pilot_cleanup or args.approve_synthetic_eros_pilot_cleanup):
                 mode, deploy = classify_eros_pilot_dispatch(
                     event_name=args.event, ref=args.ref,
                     candidate_sha=args.candidate_sha, github_sha=args.sha,
@@ -201,8 +220,11 @@ def main() -> int:
                     rollback=args.rollback,
                     test_user_ids=os.environ.get("EROS_PILOT_TEST_USER_ID", ""),
                     test_creator_ids=os.environ.get("EROS_PILOT_TEST_CREATOR_ID", ""),
+                    cleanup_pilot=args.synthetic_eros_pilot_cleanup,
+                    approve_cleanup=args.approve_synthetic_eros_pilot_cleanup,
                 )
                 pilot_apply = mode == "SYNTHETIC_PILOT_APPLY"
+                pilot_cleanup = mode == "SYNTHETIC_PILOT_CLEANUP"
             else:
                 mode, deploy = classify_dispatch(
                     ref=args.ref, candidate_sha=args.candidate_sha, github_sha=args.sha,
@@ -222,6 +244,7 @@ def main() -> int:
     print(f"mode={mode}")
     print(f"deploy={'true' if deploy else 'false'}")
     print(f"pilot_apply={'true' if pilot_apply else 'false'}")
+    print(f"pilot_cleanup={'true' if pilot_cleanup else 'false'}")
     if mode == "BLOCK" or mode.startswith("INVALID_"):
         return 2
     return 0

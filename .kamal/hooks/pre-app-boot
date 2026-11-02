@@ -55,11 +55,13 @@ except (TypeError, json.JSONDecodeError):
 if os.environ['EXPECTED_REF'] not in refs:
     raise SystemExit('Pulled Kamal image does not match the BuildKit-verified OCI digest')
 PY
-test "$source_sha" = "$expected_revision"
 if [[ "$service" == gpoint-eros-pilot ]]; then
+  test "$source_sha" = "$expected_revision"
   integration_sha="$(docker image inspect --format '{{index .Config.Labels "com.gpoint.integration.revision"}}' "$image")"
   test "$integration_sha" = "$candidate"
   test "$(docker image inspect --format '{{index .Config.Labels "com.gpoint.eros.patch-set.sha256"}}' "$image")" = none
+else
+  test "$source_sha" = "$app_source_sha"
 fi
 test "$platform" = linux/amd64
 REMOTE

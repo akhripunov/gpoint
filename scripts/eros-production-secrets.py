@@ -240,8 +240,15 @@ def provision(path=ENV_PATH, *, source_sha, image, tenant_id=None, source_env=SO
 
 
 def _psql(sql, database='postgres'):
+    container = 'shared_postgres_1'
+    if os.environ.get('EROS_PROVISION_TEST') == '1':
+        candidate = os.environ.get('EROS_PROVISION_TEST_POSTGRES_CONTAINER', '')
+        if re.fullmatch(r'eros-provision-test-[a-f0-9]{12}', candidate):
+            container = candidate
+        else:
+            raise RuntimeError('isolated Eros provisioning test container identity is invalid')
     result = subprocess.run(
-        ['docker', 'exec', '-i', 'shared_postgres_1', 'sh', '-ec',
+        ['docker', 'exec', '-i', container, 'sh', '-ec',
          'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d ' + database],
         input=sql, text=True, capture_output=True, timeout=45)
     if result.returncode:

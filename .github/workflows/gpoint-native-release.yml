@@ -59,6 +59,16 @@ on:
         required: true
         default: false
         type: boolean
+      synthetic_eros_pilot_cleanup:
+        description: Request the protected restore and cleanup path for an installed synthetic Eros pilot
+        required: true
+        default: false
+        type: boolean
+      approve_synthetic_eros_pilot_cleanup:
+        description: Confirm exact-SHA synthetic Eros pilot rollback and cleanup
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -74,6 +84,7 @@ jobs:
       mode: ${{ steps.intent.outputs.mode }}
       deploy: ${{ steps.intent.outputs.deploy }}
       pilot_apply: ${{ steps.intent.outputs.pilot_apply }}
+      pilot_cleanup: ${{ steps.intent.outputs.pilot_cleanup }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -115,6 +126,8 @@ jobs:
           EROS_PILOT_TEST_USER_ID: ${{ inputs.eros_pilot_test_user_id || '' }}
           EROS_PILOT_TEST_CREATOR_ID: ${{ inputs.eros_pilot_test_creator_id || '' }}
           APPROVE_SYNTHETIC_EROS_PILOT_APPLY: ${{ inputs.approve_synthetic_eros_pilot_apply || false }}
+          SYNTHETIC_EROS_PILOT_CLEANUP: ${{ inputs.synthetic_eros_pilot_cleanup || false }}
+          APPROVE_SYNTHETIC_EROS_PILOT_CLEANUP: ${{ inputs.approve_synthetic_eros_pilot_cleanup || false }}
         run: |
           set -euo pipefail
           args=(--event "$EVENT_NAME" --ref "$EVENT_REF" --sha "$EVENT_SHA"
@@ -127,6 +140,8 @@ jobs:
           [[ "$APPROVE_PRODUCTION" == true ]] && args+=(--approve-production)
           [[ "$SYNTHETIC_EROS_PILOT" == true ]] && args+=(--synthetic-eros-pilot)
           [[ "$APPROVE_SYNTHETIC_EROS_PILOT_APPLY" == true ]] && args+=(--approve-synthetic-eros-pilot)
+          [[ "$SYNTHETIC_EROS_PILOT_CLEANUP" == true ]] && args+=(--synthetic-eros-pilot-cleanup)
+          [[ "$APPROVE_SYNTHETIC_EROS_PILOT_CLEANUP" == true ]] && args+=(--approve-synthetic-eros-pilot-cleanup)
           python3 scripts/native_release_intent.py "${args[@]}" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
@@ -240,11 +255,14 @@ jobs:
   eros-pilot-integration:
     name: Isolated stock Eros migration and chat integration
     needs: [workspace, python]
-    if: needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_READY' || needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_APPLY_REQUESTED'
+    if: needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_READY' || needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_APPLY_REQUESTED' || needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_VERIFY_ONLY'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
       contents: read
+      packages: write
+    outputs:
+      eros_digest: ${{ steps.stock_image.outputs.digest }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -271,8 +289,35 @@ jobs:
               raise SystemExit('stock Eros image identity mismatch')
           print('EROS_STOCK_IMAGE_BUILD=PASS')
           PY
+      - name: Publish and read back the immutable stock Eros image for exact-SHA CI
+        id: stock_image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ github.sha }}
+          EROS_TAG: ghcr.io/akhripunov/gpoint-eros-pilot:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker tag "gpoint-eros-pilot:$CANDIDATE_SHA" "$EROS_TAG"
+          docker push "$EROS_TAG"
+          docker pull --platform linux/amd64 "$EROS_TAG"
+          digest="$(docker image inspect "$EROS_TAG" --format '{{json .RepoDigests}}' | python3 -c 'import json,sys; rows=json.load(sys.stdin); matches=[x.split("@",1)[1] for x in rows if x.startswith("ghcr.io/akhripunov/gpoint-eros-pilot@")]; assert len(matches)==1; print(matches[0])')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker pull --platform linux/amd64 "ghcr.io/akhripunov/gpoint-eros-pilot@$digest"
+          test "$(docker image inspect "ghcr.io/akhripunov/gpoint-eros-pilot@$digest" --format '{{index .Config.Labels "com.gpoint.integration.revision"}}')" = "$CANDIDATE_SHA"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Run isolated PostgreSQL, SQLx migrations, API, Worker, memory and 15-turn chat E2E
         run: bash services/eros-engine/run-local-e2e.sh "gpoint-eros-pilot:${{ github.sha }}"
+      - name: Run Native PostgreSQL provisioning, SQLx, backup, restore and cleanup E2E
+        env:
+          EROS_PILOT_IMAGE: ghcr.io/akhripunov/gpoint-eros-pilot@${{ steps.stock_image.outputs.digest }}
+          EROS_PILOT_TEST_USER_ID: ${{ inputs.eros_pilot_test_user_id }}
+          EROS_PILOT_TEST_CREATOR_ID: ${{ inputs.eros_pilot_test_creator_id }}
+        run: >-
+          python3 services/eros-engine/run-native-pilot-ops-e2e.py
+          --image "$EROS_PILOT_IMAGE" --candidate-sha "$GITHUB_SHA"
+          --test-user-id "$EROS_PILOT_TEST_USER_ID"
+          --test-creator-id "$EROS_PILOT_TEST_CREATOR_ID"
 
   build:
     name: Build and publish immutable images
@@ -422,6 +467,173 @@ jobs:
             echo "${role}_image_bytes=$image_bytes" >> "$GITHUB_OUTPUT"
           done
 
+  eros-pilot-apply:
+    name: Protected Native Kamal synthetic Eros Pilot Apply
+    needs: [workspace, python, eros-pilot-integration, build]
+    if: needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_APPLY_REQUESTED' && inputs.approve_synthetic_eros_pilot_apply == true && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, macOS, gpoint-production]
+    environment:
+      name: gpoint-eros-pilot
+      deployment: false
+    concurrency:
+      group: gpoint-production-release
+      cancel-in-progress: false
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: read
+    env:
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      IMAGE_VERSION: ${{ inputs.candidate_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+      GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}
+      GPOINT_SSH_KEY: ${{ runner.temp }}/gpoint-eros-pilot/id_ed25519
+      GPOINT_KNOWN_HOSTS_FILE: ${{ runner.temp }}/gpoint-eros-pilot/known_hosts
+      GPOINT_KAMAL_EXPECTED_DIGEST: ${{ needs.build.outputs.app_digest }}
+      KAMAL_REGISTRY_PASSWORD: ${{ github.token }}
+      EROS_PILOT_IMAGE: ghcr.io/akhripunov/gpoint-eros-pilot@${{ needs.eros-pilot-integration.outputs.eros_digest }}
+      EROS_PILOT_TEST_USER_ID: ${{ inputs.eros_pilot_test_user_id }}
+      EROS_PILOT_TEST_CREATOR_ID: ${{ inputs.eros_pilot_test_creator_id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Recheck exact owner-approved pilot intent after protected environment approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER_APPROVAL_ACTOR: ${{ github.actor }}
+          OWNER_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          OWNER_REPOSITORY: ${{ github.repository_owner }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY"
+          test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY"
+          test "$CANDIDATE_SHA" = "$WORKFLOW_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"
+          EROS_PILOT_TEST_USER_ID="$EROS_PILOT_TEST_USER_ID" EROS_PILOT_TEST_CREATOR_ID="$EROS_PILOT_TEST_CREATOR_ID" \
+            python3 scripts/native_release_intent.py --event workflow_dispatch --ref "$GITHUB_REF" \
+              --sha "$WORKFLOW_SHA" --candidate-sha "$CANDIDATE_SHA" --actor "$OWNER_APPROVAL_ACTOR" \
+              --repository-owner "$OWNER_REPOSITORY" --synthetic-eros-pilot \
+              --approve-synthetic-eros-pilot --pilot-environment-approved | tee "$RUNNER_TEMP/eros-pilot-intent.txt"
+          grep -Fx 'mode=SYNTHETIC_PILOT_APPLY' "$RUNNER_TEMP/eros-pilot-intent.txt"
+          grep -Fx 'pilot_apply=true' "$RUNNER_TEMP/eros-pilot-intent.txt"
+          grep -Fx 'deploy=false' "$RUNNER_TEMP/eros-pilot-intent.txt"
+      - name: Install verified VPS SSH credentials
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.GPOINT_KAMAL_SSH_PRIVATE_KEY }}
+          VERIFIED_KNOWN_HOSTS: ${{ secrets.GPOINT_KAMAL_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$SSH_PRIVATE_KEY" && test -n "$VERIFIED_KNOWN_HOSTS"
+          [[ "$GPOINT_PRODUCTION_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
+          install -d -m 700 "$(dirname "$GPOINT_SSH_KEY")"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$GPOINT_SSH_KEY"
+          printf '%s\n' "$VERIFIED_KNOWN_HOSTS" > "$GPOINT_KNOWN_HOSTS_FILE"
+          chmod 600 "$GPOINT_SSH_KEY" "$GPOINT_KNOWN_HOSTS_FILE"
+          ssh-keygen -F "$GPOINT_PRODUCTION_HOST" -f "$GPOINT_KNOWN_HOSTS_FILE" >/dev/null
+      - name: Open loopback-only Mac Ollama reverse tunnel with the locked Qwen3 embedding model
+        env:
+          EROS_PILOT_VPS_SSH_TARGET: root@${{ secrets.GPOINT_KAMAL_HOST }}
+          GPOINT_SSH_IDENTITY_FILE: ${{ runner.temp }}/gpoint-eros-pilot/id_ed25519
+          GPOINT_KNOWN_HOSTS_FILE: ${{ runner.temp }}/gpoint-eros-pilot/known_hosts
+        run: |
+          set -euo pipefail
+          bash services/eros-engine/open-mac-ollama-tunnel.sh > "$RUNNER_TEMP/eros-pilot-tunnel.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/eros-pilot-tunnel.pid"
+          ready=0
+          for _ in {1..30}; do
+            if ssh -F /dev/null -T -i "$GPOINT_SSH_IDENTITY_FILE" -o BatchMode=yes -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$GPOINT_KNOWN_HOSTS_FILE" \
+              "root@${GPOINT_PRODUCTION_HOST}" curl --fail --silent --show-error --max-time 3 http://127.0.0.1:11435/api/tags >/dev/null 2>&1; then
+              ready=1; break
+            fi
+            sleep 2
+          done
+          test "$ready" = 1 || { cat "$RUNNER_TEMP/eros-pilot-tunnel.log" >&2; exit 1; }
+      - name: Verify exact stock images and apply the isolated synthetic pilot through Kamal
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_DIGEST: ${{ needs.build.outputs.app_digest }}
+          AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
+          MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
+        run: bash scripts/eros-native-pilot-lifecycle.sh apply
+      - name: Stop Mac Ollama reverse tunnel
+        if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/eros-pilot-tunnel.pid" ]]; then
+            pid="$(cat "$RUNNER_TEMP/eros-pilot-tunnel.pid")"
+            if [[ "$pid" =~ ^[0-9]+$ ]]; then kill "$pid" 2>/dev/null || true; fi
+            rm -f "$RUNNER_TEMP/eros-pilot-tunnel.pid"
+          fi
+
+  eros-pilot-cleanup:
+    name: Protected Native Kamal synthetic Eros Pilot rollback and cleanup
+    needs: [workspace, python]
+    if: needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_CLEANUP_REQUESTED' && inputs.approve_synthetic_eros_pilot_cleanup == true && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, macOS, gpoint-production]
+    environment:
+      name: gpoint-eros-pilot
+      deployment: false
+    concurrency:
+      group: gpoint-production-release
+      cancel-in-progress: false
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: read
+    env:
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}
+      GPOINT_SSH_KEY: ${{ runner.temp }}/gpoint-eros-pilot/id_ed25519
+      GPOINT_KNOWN_HOSTS_FILE: ${{ runner.temp }}/gpoint-eros-pilot/known_hosts
+      KAMAL_REGISTRY_PASSWORD: ${{ github.token }}
+      EROS_PILOT_TEST_USER_ID: ${{ inputs.eros_pilot_test_user_id }}
+      EROS_PILOT_TEST_CREATOR_ID: ${{ inputs.eros_pilot_test_creator_id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Recheck exact owner-approved pilot cleanup intent
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER_APPROVAL_ACTOR: ${{ github.actor }}
+          OWNER_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          OWNER_REPOSITORY: ${{ github.repository_owner }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY"
+          test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY"
+          test "$CANDIDATE_SHA" = "$WORKFLOW_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"
+          EROS_PILOT_TEST_USER_ID="$EROS_PILOT_TEST_USER_ID" EROS_PILOT_TEST_CREATOR_ID="$EROS_PILOT_TEST_CREATOR_ID" \
+            python3 scripts/native_release_intent.py --event workflow_dispatch --ref "$GITHUB_REF" \
+              --sha "$WORKFLOW_SHA" --candidate-sha "$CANDIDATE_SHA" --actor "$OWNER_APPROVAL_ACTOR" \
+              --repository-owner "$OWNER_REPOSITORY" --synthetic-eros-pilot --synthetic-eros-pilot-cleanup \
+              --approve-synthetic-eros-pilot-cleanup --pilot-environment-approved | tee "$RUNNER_TEMP/eros-pilot-cleanup-intent.txt"
+          grep -Fx 'mode=SYNTHETIC_PILOT_CLEANUP' "$RUNNER_TEMP/eros-pilot-cleanup-intent.txt"
+          grep -Fx 'pilot_cleanup=true' "$RUNNER_TEMP/eros-pilot-cleanup-intent.txt"
+          grep -Fx 'deploy=false' "$RUNNER_TEMP/eros-pilot-cleanup-intent.txt"
+      - name: Install verified VPS SSH credentials
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.GPOINT_KAMAL_SSH_PRIVATE_KEY }}
+          VERIFIED_KNOWN_HOSTS: ${{ secrets.GPOINT_KAMAL_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$SSH_PRIVATE_KEY" && test -n "$VERIFIED_KNOWN_HOSTS"
+          [[ "$GPOINT_PRODUCTION_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
+          install -d -m 700 "$(dirname "$GPOINT_SSH_KEY")"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$GPOINT_SSH_KEY"
+          printf '%s\n' "$VERIFIED_KNOWN_HOSTS" > "$GPOINT_KNOWN_HOSTS_FILE"
+          chmod 600 "$GPOINT_SSH_KEY" "$GPOINT_KNOWN_HOSTS_FILE"
+          ssh-keygen -F "$GPOINT_PRODUCTION_HOST" -f "$GPOINT_KNOWN_HOSTS_FILE" >/dev/null
+      - name: Restore the pre-pilot database backup, stop only Eros pilot services and return API to baseline
+        run: bash scripts/eros-native-pilot-lifecycle.sh cleanup
+
   deploy:
     name: Kamal production Deploy and Verify
     needs: [workspace, python, build]
@@ -542,6 +754,7 @@ jobs:
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" "cat > '$remote_dir/$helper' && chmod 600 '$remote_dir/$helper'" < "$GITHUB_WORKSPACE/scripts/$helper"
           done
           ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 "$remote_dir/collect_kamal_eros_state.py" --output "$remote_dir/no-eros-state.json"
+          echo NO_EROS_STATE=PASS
           ssh -T "root@${GPOINT_PRODUCTION_HOST}" rm -rf -- "$remote_dir"
           role_inventory="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - < "$GITHUB_WORKSPACE/scripts/verify-kamal-production-baseline.py")"
           baseline_values="$(python3 -c 'import json,re,sys; d=json.loads(sys.argv[1]); assert set(d["roles"]) == {"gpoint-core-api","gpoint-core-worker","gpoint-core-bot","gpoint-agata-api","gpoint-agata-memory-worker","gpoint-miniapp-web"}; v=d["version"]; s=d["source_sha"]; assert re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+",v); assert re.fullmatch(r"[0-9a-f]{40}",s); print(v+"\t"+s)' "$role_inventory")"
