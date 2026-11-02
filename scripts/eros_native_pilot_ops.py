@@ -66,9 +66,9 @@ def _safe_diagnostic_code(stderr: bytes | str | None) -> str | None:
     for marker, code in patterns:
         if marker in text:
             return code
-    sqlstate = re.search(r"sqlstate(?:\s*(?:code)?\s*[:=]?\s*)([0-9a-z]{5})", text)
+    sqlstate = re.search(r"sqlstate(?:\s*(?:code)?\s*[:=]?\s*)[0-9a-z]{5}\b", text)
     if sqlstate:
-        return "postgres_sqlstate_" + sqlstate.group(1).upper()
+        return "postgres_sqlstate"
     return None
 
 

@@ -7,7 +7,6 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import re
 import secrets
 import subprocess
 import sys
@@ -23,7 +22,7 @@ SAFE_DIAGNOSTICS = frozenset({
     "postgres_object_owner", "postgres_dns_failure", "postgres_connection_failure",
     "postgres_authentication_failure", "postgres_migrator_role_missing",
     "postgres_database_missing", "postgres_vector_extension", "sqlx_migration_object_conflict",
-    "stock_eros_migration_failure",
+    "stock_eros_migration_failure", "postgres_sqlstate",
 })
 stage = "startup"
 
@@ -31,8 +30,7 @@ stage = "startup"
 def failure_summary(current_stage: str, error: Exception) -> str:
     line = f"EROS_NATIVE_POSTGRES_E2E=FAIL:stage={current_stage}:type={type(error).__name__}"
     diagnostic = getattr(error, "diagnostic_code", None)
-    if diagnostic in SAFE_DIAGNOSTICS or (isinstance(diagnostic, str)
-                                           and re.fullmatch(r"postgres_sqlstate_[0-9A-Z]{5}", diagnostic)):
+    if diagnostic in SAFE_DIAGNOSTICS:
         line += f":diagnostic={diagnostic}"
     return line
 

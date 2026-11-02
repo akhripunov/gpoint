@@ -113,7 +113,8 @@ def test_native_ops_run_classifies_permission_failures_without_exposing_output(m
 
 
 @pytest.mark.parametrize(("stdout", "stderr", "expected"), [
-    (b"sqlx error: SQLSTATE 42501", b"", "postgres_sqlstate_42501"),
+    (b"sqlx error: SQLSTATE 42501", b"", "postgres_sqlstate"),
+    (b"sqlx error: SQLSTATE secre!", b"", "postgres_sqlstate"),
     (b"vendor password mismatch", b"", "stock_eros_migration_failure"),
 ])
 def test_native_ops_run_classifies_stdout_only_migration_errors(monkeypatch, stdout, stderr, expected):

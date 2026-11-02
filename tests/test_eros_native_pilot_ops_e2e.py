@@ -27,5 +27,5 @@ def test_failure_summary_includes_only_allowlisted_diagnostic_code():
     assert "postgres password" not in line
     error.diagnostic_code = "postgresql://secret"
     assert "diagnostic=" not in MODULE.failure_summary("stock SQLx migration", error)
-    error.diagnostic_code = "postgres_sqlstate_42501"
-    assert "diagnostic=postgres_sqlstate_42501" in MODULE.failure_summary("stock SQLx migration", error)
+    error.diagnostic_code = "postgres_sqlstate"
+    assert "diagnostic=postgres_sqlstate" in MODULE.failure_summary("stock SQLx migration", error)
