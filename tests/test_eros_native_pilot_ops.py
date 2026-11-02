@@ -184,6 +184,50 @@ def test_restore_probe_database_name_is_strictly_scoped():
             MODULE.validate_restore_probe_name(name)
 
 
+def test_rollback_recreates_only_identity_matched_eros_database_before_restore(monkeypatch, tmp_path):
+    backup = tmp_path / ("eros-before-" + "a" * 40 + ".dump")
+    backup.write_bytes(b"synthetic postgres archive")
+    backup.chmod(0o600)
+    MODULE.write_backup_manifest(backup, "a" * 40, "pilot-identity", backup_root=tmp_path)
+    psql_calls = []
+    replies = iter(("eros_ddl|pilot-identity", "0", "", "eros_ddl|pilot-identity|true|true|false|true|true"))
+
+    def psql(sql, database="postgres"):
+        psql_calls.append((database, sql))
+        return next(replies)
+
+    restore_calls = []
+    monkeypatch.setattr(MODULE, "_psql", psql)
+    monkeypatch.setattr(MODULE, "_run", lambda command, **kwargs: restore_calls.append((command, kwargs)))
+    MODULE.restore_eros(backup, expected_identity="pilot-identity", backup_root=tmp_path)
+    assert [database for database, _ in psql_calls] == ["eros", "postgres", "postgres", "eros"]
+    assert "DROP DATABASE eros" in psql_calls[2][1]
+    assert "CREATE DATABASE eros OWNER eros_ddl" in psql_calls[2][1]
+    assert "REVOKE CONNECT ON DATABASE eros FROM PUBLIC" in psql_calls[2][1]
+    assert "GRANT CONNECT ON DATABASE eros TO eros_runtime, eros_migrator" in psql_calls[2][1]
+    assert "GRANT CREATE ON DATABASE eros TO eros_migrator" in psql_calls[2][1]
+    assert "pg_restore --single-transaction --exit-on-error" in restore_calls[0][0][-1]
+    assert "-d eros" in restore_calls[0][0][-1]
+    assert "--clean" not in restore_calls[0][0]
+
+
+def test_rollback_refuses_identity_mismatch_or_active_eros_connections_before_drop(monkeypatch, tmp_path):
+    backup = tmp_path / ("eros-before-" + "a" * 40 + ".dump")
+    backup.write_bytes(b"synthetic postgres archive")
+    backup.chmod(0o600)
+    MODULE.write_backup_manifest(backup, "a" * 40, "pilot-identity", backup_root=tmp_path)
+    calls = []
+    monkeypatch.setattr(MODULE, "_run", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(MODULE, "_psql", lambda sql, database="postgres": "eros_ddl|foreign" if database == "eros" else "0")
+    with pytest.raises(MODULE.PilotGateError, match="database identity"):
+        MODULE.restore_eros(backup, expected_identity="pilot-identity", backup_root=tmp_path)
+    assert calls == []
+    monkeypatch.setattr(MODULE, "_psql", lambda sql, database="postgres": "eros_ddl|pilot-identity" if database == "eros" else "1")
+    with pytest.raises(MODULE.PilotGateError, match="active connections"):
+        MODULE.restore_eros(backup, expected_identity="pilot-identity", backup_root=tmp_path)
+    assert calls == []
+
+
 def test_pilot_cleanup_requires_exact_eros_database_owner_and_deployment_identity():
     assert MODULE.validate_cleanup_identity(
         database="eros", owner="eros_ddl", observed_identity="pilot-identity",

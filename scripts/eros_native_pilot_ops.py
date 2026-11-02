@@ -558,11 +558,39 @@ def restore_probe(backup: Path, probe_name: str, *, backup_root: Path = BACKUP_R
               f'exec dropdb --if-exists -U "$POSTGRES_USER" {probe_name}'], timeout=120)
 
 
-def restore_eros(backup: Path, *, backup_root: Path = BACKUP_ROOT) -> dict:
+def restore_eros(backup: Path, *, expected_identity: str,
+                 backup_root: Path = BACKUP_ROOT) -> dict:
     facts = verify_backup(backup, backup_root)
+    if (not expected_identity or hashlib.sha256(expected_identity.encode()).hexdigest()
+            != facts.get("databaseIdentitySha256")):
+        raise PilotGateError("Eros backup identity does not match the protected pilot environment")
+    current = _psql("""SELECT pg_get_userbyid(d.datdba) || '|' ||
+      coalesce((SELECT identity FROM public.eros_deployment_identity WHERE singleton=true), '')
+      FROM pg_database d WHERE d.datname='eros'""", "eros")
+    if current != f"eros_ddl|{expected_identity}":
+        raise PilotGateError("Eros database identity does not match the protected pilot environment")
+    connections = _psql("SELECT count(*)::text FROM pg_stat_activity WHERE datname='eros' AND pid<>pg_backend_pid()")
+    if connections != "0":
+        raise PilotGateError("Eros database has active connections during rollback")
+    _psql("""DROP DATABASE eros;
+CREATE DATABASE eros OWNER eros_ddl;
+REVOKE CONNECT ON DATABASE eros FROM PUBLIC;
+GRANT CONNECT ON DATABASE eros TO eros_runtime, eros_migrator;
+GRANT CREATE ON DATABASE eros TO eros_migrator;""")
     _run(["docker", "exec", "-i", _postgres_container(), "sh", "-ec",
-          'exec pg_restore --single-transaction --exit-on-error --clean --if-exists -U "$POSTGRES_USER" -d eros'],
+          'exec pg_restore --single-transaction --exit-on-error -U "$POSTGRES_USER" -d eros'],
          input_bytes=Path(backup).read_bytes(), timeout=900)
+    restored = _psql("""SELECT pg_get_userbyid(d.datdba) || '|' ||
+      coalesce((SELECT identity FROM public.eros_deployment_identity WHERE singleton=true), '') || '|' ||
+      has_database_privilege('eros_runtime','eros','CONNECT')::text || '|' ||
+      has_database_privilege('eros_migrator','eros','CONNECT')::text || '|' ||
+      has_database_privilege('eros_runtime','eros','CREATE')::text || '|' ||
+      has_database_privilege('eros_migrator','eros','CREATE')::text || '|' ||
+      (NOT EXISTS (SELECT 1 FROM aclexplode(COALESCE(d.datacl, acldefault('d',d.datdba))) acl
+        WHERE acl.grantee=0 AND acl.privilege_type='CONNECT'))::text
+      FROM pg_database d WHERE d.datname='eros'""", "eros")
+    if restored != f"eros_ddl|{expected_identity}|true|true|false|true|true":
+        raise PilotGateError("restored Eros database identity or ACL read-back failed")
     return facts
 
 
@@ -641,7 +669,8 @@ def main() -> int:
             restore_probe(Path(args.backup), args.probe_database, backup_root=Path(args.backup_root))
             print("EROS_ISOLATED_RESTORE=PASS")
         elif args.operation == "restore":
-            facts = restore_eros(Path(args.backup), backup_root=Path(args.backup_root))
+            facts = restore_eros(Path(args.backup), expected_identity=values.get("EROS_DATABASE_IDENTITY", ""),
+                                 backup_root=Path(args.backup_root))
             print(f"EROS_DATABASE_RESTORE=PASS sha256={facts['sha256']}")
         elif args.operation == "cleanup":
             cleanup_database(values.get("EROS_DATABASE_IDENTITY", ""))

@@ -197,7 +197,7 @@ def main() -> int:
             if migrations <= 0:
                 raise RuntimeError("stock SQLx migration ledger is empty")
             stage = "backup rollback"
-            ops.restore_eros(backup, backup_root=backup_root)
+            ops.restore_eros(backup, expected_identity=values["EROS_DATABASE_IDENTITY"], backup_root=backup_root)
             ledger = run("docker", "exec", container, "psql", "-XqAt", "-v", "ON_ERROR_STOP=1",
                 "-U", "postgres", "-d", "eros", "-c",
                 "SELECT to_regclass('public._sqlx_migrations') IS NULL").stdout.strip()
