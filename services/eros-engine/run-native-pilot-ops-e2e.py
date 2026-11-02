@@ -51,6 +51,7 @@ def main() -> int:
     embedding_network = "gpoint_eros_embeddings"
     created_networks: set[str] = set()
     started_container = False
+    stage = "initialize"
     with tempfile.TemporaryDirectory(prefix="me36-native-eros-ops-") as temporary:
         root = Path(temporary)
         env_file = root / "eros.env"
@@ -92,6 +93,7 @@ def main() -> int:
             source_env.chmod(0o600)
             os.environ["EROS_PROVISION_TEST"] = "1"
             os.environ["EROS_PROVISION_TEST_POSTGRES_CONTAINER"] = container
+            stage = "secret provision"
             identity = secrets_module.provision(
                 env_file, source_sha=args.candidate_sha, image=args.image,
                 source_env=source_env, pilot_test_user_id=args.test_user_id,
@@ -99,14 +101,18 @@ def main() -> int:
             )
             if identity != "EROS_SECRET_STORE=READY":
                 raise RuntimeError("Eros secret provisioning did not report readiness")
+            stage = "database and role provisioning"
             secrets_module.provision_database(env_file)
             values = ops._load_env(env_file)
             os.environ["EROS_NATIVE_OPS_TEST"] = "1"
             os.environ["EROS_NATIVE_OPS_TEST_POSTGRES_CONTAINER"] = container
             os.environ["EROS_NATIVE_OPS_TEST_RUN_DIR"] = str(run_dir)
             os.environ["EROS_NATIVE_OPS_TEST_SOURCE_ROOT"] = str(ROOT)
+            stage = "runtime allowlist validation"
             ops.validate_pilot_runtime(values, args.test_user_id, args.test_creator_id, args.candidate_sha)
+            stage = "stock image identity readback"
             ops.verify_stock_image(args.image, args.candidate_sha)
+            stage = "ACL and private network readback"
             privilege_row = run("docker", "exec", container, "psql", "-XqAt", "-v", "ON_ERROR_STOP=1",
                 "-U", "postgres", "-d", "postgres", "-c",
                 "SELECT has_database_privilege('eros_runtime','eros','CONNECT')::text || '|' || has_database_privilege('eros_runtime','gpoint','CONNECT')::text || '|' || has_database_privilege('eros_migrator','gpoint','CONNECT')::text").stdout.strip()
@@ -121,17 +127,22 @@ def main() -> int:
             network_facts = json.loads(run("docker", "network", "inspect", embedding_network).stdout)[0]
             if network_facts.get("Internal") is not True or network_facts.get("Containers"):
                 raise RuntimeError("embedding network is not isolated from the PostgreSQL test service")
+            stage = "verified Eros backup"
             backup = backup_root / f"eros-before-{args.candidate_sha}.dump"
             facts = ops.create_verified_backup(backup, args.candidate_sha,
                                                values["EROS_DATABASE_IDENTITY"], backup_root=backup_root)
+            stage = "isolated restore probe"
             ops.restore_probe(backup, "eros_restore_probe_" + secrets.token_hex(8), backup_root=backup_root)
+            stage = "stock SQLx migration"
             ops.run_stock_migration(args.image, args.candidate_sha, values)
+            stage = "stock synthetic persona seed"
             genome_id = ops.run_stock_persona_seed(args.image, args.candidate_sha, values)
             if not ops.UUID.fullmatch(genome_id):
                 raise RuntimeError("stock synthetic persona seed did not return an exact genome UUID")
             migrations = ops.verify_sqlx_migrations()
             if migrations <= 0:
                 raise RuntimeError("stock SQLx migration ledger is empty")
+            stage = "backup rollback"
             ops.restore_eros(backup, backup_root=backup_root)
             ledger = run("docker", "exec", container, "psql", "-XqAt", "-v", "ON_ERROR_STOP=1",
                 "-U", "postgres", "-d", "eros", "-c",
@@ -159,6 +170,7 @@ def main() -> int:
                 pass
             else:
                 raise RuntimeError("cleanup accepted a mismatched Eros database identity")
+            stage = "identity-bound cleanup"
             ops.cleanup_database(values["EROS_DATABASE_IDENTITY"])
             run("docker", "network", "disconnect", data_network, container)
             ops.cleanup_managed_networks()
@@ -191,5 +203,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as error:
-        print(f"EROS_NATIVE_POSTGRES_E2E=FAIL:{type(error).__name__}", file=sys.stderr)
+        print(f"EROS_NATIVE_POSTGRES_E2E=FAIL:stage={stage}:type={type(error).__name__}", file=sys.stderr)
         raise SystemExit(1)
