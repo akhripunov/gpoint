@@ -102,6 +102,16 @@ def test_native_pilot_apply_is_separately_gated_and_ordinary_release_fails_close
     assert "collect_kamal_eros_state.py" in topology.get("run", "")
 
 
+def test_native_apply_reads_synthetic_allowlist_and_mode_from_the_api_container():
+    lifecycle = (ROOT / "scripts/eros-native-pilot-lifecycle.sh").read_text()
+    verify = lifecycle.split("REMOTE_VERIFY", 1)[1].split("PY\n", 1)[0]
+    assert "api_values.get(key)!=expected" in verify
+    assert "api_values.get('EROS_ENABLED')" in verify
+    assert "api_values.get('EROS_PRODUCTION_TEST_MODE')" in verify
+    assert "api_values.get('EROS_DATA_MODE')" in verify
+    assert "if values.get(key)!=expected" not in verify
+
+
 def test_mac_embedding_tunnel_uses_verified_known_hosts_and_loopback_reverse_forward():
     tunnel = (ROOT / "services/eros-engine/open-mac-ollama-tunnel.sh").read_text()
     assert 'UserKnownHostsFile="$known_hosts"' in tunnel

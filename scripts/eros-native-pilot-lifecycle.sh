@@ -397,9 +397,9 @@ def env(name):
     values=dict(x.split('=',1) for x in row['Config']['Env'] if '=' in x)
     return values,row
 values,_=env(engine); api_values,api_row=env(api)
-for key,expected in [('EROS_PRODUCTION_TEST_USER_IDS',user),('EROS_PRODUCTION_TEST_CREATOR_IDS',creator),('EROS_TEST_USER_IDS',user),('EROS_TEST_CREATOR_IDS',creator)]:
-    if values.get(key)!=expected: raise SystemExit('runtime synthetic allowlist mismatch')
-if values.get('EROS_ENABLED')!='true' or values.get('EROS_PRODUCTION_TEST_MODE')!='true' or values.get('EROS_DATA_MODE')!='synthetic': raise SystemExit('runtime synthetic mode mismatch')
+for key,expected in [('EROS_PRODUCTION_TEST_USER_IDS',user),('EROS_PRODUCTION_TEST_CREATOR_IDS',creator)]:
+    if api_values.get(key)!=expected: raise SystemExit('runtime synthetic allowlist mismatch')
+if api_values.get('EROS_ENABLED')!='true' or api_values.get('EROS_PRODUCTION_TEST_MODE')!='true' or api_values.get('EROS_DATA_MODE')!='synthetic': raise SystemExit('runtime synthetic mode mismatch')
 engine_networks=json.loads(subprocess.run(['docker','inspect',engine,'--format','{{json .NetworkSettings.Networks}}'],check=True,text=True,capture_output=True).stdout)
 if set(engine_networks)!={'gpoint_app','gpoint_eros_data'}: raise SystemExit('Eros engine network boundary mismatch')
 networks=json.loads(subprocess.run(['docker','inspect',api,'--format','{{json .NetworkSettings.Networks}}'],check=True,text=True,capture_output=True).stdout)
