@@ -130,12 +130,14 @@ if [[ "$service:$role" == "gpoint-agata:memory-worker" ]]; then
     fi
     sleep 5
   done
+  test "$healthy" -eq 1 || { echo 'AGATA memory worker did not become healthy after network attachment' >&2; exit 1; }
+fi
 
-  if [[ "$service:$role" == "gpoint-core:api" ]] && docker network inspect gpoint_eros_embeddings >/dev/null 2>&1; then
-    api_container="${service}-${role}-${version}"
-    api_id="$(docker inspect --format '{{.Id}}' "$api_container")"
-    network_json="$(docker network inspect gpoint_eros_embeddings)"
-    python3 - "$network_json" <<'PY'
+if [[ "$service:$role" == "gpoint-core:api" ]] && docker network inspect gpoint_eros_embeddings >/dev/null 2>&1; then
+  api_container="${service}-${role}-${version}"
+  api_id="$(docker inspect --format '{{.Id}}' "$api_container")"
+  network_json="$(docker network inspect gpoint_eros_embeddings)"
+  python3 - "$network_json" <<'PY'
 import json, sys
 net = json.loads(sys.argv[1])[0]
 if net.get("Internal") is not True or net.get("Driver") != "bridge":
@@ -144,22 +146,20 @@ config = (net.get("IPAM") or {}).get("Config") or []
 if not any(x.get("Subnet") == "172.31.254.0/29" and x.get("Gateway") == "172.31.254.1" for x in config):
     raise SystemExit("Eros embeddings network address plan differs")
 PY
-    current="$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$api_id")"
-    if ! python3 - "$current" <<'PY'
+  current="$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$api_id")"
+  if ! python3 - "$current" <<'PY'
 import json, sys
 networks = json.loads(sys.argv[1]) or {}
 network = networks.get("gpoint_eros_embeddings") or {}
 raise SystemExit(0 if network.get("IPAddress") == "172.31.254.2" else 1)
 PY
-    then
-      if [[ -n "$(docker network inspect --format '{{range $id, $container := .Containers}}{{println $container.IPv4Address}}{{end}}' gpoint_eros_embeddings | grep '^172\.31\.254\.2/' || true)" ]]; then
-        echo 'Eros embeddings API address is already owned by another container' >&2
-        exit 1
-      fi
-      docker network connect --ip 172.31.254.2 gpoint_eros_embeddings "$api_id"
+  then
+    if [[ -n "$(docker network inspect --format '{{range $id, $container := .Containers}}{{println $container.IPv4Address}}{{end}}' gpoint_eros_embeddings | grep '^172\.31\.254\.2/' || true)" ]]; then
+      echo 'Eros embeddings API address is already owned by another container' >&2
+      exit 1
     fi
+    docker network connect --ip 172.31.254.2 gpoint_eros_embeddings "$api_id"
   fi
-  test "$healthy" -eq 1 || { echo 'AGATA memory worker did not become healthy after network attachment' >&2; exit 1; }
 fi
   if [[ "$service:$role" == "gpoint-miniapp:web" ]]; then
     docker exec "$id" nginx -t >/dev/null

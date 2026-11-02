@@ -43,6 +43,9 @@ def test_only_post_boot_hooks_attach_the_eros_service_to_internal_networks():
     assert "gpoint-eros-relay:relay" in post
     assert "stock Eros engine did not become healthy" in post
     assert "private Eros embedding relay did not become healthy" in post
+    assert post.index('if [[ "$service:$role" == "gpoint-core:api" ]]') > post.index(
+        "AGATA memory worker did not become healthy"
+    )
 
 
 def test_native_workflow_runs_pilot_in_disposable_environment_and_never_uses_ordinary_deploy():
