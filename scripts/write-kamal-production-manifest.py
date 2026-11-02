@@ -245,7 +245,7 @@ def main() -> int:
         stopped_gsales = []
         for service in ("gsales-api", "gsales-agata-api", "gsales-agata-memory-worker"):
             result = subprocess.run(["docker", "ps", "-aq", "--filter",
-                                     "--filter", f"label=com.docker.compose.project=compose",
+                                     "label=com.docker.compose.project=compose",
                                      "--filter", f"label=com.docker.compose.service={service}"],
                                     check=True, capture_output=True, text=True)
             container_ids = [value for value in result.stdout.splitlines() if value]

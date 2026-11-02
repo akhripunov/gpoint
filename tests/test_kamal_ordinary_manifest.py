@@ -44,6 +44,10 @@ elif args[0:2] == ["image", "inspect"]:
  else: repo="ghcr.io/akhripunov/gpoint-miniapp@{MINIAPP}"
  print(json.dumps([{{"RepoDigests":[repo]}}]))
 elif args[0:2] == ["ps", "-aq"]:
+ if (len(args) != 6 or args[2] != "--filter"
+     or args[3] != "label=com.docker.compose.project=compose"
+     or args[4] != "--filter" or not args[5].startswith("label=com.docker.compose.service=")):
+  raise SystemExit("invalid Docker filter argument contract")
  service=args[-1].split("=")[-1]
  prefix="legacy-" if service in ("api", "worker", "bot", "agata-api", "agata-memory-worker") else "gsales-"
  print(prefix+service)

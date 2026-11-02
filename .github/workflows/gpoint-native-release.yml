@@ -186,7 +186,7 @@ jobs:
           install -d "$install_dir"
           tar -xzf "$archive" -C "$install_dir" oras
           chmod 0755 "$install_dir/oras"
-          "$install_dir/oras" version | grep -Eq 'Version:[[:space:]]+1\.3\.0([[:space:]]|$)'
+          "$install_dir/oras" version | grep -E 'Version:[[:space:]]+1\.3\.0([[:space:]]|$)' >/dev/null
           echo "ORAS_1_3_BIN=$install_dir/oras" >> "$GITHUB_ENV"
       - name: Run workflow, Native First and Kamal boundary tests
         run: >-
@@ -338,7 +338,7 @@ jobs:
             esac
             docker pull --platform linux/amd64 "$image@$digest"
             docker pull --platform linux/amd64 "$image:$IMAGE_VERSION"
-            docker image inspect "$image:$IMAGE_VERSION" --format '{{json .RepoDigests}}' | grep -Fq "$image@$digest"
+            docker image inspect "$image:$IMAGE_VERSION" --format '{{json .RepoDigests}}' | grep -F "$image@$digest" >/dev/null
             docker image inspect --format '{{json .}}' "$image@$digest" > "$RUNNER_TEMP/$role-image.json"
             docker buildx imagetools inspect --format '{{json .SBOM.SPDX}}' \
               "$image@$digest" > "$RUNNER_TEMP/$role-sbom.json"
@@ -651,9 +651,9 @@ jobs:
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
         run: |
           set -euo pipefail
-          curl --retry 12 --retry-connrefused --retry-delay 5 --fail --silent --show-error https://gpoint.one/api/health/live | grep -Fq '"status":"ok"'
+          curl --retry 12 --retry-connrefused --retry-delay 5 --fail --silent --show-error https://gpoint.one/api/health/live | grep -F '"status":"ok"' >/dev/null
           for path in / /creators; do
-            curl --retry 6 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.one$path" | grep -Fq '<div id="root">'
+            curl --retry 6 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.one$path" | grep -F '<div id="root">' >/dev/null
           done
           media_body="$RUNNER_TEMP/gpoint-media-route-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
           media_status="$(curl --retry 6 --retry-connrefused --retry-delay 2 --silent --show-error \
@@ -673,10 +673,11 @@ jobs:
           remote_writer_sha="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" sha256sum "$writer_remote" | awk '{print $1}')"
           test "$writer_sha" = "$remote_writer_sha"
           test -n "$BASELINE_PRISMA_HEAD" && test -n "$BASELINE_PRISMA_MIGRATIONS" && test -n "$BASELINE_PRISMA_CHECKSUMS" && test -n "$BASELINE_AGATA_HEAD"
-          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$BASELINE_PRISMA_MIGRATIONS" "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "$BASELINE_AGATA_HEAD" <<'REMOTE'
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$BASELINE_PRISMA_MIGRATIONS" "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "$BASELINE_AGATA_HEAD" "$BASELINE_ROLE_VERSION" "$BASELINE_ROLE_SOURCE_SHA" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" <<'REMOTE'
           set -euo pipefail
           sha="$1"; version="$2"; app="$3"; agata="$4"; miniapp="$5"; db_id="$6"; redis_id="$7"; deployment_id="$8"; run_id="$9"; attempt="${10}"; writer="${11}"
           expected_prisma_migrations="${12}"; expected_prisma_checksums="${13}"; expected_prisma_head="${14}"; expected_agata_head="${15}"
+          BASELINE_ROLE_VERSION="${16}"; BASELINE_ROLE_SOURCE_SHA="${17}"; DB_MOUNTS_SHA256="${18}"; REDIS_MOUNTS_SHA256="${19}"
           [[ "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
           [[ "$writer" == "/run/gpoint-ordinary-manifest-${run_id}-${attempt}.py" ]]
           test -s "$writer"
@@ -709,14 +710,14 @@ jobs:
             test "$(docker inspect --format '{{.State.Running}}' "$container")" = true
             test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$container")" = "$sha"
             image_id="$(docker inspect --format '{{.Image}}' "$container")"
-            docker image inspect "$image_id" --format '{{json .RepoDigests}}' | grep -Fq "$repository@$digest"
+            docker image inspect "$image_id" --format '{{json .RepoDigests}}' | grep -F "$repository@$digest" >/dev/null
             running_count="$(docker ps -q --filter "name=^/${prefix}-" | wc -l | tr -d ' ')"
             test "$running_count" = 1 || { echo "duplicate running Kamal role: $prefix" >&2; exit 1; }
           done
-          docker exec kamal-proxy kamal-proxy list | grep -Fq 'gpoint-miniapp'
-          docker exec kamal-proxy kamal-proxy list | grep -Fq 'gpoint-core'
-          docker inspect shared_postgres_1 --format '{{range .Mounts}}{{.Type}} {{.Name}} {{.Source}} {{.Destination}}{{"\n"}}{{end}}' | grep -q .
-          docker inspect shared_redis_1 --format '{{range .Mounts}}{{.Type}} {{.Name}} {{.Source}} {{.Destination}}{{"\n"}}{{end}}' | grep -q .
+          docker exec kamal-proxy kamal-proxy list | grep -F 'gpoint-miniapp' >/dev/null
+          docker exec kamal-proxy kamal-proxy list | grep -F 'gpoint-core' >/dev/null
+          docker inspect shared_postgres_1 --format '{{range .Mounts}}{{.Type}} {{.Name}} {{.Source}} {{.Destination}}{{"\n"}}{{end}}' | grep . >/dev/null
+          docker inspect shared_redis_1 --format '{{range .Mounts}}{{.Type}} {{.Name}} {{.Source}} {{.Destination}}{{"\n"}}{{end}}' | grep . >/dev/null
           db_mounts="$(docker inspect shared_postgres_1 --format '{{json .Mounts}}')"
           redis_mounts="$(docker inspect shared_redis_1 --format '{{json .Mounts}}')"
           python3 - "$db_mounts" "$redis_mounts" <<'PY'
@@ -729,8 +730,8 @@ jobs:
                   raise SystemExit(f'{name} has no persistent volume or bind mount')
           PY
           docker exec "gpoint-core-api-$version" node -e "fetch('http://127.0.0.1:3000/health/live').then(async r => { if (!r.ok || (await r.json()).status !== 'ok') process.exit(1) }).catch(() => process.exit(1))"
-          docker exec "gpoint-core-worker-$version" sh -ec 'ps aux | grep -F "apps/worker/dist/main.js" | grep -v grep'
-          docker exec "gpoint-core-bot-$version" sh -ec 'ps aux | grep -F "apps/bot/dist/main.js" | grep -v grep'
+          docker top "gpoint-core-worker-$version" -eo pid,args | grep -F "apps/worker/dist/main.js"
+          docker top "gpoint-core-bot-$version" -eo pid,args | grep -F "apps/bot/dist/main.js"
           docker exec "gpoint-agata-api-$version" python -c "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/health/ready',timeout=3); assert r.status == 200"
           docker exec "gpoint-agata-memory-worker-$version" python -m app.memory.worker --healthcheck
           docker exec "gpoint-miniapp-web-$version" wget --spider --quiet http://127.0.0.1/
@@ -752,7 +753,7 @@ jobs:
           if not proxy.intersection(core) or not proxy.intersection(miniapp):
               raise SystemExit('Kamal Proxy is not connected to both Core API and Mini App networks')
           PY
-          runtime_db="$(docker exec "gpoint-core-api-$version" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const failed=await db.$queryRawUnsafe("SELECT count(*)::int AS count FROM _prisma_migrations WHERE finished_at IS NULL AND rolled_back_at IS NULL");if(failed[0].count!==0)throw Error("unfinished Prisma migration exists");const rows=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const head=rows.length?rows[rows.length-1].migration_name:"NONE";const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head is not singular");console.log("PRISMA_HEAD="+head);console.log("PRISMA_MIGRATIONS="+rows.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+rows.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("POST_DEPLOY_DATABASE_VERIFY_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
+          runtime_db="$(docker exec --workdir /app/apps/api "gpoint-core-api-$version" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const failed=await db.$queryRawUnsafe("SELECT count(*)::int AS count FROM _prisma_migrations WHERE finished_at IS NULL AND rolled_back_at IS NULL");if(failed[0].count!==0)throw Error("unfinished Prisma migration exists");const rows=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const head=rows.length?rows[rows.length-1].migration_name:"NONE";const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head is not singular");console.log("PRISMA_HEAD="+head);console.log("PRISMA_MIGRATIONS="+rows.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+rows.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("POST_DEPLOY_DATABASE_VERIFY_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
           prisma_head="$(sed -n 's/^PRISMA_HEAD=//p' <<< "$runtime_db")"
           prisma_migrations="$(sed -n 's/^PRISMA_MIGRATIONS=//p' <<< "$runtime_db")"
           prisma_checksums="$(sed -n 's/^PRISMA_CHECKSUMS=//p' <<< "$runtime_db")"
@@ -1030,7 +1031,7 @@ jobs:
             test "$(wc -l <<< "$target" | tr -d ' ')" = 1 || { echo "previous target container is not retained: $prefix" >&2; exit 1; }
             test "$(docker inspect --format '{{.Config.Labels "org.opencontainers.image.revision"}}' "$target")" = "$sha"
             image_id="$(docker inspect --format '{{.Image}}' "$target")"
-            docker image inspect "$image_id" --format '{{json .RepoDigests}}' | grep -Fq "$expected_image"
+            docker image inspect "$image_id" --format '{{json .RepoDigests}}' | grep -F "$expected_image" >/dev/null
           done
           db_mounts="$(docker inspect shared_postgres_1 --format '{{json .Mounts}}' | python3 -c 'import hashlib,json,sys; a=json.load(sys.stdin); r=sorted(({k:m.get(k) for k in ("Type","Name","Source","Destination","RW")} for m in a),key=lambda x:(x["Destination"] or "",x["Source"] or "")); assert r and all(x["Source"] and x["Destination"] for x in r); print(hashlib.sha256(json.dumps(r,sort_keys=True,separators=(",",":")).encode()).hexdigest())')"
           redis_mounts="$(docker inspect shared_redis_1 --format '{{json .Mounts}}' | python3 -c 'import hashlib,json,sys; a=json.load(sys.stdin); r=sorted(({k:m.get(k) for k in ("Type","Name","Source","Destination","RW")} for m in a),key=lambda x:(x["Destination"] or "",x["Source"] or "")); assert r and all(x["Source"] and x["Destination"] for x in r); print(hashlib.sha256(json.dumps(r,sort_keys=True,separators=(",",":")).encode()).hexdigest())')"
@@ -1039,7 +1040,7 @@ jobs:
           echo "BASELINE_ROLE_VERSION=$live_version"
           echo "BASELINE_ROLE_SOURCE_SHA=$live_source_sha"
           current_api="$(docker ps -q --filter 'name=^/gpoint-core-api-')"
-          current_db="$(docker exec "$current_api" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const r=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head not singular");console.log("PRISMA_HEAD="+(r.length?r[r.length-1].migration_name:"NONE"));console.log("PRISMA_MIGRATIONS="+r.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+r.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("READ_ONLY_DB_CHECK_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
+          current_db="$(docker exec --workdir /app/apps/api "$current_api" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const r=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head not singular");console.log("PRISMA_HEAD="+(r.length?r[r.length-1].migration_name:"NONE"));console.log("PRISMA_MIGRATIONS="+r.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+r.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("READ_ONLY_DB_CHECK_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
           printf '%s\n' "$current_db"
           REMOTE
           )"
@@ -1119,8 +1120,8 @@ jobs:
           ROLLBACK_DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
         run: |
           set -euo pipefail
-          curl --retry 8 --retry-connrefused --retry-delay 3 --fail --silent --show-error https://gpoint.one/api/health/live | grep -Fq '"status":"ok"'
-          for path in / /creators; do curl --retry 5 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.one$path" | grep -Fq '<div id="root">'; done
+          curl --retry 8 --retry-connrefused --retry-delay 3 --fail --silent --show-error https://gpoint.one/api/health/live | grep -F '"status":"ok"' >/dev/null
+          for path in / /creators; do curl --retry 5 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.one$path" | grep -F '<div id="root">' >/dev/null; done
           media_body="$RUNNER_TEMP/gpoint-rollback/media-route.json"
           media_status="$(curl --retry 5 --retry-connrefused --retry-delay 2 --silent --show-error --output "$media_body" --write-out '%{http_code}' https://gpoint.one/media/assets/kamal-route-verification-missing)"
           test "$media_status" = 404 && grep -Fq '"message":"media not found"' "$media_body"
@@ -1140,7 +1141,7 @@ jobs:
             test "$(docker ps -q --filter "name=^/$name$" | wc -l | tr -d ' ')" = 1
             test "$(docker inspect --format '{{.State.Running}}' "$name")" = true
             test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$name")" = "$sha"
-            image="$(docker inspect --format '{{.Image}}' "$name")"; docker image inspect "$image" --format '{{json .RepoDigests}}' | grep -Fq "$expected"
+            image="$(docker inspect --format '{{.Image}}' "$name")"; docker image inspect "$image" --format '{{json .RepoDigests}}' | grep -F "$expected" >/dev/null
           done
           fingerprint() { docker inspect "$1" --format '{{json .Mounts}}' | python3 -c 'import hashlib,json,sys; a=json.load(sys.stdin); r=sorted(({k:m.get(k) for k in ("Type","Name","Source","Destination","RW")} for m in a),key=lambda x:(x["Destination"] or "",x["Source"] or "")); assert r and all(x["Source"] and x["Destination"] for x in r); print(hashlib.sha256(json.dumps(r,sort_keys=True,separators=(",",":")).encode()).hexdigest())'; }
           test "$(fingerprint shared_postgres_1)" = "$dbmount"
@@ -1149,8 +1150,8 @@ jobs:
           test "$(docker exec "gpoint-core-api-$version" node -p 'process.env.RELEASE_SHA || ""')" = "$TARGET_SHA"
           test "$(docker exec "gpoint-core-worker-$version" node -p 'process.env.RELEASE_SHA || ""')" = "$TARGET_SHA"
           test "$(docker exec "gpoint-core-bot-$version" node -p 'process.env.RELEASE_SHA || ""')" = "$TARGET_SHA"
-          docker exec "gpoint-core-worker-$version" sh -ec 'ps aux | grep -F "apps/worker/dist/main.js" | grep -v grep'
-          docker exec "gpoint-core-bot-$version" sh -ec 'ps aux | grep -F "apps/bot/dist/main.js" | grep -v grep'
+          docker top "gpoint-core-worker-$version" -eo pid,args | grep -F "apps/worker/dist/main.js"
+          docker top "gpoint-core-bot-$version" -eo pid,args | grep -F "apps/bot/dist/main.js"
           docker exec "gpoint-agata-api-$version" python -c "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8000/health/ready',timeout=3).status==200"
           docker exec "gpoint-agata-memory-worker-$version" python -m app.memory.worker --healthcheck
           test "$(docker exec "gpoint-agata-api-$version" python -c 'import os; print(os.environ.get("RELEASE_SHA", ""))')" = "$TARGET_SHA"
@@ -1163,9 +1164,9 @@ jobs:
           rows=[m for m in json.loads(sys.argv[1]) if m.get('Destination') == '/data/media']
           if len(rows)!=1 or rows[0].get('Type')!='bind' or rows[0].get('Source')!='/opt/gpoint/media' or rows[0].get('RW') is not True: raise SystemExit('media mount identity changed')
           PY
-          docker exec kamal-proxy kamal-proxy list | grep -Fq 'gpoint-miniapp'
-          docker exec kamal-proxy kamal-proxy list | grep -Fq 'gpoint-core'
-          runtime_db="$(docker exec "gpoint-core-api-$version" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const r=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head not singular");console.log("PRISMA_HEAD="+(r.length?r[r.length-1].migration_name:"NONE"));console.log("PRISMA_MIGRATIONS="+r.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+r.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("POST_ROLLBACK_DB_VERIFY_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
+          docker exec kamal-proxy kamal-proxy list | grep -F 'gpoint-miniapp' >/dev/null
+          docker exec kamal-proxy kamal-proxy list | grep -F 'gpoint-core' >/dev/null
+          runtime_db="$(docker exec --workdir /app/apps/api "gpoint-core-api-$version" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const r=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head not singular");console.log("PRISMA_HEAD="+(r.length?r[r.length-1].migration_name:"NONE"));console.log("PRISMA_MIGRATIONS="+r.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+r.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("POST_ROLLBACK_DB_VERIFY_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
           printf '%s\n' "$runtime_db"
           echo ROLLBACK_RUNTIME_VERIFY=PASS
           REMOTE
@@ -1572,7 +1573,7 @@ jobs:
           current_step=ghcr-app-source-revision
           test "$(docker image inspect "$app_image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$candidate"
           current_step=ghcr-app-repository-digest
-          docker image inspect "$app_image" --format '{{json .RepoDigests}}' | grep -Fq "$app_image"
+          docker image inspect "$app_image" --format '{{json .RepoDigests}}' | grep -F "$app_image" >/dev/null
           current_step=ghcr-agata-pull
           DOCKER_CONFIG="$stage/docker-config" docker pull --platform linux/amd64 "$agata_image" >/dev/null
           current_step=ghcr-agata-platform
@@ -1580,7 +1581,7 @@ jobs:
           current_step=ghcr-agata-source-revision
           test "$(docker image inspect "$agata_image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$candidate"
           current_step=ghcr-agata-repository-digest
-          docker image inspect "$agata_image" --format '{{json .RepoDigests}}' | grep -Fq "$agata_image"
+          docker image inspect "$agata_image" --format '{{json .RepoDigests}}' | grep -F "$agata_image" >/dev/null
           current_step=ghcr-post-pull-capacity
           docker_free_after_pull="$(df -PB1 "$docker_root" | awk 'NR==2 {print $4}')"
           [[ "$docker_free_after_pull" =~ ^[0-9]+$ ]]

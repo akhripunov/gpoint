@@ -1532,3 +1532,68 @@ def test_memory_worker_has_database_network_before_process_start():
     assert agata['servers']['memory-worker']['options']['network'] == 'shared_internal'
     # API aliases remain assigned by the existing post-boot hook.
     assert 'network' not in agata['servers']['api']['options']
+
+
+def test_ordinary_verify_receives_baseline_facts_in_remote_shell():
+    import re
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    step = next(s for j in workflow['jobs'].values() for s in j.get('steps', [])
+                if s.get('name') == 'Verify public routes and exact running services')
+    match = re.search(r'facts="\$\(ssh([^\n]+)<<\x27REMOTE\x27\n(.*?)\nREMOTE\n', step['run'], re.S)
+    assert match
+    values = {
+        'CANDIDATE_SHA': 'a' * 40, 'IMAGE_VERSION': 'a' * 40 + '-123-1',
+        'APP_DIGEST': 'sha256:' + 'b' * 64, 'AGATA_DIGEST': 'sha256:' + 'c' * 64,
+        'MINIAPP_DIGEST': 'sha256:' + 'd' * 64, 'DB_CONTAINER_ID': 'e' * 64,
+        'REDIS_CONTAINER_ID': 'f' * 64, 'DEPLOYMENT_ID': '7', 'GITHUB_RUN_ID': '123',
+        'GITHUB_RUN_ATTEMPT': '1', 'writer_remote': '/run/gpoint-ordinary-manifest-123-1.py',
+        'BASELINE_PRISMA_MIGRATIONS': 'migration', 'BASELINE_PRISMA_CHECKSUMS': 'migration=checksum',
+        'BASELINE_PRISMA_HEAD': 'migration', 'BASELINE_AGATA_HEAD': 'agata0012',
+        'BASELINE_ROLE_VERSION': 'b' * 40 + '-100-1', 'BASELINE_ROLE_SOURCE_SHA': 'b' * 40,
+        'DB_MOUNTS_SHA256': 'c' * 64, 'REDIS_MOUNTS_SHA256': 'd' * 64,
+    }
+    names = re.findall(r'"\$([A-Za-z_][A-Za-z0-9_]*)"', match.group(1))
+    prefix = match.group(2).split('db_mounts_sha=', 1)[0]
+    harness = '''
+    docker() {
+      case "$*" in
+        *shared_postgres_1*) if [[ "$*" == *'.Id'* ]]; then printf '%s' "${6}"; else printf true; fi ;;
+        *shared_redis_1*) if [[ "$*" == *'.Id'* ]]; then printf '%s' "${7}"; else printf true; fi ;;
+        *) return 1 ;;
+      esac
+    }
+    test() { if [[ "$1" == -s ]]; then return 0; fi; builtin test "$@"; }
+    '''
+    # Mock only Docker inspection and the existing writer file; execute the
+    # actual quoted-heredoc assignments and validation with the real SSH args.
+    harness = harness.replace('"${6}"', "'" + values['DB_CONTAINER_ID'] + "'")
+    harness = harness.replace('"${7}"', "'" + values['REDIS_CONTAINER_ID'] + "'")
+    result = subprocess.run(['bash', '-c', harness + prefix, 'verify', *[values[n] for n in names]],
+                            env={'PATH': os.environ['PATH']}, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_consumer_process_checks_do_not_require_ps_inside_slim_images():
+    workflow = (ROOT / '.github/workflows/gpoint-native-release.yml').read_text()
+    for role in ['worker', 'bot']:
+        probe = f'docker top "gpoint-core-{role}-$version" -eo pid,args | grep -F "apps/{role}/dist/main.js"'
+        assert workflow.count(probe) == 2  # Ordinary Verify and protected rollback Verify.
+    assert "sh -ec 'ps aux" not in workflow
+
+
+def test_proxy_route_probe_drains_docker_output_under_pipefail():
+    workflow = (ROOT / '.github/workflows/gpoint-native-release.yml').read_text()
+    probe = next(line.strip() for line in workflow.splitlines()
+                 if 'docker exec kamal-proxy kamal-proxy list |' in line and 'gpoint-core' in line)
+    producer = '''docker() { python3 -c 'import sys; sys.stdout.write("gpoint-core\\n" + "x" * 1048576)'; }; '''
+    result = subprocess.run(['bash', '-o', 'pipefail', '-c', producer + probe],
+                            env={'PATH': os.environ['PATH']}, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ''
+
+
+def test_runtime_prisma_readbacks_resolve_the_api_workspace_dependencies():
+    workflow = (ROOT / '.github/workflows/gpoint-native-release.yml').read_text()
+    calls = [line for line in workflow.splitlines() if 'docker exec' in line and 'require("@prisma/client")' in line]
+    assert len(calls) == 3
+    assert all('docker exec --workdir /app/apps/api ' in line for line in calls)
