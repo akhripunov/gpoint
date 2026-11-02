@@ -55,7 +55,7 @@ class GPointReleaseTriggerGraphTests(unittest.TestCase):
         native_events = events(native)
         self.assertEqual(native_events["push"]["branches"], ["main"])
         self.assertIn("workflow_dispatch", native_events)
-        self.assertIn("github.event_name == 'push'", native["jobs"]["deploy"]["if"])
+        self.assertNotIn("github.event_name == 'push'", native["jobs"]["deploy"]["if"])
         self.assertIn("github.event_name == 'workflow_dispatch'", native["jobs"]["deploy"]["if"])
         self.assertIn("Kamal production Deploy and Verify", native["jobs"]["deploy"]["name"])
 
