@@ -148,12 +148,16 @@ def main() -> int:
                 raise RuntimeError("migrator credentials crossed into an application container")
             if engine_container_env.get("DATABASE_URL") != values["EROS_RUNTIME_DATABASE_URL"]:
                 raise RuntimeError("stock Eros engine did not receive the runtime database projection")
+            if engine_container_env.get("GPOINT_EMBEDDINGS_API_KEY") != values["EROS_EMBEDDING_API_KEY"]:
+                raise RuntimeError("stock Eros engine did not receive the GPoint embeddings credential")
             if api_container_env.get("DATABASE_URL") != "postgresql://gpoint_api@gpoint-db:5432/gpoint":
                 raise RuntimeError("Eros API projection replaced GPoint DATABASE_URL")
             if api_container_env.get("EROS_PRODUCTION_TEST_USER_IDS") != args.test_user_id:
                 raise RuntimeError("exact user UUID was not projected into the API runtime")
             if api_container_env.get("EROS_PRODUCTION_TEST_CREATOR_IDS") != args.test_creator_id:
                 raise RuntimeError("exact character UUID was not projected into the API runtime")
+            if api_container_env.get("EROS_OLLAMA_EMBEDDING_URL") != values["EROS_OLLAMA_EMBEDDING_URL"]:
+                raise RuntimeError("GPoint API did not receive the private embeddings relay URL")
             os.environ["EROS_NATIVE_OPS_TEST"] = "1"
             os.environ["EROS_NATIVE_OPS_TEST_POSTGRES_CONTAINER"] = container
             os.environ["EROS_NATIVE_OPS_TEST_RUN_DIR"] = str(run_dir)

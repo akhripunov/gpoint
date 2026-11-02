@@ -102,14 +102,14 @@ def _runtime_aliases(values, user_id, creator_id):
 def _env_projections(values):
     """Return least-privilege env sets for the stock engine and GPoint API."""
     engine_keys = (
-        'DATABASE_URL', 'GPOINT_API_KEY', 'GPOINT_WORKER_BRIDGE_SIGNING_SECRET',
+        'DATABASE_URL', 'GPOINT_API_KEY', 'GPOINT_EMBEDDINGS_API_KEY', 'GPOINT_WORKER_BRIDGE_SIGNING_SECRET',
         'GPOINT_WORKER_TENANT_ID', 'OPENROUTER_API_KEY', 'SUPABASE_JWT_SECRET',
         'MODEL_CONFIG_PATH', 'RUST_LOG', 'EROS_DATA_MODE',
     )
     api_keys = (
         'EROS_ENABLED', 'EROS_PRODUCTION_TEST_MODE', 'EROS_DATA_MODE',
         'EROS_PRODUCTION_TEST_USER_IDS', 'EROS_PRODUCTION_TEST_CREATOR_IDS',
-        'EROS_SERVICE_URL', 'EROS_JWT_SECRET', 'EROS_WORKER_SIGNING_SECRET',
+        'EROS_SERVICE_URL', 'EROS_OLLAMA_EMBEDDING_URL', 'EROS_JWT_SECRET', 'EROS_WORKER_SIGNING_SECRET',
         'EROS_WORKER_TENANT_ID', 'EROS_BRIDGE_API_KEY', 'EROS_EMBEDDING_API_KEY',
     )
     return ({key: values[key] for key in engine_keys},

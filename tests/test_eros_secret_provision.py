@@ -167,6 +167,7 @@ class ErosProductionSecretTests(unittest.TestCase):
             engine = MODULE.read_env(path.with_name('eros-engine.env'))
             api = MODULE.read_env(path.with_name('eros-api.env'))
             self.assertEqual(engine['DATABASE_URL'], values['EROS_RUNTIME_DATABASE_URL'])
+            self.assertEqual(engine['GPOINT_EMBEDDINGS_API_KEY'], values['EROS_EMBEDDING_API_KEY'])
             self.assertNotIn('EROS_MIGRATOR_DATABASE_URL', engine)
             self.assertNotIn('EROS_MIGRATOR_PASSWORD', engine)
             self.assertNotIn('EROS_MIGRATOR_DATABASE_URL', api)
@@ -176,6 +177,7 @@ class ErosProductionSecretTests(unittest.TestCase):
             self.assertEqual(api['EROS_PRODUCTION_TEST_USER_IDS'], values['EROS_PRODUCTION_TEST_USER_IDS'])
             self.assertEqual(api['EROS_PRODUCTION_TEST_CREATOR_IDS'], values['EROS_PRODUCTION_TEST_CREATOR_IDS'])
             self.assertEqual(api['EROS_SERVICE_URL'], 'http://eros:8080')
+            self.assertEqual(api['EROS_OLLAMA_EMBEDDING_URL'], 'http://172.31.254.1:11434/api/embed')
             self.assertEqual(engine['GPOINT_WORKER_TENANT_ID'], values['EROS_TENANT_ID'])
             self.assertEqual(api['EROS_WORKER_TENANT_ID'], values['EROS_TENANT_ID'])
             self.assertTrue(all(file.stat().st_mode & 0o777 == 0o600 for file in (
