@@ -319,6 +319,80 @@ def test_documentation_only_candidate_verifies_runtime_without_restarting_compon
         assert {row["sourceSha"] for row in expected["roles"].values()} == {_baseline}
 
 
+def test_known_release_infrastructure_candidate_has_no_application_component_scope(tmp_path):
+    changes = {
+        ".codex/roles/devops.md": "updated role policy\n",
+        ".github/workflows/gpoint-native-release.yml": "updated workflow\n",
+        "AGENTS.md": "updated instructions\n",
+        "docs/operations/gpoint-vps-backups.md": "updated backup guide\n",
+        "docs/release/automation.md": "updated release guide\n",
+        "packages/db/prisma/production-approved-migrations.json": "[]\n",
+        "packages/db/prisma/migrations/20261103120000_release_guard/migration.sql": "SELECT 1;\n",
+        "scripts/gpoint-backup-policy.py": "updated backup policy\n",
+        "scripts/gpoint-scheduled-backup.py": "updated backup runner\n",
+        "scripts/native_release_intent.py": "updated scope classifier\n",
+        "scripts/prisma_migration_release_plan.py": "updated migration planner\n",
+        "scripts/resolve_native_environment_deployment.py": "updated deployment resolver\n",
+        "scripts/verify-gpoint-scheduled-backup-restore.sh": "updated restore verifier\n",
+        "scripts/verify-kamal-migration-parity.py": "updated migration verifier\n",
+        "scripts/verify-kamal-production-baseline.py": "updated runtime verifier\n",
+        "scripts/verify_native_rollback_evidence.py": "updated rollback verifier\n",
+        "scripts/write-kamal-production-manifest.py": "updated manifest writer\n",
+        "systemd/gpoint-backup.service": "updated backup service\n",
+        "tests/test_native_release_intent.py": "updated release tests\n",
+    }
+    repo, _baseline, candidate, inventory = _component_repo(tmp_path, changes)
+
+    scope = MODULE.classify_component_scope(repo, candidate, inventory)
+
+    assert scope == {
+        "scope": "NONE", "reason": "no_runtime_changes",
+        "deploy_core": False, "deploy_agata": False, "deploy_miniapp": False,
+    }
+
+
+def test_known_release_infrastructure_does_not_expand_an_application_scope(tmp_path):
+    repo, _baseline, candidate, inventory = _component_repo(
+        tmp_path,
+        {
+            "apps/api/src/main.ts": "export const version = 2;\n",
+            "scripts/native_release_intent.py": "updated scope classifier\n",
+            ".github/workflows/gpoint-native-release.yml": "updated workflow\n",
+        },
+    )
+
+    scope = MODULE.classify_component_scope(repo, candidate, inventory)
+
+    assert scope["scope"] == "CORE"
+    assert scope["deploy_core"] is True
+    assert scope["deploy_agata"] is False
+    assert scope["deploy_miniapp"] is False
+
+
+def test_unlisted_release_script_still_requires_explicit_component_scope(tmp_path):
+    repo, _baseline, candidate, inventory = _component_repo(
+        tmp_path, {"scripts/unreviewed-runtime-helper.py": "unmapped behavior\n"}
+    )
+
+    with pytest.raises(ValueError, match="unmapped or unsafe candidate path"):
+        MODULE.classify_component_scope(repo, candidate, inventory)
+
+
+def test_known_non_runtime_symlink_still_requires_explicit_component_scope(tmp_path):
+    repo, _baseline, _candidate, inventory = _component_repo(
+        tmp_path, {"docs/release-link.md": "regular file\n"}
+    )
+    path = repo / "docs/release-link.md"
+    path.unlink()
+    path.symlink_to("../apps/api/src/main.ts")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "replace release guide with symlink")
+    candidate = _git(repo, "rev-parse", "HEAD")
+
+    with pytest.raises(ValueError, match="candidate path is not a regular file"):
+        MODULE.classify_component_scope(repo, candidate, inventory)
+
+
 def test_candidate_equal_to_baseline_blocks_without_restarting_components(tmp_path):
     repo, baseline, _candidate, inventory = _component_repo(
         tmp_path, {"apps/miniapp/src/main.tsx": "export default 1;\n"}

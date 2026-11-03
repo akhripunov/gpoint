@@ -45,6 +45,21 @@ TEST_DIRECTORY_NAMES = frozenset({"test", "tests"})
 PRISMA_MIGRATION = re.compile(
     r"^packages/db/prisma/migrations/[0-9]{14}_[a-z0-9_]+/migration\.sql$"
 )
+KNOWN_NON_RUNTIME_FILES = frozenset({
+    "AGENTS.md",
+    "packages/db/prisma/production-approved-migrations.json",
+    "scripts/gpoint-backup-policy.py",
+    "scripts/gpoint-scheduled-backup.py",
+    "scripts/native_release_intent.py",
+    "scripts/prisma_migration_release_plan.py",
+    "scripts/resolve_native_environment_deployment.py",
+    "scripts/verify-gpoint-scheduled-backup-restore.sh",
+    "scripts/verify-kamal-migration-parity.py",
+    "scripts/verify-kamal-production-baseline.py",
+    "scripts/verify_native_rollback_evidence.py",
+    "scripts/write-kamal-production-manifest.py",
+    "systemd/gpoint-backup.service",
+})
 COMPONENT_ROLES = {
     "CORE": ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot"),
     "AGATA": ("gpoint-agata-api", "gpoint-agata-memory-worker"),
@@ -203,6 +218,16 @@ def _non_runtime_documentation_path(path: str) -> bool:
             or (path.startswith("docs/") and path.endswith((".md", ".mdx"))))
 
 
+def _known_non_runtime_path(path: str) -> bool:
+    """Recognize only verified release/test metadata outside application images."""
+    return (_non_runtime_documentation_path(path)
+            or path in KNOWN_NON_RUNTIME_FILES
+            or PRISMA_MIGRATION.fullmatch(path) is not None
+            or path.startswith("tests/")
+            or (path.startswith(".github/workflows/") and path.endswith((".yml", ".yaml")))
+            or (path.startswith(".codex/roles/") and path.endswith(".md")))
+
+
 def _safe_component_path(path: str) -> bool:
     return (isinstance(path, str) and bool(path) and not path.startswith(("/", "./", "../"))
             and "\\" not in path and "\x00" not in path and "\n" not in path
@@ -215,7 +240,7 @@ def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dic
         raise ValueError("candidate SHA is invalid")
     roles = _validate_role_inventory(inventory)
     paths_by_baseline: dict[str, set[str]] = {}
-    documentation_only = True
+    non_runtime_only = True
     for component_roles in COMPONENT_ROLES.values():
         baseline = roles[component_roles[0]]["source_sha"]
         if baseline == candidate or baseline in paths_by_baseline:
@@ -234,16 +259,18 @@ def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dic
         for status, path in entries:
             if status not in ("A", "M"):
                 raise ValueError("deleted or renamed candidate path needs explicit scope approval")
-            changed_component = _component_path(path) if _safe_component_path(path) else None
-            if changed_component is None:
-                if _safe_component_path(path) and _non_runtime_documentation_path(path):
-                    continue
+            if not _safe_component_path(path):
                 raise ValueError("unmapped or unsafe candidate path needs explicit scope approval")
-            documentation_only = False
             tree = subprocess.check_output(["git", "ls-tree", candidate, "--", path],
                                            cwd=repo).decode()
             if not tree.startswith(("100644 blob ", "100755 blob ")):
                 raise ValueError("candidate path is not a regular file and needs explicit scope approval")
+            changed_component = _component_path(path)
+            if changed_component is None:
+                if _known_non_runtime_path(path):
+                    continue
+                raise ValueError("unmapped or unsafe candidate path needs explicit scope approval")
+            non_runtime_only = False
             paths.add(changed_component)
         paths_by_baseline[baseline] = paths
 
@@ -256,7 +283,7 @@ def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dic
         if all(roles[component_roles[0]]["source_sha"] == candidate
                for component_roles in COMPONENT_ROLES.values()):
             raise ValueError("candidate equals production baseline; no changed component scope")
-        if documentation_only:
+        if non_runtime_only:
             return {"scope": "NONE", "reason": "no_runtime_changes",
                     "deploy_core": False, "deploy_agata": False, "deploy_miniapp": False}
         raise ValueError("candidate diff contains no changed runtime component")

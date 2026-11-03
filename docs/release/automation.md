@@ -173,11 +173,17 @@ production source SHA после предыдущих scoped releases: срав�
 каждого компонента отдельно; роли одного образа при этом должны совпадать.
 Неоднозначный scope не превращается автоматически в FULL и не перезапускает
 незаявленные сервисы.
-Кандидат, в полном production-to-candidate diff которого изменились только
-корневой `README.md` и Markdown-файлы под `docs/`, получает scope `NONE`:
-application roles не перезапускаются, но защищённый Deploy всё равно проверяет
-runtime inventory, состояние БД, маршруты и health перед успешным статусом
-штатного GitHub Deployment.
+Known non-runtime paths receive scope `NONE`: root `README.md`, Markdown under
+`docs/`, `tests/`, `.github/workflows/*.yml` and `*.yaml`, `AGENTS.md`, `.codex/roles/*.md`,
+the exact release/backup helpers listed in `KNOWN_NON_RUNTIME_FILES` in
+`scripts/native_release_intent.py`, the production Prisma allowlist manifest,
+exact Prisma migration SQL paths matching `PRISMA_MIGRATION` in
+`scripts/native_release_intent.py`, and `systemd/gpoint-backup.service`. This lets a release-infrastructure-only
+candidate use the protected Deploy and Runtime Verify without restarting
+application roles or installing backup-service changes. A changed Prisma
+migration remains subject to the separate migration planner and Apply gates.
+Any other non-component path, unsafe path, deletion, or rename still blocks
+before DB preflight/Apply and requires explicit component-scope approval.
 Runtime Verify проверяет все шесть ролей, digest, source SHA, version, Docker
 image ID неизменённых ролей, health и database/cache identities. PostgreSQL,
 Redis, proxy и неизменённые компоненты не перезапускаются.
