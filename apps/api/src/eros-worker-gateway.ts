@@ -3,7 +3,7 @@ import { BadRequestException, Body, Controller, Get, Headers, Header, HttpExcept
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { PrismaClient, type Prisma } from '@prisma/client';
 import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, deriveBridgeInferenceIdentity, parseBridgeRequest, parseErosEmbeddingRequest, type ParsedErosBridgeRequest } from './eros-worker-contract.js';
-import { isAllowedOllamaEmbeddingEndpoint } from './eros-network-policy.js';
+import { isAllowedOllamaEmbeddingEndpoint, isDisposableSyntheticLocalTest } from './eros-network-policy.js';
 import { erosIdentityFor, exactErosPilotPair } from './eros-adapter.js';
 
 const prisma = new PrismaClient();
@@ -517,7 +517,7 @@ export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestro
     try { parsed = parseErosEmbeddingRequest(body); }
     catch { throw new BadRequestException({ code: 'EROS_EMBEDDING_REQUEST_INVALID' }); }
     const endpoint = process.env.EROS_OLLAMA_EMBEDDING_URL ?? '';
-    const localMode = process.env.EROS_WORKER_LOCAL_TEST === 'true';
+    const localMode = isDisposableSyntheticLocalTest();
     if (!isAllowedOllamaEmbeddingEndpoint(endpoint, { localTest: localMode })) {
       throw new HttpException({ code: 'EROS_EMBEDDINGS_UNAVAILABLE' }, 503);
     }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isAllowedOllamaEmbeddingEndpoint } from '../src/eros-network-policy.js';
+import { isAllowedOllamaEmbeddingEndpoint, isDisposableSyntheticLocalTest } from '../src/eros-network-policy.js';
 
 test('production permits only the private Ollama Compose endpoint', () => {
   assert.equal(isAllowedOllamaEmbeddingEndpoint('http://ollama:11434/api/embed'), true);
@@ -25,4 +25,20 @@ test('local test mode permits loopback and keeps production hostname restricted'
   assert.equal(isAllowedOllamaEmbeddingEndpoint('http://127.0.0.1:11434/api/embed', { localTest: true }), true);
   assert.equal(isAllowedOllamaEmbeddingEndpoint('http://ollama:11414/api/embed', { localTest: true }), false);
   assert.equal(isAllowedOllamaEmbeddingEndpoint('http://example.com:11434/api/embed', { localTest: true }), false);
+});
+
+test('loopback embedding exception requires the complete disposable synthetic test mode', () => {
+  const valid = {
+    NODE_ENV: 'development', EROS_DATA_MODE: 'synthetic',
+    EROS_WORKER_LOCAL_TEST: 'true', EROS_WORKER_DISPOSABLE_TEST_DB: '1',
+  };
+  assert.equal(isDisposableSyntheticLocalTest(valid), true);
+  for (const patch of [
+    { NODE_ENV: 'production' },
+    { EROS_DATA_MODE: 'production' },
+    { EROS_WORKER_LOCAL_TEST: 'false' },
+    { EROS_WORKER_DISPOSABLE_TEST_DB: '0' },
+  ]) {
+    assert.equal(isDisposableSyntheticLocalTest({ ...valid, ...patch }), false);
+  }
 });
