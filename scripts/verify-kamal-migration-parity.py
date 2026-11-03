@@ -342,6 +342,8 @@ def verify_compatible(args, live_prisma, recorded):
     if args.agata_current_head not in candidate_ancestors:
         raise ValueError("live AGATA head is not an ancestor of candidate history")
     pending_agata = candidate_ancestors - live_ancestors
+    if getattr(args, "require_no_agata_pending", False) and pending_agata:
+        raise ValueError("PENDING_AGATA_MIGRATION:" + ",".join(sorted(pending_agata)))
     revision_files = {literal_assignments(path).get("revision"): path
                       for path in Path(args.agata_directory).glob("*.py")}
     applied_agata = {}
@@ -452,6 +454,8 @@ def main():
     parser.add_argument("--agata-directory", required=True)
     parser.add_argument("--agata-current-head", required=True)
     parser.add_argument("--agata-current-checksums", default="")
+    parser.add_argument("--require-no-agata-pending", action="store_true",
+                        help="block Native Prisma Deploy if any AGATA revision still needs a separate guarded Apply")
     args = parser.parse_args()
     try:
         prisma_head, agata_head, pending = verify(args)

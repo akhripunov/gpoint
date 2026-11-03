@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -18,6 +19,19 @@ from pathlib import Path
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 OCI_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+ROLE_REPOSITORIES = {
+    "gpoint-core-api": "ghcr.io/akhripunov/gpoint-runtime",
+    "gpoint-core-worker": "ghcr.io/akhripunov/gpoint-runtime",
+    "gpoint-core-bot": "ghcr.io/akhripunov/gpoint-runtime",
+    "gpoint-agata-api": "ghcr.io/akhripunov/gpoint-agata-runtime",
+    "gpoint-agata-memory-worker": "ghcr.io/akhripunov/gpoint-agata-runtime",
+    "gpoint-miniapp-web": "ghcr.io/akhripunov/gpoint-miniapp",
+}
+ROLE_COMPONENTS = {
+    "gpoint-core-api": "CORE", "gpoint-core-worker": "CORE", "gpoint-core-bot": "CORE",
+    "gpoint-agata-api": "AGATA", "gpoint-agata-memory-worker": "AGATA",
+    "gpoint-miniapp-web": "MINIAPP",
+}
 
 
 def read_valid_no_eros_state(path: str, expected_sha: str) -> dict[str, object]:
@@ -68,7 +82,8 @@ def parser() -> argparse.ArgumentParser:
                  "media-restore-manifest-sha", "media-file-count", "media-directory-count",
                  "media-total-bytes", "media-backup-bytes", "prisma-head", "agata-head",
                  "prisma-migrations", "prisma-checksums", "baseline-prisma-head",
-                 "baseline-prisma-migrations", "baseline-prisma-checksums", "baseline-agata-head"):
+                 "baseline-prisma-migrations", "baseline-prisma-checksums", "baseline-agata-head",
+                 "pending-prisma-migrations", "pending-prisma-checksums", "expected-role-identities-b64"):
         result.add_argument(f"--{name}")
     result.add_argument("--public-routes-verified", action="store_true")
     result.add_argument("--migration-compatibility-verified", action="store_true")
@@ -82,6 +97,7 @@ def main() -> int:
         raise SystemExit("candidate SHA must be 40 lowercase hex characters")
     if not SHA40.fullmatch(args.app_source_sha):
         raise SystemExit("application source SHA must be 40 lowercase hex characters")
+    expected_role_plan = None
     if args.mode == "cutover":
         required = ("baseline_path", "inventory_path", "backup_path", "restore_path",
                     "agata_candidate_head", "agata_live_head", "postgres_system_identifier",
@@ -122,12 +138,85 @@ def main() -> int:
             raise SystemExit("ordinary manifest Prisma checksums do not match applied migrations")
         baseline_migrations = (args.baseline_prisma_migrations or "").split(",")
         baseline_checksums = (args.baseline_prisma_checksums or "").split(",")
-        if (args.baseline_prisma_head != args.prisma_head
-                or args.baseline_agata_head != args.agata_head
-                or baseline_migrations != migrations or baseline_checksums != checksums):
-            raise SystemExit("ordinary manifest live DB migration baseline changed during Deploy")
+        pending_migrations = (args.pending_prisma_migrations or "").split(",") if args.pending_prisma_migrations else []
+        pending_checksums = (args.pending_prisma_checksums or "").split(",") if args.pending_prisma_checksums else []
+        if (not re.fullmatch(r"[A-Za-z0-9_]+", args.baseline_agata_head or "")
+                or args.baseline_agata_head != args.agata_head):
+            raise SystemExit("ordinary manifest AGATA head changed during Deploy")
+        if (not baseline_migrations
+                or any(not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", value) for value in baseline_migrations)
+                or len(baseline_migrations) != len(set(baseline_migrations))
+                or baseline_migrations[-1] != args.baseline_prisma_head):
+            raise SystemExit("ordinary manifest Prisma baseline inventory is malformed")
+        baseline_checksum_rows = {}
+        for value in baseline_checksums:
+            name, separator, checksum = value.partition("=")
+            if (not separator or name in baseline_checksum_rows
+                    or not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", name)
+                    or not SHA256.fullmatch(checksum)):
+                raise SystemExit("ordinary manifest Prisma baseline checksums are malformed")
+            baseline_checksum_rows[name] = checksum
+        pending_checksum_rows = {}
+        for value in pending_checksums:
+            name, separator, checksum = value.partition("=")
+            if (not separator or name in pending_checksum_rows
+                    or not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", name)
+                    or not SHA256.fullmatch(checksum)):
+                raise SystemExit("ordinary manifest pending Prisma checksums are malformed")
+            pending_checksum_rows[name] = checksum
+        if ([name for name in baseline_checksum_rows] != baseline_migrations
+                or list(pending_checksum_rows) != pending_migrations
+                or len(pending_migrations) != len(set(pending_migrations))):
+            raise SystemExit("ordinary manifest migration plan order or checksum coverage is invalid")
+        planned_migrations = baseline_migrations + pending_migrations
+        planned_checksums = baseline_checksums + pending_checksums
+        if (args.baseline_prisma_head != baseline_migrations[-1]
+                or migrations != planned_migrations or checksums != planned_checksums
+                or args.prisma_head != planned_migrations[-1]):
+            raise SystemExit("ordinary manifest live migration transition differs from the exact approved plan")
         if not args.public_routes_verified or not args.migration_compatibility_verified:
             raise SystemExit("ordinary manifest needs verified public routes and live-schema compatibility")
+        try:
+            expected_role_plan = json.loads(base64.b64decode(args.expected_role_identities_b64 or "", validate=True))
+        except (ValueError, UnicodeError, json.JSONDecodeError):
+            raise SystemExit("ordinary manifest expected component role inventory is malformed") from None
+        role_repositories = ROLE_REPOSITORIES
+        role_components = ROLE_COMPONENTS
+        scope = expected_role_plan.get("scope") if isinstance(expected_role_plan, dict) else None
+        scope_components = {"FULL": {"CORE", "AGATA", "MINIAPP"}, "CORE": {"CORE"},
+                           "AGATA": {"AGATA"}, "MINIAPP": {"MINIAPP"}}
+        updated_components = scope_components.get(scope)
+        expected_roles = expected_role_plan.get("roles") if isinstance(expected_role_plan, dict) else None
+        if (not isinstance(expected_role_plan, dict)
+                or expected_role_plan.get("schema") != 1 or expected_role_plan.get("candidateSha") != args.sha
+                or updated_components is None or set(expected_role_plan.get("updatedComponents", [])) != updated_components
+                or not isinstance(expected_roles, dict) or set(expected_roles) != set(role_repositories)):
+            raise SystemExit("ordinary manifest component role plan does not match the exact candidate scope")
+        candidate_digests = {
+            "CORE": "ghcr.io/akhripunov/gpoint-runtime@" + args.app_digest,
+            "AGATA": "ghcr.io/akhripunov/gpoint-agata-runtime@" + args.agata_digest,
+            "MINIAPP": "ghcr.io/akhripunov/gpoint-miniapp@" + args.miniapp_digest,
+        }
+        component_identities = {}
+        for role, repository in role_repositories.items():
+            row = expected_roles[role]
+            component = role_components[role]
+            version, source, repo_digest = row.get("version"), row.get("sourceSha"), row.get("repositoryDigest")
+            baseline_image_id = row.get("baselineImageId")
+            if (not re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+", version or "")
+                    or not SHA40.fullmatch(source or "")
+                    or not re.fullmatch(re.escape(repository) + r"@sha256:[0-9a-f]{64}", repo_digest or "")):
+                raise SystemExit("ordinary manifest component role identity is malformed")
+            if component in updated_components:
+                if (version != args.version or source != args.sha or repo_digest != candidate_digests[component]
+                        or baseline_image_id is not None):
+                    raise SystemExit("ordinary manifest updated role differs from the exact candidate artifact")
+            elif not re.fullmatch(r"sha256:[0-9a-f]{64}", baseline_image_id or ""):
+                raise SystemExit("ordinary manifest untouched role lacks its exact baseline Docker image ID")
+            identity = (version, source, repo_digest, baseline_image_id)
+            if component in component_identities and component_identities[component] != identity:
+                raise SystemExit("ordinary manifest shared component roles have inconsistent identities")
+            component_identities[component] = identity
     for field in ("run_id", "attempt", "deployment_id"):
         if not getattr(args, field).isdigit() or int(getattr(args, field)) <= 0:
             raise SystemExit(f"{field.replace('_', ' ')} must be a positive integer")
@@ -172,13 +261,19 @@ def main() -> int:
     ]
     runtime_services = []
     for prefix, repository, digest in expected_services:
-        name = f"{prefix}-{args.version}"
+        expected_role = expected_role_plan["roles"][prefix] if args.mode == "ordinary" else None
+        role_version = expected_role["version"] if expected_role else args.version
+        role_source = expected_role["sourceSha"] if expected_role else args.app_source_sha
+        expected_digest = expected_role["repositoryDigest"] if expected_role else f"{repository}@{digest}"
+        expected_baseline_image_id = expected_role["baselineImageId"] if expected_role else None
+        name = f"{prefix}-{role_version}"
         container = docker_json("inspect", name)[0]
         image_id = container["Image"]
         image = docker_json("image", "inspect", image_id)[0]
-        repo_digest = f"{repository}@{digest}"
+        if expected_baseline_image_id is not None and image_id != expected_baseline_image_id:
+            raise SystemExit(f"untouched runtime image ID changed before manifest: {name}")
         if (not container["State"]["Running"]
-                or container["Config"]["Labels"].get("org.opencontainers.image.revision") != args.app_source_sha):
+                or container["Config"]["Labels"].get("org.opencontainers.image.revision") != role_source):
             raise SystemExit(f"final runtime identity changed before manifest: {name}")
         if prefix != "gpoint-miniapp-web":
             if prefix.startswith("gpoint-agata-"):
@@ -190,16 +285,18 @@ def main() -> int:
                 process_sha = subprocess.run(
                     ["docker", "exec", name, "node", "-p", "process.env.RELEASE_SHA || ''"],
                     check=True, capture_output=True, text=True).stdout.strip()
-            if process_sha != args.app_source_sha:
+            if process_sha != role_source:
                 raise SystemExit(f"runtime RELEASE_SHA does not match application source: {name}")
-        if repo_digest not in image.get("RepoDigests", []):
+        if expected_digest not in image.get("RepoDigests", []):
             raise SystemExit(f"final runtime digest changed before manifest: {name}")
         runtime_services.append({
             "name": name,
+            "component": ROLE_COMPONENTS[prefix],
+            "version": role_version,
             "containerId": container["Id"],
             "imageId": image_id,
-            "repositoryDigest": repo_digest,
-            "revision": args.app_source_sha,
+            "repositoryDigest": expected_digest,
+            "revision": role_source,
             "running": True,
             "healthStatus": container["State"].get("Health", {}).get("Status", "none"),
             "restartCount": container["RestartCount"],
@@ -264,7 +361,7 @@ def main() -> int:
             "legacyComposeContainers": stopped_compose,
             "gsales": "STOPPED",
             "gsalesContainers": stopped_gsales,
-            "databaseMigrationsAppliedByRelease": False,
+            "databaseMigrationsAppliedByRelease": bool(pending_migrations),
             "migrationCompatibility": "PASS",
         }
         public_ingress = {"proxy": "kamal-proxy", "httpPort": 80, "httpsPort": 443,
@@ -285,6 +382,10 @@ def main() -> int:
                 "miniapp": f"ghcr.io/akhripunov/gpoint-miniapp@{args.miniapp_digest}",
             },
         },
+        "deploymentScope": ({
+            "classification": expected_role_plan["scope"],
+            "updatedComponents": expected_role_plan["updatedComponents"],
+        } if args.mode == "ordinary" else {"classification": "FULL", "updatedComponents": ["CORE", "AGATA", "MINIAPP"]}),
         "runtimeServices": runtime_services,
         "attempt": {"runId": args.run_id, "runAttempt": args.attempt,
                     "githubDeploymentId": args.deployment_id},
@@ -333,11 +434,15 @@ def main() -> int:
             "baselineUnchanged": {
                 "prismaHead": args.baseline_prisma_head,
                 "prismaMigrations": baseline_migrations,
-                "prismaChecksums": dict(value.split("=", 1) for value in baseline_checksums),
+                "prismaChecksums": baseline_checksum_rows,
                 "agataHead": args.baseline_agata_head,
             },
-            "liveBaselineUnchanged": True,
-            "databaseWrites": False,
+            "approvedPendingMigrations": [
+                {"name": name, "checksum": digest} for name, digest in pending_checksum_rows.items()
+            ],
+            "liveBaselineUnchanged": not pending_migrations,
+            "appliedExactlyApprovedPlan": True,
+            "databaseWrites": bool(pending_migrations),
         }),
         "verified": ([
             "public-api-health", "public-miniapp-routes", "exact-image-digests-and-git-sha",

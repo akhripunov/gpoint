@@ -1,5 +1,7 @@
 import importlib.util
+import json
 from pathlib import Path
+import subprocess
 import sys
 
 
@@ -66,7 +68,6 @@ def test_app_and_release_files_can_ship_together_in_one_authorized_main_push():
 def test_any_schema_or_migration_change_blocks_ordinary_release():
     for path in (
         "packages/db/prisma/schema.prisma",
-        "packages/db/prisma/migrations/20261101000000_new/migration.sql",
         "services/agata/migrations/versions/0013_new.py",
         "packages/db/prisma/migrations/README.md",
     ):
@@ -74,6 +75,32 @@ def test_any_schema_or_migration_change_blocks_ordinary_release():
             event_name="push", ref="refs/heads/main",
             changed_paths={"apps/api/src/main.ts", path},
         ) == "BLOCK"
+        assert MODULE.classify_push(
+            event_name="push", ref="refs/heads/main", changed_paths={path}
+        ) == "BLOCK"
+
+
+def test_approved_prisma_migration_source_paths_enter_the_existing_protected_deploy():
+    migration = "packages/db/prisma/migrations/20261103090000_add_index/migration.sql"
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths={migration}
+    ) == "DEPLOY"
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main",
+        changed_paths={migration, "packages/db/prisma/schema.prisma"},
+    ) == "DEPLOY"
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main",
+        changed_paths={"packages/db/prisma/schema.prisma"},
+    ) == "BLOCK"
+
+
+def test_agata_migration_and_unknown_schema_paths_remain_blocked_from_prisma_apply():
+    for path in (
+        "services/agata/migrations/versions/0013_new.py",
+        "packages/another-db/migrations/001_new.sql",
+        "apps/api/prisma/migrations/001_new.sql",
+    ):
         assert MODULE.classify_push(
             event_name="push", ref="refs/heads/main", changed_paths={path}
         ) == "BLOCK"
@@ -176,6 +203,102 @@ def test_manual_production_dispatch_requires_exact_owner_approval_before_build()
             actor=actor, repository_owner="akhripunov",
             migration_rehearsal=False, approve_production=approved,
         ) == ("INVALID_DEPLOY", False)
+
+
+def _git(repo, *args):
+    return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
+
+
+def _component_repo(tmp_path, changes):
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test")
+    base_file = repo / "apps/api/src/main.ts"
+    base_file.parent.mkdir(parents=True)
+    base_file.write_text("export const version = 1;\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "baseline")
+    baseline = _git(repo, "rev-parse", "HEAD")
+    for path, contents in changes.items():
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(contents)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "candidate")
+    candidate = _git(repo, "rev-parse", "HEAD")
+    repos = {
+        "gpoint-core-api": "ghcr.io/akhripunov/gpoint-runtime",
+        "gpoint-core-worker": "ghcr.io/akhripunov/gpoint-runtime",
+        "gpoint-core-bot": "ghcr.io/akhripunov/gpoint-runtime",
+        "gpoint-agata-api": "ghcr.io/akhripunov/gpoint-agata-runtime",
+        "gpoint-agata-memory-worker": "ghcr.io/akhripunov/gpoint-agata-runtime",
+        "gpoint-miniapp-web": "ghcr.io/akhripunov/gpoint-miniapp",
+    }
+    image_ids = {repo: "sha256:" + str(index) * 64 for index, repo in enumerate(set(repos.values()), 1)}
+    inventory = {"roles": {}}
+    for role, image_repo in repos.items():
+        version = f"{baseline}-100-1"
+        inventory["roles"][role] = {
+            "name": f"{role}-{version}", "version": version, "source_sha": baseline,
+            "image_id": image_ids[image_repo],
+            "repo_digest": f"{image_repo}@sha256:" + str(list(set(repos.values())).index(image_repo) + 1) * 64,
+        }
+    return repo, baseline, candidate, inventory
+
+
+def test_component_scope_is_exactly_single_component_and_uses_full_fallback(tmp_path):
+    cases = (
+        ({"apps/miniapp/src/main.tsx": "export default 1;\n"}, "MINIAPP"),
+        ({"services/agata/app/responses/main.py": "VALUE = 1\n"}, "AGATA"),
+        ({"apps/api/src/main.ts": "export const version = 2;\n"}, "CORE"),
+        ({"apps/api/src/main.ts": "export const version = 2;\n",
+          "apps/miniapp/src/main.tsx": "export default 1;\n"}, "FULL"),
+        ({"docs/release/automation.md": "release\n"}, "FULL"),
+    )
+    for index, (changes, expected) in enumerate(cases):
+        repo, _baseline, candidate, inventory = _component_repo(tmp_path / str(index), changes)
+        result = MODULE.classify_component_scope(repo, candidate, inventory)
+        assert result["scope"] == expected
+        assert result["deploy_core"] is (expected in ("CORE", "FULL"))
+        assert result["deploy_agata"] is (expected in ("AGATA", "FULL"))
+        assert result["deploy_miniapp"] is (expected in ("MINIAPP", "FULL"))
+
+
+def test_mixed_runtime_baseline_falls_back_to_full_component_deploy(tmp_path):
+    repo, _baseline, candidate, inventory = _component_repo(
+        tmp_path, {"apps/miniapp/src/main.tsx": "export default 1;\n"}
+    )
+    inventory["roles"]["gpoint-agata-api"]["source_sha"] = "c" * 40
+    inventory["roles"]["gpoint-agata-memory-worker"]["source_sha"] = "c" * 40
+    result = MODULE.classify_component_scope(repo, candidate, inventory)
+    assert result["scope"] == "FULL"
+    assert result["reason"] == "mixed_component_baseline"
+
+
+def test_component_runtime_inventory_pins_new_roles_and_preserves_untouched_identity(tmp_path):
+    _repo, baseline, _candidate, inventory = _component_repo(
+        tmp_path, {"apps/miniapp/src/main.tsx": "export default 1;\n"}
+    )
+    candidate = "d" * 40
+    version = candidate + "-123-2"
+    result = MODULE.expected_runtime_inventory(
+        "MINIAPP", inventory, candidate, version,
+        "sha256:" + "1" * 64, "sha256:" + "2" * 64, "sha256:" + "3" * 64,
+    )
+    assert result["roles"]["gpoint-miniapp-web"] == {
+        "version": version, "sourceSha": candidate,
+        "repositoryDigest": "ghcr.io/akhripunov/gpoint-miniapp@sha256:" + "3" * 64,
+        "baselineImageId": None,
+    }
+    assert result["roles"]["gpoint-core-api"]["sourceSha"] == baseline
+    assert result["roles"]["gpoint-core-api"]["baselineImageId"].startswith("sha256:")
+    encoded = MODULE.expected_runtime_inventory_b64(
+        "MINIAPP", inventory, candidate, version,
+        "sha256:" + "1" * 64, "sha256:" + "2" * 64, "sha256:" + "3" * 64,
+    )
+    assert json.loads(__import__("base64").b64decode(encoded)) == result
 
 
 def test_rollback_dispatch_requires_main_exact_owner_explicit_approval_and_no_other_maintenance():

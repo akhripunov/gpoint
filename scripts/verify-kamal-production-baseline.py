@@ -25,7 +25,7 @@ REPO_DIGEST = re.compile(r"^ghcr\.io/akhripunov/[a-z0-9-]+@sha256:[0-9a-f]{64}$"
 def validate(records: list[dict]) -> dict:
     if len(records) != len(ROLES) or {r.get("role") for r in records} != set(ROLES):
         raise ValueError("running Kamal role set is incomplete or duplicated")
-    versions, sources, result, images_by_repo = set(), set(), {}, {}
+    versions, result, images_by_repo, component_identities = set(), {}, {}, {}
     for row in records:
         role = row["role"]
         name, version = row.get("name"), row.get("version")
@@ -48,14 +48,14 @@ def validate(records: list[dict]) -> dict:
             raise ValueError(f"roles for {repo} have different image digests")
         images_by_repo[repo] = identity
         versions.add(version)
-        sources.add(source)
+        if repo in component_identities and component_identities[repo] != (version, source):
+            raise ValueError(f"roles for {repo} have mixed release versions or mixed source revisions")
+        component_identities[repo] = (version, source)
         result[role] = {"name": name, "version": version, "source_sha": source,
                         "image_id": image_id, "repo_digest": matching[0]}
-    if len(versions) != 1:
-        raise ValueError("running Kamal roles have mixed release versions")
-    if len(sources) != 1:
-        raise ValueError("running Kamal roles have mixed source revisions")
-    return {"version": next(iter(versions)), "source_sha": next(iter(sources)), "roles": result}
+    core_source = result["gpoint-core-api"]["source_sha"]
+    return {"version": next(iter(versions)) if len(versions) == 1 else None,
+            "source_sha": core_source, "roles": result}
 
 
 def inspect_running_roles() -> list[dict]:

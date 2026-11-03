@@ -1,37 +1,57 @@
 # Как выпускать GPoint
 
-## ME-52: Native Kamal release (локальное упрощение 2026-11-01)
+## ME-52: Native Kamal release (Native First V3)
 
 Production переводится на Kamal отдельным workflow
 `.github/workflows/gpoint-first-kamal-cutover.yml`; он требует свежий inventory,
 encrypted backup/isolated restore, migration parity, паузу старых consumers и
 полную runtime Verify. После cutover обычный workflow
-`.github/workflows/gpoint-native-release.yml` выполняет для чистых изменений
-приложения `main push → Workspace CI + Python CI → immutable Core/AGATA/Mini App
-images → stock Kamal Deploy → Runtime Verify` без ручного OWNER approval для
-обычного обновления. Exact SHA, immutable digest/provenance, platform/revision,
-production Environment и read-only database parity gates сохраняются.
+`.github/workflows/gpoint-native-release.yml` выполняет
+`Tests → immutable Build/GHCR → protected Deploy job (Prisma при необходимости
+→ stock Kamal 2 → Runtime Verify)`. Exact SHA, immutable digest/provenance,
+platform/revision, production Environment, runtime identity, backup и migration
+gates сохраняются.
 
 Обычный путь содержит четыре jobs: независимые Workspace и Python tests,
 затем Build, затем Kamal Deploy + Runtime Verify. Проверка события и путей
 выполняется шагом Workspace, без отдельного runner/job. PR запускает только
 тесты и не получает production Environment/secrets или GHCR write.
 
-Разрешённый push в main с известными путями приложения, тестов, документации
-или release tooling сразу проходит ту же цепочку, включая смешанный code +
-release-fix commit. Режима PREPARE_ONLY для таких изменений больше нет: не
-нужно повторять тесты и Build отдельным ручным запуском. Публикация в main
-поэтому требует разрешения на production, даже для documentation-only commit.
-Prisma/Alembic schema/migrations и неизвестные пути по-прежнему блокируются;
-это не разрешение применять DDL. Совместимость с фактической БД проверяется
-до Kamal, без автоматических миграций и без ослабления Eros/Worker gates.
+Разрешённый push в main проходит Tests и Build, после чего тот же workflow
+выполняет protected Deploy и Runtime Verify. Prisma migration SQL допускается
+только с точным именем и SHA-256 checksum в
+`packages/db/prisma/production-approved-migrations.json`; неизвестные,
+несовпадающие и AGATA migrations блокируются. Prisma schema без migration SQL,
+удаление/перемещение migration и неизвестные schema paths блокируются. Deploy
+проверяет полный applied prefix/checksums, свежий backup/isolated-restore
+manifest, применяет точный pending allowlist через `prisma migrate deploy` один
+раз, проверяет итоговые heads/checksums и только потом вызывает Kamal. Ошибка
+или неопределённый Apply останавливает Kamal; автоматический downgrade или
+слепой повтор не выполняется. Production allowlist сейчас пуст.
+
+GitHub Tests выполняют Prisma migrations на disposable PostgreSQL, сравнивают
+полную историю миграций с `schema.prisma` через отдельный Prisma shadow database,
+повторно запускают `migrate deploy` и проверяют `migrate status`. `migrate diff`
+для migration directory использует shadow database; `migrate deploy` сам по
+себе drift не проверяет ([Prisma CLI v6](https://www.prisma.io/docs/orm/v6/reference/prisma-cli-reference)).
+Destructive SQL и совместимость предыдущего/кандидатного приложения остаются
+обязательным предметом review exact migration перед включением её checksum в
+allowlist; универсальный SQL risk classifier не вводился.
+
+Перед Kamal scope определяется полным diff от общего проверенного live
+baseline. Только diff, целиком ограниченный одним компонентом Mini App, Core
+или AGATA, допускает scoped deploy; неизвестные пути, удаления, смешанный
+baseline или multi-component diff переходят в FULL. Runtime Verify проверяет
+все шесть ролей, digest, source SHA, version, Docker image ID неизменённых
+ролей, health и database/cache identities. PostgreSQL, Redis, proxy и
+неизменённые компоненты не перезапускаются.
 
 Rollback, backup maintenance и isolated migration rehearsal остаются отдельными
 ручными операциями; обычный push их не запускает. Первый cutover и его recovery
-сохраняют свои допуски. Этот локальный commit не подтверждает production SUCCESS:
-последний Native run 41319291616 остановился до Apply на pending schema dependency.
-Перед первым успешным Native релизом нужны отдельно согласованные миграции и
-проверка фактического состояния; успешные Tests/Build не заменяют Runtime Verify.
+сохраняют свои допуски. Исторические workflow runs не подтверждают текущее
+production состояние. Production SUCCESS устанавливается только свежим успешным
+Native Runtime Verify и read-only runtime evidence; успешные Tests/Build его не
+заменяют.
 
 У отдельного First Cutover workflow есть `allow_source_update`, по умолчанию
 `false`. Его включают только для отдельно OWNER-approved exact candidate, если
@@ -48,10 +68,11 @@ consumer и runtime Verify gates.
 material. GSales не собирается и не стартует в обычных релизах; Eros,
 Sensitive Detector и ACL/pilot остаются вне обычного release scope.
 
-Production Deploy обычного app-only релиза выполняется после успешных CI,
-Build и read-only migration compatibility checks на `main`; pending schema
-changes останавливают его до Kamal и без DDL. Runtime Verify является
-единственным runtime gate для GitHub Deployment SUCCESS.
+Production Deploy выполняется после успешных CI и Build, authorization и
+read-only live-state checks. Для app-only кандидата Prisma Apply пропускается;
+для миграционного кандидата допустим только точный checksum allowlist и полный
+совместимый pending набор. Runtime Verify является единственным runtime gate
+для GitHub Deployment SUCCESS.
 
 Для отдельно разрешённого перехода AGATA `agata0011 → agata0012` результат
 реального Apply фиксируется в приватном root-owned mode-0600 файле
@@ -66,7 +87,8 @@ immutable digest, `--expected-migration-sha256` и `--record-receipt`, толь�
 bootstrap proof больше не нужен; это evidence миграции, а не новый release controller.
 
 Обычный production preflight требует ровно по одной работающей версии каждой из
-шести Kamal-ролей, общего SHA/version baseline, активного Proxy, точных
+шести Kamal-ролей, согласованной идентичности ролей внутри каждой общей image
+группы, активного Proxy, точных
 PostgreSQL/Redis container IDs и SHA-256 fingerprints их persistent mounts.
 После Deploy идентичность БД и Redis сверяется повторно. Core Worker, Bot и
 AGATA memory-worker обновляются отдельными stock Kamal вызовами. Перед этим
@@ -103,6 +125,30 @@ backup/restore проверки перед миграциями и опасны�
 инфраструктурными операциями, offsite gate первого cutover и прочие действующие
 backup/offsite требования не меняются. Удалять recovery/legacy путь можно
 только после отдельной авторизации и успешной production Verify.
+
+### Инвентаризация workflows и прежних release helpers
+
+Статусы основаны на текущих workflow calls, package scripts, imports, tests и
+recovery/transition paths. Отсутствие автоматического вызова не доказывает
+отсутствие ручного или внешнего использования.
+
+| Механизм | Статус | Подтверждённая зависимость |
+|---|---|---|
+| `gpoint-native-release.yml` | ACTIVE | Обычный Tests → Build/GHCR → protected Deploy → Kamal → Runtime Verify. |
+| `gpoint-deploy.yml` | REQUIRED FOR EROS TRANSITION / REQUIRED FOR RECOVERY | Eros Pilot, ACL, authorization reconcile и task-scoped operations; вызывается Linear reconciliation и recovery tooling. Не удалять целиком. |
+| `gpoint-prepare.yml` | REQUIRED FOR RECOVERY | Legacy exact-SHA Prepare/coalescing, старый Deploy receipt и Linear/recovery evidence. |
+| `gpoint-recover-interrupted.yml` | REQUIRED FOR RECOVERY | Metadata-only восстановление уже применённого exact SHA; не делает повторный Apply. |
+| `gpoint-first-kamal-cutover.yml` | REQUIRED FOR RECOVERY | Первый cutover и recovery; процедура должна оставаться до отдельного закрытия transition. |
+| `gpoint-linear-reconcile.yml` | ACTIVE | Read-only reconcile после Prepare/Deploy/recovery, публикует проверенное состояние. |
+| `automated-release.mjs`, `release-gpoint.mjs`, `release-orchestrator.mjs`, `prepare-release.py` | REQUIRED FOR RECOVERY / UNKNOWN | Ссылки из старых workflows, tests и package scripts. У orchestrator не найден текущий обычный вызов, но внешнее/ручное использование не исключено. |
+| Static Release V4 и Prepare V3/V4 helpers | REQUIRED FOR RECOVERY / UNKNOWN | Используются legacy Prepare, first cutover, static exchange и recovery tests. |
+| `unified_release_v1`, release locks/state, OCI receipt helpers | ACTIVE / REQUIRED FOR RECOVERY | Используются coalescing, authorization, provenance, reconciliation или safe recovery. |
+
+В этой проверке не обнаружен механизм со статусом OBSOLETE, который можно
+удалить без риска. Удаление старого workflow или его helpers потребует
+подтверждения текущего production SHA/runtime, active authorization и замены
+его recovery/evidence path. Исторические procedures ниже текущей модели
+помечены отдельно и не являются рабочими instructions.
 
 ## Текущая модель выпуска и состояния (ME-42)
 

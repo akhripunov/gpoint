@@ -1,5 +1,7 @@
 import pytest
 
+import base64
+import json
 from pathlib import Path
 import os
 import hashlib
@@ -764,6 +766,18 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
     assert result.returncode == 0, result.stderr
     assert "GPOINT_KAMAL_SCHEMA_COMPATIBILITY=PASS" in result.stdout
     assert "GPOINT_KAMAL_DB_MIGRATION_REQUIRED=YES" in result.stdout
+    native_release = subprocess.run(
+        ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
+         "--policy", "compatible", "--require-no-agata-pending", "--repo-root", str(repo),
+         "--baseline-source-sha", baseline_sha, "--candidate-source-sha", candidate_sha,
+         "--prisma-directory", str(prisma), "--prisma-current-head", base_name,
+         "--prisma-current-migrations", base_name,
+         "--prisma-current-checksums", base_name + "=" + hashlib.sha256(base_sql.encode()).hexdigest(),
+         "--agata-directory", str(agata), "--agata-current-head", "agata0011"],
+        capture_output=True, text=True,
+    )
+    assert native_release.returncode != 0
+    assert "PENDING_AGATA_MIGRATION" in native_release.stderr
     app_file.write_text("export const errorCode = 'error_code';\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "app depends on pending varchar field"], check=True)
@@ -1549,6 +1563,21 @@ def test_ordinary_verify_receives_baseline_facts_in_remote_shell():
         'GITHUB_RUN_ATTEMPT': '1', 'writer_remote': '/run/gpoint-ordinary-manifest-123-1.py',
         'BASELINE_PRISMA_MIGRATIONS': 'migration', 'BASELINE_PRISMA_CHECKSUMS': 'migration=checksum',
         'BASELINE_PRISMA_HEAD': 'migration', 'BASELINE_AGATA_HEAD': 'agata0012',
+        'EXPECTED_PRISMA_MIGRATIONS': 'migration', 'EXPECTED_PRISMA_CHECKSUMS': 'migration=checksum',
+        'EXPECTED_PRISMA_HEAD': 'migration', 'EXPECTED_AGATA_HEAD': 'agata0012',
+        'PENDING_PRISMA_MIGRATIONS': '', 'PENDING_PRISMA_CHECKSUMS': '',
+        'EXPECTED_ROLE_IDENTITIES_B64': base64.b64encode(json.dumps({
+            'schema': 1, 'candidateSha': 'a' * 40, 'scope': 'FULL',
+            'updatedComponents': ['AGATA', 'CORE', 'MINIAPP'],
+            'roles': {
+                'gpoint-core-api': {'version': 'a' * 40 + '-123-1', 'sourceSha': 'a' * 40, 'repositoryDigest': 'ghcr.io/akhripunov/gpoint-runtime@sha256:' + 'b' * 64, 'baselineImageId': None},
+                'gpoint-core-worker': {'version': 'a' * 40 + '-123-1', 'sourceSha': 'a' * 40, 'repositoryDigest': 'ghcr.io/akhripunov/gpoint-runtime@sha256:' + 'b' * 64, 'baselineImageId': None},
+                'gpoint-core-bot': {'version': 'a' * 40 + '-123-1', 'sourceSha': 'a' * 40, 'repositoryDigest': 'ghcr.io/akhripunov/gpoint-runtime@sha256:' + 'b' * 64, 'baselineImageId': None},
+                'gpoint-agata-api': {'version': 'a' * 40 + '-123-1', 'sourceSha': 'a' * 40, 'repositoryDigest': 'ghcr.io/akhripunov/gpoint-agata-runtime@sha256:' + 'c' * 64, 'baselineImageId': None},
+                'gpoint-agata-memory-worker': {'version': 'a' * 40 + '-123-1', 'sourceSha': 'a' * 40, 'repositoryDigest': 'ghcr.io/akhripunov/gpoint-agata-runtime@sha256:' + 'c' * 64, 'baselineImageId': None},
+                'gpoint-miniapp-web': {'version': 'a' * 40 + '-123-1', 'sourceSha': 'a' * 40, 'repositoryDigest': 'ghcr.io/akhripunov/gpoint-miniapp@sha256:' + 'd' * 64, 'baselineImageId': None},
+            },
+        }, separators=(',', ':')).encode()).decode(),
         'BASELINE_ROLE_VERSION': 'b' * 40 + '-100-1', 'BASELINE_ROLE_SOURCE_SHA': 'b' * 40,
         'DB_MOUNTS_SHA256': 'c' * 64, 'REDIS_MOUNTS_SHA256': 'd' * 64,
     }
@@ -1576,8 +1605,8 @@ def test_ordinary_verify_receives_baseline_facts_in_remote_shell():
 def test_consumer_process_checks_do_not_require_ps_inside_slim_images():
     workflow = (ROOT / '.github/workflows/gpoint-native-release.yml').read_text()
     for role in ['worker', 'bot']:
-        probe = f'docker top "gpoint-core-{role}-$version" -eo pid,args | grep -F "apps/{role}/dist/main.js"'
-        assert workflow.count(probe) == 2  # Ordinary Verify and protected rollback Verify.
+        assert workflow.count(f'docker top "gpoint-core-{role}-$core_version" -eo pid,args | grep -F "apps/{role}/dist/main.js"') == 1
+        assert workflow.count(f'docker top "gpoint-core-{role}-$version" -eo pid,args | grep -F "apps/{role}/dist/main.js"') == 1
     assert "sh -ec 'ps aux" not in workflow
 
 

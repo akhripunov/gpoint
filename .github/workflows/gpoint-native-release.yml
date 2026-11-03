@@ -73,6 +73,7 @@ jobs:
           --health-retries 20
     env:
       DATABASE_URL: postgresql://gpoint:gpoint_dev_only@127.0.0.1:5432/gpoint
+      SHADOW_DATABASE_URL: postgresql://gpoint:gpoint_dev_only@127.0.0.1:5432/gpoint_shadow
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -134,6 +135,13 @@ jobs:
         run: |
           pnpm --filter @gpoint/db exec prisma generate
           pnpm --filter @gpoint/db exec prisma migrate deploy
+          pnpm --filter @gpoint/db exec prisma migrate diff \
+            --from-migrations prisma/migrations \
+            --to-schema prisma/schema.prisma \
+            --shadow-database-url "$SHADOW_DATABASE_URL" \
+            --exit-code
+          pnpm --filter @gpoint/db exec prisma migrate deploy
+          pnpm --filter @gpoint/db exec prisma migrate status
       - name: Build and typecheck workspace
         run: |
           pnpm -r build
@@ -474,7 +482,7 @@ jobs:
         run: |
           set -euo pipefail
           role_inventory="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - < "$GITHUB_WORKSPACE/scripts/verify-kamal-production-baseline.py")"
-          baseline_values="$(python3 -c 'import json,re,sys; d=json.loads(sys.argv[1]); assert set(d["roles"]) == {"gpoint-core-api","gpoint-core-worker","gpoint-core-bot","gpoint-agata-api","gpoint-agata-memory-worker","gpoint-miniapp-web"}; v=d["version"]; s=d["source_sha"]; assert re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+",v); assert re.fullmatch(r"[0-9a-f]{40}",s); print(v+"\t"+s)' "$role_inventory")"
+          baseline_values="$(python3 -c 'import json,re,sys; d=json.loads(sys.argv[1]); assert set(d["roles"]) == {"gpoint-core-api","gpoint-core-worker","gpoint-core-bot","gpoint-agata-api","gpoint-agata-memory-worker","gpoint-miniapp-web"}; core=d["roles"]["gpoint-core-api"]; v=core["version"]; s=core["source_sha"]; assert re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+",v); assert re.fullmatch(r"[0-9a-f]{40}",s); print(v+"\t"+s)' "$role_inventory")"
           IFS=$'\t' read -r baseline_version baseline_source_sha <<< "$baseline_values"
           test -n "$baseline_version" && test -n "$baseline_source_sha"
           facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$baseline_version" "$baseline_source_sha" <<'REMOTE'
@@ -526,6 +534,35 @@ jobs:
               *) echo 'unexpected topology fact' >&2; exit 1 ;;
             esac
           done <<< "$facts"
+      - name: Plan exact component-scoped Kamal update from live baseline
+        id: component_plan
+        env:
+          BASELINE_ROLE_INVENTORY: ${{ steps.topology.outputs.GPOINT_BASELINE_ROLE_INVENTORY }}
+          APP_DIGEST: ${{ needs.build.outputs.app_digest }}
+          AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
+          MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path.cwd() / "scripts"))
+          from native_release_intent import classify_component_scope, expected_runtime_inventory_b64
+
+          candidate = os.environ["CANDIDATE_SHA"]
+          baseline = json.loads(os.environ["BASELINE_ROLE_INVENTORY"])
+          scope = classify_component_scope(Path.cwd(), candidate, baseline)
+          expected = expected_runtime_inventory_b64(
+              scope["scope"], baseline, candidate, os.environ["IMAGE_VERSION"],
+              os.environ["APP_DIGEST"], os.environ["AGATA_DIGEST"], os.environ["MINIAPP_DIGEST"],
+          )
+          print("scope=" + str(scope["scope"]))
+          print("reason=" + str(scope["reason"]))
+          print("deploy_core=" + str(scope["deploy_core"]).lower())
+          print("deploy_agata=" + str(scope["deploy_agata"]).lower())
+          print("deploy_miniapp=" + str(scope["deploy_miniapp"]).lower())
+          print("expected_role_identities_b64=" + expected)
+          PY
       - name: Verify candidate compatibility with the live database baseline
         id: migration_baseline
         env:
@@ -567,6 +604,7 @@ jobs:
           fi
           python3 scripts/verify-kamal-migration-parity.py \
             --policy compatible \
+            --require-no-agata-pending \
             --repo-root "$GITHUB_WORKSPACE" \
             --baseline-source-sha "$BASELINE_SOURCE_SHA" \
             --candidate-source-sha "$CANDIDATE_SHA" \
@@ -583,6 +621,36 @@ jobs:
             echo "prisma_checksums=$prisma_checksums"
             echo "agata_head=$agata_head"
           } >> "$GITHUB_OUTPUT"
+      - name: Plan the exact approved Prisma migration set
+        id: migration_plan
+        env:
+          LIVE_MIGRATIONS: ${{ steps.migration_baseline.outputs.prisma_migrations }}
+          LIVE_CHECKSUMS: ${{ steps.migration_baseline.outputs.prisma_checksums }}
+        run: |
+          set -euo pipefail
+          plan="$(python3 scripts/prisma_migration_release_plan.py \
+            --migrations-dir packages/db/prisma/migrations \
+            --applied-migrations "$LIVE_MIGRATIONS" \
+            --applied-checksums "$LIVE_CHECKSUMS" \
+            --allowlist packages/db/prisma/production-approved-migrations.json)"
+          grep -qx 'PRISMA_RELEASE_PLAN=PASS' <<< "$plan"
+          apply="$(sed -n 's/^apply=//p' <<< "$plan")"
+          pending="$(sed -n 's/^pending=//p' <<< "$plan")"
+          pending_checksums="$(sed -n 's/^pending_checksums=//p' <<< "$plan")"
+          source_head="$(sed -n 's/^source_head=//p' <<< "$plan")"
+          [[ "$apply" == true || "$apply" == false ]]
+          [[ "$source_head" =~ ^[0-9]{14}_[a-z0-9_]+$ ]]
+          if [[ "$apply" == true ]]; then
+            test -n "$pending" && test -n "$pending_checksums"
+          else
+            test -z "$pending" && test -z "$pending_checksums"
+          fi
+          {
+            echo "apply=$apply"
+            echo "pending_prisma_migrations=$pending"
+            echo "pending_prisma_checksums=$pending_checksums"
+            echo "candidate_prisma_head=$source_head"
+          } >> "$GITHUB_OUTPUT"
       - name: Create exact-SHA in-progress GitHub Deployment
         id: deployment
         env:
@@ -595,14 +663,145 @@ jobs:
           gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$id/statuses" \
             -f state=in_progress -f environment=production -f description="Kamal deploy in progress for exact SHA $CANDIDATE_SHA" >/dev/null
           echo "id=$id" >> "$GITHUB_OUTPUT"
+      - name: Apply approved Prisma migrations once before Kamal
+        id: migration_apply
+        env:
+          APPLY: ${{ steps.migration_plan.outputs.apply }}
+          APP_IMAGE: ghcr.io/akhripunov/gpoint-runtime@${{ needs.build.outputs.app_digest }}
+          PENDING_MIGRATIONS: ${{ steps.migration_plan.outputs.pending_prisma_migrations }}
+          PENDING_CHECKSUMS: ${{ steps.migration_plan.outputs.pending_prisma_checksums }}
+          BASELINE_PRISMA_HEAD: ${{ steps.migration_baseline.outputs.prisma_head }}
+          BASELINE_PRISMA_MIGRATIONS: ${{ steps.migration_baseline.outputs.prisma_migrations }}
+          BASELINE_PRISMA_CHECKSUMS: ${{ steps.migration_baseline.outputs.prisma_checksums }}
+          BASELINE_AGATA_HEAD: ${{ steps.migration_baseline.outputs.agata_head }}
+          PENDING_PRISMA_MIGRATIONS: ${{ steps.migration_plan.outputs.pending_prisma_migrations }}
+          PENDING_PRISMA_CHECKSUMS: ${{ steps.migration_plan.outputs.pending_prisma_checksums }}
+        run: |
+          set -euo pipefail
+          if [[ "$APPLY" == false ]]; then
+            {
+              echo "prisma_head=$BASELINE_PRISMA_HEAD"
+              echo "prisma_migrations=$BASELINE_PRISMA_MIGRATIONS"
+              echo "prisma_checksums=$BASELINE_PRISMA_CHECKSUMS"
+              echo "agata_head=$BASELINE_AGATA_HEAD"
+            } >> "$GITHUB_OUTPUT"
+            echo 'GPOINT_PRISMA_APPLY=SKIPPED_NO_PENDING' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          test "$APPLY" = true
+          [[ "$APP_IMAGE" =~ ^ghcr\.io/akhripunov/gpoint-runtime@sha256:[0-9a-f]{64}$ ]]
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$BASELINE_PRISMA_HEAD" =~ ^[0-9]{14}_[a-z0-9_]+$ ]]
+          [[ "$BASELINE_AGATA_HEAD" =~ ^[A-Za-z0-9_]+$ ]]
+          test -n "$PENDING_MIGRATIONS" && test -n "$PENDING_CHECKSUMS"
+          stage="/run/gpoint-prisma-apply-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          remote_stage_created=false
+          cleanup_apply() {
+            result=$?
+            trap - EXIT
+            if [[ "$remote_stage_created" == true ]]; then
+              ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$stage" <<'REMOTE_CLEANUP' || result=1
+          set -euo pipefail
+          [[ "$1" =~ ^/run/gpoint-prisma-apply-[0-9]+-[0-9]+$ ]]
+          rm -rf -- "$1"
+          test ! -e "$1"
+          REMOTE_CLEANUP
+            fi
+            exit "$result"
+          }
+          trap cleanup_apply EXIT
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$stage" "$GITHUB_ACTOR" <<'REMOTE_STAGE'
+          set -euo pipefail
+          stage="$1"; actor="$2"
+          [[ "$stage" =~ ^/run/gpoint-prisma-apply-[0-9]+-[0-9]+$ ]]
+          [[ "$actor" =~ ^[A-Za-z0-9-]+$ ]]
+          test ! -e "$stage"
+          install -d -o root -g root -m 0700 "$stage" "$stage/docker-config"
+          REMOTE_STAGE
+          remote_stage_created=true
+          printf '%s' "$KAMAL_REGISTRY_PASSWORD" | ssh -T "root@${GPOINT_PRODUCTION_HOST}" \
+            "DOCKER_CONFIG='$stage/docker-config' docker login ghcr.io --username '$GITHUB_ACTOR' --password-stdin" >/dev/null
+          echo 'Starting the existing encrypted backup and isolated-restore service before Prisma Apply.'
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" systemctl start gpoint-backup.service
+          backup_policy="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" \
+            python3 /opt/gpoint/gpoint-backup-current/scripts/gpoint-backup-policy.py freshness \
+            --manifest /opt/gpoint/backups/scheduled/latest.json --max-age-hours 26)"
+          grep -q '^GPOINT_BACKUP_FRESHNESS=PASS ' <<< "$backup_policy"
+          backup_manifest="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" cat /opt/gpoint/backups/scheduled/latest.json)"
+          python3 - "$BASELINE_PRISMA_HEAD" "$BASELINE_AGATA_HEAD" "$backup_manifest" <<'PY'
+          import json, sys
+          manifest = json.loads(sys.argv[3])
+          if manifest.get("schema") != "gpoint-scheduled-backup/v1" or manifest.get("status") != "PASS":
+              raise SystemExit("fresh backup manifest is invalid")
+          if manifest.get("database", {}).get("prisma_head") != sys.argv[1]:
+              raise SystemExit("fresh isolated restore has a different Prisma baseline")
+          if manifest.get("database", {}).get("agata_head") != sys.argv[2]:
+              raise SystemExit("fresh isolated restore has a different AGATA baseline")
+          print("GPOINT_MIGRATION_BACKUP_BASELINE=PASS")
+          PY
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$stage" "$APP_IMAGE" "$CANDIDATE_SHA" \
+            "$PENDING_MIGRATIONS" "$PENDING_CHECKSUMS" "$BASELINE_PRISMA_MIGRATIONS" \
+            "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "$BASELINE_AGATA_HEAD" <<'REMOTE_APPLY'
+          set -euo pipefail
+          stage="$1"; app_image="$2"; candidate="$3"; pending="$4"; pending_checksums="$5"
+          baseline_migrations="$6"; baseline_checksums="$7"; baseline_head="$8"; baseline_agata="$9"
+          [[ "$stage" =~ ^/run/gpoint-prisma-apply-[0-9]+-[0-9]+$ ]]
+          [[ "$app_image" =~ ^ghcr\.io/akhripunov/gpoint-runtime@sha256:[0-9a-f]{64}$ ]]
+          [[ "$candidate" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$baseline_head" =~ ^[0-9]{14}_[a-z0-9_]+$ && "$baseline_agata" =~ ^[A-Za-z0-9_]+$ ]]
+          test -n "$pending" && test -n "$pending_checksums"
+          export DOCKER_CONFIG="$stage/docker-config"
+          docker pull --platform linux/amd64 "$app_image"
+          test "$(docker image inspect "$app_image" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
+          test "$(docker image inspect "$app_image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$candidate"
+          docker image inspect "$app_image" --format '{{json .RepoDigests}}' | grep -F "$app_image" >/dev/null
+          freshness="$(python3 /opt/gpoint/gpoint-backup-current/scripts/gpoint-backup-policy.py freshness \
+            --manifest /opt/gpoint/backups/scheduled/latest.json --max-age-hours 26)"
+          grep -q '^GPOINT_BACKUP_FRESHNESS=PASS ' <<< "$freshness"
+          docker run --rm --network shared_internal --env-file /opt/gpoint/env/production.env \
+            --workdir /app/packages/db "$app_image" pnpm exec prisma migrate deploy
+          actual="$(docker run --rm --network shared_internal --env-file /opt/gpoint/env/production.env \
+            --workdir /app/apps/api "$app_image" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const failed=await db.$queryRawUnsafe("SELECT count(*)::int AS count FROM _prisma_migrations WHERE finished_at IS NULL AND rolled_back_at IS NULL");if(failed[0].count!==0)throw Error("unfinished Prisma migration exists after deploy");const rows=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head is not singular");console.log("PRISMA_HEAD="+(rows.length?rows[rows.length-1].migration_name:"NONE"));console.log("PRISMA_MIGRATIONS="+rows.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+rows.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("POST_APPLY_DATABASE_VERIFY_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
+          prisma_head="$(sed -n 's/^PRISMA_HEAD=//p' <<< "$actual")"
+          prisma_migrations="$(sed -n 's/^PRISMA_MIGRATIONS=//p' <<< "$actual")"
+          prisma_checksums="$(sed -n 's/^PRISMA_CHECKSUMS=//p' <<< "$actual")"
+          agata_head="$(sed -n 's/^AGATA_HEAD=//p' <<< "$actual")"
+          expected_migrations="$baseline_migrations,$pending"
+          expected_checksums="$baseline_checksums,$pending_checksums"
+          expected_head="${pending##*,}"
+          expected_head="${expected_head%%=*}"
+          test "$prisma_migrations" = "$expected_migrations" || { echo 'post-Apply Prisma migration inventory differs from the authorized pending set' >&2; exit 1; }
+          test "$prisma_checksums" = "$expected_checksums" || { echo 'post-Apply Prisma checksums differ from the authorized pending set' >&2; exit 1; }
+          test "$prisma_head" = "$expected_head" || { echo 'post-Apply Prisma head differs from the exact candidate plan' >&2; exit 1; }
+          test "$agata_head" = "$baseline_agata" || { echo 'Prisma Apply unexpectedly changed the AGATA migration head' >&2; exit 1; }
+          printf 'prisma_head=%s\nprisma_migrations=%s\nprisma_checksums=%s\nagata_head=%s\n' \
+            "$prisma_head" "$prisma_migrations" "$prisma_checksums" "$agata_head"
+          REMOTE_APPLY
+          )"
+          {
+            echo "prisma_head=$(sed -n 's/^prisma_head=//p' <<< "$facts")"
+            echo "prisma_migrations=$(sed -n 's/^prisma_migrations=//p' <<< "$facts")"
+            echo "prisma_checksums=$(sed -n 's/^prisma_checksums=//p' <<< "$facts")"
+            echo "agata_head=$(sed -n 's/^agata_head=//p' <<< "$facts")"
+          } >> "$GITHUB_OUTPUT"
+          echo "GPOINT_PRISMA_APPLY=PASS PENDING=$PENDING_MIGRATIONS" >> "$GITHUB_STEP_SUMMARY"
       - name: Deploy exact immutable images with stock Kamal
         id: kamal_apply
+        if: success()
         env:
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
+          DEPLOY_CORE: ${{ steps.component_plan.outputs.deploy_core }}
+          DEPLOY_AGATA: ${{ steps.component_plan.outputs.deploy_agata }}
+          DEPLOY_MINIAPP: ${{ steps.component_plan.outputs.deploy_miniapp }}
+          DEPLOY_SCOPE: ${{ steps.component_plan.outputs.scope }}
         run: |
           set -euo pipefail
+          for value in "$DEPLOY_CORE" "$DEPLOY_AGATA" "$DEPLOY_MINIAPP"; do
+            [[ "$value" == true || "$value" == false ]]
+          done
+          echo "GPOINT_KAMAL_COMPONENT_SCOPE=$DEPLOY_SCOPE" >> "$GITHUB_STEP_SUMMARY"
           kamal() {
             docker run --rm --volume "$GITHUB_WORKSPACE:/workdir" --volume "$HOME/.ssh:/root/.ssh:ro" --volume "$HOME/.ssh:$HOME/.ssh:ro" \
               --workdir /workdir --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA --env GPOINT_PRODUCTION_HOST \
@@ -610,28 +809,34 @@ jobs:
               --env GPOINT_KAMAL_EXPECTED_DIGEST --env GPOINT_KAMAL_SERVICE --env KAMAL_ROLES \
               ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 "$@"
           }
-          GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
-            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.yml
-          GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api \
-            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.agata.yml
-          GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
-            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.miniapp.yml
           verify_single_running_role() {
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$@" \
               < "$GITHUB_WORKSPACE/scripts/verify-kamal-role.sh"
           }
-          GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker kamal app stop --roles worker --config-file config/deploy.yml
-          GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker \
-            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker --config-file config/deploy.yml
-          verify_single_running_role gpoint-core-worker "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
-          GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot kamal app stop --roles bot --config-file config/deploy.yml
-          GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot \
-            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles bot --config-file config/deploy.yml
-          verify_single_running_role gpoint-core-bot "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
-          GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker kamal app stop --roles memory-worker --config-file config/deploy.agata.yml
-          GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker \
-            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles memory-worker --config-file config/deploy.agata.yml
-          verify_single_running_role gpoint-agata-memory-worker "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
+          if [[ "$DEPLOY_CORE" == true ]]; then
+            GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
+              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.yml
+            GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker kamal app stop --roles worker --config-file config/deploy.yml
+            GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker \
+              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker --config-file config/deploy.yml
+            verify_single_running_role gpoint-core-worker "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
+            GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot kamal app stop --roles bot --config-file config/deploy.yml
+            GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot \
+              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles bot --config-file config/deploy.yml
+            verify_single_running_role gpoint-core-bot "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
+          fi
+          if [[ "$DEPLOY_AGATA" == true ]]; then
+            GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api \
+              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.agata.yml
+            GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker kamal app stop --roles memory-worker --config-file config/deploy.agata.yml
+            GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker \
+              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles memory-worker --config-file config/deploy.agata.yml
+            verify_single_running_role gpoint-agata-memory-worker "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
+          fi
+          if [[ "$DEPLOY_MINIAPP" == true ]]; then
+            GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
+              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.miniapp.yml
+          fi
       - name: Verify public routes and exact running services
         id: verify
         env:
@@ -642,12 +847,17 @@ jobs:
           REDIS_CONTAINER_ID: ${{ steps.topology.outputs.REDIS_CONTAINER_ID }}
           DB_MOUNTS_SHA256: ${{ steps.topology.outputs.DB_MOUNTS_SHA256 }}
           REDIS_MOUNTS_SHA256: ${{ steps.topology.outputs.REDIS_MOUNTS_SHA256 }}
-          BASELINE_ROLE_VERSION: ${{ steps.topology.outputs.GPOINT_BASELINE_ROLE_VERSION }}
-          BASELINE_ROLE_SOURCE_SHA: ${{ steps.topology.outputs.GPOINT_BASELINE_ROLE_SOURCE_SHA }}
+          EXPECTED_ROLE_IDENTITIES_B64: ${{ steps.component_plan.outputs.expected_role_identities_b64 }}
+          EXPECTED_PRISMA_HEAD: ${{ steps.migration_apply.outputs.prisma_head }}
+          EXPECTED_PRISMA_MIGRATIONS: ${{ steps.migration_apply.outputs.prisma_migrations }}
+          EXPECTED_PRISMA_CHECKSUMS: ${{ steps.migration_apply.outputs.prisma_checksums }}
+          EXPECTED_AGATA_HEAD: ${{ steps.migration_apply.outputs.agata_head }}
           BASELINE_PRISMA_HEAD: ${{ steps.migration_baseline.outputs.prisma_head }}
           BASELINE_PRISMA_MIGRATIONS: ${{ steps.migration_baseline.outputs.prisma_migrations }}
           BASELINE_PRISMA_CHECKSUMS: ${{ steps.migration_baseline.outputs.prisma_checksums }}
           BASELINE_AGATA_HEAD: ${{ steps.migration_baseline.outputs.agata_head }}
+          PENDING_PRISMA_MIGRATIONS: ${{ steps.migration_plan.outputs.pending_prisma_migrations }}
+          PENDING_PRISMA_CHECKSUMS: ${{ steps.migration_plan.outputs.pending_prisma_checksums }}
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
         run: |
           set -euo pipefail
@@ -672,12 +882,16 @@ jobs:
           writer_sha="$(sha256sum scripts/write-kamal-production-manifest.py | awk '{print $1}')"
           remote_writer_sha="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" sha256sum "$writer_remote" | awk '{print $1}')"
           test "$writer_sha" = "$remote_writer_sha"
-          test -n "$BASELINE_PRISMA_HEAD" && test -n "$BASELINE_PRISMA_MIGRATIONS" && test -n "$BASELINE_PRISMA_CHECKSUMS" && test -n "$BASELINE_AGATA_HEAD"
-          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$BASELINE_PRISMA_MIGRATIONS" "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "$BASELINE_AGATA_HEAD" "$BASELINE_ROLE_VERSION" "$BASELINE_ROLE_SOURCE_SHA" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" <<'REMOTE'
+          test -n "$EXPECTED_PRISMA_HEAD" && test -n "$EXPECTED_PRISMA_MIGRATIONS" && test -n "$EXPECTED_PRISMA_CHECKSUMS" && test -n "$EXPECTED_AGATA_HEAD"
+          test -n "$BASELINE_PRISMA_HEAD" && test -n "$BASELINE_PRISMA_MIGRATIONS" && test -n "$BASELINE_PRISMA_CHECKSUMS"
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$EXPECTED_PRISMA_MIGRATIONS" "$EXPECTED_PRISMA_CHECKSUMS" "$EXPECTED_PRISMA_HEAD" "$EXPECTED_AGATA_HEAD" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" "$BASELINE_PRISMA_MIGRATIONS" "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "$PENDING_PRISMA_MIGRATIONS" "$PENDING_PRISMA_CHECKSUMS" "$BASELINE_AGATA_HEAD" "$EXPECTED_ROLE_IDENTITIES_B64" <<'REMOTE'
           set -euo pipefail
           sha="$1"; version="$2"; app="$3"; agata="$4"; miniapp="$5"; db_id="$6"; redis_id="$7"; deployment_id="$8"; run_id="$9"; attempt="${10}"; writer="${11}"
           expected_prisma_migrations="${12}"; expected_prisma_checksums="${13}"; expected_prisma_head="${14}"; expected_agata_head="${15}"
-          BASELINE_ROLE_VERSION="${16}"; BASELINE_ROLE_SOURCE_SHA="${17}"; DB_MOUNTS_SHA256="${18}"; REDIS_MOUNTS_SHA256="${19}"
+          DB_MOUNTS_SHA256="${16}"; REDIS_MOUNTS_SHA256="${17}"
+          baseline_prisma_migrations="${18}"; baseline_prisma_checksums="${19}"; baseline_prisma_head="${20}"
+          pending_prisma_migrations="${21}"; pending_prisma_checksums="${22}"; baseline_agata_head="${23}"
+          expected_role_identities_b64="${24}"
           [[ "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
           [[ "$writer" == "/run/gpoint-ordinary-manifest-${run_id}-${attempt}.py" ]]
           test -s "$writer"
@@ -685,9 +899,8 @@ jobs:
           test "$(docker inspect --format '{{.Id}}' shared_redis_1)" = "$redis_id"
           test "$(docker inspect --format '{{.State.Running}}' shared_postgres_1)" = true
           test "$(docker inspect --format '{{.State.Running}}' shared_redis_1)" = true
-          [[ "$BASELINE_ROLE_VERSION" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
-          [[ "$BASELINE_ROLE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$DB_MOUNTS_SHA256" =~ ^[0-9a-f]{64}$ && "$REDIS_MOUNTS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$expected_role_identities_b64" =~ ^[A-Za-z0-9+/=]+$ ]]
           db_mounts_sha="$(docker inspect shared_postgres_1 --format '{{json .Mounts}}' | python3 -c 'import hashlib,json,sys; a=json.load(sys.stdin); rows=sorted(({k:m.get(k) for k in ("Type","Name","Source","Destination","RW")} for m in a), key=lambda x:(x["Destination"] or "",x["Source"] or "")); assert rows and all(x["Source"] and x["Destination"] for x in rows); print(hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(",",":")).encode()).hexdigest())')"
           redis_mounts_sha="$(docker inspect shared_redis_1 --format '{{json .Mounts}}' | python3 -c 'import hashlib,json,sys; a=json.load(sys.stdin); rows=sorted(({k:m.get(k) for k in ("Type","Name","Source","Destination","RW")} for m in a), key=lambda x:(x["Destination"] or "",x["Source"] or "")); assert rows and all(x["Source"] and x["Destination"] for x in rows); print(hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(",",":")).encode()).hexdigest())')"
           test "$db_mounts_sha" = "$DB_MOUNTS_SHA256" || { echo 'PostgreSQL persistence identity changed during Kamal apply' >&2; exit 1; }
@@ -697,23 +910,50 @@ jobs:
           test "$(docker ps -q --filter label=com.docker.compose.project=shared --filter label=com.docker.compose.service=postgres | wc -l | tr -d ' ')" = 1
           test "$(docker ps -q --filter label=com.docker.compose.project=shared --filter label=com.docker.compose.service=redis | wc -l | tr -d ' ')" = 1
           if systemctl is-active --quiet caddy; then echo 'Caddy is active on ordinary Kamal topology' >&2; exit 1; fi
-          for item in \
-            "gpoint-core-api|ghcr.io/akhripunov/gpoint-runtime|$app" \
-            "gpoint-core-worker|ghcr.io/akhripunov/gpoint-runtime|$app" \
-            "gpoint-core-bot|ghcr.io/akhripunov/gpoint-runtime|$app" \
-            "gpoint-agata-api|ghcr.io/akhripunov/gpoint-agata-runtime|$agata" \
-            "gpoint-agata-memory-worker|ghcr.io/akhripunov/gpoint-agata-runtime|$agata" \
-            "gpoint-miniapp-web|ghcr.io/akhripunov/gpoint-miniapp|$miniapp"; do
-            IFS='|' read -r prefix repository digest <<< "$item"
-            container="$(docker ps -q --filter "name=^/${prefix}-${version}$")"
+          runtime_rows="$(python3 - "$expected_role_identities_b64" "$sha" <<'PY'
+          import base64, json, re, sys
+          expected = json.loads(base64.b64decode(sys.argv[1], validate=True))
+          if expected.get("schema") != 1 or expected.get("candidateSha") != sys.argv[2]:
+              raise SystemExit("component runtime plan does not match exact candidate")
+          repos = {
+              "gpoint-core-api": "ghcr.io/akhripunov/gpoint-runtime",
+              "gpoint-core-worker": "ghcr.io/akhripunov/gpoint-runtime",
+              "gpoint-core-bot": "ghcr.io/akhripunov/gpoint-runtime",
+              "gpoint-agata-api": "ghcr.io/akhripunov/gpoint-agata-runtime",
+              "gpoint-agata-memory-worker": "ghcr.io/akhripunov/gpoint-agata-runtime",
+              "gpoint-miniapp-web": "ghcr.io/akhripunov/gpoint-miniapp",
+          }
+          roles = expected.get("roles")
+          if not isinstance(roles, dict) or set(roles) != set(repos):
+              raise SystemExit("component runtime plan has incomplete role inventory")
+          for role, repository in repos.items():
+              row = roles[role]
+              if (not re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+", row.get("version", ""))
+                      or not re.fullmatch(r"[0-9a-f]{40}", row.get("sourceSha", ""))
+                      or not re.fullmatch(re.escape(repository) + r"@sha256:[0-9a-f]{64}", row.get("repositoryDigest", ""))
+                      or (row.get("baselineImageId") is not None and not re.fullmatch(r"sha256:[0-9a-f]{64}", row["baselineImageId"]))):
+                  raise SystemExit("component runtime plan has invalid role identity")
+              print("|".join((role, row["version"], row["sourceSha"], row["repositoryDigest"], row.get("baselineImageId") or "-")))
+          PY
+          )"
+          while IFS='|' read -r prefix role_version role_source repository_digest baseline_image_id; do
+            [[ -n "$prefix" && -n "$role_version" ]]
+            container="$(docker ps -q --filter "name=^/${prefix}-${role_version}$")"
             test -n "$container"
             test "$(docker inspect --format '{{.State.Running}}' "$container")" = true
-            test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$container")" = "$sha"
+            test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$container")" = "$role_source"
             image_id="$(docker inspect --format '{{.Image}}' "$container")"
-            docker image inspect "$image_id" --format '{{json .RepoDigests}}' | grep -F "$repository@$digest" >/dev/null
+            if [[ "$baseline_image_id" != - ]]; then
+              test "$image_id" = "$baseline_image_id" || { echo "untouched role image ID changed: $prefix" >&2; exit 1; }
+            fi
+            docker image inspect "$image_id" --format '{{json .RepoDigests}}' | grep -F "$repository_digest" >/dev/null
             running_count="$(docker ps -q --filter "name=^/${prefix}-" | wc -l | tr -d ' ')"
             test "$running_count" = 1 || { echo "duplicate running Kamal role: $prefix" >&2; exit 1; }
-          done
+          done <<< "$runtime_rows"
+          core_version="$(sed -n 's/^gpoint-core-api|\([^|]*\).*/\1/p' <<< "$runtime_rows")"
+          agata_version="$(sed -n 's/^gpoint-agata-api|\([^|]*\).*/\1/p' <<< "$runtime_rows")"
+          miniapp_version="$(sed -n 's/^gpoint-miniapp-web|\([^|]*\).*/\1/p' <<< "$runtime_rows")"
+          test -n "$core_version" && test -n "$agata_version" && test -n "$miniapp_version"
           docker exec kamal-proxy kamal-proxy list | grep -F 'gpoint-miniapp' >/dev/null
           docker exec kamal-proxy kamal-proxy list | grep -F 'gpoint-core' >/dev/null
           docker inspect shared_postgres_1 --format '{{range .Mounts}}{{.Type}} {{.Name}} {{.Source}} {{.Destination}}{{"\n"}}{{end}}' | grep . >/dev/null
@@ -729,14 +969,14 @@ jobs:
               if not any(item.get('Type') in ('volume', 'bind') for item in mounts):
                   raise SystemExit(f'{name} has no persistent volume or bind mount')
           PY
-          docker exec "gpoint-core-api-$version" node -e "fetch('http://127.0.0.1:3000/health/live').then(async r => { if (!r.ok || (await r.json()).status !== 'ok') process.exit(1) }).catch(() => process.exit(1))"
-          docker top "gpoint-core-worker-$version" -eo pid,args | grep -F "apps/worker/dist/main.js"
-          docker top "gpoint-core-bot-$version" -eo pid,args | grep -F "apps/bot/dist/main.js"
-          docker exec "gpoint-agata-api-$version" python -c "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/health/ready',timeout=3); assert r.status == 200"
-          docker exec "gpoint-agata-memory-worker-$version" python -m app.memory.worker --healthcheck
-          docker exec "gpoint-miniapp-web-$version" wget --spider --quiet http://127.0.0.1/
-          docker exec "gpoint-core-api-$version" node -e 'const fs=require("node:fs");const crypto=require("node:crypto");const p="/data/media/.gpoint-runtime-verify-"+crypto.randomUUID();let created=false;try{fs.writeFileSync(p,"gpoint-media-read-write-pass",{flag:"wx"});created=true;if(fs.readFileSync(p,"utf8")!=="gpoint-media-read-write-pass")process.exit(1)}finally{if(created)fs.unlinkSync(p)}'
-          media_mounts="$(docker inspect "gpoint-core-api-$version" --format '{{json .Mounts}}')"
+          docker exec "gpoint-core-api-$core_version" node -e "fetch('http://127.0.0.1:3000/health/live').then(async r => { if (!r.ok || (await r.json()).status !== 'ok') process.exit(1) }).catch(() => process.exit(1))"
+          docker top "gpoint-core-worker-$core_version" -eo pid,args | grep -F "apps/worker/dist/main.js"
+          docker top "gpoint-core-bot-$core_version" -eo pid,args | grep -F "apps/bot/dist/main.js"
+          docker exec "gpoint-agata-api-$agata_version" python -c "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/health/ready',timeout=3); assert r.status == 200"
+          docker exec "gpoint-agata-memory-worker-$agata_version" python -m app.memory.worker --healthcheck
+          docker exec "gpoint-miniapp-web-$miniapp_version" wget --spider --quiet http://127.0.0.1/
+          docker exec "gpoint-core-api-$core_version" node -e 'const fs=require("node:fs");const crypto=require("node:crypto");const p="/data/media/.gpoint-runtime-verify-"+crypto.randomUUID();let created=false;try{fs.writeFileSync(p,"gpoint-media-read-write-pass",{flag:"wx"});created=true;if(fs.readFileSync(p,"utf8")!=="gpoint-media-read-write-pass")process.exit(1)}finally{if(created)fs.unlinkSync(p)}'
+          media_mounts="$(docker inspect "gpoint-core-api-$core_version" --format '{{json .Mounts}}')"
           python3 - "$media_mounts" <<'PY'
           import json, sys
           mounts=json.loads(sys.argv[1])
@@ -745,15 +985,15 @@ jobs:
               raise SystemExit('Kamal Core API does not have the exact writable GPoint media bind mount')
           PY
           proxy_networks="$(docker inspect kamal-proxy --format '{{json .NetworkSettings.Networks}}')"
-          core_networks="$(docker inspect "gpoint-core-api-$version" --format '{{json .NetworkSettings.Networks}}')"
-          miniapp_networks="$(docker inspect "gpoint-miniapp-web-$version" --format '{{json .NetworkSettings.Networks}}')"
+          core_networks="$(docker inspect "gpoint-core-api-$core_version" --format '{{json .NetworkSettings.Networks}}')"
+          miniapp_networks="$(docker inspect "gpoint-miniapp-web-$miniapp_version" --format '{{json .NetworkSettings.Networks}}')"
           python3 - "$proxy_networks" "$core_networks" "$miniapp_networks" <<'PY'
           import json, sys
           proxy, core, miniapp = (set(json.loads(value)) for value in sys.argv[1:])
           if not proxy.intersection(core) or not proxy.intersection(miniapp):
               raise SystemExit('Kamal Proxy is not connected to both Core API and Mini App networks')
           PY
-          runtime_db="$(docker exec --workdir /app/apps/api "gpoint-core-api-$version" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const failed=await db.$queryRawUnsafe("SELECT count(*)::int AS count FROM _prisma_migrations WHERE finished_at IS NULL AND rolled_back_at IS NULL");if(failed[0].count!==0)throw Error("unfinished Prisma migration exists");const rows=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const head=rows.length?rows[rows.length-1].migration_name:"NONE";const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head is not singular");console.log("PRISMA_HEAD="+head);console.log("PRISMA_MIGRATIONS="+rows.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+rows.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("POST_DEPLOY_DATABASE_VERIFY_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
+          runtime_db="$(docker exec --workdir /app/apps/api "gpoint-core-api-$core_version" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const failed=await db.$queryRawUnsafe("SELECT count(*)::int AS count FROM _prisma_migrations WHERE finished_at IS NULL AND rolled_back_at IS NULL");if(failed[0].count!==0)throw Error("unfinished Prisma migration exists");const rows=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const head=rows.length?rows[rows.length-1].migration_name:"NONE";const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head is not singular");console.log("PRISMA_HEAD="+head);console.log("PRISMA_MIGRATIONS="+rows.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+rows.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("POST_DEPLOY_DATABASE_VERIFY_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
           prisma_head="$(sed -n 's/^PRISMA_HEAD=//p' <<< "$runtime_db")"
           prisma_migrations="$(sed -n 's/^PRISMA_MIGRATIONS=//p' <<< "$runtime_db")"
           prisma_checksums="$(sed -n 's/^PRISMA_CHECKSUMS=//p' <<< "$runtime_db")"
@@ -786,8 +1026,10 @@ jobs:
             --deployment-id "$deployment_id" --db-container-id "$db_id" \
             --redis-container-id "$redis_id" --prisma-head "$prisma_head" --agata-head "$agata_head" \
             --prisma-migrations "$prisma_migrations" --prisma-checksums "$prisma_checksums" \
-            --baseline-prisma-head "$expected_prisma_head" --baseline-prisma-migrations "$expected_prisma_migrations" \
-            --baseline-prisma-checksums "$expected_prisma_checksums" --baseline-agata-head "$expected_agata_head" \
+            --baseline-prisma-head "$baseline_prisma_head" --baseline-prisma-migrations "$baseline_prisma_migrations" \
+            --baseline-prisma-checksums "$baseline_prisma_checksums" --baseline-agata-head "$baseline_agata_head" \
+            --pending-prisma-migrations "$pending_prisma_migrations" --pending-prisma-checksums "$pending_prisma_checksums" \
+            --expected-role-identities-b64 "$expected_role_identities_b64" \
             --public-routes-verified --migration-compatibility-verified)"
           printf '%s\n' "$writer_output"
           manifest_sha="$(sed -n 's/^GPOINT_KAMAL_MANIFEST_SHA256=\([0-9a-f]*\).*/\1/p' <<< "$writer_output")"
@@ -806,6 +1048,7 @@ jobs:
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
           MANIFEST_SHA: ${{ steps.verify.outputs.manifest_sha }}
           DEPLOY_JOB_STATUS: ${{ job.status }}
+          MIGRATION_APPLY_OUTCOME: ${{ steps.migration_apply.outcome }}
           KAMAL_APPLY_OUTCOME: ${{ steps.kamal_apply.outcome }}
           VERIFY_OUTCOME: ${{ steps.verify.outcome }}
         run: |
@@ -813,8 +1056,10 @@ jobs:
           state=failure
           if [[ "$DEPLOY_JOB_STATUS" == success && "$VERIFY_OUTCOME" == success ]]; then state=success; fi
           description="Kamal $state SHA $CANDIDATE_SHA"
-          if [[ "$KAMAL_APPLY_OUTCOME" != success || "$VERIFY_OUTCOME" != success ]]; then
-            echo "RECOVERY_REQUIRED: partial Kamal transition or Runtime Verify failure for $CANDIDATE_SHA; automatic rollback is prohibited. Confirm the live topology read-only before another production mutation." >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$MIGRATION_APPLY_OUTCOME" == failure ]]; then
+            echo "RECOVERY_REQUIRED: Prisma Apply failed or its exact post-Apply inventory was not verified for $CANDIDATE_SHA. Do not retry Apply or run Kamal until a read-only reconciliation confirms the live migration table and heads." >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$KAMAL_APPLY_OUTCOME" != success || "$VERIFY_OUTCOME" != success ]]; then
+            echo "RECOVERY_REQUIRED: partial Kamal transition or Runtime Verify failure for $CANDIDATE_SHA; automatic database downgrade is prohibited. Confirm the live topology and migration head read-only before another production mutation." >> "$GITHUB_STEP_SUMMARY"
           fi
           if [[ "$state" == success ]]; then
             [[ "$MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]]

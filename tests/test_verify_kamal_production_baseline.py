@@ -32,6 +32,28 @@ def test_accepts_historical_release_version_sha_separate_from_common_app_source_
     assert len(result["roles"]) == 6
 
 
+def test_accepts_component_scoped_baselines_but_keeps_each_shared_image_group_consistent():
+    rows = records()
+    groups = {
+        "gpoint-agata-api": ("c" * 40, "c" * 40 + "-41223019900-1"),
+        "gpoint-agata-memory-worker": ("c" * 40, "c" * 40 + "-41223019900-1"),
+        "gpoint-miniapp-web": ("d" * 40, "d" * 40 + "-41223020000-1"),
+    }
+    for row in rows:
+        if row["role"] in groups:
+            source, version = groups[row["role"]]
+            row["revision"] = source
+            row["version"] = version
+            row["name"] = f"{row['role']}-{version}"
+
+    result = BASELINE.validate(rows)
+
+    assert result["version"] is None
+    assert result["source_sha"] == SOURCE
+    assert result["roles"]["gpoint-agata-api"]["source_sha"] == "c" * 40
+    assert result["roles"]["gpoint-miniapp-web"]["source_sha"] == "d" * 40
+
+
 @pytest.mark.parametrize("mutate, message", [
     (lambda r: r.pop(), "incomplete or duplicated"),
     (lambda r: r[0].update(repo_digests=[]), "immutable GHCR RepoDigest"),
