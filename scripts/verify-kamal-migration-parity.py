@@ -4,11 +4,12 @@ import argparse
 import hashlib
 import json
 import os
-import stat
-from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
+from pathlib import Path
+
 from alembic.script import ScriptDirectory
 from alembic.script.revision import RevisionError
 from alembic.util.exc import CommandError
