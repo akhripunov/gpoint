@@ -267,14 +267,30 @@ def test_component_scope_updates_only_exactly_touched_known_components(tmp_path)
         assert result["deploy_miniapp"] is ("MINIAPP" in components)
 
 
-def test_mixed_runtime_baseline_blocks_before_deploy_planning(tmp_path):
-    repo, _baseline, candidate, inventory = _component_repo(
-        tmp_path, {"apps/miniapp/src/main.tsx": "export default 1;\n"}
+def test_staggered_component_baselines_do_not_redeploy_already_updated_components(tmp_path):
+    repo, baseline, core_release, inventory = _component_repo(
+        tmp_path, {"apps/api/src/main.ts": "export const version = 2;\n"}
     )
-    inventory["roles"]["gpoint-agata-api"]["source_sha"] = "c" * 40
-    inventory["roles"]["gpoint-agata-memory-worker"]["source_sha"] = "c" * 40
-    with pytest.raises(ValueError, match="mixed component baseline"):
-        MODULE.classify_component_scope(repo, candidate, inventory)
+    version = f"{core_release}-101-1"
+    for role in MODULE.COMPONENT_ROLES["CORE"]:
+        inventory["roles"][role]["source_sha"] = core_release
+        inventory["roles"][role]["version"] = version
+        inventory["roles"][role]["name"] = f"{role}-{version}"
+    target = repo / "apps/miniapp/src/main.tsx"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("export default 1;\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "miniapp candidate")
+    candidate = _git(repo, "rev-parse", "HEAD")
+
+    result = MODULE.classify_component_scope(repo, candidate, inventory)
+
+    assert result["scope"] == "MINIAPP"
+    assert result["reason"] == "exact_component_diff"
+    assert result["deploy_core"] is False
+    assert result["deploy_agata"] is False
+    assert result["deploy_miniapp"] is True
+    assert baseline != core_release
 
 
 def test_unknown_paths_block_before_deploy_planning(tmp_path):

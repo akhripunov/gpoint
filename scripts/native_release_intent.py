@@ -209,34 +209,45 @@ def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dic
     if not EXACT_SHA.fullmatch(candidate or ""):
         raise ValueError("candidate SHA is invalid")
     roles = _validate_role_inventory(inventory)
-    sources = {row["source_sha"] for row in roles.values()}
-    if len(sources) != 1:
-        raise ValueError("mixed component baseline cannot authorize a scoped deploy")
-    baseline = next(iter(sources))
-    if candidate == baseline:
-        raise ValueError("candidate equals production baseline; no changed component scope")
-    subprocess.run(["git", "merge-base", "--is-ancestor", baseline, candidate],
-                   cwd=repo, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    raw = subprocess.check_output(["git", "diff", "--name-status", "-z", "--no-renames",
-                                   f"{baseline}..{candidate}", "--"], cwd=repo)
-    parts = raw.decode("utf8").split("\x00")
-    if not parts or parts.pop() != "" or len(parts) % 2:
-        raise ValueError("component scope diff is malformed")
-    entries = list(zip(parts[::2], parts[1::2]))
-    if not entries:
-        raise ValueError("candidate diff is empty; no changed component scope")
-    components = set()
-    for status, path in entries:
-        if status not in ("A", "M"):
-            raise ValueError("deleted or renamed candidate path needs explicit scope approval")
-        component = _component_path(path) if _safe_component_path(path) else None
-        if component is None:
-            raise ValueError("unmapped or unsafe candidate path needs explicit scope approval")
-        components.add(component)
-        tree = subprocess.check_output(["git", "ls-tree", candidate, "--", path],
-                                       cwd=repo).decode()
-        if not tree.startswith(("100644 blob ", "100755 blob ")):
-            raise ValueError("candidate path is not a regular file and needs explicit scope approval")
+    paths_by_baseline: dict[str, set[str]] = {}
+    for component_roles in COMPONENT_ROLES.values():
+        baseline = roles[component_roles[0]]["source_sha"]
+        if baseline == candidate or baseline in paths_by_baseline:
+            continue
+        ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", baseline, candidate],
+                                  cwd=repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if ancestor.returncode:
+            raise ValueError("component production source is not an ancestor of the candidate")
+        raw = subprocess.check_output(["git", "diff", "--name-status", "-z", "--no-renames",
+                                       f"{baseline}..{candidate}", "--"], cwd=repo)
+        parts = raw.decode("utf8").split("\x00")
+        if not parts or parts.pop() != "" or len(parts) % 2:
+            raise ValueError("component scope diff is malformed")
+        entries = list(zip(parts[::2], parts[1::2]))
+        paths = set()
+        for status, path in entries:
+            if status not in ("A", "M"):
+                raise ValueError("deleted or renamed candidate path needs explicit scope approval")
+            changed_component = _component_path(path) if _safe_component_path(path) else None
+            if changed_component is None:
+                raise ValueError("unmapped or unsafe candidate path needs explicit scope approval")
+            tree = subprocess.check_output(["git", "ls-tree", candidate, "--", path],
+                                           cwd=repo).decode()
+            if not tree.startswith(("100644 blob ", "100755 blob ")):
+                raise ValueError("candidate path is not a regular file and needs explicit scope approval")
+            paths.add(changed_component)
+        paths_by_baseline[baseline] = paths
+
+    components = {
+        component for component, component_roles in COMPONENT_ROLES.items()
+        if roles[component_roles[0]]["source_sha"] != candidate
+        and component in paths_by_baseline[roles[component_roles[0]]["source_sha"]]
+    }
+    if not components:
+        if all(roles[component_roles[0]]["source_sha"] == candidate
+               for component_roles in COMPONENT_ROLES.values()):
+            raise ValueError("candidate equals production baseline; no changed component scope")
+        raise ValueError("candidate diff contains no changed runtime component")
     scope = "+".join(sorted(components))
     return {"scope": scope, "reason": "exact_component_diff",
             "deploy_core": "CORE" in components,
