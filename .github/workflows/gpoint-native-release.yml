@@ -1222,7 +1222,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: production
-      deployment: false
+      url: ${{ steps.verify.outputs.environment_url }}
     concurrency:
       group: gpoint-production-release
       cancel-in-progress: false
@@ -1375,57 +1375,73 @@ jobs:
           CORE_DIGEST: ${{ steps.evidence.outputs.core_digest }}
           AGATA_DIGEST: ${{ steps.evidence.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ steps.evidence.outputs.miniapp_digest }}
+          CORE_SOURCE_SHA: ${{ steps.evidence.outputs.core_source_sha }}
+          AGATA_SOURCE_SHA: ${{ steps.evidence.outputs.agata_source_sha }}
+          MINIAPP_SOURCE_SHA: ${{ steps.evidence.outputs.miniapp_source_sha }}
         run: |
           set -euo pipefail
           for item in \
-            "core|ghcr.io/akhripunov/gpoint-runtime|$CORE_DIGEST" \
-            "agata|ghcr.io/akhripunov/gpoint-agata-runtime|$AGATA_DIGEST" \
-            "miniapp|ghcr.io/akhripunov/gpoint-miniapp|$MINIAPP_DIGEST"; do
-            IFS='|' read -r role repository digest <<< "$item"
+            "core|ghcr.io/akhripunov/gpoint-runtime|$CORE_DIGEST|$CORE_SOURCE_SHA" \
+            "agata|ghcr.io/akhripunov/gpoint-agata-runtime|$AGATA_DIGEST|$AGATA_SOURCE_SHA" \
+            "miniapp|ghcr.io/akhripunov/gpoint-miniapp|$MINIAPP_DIGEST|$MINIAPP_SOURCE_SHA"; do
+            IFS='|' read -r role repository digest source_sha <<< "$item"
             docker pull --platform linux/amd64 "$repository@$digest"
             docker image inspect "$repository@$digest" > "$RUNNER_TEMP/gpoint-rollback/$role-image.json"
             docker buildx imagetools inspect --format '{{json .SBOM.SPDX}}' "$repository@$digest" > "$RUNNER_TEMP/gpoint-rollback/$role-sbom.json"
             docker buildx imagetools inspect --format '{{json .Provenance}}' "$repository@$digest" > "$RUNNER_TEMP/gpoint-rollback/$role-provenance.json"
-            python3 scripts/verify_native_image_readback.py "$RUNNER_TEMP/gpoint-rollback/$role-image.json" "$repository" "$digest" "$TARGET_SHA"
-            python3 scripts/verify_native_image_attestation.py "$RUNNER_TEMP/gpoint-rollback/$role-sbom.json" "$RUNNER_TEMP/gpoint-rollback/$role-provenance.json" "$TARGET_SHA" https://github.com/akhripunov/gpoint.git
+            python3 scripts/verify_native_image_readback.py "$RUNNER_TEMP/gpoint-rollback/$role-image.json" "$repository" "$digest" "$source_sha"
+            python3 scripts/verify_native_image_attestation.py "$RUNNER_TEMP/gpoint-rollback/$role-sbom.json" "$RUNNER_TEMP/gpoint-rollback/$role-provenance.json" "$source_sha" https://github.com/akhripunov/gpoint.git
           done
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ inputs.rollback_target_sha }}
-          path: rollback-source
+          ref: ${{ steps.evidence.outputs.core_source_sha }}
+          path: rollback-core
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ steps.evidence.outputs.agata_source_sha }}
+          path: rollback-agata
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ steps.evidence.outputs.miniapp_source_sha }}
+          path: rollback-miniapp
           persist-credentials: false
       - name: Verify live DB compatibility and retained target containers before mutation
         id: baseline
         env:
           TARGET_SHA: ${{ inputs.rollback_target_sha }}
-          TARGET_VERSION: ${{ steps.evidence.outputs.version }}
+          CORE_VERSION: ${{ steps.evidence.outputs.core_version }}
+          AGATA_VERSION: ${{ steps.evidence.outputs.agata_version }}
+          MINIAPP_VERSION: ${{ steps.evidence.outputs.miniapp_version }}
+          CORE_SOURCE_SHA: ${{ steps.evidence.outputs.core_source_sha }}
+          AGATA_SOURCE_SHA: ${{ steps.evidence.outputs.agata_source_sha }}
+          MINIAPP_SOURCE_SHA: ${{ steps.evidence.outputs.miniapp_source_sha }}
           CORE_DIGEST: ${{ steps.evidence.outputs.core_digest }}
           AGATA_DIGEST: ${{ steps.evidence.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ steps.evidence.outputs.miniapp_digest }}
         run: |
           set -euo pipefail
-          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$TARGET_SHA" "$TARGET_VERSION" "$CORE_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" <<'REMOTE'
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$TARGET_SHA" "$CORE_VERSION" "$AGATA_VERSION" "$MINIAPP_VERSION" "$CORE_SOURCE_SHA" "$AGATA_SOURCE_SHA" "$MINIAPP_SOURCE_SHA" "$CORE_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" <<'REMOTE'
           set -euo pipefail
-          sha="$1"; version="$2"; core="ghcr.io/akhripunov/gpoint-runtime@$3"; agata="ghcr.io/akhripunov/gpoint-agata-runtime@$4"; miniapp="ghcr.io/akhripunov/gpoint-miniapp@$5"
-          [[ "$sha" =~ ^[0-9a-f]{40}$ && "$version" == "$sha"-* ]]
+          target_sha="$1"; core_version="$2"; agata_version="$3"; miniapp_version="$4"; core_sha="$5"; agata_sha="$6"; miniapp_sha="$7"; core="ghcr.io/akhripunov/gpoint-runtime@$8"; agata="ghcr.io/akhripunov/gpoint-agata-runtime@$9"; miniapp="ghcr.io/akhripunov/gpoint-miniapp@${10}"
+          [[ "$target_sha" =~ ^[0-9a-f]{40}$ && "$core_version" == "$core_sha"-* && "$agata_version" == "$agata_sha"-* && "$miniapp_version" == "$miniapp_sha"-* ]]
           test "$(docker inspect --format '{{.State.Running}}' kamal-proxy)" = true
           test "$(docker inspect --format '{{.State.Running}}' shared_postgres_1)" = true
           test "$(docker inspect --format '{{.State.Running}}' shared_redis_1)" = true
           echo "DB_CONTAINER_ID=$(docker inspect --format '{{.Id}}' shared_postgres_1)"
           echo "REDIS_CONTAINER_ID=$(docker inspect --format '{{.Id}}' shared_redis_1)"
-          live_version=""; live_source_sha=""
-          for item in "gpoint-core-api|$core" "gpoint-core-worker|$core" "gpoint-core-bot|$core" "gpoint-agata-api|$agata" "gpoint-agata-memory-worker|$agata" "gpoint-miniapp-web|$miniapp"; do
-            IFS='|' read -r prefix expected_image <<< "$item"
+          for item in "gpoint-core-api|$core|$core_version|$core_sha" "gpoint-core-worker|$core|$core_version|$core_sha" "gpoint-core-bot|$core|$core_version|$core_sha" "gpoint-agata-api|$agata|$agata_version|$agata_sha" "gpoint-agata-memory-worker|$agata|$agata_version|$agata_sha" "gpoint-miniapp-web|$miniapp|$miniapp_version|$miniapp_sha"; do
+            IFS='|' read -r prefix expected_image version source_sha <<< "$item"
             current="$(docker ps -q --filter "name=^/${prefix}-")"
             test "$(wc -l <<< "$current" | tr -d ' ')" = 1
             live_name="$(docker inspect --format '{{.Name}}' "$current" | sed 's#^/##')"
             current_version="${live_name#${prefix}-}"
             current_sha="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$current")"
             [[ "$current_sha" =~ ^[0-9a-f]{40}$ && "$current_version" == "$current_sha"-* ]]
-            if [[ -z "$live_version" ]]; then live_version="$current_version"; live_source_sha="$current_sha"; else test "$current_version" = "$live_version" && test "$current_sha" = "$live_source_sha"; fi
             target="$(docker ps -aq --filter "name=^/${prefix}-${version}$")"
-            test "$(wc -l <<< "$target" | tr -d ' ')" = 1 || { echo "previous target container is not retained: $prefix" >&2; exit 1; }
-            test "$(docker inspect --format '{{.Config.Labels "org.opencontainers.image.revision"}}' "$target")" = "$sha"
+            test "$(wc -l <<< "$target" | tr -d ' ')" = 1 || { echo "rollback target container is not retained: $prefix" >&2; exit 1; }
+            test "$(docker inspect --format '{{.Config.Labels "org.opencontainers.image.revision"}}' "$target")" = "$source_sha"
             image_id="$(docker inspect --format '{{.Image}}' "$target")"
             docker image inspect "$image_id" --format '{{json .RepoDigests}}' | grep -F "$expected_image" >/dev/null
           done
@@ -1433,8 +1449,6 @@ jobs:
           redis_mounts="$(docker inspect shared_redis_1 --format '{{json .Mounts}}' | python3 -c 'import hashlib,json,sys; a=json.load(sys.stdin); r=sorted(({k:m.get(k) for k in ("Type","Name","Source","Destination","RW")} for m in a),key=lambda x:(x["Destination"] or "",x["Source"] or "")); assert r and all(x["Source"] and x["Destination"] for x in r); print(hashlib.sha256(json.dumps(r,sort_keys=True,separators=(",",":")).encode()).hexdigest())')"
           echo "DB_MOUNTS_SHA256=$db_mounts"
           echo "REDIS_MOUNTS_SHA256=$redis_mounts"
-          echo "BASELINE_ROLE_VERSION=$live_version"
-          echo "BASELINE_ROLE_SOURCE_SHA=$live_source_sha"
           current_api="$(docker ps -q --filter 'name=^/gpoint-core-api-')"
           current_db="$(docker exec --workdir /app/apps/api "$current_api" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const r=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head not singular");console.log("PRISMA_HEAD="+(r.length?r[r.length-1].migration_name:"NONE"));console.log("PRISMA_MIGRATIONS="+r.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+r.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("READ_ONLY_DB_CHECK_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
           printf '%s\n' "$current_db"
@@ -1442,70 +1456,62 @@ jobs:
           )"
           printf '%s\n' "$facts" > "$RUNNER_TEMP/gpoint-rollback/live-db.txt"
           python3 "$GITHUB_WORKSPACE/scripts/verify-kamal-migration-parity.py" \
-            --prisma-directory "$GITHUB_WORKSPACE/rollback-source/packages/db/prisma/migrations" \
+            --prisma-directory "$GITHUB_WORKSPACE/rollback-core/packages/db/prisma/migrations" \
             --prisma-current-migrations "$(sed -n 's/^PRISMA_MIGRATIONS=//p' <<< "$facts")" \
             --prisma-current-checksums "$(sed -n 's/^PRISMA_CHECKSUMS=//p' <<< "$facts")" \
             --prisma-current-head "$(sed -n 's/^PRISMA_HEAD=//p' <<< "$facts")" \
-            --agata-directory "$GITHUB_WORKSPACE/rollback-source/services/agata/migrations/versions" \
+            --agata-directory "$GITHUB_WORKSPACE/rollback-agata/services/agata/migrations/versions" \
             --agata-current-head "$(sed -n 's/^AGATA_HEAD=//p' <<< "$facts")"
-          grep -Eq '^BASELINE_ROLE_VERSION=[0-9a-f]{40}-[0-9]+-[0-9]+$' <<< "$facts"
-          grep -Eq '^BASELINE_ROLE_SOURCE_SHA=[0-9a-f]{40}$' <<< "$facts"
-          while IFS='=' read -r key value; do case "$key" in DB_CONTAINER_ID|REDIS_CONTAINER_ID|DB_MOUNTS_SHA256|REDIS_MOUNTS_SHA256|BASELINE_ROLE_VERSION|BASELINE_ROLE_SOURCE_SHA) echo "$key=$value" >> "$GITHUB_OUTPUT" ;; esac; done <<< "$facts"
-      - name: Create rollback Deployment only after all target evidence passes
-        id: deployment
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TARGET_SHA: ${{ inputs.rollback_target_sha }}
-        run: |
-          set -euo pipefail
-          payload="$(jq -nc --arg ref "$TARGET_SHA" --arg run "$GITHUB_RUN_ID" '{ref:$ref,task:"rollback",environment:"production",auto_merge:false,required_contexts:[],payload:{workflow_run:$run}}')"
-          id="$(gh api --method POST "repos/$GITHUB_REPOSITORY/deployments" --input - <<<"$payload" --jq .id)"
-          test "$id" -gt 0
-          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$id/statuses" \
-            -f state=in_progress -f environment=production -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-            -f description="Kamal rollback in progress to verified SHA $TARGET_SHA" >/dev/null
-          echo "id=$id" >> "$GITHUB_OUTPUT"
+          while IFS='=' read -r key value; do case "$key" in DB_CONTAINER_ID|REDIS_CONTAINER_ID|DB_MOUNTS_SHA256|REDIS_MOUNTS_SHA256) echo "$key=$value" >> "$GITHUB_OUTPUT" ;; esac; done <<< "$facts"
       - name: Roll back consumers and then APIs with stock Kamal
         id: rollback_apply
         env:
-          TARGET_SHA: ${{ inputs.rollback_target_sha }}
-          TARGET_VERSION: ${{ steps.evidence.outputs.version }}
+          CORE_VERSION: ${{ steps.evidence.outputs.core_version }}
+          AGATA_VERSION: ${{ steps.evidence.outputs.agata_version }}
+          MINIAPP_VERSION: ${{ steps.evidence.outputs.miniapp_version }}
           CORE_DIGEST: ${{ steps.evidence.outputs.core_digest }}
           AGATA_DIGEST: ${{ steps.evidence.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ steps.evidence.outputs.miniapp_digest }}
+          CORE_SOURCE_SHA: ${{ steps.evidence.outputs.core_source_sha }}
+          AGATA_SOURCE_SHA: ${{ steps.evidence.outputs.agata_source_sha }}
+          MINIAPP_SOURCE_SHA: ${{ steps.evidence.outputs.miniapp_source_sha }}
+          TARGET_MANIFEST_SHA: ${{ steps.evidence.outputs.manifest_sha256 }}
         run: |
           set -euo pipefail
           kamal() {
-            docker run --rm --volume "$GITHUB_WORKSPACE/rollback-source:/workdir" --volume "$HOME/.ssh:/root/.ssh:ro" --volume "$HOME/.ssh:$HOME/.ssh:ro" --workdir /workdir \
+            local checkout="$1"; shift
+            docker run --rm --volume "$GITHUB_WORKSPACE/$checkout:/workdir" --volume "$HOME/.ssh:/root/.ssh:ro" --volume "$HOME/.ssh:$HOME/.ssh:ro" --workdir /workdir \
               --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA --env GPOINT_PRODUCTION_HOST --env GPOINT_SSH_KEY \
               --env GPOINT_KNOWN_HOSTS_FILE --env KAMAL_REGISTRY_PASSWORD --env GPOINT_KAMAL_EXPECTED_DIGEST \
               --env GPOINT_KAMAL_SERVICE --env KAMAL_ROLES \
               ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 "$@"
           }
           verify_role() {
-            ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$1" "$TARGET_VERSION" "$TARGET_SHA" \
+            ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$1" "$2" "$3" \
               < "$GITHUB_WORKSPACE/scripts/verify-kamal-role.sh"
           }
-          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker kamal app stop --roles worker --config-file config/deploy.yml
-          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker kamal rollback "$TARGET_VERSION" --roles worker --config-file config/deploy.yml
-          verify_role gpoint-core-worker
-          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot kamal app stop --roles bot --config-file config/deploy.yml
-          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot kamal rollback "$TARGET_VERSION" --roles bot --config-file config/deploy.yml
-          verify_role gpoint-core-bot
-          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker kamal app stop --roles memory-worker --config-file config/deploy.agata.yml
-          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker kamal rollback "$TARGET_VERSION" --roles memory-worker --config-file config/deploy.agata.yml
-          verify_role gpoint-agata-memory-worker
-          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web kamal rollback "$TARGET_VERSION" --roles web --config-file config/deploy.miniapp.yml
-          verify_role gpoint-miniapp-web
-          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api kamal rollback "$TARGET_VERSION" --roles api --config-file config/deploy.agata.yml
-          verify_role gpoint-agata-api
-          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api kamal rollback "$TARGET_VERSION" --roles api --config-file config/deploy.yml
-          verify_role gpoint-core-api
+          GPOINT_COMMIT_SHA="$CORE_SOURCE_SHA" GPOINT_APP_SOURCE_SHA="$CORE_SOURCE_SHA" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker kamal rollback-core app stop --roles worker --config-file config/deploy.yml
+          GPOINT_COMMIT_SHA="$CORE_SOURCE_SHA" GPOINT_APP_SOURCE_SHA="$CORE_SOURCE_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker kamal rollback-core rollback "$CORE_VERSION" --roles worker --config-file config/deploy.yml
+          verify_role gpoint-core-worker "$CORE_VERSION" "$CORE_SOURCE_SHA"
+          GPOINT_COMMIT_SHA="$CORE_SOURCE_SHA" GPOINT_APP_SOURCE_SHA="$CORE_SOURCE_SHA" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot kamal rollback-core app stop --roles bot --config-file config/deploy.yml
+          GPOINT_COMMIT_SHA="$CORE_SOURCE_SHA" GPOINT_APP_SOURCE_SHA="$CORE_SOURCE_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot kamal rollback-core rollback "$CORE_VERSION" --roles bot --config-file config/deploy.yml
+          verify_role gpoint-core-bot "$CORE_VERSION" "$CORE_SOURCE_SHA"
+          GPOINT_COMMIT_SHA="$AGATA_SOURCE_SHA" GPOINT_APP_SOURCE_SHA="$AGATA_SOURCE_SHA" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker kamal rollback-agata app stop --roles memory-worker --config-file config/deploy.agata.yml
+          GPOINT_COMMIT_SHA="$AGATA_SOURCE_SHA" GPOINT_APP_SOURCE_SHA="$AGATA_SOURCE_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker kamal rollback-agata rollback "$AGATA_VERSION" --roles memory-worker --config-file config/deploy.agata.yml
+          verify_role gpoint-agata-memory-worker "$AGATA_VERSION" "$AGATA_SOURCE_SHA"
+          GPOINT_COMMIT_SHA="$MINIAPP_SOURCE_SHA" GPOINT_APP_SOURCE_SHA="$MINIAPP_SOURCE_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web kamal rollback-miniapp rollback "$MINIAPP_VERSION" --roles web --config-file config/deploy.miniapp.yml
+          verify_role gpoint-miniapp-web "$MINIAPP_VERSION" "$MINIAPP_SOURCE_SHA"
+          GPOINT_COMMIT_SHA="$AGATA_SOURCE_SHA" GPOINT_APP_SOURCE_SHA="$AGATA_SOURCE_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api kamal rollback-agata rollback "$AGATA_VERSION" --roles api --config-file config/deploy.agata.yml
+          verify_role gpoint-agata-api "$AGATA_VERSION" "$AGATA_SOURCE_SHA"
+          GPOINT_COMMIT_SHA="$CORE_SOURCE_SHA" GPOINT_APP_SOURCE_SHA="$CORE_SOURCE_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api kamal rollback-core rollback "$CORE_VERSION" --roles api --config-file config/deploy.yml
+          verify_role gpoint-core-api "$CORE_VERSION" "$CORE_SOURCE_SHA"
       - name: Verify rollback Runtime and preserve databases before SUCCESS
         id: verify
         env:
           TARGET_SHA: ${{ inputs.rollback_target_sha }}
-          TARGET_VERSION: ${{ steps.evidence.outputs.version }}
+          CORE_VERSION: ${{ steps.evidence.outputs.core_version }}
+          AGATA_VERSION: ${{ steps.evidence.outputs.agata_version }}
+          MINIAPP_VERSION: ${{ steps.evidence.outputs.miniapp_version }}
           CORE_DIGEST: ${{ steps.evidence.outputs.core_digest }}
           AGATA_DIGEST: ${{ steps.evidence.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ steps.evidence.outputs.miniapp_digest }}
@@ -1513,7 +1519,10 @@ jobs:
           REDIS_CONTAINER_ID: ${{ steps.baseline.outputs.REDIS_CONTAINER_ID }}
           DB_MOUNTS_SHA256: ${{ steps.baseline.outputs.DB_MOUNTS_SHA256 }}
           REDIS_MOUNTS_SHA256: ${{ steps.baseline.outputs.REDIS_MOUNTS_SHA256 }}
-          ROLLBACK_DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
+          CORE_SOURCE_SHA: ${{ steps.evidence.outputs.core_source_sha }}
+          AGATA_SOURCE_SHA: ${{ steps.evidence.outputs.agata_source_sha }}
+          MINIAPP_SOURCE_SHA: ${{ steps.evidence.outputs.miniapp_source_sha }}
+          TARGET_MANIFEST_SHA: ${{ steps.evidence.outputs.manifest_sha256 }}
         run: |
           set -euo pipefail
           curl --retry 8 --retry-connrefused --retry-delay 3 --fail --silent --show-error https://gpoint.one/api/health/live | grep -F '"status":"ok"' >/dev/null
@@ -1521,40 +1530,40 @@ jobs:
           media_body="$RUNNER_TEMP/gpoint-rollback/media-route.json"
           media_status="$(curl --retry 5 --retry-connrefused --retry-delay 2 --silent --show-error --output "$media_body" --write-out '%{http_code}' https://gpoint.one/media/assets/kamal-route-verification-missing)"
           test "$media_status" = 404 && grep -Fq '"message":"media not found"' "$media_body"
-          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$TARGET_SHA" "$TARGET_VERSION" "$CORE_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" <<'REMOTE'
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$TARGET_SHA" "$CORE_VERSION" "$AGATA_VERSION" "$MINIAPP_VERSION" "$CORE_SOURCE_SHA" "$AGATA_SOURCE_SHA" "$MINIAPP_SOURCE_SHA" "$CORE_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" <<'REMOTE'
           set -euo pipefail
-          sha="$1"; version="$2"; dbid="$6"; redisid="$7"; dbmount="$8"; redismount="$9"
+          core_version="$2"; agata_version="$3"; miniapp_version="$4"; core_sha="$5"; agata_sha="$6"; miniapp_sha="$7"; dbid="${11}"; redisid="${12}"; dbmount="${13}"; redismount="${14}"
           test "$(docker inspect --format '{{.Id}}' shared_postgres_1)" = "$dbid"
           test "$(docker inspect --format '{{.Id}}' shared_redis_1)" = "$redisid"
           test "$(docker inspect --format '{{.State.Running}}' shared_postgres_1)" = true
           test "$(docker inspect --format '{{.State.Running}}' shared_redis_1)" = true
           test "$(docker inspect --format '{{.State.Running}}' kamal-proxy)" = true
           test "$(docker ps -q --filter 'name=^/kamal-proxy$' | wc -l | tr -d ' ')" = 1
-          for item in "gpoint-core-api|ghcr.io/akhripunov/gpoint-runtime@$3" "gpoint-core-worker|ghcr.io/akhripunov/gpoint-runtime@$3" "gpoint-core-bot|ghcr.io/akhripunov/gpoint-runtime@$3" "gpoint-agata-api|ghcr.io/akhripunov/gpoint-agata-runtime@$4" "gpoint-agata-memory-worker|ghcr.io/akhripunov/gpoint-agata-runtime@$4" "gpoint-miniapp-web|ghcr.io/akhripunov/gpoint-miniapp@$5"; do
-            IFS='|' read -r prefix expected <<< "$item"
+          for item in "gpoint-core-api|ghcr.io/akhripunov/gpoint-runtime@$8|$core_version|$core_sha" "gpoint-core-worker|ghcr.io/akhripunov/gpoint-runtime@$8|$core_version|$core_sha" "gpoint-core-bot|ghcr.io/akhripunov/gpoint-runtime@$8|$core_version|$core_sha" "gpoint-agata-api|ghcr.io/akhripunov/gpoint-agata-runtime@$9|$agata_version|$agata_sha" "gpoint-agata-memory-worker|ghcr.io/akhripunov/gpoint-agata-runtime@$9|$agata_version|$agata_sha" "gpoint-miniapp-web|ghcr.io/akhripunov/gpoint-miniapp@${10}|$miniapp_version|$miniapp_sha"; do
+            IFS='|' read -r prefix expected version source_sha <<< "$item"
             name="$prefix-$version"
             test "$(docker ps -q --filter "name=^/${prefix}-" | wc -l | tr -d ' ')" = 1
             test "$(docker ps -q --filter "name=^/$name$" | wc -l | tr -d ' ')" = 1
             test "$(docker inspect --format '{{.State.Running}}' "$name")" = true
-            test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$name")" = "$sha"
+            test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$name")" = "$source_sha"
             image="$(docker inspect --format '{{.Image}}' "$name")"; docker image inspect "$image" --format '{{json .RepoDigests}}' | grep -F "$expected" >/dev/null
           done
           fingerprint() { docker inspect "$1" --format '{{json .Mounts}}' | python3 -c 'import hashlib,json,sys; a=json.load(sys.stdin); r=sorted(({k:m.get(k) for k in ("Type","Name","Source","Destination","RW")} for m in a),key=lambda x:(x["Destination"] or "",x["Source"] or "")); assert r and all(x["Source"] and x["Destination"] for x in r); print(hashlib.sha256(json.dumps(r,sort_keys=True,separators=(",",":")).encode()).hexdigest())'; }
           test "$(fingerprint shared_postgres_1)" = "$dbmount"
           test "$(fingerprint shared_redis_1)" = "$redismount"
-          docker exec "gpoint-core-api-$version" node -e "fetch('http://127.0.0.1:3000/health/live').then(async r=>{if(!r.ok||(await r.json()).status!=='ok')process.exit(1)}).catch(()=>process.exit(1))"
-          test "$(docker exec "gpoint-core-api-$version" node -p 'process.env.RELEASE_SHA || ""')" = "$TARGET_SHA"
-          test "$(docker exec "gpoint-core-worker-$version" node -p 'process.env.RELEASE_SHA || ""')" = "$TARGET_SHA"
-          test "$(docker exec "gpoint-core-bot-$version" node -p 'process.env.RELEASE_SHA || ""')" = "$TARGET_SHA"
-          docker top "gpoint-core-worker-$version" -eo pid,args | grep -F "apps/worker/dist/main.js"
-          docker top "gpoint-core-bot-$version" -eo pid,args | grep -F "apps/bot/dist/main.js"
-          docker exec "gpoint-agata-api-$version" python -c "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8000/health/ready',timeout=3).status==200"
-          docker exec "gpoint-agata-memory-worker-$version" python -m app.memory.worker --healthcheck
-          test "$(docker exec "gpoint-agata-api-$version" python -c 'import os; print(os.environ.get("RELEASE_SHA", ""))')" = "$TARGET_SHA"
-          test "$(docker exec "gpoint-agata-memory-worker-$version" python -c 'import os; print(os.environ.get("RELEASE_SHA", ""))')" = "$TARGET_SHA"
-          docker exec "gpoint-miniapp-web-$version" wget --spider --quiet http://127.0.0.1/
-          docker exec "gpoint-core-api-$version" node -e 'const fs=require("node:fs");const p="/data/media/.gpoint-rollback-"+require("node:crypto").randomUUID();let created=false;try{fs.writeFileSync(p,"ok",{flag:"wx"});created=true;if(fs.readFileSync(p,"utf8")!=="ok")process.exit(1)}finally{if(created)fs.unlinkSync(p)}'
-          media_mounts="$(docker inspect "gpoint-core-api-$version" --format '{{json .Mounts}}')"
+          docker exec "gpoint-core-api-$core_version" node -e "fetch('http://127.0.0.1:3000/health/live').then(async r=>{if(!r.ok||(await r.json()).status!=='ok')process.exit(1)}).catch(()=>process.exit(1))"
+          test "$(docker exec "gpoint-core-api-$core_version" node -p 'process.env.RELEASE_SHA || ""')" = "$core_sha"
+          test "$(docker exec "gpoint-core-worker-$core_version" node -p 'process.env.RELEASE_SHA || ""')" = "$core_sha"
+          test "$(docker exec "gpoint-core-bot-$core_version" node -p 'process.env.RELEASE_SHA || ""')" = "$core_sha"
+          docker top "gpoint-core-worker-$core_version" -eo pid,args | grep -F "apps/worker/dist/main.js"
+          docker top "gpoint-core-bot-$core_version" -eo pid,args | grep -F "apps/bot/dist/main.js"
+          docker exec "gpoint-agata-api-$agata_version" python -c "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8000/health/ready',timeout=3).status==200"
+          docker exec "gpoint-agata-memory-worker-$agata_version" python -m app.memory.worker --healthcheck
+          test "$(docker exec "gpoint-agata-api-$agata_version" python -c 'import os; print(os.environ.get("RELEASE_SHA", ""))')" = "$agata_sha"
+          test "$(docker exec "gpoint-agata-memory-worker-$agata_version" python -c 'import os; print(os.environ.get("RELEASE_SHA", ""))')" = "$agata_sha"
+          docker exec "gpoint-miniapp-web-$miniapp_version" wget --spider --quiet http://127.0.0.1/
+          docker exec "gpoint-core-api-$core_version" node -e 'const fs=require("node:fs");const p="/data/media/.gpoint-rollback-"+require("node:crypto").randomUUID();let created=false;try{fs.writeFileSync(p,"ok",{flag:"wx"});created=true;if(fs.readFileSync(p,"utf8")!=="ok")process.exit(1)}finally{if(created)fs.unlinkSync(p)}'
+          media_mounts="$(docker inspect "gpoint-core-api-$core_version" --format '{{json .Mounts}}')"
           python3 - "$media_mounts" <<'PY'
           import json,sys
           rows=[m for m in json.loads(sys.argv[1]) if m.get('Destination') == '/data/media']
@@ -1562,35 +1571,30 @@ jobs:
           PY
           docker exec kamal-proxy kamal-proxy list | grep -F 'gpoint-miniapp' >/dev/null
           docker exec kamal-proxy kamal-proxy list | grep -F 'gpoint-core' >/dev/null
-          runtime_db="$(docker exec --workdir /app/apps/api "gpoint-core-api-$version" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const r=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head not singular");console.log("PRISMA_HEAD="+(r.length?r[r.length-1].migration_name:"NONE"));console.log("PRISMA_MIGRATIONS="+r.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+r.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("POST_ROLLBACK_DB_VERIFY_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
+          runtime_db="$(docker exec --workdir /app/apps/api "gpoint-core-api-$core_version" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const r=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head not singular");console.log("PRISMA_HEAD="+(r.length?r[r.length-1].migration_name:"NONE"));console.log("PRISMA_MIGRATIONS="+r.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+r.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("POST_ROLLBACK_DB_VERIFY_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
           printf '%s\n' "$runtime_db"
           echo ROLLBACK_RUNTIME_VERIFY=PASS
           REMOTE
           )"
           grep -Fq 'ROLLBACK_RUNTIME_VERIFY=PASS' <<< "$facts"
           python3 "$GITHUB_WORKSPACE/scripts/verify-kamal-migration-parity.py" \
-            --prisma-directory "$GITHUB_WORKSPACE/rollback-source/packages/db/prisma/migrations" \
+            --prisma-directory "$GITHUB_WORKSPACE/rollback-core/packages/db/prisma/migrations" \
             --prisma-current-migrations "$(sed -n 's/^PRISMA_MIGRATIONS=//p' <<< "$facts")" \
             --prisma-current-checksums "$(sed -n 's/^PRISMA_CHECKSUMS=//p' <<< "$facts")" \
             --prisma-current-head "$(sed -n 's/^PRISMA_HEAD=//p' <<< "$facts")" \
-            --agata-directory "$GITHUB_WORKSPACE/rollback-source/services/agata/migrations/versions" \
+            --agata-directory "$GITHUB_WORKSPACE/rollback-agata/services/agata/migrations/versions" \
             --agata-current-head "$(sed -n 's/^AGATA_HEAD=//p' <<< "$facts")"
-          id="$ROLLBACK_DEPLOYMENT_ID"
-          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$id/statuses" -f state=success -f environment=production -f environment_url="https://gpoint.one/#gpoint-manifest-sha256=$TARGET_MANIFEST_SHA&gpoint-core-source-sha=$TARGET_SHA&gpoint-agata-source-sha=$TARGET_SHA&gpoint-miniapp-source-sha=$TARGET_SHA" -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" -f description="Kamal rollback SUCCESS SHA $TARGET_SHA" >/dev/null
+          environment_url="https://gpoint.one/#gpoint-manifest-sha256=$TARGET_MANIFEST_SHA&gpoint-runtime-target-sha=$TARGET_SHA&gpoint-core-source-sha=$CORE_SOURCE_SHA&gpoint-agata-source-sha=$AGATA_SOURCE_SHA&gpoint-miniapp-source-sha=$MINIAPP_SOURCE_SHA"
+          printf 'environment_url=%s\n' "$environment_url" >> "$GITHUB_OUTPUT"
           echo "GPOINT_ROLLBACK_VERIFY=PASS SHA=$TARGET_SHA" >> "$GITHUB_STEP_SUMMARY"
       - name: Mark failed partial rollback for read-only recovery
-        if: always() && steps.deployment.outputs.id != '' && steps.verify.outcome != 'success'
+        if: always() && (steps.rollback_apply.outcome == 'failure' || steps.verify.outcome == 'failure')
         env:
-          GH_TOKEN: ${{ github.token }}
-          DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
           APPLY_OUTCOME: ${{ steps.rollback_apply.outcome }}
           VERIFY_OUTCOME: ${{ steps.verify.outcome }}
         run: |
           set -euo pipefail
           echo "RECOVERY_REQUIRED: rollback apply/verify did not PASS; no automatic rollback or second Apply. Confirm live topology read-only before another production mutation." >> "$GITHUB_STEP_SUMMARY"
-          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
-            -f state=failure -f environment=production -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-            -f description="Kamal rollback FAILED/RECOVERY_REQUIRED" >/dev/null
 
   backup_maintenance:
     name: Install or update scheduled VPS backups

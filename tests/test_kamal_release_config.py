@@ -142,9 +142,9 @@ def test_kamal_uses_attempt_scoped_tag_with_buildkit_digest_verification():
     version = "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
     assert f"IMAGE_VERSION: {version}" in deploy
     assert "ghcr.io/akhripunov/gpoint-runtime:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}" in workflow
-    assert "name: Verify GHCR candidate tags resolve to exact amd64 digests" in deploy
+    assert "name: Verify immutable candidate images selected for the live scope" in deploy
     assert 'docker pull --platform linux/amd64 "$repository:$IMAGE_VERSION"' in deploy
-    assert 'test "$actual" = "$repository@$digest"' in deploy
+    assert 'docker image inspect "$repository:$IMAGE_VERSION" --format' in deploy
     assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST"' in deploy
     assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST"' in deploy
     assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST"' in deploy
@@ -1295,12 +1295,12 @@ def test_native_release_runs_kamal_after_successful_main_push():
     assert 'repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses' not in deploy_script
 
     rollback = workflow["jobs"]["rollback"]
-    assert rollback["environment"] == {"name": "production", "deployment": False}
+    assert rollback["environment"] == {
+        "name": "production", "url": "${{ steps.verify.outputs.environment_url }}",
+    }
     rollback_script = "\n".join(step.get("run", "") for step in rollback["steps"])
-    assert 'repos/$GITHUB_REPOSITORY/deployments' in rollback_script
-    assert "Create rollback Deployment only after all target evidence passes" in [
-        step.get("name") for step in rollback["steps"]
-    ]
+    assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments' not in rollback_script
+    assert "gpoint-runtime-target-sha=" in rollback_script
 
 
 def test_native_migration_parity_runs_prisma_from_api_workspace():
@@ -1647,10 +1647,13 @@ def test_ordinary_verify_receives_baseline_facts_in_remote_shell():
 
 
 def test_consumer_process_checks_do_not_require_ps_inside_slim_images():
-    workflow = (ROOT / '.github/workflows/gpoint-native-release.yml').read_text()
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    deploy = "\n".join(step.get("run", "") for step in workflow["jobs"]["deploy"]["steps"])
+    rollback = "\n".join(step.get("run", "") for step in workflow["jobs"]["rollback"]["steps"])
     for role in ['worker', 'bot']:
-        assert workflow.count(f'docker top "gpoint-core-{role}-$core_version" -eo pid,args | grep -F "apps/{role}/dist/main.js"') == 1
-        assert workflow.count(f'docker top "gpoint-core-{role}-$version" -eo pid,args | grep -F "apps/{role}/dist/main.js"') == 1
+        assertion = f'docker top "gpoint-core-{role}-$core_version" -eo pid,args | grep -F "apps/{role}/dist/main.js"'
+        assert deploy.count(assertion) == 1
+        assert rollback.count(assertion) == 1
     assert "sh -ec 'ps aux" not in workflow
 
 

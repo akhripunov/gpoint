@@ -72,7 +72,7 @@ def test_deploy_role_inspection_runs_over_the_pinned_vps_ssh_connection():
 
 def test_rollback_role_inspection_runs_over_the_pinned_vps_ssh_connection():
     script = _step_script("rollback", "Roll back consumers and then APIs with stock Kamal")
-    assert 'ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$1" "$TARGET_VERSION" "$TARGET_SHA"' in script
+    assert 'ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$1" "$2" "$3"' in script
     assert '< "$GITHUB_WORKSPACE/scripts/verify-kamal-role.sh"' in script
     assert "docker inspect" not in script
     assert "docker ps" not in script
@@ -80,9 +80,13 @@ def test_rollback_role_inspection_runs_over_the_pinned_vps_ssh_connection():
 
 def test_rollback_passes_target_version_as_kamal_positional_argument():
     script = _step_script("rollback", "Roll back consumers and then APIs with stock Kamal")
-    calls = [line.strip() for line in script.splitlines() if "kamal rollback" in line]
+    calls = [line.strip() for line in script.splitlines()
+             if "kamal rollback" in line and ' rollback "$' in line]
     assert len(calls) == 6
-    assert all('kamal rollback "$TARGET_VERSION" --roles ' in line for line in calls)
+    assert all('rollback "$' in line for line in calls)
+    assert any('"$CORE_VERSION"' in line for line in calls)
+    assert any('"$AGATA_VERSION"' in line for line in calls)
+    assert any('"$MINIAPP_VERSION"' in line for line in calls)
     assert all("rollback --version" not in line for line in calls)
 
 

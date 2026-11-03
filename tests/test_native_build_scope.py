@@ -146,6 +146,52 @@ def test_rollback_baseline_requires_all_sources_equal_the_exact_target_sha():
     }
 
 
+def test_native_environment_rollback_tracks_workflow_sha_and_runtime_target_separately():
+    target = "2" * 40
+    workflow_sha = "3" * 40
+    deployments, statuses, runs = deployment_fixture(
+        task="deploy", target_sha=workflow_sha, run_head_sha=workflow_sha,
+        run_event="workflow_dispatch",
+    )
+    statuses[200][0]["environment_url"] = (
+        "https://gpoint.one/#gpoint-manifest-sha256=" + MANIFEST_SHA
+        + "&gpoint-runtime-target-sha=" + target
+        + "&gpoint-core-source-sha=" + target
+        + "&gpoint-agata-source-sha=" + target
+        + "&gpoint-miniapp-source-sha=" + target
+    )
+
+    baseline = MODULE.resolve_production_component_sources(
+        deployments, statuses, runs, repository=REPOSITORY
+    )
+
+    assert baseline["status"] == "VERIFIED"
+    assert baseline["component_sources"] == {
+        "CORE": target, "AGATA": target, "MINIAPP": target,
+    }
+
+
+def test_native_environment_rollback_rejects_invalid_runtime_target_sha():
+    target = "invalid"
+    workflow_sha = "3" * 40
+    deployments, statuses, runs = deployment_fixture(
+        task="deploy", target_sha=workflow_sha, run_head_sha=workflow_sha,
+        run_event="workflow_dispatch",
+    )
+    statuses[200][0]["environment_url"] = (
+        "https://gpoint.one/#gpoint-manifest-sha256=" + MANIFEST_SHA
+        + "&gpoint-runtime-target-sha=" + target
+        + "&gpoint-core-source-sha=" + workflow_sha
+        + "&gpoint-agata-source-sha=" + workflow_sha
+        + "&gpoint-miniapp-source-sha=" + BASELINE
+    )
+
+    with pytest.raises(ValueError, match="runtime target SHA"):
+        MODULE.resolve_production_component_sources(
+            deployments, statuses, runs, repository=REPOSITORY
+        )
+
+
 def test_selective_plan_builds_only_the_component_changed_since_its_baseline(tmp_path):
     repo, baseline_sha = repo_with_baseline(tmp_path)
     candidate = commit_file(repo, "apps/miniapp/src/main.tsx", "export default 1;\n")

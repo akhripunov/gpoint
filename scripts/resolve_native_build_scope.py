@@ -72,7 +72,8 @@ def _manifest_baseline(environment_url: object, *, deployment_task: str,
     if not MANIFEST_SHA.fullmatch(digest):
         raise ValueError("production Deployment manifest digest is invalid")
     source_keys = set(COMPONENT_SOURCE_KEYS.values())
-    if set(values) - (source_keys | {"gpoint-manifest-sha256"}):
+    supported_keys = source_keys | {"gpoint-manifest-sha256", "gpoint-runtime-target-sha"}
+    if set(values) - supported_keys:
         raise ValueError("production Deployment URL contains unsupported manifest fields")
     present_sources = source_keys.intersection(values)
     if not present_sources:
@@ -82,9 +83,15 @@ def _manifest_baseline(environment_url: object, *, deployment_task: str,
     sources = {component: values[key] for component, key in COMPONENT_SOURCE_KEYS.items()}
     if any(not EXACT_SHA.fullmatch(source) for source in sources.values()):
         raise ValueError("production Deployment component source SHA is invalid")
+    runtime_target_sha = values.get("gpoint-runtime-target-sha")
+    if runtime_target_sha is not None and not EXACT_SHA.fullmatch(runtime_target_sha):
+        raise ValueError("production Deployment runtime target SHA is invalid")
     if deployment_task == "rollback" and set(sources.values()) != {deployment_sha}:
         raise ValueError("rollback Deployment component sources differ from its exact target SHA")
-    return {"manifest_sha256": digest, "component_sources": sources}
+    result = {"manifest_sha256": digest, "component_sources": sources}
+    if runtime_target_sha is not None:
+        result["runtime_target_sha"] = runtime_target_sha
+    return result
 
 
 def resolve_production_component_sources(deployments: list[dict], statuses_by_id: dict,

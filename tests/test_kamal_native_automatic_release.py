@@ -182,13 +182,24 @@ def test_ordinary_deployment_uses_native_environment_status_after_verify():
     assert "GITHUB_RUN_ATTEMPT" in deploy["steps"][resolve]["run"]
 
 
-def test_manual_rollback_keeps_exact_target_sha_status_until_native_equivalence_exists():
+def test_manual_rollback_uses_native_environment_deployment_and_target_metadata():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     rollback = workflow["jobs"]["rollback"]
-    assert rollback["environment"] == {"name": "production", "deployment": False}
+    assert rollback["environment"] == {
+        "name": "production",
+        "url": "${{ steps.verify.outputs.environment_url }}",
+    }
     body = "\n".join(step.get("run", "") for step in rollback["steps"])
-    assert "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" in body
-    assert '"$TARGET_SHA"' in body
+    assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments' not in body
+    assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses' not in body
+    assert "gpoint-runtime-target-sha=" in body
+    assert "gpoint-core-source-sha=$CORE_SOURCE_SHA" in body
+    assert "gpoint-agata-source-sha=$AGATA_SOURCE_SHA" in body
+    assert "gpoint-miniapp-source-sha=$MINIAPP_SOURCE_SHA" in body
+    for key in ("core_version", "agata_version", "miniapp_version"):
+        assert f"steps.evidence.outputs.{key}" in yaml.safe_dump(rollback)
+    assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments' not in body
+    assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses' not in body
 
 
 def test_production_mutations_share_one_non_cancelling_lock():
@@ -398,23 +409,24 @@ def test_protected_rollback_uses_only_verified_prior_target_and_shared_lock():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     rollback = workflow["jobs"]["rollback"]
     assert "outputs.mode == 'ROLLBACK'" in rollback["if"]
-    assert rollback["environment"] == {"name": "production", "deployment": False}
+    assert rollback["environment"] == {
+        "name": "production", "url": "${{ steps.verify.outputs.environment_url }}",
+    }
     assert rollback["concurrency"] == {"group": "gpoint-production-release", "cancel-in-progress": False}
     assert rollback["permissions"] == {"contents": "read", "packages": "read", "deployments": "write"}
     body = yaml.safe_dump(rollback)
     names = [step.get("name", step.get("uses", "")) for step in rollback["steps"]]
     assert names.index("Validate linked build, successful Runtime Verify and six-role manifest") < names.index("Verify target digests, platform, revision and provenance")
     assert names.index("Verify target digests, platform, revision and provenance") < names.index("Verify live DB compatibility and retained target containers before mutation")
-    assert names.index("Verify live DB compatibility and retained target containers before mutation") < names.index("Create rollback Deployment only after all target evidence passes")
-    assert names.index("Create rollback Deployment only after all target evidence passes") < names.index("Roll back consumers and then APIs with stock Kamal")
+    assert names.index("Verify live DB compatibility and retained target containers before mutation") < names.index("Roll back consumers and then APIs with stock Kamal")
     assert names.index("Roll back consumers and then APIs with stock Kamal") < names.index("Verify rollback Runtime and preserve databases before SUCCESS")
     for gate in (
         "rollback_target_sha", "rollback_deployment_id", "verify_native_rollback_evidence.py",
         "verify_native_image_readback.py", "verify_native_image_attestation.py",
-        "verify-kamal-migration-parity.py", "BASELINE_ROLE_VERSION=$live_version",
-        "BASELINE_ROLE_SOURCE_SHA=$live_source_sha", "KAMAL_ROLES=worker", "KAMAL_ROLES=bot",
-        "KAMAL_ROLES=memory-worker", "kamal app stop --roles",
-        "RECOVERY_REQUIRED", "state=success",
+        "verify-kamal-migration-parity.py", "core_version", "agata_version",
+        "miniapp_version", "KAMAL_ROLES=worker", "KAMAL_ROLES=bot",
+        "KAMAL_ROLES=memory-worker", "app stop --roles",
+        "RECOVERY_REQUIRED", "steps.verify.outputs.environment_url",
     ):
         assert gate in body
     events = workflow.get("on", workflow.get(True))

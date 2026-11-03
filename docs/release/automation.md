@@ -285,13 +285,12 @@ GitHub сам создаёт Deployment и управляет `in_progress`/фи
 manifest, поэтому автоматический SUCCESS связан с тем же проверенным manifest.
 Отдельные ручные POST статусов в обычном пути не нужны.
 
-Rollback пока сохраняет отдельный ручной Deployment для выбранного предыдущего
-target SHA. Workflow исполняется с текущего `main`, поэтому автоматически
-созданный Environment Deployment имел бы SHA workflow, а не SHA восстановленной
-версии и сделал бы историю ложной. До подтверждения эквивалентной штатной модели
-rollback продолжает создавать запись для exact target SHA и вручную отмечать её
-только после полного Runtime Verify. Это зафиксированный архитектурный gap, не
-разрешение обходить OWNER approval или safety gates.
+Rollback использует тот же штатный GitHub `environment: production`, поэтому
+Environment создаёт Deployment, связанный с SHA текущего защищённого workflow.
+После полного Runtime Verify `environment.url` фиксирует SHA-256 manifest,
+выбранный runtime target SHA и source SHA каждого компонента. Deployment SHA
+остаётся SHA workflow, а проверенный manifest описывает фактически восстановленную
+версию. Это различие явно сохраняется при следующем rollback resolver.
 
 Для отдельно разрешённого перехода AGATA `agata0011 → agata0012` результат
 реального Apply фиксируется в приватном root-owned mode-0600 файле
@@ -328,10 +327,11 @@ OWNER approval, exact target SHA и ID предыдущего успешного
 Deployment. Проверяются последний статус SUCCESS, связанный успешный Native
 Release run/build, SHA-256-bound production manifest для всех шести ролей,
 GHCR immutable digests и provenance, retained target containers, совместимость
-текущих Prisma/Alembic heads и сохранность DB/Redis IDs и mounts. Kamal rollback
-выполняется по одной роли: consumers раньше API. Закреплённый Kamal 2.12.0
-вызывается как `kamal rollback <version> --roles <role>`: версия — позиционный
-аргумент stock CLI. Полный runtime Verify должен
+текущих Prisma/Alembic heads и сохранность DB/Redis IDs и mounts. Роли каждой
+компонентной группы возвращаются к версии, source SHA и digest из manifest;
+разные группы могут иметь разные версии и source SHA. Kamal rollback выполняется
+по одной роли: consumers раньше API. Закреплённый Kamal 2.12.0 вызывается как
+`kamal rollback <version> --roles <role>`: версия — позиционный аргумент stock CLI. Полный runtime Verify должен
 завершиться до GitHub Deployment SUCCESS. Любая неоднозначность блокирует
 операцию; production DB migrations автоматически не откатываются. Пока нет
 предыдущего Native Release с подтверждённым successful manifest, rollback
@@ -363,7 +363,7 @@ recovery/transition paths. Отсутствие автоматического �
 | `infra/production/docker-compose*.yml`, `infra/shared/docker-compose.yml`, `infra/docker/docker-compose.yml` | LEGACY / TRANSITION / ACTIVE FOR SCOPED SERVICES | Compose-конфигурация нужна для оставшихся cutover, Eros/GSales, shared services или recovery; штатный Native app lifecycle выполняет Kamal. | `tests/test_eros_permanent_compose.py`, `tests/test_eros_vps_pilot_compose.py`, `tests/test_kamal_release_config.py`. | Удалять пофайлово после отсутствия production/manual callers, закрытого соответствующего transition и доказательства сохранения shared DB/cache, volumes, network, health и rollback. |
 | `scripts/verify-gpoint-backup-restore.sh` | REQUIRED FOR RECOVERY / CUTOVER | Защищённое одноразовое восстановление и cutover evidence; routine Bunny backup использует `gpoint-scheduled-backup.py` и `verify-gpoint-scheduled-backup-restore.sh`. | `tests/test_kamal_release_config.py`, `tests/test_gpoint_media_tree.py`, `tests/test_recover_kamal_cutover.py`. | Только после успешной production restore rehearsal через принятую замену и подтверждения, что ни один recovery workflow/caller не использует этот путь. |
 | `scripts/gpoint-scheduled-backup.py`, `scripts/verify-gpoint-scheduled-backup-restore.sh`, `scripts/gpoint-backup-policy.py` | ACTIVE | Отдельный systemd backup runner: штатный PostgreSQL archive, Bunny upload/read-back и isolated restore из одного снимка. Не входит в обычный app Deploy. | `tests/test_gpoint_scheduled_backup.py`; в том числе проверка upload → exact-object read-back → restore. | Не удалять до OWNER-approved replacement и подтверждённой непрерывности расписания, freshness/failed-run monitoring, Bunny restore proof и recovery acceptance. |
-| Ручные `gh api POST /deployments` и deployment statuses в rollback части `gpoint-native-release.yml` | ACTIVE, DOCUMENTED GAP | Нужны для rollback target SHA: workflow запускается с текущего `main`, а цель — ранее выпущенный другой SHA. Обычный Deploy использует native Environment Deployment и ручные POST не вызывает. | `tests/test_kamal_native_automatic_release.py`, `tests/test_native_environment_deployment.py`. | Только если штатный Environment workflow сможет точно представлять target SHA и сохранить approval, run linkage и SUCCESS-after-Verify; иначе gap остаётся и не создаётся ложный SUCCESS. |
+| Rollback в `.github/workflows/gpoint-native-release.yml` | ACTIVE | Использует штатный production Environment Deployment текущего workflow SHA; после Runtime Verify записывает manifest SHA, выбранный runtime target SHA и source SHA всех компонентов в Environment URL. Компонентные версии и digests восстанавливаются раздельно из проверенного manifest. | `tests/test_kamal_native_automatic_release.py`, `tests/test_native_environment_deployment.py`, `tests/test_native_rollback_evidence.py`. | Сохранять exact-main/OWNER gates, native Environment lifecycle, manifest-bound runtime metadata, component identity и SUCCESS только после полного Verify. |
 | Docker lifecycle в `scripts/release-gpoint-vps-adapter.mjs` и cutover/recovery helpers | LEGACY / REQUIRED FOR TRANSITION OR RECOVERY | Для обычных Native app контейнеров заменено stock `kamal deploy --skip-push`, `kamal app stop` и `kamal rollback`. Остальные команды могут быть одноразовыми technical DB/backup или переходными операциями. | `tests/test_kamal_native_automatic_release.py`, `tests/test_kamal_cutover_owner.py`, `tests/test_gpoint_scheduled_backup.py`. | Удалять только после caller-by-caller доказательства, что операция управляет application lifecycle и stock Kamal эквивалентен; DB/backup technical actions не считать дублирующим app lifecycle. |
 
 На момент проверки не найден путь, который можно безопасно удалить безусловно.

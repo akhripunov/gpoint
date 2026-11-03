@@ -19,7 +19,9 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(set(jobs), {"workspace", "python", "build", "deploy", "rollback", "backup_maintenance", "migration_rehearsal"})
         rollback = jobs["rollback"]
         self.assertIn("outputs.mode == 'ROLLBACK'", rollback["if"])
-        self.assertEqual(rollback["environment"], {"name": "production", "deployment": False})
+        self.assertEqual(rollback["environment"], {
+            "name": "production", "url": "${{ steps.verify.outputs.environment_url }}",
+        })
         self.assertEqual(rollback["concurrency"], {"group": "gpoint-production-release", "cancel-in-progress": False})
         self.assertNotIn("build", rollback["needs"])
         self.assertEqual(jobs["migration_rehearsal"]["needs"], ["workspace", "python", "build"])
