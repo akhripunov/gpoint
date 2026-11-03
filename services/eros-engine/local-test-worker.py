@@ -11,9 +11,9 @@ from pathlib import Path
 repo = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(repo / 'services/agata/worker'))
 
-if os.environ.get('GPOINT_AGATA_WORKER_LOCAL_TEST') != 'true':
+if os.environ.get('GPOINT_EROS_WORKER_LOCAL_TEST') != 'true':
     raise SystemExit('local_test_mode_required')
-if os.environ.get('GPOINT_AGATA_WORKER_URL') != 'http://127.0.0.1:3000/agata-worker':
+if os.environ.get('GPOINT_EROS_WORKER_URL') != 'http://127.0.0.1:3000/gpoint-worker':
     raise SystemExit('isolated_test_gateway_mismatch')
 
 import gpoint_mac_worker as worker

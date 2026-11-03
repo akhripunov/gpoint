@@ -209,8 +209,10 @@ test('Mac Ollama tunnel retries SSH after a disconnect and stops cleanly on TERM
 
 test('local Worker fixture refuses non-isolated or non-local mode', () => {
   const worker = readFileSync(new URL('local-test-worker.py', directory), 'utf8');
-  assert.match(worker, /GPOINT_AGATA_WORKER_LOCAL_TEST/);
-  assert.match(worker, /http:\/\/127\.0\.0\.1:3000\/agata-worker/);
+  assert.match(worker, /GPOINT_EROS_WORKER_LOCAL_TEST/);
+  assert.match(worker, /GPOINT_EROS_WORKER_URL/);
+  assert.match(worker, /http:\/\/127\.0\.0\.1:3000\/gpoint-worker/);
+  assert.doesNotMatch(worker, /GPOINT_AGATA_WORKER_(?:LOCAL_TEST|URL)/, 'the GPoint Eros lane must not depend on AGATA Worker settings');
   assert.match(worker, /DETERMINISTIC_LOCAL_E2E_REPLY/);
   assert.match(worker, /SYNTHETIC_MEMORY_EXTRACTION_RESULT/);
   assert.match(worker, /purpose == 'eros_chat_completion'/);
