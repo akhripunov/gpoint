@@ -1400,8 +1400,6 @@ jobs:
           TARGET_SHA: ${{ inputs.rollback_target_sha }}
           TARGET_VERSION: ${{ steps.evidence.outputs.version }}
           TARGET_TOPOLOGY: ${{ steps.evidence.outputs.topology }}
-          EROS_PILOT_ACTIVE: ${{ steps.baseline.outputs.eros_pilot_active }}
-          EROS_PILOT_ACTIVE: ${{ steps.baseline.outputs.eros_pilot_active }}
           CORE_DIGEST: ${{ steps.evidence.outputs.core_digest }}
           AGATA_DIGEST: ${{ steps.evidence.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ steps.evidence.outputs.miniapp_digest }}
