@@ -17,7 +17,10 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     assert "push" in deploy.get("if", "")
     assert "refs/heads/main" in deploy.get("if", "")
     assert "workflow_dispatch" in deploy.get("if", "")
-    assert deploy["environment"] == {"name": "production", "deployment": False}
+    assert deploy["environment"] == {
+        "name": "production",
+        "url": "${{ steps.verify.outputs.environment_url }}",
+    }
     build = workflow["jobs"]["build"]
     assert "release_intent" not in workflow["jobs"]
     assert "workspace" in build["needs"] and "python" in build["needs"]
@@ -51,9 +54,9 @@ def test_runtime_verify_rechecks_public_and_all_six_kamal_roles_after_deploy():
     deploy = workflow.split("  deploy:\n", 1)[1]
     deploy_step = deploy.index("name: Deploy exact immutable images with stock Kamal")
     verify_step = deploy.index("name: Verify public routes and exact running services")
-    status_step = deploy.index("name: Record GitHub Deployment result against the same attempt")
-    verify = deploy[verify_step:status_step]
-    assert deploy_step < verify_step < status_step
+    assert "name: Record GitHub Deployment result against the same attempt" not in deploy
+    verify = deploy[verify_step:]
+    assert deploy_step < verify_step
     for expected in (
         "https://gpoint.one/api/health/live",
         "gpoint-core-api",
@@ -87,7 +90,7 @@ def test_production_preflight_accepts_historical_version_source_sha_split_but_ch
     assert "DB_MOUNTS_SHA256" in preflight
     assert "REDIS_MOUNTS_SHA256" in preflight
     verify = deploy.split("name: Verify public routes and exact running services", 1)[1].split(
-        "name: Record GitHub Deployment result against the same attempt", 1
+        "name: Report recovery guidance after ordinary release", 1
     )[0]
     assert "DB_MOUNTS_SHA256" in verify and "REDIS_MOUNTS_SHA256" in verify
     assert "EXPECTED_ROLE_IDENTITIES_B64" in verify
@@ -117,9 +120,34 @@ def test_core_consumers_are_updated_one_role_at_a_time_and_partial_failure_fails
     assert "verify_single_running_role gpoint-core-worker" in apply
     assert "verify_single_running_role gpoint-core-bot" in apply
     assert "verify_single_running_role gpoint-agata-memory-worker" in apply
-    status = deploy.split("name: Record GitHub Deployment result against the same attempt", 1)[1]
+    ordinary = deploy.split("  rollback:\n", 1)[0]
+    status = ordinary.split("name: Report recovery guidance after ordinary release", 1)[1]
     assert "RECOVERY_REQUIRED" in status
     assert "automatic database downgrade is prohibited" in status
+    assert "deployments/$DEPLOYMENT_ID/statuses" not in status
+
+
+def test_ordinary_deployment_uses_native_environment_status_after_verify():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    deploy = workflow["jobs"]["deploy"]
+    names = [step.get("name", "") for step in deploy["steps"]]
+    resolve = names.index("Resolve exact GitHub environment Deployment ID")
+    verify = names.index("Verify public routes and exact running services")
+    assert resolve < verify
+    assert deploy["environment"]["url"] == "${{ steps.verify.outputs.environment_url }}"
+    deployment_steps = "\n".join(step.get("run", "") for step in deploy["steps"])
+    assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments' not in deployment_steps
+    assert "gpoint-manifest-sha256=" in deployment_steps
+    assert "GITHUB_RUN_ATTEMPT" in deploy["steps"][resolve]["run"]
+
+
+def test_manual_rollback_keeps_exact_target_sha_status_until_native_equivalence_exists():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    rollback = workflow["jobs"]["rollback"]
+    assert rollback["environment"] == {"name": "production", "deployment": False}
+    body = "\n".join(step.get("run", "") for step in rollback["steps"])
+    assert "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" in body
+    assert '"$TARGET_SHA"' in body
 
 
 def test_production_mutations_share_one_non_cancelling_lock():
@@ -138,9 +166,8 @@ def test_production_mutations_share_one_non_cancelling_lock():
 def test_ordinary_release_success_does_not_depend_on_scheduled_backup_freshness():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     deploy = workflow.split("  deploy:\n", 1)[1]
-    status_step = deploy.index("name: Record GitHub Deployment result against the same attempt")
-    ordinary_deploy = deploy[:deploy.index("  backup_maintenance:")]
-    status = ordinary_deploy[status_step:]
+    ordinary_deploy = deploy[:deploy.index("  rollback:")]
+    status = ordinary_deploy.split("name: Report recovery guidance after ordinary release", 1)[1]
     assert "Verify public routes and exact running services" in ordinary_deploy
     assert "Verify existing scheduled VPS backups" not in ordinary_deploy
     assert "gpoint-backup.timer" not in ordinary_deploy
@@ -152,7 +179,8 @@ def test_ordinary_release_success_does_not_depend_on_scheduled_backup_freshness(
     assert "freshness" not in no_migration_path
     assert "gpoint-backup-policy.py freshness" in migration_apply
     assert "BACKUP_OUTCOME" not in status
-    assert '"$DEPLOY_JOB_STATUS" == success && "$VERIFY_OUTCOME" == success' in status
+    assert 'steps.verify.outcome != \'success\'' in status
+    assert 'DEPLOY_JOB_STATUS' not in status
 
 
 def test_backup_maintenance_retains_timer_and_freshness_checks():

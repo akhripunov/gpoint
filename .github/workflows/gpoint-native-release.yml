@@ -204,6 +204,7 @@ jobs:
           tests/test_deploy_evidence_workflow.py
           tests/test_native_build_boundary.py
           tests/test_native_release_intent.py
+          tests/test_native_environment_deployment.py
           tests/test_native_prisma_apply_boundary.py
           tests/test_prisma_migration_release_plan.py
           tests/test_gpoint_scheduled_backup.py
@@ -379,7 +380,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: production
-      deployment: false
+      url: ${{ steps.verify.outputs.environment_url }}
     concurrency:
       group: gpoint-production-release
       cancel-in-progress: false
@@ -481,6 +482,31 @@ jobs:
             UserKnownHostsFile $HOME/.ssh/known_hosts
           EOF
           chmod 600 "$HOME/.ssh/config"
+      - name: Read live application version and containers with Kamal
+        run: |
+          set -euo pipefail
+          kamal() {
+            docker run --rm \
+              --volume "$GITHUB_WORKSPACE:/workdir" \
+              --volume "$HOME/.ssh:/root/.ssh:ro" \
+              --workdir /workdir \
+              --env GPOINT_PRODUCTION_HOST \
+              --env GPOINT_SSH_KEY \
+              --env GPOINT_KNOWN_HOSTS_FILE \
+              ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 "$@"
+          }
+          for config in config/deploy.yml config/deploy.agata.yml config/deploy.miniapp.yml; do
+            version="$(kamal app version --config-file "$config")"
+            details="$(kamal app details --config-file "$config")"
+            containers="$(kamal app containers --config-file "$config")"
+            [[ "$version" =~ [0-9a-f]{40}-[0-9]+-[0-9]+ ]]
+            test -n "$details" && test -n "$containers"
+            {
+              printf '### Kamal inventory: %s\n\n' "$config"
+              printf 'Current version:\n\n```text\n%s\n```\n\nContainers:\n\n```text\n%s\n```\n\nDetails:\n\n```text\n%s\n```\n\n' \
+                "$version" "$containers" "$details"
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
       - name: Verify installed Kamal topology before ordinary release
         id: topology
         run: |
@@ -655,18 +681,18 @@ jobs:
             echo "pending_prisma_checksums=$pending_checksums"
             echo "candidate_prisma_head=$source_head"
           } >> "$GITHUB_OUTPUT"
-      - name: Create exact-SHA in-progress GitHub Deployment
+      - name: Resolve exact GitHub environment Deployment ID
         id: deployment
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          payload="$(jq -nc --arg ref "$CANDIDATE_SHA" '{ref:$ref, task:"deploy", environment:"production", auto_merge:false, required_contexts:[]}')"
-          id="$(gh api --method POST "repos/$GITHUB_REPOSITORY/deployments" --input - <<<"$payload" --jq .id)"
-          test "$id" -gt 0
-          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$id/statuses" \
-            -f state=in_progress -f environment=production -f description="Kamal deploy in progress for exact SHA $CANDIDATE_SHA" >/dev/null
-          echo "id=$id" >> "$GITHUB_OUTPUT"
+          resolved="$(python3 scripts/resolve_native_environment_deployment.py \
+            --sha "$CANDIDATE_SHA" --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT")"
+          grep -Eq '^deployment_id=[1-9][0-9]*$' <<< "$resolved"
+          deployment_id="${resolved#deployment_id=}"
+          echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
       - name: Apply approved Prisma migrations once before Kamal
         id: migration_apply
         env:
@@ -1044,34 +1070,21 @@ jobs:
           manifest_sha="$(sed -n 's/^MANIFEST_SHA=//p' <<< "$facts")"
           [[ "$manifest_sha" =~ ^[0-9a-f]{64}$ ]]
           echo "manifest_sha=$manifest_sha" >> "$GITHUB_OUTPUT"
+          echo "environment_url=https://gpoint.one/#gpoint-manifest-sha256=$manifest_sha" >> "$GITHUB_OUTPUT"
           echo "GPOINT_KAMAL_VERIFY=PASS SHA=$CANDIDATE_SHA MANIFEST_SHA=$manifest_sha" >> "$GITHUB_STEP_SUMMARY"
-      - name: Record GitHub Deployment result against the same attempt
-        if: always() && steps.deployment.outputs.id != ''
+      - name: Report recovery guidance after ordinary release
+        if: always() && steps.deployment.outputs.id != '' && steps.verify.outcome != 'success'
         env:
-          GH_TOKEN: ${{ github.token }}
-          DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
-          MANIFEST_SHA: ${{ steps.verify.outputs.manifest_sha }}
-          DEPLOY_JOB_STATUS: ${{ job.status }}
           MIGRATION_APPLY_OUTCOME: ${{ steps.migration_apply.outcome }}
           KAMAL_APPLY_OUTCOME: ${{ steps.kamal_apply.outcome }}
           VERIFY_OUTCOME: ${{ steps.verify.outcome }}
         run: |
           set -euo pipefail
-          state=failure
-          if [[ "$DEPLOY_JOB_STATUS" == success && "$VERIFY_OUTCOME" == success ]]; then state=success; fi
-          description="Kamal $state SHA $CANDIDATE_SHA"
           if [[ "$MIGRATION_APPLY_OUTCOME" == failure ]]; then
             echo "RECOVERY_REQUIRED: Prisma Apply failed or its exact post-Apply inventory was not verified for $CANDIDATE_SHA. Do not retry Apply or run Kamal until a read-only reconciliation confirms the live migration table and heads." >> "$GITHUB_STEP_SUMMARY"
           elif [[ "$KAMAL_APPLY_OUTCOME" != success || "$VERIFY_OUTCOME" != success ]]; then
             echo "RECOVERY_REQUIRED: partial Kamal transition or Runtime Verify failure for $CANDIDATE_SHA; automatic database downgrade is prohibited. Confirm the live topology and migration head read-only before another production mutation." >> "$GITHUB_STEP_SUMMARY"
           fi
-          if [[ "$state" == success ]]; then
-            [[ "$MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]]
-            description="Kamal $state SHA $CANDIDATE_SHA manifest $MANIFEST_SHA"
-          fi
-          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
-            -f state="$state" -f environment=production -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-            -f description="$description" >/dev/null
 
   rollback:
     name: Protected rollback to a verified Native release
@@ -1133,17 +1146,27 @@ jobs:
               raise SystemExit('selected target is not the requested production Deploy')
           statuses.sort(key=lambda x:x.get('created_at',''), reverse=True)
           if not statuses or statuses[0].get('state') != 'success': raise SystemExit('latest target Deployment status is not SUCCESS')
-          match=re.fullmatch(r'Kamal success SHA ([0-9a-f]{40}) manifest ([0-9a-f]{64})',statuses[0].get('description',''))
-          if not match or match.group(1) != sha: raise SystemExit('target Deployment lacks exact Runtime Verify manifest evidence')
+          description_match=re.fullmatch(r'Kamal success SHA ([0-9a-f]{40}) manifest ([0-9a-f]{64})',statuses[0].get('description',''))
+          environment_match=re.fullmatch(r'https://gpoint\.one/#gpoint-manifest-sha256=([0-9a-f]{64})',statuses[0].get('environment_url',''))
+          if environment_match:
+              manifest_sha=environment_match.group(1)
+          elif description_match and description_match.group(1) == sha:
+              manifest_sha=description_match.group(2)
+          else:
+              raise SystemExit('target Deployment lacks exact Runtime Verify manifest evidence')
           url=statuses[0].get('log_url','')
-          run=re.fullmatch(r'https://github\.com/([^/]+/[^/]+)/actions/runs/([0-9]+)',url)
+          run=re.fullmatch(r'https://github\.com/([^/]+/[^/]+)/actions/runs/([0-9]+)(?:/attempts/([0-9]+))?',url)
           if not run or run.group(1).lower() != os.environ.get('GITHUB_REPOSITORY','').lower(): raise SystemExit('target Deployment lacks a trusted Native Release run link')
           print(run.group(2))
+          print(manifest_sha)
           PY
-          run_id="$(cat "$RUNNER_TEMP/gpoint-rollback/run_id")"
+          run_id="$(sed -n '1p' "$RUNNER_TEMP/gpoint-rollback/run_id")"
+          target_manifest_sha="$(sed -n '2p' "$RUNNER_TEMP/gpoint-rollback/run_id")"
+          [[ "$target_manifest_sha" =~ ^[0-9a-f]{64}$ ]]
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > "$RUNNER_TEMP/gpoint-rollback/run.json"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" --jq '.jobs' > "$RUNNER_TEMP/gpoint-rollback/jobs.json"
           echo "TARGET_RUN_ID=$run_id" >> "$GITHUB_ENV"
+          echo "TARGET_MANIFEST_SHA=$target_manifest_sha" >> "$GITHUB_ENV"
       - name: Install verified VPS SSH credentials
         env:
           SSH_PRIVATE_KEY: ${{ secrets.GPOINT_KAMAL_SSH_PRIVATE_KEY }}
@@ -1171,16 +1194,11 @@ jobs:
         id: manifest
         env:
           TARGET_SHA: ${{ inputs.rollback_target_sha }}
+          TARGET_MANIFEST_SHA: ${{ env.TARGET_MANIFEST_SHA }}
         run: |
           set -euo pipefail
-          manifest_sha="$(python3 - "$RUNNER_TEMP/gpoint-rollback/statuses.json" <<'PY'
-          import json,re,sys
-          statuses=sorted(json.load(open(sys.argv[1])),key=lambda x:x.get('created_at',''),reverse=True)
-          m=re.fullmatch(r'Kamal success SHA [0-9a-f]{40} manifest ([0-9a-f]{64})',statuses[0].get('description',''))
-          if not m: raise SystemExit('verified manifest identity is missing')
-          print(m.group(1))
-          PY
-          )"
+          manifest_sha="$TARGET_MANIFEST_SHA"
+          [[ "$manifest_sha" =~ ^[0-9a-f]{64}$ ]]
           encoded="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$TARGET_SHA" "$manifest_sha" <<'REMOTE'
           set -euo pipefail
           sha="$1"; expected="$2"

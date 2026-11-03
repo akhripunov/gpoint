@@ -101,6 +101,17 @@ def test_accepts_exact_successful_release_manifest_and_all_six_role_digests():
     assert result["run_id"] == RUN_ID
 
 
+def test_accepts_native_environment_status_with_manifest_url_and_exact_attempt_run_link():
+    args = evidence()
+    status = dict(args[1][0])
+    status.pop("description")
+    status["environment_url"] = "https://gpoint.one/#gpoint-manifest-sha256=" + hashlib.sha256(args[4]).hexdigest()
+    status["log_url"] = f"https://github.com/akhripunov/gpoint/actions/runs/{RUN_ID}/attempts/1"
+    result = verify(args, statuses=[status])
+    assert result["manifest_sha256"] == hashlib.sha256(args[4]).hexdigest()
+    assert result["run_attempt"] == 1
+
+
 def test_rejects_failed_or_newer_non_success_deployment_status():
     args = evidence()
     args[1].append({

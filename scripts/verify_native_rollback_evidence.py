@@ -50,14 +50,19 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
         _fail("selected deployment has no statuses")
     latest = max(statuses, key=lambda row: _time(row.get("created_at", "")))
     match = re.fullmatch(r"Kamal success SHA ([0-9a-f]{40}) manifest ([0-9a-f]{64})", latest.get("description", ""))
+    environment_url_match = re.fullmatch(
+        r"https://gpoint\.one/#gpoint-manifest-sha256=([0-9a-f]{64})",
+        latest.get("environment_url", ""),
+    )
+    native_status = environment_url_match is not None
     if (latest.get("state") != "success" or latest.get("environment") != "production"
-            or not match or match.group(1) != expected_sha):
+            or (not native_status and (not match or match.group(1) != expected_sha))):
         _fail("latest status is not a successful verified Kamal production deployment")
-    manifest_sha = match.group(2)
+    manifest_sha = environment_url_match.group(1) if environment_url_match else match.group(2)
     if hashlib.sha256(manifest_bytes).hexdigest() != manifest_sha:
         _fail("production runtime manifest does not match the successful Deployment status")
     log_url = latest.get("log_url", "")
-    run_match = re.fullmatch(r"https://github\.com/([^/]+/[^/]+)/actions/runs/([0-9]+)", log_url)
+    run_match = re.fullmatch(r"https://github\.com/([^/]+/[^/]+)/actions/runs/([0-9]+)(?:/attempts/([0-9]+))?", log_url)
     if not run_match or run_match.group(1).lower() != repository.lower():
         _fail("successful Deployment status is not linked to a repository workflow run")
     if (str(run.get("id")) != run_match.group(2) or run.get("head_sha") != expected_sha
@@ -85,6 +90,7 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
     if (not str(attempt_run).isdigit() or int(attempt_run) != int(run_match.group(2))
             or not str(attempt_number).isdigit() or int(attempt_number) <= 0
             or int(run.get("run_attempt", 0)) != int(attempt_number)
+            or (run_match.group(3) is not None and int(run_match.group(3)) != int(attempt_number))
             or version != f"{expected_sha}-{attempt_run}-{attempt_number}"):
         _fail("rollback target has no exact immutable build attempt tag")
     images = candidate.get("images", {})

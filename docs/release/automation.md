@@ -165,6 +165,19 @@ baseline или multi-component diff переходят в FULL. Runtime Verify 
 ролей, health и database/cache identities. PostgreSQL, Redis, proxy и
 неизменённые компоненты не перезапускаются.
 
+Build пока публикует все три runtime-образа. Точный live baseline читается только
+в защищённом Deploy job после Tests и Build; до этого job production credentials
+недоступны. `github.event.before` не является надёжной заменой live baseline:
+предыдущая публикация могла завершиться ошибкой, а в main могли накопиться
+невыкаченные изменения. Поэтому ранний path-only выбор образа может пропустить
+образ, который станет необходим при fail-closed переходе Deploy в FULL. Тест
+`test_all_runtime_images_build_before_production_baseline_is_available`
+закрепляет это ограничение и порядок: полный безопасный build, затем live
+inventory, затем component plan. Для настоящего selective Build требуется
+надёжно доказать production source и применить тот же cumulative diff до Build,
+не выдавая production secrets тестовым job; пока такого проверенного безопасного
+источника нет, удалять эти три build шага нельзя.
+
 Rollback, backup maintenance и isolated migration rehearsal остаются отдельными
 ручными операциями; обычный push их не запускает. Первый cutover и его recovery
 сохраняют свои допуски. Исторические workflow runs не подтверждают текущее
@@ -192,6 +205,22 @@ read-only live-state checks. Для app-only кандидата Prisma Apply п�
 для миграционного кандидата допустим только точный checksum allowlist и полный
 совместимый pending набор. Runtime Verify является единственным runtime gate
 для GitHub Deployment SUCCESS.
+
+В обычном Native Release job использует GitHub Actions `environment: production`:
+GitHub сам создаёт Deployment и управляет `in_progress`/финальным статусом по
+результату job. Read-only resolver находит ровно одну запись по exact candidate
+SHA/ref, production environment, task, run URL и попытке; неоднозначность
+блокирует job. Успешный Verify отдаёт в `environment.url` URL с SHA-256 runtime
+manifest, поэтому автоматический SUCCESS связан с тем же проверенным manifest.
+Отдельные ручные POST статусов в обычном пути не нужны.
+
+Rollback пока сохраняет отдельный ручной Deployment для выбранного предыдущего
+target SHA. Workflow исполняется с текущего `main`, поэтому автоматически
+созданный Environment Deployment имел бы SHA workflow, а не SHA восстановленной
+версии и сделал бы историю ложной. До подтверждения эквивалентной штатной модели
+rollback продолжает создавать запись для exact target SHA и вручную отмечать её
+только после полного Runtime Verify. Это зафиксированный архитектурный gap, не
+разрешение обходить OWNER approval или safety gates.
 
 Для отдельно разрешённого перехода AGATA `agata0011 → agata0012` результат
 реального Apply фиксируется в приватном root-owned mode-0600 файле

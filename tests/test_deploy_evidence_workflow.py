@@ -77,13 +77,18 @@ class DeployEvidenceWorkflowTests(unittest.TestCase):
         self.assertIn('test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY"', owner_gate['run'])
         self.assertIn('test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY"', owner_gate['run'])
         self.assertIn('if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then', owner_gate['run'])
-        self.assertEqual(deploy['environment'], {'name': 'production', 'deployment': False})
+        self.assertEqual(deploy['environment'], {
+            'name': 'production',
+            'url': '${{ steps.verify.outputs.environment_url }}',
+        })
         self.assertEqual(deploy['concurrency']['group'], 'gpoint-production-release')
         self.assertIn('deployments', deploy.get('permissions', {}))
-        self.assertIn('Create exact-SHA in-progress GitHub Deployment', [step.get('name') for step in deploy['steps']])
+        self.assertIn('Resolve exact GitHub environment Deployment ID', [step.get('name') for step in deploy['steps']])
         names = [step.get('name') for step in deploy['steps']]
-        self.assertLess(names.index('Verify public routes and exact running services'),
-                        names.index('Record GitHub Deployment result against the same attempt'))
+        self.assertLess(names.index('Resolve exact GitHub environment Deployment ID'),
+                        names.index('Verify public routes and exact running services'))
+        self.assertNotIn('deployments/$DEPLOYMENT_ID/statuses',
+                         '\n'.join(step.get('run', '') for step in deploy['steps']))
 
     def test_authorization_reconciliation_is_a_separate_owner_bound_metadata_only_job(self):
         workflow = yaml.safe_load(WORKFLOW.read_text())
