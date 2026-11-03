@@ -74,7 +74,8 @@ def test_eros_runtime_hooks_and_config_changes_block_until_explicit_pilot_reconc
     for path in (".kamal/hooks/pre-app-boot", ".kamal/hooks/post-app-boot", "config/eros-pilot.yml",
                  "scripts/eros-new-operation.py", "scripts/collect_kamal_eros_state.py",
                  "scripts/kamal_eros_state.py", "scripts/automated-eros-new-operation.py",
-                 "scripts/kamal-eros-new-operation.py"):
+                 "scripts/kamal-eros-new-operation.py", "scripts/check-eros-pilot.py",
+                 "scripts/deploy-eros-pilot.py"):
         assert MODULE.classify_push(
             event_name="push", ref="refs/heads/main", changed_paths={path}
         ) == "BLOCK", path
