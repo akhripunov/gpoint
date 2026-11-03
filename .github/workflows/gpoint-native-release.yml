@@ -489,6 +489,7 @@ jobs:
             docker run --rm \
               --volume "$GITHUB_WORKSPACE:/workdir" \
               --volume "$HOME/.ssh:/root/.ssh:ro" \
+              --volume "$HOME/.ssh:$HOME/.ssh:ro" \
               --workdir /workdir \
               --env GPOINT_PRODUCTION_HOST \
               --env GPOINT_SSH_KEY \

@@ -104,19 +104,21 @@ def test_kamal_agata_and_miniapp_are_separate_services():
 
 
 def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
-    assert "  workspace:" in workflow
-    assert "  python:" in workflow
-    assert "  build:" in workflow
-    assert "needs: [workspace, python]" in workflow
-    assert "if: needs.workspace.outputs.mode == 'DEPLOY' || needs.workspace.outputs.mode == 'REHEARSAL'" in workflow
-    assert "cache-to: type=gha,scope=gpoint-runtime,mode=max" in workflow
-    assert "sbom: true" in workflow
-    assert "provenance: mode=max" in workflow
-    assert "  deploy:" in workflow
-    assert "needs: [workspace, python, build]" in workflow
-    assert "name: production" in workflow
-    assert "deployment: false" in workflow
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    jobs = workflow["jobs"]
+    assert {"workspace", "python", "build", "deploy"}.issubset(jobs)
+    assert jobs["build"]["needs"] == ["workspace", "python"]
+    assert jobs["build"]["if"] == "needs.workspace.outputs.mode == 'DEPLOY' || needs.workspace.outputs.mode == 'REHEARSAL'"
+    build_steps = yaml.safe_dump(jobs["build"]["steps"])
+    assert "cache-to: type=gha,scope=gpoint-runtime,mode=max" in build_steps
+    assert "sbom: true" in build_steps
+    assert "provenance: mode=max" in build_steps
+    assert jobs["deploy"]["needs"] == ["workspace", "python", "build"]
+    assert jobs["deploy"]["environment"] == {
+        "name": "production",
+        "url": "${{ steps.verify.outputs.environment_url }}",
+    }
+    assert "deployment" not in jobs["deploy"]["environment"]
 
 
 def test_first_cutover_build_images_include_the_kamal_service_labels():
@@ -1249,14 +1251,26 @@ def test_manifest_writer_behavior_tests_run_in_python_ci():
 
 
 def test_native_release_runs_kamal_after_successful_main_push():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
-    deploy = workflow.split("  deploy:\n", 1)[1]
-    assert "if: needs.workspace.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true))" in deploy
-    assert "CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}" in deploy
-    assert "test \"$APPROVE_PRODUCTION\" = true" in deploy
-    assert "if [[ \"$GITHUB_EVENT_NAME\" == workflow_dispatch ]]; then" in deploy
-    assert "name: production" in deploy
-    assert "deployment: false" in deploy
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    deploy = workflow["jobs"]["deploy"]
+    assert deploy["if"] == "needs.workspace.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true))"
+    assert deploy["environment"] == {
+        "name": "production",
+        "url": "${{ steps.verify.outputs.environment_url }}",
+    }
+    deploy_script = "\n".join(step.get("run", "") for step in deploy["steps"])
+    assert 'test "$APPROVE_PRODUCTION" = true' in deploy_script
+    assert 'test "$REQUESTED_SHA" = "$WORKFLOW_SHA"' in deploy_script
+    assert "Resolve exact GitHub environment Deployment ID" in [step.get("name") for step in deploy["steps"]]
+    assert 'repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses' not in deploy_script
+
+    rollback = workflow["jobs"]["rollback"]
+    assert rollback["environment"] == {"name": "production", "deployment": False}
+    rollback_script = "\n".join(step.get("run", "") for step in rollback["steps"])
+    assert 'repos/$GITHUB_REPOSITORY/deployments' in rollback_script
+    assert "Create rollback Deployment only after all target evidence passes" in [
+        step.get("name") for step in rollback["steps"]
+    ]
 
 
 def test_native_migration_parity_runs_prisma_from_api_workspace():
