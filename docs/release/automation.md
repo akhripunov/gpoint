@@ -67,6 +67,29 @@ README-коммит поверх накопленного изменения к�
 неизвестный production SHA или отсутствие разрешения блокирует публикацию в обоих
 режимах.
 
+Для механической классификации накопленного diff используй:
+
+```sh
+python3 scripts/classify-release-prepush.py \
+  --repo . \
+  --production-sha <verified-runtime-source-sha> \
+  --main-sha <fresh-origin-main-sha> \
+  --candidate-sha <exact-candidate-sha>
+```
+
+Команда проверяет полные commit SHA, что production и свежий `main` являются
+предками кандидата, и классифицирует весь `production..candidate` path diff.
+Она возвращает `FAST` только для изменения существующего корневого `README.md`;
+добавления, удаления, остальные файлы и смешанный накопленный diff дают `FULL`.
+Непроверяемая SHA, ancestry или path inventory дают `BLOCK` с exit code 2.
+Классификатор не проверяет фактический production/runtime evidence, безвредность
+текста или OWNER authorization, не выполняет push и не заменяет эти проверки.
+Тесты для локальной имитации:
+
+```sh
+python3 -m pytest tests/test_release_pre_push_mode.py -q
+```
+
 ### 4. Подготовить и проверить exact candidate
 
 В выбранной чистой ветке изменить только разрешённые файлы. Просмотреть staged и
