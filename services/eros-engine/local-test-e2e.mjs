@@ -157,8 +157,6 @@ const regranted = await request(`${api}/messages/consent`, {
   method: 'POST', token, body: { chatHistory: true, longTermMemory: true, disclosureVersion: 1 },
 });
 assert.equal(regranted.status, 201);
-await assertStockApiUserIsolation();
-
 const dialogue = [
   'SYNTH_CITY_ZEPHYRBAY: In this synthetic continuity test, I live in Zephyr Bay. My meeting is currently on 22 October 2026 at 18:40, marker SYNTH_OLD_2026-10-22_18:40.',
   'Correction: the meeting moved to 23 October 2026 at 19:15, marker SYNTH_CURRENT_2026-10-23_19:15. Keep the earlier date as history only.',
@@ -186,6 +184,7 @@ for (const [index, text] of dialogue.entries()) {
   assert.equal(response.status, 201, `turn ${index + 1}: ${JSON.stringify(response.data)}`);
   assert.equal(response.data?.status, 'completed', `turn ${index + 1}`);
   assert.equal(response.data?.response?.text, 'DETERMINISTIC_LOCAL_E2E_REPLY', `turn ${index + 1}`);
+  if (index === 0) await assertStockApiUserIsolation();
 }
 console.log('LOCAL_E2E_15_TURN_DIALOGUE=PASS');
 

@@ -103,9 +103,10 @@ def main() -> int:
     else:
         if not SHA256.fullmatch(args.db_container_id or "") or not SHA256.fullmatch(args.redis_container_id or ""):
             raise SystemExit("ordinary manifest needs exact PostgreSQL and Redis container IDs")
-        if (not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", args.prisma_head or "")
-                or not re.fullmatch(r"[A-Za-z0-9_]+", args.agata_head or "")):
-            raise SystemExit("ordinary manifest needs verified Prisma and preserved AGATA migration heads")
+        if not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", args.prisma_head or ""):
+            raise SystemExit("ordinary manifest needs a verified Prisma migration head")
+        if args.agata_digest:
+            raise SystemExit("ordinary manifest cannot include retired AGATA runtime services")
         migrations = (args.prisma_migrations or "").split(",")
         checksums = (args.prisma_checksums or "").split(",")
         if (not migrations or any(not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", value) for value in migrations)
@@ -124,7 +125,6 @@ def main() -> int:
         baseline_migrations = (args.baseline_prisma_migrations or "").split(",")
         baseline_checksums = (args.baseline_prisma_checksums or "").split(",")
         if (args.baseline_prisma_head != args.prisma_head
-                or args.baseline_agata_head != args.agata_head
                 or baseline_migrations != migrations or baseline_checksums != checksums):
             raise SystemExit("ordinary manifest live DB migration baseline changed during Deploy")
         if not args.public_routes_verified or not args.migration_compatibility_verified:
@@ -314,7 +314,7 @@ def main() -> int:
             "mediaRestore": {"result": "PASS", "manifestSha256": args.media_restore_manifest_sha},
         } if args.mode == "cutover" else {
             "publicRoutes": "PASS", "migrationCompatibility": "PASS",
-            "prismaHead": args.prisma_head, "agataHead": args.agata_head,
+        "prismaHead": args.prisma_head,
         }),
         "preservation": ({
             "postgresSystemIdentifier": args.postgres_system_identifier,
@@ -334,12 +334,10 @@ def main() -> int:
             "prismaHead": args.prisma_head,
             "prismaAppliedMigrations": migrations,
             "prismaAppliedChecksums": checksum_rows,
-            "agataHead": args.agata_head,
             "baselineUnchanged": {
                 "prismaHead": args.baseline_prisma_head,
                 "prismaMigrations": baseline_migrations,
                 "prismaChecksums": dict(value.split("=", 1) for value in baseline_checksums),
-                "agataHead": args.baseline_agata_head,
             },
             "liveBaselineUnchanged": True,
             "databaseWrites": False,

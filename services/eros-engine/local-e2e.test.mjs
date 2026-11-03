@@ -145,7 +145,7 @@ test('production stock Eros model config includes the required memory extraction
 
 test('Mac Ollama tunnel preserves its reverse forward and reconnects after SSH exits', () => {
   const tunnel = readFileSync(new URL('open-mac-ollama-tunnel.sh', directory), 'utf8');
-  assert.doesNotMatch(tunnel, /ClearAllForwardings=yes/);
+  assert.match(tunnel, /-o ClearAllForwardings=yes/);
   assert.match(tunnel, /-R 127\.0\.0\.1:11435:127\.0\.0\.1:11434/);
   assert.match(tunnel, /while[\s\S]*ssh[\s\S]*sleep/);
   assert.match(tunnel, /ServerAliveInterval=30/);
@@ -167,7 +167,7 @@ test('Mac Ollama tunnel retries SSH after a disconnect and stops cleanly on TERM
   const node = join(bin, 'node');
   const ssh = join(bin, 'ssh');
   writeFileSync(node, '#!/bin/sh\nexit 0\n');
-  writeFileSync(ssh, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$EROS_TEST_SSH_CALLS"\nif [ "$(wc -l < "$EROS_TEST_SSH_CALLS")" -eq 1 ]; then exit 255; fi\nexec /bin/sleep 30\n');
+  writeFileSync(ssh, '#!/bin/sh\ncase " $* " in *" -N "*) printf "%s\\n" "$*" >> "$EROS_TEST_SSH_CALLS"; if [ "$(wc -l < "$EROS_TEST_SSH_CALLS")" -eq 1 ]; then exit 255; fi; exec /bin/sleep 30;; *) exit 0;; esac\n');
   chmodSync(node, 0o700);
   chmodSync(ssh, 0o700);
   const tunnel = spawn('/bin/sh', [script], {
@@ -192,7 +192,7 @@ test('Mac Ollama tunnel retries SSH after a disconnect and stops cleanly on TERM
     assert.equal(lines.length, 2, 'tunnel should retry the SSH reverse forward after a disconnect');
     assert.ok(lines.every((line) => line.includes('-R 127.0.0.1:11435:127.0.0.1:11434')));
     assert.ok(lines.every((line) => line.includes(`-i ${identity}`) && line.includes('-o IdentitiesOnly=yes')));
-    assert.ok(lines.every((line) => !line.includes('ClearAllForwardings=yes')));
+    assert.ok(lines.every((line) => line.includes('ClearAllForwardings=yes')));
     tunnel.kill('SIGTERM');
     await exit;
   } finally {
@@ -393,6 +393,7 @@ test('stock Eros API E2E exercises owner-bound session listing and foreign-sessi
   assert.match(e2e, /client\.sessions\(foreignUserId\)/);
   assert.match(e2e, /client\.history\(foreignUserId, ownSession\.sessionId/);
   assert.match(e2e, /result\.reason\.status === 403/);
+  assert.ok(e2e.indexOf('await assertStockApiUserIsolation();') > e2e.indexOf("assert.equal(response.data?.status, 'completed', `turn ${index + 1}`)"));
   assert.match(runner, /exec -w \/workspace\/apps\/api -T gpoint-api node --import tsx \/workspace\/services\/eros-engine\/local-test-e2e\.mjs/);
   assert.match(runner, /LOCAL_E2E_GPOINT_QUEUE_RLS_TENANT_ISOLATION=PASS fixture_role=gpoint_worker_test/);
   assert.match(runner, /LOCAL_E2E_EROS_DATABASE_USER_RLS=NOT_AVAILABLE stock_api_ownership_test=PASS/);

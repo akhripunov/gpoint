@@ -408,6 +408,7 @@ jobs:
           provenance: mode=max
       - name: Build and publish immutable AGATA compatibility image for isolated migration rehearsal
         id: agata
+        if: needs.workspace.outputs.mode == 'REHEARSAL'
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
           context: https://github.com/akhripunov/gpoint.git#${{ github.sha }}:services/agata
@@ -427,6 +428,7 @@ jobs:
           provenance: mode=max
       - name: Validate immutable image identity and expose digests
         env:
+          MODE: ${{ needs.workspace.outputs.mode }}
           CANDIDATE_SHA: ${{ github.sha }}
           APP_DIGEST: ${{ steps.app.outputs.digest }}
           AGATA_DIGEST: ${{ steps.agata.outputs.digest }}
@@ -437,13 +439,16 @@ jobs:
           sha = os.environ['CANDIDATE_SHA']
           if not re.fullmatch(r'[0-9a-f]{40}', sha):
               raise SystemExit('candidate SHA is not exact')
-          for name in ('APP_DIGEST', 'AGATA_DIGEST', 'MINIAPP_DIGEST'):
+          for name in ('APP_DIGEST', 'MINIAPP_DIGEST'):
               if not re.fullmatch(r'sha256:[0-9a-f]{64}', os.environ[name]):
                   raise SystemExit(f'{name} is not an immutable OCI digest')
+          if os.environ['MODE'] == 'REHEARSAL' and not re.fullmatch(r'sha256:[0-9a-f]{64}', os.environ['AGATA_DIGEST']):
+              raise SystemExit('AGATA_DIGEST is required only for isolated legacy migration rehearsal')
           PY
       - name: Read back exact published images and verify candidate identity
         id: image_readback
         env:
+          MODE: ${{ needs.workspace.outputs.mode }}
           CANDIDATE_SHA: ${{ github.sha }}
           IMAGE_VERSION: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           APP_DIGEST: ${{ steps.app.outputs.digest }}
@@ -451,7 +456,9 @@ jobs:
           MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}
         run: |
           set -euo pipefail
-          for role in app agata miniapp; do
+          roles=(app miniapp)
+          if [[ "$MODE" == REHEARSAL ]]; then roles+=(agata); fi
+          for role in "${roles[@]}"; do
             case "$role" in
               app) image=ghcr.io/akhripunov/gpoint-runtime; digest="$APP_DIGEST" ;;
               agata) image=ghcr.io/akhripunov/gpoint-agata-runtime; digest="$AGATA_DIGEST" ;;
@@ -471,7 +478,9 @@ jobs:
               "$RUNNER_TEMP/$role-sbom.json" "$RUNNER_TEMP/$role-provenance.json" \
               "$CANDIDATE_SHA" https://github.com/akhripunov/gpoint.git
           done
-          for role in app agata; do
+          image_roles=(app)
+          if [[ "$MODE" == REHEARSAL ]]; then image_roles+=(agata); fi
+          for role in "${image_roles[@]}"; do
             case "$role" in
               app) image=ghcr.io/akhripunov/gpoint-runtime; digest="$APP_DIGEST" ;;
               agata) image=ghcr.io/akhripunov/gpoint-agata-runtime; digest="$AGATA_DIGEST" ;;
@@ -837,7 +846,7 @@ jobs:
           test "$(docker inspect --format '{{.State.Running}}' kamal-proxy)" = true
           test "$(docker inspect --format '{{.State.Running}}' shared_postgres_1)" = true
           test "$(docker inspect --format '{{.State.Running}}' shared_redis_1)" = true
-          for service in api worker bot agata-api agata-memory-worker; do
+          for service in api worker bot; do
             ids="$(docker ps -aq --filter label=com.docker.compose.project=compose --filter "label=com.docker.compose.service=$service")"
             test -n "$ids" || { echo "expected stopped legacy Compose service is missing: $service" >&2; exit 1; }
             while IFS= read -r id; do
@@ -888,31 +897,17 @@ jobs:
           set -euo pipefail
           api_image="$(docker inspect --format '{{.Config.Image}}' "$(docker ps -q --filter 'name=^/gpoint-core-api-' | head -1)")"
           test -n "$api_image"
-          current="$(docker run --rm --network shared_internal --env-file /opt/gpoint/env/production.env --workdir /app/apps/api "$api_image" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const failed=await db.$queryRawUnsafe("SELECT count(*)::int AS count FROM _prisma_migrations WHERE finished_at IS NULL AND rolled_back_at IS NULL");if(failed[0].count!==0)throw Error("unfinished Prisma migration exists");const rows=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const head=rows.length?rows[rows.length-1].migration_name:"NONE";const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head is not singular");console.log("PRISMA_HEAD="+head);console.log("PRISMA_MIGRATIONS="+rows.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+rows.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("READ_ONLY_DATABASE_BASELINE_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
+          current="$(docker run --rm --network shared_internal --env-file /opt/gpoint/env/production.env --workdir /app/apps/api "$api_image" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const failed=await db.$queryRawUnsafe("SELECT count(*)::int AS count FROM _prisma_migrations WHERE finished_at IS NULL AND rolled_back_at IS NULL");if(failed[0].count!==0)throw Error("unfinished Prisma migration exists");const rows=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const head=rows.length?rows[rows.length-1].migration_name:"NONE";console.log("PRISMA_HEAD="+head);console.log("PRISMA_MIGRATIONS="+rows.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+rows.map(x=>x.migration_name+"="+x.checksum).join(","));}catch(e){console.error("READ_ONLY_DATABASE_BASELINE_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
           printf '%s\n' "$current"
           REMOTE
           )"
           prisma_head="$(sed -n 's/^PRISMA_HEAD=//p' <<< "$facts")"
           prisma_migrations="$(sed -n 's/^PRISMA_MIGRATIONS=//p' <<< "$facts")"
           prisma_checksums="$(sed -n 's/^PRISMA_CHECKSUMS=//p' <<< "$facts")"
-          agata_head="$(sed -n 's/^AGATA_HEAD=//p' <<< "$facts")"
-          test -n "$prisma_head" && test -n "$prisma_migrations" && test -n "$agata_head"
+          test -n "$prisma_head" && test -n "$prisma_migrations"
           test -n "$prisma_checksums"
           [[ "$BASELINE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ && "$agata_head" =~ ^[A-Za-z0-9_]+$ ]]
-          agata_checksums=""
-          if [[ "$agata_head" == agata0012 ]] && ! git cat-file -e "$BASELINE_SOURCE_SHA:services/agata/migrations/versions/0012_eros_memory_disclosure.py" 2>/dev/null; then
-            mapfile -t receipt_sources < <(git rev-list --first-parent --max-count=64 "$CANDIDATE_SHA")
-            receipt_proof="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - --read-agata-ancestor-receipt \
-              "$agata_head" "${receipt_sources[@]}" \
-              < "$GITHUB_WORKSPACE/scripts/verify-kamal-migration-parity.py")"
-            [[ "$receipt_proof" =~ ^([0-9a-f]{40}):(agata0012=([0-9a-f]{64}))$ ]]
-            receipt_source="${BASH_REMATCH[1]}"; agata_checksums="${BASH_REMATCH[2]}"; receipt_checksum="${BASH_REMATCH[3]}"
-            git merge-base --is-ancestor "$receipt_source" "$CANDIDATE_SHA"
-            migration_path=services/agata/migrations/versions/0012_eros_memory_disclosure.py
-            test "$(git show "$receipt_source:$migration_path" | sha256sum | cut -d' ' -f1)" = "$receipt_checksum"
-            test "$(sha256sum "$migration_path" | cut -d' ' -f1)" = "$receipt_checksum"
-          fi
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
           python3 scripts/verify-kamal-migration-parity.py \
             --policy compatible \
             --repo-root "$GITHUB_WORKSPACE" \
@@ -921,15 +916,11 @@ jobs:
             --prisma-directory packages/db/prisma/migrations \
             --prisma-current-migrations "$prisma_migrations" \
             --prisma-current-checksums "$prisma_checksums" \
-            --prisma-current-head "$prisma_head" \
-            --agata-directory services/agata/migrations/versions \
-            --agata-current-head "$agata_head" \
-            --agata-current-checksums "$agata_checksums"
+            --prisma-current-head "$prisma_head"
           {
             echo "prisma_head=$prisma_head"
             echo "prisma_migrations=$prisma_migrations"
             echo "prisma_checksums=$prisma_checksums"
-            echo "agata_head=$agata_head"
           } >> "$GITHUB_OUTPUT"
       - name: Create exact-SHA in-progress GitHub Deployment
         id: deployment
@@ -980,17 +971,14 @@ jobs:
           GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles bot --config-file config/deploy.yml
           verify_single_running_role gpoint-core-bot "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
-          for role in api; do
-            role_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$role" \
-              < "$GITHUB_WORKSPACE/scripts/verify-kamal-optional-agata-role.sh")"
-            if [[ "$role_state" == ROLE_PRESENT=true ]]; then
-              GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES="$role" \
-                kamal app stop --roles "$role" --config-file config/deploy.agata.yml
-            elif [[ "$role_state" != ROLE_PRESENT=false ]]; then
-              echo 'AGATA API role state was not classified' >&2; exit 1
-            fi
-          done
-          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$IMAGE_VERSION" <<'REMOTE_DRAIN'
+          legacy_agata_api_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- api \
+            < "$GITHUB_WORKSPACE/scripts/verify-kamal-optional-agata-role.sh")"
+          legacy_agata_worker_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- memory-worker \
+            < "$GITHUB_WORKSPACE/scripts/verify-kamal-optional-agata-role.sh")"
+          [[ "$legacy_agata_api_state" == ROLE_PRESENT=true || "$legacy_agata_api_state" == ROLE_PRESENT=false ]]
+          [[ "$legacy_agata_worker_state" == ROLE_PRESENT=true || "$legacy_agata_worker_state" == ROLE_PRESENT=false ]]
+          if [[ "$legacy_agata_api_state" == ROLE_PRESENT=true || "$legacy_agata_worker_state" == ROLE_PRESENT=true ]]; then
+            ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$IMAGE_VERSION" <<'REMOTE_DRAIN'
           set -euo pipefail
           api="gpoint-core-api-$1"
           test "$(docker inspect --format '{{.State.Running}}' "$api")" = true
@@ -1003,13 +991,14 @@ jobs:
           echo 'GPoint AGATA outbox did not drain before retirement; leaving memory worker running and failing closed' >&2
           exit 1
           REMOTE_DRAIN
-          worker_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- memory-worker \
-            < "$GITHUB_WORKSPACE/scripts/verify-kamal-optional-agata-role.sh")"
-          if [[ "$worker_state" == ROLE_PRESENT=true ]]; then
+          fi
+          if [[ "$legacy_agata_api_state" == ROLE_PRESENT=true ]]; then
+            GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api \
+              kamal app stop --roles api --config-file config/deploy.agata.yml
+          fi
+          if [[ "$legacy_agata_worker_state" == ROLE_PRESENT=true ]]; then
             GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker \
               kamal app stop --roles memory-worker --config-file config/deploy.agata.yml
-          elif [[ "$worker_state" != ROLE_PRESENT=false ]]; then
-            echo 'AGATA memory-worker role state was not classified after drain' >&2; exit 1
           fi
       - name: Verify public routes and exact running services
         id: verify
@@ -1025,7 +1014,6 @@ jobs:
           BASELINE_PRISMA_HEAD: ${{ steps.migration_baseline.outputs.prisma_head }}
           BASELINE_PRISMA_MIGRATIONS: ${{ steps.migration_baseline.outputs.prisma_migrations }}
           BASELINE_PRISMA_CHECKSUMS: ${{ steps.migration_baseline.outputs.prisma_checksums }}
-          BASELINE_AGATA_HEAD: ${{ steps.migration_baseline.outputs.agata_head }}
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
           GPOINT_EROS_PILOT_ACTIVE: ${{ steps.topology.outputs.eros_pilot_active }}
           EROS_PILOT_BASELINE_SHA256: ${{ steps.topology.outputs.EROS_PILOT_BASELINE_SHA256 }}
@@ -1053,18 +1041,18 @@ jobs:
           writer_sha="$(sha256sum scripts/write-kamal-production-manifest.py | awk '{print $1}')"
           remote_writer_sha="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" sha256sum "$writer_remote" | awk '{print $1}')"
           test "$writer_sha" = "$remote_writer_sha"
-          test -n "$BASELINE_PRISMA_HEAD" && test -n "$BASELINE_PRISMA_MIGRATIONS" && test -n "$BASELINE_PRISMA_CHECKSUMS" && test -n "$BASELINE_AGATA_HEAD"
+          test -n "$BASELINE_PRISMA_HEAD" && test -n "$BASELINE_PRISMA_MIGRATIONS" && test -n "$BASELINE_PRISMA_CHECKSUMS"
           if [[ "$GPOINT_EROS_PILOT_ACTIVE" == true ]]; then
             [[ "$EROS_PILOT_BASELINE_SHA256" =~ ^[0-9a-f]{64}$ ]]
             [[ "$EROS_REMOTE_DIR" == "/run/gpoint-eros-state-${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]]
           elif [[ "$GPOINT_EROS_PILOT_ACTIVE" != false ]]; then
             echo 'Eros topology classification is missing' >&2; exit 1
           fi
-          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$BASELINE_PRISMA_MIGRATIONS" "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "$BASELINE_AGATA_HEAD" "$BASELINE_ROLE_VERSION" "$BASELINE_ROLE_SOURCE_SHA" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" <<'REMOTE'
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$BASELINE_PRISMA_MIGRATIONS" "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "$BASELINE_ROLE_VERSION" "$BASELINE_ROLE_SOURCE_SHA" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" <<'REMOTE'
           set -euo pipefail
           sha="$1"; version="$2"; app="$3"; miniapp="$4"; db_id="$5"; redis_id="$6"; deployment_id="$7"; run_id="$8"; attempt="${9}"; writer="${10}"
-          expected_prisma_migrations="${11}"; expected_prisma_checksums="${12}"; expected_prisma_head="${13}"; expected_agata_head="${14}"
-          BASELINE_ROLE_VERSION="${15}"; BASELINE_ROLE_SOURCE_SHA="${16}"; DB_MOUNTS_SHA256="${17}"; REDIS_MOUNTS_SHA256="${18}"
+          expected_prisma_migrations="${11}"; expected_prisma_checksums="${12}"; expected_prisma_head="${13}"
+          BASELINE_ROLE_VERSION="${14}"; BASELINE_ROLE_SOURCE_SHA="${15}"; DB_MOUNTS_SHA256="${16}"; REDIS_MOUNTS_SHA256="${17}"
           [[ "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
           [[ "$writer" == "/run/gpoint-ordinary-manifest-${run_id}-${attempt}.py" ]]
           test -s "$writer"
@@ -1140,18 +1128,15 @@ jobs:
           if not proxy.intersection(core) or not proxy.intersection(miniapp):
               raise SystemExit('Kamal Proxy is not connected to both Core API and Mini App networks')
           PY
-          runtime_db="$(docker exec --workdir /app/apps/api "gpoint-core-api-$version" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const failed=await db.$queryRawUnsafe("SELECT count(*)::int AS count FROM _prisma_migrations WHERE finished_at IS NULL AND rolled_back_at IS NULL");if(failed[0].count!==0)throw Error("unfinished Prisma migration exists");const rows=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const head=rows.length?rows[rows.length-1].migration_name:"NONE";const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head is not singular");console.log("PRISMA_HEAD="+head);console.log("PRISMA_MIGRATIONS="+rows.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+rows.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("POST_DEPLOY_DATABASE_VERIFY_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
+          runtime_db="$(docker exec --workdir /app/apps/api "gpoint-core-api-$version" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const failed=await db.$queryRawUnsafe("SELECT count(*)::int AS count FROM _prisma_migrations WHERE finished_at IS NULL AND rolled_back_at IS NULL");if(failed[0].count!==0)throw Error("unfinished Prisma migration exists");const rows=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const head=rows.length?rows[rows.length-1].migration_name:"NONE";console.log("PRISMA_HEAD="+head);console.log("PRISMA_MIGRATIONS="+rows.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+rows.map(x=>x.migration_name+"="+x.checksum).join(","));}catch(e){console.error("POST_DEPLOY_DATABASE_VERIFY_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
           prisma_head="$(sed -n 's/^PRISMA_HEAD=//p' <<< "$runtime_db")"
           prisma_migrations="$(sed -n 's/^PRISMA_MIGRATIONS=//p' <<< "$runtime_db")"
           prisma_checksums="$(sed -n 's/^PRISMA_CHECKSUMS=//p' <<< "$runtime_db")"
-          agata_head="$(sed -n 's/^AGATA_HEAD=//p' <<< "$runtime_db")"
-          test -n "$prisma_head" && test -n "$prisma_migrations" && test -n "$prisma_checksums" && test -n "$agata_head"
+          test -n "$prisma_head" && test -n "$prisma_migrations" && test -n "$prisma_checksums"
           test "$prisma_migrations" = "$expected_prisma_migrations" || { echo 'Prisma applied migration inventory changed during ordinary deploy' >&2; exit 1; }
           test "$prisma_checksums" = "$expected_prisma_checksums" || { echo 'Prisma applied checksums changed during ordinary deploy' >&2; exit 1; }
           test "$prisma_head" = "$expected_prisma_head" || { echo 'Prisma head changed during ordinary deploy' >&2; exit 1; }
-          test "$agata_head" = "$expected_agata_head" || { echo 'AGATA head changed during ordinary deploy' >&2; exit 1; }
           echo "GPOINT_RUNTIME_PRISMA_HEAD=$prisma_head"
-          echo "GPOINT_PRESERVED_AGATA_DATABASE_HEAD=$agata_head"
           for service in gsales-api gsales-agata-api gsales-agata-memory-worker; do
             ids="$(docker ps -aq --filter "label=com.docker.compose.service=$service")"
             test -n "$ids" || { echo "Expected stopped GSales service is missing: $service" >&2; exit 1; }
@@ -1180,10 +1165,10 @@ jobs:
             --app-digest "$app" \
             --miniapp-digest "$miniapp" --run-id "$run_id" --attempt "$attempt" \
             --deployment-id "$deployment_id" --db-container-id "$db_id" \
-            --redis-container-id "$redis_id" --prisma-head "$prisma_head" --agata-head "$agata_head" \
+            --redis-container-id "$redis_id" --prisma-head "$prisma_head" \
             --prisma-migrations "$prisma_migrations" --prisma-checksums "$prisma_checksums" \
             --baseline-prisma-head "$expected_prisma_head" --baseline-prisma-migrations "$expected_prisma_migrations" \
-            --baseline-prisma-checksums "$expected_prisma_checksums" --baseline-agata-head "$expected_agata_head" \
+            --baseline-prisma-checksums "$expected_prisma_checksums" \
             --public-routes-verified --migration-compatibility-verified)"
           printf '%s\n' "$writer_output"
           manifest_sha="$(sed -n 's/^GPOINT_KAMAL_MANIFEST_SHA256=\([0-9a-f]*\).*/\1/p' <<< "$writer_output")"
@@ -1473,7 +1458,7 @@ jobs:
           echo "BASELINE_ROLE_SOURCE_SHA=$live_source_sha"
           echo "TARGET_TOPOLOGY=$topology"
           current_api="$(docker ps -q --filter 'name=^/gpoint-core-api-')"
-          current_db="$(docker exec --workdir /app/apps/api "$current_api" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const r=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head not singular");console.log("PRISMA_HEAD="+(r.length?r[r.length-1].migration_name:"NONE"));console.log("PRISMA_MIGRATIONS="+r.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+r.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("READ_ONLY_DB_CHECK_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
+          current_db="$(docker exec --workdir /app/apps/api "$current_api" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const r=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");console.log("PRISMA_HEAD="+(r.length?r[r.length-1].migration_name:"NONE"));console.log("PRISMA_MIGRATIONS="+r.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+r.map(x=>x.migration_name+"="+x.checksum).join(","));}catch(e){console.error("READ_ONLY_DB_CHECK_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
           printf '%s\n' "$current_db"
           REMOTE
           )"
@@ -1526,9 +1511,7 @@ jobs:
             --prisma-directory "$GITHUB_WORKSPACE/rollback-source/packages/db/prisma/migrations" \
             --prisma-current-migrations "$(sed -n 's/^PRISMA_MIGRATIONS=//p' <<< "$facts")" \
             --prisma-current-checksums "$(sed -n 's/^PRISMA_CHECKSUMS=//p' <<< "$facts")" \
-            --prisma-current-head "$(sed -n 's/^PRISMA_HEAD=//p' <<< "$facts")" \
-            --agata-directory "$GITHUB_WORKSPACE/rollback-source/services/agata/migrations/versions" \
-            --agata-current-head "$(sed -n 's/^AGATA_HEAD=//p' <<< "$facts")"
+            --prisma-current-head "$(sed -n 's/^PRISMA_HEAD=//p' <<< "$facts")"
           grep -Eq '^BASELINE_ROLE_VERSION=[0-9a-f]{40}-[0-9]+-[0-9]+$' <<< "$facts"
           grep -Eq '^BASELINE_ROLE_SOURCE_SHA=[0-9a-f]{40}$' <<< "$facts"
           while IFS='=' read -r key value; do case "$key" in DB_CONTAINER_ID|REDIS_CONTAINER_ID|DB_MOUNTS_SHA256|REDIS_MOUNTS_SHA256|BASELINE_ROLE_VERSION|BASELINE_ROLE_SOURCE_SHA|TARGET_TOPOLOGY) echo "$key=$value" >> "$GITHUB_OUTPUT" ;; esac; done <<< "$facts"
@@ -1674,7 +1657,7 @@ jobs:
           PY
           docker exec kamal-proxy kamal-proxy list | grep -F 'gpoint-miniapp' >/dev/null
           docker exec kamal-proxy kamal-proxy list | grep -F 'gpoint-core' >/dev/null
-          runtime_db="$(docker exec --workdir /app/apps/api "gpoint-core-api-$version" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const r=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head not singular");console.log("PRISMA_HEAD="+(r.length?r[r.length-1].migration_name:"NONE"));console.log("PRISMA_MIGRATIONS="+r.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+r.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("POST_ROLLBACK_DB_VERIFY_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
+          runtime_db="$(docker exec --workdir /app/apps/api "gpoint-core-api-$version" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const r=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");console.log("PRISMA_HEAD="+(r.length?r[r.length-1].migration_name:"NONE"));console.log("PRISMA_MIGRATIONS="+r.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+r.map(x=>x.migration_name+"="+x.checksum).join(","));}catch(e){console.error("POST_ROLLBACK_DB_VERIFY_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
           printf '%s\n' "$runtime_db"
           echo ROLLBACK_RUNTIME_VERIFY=PASS
           REMOTE
@@ -1684,9 +1667,7 @@ jobs:
             --prisma-directory "$GITHUB_WORKSPACE/rollback-source/packages/db/prisma/migrations" \
             --prisma-current-migrations "$(sed -n 's/^PRISMA_MIGRATIONS=//p' <<< "$facts")" \
             --prisma-current-checksums "$(sed -n 's/^PRISMA_CHECKSUMS=//p' <<< "$facts")" \
-            --prisma-current-head "$(sed -n 's/^PRISMA_HEAD=//p' <<< "$facts")" \
-            --agata-directory "$GITHUB_WORKSPACE/rollback-source/services/agata/migrations/versions" \
-            --agata-current-head "$(sed -n 's/^AGATA_HEAD=//p' <<< "$facts")"
+            --prisma-current-head "$(sed -n 's/^PRISMA_HEAD=//p' <<< "$facts")"
           if [[ "$EROS_PILOT_ACTIVE" == true ]]; then
             [[ "$TARGET_TOPOLOGY" == agata-free-four && "$EROS_PILOT_SOURCE_SHA" =~ ^[0-9a-f]{40}$ && "$EROS_PILOT_BASELINE_SHA256" =~ ^[0-9a-f]{64}$ ]]
             eros_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 "$EROS_REMOTE_DIR/verify-kamal-eros-pilot-runtime.py" --output "$EROS_REMOTE_DIR/active-after.json")"

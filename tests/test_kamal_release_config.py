@@ -767,6 +767,8 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
     assert result.returncode == 0, result.stderr
     assert "GPOINT_KAMAL_SCHEMA_COMPATIBILITY=PASS" in result.stdout
     assert "GPOINT_KAMAL_DB_MIGRATION_REQUIRED=YES" in result.stdout
+
+
     app_file.write_text("export const errorCode = 'error_code';\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "app depends on pending varchar field"], check=True)
@@ -907,6 +909,43 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
     )
     assert blocked.returncode != 0
     assert "PENDING_SCHEMA_DEPENDENCY" in blocked.stderr
+
+
+def test_kamal_app_only_compatibility_does_not_require_agata_schema_or_head(tmp_path):
+    repo = tmp_path / "agata-absent"
+    repo.mkdir()
+    for args in (("init", "-q"), ("config", "user.name", "Test"),
+                 ("config", "user.email", "test@example.invalid")):
+        subprocess.run(["git", "-C", str(repo), *args], check=True)
+    prisma = repo / "packages/db/prisma/migrations"
+    baseline_name = "20261015130000_baseline"
+    pending_name = "20261022110000_compatible_pending"
+    (prisma / baseline_name).mkdir(parents=True)
+    (prisma / baseline_name / "migration.sql").write_text("SELECT 1;\n")
+    (prisma / pending_name).mkdir()
+    (prisma / pending_name / "migration.sql").write_text("CREATE TABLE engine.future_state (id UUID PRIMARY KEY);\n")
+    app = repo / "apps/api/src/health.ts"
+    app.parent.mkdir(parents=True)
+    app.write_text("export const healthy = true;\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "baseline"], check=True)
+    baseline_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    app.write_text("export const healthy = true; export const version = 2;\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "app only"], check=True)
+    candidate_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    result = subprocess.run(
+        ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
+         "--policy", "compatible", "--repo-root", str(repo),
+         "--baseline-source-sha", baseline_sha, "--candidate-source-sha", candidate_sha,
+         "--prisma-directory", str(prisma), "--prisma-current-head", baseline_name,
+         "--prisma-current-migrations", baseline_name,
+         "--prisma-current-checksums", baseline_name + "=" + hashlib.sha256(b"SELECT 1;\n").hexdigest()],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "GPOINT_KAMAL_SCHEMA_COMPATIBILITY=PASS" in result.stdout
+    assert "GPOINT_KAMAL_DB_MIGRATION_REQUIRED=YES" in result.stdout
 
 
 def test_kamal_schema_compatibility_accepts_divergent_live_source_only_when_tree_changes_are_preserved(tmp_path):
@@ -1271,7 +1310,8 @@ def test_native_runtime_verify_compares_live_database_to_its_predeploy_baseline(
     assert "BASELINE_PRISMA_CHECKSUMS: ${{ steps.migration_baseline.outputs.prisma_checksums }}" in verify
     assert 'test "$prisma_migrations" = "$expected_prisma_migrations"' in verify
     assert 'test "$prisma_checksums" = "$expected_prisma_checksums"' in verify
-    assert 'test "$agata_head" = "$expected_agata_head"' in verify
+    assert 'agata.alembic_version' not in verify
+    assert 'agata_head' not in verify
     assert "find packages/db/prisma/migrations" not in verify
     assert "alembic_head('services/agata/migrations/versions')" not in verify
 
@@ -1518,8 +1558,7 @@ def test_native_kamal_keeps_absolute_runner_ssh_config_paths_available():
         command = wrapper.split('\n          }', 1)[0]
         assert '--volume "$HOME/.ssh:/root/.ssh:ro"' in command
         assert '--volume "$HOME/.ssh:$HOME/.ssh:ro"' in command
-    assert 'git rev-list --first-parent --max-count=64 "$CANDIDATE_SHA"' in workflow
-    assert '--read-agata-ancestor-receipt' in workflow
+    assert '--read-agata-ancestor-receipt' not in workflow
 
 
 @pytest.mark.parametrize('name', ['pre-app-boot', 'post-app-boot'])

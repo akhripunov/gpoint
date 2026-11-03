@@ -66,25 +66,21 @@ def ordinary_args(output: Path):
     return [
         "--mode", "ordinary", "--output", str(output), "--sha", SHA,
         "--app-source-sha", SHA, "--version", VERSION,
-        "--app-digest", APP, "--agata-digest", AGATA, "--miniapp-digest", MINIAPP,
+        "--app-digest", APP, "--miniapp-digest", MINIAPP,
         "--run-id", "42", "--attempt", "2", "--deployment-id", "987",
         "--db-container-id", DB_ID, "--redis-container-id", REDIS_ID,
-        "--prisma-head", "20261022110000_eros_gpoint_message_state", "--agata-head", "agata0012",
+        "--prisma-head", "20261022110000_eros_gpoint_message_state",
         "--prisma-migrations", "20261015130000_baseline,20261022110000_eros_gpoint_message_state",
         "--prisma-checksums", "20261015130000_baseline=" + "1" * 64 + ",20261022110000_eros_gpoint_message_state=" + "2" * 64,
         "--baseline-prisma-head", "20261022110000_eros_gpoint_message_state",
         "--baseline-prisma-migrations", "20261015130000_baseline,20261022110000_eros_gpoint_message_state",
         "--baseline-prisma-checksums", "20261015130000_baseline=" + "1" * 64 + ",20261022110000_eros_gpoint_message_state=" + "2" * 64,
-        "--baseline-agata-head", "agata0012",
         "--public-routes-verified", "--migration-compatibility-verified",
     ]
 
 
 def ordinary_four_role_args(output: Path):
-    args = ordinary_args(output)
-    args.remove("--agata-digest")
-    args.remove(AGATA)
-    return args
+    return ordinary_args(output)
 
 
 def run_ordinary(tmp_path: Path, *, active_caddy=False):
@@ -106,7 +102,7 @@ def test_ordinary_manifest_binds_services_database_proxy_tls_and_routes(tmp_path
     assert manifest["operationMode"] == "ordinary"
     assert manifest["candidate"]["gitSha"] == SHA
     assert manifest["candidate"]["appSourceSha"] == SHA
-    assert len(manifest["runtimeServices"]) == 6
+    assert len(manifest["runtimeServices"]) == 4
     assert {service["revision"] for service in manifest["runtimeServices"]} == {SHA}
     assert manifest["preservation"]["postgresContainerId"] == DB_ID
     assert manifest["preservation"]["redisContainerId"] == REDIS_ID
@@ -137,7 +133,7 @@ def test_ordinary_manifest_accepts_exact_four_role_gpoint_topology_without_agata
     roles = {row["name"].rsplit("-", 3)[0] for row in manifest["runtimeServices"]}
     assert roles == {"gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot", "gpoint-miniapp-web"}
     assert "agata" not in manifest["candidate"]["images"]
-    assert manifest["migrationHeads"]["agataHead"] == "agata0012"
+    assert "agataHead" not in manifest["migrationHeads"]
 
 
 def test_ordinary_manifest_refuses_active_caddy_without_writing_output(tmp_path):
@@ -167,8 +163,8 @@ def test_ordinary_manifest_refuses_database_migration_baseline_drift(tmp_path):
     setup_host_stubs(bin_dir)
     output = tmp_path / "ordinary-manifest.json"
     args = ordinary_args(output)
-    index = args.index("--baseline-agata-head") + 1
-    args[index] = "agata0011"
+    index = args.index("--baseline-prisma-head") + 1
+    args[index] = "20261015130000_baseline"
     env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
     result = subprocess.run([sys.executable, str(WRITER), *args], capture_output=True, text=True, env=env)
     assert result.returncode != 0

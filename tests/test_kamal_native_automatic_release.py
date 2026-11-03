@@ -102,7 +102,7 @@ def test_runtime_verify_rechecks_public_and_exact_four_gpoint_roles_after_deploy
     ):
         assert expected in verify
     assert 'for prefix in gpoint-agata-api gpoint-agata-memory-worker' in verify
-    assert "GPOINT_PRESERVED_AGATA_DATABASE_HEAD" in verify
+    assert "GPOINT_RUNTIME_PRISMA_HEAD" in verify
 
 
 def test_ordinary_native_deploy_never_restarts_or_requires_gpoint_agata():
@@ -116,13 +116,16 @@ def test_ordinary_native_deploy_never_restarts_or_requires_gpoint_agata():
     )[0]
     assert "kamal deploy --skip-push --version \"$IMAGE_VERSION\" --roles api --config-file config/deploy.agata.yml" not in apply
     assert "kamal deploy --skip-push --version \"$IMAGE_VERSION\" --roles memory-worker" not in apply
-    assert 'kamal app stop --roles "$role" --config-file config/deploy.agata.yml' in apply
+    assert 'kamal app stop --roles api --config-file config/deploy.agata.yml' in apply
+    assert 'kamal app stop --roles memory-worker --config-file config/deploy.agata.yml' in apply
     assert "GPOINT_AGATA_QUEUE_DRAIN=PASS" in apply
     assert "verify-kamal-optional-agata-role.sh" in apply
     assert apply.index("REMOTE_DRAIN") < apply.index("KAMAL_ROLES=memory-worker")
+    assert 'if [[ "$legacy_agata_api_state" == ROLE_PRESENT=true || "$legacy_agata_worker_state" == ROLE_PRESENT=true ]]; then' in apply
     assert "docker ps" not in apply
     assert 'for prefix in gpoint-agata-api gpoint-agata-memory-worker' in verify
-    assert "AGATA_HEAD" in verify  # The preserved AGATA database head remains under drift protection.
+    assert "agata.alembic_version" not in verify
+    assert "AGATA_HEAD" not in verify
 
 
 def test_production_preflight_accepts_historical_version_source_sha_split_but_checks_digest_identity():
@@ -144,7 +147,7 @@ def test_production_preflight_accepts_historical_version_source_sha_split_but_ch
     )[0]
     assert "DB_MOUNTS_SHA256" in verify and "REDIS_MOUNTS_SHA256" in verify
     assert "BASELINE_ROLE_VERSION" in verify
-    assert "BASELINE_PRISMA_HEAD" in verify and "BASELINE_AGATA_HEAD" in verify
+    assert "BASELINE_PRISMA_HEAD" in verify and "BASELINE_AGATA_HEAD" not in verify
     assert 'test "$prisma_migrations" = "$expected_prisma_migrations"' in verify
     assert 'test "$prisma_checksums" = "$expected_prisma_checksums"' in verify
     assert "find packages/db/prisma/migrations" not in verify
@@ -168,7 +171,8 @@ def test_core_consumers_are_updated_one_role_at_a_time_and_partial_failure_fails
     assert "verify_single_running_role gpoint-core-bot" in apply
     assert 'kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.agata.yml' not in apply
     assert 'kamal deploy --skip-push --version "$IMAGE_VERSION" --roles memory-worker' not in apply
-    assert 'kamal app stop --roles "$role" --config-file config/deploy.agata.yml' in apply
+    assert 'kamal app stop --roles api --config-file config/deploy.agata.yml' in apply
+    assert 'kamal app stop --roles memory-worker --config-file config/deploy.agata.yml' in apply
     assert "GPOINT_AGATA_QUEUE_DRAIN=PASS" in apply
     status = deploy.split("name: Record GitHub Deployment result against the same attempt", 1)[1]
     assert "RECOVERY_REQUIRED" in status
@@ -431,3 +435,39 @@ def test_protected_rollback_uses_only_verified_prior_target_and_shared_lock():
     assert "rollback_target_sha" in inputs
     assert "rollback_deployment_id" in inputs
     assert "outputs.deploy == 'true'" in workflow["jobs"]["deploy"]["if"]
+
+
+def test_native_four_service_release_paths_do_not_query_agata_schema():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    deploy = workflow["jobs"]["deploy"]
+    rollback = workflow["jobs"]["rollback"]
+    deploy_body = "\n".join(step.get("run", "") for step in deploy["steps"])
+    rollback_body = "\n".join(step.get("run", "") for step in rollback["steps"])
+    for path, body in (("deploy", deploy_body), ("rollback", rollback_body)):
+        assert "SELECT version_num FROM agata.alembic_version" not in body, path
+        assert "agataHead" not in body and "agata_head" not in body, path
+    assert "--prisma-current-checksums" in deploy_body
+    assert "--prisma-current-checksums" in rollback_body
+    topology = next(step for step in deploy["steps"] if step.get("id") == "topology")["run"]
+    assert "for service in api worker bot; do" in topology
+    assert "for service in api worker bot agata-api agata-memory-worker; do" not in topology
+    apply = next(step for step in deploy["steps"] if step.get("id") == "kamal_apply")["run"]
+    drain_start = apply.index("REMOTE_DRAIN")
+    assert apply.index("legacy_agata_api_state=") < drain_start
+    assert 'if [[ "$legacy_agata_api_state" == ROLE_PRESENT=true || "$legacy_agata_worker_state" == ROLE_PRESENT=true ]]; then' in apply
+
+
+def test_normal_native_build_does_not_publish_agata_compatibility_image():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    build = workflow["jobs"]["build"]
+    agata = next(step for step in build["steps"] if step.get("id") == "agata")
+    assert agata["if"] == "needs.workspace.outputs.mode == 'REHEARSAL'"
+    readback = next(step for step in build["steps"] if step.get("id") == "image_readback")
+    assert readback["env"]["MODE"] == "${{ needs.workspace.outputs.mode }}"
+    assert 'if [[ "$MODE" == REHEARSAL ]]; then roles+=(agata); fi' in readback["run"]
+    deploy = workflow["jobs"]["deploy"]
+    rollback = workflow["jobs"]["rollback"]
+    for job in (deploy, rollback):
+        body = "\n".join(step.get("run", "") for step in job["steps"])
+        assert "prisma migrate deploy" not in body
+        assert "alembic upgrade" not in body
