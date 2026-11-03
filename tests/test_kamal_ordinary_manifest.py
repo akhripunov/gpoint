@@ -49,6 +49,9 @@ elif args[0:2] == ["ps", "-aq"]:
      or args[4] != "--filter" or not args[5].startswith("label=com.docker.compose.service=")):
   raise SystemExit("invalid Docker filter argument contract")
  service=args[-1].split("=")[-1]
+ if service in __import__("os").environ.get("ABSENT_COMPOSE_SERVICE", "").split(","):
+  print("")
+  raise SystemExit(0)
  prefix="legacy-" if service in ("api", "worker", "bot", "agata-api", "agata-memory-worker") else "gsales-"
  print(prefix+service)
 else: raise SystemExit(2)
@@ -134,6 +137,21 @@ def test_ordinary_manifest_accepts_exact_four_role_gpoint_topology_without_agata
     assert roles == {"gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot", "gpoint-miniapp-web"}
     assert "agata" not in manifest["candidate"]["images"]
     assert "agataHead" not in manifest["migrationHeads"]
+
+
+def test_ordinary_manifest_accepts_removed_legacy_agata_compose_containers(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    setup_host_stubs(bin_dir)
+    output = tmp_path / "four-role-manifest.json"
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+           "ABSENT_COMPOSE_SERVICE": "agata-api,agata-memory-worker"}
+    result = subprocess.run([sys.executable, str(WRITER), *ordinary_args(output)],
+                            capture_output=True, text=True, env=env)
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads(output.read_bytes())
+    stopped = manifest["preservation"]["legacyComposeContainers"]
+    assert {row["service"] for row in stopped} == {"api", "worker", "bot"}
 
 
 def test_ordinary_manifest_refuses_active_caddy_without_writing_output(tmp_path):

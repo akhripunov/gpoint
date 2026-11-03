@@ -242,6 +242,8 @@ def main() -> int:
                                     check=True, capture_output=True, text=True)
             container_ids = [value for value in result.stdout.splitlines() if value]
             if not container_ids:
+                if service in ("agata-api", "agata-memory-worker"):
+                    continue
                 raise SystemExit(f"expected stopped legacy Compose service is missing: {service}")
             for container_id in container_ids:
                 container = docker_json("inspect", container_id)[0]

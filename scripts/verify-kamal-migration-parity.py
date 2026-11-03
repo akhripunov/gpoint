@@ -277,6 +277,31 @@ def changed_application_lines(repo_root, baseline_sha, candidate_sha):
             yield path, line[1:]
 
 
+def changed_prisma_schema_identifiers(repo_root, baseline_sha, candidate_sha):
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), "diff", "--unified=0", baseline_sha, candidate_sha,
+         "--", "packages/db/prisma/schema.prisma"],
+        check=True, capture_output=True, text=True,
+    )
+    identifiers = set()
+    for line in result.stdout.splitlines():
+        if not line.startswith(("+", "-")) or line.startswith(("+++", "---")):
+            continue
+        declaration = line[1:].strip()
+        if not declaration or declaration.startswith("//"):
+            continue
+        model = re.match(r"(?:model|enum|type)\s+([A-Za-z_][A-Za-z0-9_]*)\b", declaration)
+        if model:
+            identifiers.add(model.group(1).casefold())
+        elif not declaration.startswith("@@"):
+            field = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s+", declaration)
+            if field:
+                identifiers.add(field.group(1).casefold())
+        for mapped in re.finditer(r"@{1,2}map\(\s*[\"']([^\"']+)", declaration):
+            identifiers.add(mapped.group(1).casefold())
+    return identifiers
+
+
 def require_live_source_tree_in_candidate(repo_root, baseline_sha, candidate_sha):
     """Accept divergent history only when the candidate preserves every live-tree change."""
     common = subprocess.run(
@@ -397,6 +422,21 @@ def verify_compatible(args, live_prisma, recorded):
                 raise ValueError(f"cannot compare applied Alembic revision with baseline: {revision}")
     pending = [(name, Path(args.prisma_directory) / name / "migration.sql") for name in pending_prisma]
     pending.extend((name, revision_files[name]) for name in pending_agata)
+    if schema_diff.returncode == 1:
+        schema_identifiers = changed_prisma_schema_identifiers(repo_root, baseline, candidate)
+        if not schema_identifiers:
+            raise ValueError("cannot identify changed Prisma schema declarations")
+        pending_identifiers = set()
+        for migration, path in pending:
+            if migration in pending_prisma:
+                pending_identifiers.update(
+                    value.casefold() for value in migration_identifiers(
+                        path, prisma_directory=args.prisma_directory, repo_root=repo_root
+                    )
+                )
+        unmatched = sorted(schema_identifiers - pending_identifiers)
+        if unmatched:
+            raise ValueError("PRISMA_SCHEMA_MIGRATION_CONTRACT_MISMATCH:" + ",".join(unmatched))
     changed = list(changed_application_lines(repo_root, baseline, candidate))
     for migration, path in pending:
         identifiers = migration_identifiers(path, prisma_directory=args.prisma_directory, repo_root=repo_root)

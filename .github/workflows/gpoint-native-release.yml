@@ -1417,6 +1417,10 @@ jobs:
             [[ -z "$agata_digest" ]]
           elif [[ "$topology" == legacy-six ]]; then
             [[ "$agata_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            live_api="$(docker ps -q --filter 'name=^/gpoint-core-api-')"
+            test "$(wc -l <<< "$live_api" | tr -d ' ')" = 1
+            agata_schema="$(docker exec --workdir /app/apps/api "$live_api" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const rows=await db.$queryRawUnsafe("SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name=$1) AS present","agata");console.log(String(rows[0].present))}catch(e){console.error("AGATA_SCHEMA_READ_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
+            [[ "$agata_schema" == true ]] || { echo 'legacy six-role rollback cannot reactivate AGATA after its schema is absent' >&2; exit 1; }
             eros_db="$(docker exec shared_postgres_1 psql -U postgres -d postgres -Atc "SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_database WHERE datname='eros') THEN 'present' ELSE 'absent' END")"
             [[ "$eros_db" == present || "$eros_db" == absent ]]
             if [[ -e /opt/gpoint/env/eros-pilot-state.json || -L /opt/gpoint/env/eros-pilot-state.json ]] \

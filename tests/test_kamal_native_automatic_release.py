@@ -429,6 +429,8 @@ def test_protected_rollback_uses_only_verified_prior_target_and_shared_lock():
     assert "legacy-six" in body
     baseline = next(step for step in rollback["steps"] if step.get("id") == "baseline")
     assert "legacy six-role rollback cannot reactivate AGATA while any Eros pilot state exists" in baseline["run"]
+    assert "legacy six-role rollback cannot reactivate AGATA after its schema is absent" in baseline["run"]
+    assert "information_schema.schemata WHERE schema_name=$1" in baseline["run"]
     events = workflow.get("on", workflow.get(True))
     inputs = events["workflow_dispatch"]["inputs"]
     assert "rollback" in inputs and inputs["rollback"]["default"] is False

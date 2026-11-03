@@ -988,6 +988,26 @@ def test_kamal_compatibility_blocks_prisma_schema_and_runtime_field_without_pend
     assert result.returncode != 0
     assert "PRISMA_SCHEMA_CHANGED_WITHOUT_PENDING_MIGRATION" in result.stderr
 
+    unrelated_name = "20261016120000_feature_flag"
+    (prisma / unrelated_name).mkdir()
+    (prisma / unrelated_name / "migration.sql").write_text(
+        "CREATE TABLE public.feature_flag (id UUID PRIMARY KEY);\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "add unrelated pending migration"], check=True)
+    unrelated_candidate_sha = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    unrelated_pending = subprocess.run(
+        ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
+         "--policy", "compatible", "--repo-root", str(repo),
+         "--baseline-source-sha", baseline_sha, "--candidate-source-sha", unrelated_candidate_sha,
+         "--prisma-directory", str(prisma), "--prisma-current-head", baseline_name,
+         "--prisma-current-migrations", baseline_name,
+         "--prisma-current-checksums", baseline_name + "=" + hashlib.sha256(base_sql.encode()).hexdigest()],
+        capture_output=True, text=True,
+    )
+    assert unrelated_pending.returncode != 0
+    assert "PRISMA_SCHEMA_MIGRATION_CONTRACT_MISMATCH" in unrelated_pending.stderr
+
 
 def test_kamal_schema_compatibility_accepts_divergent_live_source_only_when_tree_changes_are_preserved(tmp_path):
     repo = tmp_path / "divergent-repo"
@@ -1680,5 +1700,6 @@ def test_proxy_route_probe_drains_docker_output_under_pipefail():
 def test_runtime_prisma_readbacks_resolve_the_api_workspace_dependencies():
     workflow = (ROOT / '.github/workflows/gpoint-native-release.yml').read_text()
     calls = [line for line in workflow.splitlines() if 'docker exec' in line and 'require("@prisma/client")' in line]
-    assert len(calls) == 4  # Added the exact rollback runtime DB readback.
+    assert len(calls) == 5  # Includes the legacy-six rollback AGATA schema guard.
     assert all('docker exec --workdir /app/apps/api ' in line for line in calls)
+    assert any('information_schema.schemata WHERE schema_name=$1' in line for line in calls)
