@@ -41,7 +41,8 @@ def facts():
                 "networks": {"gpoint_eros_data": {"aliases": ["gpoint-eros-db"]}},
                 "database": {"name": "eros", "owner": "eros_ddl", "allowConnections": True,
                              "publicConnect": False, "publicSchemaCreate": False,
-                             "runtimeSchemaCreate": False},
+                             "runtimeSchemaCreate": False, "enginePublicSchemaCreate": False,
+                             "engineRuntimeSchemaCreate": False},
                 "roles": {"eros_ddl": {"login": False, "superuser": False, "createDatabase": False,
                                          "createRole": False, "bypassRls": False},
                           "eros_runtime": {"login": True, "superuser": False, "createDatabase": False,
@@ -49,6 +50,7 @@ def facts():
                           "eros_migrator": {"login": True, "superuser": False, "createDatabase": False,
                                             "createRole": False, "bypassRls": False}},
                 "runtimeConnect": True, "runtimeCreate": False, "runtimeSchemaCreate": False,
+                "runtimeEngineSchemaCreate": False,
                 "migratorConnect": True,
                 "migratorCreate": True, "foreignConnect": False, "memberships": [],
                 "migrationCount": 4, "migrationFailures": 0, "migrationHead": "2026102001", "catalogSha256": "9" * 64}
@@ -105,6 +107,14 @@ def test_public_acl_semantics_match_revoke_from_public():
         MODULE.validate_database_acl(postgres["database"])
     postgres["database"]["publicConnect"] = False
     postgres["database"]["publicSchemaCreate"] = True
+    with pytest.raises(MODULE.RuntimeStateError, match="public ACL"):
+        MODULE.validate_database_acl(postgres["database"])
+    postgres["database"]["publicSchemaCreate"] = False
+    postgres["database"]["enginePublicSchemaCreate"] = True
+    with pytest.raises(MODULE.RuntimeStateError, match="public ACL"):
+        MODULE.validate_database_acl(postgres["database"])
+    postgres["database"]["enginePublicSchemaCreate"] = False
+    postgres["database"]["engineRuntimeSchemaCreate"] = True
     with pytest.raises(MODULE.RuntimeStateError, match="public ACL"):
         MODULE.validate_database_acl(postgres["database"])
 

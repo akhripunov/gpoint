@@ -26,7 +26,8 @@ def require(ok, message):
 
 def validate_database_acl(database):
     require(database == {"name":"eros","owner":"eros_ddl","allowConnections":True,
-                         "publicConnect":False,"publicSchemaCreate":False,"runtimeSchemaCreate":False},
+                         "publicConnect":False,"publicSchemaCreate":False,"runtimeSchemaCreate":False,
+                         "enginePublicSchemaCreate":False,"engineRuntimeSchemaCreate":False},
             "Eros database owner or public ACL is invalid")
 
 def validate(marker, api, engine, relay, postgres, networks):
@@ -72,7 +73,7 @@ def validate(marker, api, engine, relay, postgres, networks):
       "eros_migrator":{"login":True,"superuser":False,"createDatabase":False,"createRole":False,"bypassRls":False}}
     require(postgres.get("roles") == expected_roles, "Eros role privileges mismatch")
     require(postgres.get("runtimeConnect") is True and postgres.get("runtimeCreate") is False and
-            postgres.get("runtimeSchemaCreate") is False and
+            postgres.get("runtimeSchemaCreate") is False and postgres.get("runtimeEngineSchemaCreate") is False and
             postgres.get("migratorConnect") is True and postgres.get("migratorCreate") is True and
             postgres.get("foreignConnect") is False and postgres.get("memberships") == [], "Eros database grants escape isolation")
     require(isinstance(postgres.get("migrationCount"), int) and postgres["migrationCount"] > 0 and
@@ -90,7 +91,7 @@ def validate(marker, api, engine, relay, postgres, networks):
       "pilot":{k:marker[k] for k in ("sourceSha","imageVersion","testUserId","testCreatorId","erosImage","pilotAppDigest","backupSha256")},
       "engine":{k:engine[k] for k in ("id","name","revision","integrationRevision","patchSetSha256","repoDigests","networks")},
       "relay":{k:relay[k] for k in ("id","name","revision","repoDigests","networkMode")},
-      "database":{k:postgres[k] for k in ("id","database","roles","runtimeConnect","runtimeCreate","runtimeSchemaCreate","migratorConnect","migratorCreate","foreignConnect","memberships","migrationCount","migrationFailures","migrationHead","catalogSha256")},
+      "database":{k:postgres[k] for k in ("id","database","roles","runtimeConnect","runtimeCreate","runtimeSchemaCreate","runtimeEngineSchemaCreate","migratorConnect","migratorCreate","foreignConnect","memberships","migrationCount","migrationFailures","migrationHead","catalogSha256")},
       "networks":{k:networks[k] for k in ("gpoint_eros_data","gpoint_eros_embeddings")}, "apiContract":exact}
     stable["sha256"] = hashlib.sha256(json.dumps(stable,sort_keys=True,separators=(",",":")).encode()).hexdigest()
     return stable
@@ -130,11 +131,14 @@ def collect(marker_path=Path("/opt/gpoint/env/eros-pilot-state.json")):
     sql="""BEGIN READ ONLY; SELECT json_build_object(
       'database',(SELECT json_build_object('name',datname,'owner',pg_get_userbyid(datdba),'allowConnections',datallowconn,
        'publicConnect',PUBLIC_CONNECT_EXPR,'publicSchemaCreate',PUBLIC_SCHEMA_CREATE_EXPR,
-       'runtimeSchemaCreate',has_schema_privilege('eros_runtime','public','CREATE'))
+       'runtimeSchemaCreate',has_schema_privilege('eros_runtime','public','CREATE'),
+       'enginePublicSchemaCreate',(SELECT PUBLIC_SCHEMA_CREATE_EXPR FROM pg_namespace WHERE nspname='engine'),
+       'engineRuntimeSchemaCreate',has_schema_privilege('eros_runtime','engine','CREATE'))
        FROM pg_database CROSS JOIN pg_namespace WHERE datname='eros' AND nspname='public'),
       'roles',(SELECT json_object_agg(rolname,json_build_object('login',rolcanlogin,'superuser',rolsuper,'createDatabase',rolcreatedb,'createRole',rolcreaterole,'bypassRls',rolbypassrls)) FROM pg_roles WHERE rolname IN ('eros_ddl','eros_runtime','eros_migrator')),
       'runtimeConnect',has_database_privilege('eros_runtime','eros','CONNECT'),'runtimeCreate',has_database_privilege('eros_runtime','eros','CREATE'),
       'runtimeSchemaCreate',has_schema_privilege('eros_runtime','public','CREATE'),
+      'runtimeEngineSchemaCreate',has_schema_privilege('eros_runtime','engine','CREATE'),
       'migratorConnect',has_database_privilege('eros_migrator','eros','CONNECT'),'migratorCreate',has_database_privilege('eros_migrator','eros','CREATE'),
       'foreignConnect',EXISTS(SELECT 1 FROM pg_database d WHERE d.datallowconn AND d.datname<>'eros' AND
         (has_database_privilege('eros_runtime',d.datname,'CONNECT') OR has_database_privilege('eros_migrator',d.datname,'CONNECT'))),

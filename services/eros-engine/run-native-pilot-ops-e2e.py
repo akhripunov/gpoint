@@ -132,7 +132,10 @@ def main() -> int:
                 "SELECT json_build_object('name',datname,'owner',pg_get_userbyid(datdba),"
                 "'allowConnections',datallowconn,'publicConnect'," + runtime_verifier.PUBLIC_CONNECT_SQL +
                 ",'publicSchemaCreate'," + runtime_verifier.PUBLIC_SCHEMA_CREATE_SQL +
-                ",'runtimeSchemaCreate',has_schema_privilege('eros_runtime','public','CREATE'))"
+                ",'runtimeSchemaCreate',has_schema_privilege('eros_runtime','public','CREATE'),"
+                "'enginePublicSchemaCreate',(SELECT " + runtime_verifier.PUBLIC_SCHEMA_CREATE_SQL +
+                " FROM pg_namespace WHERE nspname='engine'),"
+                "'engineRuntimeSchemaCreate',has_schema_privilege('eros_runtime','engine','CREATE'))"
                 "::text FROM pg_database CROSS JOIN pg_namespace WHERE datname='eros' AND nspname='public'"
             )
             def database_acl():
@@ -183,8 +186,23 @@ def main() -> int:
                 run("docker", "exec", container, "psql", "-Xq", "-v", "ON_ERROR_STOP=1",
                     "-U", "postgres", "-d", "eros",
                     "-c", "REVOKE CREATE ON SCHEMA public FROM eros_runtime")
+            for grantee, revoke in (("PUBLIC", "PUBLIC"), ("eros_runtime", "eros_runtime")):
+                run("docker", "exec", container, "psql", "-Xq", "-v", "ON_ERROR_STOP=1",
+                    "-U", "postgres", "-d", "eros",
+                    "-c", f"GRANT CREATE ON SCHEMA engine TO {grantee}")
+                try:
+                    try:
+                        runtime_verifier.validate_database_acl(database_acl())
+                    except runtime_verifier.RuntimeStateError:
+                        pass
+                    else:
+                        raise RuntimeError(f"runtime verifier accepted engine schema CREATE for {grantee}")
+                finally:
+                    run("docker", "exec", container, "psql", "-Xq", "-v", "ON_ERROR_STOP=1",
+                        "-U", "postgres", "-d", "eros",
+                        "-c", f"REVOKE CREATE ON SCHEMA engine FROM {revoke}")
             runtime_verifier.validate_database_acl(database_acl())
-            print("EROS_ACL_E2E=PASS revoked_accepted granted_blocked for PUBLIC CONNECT and schema CREATE")
+            print("EROS_ACL_E2E=PASS revoked_accepted granted_blocked for PUBLIC CONNECT and public/engine schema CREATE")
             values = ops._load_env(env_file)
             stage = "least-privilege container env projection"
             production_env = root / "production-container.env"
