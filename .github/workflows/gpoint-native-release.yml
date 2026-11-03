@@ -135,8 +135,8 @@ jobs:
         run: |
           pnpm --filter @gpoint/db exec prisma generate
           pnpm --filter @gpoint/db exec prisma migrate deploy
-          printf '%s\n' 'CREATE DATABASE gpoint_shadow OWNER gpoint;' |
-            pnpm --filter @gpoint/db exec prisma db execute --stdin
+          command -v createdb
+          createdb --maintenance-db="$DATABASE_URL" --owner=gpoint gpoint_shadow
           pnpm --filter @gpoint/db exec prisma migrate diff \
             --from-migrations prisma/migrations \
             --to-schema-datamodel prisma/schema.prisma \
