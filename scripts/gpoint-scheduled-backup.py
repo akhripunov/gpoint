@@ -143,9 +143,6 @@ def _bunny_upload_and_readback(source: Path, remote_object: str, readback: Path)
     source_sha = _sha256(source)
     _run(["rclone", "copyto", "--immutable", "--config", str(RCLONE_CONFIG),
           str(source), remote_object], stage="Bunny immutable object upload", timeout=6 * 60 * 60)
-    remote_directory = remote_object.rsplit("/", 1)[0]
-    _run(["rclone", "check", "--download", "--one-way", "--config", str(RCLONE_CONFIG),
-          str(source), remote_directory], stage="Bunny object read-back", timeout=6 * 60 * 60)
     _run(["rclone", "copyto", "--config", str(RCLONE_CONFIG),
           remote_object, str(readback)], stage="Bunny object download", timeout=6 * 60 * 60)
     if not readback.is_file() or readback.is_symlink() or _sha256(readback) != source_sha:

@@ -78,7 +78,6 @@ ROLE_REPOSITORIES = {
 EXACT_SHA = re.compile(r"^[0-9a-f]{40}$")
 EXACT_VERSION = re.compile(r"^[0-9a-f]{40}-[0-9]+-[0-9]+$")
 EXACT_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
-EXACT_IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _path_kind(path: str) -> str:
@@ -192,7 +191,7 @@ def _validate_role_inventory(inventory: dict) -> dict[str, dict[str, str]]:
         )
         if (not isinstance(version, str) or not EXACT_VERSION.fullmatch(version)
                 or not isinstance(source, str) or not EXACT_SHA.fullmatch(source)
-                or not isinstance(image_id, str) or not EXACT_IMAGE_ID.fullmatch(image_id)
+                or not isinstance(image_id, str) or not EXACT_DIGEST.fullmatch(image_id)
                 or not isinstance(repo_digest, str)
                 or not re.fullmatch(re.escape(repository) + r"@sha256:[0-9a-f]{64}", repo_digest)):
             raise ValueError("verified role inventory contains an invalid runtime identity")

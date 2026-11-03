@@ -200,7 +200,9 @@ def test_scheduled_backup_uploads_then_restores_the_same_bunny_readback_objects(
     assert readback < database_readback_source < database_restore
     assert readback < media_readback_source < media_restore
     assert 'restore_media_source_manifest="${bunny_readback_dir}/media-source.json"' in helper
-    assert 'rclone check --download --one-way' in helper
+    assert 'rclone check --download --one-way' not in helper
+    assert 'rclone copyto --config "$rclone_config" "$object" "${bunny_readback_dir}/${name}"' in helper
+    assert 'sha256sum "$source"' in helper and 'sha256sum "${bunny_readback_dir}/${name}"' in helper
     assert 'age -d -i "$age_identity" "${bunny_readback_dir}/media-source.json.age"' in helper
     assert 'BUNNY_DATABASE_READBACK=$bunny_database_readback' in helper
     remote_manifest_read = helper.index('python3 - "$bunny_readback_dir/manifest.json"')

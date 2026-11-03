@@ -446,7 +446,6 @@ if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" != "1" && "${GPOINT_USE_EXISTING_BACKUP
     "$bunny_media_manifest_encrypted|$bunny_media_manifest_object|media-source.json.age"; do
     IFS='|' read -r source object name <<< "$pair"
     rclone copyto --immutable --config "$rclone_config" "$source" "$object"
-    rclone check --download --one-way --config "$rclone_config" "$source" "$bunny_snapshot_prefix"
     rclone copyto --config "$rclone_config" "$object" "${bunny_readback_dir}/${name}"
     test "$(sha256sum "$source" | awk '{print $1}')" = \
       "$(sha256sum "${bunny_readback_dir}/${name}" | awk '{print $1}')"

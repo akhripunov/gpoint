@@ -102,7 +102,7 @@ def build_release_plan(
     }
 
 
-def parse_inventory(value: str, *, label: str, checksum: bool = False) -> dict[str, str] | list[str]:
+def parse_inventory(value: str, *, label: str) -> dict[str, str] | list[str]:
     if label == "applied migrations":
         names = value.split(",") if value else []
         if any(not MIGRATION_NAME.fullmatch(name) for name in names):
