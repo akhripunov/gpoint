@@ -846,9 +846,13 @@ jobs:
           test "$(docker inspect --format '{{.State.Running}}' kamal-proxy)" = true
           test "$(docker inspect --format '{{.State.Running}}' shared_postgres_1)" = true
           test "$(docker inspect --format '{{.State.Running}}' shared_redis_1)" = true
-          for service in api worker bot; do
+          for service in api worker bot agata-api agata-memory-worker; do
             ids="$(docker ps -aq --filter label=com.docker.compose.project=compose --filter "label=com.docker.compose.service=$service")"
-            test -n "$ids" || { echo "expected stopped legacy Compose service is missing: $service" >&2; exit 1; }
+            if [[ -z "$ids" ]]; then
+              case "$service" in agata-api|agata-memory-worker) continue ;; esac
+              echo "expected stopped legacy Compose service is missing: $service" >&2
+              exit 1
+            fi
             while IFS= read -r id; do
               [[ -n "$id" ]] || continue
               test "$(docker inspect --format '{{.State.Running}}' "$id")" = false || {

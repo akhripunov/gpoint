@@ -155,7 +155,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("for service in api worker bot agata-api agata-memory-worker", steps[preflight]["run"])
         self.assertIn("shared_postgres_1", steps[preflight]["run"])
         self.assertIn("compose.service=$service", steps[preflight]["run"])
-        self.assertIn("agata-memory-worker", steps[preflight]["run"])
+        self.assertIn('case "$service" in agata-api|agata-memory-worker) continue ;; esac', steps[preflight]["run"])
 
     def test_ordinary_deployment_success_requires_verified_manifest(self):
         deploy = self.workflow["jobs"]["deploy"]

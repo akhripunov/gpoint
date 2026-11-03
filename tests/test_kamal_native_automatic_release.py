@@ -449,8 +449,9 @@ def test_native_four_service_release_paths_do_not_query_agata_schema():
     assert "--prisma-current-checksums" in deploy_body
     assert "--prisma-current-checksums" in rollback_body
     topology = next(step for step in deploy["steps"] if step.get("id") == "topology")["run"]
-    assert "for service in api worker bot; do" in topology
-    assert "for service in api worker bot agata-api agata-memory-worker; do" not in topology
+    assert "for service in api worker bot agata-api agata-memory-worker; do" in topology
+    assert 'case "$service" in agata-api|agata-memory-worker) continue ;; esac' in topology
+    assert 'test "$(docker inspect --format \'{{.State.Running}}\' "$id")" = false' in topology
     apply = next(step for step in deploy["steps"] if step.get("id") == "kamal_apply")["run"]
     drain_start = apply.index("REMOTE_DRAIN")
     assert apply.index("legacy_agata_api_state=") < drain_start
