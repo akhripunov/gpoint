@@ -28,9 +28,11 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("inputs.migration_rehearsal == true", jobs["migration_rehearsal"]["if"])
         self.assertIn("workspace", jobs["deploy"]["needs"])
         self.assertEqual(set(jobs["build"]["needs"]), {"workspace", "python"})
+        self.assertEqual(jobs["eros-pilot-integration"]["needs"], ["workspace", "python", "build"])
         self.assertIn("outputs.mode == 'DEPLOY'", jobs["build"]["if"])
         self.assertIn("outputs.mode == 'REHEARSAL'", jobs["build"]["if"])
         self.assertIn("outputs.mode == 'SYNTHETIC_PILOT_APPLY_REQUESTED'", jobs["build"]["if"])
+        self.assertIn("outputs.mode == 'SYNTHETIC_PILOT_READY'", jobs["build"]["if"])
         self.assertIn("outputs.mode == 'SYNTHETIC_PILOT_VERIFY_ONLY'", jobs["build"]["if"])
         self.assertIn("build", jobs["deploy"]["needs"])
 

@@ -151,3 +151,34 @@ def test_pilot_apply_uses_managed_tunnel_and_checks_it_after_apply_job():
     cleanup_names = [step.get("name", "") for step in cleanup]
     assert cleanup_names.index("Remove Mac Ollama tunnel after successful pilot cleanup") > next(
         i for i, name in enumerate(cleanup_names) if "Restore the pre-pilot database backup" in name)
+
+
+def test_pilot_apply_backs_up_gpoint_and_migrates_exact_app_image_before_enabling_eros():
+    lifecycle = (ROOT / "scripts/eros-native-pilot-lifecycle.sh").read_text()
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    apply = workflow["jobs"]["eros-pilot-apply"]
+    names = [step.get("name", "") for step in apply["steps"]]
+    assert "Back up and isolated-restore GPoint before applying pilot state migration" in names
+    assert any("eros-pilot-apply-gpoint-state-migration.sh" in step.get("run", "") for step in apply["steps"])
+    assert all("eros-pilot-apply-gpoint-state-migration.sh" not in step.get("run", "")
+               for step in workflow["jobs"]["deploy"]["steps"])
+    migration = (ROOT / "scripts/eros-pilot-apply-gpoint-state-migration.sh").read_text()
+    assert "GPOINT_BACKUP_SCHEDULED=PASS" in migration
+    assert "ISOLATED_RESTORE=PASS" in migration
+    assert "20261103140000_gpoint_chat_policy_and_agata_state_copy" in migration
+    assert "APP_DIGEST" in migration
+    assert "_prisma_migrations" in migration
+    assert "GPOINT_PILOT_STATE_MIGRATION=PASS" in migration
+    assert "org.opencontainers.image.revision" in migration
+    assert "RepoDigests" in migration
+    assert "DOCKER_CONFIG=\"$stage/docker\" docker login ghcr.io" in migration
+    assert "--password-stdin" in migration and "registry-token" in migration
+    assert "trap cleanup EXIT" in migration and "REMOTE_STAGE_CLEANUP" in migration
+    assert "DROP TABLE" not in (ROOT / "packages/db/prisma/migrations/20261103140000_gpoint_chat_policy_and_agata_state_copy/migration.sql").read_text().upper()
+    sql = (ROOT / "packages/db/prisma/migrations/20261103140000_gpoint_chat_policy_and_agata_state_copy/migration.sql").read_text().strip()
+    assert sql.startswith("BEGIN;") and sql.endswith("COMMIT;")
+    integration = (ROOT / "tests/integration/gpoint-agata-state-migration-docker.py").read_text()
+    assert "GPOINT_STATE_MIGRATION_ATOMIC_FAILURE_ROLLBACK=PASS" in integration
+    assert "GPOINT_EXACT_IMAGE_PRISMA_MIGRATION_E2E=PASS" in integration
+    assert "--app-image \"$GPOINT_RUNTIME_IMAGE\"" in "\n".join(
+        step.get("run", "") for step in workflow["jobs"]["eros-pilot-integration"]["steps"])

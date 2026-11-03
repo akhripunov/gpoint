@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import subprocess
@@ -70,14 +71,53 @@ def docker(*args: str, check: bool = True, input_text: str | None = None) -> sub
     return result
 
 
-def psql(container: str, sql: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
+def psql(container: str, sql: str, *, database: str = "gpoint",
+         check: bool = True) -> subprocess.CompletedProcess[str]:
     return docker("exec", "-i", container, "psql", "-X", "-v", "ON_ERROR_STOP=1", "-U", "postgres",
-                  "-d", "gpoint", "-At", input_text=sql, check=check)
+                  "-d", database, "-At", input_text=sql, check=check)
+
+
+def run_exact_prisma_image(app_image: str, candidate_sha: str, network: str,
+                           container: str) -> None:
+    if (not re.fullmatch(r"ghcr\.io/akhripunov/gpoint-runtime@sha256:[0-9a-f]{64}", app_image)
+            or not re.fullmatch(r"[0-9a-f]{40}", candidate_sha)):
+        raise RuntimeError("GPoint migration E2E requires exact candidate image digest and SHA")
+    revision = docker("image", "inspect", app_image, "--format",
+                      '{{index .Config.Labels "org.opencontainers.image.revision"}}').stdout.strip()
+    if revision != candidate_sha:
+        raise RuntimeError("GPoint migration E2E image revision differs from exact candidate")
+    psql(container, "CREATE DATABASE gpoint_prisma", database="postgres")
+    dsn = f"postgresql://postgres:isolated-test-only@{container}:5432/gpoint_prisma?schema=public"
+    docker("run", "--rm", "--network", network, "-e", f"DATABASE_URL={dsn}",
+           "--workdir", "/app", "--entrypoint", "pnpm", app_image,
+           "--filter", "@gpoint/db", "exec", "prisma", "migrate", "deploy")
+    expected_checksum = hashlib.sha256(MIGRATION.read_bytes()).hexdigest()
+    ledger = psql(container, """
+      SELECT count(*) || '|' || coalesce(max(checksum),'')
+      FROM public._prisma_migrations
+      WHERE migration_name='20261103140000_gpoint_chat_policy_and_agata_state_copy'
+        AND finished_at IS NOT NULL AND rolled_back_at IS NULL;
+    """, database="gpoint_prisma").stdout.strip()
+    if ledger != "1|" + expected_checksum:
+        raise RuntimeError("exact-image Prisma migrate ledger checksum mismatch")
+    table_count = psql(container, """
+      SELECT count(*) FROM information_schema.tables
+      WHERE table_schema='public' AND table_name IN (
+        'GpointChatPolicyProfile','GpointChatConsent','GpointAgeAssurance',
+        'GpointAiDisclosureReceipt','GpointLegacyConversationFence',
+        'GpointLegacyConversationArchive','GpointLegacyMessageArchive'
+      );
+    """, database="gpoint_prisma").stdout.strip()
+    if table_count != "7":
+        raise RuntimeError(f"exact-image Prisma migration did not create all GPoint-owned tables: {table_count}")
+    print("GPOINT_EXACT_IMAGE_PRISMA_MIGRATION_E2E=PASS checksum_match=true tables=7")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", default=DEFAULT_IMAGE)
+    parser.add_argument("--app-image")
+    parser.add_argument("--candidate-sha")
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9._/:@+-]+", args.image) or args.image.endswith(":latest"):
         raise SystemExit("PostgreSQL test image must be an explicit non-latest image reference")
@@ -100,6 +140,8 @@ def main() -> int:
         else:
             raise RuntimeError("isolated PostgreSQL did not become ready")
         psql(container, FIXTURE)
+        if args.app_image:
+            run_exact_prisma_image(args.app_image, args.candidate_sha or "", network, container)
         migration = MIGRATION.read_text(encoding="utf-8")
         result = psql(container, migration)
         checks = psql(container, """
@@ -123,9 +165,25 @@ def main() -> int:
         drift = psql(container, migration, check=False)
         if drift.returncode == 0 or "GPOINT_LEGACY_MESSAGE_ARCHIVE_MISMATCH" not in drift.stderr:
             raise RuntimeError("rerun did not reject altered encrypted message archive")
+
+        psql(container, "CREATE DATABASE gpoint_migration_failure", database="postgres")
+        atomic = psql(container, migration, database="gpoint_migration_failure", check=False)
+        if atomic.returncode == 0:
+            raise RuntimeError("migration without its required AGATA source unexpectedly succeeded")
+        rolled_back = psql(container, """
+          SELECT count(*) FROM information_schema.tables
+          WHERE table_schema='public' AND table_name IN (
+            'GpointChatPolicyProfile','GpointChatConsent','GpointAgeAssurance',
+            'GpointAiDisclosureReceipt','GpointLegacyConversationFence',
+            'GpointLegacyConversationArchive','GpointLegacyMessageArchive'
+          );
+        """, database="gpoint_migration_failure").stdout.strip()
+        if rolled_back != "0":
+            raise RuntimeError(f"failed migration left partial GPoint tables: {rolled_back}")
         print("GPOINT_AGATA_CONSENT_AND_ENCRYPTED_HISTORY_MIGRATION_E2E=PASS")
         print("GPOINT_LEGACY_ARCHIVE_SOURCE_PLAINTEXT_COPIED=NO")
         print("GPOINT_LEGACY_ARCHIVE_DRIFT_GUARDS=PASS")
+        print("GPOINT_STATE_MIGRATION_ATOMIC_FAILURE_ROLLBACK=PASS")
         return 0
     finally:
         if created_container:

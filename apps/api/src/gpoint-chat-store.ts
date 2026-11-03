@@ -20,7 +20,15 @@ function policyScope() {
   return { jurisdiction, market };
 }
 
+function disabledChatState() {
+  return buildGpointMessagesState({
+    policies: [], consents: [], ages: [], receipts: [],
+    policyScope: { jurisdiction: '', market: '' }, erosEnabled: false,
+  });
+}
+
 export async function loadGpointChatState(db: PrismaClient, userId: string) {
+  if (process.env.EROS_ENABLED !== 'true') return disabledChatState();
   const tenantId = tenantPinned();
   const [policies, consents, ages, receipts] = await Promise.all([
     db.gpointChatPolicyProfile.findMany({ where: { sourceTenantId: tenantId }, orderBy: [{ effectiveFrom: 'desc' }, { id: 'desc' }] }),
@@ -67,6 +75,7 @@ export async function recordGpointChatConsent(
 }
 
 export async function revokeGpointChatConsent(db: PrismaClient, userId: string, purpose: 'chat_history' | 'long_term_memory') {
+  if (process.env.EROS_ENABLED !== 'true') return disabledChatState();
   const sourceTenantId = tenantPinned();
   const now = new Date();
   await db.gpointChatConsent.updateMany({ where: { sourceTenantId, userId, purpose, revokedAt: null }, data: { revokedAt: now } });

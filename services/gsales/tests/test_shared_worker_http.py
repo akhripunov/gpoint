@@ -32,11 +32,11 @@ def test_two_targets_route_through_shared_worker_without_context_mix(tmp_path, m
     point_tenant_id = str(uuid4())
     sales_tenant_id = Settings().tenant_id
     with core_runtime(tmp_path / "sales") as sales_url, core_runtime(tmp_path / "point", "gpoint", point_tenant_id) as point_url:
-        monkeypatch.setenv("GPOINT_AGATA_WORKER_URL", "https://gpoint.one/api/agata-worker")
+        monkeypatch.setenv("GPOINT_EROS_WORKER_URL", "https://gpoint.one/api/gpoint-worker")
         monkeypatch.setenv("GSALES_AGATA_WORKER_URL", "https://sales.test/agata-worker")
-        monkeypatch.setenv("GPOINT_AGATA_WORKER_TOKEN", "point-worker-test")
+        monkeypatch.setenv("GPOINT_EROS_WORKER_TOKEN", "point-worker-test")
         monkeypatch.setenv("GSALES_AGATA_WORKER_TOKEN", "sales-worker-test")
-        monkeypatch.setenv("GPOINT_AGATA_TENANT_ID", point_tenant_id)
+        monkeypatch.setenv("GPOINT_EROS_TENANT_ID", point_tenant_id)
         monkeypatch.setenv("GSALES_AGATA_TENANT_ID", sales_tenant_id)
         monkeypatch.setattr(worker, "SUPPORT", Path.home() / "Library/Application Support/GPoint/agata-codex-worker" if real_codex else tmp_path / "worker")
         monkeypatch.setattr(worker, "STATUS", tmp_path / "worker/status.json")
