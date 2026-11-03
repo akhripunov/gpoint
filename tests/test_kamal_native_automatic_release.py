@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 import subprocess
 
@@ -30,6 +31,65 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     assert "environment" not in build
     assert "packages: write" in WORKFLOW.read_text(encoding="utf-8")
     assert {"workspace", "python", "build"}.issubset(deploy["needs"])
+
+
+def test_rerun_by_non_owner_cannot_deploy_a_main_push(tmp_path):
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    deploy = workflow["jobs"]["deploy"]
+    gate = next(step for step in deploy["steps"]
+                if step.get("name") == "Recheck exact SHA, current main and owner approval")
+    sha = "a" * 40
+    fake_gh = tmp_path / "gh"
+    try:
+        fake_gh.write_text("#!/bin/sh\nprintf '%s\\n' '" + sha + "'\n", encoding="utf-8")
+        fake_gh.chmod(0o700)
+        env = os.environ.copy()
+        env.update({
+            "PATH": str(tmp_path) + os.pathsep + env.get("PATH", ""),
+            "GITHUB_EVENT_NAME": "push",
+            "GITHUB_REPOSITORY": "akhripunov/gpoint",
+            "GITHUB_SHA": sha,
+            "REQUESTED_SHA": sha,
+            "WORKFLOW_SHA": sha,
+            "APPROVE_PRODUCTION": "false",
+            "OWNER_APPROVAL_ACTOR": "akhripunov",
+            "OWNER_TRIGGERING_ACTOR": "collaborator",
+            "OWNER_REPOSITORY": "akhripunov",
+        })
+
+        result = subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", gate["run"]], env=env,
+            capture_output=True, text=True, check=False,
+        )
+
+        assert result.returncode != 0
+        assert "triggering actor" in result.stderr.lower()
+    finally:
+        fake_gh.unlink(missing_ok=True)
+
+
+def test_non_owner_cannot_rerun_migration_rehearsal(tmp_path):
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    rehearsal = workflow["jobs"]["migration_rehearsal"]
+    gate = next(step for step in rehearsal["steps"]
+                if step.get("name") == "Require exact main-only owner initiated rehearsal")
+    sha = "a" * 40
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", gate["run"]],
+        env={**os.environ,
+             "GITHUB_EVENT_NAME": "workflow_dispatch",
+             "GITHUB_REF": "refs/heads/main",
+             "GITHUB_SHA": sha,
+             "REQUESTED_SHA": sha,
+             "APPROVE_PRODUCTION": "false",
+             "OWNER_ACTOR": "akhripunov",
+             "OWNER_TRIGGERING_ACTOR": "collaborator",
+             "REPOSITORY_OWNER": "akhripunov"},
+        capture_output=True, text=True, check=False,
+    )
+
+    assert result.returncode != 0
+    assert "triggering actor" in result.stderr.lower()
 
 
 def test_deploy_installs_the_pinned_agata_alembic_runtime_before_migration_checks():

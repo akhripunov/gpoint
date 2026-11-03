@@ -88,6 +88,7 @@ jobs:
           EVENT_BEFORE: ${{ github.event.before || '' }}
           REQUESTED_SHA: ${{ inputs.candidate_sha || github.sha }}
           EVENT_ACTOR: ${{ github.actor }}
+          EVENT_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           MIGRATION_REHEARSAL: ${{ inputs.migration_rehearsal || false }}
           BACKUP_MAINTENANCE: ${{ inputs.backup_maintenance || false }}
@@ -98,6 +99,7 @@ jobs:
           args=(--event "$EVENT_NAME" --ref "$EVENT_REF" --sha "$EVENT_SHA"
             --before "$EVENT_BEFORE"
             --candidate-sha "$REQUESTED_SHA" --actor "$EVENT_ACTOR"
+            --triggering-actor "$EVENT_TRIGGERING_ACTOR"
             --repository-owner "$REPOSITORY_OWNER")
           [[ "$MIGRATION_REHEARSAL" == true ]] && args+=(--migration-rehearsal)
           [[ "$BACKUP_MAINTENANCE" == true ]] && args+=(--backup-maintenance)
@@ -460,11 +462,15 @@ jobs:
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
             test "$APPROVE_PRODUCTION" = true
-            test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY"
-            test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY"
           elif [[ "$GITHUB_EVENT_NAME" != push ]]; then
             echo 'unsupported production release event' >&2; exit 1
           fi
+          test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY" || {
+            echo 'production release actor must match the repository owner' >&2; exit 1;
+          }
+          test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY" || {
+            echo 'production release triggering actor must match the repository owner' >&2; exit 1;
+          }
           test "$REQUESTED_SHA" = "$WORKFLOW_SHA"
           [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$REQUESTED_SHA"
@@ -1737,6 +1743,7 @@ jobs:
           REQUESTED_SHA: ${{ inputs.candidate_sha }}
           APPROVE_PRODUCTION: ${{ inputs.approve_production }}
           OWNER_ACTOR: ${{ github.actor }}
+          OWNER_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
@@ -1746,6 +1753,9 @@ jobs:
           [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$APPROVE_PRODUCTION" = false
           test "$OWNER_ACTOR" = "$REPOSITORY_OWNER"
+          test "$OWNER_TRIGGERING_ACTOR" = "$REPOSITORY_OWNER" || {
+            echo 'migration rehearsal triggering actor must match the repository owner' >&2; exit 1;
+          }
       - name: Install verified Kamal SSH credentials
         env:
           SSH_PRIVATE_KEY: ${{ secrets.GPOINT_KAMAL_SSH_PRIVATE_KEY }}

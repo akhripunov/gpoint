@@ -380,6 +380,7 @@ def main() -> int:
     parser.add_argument("--before", default="")
     parser.add_argument("--candidate-sha", default="")
     parser.add_argument("--actor", default="")
+    parser.add_argument("--triggering-actor", default="")
     parser.add_argument("--repository-owner", default="")
     parser.add_argument("--migration-rehearsal", action="store_true")
     parser.add_argument("--backup-maintenance", action="store_true")
@@ -389,10 +390,18 @@ def main() -> int:
 
     try:
         if args.event == "push":
+            if args.ref == "refs/heads/main":
+                owner = args.repository_owner.lower()
+                if (not owner or args.actor.lower() != owner
+                        or args.triggering_actor.lower() != owner):
+                    raise ValueError("main push actor and triggering actor must match the repository owner")
             paths = changed_paths(args.before, args.sha)
             mode = classify_push(event_name=args.event, ref=args.ref, changed_paths=paths)
             deploy = mode == "DEPLOY"
         elif args.event == "workflow_dispatch":
+            owner = args.repository_owner.lower()
+            if not owner or args.triggering_actor.lower() != owner:
+                raise ValueError("workflow dispatch triggering actor must match the repository owner")
             mode, deploy = classify_dispatch(
                 ref=args.ref, candidate_sha=args.candidate_sha, github_sha=args.sha,
                 actor=args.actor, repository_owner=args.repository_owner,

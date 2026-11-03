@@ -120,12 +120,62 @@ def test_blocked_main_path_set_fails_the_classifier_job(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", [
         "native_release_intent.py", "--event", "push", "--ref", "refs/heads/main",
         "--sha", "a" * 40, "--before", "b" * 40,
+        "--actor", "akhripunov", "--triggering-actor", "akhripunov",
+        "--repository-owner", "akhripunov",
     ])
     monkeypatch.setattr(MODULE, "changed_paths", lambda *_args, **_kwargs: {
         "apps/api/src/main.ts", "packages/db/prisma/schema.prisma",
     })
     assert MODULE.main() == 2
     assert "mode=BLOCK" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(("actor", "triggering_actor"), [
+    ("collaborator", "collaborator"),
+    ("akhripunov", "collaborator"),
+    ("", "akhripunov"),
+    ("akhripunov", ""),
+])
+def test_main_push_requires_repository_owner_as_actor_and_triggering_actor(
+    monkeypatch, capsys, actor, triggering_actor
+):
+    monkeypatch.setattr(sys, "argv", [
+        "native_release_intent.py", "--event", "push", "--ref", "refs/heads/main",
+        "--sha", "a" * 40, "--before", "b" * 40,
+        "--actor", actor, "--triggering-actor", triggering_actor,
+        "--repository-owner", "akhripunov",
+    ])
+    monkeypatch.setattr(MODULE, "changed_paths", lambda *_args, **_kwargs: {"apps/api/src/main.ts"})
+
+    assert MODULE.main() == 2
+    output = capsys.readouterr()
+    assert "NATIVE_RELEASE_INTENT=BLOCK" in output.err
+    assert "repository owner" in output.err
+
+
+def test_owner_main_push_remains_automatic_after_the_existing_tests_and_build(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", [
+        "native_release_intent.py", "--event", "push", "--ref", "refs/heads/main",
+        "--sha", "a" * 40, "--before", "b" * 40,
+        "--actor", "akhripunov", "--triggering-actor", "akhripunov",
+        "--repository-owner", "akhripunov",
+    ])
+    monkeypatch.setattr(MODULE, "changed_paths", lambda *_args, **_kwargs: {"apps/api/src/main.ts"})
+    assert MODULE.main() == 0
+    assert "deploy=true" in capsys.readouterr().out
+
+
+def test_dispatch_rerun_requires_repository_owner_as_triggering_actor(monkeypatch, capsys):
+    sha = "a" * 40
+    monkeypatch.setattr(sys, "argv", [
+        "native_release_intent.py", "--event", "workflow_dispatch", "--ref", "refs/heads/main",
+        "--sha", sha, "--candidate-sha", sha,
+        "--actor", "akhripunov", "--triggering-actor", "collaborator",
+        "--repository-owner", "akhripunov", "--approve-production",
+    ])
+
+    assert MODULE.main() == 2
+    assert "NATIVE_RELEASE_INTENT=BLOCK" in capsys.readouterr().err
 
 
 def test_non_main_and_non_push_events_cannot_deploy():
