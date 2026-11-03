@@ -43,6 +43,8 @@ test('local E2E topology has API, Eros, Worker and isolated PostgreSQL', () => {
   assert.doesNotMatch(compose, /EROS_ADAPTER_DATABASE_URL/);
   assert.match(compose, /eros-migrate:[\s\S]*?postgres:5432\/eros_test/);
   assert.match(compose, /eros:[\s\S]*?postgres:5432\/eros_test/);
+  assert.match(compose, /gpoint-api:[\s\S]*?EROS_WORKER_LOCAL_TEST:\s*"true"/);
+  assert.match(compose, /gpoint-api:[\s\S]*?EROS_OLLAMA_EMBEDDING_URL:\s*http:\/\/127\.0\.0\.1:11434\/api\/embed/);
   assert.match(compose, /test-personas:\/etc\/eros-engine\/test-personas:ro/);
   assert.match(compose, /internal:\s*true/);
   assert.match(compose, /network_mode:\s*service:gpoint-api/);

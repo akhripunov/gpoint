@@ -66,6 +66,7 @@ services:
       DATABASE_URL: postgresql://gpoint_api_test:local-only-gpoint-api-test@postgres:5432/gpoint_test?schema=public
       EROS_ENABLED: "true"
       EROS_DATA_MODE: synthetic
+      EROS_WORKER_LOCAL_TEST: "true"
       EROS_TEST_USER_IDS: 10000000-0000-4000-8000-000000000001
       EROS_TEST_CREATOR_IDS: 20000000-0000-4000-8000-000000000002
       EROS_SERVICE_URL: http://eros:8080
