@@ -1,5 +1,4 @@
 """Target isolation/fairness without touching installed worker or Codex."""
-import hashlib
 import json
 import os
 import sys
@@ -44,53 +43,30 @@ def test_tenant_bindings_are_trusted_runtime_config_not_source_constants():
             worker.configured_tenant_bindings()
 
 
-def test_legacy_gpoint_sidecar_binds_identity_to_installed_worker_hash(tmp_path, monkeypatch):
+def test_gpoint_runtime_tenant_pin_is_not_taken_from_legacy_sidecar(tmp_path, monkeypatch):
     monkeypatch.setattr(worker, "SUPPORT", tmp_path)
-    worker_hash = hashlib.sha256(Path(worker.__file__).read_bytes()).hexdigest()
-    sidecar = {
-        "version": 1,
-        "candidate_sha": "a" * 40,
-        "worker_sha256": worker_hash,
-        "tenant_id": ENV["GPOINT_EROS_TENANT_ID"],
-        "source_id": "gpoint-vps:" + "b" * 40 + ":api=sha256:" + "1" * 64 + ":agata=sha256:" + "2" * 64,
-        "snapshot_at": "2026-10-04T12:00:00Z",
-    }
-    (tmp_path / "config/tenant-bindings.json").parent.mkdir()
-    (tmp_path / "config/tenant-bindings.json").write_text(json.dumps(sidecar))
-    (tmp_path / "config/tenant-bindings.json").chmod(0o600)
+    sidecar = tmp_path / "config/tenant-bindings.json"
+    sidecar.parent.mkdir()
+    sidecar.write_text(json.dumps({"tenant_id": "00000000-0000-0000-0000-000000000000"}))
+    sidecar.chmod(0o600)
     with patch.dict(os.environ, {
         "GPOINT_EROS_WORKER_URL": worker.GPOINT_EROS_GATEWAY_URL,
         "GPOINT_EROS_WORKER_TOKEN": "point-private",
+        "GPOINT_EROS_TENANT_ID": ENV["GPOINT_EROS_TENANT_ID"],
     }, clear=True):
         assert worker.configured_tenant_bindings() == {"GPOINT": ENV["GPOINT_EROS_TENANT_ID"]}
 
-    sidecar["worker_sha256"] = "0" * 64
-    (tmp_path / "config/tenant-bindings.json").write_text(json.dumps(sidecar))
-    (tmp_path / "config/tenant-bindings.json").chmod(0o600)
-    with patch.dict(os.environ, {
-        "GPOINT_EROS_WORKER_URL": worker.GPOINT_EROS_GATEWAY_URL,
-        "GPOINT_EROS_WORKER_TOKEN": "point-private",
-    }, clear=True):
-        with pytest.raises(worker.FatalConfigurationError, match="worker_tenant_binding_invalid"):
-            worker.configured_tenant_bindings()
-
-
-def test_legacy_gpoint_without_binding_fails_closed_on_identity_claim(tmp_path, monkeypatch):
+def test_gpoint_missing_runtime_tenant_pin_fails_before_claim_or_inference(tmp_path, monkeypatch):
     monkeypatch.setattr(worker, "SUPPORT", tmp_path)
     monkeypatch.setattr(worker, "STATUS", tmp_path / "status.json")
     with patch.dict(os.environ, {
         "GPOINT_EROS_WORKER_URL": worker.GPOINT_EROS_GATEWAY_URL,
         "GPOINT_EROS_WORKER_TOKEN": "point-private",
     }, clear=True):
-        assert worker.configured_tenant_bindings() == {}
-        def rpc(path, body=None, **kwargs):
-            if path == "claim":
-                return {"job": {"id": "job", "leaseToken": "lease", "target": "GPOINT",
-                                 "tenant_id": ENV["GPOINT_EROS_TENANT_ID"], "request": {}}}
-            return {"status": "ready"}
-        with patch.object(worker, "api_request", side_effect=rpc), patch.object(worker, "run_inference") as inference:
-            with pytest.raises(worker.GatewayResponseError, match="worker_claim_target_mismatch"):
+        with patch.object(worker, "api_request") as api, patch.object(worker, "run_inference") as inference:
+            with pytest.raises(worker.FatalConfigurationError, match="worker_tenant_binding_invalid"):
                 worker.process_one("GPOINT")
+            api.assert_not_called()
             inference.assert_not_called()
 
 

@@ -29,9 +29,6 @@ importers:
       '@aws-sdk/s3-request-presigner':
         specifier: ^3.879.0
         version: 3.1131.0
-      '@gpoint/agata-client':
-        specifier: workspace:*
-        version: link:../../packages/agata-client
       '@gpoint/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts

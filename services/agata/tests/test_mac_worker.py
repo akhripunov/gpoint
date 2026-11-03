@@ -91,7 +91,7 @@ class MacWorkerTests(unittest.TestCase):
         self.assertEqual(observed["stderr"], subprocess.DEVNULL)
         self.assertEqual(Path(observed["cwd"]).parent, Path(tempfile.gettempdir()))
         self.assertIn('"user_message":"hello"', observed["prompt"])
-        self.assertNotIn("GPOINT_AGATA_WORKER_TOKEN", observed["env"])
+        self.assertNotIn("GPOINT_EROS_WORKER_TOKEN", observed["env"])
 
     def test_memory_task_uses_a_separate_server_authored_prompt(self):
         executable = self.root / "codex"
@@ -167,7 +167,7 @@ class MacWorkerTests(unittest.TestCase):
             {"completed": True},
             {"status": "ready"},
             {
-                "source_id": "agata-worker-queue-status-v1:gpoint",
+                "source_id": "gpoint-eros-worker-queue-status-v1:gpoint",
                 "lane": "GPOINT",
                 "pending_jobs": 2,
                 "running_jobs": 1,
@@ -181,7 +181,7 @@ class MacWorkerTests(unittest.TestCase):
             calls.append((path, body))
             return next(responses)
 
-        with patch.dict(os.environ, {"GPOINT_AGATA_WORKER_TOKEN": token, "GPOINT_AGATA_TENANT_ID": TEST_GPOINT_TENANT_ID, "AGATA_WORKER_MODEL": "test-model"}), patch.object(worker, "api_request", side_effect=api), patch.object(worker, "run_inference", return_value="answer"), patch("sys.stdout", output):
+        with patch.dict(os.environ, {"GPOINT_EROS_WORKER_TOKEN": token, "GPOINT_EROS_TENANT_ID": TEST_GPOINT_TENANT_ID, "AGATA_WORKER_MODEL": "test-model"}), patch.object(worker, "api_request", side_effect=api), patch.object(worker, "run_inference", return_value="answer"), patch("sys.stdout", output):
             self.assertTrue(worker.process_one())
             self.assertEqual(worker.status(), 0)
 
@@ -213,7 +213,7 @@ class MacWorkerTests(unittest.TestCase):
                     self.assertEqual(validated.model, expected_model)
                 return {"accepted": True}
 
-            with self.subTest(model=model), patch.dict(os.environ, {"AGATA_CODEX_MODEL": model, "GPOINT_AGATA_WORKER_TOKEN": "test-only", "GPOINT_AGATA_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(worker, "api_request", side_effect=api), patch.object(worker, "run_inference", return_value="answer"):
+            with self.subTest(model=model), patch.dict(os.environ, {"AGATA_CODEX_MODEL": model, "GPOINT_EROS_WORKER_TOKEN": "test-only", "GPOINT_EROS_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(worker, "api_request", side_effect=api), patch.object(worker, "run_inference", return_value="answer"):
                 self.assertTrue(worker.process_one())
 
     def test_inference_failure_reports_retryable_safe_code(self):
@@ -225,7 +225,7 @@ class MacWorkerTests(unittest.TestCase):
                 return {"job": {"id": "job-2", "leaseToken": "lease-2", "request": {}}}
             return {"accepted": True, "state": "pending"}
 
-        with patch.dict(os.environ, {"GPOINT_AGATA_WORKER_TOKEN": "test-only", "GPOINT_AGATA_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(worker, "api_request", side_effect=api), patch.object(
+        with patch.dict(os.environ, {"GPOINT_EROS_WORKER_TOKEN": "test-only", "GPOINT_EROS_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(worker, "api_request", side_effect=api), patch.object(
             worker, "run_inference", side_effect=RuntimeError("codex_execution_failed_1")
         ):
             self.assertFalse(worker.process_one())
@@ -235,7 +235,7 @@ class MacWorkerTests(unittest.TestCase):
         self.assertNotIn("lease-2", worker.STATUS.read_text(encoding="utf-8"))
 
     def test_gateway_requires_https_and_token(self):
-        with patch.dict(os.environ, {"GPOINT_AGATA_WORKER_URL": "http://example.test", "GPOINT_AGATA_WORKER_TOKEN": "secret"}):
+        with patch.dict(os.environ, {"GPOINT_EROS_WORKER_URL": "http://example.test", "GPOINT_EROS_WORKER_TOKEN": "secret"}):
             with self.assertRaisesRegex(RuntimeError, "worker_gateway_or_auth_unconfigured"):
                 worker.api_request("claim")
 

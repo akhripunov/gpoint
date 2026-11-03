@@ -76,8 +76,8 @@ class MacWorkerHttpTests(unittest.TestCase):
             return httpx.Response(200, json={"status": "ready"})
 
         with patch.dict(os.environ, {
-            "GPOINT_AGATA_WORKER_URL": "https://gpoint.one/api/agata-worker",
-            "GPOINT_AGATA_WORKER_TOKEN": "test-secret",
+            "GPOINT_EROS_WORKER_URL": "https://gpoint.one/api/gpoint-worker",
+            "GPOINT_EROS_WORKER_TOKEN": "test-secret",
         }), patch.object(worker.httpx, "AsyncClient", side_effect=lambda **_kwargs: self.client_for(handler)):
             self.assertEqual(worker.api_request("health"), {"status": "ready"})
             worker.api_request("complete", {"text": "reply"})
@@ -95,14 +95,14 @@ class MacWorkerHttpTests(unittest.TestCase):
         def handler(request):
             observed.append(request)
             return httpx.Response(200, json={
-                "source_id": "agata-worker-queue-status-v1:gpoint",
+                "source_id": "gpoint-eros-worker-queue-status-v1:gpoint",
                 "lane": "GPOINT", "pending_jobs": 0, "running_jobs": 0,
                 "snapshot_at": "2026-10-07T10:00:00+00:00",
             })
 
         with patch.dict(os.environ, {
-            "GPOINT_AGATA_WORKER_URL": "https://gpoint.one/api/agata-worker",
-            "GPOINT_AGATA_WORKER_TOKEN": "test-secret",
+            "GPOINT_EROS_WORKER_URL": "https://gpoint.one/api/gpoint-worker",
+            "GPOINT_EROS_WORKER_TOKEN": "test-secret",
         }), patch.object(worker.httpx, "AsyncClient", side_effect=lambda **_kwargs: self.client_for(handler)):
             result = worker.api_request("queue-status")
 
@@ -123,7 +123,7 @@ class MacWorkerHttpTests(unittest.TestCase):
             "lanes": {"GPOINT": {"state": "HEALTHY"}, "GSALES": {"state": "HEALTHY"}},
         }))
         queue = {
-            "GPOINT": {"source_id": "agata-worker-queue-status-v1:gpoint", "lane": "GPOINT", "pending_jobs": 2,
+            "GPOINT": {"source_id": "gpoint-eros-worker-queue-status-v1:gpoint", "lane": "GPOINT", "pending_jobs": 2,
                        "running_jobs": 0, "snapshot_at": "2026-10-07T10:00:00+00:00",
                        "private_payload": "must-not-appear"},
             "GSALES": {"source_id": "agata-worker-queue-status-v1:gsales", "lane": "GSALES", "pending_jobs": 0,
@@ -207,7 +207,7 @@ class MacWorkerHttpTests(unittest.TestCase):
                 raise worker.TransientNetworkError("worker_gateway_network_error")
             self.fail(f"unexpected {path} request")
 
-        with patch.dict(os.environ, {"GPOINT_AGATA_WORKER_TOKEN": "test-secret", "GPOINT_AGATA_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(
+        with patch.dict(os.environ, {"GPOINT_EROS_WORKER_TOKEN": "test-secret", "GPOINT_EROS_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(
             worker, "api_request", side_effect=api
         ), patch.object(worker, "run_inference", return_value="reply"):
             with self.assertRaises(worker.TransientNetworkError):
@@ -249,7 +249,7 @@ class MacWorkerHttpTests(unittest.TestCase):
                 return {"job": {"id": "job-2", "leaseToken": "lease-2", "request": {}}}
             return {"completed": True}
 
-        with patch.dict(os.environ, {"GPOINT_AGATA_WORKER_TOKEN": "test-secret", "GPOINT_AGATA_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(
+        with patch.dict(os.environ, {"GPOINT_EROS_WORKER_TOKEN": "test-secret", "GPOINT_EROS_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(
             worker, "api_request", side_effect=api
         ), patch.object(worker, "run_inference", return_value="reply"):
             self.assertTrue(worker.process_one())
@@ -265,8 +265,8 @@ class MacWorkerHttpTests(unittest.TestCase):
             raise httpx.ConnectTimeout("test-secret")
 
         with patch.dict(os.environ, {
-            "GPOINT_AGATA_WORKER_URL": "https://gpoint.one/api/agata-worker",
-            "GPOINT_AGATA_WORKER_TOKEN": "test-secret",
+            "GPOINT_EROS_WORKER_URL": "https://gpoint.one/api/gpoint-worker",
+            "GPOINT_EROS_WORKER_TOKEN": "test-secret",
         }), patch.object(worker.httpx, "AsyncClient", side_effect=lambda **_kwargs: self.client_for(handler)):
             with self.assertRaises(worker.TransientNetworkError) as raised:
                 worker.api_request("health")

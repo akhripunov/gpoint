@@ -49,9 +49,9 @@ class MacWorkerLockTests(unittest.TestCase):
             return original_run_pool(max_cycles=1, sleep_fn=lambda _delay: None)
 
         with patch.dict(os.environ, {
-            "GPOINT_AGATA_WORKER_URL": "https://gpoint.one/api/agata-worker",
-            "GPOINT_AGATA_WORKER_TOKEN": "test-only",
-            "GPOINT_AGATA_TENANT_ID": "7508f36f-774a-48aa-8c6b-42f6f160415d",
+            "GPOINT_EROS_WORKER_URL": "https://gpoint.one/api/gpoint-worker",
+            "GPOINT_EROS_WORKER_TOKEN": "test-only",
+            "GPOINT_EROS_TENANT_ID": "7508f36f-774a-48aa-8c6b-42f6f160415d",
         }), patch.object(sys, "argv", ["gpoint_mac_worker.py", "watch"]), patch.object(
             worker, "load_env_file"
         ), patch.object(worker, "build_pool_supervisor", return_value=FakeSupervisor(self.root)), patch.object(
