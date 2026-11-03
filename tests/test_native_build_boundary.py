@@ -137,6 +137,12 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("scripts/resolve_native_build_scope.py", resolver_run)
         self.assertEqual(build["permissions"]["deployments"], "read")
         self.assertEqual(build["permissions"]["actions"], "read")
+        workflow_runs = "\n".join(
+            step.get("run", "")
+            for job in self.workflow["jobs"].values()
+            for step in job.get("steps", [])
+        )
+        self.assertIn("tests/test_release_pre_push_mode.py", workflow_runs)
         deploy = self.workflow["jobs"]["deploy"]
         deploy_names = [step.get("name", "") for step in deploy["steps"]]
         live_inventory = deploy_names.index("Verify installed Kamal topology before ordinary release")
