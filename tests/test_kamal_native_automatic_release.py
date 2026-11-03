@@ -397,7 +397,10 @@ def test_scheduled_vps_backup_uploads_and_restores_same_bunny_snapshot_during_tr
     assert "gpoint-backups" in policy
     assert "_bunny_remote_root" in runner and "_publish_bunny_receipt" in runner
     assert "rclone" in runner and "rclone" in helper
-    assert "--immutable" in helper and "--download --one-way" in helper
+    assert "--immutable" in helper
+    assert 'rclone copyto --config "$rclone_config" "$object" "${bunny_readback_dir}/${name}"' in helper
+    assert 'sha256sum "$source"' in helper and 'sha256sum "${bunny_readback_dir}/${name}"' in helper
+    assert "--download --one-way" not in helper
     assert "restore_backup_file=" in helper and "restore_media_backup_file=" in helper
     assert 'OFFSITE_RESTORE=$(' in helper and 'MEDIA_OFFSITE_RESTORE=$(' in helper
     assert "gpoint-backup.agekey" in runner and "age-keygen" in runner
