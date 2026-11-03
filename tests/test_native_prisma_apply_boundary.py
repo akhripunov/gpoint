@@ -66,7 +66,7 @@ def test_ci_rehearses_prisma_history_schema_parity_and_idempotent_redeploy():
                 if step.get("name") == "Generate Prisma client and apply test migrations")
     assert workspace["env"]["SHADOW_DATABASE_URL"].endswith("/gpoint_shadow")
     assert "--from-migrations prisma/migrations" in step["run"]
-    assert "--to-schema prisma/schema.prisma" in step["run"]
+    assert "--to-schema-datamodel prisma/schema.prisma" in step["run"]
     assert "--shadow-database-url \"$SHADOW_DATABASE_URL\"" in step["run"]
     assert "--exit-code" in step["run"]
     assert step["run"].count("prisma migrate deploy") == 2

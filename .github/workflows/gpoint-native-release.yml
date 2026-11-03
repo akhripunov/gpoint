@@ -137,7 +137,7 @@ jobs:
           pnpm --filter @gpoint/db exec prisma migrate deploy
           pnpm --filter @gpoint/db exec prisma migrate diff \
             --from-migrations prisma/migrations \
-            --to-schema prisma/schema.prisma \
+            --to-schema-datamodel prisma/schema.prisma \
             --shadow-database-url "$SHADOW_DATABASE_URL" \
             --exit-code
           pnpm --filter @gpoint/db exec prisma migrate deploy
@@ -202,6 +202,8 @@ jobs:
           tests/test_deploy_evidence_workflow.py
           tests/test_native_build_boundary.py
           tests/test_native_release_intent.py
+          tests/test_native_prisma_apply_boundary.py
+          tests/test_prisma_migration_release_plan.py
           tests/test_gpoint_scheduled_backup.py
           tests/test_agata_production_migration.py
           tests/test_agata_migration_receipt.py

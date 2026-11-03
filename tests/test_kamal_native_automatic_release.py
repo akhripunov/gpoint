@@ -90,7 +90,9 @@ def test_production_preflight_accepts_historical_version_source_sha_split_but_ch
         "name: Record GitHub Deployment result against the same attempt", 1
     )[0]
     assert "DB_MOUNTS_SHA256" in verify and "REDIS_MOUNTS_SHA256" in verify
-    assert "BASELINE_ROLE_VERSION" in verify
+    assert "EXPECTED_ROLE_IDENTITIES_B64" in verify
+    assert "core_version=\"$(sed -n 's/^gpoint-core-api|" in verify
+    assert "agata_version=\"$(sed -n 's/^gpoint-agata-api|" in verify
     assert "BASELINE_PRISMA_HEAD" in verify and "BASELINE_AGATA_HEAD" in verify
     assert 'test "$prisma_migrations" = "$expected_prisma_migrations"' in verify
     assert 'test "$prisma_checksums" = "$expected_prisma_checksums"' in verify
@@ -117,7 +119,7 @@ def test_core_consumers_are_updated_one_role_at_a_time_and_partial_failure_fails
     assert "verify_single_running_role gpoint-agata-memory-worker" in apply
     status = deploy.split("name: Record GitHub Deployment result against the same attempt", 1)[1]
     assert "RECOVERY_REQUIRED" in status
-    assert "automatic rollback is prohibited" in status
+    assert "automatic database downgrade is prohibited" in status
 
 
 def test_production_mutations_share_one_non_cancelling_lock():
@@ -142,8 +144,13 @@ def test_ordinary_release_success_does_not_depend_on_scheduled_backup_freshness(
     assert "Verify public routes and exact running services" in ordinary_deploy
     assert "Verify existing scheduled VPS backups" not in ordinary_deploy
     assert "gpoint-backup.timer" not in ordinary_deploy
-    assert "gpoint-backup-policy.py" not in ordinary_deploy
-    assert "freshness" not in ordinary_deploy
+    migration_apply = ordinary_deploy.split("id: migration_apply", 1)[1].split(
+        "name: Deploy exact immutable images with stock Kamal", 1
+    )[0]
+    no_migration_path = migration_apply.split('if [[ "$APPLY" == false ]]', 1)[1].split("exit 0", 1)[0]
+    assert "gpoint-backup-policy.py" not in no_migration_path
+    assert "freshness" not in no_migration_path
+    assert "gpoint-backup-policy.py freshness" in migration_apply
     assert "BACKUP_OUTCOME" not in status
     assert '"$DEPLOY_JOB_STATUS" == success && "$VERIFY_OUTCOME" == success' in status
 
