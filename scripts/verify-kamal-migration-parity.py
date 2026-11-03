@@ -325,6 +325,15 @@ def verify_compatible(args, live_prisma, recorded):
         raise ValueError("live Prisma migrations are not a prefix of candidate migration history")
     if not live_prisma or args.prisma_current_head != live_prisma[-1]:
         raise ValueError("live Prisma head does not match its applied migration inventory")
+    schema_path = "packages/db/prisma/schema.prisma"
+    schema_diff = subprocess.run(
+        ["git", "-C", str(repo_root), "diff", "--quiet", baseline, candidate, "--", schema_path],
+        check=False,
+    )
+    if schema_diff.returncode == 1 and not pending_prisma:
+        raise ValueError("PRISMA_SCHEMA_CHANGED_WITHOUT_PENDING_MIGRATION")
+    if schema_diff.returncode not in (0, 1):
+        raise ValueError("cannot compare Prisma schema between baseline and candidate")
     # AGATA is retired from the steady-state GPoint release contract. Callers
     # may opt into its legacy inventory only for the bounded six-to-four role
     # transition; ordinary Deploy and rollback omit these arguments entirely.

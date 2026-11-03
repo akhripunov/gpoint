@@ -948,6 +948,47 @@ def test_kamal_app_only_compatibility_does_not_require_agata_schema_or_head(tmp_
     assert "GPOINT_KAMAL_DB_MIGRATION_REQUIRED=YES" in result.stdout
 
 
+def test_kamal_compatibility_blocks_prisma_schema_and_runtime_field_without_pending_migration(tmp_path):
+    repo = tmp_path / "missing-schema-migration"
+    repo.mkdir()
+    for args in (("init", "-q"), ("config", "user.name", "Test"),
+                 ("config", "user.email", "test@example.invalid")):
+        subprocess.run(["git", "-C", str(repo), *args], check=True)
+
+    prisma = repo / "packages/db/prisma/migrations"
+    baseline_name = "20261015130000_baseline"
+    (prisma / baseline_name).mkdir(parents=True)
+    base_sql = "SELECT 1;\n"
+    (prisma / baseline_name / "migration.sql").write_text(base_sql, encoding="utf-8")
+    schema = repo / "packages/db/prisma/schema.prisma"
+    schema.parent.mkdir(parents=True, exist_ok=True)
+    schema.write_text("model User {\n  id String @id\n}\n", encoding="utf-8")
+    app = repo / "apps/api/src/profile.ts"
+    app.parent.mkdir(parents=True)
+    app.write_text("export const id = 'id';\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "baseline"], check=True)
+    baseline_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+
+    schema.write_text("model User {\n  id String @id\n  riskScore Int\n}\n", encoding="utf-8")
+    app.write_text("export const riskScore = 'riskScore';\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "schema and runtime require unmigrated field"], check=True)
+    candidate_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+
+    result = subprocess.run(
+        ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
+         "--policy", "compatible", "--repo-root", str(repo),
+         "--baseline-source-sha", baseline_sha, "--candidate-source-sha", candidate_sha,
+         "--prisma-directory", str(prisma), "--prisma-current-head", baseline_name,
+         "--prisma-current-migrations", baseline_name,
+         "--prisma-current-checksums", baseline_name + "=" + hashlib.sha256(base_sql.encode()).hexdigest()],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "PRISMA_SCHEMA_CHANGED_WITHOUT_PENDING_MIGRATION" in result.stderr
+
+
 def test_kamal_schema_compatibility_accepts_divergent_live_source_only_when_tree_changes_are_preserved(tmp_path):
     repo = tmp_path / "divergent-repo"
     repo.mkdir()
