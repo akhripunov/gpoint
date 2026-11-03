@@ -330,7 +330,7 @@ def test_runtime_image_targets_stage_with_prisma_migration_history():
         assert f"/app/packages/db/prisma/migrations/{migration}/migration.sql" in helper
 
 
-def test_scheduled_vps_backup_is_local_encrypted_fresh_and_restored_without_remote_config():
+def test_scheduled_vps_backup_uploads_and_restores_same_bunny_snapshot_during_transition():
     policy_path = ROOT / "scripts/gpoint-backup-policy.py"
     runner_path = ROOT / "scripts/gpoint-scheduled-backup.py"
     helper_path = ROOT / "scripts/verify-gpoint-scheduled-backup-restore.sh"
@@ -341,10 +341,16 @@ def test_scheduled_vps_backup_is_local_encrypted_fresh_and_restored_without_remo
     runner = runner_path.read_text(encoding="utf-8")
     helper = helper_path.read_text(encoding="utf-8")
     assert "isolated_restore" in policy and "sha256" in policy
-    assert "offsite_readback" not in policy
-    assert "rclone" not in runner and "rclone" not in helper
+    assert "verify_bunny_evidence(manifest)" in policy
+    assert "gpoint-backups" in policy
+    assert "_bunny_remote_root" in runner and "_publish_bunny_receipt" in runner
+    assert "rclone" in runner and "rclone" in helper
+    assert "--immutable" in helper and "--download --one-way" in helper
+    assert "restore_backup_file=" in helper and "restore_media_backup_file=" in helper
+    assert 'OFFSITE_RESTORE=$(' in helper and 'MEDIA_OFFSITE_RESTORE=$(' in helper
     assert "gpoint-backup.agekey" in runner and "age-keygen" in runner
     assert "/opt/gpoint/media" in runner and "media-tree" in runner
+    assert "def _retain_local(now: float)" in runner
 
 
 def test_protected_rollback_uses_only_verified_prior_target_and_shared_lock():

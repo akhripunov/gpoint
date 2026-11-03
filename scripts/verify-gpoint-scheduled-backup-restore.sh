@@ -29,6 +29,20 @@ test "$(age-keygen -y "$age_identity")" = "$age_recipient"
 test "$(stat -f -c %T /run)" = tmpfs
 plaintext_dir="/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/plaintext"
 install -d -m 700 "$plaintext_dir"
+rclone_config=/root/.config/rclone/rclone.conf
+bunny_remote=""
+bunny_snapshot_prefix=""
+bunny_database_object=""
+bunny_database_readback="NOT_REQUESTED"
+bunny_media_object=""
+bunny_media_readback="NOT_REQUESTED"
+bunny_media_manifest_object=""
+bunny_media_manifest_encrypted=""
+bunny_media_manifest_readback="NOT_REQUESTED"
+bunny_manifest_object=""
+bunny_manifest_sha=""
+bunny_receipt_object=""
+bunny_receipt_sha=""
 roles_file=""
 backup_work=""
 restore_dir=""
@@ -270,6 +284,76 @@ PY
   media_backup_file="${existing_facts[3]}"
   media_backup_sha="${existing_facts[4]}"
   media_backup_bytes="${existing_facts[5]}"
+  if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" == "1" && -z "${GPOINT_MIGRATION_BACKUP_EVIDENCE:-}" ]]; then
+    latest_manifest=/opt/gpoint/backups/scheduled/latest.json
+    readarray -t bunny_facts < <(python3 - "$latest_manifest" "$backup_sha" "$media_backup_sha" <<'PY'
+import json, re, sys
+from pathlib import Path
+manifest=json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+b=manifest.get('bunny', {})
+db=manifest.get('database', {})
+media=manifest.get('media', {})
+restore=manifest.get('restore_evidence', {})
+remote_db=b.get('database', {})
+remote_media=b.get('media', {})
+remote_restore=b.get('restore', {})
+root=str(b.get('remote_root',''))
+candidate=str(manifest.get('candidate_sha',''))
+run_id=str(manifest.get('run_id',''))
+attempt=str(manifest.get('attempt',''))
+if (b.get('schema')!='gpoint-bunny-backup/v1' or b.get('status')!='PASS'
+        or b.get('bucket')!='gpoint-backups' or not re.fullmatch(r'[A-Za-z0-9_-]+:gpoint-backups',root)
+        or not re.fullmatch(r'[0-9a-f]{40}',candidate) or not run_id.isdigit() or not attempt.isdigit()):
+    raise SystemExit('existing Bunny snapshot identity is invalid')
+prefix=f'{root}/gpoint/scheduled/{candidate}/{run_id}-{attempt}'
+if b.get('snapshot_prefix')!=prefix or b.get('snapshot')!=f'{candidate}/{run_id}-{attempt}':
+    raise SystemExit('existing Bunny snapshot prefix mismatch')
+expected={
+    'database': (remote_db, f'{prefix}/{Path(str(db.get("path",""))).name}', sys.argv[2]),
+    'media': (remote_media, f'{prefix}/{Path(str(media.get("path",""))).name}', sys.argv[3]),
+}
+for name,(item,path,digest) in expected.items():
+    if (item.get('object')!=path or item.get('sha256')!=digest or item.get('readback')!='PASS'
+            or item.get('isolated_restore')!='PASS' or item.get('encrypted') is not True):
+        raise SystemExit(f'existing Bunny {name} snapshot proof is incomplete')
+media_manifest=f'{prefix}/media-source.json.age'
+manifest_object=f'{prefix}/manifest.json'
+receipt_object=f'{prefix}/restore.txt'
+if (remote_media.get('source_manifest_object')!=media_manifest
+        or remote_media.get('source_manifest_readback')!='PASS'
+        or not re.fullmatch(r'[0-9a-f]{64}',str(remote_media.get('source_manifest_ciphertext_sha256','')))
+        or not re.fullmatch(r'[0-9a-f]{64}',str(remote_media.get('source_manifest_sha256','')))
+        or remote_media.get('source_manifest_sha256')!=media.get('manifest_sha256')):
+    raise SystemExit('existing Bunny media source manifest proof is incomplete')
+if (remote_restore.get('source')!='BUNNY_READBACK' or remote_restore.get('status')!='PASS'
+        or remote_restore.get('receipt_object')!=receipt_object
+        or remote_restore.get('receipt_sha256')!=restore.get('sha256')
+        or remote_restore.get('receipt_readback')!='PASS'
+        or b.get('manifest_object')!=manifest_object
+        or not re.fullmatch(r'[0-9a-f]{64}',str(b.get('manifest_sha256','')))
+        or b.get('manifest_readback')!='PASS'):
+    raise SystemExit('existing Bunny manifest or restore receipt proof is incomplete')
+for value in (root,prefix,remote_db['object'],remote_db['sha256'],remote_media['object'],remote_media['sha256'],
+              media_manifest,remote_media['source_manifest_ciphertext_sha256'],remote_media['source_manifest_sha256'],
+              manifest_object,b['manifest_sha256'],receipt_object,remote_restore['receipt_sha256']):
+    print(value)
+PY
+    )
+    test "${#bunny_facts[@]}" -eq 13
+    bunny_remote="${bunny_facts[0]}"
+    bunny_snapshot_prefix="${bunny_facts[1]}"
+    bunny_database_object="${bunny_facts[2]}"
+    bunny_database_sha="${bunny_facts[3]}"
+    bunny_media_object="${bunny_facts[4]}"
+    bunny_media_sha="${bunny_facts[5]}"
+    bunny_media_manifest_object="${bunny_facts[6]}"
+    bunny_media_manifest_ciphertext_sha="${bunny_facts[7]}"
+    bunny_media_manifest_plaintext_sha="${bunny_facts[8]}"
+    bunny_manifest_object="${bunny_facts[9]}"
+    bunny_manifest_sha="${bunny_facts[10]}"
+    bunny_receipt_object="${bunny_facts[11]}"
+    bunny_receipt_sha="${bunny_facts[12]}"
+  fi
   echo GPOINT_EXISTING_BACKUP=PASS
 else
   # Reuse GPoint's established complete logical-backup and archive-integrity gate.
@@ -338,6 +422,105 @@ if [[ "${GPOINT_USE_EXISTING_BACKUP:-0}" != "1" ]]; then
   echo GPOINT_MEDIA_BACKUP_INTEGRITY=PASS
 else
   echo GPOINT_EXISTING_MEDIA_BACKUP=PASS
+fi
+
+# The routine restore consumes exact read-back objects from the existing Bunny
+# zone. Local recovery files remain intact until the separate policy transition.
+restore_backup_file="$backup_file"
+restore_media_backup_file="$media_backup_file"
+if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" != "1" && "${GPOINT_USE_EXISTING_BACKUP:-0}" != "1" ]]; then
+  bunny_remote="${GPOINT_BACKUP_BUNNY_REMOTE:-}"
+  [[ "$bunny_remote" =~ ^[A-Za-z0-9_-]+:gpoint-backups$ ]]
+  test -f "$rclone_config" && test ! -L "$rclone_config"
+  test "$(stat -c '%a:%u' "$rclone_config")" = 600:0
+  command -v rclone >/dev/null
+  bunny_snapshot_prefix="${bunny_remote}/gpoint/scheduled/${candidate}/${run_id}-${attempt}"
+  bunny_database_object="${bunny_snapshot_prefix}/$(basename "$backup_file")"
+  bunny_media_object="${bunny_snapshot_prefix}/$(basename "$media_backup_file")"
+  bunny_media_manifest_object="${bunny_snapshot_prefix}/media-source.json.age"
+  bunny_readback_dir="${plaintext_dir}/bunny-readback"
+  install -d -m 700 "$bunny_readback_dir"
+  bunny_media_manifest_encrypted="${plaintext_dir}/media-source.json.age"
+  age --recipient "$age_recipient" -o "$bunny_media_manifest_encrypted" "$media_source_manifest"
+  chmod 600 "$bunny_media_manifest_encrypted"
+
+  for pair in \
+    "$backup_file|$bunny_database_object|$(basename "$backup_file")" \
+    "$media_backup_file|$bunny_media_object|$(basename "$media_backup_file")" \
+    "$bunny_media_manifest_encrypted|$bunny_media_manifest_object|media-source.json.age"; do
+    IFS='|' read -r source object name <<< "$pair"
+    rclone copyto --immutable --config "$rclone_config" "$source" "$object"
+    rclone check --download --one-way --config "$rclone_config" "$source" "$bunny_snapshot_prefix"
+    rclone copyto --config "$rclone_config" "$object" "${bunny_readback_dir}/${name}"
+    test "$(sha256sum "$source" | awk '{print $1}')" = \
+      "$(sha256sum "${bunny_readback_dir}/${name}" | awk '{print $1}')"
+  done
+  bunny_database_readback=PASS
+  bunny_media_readback=PASS
+  bunny_media_manifest_readback=PASS
+  restore_backup_file="${bunny_readback_dir}/$(basename "$backup_file")"
+  restore_media_backup_file="${bunny_readback_dir}/$(basename "$media_backup_file")"
+  restore_media_source_manifest="${bunny_readback_dir}/media-source.json"
+  age -d -i "$age_identity" "${bunny_readback_dir}/media-source.json.age" > "$restore_media_source_manifest"
+  chmod 600 "$restore_media_source_manifest"
+  test "$(sha256sum "$restore_media_source_manifest" | awk '{print $1}')" = "$media_manifest_sha"
+elif [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" == "1" && -n "$bunny_database_object" ]]; then
+  test "${GPOINT_BACKUP_BUNNY_REMOTE:-}" = "$bunny_remote"
+  test -f "$rclone_config" && test ! -L "$rclone_config"
+  test "$(stat -c '%a:%u' "$rclone_config")" = 600:0
+  command -v rclone >/dev/null
+  bunny_readback_dir="${plaintext_dir}/bunny-readback"
+  install -d -m 700 "$bunny_readback_dir"
+  rclone copyto --config "$rclone_config" "$bunny_manifest_object" "$bunny_readback_dir/manifest.json"
+  rclone copyto --config "$rclone_config" "$bunny_receipt_object" "$bunny_readback_dir/restore.txt"
+  rclone copyto --config "$rclone_config" "$bunny_database_object" "$bunny_readback_dir/$(basename "$backup_file")"
+  rclone copyto --config "$rclone_config" "$bunny_media_object" "$bunny_readback_dir/$(basename "$media_backup_file")"
+  bunny_media_manifest_encrypted="$bunny_readback_dir/media-source.json.age"
+  rclone copyto --config "$rclone_config" "$bunny_media_manifest_object" "$bunny_media_manifest_encrypted"
+  test "$(sha256sum "$bunny_readback_dir/manifest.json" | awk '{print $1}')" = "$bunny_manifest_sha"
+  test "$(sha256sum "$bunny_readback_dir/restore.txt" | awk '{print $1}')" = "$bunny_receipt_sha"
+  test "$(sha256sum "$bunny_readback_dir/$(basename "$backup_file")" | awk '{print $1}')" = "$bunny_database_sha"
+  test "$(sha256sum "$bunny_readback_dir/$(basename "$media_backup_file")" | awk '{print $1}')" = "$bunny_media_sha"
+  test "$(sha256sum "$bunny_media_manifest_encrypted" | awk '{print $1}')" = "$bunny_media_manifest_ciphertext_sha"
+  python3 - "$bunny_readback_dir/manifest.json" "$bunny_remote" "$bunny_snapshot_prefix" \
+    "$bunny_database_object" "$bunny_database_sha" "$bunny_media_object" "$bunny_media_sha" \
+    "$bunny_media_manifest_object" "$bunny_media_manifest_ciphertext_sha" "$bunny_media_manifest_plaintext_sha" \
+    "$bunny_receipt_object" "$bunny_receipt_sha" <<'PY'
+import json, re, sys
+from pathlib import Path
+manifest=json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+b=manifest
+db=b.get('database',{})
+media=b.get('media',{})
+restore=b.get('restore',{})
+if (b.get('schema')!='gpoint-bunny-backup/v1' or b.get('status')!='PASS'
+        or b.get('bucket')!='gpoint-backups' or b.get('remote_root')!=sys.argv[2]
+        or b.get('snapshot_prefix')!=sys.argv[3]):
+    raise SystemExit('read-back Bunny manifest identity mismatch')
+if (db.get('object')!=sys.argv[4] or db.get('sha256')!=sys.argv[5]
+        or db.get('readback')!='PASS' or db.get('isolated_restore')!='PASS'):
+    raise SystemExit('read-back Bunny database manifest mismatch')
+if (media.get('object')!=sys.argv[6] or media.get('sha256')!=sys.argv[7]
+        or media.get('readback')!='PASS' or media.get('isolated_restore')!='PASS'
+        or media.get('source_manifest_object')!=sys.argv[8]
+        or media.get('source_manifest_ciphertext_sha256')!=sys.argv[9]
+        or media.get('source_manifest_sha256')!=sys.argv[10]
+        or media.get('source_manifest_readback')!='PASS'):
+    raise SystemExit('read-back Bunny media manifest mismatch')
+if (restore.get('source')!='BUNNY_READBACK' or restore.get('status')!='PASS'
+        or restore.get('receipt_object')!=sys.argv[11] or restore.get('receipt_sha256')!=sys.argv[12]):
+    raise SystemExit('read-back Bunny restore receipt mismatch')
+PY
+  restore_backup_file="$bunny_readback_dir/$(basename "$backup_file")"
+  restore_media_backup_file="$bunny_readback_dir/$(basename "$media_backup_file")"
+  restore_media_source_manifest="$bunny_readback_dir/media-source.json"
+  age -d -i "$age_identity" "$bunny_media_manifest_encrypted" > "$restore_media_source_manifest"
+  chmod 600 "$restore_media_source_manifest"
+  test "$(sha256sum "$restore_media_source_manifest" | awk '{print $1}')" = "$bunny_media_manifest_plaintext_sha"
+  test "$bunny_media_manifest_plaintext_sha" = "$media_manifest_sha"
+  bunny_database_readback=PASS
+  bunny_media_readback=PASS
+  bunny_media_manifest_readback=PASS
 fi
 
 backup_fs="$(stat -c '%d' "$backup_file")"
@@ -467,7 +650,7 @@ docker exec "$restore_container_id" psql -Xq -v ON_ERROR_STOP=1 -U gpoint_restor
 test "$(docker exec "$restore_container_id" psql -XqAt -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
   -c "SELECT to_regnamespace('public') IS NULL")" = t
 
-age -d -i "$age_identity" "$backup_file" | \
+age -d -i "$age_identity" "$restore_backup_file" | \
   docker exec -i "$restore_container_id" pg_restore --exit-on-error --no-owner -U gpoint_restore_admin -d gpoint >/dev/null
 restored_tables="$(docker exec "$restore_container_id" psql -XqAt -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
   -c "SELECT count(*) FROM pg_tables WHERE schemaname IN ('public','agata','gsales','gsales_meta','agata_identity')")"
@@ -676,7 +859,7 @@ fi
 if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" != "1" ]]; then
   media_restore_dir="$(mktemp -d "${docker_root%/}/.gpoint-kamal-media-restore-${run_id}-${attempt}.XXXXXX")"
   chmod 700 "$media_restore_dir"
-  age -d -i "$age_identity" "$media_backup_file" | \
+  age -d -i "$age_identity" "$restore_media_backup_file" | \
     tar --extract --file=- --directory="$media_restore_dir" --numeric-owner \
       --same-owner --same-permissions --acls --xattrs --delay-directory-restore
   media_restore_manifest="$plaintext_dir/media-restored.json"
@@ -685,8 +868,8 @@ if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" != "1" ]]; then
   media_restore_manifest_sha="$(sed -n 's/^GPOINT_MEDIA_MANIFEST_SHA256=//p' <<< "$media_restore_output")"
   [[ "$media_restore_manifest_sha" =~ ^[0-9a-f]{64}$ ]]
   test "$media_restore_manifest_sha" = "$media_manifest_sha"
-  cmp -s "$media_source_manifest" "$media_restore_manifest"
-  python3 "$media_tree_helper" compare --manifest "$media_source_manifest" --root "$media_root" | \
+  cmp -s "${restore_media_source_manifest:-$media_source_manifest}" "$media_restore_manifest"
+  python3 "$media_tree_helper" compare --manifest "${restore_media_source_manifest:-$media_source_manifest}" --root "$media_root" | \
     grep -qx 'GPOINT_MEDIA_TREE_MATCH=PASS'
 fi
 echo GPOINT_MEDIA_BACKUP=PASS
@@ -719,6 +902,18 @@ MEDIA_SOURCE_MANIFEST_SHA256=$media_manifest_sha
 MEDIA_RESTORE_MANIFEST_SHA256=$media_restore_manifest_sha
 MEDIA_BACKUP_ENCRYPTION=AGE_X25519
 MEDIA_ISOLATED_RESTORE=PASS
+BUNNY_BACKUP_BUCKET=${bunny_remote#*:}
+BUNNY_REMOTE_ROOT=$bunny_remote
+BUNNY_SNAPSHOT_PREFIX=$bunny_snapshot_prefix
+BUNNY_DATABASE_OBJECT=$bunny_database_object
+BUNNY_DATABASE_READBACK=$bunny_database_readback
+BUNNY_MEDIA_OBJECT=$bunny_media_object
+BUNNY_MEDIA_READBACK=$bunny_media_readback
+BUNNY_MEDIA_MANIFEST_OBJECT=$bunny_media_manifest_object
+BUNNY_MEDIA_MANIFEST_SHA256=$([[ -n "$bunny_media_manifest_object" ]] && sha256sum "$bunny_media_manifest_encrypted" | awk '{print $1}' || echo NOT_REQUESTED)
+BUNNY_MEDIA_MANIFEST_READBACK=$bunny_media_manifest_readback
+OFFSITE_RESTORE=$([[ "$bunny_database_readback" == PASS ]] && echo PASS || echo NOT_REQUESTED)
+MEDIA_OFFSITE_RESTORE=$([[ "$bunny_media_readback" == PASS && "$bunny_media_manifest_readback" == PASS ]] && echo PASS || echo NOT_REQUESTED)
 MIGRATION_PARITY=$migration_parity
 MIGRATION_DATA_PRESERVATION=$migration_data
 MIGRATION_SYNTHETIC_RLS=$migration_access
