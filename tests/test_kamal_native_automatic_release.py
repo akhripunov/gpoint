@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 import yaml
 
@@ -29,6 +30,29 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     assert "environment" not in build
     assert "packages: write" in WORKFLOW.read_text(encoding="utf-8")
     assert {"workspace", "python", "build"}.issubset(deploy["needs"])
+
+
+def test_kamal_inventory_summary_uses_shellcheck_safe_markdown_fences():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    inventory = next(step for step in workflow["jobs"]["deploy"]["steps"]
+                     if step.get("id") == "kamal_inventory")
+
+    assert "`" not in inventory["run"]
+    assert r"\140\140\140text" in inventory["run"]
+
+    lines = inventory["run"].splitlines()
+    printf_index = next(i for i, line in enumerate(lines)
+                        if "printf 'Current version:" in line)
+    printf_command = "\n".join(line.strip() for line in lines[printf_index:printf_index + 2])
+    result = subprocess.run(
+        ["bash", "-c", "version=sha; containers=containers; details=details; " + printf_command],
+        check=True, capture_output=True, text=True,
+    )
+    assert result.stdout == (
+        "Current version:\n\n```text\nsha\n```\n\n"
+        "Containers:\n\n```text\ncontainers\n```\n\n"
+        "Details:\n\n```text\ndetails\n```\n\n"
+    )
 
 
 def test_release_event_routing_is_fail_closed_and_does_not_give_prs_prod_access():

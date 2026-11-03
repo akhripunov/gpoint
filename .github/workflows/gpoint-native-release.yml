@@ -526,7 +526,7 @@ jobs:
             printf '%s=%s\n' "$version_output" "$version" >> "$GITHUB_OUTPUT"
             {
               printf '### Kamal inventory: %s\n\n' "$config"
-              printf 'Current version:\n\n```text\n%s\n```\n\nContainers:\n\n```text\n%s\n```\n\nDetails:\n\n```text\n%s\n```\n\n' \
+              printf 'Current version:\n\n\140\140\140text\n%s\n\140\140\140\n\nContainers:\n\n\140\140\140text\n%s\n\140\140\140\n\nDetails:\n\n\140\140\140text\n%s\n\140\140\140\n\n' \
                 "$version" "$containers" "$details"
             } >> "$GITHUB_STEP_SUMMARY"
           done
