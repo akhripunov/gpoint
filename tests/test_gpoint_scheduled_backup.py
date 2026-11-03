@@ -154,11 +154,14 @@ def test_bunny_receipt_is_immutable_snapshot_bound_and_read_back(tmp_path, monke
     }
     monkeypatch.setattr(gpoint_scheduled_backup, "BUNNY_TEMP_ROOT", tmp_path)
     uploads = []
+    uploaded_payloads = {}
 
     def readback(source, remote_object, target):
-        target.write_bytes(source.read_bytes())
+        payload = source.read_bytes()
+        target.write_bytes(payload)
         uploads.append(remote_object)
-        return hashlib.sha256(source.read_bytes()).hexdigest()
+        uploaded_payloads[remote_object] = payload
+        return hashlib.sha256(payload).hexdigest()
 
     monkeypatch.setattr(gpoint_scheduled_backup, "_bunny_upload_and_readback", readback)
     snapshot = gpoint_scheduled_backup._publish_bunny_receipt(
@@ -171,6 +174,15 @@ def test_bunny_receipt_is_immutable_snapshot_bound_and_read_back(tmp_path, monke
         "bunny:gpoint-backups/gpoint/scheduled/" + "a" * 40 + "/42-1/restore.txt",
         "bunny:gpoint-backups/gpoint/scheduled/" + "a" * 40 + "/42-1/manifest.json",
     ]
+    remote_manifest = json.loads(uploaded_payloads[uploads[-1]])
+    assert remote_manifest["restore"]["source"] == "BUNNY_READBACK"
+    assert "receipt_readback" not in remote_manifest["restore"]
+    assert "manifest_object" not in remote_manifest
+    assert "manifest_sha256" not in remote_manifest
+    assert "manifest_readback" not in remote_manifest
+    assert snapshot["manifest_sha256"] == hashlib.sha256(uploaded_payloads[uploads[-1]]).hexdigest()
+    assert snapshot["manifest_object"] == uploads[-1]
+    assert snapshot["manifest_readback"] == "PASS"
 
 
 def test_scheduled_backup_uploads_then_restores_the_same_bunny_readback_objects():
@@ -191,9 +203,15 @@ def test_scheduled_backup_uploads_then_restores_the_same_bunny_readback_objects(
     assert 'rclone check --download --one-way' in helper
     assert 'age -d -i "$age_identity" "${bunny_readback_dir}/media-source.json.age"' in helper
     assert 'BUNNY_DATABASE_READBACK=$bunny_database_readback' in helper
+    remote_manifest_read = helper.index('python3 - "$bunny_readback_dir/manifest.json"')
+    assert helper.index('test "$(sha256sum "$bunny_readback_dir/manifest.json"') < remote_manifest_read
     assert 'OFFSITE_RESTORE=' in helper and 'MEDIA_OFFSITE_RESTORE=' in helper
     assert '_publish_bunny_receipt(' in runner
     assert 'manifest["bunny"] = _publish_bunny_receipt(' in runner
+    remote_manifest_check = helper.split("manifest=json.loads(Path(sys.argv[1])", 1)[1].split("for value in (root,prefix", 1)[0]
+    assert "b.get('manifest_object')" not in remote_manifest_check
+    assert "b.get('manifest_sha256'" not in remote_manifest_check
+    assert "b.get('manifest_readback')" not in remote_manifest_check
     assert 'EnvironmentFile=-/opt/gpoint/env/gpoint-backup-offsite.conf' in service
     assert service.count('EnvironmentFile=-/opt/gpoint/env/gpoint-backup-offsite.conf') == 1
     assert 'def _retain_local(now: float)' in runner  # no unapproved retention switch

@@ -327,11 +327,7 @@ if (remote_media.get('source_manifest_object')!=media_manifest
     raise SystemExit('existing Bunny media source manifest proof is incomplete')
 if (remote_restore.get('source')!='BUNNY_READBACK' or remote_restore.get('status')!='PASS'
         or remote_restore.get('receipt_object')!=receipt_object
-        or remote_restore.get('receipt_sha256')!=restore.get('sha256')
-        or remote_restore.get('receipt_readback')!='PASS'
-        or b.get('manifest_object')!=manifest_object
-        or not re.fullmatch(r'[0-9a-f]{64}',str(b.get('manifest_sha256','')))
-        or b.get('manifest_readback')!='PASS'):
+        or remote_restore.get('receipt_sha256')!=restore.get('sha256')):
     raise SystemExit('existing Bunny manifest or restore receipt proof is incomplete')
 for value in (root,prefix,remote_db['object'],remote_db['sha256'],remote_media['object'],remote_media['sha256'],
               media_manifest,remote_media['source_manifest_ciphertext_sha256'],remote_media['source_manifest_sha256'],
