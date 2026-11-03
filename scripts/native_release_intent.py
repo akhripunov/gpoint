@@ -70,7 +70,7 @@ EROS_SCRIPT_RUNTIME_PREFIXES = (
 EROS_BOOTSTRAP_BASE_SHA = "35bfad2a42384adca55464b33cee72589a1247ad"
 # Filled from the reviewed ME-36 bootstrap payload. The digest binds every
 # blocked runtime file/tree entry to this one initial main-push range.
-EROS_BOOTSTRAP_TREE_SHA256 = "73b22108903a6be1289068d47baa891a275ca666d1d9b1da971d59f3af0ae128"
+EROS_BOOTSTRAP_TREE_SHA256 = "18f44af17b3d3f1c7a9a3b9c6449d6a649203f6d48ea0fdb42d742cc7998d804"
 EROS_BOOTSTRAP_PATHS = (
     "services/eros-engine/",
     # Hash the whole config tree so a newly added deploy.eros* path cannot
