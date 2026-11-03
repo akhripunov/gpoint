@@ -32,6 +32,23 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     assert {"workspace", "python", "build"}.issubset(deploy["needs"])
 
 
+def test_deploy_installs_the_pinned_agata_alembic_runtime_before_migration_checks():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["deploy"]["steps"]
+    setup = next((i for i, step in enumerate(steps)
+                  if step.get("uses", "").startswith("actions/setup-python@")), None)
+    install = next((i for i, step in enumerate(steps)
+                    if "python -m pip install ./services/agata" in step.get("run", "")), None)
+    parity = next(i for i, step in enumerate(steps)
+                  if step.get("name") == "Verify candidate compatibility with the live database baseline")
+
+    assert setup is not None
+    assert install is not None
+    assert setup < install < parity
+    assert steps[setup]["with"]["python-version"] == "3.12"
+    assert steps[setup]["with"]["cache-dependency-path"] == "services/agata/pyproject.toml"
+
+
 def test_kamal_inventory_summary_uses_shellcheck_safe_markdown_fences():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     inventory = next(step for step in workflow["jobs"]["deploy"]["steps"]

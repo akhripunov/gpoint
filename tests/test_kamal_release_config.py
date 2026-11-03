@@ -652,8 +652,8 @@ def test_kamal_cutover_requires_candidate_and_live_migration_heads_to_match(tmp_
     (prisma_dir / "20261015130000_codex_telegram_challenge" / "migration.sql").write_text("SELECT 1;\n")
     agata_dir = tmp_path / "agata"
     agata_dir.mkdir()
-    (agata_dir / "0010.py").write_text("revision = 'agata0010'\ndown_revision = None\n")
-    (agata_dir / "0011.py").write_text("revision = 'agata0011'\ndown_revision = 'agata0010'\n")
+    (agata_dir / "agata0010_baseline.py").write_text("revision = 'agata0010'\ndown_revision = None\n")
+    (agata_dir / "agata0011_messages.py").write_text("revision = 'agata0011'\ndown_revision = 'agata0010'\n")
     result = subprocess.run(
         ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
          "--prisma-directory", str(prisma_dir), "--prisma-current-head", "20261015130000_codex_telegram_challenge",
@@ -667,6 +667,34 @@ def test_kamal_cutover_requires_candidate_and_live_migration_heads_to_match(tmp_
     assert "GPOINT_KAMAL_DB_MIGRATION_REQUIRED=NO" in result.stdout
 
 
+def test_kamal_migration_parity_uses_alembic_script_directory_for_revision_graph(tmp_path):
+    prisma_dir = tmp_path / "prisma"
+    migration = prisma_dir / "20261015130000_baseline"
+    migration.mkdir(parents=True)
+    (migration / "migration.sql").write_text("SELECT 1;\n", encoding="utf-8")
+    agata_dir = tmp_path / "agata"
+    agata_dir.mkdir()
+    (agata_dir / "agata0001_baseline.py").write_text(
+        'revision = f"agata{1:04d}"\ndown_revision = None\n', encoding="utf-8"
+    )
+    (agata_dir / "agata0002_messages.py").write_text(
+        'revision = "agata0002"\ndown_revision = "agata0001"\n', encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
+         "--prisma-directory", str(prisma_dir), "--prisma-current-head", "20261015130000_baseline",
+         "--prisma-current-migrations", "20261015130000_baseline",
+         "--prisma-current-checksums", "20261015130000_baseline=" + hashlib.sha256(b"SELECT 1;\n").hexdigest(),
+         "--agata-directory", str(agata_dir), "--agata-current-head", "agata0002"],
+        capture_output=True, text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "GPOINT_KAMAL_MIGRATION_PARITY=PASS" in result.stdout
+    assert "AGATA_HEAD=agata0002" in result.stdout
+
+
 def test_kamal_migration_parity_rejects_changed_applied_prisma_sql(tmp_path):
     prisma_dir = tmp_path / "prisma"
     migration = prisma_dir / "20261015130000_codex_telegram_challenge"
@@ -674,7 +702,7 @@ def test_kamal_migration_parity_rejects_changed_applied_prisma_sql(tmp_path):
     (migration / "migration.sql").write_text("SELECT 1;\n", encoding="utf-8")
     agata_dir = tmp_path / "agata"
     agata_dir.mkdir()
-    (agata_dir / "0010.py").write_text("revision = 'agata0010'\ndown_revision = None\n")
+    (agata_dir / "agata0010_baseline.py").write_text("revision = 'agata0010'\ndown_revision = None\n")
     recorded = hashlib.sha256(b"SELECT 2;\n").hexdigest()
     result = subprocess.run(
         ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
@@ -697,9 +725,9 @@ def test_kamal_migration_parity_fails_closed_for_pending_candidate_revision(tmp_
     (prisma_dir / "20261022110000_eros_gpoint_message_state" / "migration.sql").write_text("SELECT 1;\n")
     agata_dir = tmp_path / "agata"
     agata_dir.mkdir()
-    (agata_dir / "0010.py").write_text("revision = 'agata0010'\ndown_revision = None\n")
-    (agata_dir / "0011.py").write_text("revision = 'agata0011'\ndown_revision = 'agata0010'\n")
-    (agata_dir / "0012.py").write_text("revision = 'agata0012'\ndown_revision = 'agata0011'\n")
+    (agata_dir / "agata0010_baseline.py").write_text("revision = 'agata0010'\ndown_revision = None\n")
+    (agata_dir / "agata0011_messages.py").write_text("revision = 'agata0011'\ndown_revision = 'agata0010'\n")
+    (agata_dir / "agata0012_eros.py").write_text("revision = 'agata0012'\ndown_revision = 'agata0011'\n")
     result = subprocess.run(
         ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
          "--prisma-directory", str(prisma_dir), "--prisma-current-head", "20261015130000_codex_telegram_challenge",
@@ -729,8 +757,8 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
         "ALTER TABLE engine.eros_inference_jobs RENAME COLUMN legacy_code TO normalized_code;\n", encoding="utf-8")
     agata = repo / "services/agata/migrations/versions"
     agata.mkdir(parents=True)
-    (agata / "0011.py").write_text("revision = 'agata0011'\ndown_revision = None\n", encoding="utf-8")
-    (agata / "0012.py").write_text(
+    (agata / "agata0011_messages.py").write_text("revision = 'agata0011'\ndown_revision = None\n", encoding="utf-8")
+    (agata / "agata0012_eros.py").write_text(
         "revision = 'agata0012'\ndown_revision = 'agata0011'\n"
         "SQL = \"UPDATE agata.regional_policy_profiles SET status='retired' "
         "WHERE rules->>'ai_disclosure_required'='true'\"\n", encoding="utf-8")
@@ -841,7 +869,7 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
     assert checksum_drift.returncode != 0
     assert "PRISMA_MIGRATION_CHECKSUM_MISMATCH" in checksum_drift.stderr
 
-    (agata / "0011.py").write_text(
+    (agata / "agata0011_messages.py").write_text(
         "revision = 'agata0011'\ndown_revision = None\n# altered after production apply\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "alter applied AGATA revision"], check=True)
@@ -859,7 +887,7 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
     assert changed_revision.returncode != 0
     assert "APPLIED_ALEMBIC_MIGRATION_CHANGED:agata0011" in changed_revision.stderr
 
-    (agata / "0011.py").write_text("revision = 'agata0011'\ndown_revision = None\n", encoding="utf-8")
+    (agata / "agata0011_messages.py").write_text("revision = 'agata0011'\ndown_revision = None\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "restore applied AGATA migration identity"], check=True)
     app_file.write_text("export const health = true;\n", encoding="utf-8")
@@ -940,10 +968,12 @@ def test_kamal_schema_compatibility_accepts_divergent_live_source_only_when_tree
         "CREATE TABLE engine.pending_queue (id UUID PRIMARY KEY);\n", encoding="utf-8")
     agata = repo / "services/agata/migrations/versions"
     agata.mkdir(parents=True)
-    (agata / "0011.py").write_text("revision = 'agata0011'\ndown_revision = None\n", encoding="utf-8")
-    (agata / "0012.py").write_text(
+    (agata / "agata0011_messages.py").write_text("revision = 'agata0011'\ndown_revision = None\n", encoding="utf-8")
+    (agata / "agata0012_eros.py").write_text(
         "revision = 'agata0012'\ndown_revision = 'agata0011'\n"
-        "op.add_column('regional_policy_profiles', sa.Column('new_field', sa.String()))\n", encoding="utf-8")
+        "from alembic import op\nimport sqlalchemy as sa\n"
+        "def upgrade():\n    op.add_column('regional_policy_profiles', sa.Column('new_field', sa.String()))\n",
+        encoding="utf-8")
     live_app = repo / "apps/miniapp/src/model-routing.js"
     live_app.parent.mkdir(parents=True)
     live_app.write_text("export const host = 'gpoint.one';\n", encoding="utf-8")

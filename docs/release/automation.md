@@ -153,6 +153,14 @@ manifest, применяет точный pending allowlist через `prisma m
 или неопределённый Apply останавливает Kamal; автоматический downgrade или
 слепой повтор не выполняется. Production allowlist сейчас пуст.
 
+AGATA migration graph проверяется установленной версией Alembic из
+`services/agata/pyproject.toml`: verifier использует `ScriptDirectory`,
+`walk_revisions()` и `get_heads()`, а не извлекает revision поля собственным
+разбором Python AST. Deploy устанавливает этот же пакет до проверки live и
+candidate heads/checksums. Это позволяет Alembic разрешать стандартные
+выражения revision и parent так же, как приложение; граф с несколькими heads
+или некорректными ссылками блокируется.
+
 GitHub Tests выполняют Prisma migrations на disposable PostgreSQL, сравнивают
 полную историю миграций с `schema.prisma` через отдельный Prisma shadow database,
 повторно запускают `migrate deploy` и проверяют `migrate status`. `migrate diff`
