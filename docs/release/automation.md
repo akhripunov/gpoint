@@ -297,27 +297,30 @@ backup/offsite требования не меняются. Удалять recove
 
 ### Инвентаризация workflows и прежних release helpers
 
-Статусы основаны на текущих workflow calls, package scripts, imports, tests и
+Статусы основаны на workflow calls, package scripts, imports, tests и
 recovery/transition paths. Отсутствие автоматического вызова не доказывает
-отсутствие ручного или внешнего использования.
+отсутствие ручного или внешнего использования. Таблица фиксирует безопасное
+условие удаления, а не разрешение на удаление.
 
-| Механизм | Статус | Подтверждённая зависимость |
-|---|---|---|
-| `gpoint-native-release.yml` | ACTIVE | Обычный Tests → Build/GHCR → protected Deploy → Kamal → Runtime Verify. |
-| `gpoint-deploy.yml` | REQUIRED FOR EROS TRANSITION / REQUIRED FOR RECOVERY | Eros Pilot, ACL, authorization reconcile и task-scoped operations; вызывается Linear reconciliation и recovery tooling. Не удалять целиком. |
-| `gpoint-prepare.yml` | REQUIRED FOR RECOVERY | Legacy exact-SHA Prepare/coalescing, старый Deploy receipt и Linear/recovery evidence. |
-| `gpoint-recover-interrupted.yml` | REQUIRED FOR RECOVERY | Metadata-only восстановление уже применённого exact SHA; не делает повторный Apply. |
-| `gpoint-first-kamal-cutover.yml` | REQUIRED FOR RECOVERY | Первый cutover и recovery; процедура должна оставаться до отдельного закрытия transition. |
-| `gpoint-linear-reconcile.yml` | ACTIVE | Read-only reconcile после Prepare/Deploy/recovery, публикует проверенное состояние. |
-| `automated-release.mjs`, `release-gpoint.mjs`, `release-orchestrator.mjs`, `prepare-release.py` | REQUIRED FOR RECOVERY / UNKNOWN | Ссылки из старых workflows, tests и package scripts. У orchestrator не найден текущий обычный вызов, но внешнее/ручное использование не исключено. |
-| Static Release V4 и Prepare V3/V4 helpers | REQUIRED FOR RECOVERY / UNKNOWN | Используются legacy Prepare, first cutover, static exchange и recovery tests. |
-| `unified_release_v1`, release locks/state, OCI receipt helpers | ACTIVE / REQUIRED FOR RECOVERY | Используются coalescing, authorization, provenance, reconciliation или safe recovery. |
+| Путь | Статус | Замена / назначение | Test evidence | Условие безопасного удаления |
+|---|---|---|---|---|
+| `.github/workflows/gpoint-native-release.yml` | ACTIVE | Канонический Tests → Build/GHCR → protected Kamal Deploy → Runtime Verify; штатный GitHub Deployment для обычного Deploy. | `tests/test_kamal_native_automatic_release.py`, `tests/test_kamal_release_config.py`, `tests/test_native_environment_deployment.py`, `tests/test_deploy_evidence_workflow.py`. | Не удалять; заменять только отдельным OWNER-approved workflow с равными или более строгими gates и доказанной миграцией активных callers. |
+| `.github/workflows/gpoint-deploy.yml` | REQUIRED FOR EROS TRANSITION / RECOVERY | Eros Pilot, ACL, authorization reconciliation и task-scoped operations. Не является обычным Native release-путём. | `scripts/test_prepare_coalescing.py`, `scripts/release-authorization.test.mjs`, `tests/test_eros_postgres_acl_workflow.py`. | После закрытия Eros transition и перевода каждого caller на проверенную замену; сохранить recovery evidence и per-task authorization. |
+| `.github/workflows/gpoint-prepare.yml`, `.github/workflows/gpoint-recover-interrupted.yml` | REQUIRED FOR RECOVERY | Legacy exact-SHA Prepare/coalescing и metadata-only recovery без повторного Apply. | `scripts/test_prepare_coalescing.py`, `tests/test_interrupted_recovery_workflow.py`, `tests/test_native_release_intent.py`. | После подтверждения production/runtime SHA и отсутствия открытых legacy attempts; эквивалентный recovery путь должен пройти exact-SHA regression и operational acceptance. |
+| `.github/workflows/gpoint-first-kamal-cutover.yml` | REQUIRED FOR RECOVERY | Первый Compose-to-Kamal cutover и recovery. | `tests/test_kamal_cutover_owner.py`, `tests/test_recover_kamal_cutover.py`, `tests/test_kamal_native_automatic_release.py`. | Только после закрытого cutover, проверенной native runtime evidence и отсутствия активных recovery callers. |
+| `.github/workflows/gpoint-linear-reconcile.yml` | ACTIVE | Read-only reconciliation и публикация фактов после Prepare/Deploy/recovery. | `scripts/reconcile-deployment.test.mjs`, `tests/test_interrupted_recovery_workflow.py`. | Не удалять, пока Linear release queue использует этот reconciliation; замена должна сохранять проверку точных run/SHA/runtime facts. |
+| `scripts/release-gpoint-vps-adapter.mjs`, `scripts/release-gpoint.mjs`, `scripts/automated-release.mjs`, `scripts/prepare-release.py` | LEGACY / REQUIRED FOR RECOVERY / UNKNOWN BY ENTRYPOINT | Старый Compose release/apply и orchestration; отдельные функции остаются в старых workflows, cutover, static exchange или recovery. Обычный выпуск заменён `gpoint-native-release.yml` + stock Kamal. | `scripts/release-gpoint.test.mjs`, `scripts/release-orchestrator.test.mjs`, `scripts/test_prepare_coalescing.py`, `tests/test_prepare_release_migration_inventory.py`. | Не удалять по названию. Сначала доказать отсутствие workflow/package/manual callers, перечислить каждую оставшуюся функцию и перевести её caller с regression и recovery acceptance. |
+| `infra/production/docker-compose*.yml`, `infra/shared/docker-compose.yml`, `infra/docker/docker-compose.yml` | LEGACY / TRANSITION / ACTIVE FOR SCOPED SERVICES | Compose-конфигурация нужна для оставшихся cutover, Eros/GSales, shared services или recovery; штатный Native app lifecycle выполняет Kamal. | `tests/test_eros_permanent_compose.py`, `tests/test_eros_vps_pilot_compose.py`, `tests/test_kamal_release_config.py`. | Удалять пофайлово после отсутствия production/manual callers, закрытого соответствующего transition и доказательства сохранения shared DB/cache, volumes, network, health и rollback. |
+| `scripts/verify-gpoint-backup-restore.sh` | REQUIRED FOR RECOVERY / CUTOVER | Защищённое одноразовое восстановление и cutover evidence; routine Bunny backup использует `gpoint-scheduled-backup.py` и `verify-gpoint-scheduled-backup-restore.sh`. | `tests/test_kamal_release_config.py`, `tests/test_gpoint_media_tree.py`, `tests/test_recover_kamal_cutover.py`. | Только после успешной production restore rehearsal через принятую замену и подтверждения, что ни один recovery workflow/caller не использует этот путь. |
+| `scripts/gpoint-scheduled-backup.py`, `scripts/verify-gpoint-scheduled-backup-restore.sh`, `scripts/gpoint-backup-policy.py` | ACTIVE | Отдельный systemd backup runner: штатный PostgreSQL archive, Bunny upload/read-back и isolated restore из одного снимка. Не входит в обычный app Deploy. | `tests/test_gpoint_scheduled_backup.py`; в том числе проверка upload → exact-object read-back → restore. | Не удалять до OWNER-approved replacement и подтверждённой непрерывности расписания, freshness/failed-run monitoring, Bunny restore proof и recovery acceptance. |
+| Ручные `gh api POST /deployments` и deployment statuses в rollback части `gpoint-native-release.yml` | ACTIVE, DOCUMENTED GAP | Нужны для rollback target SHA: workflow запускается с текущего `main`, а цель — ранее выпущенный другой SHA. Обычный Deploy использует native Environment Deployment и ручные POST не вызывает. | `tests/test_kamal_native_automatic_release.py`, `tests/test_native_environment_deployment.py`. | Только если штатный Environment workflow сможет точно представлять target SHA и сохранить approval, run linkage и SUCCESS-after-Verify; иначе gap остаётся и не создаётся ложный SUCCESS. |
+| Docker lifecycle в `scripts/release-gpoint-vps-adapter.mjs` и cutover/recovery helpers | LEGACY / REQUIRED FOR TRANSITION OR RECOVERY | Для обычных Native app контейнеров заменено stock `kamal deploy --skip-push`, `kamal app stop` и `kamal rollback`. Остальные команды могут быть одноразовыми technical DB/backup или переходными операциями. | `tests/test_kamal_native_automatic_release.py`, `tests/test_kamal_cutover_owner.py`, `tests/test_gpoint_scheduled_backup.py`. | Удалять только после caller-by-caller доказательства, что операция управляет application lifecycle и stock Kamal эквивалентен; DB/backup technical actions не считать дублирующим app lifecycle. |
 
-В этой проверке не обнаружен механизм со статусом OBSOLETE, который можно
-удалить без риска. Удаление старого workflow или его helpers потребует
-подтверждения текущего production SHA/runtime, active authorization и замены
-его recovery/evidence path. Исторические procedures ниже текущей модели
-помечены отдельно и не являются рабочими instructions.
+На момент проверки не найден путь, который можно безопасно удалить безусловно.
+Финальная классификация runtime/production callers остаётся `PROD_NOT_VERIFIED`;
+таблица не утверждает, что старые файлы не используются вручную. Исторические
+procedures ниже текущей модели помечены отдельно и не являются рабочими
+instructions.
 
 ## Текущая модель выпуска и состояния (ME-42)
 
