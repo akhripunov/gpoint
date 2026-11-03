@@ -82,7 +82,7 @@ def _run(args: list[str], *, stage: str, input_text: str | None = None,
     return result.stdout.strip()
 
 
-def _bunny_remote_root() -> str:
+def _bunny_remote_root(*, require_systemd_environment: bool = True) -> str:
     """Resolve the configured rclone remote while pinning the existing Bunny zone."""
     _private_file(OFFSITE_CONFIG)
     configured_lines = OFFSITE_CONFIG.read_text(encoding="utf-8").splitlines()
@@ -91,7 +91,9 @@ def _bunny_remote_root() -> str:
                                 configured_lines[0])):
         raise ScheduledBackupError("the protected offsite destination file has an invalid format")
     remote = configured_lines[0].split("=", 1)[1]
-    if os.environ.get("GPOINT_BACKUP_BUNNY_REMOTE") != remote:
+    systemd_remote = os.environ.get("GPOINT_BACKUP_BUNNY_REMOTE")
+    if ((require_systemd_environment and systemd_remote != remote)
+            or (systemd_remote is not None and systemd_remote != remote)):
         raise ScheduledBackupError("systemd Bunny destination does not match its protected configuration")
     match = re.fullmatch(r"([A-Za-z0-9_-]+):gpoint-backups", remote)
     if not match:
@@ -123,6 +125,16 @@ def _bunny_remote_root() -> str:
     if match.group(1) + ":" not in configured.splitlines():
         raise ScheduledBackupError("the Bunny rclone remote is not present in the protected configuration")
     return remote
+
+
+def _backup_evidence_and_bunny_remote(*, migration_rehearsal: bool) -> tuple[str, str]:
+    evidence_path = (os.environ.get("GPOINT_MIGRATION_BACKUP_EVIDENCE", "").strip()
+                     if migration_rehearsal else "")
+    if migration_rehearsal and evidence_path:
+        bunny_remote = ""
+    else:
+        bunny_remote = _bunny_remote_root(require_systemd_environment=not migration_rehearsal)
+    return evidence_path, bunny_remote
 
 
 def _bunny_upload_and_readback(source: Path, remote_object: str, readback: Path) -> str:
@@ -388,13 +400,12 @@ def run() -> None:
         recipient = _run(["age-keygen", "-y", str(AGE_IDENTITY)], stage="age key identity")
         if not AGE_RECIPIENT.fullmatch(recipient):
             raise ScheduledBackupError("age identity recipient is invalid")
-        bunny_remote_root = ("" if migration_rehearsal and evidence_path
-                             else _bunny_remote_root())
+        evidence_path, bunny_remote_root = _backup_evidence_and_bunny_remote(
+            migration_rehearsal=migration_rehearsal)
         if migration_rehearsal:
             # A rehearsal's source of truth is the verified encrypted backup.
             # Do not inspect the live Kamal API, PostgreSQL container, network,
             # production environment, or media bind mount in this path.
-            evidence_path = os.environ.get("GPOINT_MIGRATION_BACKUP_EVIDENCE", "").strip()
             if evidence_path:
                 evidence_sha = os.environ.get("GPOINT_MIGRATION_BACKUP_EVIDENCE_SHA256", "")
                 try:

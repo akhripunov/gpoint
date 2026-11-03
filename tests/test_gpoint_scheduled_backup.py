@@ -192,6 +192,59 @@ def test_scheduled_backup_uploads_then_restores_the_same_bunny_readback_objects(
     assert 'def _retain_local(now: float)' in runner  # no unapproved retention switch
 
 
+def test_migration_rehearsal_with_release_backup_evidence_does_not_require_bunny_config(monkeypatch):
+    backup_evidence = "/opt/gpoint/release-logs/" + "a" * 40 + "/receipt.txt"
+    monkeypatch.setenv("GPOINT_MIGRATION_BACKUP_EVIDENCE", backup_evidence)
+    monkeypatch.setattr(
+        gpoint_scheduled_backup, "_bunny_remote_root",
+        lambda: pytest.fail("release evidence rehearsal must not load Bunny configuration"),
+    )
+    assert gpoint_scheduled_backup._backup_evidence_and_bunny_remote(migration_rehearsal=True) == (
+        backup_evidence, "",
+    )
+
+
+def test_scheduled_backup_and_latest_snapshot_rehearsal_require_bunny_config(monkeypatch):
+    monkeypatch.delenv("GPOINT_MIGRATION_BACKUP_EVIDENCE", raising=False)
+    calls = []
+    monkeypatch.setattr(
+        gpoint_scheduled_backup, "_bunny_remote_root",
+        lambda **kwargs: calls.append(kwargs) or "bunny:gpoint-backups",
+    )
+    assert gpoint_scheduled_backup._backup_evidence_and_bunny_remote(migration_rehearsal=False) == (
+        "", "bunny:gpoint-backups",
+    )
+    assert gpoint_scheduled_backup._backup_evidence_and_bunny_remote(migration_rehearsal=True) == (
+        "", "bunny:gpoint-backups",
+    )
+    assert calls == [
+        {"require_systemd_environment": True},
+        {"require_systemd_environment": False},
+    ]
+
+
+def test_latest_snapshot_rehearsal_reads_protected_bunny_destination_without_systemd_environment(monkeypatch, tmp_path):
+    config = tmp_path / "rclone.conf"
+    config.write_text(
+        "[bunny]\ntype = s3\nprovider = Other\nendpoint = https://ny-s3.storage.bunnycdn.com\n"
+        "access_key_id = gpoint-backups\nsecret_access_key = protected\n",
+    )
+    config.chmod(0o600)
+    destination = tmp_path / "gpoint-backup-offsite.conf"
+    destination.write_text("GPOINT_BACKUP_BUNNY_REMOTE=bunny:gpoint-backups\n")
+    destination.chmod(0o600)
+    monkeypatch.setattr(gpoint_scheduled_backup, "OFFSITE_CONFIG", destination)
+    monkeypatch.setattr(gpoint_scheduled_backup, "RCLONE_CONFIG", config)
+    monkeypatch.setattr(gpoint_scheduled_backup, "_private_file", lambda path: None)
+    monkeypatch.setattr(gpoint_scheduled_backup, "_run", lambda *args, **kwargs: "bunny:\n")
+    monkeypatch.delenv("GPOINT_BACKUP_BUNNY_REMOTE", raising=False)
+    assert gpoint_scheduled_backup._backup_evidence_and_bunny_remote(migration_rehearsal=True) == (
+        "", "bunny:gpoint-backups",
+    )
+    with pytest.raises(gpoint_scheduled_backup.ScheduledBackupError, match="does not match its protected configuration"):
+        gpoint_scheduled_backup._bunny_remote_root()
+
+
 def test_scheduled_backup_uses_age_keygen_positional_identity_input():
     runner = RUNNER_PATH.read_text()
     assert '_run(["age-keygen", "-y", str(AGE_IDENTITY)], stage="age key identity")' in runner
