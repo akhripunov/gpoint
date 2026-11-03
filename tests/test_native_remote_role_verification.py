@@ -65,15 +65,18 @@ def test_deploy_role_inspection_runs_over_the_pinned_vps_ssh_connection():
     assert '< "$GITHUB_WORKSPACE/scripts/verify-kamal-role.sh"' in script
     assert "verify_single_running_role gpoint-core-worker" in script
     assert "verify_single_running_role gpoint-core-bot" in script
-    assert "verify_single_running_role gpoint-agata-memory-worker" in script
-    assert "docker inspect" not in script
-    assert "docker ps" not in script
+    assert "verify-kamal-optional-agata-role.sh" in script
+    runner_script = script.split("<<'REMOTE_DRAIN'", 1)[0]
+    assert "docker inspect" not in runner_script
+    assert "docker ps" not in runner_script
+    assert 'ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$IMAGE_VERSION"' in script
 
 
 def test_rollback_role_inspection_runs_over_the_pinned_vps_ssh_connection():
     script = _step_script("rollback", "Roll back consumers and then APIs with stock Kamal")
     assert 'ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$1" "$TARGET_VERSION" "$TARGET_SHA"' in script
     assert '< "$GITHUB_WORKSPACE/scripts/verify-kamal-role.sh"' in script
+    assert "verify-kamal-optional-agata-role.sh" in script
     assert "docker inspect" not in script
     assert "docker ps" not in script
 

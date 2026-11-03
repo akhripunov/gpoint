@@ -29,6 +29,7 @@ SECRET_KEYS = (
     'EROS_RUNTIME_PASSWORD',
     'EROS_MIGRATOR_PASSWORD',
     'EROS_DATABASE_IDENTITY',
+    'GPOINT_EROS_WORKER_TOKEN',
 )
 MANAGED_KEYS = frozenset((*SECRET_KEYS, 'EROS_RUNTIME_DATABASE_URL',
                           'EROS_MIGRATOR_DATABASE_URL', 'EROS_SOURCE_SHA', 'EROS_IMAGE', 'EROS_TENANT_ID',
@@ -40,6 +41,9 @@ MANAGED_KEYS = frozenset((*SECRET_KEYS, 'EROS_RUNTIME_DATABASE_URL',
                           'EROS_BRIDGE_API_KEY', 'EROS_EMBEDDING_API_KEY',
                           'EROS_JWT_SECRET', 'GPOINT_API_KEY', 'GPOINT_EMBEDDINGS_API_KEY',
                           'GPOINT_WORKER_BRIDGE_SIGNING_SECRET', 'GPOINT_WORKER_TENANT_ID',
+                          'GPOINT_CHAT_POLICY_TENANT_ID', 'GPOINT_EROS_WORKER_TOKEN',
+                          'GPOINT_EROS_TENANT_ID', 'GPOINT_CHAT_POLICY_JURISDICTION',
+                          'GPOINT_CHAT_POLICY_MARKET',
                           'OPENROUTER_API_KEY', 'SUPABASE_JWT_SECRET', 'MODEL_CONFIG_PATH', 'RUST_LOG'))
 UUID_PATTERN = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$', re.I)
 
@@ -83,6 +87,11 @@ def _runtime_aliases(values, user_id, creator_id):
         'EROS_PRODUCTION_TEST_CREATOR_IDS': creator_id,
         'EROS_WORKER_SIGNING_SECRET': values['EROS_WORKER_SIGNING_SECRET'],
         'EROS_WORKER_TENANT_ID': values['EROS_TENANT_ID'],
+        'GPOINT_CHAT_POLICY_TENANT_ID': values['EROS_TENANT_ID'],
+        'GPOINT_CHAT_POLICY_JURISDICTION': values['GPOINT_CHAT_POLICY_JURISDICTION'],
+        'GPOINT_CHAT_POLICY_MARKET': values['GPOINT_CHAT_POLICY_MARKET'],
+        'GPOINT_EROS_TENANT_ID': values['EROS_TENANT_ID'],
+        'GPOINT_EROS_WORKER_TOKEN': values['GPOINT_EROS_WORKER_TOKEN'],
         'EROS_BRIDGE_API_KEY': values['EROS_BRIDGE_API_KEY'],
         'EROS_EMBEDDING_API_KEY': values['EROS_EMBEDDING_API_KEY'],
         'EROS_JWT_SECRET': values['EROS_JWT_SECRET'],
@@ -111,6 +120,8 @@ def _env_projections(values):
         'EROS_PRODUCTION_TEST_USER_IDS', 'EROS_PRODUCTION_TEST_CREATOR_IDS',
         'EROS_SERVICE_URL', 'EROS_OLLAMA_EMBEDDING_URL', 'EROS_JWT_SECRET', 'EROS_WORKER_SIGNING_SECRET',
         'EROS_WORKER_TENANT_ID', 'EROS_BRIDGE_API_KEY', 'EROS_EMBEDDING_API_KEY',
+        'GPOINT_CHAT_POLICY_TENANT_ID', 'GPOINT_EROS_WORKER_TOKEN',
+        'GPOINT_CHAT_POLICY_JURISDICTION', 'GPOINT_CHAT_POLICY_MARKET',
     )
     return ({key: values[key] for key in engine_keys},
             {key: values[key] for key in api_keys})
@@ -151,7 +162,17 @@ def _write_private_env(path, values):
             pass
 
 
-def _new_values(source_sha, image, tenant_id, pilot_test_user_id='', pilot_test_creator_id=''):
+def _policy_scope(jurisdiction, market, enabled):
+    if not jurisdiction and not market and not enabled:
+        return '', ''
+    if (not re.fullmatch(r'[A-Z0-9_-]{2,32}', jurisdiction or '')
+            or not re.fullmatch(r'[a-z0-9_-]{2,32}', market or '')):
+        raise ValueError('policy jurisdiction and market are required for an enabled synthetic pilot')
+    return jurisdiction, market
+
+
+def _new_values(source_sha, image, tenant_id, pilot_test_user_id='', pilot_test_creator_id='',
+                policy_jurisdiction='', policy_market=''):
     if not re.fullmatch(r'[a-f0-9]{40}', source_sha or ''):
         raise ValueError('exact Eros source SHA is required')
     if not _valid_image_identity(source_sha, image):
@@ -166,12 +187,15 @@ def _new_values(source_sha, image, tenant_id, pilot_test_user_id='', pilot_test_
     def dsn(role, password):
         return f'postgresql://{role}:{quote(password, safe="")}@gpoint-eros-db:5432/eros'
     user_id, creator_id = _pilot_pair(pilot_test_user_id, pilot_test_creator_id)
+    policy_jurisdiction, policy_market = _policy_scope(policy_jurisdiction, policy_market, bool(user_id and creator_id))
     values.update({
         'EROS_RUNTIME_DATABASE_URL': dsn('eros_runtime', values['EROS_RUNTIME_PASSWORD']),
         'EROS_MIGRATOR_DATABASE_URL': dsn('eros_migrator', values['EROS_MIGRATOR_PASSWORD']),
         'EROS_SOURCE_SHA': source_sha,
         'EROS_IMAGE': image,
         'EROS_TENANT_ID': tenant_id,
+        'GPOINT_CHAT_POLICY_JURISDICTION': policy_jurisdiction,
+        'GPOINT_CHAT_POLICY_MARKET': policy_market,
     })
     _runtime_aliases(values, user_id, creator_id)
     return values
@@ -216,9 +240,10 @@ def _source_tenant(path):
 
 
 def provision(path=ENV_PATH, *, source_sha, image, tenant_id=None, source_env=SOURCE_ENV_PATH,
-              pilot_test_user_id='', pilot_test_creator_id=''):
+              pilot_test_user_id='', pilot_test_creator_id='', policy_jurisdiction='', policy_market=''):
     _validate_release_identity(source_sha, image)
     user_id, creator_id = _pilot_pair(pilot_test_user_id, pilot_test_creator_id)
+    policy_jurisdiction, policy_market = _policy_scope(policy_jurisdiction, policy_market, bool(user_id and creator_id))
     path = Path(path)
     if path.parent.is_symlink():
         raise RuntimeError('Eros protected environment directory cannot be a symlink')
@@ -246,7 +271,8 @@ def provision(path=ENV_PATH, *, source_sha, image, tenant_id=None, source_env=SO
         values = {}
 
     if not values:
-        values = _new_values(source_sha, image, tenant_id or _source_tenant(source_env), user_id, creator_id)
+        values = _new_values(source_sha, image, tenant_id or _source_tenant(source_env), user_id, creator_id,
+                             policy_jurisdiction, policy_market)
     else:
         if any(not values.get(key) for key in SECRET_KEYS):
             raise RuntimeError('Eros protected environment has an empty credential')
@@ -256,6 +282,14 @@ def provision(path=ENV_PATH, *, source_sha, image, tenant_id=None, source_env=SO
         old_creator = values.get('EROS_PRODUCTION_TEST_CREATOR_IDS', values.get('EROS_TEST_CREATOR_IDS', ''))
         if (user_id or creator_id) and (old_user or old_creator) and (old_user != user_id or old_creator != creator_id):
             raise RuntimeError('protected synthetic pilot allowlist does not match the requested UUID pair')
+        if user_id and creator_id:
+            previous_scope = (values.get('GPOINT_CHAT_POLICY_JURISDICTION', ''), values.get('GPOINT_CHAT_POLICY_MARKET', ''))
+            if previous_scope != ('', '') and previous_scope != (policy_jurisdiction, policy_market):
+                raise RuntimeError('protected synthetic pilot policy scope does not match the requested scope')
+            values['GPOINT_CHAT_POLICY_JURISDICTION'] = policy_jurisdiction
+            values['GPOINT_CHAT_POLICY_MARKET'] = policy_market
+        values.setdefault('GPOINT_CHAT_POLICY_JURISDICTION', '')
+        values.setdefault('GPOINT_CHAT_POLICY_MARKET', '')
         _runtime_aliases(values, user_id, creator_id)
         existing_tenant = values.get('EROS_TENANT_ID')
         if not existing_tenant:
@@ -489,6 +523,8 @@ def main():
     parser.add_argument('--tenant-id')
     parser.add_argument('--pilot-test-user-id', default='')
     parser.add_argument('--pilot-test-creator-id', default='')
+    parser.add_argument('--policy-jurisdiction', default='')
+    parser.add_argument('--policy-market', default='')
     parser.add_argument('--source-env', default=str(SOURCE_ENV_PATH))
     parser.add_argument('--ensure-postgres-network', action='store_true')
     parser.add_argument('--ensure-embeddings-network', action='store_true')
@@ -500,7 +536,9 @@ def main():
         print(provision(args.path, source_sha=args.source_sha, image=args.image,
                         tenant_id=args.tenant_id, source_env=args.source_env,
                         pilot_test_user_id=args.pilot_test_user_id,
-                        pilot_test_creator_id=args.pilot_test_creator_id))
+                        pilot_test_creator_id=args.pilot_test_creator_id,
+                        policy_jurisdiction=args.policy_jurisdiction,
+                        policy_market=args.policy_market))
         if args.ensure_postgres_network:
             print(ensure_postgres_network())
         if args.ensure_embeddings_network:

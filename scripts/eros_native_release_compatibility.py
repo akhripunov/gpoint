@@ -11,9 +11,14 @@ from typing import Callable
 
 
 CONTRACT_PATHS = (
+    "config/deploy.yml",
+    "config/deploy.eros-api.yml",
     "apps/api/src/eros-adapter.ts",
     "apps/api/src/eros-worker-contract.ts",
     "apps/api/src/eros-worker-gateway.ts",
+    "apps/api/src/gpoint-worker-gateway.ts",
+    "apps/api/src/gpoint-chat-state.js",
+    "apps/api/src/gpoint-chat-store.ts",
     "apps/api/src/messages.ts",
     # These are the application composition roots that expose the Eros and
     # AGATA worker gateways. A change can silently remove/register routes even
@@ -21,6 +26,7 @@ CONTRACT_PATHS = (
     "apps/api/src/main.ts",
     "apps/api/src/agata-worker-gateway.ts",
 )
+ABSENCE_CONTRACT_PATHS = frozenset({"apps/api/src/agata-worker-gateway.ts"})
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -40,7 +46,9 @@ def contract_digest(sha: str, reader: Callable[[str, str], bytes | None] = _git_
     digest = hashlib.sha256()
     for path in CONTRACT_PATHS:
         content = reader(sha, path)
-        if not isinstance(content, bytes):
+        if content is None and path in ABSENCE_CONTRACT_PATHS:
+            content = b"<intentionally-absent>"
+        elif not isinstance(content, bytes):
             raise CompatibilityError("Eros runtime contract source is unavailable")
         digest.update(path.encode("utf-8") + b"\0")
         digest.update(len(content).to_bytes(8, "big"))

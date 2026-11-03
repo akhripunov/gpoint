@@ -12,6 +12,25 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ErosProductionSecretTests(unittest.TestCase):
+    def test_pilot_policy_scope_is_required_and_injected_only_into_api_projection(self):
+        sha = 'a' * 40
+        image = f'gpoint-eros-pilot:{sha}'
+        with patch.dict(MODULE.os.environ, {'EROS_PROVISION_TEST': '1',
+                                           'EROS_PROVISION_TEST_POSTGRES_CONTAINER': 'eros-provision-test-0123456789ab'}):
+            with self.assertRaisesRegex(ValueError, 'policy jurisdiction and market'):
+                MODULE._new_values(sha, image, '12345678-1234-4234-8234-123456789abc',
+                                   '10000000-0000-4000-8000-000000000001',
+                                   '20000000-0000-4000-8000-000000000002')
+            values = MODULE._new_values(sha, image, '12345678-1234-4234-8234-123456789abc',
+                                        '10000000-0000-4000-8000-000000000001',
+                                        '20000000-0000-4000-8000-000000000002',
+                                        'GLOBAL', 'synthetic')
+        engine, api = MODULE._env_projections(values)
+        self.assertNotIn('GPOINT_CHAT_POLICY_JURISDICTION', engine)
+        self.assertNotIn('GPOINT_CHAT_POLICY_MARKET', engine)
+        self.assertEqual(api['GPOINT_CHAT_POLICY_JURISDICTION'], 'GLOBAL')
+        self.assertEqual(api['GPOINT_CHAT_POLICY_MARKET'], 'synthetic')
+
     def test_local_stock_image_alias_is_available_only_in_the_exact_disposable_postgres_test(self):
         sha = 'a' * 40
         image = f'gpoint-eros-pilot:{sha}'
@@ -31,7 +50,7 @@ class ErosProductionSecretTests(unittest.TestCase):
             MODULE._validate_release_identity(sha, image)
             values = MODULE._new_values(sha, image, '12345678-1234-4234-8234-123456789abc',
                                         '10000000-0000-4000-8000-000000000001',
-                                        '20000000-0000-4000-8000-000000000002')
+                                        '20000000-0000-4000-8000-000000000002', 'GLOBAL', 'synthetic')
             self.assertEqual(values['EROS_IMAGE'], image)
             MODULE.os.environ['EROS_PROVISION_TEST_POSTGRES_CONTAINER'] = 'wrong-container'
             with self.assertRaisesRegex(ValueError, 'immutable'):
@@ -150,10 +169,13 @@ class ErosProductionSecretTests(unittest.TestCase):
                 tenant_id='12345678-1234-4234-8234-123456789abc',
                 pilot_test_user_id='10000000-0000-4000-8000-000000000001',
                 pilot_test_creator_id='20000000-0000-4000-8000-000000000002',
+                policy_jurisdiction='GLOBAL', policy_market='synthetic',
             )
             values = MODULE.read_env(path)
             self.assertEqual(values['EROS_PRODUCTION_TEST_USER_IDS'], '10000000-0000-4000-8000-000000000001')
             self.assertEqual(values['EROS_PRODUCTION_TEST_CREATOR_IDS'], '20000000-0000-4000-8000-000000000002')
+            self.assertEqual(values['GPOINT_CHAT_POLICY_JURISDICTION'], 'GLOBAL')
+            self.assertEqual(values['GPOINT_CHAT_POLICY_MARKET'], 'synthetic')
             self.assertEqual(values['DATABASE_URL'], values['EROS_RUNTIME_DATABASE_URL'])
             self.assertEqual(values['EROS_MIGRATOR_DATABASE_URL'], values['EROS_MIGRATOR_DATABASE_URL'])
             self.assertEqual(values['GPOINT_API_KEY'], values['EROS_BRIDGE_API_KEY'])

@@ -54,9 +54,10 @@ def docker_json(*args: str) -> object:
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
-    for name in ("output", "sha", "app-source-sha", "version", "app-digest", "agata-digest", "miniapp-digest",
+    for name in ("output", "sha", "app-source-sha", "version", "app-digest", "miniapp-digest",
                  "run-id", "attempt", "deployment-id"):
         result.add_argument(f"--{name}", required=True)
+    result.add_argument("--agata-digest")
     result.add_argument("--mode", choices=("cutover", "ordinary"), default="cutover")
     for name in ("baseline-path", "baseline-sha",
                  "inventory-path", "inventory-sha", "backup-path", "backup-sha", "restore-path",
@@ -104,7 +105,7 @@ def main() -> int:
             raise SystemExit("ordinary manifest needs exact PostgreSQL and Redis container IDs")
         if (not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", args.prisma_head or "")
                 or not re.fullmatch(r"[A-Za-z0-9_]+", args.agata_head or "")):
-            raise SystemExit("ordinary manifest needs verified Prisma and AGATA migration heads")
+            raise SystemExit("ordinary manifest needs verified Prisma and preserved AGATA migration heads")
         migrations = (args.prisma_migrations or "").split(",")
         checksums = (args.prisma_checksums or "").split(",")
         if (not migrations or any(not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", value) for value in migrations)
@@ -158,18 +159,23 @@ def main() -> int:
                 raise SystemExit(f"{field.replace('_', ' ')} must be a nonnegative integer")
         if int(args.media_backup_bytes) <= 0:
             raise SystemExit("media backup bytes must be positive")
-    for field in ("app_digest", "agata_digest", "miniapp_digest"):
+    for field in ("app_digest", "miniapp_digest"):
         if not OCI_DIGEST.fullmatch(getattr(args, field)):
             raise SystemExit(f"{field.replace('_', ' ')} must be an immutable OCI digest")
+    if args.agata_digest and not OCI_DIGEST.fullmatch(args.agata_digest):
+        raise SystemExit("agata digest must be an immutable OCI digest")
 
     expected_services = [
         ("gpoint-core-api", "ghcr.io/akhripunov/gpoint-runtime", args.app_digest),
         ("gpoint-core-worker", "ghcr.io/akhripunov/gpoint-runtime", args.app_digest),
         ("gpoint-core-bot", "ghcr.io/akhripunov/gpoint-runtime", args.app_digest),
-        ("gpoint-agata-api", "ghcr.io/akhripunov/gpoint-agata-runtime", args.agata_digest),
-        ("gpoint-agata-memory-worker", "ghcr.io/akhripunov/gpoint-agata-runtime", args.agata_digest),
         ("gpoint-miniapp-web", "ghcr.io/akhripunov/gpoint-miniapp", args.miniapp_digest),
     ]
+    if args.agata_digest:
+        expected_services[3:3] = [
+            ("gpoint-agata-api", "ghcr.io/akhripunov/gpoint-agata-runtime", args.agata_digest),
+            ("gpoint-agata-memory-worker", "ghcr.io/akhripunov/gpoint-agata-runtime", args.agata_digest),
+        ]
     runtime_services = []
     for prefix, repository, digest in expected_services:
         name = f"{prefix}-{args.version}"
@@ -281,7 +287,6 @@ def main() -> int:
             "appSourceSha": args.app_source_sha,
             "images": {
                 "core": f"ghcr.io/akhripunov/gpoint-runtime@{args.app_digest}",
-                "agata": f"ghcr.io/akhripunov/gpoint-agata-runtime@{args.agata_digest}",
                 "miniapp": f"ghcr.io/akhripunov/gpoint-miniapp@{args.miniapp_digest}",
             },
         },
@@ -350,6 +355,8 @@ def main() -> int:
             "postgres-redis-preserved", "live-schema-compatibility-and-baseline-unchanged", "gsales-stopped",
         ]),
     }
+    if args.agata_digest:
+        manifest["candidate"]["images"]["agata"] = f"ghcr.io/akhripunov/gpoint-agata-runtime@{args.agata_digest}"
     output_path = Path(args.output)
     fd, temporary = tempfile.mkstemp(prefix=".kamal-manifest-", dir=output_path.parent)
     try:

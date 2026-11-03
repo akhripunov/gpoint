@@ -13,25 +13,27 @@ const disposableLoopbackDatabase = Boolean(
 );
 
 test('cancel-check terminalizes a running lease whose deadline has elapsed', { skip: !disposableLoopbackDatabase }, async () => {
-  const prior = { token: process.env.GPOINT_AGATA_WORKER_TOKEN, enabled: process.env.EROS_ENABLED, tenant: process.env.EROS_WORKER_TENANT_ID, agataTenant: process.env.AGATA_TENANT_ID };
-  process.env.GPOINT_AGATA_WORKER_TOKEN = `local-test-${randomUUID()}`;
+  const prior = { token: process.env.GPOINT_EROS_WORKER_TOKEN, enabled: process.env.EROS_ENABLED, dataMode: process.env.EROS_DATA_MODE, testMode: process.env.EROS_TEST_USER_IDS, testCreator: process.env.EROS_TEST_CREATOR_IDS, tenant: process.env.EROS_WORKER_TENANT_ID, policyTenant: process.env.GPOINT_CHAT_POLICY_TENANT_ID };
+  process.env.GPOINT_EROS_WORKER_TOKEN = `local-test-${randomUUID()}`;
   process.env.EROS_ENABLED = 'true';
+  process.env.EROS_DATA_MODE = 'synthetic';
+  process.env.EROS_TEST_USER_IDS = '10000000-0000-4000-8000-000000000001';
+  process.env.EROS_TEST_CREATOR_IDS = '20000000-0000-4000-8000-000000000002';
   const tenantId = '7508f36f-774a-48aa-8c6b-42f6f160415d';
   process.env.EROS_WORKER_TENANT_ID = tenantId;
-  process.env.AGATA_TENANT_ID = tenantId;
+  process.env.GPOINT_CHAT_POLICY_TENANT_ID = tenantId;
 
-  const [{ AgataWorkerGatewayController }, prisma] = await Promise.all([
-    import('../src/agata-worker-gateway.js'),
+  const [{ GpointWorkerGatewayController }, prisma] = await Promise.all([
+    import('../src/gpoint-worker-gateway.js'),
     Promise.resolve(new PrismaClient()),
   ]);
   const jobId = randomUUID();
   const leaseToken = randomUUID();
   const requestId = randomUUID();
-  const userId = randomUUID();
-  const creatorId = randomUUID();
+  const { userId, creatorId } = (await import('../src/eros-adapter.js')).erosIdentityFor({ userId: '10000000-0000-4000-8000-000000000001', creatorId: '20000000-0000-4000-8000-000000000002' });
   const sessionId = randomUUID();
   const instanceId = randomUUID();
-  const controller = new AgataWorkerGatewayController();
+  const controller = new GpointWorkerGatewayController();
 
   try {
     const [databaseRole] = await prisma.$queryRawUnsafe<Array<{ rolsuper: boolean; rolbypassrls: boolean }>>(
@@ -74,7 +76,7 @@ test('cancel-check terminalizes a running lease whose deadline has elapsed', { s
     });
 
     const result = await controller.cancelCheck(
-      { authorization: `Bearer ${process.env.GPOINT_AGATA_WORKER_TOKEN}` },
+      { authorization: `Bearer ${process.env.GPOINT_EROS_WORKER_TOKEN}` },
       { job_id: jobId, lease_token: leaseToken },
     );
     assert.deepEqual(result, { active: false, terminal_status: 'EXPIRED' });
@@ -100,10 +102,13 @@ test('cancel-check terminalizes a running lease whose deadline has elapsed', { s
       await tx.$executeRawUnsafe('DELETE FROM engine.eros_inference_jobs WHERE id = $1::uuid', jobId);
     });
     await prisma.$disconnect();
-    if (prior.token === undefined) delete process.env.GPOINT_AGATA_WORKER_TOKEN; else process.env.GPOINT_AGATA_WORKER_TOKEN = prior.token;
+    if (prior.token === undefined) delete process.env.GPOINT_EROS_WORKER_TOKEN; else process.env.GPOINT_EROS_WORKER_TOKEN = prior.token;
     if (prior.enabled === undefined) delete process.env.EROS_ENABLED; else process.env.EROS_ENABLED = prior.enabled;
     if (prior.tenant === undefined) delete process.env.EROS_WORKER_TENANT_ID; else process.env.EROS_WORKER_TENANT_ID = prior.tenant;
-    if (prior.agataTenant === undefined) delete process.env.AGATA_TENANT_ID; else process.env.AGATA_TENANT_ID = prior.agataTenant;
+    if (prior.dataMode === undefined) delete process.env.EROS_DATA_MODE; else process.env.EROS_DATA_MODE = prior.dataMode;
+    if (prior.testMode === undefined) delete process.env.EROS_TEST_USER_IDS; else process.env.EROS_TEST_USER_IDS = prior.testMode;
+    if (prior.testCreator === undefined) delete process.env.EROS_TEST_CREATOR_IDS; else process.env.EROS_TEST_CREATOR_IDS = prior.testCreator;
+    if (prior.policyTenant === undefined) delete process.env.GPOINT_CHAT_POLICY_TENANT_ID; else process.env.GPOINT_CHAT_POLICY_TENANT_ID = prior.policyTenant;
   }
 });
 
@@ -111,26 +116,31 @@ test('cancel-check terminalizes a running lease whose deadline has elapsed', { s
 test('GPOINT claim round-trips encrypted Eros job and completes it with a single lease', { skip: !disposableLoopbackDatabase }, async () => {
   const tenantId = '7508f36f-774a-48aa-8c6b-42f6f160415d';
   const prior = {
-    token: process.env.GPOINT_AGATA_WORKER_TOKEN,
+    token: process.env.GPOINT_EROS_WORKER_TOKEN,
     enabled: process.env.EROS_ENABLED,
     tenant: process.env.EROS_WORKER_TENANT_ID,
-    agataTenant: process.env.AGATA_TENANT_ID,
+    dataMode: process.env.EROS_DATA_MODE,
+    testUser: process.env.EROS_TEST_USER_IDS,
+    testCreator: process.env.EROS_TEST_CREATOR_IDS,
+    policyTenant: process.env.GPOINT_CHAT_POLICY_TENANT_ID,
     signing: process.env.EROS_WORKER_SIGNING_SECRET,
   };
-  process.env.GPOINT_AGATA_WORKER_TOKEN = `local-test-${randomUUID()}`;
+  process.env.GPOINT_EROS_WORKER_TOKEN = `local-test-${randomUUID()}`;
   process.env.EROS_ENABLED = 'true';
   process.env.EROS_WORKER_TENANT_ID = tenantId;
-  process.env.AGATA_TENANT_ID = tenantId;
+  process.env.EROS_DATA_MODE = 'synthetic';
+  process.env.EROS_TEST_USER_IDS = '10000000-0000-4000-8000-000000000001';
+  process.env.EROS_TEST_CREATOR_IDS = '20000000-0000-4000-8000-000000000002';
+  process.env.GPOINT_CHAT_POLICY_TENANT_ID = tenantId;
   process.env.EROS_WORKER_SIGNING_SECRET = 'synthetic-only-signing-secret-32-bytes-minimum';
-  const [{ AgataWorkerGatewayController }, { claimErosForGpointWorker, ErosWorkerGatewayController }, prisma] = await Promise.all([
-    import('../src/agata-worker-gateway.js'),
+  const [{ GpointWorkerGatewayController }, { ErosWorkerGatewayController }, prisma] = await Promise.all([
+    import('../src/gpoint-worker-gateway.js'),
     import('../src/eros-worker-gateway.js'),
     Promise.resolve(new PrismaClient()),
   ]);
   const id = randomUUID();
   const requestId = randomUUID();
-  const userId = randomUUID();
-  const creatorId = randomUUID();
+  const { userId, creatorId } = (await import('../src/eros-adapter.js')).erosIdentityFor({ userId: '10000000-0000-4000-8000-000000000001', creatorId: '20000000-0000-4000-8000-000000000002' });
   const sessionId = randomUUID();
   const instanceId = randomUUID();
   const request = {
@@ -165,13 +175,9 @@ test('GPOINT claim round-trips encrypted Eros job and completes it with a single
         id, requestId, tenantId, userId, creatorId, sessionId, instanceId, JSON.stringify(envelope),
       );
     });
-    class TestGateway extends AgataWorkerGatewayController {
-      protected override async claimAgataJob() { return { job: null }; }
-      protected override claimErosJob() { return claimErosForGpointWorker(); }
-    }
-    const controller = new TestGateway();
+    const controller = new GpointWorkerGatewayController();
     const concurrentClaims = await Promise.all(Array.from({ length: 2 }, () =>
-      controller.claim({ authorization: `Bearer ${process.env.GPOINT_AGATA_WORKER_TOKEN}` }),
+      controller.claim({ authorization: `Bearer ${process.env.GPOINT_EROS_WORKER_TOKEN}` }),
     ));
     const claimedJobs = concurrentClaims
       .map((claim) => (claim as { job: { id: string; leaseToken: string; attempt: number; target: string; tenant_id: string; request: unknown; purpose: string } | null }).job)
@@ -185,9 +191,9 @@ test('GPOINT claim round-trips encrypted Eros job and completes it with a single
     assert.equal(job.tenant_id, tenantId);
     assert.deepEqual(job.request, request);
     assert.equal(job.purpose, 'eros_chat_completion');
-    assert.deepEqual(await controller.claim({ authorization: `Bearer ${process.env.GPOINT_AGATA_WORKER_TOKEN}` }), { job: null });
+    assert.deepEqual(await controller.claim({ authorization: `Bearer ${process.env.GPOINT_EROS_WORKER_TOKEN}` }), { job: null });
     assert.deepEqual(await controller.complete(
-      { authorization: `Bearer ${process.env.GPOINT_AGATA_WORKER_TOKEN}` },
+      { authorization: `Bearer ${process.env.GPOINT_EROS_WORKER_TOKEN}` },
       { job_id: job.id, lease_token: job.leaseToken, text: 'synthetic reply', model: 'codex-default', purpose: 'eros_chat_completion' },
     ), { completed: true });
     const state = await prisma.$transaction(async (tx) => {
@@ -211,10 +217,13 @@ test('GPOINT claim round-trips encrypted Eros job and completes it with a single
       await tx.$executeRawUnsafe('DELETE FROM engine.eros_inference_jobs WHERE id = $1::uuid', id);
     });
     await prisma.$disconnect();
-    if (prior.token === undefined) delete process.env.GPOINT_AGATA_WORKER_TOKEN; else process.env.GPOINT_AGATA_WORKER_TOKEN = prior.token;
+    if (prior.token === undefined) delete process.env.GPOINT_EROS_WORKER_TOKEN; else process.env.GPOINT_EROS_WORKER_TOKEN = prior.token;
     if (prior.enabled === undefined) delete process.env.EROS_ENABLED; else process.env.EROS_ENABLED = prior.enabled;
     if (prior.tenant === undefined) delete process.env.EROS_WORKER_TENANT_ID; else process.env.EROS_WORKER_TENANT_ID = prior.tenant;
-    if (prior.agataTenant === undefined) delete process.env.AGATA_TENANT_ID; else process.env.AGATA_TENANT_ID = prior.agataTenant;
+    if (prior.dataMode === undefined) delete process.env.EROS_DATA_MODE; else process.env.EROS_DATA_MODE = prior.dataMode;
+    if (prior.testUser === undefined) delete process.env.EROS_TEST_USER_IDS; else process.env.EROS_TEST_USER_IDS = prior.testUser;
+    if (prior.testCreator === undefined) delete process.env.EROS_TEST_CREATOR_IDS; else process.env.EROS_TEST_CREATOR_IDS = prior.testCreator;
+    if (prior.policyTenant === undefined) delete process.env.GPOINT_CHAT_POLICY_TENANT_ID; else process.env.GPOINT_CHAT_POLICY_TENANT_ID = prior.policyTenant;
     if (prior.signing === undefined) delete process.env.EROS_WORKER_SIGNING_SECRET; else process.env.EROS_WORKER_SIGNING_SECRET = prior.signing;
   }
 });

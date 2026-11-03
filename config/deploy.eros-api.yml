@@ -10,7 +10,6 @@ servers:
     env:
       clear:
         RELEASE_SHA: <%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>
-        AGATA_SERVICE_URL: http://agata-api:8000
     options:
       env-file:
         - /opt/gpoint/env/production.env

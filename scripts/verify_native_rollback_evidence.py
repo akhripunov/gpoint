@@ -22,6 +22,12 @@ ROLE_IMAGES = {
     "gpoint-agata-memory-worker": "agata",
     "gpoint-miniapp-web": "miniapp",
 }
+CORE_ROLE_IMAGES = {
+    "gpoint-core-api": "core",
+    "gpoint-core-worker": "core",
+    "gpoint-core-bot": "core",
+    "gpoint-miniapp-web": "miniapp",
+}
 REPOSITORIES = {
     "core": "ghcr.io/akhripunov/gpoint-runtime",
     "agata": "ghcr.io/akhripunov/gpoint-agata-runtime",
@@ -88,13 +94,6 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
             or version != f"{expected_sha}-{attempt_run}-{attempt_number}"):
         _fail("rollback target has no exact immutable build attempt tag")
     images = candidate.get("images", {})
-    digests: dict[str, str] = {}
-    for key, repo in REPOSITORIES.items():
-        value = images.get(key, "")
-        prefix = repo + "@sha256:"
-        if not value.startswith(prefix) or not SHA256.fullmatch(value[len(prefix):]):
-            _fail(f"manifest has no immutable {key} image digest")
-        digests[key] = value[len(repo) + 1:]
     services = manifest.get("runtimeServices", [])
     suffix = "-" + version
     by_name = {}
@@ -106,9 +105,28 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
         if role in by_name:
             _fail("manifest contains a duplicate GPoint Kamal role")
         by_name[role] = item
-    if len(services) != len(ROLE_IMAGES) or set(by_name) != set(ROLE_IMAGES):
-        _fail("manifest does not contain exactly the six GPoint Kamal roles")
-    for name, image_key in ROLE_IMAGES.items():
+    if set(by_name) == set(CORE_ROLE_IMAGES):
+        role_images = CORE_ROLE_IMAGES
+        topology = "agata-free-four"
+    elif set(by_name) == set(ROLE_IMAGES):
+        role_images = ROLE_IMAGES
+        topology = "legacy-six"
+    else:
+        _fail("manifest does not contain exactly the four GPoint roles or a verified legacy six-role topology")
+    image_keys = set(role_images.values())
+    if not isinstance(images, dict) or set(images) != image_keys:
+        _fail("manifest image set does not match its runtime topology")
+    digests: dict[str, str] = {}
+    for key in sorted(image_keys):
+        repo = REPOSITORIES[key]
+        value = images.get(key, "")
+        prefix = repo + "@sha256:"
+        if not value.startswith(prefix) or not SHA256.fullmatch(value[len(prefix):]):
+            _fail(f"manifest has no immutable {key} image digest")
+        digests[key] = value[len(repo) + 1:]
+    if len(services) != len(role_images):
+        _fail("manifest contains duplicate or unexpected runtime roles")
+    for name, image_key in role_images.items():
         service = by_name[name]
         repo_digest = f"{REPOSITORIES[image_key]}@{digests[image_key]}"
         if (service.get("revision") != expected_sha or service.get("running") is not True
@@ -117,7 +135,8 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
             _fail(f"manifest runtime identity is inconsistent for {name}")
     return {"target_sha": expected_sha, "version": version, "manifest_sha256": manifest_sha,
             "digests": digests, "run_id": int(run_match.group(2)),
-            "run_attempt": int(attempt.get("runAttempt", 0)), "images": images}
+            "run_attempt": int(attempt.get("runAttempt", 0)), "images": images,
+            "topology": topology}
 
 
 def main() -> int:
@@ -139,9 +158,9 @@ def main() -> int:
     except (OSError, json.JSONDecodeError, ValueError) as error:
         print(f"GPOINT_ROLLBACK_EVIDENCE=BLOCKED reason={error}", file=sys.stderr)
         return 1
-    for key in ("target_sha", "version", "manifest_sha256", "run_id", "run_attempt"):
+    for key in ("target_sha", "version", "manifest_sha256", "run_id", "run_attempt", "topology"):
         print(f"{key}={evidence[key]}")
-    for image_key, digest in evidence["digests"].items():
+    for image_key, digest in sorted(evidence["digests"].items()):
         print(f"{image_key}_digest={digest}")
     return 0
 

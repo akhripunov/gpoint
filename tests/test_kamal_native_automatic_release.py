@@ -55,7 +55,7 @@ def test_release_event_routing_is_fail_closed_and_does_not_give_prs_prod_access(
     assert workflow["permissions"] == {"contents": "read"}
 
 
-def test_runtime_verify_rechecks_public_and_all_six_kamal_roles_after_deploy():
+def test_runtime_verify_rechecks_public_and_exact_four_gpoint_roles_after_deploy():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     deploy = workflow.split("  deploy:\n", 1)[1]
     deploy_step = deploy.index("name: Deploy exact immutable images with stock Kamal")
@@ -68,17 +68,36 @@ def test_runtime_verify_rechecks_public_and_all_six_kamal_roles_after_deploy():
         "gpoint-core-api",
         "gpoint-core-worker",
         "gpoint-core-bot",
-        "gpoint-agata-api",
-        "gpoint-agata-memory-worker",
         "gpoint-miniapp-web",
         "kamal-proxy",
         "shared_postgres_1",
         "shared_redis_1",
         "PRISMA_HEAD",
-        "AGATA_HEAD",
         "GPOINT_MEDIA_READ_WRITE=PASS",
     ):
         assert expected in verify
+    assert 'for prefix in gpoint-agata-api gpoint-agata-memory-worker' in verify
+    assert "GPOINT_PRESERVED_AGATA_DATABASE_HEAD" in verify
+
+
+def test_ordinary_native_deploy_never_restarts_or_requires_gpoint_agata():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    deploy = workflow.split("  deploy:\n", 1)[1].split("  backup_maintenance:\n", 1)[0]
+    apply = deploy.split("name: Deploy exact immutable images with stock Kamal", 1)[1].split(
+        "name: Verify public routes and exact running services", 1
+    )[0]
+    verify = deploy.split("name: Verify public routes and exact running services", 1)[1].split(
+        "name: Record GitHub Deployment result against the same attempt", 1
+    )[0]
+    assert "kamal deploy --skip-push --version \"$IMAGE_VERSION\" --roles api --config-file config/deploy.agata.yml" not in apply
+    assert "kamal deploy --skip-push --version \"$IMAGE_VERSION\" --roles memory-worker" not in apply
+    assert 'kamal app stop --roles "$role" --config-file config/deploy.agata.yml' in apply
+    assert "GPOINT_AGATA_QUEUE_DRAIN=PASS" in apply
+    assert "verify-kamal-optional-agata-role.sh" in apply
+    assert apply.index("REMOTE_DRAIN") < apply.index("KAMAL_ROLES=memory-worker")
+    assert "docker ps" not in apply
+    assert 'for prefix in gpoint-agata-api gpoint-agata-memory-worker' in verify
+    assert "AGATA_HEAD" in verify  # The preserved AGATA database head remains under drift protection.
 
 
 def test_production_preflight_accepts_historical_version_source_sha_split_but_checks_digest_identity():
@@ -114,16 +133,18 @@ def test_core_consumers_are_updated_one_role_at_a_time_and_partial_failure_fails
     )[0]
     worker = apply.index("KAMAL_ROLES=worker")
     bot = apply.index("KAMAL_ROLES=bot")
-    memory_worker = apply.index("KAMAL_ROLES=memory-worker")
-    assert worker < bot < memory_worker
-    for role in ("worker", "bot", "memory-worker"):
+    assert worker < bot
+    for role in ("worker", "bot"):
         stop = apply.index(f"kamal app stop --roles {role}")
         deploy_call = apply.index(f"kamal deploy --skip-push --version \"$IMAGE_VERSION\" --roles {role}")
         assert stop < deploy_call
     assert "KAMAL_ROLES=worker,bot" not in apply
     assert "verify_single_running_role gpoint-core-worker" in apply
     assert "verify_single_running_role gpoint-core-bot" in apply
-    assert "verify_single_running_role gpoint-agata-memory-worker" in apply
+    assert 'kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.agata.yml' not in apply
+    assert 'kamal deploy --skip-push --version "$IMAGE_VERSION" --roles memory-worker' not in apply
+    assert 'kamal app stop --roles "$role" --config-file config/deploy.agata.yml' in apply
+    assert "GPOINT_AGATA_QUEUE_DRAIN=PASS" in apply
     status = deploy.split("name: Record GitHub Deployment result against the same attempt", 1)[1]
     assert "RECOVERY_REQUIRED" in status
     assert "automatic rollback is prohibited" in status
@@ -350,11 +371,22 @@ def test_protected_rollback_uses_only_verified_prior_target_and_shared_lock():
     assert rollback["permissions"] == {"contents": "read", "packages": "read", "deployments": "write"}
     body = yaml.safe_dump(rollback)
     names = [step.get("name", step.get("uses", "")) for step in rollback["steps"]]
-    assert names.index("Validate linked build, successful Runtime Verify and six-role manifest") < names.index("Verify target digests, platform, revision and provenance")
+    assert names.index("Validate linked build, successful Runtime Verify and exact four-or-legacy-six role manifest") < names.index("Verify target digests, platform, revision and provenance")
     assert names.index("Verify target digests, platform, revision and provenance") < names.index("Verify live DB compatibility and retained target containers before mutation")
     assert names.index("Verify live DB compatibility and retained target containers before mutation") < names.index("Create rollback Deployment only after all target evidence passes")
     assert names.index("Create rollback Deployment only after all target evidence passes") < names.index("Roll back consumers and then APIs with stock Kamal")
     assert names.index("Roll back consumers and then APIs with stock Kamal") < names.index("Verify rollback Runtime and preserve databases before SUCCESS")
+    apply = next(step for step in rollback["steps"] if step.get("id") == "rollback_apply")
+    verify_step = next(step for step in rollback["steps"] if step.get("id") == "verify")
+    assert apply["env"]["EROS_PILOT_ACTIVE"] == "${{ steps.baseline.outputs.eros_pilot_active }}"
+    assert verify_step["env"]["TARGET_TOPOLOGY"] == "${{ steps.evidence.outputs.topology }}"
+    assert verify_step["env"]["EROS_PILOT_BASELINE_SHA256"] == "${{ steps.baseline.outputs.EROS_PILOT_BASELINE_SHA256 }}"
+    assert "TARGET_TOPOLOGY" in verify_step["run"]
+    assert "EROS_PILOT_ROLLBACK_PRESERVED=PASS" in verify_step["run"]
+    assert "active-after.json" in verify_step["run"]
+    assert "Remove only this rollback's temporary Eros verifier" in names
+    assert "legacy-six" in verify_step["run"] and "agata-free-four" in verify_step["run"]
+    assert "items+=(\"gpoint-agata-api" in verify_step["run"]
     for gate in (
         "rollback_target_sha", "rollback_deployment_id", "verify_native_rollback_evidence.py",
         "verify_native_image_readback.py", "verify_native_image_attestation.py",
@@ -364,6 +396,10 @@ def test_protected_rollback_uses_only_verified_prior_target_and_shared_lock():
         "RECOVERY_REQUIRED", "state=success",
     ):
         assert gate in body
+    assert "agata-free-four" in body
+    assert "legacy-six" in body
+    baseline = next(step for step in rollback["steps"] if step.get("id") == "baseline")
+    assert "legacy six-role rollback cannot reactivate AGATA while any Eros pilot state exists" in baseline["run"]
     events = workflow.get("on", workflow.get(True))
     inputs = events["workflow_dispatch"]["inputs"]
     assert "rollback" in inputs and inputs["rollback"]["default"] is False

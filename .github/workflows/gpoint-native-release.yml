@@ -54,6 +54,14 @@ on:
         description: Exact UUID of the single synthetic pilot creator
         required: false
         type: string
+      eros_pilot_policy_jurisdiction:
+        description: Exact jurisdiction of the active GPoint chat policy for the synthetic user
+        required: false
+        type: string
+      eros_pilot_policy_market:
+        description: Exact market of the active GPoint chat policy for the synthetic user
+        required: false
+        type: string
       approve_synthetic_eros_pilot_apply:
         description: Request the protected Synthetic Pilot Apply environment for this exact candidate
         required: true
@@ -125,11 +133,17 @@ jobs:
           SYNTHETIC_EROS_PILOT: ${{ inputs.synthetic_eros_pilot || false }}
           EROS_PILOT_TEST_USER_ID: ${{ inputs.eros_pilot_test_user_id || '' }}
           EROS_PILOT_TEST_CREATOR_ID: ${{ inputs.eros_pilot_test_creator_id || '' }}
+          EROS_PILOT_POLICY_JURISDICTION: ${{ inputs.eros_pilot_policy_jurisdiction || '' }}
+          EROS_PILOT_POLICY_MARKET: ${{ inputs.eros_pilot_policy_market || '' }}
           APPROVE_SYNTHETIC_EROS_PILOT_APPLY: ${{ inputs.approve_synthetic_eros_pilot_apply || false }}
           SYNTHETIC_EROS_PILOT_CLEANUP: ${{ inputs.synthetic_eros_pilot_cleanup || false }}
           APPROVE_SYNTHETIC_EROS_PILOT_CLEANUP: ${{ inputs.approve_synthetic_eros_pilot_cleanup || false }}
         run: |
           set -euo pipefail
+          if [[ "$APPROVE_SYNTHETIC_EROS_PILOT_APPLY" == true ]]; then
+            [[ "$EROS_PILOT_POLICY_JURISDICTION" =~ ^[A-Z0-9_-]{2,32}$ ]]
+            [[ "$EROS_PILOT_POLICY_MARKET" =~ ^[a-z0-9_-]{2,32}$ ]]
+          fi
           args=(--event "$EVENT_NAME" --ref "$EVENT_REF" --sha "$EVENT_SHA"
             --before "$EVENT_BEFORE"
             --candidate-sha "$REQUESTED_SHA" --actor "$EVENT_ACTOR"
@@ -295,6 +309,8 @@ jobs:
           PY
       - name: Run isolated PostgreSQL, SQLx migrations, API, Worker, memory and 15-turn chat E2E
         run: bash services/eros-engine/run-local-e2e.sh "gpoint-eros-pilot:${{ github.sha }}"
+      - name: Run isolated PostgreSQL GPoint consent and encrypted legacy-history migration E2E
+        run: python3 tests/integration/gpoint-agata-state-migration-docker.py --image pgvector/pgvector:0.8.6-pg16
       - name: Run Native PostgreSQL provisioning, SQLx, backup, restore and cleanup E2E
         env:
           EROS_PILOT_IMAGE: gpoint-eros-pilot:${{ github.sha }}
@@ -379,7 +395,7 @@ jobs:
           cache-to: type=gha,scope=gpoint-miniapp,mode=max
           sbom: true
           provenance: mode=max
-      - name: Build and publish immutable AGATA image
+      - name: Build and publish immutable AGATA compatibility image for isolated migration rehearsal
         id: agata
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -477,6 +493,8 @@ jobs:
       KAMAL_REGISTRY_PASSWORD: ${{ github.token }}
       EROS_PILOT_TEST_USER_ID: ${{ inputs.eros_pilot_test_user_id }}
       EROS_PILOT_TEST_CREATOR_ID: ${{ inputs.eros_pilot_test_creator_id }}
+      EROS_PILOT_POLICY_JURISDICTION: ${{ inputs.eros_pilot_policy_jurisdiction }}
+      EROS_PILOT_POLICY_MARKET: ${{ inputs.eros_pilot_policy_market }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -496,6 +514,8 @@ jobs:
           test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY"
           test "$CANDIDATE_SHA" = "$WORKFLOW_SHA"
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"
+          [[ "$EROS_PILOT_POLICY_JURISDICTION" =~ ^[A-Z0-9_-]{2,32}$ ]]
+          [[ "$EROS_PILOT_POLICY_MARKET" =~ ^[a-z0-9_-]{2,32}$ ]]
           EROS_PILOT_TEST_USER_ID="$EROS_PILOT_TEST_USER_ID" EROS_PILOT_TEST_CREATOR_ID="$EROS_PILOT_TEST_CREATOR_ID" \
             python3 scripts/native_release_intent.py --event workflow_dispatch --ref "$GITHUB_REF" \
               --sha "$WORKFLOW_SHA" --candidate-sha "$CANDIDATE_SHA" --actor "$OWNER_APPROVAL_ACTOR" \
@@ -558,8 +578,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
-          AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
-          MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
         run: bash scripts/eros-native-pilot-lifecycle.sh apply
       - name: Remove persistent Mac Ollama tunnel after failed Pilot Apply
         if: failure() || cancelled()
@@ -695,12 +713,11 @@ jobs:
       - name: Verify immutable image outputs for the requested candidate
         env:
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
-          AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
         run: |
           python3 - <<'PY'
           import os, re
-          for name in ('APP_DIGEST', 'AGATA_DIGEST', 'MINIAPP_DIGEST'):
+          for name in ('APP_DIGEST', 'MINIAPP_DIGEST'):
               if not re.fullmatch(r'sha256:[0-9a-f]{64}', os.environ[name]):
                   raise SystemExit(f'{name} is not an immutable digest')
           PY
@@ -709,14 +726,12 @@ jobs:
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
-          AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
         run: |
           set -euo pipefail
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           for item in \
             "ghcr.io/akhripunov/gpoint-runtime|$APP_DIGEST" \
-            "ghcr.io/akhripunov/gpoint-agata-runtime|$AGATA_DIGEST" \
             "ghcr.io/akhripunov/gpoint-miniapp|$MINIAPP_DIGEST"; do
             IFS='|' read -r repository digest <<< "$item"
             docker pull --platform linux/amd64 "$repository@$digest"
@@ -794,7 +809,7 @@ jobs:
             echo 'EROS_ACTIVE_STATE=PASS' >> "$GITHUB_STEP_SUMMARY"
           fi
           role_inventory="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - < "$GITHUB_WORKSPACE/scripts/verify-kamal-production-baseline.py")"
-          baseline_values="$(python3 -c 'import json,re,sys; d=json.loads(sys.argv[1]); assert set(d["roles"]) == {"gpoint-core-api","gpoint-core-worker","gpoint-core-bot","gpoint-agata-api","gpoint-agata-memory-worker","gpoint-miniapp-web"}; v=d["version"]; s=d["source_sha"]; assert re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+",v); assert re.fullmatch(r"[0-9a-f]{40}",s); print(v+"\t"+s)' "$role_inventory")"
+          baseline_values="$(python3 -c 'import json,re,sys; d=json.loads(sys.argv[1]); roles=set(d["roles"]); allowed=({"gpoint-core-api","gpoint-core-worker","gpoint-core-bot","gpoint-miniapp-web"},{"gpoint-core-api","gpoint-core-worker","gpoint-core-bot","gpoint-agata-api","gpoint-agata-memory-worker","gpoint-miniapp-web"}); assert roles in allowed, "unsupported or partial Native topology"; v=d["version"]; s=d["source_sha"]; assert re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+",v); assert re.fullmatch(r"[0-9a-f]{40}",s); print(v+"\t"+s)' "$role_inventory")"
           IFS=$'\t' read -r baseline_version baseline_source_sha <<< "$baseline_values"
           test -n "$baseline_version" && test -n "$baseline_source_sha"
           facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$baseline_version" "$baseline_source_sha" <<'REMOTE'
@@ -851,14 +866,11 @@ jobs:
         id: migration_baseline
         env:
           GH_TOKEN: ${{ github.token }}
-          APP_IMAGE: ghcr.io/akhripunov/gpoint-runtime@${{ needs.build.outputs.app_digest }}
-          AGATA_IMAGE: ghcr.io/akhripunov/gpoint-agata-runtime@${{ needs.build.outputs.agata_digest }}
           BASELINE_SOURCE_SHA: ${{ steps.topology.outputs.GPOINT_BASELINE_ROLE_SOURCE_SHA }}
         run: |
           set -euo pipefail
-          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$APP_IMAGE" "$AGATA_IMAGE" <<'REMOTE'
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s <<'REMOTE'
           set -euo pipefail
-          app_image="$1"; agata_image="$2"
           api_image="$(docker inspect --format '{{.Config.Image}}' "$(docker ps -q --filter 'name=^/gpoint-core-api-' | head -1)")"
           test -n "$api_image"
           current="$(docker run --rm --network shared_internal --env-file /opt/gpoint/env/production.env --workdir /app/apps/api "$api_image" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const failed=await db.$queryRawUnsafe("SELECT count(*)::int AS count FROM _prisma_migrations WHERE finished_at IS NULL AND rolled_back_at IS NULL");if(failed[0].count!==0)throw Error("unfinished Prisma migration exists");const rows=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const head=rows.length?rows[rows.length-1].migration_name:"NONE";const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head is not singular");console.log("PRISMA_HEAD="+head);console.log("PRISMA_MIGRATIONS="+rows.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+rows.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("READ_ONLY_DATABASE_BASELINE_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
@@ -920,7 +932,6 @@ jobs:
         id: kamal_apply
         env:
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
-          AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
           GPOINT_EROS_PILOT_ACTIVE: ${{ steps.topology.outputs.eros_pilot_active }}
         run: |
@@ -940,8 +951,6 @@ jobs:
           fi
           GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file "$api_config"
-          GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api \
-            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.agata.yml
           GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.miniapp.yml
           verify_single_running_role() {
@@ -956,15 +965,41 @@ jobs:
           GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles bot --config-file config/deploy.yml
           verify_single_running_role gpoint-core-bot "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
-          GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker kamal app stop --roles memory-worker --config-file config/deploy.agata.yml
-          GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker \
-            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles memory-worker --config-file config/deploy.agata.yml
-          verify_single_running_role gpoint-agata-memory-worker "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
+          for role in api; do
+            role_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$role" \
+              < "$GITHUB_WORKSPACE/scripts/verify-kamal-optional-agata-role.sh")"
+            if [[ "$role_state" == ROLE_PRESENT=true ]]; then
+              GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES="$role" \
+                kamal app stop --roles "$role" --config-file config/deploy.agata.yml
+            elif [[ "$role_state" != ROLE_PRESENT=false ]]; then
+              echo 'AGATA API role state was not classified' >&2; exit 1
+            fi
+          done
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$IMAGE_VERSION" <<'REMOTE_DRAIN'
+          set -euo pipefail
+          api="gpoint-core-api-$1"
+          test "$(docker inspect --format '{{.State.Running}}' "$api")" = true
+          for attempt in $(seq 1 40); do
+            pending="$(docker exec --workdir /app/apps/api "$api" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const r=await db.$queryRawUnsafe("SELECT count(*)::int AS count FROM agata.outbox_jobs o WHERE o.tenant_id IN (SELECT DISTINCT tenant_id FROM agata.users WHERE source_system = '\''gpoint'\'') AND o.state IN ('\''pending'\'','\''running'\'')");process.stdout.write(String(r[0].count))}catch(e){console.error("GPOINT_AGATA_QUEUE_DRAIN_CHECK_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
+            [[ "$pending" =~ ^[0-9]+$ ]]
+            if [[ "$pending" == 0 ]]; then echo GPOINT_AGATA_QUEUE_DRAIN=PASS; exit 0; fi
+            sleep 15
+          done
+          echo 'GPoint AGATA outbox did not drain before retirement; leaving memory worker running and failing closed' >&2
+          exit 1
+          REMOTE_DRAIN
+          worker_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- memory-worker \
+            < "$GITHUB_WORKSPACE/scripts/verify-kamal-optional-agata-role.sh")"
+          if [[ "$worker_state" == ROLE_PRESENT=true ]]; then
+            GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker \
+              kamal app stop --roles memory-worker --config-file config/deploy.agata.yml
+          elif [[ "$worker_state" != ROLE_PRESENT=false ]]; then
+            echo 'AGATA memory-worker role state was not classified after drain' >&2; exit 1
+          fi
       - name: Verify public routes and exact running services
         id: verify
         env:
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
-          AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
           DB_CONTAINER_ID: ${{ steps.topology.outputs.DB_CONTAINER_ID }}
           REDIS_CONTAINER_ID: ${{ steps.topology.outputs.REDIS_CONTAINER_ID }}
@@ -1010,11 +1045,11 @@ jobs:
           elif [[ "$GPOINT_EROS_PILOT_ACTIVE" != false ]]; then
             echo 'Eros topology classification is missing' >&2; exit 1
           fi
-          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$BASELINE_PRISMA_MIGRATIONS" "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "$BASELINE_AGATA_HEAD" "$BASELINE_ROLE_VERSION" "$BASELINE_ROLE_SOURCE_SHA" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" <<'REMOTE'
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$BASELINE_PRISMA_MIGRATIONS" "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "$BASELINE_AGATA_HEAD" "$BASELINE_ROLE_VERSION" "$BASELINE_ROLE_SOURCE_SHA" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" <<'REMOTE'
           set -euo pipefail
-          sha="$1"; version="$2"; app="$3"; agata="$4"; miniapp="$5"; db_id="$6"; redis_id="$7"; deployment_id="$8"; run_id="$9"; attempt="${10}"; writer="${11}"
-          expected_prisma_migrations="${12}"; expected_prisma_checksums="${13}"; expected_prisma_head="${14}"; expected_agata_head="${15}"
-          BASELINE_ROLE_VERSION="${16}"; BASELINE_ROLE_SOURCE_SHA="${17}"; DB_MOUNTS_SHA256="${18}"; REDIS_MOUNTS_SHA256="${19}"
+          sha="$1"; version="$2"; app="$3"; miniapp="$4"; db_id="$5"; redis_id="$6"; deployment_id="$7"; run_id="$8"; attempt="${9}"; writer="${10}"
+          expected_prisma_migrations="${11}"; expected_prisma_checksums="${12}"; expected_prisma_head="${13}"; expected_agata_head="${14}"
+          BASELINE_ROLE_VERSION="${15}"; BASELINE_ROLE_SOURCE_SHA="${16}"; DB_MOUNTS_SHA256="${17}"; REDIS_MOUNTS_SHA256="${18}"
           [[ "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
           [[ "$writer" == "/run/gpoint-ordinary-manifest-${run_id}-${attempt}.py" ]]
           test -s "$writer"
@@ -1038,8 +1073,6 @@ jobs:
             "gpoint-core-api|ghcr.io/akhripunov/gpoint-runtime|$app" \
             "gpoint-core-worker|ghcr.io/akhripunov/gpoint-runtime|$app" \
             "gpoint-core-bot|ghcr.io/akhripunov/gpoint-runtime|$app" \
-            "gpoint-agata-api|ghcr.io/akhripunov/gpoint-agata-runtime|$agata" \
-            "gpoint-agata-memory-worker|ghcr.io/akhripunov/gpoint-agata-runtime|$agata" \
             "gpoint-miniapp-web|ghcr.io/akhripunov/gpoint-miniapp|$miniapp"; do
             IFS='|' read -r prefix repository digest <<< "$item"
             container="$(docker ps -q --filter "name=^/${prefix}-${version}$")"
@@ -1069,9 +1102,11 @@ jobs:
           docker exec "gpoint-core-api-$version" node -e "fetch('http://127.0.0.1:3000/health/live').then(async r => { if (!r.ok || (await r.json()).status !== 'ok') process.exit(1) }).catch(() => process.exit(1))"
           docker top "gpoint-core-worker-$version" -eo pid,args | grep -F "apps/worker/dist/main.js"
           docker top "gpoint-core-bot-$version" -eo pid,args | grep -F "apps/bot/dist/main.js"
-          docker exec "gpoint-agata-api-$version" python -c "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/health/ready',timeout=3); assert r.status == 200"
-          docker exec "gpoint-agata-memory-worker-$version" python -m app.memory.worker --healthcheck
           docker exec "gpoint-miniapp-web-$version" wget --spider --quiet http://127.0.0.1/
+          for prefix in gpoint-agata-api gpoint-agata-memory-worker; do
+            running="$(docker ps -q --filter "name=^/${prefix}-")"
+            test -z "$running" || { echo "retired GPoint AGATA role is still running: $prefix" >&2; exit 1; }
+          done
           docker exec "gpoint-core-api-$version" node -e 'const fs=require("node:fs");const crypto=require("node:crypto");const p="/data/media/.gpoint-runtime-verify-"+crypto.randomUUID();let created=false;try{fs.writeFileSync(p,"gpoint-media-read-write-pass",{flag:"wx"});created=true;if(fs.readFileSync(p,"utf8")!=="gpoint-media-read-write-pass")process.exit(1)}finally{if(created)fs.unlinkSync(p)}'
           media_mounts="$(docker inspect "gpoint-core-api-$version" --format '{{json .Mounts}}')"
           python3 - "$media_mounts" <<'PY'
@@ -1101,7 +1136,7 @@ jobs:
           test "$prisma_head" = "$expected_prisma_head" || { echo 'Prisma head changed during ordinary deploy' >&2; exit 1; }
           test "$agata_head" = "$expected_agata_head" || { echo 'AGATA head changed during ordinary deploy' >&2; exit 1; }
           echo "GPOINT_RUNTIME_PRISMA_HEAD=$prisma_head"
-          echo "GPOINT_RUNTIME_AGATA_HEAD=$agata_head"
+          echo "GPOINT_PRESERVED_AGATA_DATABASE_HEAD=$agata_head"
           for service in gsales-api gsales-agata-api gsales-agata-memory-worker; do
             ids="$(docker ps -aq --filter "label=com.docker.compose.service=$service")"
             test -n "$ids" || { echo "Expected stopped GSales service is missing: $service" >&2; exit 1; }
@@ -1127,7 +1162,7 @@ jobs:
           test ! -e "$manifest"
           writer_output="$(python3 "$writer" --mode ordinary --output "$manifest" \
             --sha "$sha" --app-source-sha "$sha" --version "$version" \
-            --app-digest "$app" --agata-digest "$agata" \
+            --app-digest "$app" \
             --miniapp-digest "$miniapp" --run-id "$run_id" --attempt "$attempt" \
             --deployment-id "$deployment_id" --db-container-id "$db_id" \
             --redis-container-id "$redis_id" --prisma-head "$prisma_head" --agata-head "$agata_head" \
@@ -1204,6 +1239,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Require exact current main and owner-selected previous deployment
         env:
@@ -1304,7 +1340,7 @@ jobs:
           )"
           printf '%s' "$encoded" | base64 --decode > "$RUNNER_TEMP/gpoint-rollback/manifest.json"
           echo "manifest_sha=$manifest_sha" >> "$GITHUB_OUTPUT"
-      - name: Validate linked build, successful Runtime Verify and six-role manifest
+      - name: Validate linked build, successful Runtime Verify and exact four-or-legacy-six role manifest
         id: evidence
         env:
           TARGET_SHA: ${{ inputs.rollback_target_sha }}
@@ -1334,12 +1370,17 @@ jobs:
           CORE_DIGEST: ${{ steps.evidence.outputs.core_digest }}
           AGATA_DIGEST: ${{ steps.evidence.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ steps.evidence.outputs.miniapp_digest }}
+          TARGET_TOPOLOGY: ${{ steps.evidence.outputs.topology }}
         run: |
           set -euo pipefail
-          for item in \
-            "core|ghcr.io/akhripunov/gpoint-runtime|$CORE_DIGEST" \
-            "agata|ghcr.io/akhripunov/gpoint-agata-runtime|$AGATA_DIGEST" \
-            "miniapp|ghcr.io/akhripunov/gpoint-miniapp|$MINIAPP_DIGEST"; do
+          items=("core|ghcr.io/akhripunov/gpoint-runtime|$CORE_DIGEST" "miniapp|ghcr.io/akhripunov/gpoint-miniapp|$MINIAPP_DIGEST")
+          if [[ "$TARGET_TOPOLOGY" == legacy-six ]]; then
+            [[ "$AGATA_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+            items+=("agata|ghcr.io/akhripunov/gpoint-agata-runtime|$AGATA_DIGEST")
+          elif [[ "$TARGET_TOPOLOGY" != agata-free-four || -n "$AGATA_DIGEST" ]]; then
+            echo 'rollback evidence topology is missing or inconsistent' >&2; exit 1
+          fi
+          for item in "${items[@]}"; do
             IFS='|' read -r role repository digest <<< "$item"
             docker pull --platform linux/amd64 "$repository@$digest"
             docker image inspect "$repository@$digest" > "$RUNNER_TEMP/gpoint-rollback/$role-image.json"
@@ -1358,22 +1399,45 @@ jobs:
         env:
           TARGET_SHA: ${{ inputs.rollback_target_sha }}
           TARGET_VERSION: ${{ steps.evidence.outputs.version }}
+          TARGET_TOPOLOGY: ${{ steps.evidence.outputs.topology }}
+          EROS_PILOT_ACTIVE: ${{ steps.baseline.outputs.eros_pilot_active }}
+          EROS_PILOT_ACTIVE: ${{ steps.baseline.outputs.eros_pilot_active }}
           CORE_DIGEST: ${{ steps.evidence.outputs.core_digest }}
           AGATA_DIGEST: ${{ steps.evidence.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ steps.evidence.outputs.miniapp_digest }}
         run: |
           set -euo pipefail
-          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$TARGET_SHA" "$TARGET_VERSION" "$CORE_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" <<'REMOTE'
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$TARGET_SHA" "$TARGET_VERSION" "$TARGET_TOPOLOGY" "$CORE_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" <<'REMOTE'
           set -euo pipefail
-          sha="$1"; version="$2"; core="ghcr.io/akhripunov/gpoint-runtime@$3"; agata="ghcr.io/akhripunov/gpoint-agata-runtime@$4"; miniapp="ghcr.io/akhripunov/gpoint-miniapp@$5"
+          sha="$1"; version="$2"; topology="$3"; core="ghcr.io/akhripunov/gpoint-runtime@$4"; agata_digest="$5"; miniapp="ghcr.io/akhripunov/gpoint-miniapp@$6"
           [[ "$sha" =~ ^[0-9a-f]{40}$ && "$version" == "$sha"-* ]]
+          if [[ "$topology" == agata-free-four ]]; then
+            [[ -z "$agata_digest" ]]
+          elif [[ "$topology" == legacy-six ]]; then
+            [[ "$agata_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            eros_db="$(docker exec shared_postgres_1 psql -U postgres -d postgres -Atc "SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_database WHERE datname='eros') THEN 'present' ELSE 'absent' END")"
+            [[ "$eros_db" == present || "$eros_db" == absent ]]
+            if [[ -e /opt/gpoint/env/eros-pilot-state.json || -L /opt/gpoint/env/eros-pilot-state.json ]] \
+              || [[ -n "$(docker ps -aq --filter 'name=^/gpoint-eros-engine-')" ]] \
+              || [[ -n "$(docker ps -aq --filter 'name=^/gpoint-eros-embedding-relay-')" ]] \
+              || [[ "$eros_db" == present ]]; then
+              echo 'legacy six-role rollback cannot reactivate AGATA while any Eros pilot state exists' >&2; exit 1
+            fi
+            agata="ghcr.io/akhripunov/gpoint-agata-runtime@$agata_digest"
+          else
+            echo 'rollback topology is missing or unsupported' >&2; exit 1
+          fi
           test "$(docker inspect --format '{{.State.Running}}' kamal-proxy)" = true
           test "$(docker inspect --format '{{.State.Running}}' shared_postgres_1)" = true
           test "$(docker inspect --format '{{.State.Running}}' shared_redis_1)" = true
           echo "DB_CONTAINER_ID=$(docker inspect --format '{{.Id}}' shared_postgres_1)"
           echo "REDIS_CONTAINER_ID=$(docker inspect --format '{{.Id}}' shared_redis_1)"
           live_version=""; live_source_sha=""
-          for item in "gpoint-core-api|$core" "gpoint-core-worker|$core" "gpoint-core-bot|$core" "gpoint-agata-api|$agata" "gpoint-agata-memory-worker|$agata" "gpoint-miniapp-web|$miniapp"; do
+          items=("gpoint-core-api|$core" "gpoint-core-worker|$core" "gpoint-core-bot|$core" "gpoint-miniapp-web|$miniapp")
+          if [[ "$topology" == legacy-six ]]; then
+            items+=("gpoint-agata-api|$agata" "gpoint-agata-memory-worker|$agata")
+          fi
+          for item in "${items[@]}"; do
             IFS='|' read -r prefix expected_image <<< "$item"
             current="$(docker ps -q --filter "name=^/${prefix}-")"
             test "$(wc -l <<< "$current" | tr -d ' ')" = 1
@@ -1394,12 +1458,50 @@ jobs:
           echo "REDIS_MOUNTS_SHA256=$redis_mounts"
           echo "BASELINE_ROLE_VERSION=$live_version"
           echo "BASELINE_ROLE_SOURCE_SHA=$live_source_sha"
+          echo "TARGET_TOPOLOGY=$topology"
           current_api="$(docker ps -q --filter 'name=^/gpoint-core-api-')"
           current_db="$(docker exec --workdir /app/apps/api "$current_api" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const r=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const a=await db.$queryRawUnsafe("SELECT version_num FROM agata.alembic_version");if(a.length!==1)throw Error("AGATA head not singular");console.log("PRISMA_HEAD="+(r.length?r[r.length-1].migration_name:"NONE"));console.log("PRISMA_MIGRATIONS="+r.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+r.map(x=>x.migration_name+"="+x.checksum).join(","));console.log("AGATA_HEAD="+a[0].version_num)}catch(e){console.error("READ_ONLY_DB_CHECK_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
           printf '%s\n' "$current_db"
           REMOTE
           )"
           printf '%s\n' "$facts" > "$RUNNER_TEMP/gpoint-rollback/live-db.txt"
+          eros_remote_dir="/run/gpoint-eros-rollback-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$eros_remote_dir" <<'REMOTE_EROS_DIR'
+          set -euo pipefail
+          [[ "$1" =~ ^/run/gpoint-eros-rollback-[0-9]+-[0-9]+$ ]]
+          test ! -e "$1"
+          install -d -o root -g root -m 0700 "$1"
+          REMOTE_EROS_DIR
+          echo "EROS_REMOTE_DIR=$eros_remote_dir" >> "$GITHUB_OUTPUT"
+          scp -p scripts/verify-kamal-eros-pilot-runtime.py "root@${GPOINT_PRODUCTION_HOST}:$eros_remote_dir/verify-kamal-eros-pilot-runtime.py"
+          verifier_sha="$(sha256sum scripts/verify-kamal-eros-pilot-runtime.py | awk '{print $1}')"
+          test "$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" sha256sum "$eros_remote_dir/verify-kamal-eros-pilot-runtime.py" | awk '{print $1}')" = "$verifier_sha"
+          if ssh -T "root@${GPOINT_PRODUCTION_HOST}" test -e /opt/gpoint/env/eros-pilot-state.json; then
+            [[ "$TARGET_TOPOLOGY" == agata-free-four ]] || { echo 'legacy six-role rollback is incompatible with installed Eros' >&2; exit 1; }
+            pilot_sha="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 -c 'import json,pathlib,re; p=pathlib.Path("/opt/gpoint/env/eros-pilot-state.json"); s=p.stat(); assert not p.is_symlink() and s.st_uid==0 and s.st_mode&0o077==0 and s.st_nlink==1; x=json.loads(p.read_text()); v=x.get("sourceSha",""); assert x.get("schema")=="gpoint-eros-native-pilot-state/v1" and re.fullmatch(r"[0-9a-f]{40}",v); print(v)')"
+            python3 scripts/eros_native_release_compatibility.py --pilot-sha "$pilot_sha" --candidate-sha "$TARGET_SHA"
+            eros_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 "$eros_remote_dir/verify-kamal-eros-pilot-runtime.py" --output "$eros_remote_dir/active-before.json")"
+            eros_baseline="$(sed -n 's/^EROS_ACTIVE_STATE=PASS sha256=//p' <<< "$eros_state")"
+            [[ "$eros_baseline" =~ ^[0-9a-f]{64}$ ]]
+            echo 'eros_pilot_active=true' >> "$GITHUB_OUTPUT"
+            echo "EROS_PILOT_SOURCE_SHA=$pilot_sha" >> "$GITHUB_OUTPUT"
+            echo "EROS_PILOT_BASELINE_SHA256=$eros_baseline" >> "$GITHUB_OUTPUT"
+          else
+            eros_footprint="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s <<'REMOTE_EROS_ABSENT'
+          set -euo pipefail
+          test ! -L /opt/gpoint/env/eros-pilot-state.json
+          test -z "$(docker ps -aq --filter 'name=^/gpoint-eros-')"
+          db="$(docker exec shared_postgres_1 sh -ec 'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres -c "SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_database WHERE datname = '\''eros'\'') THEN '\''present'\'' ELSE '\''absent'\'' END"')"
+          [[ "$db" == absent ]]
+          for network in gpoint_eros_data gpoint_eros_embeddings; do
+            if docker network inspect "$network" >/dev/null 2>&1; then echo "unexpected Eros network: $network" >&2; exit 1; fi
+          done
+          echo EROS_PILOT_STATE=ABSENT
+          REMOTE_EROS_ABSENT
+          )"
+            grep -Fx 'EROS_PILOT_STATE=ABSENT' <<< "$eros_footprint"
+            echo 'eros_pilot_active=false' >> "$GITHUB_OUTPUT"
+          fi
           python3 "$GITHUB_WORKSPACE/scripts/verify-kamal-migration-parity.py" \
             --prisma-directory "$GITHUB_WORKSPACE/rollback-source/packages/db/prisma/migrations" \
             --prisma-current-migrations "$(sed -n 's/^PRISMA_MIGRATIONS=//p' <<< "$facts")" \
@@ -1409,7 +1511,7 @@ jobs:
             --agata-current-head "$(sed -n 's/^AGATA_HEAD=//p' <<< "$facts")"
           grep -Eq '^BASELINE_ROLE_VERSION=[0-9a-f]{40}-[0-9]+-[0-9]+$' <<< "$facts"
           grep -Eq '^BASELINE_ROLE_SOURCE_SHA=[0-9a-f]{40}$' <<< "$facts"
-          while IFS='=' read -r key value; do case "$key" in DB_CONTAINER_ID|REDIS_CONTAINER_ID|DB_MOUNTS_SHA256|REDIS_MOUNTS_SHA256|BASELINE_ROLE_VERSION|BASELINE_ROLE_SOURCE_SHA) echo "$key=$value" >> "$GITHUB_OUTPUT" ;; esac; done <<< "$facts"
+          while IFS='=' read -r key value; do case "$key" in DB_CONTAINER_ID|REDIS_CONTAINER_ID|DB_MOUNTS_SHA256|REDIS_MOUNTS_SHA256|BASELINE_ROLE_VERSION|BASELINE_ROLE_SOURCE_SHA|TARGET_TOPOLOGY) echo "$key=$value" >> "$GITHUB_OUTPUT" ;; esac; done <<< "$facts"
       - name: Create rollback Deployment only after all target evidence passes
         id: deployment
         env:
@@ -1429,6 +1531,8 @@ jobs:
         env:
           TARGET_SHA: ${{ inputs.rollback_target_sha }}
           TARGET_VERSION: ${{ steps.evidence.outputs.version }}
+          TARGET_TOPOLOGY: ${{ steps.evidence.outputs.topology }}
+          EROS_PILOT_ACTIVE: ${{ steps.baseline.outputs.eros_pilot_active }}
           CORE_DIGEST: ${{ steps.evidence.outputs.core_digest }}
           AGATA_DIGEST: ${{ steps.evidence.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ steps.evidence.outputs.miniapp_digest }}
@@ -1445,26 +1549,42 @@ jobs:
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$1" "$TARGET_VERSION" "$TARGET_SHA" \
               < "$GITHUB_WORKSPACE/scripts/verify-kamal-role.sh"
           }
+          api_config=config/deploy.yml
+          if [[ "$EROS_PILOT_ACTIVE" == true ]]; then api_config=config/deploy.eros-api.yml; \
+          elif [[ "$EROS_PILOT_ACTIVE" != false ]]; then echo 'Eros state was not classified before rollback' >&2; exit 1; fi
           GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker kamal app stop --roles worker --config-file config/deploy.yml
           GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker kamal rollback "$TARGET_VERSION" --roles worker --config-file config/deploy.yml
           verify_role gpoint-core-worker
           GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot kamal app stop --roles bot --config-file config/deploy.yml
           GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot kamal rollback "$TARGET_VERSION" --roles bot --config-file config/deploy.yml
           verify_role gpoint-core-bot
-          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker kamal app stop --roles memory-worker --config-file config/deploy.agata.yml
-          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker kamal rollback "$TARGET_VERSION" --roles memory-worker --config-file config/deploy.agata.yml
-          verify_role gpoint-agata-memory-worker
           GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web kamal rollback "$TARGET_VERSION" --roles web --config-file config/deploy.miniapp.yml
           verify_role gpoint-miniapp-web
-          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api kamal rollback "$TARGET_VERSION" --roles api --config-file config/deploy.agata.yml
-          verify_role gpoint-agata-api
-          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api kamal rollback "$TARGET_VERSION" --roles api --config-file config/deploy.yml
+          if [[ "$TARGET_TOPOLOGY" == legacy-six ]]; then
+            GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker kamal app stop --roles memory-worker --config-file config/deploy.agata.yml
+            GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker kamal rollback "$TARGET_VERSION" --roles memory-worker --config-file config/deploy.agata.yml
+            verify_role gpoint-agata-memory-worker
+            GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api kamal rollback "$TARGET_VERSION" --roles api --config-file config/deploy.agata.yml
+            verify_role gpoint-agata-api
+          else
+            for role in api memory-worker; do
+              role_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$role" \
+                < "$GITHUB_WORKSPACE/scripts/verify-kamal-optional-agata-role.sh")"
+              if [[ "$role_state" == ROLE_PRESENT=true ]]; then
+                GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES="$role" kamal app stop --roles "$role" --config-file config/deploy.agata.yml
+              elif [[ "$role_state" != ROLE_PRESENT=false ]]; then
+                echo "AGATA $role state was not classified before rollback" >&2; exit 1
+              fi
+            done
+          fi
+          GPOINT_COMMIT_SHA="$TARGET_SHA" GPOINT_APP_SOURCE_SHA="$TARGET_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api kamal rollback "$TARGET_VERSION" --roles api --config-file "$api_config"
           verify_role gpoint-core-api
       - name: Verify rollback Runtime and preserve databases before SUCCESS
         id: verify
         env:
           TARGET_SHA: ${{ inputs.rollback_target_sha }}
           TARGET_VERSION: ${{ steps.evidence.outputs.version }}
+          TARGET_TOPOLOGY: ${{ steps.evidence.outputs.topology }}
           CORE_DIGEST: ${{ steps.evidence.outputs.core_digest }}
           AGATA_DIGEST: ${{ steps.evidence.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ steps.evidence.outputs.miniapp_digest }}
@@ -1472,6 +1592,10 @@ jobs:
           REDIS_CONTAINER_ID: ${{ steps.baseline.outputs.REDIS_CONTAINER_ID }}
           DB_MOUNTS_SHA256: ${{ steps.baseline.outputs.DB_MOUNTS_SHA256 }}
           REDIS_MOUNTS_SHA256: ${{ steps.baseline.outputs.REDIS_MOUNTS_SHA256 }}
+          EROS_PILOT_ACTIVE: ${{ steps.baseline.outputs.eros_pilot_active }}
+          EROS_PILOT_SOURCE_SHA: ${{ steps.baseline.outputs.EROS_PILOT_SOURCE_SHA }}
+          EROS_PILOT_BASELINE_SHA256: ${{ steps.baseline.outputs.EROS_PILOT_BASELINE_SHA256 }}
+          EROS_REMOTE_DIR: ${{ steps.baseline.outputs.EROS_REMOTE_DIR }}
           ROLLBACK_DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
         run: |
           set -euo pipefail
@@ -1480,16 +1604,21 @@ jobs:
           media_body="$RUNNER_TEMP/gpoint-rollback/media-route.json"
           media_status="$(curl --retry 5 --retry-connrefused --retry-delay 2 --silent --show-error --output "$media_body" --write-out '%{http_code}' https://gpoint.one/media/assets/kamal-route-verification-missing)"
           test "$media_status" = 404 && grep -Fq '"message":"media not found"' "$media_body"
-          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$TARGET_SHA" "$TARGET_VERSION" "$CORE_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" <<'REMOTE'
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$TARGET_SHA" "$TARGET_VERSION" "$TARGET_TOPOLOGY" "$CORE_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" <<'REMOTE'
           set -euo pipefail
-          sha="$1"; version="$2"; dbid="$6"; redisid="$7"; dbmount="$8"; redismount="$9"
+          sha="$1"; version="$2"; topology="$3"; dbid="$7"; redisid="$8"; dbmount="$9"; redismount="${10}"
           test "$(docker inspect --format '{{.Id}}' shared_postgres_1)" = "$dbid"
           test "$(docker inspect --format '{{.Id}}' shared_redis_1)" = "$redisid"
           test "$(docker inspect --format '{{.State.Running}}' shared_postgres_1)" = true
           test "$(docker inspect --format '{{.State.Running}}' shared_redis_1)" = true
           test "$(docker inspect --format '{{.State.Running}}' kamal-proxy)" = true
           test "$(docker ps -q --filter 'name=^/kamal-proxy$' | wc -l | tr -d ' ')" = 1
-          for item in "gpoint-core-api|ghcr.io/akhripunov/gpoint-runtime@$3" "gpoint-core-worker|ghcr.io/akhripunov/gpoint-runtime@$3" "gpoint-core-bot|ghcr.io/akhripunov/gpoint-runtime@$3" "gpoint-agata-api|ghcr.io/akhripunov/gpoint-agata-runtime@$4" "gpoint-agata-memory-worker|ghcr.io/akhripunov/gpoint-agata-runtime@$4" "gpoint-miniapp-web|ghcr.io/akhripunov/gpoint-miniapp@$5"; do
+          items=("gpoint-core-api|ghcr.io/akhripunov/gpoint-runtime@$4" "gpoint-core-worker|ghcr.io/akhripunov/gpoint-runtime@$4" "gpoint-core-bot|ghcr.io/akhripunov/gpoint-runtime@$4" "gpoint-miniapp-web|ghcr.io/akhripunov/gpoint-miniapp@$6")
+          if [[ "$topology" == legacy-six ]]; then
+            [[ "$5" =~ ^sha256:[0-9a-f]{64}$ ]]
+            items+=("gpoint-agata-api|ghcr.io/akhripunov/gpoint-agata-runtime@$5" "gpoint-agata-memory-worker|ghcr.io/akhripunov/gpoint-agata-runtime@$5")
+          elif [[ "$topology" != agata-free-four || -n "$5" ]]; then echo 'rollback topology/digest mismatch' >&2; exit 1; fi
+          for item in "${items[@]}"; do
             IFS='|' read -r prefix expected <<< "$item"
             name="$prefix-$version"
             test "$(docker ps -q --filter "name=^/${prefix}-" | wc -l | tr -d ' ')" = 1
@@ -1507,10 +1636,14 @@ jobs:
           test "$(docker exec "gpoint-core-bot-$version" node -p 'process.env.RELEASE_SHA || ""')" = "$TARGET_SHA"
           docker top "gpoint-core-worker-$version" -eo pid,args | grep -F "apps/worker/dist/main.js"
           docker top "gpoint-core-bot-$version" -eo pid,args | grep -F "apps/bot/dist/main.js"
-          docker exec "gpoint-agata-api-$version" python -c "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8000/health/ready',timeout=3).status==200"
-          docker exec "gpoint-agata-memory-worker-$version" python -m app.memory.worker --healthcheck
-          test "$(docker exec "gpoint-agata-api-$version" python -c 'import os; print(os.environ.get("RELEASE_SHA", ""))')" = "$TARGET_SHA"
-          test "$(docker exec "gpoint-agata-memory-worker-$version" python -c 'import os; print(os.environ.get("RELEASE_SHA", ""))')" = "$TARGET_SHA"
+          if [[ "$topology" == legacy-six ]]; then
+            docker exec "gpoint-agata-api-$version" python -c "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8000/health/ready',timeout=3).status==200"
+            docker exec "gpoint-agata-memory-worker-$version" python -m app.memory.worker --healthcheck
+            test "$(docker exec "gpoint-agata-api-$version" python -c 'import os; print(os.environ.get("RELEASE_SHA", ""))')" = "$TARGET_SHA"
+            test "$(docker exec "gpoint-agata-memory-worker-$version" python -c 'import os; print(os.environ.get("RELEASE_SHA", ""))')" = "$TARGET_SHA"
+          else
+            for role in api memory-worker; do test -z "$(docker ps -q --filter "name=^/gpoint-agata-$role-")"; done
+          fi
           docker exec "gpoint-miniapp-web-$version" wget --spider --quiet http://127.0.0.1/
           docker exec "gpoint-core-api-$version" node -e 'const fs=require("node:fs");const p="/data/media/.gpoint-rollback-"+require("node:crypto").randomUUID();let created=false;try{fs.writeFileSync(p,"ok",{flag:"wx"});created=true;if(fs.readFileSync(p,"utf8")!=="ok")process.exit(1)}finally{if(created)fs.unlinkSync(p)}'
           media_mounts="$(docker inspect "gpoint-core-api-$version" --format '{{json .Mounts}}')"
@@ -1534,9 +1667,42 @@ jobs:
             --prisma-current-head "$(sed -n 's/^PRISMA_HEAD=//p' <<< "$facts")" \
             --agata-directory "$GITHUB_WORKSPACE/rollback-source/services/agata/migrations/versions" \
             --agata-current-head "$(sed -n 's/^AGATA_HEAD=//p' <<< "$facts")"
+          if [[ "$EROS_PILOT_ACTIVE" == true ]]; then
+            [[ "$TARGET_TOPOLOGY" == agata-free-four && "$EROS_PILOT_SOURCE_SHA" =~ ^[0-9a-f]{40}$ && "$EROS_PILOT_BASELINE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            eros_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 "$EROS_REMOTE_DIR/verify-kamal-eros-pilot-runtime.py" --output "$EROS_REMOTE_DIR/active-after.json")"
+            grep -Eq "^EROS_ACTIVE_STATE=PASS sha256=${EROS_PILOT_BASELINE_SHA256}$" <<< "$eros_state"
+            ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); assert x["pilot"]["sourceSha"]==sys.argv[2]' "$EROS_REMOTE_DIR/active-after.json" "$EROS_PILOT_SOURCE_SHA"
+            echo EROS_PILOT_ROLLBACK_PRESERVED=PASS >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$EROS_PILOT_ACTIVE" == false ]]; then
+            ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s <<'REMOTE_EROS_ABSENT_AFTER'
+          set -euo pipefail
+          test ! -e /opt/gpoint/env/eros-pilot-state.json && test ! -L /opt/gpoint/env/eros-pilot-state.json
+          test -z "$(docker ps -aq --filter 'name=^/gpoint-eros-')"
+          db="$(docker exec shared_postgres_1 sh -ec 'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres -c "SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_database WHERE datname = '\''eros'\'') THEN '\''present'\'' ELSE '\''absent'\'' END"')"
+          [[ "$db" == absent ]]
+          for network in gpoint_eros_data gpoint_eros_embeddings; do if docker network inspect "$network" >/dev/null 2>&1; then exit 1; fi; done
+          REMOTE_EROS_ABSENT_AFTER
+          else
+            echo 'Eros pilot state was not classified for rollback verify' >&2; exit 1
+          fi
           id="$ROLLBACK_DEPLOYMENT_ID"
           gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$id/statuses" -f state=success -f environment=production -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" -f description="Kamal rollback SUCCESS SHA $TARGET_SHA" >/dev/null
           echo "GPOINT_ROLLBACK_VERIFY=PASS SHA=$TARGET_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove only this rollback's temporary Eros verifier
+        if: always() && steps.baseline.outputs.EROS_REMOTE_DIR != ''
+        env:
+          EROS_REMOTE_DIR: ${{ steps.baseline.outputs.EROS_REMOTE_DIR }}
+        run: |
+          set -euo pipefail
+          [[ "$EROS_REMOTE_DIR" =~ ^/run/gpoint-eros-rollback-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}$ ]]
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$EROS_REMOTE_DIR" <<'REMOTE_CLEANUP'
+          set -euo pipefail
+          path="$1"
+          [[ "$path" =~ ^/run/gpoint-eros-rollback-[0-9]+-[0-9]+$ ]]
+          test -d "$path" && test ! -L "$path"
+          find "$path" -mindepth 1 -maxdepth 1 -type f -delete
+          rmdir "$path"
+          REMOTE_CLEANUP
       - name: Mark failed partial rollback for read-only recovery
         if: always() && steps.deployment.outputs.id != '' && steps.verify.outcome != 'success'
         env:

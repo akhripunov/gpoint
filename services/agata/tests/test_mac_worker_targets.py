@@ -13,9 +13,9 @@ import gpoint_mac_worker as worker
 from agata_worker_pool import PoolConfig, PoolPaths, PoolSupervisor
 
 ENV = {
-    "GPOINT_AGATA_WORKER_URL": "https://gpoint.one/api/agata-worker",
-    "GPOINT_AGATA_WORKER_TOKEN": "point-private",
-    "GPOINT_AGATA_TENANT_ID": "81a4ba28-6de5-4b03-8332-0661ba4d46f4",
+    "GPOINT_EROS_WORKER_URL": "https://gpoint.one/api/gpoint-worker",
+    "GPOINT_EROS_WORKER_TOKEN": "point-private",
+    "GPOINT_EROS_TENANT_ID": "81a4ba28-6de5-4b03-8332-0661ba4d46f4",
     "GSALES_AGATA_WORKER_URL": "https://sales.example/worker",
     "GSALES_AGATA_WORKER_TOKEN": "sales-private",
     "GSALES_AGATA_TENANT_ID": "c4d67889-877e-4d1b-a8d8-597c479d638f",
@@ -27,7 +27,7 @@ def test_tenant_bindings_are_trusted_runtime_config_not_source_constants():
     isolated_sales = "1a461346-f069-4b73-b80e-582cc64b0231"
     config = {
         **ENV,
-        "GPOINT_AGATA_TENANT_ID": isolated_point,
+        "GPOINT_EROS_TENANT_ID": isolated_point,
         "GSALES_AGATA_TENANT_ID": isolated_sales,
     }
     with patch.dict(os.environ, config):
@@ -36,7 +36,7 @@ def test_tenant_bindings_are_trusted_runtime_config_not_source_constants():
             "GSALES": isolated_sales,
         }
 
-    with patch.dict(os.environ, {**config, "GPOINT_AGATA_TENANT_ID": "invalid"}):
+    with patch.dict(os.environ, {**config, "GPOINT_EROS_TENANT_ID": "invalid"}):
         with pytest.raises(worker.FatalConfigurationError, match="worker_tenant_binding_invalid"):
             worker.configured_tenant_bindings()
     with patch.dict(os.environ, {**config, "GSALES_AGATA_TENANT_ID": isolated_point}):
@@ -51,7 +51,7 @@ def test_legacy_gpoint_sidecar_binds_identity_to_installed_worker_hash(tmp_path,
         "version": 1,
         "candidate_sha": "a" * 40,
         "worker_sha256": worker_hash,
-        "tenant_id": ENV["GPOINT_AGATA_TENANT_ID"],
+        "tenant_id": ENV["GPOINT_EROS_TENANT_ID"],
         "source_id": "gpoint-vps:" + "b" * 40 + ":api=sha256:" + "1" * 64 + ":agata=sha256:" + "2" * 64,
         "snapshot_at": "2026-10-04T12:00:00Z",
     }
@@ -59,17 +59,17 @@ def test_legacy_gpoint_sidecar_binds_identity_to_installed_worker_hash(tmp_path,
     (tmp_path / "config/tenant-bindings.json").write_text(json.dumps(sidecar))
     (tmp_path / "config/tenant-bindings.json").chmod(0o600)
     with patch.dict(os.environ, {
-        "GPOINT_AGATA_WORKER_URL": worker.LEGACY_GPOINT_GATEWAY_URL,
-        "GPOINT_AGATA_WORKER_TOKEN": "point-private",
+        "GPOINT_EROS_WORKER_URL": worker.GPOINT_EROS_GATEWAY_URL,
+        "GPOINT_EROS_WORKER_TOKEN": "point-private",
     }, clear=True):
-        assert worker.configured_tenant_bindings() == {"GPOINT": ENV["GPOINT_AGATA_TENANT_ID"]}
+        assert worker.configured_tenant_bindings() == {"GPOINT": ENV["GPOINT_EROS_TENANT_ID"]}
 
     sidecar["worker_sha256"] = "0" * 64
     (tmp_path / "config/tenant-bindings.json").write_text(json.dumps(sidecar))
     (tmp_path / "config/tenant-bindings.json").chmod(0o600)
     with patch.dict(os.environ, {
-        "GPOINT_AGATA_WORKER_URL": worker.LEGACY_GPOINT_GATEWAY_URL,
-        "GPOINT_AGATA_WORKER_TOKEN": "point-private",
+        "GPOINT_EROS_WORKER_URL": worker.GPOINT_EROS_GATEWAY_URL,
+        "GPOINT_EROS_WORKER_TOKEN": "point-private",
     }, clear=True):
         with pytest.raises(worker.FatalConfigurationError, match="worker_tenant_binding_invalid"):
             worker.configured_tenant_bindings()
@@ -79,14 +79,14 @@ def test_legacy_gpoint_without_binding_fails_closed_on_identity_claim(tmp_path, 
     monkeypatch.setattr(worker, "SUPPORT", tmp_path)
     monkeypatch.setattr(worker, "STATUS", tmp_path / "status.json")
     with patch.dict(os.environ, {
-        "GPOINT_AGATA_WORKER_URL": worker.LEGACY_GPOINT_GATEWAY_URL,
-        "GPOINT_AGATA_WORKER_TOKEN": "point-private",
+        "GPOINT_EROS_WORKER_URL": worker.GPOINT_EROS_GATEWAY_URL,
+        "GPOINT_EROS_WORKER_TOKEN": "point-private",
     }, clear=True):
         assert worker.configured_tenant_bindings() == {}
         def rpc(path, body=None, **kwargs):
             if path == "claim":
                 return {"job": {"id": "job", "leaseToken": "lease", "target": "GPOINT",
-                                 "tenant_id": ENV["GPOINT_AGATA_TENANT_ID"], "request": {}}}
+                                 "tenant_id": ENV["GPOINT_EROS_TENANT_ID"], "request": {}}}
             return {"status": "ready"}
         with patch.object(worker, "api_request", side_effect=rpc), patch.object(worker, "run_inference") as inference:
             with pytest.raises(worker.GatewayResponseError, match="worker_claim_target_mismatch"):
@@ -122,7 +122,7 @@ def test_gpoint_foreign_claim_identity_is_rejected_before_inference(tmp_path, mo
 def test_identityless_gpoint_claim_requires_the_verified_legacy_gateway(tmp_path, monkeypatch):
     monkeypatch.setattr(worker, "SUPPORT", tmp_path)
     monkeypatch.setattr(worker, "STATUS", tmp_path / "status.json")
-    with patch.dict(os.environ, {**ENV, "GPOINT_AGATA_WORKER_URL": "https://other.example/worker"}), patch.object(
+    with patch.dict(os.environ, {**ENV, "GPOINT_EROS_WORKER_URL": "https://other.example/worker"}), patch.object(
         worker, "api_request", side_effect=lambda path, body=None, **kwargs: (
             {"job": {"id": "legacy", "leaseToken": "lease", "request": {}}}
             if path == "claim" else {"status": "ready"}
@@ -137,6 +137,21 @@ def test_target_configuration_rejects_reused_credentials():
     with patch.dict(os.environ, {**ENV, "GSALES_AGATA_WORKER_TOKEN": "point-private"}):
         with pytest.raises(worker.FatalConfigurationError):
             worker.configured_targets()
+
+
+@pytest.mark.parametrize(("target", "source_id"), [
+    ("GPOINT", "gpoint-eros-worker-queue-status-v1:gpoint"),
+    ("GSALES", "agata-worker-queue-status-v1:gsales"),
+])
+def test_queue_status_identity_keeps_target_specific_gateway_contract(target, source_id):
+    result = worker._validated_queue_status(target, {
+        "lane": target,
+        "source_id": source_id,
+        "pending_jobs": 0,
+        "running_jobs": 0,
+        "snapshot_at": "2026-11-03T12:00:00Z",
+    })
+    assert result["queue_snapshot_source_id"] == source_id
 
 
 def test_validate_startup_passes_all_lanes_without_claim_or_inference(tmp_path, monkeypatch):
@@ -262,7 +277,7 @@ def test_status_preserves_permanent_lab_contract_from_real_pool_serialization(tm
             return {"status": "ok"}
         return {
             "lane": target,
-            "source_id": f"agata-worker-queue-status-v1:{target.lower()}",
+            "source_id": f"gpoint-eros-worker-queue-status-v1:{target.lower()}",
             "pending_jobs": 0,
             "running_jobs": 0,
             "snapshot_at": "2026-10-08T10:00:00Z",
@@ -305,9 +320,9 @@ def test_startup_cli_reports_specific_safe_configuration_code_without_values(tmp
     pool_config.chmod(0o600)
     monkeypatch.setattr(worker, "CONFIG", tmp_path / "missing-worker.env")
     monkeypatch.setattr(sys, "argv", ["gpoint_mac_worker.py", "validate-startup"])
-    invalid = {"GPOINT_AGATA_WORKER_URL": ENV["GPOINT_AGATA_WORKER_URL"],
-               "GPOINT_AGATA_WORKER_TOKEN": "do-not-print-point-secret",
-               "GPOINT_AGATA_TENANT_ID": ENV["GPOINT_AGATA_TENANT_ID"],
+    invalid = {"GPOINT_EROS_WORKER_URL": ENV["GPOINT_EROS_WORKER_URL"],
+               "GPOINT_EROS_WORKER_TOKEN": "do-not-print-point-secret",
+               "GPOINT_EROS_TENANT_ID": ENV["GPOINT_EROS_TENANT_ID"],
                "GPOINT_AGATA_WORKER_SUPPORT": str(support),
                "AGATA_WORKER_POOL_CONFIG": str(pool_config)}
     with patch.dict(os.environ, invalid, clear=True):

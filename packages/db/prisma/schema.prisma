@@ -30,6 +30,9 @@ model User {
   codexDeviceAuthorizations CodexDeviceAuthorization[]
   erosRelationships ErosRelationshipMapping[]
   erosAssistantMessageStates ErosAssistantMessageState[]
+  chatConsents GpointChatConsent[]
+  ageAssurances GpointAgeAssurance[]
+  aiDisclosureReceipts GpointAiDisclosureReceipt[]
 }
 model UserPreference {
   id String @id @default(cuid())
@@ -64,7 +67,7 @@ model Creator {
   erosAssistantMessageStates ErosAssistantMessageState[]
 }
 
-// Contains only revocable, hashed Codex capability tokens. Conversation data remains in AGATA.
+// Contains only revocable, hashed Codex capability tokens. Conversation data is owned by stock Eros.
 model CodexChatConnection {
   id String @id @default(cuid())
   userId String
@@ -137,6 +140,136 @@ model ErosAssistantMessageState {
   creator Creator @relation(fields: [creatorId], references: [id], onDelete: Cascade)
   @@id([userId, creatorId, sessionId, messageId])
   @@index([userId, creatorId, sessionId, readAt])
+}
+
+// GPoint owns policy and permission state; Eros owns chat bodies and memories.
+model GpointChatPolicyProfile {
+  id String @id @default(cuid())
+  sourceAgataId String? @unique
+  sourceTenantId String
+  jurisdiction String
+  market String
+  version Int
+  status String
+  effectiveFrom DateTime
+  effectiveTo DateTime?
+  rules Json
+  createdAt DateTime @default(now())
+  receipts GpointAiDisclosureReceipt[]
+  @@unique([sourceTenantId, jurisdiction, market, version])
+  @@index([sourceTenantId, jurisdiction, market, status, effectiveFrom])
+}
+
+model GpointChatConsent {
+  id String @id @default(cuid())
+  sourceAgataId String? @unique
+  sourceTenantId String
+  userId String
+  purpose String
+  grantedAt DateTime
+  revokedAt DateTime?
+  policyVersion String
+  createdAt DateTime @default(now())
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  @@index([userId, purpose, grantedAt])
+}
+
+model GpointAgeAssurance {
+  id String @id @default(cuid())
+  sourceAgataId String? @unique
+  sourceTenantId String
+  userId String
+  ageBand String
+  status String
+  method String
+  jurisdiction String
+  verifiedAt DateTime?
+  assertedAt DateTime?
+  expiresAt DateTime?
+  version Int
+  createdAt DateTime @default(now())
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  @@unique([userId, jurisdiction, version])
+  @@index([userId, version])
+}
+
+model GpointAiDisclosureReceipt {
+  id String @id @default(cuid())
+  sourceAgataId String? @unique
+  sourceTenantId String
+  userId String
+  policyProfileId String
+  policyVersion Int
+  channel String
+  receiptKey String
+  displayedAt DateTime
+  memoryOptIn Boolean
+  memoryOptInAt DateTime?
+  createdAt DateTime @default(now())
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  policy GpointChatPolicyProfile @relation(fields: [policyProfileId], references: [id], onDelete: Restrict)
+  @@index([userId, policyProfileId, policyVersion, displayedAt])
+}
+
+// Non-destructive lineage fence for legacy AGATA conversations. Encrypted content is archived below.
+model GpointLegacyConversationFence {
+  id String @id @default(cuid())
+  sourceAgataConversationId String @unique
+  sourceTenantId String
+  userId String?
+  creatorId String?
+  sourceUserId String
+  sourceCharacterId String
+  messageCount Int
+  memoryCount Int
+  firstMessageAt DateTime?
+  lastMessageAt DateTime?
+  consentWasActive Boolean
+  migratedAt DateTime @default(now())
+  @@index([userId, creatorId])
+}
+
+// Archived legacy history keeps AGATA's encrypted payload envelope and key version.
+// It is not automatically imported into an Eros session or decrypted by the API.
+model GpointLegacyConversationArchive {
+  id String @id @default(cuid())
+  sourceAgataConversationId String @unique
+  sourceTenantId String
+  userId String?
+  creatorId String?
+  sourceRelationshipId String
+  sourceScope String
+  sourceScenarioId String?
+  sourceSystem String
+  sourceExternalId String?
+  startedAt DateTime
+  closedAt DateTime?
+  languageCode String
+  createdAt DateTime @default(now())
+  @@index([userId, creatorId, startedAt])
+}
+
+model GpointLegacyMessageArchive {
+  id String @id @default(cuid())
+  sourceAgataMessageId String @unique
+  sourceAgataConversationId String
+  sourceTenantId String
+  userId String?
+  creatorId String?
+  idempotencyKey String
+  role String
+  contentCiphertext Bytes?
+  contentNonce Bytes?
+  contentKeyVersion String?
+  systemMessageType String?
+  systemAction String?
+  occurredAt DateTime
+  deletedAt DateTime?
+  incomingReadAt DateTime?
+  languageCode String
+  createdAt DateTime @default(now())
+  @@index([sourceAgataConversationId, occurredAt])
+  @@index([userId, creatorId, occurredAt])
 }
 
 model CreatorOwner {

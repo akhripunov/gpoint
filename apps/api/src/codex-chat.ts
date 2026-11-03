@@ -1,9 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import { BadRequestException, Body, Controller, Headers, HttpException, Param, Post, Req, UnauthorizedException } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
-import { createAgataIntegration } from './agata-integration.js';
 import { hashCodexCredential, isCodexOwnerAllowed, isCodexRefreshOwnerCurrent, parseCodexOwnerUserIds, parseCodexTrustedProxyIps, resolveCodexDeviceStartRateKey, resolveCodexMessageSession, validateTelegramCodexApproval, validTelegramWebhookSecret, CODEX_ACCESS_TTL_MS, CODEX_DEVICE_TTL_MS, CODEX_REFRESH_TTL_MS } from './codex-chat-auth.js';
 import { FixedWindowRateLimiter } from './rate-limit.js';
+import { isErosChatAllowed } from './eros-adapter.js';
 
 const prisma = new PrismaClient();
 const approvalLimiter = new FixedWindowRateLimiter(20, 60_000);
@@ -53,12 +53,8 @@ export class CodexChatController {
     if (!user || !isCodexOwnerAllowed(user.id, ownerIds())) throw new UnauthorizedException();
     const authorization = await prisma.codexDeviceAuthorization.findFirst({ where: { telegramChallengeHash: hashCodexCredential(payload), expiresAt: { gt: new Date() }, userId: null, consumedAt: null }, select: { id: true, creatorId: true } });
     if (!authorization?.creatorId) throw new UnauthorizedException();
-    const agata = createAgataIntegration();
-    if (!agata) throw new HttpException({ code: 'MESSAGES_UNAVAILABLE' }, 503);
     const creator = await prisma.creator.findFirst({ where: { id: authorization.creatorId, profile: { status: 'APPROVED' }, owners: { some: { userId: user.id } } }, select: { id: true } });
-    if (!creator) throw new UnauthorizedException();
-    const history = await agata.listMessages(user.id, creator.id, { limit: 1 });
-    if (!history.items.length) throw new UnauthorizedException();
+    if (!creator || !isErosChatAllowed(user.id, creator.id)) throw new UnauthorizedException();
     const now = new Date();
     const updated = await prisma.codexDeviceAuthorization.updateMany({
       where: { id: authorization.id, telegramChallengeHash: hashCodexCredential(payload), expiresAt: { gt: now }, userId: null, consumedAt: null },

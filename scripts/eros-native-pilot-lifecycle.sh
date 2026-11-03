@@ -9,9 +9,13 @@ action="${1:-}"
 : "${GPOINT_KNOWN_HOSTS_FILE:?verified known-hosts file is required}"
 : "${EROS_PILOT_TEST_USER_ID:?exact synthetic user UUID is required}"
 : "${EROS_PILOT_TEST_CREATOR_ID:?exact synthetic creator UUID is required}"
+: "${EROS_PILOT_POLICY_JURISDICTION:?exact approved policy jurisdiction is required}"
+: "${EROS_PILOT_POLICY_MARKET:?exact approved policy market is required}"
 [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
 [[ "$EROS_PILOT_TEST_USER_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
 [[ "$EROS_PILOT_TEST_CREATOR_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
+[[ "$EROS_PILOT_POLICY_JURISDICTION" =~ ^[A-Z0-9_-]{2,32}$ ]]
+[[ "$EROS_PILOT_POLICY_MARKET" =~ ^[a-z0-9_-]{2,32}$ ]]
 target="root@${GPOINT_PRODUCTION_HOST}"
 marker='/opt/gpoint/env/eros-pilot-state.json'
 backup_root='/opt/gpoint/backups/eros-pilot'
@@ -52,6 +56,20 @@ check_remote_baseline() {
 stage_sources() {
   local archive="$RUNNER_TEMP/eros-pilot-source-${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz"
   local stage="/run/eros-pilot-stage-${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+  cleanup_stage() {
+    [[ "$stage" == "/run/eros-pilot-stage-${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]]
+    "${ssh[@]}" "$target" bash -s -- "$stage" <<'REMOTE_CLEAN_STAGE'
+set -euo pipefail
+path="$1"
+[[ "$path" =~ ^/run/eros-pilot-stage-[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
+if [[ -e "$path" || -L "$path" ]]; then
+  test -d "$path" && test ! -L "$path"
+  find "$path" -mindepth 1 -delete
+  rmdir "$path"
+fi
+REMOTE_CLEAN_STAGE
+  }
+  trap 'cleanup_stage; rm -f "$archive"' EXIT
   tar -czf "$archive" -C "$GITHUB_WORKSPACE" \
     config/deploy.eros.yml config/deploy.eros-relay.yml config/deploy.eros-api.yml \
     services/eros-engine/eros-production-model-config.toml \
@@ -80,9 +98,10 @@ while IFS= read -r -d '' path; do
     install -m 644 "$stage/source/$path" "$target"
   fi
 done < <(find "$stage/source" -type f -print0)
-rm -f "$stage/payload.tar.gz"
 REMOTE_STAGE
   rm -f "$archive"
+  cleanup_stage
+  trap - EXIT
 }
 
 write_pilot_marker() {
@@ -383,6 +402,7 @@ pilot_marker_present=1
 "${ssh[@]}" "$target" python3 "/opt/gpoint/releases/$CANDIDATE_SHA/source/scripts/eros-production-secrets.py" \
   --source-sha "$CANDIDATE_SHA" --image "$EROS_PILOT_IMAGE" \
   --pilot-test-user-id "$EROS_PILOT_TEST_USER_ID" --pilot-test-creator-id "$EROS_PILOT_TEST_CREATOR_ID" \
+  --policy-jurisdiction "$EROS_PILOT_POLICY_JURISDICTION" --policy-market "$EROS_PILOT_POLICY_MARKET" \
   --ensure-postgres-network --ensure-embeddings-network --provision-database
 backup="$backup_root/eros-before-$CANDIDATE_SHA.dump"
 run_ops backup "$CANDIDATE_SHA" "$EROS_PILOT_TEST_USER_ID" "$EROS_PILOT_TEST_CREATOR_ID" --backup "$backup"

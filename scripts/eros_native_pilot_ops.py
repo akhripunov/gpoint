@@ -94,6 +94,9 @@ def validate_pilot_runtime(values: dict[str, str], user_id: str, creator_id: str
         raise PilotGateError("pilot runtime UUID allowlist differs from the authorized pair")
     if values.get("EROS_TEST_USER_IDS") != user_id or values.get("EROS_TEST_CREATOR_IDS") != creator_id:
         raise PilotGateError("legacy synthetic allowlist aliases differ from the authorized pair")
+    if (not re.fullmatch(r"[A-Z0-9_-]{2,32}", values.get("GPOINT_CHAT_POLICY_JURISDICTION", ""))
+            or not re.fullmatch(r"[a-z0-9_-]{2,32}", values.get("GPOINT_CHAT_POLICY_MARKET", ""))):
+        raise PilotGateError("exact active GPoint policy jurisdiction and market are required")
     image = values.get("EROS_IMAGE", "")
     if not _valid_stock_image(image, candidate_sha):
         raise PilotGateError("stock Eros image must be pinned by immutable GHCR digest")

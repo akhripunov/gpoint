@@ -80,6 +80,13 @@ def ordinary_args(output: Path):
     ]
 
 
+def ordinary_four_role_args(output: Path):
+    args = ordinary_args(output)
+    args.remove("--agata-digest")
+    args.remove(AGATA)
+    return args
+
+
 def run_ordinary(tmp_path: Path, *, active_caddy=False):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -115,6 +122,22 @@ def test_ordinary_manifest_binds_services_database_proxy_tls_and_routes(tmp_path
     assert manifest["evidence"]["migrationCompatibility"] == "PASS"
     assert f"GPOINT_KAMAL_MANIFEST_SHA256={hashlib.sha256(raw).hexdigest()}" in result.stdout
     assert output.stat().st_mode & 0o777 == 0o600
+
+
+def test_ordinary_manifest_accepts_exact_four_role_gpoint_topology_without_agata_image(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    setup_host_stubs(bin_dir)
+    output = tmp_path / "four-role-manifest.json"
+    args = ordinary_four_role_args(output)
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    result = subprocess.run([sys.executable, str(WRITER), *args], capture_output=True, text=True, env=env)
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads(output.read_bytes())
+    roles = {row["name"].rsplit("-", 3)[0] for row in manifest["runtimeServices"]}
+    assert roles == {"gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot", "gpoint-miniapp-web"}
+    assert "agata" not in manifest["candidate"]["images"]
+    assert manifest["migrationHeads"]["agataHead"] == "agata0012"
 
 
 def test_ordinary_manifest_refuses_active_caddy_without_writing_output(tmp_path):

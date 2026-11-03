@@ -3,8 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { createErosEngineClient, ErosAdapterError, erosIdentityFor } from '../../apps/api/src/eros-adapter.ts';
 
 const api = 'http://127.0.0.1:3000';
-const creator = 'eros_test_creator';
-const control = 'http://127.0.0.1:18080/control/state';
+const creator = '20000000-0000-4000-8000-000000000002';
 
 async function request(url, { method = 'GET', token, body } = {}) {
   const response = await fetch(url, {
@@ -19,22 +18,13 @@ async function request(url, { method = 'GET', token, body } = {}) {
   return { status: response.status, data: await response.json().catch(() => null) };
 }
 
-async function setFixtureState(update) {
-  const response = await request(control, {
-    method: 'POST',
-    token: process.env.EROS_TEST_AGATA_TOKEN,
-    body: update,
-  });
-  assert.equal(response.status, 200);
-}
-
 async function authenticate() {
   const response = await request(`${api}/auth/telegram`, {
     method: 'POST',
     body: { initData: 'synthetic local E2E', devTelegramUserId: '900000001' },
   });
   assert.equal(response.status, 201);
-  assert.equal(response.data?.user?.id, 'eros_test_user');
+  assert.equal(response.data?.user?.id, '10000000-0000-4000-8000-000000000001');
   assert.equal(response.data?.user?.telegramUsername, 'eros_test_dialogue');
   return response.data.accessToken;
 }
@@ -46,7 +36,7 @@ async function readHistory(token) {
 async function assertStockApiUserIsolation() {
   const client = createErosEngineClient(process.env);
   assert.ok(client, 'Eros client is configured in the isolated API container');
-  const ownerIdentity = erosIdentityFor({ userId: 'eros_test_user', creatorId: creator });
+  const ownerIdentity = erosIdentityFor({ userId: '10000000-0000-4000-8000-000000000001', creatorId: creator });
   const foreignUserId = randomUUID();
   const [ownerSessions, foreignSessions] = await Promise.all([
     client.sessions(ownerIdentity.userId),
@@ -127,26 +117,48 @@ const unauthenticated = await request(`${api}/messages/creator/${creator}`, {
 assert.equal(unauthenticated.status, 401);
 
 const token = await authenticate();
-await setFixtureState({ ageAssuranceRequired: true, longTermMemory: true });
+const ageState = await request(`${api}/age-assurance/state`, { token });
+assert.equal(ageState.status, 200);
+assert.equal(ageState.data?.required, true);
 const ageGate = await request(`${api}/messages/creator/${creator}`, {
-  method: 'POST',
-  token,
+  method: 'POST', token,
   body: { clientMessageId: randomUUID(), text: 'synthetic age gate check' },
 });
 assert.equal(ageGate.status, 403);
-
-await setFixtureState({ ageAssuranceRequired: false, longTermMemory: false });
-const noConsent = await request(`${api}/messages/creator/${creator}`, {
-  method: 'POST',
-  token,
-  body: { clientMessageId: randomUUID(), text: 'synthetic no-memory-consent check' },
+const ageAccepted = await request(`${api}/age-assurance/self-attest`, {
+  method: 'POST', token, body: { confirmed18Plus: true },
 });
-assert.equal(noConsent.status, 201, JSON.stringify(noConsent.data));
-assert.equal(noConsent.data?.response?.text, 'DETERMINISTIC_LOCAL_E2E_REPLY',
-  'the deprecated optional memory flag must not block Eros after required disclosure is current');
+assert.equal(ageAccepted.status, 201);
+assert.equal(ageAccepted.data?.eligible, true);
+const noConsent = await request(`${api}/messages/creator/${creator}`, {
+  method: 'POST', token,
+  body: { clientMessageId: randomUUID(), text: 'synthetic no-consent check' },
+});
+assert.equal(noConsent.status, 403, 'missing chat, memory and disclosure consent blocks Eros');
+assert.equal(noConsent.data?.code, 'CHAT_CONSENT_REQUIRED');
+const granted = await request(`${api}/messages/consent`, {
+  method: 'POST', token, body: { chatHistory: true, longTermMemory: true, disclosureVersion: 1 },
+});
+assert.equal(granted.status, 201);
+assert.equal(granted.data?.chatHistory, true);
+assert.equal(granted.data?.longTermMemory, true);
+const memoryRevoked = await request(`${api}/messages/consent/revoke`, {
+  method: 'POST', token, body: { purpose: 'long_term_memory' },
+});
+assert.equal(memoryRevoked.status, 201);
+assert.equal(memoryRevoked.data?.longTermMemory, false);
+const revokedSend = await request(`${api}/messages/creator/${creator}`, {
+  method: 'POST', token,
+  body: { clientMessageId: randomUUID(), text: 'synthetic revoked-memory-consent check' },
+});
+assert.equal(revokedSend.status, 403, 'revoked memory permission blocks stock Eros memory extraction');
+assert.equal(revokedSend.data?.code, 'CHAT_CONSENT_REQUIRED');
+const regranted = await request(`${api}/messages/consent`, {
+  method: 'POST', token, body: { chatHistory: true, longTermMemory: true, disclosureVersion: 1 },
+});
+assert.equal(regranted.status, 201);
 await assertStockApiUserIsolation();
 
-await setFixtureState({ ageAssuranceRequired: false, longTermMemory: true });
 const dialogue = [
   'SYNTH_CITY_ZEPHYRBAY: In this synthetic continuity test, I live in Zephyr Bay. My meeting is currently on 22 October 2026 at 18:40, marker SYNTH_OLD_2026-10-22_18:40.',
   'Correction: the meeting moved to 23 October 2026 at 19:15, marker SYNTH_CURRENT_2026-10-23_19:15. Keep the earlier date as history only.',

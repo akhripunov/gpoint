@@ -126,7 +126,10 @@ def test_first_cutover_build_images_include_the_kamal_service_labels():
     for workflow_name in ("gpoint-first-kamal-cutover.yml", "gpoint-native-release.yml"):
         workflow = yaml.safe_load((ROOT / ".github/workflows" / workflow_name).read_text())
         build = workflow["jobs"]["build"]["steps"]
-        for step_name, service in expected.items():
+        workflow_expected = dict(expected)
+        if workflow_name == "gpoint-native-release.yml":
+            workflow_expected["Build and publish immutable AGATA compatibility image for isolated migration rehearsal"] = workflow_expected.pop("Build and publish immutable AGATA image")
+        for step_name, service in workflow_expected.items():
             step = next(step for step in build if step.get("name") == step_name)
             labels = step["with"]["labels"].splitlines()
             assert f"service={service}" in labels, f"{workflow_name}: {step_name} lacks service={service}"
@@ -1597,5 +1600,5 @@ def test_proxy_route_probe_drains_docker_output_under_pipefail():
 def test_runtime_prisma_readbacks_resolve_the_api_workspace_dependencies():
     workflow = (ROOT / '.github/workflows/gpoint-native-release.yml').read_text()
     calls = [line for line in workflow.splitlines() if 'docker exec' in line and 'require("@prisma/client")' in line]
-    assert len(calls) == 3
+    assert len(calls) == 4  # Added the exact rollback runtime DB readback.
     assert all('docker exec --workdir /app/apps/api ' in line for line in calls)

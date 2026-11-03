@@ -121,6 +121,7 @@ def main() -> int:
                 env_file, source_sha=args.candidate_sha, image=args.image,
                 source_env=source_env, pilot_test_user_id=args.test_user_id,
                 pilot_test_creator_id=args.test_creator_id,
+                policy_jurisdiction="GLOBAL", policy_market="synthetic",
             )
             if identity != "EROS_SECRET_STORE=READY":
                 raise RuntimeError("Eros secret provisioning did not report readiness")
@@ -233,6 +234,9 @@ def main() -> int:
                 raise RuntimeError("exact user UUID was not projected into the API runtime")
             if api_container_env.get("EROS_PRODUCTION_TEST_CREATOR_IDS") != args.test_creator_id:
                 raise RuntimeError("exact character UUID was not projected into the API runtime")
+            if (api_container_env.get("GPOINT_CHAT_POLICY_JURISDICTION") != "GLOBAL"
+                    or api_container_env.get("GPOINT_CHAT_POLICY_MARKET") != "synthetic"):
+                raise RuntimeError("exact GPoint policy scope was not projected into the API runtime")
             if api_container_env.get("EROS_OLLAMA_EMBEDDING_URL") != values["EROS_OLLAMA_EMBEDDING_URL"]:
                 raise RuntimeError("GPoint API did not receive the private embeddings relay URL")
             os.environ["EROS_NATIVE_OPS_TEST"] = "1"

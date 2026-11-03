@@ -22,7 +22,6 @@ signing=$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')
 tenant=$(python3 -c 'import uuid;print(uuid.uuid4())')
 jwt=$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')
 worker_token=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
-agata=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
 umask 077; envfile="$tmp/compose.env"
 cat > "$envfile" <<EOF
 EROS_IMAGE=$image_id
@@ -33,10 +32,9 @@ EROS_TEST_BRIDGE_SIGNING_SECRET=$signing
 EROS_TEST_TENANT_ID=$tenant
 EROS_TEST_SUPABASE_JWT_SECRET=$jwt
 EROS_TEST_WORKER_TOKEN=$worker_token
-EROS_TEST_AGATA_TOKEN=$agata
 EROS_TEST_OPENROUTER_API_KEY=
 EOF
-unset admin provider signing jwt agata
+unset admin provider jwt
 compose(){ env -i PATH="$PATH" HOME="$HOME" DOCKER_CONFIG="$docker_config" DOCKER_CONTEXT="$local_context" docker compose --env-file "$envfile" -p "$project" -f "$repo/services/eros-engine/compose.local-test.yml" --profile test "$@"; }
 . "$repo/services/eros-engine/local-e2e-image-tools.sh"
 run_manifest="$tmp/resources.manifest"
@@ -264,15 +262,28 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA engine TO gpoint_wo
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA engine TO gpoint_worker_test;
 SQL
 compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 <<'SQL'
-INSERT INTO "User" (id,"telegramUserId","telegramUsername","firstName","createdAt","updatedAt") VALUES ('eros_test_user',900000001,'eros_test_dialogue','Synthetic',now(),now());
-INSERT INTO "Creator" (id,"displayName",slug,"createdAt") VALUES ('eros_test_creator','Synthetic Eros Persona','eros-test-persona',now());
+INSERT INTO "User" (id,"telegramUserId","telegramUsername","firstName","createdAt","updatedAt") VALUES ('10000000-0000-4000-8000-000000000001',900000001,'eros_test_dialogue','Synthetic',now(),now());
+INSERT INTO "Creator" (id,"displayName",slug,"createdAt") VALUES ('20000000-0000-4000-8000-000000000002','Synthetic Eros Persona','eros-test-persona',now());
+SQL
+compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 <<SQL
+INSERT INTO "GpointChatPolicyProfile" (id,"sourceTenantId",jurisdiction,market,version,status,"effectiveFrom",rules)
+VALUES ('30000000-0000-4000-8000-000000000003','$tenant','GLOBAL','synthetic',1,'active',now(),'{"ai_disclosure_required":true,"self_attestation_allowed":true}'::jsonb);
 SQL
 compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c \
-  "INSERT INTO \"CreatorProfile\" (id,\"creatorId\",status,bio,\"tagsJson\",\"erosGenomeId\") VALUES ('eros_test_profile','eros_test_creator','APPROVED','Local synthetic test persona','[]','$genome_id'::uuid);"
+  "INSERT INTO \"CreatorProfile\" (id,\"creatorId\",status,bio,\"tagsJson\",\"erosGenomeId\") VALUES ('eros_test_profile','20000000-0000-4000-8000-000000000002','APPROVED','Local synthetic test persona','[]','$genome_id'::uuid);"
 postgres_id=$(compose ps -q postgres)
 api_image=$(compose images -q gpoint-api)
   docker_local run --name "$integration_container" --label "com.docker.compose.project=$project" --network "container:$postgres_id" \
   -e DATABASE_URL='postgresql://gpoint_worker_test:local-only-gpoint-worker-test@127.0.0.1:5432/gpoint_test?schema=public' \
+  -e NODE_ENV=test \
+  -e EROS_ENABLED=true \
+  -e EROS_DATA_MODE=synthetic \
+  -e EROS_TEST_USER_IDS=10000000-0000-4000-8000-000000000001 \
+  -e EROS_TEST_CREATOR_IDS=20000000-0000-4000-8000-000000000002 \
+  -e EROS_WORKER_TENANT_ID="$tenant" \
+  -e GPOINT_CHAT_POLICY_TENANT_ID="$tenant" \
+  -e GPOINT_EROS_WORKER_TOKEN="$worker_token" \
+  -e EROS_WORKER_SIGNING_SECRET="$signing" \
   -e EROS_WORKER_DISPOSABLE_TEST_DB=1 \
   -v "$repo/apps/api/test:/workspace/apps/api/test:ro" \
   -v "$repo/packages/db/prisma/migrations:/workspace/packages/db/prisma/migrations:ro" \
@@ -337,13 +348,13 @@ compose restart eros
 compose up -d --wait --wait-timeout 90 eros
 compose exec -w /workspace/apps/api -T gpoint-api node --import tsx /workspace/services/eros-engine/local-test-e2e.mjs --history-only
 compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT 'EROS_CHAT_MESSAGES=' || count(*) FROM engine.chat_messages; SELECT 'EROS_DURABLE_MEMORY_ROWS=' || count(*) FROM engine.companion_memories WHERE category IS NOT NULL AND content LIKE 'SYNTH_%';"
-if compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c 'DELETE FROM "User" WHERE id = '\''eros_test_user'\''' >"$tmp/user-delete.out" 2>&1; then
+if compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c 'DELETE FROM "User" WHERE id = '\''10000000-0000-4000-8000-000000000001'\''' >"$tmp/user-delete.out" 2>&1; then
   echo LOCAL_E2E_MAPPING_ERASURE_GUARD=FAIL user_delete_unexpectedly_succeeded >&2
   exit 1
 fi
 grep -q 'ErosRelationshipMapping_userId_fkey' "$tmp/user-delete.out" || { echo LOCAL_E2E_MAPPING_ERASURE_GUARD=FAIL user_delete_block_reason_unexpected >&2; exit 1; }
 compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c 'DELETE FROM "CreatorProfile" WHERE id = '\''eros_test_profile'\''' >/dev/null
-if compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c 'DELETE FROM "Creator" WHERE id = '\''eros_test_creator'\''' >"$tmp/creator-delete.out" 2>&1; then
+if compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c 'DELETE FROM "Creator" WHERE id = '\''20000000-0000-4000-8000-000000000002'\''' >"$tmp/creator-delete.out" 2>&1; then
   echo LOCAL_E2E_MAPPING_ERASURE_GUARD=FAIL creator_delete_unexpectedly_succeeded >&2
   exit 1
 fi

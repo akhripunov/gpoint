@@ -31,6 +31,7 @@ def test_changed_eros_adapter_contract_blocks_until_pilot_upgrade_is_approved():
 @pytest.mark.parametrize("path", [
     "apps/api/src/main.ts",
     "apps/api/src/agata-worker-gateway.ts",
+    "config/deploy.eros-api.yml",
 ])
 def test_changed_eros_registration_path_blocks_ordinary_release(path):
     pilot = {item: ("pilot:" + item).encode() for item in (*MODULE.CONTRACT_PATHS, path)}
@@ -54,6 +55,21 @@ def test_api_embedding_network_uses_dynamic_address_during_kamal_rollout():
     section = hook.split('if [[ "$service:$role" == "gpoint-core:api" ]]', 1)[1]
     assert "docker network connect gpoint_eros_embeddings \"$api_id\"" in section
     assert "docker network connect --ip 172.31.254.2" not in section
+
+
+def test_retired_agata_gateway_is_compared_as_an_explicit_absence_contract():
+    def read(sha, path):
+        if path == "apps/api/src/agata-worker-gateway.ts":
+            return None if sha in ("a" * 40, "b" * 40) else b"unexpected legacy gateway"
+        return ("pilot:" if sha == "a" * 40 else "pilot:").encode() + path.encode()
+
+    assert MODULE.compare_contract("a" * 40, "b" * 40, read)
+    with pytest.raises(MODULE.CompatibilityError, match="contracts differ"):
+        MODULE.compare_contract("a" * 40, "c" * 40, read)
+
+
+def test_current_gpoint_worker_gateway_is_in_the_eros_runtime_contract():
+    assert "apps/api/src/gpoint-worker-gateway.ts" in MODULE.CONTRACT_PATHS
 
 
 def test_ordinary_deploy_selects_eros_api_config_when_pilot_is_active():

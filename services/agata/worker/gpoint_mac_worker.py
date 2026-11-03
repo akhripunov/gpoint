@@ -135,7 +135,7 @@ _WORKER_INHERITED_LOCK_FDS: tuple[int, ...] = ()
 _ACTIVE_INFERENCE: subprocess.Popen | None = None
 TARGET_NAMES = ("GPOINT", "GSALES")
 LAB_TARGET = "LAB"
-LEGACY_GPOINT_GATEWAY_URL = "https://gpoint.one/api/agata-worker"
+GPOINT_EROS_GATEWAY_URL = "https://gpoint.one/api/gpoint-worker"
 STARTUP_LANES = ("GPOINT", "GSALES", "LAB")
 SAFE_STARTUP_ERROR_CODES = {
     "worker_config_permissions_invalid", "worker_gateway_or_auth_unconfigured",
@@ -153,12 +153,12 @@ SAFE_STARTUP_ERROR_CODES = {
 def configured_targets() -> dict[str, tuple[str, str]]:
     targets = {}
     for name in TARGET_NAMES:
-        base = os.environ.get(name + "_AGATA_WORKER_URL", LEGACY_GPOINT_GATEWAY_URL if name == "GPOINT" else "").rstrip("/")
-        token = os.environ.get(name + "_AGATA_WORKER_TOKEN", "")
+        base = os.environ.get(("GPOINT_EROS_WORKER_URL" if name == "GPOINT" else "GSALES_AGATA_WORKER_URL"), "").rstrip("/")
+        token = os.environ.get(("GPOINT_EROS_WORKER_TOKEN" if name == "GPOINT" else "GSALES_AGATA_WORKER_TOKEN"), "")
         if name == "GSALES" and not base and not token:
             continue
         parsed = urlsplit(base)
-        local = os.environ.get("GPOINT_AGATA_WORKER_LOCAL_TEST") == "true" and parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+        local = os.environ.get("GPOINT_EROS_WORKER_LOCAL_TEST") == "true" and parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
         if not token or (parsed.scheme != "https" and not local) or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise FatalConfigurationError("worker_gateway_or_auth_unconfigured")
         targets[name] = (base, token)
@@ -174,16 +174,7 @@ def configured_tenant_bindings(
     configured = targets if targets is not None else configured_targets()
     bindings: dict[str, str] = {}
     for target in configured:
-        value = os.environ.get(f"{target}_AGATA_TENANT_ID", "").strip()
-        if not value and target == "GPOINT":
-            if configured[target][0] != LEGACY_GPOINT_GATEWAY_URL:
-                raise FatalConfigurationError("worker_tenant_binding_invalid")
-            value = _legacy_gpoint_tenant_binding() or ""
-            if not value:
-                # The legacy V2 endpoint may return identity-less GPOINT claims.
-                # If a claim carries target/tenant identity, process_one still
-                # rejects it until a source-verified sidecar is installed.
-                continue
+        value = os.environ.get("GPOINT_EROS_TENANT_ID" if target == "GPOINT" else "GSALES_AGATA_TENANT_ID", "").strip()
         try:
             parsed = UUID(value)
             canonical = str(parsed)
@@ -279,46 +270,6 @@ def validate_startup_configuration() -> dict:
     }
 
 
-def _legacy_gpoint_tenant_binding() -> str | None:
-    path = SUPPORT / "config/tenant-bindings.json"
-    try:
-        stat = path.lstat()
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise FatalConfigurationError("worker_tenant_binding_invalid") from exc
-    if path.is_symlink() or stat.st_uid != os.getuid() or stat.st_mode & 0o077:
-        raise FatalConfigurationError("worker_tenant_binding_invalid")
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-        expected_keys = {"version", "candidate_sha", "worker_sha256", "tenant_id", "source_id", "snapshot_at"}
-        if not isinstance(value, dict) or set(value) != expected_keys or value.get("version") != 1:
-            raise ValueError
-        candidate_sha = value["candidate_sha"]
-        worker_sha = value["worker_sha256"]
-        if (not isinstance(candidate_sha, str) or len(candidate_sha) != 40
-                or any(char not in "0123456789abcdef" for char in candidate_sha)
-                or not isinstance(worker_sha, str) or len(worker_sha) != 64
-                or worker_sha != hashlib.sha256(Path(__file__).resolve().read_bytes()).hexdigest()):
-            raise ValueError
-        source = value["source_id"]
-        match = re.fullmatch(
-            r"gpoint-vps:([0-9a-f]{40}):api=sha256:([0-9a-f]{64}):agata=sha256:([0-9a-f]{64})",
-            source,
-        )
-        if not match:
-            raise ValueError
-        tenant = UUID(value["tenant_id"])
-        if tenant.int == 0 or str(tenant) != value["tenant_id"]:
-            raise ValueError
-        captured_at = datetime.fromisoformat(value["snapshot_at"].replace("Z", "+00:00"))
-        if captured_at.tzinfo is None:
-            raise ValueError
-        return str(tenant)
-    except (OSError, ValueError, TypeError, AttributeError) as exc:
-        raise FatalConfigurationError("worker_tenant_binding_invalid") from exc
-
-
 def target_request(target: str, path: str, body: dict | None = None) -> dict:
     # Preserve the existing GPOINT call shape for the installed v2 contract.
     return api_request(path, body) if target == "GPOINT" else api_request(path, body, target=target)
@@ -327,7 +278,11 @@ def target_request(target: str, path: str, body: dict | None = None) -> dict:
 def _validated_queue_status(target: str, value: dict) -> dict[str, object]:
     if target not in TARGET_NAMES or not isinstance(value, dict):
         raise GatewayResponseError("worker_queue_status_response_invalid")
-    expected_source = f"agata-worker-queue-status-v1:{target.lower()}"
+    expected_source = (
+        "gpoint-eros-worker-queue-status-v1:gpoint"
+        if target == "GPOINT"
+        else f"agata-worker-queue-status-v1:{target.lower()}"
+    )
     if value.get("lane") != target or value.get("source_id") != expected_source:
         raise GatewayResponseError("worker_queue_status_identity_invalid")
     counts = (value.get("pending_jobs"), value.get("running_jobs"))
@@ -912,17 +867,7 @@ def validate_target_claim(target: str, claim: dict) -> None:
     if not isinstance(job_id, str) or not isinstance(lease, str):
         raise RuntimeError("worker_claim_invalid")
     identity_present = "target" in claim or "tenant_id" in claim
-    legacy_gpoint_contract = (
-        target == "GPOINT" and not identity_present
-        and targets[target][0] == LEGACY_GPOINT_GATEWAY_URL
-    )
-    if (target == "GSALES" and not identity_present) or (
-        not identity_present and not legacy_gpoint_contract
-    ) or (
-        identity_present and (
-            claim.get("target") != target or claim.get("tenant_id") != bindings.get(target)
-        )
-    ):
+    if not identity_present or claim.get("target") != target or claim.get("tenant_id") != bindings.get(target):
         raise GatewayResponseError("worker_claim_target_mismatch")
 
 
@@ -1381,7 +1326,7 @@ def run_watch(
 
 def unauthenticated_health_probe() -> None:
     """Probe TLS/HTTP reachability without worker credentials or queue side effects."""
-    base = os.environ.get("GPOINT_AGATA_WORKER_URL", "https://gpoint.one/api/agata-worker").rstrip("/")
+    base = os.environ.get("GPOINT_EROS_WORKER_URL", GPOINT_EROS_GATEWAY_URL).rstrip("/")
     if not base.startswith("https://"):
         raise FatalConfigurationError("worker_gateway_url_invalid")
 
@@ -1564,7 +1509,7 @@ def status() -> int:
 
     print(json.dumps({
         "worker_version": WORKER_VERSION,
-        "enabled": bool(os.environ.get("GPOINT_AGATA_WORKER_TOKEN")),
+        "enabled": bool(os.environ.get("GPOINT_EROS_WORKER_TOKEN")),
         "launch_agent_loaded": service_loaded,
         "last_poll_at": saved.get("last_poll_at"),
         "last_heartbeat_at": saved.get("last_heartbeat_at"),

@@ -25,6 +25,8 @@ def pilot_values():
         "EROS_PRODUCTION_TEST_CREATOR_IDS": CREATOR_ID,
         "EROS_TEST_USER_IDS": USER_ID,
         "EROS_TEST_CREATOR_IDS": CREATOR_ID,
+        "GPOINT_CHAT_POLICY_JURISDICTION": "GLOBAL",
+        "GPOINT_CHAT_POLICY_MARKET": "synthetic",
         "EROS_RUNTIME_DATABASE_URL": "postgresql://eros_runtime:secret@gpoint-eros-db:5432/eros",
         "EROS_MIGRATOR_DATABASE_URL": "postgresql://eros_migrator:secret@gpoint-eros-db:5432/eros",
         "DATABASE_URL": "postgresql://eros_runtime:secret@gpoint-eros-db:5432/eros",
@@ -50,6 +52,9 @@ def test_runtime_gate_requires_exact_single_uuid_pair_and_all_synthetic_flags():
             MODULE.validate_pilot_runtime(mismatch, USER_ID, CREATOR_ID, "a" * 40)
     with pytest.raises(MODULE.PilotGateError):
         MODULE.validate_pilot_runtime(values, CREATOR_ID, USER_ID, "a" * 40)
+    for key in ("GPOINT_CHAT_POLICY_JURISDICTION", "GPOINT_CHAT_POLICY_MARKET"):
+        with pytest.raises(MODULE.PilotGateError):
+            MODULE.validate_pilot_runtime(dict(values, **{key: ""}), USER_ID, CREATOR_ID, "a" * 40)
 
 
 def test_cleanup_removes_only_the_three_dedicated_eros_environment_files(monkeypatch, tmp_path):

@@ -112,6 +112,9 @@ def test_native_pilot_apply_is_separately_gated_and_ordinary_release_is_eros_awa
     assert "verifier_ip=dynamic" in lifecycle
     assert "EROS_QWEN3_RELAY=PASS" in lifecycle
     assert "'/opt/gpoint/releases')/pilot_sha/'source/scripts/eros_native_pilot_ops.py'" in lifecycle
+    assert 'trap \'cleanup_stage; rm -f "$archive"\' EXIT' in lifecycle
+    assert 'REMOTE_CLEAN_STAGE' in lifecycle
+    assert 'find "$path" -mindepth 1 -delete' in lifecycle
     topology = next(step for step in jobs["deploy"]["steps"] if step.get("id") == "topology")
     assert "NO_EROS_STATE" in topology.get("run", "")
     assert "eros_pilot_active=true" in topology.get("run", "")

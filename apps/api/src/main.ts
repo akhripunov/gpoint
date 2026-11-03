@@ -17,9 +17,9 @@ import { FeedController } from './feed.js';
 import { SearchController } from './search.js';
 import { DiagnosticsController } from './diagnostics.js';
 import { AgeAssuranceController, MessagesController } from './messages.js';
-import { AgataWorkerGatewayController } from './agata-worker-gateway.js';
 import { CodexChatController } from './codex-chat.js';
 import { ErosWorkerGatewayController } from './eros-worker-gateway.js';
-@Module({ controllers: [HealthController, DiagnosticsController, SearchController, ExploreController, AuthController, MeController, CreatorController, PersonalizedReelsController, VipController, CreatorPlatformController, AdminPlatformController, MediaReadController, EngagementController, FollowingController, DiscoveryHealthController, PreferencesController, TelegramIngestionController, TelegramChannelController, TelegramChannelVerificationController, TelegramConnectionController, FeedController, MessagesController, AgeAssuranceController, AgataWorkerGatewayController, CodexChatController, ErosWorkerGatewayController] }) class AppModule {}
+import { GpointWorkerGatewayController } from './gpoint-worker-gateway.js';
+@Module({ controllers: [HealthController, DiagnosticsController, SearchController, ExploreController, AuthController, MeController, CreatorController, PersonalizedReelsController, VipController, CreatorPlatformController, AdminPlatformController, MediaReadController, EngagementController, FollowingController, DiscoveryHealthController, PreferencesController, TelegramIngestionController, TelegramChannelController, TelegramChannelVerificationController, TelegramConnectionController, FeedController, MessagesController, AgeAssuranceController, CodexChatController, ErosWorkerGatewayController, GpointWorkerGatewayController] }) class AppModule {}
 export async function bootstrap() { const app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter()); app.enableCors({ origin: process.env.MINIAPP_ORIGIN?.split(',') ?? true, methods: ['GET', 'HEAD', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }); await app.listen({ port: Number(process.env.API_PORT ?? 3000), host: process.env.API_HOST ?? '0.0.0.0' }); return app; }
 if (process.env.NODE_ENV !== 'test') bootstrap();
