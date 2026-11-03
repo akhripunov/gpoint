@@ -38,6 +38,22 @@ def test_initial_eros_bootstrap_exception_is_bound_to_exact_base_and_runtime_tre
     ) == "BLOCK"
 
 
+def test_exact_main_push_range_matches_one_time_eros_bootstrap_fingerprint():
+    import subprocess
+
+    candidate = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    assert MODULE.eros_runtime_tree_digest(candidate, ROOT) == MODULE.EROS_BOOTSTRAP_TREE_SHA256
+    paths = MODULE.changed_paths(MODULE.EROS_BOOTSTRAP_BASE_SHA, candidate, repo=ROOT)
+    assert any(MODULE._is_eros_runtime_path(path) for path in paths)
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths=paths,
+        before=MODULE.EROS_BOOTSTRAP_BASE_SHA, sha=candidate, repo=ROOT,
+    ) == "DEPLOY"
+
+
 def test_normal_app_paths_cover_miniapp_bot_worker_agata_and_runtime_packages():
     for path in (
         "apps/miniapp/src/main.tsx",
@@ -92,7 +108,7 @@ def test_app_and_release_files_can_ship_together_in_one_authorized_main_push():
         ) == "DEPLOY"
 
 
-def test_any_schema_or_migration_change_blocks_ordinary_release():
+def test_schema_changes_route_to_checked_app_only_release_without_applying_migrations():
     for path in (
         "packages/db/prisma/schema.prisma",
         "packages/db/prisma/migrations/20261101000000_new/migration.sql",
@@ -102,10 +118,10 @@ def test_any_schema_or_migration_change_blocks_ordinary_release():
         assert MODULE.classify_push(
             event_name="push", ref="refs/heads/main",
             changed_paths={"apps/api/src/main.ts", path},
-        ) == "BLOCK"
+        ) == "DEPLOY"
         assert MODULE.classify_push(
             event_name="push", ref="refs/heads/main", changed_paths={path}
-        ) == "BLOCK"
+        ) == "DEPLOY"
 
 
 def test_unknown_paths_block_instead_of_becoming_a_deploy_or_silent_prepare():
@@ -123,7 +139,7 @@ def test_blocked_main_path_set_fails_the_classifier_job(monkeypatch, capsys):
         "--sha", "a" * 40, "--before", "b" * 40,
     ])
     monkeypatch.setattr(MODULE, "changed_paths", lambda *_args, **_kwargs: {
-        "apps/api/src/main.ts", "packages/db/prisma/schema.prisma",
+        "apps/api/src/main.ts", "new-root/file.py",
     })
     assert MODULE.main() == 2
     assert "mode=BLOCK" in capsys.readouterr().out

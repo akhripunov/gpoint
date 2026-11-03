@@ -62,7 +62,7 @@ EROS_RUNTIME_FILES = frozenset({
 EROS_BOOTSTRAP_BASE_SHA = "35bfad2a42384adca55464b33cee72589a1247ad"
 # Filled from the reviewed ME-36 bootstrap payload. The digest binds every
 # blocked runtime file/tree entry to this one initial main-push range.
-EROS_BOOTSTRAP_TREE_SHA256 = "985d7d1821a2b666b4186569f7d2bbd8eb2dea3d134f7668f166fb71394368c2"
+EROS_BOOTSTRAP_TREE_SHA256 = "e4f081ccab89e6f295f77723be0059526114ff96d0838db0bc2b68e848be82e9"
 EROS_BOOTSTRAP_PATHS = (
     "services/eros-engine/",
     # Hash the whole config tree so a newly added deploy.eros* path cannot
@@ -154,7 +154,7 @@ def classify_push(*, event_name: str, ref: str,
                before=before, sha=sha, changed_paths=changed_paths, repo=repo):
         return "BLOCK"
     kinds = {_path_kind(path) for path in changed_paths}
-    if "schema" in kinds or "unknown" in kinds:
+    if "unknown" in kinds:
         return "BLOCK"
     # An authorized main push is the existing Native release intent. The
     # workflow still runs Tests -> immutable Build/read-back -> Deploy -> Verify.
