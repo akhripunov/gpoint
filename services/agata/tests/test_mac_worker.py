@@ -181,7 +181,7 @@ class MacWorkerTests(unittest.TestCase):
             calls.append((path, body))
             return next(responses)
 
-        with patch.dict(os.environ, {"GPOINT_EROS_WORKER_TOKEN": token, "GPOINT_EROS_TENANT_ID": TEST_GPOINT_TENANT_ID, "AGATA_WORKER_MODEL": "test-model"}), patch.object(worker, "api_request", side_effect=api), patch.object(worker, "run_inference", return_value="answer"), patch("sys.stdout", output):
+        with patch.dict(os.environ, {"GPOINT_EROS_WORKER_URL": worker.GPOINT_EROS_GATEWAY_URL, "GPOINT_EROS_WORKER_TOKEN": token, "GPOINT_EROS_TENANT_ID": TEST_GPOINT_TENANT_ID, "AGATA_CODEX_MODEL": "test-model"}), patch.object(worker, "api_request", side_effect=api), patch.object(worker, "run_inference", return_value="answer"), patch("sys.stdout", output):
             self.assertTrue(worker.process_one())
             self.assertEqual(worker.status(), 0)
 
@@ -213,7 +213,7 @@ class MacWorkerTests(unittest.TestCase):
                     self.assertEqual(validated.model, expected_model)
                 return {"accepted": True}
 
-            with self.subTest(model=model), patch.dict(os.environ, {"AGATA_CODEX_MODEL": model, "GPOINT_EROS_WORKER_TOKEN": "test-only", "GPOINT_EROS_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(worker, "api_request", side_effect=api), patch.object(worker, "run_inference", return_value="answer"):
+            with self.subTest(model=model), patch.dict(os.environ, {"AGATA_CODEX_MODEL": model, "GPOINT_EROS_WORKER_URL": worker.GPOINT_EROS_GATEWAY_URL, "GPOINT_EROS_WORKER_TOKEN": "test-only", "GPOINT_EROS_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(worker, "api_request", side_effect=api), patch.object(worker, "run_inference", return_value="answer"):
                 self.assertTrue(worker.process_one())
 
     def test_inference_failure_reports_retryable_safe_code(self):
@@ -225,7 +225,7 @@ class MacWorkerTests(unittest.TestCase):
                 return {"job": {"id": "job-2", "leaseToken": "lease-2", "request": {}}}
             return {"accepted": True, "state": "pending"}
 
-        with patch.dict(os.environ, {"GPOINT_EROS_WORKER_TOKEN": "test-only", "GPOINT_EROS_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(worker, "api_request", side_effect=api), patch.object(
+        with patch.dict(os.environ, {"GPOINT_EROS_WORKER_URL": worker.GPOINT_EROS_GATEWAY_URL, "GPOINT_EROS_WORKER_TOKEN": "test-only", "GPOINT_EROS_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(worker, "api_request", side_effect=api), patch.object(
             worker, "run_inference", side_effect=RuntimeError("codex_execution_failed_1")
         ):
             self.assertFalse(worker.process_one())
