@@ -8,6 +8,10 @@ MARKER_SCHEMA = "gpoint-eros-native-pilot-state/v1"
 EROS_UPSTREAM_SHA = "d1a140083321687212fb7b17c09cc0c3c9639f5e"
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.I)
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
+PUBLIC_SCHEMA_CREATE_SQL = (
+    "EXISTS(SELECT 1 FROM aclexplode(COALESCE(nspacl,acldefault('n',nspowner))) a "
+    "WHERE a.grantee=0 AND a.privilege_type='CREATE')"
+)
 PUBLIC_CONNECT_SQL = (
     "EXISTS(SELECT 1 FROM aclexplode(COALESCE(datacl,acldefault('d',datdba))) a "
     "WHERE a.grantee=0 AND a.privilege_type='CONNECT')"
@@ -21,7 +25,8 @@ def require(ok, message):
         raise RuntimeStateError(message)
 
 def validate_database_acl(database):
-    require(database == {"name":"eros","owner":"eros_ddl","allowConnections":True,"publicConnect":False},
+    require(database == {"name":"eros","owner":"eros_ddl","allowConnections":True,
+                         "publicConnect":False,"publicSchemaCreate":False,"runtimeSchemaCreate":False},
             "Eros database owner or public ACL is invalid")
 
 def validate(marker, api, engine, relay, postgres, networks):
@@ -67,6 +72,7 @@ def validate(marker, api, engine, relay, postgres, networks):
       "eros_migrator":{"login":True,"superuser":False,"createDatabase":False,"createRole":False,"bypassRls":False}}
     require(postgres.get("roles") == expected_roles, "Eros role privileges mismatch")
     require(postgres.get("runtimeConnect") is True and postgres.get("runtimeCreate") is False and
+            postgres.get("runtimeSchemaCreate") is False and
             postgres.get("migratorConnect") is True and postgres.get("migratorCreate") is True and
             postgres.get("foreignConnect") is False and postgres.get("memberships") == [], "Eros database grants escape isolation")
     require(isinstance(postgres.get("migrationCount"), int) and postgres["migrationCount"] > 0 and
@@ -84,7 +90,7 @@ def validate(marker, api, engine, relay, postgres, networks):
       "pilot":{k:marker[k] for k in ("sourceSha","imageVersion","testUserId","testCreatorId","erosImage","pilotAppDigest","backupSha256")},
       "engine":{k:engine[k] for k in ("id","name","revision","integrationRevision","patchSetSha256","repoDigests","networks")},
       "relay":{k:relay[k] for k in ("id","name","revision","repoDigests","networkMode")},
-      "database":{k:postgres[k] for k in ("id","database","roles","runtimeConnect","runtimeCreate","migratorConnect","migratorCreate","foreignConnect","memberships","migrationCount","migrationFailures","migrationHead","catalogSha256")},
+      "database":{k:postgres[k] for k in ("id","database","roles","runtimeConnect","runtimeCreate","runtimeSchemaCreate","migratorConnect","migratorCreate","foreignConnect","memberships","migrationCount","migrationFailures","migrationHead","catalogSha256")},
       "networks":{k:networks[k] for k in ("gpoint_eros_data","gpoint_eros_embeddings")}, "apiContract":exact}
     stable["sha256"] = hashlib.sha256(json.dumps(stable,sort_keys=True,separators=(",",":")).encode()).hexdigest()
     return stable
@@ -123,9 +129,12 @@ def collect(marker_path=Path("/opt/gpoint/env/eros-pilot-state.json")):
     # This query is READ ONLY and returns only ACL, migration and catalog facts.
     sql="""BEGIN READ ONLY; SELECT json_build_object(
       'database',(SELECT json_build_object('name',datname,'owner',pg_get_userbyid(datdba),'allowConnections',datallowconn,
-       'publicConnect',PUBLIC_CONNECT_EXPR) FROM pg_database WHERE datname='eros'),
+       'publicConnect',PUBLIC_CONNECT_EXPR,'publicSchemaCreate',PUBLIC_SCHEMA_CREATE_EXPR,
+       'runtimeSchemaCreate',has_schema_privilege('eros_runtime','public','CREATE'))
+       FROM pg_database CROSS JOIN pg_namespace WHERE datname='eros' AND nspname='public'),
       'roles',(SELECT json_object_agg(rolname,json_build_object('login',rolcanlogin,'superuser',rolsuper,'createDatabase',rolcreatedb,'createRole',rolcreaterole,'bypassRls',rolbypassrls)) FROM pg_roles WHERE rolname IN ('eros_ddl','eros_runtime','eros_migrator')),
       'runtimeConnect',has_database_privilege('eros_runtime','eros','CONNECT'),'runtimeCreate',has_database_privilege('eros_runtime','eros','CREATE'),
+      'runtimeSchemaCreate',has_schema_privilege('eros_runtime','public','CREATE'),
       'migratorConnect',has_database_privilege('eros_migrator','eros','CONNECT'),'migratorCreate',has_database_privilege('eros_migrator','eros','CREATE'),
       'foreignConnect',EXISTS(SELECT 1 FROM pg_database d WHERE d.datallowconn AND d.datname<>'eros' AND
         (has_database_privilege('eros_runtime',d.datname,'CONNECT') OR has_database_privilege('eros_migrator',d.datname,'CONNECT'))),
@@ -137,7 +146,7 @@ def collect(marker_path=Path("/opt/gpoint/env/eros-pilot-state.json")):
         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace LEFT JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
         WHERE n.nspname IN ('public','engine'))::text FROM pg_catalog.pg_database LIMIT 1; COMMIT;""".replace(
             "PUBLIC_CONNECT_EXPR", PUBLIC_CONNECT_SQL
-        )
+        ).replace("PUBLIC_SCHEMA_CREATE_EXPR", PUBLIC_SCHEMA_CREATE_SQL)
     proc=subprocess.run(["docker","exec","-i","shared_postgres_1","sh","-ec",'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d eros'],
       input=sql,text=True,capture_output=True,check=False)
     if proc.returncode: raise RuntimeStateError("read-only Eros PostgreSQL verification failed")

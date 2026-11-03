@@ -57,7 +57,6 @@ def test_normal_app_paths_cover_miniapp_bot_worker_agata_and_runtime_packages():
 def test_known_operational_or_test_only_main_push_uses_native_release_flow():
     for changed_paths in (
         {"scripts/verify.py", "scripts/new-helper.py"},
-        {".kamal/hooks/pre-app-boot", ".kamal/hooks/post-app-boot"},
         {".kamal/secrets"},
         {".github/workflows/gpoint-native-release.yml", "tests/test_native_release_intent.py"},
         {"docs/release/automation.md"},
@@ -69,6 +68,13 @@ def test_known_operational_or_test_only_main_push_uses_native_release_flow():
         assert MODULE.classify_push(
             event_name="push", ref="refs/heads/main", changed_paths=changed_paths
         ) == "DEPLOY"
+
+
+def test_eros_runtime_hooks_and_config_changes_block_until_explicit_pilot_reconciliation():
+    for path in (".kamal/hooks/pre-app-boot", ".kamal/hooks/post-app-boot", "config/eros-pilot.yml"):
+        assert MODULE.classify_push(
+            event_name="push", ref="refs/heads/main", changed_paths={path}
+        ) == "BLOCK", path
 
 
 def test_app_and_release_files_can_ship_together_in_one_authorized_main_push():

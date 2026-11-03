@@ -40,14 +40,16 @@ def facts():
     postgres = {"id": "c" * 64, "running": True,
                 "networks": {"gpoint_eros_data": {"aliases": ["gpoint-eros-db"]}},
                 "database": {"name": "eros", "owner": "eros_ddl", "allowConnections": True,
-                             "publicConnect": False},
+                             "publicConnect": False, "publicSchemaCreate": False,
+                             "runtimeSchemaCreate": False},
                 "roles": {"eros_ddl": {"login": False, "superuser": False, "createDatabase": False,
                                          "createRole": False, "bypassRls": False},
                           "eros_runtime": {"login": True, "superuser": False, "createDatabase": False,
                                            "createRole": False, "bypassRls": True},
                           "eros_migrator": {"login": True, "superuser": False, "createDatabase": False,
                                             "createRole": False, "bypassRls": False}},
-                "runtimeConnect": True, "runtimeCreate": False, "migratorConnect": True,
+                "runtimeConnect": True, "runtimeCreate": False, "runtimeSchemaCreate": False,
+                "migratorConnect": True,
                 "migratorCreate": True, "foreignConnect": False, "memberships": [],
                 "migrationCount": 4, "migrationFailures": 0, "migrationHead": "2026102001", "catalogSha256": "9" * 64}
     networks = {"gpoint_eros_data": {"id": "1" * 64, "driver": "bridge", "internal": True,
@@ -71,6 +73,7 @@ def test_approved_synthetic_pilot_is_preserved_as_a_native_release_baseline():
     lambda f: f[2].update(patchSetSha256="patched"),
     lambda f: f[3].update(networkMode="bridge"),
     lambda f: f[4].update(foreignConnect=True),
+    lambda f: f[4].update(runtimeSchemaCreate=True),
     lambda f: f[5]["gpoint_eros_embeddings"].update(internal=False),
 ])
 def test_uncertain_or_widened_pilot_runtime_blocks_ordinary_release(mutation):
@@ -94,10 +97,14 @@ def test_sqlx_failed_migration_blocks_ordinary_release():
         MODULE.validate(*values)
 
 
-def test_public_connect_acl_semantics_match_revoke_from_public():
+def test_public_acl_semantics_match_revoke_from_public():
     marker, api, engine, relay, postgres, networks = facts()
     MODULE.validate_database_acl(postgres["database"])
     postgres["database"]["publicConnect"] = True
+    with pytest.raises(MODULE.RuntimeStateError, match="public ACL"):
+        MODULE.validate_database_acl(postgres["database"])
+    postgres["database"]["publicConnect"] = False
+    postgres["database"]["publicSchemaCreate"] = True
     with pytest.raises(MODULE.RuntimeStateError, match="public ACL"):
         MODULE.validate_database_acl(postgres["database"])
 

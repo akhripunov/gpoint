@@ -131,11 +131,13 @@ def main() -> int:
             acl_query = (
                 "SELECT json_build_object('name',datname,'owner',pg_get_userbyid(datdba),"
                 "'allowConnections',datallowconn,'publicConnect'," + runtime_verifier.PUBLIC_CONNECT_SQL +
-                ")::text FROM pg_database WHERE datname='eros'"
+                ",'publicSchemaCreate'," + runtime_verifier.PUBLIC_SCHEMA_CREATE_SQL +
+                ",'runtimeSchemaCreate',has_schema_privilege('eros_runtime','public','CREATE'))"
+                "::text FROM pg_database CROSS JOIN pg_namespace WHERE datname='eros' AND nspname='public'"
             )
             def database_acl():
                 raw = run("docker", "exec", container, "psql", "-XqAt", "-v", "ON_ERROR_STOP=1",
-                          "-U", "postgres", "-d", "postgres", "-c", acl_query).stdout.strip()
+                          "-U", "postgres", "-d", "eros", "-c", acl_query).stdout.strip()
                 return json.loads(raw)
             runtime_verifier.validate_database_acl(database_acl())
             run("docker", "exec", container, "psql", "-Xq", "-v", "ON_ERROR_STOP=1",
@@ -153,7 +155,36 @@ def main() -> int:
                     "-U", "postgres", "-d", "postgres",
                     "-c", "REVOKE CONNECT ON DATABASE eros FROM PUBLIC")
             runtime_verifier.validate_database_acl(database_acl())
-            print("EROS_PUBLIC_CONNECT_ACL_E2E=PASS revoked=accepted granted=blocked")
+            run("docker", "exec", container, "psql", "-Xq", "-v", "ON_ERROR_STOP=1",
+                "-U", "postgres", "-d", "eros",
+                "-c", "GRANT CREATE ON SCHEMA public TO PUBLIC")
+            try:
+                try:
+                    runtime_verifier.validate_database_acl(database_acl())
+                except runtime_verifier.RuntimeStateError:
+                    pass
+                else:
+                    raise RuntimeError("runtime verifier accepted PUBLIC schema CREATE")
+            finally:
+                run("docker", "exec", container, "psql", "-Xq", "-v", "ON_ERROR_STOP=1",
+                    "-U", "postgres", "-d", "eros",
+                    "-c", "REVOKE CREATE ON SCHEMA public FROM PUBLIC")
+            run("docker", "exec", container, "psql", "-Xq", "-v", "ON_ERROR_STOP=1",
+                "-U", "postgres", "-d", "eros",
+                "-c", "GRANT CREATE ON SCHEMA public TO eros_runtime")
+            try:
+                try:
+                    runtime_verifier.validate_database_acl(database_acl())
+                except runtime_verifier.RuntimeStateError:
+                    pass
+                else:
+                    raise RuntimeError("runtime verifier accepted runtime schema CREATE")
+            finally:
+                run("docker", "exec", container, "psql", "-Xq", "-v", "ON_ERROR_STOP=1",
+                    "-U", "postgres", "-d", "eros",
+                    "-c", "REVOKE CREATE ON SCHEMA public FROM eros_runtime")
+            runtime_verifier.validate_database_acl(database_acl())
+            print("EROS_ACL_E2E=PASS revoked_accepted granted_blocked for PUBLIC CONNECT and schema CREATE")
             values = ops._load_env(env_file)
             stage = "least-privilege container env projection"
             production_env = root / "production-container.env"

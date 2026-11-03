@@ -42,6 +42,8 @@ OPERATIONAL_PREFIXES = (
 EROS_RUNTIME_PREFIXES = (
     "services/eros-engine/",
     "config/deploy.eros",
+    "config/eros-",
+    ".kamal/hooks/",
 )
 EROS_RUNTIME_FILES = frozenset({
     "scripts/eros-native-pilot-lifecycle.sh",
@@ -60,6 +62,7 @@ EROS_BOOTSTRAP_PATHS = (
     # Hash the whole config tree so a newly added deploy.eros* path cannot
     # escape the exact initial payload fingerprint.
     "config/",
+    ".kamal/hooks/",
     *sorted(EROS_RUNTIME_FILES),
 )
 SCHEMA_FILENAMES = frozenset({"schema.prisma"})
