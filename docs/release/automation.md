@@ -177,6 +177,14 @@ Runtime Verify проверяет все шесть ролей, digest, source S
 image ID неизменённых ролей, health и database/cache identities. PostgreSQL,
 Redis, proxy и неизменённые компоненты не перезапускаются.
 
+До дополнительной Docker-инспекции Deploy вызывает для каждой Kamal-конфигурации
+`kamal app version`, `kamal app details` и `kamal app containers`. Workflow
+проверяет актуальную версию и наличие ожидаемых role/version записей в штатном
+выводе Kamal, затем сверяет её с inventory. Docker read-only проверки дополняют
+этот inventory точными OCI digest/image ID, количеством работающих контейнеров,
+mounts и сетевой/database идентичностью, которых Kamal CLI не выдаёт в требуемом
+машиночитаемом виде.
+
 Build пока публикует все три runtime-образа. Точный live baseline читается только
 в защищённом Deploy job после Tests и Build; до этого job production credentials
 недоступны. `github.event.before` не является надёжной заменой live baseline:

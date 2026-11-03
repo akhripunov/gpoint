@@ -483,6 +483,7 @@ jobs:
           EOF
           chmod 600 "$HOME/.ssh/config"
       - name: Read live application version and containers with Kamal
+        id: kamal_inventory
         run: |
           set -euo pipefail
           kamal() {
@@ -497,11 +498,32 @@ jobs:
               ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 "$@"
           }
           for config in config/deploy.yml config/deploy.agata.yml config/deploy.miniapp.yml; do
-            version="$(kamal app version --config-file "$config")"
+            case "$config" in
+              config/deploy.yml)
+                version_output=core_version
+                roles=(gpoint-core-api gpoint-core-worker gpoint-core-bot)
+                ;;
+              config/deploy.agata.yml)
+                version_output=agata_version
+                roles=(gpoint-agata-api gpoint-agata-memory-worker)
+                ;;
+              config/deploy.miniapp.yml)
+                version_output=miniapp_version
+                roles=(gpoint-miniapp-web)
+                ;;
+            esac
+            version_text="$(kamal app version --config-file "$config")"
+            mapfile -t versions < <(grep -Eo '[0-9a-f]{40}-[0-9]+-[0-9]+' <<< "$version_text" | sort -u)
+            [[ "${#versions[@]}" == 1 ]]
+            version="${versions[0]}"
             details="$(kamal app details --config-file "$config")"
             containers="$(kamal app containers --config-file "$config")"
-            [[ "$version" =~ [0-9a-f]{40}-[0-9]+-[0-9]+ ]]
             test -n "$details" && test -n "$containers"
+            for role in "${roles[@]}"; do
+              grep -F -- "$role-$version" <<< "$details" >/dev/null
+              grep -F -- "$role-$version" <<< "$containers" >/dev/null
+            done
+            printf '%s=%s\n' "$version_output" "$version" >> "$GITHUB_OUTPUT"
             {
               printf '### Kamal inventory: %s\n\n' "$config"
               printf 'Current version:\n\n```text\n%s\n```\n\nContainers:\n\n```text\n%s\n```\n\nDetails:\n\n```text\n%s\n```\n\n' \
@@ -510,9 +532,26 @@ jobs:
           done
       - name: Verify installed Kamal topology before ordinary release
         id: topology
+        env:
+          KAMAL_CORE_VERSION: ${{ steps.kamal_inventory.outputs.core_version }}
+          KAMAL_AGATA_VERSION: ${{ steps.kamal_inventory.outputs.agata_version }}
+          KAMAL_MINIAPP_VERSION: ${{ steps.kamal_inventory.outputs.miniapp_version }}
         run: |
           set -euo pipefail
           role_inventory="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - < "$GITHUB_WORKSPACE/scripts/verify-kamal-production-baseline.py")"
+          python3 - "$role_inventory" <<'PY'
+          import json, os, re, sys
+          roles = json.loads(sys.argv[1])["roles"]
+          for role, expected in {
+              "gpoint-core-api": os.environ["KAMAL_CORE_VERSION"],
+              "gpoint-agata-api": os.environ["KAMAL_AGATA_VERSION"],
+              "gpoint-miniapp-web": os.environ["KAMAL_MINIAPP_VERSION"],
+          }.items():
+              if not re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+", expected):
+                  raise SystemExit("Kamal-reported runtime version is malformed")
+              if roles[role]["version"] != expected:
+                  raise SystemExit("Kamal CLI version differs from verified running role inventory")
+          PY
           baseline_values="$(python3 -c 'import json,re,sys; d=json.loads(sys.argv[1]); assert set(d["roles"]) == {"gpoint-core-api","gpoint-core-worker","gpoint-core-bot","gpoint-agata-api","gpoint-agata-memory-worker","gpoint-miniapp-web"}; core=d["roles"]["gpoint-core-api"]; v=core["version"]; s=core["source_sha"]; assert re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+",v); assert re.fullmatch(r"[0-9a-f]{40}",s); print(v+"\t"+s)' "$role_inventory")"
           IFS=$'\t' read -r baseline_version baseline_source_sha <<< "$baseline_values"
           test -n "$baseline_version" && test -n "$baseline_source_sha"

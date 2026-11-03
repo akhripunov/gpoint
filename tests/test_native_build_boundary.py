@@ -176,12 +176,25 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         cli_index = names.index("Read live application version and containers with Kamal")
         topology_index = names.index("Verify installed Kamal topology before ordinary release")
         self.assertLess(cli_index, topology_index)
-        commands = steps[cli_index]["run"]
+        kamal_inventory = steps[cli_index]
+        self.assertEqual(kamal_inventory.get("id"), "kamal_inventory")
+        commands = kamal_inventory["run"]
         for command in ("kamal app version", "kamal app details", "kamal app containers"):
             self.assertIn(command, commands)
+        self.assertIn('>> "$GITHUB_OUTPUT"', commands)
+        for role in ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot",
+                     "gpoint-agata-api", "gpoint-agata-memory-worker", "gpoint-miniapp-web"):
+            self.assertIn(role, commands)
         self.assertIn("config/deploy.yml", commands)
         self.assertIn("config/deploy.agata.yml", commands)
         self.assertIn("config/deploy.miniapp.yml", commands)
+        topology = steps[topology_index]
+        for component in ("core", "agata", "miniapp"):
+            self.assertTrue(any(
+                f"steps.kamal_inventory.outputs.{component}_version" in value
+                for value in topology["env"].values()
+            ))
+        self.assertIn("KAMAL_CORE_VERSION", topology["run"])
 
     def test_ordinary_deployment_success_requires_verified_manifest(self):
         deploy = self.workflow["jobs"]["deploy"]
