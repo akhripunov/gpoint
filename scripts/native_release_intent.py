@@ -205,20 +205,16 @@ def _safe_component_path(path: str) -> bool:
 
 
 def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dict[str, str | bool]:
-    """Classify a verified runtime baseline to exact candidate diff; ambiguity is FULL."""
+    """Classify the exact candidate diff; never broaden an ambiguous scope."""
     if not EXACT_SHA.fullmatch(candidate or ""):
         raise ValueError("candidate SHA is invalid")
     roles = _validate_role_inventory(inventory)
     sources = {row["source_sha"] for row in roles.values()}
-    result = {"scope": "FULL", "reason": "full_candidate", "deploy_core": True,
-              "deploy_agata": True, "deploy_miniapp": True}
     if len(sources) != 1:
-        result["reason"] = "mixed_component_baseline"
-        return result
+        raise ValueError("mixed component baseline cannot authorize a scoped deploy")
     baseline = next(iter(sources))
     if candidate == baseline:
-        result["reason"] = "candidate_equals_baseline"
-        return result
+        raise ValueError("candidate equals production baseline; no changed component scope")
     subprocess.run(["git", "merge-base", "--is-ancestor", baseline, candidate],
                    cwd=repo, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     raw = subprocess.check_output(["git", "diff", "--name-status", "-z", "--no-renames",
@@ -228,42 +224,40 @@ def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dic
         raise ValueError("component scope diff is malformed")
     entries = list(zip(parts[::2], parts[1::2]))
     if not entries:
-        result["reason"] = "empty_candidate_diff"
-        return result
+        raise ValueError("candidate diff is empty; no changed component scope")
     components = set()
     for status, path in entries:
         if status not in ("A", "M"):
-            return result
+            raise ValueError("deleted or renamed candidate path needs explicit scope approval")
         component = _component_path(path) if _safe_component_path(path) else None
         if component is None:
-            return result
+            raise ValueError("unmapped or unsafe candidate path needs explicit scope approval")
         components.add(component)
         tree = subprocess.check_output(["git", "ls-tree", candidate, "--", path],
                                        cwd=repo).decode()
         if not tree.startswith(("100644 blob ", "100755 blob ")):
-            return result
-    if len(components) != 1:
-        result["reason"] = "multiple_or_unmapped_components"
-        return result
-    component = next(iter(components))
-    result.update({"scope": component, "reason": "exact_single_component_diff",
-                   "deploy_core": component in ("CORE",),
-                   "deploy_agata": component in ("AGATA",),
-                   "deploy_miniapp": component in ("MINIAPP",)})
-    return result
+            raise ValueError("candidate path is not a regular file and needs explicit scope approval")
+    scope = "+".join(sorted(components))
+    return {"scope": scope, "reason": "exact_component_diff",
+            "deploy_core": "CORE" in components,
+            "deploy_agata": "AGATA" in components,
+            "deploy_miniapp": "MINIAPP" in components}
 
 
 def expected_runtime_inventory(scope: str, inventory: dict, candidate: str, version: str,
                                app_digest: str, agata_digest: str, miniapp_digest: str) -> dict:
     """Bind every verified role to either the untouched baseline or exact candidate artifact."""
     roles = _validate_role_inventory(inventory)
-    if (scope not in (*COMPONENT_ROLES, "FULL") or not EXACT_SHA.fullmatch(candidate or "")
+    scope_components = set(scope.split("+")) if isinstance(scope, str) else set()
+    if (not scope_components or not scope_components.issubset(COMPONENT_ROLES)
+            or "+".join(sorted(scope_components)) != scope
+            or not EXACT_SHA.fullmatch(candidate or "")
             or not EXACT_VERSION.fullmatch(version or "") or not version.startswith(candidate + "-")):
         raise ValueError("candidate component runtime plan is malformed")
     digests = {"CORE": app_digest, "AGATA": agata_digest, "MINIAPP": miniapp_digest}
     if any(not EXACT_DIGEST.fullmatch(value or "") for value in digests.values()):
         raise ValueError("candidate runtime image digest is invalid")
-    updated = set(COMPONENT_ROLES) if scope == "FULL" else {scope}
+    updated = scope_components
     inventory_out = {}
     group_repo_digests = {
         "CORE": f"{ROLE_REPOSITORIES['gpoint-core-api']}@{app_digest}",

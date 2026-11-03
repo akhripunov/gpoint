@@ -13,6 +13,8 @@ def test_approved_prisma_apply_is_inside_the_protected_deploy_before_kamal():
     deploy = jobs["deploy"]
     steps = deploy["steps"]
     ids = [step.get("id") for step in steps]
+    assert ids.index("component_plan") < ids.index("migration_baseline")
+    assert ids.index("component_plan") < ids.index("migration_apply")
     assert ids.index("migration_plan") < ids.index("deployment")
     assert ids.index("deployment") < ids.index("migration_apply") < ids.index("kamal_apply")
     apply = next(step for step in steps if step.get("id") == "migration_apply")

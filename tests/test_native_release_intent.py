@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -248,33 +249,48 @@ def _component_repo(tmp_path, changes):
     return repo, baseline, candidate, inventory
 
 
-def test_component_scope_is_exactly_single_component_and_uses_full_fallback(tmp_path):
+def test_component_scope_updates_only_exactly_touched_known_components(tmp_path):
     cases = (
         ({"apps/miniapp/src/main.tsx": "export default 1;\n"}, "MINIAPP"),
         ({"services/agata/app/responses/main.py": "VALUE = 1\n"}, "AGATA"),
         ({"apps/api/src/main.ts": "export const version = 2;\n"}, "CORE"),
         ({"apps/api/src/main.ts": "export const version = 2;\n",
-          "apps/miniapp/src/main.tsx": "export default 1;\n"}, "FULL"),
-        ({"docs/release/automation.md": "release\n"}, "FULL"),
+          "apps/miniapp/src/main.tsx": "export default 1;\n"}, "CORE+MINIAPP"),
     )
     for index, (changes, expected) in enumerate(cases):
         repo, _baseline, candidate, inventory = _component_repo(tmp_path / str(index), changes)
         result = MODULE.classify_component_scope(repo, candidate, inventory)
         assert result["scope"] == expected
-        assert result["deploy_core"] is (expected in ("CORE", "FULL"))
-        assert result["deploy_agata"] is (expected in ("AGATA", "FULL"))
-        assert result["deploy_miniapp"] is (expected in ("MINIAPP", "FULL"))
+        components = set(expected.split("+"))
+        assert result["deploy_core"] is ("CORE" in components)
+        assert result["deploy_agata"] is ("AGATA" in components)
+        assert result["deploy_miniapp"] is ("MINIAPP" in components)
 
 
-def test_mixed_runtime_baseline_falls_back_to_full_component_deploy(tmp_path):
+def test_mixed_runtime_baseline_blocks_before_deploy_planning(tmp_path):
     repo, _baseline, candidate, inventory = _component_repo(
         tmp_path, {"apps/miniapp/src/main.tsx": "export default 1;\n"}
     )
     inventory["roles"]["gpoint-agata-api"]["source_sha"] = "c" * 40
     inventory["roles"]["gpoint-agata-memory-worker"]["source_sha"] = "c" * 40
-    result = MODULE.classify_component_scope(repo, candidate, inventory)
-    assert result["scope"] == "FULL"
-    assert result["reason"] == "mixed_component_baseline"
+    with pytest.raises(ValueError, match="mixed component baseline"):
+        MODULE.classify_component_scope(repo, candidate, inventory)
+
+
+def test_unknown_paths_block_before_deploy_planning(tmp_path):
+    repo, _baseline, candidate, inventory = _component_repo(
+        tmp_path, {"docs/release/automation.md": "release\n"}
+    )
+    with pytest.raises(ValueError, match="unmapped or unsafe candidate path"):
+        MODULE.classify_component_scope(repo, candidate, inventory)
+
+
+def test_candidate_equal_to_baseline_blocks_without_restarting_components(tmp_path):
+    repo, baseline, _candidate, inventory = _component_repo(
+        tmp_path, {"apps/miniapp/src/main.tsx": "export default 1;\n"}
+    )
+    with pytest.raises(ValueError, match="candidate equals production baseline"):
+        MODULE.classify_component_scope(repo, baseline, inventory)
 
 
 def test_component_runtime_inventory_pins_new_roles_and_preserves_untouched_identity(tmp_path):
@@ -299,6 +315,13 @@ def test_component_runtime_inventory_pins_new_roles_and_preserves_untouched_iden
         "sha256:" + "1" * 64, "sha256:" + "2" * 64, "sha256:" + "3" * 64,
     )
     assert json.loads(__import__("base64").b64decode(encoded)) == result
+    multi = MODULE.expected_runtime_inventory(
+        "CORE+MINIAPP", inventory, candidate, version,
+        "sha256:" + "1" * 64, "sha256:" + "2" * 64, "sha256:" + "3" * 64,
+    )
+    assert multi["roles"]["gpoint-core-api"]["sourceSha"] == candidate
+    assert multi["roles"]["gpoint-miniapp-web"]["sourceSha"] == candidate
+    assert multi["roles"]["gpoint-agata-api"]["sourceSha"] == baseline
 
 
 def test_rollback_dispatch_requires_main_exact_owner_explicit_approval_and_no_other_maintenance():

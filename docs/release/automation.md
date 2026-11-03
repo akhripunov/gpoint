@@ -158,19 +158,23 @@ Destructive SQL и совместимость предыдущего/канди�
 allowlist; универсальный SQL risk classifier не вводился.
 
 Перед Kamal scope определяется полным diff от общего проверенного live
-baseline. Только diff, целиком ограниченный одним компонентом Mini App, Core
-или AGATA, допускает scoped deploy; неизвестные пути, удаления, смешанный
-baseline или multi-component diff переходят в FULL. Runtime Verify проверяет
-все шесть ролей, digest, source SHA, version, Docker image ID неизменённых
-ролей, health и database/cache identities. PostgreSQL, Redis, proxy и
-неизменённые компоненты не перезапускаются.
+baseline. Изменённые Core, Mini App и AGATA определяются независимо, поэтому
+изменение нескольких точно распознанных компонентов обновляет только эти
+компоненты. Неизвестный/небезопасный путь, удаление/переименование, пустой diff,
+кандидат равный baseline или смешанный runtime baseline останавливает Deploy до
+DB preflight/Apply и требует отдельного подтверждения component scope. Эти случаи
+не превращаются автоматически в FULL и не перезапускают незаявленные сервисы.
+Runtime Verify проверяет все шесть ролей, digest, source SHA, version, Docker
+image ID неизменённых ролей, health и database/cache identities. PostgreSQL,
+Redis, proxy и неизменённые компоненты не перезапускаются.
 
 Build пока публикует все три runtime-образа. Точный live baseline читается только
 в защищённом Deploy job после Tests и Build; до этого job production credentials
 недоступны. `github.event.before` не является надёжной заменой live baseline:
 предыдущая публикация могла завершиться ошибкой, а в main могли накопиться
-невыкаченные изменения. Поэтому ранний path-only выбор образа может пропустить
-образ, который станет необходим при fail-closed переходе Deploy в FULL. Тест
+невыкаченные изменения. Поэтому ранний path-only выбор образа не определяет
+Deploy scope: неоднозначный live diff блокируется до DB действий, а не
+расширяется до FULL. Тест
 `test_all_runtime_images_build_before_production_baseline_is_available`
 закрепляет это ограничение и порядок: полный безопасный build, затем live
 inventory, затем component plan. Для настоящего selective Build требуется
