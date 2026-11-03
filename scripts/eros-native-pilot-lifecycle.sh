@@ -415,12 +415,18 @@ docker image inspect "$(docker inspect --format '{{.Image}}' "$relay")" --format
 ss -ltn | grep -F '172.31.254.1:11434' >/dev/null
 ! ss -ltn | grep -Eq '(^|[[:space:]])(0\.0\.0\.0|\[::\]):11434([[:space:]]|$)'
 docker exec "$api" node -e "fetch('http://172.31.254.1:11434/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" >/dev/null
-docker run --rm --network gpoint_eros_embeddings --ip 172.31.254.3 \
+docker run --rm --network gpoint_eros_embeddings \
   --entrypoint node "ghcr.io/akhripunov/gpoint-runtime@$app_digest" -e \
   "fetch('http://172.31.254.1:11434/api/tags').then(async r=>{if(!r.ok)throw Error('relay model verification denied');const x=await r.json();if(!x.models?.some(m=>m.name==='qwen3-embedding:0.6b'&&m.digest==='ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d'))throw Error('locked Qwen model digest missing')}).catch(()=>process.exit(1))" >/dev/null
 api_ip="$(docker inspect --format '{{with index .NetworkSettings.Networks "gpoint_eros_embeddings"}}{{.IPAddress}}{{end}}' "$api")"
-test "$api_ip" = 172.31.254.2
-echo 'EROS_QWEN3_RELAY=PASS api_ip=172.31.254.2 verifier_ip=172.31.254.3 digest=locked'
+python3 - "$api_ip" <<'PY'
+import ipaddress,sys
+address=ipaddress.ip_address(sys.argv[1])
+network=ipaddress.ip_network('172.31.254.0/29')
+if address not in network or address in (network.network_address,network.broadcast_address,ipaddress.ip_address('172.31.254.1')):
+    raise SystemExit('API did not receive a usable embeddings-network address')
+PY
+echo "EROS_QWEN3_RELAY=PASS api_ip=$api_ip verifier_ip=dynamic digest=locked"
 REMOTE_VERIFY
 
 "${ssh[@]}" "$target" python3 - "/opt/gpoint/releases/$CANDIDATE_SHA/source/scripts/eros_native_pilot_ops.py" <<'REMOTE_FINAL_RESOURCES'

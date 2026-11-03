@@ -151,14 +151,13 @@ PY
 import json, sys
 networks = json.loads(sys.argv[1]) or {}
 network = networks.get("gpoint_eros_embeddings") or {}
-raise SystemExit(0 if network.get("IPAddress") == "172.31.254.2" else 1)
+address = network.get("IPAddress") or ""
+raise SystemExit(0 if address in {f"172.31.254.{host}" for host in range(2, 7)} else 1)
 PY
   then
-    if [[ -n "$(docker network inspect --format '{{range $id, $container := .Containers}}{{println $container.IPv4Address}}{{end}}' gpoint_eros_embeddings | grep '^172\.31\.254\.2/' || true)" ]]; then
-      echo 'Eros embeddings API address is already owned by another container' >&2
-      exit 1
-    fi
-    docker network connect --ip 172.31.254.2 gpoint_eros_embeddings "$api_id"
+    # Let Docker allocate an address so Kamal can start the replacement API
+    # while the old API is still connected during a rolling deployment.
+    docker network connect gpoint_eros_embeddings "$api_id"
   fi
 fi
   if [[ "$service:$role" == "gpoint-miniapp:web" ]]; then

@@ -31,16 +31,18 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("outputs.mode == 'DEPLOY'", jobs["build"]["if"])
         self.assertIn("outputs.mode == 'REHEARSAL'", jobs["build"]["if"])
         self.assertIn("outputs.mode == 'SYNTHETIC_PILOT_APPLY_REQUESTED'", jobs["build"]["if"])
+        self.assertIn("outputs.mode == 'SYNTHETIC_PILOT_VERIFY_ONLY'", jobs["build"]["if"])
         self.assertIn("build", jobs["deploy"]["needs"])
 
-    def test_main_push_runs_prepare_gates_and_never_runs_kamal_production_jobs(self):
+    def test_main_push_runs_the_automatic_exact_sha_kamal_release_chain(self):
         triggers = self.workflow.get("on", self.workflow.get(True))
         self.assertIn("push", triggers)
         self.assertIn("pull_request", triggers)
         self.assertEqual(triggers["push"]["branches"], ["main"])
         deploy = self.workflow["jobs"]["deploy"]
-        self.assertEqual(deploy["if"], "needs.workspace.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true")
-        self.assertNotIn("github.event_name == 'push'", deploy["if"])
+        self.assertIn("needs.workspace.outputs.mode == 'DEPLOY'", deploy["if"])
+        self.assertIn("github.event_name == 'push'", deploy["if"])
+        self.assertIn("github.event_name == 'workflow_dispatch' && inputs.approve_production == true", deploy["if"])
 
     def test_operational_only_push_and_migration_rehearsal_fail_closed(self):
         gate = self.workflow["jobs"]["workspace"]
@@ -48,7 +50,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("scripts/native_release_intent.py", "\n".join(step.get("run", "") for step in gate["steps"]))
         self.assertIn("--backup-maintenance", "\n".join(step.get("run", "") for step in gate["steps"]))
         intent = (ROOT / "scripts/native_release_intent.py").read_text()
-        self.assertIn('return "PREPARE_ONLY"', intent)
+        self.assertIn('return "DEPLOY"', intent)
         self.assertIn('return "BLOCK"', intent)
         self.assertEqual(self.workflow["jobs"]["backup_maintenance"]["environment"],
                          {"name": "production", "deployment": False})

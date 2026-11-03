@@ -235,6 +235,8 @@ jobs:
           tests/test_deploy_evidence_workflow.py
           tests/test_native_build_boundary.py
           tests/test_native_release_intent.py
+          tests/test_eros_native_release_compatibility.py
+          tests/test_kamal_eros_active_release_state.py
           tests/test_eros_pilot_mac_tunnel_service.py
           tests/test_eros_pilot_tunnel_post_workflow.py
           tests/test_kamal_eros_pilot_config.py
@@ -307,7 +309,7 @@ jobs:
   build:
     name: Build and publish immutable images
     needs: [workspace, python]
-    if: needs.workspace.outputs.mode == 'DEPLOY' || needs.workspace.outputs.mode == 'REHEARSAL' || needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_APPLY_REQUESTED'
+    if: needs.workspace.outputs.mode == 'DEPLOY' || needs.workspace.outputs.mode == 'REHEARSAL' || needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_APPLY_REQUESTED' || needs.workspace.outputs.mode == 'SYNTHETIC_PILOT_VERIFY_ONLY'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -636,7 +638,7 @@ jobs:
   deploy:
     name: Kamal production Deploy and Verify
     needs: [workspace, python, build]
-    if: needs.workspace.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true
+    if: needs.workspace.outputs.mode == 'DEPLOY' && needs.workspace.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.approve_production == true)) && inputs.migration_rehearsal != true && inputs.backup_maintenance != true
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -675,10 +677,18 @@ jobs:
           WORKFLOW_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          test "$GITHUB_EVENT_NAME" = workflow_dispatch
-          test "$APPROVE_PRODUCTION" = true
-          test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY"
-          test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY"
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            test "$GITHUB_EVENT_NAME" = push
+            test "$GITHUB_REF" = refs/heads/main
+            test "$REQUESTED_SHA" = "$WORKFLOW_SHA"
+          elif [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            test "$APPROVE_PRODUCTION" = true
+            test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY"
+            test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY"
+          else
+            echo 'ordinary production Deploy requires a main push or exact-SHA approved dispatch' >&2
+            exit 1
+          fi
           test "$REQUESTED_SHA" = "$WORKFLOW_SHA"
           [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$REQUESTED_SHA"
@@ -743,15 +753,47 @@ jobs:
         id: topology
         run: |
           set -euo pipefail
-          # Preserve the ordinary no-Eros invariant before any release mutation.
           remote_dir="/run/gpoint-eros-state-${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           ssh -T "root@${GPOINT_PRODUCTION_HOST}" mkdir -m 700 -- "$remote_dir"
+          echo "EROS_REMOTE_DIR=$remote_dir" >> "$GITHUB_OUTPUT"
           for helper in collect_kamal_eros_state.py kamal_eros_state.py sanitize-kamal-inventory.py sanitize-kamal-resources.py; do
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" "cat > '$remote_dir/$helper' && chmod 600 '$remote_dir/$helper'" < "$GITHUB_WORKSPACE/scripts/$helper"
           done
-          ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 "$remote_dir/collect_kamal_eros_state.py" --output "$remote_dir/no-eros-state.json"
-          echo NO_EROS_STATE=PASS
-          ssh -T "root@${GPOINT_PRODUCTION_HOST}" rm -rf -- "$remote_dir"
+          marker_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s <<'REMOTE_MARKER'
+          set -euo pipefail
+          marker=/opt/gpoint/env/eros-pilot-state.json
+          if [[ -L "$marker" ]]; then echo 'pilot marker symlink is forbidden' >&2; exit 1; fi
+          if [[ -e "$marker" ]]; then
+            test -f "$marker"
+            python3 - "$marker" <<'PY'
+          import json,os,sys,re
+          p=sys.argv[1]; s=os.stat(p,follow_symlinks=False)
+          if s.st_uid != 0 or s.st_mode & 0o077 or s.st_nlink != 1: raise SystemExit('unsafe Eros marker')
+          x=json.load(open(p)); sha=x.get('sourceSha','')
+          if x.get('schema')!='gpoint-eros-native-pilot-state/v1' or not re.fullmatch('[0-9a-f]{40}',sha): raise SystemExit('invalid Eros marker identity')
+          print(sha)
+          PY
+          else
+            echo NONE
+          fi
+          REMOTE_MARKER
+          )"
+          if [[ "$marker_state" == NONE ]]; then
+            ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 "$remote_dir/collect_kamal_eros_state.py" --output "$remote_dir/no-eros-state.json"
+            echo NO_EROS_STATE=PASS
+            echo 'eros_pilot_active=false' >> "$GITHUB_OUTPUT"
+          else
+            python3 scripts/eros_native_release_compatibility.py --pilot-sha "$marker_state" --candidate-sha "$CANDIDATE_SHA"
+            ssh -T "root@${GPOINT_PRODUCTION_HOST}" "cat > '$remote_dir/verify-kamal-eros-pilot-runtime.py' && chmod 600 '$remote_dir/verify-kamal-eros-pilot-runtime.py'" < "$GITHUB_WORKSPACE/scripts/verify-kamal-eros-pilot-runtime.py"
+            active_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 "$remote_dir/verify-kamal-eros-pilot-runtime.py" --output "$remote_dir/eros-active-before.json")"
+            echo "$active_state"
+            pilot_hash="$(sed -n 's/^EROS_ACTIVE_STATE=PASS sha256=//p' <<< "$active_state")"
+            [[ "$pilot_hash" =~ ^[0-9a-f]{64}$ ]]
+            echo 'eros_pilot_active=true' >> "$GITHUB_OUTPUT"
+            echo "EROS_PILOT_BASELINE_SHA256=$pilot_hash" >> "$GITHUB_OUTPUT"
+            echo "EROS_PILOT_MARKER_SOURCE_SHA=$marker_state" >> "$GITHUB_OUTPUT"
+            echo 'EROS_ACTIVE_STATE=PASS' >> "$GITHUB_STEP_SUMMARY"
+          fi
           role_inventory="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - < "$GITHUB_WORKSPACE/scripts/verify-kamal-production-baseline.py")"
           baseline_values="$(python3 -c 'import json,re,sys; d=json.loads(sys.argv[1]); assert set(d["roles"]) == {"gpoint-core-api","gpoint-core-worker","gpoint-core-bot","gpoint-agata-api","gpoint-agata-memory-worker","gpoint-miniapp-web"}; v=d["version"]; s=d["source_sha"]; assert re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+",v); assert re.fullmatch(r"[0-9a-f]{40}",s); print(v+"\t"+s)' "$role_inventory")"
           IFS=$'\t' read -r baseline_version baseline_source_sha <<< "$baseline_values"
@@ -880,6 +922,7 @@ jobs:
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
+          GPOINT_EROS_PILOT_ACTIVE: ${{ steps.topology.outputs.eros_pilot_active }}
         run: |
           set -euo pipefail
           kamal() {
@@ -889,8 +932,14 @@ jobs:
               --env GPOINT_KAMAL_EXPECTED_DIGEST --env GPOINT_KAMAL_SERVICE --env KAMAL_ROLES \
               ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 "$@"
           }
+          api_config=config/deploy.yml
+          if [[ "$GPOINT_EROS_PILOT_ACTIVE" == true ]]; then
+            api_config=config/deploy.eros-api.yml
+          elif [[ "$GPOINT_EROS_PILOT_ACTIVE" != false ]]; then
+            echo 'Eros pilot state was not explicitly classified' >&2; exit 1
+          fi
           GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
-            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.yml
+            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file "$api_config"
           GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.agata.yml
           GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
@@ -928,6 +977,9 @@ jobs:
           BASELINE_PRISMA_CHECKSUMS: ${{ steps.migration_baseline.outputs.prisma_checksums }}
           BASELINE_AGATA_HEAD: ${{ steps.migration_baseline.outputs.agata_head }}
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
+          GPOINT_EROS_PILOT_ACTIVE: ${{ steps.topology.outputs.eros_pilot_active }}
+          EROS_PILOT_BASELINE_SHA256: ${{ steps.topology.outputs.EROS_PILOT_BASELINE_SHA256 }}
+          EROS_REMOTE_DIR: ${{ steps.topology.outputs.EROS_REMOTE_DIR }}
         run: |
           set -euo pipefail
           curl --retry 12 --retry-connrefused --retry-delay 5 --fail --silent --show-error https://gpoint.one/api/health/live | grep -F '"status":"ok"' >/dev/null
@@ -952,6 +1004,12 @@ jobs:
           remote_writer_sha="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" sha256sum "$writer_remote" | awk '{print $1}')"
           test "$writer_sha" = "$remote_writer_sha"
           test -n "$BASELINE_PRISMA_HEAD" && test -n "$BASELINE_PRISMA_MIGRATIONS" && test -n "$BASELINE_PRISMA_CHECKSUMS" && test -n "$BASELINE_AGATA_HEAD"
+          if [[ "$GPOINT_EROS_PILOT_ACTIVE" == true ]]; then
+            [[ "$EROS_PILOT_BASELINE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            [[ "$EROS_REMOTE_DIR" == "/run/gpoint-eros-state-${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]]
+          elif [[ "$GPOINT_EROS_PILOT_ACTIVE" != false ]]; then
+            echo 'Eros topology classification is missing' >&2; exit 1
+          fi
           facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$BASELINE_PRISMA_MIGRATIONS" "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "$BASELINE_AGATA_HEAD" "$BASELINE_ROLE_VERSION" "$BASELINE_ROLE_SOURCE_SHA" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" <<'REMOTE'
           set -euo pipefail
           sha="$1"; version="$2"; app="$3"; agata="$4"; miniapp="$5"; db_id="$6"; redis_id="$7"; deployment_id="$8"; run_id="$9"; attempt="${10}"; writer="${11}"
@@ -1054,6 +1112,15 @@ jobs:
           done
           echo 'GPOINT_MEDIA_READ_WRITE=PASS'
           echo 'GPOINT_ORDINARY_KAMAL_VERIFY=PASS'
+          if [[ "$GPOINT_EROS_PILOT_ACTIVE" == true ]]; then
+            eros_state="$EROS_REMOTE_DIR/eros-active-after.json"
+            python3 "$EROS_REMOTE_DIR/verify-kamal-eros-pilot-runtime.py" --output "$eros_state"
+            after_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "$eros_state")"
+            test "$after_sha" = "$EROS_PILOT_BASELINE_SHA256" || {
+              echo 'Active Eros pilot identity or data changed during ordinary GPoint Deploy' >&2; exit 1
+            }
+            echo 'EROS_ACTIVE_STATE_PRESERVED=PASS'
+          fi
           remote_manifest_dir="/opt/gpoint/release-logs/$sha"
           install -d -o root -g root -m 0700 "$remote_manifest_dir"
           manifest="$remote_manifest_dir/kamal-production-${run_id}-${attempt}.json"
@@ -1102,6 +1169,15 @@ jobs:
           gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
             -f state="$state" -f environment=production -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             -f description="$description" >/dev/null
+      - name: Remove read-only topology snapshot
+        if: always() && steps.topology.outputs.EROS_REMOTE_DIR != ''
+        env:
+          EROS_REMOTE_DIR: ${{ steps.topology.outputs.EROS_REMOTE_DIR }}
+        run: |
+          set -euo pipefail
+          expected="/run/gpoint-eros-state-$CANDIDATE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test "$EROS_REMOTE_DIR" = "$expected"
+          ssh -T "root@$GPOINT_PRODUCTION_HOST" rm -rf -- "$expected"
 
   rollback:
     name: Protected rollback to a verified Native release

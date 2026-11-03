@@ -76,7 +76,7 @@ def test_native_workflow_runs_pilot_in_disposable_environment_and_never_uses_ord
     assert "mode == 'SYNTHETIC_PILOT_READY'" not in jobs["deploy"]["if"]
 
 
-def test_native_pilot_apply_is_separately_gated_and_ordinary_release_fails_closed_after_pilot():
+def test_native_pilot_apply_is_separately_gated_and_ordinary_release_is_eros_aware():
     workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
     trigger = workflow.get("on", workflow.get(True))
     inputs = trigger["workflow_dispatch"]["inputs"]
@@ -97,11 +97,14 @@ def test_native_pilot_apply_is_separately_gated_and_ordinary_release_fails_close
     assert any("eros-native-pilot-lifecycle.sh" in step.get("run", "") for step in apply["steps"])
     assert "approve_production" not in str(apply)
     lifecycle = (ROOT / "scripts/eros-native-pilot-lifecycle.sh").read_text()
-    assert "--network gpoint_eros_embeddings --ip 172.31.254.3" in lifecycle
+    assert "--ip 172.31.254.3" not in lifecycle
+    assert 'docker run --rm --network gpoint_eros_embeddings \\' in lifecycle
+    assert "verifier_ip=dynamic" in lifecycle
     assert "EROS_QWEN3_RELAY=PASS" in lifecycle
     assert "'/opt/gpoint/releases')/pilot_sha/'source/scripts/eros_native_pilot_ops.py'" in lifecycle
     topology = next(step for step in jobs["deploy"]["steps"] if step.get("id") == "topology")
     assert "NO_EROS_STATE" in topology.get("run", "")
+    assert "eros_pilot_active=true" in topology.get("run", "")
     assert "collect_kamal_eros_state.py" in topology.get("run", "")
 
 

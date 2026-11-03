@@ -39,6 +39,18 @@ OPERATIONAL_PREFIXES = (
     "tests/",
     "tools/",
 )
+EROS_RUNTIME_PREFIXES = (
+    "services/eros-engine/",
+    "config/deploy.eros",
+)
+EROS_RUNTIME_FILES = frozenset({
+    "scripts/eros-native-pilot-lifecycle.sh",
+    "scripts/eros-pilot-mac-tunnel-service.sh",
+    "scripts/eros-production-secrets.py",
+    "scripts/eros_native_pilot_ops.py",
+    "scripts/eros_native_release_compatibility.py",
+    "scripts/verify-kamal-eros-pilot-runtime.py",
+})
 SCHEMA_FILENAMES = frozenset({"schema.prisma"})
 TEST_DIRECTORY_NAMES = frozenset({"test", "tests"})
 SYNTHETIC_UUID = re.compile(
@@ -75,12 +87,15 @@ def classify_push(*, event_name: str, ref: str,
         return "NO_DEPLOY"
     if not changed_paths:
         return "BLOCK"
+    if any(path.startswith(EROS_RUNTIME_PREFIXES) or path in EROS_RUNTIME_FILES
+           for path in changed_paths):
+        return "BLOCK"
     kinds = {_path_kind(path) for path in changed_paths}
     if "schema" in kinds or "unknown" in kinds:
         return "BLOCK"
-    # Main pushes prepare and verify a candidate. Production mutation is a
-    # separate exact-SHA owner-approved workflow_dispatch intent.
-    return "PREPARE_ONLY"
+    # An authorized main push is the existing Native release intent. The
+    # workflow still runs Tests -> immutable Build/read-back -> Deploy -> Verify.
+    return "DEPLOY"
 
 
 def classify_dispatch(*, ref: str, candidate_sha: str, github_sha: str, actor: str,

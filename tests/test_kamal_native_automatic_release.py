@@ -7,27 +7,34 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/gpoint-native-release.yml"
 
 
-def test_main_push_runs_exact_candidate_prepare_gates_without_kamal_apply():
+def test_main_push_runs_tests_build_deploy_and_runtime_verify_automatically():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     events = workflow.get("on", workflow.get(True))
     assert events["push"]["branches"] == ["main"]
     assert events["pull_request"]["branches"] == ["main"]
     deploy = workflow["jobs"]["deploy"]
     assert "build" in deploy["needs"]
-    assert "push" not in deploy.get("if", "")
+    assert "github.event_name == 'push'" in deploy.get("if", "")
     assert 'elif [[ "$GITHUB_EVENT_NAME" != push ]]' not in WORKFLOW.read_text()
-    assert 'test "$GITHUB_EVENT_NAME" = workflow_dispatch' in WORKFLOW.read_text()
+    assert 'test "$GITHUB_EVENT_NAME" = push' in WORKFLOW.read_text()
     assert "refs/heads/main" in deploy.get("if", "")
     assert "workflow_dispatch" in deploy.get("if", "")
+    assert "DEPLOY" in deploy.get("if", "")
     assert deploy["environment"] == {"name": "production", "deployment": False}
     build = workflow["jobs"]["build"]
     assert "release_intent" not in workflow["jobs"]
     assert "workspace" in build["needs"] and "python" in build["needs"]
     assert "outputs.mode == 'DEPLOY'" in build["if"]
     assert "outputs.mode == 'REHEARSAL'" in build["if"]
+    assert "outputs.mode == 'SYNTHETIC_PILOT_VERIFY_ONLY'" in build["if"]
     assert "environment" not in build
     assert "packages: write" in WORKFLOW.read_text(encoding="utf-8")
     assert {"workspace", "python", "build"}.issubset(deploy["needs"])
+    assert "name: Verify public routes and exact running services" in WORKFLOW.read_text()
+    assert "needs.workspace.outputs.mode == 'DEPLOY'" in deploy.get("if", "")
+    assert "github.event_name == 'push'" in deploy.get("if", "")
+    assert "inputs.approve_production == true" in deploy.get("if", "")
+    assert "test \"$GITHUB_EVENT_NAME\" = push" in WORKFLOW.read_text()
 
 
 def test_release_event_routing_is_fail_closed_and_does_not_give_prs_prod_access():
@@ -148,6 +155,26 @@ def test_ordinary_release_success_does_not_depend_on_scheduled_backup_freshness(
     assert "freshness" not in ordinary_deploy
     assert "BACKUP_OUTCOME" not in status
     assert '"$DEPLOY_JOB_STATUS" == success && "$VERIFY_OUTCOME" == success' in status
+
+
+def test_active_eros_uses_separate_read_only_state_validation_and_preserves_the_pilot():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    topology = workflow.split("name: Verify installed Kamal topology before ordinary release", 1)[1].split(
+        "name: Verify candidate compatibility with the live database baseline", 1)[0]
+    assert "collect_kamal_eros_state.py" in topology
+    assert 'if [[ "$marker_state" == NONE ]]' in topology
+    assert "verify-kamal-eros-pilot-runtime.py" in topology
+    assert "eros_pilot_active=true" in topology
+    assert "eros_native_release_compatibility.py" in topology
+    deploy = workflow.split("name: Deploy exact immutable images with stock Kamal", 1)[1].split(
+        "name: Verify public routes and exact running services", 1)[0]
+    assert "config/deploy.eros-api.yml" in deploy
+    verify = workflow.split("name: Verify public routes and exact running services", 1)[1].split(
+        "name: Record GitHub Deployment result", 1)[0]
+    assert "EROS_ACTIVE_STATE_PRESERVED=PASS" in verify
+    assert "eros-active-after.json" in verify
+    assert "test \"$GITHUB_EVENT_NAME\" = push" in workflow
+    assert "github.event_name == 'workflow_dispatch' && inputs.approve_production == true" in workflow.split("  deploy:\n", 1)[1]
 
 
 def test_backup_maintenance_retains_timer_and_freshness_checks():

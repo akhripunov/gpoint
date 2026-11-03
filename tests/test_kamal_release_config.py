@@ -1234,14 +1234,15 @@ def test_manifest_writer_behavior_tests_run_in_python_ci():
     assert '"$GITHUB_ENV"' in python_job
 
 
-def test_native_release_requires_manual_exact_sha_production_dispatch():
+def test_native_release_preserves_automatic_main_deploy_and_exact_sha_dispatch_guard():
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
-    assert "if: needs.workspace.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true" in deploy
-    assert "github.event_name == 'push'" not in deploy
+    assert "needs.workspace.outputs.mode == 'DEPLOY'" in deploy
+    assert "github.event_name == 'push'" in deploy
+    assert "github.event_name == 'workflow_dispatch' && inputs.approve_production == true" in deploy
     assert "CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}" in deploy
     assert "test \"$APPROVE_PRODUCTION\" = true" in deploy
-    assert 'test "$GITHUB_EVENT_NAME" = workflow_dispatch' in deploy
+    assert 'test "$GITHUB_EVENT_NAME" = push' in deploy
     assert "name: production" in deploy
     assert "deployment: false" in deploy
 
