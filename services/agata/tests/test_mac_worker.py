@@ -163,7 +163,7 @@ class MacWorkerTests(unittest.TestCase):
         token = "test-worker-secret"
         responses = iter([
             {"status": "ready"},
-            {"job": {"id": "job-1", "leaseToken": "lease-1", "request": {"user_message": "hi"}}},
+            {"job": {"id": "job-1", "leaseToken": "lease-1", "target": "GPOINT", "tenant_id": TEST_GPOINT_TENANT_ID, "request": {"user_message": "hi"}}},
             {"completed": True},
             {"status": "ready"},
             {
@@ -207,7 +207,7 @@ class MacWorkerTests(unittest.TestCase):
             worker._last_heartbeat_attempt = float("-inf")
             def api(path, body=None, expected_model=expected):
                 if path == "claim":
-                    return {"job": {"id": "7508f36f-774a-48aa-8c6b-42f6f160415d", "leaseToken": "x" * 32, "request": {}}}
+                    return {"job": {"id": "7508f36f-774a-48aa-8c6b-42f6f160415d", "leaseToken": "x" * 32, "target": "GPOINT", "tenant_id": TEST_GPOINT_TENANT_ID, "request": {}}}
                 if path == "complete":
                     validated = WorkerCompleteRequest(**body)
                     self.assertEqual(validated.model, expected_model)
@@ -222,7 +222,7 @@ class MacWorkerTests(unittest.TestCase):
         def api(path, body=None):
             calls.append((path, body))
             if path == "claim":
-                return {"job": {"id": "job-2", "leaseToken": "lease-2", "request": {}}}
+                return {"job": {"id": "job-2", "leaseToken": "lease-2", "target": "GPOINT", "tenant_id": TEST_GPOINT_TENANT_ID, "request": {}}}
             return {"accepted": True, "state": "pending"}
 
         with patch.dict(os.environ, {"GPOINT_EROS_WORKER_URL": worker.GPOINT_EROS_GATEWAY_URL, "GPOINT_EROS_WORKER_TOKEN": "test-only", "GPOINT_EROS_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(worker, "api_request", side_effect=api), patch.object(

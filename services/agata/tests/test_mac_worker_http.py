@@ -202,7 +202,7 @@ class MacWorkerHttpTests(unittest.TestCase):
             if path == "health":
                 return {"status": "ready"}
             if path == "claim":
-                return {"job": {"id": "job-1", "leaseToken": "lease-1", "request": {}}}
+                return {"job": {"id": "job-1", "leaseToken": "lease-1", "target": "GPOINT", "tenant_id": TEST_GPOINT_TENANT_ID, "request": {}}}
             if path == "complete":
                 raise worker.TransientNetworkError("worker_gateway_network_error")
             self.fail(f"unexpected {path} request")
@@ -246,7 +246,7 @@ class MacWorkerHttpTests(unittest.TestCase):
         def api(path, body=None):
             calls.append(path)
             if path == "claim":
-                return {"job": {"id": "job-2", "leaseToken": "lease-2", "request": {}}}
+                return {"job": {"id": "job-2", "leaseToken": "lease-2", "target": "GPOINT", "tenant_id": TEST_GPOINT_TENANT_ID, "request": {}}}
             return {"completed": True}
 
         with patch.dict(os.environ, {"GPOINT_EROS_WORKER_URL": worker.GPOINT_EROS_GATEWAY_URL, "GPOINT_EROS_WORKER_TOKEN": "test-secret", "GPOINT_EROS_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(
