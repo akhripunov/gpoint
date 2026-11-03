@@ -369,6 +369,26 @@ def _remove_failed_attempt(candidate: str, run_id: str, attempt: str,
     shutil.rmtree(evidence_dir, ignore_errors=True)
 
 
+def _commit_snapshot_manifest(manifest: dict[str, object], *, bunny_remote_root: str,
+                              candidate: str, run_id: str, attempt: str,
+                              evidence_path: Path, evidence: dict[str, str], completed_at: str,
+                              latest_path: Path, run_dir: Path, run_evidence_dir: Path,
+                              policy_module, publish_bunny: bool = True) -> None:
+    pending_manifest = SCHEDULED_ROOT / f".latest-{run_id}-{attempt}.json"
+    try:
+        if publish_bunny:
+            manifest["bunny"] = _publish_bunny_receipt(
+                bunny_remote_root, candidate, run_id, attempt, evidence_path, evidence,
+                completed_at)
+        _atomic_manifest(pending_manifest, manifest)
+        policy_module.verify_freshness(pending_manifest, max_age_hours=26)
+        os.replace(pending_manifest, latest_path)
+    except Exception:
+        pending_manifest.unlink(missing_ok=True)
+        _remove_failed_attempt(candidate, run_id, attempt, run_dir, run_evidence_dir)
+        raise
+
+
 def run() -> None:
     migration_rehearsal = os.environ.get("GPOINT_MIGRATION_REHEARSAL") == "1"
     if migration_rehearsal:
@@ -599,19 +619,12 @@ def run() -> None:
                       "manifest_sha256": evidence["MEDIA_SOURCE_MANIFEST_SHA256"]},
             "restore_evidence": {"path": str(evidence_path), "sha256": _sha256(evidence_path)},
         }
-        if not migration_rehearsal:
-            manifest["bunny"] = _publish_bunny_receipt(
-                bunny_remote_root, candidate, run_id, attempt, evidence_path, evidence,
-                completed_at)
-        pending_manifest = SCHEDULED_ROOT / f".latest-{run_id}-{attempt}.json"
-        _atomic_manifest(pending_manifest, manifest)
-        try:
-            policy.verify_freshness(pending_manifest, max_age_hours=26)
-            os.replace(pending_manifest, latest_path)
-        except Exception:
-            pending_manifest.unlink(missing_ok=True)
-            _remove_failed_attempt(candidate, run_id, attempt, run_dir, run_evidence_dir)
-            raise
+        _commit_snapshot_manifest(
+            manifest, bunny_remote_root=bunny_remote_root, candidate=candidate,
+            run_id=run_id, attempt=attempt, evidence_path=evidence_path, evidence=evidence,
+            completed_at=completed_at, latest_path=latest_path, run_dir=run_dir,
+            run_evidence_dir=run_evidence_dir, policy_module=policy,
+            publish_bunny=not migration_rehearsal)
         _retain_local(time.time())
         print("GPOINT_BACKUP_SCHEDULED=PASS")
         if not migration_rehearsal:

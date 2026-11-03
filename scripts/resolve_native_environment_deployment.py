@@ -44,7 +44,7 @@ def resolve_native_deployment_id(deployments: list[dict], statuses_by_id: dict[i
     for deployment in deployments:
         identifier = deployment.get("id")
         if (not isinstance(identifier, int) or identifier <= 0
-                or deployment.get("sha") != candidate_sha or deployment.get("ref") != candidate_sha
+                or deployment.get("sha") != candidate_sha
                 or deployment.get("environment") != "production" or deployment.get("task") != "deploy"
                 or deployment.get("production_environment") is not True
                 or deployment.get("transient_environment") is not False):

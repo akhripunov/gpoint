@@ -198,6 +198,11 @@ def _component_path(path: str) -> str | None:
     return None
 
 
+def _non_runtime_documentation_path(path: str) -> bool:
+    return (path == "README.md"
+            or (path.startswith("docs/") and path.endswith((".md", ".mdx"))))
+
+
 def _safe_component_path(path: str) -> bool:
     return (isinstance(path, str) and bool(path) and not path.startswith(("/", "./", "../"))
             and "\\" not in path and "\x00" not in path and "\n" not in path
@@ -210,6 +215,7 @@ def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dic
         raise ValueError("candidate SHA is invalid")
     roles = _validate_role_inventory(inventory)
     paths_by_baseline: dict[str, set[str]] = {}
+    documentation_only = True
     for component_roles in COMPONENT_ROLES.values():
         baseline = roles[component_roles[0]]["source_sha"]
         if baseline == candidate or baseline in paths_by_baseline:
@@ -230,7 +236,10 @@ def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dic
                 raise ValueError("deleted or renamed candidate path needs explicit scope approval")
             changed_component = _component_path(path) if _safe_component_path(path) else None
             if changed_component is None:
+                if _safe_component_path(path) and _non_runtime_documentation_path(path):
+                    continue
                 raise ValueError("unmapped or unsafe candidate path needs explicit scope approval")
+            documentation_only = False
             tree = subprocess.check_output(["git", "ls-tree", candidate, "--", path],
                                            cwd=repo).decode()
             if not tree.startswith(("100644 blob ", "100755 blob ")):
@@ -247,6 +256,9 @@ def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dic
         if all(roles[component_roles[0]]["source_sha"] == candidate
                for component_roles in COMPONENT_ROLES.values()):
             raise ValueError("candidate equals production baseline; no changed component scope")
+        if documentation_only:
+            return {"scope": "NONE", "reason": "no_runtime_changes",
+                    "deploy_core": False, "deploy_agata": False, "deploy_miniapp": False}
         raise ValueError("candidate diff contains no changed runtime component")
     scope = "+".join(sorted(components))
     return {"scope": scope, "reason": "exact_component_diff",
@@ -259,9 +271,10 @@ def expected_runtime_inventory(scope: str, inventory: dict, candidate: str, vers
                                app_digest: str, agata_digest: str, miniapp_digest: str) -> dict:
     """Bind every verified role to either the untouched baseline or exact candidate artifact."""
     roles = _validate_role_inventory(inventory)
-    scope_components = set(scope.split("+")) if isinstance(scope, str) else set()
-    if (not scope_components or not scope_components.issubset(COMPONENT_ROLES)
-            or "+".join(sorted(scope_components)) != scope
+    scope_components = (set() if scope == "NONE" else
+                        set(scope.split("+")) if isinstance(scope, str) else set())
+    if (scope != "NONE" and (not scope_components or not scope_components.issubset(COMPONENT_ROLES)
+                              or "+".join(sorted(scope_components)) != scope)
             or not EXACT_SHA.fullmatch(candidate or "")
             or not EXACT_VERSION.fullmatch(version or "") or not version.startswith(candidate + "-")):
         raise ValueError("candidate component runtime plan is malformed")

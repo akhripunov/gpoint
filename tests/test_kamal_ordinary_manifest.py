@@ -82,7 +82,7 @@ def expected_roles_b64(scope="FULL"):
     components = {"CORE": ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot"),
                   "AGATA": ("gpoint-agata-api", "gpoint-agata-memory-worker"),
                   "MINIAPP": ("gpoint-miniapp-web",)}
-    updated = set(components) if scope == "FULL" else {scope}
+    updated = set(components) if scope == "FULL" else set(scope.split("+")) - {"NONE"}
     baseline = "b" * 40
     role_rows = {}
     for role, (component, repository, digest) in roles.items():
@@ -123,7 +123,7 @@ def ordinary_args(output: Path):
 
 def run_ordinary(tmp_path: Path, *, active_caddy=False, role_plan_b64=None):
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir(exist_ok=True)
+    bin_dir.mkdir(parents=True, exist_ok=True)
     setup_host_stubs(bin_dir, active_caddy=active_caddy)
     output = tmp_path / "ordinary-manifest.json"
     args = ordinary_args(output)
@@ -160,6 +160,26 @@ def test_ordinary_manifest_binds_services_database_proxy_tls_and_routes(tmp_path
     assert manifest["evidence"]["migrationCompatibility"] == "PASS"
     assert f"GPOINT_KAMAL_MANIFEST_SHA256={hashlib.sha256(raw).hexdigest()}" in result.stdout
     assert output.stat().st_mode & 0o777 == 0o600
+
+
+def test_ordinary_manifest_accepts_canonical_joined_component_scopes(tmp_path):
+    for index, scope in enumerate(("AGATA+CORE", "AGATA+MINIAPP", "CORE+MINIAPP",
+                                   "AGATA+CORE+MINIAPP")):
+        result, output = run_ordinary(tmp_path / str(index), role_plan_b64=expected_roles_b64(scope))
+        assert result.returncode == 0, result.stderr
+        manifest = json.loads(output.read_bytes())
+        assert manifest["deploymentScope"] == {
+            "classification": scope,
+            "updatedComponents": sorted(scope.split("+")),
+        }
+
+
+def test_ordinary_manifest_accepts_documentation_only_no_runtime_scope(tmp_path):
+    result, output = run_ordinary(tmp_path, role_plan_b64=expected_roles_b64("NONE"))
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads(output.read_bytes())
+    assert manifest["deploymentScope"] == {"classification": "NONE", "updatedComponents": []}
+    assert {service["revision"] for service in manifest["runtimeServices"]} == {"b" * 40}
 
 
 def test_ordinary_manifest_refuses_active_caddy_without_writing_output(tmp_path):

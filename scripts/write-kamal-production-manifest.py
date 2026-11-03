@@ -183,9 +183,18 @@ def main() -> int:
         role_repositories = ROLE_REPOSITORIES
         role_components = ROLE_COMPONENTS
         scope = expected_role_plan.get("scope") if isinstance(expected_role_plan, dict) else None
-        scope_components = {"FULL": {"CORE", "AGATA", "MINIAPP"}, "CORE": {"CORE"},
-                           "AGATA": {"AGATA"}, "MINIAPP": {"MINIAPP"}}
-        updated_components = scope_components.get(scope)
+        component_names = set(ROLE_COMPONENTS.values())
+        if scope == "FULL":
+            updated_components = component_names
+        elif scope == "NONE":
+            updated_components = set()
+        elif isinstance(scope, str):
+            updated_components = set(scope.split("+"))
+            if (not updated_components.issubset(component_names)
+                    or "+".join(sorted(updated_components)) != scope):
+                updated_components = None
+        else:
+            updated_components = None
         expected_roles = expected_role_plan.get("roles") if isinstance(expected_role_plan, dict) else None
         if (not isinstance(expected_role_plan, dict)
                 or expected_role_plan.get("schema") != 1 or expected_role_plan.get("candidateSha") != args.sha

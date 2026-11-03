@@ -173,6 +173,11 @@ production source SHA после предыдущих scoped releases: срав�
 каждого компонента отдельно; роли одного образа при этом должны совпадать.
 Неоднозначный scope не превращается автоматически в FULL и не перезапускает
 незаявленные сервисы.
+Кандидат, в полном production-to-candidate diff которого изменились только
+корневой `README.md` и Markdown-файлы под `docs/`, получает scope `NONE`:
+application roles не перезапускаются, но защищённый Deploy всё равно проверяет
+runtime inventory, состояние БД, маршруты и health перед успешным статусом
+штатного GitHub Deployment.
 Runtime Verify проверяет все шесть ролей, digest, source SHA, version, Docker
 image ID неизменённых ролей, health и database/cache identities. PostgreSQL,
 Redis, proxy и неизменённые компоненты не перезапускаются.
@@ -230,7 +235,8 @@ read-only live-state checks. Для app-only кандидата Prisma Apply п�
 В обычном Native Release job использует GitHub Actions `environment: production`:
 GitHub сам создаёт Deployment и управляет `in_progress`/финальным статусом по
 результату job. Read-only resolver находит ровно одну запись по exact candidate
-SHA/ref, production environment, task, run URL и попытке; неоднозначность
+`sha`, production environment, task, run URL и попытке; GitHub `ref` может быть
+именем triggering branch и не заменяет проверку deployed SHA. Неоднозначность
 блокирует job. Успешный Verify отдаёт в `environment.url` URL с SHA-256 runtime
 manifest, поэтому автоматический SUCCESS связан с тем же проверенным manifest.
 Отдельные ручные POST статусов в обычном пути не нужны.
@@ -322,11 +328,12 @@ recovery/transition paths. Отсутствие автоматического �
 procedures ниже текущей модели помечены отдельно и не являются рабочими
 instructions.
 
-## Текущая модель выпуска и состояния (ME-42)
+## Архивная модель артефактов и состояния (ME-42)
 
-Этот раздел является единственным действующим описанием хранения артефактов и
-production state после OWNER addendum ME-42. Все разделы ниже него — исторические
-сведения о прежних процедурах; их команды и инструкции не запускать.
+Этот раздел сохраняет правила прежнего Prepare/OCI-receipt потока. Для обычных
+релизов действует Native First V3 + Kamal 2 в разделе `ME-52` выше; этот архивный
+поток не является fallback и не заменяет его. Все команды ниже этого заголовка
+описаны только для исторических или отдельно сохранённых recovery callers.
 
 - **Единое хранилище build artifacts — GHCR.** GitHub Releases и Actions Artifact
   Storage не используются в действующем Prepare/Deploy transport. Prepare
@@ -409,7 +416,7 @@ runner. Host Mac read-only check тоже не доказывает доступ
 не право читать/писать package. Не выводить секреты, не обходить sandbox или host
 approval и не расширять OWNER scope; сообщать точную причину и минимальное действие.
 
-## Исторические процедуры (заменены ME-42)
+## Исторические процедуры (заменены Native First V3; ME-42 также архивный)
 
 Ниже — архивный текст прежнего дизайна, включая GitHub Releases, Actions
 artifacts, ledger и устаревшие команды; это не инструкция к запуску и не

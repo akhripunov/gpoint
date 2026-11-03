@@ -295,10 +295,28 @@ def test_staggered_component_baselines_do_not_redeploy_already_updated_component
 
 def test_unknown_paths_block_before_deploy_planning(tmp_path):
     repo, _baseline, candidate, inventory = _component_repo(
-        tmp_path, {"docs/release/automation.md": "release\n"}
+        tmp_path, {"secrets/unmapped.txt": "do not deploy\n"}
     )
     with pytest.raises(ValueError, match="unmapped or unsafe candidate path"):
         MODULE.classify_component_scope(repo, candidate, inventory)
+
+
+def test_documentation_only_candidate_verifies_runtime_without_restarting_components(tmp_path):
+    for path in ("README.md", "docs/release/automation.md"):
+        repo, _baseline, candidate, inventory = _component_repo(
+            tmp_path / path.replace("/", "_"), {path: "updated documentation\n"}
+        )
+
+        scope = MODULE.classify_component_scope(repo, candidate, inventory)
+        expected = MODULE.expected_runtime_inventory(
+            scope["scope"], inventory, candidate, candidate + "-123-1",
+            "sha256:" + "1" * 64, "sha256:" + "2" * 64, "sha256:" + "3" * 64,
+        )
+
+        assert scope == {"scope": "NONE", "reason": "no_runtime_changes",
+                         "deploy_core": False, "deploy_agata": False, "deploy_miniapp": False}
+        assert expected["updatedComponents"] == []
+        assert {row["sourceSha"] for row in expected["roles"].values()} == {_baseline}
 
 
 def test_candidate_equal_to_baseline_blocks_without_restarting_components(tmp_path):

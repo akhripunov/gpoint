@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 
 import pytest
 
@@ -182,6 +183,11 @@ def test_scheduled_backup_uploads_then_restores_the_same_bunny_readback_objects(
     database_restore = helper.index('age -d -i "$age_identity" "$restore_backup_file"')
     media_restore = helper.index('age -d -i "$age_identity" "$restore_media_backup_file"')
     assert upload < readback < database_restore < media_restore
+    database_readback_source = helper.index('restore_backup_file="${bunny_readback_dir}/$(basename "$backup_file")"')
+    media_readback_source = helper.index('restore_media_backup_file="${bunny_readback_dir}/$(basename "$media_backup_file")"')
+    assert readback < database_readback_source < database_restore
+    assert readback < media_readback_source < media_restore
+    assert 'restore_media_source_manifest="${bunny_readback_dir}/media-source.json"' in helper
     assert 'rclone check --download --one-way' in helper
     assert 'age -d -i "$age_identity" "${bunny_readback_dir}/media-source.json.age"' in helper
     assert 'BUNNY_DATABASE_READBACK=$bunny_database_readback' in helper
@@ -191,6 +197,78 @@ def test_scheduled_backup_uploads_then_restores_the_same_bunny_readback_objects(
     assert 'EnvironmentFile=-/opt/gpoint/env/gpoint-backup-offsite.conf' in service
     assert service.count('EnvironmentFile=-/opt/gpoint/env/gpoint-backup-offsite.conf') == 1
     assert 'def _retain_local(now: float)' in runner  # no unapproved retention switch
+
+
+def test_bunny_receipt_failure_cleans_only_the_new_attempt_and_preserves_latest(tmp_path, monkeypatch):
+    scheduled = tmp_path / "scheduled"
+    scheduled.mkdir(mode=0o700)
+    monkeypatch.setattr(gpoint_scheduled_backup, "SCHEDULED_ROOT", scheduled)
+    latest = scheduled / "latest.json"
+    latest.write_text('{"status":"PASS","snapshot":"previous"}', encoding="utf-8")
+    candidate = "a" * 40
+    run_id, attempt = "42", "1"
+    run_dir = tmp_path / "attempt-runtime"
+    evidence_dir = scheduled / "runs" / f"{candidate}-{run_id}-{attempt}"
+    run_dir.mkdir()
+    evidence_dir.mkdir(parents=True)
+    cleanup_calls = []
+
+    def fail_receipt(*_args):
+        raise RuntimeError("read-back failed")
+
+    def cleanup(*args):
+        cleanup_calls.append(args)
+        shutil.rmtree(args[3], ignore_errors=True)
+        shutil.rmtree(args[4], ignore_errors=True)
+
+    monkeypatch.setattr(gpoint_scheduled_backup, "_publish_bunny_receipt", fail_receipt)
+    monkeypatch.setattr(gpoint_scheduled_backup, "_remove_failed_attempt", cleanup)
+    monkeypatch.setattr(
+        gpoint_scheduled_backup, "_atomic_manifest",
+        lambda *_args: pytest.fail("failed Bunny read-back must not write a pending manifest"),
+    )
+
+    with pytest.raises(RuntimeError, match="read-back failed"):
+        gpoint_scheduled_backup._commit_snapshot_manifest(
+            {"status": "PASS"}, bunny_remote_root="bunny:gpoint-backups",
+            candidate=candidate, run_id=run_id, attempt=attempt,
+            evidence_path=evidence_dir / "restore.txt", evidence={}, completed_at="now",
+            latest_path=latest, run_dir=run_dir, run_evidence_dir=evidence_dir,
+            policy_module=gpoint_backup_policy,
+        )
+
+    assert latest.read_text(encoding="utf-8") == '{"status":"PASS","snapshot":"previous"}'
+    assert not (scheduled / f".latest-{run_id}-{attempt}.json").exists()
+    assert cleanup_calls == [(candidate, run_id, attempt, run_dir, evidence_dir)]
+    assert not run_dir.exists()
+    assert not evidence_dir.exists()
+
+
+def test_migration_rehearsal_manifest_skips_bunny_receipt(tmp_path, monkeypatch):
+    scheduled = tmp_path / "scheduled"
+    scheduled.mkdir(mode=0o700)
+    monkeypatch.setattr(gpoint_scheduled_backup, "SCHEDULED_ROOT", scheduled)
+    latest = scheduled / "latest.json"
+    run_dir = tmp_path / "attempt-runtime"
+    evidence_dir = scheduled / "runs" / ("a" * 40 + "-42-1")
+    run_dir.mkdir()
+    evidence_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        gpoint_scheduled_backup, "_publish_bunny_receipt",
+        lambda *_args: pytest.fail("migration rehearsal must not access Bunny"),
+    )
+    monkeypatch.setattr(gpoint_backup_policy, "verify_freshness", lambda *_args, **_kwargs: None)
+
+    gpoint_scheduled_backup._commit_snapshot_manifest(
+        {"status": "PASS"}, bunny_remote_root="", candidate="a" * 40,
+        run_id="42", attempt="1", evidence_path=evidence_dir / "restore.txt", evidence={},
+        completed_at="now", latest_path=latest, run_dir=run_dir,
+        run_evidence_dir=evidence_dir, policy_module=gpoint_backup_policy, publish_bunny=False,
+    )
+
+    saved = json.loads(latest.read_text(encoding="utf-8"))
+    assert saved["status"] == "PASS"
+    assert "bunny" not in saved
 
 
 def test_migration_rehearsal_with_release_backup_evidence_does_not_require_bunny_config(monkeypatch):
@@ -266,7 +344,7 @@ def test_migration_rehearsal_requires_existing_backup_and_never_refreshes_latest
     assert "GPOINT_MIGRATION_REHEARSAL" in helper
     assert '"BASELINE_SCHEMA": ("gpoint-migration-rehearsal-baseline/v1" if migration_rehearsal' in runner
     rehearsal_finish = runner.index('print("GPOINT_MIGRATION_REHEARSAL=PASS")')
-    normal_manifest_publish = runner.index("os.replace(pending_manifest, latest_path)")
+    normal_manifest_publish = runner.index("_commit_snapshot_manifest(", rehearsal_finish)
     assert "return" in runner[rehearsal_finish:normal_manifest_publish]
     assert 'backup --sha "$candidate"' not in helper.split('if [[ "${GPOINT_USE_EXISTING_BACKUP:-0}" == "1" ]]', 1)[1].split("else", 1)[0]
 

@@ -36,6 +36,13 @@ def test_resolves_only_exact_in_progress_deployment_for_current_run_attempt():
     assert result == 101
 
 
+def test_resolves_exact_sha_even_when_native_deployment_ref_is_main_branch():
+    result = resolver.resolve_native_deployment_id(
+        [deployment() | {"ref": "refs/heads/main"}], {101: [status()]},
+        candidate_sha=SHA, repository=REPOSITORY, run_id=RUN, run_attempt=ATTEMPT)
+    assert result == 101
+
+
 @pytest.mark.parametrize("bad", [
     deployment(101) | {"sha": "b" * 40},
     deployment(101) | {"environment": "staging"},
