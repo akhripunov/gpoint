@@ -189,6 +189,7 @@ def test_scheduled_backup_uploads_then_restores_the_same_bunny_readback_objects(
     assert '_publish_bunny_receipt(' in runner
     assert 'manifest["bunny"] = _publish_bunny_receipt(' in runner
     assert 'EnvironmentFile=-/opt/gpoint/env/gpoint-backup-offsite.conf' in service
+    assert service.count('EnvironmentFile=-/opt/gpoint/env/gpoint-backup-offsite.conf') == 1
     assert 'def _retain_local(now: float)' in runner  # no unapproved retention switch
 
 
