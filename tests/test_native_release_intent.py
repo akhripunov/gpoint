@@ -71,7 +71,10 @@ def test_known_operational_or_test_only_main_push_uses_native_release_flow():
 
 
 def test_eros_runtime_hooks_and_config_changes_block_until_explicit_pilot_reconciliation():
-    for path in (".kamal/hooks/pre-app-boot", ".kamal/hooks/post-app-boot", "config/eros-pilot.yml"):
+    for path in (".kamal/hooks/pre-app-boot", ".kamal/hooks/post-app-boot", "config/eros-pilot.yml",
+                 "scripts/eros-new-operation.py", "scripts/collect_kamal_eros_state.py",
+                 "scripts/kamal_eros_state.py", "scripts/automated-eros-new-operation.py",
+                 "scripts/kamal-eros-new-operation.py"):
         assert MODULE.classify_push(
             event_name="push", ref="refs/heads/main", changed_paths={path}
         ) == "BLOCK", path

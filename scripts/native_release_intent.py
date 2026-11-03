@@ -44,6 +44,12 @@ EROS_RUNTIME_PREFIXES = (
     "config/deploy.eros",
     "config/eros-",
     ".kamal/hooks/",
+    "scripts/eros-",
+    "scripts/eros_",
+    "scripts/collect_kamal_eros_",
+    "scripts/kamal_eros_",
+    "scripts/automated-eros-",
+    "scripts/kamal-eros-",
 )
 EROS_RUNTIME_FILES = frozenset({
     "scripts/eros-native-pilot-lifecycle.sh",
@@ -53,6 +59,14 @@ EROS_RUNTIME_FILES = frozenset({
     "scripts/eros_native_release_compatibility.py",
     "scripts/verify-kamal-eros-pilot-runtime.py",
 })
+EROS_SCRIPT_RUNTIME_PREFIXES = (
+    "scripts/eros-",
+    "scripts/eros_",
+    "scripts/collect_kamal_eros_",
+    "scripts/kamal_eros_",
+    "scripts/automated-eros-",
+    "scripts/kamal-eros-",
+)
 EROS_BOOTSTRAP_BASE_SHA = "35bfad2a42384adca55464b33cee72589a1247ad"
 # Filled from the reviewed ME-36 bootstrap payload. The digest binds every
 # blocked runtime file/tree entry to this one initial main-push range.
@@ -63,7 +77,7 @@ EROS_BOOTSTRAP_PATHS = (
     # escape the exact initial payload fingerprint.
     "config/",
     ".kamal/hooks/",
-    *sorted(EROS_RUNTIME_FILES),
+    "scripts/",
 )
 SCHEMA_FILENAMES = frozenset({"schema.prisma"})
 TEST_DIRECTORY_NAMES = frozenset({"test", "tests"})
@@ -102,10 +116,20 @@ def eros_runtime_tree_digest(sha: str, repo: Path = Path.cwd()) -> str:
         ["git", "ls-tree", "-r", "--full-tree", "-z", sha, "--", *EROS_BOOTSTRAP_PATHS],
         cwd=repo, check=True, capture_output=True,
     )
-    if not result.stdout:
+    records = [record for record in result.stdout.split(b"\0") if record]
+    selected = []
+    for record in records:
+        _metadata, separator, raw_path = record.partition(b"\t")
+        if not separator:
+            continue
+        path = raw_path.decode("utf-8", errors="strict")
+        if (path.startswith(("services/eros-engine/", "config/", ".kamal/hooks/")) or
+                path in EROS_RUNTIME_FILES or path.startswith(EROS_SCRIPT_RUNTIME_PREFIXES)):
+            selected.append(record)
+    if not selected:
         raise ValueError("bootstrap runtime tree is empty")
     import hashlib
-    return hashlib.sha256(result.stdout).hexdigest()
+    return hashlib.sha256(b"\0".join(selected) + b"\0").hexdigest()
 
 
 def is_eros_bootstrap_range(*, before: str, sha: str,
@@ -114,7 +138,8 @@ def is_eros_bootstrap_range(*, before: str, sha: str,
     if before != EROS_BOOTSTRAP_BASE_SHA:
         return False
     has_eros_runtime_change = any(
-        path.startswith(EROS_RUNTIME_PREFIXES) or path in EROS_RUNTIME_FILES
+        path.startswith(EROS_RUNTIME_PREFIXES) or path.startswith(EROS_SCRIPT_RUNTIME_PREFIXES)
+        or path in EROS_RUNTIME_FILES
         for path in changed_paths
     )
     if not has_eros_runtime_change:
@@ -129,7 +154,8 @@ def classify_push(*, event_name: str, ref: str,
         return "NO_DEPLOY"
     if not changed_paths:
         return "BLOCK"
-    if any(path.startswith(EROS_RUNTIME_PREFIXES) or path in EROS_RUNTIME_FILES
+    if any(path.startswith(EROS_RUNTIME_PREFIXES) or path.startswith(EROS_SCRIPT_RUNTIME_PREFIXES)
+           or path in EROS_RUNTIME_FILES
            for path in changed_paths) and not is_eros_bootstrap_range(
                before=before, sha=sha, changed_paths=changed_paths, repo=repo):
         return "BLOCK"
