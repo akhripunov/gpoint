@@ -51,6 +51,17 @@ EROS_RUNTIME_FILES = frozenset({
     "scripts/eros_native_release_compatibility.py",
     "scripts/verify-kamal-eros-pilot-runtime.py",
 })
+EROS_BOOTSTRAP_BASE_SHA = "35bfad2a42384adca55464b33cee72589a1247ad"
+# Filled from the reviewed ME-36 bootstrap payload. The digest binds every
+# blocked runtime file/tree entry to this one initial main-push range.
+EROS_BOOTSTRAP_TREE_SHA256 = "d5a3afea6038f3e1970ebb0e77b0c544674e0062bcce00362bc9d46fe810d9b9"
+EROS_BOOTSTRAP_PATHS = (
+    "services/eros-engine/",
+    # Hash the whole config tree so a newly added deploy.eros* path cannot
+    # escape the exact initial payload fingerprint.
+    "config/",
+    *sorted(EROS_RUNTIME_FILES),
+)
 SCHEMA_FILENAMES = frozenset({"schema.prisma"})
 TEST_DIRECTORY_NAMES = frozenset({"test", "tests"})
 SYNTHETIC_UUID = re.compile(
@@ -81,14 +92,43 @@ def _path_kind(path: str) -> str:
     return "unknown"
 
 
+def eros_runtime_tree_digest(sha: str, repo: Path = Path.cwd()) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise ValueError("bootstrap candidate SHA is malformed")
+    result = subprocess.run(
+        ["git", "ls-tree", "-r", "--full-tree", "-z", sha, "--", *EROS_BOOTSTRAP_PATHS],
+        cwd=repo, check=True, capture_output=True,
+    )
+    if not result.stdout:
+        raise ValueError("bootstrap runtime tree is empty")
+    import hashlib
+    return hashlib.sha256(result.stdout).hexdigest()
+
+
+def is_eros_bootstrap_range(*, before: str, sha: str,
+                            changed_paths: set[str] | frozenset[str],
+                            repo: Path = Path.cwd()) -> bool:
+    if before != EROS_BOOTSTRAP_BASE_SHA:
+        return False
+    has_eros_runtime_change = any(
+        path.startswith(EROS_RUNTIME_PREFIXES) or path in EROS_RUNTIME_FILES
+        for path in changed_paths
+    )
+    if not has_eros_runtime_change:
+        return False
+    return eros_runtime_tree_digest(sha, repo) == EROS_BOOTSTRAP_TREE_SHA256
+
+
 def classify_push(*, event_name: str, ref: str,
-                  changed_paths: set[str] | frozenset[str]) -> str:
+                  changed_paths: set[str] | frozenset[str],
+                  before: str = "", sha: str = "", repo: Path = Path.cwd()) -> str:
     if event_name != "push" or ref != "refs/heads/main":
         return "NO_DEPLOY"
     if not changed_paths:
         return "BLOCK"
     if any(path.startswith(EROS_RUNTIME_PREFIXES) or path in EROS_RUNTIME_FILES
-           for path in changed_paths):
+           for path in changed_paths) and not is_eros_bootstrap_range(
+               before=before, sha=sha, changed_paths=changed_paths, repo=repo):
         return "BLOCK"
     kinds = {_path_kind(path) for path in changed_paths}
     if "schema" in kinds or "unknown" in kinds:
@@ -216,7 +256,8 @@ def main() -> int:
     try:
         if args.event == "push":
             paths = changed_paths(args.before, args.sha)
-            mode = classify_push(event_name=args.event, ref=args.ref, changed_paths=paths)
+            mode = classify_push(event_name=args.event, ref=args.ref, changed_paths=paths,
+                                 before=args.before, sha=args.sha)
             deploy = mode == "DEPLOY"
         elif args.event == "workflow_dispatch":
             if (args.synthetic_eros_pilot or args.approve_synthetic_eros_pilot

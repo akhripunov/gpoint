@@ -19,6 +19,25 @@ def test_allowed_main_push_selects_automatic_exact_sha_deploy():
     ) == "DEPLOY"
 
 
+def test_initial_eros_bootstrap_exception_is_bound_to_exact_base_and_runtime_tree(monkeypatch):
+    paths = {"apps/api/src/main.ts", "services/eros-engine/local-e2e.test.mjs",
+             "config/deploy.eros-api.yml"}
+    monkeypatch.setattr(MODULE, "eros_runtime_tree_digest", lambda _sha, _repo: MODULE.EROS_BOOTSTRAP_TREE_SHA256)
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths=paths,
+        before=MODULE.EROS_BOOTSTRAP_BASE_SHA, sha="a" * 40,
+    ) == "DEPLOY"
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths=paths,
+        before="b" * 40, sha="a" * 40,
+    ) == "BLOCK"
+    monkeypatch.setattr(MODULE, "eros_runtime_tree_digest", lambda _sha, _repo: "0" * 64)
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths=paths,
+        before=MODULE.EROS_BOOTSTRAP_BASE_SHA, sha="a" * 40,
+    ) == "BLOCK"
+
+
 def test_normal_app_paths_cover_miniapp_bot_worker_agata_and_runtime_packages():
     for path in (
         "apps/miniapp/src/main.tsx",

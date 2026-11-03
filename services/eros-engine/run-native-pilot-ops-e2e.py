@@ -126,6 +126,34 @@ def main() -> int:
                 raise RuntimeError("Eros secret provisioning did not report readiness")
             stage = "database and role provisioning"
             secrets_module.provision_database(env_file)
+            stage = "public database ACL read-back"
+            runtime_verifier = module("verify_kamal_eros_pilot_runtime", "verify-kamal-eros-pilot-runtime.py")
+            acl_query = (
+                "SELECT json_build_object('name',datname,'owner',pg_get_userbyid(datdba),"
+                "'allowConnections',datallowconn,'publicConnect'," + runtime_verifier.PUBLIC_CONNECT_SQL +
+                ")::text FROM pg_database WHERE datname='eros'"
+            )
+            def database_acl():
+                raw = run("docker", "exec", container, "psql", "-XqAt", "-v", "ON_ERROR_STOP=1",
+                          "-U", "postgres", "-d", "postgres", "-c", acl_query).stdout.strip()
+                return json.loads(raw)
+            runtime_verifier.validate_database_acl(database_acl())
+            run("docker", "exec", container, "psql", "-Xq", "-v", "ON_ERROR_STOP=1",
+                "-U", "postgres", "-d", "postgres",
+                "-c", "GRANT CONNECT ON DATABASE eros TO PUBLIC")
+            try:
+                try:
+                    runtime_verifier.validate_database_acl(database_acl())
+                except runtime_verifier.RuntimeStateError:
+                    pass
+                else:
+                    raise RuntimeError("runtime verifier accepted public CONNECT on eros")
+            finally:
+                run("docker", "exec", container, "psql", "-Xq", "-v", "ON_ERROR_STOP=1",
+                    "-U", "postgres", "-d", "postgres",
+                    "-c", "REVOKE CONNECT ON DATABASE eros FROM PUBLIC")
+            runtime_verifier.validate_database_acl(database_acl())
+            print("EROS_PUBLIC_CONNECT_ACL_E2E=PASS revoked=accepted granted=blocked")
             values = ops._load_env(env_file)
             stage = "least-privilege container env projection"
             production_env = root / "production-container.env"

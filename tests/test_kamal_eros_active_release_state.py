@@ -94,6 +94,14 @@ def test_sqlx_failed_migration_blocks_ordinary_release():
         MODULE.validate(*values)
 
 
+def test_public_connect_acl_semantics_match_revoke_from_public():
+    marker, api, engine, relay, postgres, networks = facts()
+    MODULE.validate_database_acl(postgres["database"])
+    postgres["database"]["publicConnect"] = True
+    with pytest.raises(MODULE.RuntimeStateError, match="public ACL"):
+        MODULE.validate_database_acl(postgres["database"])
+
+
 def test_rolling_api_address_change_is_excluded_but_eros_container_replacement_changes_baseline():
     values = facts()
     before = MODULE.validate(*values)

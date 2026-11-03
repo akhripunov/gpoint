@@ -8,6 +8,10 @@ MARKER_SCHEMA = "gpoint-eros-native-pilot-state/v1"
 EROS_UPSTREAM_SHA = "d1a140083321687212fb7b17c09cc0c3c9639f5e"
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.I)
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
+PUBLIC_CONNECT_SQL = (
+    "EXISTS(SELECT 1 FROM aclexplode(COALESCE(datacl,acldefault('d',datdba))) a "
+    "WHERE a.grantee=0 AND a.privilege_type='CONNECT')"
+)
 
 class RuntimeStateError(ValueError):
     pass
@@ -15,6 +19,10 @@ class RuntimeStateError(ValueError):
 def require(ok, message):
     if not ok:
         raise RuntimeStateError(message)
+
+def validate_database_acl(database):
+    require(database == {"name":"eros","owner":"eros_ddl","allowConnections":True,"publicConnect":False},
+            "Eros database owner or public ACL is invalid")
 
 def validate(marker, api, engine, relay, postgres, networks):
     require(marker.get("schema") == MARKER_SCHEMA and marker.get("status") == "synthetic-pilot-ready", "pilot marker is absent or not ready")
@@ -52,8 +60,7 @@ def validate(marker, api, engine, relay, postgres, networks):
     require(postgres.get("running") is True and "gpoint_eros_data" in postgres.get("networks",{})
             and "gpoint-eros-db" in postgres["networks"]["gpoint_eros_data"].get("aliases",[]),
             "existing PostgreSQL is not on private Eros data network")
-    require(postgres.get("database") == {"name":"eros","owner":"eros_ddl","allowConnections":True,"publicConnect":False},
-            "Eros database identity or public ACL mismatch")
+    validate_database_acl(postgres.get("database"))
     expected_roles = {
       "eros_ddl":{"login":False,"superuser":False,"createDatabase":False,"createRole":False,"bypassRls":False},
       "eros_runtime":{"login":True,"superuser":False,"createDatabase":False,"createRole":False,"bypassRls":True},
@@ -116,7 +123,7 @@ def collect(marker_path=Path("/opt/gpoint/env/eros-pilot-state.json")):
     # This query is READ ONLY and returns only ACL, migration and catalog facts.
     sql="""BEGIN READ ONLY; SELECT json_build_object(
       'database',(SELECT json_build_object('name',datname,'owner',pg_get_userbyid(datdba),'allowConnections',datallowconn,
-       'publicConnect',NOT EXISTS(SELECT 1 FROM aclexplode(COALESCE(datacl,acldefault('d',datdba))) a WHERE a.grantee=0 AND a.privilege_type='CONNECT')) FROM pg_database WHERE datname='eros'),
+       'publicConnect',PUBLIC_CONNECT_EXPR) FROM pg_database WHERE datname='eros'),
       'roles',(SELECT json_object_agg(rolname,json_build_object('login',rolcanlogin,'superuser',rolsuper,'createDatabase',rolcreatedb,'createRole',rolcreaterole,'bypassRls',rolbypassrls)) FROM pg_roles WHERE rolname IN ('eros_ddl','eros_runtime','eros_migrator')),
       'runtimeConnect',has_database_privilege('eros_runtime','eros','CONNECT'),'runtimeCreate',has_database_privilege('eros_runtime','eros','CREATE'),
       'migratorConnect',has_database_privilege('eros_migrator','eros','CONNECT'),'migratorCreate',has_database_privilege('eros_migrator','eros','CREATE'),
@@ -128,7 +135,9 @@ def collect(marker_path=Path("/opt/gpoint/env/eros-pilot-state.json")):
       'migrationHead',(SELECT version::text FROM public._sqlx_migrations WHERE success ORDER BY version DESC LIMIT 1),
       'catalogFacts',(SELECT string_agg(concat_ws('|',n.nspname,c.relname,a.attname,a.atttypid::text),E'\\n' ORDER BY n.nspname,c.relname,a.attnum)
         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace LEFT JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
-        WHERE n.nspname IN ('public','engine'))::text FROM pg_catalog.pg_database LIMIT 1; COMMIT;"""
+        WHERE n.nspname IN ('public','engine'))::text FROM pg_catalog.pg_database LIMIT 1; COMMIT;""".replace(
+            "PUBLIC_CONNECT_EXPR", PUBLIC_CONNECT_SQL
+        )
     proc=subprocess.run(["docker","exec","-i","shared_postgres_1","sh","-ec",'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d eros'],
       input=sql,text=True,capture_output=True,check=False)
     if proc.returncode: raise RuntimeStateError("read-only Eros PostgreSQL verification failed")
