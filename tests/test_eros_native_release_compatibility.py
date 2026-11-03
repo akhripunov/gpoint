@@ -28,6 +28,22 @@ def test_changed_eros_adapter_contract_blocks_until_pilot_upgrade_is_approved():
         MODULE.compare_contract("a" * 40, "b" * 40, read)
 
 
+@pytest.mark.parametrize("path", [
+    "apps/api/src/main.ts",
+    "apps/api/src/agata-worker-gateway.ts",
+])
+def test_changed_eros_registration_path_blocks_ordinary_release(path):
+    pilot = {item: ("pilot:" + item).encode() for item in (*MODULE.CONTRACT_PATHS, path)}
+    candidate = dict(pilot)
+    candidate[path] += b"\nchanged"
+
+    def read(sha, requested_path):
+        return (pilot if sha == "a" * 40 else candidate).get(requested_path)
+
+    with pytest.raises(MODULE.CompatibilityError, match="contracts differ"):
+        MODULE.compare_contract("a" * 40, "b" * 40, read)
+
+
 def test_missing_contract_file_fails_closed():
     with pytest.raises(MODULE.CompatibilityError, match="unavailable"):
         MODULE.contract_digest("a" * 40, lambda _sha, _path: None)

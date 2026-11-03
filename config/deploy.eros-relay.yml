@@ -17,6 +17,7 @@ servers:
       network: host
       volume: /opt/gpoint/releases/<%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>/source/services/eros-engine/eros-pilot-embedding-relay.mjs:/opt/gpoint/eros-pilot-embedding-relay.mjs:ro
       memory: 64m
+      memory-swap: 64m
       cpus: 0.25
       pids-limit: 64
       read-only: true

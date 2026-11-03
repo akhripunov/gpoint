@@ -249,6 +249,89 @@ def test_pilot_cleanup_requires_exact_eros_database_owner_and_deployment_identit
                 observed_identity=observed, expected_identity="pilot-identity")
 
 
+def test_cleanup_uses_latest_verified_gpoint_release_after_an_ordinary_deploy():
+    latest_sha = "d" * 40
+    old_pilot_sha = "a" * 40
+    target = MODULE.cleanup_api_release_target(
+        version=latest_sha + "-41575023637-1",
+        source_sha=latest_sha,
+        repo_digest="ghcr.io/akhripunov/gpoint-runtime@sha256:" + "e" * 64,
+        pilot_version=old_pilot_sha + "-41570000000-1",
+    )
+    assert target == {
+        "version": latest_sha + "-41575023637-1",
+        "sourceSha": latest_sha,
+        "repoDigest": "ghcr.io/akhripunov/gpoint-runtime@sha256:" + "e" * 64,
+    }
+
+
+@pytest.mark.parametrize(("version", "source", "digest", "pilot_version"), [
+    ("", "d" * 40, "ghcr.io/akhripunov/gpoint-runtime@sha256:" + "e" * 64, "a" * 40 + "-1-1"),
+    ("d" * 40 + "-1-1", "c" * 40, "ghcr.io/akhripunov/gpoint-runtime@sha256:" + "e" * 64, "a" * 40 + "-1-1"),
+    ("d" * 40 + "-1-1", "d" * 40, "latest", "a" * 40 + "-1-1"),
+])
+def test_cleanup_rejects_unverified_current_release_identity(version, source, digest, pilot_version):
+    with pytest.raises(MODULE.PilotGateError, match="verified current GPoint API release"):
+        MODULE.cleanup_api_release_target(version, source, digest, pilot_version)
+
+
+def test_cleanup_deploys_latest_running_api_with_standard_kamal_config():
+    lifecycle = (ROOT / "scripts/eros-native-pilot-lifecycle.sh").read_text()
+    cleanup = lifecycle.split("rollback_and_cleanup() {", 1)[1].split("\n}\n\nif [[", 1)[0]
+    assert 'current_raw="$(check_remote_baseline_raw)"' in cleanup
+    assert "cleanup_api_release_target" in cleanup
+    assert 'kamal deploy --skip-push --version "$current_image_version" --roles api --config-file config/deploy.yml' in cleanup
+    assert "kamal rollback" not in cleanup
+    assert "EROS_CLEANUP_LATEST_GPOINT_API=PASS" in cleanup
+
+
+def test_cleanup_removes_kamal_replaced_api_from_current_release_after_ordinary_deploy(monkeypatch):
+    import subprocess
+
+    pilot_sha, pilot_version = "a" * 40, "a" * 40 + "-100-1"
+    current_sha, current_version = "d" * 40, "d" * 40 + "-200-1"
+    pilot_digest = "ghcr.io/akhripunov/gpoint-runtime@sha256:" + "1" * 64
+    current_digest = "ghcr.io/akhripunov/gpoint-runtime@sha256:" + "2" * 64
+    active = "gpoint-core-api-" + current_version
+    replaced = active + "_replaced_deadbeef"
+    api_rows = {
+        active: {"Name": "/" + active, "Image": "sha256:" + "3" * 64,
+                 "State": {"Running": True}, "Config": {"Labels": {"org.opencontainers.image.revision": current_sha},
+                 "Env": ["RELEASE_SHA=" + current_sha]}, "Mounts": []},
+        replaced: {"Name": "/" + replaced, "Image": "sha256:" + "4" * 64,
+                    "State": {"Running": False}, "Config": {"Labels": {"org.opencontainers.image.revision": current_sha},
+                    "Env": ["EROS_ENABLED=true"]}, "Mounts": [{"Destination": "/opt/gpoint/env/eros-api.env"}]},
+        "gpoint-core-api-" + pilot_version: {"Name": "/gpoint-core-api-" + pilot_version,
+                    "Image": "sha256:" + "5" * 64, "State": {"Running": False},
+                    "Config": {"Labels": {"org.opencontainers.image.revision": pilot_sha},
+                    "Env": ["EROS_ENABLED=true"]}, "Mounts": [{"Destination": "/opt/gpoint/env/eros-api.env"}]},
+    }
+    repo_digests = {
+        "sha256:" + "3" * 64: [current_digest],
+        "sha256:" + "4" * 64: [current_digest],
+        "sha256:" + "5" * 64: [pilot_digest],
+    }
+    removed = []
+
+    def run(command, **kwargs):
+        if command[:3] == ["docker", "ps", "-a"]:
+            return subprocess.CompletedProcess(command, 0, "\n".join(api_rows), "")
+        if command[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, json.dumps([api_rows[command[2]]]), "")
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, json.dumps([{"RepoDigests": repo_digests[command[3]]}]), "")
+        if command[:2] == ["docker", "rm"]:
+            removed.append(command[2])
+            return subprocess.CompletedProcess(command, 0, "", "")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(MODULE.subprocess, "run", run)
+    MODULE.remove_pilot_api_containers(pilot_sha, pilot_version, pilot_digest,
+                                       current_version, current_sha, current_digest)
+    assert set(removed) == {replaced, "gpoint-core-api-" + pilot_version}
+    assert active not in removed
+
+
 def test_pilot_cleanup_never_targets_existing_gpoint_services_or_shared_networks():
     assert MODULE.validate_cleanup_service("gpoint-eros-pilot")
     assert MODULE.validate_cleanup_service("gpoint-eros-relay")

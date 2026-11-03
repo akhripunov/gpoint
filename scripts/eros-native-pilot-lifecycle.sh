@@ -39,10 +39,14 @@ run_ops() {
     --environment /opt/gpoint/env/eros.env --backup-root "$backup_root" "$@"
 }
 
+check_remote_baseline_raw() {
+  "${ssh[@]}" "$target" python3 - < "$GITHUB_WORKSPACE/scripts/verify-kamal-production-baseline.py"
+}
+
 check_remote_baseline() {
   local raw
-  raw="$("${ssh[@]}" "$target" python3 - < "$GITHUB_WORKSPACE/scripts/verify-kamal-production-baseline.py")"
-  python3 -c 'import json,re,sys; x=json.loads(sys.argv[1]); assert set(x["roles"]) == {"gpoint-core-api","gpoint-core-worker","gpoint-core-bot","gpoint-agata-api","gpoint-agata-memory-worker","gpoint-miniapp-web"}; assert re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+",x["version"]); assert re.fullmatch(r"[0-9a-f]{40}",x["source_sha"]); print("\n".join((x["version"],x["source_sha"],x["roles"]["gpoint-core-api"]["repo_digest"])))' "$raw"
+  raw="$(check_remote_baseline_raw)"
+  python3 -c 'import json,re,sys; x=json.loads(sys.argv[1]); roles=set(x["roles"]); legacy={"gpoint-core-api","gpoint-core-worker","gpoint-core-bot","gpoint-agata-api","gpoint-agata-memory-worker","gpoint-miniapp-web"}; agata_free=legacy-{"gpoint-agata-api","gpoint-agata-memory-worker"}; assert roles in (legacy,agata_free), "incomplete or mixed Kamal role set"; assert re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+",x["version"]); assert re.fullmatch(r"[0-9a-f]{40}",x["source_sha"]); print("\n".join((x["version"],x["source_sha"],x["roles"]["gpoint-core-api"]["repo_digest"])))' "$raw"
 }
 
 stage_sources() {
@@ -183,13 +187,16 @@ REMOTE_CLEAR_GENOME
 
 remove_exact_pilot_containers() {
   local pilot_sha="$1" pilot_version="$2" eros_image="$3" app_digest="$4"
-  "${ssh[@]}" "$target" bash -s -- "$pilot_sha" "$pilot_version" "$eros_image" "$app_digest" <<'REMOTE_REMOVE'
+  local current_version="$5" current_source="$6" current_digest="$7"
+  "${ssh[@]}" "$target" bash -s -- "$pilot_sha" "$pilot_version" "$eros_image" "$app_digest" \
+    "$current_version" "$current_source" "$current_digest" <<'REMOTE_REMOVE'
 set -euo pipefail
-sha="$1"; version="$2"; eros_image="$3"; app_digest="$4"
-python3 - "$sha" "$version" "$eros_image" "$app_digest" <<'PY'
+sha="$1"; version="$2"; eros_image="$3"; app_digest="$4"; current_version="$5"; current_source="$6"; current_digest="$7"
+python3 - "$sha" "$version" "$eros_image" "$app_digest" "$current_version" "$current_source" "$current_digest" <<'PY'
 import json,re,subprocess,sys
-sha,version,eros_image,app_digest=sys.argv[1:]
+sha,version,eros_image,app_digest,current_version,current_source,current_digest=sys.argv[1:]
 if not re.fullmatch(r'[0-9a-f]{40}',sha) or not re.fullmatch(r'[0-9a-f]{40}-[0-9]+-[0-9]+',version): raise SystemExit('pilot container version invalid')
+if not re.fullmatch(r'[0-9a-f]{40}-[0-9]+-[0-9]+',current_version) or not re.fullmatch(r'[0-9a-f]{40}',current_source) or not re.fullmatch(r'ghcr\.io/akhripunov/gpoint-runtime@sha256:[0-9a-f]{64}',current_digest): raise SystemExit('current GPoint API identity invalid')
 specs=(('gpoint-eros-pilot-engine-'+version,'d1a140083321687212fb7b17c09cc0c3c9639f5e',eros_image,True),('gpoint-eros-relay-relay-'+version,sha,'ghcr.io/akhripunov/gpoint-runtime@'+app_digest,False))
 for name,revision,repo_digest,stock in specs:
     p=subprocess.run(['docker','inspect',name],text=True,capture_output=True)
@@ -208,16 +215,10 @@ for name,revision,repo_digest,stock in specs:
     final=json.loads(subprocess.run(['docker','inspect',name],check=True,text=True,capture_output=True).stdout)[0]
     if final.get('State',{}).get('Running'): raise SystemExit('pilot container did not stop')
     subprocess.run(['docker','rm',name],check=True,capture_output=True)
-api_name='gpoint-core-api-'+version
-p=subprocess.run(['docker','inspect',api_name],text=True,capture_output=True)
-if p.returncode==0:
-    row=json.loads(p.stdout)[0]; labels=row.get('Config',{}).get('Labels') or {}
-    if row.get('Name')!='/'+api_name or labels.get('org.opencontainers.image.revision')!=sha: raise SystemExit('pilot API container identity mismatch')
-    image=json.loads(subprocess.run(['docker','image','inspect',row['Image']],check=True,text=True,capture_output=True).stdout)[0]
-    if 'ghcr.io/akhripunov/gpoint-runtime@'+app_digest not in (image.get('RepoDigests') or []): raise SystemExit('pilot API image digest mismatch')
-    if row.get('State',{}).get('Running'): raise SystemExit('pilot API must be rolled back before candidate container removal')
-    subprocess.run(['docker','rm',api_name],check=True,capture_output=True)
-elif 'no such object' not in (p.stdout+p.stderr).lower(): raise SystemExit('pilot API container inspection failed')
+spec=importlib.util.spec_from_file_location('ops',pathlib.Path('/opt/gpoint/releases')/sha/'source/scripts/eros_native_pilot_ops.py')
+module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+module.remove_pilot_api_containers(sha,version,'ghcr.io/akhripunov/gpoint-runtime@'+app_digest,
+                                  current_version,current_source,current_digest)
 PY
 REMOTE_REMOVE
 }
@@ -230,16 +231,48 @@ rollback_and_cleanup() {
   local baseline_source="${marker_values[3]}" baseline_digest="${marker_values[4]}" app_digest="${marker_values[5]}"
   local eros_image="${marker_values[6]}" backup="${marker_values[7]}" genome_id="${marker_values[8]}"
   local worktree_root="$RUNNER_TEMP/eros-pilot-kamal-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-  local pilot_worktree="$worktree_root/pilot" baseline_worktree="$worktree_root/baseline"
+  local pilot_worktree="$worktree_root/pilot" current_worktree="$worktree_root/current"
+  local current_raw current_version current_source current_digest cleanup_target
+  current_raw="$(check_remote_baseline_raw)"
+  cleanup_target="$(python3 - "$current_raw" "$pilot_version" <<'CLEANUP_TARGET'
+import importlib.util,json,pathlib,sys
+raw,pilot_version=sys.argv[1:]
+baseline=json.loads(raw)
+api=baseline['roles']['gpoint-core-api']
+spec=importlib.util.spec_from_file_location('ops',pathlib.Path('scripts/eros_native_pilot_ops.py'))
+module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+target=module.cleanup_api_release_target(baseline['version'],baseline['source_sha'],api['repo_digest'],pilot_version)
+print('\n'.join((target['version'],target['sourceSha'],target['repoDigest'])))
+CLEANUP_TARGET
+  )"
+  mapfile -t cleanup_values <<<"$cleanup_target"
+  [[ "${#cleanup_values[@]}" -eq 3 ]]
+  current_version="${cleanup_values[0]}" current_source="${cleanup_values[1]}" current_digest="${cleanup_values[2]}"
+  local current_image_version="$current_version"
   mkdir -p "$worktree_root"
   git -C "$GITHUB_WORKSPACE" worktree add --detach "$pilot_worktree" "$pilot_sha"
-  git -C "$GITHUB_WORKSPACE" worktree add --detach "$baseline_worktree" "$baseline_source"
-  if "${ssh[@]}" "$target" docker inspect "gpoint-core-api-$pilot_version" >/dev/null 2>&1; then
-    export GPOINT_KAMAL_WORKTREE="$baseline_worktree"
-    GPOINT_COMMIT_SHA="$baseline_source" GPOINT_APP_SOURCE_SHA="$baseline_source" \
-      GPOINT_KAMAL_EXPECTED_DIGEST="${baseline_digest##*@}" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
-      kamal rollback "$baseline_version" --roles api --config-file config/deploy.yml
-  fi
+  git -C "$GITHUB_WORKSPACE" cat-file -e "$current_source^{commit}"
+  git -C "$GITHUB_WORKSPACE" worktree add --detach "$current_worktree" "$current_source"
+  export GPOINT_KAMAL_WORKTREE="$current_worktree"
+  GPOINT_COMMIT_SHA="$current_source" GPOINT_APP_SOURCE_SHA="$current_source" \
+    GPOINT_KAMAL_EXPECTED_DIGEST="${current_digest##*@}" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
+    kamal deploy --skip-push --version "$current_image_version" --roles api --config-file config/deploy.yml
+  "${ssh[@]}" "$target" python3 - "$current_image_version" "$current_source" "$current_digest" <<'REMOTE_CLEAN_API'
+import json,re,subprocess,sys
+version,source,digest=sys.argv[1:]
+if not re.fullmatch(r'[0-9a-f]{40}-[0-9]+-[0-9]+',version) or not re.fullmatch(r'[0-9a-f]{40}',source) or not re.fullmatch(r'ghcr\.io/akhripunov/gpoint-runtime@sha256:[0-9a-f]{64}',digest): raise SystemExit('cleanup API identity invalid')
+name='gpoint-core-api-'+version
+row=json.loads(subprocess.run(['docker','inspect',name],check=True,text=True,capture_output=True).stdout)[0]
+if row.get('Name')!='/'+name or row.get('State',{}).get('Running') is not True: raise SystemExit('latest GPoint API did not return healthy')
+labels=row.get('Config',{}).get('Labels') or {}
+if labels.get('org.opencontainers.image.revision')!=source: raise SystemExit('cleanup API source SHA changed')
+env=dict(x.split('=',1) for x in row.get('Config',{}).get('Env',[]) if '=' in x)
+if env.get('EROS_ENABLED')=='true' or env.get('EROS_PRODUCTION_TEST_MODE')=='true' or any(m.get('Destination')=='/opt/gpoint/env/eros-api.env' for m in row.get('Mounts') or []): raise SystemExit('standard API still contains pilot configuration')
+image=json.loads(subprocess.run(['docker','image','inspect',row['Image']],check=True,text=True,capture_output=True).stdout)[0]
+if digest not in (image.get('RepoDigests') or []): raise SystemExit('cleanup API digest changed')
+networks=row.get('NetworkSettings',{}).get('Networks') or {}
+print('EROS_CLEANUP_LATEST_GPOINT_API=PASS source_sha='+source)
+REMOTE_CLEAN_API
   export GPOINT_KAMAL_WORKTREE="$pilot_worktree"
   GPOINT_COMMIT_SHA="$pilot_sha" GPOINT_APP_SOURCE_SHA="$pilot_sha" \
     GPOINT_KAMAL_SERVICE=gpoint-eros-pilot KAMAL_ROLES=engine \
@@ -248,15 +281,23 @@ rollback_and_cleanup() {
     GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay \
     kamal app stop --roles relay --config-file config/deploy.eros-relay.yml || true
   unset GPOINT_KAMAL_WORKTREE
-  export GPOINT_KAMAL_WORKTREE="$baseline_worktree"
-  "${ssh[@]}" "$target" python3 - "$pilot_sha" "$baseline_version" "$baseline_source" "$baseline_digest" <<'REMOTE_DETACH'
+  export GPOINT_KAMAL_WORKTREE="$current_worktree"
+  "${ssh[@]}" "$target" python3 - "$pilot_sha" "$current_version" "$current_source" "$current_digest" <<'REMOTE_DETACH'
 import importlib.util,pathlib,sys
 pilot_sha,version,source,digest=sys.argv[1:]
 spec=importlib.util.spec_from_file_location('ops',pathlib.Path('/opt/gpoint/releases')/pilot_sha/'source/scripts/eros_native_pilot_ops.py')
 module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 module.detach_pilot_api_network(version,source,digest)
 REMOTE_DETACH
-  remove_exact_pilot_containers "$pilot_sha" "$pilot_version" "$eros_image" "$app_digest"
+  "${ssh[@]}" "$target" python3 - "$current_version" <<'REMOTE_CLEAN_NETWORK'
+import json,subprocess,sys
+name='gpoint-core-api-'+sys.argv[1]
+row=json.loads(subprocess.run(['docker','inspect',name],check=True,text=True,capture_output=True).stdout)[0]
+if 'gpoint_eros_embeddings' in (row.get('NetworkSettings',{}).get('Networks') or {}): raise SystemExit('standard API remains attached to Eros network')
+print('EROS_CLEANUP_API_NETWORK=PASS')
+REMOTE_CLEAN_NETWORK
+  remove_exact_pilot_containers "$pilot_sha" "$pilot_version" "$eros_image" "$app_digest" \
+    "$current_version" "$current_source" "$current_digest"
   clear_creator_genome "$EROS_PILOT_TEST_CREATOR_ID" "$genome_id"
   "${ssh[@]}" "$target" rm -f -- "/run/eros-persona-$pilot_sha.json"
   if "${ssh[@]}" "$target" test -f "$backup"; then
@@ -282,7 +323,7 @@ REMOTE_METADATA
   "${ssh[@]}" "$target" rm -f -- "$marker"
   unset GPOINT_KAMAL_WORKTREE
   git -C "$GITHUB_WORKSPACE" worktree remove --force "$pilot_worktree"
-  git -C "$GITHUB_WORKSPACE" worktree remove --force "$baseline_worktree"
+  git -C "$GITHUB_WORKSPACE" worktree remove --force "$current_worktree"
   rmdir "$worktree_root"
   echo 'EROS_PILOT_ROLLBACK_AND_CLEANUP=PASS'
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only, fail-closed identity check for the installed six-role Kamal baseline."""
+"""Read-only identity check for the installed legacy or AGATA-free Kamal baseline."""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ ROLES = {
     "gpoint-agata-memory-worker": "ghcr.io/akhripunov/gpoint-agata-runtime",
     "gpoint-miniapp-web": "ghcr.io/akhripunov/gpoint-miniapp",
 }
+LEGACY_ROLES = frozenset(ROLES)
+AGATA_FREE_ROLES = LEGACY_ROLES - {"gpoint-agata-api", "gpoint-agata-memory-worker"}
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 VERSION = re.compile(r"^[0-9a-f]{40}-[0-9]+-[0-9]+$")
@@ -23,7 +25,9 @@ REPO_DIGEST = re.compile(r"^ghcr\.io/akhripunov/[a-z0-9-]+@sha256:[0-9a-f]{64}$"
 
 
 def validate(records: list[dict]) -> dict:
-    if len(records) != len(ROLES) or {r.get("role") for r in records} != set(ROLES):
+    observed_roles = {r.get("role") for r in records}
+    if (len(records) != len(observed_roles)
+            or observed_roles not in (LEGACY_ROLES, AGATA_FREE_ROLES)):
         raise ValueError("running Kamal role set is incomplete or duplicated")
     versions, sources, result, images_by_repo = set(), set(), {}, {}
     for row in records:
@@ -60,10 +64,12 @@ def validate(records: list[dict]) -> dict:
 
 def inspect_running_roles() -> list[dict]:
     rows = []
+    found = subprocess.run(["docker", "ps", "--no-trunc", "--format", "{{.Names}}"],
+                           check=True, text=True, capture_output=True).stdout.splitlines()
     for role in ROLES:
-        found = subprocess.run(["docker", "ps", "--no-trunc", "--format", "{{.Names}}"],
-                              check=True, text=True, capture_output=True).stdout.splitlines()
         matches = [name for name in found if name.startswith(role + "-")]
+        if not matches:
+            continue
         if len(matches) != 1:
             raise ValueError(f"expected exactly one running Kamal role: {role}")
         name = matches[0]

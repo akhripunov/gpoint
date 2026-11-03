@@ -17,6 +17,8 @@ def test_eros_kamal_services_are_private_and_use_exact_release_owned_inputs():
     assert engine["servers"]["engine"]["proxy"] is False
     assert engine["servers"]["engine"]["options"]["network"] == "gpoint_eros_data"
     assert engine["servers"]["engine"]["options"]["env-file"] == ["/opt/gpoint/env/eros-engine.env"]
+    assert engine["servers"]["engine"]["options"]["memory"] == "384m"
+    assert engine["servers"]["engine"]["options"]["memory-swap"] == "384m"
     assert engine["servers"]["engine"]["options"]["volume"].endswith(
         "/source/services/eros-engine/eros-production-model-config.toml:/etc/eros-engine/model_config.toml:ro"
     )
@@ -26,6 +28,8 @@ def test_eros_kamal_services_are_private_and_use_exact_release_owned_inputs():
     assert set(relay["servers"]) == {"relay"}
     assert relay["servers"]["relay"]["proxy"] is False
     assert relay["servers"]["relay"]["options"]["network"] == "host"
+    assert relay["servers"]["relay"]["options"]["memory"] == "64m"
+    assert relay["servers"]["relay"]["options"]["memory-swap"] == "64m"
     assert relay["servers"]["relay"]["options"]["volume"].endswith(
         "/source/services/eros-engine/eros-pilot-embedding-relay.mjs:/opt/gpoint/eros-pilot-embedding-relay.mjs:ro"
     )
@@ -38,6 +42,12 @@ def test_eros_kamal_services_are_private_and_use_exact_release_owned_inputs():
     assert "gpoint_app" not in api["servers"]["api"]["options"].get("network", "")
     assert "EROS_PRODUCTION_TEST_USER_IDS" not in (ROOT / "config/deploy.yml").read_text()
     assert engine["servers"]["engine"]["options"]["network"] == "gpoint_eros_data"
+
+
+def test_isolated_stock_eros_chat_e2e_enforces_engine_memory_and_swap_caps():
+    compose = yaml.safe_load((ROOT / "services/eros-engine/compose.local-test.yml").read_text())
+    assert compose["services"]["eros"]["mem_limit"] == "384m"
+    assert compose["services"]["eros"]["memswap_limit"] == "384m"
 
 
 def test_only_post_boot_hooks_attach_the_eros_service_to_internal_networks():

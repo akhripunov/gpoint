@@ -15,6 +15,11 @@ CONTRACT_PATHS = (
     "apps/api/src/eros-worker-contract.ts",
     "apps/api/src/eros-worker-gateway.ts",
     "apps/api/src/messages.ts",
+    # These are the application composition roots that expose the Eros and
+    # AGATA worker gateways. A change can silently remove/register routes even
+    # when the individual controller contracts remain unchanged.
+    "apps/api/src/main.ts",
+    "apps/api/src/agata-worker-gateway.ts",
 )
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 

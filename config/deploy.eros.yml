@@ -13,6 +13,7 @@ servers:
         - /opt/gpoint/env/eros-engine.env
       volume: /opt/gpoint/releases/<%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>/source/services/eros-engine/eros-production-model-config.toml:/etc/eros-engine/model_config.toml:ro
       memory: 384m
+      memory-swap: 384m
       cpus: 0.50
       pids-limit: 256
       read-only: true

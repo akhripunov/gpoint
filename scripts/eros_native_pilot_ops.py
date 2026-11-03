@@ -105,6 +105,18 @@ def validate_pilot_runtime(values: dict[str, str], user_id: str, creator_id: str
     return True
 
 
+def cleanup_api_release_target(version: str, source_sha: str, repo_digest: str,
+                               pilot_version: str) -> dict[str, str]:
+    """Select the current verified GPoint API release, never the install baseline."""
+    if (not re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+", version or "")
+            or not SHA40.fullmatch(source_sha or "")
+            or not version.startswith(source_sha + "-")
+            or not re.fullmatch(r"ghcr\.io/akhripunov/gpoint-runtime@sha256:[0-9a-f]{64}", repo_digest or "")
+            or not re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+", pilot_version or "")):
+        raise PilotGateError("verified current GPoint API release identity is required for pilot cleanup")
+    return {"version": version, "sourceSha": source_sha, "repoDigest": repo_digest}
+
+
 def write_migrator_env(path: Path, values: dict[str, str]) -> None:
     dsn = values.get("EROS_MIGRATOR_DATABASE_URL", "")
     if not dsn.startswith("postgresql://") or "@gpoint-eros-db:5432/eros" not in dsn or "\n" in dsn:
@@ -484,6 +496,57 @@ def detach_pilot_api_network(version: str, source_sha: str, repo_digest: str) ->
         raise PilotGateError("API container image does not match the verified repository digest")
     if EMBEDDINGS_NETWORK in networks:
         _run(["docker", "network", "disconnect", EMBEDDINGS_NETWORK, name], timeout=30)
+
+
+def remove_pilot_api_containers(pilot_sha: str, pilot_version: str, pilot_repo_digest: str,
+                                current_version: str, current_source_sha: str,
+                                current_repo_digest: str) -> list[str]:
+    """Remove only stopped Eros-configured API containers replaced by cleanup."""
+    if (not SHA40.fullmatch(pilot_sha or "")
+            or not re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+", pilot_version or "")
+            or not re.fullmatch(r"ghcr\.io/akhripunov/gpoint-runtime@sha256:[0-9a-f]{64}", pilot_repo_digest or "")
+            or not re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+", current_version or "")
+            or not SHA40.fullmatch(current_source_sha or "")
+            or not current_version.startswith(current_source_sha + "-")
+            or not re.fullmatch(r"ghcr\.io/akhripunov/gpoint-runtime@sha256:[0-9a-f]{64}", current_repo_digest or "")):
+        raise PilotGateError("exact pilot and current GPoint API identities are required for cleanup")
+    prefix_identities = {
+        "gpoint-core-api-" + pilot_version: (pilot_sha, pilot_repo_digest),
+        "gpoint-core-api-" + current_version: (current_source_sha, current_repo_digest),
+    }
+    names = _run(["docker", "ps", "-a", "--no-trunc", "--format", "{{.Names}}"], timeout=30).stdout.splitlines()
+    targets = sorted({name for name in names for prefix in prefix_identities
+                      if name == prefix or name.startswith(prefix + "_replaced_")})
+    removed: list[str] = []
+    current_name = "gpoint-core-api-" + current_version
+    for name in targets:
+        prefix = next(prefix for prefix in prefix_identities
+                      if name == prefix or name.startswith(prefix + "_replaced_"))
+        expected_sha, expected_digest = prefix_identities[prefix]
+        try:
+            row = json.loads(_run(["docker", "inspect", name], timeout=30).stdout)[0]
+            labels = row.get("Config", {}).get("Labels") or {}
+            image = json.loads(_run(["docker", "image", "inspect", row["Image"]], timeout=30).stdout)[0]
+        except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
+            raise PilotGateError("pilot API container identity is incomplete") from None
+        if (row.get("Name") != "/" + name
+                or labels.get("org.opencontainers.image.revision") != expected_sha
+                or expected_digest not in (image.get("RepoDigests") or [])):
+            raise PilotGateError("API container identity is outside the exact pilot cleanup scope")
+        env = dict(item.split("=", 1) for item in (row.get("Config", {}).get("Env") or []) if "=" in item)
+        has_eros_mount = any(mount.get("Destination") == "/opt/gpoint/env/eros-api.env"
+                             for mount in row.get("Mounts") or [])
+        if name == current_name and row.get("State", {}).get("Running") is True:
+            if env.get("EROS_ENABLED") == "true" or has_eros_mount:
+                raise PilotGateError("active GPoint API still has Eros pilot configuration")
+            continue
+        if row.get("State", {}).get("Running") is True:
+            raise PilotGateError("replaced pilot API container is unexpectedly running")
+        if env.get("EROS_ENABLED") != "true" and not has_eros_mount:
+            raise PilotGateError("replaced API container is not proven to belong to the Eros pilot")
+        _run(["docker", "rm", name], timeout=30)
+        removed.append(name)
+    return removed
 
 
 def check_resources(*, minimum_available_kib: int = 1441792,

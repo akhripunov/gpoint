@@ -126,6 +126,8 @@ services:
     profiles: [test]
     image: ${EROS_IMAGE:?build local Eros image first}
     restart: "no"
+    mem_limit: 384m
+    memswap_limit: 384m
     depends_on:
       postgres: {condition: service_healthy}
       eros-migrate: {condition: service_completed_successfully}
