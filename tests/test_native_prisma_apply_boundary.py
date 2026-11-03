@@ -26,7 +26,7 @@ def test_approved_prisma_apply_is_inside_the_protected_deploy_before_kamal():
     assert "systemctl start gpoint-backup.service" in apply["run"]
     assert "gpoint-backup-policy.py freshness" in apply["run"]
     assert "prisma migrate deploy" in apply["run"]
-    assert apply["env"]["APP_IMAGE"] == "ghcr.io/akhripunov/gpoint-runtime@${{ needs.build.outputs.app_digest }}"
+    assert apply["env"]["APP_IMAGE"] == "ghcr.io/akhripunov/gpoint-runtime@${{ steps.component_plan.outputs.app_digest }}"
     assert "apply_failed" not in apply
     kamal = next(step for step in steps if step.get("id") == "kamal_apply")
     assert not kamal.get("if") or "success()" in kamal["if"]

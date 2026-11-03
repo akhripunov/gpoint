@@ -267,6 +267,59 @@ def test_component_scope_updates_only_exactly_touched_known_components(tmp_path)
         assert result["deploy_miniapp"] is ("MINIAPP" in components)
 
 
+def test_build_plan_uses_per_component_sources_and_builds_core_for_prisma_migrations(tmp_path):
+    repo, baseline, candidate, _inventory = _component_repo(
+        tmp_path,
+        {
+            "apps/miniapp/src/main.tsx": "export default 1;\n",
+            "packages/db/prisma/migrations/20261103120000_add_flag/migration.sql": "ALTER TABLE users ADD COLUMN flag boolean;\n",
+        },
+    )
+
+    plan = MODULE.classify_component_build_plan(
+        repo, candidate, {"CORE": baseline, "AGATA": baseline, "MINIAPP": baseline}
+    )
+
+    assert plan == {
+        "deploy_scope": "MINIAPP",
+        "build_components": ["CORE", "MINIAPP"],
+        "reason": "exact_component_diff",
+    }
+
+
+def test_build_plan_skips_images_for_documentation_only_diff(tmp_path):
+    repo, baseline, candidate, _inventory = _component_repo(
+        tmp_path, {"docs/release/automation.md": "updated release guide\n"}
+    )
+
+    plan = MODULE.classify_component_build_plan(
+        repo, candidate, {"CORE": baseline, "AGATA": baseline, "MINIAPP": baseline}
+    )
+
+    assert plan == {
+        "deploy_scope": "NONE",
+        "build_components": [],
+        "reason": "no_runtime_changes",
+    }
+
+
+def test_shared_dependency_and_agata_migration_paths_select_their_real_images(tmp_path):
+    repo, baseline, candidate, _inventory = _component_repo(
+        tmp_path,
+        {
+            "packages/contracts/src/index.ts": "export type Id = string;\n",
+            "services/agata/migrations/versions/0013_next.py": "revision = 'agata0013'\n",
+        },
+    )
+
+    plan = MODULE.classify_component_build_plan(
+        repo, candidate, {"CORE": baseline, "AGATA": baseline, "MINIAPP": baseline}
+    )
+
+    assert plan["deploy_scope"] == "AGATA+CORE+MINIAPP"
+    assert plan["build_components"] == ["AGATA", "CORE", "MINIAPP"]
+
+
 def test_staggered_component_baselines_do_not_redeploy_already_updated_components(tmp_path):
     repo, baseline, core_release, inventory = _component_repo(
         tmp_path, {"apps/api/src/main.ts": "export const version = 2;\n"}
@@ -334,6 +387,7 @@ def test_known_release_infrastructure_candidate_has_no_application_component_sco
         "scripts/native_release_intent.py": "updated scope classifier\n",
         "scripts/prisma_migration_release_plan.py": "updated migration planner\n",
         "scripts/resolve_native_environment_deployment.py": "updated deployment resolver\n",
+        "scripts/resolve_native_build_scope.py": "updated build resolver\n",
         "scripts/verify-gpoint-scheduled-backup-restore.sh": "updated restore verifier\n",
         "scripts/verify-kamal-migration-parity.py": "updated migration verifier\n",
         "scripts/verify-kamal-production-baseline.py": "updated runtime verifier\n",

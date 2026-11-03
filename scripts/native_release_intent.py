@@ -54,6 +54,7 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     "scripts/native_release_intent.py",
     "scripts/prisma_migration_release_plan.py",
     "scripts/resolve_native_environment_deployment.py",
+    "scripts/resolve_native_build_scope.py",
     "scripts/verify-gpoint-scheduled-backup-restore.sh",
     "scripts/verify-kamal-migration-parity.py",
     "scripts/verify-kamal-production-baseline.py",
@@ -202,16 +203,25 @@ def _validate_role_inventory(inventory: dict) -> dict[str, dict[str, str]]:
     return roles
 
 
-def _component_path(path: str) -> str | None:
+def _component_paths(path: str) -> set[str]:
+    if (PRISMA_MIGRATION.fullmatch(path)
+            or path == "packages/db/prisma/production-approved-migrations.json"):
+        return set()
+    if path == "packages/db/prisma/schema.prisma":
+        return {"CORE"}
     if path == "apps/miniapp/index.html" or path.startswith(("apps/miniapp/src/", "apps/miniapp/public/")):
-        return "MINIAPP"
-    if (path.startswith("services/agata/app/") or path.startswith("services/agata/tests/")
-            or path in {"services/agata/Dockerfile", "services/agata/pyproject.toml",
-                        "services/agata/requirements.txt", "services/agata/requirements.lock"}):
-        return "AGATA"
-    if path.startswith(("apps/api/", "apps/worker/", "apps/bot/")):
-        return "CORE"
-    return None
+        return {"MINIAPP"}
+    if path.startswith("services/agata/"):
+        return {"AGATA"}
+    if path in {"infra/production/Gpoint.Dockerfile", "infra/production/nginx-miniapp.conf"}:
+        return {"CORE", "MINIAPP"} if path.endswith("Gpoint.Dockerfile") else {"MINIAPP"}
+    if path in APP_ROOT_FILES or path in {"pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.base.json"}:
+        return {"CORE", "MINIAPP"}
+    if path.startswith("apps/"):
+        return {"CORE"}
+    if path.startswith("packages/") and not path.startswith("packages/gpoint-codex-mcp/"):
+        return {"CORE", "MINIAPP"}
+    return set()
 
 
 def _non_runtime_documentation_path(path: str) -> bool:
@@ -235,15 +245,21 @@ def _safe_component_path(path: str) -> bool:
             and all(part not in ("", ".", "..") for part in path.split("/")))
 
 
-def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dict[str, str | bool]:
-    """Classify the exact candidate diff; never broaden an ambiguous scope."""
+def classify_component_build_plan(repo: Path, candidate: str,
+                                  component_sources: dict[str, str]) -> dict[str, object]:
+    """Classify runtime updates and image-only Prisma migration build impact."""
     if not EXACT_SHA.fullmatch(candidate or ""):
         raise ValueError("candidate SHA is invalid")
-    roles = _validate_role_inventory(inventory)
+    if (not isinstance(component_sources, dict)
+            or set(component_sources) != set(COMPONENT_ROLES)):
+        raise ValueError("component production source inventory is incomplete")
+    for component, source in component_sources.items():
+        if not isinstance(source, str) or not EXACT_SHA.fullmatch(source):
+            raise ValueError(f"{component} production source SHA is invalid")
     paths_by_baseline: dict[str, set[str]] = {}
+    all_paths: set[str] = set()
     non_runtime_only = True
-    for component_roles in COMPONENT_ROLES.values():
-        baseline = roles[component_roles[0]]["source_sha"]
+    for baseline in component_sources.values():
         if baseline == candidate or baseline in paths_by_baseline:
             continue
         ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", baseline, candidate],
@@ -266,33 +282,52 @@ def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dic
                                            cwd=repo).decode()
             if not tree.startswith(("100644 blob ", "100755 blob ")):
                 raise ValueError("candidate path is not a regular file and needs explicit scope approval")
-            changed_component = _component_path(path)
-            if changed_component is None:
+            changed_components = _component_paths(path)
+            all_paths.add(path)
+            if not changed_components:
                 if _known_non_runtime_path(path):
                     continue
                 raise ValueError("unmapped or unsafe candidate path needs explicit scope approval")
             non_runtime_only = False
-            paths.add(changed_component)
+            paths.update(changed_components)
         paths_by_baseline[baseline] = paths
 
     components = {
-        component for component, component_roles in COMPONENT_ROLES.items()
-        if roles[component_roles[0]]["source_sha"] != candidate
-        and component in paths_by_baseline[roles[component_roles[0]]["source_sha"]]
+        component for component, baseline in component_sources.items()
+        if baseline != candidate and component in paths_by_baseline[baseline]
     }
     if not components:
-        if all(roles[component_roles[0]]["source_sha"] == candidate
-               for component_roles in COMPONENT_ROLES.values()):
+        if all(source == candidate for source in component_sources.values()):
             raise ValueError("candidate equals production baseline; no changed component scope")
-        if non_runtime_only:
-            return {"scope": "NONE", "reason": "no_runtime_changes",
-                    "deploy_core": False, "deploy_agata": False, "deploy_miniapp": False}
-        raise ValueError("candidate diff contains no changed runtime component")
-    scope = "+".join(sorted(components))
-    return {"scope": scope, "reason": "exact_component_diff",
-            "deploy_core": "CORE" in components,
-            "deploy_agata": "AGATA" in components,
-            "deploy_miniapp": "MINIAPP" in components}
+        if not non_runtime_only:
+            raise ValueError("candidate diff contains no changed runtime component")
+    runtime_scope = "+".join(sorted(components)) if components else "NONE"
+    build_components = set(components)
+    if any(PRISMA_MIGRATION.fullmatch(path) for path in all_paths):
+        build_components.add("CORE")
+    return {
+        "deploy_scope": runtime_scope,
+        "build_components": sorted(build_components),
+        "reason": "exact_component_diff" if components else "no_runtime_changes",
+    }
+
+
+def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dict[str, str | bool]:
+    """Classify the exact candidate diff; never broaden an ambiguous scope."""
+    roles = _validate_role_inventory(inventory)
+    component_sources = {
+        component: roles[component_roles[0]]["source_sha"]
+        for component, component_roles in COMPONENT_ROLES.items()
+    }
+    plan = classify_component_build_plan(repo, candidate, component_sources)
+    components = set(str(plan["deploy_scope"]).split("+")) - {"NONE"}
+    return {
+        "scope": str(plan["deploy_scope"]),
+        "reason": str(plan["reason"]),
+        "deploy_core": "CORE" in components,
+        "deploy_agata": "AGATA" in components,
+        "deploy_miniapp": "MINIAPP" in components,
+    }
 
 
 def expected_runtime_inventory(scope: str, inventory: dict, candidate: str, version: str,
@@ -306,15 +341,18 @@ def expected_runtime_inventory(scope: str, inventory: dict, candidate: str, vers
             or not EXACT_SHA.fullmatch(candidate or "")
             or not EXACT_VERSION.fullmatch(version or "") or not version.startswith(candidate + "-")):
         raise ValueError("candidate component runtime plan is malformed")
-    digests = {"CORE": app_digest, "AGATA": agata_digest, "MINIAPP": miniapp_digest}
-    if any(not EXACT_DIGEST.fullmatch(value or "") for value in digests.values()):
-        raise ValueError("candidate runtime image digest is invalid")
     updated = scope_components
+    digests = {"CORE": app_digest, "AGATA": agata_digest, "MINIAPP": miniapp_digest}
+    for component, value in digests.items():
+        if component in updated and not EXACT_DIGEST.fullmatch(value or ""):
+            raise ValueError("updated candidate runtime image digest is invalid")
+        if component not in updated and value and not EXACT_DIGEST.fullmatch(value):
+            raise ValueError("baseline runtime image digest is invalid")
     inventory_out = {}
     group_repo_digests = {
-        "CORE": f"{ROLE_REPOSITORIES['gpoint-core-api']}@{app_digest}",
-        "AGATA": f"{ROLE_REPOSITORIES['gpoint-agata-api']}@{agata_digest}",
-        "MINIAPP": f"{ROLE_REPOSITORIES['gpoint-miniapp-web']}@{miniapp_digest}",
+        "CORE": (f"{ROLE_REPOSITORIES['gpoint-core-api']}@{app_digest}" if app_digest else None),
+        "AGATA": (f"{ROLE_REPOSITORIES['gpoint-agata-api']}@{agata_digest}" if agata_digest else None),
+        "MINIAPP": (f"{ROLE_REPOSITORIES['gpoint-miniapp-web']}@{miniapp_digest}" if miniapp_digest else None),
     }
     for component, component_roles in COMPONENT_ROLES.items():
         for role in component_roles:

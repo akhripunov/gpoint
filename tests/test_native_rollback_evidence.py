@@ -105,7 +105,12 @@ def test_accepts_native_environment_status_with_manifest_url_and_exact_attempt_r
     args = evidence()
     status = dict(args[1][0])
     status.pop("description")
-    status["environment_url"] = "https://gpoint.one/#gpoint-manifest-sha256=" + hashlib.sha256(args[4]).hexdigest()
+    status["environment_url"] = (
+        "https://gpoint.one/#gpoint-manifest-sha256=" + hashlib.sha256(args[4]).hexdigest()
+        + "&gpoint-core-source-sha=" + SHA
+        + "&gpoint-agata-source-sha=" + SHA
+        + "&gpoint-miniapp-source-sha=" + SHA
+    )
     status["log_url"] = f"https://github.com/akhripunov/gpoint/actions/runs/{RUN_ID}/attempts/1"
     result = verify(args, statuses=[status])
     assert result["manifest_sha256"] == hashlib.sha256(args[4]).hexdigest()

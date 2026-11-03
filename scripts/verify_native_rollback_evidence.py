@@ -51,7 +51,7 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
     latest = max(statuses, key=lambda row: _time(row.get("created_at", "")))
     match = re.fullmatch(r"Kamal success SHA ([0-9a-f]{40}) manifest ([0-9a-f]{64})", latest.get("description", ""))
     environment_url_match = re.fullmatch(
-        r"https://gpoint\.one/#gpoint-manifest-sha256=([0-9a-f]{64})",
+        r"https://gpoint\.one/#gpoint-manifest-sha256=([0-9a-f]{64})(?:&gpoint-core-source-sha=[0-9a-f]{40}&gpoint-agata-source-sha=[0-9a-f]{40}&gpoint-miniapp-source-sha=[0-9a-f]{40})?",
         latest.get("environment_url", ""),
     )
     native_status = environment_url_match is not None

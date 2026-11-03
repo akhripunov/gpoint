@@ -227,19 +227,26 @@ Redis, proxy и неизменённые компоненты не переза�
 mounts и сетевой/database идентичностью, которых Kamal CLI не выдаёт в требуемом
 машиночитаемом виде.
 
-Build пока публикует все три runtime-образа. Точный live baseline читается только
-в защищённом Deploy job после Tests и Build; до этого job production credentials
-недоступны. `github.event.before` не является надёжной заменой live baseline:
-предыдущая публикация могла завершиться ошибкой, а в main могли накопиться
-невыкаченные изменения. Поэтому ранний path-only выбор образа не определяет
-Deploy scope: неоднозначный live diff блокируется до DB действий, а не
-расширяется до FULL. Тест
-`test_all_runtime_images_build_before_production_baseline_is_available`
-закрепляет это ограничение и порядок: полный безопасный build, затем live
-inventory, затем component plan. Для настоящего selective Build требуется
-надёжно доказать production source и применить тот же cumulative diff до Build,
-не выдавая production secrets тестовым job; пока такого проверенного безопасного
-источника нет, удалять эти три build шага нельзя.
+До сборки отдельный Build-шаг читает только GitHub Production Deployment history
+и связанный успешный Native Actions run. Он проверяет точный workflow, SHA,
+attempt, Runtime Verify status и manifest digest, содержащий независимые source
+SHA Core, AGATA и Mini App. Кандидатный diff сравнивается отдельно с source SHA
+каждого компонента; известные пути выбирают только затронутые образы. Prisma
+migration-only изменение также собирает CORE image для Apply, не меняя runtime
+Deploy scope. Неизвестный путь, неуспешный последний Deployment, неполный
+metadata или неоднозначная история останавливают Build. Если есть только
+успешный legacy Deployment без component metadata, выполняется один полный
+bootstrap build.
+
+Этот ранний план не получает production secrets и не заменяет чтение VPS. После
+сборки защищённый Deploy сверяет точные per-component source SHA и Deploy scope
+со свежим шестиролевым Kamal inventory. Любое изменение baseline между Build и
+Deploy блокирует шаг до database preflight/Apply. Для неизменённых компонентов
+используется их текущий runtime digest; candidate digest применяется только к
+собранным и выбранным компонентам. Runtime Verify записывает manifest digest и
+три source SHA в GitHub Deployment URL, чтобы следующая сборка получила
+проверяемый baseline. Изолированная migration rehearsal собирает CORE и AGATA;
+PR тесты не читают production Deployment history и не публикуют образы.
 
 Rollback, backup maintenance и isolated migration rehearsal остаются отдельными
 ручными операциями; обычный push их не запускает. Первый cutover и его recovery

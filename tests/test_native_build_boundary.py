@@ -122,21 +122,28 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
             image_step = next(step for step in steps if step.get("id") == role)
             self.assertIn("GPOINT_BUILD_SHA=${{ github.sha }}", image_step["with"]["build-args"])
 
-    def test_all_runtime_images_build_before_production_baseline_is_available(self):
+    def test_runtime_images_build_only_after_verified_component_baseline(self):
         build = self.workflow["jobs"]["build"]
         self.assertNotIn("environment", build)
         self.assertEqual(set(build["needs"]), {"workspace", "python"})
-        names = {step.get("name") for step in build["steps"]}
-        self.assertTrue({
-            "Build and publish immutable runtime image",
-            "Build and publish immutable Mini App image",
-            "Build and publish immutable AGATA image",
-        }.issubset(names))
+        steps = build["steps"]
+        resolver = next(i for i, step in enumerate(steps)
+                        if step.get("id") == "build_scope")
+        for component, step_id in (("CORE", "app"), ("AGATA", "agata"), ("MINIAPP", "miniapp")):
+            image = next(i for i, step in enumerate(steps) if step.get("id") == step_id)
+            self.assertGreater(image, resolver)
+            self.assertIn(component, steps[image]["if"])
+        resolver_run = steps[resolver]["run"]
+        self.assertIn("scripts/resolve_native_build_scope.py", resolver_run)
+        self.assertEqual(build["permissions"]["deployments"], "read")
+        self.assertEqual(build["permissions"]["actions"], "read")
         deploy = self.workflow["jobs"]["deploy"]
         deploy_names = [step.get("name", "") for step in deploy["steps"]]
         live_inventory = deploy_names.index("Verify installed Kamal topology before ordinary release")
         component_plan = deploy_names.index("Plan exact component-scoped Kamal update from live baseline")
         self.assertLess(live_inventory, component_plan)
+        verify_images = deploy_names.index("Verify immutable candidate images selected for the live scope")
+        self.assertGreater(verify_images, component_plan)
 
     def test_ordinary_release_does_not_contain_first_cutover_mutations(self):
         deploy = self.workflow["jobs"]["deploy"]
