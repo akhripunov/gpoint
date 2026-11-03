@@ -55,8 +55,35 @@ class GPointReleaseTriggerGraphTests(unittest.TestCase):
         native_events = events(native)
         self.assertEqual(native_events["push"]["branches"], ["main"])
         self.assertIn("workflow_dispatch", native_events)
-        self.assertNotIn("github.event_name == 'push'", native["jobs"]["deploy"]["if"])
-        self.assertIn("github.event_name == 'workflow_dispatch'", native["jobs"]["deploy"]["if"])
+        deploy = native["jobs"]["deploy"]
+        deploy_condition = deploy["if"]
+        self.assertIn("github.event_name == 'push'", deploy_condition)
+        self.assertIn("github.event_name == 'workflow_dispatch'", deploy_condition)
+        self.assertIn("github.ref == 'refs/heads/main'", deploy_condition)
+        self.assertIn("inputs.approve_production == true", deploy_condition)
+        self.assertIn("needs.workspace.outputs.mode == 'DEPLOY'", deploy_condition)
+        self.assertIn("needs.workspace.outputs.deploy == 'true'", deploy_condition)
+        self.assertIn("inputs.migration_rehearsal != true", deploy_condition)
+        self.assertIn("inputs.backup_maintenance != true", deploy_condition)
+        self.assertEqual(deploy["needs"], ["workspace", "python", "build"])
+        self.assertIn("candidate_sha", native_events["workflow_dispatch"]["inputs"])
+        self.assertEqual(native_events["workflow_dispatch"]["inputs"]["approve_production"]["type"], "boolean")
+        owner_gate = next(step for step in deploy["steps"]
+                          if step.get("name") == "Recheck exact SHA, current main and owner approval")
+        for guard in (
+            'test "$GITHUB_REF" = refs/heads/main',
+            'test "$APPROVE_PRODUCTION" = true',
+            'test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY"',
+            'test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY"',
+            'test "$REQUESTED_SHA" = "$WORKFLOW_SHA"',
+            '[[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]',
+            'git/ref/heads/main',
+        ):
+            self.assertIn(guard, owner_gate["run"])
+        self.assertIn("Build and publish immutable images", native["jobs"]["build"]["name"])
+        self.assertEqual(native["jobs"]["build"]["needs"], ["workspace", "python"])
+        self.assertIn("Verify public routes and exact running services",
+                      [step.get("name") for step in deploy["steps"]])
         self.assertIn("Kamal production Deploy and Verify", native["jobs"]["deploy"]["name"])
 
         legacy_deploy = all_workflows["gpoint-deploy.yml"]

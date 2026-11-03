@@ -753,9 +753,10 @@ jobs:
         id: topology
         run: |
           set -euo pipefail
+          output_lines=()
           remote_dir="/run/gpoint-eros-state-${CANDIDATE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           ssh -T "root@${GPOINT_PRODUCTION_HOST}" mkdir -m 700 -- "$remote_dir"
-          echo "EROS_REMOTE_DIR=$remote_dir" >> "$GITHUB_OUTPUT"
+          output_lines+=("EROS_REMOTE_DIR=$remote_dir")
           for helper in collect_kamal_eros_state.py kamal_eros_state.py sanitize-kamal-inventory.py sanitize-kamal-resources.py; do
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" "cat > '$remote_dir/$helper' && chmod 600 '$remote_dir/$helper'" < "$GITHUB_WORKSPACE/scripts/$helper"
           done
@@ -781,7 +782,7 @@ jobs:
           if [[ "$marker_state" == NONE ]]; then
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 "$remote_dir/collect_kamal_eros_state.py" --output "$remote_dir/no-eros-state.json"
             echo NO_EROS_STATE=PASS
-            echo 'eros_pilot_active=false' >> "$GITHUB_OUTPUT"
+            output_lines+=('eros_pilot_active=false')
           else
             python3 scripts/eros_native_release_compatibility.py --pilot-sha "$marker_state" --candidate-sha "$CANDIDATE_SHA"
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" "cat > '$remote_dir/verify-kamal-eros-pilot-runtime.py' && chmod 600 '$remote_dir/verify-kamal-eros-pilot-runtime.py'" < "$GITHUB_WORKSPACE/scripts/verify-kamal-eros-pilot-runtime.py"
@@ -789,9 +790,7 @@ jobs:
             echo "$active_state"
             pilot_hash="$(sed -n 's/^EROS_ACTIVE_STATE=PASS sha256=//p' <<< "$active_state")"
             [[ "$pilot_hash" =~ ^[0-9a-f]{64}$ ]]
-            echo 'eros_pilot_active=true' >> "$GITHUB_OUTPUT"
-            echo "EROS_PILOT_BASELINE_SHA256=$pilot_hash" >> "$GITHUB_OUTPUT"
-            echo "EROS_PILOT_MARKER_SOURCE_SHA=$marker_state" >> "$GITHUB_OUTPUT"
+            output_lines+=('eros_pilot_active=true' "EROS_PILOT_BASELINE_SHA256=$pilot_hash" "EROS_PILOT_MARKER_SOURCE_SHA=$marker_state")
             echo 'EROS_ACTIVE_STATE=PASS' >> "$GITHUB_STEP_SUMMARY"
           fi
           role_inventory="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - < "$GITHUB_WORKSPACE/scripts/verify-kamal-production-baseline.py")"
@@ -840,13 +839,14 @@ jobs:
           grep -Eq '^GPOINT_BASELINE_ROLE_SOURCE_SHA=[0-9a-f]{40}$' <<< "$facts"
           grep -Eq '^DB_MOUNTS_SHA256=[0-9a-f]{64}$' <<< "$facts"
           grep -Eq '^REDIS_MOUNTS_SHA256=[0-9a-f]{64}$' <<< "$facts"
-          printf 'GPOINT_BASELINE_ROLE_INVENTORY=%s\n' "$role_inventory" >> "$GITHUB_OUTPUT"
+          output_lines+=("GPOINT_BASELINE_ROLE_INVENTORY=$role_inventory")
           while IFS='=' read -r key value; do
             case "$key" in
-              DB_CONTAINER_ID|REDIS_CONTAINER_ID|GPOINT_BASELINE_ROLE_VERSION|GPOINT_BASELINE_ROLE_SOURCE_SHA|DB_MOUNTS_SHA256|REDIS_MOUNTS_SHA256) printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT" ;;
+              DB_CONTAINER_ID|REDIS_CONTAINER_ID|GPOINT_BASELINE_ROLE_VERSION|GPOINT_BASELINE_ROLE_SOURCE_SHA|DB_MOUNTS_SHA256|REDIS_MOUNTS_SHA256) output_lines+=("$key=$value") ;;
               *) echo 'unexpected topology fact' >&2; exit 1 ;;
             esac
           done <<< "$facts"
+          printf '%s\n' "${output_lines[@]}" >> "$GITHUB_OUTPUT"
       - name: Verify candidate compatibility with the live database baseline
         id: migration_baseline
         env:

@@ -65,7 +65,7 @@ class DeployEvidenceWorkflowTests(unittest.TestCase):
         self.assertIn('candidate_sha', triggers['workflow_dispatch']['inputs'])
         deploy = native['jobs']['deploy']
         self.assertEqual(deploy['if'],
-                         "needs.workspace.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true")
+                         "needs.workspace.outputs.mode == 'DEPLOY' && needs.workspace.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.approve_production == true)) && inputs.migration_rehearsal != true && inputs.backup_maintenance != true")
         script = '\n'.join(step.get('run', '') for step in deploy['steps'])
         self.assertIn('REQUESTED_SHA', script)
         owner_gate = next(step for step in deploy['steps']
@@ -76,8 +76,12 @@ class DeployEvidenceWorkflowTests(unittest.TestCase):
         self.assertIn('OWNER_REPOSITORY', owner_gate['env'])
         self.assertIn('test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY"', owner_gate['run'])
         self.assertIn('test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY"', owner_gate['run'])
-        self.assertIn('test "$GITHUB_EVENT_NAME" = workflow_dispatch', owner_gate['run'])
-        self.assertNotIn('GITHUB_EVENT_NAME" = push', owner_gate['run'])
+        self.assertIn('elif [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]', owner_gate['run'])
+        self.assertIn('test "$GITHUB_EVENT_NAME" = push', owner_gate['run'])
+        self.assertIn('test "$GITHUB_REF" = refs/heads/main', owner_gate['run'])
+        self.assertIn('test "$REQUESTED_SHA" = "$WORKFLOW_SHA"', owner_gate['run'])
+        self.assertIn('[[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]', owner_gate['run'])
+        self.assertIn('git/ref/heads/main', owner_gate['run'])
         self.assertEqual(deploy['environment'], {'name': 'production', 'deployment': False})
         self.assertEqual(deploy['concurrency']['group'], 'gpoint-production-release')
         self.assertIn('deployments', deploy.get('permissions', {}))
