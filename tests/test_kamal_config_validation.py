@@ -12,6 +12,31 @@ CONFIGS = [
     "config/deploy.miniapp.yml",
 ]
 REGISTRY_PASSWORD = "config-validation-placeholder"
+KAMAL_IMAGE = "ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625"
+
+
+def test_kamal_config_checker_pulls_pinned_image_and_passes_exact_cli_arguments(tmp_path):
+    result, calls = run_config_check(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert [call["command"] for call in calls] == ["pull", "image inspect"] + ["run"] * 6
+    assert calls[0]["args"] == ["pull", "--platform", "linux/amd64", KAMAL_IMAGE]
+    assert calls[1]["args"] == [
+        "image", "inspect", "--format",
+        "{{.Os}}/{{.Architecture}} {{json .RepoDigests}}", KAMAL_IMAGE,
+    ]
+    run_calls = calls[2:]
+    assert all("--platform" in call["args"] and
+               call["args"][call["args"].index("--platform") + 1] == "linux/amd64"
+               for call in run_calls)
+    assert all("--network" in call["args"] and
+               call["args"][call["args"].index("--network") + 1] == "none"
+               for call in run_calls)
+    expected_configs = [config for config in CONFIGS for _ in range(2)]
+    assert len(run_calls) == len(expected_configs)
+    for call, config in zip(run_calls, expected_configs):
+        kamal_argv = call["args"][call["args"].index(KAMAL_IMAGE) + 1:]
+        assert kamal_argv[-2:] == ["--config-file", config]
 
 
 def setup_fake_tools(tmp_path):
@@ -34,14 +59,26 @@ key.with_suffix(key.suffix + '.pub').write_text('ssh-ed25519 synthetic-only-key\
     docker.write_text("""#!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
+trace_path = os.environ['DOCKER_TRACE']
+def record(call):
+    with open(trace_path, 'a') as trace:
+        trace.write(json.dumps(call) + '\\n')
+if args[:1] == ['pull']:
+    record({'command': 'pull', 'args': args})
+    raise SystemExit(0)
+if args[:2] == ['image', 'inspect']:
+    record({'command': 'image inspect', 'args': args})
+    print('linux/amd64 [\\"ghcr.io/basecamp/kamal@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625\\"]')
+    raise SystemExit(0)
+if args[:1] != ['run']:
+    raise SystemExit('unexpected Docker command: ' + ' '.join(args))
 env = {}
 for index, arg in enumerate(args[:-1]):
     if arg == '--env':
         key, value = args[index + 1].split('=', 1)
         env[key] = value
 config = args[args.index('--config-file') + 1]
-with open(os.environ['DOCKER_TRACE'], 'a') as trace:
-    trace.write(json.dumps({'args': args, 'env': env, 'config': config}) + '\\n')
+record({'command': 'run', 'args': args, 'env': env, 'config': config})
 if 'secrets' in args and 'print' in args:
     if os.environ.get('MISSING_REGISTRY_SECRET') != 'true':
         print('KAMAL_REGISTRY_PASSWORD=' + env['KAMAL_REGISTRY_PASSWORD'])
@@ -76,12 +113,16 @@ def run_config_check(tmp_path, *, fail_config=None, missing_registry_secret=Fals
     return result, calls
 
 
-def test_kamal_config_checker_runs_all_services_with_synthetic_credentials_and_silent_success(tmp_path):
+def test_kamal_config_checker_runs_all_services_with_synthetic_credentials(tmp_path):
     result, calls = run_config_check(tmp_path)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout == ""
+    assert result.stdout == (
+        "KAMAL_IMAGE_PULL=PASS PLATFORM=linux/amd64 "
+        "DIGEST=sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625\n"
+    )
     assert result.stderr == ""
+    calls = [call for call in calls if call["command"] == "run"]
     assert [call["config"] for call in calls] == [config for config in CONFIGS for _ in range(2)]
     assert all('secrets' in calls[index]['args'] and 'print' in calls[index]['args']
                for index in (1, 3, 5))
@@ -95,6 +136,7 @@ def test_kamal_config_checker_runs_all_services_with_synthetic_credentials_and_s
 
 def test_kamal_config_checker_rejects_unresolved_registry_secret_before_deploy(tmp_path):
     result, calls = run_config_check(tmp_path, missing_registry_secret=True)
+    calls = [call for call in calls if call["command"] == "run"]
     assert result.returncode != 0
     assert [call['config'] for call in calls] == [CONFIGS[0], CONFIGS[0]]
     assert 'registry credential did not resolve' in result.stderr
@@ -104,6 +146,7 @@ def test_kamal_config_checker_rejects_unresolved_registry_secret_before_deploy(t
 
 def test_kamal_config_checker_preserves_error_redacts_synthetic_password_and_stops(tmp_path):
     result, calls = run_config_check(tmp_path, fail_config=CONFIGS[0])
+    calls = [call for call in calls if call["command"] == "run"]
 
     assert result.returncode == 7
     output = result.stdout + result.stderr

@@ -12,12 +12,17 @@ import sys
 from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
 
-from native_release_intent import EXACT_SHA, classify_component_build_plan
+from native_release_intent import (
+    EXACT_SHA,
+    _known_non_runtime_path,
+    _safe_component_path,
+    classify_component_build_plan,
+)
 
 
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 RUN_URL = re.compile(
-    r"^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/actions/runs/([1-9][0-9]*)(?:/attempts/([1-9][0-9]*))?$"
+    r"^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/actions/runs/([1-9][0-9]*)(?:/attempts/([1-9][0-9]*)|/job/([1-9][0-9]*))?$"
 )
 MANIFEST_SHA = re.compile(r"^[0-9a-f]{64}$")
 COMPONENT_SOURCE_KEYS = {
@@ -56,7 +61,7 @@ def _latest_status(statuses: list[dict]) -> dict:
 
 
 def _is_github_environment_job_record(deployment: dict) -> bool:
-    """Recognize the empty, non-production record GitHub creates for an Environment job."""
+    """Recognize GitHub's native Environment record, including successful releases."""
     return (
         deployment.get("environment") == "production"
         and deployment.get("production_environment") is False
@@ -66,10 +71,13 @@ def _is_github_environment_job_record(deployment: dict) -> bool:
     )
 
 
-def _production_deployments(deployments: list[dict]) -> list[dict]:
+def _production_deployments(deployments: list[dict], statuses_by_id: dict | None = None) -> list[dict]:
     return [row for row in deployments
             if row.get("environment") == "production"
-            and not _is_github_environment_job_record(row)]
+            and (not _is_github_environment_job_record(row)
+                 or statuses_by_id is None
+                 or (statuses_by_id.get(row.get("id"))
+                     and _latest_status(statuses_by_id[row["id"]]).get("state") == "success"))]
 
 
 def _manifest_baseline(environment_url: object, *, deployment_task: str,
@@ -112,7 +120,8 @@ def _manifest_baseline(environment_url: object, *, deployment_task: str,
 
 
 def resolve_production_component_sources(deployments: list[dict], statuses_by_id: dict,
-                                         runs_by_id: dict, *, repository: str) -> dict:
+                                         runs_by_id: dict, *, repository: str,
+                                         jobs_by_id: dict | None = None) -> dict:
     """Validate latest Deployment/Verify identity and extract source SHAs."""
     if not REPOSITORY.fullmatch(repository or ""):
         raise ValueError("repository identity is invalid")
@@ -122,7 +131,7 @@ def resolve_production_component_sources(deployments: list[dict], statuses_by_id
         raise ValueError("production Deployment collection is malformed")
     if not deployments:
         return {"status": "BOOTSTRAP_FULL", "reason": "production_component_baseline_unavailable"}
-    eligible = _production_deployments(deployments)
+    eligible = _production_deployments(deployments, statuses_by_id)
     if not eligible:
         raise ValueError("production Deployment collection has no production record")
     newest = max(_timestamp(row.get("created_at")) for row in eligible)
@@ -135,7 +144,8 @@ def resolve_production_component_sources(deployments: list[dict], statuses_by_id
     task = deployment.get("task")
     if (not isinstance(identifier, int) or identifier <= 0
             or not isinstance(target_sha, str) or not EXACT_SHA.fullmatch(target_sha)
-            or deployment.get("production_environment") is not True
+            or (deployment.get("production_environment") is not True
+                and not _is_github_environment_job_record(deployment))
             or deployment.get("transient_environment") is not False
             or task not in SUPPORTED_TASKS):
         raise ValueError("latest production Deployment identity is unsupported or malformed")
@@ -156,6 +166,13 @@ def resolve_production_component_sources(deployments: list[dict], statuses_by_id
             or not re.fullmatch(r"[1-9][0-9]*", run_attempt)
             or (url_attempt is not None and url_attempt != run_attempt)):
         raise ValueError("linked production run did not pass the canonical Native workflow")
+    job_id = match.group(4)
+    if job_id is not None:
+        job = (jobs_by_id or {}).get(int(job_id))
+        if (not isinstance(job, dict) or str(job.get("run_id")) != run_id
+                or str(job.get("run_attempt")) != run_attempt
+                or job.get("status") != "completed" or job.get("conclusion") != "success"):
+            raise ValueError("linked production job does not match its successful run attempt")
     if task == "deploy":
         if (run.get("head_sha") != target_sha
                 or run.get("event") not in {"push", "workflow_dispatch"}):
@@ -172,8 +189,37 @@ def resolve_production_component_sources(deployments: list[dict], statuses_by_id
     return {"status": "VERIFIED", "deployment_id": identifier, **baseline}
 
 
+def _is_verified_tooling_only_push(repo: Path, before: str | None, candidate: str) -> bool:
+    """Allow no-image verification only for an exact, known non-runtime push diff."""
+    if not isinstance(before, str) or not EXACT_SHA.fullmatch(before) or before == "0" * 40:
+        return False
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", before, candidate], cwd=repo,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    if ancestor.returncode:
+        return False
+    raw = subprocess.check_output(
+        ["git", "diff", "--name-status", "-z", "--no-renames", f"{before}..{candidate}", "--"],
+        cwd=repo,
+    )
+    entries = raw.decode("utf8").split("\x00")
+    if not entries or entries.pop() != "" or len(entries) % 2:
+        return False
+    pairs = list(zip(entries[::2], entries[1::2]))
+    return bool(pairs) and all(
+        status in {"A", "M"}
+        and _safe_component_path(path)
+        and not path.startswith("packages/db/prisma/migrations/")
+        and path != "packages/db/prisma/production-approved-migrations.json"
+        and _known_non_runtime_path(path)
+        for status, path in pairs
+    )
+
+
 def resolve_build_plan(repo: Path, candidate_sha: str, deployments: list[dict],
-                       statuses_by_id: dict, runs_by_id: dict, *, repository: str) -> dict:
+                       statuses_by_id: dict, runs_by_id: dict, *, repository: str,
+                       push_before: str | None = None, jobs_by_id: dict | None = None) -> dict:
     if not EXACT_SHA.fullmatch(candidate_sha or ""):
         raise ValueError("candidate SHA must be exact")
     repo = repo.resolve()
@@ -184,8 +230,15 @@ def resolve_build_plan(repo: Path, candidate_sha: str, deployments: list[dict],
                                cwd=repo, text=True).strip():
         raise ValueError("build candidate worktree must be clean")
     baseline = resolve_production_component_sources(
-        deployments, statuses_by_id, runs_by_id, repository=repository)
+        deployments, statuses_by_id, runs_by_id, repository=repository, jobs_by_id=jobs_by_id)
     if baseline["status"] == "BOOTSTRAP_FULL":
+        if _is_verified_tooling_only_push(repo, push_before, candidate_sha):
+            return {
+                "status": "VERIFY_ONLY",
+                "deploy_scope": "UNRESOLVED",
+                "build_components": [],
+                "reason": "verified_tooling_only_push",
+            }
         return {
             "status": "BOOTSTRAP_FULL",
             "deploy_scope": "UNRESOLVED",
@@ -220,6 +273,7 @@ def main() -> int:
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--repository", required=True)
+    parser.add_argument("--push-before")
     args = parser.parse_args()
     try:
         deployments = _gh_json(
@@ -228,19 +282,28 @@ def main() -> int:
         if any(not isinstance(row, dict) for row in deployments):
             raise ValueError("production Deployment collection is malformed")
         eligible = _production_deployments(deployments)
-        if eligible:
-            newest = max(_timestamp(row.get("created_at")) for row in eligible)
-            latest_rows = [row for row in eligible if _timestamp(row.get("created_at")) == newest]
-            if len(latest_rows) != 1:
-                raise ValueError("latest production Deployment is ambiguous")
-            identifier = latest_rows[0].get("id")
+        # Read newest first and stop at the first usable baseline. Native failed
+        # jobs have no verified manifest; live Deploy inventory still reconciles
+        # their actual runtime outcome before any mutation.
+        baseline_time = None
+        for row in sorted(eligible, key=lambda row: _timestamp(row.get("created_at")), reverse=True):
+            row_time = _timestamp(row.get("created_at"))
+            if baseline_time is not None and row_time < baseline_time:
+                break
+            identifier = row.get("id")
             if not isinstance(identifier, int) or identifier <= 0:
                 raise ValueError("latest production Deployment identity is unsupported or malformed")
             statuses_by_id[identifier] = _gh_json(
                 f"repos/{args.repository}/deployments/{identifier}/statuses?per_page=100")
+            if (not _is_github_environment_job_record(row)
+                    or _latest_status(statuses_by_id[identifier]).get("state") == "success"):
+                baseline_time = row_time
         runs_by_id = {}
+        jobs_by_id = {}
         for statuses in statuses_by_id.values():
             status = _latest_status(statuses)
+            if status.get("state") != "success":
+                continue
             match = RUN_URL.fullmatch(status.get("log_url", ""))
             if match:
                 run_id = match.group(2)
@@ -249,9 +312,16 @@ def main() -> int:
                         ["gh", "api", f"repos/{args.repository}/actions/runs/{run_id}"],
                         check=True, text=True, capture_output=True)
                     runs_by_id[run_id] = json.loads(result.stdout)
+                job_id = match.group(4)
+                if job_id is not None and int(job_id) not in jobs_by_id:
+                    result = subprocess.run(
+                        ["gh", "api", f"repos/{args.repository}/actions/jobs/{job_id}"],
+                        check=True, text=True, capture_output=True)
+                    jobs_by_id[int(job_id)] = json.loads(result.stdout)
         plan = resolve_build_plan(args.repo, args.candidate_sha, deployments,
                                   statuses_by_id, runs_by_id,
-                                  repository=args.repository)
+                                  repository=args.repository, push_before=args.push_before,
+                                  jobs_by_id=jobs_by_id)
     except (ValueError, subprocess.CalledProcessError, OSError, json.JSONDecodeError) as error:
         reason = str(error) if isinstance(error, ValueError) else "GitHub production baseline lookup failed"
         print(json.dumps({"status": "BLOCK", "reason": reason}, sort_keys=True))

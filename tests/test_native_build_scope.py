@@ -86,6 +86,101 @@ def test_latest_native_deployment_exposes_exact_component_baselines():
     }
 
 
+def test_successful_native_environment_record_supplies_component_baselines():
+    deployments, statuses, runs = deployment_fixture()
+    deployments[0].update(production_environment=False, payload={})
+    statuses[200][0]["log_url"] = (
+        f"https://github.com/{REPOSITORY}/actions/runs/100/job/300"
+    )
+
+    baseline = MODULE.resolve_production_component_sources(
+        deployments, statuses, runs, repository=REPOSITORY,
+        jobs_by_id={300: {"run_id": 100, "run_attempt": 1, "status": "completed", "conclusion": "success"}},
+    )
+
+    assert baseline["status"] == "VERIFIED"
+    assert baseline["component_sources"] == dict.fromkeys(MODULE.ALL_COMPONENTS, BASELINE)
+
+
+def test_successful_native_environment_record_cannot_hide_invalid_manifest():
+    deployments, statuses, runs = deployment_fixture()
+    deployments[0].update(production_environment=False, payload={})
+    statuses[200][0]["environment_url"] = "https://example.invalid/"
+
+    with pytest.raises(ValueError, match="verified GPoint manifest URL"):
+        MODULE.resolve_production_component_sources(
+            deployments, statuses, runs, repository=REPOSITORY
+        )
+
+
+def test_successful_native_environment_record_requires_successful_canonical_run():
+    deployments, statuses, runs = deployment_fixture(run_conclusion="failure")
+    deployments[0].update(production_environment=False, payload={})
+
+    with pytest.raises(ValueError, match="canonical Native workflow"):
+        MODULE.resolve_production_component_sources(
+            deployments, statuses, runs, repository=REPOSITORY
+        )
+
+
+def test_cli_reads_native_success_after_failed_job_without_loading_older_history(monkeypatch, capsys):
+    import json
+    from types import SimpleNamespace
+
+    deployments, statuses, runs = deployment_fixture()
+    deployments[0].update(production_environment=False, payload={})
+    statuses[200][0]["log_url"] = f"https://github.com/{REPOSITORY}/actions/runs/100/job/300"
+    deployments.extend([
+        dict(deployments[0], id=201, created_at="2026-11-03T12:00:00Z"),
+        dict(deployments[0], id=199, created_at="2026-11-01T12:00:00Z"),
+    ])
+    calls = []
+
+    def gh_json(route):
+        calls.append(route)
+        if "/deployments?" in route:
+            return deployments
+        if "/201/" in route:
+            return [dict(statuses[200][0], state="failure", log_url=
+                         f"https://github.com/{REPOSITORY}/actions/runs/101/job/301")]
+        assert "/200/" in route, "must stop before older history"
+        return statuses[200]
+
+    monkeypatch.setattr(MODULE, "_gh_json", gh_json)
+    def gh_run(args, **kwargs):
+        assert args[-1].endswith(("/runs/100", "/jobs/300")), "ignored failed job needs no provenance lookup"
+        value = ({"run_id": 100, "run_attempt": 1, "status": "completed", "conclusion": "success"}
+                 if "/actions/jobs/300" in args[-1] else runs[100])
+        return SimpleNamespace(stdout=json.dumps(value))
+
+    monkeypatch.setattr(MODULE.subprocess, "run", gh_run)
+    monkeypatch.setattr(MODULE, "resolve_build_plan", lambda repo, sha, ds, ss, rs, **kwargs:
+                        MODULE.resolve_production_component_sources(
+                            ds, ss, rs, repository=REPOSITORY, jobs_by_id=kwargs["jobs_by_id"]))
+    monkeypatch.setattr(sys, "argv", ["resolve_native_build_scope.py", "--candidate-sha", BASELINE,
+                                    "--repository", REPOSITORY])
+
+    assert MODULE.main() == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "VERIFIED"
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("job", [
+    {},
+    {"run_id": 101, "run_attempt": 1, "status": "completed", "conclusion": "success"},
+    {"run_id": 100, "run_attempt": 2, "status": "completed", "conclusion": "success"},
+    {"run_id": 100, "run_attempt": 1, "status": "completed", "conclusion": "failure"},
+])
+def test_native_job_url_requires_the_same_successful_run_attempt(job):
+    deployments, statuses, runs = deployment_fixture()
+    deployments[0].update(production_environment=False, payload={})
+    statuses[200][0]["log_url"] = f"https://github.com/{REPOSITORY}/actions/runs/100/job/300"
+
+    with pytest.raises(ValueError, match="job.*attempt"):
+        MODULE.resolve_production_component_sources(
+            deployments, statuses, runs, repository=REPOSITORY, jobs_by_id={300: job})
+
+
 def test_ignores_github_environment_job_record_when_selecting_production_baseline():
     deployments, statuses, runs = deployment_fixture()
     environment_job = {
@@ -144,6 +239,66 @@ def test_legacy_success_without_component_sources_uses_one_bootstrap_build():
 
     assert baseline == {"status": "BOOTSTRAP_FULL", "deployment_id": 200,
                         "reason": "successful_legacy_deployment_has_no_component_source_manifest"}
+
+
+def test_tooling_only_push_without_manifest_uses_verify_only_plan(tmp_path):
+    repo, before = repo_with_baseline(tmp_path)
+    candidate = commit_file(repo, "tests/test_release_tooling.py", "assert True\n")
+    deployments, statuses, runs = deployment_fixture(
+        environment_url="https://gpoint.one/#gpoint-manifest-sha256=" + MANIFEST_SHA,
+        run_head_sha=BASELINE,
+    )
+
+    plan = MODULE.resolve_build_plan(
+        repo, candidate, deployments, statuses, runs,
+        repository=REPOSITORY, push_before=before,
+    )
+
+    assert plan == {
+        "status": "VERIFY_ONLY",
+        "deploy_scope": "UNRESOLVED",
+        "build_components": [],
+        "reason": "verified_tooling_only_push",
+    }
+
+
+@pytest.mark.parametrize("path", [
+    "apps/api/src/main.ts",
+    "unmapped/release-file.bin",
+    "packages/db/prisma/migrations/20261104120000_add_flag/migration.sql",
+    "packages/db/prisma/production-approved-migrations.json",
+])
+def test_runtime_unknown_or_migration_push_path_does_not_use_verify_only(tmp_path, path):
+    repo, before = repo_with_baseline(tmp_path)
+    candidate = commit_file(repo, path, "candidate content\n")
+    deployments, statuses, runs = deployment_fixture(
+        environment_url="https://gpoint.one/#gpoint-manifest-sha256=" + MANIFEST_SHA,
+        run_head_sha=BASELINE,
+    )
+
+    plan = MODULE.resolve_build_plan(
+        repo, candidate, deployments, statuses, runs,
+        repository=REPOSITORY, push_before=before,
+    )
+
+    assert plan["status"] == "BOOTSTRAP_FULL"
+    assert plan["build_components"] == ["CORE", "AGATA", "MINIAPP"]
+
+
+def test_tooling_only_candidate_without_exact_push_before_does_not_use_verify_only(tmp_path):
+    repo, _before = repo_with_baseline(tmp_path)
+    candidate = commit_file(repo, "tests/test_release_tooling.py", "assert True\n")
+    deployments, statuses, runs = deployment_fixture(
+        environment_url="https://gpoint.one/#gpoint-manifest-sha256=" + MANIFEST_SHA,
+        run_head_sha=BASELINE,
+    )
+
+    plan = MODULE.resolve_build_plan(
+        repo, candidate, deployments, statuses, runs, repository=REPOSITORY,
+    )
+
+    assert plan["status"] == "BOOTSTRAP_FULL"
+    assert plan["build_components"] == ["CORE", "AGATA", "MINIAPP"]
 
 
 def test_rollback_baseline_requires_all_sources_equal_the_exact_target_sha():
@@ -231,6 +386,36 @@ def test_selective_plan_builds_only_the_component_changed_since_its_baseline(tmp
 
     assert plan["deploy_scope"] == "MINIAPP"
     assert plan["build_components"] == ["MINIAPP"]
+
+
+def test_selective_plan_returns_verify_only_for_staggered_sources_and_old_migrations(tmp_path):
+    repo, baseline_sha = repo_with_baseline(tmp_path)
+    migration = "packages/db/prisma/migrations/20261103120000_add_flag/migration.sql"
+    migration_sha = commit_file(repo, migration, "ALTER TABLE users ADD COLUMN flag boolean;\n")
+    core_source_sha = commit_file(repo, "apps/api/src/main.ts", "export const version = 2;\n")
+    candidate = commit_file(repo, "docs/release/automation.md", "release tooling only\n")
+    deployments, statuses, runs = deployment_fixture(
+        target_sha=baseline_sha, run_head_sha=baseline_sha
+    )
+    statuses[200][0]["environment_url"] = (
+        "https://gpoint.one/#gpoint-manifest-sha256=" + MANIFEST_SHA
+        + "&gpoint-core-source-sha=" + core_source_sha
+        + "&gpoint-agata-source-sha=" + baseline_sha
+        + "&gpoint-miniapp-source-sha=" + baseline_sha
+    )
+
+    plan = MODULE.resolve_build_plan(
+        repo, candidate, deployments, statuses, runs, repository=REPOSITORY
+    )
+
+    assert plan["status"] == "VERIFIED"
+    assert plan["baseline_sources"] == {
+        "CORE": core_source_sha, "AGATA": baseline_sha, "MINIAPP": baseline_sha,
+    }
+    assert plan["deploy_scope"] == "NONE"
+    assert plan["build_components"] == []
+    assert plan["reason"] == "no_runtime_changes"
+    assert migration_sha != baseline_sha
 
 
 def test_missing_deployment_history_is_fail_closed_for_component_scope(tmp_path):
