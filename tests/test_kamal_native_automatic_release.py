@@ -157,6 +157,9 @@ def test_runtime_verify_rechecks_public_and_all_six_kamal_roles_after_deploy():
     assert "name: Record GitHub Deployment result against the same attempt" not in deploy
     verify = deploy[verify_step:]
     assert deploy_step < verify_step
+    assert '"${PENDING_PRISMA_MIGRATIONS:--}" "${PENDING_PRISMA_CHECKSUMS:--}"' in verify
+    assert '[[ "$pending_prisma_migrations" != "-" ]] || pending_prisma_migrations=""' in verify
+    assert '[[ "$pending_prisma_checksums" != "-" ]] || pending_prisma_checksums=""' in verify
     for expected in (
         "https://gpoint.one/api/health/live",
         "gpoint-core-api",
