@@ -197,6 +197,9 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         for command in ("kamal app version", "kamal app details", "kamal app containers"):
             self.assertIn(command, commands)
         self.assertIn("--env KAMAL_REGISTRY_PASSWORD", commands)
+        self.assertIn("Kamal app version command failed for", commands)
+        self.assertIn("2>&1", commands)
+        self.assertIn("[redacted]", commands)
         self.assertIn("Kamal inventory could not resolve one exact current version", commands)
         self.assertIn("Kamal inventory details do not include expected role/version", commands)
         self.assertIn("Kamal inventory containers do not include expected role/version", commands)

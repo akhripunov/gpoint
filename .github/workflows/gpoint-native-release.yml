@@ -535,7 +535,28 @@ jobs:
                 roles=(gpoint-miniapp-web)
                 ;;
             esac
-            version_text="$(kamal app version --config-file "$config")"
+            if version_text="$(kamal app version --config-file "$config" 2>&1)"; then
+              version_status=0
+            else
+              version_status=$?
+            fi
+            if [[ "$version_status" != 0 ]]; then
+              safe_error="$(printf '%s' "$version_text" | python3 -c '
+          import os, re, sys
+          message = sys.stdin.read()
+          for name in ("GPOINT_PRODUCTION_HOST", "KAMAL_REGISTRY_PASSWORD"):
+              secret = os.environ.get(name)
+              if secret:
+                  message = message.replace(secret, "[redacted]")
+          message = re.sub(r"(?i)\b(password|token|secret|authorization)\b\s*[:=]\s*\S+", r"\1=[redacted]", message)
+          message = re.sub(r"-----BEGIN [^-]+-----.*?-----END [^-]+-----", "[redacted]", message, flags=re.S)
+          message = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", "[redacted-ip]", message)
+          print(" ".join(message.split())[:300])
+          ')"
+              [[ -n "$safe_error" ]] || safe_error="no command output"
+              echo "Kamal app version command failed for $config (exit=$version_status): $safe_error" >&2
+              exit "$version_status"
+            fi
             mapfile -t versions < <(grep -Eo '[0-9a-f]{40}-[0-9]+-[0-9]+' <<< "$version_text" | sort -u)
             if [[ "${#versions[@]}" != 1 ]]; then
               echo "Kamal inventory could not resolve one exact current version for $config (matches=${#versions[@]})." >&2
