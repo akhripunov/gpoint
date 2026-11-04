@@ -86,6 +86,28 @@ def test_latest_native_deployment_exposes_exact_component_baselines():
     }
 
 
+def test_ignores_github_environment_job_record_when_selecting_production_baseline():
+    deployments, statuses, runs = deployment_fixture()
+    environment_job = {
+        "id": 201,
+        "sha": "2" * 40,
+        "environment": "production",
+        "production_environment": False,
+        "transient_environment": False,
+        "task": "deploy",
+        "created_at": "2026-11-04T04:55:55Z",
+        "payload": {},
+    }
+    deployments.append(environment_job)
+
+    baseline = MODULE.resolve_production_component_sources(
+        deployments, statuses, runs, repository=REPOSITORY
+    )
+
+    assert baseline["status"] == "VERIFIED"
+    assert baseline["deployment_id"] == 200
+
+
 def test_latest_failed_deployment_blocks_instead_of_using_older_baseline():
     deployments, statuses, runs = deployment_fixture(state="failure")
     older = dict(deployments[0], id=199, created_at="2026-11-01T12:00:00Z")
