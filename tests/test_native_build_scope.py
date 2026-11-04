@@ -86,6 +86,101 @@ def test_latest_native_deployment_exposes_exact_component_baselines():
     }
 
 
+def test_successful_native_environment_record_supplies_component_baselines():
+    deployments, statuses, runs = deployment_fixture()
+    deployments[0].update(production_environment=False, payload={})
+    statuses[200][0]["log_url"] = (
+        f"https://github.com/{REPOSITORY}/actions/runs/100/job/300"
+    )
+
+    baseline = MODULE.resolve_production_component_sources(
+        deployments, statuses, runs, repository=REPOSITORY,
+        jobs_by_id={300: {"run_id": 100, "run_attempt": 1, "status": "completed", "conclusion": "success"}},
+    )
+
+    assert baseline["status"] == "VERIFIED"
+    assert baseline["component_sources"] == dict.fromkeys(MODULE.ALL_COMPONENTS, BASELINE)
+
+
+def test_successful_native_environment_record_cannot_hide_invalid_manifest():
+    deployments, statuses, runs = deployment_fixture()
+    deployments[0].update(production_environment=False, payload={})
+    statuses[200][0]["environment_url"] = "https://example.invalid/"
+
+    with pytest.raises(ValueError, match="verified GPoint manifest URL"):
+        MODULE.resolve_production_component_sources(
+            deployments, statuses, runs, repository=REPOSITORY
+        )
+
+
+def test_successful_native_environment_record_requires_successful_canonical_run():
+    deployments, statuses, runs = deployment_fixture(run_conclusion="failure")
+    deployments[0].update(production_environment=False, payload={})
+
+    with pytest.raises(ValueError, match="canonical Native workflow"):
+        MODULE.resolve_production_component_sources(
+            deployments, statuses, runs, repository=REPOSITORY
+        )
+
+
+def test_cli_reads_native_success_after_failed_job_without_loading_older_history(monkeypatch, capsys):
+    import json
+    from types import SimpleNamespace
+
+    deployments, statuses, runs = deployment_fixture()
+    deployments[0].update(production_environment=False, payload={})
+    statuses[200][0]["log_url"] = f"https://github.com/{REPOSITORY}/actions/runs/100/job/300"
+    deployments.extend([
+        dict(deployments[0], id=201, created_at="2026-11-03T12:00:00Z"),
+        dict(deployments[0], id=199, created_at="2026-11-01T12:00:00Z"),
+    ])
+    calls = []
+
+    def gh_json(route):
+        calls.append(route)
+        if "/deployments?" in route:
+            return deployments
+        if "/201/" in route:
+            return [dict(statuses[200][0], state="failure", log_url=
+                         f"https://github.com/{REPOSITORY}/actions/runs/101/job/301")]
+        assert "/200/" in route, "must stop before older history"
+        return statuses[200]
+
+    monkeypatch.setattr(MODULE, "_gh_json", gh_json)
+    def gh_run(args, **kwargs):
+        assert args[-1].endswith(("/runs/100", "/jobs/300")), "ignored failed job needs no provenance lookup"
+        value = ({"run_id": 100, "run_attempt": 1, "status": "completed", "conclusion": "success"}
+                 if "/actions/jobs/300" in args[-1] else runs[100])
+        return SimpleNamespace(stdout=json.dumps(value))
+
+    monkeypatch.setattr(MODULE.subprocess, "run", gh_run)
+    monkeypatch.setattr(MODULE, "resolve_build_plan", lambda repo, sha, ds, ss, rs, **kwargs:
+                        MODULE.resolve_production_component_sources(
+                            ds, ss, rs, repository=REPOSITORY, jobs_by_id=kwargs["jobs_by_id"]))
+    monkeypatch.setattr(sys, "argv", ["resolve_native_build_scope.py", "--candidate-sha", BASELINE,
+                                    "--repository", REPOSITORY])
+
+    assert MODULE.main() == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "VERIFIED"
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("job", [
+    {},
+    {"run_id": 101, "run_attempt": 1, "status": "completed", "conclusion": "success"},
+    {"run_id": 100, "run_attempt": 2, "status": "completed", "conclusion": "success"},
+    {"run_id": 100, "run_attempt": 1, "status": "completed", "conclusion": "failure"},
+])
+def test_native_job_url_requires_the_same_successful_run_attempt(job):
+    deployments, statuses, runs = deployment_fixture()
+    deployments[0].update(production_environment=False, payload={})
+    statuses[200][0]["log_url"] = f"https://github.com/{REPOSITORY}/actions/runs/100/job/300"
+
+    with pytest.raises(ValueError, match="job.*attempt"):
+        MODULE.resolve_production_component_sources(
+            deployments, statuses, runs, repository=REPOSITORY, jobs_by_id={300: job})
+
+
 def test_ignores_github_environment_job_record_when_selecting_production_baseline():
     deployments, statuses, runs = deployment_fixture()
     environment_job = {
