@@ -91,6 +91,20 @@ def _gh_json(*args: str):
     return [row for page in pages for row in page]
 
 
+def _gh_run_jobs(route: str) -> list[dict]:
+    try:
+        result = subprocess.run(["gh", "api", "--paginate", "--slurp", route],
+                                check=True, text=True, capture_output=True)
+        pages = json.loads(result.stdout)
+    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError):
+        raise ValueError("GitHub Actions job lookup failed") from None
+    if (not isinstance(pages, list)
+            or any(not isinstance(page, dict) or not isinstance(page.get("jobs"), list)
+                   for page in pages)):
+        raise ValueError("GitHub Actions job response shape is invalid")
+    return [job for page in pages for job in page["jobs"]]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sha", required=True)
@@ -104,7 +118,7 @@ def main() -> int:
         job_routes = (f"repos/{args.repository}/actions/runs/{args.run_id}/attempts/"
                       f"{args.run_attempt}/jobs?per_page=100")
         job_urls = _current_attempt_deploy_job_urls(
-            _gh_json(job_routes), repository=args.repository, run_id=args.run_id)
+            _gh_run_jobs(job_routes), repository=args.repository, run_id=args.run_id)
         status_rows = {}
         for row in deployments:
             identifier = row.get("id") if isinstance(row, dict) else None

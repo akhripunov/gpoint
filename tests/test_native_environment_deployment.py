@@ -1,5 +1,7 @@
 from pathlib import Path
+import json
 import sys
+from types import SimpleNamespace
 
 import importlib.util
 import pytest
@@ -50,18 +52,30 @@ def test_main_resolves_exact_active_deploy_job_url_for_this_attempt(monkeypatch,
             return [deployment() | {"production_environment": False}]
         if route == f"repos/{REPOSITORY}/deployments/101/statuses?per_page=100":
             return [status(url=job_url)]
-        if route == f"repos/{REPOSITORY}/actions/runs/{RUN}/attempts/{ATTEMPT}/jobs?per_page=100":
-            return [{"id": 126479089691, "name": "Kamal production Deploy and Verify",
-                     "status": "in_progress", "html_url": job_url}]
         raise AssertionError(f"unexpected GitHub API route: {route}")
 
     monkeypatch.setattr(resolver, "_gh_json", gh_json)
+    jobs_route = f"repos/{REPOSITORY}/actions/runs/{RUN}/attempts/{ATTEMPT}/jobs?per_page=100"
+    job = {"id": 126479089691, "name": "Kamal production Deploy and Verify",
+           "status": "in_progress", "html_url": job_url}
+    monkeypatch.setattr(resolver, "_gh_run_jobs",
+                        lambda route: [job] if route == jobs_route else [], raising=False)
 
     assert resolver.main() == 0
     assert capsys.readouterr().out.strip() == "deployment_id=101"
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
     deploy_permissions = workflow.split("  deploy:\n", 1)[1].split("    env:\n", 1)[0]
     assert "      actions: read" in deploy_permissions
+
+
+def test_gh_run_jobs_unwraps_github_object_pages(monkeypatch):
+    job = {"id": 126479089691, "name": "Kamal production Deploy and Verify",
+           "status": "in_progress"}
+    result = SimpleNamespace(returncode=0, stdout=json.dumps([{"total_count": 1, "jobs": [job]}]),
+                             stderr="")
+    monkeypatch.setattr(resolver.subprocess, "run", lambda *_args, **_kwargs: result)
+
+    assert resolver._gh_run_jobs("repos/example/repo/actions/runs/1/attempts/1/jobs") == [job]
 
 
 def test_resolves_protected_production_environment_when_api_flag_is_false():
