@@ -820,6 +820,11 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
     (prisma / pending_name / "migration.sql").write_text(
         "CREATE TABLE engine.eros_inference_jobs (id UUID PRIMARY KEY, error_code VARCHAR(64), status TEXT);\n"
         "ALTER TABLE engine.eros_inference_jobs RENAME COLUMN legacy_code TO normalized_code;\n", encoding="utf-8")
+    smoke_name = "20261104144700_native_release_smoke"
+    (prisma / smoke_name).mkdir()
+    (prisma / smoke_name / "migration.sql").write_text(
+        "-- Production release pipeline smoke test: ledger-only, no schema or data changes.\n"
+        "SELECT 1;\n", encoding="utf-8")
     agata = repo / "services/agata/migrations/versions"
     agata.mkdir(parents=True)
     (agata / "agata0011_messages.py").write_text("revision = 'agata0011'\ndown_revision = None\n", encoding="utf-8")

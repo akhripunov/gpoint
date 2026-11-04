@@ -258,6 +258,13 @@ def migration_identifiers(path, *, prisma_directory, repo_root):
     return {x for x in identifiers if x}
 
 
+def is_explicit_noop_migration(path):
+    """Recognize only a single SELECT 1 statement as having no schema dependencies."""
+    source = Path(path).read_text(encoding="utf-8")
+    without_line_comments = re.sub(r"(?m)^\s*--[^\n]*(?:\n|$)", "", source)
+    return re.fullmatch(r"\s*SELECT\s+1\s*;\s*", without_line_comments, re.IGNORECASE) is not None
+
+
 def changed_application_lines(repo_root, baseline_sha, candidate_sha):
     result = subprocess.run(
         ["git", "-C", str(repo_root), "diff", "--unified=0", baseline_sha, candidate_sha,
@@ -388,6 +395,8 @@ def verify_compatible(args, live_prisma, recorded):
     for migration, path in pending:
         identifiers = migration_identifiers(path, prisma_directory=args.prisma_directory, repo_root=repo_root)
         if not identifiers:
+            if is_explicit_noop_migration(path):
+                continue
             raise ValueError(f"cannot identify dependencies in pending migration {migration}")
         for source_path, line in changed:
             if migration in pending_agata and not source_path.startswith("services/agata/"):
