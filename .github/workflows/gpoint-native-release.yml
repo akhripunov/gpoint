@@ -510,10 +510,13 @@ jobs:
           set -euo pipefail
           kamal() {
             docker run --rm \
+              --platform linux/amd64 \
               --volume "$GITHUB_WORKSPACE:/workdir" \
               --volume "$HOME/.ssh:/root/.ssh:ro" \
               --volume "$HOME/.ssh:$HOME/.ssh:ro" \
               --workdir /workdir \
+              --env GPOINT_COMMIT_SHA \
+              --env GPOINT_APP_SOURCE_SHA \
               --env KAMAL_REGISTRY_PASSWORD \
               --env GPOINT_PRODUCTION_HOST \
               --env GPOINT_SSH_KEY \

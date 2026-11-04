@@ -197,6 +197,9 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         for command in ("kamal app version", "kamal app details", "kamal app containers"):
             self.assertIn(command, commands)
         self.assertIn("--env KAMAL_REGISTRY_PASSWORD", commands)
+        self.assertIn("--env GPOINT_APP_SOURCE_SHA", commands)
+        self.assertIn("--env GPOINT_COMMIT_SHA", commands)
+        self.assertIn("--platform linux/amd64", commands)
         self.assertIn("Kamal app version command failed for", commands)
         self.assertIn("2>&1", commands)
         self.assertIn("[redacted]", commands)
