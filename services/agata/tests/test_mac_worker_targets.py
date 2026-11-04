@@ -74,7 +74,15 @@ def test_eros_gateway_mode_is_selected_only_by_its_dedicated_url():
         worker.validate_target_claim("GPOINT", {
             "id": "job", "leaseToken": "lease", "target": "GPOINT", "tenant_id": eros_tenant,
         })
-    with patch.dict(os.environ, {**config, "GSALES_AGATA_TENANT_ID": isolated_point}):
+    duplicate_tenant_config = {
+        "GPOINT_EROS_WORKER_URL": eros["GPOINT_EROS_WORKER_URL"],
+        "GPOINT_EROS_WORKER_TOKEN": eros["GPOINT_EROS_WORKER_TOKEN"],
+        "GPOINT_EROS_TENANT_ID": eros_tenant,
+        "GSALES_AGATA_WORKER_URL": ENV["GSALES_AGATA_WORKER_URL"],
+        "GSALES_AGATA_WORKER_TOKEN": ENV["GSALES_AGATA_WORKER_TOKEN"],
+        "GSALES_AGATA_TENANT_ID": eros_tenant,
+    }
+    with patch.dict(os.environ, duplicate_tenant_config, clear=True):
         with pytest.raises(worker.FatalConfigurationError, match="worker_tenants_must_be_distinct"):
             worker.configured_tenant_bindings()
 
