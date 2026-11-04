@@ -582,6 +582,44 @@ def test_component_runtime_inventory_pins_new_roles_and_preserves_untouched_iden
     assert multi["roles"]["gpoint-agata-api"]["sourceSha"] == baseline
 
 
+@pytest.mark.parametrize("mode,builds", [("BOOTSTRAP_FULL", ["CORE", "AGATA", "MINIAPP"]),
+                                        ("VERIFIED", ["CORE", "MINIAPP"])])
+def test_workflow_plan_keeps_extra_builds_separate_from_runtime_scope(tmp_path, monkeypatch, capsys, mode, builds):
+    import yaml
+    repo, baseline, candidate, inventory = _component_repo(
+        tmp_path, {"apps/miniapp/public/release-smoke.json": '{"attempt":2}\n'})
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    step = next(s for s in workflow["jobs"]["deploy"]["steps"] if s.get("id") == "component_plan")
+    verify_images = next(s for s in workflow["jobs"]["deploy"]["steps"]
+                         if s.get("name") == "Verify immutable candidate images selected for the live scope")
+    verify_runtime = next(s for s in workflow["jobs"]["deploy"]["steps"] if s.get("id") == "verify")
+    for key in ("APP_DIGEST", "AGATA_DIGEST", "MINIAPP_DIGEST"):
+        assert verify_images["env"][key] == "${{ needs.build.outputs." + key.lower() + " }}"
+        assert verify_runtime["env"][key] == "${{ steps.component_plan.outputs." + key.lower() + " }}"
+    script = step["run"].split('python3 - <<\'PY\' >> "$GITHUB_OUTPUT"\n', 1)[1].rsplit('\nPY', 1)[0]
+    monkeypatch.chdir(repo)
+    monkeypatch.setitem(sys.modules, "native_release_intent", MODULE)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    for key, value in {
+        "CANDIDATE_SHA": candidate, "IMAGE_VERSION": candidate + "-200-1",
+        "BASELINE_ROLE_INVENTORY": json.dumps(inventory), "BASELINE_MODE": mode,
+        "BUILD_COMPONENTS": json.dumps(builds), "BUILD_DEPLOY_SCOPE": "MINIAPP",
+        "BUILD_BASELINE_SOURCES": json.dumps(dict.fromkeys(MODULE.COMPONENT_ROLES, baseline)),
+        "APP_DIGEST": "sha256:" + "4" * 64, "AGATA_DIGEST": "sha256:" + "5" * 64,
+        "MINIAPP_DIGEST": "sha256:" + "6" * 64,
+    }.items():
+        monkeypatch.setenv(key, value)
+    exec(compile(script, "component_plan", "exec"), {})
+    outputs = dict(line.split("=", 1) for line in capsys.readouterr().out.splitlines())
+    assert outputs["scope"] == "MINIAPP"
+    assert outputs["app_digest"] == inventory["roles"]["gpoint-core-api"]["repo_digest"].split("@", 1)[1]
+    assert outputs["agata_digest"] == inventory["roles"]["gpoint-agata-api"]["repo_digest"].split("@", 1)[1]
+    assert outputs["miniapp_digest"] == "sha256:" + "6" * 64
+    assert outputs["migration_app_digest"] == "sha256:" + "4" * 64
+    assert outputs["core_api_version"] == inventory["roles"]["gpoint-core-api"]["version"]
+    assert outputs["core_api_source_sha"] == baseline
+
+
 def test_rollback_dispatch_requires_main_exact_owner_explicit_approval_and_no_other_maintenance():
     args = dict(
         ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,

@@ -76,8 +76,7 @@ def _production_deployments(deployments: list[dict], statuses_by_id: dict | None
             if row.get("environment") == "production"
             and (not _is_github_environment_job_record(row)
                  or statuses_by_id is None
-                 or (statuses_by_id.get(row.get("id"))
-                     and _latest_status(statuses_by_id[row["id"]]).get("state") == "success"))]
+                 or statuses_by_id.get(row.get("id")))]
 
 
 def _manifest_baseline(environment_url: object, *, deployment_task: str,
@@ -150,8 +149,10 @@ def resolve_production_component_sources(deployments: list[dict], statuses_by_id
             or task not in SUPPORTED_TASKS):
         raise ValueError("latest production Deployment identity is unsupported or malformed")
     status = _latest_status(statuses_by_id.get(identifier, []))
-    if status.get("state") != "success" or status.get("environment") != "production":
+    failed_native = _is_github_environment_job_record(deployment) and status.get("state") in {"failure", "error"}
+    if (status.get("state") != "success" and not failed_native) or status.get("environment") != "production":
         raise ValueError("latest production Deployment is not successful")
+    expected_conclusion = "failure" if failed_native else "success"
     match = RUN_URL.fullmatch(status.get("log_url", ""))
     if not match or match.group(1) != repository:
         raise ValueError("latest production Deployment is not linked to a GPoint Actions run")
@@ -161,7 +162,7 @@ def resolve_production_component_sources(deployments: list[dict], statuses_by_id
         raise ValueError("linked production Actions run evidence is missing")
     run_attempt = str(run.get("run_attempt", ""))
     if (run.get("path") != ".github/workflows/gpoint-native-release.yml"
-            or run.get("status") != "completed" or run.get("conclusion") != "success"
+            or run.get("status") != "completed" or run.get("conclusion") != expected_conclusion
             or run.get("head_branch") != "main"
             or not re.fullmatch(r"[1-9][0-9]*", run_attempt)
             or (url_attempt is not None and url_attempt != run_attempt)):
@@ -171,7 +172,7 @@ def resolve_production_component_sources(deployments: list[dict], statuses_by_id
         job = (jobs_by_id or {}).get(int(job_id))
         if (not isinstance(job, dict) or str(job.get("run_id")) != run_id
                 or str(job.get("run_attempt")) != run_attempt
-                or job.get("status") != "completed" or job.get("conclusion") != "success"):
+                or job.get("status") != "completed" or job.get("conclusion") != expected_conclusion):
             raise ValueError("linked production job does not match its successful run attempt")
     if task == "deploy":
         if (run.get("head_sha") != target_sha
@@ -180,6 +181,10 @@ def resolve_production_component_sources(deployments: list[dict], statuses_by_id
     elif task == "rollback":
         if run.get("event") != "workflow_dispatch":
             raise ValueError("rollback Deployment is not linked to an exact manual run")
+
+    if failed_native:
+        return {"status": "BOOTSTRAP_FULL", "deployment_id": identifier,
+                "reason": "failed_native_attempt_requires_live_reconciliation"}
 
     baseline = _manifest_baseline(status.get("environment_url"),
                                   deployment_task=task, deployment_sha=target_sha)
@@ -282,9 +287,8 @@ def main() -> int:
         if any(not isinstance(row, dict) for row in deployments):
             raise ValueError("production Deployment collection is malformed")
         eligible = _production_deployments(deployments)
-        # Read newest first and stop at the first usable baseline. Native failed
-        # jobs have no verified manifest; live Deploy inventory still reconciles
-        # their actual runtime outcome before any mutation.
+        # A failed canonical attempt invalidates the older manifest baseline.
+        # Build conservatively; fresh live inventory still controls Kamal scope.
         baseline_time = None
         for row in sorted(eligible, key=lambda row: _timestamp(row.get("created_at")), reverse=True):
             row_time = _timestamp(row.get("created_at"))
@@ -295,14 +299,12 @@ def main() -> int:
                 raise ValueError("latest production Deployment identity is unsupported or malformed")
             statuses_by_id[identifier] = _gh_json(
                 f"repos/{args.repository}/deployments/{identifier}/statuses?per_page=100")
-            if (not _is_github_environment_job_record(row)
-                    or _latest_status(statuses_by_id[identifier]).get("state") == "success"):
-                baseline_time = row_time
+            baseline_time = row_time
         runs_by_id = {}
         jobs_by_id = {}
         for statuses in statuses_by_id.values():
             status = _latest_status(statuses)
-            if status.get("state") != "success":
+            if status.get("state") not in {"success", "failure", "error"}:
                 continue
             match = RUN_URL.fullmatch(status.get("log_url", ""))
             if match:

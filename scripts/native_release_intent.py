@@ -46,6 +46,7 @@ PRISMA_MIGRATION = re.compile(
     r"^packages/db/prisma/migrations/[0-9]{14}_[a-z0-9_]+/migration\.sql$"
 )
 KNOWN_NON_RUNTIME_FILES = frozenset({
+    ".kamal/hooks/post-app-boot",
     "AGENTS.md",
     "packages/db/prisma/production-approved-migrations.json",
     "scripts/classify-release-prepush.py",
