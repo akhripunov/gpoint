@@ -115,8 +115,9 @@ def classify_push(*, event_name: str, ref: str,
     kinds = {_path_kind(path) for path in changed_paths}
     if "schema" in kinds or "unknown" in kinds:
         return "BLOCK"
-    if "prisma_schema" in kinds and "prisma_migration" not in kinds:
-        return "BLOCK"
+    # Prisma schema changes must reach hosted Tests, which compare the full
+    # migration history with schema.prisma before Build. Production Apply still
+    # requires an exact migration set in the approved migration manifest.
     # Publishing to main authorizes the complete reviewed candidate. Docs,
     # release fixes and their app changes use the same Tests -> Build -> Deploy
     # run; no second manual run repeats CI just because a path is operational.

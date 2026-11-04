@@ -172,9 +172,11 @@ gates сохраняются.
 выполняет protected Deploy и Runtime Verify. Prisma migration SQL допускается
 только с точным именем и SHA-256 checksum в
 `packages/db/prisma/production-approved-migrations.json`; неизвестные,
-несовпадающие и AGATA migrations блокируются. Prisma schema без migration SQL,
-удаление/перемещение migration и неизвестные schema paths блокируются. Deploy
-проверяет полный applied prefix/checksums, свежий backup/isolated-restore
+несовпадающие и AGATA migrations блокируются. Изменение Prisma schema проходит
+в обязательные Tests, которые сверяют его с полной migration history на
+изолированной PostgreSQL; удаление/перемещение migration и неизвестные schema
+paths блокируются. Production Apply по-прежнему требует точный migration
+allowlist. Deploy проверяет полный applied prefix/checksums, свежий backup/isolated-restore
 manifest, применяет точный pending allowlist через `prisma migrate deploy` один
 раз, проверяет итоговые heads/checksums и только потом вызывает Kamal. Ошибка
 или неопределённый Apply останавливает Kamal; автоматический downgrade или
