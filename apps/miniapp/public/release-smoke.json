@@ -1,0 +1,5 @@
+{
+  "project": "GPoint",
+  "test": "native-release-runtime-smoke",
+  "release": "2026-11-04T12:25:29Z"
+}
