@@ -34,7 +34,7 @@ def test_approved_prisma_apply_is_inside_the_protected_deploy_before_kamal():
     assert "steps.migration_apply.outputs.prisma_migrations" in verify["env"]["EXPECTED_PRISMA_MIGRATIONS"]
     assert verify["env"]["BASELINE_AGATA_HEAD"] == "${{ steps.migration_baseline.outputs.agata_head }}"
     assert '"$BASELINE_AGATA_HEAD" "$EXPECTED_ROLE_IDENTITIES_B64" <<\'REMOTE\'' in verify["run"]
-    assert set(jobs) == {"workspace", "python", "build", "deploy", "rollback", "backup_maintenance", "migration_rehearsal"}
+    assert set(jobs) == {"tests", "build", "deploy", "rollback", "backup_maintenance", "migration_rehearsal"}
 
 
 def test_prisma_apply_never_changes_agata_migrations_or_rolls_back_database():
@@ -63,7 +63,7 @@ def test_prisma_migration_plan_and_apply_remain_exact_sha_and_environment_scoped
 
 def test_ci_rehearses_prisma_history_schema_parity_and_idempotent_redeploy():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    workspace = workflow["jobs"]["workspace"]
+    workspace = workflow["jobs"]["tests"]
     step = next(step for step in workspace["steps"]
                 if step.get("name") == "Generate Prisma client and apply test migrations")
     assert workspace["env"]["SHADOW_DATABASE_URL"].endswith("/gpoint_shadow")

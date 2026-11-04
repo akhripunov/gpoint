@@ -25,12 +25,12 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     }
     build = workflow["jobs"]["build"]
     assert "release_intent" not in workflow["jobs"]
-    assert "workspace" in build["needs"] and "python" in build["needs"]
+    assert build["needs"] == ["tests"]
     assert "outputs.mode == 'DEPLOY'" in build["if"]
     assert "outputs.mode == 'REHEARSAL'" in build["if"]
     assert "environment" not in build
     assert "packages: write" in WORKFLOW.read_text(encoding="utf-8")
-    assert {"workspace", "python", "build"}.issubset(deploy["needs"])
+    assert deploy["needs"] == ["tests", "build"]
 
 
 def test_rerun_by_non_owner_cannot_deploy_a_main_push(tmp_path):
@@ -134,7 +134,7 @@ def test_kamal_inventory_summary_uses_shellcheck_safe_markdown_fences():
 
 def test_release_event_routing_is_fail_closed_and_does_not_give_prs_prod_access():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    intent = workflow["jobs"]["workspace"]
+    intent = workflow["jobs"]["tests"]
     assert "if" not in intent
     assert "environment" not in intent
     intent_script = next(step.get("run", "") for step in intent["steps"]
@@ -143,10 +143,9 @@ def test_release_event_routing_is_fail_closed_and_does_not_give_prs_prod_access(
     assert "GPOINT_MIGRATION_REHEARSAL_PREP" not in intent_script
     assert 'return 2' in (ROOT / "scripts/native_release_intent.py").read_text()
     deploy = workflow["jobs"]["deploy"]
-    assert "needs.workspace.outputs.deploy == 'true'" in deploy["if"]
+    assert "needs.tests.outputs.deploy == 'true'" in deploy["if"]
     assert "pull_request" not in deploy["if"]
-    assert "production" not in workflow["jobs"]["workspace"].get("environment", {})
-    assert "production" not in workflow["jobs"]["python"].get("environment", {})
+    assert "production" not in workflow["jobs"]["tests"].get("environment", {})
     assert workflow["permissions"] == {"contents": "read"}
 
 
@@ -373,7 +372,7 @@ def test_manual_migration_rehearsal_uses_existing_backup_without_deployment_or_k
     assert "repos/$GITHUB_REPOSITORY/deployments" not in body
     assert rehearsal["permissions"] == {"contents": "read", "packages": "read"}
     deploy = workflow["jobs"]["deploy"]
-    assert "needs.workspace.outputs.deploy == 'true'" in deploy["if"]
+    assert "needs.tests.outputs.deploy == 'true'" in deploy["if"]
     assert "inputs.migration_rehearsal != true" in deploy["if"]
 
 

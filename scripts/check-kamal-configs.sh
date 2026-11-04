@@ -27,6 +27,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+docker pull --platform linux/amd64 "$KAMAL_IMAGE"
+image_facts="$(docker image inspect --format '{{.Os}}/{{.Architecture}} {{json .RepoDigests}}' "$KAMAL_IMAGE")"
+[[ "$image_facts" == linux/amd64\ * ]] || {
+  echo "Pinned Kamal image platform mismatch: $image_facts" >&2
+  exit 1
+}
+grep -Fq 'ghcr.io/basecamp/kamal@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625' <<< "$image_facts" || {
+  echo "Pinned Kamal image digest mismatch: $image_facts" >&2
+  exit 1
+}
+echo "KAMAL_IMAGE_PULL=PASS PLATFORM=linux/amd64 DIGEST=sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625"
+
 if ! ssh-keygen -q -t ed25519 -N '' -C kamal-config-validation -f "$ssh_key"; then
   echo "Unable to create a temporary synthetic SSH key for Kamal config validation" >&2
   exit 2
@@ -44,7 +56,7 @@ run_config() {
   local status
   shift
 
-  if docker run --rm --platform linux/amd64 --network none \
+  if docker run --rm --pull=never --platform linux/amd64 --network none \
     "${docker_mount_args[@]}" \
     --workdir /workdir \
     --volume "$ssh_key:/tmp/gpoint-kamal-config-test-key:ro" \

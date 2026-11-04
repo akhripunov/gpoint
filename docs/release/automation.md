@@ -163,10 +163,15 @@ encrypted backup/isolated restore, migration parity, паузу старых con
 platform/revision, production Environment, runtime identity, backup и migration
 gates сохраняются.
 
-Обычный путь содержит четыре jobs: независимые Workspace и Python tests,
-затем Build, затем Kamal Deploy + Runtime Verify. Проверка события и путей
-выполняется шагом Workspace, без отдельного runner/job. PR запускает только
-тесты и не получает production Environment/secrets или GHCR write.
+Основной релизный граф содержит ровно три jobs: `tests` matrix параллельно
+запускает workspace/Prisma/Playwright и Python/PostgreSQL suites, затем `build`
+публикует только нужные неизменяемые образы, затем защищённый `deploy`
+проверяет baseline, применяет только разрешённые миграции при необходимости,
+выполняет Kamal и Runtime Verify. Rollback, backup maintenance и isolated
+migration rehearsal остаются отдельными защищёнными эксплуатационными jobs;
+они не входят в обычный граф Tests → Build → Deploy. Event/path gate выполняется
+в начале Tests. PR запускает тесты и безопасную проверку pinned Kamal image,
+не получает production Environment/secrets или GHCR write.
 
 Разрешённый push в main проходит Tests и Build, после чего тот же workflow
 выполняет protected Deploy и Runtime Verify. Prisma migration SQL допускается
@@ -181,6 +186,26 @@ manifest, применяет точный pending allowlist через `prisma m
 раз, проверяет итоговые heads/checksums и только потом вызывает Kamal. Ошибка
 или неопределённый Apply останавливает Kamal; автоматический downgrade или
 слепой повтор не выполняется. Production allowlist сейчас пуст.
+
+### Release tooling audit (Native First V3)
+
+| Mechanism | Decision | Reason |
+|---|---|---|
+| `native_release_intent.py` | Keep | One fail-closed event/OWNER/path gate and component-scope calculation; GitHub `if` alone cannot enforce the cumulative path and migration rules. Its outputs feed the built-in job graph. |
+| `resolve_native_build_scope.py` | Keep | Reads the latest successful Native GitHub Deployment and its component-source manifest, then compares each component baseline with the exact candidate; needed for selective Build. Unknown baseline fails closed. |
+| `resolve_native_environment_deployment.py` | Keep | Resolves the GitHub-created Environment Deployment for exact-SHA readback; does not create a separate Deployment or status controller. |
+| `prisma_migration_release_plan.py` | Keep | Checks the exact approved migration names/checksums and applied prefix before the one protected Apply; Prisma does not enforce this OWNER allowlist. |
+| `verify-kamal-production-baseline.py` | Keep | Supplements Kamal with six-role source/image digest/ID facts and runtime invariants Kamal does not expose. |
+| `write-kamal-production-manifest.py` | Keep | Writes the verified per-component source facts used by the native GitHub Deployment URL and the next selective Build. |
+| `check-kamal-configs.sh` | Keep | Pulls the pinned Kamal image, verifies linux/amd64 and its digest, then loads all three configs with synthetic credentials and network disabled. It does not read production. |
+| `classify-release-prepush.py` | Keep outside CI | Implements local FAST/FULL preparation rules only; it is not a release router and does not weaken hosted gates. |
+
+No second release controller or duplicate Deployment-status writer is in the
+ordinary Native workflow. The supplemental Docker checks cover exact container
+identity, OCI digest and persistent mounts that Kamal inventory does not expose;
+they follow `kamal app version/details/containers` and do not replace Kamal.
+Recovery, rollback, backup maintenance and first-cutover paths remain because
+they have no verified equivalent in the ordinary app release path.
 
 AGATA migration graph проверяется установленной версией Alembic из
 `services/agata/pyproject.toml`: verifier использует `ScriptDirectory`,
