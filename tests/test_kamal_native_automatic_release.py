@@ -178,6 +178,25 @@ def test_runtime_verify_rechecks_public_and_all_six_kamal_roles_after_deploy():
         assert expected in verify
 
 
+def test_verify_only_component_scope_runs_runtime_verification_without_kamal_replacements():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["deploy"]["steps"]
+    apply = next(step for step in steps
+                 if step.get("name") == "Deploy exact immutable images with stock Kamal")
+    verify = next(step for step in steps
+                  if step.get("name") == "Verify public routes and exact running services")
+    run = apply["run"]
+
+    for component in ("CORE", "AGATA", "MINIAPP"):
+        assert f'if [[ "$DEPLOY_{component}" == true ]]; then' in run
+    assert apply["if"] == "success()"
+    assert "if" not in verify
+    assert "EXPECTED_ROLE_IDENTITIES_B64" in verify["run"]
+    for role in ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot",
+                 "gpoint-agata-api", "gpoint-agata-memory-worker", "gpoint-miniapp-web"):
+        assert role in verify["run"]
+
+
 def test_production_preflight_accepts_historical_version_source_sha_split_but_checks_digest_identity():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     deploy = workflow.split("  deploy:\n", 1)[1].split("  backup_maintenance:\n", 1)[0]

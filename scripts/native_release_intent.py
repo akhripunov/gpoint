@@ -258,8 +258,8 @@ def classify_component_build_plan(repo: Path, candidate: str,
         if not isinstance(source, str) or not EXACT_SHA.fullmatch(source):
             raise ValueError(f"{component} production source SHA is invalid")
     paths_by_baseline: dict[str, set[str]] = {}
-    all_paths: set[str] = set()
-    non_runtime_only = True
+    core_migration_paths: set[str] = set()
+    core_source = component_sources["CORE"]
     for baseline in component_sources.values():
         if baseline == candidate or baseline in paths_by_baseline:
             continue
@@ -284,12 +284,12 @@ def classify_component_build_plan(repo: Path, candidate: str,
             if not tree.startswith(("100644 blob ", "100755 blob ")):
                 raise ValueError("candidate path is not a regular file and needs explicit scope approval")
             changed_components = _component_paths(path)
-            all_paths.add(path)
+            if baseline == core_source and PRISMA_MIGRATION.fullmatch(path):
+                core_migration_paths.add(path)
             if not changed_components:
                 if _known_non_runtime_path(path):
                     continue
                 raise ValueError("unmapped or unsafe candidate path needs explicit scope approval")
-            non_runtime_only = False
             paths.update(changed_components)
         paths_by_baseline[baseline] = paths
 
@@ -297,14 +297,15 @@ def classify_component_build_plan(repo: Path, candidate: str,
         component for component, baseline in component_sources.items()
         if baseline != candidate and component in paths_by_baseline[baseline]
     }
-    if not components:
-        if all(source == candidate for source in component_sources.values()):
-            raise ValueError("candidate equals production baseline; no changed component scope")
-        if not non_runtime_only:
-            raise ValueError("candidate diff contains no changed runtime component")
+    if not components and all(source == candidate for source in component_sources.values()):
+        raise ValueError("candidate equals production baseline; no changed component scope")
+    # Historical runtime changes may appear when a lagging component SHA is
+    # compared with the candidate. Only paths owned by that component count;
+    # a newer component baseline has already absorbed its own changes. Unknown
+    # paths still fail closed above.
     runtime_scope = "+".join(sorted(components)) if components else "NONE"
     build_components = set(components)
-    if any(PRISMA_MIGRATION.fullmatch(path) for path in all_paths):
+    if core_migration_paths:
         build_components.add("CORE")
     return {
         "deploy_scope": runtime_scope,

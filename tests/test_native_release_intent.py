@@ -323,6 +323,44 @@ def test_component_scope_updates_only_exactly_touched_known_components(tmp_path)
         assert result["deploy_miniapp"] is ("MINIAPP" in components)
 
 
+def test_tooling_only_candidate_is_noop_with_staggered_component_baselines(tmp_path):
+    repo, baseline, core_release, inventory = _component_repo(
+        tmp_path, {"apps/api/src/main.ts": "export const version = 2;\n"}
+    )
+    core_version = f"{core_release}-101-1"
+    for role in MODULE.COMPONENT_ROLES["CORE"]:
+        inventory["roles"][role]["source_sha"] = core_release
+        inventory["roles"][role]["version"] = core_version
+        inventory["roles"][role]["name"] = f"{role}-{core_version}"
+
+    workflow = repo / ".github/workflows/gpoint-native-release.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("name: release workflow\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "release tooling only")
+    candidate = _git(repo, "rev-parse", "HEAD")
+
+    result = MODULE.classify_component_scope(repo, candidate, inventory)
+
+    assert result == {
+        "scope": "NONE", "reason": "no_runtime_changes",
+        "deploy_core": False, "deploy_agata": False, "deploy_miniapp": False,
+    }
+    assert baseline != core_release
+    expected = MODULE.expected_runtime_inventory(
+        result["scope"], inventory, candidate, candidate + "-102-1",
+        "sha256:" + "1" * 64, "sha256:" + "2" * 64, "sha256:" + "3" * 64,
+    )
+    assert expected["updatedComponents"] == []
+    assert {
+        role: (row["sourceSha"], row["version"])
+        for role, row in expected["roles"].items()
+    } == {
+        role: (row["source_sha"], row["version"])
+        for role, row in inventory["roles"].items()
+    }
+
+
 def test_build_plan_uses_per_component_sources_and_builds_core_for_prisma_migrations(tmp_path):
     repo, baseline, candidate, _inventory = _component_repo(
         tmp_path,

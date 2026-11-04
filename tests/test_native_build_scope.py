@@ -233,6 +233,36 @@ def test_selective_plan_builds_only_the_component_changed_since_its_baseline(tmp
     assert plan["build_components"] == ["MINIAPP"]
 
 
+def test_selective_plan_returns_verify_only_for_staggered_sources_and_old_migrations(tmp_path):
+    repo, baseline_sha = repo_with_baseline(tmp_path)
+    migration = "packages/db/prisma/migrations/20261103120000_add_flag/migration.sql"
+    migration_sha = commit_file(repo, migration, "ALTER TABLE users ADD COLUMN flag boolean;\n")
+    core_source_sha = commit_file(repo, "apps/api/src/main.ts", "export const version = 2;\n")
+    candidate = commit_file(repo, "docs/release/automation.md", "release tooling only\n")
+    deployments, statuses, runs = deployment_fixture(
+        target_sha=baseline_sha, run_head_sha=baseline_sha
+    )
+    statuses[200][0]["environment_url"] = (
+        "https://gpoint.one/#gpoint-manifest-sha256=" + MANIFEST_SHA
+        + "&gpoint-core-source-sha=" + core_source_sha
+        + "&gpoint-agata-source-sha=" + baseline_sha
+        + "&gpoint-miniapp-source-sha=" + baseline_sha
+    )
+
+    plan = MODULE.resolve_build_plan(
+        repo, candidate, deployments, statuses, runs, repository=REPOSITORY
+    )
+
+    assert plan["status"] == "VERIFIED"
+    assert plan["baseline_sources"] == {
+        "CORE": core_source_sha, "AGATA": baseline_sha, "MINIAPP": baseline_sha,
+    }
+    assert plan["deploy_scope"] == "NONE"
+    assert plan["build_components"] == []
+    assert plan["reason"] == "no_runtime_changes"
+    assert migration_sha != baseline_sha
+
+
 def test_missing_deployment_history_is_fail_closed_for_component_scope(tmp_path):
     repo, baseline_sha = repo_with_baseline(tmp_path)
     candidate = commit_file(repo, "apps/api/src/main.ts", "export {};\n")
