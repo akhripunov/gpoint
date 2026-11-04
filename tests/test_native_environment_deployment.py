@@ -1,4 +1,5 @@
 from pathlib import Path
+import sys
 
 import importlib.util
 import pytest
@@ -34,6 +35,33 @@ def test_resolves_only_exact_in_progress_deployment_for_current_run_attempt():
         [deployment()], {101: [status()]}, candidate_sha=SHA, repository=REPOSITORY,
         run_id=RUN, run_attempt=ATTEMPT)
     assert result == 101
+
+
+def test_main_resolves_exact_active_deploy_job_url_for_this_attempt(monkeypatch, capsys):
+    job_url = f"https://github.com/{REPOSITORY}/actions/runs/{RUN}/job/126479089691"
+    monkeypatch.setattr(sys, "argv", [
+        "resolve_native_environment_deployment.py", "--sha", SHA,
+        "--repository", REPOSITORY, "--run-id", RUN, "--run-attempt", ATTEMPT,
+    ])
+
+    def gh_json(*args):
+        route = args[-1]
+        if route.startswith(f"repos/{REPOSITORY}/deployments?"):
+            return [deployment() | {"production_environment": False}]
+        if route == f"repos/{REPOSITORY}/deployments/101/statuses?per_page=100":
+            return [status(url=job_url)]
+        if route == f"repos/{REPOSITORY}/actions/runs/{RUN}/attempts/{ATTEMPT}/jobs?per_page=100":
+            return [{"id": 126479089691, "name": "Kamal production Deploy and Verify",
+                     "status": "in_progress", "html_url": job_url}]
+        raise AssertionError(f"unexpected GitHub API route: {route}")
+
+    monkeypatch.setattr(resolver, "_gh_json", gh_json)
+
+    assert resolver.main() == 0
+    assert capsys.readouterr().out.strip() == "deployment_id=101"
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    deploy_permissions = workflow.split("  deploy:\n", 1)[1].split("    env:\n", 1)[0]
+    assert "      actions: read" in deploy_permissions
 
 
 def test_resolves_protected_production_environment_when_api_flag_is_false():
