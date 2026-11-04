@@ -66,9 +66,8 @@ def test_app_and_release_files_can_ship_together_in_one_authorized_main_push():
         ) == "DEPLOY"
 
 
-def test_any_schema_or_migration_change_blocks_ordinary_release():
+def test_non_prisma_or_unclassified_migration_paths_block_ordinary_release():
     for path in (
-        "packages/db/prisma/schema.prisma",
         "services/agata/migrations/versions/0013_new.py",
         "packages/db/prisma/migrations/README.md",
     ):
@@ -81,6 +80,17 @@ def test_any_schema_or_migration_change_blocks_ordinary_release():
         ) == "BLOCK"
 
 
+def test_prisma_schema_change_reaches_required_hosted_prisma_gates():
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main",
+        changed_paths={"packages/db/prisma/schema.prisma"},
+    ) == "DEPLOY"
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main",
+        changed_paths={"apps/api/src/main.ts", "packages/db/prisma/schema.prisma"},
+    ) == "DEPLOY"
+
+
 def test_approved_prisma_migration_source_paths_enter_the_existing_protected_deploy():
     migration = "packages/db/prisma/migrations/20261103090000_add_index/migration.sql"
     assert MODULE.classify_push(
@@ -90,10 +100,6 @@ def test_approved_prisma_migration_source_paths_enter_the_existing_protected_dep
         event_name="push", ref="refs/heads/main",
         changed_paths={migration, "packages/db/prisma/schema.prisma"},
     ) == "DEPLOY"
-    assert MODULE.classify_push(
-        event_name="push", ref="refs/heads/main",
-        changed_paths={"packages/db/prisma/schema.prisma"},
-    ) == "BLOCK"
 
 
 def test_agata_migration_and_unknown_schema_paths_remain_blocked_from_prisma_apply():
@@ -116,7 +122,7 @@ def test_unknown_paths_block_instead_of_becoming_a_deploy_or_silent_prepare():
     ) == "BLOCK"
 
 
-def test_blocked_main_path_set_fails_the_classifier_job(monkeypatch, capsys):
+def test_prisma_schema_change_is_deployed_only_after_classifier_passes(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", [
         "native_release_intent.py", "--event", "push", "--ref", "refs/heads/main",
         "--sha", "a" * 40, "--before", "b" * 40,
@@ -126,8 +132,8 @@ def test_blocked_main_path_set_fails_the_classifier_job(monkeypatch, capsys):
     monkeypatch.setattr(MODULE, "changed_paths", lambda *_args, **_kwargs: {
         "apps/api/src/main.ts", "packages/db/prisma/schema.prisma",
     })
-    assert MODULE.main() == 2
-    assert "mode=BLOCK" in capsys.readouterr().out
+    assert MODULE.main() == 0
+    assert "mode=DEPLOY" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(("actor", "triggering_actor"), [
