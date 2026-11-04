@@ -1,0 +1,41 @@
+service: gpoint-eros-pilot
+image: akhripunov/gpoint-eros-pilot
+primary_role: engine
+
+servers:
+  engine:
+    hosts:
+      - <%= ENV.fetch("GPOINT_PRODUCTION_HOST") %>
+    proxy: false
+    options:
+      network: gpoint_eros_data
+      env-file:
+        - /opt/gpoint/env/eros-engine.env
+      volume: /opt/gpoint/releases/<%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>/source/services/eros-engine/eros-production-model-config.toml:/etc/eros-engine/model_config.toml:ro
+      memory: 384m
+      memory-swap: 384m
+      cpus: 0.50
+      pids-limit: 256
+      read-only: true
+      tmpfs: /tmp
+      cap-drop: ALL
+      security-opt: no-new-privileges:true
+
+registry:
+  server: ghcr.io
+  username: akhripunov
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+ssh:
+  user: root
+  keys:
+    - <%= ENV.fetch("GPOINT_SSH_KEY") %>
+  keys_only: true
+  config: true
+
+builder:
+  arch: amd64
+
+retain_containers: 2
+minimum_version: 2.12.0

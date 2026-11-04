@@ -69,6 +69,7 @@ COMPONENT_ROLES = {
     "AGATA": ("gpoint-agata-api", "gpoint-agata-memory-worker"),
     "MINIAPP": ("gpoint-miniapp-web",),
 }
+EROS_ROLE = ("gpoint-eros-engine",)
 ROLE_REPOSITORIES = {
     "gpoint-core-api": "ghcr.io/akhripunov/gpoint-runtime",
     "gpoint-core-worker": "ghcr.io/akhripunov/gpoint-runtime",
@@ -76,6 +77,7 @@ ROLE_REPOSITORIES = {
     "gpoint-agata-api": "ghcr.io/akhripunov/gpoint-agata-runtime",
     "gpoint-agata-memory-worker": "ghcr.io/akhripunov/gpoint-agata-runtime",
     "gpoint-miniapp-web": "ghcr.io/akhripunov/gpoint-miniapp",
+    "gpoint-eros-engine": "ghcr.io/akhripunov/gpoint-eros",
 }
 EXACT_SHA = re.compile(r"^[0-9a-f]{40}$")
 EXACT_VERSION = re.compile(r"^[0-9a-f]{40}-[0-9]+-[0-9]+$")
@@ -182,10 +184,12 @@ def _validate_role_inventory(inventory: dict) -> dict[str, dict[str, str]]:
     if not isinstance(inventory, dict) or not isinstance(inventory.get("roles"), dict):
         raise ValueError("verified role inventory is missing")
     roles = inventory["roles"]
-    if set(roles) != set(ROLE_REPOSITORIES):
+    if set(roles) not in (set(ROLE_REPOSITORIES), set(ROLE_REPOSITORIES) - {"gpoint-eros-engine"}):
         raise ValueError("verified role inventory has an unexpected role set")
     component_identities: dict[str, tuple[str, str, str]] = {}
     for role, repository in ROLE_REPOSITORIES.items():
+        if role not in roles:
+            continue
         row = roles[role]
         if not isinstance(row, dict):
             raise ValueError("verified role inventory is malformed")
@@ -215,6 +219,8 @@ def _component_paths(path: str) -> set[str]:
         return {"MINIAPP"}
     if path.startswith("services/agata/"):
         return {"AGATA"}
+    if path.startswith(("services/eros-engine/", "config/deploy.eros")):
+        return {"EROS"}
     if path in {"infra/production/Gpoint.Dockerfile", "infra/production/nginx-miniapp.conf"}:
         return {"CORE", "MINIAPP"} if path.endswith("Gpoint.Dockerfile") else {"MINIAPP"}
     if path in APP_ROOT_FILES or path in {"pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.base.json"}:
@@ -253,7 +259,7 @@ def classify_component_build_plan(repo: Path, candidate: str,
     if not EXACT_SHA.fullmatch(candidate or ""):
         raise ValueError("candidate SHA is invalid")
     if (not isinstance(component_sources, dict)
-            or set(component_sources) != set(COMPONENT_ROLES)):
+            or set(component_sources) not in (set(COMPONENT_ROLES), set(COMPONENT_ROLES) | {"EROS"})):
         raise ValueError("component production source inventory is incomplete")
     for component, source in component_sources.items():
         if not isinstance(source, str) or not EXACT_SHA.fullmatch(source):
@@ -321,31 +327,43 @@ def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dic
     component_sources = {
         component: roles[component_roles[0]]["source_sha"]
         for component, component_roles in COMPONENT_ROLES.items()
+        if component_roles[0] in roles
     }
+    if "gpoint-eros-engine" in roles:
+        component_sources["EROS"] = roles["gpoint-eros-engine"]["source_sha"]
+    else:
+        component_sources["EROS"] = roles["gpoint-core-api"]["source_sha"]
+        component_sources.pop("EROS")
     plan = classify_component_build_plan(repo, candidate, component_sources)
     components = set(str(plan["deploy_scope"]).split("+")) - {"NONE"}
-    return {
+    result = {
         "scope": str(plan["deploy_scope"]),
         "reason": str(plan["reason"]),
         "deploy_core": "CORE" in components,
         "deploy_agata": "AGATA" in components,
         "deploy_miniapp": "MINIAPP" in components,
     }
+    if "gpoint-eros-engine" in roles:
+        result["deploy_eros"] = "EROS" in components
+    return result
 
 
 def expected_runtime_inventory(scope: str, inventory: dict, candidate: str, version: str,
-                               app_digest: str, agata_digest: str, miniapp_digest: str) -> dict:
+                               app_digest: str, agata_digest: str, miniapp_digest: str,
+                               *, eros_digest: str = "") -> dict:
     """Bind every verified role to either the untouched baseline or exact candidate artifact."""
     roles = _validate_role_inventory(inventory)
     scope_components = (set() if scope == "NONE" else
                         set(scope.split("+")) if isinstance(scope, str) else set())
-    if (scope != "NONE" and (not scope_components or not scope_components.issubset(COMPONENT_ROLES)
+    valid_components = set(COMPONENT_ROLES) | {"EROS"}
+    if (scope != "NONE" and (not scope_components or not scope_components.issubset(valid_components)
                               or "+".join(sorted(scope_components)) != scope)
             or not EXACT_SHA.fullmatch(candidate or "")
             or not EXACT_VERSION.fullmatch(version or "") or not version.startswith(candidate + "-")):
         raise ValueError("candidate component runtime plan is malformed")
     updated = scope_components
-    digests = {"CORE": app_digest, "AGATA": agata_digest, "MINIAPP": miniapp_digest}
+    digests = {"CORE": app_digest, "AGATA": agata_digest, "MINIAPP": miniapp_digest,
+               "EROS": eros_digest}
     for component, value in digests.items():
         if component in updated and not EXACT_DIGEST.fullmatch(value or ""):
             raise ValueError("updated candidate runtime image digest is invalid")
@@ -356,9 +374,13 @@ def expected_runtime_inventory(scope: str, inventory: dict, candidate: str, vers
         "CORE": (f"{ROLE_REPOSITORIES['gpoint-core-api']}@{app_digest}" if app_digest else None),
         "AGATA": (f"{ROLE_REPOSITORIES['gpoint-agata-api']}@{agata_digest}" if agata_digest else None),
         "MINIAPP": (f"{ROLE_REPOSITORIES['gpoint-miniapp-web']}@{miniapp_digest}" if miniapp_digest else None),
+        "EROS": (f"{ROLE_REPOSITORIES['gpoint-eros-engine']}@{eros_digest}" if eros_digest else None),
     }
-    for component, component_roles in COMPONENT_ROLES.items():
+    all_component_roles = {**COMPONENT_ROLES, "EROS": EROS_ROLE}
+    for component, component_roles in all_component_roles.items():
         for role in component_roles:
+            if role not in roles:
+                continue
             baseline = roles[role]
             inventory_out[role] = ({"version": version, "sourceSha": candidate,
                                     "repositoryDigest": group_repo_digests[component],

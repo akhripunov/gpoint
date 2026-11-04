@@ -264,11 +264,11 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA engine TO gpoint_wo
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA engine TO gpoint_worker_test;
 SQL
 compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 <<'SQL'
-INSERT INTO "User" (id,"telegramUserId","telegramUsername","firstName","createdAt","updatedAt") VALUES ('eros_test_user',900000001,'eros_test_dialogue','Synthetic',now(),now());
-INSERT INTO "Creator" (id,"displayName",slug,"createdAt") VALUES ('eros_test_creator','Synthetic Eros Persona','eros-test-persona',now());
+INSERT INTO "User" (id,"telegramUserId","telegramUsername","firstName","createdAt","updatedAt") VALUES ('10000000-0000-4000-8000-000000000001',900000001,'eros_test_dialogue','Synthetic',now(),now());
+INSERT INTO "Creator" (id,"displayName",slug,"createdAt") VALUES ('20000000-0000-4000-8000-000000000002','Synthetic Eros Persona','eros-test-persona',now());
 SQL
 compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c \
-  "INSERT INTO \"CreatorProfile\" (id,\"creatorId\",status,bio,\"tagsJson\",\"erosGenomeId\") VALUES ('eros_test_profile','eros_test_creator','APPROVED','Local synthetic test persona','[]','$genome_id'::uuid);"
+  "INSERT INTO \"CreatorProfile\" (id,\"creatorId\",status,bio,\"tagsJson\",\"erosGenomeId\") VALUES ('eros_test_profile','20000000-0000-4000-8000-000000000002','APPROVED','Local synthetic test persona','[]','$genome_id'::uuid);"
 postgres_id=$(compose ps -q postgres)
 api_image=$(compose images -q gpoint-api)
   docker_local run --name "$integration_container" --label "com.docker.compose.project=$project" --network "container:$postgres_id" \
@@ -337,13 +337,13 @@ compose restart eros
 compose up -d --wait --wait-timeout 90 eros
 compose exec -w /workspace/apps/api -T gpoint-api node --import tsx /workspace/services/eros-engine/local-test-e2e.mjs --history-only
 compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT 'EROS_CHAT_MESSAGES=' || count(*) FROM engine.chat_messages; SELECT 'EROS_DURABLE_MEMORY_ROWS=' || count(*) FROM engine.companion_memories WHERE category IS NOT NULL AND content LIKE 'SYNTH_%';"
-if compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c 'DELETE FROM "User" WHERE id = '\''eros_test_user'\''' >"$tmp/user-delete.out" 2>&1; then
+if compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c 'DELETE FROM "User" WHERE id = '\''10000000-0000-4000-8000-000000000001'\''' >"$tmp/user-delete.out" 2>&1; then
   echo LOCAL_E2E_MAPPING_ERASURE_GUARD=FAIL user_delete_unexpectedly_succeeded >&2
   exit 1
 fi
 grep -q 'ErosRelationshipMapping_userId_fkey' "$tmp/user-delete.out" || { echo LOCAL_E2E_MAPPING_ERASURE_GUARD=FAIL user_delete_block_reason_unexpected >&2; exit 1; }
 compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c 'DELETE FROM "CreatorProfile" WHERE id = '\''eros_test_profile'\''' >/dev/null
-if compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c 'DELETE FROM "Creator" WHERE id = '\''eros_test_creator'\''' >"$tmp/creator-delete.out" 2>&1; then
+if compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c 'DELETE FROM "Creator" WHERE id = '\''20000000-0000-4000-8000-000000000002'\''' >"$tmp/creator-delete.out" 2>&1; then
   echo LOCAL_E2E_MAPPING_ERASURE_GUARD=FAIL creator_delete_unexpectedly_succeeded >&2
   exit 1
 fi

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { createErosEngineClient, ErosAdapterError, erosIdentityFor } from '../../apps/api/src/eros-adapter.ts';
 
 const api = 'http://127.0.0.1:3000';
-const creator = 'eros_test_creator';
+const creator = '20000000-0000-4000-8000-000000000002';
 const control = 'http://127.0.0.1:18080/control/state';
 
 async function request(url, { method = 'GET', token, body } = {}) {
@@ -34,7 +34,7 @@ async function authenticate() {
     body: { initData: 'synthetic local E2E', devTelegramUserId: '900000001' },
   });
   assert.equal(response.status, 201);
-  assert.equal(response.data?.user?.id, 'eros_test_user');
+  assert.equal(response.data?.user?.id, '10000000-0000-4000-8000-000000000001');
   assert.equal(response.data?.user?.telegramUsername, 'eros_test_dialogue');
   return response.data.accessToken;
 }
@@ -46,7 +46,7 @@ async function readHistory(token) {
 async function assertStockApiUserIsolation() {
   const client = createErosEngineClient(process.env);
   assert.ok(client, 'Eros client is configured in the isolated API container');
-  const ownerIdentity = erosIdentityFor({ userId: 'eros_test_user', creatorId: creator });
+  const ownerIdentity = erosIdentityFor({ userId: '10000000-0000-4000-8000-000000000001', creatorId: creator });
   const foreignUserId = randomUUID();
   const [ownerSessions, foreignSessions] = await Promise.all([
     client.sessions(ownerIdentity.userId),

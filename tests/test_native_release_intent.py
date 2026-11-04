@@ -323,6 +323,36 @@ def test_component_scope_updates_only_exactly_touched_known_components(tmp_path)
         assert result["deploy_miniapp"] is ("MINIAPP" in components)
 
 
+def test_eros_engine_source_is_an_independent_runtime_component(tmp_path):
+    repo, baseline, candidate, inventory = _component_repo(
+        tmp_path, {"services/eros-engine/build-stock-image.sh": "#!/bin/sh\n"}
+    )
+    repository = "ghcr.io/akhripunov/gpoint-eros"
+    inventory["roles"]["gpoint-eros-engine"] = {
+        "name": f"gpoint-eros-engine-{baseline}-100-1",
+        "version": f"{baseline}-100-1",
+        "source_sha": baseline,
+        "image_id": "sha256:" + "4" * 64,
+        "repo_digest": repository + "@sha256:" + "5" * 64,
+    }
+
+    result = MODULE.classify_component_scope(repo, candidate, inventory)
+
+    assert result == {
+        "scope": "EROS", "reason": "exact_component_diff",
+        "deploy_core": False, "deploy_agata": False, "deploy_miniapp": False,
+        "deploy_eros": True,
+    }
+    expected = MODULE.expected_runtime_inventory(
+        "EROS", inventory, candidate, candidate + "-101-1", "", "", "",
+        eros_digest="sha256:" + "6" * 64,
+    )
+    assert expected["updatedComponents"] == ["EROS"]
+    assert expected["roles"]["gpoint-eros-engine"]["sourceSha"] == candidate
+    assert expected["roles"]["gpoint-eros-engine"]["repositoryDigest"] == repository + "@sha256:" + "6" * 64
+    assert expected["roles"]["gpoint-core-api"]["sourceSha"] == baseline
+
+
 def test_tooling_only_candidate_is_noop_with_staggered_component_baselines(tmp_path):
     repo, baseline, core_release, inventory = _component_repo(
         tmp_path, {"apps/api/src/main.ts": "export const version = 2;\n"}

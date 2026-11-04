@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createCipheriv, hkdfSync, randomBytes, randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { PrismaClient } from '@prisma/client';
+import { erosIdentityFor } from '../src/eros-adapter.js';
 
 const databaseUrl = process.env.DATABASE_URL;
 const parsedDatabaseUrl = databaseUrl ? new URL(databaseUrl) : undefined;
@@ -113,12 +114,18 @@ test('GPOINT claim round-trips encrypted Eros job and completes it with a single
   const prior = {
     token: process.env.GPOINT_AGATA_WORKER_TOKEN,
     enabled: process.env.EROS_ENABLED,
+    dataMode: process.env.EROS_DATA_MODE,
+    testUsers: process.env.EROS_TEST_USER_IDS,
+    testCreators: process.env.EROS_TEST_CREATOR_IDS,
     tenant: process.env.EROS_WORKER_TENANT_ID,
     agataTenant: process.env.AGATA_TENANT_ID,
     signing: process.env.EROS_WORKER_SIGNING_SECRET,
   };
   process.env.GPOINT_AGATA_WORKER_TOKEN = `local-test-${randomUUID()}`;
   process.env.EROS_ENABLED = 'true';
+  process.env.EROS_DATA_MODE = 'synthetic';
+  process.env.EROS_TEST_USER_IDS = '10000000-0000-4000-8000-000000000001';
+  process.env.EROS_TEST_CREATOR_IDS = '20000000-0000-4000-8000-000000000002';
   process.env.EROS_WORKER_TENANT_ID = tenantId;
   process.env.AGATA_TENANT_ID = tenantId;
   process.env.EROS_WORKER_SIGNING_SECRET = 'synthetic-only-signing-secret-32-bytes-minimum';
@@ -129,8 +136,12 @@ test('GPOINT claim round-trips encrypted Eros job and completes it with a single
   ]);
   const id = randomUUID();
   const requestId = randomUUID();
-  const userId = randomUUID();
-  const creatorId = randomUUID();
+  const mappedIdentity = erosIdentityFor({
+    userId: process.env.EROS_TEST_USER_IDS,
+    creatorId: process.env.EROS_TEST_CREATOR_IDS,
+  });
+  const userId = mappedIdentity.userId;
+  const creatorId = mappedIdentity.creatorId;
   const sessionId = randomUUID();
   const instanceId = randomUUID();
   const request = {
@@ -213,6 +224,9 @@ test('GPOINT claim round-trips encrypted Eros job and completes it with a single
     await prisma.$disconnect();
     if (prior.token === undefined) delete process.env.GPOINT_AGATA_WORKER_TOKEN; else process.env.GPOINT_AGATA_WORKER_TOKEN = prior.token;
     if (prior.enabled === undefined) delete process.env.EROS_ENABLED; else process.env.EROS_ENABLED = prior.enabled;
+    if (prior.dataMode === undefined) delete process.env.EROS_DATA_MODE; else process.env.EROS_DATA_MODE = prior.dataMode;
+    if (prior.testUsers === undefined) delete process.env.EROS_TEST_USER_IDS; else process.env.EROS_TEST_USER_IDS = prior.testUsers;
+    if (prior.testCreators === undefined) delete process.env.EROS_TEST_CREATOR_IDS; else process.env.EROS_TEST_CREATOR_IDS = prior.testCreators;
     if (prior.tenant === undefined) delete process.env.EROS_WORKER_TENANT_ID; else process.env.EROS_WORKER_TENANT_ID = prior.tenant;
     if (prior.agataTenant === undefined) delete process.env.AGATA_TENANT_ID; else process.env.AGATA_TENANT_ID = prior.agataTenant;
     if (prior.signing === undefined) delete process.env.EROS_WORKER_SIGNING_SECRET; else process.env.EROS_WORKER_SIGNING_SECRET = prior.signing;

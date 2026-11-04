@@ -122,7 +122,7 @@ export function ModelChat({ slug, back }: { slug: string; back: () => void }) {
         window.dispatchEvent(new Event("gpoint:age-assurance-required"));
         void queryClient.invalidateQueries({ queryKey: ["messages-state"] });
       }
-      if (error instanceof ApiError && error.code === "AI_UNAVAILABLE") {
+      if (error instanceof ApiError && (error.code === "AI_UNAVAILABLE" || error.code === "EROS_UNAVAILABLE")) {
         setProviderUnavailable(true);
         setPending((all) => all.map((item) => item.id === variables.id ? { ...item, status: "waiting" } : item));
         void queryClient.invalidateQueries({ queryKey: ["creator-messages", creatorId] });
@@ -141,7 +141,7 @@ export function ModelChat({ slug, back }: { slug: string; back: () => void }) {
   useEffect(() => {
     if (state.data?.ageAssuranceRequired) window.dispatchEvent(new Event("gpoint:age-assurance-required"));
   }, [state.data?.ageAssuranceRequired]);
-  const needsConsent = !!state.data && (!state.data.chatHistory || !state.data.onboardingCompleted || state.data.disclosureRequired);
+  const needsConsent = !!state.data && (!state.data.chatHistory || (state.data.memoryConsentRequired === true && !state.data.longTermMemory) || !state.data.onboardingCompleted || state.data.disclosureRequired);
   useVisibleMessageReads(creatorId, historyRoot, displayItems, Boolean(state.data?.enabled && !needsConsent && !ageBlocked && !history.isLoading && !history.isError));
   const canSend = Boolean(creatorId && state.data?.enabled && !needsConsent && !ageBlocked && !aiUnavailable && !send.isPending);
 

@@ -241,7 +241,10 @@ jobs:
           tests/test_gpoint_release_trigger_graph.py
       - name: Run isolated PostgreSQL 16 migration and integration suites
         if: matrix.suite == 'python'
-        run: unset DATABASE_URL SHADOW_DATABASE_URL; python services/gsales/tests/run_postgres.py
+        run: |
+          unset DATABASE_URL SHADOW_DATABASE_URL
+          python tests/integration/gpoint-agata-state-migration-docker.py --image pgvector/pgvector:0.8.6-pg16
+          python services/gsales/tests/run_postgres.py
 
   build:
     name: Build and publish immutable images

@@ -55,15 +55,12 @@ alter its installed configuration.
   patches is used in the pinned stock image.
 - Stock Eros's relationship archive endpoint soft-deletes sessions and removes
   some relationship memory, but deliberately retains transcript history.
-  GPoint currently has no Eros user-data erasure path. The new GPoint
-  relationship mapping uses restrictive user/creator foreign keys so deleting
-  either parent cannot silently discard the only Eros instance pointer. This
-  intentionally blocks GPoint deletion while a mapping exists; it does not
-  erase Eros data. OWNER has accepted a strictly synthetic, single-user VPS
-  pilot in a dedicated disposable Eros database. The missing complete erasure
-  adapter is a hard gate before any real-user access; the pilot must contain no
-  real user data and must be removable by deleting the isolated database.
-  The Mac-hosted Ollama model stays on the Mac.
+  OWNER has withdrawn a stock full-erasure API as a ME-36 blocker. Do not fork
+  or patch Eros to add it. The first protected pilot remains strictly synthetic
+  and uses a dedicated disposable Eros database; no real user data is allowed.
+  Other consent, age assurance, disclosure, access-isolation, backup and
+  recovery requirements remain active. The Mac-hosted Ollama model stays on
+  the Mac.
 - Stock `classify_session` performs model/extraction and embedding before an
   unconditional memory upsert; archive deletes relationship memory. A delayed
   write crossing archive is a plausible data-resurrection risk, not a proven
@@ -72,7 +69,9 @@ alter its installed configuration.
   retention after archive itself is expected behavior.
 - The pilot allowlist is synthetic and contains exactly one test user and one
   test creator. No normal user is routed to Eros, and no AutoWrite/memory-policy
-  change is made here.
+  change is made here. The ordinary Native First V3 + Kamal 2 release owns
+  component selection; the legacy Compose and release-controller procedures
+  in this historical file are not deployment instructions.
 
 ## Local verification boundary
 

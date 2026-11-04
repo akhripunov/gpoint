@@ -30,6 +30,9 @@ model User {
   codexDeviceAuthorizations CodexDeviceAuthorization[]
   erosRelationships ErosRelationshipMapping[]
   erosAssistantMessageStates ErosAssistantMessageState[]
+  chatConsents GpointChatConsent[]
+  ageAssurances GpointAgeAssurance[]
+  aiDisclosureReceipts GpointAiDisclosureReceipt[]
 }
 model UserPreference {
   id String @id @default(cuid())
@@ -138,6 +141,127 @@ model ErosAssistantMessageState {
   creator Creator @relation(fields: [creatorId], references: [id], onDelete: Cascade)
   @@id([userId, creatorId, sessionId, messageId])
   @@index([userId, creatorId, sessionId, readAt])
+}
+
+// GPoint owns consent and disclosure policy; Eros owns chat bodies and memories.
+model GpointChatPolicyProfile {
+  id String @id @default(cuid())
+  sourceAgataId String? @unique
+  sourceTenantId String
+  jurisdiction String
+  market String
+  version Int
+  status String
+  effectiveFrom DateTime @db.Timestamptz(6)
+  effectiveTo DateTime? @db.Timestamptz(6)
+  rules Json
+  createdAt DateTime @default(now())
+  receipts GpointAiDisclosureReceipt[]
+  @@unique([sourceTenantId, jurisdiction, market, version], map: "GpointChatPolicyProfile_tenant_jurisdiction_market_version_key")
+  @@index([sourceTenantId, jurisdiction, market, status, effectiveFrom], map: "GpointChatPolicyProfile_active_idx")
+}
+model GpointChatConsent {
+  id String @id @default(cuid())
+  sourceAgataId String? @unique
+  sourceTenantId String
+  userId String
+  purpose String
+  grantedAt DateTime @db.Timestamptz(6)
+  revokedAt DateTime? @db.Timestamptz(6)
+  policyVersion String
+  createdAt DateTime @default(now())
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  @@index([userId, purpose, grantedAt], map: "GpointChatConsent_user_purpose_granted_idx")
+}
+model GpointAgeAssurance {
+  id String @id @default(cuid())
+  sourceAgataId String? @unique
+  sourceTenantId String
+  userId String
+  ageBand String
+  status String
+  method String
+  jurisdiction String
+  verifiedAt DateTime? @db.Timestamptz(6)
+  assertedAt DateTime? @db.Timestamptz(6)
+  expiresAt DateTime? @db.Timestamptz(6)
+  version Int
+  createdAt DateTime @default(now())
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  @@unique([userId, jurisdiction, version], map: "GpointAgeAssurance_user_jurisdiction_version_key")
+  @@index([userId, version], map: "GpointAgeAssurance_user_version_idx")
+}
+model GpointAiDisclosureReceipt {
+  id String @id @default(cuid())
+  sourceAgataId String? @unique
+  sourceTenantId String
+  userId String
+  policyProfileId String
+  policyVersion Int
+  channel String
+  receiptKey String
+  displayedAt DateTime @db.Timestamptz(6)
+  memoryOptIn Boolean
+  memoryOptInAt DateTime? @db.Timestamptz(6)
+  createdAt DateTime @default(now())
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  policy GpointChatPolicyProfile @relation(fields: [policyProfileId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  @@index([userId, policyProfileId, policyVersion, displayedAt], map: "GpointAiDisclosureReceipt_user_policy_displayed_idx")
+}
+model GpointLegacyConversationFence {
+  id String @id @default(cuid())
+  sourceAgataConversationId String @unique
+  sourceTenantId String
+  userId String?
+  creatorId String?
+  sourceUserId String
+  sourceCharacterId String
+  messageCount Int
+  memoryCount Int
+  firstMessageAt DateTime? @db.Timestamptz(6)
+  lastMessageAt DateTime? @db.Timestamptz(6)
+  consentWasActive Boolean
+  migratedAt DateTime @default(now())
+  @@index([userId, creatorId], map: "GpointLegacyConversationFence_user_creator_idx")
+}
+model GpointLegacyConversationArchive {
+  id String @id @default(cuid())
+  sourceAgataConversationId String @unique
+  sourceTenantId String
+  userId String?
+  creatorId String?
+  sourceRelationshipId String
+  sourceScope String
+  sourceScenarioId String?
+  sourceSystem String
+  sourceExternalId String?
+  startedAt DateTime @db.Timestamptz(6)
+  closedAt DateTime? @db.Timestamptz(6)
+  languageCode String
+  createdAt DateTime @default(now())
+  @@index([userId, creatorId, startedAt], map: "GpointLegacyConversationArchive_user_creator_started_idx")
+}
+model GpointLegacyMessageArchive {
+  id String @id @default(cuid())
+  sourceAgataMessageId String @unique
+  sourceAgataConversationId String
+  sourceTenantId String
+  userId String?
+  creatorId String?
+  idempotencyKey String
+  role String
+  contentCiphertext Bytes?
+  contentNonce Bytes?
+  contentKeyVersion String?
+  systemMessageType String?
+  systemAction String?
+  occurredAt DateTime @db.Timestamptz(6)
+  deletedAt DateTime? @db.Timestamptz(6)
+  incomingReadAt DateTime? @db.Timestamptz(6)
+  languageCode String
+  createdAt DateTime @default(now())
+  @@index([sourceAgataConversationId, occurredAt], map: "GpointLegacyMessageArchive_conversation_time_idx")
+  @@index([userId, creatorId, occurredAt], map: "GpointLegacyMessageArchive_user_creator_time_idx")
 }
 
 model CreatorOwner {

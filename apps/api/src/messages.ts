@@ -14,6 +14,7 @@ import { resolveSession } from './session.js';
 import { connectedTelegramChannelAvatarUrls } from './telegram-channel-avatars.js';
 import { isAllowedCodexMessageRequest, isCodexOwnerAllowed, parseCodexOwnerUserIds, resolveCodexMessageSession } from './codex-chat-auth.js';
 import { decodeErosCursor, encodeErosCursor, ErosAdapterError, createErosEngineClient, erosIdentityFor, erosTestCreatorIds, isErosChatAllowed, isSyntheticErosPair, prepareErosRelationship, markErosAssistantMessagesRead, mergeErosInboxItems, erosInboxLastMessageSummary, unreadErosAssistantCounts, resolveErosRelationshipInstanceId, recordErosAssistantMessage, syncErosAssistantMessageStates, erosAssistantReadAtById } from './eros-adapter.js';
+import { isGpointChatPermitted, loadGpointAgeAssurance, loadGpointChatState, recordGpointChatConsent, recordGpointSelfAttestation, revokeGpointChatConsent } from './gpoint-chat-store.js';
 
 const prisma = new PrismaClient();
 const sendLimiter = new FixedWindowRateLimiter(30, 60_000);
@@ -46,12 +47,41 @@ async function prepareErosChat(userId: string, creator: { id: string; displayNam
   });
 }
 
-async function canRouteErosChat(userId: string, creator: { id: string; slug: string; profile?: { status?: string | null } | null }, agata: ReturnType<typeof agataOrUnavailable>): Promise<boolean> {
+async function canRouteErosChat(userId: string, creator: { id: string; slug: string; profile?: { status?: string | null } | null }): Promise<boolean> {
   if (!isErosChatAllowed(userId, creator.id)) return false;
   const user = await prisma.user.findUnique({ where: { id: userId }, select: { telegramUsername: true } });
   if (!user || !isSyntheticErosPair(user, { slug: creator.slug, profileStatus: creator.profile?.status ?? '' })) return false;
-  const priorAgataHistory = await agata.listMessages(userId, creator.id, { limit: 1 });
+  if (gpointChatPolicyPilot(userId, creator.id)) {
+    const state = await loadGpointChatState(prisma, userId);
+    if (!isGpointChatPermitted(state)) return false;
+    const legacy = await prisma.gpointLegacyConversationFence.findFirst({ where: { userId, creatorId: creator.id }, select: { id: true } });
+    return !legacy;
+  }
+  const priorAgataHistory = await agataOrUnavailable().listMessages(userId, creator.id, { limit: 1 });
   return priorAgataHistory.items.length === 0;
+}
+
+function gpointChatPolicyPilot(userId: string, creatorId: string): boolean {
+  return Boolean(process.env.GPOINT_CHAT_POLICY_TENANT_ID) && isErosChatAllowed(userId, creatorId);
+}
+
+function gpointChatPolicyCreator(userId: string): string | null {
+  return erosTestCreatorIds().find((creatorId) => gpointChatPolicyPilot(userId, creatorId)) ?? null;
+}
+
+async function sendErosMessage(userId: string, creatorId: string, creator: {
+  id: string; displayName: string;
+  profile?: { bio?: string | null; tagsJson?: string | null; erosGenomeId?: string | null } | null;
+}, clientMessageId: string, text: string) {
+  const { identity, session } = await prepareErosChat(userId, creator);
+  const eros = createErosEngineClient();
+  if (!eros) throw new ErosAdapterError('eros_disabled');
+  const response = await eros.sendMessage(identity.userId, session.sessionId, clientMessageId, text, {
+    creatorId: identity.creatorId, instanceId: identity.relationshipId,
+  });
+  await recordErosAssistantMessage(prisma, userId, creatorId, session.sessionId, response.id);
+  return { status: 'completed' as const, userMessageId: clientMessageId,
+    response: { id: response.id, role: 'assistant' as const, text: response.text, occurredAt: new Date().toISOString(), incomingReadAt: null } };
 }
 
 async function findErosSession(userId: string, creatorId: string): Promise<{ userId: string; sessionId: string } | null> {
@@ -67,25 +97,39 @@ async function findErosSession(userId: string, creatorId: string): Promise<{ use
   return session ? { userId: identity.userId, sessionId: session.sessionId } : null;
 }
 
-async function localErosConversations(userId: string, agata: ReturnType<typeof agataOrUnavailable>) {
+async function localErosConversations(userId: string, agata?: ReturnType<typeof agataOrUnavailable>) {
   const creatorIds = erosTestCreatorIds().filter((creatorId) => isErosChatAllowed(userId, creatorId));
   if (!creatorIds.length) return [];
   const user = await prisma.user.findUnique({ where: { id: userId }, select: { telegramUsername: true } });
   if (!user) return [];
-  const consent = await agata.chatState(userId);
-  assertMessageAgeAssurance(consent);
-  if (!consent.chatHistory || consent.disclosureRequired) return [];
+  const consent = gpointChatPolicyPilot(userId, creatorIds[0])
+    ? await loadGpointChatState(prisma, userId)
+    : await (agata ?? agataOrUnavailable()).chatState(userId);
+  if ('ageAssuranceRequired' in consent && consent.ageAssuranceRequired) return [];
+  if (gpointChatPolicyPilot(userId, creatorIds[0])
+    ? !isGpointChatPermitted(consent as Awaited<ReturnType<typeof loadGpointChatState>>)
+    : !('chatHistory' in consent) || !consent.chatHistory || consent.disclosureRequired) return [];
   const client = createErosEngineClient();
   if (!client) return [];
   const mappedUser = erosIdentityFor({ userId, creatorId: creatorIds[0] }).userId;
   const sessions = await client.sessions(mappedUser);
   const creators = (await prisma.creator.findMany({ where: { id: { in: creatorIds }, profile: { status: 'APPROVED' } }, include: CREATOR_INCLUDE }))
     .filter((creator) => isSyntheticErosPair(user, { slug: creator.slug, profileStatus: creator.profile?.status ?? '' }));
-  const noPriorAgataHistory = await Promise.all(creators.map(async (creator) => {
-    const history = await agata.listMessages(userId, creator.id, { limit: 1 });
-    return history.items.length === 0 ? creator : null;
-  }));
-  const routedCreators = noPriorAgataHistory.filter((creator) => creator !== null);
+  let routedCreators: typeof creators;
+  if (gpointChatPolicyPilot(userId, creatorIds[0])) {
+    const legacy = await prisma.gpointLegacyConversationFence.findMany({
+      where: { userId, creatorId: { in: creators.map((creator) => creator.id) } },
+      select: { creatorId: true },
+    });
+    const fenced = new Set(legacy.map((row) => row.creatorId));
+    routedCreators = creators.filter((creator) => !fenced.has(creator.id));
+  } else {
+    const noPriorAgataHistory = await Promise.all(creators.map(async (creator) => {
+      const history = await (agata ?? agataOrUnavailable()).listMessages(userId, creator.id, { limit: 1 });
+      return history.items.length === 0 ? creator : null;
+    }));
+    routedCreators = noPriorAgataHistory.filter((creator) => creator !== null);
+  }
   const relationshipMappings = await prisma.erosRelationshipMapping.findMany({
     where: { userId, creatorId: { in: routedCreators.map((creator) => creator.id) } },
     select: { creatorId: true, instanceId: true },
@@ -137,8 +181,14 @@ function mapErosError(error: unknown): HttpException {
   return new HttpException({ code: 'EROS_UNAVAILABLE' }, 503);
 }
 
-async function requireErosConsent(agata: ReturnType<typeof agataOrUnavailable>, userId: string): Promise<void> {
-  const current = await agata.chatState(userId);
+async function requireErosConsent(agata: ReturnType<typeof agataOrUnavailable> | undefined, userId: string, creatorId: string): Promise<void> {
+  if (gpointChatPolicyPilot(userId, creatorId)) {
+    const state = await loadGpointChatState(prisma, userId);
+    if (state.ageAssuranceRequired) throw new HttpException({ code: 'AGE_ASSURANCE_REQUIRED' }, 403);
+    if (!isGpointChatPermitted(state)) throw new HttpException({ code: 'CHAT_CONSENT_REQUIRED' }, 403);
+    return;
+  }
+  const current = await (agata ?? agataOrUnavailable()).chatState(userId);
   assertMessageAgeAssurance(current);
   if (!current.chatHistory || current.disclosureRequired) throw new HttpException({ code: 'CHAT_CONSENT_REQUIRED' }, 403);
 }
@@ -274,6 +324,10 @@ export class MessagesController {
   @Get('unread')
   async unread(@Headers() headers: Record<string, string | undefined>) {
     const userId = authenticatedUser(headers);
+    if (gpointChatPolicyCreator(userId)) {
+      const conversations = await localErosConversations(userId);
+      return publicUnreadSummary(conversations.map((item) => ({ gpointCharacterId: item.creator.id, unreadCount: item.unreadCount })), new Set(conversations.map((item) => item.creator.id)));
+    }
     const agata = createAgataIntegration();
     if (!agata) return { totalUnread: 0, items: [] };
     try {
@@ -295,17 +349,17 @@ export class MessagesController {
     const ids = validateReadBatch(body, true);
     try {
       const creator = await findApprovedCreator(creatorId);
-      const agata = agataOrUnavailable();
+      const agata = gpointChatPolicyPilot(userId, creatorId) ? undefined : agataOrUnavailable();
       if (isErosChatAllowed(userId, creatorId)) {
-        await requireErosConsent(agata, userId);
-        if (await canRouteErosChat(userId, creator, agata)) {
+        await requireErosConsent(undefined, userId, creatorId);
+        if (await canRouteErosChat(userId, creator)) {
           const session = await findErosSession(userId, creatorId);
           if (!session) return { acknowledgedMessageIds: [] };
           const acknowledgedMessageIds = await markErosAssistantMessagesRead(prisma, userId, creatorId, session.sessionId, ids);
           return { acknowledgedMessageIds };
         }
       }
-      return await agataOrUnavailable().markMessagesRead(userId, creatorId, validateReadBatch(body));
+      return await (agata ?? agataOrUnavailable()).markMessagesRead(userId, creatorId, validateReadBatch(body));
     } catch (error) {
       if (error instanceof HttpException) throw error;
       if (error instanceof ErosAdapterError) throw mapErosError(error);
@@ -316,6 +370,7 @@ export class MessagesController {
   @Get('state')
   async state(@Headers() headers: Record<string, string | undefined>) {
     const userId = authenticatedUser(headers);
+    if (gpointChatPolicyCreator(userId)) return loadGpointChatState(prisma, userId);
     const agata = createAgataIntegration();
     if (!agata) return { enabled: false, chatHistory: false, longTermMemory: false, disclosureRequired: true, onboardingCompleted: false, disclosureVersion: null, onboardingCompletedAt: null, memoryOptIn: false, memoryOptInAt: null, aiAvailable: false };
     try {
@@ -325,8 +380,16 @@ export class MessagesController {
   }
 
   @Post('consent')
-  async consent(@Headers() headers: Record<string, string | undefined>, @Body() body: { longTermMemory?: unknown; disclosureVersion?: unknown }) {
+  async consent(@Headers() headers: Record<string, string | undefined>, @Body() body: { chatHistory?: unknown; longTermMemory?: unknown; disclosureVersion?: unknown }) {
     const userId = authenticatedUser(headers);
+    if (gpointChatPolicyCreator(userId)) {
+      // Older Mini Apps send only disclosureVersion after the same explicit consent screen.
+      return recordGpointChatConsent(prisma, userId, {
+        chatHistory: body?.chatHistory === undefined ? true : body.chatHistory,
+        longTermMemory: body?.longTermMemory === undefined ? true : body.longTermMemory,
+        disclosureVersion: body?.disclosureVersion,
+      });
+    }
     if (body?.longTermMemory !== undefined && typeof body.longTermMemory !== 'boolean') throw new BadRequestException({ code: 'invalid_consent' });
     if (body?.disclosureVersion !== undefined && (!Number.isSafeInteger(body.disclosureVersion) || Number(body.disclosureVersion) < 1)) {
       throw new BadRequestException({ code: 'invalid_disclosure_version' });
@@ -356,9 +419,21 @@ export class MessagesController {
     } catch (error) { throw mapAgataError(error); }
   }
 
+  @Post('consent/revoke')
+  async revokeConsent(@Headers() headers: Record<string, string | undefined>, @Body() body: { purpose?: unknown }) {
+    const userId = authenticatedUser(headers);
+    if (!gpointChatPolicyCreator(userId)) throw new HttpException({ code: 'CHAT_UNAVAILABLE' }, 403);
+    if (body?.purpose !== 'chat_history' && body?.purpose !== 'long_term_memory') throw new BadRequestException({ code: 'invalid_consent_purpose' });
+    return revokeGpointChatConsent(prisma, userId, body.purpose);
+  }
+
   @Get()
   async inbox(@Headers() headers: Record<string, string | undefined>, @Query('cursor') cursor?: string) {
     const userId = authenticatedUser(headers);
+    if (gpointChatPolicyCreator(userId)) {
+      const items = await localErosConversations(userId);
+      return { items, nextCursor: null };
+    }
     const agata = agataOrUnavailable();
     try {
       const page = await agata.listConversations(userId, { limit: 30, ...(cursor ? { cursor } : {}) });
@@ -389,11 +464,11 @@ export class MessagesController {
     const userId = await authenticatedMessageUser(headers, creatorId, 'read', request?.method ?? 'GET', request?.url ?? `/messages/creator/${encodeURIComponent(creatorId)}`);
     const limit = limitValue === undefined ? 50 : Number(limitValue);
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new BadRequestException({ code: 'invalid_limit' });
-    const [creator, agata] = [await findApprovedCreator(creatorId), agataOrUnavailable()];
+    const creator = await findApprovedCreator(creatorId);
     try {
       if (isErosChatAllowed(userId, creatorId)) {
-        await requireErosConsent(agata, userId);
-        if (await canRouteErosChat(userId, creator, agata)) {
+        await requireErosConsent(undefined, userId, creatorId);
+        if (await canRouteErosChat(userId, creator)) {
           const session = await findErosSession(userId, creatorId);
           const dto = await publicCreator(creator);
           if (!session) return { creator: dto, items: [], nextCursor: null };
@@ -418,6 +493,7 @@ export class MessagesController {
           };
         }
       }
+      const agata = agataOrUnavailable();
       const page = await agata.listMessages(userId, creatorId, { limit, ...(cursor ? { cursor } : {}) });
       const dto = await publicCreator(creator);
       await recordChatEvent(userId, creatorId, 'CHAT_OPEN', 'chat-open-' + creatorId + '-' + Math.floor(Date.now() / (30 * 60_000)));
@@ -440,25 +516,18 @@ export class MessagesController {
     const creator = await findApprovedCreator(creatorId);
     const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, languageCode: true } });
     if (!user) throw new UnauthorizedException();
-    const agata = agataOrUnavailable();
     try {
+      if (gpointChatPolicyPilot(userId, creatorId)) {
+        await requireErosConsent(undefined, userId, creatorId);
+        if (!await canRouteErosChat(userId, creator)) throw new HttpException({ code: 'CHAT_UNAVAILABLE' }, 403);
+        return await sendErosMessage(userId, creatorId, creator, body.clientMessageId, text);
+      }
+      const agata = agataOrUnavailable();
       const current = await agata.chatState(userId);
       assertMessageAgeAssurance(current);
       if (!current.chatHistory || current.disclosureRequired) throw new HttpException({ code: 'CHAT_CONSENT_REQUIRED' }, 403);
-      if (await canRouteErosChat(userId, creator, agata)) {
-        const { identity, session } = await prepareErosChat(userId, creator);
-        const eros = createErosEngineClient();
-        if (!eros) throw new ErosAdapterError('eros_disabled');
-        const response = await eros.sendMessage(identity.userId, session.sessionId, body.clientMessageId, text, {
-          creatorId: identity.creatorId,
-          instanceId: identity.relationshipId,
-        });
-        await recordErosAssistantMessage(prisma, userId, creatorId, session.sessionId, response.id);
-        return {
-          status: 'completed' as const,
-          userMessageId: body.clientMessageId,
-          response: { id: response.id, role: 'assistant' as const, text: response.text, occurredAt: new Date().toISOString(), incomingReadAt: null },
-        };
+      if (await canRouteErosChat(userId, creator)) {
+        return await sendErosMessage(userId, creatorId, creator, body.clientMessageId, text);
       }
       const consent: AgataConsentSnapshot = {
         chat_history: current.chatHistory,
@@ -511,6 +580,7 @@ export class AgeAssuranceController {
   @Get('state')
   async state(@Headers() headers: Record<string, string | undefined>) {
     const userId = authenticatedUser(headers);
+    if (gpointChatPolicyCreator(userId)) return loadGpointAgeAssurance(prisma, userId);
     const agata = agataOrUnavailable();
     try { return await agata.ageAssurance(userId); }
     catch (error) { throw mapAgataError(error); }
@@ -523,6 +593,7 @@ export class AgeAssuranceController {
   ) {
     const userId = authenticatedUser(headers);
     if (body?.confirmed18Plus !== true) throw new BadRequestException({ code: 'explicit_age_confirmation_required' });
+    if (gpointChatPolicyCreator(userId)) return recordGpointSelfAttestation(prisma, userId, body.confirmed18Plus);
     const agata = agataOrUnavailable();
     try {
       await agata.selfAttestAge(userId);

@@ -39,6 +39,41 @@ def test_tenant_bindings_are_trusted_runtime_config_not_source_constants():
     with patch.dict(os.environ, {**config, "GPOINT_AGATA_TENANT_ID": "invalid"}):
         with pytest.raises(worker.FatalConfigurationError, match="worker_tenant_binding_invalid"):
             worker.configured_tenant_bindings()
+
+
+def test_eros_gateway_mode_is_selected_only_by_its_dedicated_url():
+    eros_tenant = "a1a46146-4b6e-4b03-8332-0661ba4d46f4"
+    custom_agata = {
+        "GPOINT_AGATA_WORKER_URL": "https://gpoint.example/api/agata-worker",
+        "GPOINT_AGATA_WORKER_TOKEN": "point-private",
+        "GPOINT_AGATA_TENANT_ID": ENV["GPOINT_AGATA_TENANT_ID"],
+    }
+    with patch.dict(os.environ, custom_agata, clear=True):
+        target = worker.configured_targets()["GPOINT"]
+        assert target[0] == custom_agata["GPOINT_AGATA_WORKER_URL"]
+        assert worker.configured_tenant_bindings() == {"GPOINT": ENV["GPOINT_AGATA_TENANT_ID"]}
+        assert worker._validated_queue_status("GPOINT", {
+            "lane": "GPOINT", "source_id": "agata-worker-queue-status-v1:gpoint",
+            "pending_jobs": 0, "running_jobs": 0, "snapshot_at": "2026-11-04T00:00:00Z",
+        })["queue_snapshot_source_id"] == "agata-worker-queue-status-v1:gpoint"
+        with pytest.raises(worker.GatewayResponseError, match="worker_claim_target_mismatch"):
+            worker.validate_target_claim("GPOINT", {"id": "job", "leaseToken": "lease"})
+
+    eros = {
+        "GPOINT_EROS_WORKER_URL": "https://gpoint.one/api/gpoint-worker",
+        "GPOINT_EROS_WORKER_TOKEN": "eros-private",
+        "GPOINT_EROS_TENANT_ID": eros_tenant,
+    }
+    with patch.dict(os.environ, eros, clear=True):
+        assert worker.configured_targets()["GPOINT"] == (eros["GPOINT_EROS_WORKER_URL"], "eros-private")
+        assert worker.configured_tenant_bindings() == {"GPOINT": eros_tenant}
+        assert worker._validated_queue_status("GPOINT", {
+            "lane": "GPOINT", "source_id": "gpoint-eros-worker-queue-status-v1:gpoint",
+            "pending_jobs": 0, "running_jobs": 0, "snapshot_at": "2026-11-04T00:00:00Z",
+        })["queue_snapshot_source_id"] == "gpoint-eros-worker-queue-status-v1:gpoint"
+        worker.validate_target_claim("GPOINT", {
+            "id": "job", "leaseToken": "lease", "target": "GPOINT", "tenant_id": eros_tenant,
+        })
     with patch.dict(os.environ, {**config, "GSALES_AGATA_TENANT_ID": isolated_point}):
         with pytest.raises(worker.FatalConfigurationError, match="worker_tenants_must_be_distinct"):
             worker.configured_tenant_bindings()
@@ -387,3 +422,14 @@ def test_orphan_lab_slot_lock_prevents_startup_from_marking_live_job_ambiguous(t
     assert worker._active_lab_slot_job_ids(paths) == {"lab-active-1"}
     lock.close()
     assert worker._active_lab_slot_job_ids(paths) == set()
+
+
+def test_reject_claim_for_eros_includes_required_purpose():
+    claim = {"id": "job-1", "leaseToken": "lease-1", "purpose": "eros_chat_completion"}
+    sent = []
+    with patch.object(worker, "target_request", side_effect=lambda lane, action, body: sent.append((lane, action, body))):
+        worker.reject_claim("GPOINT", claim, "slot_start_failed")
+    assert sent == [("GPOINT", "fail", {
+        "job_id": "job-1", "lease_token": "lease-1", "error_code": "slot_start_failed",
+        "purpose": "eros_chat_completion",
+    })]

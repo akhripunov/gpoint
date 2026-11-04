@@ -45,16 +45,28 @@ function csvIds(value: string | undefined): Set<string> {
   return new Set((value ?? '').split(',').map((item) => item.trim()).filter(Boolean));
 }
 
+function exactSingleUuid(value: string | undefined): string | null {
+  const values = (value ?? '').split(',').map((item) => item.trim());
+  if (values.length !== 1 || !UUID_PATTERN.test(values[0])) return null;
+  return values[0].toLowerCase();
+}
+
+export function exactErosPilotPair(env: NodeJS.ProcessEnv = process.env): { userId: string; creatorId: string } | null {
+  if (env.EROS_ENABLED !== 'true' || env.EROS_DATA_MODE !== 'synthetic') return null;
+  const production = env.NODE_ENV === 'production';
+  if (production && env.EROS_PRODUCTION_TEST_MODE !== 'true') return null;
+  if (!production && !['development', 'test'].includes(env.NODE_ENV ?? '')) return null;
+  const userId = exactSingleUuid(production ? env.EROS_PRODUCTION_TEST_USER_IDS : env.EROS_TEST_USER_IDS);
+  const creatorId = exactSingleUuid(production ? env.EROS_PRODUCTION_TEST_CREATOR_IDS : env.EROS_TEST_CREATOR_IDS);
+  if (!userId || !creatorId) return null;
+  if (!production && !isLocalSandboxDatabaseUrl(env.DATABASE_URL)) return null;
+  return { userId, creatorId };
+}
+
 /** Eros is available only to exact synthetic identity allowlists; production requires a separate pilot gate. */
 export function isErosChatAllowed(userId: string, creatorId: string, env: NodeJS.ProcessEnv = process.env): boolean {
-  const productionPilot = env.NODE_ENV === 'production' && env.EROS_ENABLED === 'true' &&
-    env.EROS_PRODUCTION_TEST_MODE === 'true' && env.EROS_DATA_MODE === 'synthetic' &&
-    csvIds(env.EROS_PRODUCTION_TEST_USER_IDS).has(userId) &&
-    csvIds(env.EROS_PRODUCTION_TEST_CREATOR_IDS).has(creatorId);
-  const localSynthetic = ['development', 'test'].includes(env.NODE_ENV ?? '') && env.EROS_ENABLED === 'true' &&
-    env.EROS_DATA_MODE === 'synthetic' && isLocalSandboxDatabaseUrl(env.DATABASE_URL) &&
-    csvIds(env.EROS_TEST_USER_IDS).has(userId) && csvIds(env.EROS_TEST_CREATOR_IDS).has(creatorId);
-  return productionPilot || localSynthetic;
+  const pair = exactErosPilotPair(env);
+  return Boolean(pair && pair.userId === userId.toLowerCase() && pair.creatorId === creatorId.toLowerCase());
 }
 
 export function isSyntheticErosPair(
@@ -67,7 +79,8 @@ export function isSyntheticErosPair(
 
 export function erosTestCreatorIds(env: NodeJS.ProcessEnv = process.env): string[] {
   const allowlist = env.NODE_ENV === 'production' ? env.EROS_PRODUCTION_TEST_CREATOR_IDS : env.EROS_TEST_CREATOR_IDS;
-  return [...csvIds(allowlist)].slice(0, 20);
+  const exact = exactSingleUuid(allowlist);
+  return exact ? [exact] : [];
 }
 
 function isLocalSandboxDatabaseUrl(value: string | undefined): boolean {

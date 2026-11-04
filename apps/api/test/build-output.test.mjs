@@ -12,3 +12,11 @@ test('production API build includes the gateway network policy helper', async ()
   const { ErosWorkerGatewayController } = await import('../dist/apps/api/src/eros-worker-gateway.js');
   assert.equal(typeof ErosWorkerGatewayController, 'function');
 });
+
+test('production API build includes the GPoint chat policy state machine', async () => {
+  const compiled = new URL('../dist/apps/api/src/gpoint-chat-state.js', import.meta.url);
+  assert.deepEqual(await readFile(compiled), await readFile(new URL('../src/gpoint-chat-state.js', import.meta.url)));
+  const { buildGpointMessagesState, isGpointChatPermitted } = await import(compiled.href);
+  assert.equal(typeof buildGpointMessagesState, 'function');
+  assert.equal(typeof isGpointChatPermitted, 'function');
+});

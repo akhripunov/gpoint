@@ -3,7 +3,8 @@ import { BadRequestException, Body, Controller, Get, Headers, Header, HttpExcept
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { PrismaClient, type Prisma } from '@prisma/client';
 import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, deriveBridgeInferenceIdentity, parseBridgeRequest, parseErosEmbeddingRequest, type ParsedErosBridgeRequest } from './eros-worker-contract.js';
-import { isAllowedOllamaEmbeddingEndpoint } from './eros-network-policy.js';
+import { isAllowedOllamaEmbeddingEndpoint, isDisposableSyntheticLocalTest } from './eros-network-policy.js';
+import { erosIdentityFor, exactErosPilotPair } from './eros-adapter.js';
 
 const prisma = new PrismaClient();
 const REPLY_LIMIT = 4_096;
@@ -167,6 +168,8 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 
 /** Claim Eros bridge work on the existing authenticated GPOINT Product Worker contract. */
 export async function claimErosForGpointWorker(): Promise<{ job: Record<string, unknown> } | null> {
+  const pair = exactErosPilotPair();
+  if (!pair) throw new HttpException({ code: 'EROS_PILOT_ALLOWLIST_INVALID' }, 503);
   const tenantId = workerTenant();
   const row = await withWorkerTenant(async (tx) => {
     await tx.$queryRawUnsafe(
@@ -199,6 +202,16 @@ export async function claimErosForGpointWorker(): Promise<{ job: Record<string, 
     return rows[0];
   });
   if (!row) return null;
+  const expectedIdentity = erosIdentityFor(pair);
+  if (row.user_id !== expectedIdentity.userId || row.creator_id !== expectedIdentity.creatorId) {
+    await withWorkerTenant((tx) => tx.$executeRawUnsafe(
+      `UPDATE engine.eros_inference_jobs SET status = 'FAILED', error_code = 'synthetic_allowlist_mismatch',
+         lease_token = NULL, lease_expires_at = NULL, updated_at = now()
+       WHERE id = $1::uuid AND tenant_id = $2 AND status = 'RUNNING' AND lease_token = $3::uuid`,
+      row.id, tenantId, row.lease_token,
+    ));
+    throw new HttpException({ code: 'EROS_PILOT_ALLOWLIST_MISMATCH' }, 503);
+  }
   const identity: ErosQueueIdentity = {
     id: row.id, request_id: row.request_id, tenant_id: row.tenant_id, user_id: row.user_id,
     creator_id: row.creator_id, session_id: row.session_id, instance_id: row.instance_id,
@@ -504,7 +517,7 @@ export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestro
     try { parsed = parseErosEmbeddingRequest(body); }
     catch { throw new BadRequestException({ code: 'EROS_EMBEDDING_REQUEST_INVALID' }); }
     const endpoint = process.env.EROS_OLLAMA_EMBEDDING_URL ?? '';
-    const localMode = process.env.EROS_WORKER_LOCAL_TEST === 'true';
+    const localMode = isDisposableSyntheticLocalTest();
     if (!isAllowedOllamaEmbeddingEndpoint(endpoint, { localTest: localMode })) {
       throw new HttpException({ code: 'EROS_EMBEDDINGS_UNAVAILABLE' }, 503);
     }
