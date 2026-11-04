@@ -292,7 +292,7 @@ def test_kamal_network_hook_joins_only_allowed_core_and_agata_roles():
     assert 'GPOINT_KAMAL_ROOT_ROUTE_BOOTSTRAP' in hook
     assert 'DEFERRED_FOR_FIRST_CUTOVER' in hook
     assert hook.index('docker exec "$id" nginx -t') < hook.index('GPOINT_KAMAL_ROOT_ROUTE_BOOTSTRAP')
-    assert 'api_container="gpoint-core-api-${version}"' in hook
+    assert 'api_container="gpoint-core-api-${core_version}"' in hook
     assert "resolved_ip" in hook and "test \"$resolved_ip\" = \"$api_ip\"" in hook
     assert "nginx -t" in hook
     assert 'if [[ "$service:$role" == "gpoint-agata:memory-worker" ]]' in hook
@@ -305,6 +305,66 @@ def test_kamal_hooks_parse_with_the_shell_available_in_the_pinned_cli(name):
     assert hook.read_text().startswith("#!/bin/sh\n")
     result = subprocess.run(["sh", "-n", str(hook)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("wrong_sha,wrong_dns,expected", [(False, False, 0), (True, False, 1), (False, True, 1)])
+def test_miniapp_post_boot_checks_independent_core_identity(tmp_path, wrong_sha, wrong_dns, expected):
+    candidate, core_sha = "a" * 40, "b" * 40
+    core_version = core_sha + "-100-1"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ("key", "known_hosts"):
+        (tmp_path / name).write_text("synthetic fixture\n")
+    (bin_dir / "ssh").write_text(textwrap.dedent('''\
+        #!/usr/bin/env python3
+        import subprocess, sys
+        args = sys.argv[1:]
+        host = next(i for i, arg in enumerate(args) if arg.startswith('root@'))
+        raise SystemExit(subprocess.run(args[host + 1:]).returncode)
+    '''))
+    (bin_dir / "docker").write_text(textwrap.dedent('''\
+        #!/usr/bin/env python3
+        import json, os, sys
+        args = sys.argv[1:]
+        with open(os.environ['CALLS'], 'a') as log:
+            log.write(json.dumps(args) + '\\n')
+        if args[:2] == ['network', 'inspect']:
+            raise SystemExit(0)
+        if args[:1] == ['inspect']:
+            template, target = args[2], args[3]
+            core = target.startswith('gpoint-core-api-')
+            if core and target != 'gpoint-core-api-' + os.environ['GPOINT_KAMAL_CORE_API_VERSION']:
+                raise SystemExit('Core must retain its independent version')
+            if template == '{{.Id}}': print('miniapp-id')
+            elif template == '{{.State.Running}}': print('true')
+            elif 'org.opencontainers.image.revision' in template:
+                print(('c' * 40 if os.environ['WRONG_SHA'] == 'true' else os.environ['GPOINT_KAMAL_CORE_API_SOURCE_SHA'])
+                      if core else os.environ['GPOINT_APP_SOURCE_SHA'])
+            elif 'NetworkSettings.Networks' in template:
+                print('172.20.0.8' if core else json.dumps({'gpoint_app': {'Aliases': []}}))
+            else: raise SystemExit('unexpected inspect: ' + template)
+            raise SystemExit(0)
+        if args[:1] == ['exec'] and args[2:] == ['nginx', '-t']:
+            raise SystemExit(0)
+        if args[:1] == ['exec'] and args[2:] == ['sh', '-ec', 'getent hosts api']:
+            print(('172.20.0.9' if os.environ['WRONG_DNS'] == 'true' else '172.20.0.8') + ' api')
+            raise SystemExit(0)
+        raise SystemExit('unexpected Docker call: ' + repr(args))
+    '''))
+    for path in bin_dir.iterdir():
+        path.chmod(0o755)
+    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}",
+               GPOINT_KAMAL_SERVICE="gpoint-miniapp", KAMAL_ROLES="web", KAMAL_HOSTS="127.0.0.1",
+               KAMAL_VERSION=candidate + "-200-1", GPOINT_COMMIT_SHA=candidate,
+               GPOINT_APP_SOURCE_SHA=candidate, GPOINT_KAMAL_CORE_API_VERSION=core_version,
+               GPOINT_KAMAL_CORE_API_SOURCE_SHA=core_sha, GPOINT_SSH_KEY=str(tmp_path / "key"),
+               GPOINT_KNOWN_HOSTS_FILE=str(tmp_path / "known_hosts"), CALLS=str(tmp_path / "calls"),
+               WRONG_SHA=str(wrong_sha).lower(), WRONG_DNS=str(wrong_dns).lower())
+    result = subprocess.run(["sh", str(ROOT / ".kamal/hooks/post-app-boot")], env=env,
+                            text=True, capture_output=True)
+    assert (result.returncode == 0) == (expected == 0), result.stderr
+    if expected == 0:
+        assert 'GPOINT_MINIAPP_API_NETWORK=PASS' in result.stdout
 
 
 def test_ssh_heredoc_commands_keep_stdin_available():

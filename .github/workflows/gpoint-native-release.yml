@@ -709,7 +709,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import json, os, re, sys
+          import base64, json, os, re, sys
           from pathlib import Path
           sys.path.insert(0, str(Path.cwd() / "scripts"))
           from native_release_intent import COMPONENT_ROLES, classify_component_scope, expected_runtime_inventory_b64
@@ -745,7 +745,7 @@ jobs:
                    "AGATA": ("AGATA_DIGEST", "agata_digest", "ghcr.io/akhripunov/gpoint-agata-runtime"),
                    "MINIAPP": ("MINIAPP_DIGEST", "miniapp_digest", "ghcr.io/akhripunov/gpoint-miniapp")}
           for component, (env_name, output_name, repository) in names.items():
-              digest = os.environ[env_name] if component in builds else baseline["roles"][COMPONENT_ROLES[component][0]]["repo_digest"].removeprefix(repository + "@")
+              digest = os.environ[env_name] if component in scope_components else baseline["roles"][COMPONENT_ROLES[component][0]]["repo_digest"].removeprefix(repository + "@")
               if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
                   raise SystemExit("effective runtime component digest is invalid")
               effective[output_name] = digest
@@ -759,6 +759,10 @@ jobs:
           print("deploy_agata=" + str(scope["deploy_agata"]).lower())
           print("deploy_miniapp=" + str(scope["deploy_miniapp"]).lower())
           print("expected_role_identities_b64=" + expected)
+          print("migration_app_digest=" + (os.environ["APP_DIGEST"] if "CORE" in builds else effective["app_digest"]))
+          core_api = json.loads(base64.b64decode(expected))["roles"]["gpoint-core-api"]
+          print("core_api_version=" + core_api["version"])
+          print("core_api_source_sha=" + core_api["sourceSha"])
           for output, digest in effective.items():
               print(output + "=" + digest)
           print("build_components=" + json.dumps(sorted(builds), separators=(",", ":")))
@@ -767,9 +771,9 @@ jobs:
         if: steps.component_plan.outputs.build_components != '[]'
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APP_DIGEST: ${{ steps.component_plan.outputs.app_digest }}
-          AGATA_DIGEST: ${{ steps.component_plan.outputs.agata_digest }}
-          MINIAPP_DIGEST: ${{ steps.component_plan.outputs.miniapp_digest }}
+          APP_DIGEST: ${{ needs.build.outputs.app_digest }}
+          AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
+          MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
           BUILD_COMPONENTS: ${{ steps.component_plan.outputs.build_components }}
         run: |
           set -euo pipefail
@@ -896,7 +900,7 @@ jobs:
         id: migration_apply
         env:
           APPLY: ${{ steps.migration_plan.outputs.apply }}
-          APP_IMAGE: ghcr.io/akhripunov/gpoint-runtime@${{ steps.component_plan.outputs.app_digest }}
+          APP_IMAGE: ghcr.io/akhripunov/gpoint-runtime@${{ steps.component_plan.outputs.migration_app_digest }}
           PENDING_MIGRATIONS: ${{ steps.migration_plan.outputs.pending_prisma_migrations }}
           PENDING_CHECKSUMS: ${{ steps.migration_plan.outputs.pending_prisma_checksums }}
           BASELINE_PRISMA_HEAD: ${{ steps.migration_baseline.outputs.prisma_head }}
@@ -1025,6 +1029,8 @@ jobs:
           DEPLOY_AGATA: ${{ steps.component_plan.outputs.deploy_agata }}
           DEPLOY_MINIAPP: ${{ steps.component_plan.outputs.deploy_miniapp }}
           DEPLOY_SCOPE: ${{ steps.component_plan.outputs.scope }}
+          GPOINT_KAMAL_CORE_API_VERSION: ${{ steps.component_plan.outputs.core_api_version }}
+          GPOINT_KAMAL_CORE_API_SOURCE_SHA: ${{ steps.component_plan.outputs.core_api_source_sha }}
         run: |
           set -euo pipefail
           for value in "$DEPLOY_CORE" "$DEPLOY_AGATA" "$DEPLOY_MINIAPP"; do
@@ -1036,6 +1042,7 @@ jobs:
               --workdir /workdir --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA --env GPOINT_PRODUCTION_HOST \
               --env GPOINT_SSH_KEY --env GPOINT_KNOWN_HOSTS_FILE --env KAMAL_REGISTRY_PASSWORD \
               --env GPOINT_KAMAL_EXPECTED_DIGEST --env GPOINT_KAMAL_SERVICE --env KAMAL_ROLES \
+              --env GPOINT_KAMAL_CORE_API_VERSION --env GPOINT_KAMAL_CORE_API_SOURCE_SHA \
               ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 "$@"
           }
           verify_single_running_role() {

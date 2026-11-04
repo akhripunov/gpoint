@@ -133,20 +133,25 @@ REMOTE
       echo 'GPOINT_MINIAPP_API_NETWORK=DEFERRED_FOR_FIRST_CUTOVER'
       continue
     fi
+    core_version="${GPOINT_KAMAL_CORE_API_VERSION:-$version}"
+    core_source_sha="${GPOINT_KAMAL_CORE_API_SOURCE_SHA:-$app_source_sha}"
+    printf '%s\n' "$core_source_sha" | grep -Eq '^[0-9a-f]{40}$'
+    printf '%s\n' "$core_version" | grep -Eq '^[0-9a-f]{40}-[0-9]+-[0-9]+$'
+    case "$core_version" in "$core_source_sha"-*) ;; *) echo 'Core API version does not match its source SHA' >&2; exit 1 ;; esac
     ssh -F /dev/null -T -i "$ssh_key" \
       -o BatchMode=yes \
       -o IdentitiesOnly=yes \
       -o StrictHostKeyChecking=yes \
       -o UserKnownHostsFile="$known_hosts" \
-      "root@$host" bash -s -- "$service" "$role" "$version" "$candidate" "$app_source_sha" <<'REMOTE_MINIAPP'
+      "root@$host" bash -s -- "$service" "$role" "$version" "$candidate" "$app_source_sha" "$core_version" "$core_source_sha" <<'REMOTE_MINIAPP'
 set -euo pipefail
-service="$1"; role="$2"; version="$3"; candidate="$4"; app_source_sha="$5"
+service="$1"; role="$2"; version="$3"; candidate="$4"; app_source_sha="$5"; core_version="$6"; core_source_sha="$7"
 container="${service}-${role}-${version}"
-api_container="gpoint-core-api-${version}"
+api_container="gpoint-core-api-${core_version}"
 [[ "$container" =~ ^[A-Za-z0-9._-]+$ && "$candidate" =~ ^[0-9a-f]{40}$ && "$app_source_sha" =~ ^[0-9a-f]{40}$ ]]
 id="$(docker inspect --format '{{.Id}}' "$container")"
 test "$(docker inspect --format '{{.State.Running}}' "$api_container")" = true
-test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$api_container")" = "$app_source_sha"
+test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$api_container")" = "$core_source_sha"
 api_ip="$(docker inspect --format '{{with index .NetworkSettings.Networks "gpoint_app"}}{{.IPAddress}}{{end}}' "$api_container")"
 test -n "$api_ip"
 resolved_ip="$(docker exec "$id" sh -ec 'getent hosts api' | awk 'NR == 1 {print $1}')"

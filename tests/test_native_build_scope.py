@@ -123,7 +123,7 @@ def test_successful_native_environment_record_requires_successful_canonical_run(
         )
 
 
-def test_cli_reads_native_success_after_failed_job_without_loading_older_history(monkeypatch, capsys):
+def test_cli_uses_latest_failed_native_attempt_as_unverified_baseline(monkeypatch, capsys):
     import json
     from types import SimpleNamespace
 
@@ -143,14 +143,13 @@ def test_cli_reads_native_success_after_failed_job_without_loading_older_history
         if "/201/" in route:
             return [dict(statuses[200][0], state="failure", log_url=
                          f"https://github.com/{REPOSITORY}/actions/runs/101/job/301")]
-        assert "/200/" in route, "must stop before older history"
-        return statuses[200]
+        raise AssertionError("must stop before older history")
 
     monkeypatch.setattr(MODULE, "_gh_json", gh_json)
     def gh_run(args, **kwargs):
-        assert args[-1].endswith(("/runs/100", "/jobs/300")), "ignored failed job needs no provenance lookup"
-        value = ({"run_id": 100, "run_attempt": 1, "status": "completed", "conclusion": "success"}
-                 if "/actions/jobs/300" in args[-1] else runs[100])
+        assert args[-1].endswith(("/runs/101", "/jobs/301"))
+        value = ({"run_id": 101, "run_attempt": 1, "status": "completed", "conclusion": "failure"}
+                 if "/actions/jobs/301" in args[-1] else dict(runs[100], conclusion="failure"))
         return SimpleNamespace(stdout=json.dumps(value))
 
     monkeypatch.setattr(MODULE.subprocess, "run", gh_run)
@@ -161,8 +160,35 @@ def test_cli_reads_native_success_after_failed_job_without_loading_older_history
                                     "--repository", REPOSITORY])
 
     assert MODULE.main() == 0
-    assert json.loads(capsys.readouterr().out)["status"] == "VERIFIED"
-    assert len(calls) == 3
+    assert json.loads(capsys.readouterr().out)["status"] == "BOOTSTRAP_FULL"
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("state", ["failure", "error"])
+def test_failed_native_attempt_requires_fresh_live_reconciliation(state):
+    deployments, statuses, runs = deployment_fixture(state=state, run_conclusion="failure")
+    deployments[0].update(production_environment=False, payload={})
+    plan = MODULE.resolve_production_component_sources(deployments, statuses, runs, repository=REPOSITORY)
+    assert plan["status"] == "BOOTSTRAP_FULL"
+    assert plan["reason"] == "failed_native_attempt_requires_live_reconciliation"
+
+
+def test_pending_native_attempt_blocks_instead_of_using_older_success():
+    deployments, statuses, runs = deployment_fixture(state="pending")
+    deployments[0].update(production_environment=False, payload={})
+    older = dict(deployments[0], id=199, created_at="2026-11-01T12:00:00Z")
+    deployments.append(older)
+    statuses[199] = [dict(statuses[200][0], state="success")]
+    with pytest.raises(ValueError, match="not successful"):
+        MODULE.resolve_production_component_sources(deployments, statuses, runs, repository=REPOSITORY)
+
+
+def test_failed_native_attempt_from_unrelated_workflow_blocks():
+    deployments, statuses, runs = deployment_fixture(state="failure", run_conclusion="failure")
+    deployments[0].update(production_environment=False, payload={})
+    runs[100]["path"] = ".github/workflows/unrelated.yml"
+    with pytest.raises(ValueError, match="canonical Native workflow"):
+        MODULE.resolve_production_component_sources(deployments, statuses, runs, repository=REPOSITORY)
 
 
 @pytest.mark.parametrize("job", [
