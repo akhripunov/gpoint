@@ -263,6 +263,21 @@ def test_manual_production_dispatch_requires_exact_owner_approval_before_build()
         ) == ("INVALID_DEPLOY", False)
 
 
+def test_eros_image_rollback_is_opt_in_only_with_the_protected_rollback_operation():
+    valid = MODULE.classify_dispatch(
+        ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
+        actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
+        approve_production=True, rollback=True, rollback_eros=True,
+    )
+    assert valid == ("ROLLBACK", False)
+    invalid = MODULE.classify_dispatch(
+        ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
+        actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
+        approve_production=True, rollback=False, rollback_eros=True,
+    )
+    assert invalid == ("INVALID_ROLLBACK", False)
+
+
 def _git(repo, *args):
     return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
 

@@ -143,7 +143,10 @@ def classify_dispatch(*, ref: str, candidate_sha: str, github_sha: str, actor: s
                       repository_owner: str, migration_rehearsal: bool,
                       approve_production: bool,
                       backup_maintenance: bool = False,
-                      rollback: bool = False) -> tuple[str, bool]:
+                      rollback: bool = False,
+                      rollback_eros: bool = False) -> tuple[str, bool]:
+    if rollback_eros and not rollback:
+        return "INVALID_ROLLBACK", False
     exact = bool(re.fullmatch(r"[0-9a-f]{40}", candidate_sha)) and candidate_sha == github_sha
     owner = bool(repository_owner) and actor.lower() == repository_owner.lower()
     if rollback and (migration_rehearsal or backup_maintenance):
@@ -443,6 +446,7 @@ def main() -> int:
     parser.add_argument("--migration-rehearsal", action="store_true")
     parser.add_argument("--backup-maintenance", action="store_true")
     parser.add_argument("--rollback", action="store_true")
+    parser.add_argument("--rollback-eros", action="store_true")
     parser.add_argument("--approve-production", action="store_true")
     args = parser.parse_args()
 
@@ -467,6 +471,7 @@ def main() -> int:
                 approve_production=args.approve_production,
                 backup_maintenance=args.backup_maintenance,
                 rollback=args.rollback,
+                rollback_eros=args.rollback_eros,
             )
         else:
             mode, deploy = "NO_DEPLOY", False

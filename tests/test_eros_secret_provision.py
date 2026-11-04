@@ -40,6 +40,24 @@ class ErosProductionSecretTests(unittest.TestCase):
                 self.assertEqual(second[key], first[key])
             self.assertEqual(second['EROS_SOURCE_SHA'], 'c' * 40)
 
+    def test_native_engine_environment_maps_stock_runtime_credentials_and_keeps_migrator_private(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'eros.env'
+            output = root / 'eros-engine.env'
+            MODULE.provision(source, source_sha='a' * 40,
+                             image='ghcr.io/akhripunov/eros@sha256:' + 'b' * 64,
+                             tenant_id='12345678-1234-4234-8234-123456789abc')
+            self.assertEqual(MODULE.write_native_engine_env(source, output), 'EROS_NATIVE_ENV=READY')
+            values = dict(line.split('=', 1) for line in output.read_text().splitlines())
+            secrets = MODULE.read_env(source)
+            self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(values['DATABASE_URL'], secrets['EROS_RUNTIME_DATABASE_URL'])
+            self.assertEqual(values['GPOINT_API_KEY'], secrets['EROS_BRIDGE_API_KEY'])
+            self.assertEqual(values['SUPABASE_JWT_SECRET'], secrets['EROS_JWT_SECRET'])
+            self.assertEqual(values['OPENROUTER_API_KEY'], '')
+            self.assertNotIn('EROS_MIGRATOR_DATABASE_URL', values)
+
     def test_rejects_unexpected_permissions_and_malformed_identity_without_replacing_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'eros.env'

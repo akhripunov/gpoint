@@ -18,6 +18,7 @@ import uuid
 
 
 ENV_PATH = Path('/opt/gpoint/env/eros.env')
+NATIVE_ENV_PATH = Path('/opt/gpoint/env/eros-engine.env')
 SOURCE_ENV_PATH = Path('/opt/gpoint/env/production.env')
 SECRET_KEYS = (
     'EROS_JWT_SECRET',
@@ -306,6 +307,54 @@ GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA engine TO eros_runtime;
     return 'EROS_DATABASE_ROLES=READY'
 
 
+def write_native_engine_env(path=ENV_PATH, output=NATIVE_ENV_PATH):
+    """Materialize the minimal stock-image environment used by Kamal and SQLx."""
+    values = read_env(Path(path))
+    required = set(SECRET_KEYS) | {'EROS_RUNTIME_DATABASE_URL', 'EROS_MIGRATOR_DATABASE_URL'}
+    if not required.issubset(values):
+        raise RuntimeError('Eros protected environment is incomplete')
+    target = Path(output)
+    if target.parent.is_symlink():
+        raise RuntimeError('Native Eros environment directory cannot be a symlink')
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if target.parent.stat().st_mode & 0o077 or (target == NATIVE_ENV_PATH and target.parent.stat().st_uid != 0):
+        raise RuntimeError('Native Eros environment directory permissions are unsafe')
+    env = {
+        'DATABASE_URL': values['EROS_RUNTIME_DATABASE_URL'],
+        'GPOINT_API_KEY': values['EROS_BRIDGE_API_KEY'],
+        'GPOINT_EMBEDDINGS_API_KEY': values['EROS_EMBEDDING_API_KEY'],
+        'GPOINT_WORKER_BRIDGE_SIGNING_SECRET': values['EROS_WORKER_SIGNING_SECRET'],
+        'GPOINT_WORKER_TENANT_ID': values['EROS_TENANT_ID'],
+        'EROS_BRIDGE_API_KEY': values['EROS_BRIDGE_API_KEY'],
+        'OPENROUTER_API_KEY': '',
+        'SUPABASE_JWT_SECRET': values['EROS_JWT_SECRET'],
+        'MODEL_CONFIG_PATH': '/etc/eros-engine/model_config.toml',
+        'RUST_LOG': 'info',
+    }
+    if target.exists() and (target.is_symlink() or not stat.S_ISREG(target.stat().st_mode)
+                            or target.stat().st_mode & 0o077 or target.stat().st_nlink != 1):
+        raise RuntimeError('Native Eros environment file permissions are unsafe')
+    fd, staged = tempfile.mkstemp(prefix='.eros-engine.env.', dir=str(target.parent))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'w') as stream:
+            for key in sorted(env):
+                value = env[key]
+                if '\n' in value or '\r' in value:
+                    raise RuntimeError('Native Eros environment contains a newline')
+                stream.write(f'{key}={value}\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(staged, target)
+        os.chmod(target, 0o600)
+    finally:
+        try:
+            os.unlink(staged)
+        except FileNotFoundError:
+            pass
+    return 'EROS_NATIVE_ENV=READY'
+
+
 def ensure_postgres_network():
     """Attach the existing PostgreSQL container to a private Eros-only network."""
     def docker(args, *, allow_missing=False):
@@ -349,6 +398,7 @@ def main():
     parser.add_argument('--source-env', default=str(SOURCE_ENV_PATH))
     parser.add_argument('--ensure-postgres-network', action='store_true')
     parser.add_argument('--provision-database', action='store_true')
+    parser.add_argument('--write-native-engine-env', action='store_true')
     args = parser.parse_args()
     try:
         if args.provision_database:
@@ -359,6 +409,8 @@ def main():
             print(ensure_postgres_network())
         if args.provision_database:
             print(provision_database(args.path))
+        if args.write_native_engine_env:
+            print(write_native_engine_env(args.path))
     except Exception as error:
         # Error text is intentionally limited to classifications, never values.
         raise SystemExit('BLOCKED: ' + str(error)) from None
