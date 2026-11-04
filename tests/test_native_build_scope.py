@@ -146,6 +146,66 @@ def test_legacy_success_without_component_sources_uses_one_bootstrap_build():
                         "reason": "successful_legacy_deployment_has_no_component_source_manifest"}
 
 
+def test_tooling_only_push_without_manifest_uses_verify_only_plan(tmp_path):
+    repo, before = repo_with_baseline(tmp_path)
+    candidate = commit_file(repo, "tests/test_release_tooling.py", "assert True\n")
+    deployments, statuses, runs = deployment_fixture(
+        environment_url="https://gpoint.one/#gpoint-manifest-sha256=" + MANIFEST_SHA,
+        run_head_sha=BASELINE,
+    )
+
+    plan = MODULE.resolve_build_plan(
+        repo, candidate, deployments, statuses, runs,
+        repository=REPOSITORY, push_before=before,
+    )
+
+    assert plan == {
+        "status": "VERIFY_ONLY",
+        "deploy_scope": "UNRESOLVED",
+        "build_components": [],
+        "reason": "verified_tooling_only_push",
+    }
+
+
+@pytest.mark.parametrize("path", [
+    "apps/api/src/main.ts",
+    "unmapped/release-file.bin",
+    "packages/db/prisma/migrations/20261104120000_add_flag/migration.sql",
+    "packages/db/prisma/production-approved-migrations.json",
+])
+def test_runtime_unknown_or_migration_push_path_does_not_use_verify_only(tmp_path, path):
+    repo, before = repo_with_baseline(tmp_path)
+    candidate = commit_file(repo, path, "candidate content\n")
+    deployments, statuses, runs = deployment_fixture(
+        environment_url="https://gpoint.one/#gpoint-manifest-sha256=" + MANIFEST_SHA,
+        run_head_sha=BASELINE,
+    )
+
+    plan = MODULE.resolve_build_plan(
+        repo, candidate, deployments, statuses, runs,
+        repository=REPOSITORY, push_before=before,
+    )
+
+    assert plan["status"] == "BOOTSTRAP_FULL"
+    assert plan["build_components"] == ["CORE", "AGATA", "MINIAPP"]
+
+
+def test_tooling_only_candidate_without_exact_push_before_does_not_use_verify_only(tmp_path):
+    repo, _before = repo_with_baseline(tmp_path)
+    candidate = commit_file(repo, "tests/test_release_tooling.py", "assert True\n")
+    deployments, statuses, runs = deployment_fixture(
+        environment_url="https://gpoint.one/#gpoint-manifest-sha256=" + MANIFEST_SHA,
+        run_head_sha=BASELINE,
+    )
+
+    plan = MODULE.resolve_build_plan(
+        repo, candidate, deployments, statuses, runs, repository=REPOSITORY,
+    )
+
+    assert plan["status"] == "BOOTSTRAP_FULL"
+    assert plan["build_components"] == ["CORE", "AGATA", "MINIAPP"]
+
+
 def test_rollback_baseline_requires_all_sources_equal_the_exact_target_sha():
     target = "2" * 40
     deployments, statuses, runs = deployment_fixture(

@@ -33,6 +33,27 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     assert deploy["needs"] == ["tests", "build"]
 
 
+def test_verified_tooling_only_push_skips_images_and_requires_live_noop_scope():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    build = workflow["jobs"]["build"]
+    steps = build["steps"]
+    resolver = next(step for step in steps if step.get("id") == "build_scope")
+    assert "--push-before" in resolver["run"]
+    assert "VERIFY_ONLY" in resolver["run"]
+    assert "VERIFY_ONLY" in resolver["env"].get("EVENT_BEFORE", "") or "EVENT_BEFORE" in resolver["env"]
+    for step in steps:
+        if step.get("uses", "").startswith(("docker/setup-buildx-action@", "docker/login-action@")):
+            assert "build_components != '[]'" in step["if"]
+
+    deploy_steps = workflow["jobs"]["deploy"]["steps"]
+    component_plan = next(step for step in deploy_steps if step.get("id") == "component_plan")
+    assert 'elif mode == "VERIFY_ONLY"' in component_plan["run"]
+    assert 'scope["scope"] != "NONE"' in component_plan["run"]
+    migration_plan = next(step for step in deploy_steps if step.get("id") == "migration_plan")
+    assert "LIVE_COMPONENT_SCOPE" in migration_plan["env"]
+    assert "verify-only release has pending Prisma migrations" in migration_plan["run"]
+
+
 def test_rerun_by_non_owner_cannot_deploy_a_main_push(tmp_path):
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     deploy = workflow["jobs"]["deploy"]
