@@ -80,3 +80,10 @@ def test_eros_topology_inventory_shell_loop_has_no_unused_read_variable():
                     if step.get("name") == "Verify installed Kamal topology before ordinary release")
     assert '"config/deploy.eros.yml|gpoint-eros-pilot-engine"' in topology
     assert 'IFS=\'|\' read -r config expected <<< "$pair"' in topology
+
+
+def test_hosted_stock_eros_e2e_uses_the_policy_approved_upstream_tag():
+    test_steps = steps_for("tests")
+    e2e = next(step["run"] for step in test_steps
+               if step.get("name") == "Build stock Eros and run isolated SQLx and synthetic conversation E2E")
+    assert 'image="gpoint-eros:stock-$EROS_UPSTREAM_SHA"' in e2e

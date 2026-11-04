@@ -146,7 +146,7 @@ jobs:
           EROS_UPSTREAM_SHA: d1a140083321687212fb7b17c09cc0c3c9639f5e
         run: |
           set -euo pipefail
-          image="gpoint-eros-native-test:$GITHUB_SHA"
+          image="gpoint-eros:stock-$EROS_UPSTREAM_SHA"
           docker buildx build --platform linux/amd64 --load \
             --file docker/Dockerfile \
             --label org.opencontainers.image.source=https://github.com/etherfunlab/eros-engine \
