@@ -1098,7 +1098,7 @@ jobs:
           test "$writer_sha" = "$remote_writer_sha"
           test -n "$EXPECTED_PRISMA_HEAD" && test -n "$EXPECTED_PRISMA_MIGRATIONS" && test -n "$EXPECTED_PRISMA_CHECKSUMS" && test -n "$EXPECTED_AGATA_HEAD"
           test -n "$BASELINE_PRISMA_HEAD" && test -n "$BASELINE_PRISMA_MIGRATIONS" && test -n "$BASELINE_PRISMA_CHECKSUMS"
-          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$EXPECTED_PRISMA_MIGRATIONS" "$EXPECTED_PRISMA_CHECKSUMS" "$EXPECTED_PRISMA_HEAD" "$EXPECTED_AGATA_HEAD" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" "$BASELINE_PRISMA_MIGRATIONS" "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "$PENDING_PRISMA_MIGRATIONS" "$PENDING_PRISMA_CHECKSUMS" "$BASELINE_AGATA_HEAD" "$EXPECTED_ROLE_IDENTITIES_B64" <<'REMOTE'
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$EXPECTED_PRISMA_MIGRATIONS" "$EXPECTED_PRISMA_CHECKSUMS" "$EXPECTED_PRISMA_HEAD" "$EXPECTED_AGATA_HEAD" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" "$BASELINE_PRISMA_MIGRATIONS" "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "${PENDING_PRISMA_MIGRATIONS:--}" "${PENDING_PRISMA_CHECKSUMS:--}" "$BASELINE_AGATA_HEAD" "$EXPECTED_ROLE_IDENTITIES_B64" <<'REMOTE'
           set -euo pipefail
           sha="$1"; version="$2"; app="$3"; agata="$4"; miniapp="$5"; db_id="$6"; redis_id="$7"; deployment_id="$8"; run_id="$9"; attempt="${10}"; writer="${11}"
           expected_prisma_migrations="${12}"; expected_prisma_checksums="${13}"; expected_prisma_head="${14}"; expected_agata_head="${15}"
@@ -1106,6 +1106,8 @@ jobs:
           baseline_prisma_migrations="${18}"; baseline_prisma_checksums="${19}"; baseline_prisma_head="${20}"
           pending_prisma_migrations="${21}"; pending_prisma_checksums="${22}"; baseline_agata_head="${23}"
           expected_role_identities_b64="${24}"
+          [[ "$pending_prisma_migrations" != "-" ]] || pending_prisma_migrations=""
+          [[ "$pending_prisma_checksums" != "-" ]] || pending_prisma_checksums=""
           [[ "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
           [[ "$writer" == "/run/gpoint-ordinary-manifest-${run_id}-${attempt}.py" ]]
           test -s "$writer"
