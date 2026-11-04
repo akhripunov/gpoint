@@ -2,7 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, ran
 import { BadRequestException, Body, Controller, Get, Headers, Header, HttpException, OnModuleDestroy, OnModuleInit, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { PrismaClient, type Prisma } from '@prisma/client';
-import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, deriveBridgeInferenceIdentity, parseBridgeRequest, parseErosEmbeddingRequest, type ParsedErosBridgeRequest } from './eros-worker-contract.js';
+import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, deriveBridgeInferenceIdentity, isExpectedErosWorkerJobIdentity, parseBridgeRequest, parseErosEmbeddingRequest, type ParsedErosBridgeRequest } from './eros-worker-contract.js';
 import { isAllowedOllamaEmbeddingEndpoint, isDisposableSyntheticLocalTest } from './eros-network-policy.js';
 import { erosIdentityFor, exactErosPilotPair } from './eros-adapter.js';
 
@@ -203,7 +203,15 @@ export async function claimErosForGpointWorker(): Promise<{ job: Record<string, 
   });
   if (!row) return null;
   const expectedIdentity = erosIdentityFor(pair);
-  if (row.user_id !== expectedIdentity.userId || row.creator_id !== expectedIdentity.creatorId) {
+  const identity: ErosQueueIdentity = {
+    id: row.id, request_id: row.request_id, tenant_id: row.tenant_id, user_id: row.user_id,
+    creator_id: row.creator_id, session_id: row.session_id, instance_id: row.instance_id,
+  };
+  const request = decryptQueueRequest(row.request, identity);
+  const systemIdentity = row.job_type === 'SYSTEM_COMPLETION'
+    ? systemTaskIdentity(await parseBridgeRequest(request, signingSecret()), tenantId)
+    : null;
+  if (!isExpectedErosWorkerJobIdentity(row, tenantId, expectedIdentity, systemIdentity)) {
     await withWorkerTenant((tx) => tx.$executeRawUnsafe(
       `UPDATE engine.eros_inference_jobs SET status = 'FAILED', error_code = 'synthetic_allowlist_mismatch',
          lease_token = NULL, lease_expires_at = NULL, updated_at = now()
@@ -212,13 +220,9 @@ export async function claimErosForGpointWorker(): Promise<{ job: Record<string, 
     ));
     throw new HttpException({ code: 'EROS_PILOT_ALLOWLIST_MISMATCH' }, 503);
   }
-  const identity: ErosQueueIdentity = {
-    id: row.id, request_id: row.request_id, tenant_id: row.tenant_id, user_id: row.user_id,
-    creator_id: row.creator_id, session_id: row.session_id, instance_id: row.instance_id,
-  };
   return { job: {
     id: row.id, leaseToken: row.lease_token, attempt: 1, target: 'GPOINT', tenant_id: tenantId,
-    request: decryptQueueRequest(row.request, identity), purpose: 'eros_chat_completion',
+    request, purpose: 'eros_chat_completion',
   } };
 }
 
