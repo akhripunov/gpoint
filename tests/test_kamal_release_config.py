@@ -146,6 +146,10 @@ def test_kamal_uses_attempt_scoped_tag_with_buildkit_digest_verification():
     assert "name: Verify immutable candidate images selected for the live scope" in deploy
     assert 'docker pull --platform linux/amd64 "$repository:$IMAGE_VERSION"' in deploy
     assert 'docker image inspect "$repository:$IMAGE_VERSION" --format' in deploy
+    verify_images = deploy.split(
+        "name: Verify immutable candidate images selected for the live scope", 1
+    )[1].split("name: Verify candidate compatibility with the live database baseline", 1)[0]
+    assert '''--format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$CANDIDATE_SHA"''' in verify_images
     assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST"' in deploy
     assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST"' in deploy
     assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST"' in deploy
