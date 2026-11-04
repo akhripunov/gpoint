@@ -49,6 +49,7 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     "AGENTS.md",
     "packages/db/prisma/production-approved-migrations.json",
     "scripts/classify-release-prepush.py",
+    "scripts/check-kamal-configs.sh",
     "scripts/gpoint-backup-policy.py",
     "scripts/gpoint-scheduled-backup.py",
     "scripts/native_release_intent.py",
