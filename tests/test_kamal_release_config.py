@@ -1630,7 +1630,14 @@ def test_ordinary_verify_receives_baseline_facts_in_remote_shell():
         'BASELINE_ROLE_VERSION': 'b' * 40 + '-100-1', 'BASELINE_ROLE_SOURCE_SHA': 'b' * 40,
         'DB_MOUNTS_SHA256': 'c' * 64, 'REDIS_MOUNTS_SHA256': 'd' * 64,
     }
-    names = re.findall(r'"\$([A-Za-z_][A-Za-z0-9_]*)"', match.group(1))
+    arguments = re.findall(
+        r'"(\$\{([A-Za-z_][A-Za-z0-9_]*):--\}|\$([A-Za-z_][A-Za-z0-9_]*))"',
+        match.group(1),
+    )
+    remote_args = [
+        values[default_name] or '-' if default_name else values[name]
+        for _expression, default_name, name in arguments
+    ]
     prefix = match.group(2).split('db_mounts_sha=', 1)[0]
     harness = '''
     docker() {
@@ -1646,7 +1653,7 @@ def test_ordinary_verify_receives_baseline_facts_in_remote_shell():
     # actual quoted-heredoc assignments and validation with the real SSH args.
     harness = harness.replace('"${6}"', "'" + values['DB_CONTAINER_ID'] + "'")
     harness = harness.replace('"${7}"', "'" + values['REDIS_CONTAINER_ID'] + "'")
-    result = subprocess.run(['bash', '-c', harness + prefix, 'verify', *[values[n] for n in names]],
+    result = subprocess.run(['bash', '-c', harness + prefix, 'verify', *remote_args],
                             env={'PATH': os.environ['PATH']}, text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
 
