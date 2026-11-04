@@ -29,9 +29,12 @@ COMPONENT_SOURCE_KEYS = {
     "CORE": "gpoint-core-source-sha",
     "AGATA": "gpoint-agata-source-sha",
     "MINIAPP": "gpoint-miniapp-source-sha",
+    "EROS": "gpoint-eros-source-sha",
 }
+REQUIRED_COMPONENTS = ("CORE", "AGATA", "MINIAPP")
 SUPPORTED_TASKS = {"deploy", "rollback"}
-ALL_COMPONENTS = ["CORE", "AGATA", "MINIAPP"]
+ALL_COMPONENTS = ["CORE", "AGATA", "MINIAPP", "EROS"]
+BOOTSTRAP_BUILD_COMPONENTS = ["CORE", "AGATA", "MINIAPP"]
 
 
 def _timestamp(value: object) -> datetime:
@@ -96,15 +99,20 @@ def _manifest_baseline(environment_url: object, *, deployment_task: str,
     if not MANIFEST_SHA.fullmatch(digest):
         raise ValueError("production Deployment manifest digest is invalid")
     source_keys = set(COMPONENT_SOURCE_KEYS.values())
+    required_source_keys = {COMPONENT_SOURCE_KEYS[name] for name in REQUIRED_COMPONENTS}
     supported_keys = source_keys | {"gpoint-manifest-sha256", "gpoint-runtime-target-sha"}
     if set(values) - supported_keys:
         raise ValueError("production Deployment URL contains unsupported manifest fields")
     present_sources = source_keys.intersection(values)
     if not present_sources:
         return None
-    if present_sources != source_keys:
+    if not required_source_keys.issubset(present_sources):
         raise ValueError("production Deployment component source evidence is incomplete")
-    sources = {component: values[key] for component, key in COMPONENT_SOURCE_KEYS.items()}
+    sources = {component: values[key] for component, key in COMPONENT_SOURCE_KEYS.items()
+               if key in values}
+    # Existing V3 manifests predate Eros. Until the first Eros deployment, use
+    # the Core baseline to classify the introduction of the Eros component.
+    sources.setdefault("EROS", sources["CORE"])
     if any(not EXACT_SHA.fullmatch(source) for source in sources.values()):
         raise ValueError("production Deployment component source SHA is invalid")
     runtime_target_sha = values.get("gpoint-runtime-target-sha")
@@ -247,7 +255,7 @@ def resolve_build_plan(repo: Path, candidate_sha: str, deployments: list[dict],
         return {
             "status": "BOOTSTRAP_FULL",
             "deploy_scope": "UNRESOLVED",
-            "build_components": ALL_COMPONENTS,
+            "build_components": BOOTSTRAP_BUILD_COMPONENTS,
             "reason": baseline["reason"],
         }
     plan = classify_component_build_plan(repo, candidate_sha,

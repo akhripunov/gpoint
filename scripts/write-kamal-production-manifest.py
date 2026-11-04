@@ -26,11 +26,22 @@ ROLE_REPOSITORIES = {
     "gpoint-agata-api": "ghcr.io/akhripunov/gpoint-agata-runtime",
     "gpoint-agata-memory-worker": "ghcr.io/akhripunov/gpoint-agata-runtime",
     "gpoint-miniapp-web": "ghcr.io/akhripunov/gpoint-miniapp",
+    "gpoint-eros-pilot-engine": "ghcr.io/akhripunov/gpoint-eros",
+    "gpoint-eros-relay-relay": "ghcr.io/akhripunov/gpoint-runtime",
 }
 ROLE_COMPONENTS = {
     "gpoint-core-api": "CORE", "gpoint-core-worker": "CORE", "gpoint-core-bot": "CORE",
     "gpoint-agata-api": "AGATA", "gpoint-agata-memory-worker": "AGATA",
     "gpoint-miniapp-web": "MINIAPP",
+    "gpoint-eros-pilot-engine": "EROS",
+    "gpoint-eros-relay-relay": "EROS",
+}
+ROLE_IDENTITY_GROUP = {
+    **{role: "CORE" for role in ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot")},
+    **{role: "AGATA" for role in ("gpoint-agata-api", "gpoint-agata-memory-worker")},
+    "gpoint-miniapp-web": "MINIAPP",
+    "gpoint-eros-pilot-engine": "EROS_ENGINE",
+    "gpoint-eros-relay-relay": "EROS_RELAY",
 }
 
 
@@ -71,6 +82,7 @@ def parser() -> argparse.ArgumentParser:
     for name in ("output", "sha", "app-source-sha", "version", "app-digest", "agata-digest", "miniapp-digest",
                  "run-id", "attempt", "deployment-id"):
         result.add_argument(f"--{name}", required=True)
+    result.add_argument("--eros-digest")
     result.add_argument("--mode", choices=("cutover", "ordinary"), default="cutover")
     for name in ("baseline-path", "baseline-sha",
                  "inventory-path", "inventory-sha", "backup-path", "backup-sha", "restore-path",
@@ -180,10 +192,15 @@ def main() -> int:
             expected_role_plan = json.loads(base64.b64decode(args.expected_role_identities_b64 or "", validate=True))
         except (ValueError, UnicodeError, json.JSONDecodeError):
             raise SystemExit("ordinary manifest expected component role inventory is malformed") from None
-        role_repositories = ROLE_REPOSITORIES
-        role_components = ROLE_COMPONENTS
+        expected_roles = expected_role_plan.get("roles") if isinstance(expected_role_plan, dict) else None
+        if not isinstance(expected_roles, dict) or set(expected_roles) not in (
+                set(ROLE_REPOSITORIES) - {"gpoint-eros-pilot-engine", "gpoint-eros-relay-relay"},
+                set(ROLE_REPOSITORIES)):
+            raise SystemExit("ordinary manifest role inventory is incomplete")
+        role_repositories = {role: ROLE_REPOSITORIES[role] for role in expected_roles}
+        role_components = {role: ROLE_COMPONENTS[role] for role in expected_roles}
         scope = expected_role_plan.get("scope") if isinstance(expected_role_plan, dict) else None
-        component_names = set(ROLE_COMPONENTS.values())
+        component_names = set(role_components.values())
         if scope == "FULL":
             updated_components = component_names
         elif scope == "NONE":
@@ -195,17 +212,26 @@ def main() -> int:
                 updated_components = None
         else:
             updated_components = None
-        expected_roles = expected_role_plan.get("roles") if isinstance(expected_role_plan, dict) else None
         if (not isinstance(expected_role_plan, dict)
                 or expected_role_plan.get("schema") != 1 or expected_role_plan.get("candidateSha") != args.sha
                 or updated_components is None or set(expected_role_plan.get("updatedComponents", [])) != updated_components
                 or not isinstance(expected_roles, dict) or set(expected_roles) != set(role_repositories)):
             raise SystemExit("ordinary manifest component role plan does not match the exact candidate scope")
         candidate_digests = {
-            "CORE": "ghcr.io/akhripunov/gpoint-runtime@" + args.app_digest,
-            "AGATA": "ghcr.io/akhripunov/gpoint-agata-runtime@" + args.agata_digest,
-            "MINIAPP": "ghcr.io/akhripunov/gpoint-miniapp@" + args.miniapp_digest,
+            "gpoint-core-api": "ghcr.io/akhripunov/gpoint-runtime@" + args.app_digest,
+            "gpoint-core-worker": "ghcr.io/akhripunov/gpoint-runtime@" + args.app_digest,
+            "gpoint-core-bot": "ghcr.io/akhripunov/gpoint-runtime@" + args.app_digest,
+            "gpoint-agata-api": "ghcr.io/akhripunov/gpoint-agata-runtime@" + args.agata_digest,
+            "gpoint-agata-memory-worker": "ghcr.io/akhripunov/gpoint-agata-runtime@" + args.agata_digest,
+            "gpoint-miniapp-web": "ghcr.io/akhripunov/gpoint-miniapp@" + args.miniapp_digest,
+            "gpoint-eros-pilot-engine": "ghcr.io/akhripunov/gpoint-eros@" + (args.eros_digest or ""),
+            "gpoint-eros-relay-relay": "ghcr.io/akhripunov/gpoint-runtime@" + args.app_digest,
         }
+        has_eros = "gpoint-eros-pilot-engine" in expected_roles
+        if has_eros and not OCI_DIGEST.fullmatch(args.eros_digest or ""):
+            raise SystemExit("ordinary manifest needs the exact stock Eros OCI digest")
+        if not has_eros and args.eros_digest:
+            raise SystemExit("ordinary manifest received an Eros digest without Eros roles")
         component_identities = {}
         for role, repository in role_repositories.items():
             row = expected_roles[role]
@@ -217,15 +243,17 @@ def main() -> int:
                     or not re.fullmatch(re.escape(repository) + r"@sha256:[0-9a-f]{64}", repo_digest or "")):
                 raise SystemExit("ordinary manifest component role identity is malformed")
             if component in updated_components:
-                if (version != args.version or source != args.sha or repo_digest != candidate_digests[component]
+                expected_candidate_digest = candidate_digests[role]
+                if (version != args.version or source != args.sha or repo_digest != expected_candidate_digest
                         or baseline_image_id is not None):
                     raise SystemExit("ordinary manifest updated role differs from the exact candidate artifact")
             elif not re.fullmatch(r"sha256:[0-9a-f]{64}", baseline_image_id or ""):
                 raise SystemExit("ordinary manifest untouched role lacks its exact baseline Docker image ID")
             identity = (version, source, repo_digest, baseline_image_id)
-            if component in component_identities and component_identities[component] != identity:
+            identity_group = ROLE_IDENTITY_GROUP[role]
+            if identity_group in component_identities and component_identities[identity_group] != identity:
                 raise SystemExit("ordinary manifest shared component roles have inconsistent identities")
-            component_identities[component] = identity
+            component_identities[identity_group] = identity
     for field in ("run_id", "attempt", "deployment_id"):
         if not getattr(args, field).isdigit() or int(getattr(args, field)) <= 0:
             raise SystemExit(f"{field.replace('_', ' ')} must be a positive integer")
@@ -268,6 +296,11 @@ def main() -> int:
         ("gpoint-agata-memory-worker", "ghcr.io/akhripunov/gpoint-agata-runtime", args.agata_digest),
         ("gpoint-miniapp-web", "ghcr.io/akhripunov/gpoint-miniapp", args.miniapp_digest),
     ]
+    if args.mode == "ordinary" and expected_role_plan and "gpoint-eros-pilot-engine" in expected_role_plan["roles"]:
+        expected_services.extend([
+            ("gpoint-eros-pilot-engine", "ghcr.io/akhripunov/gpoint-eros", args.eros_digest),
+            ("gpoint-eros-relay-relay", "ghcr.io/akhripunov/gpoint-runtime", args.app_digest),
+        ])
     runtime_services = []
     for prefix, repository, digest in expected_services:
         expected_role = expected_role_plan["roles"][prefix] if args.mode == "ordinary" else None
@@ -281,10 +314,14 @@ def main() -> int:
         image = docker_json("image", "inspect", image_id)[0]
         if expected_baseline_image_id is not None and image_id != expected_baseline_image_id:
             raise SystemExit(f"untouched runtime image ID changed before manifest: {name}")
+        revision_label = ("com.gpoint.source.revision" if prefix == "gpoint-eros-pilot-engine"
+                          else "org.opencontainers.image.revision")
         if (not container["State"]["Running"]
-                or container["Config"]["Labels"].get("org.opencontainers.image.revision") != role_source):
+                or container["Config"]["Labels"].get(revision_label) != role_source):
             raise SystemExit(f"final runtime identity changed before manifest: {name}")
-        if prefix != "gpoint-miniapp-web":
+        if prefix in {"gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot",
+                      "gpoint-agata-api", "gpoint-agata-memory-worker",
+                      "gpoint-eros-relay-relay"}:
             if prefix.startswith("gpoint-agata-"):
                 process_sha = subprocess.run(
                     ["docker", "exec", name, "python", "-c",
@@ -389,6 +426,10 @@ def main() -> int:
                 "core": f"ghcr.io/akhripunov/gpoint-runtime@{args.app_digest}",
                 "agata": f"ghcr.io/akhripunov/gpoint-agata-runtime@{args.agata_digest}",
                 "miniapp": f"ghcr.io/akhripunov/gpoint-miniapp@{args.miniapp_digest}",
+                **({"eros": f"ghcr.io/akhripunov/gpoint-eros@{args.eros_digest}",
+                    "eros_relay": f"ghcr.io/akhripunov/gpoint-runtime@{args.app_digest}"}
+                   if args.mode == "ordinary" and expected_role_plan
+                   and "gpoint-eros-pilot-engine" in expected_role_plan["roles"] else {}),
             },
         },
         "deploymentScope": ({

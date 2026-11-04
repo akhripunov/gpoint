@@ -29,6 +29,8 @@ VERSION = f"{SHA}-{RUN_ID}-1"
 def evidence():
     services = []
     for name, key in MODULE.ROLE_IMAGES.items():
+        if key in {"eros", "eros_relay"}:
+            continue
         services.append({
             "name": f"{name}-{VERSION}",
             "revision": SHA,
@@ -113,6 +115,24 @@ def mixed_component_evidence():
     return deployment, statuses, run, jobs, raw
 
 
+def eros_evidence():
+    deployment, statuses, run, jobs, raw = evidence()
+    manifest = json.loads(raw)
+    manifest["candidate"]["images"].update({
+        "eros": "ghcr.io/akhripunov/gpoint-eros@sha256:" + "8" * 64,
+        "eros_relay": "ghcr.io/akhripunov/gpoint-runtime@" + DIGESTS["core"],
+    })
+    manifest["runtimeServices"].extend([
+        {"name": "gpoint-eros-pilot-engine-" + VERSION, "revision": SHA, "running": True,
+         "repositoryDigest": manifest["candidate"]["images"]["eros"], "component": "EROS"},
+        {"name": "gpoint-eros-relay-relay-" + VERSION, "revision": SHA, "running": True,
+         "repositoryDigest": manifest["candidate"]["images"]["eros_relay"], "component": "EROS"},
+    ])
+    raw = json.dumps(manifest, separators=(",", ":"), sort_keys=True).encode()
+    statuses[0]["description"] = f"Kamal success SHA {SHA} manifest {hashlib.sha256(raw).hexdigest()}"
+    return deployment, statuses, run, jobs, raw
+
+
 def verify(args, **overrides):
     deployment, statuses, run, jobs, manifest_bytes = args
     values = {
@@ -177,6 +197,13 @@ def test_accepts_native_environment_status_with_manifest_url_and_exact_attempt_r
     result = verify(args, statuses=[status])
     assert result["manifest_sha256"] == hashlib.sha256(args[4]).hexdigest()
     assert result["run_attempt"] == 1
+
+
+def test_accepts_eros_stock_engine_and_relay_rollback_identities():
+    result = verify(eros_evidence())
+    assert result["digests"]["eros"] == "sha256:" + "8" * 64
+    assert result["component_sources"]["eros"] == SHA
+    assert result["component_sources"]["eros_relay"] == SHA
 
 
 def test_rejects_failed_or_newer_non_success_deployment_status():

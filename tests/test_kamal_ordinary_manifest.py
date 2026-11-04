@@ -41,6 +41,7 @@ elif args[0] == "inspect" and name.startswith(("gsales-", "legacy-")):
 elif args[0] == "inspect" and name.startswith("gpoint-"):
  role,row=role_for(name)
  labels=dict(); labels["org.opencontainers.image.revision"]=row["sourceSha"]
+ if role == "gpoint-eros-pilot-engine": labels["com.gpoint.source.revision"]=row["sourceSha"]
  image_id=row.get("baselineImageId") or "image-"+role
  config=dict(Labels=labels,Env=["RELEASE_SHA="+row["sourceSha"]])
  state=dict(Running=True,Health=dict(Status="healthy"))
@@ -82,6 +83,12 @@ def expected_roles_b64(scope="FULL"):
     components = {"CORE": ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot"),
                   "AGATA": ("gpoint-agata-api", "gpoint-agata-memory-worker"),
                   "MINIAPP": ("gpoint-miniapp-web",)}
+    if "EROS" in scope.split("+"):
+        roles.update({
+            "gpoint-eros-pilot-engine": ("EROS", "ghcr.io/akhripunov/gpoint-eros", "sha256:" + "a" * 64),
+            "gpoint-eros-relay-relay": ("EROS", "ghcr.io/akhripunov/gpoint-runtime", APP),
+        })
+        components["EROS"] = ("gpoint-eros-pilot-engine", "gpoint-eros-relay-relay")
     updated = set(components) if scope == "FULL" else set(scope.split("+")) - {"NONE"}
     baseline = "b" * 40
     role_rows = {}
@@ -91,7 +98,7 @@ def expected_roles_b64(scope="FULL"):
                             "baselineImageId": None}
                            if component in updated else
                            {"version": baseline + "-40-1", "sourceSha": baseline,
-                            "repositoryDigest": repository + "@sha256:" + ("4" if component == "CORE" else "6" if component == "AGATA" else "7") * 64,
+                            "repositoryDigest": repository + "@sha256:" + ("4" if component == "CORE" else "6" if component == "AGATA" else "7" if component == "MINIAPP" else "a" if role == "gpoint-eros-pilot-engine" else "4") * 64,
                             "baselineImageId": "sha256:" + ("5" if component == "CORE" else "8" if component == "AGATA" else "9") * 64})
     value = {
         "schema": 1, "candidateSha": SHA, "scope": scope,
@@ -129,6 +136,8 @@ def run_ordinary(tmp_path: Path, *, active_caddy=False, role_plan_b64=None):
     args = ordinary_args(output)
     if role_plan_b64:
         args[args.index("--expected-role-identities-b64") + 1] = role_plan_b64
+        if "gpoint-eros-pilot-engine" in json.loads(base64.b64decode(role_plan_b64))["roles"]:
+            args.extend(["--eros-digest", "sha256:" + "a" * 64])
     env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
            "EXPECTED_ROLE_PLAN_B64": args[args.index("--expected-role-identities-b64") + 1]}
     result = subprocess.run([sys.executable, str(WRITER), *args],
@@ -280,3 +289,16 @@ def test_ordinary_manifest_verifies_untouched_component_identity_in_selective_re
     assert services["gpoint-core-api"]["repositoryDigest"].endswith("sha256:" + "4" * 64)
     assert services["gpoint-miniapp-web"]["revision"] == SHA
     assert services["gpoint-miniapp-web"]["version"] == VERSION
+
+
+def test_ordinary_manifest_records_independent_eros_engine_and_relay_artifacts(tmp_path):
+    result, output = run_ordinary(tmp_path, role_plan_b64=expected_roles_b64("EROS"))
+
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads(output.read_text(encoding="utf-8"))
+    assert manifest["candidate"]["images"]["eros"] == "ghcr.io/akhripunov/gpoint-eros@sha256:" + "a" * 64
+    services = {row["name"].split("-" + row["version"], 1)[0]: row for row in manifest["runtimeServices"]}
+    assert len(manifest["runtimeServices"]) == 8
+    assert services["gpoint-eros-pilot-engine"]["repositoryDigest"] == manifest["candidate"]["images"]["eros"]
+    assert services["gpoint-eros-relay-relay"]["repositoryDigest"] == "ghcr.io/akhripunov/gpoint-runtime@" + APP
+    assert services["gpoint-core-api"]["revision"] == "b" * 40

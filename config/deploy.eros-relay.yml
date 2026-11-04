@@ -6,7 +6,7 @@ servers:
   relay:
     hosts:
       - <%= ENV.fetch("GPOINT_PRODUCTION_HOST") %>
-    cmd: node /opt/gpoint/eros-pilot-embedding-relay.mjs
+    cmd: node /app/services/eros-engine/eros-pilot-embedding-relay.mjs
     proxy: false
     env:
       clear:
@@ -15,7 +15,6 @@ servers:
         RELEASE_SHA: <%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>
     options:
       network: host
-      volume: /opt/gpoint/releases/<%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>/source/services/eros-engine/eros-pilot-embedding-relay.mjs:/opt/gpoint/eros-pilot-embedding-relay.mjs:ro
       memory: 64m
       memory-swap: 64m
       cpus: 0.25

@@ -6,7 +6,7 @@ version="${2:-}"
 expected_sha="${3:-}"
 
 case "$prefix" in
-  gpoint-core-api|gpoint-core-worker|gpoint-core-bot|gpoint-agata-api|gpoint-agata-memory-worker|gpoint-miniapp-web) ;;
+  gpoint-core-api|gpoint-core-worker|gpoint-core-bot|gpoint-agata-api|gpoint-agata-memory-worker|gpoint-miniapp-web|gpoint-eros-pilot-engine|gpoint-eros-relay-relay) ;;
   *) echo "unsupported Kamal role prefix" >&2; exit 2 ;;
 esac
 [[ "$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]] || { echo "invalid Kamal version" >&2; exit 2; }
@@ -31,6 +31,10 @@ fi
 
 running="$(docker inspect --format '{{.State.Running}}' "$expected_name")"
 [[ "$running" == true ]] || { echo "role is not running: $prefix" >&2; exit 1; }
-revision="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$expected_name")"
+if [[ "$prefix" == gpoint-eros-pilot-engine ]]; then
+  revision="$(docker inspect --format '{{index .Config.Labels "com.gpoint.source.revision"}}' "$expected_name")"
+else
+  revision="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$expected_name")"
+fi
 [[ "$revision" == "$expected_sha" ]] || { echo "role source revision does not match expected SHA: $prefix" >&2; exit 1; }
 printf 'ROLE_VERIFY=PASS role=%s version=%s source_sha=%s\n' "$prefix" "$version" "$expected_sha"

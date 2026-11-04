@@ -297,13 +297,14 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("OWNER_APPROVAL_ACTOR", script)
         self.assertEqual(deploy["needs"], ["tests", "build"])
         self.assertTrue(all(name in self.workflow["jobs"]["build"]["outputs"]
-                            for name in ("app_digest", "agata_digest", "miniapp_digest")))
+                            for name in ("app_digest", "agata_digest", "miniapp_digest", "eros_digest")))
         self.assertNotIn("gsales_digest", self.workflow["jobs"]["build"]["outputs"])
         deploy_text = yaml.safe_dump(deploy)
         self.assertIn("needs.build.outputs.app_digest", deploy_text)
         self.assertIn("needs.build.outputs.agata_digest", deploy_text)
         self.assertNotIn("needs.build.outputs.gsales_digest", deploy_text)
         self.assertIn("needs.build.outputs.miniapp_digest", deploy_text)
+        self.assertIn("needs.build.outputs.eros_digest", deploy_text)
         self.assertNotRegex(script, r"docker\s+compose\s+(up|down|pull|restart)")
         phases = "\n".join((ROOT / "scripts/kamal-first-cutover" / (name+".sh")).read_text()
                            for name in ("requests", "consumers", "verify"))
@@ -312,6 +313,28 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("test \"$(docker inspect --format '{{.State.Running}}' \"$id\")\" = false", script)
         self.assertIn("kamal deploy --skip-push", script)
         self.assertIn("GPOINT_KAMAL_VERIFY=PASS", script)
+
+    def test_eros_uses_exact_stock_artifact_and_existing_selective_kamal_chain(self):
+        workflow_text = WORKFLOW.read_text()
+        jobs = self.workflow["jobs"]
+        build = jobs["build"]
+        eros_build = next(step for step in build["steps"] if step.get("id") == "eros")
+        self.assertEqual(eros_build["with"]["context"],
+                         "https://github.com/etherfunlab/eros-engine.git#d1a140083321687212fb7b17c09cc0c3c9639f5e")
+        self.assertEqual(eros_build["with"]["platforms"], "linux/amd64")
+        self.assertTrue(eros_build["with"]["push"])
+        self.assertIn("sbom: true", yaml.safe_dump(eros_build["with"]))
+        self.assertIn("provenance: mode=max", yaml.safe_dump(eros_build["with"]))
+        self.assertIn("verify_native_eros_image.py", workflow_text)
+        self.assertIn("d1a140083321687212fb7b17c09cc0c3c9639f5e", workflow_text)
+        self.assertIn("config/deploy.eros.yml", workflow_text)
+        self.assertIn("config/deploy.eros-relay.yml", workflow_text)
+        self.assertIn("DEPLOY_EROS", workflow_text)
+        self.assertIn("gpoint-eros-pilot-engine", workflow_text)
+        self.assertIn("gpoint-eros-relay-relay", workflow_text)
+        self.assertIn('image: akhripunov/gpoint-eros', (ROOT / "config/deploy.eros.yml").read_text())
+        self.assertIn('--eros-digest "$eros_digest"', workflow_text)
+        self.assertNotIn("docker compose", workflow_text)
 
     def test_no_mac_runner_or_release_controller_is_used(self):
         text = WORKFLOW.read_text()
@@ -346,7 +369,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         ))
 
         config_check = (ROOT / "scripts/check-kamal-configs.sh").read_text()
-        for config in ("deploy.yml", "deploy.agata.yml", "deploy.miniapp.yml"):
+        for config in ("deploy.yml", "deploy.agata.yml", "deploy.miniapp.yml", "deploy.eros.yml",
+                       "deploy.eros-relay.yml", "deploy.eros-api.yml"):
             self.assertIn(f"config/{config}", config_check)
         self.assertIn("config-validation-placeholder", config_check)
         self.assertIn("Kamal config validation failed", config_check)

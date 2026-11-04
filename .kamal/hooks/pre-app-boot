@@ -24,6 +24,8 @@ case "$service" in
   gpoint-core) repository=ghcr.io/akhripunov/gpoint-runtime ;;
   gpoint-agata) repository=ghcr.io/akhripunov/gpoint-agata-runtime ;;
   gpoint-miniapp) repository=ghcr.io/akhripunov/gpoint-miniapp ;;
+  gpoint-eros-pilot) repository=ghcr.io/akhripunov/gpoint-eros ;;
+  gpoint-eros-relay) repository=ghcr.io/akhripunov/gpoint-runtime ;;
   *) echo 'Unrecognized GPoint Kamal service' >&2; exit 1 ;;
 esac
 
@@ -42,7 +44,11 @@ image="$repository:$version"
 [[ "$expected_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
 [[ "$app_source_sha" =~ ^[0-9a-f]{40}$ ]]
 repo_digests="$(docker image inspect --format '{{json .RepoDigests}}' "$image")"
-source_sha="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")"
+if [[ "$repository" == ghcr.io/akhripunov/gpoint-eros ]]; then
+  source_sha="$(docker image inspect --format '{{index .Config.Labels "com.gpoint.source.revision"}}' "$image")"
+else
+  source_sha="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")"
+fi
 platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")"
 EXPECTED_REF="$repository@$expected_digest" python3 - "$repo_digests" <<'PY'
 import json, os, sys

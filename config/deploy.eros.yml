@@ -1,5 +1,5 @@
 service: gpoint-eros-pilot
-image: akhripunov/gpoint-eros-pilot
+image: akhripunov/gpoint-eros
 primary_role: engine
 
 servers:
@@ -11,7 +11,7 @@ servers:
       network: gpoint_eros_data
       env-file:
         - /opt/gpoint/env/eros-engine.env
-      volume: /opt/gpoint/releases/<%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>/source/services/eros-engine/eros-production-model-config.toml:/etc/eros-engine/model_config.toml:ro
+      volume: /opt/gpoint/env/eros-production-model-config.toml:/etc/eros-engine/model_config.toml:ro
       memory: 384m
       memory-swap: 384m
       cpus: 0.50

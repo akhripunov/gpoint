@@ -157,6 +157,8 @@ def test_kamal_uses_attempt_scoped_tag_with_buildkit_digest_verification():
     assert hook.startswith("#!/bin/sh\n")
     assert 'case "$version" in "$candidate"-*)' in hook
     assert 'EXPECTED_REF="$repository@$expected_digest"' in hook
+    assert "gpoint-eros-pilot) repository=ghcr.io/akhripunov/gpoint-eros ;;" in hook
+    assert 'com.gpoint.source.revision' in hook
 
 
 def test_kamal_deploy_uses_native_verified_images_and_preserves_first_cutover_guard():
@@ -288,6 +290,9 @@ def test_kamal_network_hook_joins_only_allowed_core_and_agata_roles():
     assert "StrictHostKeyChecking=yes" in hook
     assert "gsales" not in hook.lower()
     assert "gpoint-miniapp:web) networks='gpoint_app:'" in hook
+    assert "gpoint-eros-pilot)" in hook and "gpoint-eros-relay)" in hook
+    assert "gpoint-eros-pilot:engine|gpoint-eros-relay:relay) networks=''" in hook
+    assert "Eros engine is not attached to its data network" in hook
     assert "getent hosts api" in hook
     assert 'GPOINT_KAMAL_ROOT_ROUTE_BOOTSTRAP' in hook
     assert 'DEFERRED_FOR_FIRST_CUTOVER' in hook
@@ -1672,7 +1677,8 @@ def test_ordinary_verify_receives_baseline_facts_in_remote_shell():
     values = {
         'CANDIDATE_SHA': 'a' * 40, 'IMAGE_VERSION': 'a' * 40 + '-123-1',
         'APP_DIGEST': 'sha256:' + 'b' * 64, 'AGATA_DIGEST': 'sha256:' + 'c' * 64,
-        'MINIAPP_DIGEST': 'sha256:' + 'd' * 64, 'DB_CONTAINER_ID': 'e' * 64,
+        'MINIAPP_DIGEST': 'sha256:' + 'd' * 64, 'EROS_DIGEST': 'sha256:' + 'e' * 64,
+        'DB_CONTAINER_ID': 'e' * 64,
         'REDIS_CONTAINER_ID': 'f' * 64, 'DEPLOYMENT_ID': '7', 'GITHUB_RUN_ID': '123',
         'GITHUB_RUN_ATTEMPT': '1', 'writer_remote': '/run/gpoint-ordinary-manifest-123-1.py',
         'BASELINE_PRISMA_MIGRATIONS': 'migration', 'BASELINE_PRISMA_CHECKSUMS': 'migration=checksum',

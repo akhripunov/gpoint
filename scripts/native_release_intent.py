@@ -69,7 +69,8 @@ COMPONENT_ROLES = {
     "AGATA": ("gpoint-agata-api", "gpoint-agata-memory-worker"),
     "MINIAPP": ("gpoint-miniapp-web",),
 }
-EROS_ROLE = ("gpoint-eros-engine",)
+EROS_ROLES = ("gpoint-eros-pilot-engine", "gpoint-eros-relay-relay")
+ALL_COMPONENT_ROLES = {**COMPONENT_ROLES, "EROS": EROS_ROLES}
 ROLE_REPOSITORIES = {
     "gpoint-core-api": "ghcr.io/akhripunov/gpoint-runtime",
     "gpoint-core-worker": "ghcr.io/akhripunov/gpoint-runtime",
@@ -77,8 +78,18 @@ ROLE_REPOSITORIES = {
     "gpoint-agata-api": "ghcr.io/akhripunov/gpoint-agata-runtime",
     "gpoint-agata-memory-worker": "ghcr.io/akhripunov/gpoint-agata-runtime",
     "gpoint-miniapp-web": "ghcr.io/akhripunov/gpoint-miniapp",
-    "gpoint-eros-engine": "ghcr.io/akhripunov/gpoint-eros",
+    "gpoint-eros-pilot-engine": "ghcr.io/akhripunov/gpoint-eros",
+    # The Eros relay is a separate Kamal service using the GPoint runtime image.
+    "gpoint-eros-relay-relay": "ghcr.io/akhripunov/gpoint-runtime",
 }
+ROLE_IDENTITY_GROUP = {
+    **{role: "CORE" for role in COMPONENT_ROLES["CORE"]},
+    **{role: "AGATA" for role in COMPONENT_ROLES["AGATA"]},
+    **{role: "MINIAPP" for role in COMPONENT_ROLES["MINIAPP"]},
+    "gpoint-eros-pilot-engine": "EROS_ENGINE",
+    "gpoint-eros-relay-relay": "EROS_RELAY",
+}
+BASELINE_ROLES = set(ROLE_REPOSITORIES) - set(EROS_ROLES)
 EXACT_SHA = re.compile(r"^[0-9a-f]{40}$")
 EXACT_VERSION = re.compile(r"^[0-9a-f]{40}-[0-9]+-[0-9]+$")
 EXACT_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -184,28 +195,33 @@ def _validate_role_inventory(inventory: dict) -> dict[str, dict[str, str]]:
     if not isinstance(inventory, dict) or not isinstance(inventory.get("roles"), dict):
         raise ValueError("verified role inventory is missing")
     roles = inventory["roles"]
-    if set(roles) not in (set(ROLE_REPOSITORIES), set(ROLE_REPOSITORIES) - {"gpoint-eros-engine"}):
+    if set(roles) not in (set(ROLE_REPOSITORIES), BASELINE_ROLES):
         raise ValueError("verified role inventory has an unexpected role set")
-    component_identities: dict[str, tuple[str, str, str]] = {}
+    repository_identities: dict[str, tuple[str, str]] = {}
     for role, repository in ROLE_REPOSITORIES.items():
         if role not in roles:
             continue
         row = roles[role]
         if not isinstance(row, dict):
             raise ValueError("verified role inventory is malformed")
-        version, source, image_id, repo_digest = (
-            row.get("version"), row.get("source_sha"), row.get("image_id"), row.get("repo_digest")
+        name, version, source, image_id, repo_digest = (
+            row.get("name"), row.get("version"), row.get("source_sha"), row.get("image_id"), row.get("repo_digest")
         )
         if (not isinstance(version, str) or not EXACT_VERSION.fullmatch(version)
+                or name != f"{role}-{version}"
                 or not isinstance(source, str) or not EXACT_SHA.fullmatch(source)
                 or not isinstance(image_id, str) or not EXACT_DIGEST.fullmatch(image_id)
                 or not isinstance(repo_digest, str)
                 or not re.fullmatch(re.escape(repository) + r"@sha256:[0-9a-f]{64}", repo_digest)):
             raise ValueError("verified role inventory contains an invalid runtime identity")
-        identity = (version, source, repo_digest)
-        if repository in component_identities and component_identities[repository] != identity:
-            raise ValueError("shared image roles have different runtime identities")
-        component_identities[repository] = identity
+        # One image repository may serve independently-versioned Kamal services.
+        # The image bytes/digest must agree, while each service's version/source
+        # identity remains role-specific.
+        identity = (image_id, repo_digest)
+        group = ROLE_IDENTITY_GROUP[role]
+        if group in repository_identities and repository_identities[group] != identity:
+            raise ValueError("shared image roles have different image identities")
+        repository_identities[group] = identity
     return roles
 
 
@@ -258,8 +274,9 @@ def classify_component_build_plan(repo: Path, candidate: str,
     """Classify runtime updates and image-only Prisma migration build impact."""
     if not EXACT_SHA.fullmatch(candidate or ""):
         raise ValueError("candidate SHA is invalid")
+    required_sources = set(COMPONENT_ROLES)
     if (not isinstance(component_sources, dict)
-            or set(component_sources) not in (set(COMPONENT_ROLES), set(COMPONENT_ROLES) | {"EROS"})):
+            or set(component_sources) not in (required_sources, required_sources | {"EROS"})):
         raise ValueError("component production source inventory is incomplete")
     for component, source in component_sources.items():
         if not isinstance(source, str) or not EXACT_SHA.fullmatch(source):
@@ -312,6 +329,10 @@ def classify_component_build_plan(repo: Path, candidate: str,
     # paths still fail closed above.
     runtime_scope = "+".join(sorted(components)) if components else "NONE"
     build_components = set(components)
+    if "EROS" in components:
+        # Eros API integration and relay share the CORE runtime artifact, but
+        # their Kamal services remain independently scoped from Core roles.
+        build_components.add("CORE")
     if core_migration_paths:
         build_components.add("CORE")
     return {
@@ -327,13 +348,10 @@ def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dic
     component_sources = {
         component: roles[component_roles[0]]["source_sha"]
         for component, component_roles in COMPONENT_ROLES.items()
-        if component_roles[0] in roles
     }
-    if "gpoint-eros-engine" in roles:
-        component_sources["EROS"] = roles["gpoint-eros-engine"]["source_sha"]
-    else:
-        component_sources["EROS"] = roles["gpoint-core-api"]["source_sha"]
-        component_sources.pop("EROS")
+    eros_installed = "gpoint-eros-pilot-engine" in roles
+    component_sources["EROS"] = (roles["gpoint-eros-pilot-engine"]["source_sha"] if eros_installed
+                                  else roles["gpoint-core-api"]["source_sha"])
     plan = classify_component_build_plan(repo, candidate, component_sources)
     components = set(str(plan["deploy_scope"]).split("+")) - {"NONE"}
     result = {
@@ -342,9 +360,9 @@ def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dic
         "deploy_core": "CORE" in components,
         "deploy_agata": "AGATA" in components,
         "deploy_miniapp": "MINIAPP" in components,
+        "deploy_eros": "EROS" in components,
+        "eros_bootstrap": "EROS" in components and not eros_installed,
     }
-    if "gpoint-eros-engine" in roles:
-        result["deploy_eros"] = "EROS" in components
     return result
 
 
@@ -369,26 +387,40 @@ def expected_runtime_inventory(scope: str, inventory: dict, candidate: str, vers
             raise ValueError("updated candidate runtime image digest is invalid")
         if component not in updated and value and not EXACT_DIGEST.fullmatch(value):
             raise ValueError("baseline runtime image digest is invalid")
+    if "EROS" in updated and not EXACT_DIGEST.fullmatch(app_digest or ""):
+        raise ValueError("updated Eros relay runtime image digest is invalid")
     inventory_out = {}
     group_repo_digests = {
         "CORE": (f"{ROLE_REPOSITORIES['gpoint-core-api']}@{app_digest}" if app_digest else None),
         "AGATA": (f"{ROLE_REPOSITORIES['gpoint-agata-api']}@{agata_digest}" if agata_digest else None),
         "MINIAPP": (f"{ROLE_REPOSITORIES['gpoint-miniapp-web']}@{miniapp_digest}" if miniapp_digest else None),
-        "EROS": (f"{ROLE_REPOSITORIES['gpoint-eros-engine']}@{eros_digest}" if eros_digest else None),
+        "EROS": (f"{ROLE_REPOSITORIES['gpoint-eros-pilot-engine']}@{eros_digest}" if eros_digest else None),
     }
-    all_component_roles = {**COMPONENT_ROLES, "EROS": EROS_ROLE}
-    for component, component_roles in all_component_roles.items():
+    for component, component_roles in ALL_COMPONENT_ROLES.items():
         for role in component_roles:
-            if role not in roles:
+            if role not in roles and not (component == "EROS" and component in updated):
                 continue
-            baseline = roles[role]
-            inventory_out[role] = ({"version": version, "sourceSha": candidate,
-                                    "repositoryDigest": group_repo_digests[component],
-                                    "baselineImageId": None}
-                                   if component in updated else
-                                   {"version": baseline["version"], "sourceSha": baseline["source_sha"],
-                                    "repositoryDigest": baseline["repo_digest"],
-                                    "baselineImageId": baseline["image_id"]})
+            baseline = roles.get(role)
+            role_component = component
+            if component == "EROS" and role == "gpoint-eros-relay-relay":
+                # Eros deploys a freshly built CORE runtime image to the relay
+                # role only; the regular Core roles remain untouched on EROS-only scope.
+                role_component = "CORE"
+            if component in updated:
+                repository_digest = group_repo_digests[role_component]
+                if not repository_digest:
+                    # For Eros API/relay, this is the no-Core-build case handled
+                    # above; all other updated components require their digest.
+                    raise ValueError(f"updated {component} runtime digest is required")
+                inventory_out[role] = {"version": version, "sourceSha": candidate,
+                                       "repositoryDigest": repository_digest,
+                                       "baselineImageId": None}
+            else:
+                if baseline is None:
+                    continue
+                inventory_out[role] = {"version": baseline["version"], "sourceSha": baseline["source_sha"],
+                                       "repositoryDigest": baseline["repo_digest"],
+                                       "baselineImageId": baseline["image_id"]}
     return {"schema": 1, "candidateSha": candidate, "scope": scope,
             "updatedComponents": sorted(updated), "roles": inventory_out}
 

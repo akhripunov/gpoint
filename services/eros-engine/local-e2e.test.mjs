@@ -93,7 +93,7 @@ test('GPoint-owned read receipts preserve selected-message semantics and survive
   assert.doesNotMatch(stateModel, /content|text|memory|summary/i);
 });
 
-test('creator erasure fixture removes dependent profile before asserting relationship mapping guard', () => {
+test('creator cleanup retains the GPoint-owned Eros relationship reference', () => {
   const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
   const profileDelete = runner.indexOf('DELETE FROM \"CreatorProfile\"');
   const creatorDelete = runner.indexOf('DELETE FROM \"Creator\"');
@@ -103,15 +103,22 @@ test('creator erasure fixture removes dependent profile before asserting relatio
   assert.match(runner, /ErosRelationshipMapping_creatorId_fkey/);
 });
 
-test('GPoint mapping deletion is blocked until Eros has a supported data-erasure lifecycle', () => {
+test('GPoint consent and Eros mapping foreign keys preserve ownership records', () => {
   const schema = readFileSync(new URL('../../packages/db/prisma/schema.prisma', directory), 'utf8');
   const migration = readFileSync(new URL('../../packages/db/prisma/migrations/20261020153000_eros_external_relationship_mapping/migration.sql', directory), 'utf8');
   const model = schema.match(/model ErosRelationshipMapping \{[\s\S]*?\n\}/)?.[0] ?? '';
+  const consent = schema.match(/model GpointChatConsent \{[\s\S]*?\n\}/)?.[0] ?? '';
+  const age = schema.match(/model GpointAgeAssurance \{[\s\S]*?\n\}/)?.[0] ?? '';
   assert.match(model, /user User @relation\(fields: \[userId\], references: \[id\], onDelete: Restrict\)/);
   assert.match(model, /creator Creator @relation\(fields: \[creatorId\], references: \[id\], onDelete: Restrict\)/);
+  assert.match(consent, /user User @relation\(fields: \[userId\], references: \[id\], onDelete: Restrict/);
+  assert.match(age, /user User @relation\(fields: \[userId\], references: \[id\], onDelete: Restrict/);
   assert.match(migration, /ErosRelationshipMapping_userId_fkey[\s\S]*?ON DELETE RESTRICT/);
   assert.match(migration, /ErosRelationshipMapping_creatorId_fkey[\s\S]*?ON DELETE RESTRICT/);
   assert.doesNotMatch(migration, /ErosRelationshipMapping_(?:userId|creatorId)_fkey[^;]*ON DELETE CASCADE/);
+  const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
+  assert.match(runner, /LOCAL_E2E_GPOINT_MAPPING_OWNERSHIP=PASS/);
+  assert.doesNotMatch(runner, /MAPPING_ERASURE_GUARD|blocked_without_stock_eros_erase/);
 });
 
 test('model config routes chat, embeddings and synthetic memory extraction to the internal GPOINT bridge', () => {

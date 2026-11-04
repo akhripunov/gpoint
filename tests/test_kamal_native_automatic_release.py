@@ -521,7 +521,8 @@ def test_protected_rollback_uses_only_verified_prior_target_and_shared_lock():
     assert rollback["permissions"] == {"contents": "read", "packages": "read", "deployments": "write"}
     body = yaml.safe_dump(rollback)
     names = [step.get("name", step.get("uses", "")) for step in rollback["steps"]]
-    assert names.index("Validate linked build, successful Runtime Verify and six-role manifest") < names.index("Verify target digests, platform, revision and provenance")
+    assert names.index("Validate linked build, successful Runtime Verify and component-role manifest") < names.index("Verify target digests, platform, revision and provenance")
+    assert names.index("Block Eros rollback until target SQLx compatibility is verified") < names.index("Roll back consumers and then APIs with stock Kamal")
     assert names.index("Verify target digests, platform, revision and provenance") < names.index("Verify live DB compatibility and retained target containers before mutation")
     assert names.index("Verify live DB compatibility and retained target containers before mutation") < names.index("Roll back consumers and then APIs with stock Kamal")
     assert names.index("Roll back consumers and then APIs with stock Kamal") < names.index("Verify rollback Runtime and preserve databases before SUCCESS")
