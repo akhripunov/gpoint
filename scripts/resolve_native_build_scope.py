@@ -55,6 +55,23 @@ def _latest_status(statuses: list[dict]) -> dict:
     return matches[0]
 
 
+def _is_github_environment_job_record(deployment: dict) -> bool:
+    """Recognize the empty, non-production record GitHub creates for an Environment job."""
+    return (
+        deployment.get("environment") == "production"
+        and deployment.get("production_environment") is False
+        and deployment.get("transient_environment") is False
+        and deployment.get("task") == "deploy"
+        and deployment.get("payload") == {}
+    )
+
+
+def _production_deployments(deployments: list[dict]) -> list[dict]:
+    return [row for row in deployments
+            if row.get("environment") == "production"
+            and not _is_github_environment_job_record(row)]
+
+
 def _manifest_baseline(environment_url: object, *, deployment_task: str,
                         deployment_sha: str) -> dict | None:
     if not isinstance(environment_url, str) or not environment_url:
@@ -105,7 +122,7 @@ def resolve_production_component_sources(deployments: list[dict], statuses_by_id
         raise ValueError("production Deployment collection is malformed")
     if not deployments:
         return {"status": "BOOTSTRAP_FULL", "reason": "production_component_baseline_unavailable"}
-    eligible = [row for row in deployments if row.get("environment") == "production"]
+    eligible = _production_deployments(deployments)
     if not eligible:
         raise ValueError("production Deployment collection has no production record")
     newest = max(_timestamp(row.get("created_at")) for row in eligible)
@@ -210,7 +227,7 @@ def main() -> int:
         statuses_by_id = {}
         if any(not isinstance(row, dict) for row in deployments):
             raise ValueError("production Deployment collection is malformed")
-        eligible = [row for row in deployments if row.get("environment") == "production"]
+        eligible = _production_deployments(deployments)
         if eligible:
             newest = max(_timestamp(row.get("created_at")) for row in eligible)
             latest_rows = [row for row in eligible if _timestamp(row.get("created_at")) == newest]
