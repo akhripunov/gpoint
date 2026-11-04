@@ -439,6 +439,7 @@ def test_known_release_infrastructure_candidate_has_no_application_component_sco
         "packages/db/prisma/migrations/20261103120000_release_guard/migration.sql": "SELECT 1;\n",
         "scripts/gpoint-backup-policy.py": "updated backup policy\n",
         "scripts/classify-release-prepush.py": "updated pre-push classifier\n",
+        "scripts/check-kamal-configs.sh": "updated Kamal config validation helper\n",
         "scripts/gpoint-scheduled-backup.py": "updated backup runner\n",
         "scripts/native_release_intent.py": "updated scope classifier\n",
         "scripts/prisma_migration_release_plan.py": "updated migration planner\n",
