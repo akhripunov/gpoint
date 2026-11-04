@@ -516,13 +516,14 @@ export class MessagesController {
     const creator = await findApprovedCreator(creatorId);
     const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, languageCode: true } });
     if (!user) throw new UnauthorizedException();
+    let agata: ReturnType<typeof agataOrUnavailable> | null = null;
     try {
       if (gpointChatPolicyPilot(userId, creatorId)) {
         await requireErosConsent(undefined, userId, creatorId);
         if (!await canRouteErosChat(userId, creator)) throw new HttpException({ code: 'CHAT_UNAVAILABLE' }, 403);
         return await sendErosMessage(userId, creatorId, creator, body.clientMessageId, text);
       }
-      const agata = agataOrUnavailable();
+      agata = agataOrUnavailable();
       const current = await agata.chatState(userId);
       assertMessageAgeAssurance(current);
       if (!current.chatHistory || current.disclosureRequired) throw new HttpException({ code: 'CHAT_CONSENT_REQUIRED' }, 403);
@@ -560,7 +561,7 @@ export class MessagesController {
       };
     } catch (error) {
       if (error instanceof HttpException) throw error;
-      if (error instanceof AgataServiceError && error.status === 403 && error.code === 'compliance_not_permitted') {
+      if (agata && error instanceof AgataServiceError && error.status === 403 && error.code === 'compliance_not_permitted') {
         try {
           const refreshed = await agata.chatState(userId);
           if (refreshed.ageAssuranceRequired) throw new HttpException({ code: 'AGE_ASSURANCE_REQUIRED' }, 403);
