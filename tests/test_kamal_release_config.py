@@ -1,5 +1,7 @@
 import pytest
 
+import base64
+import json
 from pathlib import Path
 import os
 import hashlib
@@ -102,19 +104,21 @@ def test_kamal_agata_and_miniapp_are_separate_services():
 
 
 def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
-    assert "  workspace:" in workflow
-    assert "  python:" in workflow
-    assert "  build:" in workflow
-    assert "needs: [workspace, python]" in workflow
-    assert "if: needs.workspace.outputs.mode == 'DEPLOY' || needs.workspace.outputs.mode == 'REHEARSAL'" in workflow
-    assert "cache-to: type=gha,scope=gpoint-runtime,mode=max" in workflow
-    assert "sbom: true" in workflow
-    assert "provenance: mode=max" in workflow
-    assert "  deploy:" in workflow
-    assert "needs: [workspace, python, build]" in workflow
-    assert "name: production" in workflow
-    assert "deployment: false" in workflow
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    jobs = workflow["jobs"]
+    assert {"workspace", "python", "build", "deploy"}.issubset(jobs)
+    assert jobs["build"]["needs"] == ["workspace", "python"]
+    assert jobs["build"]["if"] == "needs.workspace.outputs.mode == 'DEPLOY' || needs.workspace.outputs.mode == 'REHEARSAL'"
+    build_steps = yaml.safe_dump(jobs["build"]["steps"])
+    assert "cache-to: type=gha,scope=gpoint-runtime,mode=max" in build_steps
+    assert "sbom: true" in build_steps
+    assert "provenance: mode=max" in build_steps
+    assert jobs["deploy"]["needs"] == ["workspace", "python", "build"]
+    assert jobs["deploy"]["environment"] == {
+        "name": "production",
+        "url": "${{ steps.verify.outputs.environment_url }}",
+    }
+    assert "deployment" not in jobs["deploy"]["environment"]
 
 
 def test_first_cutover_build_images_include_the_kamal_service_labels():
@@ -138,9 +142,9 @@ def test_kamal_uses_attempt_scoped_tag_with_buildkit_digest_verification():
     version = "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
     assert f"IMAGE_VERSION: {version}" in deploy
     assert "ghcr.io/akhripunov/gpoint-runtime:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}" in workflow
-    assert "name: Verify GHCR candidate tags resolve to exact amd64 digests" in deploy
+    assert "name: Verify immutable candidate images selected for the live scope" in deploy
     assert 'docker pull --platform linux/amd64 "$repository:$IMAGE_VERSION"' in deploy
-    assert 'test "$actual" = "$repository@$digest"' in deploy
+    assert 'docker image inspect "$repository:$IMAGE_VERSION" --format' in deploy
     assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST"' in deploy
     assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST"' in deploy
     assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST"' in deploy
@@ -648,8 +652,8 @@ def test_kamal_cutover_requires_candidate_and_live_migration_heads_to_match(tmp_
     (prisma_dir / "20261015130000_codex_telegram_challenge" / "migration.sql").write_text("SELECT 1;\n")
     agata_dir = tmp_path / "agata"
     agata_dir.mkdir()
-    (agata_dir / "0010.py").write_text("revision = 'agata0010'\ndown_revision = None\n")
-    (agata_dir / "0011.py").write_text("revision = 'agata0011'\ndown_revision = 'agata0010'\n")
+    (agata_dir / "agata0010_baseline.py").write_text("revision = 'agata0010'\ndown_revision = None\n")
+    (agata_dir / "agata0011_messages.py").write_text("revision = 'agata0011'\ndown_revision = 'agata0010'\n")
     result = subprocess.run(
         ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
          "--prisma-directory", str(prisma_dir), "--prisma-current-head", "20261015130000_codex_telegram_challenge",
@@ -663,6 +667,34 @@ def test_kamal_cutover_requires_candidate_and_live_migration_heads_to_match(tmp_
     assert "GPOINT_KAMAL_DB_MIGRATION_REQUIRED=NO" in result.stdout
 
 
+def test_kamal_migration_parity_uses_alembic_script_directory_for_revision_graph(tmp_path):
+    prisma_dir = tmp_path / "prisma"
+    migration = prisma_dir / "20261015130000_baseline"
+    migration.mkdir(parents=True)
+    (migration / "migration.sql").write_text("SELECT 1;\n", encoding="utf-8")
+    agata_dir = tmp_path / "agata"
+    agata_dir.mkdir()
+    (agata_dir / "agata0001_baseline.py").write_text(
+        'revision = f"agata{1:04d}"\ndown_revision = None\n', encoding="utf-8"
+    )
+    (agata_dir / "agata0002_messages.py").write_text(
+        'revision = "agata0002"\ndown_revision = "agata0001"\n', encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
+         "--prisma-directory", str(prisma_dir), "--prisma-current-head", "20261015130000_baseline",
+         "--prisma-current-migrations", "20261015130000_baseline",
+         "--prisma-current-checksums", "20261015130000_baseline=" + hashlib.sha256(b"SELECT 1;\n").hexdigest(),
+         "--agata-directory", str(agata_dir), "--agata-current-head", "agata0002"],
+        capture_output=True, text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "GPOINT_KAMAL_MIGRATION_PARITY=PASS" in result.stdout
+    assert "AGATA_HEAD=agata0002" in result.stdout
+
+
 def test_kamal_migration_parity_rejects_changed_applied_prisma_sql(tmp_path):
     prisma_dir = tmp_path / "prisma"
     migration = prisma_dir / "20261015130000_codex_telegram_challenge"
@@ -670,7 +702,7 @@ def test_kamal_migration_parity_rejects_changed_applied_prisma_sql(tmp_path):
     (migration / "migration.sql").write_text("SELECT 1;\n", encoding="utf-8")
     agata_dir = tmp_path / "agata"
     agata_dir.mkdir()
-    (agata_dir / "0010.py").write_text("revision = 'agata0010'\ndown_revision = None\n")
+    (agata_dir / "agata0010_baseline.py").write_text("revision = 'agata0010'\ndown_revision = None\n")
     recorded = hashlib.sha256(b"SELECT 2;\n").hexdigest()
     result = subprocess.run(
         ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
@@ -693,9 +725,9 @@ def test_kamal_migration_parity_fails_closed_for_pending_candidate_revision(tmp_
     (prisma_dir / "20261022110000_eros_gpoint_message_state" / "migration.sql").write_text("SELECT 1;\n")
     agata_dir = tmp_path / "agata"
     agata_dir.mkdir()
-    (agata_dir / "0010.py").write_text("revision = 'agata0010'\ndown_revision = None\n")
-    (agata_dir / "0011.py").write_text("revision = 'agata0011'\ndown_revision = 'agata0010'\n")
-    (agata_dir / "0012.py").write_text("revision = 'agata0012'\ndown_revision = 'agata0011'\n")
+    (agata_dir / "agata0010_baseline.py").write_text("revision = 'agata0010'\ndown_revision = None\n")
+    (agata_dir / "agata0011_messages.py").write_text("revision = 'agata0011'\ndown_revision = 'agata0010'\n")
+    (agata_dir / "agata0012_eros.py").write_text("revision = 'agata0012'\ndown_revision = 'agata0011'\n")
     result = subprocess.run(
         ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
          "--prisma-directory", str(prisma_dir), "--prisma-current-head", "20261015130000_codex_telegram_challenge",
@@ -725,8 +757,8 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
         "ALTER TABLE engine.eros_inference_jobs RENAME COLUMN legacy_code TO normalized_code;\n", encoding="utf-8")
     agata = repo / "services/agata/migrations/versions"
     agata.mkdir(parents=True)
-    (agata / "0011.py").write_text("revision = 'agata0011'\ndown_revision = None\n", encoding="utf-8")
-    (agata / "0012.py").write_text(
+    (agata / "agata0011_messages.py").write_text("revision = 'agata0011'\ndown_revision = None\n", encoding="utf-8")
+    (agata / "agata0012_eros.py").write_text(
         "revision = 'agata0012'\ndown_revision = 'agata0011'\n"
         "SQL = \"UPDATE agata.regional_policy_profiles SET status='retired' "
         "WHERE rules->>'ai_disclosure_required'='true'\"\n", encoding="utf-8")
@@ -764,6 +796,18 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
     assert result.returncode == 0, result.stderr
     assert "GPOINT_KAMAL_SCHEMA_COMPATIBILITY=PASS" in result.stdout
     assert "GPOINT_KAMAL_DB_MIGRATION_REQUIRED=YES" in result.stdout
+    native_release = subprocess.run(
+        ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
+         "--policy", "compatible", "--require-no-agata-pending", "--repo-root", str(repo),
+         "--baseline-source-sha", baseline_sha, "--candidate-source-sha", candidate_sha,
+         "--prisma-directory", str(prisma), "--prisma-current-head", base_name,
+         "--prisma-current-migrations", base_name,
+         "--prisma-current-checksums", base_name + "=" + hashlib.sha256(base_sql.encode()).hexdigest(),
+         "--agata-directory", str(agata), "--agata-current-head", "agata0011"],
+        capture_output=True, text=True,
+    )
+    assert native_release.returncode != 0
+    assert "PENDING_AGATA_MIGRATION" in native_release.stderr
     app_file.write_text("export const errorCode = 'error_code';\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "app depends on pending varchar field"], check=True)
@@ -825,7 +869,7 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
     assert checksum_drift.returncode != 0
     assert "PRISMA_MIGRATION_CHECKSUM_MISMATCH" in checksum_drift.stderr
 
-    (agata / "0011.py").write_text(
+    (agata / "agata0011_messages.py").write_text(
         "revision = 'agata0011'\ndown_revision = None\n# altered after production apply\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "alter applied AGATA revision"], check=True)
@@ -843,7 +887,7 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
     assert changed_revision.returncode != 0
     assert "APPLIED_ALEMBIC_MIGRATION_CHANGED:agata0011" in changed_revision.stderr
 
-    (agata / "0011.py").write_text("revision = 'agata0011'\ndown_revision = None\n", encoding="utf-8")
+    (agata / "agata0011_messages.py").write_text("revision = 'agata0011'\ndown_revision = None\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "restore applied AGATA migration identity"], check=True)
     app_file.write_text("export const health = true;\n", encoding="utf-8")
@@ -924,10 +968,12 @@ def test_kamal_schema_compatibility_accepts_divergent_live_source_only_when_tree
         "CREATE TABLE engine.pending_queue (id UUID PRIMARY KEY);\n", encoding="utf-8")
     agata = repo / "services/agata/migrations/versions"
     agata.mkdir(parents=True)
-    (agata / "0011.py").write_text("revision = 'agata0011'\ndown_revision = None\n", encoding="utf-8")
-    (agata / "0012.py").write_text(
+    (agata / "agata0011_messages.py").write_text("revision = 'agata0011'\ndown_revision = None\n", encoding="utf-8")
+    (agata / "agata0012_eros.py").write_text(
         "revision = 'agata0012'\ndown_revision = 'agata0011'\n"
-        "op.add_column('regional_policy_profiles', sa.Column('new_field', sa.String()))\n", encoding="utf-8")
+        "from alembic import op\nimport sqlalchemy as sa\n"
+        "def upgrade():\n    op.add_column('regional_policy_profiles', sa.Column('new_field', sa.String()))\n",
+        encoding="utf-8")
     live_app = repo / "apps/miniapp/src/model-routing.js"
     live_app.parent.mkdir(parents=True)
     live_app.write_text("export const host = 'gpoint.one';\n", encoding="utf-8")
@@ -1235,14 +1281,26 @@ def test_manifest_writer_behavior_tests_run_in_python_ci():
 
 
 def test_native_release_runs_kamal_after_successful_main_push():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
-    deploy = workflow.split("  deploy:\n", 1)[1]
-    assert "if: needs.workspace.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true))" in deploy
-    assert "CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}" in deploy
-    assert "test \"$APPROVE_PRODUCTION\" = true" in deploy
-    assert "if [[ \"$GITHUB_EVENT_NAME\" == workflow_dispatch ]]; then" in deploy
-    assert "name: production" in deploy
-    assert "deployment: false" in deploy
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    deploy = workflow["jobs"]["deploy"]
+    assert deploy["if"] == "needs.workspace.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true))"
+    assert deploy["environment"] == {
+        "name": "production",
+        "url": "${{ steps.verify.outputs.environment_url }}",
+    }
+    deploy_script = "\n".join(step.get("run", "") for step in deploy["steps"])
+    assert 'test "$APPROVE_PRODUCTION" = true' in deploy_script
+    assert 'test "$REQUESTED_SHA" = "$WORKFLOW_SHA"' in deploy_script
+    assert "Resolve exact GitHub environment Deployment ID" in [step.get("name") for step in deploy["steps"]]
+    assert 'repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses' not in deploy_script
+
+    rollback = workflow["jobs"]["rollback"]
+    assert rollback["environment"] == {
+        "name": "production", "url": "${{ steps.verify.outputs.environment_url }}",
+    }
+    rollback_script = "\n".join(step.get("run", "") for step in rollback["steps"])
+    assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments' not in rollback_script
+    assert "gpoint-runtime-target-sha=" in rollback_script
 
 
 def test_native_migration_parity_runs_prisma_from_api_workspace():
@@ -1549,6 +1607,21 @@ def test_ordinary_verify_receives_baseline_facts_in_remote_shell():
         'GITHUB_RUN_ATTEMPT': '1', 'writer_remote': '/run/gpoint-ordinary-manifest-123-1.py',
         'BASELINE_PRISMA_MIGRATIONS': 'migration', 'BASELINE_PRISMA_CHECKSUMS': 'migration=checksum',
         'BASELINE_PRISMA_HEAD': 'migration', 'BASELINE_AGATA_HEAD': 'agata0012',
+        'EXPECTED_PRISMA_MIGRATIONS': 'migration', 'EXPECTED_PRISMA_CHECKSUMS': 'migration=checksum',
+        'EXPECTED_PRISMA_HEAD': 'migration', 'EXPECTED_AGATA_HEAD': 'agata0012',
+        'PENDING_PRISMA_MIGRATIONS': '', 'PENDING_PRISMA_CHECKSUMS': '',
+        'EXPECTED_ROLE_IDENTITIES_B64': base64.b64encode(json.dumps({
+            'schema': 1, 'candidateSha': 'a' * 40, 'scope': 'FULL',
+            'updatedComponents': ['AGATA', 'CORE', 'MINIAPP'],
+            'roles': {
+                'gpoint-core-api': {'version': 'a' * 40 + '-123-1', 'sourceSha': 'a' * 40, 'repositoryDigest': 'ghcr.io/akhripunov/gpoint-runtime@sha256:' + 'b' * 64, 'baselineImageId': None},
+                'gpoint-core-worker': {'version': 'a' * 40 + '-123-1', 'sourceSha': 'a' * 40, 'repositoryDigest': 'ghcr.io/akhripunov/gpoint-runtime@sha256:' + 'b' * 64, 'baselineImageId': None},
+                'gpoint-core-bot': {'version': 'a' * 40 + '-123-1', 'sourceSha': 'a' * 40, 'repositoryDigest': 'ghcr.io/akhripunov/gpoint-runtime@sha256:' + 'b' * 64, 'baselineImageId': None},
+                'gpoint-agata-api': {'version': 'a' * 40 + '-123-1', 'sourceSha': 'a' * 40, 'repositoryDigest': 'ghcr.io/akhripunov/gpoint-agata-runtime@sha256:' + 'c' * 64, 'baselineImageId': None},
+                'gpoint-agata-memory-worker': {'version': 'a' * 40 + '-123-1', 'sourceSha': 'a' * 40, 'repositoryDigest': 'ghcr.io/akhripunov/gpoint-agata-runtime@sha256:' + 'c' * 64, 'baselineImageId': None},
+                'gpoint-miniapp-web': {'version': 'a' * 40 + '-123-1', 'sourceSha': 'a' * 40, 'repositoryDigest': 'ghcr.io/akhripunov/gpoint-miniapp@sha256:' + 'd' * 64, 'baselineImageId': None},
+            },
+        }, separators=(',', ':')).encode()).decode(),
         'BASELINE_ROLE_VERSION': 'b' * 40 + '-100-1', 'BASELINE_ROLE_SOURCE_SHA': 'b' * 40,
         'DB_MOUNTS_SHA256': 'c' * 64, 'REDIS_MOUNTS_SHA256': 'd' * 64,
     }
@@ -1574,10 +1647,13 @@ def test_ordinary_verify_receives_baseline_facts_in_remote_shell():
 
 
 def test_consumer_process_checks_do_not_require_ps_inside_slim_images():
-    workflow = (ROOT / '.github/workflows/gpoint-native-release.yml').read_text()
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    deploy = "\n".join(step.get("run", "") for step in workflow["jobs"]["deploy"]["steps"])
+    rollback = "\n".join(step.get("run", "") for step in workflow["jobs"]["rollback"]["steps"])
     for role in ['worker', 'bot']:
-        probe = f'docker top "gpoint-core-{role}-$version" -eo pid,args | grep -F "apps/{role}/dist/main.js"'
-        assert workflow.count(probe) == 2  # Ordinary Verify and protected rollback Verify.
+        assertion = f'docker top "gpoint-core-{role}-$core_version" -eo pid,args | grep -F "apps/{role}/dist/main.js"'
+        assert deploy.count(assertion) == 1
+        assert rollback.count(assertion) == 1
     assert "sh -ec 'ps aux" not in workflow
 
 

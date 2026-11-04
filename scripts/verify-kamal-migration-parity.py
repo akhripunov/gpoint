@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Fail closed before cutover unless the candidate requires no DB migrations."""
 import argparse
-import ast
 import hashlib
 import json
 import os
-import stat
-from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
+from pathlib import Path
+
+from alembic.script import ScriptDirectory
+from alembic.script.revision import RevisionError
+from alembic.util.exc import CommandError
 
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 COMMON_SCHEMA_FIELDS = {
@@ -124,23 +127,23 @@ def prisma_names(directory):
     return rows
 
 
-def literal_assignments(path):
-    tree = ast.parse(Path(path).read_text(encoding="utf-8"), filename=str(path))
-    values = {}
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            if node.targets[0].id in {"revision", "down_revision"}:
-                values[node.targets[0].id] = ast.literal_eval(node.value)
-    return values
-
-
 def alembic_revisions(directory):
+    version_directory = Path(directory).resolve(strict=True)
+    source_root = version_directory.parent.parent
+    if str(source_root) not in sys.path:
+        sys.path.insert(0, str(source_root))
+    script_directory = ScriptDirectory(
+        dir=str(version_directory.parent),
+        version_locations=[str(version_directory)],
+    )
     revisions = {}
-    for path in sorted(Path(directory).glob("*.py")):
-        values = literal_assignments(path)
-        revision = values.get("revision")
-        parents = values.get("down_revision")
-        if not isinstance(revision, str) or not re.fullmatch(r"[A-Za-z0-9_]+", revision) or revision in revisions:
+    revision_files = {}
+    for script in script_directory.walk_revisions():
+        revision = script.revision
+        parents = script.down_revision
+        if (not isinstance(revision, str)
+                or not re.fullmatch(r"[A-Za-z0-9_]+", revision)
+                or revision in revisions):
             raise ValueError("candidate Alembic revision identity is invalid or duplicated")
         if parents is None:
             parents = ()
@@ -151,15 +154,13 @@ def alembic_revisions(directory):
         else:
             raise ValueError("candidate Alembic parent identity is unsupported")
         revisions[revision] = parents
+        revision_files[revision] = Path(script.path).resolve(strict=True)
     if not revisions:
         raise ValueError("candidate Alembic migration inventory is empty")
-    for parents in revisions.values():
-        if any(parent not in revisions for parent in parents):
-            raise ValueError("candidate Alembic migration has an unresolved parent")
-    heads = sorted(set(revisions) - {parent for parents in revisions.values() for parent in parents})
+    heads = sorted(script_directory.get_heads())
     if len(heads) != 1:
         raise ValueError("candidate Alembic migration graph must have exactly one head")
-    return revisions, heads[0]
+    return revisions, heads[0], revision_files
 
 
 def alembic_head(directory):
@@ -325,7 +326,7 @@ def verify_compatible(args, live_prisma, recorded):
         raise ValueError("live Prisma migrations are not a prefix of candidate migration history")
     if not live_prisma or args.prisma_current_head != live_prisma[-1]:
         raise ValueError("live Prisma head does not match its applied migration inventory")
-    revisions, candidate_agata_head = alembic_revisions(args.agata_directory)
+    revisions, candidate_agata_head, revision_files = alembic_revisions(args.agata_directory)
     if args.agata_current_head not in revisions:
         raise ValueError("live AGATA head is absent from candidate migration history")
     def ancestors(revision):
@@ -342,8 +343,8 @@ def verify_compatible(args, live_prisma, recorded):
     if args.agata_current_head not in candidate_ancestors:
         raise ValueError("live AGATA head is not an ancestor of candidate history")
     pending_agata = candidate_ancestors - live_ancestors
-    revision_files = {literal_assignments(path).get("revision"): path
-                      for path in Path(args.agata_directory).glob("*.py")}
+    if getattr(args, "require_no_agata_pending", False) and pending_agata:
+        raise ValueError("PENDING_AGATA_MIGRATION:" + ",".join(sorted(pending_agata)))
     applied_agata = {}
     for item in filter(None, getattr(args, "agata_current_checksums", "").split(",")):
         revision, separator, checksum = item.partition("=")
@@ -452,10 +453,13 @@ def main():
     parser.add_argument("--agata-directory", required=True)
     parser.add_argument("--agata-current-head", required=True)
     parser.add_argument("--agata-current-checksums", default="")
+    parser.add_argument("--require-no-agata-pending", action="store_true",
+                        help="block Native Prisma Deploy if any AGATA revision still needs a separate guarded Apply")
     args = parser.parse_args()
     try:
         prisma_head, agata_head, pending = verify(args)
-    except (OSError, SyntaxError, ValueError, subprocess.CalledProcessError) as exc:
+    except (CommandError, ImportError, OSError, RevisionError, SyntaxError, ValueError,
+            subprocess.CalledProcessError) as exc:
         print(f"GPOINT_KAMAL_MIGRATION_PARITY=BLOCKED reason={exc}", file=sys.stderr)
         return 1
     if args.policy == "compatible":

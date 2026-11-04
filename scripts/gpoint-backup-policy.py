@@ -14,6 +14,7 @@ from typing import Any
 
 
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+RCLONE_BUCKET_ROOT = re.compile(r"[A-Za-z0-9_-]+:gpoint-backups\Z")
 SCHEMA = "gpoint-scheduled-backup/v1"
 SCHEDULED_ROOT = Path("/opt/gpoint/backups/scheduled")
 
@@ -36,6 +37,67 @@ def _read_private_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise BackupPolicyError("backup success proof has an invalid shape")
     return value
+
+
+def verify_bunny_evidence(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Require the encrypted snapshot and restore receipt to identify one Bunny object set."""
+    bunny = manifest.get("bunny")
+    if not isinstance(bunny, dict) or bunny.get("schema") != "gpoint-bunny-backup/v1":
+        raise BackupPolicyError("Bunny backup evidence is missing or unsupported")
+    if bunny.get("status") != "PASS" or bunny.get("bucket") != "gpoint-backups":
+        raise BackupPolicyError("Bunny backup did not complete in the approved GPoint zone")
+    remote_root = str(bunny.get("remote_root", ""))
+    if not RCLONE_BUCKET_ROOT.fullmatch(remote_root):
+        raise BackupPolicyError("Bunny remote root is invalid")
+    candidate = str(manifest.get("candidate_sha", ""))
+    run_id = str(manifest.get("run_id", ""))
+    attempt = str(manifest.get("attempt", ""))
+    if not re.fullmatch(r"[0-9a-f]{40}", candidate) or not run_id.isdigit() or not attempt.isdigit():
+        raise BackupPolicyError("Bunny snapshot identity is invalid")
+    prefix = f"{remote_root}/gpoint/scheduled/{candidate}/{run_id}-{attempt}"
+    if bunny.get("snapshot_prefix") != prefix or bunny.get("snapshot") != f"{candidate}/{run_id}-{attempt}":
+        raise BackupPolicyError("Bunny objects are not bound to the exact backup snapshot")
+
+    def object_path(value: Any, expected_name: str) -> str:
+        path = str(value or "")
+        if path != f"{prefix}/{expected_name}":
+            raise BackupPolicyError("Bunny object path is outside the exact snapshot")
+        return path
+
+    database = manifest.get("database", {})
+    media = manifest.get("media", {})
+    remote_database = bunny.get("database", {})
+    remote_media = bunny.get("media", {})
+    if not isinstance(remote_database, dict) or not isinstance(remote_media, dict):
+        raise BackupPolicyError("Bunny database or media evidence is missing")
+    object_path(remote_database.get("object"), Path(str(database.get("path", ""))).name)
+    object_path(remote_media.get("object"), Path(str(media.get("path", ""))).name)
+    object_path(remote_media.get("source_manifest_object"), "media-source.json.age")
+    for remote, local in ((remote_database, database), (remote_media, media)):
+        if (remote.get("sha256") != local.get("sha256") or remote.get("bytes") != local.get("bytes")
+                or remote.get("encrypted") is not True or remote.get("readback") != "PASS"
+                or remote.get("isolated_restore") != "PASS"):
+            raise BackupPolicyError("Bunny object read-back or restore evidence does not match local proof")
+    if (remote_media.get("source_manifest_sha256") != media.get("manifest_sha256")
+            or not SHA256.fullmatch(str(remote_media.get("source_manifest_ciphertext_sha256", "")))
+            or remote_media.get("source_manifest_readback") != "PASS"):
+        raise BackupPolicyError("Bunny encrypted media manifest proof is incomplete")
+    for key in ("file_count", "directory_count", "total_bytes"):
+        if remote_media.get(key) != media.get(key):
+            raise BackupPolicyError("Bunny media manifest metadata differs from the restored snapshot")
+
+    restore = bunny.get("restore", {})
+    local_restore = manifest.get("restore_evidence", {})
+    object_path(restore.get("receipt_object"), "restore.txt")
+    if (restore.get("source") != "BUNNY_READBACK" or restore.get("status") != "PASS"
+            or restore.get("receipt_sha256") != local_restore.get("sha256")
+            or restore.get("receipt_readback") != "PASS"):
+        raise BackupPolicyError("Bunny restore receipt is missing or not bound to the local proof")
+    object_path(bunny.get("manifest_object"), "manifest.json")
+    if (not SHA256.fullmatch(str(bunny.get("manifest_sha256", "")))
+            or bunny.get("manifest_readback") != "PASS"):
+        raise BackupPolicyError("Bunny snapshot manifest read-back is incomplete")
+    return bunny
 
 
 def verify_freshness(
@@ -100,6 +162,7 @@ def verify_freshness(
             or restore_info.st_uid != os.geteuid() or stat.S_IMODE(restore_info.st_mode) != 0o600
             or restore_digest != restore["sha256"]):
         raise BackupPolicyError("isolated restore evidence failed its identity or checksum check")
+    verify_bunny_evidence(manifest)
     return manifest
 
 

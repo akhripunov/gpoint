@@ -1,6 +1,9 @@
 import importlib.util
+import json
 from pathlib import Path
+import subprocess
 import sys
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,7 +69,6 @@ def test_app_and_release_files_can_ship_together_in_one_authorized_main_push():
 def test_any_schema_or_migration_change_blocks_ordinary_release():
     for path in (
         "packages/db/prisma/schema.prisma",
-        "packages/db/prisma/migrations/20261101000000_new/migration.sql",
         "services/agata/migrations/versions/0013_new.py",
         "packages/db/prisma/migrations/README.md",
     ):
@@ -74,6 +76,32 @@ def test_any_schema_or_migration_change_blocks_ordinary_release():
             event_name="push", ref="refs/heads/main",
             changed_paths={"apps/api/src/main.ts", path},
         ) == "BLOCK"
+        assert MODULE.classify_push(
+            event_name="push", ref="refs/heads/main", changed_paths={path}
+        ) == "BLOCK"
+
+
+def test_approved_prisma_migration_source_paths_enter_the_existing_protected_deploy():
+    migration = "packages/db/prisma/migrations/20261103090000_add_index/migration.sql"
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths={migration}
+    ) == "DEPLOY"
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main",
+        changed_paths={migration, "packages/db/prisma/schema.prisma"},
+    ) == "DEPLOY"
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main",
+        changed_paths={"packages/db/prisma/schema.prisma"},
+    ) == "BLOCK"
+
+
+def test_agata_migration_and_unknown_schema_paths_remain_blocked_from_prisma_apply():
+    for path in (
+        "services/agata/migrations/versions/0013_new.py",
+        "packages/another-db/migrations/001_new.sql",
+        "apps/api/prisma/migrations/001_new.sql",
+    ):
         assert MODULE.classify_push(
             event_name="push", ref="refs/heads/main", changed_paths={path}
         ) == "BLOCK"
@@ -92,12 +120,62 @@ def test_blocked_main_path_set_fails_the_classifier_job(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", [
         "native_release_intent.py", "--event", "push", "--ref", "refs/heads/main",
         "--sha", "a" * 40, "--before", "b" * 40,
+        "--actor", "akhripunov", "--triggering-actor", "akhripunov",
+        "--repository-owner", "akhripunov",
     ])
     monkeypatch.setattr(MODULE, "changed_paths", lambda *_args, **_kwargs: {
         "apps/api/src/main.ts", "packages/db/prisma/schema.prisma",
     })
     assert MODULE.main() == 2
     assert "mode=BLOCK" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(("actor", "triggering_actor"), [
+    ("collaborator", "collaborator"),
+    ("akhripunov", "collaborator"),
+    ("", "akhripunov"),
+    ("akhripunov", ""),
+])
+def test_main_push_requires_repository_owner_as_actor_and_triggering_actor(
+    monkeypatch, capsys, actor, triggering_actor
+):
+    monkeypatch.setattr(sys, "argv", [
+        "native_release_intent.py", "--event", "push", "--ref", "refs/heads/main",
+        "--sha", "a" * 40, "--before", "b" * 40,
+        "--actor", actor, "--triggering-actor", triggering_actor,
+        "--repository-owner", "akhripunov",
+    ])
+    monkeypatch.setattr(MODULE, "changed_paths", lambda *_args, **_kwargs: {"apps/api/src/main.ts"})
+
+    assert MODULE.main() == 2
+    output = capsys.readouterr()
+    assert "NATIVE_RELEASE_INTENT=BLOCK" in output.err
+    assert "repository owner" in output.err
+
+
+def test_owner_main_push_remains_automatic_after_the_existing_tests_and_build(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", [
+        "native_release_intent.py", "--event", "push", "--ref", "refs/heads/main",
+        "--sha", "a" * 40, "--before", "b" * 40,
+        "--actor", "akhripunov", "--triggering-actor", "akhripunov",
+        "--repository-owner", "akhripunov",
+    ])
+    monkeypatch.setattr(MODULE, "changed_paths", lambda *_args, **_kwargs: {"apps/api/src/main.ts"})
+    assert MODULE.main() == 0
+    assert "deploy=true" in capsys.readouterr().out
+
+
+def test_dispatch_rerun_requires_repository_owner_as_triggering_actor(monkeypatch, capsys):
+    sha = "a" * 40
+    monkeypatch.setattr(sys, "argv", [
+        "native_release_intent.py", "--event", "workflow_dispatch", "--ref", "refs/heads/main",
+        "--sha", sha, "--candidate-sha", sha,
+        "--actor", "akhripunov", "--triggering-actor", "collaborator",
+        "--repository-owner", "akhripunov", "--approve-production",
+    ])
+
+    assert MODULE.main() == 2
+    assert "NATIVE_RELEASE_INTENT=BLOCK" in capsys.readouterr().err
 
 
 def test_non_main_and_non_push_events_cannot_deploy():
@@ -176,6 +254,287 @@ def test_manual_production_dispatch_requires_exact_owner_approval_before_build()
             actor=actor, repository_owner="akhripunov",
             migration_rehearsal=False, approve_production=approved,
         ) == ("INVALID_DEPLOY", False)
+
+
+def _git(repo, *args):
+    return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
+
+
+def _component_repo(tmp_path, changes):
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test")
+    base_file = repo / "apps/api/src/main.ts"
+    base_file.parent.mkdir(parents=True)
+    base_file.write_text("export const version = 1;\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "baseline")
+    baseline = _git(repo, "rev-parse", "HEAD")
+    for path, contents in changes.items():
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(contents)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "candidate")
+    candidate = _git(repo, "rev-parse", "HEAD")
+    repos = {
+        "gpoint-core-api": "ghcr.io/akhripunov/gpoint-runtime",
+        "gpoint-core-worker": "ghcr.io/akhripunov/gpoint-runtime",
+        "gpoint-core-bot": "ghcr.io/akhripunov/gpoint-runtime",
+        "gpoint-agata-api": "ghcr.io/akhripunov/gpoint-agata-runtime",
+        "gpoint-agata-memory-worker": "ghcr.io/akhripunov/gpoint-agata-runtime",
+        "gpoint-miniapp-web": "ghcr.io/akhripunov/gpoint-miniapp",
+    }
+    image_ids = {repo: "sha256:" + str(index) * 64 for index, repo in enumerate(set(repos.values()), 1)}
+    inventory = {"roles": {}}
+    for role, image_repo in repos.items():
+        version = f"{baseline}-100-1"
+        inventory["roles"][role] = {
+            "name": f"{role}-{version}", "version": version, "source_sha": baseline,
+            "image_id": image_ids[image_repo],
+            "repo_digest": f"{image_repo}@sha256:" + str(list(set(repos.values())).index(image_repo) + 1) * 64,
+        }
+    return repo, baseline, candidate, inventory
+
+
+def test_component_scope_updates_only_exactly_touched_known_components(tmp_path):
+    cases = (
+        ({"apps/miniapp/src/main.tsx": "export default 1;\n"}, "MINIAPP"),
+        ({"services/agata/app/responses/main.py": "VALUE = 1\n"}, "AGATA"),
+        ({"apps/api/src/main.ts": "export const version = 2;\n"}, "CORE"),
+        ({"apps/api/src/main.ts": "export const version = 2;\n",
+          "apps/miniapp/src/main.tsx": "export default 1;\n"}, "CORE+MINIAPP"),
+    )
+    for index, (changes, expected) in enumerate(cases):
+        repo, _baseline, candidate, inventory = _component_repo(tmp_path / str(index), changes)
+        result = MODULE.classify_component_scope(repo, candidate, inventory)
+        assert result["scope"] == expected
+        components = set(expected.split("+"))
+        assert result["deploy_core"] is ("CORE" in components)
+        assert result["deploy_agata"] is ("AGATA" in components)
+        assert result["deploy_miniapp"] is ("MINIAPP" in components)
+
+
+def test_build_plan_uses_per_component_sources_and_builds_core_for_prisma_migrations(tmp_path):
+    repo, baseline, candidate, _inventory = _component_repo(
+        tmp_path,
+        {
+            "apps/miniapp/src/main.tsx": "export default 1;\n",
+            "packages/db/prisma/migrations/20261103120000_add_flag/migration.sql": "ALTER TABLE users ADD COLUMN flag boolean;\n",
+        },
+    )
+
+    plan = MODULE.classify_component_build_plan(
+        repo, candidate, {"CORE": baseline, "AGATA": baseline, "MINIAPP": baseline}
+    )
+
+    assert plan == {
+        "deploy_scope": "MINIAPP",
+        "build_components": ["CORE", "MINIAPP"],
+        "reason": "exact_component_diff",
+    }
+
+
+def test_build_plan_skips_images_for_documentation_only_diff(tmp_path):
+    repo, baseline, candidate, _inventory = _component_repo(
+        tmp_path, {"docs/release/automation.md": "updated release guide\n"}
+    )
+
+    plan = MODULE.classify_component_build_plan(
+        repo, candidate, {"CORE": baseline, "AGATA": baseline, "MINIAPP": baseline}
+    )
+
+    assert plan == {
+        "deploy_scope": "NONE",
+        "build_components": [],
+        "reason": "no_runtime_changes",
+    }
+
+
+def test_shared_dependency_and_agata_migration_paths_select_their_real_images(tmp_path):
+    repo, baseline, candidate, _inventory = _component_repo(
+        tmp_path,
+        {
+            "packages/contracts/src/index.ts": "export type Id = string;\n",
+            "services/agata/migrations/versions/0013_next.py": "revision = 'agata0013'\n",
+        },
+    )
+
+    plan = MODULE.classify_component_build_plan(
+        repo, candidate, {"CORE": baseline, "AGATA": baseline, "MINIAPP": baseline}
+    )
+
+    assert plan["deploy_scope"] == "AGATA+CORE+MINIAPP"
+    assert plan["build_components"] == ["AGATA", "CORE", "MINIAPP"]
+
+
+def test_staggered_component_baselines_do_not_redeploy_already_updated_components(tmp_path):
+    repo, baseline, core_release, inventory = _component_repo(
+        tmp_path, {"apps/api/src/main.ts": "export const version = 2;\n"}
+    )
+    version = f"{core_release}-101-1"
+    for role in MODULE.COMPONENT_ROLES["CORE"]:
+        inventory["roles"][role]["source_sha"] = core_release
+        inventory["roles"][role]["version"] = version
+        inventory["roles"][role]["name"] = f"{role}-{version}"
+    target = repo / "apps/miniapp/src/main.tsx"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("export default 1;\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "miniapp candidate")
+    candidate = _git(repo, "rev-parse", "HEAD")
+
+    result = MODULE.classify_component_scope(repo, candidate, inventory)
+
+    assert result["scope"] == "MINIAPP"
+    assert result["reason"] == "exact_component_diff"
+    assert result["deploy_core"] is False
+    assert result["deploy_agata"] is False
+    assert result["deploy_miniapp"] is True
+    assert baseline != core_release
+
+
+def test_unknown_paths_block_before_deploy_planning(tmp_path):
+    repo, _baseline, candidate, inventory = _component_repo(
+        tmp_path, {"secrets/unmapped.txt": "do not deploy\n"}
+    )
+    with pytest.raises(ValueError, match="unmapped or unsafe candidate path"):
+        MODULE.classify_component_scope(repo, candidate, inventory)
+
+
+def test_documentation_only_candidate_verifies_runtime_without_restarting_components(tmp_path):
+    for path in ("README.md", "docs/release/automation.md"):
+        repo, _baseline, candidate, inventory = _component_repo(
+            tmp_path / path.replace("/", "_"), {path: "updated documentation\n"}
+        )
+
+        scope = MODULE.classify_component_scope(repo, candidate, inventory)
+        expected = MODULE.expected_runtime_inventory(
+            scope["scope"], inventory, candidate, candidate + "-123-1",
+            "sha256:" + "1" * 64, "sha256:" + "2" * 64, "sha256:" + "3" * 64,
+        )
+
+        assert scope == {"scope": "NONE", "reason": "no_runtime_changes",
+                         "deploy_core": False, "deploy_agata": False, "deploy_miniapp": False}
+        assert expected["updatedComponents"] == []
+        assert {row["sourceSha"] for row in expected["roles"].values()} == {_baseline}
+
+
+def test_known_release_infrastructure_candidate_has_no_application_component_scope(tmp_path):
+    changes = {
+        ".codex/roles/devops.md": "updated role policy\n",
+        ".github/workflows/gpoint-native-release.yml": "updated workflow\n",
+        "AGENTS.md": "updated instructions\n",
+        "docs/operations/gpoint-vps-backups.md": "updated backup guide\n",
+        "docs/release/automation.md": "updated release guide\n",
+        "packages/db/prisma/production-approved-migrations.json": "[]\n",
+        "packages/db/prisma/migrations/20261103120000_release_guard/migration.sql": "SELECT 1;\n",
+        "scripts/gpoint-backup-policy.py": "updated backup policy\n",
+        "scripts/classify-release-prepush.py": "updated pre-push classifier\n",
+        "scripts/gpoint-scheduled-backup.py": "updated backup runner\n",
+        "scripts/native_release_intent.py": "updated scope classifier\n",
+        "scripts/prisma_migration_release_plan.py": "updated migration planner\n",
+        "scripts/resolve_native_environment_deployment.py": "updated deployment resolver\n",
+        "scripts/resolve_native_build_scope.py": "updated build resolver\n",
+        "scripts/verify-gpoint-scheduled-backup-restore.sh": "updated restore verifier\n",
+        "scripts/verify-kamal-migration-parity.py": "updated migration verifier\n",
+        "scripts/verify-kamal-production-baseline.py": "updated runtime verifier\n",
+        "scripts/verify_native_rollback_evidence.py": "updated rollback verifier\n",
+        "scripts/write-kamal-production-manifest.py": "updated manifest writer\n",
+        "systemd/gpoint-backup.service": "updated backup service\n",
+        "tests/test_native_release_intent.py": "updated release tests\n",
+    }
+    repo, _baseline, candidate, inventory = _component_repo(tmp_path, changes)
+
+    scope = MODULE.classify_component_scope(repo, candidate, inventory)
+
+    assert scope == {
+        "scope": "NONE", "reason": "no_runtime_changes",
+        "deploy_core": False, "deploy_agata": False, "deploy_miniapp": False,
+    }
+
+
+def test_known_release_infrastructure_does_not_expand_an_application_scope(tmp_path):
+    repo, _baseline, candidate, inventory = _component_repo(
+        tmp_path,
+        {
+            "apps/api/src/main.ts": "export const version = 2;\n",
+            "scripts/native_release_intent.py": "updated scope classifier\n",
+            ".github/workflows/gpoint-native-release.yml": "updated workflow\n",
+        },
+    )
+
+    scope = MODULE.classify_component_scope(repo, candidate, inventory)
+
+    assert scope["scope"] == "CORE"
+    assert scope["deploy_core"] is True
+    assert scope["deploy_agata"] is False
+    assert scope["deploy_miniapp"] is False
+
+
+def test_unlisted_release_script_still_requires_explicit_component_scope(tmp_path):
+    repo, _baseline, candidate, inventory = _component_repo(
+        tmp_path, {"scripts/unreviewed-runtime-helper.py": "unmapped behavior\n"}
+    )
+
+    with pytest.raises(ValueError, match="unmapped or unsafe candidate path"):
+        MODULE.classify_component_scope(repo, candidate, inventory)
+
+
+def test_known_non_runtime_symlink_still_requires_explicit_component_scope(tmp_path):
+    repo, _baseline, _candidate, inventory = _component_repo(
+        tmp_path, {"docs/release-link.md": "regular file\n"}
+    )
+    path = repo / "docs/release-link.md"
+    path.unlink()
+    path.symlink_to("../apps/api/src/main.ts")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "replace release guide with symlink")
+    candidate = _git(repo, "rev-parse", "HEAD")
+
+    with pytest.raises(ValueError, match="candidate path is not a regular file"):
+        MODULE.classify_component_scope(repo, candidate, inventory)
+
+
+def test_candidate_equal_to_baseline_blocks_without_restarting_components(tmp_path):
+    repo, baseline, _candidate, inventory = _component_repo(
+        tmp_path, {"apps/miniapp/src/main.tsx": "export default 1;\n"}
+    )
+    with pytest.raises(ValueError, match="candidate equals production baseline"):
+        MODULE.classify_component_scope(repo, baseline, inventory)
+
+
+def test_component_runtime_inventory_pins_new_roles_and_preserves_untouched_identity(tmp_path):
+    _repo, baseline, _candidate, inventory = _component_repo(
+        tmp_path, {"apps/miniapp/src/main.tsx": "export default 1;\n"}
+    )
+    candidate = "d" * 40
+    version = candidate + "-123-2"
+    result = MODULE.expected_runtime_inventory(
+        "MINIAPP", inventory, candidate, version,
+        "sha256:" + "1" * 64, "sha256:" + "2" * 64, "sha256:" + "3" * 64,
+    )
+    assert result["roles"]["gpoint-miniapp-web"] == {
+        "version": version, "sourceSha": candidate,
+        "repositoryDigest": "ghcr.io/akhripunov/gpoint-miniapp@sha256:" + "3" * 64,
+        "baselineImageId": None,
+    }
+    assert result["roles"]["gpoint-core-api"]["sourceSha"] == baseline
+    assert result["roles"]["gpoint-core-api"]["baselineImageId"].startswith("sha256:")
+    encoded = MODULE.expected_runtime_inventory_b64(
+        "MINIAPP", inventory, candidate, version,
+        "sha256:" + "1" * 64, "sha256:" + "2" * 64, "sha256:" + "3" * 64,
+    )
+    assert json.loads(__import__("base64").b64decode(encoded)) == result
+    multi = MODULE.expected_runtime_inventory(
+        "CORE+MINIAPP", inventory, candidate, version,
+        "sha256:" + "1" * 64, "sha256:" + "2" * 64, "sha256:" + "3" * 64,
+    )
+    assert multi["roles"]["gpoint-core-api"]["sourceSha"] == candidate
+    assert multi["roles"]["gpoint-miniapp-web"]["sourceSha"] == candidate
+    assert multi["roles"]["gpoint-agata-api"]["sourceSha"] == baseline
 
 
 def test_rollback_dispatch_requires_main_exact_owner_explicit_approval_and_no_other_maintenance():

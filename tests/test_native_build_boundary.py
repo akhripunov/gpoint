@@ -19,7 +19,9 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(set(jobs), {"workspace", "python", "build", "deploy", "rollback", "backup_maintenance", "migration_rehearsal"})
         rollback = jobs["rollback"]
         self.assertIn("outputs.mode == 'ROLLBACK'", rollback["if"])
-        self.assertEqual(rollback["environment"], {"name": "production", "deployment": False})
+        self.assertEqual(rollback["environment"], {
+            "name": "production", "url": "${{ steps.verify.outputs.environment_url }}",
+        })
         self.assertEqual(rollback["concurrency"], {"group": "gpoint-production-release", "cancel-in-progress": False})
         self.assertNotIn("build", rollback["needs"])
         self.assertEqual(jobs["migration_rehearsal"]["needs"], ["workspace", "python", "build"])
@@ -122,6 +124,35 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
             image_step = next(step for step in steps if step.get("id") == role)
             self.assertIn("GPOINT_BUILD_SHA=${{ github.sha }}", image_step["with"]["build-args"])
 
+    def test_runtime_images_build_only_after_verified_component_baseline(self):
+        build = self.workflow["jobs"]["build"]
+        self.assertNotIn("environment", build)
+        self.assertEqual(set(build["needs"]), {"workspace", "python"})
+        steps = build["steps"]
+        resolver = next(i for i, step in enumerate(steps)
+                        if step.get("id") == "build_scope")
+        for component, step_id in (("CORE", "app"), ("AGATA", "agata"), ("MINIAPP", "miniapp")):
+            image = next(i for i, step in enumerate(steps) if step.get("id") == step_id)
+            self.assertGreater(image, resolver)
+            self.assertIn(component, steps[image]["if"])
+        resolver_run = steps[resolver]["run"]
+        self.assertIn("scripts/resolve_native_build_scope.py", resolver_run)
+        self.assertEqual(build["permissions"]["deployments"], "read")
+        self.assertEqual(build["permissions"]["actions"], "read")
+        workflow_runs = "\n".join(
+            step.get("run", "")
+            for job in self.workflow["jobs"].values()
+            for step in job.get("steps", [])
+        )
+        self.assertIn("tests/test_release_pre_push_mode.py", workflow_runs)
+        deploy = self.workflow["jobs"]["deploy"]
+        deploy_names = [step.get("name", "") for step in deploy["steps"]]
+        live_inventory = deploy_names.index("Verify installed Kamal topology before ordinary release")
+        component_plan = deploy_names.index("Plan exact component-scoped Kamal update from live baseline")
+        self.assertLess(live_inventory, component_plan)
+        verify_images = deploy_names.index("Verify immutable candidate images selected for the live scope")
+        self.assertGreater(verify_images, component_plan)
+
     def test_ordinary_release_does_not_contain_first_cutover_mutations(self):
         deploy = self.workflow["jobs"]["deploy"]
         steps = deploy["steps"]
@@ -153,14 +184,43 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("compose.service=$service", steps[preflight]["run"])
         self.assertIn("agata-memory-worker", steps[preflight]["run"])
 
+    def test_stock_kamal_inventory_commands_precede_supplementary_docker_inspection(self):
+        deploy = self.workflow["jobs"]["deploy"]
+        steps = deploy["steps"]
+        names = [step.get("name", "") for step in steps]
+        cli_index = names.index("Read live application version and containers with Kamal")
+        topology_index = names.index("Verify installed Kamal topology before ordinary release")
+        self.assertLess(cli_index, topology_index)
+        kamal_inventory = steps[cli_index]
+        self.assertEqual(kamal_inventory.get("id"), "kamal_inventory")
+        commands = kamal_inventory["run"]
+        for command in ("kamal app version", "kamal app details", "kamal app containers"):
+            self.assertIn(command, commands)
+        self.assertIn('>> "$GITHUB_OUTPUT"', commands)
+        for role in ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot",
+                     "gpoint-agata-api", "gpoint-agata-memory-worker", "gpoint-miniapp-web"):
+            self.assertIn(role, commands)
+        self.assertIn("config/deploy.yml", commands)
+        self.assertIn("config/deploy.agata.yml", commands)
+        self.assertIn("config/deploy.miniapp.yml", commands)
+        topology = steps[topology_index]
+        for component in ("core", "agata", "miniapp"):
+            self.assertTrue(any(
+                f"steps.kamal_inventory.outputs.{component}_version" in value
+                for value in topology["env"].values()
+            ))
+        self.assertIn("KAMAL_CORE_VERSION", topology["run"])
+
     def test_ordinary_deployment_success_requires_verified_manifest(self):
         deploy = self.workflow["jobs"]["deploy"]
         steps = deploy["steps"]
         verify = next(i for i, step in enumerate(steps) if step.get("name") == "Verify public routes and exact running services")
-        record = next(i for i, step in enumerate(steps) if step.get("name") == "Record GitHub Deployment result against the same attempt")
-        self.assertLess(verify, record)
+        resolve = next(i for i, step in enumerate(steps) if step.get("name") == "Resolve exact GitHub environment Deployment ID")
+        self.assertLess(resolve, verify)
         self.assertIn("manifest_sha", steps[verify]["run"])
-        self.assertIn("steps.verify.outputs.manifest_sha", yaml.safe_dump(steps[record]))
+        self.assertIn("environment_url=https://gpoint.one/#gpoint-manifest-sha256=$manifest_sha", steps[verify]["run"])
+        self.assertEqual(deploy["environment"]["url"], "${{ steps.verify.outputs.environment_url }}")
+        self.assertNotIn("deployments/$DEPLOYMENT_ID/statuses", "\n".join(step.get("run", "") for step in steps))
         verify_run = steps[verify]["run"]
         self.assertIn("scp -p scripts/write-kamal-production-manifest.py", verify_run)
         self.assertIn("--mode ordinary", verify_run)

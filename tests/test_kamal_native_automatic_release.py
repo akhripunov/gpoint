@@ -1,4 +1,6 @@
+import os
 from pathlib import Path
+import subprocess
 
 import yaml
 
@@ -17,7 +19,10 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     assert "push" in deploy.get("if", "")
     assert "refs/heads/main" in deploy.get("if", "")
     assert "workflow_dispatch" in deploy.get("if", "")
-    assert deploy["environment"] == {"name": "production", "deployment": False}
+    assert deploy["environment"] == {
+        "name": "production",
+        "url": "${{ steps.verify.outputs.environment_url }}",
+    }
     build = workflow["jobs"]["build"]
     assert "release_intent" not in workflow["jobs"]
     assert "workspace" in build["needs"] and "python" in build["needs"]
@@ -26,6 +31,105 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     assert "environment" not in build
     assert "packages: write" in WORKFLOW.read_text(encoding="utf-8")
     assert {"workspace", "python", "build"}.issubset(deploy["needs"])
+
+
+def test_rerun_by_non_owner_cannot_deploy_a_main_push(tmp_path):
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    deploy = workflow["jobs"]["deploy"]
+    gate = next(step for step in deploy["steps"]
+                if step.get("name") == "Recheck exact SHA, current main and owner approval")
+    sha = "a" * 40
+    fake_gh = tmp_path / "gh"
+    try:
+        fake_gh.write_text("#!/bin/sh\nprintf '%s\\n' '" + sha + "'\n", encoding="utf-8")
+        fake_gh.chmod(0o700)
+        env = os.environ.copy()
+        env.update({
+            "PATH": str(tmp_path) + os.pathsep + env.get("PATH", ""),
+            "GITHUB_EVENT_NAME": "push",
+            "GITHUB_REPOSITORY": "akhripunov/gpoint",
+            "GITHUB_SHA": sha,
+            "REQUESTED_SHA": sha,
+            "WORKFLOW_SHA": sha,
+            "APPROVE_PRODUCTION": "false",
+            "OWNER_APPROVAL_ACTOR": "akhripunov",
+            "OWNER_TRIGGERING_ACTOR": "collaborator",
+            "OWNER_REPOSITORY": "akhripunov",
+        })
+
+        result = subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", gate["run"]], env=env,
+            capture_output=True, text=True, check=False,
+        )
+
+        assert result.returncode != 0
+        assert "triggering actor" in result.stderr.lower()
+    finally:
+        fake_gh.unlink(missing_ok=True)
+
+
+def test_non_owner_cannot_rerun_migration_rehearsal(tmp_path):
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    rehearsal = workflow["jobs"]["migration_rehearsal"]
+    gate = next(step for step in rehearsal["steps"]
+                if step.get("name") == "Require exact main-only owner initiated rehearsal")
+    sha = "a" * 40
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", gate["run"]],
+        env={**os.environ,
+             "GITHUB_EVENT_NAME": "workflow_dispatch",
+             "GITHUB_REF": "refs/heads/main",
+             "GITHUB_SHA": sha,
+             "REQUESTED_SHA": sha,
+             "APPROVE_PRODUCTION": "false",
+             "OWNER_ACTOR": "akhripunov",
+             "OWNER_TRIGGERING_ACTOR": "collaborator",
+             "REPOSITORY_OWNER": "akhripunov"},
+        capture_output=True, text=True, check=False,
+    )
+
+    assert result.returncode != 0
+    assert "triggering actor" in result.stderr.lower()
+
+
+def test_deploy_installs_the_pinned_agata_alembic_runtime_before_migration_checks():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["deploy"]["steps"]
+    setup = next((i for i, step in enumerate(steps)
+                  if step.get("uses", "").startswith("actions/setup-python@")), None)
+    install = next((i for i, step in enumerate(steps)
+                    if "python -m pip install ./services/agata" in step.get("run", "")), None)
+    parity = next(i for i, step in enumerate(steps)
+                  if step.get("name") == "Verify candidate compatibility with the live database baseline")
+
+    assert setup is not None
+    assert install is not None
+    assert setup < install < parity
+    assert steps[setup]["with"]["python-version"] == "3.12"
+    assert steps[setup]["with"]["cache-dependency-path"] == "services/agata/pyproject.toml"
+
+
+def test_kamal_inventory_summary_uses_shellcheck_safe_markdown_fences():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    inventory = next(step for step in workflow["jobs"]["deploy"]["steps"]
+                     if step.get("id") == "kamal_inventory")
+
+    assert "`" not in inventory["run"]
+    assert r"\140\140\140text" in inventory["run"]
+
+    lines = inventory["run"].splitlines()
+    printf_index = next(i for i, line in enumerate(lines)
+                        if "printf 'Current version:" in line)
+    printf_command = "\n".join(line.strip() for line in lines[printf_index:printf_index + 2])
+    result = subprocess.run(
+        ["bash", "-c", "version=sha; containers=containers; details=details; " + printf_command],
+        check=True, capture_output=True, text=True,
+    )
+    assert result.stdout == (
+        "Current version:\n\n```text\nsha\n```\n\n"
+        "Containers:\n\n```text\ncontainers\n```\n\n"
+        "Details:\n\n```text\ndetails\n```\n\n"
+    )
 
 
 def test_release_event_routing_is_fail_closed_and_does_not_give_prs_prod_access():
@@ -51,9 +155,9 @@ def test_runtime_verify_rechecks_public_and_all_six_kamal_roles_after_deploy():
     deploy = workflow.split("  deploy:\n", 1)[1]
     deploy_step = deploy.index("name: Deploy exact immutable images with stock Kamal")
     verify_step = deploy.index("name: Verify public routes and exact running services")
-    status_step = deploy.index("name: Record GitHub Deployment result against the same attempt")
-    verify = deploy[verify_step:status_step]
-    assert deploy_step < verify_step < status_step
+    assert "name: Record GitHub Deployment result against the same attempt" not in deploy
+    verify = deploy[verify_step:]
+    assert deploy_step < verify_step
     for expected in (
         "https://gpoint.one/api/health/live",
         "gpoint-core-api",
@@ -87,10 +191,12 @@ def test_production_preflight_accepts_historical_version_source_sha_split_but_ch
     assert "DB_MOUNTS_SHA256" in preflight
     assert "REDIS_MOUNTS_SHA256" in preflight
     verify = deploy.split("name: Verify public routes and exact running services", 1)[1].split(
-        "name: Record GitHub Deployment result against the same attempt", 1
+        "name: Report recovery guidance after ordinary release", 1
     )[0]
     assert "DB_MOUNTS_SHA256" in verify and "REDIS_MOUNTS_SHA256" in verify
-    assert "BASELINE_ROLE_VERSION" in verify
+    assert "EXPECTED_ROLE_IDENTITIES_B64" in verify
+    assert "core_version=\"$(sed -n 's/^gpoint-core-api|" in verify
+    assert "agata_version=\"$(sed -n 's/^gpoint-agata-api|" in verify
     assert "BASELINE_PRISMA_HEAD" in verify and "BASELINE_AGATA_HEAD" in verify
     assert 'test "$prisma_migrations" = "$expected_prisma_migrations"' in verify
     assert 'test "$prisma_checksums" = "$expected_prisma_checksums"' in verify
@@ -115,9 +221,45 @@ def test_core_consumers_are_updated_one_role_at_a_time_and_partial_failure_fails
     assert "verify_single_running_role gpoint-core-worker" in apply
     assert "verify_single_running_role gpoint-core-bot" in apply
     assert "verify_single_running_role gpoint-agata-memory-worker" in apply
-    status = deploy.split("name: Record GitHub Deployment result against the same attempt", 1)[1]
+    ordinary = deploy.split("  rollback:\n", 1)[0]
+    status = ordinary.split("name: Report recovery guidance after ordinary release", 1)[1]
     assert "RECOVERY_REQUIRED" in status
-    assert "automatic rollback is prohibited" in status
+    assert "automatic database downgrade is prohibited" in status
+    assert "deployments/$DEPLOYMENT_ID/statuses" not in status
+
+
+def test_ordinary_deployment_uses_native_environment_status_after_verify():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    deploy = workflow["jobs"]["deploy"]
+    names = [step.get("name", "") for step in deploy["steps"]]
+    resolve = names.index("Resolve exact GitHub environment Deployment ID")
+    verify = names.index("Verify public routes and exact running services")
+    assert resolve < verify
+    assert deploy["environment"]["url"] == "${{ steps.verify.outputs.environment_url }}"
+    deployment_steps = "\n".join(step.get("run", "") for step in deploy["steps"])
+    assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments' not in deployment_steps
+    assert "gpoint-manifest-sha256=" in deployment_steps
+    assert "GITHUB_RUN_ATTEMPT" in deploy["steps"][resolve]["run"]
+
+
+def test_manual_rollback_uses_native_environment_deployment_and_target_metadata():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    rollback = workflow["jobs"]["rollback"]
+    assert rollback["environment"] == {
+        "name": "production",
+        "url": "${{ steps.verify.outputs.environment_url }}",
+    }
+    body = "\n".join(step.get("run", "") for step in rollback["steps"])
+    assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments' not in body
+    assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses' not in body
+    assert "gpoint-runtime-target-sha=" in body
+    assert "gpoint-core-source-sha=$CORE_SOURCE_SHA" in body
+    assert "gpoint-agata-source-sha=$AGATA_SOURCE_SHA" in body
+    assert "gpoint-miniapp-source-sha=$MINIAPP_SOURCE_SHA" in body
+    for key in ("core_version", "agata_version", "miniapp_version"):
+        assert f"steps.evidence.outputs.{key}" in yaml.safe_dump(rollback)
+    assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments' not in body
+    assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses' not in body
 
 
 def test_production_mutations_share_one_non_cancelling_lock():
@@ -136,16 +278,21 @@ def test_production_mutations_share_one_non_cancelling_lock():
 def test_ordinary_release_success_does_not_depend_on_scheduled_backup_freshness():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     deploy = workflow.split("  deploy:\n", 1)[1]
-    status_step = deploy.index("name: Record GitHub Deployment result against the same attempt")
-    ordinary_deploy = deploy[:deploy.index("  backup_maintenance:")]
-    status = ordinary_deploy[status_step:]
+    ordinary_deploy = deploy[:deploy.index("  rollback:")]
+    status = ordinary_deploy.split("name: Report recovery guidance after ordinary release", 1)[1]
     assert "Verify public routes and exact running services" in ordinary_deploy
     assert "Verify existing scheduled VPS backups" not in ordinary_deploy
     assert "gpoint-backup.timer" not in ordinary_deploy
-    assert "gpoint-backup-policy.py" not in ordinary_deploy
-    assert "freshness" not in ordinary_deploy
+    migration_apply = ordinary_deploy.split("id: migration_apply", 1)[1].split(
+        "name: Deploy exact immutable images with stock Kamal", 1
+    )[0]
+    no_migration_path = migration_apply.split('if [[ "$APPLY" == false ]]', 1)[1].split("exit 0", 1)[0]
+    assert "gpoint-backup-policy.py" not in no_migration_path
+    assert "freshness" not in no_migration_path
+    assert "gpoint-backup-policy.py freshness" in migration_apply
     assert "BACKUP_OUTCOME" not in status
-    assert '"$DEPLOY_JOB_STATUS" == success && "$VERIFY_OUTCOME" == success' in status
+    assert 'steps.verify.outcome != \'success\'' in status
+    assert 'DEPLOY_JOB_STATUS' not in status
 
 
 def test_backup_maintenance_retains_timer_and_freshness_checks():
@@ -295,7 +442,7 @@ def test_runtime_image_targets_stage_with_prisma_migration_history():
         assert f"/app/packages/db/prisma/migrations/{migration}/migration.sql" in helper
 
 
-def test_scheduled_vps_backup_is_local_encrypted_fresh_and_restored_without_remote_config():
+def test_scheduled_vps_backup_uploads_and_restores_same_bunny_snapshot_during_transition():
     policy_path = ROOT / "scripts/gpoint-backup-policy.py"
     runner_path = ROOT / "scripts/gpoint-scheduled-backup.py"
     helper_path = ROOT / "scripts/verify-gpoint-scheduled-backup-restore.sh"
@@ -306,33 +453,43 @@ def test_scheduled_vps_backup_is_local_encrypted_fresh_and_restored_without_remo
     runner = runner_path.read_text(encoding="utf-8")
     helper = helper_path.read_text(encoding="utf-8")
     assert "isolated_restore" in policy and "sha256" in policy
-    assert "offsite_readback" not in policy
-    assert "rclone" not in runner and "rclone" not in helper
+    assert "verify_bunny_evidence(manifest)" in policy
+    assert "gpoint-backups" in policy
+    assert "_bunny_remote_root" in runner and "_publish_bunny_receipt" in runner
+    assert "rclone" in runner and "rclone" in helper
+    assert "--immutable" in helper
+    assert 'rclone copyto --config "$rclone_config" "$object" "${bunny_readback_dir}/${name}"' in helper
+    assert 'sha256sum "$source"' in helper and 'sha256sum "${bunny_readback_dir}/${name}"' in helper
+    assert "--download --one-way" not in helper
+    assert "restore_backup_file=" in helper and "restore_media_backup_file=" in helper
+    assert 'OFFSITE_RESTORE=$(' in helper and 'MEDIA_OFFSITE_RESTORE=$(' in helper
     assert "gpoint-backup.agekey" in runner and "age-keygen" in runner
     assert "/opt/gpoint/media" in runner and "media-tree" in runner
+    assert "def _retain_local(now: float)" in runner
 
 
 def test_protected_rollback_uses_only_verified_prior_target_and_shared_lock():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     rollback = workflow["jobs"]["rollback"]
     assert "outputs.mode == 'ROLLBACK'" in rollback["if"]
-    assert rollback["environment"] == {"name": "production", "deployment": False}
+    assert rollback["environment"] == {
+        "name": "production", "url": "${{ steps.verify.outputs.environment_url }}",
+    }
     assert rollback["concurrency"] == {"group": "gpoint-production-release", "cancel-in-progress": False}
     assert rollback["permissions"] == {"contents": "read", "packages": "read", "deployments": "write"}
     body = yaml.safe_dump(rollback)
     names = [step.get("name", step.get("uses", "")) for step in rollback["steps"]]
     assert names.index("Validate linked build, successful Runtime Verify and six-role manifest") < names.index("Verify target digests, platform, revision and provenance")
     assert names.index("Verify target digests, platform, revision and provenance") < names.index("Verify live DB compatibility and retained target containers before mutation")
-    assert names.index("Verify live DB compatibility and retained target containers before mutation") < names.index("Create rollback Deployment only after all target evidence passes")
-    assert names.index("Create rollback Deployment only after all target evidence passes") < names.index("Roll back consumers and then APIs with stock Kamal")
+    assert names.index("Verify live DB compatibility and retained target containers before mutation") < names.index("Roll back consumers and then APIs with stock Kamal")
     assert names.index("Roll back consumers and then APIs with stock Kamal") < names.index("Verify rollback Runtime and preserve databases before SUCCESS")
     for gate in (
         "rollback_target_sha", "rollback_deployment_id", "verify_native_rollback_evidence.py",
         "verify_native_image_readback.py", "verify_native_image_attestation.py",
-        "verify-kamal-migration-parity.py", "BASELINE_ROLE_VERSION=$live_version",
-        "BASELINE_ROLE_SOURCE_SHA=$live_source_sha", "KAMAL_ROLES=worker", "KAMAL_ROLES=bot",
-        "KAMAL_ROLES=memory-worker", "kamal app stop --roles",
-        "RECOVERY_REQUIRED", "state=success",
+        "verify-kamal-migration-parity.py", "core_version", "agata_version",
+        "miniapp_version", "KAMAL_ROLES=worker", "KAMAL_ROLES=bot",
+        "KAMAL_ROLES=memory-worker", "app stop --roles",
+        "RECOVERY_REQUIRED", "steps.verify.outputs.environment_url",
     ):
         assert gate in body
     events = workflow.get("on", workflow.get(True))

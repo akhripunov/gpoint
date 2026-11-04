@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import configparser
 import fcntl
 import hashlib
 import importlib.util
@@ -17,16 +18,21 @@ import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import urlparse
 
 
 BIN_DIR = Path(__file__).resolve().parent
 AGE_IDENTITY = Path("/opt/gpoint/env/gpoint-backup.agekey")
+OFFSITE_CONFIG = Path("/opt/gpoint/env/gpoint-backup-offsite.conf")
+RCLONE_CONFIG = Path("/root/.config/rclone/rclone.conf")
+BUNNY_TEMP_ROOT = Path("/run")
 BACKUP_ROOT = Path("/opt/gpoint/backups")
 SCHEDULED_ROOT = BACKUP_ROOT / "scheduled"
 MEDIA_ROOT = Path("/opt/gpoint/media")
 POSTGRES = "shared_postgres_1"
 AGE_RECIPIENT = re.compile(r"age1[0-9a-z]{58}\Z")
 SHA40 = re.compile(r"[0-9a-f]{40}\Z")
+BUNNY_S3_REGIONS = {"de", "ny", "sg", "uk", "se", "la", "jh", "syd"}
 SECRET_ASSIGNMENT = re.compile(
     r"(?i)(access[_ -]?key|secret[_ -]?key|session[_ -]?token|password|token|credential|authorization)([=: ]+)[^\s,;]+"
 )
@@ -62,10 +68,11 @@ def _private_file(path: Path, *, expected_mode: int = 0o600) -> None:
         raise ScheduledBackupError("required protected file has unsafe ownership or mode")
 
 
-def _run(args: list[str], *, stage: str, input_text: str | None = None) -> str:
+def _run(args: list[str], *, stage: str, input_text: str | None = None,
+         timeout: int = 1800) -> str:
     try:
         result = subprocess.run(args, input=input_text, text=True, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, check=False, timeout=1800)
+                                stderr=subprocess.PIPE, check=False, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired):
         raise ScheduledBackupError(f"{stage} could not complete") from None
     if result.returncode:
@@ -73,6 +80,145 @@ def _run(args: list[str], *, stage: str, input_text: str | None = None) -> str:
         suffix = ": " + detail if detail else ""
         raise ScheduledBackupError(f"{stage} failed (exit {result.returncode}){suffix}")
     return result.stdout.strip()
+
+
+def _bunny_remote_root(*, require_systemd_environment: bool = True) -> str:
+    """Resolve the configured rclone remote while pinning the existing Bunny zone."""
+    _private_file(OFFSITE_CONFIG)
+    configured_lines = OFFSITE_CONFIG.read_text(encoding="utf-8").splitlines()
+    if (len(configured_lines) != 1
+            or not re.fullmatch(r"GPOINT_BACKUP_BUNNY_REMOTE=[A-Za-z0-9_-]+:gpoint-backups",
+                                configured_lines[0])):
+        raise ScheduledBackupError("the protected offsite destination file has an invalid format")
+    remote = configured_lines[0].split("=", 1)[1]
+    systemd_remote = os.environ.get("GPOINT_BACKUP_BUNNY_REMOTE")
+    if ((require_systemd_environment and systemd_remote != remote)
+            or (systemd_remote is not None and systemd_remote != remote)):
+        raise ScheduledBackupError("systemd Bunny destination does not match its protected configuration")
+    match = re.fullmatch(r"([A-Za-z0-9_-]+):gpoint-backups", remote)
+    if not match:
+        raise ScheduledBackupError("the configured Bunny destination must target the existing gpoint-backups zone")
+    _private_file(RCLONE_CONFIG)
+    rclone_config = configparser.ConfigParser(interpolation=None)
+    try:
+        with RCLONE_CONFIG.open(encoding="utf-8") as source:
+            rclone_config.read_file(source)
+    except (OSError, UnicodeDecodeError, configparser.Error):
+        raise ScheduledBackupError("the protected Bunny rclone configuration is invalid") from None
+    section = match.group(1)
+    if not rclone_config.has_section(section):
+        raise ScheduledBackupError("the Bunny rclone remote is not present in the protected configuration")
+    remote_config = rclone_config[section]
+    endpoint = urlparse(remote_config.get("endpoint", ""))
+    if (remote_config.get("type", "").lower() != "s3"
+            or remote_config.get("provider", "").lower() != "other"
+            or endpoint.scheme != "https"
+            or endpoint.username is not None or endpoint.password is not None
+            or endpoint.port is not None or endpoint.path not in ("", "/")
+            or endpoint.query or endpoint.fragment
+            or (endpoint.hostname or "").removesuffix("-s3.storage.bunnycdn.com") not in BUNNY_S3_REGIONS
+            or not (endpoint.hostname or "").endswith("-s3.storage.bunnycdn.com")
+            or remote_config.get("access_key_id", "") != "gpoint-backups"):
+        raise ScheduledBackupError("the configured S3 remote is not the existing private Bunny gpoint-backups zone")
+    configured = _run(["rclone", "listremotes", "--config", str(RCLONE_CONFIG)],
+                      stage="Bunny rclone configuration")
+    if match.group(1) + ":" not in configured.splitlines():
+        raise ScheduledBackupError("the Bunny rclone remote is not present in the protected configuration")
+    return remote
+
+
+def _backup_evidence_and_bunny_remote(*, migration_rehearsal: bool) -> tuple[str, str]:
+    evidence_path = (os.environ.get("GPOINT_MIGRATION_BACKUP_EVIDENCE", "").strip()
+                     if migration_rehearsal else "")
+    if migration_rehearsal and evidence_path:
+        bunny_remote = ""
+    else:
+        bunny_remote = _bunny_remote_root(require_systemd_environment=not migration_rehearsal)
+    return evidence_path, bunny_remote
+
+
+def _bunny_upload_and_readback(source: Path, remote_object: str, readback: Path) -> str:
+    if not source.is_file() or source.is_symlink():
+        raise ScheduledBackupError("Bunny source object is not a regular file")
+    source_sha = _sha256(source)
+    _run(["rclone", "copyto", "--immutable", "--config", str(RCLONE_CONFIG),
+          str(source), remote_object], stage="Bunny immutable object upload", timeout=6 * 60 * 60)
+    _run(["rclone", "copyto", "--config", str(RCLONE_CONFIG),
+          remote_object, str(readback)], stage="Bunny object download", timeout=6 * 60 * 60)
+    if not readback.is_file() or readback.is_symlink() or _sha256(readback) != source_sha:
+        raise ScheduledBackupError("Bunny object read-back checksum mismatch")
+    return source_sha
+
+
+def _publish_bunny_receipt(remote_root: str, candidate: str, run_id: str, attempt: str,
+                           evidence_path: Path, evidence: dict[str, str],
+                           completed_at: str) -> dict[str, object]:
+    prefix = f"{remote_root}/gpoint/scheduled/{candidate}/{run_id}-{attempt}"
+    if (evidence.get("BUNNY_REMOTE_ROOT") != remote_root
+            or evidence.get("BUNNY_SNAPSHOT_PREFIX") != prefix
+            or any(evidence.get(key) != "PASS" for key in (
+                "BUNNY_DATABASE_READBACK", "BUNNY_MEDIA_READBACK",
+                "BUNNY_MEDIA_MANIFEST_READBACK", "OFFSITE_RESTORE", "MEDIA_OFFSITE_RESTORE"))):
+        raise ScheduledBackupError("Bunny upload, read-back, or isolated restore evidence is incomplete")
+    database = {
+        "object": evidence["BUNNY_DATABASE_OBJECT"],
+        "sha256": evidence["BACKUP_SHA256"],
+        "bytes": int(evidence["BACKUP_BYTES"]),
+        "encrypted": evidence["BACKUP_ENCRYPTION"] == "AGE_X25519",
+        "readback": evidence["BUNNY_DATABASE_READBACK"],
+        "isolated_restore": evidence["OFFSITE_RESTORE"],
+    }
+    media = {
+        "object": evidence["BUNNY_MEDIA_OBJECT"],
+        "sha256": evidence["MEDIA_BACKUP_SHA256"],
+        "bytes": int(evidence["MEDIA_BACKUP_BYTES"]),
+        "encrypted": evidence["MEDIA_BACKUP_ENCRYPTION"] == "AGE_X25519",
+        "readback": evidence["BUNNY_MEDIA_READBACK"],
+        "isolated_restore": evidence["MEDIA_OFFSITE_RESTORE"],
+        "source_manifest_object": evidence["BUNNY_MEDIA_MANIFEST_OBJECT"],
+        "source_manifest_sha256": evidence["MEDIA_SOURCE_MANIFEST_SHA256"],
+        "source_manifest_ciphertext_sha256": evidence["BUNNY_MEDIA_MANIFEST_SHA256"],
+        "source_manifest_readback": evidence["BUNNY_MEDIA_MANIFEST_READBACK"],
+        "file_count": int(evidence["MEDIA_FILE_COUNT"]),
+        "directory_count": int(evidence["MEDIA_DIRECTORY_COUNT"]),
+        "total_bytes": int(evidence["MEDIA_TOTAL_BYTES"]),
+    }
+    receipt_object = f"{prefix}/restore.txt"
+    manifest_object = f"{prefix}/manifest.json"
+    snapshot: dict[str, object] = {
+        "schema": "gpoint-bunny-backup/v1",
+        "status": "PASS",
+        "completed_at": completed_at,
+        "remote_root": remote_root,
+        "snapshot_prefix": prefix,
+        "snapshot": f"{candidate}/{run_id}-{attempt}",
+        "bucket": "gpoint-backups",
+        "database": database,
+        "media": media,
+        "restore": {
+            "source": "BUNNY_READBACK",
+            "status": "PASS",
+            "receipt_object": receipt_object,
+            "receipt_sha256": _sha256(evidence_path),
+        },
+    }
+    with tempfile.TemporaryDirectory(prefix="gpoint-bunny-manifest-", dir=BUNNY_TEMP_ROOT) as temp_name:
+        temp_dir = Path(temp_name)
+        receipt_readback = temp_dir / "restore.txt"
+        receipt_sha = _bunny_upload_and_readback(evidence_path, receipt_object, receipt_readback)
+        if receipt_sha != snapshot["restore"]["receipt_sha256"]:
+            raise ScheduledBackupError("Bunny restore receipt checksum mismatch")
+        manifest_path = temp_dir / "manifest.json"
+        manifest_path.write_text(json.dumps(snapshot, sort_keys=True, separators=(",", ":")),
+                                 encoding="utf-8")
+        os.chmod(manifest_path, 0o600)
+        manifest_readback = temp_dir / "manifest-readback.json"
+        manifest_sha = _bunny_upload_and_readback(manifest_path, manifest_object, manifest_readback)
+        snapshot["manifest_object"] = manifest_object
+        snapshot["manifest_sha256"] = manifest_sha
+        snapshot["manifest_readback"] = "PASS"
+        snapshot["restore"]["receipt_readback"] = "PASS"
+    return snapshot
 
 
 def _sha256(path: Path) -> str:
@@ -220,6 +366,26 @@ def _remove_failed_attempt(candidate: str, run_id: str, attempt: str,
     shutil.rmtree(evidence_dir, ignore_errors=True)
 
 
+def _commit_snapshot_manifest(manifest: dict[str, object], *, bunny_remote_root: str,
+                              candidate: str, run_id: str, attempt: str,
+                              evidence_path: Path, evidence: dict[str, str], completed_at: str,
+                              latest_path: Path, run_dir: Path, run_evidence_dir: Path,
+                              policy_module, publish_bunny: bool = True) -> None:
+    pending_manifest = SCHEDULED_ROOT / f".latest-{run_id}-{attempt}.json"
+    try:
+        if publish_bunny:
+            manifest["bunny"] = _publish_bunny_receipt(
+                bunny_remote_root, candidate, run_id, attempt, evidence_path, evidence,
+                completed_at)
+        _atomic_manifest(pending_manifest, manifest)
+        policy_module.verify_freshness(pending_manifest, max_age_hours=26)
+        os.replace(pending_manifest, latest_path)
+    except Exception:
+        pending_manifest.unlink(missing_ok=True)
+        _remove_failed_attempt(candidate, run_id, attempt, run_dir, run_evidence_dir)
+        raise
+
+
 def run() -> None:
     migration_rehearsal = os.environ.get("GPOINT_MIGRATION_REHEARSAL") == "1"
     if migration_rehearsal:
@@ -251,11 +417,12 @@ def run() -> None:
         recipient = _run(["age-keygen", "-y", str(AGE_IDENTITY)], stage="age key identity")
         if not AGE_RECIPIENT.fullmatch(recipient):
             raise ScheduledBackupError("age identity recipient is invalid")
+        evidence_path, bunny_remote_root = _backup_evidence_and_bunny_remote(
+            migration_rehearsal=migration_rehearsal)
         if migration_rehearsal:
             # A rehearsal's source of truth is the verified encrypted backup.
             # Do not inspect the live Kamal API, PostgreSQL container, network,
             # production environment, or media bind mount in this path.
-            evidence_path = os.environ.get("GPOINT_MIGRATION_BACKUP_EVIDENCE", "").strip()
             if evidence_path:
                 evidence_sha = os.environ.get("GPOINT_MIGRATION_BACKUP_EVIDENCE_SHA256", "")
                 try:
@@ -449,17 +616,16 @@ def run() -> None:
                       "manifest_sha256": evidence["MEDIA_SOURCE_MANIFEST_SHA256"]},
             "restore_evidence": {"path": str(evidence_path), "sha256": _sha256(evidence_path)},
         }
-        pending_manifest = SCHEDULED_ROOT / f".latest-{run_id}-{attempt}.json"
-        _atomic_manifest(pending_manifest, manifest)
-        try:
-            policy.verify_freshness(pending_manifest, max_age_hours=26)
-            os.replace(pending_manifest, latest_path)
-        except Exception:
-            pending_manifest.unlink(missing_ok=True)
-            _remove_failed_attempt(candidate, run_id, attempt, run_dir, run_evidence_dir)
-            raise
+        _commit_snapshot_manifest(
+            manifest, bunny_remote_root=bunny_remote_root, candidate=candidate,
+            run_id=run_id, attempt=attempt, evidence_path=evidence_path, evidence=evidence,
+            completed_at=completed_at, latest_path=latest_path, run_dir=run_dir,
+            run_evidence_dir=run_evidence_dir, policy_module=policy,
+            publish_bunny=not migration_rehearsal)
         _retain_local(time.time())
         print("GPOINT_BACKUP_SCHEDULED=PASS")
+        if not migration_rehearsal:
+            print("GPOINT_BACKUP_BUNNY=PASS")
         print("GPOINT_BACKUP_MANIFEST=" + str(SCHEDULED_ROOT / "latest.json"))
 
 

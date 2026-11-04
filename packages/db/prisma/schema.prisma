@@ -39,7 +39,7 @@ model UserPreference {
   entityId String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-  user User @relation(fields: [userId], references: [id])
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
   @@unique([userId, preferenceType, entityType, entityId])
   @@index([userId, preferenceType])
 }
@@ -95,6 +95,7 @@ model CodexDeviceAuthorization {
   user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
   creator Creator? @relation(fields: [creatorId], references: [id], onDelete: Cascade)
   @@index([expiresAt])
+  @@index([sourceHash, createdAt])
 }
 model CreatorProfile {
   id String @id @default(cuid())
@@ -199,7 +200,7 @@ model TelegramConnectionChallenge {
   telegramChatId String?
   preparedButtonId String?
   createdAt DateTime @default(now())
-  user User @relation(fields: [userId], references: [id])
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
   @@index([userId, expiresAt])
 }
 model CreatorChannelInstallAttempt {
@@ -229,7 +230,7 @@ model TelegramChannelInstallEvidence {
   eventDate DateTime?
   receivedAt DateTime @default(now())
   attempt CreatorChannelInstallAttempt? @relation(fields: [attemptId], references: [id])
-  @@index([actorTelegramUserId, receivedAt])
+  @@index([actorTelegramUserId, receivedAt], map: "TelegramChannelInstallEvidence_actorTelegramUserId_receivedAt_i")
   @@index([telegramChatId, receivedAt])
 }
 model AffiliateProgram {

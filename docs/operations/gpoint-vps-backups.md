@@ -12,18 +12,39 @@ releases.
 
 The timer runs daily at 03:00 UTC with a persistent catch-up and up to 20 minutes
 of scheduling jitter. It backs up the `gpoint` PostgreSQL database and the full
-`/opt/gpoint/media` tree. Both artifacts are age-encrypted before they are
-written under `/opt/gpoint/backups/scheduled`; plaintext database archives and
-media tar streams exist only in `/run` during the run. Encrypted artifacts and
-run evidence are retained locally for 30 days.
+`/opt/gpoint/media` tree. PostgreSQL uses the standard custom archive consumed
+by `pg_restore`; media uses a standard tar archive. Both are age-encrypted.
+Plaintext database archives, media tar streams, and the media source manifest
+exist only in `/run` during the run.
 
-Each run verifies the live Kamal API, Proxy, PostgreSQL identity and migration
-heads, writable media mount, encryption key identity, SHA-256 of both encrypted
-files, a network-isolated restore using the same PostgreSQL image, restored
-Prisma/Alembic heads, and a restored media tree against its source manifest.
-`latest.json` is written atomically only after all checks pass. The freshness
-gate re-reads the files and restore evidence and rejects missing, altered, unsafe
-or older-than-26-hour results.
+Each routine run verifies the live Kamal API, Proxy, PostgreSQL identity and
+migration heads, writable media mount, encryption key identity, then uploads the
+encrypted database, media archive, and encrypted source manifest to the existing
+private Bunny S3 zone `gpoint-backups`. It downloads the same exact objects,
+checks their SHA-256 values, and performs the isolated `pg_restore` and media
+restore from those read-back files. It compares restored Prisma/Alembic heads
+and the restored media tree to the source manifest recovered from Bunny. A
+snapshot manifest and restore receipt are uploaded immutably and read back before
+`latest.json` can be updated. Any missing config or failed step exits nonzero and
+preserves the previous `latest.json`.
+
+The root-owned mode-0600 `/opt/gpoint/env/gpoint-backup-offsite.conf` contains
+only `GPOINT_BACKUP_BUNNY_REMOTE=<rclone-alias>:gpoint-backups`. The configured
+alias must exist in the root-owned mode-0600 `/root/.config/rclone/rclone.conf`,
+use rclone S3 with `provider=Other`, an HTTPS Bunny Storage S3 endpoint, and the
+zone name as access key ID. Credentials remain in that protected rclone file;
+they are not written to Git, manifests, or logs. Provisioning must verify that
+this is the existing private zone with S3 compatibility already enabled; the
+code neither creates a zone nor changes zone privacy or credentials. Bunny
+currently documents S3 support as public preview and says S3 compatibility can
+only be enabled when a zone is created. If the existing zone is not S3-enabled,
+stop without creating a replacement zone.
+
+For the transition, encrypted VPS recovery files and evidence are still retained
+locally for the existing 30-day period. This implementation does not change the
+schedule or retention and does not remove previous local copies. The later
+storage-only change requires a successful Bunny restore and separate approval of
+the updated backup policy.
 
 The VPS must have a root-owned mode-0600 age identity at
 `/opt/gpoint/env/gpoint-backup.agekey`, plus Docker and the pinned database image.
@@ -38,8 +59,7 @@ an alert. Track independent alerting in [ME-56](https://linear.app/bestuzhev/iss
 do not restore a release-blocking freshness check to the ordinary application
 Deploy.
 
-These scheduled copies are VPS-local recovery copies. They do not satisfy or
-replace the separately required offsite backup/read-back/isolated-restore gate
-in the first Kamal cutover workflow. That gate remains unchanged. Changing the
-offsite policy requires an explicit OWNER amendment to the canonical GPoint
-release rules and cutover runbook.
+This scheduled Bunny backup remains independent of ordinary application
+releases. The first Kamal cutover's separate offsite backup workflow is unchanged
+until its own replacement is proven; scheduled backup PASS does not retroactively
+replace that historical cutover gate.
