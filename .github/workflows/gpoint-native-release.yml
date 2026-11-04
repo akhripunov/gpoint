@@ -774,7 +774,7 @@ jobs:
             docker pull --platform linux/amd64 "$repository@$digest"
             docker pull --platform linux/amd64 "$repository:$IMAGE_VERSION"
             test "$(docker image inspect "$repository:$IMAGE_VERSION" --format '{{index .RepoDigests 0}}')" = "$repository@$digest"
-            test "$(docker image inspect "$repository:$IMAGE_VERSION" --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')" = "$CANDIDATE_SHA"
+            test "$(docker image inspect "$repository:$IMAGE_VERSION" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$CANDIDATE_SHA"
           done
       - name: Verify candidate compatibility with the live database baseline
         id: migration_baseline
