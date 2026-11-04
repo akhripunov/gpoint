@@ -196,6 +196,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         commands = kamal_inventory["run"]
         for command in ("kamal app version", "kamal app details", "kamal app containers"):
             self.assertIn(command, commands)
+        self.assertIn("--env KAMAL_REGISTRY_PASSWORD", commands)
         self.assertIn('>> "$GITHUB_OUTPUT"', commands)
         for role in ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot",
                      "gpoint-agata-api", "gpoint-agata-memory-worker", "gpoint-miniapp-web"):

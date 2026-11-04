@@ -514,6 +514,7 @@ jobs:
               --volume "$HOME/.ssh:/root/.ssh:ro" \
               --volume "$HOME/.ssh:$HOME/.ssh:ro" \
               --workdir /workdir \
+              --env KAMAL_REGISTRY_PASSWORD \
               --env GPOINT_PRODUCTION_HOST \
               --env GPOINT_SSH_KEY \
               --env GPOINT_KNOWN_HOSTS_FILE \
