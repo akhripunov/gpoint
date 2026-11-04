@@ -715,8 +715,8 @@ jobs:
           [[ "$eros_installed" == true || "$eros_installed" == false ]]
           if [[ "$eros_installed" == true ]]; then
             [[ "$eros_version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
-            for pair in "config/deploy.eros.yml|engine|gpoint-eros-pilot-engine" "config/deploy.eros-relay.yml|relay|gpoint-eros-relay-relay"; do
-              IFS='|' read -r config role expected <<< "$pair"
+            for pair in "config/deploy.eros.yml|gpoint-eros-pilot-engine" "config/deploy.eros-relay.yml|gpoint-eros-relay-relay"; do
+              IFS='|' read -r config expected <<< "$pair"
               output="$(docker run --rm --pull=never --platform linux/amd64 --volume "$GITHUB_WORKSPACE:/workdir" --volume "$HOME/.ssh:/root/.ssh:ro" --workdir /workdir --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA --env GPOINT_PRODUCTION_HOST --env GPOINT_SSH_KEY --env GPOINT_KNOWN_HOSTS_FILE --env KAMAL_REGISTRY_PASSWORD ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 app version --config-file "$config")"
               grep -F "$expected-$eros_version" <<< "$output" >/dev/null
             done

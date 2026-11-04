@@ -72,3 +72,11 @@ def test_eros_database_changes_do_not_run_for_core_only_deploy_or_rollback():
     rollback = steps_for("rollback")
     compat = next(step for step in rollback if step.get("name", "").startswith("Verify Eros rollback image"))
     assert compat["if"] == "inputs.rollback_eros == true"
+
+
+def test_eros_topology_inventory_shell_loop_has_no_unused_read_variable():
+    deploy = steps_for("deploy")
+    topology = next(step["run"] for step in deploy
+                    if step.get("name") == "Verify installed Kamal topology before ordinary release")
+    assert '"config/deploy.eros.yml|gpoint-eros-pilot-engine"' in topology
+    assert 'IFS=\'|\' read -r config expected <<< "$pair"' in topology
