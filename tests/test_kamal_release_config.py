@@ -106,14 +106,15 @@ def test_kamal_agata_and_miniapp_are_separate_services():
 def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
     workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
     jobs = workflow["jobs"]
-    assert {"workspace", "python", "build", "deploy"}.issubset(jobs)
-    assert jobs["build"]["needs"] == ["workspace", "python"]
-    assert jobs["build"]["if"] == "needs.workspace.outputs.mode == 'DEPLOY' || needs.workspace.outputs.mode == 'REHEARSAL'"
+    assert {"tests", "build", "deploy"}.issubset(jobs)
+    assert not ({"workspace", "python"} & set(jobs))
+    assert jobs["build"]["needs"] == ["tests"]
+    assert jobs["build"]["if"] == "needs.tests.outputs.mode == 'DEPLOY' || needs.tests.outputs.mode == 'REHEARSAL'"
     build_steps = yaml.safe_dump(jobs["build"]["steps"])
     assert "cache-to: type=gha,scope=gpoint-runtime,mode=max" in build_steps
     assert "sbom: true" in build_steps
     assert "provenance: mode=max" in build_steps
-    assert jobs["deploy"]["needs"] == ["workspace", "python", "build"]
+    assert jobs["deploy"]["needs"] == ["tests", "build"]
     assert jobs["deploy"]["environment"] == {
         "name": "production",
         "url": "${{ steps.verify.outputs.environment_url }}",
@@ -1270,20 +1271,20 @@ def test_kamal_production_verify_persists_attempt_bound_manifest():
 
 def test_manifest_writer_behavior_tests_run_in_python_ci():
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
-    python_job = workflow.split("  python:\n", 1)[1].split("  build:\n", 1)[0]
-    assert "tests/test_kamal_production_manifest.py" in python_job
-    oras_setup = python_job.index("name: Install pinned ORAS for release evidence round-trip test")
-    evidence_tests = python_job.index("tests/test_deploy_evidence_workflow.py")
+    tests_job = workflow.split("  tests:\n", 1)[1].split("  build:\n", 1)[0]
+    assert "tests/test_kamal_production_manifest.py" in tests_job
+    oras_setup = tests_job.index("name: Install pinned ORAS for release evidence round-trip test")
+    evidence_tests = tests_job.index("tests/test_deploy_evidence_workflow.py")
     assert oras_setup < evidence_tests
-    assert "oras_1.3.0_linux_amd64.tar.gz" in python_job
-    assert "6cdc692f929100feb08aa8de584d02f7bcc30ec7d88bc2adc2054d782db57c64" in python_job
-    assert '"$GITHUB_ENV"' in python_job
+    assert "oras_1.3.0_linux_amd64.tar.gz" in tests_job
+    assert "6cdc692f929100feb08aa8de584d02f7bcc30ec7d88bc2adc2054d782db57c64" in tests_job
+    assert '"$GITHUB_ENV"' in tests_job
 
 
 def test_native_release_runs_kamal_after_successful_main_push():
     workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
     deploy = workflow["jobs"]["deploy"]
-    assert deploy["if"] == "needs.workspace.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true))"
+    assert deploy["if"] == "needs.tests.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true))"
     assert deploy["environment"] == {
         "name": "production",
         "url": "${{ steps.verify.outputs.environment_url }}",
