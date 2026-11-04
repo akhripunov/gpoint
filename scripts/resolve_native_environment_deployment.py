@@ -30,13 +30,35 @@ def _latest_status(statuses: list[dict]) -> dict:
     return matches[0]
 
 
+def _current_attempt_deploy_job_urls(jobs: list[dict], *, repository: str,
+                                    run_id: str) -> set[str]:
+    if not isinstance(jobs, list):
+        raise ValueError("current workflow attempt job list is invalid")
+    matches = set()
+    for job in jobs:
+        if (not isinstance(job, dict)
+                or job.get("name") != "Kamal production Deploy and Verify"
+                or job.get("status") != "in_progress"):
+            continue
+        identifier = job.get("id")
+        if not isinstance(identifier, int) or identifier <= 0:
+            continue
+        expected = f"https://github.com/{repository}/actions/runs/{run_id}/job/{identifier}"
+        if job.get("html_url") == expected:
+            matches.add(expected)
+    if len(matches) != 1:
+        raise ValueError("current workflow attempt does not identify exactly one active production Deploy job")
+    return matches
+
+
 def resolve_native_deployment_id(deployments: list[dict], statuses_by_id: dict[int, list[dict]], *,
                                  candidate_sha: str, repository: str, run_id: str,
-                                 run_attempt: str) -> int:
+                                 run_attempt: str,
+                                 current_attempt_job_urls: set[str] | None = None) -> int:
     if (not SHA40.fullmatch(candidate_sha or "") or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository or "")
             or not POSITIVE.fullmatch(str(run_id)) or not POSITIVE.fullmatch(str(run_attempt))):
         raise ValueError("exact candidate SHA, repository, run ID and attempt are required")
-    run_urls = {
+    run_urls = set(current_attempt_job_urls or ()) | {
         f"https://github.com/{repository}/actions/runs/{run_id}",
         f"https://github.com/{repository}/actions/runs/{run_id}/attempts/{run_attempt}",
     }
@@ -79,6 +101,10 @@ def main() -> int:
     try:
         route = f"repos/{args.repository}/deployments?sha={args.sha}&environment=production&task=deploy&per_page=100"
         deployments = _gh_json(route)
+        job_routes = (f"repos/{args.repository}/actions/runs/{args.run_id}/attempts/"
+                      f"{args.run_attempt}/jobs?per_page=100")
+        job_urls = _current_attempt_deploy_job_urls(
+            _gh_json(job_routes), repository=args.repository, run_id=args.run_id)
         status_rows = {}
         for row in deployments:
             identifier = row.get("id") if isinstance(row, dict) else None
@@ -87,7 +113,8 @@ def main() -> int:
                     f"repos/{args.repository}/deployments/{identifier}/statuses?per_page=100")
         deployment_id = resolve_native_deployment_id(
             deployments, status_rows, candidate_sha=args.sha, repository=args.repository,
-            run_id=args.run_id, run_attempt=args.run_attempt)
+            run_id=args.run_id, run_attempt=args.run_attempt,
+            current_attempt_job_urls=job_urls)
     except ValueError as error:
         print(f"NATIVE_DEPLOYMENT=BLOCKED reason={error}", file=sys.stderr)
         return 1

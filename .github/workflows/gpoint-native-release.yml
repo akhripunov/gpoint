@@ -447,6 +447,7 @@ jobs:
     permissions:
       contents: read
       packages: read
+      actions: read
       deployments: write
     env:
       CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
