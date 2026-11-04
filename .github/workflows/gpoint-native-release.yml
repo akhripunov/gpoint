@@ -537,14 +537,26 @@ jobs:
             esac
             version_text="$(kamal app version --config-file "$config")"
             mapfile -t versions < <(grep -Eo '[0-9a-f]{40}-[0-9]+-[0-9]+' <<< "$version_text" | sort -u)
-            [[ "${#versions[@]}" == 1 ]]
+            if [[ "${#versions[@]}" != 1 ]]; then
+              echo "Kamal inventory could not resolve one exact current version for $config (matches=${#versions[@]})." >&2
+              exit 1
+            fi
             version="${versions[0]}"
             details="$(kamal app details --config-file "$config")"
             containers="$(kamal app containers --config-file "$config")"
-            test -n "$details" && test -n "$containers"
+            if [[ -z "$details" || -z "$containers" ]]; then
+              echo "Kamal inventory returned empty details or container output for $config." >&2
+              exit 1
+            fi
             for role in "${roles[@]}"; do
-              grep -F -- "$role-$version" <<< "$details" >/dev/null
-              grep -F -- "$role-$version" <<< "$containers" >/dev/null
+              if ! grep -F -- "$role-$version" <<< "$details" >/dev/null; then
+                echo "Kamal inventory details do not include expected role/version: $role-$version." >&2
+                exit 1
+              fi
+              if ! grep -F -- "$role-$version" <<< "$containers" >/dev/null; then
+                echo "Kamal inventory containers do not include expected role/version: $role-$version." >&2
+                exit 1
+              fi
             done
             printf '%s=%s\n' "$version_output" "$version" >> "$GITHUB_OUTPUT"
             {
