@@ -25,6 +25,7 @@ FIXTURE = r"""
 CREATE TABLE "User" (id TEXT PRIMARY KEY);
 CREATE TABLE "Creator" (id TEXT PRIMARY KEY);
 INSERT INTO "User" VALUES ('gpoint-user-test');
+INSERT INTO "User" VALUES ('gpoint-user-test-newer-denial');
 INSERT INTO "Creator" VALUES ('gpoint-creator-test');
 CREATE SCHEMA agata;
 CREATE TABLE agata.synthetic_user_state (id integer PRIMARY KEY, payload text NOT NULL);
@@ -36,7 +37,7 @@ CREATE TABLE agata.consents (id UUID, tenant_id UUID, user_id UUID, purpose TEXT
   revoked_at TIMESTAMPTZ, policy_version TEXT);
 CREATE TABLE agata.age_assurances (id UUID, tenant_id UUID, user_id UUID, age_band TEXT, status TEXT,
   method TEXT, jurisdiction TEXT, verified_at TIMESTAMPTZ, asserted_at TIMESTAMPTZ, expires_at TIMESTAMPTZ,
-  version INTEGER);
+  version INTEGER, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE TABLE agata.ai_disclosure_receipts (id UUID, tenant_id UUID, user_id UUID, policy_profile_id UUID,
   policy_version INTEGER, channel TEXT, receipt_key TEXT, displayed_at TIMESTAMPTZ, memory_opt_in BOOLEAN,
   memory_opt_in_at TIMESTAMPTZ);
@@ -49,7 +50,9 @@ CREATE TABLE agata.messages (id UUID, tenant_id UUID, conversation_id UUID, user
   content_key_version TEXT, system_message_type TEXT, system_action TEXT, occurred_at TIMESTAMPTZ,
   deleted_at TIMESTAMPTZ, incoming_read_at TIMESTAMPTZ, language_code TEXT);
 CREATE TABLE agata.memories (id UUID, tenant_id UUID, user_id UUID, character_id UUID, relationship_id UUID);
-INSERT INTO agata.users VALUES ('10000000-0000-4000-8000-000000000001','30000000-0000-4000-8000-000000000003','gpoint','gpoint-user-test');
+INSERT INTO agata.users VALUES
+ ('10000000-0000-4000-8000-000000000001','30000000-0000-4000-8000-000000000003','gpoint','gpoint-user-test'),
+ ('10000000-0000-4000-8000-000000000011','30000000-0000-4000-8000-000000000003','gpoint','gpoint-user-test-newer-denial');
 INSERT INTO agata.regional_policy_profiles VALUES
  ('40000000-0000-4000-8000-000000000004','30000000-0000-4000-8000-000000000003','GLOBAL','synthetic',1,'active',now()-interval '1 day',NULL,
   '{"ai_disclosure_required":true,"self_attestation_allowed":false,"adult_only_features":["restricted"]}'),
@@ -57,10 +60,15 @@ INSERT INTO agata.regional_policy_profiles VALUES
   '{"ai_disclosure_required":false,"self_attestation_allowed":true,"adult_only_features":[]}');
 INSERT INTO agata.consents VALUES
  ('50000000-0000-4000-8000-000000000005','30000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000001','chat_history',now()-interval '2 hours',NULL,'1'),
- ('50000000-0000-4000-8000-000000000015','30000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000001','chat_history',now()-interval '1 hour',NULL,'1');
-INSERT INTO agata.age_assurances VALUES
- ('60000000-0000-4000-8000-000000000006','30000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000001','adult','verified','document','GLOBAL',now(),NULL,NULL,1),
- ('60000000-0000-4000-8000-000000000016','30000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000001','adult','expired','document','US',now()-interval '400 days',NULL,now()-interval '1 day',5);
+ ('50000000-0000-4000-8000-000000000015','30000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000001','chat_history',now()-interval '1 hour',NULL,'1'),
+ ('50000000-0000-4000-8000-000000000025','30000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000001','long_term_memory',now()-interval '3 hours',now()-interval '30 minutes','1'),
+ ('50000000-0000-4000-8000-000000000035','30000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000001','long_term_memory',now()-interval '30 minutes',NULL,'1');
+INSERT INTO agata.age_assurances
+  (id,tenant_id,user_id,age_band,status,method,jurisdiction,verified_at,asserted_at,expires_at,version,created_at) VALUES
+ ('60000000-0000-4000-8000-000000000006','30000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000001','adult','verified','document','GLOBAL',now(),NULL,NULL,1,now()),
+ ('60000000-0000-4000-8000-000000000016','30000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000001','adult','expired','document','US',now()-interval '400 days',NULL,now()-interval '1 day',5,now()-interval '400 days'),
+ ('60000000-0000-4000-8000-000000000026','30000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000011','adult','verified','document','GLOBAL',now()-interval '10 days',NULL,NULL,9,now()-interval '10 days'),
+ ('60000000-0000-4000-8000-000000000036','30000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000011','adult','expired','document','US',now()-interval '10 days',NULL,now()-interval '1 day',2,now());
 INSERT INTO agata.ai_disclosure_receipts VALUES
  ('70000000-0000-4000-8000-000000000007','30000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000001','40000000-0000-4000-8000-000000000004',1,'web','synthetic-receipt',now(),true,now());
 INSERT INTO agata.characters VALUES ('80000000-0000-4000-8000-000000000008','30000000-0000-4000-8000-000000000003','gpoint-creator-test');
@@ -152,20 +160,21 @@ def main() -> int:
         policy_counts = psql(container, "SELECT count(*) || '|' || max(\"version\") || '|' || min(\"termsVersion\") || '|' || min(\"privacyVersion\") || '|' || min((\"rules\"->>'minimum_age')::integer) || '|' || bool_and(\"rules\"->>'ai_disclosure_required'='true')::text FROM \"GpointChatPolicyProfile\"").stdout.strip()
         user_state_counts = psql(container, "SELECT (SELECT count(*) FROM \"GpointChatConsent\") || '|' || (SELECT count(*) FROM \"GpointAgeAssurance\") || '|' || (SELECT count(*) FROM \"GpointAiDisclosureReceipt\")").stdout.strip()
         active_chat_consents = psql(container, "SELECT count(*) FROM \"GpointChatConsent\" WHERE purpose='chat_history' AND \"revokedAt\" IS NULL").stdout.strip()
-        age_version = psql(container, 'SELECT max("version") FROM "GpointAgeAssurance"').stdout.strip()
+        active_memory_consents = psql(container, "SELECT count(*) FROM \"GpointChatConsent\" WHERE purpose='long_term_memory' AND \"revokedAt\" IS NULL").stdout.strip()
+        age_state = psql(container, 'SELECT string_agg("ageBand" || \'|\' || status || \'|\' || "version", \'|\' ORDER BY "userId") FROM "GpointAgeAssurance"').stdout.strip()
         archive_counts = psql(container, "SELECT " + " || '|' || ".join(
             f'(SELECT count(*) FROM "{table}")' for table in ARCHIVE_TABLES)).stdout.strip()
-        if source_counts != "1|2|1|2|1|1|1|0":
+        if source_counts != "2|2|4|4|1|1|1|0":
             raise RuntimeError(f"AGATA source counts changed or fixture mismatch: {source_counts!r}")
         if policy_counts != "1|1|gpoint-terms-v1|gpoint-privacy-v1|18|true":
             raise RuntimeError(f"GPoint policy definition copy mismatch: {policy_counts!r}")
-        if user_state_counts != "2|1|0" or active_chat_consents != "1" or age_version != "5":
+        if user_state_counts != "4|2|0" or active_chat_consents != "1" or active_memory_consents != "0" or age_state != "adult|verified|1|adult|expired|2":
             raise RuntimeError(f"GPoint consent/age/disclosure state copy mismatch: {user_state_counts!r}")
         if archive_counts != "0|0|0":
             raise RuntimeError(f"AGATA conversation, message, or memory archive was copied: {archive_counts!r}")
         print("GPOINT_AGATA_SOURCE_STATE_UNCHANGED=PASS")
         print("GPOINT_GLOBAL_POLICY=PASS version=1 terms=gpoint-terms-v1 privacy=gpoint-privacy-v1")
-        print("GPOINT_LEGACY_CHAT_CONSENT_AND_LATEST_AGE=PASS consent_rows=2 active_chat_rows=1 age_rows=1 age_version=5")
+        print("GPOINT_LATEST_CONSENT_AND_AGE_WINS=PASS consent_rows=4 active_chat_rows=1 active_memory_rows=0 age=latest-created-state-wins")
         print("GPOINT_NEW_DISCLOSURE_REQUIRED=PASS legacy_receipt_stays_in_agata=true")
         print("GPOINT_AGATA_HISTORY_AND_MEMORY_NOT_COPIED=PASS")
         print("GPOINT_CHAT_SCHEMA_ADDITIVE_RERUN=PASS")

@@ -44,7 +44,7 @@ def test_postgres_rehearsal_checks_global_policy_legacy_state_and_archive_non_tr
 
     assert "GPOINT_AGATA_SOURCE_STATE_UNCHANGED=PASS" in rehearsal
     assert "GPOINT_GLOBAL_POLICY=PASS version=1 terms=gpoint-terms-v1 privacy=gpoint-privacy-v1" in rehearsal
-    assert "GPOINT_LEGACY_CHAT_CONSENT_AND_LATEST_AGE=PASS consent_rows=2 active_chat_rows=1 age_rows=1 age_version=5" in rehearsal
+    assert "GPOINT_LATEST_CONSENT_AND_AGE_WINS=PASS consent_rows=4 active_chat_rows=1 active_memory_rows=0 age=latest-created-state-wins" in rehearsal
     assert "GPOINT_NEW_DISCLOSURE_REQUIRED=PASS legacy_receipt_stays_in_agata=true" in rehearsal
     assert "GPOINT_AGATA_HISTORY_AND_MEMORY_NOT_COPIED=PASS" in rehearsal
 
@@ -55,11 +55,18 @@ def test_global_self_attestation_version_accounts_for_legacy_non_global_age_rows
     assert "jurisdiction" not in source
 
 
+def test_gpoint_messages_never_reuses_legacy_agata_jurisdiction():
+    source = (ROOT / "apps/api/src/messages.ts").read_text()
+    assert "current.jurisdiction" not in source
+    assert source.count("jurisdiction: 'GLOBAL'") == 2
+
+
 def test_consent_migration_keeps_only_the_latest_legacy_active_row_current():
     sql = MIGRATION.read_text(encoding="utf-8").lower()
     assert re.search(
         r'row_number\(\) over \(partition by c\.tenant_id,c\.user_id,c\.purpose\s+'
-        r'order by case when c\.revoked_at is null then 0 else 1 end,c\.granted_at desc,c\.id desc\) as active_rank',
+        r'order by coalesce\(c\.revoked_at,c\.granted_at\) desc,\s*case when c\.revoked_at is null then 1 else 0 end,c\.granted_at desc,c\.id desc\) as latest_event_rank',
         sql,
     )
-    assert re.search(r'when revoked_at is null and active_rank > 1 then latest_active_granted_at', sql)
+    assert re.search(r'when revoked_at is null and latest_event_rank > 1 then latest_event_at', sql)
+    assert re.search(r'order by u\.id,a\.created_at desc,coalesce\(a\.verified_at,a\.asserted_at\) desc nulls last,a\.version desc,a\.id desc', sql)

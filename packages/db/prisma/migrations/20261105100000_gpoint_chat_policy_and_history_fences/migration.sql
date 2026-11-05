@@ -173,10 +173,11 @@ BEGIN
 
     WITH scoped AS (
       SELECT c.*,u.id AS gpoint_user_id,
-        max(c.granted_at) FILTER (WHERE c.revoked_at IS NULL)
-          OVER (PARTITION BY c.tenant_id,c.user_id,c.purpose) AS latest_active_granted_at,
+        max(coalesce(c.revoked_at,c.granted_at))
+          OVER (PARTITION BY c.tenant_id,c.user_id,c.purpose) AS latest_event_at,
         row_number() OVER (PARTITION BY c.tenant_id,c.user_id,c.purpose
-          ORDER BY CASE WHEN c.revoked_at IS NULL THEN 0 ELSE 1 END,c.granted_at DESC,c.id DESC) AS active_rank
+          ORDER BY coalesce(c.revoked_at,c.granted_at) DESC,
+            CASE WHEN c.revoked_at IS NULL THEN 1 ELSE 0 END,c.granted_at DESC,c.id DESC) AS latest_event_rank
       FROM agata.consents c
       JOIN agata.users au ON au.tenant_id=c.tenant_id AND au.id=c.user_id AND au.source_system='gpoint'
       JOIN "User" u ON u.id=au.external_id
@@ -185,7 +186,7 @@ BEGIN
     INSERT INTO "GpointChatConsent"
       ("id","sourceAgataId","sourceTenantId","userId","purpose","grantedAt","revokedAt","policyVersion")
     SELECT id::text,id::text,tenant_id::text,gpoint_user_id,purpose,granted_at,
-      CASE WHEN revoked_at IS NULL AND active_rank > 1 THEN latest_active_granted_at ELSE revoked_at END,
+      CASE WHEN revoked_at IS NULL AND latest_event_rank > 1 THEN latest_event_at ELSE revoked_at END,
       policy_version
     FROM scoped
     ON CONFLICT ("sourceAgataId") DO NOTHING;
@@ -196,7 +197,7 @@ BEGIN
     FROM agata.age_assurances a
     JOIN agata.users au ON au.tenant_id=a.tenant_id AND au.id=a.user_id AND au.source_system='gpoint'
     JOIN "User" u ON u.id=au.external_id
-    ORDER BY u.id,a.version DESC,coalesce(a.verified_at,a.asserted_at) DESC NULLS LAST,a.id DESC
+    ORDER BY u.id,a.created_at DESC,coalesce(a.verified_at,a.asserted_at) DESC NULLS LAST,a.version DESC,a.id DESC
     ON CONFLICT ("sourceAgataId") DO NOTHING;
 
     IF EXISTS (SELECT 1 FROM agata.users au WHERE au.source_system='gpoint'

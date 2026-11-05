@@ -25,7 +25,6 @@ export async function useDefaultAgeAssuranceState(page: Page): Promise<void> {
       eligible: true,
       status: 'verified',
       method: 'e2e',
-      jurisdiction: 'test',
       assertedAt: null,
       expiresAt: null,
       selfAttestationAllowed: false,

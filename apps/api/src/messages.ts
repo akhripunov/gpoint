@@ -429,7 +429,9 @@ export class MessagesController {
         age_band: current.ageBand,
         age_status: current.ageStatus,
         age_method: current.ageMethod,
-        jurisdiction: current.jurisdiction,
+        // The GPoint compatibility contract is global; never echo an AGATA
+        // region back into consent state.
+        jurisdiction: 'GLOBAL',
         verified_at: current.verifiedAt,
         expires_at: current.expiresAt,
         disclosure_accepted: true,
@@ -559,7 +561,9 @@ export class MessagesController {
         age_band: current.ageBand,
         age_status: current.ageStatus,
         age_method: current.ageMethod,
-        jurisdiction: current.jurisdiction,
+        // Keep the legacy transport on GPoint's single global scope until
+        // the Eros route is enabled; never derive a scope from user metadata.
+        jurisdiction: 'GLOBAL',
         verified_at: current.verifiedAt,
         expires_at: current.expiresAt,
         disclosure_accepted: false,

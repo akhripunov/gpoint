@@ -84,7 +84,7 @@ export async function installMiniAppBrowserMocks(
     else if (apiPath === "/creators/browser-smoke-model-id/posts") data = { items, nextCursor: null };
     else if (apiPath === "/age-assurance/state") {
       if (options.ageAssuranceDelayMs) await new Promise((resolve) => setTimeout(resolve, options.ageAssuranceDelayMs));
-      data = { required: ageAssuranceRequired, eligible: !ageAssuranceRequired, status: ageAssuranceRequired ? "pending" : "self_attested", method: ageAssuranceRequired ? "unknown" : "self_attested", jurisdiction: "GLOBAL", assertedAt: ageAssuranceRequired ? null : "2026-09-27T10:00:00.000Z", expiresAt: null, selfAttestationAllowed: true };
+      data = { required: ageAssuranceRequired, eligible: !ageAssuranceRequired, status: ageAssuranceRequired ? "pending" : "self_attested", method: ageAssuranceRequired ? "unknown" : "self_attested", assertedAt: ageAssuranceRequired ? null : "2026-09-27T10:00:00.000Z", expiresAt: null, selfAttestationAllowed: true };
     }
     else if (apiPath === "/age-assurance/self-attest" && route.request().method() === "POST") {
       if (options.ageAttestationWriteStatus) {
@@ -92,7 +92,7 @@ export async function installMiniAppBrowserMocks(
         data = { code: "AGE_ASSURANCE_UNAVAILABLE" };
       } else {
         ageAssuranceRequired = false;
-        data = { required: false, eligible: true, status: "self_attested", method: "self_attested", jurisdiction: "GLOBAL", assertedAt: "2026-09-27T10:00:00.000Z", expiresAt: null, selfAttestationAllowed: true };
+        data = { required: false, eligible: true, status: "self_attested", method: "self_attested", assertedAt: "2026-09-27T10:00:00.000Z", expiresAt: null, selfAttestationAllowed: true };
       }
     }
     else if (apiPath === "/messages/state") data = { enabled: true, chatHistory: chatHistoryAccepted, longTermMemory: memoryOptIn, disclosureRequired: !chatHistoryAccepted, onboardingCompleted: chatHistoryAccepted, disclosureVersion: 1, onboardingCompletedAt, memoryOptIn, memoryOptInAt: onboardingCompletedAt, ageAssuranceRequired, aiAvailable: options.aiAvailable ?? true };
