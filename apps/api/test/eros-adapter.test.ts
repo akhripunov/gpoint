@@ -89,8 +89,8 @@ test('production GPoint-owned routing admits any valid GPoint identity only with
     GPOINT_CHAT_POLICY_TENANT_ID: '30000000-0000-4000-8000-000000000003',
   };
   assert.equal(isErosChatAllowed('10000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000002', owned), true);
-  assert.equal(isErosChatAllowed('not-a-uuid', '20000000-0000-4000-8000-000000000002', owned), false);
-  assert.equal(isErosChatAllowed('10000000-0000-4000-8000-000000000001', 'bad-creator', owned), false);
+  assert.equal(isErosChatAllowed('invalid user id', '20000000-0000-4000-8000-000000000002', owned), false);
+  assert.equal(isErosChatAllowed('10000000-0000-4000-8000-000000000001', 'bad creator', owned), false);
   assert.equal(isErosChatAllowed('10000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000002', { ...owned, EROS_ENABLED: 'false' }), false);
   assert.equal(isErosChatAllowed('10000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000002', { ...owned, GPOINT_CHAT_POLICY_TENANT_ID: '' }), false);
   assert.equal(isErosChatAllowed('10000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000002', { ...owned, EROS_DATA_MODE: 'synthetic' }), false);

@@ -153,7 +153,7 @@ test('GPoint-owned Worker routes health, status and claims through Eros without 
     protected override async readAgataQueueStatus(): Promise<never> { assert.fail('AGATA queue must not be queried'); }
     protected override async claimAgataJob(): Promise<never> { assert.fail('AGATA claim must not be queried'); }
     protected override async readErosQueueStatus() { return { pending_jobs: 1, running_jobs: 0 }; }
-    protected override async claimErosJob() { return { job: null }; }
+    protected override async claimErosJob() { return null; }
   }
   const previous = {
     token: process.env.GPOINT_AGATA_WORKER_TOKEN, enabled: process.env.EROS_ENABLED,

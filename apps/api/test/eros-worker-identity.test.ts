@@ -65,7 +65,15 @@ test('does not let a system identity bypass the exact pilot chat-user mapping', 
   }, expectedSystemIdentity), false);
 });
 
-test('accepts a chat job only for the configured synthetic pilot pair', () => {
+test('accepts a chat job only for the configured synthetic pilot pair and exact signed identity', () => {
+  const chatIdentity = {
+    tenantId,
+    userId: 'c0ed4418-d76d-5ccc-8b1b-4eeeaed78651',
+    creatorId: 'd552a185-1e1a-54f2-a668-da366e82b4f4',
+    sessionId: '30000000-0000-4000-8000-000000000003',
+    instanceId: '40000000-0000-4000-8000-000000000004',
+    requestId: '50000000-0000-4000-8000-000000000005',
+  };
   assert.equal(isExpectedErosWorkerJobIdentity({
     job_type: 'CHAT_COMPLETION',
     tenant_id: tenantId,
@@ -76,5 +84,5 @@ test('accepts a chat job only for the configured synthetic pilot pair', () => {
     request_id: '50000000-0000-4000-8000-000000000005',
   }, tenantId, {
     userId: 'c0ed4418-d76d-5ccc-8b1b-4eeeaed78651', creatorId: 'd552a185-1e1a-54f2-a668-da366e82b4f4',
-  }, null), true);
+  }, null, { chatIdentity }), true);
 });
