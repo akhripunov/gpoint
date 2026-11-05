@@ -33,7 +33,36 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(jobs["deploy"]["needs"], ["tests", "build"])
         self.assertIn("outputs.mode == 'DEPLOY'", jobs["build"]["if"])
         self.assertIn("outputs.mode == 'REHEARSAL'", jobs["build"]["if"])
+        self.assertIn("outputs.mode == 'ARTIFACT_PREPARE'", jobs["build"]["if"])
         self.assertIn("build", jobs["deploy"]["needs"])
+
+    def test_prepared_artifact_build_has_no_deploy_authority_and_deploy_reuses_exact_digests(self):
+        events = self.workflow.get("on", self.workflow.get(True))
+        inputs = events["workflow_dispatch"]["inputs"]
+        self.assertEqual(inputs["use_prepared_images"]["type"], "boolean")
+        self.assertTrue(all(inputs[name]["type"] == "string" for name in (
+            "prepared_app_digest", "prepared_agata_digest",
+            "prepared_miniapp_digest", "prepared_eros_digest",
+        )))
+        build = self.workflow["jobs"]["build"]
+        self.assertNotIn("environment", build)
+        self.assertNotEqual(build["permissions"].get("deployments"), "write")
+        steps = build["steps"]
+        prepared = next(step for step in steps if step.get("id") == "prepared")
+        self.assertIn("inputs.use_prepared_images == true", prepared["if"])
+        self.assertIn("validate_prepared_image_digests", prepared["run"])
+        readback = next(step for step in steps if step.get("id") == "image_readback")
+        self.assertIn("REUSE_PREPARED_IMAGES", readback["env"])
+        self.assertIn('if [[ "$REUSE_PREPARED_IMAGES" != true ]]', readback["run"])
+        deploy = self.workflow["jobs"]["deploy"]
+        self.assertIn("needs.tests.outputs.deploy == 'true'", deploy["if"])
+
+    def test_artifact_prepare_marker_is_passed_to_the_fail_closed_intent_classifier(self):
+        steps = self.workflow["jobs"]["tests"]["steps"]
+        intent = next(step for step in steps if step.get("id") == "intent")
+        self.assertEqual(intent["env"]["EVENT_COMMIT_MESSAGE"], "${{ github.event.head_commit.message || '' }}")
+        self.assertIn("--commit-message", intent["run"])
+        self.assertIn("ARTIFACT_PREPARE", self.workflow["jobs"]["build"]["if"])
 
     def test_tests_matrix_preserves_parallel_suites_and_shared_fail_closed_outputs(self):
         tests = self.workflow["jobs"]["tests"]

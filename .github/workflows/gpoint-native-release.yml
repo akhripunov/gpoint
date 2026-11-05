@@ -28,6 +28,27 @@ on:
         required: true
         default: false
         type: boolean
+      use_prepared_images:
+        description: Reuse exact GHCR digests from a successful GPOINT-ARTIFACT-PREPARE run for this SHA
+        required: true
+        default: false
+        type: boolean
+      prepared_app_digest:
+        description: Prepared GHCR digest for CORE, when included in the candidate scope
+        required: false
+        type: string
+      prepared_agata_digest:
+        description: Prepared GHCR digest for AGATA, when included in the candidate scope
+        required: false
+        type: string
+      prepared_miniapp_digest:
+        description: Prepared GHCR digest for MINIAPP, when included in the candidate scope
+        required: false
+        type: string
+      prepared_eros_digest:
+        description: Prepared GHCR digest for EROS, when included in the candidate scope
+        required: false
+        type: string
       rollback:
         description: Roll back to a previously verified successful Native production release
         required: true
@@ -96,6 +117,7 @@ jobs:
           EVENT_REF: ${{ github.ref }}
           EVENT_SHA: ${{ github.sha }}
           EVENT_BEFORE: ${{ github.event.before || '' }}
+          EVENT_COMMIT_MESSAGE: ${{ github.event.head_commit.message || '' }}
           REQUESTED_SHA: ${{ inputs.candidate_sha || github.sha }}
           EVENT_ACTOR: ${{ github.actor }}
           EVENT_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
@@ -105,6 +127,7 @@ jobs:
           ROLLBACK: ${{ inputs.rollback || false }}
           ROLLBACK_EROS: ${{ inputs.rollback_eros || false }}
           APPROVE_PRODUCTION: ${{ inputs.approve_production || false }}
+          USE_PREPARED_IMAGES: ${{ inputs.use_prepared_images || false }}
         run: |
           set -euo pipefail
           args=(--event "$EVENT_NAME" --ref "$EVENT_REF" --sha "$EVENT_SHA"
@@ -112,11 +135,13 @@ jobs:
             --candidate-sha "$REQUESTED_SHA" --actor "$EVENT_ACTOR"
             --triggering-actor "$EVENT_TRIGGERING_ACTOR"
             --repository-owner "$REPOSITORY_OWNER")
+          [[ -n "$EVENT_COMMIT_MESSAGE" ]] && args+=(--commit-message "$EVENT_COMMIT_MESSAGE")
           [[ "$MIGRATION_REHEARSAL" == true ]] && args+=(--migration-rehearsal)
           [[ "$BACKUP_MAINTENANCE" == true ]] && args+=(--backup-maintenance)
           [[ "$ROLLBACK" == true ]] && args+=(--rollback)
           [[ "$ROLLBACK_EROS" == true ]] && args+=(--rollback-eros)
           [[ "$APPROVE_PRODUCTION" == true ]] && args+=(--approve-production)
+          [[ "$USE_PREPARED_IMAGES" == true ]] && args+=(--use-prepared-images)
           python3 scripts/native_release_intent.py "${args[@]}" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         if: matrix.suite == 'workspace'
@@ -281,7 +306,7 @@ jobs:
   build:
     name: Build and publish immutable images
     needs: [tests]
-    if: needs.tests.outputs.mode == 'DEPLOY' || needs.tests.outputs.mode == 'REHEARSAL'
+    if: needs.tests.outputs.mode == 'DEPLOY' || needs.tests.outputs.mode == 'REHEARSAL' || needs.tests.outputs.mode == 'ARTIFACT_PREPARE'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -290,10 +315,10 @@ jobs:
       deployments: read
       actions: read
     outputs:
-      app_digest: ${{ steps.app.outputs.digest }}
-      agata_digest: ${{ steps.agata.outputs.digest }}
-      miniapp_digest: ${{ steps.miniapp.outputs.digest }}
-      eros_digest: ${{ steps.eros.outputs.digest }}
+      app_digest: ${{ steps.app.outputs.digest || steps.prepared.outputs.app_digest }}
+      agata_digest: ${{ steps.agata.outputs.digest || steps.prepared.outputs.agata_digest }}
+      miniapp_digest: ${{ steps.miniapp.outputs.digest || steps.prepared.outputs.miniapp_digest }}
+      eros_digest: ${{ steps.eros.outputs.digest || steps.prepared.outputs.eros_digest }}
       build_components: ${{ steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components }}
       baseline_mode: ${{ steps.build_scope.outputs.status || steps.rehearsal_scope.outputs.status }}
       baseline_sources: ${{ steps.build_scope.outputs.baseline_sources || steps.rehearsal_scope.outputs.baseline_sources }}
@@ -307,7 +332,7 @@ jobs:
           persist-credentials: false
       - name: Resolve exact production component build scope
         id: build_scope
-        if: needs.tests.outputs.mode == 'DEPLOY'
+        if: needs.tests.outputs.mode == 'DEPLOY' || needs.tests.outputs.mode == 'ARTIFACT_PREPARE'
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_BEFORE: ${{ github.event.before || '' }}
@@ -334,6 +359,41 @@ jobs:
         if: needs.tests.outputs.mode == 'REHEARSAL'
         run: |
           printf 'status=REHEARSAL\nbuild_components=["CORE","AGATA"]\ndeploy_scope=UNRESOLVED\nbaseline_sources={}\n' >> "$GITHUB_OUTPUT"
+      - name: Validate exact prepared image digests
+        id: prepared
+        if: needs.tests.outputs.mode == 'DEPLOY' && inputs.use_prepared_images == true
+        env:
+          BUILD_COMPONENTS: ${{ steps.build_scope.outputs.build_components }}
+          PREPARED_APP_DIGEST: ${{ inputs.prepared_app_digest }}
+          PREPARED_AGATA_DIGEST: ${{ inputs.prepared_agata_digest }}
+          PREPARED_MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
+          PREPARED_EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path.cwd() / "scripts"))
+          from native_release_intent import validate_prepared_image_digests
+          components = json.loads(os.environ["BUILD_COMPONENTS"])
+          supplied = {component: os.environ[name] for component, name in {
+              "CORE": "PREPARED_APP_DIGEST", "AGATA": "PREPARED_AGATA_DIGEST",
+              "MINIAPP": "PREPARED_MINIAPP_DIGEST", "EROS": "PREPARED_EROS_DIGEST",
+          }.items() if os.environ[name]}
+          values = validate_prepared_image_digests(components, supplied)
+          outputs = {"CORE": "app_digest", "AGATA": "agata_digest",
+                     "MINIAPP": "miniapp_digest", "EROS": "eros_digest"}
+          for component, digest in values.items():
+              print(f"{outputs[component]}={digest}")
+          PY
+      - name: Reject unused prepared image digest inputs
+        if: needs.tests.outputs.mode == 'DEPLOY' && inputs.use_prepared_images != true
+        env:
+          PREPARED_DIGESTS: ${{ inputs.prepared_app_digest }},${{ inputs.prepared_agata_digest }},${{ inputs.prepared_miniapp_digest }},${{ inputs.prepared_eros_digest }}
+        run: |
+          test -z "${PREPARED_DIGESTS//,/}" || {
+            echo 'prepared image digests require use_prepared_images=true' >&2; exit 1;
+          }
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
         if: steps.build_scope.outputs.build_components != '[]' || steps.rehearsal_scope.outputs.build_components != '[]'
         with:
@@ -348,7 +408,7 @@ jobs:
         if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'CORE') || contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'MINIAPP')
         run: python3 scripts/docker_dependency_manifests.py "$RUNNER_TEMP/dependency-manifests"
       - name: Build and publish immutable runtime image
-        if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'CORE')
+        if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'CORE') && inputs.use_prepared_images != true
         id: app
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -371,7 +431,7 @@ jobs:
           sbom: true
           provenance: mode=max
       - name: Build and publish immutable Mini App image
-        if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'MINIAPP')
+        if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'MINIAPP') && inputs.use_prepared_images != true
         id: miniapp
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -394,7 +454,7 @@ jobs:
           sbom: true
           provenance: mode=max
       - name: Build and publish immutable AGATA image
-        if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'AGATA')
+        if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'AGATA') && inputs.use_prepared_images != true
         id: agata
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -414,7 +474,7 @@ jobs:
           sbom: true
           provenance: mode=max
       - name: Build and publish stock Eros image
-        if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'EROS')
+        if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'EROS') && inputs.use_prepared_images != true
         id: eros
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -439,10 +499,10 @@ jobs:
         if: steps.build_scope.outputs.build_components != '[]' || steps.rehearsal_scope.outputs.build_components != '[]'
         env:
           CANDIDATE_SHA: ${{ github.sha }}
-          APP_DIGEST: ${{ steps.app.outputs.digest }}
-          AGATA_DIGEST: ${{ steps.agata.outputs.digest }}
-          MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}
-          EROS_DIGEST: ${{ steps.eros.outputs.digest }}
+          APP_DIGEST: ${{ steps.app.outputs.digest || steps.prepared.outputs.app_digest }}
+          AGATA_DIGEST: ${{ steps.agata.outputs.digest || steps.prepared.outputs.agata_digest }}
+          MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest || steps.prepared.outputs.miniapp_digest }}
+          EROS_DIGEST: ${{ steps.eros.outputs.digest || steps.prepared.outputs.eros_digest }}
           BUILD_COMPONENTS: ${{ steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components }}
         run: |
           python3 - <<'PY'
@@ -454,6 +514,9 @@ jobs:
           for component, name in {'CORE': 'APP_DIGEST', 'AGATA': 'AGATA_DIGEST', 'MINIAPP': 'MINIAPP_DIGEST', 'EROS': 'EROS_DIGEST'}.items():
               if component in components and not re.fullmatch(r'sha256:[0-9a-f]{64}', os.environ[name]):
                   raise SystemExit(f'{name} is not an immutable OCI digest')
+          for component, name in {'CORE': 'APP_DIGEST', 'AGATA': 'AGATA_DIGEST', 'MINIAPP': 'MINIAPP_DIGEST', 'EROS': 'EROS_DIGEST'}.items():
+              if component in components:
+                  print(f"{component}_IMAGE=ghcr.io/akhripunov/" + ("gpoint-runtime" if component == "CORE" else "gpoint-agata-runtime" if component == "AGATA" else "gpoint-miniapp" if component == "MINIAPP" else "gpoint-eros") + "@" + os.environ[name], file=open(os.environ['GITHUB_STEP_SUMMARY'], 'a'))
           PY
       - name: Read back exact published images and verify candidate identity
         id: image_readback
@@ -461,10 +524,11 @@ jobs:
         env:
           CANDIDATE_SHA: ${{ github.sha }}
           IMAGE_VERSION: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          APP_DIGEST: ${{ steps.app.outputs.digest }}
-          AGATA_DIGEST: ${{ steps.agata.outputs.digest }}
-          MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}
-          EROS_DIGEST: ${{ steps.eros.outputs.digest }}
+          APP_DIGEST: ${{ steps.app.outputs.digest || steps.prepared.outputs.app_digest }}
+          AGATA_DIGEST: ${{ steps.agata.outputs.digest || steps.prepared.outputs.agata_digest }}
+          MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest || steps.prepared.outputs.miniapp_digest }}
+          EROS_DIGEST: ${{ steps.eros.outputs.digest || steps.prepared.outputs.eros_digest }}
+          REUSE_PREPARED_IMAGES: ${{ inputs.use_prepared_images || false }}
           BUILD_COMPONENTS: ${{ steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components }}
         run: |
           set -euo pipefail
@@ -476,8 +540,10 @@ jobs:
               eros) image=ghcr.io/akhripunov/gpoint-eros; digest="$EROS_DIGEST" ;;
             esac
             docker pull --platform linux/amd64 "$image@$digest"
-            docker pull --platform linux/amd64 "$image:$IMAGE_VERSION"
-            docker image inspect "$image:$IMAGE_VERSION" --format '{{json .RepoDigests}}' | grep -F "$image@$digest" >/dev/null
+            if [[ "$REUSE_PREPARED_IMAGES" != true ]]; then
+              docker pull --platform linux/amd64 "$image:$IMAGE_VERSION"
+              docker image inspect "$image:$IMAGE_VERSION" --format '{{json .RepoDigests}}' | grep -F "$image@$digest" >/dev/null
+            fi
             docker image inspect --format '{{json .}}' "$image@$digest" > "$RUNNER_TEMP/$role-image.json"
             docker buildx imagetools inspect --format '{{json .SBOM.SPDX}}' \
               "$image@$digest" > "$RUNNER_TEMP/$role-sbom.json"

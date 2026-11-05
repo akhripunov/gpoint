@@ -93,6 +93,7 @@ BASELINE_ROLES = set(ROLE_REPOSITORIES) - set(EROS_ROLES)
 EXACT_SHA = re.compile(r"^[0-9a-f]{40}$")
 EXACT_VERSION = re.compile(r"^[0-9a-f]{40}-[0-9]+-[0-9]+$")
 EXACT_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+ARTIFACT_PREPARE_MARKER = "GPOINT-ARTIFACT-PREPARE"
 
 
 def _path_kind(path: str) -> str:
@@ -122,7 +123,8 @@ def _path_kind(path: str) -> str:
 
 
 def classify_push(*, event_name: str, ref: str,
-                  changed_paths: set[str] | frozenset[str]) -> str:
+                  changed_paths: set[str] | frozenset[str],
+                  commit_message: str = "") -> str:
     if event_name != "push" or ref != "refs/heads/main":
         return "NO_DEPLOY"
     if not changed_paths:
@@ -130,6 +132,8 @@ def classify_push(*, event_name: str, ref: str,
     kinds = {_path_kind(path) for path in changed_paths}
     if "schema" in kinds or "unknown" in kinds:
         return "BLOCK"
+    if re.search(rf"(?m)^{re.escape(ARTIFACT_PREPARE_MARKER)}$", commit_message):
+        return "ARTIFACT_PREPARE"
     # Prisma schema changes must reach hosted Tests, which compare the full
     # migration history with schema.prisma before Build. Production Apply still
     # requires an exact migration set in the approved migration manifest.
@@ -139,20 +143,40 @@ def classify_push(*, event_name: str, ref: str,
     return "DEPLOY"
 
 
+def validate_prepared_image_digests(build_components: list[str],
+                                    digests: dict[str, str]) -> dict[str, str]:
+    """Require one immutable OCI digest for each, and only each, built component."""
+    allowed = set(ALL_COMPONENT_ROLES)
+    if (not isinstance(build_components, list) or not build_components
+            or any(not isinstance(component, str) or component not in allowed
+                   for component in build_components)
+            or len(build_components) != len(set(build_components))):
+        raise ValueError("prepared build component scope is invalid")
+    if not isinstance(digests, dict) or set(digests) != set(build_components):
+        raise ValueError("prepared image digest set does not match build component scope")
+    if any(not isinstance(digest, str) or not EXACT_DIGEST.fullmatch(digest)
+           for digest in digests.values()):
+        raise ValueError("prepared image digest is not immutable")
+    return {component: digests[component] for component in sorted(digests)}
+
+
 def classify_dispatch(*, ref: str, candidate_sha: str, github_sha: str, actor: str,
                       repository_owner: str, migration_rehearsal: bool,
                       approve_production: bool,
                       backup_maintenance: bool = False,
                       rollback: bool = False,
-                      rollback_eros: bool = False) -> tuple[str, bool]:
+                      rollback_eros: bool = False,
+                      use_prepared_images: bool = False) -> tuple[str, bool]:
     if rollback_eros and not rollback:
         return "INVALID_ROLLBACK", False
     exact = bool(re.fullmatch(r"[0-9a-f]{40}", candidate_sha)) and candidate_sha == github_sha
     owner = bool(repository_owner) and actor.lower() == repository_owner.lower()
-    if rollback and (migration_rehearsal or backup_maintenance):
+    if rollback and (migration_rehearsal or backup_maintenance or use_prepared_images):
         return "INVALID_ROLLBACK", False
-    if migration_rehearsal and backup_maintenance:
+    if migration_rehearsal and (backup_maintenance or use_prepared_images):
         return "INVALID_REHEARSAL", False
+    if backup_maintenance and use_prepared_images:
+        return "INVALID_BACKUP_MAINTENANCE", False
     if rollback:
         if ref == "refs/heads/main" and exact and owner and approve_production:
             return "ROLLBACK", False
@@ -439,6 +463,7 @@ def main() -> int:
     parser.add_argument("--ref", required=True)
     parser.add_argument("--sha", required=True)
     parser.add_argument("--before", default="")
+    parser.add_argument("--commit-message", default="")
     parser.add_argument("--candidate-sha", default="")
     parser.add_argument("--actor", default="")
     parser.add_argument("--triggering-actor", default="")
@@ -447,6 +472,7 @@ def main() -> int:
     parser.add_argument("--backup-maintenance", action="store_true")
     parser.add_argument("--rollback", action="store_true")
     parser.add_argument("--rollback-eros", action="store_true")
+    parser.add_argument("--use-prepared-images", action="store_true")
     parser.add_argument("--approve-production", action="store_true")
     args = parser.parse_args()
 
@@ -458,7 +484,8 @@ def main() -> int:
                         or args.triggering_actor.lower() != owner):
                     raise ValueError("main push actor and triggering actor must match the repository owner")
             paths = changed_paths(args.before, args.sha)
-            mode = classify_push(event_name=args.event, ref=args.ref, changed_paths=paths)
+            mode = classify_push(event_name=args.event, ref=args.ref, changed_paths=paths,
+                                 commit_message=args.commit_message)
             deploy = mode == "DEPLOY"
         elif args.event == "workflow_dispatch":
             owner = args.repository_owner.lower()
@@ -472,6 +499,7 @@ def main() -> int:
                 backup_maintenance=args.backup_maintenance,
                 rollback=args.rollback,
                 rollback_eros=args.rollback_eros,
+                use_prepared_images=args.use_prepared_images,
             )
         else:
             mode, deploy = "NO_DEPLOY", False

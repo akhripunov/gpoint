@@ -103,6 +103,70 @@ def test_approved_prisma_migration_source_paths_enter_the_existing_protected_dep
     ) == "DEPLOY"
 
 
+def test_exact_main_push_with_artifact_prepare_marker_builds_without_authorizing_deploy():
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main",
+        changed_paths={"apps/api/src/main.ts", "packages/db/prisma/migrations/20261105100000_global_policy/migration.sql"},
+        commit_message="ME-36 candidate\n\nGPOINT-ARTIFACT-PREPARE",
+    ) == "ARTIFACT_PREPARE"
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main",
+        changed_paths={"apps/api/src/main.ts"},
+    ) == "DEPLOY"
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths={"new-root/unclassified.py"},
+        commit_message="GPOINT-ARTIFACT-PREPARE",
+    ) == "BLOCK"
+
+
+def test_artifact_prepare_marker_routes_main_push_to_build_only(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", [
+        "native_release_intent.py", "--event", "push", "--ref", "refs/heads/main",
+        "--sha", "a" * 40, "--before", "b" * 40,
+        "--actor", "akhripunov", "--triggering-actor", "akhripunov",
+        "--repository-owner", "akhripunov", "--commit-message", "ME-36\nGPOINT-ARTIFACT-PREPARE",
+    ])
+    monkeypatch.setattr(MODULE, "changed_paths", lambda *_args, **_kwargs: {"apps/api/src/main.ts"})
+    assert MODULE.main() == 0
+    output = capsys.readouterr().out
+    assert "mode=ARTIFACT_PREPARE" in output
+    assert "deploy=false" in output
+
+
+def test_prepared_image_digest_gate_requires_exact_scope_and_immutable_digests():
+    assert MODULE.validate_prepared_image_digests(
+        ["CORE", "EROS"],
+        {"CORE": "sha256:" + "a" * 64, "EROS": "sha256:" + "b" * 64},
+    ) == {"CORE": "sha256:" + "a" * 64, "EROS": "sha256:" + "b" * 64}
+    for supplied in (
+        {"CORE": "sha256:" + "a" * 64},
+        {"CORE": "sha256:" + "a" * 64, "EROS": "latest"},
+        {"CORE": "sha256:" + "a" * 64, "EROS": "sha256:" + "b" * 64,
+         "MINIAPP": "sha256:" + "c" * 64},
+    ):
+        with pytest.raises(ValueError):
+            MODULE.validate_prepared_image_digests(["CORE", "EROS"], supplied)
+
+
+def test_prepared_images_can_only_be_reused_by_exact_owner_approved_deploy():
+    assert MODULE.classify_dispatch(
+        ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
+        actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
+        approve_production=True, use_prepared_images=True,
+    ) == ("DEPLOY", True)
+    for changes, expected in (
+        ({"approve_production": False}, "INVALID_DEPLOY"),
+        ({"actor": "other"}, "INVALID_DEPLOY"),
+        ({"migration_rehearsal": True}, "INVALID_REHEARSAL"),
+        ({"rollback": True}, "INVALID_ROLLBACK"),
+    ):
+        args = dict(
+            ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
+            actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
+            approve_production=True, use_prepared_images=True,
+        )
+        args.update(changes)
+        assert MODULE.classify_dispatch(**args) == (expected, False)
 def test_agata_migration_and_unknown_schema_paths_remain_blocked_from_prisma_apply():
     for path in (
         "services/agata/migrations/versions/0013_new.py",
