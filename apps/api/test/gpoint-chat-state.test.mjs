@@ -96,10 +96,13 @@ test('revoking memory permission prevents Eros routing until memory consent is e
 test('missing or malformed active policy never enables the chat gate', () => {
   const absent = build({ policies: [], consents, ages: [adult], receipts: [receipt], now });
   const malformed = build({ policies: [{ ...policy, rules: null }], consents, ages: [adult], receipts: [receipt], now });
+  const disclosureDisabled = build({ policies: [{ ...policy, rules: { ...policy.rules, ai_disclosure_required: undefined } }], consents, ages: [adult], receipts: [receipt], now });
   assert.equal(absent.enabled, false);
   assert.equal(malformed.enabled, false);
+  assert.equal(disclosureDisabled.enabled, false);
   assert.equal(isGpointChatPermitted(absent), false);
   assert.equal(isGpointChatPermitted(malformed), false);
+  assert.equal(isGpointChatPermitted(disclosureDisabled), false);
 });
 
 test('ambiguous GPoint tenant lineage and non-adult age fail closed', () => {

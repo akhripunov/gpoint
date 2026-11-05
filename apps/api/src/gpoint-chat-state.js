@@ -21,6 +21,7 @@ function validPolicyRules(rules) {
   if (!rules || typeof rules !== 'object' || Array.isArray(rules)) return false;
   if (Object.keys(rules).some((key) => !ALLOWED_POLICY_RULES.has(key))) return false;
   if (rules.minimum_age !== 18) return false;
+  if (rules.ai_disclosure_required !== true) return false;
   if (rules.adult_only_features !== undefined &&
       (!Array.isArray(rules.adult_only_features) || rules.adult_only_features.some((value) => typeof value !== 'string'))) return false;
   for (const key of ['ai_disclosure_required', 'self_attestation_allowed']) {
