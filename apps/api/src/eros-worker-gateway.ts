@@ -2,7 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, ran
 import { BadRequestException, Body, Controller, Get, Headers, Header, HttpException, OnModuleDestroy, OnModuleInit, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { PrismaClient, type Prisma } from '@prisma/client';
-import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, deriveBridgeInferenceIdentity, isExpectedErosWorkerJobIdentity, parseBridgeRequest, parseErosEmbeddingRequest, type ParsedErosBridgeRequest } from './eros-worker-contract.js';
+import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, deriveBridgeInferenceIdentity, isExpectedErosWorkerJobIdentity, parseBridgeRequest, parseErosEmbeddingRequest, signBridgeIdentity, type ParsedErosBridgeRequest } from './eros-worker-contract.js';
 import { isAllowedOllamaEmbeddingEndpoint, isDisposableSyntheticLocalTest } from './eros-network-policy.js';
 import { erosIdentityFor, exactErosPilotPair, isGpointOwnedErosMode } from './eros-adapter.js';
 
@@ -63,7 +63,13 @@ function encryptQueueRequest(request: ParsedErosBridgeRequest, identity: ErosQue
   const cipher = createCipheriv('aes-256-gcm', queueEncryptionKey(), nonce);
   cipher.setAAD(queueAad(identity));
   const ciphertext = Buffer.concat([
-    cipher.update(JSON.stringify({ model: request.model, messages: request.messages, max_tokens: request.maxTokens, temperature: request.temperature }), 'utf8'),
+    cipher.update(JSON.stringify({
+      model: request.model,
+      messages: request.messages,
+      max_tokens: request.maxTokens,
+      temperature: request.temperature,
+      ...(request.identity ? { user: signBridgeIdentity(request.identity, signingSecret()) } : {}),
+    }), 'utf8'),
     cipher.final(),
   ]);
   return { v: 1, alg: 'A256GCM', nonce: nonce.toString('base64url'), ciphertext: ciphertext.toString('base64url'), tag: cipher.getAuthTag().toString('base64url') };

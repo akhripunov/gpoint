@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { createCipheriv, createHmac, hkdfSync, randomBytes, randomUUID } from 'node:crypto';
+import { createHmac, hkdfSync, randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { PrismaClient } from '@prisma/client';
 import { erosIdentityFor } from '../src/eros-adapter.js';
-import { deriveBridgeInferenceIdentity, signBridgeIdentity } from '../src/eros-worker-contract.js';
+import { deriveBridgeInferenceIdentity, parseBridgeRequest, signBridgeIdentity, type ParsedErosBridgeRequest } from '../src/eros-worker-contract.js';
 
 const databaseUrl = process.env.DATABASE_URL;
 const parsedDatabaseUrl = databaseUrl ? new URL(databaseUrl) : undefined;
@@ -135,7 +135,6 @@ test('GPOINT claim round-trips encrypted Eros job and completes it with a single
     import('../src/eros-worker-gateway.js'),
     Promise.resolve(new PrismaClient()),
   ]);
-  const id = randomUUID();
   const requestId = randomUUID();
   const mappedIdentity = erosIdentityFor({
     userId: process.env.EROS_TEST_USER_IDS,
@@ -157,38 +156,34 @@ test('GPOINT claim round-trips encrypted Eros job and completes it with a single
     'sha256', Buffer.from(signingSecret),
     Buffer.from('gpoint-eros-queue-v1'), Buffer.from('request-payload-aead'), 32,
   ));
-  const requestFingerprint = createHmac('sha256', key).update(JSON.stringify(requestBody)).digest('hex');
   const bridgeIdentity = {
     tenantId, userId, creatorId, sessionId, instanceId, requestId,
   };
-  const chatIdentity = deriveBridgeInferenceIdentity(bridgeIdentity, requestFingerprint);
-  const request = {
+  const signedRequest = {
     ...requestBody,
     user: signBridgeIdentity(bridgeIdentity, new TextEncoder().encode(signingSecret)),
   };
-  const nonce = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', key, nonce);
-  cipher.setAAD(Buffer.from([
-    tenantId, id, chatIdentity.requestId, userId, creatorId, sessionId, instanceId, 'request',
-  ].join('\0')));
-  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(request), 'utf8'), cipher.final()]);
-  const envelope = {
-    v: 1, alg: 'A256GCM', nonce: nonce.toString('base64url'),
-    ciphertext: ciphertext.toString('base64url'), tag: cipher.getAuthTag().toString('base64url'),
-  };
+  const parsedRequest = await parseBridgeRequest(signedRequest, new TextEncoder().encode(signingSecret));
+  const requestFingerprint = createHmac('sha256', key).update(JSON.stringify({
+    model: parsedRequest.model, messages: parsedRequest.messages,
+    max_tokens: parsedRequest.maxTokens, temperature: parsedRequest.temperature,
+  })).digest('hex');
+  const chatIdentity = deriveBridgeInferenceIdentity(bridgeIdentity, requestFingerprint);
+  let createdJobId: string | undefined;
   try {
-    await prisma.$transaction(async (tx) => {
-      await tx.$queryRawUnsafe("SELECT set_config('app.tenant_id', $1, true)", tenantId);
-      await tx.$executeRawUnsafe(
-        `INSERT INTO engine.eros_inference_jobs
-           (id, request_id, request_hash, tenant_id, user_id, creator_id, session_id, instance_id,
-            job_type, request, status, deadline_at)
-         VALUES ($1::uuid, $2::uuid, $8, $3, $4::uuid, $5::uuid, $6::uuid, $7::uuid,
-            'CHAT_COMPLETION', $9::jsonb, 'PENDING', now() + interval '2 minutes')`,
-        id, chatIdentity.requestId, tenantId, userId, creatorId, sessionId, instanceId, requestFingerprint,
-        JSON.stringify(envelope),
-      );
-    });
+    const erosGateway = new ErosWorkerGatewayController();
+    const internalGateway = erosGateway as unknown as {
+      createOrReadJob(request: ParsedErosBridgeRequest): Promise<{
+        id: string; request_id: string; request_hash: string; tenant_id: string; user_id: string;
+        creator_id: string | null; session_id: string; instance_id: string; job_type: string;
+        request: Record<string, unknown>; status: string; lease_token: string | null;
+        deadline_at: Date; response_text: string | null; error_code: string | null;
+      }>;
+    };
+    const createdJob = await internalGateway.createOrReadJob(parsedRequest);
+    createdJobId = createdJob.id;
+    assert.equal(createdJob.id.length, 36);
+    assert.equal(createdJob.request_id, chatIdentity.requestId);
     class TestGateway extends AgataWorkerGatewayController {
       protected override async claimAgataJob() { return { job: null }; }
       protected override claimErosJob() { return claimErosForGpointWorker(); }
@@ -202,12 +197,15 @@ test('GPOINT claim round-trips encrypted Eros job and completes it with a single
       .filter((job): job is NonNullable<typeof job> => job !== null);
     assert.equal(claimedJobs.length, 1);
     const job = claimedJobs[0]!;
-    assert.equal(job.id, id);
+    assert.equal(job.id, createdJob.id);
     assert.match(job.leaseToken, /^[0-9a-f-]{36}$/);
     assert.equal(job.attempt, 1);
     assert.equal(job.target, 'GPOINT');
     assert.equal(job.tenant_id, tenantId);
-    assert.deepEqual(job.request, request);
+    assert.deepEqual(await parseBridgeRequest(job.request, new TextEncoder().encode(signingSecret)), {
+      ...parsedRequest,
+      stream: false,
+    });
     assert.equal(job.purpose, 'eros_chat_completion');
     assert.deepEqual(await controller.claim({ authorization: `Bearer ${process.env.GPOINT_AGATA_WORKER_TOKEN}` }), { job: null });
     assert.deepEqual(await controller.complete(
@@ -217,7 +215,7 @@ test('GPOINT claim round-trips encrypted Eros job and completes it with a single
     const state = await prisma.$transaction(async (tx) => {
       await tx.$queryRawUnsafe("SELECT set_config('app.tenant_id', $1, true)", tenantId);
       return tx.$queryRawUnsafe<Array<{ status: string; attempts: number; lease_token: string | null; response_text: string | null }>>(
-        `SELECT status, attempts, lease_token::text, response_text FROM engine.eros_inference_jobs WHERE id = $1::uuid`, id,
+        `SELECT status, attempts, lease_token::text, response_text FROM engine.eros_inference_jobs WHERE id = $1::uuid`, createdJob.id,
       );
     });
     assert.equal(state[0]?.status, 'COMPLETED');
@@ -228,11 +226,11 @@ test('GPOINT claim round-trips encrypted Eros job and completes it with a single
     class TestErosReader extends ErosWorkerGatewayController {
       async readCompletedJob(jobId: string) { return this.readJob(jobId); }
     }
-    assert.equal((await new TestErosReader().readCompletedJob(id))?.response_text, 'synthetic reply');
+    assert.equal((await new TestErosReader().readCompletedJob(createdJob.id))?.response_text, 'synthetic reply');
   } finally {
-    await prisma.$transaction(async (tx) => {
+    if (createdJobId) await prisma.$transaction(async (tx) => {
       await tx.$queryRawUnsafe("SELECT set_config('app.tenant_id', $1, true)", tenantId);
-      await tx.$executeRawUnsafe('DELETE FROM engine.eros_inference_jobs WHERE id = $1::uuid', id);
+      await tx.$executeRawUnsafe('DELETE FROM engine.eros_inference_jobs WHERE id = $1::uuid', createdJobId);
     });
     await prisma.$disconnect();
     if (prior.token === undefined) delete process.env.GPOINT_AGATA_WORKER_TOKEN; else process.env.GPOINT_AGATA_WORKER_TOKEN = prior.token;
