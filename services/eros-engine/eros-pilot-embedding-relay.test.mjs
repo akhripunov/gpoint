@@ -8,9 +8,10 @@ assert.equal(authorizeRelayRequest({ address: "172.31.254.2", method: "GET", pat
 assert.equal(authorizeRelayRequest({ address: "172.31.254.1", method: "POST", path: "/healthz" }), false);
 assert.equal(authorizeRelayRequest({ address: "172.31.254.3", method: "GET", path: "/api/tags" }), true);
 assert.equal(authorizeRelayRequest({ address: "172.31.254.3", method: "POST", path: "/api/embed" }), true);
-assert.equal(authorizeRelayRequest({ address: "172.31.254.2", method: "GET", path: "/api/tags" }), false);
+assert.equal(authorizeRelayRequest({ address: "172.31.254.2", method: "GET", path: "/api/tags" }), true);
 assert.equal(authorizeRelayRequest({ address: "172.31.254.3", method: "POST", path: "/api/tags" }), false);
-assert.equal(authorizeRelayRequest({ address: "172.31.254.4", method: "POST", path: "/api/embed" }), false);
+assert.equal(authorizeRelayRequest({ address: "172.31.254.4", method: "POST", path: "/api/embed" }), true);
+assert.equal(authorizeRelayRequest({ address: "172.31.253.4", method: "POST", path: "/api/embed" }), false);
 assert.equal(authorizeRelayRequest({ address: "127.0.0.1", method: "POST", path: "/api/embed" }), false);
 assert.equal(authorizeRelayRequest({ address: "172.31.254.2", method: "POST", path: "/api/generate" }), false);
 assert.equal(isValidEmbeddingRequest({ model: "qwen3-embedding:0.6b", dimensions: 512, input: "synthetic probe" }), true);

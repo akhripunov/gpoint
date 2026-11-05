@@ -148,24 +148,24 @@ model GpointChatPolicyProfile {
   id String @id @default(cuid())
   sourceAgataId String? @unique
   sourceTenantId String
-  jurisdiction String
-  market String
   version Int
+  termsVersion String
+  privacyVersion String
   status String
   effectiveFrom DateTime @db.Timestamptz(6)
   effectiveTo DateTime? @db.Timestamptz(6)
   rules Json
   createdAt DateTime @default(now())
   receipts GpointAiDisclosureReceipt[]
-  @@unique([sourceTenantId, jurisdiction, market, version], map: "GpointChatPolicyProfile_tenant_jurisdiction_market_version_key")
-  @@index([sourceTenantId, jurisdiction, market, status, effectiveFrom], map: "GpointChatPolicyProfile_active_idx")
+  @@unique([sourceTenantId, version], map: "GpointChatPolicyProfile_tenant_version_key")
+  @@index([sourceTenantId, status, effectiveFrom], map: "GpointChatPolicyProfile_active_idx")
 }
 model GpointChatConsent {
   id String @id @default(cuid())
   sourceAgataId String? @unique
   sourceTenantId String
   userId String
-  purpose String
+  purpose String // chat_history, long_term_memory, terms_of_use, privacy_policy
   grantedAt DateTime @db.Timestamptz(6)
   revokedAt DateTime? @db.Timestamptz(6)
   policyVersion String
@@ -181,14 +181,13 @@ model GpointAgeAssurance {
   ageBand String
   status String
   method String
-  jurisdiction String
   verifiedAt DateTime? @db.Timestamptz(6)
   assertedAt DateTime? @db.Timestamptz(6)
   expiresAt DateTime? @db.Timestamptz(6)
   version Int
   createdAt DateTime @default(now())
   user User @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  @@unique([userId, jurisdiction, version], map: "GpointAgeAssurance_user_jurisdiction_version_key")
+  @@unique([userId, version], map: "GpointAgeAssurance_user_version_key")
   @@index([userId, version], map: "GpointAgeAssurance_user_version_idx")
 }
 model GpointAiDisclosureReceipt {

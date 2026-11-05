@@ -101,7 +101,7 @@ class PermanentErosComposeTests(unittest.TestCase):
                 if endpoint not in provider:
                     continue
                 url = urlsplit(provider[endpoint])
-                self.assertEqual(url.hostname, 'api')
+                self.assertEqual(url.hostname, 'gpoint-core-api')
                 self.assertEqual(url.port, 3000)
                 self.assertEqual(url.path, '/eros-worker/v1/' + ('chat/completions' if endpoint == 'chat' else 'embeddings'))
                 api_networks = set(self.overlay['services']['api']['networks'])

@@ -6,6 +6,7 @@ const USER_NAMESPACE = 'b92c2772-7534-5a7c-8eed-ec08e0a9c45b';
 const CREATOR_NAMESPACE = 'c9568a43-7e99-58a2-a41e-50e031eac7bc';
 const RELATIONSHIP_NAMESPACE = '8a275e5e-c6dd-5d56-9dc8-d5642d06d9d0';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const GPOINT_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const MESSAGE_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const MAX_REPLY_CHARS = 4_096;
 const MAX_STREAM_BYTES = 128 * 1024;
@@ -63,8 +64,20 @@ export function exactErosPilotPair(env: NodeJS.ProcessEnv = process.env): { user
   return { userId, creatorId };
 }
 
+export function isGpointOwnedErosMode(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.NODE_ENV === 'production' && env.EROS_ENABLED === 'true' && env.EROS_DATA_MODE === 'gpoint-owned' &&
+    Boolean(env.GPOINT_CHAT_POLICY_TENANT_ID && UUID_PATTERN.test(env.GPOINT_CHAT_POLICY_TENANT_ID));
+}
+
+export function isGpointOwnedChatIdentity(userId: string, creatorId: string): boolean {
+  // GPoint's persisted user and creator IDs are CUIDs. They are mapped to
+  // UUIDv5 inside erosIdentityFor and must not be mistaken for Eros UUIDs.
+  return GPOINT_ID_PATTERN.test(userId) && GPOINT_ID_PATTERN.test(creatorId);
+}
+
 /** Eros is available only to exact synthetic identity allowlists; production requires a separate pilot gate. */
 export function isErosChatAllowed(userId: string, creatorId: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (isGpointOwnedErosMode(env)) return isGpointOwnedChatIdentity(userId, creatorId);
   const pair = exactErosPilotPair(env);
   return Boolean(pair && pair.userId === userId.toLowerCase() && pair.creatorId === creatorId.toLowerCase());
 }

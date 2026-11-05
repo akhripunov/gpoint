@@ -2,6 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { Body, Controller, Get, Headers, Header, HttpException, Post, UnauthorizedException } from '@nestjs/common';
 import { createAgataClient } from './agata-client.js';
 import { claimErosForGpointWorker, checkErosForGpointWorker, completeErosForGpointWorker, erosQueueStatusForGpointWorker, failErosForGpointWorker } from './eros-worker-gateway.js';
+import { isGpointOwnedErosMode } from './eros-adapter.js';
 
 function assertWorkerAuth(
   headers: Record<string, string | string[] | undefined>,
@@ -50,6 +51,10 @@ export class AgataWorkerGatewayController {
   async queueStatus(@Headers() headers: Record<string, string | string[] | undefined>) {
     assertWorkerAuth(headers);
     try {
+      if (isGpointOwnedErosMode()) {
+        const eros = await this.readErosQueueStatus();
+        return { ...eros, lane: 'GPOINT', source_id: 'agata-worker-queue-status-v1:gpoint', snapshot_at: new Date().toISOString() };
+      }
       const agata = await this.readAgataQueueStatus();
       let eros = { pending_jobs: 0, running_jobs: 0 };
       let erosQueueAvailable = process.env.EROS_ENABLED !== 'true';
@@ -66,19 +71,27 @@ export class AgataWorkerGatewayController {
         eros_queue_available: erosQueueAvailable,
       };
     } catch {
-      throw new HttpException({ code: 'AGATA_UNAVAILABLE' }, 503);
+      throw new HttpException({ code: isGpointOwnedErosMode() ? 'EROS_WORKER_UNAVAILABLE' : 'AGATA_UNAVAILABLE' }, 503);
     }
   }
 
   @Post('health')
   async health(@Headers() headers: Record<string, string | string[] | undefined>) {
     assertWorkerAuth(headers);
+    if (isGpointOwnedErosMode()) {
+      try { await this.readErosQueueStatus(); return { status: 'ok', lane: 'GPOINT', provider: 'mac_product_worker' }; }
+      catch { throw new HttpException({ code: 'EROS_WORKER_UNAVAILABLE' }, 503); }
+    }
     return internalClient().ready();
   }
 
   @Post('claim')
   async claim(@Headers() headers: Record<string, string | string[] | undefined>) {
     assertWorkerAuth(headers);
+    if (isGpointOwnedErosMode()) {
+      try { return (await this.claimErosJob()) ?? { job: null }; }
+      catch { throw new HttpException({ code: 'EROS_WORKER_UNAVAILABLE' }, 503); }
+    }
     if (process.env.EROS_ENABLED !== 'true') return this.claimAgataJob();
     try {
       const agata = await this.claimAgataJob();
@@ -101,9 +114,12 @@ export class AgataWorkerGatewayController {
     if (typeof body?.job_id !== 'string' || typeof body.lease_token !== 'string') {
       throw new HttpException({ code: 'INVALID_WORKER_REQUEST' }, 400);
     }
+    if (isGpointOwnedErosMode() || process.env.EROS_ENABLED === 'true') {
+      try { return await checkErosForGpointWorker({ job_id: body.job_id, lease_token: body.lease_token }); }
+      catch { throw new HttpException({ code: 'EROS_WORKER_UNAVAILABLE' }, 503); }
+    }
     if (process.env.EROS_ENABLED !== 'true') return { active: false, terminal_status: 'EXPIRED' };
-    try { return await checkErosForGpointWorker({ job_id: body.job_id, lease_token: body.lease_token }); }
-    catch { throw new HttpException({ code: 'AGATA_UNAVAILABLE' }, 503); }
+    return { active: false, terminal_status: 'EXPIRED' };
   }
 
   @Post('complete')
@@ -119,6 +135,9 @@ export class AgataWorkerGatewayController {
       (body.purpose !== undefined && typeof body.purpose !== 'string')
     ) throw new HttpException({ code: 'INVALID_WORKER_RESULT' }, 400);
     try {
+      if (isGpointOwnedErosMode() && body.purpose !== 'eros_chat_completion') {
+        throw new HttpException({ code: 'EROS_WORKER_PURPOSE_REQUIRED' }, 400);
+      }
       if (body.purpose === 'eros_chat_completion') {
         if (process.env.EROS_ENABLED !== 'true') throw new HttpException({ code: 'EROS_BRIDGE_UNAVAILABLE' }, 503);
         const eros = await completeErosForGpointWorker({
@@ -132,7 +151,7 @@ export class AgataWorkerGatewayController {
       });
     } catch (error) {
       if (error instanceof HttpException) throw error;
-      throw new HttpException({ code: 'AGATA_UNAVAILABLE' }, 503);
+      throw new HttpException({ code: isGpointOwnedErosMode() ? 'EROS_WORKER_UNAVAILABLE' : 'AGATA_UNAVAILABLE' }, 503);
     }
   }
 
@@ -148,6 +167,9 @@ export class AgataWorkerGatewayController {
       (body.purpose !== undefined && typeof body.purpose !== 'string')
     ) throw new HttpException({ code: 'INVALID_WORKER_FAILURE' }, 400);
     try {
+      if (isGpointOwnedErosMode() && body.purpose !== 'eros_chat_completion') {
+        throw new HttpException({ code: 'EROS_WORKER_PURPOSE_REQUIRED' }, 400);
+      }
       if (body.purpose === 'eros_chat_completion') {
         if (process.env.EROS_ENABLED !== 'true') throw new HttpException({ code: 'EROS_BRIDGE_UNAVAILABLE' }, 503);
         const eros = await failErosForGpointWorker({
@@ -161,7 +183,7 @@ export class AgataWorkerGatewayController {
       });
     } catch (error) {
       if (error instanceof HttpException) throw error;
-      throw new HttpException({ code: 'AGATA_UNAVAILABLE' }, 503);
+      throw new HttpException({ code: isGpointOwnedErosMode() ? 'EROS_WORKER_UNAVAILABLE' : 'AGATA_UNAVAILABLE' }, 503);
     }
   }
 }

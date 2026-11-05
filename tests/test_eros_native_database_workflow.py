@@ -18,11 +18,38 @@ def test_native_deploy_provisions_only_bootstrap_and_rehearses_exact_eros_sqlx_t
     body = gate["run"]
     assert gate["if"] == "steps.component_plan.outputs.deploy_eros == 'true'"
     assert names.index(gate["name"]) < names.index("Deploy exact immutable images with stock Kamal")
-    assert "--provision-database" in body and "--write-native-engine-env" in body
+    assert "--provision-database" in body and "--write-native-engine-env" in body and "--write-native-api-env" in body
     assert "if [[ \"$EROS_BOOTSTRAP\" == true ]]" in body
     assert "--mode prepare" in body and "--mode apply" in body
     assert "ghcr.io/akhripunov/gpoint-eros@$EROS_DIGEST" in body
     assert "docker pull --platform linux/amd64" in body
+
+
+def test_eros_digest_is_available_to_kamal_apply_and_runtime_verify():
+    deploy = steps_for("deploy")
+    kamal = next(step for step in deploy if step.get("name") == "Deploy exact immutable images with stock Kamal")
+    verify = next(step for step in deploy if step.get("id") == "verify")
+    assert kamal["env"]["EROS_DIGEST"] == "${{ steps.component_plan.outputs.eros_digest }}"
+    assert verify["env"]["EROS_DIGEST"] == "${{ steps.component_plan.outputs.eros_digest }}"
+
+
+def test_eros_relay_health_checks_use_its_configured_host_bind_address():
+    deploy = next(step for step in steps_for("deploy") if step.get("id") == "verify")
+    rollback = next(step for step in steps_for("rollback")
+                    if step.get("name") == "Verify rollback Runtime and preserve databases before SUCCESS")
+    for step in (deploy, rollback):
+        assert "http://172.31.254.1:11434/healthz" in step["run"]
+        assert "http://127.0.0.1:11434/healthz" not in step["run"]
+
+
+def test_native_deploy_materializes_and_hash_verifies_the_required_model_config():
+    gate = next(step for step in steps_for("deploy")
+                if step.get("name", "").startswith("Rehearse exact Eros SQLx"))
+    body = gate["run"]
+    assert "services/eros-engine/eros-production-model-config.toml" in body
+    assert "EROS_MODEL_CONFIG=READY SHA256=$expected" in body
+    assert 'sha256sum "$target"' in body
+    assert "install -o root -g root -m 0600" in body
 
 
 def test_sqlx_helper_checks_acl_ledger_backup_restore_and_never_downgrades_live_database():
@@ -80,6 +107,16 @@ def test_eros_topology_inventory_shell_loop_has_no_unused_read_variable():
                     if step.get("name") == "Verify installed Kamal topology before ordinary release")
     assert '"config/deploy.eros.yml|gpoint-eros-pilot-engine"' in topology
     assert 'IFS=\'|\' read -r config expected <<< "$pair"' in topology
+
+
+def test_kamal_roles_share_the_private_eros_network_with_stable_service_aliases():
+    api = (ROOT / "config/deploy.eros-api.yml").read_text()
+    engine = (ROOT / "config/deploy.eros.yml").read_text()
+    model = (ROOT / "services/eros-engine/eros-production-model-config.toml").read_text()
+    assert "- shared_internal" in api and "- gpoint_eros_data" in api
+    assert "network-alias: gpoint-core-api" in api
+    assert "network: gpoint_eros_data" in engine and "network-alias: gpoint-eros-engine" in engine
+    assert model.count("http://gpoint-core-api:3000/eros-worker/v1/") == 2
 
 
 def test_hosted_stock_eros_e2e_uses_the_policy_approved_upstream_tag():

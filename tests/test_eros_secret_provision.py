@@ -58,6 +58,64 @@ class ErosProductionSecretTests(unittest.TestCase):
             self.assertEqual(values['OPENROUTER_API_KEY'], '')
             self.assertNotIn('EROS_MIGRATOR_DATABASE_URL', values)
 
+    def test_native_api_environment_is_created_with_required_keys_and_never_logs_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'eros.env'
+            production = root / 'production.env'
+            output = root / 'eros-api.env'
+            tenant = '12345678-1234-4234-8234-123456789abc'
+            MODULE.provision(source, source_sha='a' * 40,
+                             image='ghcr.io/akhripunov/eros@sha256:' + 'b' * 64,
+                             tenant_id=tenant)
+            production.write_text('GPOINT_AGATA_WORKER_TOKEN=worker-secret\n')
+            result = MODULE.write_native_api_env(source, production, output)
+            values = dict(line.split('=', 1) for line in output.read_text().splitlines())
+            self.assertEqual(result, 'EROS_API_ENV=READY')
+            self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(values['EROS_DATA_MODE'], 'gpoint-owned')
+            self.assertEqual(values['EROS_ENABLED'], 'true')
+            self.assertEqual(values['EROS_WORKER_TENANT_ID'], tenant)
+            self.assertEqual(values['GPOINT_CHAT_POLICY_TENANT_ID'], tenant)
+            self.assertNotIn('GPOINT_CHAT_POLICY_JURISDICTION', values)
+            self.assertNotIn('GPOINT_CHAT_POLICY_MARKET', values)
+            self.assertEqual(values['GPOINT_AGATA_WORKER_TOKEN'], 'worker-secret')
+            self.assertEqual(values['EROS_PRODUCTION_TEST_USER_IDS'], '')
+            self.assertNotIn('worker-secret', result)
+            for key in ('EROS_JWT_SECRET', 'EROS_BRIDGE_API_KEY', 'EROS_EMBEDDING_API_KEY', 'EROS_WORKER_SIGNING_SECRET'):
+                self.assertEqual(values[key], MODULE.read_env(source)[key])
+
+    def test_native_api_environment_requires_existing_worker_secret_but_not_geographic_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'eros.env'
+            production = root / 'production.env'
+            output = root / 'eros-api.env'
+            MODULE.provision(source, source_sha='a' * 40,
+                             image='ghcr.io/akhripunov/eros@sha256:' + 'b' * 64,
+                             tenant_id='12345678-1234-4234-8234-123456789abc')
+            production.write_text('GPOINT_CHAT_POLICY_JURISDICTION=US\nGPOINT_CHAT_POLICY_MARKET=us\n')
+            with self.assertRaisesRegex(RuntimeError, 'existing GPoint Worker configuration'):
+                MODULE.write_native_api_env(source, production, output)
+            self.assertFalse(output.exists())
+
+    def test_native_api_environment_rejects_duplicate_production_keys_without_writing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'eros.env'
+            production = root / 'production.env'
+            output = root / 'eros-api.env'
+            tenant = '12345678-1234-4234-8234-123456789abc'
+            MODULE.provision(source, source_sha='a' * 40,
+                             image='ghcr.io/akhripunov/eros@sha256:' + 'b' * 64,
+                             tenant_id=tenant)
+            production.write_text('GPOINT_CHAT_POLICY_TENANT_ID=' + tenant + '\n'
+                                  'GPOINT_CHAT_POLICY_TENANT_ID=' + tenant + '\n'
+                                  'GPOINT_AGATA_WORKER_TOKEN=worker-secret\n')
+            with self.assertRaisesRegex(RuntimeError, 'duplicate keys'):
+                MODULE.write_native_api_env(source, production, output)
+            self.assertFalse(output.exists())
+
     def test_rejects_unexpected_permissions_and_malformed_identity_without_replacing_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'eros.env'
@@ -218,7 +276,8 @@ class ErosProductionSecretTests(unittest.TestCase):
             self.assertNotIn(secret, str(error.exception))
 
     def test_existing_postgres_is_attached_once_to_private_eros_network_with_stable_alias(self):
-        network = [{"Driver": "bridge", "Internal": True}]
+        network = [{"Driver": "bridge", "Internal": True,
+                    "IPAM": {"Config": [{"Subnet": "172.31.254.0/24", "Gateway": "172.31.254.1"}]}}]
         unattached = [{"NetworkSettings": {"Networks": {"shared_internal": {"Aliases": ["shared_postgres_1"]}}}}]
         attached = [{"NetworkSettings": {"Networks": {"shared_internal": {"Aliases": ["shared_postgres_1"]},
                                                        "gpoint_eros_data": {"Aliases": ["shared_postgres_1", "gpoint-eros-db"]}}}}]
@@ -237,8 +296,17 @@ class ErosProductionSecretTests(unittest.TestCase):
         with patch.object(MODULE.subprocess, 'run', side_effect=run):
             self.assertEqual(MODULE.ensure_postgres_network(), 'EROS_POSTGRES_NETWORK=READY')
         self.assertEqual(calls[1][-1], 'gpoint_eros_data')
+        self.assertIn('--subnet', calls[1])
+        self.assertIn('--gateway', calls[1])
         self.assertEqual(calls[4][-5:], ['connect', '--alias', 'gpoint-eros-db', 'gpoint_eros_data', 'shared_postgres_1'])
-        self.assertEqual(len(responses), 0)
+
+    def test_existing_eros_network_with_wrong_relay_gateway_fails_closed(self):
+        wrong = [{"Driver": "bridge", "Internal": True,
+                  "IPAM": {"Config": [{"Subnet": "172.31.0.0/16", "Gateway": "172.31.0.1"}]}}]
+        with patch.object(MODULE.subprocess, 'run', return_value=SimpleNamespace(
+                returncode=0, stdout=__import__('json').dumps(wrong), stderr='')):
+            with self.assertRaisesRegex(RuntimeError, 'private relay gateway contract'):
+                MODULE.ensure_postgres_network()
 
 
 if __name__ == '__main__':

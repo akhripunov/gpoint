@@ -67,10 +67,16 @@ export function isExpectedErosWorkerJobIdentity(
   tenantId: string,
   pilotPair: { userId: string; creatorId: string },
   systemIdentity: ErosBridgeIdentity | null,
+  options: { chatIdentity?: ErosBridgeIdentity | null; allowGpointOwnedChat?: boolean } = {},
 ): boolean {
   if (row.tenant_id !== tenantId) return false;
   if (row.job_type === 'CHAT_COMPLETION') {
-    return row.user_id === pilotPair.userId && row.creator_id === pilotPair.creatorId;
+    const identity = options.chatIdentity;
+    if (!identity || row.tenant_id !== identity.tenantId || row.user_id !== identity.userId ||
+        row.creator_id !== identity.creatorId || row.session_id !== identity.sessionId ||
+        row.instance_id !== identity.instanceId || row.request_id !== identity.requestId) return false;
+    return options.allowGpointOwnedChat === true ||
+      (row.user_id === pilotPair.userId && row.creator_id === pilotPair.creatorId);
   }
   if (row.job_type !== 'SYSTEM_COMPLETION' || !systemIdentity) return false;
   return row.tenant_id === systemIdentity.tenantId &&

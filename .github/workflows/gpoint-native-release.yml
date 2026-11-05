@@ -255,6 +255,7 @@ jobs:
           tests/test_native_environment_deployment.py
           tests/test_native_prisma_apply_boundary.py
           tests/test_prisma_migration_release_plan.py
+          tests/test_eros_pilot_no_agata_transfer.py
           tests/test_gpoint_scheduled_backup.py
           tests/test_agata_production_migration.py
           tests/test_agata_migration_receipt.py
@@ -274,7 +275,7 @@ jobs:
         if: matrix.suite == 'python'
         run: |
           unset DATABASE_URL SHADOW_DATABASE_URL
-          python tests/integration/gpoint-agata-state-migration-docker.py --image pgvector/pgvector:0.8.6-pg16
+          python tests/integration/gpoint-chat-schema-docker.py --image pgvector/pgvector:0.8.6-pg16
           python services/gsales/tests/run_postgres.py
 
   build:
@@ -1135,6 +1136,24 @@ jobs:
           [[ "$EROS_BOOTSTRAP" == true || "$EROS_BOOTSTRAP" == false ]]
           eros_image="ghcr.io/akhripunov/gpoint-eros@$EROS_DIGEST"
           run_identity="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          model_config_sha256="$(sha256sum services/eros-engine/eros-production-model-config.toml | awk '{print $1}')"
+          [[ "$model_config_sha256" =~ ^[0-9a-f]{64}$ ]]
+          model_config_stage="/opt/gpoint/env/.eros-model-config-$run_identity"
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" install -d -o root -g root -m 0700 /opt/gpoint/env
+          scp -q services/eros-engine/eros-production-model-config.toml "root@${GPOINT_PRODUCTION_HOST}:$model_config_stage"
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$model_config_stage" "$model_config_sha256" <<'REMOTE_MODEL_CONFIG'
+          set -euo pipefail
+          stage="$1" expected="$2" target=/opt/gpoint/env/eros-production-model-config.toml
+          trap 'rm -f -- "$stage"' EXIT
+          test -f "$stage" && test ! -L "$stage"
+          chmod 0600 "$stage"
+          test "$(sha256sum "$stage" | awk '{print $1}')" = "$expected"
+          install -o root -g root -m 0600 "$stage" "$target.tmp"
+          test "$(sha256sum "$target.tmp" | awk '{print $1}')" = "$expected"
+          mv -f -- "$target.tmp" "$target"
+          test "$(sha256sum "$target" | awk '{print $1}')" = "$expected"
+          echo "EROS_MODEL_CONFIG=READY SHA256=$expected"
+          REMOTE_MODEL_CONFIG
           remote_docker_config="/run/gpoint-eros-ghcr-$run_identity"
           ssh -T "root@${GPOINT_PRODUCTION_HOST}" install -d -o root -g root -m 0700 "$remote_docker_config"
           cleanup_remote_docker_config() {
@@ -1145,7 +1164,7 @@ jobs:
             "DOCKER_CONFIG='$remote_docker_config' docker login ghcr.io --username '$GITHUB_ACTOR' --password-stdin" >/dev/null
           ssh -T "root@${GPOINT_PRODUCTION_HOST}" env DOCKER_CONFIG="$remote_docker_config" docker pull --platform linux/amd64 "$eros_image"
           test "$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" env DOCKER_CONFIG="$remote_docker_config" docker image inspect "$eros_image" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
-          secrets_args=(--source-sha "$CANDIDATE_SHA" --image "$eros_image" --write-native-engine-env)
+          secrets_args=(--source-sha "$CANDIDATE_SHA" --image "$eros_image" --write-native-engine-env --write-native-api-env)
           if [[ "$EROS_BOOTSTRAP" == true ]]; then
             secrets_args+=(--ensure-postgres-network --provision-database)
           fi
@@ -1173,6 +1192,7 @@ jobs:
           GPOINT_KAMAL_CORE_API_SOURCE_SHA: ${{ steps.component_plan.outputs.core_api_source_sha }}
           DEPLOY_EROS: ${{ steps.component_plan.outputs.deploy_eros }}
           EROS_INSTALLED: ${{ steps.topology.outputs.EROS_INSTALLED }}
+          EROS_DIGEST: ${{ steps.component_plan.outputs.eros_digest }}
         run: |
           set -euo pipefail
           for value in "$DEPLOY_CORE" "$DEPLOY_AGATA" "$DEPLOY_MINIAPP" "$DEPLOY_EROS" "$EROS_INSTALLED"; do
@@ -1384,7 +1404,7 @@ jobs:
             eros_version="$(sed -n 's/^gpoint-eros-pilot-engine|\([^|]*\).*/\1/p' <<< "$runtime_rows")"
             relay_version="$(sed -n 's/^gpoint-eros-relay-relay|\([^|]*\).*/\1/p' <<< "$runtime_rows")"
             docker exec "gpoint-eros-pilot-engine-$eros_version" curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null
-            docker exec "gpoint-eros-relay-relay-$relay_version" node -e "fetch('http://127.0.0.1:11434/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+            docker exec "gpoint-eros-relay-relay-$relay_version" node -e "fetch('http://172.31.254.1:11434/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
             test "$(docker inspect --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}' "gpoint-eros-pilot-engine-$eros_version")" = d1a140083321687212fb7b17c09cc0c3c9639f5e
             test "$(docker inspect --format '{{index .Config.Labels \"com.gpoint.eros.patch-set.sha256\"}}' "gpoint-eros-pilot-engine-$eros_version")" = none
             echo "GPOINT_EROS_HEALTH=PASS UPSTREAM_SHA=d1a140083321687212fb7b17c09cc0c3c9639f5e DIGEST=$EROS_DIGEST"
@@ -1961,7 +1981,7 @@ jobs:
             docker image inspect "$image_id" --format '{{json .RepoDigests}}' | grep -F "$image" >/dev/null
           done
           docker exec "gpoint-eros-pilot-engine-$1" curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null
-          docker exec "gpoint-eros-relay-relay-$2" node -e "fetch('http://127.0.0.1:11434/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+          docker exec "gpoint-eros-relay-relay-$2" node -e "fetch('http://172.31.254.1:11434/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
           echo EROS_ROLLBACK_RUNTIME_VERIFY=PASS
           REMOTE_EROS_VERIFY
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - --mode verify-unchanged \

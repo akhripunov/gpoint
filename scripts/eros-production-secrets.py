@@ -19,6 +19,7 @@ import uuid
 
 ENV_PATH = Path('/opt/gpoint/env/eros.env')
 NATIVE_ENV_PATH = Path('/opt/gpoint/env/eros-engine.env')
+NATIVE_API_ENV_PATH = Path('/opt/gpoint/env/eros-api.env')
 SOURCE_ENV_PATH = Path('/opt/gpoint/env/production.env')
 SECRET_KEYS = (
     'EROS_JWT_SECRET',
@@ -355,6 +356,75 @@ def write_native_engine_env(path=ENV_PATH, output=NATIVE_ENV_PATH):
     return 'EROS_NATIVE_ENV=READY'
 
 
+def write_native_api_env(path=ENV_PATH, source_env=SOURCE_ENV_PATH, output=NATIVE_API_ENV_PATH):
+    """Create the Core API's Eros bridge environment without exposing values."""
+    values = read_env(Path(path))
+    required_secrets = {'EROS_JWT_SECRET', 'EROS_BRIDGE_API_KEY', 'EROS_EMBEDDING_API_KEY',
+                        'EROS_WORKER_SIGNING_SECRET', 'EROS_TENANT_ID'}
+    if not required_secrets.issubset(values) or any(not values.get(key) for key in required_secrets):
+        raise RuntimeError('Eros protected environment is incomplete')
+    source = {}
+    try:
+        for line in Path(source_env).read_text().splitlines():
+            if line and not line.lstrip().startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                if key in source:
+                    raise RuntimeError('GPoint production environment contains duplicate keys')
+                source[key] = value
+    except OSError:
+        raise RuntimeError('GPoint production environment is unavailable') from None
+    required_source = {'GPOINT_AGATA_WORKER_TOKEN'}
+    if any(not source.get(key) for key in required_source):
+        raise RuntimeError('existing GPoint Worker configuration is missing')
+    policy_tenant = source.get('GPOINT_CHAT_POLICY_TENANT_ID') or values['EROS_TENANT_ID']
+    if policy_tenant != values['EROS_TENANT_ID']:
+        raise RuntimeError('GPoint and Eros tenant identities disagree')
+    env = {
+        'EROS_ENABLED': 'true',
+        'EROS_DATA_MODE': 'gpoint-owned',
+        'EROS_SERVICE_URL': 'http://gpoint-eros-engine:8080',
+        'EROS_JWT_SECRET': values['EROS_JWT_SECRET'],
+        'EROS_BRIDGE_API_KEY': values['EROS_BRIDGE_API_KEY'],
+        'EROS_EMBEDDING_API_KEY': values['EROS_EMBEDDING_API_KEY'],
+        'EROS_WORKER_SIGNING_SECRET': values['EROS_WORKER_SIGNING_SECRET'],
+        'EROS_WORKER_TENANT_ID': values['EROS_TENANT_ID'],
+        'EROS_REQUEST_TIMEOUT_MS': '240000',
+        'EROS_BRIDGE_TIMEOUT_SECONDS': '240',
+        'EROS_OLLAMA_EMBEDDING_URL': 'http://172.31.254.1:11434/api/embed',
+        'GPOINT_CHAT_POLICY_TENANT_ID': policy_tenant,
+        'GPOINT_AGATA_WORKER_TOKEN': source['GPOINT_AGATA_WORKER_TOKEN'],
+        'EROS_PRODUCTION_TEST_USER_IDS': '',
+        'EROS_PRODUCTION_TEST_CREATOR_IDS': '',
+    }
+    target = Path(output)
+    if target.parent.is_symlink():
+        raise RuntimeError('Eros API environment directory cannot be a symlink')
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if target.parent.stat().st_mode & 0o077 or (target == NATIVE_API_ENV_PATH and target.parent.stat().st_uid != 0):
+        raise RuntimeError('Eros API environment directory permissions are unsafe')
+    if target.exists() and (target.is_symlink() or not stat.S_ISREG(target.stat().st_mode)
+                            or target.stat().st_mode & 0o077 or target.stat().st_nlink != 1):
+        raise RuntimeError('Eros API environment file permissions are unsafe')
+    fd, staged = tempfile.mkstemp(prefix='.eros-api.env.', dir=str(target.parent))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'w') as stream:
+            for key in sorted(env):
+                if '\n' in env[key] or '\r' in env[key]:
+                    raise RuntimeError('Eros API environment contains a newline')
+                stream.write(f'{key}={env[key]}\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(staged, target)
+        os.chmod(target, 0o600)
+    finally:
+        try:
+            os.unlink(staged)
+        except FileNotFoundError:
+            pass
+    return 'EROS_API_ENV=READY'
+
+
 def ensure_postgres_network():
     """Attach the existing PostgreSQL container to a private Eros-only network."""
     def docker(args, *, allow_missing=False):
@@ -370,10 +440,14 @@ def ensure_postgres_network():
     network = json.loads(inspected)[0] if inspected else None
     if network is None:
         docker(['network', 'create', '--driver', 'bridge', '--internal',
+                '--subnet', '172.31.254.0/24', '--gateway', '172.31.254.1',
                 '--label', 'com.gpoint.eros.managed=true', 'gpoint_eros_data'])
         network = json.loads(docker(['network', 'inspect', 'gpoint_eros_data']))[0]
-    if network.get('Driver') != 'bridge' or network.get('Internal') is not True:
-        raise RuntimeError('existing Eros data network is not private bridge network')
+    ipam = network.get('IPAM', {}).get('Config', [])
+    if (network.get('Driver') != 'bridge' or network.get('Internal') is not True or
+            len(ipam) != 1 or ipam[0].get('Subnet') != '172.31.254.0/24' or
+            ipam[0].get('Gateway') != '172.31.254.1'):
+        raise RuntimeError('existing Eros data network does not match the private relay gateway contract')
     container = json.loads(docker(['inspect', 'shared_postgres_1']))[0]
     networks = container.get('NetworkSettings', {}).get('Networks', {})
     attached = networks.get('gpoint_eros_data')
@@ -399,6 +473,7 @@ def main():
     parser.add_argument('--ensure-postgres-network', action='store_true')
     parser.add_argument('--provision-database', action='store_true')
     parser.add_argument('--write-native-engine-env', action='store_true')
+    parser.add_argument('--write-native-api-env', action='store_true')
     args = parser.parse_args()
     try:
         if args.provision_database:
@@ -411,6 +486,8 @@ def main():
             print(provision_database(args.path))
         if args.write_native_engine_env:
             print(write_native_engine_env(args.path))
+        if args.write_native_api_env:
+            print(write_native_api_env(args.path, args.source_env))
     except Exception as error:
         # Error text is intentionally limited to classifications, never values.
         raise SystemExit('BLOCKED: ' + str(error)) from None

@@ -4,7 +4,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { PrismaClient, type Prisma } from '@prisma/client';
 import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, deriveBridgeInferenceIdentity, isExpectedErosWorkerJobIdentity, parseBridgeRequest, parseErosEmbeddingRequest, type ParsedErosBridgeRequest } from './eros-worker-contract.js';
 import { isAllowedOllamaEmbeddingEndpoint, isDisposableSyntheticLocalTest } from './eros-network-policy.js';
-import { erosIdentityFor, exactErosPilotPair } from './eros-adapter.js';
+import { erosIdentityFor, exactErosPilotPair, isGpointOwnedErosMode } from './eros-adapter.js';
 
 const prisma = new PrismaClient();
 const REPLY_LIMIT = 4_096;
@@ -169,7 +169,8 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 /** Claim Eros bridge work on the existing authenticated GPOINT Product Worker contract. */
 export async function claimErosForGpointWorker(): Promise<{ job: Record<string, unknown> } | null> {
   const pair = exactErosPilotPair();
-  if (!pair) throw new HttpException({ code: 'EROS_PILOT_ALLOWLIST_INVALID' }, 503);
+  const ownedMode = isGpointOwnedErosMode();
+  if (!pair && !ownedMode) throw new HttpException({ code: 'EROS_PILOT_ALLOWLIST_INVALID' }, 503);
   const tenantId = workerTenant();
   const row = await withWorkerTenant(async (tx) => {
     await tx.$queryRawUnsafe(
@@ -202,16 +203,27 @@ export async function claimErosForGpointWorker(): Promise<{ job: Record<string, 
     return rows[0];
   });
   if (!row) return null;
-  const expectedIdentity = erosIdentityFor(pair);
   const identity: ErosQueueIdentity = {
     id: row.id, request_id: row.request_id, tenant_id: row.tenant_id, user_id: row.user_id,
     creator_id: row.creator_id, session_id: row.session_id, instance_id: row.instance_id,
   };
   const request = decryptQueueRequest(row.request, identity);
-  const systemIdentity = row.job_type === 'SYSTEM_COMPLETION'
-    ? systemTaskIdentity(await parseBridgeRequest(request, signingSecret()), tenantId)
+  let parsedRequest: ParsedErosBridgeRequest;
+  try {
+    parsedRequest = await parseBridgeRequest(request, signingSecret());
+  } catch {
+    throw new HttpException({ code: 'EROS_QUEUE_IDENTITY_INVALID' }, 503);
+  }
+  const chatIdentity = parsedRequest.identity
+    ? deriveBridgeInferenceIdentity(parsedRequest.identity, requestFingerprint(parsedRequest))
     : null;
-  if (!isExpectedErosWorkerJobIdentity(row, tenantId, expectedIdentity, systemIdentity)) {
+  const systemIdentity = row.job_type === 'SYSTEM_COMPLETION'
+    ? systemTaskIdentity(parsedRequest, tenantId)
+    : null;
+  if (!isExpectedErosWorkerJobIdentity(row, tenantId, pair ?? { userId: '', creatorId: '' }, systemIdentity, {
+    chatIdentity,
+    allowGpointOwnedChat: ownedMode,
+  })) {
     await withWorkerTenant((tx) => tx.$executeRawUnsafe(
       `UPDATE engine.eros_inference_jobs SET status = 'FAILED', error_code = 'synthetic_allowlist_mismatch',
          lease_token = NULL, lease_expires_at = NULL, updated_at = now()

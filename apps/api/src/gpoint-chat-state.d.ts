@@ -1,9 +1,9 @@
 export interface GpointChatPolicy {
   id: string;
   sourceTenantId: string;
-  jurisdiction: string;
-  market: string;
   version: number;
+  termsVersion: string;
+  privacyVersion: string;
   status: string;
   effectiveFrom: Date;
   effectiveTo?: Date | null;
@@ -23,7 +23,6 @@ export interface GpointAgeAssurance {
   ageBand: string;
   status: string;
   method: string;
-  jurisdiction: string;
   verifiedAt?: Date | null;
   assertedAt?: Date | null;
   expiresAt?: Date | null;
@@ -43,6 +42,10 @@ export interface GpointMessagesState {
   enabled: boolean;
   chatHistory: boolean;
   longTermMemory: boolean;
+  termsAccepted: boolean;
+  privacyAccepted: boolean;
+  termsVersion: string | null;
+  privacyVersion: string | null;
   memoryConsentRequired: boolean;
   disclosureRequired: boolean;
   onboardingCompleted: boolean;
@@ -57,7 +60,6 @@ export interface GpointMessagesState {
   verifiedAt: string | null;
   assertedAt: string | null;
   expiresAt: string | null;
-  jurisdiction: string;
   aiAvailable: boolean;
 }
 
@@ -66,7 +68,6 @@ export function buildGpointMessagesState(input: {
   consents: GpointConsent[];
   ages: GpointAgeAssurance[];
   receipts: GpointDisclosureReceipt[];
-  policyScope?: { jurisdiction: string; market: string };
   now?: Date;
   erosEnabled?: boolean;
 }): GpointMessagesState;
@@ -77,7 +78,6 @@ export function gpointAgeAssuranceState(state: GpointMessagesState | null | unde
   eligible: boolean;
   status: string;
   method: string;
-  jurisdiction: string;
   assertedAt: string | null;
   expiresAt: string | null;
   selfAttestationAllowed: boolean;

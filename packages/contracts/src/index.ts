@@ -27,7 +27,7 @@ export interface MessageThreadDTO {
 export interface MessagesUnreadDTO { totalUnread: number; items: Array<{ creatorId: string; unreadCount: number }>; }
 export interface MessageThreadListDTO { items: MessageThreadDTO[]; nextCursor: string | null; }
 export interface ChatHistoryDTO extends PaginatedResponse<ChatMessageDTO> { creator: CreatorSummaryDTO; }
-export interface MessagesStateDTO { enabled: boolean; chatHistory: boolean; longTermMemory: boolean; memoryConsentRequired?: boolean; disclosureRequired: boolean; onboardingCompleted: boolean; disclosureVersion: number | null; onboardingCompletedAt: string | null; memoryOptIn: boolean; memoryOptInAt: string | null; ageAssuranceRequired?: boolean; aiAvailable?: boolean; }
+export interface MessagesStateDTO { enabled: boolean; chatHistory: boolean; longTermMemory: boolean; termsAccepted: boolean; privacyAccepted: boolean; termsVersion: string | null; privacyVersion: string | null; memoryConsentRequired?: boolean; disclosureRequired: boolean; onboardingCompleted: boolean; disclosureVersion: number | null; onboardingCompletedAt: string | null; memoryOptIn: boolean; memoryOptInAt: string | null; ageAssuranceRequired?: boolean; aiAvailable?: boolean; }
 export interface SendMessageDTO { userMessageId: string; status?: 'pending' | 'completed'; response?: ChatMessageDTO; }
 
 export interface CreatorBot {

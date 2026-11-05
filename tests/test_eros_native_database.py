@@ -11,7 +11,7 @@ DB = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(DB)
 
 
-def ledger(version=1, checksum="a" * 64, description="initial"):
+def ledger(version=1, checksum="a" * 96, description="initial"):
     return [{"version": version, "description": description, "success": True, "checksum": checksum}]
 
 
@@ -37,6 +37,15 @@ def facts(database="eros"):
 
 
 class ErosNativeDatabaseTests(unittest.TestCase):
+    def test_database_inventory_quotes_database_names_as_sql_string_literals(self):
+        database = "eros_check_123_1"
+        with patch.object(DB, "_docker_psql", return_value=json.dumps(facts(database))) as psql:
+            DB._database_facts("a" * 48, database)
+        query = psql.call_args.args[1]
+        self.assertIn("d.datname='eros_check_123_1'", query)
+        self.assertIn("x.datname NOT IN ('eros','eros_check_123_1')", query)
+        self.assertNotIn('d.datname="eros_check_123_1"', query)
+
     def test_acl_gate_accepts_dedicated_database_and_rejects_each_boundary(self):
         with patch.object(DB, "_docker_psql", return_value=json.dumps(facts())):
             self.assertEqual(DB._database_facts("a" * 48)["owner"], "eros_ddl")
@@ -80,13 +89,20 @@ class ErosNativeDatabaseTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "failed or malformed|duplicated"):
                     DB._ledger()
 
+    def test_sqlx_ledger_accepts_stock_sha384_and_rejects_non_sha384_checksums(self):
+        with patch.object(DB, "_docker_psql", side_effect=["t", json.dumps(ledger())]):
+            self.assertEqual(DB._ledger(), ledger())
+        with patch.object(DB, "_docker_psql", side_effect=["t", json.dumps(ledger(checksum="a" * 64))]):
+            with self.assertRaisesRegex(RuntimeError, "failed or malformed"):
+                DB._ledger()
+
     def test_migration_delta_accepts_noop_or_append_and_rejects_drift(self):
         old = ledger()
         self.assertEqual(DB._migration_delta(old, old), [])
-        self.assertEqual(DB._migration_delta(old, old + ledger(2, "b" * 64, "next")),
-                         ledger(2, "b" * 64, "next"))
+        self.assertEqual(DB._migration_delta(old, old + ledger(2, "b" * 96, "next")),
+                         ledger(2, "b" * 96, "next"))
         with self.assertRaisesRegex(RuntimeError, "changed or removed"):
-            DB._migration_delta(old, ledger(1, "c" * 64))
+            DB._migration_delta(old, ledger(1, "c" * 96))
         with self.assertRaisesRegex(RuntimeError, "changed or removed"):
             DB._migration_delta(old, [])
         existing = [ledger(1)[0], ledger(3, "c" * 64, "later")[0]]

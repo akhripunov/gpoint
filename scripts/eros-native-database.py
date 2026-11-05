@@ -94,6 +94,7 @@ def _read_env(path: Path = ENV_PATH) -> dict[str, str]:
 def _database_facts(expected_identity: str, database: str = "eros") -> dict:
     if database != "eros" and not DB_NAME.fullmatch(database):
         raise ValueError("database name is outside the Eros lifecycle scope")
+    database_literal = "'" + database.replace("'", "''") + "'"
     query = rf"""SELECT json_build_object(
       'name',d.datname,'owner',pg_get_userbyid(d.datdba),'allowConnect',d.datallowconn,
       'sizeBytes',pg_database_size(d.datname),
@@ -113,9 +114,9 @@ def _database_facts(expected_identity: str, database: str = "eros") -> dict:
       'extension',(SELECT extversion FROM pg_extension WHERE extname='vector'),
       'engineOwner',(SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='engine'),
       'runtimeForeign',(SELECT coalesce(json_agg(datname ORDER BY datname),'[]'::json) FROM pg_database x
-        WHERE x.datallowconn AND x.datname NOT IN ('eros',{json.dumps(database)}) AND has_database_privilege('eros_runtime',x.oid,'CONNECT')),
+        WHERE x.datallowconn AND x.datname NOT IN ('eros',{database_literal}) AND has_database_privilege('eros_runtime',x.oid,'CONNECT')),
       'migratorForeign',(SELECT coalesce(json_agg(datname ORDER BY datname),'[]'::json) FROM pg_database x
-        WHERE x.datallowconn AND x.datname NOT IN ('eros',{json.dumps(database)}) AND has_database_privilege('eros_migrator',x.oid,'CONNECT')),
+        WHERE x.datallowconn AND x.datname NOT IN ('eros',{database_literal}) AND has_database_privilege('eros_migrator',x.oid,'CONNECT')),
       'runtimeSchemaUsage',has_schema_privilege('eros_runtime','engine','USAGE'),
       'runtimeSchemaCreate',has_schema_privilege('eros_runtime','engine','CREATE'),
       'runtimePublicSchemaCreate',has_schema_privilege('eros_runtime','public','CREATE'),
@@ -134,7 +135,7 @@ def _database_facts(expected_identity: str, database: str = "eros") -> dict:
       'roles',(SELECT json_agg(json_build_object('name',rolname,'login',rolcanlogin,'superuser',rolsuper,
         'createdb',rolcreatedb,'createrole',rolcreaterole,'bypassrls',rolbypassrls,'inherit',rolinherit)
         ORDER BY rolname) FROM pg_roles WHERE rolname IN ('eros_ddl','eros_runtime','eros_migrator'))
-    )::text FROM pg_database d WHERE d.datname={json.dumps(database)}"""
+    )::text FROM pg_database d WHERE d.datname={database_literal}"""
     try:
         raw = _docker_psql(database, query)
         facts = json.loads(raw)
@@ -210,7 +211,8 @@ def _ledger(database: str = "eros") -> list[dict]:
         if (not isinstance(row.get("version"), int) or row["version"] < 0
                 or not isinstance(row.get("description"), str) or not row["description"]
                 or row.get("success") is not True
-                or not re.fullmatch(r"[0-9a-f]{64}", row.get("checksum", ""))):
+                # SQLx 0.8.6 stores SHA-384 migration checksums as 48 bytes.
+                or not re.fullmatch(r"[0-9a-f]{96}", row.get("checksum", ""))):
             raise RuntimeError("Eros SQLx ledger contains failed or malformed migration state")
         versions.append(row["version"])
     if versions != sorted(set(versions)):

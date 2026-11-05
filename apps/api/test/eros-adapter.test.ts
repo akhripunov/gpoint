@@ -81,6 +81,21 @@ test('production Eros routing is limited to explicitly enabled synthetic pilot i
   ), false);
 });
 
+test('production GPoint-owned routing admits any valid GPoint identity only with an exact tenant and enabled Eros', () => {
+  const owned = {
+    NODE_ENV: 'production',
+    EROS_ENABLED: 'true',
+    EROS_DATA_MODE: 'gpoint-owned',
+    GPOINT_CHAT_POLICY_TENANT_ID: '30000000-0000-4000-8000-000000000003',
+  };
+  assert.equal(isErosChatAllowed('10000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000002', owned), true);
+  assert.equal(isErosChatAllowed('not-a-uuid', '20000000-0000-4000-8000-000000000002', owned), false);
+  assert.equal(isErosChatAllowed('10000000-0000-4000-8000-000000000001', 'bad-creator', owned), false);
+  assert.equal(isErosChatAllowed('10000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000002', { ...owned, EROS_ENABLED: 'false' }), false);
+  assert.equal(isErosChatAllowed('10000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000002', { ...owned, GPOINT_CHAT_POLICY_TENANT_ID: '' }), false);
+  assert.equal(isErosChatAllowed('10000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000002', { ...owned, EROS_DATA_MODE: 'synthetic' }), false);
+});
+
 test('UUIDv5 identity mapping is stable and separates GPoint users, personas, and relationships', () => {
   assert.equal(uuidV5('6ba7b810-9dad-11d1-80b4-00c04fd430c8', 'www.widgets.com'), '21f7f8de-8051-5b89-8680-0195ef798b6a');
   const first = erosIdentityFor({ userId: 'user_cuid_1', creatorId: 'creator_cuid_1' });

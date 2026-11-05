@@ -3,21 +3,23 @@ import test from 'node:test';
 import { buildGpointMessagesState, isGpointChatPermitted } from '../src/gpoint-chat-state.js';
 import { gpointAgeAssuranceState } from '../src/gpoint-chat-state.js';
 
-const build = (input) => buildGpointMessagesState({ ...input, policyScope: { jurisdiction: 'GLOBAL', market: 'synthetic' }, erosEnabled: true });
+const build = (input) => buildGpointMessagesState({ ...input, erosEnabled: true });
 
 const now = new Date('2026-11-03T12:00:00.000Z');
 const policy = {
-  id: 'policy-1', sourceTenantId: 'tenant-1', jurisdiction: 'GLOBAL', market: 'synthetic', version: 7, status: 'active',
+  id: 'policy-1', sourceTenantId: 'tenant-1', termsVersion: 'gpoint-terms-v1', privacyVersion: 'gpoint-privacy-v1', version: 1, status: 'active',
   effectiveFrom: new Date('2026-01-01T00:00:00.000Z'), effectiveTo: null,
-  rules: { ai_disclosure_required: true, self_attestation_allowed: false, adult_only_features: ['romantic', 'sexual'] },
+  rules: { minimum_age: 18, ai_disclosure_required: true, self_attestation_allowed: false, adult_only_features: ['romantic', 'sexual'] },
 };
 const adult = {
-  id: 'age-1', ageBand: 'adult', status: 'verified', method: 'document', jurisdiction: 'GLOBAL',
+  id: 'age-1', ageBand: 'adult', status: 'verified', method: 'document',
   verifiedAt: new Date('2026-10-01T00:00:00.000Z'), assertedAt: null, expiresAt: null, version: 1,
 };
 const consents = [
   { id: 'consent-chat', purpose: 'chat_history', grantedAt: new Date('2026-10-01T00:00:00.000Z'), revokedAt: null, policyVersion: 'gpoint-consent-v1' },
   { id: 'consent-memory', purpose: 'long_term_memory', grantedAt: new Date('2026-10-01T00:00:00.000Z'), revokedAt: null, policyVersion: 'gpoint-consent-v1' },
+  { id: 'consent-terms', purpose: 'terms_of_use', grantedAt: new Date('2026-10-01T00:00:00.000Z'), revokedAt: null, policyVersion: 'gpoint-terms-v1' },
+  { id: 'consent-privacy', purpose: 'privacy_policy', grantedAt: new Date('2026-10-01T00:00:00.000Z'), revokedAt: null, policyVersion: 'gpoint-privacy-v1' },
 ];
 const receipt = {
   id: 'receipt-1', policyProfileId: policy.id, policyVersion: policy.version,
@@ -30,9 +32,13 @@ test('GPoint message state requires an exact active disclosure and current conse
   assert.equal(state.enabled, true);
   assert.equal(state.chatHistory, true);
   assert.equal(state.longTermMemory, true);
+  assert.equal(state.termsAccepted, true);
+  assert.equal(state.privacyAccepted, true);
+  assert.equal(state.termsVersion, 'gpoint-terms-v1');
+  assert.equal(state.privacyVersion, 'gpoint-privacy-v1');
   assert.equal(state.memoryConsentRequired, true);
   assert.equal(state.disclosureRequired, false);
-  assert.equal(state.disclosureVersion, 7);
+  assert.equal(state.disclosureVersion, 1);
   assert.equal(state.ageAssuranceRequired, false);
   assert.equal(state.assertedAt, null);
   assert.equal(isGpointChatPermitted(state), true);
@@ -61,7 +67,7 @@ test('missing disclosure receipt, minor age, and expired age never authorize cha
   assert.equal(minor.ageAssuranceRequired, true);
 });
 
-test('self-attestation only passes when the active jurisdiction policy explicitly allows it', () => {
+test('self-attestation only passes when the active global policy explicitly allows it', () => {
   const selfAttested = {
     ...adult, status: 'self_attested', method: 'self_attested', verifiedAt: null,
     assertedAt: new Date('2026-11-03T11:00:00.000Z'),
@@ -96,14 +102,14 @@ test('missing or malformed active policy never enables the chat gate', () => {
   assert.equal(isGpointChatPermitted(malformed), false);
 });
 
-test('ambiguous AGATA tenant lineage and age-policy tenant mismatch fail closed', () => {
+test('ambiguous GPoint tenant lineage and non-adult age fail closed', () => {
   const ambiguous = build({
     policies: [policy, { ...policy, id: 'policy-other-tenant', sourceTenantId: 'tenant-2' }],
     consents, ages: [adult], receipts: [receipt], now,
   });
   const mismatchedAge = build({
     policies: [policy], consents,
-    ages: [{ ...adult, status: 'self_attested', method: 'self_attested', jurisdiction: 'OTHER', verifiedAt: null, assertedAt: now }],
+    ages: [{ ...adult, status: 'self_attested', ageBand: 'minor', verifiedAt: null, assertedAt: now }],
     receipts: [receipt], now,
   });
   assert.equal(ambiguous.enabled, false);
@@ -111,16 +117,23 @@ test('ambiguous AGATA tenant lineage and age-policy tenant mismatch fail closed'
   assert.equal(isGpointChatPermitted(mismatchedAge), false);
 });
 
-test('multi-market tenant selects only its exact configured policy scope', () => {
-  const otherMarket = { ...policy, id: 'policy-other-market', market: 'other', jurisdiction: 'OTHER' };
-  const selected = build({ policies: [policy, otherMarket], consents, ages: [adult], receipts: [receipt], now });
-  const missingScope = buildGpointMessagesState({ policies: [policy, otherMarket], consents, ages: [adult], receipts: [receipt], now, erosEnabled: true });
-  const ambiguousScope = build({
-    policies: [policy, { ...policy, id: 'policy-duplicate-scope', version: 8 }],
+test('GPoint Terms and Privacy Policy versions require current explicit acceptance', () => {
+  const missingTerms = build({ policies: [policy], consents: consents.filter((row) => row.purpose !== 'terms_of_use'), ages: [adult], receipts: [receipt], now });
+  const stalePrivacy = build({ policies: [policy], consents: consents.map((row) => row.purpose === 'privacy_policy' ? { ...row, policyVersion: 'gpoint-privacy-old' } : row), ages: [adult], receipts: [receipt], now });
+  assert.equal(missingTerms.termsAccepted, false);
+  assert.equal(stalePrivacy.privacyAccepted, false);
+  assert.equal(isGpointChatPermitted(missingTerms), false);
+  assert.equal(isGpointChatPermitted(stalePrivacy), false);
+  assert.equal(Object.hasOwn(build({ policies: [policy], consents, ages: [adult], receipts: [receipt], now }), 'jurisdiction'), false);
+});
+
+test('duplicate active global policy disagreement fails closed', () => {
+  const conflicting = { ...policy, id: 'policy-conflicting-rules',
+    rules: { ...policy.rules, self_attestation_allowed: true } };
+  const ambiguousPolicy = build({
+    policies: [policy, conflicting],
     consents, ages: [adult], receipts: [receipt], now,
   });
-  assert.equal(selected.enabled, true);
-  assert.equal(selected.disclosureVersion, 7);
-  assert.equal(missingScope.enabled, false);
-  assert.equal(ambiguousScope.enabled, false);
+  assert.equal(ambiguousPolicy.enabled, false);
+  assert.equal(isGpointChatPermitted(ambiguousPolicy), false);
 });

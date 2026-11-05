@@ -11,6 +11,10 @@ servers:
       clear:
         RELEASE_SHA: <%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>
     options:
+      network:
+        - shared_internal
+        - gpoint_eros_data
+      network-alias: gpoint-core-api
       env-file:
         - /opt/gpoint/env/production.env
         - /opt/gpoint/env/eros-api.env

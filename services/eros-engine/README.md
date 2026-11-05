@@ -166,25 +166,39 @@ provide per-user database isolation. This is accepted only for the isolated
 single-synthetic-user pilot; it remains a hard gate before any real-user
 access.
 
-Before the protected synthetic pilot, verify the stock image SHA and provenance,
-dedicated database ownership, SQLx migration compatibility, ACL, backup and
-restore, network boundaries, provider route, existing GPOINT Worker
+Before the protected production Apply, verify the stock image SHA and
+provenance, dedicated database ownership, SQLx migration compatibility, ACL,
+backup and restore, network boundaries, provider route, existing GPOINT Worker
 compatibility, VPS resource headroom, and AGPL-3.0 distribution/source
-obligations. Any later real-user access must meet the applicable GPoint
+obligations. The Apply includes a short synthetic runtime check of API,
+dialogue, durable memory recall, and the existing Mac Product Worker before
+Messages routing changes. Any later real-user access must meet the applicable GPoint
 consent, privacy, retention and deletion obligations; the withdrawn full-erasure
 API prerequisite must not be reintroduced under another name. Mac resource
 measurements are directional evidence and cannot replace a VPS load measurement.
 
 ## Release and pilot boundary
 
-The initial AGATA-to-Eros transition retains its separately protected,
-synthetic-only pilot and recovery approvals. It is not the ordinary release
-path. The pilot must prove stock image identity, a dedicated Eros database,
-SQLx migration and ACL behavior, isolated backup/restore, resource limits,
-existing GPOINT Worker connectivity, synthetic memory write/read, and
-cross-user isolation before any routing change. Pilot Apply, production database
-changes, AGATA shutdown, and user activation require their own current
-authorization.
+The initial AGATA-to-Eros transition uses the existing protected Native First V3 Deploy and Kamal 2.
+It starts Eros while AGATA remains available,
+checks API, dialogue, durable memory recall, and the existing GPOINT Mac Product
+Worker with synthetic identities, then changes Messages routing and stops the
+AGATA API and Memory Worker only after those checks pass. Failure restores the
+previous route and AGATA services; it never downgrades either database. Keep the
+AGATA database and its existing 102 messages intact for recovery. Do not copy
+conversation history or memory rows into Eros and do not drop old data or
+schemas during cutover. The production Apply plan and data impact must be shown
+to OWNER before the first production mutation; the protected Apply requires a
+separate current authorization.
+
+GPoint Messages uses one global policy: users must be 18 or older, accept the
+current GPoint Terms of Use at `https://gpoint.one/terms` and Privacy Policy at
+`https://gpoint.one/privacy`, and acknowledge the current AI disclosure. The
+document versions and each confirmation are stored for audit. Legacy AGATA
+regional policy rows remain untouched and never select GPoint runtime rules.
+Previously active consent rows are retained in the GPoint audit history, with
+only the newest confirmation left active; age assurance is selected by its
+latest version without a regional filter.
 
 After accepted cutover, Eros upgrades use the existing GPoint Native First V3
 workflow and Kamal 2. Eros, Core, AGATA, and Mini App retain independent version
@@ -208,7 +222,7 @@ isolated database, verified the marker and migration ledger, and checked the
 migrator ownership. The rehearsal validates the local snapshot/restore mechanics
 only; it is not production evidence and does not authorize a database swap.
 
-The first protected pilot still requires a fresh, exact-SHA recovery plan and
+The protected production Apply requires a fresh, exact-SHA recovery plan and
 backup/restore verification for its dedicated Eros database. Steady-state
 version rollback may restore a compatible stock image but must not downgrade the
 SQLx database. If a migration is incompatible with the prior image, block image
