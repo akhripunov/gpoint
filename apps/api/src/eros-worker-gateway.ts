@@ -68,7 +68,7 @@ function encryptQueueRequest(request: ParsedErosBridgeRequest, identity: ErosQue
       messages: request.messages,
       max_tokens: request.maxTokens,
       temperature: request.temperature,
-      ...(request.identity ? { user: signBridgeIdentity(request.identity, signingSecret()) } : {}),
+      ...(request.identity ? { bridge_identity: request.identity } : {}),
     }), 'utf8'),
     cipher.final(),
   ]);
@@ -217,6 +217,18 @@ export async function claimErosForGpointWorker(): Promise<{ job: Record<string, 
     creator_id: row.creator_id, session_id: row.session_id, instance_id: row.instance_id,
   };
   const request = decryptQueueRequest(row.request, identity);
+  const bridgeIdentity = request.bridge_identity;
+  delete request.bridge_identity;
+  if (bridgeIdentity !== undefined) {
+    if (!bridgeIdentity || typeof bridgeIdentity !== 'object' || Array.isArray(bridgeIdentity)) {
+      throw new HttpException({ code: 'EROS_QUEUE_IDENTITY_INVALID' }, 503);
+    }
+    try {
+      request.user = signBridgeIdentity(bridgeIdentity as NonNullable<ParsedErosBridgeRequest['identity']>, signingSecret());
+    } catch {
+      throw new HttpException({ code: 'EROS_QUEUE_IDENTITY_INVALID' }, 503);
+    }
+  }
   let parsedRequest: ParsedErosBridgeRequest;
   try {
     parsedRequest = await parseBridgeRequest(request, signingSecret());

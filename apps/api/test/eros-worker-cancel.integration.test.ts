@@ -110,7 +110,7 @@ test('cancel-check terminalizes a running lease whose deadline has elapsed', { s
 });
 
 
-test('GPOINT claim round-trips encrypted Eros job and completes it with a single lease', { skip: !disposableLoopbackDatabase }, async () => {
+test('GPOINT claim refreshes queued Eros identity after token expiry and completes one lease', { skip: !disposableLoopbackDatabase }, async () => {
   const tenantId = '7508f36f-774a-48aa-8c6b-42f6f160415d';
   const prior = {
     token: process.env.GPOINT_AGATA_WORKER_TOKEN,
@@ -189,9 +189,17 @@ test('GPOINT claim round-trips encrypted Eros job and completes it with a single
       protected override claimErosJob() { return claimErosForGpointWorker(); }
     }
     const controller = new TestGateway();
-    const concurrentClaims = await Promise.all(Array.from({ length: 2 }, () =>
-      controller.claim({ authorization: `Bearer ${process.env.GPOINT_AGATA_WORKER_TOKEN}` }),
-    ));
+    const realDateNow = Date.now;
+    const claimNowMs = realDateNow() + 121_000;
+    let concurrentClaims: unknown[];
+    Date.now = () => claimNowMs;
+    try {
+      concurrentClaims = await Promise.all(Array.from({ length: 2 }, () =>
+        controller.claim({ authorization: `Bearer ${process.env.GPOINT_AGATA_WORKER_TOKEN}` }),
+      ));
+    } finally {
+      Date.now = realDateNow;
+    }
     const claimedJobs = concurrentClaims
       .map((claim) => (claim as { job: { id: string; leaseToken: string; attempt: number; target: string; tenant_id: string; request: unknown; purpose: string } | null }).job)
       .filter((job): job is NonNullable<typeof job> => job !== null);
@@ -202,7 +210,9 @@ test('GPOINT claim round-trips encrypted Eros job and completes it with a single
     assert.equal(job.attempt, 1);
     assert.equal(job.target, 'GPOINT');
     assert.equal(job.tenant_id, tenantId);
-    assert.deepEqual(await parseBridgeRequest(job.request, new TextEncoder().encode(signingSecret)), {
+    assert.deepEqual(await parseBridgeRequest(
+      job.request, new TextEncoder().encode(signingSecret), Math.floor(claimNowMs / 1000),
+    ), {
       ...parsedRequest,
       stream: false,
     });
