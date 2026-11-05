@@ -98,9 +98,9 @@ def test_kamal_agata_and_miniapp_are_separate_services():
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
     assert "id: miniapp" in workflow and "target: miniapp-runtime" in workflow
     assert "ghcr.io/akhripunov/gpoint-miniapp:${{ github.sha }}" in workflow
-    assert "MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}" in workflow
-    assert "APP_DIGEST: ${{ steps.app.outputs.digest }}" in workflow
-    assert "AGATA_DIGEST: ${{ steps.agata.outputs.digest }}" in workflow
+    assert "MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest || steps.prepared.outputs.miniapp_digest }}" in workflow
+    assert "APP_DIGEST: ${{ steps.app.outputs.digest || steps.prepared.outputs.app_digest }}" in workflow
+    assert "AGATA_DIGEST: ${{ steps.agata.outputs.digest || steps.prepared.outputs.agata_digest }}" in workflow
 
 
 def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
@@ -109,7 +109,10 @@ def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
     assert {"tests", "build", "deploy"}.issubset(jobs)
     assert not ({"workspace", "python"} & set(jobs))
     assert jobs["build"]["needs"] == ["tests"]
-    assert jobs["build"]["if"] == "needs.tests.outputs.mode == 'DEPLOY' || needs.tests.outputs.mode == 'REHEARSAL'"
+    assert jobs["build"]["if"] == (
+        "needs.tests.outputs.mode == 'DEPLOY' || needs.tests.outputs.mode == 'REHEARSAL' "
+        "|| needs.tests.outputs.mode == 'ARTIFACT_PREPARE'"
+    )
     build_steps = yaml.safe_dump(jobs["build"]["steps"])
     assert "cache-to: type=gha,scope=gpoint-runtime,mode=max" in build_steps
     assert "sbom: true" in build_steps

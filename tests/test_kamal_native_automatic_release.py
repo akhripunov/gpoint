@@ -447,8 +447,8 @@ def test_migration_rehearsal_uses_immutable_oci_identity_across_docker_hosts():
         assert 'docker image inspect "$agata_image" --format \'{{json .RepoDigests}}\' | grep -F "$agata_image" >/dev/null' in body
         assert f'current_step=ghcr-{role}-repository-digest' in body
 
-    assert build["outputs"]["app_digest"] == "${{ steps.app.outputs.digest }}"
-    assert build["outputs"]["agata_digest"] == "${{ steps.agata.outputs.digest }}"
+    assert build["outputs"]["app_digest"] == "${{ steps.app.outputs.digest || steps.prepared.outputs.app_digest }}"
+    assert build["outputs"]["agata_digest"] == "${{ steps.agata.outputs.digest || steps.prepared.outputs.agata_digest }}"
     assert "app_image_id" not in build.get("outputs", {})
     assert "agata_image_id" not in build.get("outputs", {})
     assert "image inspect" in build_body and "{{.Id}}" not in build_body
