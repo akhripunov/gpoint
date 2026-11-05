@@ -44,6 +44,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
             "prepared_app_digest", "prepared_agata_digest",
             "prepared_miniapp_digest", "prepared_eros_digest",
         )))
+        self.assertEqual(inputs["prepared_run_id"]["type"], "string")
         build = self.workflow["jobs"]["build"]
         self.assertNotIn("environment", build)
         self.assertNotEqual(build["permissions"].get("deployments"), "write")
@@ -51,6 +52,11 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         prepared = next(step for step in steps if step.get("id") == "prepared")
         self.assertIn("inputs.use_prepared_images == true", prepared["if"])
         self.assertIn("validate_prepared_image_digests", prepared["run"])
+        verify_prepared_run = next(step for step in steps if "Verify successful prepared run" in step.get("name", ""))
+        self.assertIn("actions/runs/$PREPARED_RUN_ID", verify_prepared_run["run"])
+        self.assertIn("actions/jobs/$build_job_id/logs", verify_prepared_run["run"])
+        self.assertIn("/commits/$CANDIDATE_SHA", verify_prepared_run["run"])
+        self.assertIn("verify_native_prepared_run.py", verify_prepared_run["run"])
         readback = next(step for step in steps if step.get("id") == "image_readback")
         self.assertIn("REUSE_PREPARED_IMAGES", readback["env"])
         self.assertIn('if [[ "$REUSE_PREPARED_IMAGES" != true ]]', readback["run"])

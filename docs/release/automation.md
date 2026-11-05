@@ -195,13 +195,15 @@ Build/GHCR, записывает точные `COMPONENT_IMAGE=repository@sha256
 
 Чтобы применить заранее проверенные образы, OWNER запускает workflow dispatch на
 том же exact main SHA с `approve_production=true`,
-`use_prepared_images=true` и digest inputs из Build summary для каждого
-компонента текущего scope. Build job требует точное совпадение набора компонентов
-и immutable digests, затем скачивает каждый образ по digest и заново проверяет
-source SHA, SBOM/provenance и `linux/amd64`; Build actions не пересобирают и не
-публикуют эти образы. Любой отсутствующий, лишний или неверный digest блокирует
-Deploy. Artifact preparation не является production authorization и не заменяет
-backup, migration, compatibility, worker, Runtime Verify или recovery gates.
+`use_prepared_images=true`, `prepared_run_id` и digest inputs из Build summary
+для каждого компонента текущего scope. Build job проверяет, что указан успешный
+Native workflow run с событием main push и exact SHA, затем сверяет набор
+component digests с логом его успешного Build job. После этого он скачивает
+каждый образ по digest и заново проверяет source SHA, SBOM/provenance и
+`linux/amd64`; Build actions не пересобирают и не публикуют эти образы. Любой
+неверный run, отсутствующий, лишний или несовпадающий digest блокирует Deploy.
+Artifact preparation не является production authorization и не заменяет backup,
+migration, compatibility, worker, Runtime Verify или recovery gates.
 
 ### Release tooling audit (Native First V3)
 

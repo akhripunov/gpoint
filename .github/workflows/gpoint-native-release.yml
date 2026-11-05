@@ -33,6 +33,10 @@ on:
         required: true
         default: false
         type: boolean
+      prepared_run_id:
+        description: Run ID of the successful GPOINT-ARTIFACT-PREPARE run for this exact SHA
+        required: false
+        type: string
       prepared_app_digest:
         description: Prepared GHCR digest for CORE, when included in the candidate scope
         required: false
@@ -276,6 +280,7 @@ jobs:
           tests/test_native_build_boundary.py
           tests/test_native_build_scope.py
           tests/test_native_release_intent.py
+          tests/test_native_prepared_run.py
           tests/test_release_pre_push_mode.py
           tests/test_native_environment_deployment.py
           tests/test_native_prisma_apply_boundary.py
@@ -389,11 +394,58 @@ jobs:
       - name: Reject unused prepared image digest inputs
         if: needs.tests.outputs.mode == 'DEPLOY' && inputs.use_prepared_images != true
         env:
-          PREPARED_DIGESTS: ${{ inputs.prepared_app_digest }},${{ inputs.prepared_agata_digest }},${{ inputs.prepared_miniapp_digest }},${{ inputs.prepared_eros_digest }}
+          PREPARED_INPUTS: ${{ inputs.prepared_run_id }},${{ inputs.prepared_app_digest }},${{ inputs.prepared_agata_digest }},${{ inputs.prepared_miniapp_digest }},${{ inputs.prepared_eros_digest }}
         run: |
-          test -z "${PREPARED_DIGESTS//,/}" || {
-            echo 'prepared image digests require use_prepared_images=true' >&2; exit 1;
+          test -z "${PREPARED_INPUTS//,/}" || {
+            echo 'prepared image inputs require use_prepared_images=true' >&2; exit 1;
           }
+      - name: Verify successful prepared run and its exact component digests
+        if: needs.tests.outputs.mode == 'DEPLOY' && inputs.use_prepared_images == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREPARED_RUN_ID: ${{ inputs.prepared_run_id }}
+          CANDIDATE_SHA: ${{ github.sha }}
+          BUILD_COMPONENTS: ${{ steps.build_scope.outputs.build_components }}
+          PREPARED_APP_DIGEST: ${{ inputs.prepared_app_digest }}
+          PREPARED_AGATA_DIGEST: ${{ inputs.prepared_agata_digest }}
+          PREPARED_MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
+          PREPARED_EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
+        run: |
+          set -euo pipefail
+          [[ "$PREPARED_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'prepared_run_id must be a positive run ID' >&2; exit 1; }
+          run_json="$RUNNER_TEMP/prepared-run.json"
+          jobs_json="$RUNNER_TEMP/prepared-jobs.json"
+          commit_json="$RUNNER_TEMP/prepared-commit.json"
+          logs_zip="$RUNNER_TEMP/prepared-build-logs.zip"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREPARED_RUN_ID" > "$run_json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREPARED_RUN_ID/jobs?per_page=100" > "$jobs_json"
+          gh api "repos/$GITHUB_REPOSITORY/commits/$CANDIDATE_SHA" > "$commit_json"
+          build_job_id="$(python3 - "$jobs_json" <<'PY'
+          import json, sys
+          jobs = json.load(open(sys.argv[1], encoding='utf-8')).get('jobs', [])
+          matches = [job for job in jobs if job.get('name') == 'Build and publish immutable images']
+          if len(matches) != 1 or not isinstance(matches[0].get('id'), int):
+              raise SystemExit('prepared run must contain exactly one Native Build job')
+          print(matches[0]['id'])
+          PY
+          )"
+          curl --fail --silent --show-error --location \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/jobs/$build_job_id/logs" \
+            --output "$logs_zip"
+          python3 scripts/verify_native_prepared_run.py \
+            --run "$run_json" --jobs "$jobs_json" --commit "$commit_json" --logs "$logs_zip" \
+            --candidate-sha "$CANDIDATE_SHA" --run-id "$PREPARED_RUN_ID" \
+            --digests "$(python3 - <<'PY'
+          import json, os
+          supplied = {'CORE': 'PREPARED_APP_DIGEST', 'AGATA': 'PREPARED_AGATA_DIGEST',
+                      'MINIAPP': 'PREPARED_MINIAPP_DIGEST', 'EROS': 'PREPARED_EROS_DIGEST'}
+          components = json.loads(os.environ['BUILD_COMPONENTS'])
+          print(json.dumps({component: os.environ[name] for component, name in supplied.items()
+                            if component in components and os.environ[name]}, sort_keys=True))
+          PY
+          )"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
         if: steps.build_scope.outputs.build_components != '[]' || steps.rehearsal_scope.outputs.build_components != '[]'
         with:
@@ -516,7 +568,10 @@ jobs:
                   raise SystemExit(f'{name} is not an immutable OCI digest')
           for component, name in {'CORE': 'APP_DIGEST', 'AGATA': 'AGATA_DIGEST', 'MINIAPP': 'MINIAPP_DIGEST', 'EROS': 'EROS_DIGEST'}.items():
               if component in components:
-                  print(f"{component}_IMAGE=ghcr.io/akhripunov/" + ("gpoint-runtime" if component == "CORE" else "gpoint-agata-runtime" if component == "AGATA" else "gpoint-miniapp" if component == "MINIAPP" else "gpoint-eros") + "@" + os.environ[name], file=open(os.environ['GITHUB_STEP_SUMMARY'], 'a'))
+                  image = "ghcr.io/akhripunov/" + ("gpoint-runtime" if component == "CORE" else "gpoint-agata-runtime" if component == "AGATA" else "gpoint-miniapp" if component == "MINIAPP" else "gpoint-eros") + "@" + os.environ[name]
+                  line = f"GPOINT_IMAGE_DIGEST {component} {image}"
+                  print(line)
+                  print(f"{component}_IMAGE={image}", file=open(os.environ['GITHUB_STEP_SUMMARY'], 'a'))
           PY
       - name: Read back exact published images and verify candidate identity
         id: image_readback
