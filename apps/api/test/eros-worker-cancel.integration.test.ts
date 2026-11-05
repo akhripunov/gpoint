@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { createCipheriv, hkdfSync, randomBytes, randomUUID } from 'node:crypto';
+import { createCipheriv, createHmac, hkdfSync, randomBytes, randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { PrismaClient } from '@prisma/client';
 import { erosIdentityFor } from '../src/eros-adapter.js';
+import { deriveBridgeInferenceIdentity, signBridgeIdentity } from '../src/eros-worker-contract.js';
 
 const databaseUrl = process.env.DATABASE_URL;
 const parsedDatabaseUrl = databaseUrl ? new URL(databaseUrl) : undefined;
@@ -144,20 +145,31 @@ test('GPOINT claim round-trips encrypted Eros job and completes it with a single
   const creatorId = mappedIdentity.creatorId;
   const sessionId = randomUUID();
   const instanceId = randomUUID();
-  const request = {
+  const requestBody = {
     model: 'gpoint-codex',
     messages: [{ role: 'user', content: 'synthetic queued prompt' }],
     max_tokens: 32,
     temperature: 1,
   };
+  const signingSecret = process.env.EROS_WORKER_SIGNING_SECRET;
+  assert.ok(signingSecret);
   const key = Buffer.from(hkdfSync(
-    'sha256', Buffer.from(process.env.EROS_WORKER_SIGNING_SECRET),
+    'sha256', Buffer.from(signingSecret),
     Buffer.from('gpoint-eros-queue-v1'), Buffer.from('request-payload-aead'), 32,
   ));
+  const requestFingerprint = createHmac('sha256', key).update(JSON.stringify(requestBody)).digest('hex');
+  const bridgeIdentity = {
+    tenantId, userId, creatorId, sessionId, instanceId, requestId,
+  };
+  const chatIdentity = deriveBridgeInferenceIdentity(bridgeIdentity, requestFingerprint);
+  const request = {
+    ...requestBody,
+    user: signBridgeIdentity(bridgeIdentity, new TextEncoder().encode(signingSecret)),
+  };
   const nonce = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', key, nonce);
   cipher.setAAD(Buffer.from([
-    tenantId, id, requestId, userId, creatorId, sessionId, instanceId, 'request',
+    tenantId, id, chatIdentity.requestId, userId, creatorId, sessionId, instanceId, 'request',
   ].join('\0')));
   const ciphertext = Buffer.concat([cipher.update(JSON.stringify(request), 'utf8'), cipher.final()]);
   const envelope = {
@@ -171,9 +183,10 @@ test('GPOINT claim round-trips encrypted Eros job and completes it with a single
         `INSERT INTO engine.eros_inference_jobs
            (id, request_id, request_hash, tenant_id, user_id, creator_id, session_id, instance_id,
             job_type, request, status, deadline_at)
-         VALUES ($1::uuid, $2::uuid, repeat('e', 64), $3, $4::uuid, $5::uuid, $6::uuid, $7::uuid,
-            'CHAT_COMPLETION', $8::jsonb, 'PENDING', now() + interval '2 minutes')`,
-        id, requestId, tenantId, userId, creatorId, sessionId, instanceId, JSON.stringify(envelope),
+         VALUES ($1::uuid, $2::uuid, $8, $3, $4::uuid, $5::uuid, $6::uuid, $7::uuid,
+            'CHAT_COMPLETION', $9::jsonb, 'PENDING', now() + interval '2 minutes')`,
+        id, chatIdentity.requestId, tenantId, userId, creatorId, sessionId, instanceId, requestFingerprint,
+        JSON.stringify(envelope),
       );
     });
     class TestGateway extends AgataWorkerGatewayController {

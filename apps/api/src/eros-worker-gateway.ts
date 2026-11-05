@@ -169,6 +169,9 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 /** Claim Eros bridge work on the existing authenticated GPOINT Product Worker contract. */
 export async function claimErosForGpointWorker(): Promise<{ job: Record<string, unknown> } | null> {
   const pair = exactErosPilotPair();
+  // The pilot allowlist stores GPoint IDs. Queue rows carry Eros UUIDv5 IDs,
+  // so compare the signed queue identity against the deterministic mapping.
+  const mappedPilotPair = pair ? erosIdentityFor(pair) : null;
   const ownedMode = isGpointOwnedErosMode();
   if (!pair && !ownedMode) throw new HttpException({ code: 'EROS_PILOT_ALLOWLIST_INVALID' }, 503);
   const tenantId = workerTenant();
@@ -220,7 +223,7 @@ export async function claimErosForGpointWorker(): Promise<{ job: Record<string, 
   const systemIdentity = row.job_type === 'SYSTEM_COMPLETION'
     ? systemTaskIdentity(parsedRequest, tenantId)
     : null;
-  if (!isExpectedErosWorkerJobIdentity(row, tenantId, pair ?? { userId: '', creatorId: '' }, systemIdentity, {
+  if (!isExpectedErosWorkerJobIdentity(row, tenantId, mappedPilotPair ?? { userId: '', creatorId: '' }, systemIdentity, {
     chatIdentity,
     allowGpointOwnedChat: ownedMode,
   })) {
