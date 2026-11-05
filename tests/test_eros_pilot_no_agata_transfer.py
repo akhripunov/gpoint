@@ -61,6 +61,15 @@ def test_gpoint_messages_never_reuses_legacy_agata_jurisdiction():
     assert source.count("jurisdiction: 'GLOBAL'") == 2
 
 
+def test_local_eros_queue_integration_uses_test_allowlist_mode():
+    script = (ROOT / "services/eros-engine/run-local-e2e.sh").read_text()
+    start = script.index('docker_local run --name "$integration_container"')
+    end = script.index("echo LOCAL_E2E_GPOINT_QUEUE_RLS_TENANT_ISOLATION=PASS", start)
+    isolated_runner = script[start:end]
+    assert "-e NODE_ENV=test" in isolated_runner
+    assert "-e EROS_WORKER_DISPOSABLE_TEST_DB=1" in isolated_runner
+
+
 def test_consent_migration_keeps_only_the_latest_legacy_active_row_current():
     sql = MIGRATION.read_text(encoding="utf-8").lower()
     assert re.search(

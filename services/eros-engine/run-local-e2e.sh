@@ -272,6 +272,7 @@ compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP
 postgres_id=$(compose ps -q postgres)
 api_image=$(compose images -q gpoint-api)
   docker_local run --name "$integration_container" --label "com.docker.compose.project=$project" --network "container:$postgres_id" \
+  -e NODE_ENV=test \
   -e DATABASE_URL='postgresql://gpoint_worker_test:local-only-gpoint-worker-test@127.0.0.1:5432/gpoint_test?schema=public' \
   -e EROS_WORKER_DISPOSABLE_TEST_DB=1 \
   -v "$repo/apps/api/test:/workspace/apps/api/test:ro" \
