@@ -43,7 +43,9 @@ def test_first_eros_engine_and_relay_start_before_core_api_selects_eros_route():
     body = kamal["run"]
     eros = body.index('if [[ "$DEPLOY_EROS" == true ]]; then')
     core = body.index('if [[ "$DEPLOY_CORE" == true ]]; then')
+    miniapp = body.index('if [[ "$DEPLOY_MINIAPP" == true ]]; then')
     assert eros < core
+    assert core < miniapp
     assert body.index("verify_single_running_role gpoint-eros-pilot-engine", eros) < core
     assert body.index("verify_single_running_role gpoint-eros-relay-relay", eros) < core
     assert "core_api_config=config/deploy.eros-api.yml" in body

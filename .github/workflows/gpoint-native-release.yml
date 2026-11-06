@@ -1368,10 +1368,6 @@ jobs:
               kamal deploy --skip-push --version "$IMAGE_VERSION" --roles memory-worker --config-file config/deploy.agata.yml
             verify_single_running_role gpoint-agata-memory-worker "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
           fi
-          if [[ "$DEPLOY_MINIAPP" == true ]]; then
-            GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
-              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.miniapp.yml
-          fi
           if [[ "$DEPLOY_EROS" == true ]]; then
             [[ "$EROS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
             GPOINT_KAMAL_EXPECTED_DIGEST="$EROS_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-pilot KAMAL_ROLES=engine \
@@ -1397,6 +1393,10 @@ jobs:
             GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot \
               kamal deploy --skip-push --version "$IMAGE_VERSION" --roles bot --config-file config/deploy.yml
             verify_single_running_role gpoint-core-bot "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
+          fi
+          if [[ "$DEPLOY_MINIAPP" == true ]]; then
+            GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
+              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.miniapp.yml
           fi
       - name: Verify public routes and exact running services
         id: verify
