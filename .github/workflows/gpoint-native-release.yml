@@ -1370,13 +1370,81 @@ jobs:
           fi
           if [[ "$DEPLOY_EROS" == true ]]; then
             [[ "$EROS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-            GPOINT_KAMAL_EXPECTED_DIGEST="$EROS_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-pilot KAMAL_ROLES=engine \
-              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles engine --config-file config/deploy.eros.yml
+            EROS_OLLAMA_MODEL_DIGEST="$(python3 -c 'import json; print(json.load(open("services/eros-engine/ollama-model.lock.json"))["digest"])')"
+            [[ "$EROS_OLLAMA_MODEL_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+            if accessory_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{.State.Status}}' gpoint-eros-relay-ollama 2>&1)"; then
+              :
+            elif [[ "$accessory_state" == *"No such object: gpoint-eros-relay-ollama"* ]]; then
+              accessory_state=ABSENT
+            else
+              echo "could not verify Ollama accessory state; refusing bootstrap" >&2
+              exit 1
+            fi
+            ollama_bootstrap=false
+            legacy_ollama_stopped=false
+            legacy_ollama_committed=false
+            restore_legacy_ollama() {
+              local result=$?
+              if [[ "$legacy_ollama_stopped" == true && "$legacy_ollama_committed" != true ]]; then
+                if ! ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s <<'REMOTE_OLLAMA_RESTORE'
+          set -euo pipefail
+          if docker inspect gpoint-eros-relay-ollama >/dev/null 2>&1; then
+            image="$(docker inspect --format '{{.Config.Image}}' gpoint-eros-relay-ollama)"
+            test "$image" = 'ollama/ollama@sha256:a717bfc1c56acfc2e85d3109bd40a7646258ec9062c40cea83b9ed0927eb4223'
+            docker rm -f gpoint-eros-relay-ollama >/dev/null
+          fi
+          if [[ "$(docker inspect --format '{{.State.Running}}' ollama-layer7)" != true ]]; then
+            docker start ollama-layer7 >/dev/null
+          fi
+          REMOTE_OLLAMA_RESTORE
+                then
+                  echo "failed to restore temporary Ollama after Kamal accessory handoff failure" >&2
+                fi
+              fi
+              return "$result"
+            }
+            if [[ "$accessory_state" == ABSENT ]]; then
+              if legacy_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{.State.Status}}' ollama-layer7 2>&1)"; then
+                if [[ "$legacy_state" != running ]]; then
+                  echo "temporary Ollama exists but is not running; refusing accessory handoff" >&2
+                  exit 1
+                fi
+                ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - "$EROS_OLLAMA_MODEL_DIGEST" ollama-layer7 \
+                  < scripts/verify-layer7-ollama.py
+                legacy_ollama_stopped=true
+                trap restore_legacy_ollama EXIT
+                ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker stop ollama-layer7 >/dev/null
+              elif [[ "$legacy_state" != *"No such object: ollama-layer7"* ]]; then
+                echo "could not verify temporary Ollama state; refusing bootstrap" >&2
+                exit 1
+              fi
+              GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay \
+                kamal accessory boot ollama --config-file config/deploy.eros-relay.yml
+              ollama_bootstrap=true
+            else
+              if [[ "$accessory_state" != running ]]; then
+                GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay \
+                  kamal accessory start ollama --config-file config/deploy.eros-relay.yml
+              fi
+            fi
+            if [[ "$ollama_bootstrap" == true && "$legacy_ollama_stopped" != true ]]; then
+              GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay \
+                kamal accessory exec ollama ollama pull qwen3-embedding:0.6b --config-file config/deploy.eros-relay.yml
+            fi
+            ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - "$EROS_OLLAMA_MODEL_DIGEST" \
+              < scripts/verify-layer7-ollama.py
+            if [[ "$legacy_ollama_stopped" == true ]]; then
+              ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker rm ollama-layer7 >/dev/null
+              legacy_ollama_committed=true
+              trap - EXIT
+            fi
             GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay kamal app stop --roles relay --config-file config/deploy.eros-relay.yml
             GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay \
               kamal deploy --skip-push --version "$IMAGE_VERSION" --roles relay --config-file config/deploy.eros-relay.yml
-            verify_single_running_role gpoint-eros-pilot-engine "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
             verify_single_running_role gpoint-eros-relay-relay "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
+            GPOINT_KAMAL_EXPECTED_DIGEST="$EROS_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-pilot KAMAL_ROLES=engine \
+              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles engine --config-file config/deploy.eros.yml
+            verify_single_running_role gpoint-eros-pilot-engine "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
           fi
           if [[ "$DEPLOY_CORE" == true ]]; then
             core_api_config=config/deploy.yml
@@ -1561,6 +1629,7 @@ jobs:
             eros_version="$(sed -n 's/^gpoint-eros-pilot-engine|\([^|]*\).*/\1/p' <<< "$runtime_rows")"
             relay_version="$(sed -n 's/^gpoint-eros-relay-relay|\([^|]*\).*/\1/p' <<< "$runtime_rows")"
             docker exec "gpoint-eros-pilot-engine-$eros_version" curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null
+            docker exec "gpoint-eros-pilot-engine-$eros_version" sh -c 'curl --fail --silent --show-error --max-time 60 -H "Content-Type: application/json" --data "{\"model\":\"qwen3-embedding:0.6b\",\"input\":\"Synthetic Layer7 Eros network verification\",\"dimensions\":512}" "$EROS_OLLAMA_EMBEDDING_URL" >/dev/null'
             docker exec "gpoint-eros-relay-relay-$relay_version" node -e "fetch('http://172.31.254.1:11434/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
             python3 "/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py" "gpoint-eros-pilot-engine-$eros_version" d1a140083321687212fb7b17c09cc0c3c9639f5e none
             rm -f -- "/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py"

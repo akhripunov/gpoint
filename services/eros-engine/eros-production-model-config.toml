@@ -1,5 +1,5 @@
 # Stock Eros uses the existing GPoint API and Worker; embeddings use the
-# internal GPoint API proxy to the Mac-hosted Ollama tunnel.
+# internal GPoint API proxy to the private Layer7 Ollama relay.
 [defaults]
 fallback_model = "gpoint-codex@gpoint"
 fallback_temperature = 1.0
