@@ -252,13 +252,22 @@ def test_core_consumers_are_updated_one_role_at_a_time_and_partial_failure_fails
     apply = deploy.split("name: Deploy exact immutable images with stock Kamal", 1)[1].split(
         "name: Verify public routes and exact running services", 1
     )[0]
-    worker = apply.index("KAMAL_ROLES=worker")
-    bot = apply.index("KAMAL_ROLES=bot")
-    memory_worker = apply.index("KAMAL_ROLES=memory-worker")
-    assert worker < bot < memory_worker
-    for role in ("worker", "bot", "memory-worker"):
-        stop = apply.index(f"kamal app stop --roles {role}")
-        deploy_call = apply.index(f"kamal deploy --skip-push --version \"$IMAGE_VERSION\" --roles {role}")
+    agata = apply.split('if [[ "$DEPLOY_AGATA" == true ]]; then', 1)[1].split(
+        'if [[ "$DEPLOY_EROS" == true ]]; then', 1
+    )[0]
+    eros = apply.split('if [[ "$DEPLOY_EROS" == true ]]; then', 1)[1].split(
+        'if [[ "$DEPLOY_CORE" == true ]]; then', 1
+    )[0]
+    core = apply.split('if [[ "$DEPLOY_CORE" == true ]]; then', 1)[1].split(
+        'if [[ "$DEPLOY_MINIAPP" == true ]]; then', 1
+    )[0]
+    assert apply.index('if [[ "$DEPLOY_AGATA" == true ]]; then') < apply.index('if [[ "$DEPLOY_EROS" == true ]]; then')
+    assert apply.index('if [[ "$DEPLOY_EROS" == true ]]; then') < apply.index('if [[ "$DEPLOY_CORE" == true ]]; then')
+    assert apply.index('if [[ "$DEPLOY_CORE" == true ]]; then') < apply.index('if [[ "$DEPLOY_MINIAPP" == true ]]; then')
+    assert core.index("KAMAL_ROLES=worker") < core.index("KAMAL_ROLES=bot")
+    for block, role in ((core, "worker"), (core, "bot"), (agata, "memory-worker")):
+        stop = block.index(f"kamal app stop --roles {role}")
+        deploy_call = block.index(f"kamal deploy --skip-push --version \"$IMAGE_VERSION\" --roles {role}")
         assert stop < deploy_call
     assert "KAMAL_ROLES=worker,bot" not in apply
     assert "verify_single_running_role gpoint-core-worker" in apply
