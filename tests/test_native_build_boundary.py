@@ -1,5 +1,8 @@
 import unittest
+import os
 from pathlib import Path
+import subprocess
+import tempfile
 
 import yaml
 
@@ -62,6 +65,66 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn('if [[ "$REUSE_PREPARED_IMAGES" != true ]]', readback["run"])
         deploy = self.workflow["jobs"]["deploy"]
         self.assertIn("needs.tests.outputs.deploy == 'true'", deploy["if"])
+
+    def test_prepared_run_image_version_flows_from_build_run_through_kamal_deploy(self):
+        build = self.workflow["jobs"]["build"]
+        deploy = self.workflow["jobs"]["deploy"]
+        version_step = next((step for step in build["steps"]
+                             if step.get("id") == "image_version"), None)
+        verify_step = next((step for step in build["steps"]
+                            if step.get("id") == "prepared_run"), None)
+        self.assertIsNotNone(version_step)
+        self.assertIsNotNone(verify_step)
+        self.assertIn("steps.prepared_run.outputs.image_version", version_step["env"]["PREPARED_IMAGE_VERSION"])
+        self.assertIn("inputs.prepared_run_id", version_step["env"]["PREPARED_RUN_ID"])
+        self.assertIn("inputs.candidate_sha", version_step["env"]["CANDIDATE_SHA"])
+        self.assertIn("PREPARED_IMAGE_VERSION", version_step["run"])
+        self.assertIn("PREPARED_RUN_ID", version_step["run"])
+        self.assertEqual(build["outputs"]["image_version"], "${{ steps.image_version.outputs.image_version }}")
+        self.assertIn("--output", verify_step["run"])
+        self.assertIn("prepared-build-logs.txt", verify_step["run"])
+        self.assertIn("${CURRENT_RUN_ID}", version_step["run"])
+        self.assertIn("${CURRENT_RUN_ATTEMPT}", version_step["run"])
+        self.assertEqual(deploy["env"]["IMAGE_VERSION"], "${{ needs.build.outputs.image_version }}")
+        kamal = next(step for step in deploy["steps"]
+                     if step.get("name") == "Deploy exact immutable images with stock Kamal")
+        self.assertIn("--version \"$IMAGE_VERSION\"", kamal["run"])
+
+    def test_image_version_selection_step_accepts_only_matching_prepared_sha_and_run(self):
+        version_step = next(step for step in self.workflow["jobs"]["build"]["steps"]
+                            if step.get("id") == "image_version")
+        candidate = "a" * 40
+
+        def run_step(*, use_prepared, prepared_run_id, prepared_image_version):
+            with tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "github-output"
+                env = os.environ.copy()
+                env.update({
+                    "USE_PREPARED_IMAGES": str(use_prepared).lower(),
+                    "PREPARED_RUN_ID": str(prepared_run_id),
+                    "PREPARED_IMAGE_VERSION": prepared_image_version,
+                    "CANDIDATE_SHA": candidate,
+                    "CURRENT_RUN_ID": "9000",
+                    "CURRENT_RUN_ATTEMPT": "3",
+                    "GITHUB_OUTPUT": str(output),
+                })
+                result = subprocess.run(["bash", "-euo", "pipefail", "-c", version_step["run"]],
+                                        env=env, text=True, capture_output=True, check=False)
+                return result, output.read_text() if output.exists() else ""
+
+        result, output = run_step(use_prepared=True, prepared_run_id="1234",
+                                  prepared_image_version=f"{candidate}-1234-2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output, f"image_version={candidate}-1234-2\n")
+        for run_id, image_version in (("5678", f"{candidate}-1234-2"),
+                                      ("1234", f"{'b' * 40}-1234-2")):
+            result, _ = run_step(use_prepared=True, prepared_run_id=run_id,
+                                 prepared_image_version=image_version)
+            self.assertNotEqual(result.returncode, 0)
+        result, output = run_step(use_prepared=False, prepared_run_id="",
+                                  prepared_image_version="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output, f"image_version={candidate}-9000-3\n")
 
     def test_artifact_prepare_marker_is_passed_to_the_fail_closed_intent_classifier(self):
         steps = self.workflow["jobs"]["tests"]["steps"]

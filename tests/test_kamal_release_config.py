@@ -143,8 +143,9 @@ def test_first_cutover_build_images_include_the_kamal_service_labels():
 def test_kamal_uses_attempt_scoped_tag_with_buildkit_digest_verification():
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
-    version = "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
-    assert f"IMAGE_VERSION: {version}" in deploy
+    assert "IMAGE_VERSION: ${{ needs.build.outputs.image_version }}" in deploy
+    assert "image_version: ${{ steps.image_version.outputs.image_version }}" in workflow
+    assert 'image_version="${CANDIDATE_SHA}-${CURRENT_RUN_ID}-${CURRENT_RUN_ATTEMPT}"' in workflow
     assert "ghcr.io/akhripunov/gpoint-runtime:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}" in workflow
     assert "name: Verify immutable candidate images selected for the live scope" in deploy
     assert 'docker pull --platform linux/amd64 "$repository:$IMAGE_VERSION"' in deploy

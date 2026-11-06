@@ -29,9 +29,30 @@ IMAGE_LINE = re.compile(
 )
 
 
-def verify_prepared_run(run: Any, jobs_payload: Any, logs_zip: bytes,
+def _job_log_lines(log_bytes: bytes) -> list[str]:
+    if log_bytes.startswith(b"PK\x03\x04"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(log_bytes)) as archive:
+                return [line for name in archive.namelist() if not name.endswith("/")
+                        for line in archive.read(name).decode("utf-8", "replace").splitlines()]
+        except (OSError, zipfile.BadZipFile) as exc:
+            raise ValueError("prepared Native Build log archive is invalid") from exc
+    try:
+        return log_bytes.decode("utf-8-sig").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ValueError("prepared Native Build logs are not UTF-8 text") from exc
+
+
+def _strip_github_timestamp(line: str) -> str:
+    return re.sub(
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+",
+        "", line.strip(), count=1,
+    )
+
+
+def verify_prepared_run(run: Any, jobs_payload: Any, logs: bytes,
                         candidate_sha: str, digests: dict[str, str],
-                        expected_run_id: int, commit_payload: Any) -> int:
+                        expected_run_id: int, commit_payload: Any) -> tuple[int, str]:
     if not isinstance(run, dict):
         raise ValueError("prepared run metadata is malformed")
     expected_run = {
@@ -49,6 +70,9 @@ def verify_prepared_run(run: Any, jobs_payload: Any, logs_zip: bytes,
         raise ValueError("prepared run ID is invalid")
     if any(run.get(field) != value for field, value in expected_run.items()):
         raise ValueError("prepared run is not a successful Native main push for this exact SHA")
+    run_attempt = run.get("run_attempt")
+    if not isinstance(run_attempt, int) or run_attempt <= 0:
+        raise ValueError("prepared run attempt is missing or invalid")
     commit = commit_payload.get("commit") if isinstance(commit_payload, dict) else None
     message = commit.get("message") if isinstance(commit, dict) else None
     if (not isinstance(message, str)
@@ -71,15 +95,10 @@ def verify_prepared_run(run: Any, jobs_payload: Any, logs_zip: bytes,
             or not isinstance(build.get("id"), int)):
         raise ValueError("prepared Native Build job did not succeed")
 
-    try:
-        with zipfile.ZipFile(io.BytesIO(logs_zip)) as archive:
-            lines = [line for name in archive.namelist() if not name.endswith("/")
-                     for line in archive.read(name).decode("utf-8", "replace").splitlines()]
-    except (OSError, zipfile.BadZipFile) as exc:
-        raise ValueError("prepared Native Build logs are unavailable or invalid") from exc
+    lines = _job_log_lines(logs)
     recorded: dict[str, str] = {}
     for line in lines:
-        match = IMAGE_LINE.fullmatch(line.strip())
+        match = IMAGE_LINE.fullmatch(_strip_github_timestamp(line))
         if not match:
             continue
         component, repository, digest = match.groups()
@@ -88,7 +107,7 @@ def verify_prepared_run(run: Any, jobs_payload: Any, logs_zip: bytes,
         recorded[component] = digest
     if recorded != digests:
         raise ValueError("prepared digest inputs do not match the successful Build job logs")
-    return build["id"]
+    return build["id"], f"{candidate_sha}-{expected_run_id}-{run_attempt}"
 
 
 def main() -> int:
@@ -99,11 +118,13 @@ def main() -> int:
     parser.add_argument("--logs", required=True, type=Path)
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--run-id", required=True, type=int)
+    parser.add_argument("--output", type=Path,
+                        help="GitHub Actions output file for the verified image version")
     parser.add_argument("--digests", required=True,
                         help="JSON object mapping component names to OCI digests")
     args = parser.parse_args()
     try:
-        build_job_id = verify_prepared_run(
+        build_job_id, image_version = verify_prepared_run(
             json.loads(args.run.read_text(encoding="utf-8")),
             json.loads(args.jobs.read_text(encoding="utf-8")),
             args.logs.read_bytes(), args.candidate_sha,
@@ -112,6 +133,11 @@ def main() -> int:
         )
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise SystemExit("PREPARED_RUN=FAIL reason=" + str(exc)) from None
+    output = f"image_version={image_version}\n"
+    if args.output:
+        args.output.write_text(output, encoding="utf-8")
+    else:
+        print(output, end="")
     print(f"PREPARED_RUN=PASS run_id={args.run_id} build_job_id={build_job_id} candidate_sha={args.candidate_sha}")
     return 0
 

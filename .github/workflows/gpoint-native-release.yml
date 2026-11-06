@@ -324,6 +324,7 @@ jobs:
       agata_digest: ${{ steps.agata.outputs.digest || steps.prepared.outputs.agata_digest }}
       miniapp_digest: ${{ steps.miniapp.outputs.digest || steps.prepared.outputs.miniapp_digest }}
       eros_digest: ${{ steps.eros.outputs.digest || steps.prepared.outputs.eros_digest }}
+      image_version: ${{ steps.image_version.outputs.image_version }}
       build_components: ${{ steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components }}
       baseline_mode: ${{ steps.build_scope.outputs.status || steps.rehearsal_scope.outputs.status }}
       baseline_sources: ${{ steps.build_scope.outputs.baseline_sources || steps.rehearsal_scope.outputs.baseline_sources }}
@@ -400,6 +401,7 @@ jobs:
             echo 'prepared image inputs require use_prepared_images=true' >&2; exit 1;
           }
       - name: Verify successful prepared run and its exact component digests
+        id: prepared_run
         if: needs.tests.outputs.mode == 'DEPLOY' && inputs.use_prepared_images == true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -416,7 +418,7 @@ jobs:
           run_json="$RUNNER_TEMP/prepared-run.json"
           jobs_json="$RUNNER_TEMP/prepared-jobs.json"
           commit_json="$RUNNER_TEMP/prepared-commit.json"
-          logs_zip="$RUNNER_TEMP/prepared-build-logs.zip"
+          logs="$RUNNER_TEMP/prepared-build-logs.txt"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREPARED_RUN_ID" > "$run_json"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREPARED_RUN_ID/jobs?per_page=100" > "$jobs_json"
           gh api "repos/$GITHUB_REPOSITORY/commits/$CANDIDATE_SHA" > "$commit_json"
@@ -433,10 +435,11 @@ jobs:
             --header "Authorization: Bearer $GH_TOKEN" \
             --header 'Accept: application/vnd.github+json' \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/jobs/$build_job_id/logs" \
-            --output "$logs_zip"
+            --output "$logs"
           python3 scripts/verify_native_prepared_run.py \
-            --run "$run_json" --jobs "$jobs_json" --commit "$commit_json" --logs "$logs_zip" \
+            --run "$run_json" --jobs "$jobs_json" --commit "$commit_json" --logs "$logs" \
             --candidate-sha "$CANDIDATE_SHA" --run-id "$PREPARED_RUN_ID" \
+            --output "$GITHUB_OUTPUT" \
             --digests "$(python3 - <<'PY'
           import json, os
           supplied = {'CORE': 'PREPARED_APP_DIGEST', 'AGATA': 'PREPARED_AGATA_DIGEST',
@@ -446,6 +449,28 @@ jobs:
                             if component in components and os.environ[name]}, sort_keys=True))
           PY
           )"
+      - name: Select exact immutable image version
+        id: image_version
+        if: needs.tests.outputs.mode == 'DEPLOY'
+        env:
+          USE_PREPARED_IMAGES: ${{ inputs.use_prepared_images }}
+          PREPARED_RUN_ID: ${{ inputs.prepared_run_id }}
+          PREPARED_IMAGE_VERSION: ${{ steps.prepared_run.outputs.image_version }}
+          CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+          CURRENT_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [[ "$USE_PREPARED_IMAGES" == true ]]; then
+            [[ "$PREPARED_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+            [[ "$PREPARED_IMAGE_VERSION" =~ ^${CANDIDATE_SHA}-${PREPARED_RUN_ID}-[1-9][0-9]*$ ]] || {
+              echo 'prepared image version does not match candidate SHA and prepared run ID' >&2; exit 1;
+            }
+            image_version="$PREPARED_IMAGE_VERSION"
+          else
+            image_version="${CANDIDATE_SHA}-${CURRENT_RUN_ID}-${CURRENT_RUN_ATTEMPT}"
+          fi
+          printf 'image_version=%s\n' "$image_version" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
         if: steps.build_scope.outputs.build_components != '[]' || steps.rehearsal_scope.outputs.build_components != '[]'
         with:
@@ -645,7 +670,7 @@ jobs:
       deployments: write
     env:
       CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
-      IMAGE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+      IMAGE_VERSION: ${{ needs.build.outputs.image_version }}
       GPOINT_COMMIT_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
       GPOINT_APP_SOURCE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
       GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}
