@@ -24,6 +24,8 @@ from urllib.parse import quote, unquote, urlsplit, urlunsplit
 CONTAINER = "shared_postgres_1"
 ENV_PATH = Path("/opt/gpoint/env/eros.env")
 BACKUP_DIR = Path("/opt/gpoint/backups/eros")
+AGE_IDENTITY = Path("/opt/gpoint/env/gpoint-backup.agekey")
+AGE_RECIPIENT = re.compile(r"age1[0-9a-z]{58}\Z")
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 IMAGE = re.compile(r"^ghcr\.io/akhripunov/gpoint-eros@sha256:[0-9a-f]{64}$")
 RUN_ID = re.compile(r"^[0-9]{1,20}-[0-9]{1,8}$")
@@ -31,11 +33,13 @@ DB_NAME = re.compile(r"^eros_[a-z0-9_]{1,48}$")
 
 
 def _run(argv: list[str], *, input: str | bytes | None = None, timeout: int = 180,
-         check: bool = True, stdout=None) -> subprocess.CompletedProcess:
+         check: bool = True, stdout=None, stdin=None) -> subprocess.CompletedProcess:
+    if input is not None and stdin is not None:
+        raise ValueError("cannot provide both input and stdin")
     try:
         result = subprocess.run(argv, input=input, text=not isinstance(input, bytes),
                                 stdout=subprocess.PIPE if stdout is None else stdout,
-                                stderr=subprocess.PIPE, timeout=timeout)
+                                stderr=subprocess.PIPE, stdin=stdin, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired):
         raise RuntimeError("Eros database lifecycle command failed") from None
     if check and result.returncode:
@@ -280,17 +284,108 @@ def _psql_identifier(name: str) -> str:
     return '"' + name + '"'
 
 
+def _tmpfs_file(prefix: str) -> Path:
+    _tmpfs_free_bytes()
+    fd, name = tempfile.mkstemp(prefix=prefix, dir="/run")
+    os.fchmod(fd, 0o600)
+    os.close(fd)
+    return Path(name)
+
+
+def _tmpfs_free_bytes() -> int:
+    if _run(["stat", "-f", "-c", "%T", "/run"], timeout=15).stdout.strip() != "tmpfs":
+        raise RuntimeError("private Eros backup staging requires a tmpfs /run")
+    return shutil.disk_usage("/run").free
+
+
+def _require_tmpfs_capacity(database_size_bytes: int) -> None:
+    # The live dump and its decrypted verification/restore copy can coexist in /run.
+    required = 2 * database_size_bytes + 256 * 1024 * 1024
+    if _tmpfs_free_bytes() < required:
+        raise RuntimeError("insufficient tmpfs storage for an Eros backup and isolated restore")
+
+
+def _age_recipient() -> str:
+    try:
+        info = AGE_IDENTITY.lstat()
+    except OSError:
+        raise RuntimeError("protected GPoint backup identity is unavailable") from None
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600:
+        raise RuntimeError("protected GPoint backup identity has unsafe ownership or mode")
+    recipient = _run(["age-keygen", "-y", str(AGE_IDENTITY)], timeout=30).stdout.strip()
+    if not AGE_RECIPIENT.fullmatch(recipient):
+        raise RuntimeError("protected GPoint backup recipient is invalid")
+    return recipient
+
+
+def _decrypt_backup_to_tmpfs(backup: Path) -> Path:
+    try:
+        info = backup.lstat()
+    except OSError:
+        raise RuntimeError("encrypted Eros recovery backup is unavailable") from None
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+            or stat.S_IMODE(info.st_mode) != 0o600):
+        raise RuntimeError("encrypted Eros recovery backup has unsafe ownership or mode")
+    with backup.open("rb") as stream:
+        if stream.readline() != b"age-encryption.org/v1\n":
+            raise RuntimeError("Eros recovery backup is not age-encrypted")
+    plaintext = _tmpfs_file(".eros-native-restore-")
+    try:
+        with plaintext.open("wb") as stream:
+            _run(["age", "-d", "-i", str(AGE_IDENTITY), str(backup)],
+                 timeout=1800, stdout=stream)
+        if plaintext.stat().st_size == 0:
+            raise RuntimeError("encrypted Eros recovery backup is empty after decryption")
+        return plaintext
+    except Exception:
+        try:
+            plaintext.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _encrypt_backup_to_staged_path(plaintext: Path, staged: Path) -> None:
+    recipient = _age_recipient()
+    try:
+        with plaintext.open("rb") as source:
+            _run(["age", "-r", recipient, "-o", str(staged)],
+                 timeout=1800, stdin=source)
+        if (not staged.is_file() or staged.is_symlink() or staged.stat().st_size == 0
+                or staged.stat().st_uid != os.geteuid()):
+            raise RuntimeError("encrypted Eros recovery backup is incomplete")
+        os.chmod(staged, 0o600)
+        with staged.open("rb") as stream:
+            if stream.readline() != b"age-encryption.org/v1\n":
+                raise RuntimeError("Eros recovery backup is not age-encrypted")
+    except Exception:
+        try:
+            staged.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def _restore_backup_into(backup: Path, restore_db: str) -> None:
     quoted = _psql_identifier(restore_db)
-    _docker_psql("postgres", f"CREATE DATABASE {quoted} OWNER eros_ddl")
+    plaintext = _decrypt_backup_to_tmpfs(backup)
+    created = False
     try:
+        _docker_psql("postgres", f"CREATE DATABASE {quoted} OWNER eros_ddl")
+        created = True
         _docker_psql("postgres", f"REVOKE CONNECT ON DATABASE {quoted} FROM PUBLIC; GRANT CONNECT ON DATABASE {quoted} TO eros_runtime, eros_migrator")
         _run_stream(["docker", "exec", "-i", CONTAINER, "sh", "-ec",
               'exec pg_restore --exit-on-error -U "$POSTGRES_USER" -d "$1"',
-              "eros-native-restore", restore_db], backup, timeout=1800)
+              "eros-native-restore", restore_db], plaintext, timeout=1800)
     except Exception:
-        _drop_database(restore_db)
+        if created:
+            _drop_database(restore_db)
         raise
+    finally:
+        try:
+            plaintext.unlink()
+        except OSError:
+            raise RuntimeError("temporary decrypted Eros backup could not be removed") from None
 
 
 def _prepare_backup_and_restore(run_id: str) -> tuple[Path, str]:
@@ -301,31 +396,47 @@ def _prepare_backup_and_restore(run_id: str) -> tuple[Path, str]:
         raise RuntimeError("Eros backup directory permissions are unsafe")
     if shutil.disk_usage(BACKUP_DIR).free < 2 * live_facts["sizeBytes"] + 256 * 1024 * 1024:
         raise RuntimeError("insufficient VPS storage for an Eros backup and isolated restore")
-    backup = BACKUP_DIR / f"native-{run_id}.dump"
-    if backup.exists() or backup.is_symlink():
+    _require_tmpfs_capacity(live_facts["sizeBytes"])
+    backup = BACKUP_DIR / f"native-{run_id}.dump.age"
+    staged = BACKUP_DIR / f".native-{run_id}.dump.age.pending"
+    if backup.exists() or backup.is_symlink() or staged.exists() or staged.is_symlink():
         raise RuntimeError("exact Eros backup path already exists")
-    with backup.open("xb") as stream:
-        os.chmod(backup, 0o600)
-        try:
+    plaintext = _tmpfs_file(".eros-native-backup-")
+    try:
+        with plaintext.open("wb") as stream:
             result = _run(["docker", "exec", CONTAINER, "sh", "-ec", 'exec pg_dump -U "$POSTGRES_USER" -d eros -Fc'],
                           timeout=1800, check=False, stdout=stream)
             if result.returncode:
                 raise RuntimeError("Eros database backup failed")
             stream.flush()
             os.fsync(stream.fileno())
+        if plaintext.stat().st_size == 0:
+            raise RuntimeError("Eros database backup is empty")
+        try:
+            _encrypt_backup_to_staged_path(plaintext, staged)
+            os.replace(staged, backup)
+            os.chmod(backup, 0o600)
+            backup_sha = _file_digest(backup)
+            restored_plaintext = _decrypt_backup_to_tmpfs(backup)
+            try:
+                _run_stream(["docker", "exec", "-i", CONTAINER, "pg_restore", "--list"],
+                            restored_plaintext, timeout=90)
+            finally:
+                restored_plaintext.unlink()
+            restore_db = "eros_check_" + run_id.replace("-", "_")
+            _restore_backup_into(backup, restore_db)
+            return backup, backup_sha
         except Exception:
             try:
-                backup.unlink()
+                staged.unlink()
             except OSError:
                 pass
             raise
-    if backup.stat().st_size == 0:
-        raise RuntimeError("Eros database backup is empty")
-    backup_sha = _file_digest(backup)
-    _run_stream(["docker", "exec", "-i", CONTAINER, "pg_restore", "--list"], backup, timeout=90)
-    restore_db = "eros_check_" + run_id.replace("-", "_")
-    _restore_backup_into(backup, restore_db)
-    return backup, backup_sha
+    finally:
+        try:
+            plaintext.unlink()
+        except OSError:
+            raise RuntimeError("temporary plaintext Eros backup could not be removed") from None
 
 
 def _drop_database(database: str) -> None:

@@ -44,7 +44,7 @@ def test_postgres_rehearsal_checks_global_policy_legacy_state_and_archive_non_tr
 
     assert "GPOINT_AGATA_SOURCE_STATE_UNCHANGED=PASS" in rehearsal
     assert "GPOINT_GLOBAL_POLICY=PASS version=1 terms=gpoint-terms-v1 privacy=gpoint-privacy-v1" in rehearsal
-    assert "GPOINT_LATEST_CONSENT_AND_AGE_WINS=PASS consent_rows=4 active_chat_rows=1 active_memory_rows=0 age=latest-created-state-wins" in rehearsal
+    assert "GPOINT_LATEST_CONSENT_AND_AGE_WINS=PASS consent_rows=4 active_chat_rows=1 active_memory_rows=0 age=latest-event-state-wins" in rehearsal
     assert "GPOINT_NEW_DISCLOSURE_REQUIRED=PASS legacy_receipt_stays_in_agata=true" in rehearsal
     assert "GPOINT_AGATA_HISTORY_AND_MEMORY_NOT_COPIED=PASS" in rehearsal
 
@@ -78,4 +78,8 @@ def test_consent_migration_keeps_only_the_latest_legacy_active_row_current():
         sql,
     )
     assert re.search(r'when revoked_at is null and latest_event_rank > 1 then latest_event_at', sql)
-    assert re.search(r'order by u\.id,a\.created_at desc,coalesce\(a\.verified_at,a\.asserted_at\) desc nulls last,a\.version desc,a\.id desc', sql)
+    assert re.search(
+        r'order by u\.id,\s*case when a\.status=\'expired\' then coalesce\(a\.expires_at,a\.created_at\)\s*'
+        r'else coalesce\(a\.verified_at,a\.asserted_at,a\.created_at\) end desc,\s*'
+        r'a\.created_at desc,a\.version desc,a\.id desc', sql,
+    )

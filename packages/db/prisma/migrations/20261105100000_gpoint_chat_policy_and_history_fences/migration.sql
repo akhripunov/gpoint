@@ -197,7 +197,10 @@ BEGIN
     FROM agata.age_assurances a
     JOIN agata.users au ON au.tenant_id=a.tenant_id AND au.id=a.user_id AND au.source_system='gpoint'
     JOIN "User" u ON u.id=au.external_id
-    ORDER BY u.id,a.created_at DESC,coalesce(a.verified_at,a.asserted_at) DESC NULLS LAST,a.version DESC,a.id DESC
+    ORDER BY u.id,
+      CASE WHEN a.status='expired' THEN coalesce(a.expires_at,a.created_at)
+        ELSE coalesce(a.verified_at,a.asserted_at,a.created_at) END DESC,
+      a.created_at DESC,a.version DESC,a.id DESC
     ON CONFLICT ("sourceAgataId") DO NOTHING;
 
     IF EXISTS (SELECT 1 FROM agata.users au WHERE au.source_system='gpoint'

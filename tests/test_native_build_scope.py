@@ -309,7 +309,7 @@ def test_runtime_unknown_or_migration_push_path_does_not_use_verify_only(tmp_pat
     )
 
     assert plan["status"] == "BOOTSTRAP_FULL"
-    assert plan["build_components"] == ["CORE", "AGATA", "MINIAPP"]
+    assert plan["build_components"] == ["CORE", "AGATA", "MINIAPP", "EROS"]
 
 
 def test_tooling_only_candidate_without_exact_push_before_does_not_use_verify_only(tmp_path):
@@ -325,7 +325,7 @@ def test_tooling_only_candidate_without_exact_push_before_does_not_use_verify_on
     )
 
     assert plan["status"] == "BOOTSTRAP_FULL"
-    assert plan["build_components"] == ["CORE", "AGATA", "MINIAPP"]
+    assert plan["build_components"] == ["CORE", "AGATA", "MINIAPP", "EROS"]
 
 
 def test_rollback_baseline_requires_all_sources_equal_the_exact_target_sha():
@@ -455,5 +455,5 @@ def test_missing_deployment_history_is_fail_closed_for_component_scope(tmp_path)
     )
 
     assert plan == {"status": "BOOTSTRAP_FULL", "deploy_scope": "UNRESOLVED",
-                    "build_components": ["CORE", "AGATA", "MINIAPP"],
+                    "build_components": ["CORE", "AGATA", "MINIAPP", "EROS"],
                     "reason": "production_component_baseline_unavailable"}

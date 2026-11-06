@@ -65,8 +65,8 @@ INSERT INTO agata.consents VALUES
  ('50000000-0000-4000-8000-000000000035','30000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000001','long_term_memory',now()-interval '30 minutes',NULL,'1');
 INSERT INTO agata.age_assurances
   (id,tenant_id,user_id,age_band,status,method,jurisdiction,verified_at,asserted_at,expires_at,version,created_at) VALUES
- ('60000000-0000-4000-8000-000000000006','30000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000001','adult','verified','document','GLOBAL',now(),NULL,NULL,1,now()),
- ('60000000-0000-4000-8000-000000000016','30000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000001','adult','expired','document','US',now()-interval '400 days',NULL,now()-interval '1 day',5,now()-interval '400 days'),
+ ('60000000-0000-4000-8000-000000000006','30000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000001','adult','verified','document','GLOBAL',now(),NULL,NULL,1,now()-interval '2 days'),
+ ('60000000-0000-4000-8000-000000000016','30000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000001','adult','expired','document','US',now()-interval '400 days',NULL,now()-interval '1 day',5,now()),
  ('60000000-0000-4000-8000-000000000026','30000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000011','adult','verified','document','GLOBAL',now()-interval '10 days',NULL,NULL,9,now()-interval '10 days'),
  ('60000000-0000-4000-8000-000000000036','30000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000011','adult','expired','document','US',now()-interval '10 days',NULL,now()-interval '1 day',2,now());
 INSERT INTO agata.ai_disclosure_receipts VALUES
@@ -174,7 +174,7 @@ def main() -> int:
             raise RuntimeError(f"AGATA conversation, message, or memory archive was copied: {archive_counts!r}")
         print("GPOINT_AGATA_SOURCE_STATE_UNCHANGED=PASS")
         print("GPOINT_GLOBAL_POLICY=PASS version=1 terms=gpoint-terms-v1 privacy=gpoint-privacy-v1")
-        print("GPOINT_LATEST_CONSENT_AND_AGE_WINS=PASS consent_rows=4 active_chat_rows=1 active_memory_rows=0 age=latest-created-state-wins")
+        print("GPOINT_LATEST_CONSENT_AND_AGE_WINS=PASS consent_rows=4 active_chat_rows=1 active_memory_rows=0 age=latest-event-state-wins")
         print("GPOINT_NEW_DISCLOSURE_REQUIRED=PASS legacy_receipt_stays_in_agata=true")
         print("GPOINT_AGATA_HISTORY_AND_MEMORY_NOT_COPIED=PASS")
         print("GPOINT_CHAT_SCHEMA_ADDITIVE_RERUN=PASS")

@@ -58,6 +58,12 @@ def test_sqlx_helper_checks_acl_ledger_backup_restore_and_never_downgrades_live_
     assert "runtimeForeign" in source and "migratorForeign" in source and "otherConnect" in source
     assert "GRANT CONNECT ON DATABASE {quoted} TO eros_runtime, eros_migrator" in source
     assert "pg_dump" in source and "pg_restore" in source
+    assert '"age", "-r", recipient, "-o", str(staged)' in source
+    assert '"age", "-d", "-i", str(AGE_IDENTITY)' in source
+    assert 'b"age-encryption.org/v1\\n"' in source
+    assert '"stat", "-f", "-c", "%T", "/run"' in source
+    assert 'f"native-{run_id}.dump.age"' in source
+    assert 'f".native-{run_id}.dump.age.pending"' in source
     assert "--exit-on-error" in source and "_migration_delta" in source
     assert 'EROS_SCHEMA_APPLY=SKIP reason=no_pending_migrations' in source
     assert 'EROS_SCHEMA_APPLY=PASS MIGRATIONS=' in source

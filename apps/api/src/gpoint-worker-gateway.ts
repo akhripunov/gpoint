@@ -4,7 +4,7 @@ import {
   checkErosForGpointWorker, claimErosForGpointWorker, completeErosForGpointWorker,
   erosQueueStatusForGpointWorker, failErosForGpointWorker,
 } from './eros-worker-gateway.js';
-import { exactErosPilotPair } from './eros-adapter.js';
+import { exactErosPilotPair, isGpointOwnedErosMode } from './eros-adapter.js';
 
 function authenticate(headers: Record<string, string | string[] | undefined>, env: NodeJS.ProcessEnv = process.env) {
   const configured = env.GPOINT_EROS_WORKER_TOKEN;
@@ -17,9 +17,10 @@ function authenticate(headers: Record<string, string | string[] | undefined>, en
 
 function pilotReady() {
   const pair = exactErosPilotPair();
+  const gpointOwned = isGpointOwnedErosMode();
   const policyTenant = process.env.GPOINT_CHAT_POLICY_TENANT_ID ?? '';
   const workerTenant = process.env.EROS_WORKER_TENANT_ID ?? '';
-  if (!pair || !process.env.GPOINT_EROS_WORKER_TOKEN ||
+  if ((!pair && !gpointOwned) || !process.env.GPOINT_EROS_WORKER_TOKEN ||
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(policyTenant) ||
       workerTenant !== policyTenant) {
     throw new HttpException({ code: 'EROS_PILOT_RUNTIME_UNAVAILABLE' }, 503);

@@ -2,8 +2,10 @@ import importlib.util
 import json
 from pathlib import Path
 import hashlib
+import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("eros_native_database", ROOT / "scripts/eros-native-database.py")
@@ -37,6 +39,55 @@ def facts(database="eros"):
 
 
 class ErosNativeDatabaseTests(unittest.TestCase):
+    def test_backup_restore_fails_closed_when_tmpfs_cannot_hold_two_plaintext_copies(self):
+        required = 2 * 1024 + 256 * 1024 * 1024
+        with patch.object(DB, "_tmpfs_free_bytes", return_value=required - 1):
+            with self.assertRaisesRegex(RuntimeError, "insufficient tmpfs storage"):
+                DB._require_tmpfs_capacity(1024)
+
+    def test_backup_restore_accepts_tmpfs_headroom_for_two_plaintext_copies(self):
+        required = 2 * 1024 + 256 * 1024 * 1024
+        with patch.object(DB, "_tmpfs_free_bytes", return_value=required):
+            DB._require_tmpfs_capacity(1024)
+
+    def test_recovery_backup_is_age_encrypted_without_putting_plaintext_in_argv(self):
+        plaintext_bytes = b"synthetic postgres dump content"
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "plain.dump"
+            staged = Path(directory) / "recovery.dump.age"
+            source.write_bytes(plaintext_bytes)
+
+            def encrypt(argv, **kwargs):
+                self.assertEqual(argv[:3], ["age", "-r", "age1" + "a" * 58])
+                self.assertEqual(Path(argv[-1]), staged)
+                self.assertEqual(kwargs["stdin"].read(), plaintext_bytes)
+                staged.write_bytes(b"age-encryption.org/v1\nsynthetic-ciphertext")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch.object(DB, "_age_recipient", return_value="age1" + "a" * 58), \
+                 patch.object(DB, "_run", side_effect=encrypt) as run:
+                DB._encrypt_backup_to_staged_path(source, staged)
+            self.assertEqual(run.call_count, 1)
+            self.assertNotIn(plaintext_bytes.decode(), " ".join(run.call_args.args[0]))
+            self.assertNotIn(plaintext_bytes, staged.read_bytes())
+            self.assertEqual(staged.stat().st_mode & 0o777, 0o600)
+
+    def test_recovery_backup_rejects_non_age_output_and_removes_partial_stage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "plain.dump"
+            staged = Path(directory) / "recovery.dump.age"
+            source.write_bytes(b"synthetic postgres dump")
+
+            def corrupt_encrypt(_argv, **_kwargs):
+                staged.write_bytes(b"plaintext or corrupt bytes")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch.object(DB, "_age_recipient", return_value="age1" + "a" * 58), \
+                 patch.object(DB, "_run", side_effect=corrupt_encrypt):
+                with self.assertRaisesRegex(RuntimeError, "not age-encrypted"):
+                    DB._encrypt_backup_to_staged_path(source, staged)
+            self.assertFalse(staged.exists())
+
     def test_database_inventory_quotes_database_names_as_sql_string_literals(self):
         database = "eros_check_123_1"
         with patch.object(DB, "_docker_psql", return_value=json.dumps(facts(database))) as psql:
@@ -130,19 +181,30 @@ class ErosNativeDatabaseTests(unittest.TestCase):
                 DB._postgres_identity()
 
     def test_isolated_backup_restore_grants_only_runtime_roles_and_cleans_partial_restore(self):
-        backup = Path("/protected/eros.dump")
+        backup = Path("/protected/eros.dump.age")
         calls = []
-        with patch.object(DB, "_docker_psql", side_effect=lambda database, sql: calls.append((database, sql))), \
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(DB, "_decrypt_backup_to_tmpfs", return_value=Path(directory) / "decrypted.dump") as decrypt, \
+             patch.object(DB, "_docker_psql", side_effect=lambda database, sql: calls.append((database, sql))), \
              patch.object(DB, "_run_stream") as restore:
+            decrypted = decrypt.return_value
+            decrypted.write_bytes(b"synthetic decrypted dump")
             DB._restore_backup_into(backup, "eros_check_123_1")
+            self.assertEqual(restore.call_args.args[1], decrypted)
+            self.assertFalse(decrypted.exists(), "decrypted temporary restore file must be removed")
         self.assertIn("CREATE DATABASE", calls[0][1])
         self.assertIn("REVOKE CONNECT ON DATABASE", calls[1][1])
         self.assertIn("TO eros_runtime, eros_migrator", calls[1][1])
         self.assertIn("pg_restore --exit-on-error", restore.call_args.args[0][-3])
-        with patch.object(DB, "_docker_psql", side_effect=[None, RuntimeError("ACL grant failed")]), \
-             patch.object(DB, "_run_stream") as restore, patch.object(DB, "_drop_database") as drop:
-            with self.assertRaisesRegex(RuntimeError, "ACL grant failed"):
-                DB._restore_backup_into(backup, "eros_check_123_1")
+        with tempfile.TemporaryDirectory() as directory:
+            decrypted = Path(directory) / "decrypted.dump"
+            decrypted.write_bytes(b"synthetic decrypted dump")
+            with patch.object(DB, "_decrypt_backup_to_tmpfs", return_value=decrypted), \
+                 patch.object(DB, "_docker_psql", side_effect=[None, RuntimeError("ACL grant failed")]), \
+                 patch.object(DB, "_run_stream") as restore, patch.object(DB, "_drop_database") as drop:
+                with self.assertRaisesRegex(RuntimeError, "ACL grant failed"):
+                    DB._restore_backup_into(backup, "eros_check_123_1")
+            self.assertFalse(decrypted.exists())
         restore.assert_not_called()
         drop.assert_called_once_with("eros_check_123_1")
 
@@ -152,7 +214,7 @@ class ErosNativeDatabaseTests(unittest.TestCase):
                 "runId": "123-1", "databaseIdentity": "a" * 48,
                 "postgresIdentity": {"containerId": "d" * 64, "imageId": "sha256:" + "e" * 64,
                                      "mountsSha256": "f" * 64}, "clusterSystemIdentifier": "742001",
-                "backupPath": "/opt/gpoint/backups/eros/native-123-1.dump",
+                "backupPath": "/opt/gpoint/backups/eros/native-123-1.dump.age",
                 "backupSha256": hashlib.sha256(b"exact backup").hexdigest(),
                 "baselineLedger": ledger(), "baselineLedgerSha256": DB._ledger_digest(ledger()),
                 "targetLedger": ledger(), "targetLedgerSha256": DB._ledger_digest(ledger()),
@@ -179,7 +241,7 @@ class ErosNativeDatabaseTests(unittest.TestCase):
                  "imageId": "sha256:" + "e" * 64, "mountsSha256": "f" * 64}), \
              patch.object(DB, "_database_facts", side_effect=[facts(), facts("eros_check_123_1"), facts("eros_check_123_1")]), \
              patch.object(DB, "_ledger", side_effect=[before, before, after]), \
-             patch.object(DB, "_prepare_backup_and_restore", return_value=(Path("/opt/gpoint/backups/eros/native-123-1.dump"), "c" * 64)), \
+             patch.object(DB, "_prepare_backup_and_restore", return_value=(Path("/opt/gpoint/backups/eros/native-123-1.dump.age"), "c" * 64)), \
              patch.object(DB, "_run_migrator") as migrate, \
              patch.object(DB, "_safe_write_plan", side_effect=lambda path, plan: written.append(plan)), \
              patch.object(DB, "_drop_database") as drop:
@@ -205,7 +267,7 @@ class ErosNativeDatabaseTests(unittest.TestCase):
              patch.object(DB, "_database_facts", side_effect=[facts(), facts("eros_check_123_1"),
                  RuntimeError("dedicated Eros database identity or ACL gate failed")]), \
              patch.object(DB, "_ledger", side_effect=[ledger(), ledger(), ledger()]), \
-             patch.object(DB, "_prepare_backup_and_restore", return_value=(Path("/opt/gpoint/backups/eros/native-123-1.dump"), "c" * 64)), \
+             patch.object(DB, "_prepare_backup_and_restore", return_value=(Path("/opt/gpoint/backups/eros/native-123-1.dump.age"), "c" * 64)), \
              patch.object(DB, "_run_migrator"), \
              patch.object(DB, "_safe_write_plan", side_effect=lambda path, plan: written.append(plan)), \
              patch.object(DB, "_drop_database") as drop:
@@ -223,7 +285,7 @@ class ErosNativeDatabaseTests(unittest.TestCase):
                 "runId": "123-1", "databaseIdentity": "a" * 48,
                 "postgresIdentity": {"containerId": "d" * 64, "imageId": "sha256:" + "e" * 64,
                                      "mountsSha256": "f" * 64}, "clusterSystemIdentifier": "742001",
-                "backupPath": "/opt/gpoint/backups/eros/native-123-1.dump",
+                "backupPath": "/opt/gpoint/backups/eros/native-123-1.dump.age",
                 "backupSha256": hashlib.sha256(b"exact backup").hexdigest(),
                 "baselineLedger": old, "baselineLedgerSha256": DB._ledger_digest(old),
                 "targetLedger": target, "targetLedgerSha256": DB._ledger_digest(target),
@@ -247,7 +309,7 @@ class ErosNativeDatabaseTests(unittest.TestCase):
                 "runId": "123-1", "databaseIdentity": "a" * 48,
                 "postgresIdentity": {"containerId": "d" * 64, "imageId": "sha256:" + "e" * 64,
                                      "mountsSha256": "f" * 64}, "clusterSystemIdentifier": "742001",
-                "backupPath": "/opt/gpoint/backups/eros/native-123-1.dump",
+                "backupPath": "/opt/gpoint/backups/eros/native-123-1.dump.age",
                 "backupSha256": "c" * 64, "baselineLedger": old,
                 "baselineLedgerSha256": DB._ledger_digest(old), "targetLedger": old,
                 "targetLedgerSha256": DB._ledger_digest(old), "pendingMigrations": [],
@@ -294,7 +356,7 @@ class ErosNativeDatabaseTests(unittest.TestCase):
                 "runId": "123-1", "databaseIdentity": "a" * 48,
                 "postgresIdentity": {"containerId": "d" * 64, "imageId": "sha256:" + "e" * 64,
                                      "mountsSha256": "f" * 64}, "clusterSystemIdentifier": "742001",
-                "backupPath": "/opt/gpoint/backups/eros/native-123-1.dump",
+                "backupPath": "/opt/gpoint/backups/eros/native-123-1.dump.age",
                 "backupSha256": "c" * 64, "baselineLedger": old,
                 "targetLedger": old, "pendingMigrations": [], "rollbackCheck": True}
         with patch.object(DB, "_read_env", return_value={"EROS_DATABASE_IDENTITY": "a" * 48}), \
