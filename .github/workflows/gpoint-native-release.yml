@@ -188,6 +188,9 @@ jobs:
           test "$(docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
           test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$EROS_UPSTREAM_SHA"
           bash services/eros-engine/run-local-e2e.sh "$image"
+          test_container="$(docker create "$image")"
+          trap 'docker rm -f "$test_container" >/dev/null 2>&1 || true' EXIT
+          python3 scripts/verify-eros-runtime-labels.py "$test_container" "$EROS_UPSTREAM_SHA" none
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
         if: matrix.suite == 'workspace'
         with:
@@ -1357,22 +1360,6 @@ jobs:
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$@" \
               < "$GITHUB_WORKSPACE/scripts/verify-kamal-role.sh"
           }
-          if [[ "$DEPLOY_CORE" == true ]]; then
-            core_api_config=config/deploy.yml
-            if [[ "$EROS_INSTALLED" == true || "$DEPLOY_EROS" == true ]]; then
-              core_api_config=config/deploy.eros-api.yml
-            fi
-            GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
-              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file "$core_api_config"
-            GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker kamal app stop --roles worker --config-file config/deploy.yml
-            GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker \
-              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker --config-file config/deploy.yml
-            verify_single_running_role gpoint-core-worker "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
-            GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot kamal app stop --roles bot --config-file config/deploy.yml
-            GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot \
-              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles bot --config-file config/deploy.yml
-            verify_single_running_role gpoint-core-bot "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
-          fi
           if [[ "$DEPLOY_AGATA" == true ]]; then
             GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api \
               kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.agata.yml
@@ -1394,6 +1381,22 @@ jobs:
               kamal deploy --skip-push --version "$IMAGE_VERSION" --roles relay --config-file config/deploy.eros-relay.yml
             verify_single_running_role gpoint-eros-pilot-engine "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
             verify_single_running_role gpoint-eros-relay-relay "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
+          fi
+          if [[ "$DEPLOY_CORE" == true ]]; then
+            core_api_config=config/deploy.yml
+            if [[ "$EROS_INSTALLED" == true || "$DEPLOY_EROS" == true ]]; then
+              core_api_config=config/deploy.eros-api.yml
+            fi
+            GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
+              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file "$core_api_config"
+            GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker kamal app stop --roles worker --config-file config/deploy.yml
+            GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker \
+              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker --config-file config/deploy.yml
+            verify_single_running_role gpoint-core-worker "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
+            GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot kamal app stop --roles bot --config-file config/deploy.yml
+            GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot \
+              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles bot --config-file config/deploy.yml
+            verify_single_running_role gpoint-core-bot "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
           fi
       - name: Verify public routes and exact running services
         id: verify
@@ -1441,6 +1444,12 @@ jobs:
           writer_sha="$(sha256sum scripts/write-kamal-production-manifest.py | awk '{print $1}')"
           remote_writer_sha="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" sha256sum "$writer_remote" | awk '{print $1}')"
           test "$writer_sha" = "$remote_writer_sha"
+          eros_label_remote="/run/gpoint-eros-runtime-labels-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.py"
+          [[ "$eros_label_remote" == "/run/gpoint-eros-runtime-labels-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.py" ]]
+          scp -p scripts/verify-eros-runtime-labels.py "root@${GPOINT_PRODUCTION_HOST}:$eros_label_remote"
+          local_label_sha="$(sha256sum scripts/verify-eros-runtime-labels.py | awk '{print $1}')"
+          remote_label_sha="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" sha256sum "$eros_label_remote" | awk '{print $1}')"
+          test "$local_label_sha" = "$remote_label_sha"
           test -n "$EXPECTED_PRISMA_HEAD" && test -n "$EXPECTED_PRISMA_MIGRATIONS" && test -n "$EXPECTED_PRISMA_CHECKSUMS" && test -n "$EXPECTED_AGATA_HEAD"
           test -n "$BASELINE_PRISMA_HEAD" && test -n "$BASELINE_PRISMA_MIGRATIONS" && test -n "$BASELINE_PRISMA_CHECKSUMS"
           facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$EXPECTED_PRISMA_MIGRATIONS" "$EXPECTED_PRISMA_CHECKSUMS" "$EXPECTED_PRISMA_HEAD" "$EXPECTED_AGATA_HEAD" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" "$BASELINE_PRISMA_MIGRATIONS" "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "${PENDING_PRISMA_MIGRATIONS:--}" "${PENDING_PRISMA_CHECKSUMS:--}" "$BASELINE_AGATA_HEAD" "$EXPECTED_ROLE_IDENTITIES_B64" "$EROS_DIGEST" <<'REMOTE'
@@ -1456,6 +1465,8 @@ jobs:
           [[ "$pending_prisma_checksums" != "-" ]] || pending_prisma_checksums=""
           [[ "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
           [[ "$writer" == "/run/gpoint-ordinary-manifest-${run_id}-${attempt}.py" ]]
+          eros_label_remote="/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py"
+          trap 'rm -f -- "$eros_label_remote"' EXIT
           test -s "$writer"
           test "$(docker inspect --format '{{.Id}}' shared_postgres_1)" = "$db_id"
           test "$(docker inspect --format '{{.Id}}' shared_redis_1)" = "$redis_id"
@@ -1551,8 +1562,8 @@ jobs:
             relay_version="$(sed -n 's/^gpoint-eros-relay-relay|\([^|]*\).*/\1/p' <<< "$runtime_rows")"
             docker exec "gpoint-eros-pilot-engine-$eros_version" curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null
             docker exec "gpoint-eros-relay-relay-$relay_version" node -e "fetch('http://172.31.254.1:11434/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
-            test "$(docker inspect --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}' "gpoint-eros-pilot-engine-$eros_version")" = d1a140083321687212fb7b17c09cc0c3c9639f5e
-            test "$(docker inspect --format '{{index .Config.Labels \"com.gpoint.eros.patch-set.sha256\"}}' "gpoint-eros-pilot-engine-$eros_version")" = none
+            python3 "/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py" "gpoint-eros-pilot-engine-$eros_version" d1a140083321687212fb7b17c09cc0c3c9639f5e none
+            rm -f -- "/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py"
             echo "GPOINT_EROS_HEALTH=PASS UPSTREAM_SHA=d1a140083321687212fb7b17c09cc0c3c9639f5e DIGEST=$EROS_DIGEST"
           fi
           docker exec "gpoint-core-api-$core_version" node -e 'const fs=require("node:fs");const crypto=require("node:crypto");const p="/data/media/.gpoint-runtime-verify-"+crypto.randomUUID();let created=false;try{fs.writeFileSync(p,"gpoint-media-read-write-pass",{flag:"wx"});created=true;if(fs.readFileSync(p,"utf8")!=="gpoint-media-read-write-pass")process.exit(1)}finally{if(created)fs.unlinkSync(p)}'

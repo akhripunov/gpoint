@@ -1,4 +1,8 @@
 from pathlib import Path
+import os
+import subprocess
+import sys
+import tempfile
 
 import yaml
 
@@ -31,6 +35,66 @@ def test_eros_digest_is_available_to_kamal_apply_and_runtime_verify():
     verify = next(step for step in deploy if step.get("id") == "verify")
     assert kamal["env"]["EROS_DIGEST"] == "${{ steps.component_plan.outputs.eros_digest }}"
     assert verify["env"]["EROS_DIGEST"] == "${{ steps.component_plan.outputs.eros_digest }}"
+
+
+def test_first_eros_engine_and_relay_start_before_core_api_selects_eros_route():
+    deploy = steps_for("deploy")
+    kamal = next(step for step in deploy if step.get("name") == "Deploy exact immutable images with stock Kamal")
+    body = kamal["run"]
+    eros = body.index('if [[ "$DEPLOY_EROS" == true ]]; then')
+    core = body.index('if [[ "$DEPLOY_CORE" == true ]]; then')
+    assert eros < core
+    assert body.index("verify_single_running_role gpoint-eros-pilot-engine", eros) < core
+    assert body.index("verify_single_running_role gpoint-eros-relay-relay", eros) < core
+    assert "core_api_config=config/deploy.eros-api.yml" in body
+
+
+def test_runtime_verify_uses_executable_eros_label_helper_and_ci_exercises_docker_templates():
+    deploy = steps_for("deploy")
+    verify = next(step for step in deploy if step.get("id") == "verify")
+    test_steps = steps_for("tests")
+    e2e = next(step for step in test_steps
+               if step.get("name") == "Build stock Eros and run isolated SQLx and synthetic conversation E2E")
+    helper = (ROOT / "scripts/verify-eros-runtime-labels.py").read_text()
+    assert "verify-eros-runtime-labels.py" in verify["run"]
+    assert "verify-eros-runtime-labels.py" in e2e["run"]
+    assert '"org.opencontainers.image.revision"' in helper
+    assert '"com.gpoint.eros.patch-set.sha256"' in helper
+    assert all(value in helper for value in ("subprocess.run", '"docker",', '"inspect",', '"--format",'))
+    assert '\\"org.opencontainers.image.revision\\"' not in verify["run"]
+    assert '\\"com.gpoint.eros.patch-set.sha256\\"' not in verify["run"]
+
+
+def test_eros_runtime_label_helper_passes_valid_docker_templates_and_fails_closed():
+    helper = ROOT / "scripts/verify-eros-runtime-labels.py"
+    upstream = "d1a140083321687212fb7b17c09cc0c3c9639f5e"
+    with tempfile.TemporaryDirectory() as temporary:
+        fake_docker = Path(temporary) / "docker"
+        fake_docker.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "assert sys.argv[1:3] == ['inspect', '--format']\n"
+            "labels = {\n"
+            "  '{{index .Config.Labels \\\"org.opencontainers.image.revision\\\"}}': '" + upstream + "',\n"
+            "  '{{index .Config.Labels \\\"com.gpoint.eros.upstream-revision\\\"}}': '" + upstream + "',\n"
+            "  '{{index .Config.Labels \\\"com.gpoint.eros.patch-set.sha256\\\"}}': 'none',\n"
+            "}\n"
+            "print(labels.get(sys.argv[3], ''))\n"
+        )
+        fake_docker.chmod(0o755)
+        environment = dict(os.environ, PATH=temporary + os.pathsep + os.environ.get("PATH", ""))
+        passed = subprocess.run(
+            [sys.executable, str(helper), "container-id", upstream, "none"],
+            env=environment, capture_output=True, text=True,
+        )
+        assert passed.returncode == 0, passed.stderr
+        assert passed.stdout.strip() == "EROS_RUNTIME_LABELS=PASS"
+        rejected = subprocess.run(
+            [sys.executable, str(helper), "container-id", "0" * 40, "none"],
+            env=environment, capture_output=True, text=True,
+        )
+        assert rejected.returncode == 1
+        assert "identity mismatch" in rejected.stderr
 
 
 def test_eros_relay_health_checks_use_its_configured_host_bind_address():
