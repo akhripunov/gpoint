@@ -10,6 +10,9 @@ CONFIGS = [
     "config/deploy.yml",
     "config/deploy.agata.yml",
     "config/deploy.miniapp.yml",
+    "config/deploy.eros.yml",
+    "config/deploy.eros-relay.yml",
+    "config/deploy.eros-api.yml",
 ]
 REGISTRY_PASSWORD = "config-validation-placeholder"
 KAMAL_IMAGE = "ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625"
@@ -19,7 +22,7 @@ def test_kamal_config_checker_pulls_pinned_image_and_passes_exact_cli_arguments(
     result, calls = run_config_check(tmp_path)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert [call["command"] for call in calls] == ["pull", "image inspect"] + ["run"] * 6
+    assert [call["command"] for call in calls] == ["pull", "image inspect"] + ["run"] * (len(CONFIGS) * 2)
     assert calls[0]["args"] == ["pull", "--platform", "linux/amd64", KAMAL_IMAGE]
     assert calls[1]["args"] == [
         "image", "inspect", "--format",
@@ -125,7 +128,7 @@ def test_kamal_config_checker_runs_all_services_with_synthetic_credentials(tmp_p
     calls = [call for call in calls if call["command"] == "run"]
     assert [call["config"] for call in calls] == [config for config in CONFIGS for _ in range(2)]
     assert all('secrets' in calls[index]['args'] and 'print' in calls[index]['args']
-               for index in (1, 3, 5))
+               for index in range(1, len(calls), 2))
     assert all(call["env"]["KAMAL_REGISTRY_PASSWORD"] == REGISTRY_PASSWORD for call in calls)
     assert all(call["env"]["GPOINT_PRODUCTION_HOST"] == "192.0.2.10" for call in calls)
     assert all(call["env"]["GPOINT_SSH_KEY"] == "/tmp/gpoint-kamal-config-test-key" for call in calls)

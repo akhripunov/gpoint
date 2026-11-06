@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { SignJWT } from 'jose';
+import { GPOINT_EROS_RESPONSE_PROMPT_TRAITS } from './eros-response-prompt.js';
 import { signBridgeIdentity } from './eros-worker-contract.js';
 
 const USER_NAMESPACE = 'b92c2772-7534-5a7c-8eed-ec08e0a9c45b';
@@ -486,7 +487,13 @@ export class ErosEngineClient {
       requestId: clientMessageId,
     }, this.workerSecret);
     const response = await this.request(`/comp/chat/${encodeURIComponent(sessionId)}/message/stream`, userId,
-      { content, client_msg_id: clientMessageId, memory_scope: 'neutral_and_relationship', audit: { user: bridgeIdentity } }, 'text/event-stream');
+      {
+        content,
+        client_msg_id: clientMessageId,
+        memory_scope: 'neutral_and_relationship',
+        prompt_traits: GPOINT_EROS_RESPONSE_PROMPT_TRAITS,
+        audit: { user: bridgeIdentity },
+      }, 'text/event-stream');
     if (!response.body) throw new ErosAdapterError('eros_response_invalid');
 
     const reader = response.body.getReader();
