@@ -10,8 +10,8 @@ def test_layer7_staging_is_owner_dispatched_on_trusted_runner_with_read_only_pac
     job = workflow["jobs"]["layer7_staging"]
     actionlint = yaml.safe_load((ROOT / ".github/actionlint.yaml").read_text())
 
-    assert job["runs-on"] == ["self-hosted", "gpoint-owner-mac"]
-    assert actionlint["self-hosted-runner"]["labels"] == ["gpoint-owner-mac"]
+    assert job["runs-on"] == ["self-hosted", "macOS"]
+    assert actionlint["self-hosted-runner"]["labels"] == ["macOS"]
     assert job["environment"]["name"] == "layer7-staging"
     assert job["permissions"] == {
         "contents": "read",

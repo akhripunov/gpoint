@@ -1767,7 +1767,7 @@ jobs:
       needs.tests.result == 'success' && needs.tests.outputs.mode == 'LAYER7_STAGING' &&
       inputs.deploy_layer7_staging == true && inputs.approve_layer7_staging == true &&
       inputs.use_prepared_images == true && inputs.staging_image_sha != ''
-    runs-on: [self-hosted, gpoint-owner-mac]
+    runs-on: [self-hosted, macOS]
     environment:
       name: layer7-staging
     concurrency:

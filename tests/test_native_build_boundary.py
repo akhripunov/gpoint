@@ -447,7 +447,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         text = WORKFLOW.read_text()
         self.assertNotIn("[self-hosted, macOS, gpoint-production]", text)
         self.assertEqual(self.workflow["jobs"]["layer7_staging"]["runs-on"],
-                         ["self-hosted", "gpoint-owner-mac"])
+                         ["self-hosted", "macOS"])
         self.assertNotIn("release:gpoint", text)
 
     def test_native_kamal_uses_attempt_scoped_image_version_and_hook_context(self):
