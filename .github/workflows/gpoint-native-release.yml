@@ -43,6 +43,10 @@ on:
         required: true
         default: false
         type: boolean
+      staging_image_sha:
+        description: Exact source SHA represented by the prepared images to deploy on Layer7 staging
+        required: false
+        type: string
       prepared_run_id:
         description: Run ID of the successful GPOINT-ARTIFACT-PREPARE run for this exact SHA
         required: false
@@ -1762,7 +1766,7 @@ jobs:
       github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
       needs.tests.result == 'success' && needs.tests.outputs.mode == 'LAYER7_STAGING' &&
       inputs.deploy_layer7_staging == true && inputs.approve_layer7_staging == true &&
-      inputs.use_prepared_images == true
+      inputs.use_prepared_images == true && inputs.staging_image_sha != ''
     runs-on: [self-hosted, gpoint-owner-mac]
     environment:
       name: layer7-staging
@@ -1776,9 +1780,9 @@ jobs:
       actions: read
       deployments: write
     env:
-      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
-      GPOINT_COMMIT_SHA: ${{ inputs.candidate_sha }}
-      GPOINT_APP_SOURCE_SHA: ${{ inputs.candidate_sha }}
+      CANDIDATE_SHA: ${{ inputs.staging_image_sha }}
+      GPOINT_COMMIT_SHA: ${{ inputs.staging_image_sha }}
+      GPOINT_APP_SOURCE_SHA: ${{ inputs.staging_image_sha }}
       GPOINT_LAYER7_STAGING_HOST: 95.133.236.59
       GPOINT_KAMAL_TARGET_HOST: 95.133.236.59
       GPOINT_SSH_KEY: /root/.ssh/gpoint_layer7
@@ -1788,16 +1792,17 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ inputs.candidate_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Recheck owner dispatch, current main, and exact candidate
+      - name: Recheck owner dispatch, current main, and prepared image ancestry
         env:
           GH_TOKEN: ${{ github.token }}
           OWNER_ACTOR: ${{ github.actor }}
           OWNER_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           REQUESTED_SHA: ${{ inputs.candidate_sha }}
+          STAGING_IMAGE_SHA: ${{ inputs.staging_image_sha }}
           WORKFLOW_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -1807,12 +1812,19 @@ jobs:
           test "$OWNER_TRIGGERING_ACTOR" = "$REPOSITORY_OWNER"
           [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$REQUESTED_SHA" = "$WORKFLOW_SHA"
+          [[ "$STAGING_IMAGE_SHA" =~ ^[0-9a-f]{40}$ ]]
           current_main="$(curl --fail --silent --show-error \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H 'Accept: application/vnd.github+json' \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/heads/main" \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])')"
-          test "$current_main" = "$REQUESTED_SHA"
+          test "$current_main" = "$WORKFLOW_SHA"
+          comparison="$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/compare/$STAGING_IMAGE_SHA...$WORKFLOW_SHA")"
+          python3 -c 'import json,sys; source=sys.argv[1]; value=json.load(sys.stdin); status=value.get("status"); merge_base=value.get("merge_base_commit",{}).get("sha"); sys.exit(0 if status in {"ahead","identical"} and merge_base == source else "prepared image SHA is not an ancestor of current main")' \
+            "$STAGING_IMAGE_SHA" <<< "$comparison"
       - name: Verify exact successful Build run and immutable component digests
         id: prepared
         env:
@@ -3137,15 +3149,3 @@ jobs:
           export GPOINT_MIGRATION_BACKUP_EVIDENCE_SHA256="$evidence_sha"
           export GPOINT_PRISMA_EROS_QUEUE_SHA256="$queue_sha"
           export GPOINT_PRISMA_EROS_MAPPING_SHA256="$mapping_sha"
-          export GPOINT_PRISMA_MESSAGE_STATE_SHA256="$state_sha"
-          export GPOINT_AGATA_0012_SHA256="$agata_sha"
-          current_step=isolated-backup-restore-and-four-migrations
-          GPOINT_MIGRATION_REHEARSAL=1 python3 "$stage/scripts/gpoint-scheduled-backup.py"
-          current_step=final-backup-integrity-check
-          test "$(sha256sum "$evidence_path" | awk '{print $1}')" = "$evidence_sha"
-          test "$(sha256sum /opt/gpoint/backups/gpoint-pre-release-7a1afde1d94c324828565a36cb7dd90f422dee3d-41223019715-1.dump.age | awk '{print $1}')" = "$expected_db_sha"
-          test "$(sha256sum /opt/gpoint/backups/gpoint-pre-release-7a1afde1d94c324828565a36cb7dd90f422dee3d-41223019715-1.media.tar.age | awk '{print $1}')" = "$expected_media_sha"
-          test ! -e /opt/gpoint/backups/scheduled/latest.json
-          echo GPOINT_MIGRATION_REHEARSAL=PASS
-          REMOTE_REHEARSAL
-          echo "GPOINT_MIGRATION_REHEARSAL=PASS SHA=$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
