@@ -36,6 +36,9 @@ def test_layer7_staging_runs_pinned_kamal_without_a_local_docker_engine():
     assert "docker run" not in deploy["run"]
     assert 'command kamal "$@"' in deploy["run"]
     assert "$HOME/.ssh/gpoint_layer7" in deploy["run"]
+    image_pull = next(step for step in job["steps"] if step.get("name") == "Pull and verify exact private images with the read-only job token")
+    assert "kamal_image=ghcr.io/basecamp/kamal" not in image_pull["run"]
+    assert 'docker pull --platform linux/amd64 "$kamal_image"' not in image_pull["run"]
 
 
 def test_layer7_staging_requires_exact_successful_prepare_and_explicit_staging_intent():
