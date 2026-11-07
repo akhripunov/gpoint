@@ -9,6 +9,8 @@ hosts="${KAMAL_HOSTS:?KAMAL_HOSTS is required}"
 roles="${KAMAL_ROLES:-}"
 ssh_key="${GPOINT_SSH_KEY:?GPOINT_SSH_KEY is required}"
 known_hosts="${GPOINT_KNOWN_HOSTS_FILE:?GPOINT_KNOWN_HOSTS_FILE is required}"
+target_host="${GPOINT_KAMAL_TARGET_HOST:-${GPOINT_PRODUCTION_HOST:-${hosts%%,*}}}"
+case ",$hosts," in *,"$target_host",*) ;; *) echo 'Kamal target host is outside the rendered host set' >&2; exit 1 ;; esac
 
 printf '%s\n' "$candidate" | grep -Eq '^[0-9a-f]{40}$'
 printf '%s\n' "$app_source_sha" | grep -Eq '^[0-9a-f]{40}$'

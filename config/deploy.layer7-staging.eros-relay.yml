@@ -1,0 +1,57 @@
+service: gpoint-eros-relay
+image: akhripunov/gpoint-runtime
+primary_role: relay
+
+servers:
+  relay:
+    hosts:
+      - <%= ENV.fetch("GPOINT_LAYER7_STAGING_HOST") %>
+    cmd: node /app/services/eros-engine/eros-pilot-embedding-relay.mjs
+    proxy: false
+    env:
+      clear:
+        EROS_PILOT_RELAY_BIND: 172.31.254.1:11434
+        EROS_PILOT_OLLAMA_MODEL_DIGEST: ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d
+        RELEASE_SHA: <%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>
+    options:
+      network: host
+      memory: 64m
+      memory-swap: 64m
+      cpus: 0.25
+      pids-limit: 64
+      read-only: true
+      tmpfs: /tmp
+      cap-drop: ALL
+      security-opt: no-new-privileges:true
+
+registry:
+  server: ghcr.io
+  username: akhripunov
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+ssh:
+  user: root
+  keys:
+    - <%= ENV.fetch("GPOINT_SSH_KEY") %>
+  keys_only: true
+  config: true
+
+builder:
+  arch: amd64
+
+retain_containers: 2
+minimum_version: 2.12.0
+
+accessories:
+  ollama:
+    image: ollama/ollama@sha256:a717bfc1c56acfc2e85d3109bd40a7646258ec9062c40cea83b9ed0927eb4223
+    host: <%= ENV.fetch("GPOINT_LAYER7_STAGING_HOST") %>
+    port: "127.0.0.1:11435:11434"
+    volumes:
+      - ollama-layer7-models:/root/.ollama
+    options:
+      restart: unless-stopped
+      cpus: 1.5
+      memory: 3g
+      memory-swap: 3g

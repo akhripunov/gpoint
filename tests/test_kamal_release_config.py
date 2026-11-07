@@ -1648,8 +1648,13 @@ def test_native_kamal_keeps_absolute_runner_ssh_config_paths_available():
     assert wrappers
     for wrapper in wrappers:
         command = wrapper.split('\n          }', 1)[0]
-        assert '--volume "$HOME/.ssh:/root/.ssh:ro"' in command
-        assert '--volume "$HOME/.ssh:$HOME/.ssh:ro"' in command
+        if 'gpoint_layer7:/root/.ssh/gpoint_layer7:ro' in command:
+            assert '--volume "$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts:/root/.ssh/known_hosts:ro"' in command
+            assert '--volume "$HOME/.ssh:/root/.ssh:ro"' not in command
+            assert '--volume "$HOME/.ssh:$HOME/.ssh:ro"' not in command
+        else:
+            assert '--volume "$HOME/.ssh:/root/.ssh:ro"' in command
+            assert '--volume "$HOME/.ssh:$HOME/.ssh:ro"' in command
     assert 'git rev-list --first-parent --max-count=64 "$CANDIDATE_SHA"' in workflow
     assert '--read-agata-ancestor-receipt' in workflow
 
