@@ -1795,6 +1795,21 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1.335.0
+        with:
+          ruby-version: 3.3.6
+          self-hosted: true
+      - name: Install pinned Kamal 2.12.0
+        run: |
+          set -euo pipefail
+          gem_root="$RUNNER_TEMP/kamal-gems"
+          mkdir -p "$gem_root"
+          GEM_HOME="$gem_root" GEM_PATH="$gem_root" gem install kamal --version 2.12.0 --no-document --install-dir "$gem_root"
+          echo "GEM_HOME=$gem_root" >> "$GITHUB_ENV"
+          echo "GEM_PATH=$gem_root" >> "$GITHUB_ENV"
+          echo "$gem_root/bin" >> "$GITHUB_PATH"
+          GEM_HOME="$gem_root" GEM_PATH="$gem_root" ruby -e 'abort unless Gem::Specification.find_by_name("kamal").version.to_s == "2.12.0"'
+          GEM_HOME="$gem_root" GEM_PATH="$gem_root" "$gem_root/bin/kamal" help >/dev/null
       - name: Recheck owner dispatch, current main, and prepared image ancestry
         env:
           GH_TOKEN: ${{ github.token }}
@@ -2110,26 +2125,17 @@ jobs:
           CORE_DIGEST: ${{ inputs.prepared_app_digest }}
           MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
           EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
-          KAMAL_IMAGE: ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625
         run: |
           set -euo pipefail
+          export GPOINT_SSH_KEY="$HOME/.ssh/gpoint_layer7"
+          export GPOINT_KNOWN_HOSTS_FILE="$HOME/.ssh/known_hosts"
+          kamal() { command kamal "$@"; }
           eros_model_digest="$(python3 -c 'import json; print(json.load(open("services/eros-engine/ollama-model.lock.json"))["digest"])')"
           [[ "$eros_model_digest" =~ ^[0-9a-f]{64}$ ]]
           ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
             -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
             "root@$GPOINT_LAYER7_STAGING_HOST" docker inspect gpoint-eros-relay-ollama >/dev/null 2>&1 || {
-              kamal() {
-                docker run --rm --pull=never --platform linux/amd64 \
-                  --volume "$GITHUB_WORKSPACE:/workdir:ro" \
-                  --volume "$HOME/.ssh/gpoint_layer7:/root/.ssh/gpoint_layer7:ro" \
-                  --volume "$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts:/root/.ssh/known_hosts:ro" \
-                  --workdir /workdir \
-                  --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA --env GPOINT_LAYER7_STAGING_HOST \
-                  --env GPOINT_KAMAL_TARGET_HOST --env GPOINT_SSH_KEY --env GPOINT_KNOWN_HOSTS_FILE \
-                  --env KAMAL_REGISTRY_PASSWORD --env GPOINT_KAMAL_EXPECTED_DIGEST \
-                  --env GPOINT_KAMAL_SERVICE --env KAMAL_ROLES "$KAMAL_IMAGE" "$@"
-              }
               GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay kamal accessory boot ollama --config-file config/deploy.layer7-staging.eros-relay.yml
               GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay kamal accessory exec ollama ollama pull qwen3-embedding:0.6b --config-file config/deploy.layer7-staging.eros-relay.yml
             }
@@ -2138,17 +2144,6 @@ jobs:
             -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
             "root@$GPOINT_LAYER7_STAGING_HOST" python3 - "$eros_model_digest" gpoint-eros-relay-ollama \
             < scripts/verify-layer7-ollama.py
-          kamal() {
-            docker run --rm --pull=never --platform linux/amd64 \
-              --volume "$GITHUB_WORKSPACE:/workdir:ro" \
-              --volume "$HOME/.ssh/gpoint_layer7:/root/.ssh/gpoint_layer7:ro" \
-              --volume "$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts:/root/.ssh/known_hosts:ro" \
-              --workdir /workdir \
-              --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA --env GPOINT_LAYER7_STAGING_HOST \
-              --env GPOINT_KAMAL_TARGET_HOST --env GPOINT_SSH_KEY --env GPOINT_KNOWN_HOSTS_FILE \
-              --env KAMAL_REGISTRY_PASSWORD --env GPOINT_KAMAL_EXPECTED_DIGEST \
-              --env GPOINT_KAMAL_SERVICE --env KAMAL_ROLES "$KAMAL_IMAGE" "$@"
-          }
           GPOINT_KAMAL_EXPECTED_DIGEST="$EROS_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-pilot KAMAL_ROLES=engine \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles engine --config-file config/deploy.layer7-staging.eros.yml
           GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay \

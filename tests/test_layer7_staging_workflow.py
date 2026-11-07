@@ -23,6 +23,21 @@ def test_layer7_staging_is_owner_dispatched_on_trusted_runner_with_read_only_pac
     assert "production" not in str(job["environment"]).lower()
 
 
+def test_layer7_staging_runs_pinned_kamal_without_a_local_docker_engine():
+    workflow = yaml.load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text(), Loader=yaml.BaseLoader)
+    job = workflow["jobs"]["layer7_staging"]
+    ruby = next(step for step in job["steps"] if step.get("uses", "").startswith("ruby/setup-ruby@"))
+    assert ruby["uses"] == "ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f"
+    assert ruby["with"]["ruby-version"] == "3.3.6"
+    assert ruby["with"]["self-hosted"] == "true"
+    installer = next(step for step in job["steps"] if step.get("name") == "Install pinned Kamal 2.12.0")
+    assert "gem install kamal --version 2.12.0" in installer["run"]
+    deploy = next(step for step in job["steps"] if step.get("name") == "Deploy exact immutable images with stock Kamal 2 to Layer7 staging")
+    assert "docker run" not in deploy["run"]
+    assert 'command kamal "$@"' in deploy["run"]
+    assert "$HOME/.ssh/gpoint_layer7" in deploy["run"]
+
+
 def test_layer7_staging_requires_exact_successful_prepare_and_explicit_staging_intent():
     workflow = yaml.load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text(), Loader=yaml.BaseLoader)
     inputs = workflow["on"]["workflow_dispatch"]["inputs"]
