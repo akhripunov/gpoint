@@ -29,15 +29,25 @@ def test_layer7_staging_requires_exact_successful_prepare_and_explicit_staging_i
     assert inputs["deploy_layer7_staging"]["type"] == "boolean"
     assert inputs["deploy_layer7_staging"]["default"] == "false"
     assert inputs["approve_layer7_staging"]["default"] == "false"
+    assert inputs["staging_image_sha"]["type"] == "string"
+    assert inputs["staging_image_sha"]["required"] == "false"
 
     job = workflow["jobs"]["layer7_staging"]
     assert job["needs"] == ["tests"]
     assert "inputs.deploy_layer7_staging == true" in job["if"]
+    assert "inputs.staging_image_sha != ''" in job["if"]
     step_text = yaml.safe_dump(job["steps"])
     assert "verify_native_prepared_run.py" in step_text
     assert "prepared_run_id" in step_text
     assert "prepared_eros_digest" in step_text
     assert "StrictHostKeyChecking=yes" in step_text
+    assert job["env"]["CANDIDATE_SHA"] == "${{ inputs.staging_image_sha }}"
+    checkout = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/checkout@"))
+    assert checkout["with"]["ref"] == "${{ github.sha }}"
+    recheck = next(step for step in job["steps"] if step.get("name") == "Recheck owner dispatch, current main, and prepared image ancestry")
+    assert "STAGING_IMAGE_SHA" in recheck["env"]
+    assert "compare/$STAGING_IMAGE_SHA...$WORKFLOW_SHA" in recheck["run"]
+    assert 'merge_base_commit",{}).get("sha")' in recheck["run"]
     assert "staging_preflight.outcome == 'success'" in step_text
     assert "Remove temporary Kamal GHCR authorization" in step_text
     assert "docker logout ghcr.io" in step_text
