@@ -19,7 +19,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
 
     def test_pipeline_has_release_gate_and_one_isolated_rehearsal_job(self):
         jobs = self.workflow["jobs"]
-        self.assertEqual(set(jobs), {"tests", "build", "deploy", "rollback", "backup_maintenance", "migration_rehearsal"})
+        self.assertEqual(set(jobs), {"tests", "build", "deploy", "rollback", "backup_maintenance", "migration_rehearsal", "layer7_staging"})
         self.assertEqual(set(jobs) & {"tests", "build", "deploy"}, {"tests", "build", "deploy"})
         rollback = jobs["rollback"]
         self.assertIn("outputs.mode == 'ROLLBACK'", rollback["if"])
@@ -38,6 +38,15 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("outputs.mode == 'REHEARSAL'", jobs["build"]["if"])
         self.assertIn("outputs.mode == 'ARTIFACT_PREPARE'", jobs["build"]["if"])
         self.assertIn("build", jobs["deploy"]["needs"])
+        staging = jobs["layer7_staging"]
+        self.assertEqual(staging["needs"], ["tests"])
+        self.assertEqual(staging["environment"]["name"], "layer7-staging")
+        self.assertNotIn("production", staging.get("environment", {}).values())
+        self.assertIn("github.event_name == 'workflow_dispatch'", staging["if"])
+        self.assertIn("github.ref == 'refs/heads/main'", staging["if"])
+        self.assertIn("inputs.approve_layer7_staging == true", staging["if"])
+        self.assertNotIn("deploy", staging["needs"])
+        self.assertNotIn("GPOINT_KAMAL_HOST", staging.get("env", {}))
 
     def test_prepared_artifact_build_has_no_deploy_authority_and_deploy_reuses_exact_digests(self):
         events = self.workflow.get("on", self.workflow.get(True))
@@ -437,7 +446,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
     def test_no_mac_runner_or_release_controller_is_used(self):
         text = WORKFLOW.read_text()
         self.assertNotIn("[self-hosted, macOS, gpoint-production]", text)
-        self.assertNotIn("self-hosted", text)
+        self.assertEqual(self.workflow["jobs"]["layer7_staging"]["runs-on"],
+                         ["self-hosted", "gpoint-owner-mac"])
         self.assertNotIn("release:gpoint", text)
 
     def test_native_kamal_uses_attempt_scoped_image_version_and_hook_context(self):
