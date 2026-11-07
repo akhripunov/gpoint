@@ -26,6 +26,7 @@ SECRET_KEYS = (
     'EROS_EMBEDDING_API_KEY',
     'EROS_BRIDGE_API_KEY',
     'EROS_WORKER_SIGNING_SECRET',
+    'EROS_WORKER_GATEWAY_TOKEN',
     'EROS_RUNTIME_PASSWORD',
     'EROS_MIGRATOR_PASSWORD',
     'EROS_DATABASE_IDENTITY',
@@ -361,7 +362,7 @@ def write_native_api_env(path=ENV_PATH, source_env=SOURCE_ENV_PATH, output=NATIV
     """Create the Core API's Eros bridge environment without exposing values."""
     values = read_env(Path(path))
     required_secrets = {'EROS_JWT_SECRET', 'EROS_BRIDGE_API_KEY', 'EROS_EMBEDDING_API_KEY',
-                        'EROS_WORKER_SIGNING_SECRET', 'EROS_TENANT_ID'}
+                        'EROS_WORKER_SIGNING_SECRET', 'EROS_WORKER_GATEWAY_TOKEN', 'EROS_TENANT_ID'}
     if not required_secrets.issubset(values) or any(not values.get(key) for key in required_secrets):
         raise RuntimeError('Eros protected environment is incomplete')
     source = {}
@@ -374,9 +375,6 @@ def write_native_api_env(path=ENV_PATH, source_env=SOURCE_ENV_PATH, output=NATIV
                 source[key] = value
     except OSError:
         raise RuntimeError('GPoint production environment is unavailable') from None
-    required_source = {'GPOINT_AGATA_WORKER_TOKEN'}
-    if any(not source.get(key) for key in required_source):
-        raise RuntimeError('existing GPoint Worker configuration is missing')
     policy_tenant = source.get('GPOINT_CHAT_POLICY_TENANT_ID') or values['EROS_TENANT_ID']
     if policy_tenant != values['EROS_TENANT_ID']:
         raise RuntimeError('GPoint and Eros tenant identities disagree')
@@ -388,12 +386,12 @@ def write_native_api_env(path=ENV_PATH, source_env=SOURCE_ENV_PATH, output=NATIV
         'EROS_BRIDGE_API_KEY': values['EROS_BRIDGE_API_KEY'],
         'EROS_EMBEDDING_API_KEY': values['EROS_EMBEDDING_API_KEY'],
         'EROS_WORKER_SIGNING_SECRET': values['EROS_WORKER_SIGNING_SECRET'],
+        'GPOINT_EROS_WORKER_TOKEN': values['EROS_WORKER_GATEWAY_TOKEN'],
         'EROS_WORKER_TENANT_ID': values['EROS_TENANT_ID'],
         'EROS_REQUEST_TIMEOUT_MS': '240000',
         'EROS_BRIDGE_TIMEOUT_SECONDS': '240',
         'EROS_OLLAMA_EMBEDDING_URL': 'http://172.31.254.1:11434/api/embed',
         'GPOINT_CHAT_POLICY_TENANT_ID': policy_tenant,
-        'GPOINT_AGATA_WORKER_TOKEN': source['GPOINT_AGATA_WORKER_TOKEN'],
         'EROS_PRODUCTION_TEST_USER_IDS': '',
         'EROS_PRODUCTION_TEST_CREATOR_IDS': '',
     }

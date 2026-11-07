@@ -28,6 +28,7 @@ class ErosProductionSecretTests(unittest.TestCase):
             self.assertTrue(first['EROS_JWT_SECRET'])
             self.assertTrue(first['EROS_EMBEDDING_API_KEY'])
             self.assertTrue(first['EROS_WORKER_SIGNING_SECRET'])
+            self.assertTrue(first['EROS_WORKER_GATEWAY_TOKEN'])
             self.assertEqual(first['EROS_RUNTIME_DATABASE_URL'].split('@')[1], 'gpoint-eros-db:5432/eros')
             self.assertEqual(first['EROS_MIGRATOR_DATABASE_URL'].split('@')[1], 'gpoint-eros-db:5432/eros')
             self.assertNotIn(first['EROS_JWT_SECRET'], output)
@@ -36,7 +37,7 @@ class ErosProductionSecretTests(unittest.TestCase):
                                              tenant_id='12345678-1234-4234-8234-123456789abc'), output)
             second = MODULE.read_env(path)
             for key in ('EROS_JWT_SECRET', 'EROS_EMBEDDING_API_KEY', 'EROS_WORKER_SIGNING_SECRET',
-                        'EROS_RUNTIME_PASSWORD', 'EROS_MIGRATOR_PASSWORD'):
+                        'EROS_WORKER_GATEWAY_TOKEN', 'EROS_RUNTIME_PASSWORD', 'EROS_MIGRATOR_PASSWORD'):
                 self.assertEqual(second[key], first[key])
             self.assertEqual(second['EROS_SOURCE_SHA'], 'c' * 40)
 
@@ -81,13 +82,35 @@ class ErosProductionSecretTests(unittest.TestCase):
             self.assertEqual(values['GPOINT_CHAT_POLICY_TENANT_ID'], tenant)
             self.assertNotIn('GPOINT_CHAT_POLICY_JURISDICTION', values)
             self.assertNotIn('GPOINT_CHAT_POLICY_MARKET', values)
-            self.assertEqual(values['GPOINT_AGATA_WORKER_TOKEN'], 'worker-secret')
+            self.assertEqual(values['GPOINT_EROS_WORKER_TOKEN'], MODULE.read_env(source)['EROS_WORKER_GATEWAY_TOKEN'])
+            self.assertNotIn('GPOINT_AGATA_WORKER_TOKEN', values)
             self.assertEqual(values['EROS_PRODUCTION_TEST_USER_IDS'], '')
             self.assertNotIn('worker-secret', result)
             for key in ('EROS_JWT_SECRET', 'EROS_BRIDGE_API_KEY', 'EROS_EMBEDDING_API_KEY', 'EROS_WORKER_SIGNING_SECRET'):
                 self.assertEqual(values[key], MODULE.read_env(source)[key])
 
-    def test_native_api_environment_requires_existing_worker_secret_but_not_geographic_policy(self):
+    def test_native_api_environment_uses_dedicated_eros_worker_auth_without_agata_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'eros.env'
+            production = root / 'production.env'
+            output = root / 'eros-api.env'
+            tenant = '12345678-1234-4234-8234-123456789abc'
+            MODULE.provision(source, source_sha='a' * 40,
+                             image='ghcr.io/akhripunov/eros@sha256:' + 'b' * 64,
+                             tenant_id=tenant)
+            production.write_text('')
+
+            result = MODULE.write_native_api_env(source, production, output)
+
+            values = dict(line.split('=', 1) for line in output.read_text().splitlines())
+            secrets = MODULE.read_env(source)
+            self.assertEqual(result, 'EROS_API_ENV=READY')
+            self.assertEqual(values['GPOINT_EROS_WORKER_TOKEN'], secrets['EROS_WORKER_GATEWAY_TOKEN'])
+            self.assertNotIn('GPOINT_AGATA_WORKER_TOKEN', values)
+            self.assertNotIn(secrets['EROS_WORKER_GATEWAY_TOKEN'], result)
+
+    def test_native_api_environment_ignores_obsolete_geographic_policy_values(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / 'eros.env'
@@ -97,9 +120,10 @@ class ErosProductionSecretTests(unittest.TestCase):
                              image='ghcr.io/akhripunov/eros@sha256:' + 'b' * 64,
                              tenant_id='12345678-1234-4234-8234-123456789abc')
             production.write_text('GPOINT_CHAT_POLICY_JURISDICTION=US\nGPOINT_CHAT_POLICY_MARKET=us\n')
-            with self.assertRaisesRegex(RuntimeError, 'existing GPoint Worker configuration'):
-                MODULE.write_native_api_env(source, production, output)
-            self.assertFalse(output.exists())
+            self.assertEqual(MODULE.write_native_api_env(source, production, output), 'EROS_API_ENV=READY')
+            values = dict(line.split('=', 1) for line in output.read_text().splitlines())
+            self.assertNotIn('GPOINT_CHAT_POLICY_JURISDICTION', values)
+            self.assertNotIn('GPOINT_CHAT_POLICY_MARKET', values)
 
     def test_native_api_environment_rejects_duplicate_production_keys_without_writing(self):
         with tempfile.TemporaryDirectory() as tmp:
