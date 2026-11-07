@@ -2054,8 +2054,6 @@ jobs:
               "root@$GPOINT_LAYER7_STAGING_HOST" rm -rf "/run/gpoint-ghcr-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           }
           trap cleanup_registry EXIT
-          kamal_image=ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625
-          docker pull --platform linux/amd64 "$kamal_image"
           remote_docker_config="/run/gpoint-ghcr-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
             -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
