@@ -693,6 +693,29 @@ def test_documentation_only_candidate_verifies_runtime_without_restarting_compon
         assert {row["sourceSha"] for row in expected["roles"].values()} == {_baseline}
 
 
+def test_me36_release_helpers_are_exact_non_runtime_paths(tmp_path):
+    helper_paths = (
+        ".kamal/hooks/pre-app-boot",
+        "scripts/eros-native-database.py",
+        "scripts/eros-production-secrets.py",
+        "scripts/verify-eros-runtime-labels.py",
+        "scripts/verify-kamal-role.sh",
+        "scripts/verify-layer7-ollama.py",
+        "scripts/verify_native_eros_image.py",
+        "scripts/verify_native_prepared_run.py",
+    )
+    changes = {path: "verified ME-36 release helper\n" for path in helper_paths}
+    repo, _baseline, candidate, inventory = _component_repo(tmp_path, changes)
+
+    scope = MODULE.classify_component_scope(repo, candidate, inventory)
+
+    assert scope == {
+        "scope": "NONE", "reason": "no_runtime_changes",
+        "deploy_core": False, "deploy_agata": False, "deploy_miniapp": False,
+        "deploy_eros": False, "eros_bootstrap": False,
+    }
+
+
 def test_known_release_infrastructure_candidate_has_no_application_component_scope(tmp_path):
     changes = {
         ".codex/roles/devops.md": "updated role policy\n",
