@@ -46,10 +46,17 @@ PRISMA_MIGRATION = re.compile(
     r"^packages/db/prisma/migrations/[0-9]{14}_[a-z0-9_]+/migration\.sql$"
 )
 KNOWN_NON_RUNTIME_FILES = frozenset({
+    ".github/actionlint.yaml",
     ".kamal/hooks/post-app-boot",
     ".kamal/hooks/pre-app-boot",
     "AGENTS.md",
     "packages/db/prisma/production-approved-migrations.json",
+    "config/deploy.layer7-staging.yml",
+    "config/deploy.layer7-staging.miniapp.yml",
+    "config/deploy.layer7-staging.eros-api.yml",
+    "config/deploy.layer7-staging.eros.yml",
+    "config/deploy.layer7-staging.eros-relay.yml",
+    "infra/staging/layer7_known_hosts",
     "scripts/classify-release-prepush.py",
     "scripts/check-kamal-configs.sh",
     "scripts/eros-native-database.py",
@@ -57,6 +64,10 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     "scripts/gpoint-backup-policy.py",
     "scripts/gpoint-scheduled-backup.py",
     "scripts/native_release_intent.py",
+    "scripts/layer7_staging_database.py",
+    "scripts/layer7_staging_env.py",
+    "scripts/write_layer7_staging_env.py",
+    "scripts/write_layer7_staging_eros_api_env.py",
     "scripts/prisma_migration_release_plan.py",
     "scripts/resolve_native_environment_deployment.py",
     "scripts/resolve_native_build_scope.py",
