@@ -8,8 +8,10 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_layer7_staging_is_owner_dispatched_on_trusted_runner_with_read_only_packages():
     workflow = yaml.load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text(), Loader=yaml.BaseLoader)
     job = workflow["jobs"]["layer7_staging"]
+    actionlint = yaml.safe_load((ROOT / ".github/actionlint.yaml").read_text())
 
     assert job["runs-on"] == ["self-hosted", "gpoint-owner-mac"]
+    assert actionlint["self-hosted-runner"]["labels"] == ["gpoint-owner-mac"]
     assert job["environment"]["name"] == "layer7-staging"
     assert job["permissions"] == {
         "contents": "read",
