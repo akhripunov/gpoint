@@ -14,7 +14,6 @@ REQUIRED = {
     "DATABASE_URL",
     "REDIS_URL",
     "NODE_ENV",
-    "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_WEBHOOK_SECRET",
     "GPOINT_TENANT_ID",
     "GPOINT_CHAT_POLICY_TENANT_ID",
@@ -23,7 +22,7 @@ STAGING_INGEST_URL = "https://layer7-staging.invalid/api/internal/telegram/updat
 STAGING_APP_URL = "https://layer7-staging.invalid"
 
 
-def parse_staging_env(payload: str) -> tuple[bytes, str]:
+def parse_staging_env(payload: str) -> tuple[bytes, str, bool]:
     if not isinstance(payload, str) or not payload or len(payload.encode("utf-8")) > 48_000:
         raise ValueError("staging environment bundle is empty or too large")
     values: dict[str, str] = {}
@@ -41,6 +40,8 @@ def parse_staging_env(payload: str) -> tuple[bytes, str]:
         raise ValueError("staging environment bundle does not select the isolated Eros route")
     if any(not values[name] for name in REQUIRED):
         raise ValueError("staging environment bundle contains an empty required setting")
+    if "TELEGRAM_BOT_TOKEN" in values and not values["TELEGRAM_BOT_TOKEN"]:
+        raise ValueError("TELEGRAM_BOT_TOKEN must be omitted when no staging bot is configured")
     try:
         tenants = [uuid.UUID(values[name]) for name in (
             "GPOINT_TENANT_ID", "GPOINT_CHAT_POLICY_TENANT_ID")
@@ -83,4 +84,4 @@ def parse_staging_env(payload: str) -> tuple[bytes, str]:
     if "PUBLIC_APP_URL" not in present:
         lines.append(f"PUBLIC_APP_URL={STAGING_APP_URL}")
     encoded = ("\n".join(lines) + "\n").encode("utf-8")
-    return encoded, hashlib.sha256(encoded).hexdigest()
+    return encoded, hashlib.sha256(encoded).hexdigest(), bool(values.get("TELEGRAM_BOT_TOKEN"))

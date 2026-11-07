@@ -24,7 +24,7 @@ def install_staging_env(payload: bytes, *, root: Path, run_id: str,
         raise ValueError("staging environment install identity is invalid")
     try:
         text = payload.decode("utf-8")
-        normalized, digest = parse_staging_env(text)
+        normalized, digest, _ = parse_staging_env(text)
     except (UnicodeDecodeError, ValueError):
         raise ValueError("staging environment bundle validation failed") from None
     if digest != expected_sha256:

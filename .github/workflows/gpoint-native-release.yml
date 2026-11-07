@@ -1929,6 +1929,7 @@ jobs:
             -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
             "root@$GPOINT_LAYER7_STAGING_HOST" 'test "$(id -u)" = 0'
       - name: Validate staging-only application environment without logging values
+        id: staging_env
         env:
           STAGING_ENV_BUNDLE: ${{ secrets.GPOINT_LAYER7_STAGING_APP_ENV }}
         run: |
@@ -1942,8 +1943,10 @@ jobs:
           from pathlib import Path
           sys.path.insert(0, "scripts")
           from layer7_staging_env import parse_staging_env
-          _, digest = parse_staging_env(sys.stdin.read(48_001))
+          _, digest, bot_enabled = parse_staging_env(sys.stdin.read(48_001))
           print("LAYER7_STAGING_ENV_VALID=PASS SHA256=" + digest)
+          with open(__import__("os").environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("bot_enabled=" + str(bot_enabled).lower() + "\n")
           '
       - name: Install staging secrets and provision only the empty GPoint staging database
         env:
@@ -2123,6 +2126,7 @@ jobs:
           CORE_DIGEST: ${{ inputs.prepared_app_digest }}
           MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
           EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
+          STAGING_BOT_ENABLED: ${{ steps.staging_env.outputs.bot_enabled }}
         run: |
           set -euo pipefail
           export GPOINT_SSH_KEY="$HOME/.ssh/gpoint_layer7"
@@ -2149,6 +2153,10 @@ jobs:
           GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.layer7-staging.eros-api.yml
           for role in worker bot; do
+            if [[ "$role" == bot && "$STAGING_BOT_ENABLED" != true ]]; then
+              echo 'LAYER7_STAGING_BOT=SKIPPED no_staging_bot_token=true'
+              continue
+            fi
             GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES="$role" \
               kamal deploy --skip-push --version "$IMAGE_VERSION" --roles "$role" --config-file config/deploy.layer7-staging.yml
           done
@@ -2160,21 +2168,24 @@ jobs:
           CORE_DIGEST: ${{ inputs.prepared_app_digest }}
           MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
           EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
+          STAGING_BOT_ENABLED: ${{ steps.staging_env.outputs.bot_enabled }}
         run: |
           set -euo pipefail
           ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
             -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
             "root@$GPOINT_LAYER7_STAGING_HOST" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" \
-            "$CORE_DIGEST" "$MINIAPP_DIGEST" "$EROS_DIGEST" <<'REMOTE'
+            "$CORE_DIGEST" "$MINIAPP_DIGEST" "$EROS_DIGEST" "$STAGING_BOT_ENABLED" <<'REMOTE'
           set -euo pipefail
-          sha="$1" version="$2" core_digest="$3" miniapp_digest="$4" eros_digest="$5"
+          sha="$1" version="$2" core_digest="$3" miniapp_digest="$4" eros_digest="$5" bot_enabled="$6"
+          [[ "$bot_enabled" == true || "$bot_enabled" == false ]]
           for spec in "gpoint-core-api|ghcr.io/akhripunov/gpoint-runtime|$core_digest" \
                       "gpoint-core-worker|ghcr.io/akhripunov/gpoint-runtime|$core_digest" \
                       "gpoint-core-bot|ghcr.io/akhripunov/gpoint-runtime|$core_digest" \
                       "gpoint-miniapp-web|ghcr.io/akhripunov/gpoint-miniapp|$miniapp_digest" \
                       "gpoint-eros-pilot-engine|ghcr.io/akhripunov/gpoint-eros|$eros_digest" \
                       "gpoint-eros-relay-relay|ghcr.io/akhripunov/gpoint-runtime|$core_digest"; do
+            if [[ "$bot_enabled" == false && "$spec" == gpoint-core-bot\|* ]]; then continue; fi
             IFS='|' read -r role image digest <<< "$spec"
             container="$role-$version"
             test "$(docker inspect --format '{{.State.Running}}' "$container")" = true
@@ -2208,7 +2219,8 @@ jobs:
             -d '{"model":"qwen3-embedding:0.6b","input":"Layer7 staging memory isolation probe","dimensions":512}' \
             http://172.31.254.1:11434/api/embed | python3 -c 'import json,sys; x=json.load(sys.stdin)["embeddings"]; assert len(x)==1 and len(x[0])==512'
           docker exec "gpoint-miniapp-web-$version" wget --spider -q http://127.0.0.1/
-          echo 'LAYER7_STAGING_RUNTIME_VERIFY=PASS roles=6 public_proxy=false'
+          if [[ "$bot_enabled" == true ]]; then role_count=6; else role_count=5; fi
+          echo "LAYER7_STAGING_RUNTIME_VERIFY=PASS roles=$role_count bot_enabled=$bot_enabled public_proxy=false"
           REMOTE
           echo "LAYER7_STAGING_DEPLOY=PASS SHA=$CANDIDATE_SHA IMAGE_VERSION=$IMAGE_VERSION" >> "$GITHUB_STEP_SUMMARY"
       - name: Remove temporary Kamal GHCR authorization from Layer7
