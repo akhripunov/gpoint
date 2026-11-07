@@ -152,7 +152,9 @@ def test_runtime_verify_sends_512_dimension_embedding_from_inside_eros_container
     verify = next(step for step in steps_for("deploy") if step.get("id") == "verify")
     body = verify["run"]
     assert "docker exec \"gpoint-eros-pilot-engine-$eros_version\" sh -c" in body
-    assert "EROS_OLLAMA_EMBEDDING_URL" in body
+    assert "EROS_PILOT_EMBEDDING_PROBE_URL" in body
+    assert "EROS_OLLAMA_EMBEDDING_URL" not in body
+    assert "http://172.31.254.1:11434/api/embed" in body
     assert '\\"dimensions\\":512' in body
     assert "Synthetic Layer7 Eros network verification" in body
 

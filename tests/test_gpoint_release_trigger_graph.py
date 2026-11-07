@@ -86,6 +86,15 @@ class GPointReleaseTriggerGraphTests(unittest.TestCase):
         self.assertEqual(prepare_workflow_run_listeners, {"gpoint-linear-reconcile.yml"})
         self.assertIn("gpoint-native-release.yml", main_push_workflows)
 
+        agents_sync = all_workflows["sync-agents-to-linear.yml"]
+        self.assertEqual(events(agents_sync)["push"]["paths"], ["AGENTS.md"])
+
+        python_gate = next(step for step in native["jobs"]["tests"]["steps"]
+                           if step.get("name") == "Run workflow, Native First and Kamal boundary tests")
+        gate_command = python_gate["run"]
+        self.assertIn("tests/test_eros_native_database_workflow.py", gate_command)
+        self.assertIn("tests/test_layer7_ollama_verifier.py", gate_command)
+
     def test_legacy_prepare_reconciliation_is_read_only(self):
         reconcile = load_workflow("gpoint-linear-reconcile.yml")
         workflow_run = events(reconcile)["workflow_run"]

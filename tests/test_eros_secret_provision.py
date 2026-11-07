@@ -55,6 +55,8 @@ class ErosProductionSecretTests(unittest.TestCase):
             self.assertEqual(values['DATABASE_URL'], secrets['EROS_RUNTIME_DATABASE_URL'])
             self.assertEqual(values['GPOINT_API_KEY'], secrets['EROS_BRIDGE_API_KEY'])
             self.assertEqual(values['SUPABASE_JWT_SECRET'], secrets['EROS_JWT_SECRET'])
+            self.assertEqual(values['EROS_PILOT_EMBEDDING_PROBE_URL'],
+                             'http://172.31.254.1:11434/api/embed')
             self.assertEqual(values['OPENROUTER_API_KEY'], '')
             self.assertNotIn('EROS_MIGRATOR_DATABASE_URL', values)
 

@@ -293,6 +293,8 @@ jobs:
           tests/test_agata_production_migration.py
           tests/test_agata_migration_receipt.py
           tests/test_kamal_native_automatic_release.py
+          tests/test_eros_native_database_workflow.py
+          tests/test_layer7_ollama_verifier.py
           tests/test_verify_kamal_production_baseline.py
           tests/test_native_rollback_evidence.py
           tests/test_kamal_release_config.py
@@ -1629,7 +1631,7 @@ jobs:
             eros_version="$(sed -n 's/^gpoint-eros-pilot-engine|\([^|]*\).*/\1/p' <<< "$runtime_rows")"
             relay_version="$(sed -n 's/^gpoint-eros-relay-relay|\([^|]*\).*/\1/p' <<< "$runtime_rows")"
             docker exec "gpoint-eros-pilot-engine-$eros_version" curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null
-            docker exec "gpoint-eros-pilot-engine-$eros_version" sh -c 'curl --fail --silent --show-error --max-time 60 -H "Content-Type: application/json" --data "{\"model\":\"qwen3-embedding:0.6b\",\"input\":\"Synthetic Layer7 Eros network verification\",\"dimensions\":512}" "$EROS_OLLAMA_EMBEDDING_URL" >/dev/null'
+            docker exec "gpoint-eros-pilot-engine-$eros_version" sh -c 'test "$EROS_PILOT_EMBEDDING_PROBE_URL" = "http://172.31.254.1:11434/api/embed" && curl --fail --silent --show-error --max-time 60 -H "Content-Type: application/json" --data "{\"model\":\"qwen3-embedding:0.6b\",\"input\":\"Synthetic Layer7 Eros network verification\",\"dimensions\":512}" "$EROS_PILOT_EMBEDDING_PROBE_URL" >/dev/null'
             docker exec "gpoint-eros-relay-relay-$relay_version" node -e "fetch('http://172.31.254.1:11434/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
             python3 "/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py" "gpoint-eros-pilot-engine-$eros_version" d1a140083321687212fb7b17c09cc0c3c9639f5e none
             rm -f -- "/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py"

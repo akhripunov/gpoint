@@ -330,6 +330,7 @@ def write_native_engine_env(path=ENV_PATH, output=NATIVE_ENV_PATH):
         'OPENROUTER_API_KEY': '',
         'SUPABASE_JWT_SECRET': values['EROS_JWT_SECRET'],
         'MODEL_CONFIG_PATH': '/etc/eros-engine/model_config.toml',
+        'EROS_PILOT_EMBEDDING_PROBE_URL': 'http://172.31.254.1:11434/api/embed',
         'RUST_LOG': 'info',
     }
     if target.exists() and (target.is_symlink() or not stat.S_ISREG(target.stat().st_mode)
