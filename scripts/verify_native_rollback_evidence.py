@@ -22,11 +22,15 @@ ROLE_IMAGES = {
     "gpoint-agata-api": "agata",
     "gpoint-agata-memory-worker": "agata",
     "gpoint-miniapp-web": "miniapp",
+    "gpoint-eros-pilot-engine": "eros",
+    "gpoint-eros-relay-relay": "eros_relay",
 }
 REPOSITORIES = {
     "core": "ghcr.io/akhripunov/gpoint-runtime",
     "agata": "ghcr.io/akhripunov/gpoint-agata-runtime",
     "miniapp": "ghcr.io/akhripunov/gpoint-miniapp",
+    "eros": "ghcr.io/akhripunov/gpoint-eros",
+    "eros_relay": "ghcr.io/akhripunov/gpoint-runtime",
 }
 
 
@@ -65,14 +69,15 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
         if len(values) != len(pairs):
             _fail("native Deployment URL metadata contains duplicate fields")
         source_keys = {"gpoint-core-source-sha", "gpoint-agata-source-sha", "gpoint-miniapp-source-sha"}
-        supported_keys = source_keys | {"gpoint-manifest-sha256", "gpoint-runtime-target-sha"}
+        eros_source_key = "gpoint-eros-source-sha"
+        supported_keys = source_keys | {eros_source_key, "gpoint-manifest-sha256", "gpoint-runtime-target-sha"}
         if set(values) - supported_keys:
             _fail("native Deployment URL metadata contains unsupported fields")
         native_manifest_sha = values.get("gpoint-manifest-sha256")
         if not SHA256.fullmatch(native_manifest_sha or ""):
             _fail("native Deployment URL manifest SHA is invalid")
         present_sources = source_keys.intersection(values)
-        if present_sources and present_sources != source_keys:
+        if present_sources and not source_keys.issubset(present_sources):
             _fail("native Deployment URL component source evidence is incomplete")
         if present_sources:
             native_sources = {
@@ -80,6 +85,9 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
                 "agata": values["gpoint-agata-source-sha"],
                 "miniapp": values["gpoint-miniapp-source-sha"],
             }
+            if eros_source_key in values:
+                native_sources["eros"] = values[eros_source_key]
+                native_sources["eros_relay"] = values[eros_source_key]
             if any(not SHA40.fullmatch(value) for value in native_sources.values()):
                 _fail("native Deployment URL component source SHA is invalid")
         runtime_target = values.get("gpoint-runtime-target-sha")
@@ -126,7 +134,12 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
         _fail("rollback target has no exact immutable build attempt tag")
     images = candidate.get("images", {})
     digests: dict[str, str] = {}
-    for key, repo in REPOSITORIES.items():
+    eros_installed = any(isinstance(item, dict)
+                         and item.get("name", "").startswith("gpoint-eros-pilot-engine-")
+                         for item in manifest.get("runtimeServices", []))
+    image_keys = set(REPOSITORIES) if eros_installed else set(REPOSITORIES) - {"eros", "eros_relay"}
+    for key in image_keys:
+        repo = REPOSITORIES[key]
         value = images.get(key, "")
         prefix = repo + "@sha256:"
         if not value.startswith(prefix) or not SHA256.fullmatch(value[len(prefix):]):
@@ -144,12 +157,16 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
         if role in by_name:
             _fail("manifest contains a duplicate GPoint Kamal role")
         by_name[role] = (item, role_version)
-    if len(services) != len(ROLE_IMAGES) or set(by_name) != set(ROLE_IMAGES):
-        _fail("manifest does not contain exactly the six GPoint Kamal roles")
+    base_roles = set(ROLE_IMAGES) - {"gpoint-eros-pilot-engine", "gpoint-eros-relay-relay"}
+    expected_roles = set(ROLE_IMAGES) if eros_installed else base_roles
+    if len(services) != len(expected_roles) or set(by_name) != expected_roles:
+        _fail("manifest does not contain a complete GPoint Kamal role inventory")
     component_versions = {}
     component_sources = {}
     component_digests = {}
     for name, image_key in ROLE_IMAGES.items():
+        if name not in expected_roles:
+            continue
         service, role_version = by_name[name]
         version_match = re.fullmatch(r"([0-9a-f]{40})-([1-9][0-9]*)-([1-9][0-9]*)", role_version)
         if not version_match:
@@ -165,13 +182,19 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
         component_versions[image_key] = role_version
         component_sources[image_key] = source_sha
         component_digests[image_key] = repo_digest
-        if service.get("component") not in (None, image_key.upper()):
+        expected_component = "EROS" if image_key in {"eros", "eros_relay"} else image_key.upper()
+        if service.get("component") not in (None, expected_component):
             _fail(f"manifest runtime component is inconsistent for {name}")
     for component, role_names in {
         "core": ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot"),
         "agata": ("gpoint-agata-api", "gpoint-agata-memory-worker"),
         "miniapp": ("gpoint-miniapp-web",),
+        "eros": ("gpoint-eros-pilot-engine",),
+        "eros_relay": ("gpoint-eros-relay-relay",),
     }.items():
+        role_names = tuple(name for name in role_names if name in expected_roles)
+        if not role_names:
+            continue
         identities = {(by_name[name][1], by_name[name][0].get("revision"),
                        by_name[name][0].get("repositoryDigest")) for name in role_names}
         if len(identities) != 1:

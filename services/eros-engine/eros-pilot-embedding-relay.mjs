@@ -7,8 +7,7 @@ const UPSTREAM_PORT = 11435;
 const MODEL_NAME = "qwen3-embedding:0.6b";
 const MAX_BODY_BYTES = 1_048_576;
 const MAX_RESPONSE_BYTES = 1_048_576;
-const API_CLIENT = "172.31.254.2";
-const VERIFY_CLIENT = "172.31.254.3";
+const EROS_DATA_NETWORK_PREFIX = "172.31.254.";
 const EXPECTED_DIGEST = process.env.EROS_PILOT_OLLAMA_MODEL_DIGEST ??
   "ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d";
 
@@ -19,9 +18,11 @@ export function normalizePeerAddress(address = "") {
 export function authorizeRelayRequest({ address, method, path }) {
   const peer = normalizePeerAddress(address);
   if (path === "/healthz") return peer === "172.31.254.1" && method === "GET";
-  if (path === "/api/tags") return peer === VERIFY_CLIENT && method === "GET";
+  const octet = peer.startsWith(EROS_DATA_NETWORK_PREFIX) ? Number(peer.slice(EROS_DATA_NETWORK_PREFIX.length)) : NaN;
+  const trustedErosNetworkPeer = Number.isInteger(octet) && octet >= 2 && octet <= 254;
+  if (path === "/api/tags") return trustedErosNetworkPeer && method === "GET";
   if (path === "/api/embed") {
-    return (peer === API_CLIENT || peer === VERIFY_CLIENT) && method === "POST";
+    return trustedErosNetworkPeer && method === "POST";
   }
   return false;
 }

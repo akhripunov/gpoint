@@ -1,5 +1,8 @@
 import unittest
+import os
 from pathlib import Path
+import subprocess
+import tempfile
 
 import yaml
 
@@ -33,7 +36,102 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(jobs["deploy"]["needs"], ["tests", "build"])
         self.assertIn("outputs.mode == 'DEPLOY'", jobs["build"]["if"])
         self.assertIn("outputs.mode == 'REHEARSAL'", jobs["build"]["if"])
+        self.assertIn("outputs.mode == 'ARTIFACT_PREPARE'", jobs["build"]["if"])
         self.assertIn("build", jobs["deploy"]["needs"])
+
+    def test_prepared_artifact_build_has_no_deploy_authority_and_deploy_reuses_exact_digests(self):
+        events = self.workflow.get("on", self.workflow.get(True))
+        inputs = events["workflow_dispatch"]["inputs"]
+        self.assertEqual(inputs["use_prepared_images"]["type"], "boolean")
+        self.assertTrue(all(inputs[name]["type"] == "string" for name in (
+            "prepared_app_digest", "prepared_agata_digest",
+            "prepared_miniapp_digest", "prepared_eros_digest",
+        )))
+        self.assertEqual(inputs["prepared_run_id"]["type"], "string")
+        build = self.workflow["jobs"]["build"]
+        self.assertNotIn("environment", build)
+        self.assertNotEqual(build["permissions"].get("deployments"), "write")
+        steps = build["steps"]
+        prepared = next(step for step in steps if step.get("id") == "prepared")
+        self.assertIn("inputs.use_prepared_images == true", prepared["if"])
+        self.assertIn("validate_prepared_image_digests", prepared["run"])
+        verify_prepared_run = next(step for step in steps if "Verify successful prepared run" in step.get("name", ""))
+        self.assertIn("actions/runs/$PREPARED_RUN_ID", verify_prepared_run["run"])
+        self.assertIn("actions/jobs/$build_job_id/logs", verify_prepared_run["run"])
+        self.assertIn("/commits/$CANDIDATE_SHA", verify_prepared_run["run"])
+        self.assertIn("verify_native_prepared_run.py", verify_prepared_run["run"])
+        readback = next(step for step in steps if step.get("id") == "image_readback")
+        self.assertIn("REUSE_PREPARED_IMAGES", readback["env"])
+        self.assertIn('if [[ "$REUSE_PREPARED_IMAGES" != true ]]', readback["run"])
+        deploy = self.workflow["jobs"]["deploy"]
+        self.assertIn("needs.tests.outputs.deploy == 'true'", deploy["if"])
+
+    def test_prepared_run_image_version_flows_from_build_run_through_kamal_deploy(self):
+        build = self.workflow["jobs"]["build"]
+        deploy = self.workflow["jobs"]["deploy"]
+        version_step = next((step for step in build["steps"]
+                             if step.get("id") == "image_version"), None)
+        verify_step = next((step for step in build["steps"]
+                            if step.get("id") == "prepared_run"), None)
+        self.assertIsNotNone(version_step)
+        self.assertIsNotNone(verify_step)
+        self.assertIn("steps.prepared_run.outputs.image_version", version_step["env"]["PREPARED_IMAGE_VERSION"])
+        self.assertIn("inputs.prepared_run_id", version_step["env"]["PREPARED_RUN_ID"])
+        self.assertIn("inputs.candidate_sha", version_step["env"]["CANDIDATE_SHA"])
+        self.assertIn("PREPARED_IMAGE_VERSION", version_step["run"])
+        self.assertIn("PREPARED_RUN_ID", version_step["run"])
+        self.assertEqual(build["outputs"]["image_version"], "${{ steps.image_version.outputs.image_version }}")
+        self.assertIn("--output", verify_step["run"])
+        self.assertIn("prepared-build-logs.txt", verify_step["run"])
+        self.assertIn("${CURRENT_RUN_ID}", version_step["run"])
+        self.assertIn("${CURRENT_RUN_ATTEMPT}", version_step["run"])
+        self.assertEqual(deploy["env"]["IMAGE_VERSION"], "${{ needs.build.outputs.image_version }}")
+        kamal = next(step for step in deploy["steps"]
+                     if step.get("name") == "Deploy exact immutable images with stock Kamal")
+        self.assertIn("--version \"$IMAGE_VERSION\"", kamal["run"])
+
+    def test_image_version_selection_step_accepts_only_matching_prepared_sha_and_run(self):
+        version_step = next(step for step in self.workflow["jobs"]["build"]["steps"]
+                            if step.get("id") == "image_version")
+        candidate = "a" * 40
+
+        def run_step(*, use_prepared, prepared_run_id, prepared_image_version):
+            with tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "github-output"
+                env = os.environ.copy()
+                env.update({
+                    "USE_PREPARED_IMAGES": str(use_prepared).lower(),
+                    "PREPARED_RUN_ID": str(prepared_run_id),
+                    "PREPARED_IMAGE_VERSION": prepared_image_version,
+                    "CANDIDATE_SHA": candidate,
+                    "CURRENT_RUN_ID": "9000",
+                    "CURRENT_RUN_ATTEMPT": "3",
+                    "GITHUB_OUTPUT": str(output),
+                })
+                result = subprocess.run(["bash", "-euo", "pipefail", "-c", version_step["run"]],
+                                        env=env, text=True, capture_output=True, check=False)
+                return result, output.read_text() if output.exists() else ""
+
+        result, output = run_step(use_prepared=True, prepared_run_id="1234",
+                                  prepared_image_version=f"{candidate}-1234-2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output, f"image_version={candidate}-1234-2\n")
+        for run_id, image_version in (("5678", f"{candidate}-1234-2"),
+                                      ("1234", f"{'b' * 40}-1234-2")):
+            result, _ = run_step(use_prepared=True, prepared_run_id=run_id,
+                                 prepared_image_version=image_version)
+            self.assertNotEqual(result.returncode, 0)
+        result, output = run_step(use_prepared=False, prepared_run_id="",
+                                  prepared_image_version="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output, f"image_version={candidate}-9000-3\n")
+
+    def test_artifact_prepare_marker_is_passed_to_the_fail_closed_intent_classifier(self):
+        steps = self.workflow["jobs"]["tests"]["steps"]
+        intent = next(step for step in steps if step.get("id") == "intent")
+        self.assertEqual(intent["env"]["EVENT_COMMIT_MESSAGE"], "${{ github.event.head_commit.message || '' }}")
+        self.assertIn("--commit-message", intent["run"])
+        self.assertIn("ARTIFACT_PREPARE", self.workflow["jobs"]["build"]["if"])
 
     def test_tests_matrix_preserves_parallel_suites_and_shared_fail_closed_outputs(self):
         tests = self.workflow["jobs"]["tests"]
@@ -297,13 +395,14 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("OWNER_APPROVAL_ACTOR", script)
         self.assertEqual(deploy["needs"], ["tests", "build"])
         self.assertTrue(all(name in self.workflow["jobs"]["build"]["outputs"]
-                            for name in ("app_digest", "agata_digest", "miniapp_digest")))
+                            for name in ("app_digest", "agata_digest", "miniapp_digest", "eros_digest")))
         self.assertNotIn("gsales_digest", self.workflow["jobs"]["build"]["outputs"])
         deploy_text = yaml.safe_dump(deploy)
         self.assertIn("needs.build.outputs.app_digest", deploy_text)
         self.assertIn("needs.build.outputs.agata_digest", deploy_text)
         self.assertNotIn("needs.build.outputs.gsales_digest", deploy_text)
         self.assertIn("needs.build.outputs.miniapp_digest", deploy_text)
+        self.assertIn("needs.build.outputs.eros_digest", deploy_text)
         self.assertNotRegex(script, r"docker\s+compose\s+(up|down|pull|restart)")
         phases = "\n".join((ROOT / "scripts/kamal-first-cutover" / (name+".sh")).read_text()
                            for name in ("requests", "consumers", "verify"))
@@ -312,6 +411,28 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("test \"$(docker inspect --format '{{.State.Running}}' \"$id\")\" = false", script)
         self.assertIn("kamal deploy --skip-push", script)
         self.assertIn("GPOINT_KAMAL_VERIFY=PASS", script)
+
+    def test_eros_uses_exact_stock_artifact_and_existing_selective_kamal_chain(self):
+        workflow_text = WORKFLOW.read_text()
+        jobs = self.workflow["jobs"]
+        build = jobs["build"]
+        eros_build = next(step for step in build["steps"] if step.get("id") == "eros")
+        self.assertEqual(eros_build["with"]["context"],
+                         "https://github.com/etherfunlab/eros-engine.git#d1a140083321687212fb7b17c09cc0c3c9639f5e")
+        self.assertEqual(eros_build["with"]["platforms"], "linux/amd64")
+        self.assertTrue(eros_build["with"]["push"])
+        self.assertIn("sbom: true", yaml.safe_dump(eros_build["with"]))
+        self.assertIn("provenance: mode=max", yaml.safe_dump(eros_build["with"]))
+        self.assertIn("verify_native_eros_image.py", workflow_text)
+        self.assertIn("d1a140083321687212fb7b17c09cc0c3c9639f5e", workflow_text)
+        self.assertIn("config/deploy.eros.yml", workflow_text)
+        self.assertIn("config/deploy.eros-relay.yml", workflow_text)
+        self.assertIn("DEPLOY_EROS", workflow_text)
+        self.assertIn("gpoint-eros-pilot-engine", workflow_text)
+        self.assertIn("gpoint-eros-relay-relay", workflow_text)
+        self.assertIn('image: akhripunov/gpoint-eros', (ROOT / "config/deploy.eros.yml").read_text())
+        self.assertIn('--eros-digest "$eros_digest"', workflow_text)
+        self.assertNotIn("docker compose", workflow_text)
 
     def test_no_mac_runner_or_release_controller_is_used(self):
         text = WORKFLOW.read_text()
@@ -346,7 +467,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         ))
 
         config_check = (ROOT / "scripts/check-kamal-configs.sh").read_text()
-        for config in ("deploy.yml", "deploy.agata.yml", "deploy.miniapp.yml"):
+        for config in ("deploy.yml", "deploy.agata.yml", "deploy.miniapp.yml", "deploy.eros.yml",
+                       "deploy.eros-relay.yml", "deploy.eros-api.yml"):
             self.assertIn(f"config/{config}", config_check)
         self.assertIn("config-validation-placeholder", config_check)
         self.assertIn("Kamal config validation failed", config_check)

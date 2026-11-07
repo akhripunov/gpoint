@@ -51,6 +51,40 @@ export interface ParsedErosBridgeRequest {
 
 export interface ParsedErosEmbeddingRequest { model: string; input: string[]; dimensions: 512 }
 
+export interface ErosWorkerQueueIdentity {
+  job_type: string;
+  tenant_id: string;
+  user_id: string;
+  creator_id: string | null;
+  session_id: string;
+  instance_id: string;
+  request_id: string;
+}
+
+/** Chat work is limited to the configured pilot pair; system work must match the complete derived sentinel identity. */
+export function isExpectedErosWorkerJobIdentity(
+  row: ErosWorkerQueueIdentity,
+  tenantId: string,
+  pilotPair: { userId: string; creatorId: string },
+  systemIdentity: ErosBridgeIdentity | null,
+  options: { chatIdentity?: ErosBridgeIdentity | null; allowGpointOwnedChat?: boolean } = {},
+): boolean {
+  if (row.tenant_id !== tenantId) return false;
+  if (row.job_type === 'CHAT_COMPLETION') {
+    const identity = options.chatIdentity;
+    if (!identity || row.tenant_id !== identity.tenantId || row.user_id !== identity.userId ||
+        row.creator_id !== identity.creatorId || row.session_id !== identity.sessionId ||
+        row.instance_id !== identity.instanceId || row.request_id !== identity.requestId) return false;
+    return options.allowGpointOwnedChat === true ||
+      (row.user_id === pilotPair.userId && row.creator_id === pilotPair.creatorId);
+  }
+  if (row.job_type !== 'SYSTEM_COMPLETION' || !systemIdentity) return false;
+  return row.tenant_id === systemIdentity.tenantId &&
+    row.user_id === systemIdentity.userId && row.creator_id === systemIdentity.creatorId &&
+    row.session_id === systemIdentity.sessionId && row.instance_id === systemIdentity.instanceId &&
+    row.request_id === systemIdentity.requestId;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }

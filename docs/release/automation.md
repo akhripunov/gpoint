@@ -187,6 +187,24 @@ manifest, применяет точный pending allowlist через `prisma m
 или неопределённый Apply останавливает Kamal; автоматический downgrade или
 слепой повтор не выполняется. Production allowlist сейчас пуст.
 
+Для plan-first кандидата OWNER может пометить сообщение main push отдельной
+строкой `GPOINT-ARTIFACT-PREPARE`. Такой run выполняет Tests и selective
+Build/GHCR, записывает точные `COMPONENT_IMAGE=repository@sha256:...` в summary,
+но не создаёт GitHub Deployment и не запускает Deploy. Обычный main push без
+этой строки сохраняет автоматический Tests → Build → Deploy flow.
+
+Чтобы применить заранее проверенные образы, OWNER запускает workflow dispatch на
+том же exact main SHA с `approve_production=true`,
+`use_prepared_images=true`, `prepared_run_id` и digest inputs из Build summary
+для каждого компонента текущего scope. Build job проверяет, что указан успешный
+Native workflow run с событием main push и exact SHA, затем сверяет набор
+component digests с логом его успешного Build job. После этого он скачивает
+каждый образ по digest и заново проверяет source SHA, SBOM/provenance и
+`linux/amd64`; Build actions не пересобирают и не публикуют эти образы. Любой
+неверный run, отсутствующий, лишний или несовпадающий digest блокирует Deploy.
+Artifact preparation не является production authorization и не заменяет backup,
+migration, compatibility, worker, Runtime Verify или recovery gates.
+
 ### Release tooling audit (Native First V3)
 
 | Mechanism | Decision | Reason |

@@ -1,11 +1,13 @@
 import { createHash } from 'node:crypto';
 import { SignJWT } from 'jose';
+import { GPOINT_EROS_RESPONSE_PROMPT_TRAITS } from './eros-response-prompt.js';
 import { signBridgeIdentity } from './eros-worker-contract.js';
 
 const USER_NAMESPACE = 'b92c2772-7534-5a7c-8eed-ec08e0a9c45b';
 const CREATOR_NAMESPACE = 'c9568a43-7e99-58a2-a41e-50e031eac7bc';
 const RELATIONSHIP_NAMESPACE = '8a275e5e-c6dd-5d56-9dc8-d5642d06d9d0';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const GPOINT_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const MESSAGE_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const MAX_REPLY_CHARS = 4_096;
 const MAX_STREAM_BYTES = 128 * 1024;
@@ -45,16 +47,40 @@ function csvIds(value: string | undefined): Set<string> {
   return new Set((value ?? '').split(',').map((item) => item.trim()).filter(Boolean));
 }
 
+function exactSingleUuid(value: string | undefined): string | null {
+  const values = (value ?? '').split(',').map((item) => item.trim());
+  if (values.length !== 1 || !UUID_PATTERN.test(values[0])) return null;
+  return values[0].toLowerCase();
+}
+
+export function exactErosPilotPair(env: NodeJS.ProcessEnv = process.env): { userId: string; creatorId: string } | null {
+  if (env.EROS_ENABLED !== 'true' || env.EROS_DATA_MODE !== 'synthetic') return null;
+  const production = env.NODE_ENV === 'production';
+  if (production && env.EROS_PRODUCTION_TEST_MODE !== 'true') return null;
+  if (!production && !['development', 'test'].includes(env.NODE_ENV ?? '')) return null;
+  const userId = exactSingleUuid(production ? env.EROS_PRODUCTION_TEST_USER_IDS : env.EROS_TEST_USER_IDS);
+  const creatorId = exactSingleUuid(production ? env.EROS_PRODUCTION_TEST_CREATOR_IDS : env.EROS_TEST_CREATOR_IDS);
+  if (!userId || !creatorId) return null;
+  if (!production && !isLocalSandboxDatabaseUrl(env.DATABASE_URL)) return null;
+  return { userId, creatorId };
+}
+
+export function isGpointOwnedErosMode(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.NODE_ENV === 'production' && env.EROS_ENABLED === 'true' && env.EROS_DATA_MODE === 'gpoint-owned' &&
+    Boolean(env.GPOINT_CHAT_POLICY_TENANT_ID && UUID_PATTERN.test(env.GPOINT_CHAT_POLICY_TENANT_ID));
+}
+
+export function isGpointOwnedChatIdentity(userId: string, creatorId: string): boolean {
+  // GPoint's persisted user and creator IDs are CUIDs. They are mapped to
+  // UUIDv5 inside erosIdentityFor and must not be mistaken for Eros UUIDs.
+  return GPOINT_ID_PATTERN.test(userId) && GPOINT_ID_PATTERN.test(creatorId);
+}
+
 /** Eros is available only to exact synthetic identity allowlists; production requires a separate pilot gate. */
 export function isErosChatAllowed(userId: string, creatorId: string, env: NodeJS.ProcessEnv = process.env): boolean {
-  const productionPilot = env.NODE_ENV === 'production' && env.EROS_ENABLED === 'true' &&
-    env.EROS_PRODUCTION_TEST_MODE === 'true' && env.EROS_DATA_MODE === 'synthetic' &&
-    csvIds(env.EROS_PRODUCTION_TEST_USER_IDS).has(userId) &&
-    csvIds(env.EROS_PRODUCTION_TEST_CREATOR_IDS).has(creatorId);
-  const localSynthetic = ['development', 'test'].includes(env.NODE_ENV ?? '') && env.EROS_ENABLED === 'true' &&
-    env.EROS_DATA_MODE === 'synthetic' && isLocalSandboxDatabaseUrl(env.DATABASE_URL) &&
-    csvIds(env.EROS_TEST_USER_IDS).has(userId) && csvIds(env.EROS_TEST_CREATOR_IDS).has(creatorId);
-  return productionPilot || localSynthetic;
+  if (isGpointOwnedErosMode(env)) return isGpointOwnedChatIdentity(userId, creatorId);
+  const pair = exactErosPilotPair(env);
+  return Boolean(pair && pair.userId === userId.toLowerCase() && pair.creatorId === creatorId.toLowerCase());
 }
 
 export function isSyntheticErosPair(
@@ -67,7 +93,8 @@ export function isSyntheticErosPair(
 
 export function erosTestCreatorIds(env: NodeJS.ProcessEnv = process.env): string[] {
   const allowlist = env.NODE_ENV === 'production' ? env.EROS_PRODUCTION_TEST_CREATOR_IDS : env.EROS_TEST_CREATOR_IDS;
-  return [...csvIds(allowlist)].slice(0, 20);
+  const exact = exactSingleUuid(allowlist);
+  return exact ? [exact] : [];
 }
 
 function isLocalSandboxDatabaseUrl(value: string | undefined): boolean {
@@ -460,7 +487,13 @@ export class ErosEngineClient {
       requestId: clientMessageId,
     }, this.workerSecret);
     const response = await this.request(`/comp/chat/${encodeURIComponent(sessionId)}/message/stream`, userId,
-      { content, client_msg_id: clientMessageId, memory_scope: 'neutral_and_relationship', audit: { user: bridgeIdentity } }, 'text/event-stream');
+      {
+        content,
+        client_msg_id: clientMessageId,
+        memory_scope: 'neutral_and_relationship',
+        prompt_traits: GPOINT_EROS_RESPONSE_PROMPT_TRAITS,
+        audit: { user: bridgeIdentity },
+      }, 'text/event-stream');
     if (!response.body) throw new ErosAdapterError('eros_response_invalid');
 
     const reader = response.body.getReader();

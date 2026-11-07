@@ -16,6 +16,7 @@ def records():
         "ghcr.io/akhripunov/gpoint-runtime": ("sha256:" + "1" * 64, "ghcr.io/akhripunov/gpoint-runtime@sha256:" + "a" * 64),
         "ghcr.io/akhripunov/gpoint-agata-runtime": ("sha256:" + "2" * 64, "ghcr.io/akhripunov/gpoint-agata-runtime@sha256:" + "b" * 64),
         "ghcr.io/akhripunov/gpoint-miniapp": ("sha256:" + "3" * 64, "ghcr.io/akhripunov/gpoint-miniapp@sha256:" + "c" * 64),
+        "ghcr.io/akhripunov/gpoint-eros": ("sha256:" + "4" * 64, "ghcr.io/akhripunov/gpoint-eros@sha256:" + "d" * 64),
     }
     for role, repo in BASELINE.ROLES.items():
         version = f"{SHA}-41223019715-1"
@@ -25,11 +26,45 @@ def records():
     return rows
 
 
+def eros_records():
+    rows = records()
+    version = f"{SHA}-41223019715-1"
+    engine_role, relay_role = BASELINE.EROS_ROLES
+    engine_repo = BASELINE.EROS_ROLES[engine_role]
+    runtime_repo = BASELINE.EROS_ROLES[relay_role]
+    rows.extend([
+        {"role": engine_role, "name": f"{engine_role}-{version}", "version": version,
+         "revision": SOURCE, "image_id": "sha256:" + "4" * 64,
+         "repo_digests": [engine_repo + "@sha256:" + "d" * 64]},
+        {"role": relay_role, "name": f"{relay_role}-{version}", "version": version,
+         "revision": SOURCE, "image_id": "sha256:" + "1" * 64,
+         "repo_digests": [runtime_repo + "@sha256:" + "a" * 64]},
+    ])
+    return rows
+
+
 def test_accepts_historical_release_version_sha_separate_from_common_app_source_sha():
     result = BASELINE.validate(records())
     assert result["version"] == f"{SHA}-41223019715-1"
     assert result["source_sha"] == SOURCE
     assert len(result["roles"]) == 6
+
+
+def test_accepts_complete_eros_engine_and_relay_baseline():
+    result = BASELINE.validate(eros_records())
+    assert len(result["roles"]) == 8
+    engine_role, relay_role = BASELINE.EROS_ROLES
+    assert result["roles"][engine_role]["repo_digest"].startswith(
+        "ghcr.io/akhripunov/gpoint-eros@sha256:")
+    assert result["roles"][relay_role]["repo_digest"].startswith(
+        "ghcr.io/akhripunov/gpoint-runtime@sha256:")
+
+
+@pytest.mark.parametrize("missing_role", BASELINE.EROS_ROLES)
+def test_rejects_partial_eros_baseline(missing_role):
+    rows = [row for row in eros_records() if row["role"] != missing_role]
+    with pytest.raises(ValueError, match="incomplete or duplicated"):
+        BASELINE.validate(rows)
 
 
 def test_accepts_component_scoped_baselines_but_keeps_each_shared_image_group_consistent():

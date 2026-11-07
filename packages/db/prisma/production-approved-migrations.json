@@ -1,6 +1,7 @@
 {
   "schema": "gpoint-prisma-production-apply/v1",
   "migrations": {
-    "20261104144700_native_release_smoke": "d6fea29997d6508dddda6e528d3d7425873e562e20b9f1f9955316f69d5fd4bf"
+    "20261104144700_native_release_smoke": "d6fea29997d6508dddda6e528d3d7425873e562e20b9f1f9955316f69d5fd4bf",
+    "20261105100000_gpoint_chat_policy_and_history_fences": "1838698623b10c7fb9d7b741db374c093daed3d00b1808a9bce68acfb222a420"
   }
 }

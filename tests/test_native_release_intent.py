@@ -1,3 +1,4 @@
+import base64
 import importlib.util
 import json
 from pathlib import Path
@@ -102,6 +103,70 @@ def test_approved_prisma_migration_source_paths_enter_the_existing_protected_dep
     ) == "DEPLOY"
 
 
+def test_exact_main_push_with_artifact_prepare_marker_builds_without_authorizing_deploy():
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main",
+        changed_paths={"apps/api/src/main.ts", "packages/db/prisma/migrations/20261105100000_global_policy/migration.sql"},
+        commit_message="ME-36 candidate\n\nGPOINT-ARTIFACT-PREPARE",
+    ) == "ARTIFACT_PREPARE"
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main",
+        changed_paths={"apps/api/src/main.ts"},
+    ) == "DEPLOY"
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths={"new-root/unclassified.py"},
+        commit_message="GPOINT-ARTIFACT-PREPARE",
+    ) == "BLOCK"
+
+
+def test_artifact_prepare_marker_routes_main_push_to_build_only(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", [
+        "native_release_intent.py", "--event", "push", "--ref", "refs/heads/main",
+        "--sha", "a" * 40, "--before", "b" * 40,
+        "--actor", "akhripunov", "--triggering-actor", "akhripunov",
+        "--repository-owner", "akhripunov", "--commit-message", "ME-36\nGPOINT-ARTIFACT-PREPARE",
+    ])
+    monkeypatch.setattr(MODULE, "changed_paths", lambda *_args, **_kwargs: {"apps/api/src/main.ts"})
+    assert MODULE.main() == 0
+    output = capsys.readouterr().out
+    assert "mode=ARTIFACT_PREPARE" in output
+    assert "deploy=false" in output
+
+
+def test_prepared_image_digest_gate_requires_exact_scope_and_immutable_digests():
+    assert MODULE.validate_prepared_image_digests(
+        ["CORE", "EROS"],
+        {"CORE": "sha256:" + "a" * 64, "EROS": "sha256:" + "b" * 64},
+    ) == {"CORE": "sha256:" + "a" * 64, "EROS": "sha256:" + "b" * 64}
+    for supplied in (
+        {"CORE": "sha256:" + "a" * 64},
+        {"CORE": "sha256:" + "a" * 64, "EROS": "latest"},
+        {"CORE": "sha256:" + "a" * 64, "EROS": "sha256:" + "b" * 64,
+         "MINIAPP": "sha256:" + "c" * 64},
+    ):
+        with pytest.raises(ValueError):
+            MODULE.validate_prepared_image_digests(["CORE", "EROS"], supplied)
+
+
+def test_prepared_images_can_only_be_reused_by_exact_owner_approved_deploy():
+    assert MODULE.classify_dispatch(
+        ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
+        actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
+        approve_production=True, use_prepared_images=True,
+    ) == ("DEPLOY", True)
+    for changes, expected in (
+        ({"approve_production": False}, "INVALID_DEPLOY"),
+        ({"actor": "other"}, "INVALID_DEPLOY"),
+        ({"migration_rehearsal": True}, "INVALID_REHEARSAL"),
+        ({"rollback": True}, "INVALID_ROLLBACK"),
+    ):
+        args = dict(
+            ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
+            actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
+            approve_production=True, use_prepared_images=True,
+        )
+        args.update(changes)
+        assert MODULE.classify_dispatch(**args) == (expected, False)
 def test_agata_migration_and_unknown_schema_paths_remain_blocked_from_prisma_apply():
     for path in (
         "services/agata/migrations/versions/0013_new.py",
@@ -262,6 +327,21 @@ def test_manual_production_dispatch_requires_exact_owner_approval_before_build()
         ) == ("INVALID_DEPLOY", False)
 
 
+def test_eros_image_rollback_is_opt_in_only_with_the_protected_rollback_operation():
+    valid = MODULE.classify_dispatch(
+        ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
+        actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
+        approve_production=True, rollback=True, rollback_eros=True,
+    )
+    assert valid == ("ROLLBACK", False)
+    invalid = MODULE.classify_dispatch(
+        ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
+        actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
+        approve_production=True, rollback=False, rollback_eros=True,
+    )
+    assert invalid == ("INVALID_ROLLBACK", False)
+
+
 def _git(repo, *args):
     return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
 
@@ -305,6 +385,29 @@ def _component_repo(tmp_path, changes):
     return repo, baseline, candidate, inventory
 
 
+def _add_eros_roles(inventory, *, baseline=None):
+    roles = inventory["roles"]
+    source = baseline or roles["gpoint-core-api"]["source_sha"]
+    version = roles["gpoint-core-api"]["version"]
+    runtime_image = roles["gpoint-core-api"]["image_id"]
+    runtime_digest = roles["gpoint-core-api"]["repo_digest"]
+    engine_role, relay_role = MODULE.EROS_ROLES
+    engine_repo = MODULE.ROLE_REPOSITORIES[engine_role]
+    relay_repo = MODULE.ROLE_REPOSITORIES[relay_role]
+    roles[engine_role] = {
+        "name": f"{engine_role}-{version}", "version": version, "source_sha": source,
+        "image_id": "sha256:" + "4" * 64,
+        "repo_digest": engine_repo + "@sha256:" + "5" * 64,
+    }
+    roles[relay_role] = {
+        "name": f"{relay_role}-{version}", "version": version, "source_sha": source,
+        "image_id": runtime_image,
+        "repo_digest": runtime_digest if relay_repo == MODULE.ROLE_REPOSITORIES["gpoint-core-api"]
+                       else relay_repo + "@sha256:" + "7" * 64,
+    }
+    return inventory
+
+
 def test_component_scope_updates_only_exactly_touched_known_components(tmp_path):
     cases = (
         ({"apps/miniapp/src/main.tsx": "export default 1;\n"}, "MINIAPP"),
@@ -321,6 +424,128 @@ def test_component_scope_updates_only_exactly_touched_known_components(tmp_path)
         assert result["deploy_core"] is ("CORE" in components)
         assert result["deploy_agata"] is ("AGATA" in components)
         assert result["deploy_miniapp"] is ("MINIAPP" in components)
+        assert result["deploy_eros"] is False
+        assert result["eros_bootstrap"] is False
+
+
+def test_eros_engine_source_is_an_independent_runtime_component(tmp_path):
+    repo, baseline, candidate, inventory = _component_repo(
+        tmp_path, {"services/eros-engine/build-stock-image.sh": "#!/bin/sh\n"}
+    )
+    _add_eros_roles(inventory, baseline=baseline)
+    repository = MODULE.ROLE_REPOSITORIES[MODULE.EROS_ROLES[0]]
+
+    result = MODULE.classify_component_scope(repo, candidate, inventory)
+
+    assert result == {
+        "scope": "EROS", "reason": "exact_component_diff",
+        "deploy_core": False, "deploy_agata": False, "deploy_miniapp": False,
+        "deploy_eros": True, "eros_bootstrap": False,
+    }
+    build_plan = MODULE.classify_component_build_plan(
+        repo, candidate, {"CORE": baseline, "AGATA": baseline, "MINIAPP": baseline, "EROS": baseline}
+    )
+    assert build_plan == {
+        "deploy_scope": "EROS", "build_components": ["CORE", "EROS"],
+        "reason": "exact_component_diff",
+    }
+    expected = MODULE.expected_runtime_inventory(
+        "EROS", inventory, candidate, candidate + "-101-1", "sha256:" + "8" * 64, "", "",
+        eros_digest="sha256:" + "6" * 64,
+    )
+    assert expected["updatedComponents"] == ["EROS"]
+    assert expected["roles"][MODULE.EROS_ROLES[0]]["sourceSha"] == candidate
+    assert expected["roles"][MODULE.EROS_ROLES[0]]["repositoryDigest"] == repository + "@sha256:" + "6" * 64
+    assert expected["roles"]["gpoint-core-api"]["sourceSha"] == baseline
+    assert expected["roles"]["gpoint-core-api"]["version"] == inventory["roles"]["gpoint-core-api"]["version"]
+    assert expected["roles"][MODULE.EROS_ROLES[1]]["sourceSha"] == candidate
+    assert expected["roles"][MODULE.EROS_ROLES[1]]["repositoryDigest"] == MODULE.ROLE_REPOSITORIES[MODULE.EROS_ROLES[1]] + "@sha256:" + "8" * 64
+
+
+def test_first_eros_bootstrap_adds_engine_and_relay_with_exact_artifact_digests(tmp_path):
+    repo, baseline, candidate, inventory = _component_repo(
+        tmp_path, {"services/eros-engine/build-stock-image.sh": "#!/bin/sh\n"}
+    )
+    result = MODULE.classify_component_scope(repo, candidate, inventory)
+    assert result == {
+        "scope": "EROS", "reason": "exact_component_diff",
+        "deploy_core": False, "deploy_agata": False, "deploy_miniapp": False,
+        "deploy_eros": True, "eros_bootstrap": True,
+    }
+
+    expected = MODULE.expected_runtime_inventory(
+        "EROS", inventory, candidate, candidate + "-101-1", "sha256:" + "8" * 64, "", "",
+        eros_digest="sha256:" + "6" * 64,
+    )
+
+    assert expected["updatedComponents"] == ["EROS"]
+    assert set(expected["roles"]) == set(MODULE.COMPONENT_ROLES["CORE"] + MODULE.COMPONENT_ROLES["AGATA"] +
+                                           MODULE.COMPONENT_ROLES["MINIAPP"] + MODULE.EROS_ROLES)
+    assert expected["roles"][MODULE.EROS_ROLES[0]]["sourceSha"] == candidate
+    assert expected["roles"][MODULE.EROS_ROLES[1]]["sourceSha"] == candidate
+    assert expected["roles"][MODULE.EROS_ROLES[1]]["repositoryDigest"] == MODULE.ROLE_REPOSITORIES[MODULE.EROS_ROLES[1]] + "@sha256:" + "8" * 64
+
+
+def test_eros_scope_fails_closed_without_stock_engine_digest(tmp_path):
+    repo, _baseline, candidate, inventory = _component_repo(
+        tmp_path, {"services/eros-engine/build-stock-image.sh": "#!/bin/sh\n"}
+    )
+    with pytest.raises(ValueError, match="updated candidate runtime image digest is invalid"):
+        MODULE.expected_runtime_inventory(
+            "EROS", inventory, candidate, candidate + "-101-1", "sha256:" + "8" * 64, "", "",
+        )
+
+
+def test_eros_scope_fails_closed_without_core_runtime_support_digest(tmp_path):
+    repo, _baseline, candidate, inventory = _component_repo(
+        tmp_path, {"services/eros-engine/build-stock-image.sh": "#!/bin/sh\n"}
+    )
+    with pytest.raises(ValueError, match="Eros relay runtime image digest is invalid"):
+        MODULE.expected_runtime_inventory(
+            "EROS", inventory, candidate, candidate + "-101-1", "", "", "",
+            eros_digest="sha256:" + "6" * 64,
+        )
+
+
+def test_installed_eros_inventory_requires_both_real_kamal_roles(tmp_path):
+    _repo, baseline, _candidate, inventory = _component_repo(
+        tmp_path, {"docs/release/automation.md": "synthetic fixture\n"}
+    )
+    _add_eros_roles(inventory, baseline=baseline)
+    del inventory["roles"][MODULE.EROS_ROLES[1]]
+    with pytest.raises(ValueError, match="unexpected role set"):
+        MODULE._validate_role_inventory(inventory)
+
+
+def test_component_scope_regressions_keep_eros_independent(tmp_path):
+    cases = (
+        ({"apps/api/src/main.ts": "export const version = 2;\n"}, "CORE"),
+        ({"services/eros-engine/build-stock-image.sh": "#!/bin/sh\n"}, "EROS"),
+        ({"apps/miniapp/src/main.tsx": "export default 2;\n"}, "MINIAPP"),
+        ({"docs/release/automation.md": "tooling-only\n"}, "NONE"),
+    )
+    for index, (changes, expected_scope) in enumerate(cases):
+        repo, baseline, candidate, inventory = _component_repo(tmp_path / str(index), changes)
+        _add_eros_roles(inventory, baseline=baseline)
+        result = MODULE.classify_component_scope(repo, candidate, inventory)
+        assert result["scope"] == expected_scope
+        assert result["deploy_eros"] is (expected_scope == "EROS")
+        assert result["eros_bootstrap"] is False
+        assert result["deploy_core"] is (expected_scope == "CORE")
+        assert result["deploy_miniapp"] is (expected_scope == "MINIAPP")
+        expected = MODULE.expected_runtime_inventory(
+            expected_scope, inventory, candidate, candidate + "-102-1",
+            "sha256:" + "1" * 64, "sha256:" + "2" * 64, "sha256:" + "3" * 64,
+            eros_digest="sha256:" + "6" * 64 if expected_scope == "EROS" else "",
+        )
+        if expected_scope != "EROS":
+            for role in MODULE.EROS_ROLES:
+                assert expected["roles"][role] == {
+                    "version": inventory["roles"][role]["version"],
+                    "sourceSha": inventory["roles"][role]["source_sha"],
+                    "repositoryDigest": inventory["roles"][role]["repo_digest"],
+                    "baselineImageId": inventory["roles"][role]["image_id"],
+                }
 
 
 def test_tooling_only_candidate_is_noop_with_staggered_component_baselines(tmp_path):
@@ -345,6 +570,7 @@ def test_tooling_only_candidate_is_noop_with_staggered_component_baselines(tmp_p
     assert result == {
         "scope": "NONE", "reason": "no_runtime_changes",
         "deploy_core": False, "deploy_agata": False, "deploy_miniapp": False,
+        "deploy_eros": False, "eros_bootstrap": False,
     }
     assert baseline != core_release
     expected = MODULE.expected_runtime_inventory(
@@ -461,7 +687,8 @@ def test_documentation_only_candidate_verifies_runtime_without_restarting_compon
         )
 
         assert scope == {"scope": "NONE", "reason": "no_runtime_changes",
-                         "deploy_core": False, "deploy_agata": False, "deploy_miniapp": False}
+                         "deploy_core": False, "deploy_agata": False, "deploy_miniapp": False,
+                         "deploy_eros": False, "eros_bootstrap": False}
         assert expected["updatedComponents"] == []
         assert {row["sourceSha"] for row in expected["roles"].values()} == {_baseline}
 
@@ -498,6 +725,7 @@ def test_known_release_infrastructure_candidate_has_no_application_component_sco
     assert scope == {
         "scope": "NONE", "reason": "no_runtime_changes",
         "deploy_core": False, "deploy_agata": False, "deploy_miniapp": False,
+        "deploy_eros": False, "eros_bootstrap": False,
     }
 
 
@@ -604,7 +832,8 @@ def test_workflow_plan_keeps_extra_builds_separate_from_runtime_scope(tmp_path, 
         "CANDIDATE_SHA": candidate, "IMAGE_VERSION": candidate + "-200-1",
         "BASELINE_ROLE_INVENTORY": json.dumps(inventory), "BASELINE_MODE": mode,
         "BUILD_COMPONENTS": json.dumps(builds), "BUILD_DEPLOY_SCOPE": "MINIAPP",
-        "BUILD_BASELINE_SOURCES": json.dumps(dict.fromkeys(MODULE.COMPONENT_ROLES, baseline)),
+        "BUILD_BASELINE_SOURCES": json.dumps({**dict.fromkeys(MODULE.COMPONENT_ROLES, baseline),
+                                              "EROS": baseline}),
         "APP_DIGEST": "sha256:" + "4" * 64, "AGATA_DIGEST": "sha256:" + "5" * 64,
         "MINIAPP_DIGEST": "sha256:" + "6" * 64,
     }.items():
@@ -615,9 +844,44 @@ def test_workflow_plan_keeps_extra_builds_separate_from_runtime_scope(tmp_path, 
     assert outputs["app_digest"] == inventory["roles"]["gpoint-core-api"]["repo_digest"].split("@", 1)[1]
     assert outputs["agata_digest"] == inventory["roles"]["gpoint-agata-api"]["repo_digest"].split("@", 1)[1]
     assert outputs["miniapp_digest"] == "sha256:" + "6" * 64
+    assert outputs["eros_digest"] == ""
     assert outputs["migration_app_digest"] == "sha256:" + "4" * 64
     assert outputs["core_api_version"] == inventory["roles"]["gpoint-core-api"]["version"]
     assert outputs["core_api_source_sha"] == baseline
+
+
+def test_workflow_eros_only_uses_candidate_core_support_digest_without_core_deploy(tmp_path, monkeypatch, capsys):
+    import yaml
+    repo, baseline, candidate, inventory = _component_repo(
+        tmp_path, {"services/eros-engine/build-stock-image.sh": "#!/bin/sh\n"})
+    _add_eros_roles(inventory, baseline=baseline)
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    step = next(s for s in workflow["jobs"]["deploy"]["steps"] if s.get("id") == "component_plan")
+    script = step["run"].split('python3 - <<\'PY\' >> "$GITHUB_OUTPUT"\n', 1)[1].rsplit('\nPY', 1)[0]
+    monkeypatch.chdir(repo)
+    monkeypatch.setitem(sys.modules, "native_release_intent", MODULE)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    for key, value in {
+        "CANDIDATE_SHA": candidate, "IMAGE_VERSION": candidate + "-200-1",
+        "BASELINE_ROLE_INVENTORY": json.dumps(inventory), "BASELINE_MODE": "VERIFIED",
+        "BUILD_COMPONENTS": '["CORE","EROS"]', "BUILD_DEPLOY_SCOPE": "EROS",
+        "BUILD_BASELINE_SOURCES": json.dumps({**dict.fromkeys(MODULE.COMPONENT_ROLES, baseline), "EROS": baseline}),
+        "APP_DIGEST": "sha256:" + "8" * 64, "EROS_DIGEST": "sha256:" + "9" * 64,
+        "AGATA_DIGEST": "", "MINIAPP_DIGEST": "",
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    exec(compile(script, "component_plan_eros", "exec"), {})
+
+    outputs = dict(line.split("=", 1) for line in capsys.readouterr().out.splitlines())
+    plan = json.loads(base64.b64decode(outputs["expected_role_identities_b64"]))
+    assert outputs["scope"] == "EROS"
+    assert outputs["deploy_core"] == "false"
+    assert outputs["deploy_eros"] == "true"
+    assert outputs["app_digest"] == "sha256:" + "8" * 64
+    assert plan["roles"]["gpoint-core-api"]["sourceSha"] == baseline
+    assert plan["roles"]["gpoint-eros-relay-relay"]["repositoryDigest"] == (
+        "ghcr.io/akhripunov/gpoint-runtime@sha256:" + "8" * 64)
 
 
 def test_rollback_dispatch_requires_main_exact_owner_explicit_approval_and_no_other_maintenance():

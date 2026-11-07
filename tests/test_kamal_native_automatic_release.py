@@ -28,6 +28,7 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     assert build["needs"] == ["tests"]
     assert "outputs.mode == 'DEPLOY'" in build["if"]
     assert "outputs.mode == 'REHEARSAL'" in build["if"]
+    assert "outputs.mode == 'ARTIFACT_PREPARE'" in build["if"]
     assert "environment" not in build
     assert "packages: write" in WORKFLOW.read_text(encoding="utf-8")
     assert deploy["needs"] == ["tests", "build"]
@@ -251,13 +252,22 @@ def test_core_consumers_are_updated_one_role_at_a_time_and_partial_failure_fails
     apply = deploy.split("name: Deploy exact immutable images with stock Kamal", 1)[1].split(
         "name: Verify public routes and exact running services", 1
     )[0]
-    worker = apply.index("KAMAL_ROLES=worker")
-    bot = apply.index("KAMAL_ROLES=bot")
-    memory_worker = apply.index("KAMAL_ROLES=memory-worker")
-    assert worker < bot < memory_worker
-    for role in ("worker", "bot", "memory-worker"):
-        stop = apply.index(f"kamal app stop --roles {role}")
-        deploy_call = apply.index(f"kamal deploy --skip-push --version \"$IMAGE_VERSION\" --roles {role}")
+    agata = apply.split('if [[ "$DEPLOY_AGATA" == true ]]; then', 1)[1].split(
+        'if [[ "$DEPLOY_EROS" == true ]]; then', 1
+    )[0]
+    eros = apply.split('if [[ "$DEPLOY_EROS" == true ]]; then', 1)[1].split(
+        'if [[ "$DEPLOY_CORE" == true ]]; then', 1
+    )[0]
+    core = apply.split('if [[ "$DEPLOY_CORE" == true ]]; then', 1)[1].split(
+        'if [[ "$DEPLOY_MINIAPP" == true ]]; then', 1
+    )[0]
+    assert apply.index('if [[ "$DEPLOY_AGATA" == true ]]; then') < apply.index('if [[ "$DEPLOY_EROS" == true ]]; then')
+    assert apply.index('if [[ "$DEPLOY_EROS" == true ]]; then') < apply.index('if [[ "$DEPLOY_CORE" == true ]]; then')
+    assert apply.index('if [[ "$DEPLOY_CORE" == true ]]; then') < apply.index('if [[ "$DEPLOY_MINIAPP" == true ]]; then')
+    assert core.index("KAMAL_ROLES=worker") < core.index("KAMAL_ROLES=bot")
+    for block, role in ((core, "worker"), (core, "bot"), (agata, "memory-worker")):
+        stop = block.index(f"kamal app stop --roles {role}")
+        deploy_call = block.index(f"kamal deploy --skip-push --version \"$IMAGE_VERSION\" --roles {role}")
         assert stop < deploy_call
     assert "KAMAL_ROLES=worker,bot" not in apply
     assert "verify_single_running_role gpoint-core-worker" in apply
@@ -446,8 +456,8 @@ def test_migration_rehearsal_uses_immutable_oci_identity_across_docker_hosts():
         assert 'docker image inspect "$agata_image" --format \'{{json .RepoDigests}}\' | grep -F "$agata_image" >/dev/null' in body
         assert f'current_step=ghcr-{role}-repository-digest' in body
 
-    assert build["outputs"]["app_digest"] == "${{ steps.app.outputs.digest }}"
-    assert build["outputs"]["agata_digest"] == "${{ steps.agata.outputs.digest }}"
+    assert build["outputs"]["app_digest"] == "${{ steps.app.outputs.digest || steps.prepared.outputs.app_digest }}"
+    assert build["outputs"]["agata_digest"] == "${{ steps.agata.outputs.digest || steps.prepared.outputs.agata_digest }}"
     assert "app_image_id" not in build.get("outputs", {})
     assert "agata_image_id" not in build.get("outputs", {})
     assert "image inspect" in build_body and "{{.Id}}" not in build_body
@@ -521,9 +531,12 @@ def test_protected_rollback_uses_only_verified_prior_target_and_shared_lock():
     assert rollback["permissions"] == {"contents": "read", "packages": "read", "deployments": "write"}
     body = yaml.safe_dump(rollback)
     names = [step.get("name", step.get("uses", "")) for step in rollback["steps"]]
-    assert names.index("Validate linked build, successful Runtime Verify and six-role manifest") < names.index("Verify target digests, platform, revision and provenance")
+    assert names.index("Validate linked build, successful Runtime Verify and component-role manifest") < names.index("Verify target digests, platform, revision and provenance")
     assert names.index("Verify target digests, platform, revision and provenance") < names.index("Verify live DB compatibility and retained target containers before mutation")
     assert names.index("Verify live DB compatibility and retained target containers before mutation") < names.index("Roll back consumers and then APIs with stock Kamal")
+    assert names.index("Verify retained Eros rollback containers") < names.index("Verify Eros rollback image against an isolated current database restore")
+    assert names.index("Verify Eros rollback image against an isolated current database restore") < names.index("Roll back consumers and then APIs with stock Kamal")
+    assert rollback["steps"][names.index("Verify Eros rollback image against an isolated current database restore")]["if"] == "inputs.rollback_eros == true"
     assert names.index("Roll back consumers and then APIs with stock Kamal") < names.index("Verify rollback Runtime and preserve databases before SUCCESS")
     for gate in (
         "rollback_target_sha", "rollback_deployment_id", "verify_native_rollback_evidence.py",

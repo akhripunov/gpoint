@@ -28,8 +28,38 @@ on:
         required: true
         default: false
         type: boolean
+      use_prepared_images:
+        description: Reuse exact GHCR digests from a successful GPOINT-ARTIFACT-PREPARE run for this SHA
+        required: true
+        default: false
+        type: boolean
+      prepared_run_id:
+        description: Run ID of the successful GPOINT-ARTIFACT-PREPARE run for this exact SHA
+        required: false
+        type: string
+      prepared_app_digest:
+        description: Prepared GHCR digest for CORE, when included in the candidate scope
+        required: false
+        type: string
+      prepared_agata_digest:
+        description: Prepared GHCR digest for AGATA, when included in the candidate scope
+        required: false
+        type: string
+      prepared_miniapp_digest:
+        description: Prepared GHCR digest for MINIAPP, when included in the candidate scope
+        required: false
+        type: string
+      prepared_eros_digest:
+        description: Prepared GHCR digest for EROS, when included in the candidate scope
+        required: false
+        type: string
       rollback:
         description: Roll back to a previously verified successful Native production release
+        required: true
+        default: false
+        type: boolean
+      rollback_eros:
+        description: Also roll back the Eros image after isolated SQLx compatibility verification
         required: true
         default: false
         type: boolean
@@ -91,6 +121,7 @@ jobs:
           EVENT_REF: ${{ github.ref }}
           EVENT_SHA: ${{ github.sha }}
           EVENT_BEFORE: ${{ github.event.before || '' }}
+          EVENT_COMMIT_MESSAGE: ${{ github.event.head_commit.message || '' }}
           REQUESTED_SHA: ${{ inputs.candidate_sha || github.sha }}
           EVENT_ACTOR: ${{ github.actor }}
           EVENT_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
@@ -98,7 +129,9 @@ jobs:
           MIGRATION_REHEARSAL: ${{ inputs.migration_rehearsal || false }}
           BACKUP_MAINTENANCE: ${{ inputs.backup_maintenance || false }}
           ROLLBACK: ${{ inputs.rollback || false }}
+          ROLLBACK_EROS: ${{ inputs.rollback_eros || false }}
           APPROVE_PRODUCTION: ${{ inputs.approve_production || false }}
+          USE_PREPARED_IMAGES: ${{ inputs.use_prepared_images || false }}
         run: |
           set -euo pipefail
           args=(--event "$EVENT_NAME" --ref "$EVENT_REF" --sha "$EVENT_SHA"
@@ -106,10 +139,13 @@ jobs:
             --candidate-sha "$REQUESTED_SHA" --actor "$EVENT_ACTOR"
             --triggering-actor "$EVENT_TRIGGERING_ACTOR"
             --repository-owner "$REPOSITORY_OWNER")
+          [[ -n "$EVENT_COMMIT_MESSAGE" ]] && args+=(--commit-message "$EVENT_COMMIT_MESSAGE")
           [[ "$MIGRATION_REHEARSAL" == true ]] && args+=(--migration-rehearsal)
           [[ "$BACKUP_MAINTENANCE" == true ]] && args+=(--backup-maintenance)
           [[ "$ROLLBACK" == true ]] && args+=(--rollback)
+          [[ "$ROLLBACK_EROS" == true ]] && args+=(--rollback-eros)
           [[ "$APPROVE_PRODUCTION" == true ]] && args+=(--approve-production)
+          [[ "$USE_PREPARED_IMAGES" == true ]] && args+=(--use-prepared-images)
           python3 scripts/native_release_intent.py "${args[@]}" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         if: matrix.suite == 'workspace'
@@ -129,6 +165,32 @@ jobs:
           set -euo pipefail
           ./scripts/check-kamal-configs.sh
           ./scripts/test-kamal-proxy-integration.sh
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        if: matrix.suite == 'workspace'
+        with:
+          platforms: linux/amd64
+      - name: Build stock Eros and run isolated SQLx and synthetic conversation E2E
+        if: matrix.suite == 'workspace'
+        env:
+          EROS_UPSTREAM_SHA: d1a140083321687212fb7b17c09cc0c3c9639f5e
+        run: |
+          set -euo pipefail
+          image="gpoint-eros:stock-$EROS_UPSTREAM_SHA"
+          docker buildx build --platform linux/amd64 --load \
+            --file docker/Dockerfile \
+            --label org.opencontainers.image.source=https://github.com/etherfunlab/eros-engine \
+            --label "org.opencontainers.image.revision=$EROS_UPSTREAM_SHA" \
+            --label "com.gpoint.eros.upstream-revision=$EROS_UPSTREAM_SHA" \
+            --label "com.gpoint.source.revision=$GITHUB_SHA" \
+            --label com.gpoint.eros.patch-set.sha256=none \
+            --tag "$image" \
+            "https://github.com/etherfunlab/eros-engine.git#$EROS_UPSTREAM_SHA"
+          test "$(docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
+          test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$EROS_UPSTREAM_SHA"
+          bash services/eros-engine/run-local-e2e.sh "$image"
+          test_container="$(docker create "$image")"
+          trap 'docker rm -f "$test_container" >/dev/null 2>&1 || true' EXIT
+          python3 scripts/verify-eros-runtime-labels.py "$test_container" "$EROS_UPSTREAM_SHA" none
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
         if: matrix.suite == 'workspace'
         with:
@@ -194,6 +256,7 @@ jobs:
           unset DATABASE_URL SHADOW_DATABASE_URL
           python tests/test_native_image_readback.py
           python tests/test_native_image_attestation.py
+          python tests/test_native_eros_image.py
       - name: Install pinned ORAS for release evidence round-trip test
         if: matrix.suite == 'python'
         run: |
@@ -220,14 +283,18 @@ jobs:
           tests/test_native_build_boundary.py
           tests/test_native_build_scope.py
           tests/test_native_release_intent.py
+          tests/test_native_prepared_run.py
           tests/test_release_pre_push_mode.py
           tests/test_native_environment_deployment.py
           tests/test_native_prisma_apply_boundary.py
           tests/test_prisma_migration_release_plan.py
+          tests/test_eros_pilot_no_agata_transfer.py
           tests/test_gpoint_scheduled_backup.py
           tests/test_agata_production_migration.py
           tests/test_agata_migration_receipt.py
           tests/test_kamal_native_automatic_release.py
+          tests/test_eros_native_database_workflow.py
+          tests/test_layer7_ollama_verifier.py
           tests/test_verify_kamal_production_baseline.py
           tests/test_native_rollback_evidence.py
           tests/test_kamal_release_config.py
@@ -241,12 +308,15 @@ jobs:
           tests/test_gpoint_release_trigger_graph.py
       - name: Run isolated PostgreSQL 16 migration and integration suites
         if: matrix.suite == 'python'
-        run: unset DATABASE_URL SHADOW_DATABASE_URL; python services/gsales/tests/run_postgres.py
+        run: |
+          unset DATABASE_URL SHADOW_DATABASE_URL
+          python tests/integration/gpoint-chat-schema-docker.py --image pgvector/pgvector:0.8.6-pg16
+          python services/gsales/tests/run_postgres.py
 
   build:
     name: Build and publish immutable images
     needs: [tests]
-    if: needs.tests.outputs.mode == 'DEPLOY' || needs.tests.outputs.mode == 'REHEARSAL'
+    if: needs.tests.outputs.mode == 'DEPLOY' || needs.tests.outputs.mode == 'REHEARSAL' || needs.tests.outputs.mode == 'ARTIFACT_PREPARE'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -255,9 +325,11 @@ jobs:
       deployments: read
       actions: read
     outputs:
-      app_digest: ${{ steps.app.outputs.digest }}
-      agata_digest: ${{ steps.agata.outputs.digest }}
-      miniapp_digest: ${{ steps.miniapp.outputs.digest }}
+      app_digest: ${{ steps.app.outputs.digest || steps.prepared.outputs.app_digest }}
+      agata_digest: ${{ steps.agata.outputs.digest || steps.prepared.outputs.agata_digest }}
+      miniapp_digest: ${{ steps.miniapp.outputs.digest || steps.prepared.outputs.miniapp_digest }}
+      eros_digest: ${{ steps.eros.outputs.digest || steps.prepared.outputs.eros_digest }}
+      image_version: ${{ steps.image_version.outputs.image_version }}
       build_components: ${{ steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components }}
       baseline_mode: ${{ steps.build_scope.outputs.status || steps.rehearsal_scope.outputs.status }}
       baseline_sources: ${{ steps.build_scope.outputs.baseline_sources || steps.rehearsal_scope.outputs.baseline_sources }}
@@ -271,7 +343,7 @@ jobs:
           persist-credentials: false
       - name: Resolve exact production component build scope
         id: build_scope
-        if: needs.tests.outputs.mode == 'DEPLOY'
+        if: needs.tests.outputs.mode == 'DEPLOY' || needs.tests.outputs.mode == 'ARTIFACT_PREPARE'
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_BEFORE: ${{ github.event.before || '' }}
@@ -298,6 +370,112 @@ jobs:
         if: needs.tests.outputs.mode == 'REHEARSAL'
         run: |
           printf 'status=REHEARSAL\nbuild_components=["CORE","AGATA"]\ndeploy_scope=UNRESOLVED\nbaseline_sources={}\n' >> "$GITHUB_OUTPUT"
+      - name: Validate exact prepared image digests
+        id: prepared
+        if: needs.tests.outputs.mode == 'DEPLOY' && inputs.use_prepared_images == true
+        env:
+          BUILD_COMPONENTS: ${{ steps.build_scope.outputs.build_components }}
+          PREPARED_APP_DIGEST: ${{ inputs.prepared_app_digest }}
+          PREPARED_AGATA_DIGEST: ${{ inputs.prepared_agata_digest }}
+          PREPARED_MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
+          PREPARED_EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path.cwd() / "scripts"))
+          from native_release_intent import validate_prepared_image_digests
+          components = json.loads(os.environ["BUILD_COMPONENTS"])
+          supplied = {component: os.environ[name] for component, name in {
+              "CORE": "PREPARED_APP_DIGEST", "AGATA": "PREPARED_AGATA_DIGEST",
+              "MINIAPP": "PREPARED_MINIAPP_DIGEST", "EROS": "PREPARED_EROS_DIGEST",
+          }.items() if os.environ[name]}
+          values = validate_prepared_image_digests(components, supplied)
+          outputs = {"CORE": "app_digest", "AGATA": "agata_digest",
+                     "MINIAPP": "miniapp_digest", "EROS": "eros_digest"}
+          for component, digest in values.items():
+              print(f"{outputs[component]}={digest}")
+          PY
+      - name: Reject unused prepared image digest inputs
+        if: needs.tests.outputs.mode == 'DEPLOY' && inputs.use_prepared_images != true
+        env:
+          PREPARED_INPUTS: ${{ inputs.prepared_run_id }},${{ inputs.prepared_app_digest }},${{ inputs.prepared_agata_digest }},${{ inputs.prepared_miniapp_digest }},${{ inputs.prepared_eros_digest }}
+        run: |
+          test -z "${PREPARED_INPUTS//,/}" || {
+            echo 'prepared image inputs require use_prepared_images=true' >&2; exit 1;
+          }
+      - name: Verify successful prepared run and its exact component digests
+        id: prepared_run
+        if: needs.tests.outputs.mode == 'DEPLOY' && inputs.use_prepared_images == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREPARED_RUN_ID: ${{ inputs.prepared_run_id }}
+          CANDIDATE_SHA: ${{ github.sha }}
+          BUILD_COMPONENTS: ${{ steps.build_scope.outputs.build_components }}
+          PREPARED_APP_DIGEST: ${{ inputs.prepared_app_digest }}
+          PREPARED_AGATA_DIGEST: ${{ inputs.prepared_agata_digest }}
+          PREPARED_MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
+          PREPARED_EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
+        run: |
+          set -euo pipefail
+          [[ "$PREPARED_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'prepared_run_id must be a positive run ID' >&2; exit 1; }
+          run_json="$RUNNER_TEMP/prepared-run.json"
+          jobs_json="$RUNNER_TEMP/prepared-jobs.json"
+          commit_json="$RUNNER_TEMP/prepared-commit.json"
+          logs="$RUNNER_TEMP/prepared-build-logs.txt"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREPARED_RUN_ID" > "$run_json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREPARED_RUN_ID/jobs?per_page=100" > "$jobs_json"
+          gh api "repos/$GITHUB_REPOSITORY/commits/$CANDIDATE_SHA" > "$commit_json"
+          build_job_id="$(python3 - "$jobs_json" <<'PY'
+          import json, sys
+          jobs = json.load(open(sys.argv[1], encoding='utf-8')).get('jobs', [])
+          matches = [job for job in jobs if job.get('name') == 'Build and publish immutable images']
+          if len(matches) != 1 or not isinstance(matches[0].get('id'), int):
+              raise SystemExit('prepared run must contain exactly one Native Build job')
+          print(matches[0]['id'])
+          PY
+          )"
+          curl --fail --silent --show-error --location \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/jobs/$build_job_id/logs" \
+            --output "$logs"
+          python3 scripts/verify_native_prepared_run.py \
+            --run "$run_json" --jobs "$jobs_json" --commit "$commit_json" --logs "$logs" \
+            --candidate-sha "$CANDIDATE_SHA" --run-id "$PREPARED_RUN_ID" \
+            --output "$GITHUB_OUTPUT" \
+            --digests "$(python3 - <<'PY'
+          import json, os
+          supplied = {'CORE': 'PREPARED_APP_DIGEST', 'AGATA': 'PREPARED_AGATA_DIGEST',
+                      'MINIAPP': 'PREPARED_MINIAPP_DIGEST', 'EROS': 'PREPARED_EROS_DIGEST'}
+          components = json.loads(os.environ['BUILD_COMPONENTS'])
+          print(json.dumps({component: os.environ[name] for component, name in supplied.items()
+                            if component in components and os.environ[name]}, sort_keys=True))
+          PY
+          )"
+      - name: Select exact immutable image version
+        id: image_version
+        if: needs.tests.outputs.mode == 'DEPLOY'
+        env:
+          USE_PREPARED_IMAGES: ${{ inputs.use_prepared_images }}
+          PREPARED_RUN_ID: ${{ inputs.prepared_run_id }}
+          PREPARED_IMAGE_VERSION: ${{ steps.prepared_run.outputs.image_version }}
+          CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+          CURRENT_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [[ "$USE_PREPARED_IMAGES" == true ]]; then
+            [[ "$PREPARED_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+            [[ "$PREPARED_IMAGE_VERSION" =~ ^${CANDIDATE_SHA}-${PREPARED_RUN_ID}-[1-9][0-9]*$ ]] || {
+              echo 'prepared image version does not match candidate SHA and prepared run ID' >&2; exit 1;
+            }
+            image_version="$PREPARED_IMAGE_VERSION"
+          else
+            image_version="${CANDIDATE_SHA}-${CURRENT_RUN_ID}-${CURRENT_RUN_ATTEMPT}"
+          fi
+          printf 'image_version=%s\n' "$image_version" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
         if: steps.build_scope.outputs.build_components != '[]' || steps.rehearsal_scope.outputs.build_components != '[]'
         with:
@@ -312,7 +490,7 @@ jobs:
         if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'CORE') || contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'MINIAPP')
         run: python3 scripts/docker_dependency_manifests.py "$RUNNER_TEMP/dependency-manifests"
       - name: Build and publish immutable runtime image
-        if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'CORE')
+        if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'CORE') && inputs.use_prepared_images != true
         id: app
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -335,7 +513,7 @@ jobs:
           sbom: true
           provenance: mode=max
       - name: Build and publish immutable Mini App image
-        if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'MINIAPP')
+        if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'MINIAPP') && inputs.use_prepared_images != true
         id: miniapp
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -358,7 +536,7 @@ jobs:
           sbom: true
           provenance: mode=max
       - name: Build and publish immutable AGATA image
-        if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'AGATA')
+        if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'AGATA') && inputs.use_prepared_images != true
         id: agata
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -377,13 +555,36 @@ jobs:
           cache-to: type=gha,scope=gpoint-agata-runtime,mode=max
           sbom: true
           provenance: mode=max
+      - name: Build and publish stock Eros image
+        if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'EROS') && inputs.use_prepared_images != true
+        id: eros
+        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
+        with:
+          context: https://github.com/etherfunlab/eros-engine.git#d1a140083321687212fb7b17c09cc0c3c9639f5e
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/akhripunov/gpoint-eros:${{ github.sha }}
+            ghcr.io/akhripunov/gpoint-eros:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/etherfunlab/eros-engine
+            org.opencontainers.image.revision=d1a140083321687212fb7b17c09cc0c3c9639f5e
+            com.gpoint.source.revision=${{ github.sha }}
+            com.gpoint.eros.upstream-revision=d1a140083321687212fb7b17c09cc0c3c9639f5e
+            com.gpoint.eros.patch-set.sha256=none
+          cache-from: type=gha,scope=gpoint-eros-stock
+          cache-to: type=gha,scope=gpoint-eros-stock,mode=max
+          sbom: true
+          provenance: mode=max
       - name: Validate immutable image identity and expose digests
         if: steps.build_scope.outputs.build_components != '[]' || steps.rehearsal_scope.outputs.build_components != '[]'
         env:
           CANDIDATE_SHA: ${{ github.sha }}
-          APP_DIGEST: ${{ steps.app.outputs.digest }}
-          AGATA_DIGEST: ${{ steps.agata.outputs.digest }}
-          MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}
+          APP_DIGEST: ${{ steps.app.outputs.digest || steps.prepared.outputs.app_digest }}
+          AGATA_DIGEST: ${{ steps.agata.outputs.digest || steps.prepared.outputs.agata_digest }}
+          MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest || steps.prepared.outputs.miniapp_digest }}
+          EROS_DIGEST: ${{ steps.eros.outputs.digest || steps.prepared.outputs.eros_digest }}
           BUILD_COMPONENTS: ${{ steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components }}
         run: |
           python3 - <<'PY'
@@ -392,9 +593,15 @@ jobs:
           if not re.fullmatch(r'[0-9a-f]{40}', sha):
               raise SystemExit('candidate SHA is not exact')
           components = set(__import__('json').loads(os.environ['BUILD_COMPONENTS']))
-          for component, name in {'CORE': 'APP_DIGEST', 'AGATA': 'AGATA_DIGEST', 'MINIAPP': 'MINIAPP_DIGEST'}.items():
+          for component, name in {'CORE': 'APP_DIGEST', 'AGATA': 'AGATA_DIGEST', 'MINIAPP': 'MINIAPP_DIGEST', 'EROS': 'EROS_DIGEST'}.items():
               if component in components and not re.fullmatch(r'sha256:[0-9a-f]{64}', os.environ[name]):
                   raise SystemExit(f'{name} is not an immutable OCI digest')
+          for component, name in {'CORE': 'APP_DIGEST', 'AGATA': 'AGATA_DIGEST', 'MINIAPP': 'MINIAPP_DIGEST', 'EROS': 'EROS_DIGEST'}.items():
+              if component in components:
+                  image = "ghcr.io/akhripunov/" + ("gpoint-runtime" if component == "CORE" else "gpoint-agata-runtime" if component == "AGATA" else "gpoint-miniapp" if component == "MINIAPP" else "gpoint-eros") + "@" + os.environ[name]
+                  line = f"GPOINT_IMAGE_DIGEST {component} {image}"
+                  print(line)
+                  print(f"{component}_IMAGE={image}", file=open(os.environ['GITHUB_STEP_SUMMARY'], 'a'))
           PY
       - name: Read back exact published images and verify candidate identity
         id: image_readback
@@ -402,31 +609,42 @@ jobs:
         env:
           CANDIDATE_SHA: ${{ github.sha }}
           IMAGE_VERSION: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          APP_DIGEST: ${{ steps.app.outputs.digest }}
-          AGATA_DIGEST: ${{ steps.agata.outputs.digest }}
-          MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}
+          APP_DIGEST: ${{ steps.app.outputs.digest || steps.prepared.outputs.app_digest }}
+          AGATA_DIGEST: ${{ steps.agata.outputs.digest || steps.prepared.outputs.agata_digest }}
+          MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest || steps.prepared.outputs.miniapp_digest }}
+          EROS_DIGEST: ${{ steps.eros.outputs.digest || steps.prepared.outputs.eros_digest }}
+          REUSE_PREPARED_IMAGES: ${{ inputs.use_prepared_images || false }}
           BUILD_COMPONENTS: ${{ steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components }}
         run: |
           set -euo pipefail
-          for role in $(python3 -c 'import json,sys; print(" ".join({"CORE":"app","AGATA":"agata","MINIAPP":"miniapp"}[x] for x in json.loads(sys.argv[1])) )' "$BUILD_COMPONENTS"); do
+          for role in $(python3 -c 'import json,sys; print(" ".join({"CORE":"app","AGATA":"agata","MINIAPP":"miniapp","EROS":"eros"}[x] for x in json.loads(sys.argv[1])) )' "$BUILD_COMPONENTS"); do
             case "$role" in
               app) image=ghcr.io/akhripunov/gpoint-runtime; digest="$APP_DIGEST" ;;
               agata) image=ghcr.io/akhripunov/gpoint-agata-runtime; digest="$AGATA_DIGEST" ;;
               miniapp) image=ghcr.io/akhripunov/gpoint-miniapp; digest="$MINIAPP_DIGEST" ;;
+              eros) image=ghcr.io/akhripunov/gpoint-eros; digest="$EROS_DIGEST" ;;
             esac
             docker pull --platform linux/amd64 "$image@$digest"
-            docker pull --platform linux/amd64 "$image:$IMAGE_VERSION"
-            docker image inspect "$image:$IMAGE_VERSION" --format '{{json .RepoDigests}}' | grep -F "$image@$digest" >/dev/null
+            if [[ "$REUSE_PREPARED_IMAGES" != true ]]; then
+              docker pull --platform linux/amd64 "$image:$IMAGE_VERSION"
+              docker image inspect "$image:$IMAGE_VERSION" --format '{{json .RepoDigests}}' | grep -F "$image@$digest" >/dev/null
+            fi
             docker image inspect --format '{{json .}}' "$image@$digest" > "$RUNNER_TEMP/$role-image.json"
             docker buildx imagetools inspect --format '{{json .SBOM.SPDX}}' \
               "$image@$digest" > "$RUNNER_TEMP/$role-sbom.json"
             docker buildx imagetools inspect --format '{{json .Provenance}}' \
               "$image@$digest" > "$RUNNER_TEMP/$role-provenance.json"
-            python3 scripts/verify_native_image_readback.py \
-              "$RUNNER_TEMP/$role-image.json" "$image" "$digest" "$CANDIDATE_SHA"
-            python3 scripts/verify_native_image_attestation.py \
-              "$RUNNER_TEMP/$role-sbom.json" "$RUNNER_TEMP/$role-provenance.json" \
-              "$CANDIDATE_SHA" https://github.com/akhripunov/gpoint.git
+            if [[ "$role" == eros ]]; then
+              python3 scripts/verify_native_eros_image.py \
+                "$RUNNER_TEMP/$role-image.json" "$RUNNER_TEMP/$role-sbom.json" \
+                "$RUNNER_TEMP/$role-provenance.json" "$digest" "$CANDIDATE_SHA"
+            else
+              python3 scripts/verify_native_image_readback.py \
+                "$RUNNER_TEMP/$role-image.json" "$image" "$digest" "$CANDIDATE_SHA"
+              python3 scripts/verify_native_image_attestation.py \
+                "$RUNNER_TEMP/$role-sbom.json" "$RUNNER_TEMP/$role-provenance.json" \
+                "$CANDIDATE_SHA" https://github.com/akhripunov/gpoint.git
+            fi
           done
           for role in $(python3 -c 'import json,sys; print(" ".join({"CORE":"app","AGATA":"agata"}[x] for x in json.loads(sys.argv[1]) if x in {"CORE","AGATA"}))' "$BUILD_COMPONENTS"); do
             case "$role" in
@@ -457,7 +675,7 @@ jobs:
       deployments: write
     env:
       CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
-      IMAGE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+      IMAGE_VERSION: ${{ needs.build.outputs.image_version }}
       GPOINT_COMMIT_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
       GPOINT_APP_SOURCE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
       GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}
@@ -643,9 +861,20 @@ jobs:
               if roles[role]["version"] != expected:
                   raise SystemExit("Kamal CLI version differs from verified running role inventory")
           PY
-          baseline_values="$(python3 -c 'import json,re,sys; d=json.loads(sys.argv[1]); assert set(d["roles"]) == {"gpoint-core-api","gpoint-core-worker","gpoint-core-bot","gpoint-agata-api","gpoint-agata-memory-worker","gpoint-miniapp-web"}; core=d["roles"]["gpoint-core-api"]; v=core["version"]; s=core["source_sha"]; assert re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+",v); assert re.fullmatch(r"[0-9a-f]{40}",s); print(v+"\t"+s)' "$role_inventory")"
-          IFS=$'\t' read -r baseline_version baseline_source_sha <<< "$baseline_values"
+          baseline_values="$(python3 -c 'import json,re,sys; d=json.loads(sys.argv[1]); roles=d["roles"]; base={"gpoint-core-api","gpoint-core-worker","gpoint-core-bot","gpoint-agata-api","gpoint-agata-memory-worker","gpoint-miniapp-web"}; eros={"gpoint-eros-pilot-engine","gpoint-eros-relay-relay"}; assert set(roles) in (base,base|eros); core=roles["gpoint-core-api"]; v=core["version"]; s=core["source_sha"]; assert re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+",v); assert re.fullmatch(r"[0-9a-f]{40}",s); engine=roles.get("gpoint-eros-pilot-engine"); es=engine["source_sha"] if engine else s; ev=engine["version"] if engine else "ABSENT"; print(v+"\t"+s+"\t"+ev+"\t"+es+"\t"+str(bool(engine)).lower())' "$role_inventory")"
+          IFS=$'\t' read -r baseline_version baseline_source_sha eros_version eros_source_sha eros_installed <<< "$baseline_values"
           test -n "$baseline_version" && test -n "$baseline_source_sha"
+          [[ "$eros_installed" == true || "$eros_installed" == false ]]
+          if [[ "$eros_installed" == true ]]; then
+            [[ "$eros_version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
+            for pair in "config/deploy.eros.yml|gpoint-eros-pilot-engine" "config/deploy.eros-relay.yml|gpoint-eros-relay-relay"; do
+              IFS='|' read -r config expected <<< "$pair"
+              output="$(docker run --rm --pull=never --platform linux/amd64 --volume "$GITHUB_WORKSPACE:/workdir" --volume "$HOME/.ssh:/root/.ssh:ro" --workdir /workdir --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA --env GPOINT_PRODUCTION_HOST --env GPOINT_SSH_KEY --env GPOINT_KNOWN_HOSTS_FILE --env KAMAL_REGISTRY_PASSWORD ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 app version --config-file "$config")"
+              grep -F "$expected-$eros_version" <<< "$output" >/dev/null
+            done
+          else
+            test "$eros_version" = ABSENT
+          fi
           facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$baseline_version" "$baseline_source_sha" <<'REMOTE'
           set -euo pipefail
           baseline_version="$1"
@@ -689,6 +918,7 @@ jobs:
           grep -Eq '^DB_MOUNTS_SHA256=[0-9a-f]{64}$' <<< "$facts"
           grep -Eq '^REDIS_MOUNTS_SHA256=[0-9a-f]{64}$' <<< "$facts"
           printf 'GPOINT_BASELINE_ROLE_INVENTORY=%s\n' "$role_inventory" >> "$GITHUB_OUTPUT"
+          printf 'EROS_INSTALLED=%s\nEROS_VERSION=%s\nEROS_SOURCE_SHA=%s\n' "$eros_installed" "$eros_version" "$eros_source_sha" >> "$GITHUB_OUTPUT"
           while IFS='=' read -r key value; do
             case "$key" in
               DB_CONTAINER_ID|REDIS_CONTAINER_ID|GPOINT_BASELINE_ROLE_VERSION|GPOINT_BASELINE_ROLE_SOURCE_SHA|DB_MOUNTS_SHA256|REDIS_MOUNTS_SHA256) printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT" ;;
@@ -702,6 +932,7 @@ jobs:
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
+          EROS_DIGEST: ${{ needs.build.outputs.eros_digest }}
           BUILD_COMPONENTS: ${{ needs.build.outputs.build_components }}
           BASELINE_MODE: ${{ needs.build.outputs.baseline_mode }}
           BUILD_BASELINE_SOURCES: ${{ needs.build.outputs.baseline_sources }}
@@ -725,6 +956,9 @@ jobs:
               component: baseline["roles"][roles[0]]["source_sha"]
               for component, roles in COMPONENT_ROLES.items()
           }
+          live_sources["EROS"] = (baseline["roles"]["gpoint-eros-pilot-engine"]["source_sha"]
+                                  if "gpoint-eros-pilot-engine" in baseline["roles"]
+                                  else live_sources["CORE"])
           mode = os.environ["BASELINE_MODE"]
           if mode == "VERIFIED":
               expected_sources = json.loads(os.environ["BUILD_BASELINE_SOURCES"])
@@ -733,8 +967,8 @@ jobs:
               if scope["scope"] != os.environ["BUILD_DEPLOY_SCOPE"]:
                   raise SystemExit("live production deploy scope differs from pre-build scope")
           elif mode == "BOOTSTRAP_FULL":
-              if builds != set(COMPONENT_ROLES):
-                  raise SystemExit("bootstrap release must build every runtime image")
+              if not set(COMPONENT_ROLES).issubset(builds):
+                  raise SystemExit("bootstrap release must build every GPoint runtime image")
           elif mode == "VERIFY_ONLY":
               if builds or scope["scope"] != "NONE":
                   raise SystemExit("verify-only candidate has a changed live runtime component")
@@ -743,21 +977,34 @@ jobs:
           effective = {}
           names = {"CORE": ("APP_DIGEST", "app_digest", "ghcr.io/akhripunov/gpoint-runtime"),
                    "AGATA": ("AGATA_DIGEST", "agata_digest", "ghcr.io/akhripunov/gpoint-agata-runtime"),
-                   "MINIAPP": ("MINIAPP_DIGEST", "miniapp_digest", "ghcr.io/akhripunov/gpoint-miniapp")}
+                   "MINIAPP": ("MINIAPP_DIGEST", "miniapp_digest", "ghcr.io/akhripunov/gpoint-miniapp"),
+                   "EROS": ("EROS_DIGEST", "eros_digest", "ghcr.io/akhripunov/gpoint-eros")}
           for component, (env_name, output_name, repository) in names.items():
-              digest = os.environ[env_name] if component in scope_components else baseline["roles"][COMPONENT_ROLES[component][0]]["repo_digest"].removeprefix(repository + "@")
+              if component in scope_components or (component == "CORE" and "EROS" in scope_components):
+                  digest = os.environ[env_name]
+              elif component == "EROS" and "gpoint-eros-pilot-engine" not in baseline["roles"]:
+                  digest = ""
+              else:
+                  role = ("gpoint-eros-pilot-engine" if component == "EROS" else COMPONENT_ROLES[component][0])
+                  digest = baseline["roles"][role]["repo_digest"].removeprefix(repository + "@")
+              if component == "EROS" and component not in scope_components:
+                  effective[output_name] = digest
+                  continue
               if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
                   raise SystemExit("effective runtime component digest is invalid")
               effective[output_name] = digest
           expected = expected_runtime_inventory_b64(
               scope["scope"], baseline, candidate, os.environ["IMAGE_VERSION"],
               effective["app_digest"], effective["agata_digest"], effective["miniapp_digest"],
+              eros_digest=effective["eros_digest"],
           )
           print("scope=" + str(scope["scope"]))
           print("reason=" + str(scope["reason"]))
           print("deploy_core=" + str(scope["deploy_core"]).lower())
           print("deploy_agata=" + str(scope["deploy_agata"]).lower())
           print("deploy_miniapp=" + str(scope["deploy_miniapp"]).lower())
+          print("deploy_eros=" + str(scope["deploy_eros"]).lower())
+          print("eros_bootstrap=" + str(scope["eros_bootstrap"]).lower())
           print("expected_role_identities_b64=" + expected)
           print("migration_app_digest=" + (os.environ["APP_DIGEST"] if "CORE" in builds else effective["app_digest"]))
           core_api = json.loads(base64.b64decode(expected))["roles"]["gpoint-core-api"]
@@ -774,21 +1021,28 @@ jobs:
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           AGATA_DIGEST: ${{ needs.build.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
+          EROS_DIGEST: ${{ needs.build.outputs.eros_digest }}
           BUILD_COMPONENTS: ${{ steps.component_plan.outputs.build_components }}
         run: |
           set -euo pipefail
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          for item in $(python3 -c 'import json,sys; names={"CORE":"app","AGATA":"agata","MINIAPP":"miniapp"}; print(" ".join(names[x] for x in json.loads(sys.argv[1])))' "$BUILD_COMPONENTS"); do
+          for item in $(python3 -c 'import json,sys; names={"CORE":"app","AGATA":"agata","MINIAPP":"miniapp","EROS":"eros"}; print(" ".join(names[x] for x in json.loads(sys.argv[1])))' "$BUILD_COMPONENTS"); do
             case "$item" in
               app) repository=ghcr.io/akhripunov/gpoint-runtime; digest="$APP_DIGEST" ;;
               agata) repository=ghcr.io/akhripunov/gpoint-agata-runtime; digest="$AGATA_DIGEST" ;;
               miniapp) repository=ghcr.io/akhripunov/gpoint-miniapp; digest="$MINIAPP_DIGEST" ;;
+              eros) repository=ghcr.io/akhripunov/gpoint-eros; digest="$EROS_DIGEST" ;;
             esac
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
             docker pull --platform linux/amd64 "$repository@$digest"
             docker pull --platform linux/amd64 "$repository:$IMAGE_VERSION"
             test "$(docker image inspect "$repository:$IMAGE_VERSION" --format '{{index .RepoDigests 0}}')" = "$repository@$digest"
-            test "$(docker image inspect "$repository:$IMAGE_VERSION" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$CANDIDATE_SHA"
+            if [[ "$item" == eros ]]; then
+              test "$(docker image inspect "$repository:$IMAGE_VERSION" --format '{{index .Config.Labels "com.gpoint.source.revision"}}')" = "$CANDIDATE_SHA"
+              test "$(docker image inspect "$repository:$IMAGE_VERSION" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = d1a140083321687212fb7b17c09cc0c3c9639f5e
+            else
+              test "$(docker image inspect "$repository:$IMAGE_VERSION" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$CANDIDATE_SHA"
+            fi
           done
       - name: Verify candidate compatibility with the live database baseline
         id: migration_baseline
@@ -1018,6 +1272,62 @@ jobs:
             echo "agata_head=$(sed -n 's/^agata_head=//p' <<< "$facts")"
           } >> "$GITHUB_OUTPUT"
           echo "GPOINT_PRISMA_APPLY=PASS PENDING=$PENDING_MIGRATIONS" >> "$GITHUB_STEP_SUMMARY"
+      - name: Rehearse exact Eros SQLx transition against protected backup restore
+        id: eros_database
+        if: steps.component_plan.outputs.deploy_eros == 'true'
+        env:
+          CANDIDATE_SHA: ${{ github.sha }}
+          EROS_DIGEST: ${{ steps.component_plan.outputs.eros_digest }}
+          EROS_BOOTSTRAP: ${{ steps.component_plan.outputs.eros_bootstrap }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EROS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$EROS_BOOTSTRAP" == true || "$EROS_BOOTSTRAP" == false ]]
+          eros_image="ghcr.io/akhripunov/gpoint-eros@$EROS_DIGEST"
+          run_identity="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          model_config_sha256="$(sha256sum services/eros-engine/eros-production-model-config.toml | awk '{print $1}')"
+          [[ "$model_config_sha256" =~ ^[0-9a-f]{64}$ ]]
+          model_config_stage="/opt/gpoint/env/.eros-model-config-$run_identity"
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" install -d -o root -g root -m 0700 /opt/gpoint/env
+          scp -q services/eros-engine/eros-production-model-config.toml "root@${GPOINT_PRODUCTION_HOST}:$model_config_stage"
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$model_config_stage" "$model_config_sha256" <<'REMOTE_MODEL_CONFIG'
+          set -euo pipefail
+          stage="$1" expected="$2" target=/opt/gpoint/env/eros-production-model-config.toml
+          trap 'rm -f -- "$stage"' EXIT
+          test -f "$stage" && test ! -L "$stage"
+          chmod 0600 "$stage"
+          test "$(sha256sum "$stage" | awk '{print $1}')" = "$expected"
+          install -o root -g root -m 0600 "$stage" "$target.tmp"
+          test "$(sha256sum "$target.tmp" | awk '{print $1}')" = "$expected"
+          mv -f -- "$target.tmp" "$target"
+          test "$(sha256sum "$target" | awk '{print $1}')" = "$expected"
+          echo "EROS_MODEL_CONFIG=READY SHA256=$expected"
+          REMOTE_MODEL_CONFIG
+          remote_docker_config="/run/gpoint-eros-ghcr-$run_identity"
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" install -d -o root -g root -m 0700 "$remote_docker_config"
+          cleanup_remote_docker_config() {
+            ssh -T "root@${GPOINT_PRODUCTION_HOST}" rm -rf -- "$remote_docker_config"
+          }
+          trap cleanup_remote_docker_config EXIT
+          printf '%s' "$GHCR_TOKEN" | ssh -T "root@${GPOINT_PRODUCTION_HOST}" \
+            "DOCKER_CONFIG='$remote_docker_config' docker login ghcr.io --username '$GITHUB_ACTOR' --password-stdin" >/dev/null
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" env DOCKER_CONFIG="$remote_docker_config" docker pull --platform linux/amd64 "$eros_image"
+          test "$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" env DOCKER_CONFIG="$remote_docker_config" docker image inspect "$eros_image" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
+          secrets_args=(--source-sha "$CANDIDATE_SHA" --image "$eros_image" --write-native-engine-env --write-native-api-env)
+          if [[ "$EROS_BOOTSTRAP" == true ]]; then
+            secrets_args+=(--ensure-postgres-network --provision-database)
+          fi
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" env DOCKER_CONFIG="$remote_docker_config" python3 - "${secrets_args[@]}" \
+            < scripts/eros-production-secrets.py
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" env DOCKER_CONFIG="$remote_docker_config" python3 - --mode prepare \
+            --candidate "$CANDIDATE_SHA" --image "$eros_image" --run-id "$run_identity" \
+            < scripts/eros-native-database.py
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" env DOCKER_CONFIG="$remote_docker_config" python3 - --mode apply \
+            --candidate "$CANDIDATE_SHA" --image "$eros_image" --run-id "$run_identity" \
+            < scripts/eros-native-database.py
+          echo "EROS_DATABASE_LIFECYCLE=PASS IMAGE=$eros_image" >> "$GITHUB_STEP_SUMMARY"
       - name: Deploy exact immutable images with stock Kamal
         id: kamal_apply
         if: success()
@@ -1031,9 +1341,12 @@ jobs:
           DEPLOY_SCOPE: ${{ steps.component_plan.outputs.scope }}
           GPOINT_KAMAL_CORE_API_VERSION: ${{ steps.component_plan.outputs.core_api_version }}
           GPOINT_KAMAL_CORE_API_SOURCE_SHA: ${{ steps.component_plan.outputs.core_api_source_sha }}
+          DEPLOY_EROS: ${{ steps.component_plan.outputs.deploy_eros }}
+          EROS_INSTALLED: ${{ steps.topology.outputs.EROS_INSTALLED }}
+          EROS_DIGEST: ${{ steps.component_plan.outputs.eros_digest }}
         run: |
           set -euo pipefail
-          for value in "$DEPLOY_CORE" "$DEPLOY_AGATA" "$DEPLOY_MINIAPP"; do
+          for value in "$DEPLOY_CORE" "$DEPLOY_AGATA" "$DEPLOY_MINIAPP" "$DEPLOY_EROS" "$EROS_INSTALLED"; do
             [[ "$value" == true || "$value" == false ]]
           done
           echo "GPOINT_KAMAL_COMPONENT_SCOPE=$DEPLOY_SCOPE" >> "$GITHUB_STEP_SUMMARY"
@@ -1049,9 +1362,99 @@ jobs:
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$@" \
               < "$GITHUB_WORKSPACE/scripts/verify-kamal-role.sh"
           }
+          if [[ "$DEPLOY_AGATA" == true ]]; then
+            GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api \
+              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.agata.yml
+            GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker kamal app stop --roles memory-worker --config-file config/deploy.agata.yml
+            GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker \
+              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles memory-worker --config-file config/deploy.agata.yml
+            verify_single_running_role gpoint-agata-memory-worker "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
+          fi
+          if [[ "$DEPLOY_EROS" == true ]]; then
+            [[ "$EROS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+            EROS_OLLAMA_MODEL_DIGEST="$(python3 -c 'import json; print(json.load(open("services/eros-engine/ollama-model.lock.json"))["digest"])')"
+            [[ "$EROS_OLLAMA_MODEL_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+            if accessory_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{.State.Status}}' gpoint-eros-relay-ollama 2>&1)"; then
+              :
+            elif [[ "$accessory_state" == *"No such object: gpoint-eros-relay-ollama"* ]]; then
+              accessory_state=ABSENT
+            else
+              echo "could not verify Ollama accessory state; refusing bootstrap" >&2
+              exit 1
+            fi
+            ollama_bootstrap=false
+            legacy_ollama_stopped=false
+            legacy_ollama_committed=false
+            restore_legacy_ollama() {
+              local result=$?
+              if [[ "$legacy_ollama_stopped" == true && "$legacy_ollama_committed" != true ]]; then
+                if ! ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s <<'REMOTE_OLLAMA_RESTORE'
+          set -euo pipefail
+          if docker inspect gpoint-eros-relay-ollama >/dev/null 2>&1; then
+            image="$(docker inspect --format '{{.Config.Image}}' gpoint-eros-relay-ollama)"
+            test "$image" = 'ollama/ollama@sha256:a717bfc1c56acfc2e85d3109bd40a7646258ec9062c40cea83b9ed0927eb4223'
+            docker rm -f gpoint-eros-relay-ollama >/dev/null
+          fi
+          if [[ "$(docker inspect --format '{{.State.Running}}' ollama-layer7)" != true ]]; then
+            docker start ollama-layer7 >/dev/null
+          fi
+          REMOTE_OLLAMA_RESTORE
+                then
+                  echo "failed to restore temporary Ollama after Kamal accessory handoff failure" >&2
+                fi
+              fi
+              return "$result"
+            }
+            if [[ "$accessory_state" == ABSENT ]]; then
+              if legacy_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{.State.Status}}' ollama-layer7 2>&1)"; then
+                if [[ "$legacy_state" != running ]]; then
+                  echo "temporary Ollama exists but is not running; refusing accessory handoff" >&2
+                  exit 1
+                fi
+                ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - "$EROS_OLLAMA_MODEL_DIGEST" ollama-layer7 \
+                  < scripts/verify-layer7-ollama.py
+                legacy_ollama_stopped=true
+                trap restore_legacy_ollama EXIT
+                ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker stop ollama-layer7 >/dev/null
+              elif [[ "$legacy_state" != *"No such object: ollama-layer7"* ]]; then
+                echo "could not verify temporary Ollama state; refusing bootstrap" >&2
+                exit 1
+              fi
+              GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay \
+                kamal accessory boot ollama --config-file config/deploy.eros-relay.yml
+              ollama_bootstrap=true
+            else
+              if [[ "$accessory_state" != running ]]; then
+                GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay \
+                  kamal accessory start ollama --config-file config/deploy.eros-relay.yml
+              fi
+            fi
+            if [[ "$ollama_bootstrap" == true && "$legacy_ollama_stopped" != true ]]; then
+              GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay \
+                kamal accessory exec ollama ollama pull qwen3-embedding:0.6b --config-file config/deploy.eros-relay.yml
+            fi
+            ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - "$EROS_OLLAMA_MODEL_DIGEST" \
+              < scripts/verify-layer7-ollama.py
+            if [[ "$legacy_ollama_stopped" == true ]]; then
+              ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker rm ollama-layer7 >/dev/null
+              legacy_ollama_committed=true
+              trap - EXIT
+            fi
+            GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay kamal app stop --roles relay --config-file config/deploy.eros-relay.yml
+            GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay \
+              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles relay --config-file config/deploy.eros-relay.yml
+            verify_single_running_role gpoint-eros-relay-relay "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
+            GPOINT_KAMAL_EXPECTED_DIGEST="$EROS_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-pilot KAMAL_ROLES=engine \
+              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles engine --config-file config/deploy.eros.yml
+            verify_single_running_role gpoint-eros-pilot-engine "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
+          fi
           if [[ "$DEPLOY_CORE" == true ]]; then
+            core_api_config=config/deploy.yml
+            if [[ "$EROS_INSTALLED" == true || "$DEPLOY_EROS" == true ]]; then
+              core_api_config=config/deploy.eros-api.yml
+            fi
             GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
-              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.yml
+              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file "$core_api_config"
             GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker kamal app stop --roles worker --config-file config/deploy.yml
             GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker \
               kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker --config-file config/deploy.yml
@@ -1060,14 +1463,6 @@ jobs:
             GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot \
               kamal deploy --skip-push --version "$IMAGE_VERSION" --roles bot --config-file config/deploy.yml
             verify_single_running_role gpoint-core-bot "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
-          fi
-          if [[ "$DEPLOY_AGATA" == true ]]; then
-            GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api \
-              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.agata.yml
-            GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker kamal app stop --roles memory-worker --config-file config/deploy.agata.yml
-            GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=memory-worker \
-              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles memory-worker --config-file config/deploy.agata.yml
-            verify_single_running_role gpoint-agata-memory-worker "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
           fi
           if [[ "$DEPLOY_MINIAPP" == true ]]; then
             GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
@@ -1084,6 +1479,7 @@ jobs:
           DB_MOUNTS_SHA256: ${{ steps.topology.outputs.DB_MOUNTS_SHA256 }}
           REDIS_MOUNTS_SHA256: ${{ steps.topology.outputs.REDIS_MOUNTS_SHA256 }}
           EXPECTED_ROLE_IDENTITIES_B64: ${{ steps.component_plan.outputs.expected_role_identities_b64 }}
+          EROS_DIGEST: ${{ steps.component_plan.outputs.eros_digest }}
           EXPECTED_PRISMA_HEAD: ${{ steps.migration_apply.outputs.prisma_head }}
           EXPECTED_PRISMA_MIGRATIONS: ${{ steps.migration_apply.outputs.prisma_migrations }}
           EXPECTED_PRISMA_CHECKSUMS: ${{ steps.migration_apply.outputs.prisma_checksums }}
@@ -1118,9 +1514,15 @@ jobs:
           writer_sha="$(sha256sum scripts/write-kamal-production-manifest.py | awk '{print $1}')"
           remote_writer_sha="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" sha256sum "$writer_remote" | awk '{print $1}')"
           test "$writer_sha" = "$remote_writer_sha"
+          eros_label_remote="/run/gpoint-eros-runtime-labels-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.py"
+          [[ "$eros_label_remote" == "/run/gpoint-eros-runtime-labels-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.py" ]]
+          scp -p scripts/verify-eros-runtime-labels.py "root@${GPOINT_PRODUCTION_HOST}:$eros_label_remote"
+          local_label_sha="$(sha256sum scripts/verify-eros-runtime-labels.py | awk '{print $1}')"
+          remote_label_sha="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" sha256sum "$eros_label_remote" | awk '{print $1}')"
+          test "$local_label_sha" = "$remote_label_sha"
           test -n "$EXPECTED_PRISMA_HEAD" && test -n "$EXPECTED_PRISMA_MIGRATIONS" && test -n "$EXPECTED_PRISMA_CHECKSUMS" && test -n "$EXPECTED_AGATA_HEAD"
           test -n "$BASELINE_PRISMA_HEAD" && test -n "$BASELINE_PRISMA_MIGRATIONS" && test -n "$BASELINE_PRISMA_CHECKSUMS"
-          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$EXPECTED_PRISMA_MIGRATIONS" "$EXPECTED_PRISMA_CHECKSUMS" "$EXPECTED_PRISMA_HEAD" "$EXPECTED_AGATA_HEAD" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" "$BASELINE_PRISMA_MIGRATIONS" "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "${PENDING_PRISMA_MIGRATIONS:--}" "${PENDING_PRISMA_CHECKSUMS:--}" "$BASELINE_AGATA_HEAD" "$EXPECTED_ROLE_IDENTITIES_B64" <<'REMOTE'
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$EXPECTED_PRISMA_MIGRATIONS" "$EXPECTED_PRISMA_CHECKSUMS" "$EXPECTED_PRISMA_HEAD" "$EXPECTED_AGATA_HEAD" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" "$BASELINE_PRISMA_MIGRATIONS" "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "${PENDING_PRISMA_MIGRATIONS:--}" "${PENDING_PRISMA_CHECKSUMS:--}" "$BASELINE_AGATA_HEAD" "$EXPECTED_ROLE_IDENTITIES_B64" "$EROS_DIGEST" <<'REMOTE'
           set -euo pipefail
           sha="$1"; version="$2"; app="$3"; agata="$4"; miniapp="$5"; db_id="$6"; redis_id="$7"; deployment_id="$8"; run_id="$9"; attempt="${10}"; writer="${11}"
           expected_prisma_migrations="${12}"; expected_prisma_checksums="${13}"; expected_prisma_head="${14}"; expected_agata_head="${15}"
@@ -1128,10 +1530,13 @@ jobs:
           baseline_prisma_migrations="${18}"; baseline_prisma_checksums="${19}"; baseline_prisma_head="${20}"
           pending_prisma_migrations="${21}"; pending_prisma_checksums="${22}"; baseline_agata_head="${23}"
           expected_role_identities_b64="${24}"
+          eros_digest="${25}"
           [[ "$pending_prisma_migrations" != "-" ]] || pending_prisma_migrations=""
           [[ "$pending_prisma_checksums" != "-" ]] || pending_prisma_checksums=""
           [[ "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
           [[ "$writer" == "/run/gpoint-ordinary-manifest-${run_id}-${attempt}.py" ]]
+          eros_label_remote="/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py"
+          trap 'rm -f -- "$eros_label_remote"' EXIT
           test -s "$writer"
           test "$(docker inspect --format '{{.Id}}' shared_postgres_1)" = "$db_id"
           test "$(docker inspect --format '{{.Id}}' shared_redis_1)" = "$redis_id"
@@ -1160,11 +1565,16 @@ jobs:
               "gpoint-agata-api": "ghcr.io/akhripunov/gpoint-agata-runtime",
               "gpoint-agata-memory-worker": "ghcr.io/akhripunov/gpoint-agata-runtime",
               "gpoint-miniapp-web": "ghcr.io/akhripunov/gpoint-miniapp",
+              "gpoint-eros-pilot-engine": "ghcr.io/akhripunov/gpoint-eros",
+              "gpoint-eros-relay-relay": "ghcr.io/akhripunov/gpoint-runtime",
           }
           roles = expected.get("roles")
-          if not isinstance(roles, dict) or set(roles) != set(repos):
+          base_roles = set(repos) - {"gpoint-eros-pilot-engine", "gpoint-eros-relay-relay"}
+          if not isinstance(roles, dict) or set(roles) not in (base_roles, set(repos)):
               raise SystemExit("component runtime plan has incomplete role inventory")
           for role, repository in repos.items():
+              if role not in roles:
+                  continue
               row = roles[role]
               if (not re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+", row.get("version", ""))
                       or not re.fullmatch(r"[0-9a-f]{40}", row.get("sourceSha", ""))
@@ -1179,7 +1589,11 @@ jobs:
             container="$(docker ps -q --filter "name=^/${prefix}-${role_version}$")"
             test -n "$container"
             test "$(docker inspect --format '{{.State.Running}}' "$container")" = true
-            test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$container")" = "$role_source"
+            if [[ "$prefix" == gpoint-eros-pilot-engine ]]; then
+              test "$(docker inspect --format '{{index .Config.Labels "com.gpoint.source.revision"}}' "$container")" = "$role_source"
+            else
+              test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$container")" = "$role_source"
+            fi
             image_id="$(docker inspect --format '{{.Image}}' "$container")"
             if [[ "$baseline_image_id" != - ]]; then
               test "$image_id" = "$baseline_image_id" || { echo "untouched role image ID changed: $prefix" >&2; exit 1; }
@@ -1213,6 +1627,16 @@ jobs:
           docker exec "gpoint-agata-api-$agata_version" python -c "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/health/ready',timeout=3); assert r.status == 200"
           docker exec "gpoint-agata-memory-worker-$agata_version" python -m app.memory.worker --healthcheck
           docker exec "gpoint-miniapp-web-$miniapp_version" wget --spider --quiet http://127.0.0.1/
+          if grep -q '^gpoint-eros-pilot-engine|' <<< "$runtime_rows"; then
+            eros_version="$(sed -n 's/^gpoint-eros-pilot-engine|\([^|]*\).*/\1/p' <<< "$runtime_rows")"
+            relay_version="$(sed -n 's/^gpoint-eros-relay-relay|\([^|]*\).*/\1/p' <<< "$runtime_rows")"
+            docker exec "gpoint-eros-pilot-engine-$eros_version" curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null
+            docker exec "gpoint-eros-pilot-engine-$eros_version" sh -c 'test "$EROS_PILOT_EMBEDDING_PROBE_URL" = "http://172.31.254.1:11434/api/embed" && curl --fail --silent --show-error --max-time 60 -H "Content-Type: application/json" --data "{\"model\":\"qwen3-embedding:0.6b\",\"input\":\"Synthetic Layer7 Eros network verification\",\"dimensions\":512}" "$EROS_PILOT_EMBEDDING_PROBE_URL" >/dev/null'
+            docker exec "gpoint-eros-relay-relay-$relay_version" node -e "fetch('http://172.31.254.1:11434/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+            python3 "/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py" "gpoint-eros-pilot-engine-$eros_version" d1a140083321687212fb7b17c09cc0c3c9639f5e none
+            rm -f -- "/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py"
+            echo "GPOINT_EROS_HEALTH=PASS UPSTREAM_SHA=d1a140083321687212fb7b17c09cc0c3c9639f5e DIGEST=$EROS_DIGEST"
+          fi
           docker exec "gpoint-core-api-$core_version" node -e 'const fs=require("node:fs");const crypto=require("node:crypto");const p="/data/media/.gpoint-runtime-verify-"+crypto.randomUUID();let created=false;try{fs.writeFileSync(p,"gpoint-media-read-write-pass",{flag:"wx"});created=true;if(fs.readFileSync(p,"utf8")!=="gpoint-media-read-write-pass")process.exit(1)}finally{if(created)fs.unlinkSync(p)}'
           media_mounts="$(docker inspect "gpoint-core-api-$core_version" --format '{{json .Mounts}}')"
           python3 - "$media_mounts" <<'PY'
@@ -1268,6 +1692,7 @@ jobs:
             --baseline-prisma-checksums "$baseline_prisma_checksums" --baseline-agata-head "$baseline_agata_head" \
             --pending-prisma-migrations "$pending_prisma_migrations" --pending-prisma-checksums "$pending_prisma_checksums" \
             --expected-role-identities-b64 "$expected_role_identities_b64" \
+            --eros-digest "$eros_digest" \
             --public-routes-verified --migration-compatibility-verified)"
           printf '%s\n' "$writer_output"
           manifest_sha="$(sed -n 's/^GPOINT_KAMAL_MANIFEST_SHA256=\([0-9a-f]*\).*/\1/p' <<< "$writer_output")"
@@ -1282,9 +1707,12 @@ jobs:
           import base64, json, re, sys
           value = json.loads(base64.b64decode(sys.argv[1], validate=True))
           roles = value["roles"]
-          keys = {"CORE": "gpoint-core-api", "AGATA": "gpoint-agata-api", "MINIAPP": "gpoint-miniapp-web"}
+          keys = {"CORE": "gpoint-core-api", "AGATA": "gpoint-agata-api", "MINIAPP": "gpoint-miniapp-web",
+                  "EROS": "gpoint-eros-pilot-engine"}
           rows = []
           for component, role in keys.items():
+              if role not in roles:
+                  continue
               source = roles[role]["sourceSha"]
               if not re.fullmatch(r"[0-9a-f]{40}", source):
                   raise SystemExit("verified component source SHA is malformed")
@@ -1298,12 +1726,15 @@ jobs:
         if: always() && steps.deployment.outputs.id != '' && steps.verify.outcome != 'success'
         env:
           MIGRATION_APPLY_OUTCOME: ${{ steps.migration_apply.outcome }}
+          EROS_DATABASE_OUTCOME: ${{ steps.eros_database.outcome }}
           KAMAL_APPLY_OUTCOME: ${{ steps.kamal_apply.outcome }}
           VERIFY_OUTCOME: ${{ steps.verify.outcome }}
         run: |
           set -euo pipefail
           if [[ "$MIGRATION_APPLY_OUTCOME" == failure ]]; then
             echo "RECOVERY_REQUIRED: Prisma Apply failed or its exact post-Apply inventory was not verified for $CANDIDATE_SHA. Do not retry Apply or run Kamal until a read-only reconciliation confirms the live migration table and heads." >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$EROS_DATABASE_OUTCOME" == failure ]]; then
+            echo "RECOVERY_REQUIRED: Eros SQLx rehearsal/Apply did not pass for $CANDIDATE_SHA. Never downgrade the Eros database; confirm its SQLx ledger and Eros backup read-only before any retry." >> "$GITHUB_STEP_SUMMARY"
           elif [[ "$KAMAL_APPLY_OUTCOME" != success || "$VERIFY_OUTCOME" != success ]]; then
             echo "RECOVERY_REQUIRED: partial Kamal transition or Runtime Verify failure for $CANDIDATE_SHA; automatic database downgrade is prohibited. Confirm the live topology and migration head read-only before another production mutation." >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -1438,7 +1869,7 @@ jobs:
           )"
           printf '%s' "$encoded" | base64 --decode > "$RUNNER_TEMP/gpoint-rollback/manifest.json"
           echo "manifest_sha=$manifest_sha" >> "$GITHUB_OUTPUT"
-      - name: Validate linked build, successful Runtime Verify and six-role manifest
+      - name: Validate linked build, successful Runtime Verify and component-role manifest
         id: evidence
         env:
           TARGET_SHA: ${{ inputs.rollback_target_sha }}
@@ -1468,9 +1899,11 @@ jobs:
           CORE_DIGEST: ${{ steps.evidence.outputs.core_digest }}
           AGATA_DIGEST: ${{ steps.evidence.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ steps.evidence.outputs.miniapp_digest }}
+          EROS_DIGEST: ${{ steps.evidence.outputs.eros_digest }}
           CORE_SOURCE_SHA: ${{ steps.evidence.outputs.core_source_sha }}
           AGATA_SOURCE_SHA: ${{ steps.evidence.outputs.agata_source_sha }}
           MINIAPP_SOURCE_SHA: ${{ steps.evidence.outputs.miniapp_source_sha }}
+          EROS_SOURCE_SHA: ${{ steps.evidence.outputs.eros_source_sha }}
         run: |
           set -euo pipefail
           for item in \
@@ -1485,6 +1918,17 @@ jobs:
             python3 scripts/verify_native_image_readback.py "$RUNNER_TEMP/gpoint-rollback/$role-image.json" "$repository" "$digest" "$source_sha"
             python3 scripts/verify_native_image_attestation.py "$RUNNER_TEMP/gpoint-rollback/$role-sbom.json" "$RUNNER_TEMP/gpoint-rollback/$role-provenance.json" "$source_sha" https://github.com/akhripunov/gpoint.git
           done
+          if [[ "${{ inputs.rollback_eros }}" == true ]]; then
+            [[ "$EROS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ && "$EROS_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+            image=ghcr.io/akhripunov/gpoint-eros
+            docker pull --platform linux/amd64 "$image@$EROS_DIGEST"
+            docker image inspect "$image@$EROS_DIGEST" > "$RUNNER_TEMP/gpoint-rollback/eros-image.json"
+            docker buildx imagetools inspect --format '{{json .SBOM.SPDX}}' "$image@$EROS_DIGEST" > "$RUNNER_TEMP/gpoint-rollback/eros-sbom.json"
+            docker buildx imagetools inspect --format '{{json .Provenance}}' "$image@$EROS_DIGEST" > "$RUNNER_TEMP/gpoint-rollback/eros-provenance.json"
+            python3 scripts/verify_native_eros_image.py \
+              "$RUNNER_TEMP/gpoint-rollback/eros-image.json" "$RUNNER_TEMP/gpoint-rollback/eros-sbom.json" \
+              "$RUNNER_TEMP/gpoint-rollback/eros-provenance.json" "$EROS_DIGEST" "$EROS_SOURCE_SHA"
+          fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ steps.evidence.outputs.core_source_sha }}
@@ -1556,6 +2000,55 @@ jobs:
             --agata-directory "$GITHUB_WORKSPACE/rollback-agata/services/agata/migrations/versions" \
             --agata-current-head "$(sed -n 's/^AGATA_HEAD=//p' <<< "$facts")"
           while IFS='=' read -r key value; do case "$key" in DB_CONTAINER_ID|REDIS_CONTAINER_ID|DB_MOUNTS_SHA256|REDIS_MOUNTS_SHA256) echo "$key=$value" >> "$GITHUB_OUTPUT" ;; esac; done <<< "$facts"
+      - name: Verify retained Eros rollback containers
+        if: inputs.rollback_eros == true
+        env:
+          EROS_VERSION: ${{ steps.evidence.outputs.eros_version }}
+          EROS_RELAY_VERSION: ${{ steps.evidence.outputs.eros_relay_version }}
+          EROS_DIGEST: ${{ steps.evidence.outputs.eros_digest }}
+          CORE_DIGEST: ${{ steps.evidence.outputs.core_digest }}
+          EROS_SOURCE_SHA: ${{ steps.evidence.outputs.eros_source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$EROS_VERSION" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
+          [[ "$EROS_RELAY_VERSION" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
+          [[ "$EROS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ && "$CORE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$EROS_SOURCE_SHA" = "${EROS_VERSION%%-*}"
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$EROS_VERSION" "$EROS_RELAY_VERSION" "$EROS_SOURCE_SHA" \
+            "ghcr.io/akhripunov/gpoint-eros@$EROS_DIGEST" "ghcr.io/akhripunov/gpoint-runtime@$CORE_DIGEST" <<'REMOTE'
+          set -euo pipefail
+          for item in "gpoint-eros-pilot-engine|$1|$3|$4|com.gpoint.source.revision" \
+                      "gpoint-eros-relay-relay|$2|$3|$5|org.opencontainers.image.revision"; do
+            IFS='|' read -r prefix version source image label <<< "$item"
+            ids="$(docker ps -aq --filter "name=^/${prefix}-${version}$")"
+            test "$(wc -l <<< "$ids" | tr -d ' ')" = 1
+            test "$(docker inspect --format "{{index .Config.Labels \"$label\"}}" "$ids")" = "$source"
+            docker image inspect "$(docker inspect --format '{{.Image}}' "$ids")" --format '{{json .RepoDigests}}' | grep -F "$image" >/dev/null
+          done
+          echo EROS_ROLLBACK_TARGET_RETAINED=PASS
+          REMOTE
+      - name: Verify Eros rollback image against an isolated current database restore
+        if: inputs.rollback_eros == true
+        env:
+          EROS_SOURCE_SHA: ${{ steps.evidence.outputs.eros_source_sha }}
+          EROS_DIGEST: ${{ steps.evidence.outputs.eros_digest }}
+        run: |
+          set -euo pipefail
+          [[ "$EROS_SOURCE_SHA" =~ ^[0-9a-f]{40}$ && "$EROS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="ghcr.io/akhripunov/gpoint-eros@$EROS_DIGEST"
+          run_identity="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          remote_docker_config="/run/gpoint-eros-ghcr-$run_identity"
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" install -d -o root -g root -m 0700 "$remote_docker_config"
+          cleanup_remote_docker_config() {
+            ssh -T "root@${GPOINT_PRODUCTION_HOST}" rm -rf -- "$remote_docker_config"
+          }
+          trap cleanup_remote_docker_config EXIT
+          printf '%s' "$KAMAL_REGISTRY_PASSWORD" | ssh -T "root@${GPOINT_PRODUCTION_HOST}" \
+            "DOCKER_CONFIG='$remote_docker_config' docker login ghcr.io --username '$GITHUB_ACTOR' --password-stdin" >/dev/null
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" env DOCKER_CONFIG="$remote_docker_config" docker pull --platform linux/amd64 "$image"
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" env DOCKER_CONFIG="$remote_docker_config" python3 - --mode rollback-check \
+            --candidate "$EROS_SOURCE_SHA" --image "$image" --run-id "$run_identity" \
+            < scripts/eros-native-database.py
       - name: Roll back consumers and then APIs with stock Kamal
         id: rollback_apply
         env:
@@ -1565,9 +2058,14 @@ jobs:
           CORE_DIGEST: ${{ steps.evidence.outputs.core_digest }}
           AGATA_DIGEST: ${{ steps.evidence.outputs.agata_digest }}
           MINIAPP_DIGEST: ${{ steps.evidence.outputs.miniapp_digest }}
+          EROS_DIGEST: ${{ steps.evidence.outputs.eros_digest }}
           CORE_SOURCE_SHA: ${{ steps.evidence.outputs.core_source_sha }}
           AGATA_SOURCE_SHA: ${{ steps.evidence.outputs.agata_source_sha }}
           MINIAPP_SOURCE_SHA: ${{ steps.evidence.outputs.miniapp_source_sha }}
+          EROS_SOURCE_SHA: ${{ steps.evidence.outputs.eros_source_sha }}
+          EROS_VERSION: ${{ steps.evidence.outputs.eros_version }}
+          EROS_RELAY_VERSION: ${{ steps.evidence.outputs.eros_relay_version }}
+          ROLLBACK_EROS: ${{ inputs.rollback_eros }}
           TARGET_MANIFEST_SHA: ${{ steps.evidence.outputs.manifest_sha256 }}
         run: |
           set -euo pipefail
@@ -1598,6 +2096,19 @@ jobs:
           verify_role gpoint-agata-api "$AGATA_VERSION" "$AGATA_SOURCE_SHA"
           GPOINT_COMMIT_SHA="$CORE_SOURCE_SHA" GPOINT_APP_SOURCE_SHA="$CORE_SOURCE_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api kamal rollback-core rollback "$CORE_VERSION" --roles api --config-file config/deploy.yml
           verify_role gpoint-core-api "$CORE_VERSION" "$CORE_SOURCE_SHA"
+          if [[ "$ROLLBACK_EROS" == true ]]; then
+            [[ "$EROS_VERSION" == "$EROS_SOURCE_SHA-"* && "$EROS_RELAY_VERSION" == "$EROS_SOURCE_SHA-"* ]]
+            GPOINT_COMMIT_SHA="$EROS_SOURCE_SHA" GPOINT_APP_SOURCE_SHA="$EROS_SOURCE_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$EROS_DIGEST" \
+              GPOINT_KAMAL_SERVICE=gpoint-eros-pilot KAMAL_ROLES=engine \
+              kamal . rollback "$EROS_VERSION" --roles engine --config-file config/deploy.eros.yml
+            verify_role gpoint-eros-pilot-engine "$EROS_VERSION" "$EROS_SOURCE_SHA"
+            GPOINT_COMMIT_SHA="$EROS_SOURCE_SHA" GPOINT_APP_SOURCE_SHA="$EROS_SOURCE_SHA" GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay \
+              kamal . app stop --roles relay --config-file config/deploy.eros-relay.yml
+            GPOINT_COMMIT_SHA="$EROS_SOURCE_SHA" GPOINT_APP_SOURCE_SHA="$EROS_SOURCE_SHA" GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" \
+              GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay \
+              kamal . rollback "$EROS_RELAY_VERSION" --roles relay --config-file config/deploy.eros-relay.yml
+            verify_role gpoint-eros-relay-relay "$EROS_RELAY_VERSION" "$EROS_SOURCE_SHA"
+          fi
       - name: Verify rollback Runtime and preserve databases before SUCCESS
         id: verify
         env:
@@ -1615,6 +2126,11 @@ jobs:
           CORE_SOURCE_SHA: ${{ steps.evidence.outputs.core_source_sha }}
           AGATA_SOURCE_SHA: ${{ steps.evidence.outputs.agata_source_sha }}
           MINIAPP_SOURCE_SHA: ${{ steps.evidence.outputs.miniapp_source_sha }}
+          EROS_SOURCE_SHA: ${{ steps.evidence.outputs.eros_source_sha }}
+          EROS_VERSION: ${{ steps.evidence.outputs.eros_version }}
+          EROS_RELAY_VERSION: ${{ steps.evidence.outputs.eros_relay_version }}
+          EROS_DIGEST: ${{ steps.evidence.outputs.eros_digest }}
+          ROLLBACK_EROS: ${{ inputs.rollback_eros }}
           TARGET_MANIFEST_SHA: ${{ steps.evidence.outputs.manifest_sha256 }}
         run: |
           set -euo pipefail
@@ -1677,7 +2193,31 @@ jobs:
             --prisma-current-head "$(sed -n 's/^PRISMA_HEAD=//p' <<< "$facts")" \
             --agata-directory "$GITHUB_WORKSPACE/rollback-agata/services/agata/migrations/versions" \
             --agata-current-head "$(sed -n 's/^AGATA_HEAD=//p' <<< "$facts")"
+          if [[ "$ROLLBACK_EROS" == true ]]; then
+            ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$EROS_VERSION" "$EROS_RELAY_VERSION" \
+              "$EROS_SOURCE_SHA" "ghcr.io/akhripunov/gpoint-eros@$EROS_DIGEST" \
+              "ghcr.io/akhripunov/gpoint-runtime@$CORE_DIGEST" <<'REMOTE_EROS_VERIFY'
+          set -euo pipefail
+          for item in "gpoint-eros-pilot-engine|$1|$3|$4|com.gpoint.source.revision" \
+                      "gpoint-eros-relay-relay|$2|$3|$5|org.opencontainers.image.revision"; do
+            IFS='|' read -r prefix version source image label <<< "$item"
+            name="$prefix-$version"
+            test "$(docker ps -q --filter "name=^/$name$")" != ""
+            test "$(docker inspect --format '{{.State.Running}}' "$name")" = true
+            test "$(docker inspect --format "{{index .Config.Labels \"$label\"}}" "$name")" = "$source"
+            image_id="$(docker inspect --format '{{.Image}}' "$name")"
+            docker image inspect "$image_id" --format '{{json .RepoDigests}}' | grep -F "$image" >/dev/null
+          done
+          docker exec "gpoint-eros-pilot-engine-$1" curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null
+          docker exec "gpoint-eros-relay-relay-$2" node -e "fetch('http://172.31.254.1:11434/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+          echo EROS_ROLLBACK_RUNTIME_VERIFY=PASS
+          REMOTE_EROS_VERIFY
+            ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - --mode verify-unchanged \
+              --candidate "$EROS_SOURCE_SHA" --image "ghcr.io/akhripunov/gpoint-eros@$EROS_DIGEST" \
+              --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" < scripts/eros-native-database.py
+          fi
           environment_url="https://gpoint.one/#gpoint-manifest-sha256=$TARGET_MANIFEST_SHA&gpoint-runtime-target-sha=$TARGET_SHA&gpoint-core-source-sha=$CORE_SOURCE_SHA&gpoint-agata-source-sha=$AGATA_SOURCE_SHA&gpoint-miniapp-source-sha=$MINIAPP_SOURCE_SHA"
+          if [[ "$ROLLBACK_EROS" == true ]]; then environment_url+="&gpoint-eros-source-sha=$EROS_SOURCE_SHA"; fi
           printf 'environment_url=%s\n' "$environment_url" >> "$GITHUB_OUTPUT"
           echo "GPOINT_ROLLBACK_VERIFY=PASS SHA=$TARGET_SHA" >> "$GITHUB_STEP_SUMMARY"
       - name: Mark failed partial rollback for read-only recovery

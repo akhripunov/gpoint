@@ -98,9 +98,9 @@ def test_kamal_agata_and_miniapp_are_separate_services():
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
     assert "id: miniapp" in workflow and "target: miniapp-runtime" in workflow
     assert "ghcr.io/akhripunov/gpoint-miniapp:${{ github.sha }}" in workflow
-    assert "MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}" in workflow
-    assert "APP_DIGEST: ${{ steps.app.outputs.digest }}" in workflow
-    assert "AGATA_DIGEST: ${{ steps.agata.outputs.digest }}" in workflow
+    assert "MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest || steps.prepared.outputs.miniapp_digest }}" in workflow
+    assert "APP_DIGEST: ${{ steps.app.outputs.digest || steps.prepared.outputs.app_digest }}" in workflow
+    assert "AGATA_DIGEST: ${{ steps.agata.outputs.digest || steps.prepared.outputs.agata_digest }}" in workflow
 
 
 def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
@@ -109,7 +109,10 @@ def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
     assert {"tests", "build", "deploy"}.issubset(jobs)
     assert not ({"workspace", "python"} & set(jobs))
     assert jobs["build"]["needs"] == ["tests"]
-    assert jobs["build"]["if"] == "needs.tests.outputs.mode == 'DEPLOY' || needs.tests.outputs.mode == 'REHEARSAL'"
+    assert jobs["build"]["if"] == (
+        "needs.tests.outputs.mode == 'DEPLOY' || needs.tests.outputs.mode == 'REHEARSAL' "
+        "|| needs.tests.outputs.mode == 'ARTIFACT_PREPARE'"
+    )
     build_steps = yaml.safe_dump(jobs["build"]["steps"])
     assert "cache-to: type=gha,scope=gpoint-runtime,mode=max" in build_steps
     assert "sbom: true" in build_steps
@@ -140,8 +143,9 @@ def test_first_cutover_build_images_include_the_kamal_service_labels():
 def test_kamal_uses_attempt_scoped_tag_with_buildkit_digest_verification():
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
-    version = "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
-    assert f"IMAGE_VERSION: {version}" in deploy
+    assert "IMAGE_VERSION: ${{ needs.build.outputs.image_version }}" in deploy
+    assert "image_version: ${{ steps.image_version.outputs.image_version }}" in workflow
+    assert 'image_version="${CANDIDATE_SHA}-${CURRENT_RUN_ID}-${CURRENT_RUN_ATTEMPT}"' in workflow
     assert "ghcr.io/akhripunov/gpoint-runtime:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}" in workflow
     assert "name: Verify immutable candidate images selected for the live scope" in deploy
     assert 'docker pull --platform linux/amd64 "$repository:$IMAGE_VERSION"' in deploy
@@ -157,6 +161,8 @@ def test_kamal_uses_attempt_scoped_tag_with_buildkit_digest_verification():
     assert hook.startswith("#!/bin/sh\n")
     assert 'case "$version" in "$candidate"-*)' in hook
     assert 'EXPECTED_REF="$repository@$expected_digest"' in hook
+    assert "gpoint-eros-pilot) repository=ghcr.io/akhripunov/gpoint-eros ;;" in hook
+    assert 'com.gpoint.source.revision' in hook
 
 
 def test_kamal_deploy_uses_native_verified_images_and_preserves_first_cutover_guard():
@@ -288,6 +294,9 @@ def test_kamal_network_hook_joins_only_allowed_core_and_agata_roles():
     assert "StrictHostKeyChecking=yes" in hook
     assert "gsales" not in hook.lower()
     assert "gpoint-miniapp:web) networks='gpoint_app:'" in hook
+    assert "gpoint-eros-pilot)" in hook and "gpoint-eros-relay)" in hook
+    assert "gpoint-eros-pilot:engine|gpoint-eros-relay:relay) networks=''" in hook
+    assert "Eros engine is not attached to its data network" in hook
     assert "getent hosts api" in hook
     assert 'GPOINT_KAMAL_ROOT_ROUTE_BOOTSTRAP' in hook
     assert 'DEFERRED_FOR_FIRST_CUTOVER' in hook
@@ -1672,7 +1681,8 @@ def test_ordinary_verify_receives_baseline_facts_in_remote_shell():
     values = {
         'CANDIDATE_SHA': 'a' * 40, 'IMAGE_VERSION': 'a' * 40 + '-123-1',
         'APP_DIGEST': 'sha256:' + 'b' * 64, 'AGATA_DIGEST': 'sha256:' + 'c' * 64,
-        'MINIAPP_DIGEST': 'sha256:' + 'd' * 64, 'DB_CONTAINER_ID': 'e' * 64,
+        'MINIAPP_DIGEST': 'sha256:' + 'd' * 64, 'EROS_DIGEST': 'sha256:' + 'e' * 64,
+        'DB_CONTAINER_ID': 'e' * 64,
         'REDIS_CONTAINER_ID': 'f' * 64, 'DEPLOYMENT_ID': '7', 'GITHUB_RUN_ID': '123',
         'GITHUB_RUN_ATTEMPT': '1', 'writer_remote': '/run/gpoint-ordinary-manifest-123-1.py',
         'BASELINE_PRISMA_MIGRATIONS': 'migration', 'BASELINE_PRISMA_CHECKSUMS': 'migration=checksum',

@@ -148,6 +148,42 @@ test('claim returns an empty GPOINT poll instead of failing when optional Eros a
   }
 });
 
+test('GPoint-owned Worker routes health, status and claims through Eros without touching AGATA', async () => {
+  class TestGateway extends AgataWorkerGatewayController {
+    protected override async readAgataQueueStatus(): Promise<never> { assert.fail('AGATA queue must not be queried'); }
+    protected override async claimAgataJob(): Promise<never> { assert.fail('AGATA claim must not be queried'); }
+    protected override async readErosQueueStatus() { return { pending_jobs: 1, running_jobs: 0 }; }
+    protected override async claimErosJob() { return null; }
+  }
+  const previous = {
+    token: process.env.GPOINT_AGATA_WORKER_TOKEN, enabled: process.env.EROS_ENABLED,
+    mode: process.env.EROS_DATA_MODE, node: process.env.NODE_ENV,
+    tenant: process.env.GPOINT_CHAT_POLICY_TENANT_ID,
+  };
+  process.env.GPOINT_AGATA_WORKER_TOKEN = 'worker-gateway-test-token';
+  process.env.EROS_ENABLED = 'true';
+  process.env.EROS_DATA_MODE = 'gpoint-owned';
+  process.env.NODE_ENV = 'production';
+  process.env.GPOINT_CHAT_POLICY_TENANT_ID = '30000000-0000-4000-8000-000000000003';
+  try {
+    const gateway = new TestGateway();
+    const headers = { authorization: 'Bearer worker-gateway-test-token' };
+    assert.deepEqual(await gateway.health(headers), { status: 'ok', lane: 'GPOINT', provider: 'mac_product_worker' });
+    const status = await gateway.queueStatus(headers);
+    assert.deepEqual(status, { pending_jobs: 1, running_jobs: 0, lane: 'GPOINT',
+      source_id: 'agata-worker-queue-status-v1:gpoint', snapshot_at: status.snapshot_at });
+    assert.equal(typeof status.snapshot_at, 'string');
+    assert.ok(Number.isFinite(Date.parse(status.snapshot_at)));
+    assert.deepEqual(await gateway.claim(headers), { job: null });
+  } finally {
+    for (const [key, value] of Object.entries({ GPOINT_AGATA_WORKER_TOKEN: previous.token,
+      EROS_ENABLED: previous.enabled, EROS_DATA_MODE: previous.mode, NODE_ENV: previous.node,
+      GPOINT_CHAT_POLICY_TENANT_ID: previous.tenant })) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+});
+
 test('enabled boundary synchronizes character and consent before idempotent respond', async () => {
   const calls: unknown[][] = [];
   const client = {

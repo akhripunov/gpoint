@@ -9,7 +9,6 @@ test('an age-gate scenario can override the default E2E adult state', async ({ p
       eligible: false,
       status: 'pending',
       method: 'unknown',
-      jurisdiction: 'test',
       assertedAt: null,
       expiresAt: null,
       selfAttestationAllowed: true,

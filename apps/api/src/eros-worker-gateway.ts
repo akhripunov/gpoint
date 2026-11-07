@@ -2,8 +2,9 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, ran
 import { BadRequestException, Body, Controller, Get, Headers, Header, HttpException, OnModuleDestroy, OnModuleInit, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { PrismaClient, type Prisma } from '@prisma/client';
-import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, deriveBridgeInferenceIdentity, parseBridgeRequest, parseErosEmbeddingRequest, type ParsedErosBridgeRequest } from './eros-worker-contract.js';
-import { isAllowedOllamaEmbeddingEndpoint } from './eros-network-policy.js';
+import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, deriveBridgeInferenceIdentity, isExpectedErosWorkerJobIdentity, parseBridgeRequest, parseErosEmbeddingRequest, signBridgeIdentity, type ParsedErosBridgeRequest } from './eros-worker-contract.js';
+import { isAllowedOllamaEmbeddingEndpoint, isDisposableSyntheticLocalTest } from './eros-network-policy.js';
+import { erosIdentityFor, exactErosPilotPair, isGpointOwnedErosMode } from './eros-adapter.js';
 
 const prisma = new PrismaClient();
 const REPLY_LIMIT = 4_096;
@@ -62,7 +63,13 @@ function encryptQueueRequest(request: ParsedErosBridgeRequest, identity: ErosQue
   const cipher = createCipheriv('aes-256-gcm', queueEncryptionKey(), nonce);
   cipher.setAAD(queueAad(identity));
   const ciphertext = Buffer.concat([
-    cipher.update(JSON.stringify({ model: request.model, messages: request.messages, max_tokens: request.maxTokens, temperature: request.temperature }), 'utf8'),
+    cipher.update(JSON.stringify({
+      model: request.model,
+      messages: request.messages,
+      max_tokens: request.maxTokens,
+      temperature: request.temperature,
+      ...(request.identity ? { bridge_identity: request.identity } : {}),
+    }), 'utf8'),
     cipher.final(),
   ]);
   return { v: 1, alg: 'A256GCM', nonce: nonce.toString('base64url'), ciphertext: ciphertext.toString('base64url'), tag: cipher.getAuthTag().toString('base64url') };
@@ -167,6 +174,12 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 
 /** Claim Eros bridge work on the existing authenticated GPOINT Product Worker contract. */
 export async function claimErosForGpointWorker(): Promise<{ job: Record<string, unknown> } | null> {
+  const pair = exactErosPilotPair();
+  // The pilot allowlist stores GPoint IDs. Queue rows carry Eros UUIDv5 IDs,
+  // so compare the signed queue identity against the deterministic mapping.
+  const mappedPilotPair = pair ? erosIdentityFor(pair) : null;
+  const ownedMode = isGpointOwnedErosMode();
+  if (!pair && !ownedMode) throw new HttpException({ code: 'EROS_PILOT_ALLOWLIST_INVALID' }, 503);
   const tenantId = workerTenant();
   const row = await withWorkerTenant(async (tx) => {
     await tx.$queryRawUnsafe(
@@ -203,9 +216,46 @@ export async function claimErosForGpointWorker(): Promise<{ job: Record<string, 
     id: row.id, request_id: row.request_id, tenant_id: row.tenant_id, user_id: row.user_id,
     creator_id: row.creator_id, session_id: row.session_id, instance_id: row.instance_id,
   };
+  const request = decryptQueueRequest(row.request, identity);
+  const bridgeIdentity = request.bridge_identity;
+  delete request.bridge_identity;
+  if (bridgeIdentity !== undefined) {
+    if (!bridgeIdentity || typeof bridgeIdentity !== 'object' || Array.isArray(bridgeIdentity)) {
+      throw new HttpException({ code: 'EROS_QUEUE_IDENTITY_INVALID' }, 503);
+    }
+    try {
+      request.user = signBridgeIdentity(bridgeIdentity as NonNullable<ParsedErosBridgeRequest['identity']>, signingSecret());
+    } catch {
+      throw new HttpException({ code: 'EROS_QUEUE_IDENTITY_INVALID' }, 503);
+    }
+  }
+  let parsedRequest: ParsedErosBridgeRequest;
+  try {
+    parsedRequest = await parseBridgeRequest(request, signingSecret());
+  } catch {
+    throw new HttpException({ code: 'EROS_QUEUE_IDENTITY_INVALID' }, 503);
+  }
+  const chatIdentity = parsedRequest.identity
+    ? deriveBridgeInferenceIdentity(parsedRequest.identity, requestFingerprint(parsedRequest))
+    : null;
+  const systemIdentity = row.job_type === 'SYSTEM_COMPLETION'
+    ? systemTaskIdentity(parsedRequest, tenantId)
+    : null;
+  if (!isExpectedErosWorkerJobIdentity(row, tenantId, mappedPilotPair ?? { userId: '', creatorId: '' }, systemIdentity, {
+    chatIdentity,
+    allowGpointOwnedChat: ownedMode,
+  })) {
+    await withWorkerTenant((tx) => tx.$executeRawUnsafe(
+      `UPDATE engine.eros_inference_jobs SET status = 'FAILED', error_code = 'synthetic_allowlist_mismatch',
+         lease_token = NULL, lease_expires_at = NULL, updated_at = now()
+       WHERE id = $1::uuid AND tenant_id = $2 AND status = 'RUNNING' AND lease_token = $3::uuid`,
+      row.id, tenantId, row.lease_token,
+    ));
+    throw new HttpException({ code: 'EROS_PILOT_ALLOWLIST_MISMATCH' }, 503);
+  }
   return { job: {
     id: row.id, leaseToken: row.lease_token, attempt: 1, target: 'GPOINT', tenant_id: tenantId,
-    request: decryptQueueRequest(row.request, identity), purpose: 'eros_chat_completion',
+    request, purpose: 'eros_chat_completion',
   } };
 }
 
@@ -504,7 +554,7 @@ export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestro
     try { parsed = parseErosEmbeddingRequest(body); }
     catch { throw new BadRequestException({ code: 'EROS_EMBEDDING_REQUEST_INVALID' }); }
     const endpoint = process.env.EROS_OLLAMA_EMBEDDING_URL ?? '';
-    const localMode = process.env.EROS_WORKER_LOCAL_TEST === 'true';
+    const localMode = isDisposableSyntheticLocalTest();
     if (!isAllowedOllamaEmbeddingEndpoint(endpoint, { localTest: localMode })) {
       throw new HttpException({ code: 'EROS_EMBEDDINGS_UNAVAILABLE' }, 503);
     }

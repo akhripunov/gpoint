@@ -51,6 +51,7 @@ class DeployEvidenceWorkflowTests(unittest.TestCase):
         self.assertIn('scripts/release-static-v4.test.mjs', test_scripts)
         self.assertIn('tests/test_deploy_evidence_workflow.py', test_scripts)
         self.assertIn('tests/test_native_build_boundary.py', test_scripts)
+        self.assertIn('tests/test_native_prepared_run.py', test_scripts)
         self.assertIn('tests/test_kamal_release_config.py', test_scripts)
         self.assertIn('tests/test_release_assets.py', test_scripts)
         self.assertIn("python -m pip install './services/agata[test]' './services/gsales[test]' pyyaml",

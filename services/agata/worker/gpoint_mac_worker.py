@@ -136,6 +136,7 @@ _ACTIVE_INFERENCE: subprocess.Popen | None = None
 TARGET_NAMES = ("GPOINT", "GSALES")
 LAB_TARGET = "LAB"
 LEGACY_GPOINT_GATEWAY_URL = "https://gpoint.one/api/agata-worker"
+GPOINT_EROS_GATEWAY_URL = "https://gpoint.one/api/gpoint-worker"
 STARTUP_LANES = ("GPOINT", "GSALES", "LAB")
 SAFE_STARTUP_ERROR_CODES = {
     "worker_config_permissions_invalid", "worker_gateway_or_auth_unconfigured",
@@ -153,18 +154,28 @@ SAFE_STARTUP_ERROR_CODES = {
 def configured_targets() -> dict[str, tuple[str, str]]:
     targets = {}
     for name in TARGET_NAMES:
-        base = os.environ.get(name + "_AGATA_WORKER_URL", LEGACY_GPOINT_GATEWAY_URL if name == "GPOINT" else "").rstrip("/")
-        token = os.environ.get(name + "_AGATA_WORKER_TOKEN", "")
+        if name == "GPOINT" and os.environ.get("GPOINT_EROS_WORKER_URL"):
+            base = os.environ["GPOINT_EROS_WORKER_URL"].rstrip("/")
+            token = os.environ.get("GPOINT_EROS_WORKER_TOKEN", "")
+        else:
+            base = os.environ.get(name + "_AGATA_WORKER_URL", LEGACY_GPOINT_GATEWAY_URL if name == "GPOINT" else "").rstrip("/")
+            token = os.environ.get(name + "_AGATA_WORKER_TOKEN", "")
         if name == "GSALES" and not base and not token:
             continue
         parsed = urlsplit(base)
-        local = os.environ.get("GPOINT_AGATA_WORKER_LOCAL_TEST") == "true" and parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+        local_flag = "GPOINT_EROS_WORKER_LOCAL_TEST" if is_gpoint_eros_gateway() and name == "GPOINT" else "GPOINT_AGATA_WORKER_LOCAL_TEST"
+        local = os.environ.get(local_flag) == "true" and parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
         if not token or (parsed.scheme != "https" and not local) or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise FatalConfigurationError("worker_gateway_or_auth_unconfigured")
         targets[name] = (base, token)
     if len(targets) == 2 and (targets["GPOINT"][0] == targets["GSALES"][0] or targets["GPOINT"][1] == targets["GSALES"][1]):
         raise FatalConfigurationError("worker_targets_must_be_distinct")
     return targets
+
+
+def is_gpoint_eros_gateway() -> bool:
+    """Select the Eros lane only from its explicit configuration key."""
+    return bool(os.environ.get("GPOINT_EROS_WORKER_URL"))
 
 
 def configured_tenant_bindings(
@@ -174,7 +185,8 @@ def configured_tenant_bindings(
     configured = targets if targets is not None else configured_targets()
     bindings: dict[str, str] = {}
     for target in configured:
-        value = os.environ.get(f"{target}_AGATA_TENANT_ID", "").strip()
+        is_eros_gateway = target == "GPOINT" and is_gpoint_eros_gateway()
+        value = os.environ.get("GPOINT_EROS_TENANT_ID" if is_eros_gateway else f"{target}_AGATA_TENANT_ID", "").strip()
         if not value and target == "GPOINT":
             if configured[target][0] != LEGACY_GPOINT_GATEWAY_URL:
                 raise FatalConfigurationError("worker_tenant_binding_invalid")
@@ -325,9 +337,14 @@ def target_request(target: str, path: str, body: dict | None = None) -> dict:
 
 
 def _validated_queue_status(target: str, value: dict) -> dict[str, object]:
-    if target not in TARGET_NAMES or not isinstance(value, dict):
+    targets = configured_targets()
+    if target not in TARGET_NAMES or target not in targets or not isinstance(value, dict):
         raise GatewayResponseError("worker_queue_status_response_invalid")
-    expected_source = f"agata-worker-queue-status-v1:{target.lower()}"
+    expected_source = (
+        "gpoint-eros-worker-queue-status-v1:gpoint"
+        if target == "GPOINT" and is_gpoint_eros_gateway()
+        else f"agata-worker-queue-status-v1:{target.lower()}"
+    )
     if value.get("lane") != target or value.get("source_id") != expected_source:
         raise GatewayResponseError("worker_queue_status_identity_invalid")
     counts = (value.get("pending_jobs"), value.get("running_jobs"))
@@ -917,6 +934,8 @@ def validate_target_claim(target: str, claim: dict) -> None:
         and targets[target][0] == LEGACY_GPOINT_GATEWAY_URL
     )
     if (target == "GSALES" and not identity_present) or (
+        target == "GPOINT" and is_gpoint_eros_gateway() and not identity_present
+    ) or (
         not identity_present and not legacy_gpoint_contract
     ) or (
         identity_present and (
@@ -1307,9 +1326,12 @@ def reject_claim(lane: str, claim: dict, error_code: str) -> None:
         job_id = claim.get("id")
         lease = claim.get("leaseToken")
         if isinstance(job_id, str) and isinstance(lease, str):
-            target_request(lane, "fail", {
+            body = {
                 "job_id": job_id, "lease_token": lease, "error_code": error_code,
-            })
+            }
+            if claim.get("purpose") == "eros_chat_completion":
+                body["purpose"] = "eros_chat_completion"
+            target_request(lane, "fail", body)
     except Exception:
         write_status(target=lane, state="network_error", last_error_code="worker_claim_rejection_failed")
 
@@ -1381,7 +1403,7 @@ def run_watch(
 
 def unauthenticated_health_probe() -> None:
     """Probe TLS/HTTP reachability without worker credentials or queue side effects."""
-    base = os.environ.get("GPOINT_AGATA_WORKER_URL", "https://gpoint.one/api/agata-worker").rstrip("/")
+    base = os.environ.get("GPOINT_EROS_WORKER_URL", os.environ.get("GPOINT_AGATA_WORKER_URL", GPOINT_EROS_GATEWAY_URL if os.environ.get("GPOINT_EROS_WORKER_TOKEN") else LEGACY_GPOINT_GATEWAY_URL)).rstrip("/")
     if not base.startswith("https://"):
         raise FatalConfigurationError("worker_gateway_url_invalid")
 
@@ -1564,7 +1586,7 @@ def status() -> int:
 
     print(json.dumps({
         "worker_version": WORKER_VERSION,
-        "enabled": bool(os.environ.get("GPOINT_AGATA_WORKER_TOKEN")),
+        "enabled": bool(os.environ.get("GPOINT_EROS_WORKER_TOKEN") or os.environ.get("GPOINT_AGATA_WORKER_TOKEN")),
         "launch_agent_loaded": service_loaded,
         "last_poll_at": saved.get("last_poll_at"),
         "last_heartbeat_at": saved.get("last_heartbeat_at"),

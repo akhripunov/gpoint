@@ -82,7 +82,8 @@ def test_latest_native_deployment_exposes_exact_component_baselines():
         "status": "VERIFIED",
         "deployment_id": 200,
         "manifest_sha256": MANIFEST_SHA,
-        "component_sources": {"CORE": BASELINE, "AGATA": BASELINE, "MINIAPP": BASELINE},
+        "component_sources": {"CORE": BASELINE, "AGATA": BASELINE, "MINIAPP": BASELINE,
+                              "EROS": BASELINE},
     }
 
 
@@ -308,7 +309,7 @@ def test_runtime_unknown_or_migration_push_path_does_not_use_verify_only(tmp_pat
     )
 
     assert plan["status"] == "BOOTSTRAP_FULL"
-    assert plan["build_components"] == ["CORE", "AGATA", "MINIAPP"]
+    assert plan["build_components"] == ["CORE", "AGATA", "MINIAPP", "EROS"]
 
 
 def test_tooling_only_candidate_without_exact_push_before_does_not_use_verify_only(tmp_path):
@@ -324,7 +325,7 @@ def test_tooling_only_candidate_without_exact_push_before_does_not_use_verify_on
     )
 
     assert plan["status"] == "BOOTSTRAP_FULL"
-    assert plan["build_components"] == ["CORE", "AGATA", "MINIAPP"]
+    assert plan["build_components"] == ["CORE", "AGATA", "MINIAPP", "EROS"]
 
 
 def test_rollback_baseline_requires_all_sources_equal_the_exact_target_sha():
@@ -345,7 +346,7 @@ def test_rollback_baseline_requires_all_sources_equal_the_exact_target_sha():
     )
 
     assert baseline["component_sources"] == {
-        "CORE": target, "AGATA": target, "MINIAPP": target,
+        "CORE": target, "AGATA": target, "MINIAPP": target, "EROS": target,
     }
 
 
@@ -370,7 +371,7 @@ def test_native_environment_rollback_tracks_workflow_sha_and_runtime_target_sepa
 
     assert baseline["status"] == "VERIFIED"
     assert baseline["component_sources"] == {
-        "CORE": target, "AGATA": target, "MINIAPP": target,
+        "CORE": target, "AGATA": target, "MINIAPP": target, "EROS": target,
     }
 
 
@@ -437,6 +438,7 @@ def test_selective_plan_returns_verify_only_for_staggered_sources_and_old_migrat
     assert plan["status"] == "VERIFIED"
     assert plan["baseline_sources"] == {
         "CORE": core_source_sha, "AGATA": baseline_sha, "MINIAPP": baseline_sha,
+        "EROS": core_source_sha,
     }
     assert plan["deploy_scope"] == "NONE"
     assert plan["build_components"] == []
@@ -453,5 +455,5 @@ def test_missing_deployment_history_is_fail_closed_for_component_scope(tmp_path)
     )
 
     assert plan == {"status": "BOOTSTRAP_FULL", "deploy_scope": "UNRESOLVED",
-                    "build_components": ["CORE", "AGATA", "MINIAPP"],
+                    "build_components": ["CORE", "AGATA", "MINIAPP", "EROS"],
                     "reason": "production_component_baseline_unavailable"}

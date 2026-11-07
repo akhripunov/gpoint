@@ -93,8 +93,7 @@ class ErosVpsPilotComposeTests(unittest.TestCase):
         relay = (ROOT / "services/eros-engine/eros-pilot-embedding-relay.mjs").read_text()
         self.assertIn('const UPSTREAM_HOST = "127.0.0.1"', relay)
         self.assertIn("const UPSTREAM_PORT = 11435", relay)
-        self.assertIn("172.31.254.2", relay)
-        self.assertIn("172.31.254.3", relay)
+        self.assertIn('const EROS_DATA_NETWORK_PREFIX = "172.31.254."', relay)
         self.assertIn(lock["digest"], relay)
         tunnel = (ROOT / "services/eros-engine/open-mac-ollama-tunnel.sh").read_text()
         self.assertIn("-R 127.0.0.1:11435:127.0.0.1:11434", tunnel)
@@ -111,18 +110,12 @@ class ErosVpsPilotComposeTests(unittest.TestCase):
                     self.assertIn("/opt/gpoint/releases/${EROS_PILOT_SOURCE_SHA", mount)
                     self.assertIn("/source/", mount)
 
-    def test_backup_restore_runbook_uses_only_isolated_pilot_resources(self):
-        readme = (ROOT / "services/eros-engine/README.md").read_text()
-        self.assertIn('pg_dump -U eros_pilot_admin -d eros_pilot -Fc', readme)
-        self.assertIn('up -d --no-deps eros', readme)
-        self.assertIn('EROS_PILOT_SOURCE_SHA', readme)
-        self.assertIn('PILOT_BACKUP', readme)
-        self.assertIn('sha256sum -c', readme)
-        self.assertIn('backup_stamp=${PILOT_BACKUP##*/eros-pilot-}', readme)
-        self.assertIn('test -n "$backup_stamp" && test "$backup_stamp" = "$env_stamp"', readme)
-        self.assertIn('install -m 600 /opt/gpoint/env/eros-pilot.env', readme)
-        self.assertIn('`down -v`', readme)
-        self.assertIn('touch the GPoint database', readme)
+    def test_backup_restore_runbook_uses_native_production_lifecycle_contract(self):
+        readme = " ".join((ROOT / "services/eros-engine/README.md").read_text().split())
+        self.assertIn('Native First V3 Deploy and Kamal 2', readme)
+        self.assertIn('Keep the AGATA database and its existing 102 messages intact', readme)
+        self.assertIn('it never downgrades either database', readme)
+        self.assertIn('must be shown to OWNER before the first production mutation', readme)
 
     def test_public_caddy_route_rejects_the_embeddings_proxy(self):
         caddy = (ROOT / "infra/production/Caddyfile").read_text()
