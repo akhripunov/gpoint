@@ -134,3 +134,23 @@ def test_layer7_staging_is_separate_from_build_and_production_deploy_jobs():
     assert "docker inspect --format" in steps
     assert "com.gpoint.source.revision" in steps
     assert "StrictHostKeyChecking=yes" in steps
+
+
+def test_layer7_staging_can_run_core_and_eros_without_a_staging_telegram_bot():
+    workflow = yaml.load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text(), Loader=yaml.BaseLoader)
+    staging = workflow["jobs"]["layer7_staging"]
+    steps = staging["steps"]
+    validation = next(step for step in steps if step.get("id") == "staging_env")
+    assert "bot_enabled=" in validation["run"]
+    assert "TELEGRAM_BOT_TOKEN" not in validation["env"].get("TELEGRAM_BOT_TOKEN", "")
+    assert "secrets.GPOINT_LAYER7_STAGING_APP_ENV" in validation["env"]["STAGING_ENV_BUNDLE"]
+    deploy = next(step for step in steps if step.get("name") == "Deploy exact immutable images with stock Kamal 2 to Layer7 staging")
+    assert deploy["env"]["STAGING_BOT_ENABLED"] == "${{ steps.staging_env.outputs.bot_enabled }}"
+    assert 'if [[ "$role" == bot && "$STAGING_BOT_ENABLED" != true ]]' in deploy["run"]
+    assert 'kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api' in deploy["run"]
+    verify = next(step for step in steps if step.get("name") == "Verify runtime roles, health, Eros embeddings, and API-to-engine route")
+    assert verify["env"]["STAGING_BOT_ENABLED"] == "${{ steps.staging_env.outputs.bot_enabled }}"
+    assert '[[ "$bot_enabled" == true || "$bot_enabled" == false ]]' in verify["run"]
+    assert '[[ "$bot_enabled" == false && "$spec" == gpoint-core-bot\\|* ]]' in verify["run"]
+    assert "STAGING_BOT_ENABLED" not in str(staging["env"])
+    assert "secrets.GPOINT_PRODUCTION" not in yaml.safe_dump(staging)

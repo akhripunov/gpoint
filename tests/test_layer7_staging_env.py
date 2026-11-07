@@ -48,12 +48,26 @@ def bundle(**overrides):
     return "\n".join(f"{key}={value}" for key, value in values.items())
 
 
+def bundle_without_bot_token():
+    values = bundle().splitlines()
+    return "\n".join(line for line in values if not line.startswith("TELEGRAM_BOT_TOKEN="))
+
+
 def test_staging_env_accepts_internal_isolated_services_and_returns_only_hash():
-    encoded, digest = MODULE.parse_staging_env(bundle())
+    encoded, digest, bot_enabled = MODULE.parse_staging_env(bundle())
     assert b"synthetic-staging-bot-token" in encoded
+    assert bot_enabled is True
     assert b"GPOINT_INGEST_URL=https://layer7-staging.invalid/api/internal/telegram/update\n" in encoded
     assert b"PUBLIC_APP_URL=https://layer7-staging.invalid\n" in encoded
     assert digest == __import__("hashlib").sha256(encoded).hexdigest()
+
+
+def test_staging_env_accepts_telegramless_core_and_eros_mode_without_bot_secret():
+    encoded, digest, bot_enabled = MODULE.parse_staging_env(bundle_without_bot_token())
+    assert bot_enabled is False
+    assert b"TELEGRAM_BOT_TOKEN=" not in encoded
+    assert b"TELEGRAM_WEBHOOK_SECRET=synthetic-webhook-secret\n" in encoded
+    assert digest == hashlib.sha256(encoded).hexdigest()
 
 
 @pytest.mark.parametrize("override", [
@@ -66,7 +80,7 @@ def test_staging_env_accepts_internal_isolated_services_and_returns_only_hash():
     {"GPOINT_CHAT_POLICY_TENANT_ID": "not-a-uuid"},
     {"EROS_ENABLED": "false"},
     {"EROS_DATA_MODE": "synthetic"},
-    {"TELEGRAM_BOT_TOKEN": ""},
+    {"TELEGRAM_WEBHOOK_SECRET": ""},
 ])
 def test_staging_env_rejects_production_remote_and_incomplete_routes(override):
     with pytest.raises(ValueError):
@@ -89,7 +103,7 @@ def test_staging_env_writer_installs_only_validated_payload_with_private_mode(tm
     root = tmp_path / "env"
     root.mkdir(mode=0o700)
     os.chmod(root, 0o700)
-    encoded, digest = MODULE.parse_staging_env(bundle())
+    encoded, digest, _ = MODULE.parse_staging_env(bundle())
     assert WRITER.install_staging_env(
         encoded, root=root, run_id="42339937322-1", expected_sha256=digest,
         owner_uid=os.getuid(),
@@ -107,7 +121,7 @@ def test_staging_env_writer_fails_closed_without_overwriting_on_digest_mismatch(
     target = root / "staging.env"
     target.write_text("old staging marker\n")
     os.chmod(target, 0o600)
-    payload, _ = MODULE.parse_staging_env(bundle())
+    payload, _, _ = MODULE.parse_staging_env(bundle())
     with pytest.raises(ValueError, match="digest mismatch"):
         WRITER.install_staging_env(payload, root=root, run_id="42339937322-2",
                                    expected_sha256="0" * 64, owner_uid=os.getuid())
