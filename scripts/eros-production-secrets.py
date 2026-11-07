@@ -381,7 +381,7 @@ def write_native_api_env(path=ENV_PATH, source_env=SOURCE_ENV_PATH, output=NATIV
     env = {
         'EROS_ENABLED': 'true',
         'EROS_DATA_MODE': 'gpoint-owned',
-        'EROS_SERVICE_URL': 'http://gpoint-eros-engine:8080',
+        'EROS_SERVICE_URL': 'http://gpoint-eros:8080',
         'EROS_JWT_SECRET': values['EROS_JWT_SECRET'],
         'EROS_BRIDGE_API_KEY': values['EROS_BRIDGE_API_KEY'],
         'EROS_EMBEDDING_API_KEY': values['EROS_EMBEDDING_API_KEY'],

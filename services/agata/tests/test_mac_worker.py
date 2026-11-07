@@ -132,6 +132,25 @@ class MacWorkerTests(unittest.TestCase):
         self.assertIn("Return only the JSON value as text", observed["prompt"])
         self.assertNotIn("Return only an object with one key, text", observed["prompt"])
 
+    def test_eros_completion_accepts_only_normalized_worker_payload(self):
+        request = {
+            "model": "gpoint-codex",
+            "messages": [
+                {"role": "system", "content": "Reply naturally in English as Mira."},
+                {"role": "user", "content": "Synthetic: I like jasmine tea."},
+            ],
+            "max_tokens": 512,
+            "temperature": 1,
+        }
+        prompt = worker.build_eros_completion_prompt(request)
+        self.assertIn('"Synthetic: I like jasmine tea."', prompt)
+        self.assertIn("Reply naturally in English as Mira.", prompt)
+        self.assertNotIn("g1.", prompt)
+        for transport_metadata in ({"user": "g1.audit-token"}, {"stream": True}):
+            with self.subTest(metadata=tuple(transport_metadata)):
+                with self.assertRaisesRegex(RuntimeError, "eros_chat_request_invalid"):
+                    worker.build_eros_completion_prompt({**request, **transport_metadata})
+
     def test_inference_timeout_terminates_the_process_group(self):
         executable = self.root / "codex"
         executable.touch()

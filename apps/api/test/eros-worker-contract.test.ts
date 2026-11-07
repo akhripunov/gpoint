@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, deriveBridgeInferenceIdentity, parseBridgeRequest, parseErosEmbeddingRequest, signBridgeIdentity, verifyBridgeIdentity } from '../src/eros-worker-contract.js';
+import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, deriveBridgeInferenceIdentity, parseBridgeRequest, parseErosEmbeddingRequest, signBridgeIdentity, verifyBridgeIdentity, workerChatCompletionRequest } from '../src/eros-worker-contract.js';
 
 const secret = new TextEncoder().encode('local-test-bridge-signing-secret-at-least-32-bytes');
 const now = Math.floor(Date.now() / 1000);
@@ -97,6 +97,37 @@ test('chat request validation uses signed identity and bounds the OpenAI-compati
     model: 'gpoint-codex', user: token,
     messages: [{ role: 'user', content: 'x'.repeat(20_001) }], max_tokens: 32,
   }, secret, now), /eros_chat_request_invalid/);
+});
+
+test('GPoint Worker receives normalized chat fields without Eros audit identity or stream metadata', async () => {
+  const token = await identity();
+  const parsed = await parseBridgeRequest({
+    model: 'gpoint-codex',
+    user: token,
+    messages: [{ role: 'system', content: 'Be Mira.' }, { role: 'user', content: 'Synthetic: I like jasmine tea.' }],
+    max_tokens: 512,
+    temperature: 1,
+    stream: true,
+  }, secret, now);
+
+  const workerRequest = workerChatCompletionRequest(parsed);
+  assert.deepEqual(workerRequest, {
+    model: 'gpoint-codex',
+    messages: parsed.messages,
+    max_tokens: 512,
+    temperature: 1,
+  });
+  assert.equal('user' in workerRequest, false);
+  assert.equal('stream' in workerRequest, false);
+  assert.equal(JSON.stringify(workerRequest).includes(token), false);
+  assert.deepEqual(await parseBridgeRequest(workerRequest, secret, now), {
+    identity: undefined,
+    model: 'gpoint-codex',
+    messages: parsed.messages,
+    maxTokens: 512,
+    temperature: 1,
+    stream: false,
+  });
 });
 
 test('streaming completion emits standard OpenAI SSE deltas and one terminal marker', () => {

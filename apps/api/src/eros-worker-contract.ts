@@ -49,6 +49,23 @@ export interface ParsedErosBridgeRequest {
   stream: boolean;
 }
 
+export interface ErosWorkerChatCompletionRequest {
+  model: string;
+  messages: ErosBridgeMessage[];
+  max_tokens: number;
+  temperature: number;
+}
+
+/** Pass only normalized inference fields to the Mac Worker; signed audit metadata stays in Core. */
+export function workerChatCompletionRequest(parsed: ParsedErosBridgeRequest): ErosWorkerChatCompletionRequest {
+  return {
+    model: parsed.model,
+    messages: parsed.messages.map(({ role, content }) => ({ role, content })),
+    max_tokens: parsed.maxTokens,
+    temperature: parsed.temperature,
+  };
+}
+
 export interface ParsedErosEmbeddingRequest { model: string; input: string[]; dimensions: 512 }
 
 export interface ErosWorkerQueueIdentity {

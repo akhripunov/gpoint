@@ -3,7 +3,7 @@ import { createHmac, hkdfSync, randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { PrismaClient } from '@prisma/client';
 import { erosIdentityFor } from '../src/eros-adapter.js';
-import { deriveBridgeInferenceIdentity, parseBridgeRequest, signBridgeIdentity, type ParsedErosBridgeRequest } from '../src/eros-worker-contract.js';
+import { deriveBridgeInferenceIdentity, parseBridgeRequest, signBridgeIdentity, workerChatCompletionRequest, type ParsedErosBridgeRequest } from '../src/eros-worker-contract.js';
 
 const databaseUrl = process.env.DATABASE_URL;
 const parsedDatabaseUrl = databaseUrl ? new URL(databaseUrl) : undefined;
@@ -210,10 +210,14 @@ test('GPOINT claim refreshes queued Eros identity after token expiry and complet
     assert.equal(job.attempt, 1);
     assert.equal(job.target, 'GPOINT');
     assert.equal(job.tenant_id, tenantId);
+    assert.deepEqual(job.request, workerChatCompletionRequest(parsedRequest));
+    assert.equal(Object.hasOwn(job.request, 'user'), false);
+    assert.equal(Object.hasOwn(job.request, 'stream'), false);
     assert.deepEqual(await parseBridgeRequest(
       job.request, new TextEncoder().encode(signingSecret), Math.floor(claimNowMs / 1000),
     ), {
       ...parsedRequest,
+      identity: undefined,
       stream: false,
     });
     assert.equal(job.purpose, 'eros_chat_completion');

@@ -200,7 +200,7 @@ def test_staging_eros_api_env_reuses_canonical_writer_and_binds_synthetic_tenant
     STAGE_EROS.write(eros_env=eros_env, source_env=source_env, output=output)
     values = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert values["EROS_DATA_MODE"] == "gpoint-owned"
-    assert values["EROS_SERVICE_URL"] == "http://gpoint-eros-engine:8080"
+    assert values["EROS_SERVICE_URL"] == "http://gpoint-eros:8080"
     assert values["EROS_WORKER_TENANT_ID"] == tenant
     assert values["GPOINT_CHAT_POLICY_TENANT_ID"] == tenant
     assert values["EROS_PRODUCTION_TEST_USER_IDS"] == ""

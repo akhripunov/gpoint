@@ -245,10 +245,13 @@ def test_eros_topology_inventory_shell_loop_has_no_unused_read_variable():
 def test_kamal_roles_share_the_private_eros_network_with_stable_service_aliases():
     api = (ROOT / "config/deploy.eros-api.yml").read_text()
     engine = (ROOT / "config/deploy.eros.yml").read_text()
+    staging_engine = (ROOT / "config/deploy.layer7-staging.eros.yml").read_text()
     model = (ROOT / "services/eros-engine/eros-production-model-config.toml").read_text()
     assert "- shared_internal" in api and "- gpoint_eros_data" in api
     assert "network-alias: gpoint-core-api" in api
-    assert "network: gpoint_eros_data" in engine and "network-alias: gpoint-eros-engine" in engine
+    assert "network: gpoint_eros_data" in engine and "network-alias: gpoint-eros" in engine
+    assert "network-alias: gpoint-eros" in staging_engine
+    assert "'EROS_SERVICE_URL': 'http://gpoint-eros:8080'" in (ROOT / "scripts/eros-production-secrets.py").read_text()
     assert model.count("http://gpoint-core-api:3000/eros-worker/v1/") == 2
 
 
