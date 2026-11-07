@@ -11,7 +11,7 @@ servers:
       network:
         - gpoint_eros_data
         - gpoint_eros_api
-      network-alias: gpoint-eros-engine
+      network-alias: gpoint-eros
       env-file:
         - /opt/gpoint/env/eros-engine.env
       volume: /opt/gpoint/env/eros-production-model-config.toml:/etc/eros-engine/model_config.toml:ro

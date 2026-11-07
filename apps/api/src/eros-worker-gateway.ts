@@ -2,7 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, ran
 import { BadRequestException, Body, Controller, Get, Headers, Header, HttpException, OnModuleDestroy, OnModuleInit, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { PrismaClient, type Prisma } from '@prisma/client';
-import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, deriveBridgeInferenceIdentity, isExpectedErosWorkerJobIdentity, parseBridgeRequest, parseErosEmbeddingRequest, signBridgeIdentity, type ParsedErosBridgeRequest } from './eros-worker-contract.js';
+import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, deriveBridgeInferenceIdentity, isExpectedErosWorkerJobIdentity, parseBridgeRequest, parseErosEmbeddingRequest, signBridgeIdentity, workerChatCompletionRequest, type ParsedErosBridgeRequest } from './eros-worker-contract.js';
 import { isAllowedOllamaEmbeddingEndpoint, isDisposableSyntheticLocalTest } from './eros-network-policy.js';
 import { erosIdentityFor, exactErosPilotPair, isGpointOwnedErosMode } from './eros-adapter.js';
 
@@ -255,7 +255,7 @@ export async function claimErosForGpointWorker(): Promise<{ job: Record<string, 
   }
   return { job: {
     id: row.id, leaseToken: row.lease_token, attempt: 1, target: 'GPOINT', tenant_id: tenantId,
-    request, purpose: 'eros_chat_completion',
+    request: workerChatCompletionRequest(parsedRequest), purpose: 'eros_chat_completion',
   } };
 }
 
