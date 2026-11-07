@@ -167,6 +167,49 @@ def test_prepared_images_can_only_be_reused_by_exact_owner_approved_deploy():
         )
         args.update(changes)
         assert MODULE.classify_dispatch(**args) == (expected, False)
+
+
+def test_layer7_staging_is_a_separate_owner_approved_exact_sha_mode():
+    sha = "a" * 40
+    assert MODULE.classify_dispatch(
+        ref="refs/heads/main", candidate_sha=sha, github_sha=sha,
+        actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
+        approve_production=False, use_prepared_images=True, layer7_staging=True,
+        approve_layer7_staging=True,
+    ) == ("LAYER7_STAGING", False)
+
+
+def test_layer7_staging_fails_closed_for_wrong_sha_actor_or_conflicting_operation():
+    sha = "a" * 40
+    base = dict(
+        ref="refs/heads/main", candidate_sha=sha, github_sha=sha,
+        actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
+        approve_production=False, use_prepared_images=True, layer7_staging=True,
+        approve_layer7_staging=True,
+    )
+    for changes in (
+        {"candidate_sha": "b" * 40},
+        {"actor": "collaborator"},
+        {"ref": "refs/heads/feature"},
+        {"approve_layer7_staging": False},
+        {"use_prepared_images": False},
+        {"approve_production": True},
+        {"migration_rehearsal": True},
+        {"backup_maintenance": True},
+        {"rollback": True},
+    ):
+        event = {**base, **changes}
+        assert MODULE.classify_dispatch(**event) == ("INVALID_LAYER7_STAGING", False)
+
+
+def test_staging_approval_without_staging_mode_is_rejected():
+    sha = "a" * 40
+    assert MODULE.classify_dispatch(
+        ref="refs/heads/main", candidate_sha=sha, github_sha=sha,
+        actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
+        approve_production=False, use_prepared_images=True,
+        approve_layer7_staging=True,
+    ) == ("INVALID_LAYER7_STAGING", False)
 def test_agata_migration_and_unknown_schema_paths_remain_blocked_from_prisma_apply():
     for path in (
         "services/agata/migrations/versions/0013_new.py",

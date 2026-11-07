@@ -65,6 +65,7 @@ run_config() {
     --env GPOINT_SSH_KEY=/tmp/gpoint-kamal-config-test-key \
     --env GPOINT_KNOWN_HOSTS_FILE=/dev/null \
     --env GPOINT_PRODUCTION_HOST=192.0.2.10 \
+    --env GPOINT_LAYER7_STAGING_HOST=192.0.2.20 \
     --env "KAMAL_REGISTRY_PASSWORD=$synthetic_registry_password" \
     "$KAMAL_IMAGE" "$@" --config-file "$config_file" >"$output_file" 2>&1; then
     return 0
@@ -87,7 +88,12 @@ for config_file in \
   config/deploy.miniapp.yml \
   config/deploy.eros.yml \
   config/deploy.eros-relay.yml \
-  config/deploy.eros-api.yml; do
+  config/deploy.eros-api.yml \
+  config/deploy.layer7-staging.yml \
+  config/deploy.layer7-staging.miniapp.yml \
+  config/deploy.layer7-staging.eros-api.yml \
+  config/deploy.layer7-staging.eros.yml \
+  config/deploy.layer7-staging.eros-relay.yml; do
   run_config "$config_file" config
   run_config "$config_file" secrets print
   grep -Fq "KAMAL_REGISTRY_PASSWORD=$synthetic_registry_password" "$output_file" || {

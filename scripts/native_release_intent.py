@@ -46,10 +46,17 @@ PRISMA_MIGRATION = re.compile(
     r"^packages/db/prisma/migrations/[0-9]{14}_[a-z0-9_]+/migration\.sql$"
 )
 KNOWN_NON_RUNTIME_FILES = frozenset({
+    ".github/actionlint.yaml",
     ".kamal/hooks/post-app-boot",
     ".kamal/hooks/pre-app-boot",
     "AGENTS.md",
     "packages/db/prisma/production-approved-migrations.json",
+    "config/deploy.layer7-staging.yml",
+    "config/deploy.layer7-staging.miniapp.yml",
+    "config/deploy.layer7-staging.eros-api.yml",
+    "config/deploy.layer7-staging.eros.yml",
+    "config/deploy.layer7-staging.eros-relay.yml",
+    "infra/staging/layer7_known_hosts",
     "scripts/classify-release-prepush.py",
     "scripts/check-kamal-configs.sh",
     "scripts/eros-native-database.py",
@@ -57,6 +64,10 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     "scripts/gpoint-backup-policy.py",
     "scripts/gpoint-scheduled-backup.py",
     "scripts/native_release_intent.py",
+    "scripts/layer7_staging_database.py",
+    "scripts/layer7_staging_env.py",
+    "scripts/write_layer7_staging_env.py",
+    "scripts/write_layer7_staging_eros_api_env.py",
     "scripts/prisma_migration_release_plan.py",
     "scripts/resolve_native_environment_deployment.py",
     "scripts/resolve_native_build_scope.py",
@@ -174,7 +185,19 @@ def classify_dispatch(*, ref: str, candidate_sha: str, github_sha: str, actor: s
                       backup_maintenance: bool = False,
                       rollback: bool = False,
                       rollback_eros: bool = False,
-                      use_prepared_images: bool = False) -> tuple[str, bool]:
+                      use_prepared_images: bool = False,
+                      layer7_staging: bool = False,
+                      approve_layer7_staging: bool = False) -> tuple[str, bool]:
+    if approve_layer7_staging and not layer7_staging:
+        return "INVALID_LAYER7_STAGING", False
+    if layer7_staging:
+        exact = bool(re.fullmatch(r"[0-9a-f]{40}", candidate_sha)) and candidate_sha == github_sha
+        owner = bool(repository_owner) and actor.lower() == repository_owner.lower()
+        if (ref == "refs/heads/main" and exact and owner and approve_layer7_staging
+                and use_prepared_images and not approve_production and not migration_rehearsal
+                and not backup_maintenance and not rollback and not rollback_eros):
+            return "LAYER7_STAGING", False
+        return "INVALID_LAYER7_STAGING", False
     if rollback_eros and not rollback:
         return "INVALID_ROLLBACK", False
     exact = bool(re.fullmatch(r"[0-9a-f]{40}", candidate_sha)) and candidate_sha == github_sha
@@ -482,6 +505,8 @@ def main() -> int:
     parser.add_argument("--rollback-eros", action="store_true")
     parser.add_argument("--use-prepared-images", action="store_true")
     parser.add_argument("--approve-production", action="store_true")
+    parser.add_argument("--layer7-staging", action="store_true")
+    parser.add_argument("--approve-layer7-staging", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -508,6 +533,8 @@ def main() -> int:
                 rollback=args.rollback,
                 rollback_eros=args.rollback_eros,
                 use_prepared_images=args.use_prepared_images,
+                layer7_staging=args.layer7_staging,
+                approve_layer7_staging=args.approve_layer7_staging,
             )
         else:
             mode, deploy = "NO_DEPLOY", False

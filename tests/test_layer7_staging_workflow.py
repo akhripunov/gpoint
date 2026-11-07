@@ -1,0 +1,136 @@
+import yaml
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_layer7_staging_is_owner_dispatched_on_trusted_runner_with_read_only_packages():
+    workflow = yaml.load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text(), Loader=yaml.BaseLoader)
+    job = workflow["jobs"]["layer7_staging"]
+    actionlint = yaml.safe_load((ROOT / ".github/actionlint.yaml").read_text())
+
+    assert job["runs-on"] == ["self-hosted", "macOS"]
+    assert actionlint["self-hosted-runner"]["labels"] == ["macOS"]
+    assert job["environment"]["name"] == "layer7-staging"
+    assert job["permissions"] == {
+        "contents": "read",
+        "packages": "read",
+        "actions": "read",
+        "deployments": "write",
+    }
+    assert "GPOINT_KAMAL_HOST" not in str(job)
+    assert "production" not in str(job["environment"]).lower()
+
+
+def test_layer7_staging_runs_pinned_kamal_without_a_local_docker_engine():
+    workflow = yaml.load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text(), Loader=yaml.BaseLoader)
+    job = workflow["jobs"]["layer7_staging"]
+    ruby = next(step for step in job["steps"] if step.get("uses", "").startswith("ruby/setup-ruby@"))
+    assert ruby["uses"] == "ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f"
+    assert ruby["with"]["ruby-version"] == "3.3.6"
+    assert ruby["with"]["self-hosted"] == "true"
+    installer = next(step for step in job["steps"] if step.get("name") == "Install pinned Kamal 2.12.0")
+    assert "gem install kamal --version 2.12.0" in installer["run"]
+    deploy = next(step for step in job["steps"] if step.get("name") == "Deploy exact immutable images with stock Kamal 2 to Layer7 staging")
+    assert "docker run" not in deploy["run"]
+    assert 'command kamal "$@"' in deploy["run"]
+    assert "$HOME/.ssh/gpoint_layer7" in deploy["run"]
+    image_pull = next(step for step in job["steps"] if step.get("name") == "Pull and verify exact private images with the read-only job token")
+    assert "kamal_image=ghcr.io/basecamp/kamal" not in image_pull["run"]
+    assert 'docker pull --platform linux/amd64 "$kamal_image"' not in image_pull["run"]
+
+
+def test_layer7_staging_requires_exact_successful_prepare_and_explicit_staging_intent():
+    workflow = yaml.load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text(), Loader=yaml.BaseLoader)
+    inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+    assert inputs["deploy_layer7_staging"]["type"] == "boolean"
+    assert inputs["deploy_layer7_staging"]["default"] == "false"
+    assert inputs["approve_layer7_staging"]["default"] == "false"
+    assert inputs["staging_image_sha"]["type"] == "string"
+    assert inputs["staging_image_sha"]["required"] == "false"
+
+    job = workflow["jobs"]["layer7_staging"]
+    assert job["needs"] == ["tests"]
+    assert "inputs.deploy_layer7_staging == true" in job["if"]
+    assert "inputs.staging_image_sha != ''" in job["if"]
+    step_text = yaml.safe_dump(job["steps"])
+    assert "verify_native_prepared_run.py" in step_text
+    assert "prepared_run_id" in step_text
+    assert "prepared_eros_digest" in step_text
+    assert "StrictHostKeyChecking=yes" in step_text
+    assert job["env"]["CANDIDATE_SHA"] == "${{ inputs.staging_image_sha }}"
+    checkout = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/checkout@"))
+    assert checkout["with"]["ref"] == "${{ github.sha }}"
+    recheck = next(step for step in job["steps"] if step.get("name") == "Recheck owner dispatch, current main, and prepared image ancestry")
+    assert "STAGING_IMAGE_SHA" in recheck["env"]
+    assert "compare/$STAGING_IMAGE_SHA...$WORKFLOW_SHA" in recheck["run"]
+    assert 'merge_base_commit",{}).get("sha")' in recheck["run"]
+    assert "staging_preflight.outcome == 'success'" in step_text
+    assert "Remove temporary Kamal GHCR authorization" in step_text
+    assert "docker logout ghcr.io" in step_text
+    assert "no_existing_credentials=true" in step_text
+    assert "CORE_API_EROS_ROUTE=PASS EROS_DATABASE_NETWORK_ISOLATION=PASS" in (
+        ROOT / ".github/workflows/gpoint-native-release.yml"
+    ).read_text()
+
+
+def test_staging_kamal_configs_are_separate_from_public_production_routes():
+    config_paths = [
+        "config/deploy.layer7-staging.yml",
+        "config/deploy.layer7-staging.miniapp.yml",
+        "config/deploy.layer7-staging.eros-api.yml",
+        "config/deploy.layer7-staging.eros.yml",
+        "config/deploy.layer7-staging.eros-relay.yml",
+    ]
+    for relative in config_paths:
+        path = ROOT / relative
+        assert path.is_file(), relative
+        text = path.read_text()
+        assert "GPOINT_KAMAL_HOST" not in text
+        assert "GPOINT_PRODUCTION_HOST" not in text
+        assert "gpoint.one" not in text
+        assert "GPOINT_LAYER7_STAGING_HOST" in text
+    api_config = (ROOT / "config/deploy.layer7-staging.yml").read_text()
+    eros_config = (ROOT / "config/deploy.layer7-staging.eros.yml").read_text()
+    assert "- gpoint_eros_api" in api_config
+    assert "- gpoint_eros_data" not in api_config
+    assert "- gpoint_eros_data" in eros_config and "- gpoint_eros_api" in eros_config
+
+
+def test_layer7_staging_never_uses_production_environment_or_production_host():
+    workflow = yaml.load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text(), Loader=yaml.BaseLoader)
+    staging = workflow["jobs"]["layer7_staging"]
+    serialized = yaml.safe_dump(staging)
+    assert "secrets.GPOINT_KAMAL_HOST" not in serialized
+    assert "environment: production" not in serialized
+    assert "GPOINT_LAYER7_STAGING_HOST" in serialized
+    assert "GITHUB_TOKEN" in serialized
+
+
+def test_layer7_staging_is_separate_from_build_and_production_deploy_jobs():
+    workflow = yaml.load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text(), Loader=yaml.BaseLoader)
+    staging = workflow["jobs"]["layer7_staging"]
+    assert "LAYER7_STAGING" not in workflow["jobs"]["build"]["if"]
+    assert "LAYER7_STAGING" not in workflow["jobs"]["deploy"]["if"]
+    assert "needs.tests.outputs.deploy == 'true'" in workflow["jobs"]["deploy"]["if"]
+    assert staging["env"]["KAMAL_REGISTRY_PASSWORD"] == "${{ secrets.GITHUB_TOKEN }}"
+    assert staging["permissions"]["packages"] == "read"
+    assert staging["permissions"].get("contents") == "read"
+    assert staging["permissions"].get("deployments") == "write"
+    assert "packages: write" not in yaml.safe_dump(staging)
+    steps = yaml.safe_dump(staging["steps"])
+    assert "steps.prepared.outputs.image_version" in steps
+    for config in (
+        "config/deploy.layer7-staging.eros.yml",
+        "config/deploy.layer7-staging.eros-relay.yml",
+        "config/deploy.layer7-staging.eros-api.yml",
+        "config/deploy.layer7-staging.yml",
+        "config/deploy.layer7-staging.miniapp.yml",
+    ):
+        assert config in steps
+    assert "--mode prepare" in steps
+    assert "--mode apply" in steps
+    assert "docker inspect --format" in steps
+    assert "com.gpoint.source.revision" in steps
+    assert "StrictHostKeyChecking=yes" in steps

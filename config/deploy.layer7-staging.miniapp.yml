@@ -1,0 +1,28 @@
+service: gpoint-miniapp
+image: akhripunov/gpoint-miniapp
+primary_role: web
+
+servers:
+  web:
+    hosts:
+      - <%= ENV.fetch("GPOINT_LAYER7_STAGING_HOST") %>
+    proxy: false
+
+registry:
+  server: ghcr.io
+  username: akhripunov
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+ssh:
+  user: root
+  keys:
+    - <%= ENV.fetch("GPOINT_SSH_KEY") %>
+  keys_only: true
+  config: true
+
+builder:
+  arch: amd64
+
+retain_containers: 2
+minimum_version: 2.12.0

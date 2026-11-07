@@ -446,6 +446,42 @@ def test_selective_plan_returns_verify_only_for_staggered_sources_and_old_migrat
     assert migration_sha != baseline_sha
 
 
+def test_layer7_staging_only_paths_do_not_select_application_images(tmp_path):
+    repo, baseline_sha = repo_with_baseline(tmp_path)
+    paths = (
+        ".github/actionlint.yaml",
+        "config/deploy.layer7-staging.yml",
+        "config/deploy.layer7-staging.miniapp.yml",
+        "config/deploy.layer7-staging.eros-api.yml",
+        "config/deploy.layer7-staging.eros.yml",
+        "config/deploy.layer7-staging.eros-relay.yml",
+        "infra/staging/layer7_known_hosts",
+        "scripts/layer7_staging_database.py",
+        "scripts/layer7_staging_env.py",
+        "scripts/write_layer7_staging_env.py",
+        "scripts/write_layer7_staging_eros_api_env.py",
+    )
+    candidate = baseline_sha
+    for index, path in enumerate(paths):
+        candidate = commit_file(repo, path, f"staging-only {index}\n")
+    deployments, statuses, runs = deployment_fixture(target_sha=baseline_sha,
+                                                       run_head_sha=baseline_sha)
+    statuses[200][0]["environment_url"] = (
+        "https://gpoint.one/#gpoint-manifest-sha256=" + MANIFEST_SHA
+        + "&gpoint-core-source-sha=" + baseline_sha
+        + "&gpoint-agata-source-sha=" + baseline_sha
+        + "&gpoint-miniapp-source-sha=" + baseline_sha
+    )
+
+    plan = MODULE.resolve_build_plan(
+        repo, candidate, deployments, statuses, runs, repository=REPOSITORY
+    )
+
+    assert plan["deploy_scope"] == "NONE"
+    assert plan["build_components"] == []
+    assert plan["reason"] == "no_runtime_changes"
+
+
 def test_missing_deployment_history_is_fail_closed_for_component_scope(tmp_path):
     repo, baseline_sha = repo_with_baseline(tmp_path)
     candidate = commit_file(repo, "apps/api/src/main.ts", "export {};\n")
