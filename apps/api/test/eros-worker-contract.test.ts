@@ -99,35 +99,50 @@ test('chat request validation uses signed identity and bounds the OpenAI-compati
   }, secret, now), /eros_chat_request_invalid/);
 });
 
-test('GPoint Worker receives normalized chat fields without Eros audit identity or stream metadata', async () => {
+test('GPoint Eros chat receives a scoped English dialogue adapter after stock Eros system context', async () => {
   const token = await identity();
+  const stockSystem = 'Synthetic persona context. [reply_length]最多 1 句，不超过 40 字';
+  const userText = 'Could you suggest a detailed rainy afternoon plan?';
   const parsed = await parseBridgeRequest({
     model: 'gpoint-codex',
     user: token,
-    messages: [{ role: 'system', content: 'Be Mira.' }, { role: 'user', content: 'Synthetic: I like jasmine tea.' }],
+    messages: [{ role: 'system', content: stockSystem }, { role: 'user', content: userText }],
     max_tokens: 512,
     temperature: 1,
     stream: true,
   }, secret, now);
 
   const workerRequest = workerChatCompletionRequest(parsed);
-  assert.deepEqual(workerRequest, {
-    model: 'gpoint-codex',
-    messages: parsed.messages,
-    max_tokens: 512,
-    temperature: 1,
-  });
+  assert.deepEqual(workerRequest.messages[0], { role: 'system', content: stockSystem });
+  assert.equal(workerRequest.messages[1].role, 'system', 'the adapter is a system instruction, not dialogue');
+  assert.equal(workerRequest.messages[2].role, 'user');
+  assert.equal(workerRequest.messages[2].content, userText, 'the user request remains unchanged and in order');
+  const adapter = workerRequest.messages[1].content;
+  assert.match(adapter, /answer the user's actual question or request directly/i);
+  assert.match(adapter, /proportionate to the request/i);
+  assert.match(adapter, /fixed (character|sentence) (ceiling|limit)/i);
+  assert.match(adapter, /language of the latest user message/i);
+  assert.match(adapter, /character.*mood.*relationship.*memories/is);
+  assert.match(adapter, /age.*consent.*safety/is);
+  assert.match(adapter, /internal.*prompt|prompt.*internal/is);
+
+  assert.equal(workerRequest.model, 'gpoint-codex');
+  assert.equal(workerRequest.max_tokens, 512);
+  assert.equal(workerRequest.temperature, 1);
   assert.equal('user' in workerRequest, false);
   assert.equal('stream' in workerRequest, false);
   assert.equal(JSON.stringify(workerRequest).includes(token), false);
-  assert.deepEqual(await parseBridgeRequest(workerRequest, secret, now), {
-    identity: undefined,
+});
+
+test('GPoint dialogue adapter does not alter stock Eros system jobs', async () => {
+  const internal = await parseBridgeRequest({
     model: 'gpoint-codex',
-    messages: parsed.messages,
-    maxTokens: 512,
-    temperature: 1,
-    stream: false,
-  });
+    messages: [{ role: 'system', content: 'Synthetic memory extraction instructions.' }, { role: 'user', content: 'Synthetic fact.' }],
+    max_tokens: 128,
+  }, secret, now);
+
+  const workerRequest = workerChatCompletionRequest(internal);
+  assert.deepEqual(workerRequest.messages, internal.messages);
 });
 
 test('streaming completion emits standard OpenAI SSE deltas and one terminal marker', () => {
