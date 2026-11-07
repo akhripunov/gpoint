@@ -3149,3 +3149,15 @@ jobs:
           export GPOINT_MIGRATION_BACKUP_EVIDENCE_SHA256="$evidence_sha"
           export GPOINT_PRISMA_EROS_QUEUE_SHA256="$queue_sha"
           export GPOINT_PRISMA_EROS_MAPPING_SHA256="$mapping_sha"
+          export GPOINT_PRISMA_MESSAGE_STATE_SHA256="$state_sha"
+          export GPOINT_AGATA_0012_SHA256="$agata_sha"
+          current_step=isolated-backup-restore-and-four-migrations
+          GPOINT_MIGRATION_REHEARSAL=1 python3 "$stage/scripts/gpoint-scheduled-backup.py"
+          current_step=final-backup-integrity-check
+          test "$(sha256sum "$evidence_path" | awk '{print $1}')" = "$evidence_sha"
+          test "$(sha256sum /opt/gpoint/backups/gpoint-pre-release-7a1afde1d94c324828565a36cb7dd90f422dee3d-41223019715-1.dump.age | awk '{print $1}')" = "$expected_db_sha"
+          test "$(sha256sum /opt/gpoint/backups/gpoint-pre-release-7a1afde1d94c324828565a36cb7dd90f422dee3d-41223019715-1.media.tar.age | awk '{print $1}')" = "$expected_media_sha"
+          test ! -e /opt/gpoint/backups/scheduled/latest.json
+          echo GPOINT_MIGRATION_REHEARSAL=PASS
+          REMOTE_REHEARSAL
+          echo "GPOINT_MIGRATION_REHEARSAL=PASS SHA=$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
