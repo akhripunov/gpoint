@@ -231,12 +231,12 @@ def git(*args: str) -> str:
 
 
 def launchctl_loaded(label: str = LABEL) -> bool:
+    # Registration exists before the spawned process reaches running/waiting.
+    # Never bootstrap a second label during that interval. PID, exact runtime,
+    # authenticated health and fresh polls are verified separately below.
     result = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"],
                             capture_output=True, text=True, timeout=8, check=False)
-    if result.returncode != 0:
-        return False
-    state = re.search(r"^\s*state = ([^\s]+)\s*$", result.stdout or "", re.MULTILINE)
-    return bool(state and state.group(1).lower() in {"running", "waiting"})
+    return result.returncode == 0
 
 
 def _active_worker_identity(*, require_loaded: bool = True) -> tuple[str, Path, Path]:

@@ -11,6 +11,8 @@ servers:
       clear:
         RELEASE_SHA: <%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>
     options:
+      publish:
+        - "127.0.0.1:13001:3000"
       network:
         - shared_internal
         - gpoint_eros_api

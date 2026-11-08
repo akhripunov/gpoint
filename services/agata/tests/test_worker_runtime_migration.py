@@ -17,6 +17,17 @@ assert SPEC and SPEC.loader
 SPEC.loader.exec_module(migration)
 
 
+@pytest.mark.parametrize('state', ['running', 'waiting', 'spawn scheduled', 'not running'])
+def test_loaded_means_registered_even_during_launchd_startup(monkeypatch, state):
+    monkeypatch.setattr(migration.subprocess, 'run', lambda *a, **kw: subprocess.CompletedProcess(a, 0, f'gui/501/service = {{\n state = {state}\n}}', ''))
+    assert migration.launchctl_loaded(migration.LABEL)
+
+
+def test_failed_launchctl_print_does_not_prove_registration(monkeypatch):
+    monkeypatch.setattr(migration.subprocess, 'run', lambda *a, **kw: subprocess.CompletedProcess(a, 113, '', 'service absent'))
+    assert not migration.launchctl_loaded(migration.LABEL)
+
+
 def _queue_status(now: datetime, *, pending: int = 0, running: int = 0) -> dict:
     return {
         "launch_agent_loaded": True,

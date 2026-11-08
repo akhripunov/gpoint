@@ -45,6 +45,12 @@ TEST_DIRECTORY_NAMES = frozenset({"test", "tests"})
 PRISMA_MIGRATION = re.compile(
     r"^packages/db/prisma/migrations/[0-9]{14}_[a-z0-9_]+/migration\.sql$"
 )
+# ME-36 OWNER-approved removal of the parallel Mac installer and stale shared
+# Worker test. This is an exact path exception; all other deletions still block.
+KNOWN_RETIRED_NON_RUNTIME_FILES = frozenset({
+    "services/agata/worker/install_launch_agent.py",
+    "services/gsales/tests/test_shared_worker_http.py",
+})
 KNOWN_NON_RUNTIME_FILES = frozenset({
     ".github/actionlint.yaml",
     ".kamal/hooks/post-app-boot",
@@ -64,6 +70,8 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     "scripts/gpoint-backup-policy.py",
     "scripts/gpoint-scheduled-backup.py",
     "scripts/native_release_intent.py",
+    "scripts/transition-agata-worker-v3.py",
+    "services/gsales/tests/test_shared_worker_http.py",
     "scripts/layer7_staging_database.py",
     "scripts/layer7_staging_env.py",
     "scripts/write_layer7_staging_env.py",
@@ -357,6 +365,11 @@ def classify_component_build_plan(repo: Path, candidate: str,
         entries = list(zip(parts[::2], parts[1::2]))
         paths = set()
         for status, path in entries:
+            if status == "D" and path in KNOWN_RETIRED_NON_RUNTIME_FILES:
+                prior = subprocess.check_output(["git", "ls-tree", baseline, "--", path], cwd=repo).decode()
+                if not prior.startswith(("100644 blob ", "100755 blob ")):
+                    raise ValueError("retired candidate path was not a regular file")
+                continue
             if status not in ("A", "M"):
                 raise ValueError("deleted or renamed candidate path needs explicit scope approval")
             if not _safe_component_path(path):

@@ -7,6 +7,33 @@ import sys
 import pytest
 
 
+@pytest.mark.parametrize('path', ['scripts/transition-agata-worker-v3.py', 'services/gsales/tests/test_shared_worker_http.py'])
+def test_retired_host_transition_and_shared_worker_fixture_are_known_non_runtime(path):
+    assert MODULE._known_non_runtime_path(path)
+    assert not MODULE._known_non_runtime_path(path + '.unreviewed')
+
+
+@pytest.mark.parametrize('path,allowed', [
+    ('services/agata/worker/install_launch_agent.py', True),
+    ('services/gsales/tests/test_shared_worker_http.py', True),
+    ('services/agata/worker/unreviewed_installer.py', False),
+])
+def test_only_exact_owner_approved_legacy_deletions_enter_build_plan(tmp_path, path, allowed):
+    repo, _, baseline, _ = _component_repo(tmp_path, {path: 'retired legacy entrypoint\n'})
+    (repo / path).unlink()
+    (repo / 'apps/api/src/main.ts').write_text('export const version = 2;\n')
+    _git(repo, 'add', '--', path, 'apps/api/src/main.ts')
+    _git(repo, 'commit', '-qm', 'remove approved legacy entrypoint')
+    candidate = _git(repo, 'rev-parse', 'HEAD')
+    sources = {component: baseline for component in MODULE.COMPONENT_ROLES}
+    if allowed:
+        plan = MODULE.classify_component_build_plan(repo, candidate, sources)
+        assert 'CORE' in plan['build_components']
+    else:
+        with pytest.raises(ValueError, match='deleted or renamed'):
+            MODULE.classify_component_build_plan(repo, candidate, sources)
+
+
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
     "native_release_intent", ROOT / "scripts/native_release_intent.py"
