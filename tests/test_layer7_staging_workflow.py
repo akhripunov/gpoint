@@ -9,6 +9,21 @@ from urllib.parse import urlsplit
 from pathlib import Path
 
 
+def test_staging_preserves_legacy_and_builds_kamal_compatible_eros_image():
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    build = next(s for s in workflow['jobs']['build']['steps'] if s.get('id') == 'eros')
+    assert 'service=gpoint-eros-pilot' in build['with']['labels'].splitlines()
+    readback = next(s['run'] for s in workflow['jobs']['build']['steps'] if s.get('name') == 'Read back exact published images and verify candidate identity')
+    assert 'expected_service=gpoint-eros-pilot' in readback
+    assert "{{index .Config.Labels \"service\"}}" in readback
+    assert '\"$expected_service\"' in readback
+    deploy = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
+    assert 'kamal deploy ' not in deploy
+    assert deploy.count('kamal redeploy --skip-push') == 4
+    assert deploy.index('kamal accessory boot relay') < deploy.index('kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles engine')
+    assert 'kamal prune' not in deploy
+
+
 def test_host_relay_uses_stock_kamal_accessory_with_one_network():
     # App#run in pinned Kamal 2.12 always adds --network kamal. A host
     # network relay must use Accessory#run, which supports network: host.
@@ -33,7 +48,7 @@ def test_host_relay_uses_stock_kamal_accessory_with_one_network():
     accessory_commands = [line for line in deploy.splitlines() if 'kamal accessory ' in line]
     assert len(accessory_commands) == 4
     assert all('--hosts \"$GPOINT_LAYER7_STAGING_HOST\"' in line for line in accessory_commands)
-    assert 'kamal deploy --skip-push --version "$IMAGE_VERSION" --roles relay' not in deploy
+    assert 'kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles relay' not in deploy
     verify = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Verify runtime roles, health, Eros embeddings, and API-to-engine route')
     assert 'container=gpoint-eros-relay-relay' in verify
     assert '{{.HostConfig.NetworkMode}}' in verify
@@ -47,7 +62,7 @@ def test_host_relay_uses_stock_kamal_accessory_with_one_network():
 def test_relay_accessory_lifecycle_is_exact_and_stock_kamal(tmp_path, existing, expected, action):
     workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
     deploy = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
-    code = deploy[deploy.index('relay_container="$('):deploy.index('# The permanent Mac SSH forward')]
+    code = deploy[deploy.index('relay_container="$('):deploy.index('# Accessory prepare creates the stock kamal bridge')]
     log = tmp_path / 'actions'
     stub = "set -euo pipefail\nssh() { printf '%s' \"$EXISTING\"; }\nkamal() { printf '%s\\n' \"$*\" >> \"$LOG\"; }\n"
     result = subprocess.run(['bash', '-c', stub + code], env=dict(os.environ, EXISTING=existing, LOG=str(log), CORE_DIGEST='sha256:' + 'a'*64, GITHUB_WORKSPACE='/scope', GPOINT_LAYER7_STAGING_HOST='95.133.236.59'), text=True, capture_output=True)
@@ -132,7 +147,7 @@ def test_staging_stops_only_managed_api_after_proving_queue_empty():
     deploy = next(x['run'] for x in steps if x.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
     queue = deploy.index('LAYER7_GPOINT_QUEUE_EMPTY=PASS')
     stop = deploy.index('kamal app stop --roles api')
-    boot = deploy.index('kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api')
+    boot = deploy.index('kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles api')
     assert queue < stop < boot
     assert stop < deploy.index('check_queue_empty', stop) < boot
     assert deploy.index('if [[ -n "$previous_api" ]]') < stop
@@ -288,7 +303,7 @@ def test_layer7_staging_can_run_core_and_eros_without_a_staging_telegram_bot():
     deploy = next(step for step in steps if step.get("name") == "Deploy exact immutable images with stock Kamal 2 to Layer7 staging")
     assert deploy["env"]["STAGING_BOT_ENABLED"] == "${{ steps.staging_env.outputs.bot_enabled }}"
     assert 'if [[ "$role" == bot && "$STAGING_BOT_ENABLED" != true ]]' in deploy["run"]
-    assert 'kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api' in deploy["run"]
+    assert 'kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles api' in deploy["run"]
     verify = next(step for step in steps if step.get("name") == "Verify runtime roles, health, Eros embeddings, and API-to-engine route")
     assert verify["env"]["STAGING_BOT_ENABLED"] == "${{ steps.staging_env.outputs.bot_enabled }}"
     assert '[[ "$bot_enabled" == true || "$bot_enabled" == false ]]' in verify["run"]
