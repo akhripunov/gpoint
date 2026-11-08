@@ -613,6 +613,7 @@ jobs:
             com.gpoint.source.revision=${{ github.sha }}
             com.gpoint.eros.upstream-revision=d1a140083321687212fb7b17c09cc0c3c9639f5e
             com.gpoint.eros.patch-set.sha256=none
+            service=gpoint-eros-pilot
           cache-from: type=gha,scope=gpoint-eros-stock
           cache-to: type=gha,scope=gpoint-eros-stock,mode=max
           sbom: true
@@ -659,12 +660,13 @@ jobs:
           set -euo pipefail
           for role in $(python3 -c 'import json,sys; print(" ".join({"CORE":"app","AGATA":"agata","MINIAPP":"miniapp","EROS":"eros"}[x] for x in json.loads(sys.argv[1])) )' "$BUILD_COMPONENTS"); do
             case "$role" in
-              app) image=ghcr.io/akhripunov/gpoint-runtime; digest="$APP_DIGEST" ;;
-              agata) image=ghcr.io/akhripunov/gpoint-agata-runtime; digest="$AGATA_DIGEST" ;;
-              miniapp) image=ghcr.io/akhripunov/gpoint-miniapp; digest="$MINIAPP_DIGEST" ;;
-              eros) image=ghcr.io/akhripunov/gpoint-eros; digest="$EROS_DIGEST" ;;
+              app) image=ghcr.io/akhripunov/gpoint-runtime; digest="$APP_DIGEST"; expected_service=gpoint-core ;;
+              agata) image=ghcr.io/akhripunov/gpoint-agata-runtime; digest="$AGATA_DIGEST"; expected_service=gpoint-agata ;;
+              miniapp) image=ghcr.io/akhripunov/gpoint-miniapp; digest="$MINIAPP_DIGEST"; expected_service=gpoint-miniapp ;;
+              eros) image=ghcr.io/akhripunov/gpoint-eros; digest="$EROS_DIGEST"; expected_service=gpoint-eros-pilot ;;
             esac
             docker pull --platform linux/amd64 "$image@$digest"
+            test "$(docker image inspect --format '{{index .Config.Labels "service"}}' "$image@$digest")" = "$expected_service"
             if [[ "$REUSE_PREPARED_IMAGES" != true ]]; then
               docker pull --platform linux/amd64 "$image:$IMAGE_VERSION"
               docker image inspect "$image:$IMAGE_VERSION" --format '{{json .RepoDigests}}' | grep -F "$image@$digest" >/dev/null
@@ -2167,8 +2169,6 @@ jobs:
             -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
             "root@$GPOINT_LAYER7_STAGING_HOST" python3 - "$eros_model_digest" gpoint-eros-relay-ollama \
             < scripts/verify-layer7-ollama.py
-          GPOINT_KAMAL_EXPECTED_DIGEST="$EROS_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-pilot KAMAL_ROLES=engine \
-            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles engine --config-file config/deploy.layer7-staging.eros.yml
           # App#run always adds --network kamal; host networking is supported
           # by stock Accessory#run instead. Reuse the exact verified OCI digest.
           relay_container="$(ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
@@ -2187,6 +2187,9 @@ jobs:
             GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-relay \
               kamal accessory reboot relay --hosts "$GPOINT_LAYER7_STAGING_HOST" --config-file config/deploy.layer7-staging.eros-relay.yml
           fi
+          # Accessory prepare creates the stock kamal bridge; redeploy skips prune.
+          GPOINT_KAMAL_EXPECTED_DIGEST="$EROS_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-pilot KAMAL_ROLES=engine \
+            kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles engine --config-file config/deploy.layer7-staging.eros.yml
           # The permanent Mac SSH forward targets this private fixed port.
           # Drain its managed API before replacing the loopback listener.
           check_queue_empty() {
@@ -2225,17 +2228,17 @@ jobs:
             exit 1
           fi
           GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
-            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.layer7-staging.eros-api.yml
+            kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.layer7-staging.eros-api.yml
           for role in worker bot; do
             if [[ "$role" == bot && "$STAGING_BOT_ENABLED" != true ]]; then
               echo 'LAYER7_STAGING_BOT=SKIPPED no_staging_bot_token=true'
               continue
             fi
             GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES="$role" \
-              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles "$role" --config-file config/deploy.layer7-staging.yml
+              kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles "$role" --config-file config/deploy.layer7-staging.yml
           done
           GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
-            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.layer7-staging.miniapp.yml
+            kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.layer7-staging.miniapp.yml
       - name: Verify runtime roles, health, Eros embeddings, and API-to-engine route
         env:
           IMAGE_VERSION: ${{ steps.prepared.outputs.image_version }}
