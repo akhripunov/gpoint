@@ -142,7 +142,7 @@ def main() -> int:
                "-e", "POSTGRES_DB=gpoint", args.image)
         created_container = True
         for _ in range(60):
-            if docker("exec", container, "pg_isready", "-U", "postgres", "-d", "gpoint", check=False).returncode == 0:
+            if docker("exec", container, "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "gpoint", check=False).returncode == 0:
                 break
             time.sleep(1)
         else:
