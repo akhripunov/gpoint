@@ -752,7 +752,8 @@ def claim_target_job(target: str) -> dict | None:
         write_status(target=target, last_heartbeat_at=datetime.now(UTC).isoformat())
     claim = target_request(target, "claim").get("job")
     if claim is None:
-        write_status(target=target, last_poll_at=datetime.now(UTC).isoformat(), state="idle")
+        write_status(target=target, last_poll_at=datetime.now(UTC).isoformat(), state="idle",
+                     current_job_present=False, last_error_code=None)
         return None
     if not isinstance(claim, dict):
         raise RuntimeError("worker_claim_invalid")

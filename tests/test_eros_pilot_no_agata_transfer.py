@@ -1,7 +1,11 @@
 import hashlib
+import importlib.util
 import json
 import re
+import subprocess
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -9,6 +13,40 @@ MIGRATION_NAME = "20261105100000_gpoint_chat_policy_and_history_fences"
 MIGRATION = ROOT / "packages/db/prisma/migrations" / MIGRATION_NAME / "migration.sql"
 ALLOWLIST = ROOT / "packages/db/prisma/production-approved-migrations.json"
 POSTGRES_REHEARSAL = ROOT / "tests/integration/gpoint-chat-schema-docker.py"
+
+
+def test_postgres_rehearsal_waits_for_final_tcp_server(monkeypatch):
+    spec = importlib.util.spec_from_file_location('schema_rehearsal', POSTGRES_REHEARSAL)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    final_server_ready = False
+    tcp_probes = 0
+
+    class ReachedFixture(Exception):
+        pass
+
+    def docker(*args, **kwargs):
+        nonlocal final_server_ready, tcp_probes
+        if 'pg_isready' in args:
+            # PostgreSQL's temporary init server accepts socket connections
+            # before shutting down; only its final server listens on TCP.
+            if '-h' in args and args[args.index('-h') + 1] == '127.0.0.1':
+                tcp_probes += 1
+                final_server_ready = tcp_probes >= 2
+                return subprocess.CompletedProcess(args, 0 if final_server_ready else 1)
+            return subprocess.CompletedProcess(args, 0)
+        if 'psql' in args:
+            if not final_server_ready:
+                raise RuntimeError('the database system is shutting down')
+            raise ReachedFixture()
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(module, 'docker', docker)
+    monkeypatch.setattr(module.time, 'sleep', lambda _: None)
+    monkeypatch.setattr('sys.argv', ['schema-rehearsal'])
+    with pytest.raises(ReachedFixture):
+        module.main()
+    assert tcp_probes == 2
 
 
 def test_gpoint_cutover_installs_one_global_policy_without_reading_regional_policy():

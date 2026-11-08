@@ -23,6 +23,20 @@ ENV = {
 
 
 class ErosGpointLaneTests(unittest.TestCase):
+    def test_empty_poll_records_idle_state_for_migration_verification(self):
+        with tempfile.TemporaryDirectory() as root:
+            status = Path(root) / 'worker-status.json'
+            with patch.dict(os.environ, ENV, clear=True), \
+                 patch.object(worker, 'SUPPORT', Path(root)), \
+                 patch.object(worker, 'STATUS', status), \
+                 patch.object(worker, 'target_request', return_value={'job': None}):
+                self.assertIsNone(worker.claim_target_job('GPOINT'))
+            saved = json.loads(status.read_text())
+            self.assertEqual(saved['state'], 'idle')
+            self.assertIs(saved.get('current_job_present'), False)
+            self.assertIsNone(saved.get('last_error_code'))
+            self.assertIs(saved['targets']['GPOINT'].get('current_job_present'), False)
+
     def test_eros_chat_claim_uses_the_only_gpoint_worker_route(self):
         with patch.dict(os.environ, ENV, clear=True):
             self.assertEqual(worker.TARGET_NAMES, ("GPOINT",))

@@ -1362,6 +1362,26 @@ def test_manifest_writer_behavior_tests_run_in_python_ci():
     assert '"$GITHUB_ENV"' in tests_job
 
 
+def test_pinned_setup_go_uses_official_digest_pinned_tool_cache_seed():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    steps = workflow["jobs"]["tests"]["steps"]
+    seed_index = next(i for i, step in enumerate(steps)
+                      if step.get("name") == "Seed pinned Go 1.25.3 in Actions tool cache")
+    setup_index = next(i for i, step in enumerate(steps)
+                       if step.get("uses", "").startswith("actions/setup-go@"))
+    seed = steps[seed_index]
+    setup = steps[setup_index]
+    assert seed_index < setup_index
+    assert seed["if"] == "matrix.suite == 'workspace'"
+    assert "api.github.com/repos/actions/go-versions/releases/assets/303957986" in seed["run"]
+    assert "Accept: application/octet-stream" in seed["run"]
+    assert "1b6c5c84f587ab036ca904638a39cf4bd272d1e8d439eb9c8bc60f91793e0765" in seed["run"]
+    assert "$RUNNER_TOOL_CACHE/go/1.25.3/x64" in seed["run"]
+    assert '"$RUNNER_TOOL_CACHE/go/1.25.3/x64.complete"' in seed["run"]
+    assert setup["uses"] == "actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5"
+    assert setup["with"]["go-version"] == "1.25.3"
+
+
 def test_native_release_runs_kamal_after_successful_main_push():
     workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
     deploy = workflow["jobs"]["deploy"]

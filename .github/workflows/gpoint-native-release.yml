@@ -165,6 +165,24 @@ jobs:
           [[ "$LAYER7_STAGING" == true ]] && args+=(--layer7-staging)
           [[ "$APPROVE_LAYER7_STAGING" == true ]] && args+=(--approve-layer7-staging)
           python3 scripts/native_release_intent.py "${args[@]}" >> "$GITHUB_OUTPUT"
+      - name: Seed pinned Go 1.25.3 in Actions tool cache
+        if: matrix.suite == 'workspace'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/go-1.25.3-linux-x64.tar.gz"
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 60 \
+            -H 'Accept: application/octet-stream' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/actions/go-versions/releases/assets/303957986 \
+            --output "$archive"
+          echo "1b6c5c84f587ab036ca904638a39cf4bd272d1e8d439eb9c8bc60f91793e0765  $archive" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TOOL_CACHE/go/1.25.3/x64"
+          tar -xzf "$archive" -C "$RUNNER_TOOL_CACHE/go/1.25.3/x64"
+          test "$("$RUNNER_TOOL_CACHE/go/1.25.3/x64/bin/go" version)" = 'go version go1.25.3 linux/amd64'
+          touch "$RUNNER_TOOL_CACHE/go/1.25.3/x64.complete"
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         if: matrix.suite == 'workspace'
         with:
