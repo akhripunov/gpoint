@@ -2107,8 +2107,8 @@ jobs:
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image:$version")" = linux/amd64
           docker image inspect --format '{{json .RepoDigests}}' "$image:$version" | grep -Fq "$ref"
           case "$image" in
-            */gpoint-eros) test "$(docker image inspect --format '{{index .Config.Labels \"com.gpoint.source.revision\"}}' "$image:$version")" = "$sha" ;;
-            *) test "$(docker image inspect --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}' "$image:$version")" = "$sha" ;;
+            */gpoint-eros) test "$(docker image inspect --format '{{index .Config.Labels "com.gpoint.source.revision"}}' "$image:$version")" = "$sha" ;;
+            *) test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image:$version")" = "$sha" ;;
           esac
           REMOTE
           done
@@ -2250,9 +2250,9 @@ jobs:
             test "$(docker inspect --format '{{.Image}}' "$container")" = "$image_id"
             docker image inspect --format '{{json .RepoDigests}}' "$image:$version" | grep -Fq "$image@$digest"
             if [[ "$image" == ghcr.io/akhripunov/gpoint-eros ]]; then
-              test "$(docker inspect --format '{{index .Config.Labels \"com.gpoint.source.revision\"}}' "$container")" = "$sha"
+              test "$(docker inspect --format '{{index .Config.Labels "com.gpoint.source.revision"}}' "$container")" = "$sha"
             else
-              test "$(docker inspect --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}' "$container")" = "$sha"
+              test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$container")" = "$sha"
             fi
           done
           api="gpoint-core-api-$version" engine="gpoint-eros-pilot-engine-$version"
@@ -2265,20 +2265,26 @@ jobs:
           print('LAYER7_PRIVATE_WORKER_GATEWAY=PASS')
           PY
           docker exec "$api" node -e 'fetch("http://127.0.0.1:3000/health/live").then(r=>{if(!r.ok)process.exit(1);console.log("CORE_API_HEALTH=PASS")}).catch(()=>process.exit(1))'
-          docker exec "$api" node --input-type=module - <<'JS'
-          import dns from 'node:dns/promises';
+          docker exec -i "$api" node --input-type=module - <<'JS'
           const endpoint = new URL('/healthz', process.env.EROS_SERVICE_URL ?? '');
-          if (endpoint.hostname !== 'gpoint-eros-engine') throw new Error('Core API Eros endpoint is not staging-local');
+          if (endpoint.hostname !== 'gpoint-eros') throw new Error('Core API Eros endpoint is not staging-local');
           const response = await fetch(endpoint, { signal: AbortSignal.timeout(5000) });
           if (!response.ok) throw new Error('Core API cannot reach the Eros engine health endpoint');
-          try {
-            await dns.lookup('gpoint-eros-db');
-            throw new Error('Core API unexpectedly resolves the isolated Eros database alias');
-          } catch (error) {
-            if (error.code !== 'ENOTFOUND') throw error;
-          }
-          console.log('CORE_API_EROS_ROUTE=PASS EROS_DATABASE_NETWORK_ISOLATION=PASS');
+          console.log('CORE_API_EROS_ROUTE=PASS');
           JS
+          python3 - "$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$api")" \
+            "$(docker inspect --format '{{json .NetworkSettings.Networks}}' shared_postgres_1)" <<'PY_CORE_DB'
+          import json, sys
+          api_networks, db_networks = map(json.loads, sys.argv[1:])
+          data = 'gpoint_eros_data'
+          alias = 'gpoint-eros-db'
+          if data in api_networks or alias not in (db_networks.get(data, {}).get('Aliases') or []):
+              raise SystemExit('Core API / Eros database network identity mismatch')
+          for network in api_networks.keys() & db_networks.keys():
+              if alias in (db_networks[network].get('Aliases') or []):
+                  raise SystemExit('Eros database alias is exposed on a Core API network')
+          print('CORE_API_EROS_ROUTE=PASS EROS_DATABASE_NETWORK_ISOLATION=PASS')
+          PY_CORE_DB
           docker exec "$engine" curl --fail --silent --show-error http://127.0.0.1:8080/healthz >/dev/null
           docker exec "$engine" curl --fail --silent --show-error -H 'Content-Type: application/json' \
             -d '{"model":"qwen3-embedding:0.6b","input":"Layer7 staging memory isolation probe","dimensions":512}' \
