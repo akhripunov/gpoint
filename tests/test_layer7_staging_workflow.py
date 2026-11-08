@@ -9,6 +9,50 @@ from urllib.parse import urlsplit
 from pathlib import Path
 
 
+def test_host_relay_uses_stock_kamal_accessory_with_one_network():
+    # App#run in pinned Kamal 2.12 always adds --network kamal. A host
+    # network relay must use Accessory#run, which supports network: host.
+    text = (ROOT / 'config/deploy.layer7-staging.eros-relay.yml').read_text()
+    config = yaml.safe_load(re.sub(r'<%=.*?%>', 'test', text))
+    assert 'servers' not in config
+    relay = config['accessories']['relay']
+    assert relay['network'] == 'host'
+    assert 'network' not in relay['options']
+    assert relay['env']['clear']['EROS_PILOT_RELAY_BIND'] == '172.31.254.1:11434'
+    assert relay['image'].startswith('ghcr.io/akhripunov/gpoint-runtime@')
+    assert 'GPOINT_KAMAL_EXPECTED_DIGEST' in text
+    assert relay['options']['memory'] == '64m'
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    deploy = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
+    assert 'kamal accessory boot relay' in deploy
+    assert "--filter 'name=^/gpoint-eros-relay-relay$' --filter label=service=gpoint-eros-relay-relay" in deploy
+    assert 'kamal accessory reboot relay' in deploy
+    accessory_commands = [line for line in deploy.splitlines() if 'kamal accessory ' in line]
+    assert len(accessory_commands) == 4
+    assert all('--hosts \"$GPOINT_LAYER7_STAGING_HOST\"' in line for line in accessory_commands)
+    assert 'kamal deploy --skip-push --version "$IMAGE_VERSION" --roles relay' not in deploy
+    verify = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Verify runtime roles, health, Eros embeddings, and API-to-engine route')
+    assert 'container=gpoint-eros-relay-relay' in verify
+    assert '{{.HostConfig.NetworkMode}}' in verify
+
+
+@pytest.mark.parametrize('existing,expected,action', [
+    ('', 0, 'boot'),
+    ('gpoint-eros-relay-relay', 0, 'reboot'),
+    ('unexpected-relay', 1, ''),
+])
+def test_relay_accessory_lifecycle_is_exact_and_stock_kamal(tmp_path, existing, expected, action):
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    deploy = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
+    code = deploy[deploy.index('relay_container="$('):deploy.index('# The permanent Mac SSH forward')]
+    log = tmp_path / 'actions'
+    stub = "set -euo pipefail\nssh() { printf '%s' \"$EXISTING\"; }\nkamal() { printf '%s\\n' \"$*\" >> \"$LOG\"; }\n"
+    result = subprocess.run(['bash', '-c', stub + code], env=dict(os.environ, EXISTING=existing, LOG=str(log), CORE_DIGEST='sha256:' + 'a'*64, GITHUB_WORKSPACE='/scope', GPOINT_LAYER7_STAGING_HOST='95.133.236.59'), text=True, capture_output=True)
+    assert result.returncode == expected
+    calls = log.read_text().splitlines() if log.exists() else []
+    assert calls == ([f'accessory {action} relay --hosts 95.133.236.59 --config-file config/deploy.layer7-staging.eros-relay.yml'] if action else [])
+
+
 def test_staging_label_lookup_templates_use_valid_string_literals():
     workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
     commands = '\n'.join(s.get('run', '') for s in workflow['jobs']['layer7_staging']['steps'])

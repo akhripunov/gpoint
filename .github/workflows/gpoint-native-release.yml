@@ -2150,6 +2150,7 @@ jobs:
         run: |
           set -euo pipefail
           export GPOINT_SSH_KEY="$HOME/.ssh/gpoint_layer7"
+          export GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST"
           export GPOINT_KNOWN_HOSTS_FILE="$HOME/.ssh/known_hosts"
           kamal() { command kamal "$@"; }
           eros_model_digest="$(python3 -c 'import json; print(json.load(open("services/eros-engine/ollama-model.lock.json"))["digest"])')"
@@ -2158,8 +2159,8 @@ jobs:
             -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
             "root@$GPOINT_LAYER7_STAGING_HOST" docker inspect gpoint-eros-relay-ollama >/dev/null 2>&1 || {
-              GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay kamal accessory boot ollama --config-file config/deploy.layer7-staging.eros-relay.yml
-              GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay kamal accessory exec ollama ollama pull qwen3-embedding:0.6b --config-file config/deploy.layer7-staging.eros-relay.yml
+              GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay kamal accessory boot ollama --hosts "$GPOINT_LAYER7_STAGING_HOST" --config-file config/deploy.layer7-staging.eros-relay.yml
+              GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay kamal accessory exec ollama ollama pull qwen3-embedding:0.6b --reuse --hosts "$GPOINT_LAYER7_STAGING_HOST" --config-file config/deploy.layer7-staging.eros-relay.yml
             }
           ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
             -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
@@ -2168,8 +2169,24 @@ jobs:
             < scripts/verify-layer7-ollama.py
           GPOINT_KAMAL_EXPECTED_DIGEST="$EROS_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-pilot KAMAL_ROLES=engine \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles engine --config-file config/deploy.layer7-staging.eros.yml
-          GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay \
-            kamal deploy --skip-push --version "$IMAGE_VERSION" --roles relay --config-file config/deploy.layer7-staging.eros-relay.yml
+          # App#run always adds --network kamal; host networking is supported
+          # by stock Accessory#run instead. Reuse the exact verified OCI digest.
+          relay_container="$(ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+            "root@$GPOINT_LAYER7_STAGING_HOST" "docker ps -a --filter 'name=^/gpoint-eros-relay-relay$' --filter label=service=gpoint-eros-relay-relay --format '{{.Names}}'")"
+          case "$relay_container" in
+            '') relay_action=boot ;;
+            gpoint-eros-relay-relay) relay_action=reboot ;;
+            *) echo 'staging relay accessory identity is ambiguous' >&2; exit 1 ;;
+          esac
+          if [[ "$relay_action" == boot ]]; then
+            GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-relay \
+              kamal accessory boot relay --hosts "$GPOINT_LAYER7_STAGING_HOST" --config-file config/deploy.layer7-staging.eros-relay.yml
+          else
+            GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-relay \
+              kamal accessory reboot relay --hosts "$GPOINT_LAYER7_STAGING_HOST" --config-file config/deploy.layer7-staging.eros-relay.yml
+          fi
           # The permanent Mac SSH forward targets this private fixed port.
           # Drain its managed API before replacing the loopback listener.
           check_queue_empty() {
@@ -2245,6 +2262,10 @@ jobs:
             if [[ "$bot_enabled" == false && "$spec" == gpoint-core-bot\|* ]]; then continue; fi
             IFS='|' read -r role image digest <<< "$spec"
             container="$role-$version"
+            if [[ "$role" == gpoint-eros-relay-relay ]]; then
+              container=gpoint-eros-relay-relay
+              test "$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$container")" = host
+            fi
             test "$(docker inspect --format '{{.State.Running}}' "$container")" = true
             image_id="$(docker image inspect --format '{{.Id}}' "$image:$version")"
             test "$(docker inspect --format '{{.Image}}' "$container")" = "$image_id"

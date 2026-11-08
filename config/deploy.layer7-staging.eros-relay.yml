@@ -1,28 +1,6 @@
 service: gpoint-eros-relay
 image: akhripunov/gpoint-runtime
-primary_role: relay
-
-servers:
-  relay:
-    hosts:
-      - <%= ENV.fetch("GPOINT_LAYER7_STAGING_HOST") %>
-    cmd: node /app/services/eros-engine/eros-pilot-embedding-relay.mjs
-    proxy: false
-    env:
-      clear:
-        EROS_PILOT_RELAY_BIND: 172.31.254.1:11434
-        EROS_PILOT_OLLAMA_MODEL_DIGEST: ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d
-        RELEASE_SHA: <%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>
-    options:
-      network: host
-      memory: 64m
-      memory-swap: 64m
-      cpus: 0.25
-      pids-limit: 64
-      read-only: true
-      tmpfs: /tmp
-      cap-drop: ALL
-      security-opt: no-new-privileges:true
+# Accessory-only: stock Kamal app roles always add the kamal bridge network.
 
 registry:
   server: ghcr.io
@@ -44,6 +22,26 @@ retain_containers: 2
 minimum_version: 2.12.0
 
 accessories:
+  relay:
+    image: ghcr.io/akhripunov/gpoint-runtime@<%= ENV.fetch("GPOINT_KAMAL_EXPECTED_DIGEST") %>
+    host: <%= ENV.fetch("GPOINT_LAYER7_STAGING_HOST") %>
+    network: host
+    cmd: node /app/services/eros-engine/eros-pilot-embedding-relay.mjs
+    env:
+      clear:
+        EROS_PILOT_RELAY_BIND: 172.31.254.1:11434
+        EROS_PILOT_OLLAMA_MODEL_DIGEST: ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d
+        RELEASE_SHA: <%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>
+    options:
+      memory: 64m
+      memory-swap: 64m
+      cpus: 0.25
+      pids-limit: 64
+      read-only: true
+      tmpfs: /tmp
+      cap-drop: ALL
+      security-opt: no-new-privileges:true
+
   ollama:
     image: ollama/ollama@sha256:a717bfc1c56acfc2e85d3109bd40a7646258ec9062c40cea83b9ed0927eb4223
     host: <%= ENV.fetch("GPOINT_LAYER7_STAGING_HOST") %>
