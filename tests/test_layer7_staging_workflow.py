@@ -14,7 +14,10 @@ def test_host_relay_uses_stock_kamal_accessory_with_one_network():
     # network relay must use Accessory#run, which supports network: host.
     text = (ROOT / 'config/deploy.layer7-staging.eros-relay.yml').read_text()
     config = yaml.safe_load(re.sub(r'<%=.*?%>', 'test', text))
-    assert 'servers' not in config
+    assert config['primary_role'] == 'relay'
+    assert config['servers']['relay']['cmd'] == '/bin/false'
+    assert config['servers']['relay']['proxy'] is False
+    assert 'options' not in config['servers']['relay']
     relay = config['accessories']['relay']
     assert relay['network'] == 'host'
     assert 'network' not in relay['options']

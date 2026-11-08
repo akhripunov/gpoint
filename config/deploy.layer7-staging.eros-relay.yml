@@ -1,6 +1,14 @@
 service: gpoint-eros-relay
 image: akhripunov/gpoint-runtime
-# Accessory-only: stock Kamal app roles always add the kamal bridge network.
+# Kamal 2.12 config/secrets CLI still needs an application role to render.
+# This role fails closed; the real host relay is deployed only as an accessory.
+primary_role: relay
+servers:
+  relay:
+    hosts:
+      - <%= ENV.fetch("GPOINT_LAYER7_STAGING_HOST") %>
+    proxy: false
+    cmd: /bin/false
 
 registry:
   server: ghcr.io
